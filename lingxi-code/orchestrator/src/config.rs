@@ -137,6 +137,15 @@ pub struct OrchestratorConfig {
     /// this `false` pending that fetch.
     #[serde(default)]
     pub is_enterprise: bool,
+
+    /// OUTSTYLE.2: the active output-style name from `settings.outputStyle`
+    /// (TS types it `z.string()`). `None` / `"default"` → no style section;
+    /// a builtin name (`Explanatory` / `Learning`) injects its
+    /// `# Output Style: <name>` section into the assembled system prompt via
+    /// [`outputstyles::resolve_builtin_output_style`]. Populated at the
+    /// composition root from merged settings.
+    #[serde(default)]
+    pub output_style: Option<String>,
 }
 
 impl Default for OrchestratorConfig {
@@ -153,6 +162,7 @@ impl Default for OrchestratorConfig {
             token_budget: None,
             is_subscriber: false,
             is_enterprise: false,
+            output_style: None,
         }
     }
 }
@@ -193,6 +203,7 @@ mod tests {
             token_budget: Some(500_000),
             is_subscriber: true,
             is_enterprise: true,
+            output_style: Some("Explanatory".into()),
         };
         let s = serde_json::to_string(&cfg).unwrap();
         let back: OrchestratorConfig = serde_json::from_str(&s).unwrap();
@@ -207,6 +218,7 @@ mod tests {
         assert_eq!(back.token_budget, Some(500_000));
         assert!(back.is_subscriber);
         assert!(back.is_enterprise);
+        assert_eq!(back.output_style.as_deref(), Some("Explanatory"));
     }
 
     #[test]

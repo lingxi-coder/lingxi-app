@@ -2262,7 +2262,10 @@ impl ConversationOrchestrator {
     /// [`crate::prompt::assemble_system_prompt`]. Bypassed when
     /// `OrchestratorConfig::system_prompt_override` is `Some(_)`.
     async fn build_system_prompt(&self) -> String {
-        use crate::prompt::{assemble_system_prompt, file_tree, git_status, SystemPromptContext};
+        use crate::prompt::{
+            assemble_system_prompt_with_style, file_tree, git_status, ActiveOutputStyle,
+            SystemPromptContext,
+        };
 
         let cwd = self.cwd.clone();
         let memory_files = self.memory.load(&cwd).await;
@@ -2309,7 +2312,16 @@ impl ConversationOrchestrator {
             memory_files,
             tool_names,
         };
-        assemble_system_prompt(&ctx)
+        // OUTSTYLE.2: when a non-default output style is active, inject its
+        // `# Output Style: <name>` section (TS getOutputStyleSection). A
+        // `None`/`"default"`/unknown style resolves to `None`, leaving the
+        // prompt byte-identical to the styleless path.
+        let builtin = outputstyles::resolve_builtin_output_style(self.config.output_style.as_deref());
+        let style = builtin.map(|b| ActiveOutputStyle {
+            name: b.name,
+            prompt: b.prompt,
+        });
+        assemble_system_prompt_with_style(&ctx, style)
     }
 
     /// Build the wire `tools` array for a turn from the registry's enabled tool

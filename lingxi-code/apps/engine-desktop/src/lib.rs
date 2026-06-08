@@ -650,6 +650,23 @@ fn oauth_subscriber_flag(api_key_present: bool, auth_token_present: bool, scopes
         && anthropic_oauth::subscription_from_scopes(scopes)
 }
 
+/// Load the merged `settings.outputStyle` (project + user + env layers) for the
+/// given project dir. Mirrors the CLI's `load_routing`/`load_provider_profiles`
+/// helpers (same `engine::settings::Settings::load` seam). Returns `None` on any
+/// load failure or when the field is unset — the caller then injects no output
+/// style section (OUTSTYLE.2).
+fn load_merged_output_style(project_dir: &std::path::Path) -> Option<String> {
+    let env: std::collections::BTreeMap<String, String> = std::env::vars().collect();
+    let inputs = engine::settings::LoadInputs {
+        env: &env,
+        project_dir,
+        defaults: engine::settings::schema::SettingsJson::default(),
+    };
+    engine::settings::Settings::load(inputs)
+        .ok()
+        .and_then(|eff| eff.settings.output_style)
+}
+
 /// # Errors
 ///
 /// Returns [`BuildError`] if the api-client or orchestrator cannot be
@@ -770,6 +787,11 @@ pub async fn build(
     // `is_enterprise` stays `false` (PARITY-GAP: enterprise tier needs a profile
     // fetch not performed in this build hot path).
     orch_cfg.is_subscriber = is_subscriber;
+    // OUTSTYLE.2: thread the merged `settings.outputStyle` (TS string) into the
+    // orchestrator config so `build_system_prompt` injects the active style's
+    // `# Output Style: <name>` section (Explanatory / Learning builtins). `None`
+    // / "default" / unknown ⇒ no section (prompt byte-identical to before).
+    orch_cfg.output_style = load_merged_output_style(&cfg.cwd);
 
     // (4.5) One CostTracker per process. The persist channel drains into a
     //       fire-and-forget task that discards snapshots (on-disk persistence is

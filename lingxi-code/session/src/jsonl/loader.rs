@@ -10,7 +10,9 @@ use crate::jsonl::reader::JsonlReader;
 use crate::jsonl::schema::JsonlMessage;
 use crate::jsonl::title::extract_title;
 use std::cmp::Ordering;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::Arc;
 use std::time::SystemTime;
 use thiserror::Error;
@@ -107,55 +109,116 @@ fn project_dir_for_cwd(claude_home: &Path, cwd: &str) -> PathBuf {
     claude_home.join("projects").join(project_dir_name(cwd))
 }
 
-/// Resolve the project dir for `cwd` and return up to `limit` most-recently-modified
-/// `.jsonl` files as [`SessionMetadata`] rows, sorted by mtime desc (filename asc on tie).
+/// Parse the `worktree ` lines of `git worktree list --porcelain` into absolute
+/// path strings — 1:1 with claude-code `getWorktreePaths`'s porcelain parse
+/// (`claude-code/src/utils/getWorktreePaths.ts:50-53`: keep lines starting with
+/// `"worktree "`, strip that prefix).
 ///
-/// Errors:
-/// - [`LoaderError::EmptyDirectory`] if the project dir doesn't exist OR contains no `.jsonl`.
-/// - [`LoaderError::Io`] on any other I/O failure.
+/// Divergence from TS: TS applies `.normalize('NFC')` to each path; we do not
+/// (no `unicode-normalization` dependency is permitted, and the rest of this
+/// crate already sanitizes the cwd without NFC). The prefix comparison runs over
+/// [`project_dir_name`]-sanitized strings, which map every non-`[a-zA-Z0-9]` byte
+/// to `-`, so ASCII paths — the overwhelming common case — are unaffected.
+/// `str::lines()` also strips a trailing `\r`, which is harmless (and slightly
+/// more correct than TS on Windows).
+fn parse_worktree_list(stdout: &str) -> Vec<String> {
+    stdout
+        .lines()
+        .filter_map(|line| line.strip_prefix("worktree ").map(str::to_string))
+        .collect()
+}
+
+/// Run `git worktree list --porcelain` in `cwd` and return the absolute worktree
+/// paths, OR an empty vec on ANY failure (git missing, `cwd` unreadable, not a
+/// repo, non-zero exit) **or** when the repo has a single worktree.
 ///
-/// Each row's `title` is read via [`crate::jsonl::title::extract_title`] from the **full**
-/// JSONL content (we open + parse every candidate, then sort + truncate). This is O(N * lines)
-/// for N sessions; for the typical N ≤ 5 case (the picker limit) the cost is trivial.
+/// claude-code only cross-lists sibling worktrees when `worktreePaths.length > 1`
+/// (`getStatOnlyLogsForWorktrees`, `sessionStorage.ts`); folding the `<= 1` gate
+/// in here means an empty return is the single, unambiguous "behave exactly as
+/// before" signal for the caller.
 ///
-/// Sub-agent / sidechain transcripts are HIDDEN (SESSION.1): a session is dropped
-/// when its first parsed line is an `isSidechain` message or carries a truthy
-/// `teamName` field, matching claude-code's `parseSessionInfoFromLite`
-/// (listSessionsImpl.ts:88-95), `enrichLog` (sessionStorage.ts:5055-5067), and
-/// `filterResumableSessions` (resume picker).
+/// Uses [`std::process::Command`] (no new dependency; `tokio`'s `process` feature
+/// is not enabled in this crate). `output()` blocks the calling task briefly,
+/// which is acceptable for the one-shot, interactive `/resume` entry point.
+fn git_worktree_paths(cwd: &str) -> Vec<String> {
+    let output = match Command::new("git")
+        .args(["worktree", "list", "--porcelain"])
+        .current_dir(cwd)
+        .output()
+    {
+        Ok(out) if out.status.success() => out,
+        _ => return Vec::new(),
+    };
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let paths = parse_worktree_list(&stdout);
+    if paths.len() <= 1 {
+        Vec::new()
+    } else {
+        paths
+    }
+}
+
+/// claude-code's worktree dir-name match
+/// (`getStatOnlyLogsForWorktrees`, `sessionStorage.ts`):
+/// `dirName === prefix || dirName.startsWith(prefix + '-')`.
 ///
-/// Locked against `claude-code/src/utils/sessionStorage.ts::loadSameRepoMessageLogs` — except:
-/// - claude-code uses a 16-KiB head-only `enrichLogs` scan for the first user message; we
-///   open + fully-parse because our `JsonlReader::read_all` is already in hand from M5-07.
-///   (The sidechain/teamName decision still reads ONLY the first line, per TS.)
-/// - claude-code includes worktrees; we list ONLY the exact cwd's project dir (cross-worktree
-///   resume is deferred to a follow-up — spec §3 M5-08 row does not require it).
-pub async fn list_recent_sessions(
-    claude_home: &Path,
-    cwd: &str,
-    limit: usize,
-    fs: Arc<dyn FileSystem>,
-) -> Result<Vec<SessionMetadata>, LoaderError> {
-    let project_dir = project_dir_for_cwd(claude_home, cwd);
-    let mut entries = match tokio::fs::read_dir(&project_dir).await {
-        Ok(rd) => rd,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            return Err(LoaderError::EmptyDirectory);
+/// The `startsWith(prefix + '-')` arm catches sessions launched in a
+/// SUBDIRECTORY of the worktree, whose sanitized project-dir name is
+/// `<prefix>-<sanitized-subpath>`. The trailing `-` is load-bearing: it stops a
+/// prefix like `-x-repo` from matching an unrelated `-x-repository`.
+fn worktree_dir_matches(dir_name: &str, prefix: &str) -> bool {
+    dir_name == prefix
+        || dir_name
+            .strip_prefix(prefix)
+            .is_some_and(|rest| rest.starts_with('-'))
+}
+
+/// Deduplicate session rows by session id (the filename UUID), keeping the row
+/// with the newest `modified` time — 1:1 with claude-code
+/// `deduplicateLogsBySessionId` (`sessionStorage.ts:4955`), whose
+/// `log.modified.getTime() > existing.modified.getTime()` replaces and keeps the
+/// first-seen entry on a tie. The same session can appear under multiple
+/// worktree project dirs; this collapses it to one.
+fn deduplicate_by_session_id(rows: Vec<SessionMetadata>) -> Vec<SessionMetadata> {
+    let mut by_id: HashMap<Uuid, SessionMetadata> = HashMap::with_capacity(rows.len());
+    for row in rows {
+        match by_id.get(&row.uuid) {
+            // Keep the existing row unless the incoming one is STRICTLY newer.
+            Some(existing) if existing.modified >= row.modified => {}
+            _ => {
+                by_id.insert(row.uuid, row);
+            }
         }
+    }
+    by_id.into_values().collect()
+}
+
+/// Scan a single project dir, appending one [`SessionMetadata`] row per resumable
+/// `.jsonl` file to `rows`. Applies the SESSION.1 sidechain/`teamName` hide
+/// filter (first parsed line only). Returns `Ok(false)` when the dir does not
+/// exist (`NotFound`) and `Ok(true)` when it was read; I/O errors carry the
+/// offending path as `arg`, exactly as the original single-dir scan did.
+async fn collect_dir(
+    dir: &Path,
+    fs: &Arc<dyn FileSystem>,
+    rows: &mut Vec<SessionMetadata>,
+) -> Result<bool, LoaderError> {
+    let mut entries = match tokio::fs::read_dir(dir).await {
+        Ok(rd) => rd,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
         Err(source) => {
             return Err(LoaderError::Io {
-                arg: project_dir.display().to_string(),
+                arg: dir.display().to_string(),
                 source,
             });
         }
     };
 
-    let mut rows: Vec<SessionMetadata> = Vec::new();
     while let Some(entry) = entries
         .next_entry()
         .await
         .map_err(|source| LoaderError::Io {
-            arg: project_dir.display().to_string(),
+            arg: dir.display().to_string(),
             source,
         })?
     {
@@ -217,6 +280,115 @@ pub async fn list_recent_sessions(
             message_count: messages.len(),
             path,
         });
+    }
+    Ok(true)
+}
+
+/// Resolve the project dir for `cwd` and return up to `limit` most-recently-modified
+/// `.jsonl` files as [`SessionMetadata`] rows, sorted by mtime desc (filename asc on tie).
+///
+/// Errors:
+/// - [`LoaderError::EmptyDirectory`] if the project dir doesn't exist OR contains no `.jsonl`.
+/// - [`LoaderError::Io`] on any other I/O failure.
+///
+/// Each row's `title` is read via [`crate::jsonl::title::extract_title`] from the **full**
+/// JSONL content (we open + parse every candidate, then sort + truncate). This is O(N * lines)
+/// for N sessions; for the typical N ≤ 5 case (the picker limit) the cost is trivial.
+///
+/// Sub-agent / sidechain transcripts are HIDDEN (SESSION.1): a session is dropped
+/// when its first parsed line is an `isSidechain` message or carries a truthy
+/// `teamName` field, matching claude-code's `parseSessionInfoFromLite`
+/// (listSessionsImpl.ts:88-95), `enrichLog` (sessionStorage.ts:5055-5067), and
+/// `filterResumableSessions` (resume picker).
+///
+/// Locked against `claude-code/src/utils/sessionStorage.ts::loadSameRepoMessageLogs` — except:
+/// - claude-code uses a 16-KiB head-only `enrichLogs` scan for the first user message; we
+///   open + fully-parse because our `JsonlReader::read_all` is already in hand from M5-07.
+///   (The sidechain/teamName decision still reads ONLY the first line, per TS.)
+///
+/// SESSION.5 — cross-worktree resume: like claude-code, when the cwd's repo has more
+/// than one git worktree we ALSO surface sessions created in SIBLING worktrees of the
+/// same repo. We run `git worktree list --porcelain` ([`git_worktree_paths`]), and for
+/// each worktree path scan every projects-root subdir whose name matches the worktree's
+/// sanitized [`project_dir_name`] prefix (`dirName === prefix || startsWith(prefix + '-')`,
+/// per `getStatOnlyLogsForWorktrees`), then [`deduplicate_by_session_id`]. With 0/1
+/// worktrees — or when git is unavailable / not a repo — we scan ONLY the exact cwd's
+/// project dir, behaving byte-for-byte as before.
+pub async fn list_recent_sessions(
+    claude_home: &Path,
+    cwd: &str,
+    limit: usize,
+    fs: Arc<dyn FileSystem>,
+) -> Result<Vec<SessionMetadata>, LoaderError> {
+    // `git_worktree_paths` already returns empty for git-error / non-repo /
+    // single-worktree, so an empty vec is the "behave exactly as before" signal.
+    let worktree_paths = git_worktree_paths(cwd);
+    list_recent_sessions_inner(claude_home, cwd, limit, &fs, &worktree_paths).await
+}
+
+/// Worktree-path-injectable core of [`list_recent_sessions`] (so unit tests can
+/// drive the multi-worktree branch without a real git repo). `worktree_paths`
+/// empty ⇒ today's single-cwd-dir behavior; len > 1 ⇒ the SESSION.5 union.
+async fn list_recent_sessions_inner(
+    claude_home: &Path,
+    cwd: &str,
+    limit: usize,
+    fs: &Arc<dyn FileSystem>,
+    worktree_paths: &[String],
+) -> Result<Vec<SessionMetadata>, LoaderError> {
+    let mut rows: Vec<SessionMetadata> = Vec::new();
+
+    if worktree_paths.len() <= 1 {
+        // 0/1 worktrees (or git unavailable): scan ONLY the cwd's project dir.
+        // `collect_dir` returns false on NotFound; the `rows.is_empty()` check
+        // below collapses both "missing dir" and "no resumable files" into the
+        // original `EmptyDirectory`, while other I/O errors propagate as `Io`.
+        collect_dir(&project_dir_for_cwd(claude_home, cwd), fs, &mut rows).await?;
+    } else {
+        // > 1 worktrees: union every projects-root subdir whose name matches a
+        // worktree's sanitized prefix (this also covers the cwd's own dir, since
+        // the cwd is — or is under — one of the worktree paths), then dedupe by
+        // session id. Mirrors `getStatOnlyLogsForWorktrees`.
+        let projects_root = claude_home.join("projects");
+        let prefixes: Vec<String> = worktree_paths
+            .iter()
+            .map(|wt| project_dir_name(wt))
+            .collect();
+
+        match tokio::fs::read_dir(&projects_root).await {
+            Ok(mut entries) => {
+                while let Some(entry) =
+                    entries
+                        .next_entry()
+                        .await
+                        .map_err(|source| LoaderError::Io {
+                            arg: projects_root.display().to_string(),
+                            source,
+                        })?
+                {
+                    if !entry
+                        .file_type()
+                        .await
+                        .map(|t| t.is_dir())
+                        .unwrap_or(false)
+                    {
+                        continue;
+                    }
+                    let name = entry.file_name();
+                    let Some(name) = name.to_str() else { continue };
+                    if prefixes.iter().any(|p| worktree_dir_matches(name, p)) {
+                        collect_dir(&entry.path(), fs, &mut rows).await?;
+                    }
+                }
+            }
+            // Projects root unreadable: fall back to the cwd's project dir, like
+            // claude-code's `getStatOnlyLogsForWorktrees` catch branch.
+            Err(_) => {
+                collect_dir(&project_dir_for_cwd(claude_home, cwd), fs, &mut rows).await?;
+            }
+        }
+
+        rows = deduplicate_by_session_id(rows);
     }
 
     if rows.is_empty() {
@@ -575,6 +747,206 @@ mod tests {
 
         let fs = make_fs(temp.path());
         match list_recent_sessions(&claude_home, &cwd, 5, fs).await {
+            Err(LoaderError::EmptyDirectory) => {}
+            other => panic!("expected EmptyDirectory, got {other:?}"),
+        }
+    }
+
+    // ---- SESSION.5: cross-worktree resume --------------------------------
+
+    /// Write one normal first-user-message session at `<dir>/<uuid>.jsonl` (the
+    /// dir is created if missing), stamp its mtime, and return nothing — the
+    /// caller supplies the `uuid` so the same session id can be planted in two
+    /// worktree dirs to exercise dedupe.
+    fn write_session_id(dir: &Path, uuid: Uuid, cwd: &str, prompt: &str, mtime: SystemTime) {
+        std::fs::create_dir_all(dir).unwrap();
+        let line = serde_json::json!({
+            "type": "user",
+            "uuid": uuid.to_string(),
+            "parentUuid": null,
+            "sessionId": uuid.to_string(),
+            "timestamp": "2026-05-25T12:00:00.000Z",
+            "cwd": cwd,
+            "version": "0.12.0",
+            "isSidechain": false,
+            "userType": "external",
+            "message": {"role": "user", "content": prompt},
+        });
+        let bytes = format!("{}\n", serde_json::to_string(&line).unwrap());
+        let path = dir.join(format!("{uuid}.jsonl"));
+        std::fs::write(&path, bytes).unwrap();
+        filetime::set_file_mtime(&path, filetime::FileTime::from_system_time(mtime)).unwrap();
+    }
+
+    #[test]
+    fn parses_worktree_list_porcelain() {
+        // The porcelain example from getWorktreePaths.ts: keep `worktree ` lines,
+        // strip the prefix; ignore HEAD/branch/blank lines.
+        let stdout = "worktree /Users/foo/repo\n\
+                      HEAD abc123\n\
+                      branch refs/heads/main\n\
+                      \n\
+                      worktree /Users/foo/repo-wt1\n\
+                      HEAD def456\n\
+                      branch refs/heads/feature\n";
+        assert_eq!(
+            parse_worktree_list(stdout),
+            vec![
+                "/Users/foo/repo".to_string(),
+                "/Users/foo/repo-wt1".to_string()
+            ]
+        );
+        // No worktree lines → empty.
+        assert!(parse_worktree_list("not a porcelain output\n").is_empty());
+    }
+
+    #[test]
+    fn worktree_dir_match_rule() {
+        // `dirName === prefix` and `dirName.startsWith(prefix + '-')` match…
+        assert!(worktree_dir_matches("-x-repo", "-x-repo")); // exact
+        assert!(worktree_dir_matches("-x-repo-sub", "-x-repo")); // subdir (prefix + '-')
+        // …but a bare prefix-extension (no `-` boundary) must NOT match.
+        assert!(!worktree_dir_matches("-x-repository", "-x-repo"));
+        assert!(!worktree_dir_matches("-y-other", "-x-repo"));
+    }
+
+    #[test]
+    fn git_unavailable_returns_no_worktrees() {
+        // A throwaway dir that is not a git repo → empty (git non-zero / errors
+        // out / single worktree all collapse to the same "behave as before").
+        let temp = TempDir::new().unwrap();
+        assert!(git_worktree_paths(&temp.path().to_string_lossy()).is_empty());
+    }
+
+    #[tokio::test]
+    async fn single_worktree_scans_only_cwd_dir() {
+        // `list_recent_sessions_inner` with an EMPTY worktree slice must behave
+        // exactly like the pre-SESSION.5 single-dir scan: only the cwd's project
+        // dir is consulted, sibling dirs are ignored.
+        let (temp, claude_home, cwd, dir) = setup();
+        let base = SystemTime::now();
+        let main = write_session(&dir, &cwd, "main", base, false, None);
+
+        // A sibling worktree dir exists on disk but must be invisible here.
+        let sibling = claude_home
+            .join("projects")
+            .join(project_dir_name("/other/wt"));
+        let _hidden = {
+            let u = Uuid::new_v4();
+            write_session_id(&sibling, u, "/other/wt", "sibling", base);
+            u
+        };
+
+        let fs = make_fs(temp.path());
+        let rows = list_recent_sessions_inner(&claude_home, &cwd, 5, &fs, &[])
+            .await
+            .expect("list");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].uuid, main);
+    }
+
+    #[tokio::test]
+    async fn includes_sibling_worktree_sessions_deduped() {
+        let temp = TempDir::new().unwrap();
+        let claude_home = temp.path().join("home");
+        let projects = claude_home.join("projects");
+        std::fs::create_dir_all(&projects).unwrap();
+
+        let wt_a = "/wt/alpha";
+        let wt_b = "/wt/beta";
+        let prefix_a = project_dir_name(wt_a); // "-wt-alpha"
+        let prefix_b = project_dir_name(wt_b); // "-wt-beta"
+
+        let base = SystemTime::now();
+
+        // Exact-prefix match for worktree A.
+        let dir_a = projects.join(&prefix_a);
+        let a_root = Uuid::new_v4();
+        write_session_id(&dir_a, a_root, wt_a, "alpha-root", base);
+
+        // Subdir of A → matched via startsWith(prefix + '-').
+        let dir_a_sub = projects.join(project_dir_name("/wt/alpha/sub"));
+        let a_sub = Uuid::new_v4();
+        write_session_id(
+            &dir_a_sub,
+            a_sub,
+            "/wt/alpha/sub",
+            "alpha-sub",
+            base + Duration::from_secs(1),
+        );
+
+        // Exact-prefix match for worktree B.
+        let dir_b = projects.join(&prefix_b);
+        let b_root = Uuid::new_v4();
+        write_session_id(&dir_b, b_root, wt_b, "beta-root", base + Duration::from_secs(2));
+
+        // Boundary guard: "-wt-alphax" starts with prefix_a but the next char is
+        // not '-', so it must be EXCLUDED.
+        let dir_boundary = projects.join(format!("{prefix_a}x"));
+        let ghost_boundary = Uuid::new_v4();
+        write_session_id(
+            &dir_boundary,
+            ghost_boundary,
+            "/wt/alphax",
+            "ghost-boundary",
+            base + Duration::from_secs(3),
+        );
+
+        // Unrelated dir → EXCLUDED.
+        let dir_other = projects.join(project_dir_name("/some/other"));
+        let ghost_other = Uuid::new_v4();
+        write_session_id(
+            &dir_other,
+            ghost_other,
+            "/some/other",
+            "ghost-other",
+            base + Duration::from_secs(4),
+        );
+
+        // Same session id under BOTH worktree dirs, different mtimes → dedupe
+        // keeps the newest ("dup-new").
+        let dup = Uuid::new_v4();
+        write_session_id(&dir_a, dup, wt_a, "dup-old", base);
+        write_session_id(&dir_b, dup, wt_b, "dup-new", base + Duration::from_secs(10));
+
+        let fs = make_fs(temp.path());
+        let worktrees = vec![wt_a.to_string(), wt_b.to_string()];
+        let rows = list_recent_sessions_inner(&claude_home, wt_a, 50, &fs, &worktrees)
+            .await
+            .expect("list");
+
+        let ids: std::collections::HashSet<Uuid> = rows.iter().map(|r| r.uuid).collect();
+        assert!(ids.contains(&a_root), "alpha-root included (exact prefix)");
+        assert!(ids.contains(&a_sub), "alpha-sub included (prefix + '-')");
+        assert!(ids.contains(&b_root), "beta-root included (sibling worktree)");
+        assert!(ids.contains(&dup), "dup session present");
+        assert!(
+            !ids.contains(&ghost_boundary),
+            "boundary dir excluded (no '-' after prefix)"
+        );
+        assert!(!ids.contains(&ghost_other), "unrelated dir excluded");
+
+        // Dedupe by id: exactly one dup row, and it is the newer one.
+        let dup_rows: Vec<_> = rows.iter().filter(|r| r.uuid == dup).collect();
+        assert_eq!(dup_rows.len(), 1, "dedupe collapses the duplicate session id");
+        assert_eq!(dup_rows[0].title, "dup-new", "dedupe keeps the newest mtime");
+
+        // Distinct surviving sessions: a_root, a_sub, b_root, dup.
+        assert_eq!(rows.len(), 4);
+    }
+
+    #[tokio::test]
+    async fn multi_worktree_empty_match_is_empty_directory() {
+        // > 1 worktrees but no projects-root subdir matches any prefix → the
+        // picker has nothing to resume, surfaced as EmptyDirectory (same as the
+        // single-dir empty case).
+        let temp = TempDir::new().unwrap();
+        let claude_home = temp.path().join("home");
+        std::fs::create_dir_all(claude_home.join("projects")).unwrap();
+
+        let fs = make_fs(temp.path());
+        let worktrees = vec!["/wt/alpha".to_string(), "/wt/beta".to_string()];
+        match list_recent_sessions_inner(&claude_home, "/wt/alpha", 5, &fs, &worktrees).await {
             Err(LoaderError::EmptyDirectory) => {}
             other => panic!("expected EmptyDirectory, got {other:?}"),
         }

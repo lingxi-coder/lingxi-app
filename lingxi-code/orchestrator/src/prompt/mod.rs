@@ -18,7 +18,38 @@ pub use memory_block::{real_provider, MemoryHierarchyProvider, RealMemoryHierarc
 use crate::prompt::locked_templates::{FOOTER, HEADER, SECTION_SEP};
 use std::path::PathBuf;
 
+/// The active output-style section to inject into the system prompt.
+///
+/// Mirrors the inputs of TS `getOutputStyleSection`
+/// (`claude-code/src/constants/prompts.ts:151-158`): `name` -> the
+/// `# Output Style: <name>` heading, `prompt` -> the verbatim body that
+/// follows on the next line.
+///
+/// Resolved by the caller — the engine `output_style` setting is fed through
+/// [`outputstyles::resolve_builtin_output_style`], whose `name` / `prompt`
+/// fields populate this borrow — and threaded into
+/// [`assemble_system_prompt_with_style`]. The orchestrator itself does not
+/// depend on the `outputstyles` crate; it only formats what it is handed.
+#[derive(Debug, Clone, Copy)]
+pub struct ActiveOutputStyle<'a> {
+    /// Style name -> `# Output Style: <name>` heading text.
+    pub name: &'a str,
+    /// Verbatim style prompt body, emitted on the line after the heading.
+    pub prompt: &'a str,
+}
+
 /// Assemble a system prompt from a [`SystemPromptContext`].
+///
+/// Equivalent to [`assemble_system_prompt_with_style`] with no active style —
+/// i.e. the default/no-output-style path. The produced bytes are LOCKED; see
+/// that function for the full section order.
+#[must_use]
+pub fn assemble_system_prompt(ctx: &SystemPromptContext) -> String {
+    assemble_system_prompt_with_style(ctx, None)
+}
+
+/// Assemble a system prompt, optionally injecting an active output-style
+/// section.
 ///
 /// Section order is LOCKED:
 ///
@@ -26,13 +57,23 @@ use std::path::PathBuf;
 /// 2. `<env>...</env>` + model description + cutoff
 /// 3. `<memory>...</memory>` (elided when no files)
 /// 4. `<tools>...</tools>` (elided when no names)
-/// 5. `FOOTER`
+/// 5. `# Output Style: <name>` + body (elided when `output_style` is `None`)
+/// 6. `FOOTER`
 ///
 /// Separator between sections is exactly `\n\n` (one blank line).
 /// `FOOTER` itself ends with a single `\n`; the assembler does not
 /// append further newlines.
+///
+/// OUTSTYLE.2: the output-style section is a `getSystemPrompt` body section
+/// (`constants/prompts.ts:505-507`), so it precedes the trailing
+/// `enhanceSystemPromptWithEnvDetails` `FOOTER`. When `output_style` is
+/// `None` (the `'default'` / unset path) the section is skipped entirely and
+/// the output is byte-identical to the pre-OUTSTYLE.2 prompt.
 #[must_use]
-pub fn assemble_system_prompt(ctx: &SystemPromptContext) -> String {
+pub fn assemble_system_prompt_with_style(
+    ctx: &SystemPromptContext,
+    output_style: Option<ActiveOutputStyle<'_>>,
+) -> String {
     let mut s = String::with_capacity(2048);
     s.push_str(HEADER);
     push_section_separator(&mut s);
@@ -50,9 +91,22 @@ pub fn assemble_system_prompt(ctx: &SystemPromptContext) -> String {
         s.push_str(&tools);
     }
 
+    if let Some(style) = output_style {
+        push_section_separator(&mut s);
+        s.push_str(&output_style_section(style));
+    }
+
     push_section_separator(&mut s);
     s.push_str(FOOTER);
     s
+}
+
+/// Format the active output-style section, byte-for-byte as TS
+/// `getOutputStyleSection` (`constants/prompts.ts:156-157`):
+/// `# Output Style: {name}\n{prompt}`.
+#[must_use]
+fn output_style_section(style: ActiveOutputStyle<'_>) -> String {
+    format!("# Output Style: {}\n{}", style.name, style.prompt)
 }
 
 /// Append a section separator that produces exactly one blank line
@@ -211,5 +265,76 @@ mod tests {
         };
         assert!(!f.is_local_override);
         assert!(f.body.contains("title"));
+    }
+
+    // ---- OUTSTYLE.2: output-style section injection ----
+
+    fn ctx_minimal() -> SystemPromptContext {
+        SystemPromptContext {
+            cwd: PathBuf::from("/proj"),
+            platform: "macos".into(),
+            model: "claude-opus-4-7".into(),
+            model_marketing_name: Some("Opus 4.7".into()),
+            knowledge_cutoff: Some("January 2026".into()),
+            shell: "zsh".into(),
+            os_version: "Darwin 25.3.0".into(),
+            git_status: None,
+            file_tree: FileTree::default(),
+            memory_files: Vec::new(),
+            tool_names: vec!["Read".into(), "Write".into()],
+        }
+    }
+
+    #[test]
+    fn no_style_is_byte_identical_to_default_path() {
+        let ctx = ctx_minimal();
+        // The public entry point and the explicit `None` style must match,
+        // and neither may contain an output-style heading.
+        let default = assemble_system_prompt(&ctx);
+        let none = assemble_system_prompt_with_style(&ctx, None);
+        assert_eq!(default, none);
+        assert!(!default.contains("# Output Style:"));
+        // Spot-check the locked envelope is untouched.
+        assert!(default.starts_with("You are Claude Code, Anthropic's official CLI for Claude."));
+        assert!(default.ends_with("with a period.\n"));
+    }
+
+    #[test]
+    fn active_style_injects_section_between_tools_and_footer() {
+        let ctx = ctx_minimal();
+        let style = ActiveOutputStyle {
+            name: "Explanatory",
+            prompt: "BODY LINE 1\nBODY LINE 2",
+        };
+        let out = assemble_system_prompt_with_style(&ctx, Some(style));
+
+        // Heading + body are present, exactly per getOutputStyleSection.
+        assert!(out.contains("# Output Style: Explanatory\nBODY LINE 1\nBODY LINE 2"));
+
+        // Placement: after the `<tools>` block, before the `Notes:` FOOTER,
+        // with one blank line (`\n\n`) on each boundary.
+        let i_tools = out.find("</tools>").expect("tools present");
+        let i_style = out.find("# Output Style:").expect("style present");
+        let i_footer = out.find("Notes:").expect("footer present");
+        assert!(i_tools < i_style, "style must come after tools");
+        assert!(i_style < i_footer, "style must come before footer");
+        assert!(out.contains("</tools>\n\n# Output Style: Explanatory"));
+        assert!(out.contains("BODY LINE 2\n\nNotes:"));
+    }
+
+    #[test]
+    fn active_style_injects_after_env_when_no_memory_or_tools() {
+        let mut ctx = ctx_minimal();
+        ctx.tool_names = Vec::new();
+        ctx.memory_files = Vec::new();
+        let style = ActiveOutputStyle {
+            name: "Learning",
+            prompt: "P",
+        };
+        let out = assemble_system_prompt_with_style(&ctx, Some(style));
+        assert!(!out.contains("<memory>"));
+        assert!(!out.contains("<tools>"));
+        // Section still lands before the footer with a blank-line boundary.
+        assert!(out.contains("# Output Style: Learning\nP\n\nNotes:"));
     }
 }

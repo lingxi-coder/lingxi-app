@@ -23,6 +23,7 @@ command-desktop = { path = "../../commands/desktop" }
 # construct an identical runtime. These are the engine-tier + platform crates
 # the lifted wiring touches; all are non-leaf so the dep-rule gate stays green.
 protocol = { path = "../../protocol" }
+engine = { path = "../../engine" }
 orchestrator = { path = "../../orchestrator" }
 providers = { path = "../../providers" }
 api-client = { path = "../../api-client" }

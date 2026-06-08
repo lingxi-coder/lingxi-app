@@ -44,7 +44,7 @@ use permission::{PermissionDecisionReason, PermissionResult};
 use serde_json::{json, Value};
 use telemetry::pii::{PiiTagged, Verified};
 use telemetry::sink::{AnalyticsValue, LogEventMetadata};
-use telemetry::tengu::tool::{SKILL_COMPLETED, SKILL_FAILED, SKILL_STARTED};
+use telemetry::tengu::tool::{SKILL_COMPLETED, SKILL_FAILED, SKILL_INVOKED, SKILL_STARTED};
 use telemetry::AnalyticsBus;
 
 use tool_api::context::ToolUseContext;
@@ -100,6 +100,16 @@ pub struct SkillDescriptor {
     /// positional argument. Empty → only `$ARGUMENTS` / `$N` placeholders expand
     /// (TS `processPromptSlashCommand` passes the command's `argNames`).
     pub argument_names: Vec<String>,
+    /// Shell to route embedded `!command` expansion through (the markdown
+    /// frontmatter `shell` selector). `None` -> bash (the TS default). Forwarded
+    /// to [`command_api::execute_shell_commands_in_prompt`] as the `shell` arg —
+    /// 1:1 with TS `getPromptForCommand(..., shell)` (`loadSkillsDir.ts:394`).
+    pub shell: Option<command_api::FrontmatterShell>,
+    /// Skip embedded `!command` shell expansion for this skill. Mirrors the TS
+    /// `loadedFrom !== 'mcp'` gate (`loadSkillsDir.ts:374`): MCP skills are
+    /// remote/untrusted, so their markdown body is NEVER shell-expanded. `false`
+    /// (the default) -> expansion runs (the on-disk / plugin markdown case).
+    pub skip_shell_expansion: bool,
 }
 
 impl Default for SkillDescriptor {
@@ -113,6 +123,8 @@ impl Default for SkillDescriptor {
             model: None,
             allowed_tools: Vec::new(),
             argument_names: Vec::new(),
+            shell: None,
+            skip_shell_expansion: false,
         }
     }
 }
@@ -133,6 +145,137 @@ pub struct EmptySkillLoader;
 impl SkillLoader for EmptySkillLoader {
     async fn load(&self, _name: &str) -> Result<Option<SkillDescriptor>, ToolError> {
         Ok(None)
+    }
+}
+
+/// Embedded-`!command` shell runner adapter for skill bodies.
+///
+/// SKILLEXEC.6: the TS `executeShellCommandsInPrompt`
+/// (`utils/promptShellExecution.ts:115`) routes each embedded command through
+/// `BashTool.call({ command }, context)`. The Rust [`command_api::ShellRunner`]
+/// seam is injected here, wrapping the SAME `ProcessRunner` + `Sandbox` seams the
+/// Rust `BashTool` spawns through (`tools/shell/src/bash.rs`): we build the
+/// foreground `ProcessCommand` like bash's foreground path — resolve the login
+/// shell, prepend the BASH.1 extglob-disable guard, run via `-c -l` — then
+/// construct the `SandboxedCommand` through `Sandbox::bypass_with_audit` and call
+/// `ProcessRunner::run`.
+///
+/// Divergence (documented): bash's `should_use_sandbox` + `wrap_with_sandbox`
+/// sandbox-wrap decision lives in the `sandbox` crate, which is outside
+/// `tool-skill`'s dependency set; the edit-only scope of this change forbids
+/// adding it. We therefore take bash's explicitly-offered alternative —
+/// `Sandbox::bypass_with_audit` (the same constructor bash uses to finalize its
+/// foreground `SandboxedCommand`) — running the embedded command un-wrapped. This
+/// matches the current Rust Bash security bar, whose `check_permissions` is an
+/// allow-all stub (`bash.rs:381-389`). The Windows-CMD `2>nul` rewrite is omitted
+/// (bash refuses on Windows outright); the BASH.4 persistent-cwd `pwd -P` readback
+/// is omitted (one-shot expansion keeps no shell-cwd state).
+struct SkillShellRunner {
+    process: Arc<dyn traits::process::ProcessRunner>,
+    sandbox: Arc<dyn traits::sandbox::Sandbox>,
+    workspace: std::path::PathBuf,
+}
+
+/// Resolve the login shell exactly like `bash.rs::resolve_shell_path`
+/// (`/bin/zsh` on macOS, `/bin/bash` elsewhere).
+fn resolve_skill_shell_path() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "/bin/zsh"
+    } else {
+        "/bin/bash"
+    }
+}
+
+/// BASH.1 extglob-disable guard, 1:1 with `bash.rs::disable_extglob_command`.
+fn skill_disable_extglob(shell_path: &str) -> Option<String> {
+    if std::env::var("CLAUDE_CODE_SHELL_PREFIX").is_ok_and(|v| !v.is_empty()) {
+        return Some("{ shopt -u extglob || setopt NO_EXTENDED_GLOB; } >/dev/null 2>&1 || true".into());
+    }
+    if shell_path.contains("bash") {
+        Some("shopt -u extglob 2>/dev/null || true".into())
+    } else if shell_path.contains("zsh") {
+        Some("setopt NO_EXTENDED_GLOB 2>/dev/null || true".into())
+    } else {
+        None
+    }
+}
+
+#[async_trait]
+impl command_api::ShellRunner for SkillShellRunner {
+    async fn run(
+        &self,
+        command: &str,
+        _shell: Option<command_api::FrontmatterShell>,
+    ) -> Result<command_api::ShellOut, command_api::ShellRunError> {
+        use traits::sandbox::ProcessCommand;
+
+        let shell_path = resolve_skill_shell_path();
+        // BASH.1: prepend the extglob-disable guard INTO the command so it runs
+        // in the same shell that expands the user's globs (mirrors the TS order
+        // `disableExtglob && <cmd>`).
+        let inner = match skill_disable_extglob(shell_path) {
+            Some(prefix) => format!("{prefix} && {command}"),
+            None => command.to_string(),
+        };
+        let pcmd = ProcessCommand {
+            command: shell_path.to_string(),
+            // BASH.4: login-shell init (`-l` after `-c`), matching the bash
+            // foreground spawn (`bashProvider.ts:201-205`, snapshot path deferred).
+            args: vec!["-c".into(), "-l".into(), inner],
+            cwd: Some(self.workspace.clone()),
+            env: HashMap::new(),
+            timeout: None,
+            stdin: None,
+        };
+        let sandboxed = self
+            .sandbox
+            .bypass_with_audit(pcmd, "skill_shell_expansion");
+        match self.process.run(&sandboxed).await {
+            // A timeout maps to the TS interrupted `ShellError` path so the engine
+            // formats "Shell command interrupted …" (mirrors bash's timeout->error).
+            Ok(out) if out.timed_out => Err(command_api::ShellRunError {
+                stdout: out.stdout,
+                stderr: out.stderr,
+                interrupted: true,
+                generic_message: None,
+            }),
+            // Non-zero exit is NOT an error here — TS `BashTool.call` returns
+            // stdout/stderr without throwing on a non-zero status; only an
+            // interruption throws. So every completed run yields `ShellOut`.
+            Ok(out) => Ok(command_api::ShellOut {
+                stdout: out.stdout,
+                stderr: out.stderr,
+                interrupted: false,
+            }),
+            // Spawn / I/O failure -> the TS `errorMessage(e)` generic path
+            // (`[Error]\n{message}`).
+            Err(e) => Err(command_api::ShellRunError {
+                stdout: String::new(),
+                stderr: String::new(),
+                interrupted: false,
+                generic_message: Some(format!("{e}")),
+            }),
+        }
+    }
+}
+
+/// Per-command permission gate for embedded skill `!command`s.
+///
+/// SKILLEXEC.6: TS calls `hasPermissionsToUseTool(shellTool, { command }, …)`
+/// before each command. The Rust `BashTool::check_permissions` is an allow-all
+/// stub (`bash.rs:381-389`), so the parity-faithful gate returns `Allow`,
+/// matching the current Bash bar. (TS merges the skill's `allowedTools` into the
+/// permission context's `alwaysAllowRules.command`; against an allow-all bar that
+/// merge is a no-op, so it is intentionally not replicated here.)
+struct SkillShellPermissionGate;
+
+impl command_api::ShellPermissionGate for SkillShellPermissionGate {
+    fn check(
+        &self,
+        _command: &str,
+        _shell: Option<command_api::FrontmatterShell>,
+    ) -> command_api::ShellPermissionDecision {
+        command_api::ShellPermissionDecision::Allow
     }
 }
 
@@ -199,6 +342,21 @@ async fn emit_failed(bus: &Arc<AnalyticsBus>, kind: &str, duration_ms: u64) {
 fn normalize_skill_name(skill: &str) -> String {
     let trimmed = skill.trim();
     trimmed.strip_prefix('/').unwrap_or(trimmed).to_string()
+}
+
+/// Sanitize a normalized skill name for the `SKILL_INVOKED` telemetry
+/// `skill_name` dimension (a `Verified`/whitelisted, non-PII field). Builtin
+/// command names pass through; any non-builtin collapses to `"custom"` — TS
+/// `command_name = NOT_CODE_OR_FILEPATHS` over `builtInCommandNames`
+/// (`commands.ts:350-353`). The descriptor carries no bundled/official-source
+/// flag, so bundled/official skills are indistinguishable here and all
+/// non-builtins map to `"custom"`.
+fn skill_name_dimension(command_name: &str) -> String {
+    if command_api::builtin_support::names::BUILTIN_COMMAND_NAMES.contains(&command_name) {
+        command_name.to_string()
+    } else {
+        "custom".to_string()
+    }
 }
 
 #[async_trait]
@@ -385,6 +543,24 @@ impl Tool for SkillTool {
             )));
         }
 
+        // SKILLEXEC.5: fire the registered `SKILL_INVOKED` event on the success
+        // path — after validateInput passes (descriptor loaded, prompt-type, not
+        // disable-model-invocation) — mirroring TS `SkillTool.ts:654-709`. The
+        // `skill_name` dimension is a `Verified` (whitelisted, non-PII) field, so
+        // it is sanitized to the builtin command name, or `"custom"` for any
+        // non-builtin skill (TS `command_name = NOT_CODE_OR_FILEPATHS` over
+        // `builtInCommandNames`, `commands.ts:350-353`). The `SkillDescriptor`
+        // carries no bundled/official-source flag, so every non-builtin collapses
+        // to `"custom"` — faithful for the hermetic substrate.
+        let skill_name_dim = skill_name_dimension(&command_name);
+        let mut inv_md: LogEventMetadata = HashMap::new();
+        inv_md.insert(
+            "invocation_id".into(),
+            verified_str(&tool_api::util::ids::ulid_or_uuid()),
+        );
+        inv_md.insert("skill_name".into(), verified_str(&skill_name_dim));
+        bus.log_event(SKILL_INVOKED, inv_md).await;
+
         // Enforce descriptor cap byte-lock.
         let truncated = if desc.description.chars().count() > MAX_SKILL_DESCRIPTOR_LEN {
             let s: String = desc
@@ -407,13 +583,15 @@ impl Tool for SkillTool {
         // user message) so the turn loop appends it after this tool_result and
         // the model acts on the skill (SkillTool.ts:735-774 `newMessages`).
         //
-        // The embedded `!command` shell-expansion step (TS step 3) is NOT run
-        // here: the `SkillDescriptor` carries no shell runner / permission seam
-        // (see module doc), so this performs the argument-substitution subset
-        // only — the faithful slice of `getPromptForCommand` reachable from a
-        // descriptor. The TS tagging of the message with the parent toolUseID
-        // (transient-until-resolved) has no Rust `ConversationMessage` substrate
-        // and is scoped out: the expanded prompt enters as a plain user message.
+        // SKILLEXEC.6: the embedded `!command` shell-expansion step (TS
+        // `getPromptForCommand` step 4) RUNS here, after argument substitution
+        // and before the user message is built — see below. The TS tagging of the
+        // message with the parent toolUseID (transient-until-resolved) has no Rust
+        // `ConversationMessage` substrate and is scoped out: the expanded prompt
+        // enters as a plain user message. The adjacent TS `${CLAUDE_SKILL_DIR}` /
+        // `${CLAUDE_SESSION_ID}` token replacements (steps 2-3) need data not wired
+        // to the descriptor (skill root, session id) and are scoped out as a
+        // follow-up — they are separate from the `!command` gap closed here.
         let args_for_expansion = args.as_deref().unwrap_or("");
         let expanded_prompt = match command_api::substitute_arguments_faithful(
             &desc.body,
@@ -434,6 +612,54 @@ impl Tool for SkillTool {
                 )));
             }
         };
+
+        // SKILLEXEC.6: embedded `!command` shell expansion over the substituted
+        // body, faithful to TS `getPromptForCommand` step 4
+        // (`loadSkillsDir.ts:374-395` -> `executeShellCommandsInPrompt`). Gated on
+        // `!skip_shell_expansion` (the TS `loadedFrom !== 'mcp'` guard): MCP skills
+        // are remote/untrusted and never shell-expand their body. The slash-command
+        // name arg is `/${command_name}`; the shell arg is the descriptor's
+        // frontmatter `shell` selector.
+        //
+        // SAFETY (byte-identical): when the substituted body contains NO `!command`
+        // block, `execute_shell_commands_in_prompt` returns it UNCHANGED (block
+        // scan finds nothing; the inline scan is gated behind a `"!`"` substring
+        // fast-path), so the common case is byte-identical to today. MCP-sourced
+        // skills (`skip_shell_expansion = true`) skip the call entirely.
+        let expanded_prompt = if desc.skip_shell_expansion {
+            expanded_prompt
+        } else {
+            let shell_ctx = command_api::ShellExpansionCtx {
+                runner: Arc::new(SkillShellRunner {
+                    process: self.ctx.process.clone(),
+                    sandbox: self.ctx.sandbox.clone(),
+                    workspace: self.ctx.workspace.clone(),
+                }),
+                permission_gate: Arc::new(SkillShellPermissionGate),
+            };
+            match command_api::execute_shell_commands_in_prompt(
+                &expanded_prompt,
+                &shell_ctx,
+                &format!("/{command_name}"),
+                desc.shell,
+            )
+            .await
+            {
+                Ok(p) => p,
+                Err(e) => {
+                    emit_failed(
+                        &bus,
+                        "shell_expansion_error",
+                        started.elapsed().as_millis() as u64,
+                    )
+                    .await;
+                    return Err(ToolError::Internal(format!(
+                        "Skill {command_name} shell expansion failed: {e}"
+                    )));
+                }
+            }
+        };
+
         let new_messages = vec![protocol::ConversationMessage::user(
             protocol::MessageId::new(),
             expanded_prompt,
@@ -581,6 +807,19 @@ mod tests {
         assert_eq!(normalize_skill_name("commit"), "commit");
         // Only a single leading slash is stripped.
         assert_eq!(normalize_skill_name("//commit"), "/commit");
+    }
+
+    #[test]
+    fn skill_name_dimension_keeps_builtin_and_sanitizes_custom() {
+        // A known builtin command name passes through unchanged...
+        let a_builtin = command_api::builtin_support::names::BUILTIN_COMMAND_NAMES[0];
+        assert_eq!(skill_name_dimension(a_builtin), a_builtin);
+        // ...while any non-builtin (custom) skill collapses to "custom" — the
+        // Verified/whitelisted SKILL_INVOKED dimension never leaks a raw PII name.
+        assert_eq!(
+            skill_name_dimension("definitely-not-a-builtin-skill-xyz"),
+            "custom"
+        );
     }
 
     #[test]
@@ -894,6 +1133,116 @@ mod tests {
         match &out.new_messages[0] {
             protocol::ConversationMessage::User { content, .. } => match content.first() {
                 Some(protocol::ContentBlock::Text { text }) => assert_eq!(text, "body here"),
+                other => panic!("expected leading Text block, got {other:?}"),
+            },
+            other => panic!("expected injected User message, got {other:?}"),
+        }
+    }
+
+    fn out_with_stdout(stdout: &str) -> ProcessOutput {
+        ProcessOutput {
+            stdout: stdout.to_string(),
+            stderr: String::new(),
+            exit_code: 0,
+            timed_out: false,
+        }
+    }
+
+    /// SKILLEXEC.6: a skill body with an embedded inline `!`…`` block runs the
+    /// command through the injected shell runner and splices its stdout into the
+    /// expanded prompt (the fake `ProcessRunner` returns "hi" for any command).
+    #[tokio::test]
+    async fn expands_inline_shell_command_into_new_messages() {
+        let desc = SkillDescriptor {
+            body: "before !`echo hi` after".into(),
+            ..prompt_desc("sh")
+        };
+        // The stub process returns this stdout for the (single) embedded command.
+        let tool = SkillTool::with_loader(
+            shell_test_ctx(out_with_stdout("hi\n")),
+            Arc::new(FixedLoader(Some(desc))),
+        );
+        let out = tool
+            .call(json!({"skill": "sh"}), fresh_ctx(), fresh_tx())
+            .await
+            .expect("ok");
+        match &out.new_messages[0] {
+            protocol::ConversationMessage::User { content, .. } => match content.first() {
+                Some(protocol::ContentBlock::Text { text }) => {
+                    // format_bash_output trims the stdout -> "hi".
+                    assert_eq!(text, "before hi after");
+                }
+                other => panic!("expected leading Text block, got {other:?}"),
+            },
+            other => panic!("expected injected User message, got {other:?}"),
+        }
+        // The model-facing line is still the launch string (body not leaked).
+        assert_eq!(out.data["model_content"], json!("Launching skill: sh"));
+    }
+
+    /// SAFETY: a skill body with NO `!command` is byte-identical to the
+    /// argument-substituted text — the shell-expansion engine returns the input
+    /// unchanged and the fake process is NEVER invoked (it would error if it were:
+    /// the stub is exhausted after one call, but no call happens).
+    #[tokio::test]
+    async fn no_shell_command_is_byte_identical_to_arg_substituted() {
+        let body = "Review PR $ARGUMENTS now (no shell here)";
+        let desc = SkillDescriptor {
+            body: body.into(),
+            ..prompt_desc("nb")
+        };
+        // Independently compute the pure arg-substitution result.
+        let expected =
+            command_api::substitute_arguments_faithful(body, Some("123"), true, &[]).unwrap();
+        // dummy_out() has empty stdout; if the runner were ever called and then
+        // called AGAIN, the stub would error — proving the no-op path.
+        let tool = SkillTool::with_loader(
+            shell_test_ctx(dummy_out()),
+            Arc::new(FixedLoader(Some(desc))),
+        );
+        let out = tool
+            .call(json!({"skill": "nb", "args": "123"}), fresh_ctx(), fresh_tx())
+            .await
+            .expect("ok");
+        match &out.new_messages[0] {
+            protocol::ConversationMessage::User { content, .. } => match content.first() {
+                Some(protocol::ContentBlock::Text { text }) => {
+                    assert_eq!(text, &expected);
+                    assert_eq!(text, "Review PR 123 now (no shell here)");
+                }
+                other => panic!("expected leading Text block, got {other:?}"),
+            },
+            other => panic!("expected injected User message, got {other:?}"),
+        }
+    }
+
+    /// SAFETY: an MCP-sourced skill (`skip_shell_expansion = true`) is
+    /// byte-identical to the arg-substituted text even when its body LOOKS like it
+    /// has an embedded `!command` — the expansion call is skipped entirely (TS
+    /// `loadedFrom !== 'mcp'` gate).
+    #[tokio::test]
+    async fn mcp_skip_shell_expansion_is_byte_identical() {
+        let desc = SkillDescriptor {
+            body: "before !`echo hi` after".into(),
+            skip_shell_expansion: true,
+            ..prompt_desc("mcpish")
+        };
+        // dummy_out(): the runner must NOT be called, so its (empty) stdout never
+        // matters; a call would not change the body, but skip proves no execution.
+        let tool = SkillTool::with_loader(
+            shell_test_ctx(dummy_out()),
+            Arc::new(FixedLoader(Some(desc))),
+        );
+        let out = tool
+            .call(json!({"skill": "mcpish"}), fresh_ctx(), fresh_tx())
+            .await
+            .expect("ok");
+        match &out.new_messages[0] {
+            protocol::ConversationMessage::User { content, .. } => match content.first() {
+                Some(protocol::ContentBlock::Text { text }) => {
+                    // Body is verbatim — the `!`echo hi`` block is NOT expanded.
+                    assert_eq!(text, "before !`echo hi` after");
+                }
                 other => panic!("expected leading Text block, got {other:?}"),
             },
             other => panic!("expected injected User message, got {other:?}"),

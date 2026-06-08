@@ -31,6 +31,7 @@
 //!   shell output is inserted verbatim, mirroring the TS function-replacer note.
 
 use crate::model::FrontmatterShell;
+use async_trait::async_trait;
 use std::sync::Arc;
 
 /// Output of a single embedded shell command.
@@ -80,11 +81,17 @@ pub trait ShellPermissionGate: Send + Sync {
 
 /// Runs a single shell command. Injected so the crate stays leaf (no `BashTool`
 /// dependency). Mirrors the TS `shellTool.call({ command }, context)`.
+///
+/// `run` is `async` so adapters can drive an `async` process runner (the
+/// production `tool-skill` adapter spawns through `traits::process::ProcessRunner`,
+/// whose `run` is `async`). The public [`execute_shell_commands_in_prompt`] is
+/// already `async`, so this only adds a `.await` at its single call site.
+#[async_trait]
 pub trait ShellRunner: Send + Sync {
     /// Execute `command` through `shell`, returning captured output. An `Err`
     /// here corresponds to the TS `ShellError`/throw path; `code` is the exit
     /// status when known.
-    fn run(
+    async fn run(
         &self,
         command: &str,
         shell: Option<FrontmatterShell>,
@@ -206,7 +213,7 @@ pub async fn execute_shell_commands_in_prompt(
             }
         }
 
-        let output = match ctx.runner.run(&m.command, shell) {
+        let output = match ctx.runner.run(&m.command, shell).await {
             Ok(data) => format_bash_output(&data.stdout, &data.stderr, false),
             Err(e) => return Err(format_bash_error(&e, &m.full)),
         };
@@ -351,8 +358,9 @@ mod tests {
             }
         }
     }
+    #[async_trait]
     impl ShellRunner for ScriptRunner {
-        fn run(
+        async fn run(
             &self,
             command: &str,
             _shell: Option<FrontmatterShell>,
@@ -511,8 +519,9 @@ mod tests {
     #[tokio::test]
     async fn run_failure_formats_error() {
         struct FailRunner;
+        #[async_trait]
         impl ShellRunner for FailRunner {
-            fn run(
+            async fn run(
                 &self,
                 _c: &str,
                 _s: Option<FrontmatterShell>,
@@ -540,8 +549,9 @@ mod tests {
     #[tokio::test]
     async fn stderr_included_in_output() {
         struct StderrRunner;
+        #[async_trait]
         impl ShellRunner for StderrRunner {
-            fn run(
+            async fn run(
                 &self,
                 _c: &str,
                 _s: Option<FrontmatterShell>,

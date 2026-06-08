@@ -176,20 +176,46 @@ impl SkillLoader for EmptySkillLoader {
 /// construct the `SandboxedCommand` through `Sandbox::bypass_with_audit` and call
 /// `ProcessRunner::run`.
 ///
-/// Divergence (documented): bash's `should_use_sandbox` + `wrap_with_sandbox`
-/// sandbox-wrap decision lives in the `sandbox` crate, which is outside
-/// `tool-skill`'s dependency set; the edit-only scope of this change forbids
-/// adding it. We therefore take bash's explicitly-offered alternative —
-/// `Sandbox::bypass_with_audit` (the same constructor bash uses to finalize its
-/// foreground `SandboxedCommand`) — running the embedded command un-wrapped. This
-/// matches the current Rust Bash security bar, whose `check_permissions` is an
-/// allow-all stub (`bash.rs:381-389`). The Windows-CMD `2>nul` rewrite is omitted
-/// (bash refuses on Windows outright); the BASH.4 persistent-cwd `pwd -P` readback
-/// is omitted (one-shot expansion keeps no shell-cwd state).
+/// Sandbox parity: before finalizing, this runner performs the SAME
+/// `should_use_sandbox` + `wrap_with_sandbox` decision as `BashTool::call`
+/// (`bash.rs:484-556`). The sandbox-decision inputs (`permission_mode`,
+/// `project_trust`, `sandbox_available`, `workspace`, `sandbox_runtime`,
+/// `platform`) are captured from the `SkillTool`'s [`BuiltinToolContext`] at
+/// construction (the `command_api::ShellRunner::run` signature stays
+/// `(&self, command, shell)` — the inputs ride on the adapter, not the call).
+/// A skill `!command` has no per-command `dangerouslyDisableSandbox` flag (it is
+/// a Bash-tool *input* field; skill bodies have no such surface), so we go
+/// straight to `should_use_sandbox` — omitting only bash's BASH.5 disable branch.
+/// The classifier arg is `None`, exactly as bash passes (external build
+/// classifier off). The `Sandbox::bypass_with_audit` envelope still finalizes
+/// the (possibly wrapped) command string for `ProcessRunner::run`, matching the
+/// constructor bash uses at its final foreground spawn — the sandboxing is baked
+/// into the wrapped command STRING, not the envelope.
+///
+/// Divergence (documented): the adapter carries no `AnalyticsBus`, so the
+/// `sandbox_refused` / `sandbox_wrap_failed` telemetry events bash emits on the
+/// refuse/wrap-failure branches are skipped here; the failure is still surfaced
+/// as a `command_api::ShellRunError` (the TS `errorMessage(e)` generic path) so
+/// the engine formats `[Error]\n…` and the command does NOT run. The Windows-CMD
+/// `2>nul` rewrite is omitted (bash refuses on Windows outright); the BASH.4
+/// persistent-cwd `pwd -P` readback is omitted (one-shot expansion keeps no
+/// shell-cwd state).
 struct SkillShellRunner {
     process: Arc<dyn traits::process::ProcessRunner>,
     sandbox: Arc<dyn traits::sandbox::Sandbox>,
     workspace: std::path::PathBuf,
+    // ===== Sandbox-decision inputs, captured from the SkillTool's
+    // `BuiltinToolContext` (mirrors what `BashTool::call` reads off `self.ctx`).
+    /// Active permission mode (`bash.rs:501`).
+    permission_mode: permission::PermissionMode,
+    /// Project trust level (`bash.rs:502`).
+    project_trust: sandbox::decision::ProjectTrustLevel,
+    /// Whether the host has a working sandbox backend (`bash.rs:504`).
+    sandbox_available: bool,
+    /// Sandbox policy runtime config — drives `wrap_with_sandbox` (`bash.rs:533`).
+    sandbox_runtime: sandbox::runtime_config::SandboxRuntimeConfig,
+    /// Detected platform — selects the `wrap_with_sandbox` branch (`bash.rs:533`).
+    platform: sandbox::runtime_config::Platform,
 }
 
 /// Resolve the login shell exactly like `bash.rs::resolve_shell_path`
@@ -223,16 +249,72 @@ impl command_api::ShellRunner for SkillShellRunner {
         command: &str,
         _shell: Option<command_api::FrontmatterShell>,
     ) -> Result<command_api::ShellOut, command_api::ShellRunError> {
+        use sandbox::decision::{should_use_sandbox, SandboxDecision};
+        use sandbox::wrap::wrap_with_sandbox;
         use traits::sandbox::ProcessCommand;
 
         let shell_path = resolve_skill_shell_path();
         // BASH.1: prepend the extglob-disable guard INTO the command so it runs
         // in the same shell that expands the user's globs (mirrors the TS order
         // `disableExtglob && <cmd>`).
-        let inner = match skill_disable_extglob(shell_path) {
+        let spawn_cmd = match skill_disable_extglob(shell_path) {
             Some(prefix) => format!("{prefix} && {command}"),
             None => command.to_string(),
         };
+
+        // ===== Sandbox decision (mirror of `BashTool::call`, bash.rs:484-556) =====
+        // A skill `!command` has NO per-command `dangerouslyDisableSandbox` flag
+        // (that is a Bash-tool *input* field; skill bodies have no such surface),
+        // so we go straight to `should_use_sandbox` — omitting only bash's BASH.5
+        // disable branch. Argument order + the `None` classifier (external build
+        // classifier off) are 1:1 with bash (`bash.rs:499-506`).
+        let decision = should_use_sandbox(
+            command,
+            self.permission_mode,
+            self.project_trust,
+            None,
+            self.sandbox_available,
+            self.workspace.clone(),
+        );
+        let inner = match decision {
+            // No sandbox: run the (extglob-guarded) command unchanged.
+            SandboxDecision::NoSandbox => spawn_cmd,
+            // Wrap the command string for the sandbox; on failure surface a
+            // `ShellRunError` (the TS `errorMessage(e)` generic path) so the
+            // command does NOT run. Bash splits this into two arms purely to emit
+            // distinct telemetry (`Unsupported` -> `sandbox_refused`,
+            // `SbplWrite` -> `sandbox_wrap_failed`) and to pick `InvalidInput` vs
+            // `Io`; this adapter has no `AnalyticsBus` and a single `ShellRunError`
+            // surface, so both `SandboxWrapError` variants collapse to the same
+            // generic failure (the inner string is preserved verbatim — the same
+            // string bash surfaces). See the struct doc.
+            SandboxDecision::Sandbox { policy: _ } => {
+                match wrap_with_sandbox(&spawn_cmd, &self.sandbox_runtime, self.platform) {
+                    Ok(wrapped) => wrapped,
+                    Err(sandbox::wrap::SandboxWrapError::Unsupported(s)
+                    | sandbox::wrap::SandboxWrapError::SbplWrite(s)) => {
+                        return Err(command_api::ShellRunError {
+                            stdout: String::new(),
+                            stderr: String::new(),
+                            interrupted: false,
+                            generic_message: Some(s),
+                        });
+                    }
+                }
+            }
+            // Dangerous command + no sandbox backend → refuse (bash returns a
+            // `PermissionDenied` error here; for skills the refusal surfaces as a
+            // `ShellRunError` so the command does NOT run).
+            SandboxDecision::RefuseBecauseSandboxUnavailable { reason } => {
+                return Err(command_api::ShellRunError {
+                    stdout: String::new(),
+                    stderr: String::new(),
+                    interrupted: false,
+                    generic_message: Some(reason),
+                });
+            }
+        };
+
         let pcmd = ProcessCommand {
             command: shell_path.to_string(),
             // BASH.4: login-shell init (`-l` after `-c`), matching the bash
@@ -682,6 +764,14 @@ impl Tool for SkillTool {
                     process: self.ctx.process.clone(),
                     sandbox: self.ctx.sandbox.clone(),
                     workspace: self.ctx.workspace.clone(),
+                    // Sandbox-decision inputs, captured at construction so the
+                    // `ShellRunner::run` signature stays unchanged — mirror of
+                    // the fields `BashTool::call` reads off `self.ctx`.
+                    permission_mode: self.ctx.permission_mode,
+                    project_trust: self.ctx.project_trust,
+                    sandbox_available: self.ctx.sandbox_available,
+                    sandbox_runtime: self.ctx.sandbox_runtime.clone(),
+                    platform: self.ctx.platform,
                 }),
                 permission_gate: Arc::new(SkillShellPermissionGate),
             };
@@ -1567,5 +1657,105 @@ mod tests {
             .expect("ok");
         assert_eq!(injected_text(&out), expected);
         assert_eq!(injected_text(&out), "Plain body X, no tokens here at all.");
+    }
+
+    // ========================================================================
+    // SKILLEXEC.6 sandbox parity: the embedded `!command` runner mirrors
+    // `BashTool::call`'s `should_use_sandbox` + `wrap_with_sandbox` decision.
+    // ========================================================================
+
+    /// The platform wrapper prefix `wrap_with_sandbox` emits, so the assertions
+    /// below stay host-agnostic: `sandbox-exec -f` on macOS, `bwrap ` elsewhere.
+    fn sandbox_wrap_prefix() -> &'static str {
+        if cfg!(target_os = "macos") {
+            "sandbox-exec -f"
+        } else {
+            "bwrap "
+        }
+    }
+
+    /// With a config that WOULD sandbox (`sandbox_available = true`, default
+    /// permission mode, classifier `None` so the trusted-safe shortcut never
+    /// fires), the embedded command is run through `wrap_with_sandbox` — the
+    /// spawned command string is the WRAPPED form, exactly as `BashTool::call`
+    /// would produce. We capture the spawned `-c -l` payload and assert it is the
+    /// platform sandbox wrapper, with the original command nested inside.
+    #[tokio::test]
+    async fn embedded_command_is_sandbox_wrapped_when_decision_says_sandbox() {
+        let capture = Arc::new(CapturingProcess {
+            seen: std::sync::Mutex::new(Vec::new()),
+            stdout: "OUT\n".into(),
+        });
+        let mut ctx = shell_test_ctx(dummy_out());
+        ctx.process = capture.clone();
+        // Flip the one input that moves the decision from NoSandbox -> Sandbox:
+        // a working sandbox backend. (Default mode + classifier `None` means the
+        // trusted-safe shortcut is skipped, so the decision lands on Sandbox.)
+        ctx.sandbox_available = true;
+        let desc = SkillDescriptor {
+            body: "pre !`echo hi` post".into(),
+            ..prompt_desc("sbx")
+        };
+        let tool = SkillTool::with_loader(ctx, Arc::new(FixedLoader(Some(desc))));
+        let out = tool
+            .call(json!({"skill": "sbx"}), fresh_ctx(), fresh_tx())
+            .await
+            .expect("ok");
+        // The splice still works (the stub stdout is "OUT").
+        assert_eq!(injected_text(&out), "pre OUT post");
+        let seen = capture.seen.lock().unwrap();
+        assert_eq!(seen.len(), 1, "exactly one embedded command ran");
+        // The spawned payload is the platform sandbox wrapper — NOT the raw
+        // command — proving the should_use_sandbox + wrap_with_sandbox path ran.
+        assert!(
+            seen[0].starts_with(sandbox_wrap_prefix()),
+            "embedded command must be sandbox-wrapped, got: {}",
+            seen[0]
+        );
+        // The original command (plus the BASH.1 extglob guard) is nested inside
+        // the wrapper's `/bin/sh -c '…'` payload.
+        assert!(
+            seen[0].contains("echo hi"),
+            "wrapped command should still carry the original command, got: {}",
+            seen[0]
+        );
+    }
+
+    /// With the DEFAULT config (`sandbox_available = false`), the decision is
+    /// `NoSandbox`, so the embedded command is run UNWRAPPED — byte-identical to
+    /// the pre-sandbox-parity behavior. The spawned payload is the bare
+    /// extglob-guarded command, never the platform wrapper.
+    #[tokio::test]
+    async fn embedded_command_is_unwrapped_when_decision_says_no_sandbox() {
+        let capture = Arc::new(CapturingProcess {
+            seen: std::sync::Mutex::new(Vec::new()),
+            stdout: "OUT\n".into(),
+        });
+        // shell_test_ctx defaults: sandbox_available = false -> NoSandbox.
+        let mut ctx = shell_test_ctx(dummy_out());
+        ctx.process = capture.clone();
+        let desc = SkillDescriptor {
+            body: "pre !`echo hi` post".into(),
+            ..prompt_desc("nosbx")
+        };
+        let tool = SkillTool::with_loader(ctx, Arc::new(FixedLoader(Some(desc))));
+        let out = tool
+            .call(json!({"skill": "nosbx"}), fresh_ctx(), fresh_tx())
+            .await
+            .expect("ok");
+        assert_eq!(injected_text(&out), "pre OUT post");
+        let seen = capture.seen.lock().unwrap();
+        assert_eq!(seen.len(), 1, "exactly one embedded command ran");
+        // No sandbox wrapper — the raw command runs directly.
+        assert!(
+            !seen[0].starts_with(sandbox_wrap_prefix()),
+            "NoSandbox path must run the command unwrapped, got: {}",
+            seen[0]
+        );
+        assert!(
+            seen[0].contains("echo hi"),
+            "unwrapped command should be the raw command, got: {}",
+            seen[0]
+        );
     }
 }

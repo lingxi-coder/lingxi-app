@@ -33,8 +33,10 @@ pub fn merge(prev: SettingsJson, next: SettingsJson) -> SettingsJson {
         // for rule loading. (Refine to per-array concat if the merged field is
         // ever consumed directly.)
         permissions: deep_merge_object(prev.permissions, next.permissions),
-        output_style: deep_merge_object(prev.output_style, next.output_style),
         // Scalar fields — Override semantics: next wins when set, else prev.
+        // OUTSTYLE.1: `outputStyle` is a string in claude-code and merges
+        // scalar-override (settingsMergeCustomizer special-cases only arrays).
+        output_style: next.output_style.or(prev.output_style),
         telemetry_enabled: next.telemetry_enabled.or(prev.telemetry_enabled),
         model: next.model.or(prev.model),
         providers: deep_merge_object(prev.providers, next.providers),

@@ -42,7 +42,9 @@ pub const MERGE_STRATEGIES: &[(&str, MergeStrategy)] = &[
     ("sandbox", MergeStrategy::DeepMerge),
     ("hooks", MergeStrategy::DeepMerge),
     ("permissions", MergeStrategy::DeepMerge),
-    ("outputStyle", MergeStrategy::DeepMerge),
+    // NB: `outputStyle` is intentionally NOT here — TS types it as a string and
+    // merges it scalar-override (settingsMergeCustomizer special-cases only
+    // arrays), so it falls through to the default Override strategy.
     // LingXi extension — deep-merge so multiple settings layers can each
     // declare a subset of provider profiles.
     ("providers", MergeStrategy::DeepMerge),
@@ -110,9 +112,14 @@ pub struct SettingsJson {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub permissions: Option<BTreeMap<String, Value>>,
 
-    /// Object-merge field (deep-merge).
+    /// Scalar field (later source wins). TS types this `outputStyle:
+    /// z.string().optional()` (settings/types.ts:639; `type OutputStyle =
+    /// string`, config.ts:181), and `settingsMergeCustomizer` special-cases
+    /// only arrays, so a string `outputStyle` takes scalar-override
+    /// (settings.ts:538-547) — NOT deep-merge. Typing it as a map made a real
+    /// `"outputStyle": "Explanatory"` settings.json fail the whole load.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub output_style: Option<BTreeMap<String, Value>>,
+    pub output_style: Option<String>,
 
     /// Scalar field (later source wins). Telemetry on/off toggle.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -210,6 +217,26 @@ mod tests {
     }
 
     #[test]
+    fn accepts_string_output_style() {
+        // OUTSTYLE.1 regression: before this fix `output_style` was typed as a
+        // map, so a real claude-code settings.json carrying the documented
+        // `"outputStyle": "Explanatory"` (a string) failed `deny_unknown_fields`
+        // deserialization and broke the ENTIRE settings load (dropping model /
+        // permissions / hooks in that layer). TS types it `z.string()` — it must
+        // now parse as a string.
+        let json = r#"{ "outputStyle": "Explanatory", "model": "claude-sonnet-4-5" }"#;
+        let parsed: SettingsJson =
+            serde_json::from_str(json).expect("string outputStyle must parse");
+        assert_eq!(parsed.output_style.as_deref(), Some("Explanatory"));
+        assert!(parsed.model.is_some(), "sibling fields must survive the load");
+        // Scalar-override, not deep-merge.
+        assert!(
+            strategy_for("outputStyle").is_none(),
+            "outputStyle must be scalar-override"
+        );
+    }
+
+    #[test]
     fn tolerates_dollar_schema_field_for_future_compat() {
         // claude-code @ 6a25909 does NOT emit "$schema". We tolerate it for forward-compat.
         let json = r#"{"$schema": "https://example.com/schema.json", "trustedDirectories": []}"#;
@@ -239,7 +266,7 @@ mod tests {
     fn merge_strategies_table_covers_object_fields() {
         // The spec §7 object-merge fields MUST be registered as DeepMerge
         // (plus the `permissions` block — claude-code parity).
-        for field in ["sandbox", "hooks", "permissions", "outputStyle"] {
+        for field in ["sandbox", "hooks", "permissions"] {
             let strat =
                 strategy_for(field).unwrap_or_else(|| panic!("missing strategy for {field}"));
             assert!(
@@ -247,6 +274,13 @@ mod tests {
                 "{field} should be DeepMerge, got {strat:?}"
             );
         }
+        // OUTSTYLE.1: `outputStyle` is a scalar string in claude-code, so it
+        // must NOT be a registered DeepMerge field — it falls through to the
+        // default Override strategy (later layer wins).
+        assert!(
+            strategy_for("outputStyle").is_none(),
+            "outputStyle must default to Override (scalar), not be registered DeepMerge"
+        );
     }
 
     #[test]

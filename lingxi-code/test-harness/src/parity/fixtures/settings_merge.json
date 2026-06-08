@@ -1,6 +1,6 @@
 {
   "_source": "claude-code @ commit 6a25909 — src/settings/loader.ts:loadEffectiveSettings (4-layer chain) + src/settings/merger.ts:mergeSettings (per-field strategy)",
-  "_note": "4-layer priority is env > user > project > defaults. Array fields (trustedDirectories, additionalDirectories, enabledTools, additionalIncludes) concat-dedup; object fields (sandbox, hooks, outputStyle) deep-merge; every other field is scalar-override. Env prefix priority is LINGXI_ > CLAUDE_CODE_ > CLAUDE_ (LingXi-only; claude-code uses only CLAUDE_*). The $schema field is NOT emitted by claude-code @ 6a25909 — we tolerate it on read for future-compat. PII routing: user paths and raw env values go to _PROTO_-prefixed metadata keys per spec §26.2.",
+  "_note": "4-layer priority is env > user > project > defaults. Array fields (trustedDirectories, additionalDirectories, enabledTools, additionalIncludes) concat-dedup; object fields (sandbox, hooks, permissions) deep-merge; outputStyle is a string in claude-code (settings/types.ts:639) so it is scalar-override like every other non-array/non-object field. Env prefix priority is LINGXI_ > CLAUDE_CODE_ > CLAUDE_ (LingXi-only; claude-code uses only CLAUDE_*). The $schema field is NOT emitted by claude-code @ 6a25909 — we tolerate it on read for future-compat. PII routing: user paths and raw env values go to _PROTO_-prefixed metadata keys per spec §26.2.",
   "input_defaults": {
     "model": "claude-sonnet-4-5",
     "trustedDirectories": ["/opt/lingxi/defaults"],

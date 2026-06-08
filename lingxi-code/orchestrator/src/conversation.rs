@@ -18,6 +18,12 @@ use hooks::events::HookEvent;
 use hooks::registry::HookContext;
 use protocol::{ConversationMessage, MessageId, SessionId};
 use session::JsonlWriter;
+
+/// Re-export of the canonical image-source shape (FROZEN in `protocol`) so callers
+/// that do NOT depend on the `protocol` crate — notably the desktop bridge's
+/// `OrchestratorTurnDriver` — can construct the already-decoded sources handed to
+/// [`ConversationOrchestrator::run_turn_streaming_with_cancel_image_sources`].
+pub use protocol::ImageSource;
 use std::sync::Arc;
 use telemetry::tengu::orchestrator as orch_events;
 use tokio::sync::Mutex;
@@ -1707,7 +1713,7 @@ impl ConversationOrchestrator {
             event = orch_events::TURN_STREAMING_STARTED,
             prompt_len = prompt.len()
         );
-        let result = self.try_run_turn_streaming(prompt, &[]).await;
+        let result = self.try_run_turn_streaming(prompt, Vec::new()).await;
         match &result {
             Ok(ConversationOutcome::EndTurn { turn_count, .. }
             | ConversationOutcome::StopHookPrevented { turn_count, .. }) => {
@@ -1732,7 +1738,7 @@ impl ConversationOrchestrator {
     async fn try_run_turn_streaming(
         &self,
         prompt: &str,
-        image_paths: &[std::path::PathBuf],
+        images: Vec<protocol::ImageSource>,
     ) -> Result<ConversationOutcome, OrchestratorError> {
         use crate::streaming_loop::{dispatch_tool_uses_concurrent, pump_stream};
         use protocol::ContentBlock;
@@ -1744,7 +1750,8 @@ impl ConversationOrchestrator {
         };
 
         // 1. Append the user prompt (+ any pasted images) to session history.
-        let images = Self::load_images(image_paths)?;
+        // `images` arrives already decoded (path-based callers ran `load_images`
+        // first; the bridge converts inline `ImageRefDto`s straight to sources).
         let user_msg =
             ConversationMessage::user_with_images(MessageId::new(), prompt.to_string(), images);
         {
@@ -2214,6 +2221,32 @@ impl ConversationOrchestrator {
         image_paths: &[std::path::PathBuf],
         cancel: CancellationToken,
     ) -> Result<TurnOutcome, OrchestratorError> {
+        // Decode the pasted PATHS into canonical sources first, then hand off to
+        // the already-decoded entry below — so the path-based and bridge (inline
+        // base64) flows share ONE cancel race + ONE turn core. A failed image read
+        // aborts the turn with `Err` before any API call (unchanged).
+        let images = Self::load_images(image_paths)?;
+        self.run_turn_streaming_with_cancel_image_sources(prompt, images, cancel)
+            .await
+    }
+
+    /// As [`Self::run_turn_streaming_with_cancel_images`], but taking
+    /// ALREADY-DECODED [`protocol::ImageSource`]s instead of file paths.
+    ///
+    /// This is the entry the desktop bridge adapter drives: pasted/attached images
+    /// arrive over the wire as inline base64 (`ImageRefDto`) and are converted
+    /// straight to [`protocol::ImageSource::Base64`] with NO temp-file round-trip.
+    /// The path-based entry above decodes its paths via [`Self::load_images`] then
+    /// delegates here, so both paths share this cancel race and the single
+    /// [`Self::try_run_turn_streaming`] core — which appends the images to the
+    /// outgoing user message via [`ConversationMessage::user_with_images`]. With an
+    /// empty `images` vector this is byte-identical to the text-only streaming path.
+    pub async fn run_turn_streaming_with_cancel_image_sources(
+        &self,
+        prompt: &str,
+        images: Vec<protocol::ImageSource>,
+        cancel: CancellationToken,
+    ) -> Result<TurnOutcome, OrchestratorError> {
         tracing::info!(
             event = orch_events::TURN_STREAMING_STARTED,
             prompt_len = prompt.len()
@@ -2224,7 +2257,7 @@ impl ConversationOrchestrator {
         tokio::select! {
             biased;
             () = cancel.cancelled() => Ok(TurnOutcome::Cancelled),
-            r = self.try_run_turn_streaming(prompt, image_paths) => match r {
+            r = self.try_run_turn_streaming(prompt, images) => match r {
                 Ok(ConversationOutcome::EndTurn { turn_count, .. }
                 | ConversationOutcome::StopHookPrevented { turn_count, .. }) => {
                     tracing::info!(

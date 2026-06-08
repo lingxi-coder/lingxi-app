@@ -50,7 +50,7 @@ use bridge::{
     FramePump, FrameSink, ServerHello, BRIDGE_PROTOCOL_VERSION,
 };
 use client_adapter::{ClientEventSink, PermissionRequestSink};
-use client_protocol::commands::ClientCommand;
+use client_protocol::commands::{ClientCommand, ImageRefDto};
 use client_protocol::events::ClientEvent;
 use client_protocol::permission::{
     PermissionKindDto, PermissionRequest, PermissionResponseDto,
@@ -77,6 +77,24 @@ pub trait TurnDriver: Send + Sync + 'static {
     /// parked permission `check()`); the implementation streams its events out
     /// through the connection's [`ClientEventSink`] as a side effect.
     async fn run_turn(&self, prompt: String);
+
+    /// Drive ONE turn for `prompt` carrying the inline images pasted/attached by
+    /// the client (the wire [`ImageRefDto`]s from
+    /// [`ClientCommand::SendPrompt`](client_protocol::commands::ClientCommand::SendPrompt)).
+    ///
+    /// ADDITIVE over [`Self::run_turn`]: the DEFAULT body DROPS the images and
+    /// delegates to `run_turn`, so every existing impl (including the test drivers)
+    /// keeps compiling and behaving exactly as before. Only
+    /// [`crate::driver::OrchestratorTurnDriver`] OVERRIDES this to route the images
+    /// through to the model. With an empty `images` vector the override is, by
+    /// construction, identical to the plain text-only `run_turn` path — so the
+    /// dispatch can always call this entry without a special-case for "no images".
+    async fn run_turn_with_images(&self, prompt: String, images: Vec<ImageRefDto>) {
+        // Default: images are not supported by this driver — drop them and run the
+        // text-only turn (byte-identical to the pre-MULTIMODAL.1 behavior).
+        let _ = images;
+        self.run_turn(prompt).await;
+    }
 }
 
 /// Connection-scoped outbound channel. Holds the per-connection [`FrameSink`]
@@ -329,13 +347,19 @@ impl BridgeConnection {
     /// Route one decoded [`ClientCommand`].
     async fn dispatch(&self, command: ClientCommand) {
         match command {
-            ClientCommand::SendPrompt { text, .. } => {
+            ClientCommand::SendPrompt { text, images, .. } => {
                 // Spawn the turn so `on_frame` returns promptly — the read loop
                 // must stay free to service the approval that unblocks a parked
                 // permission `check()`.
+                //
+                // MULTIMODAL.1: forward the inline images so the desktop bridge no
+                // longer silently drops pasted/attached attachments. When `images`
+                // is empty `run_turn_with_images` is identical to the old
+                // `run_turn(text)` path (the override and the trait default both
+                // degrade to text-only with no images).
                 if let Some(driver) = self.driver.clone() {
                     tokio::spawn(async move {
-                        driver.run_turn(text).await;
+                        driver.run_turn_with_images(text, images).await;
                     });
                 }
             }
@@ -446,5 +470,102 @@ impl FramePump for BridgeConnection {
                 tracing::debug!(drained, "bridge-server: drained parked permissions on close");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use async_trait::async_trait;
+    use client_adapter::{AdapterPermissionGate, PermissionRequestSink};
+    use client_protocol::commands::{ClientCommand, ImageRefDto};
+    use client_protocol::permission::PermissionRequest;
+    use tokio::sync::{Mutex, Notify};
+
+    use super::{BridgeConnection, TurnDriver};
+
+    /// Shared cell capturing the `(prompt, images)` a driver was driven with.
+    type CapturedTurn = Arc<Mutex<Option<(String, Vec<ImageRefDto>)>>>;
+
+    /// A [`TurnDriver`] that records the `(prompt, images)` it was driven with, so a
+    /// test can assert the `SendPrompt` dispatch forwarded the wire `images`.
+    struct RecordingDriver {
+        captured: CapturedTurn,
+        notify: Arc<Notify>,
+    }
+
+    #[async_trait]
+    impl TurnDriver for RecordingDriver {
+        async fn run_turn(&self, prompt: String) {
+            // Record an EMPTY image set so a regression (dispatch taking the old
+            // text-only `run_turn` path despite carried images) shows up as a
+            // mismatch against the sent images.
+            *self.captured.lock().await = Some((prompt, Vec::new()));
+            self.notify.notify_one();
+        }
+
+        async fn run_turn_with_images(&self, prompt: String, images: Vec<ImageRefDto>) {
+            *self.captured.lock().await = Some((prompt, images));
+            self.notify.notify_one();
+        }
+    }
+
+    /// `bind` requires a gate; this sink drops every request (the dispatch path
+    /// under test never emits one).
+    struct NoopPermissionSink;
+
+    #[async_trait]
+    impl PermissionRequestSink for NoopPermissionSink {
+        async fn emit_request(&self, _request: PermissionRequest) {}
+    }
+
+    /// A `SendPrompt` carrying inline images must dispatch through
+    /// `run_turn_with_images` with those images intact — no longer dropping them
+    /// (the MULTIMODAL.1 bridge wiring). An empty-image regression would record an
+    /// empty set via the default `run_turn` and fail the equality below.
+    #[tokio::test]
+    async fn send_prompt_forwards_images_to_run_turn_with_images() {
+        let captured = Arc::new(Mutex::new(None));
+        let notify = Arc::new(Notify::new());
+        let driver: Arc<dyn TurnDriver> = Arc::new(RecordingDriver {
+            captured: captured.clone(),
+            notify: notify.clone(),
+        });
+        let gate = Arc::new(AdapterPermissionGate::new(Arc::new(NoopPermissionSink)));
+        let connection = BridgeConnection::new().bind(gate, driver);
+
+        let images = vec![
+            ImageRefDto {
+                media_type: "image/png".to_string(),
+                base64: "iVBORw0KGgoAAAA".to_string(),
+            },
+            ImageRefDto {
+                media_type: "image/gif".to_string(),
+                base64: "R0lGODlhAQAB".to_string(),
+            },
+        ];
+        connection
+            .dispatch(ClientCommand::SendPrompt {
+                text: "look at these".to_string(),
+                prompt_mode: None,
+                images: images.clone(),
+                turn_id: None,
+            })
+            .await;
+
+        // `dispatch` SPAWNS the turn; wait for the recording driver to fire.
+        notify.notified().await;
+
+        let got = captured
+            .lock()
+            .await
+            .clone()
+            .expect("the bound driver must have been driven");
+        assert_eq!(got.0, "look at these");
+        assert_eq!(
+            got.1, images,
+            "the SendPrompt images must reach run_turn_with_images, not be dropped"
+        );
     }
 }

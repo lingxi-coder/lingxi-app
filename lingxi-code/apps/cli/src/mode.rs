@@ -138,10 +138,17 @@ pub async fn dispatch(
             // (MULTIMODAL.1) Thread the bridge sender clone so the TUI live-key
             // loop can spawn streaming turns (`tui::root::pump_turn`). Moved out
             // of `tui_build` (a disjoint field from the already-taken `bridge_rx`).
+            // (ARGS.3) Thread the dispatcher's shared command registry so the TUI
+            // populates its progressive argument-hint map at init. `.registry()`
+            // only clones the inner `Arc<RwLock<CommandRegistry>>`, leaving the
+            // dispatcher in place on `tui_build.runtime` (read before `turn_tx`,
+            // a disjoint field, is moved out below — no borrow/move conflict).
+            let command_registry = tui_build.runtime.dispatcher.registry();
             let tui_runtime = tui::session::Runtime::with_bridge(session_id, bridge, status)
                 .with_orchestrator(orchestrator)
                 .with_multiagent_feed(task_feed)
-                .with_turn_tx(tui_build.turn_tx);
+                .with_turn_tx(tui_build.turn_tx)
+                .with_command_registry(command_registry);
             let cancel = CancellationToken::new();
             match tui::run_tui_session(tui_runtime, cancel).await {
                 Ok(()) => exit_codes::SUCCESS,

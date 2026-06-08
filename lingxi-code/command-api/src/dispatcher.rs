@@ -28,6 +28,18 @@ impl RegistrySlashDispatcher {
         Self { registry }
     }
 
+    /// The shared registry handle backing this dispatcher.
+    ///
+    /// (ARGS.3) Hands the same `Arc<RwLock<CommandRegistry>>` out so a host can
+    /// read declared `argNames` once at init (e.g. the TUI's progressive
+    /// argument-hint map) without owning a second dispatcher. Cloning the `Arc`
+    /// keeps both views pointed at the SAME registry, so later
+    /// register/unregister events are visible through either handle.
+    #[must_use]
+    pub fn registry(&self) -> Arc<RwLock<CommandRegistry>> {
+        self.registry.clone()
+    }
+
     /// A second dispatcher pointing at the SAME shared registry.
     ///
     /// Dispatching is identical (both clone the same `Arc<RwLock<CommandRegistry>>`).
@@ -247,5 +259,42 @@ mod tests {
             }
             other => panic!("expected Unknown for /CLEAR, got {other:?}"),
         }
+    }
+
+    /// (ARGS.3) `registry()` hands back an `Arc` to the SAME shared registry:
+    /// a markdown command registered through the dispatcher's `Arc` is visible
+    /// through the returned handle, proving the live argument-hint seam reads
+    /// the dispatcher's actual command set.
+    #[tokio::test]
+    async fn registry_accessor_shares_the_same_registry() {
+        use crate::model::{CommandSource, SlashCommand, SlashCommandKind};
+
+        let shared = Arc::new(RwLock::new(CommandRegistry::new()));
+        let d = RegistrySlashDispatcher::new(shared.clone());
+
+        // Register a markdown command (with argNames) via the ORIGINAL Arc.
+        shared.write().await.register_command(SlashCommand {
+            name: "deploy".to_string(),
+            description: "Deploy".to_string(),
+            source: CommandSource::Project,
+            kind: SlashCommandKind::Markdown {
+                file_path: std::path::PathBuf::from("/x/deploy.md"),
+                frontmatter: crate::model::CommandFrontmatter::default(),
+                prompt_template: String::new(),
+            },
+            argument_names: vec!["env".to_string(), "region".to_string()],
+            ..SlashCommand::default()
+        });
+
+        // The accessor's handle observes that same command + its argNames.
+        let via_accessor = d.registry();
+        let guard = via_accessor.read().await;
+        let cmd = guard
+            .resolve("deploy")
+            .expect("command visible via registry()");
+        assert_eq!(
+            cmd.argument_names,
+            vec!["env".to_string(), "region".to_string()]
+        );
     }
 }

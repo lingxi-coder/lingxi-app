@@ -61,6 +61,10 @@ pub struct Runtime {
     /// streams text/tool events onto. `None` (smoke gates / resume picker)
     /// leaves the live loop unable to spawn a turn — correct for those mounts.
     pub turn_tx: Option<mpsc::UnboundedSender<crate::events::orchestrator_bridge::TurnEvent>>,
+    /// (ARGS.3) Shared command registry, used once at init to populate the
+    /// progressive argument-hint map. `None` (smoke gates / no-CLI mounts) leaves
+    /// the hint map empty — correct (no builtin declares argNames).
+    pub command_registry: Option<Arc<tokio::sync::RwLock<command_api::CommandRegistry>>>,
 }
 
 impl Runtime {
@@ -74,6 +78,7 @@ impl Runtime {
             orchestrator: None,
             multiagent_feed: None,
             turn_tx: None,
+            command_registry: None,
         }
     }
 
@@ -91,6 +96,7 @@ impl Runtime {
             orchestrator: None,
             multiagent_feed: None,
             turn_tx: None,
+            command_registry: None,
         }
     }
 
@@ -126,6 +132,20 @@ impl Runtime {
         self.turn_tx = Some(turn_tx);
         self
     }
+
+    /// (ARGS.3) Attach the shared command registry. Read once at init to
+    /// populate the progressive argument-hint map (`set_command_argument_names`),
+    /// so custom markdown commands that declare `argNames` show the inline ghost
+    /// hint. Without it the map stays empty — correct, since no built-in declares
+    /// `argNames` (the hint never renders for them either way).
+    #[must_use]
+    pub fn with_command_registry(
+        mut self,
+        registry: Arc<tokio::sync::RwLock<command_api::CommandRegistry>>,
+    ) -> Self {
+        self.command_registry = Some(registry);
+        self
+    }
 }
 
 /// Public entry point. Drives the TUI to a clean shutdown.
@@ -157,6 +177,15 @@ pub async fn run_tui_session(
     // the render path reads it. Wrapped in a tokio Mutex so the pump
     // can await locks across .await points.
     let mut initial_state = AppState::new(runtime.status.clone());
+    // (ARGS.3) Populate the progressive argument-hint map from the live command
+    // registry (when the CLI threaded one in). `run_tui_session` is async, so we
+    // take the read lock here. Custom markdown commands that declare `argNames`
+    // will surface the inline ghost hint; built-ins declare none, so this is a
+    // no-op for them. `None` (smoke gates / resume picker) leaves the map empty.
+    if let Some(reg) = runtime.command_registry.as_ref() {
+        let guard = reg.read().await;
+        initial_state.set_command_argument_names(&guard);
+    }
     // (M7-15) Apply the stored theme preference from ~/.claude/settings.json
     // (best-effort; absent/unreadable → session-default `auto`). Read once at
     // startup, before the first render, so the very first frame uses the saved
@@ -293,5 +322,58 @@ mod tests {
         let (_, rx) = mpsc::unbounded_channel();
         let r = Runtime::with_bridge(id, TuiBridge { rx }, StatusSnapshot::default());
         assert!(r.bridge.is_some());
+    }
+
+    /// (ARGS.3) End-to-end live-data-path proof without a PTY: a registry with a
+    /// markdown command declaring `argNames`, threaded through the real
+    /// `with_command_registry` builder, drives the same init-application step
+    /// `run_tui_session` runs (read the registry, call
+    /// `set_command_argument_names`) and surfaces the inline progressive hint.
+    #[tokio::test]
+    async fn with_command_registry_populates_argument_hint() {
+        use command_api::model::{CommandFrontmatter, CommandSource, SlashCommand, SlashCommandKind};
+        use command_api::CommandRegistry;
+
+        // Build a registry holding a custom markdown command with argNames.
+        let mut reg = CommandRegistry::new();
+        reg.register_command(SlashCommand {
+            name: "deploy".to_string(),
+            description: "Deploy".to_string(),
+            source: CommandSource::Project,
+            kind: SlashCommandKind::Markdown {
+                file_path: std::path::PathBuf::from("/x/deploy.md"),
+                frontmatter: CommandFrontmatter::default(),
+                prompt_template: String::new(),
+            },
+            argument_names: vec!["env".to_string(), "region".to_string()],
+            ..SlashCommand::default()
+        });
+        let registry = Arc::new(tokio::sync::RwLock::new(reg));
+
+        // Thread it through the real builder the CLI uses.
+        let runtime =
+            Runtime::new(protocol::SessionId::new()).with_command_registry(registry.clone());
+        assert!(runtime.command_registry.is_some());
+
+        // Replicate `run_tui_session`'s init-application step exactly: read the
+        // registry off the runtime and populate the hint map.
+        let mut state = AppState::new(StatusSnapshot::default());
+        let reg_handle = runtime
+            .command_registry
+            .as_ref()
+            .expect("registry threaded in");
+        let guard = reg_handle.read().await;
+        state.set_command_argument_names(&guard);
+        drop(guard);
+
+        // The live data path now renders the inline progressive hint.
+        state.prompt_text = "/deploy ".to_string();
+        assert_eq!(
+            state.prompt_argument_hint(),
+            Some("[env] [region]".to_string())
+        );
+        // One arg typed consumes the first declared name.
+        state.prompt_text = "/deploy prod ".to_string();
+        assert_eq!(state.prompt_argument_hint(), Some("[region]".to_string()));
     }
 }

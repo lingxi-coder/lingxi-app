@@ -1248,6 +1248,13 @@ pub async fn build(
     // the `tasks` leaf reaches `orch.hooks` without a dependency cycle.
     .with_task_completed_firer(Arc::new(
         orchestrator::OrchestratorTaskCompletedFirer::new(hooks.clone(), cwd.clone()),
+    ))
+    // Fire the `TaskCreated` hook (claude-code `executeTaskCreatedHooks`) when a
+    // task is created. Counterpart to the `TaskCompleted` firer above — wraps
+    // the SAME `Arc<HookExecutorImpl>` so the `tasks` leaf reaches `orch.hooks`
+    // without a dependency cycle.
+    .with_task_created_firer(Arc::new(
+        orchestrator::OrchestratorTaskCreatedFirer::new(hooks.clone(), cwd.clone()),
     ));
     // Register the M2 self-contained per-type handlers (LocalBash + MonitorMcp)
     // before the registry is shared. Both depend only on platform traits we

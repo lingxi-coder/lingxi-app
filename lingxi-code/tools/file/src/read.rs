@@ -32,8 +32,78 @@ use tool_api::BuiltinToolContext;
 /// Maximum file size FileReadTool will load. Spec §7 lock (256 KB).
 pub const MAX_FILE_READ_SIZE: u64 = 262_144;
 
+/// Default per-read output token budget — byte-locked to claude-code
+/// `DEFAULT_MAX_OUTPUT_TOKENS` (`FileReadTool/limits.ts:18`). A full text read
+/// whose estimated token count exceeds this errors with
+/// [`format_max_tokens_exceeded`]. LingXi has no GrowthBook / env override and
+/// `ToolUseContext` carries no `fileReadingLimits`, so the effective budget is
+/// always this default (the `tengu_amber_wren` GB override + the
+/// `CLAUDE_CODE_FILE_READ_MAX_OUTPUT_TOKENS` env tier are unported — 3P default).
+pub const DEFAULT_MAX_OUTPUT_TOKENS: u64 = 25_000;
+
 /// Tool name byte-lock — matches claude-code tool registry.
 pub const TOOL_NAME: &str = "Read";
+
+/// Bytes-per-token ratio for the rough local token estimate, keyed by file
+/// extension — 1:1 with `bytesPerTokenForFileType` (`tokenEstimation.ts:215-224`).
+/// Dense JSON has many single-char tokens, so its real ratio is ~2 not 4.
+#[must_use]
+fn bytes_per_token_for_file_type(ext: Option<&str>) -> u64 {
+    match ext {
+        Some("json" | "jsonl" | "jsonc") => 2,
+        _ => 4,
+    }
+}
+
+/// `roughTokenCountEstimationForFileType(content, ext)` — `Math.round(len /
+/// bytesPerToken)` (`tokenEstimation.ts:203-242`). Round-half-up over a
+/// nonnegative byte length is `(len + bpt/2) / bpt`. Uses the UTF-8 byte length
+/// (TS uses the UTF-16 string `.length`); identical for ASCII, the same
+/// convention the microcompact / mcp-output ports already use.
+#[must_use]
+fn rough_token_count_estimation_for_file_type(content: &str, ext: Option<&str>) -> u64 {
+    let bpt = bytes_per_token_for_file_type(ext);
+    u64::try_from(content.len())
+        .unwrap_or(u64::MAX)
+        .saturating_add(bpt / 2)
+        / bpt
+}
+
+/// Build the byte-locked max-tokens-exceeded error — 1:1 with
+/// `MaxFileReadTokenExceededError` (`FileReadTool.ts:175-185`).
+#[must_use]
+pub fn format_max_tokens_exceeded(token_count: u64, max_tokens: u64) -> String {
+    format!(
+        "File content ({token_count} tokens) exceeds maximum allowed tokens ({max_tokens}). Use offset and limit parameters to read specific portions of the file, or search for specific content instead of reading the whole file."
+    )
+}
+
+/// Local-estimate token gate — `validateContentTokens(content, ext, maxTokens)`
+/// (`FileReadTool.ts:755-772`). TS computes `tokenEstimate =
+/// roughTokenCountEstimationForFileType(content, ext)`; early-passes when
+/// `!tokenEstimate || tokenEstimate <= maxTokens/4`; otherwise refines with the
+/// count_tokens API as `effectiveCount = apiCount ?? tokenEstimate` and errors
+/// when `effectiveCount > maxTokens`.
+///
+/// The count_tokens API client is not reachable from the tool context, so this
+/// ports TS's own offline fallback exactly: `apiCount` is `None`, hence
+/// `effectiveCount == tokenEstimate`, and the gate errors iff
+/// `tokenEstimate > maxTokens`. The `maxTokens/4` early-pass band still admits
+/// reads in `(maxTokens/4, maxTokens]` (TS would API-refine them, but its
+/// `?? tokenEstimate` fallback also admits them when the API is unavailable),
+/// so behavior is identical to claude-code running offline / on a provider
+/// without count_tokens. Returns the byte-locked error string on overflow.
+fn validate_content_tokens(content: &str, ext: Option<&str>, max_tokens: u64) -> Result<(), String> {
+    let token_estimate = rough_token_count_estimation_for_file_type(content, ext);
+    if token_estimate == 0 || token_estimate <= max_tokens / 4 {
+        return Ok(());
+    }
+    // No reachable count_tokens API → `effectiveCount = tokenEstimate`.
+    if token_estimate > max_tokens {
+        return Err(format_max_tokens_exceeded(token_estimate, max_tokens));
+    }
+    Ok(())
+}
 
 /// Build the byte-locked too-large error message per spec §5.
 #[must_use]
@@ -394,6 +464,25 @@ impl Tool for FileReadTool {
             };
             let model_content = crate::notebook_read::render_cells_model_text(&cells);
 
+            // Serialized cells JSON — TS's `cellsJson = jsonStringify(cells)`
+            // (`FileReadTool.ts:824`). One serialization, reused for both the
+            // token gate and the registry entry (matches TS's single `cellsJson`).
+            let cells_json = serde_json::to_string(&cells).unwrap_or_default();
+
+            // Token-budget gate on the cells JSON — TS runs
+            // `validateContentTokens(cellsJson, ext, maxTokens)`
+            // (`FileReadTool.ts:838`) on the notebook path too, after the
+            // byte-size check and before recording state. `ext` is `"ipynb"`
+            // (bytesPerToken 4). The Notebook byte-size cap (`cellsJsonBytes >
+            // maxSizeBytes`, FileReadTool.ts:827) is a separate pre-existing
+            // gap not in scope here.
+            if let Err(msg) =
+                validate_content_tokens(&cells_json, Some("ipynb"), DEFAULT_MAX_OUTPUT_TOKENS)
+            {
+                self.emit_failed(&invocation_id, "max_tokens_exceeded").await;
+                return Err(ToolError::Io(msg));
+            }
+
             let duration_ms = started.elapsed().as_millis() as u64;
             self.emit_completed(&invocation_id, bytes.len() as u64, duration_ms)
                 .await;
@@ -406,7 +495,6 @@ impl Tool for FileReadTool {
             // as the verbatim (un-defaulted) input — `None` for a full read —
             // matching `read.rs`'s text path. The stored `content` is the
             // cells JSON (so a same-range re-read dedups byte-for-byte).
-            let cells_json = serde_json::to_string(&cells).unwrap_or_default();
             tool_api::read_file_state::set(
                 &self.ctx.read_file_state,
                 canon.clone(),
@@ -457,6 +545,19 @@ impl Tool for FileReadTool {
         let slice: String = all_lines[start_idx..end_idx].concat();
         let line_range_start = offset;
         let line_range_end = end_idx as u64;
+
+        // Token-budget gate — `validateContentTokens(content, ext, maxTokens)`
+        // (`FileReadTool.ts:1030`). Runs on the range-limited slice, BEFORE the
+        // success/state side-effects, so an over-budget read throws (TS) /
+        // errors (Rust) with no completed event and nothing recorded. `ext` is
+        // the lowercased extension without the dot (TS `path.extname(...).
+        // slice(1)`). LingXi has no `fileReadingLimits`, so the budget is the
+        // default. See [`validate_content_tokens`] for the offline-fallback
+        // mapping of TS's count_tokens API refinement.
+        if let Err(msg) = validate_content_tokens(&slice, ext.as_deref(), DEFAULT_MAX_OUTPUT_TOKENS) {
+            self.emit_failed(&invocation_id, "max_tokens_exceeded").await;
+            return Err(ToolError::Io(msg));
+        }
 
         let duration_ms = started.elapsed().as_millis() as u64;
         self.emit_completed(&invocation_id, bytes.len() as u64, duration_ms)
@@ -1210,6 +1311,128 @@ mod tests {
         // Real content returned (the write entry is not a dedup candidate).
         assert_eq!(result.data["content"], "seed\n");
         assert!(result.data.get("type").is_none());
+    }
+
+    // ───────────────────────── Token-budget gate ────────────────────────────
+
+    #[test]
+    fn rough_token_estimate_byte_locked() {
+        // Round-half-up over byte length, bpt=4 for non-json: (len+2)/4.
+        assert_eq!(rough_token_count_estimation_for_file_type("", None), 0);
+        assert_eq!(rough_token_count_estimation_for_file_type("ab", None), 1); // (2+2)/4
+        assert_eq!(
+            rough_token_count_estimation_for_file_type(&"a".repeat(100_000), None),
+            25_000
+        );
+        // json/jsonl/jsonc use bpt=2 (denser tokens): (len+1)/2.
+        assert_eq!(bytes_per_token_for_file_type(Some("json")), 2);
+        assert_eq!(bytes_per_token_for_file_type(Some("jsonl")), 2);
+        assert_eq!(bytes_per_token_for_file_type(Some("jsonc")), 2);
+        assert_eq!(bytes_per_token_for_file_type(Some("txt")), 4);
+        assert_eq!(bytes_per_token_for_file_type(None), 4);
+        assert_eq!(
+            rough_token_count_estimation_for_file_type(&"a".repeat(50_000), Some("json")),
+            25_000
+        );
+    }
+
+    #[test]
+    fn max_tokens_message_byte_locked() {
+        assert_eq!(
+            format_max_tokens_exceeded(30_000, 25_000),
+            "File content (30000 tokens) exceeds maximum allowed tokens (25000). Use offset and limit parameters to read specific portions of the file, or search for specific content instead of reading the whole file."
+        );
+        assert_eq!(DEFAULT_MAX_OUTPUT_TOKENS, 25_000);
+    }
+
+    #[test]
+    fn validate_content_tokens_gate_behavior() {
+        // Below maxTokens/4 (6250) → early pass.
+        assert!(validate_content_tokens(&"a".repeat(1_000), None, 25_000).is_ok());
+        // In the (maxTokens/4, maxTokens] band → passes (offline API fallback
+        // admits it: effectiveCount == estimate <= maxTokens).
+        // 80_000 bytes / 4 = 20_000 tokens (> 6250, <= 25000).
+        assert!(validate_content_tokens(&"a".repeat(80_000), None, 25_000).is_ok());
+        // Above maxTokens → error. 100_004 bytes / 4 = 25_001 > 25_000.
+        assert!(validate_content_tokens(&"a".repeat(100_004), None, 25_000).is_err());
+        // json density: 50_002 bytes / 2 = 25_001 > 25_000 → error.
+        assert!(validate_content_tokens(&"a".repeat(50_002), Some("json"), 25_000).is_err());
+    }
+
+    #[tokio::test]
+    async fn full_read_over_token_budget_errors() {
+        // A full read whose estimated tokens exceed DEFAULT_MAX_OUTPUT_TOKENS
+        // (25000) but stay under the 256KB byte cap must error with the
+        // byte-locked max-tokens message — and emit read_failed, not completed.
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("dense.txt");
+        // ~120 KB of ASCII (under 256KB), estimate 120000/4 = 30000 > 25000.
+        let body = "x".repeat(120_000);
+        std::fs::write(&target, &body).unwrap();
+        let (ctx, sink) = make_ctx(&tmp);
+        ctx.bus.attach_sink(sink.clone()).await;
+        let tool = FileReadTool::new(ctx);
+        let err = tool
+            .call(
+                json!({ "file_path": target.to_str().unwrap() }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("exceeds maximum allowed tokens (25000)"),
+            "got: {msg}"
+        );
+        let events = sink.events().await;
+        let names: Vec<&str> = events.iter().map(|e| e.name.as_str()).collect();
+        assert!(names.contains(&"tengu_tool_read_failed"));
+        assert!(!names.contains(&"tengu_tool_read_completed"));
+    }
+
+    #[tokio::test]
+    async fn ranged_read_under_token_budget_of_huge_file_passes() {
+        // The gate runs on the range-limited slice, not the whole file. A huge
+        // file read with offset+limit returning a small slice must pass.
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("huge.txt");
+        // > token budget if read whole, but we slice 2 lines.
+        let mut body = String::from("first\nsecond\nthird\n");
+        while body.len() < 120_000 {
+            body.push_str("filler-line\n");
+        }
+        std::fs::write(&target, &body).unwrap();
+        let (ctx, _sink) = make_ctx(&tmp);
+        let tool = FileReadTool::new(ctx);
+        let result = tool
+            .call(
+                json!({ "file_path": target.to_str().unwrap(), "offset": 1, "limit": 2 }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .expect("small slice of a huge file passes the token gate");
+        assert_eq!(result.data["content"], "first\nsecond\n");
+    }
+
+    #[tokio::test]
+    async fn read_under_token_budget_passes() {
+        // A small file is well under the budget — no token error.
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("small.txt");
+        std::fs::write(&target, "hello\nworld\n").unwrap();
+        let (ctx, _sink) = make_ctx(&tmp);
+        let tool = FileReadTool::new(ctx);
+        let result = tool
+            .call(
+                json!({ "file_path": target.to_str().unwrap() }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(result.data["content"], "hello\nworld\n");
     }
 
     #[test]

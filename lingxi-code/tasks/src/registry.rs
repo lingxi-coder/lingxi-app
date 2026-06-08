@@ -45,6 +45,11 @@ pub struct TaskRegistry {
     /// Mirrors the `TeamSpawnSeam` decoupling: the `tasks` leaf cannot reach a
     /// live hook executor, so it calls through this narrow trait instead.
     task_completed_firer: hooks::OptionalTaskCompletedFirer,
+    /// Best-effort seam to fire the `TaskCreated` hook when a task is created.
+    /// Counterpart to [`task_completed_firer`](Self::task_completed_firer):
+    /// `None` (the default) => strict no-op; the orchestrator injects a real
+    /// firer via [`with_task_created_firer`](Self::with_task_created_firer).
+    task_created_firer: hooks::OptionalTaskCreatedFirer,
 }
 
 impl TaskRegistry {
@@ -64,6 +69,7 @@ impl TaskRegistry {
             fs,
             output_manager,
             task_completed_firer: None,
+            task_created_firer: None,
         }
     }
 
@@ -77,6 +83,20 @@ impl TaskRegistry {
         firer: Arc<dyn hooks::TaskCompletedFirer>,
     ) -> Self {
         self.task_completed_firer = Some(firer);
+        self
+    }
+
+    /// Inject the best-effort `TaskCreated` hook firer. Counterpart to
+    /// [`with_task_completed_firer`](Self::with_task_completed_firer): existing
+    /// `new()` callers and tests stay no-op; the composition root threads the
+    /// orchestrator's firer here so creating a task fires the `TaskCreated`
+    /// hook.
+    #[must_use]
+    pub fn with_task_created_firer(
+        mut self,
+        firer: Arc<dyn hooks::TaskCreatedFirer>,
+    ) -> Self {
+        self.task_created_firer = Some(firer);
         self
     }
 
@@ -99,6 +119,9 @@ impl TaskRegistry {
             .allocate(&id)
             .await
             .map_err(|e| TaskError::Io(e.to_string()))?;
+        // Keep a copy of the description for the `TaskCreated` fire below — the
+        // original is moved into `base` here.
+        let description_for_hook = description.clone();
         let base = TaskStateBase {
             id: id.clone(),
             task_type,
@@ -134,7 +157,34 @@ impl TaskRegistry {
             }),
         };
         self.tasks.write().await.insert(id.clone(), state);
+        // Best-effort `TaskCreated` fire (claude-code `executeTaskCreatedHooks`,
+        // fired from `TaskCreateTool`). No-op when no firer is registered.
+        self.fire_task_created(&id, task_type, &description_for_hook).await;
         Ok(id)
+    }
+
+    /// Best-effort `TaskCreated` hook fire for a newly-created task. Runs
+    /// WITHOUT holding the registry lock (callers drop their write guard before
+    /// invoking) so a slow/blocking hook never stalls other task operations.
+    /// No-op when no firer is registered.
+    ///
+    /// Wire payload (`TaskCreatedHookInputSchema`): `task_subject` sources from
+    /// the task's [`TaskType`] taxonomy bucket (the M-surface task state carries
+    /// no distinct `subject` field), `task_description` from `description`.
+    /// `teammate_name` / `team_name` are not stored on the task state, so they
+    /// ride as `None` (the same documented gap as the `TaskCompleted` fire).
+    async fn fire_task_created(&self, task_id: &str, task_type: TaskType, description: &str) {
+        if let Some(firer) = &self.task_created_firer {
+            firer
+                .fire(hooks::TaskCreatedFire {
+                    task_id: task_id.to_string(),
+                    task_subject: format!("{task_type:?}"),
+                    task_description: Some(description.to_string()),
+                    teammate_name: None,
+                    team_name: None,
+                })
+                .await;
+        }
     }
 
     /// Spawn a task by dispatching to its registered per-type handler.
@@ -189,6 +239,9 @@ impl TaskRegistry {
             .allocate(&id)
             .await
             .map_err(|e| TaskError::Io(e.to_string()))?;
+        // Keep a copy of the description for the `TaskCreated` fire below — the
+        // original is moved into `base` here.
+        let description_for_hook = description.clone();
         let base = TaskStateBase {
             id: id.clone(),
             task_type,
@@ -209,6 +262,12 @@ impl TaskRegistry {
         //    to the owning handler (it manages its own runtime task; the
         //    registry holds no `BackgroundTaskHandle` for it).
         self.spawned.write().await.insert(id.clone(), task_type);
+
+        // Best-effort `TaskCreated` fire — the production task-creation path
+        // (alongside `create`'s placeholder path). Both insert a new task row,
+        // so both fire. Runs after the write guards drop. No-op when no firer is
+        // registered.
+        self.fire_task_created(&id, task_type, &description_for_hook).await;
 
         Ok(id)
     }
@@ -1065,5 +1124,106 @@ mod spawn_tests {
             .await
             .expect("transition succeeds even though the firer is a black hole");
         assert_eq!(updated.base().status, TaskStatus::Completed);
+    }
+
+    // ---- TaskCreated hook firer seam ---------------------------------------
+    //
+    // Counterpart to the `TaskCompleted` tests above: a registered firer
+    // receives the byte-faithful fire when a task is created (both the `create`
+    // placeholder path and the `spawn` production path); a registry with NO
+    // firer is a strict no-op.
+
+    /// A fake [`TaskCreatedFirer`] that records every fire it receives.
+    struct RecordingCreatedFirer {
+        fires: StdMutex<Vec<hooks::TaskCreatedFire>>,
+    }
+    impl RecordingCreatedFirer {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                fires: StdMutex::new(Vec::new()),
+            })
+        }
+        fn recorded(&self) -> Vec<hooks::TaskCreatedFire> {
+            self.fires.lock().unwrap().clone()
+        }
+    }
+    #[async_trait]
+    impl hooks::TaskCreatedFirer for RecordingCreatedFirer {
+        async fn fire(&self, fire: hooks::TaskCreatedFire) {
+            self.fires.lock().unwrap().push(fire);
+        }
+    }
+
+    fn registry_with_created_firer() -> (tempfile::TempDir, TaskRegistry, Arc<RecordingCreatedFirer>)
+    {
+        let dir = tempdir().unwrap();
+        let fs: Arc<dyn FileSystem> = Arc::new(InMemoryFs::new());
+        let runtime = Arc::new(MockRuntimeSpawner::default());
+        let out_mgr = Arc::new(crate::output_manager::TaskOutputManager::new(
+            PathBuf::from(dir.path()),
+            fs.clone(),
+        ));
+        let firer = RecordingCreatedFirer::new();
+        let registry =
+            TaskRegistry::new(runtime, fs, out_mgr).with_task_created_firer(firer.clone());
+        (dir, registry, firer)
+    }
+
+    #[tokio::test]
+    async fn create_fires_byte_faithful_task_created_payload() {
+        let (_d, registry, firer) = registry_with_created_firer();
+
+        let task_id = registry
+            .create(TaskType::LocalBash, teammate_input(), "do the work".into())
+            .await
+            .unwrap();
+
+        let recorded = firer.recorded();
+        assert_eq!(recorded.len(), 1, "exactly one TaskCreated fire: {recorded:?}");
+        let f = &recorded[0];
+        assert_eq!(f.task_id, task_id);
+        // Wire payload (`TaskCreatedHookInputSchema`): subject sources from the
+        // task-type taxonomy bucket; description from the create description.
+        assert_eq!(f.task_subject, "LocalBash");
+        assert_eq!(f.task_description.as_deref(), Some("do the work"));
+        // teammate/team are not stored on the M-surface task state => None.
+        assert_eq!(f.teammate_name, None);
+        assert_eq!(f.team_name, None);
+    }
+
+    #[tokio::test]
+    async fn spawn_also_fires_task_created() {
+        // The production task-creation path (`spawn`) inserts a new task row, so
+        // it fires `TaskCreated` too — not just the `create` placeholder path.
+        let (_d, mut registry, firer) = registry_with_created_firer();
+        let handler = RecordingHandler::new(TaskType::InProcessTeammate, "tspawnhook");
+        registry.register_handler(TaskType::InProcessTeammate, handler);
+
+        let task_id = registry
+            .spawn(
+                TaskType::InProcessTeammate,
+                teammate_input(),
+                "a teammate".into(),
+            )
+            .await
+            .unwrap();
+
+        let recorded = firer.recorded();
+        assert_eq!(recorded.len(), 1, "spawn fires TaskCreated: {recorded:?}");
+        assert_eq!(recorded[0].task_id, task_id);
+        assert_eq!(recorded[0].task_subject, "InProcessTeammate");
+        assert_eq!(recorded[0].task_description.as_deref(), Some("a teammate"));
+    }
+
+    #[tokio::test]
+    async fn no_created_firer_registered_is_a_noop() {
+        // The default registry holds no firer: creating a task must still
+        // succeed and simply not fire anything (the strict no-op contract).
+        let (_d, registry) = make_registry();
+        let task_id = registry
+            .create(TaskType::LocalBash, teammate_input(), "no firer".into())
+            .await
+            .expect("create succeeds with no firer registered");
+        assert!(!task_id.is_empty());
     }
 }

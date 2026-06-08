@@ -22,14 +22,16 @@ use crate::hook_payload::{
     HookEventNamePostToolUseFailure, HookEventNamePre, HookEventNamePreCompact,
     HookEventNameSessionEnd, HookEventNameSessionStart, HookEventNameSetup, HookEventNameStop,
     HookEventNameStopFailure, HookEventNameSubagentStart, HookEventNameSubagentStop,
-    HookEventNameTaskCompleted, HookEventNameTaskCreated, HookEventNameUserPromptSubmit,
+    HookEventNameTaskCompleted, HookEventNameTaskCreated, HookEventNameTeammateIdle,
+    HookEventNameUserPromptSubmit,
     HookEventNameWorktreeCreate,
     HookEventNameWorktreeRemove, InstructionsLoadedPayload, NotificationPayload,
     PermissionDeniedPayload, PermissionRequestPayload, PostCompactPayload,
     PostToolUseFailurePayload, PostToolUsePayload,
     PreCompactPayload, PreToolUsePayload, SessionEndPayload, SessionStartPayload, SetupPayload,
     StopFailurePayload, StopPayload, SubagentStartPayload, SubagentStopPayload,
-    TaskCompletedPayload, TaskCreatedPayload, UserPromptSubmitPayload, WorktreeCreatePayload,
+    TaskCompletedPayload, TaskCreatedPayload, TeammateIdlePayload, UserPromptSubmitPayload,
+    WorktreeCreatePayload,
     WorktreeRemovePayload,
 };
 use crate::http_executor::{HttpExecutionSignal, HttpExecutor};
@@ -1108,6 +1110,30 @@ fn build_lifecycle_envelope_body(
                 name: name.clone(),
             };
             Some(("WorktreeCreate", serde_json::to_string(&payload).ok()?))
+        }
+        // `executeTeammateIdleHooks` (`utils/hooks.ts:3716-3720`): the wire
+        // payload carries `teammate_name` + `team_name` (BOTH required strings).
+        // Unlike `ConfigChange` / `InstructionsLoaded` / `WorktreeCreate`, this
+        // fires through `createBaseHookInput(permissionMode)` (the `permissionMode`
+        // threaded from `stopHooks.ts`), so it emits `permission_mode` — same as
+        // `Elicitation`. claude-code sources `team_name` from `getTeamName() ?? ''`,
+        // so a `""` here is faithful when the firing scope has no team identity.
+        HookEvent::TeammateIdle {
+            teammate_name,
+            team_name,
+        } => {
+            let payload = TeammateIdlePayload {
+                hook_event_name: HookEventNameTeammateIdle,
+                session_id: b.session_id,
+                transcript_path: b.transcript_path,
+                cwd: b.cwd,
+                permission_mode: b.permission_mode,
+                agent_id: b.agent_id,
+                agent_type: b.agent_type,
+                teammate_name: teammate_name.clone(),
+                team_name: team_name.clone(),
+            };
+            Some(("TeammateIdle", serde_json::to_string(&payload).ok()?))
         }
         _ => None,
     }
@@ -2198,21 +2224,18 @@ mod command_arm_tests {
         // The deferred-completion batch ported the final four events that lacked
         // a field to source a *required* wire value; the hook-firing batch then
         // ported `PermissionDenied` (extending its `HookEvent` variant with
-        // `tool_input` / `tool_use_id`), and the lifecycle-firing batch ported
+        // `tool_input` / `tool_use_id`), the lifecycle-firing batch ported
         // `TaskCreated` (fired through the `TaskCreatedFirer` seam, mirroring
-        // `TaskCompleted`). The events still without a ported wire schema
-        // (`TeammateIdle` / `ElicitationResult`) must continue to fall through
-        // to `None` until their schema is ported.
+        // `TaskCompleted`), and the teammate-idle batch ported `TeammateIdle`
+        // (extending its variant with `teammate_name` / `team_name`, fired
+        // through the `TeammateIdleFirer` seam). The only event still without a
+        // ported wire schema (`ElicitationResult`) must continue to fall through
+        // to `None` until its schema is ported.
         let ctx = HookContext::default();
-        let unported = vec![
-            HookEvent::TeammateIdle {
-                agent_id: protocol::AgentId::new(),
-            },
-            HookEvent::ElicitationResult {
-                server_name: "srv".into(),
-                result: json!({}),
-            },
-        ];
+        let unported = vec![HookEvent::ElicitationResult {
+            server_name: "srv".into(),
+            result: json!({}),
+        }];
         for ev in unported {
             assert!(
                 build_envelope_body(&ev, &ctx).is_none(),
@@ -2255,6 +2278,13 @@ mod command_arm_tests {
                     description: "do the work".into(),
                 },
                 "TaskCreated",
+            ),
+            (
+                HookEvent::TeammateIdle {
+                    teammate_name: "buddy".into(),
+                    team_name: "alpha".into(),
+                },
+                "TeammateIdle",
             ),
             (
                 HookEvent::UserPromptSubmit { prompt: "p".into() },

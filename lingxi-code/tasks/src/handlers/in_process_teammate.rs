@@ -136,6 +136,14 @@ pub struct InProcessTeammateHandler {
     default_model: Option<String>,
     /// Terminal-status sink (same seam as `LocalBashHandler`).
     status_sink: Arc<dyn TaskStatusSink>,
+    /// Best-effort seam to fire the `TeammateIdle` hook each time the persistent
+    /// runner finishes a turn-set and the teammate is about to park awaiting the
+    /// next message ("about to go idle"). `None` (the default) => strict no-op;
+    /// the orchestrator injects a real firer via
+    /// [`with_teammate_idle_firer`](Self::with_teammate_idle_firer). Mirrors the
+    /// `TaskStatusSink` decoupling: the `tasks` leaf cannot reach a live hook
+    /// executor, so it calls through this narrow trait instead.
+    teammate_idle_firer: hooks::OptionalTeammateIdleFirer,
     /// `task_id` → control block, so `send_message` / `kill` can find the slot.
     entries: Arc<Mutex<HashMap<String, TeammateEntry>>>,
 }
@@ -159,6 +167,7 @@ impl InProcessTeammateHandler {
             definitions: Arc::new(DefaultTeammateDefinition),
             default_model: None,
             status_sink: Arc::new(NoopStatusSink),
+            teammate_idle_firer: None,
             entries: Arc::new(Mutex::new(HashMap::new())),
         }
     }
@@ -192,6 +201,21 @@ impl InProcessTeammateHandler {
     #[must_use]
     pub fn with_status_sink(mut self, sink: Arc<dyn TaskStatusSink>) -> Self {
         self.status_sink = sink;
+        self
+    }
+
+    /// Inject the best-effort `TeammateIdle` hook firer. Default-`None` builder
+    /// (the firer-seam pattern): existing constructors and tests stay no-op; the
+    /// composition root threads the orchestrator's firer here so each completed
+    /// turn-set (the teammate parking awaiting the next message) fires the
+    /// `TeammateIdle` hook — claude-code `executeTeammateIdleHooks`
+    /// (`stopHooks.ts:403`).
+    #[must_use]
+    pub fn with_teammate_idle_firer(
+        mut self,
+        firer: Arc<dyn hooks::TeammateIdleFirer>,
+    ) -> Self {
+        self.teammate_idle_firer = Some(firer);
         self
     }
 
@@ -285,6 +309,20 @@ fn terminal_status(ev: &SubagentEvent) -> Option<TaskStatus> {
     }
 }
 
+/// Whether `ev` marks the teammate "about to go idle" — i.e. a turn-set finished
+/// and the persistent runner is about to park awaiting the next message.
+///
+/// This is the Rust analogue of claude-code's `isTeammate()`-gated
+/// `executeTeammateIdleHooks` fire (`stopHooks.ts:403`), which runs after the
+/// teammate's query loop stops. A persistent teammate emits exactly one
+/// `Completed` at the end of *every* turn-set yet keeps running (it is NOT
+/// terminal here — see [`terminal_status`]), so `Completed` is precisely the
+/// idle moment. `Failed` / `Killed` are terminal (the teammate ends, it does not
+/// idle), and `Progress` / `Message` are mid-turn, so none of them are idle.
+fn is_idle_event(ev: &SubagentEvent) -> bool {
+    matches!(ev, SubagentEvent::Completed { .. })
+}
+
 #[async_trait]
 impl Task for InProcessTeammateHandler {
     fn name(&self) -> &str {
@@ -344,6 +382,13 @@ impl Task for InProcessTeammateHandler {
         let stop_loop = stop.clone();
         let fs = ctx.fs.clone();
         let status_sink = self.status_sink.clone();
+        // Best-effort `TeammateIdle` firer + the teammate name it carries. The
+        // team_name is not reachable from this leaf scope (it lives on the
+        // coordinator's TeamRegistry), so it rides as `""` — faithful to
+        // claude-code's `getTeamName() ?? ''` fallback and the same documented
+        // leaf-scope gap as the `TaskCompleted` `team_name`.
+        let idle_firer = self.teammate_idle_firer.clone();
+        let idle_name = name.clone();
         let worker_task_id = task_id.clone();
         let worker = Box::pin(async move {
             status_sink
@@ -359,6 +404,21 @@ impl Task for InProcessTeammateHandler {
                         target: "lingxi_tasks::in_process_teammate",
                         spool, error = %e, "spool append failed"
                     );
+                }
+                // A completed (but non-terminal) turn-set is the "about to go
+                // idle" moment: the runner is about to park awaiting the next
+                // message. Fire the `TeammateIdle` hook best-effort — claude-code
+                // `executeTeammateIdleHooks` (`stopHooks.ts:403`). No firer wired
+                // => no-op (byte-identical to the pre-firer build).
+                if is_idle_event(&ev) {
+                    if let Some(firer) = &idle_firer {
+                        firer
+                            .fire(hooks::TeammateIdleFire {
+                                teammate_name: idle_name.clone(),
+                                team_name: String::new(),
+                            })
+                            .await;
+                    }
                 }
                 if let Some(status) = terminal_status(&ev) {
                     // Failed / Killed end the teammate; a per-turn-set Completed
@@ -644,6 +704,26 @@ mod tests {
     impl RecordingSink {
         fn last_status(&self) -> Option<TaskStatus> {
             self.statuses.lock().unwrap().last().map(|(_, s)| *s)
+        }
+    }
+
+    // ---- Recording TeammateIdle firer --------------------------------------
+
+    /// A [`hooks::TeammateIdleFirer`] that records every fire it receives, so a
+    /// test can assert the per-turn-set idle moment fired with the right payload.
+    #[derive(Default)]
+    struct RecordingIdleFirer {
+        fires: StdMutex<Vec<hooks::TeammateIdleFire>>,
+    }
+    #[async_trait]
+    impl hooks::TeammateIdleFirer for RecordingIdleFirer {
+        async fn fire(&self, fire: hooks::TeammateIdleFire) {
+            self.fires.lock().unwrap().push(fire);
+        }
+    }
+    impl RecordingIdleFirer {
+        fn fires(&self) -> Vec<hooks::TeammateIdleFire> {
+            self.fires.lock().unwrap().clone()
         }
     }
 
@@ -968,5 +1048,139 @@ mod tests {
             matches!(err, TaskError::TerminatedTask),
             "send to a terminated runner maps to TerminatedTask; got {err:?}"
         );
+    }
+
+    /// Like [`make_handler`] but attaches a [`RecordingIdleFirer`] (plus a
+    /// `RecordingSink`) so a test can observe the per-turn-set `TeammateIdle`
+    /// fire.
+    fn make_handler_with_idle_firer(
+        api: Arc<ScriptedApiClient>,
+    ) -> (
+        tempfile::TempDir,
+        Arc<dyn FileSystem>,
+        Arc<MockRuntimeSpawner>,
+        InProcessTeammateHandler,
+        Arc<RecordingIdleFirer>,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let fs: Arc<dyn FileSystem> = Arc::new(InMemoryFs::new());
+        let runtime = Arc::new(MockRuntimeSpawner::default());
+        let output = Arc::new(TaskOutputManager::new(
+            PathBuf::from(dir.path()),
+            fs.clone(),
+        ));
+        let pool = Arc::new(StateMachinePool::new(
+            runtime.clone() as Arc<dyn RuntimeSpawner>,
+            8,
+        ));
+        let firer = Arc::new(RecordingIdleFirer::default());
+        let handler = InProcessTeammateHandler::new(pool, output, api)
+            .with_teammate_idle_firer(firer.clone() as Arc<dyn hooks::TeammateIdleFirer>);
+        (dir, fs, runtime, handler, firer)
+    }
+
+    /// Yield until the firer has recorded at least `n` fires, or the budget runs
+    /// out. Returns the recorded fires.
+    async fn await_fires(
+        firer: &Arc<RecordingIdleFirer>,
+        n: usize,
+    ) -> Vec<hooks::TeammateIdleFire> {
+        for _ in 0..400 {
+            let fires = firer.fires();
+            if fires.len() >= n {
+                return fires;
+            }
+            tokio::task::yield_now().await;
+        }
+        firer.fires()
+    }
+
+    /// A wired `TeammateIdleFirer` receives one fire per completed turn-set —
+    /// the "about to go idle" moment — carrying the teammate name (and `""`
+    /// team_name, the leaf-scope gap). Driving a second turn-set via an injected
+    /// message proves it fires again each time the teammate parks.
+    #[tokio::test]
+    async fn completed_turn_set_fires_teammate_idle_hook() {
+        let api = ScriptedApiClient::new(vec!["answer one", "answer two"]);
+        let (dir, fs, rt, handler, firer) = make_handler_with_idle_firer(api);
+        let c = ctx(fs.clone(), rt.clone());
+
+        let h = handler
+            .spawn(
+                TaskSpawnInput::InProcessTeammate {
+                    agent_id: protocol::AgentId::new(),
+                    name: "buddy".into(),
+                },
+                c.clone(),
+            )
+            .await
+            .unwrap();
+
+        let spool = dir.path().join(format!("{}.txt", h.task_id));
+        let spool_str = spool.to_str().unwrap().to_string();
+
+        // Turn-set 1 completes → exactly one idle fire so far.
+        await_spool(&fs, &spool_str, |b| b.contains("answer one")).await;
+        let fires = await_fires(&firer, 1).await;
+        assert_eq!(fires.len(), 1, "one idle fire after turn-set 1: {fires:?}");
+        assert_eq!(fires[0].teammate_name, "buddy", "carries the teammate name");
+        assert_eq!(
+            fires[0].team_name, "",
+            "team_name is empty at the leaf scope (no team identity reachable)"
+        );
+
+        // Inject a message → drives turn-set 2, which parks again → a 2nd fire.
+        handler
+            .send_message(&h.task_id, "follow-up".into(), c.clone())
+            .await
+            .unwrap();
+        await_spool(&fs, &spool_str, |b| b.contains("answer two")).await;
+        let fires = await_fires(&firer, 2).await;
+        assert_eq!(fires.len(), 2, "a fire per completed turn-set: {fires:?}");
+
+        handler.kill(&h.task_id, c).await.unwrap();
+    }
+
+    /// With NO firer wired (the default), a completed turn-set is a strict no-op
+    /// on the hook path: the teammate still runs and parks normally (the spool
+    /// shows the turn-set), proving the fire is purely additive and absent.
+    #[tokio::test]
+    async fn no_idle_firer_is_a_noop() {
+        let api = ScriptedApiClient::new(vec!["answer one"]);
+        // make_handler builds the handler WITHOUT a teammate idle firer.
+        let (dir, fs, rt, handler) = make_handler(api);
+        let c = ctx(fs.clone(), rt.clone());
+
+        let h = handler
+            .spawn(
+                TaskSpawnInput::InProcessTeammate {
+                    agent_id: protocol::AgentId::new(),
+                    name: "buddy".into(),
+                },
+                c.clone(),
+            )
+            .await
+            .unwrap();
+
+        // The turn-set completes and parks exactly as before — no firer, no
+        // panic, no behavioral change.
+        let spool = dir.path().join(format!("{}.txt", h.task_id));
+        let spool_str = spool.to_str().unwrap().to_string();
+        let body = await_spool(&fs, &spool_str, |b| b.contains("answer one")).await;
+        assert!(body.contains("completed:"), "turn-set still completes: {body:?}");
+
+        handler.kill(&h.task_id, c).await.unwrap();
+    }
+
+    /// `TeammateIdleFire`'s payload maps 1:1 to `HookEvent::TeammateIdle`'s
+    /// wire fields — a guard that the seam's struct stays aligned with the event.
+    #[test]
+    fn idle_fire_payload_shape() {
+        let fire = hooks::TeammateIdleFire {
+            teammate_name: "buddy".into(),
+            team_name: "alpha".into(),
+        };
+        assert_eq!(fire.teammate_name, "buddy");
+        assert_eq!(fire.team_name, "alpha");
     }
 }

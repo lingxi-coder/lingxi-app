@@ -255,10 +255,22 @@ pub enum HookEvent {
         /// Stringified reason for the denial.
         reason: String,
     },
-    /// A teammate (agent) became idle.
+    /// A teammate's query loop stopped and it is about to park awaiting the
+    /// next message ("about to go idle").
+    ///
+    /// Field set mirrors `TeammateIdleHookInputSchema` (`coreSchemas.ts:591-598`)
+    /// so the executor arm can reproduce the wire payload byte-faithfully:
+    /// `teammate_name` (required) + `team_name` (required). claude-code fires
+    /// `executeTeammateIdleHooks` from `stopHooks.ts:403`, gated on
+    /// `isTeammate()`, sourcing `teammate_name` from `getAgentName() ?? ''` and
+    /// `team_name` from `getTeamName() ?? ''` — so `team_name` may be `""` when
+    /// the firing scope cannot reach the team identity.
     TeammateIdle {
-        /// Idle agent.
-        agent_id: AgentId,
+        /// Name of the teammate going idle (wire `teammate_name`, required).
+        teammate_name: String,
+        /// Team the teammate belongs to (wire `team_name`, required; `""` when
+        /// the firing scope has no team identity).
+        team_name: String,
     },
     /// A task was created.
     TaskCreated {

@@ -116,6 +116,7 @@ hook_event_name_marker!(HookEventNameConfigChange, "ConfigChange");
 hook_event_name_marker!(HookEventNameInstructionsLoaded, "InstructionsLoaded");
 hook_event_name_marker!(HookEventNameElicitation, "Elicitation");
 hook_event_name_marker!(HookEventNameWorktreeCreate, "WorktreeCreate");
+hook_event_name_marker!(HookEventNameTeammateIdle, "TeammateIdle");
 
 /// Wire-format `PreToolUse` payload (1:1 with `coreSchemas.ts:414-423`).
 ///
@@ -257,6 +258,33 @@ pub struct TaskCreatedPayload {
     pub teammate_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub team_name: Option<String>,
+}
+
+/// Wire-format `TeammateIdle` payload (1:1 with `coreSchemas.ts:591-598`
+/// `TeammateIdleHookInputSchema`; constructed at `utils/hooks.ts:3716-3720`).
+///
+/// Fired when a teammate's query loop stops and it is about to park awaiting the
+/// next message (claude-code `stopHooks.ts:403`, gated on `isTeammate()`).
+/// `teammate_name` / `team_name` are BOTH required strings in the TS schema
+/// (unlike the `optional` pair on `TaskCompleted` / `TaskCreated`), so they are
+/// non-`Option` here. `team_name` may be `""` when the firing scope cannot reach
+/// the team identity (same documented leaf-scope gap as the `TaskCompleted`
+/// `team_name: None`) — TS itself falls back to `getTeamName() ?? ''`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(missing_docs, reason = "wire-format mirror of claude-code schema")]
+pub struct TeammateIdlePayload {
+    pub hook_event_name: HookEventNameTeammateIdle,
+    pub session_id: String,
+    pub transcript_path: String,
+    pub cwd: String,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub permission_mode: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub agent_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub agent_type: Option<String>,
+    pub teammate_name: String,
+    pub team_name: String,
 }
 
 /// Wire-format `UserPromptSubmit` payload (1:1 with `coreSchemas.ts:484-491`

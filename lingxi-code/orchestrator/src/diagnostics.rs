@@ -183,7 +183,9 @@ fn check_telemetry_schema() -> DoctorCheck {
     //        emit sites) → 330 total. (command_palette_opened/vim_mode_entered/
     //        key_pressed deferred to M8 — no clean/aggregated emit site.)
     // LSP.7b: +6 CronDelete/CronList tool events → 336.
-    let expected = 336;
+    // FileRead analytics: +3 global-tail events (tengu_file_read_dedup/
+    //        session_file_read/file_read_limits_override) → 339.
+    let expected = 339;
     DoctorCheck {
         name: "telemetry-schema".to_string(),
         status: if actual == expected {
@@ -206,7 +208,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn check_telemetry_schema_passes_at_336() {
+    fn check_telemetry_schema_passes_at_339() {
         let c = check_telemetry_schema();
         assert_eq!(c.name, "telemetry-schema");
         assert!(matches!(c.status, CheckStatus::Pass));

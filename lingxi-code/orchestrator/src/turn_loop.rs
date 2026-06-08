@@ -301,10 +301,23 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
     orch.maybe_compact_before_call().await;
 
     // Snapshot the current session history for the API call.
-    let (history_snapshot, model) = {
+    let (mut history_snapshot, model) = {
         let s = orch.session.lock().await;
         (s.history.clone(), s.model.clone())
     };
+
+    // OUTSTYLE.3: per-turn, transient output-style reminder. When a non-default
+    // output style is active, claude-code injects a meta user message into EVERY
+    // turn's model input (the `output_style` attachment). We append it to THIS
+    // call's OUTGOING snapshot only — never to `session.history` / JSONL — so it
+    // is recomputed each turn and never accumulates (TS recomputes attachments
+    // each turn). Trailing position mirrors TS (`[userMessage,
+    // ...attachmentMessages]`). `None` for the default style ⇒ no extra message,
+    // keeping the locked turn-loop fixtures byte-identical. See
+    // [`ConversationOrchestrator::output_style_reminder_message`].
+    if let Some(reminder) = orch.output_style_reminder_message() {
+        history_snapshot.push(reminder);
+    }
 
     // 1. Call the API. Advertise the registry's wire tool definitions
     //    (same set + serialization as the streaming path). Batch 5: the call is

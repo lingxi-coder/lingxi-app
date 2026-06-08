@@ -158,23 +158,28 @@ impl CostTracker {
         is_batch_request: bool,
         bus: Option<&Arc<AnalyticsBus>>,
     ) -> u64 {
+        // Resolve pricing. On a catalog miss we do NOT bill zero: mirroring
+        // claude-code's getModelCosts (`utils/modelCost.ts:155-163`), the
+        // tokens are billed at the DEFAULT_UNKNOWN_MODEL_COST tier ($5/$25,
+        // COST_TIER_5_25) instead of returning 0, and the model is flagged
+        // unknown. The TS path records this via `setHasUnknownModelCost()`;
+        // ours surfaces the model in `state.unpriced_models` (below). That set
+        // is the signal a `/cost` summary renderer would read to append
+        // " (costs may be inaccurate due to usage of unknown models)"
+        // (`cost-tracker.ts:228-233`); no Rust caller renders that string yet,
+        // and the renderer lives outside the cost crate, so the warning is
+        // surfaced there — here we guarantee the non-zero billing + the flag.
         let (pricing, resolution) = match self.catalog.resolve(&model_ref) {
-            Ok(p) => (Some(p.0), Some(p.1)),
-            // Unknown model → cost is 0, and we surface the model in
-            // `state.unpriced_models` so the host can warn. Map `Err` to the
-            // `UnpricedModel` resolution variant so the downstream
-            // `matches!(resolution, Some(UnpricedModel { .. }))` fires.
+            Ok((p, r)) => (p, r),
             Err(_) => (
-                None,
-                Some(PricingResolution::UnpricedModel {
+                PricingCatalog::default_unknown_pricing(&model_ref),
+                PricingResolution::UnpricedModel {
                     requested: model_ref.clone(),
-                }),
+                },
             ),
         };
 
-        let cost = pricing
-            .as_ref()
-            .map_or(0, |p| CostCalculator::calculate_nano_usd(&usage, p));
+        let cost = CostCalculator::calculate_nano_usd(&usage, &pricing);
 
         // ----- update in-memory state -----
         let (session_id, snap) = {
@@ -206,7 +211,7 @@ impl CostTracker {
             entry.cache_creation_input_tokens = entry
                 .cache_creation_input_tokens
                 .saturating_add(cache_creation_input_tokens);
-            if matches!(resolution, Some(PricingResolution::UnpricedModel { .. })) {
+            if matches!(resolution, PricingResolution::UnpricedModel { .. }) {
                 state.unpriced_models.insert(model_ref.clone());
             }
             if let Some(s) = usage.server_tool_use {
@@ -410,10 +415,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn record_v2_unknown_model_records_zero_cost_and_emits() {
-        // Unknown model: cost is 0 but the event still fires (so dashboards
-        // see the call). The model is added to `unpriced_models` per existing
-        // M1/M2 behavior.
+    async fn record_v2_unknown_model_bills_default_tier_and_flags() {
+        // COST.1 parity: an unknown model is NOT billed at zero. Mirroring
+        // claude-code's getModelCosts (`utils/modelCost.ts:155-163`), tokens are
+        // billed at the DEFAULT_UNKNOWN_MODEL_COST tier ($5/$25) and the model
+        // is flagged in `unpriced_models` so the host can surface the inaccuracy
+        // warning. The cost event still fires so dashboards see the call.
         let (tx, mut rx) = mpsc::channel(8);
         let tracker = CostTracker::new(
             SessionId::nil(),
@@ -443,12 +450,17 @@ mod tests {
                 None,
             )
             .await;
+        // 100 * 5_000 + 50 * 25_000 = 500_000 + 1_250_000 = 1_750_000 nano-USD.
         assert_eq!(
-            cost, 0,
-            "unpriced model yields zero cost (existing M1 behavior)"
+            cost, 1_750_000,
+            "unknown model bills at the $5/$25 default tier, not zero"
         );
         let snap = rx.recv().await.unwrap();
-        assert!(snap.unpriced_models.contains(&mr));
+        assert!(
+            snap.unpriced_models.contains(&mr),
+            "unknown model is flagged so the inaccuracy warning can be surfaced"
+        );
+        assert_eq!(snap.total_nano_usd, 1_750_000);
     }
 
     #[tokio::test]

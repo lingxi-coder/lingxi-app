@@ -449,6 +449,7 @@ mod tests {
             uuid,
             title: "First chat".to_string(),
             modified: UNIX_EPOCH + Duration::from_secs(1_609_459_200),
+            created: UNIX_EPOCH + Duration::from_secs(1_609_459_200),
             message_count: 7,
             path: PathBuf::from("/home/u/.claude/sessions/abc.jsonl"),
         };

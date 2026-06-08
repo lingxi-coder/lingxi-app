@@ -20,7 +20,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use traits::FileSystem;
 use uuid::Uuid;
 
-/// Metadata for one resumable session row (uuid + title + mtime + line count).
+/// Metadata for one resumable session row (uuid + title + mtime + created + line count).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionMetadata {
     /// The session UUID parsed from the filename stem.
@@ -29,6 +29,14 @@ pub struct SessionMetadata {
     pub title: String,
     /// File mtime (UTC `SystemTime`).
     pub modified: SystemTime,
+    /// File birthtime / creation time (UTC `SystemTime`) — the parity analog of
+    /// claude-code's `st.birthtime` (`sessionStorage.ts:4559`), used as the
+    /// equal-`modified` tie-break. Captured from [`std::fs::Metadata::created`]
+    /// at load; on platforms where `created()` is unavailable (it returns an
+    /// `Err`) we fall back to [`Self::modified`], so the field is always
+    /// populated and the tie-break degrades to a stable no-op rather than
+    /// panicking.
+    pub created: SystemTime,
     /// Number of JSONL lines in the file.
     pub message_count: usize,
     /// Absolute path to the `.jsonl` file (kept so callers can re-load without re-resolving).
@@ -37,11 +45,13 @@ pub struct SessionMetadata {
 
 impl Ord for SessionMetadata {
     fn cmp(&self, other: &Self) -> Ordering {
-        // Newest-first (mtime desc), tie-break by filename asc.
+        // Newest-first (mtime desc), tie-break by `created` (birthtime) desc.
+        // 1:1 with claude-code `sortLogs` (`types/logs.ts:319-330`): primary
+        // `modified` DESC, then `created` DESC on equal `modified`.
         other
             .modified
             .cmp(&self.modified)
-            .then_with(|| self.path.cmp(&other.path))
+            .then_with(|| other.created.cmp(&self.created))
     }
 }
 
@@ -234,6 +244,13 @@ async fn collect_dir(
             arg: path.display().to_string(),
             source,
         })?;
+        // `created()` is the parity analog of TS `st.birthtime`. Unlike
+        // `modified()` it is NOT available on every platform/filesystem — it
+        // returns `Err` where birthtime is unsupported — so we fall back to
+        // `modified` there (the equal-mtime tie-break then degrades to a stable
+        // no-op rather than failing the whole scan). No new dependency: this is
+        // std-only `std::fs::Metadata::created`.
+        let created = metadata.created().unwrap_or(modified);
 
         // Parse uuid from filename stem; silently skip non-UUID files.
         let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
@@ -277,6 +294,7 @@ async fn collect_dir(
             uuid,
             title,
             modified,
+            created,
             message_count: messages.len(),
             path,
         });
@@ -285,7 +303,7 @@ async fn collect_dir(
 }
 
 /// Resolve the project dir for `cwd` and return up to `limit` most-recently-modified
-/// `.jsonl` files as [`SessionMetadata`] rows, sorted by mtime desc (filename asc on tie).
+/// `.jsonl` files as [`SessionMetadata`] rows, sorted by mtime desc (created/birthtime desc on tie).
 ///
 /// Errors:
 /// - [`LoaderError::EmptyDirectory`] if the project dir doesn't exist OR contains no `.jsonl`.
@@ -950,5 +968,37 @@ mod tests {
             Err(LoaderError::EmptyDirectory) => {}
             other => panic!("expected EmptyDirectory, got {other:?}"),
         }
+    }
+
+    // ---- SESSION.6: equal-mtime tie-break by `created` (birthtime) DESC -----
+
+    #[test]
+    fn ord_tiebreak_prefers_newer_created() {
+        // Equal `modified` → the row with the NEWER `created` (birthtime) sorts
+        // first, mirroring claude-code `sortLogs`'s created-DESC tie-break
+        // (`types/logs.ts:327-328`).
+        let same_mtime = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000);
+        let older = SessionMetadata {
+            uuid: Uuid::from_u128(1),
+            title: "older-created".into(),
+            modified: same_mtime,
+            created: SystemTime::UNIX_EPOCH + Duration::from_secs(100),
+            message_count: 1,
+            path: PathBuf::from("z.jsonl"),
+        };
+        let newer = SessionMetadata {
+            uuid: Uuid::from_u128(2),
+            title: "newer-created".into(),
+            modified: same_mtime,
+            created: SystemTime::UNIX_EPOCH + Duration::from_secs(200),
+            message_count: 1,
+            path: PathBuf::from("a.jsonl"),
+        };
+        // Insert oldest-created first to prove the sort (not insertion order)
+        // drives the result.
+        let mut v = vec![older, newer];
+        v.sort();
+        assert_eq!(v[0].title, "newer-created", "newer birthtime sorts first");
+        assert_eq!(v[1].title, "older-created");
     }
 }

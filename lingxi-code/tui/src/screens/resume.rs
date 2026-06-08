@@ -231,6 +231,7 @@ mod tests {
             uuid: Uuid::nil(),
             title: title.to_string(),
             modified: UNIX_EPOCH + Duration::from_secs(secs),
+            created: UNIX_EPOCH + Duration::from_secs(secs),
             message_count: count,
             path: std::path::PathBuf::from("/tmp/x.jsonl"),
         }

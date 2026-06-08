@@ -15,6 +15,7 @@ fn meta(title: &str, secs: u64, count: usize) -> SessionMetadata {
         uuid: Uuid::nil(),
         title: title.to_string(),
         modified: UNIX_EPOCH + Duration::from_secs(secs),
+        created: UNIX_EPOCH + Duration::from_secs(secs),
         message_count: count,
         path: PathBuf::from("/tmp/x.jsonl"),
     }

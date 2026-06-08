@@ -371,12 +371,16 @@ impl McpRegistry {
 
     /// Drive a single server through the reconnect/backoff schedule.
     ///
-    /// Attempts `connect` up to `self.max_retry_count` times. Between attempts
-    /// the server rests in `Reconnecting { retry_count, next_retry_at }` and
-    /// the task sleeps for `min(INITIAL_BACKOFF * 2^(attempt-1), MAX_BACKOFF)`
-    /// — i.e. 1s, 2s, 4s, 8s, 16s for attempts 1-4 (capped at 30s). On success
-    /// the server is left `Connected` (set by [`Self::connect`]); after the
-    /// final attempt fails it transitions to `Failed { error, attempts }`.
+    /// Attempts `connect` up to `self.max_retry_count` times. The FIRST attempt
+    /// fires immediately (no leading sleep); after a failed NON-final attempt
+    /// the task sleeps `min(INITIAL_BACKOFF * 2^(attempt-1), MAX_BACKOFF)` and
+    /// the final attempt has NO trailing sleep — matching claude-code
+    /// `useManageMCPConnections.ts:372-461`. For the default 5 attempts the
+    /// sleeps are 1s, 2s, 4s, 8s, so attempts fire at t = 0, 1, 3, 7, 15s (the
+    /// 16s/30s-cap value is never used). While waiting, the server rests in
+    /// `Reconnecting { retry_count, next_retry_at }`. On success the server is
+    /// left `Connected` (set by [`Self::connect`]); after the final attempt
+    /// fails it transitions to `Failed { error, attempts }`.
     ///
     /// Aborts without marking `Failed` if the server is concurrently `Stopped`
     /// or its config is flipped to `disabled` (claude-code disabled-mid-wait
@@ -399,8 +403,13 @@ impl McpRegistry {
                 _ => {}
             }
 
-            let backoff = backoff_for(attempt);
-            let next_retry_at = SystemTime::now() + backoff;
+            // `next_retry_at` is the wall-clock time the NEXT attempt would fire
+            // if this one fails; the final attempt has no successor, so it
+            // points at the present.
+            let next_retry_at = match post_attempt_backoff(attempt, max) {
+                Some(backoff) => SystemTime::now() + backoff,
+                None => SystemTime::now(),
+            };
             self.connections.write().await.insert(
                 name.clone(),
                 McpConnectionState::Reconnecting {
@@ -410,8 +419,8 @@ impl McpRegistry {
                 },
             );
 
-            tokio::time::sleep(backoff).await;
-
+            // claude-code runs attempt 1 IMMEDIATELY — there is NO leading
+            // sleep before the first connect (`useManageMCPConnections.ts:372`).
             match self.connect(config.clone()).await {
                 Ok(_) => {
                     tracing::info!(server = %name, attempt, "MCP reconnect succeeded");
@@ -441,6 +450,12 @@ impl McpRegistry {
                         error = %e,
                         "MCP reconnect attempt failed; backing off"
                     );
+                    // Back off ONLY after a failed NON-final attempt; the final
+                    // attempt has no trailing sleep (claude-code schedules the
+                    // *next* retry, never one after the last).
+                    if let Some(backoff) = post_attempt_backoff(attempt, max) {
+                        tokio::time::sleep(backoff).await;
+                    }
                 }
             }
         }
@@ -494,6 +509,120 @@ fn backoff_for(attempt: u32) -> Duration {
     let base = u64::try_from(INITIAL_BACKOFF.as_millis()).unwrap_or(u64::MAX);
     let millis = base.saturating_mul(factor);
     Duration::from_millis(millis).min(MAX_BACKOFF)
+}
+
+/// Backoff to sleep AFTER reconnect `attempt` (1-based) within a run of `max`
+/// attempts, or `None` when no sleep should occur.
+///
+/// Encodes claude-code's schedule (`useManageMCPConnections.ts:446-460`): a
+/// backoff is taken only after a failed NON-final attempt; the final attempt
+/// (`attempt == max`) has no trailing sleep, and — because attempt 1 fires
+/// immediately — there is never a leading sleep. For the default `max == 5`
+/// the sleeps are 1s, 2s, 4s, 8s, so attempts fire at t = 0, 1, 3, 7, 15s; the
+/// 16s / 30s-cap value is therefore never used.
+fn post_attempt_backoff(attempt: u32, max: u32) -> Option<Duration> {
+    if attempt >= max {
+        None
+    } else {
+        Some(backoff_for(attempt))
+    }
+}
+
+#[cfg(test)]
+mod backoff_schedule_tests {
+    //! MCP reconnect backoff schedule parity with claude-code
+    //! `useManageMCPConnections.ts:372-461` (`MAX_RECONNECT_ATTEMPTS = 5`,
+    //! `INITIAL_BACKOFF_MS = 1000`, `MAX_BACKOFF_MS = 30000`).
+    use super::{backoff_for, post_attempt_backoff, INITIAL_BACKOFF, MAX_BACKOFF};
+    use std::time::Duration;
+
+    /// The ordered list of inter-attempt sleeps actually taken during a
+    /// reconnect run of `max` attempts — derived from the same
+    /// [`post_attempt_backoff`] decision the production loop uses.
+    fn sleep_schedule(max: u32) -> Vec<Duration> {
+        (1..=max)
+            .filter_map(|attempt| post_attempt_backoff(attempt, max))
+            .collect()
+    }
+
+    #[test]
+    fn constants_match_claude_code() {
+        assert_eq!(INITIAL_BACKOFF, Duration::from_millis(1000));
+        assert_eq!(MAX_BACKOFF, Duration::from_secs(30));
+    }
+
+    #[test]
+    fn no_leading_sleep_and_no_trailing_sleep_on_final_attempt() {
+        let max = 5;
+        // The final attempt never sleeps afterwards (no trailing sleep).
+        assert_eq!(post_attempt_backoff(max, max), None);
+        // Every non-final attempt sleeps. The first inter-attempt sleep happens
+        // AFTER attempt 1 — the loop calls `connect` before any sleep, so
+        // attempt 1 has no leading sleep.
+        for attempt in 1..max {
+            assert!(
+                post_attempt_backoff(attempt, max).is_some(),
+                "attempt {attempt} of {max} should be followed by a backoff",
+            );
+        }
+        // Exactly `max - 1` sleeps occur across the whole run.
+        assert_eq!(sleep_schedule(max).len(), (max - 1) as usize);
+    }
+
+    #[test]
+    fn schedule_is_1_2_4_8_seconds_and_16s_is_never_slept() {
+        // claude-code sleeps 1s, 2s, 4s, 8s between the 5 attempts. The 16s
+        // value (and the 30s cap) is NEVER used — it would only ever be a
+        // trailing sleep after the final attempt, which does not exist.
+        assert_eq!(
+            sleep_schedule(5),
+            vec![
+                Duration::from_secs(1),
+                Duration::from_secs(2),
+                Duration::from_secs(4),
+                Duration::from_secs(8),
+            ],
+        );
+        assert!(
+            !sleep_schedule(5).contains(&Duration::from_secs(16)),
+            "the 16s backoff (attempt 5) must never be slept",
+        );
+    }
+
+    #[test]
+    fn attempt_fire_times_are_0_1_3_7_15_seconds() {
+        // Cumulative offsets at which each of the 5 attempts fires. Attempt 1
+        // at t = 0 proves there is no leading sleep.
+        let mut fire_times = vec![Duration::ZERO];
+        let mut acc = Duration::ZERO;
+        for s in sleep_schedule(5) {
+            acc += s;
+            fire_times.push(acc);
+        }
+        assert_eq!(
+            fire_times,
+            vec![
+                Duration::from_secs(0),
+                Duration::from_secs(1),
+                Duration::from_secs(3),
+                Duration::from_secs(7),
+                Duration::from_secs(15),
+            ],
+        );
+    }
+
+    #[test]
+    fn backoff_for_is_exponential_and_capped_at_max() {
+        assert_eq!(backoff_for(1), Duration::from_secs(1));
+        assert_eq!(backoff_for(2), Duration::from_secs(2));
+        assert_eq!(backoff_for(3), Duration::from_secs(4));
+        assert_eq!(backoff_for(4), Duration::from_secs(8));
+        assert_eq!(backoff_for(5), Duration::from_secs(16));
+        // 1000 * 2^5 = 32s exceeds the 30s ceiling → clamped.
+        assert_eq!(backoff_for(6), MAX_BACKOFF);
+        // Large attempts saturate at the cap, never overflow.
+        assert_eq!(backoff_for(100), MAX_BACKOFF);
+    }
 }
 
 /// Whether a state's config is flagged `disabled` (mid-reconnect guard).

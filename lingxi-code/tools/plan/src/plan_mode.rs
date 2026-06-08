@@ -76,6 +76,61 @@ Remember: DO NOT write or edit any files yet. This is a read-only exploration an
 const ENTER_PLAN_MODE_AGENT_GUARD_MSG: &str =
     "EnterPlanMode tool cannot be used in agent contexts";
 
+/// Full model-facing tool prompt for `ExitPlanMode` — byte-faithful port of
+/// `EXIT_PLAN_MODE_V2_TOOL_PROMPT` (`ExitPlanModeTool/prompt.ts:6-29`), returned
+/// by `ExitPlanModeV2Tool.ts:154-156`. The TS template interpolates
+/// `${ASK_USER_QUESTION_TOOL_NAME}` (= `"AskUserQuestion"`, prompt.ts:4); that
+/// substitution is inlined here so the text is verbatim what the model sees.
+pub const EXIT_PLAN_MODE_V2_TOOL_PROMPT: &str = r#"Use this tool when you are in plan mode and have finished writing your plan to the plan file and are ready for user approval.
+
+## How This Tool Works
+- You should have already written your plan to the plan file specified in the plan mode system message
+- This tool does NOT take the plan content as a parameter - it will read the plan from the file you wrote
+- This tool simply signals that you're done planning and ready for the user to review and approve
+- The user will see the contents of your plan file when they review it
+
+## When to Use This Tool
+IMPORTANT: Only use this tool when the task requires planning the implementation steps of a task that requires writing code. For research tasks where you're gathering information, searching files, reading files or in general trying to understand the codebase - do NOT use this tool.
+
+## Before Using This Tool
+Ensure your plan is complete and unambiguous:
+- If you have unresolved questions about requirements or approach, use AskUserQuestion first (in earlier phases)
+- Once your plan is finalized, use THIS tool to request approval
+
+**Important:** Do NOT use AskUserQuestion to ask "Is this plan okay?" or "Should I proceed?" - that's exactly what THIS tool does. ExitPlanMode inherently requests user approval of your plan.
+
+## Examples
+
+1. Initial task: "Search for and understand the implementation of vim mode in the codebase" - Do not use the exit plan mode tool because you are not planning the implementation steps of a task.
+2. Initial task: "Help me implement yank mode for vim" - Use the exit plan mode tool after you have finished planning the implementation steps of the task.
+3. Initial task: "Add a new feature to handle user authentication" - If unsure about auth method (OAuth, JWT, etc.), use AskUserQuestion first, then use exit plan mode tool after clarifying the approach.
+"#;
+
+/// Model-facing approval text emitted by `ExitPlanMode` in an agent context —
+/// byte-faithful port of the `isAgent` branch of
+/// `mapToolResultToToolResultBlockParam` (`ExitPlanModeV2Tool.ts:452-459`).
+const EXIT_PLAN_APPROVED_AGENT_MSG: &str =
+    "User has approved the plan. There is nothing else needed from you now. Please respond with \"ok\"";
+
+/// Model-facing approval text when the plan is empty — byte-faithful port of the
+/// empty-plan branch (`ExitPlanModeV2Tool.ts:461-468`).
+const EXIT_PLAN_APPROVED_EMPTY_MSG: &str =
+    "User has approved exiting plan mode. You can now proceed.";
+
+/// Opening line of the model-facing approval text when a plan is present — port
+/// of the approved branch (`ExitPlanModeV2Tool.ts:481-491`). The TS text also
+/// emits a "Your plan has been saved to: ${filePath}" line plus a refer-back
+/// line; LingXi has no on-disk plan store (`getPlanFilePath` has no Rust home),
+/// so those file-path-dependent lines are omitted rather than inventing a path.
+/// The "## Approved Plan:\n<plan>" section is preserved.
+const EXIT_PLAN_APPROVED_PREFIX: &str =
+    "User has approved your plan. You can now start coding. Start with updating your todo list if applicable";
+
+/// Locked rejection string for calling `ExitPlanMode` outside plan mode —
+/// byte-faithful to `validateInput` (`ExitPlanModeV2Tool.ts:212-216`).
+const EXIT_PLAN_MODE_NOT_IN_PLAN_MODE_MSG: &str =
+    "You are not in plan mode. This tool is only for exiting plan mode after writing a plan. If your plan was already approved, continue with implementation.";
+
 /// Canonical tool name in the registry for `EnterPlanModeTool`.
 pub const ENTER_TOOL_NAME: &str = "EnterPlanMode";
 /// Canonical tool name in the registry for `ExitPlanModeTool`.
@@ -97,7 +152,10 @@ static EMPTY_INPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
 // Mirrors the pre-existing `EMPTY_INPUT_SCHEMA` `once_cell::Lazy` style above;
 // `allow` keeps this batch from adding a net-new pedantic warning while staying
 // consistent with the surrounding code (a `LazyLock` migration is out of scope).
-#[allow(clippy::non_std_lazy_statics)]
+// `unknown_lints` keeps the pinned 1.82 toolchain (whose clippy predates the
+// `non_std_lazy_statics` lint) from erroring on the allow below under `-D warnings`,
+// while newer clippy still honors the allow.
+#[allow(unknown_lints, clippy::non_std_lazy_statics)]
 static EXIT_INPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
     json!({
         "type": "object",
@@ -367,8 +425,9 @@ impl Tool for ExitPlanModeTool {
         "Exit plan mode".into()
     }
     async fn prompt(&self, _: &PromptOptions) -> String {
-        "ExitPlanMode flips the session out of plan mode and emits the literal `[EXIT PLAN MODE]`."
-            .into()
+        // Full multi-section tool prompt (TS `ExitPlanModeV2Tool.ts:154-156`
+        // returning `EXIT_PLAN_MODE_V2_TOOL_PROMPT`), not a one-line stub.
+        EXIT_PLAN_MODE_V2_TOOL_PROMPT.into()
     }
 
     async fn call(
@@ -394,7 +453,7 @@ impl Tool for ExitPlanModeTool {
                 self.emit_failed(&invocation_id, "not_in_plan_mode", dur)
                     .await;
                 return Err(ToolError::InvalidInput(
-                    "ExitPlanMode: session is not in plan mode".into(),
+                    EXIT_PLAN_MODE_NOT_IN_PLAN_MODE_MSG.into(),
                 ));
             }
             guard.plan_mode = false;
@@ -411,6 +470,23 @@ impl Tool for ExitPlanModeTool {
         let plan = input.get("plan").cloned().unwrap_or(Value::Null);
         let allowed_prompts = input.get("allowedPrompts").cloned().unwrap_or(Value::Null);
 
+        // Model-facing prose, mirroring TS `mapToolResultToToolResultBlockParam`
+        // (`ExitPlanModeV2Tool.ts:419-492`). Without this the orchestrator
+        // (`turn_loop.rs` `tool_result_to_model_text`) would JSON-dump the whole
+        // `data` object to the model. Branch order matches TS: agent context →
+        // empty plan → approved plan. (TS' `awaitingLeaderApproval` teammate
+        // branch has no Rust substrate and is not represented.)
+        let model_content = if is_agent {
+            EXIT_PLAN_APPROVED_AGENT_MSG.to_string()
+        } else {
+            let plan_text = plan.as_str().unwrap_or("");
+            if plan_text.trim().is_empty() {
+                EXIT_PLAN_APPROVED_EMPTY_MSG.to_string()
+            } else {
+                format!("{EXIT_PLAN_APPROVED_PREFIX}\n\n## Approved Plan:\n{plan_text}")
+            }
+        };
+
         Ok(ToolCallResult {
             data: json!({
                 "marker": PLAN_MODE_EXIT_MARKER,
@@ -418,6 +494,9 @@ impl Tool for ExitPlanModeTool {
                 "plan": plan,
                 "isAgent": is_agent,
                 "allowedPrompts": allowed_prompts,
+                // Model-facing string preferred by the orchestrator over a JSON
+                // dump of `data` (TS prose parity, EXITPLAN.1).
+                "model_content": model_content,
             }),
             new_messages: Vec::new(),
             context_modifier: None,
@@ -549,6 +628,12 @@ mod tests {
         // No model-supplied plan / agent context → null plan, isAgent false.
         assert_eq!(res.data["plan"], Value::Null);
         assert_eq!(res.data["isAgent"], false);
+        // Empty-plan branch (TS `ExitPlanModeV2Tool.ts:461-468`).
+        assert_eq!(res.data["model_content"], EXIT_PLAN_APPROVED_EMPTY_MSG);
+        assert_eq!(
+            res.data["model_content"],
+            "User has approved exiting plan mode. You can now proceed."
+        );
         assert!(!session.lock().await.plan_mode);
         let names: Vec<String> = sink.events().await.iter().map(|e| e.name.clone()).collect();
         assert!(names.contains(&EXIT_PLAN_MODE_COMPLETED.to_string()));
@@ -590,6 +675,13 @@ mod tests {
             res.data["allowedPrompts"],
             json!([{ "tool": "Bash", "prompt": "run tests" }])
         );
+        // Approved-plan branch (TS `ExitPlanModeV2Tool.ts:481-491`): prefix line
+        // + "## Approved Plan:" + the plan text. File-path lines are omitted
+        // (no on-disk plan store in Rust; no path invented).
+        assert_eq!(
+            res.data["model_content"],
+            "User has approved your plan. You can now start coding. Start with updating your todo list if applicable\n\n## Approved Plan:\nStep 1. Do the thing."
+        );
         assert!(!session.lock().await.plan_mode);
     }
 
@@ -606,6 +698,12 @@ mod tests {
             .expect("exit must succeed in agent context");
         assert_eq!(res.data["isAgent"], true);
         assert_eq!(res.data["plan"], Value::Null);
+        // Agent branch wins over plan state (TS `ExitPlanModeV2Tool.ts:452-459`).
+        assert_eq!(res.data["model_content"], EXIT_PLAN_APPROVED_AGENT_MSG);
+        assert_eq!(
+            res.data["model_content"],
+            "User has approved the plan. There is nothing else needed from you now. Please respond with \"ok\""
+        );
     }
 
     #[tokio::test]
@@ -617,11 +715,75 @@ mod tests {
             .call(json!({}), use_ctx, fresh_tx())
             .await
             .expect_err("exit on fresh session must fail");
+        // Out-of-plan-mode rejection now matches TS `validateInput`
+        // (`ExitPlanModeV2Tool.ts:212-216`).
         assert_eq!(
             format!("{err}"),
-            "invalid input: ExitPlanMode: session is not in plan mode"
+            format!("invalid input: {EXIT_PLAN_MODE_NOT_IN_PLAN_MODE_MSG}")
+        );
+        assert_eq!(
+            format!("{err}"),
+            "invalid input: You are not in plan mode. This tool is only for exiting plan mode after writing a plan. If your plan was already approved, continue with implementation."
         );
         let names: Vec<String> = sink.events().await.iter().map(|e| e.name.clone()).collect();
         assert!(names.contains(&EXIT_PLAN_MODE_FAILED.to_string()));
+    }
+
+    #[tokio::test]
+    async fn exit_prompt_returns_full_ts_tool_prompt() {
+        let (bctx, _sink, _session, _use_ctx) = make_ctx();
+        let tool = ExitPlanModeTool::new(bctx);
+        let prompt = tool
+            .prompt(&PromptOptions {
+                include_examples: true,
+            })
+            .await;
+        // Verbatim port of `EXIT_PLAN_MODE_V2_TOOL_PROMPT` (prompt.ts:6-29).
+        assert_eq!(prompt, EXIT_PLAN_MODE_V2_TOOL_PROMPT);
+        // Multi-section, not the old one-line stub.
+        assert!(prompt.starts_with(
+            "Use this tool when you are in plan mode and have finished writing your plan"
+        ));
+        assert!(prompt.contains("## How This Tool Works"));
+        assert!(prompt.contains("## When to Use This Tool"));
+        assert!(prompt.contains("## Before Using This Tool"));
+        assert!(prompt.contains("## Examples"));
+        // `${ASK_USER_QUESTION_TOOL_NAME}` was interpolated to "AskUserQuestion".
+        assert!(prompt.contains("use AskUserQuestion first (in earlier phases)"));
+        assert!(!prompt.contains("${ASK_USER_QUESTION_TOOL_NAME}"));
+        // Trailing newline preserved from the TS template literal.
+        assert!(prompt.ends_with("after clarifying the approach.\n"));
+    }
+
+    #[test]
+    fn exit_model_content_branch_strings_match_ts() {
+        // Byte-checks against the TS `mapToolResultToToolResultBlockParam` strings.
+        assert_eq!(
+            EXIT_PLAN_APPROVED_AGENT_MSG,
+            "User has approved the plan. There is nothing else needed from you now. Please respond with \"ok\""
+        );
+        assert_eq!(
+            EXIT_PLAN_APPROVED_EMPTY_MSG,
+            "User has approved exiting plan mode. You can now proceed."
+        );
+        assert_eq!(
+            EXIT_PLAN_APPROVED_PREFIX,
+            "User has approved your plan. You can now start coding. Start with updating your todo list if applicable"
+        );
+    }
+
+    #[tokio::test]
+    async fn exit_whitespace_only_plan_uses_empty_branch() {
+        // TS empty-plan guard is `!plan || plan.trim() === ''` — whitespace-only
+        // plan text takes the empty branch, not the approved branch.
+        let (bctx, sink, session, use_ctx) = make_ctx();
+        bctx.bus.attach_sink(sink.clone()).await;
+        session.lock().await.plan_mode = true; // pre-arm
+        let tool = ExitPlanModeTool::new(bctx);
+        let res = tool
+            .call(json!({ "plan": "   \n\t " }), use_ctx, fresh_tx())
+            .await
+            .expect("exit must succeed with whitespace plan");
+        assert_eq!(res.data["model_content"], EXIT_PLAN_APPROVED_EMPTY_MSG);
     }
 }

@@ -1420,10 +1420,16 @@ impl Tool for TaskUpdateTool {
 
 // ==== TaskStopTool ===========================================================
 
-// no-truncation: TaskStop + TaskOutput bound their model-facing output via their
-// own `max_result_size_chars` (100_000) cap — the same value claude-code sets on
-// `maxResultSizeChars` — rather than the shared `MAX_TOOL_OUTPUT_LENGTH`/`truncate`
-// path used by the variable-length file/shell tools.
+// no-truncation: TaskStop emits a small fixed status string and needs no
+// shared `MAX_TOOL_OUTPUT_LENGTH`/`truncate`. TaskOutput deliberately bounds
+// its model-facing `<output>` via `format_task_output` (port of TS
+// `formatTaskOutput`) instead of the shared 30_000-char head-truncate: a
+// 32_000-char default (TASK_MAX_OUTPUT_LENGTH-overridable, clamped at 160_000)
+// that keeps the TAIL behind a `[Truncated …]` header. The
+// `max_result_size_chars` (100_000) value
+// mirrored from claude-code's `maxResultSizeChars` is advisory metadata only —
+// no production consumer enforces it, so it does NOT bound this output; the
+// `format_task_output` cap is what actually bounds the TaskOutput surface.
 
 /// `TaskStopTool` description (`TaskStopTool.ts` `async description()`).
 const TASK_STOP_DESCRIPTION: &str = "Stop a running background task by ID";
@@ -1707,6 +1713,116 @@ static TASK_OUTPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
     })
 });
 
+/// Default cap on the model-facing `<output>` of `TaskOutput`
+/// (`outputFormatting.ts:5` `TASK_MAX_OUTPUT_DEFAULT = 32_000`).
+const TASK_MAX_OUTPUT_DEFAULT: usize = 32_000;
+/// Upper clamp for the `TASK_MAX_OUTPUT_LENGTH` env override
+/// (`outputFormatting.ts:4` `TASK_MAX_OUTPUT_UPPER_LIMIT = 160_000`).
+const TASK_MAX_OUTPUT_UPPER_LIMIT: usize = 160_000;
+
+/// Boolean that also accepts the string literals `"true"`/`"false"` — a port of
+/// the TS `semanticBoolean()` (`utils/semanticBoolean.ts:22-29`) preprocess
+/// step: `"true"`→`true`, `"false"`→`false`; anything else passes through to the
+/// inner schema (here rejected → `None`, so the caller's `default` wins).
+/// Mirrors the in-repo convention in `tools/ui/src/send_message.rs`.
+fn semantic_bool(v: &Value) -> Option<bool> {
+    match v {
+        Value::Bool(b) => Some(*b),
+        Value::String(s) if s == "true" => Some(true),
+        Value::String(s) if s == "false" => Some(false),
+        _ => None,
+    }
+}
+
+/// Port of TS `parseInt(value, 10)`: skip leading ASCII whitespace, take an
+/// optional `+`/`-` sign followed by base-10 digits, stop at the first
+/// non-digit, and ignore the rest. Returns `None` for "NaN" (no leading
+/// digits). Mirrors the parse used inside `validateBoundedIntEnvVar`.
+fn parse_int_radix10(s: &str) -> Option<i128> {
+    let s = s.trim_start_matches([' ', '\t', '\n', '\r', '\u{000B}', '\u{000C}']);
+    let mut chars = s.chars().peekable();
+    let mut buf = String::new();
+    if let Some(&c) = chars.peek() {
+        if c == '+' || c == '-' {
+            buf.push(c);
+            chars.next();
+        }
+    }
+    let mut saw_digit = false;
+    while let Some(&c) = chars.peek() {
+        if c.is_ascii_digit() {
+            buf.push(c);
+            saw_digit = true;
+            chars.next();
+        } else {
+            break;
+        }
+    }
+    if !saw_digit {
+        return None;
+    }
+    // Saturate huge magnitudes rather than failing: a 200-digit string is a
+    // finite (very large) number in JS, which `validateBoundedIntEnvVar` then
+    // caps to the upper limit. `i128::MAX` preserves the "> upper limit" path.
+    Some(buf.parse::<i128>().unwrap_or(i128::MAX))
+}
+
+/// Port of `getMaxTaskOutputLength()` (`outputFormatting.ts:7-15`) over
+/// `validateBoundedIntEnvVar` (`envValidation.ts:9-38`): `TASK_MAX_OUTPUT_LENGTH`
+/// overrides the 32_000 default; an empty / non-positive / unparseable value
+/// falls back to the default; anything above 160_000 is clamped down to it.
+fn max_task_output_length() -> usize {
+    let raw = match std::env::var("TASK_MAX_OUTPUT_LENGTH") {
+        Ok(v) if !v.is_empty() => v,
+        _ => return TASK_MAX_OUTPUT_DEFAULT,
+    };
+    match parse_int_radix10(&raw) {
+        Some(parsed) if parsed > 0 => {
+            if parsed > TASK_MAX_OUTPUT_UPPER_LIMIT as i128 {
+                TASK_MAX_OUTPUT_UPPER_LIMIT
+            } else {
+                parsed as usize
+            }
+        }
+        _ => TASK_MAX_OUTPUT_DEFAULT,
+    }
+}
+
+/// The `[Truncated …]` header path. TS uses `getTaskOutputPath(taskId)`
+/// (`diskOutput.ts:72-74`) = `<projectTempDir>/<sessionId>/tasks/<taskId>.output`.
+///
+/// BLOCKER: the absolute disk path is NOT reachable at this render site —
+/// `TaskRecord` / `TaskOutputChunk` (FROZEN `traits/`) carry no output path, and
+/// `getProjectTempDir()` is not a dependency of this crate. We emit the
+/// deterministic filename portion (`<taskId>.output`) as the closest faithful
+/// header so the truncation behaviour (tail-keep, header prefix) is otherwise
+/// byte-faithful. See the report for the path-threading blocker.
+fn task_output_path(task_id: &str) -> String {
+    format!("{task_id}.output")
+}
+
+/// Port of `formatTaskOutput` (`outputFormatting.ts:22-38`). When the output
+/// length exceeds the (env-overridable) max, prepend a
+/// `[Truncated. Full output: <path>]\n\n` header and keep the LAST
+/// `maxLen - header.length` characters (the tail); otherwise return the output
+/// unchanged.
+///
+/// TS measures `String.length`/`slice` in UTF-16 code units; this port measures
+/// Unicode scalar values (`chars()`), which differ only for astral-plane chars.
+/// For the ASCII/BMP output that task spools carry this is identical.
+fn format_task_output(output: &str, task_id: &str) -> String {
+    let max_len = max_task_output_length();
+    let char_count = output.chars().count();
+    if char_count <= max_len {
+        return output.to_string();
+    }
+    let header = format!("[Truncated. Full output: {}]\n\n", task_output_path(task_id));
+    let available = max_len.saturating_sub(header.chars().count());
+    // TS `output.slice(-availableSpace)` — keep the last `available` chars.
+    let tail: String = output.chars().skip(char_count - available).collect();
+    format!("{header}{tail}")
+}
+
 /// 1:1 port of `TaskOutputTool.tsx`'s `mapToolResultToToolResultBlockParam`
 /// (lines 283-308): the XML render of a `retrieval_status` + optional `task`,
 /// joined by a blank line. Fed to the model verbatim via the `content` key.
@@ -1726,9 +1842,12 @@ fn render_task_output(
         if let Some(code) = t.exit_code {
             parts.push(format!("<exit_code>{code}</exit_code>"));
         }
-        // `<output>` only when the trimmed output is non-blank (TS `output?.trim()`).
+        // `<output>` only when the RAW trimmed output is non-blank (TS
+        // `output?.trim()`), then truncate-and-format and `.trimEnd()` the
+        // result (TS: `formatTaskOutput(output, task_id)` → `content.trimEnd()`).
         if !t.output.trim().is_empty() {
-            parts.push(format!("<output>\n{}\n</output>", t.output.trim_end()));
+            let formatted = format_task_output(&t.output, &t.task_id);
+            parts.push(format!("<output>\n{}\n</output>", formatted.trim_end()));
         }
     }
     parts.join("\n\n")
@@ -1878,8 +1997,11 @@ impl Tool for TaskOutputTool {
         };
 
         // `block` defaults to true (TS `semanticBoolean(z.boolean().default(true))`);
-        // `timeout` defaults to 30000 ms (`z.number().min(0).max(600000).default(30000)`).
-        let block = input.get("block").and_then(Value::as_bool).unwrap_or(true);
+        // string-coerce `"true"`/`"false"` so a quoted `block:"false"` is honoured
+        // (TS `semanticBoolean` preprocess), rather than falling through to the
+        // `true` default. `timeout` defaults to 30000 ms
+        // (`z.number().min(0).max(600000).default(30000)`).
+        let block = input.get("block").and_then(semantic_bool).unwrap_or(true);
         let timeout_ms = input.get("timeout").and_then(Value::as_u64).unwrap_or(30_000);
 
         // Existence check (`TaskOutputTool.tsx:215-218`): `if (!task) throw …`.
@@ -2851,6 +2973,111 @@ mod tests {
                 render_task_output("timeout", None),
                 "<retrieval_status>timeout</retrieval_status>"
             );
+        }
+
+        // ── BASHOUT.3: `block` string coercion (semanticBoolean) ─────────────
+
+        #[test]
+        fn semantic_bool_coerces_string_literals() {
+            assert_eq!(semantic_bool(&json!(true)), Some(true));
+            assert_eq!(semantic_bool(&json!(false)), Some(false));
+            assert_eq!(semantic_bool(&json!("true")), Some(true));
+            assert_eq!(semantic_bool(&json!("false")), Some(false));
+            // Anything else passes through to the inner schema (→ None here).
+            assert_eq!(semantic_bool(&json!("FALSE")), None);
+            assert_eq!(semantic_bool(&json!("maybe")), None);
+            assert_eq!(semantic_bool(&json!(1)), None);
+        }
+
+        #[tokio::test]
+        async fn task_output_block_string_false_is_nonblocking() {
+            // Quoted `block:"false"` must be coerced to `false` (non-blocking),
+            // not fall through to the `true` default. A running task therefore
+            // returns `not_ready` after exactly ONE output read.
+            let reg = MockRegistry::with_record(Some(rec("running")));
+            reg.push_chunk(chunk("running", false, None, ""));
+            let tool = TaskOutputTool::new(bctx(reg.clone()));
+            let res = tool
+                .call(
+                    json!({ "task_id": "b12345678", "block": "false" }),
+                    fresh_ctx(),
+                    fresh_tx(),
+                )
+                .await
+                .expect("ok");
+            assert_eq!(res.data["retrieval_status"], "not_ready");
+            assert_eq!(*reg.output_calls.lock().unwrap(), 1);
+        }
+
+        #[tokio::test]
+        async fn task_output_block_string_true_blocks() {
+            // Quoted `block:"true"` must be coerced to `true` (blocking): the
+            // poll loop runs until the task is terminal.
+            let reg = MockRegistry::with_record(Some(rec("running")));
+            reg.push_chunk(chunk("running", false, None, ""));
+            reg.push_chunk(chunk("running", false, None, ""));
+            reg.push_chunk(chunk("completed", true, Some(0), "final\n"));
+            let tool = TaskOutputTool::new(bctx(reg.clone()));
+            let res = tool
+                .call(
+                    json!({ "task_id": "b12345678", "block": "true", "timeout": 600_000 }),
+                    fresh_ctx(),
+                    fresh_tx(),
+                )
+                .await
+                .expect("ok");
+            assert_eq!(res.data["retrieval_status"], "success");
+            assert_eq!(res.data["task"]["status"], "completed");
+            assert!(*reg.output_calls.lock().unwrap() >= 3);
+        }
+
+        // ── BASHOUT.1: output truncation (formatTaskOutput) ──────────────────
+
+        #[test]
+        fn format_task_output_passthrough_under_limit() {
+            // `output.length <= maxLen` ⇒ returned verbatim, no header.
+            let out = "hello world\nsecond line\n";
+            assert_eq!(format_task_output(out, "b12345678"), out);
+        }
+
+        #[test]
+        fn format_task_output_truncates_tail_over_limit() {
+            let max = max_task_output_length();
+            // Build an output strictly longer than the cap, with a unique marker
+            // at the FRONT (must be dropped) and the END (must be kept).
+            let total = max + 1000;
+            let filler = "A".repeat(total - "HEADMARKER".len() - "TAILEND".len());
+            let out = format!("HEADMARKER{filler}TAILEND");
+            assert_eq!(out.chars().count(), total);
+
+            let formatted = format_task_output(&out, "b12345678");
+            // Header prefix is byte-faithful to TS aside from the (unreachable)
+            // absolute path → deterministic `<taskId>.output` filename.
+            assert!(formatted.starts_with("[Truncated. Full output: b12345678.output]\n\n"));
+            // The leading marker was truncated away; the tail is preserved.
+            assert!(!formatted.contains("HEADMARKER"));
+            assert!(formatted.ends_with("TAILEND"));
+            // header + tail exactly fills `maxLen` chars (TS slice arithmetic).
+            assert_eq!(formatted.chars().count(), max);
+        }
+
+        #[test]
+        fn render_task_output_truncates_large_output() {
+            // Integration: render_task_output threads the raw output through
+            // format_task_output before wrapping in `<output>`.
+            let max = max_task_output_length();
+            let out = format!("{}TAILEND", "B".repeat(max + 500));
+            let view = TaskOutputView {
+                task_id: "b12345678".into(),
+                task_type: "local_bash".into(),
+                status: "completed".into(),
+                description: "echo hi".into(),
+                output: out,
+                exit_code: Some(0),
+            };
+            let rendered = render_task_output("success", Some(&view));
+            assert!(rendered.contains("<output>\n[Truncated. Full output: b12345678.output]\n\n"));
+            assert!(rendered.trim_end().ends_with("TAILEND\n</output>"));
         }
     }
 }

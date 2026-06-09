@@ -138,6 +138,11 @@ fn encode_user(content: &[ContentBlock], id_to_name: &BTreeMap<String, String>) 
                     parts.push(json!({"fileData": {"fileUri": url}}));
                 }
             },
+            ContentBlock::Document { source } => match source {
+                protocol::DocumentSource::Base64 { media_type, data } => {
+                    parts.push(json!({"inlineData": {"mimeType": media_type, "data": data}}));
+                }
+            },
             ContentBlock::Thinking { .. } | ContentBlock::ToolUse { .. } => {}
         }
     }
@@ -157,7 +162,10 @@ fn encode_assistant(content: &[ContentBlock]) -> Option<Value> {
             ContentBlock::ToolUse { name, input, .. } => {
                 parts.push(json!({"functionCall": {"name": name, "args": input}}));
             }
-            ContentBlock::ToolResult { .. } | ContentBlock::Thinking { .. } | ContentBlock::Image { .. } => {}
+            ContentBlock::ToolResult { .. }
+            | ContentBlock::Thinking { .. }
+            | ContentBlock::Image { .. }
+            | ContentBlock::Document { .. } => {}
         }
     }
     if parts.is_empty() {

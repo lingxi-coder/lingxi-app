@@ -59,6 +59,17 @@ fn is_image_path(path: &std::path::Path) -> bool {
     )
 }
 
+/// `.pdf` (compiles with `pdf-read` off). Routes to the document path. Defined
+/// here (not via `pdf_read`) so the gate / routing logic compiles in both
+/// feature states; `pdf_read::is_pdf_path` is the same predicate.
+fn is_pdf_path(path: &std::path::Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+        == Some("pdf")
+}
+
 /// Bytes-per-token ratio for the rough local token estimate, keyed by file
 /// extension — 1:1 with `bytesPerTokenForFileType` (`tokenEstimation.ts:215-224`).
 /// Dense JSON has many single-char tokens, so its real ratio is ~2 not 4.
@@ -495,6 +506,141 @@ impl FileReadTool {
             mcp_meta: None,
         })
     }
+
+    /// Read a PDF as an inline document block (claude-code FileRead PDF path).
+    /// Routing: `pages` ⇒ validate then defer to P4b extraction (error); else
+    /// page-count > 10 ⇒ error; unsupported model OR size > 3MB ⇒ extraction-
+    /// required error; else inline document block on `new_messages`.
+    ///
+    /// The PDF bytes ride on `new_messages` as a `ContentBlock::Document`
+    /// (the frozen tool-result content is text-only); the tool-result text is a
+    /// short placeholder, mirroring [`Self::read_image_result`].
+    #[cfg(feature = "pdf-read")]
+    #[allow(clippy::too_many_arguments)]
+    async fn read_pdf_result(
+        &self,
+        invocation_id: &str,
+        canon: &std::path::Path,
+        bytes: Vec<u8>,
+        original_size: u64,
+        pages: Option<String>,
+        model: &str,
+        started: Instant,
+    ) -> Result<ToolCallResult, ToolError> {
+        use crate::pdf_read::{
+            is_pdf_supported, parse_pdf_page_range, pdf_page_count, PDF_AT_MENTION_INLINE_THRESHOLD,
+            PDF_EXTRACT_SIZE_THRESHOLD, PDF_MAX_PAGES_PER_READ,
+        };
+        use base64::Engine;
+
+        // Reject empty / non-PDF bytes BEFORE any inline document block can enter
+        // history. claude-code (utils/pdf.ts readPDF) guards this deliberately: an
+        // invalid PDF document block POISONS the conversation — every later API
+        // call 400s with "The PDF specified was not valid" until /clear. Without
+        // this, a non-PDF renamed `.pdf` makes `pdf_page_count` return None (skips
+        // the page-count gate) and, if small + supported, inlines garbage.
+        if bytes.is_empty() {
+            self.emit_failed(invocation_id, "pdf_empty").await;
+            return Err(ToolError::Io(format!("PDF file is empty: {}", canon.display())));
+        }
+        if !crate::pdf_read::looks_like_pdf(&bytes) {
+            self.emit_failed(invocation_id, "pdf_invalid").await;
+            return Err(ToolError::Io(format!(
+                "File is not a valid PDF (missing %PDF- header): {}",
+                canon.display()
+            )));
+        }
+
+        // Model comes from the per-call `ToolUseContext` (`ctx.options.
+        // main_loop_model`), the same source the text path uses for the
+        // cyber-risk-mitigation gate. claude-code canonicalizes the model name
+        // before `isPDFSupported`; LingXi compares the raw model id (the same
+        // documented divergence as `MITIGATION_EXEMPT_MODELS`). LingXi's default
+        // models are PDF-capable, so a stray non-canonical id only ever yields
+        // `true` here unless it literally contains `claude-3-haiku`.
+        let supported = is_pdf_supported(model);
+
+        // `pages` parameter ⇒ ranged read. Validate the range and the per-read
+        // page cap, then defer to P4b page-image extraction (not yet available).
+        if let Some(ref p) = pages {
+            let Some((first, last)) = parse_pdf_page_range(p) else {
+                self.emit_failed(invocation_id, "pdf_pages_invalid").await;
+                return Err(ToolError::Io(format!(
+                    "Invalid pages parameter: \"{p}\". Use formats like \"1-5\", \"3\", or \"10-20\". Pages are 1-indexed."
+                )));
+            };
+            // Open-ended `"N-"` ranges are treated as exceeding the cap (TS
+            // resolves the open end against the doc's page count, which can be
+            // any size; conservatively over-cap here so they take the error
+            // path rather than silently uncapped extraction).
+            let range_size = if last == u32::MAX {
+                PDF_MAX_PAGES_PER_READ + 1
+            } else {
+                last - first + 1
+            };
+            if range_size > PDF_MAX_PAGES_PER_READ {
+                self.emit_failed(invocation_id, "pdf_pages_too_many").await;
+                return Err(ToolError::Io(format!(
+                    "Page range \"{p}\" exceeds maximum of {PDF_MAX_PAGES_PER_READ} pages per request. Please use a smaller range."
+                )));
+            }
+            self.emit_failed(invocation_id, "pdf_extraction_unavailable")
+                .await;
+            return Err(ToolError::Io(
+                "Reading specific PDF pages requires page extraction, which is not yet available. Read the whole PDF (omit pages) if it is small.".to_string(),
+            ));
+        }
+
+        // No `pages` ⇒ inline read. A parseable page count > 10 is too many to
+        // read inline (TS: pdfinfo page-count gate; `None` skips the gate,
+        // mirroring pdfinfo returning null).
+        if let Some(count) = pdf_page_count(&bytes) {
+            if count > PDF_AT_MENTION_INLINE_THRESHOLD {
+                self.emit_failed(invocation_id, "pdf_too_many_pages").await;
+                return Err(ToolError::Io(format!(
+                    "This PDF has {count} pages, which is too many to read at once. Use the pages parameter to read specific page ranges (e.g., pages: \"1-5\"). Maximum {PDF_MAX_PAGES_PER_READ} pages per request."
+                )));
+            }
+        }
+
+        // Unsupported model OR oversize ⇒ inline read is refused; the model
+        // must extract specific pages (P4b) or switch models.
+        if !supported || original_size > PDF_EXTRACT_SIZE_THRESHOLD {
+            self.emit_failed(invocation_id, "pdf_extraction_required")
+                .await;
+            return Err(ToolError::Io(
+                "Reading full PDFs is not supported with this model or this file is too large. Use a newer model, or use the pages parameter to read specific page ranges (e.g., pages: \"1-5\", maximum 20 pages per request).".to_string(),
+            ));
+        }
+
+        let data = base64::engine::general_purpose::STANDARD.encode(&bytes);
+        let source = protocol::DocumentSource::Base64 {
+            media_type: "application/pdf".to_string(),
+            data,
+        };
+        let msg = protocol::ConversationMessage::user_with_documents(
+            protocol::MessageId::new(),
+            String::new(),
+            vec![source],
+        );
+        // MIRROR the text/image success path's completion telemetry — the PDF
+        // branch has no line/byte slice counts (`emit_session_file_read` is
+        // text-only), so we emit the simpler completion event with the original
+        // file size as the `bytes_read` figure.
+        self.emit_completed(invocation_id, original_size, started.elapsed().as_millis() as u64)
+            .await;
+        Ok(ToolCallResult {
+            data: serde_json::json!({
+                "type": "pdf",
+                "file_path": canon.display().to_string(),
+                "original_size": original_size,
+                "model_content": format!("PDF file read: {} ({} bytes)", canon.display(), original_size),
+            }),
+            new_messages: vec![msg],
+            context_modifier: None,
+            mcp_meta: None,
+        })
+    }
 }
 
 static INPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
@@ -505,7 +651,8 @@ static INPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
         "properties": {
             "file_path": { "type": "string" },
             "offset": { "type": "integer", "minimum": 0 },
-            "limit":  { "type": "integer", "minimum": 1 }
+            "limit":  { "type": "integer", "minimum": 1 },
+            "pages":  { "type": "string" }
         }
     })
 });
@@ -669,13 +816,19 @@ impl Tool for FileReadTool {
         // extension to readImageWithTokenBudget, bypassing the text size cap).
         let is_image = cfg!(feature = "image-read") && is_image_path(&canon);
 
+        // PDF files route to the document path (claude-code routes by extension
+        // to the PDF reader, which applies its own 3MB extraction gate, not the
+        // 256KB text cap). Gated on the feature so the cap still applies — and
+        // PDFs still hit the binary guard — when `pdf-read` is off.
+        let is_pdf = cfg!(feature = "pdf-read") && is_pdf_path(&canon);
+
         // TS applies the byte cap ONLY when no `limit` is supplied
         // (`readFileInRange(..., limit === undefined ? maxSizeBytes : undefined)`
         // — FileReadTool.ts:1026). A ranged read (offset+limit) of a >256KB file
         // must succeed and return just the requested lines, so the cap is gated
         // on `input_limit.is_none()`. A no-limit oversize read still errors with
         // the byte-locked template (fixture-pinned `error_template`).
-        if !is_image && input_limit.is_none() && size > MAX_FILE_READ_SIZE {
+        if !is_image && !is_pdf && input_limit.is_none() && size > MAX_FILE_READ_SIZE {
             self.emit_failed(&invocation_id, "file_too_large").await;
             return Err(ToolError::Io(format_too_large(&canon, size)));
         }
@@ -692,6 +845,25 @@ impl Tool for FileReadTool {
         if is_image {
             return self
                 .read_image_result(&invocation_id, &canon, bytes, size, started)
+                .await;
+        }
+
+        #[cfg(feature = "pdf-read")]
+        if is_pdf {
+            let pages = input
+                .get("pages")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string);
+            return self
+                .read_pdf_result(
+                    &invocation_id,
+                    &canon,
+                    bytes,
+                    size,
+                    pages,
+                    &ctx.options.main_loop_model,
+                    started,
+                )
                 .await;
         }
 
@@ -1995,5 +2167,98 @@ mod tests {
             })
             .expect("a base64 image block");
         assert_eq!(media_type, "image/png");
+    }
+
+    /// A valid minimal 1-page PDF with a proper xref table + startxref. lopdf
+    /// 0.34 rejects PDFs without an xref table, so this fixture carries one.
+    #[cfg(feature = "pdf-read")]
+    const MINIMAL_PDF: &[u8] = b"%PDF-1.4\n1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] >>\nendobj\nxref\n0 4\n0000000000 65535 f \n0000000009 00000 n \n0000000058 00000 n \n0000000115 00000 n \ntrailer\n<< /Size 4 /Root 1 0 R >>\nstartxref\n186\n%%EOF\n";
+
+    #[cfg(feature = "pdf-read")]
+    #[tokio::test]
+    async fn pdf_pages_over_cap_errors() {
+        // A `pages` range spanning >20 pages is refused with the byte-locked
+        // "exceeds maximum" error, before any extraction is attempted. This
+        // exercises the routing regardless of whether the bytes parse.
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("doc.pdf");
+        std::fs::write(&target, MINIMAL_PDF).unwrap();
+        let (ctx, _sink) = make_ctx(&tmp);
+        let tool = FileReadTool::new(ctx);
+        let err = tool
+            .call(
+                json!({ "file_path": target.to_str().unwrap(), "pages": "1-25" }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("exceeds maximum"),
+            "got: {err}"
+        );
+    }
+
+    #[cfg(feature = "pdf-read")]
+    #[tokio::test]
+    async fn non_pdf_with_pdf_extension_is_rejected_before_inlining() {
+        // A non-PDF renamed `.pdf` must NOT be inlined as a document block — an
+        // invalid PDF block poisons the conversation (every later API call 400s).
+        // The %PDF- guard rejects it instead.
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("fake.pdf");
+        std::fs::write(&target, b"this is not a pdf at all").unwrap();
+        let (ctx, _sink) = make_ctx(&tmp);
+        let tool = FileReadTool::new(ctx);
+        let err = tool
+            .call(
+                json!({ "file_path": target.to_str().unwrap() }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("not a valid PDF"), "got: {err}");
+    }
+
+    #[cfg(feature = "pdf-read")]
+    #[tokio::test]
+    async fn reads_small_pdf_as_inline_document() {
+        use protocol::{ContentBlock, ConversationMessage, DocumentSource};
+
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("doc.pdf");
+        std::fs::write(&target, MINIMAL_PDF).unwrap();
+        let (ctx, _sink) = make_ctx(&tmp);
+        let tool = FileReadTool::new(ctx);
+        let res = tool
+            .call(
+                json!({ "file_path": target.to_str().unwrap() }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .expect("small PDF read must succeed");
+
+        // The tool-result data is text-only and tagged as a PDF.
+        assert_eq!(res.data["type"], "pdf");
+
+        // The PDF bytes ride on a single `new_messages` user message carrying a
+        // base64 `ContentBlock::Document` with the application/pdf media type.
+        assert_eq!(res.new_messages.len(), 1);
+        let content = match &res.new_messages[0] {
+            ConversationMessage::User { content, .. } => content,
+            other => panic!("expected a User message, got {other:?}"),
+        };
+        let media_type = content
+            .iter()
+            .find_map(|b| match b {
+                ContentBlock::Document {
+                    source: DocumentSource::Base64 { media_type, .. },
+                } => Some(media_type.as_str()),
+                _ => None,
+            })
+            .expect("a base64 document block");
+        assert_eq!(media_type, "application/pdf");
     }
 }

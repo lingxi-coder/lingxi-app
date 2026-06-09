@@ -60,6 +60,9 @@ fn content_blocks_to_api(blocks: &[protocol::ContentBlock]) -> Value {
             ContentBlock::Image { source } => {
                 json!({"type": "image", "source": source})
             }
+            ContentBlock::Document { source } => {
+                json!({"type": "document", "source": source})
+            }
         })
         .collect();
     Value::Array(arr)

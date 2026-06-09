@@ -317,7 +317,8 @@ pub fn lower_worker_agent(info: &WorkerInfo) -> CoordinatorWorkerDto {
 /// [`crate::turn::lower_content_block`] path `MessageComplete` uses, so a resumed
 /// message and a live-turn message reproduce an IDENTICAL [`MessageDto`] block set
 /// for any given content. Blocks with no `MessageBlockDto` analog
-/// ([`protocol::ContentBlock::Image`]) are dropped, matching the live path.
+/// ([`protocol::ContentBlock::Image`], [`protocol::ContentBlock::Document`]) are
+/// dropped, matching the live path.
 ///
 /// A [`ConversationMessage::System`] carries a flat `content: String` (no blocks),
 /// so it lowers to a single [`MessageBlockDto::Text`] — a faithful, lossless

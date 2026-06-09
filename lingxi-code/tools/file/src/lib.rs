@@ -29,6 +29,8 @@ pub mod grep;
 pub mod image_read;
 pub mod notebook_edit;
 pub mod notebook_read;
+#[cfg(feature = "pdf-read")]
+pub mod pdf_read;
 pub mod quotes;
 pub mod read;
 pub mod shared;

@@ -85,7 +85,7 @@ skill-api = { path = "../../skill-api" }
 skill-builtin = { path = "../../skills/builtin" }
 
 # The 14 desktop builtin tool crates (9 cross-platform + 5 desktop-only).
-tool-file = { path = "../../tools/file", features = ["image-read"] }
+tool-file = { path = "../../tools/file", features = ["image-read", "pdf-read"] }
 tool-shell = { path = "../../tools/shell" }
 tool-task = { path = "../../tools/task" }
 tool-web = { path = "../../tools/web", features = ["web-markdown"] }

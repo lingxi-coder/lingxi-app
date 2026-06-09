@@ -28,11 +28,19 @@ thiserror.workspace = true
 # four codecs only). base64 encodes the processed image for the Anthropic source.
 image = { version = "=0.24.9", default-features = false, features = ["jpeg", "png", "gif", "webp"], optional = true }
 base64 = { version = "=0.22.1", optional = true }
+# PDF page-count parsing for FileRead PDF routing (claude-code getPDFPageCount).
+# Pure-Rust PARSER (NOT a renderer — page-image extraction is P4b). Optional.
+# default-features = false drops the nom parser (get_pages would fail to link),
+# so defaults stay ON — the parser is exactly what we need. Pinned exact.
+lopdf = { version = "=0.34.0", optional = true }
 
 [features]
 # FileRead image reading. OFF by default (engine-mobile/minimal stay lean and
 # never compile the image codecs); engine-desktop enables it.
 image-read = ["dep:image", "dep:base64"]
+# FileRead PDF reading. OFF by default; routes PDFs to an inline document block
+# (page-count gate via lopdf). engine-desktop enables it alongside image-read.
+pdf-read = ["dep:lopdf", "dep:base64"]
 
 [dev-dependencies]
 tool-api = { path = "../../tool-api", features = ["test-support"] }

@@ -17,6 +17,7 @@
 )]
 pub mod blocklist;
 pub mod cache;
+mod markdown;
 pub mod url_safety;
 pub mod web_fetch;
 pub mod web_search;

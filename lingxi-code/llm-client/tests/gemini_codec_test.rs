@@ -80,9 +80,10 @@ fn decode_cached_content_token_count_maps_to_cache_read_usage() {
 }
 
 #[test]
-fn sse_stream_reassembles_text_then_function_call() {
+fn sse_stream_reassembles_text_then_thought_then_function_call() {
     let frames = [
         r#"{"candidates":[{"content":{"role":"model","parts":[{"text":"On it."}]}}]}"#,
+        r#"{"candidates":[{"content":{"role":"model","parts":[{"text":"thinking","thought":true}]}}]}"#,
         r#"{"candidates":[{"content":{"role":"model","parts":[{"functionCall":{"name":"Bash","args":{"command":"ls"}}}]} ,"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":5,"candidatesTokenCount":2}}"#,
     ];
     let mut decoder = GeminiCodec::new("https://generativelanguage.googleapis.com/v1beta").stream_decoder();
@@ -93,6 +94,15 @@ fn sse_stream_reassembles_text_then_function_call() {
     events.extend(decoder.finish().unwrap());
 
     assert!(matches!(events.first(), Some(LlmEvent::MessageStart { .. })));
-    assert!(events.iter().any(|event| matches!(event, LlmEvent::ContentBlockStart { content_block: ContentBlock::ToolCall { name, .. }, .. } if name == "Bash")));
+    assert!(matches!(events[1], LlmEvent::ContentBlockStart { content_block: ContentBlock::Text { .. }, .. }));
+    assert!(matches!(events[2], LlmEvent::ContentBlockDelta { delta: llm_client::ContentDelta::TextDelta { ref text }, .. } if text == "On it."));
+    assert!(matches!(events[3], LlmEvent::ContentBlockStart { content_block: ContentBlock::Reasoning { .. }, .. }));
+    assert!(matches!(events[4], LlmEvent::ContentBlockDelta { delta: llm_client::ContentDelta::ThinkingDelta { ref thinking }, .. } if thinking == "thinking"));
+    assert!(matches!(events[5], LlmEvent::ContentBlockStart { content_block: ContentBlock::ToolCall { ref name, .. }, .. } if name == "Bash"));
+    assert!(matches!(events[6], LlmEvent::ContentBlockDelta { delta: llm_client::ContentDelta::InputJsonDelta { ref partial_json }, .. } if partial_json == "{\"command\":\"ls\"}"));
+    assert!(matches!(events[7], LlmEvent::ContentBlockStop { .. }));
+    assert!(matches!(events[8], LlmEvent::ContentBlockStop { .. }));
+    assert!(matches!(events[9], LlmEvent::ContentBlockStop { .. }));
+    assert!(matches!(events[10], LlmEvent::MessageDelta { delta: llm_client::MessageDeltaPayload { stop_reason: Some(ref reason) }, .. } if reason == "tool_use"));
     assert!(matches!(events.last(), Some(LlmEvent::MessageStop)));
 }

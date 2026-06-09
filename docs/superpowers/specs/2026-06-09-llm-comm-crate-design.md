@@ -47,10 +47,15 @@ Codex, opencode, and liter-llm are architecture references.
   families.
 - Make provider auth request-aware: API key, bearer/OAuth, AWS SigV4, GCP token, and
   Azure token all use the same `Authenticator` seam.
+- Keep credential lookup separate from auth application so environment variables,
+  static keys, OAuth token sources, cloud token sources, keyrings, and host-managed
+  secret stores can be swapped without changing protocol or transport code.
 - Normalize provider responses into canonical responses, streaming events, and token
   usage.
 - Compute cost from resolved `provider + model + token usage breakdown`, not from a
   hardcoded provider path or model-string prefix guess.
+- Expose route/model listing from configured profiles so hosts can implement `/model`
+  or picker UIs without hardcoded examples.
 - Keep raw provider metadata available for diagnostics while redacting secrets by
   default.
 - Feature-gate heavyweight cloud auth, Tower adapters, and optional transports so the
@@ -64,6 +69,9 @@ Codex, opencode, and liter-llm are architecture references.
   management, or model-selection UX inside the crate.
 - No standalone proxy server in the first design.
 - No prompted tool-call shim for models without native tool support.
+- No provider-side `count_tokens` endpoint in the first implementation wave. The crate
+  preserves usage returned by provider responses and may add explicit token-counting
+  APIs later.
 - No direct ownership of LingXi's session-level cost summaries. The crate estimates
   per-call cost and emits normalized usage; LingXi's existing cost/session layer can
   aggregate it.
@@ -72,8 +80,9 @@ Codex, opencode, and liter-llm are architecture references.
   existing `protocol`.
 - Not every designed route family ships with runtime migration in the first
   implementation wave. The first wave is Anthropic first-party, OpenAI Chat
-  Completions, and Gemini. OpenAI Responses, Vertex, Bedrock, and Azure are designed
-  here and implemented in follow-up waves.
+  Completions, OpenAI-compatible Chat Completions profiles, and Gemini. OpenAI
+  Responses, Vertex, Bedrock, and Azure are designed here and implemented in follow-up
+  waves.
 - No mid-stream automatic provider failover unless a caller opts into a future
   resumable-stream policy.
 
@@ -84,9 +93,11 @@ Codex, opencode, and liter-llm are architecture references.
 | Crate shape | External reusable crate, not a LingXi-only wrapper |
 | Core architecture | Route composition: `Protocol + Endpoint + Authenticator + Transport + Usage/Cost` |
 | Request signing | `Authenticator` runs after URL, headers, and body are prepared |
+| Credential lookup | `CredentialProvider` resolves secrets/tokens before `Authenticator` applies them |
 | Retry scope | Retry connection/setup failures and retryable responses; do not replay an already-yielding stream by default |
 | Cost basis | `provider + concrete model + normalized token buckets` |
 | Pricing catalog | Built-in default catalog plus external override provider |
+| Unknown pricing | Core default is `estimated=false`; hosts may opt into fallback pricing or cost-required errors |
 | Tower | Optional adapter layer, not the core API |
 | Cloud SDKs | Feature-gated: AWS, GCP, Azure are optional |
 | LingXi migration | Use adapters first, then remove duplicated old communication paths after parity is locked |
@@ -116,6 +127,7 @@ LlmClient
 | `types` | Canonical request, response, stream event, message, content, tools, usage, model, provider, cost result |
 | `protocol` | Provider wire encode/decode and stream state machines |
 | `route` | Binds one protocol, endpoint, auth, transport, retry policy, and pricing context |
+| `credentials` | Secret/token lookup traits and lightweight env/static providers |
 | `auth` | API key, bearer, OAuth refresh, SigV4, GCP token, Azure token, composite auth |
 | `transport` | HTTP and SSE I/O abstractions; default reqwest transport behind a feature |
 | `retry` | Retry/backoff policy over canonical errors and response metadata |
@@ -183,6 +195,11 @@ pub trait Authenticator: Send + Sync {
 }
 
 #[async_trait]
+pub trait CredentialProvider: Send + Sync {
+    async fn load(&self, scope: CredentialScope) -> Result<Credential, LlmError>;
+}
+
+#[async_trait]
 pub trait Transport: Send + Sync {
     async fn send(&self, request: PreparedRequest) -> Result<RawResponse, LlmError>;
     async fn open_sse(&self, request: PreparedRequest) -> Result<RawStream, LlmError>;
@@ -193,9 +210,25 @@ The exact Rust signatures can be refined during implementation planning, but the
 direction is fixed:
 
 - protocol is provider-wire-specific;
-- auth receives the final request shape;
+- credential providers resolve secrets/tokens before request signing;
+- auth receives the final request shape and applies headers or signatures;
 - transport does not know provider semantics;
 - cost is computed from normalized usage after decode.
+
+## 7.1 Credential and secret-source boundary
+
+`CredentialProvider` is separate from `Authenticator`.
+
+- `CredentialProvider` locates or refreshes secret material: environment variables,
+  static host-supplied keys, OAuth access-token callbacks, GCP/Azure token sources,
+  AWS credential chains, or caller-provided secret stores.
+- `Authenticator` transforms the prepared request using resolved credentials: header
+  insertion, bearer application, OAuth refresh retry hooks, SigV4 signing, or
+  provider-specific auth composition.
+- The core crate may provide simple `StaticCredentialProvider` and
+  `EnvCredentialProvider`. It does not own keychain/keyring storage, interactive login,
+  persistent OAuth token storage, or LingXi's secret UI.
+- All credentials expose a redacted debug representation by default.
 
 ## 8. Canonical types
 
@@ -211,8 +244,10 @@ Core types:
 - `Message`
 - `ContentBlock`
 - `ToolDeclaration`
+- `ToolChoice`
 - `ToolCall`
 - `ToolResult`
+- `ResponseFormat`
 - `ReasoningConfig`
 - `ModelRef`
 - `ProviderId`
@@ -232,6 +267,28 @@ Core types:
 
 Provider-specific fields stay in `ProviderMetadata`; callers should not need to parse
 raw provider JSON for normal operation.
+
+### 8.1 Tool schema and structured-output dialects
+
+The canonical tool and structured-output types are communication-layer concerns, not
+orchestration policy:
+
+- `ToolDeclaration` stores a JSON-schema input object plus name and description.
+- `ToolChoice` represents auto/none/required/specific-tool where a provider supports
+  it.
+- `ResponseFormat` represents provider-native JSON mode / JSON schema output where a
+  provider supports it.
+- Protocol codecs own dialect mapping:
+  - Anthropic: `input_schema`, `tool_choice`, native structured-output fields when
+    available.
+  - OpenAI Chat / OpenAI-compatible: `tools[].function.parameters`,
+    `tool_choice`, and `response_format`.
+  - OpenAI Responses: Responses-native tools and text/JSON format fields.
+  - Gemini: `functionDeclarations[].parameters`, `functionCallingConfig`, and the
+    Gemini-supported schema subset.
+- Each protocol declares whether unsupported schema keywords are preserved, lowered, or
+  rejected. The first-wave Gemini codec must normalize or reject unsupported schema
+  shapes deterministically; it must not silently produce provider-invalid JSON.
 
 ## 9. Usage and cost model
 
@@ -289,8 +346,25 @@ Invariants:
   they remain in `output` and metadata records that relationship.
 - If a provider only returns totals, the codec sets the known total fields and leaves
   unknown billable buckets at zero with metadata explaining the limitation.
-- Unknown pricing never discards the LLM response. It returns `CostEstimate {
-  estimated: false }` plus `Usage`.
+- Under the default `MarkUnestimated` policy, the cost estimator does not discard the
+  LLM response when pricing is unknown. It returns `CostEstimate { estimated: false }`
+  plus `Usage`.
+
+Provider identity is explicit. First-class variants are:
+
+- `AnthropicFirstParty`
+- `OpenAI`
+- `OpenAICompatible { name }`
+- `Gemini`
+- `VertexGemini`
+- `VertexClaude`
+- `BedrockClaude`
+- `AzureOpenAI`
+- `Custom { name }`
+
+Route resolution assigns `ProviderId` before request execution. Pricing, retry
+metadata, telemetry adapters, and model listing all consume the resolved identity; they
+do not infer a provider from a raw model string after routing.
 
 Pricing catalog rules:
 
@@ -300,6 +374,18 @@ Pricing catalog rules:
 - External override catalog wins over the built-in catalog.
 - The crate never guesses a provider from the model string after routing has resolved
   the provider.
+
+Unknown-pricing policy is configurable:
+
+- `MarkUnestimated` is the reusable core default: return usage plus
+  `CostEstimate { estimated: false }`.
+- `ApplyFallbackTier` lets a host provide a fallback tier for compatibility with
+  existing behavior such as LingXi's default unknown-model pricing.
+- `RequirePriced` returns `CostUnavailable` for APIs that explicitly require a priced
+  model before making or accepting a response.
+
+LingXi's adapter chooses the policy. The core crate does not bake LingXi's default
+unknown-pricing tier into its reusable API.
 
 This satisfies the requirement that cost is based on model and token usage, and keeps
 future ChatGPT/OpenAI, Gemini, Bedrock, Vertex, and custom models on the same path.
@@ -361,9 +447,10 @@ LlmError
   UnsupportedCapability
 ```
 
-`CostUnavailable` is reserved for explicit cost-required APIs and invalid pricing
-catalog failures. Normal LLM calls with unknown model pricing return the response plus
-`CostEstimate { estimated: false }`.
+`CostUnavailable` is reserved for explicit cost-required APIs, invalid pricing catalog
+failures, and the `RequirePriced` unknown-pricing policy. Under the reusable core
+default `MarkUnestimated` policy, normal LLM calls with unknown model pricing return
+the response plus `CostEstimate { estimated: false }`.
 
 Mapping examples:
 
@@ -421,7 +508,7 @@ Designed route families:
 | Anthropic first-party | Messages API | API key, OAuth bearer | Must preserve Claude Code parity edge cases |
 | OpenAI Responses | Responses API | Bearer/API key | Primary future OpenAI path; follow-up wave after Chat/Gemini migration parity |
 | OpenAI Chat | Chat Completions | Bearer/API key | Needed for OpenAI-compatible endpoints |
-| OpenAI-compatible | Chat Completions-compatible | Bearer/header/custom | Base URL/profile driven |
+| OpenAI-compatible | Chat Completions-compatible | Bearer/header/custom | Base URL/profile driven; first wave when the endpoint follows Chat Completions semantics |
 | Gemini | Gemini generateContent | API key or GCP token | Supports native Gemini usage metadata |
 | Vertex Gemini | Gemini via Vertex endpoint | GCP token | Separate provider id, endpoint, rate-limit, and pricing from first-party Gemini |
 | Vertex Claude | Anthropic Messages-compatible body via Vertex endpoint | GCP token | Separate route family for Claude-on-Vertex deployment parity |
@@ -461,12 +548,43 @@ Profile fields:
 - retry policy overrides
 - stream idle timeout
 
+Registry APIs:
+
+```rust
+pub trait ModelRegistry {
+    fn resolve(&self, model: &ModelRef) -> Result<ResolvedRoute, LlmError>;
+    fn available_models(&self) -> Vec<ModelListing>;
+}
+
+pub struct ModelListing {
+    pub provider_id: ProviderId,
+    pub profile_name: String,
+    pub model: String,
+    pub aliases: Vec<String>,
+    pub capabilities: Capabilities,
+    pub pricing_known: bool,
+}
+```
+
+`available_models()` lists configured profile/model pairs and aliases from the
+registry; it does not hardcode examples. LingXi's `/model` implementation consumes the
+adapter's converted listings.
+
 Capability validation fails before network I/O when possible:
 
 - tools on a model without native tools
 - image/document input on a model without multimodal support
 - reasoning params on a model without reasoning support
 - streaming request on a non-streaming route
+
+First-wave OpenAI-compatible scope:
+
+- OpenAI first-party Chat Completions and OpenAI-compatible Chat Completions share the
+  same first-wave protocol implementation.
+- OpenAI-compatible first-wave support includes configurable base URL, auth header,
+  default headers/query params, declared model list, aliases, and pricing overrides.
+- Provider-specific quirks beyond Chat Completions compatibility remain per-profile
+  follow-up work, not implicit first-wave behavior.
 
 ## 15. Dependency and feature policy
 
@@ -534,13 +652,16 @@ Migration is phased but this document is not the detailed implementation plan.
 - Provider response -> `LlmResponse`.
 - SSE frames -> ordered `LlmEvent`.
 - Anthropic prompt-cache usage.
-- OpenAI Chat first-wave fixtures; OpenAI Responses fixtures before Responses runtime
-  enablement.
+- OpenAI Chat and OpenAI-compatible Chat first-wave fixtures; OpenAI Responses fixtures
+  before Responses runtime enablement.
 - Gemini usage metadata.
+- Tool schema dialect fixtures for Anthropic, OpenAI Chat/OpenAI-compatible, OpenAI
+  Responses before enablement, and Gemini.
 - Bedrock/Vertex wrapper paths.
 
 ### Auth tests
 
+- `StaticCredentialProvider` and `EnvCredentialProvider` success/failure paths.
 - API key and bearer headers.
 - OAuth refresh after stale token.
 - AWS SigV4 signs final URL, headers, and body.
@@ -559,12 +680,21 @@ Migration is phased but this document is not the detailed implementation plan.
 ### Cost tests
 
 - Exact provider/model price match.
+- every first-class `ProviderId` variant routes to the intended pricing namespace.
 - alias and pattern fallback.
 - independent billable token buckets for input, output, cache write, cache read, and
   reasoning output.
 - provider/context totals do not double-count billable buckets.
-- unknown model returns usage plus non-estimated cost.
+- `MarkUnestimated`, `ApplyFallbackTier`, and `RequirePriced` unknown-pricing policies.
 - external pricing override wins over built-in catalog.
+
+### Registry tests
+
+- `available_models()` lists configured profile/model pairs and aliases.
+- listings include provider id, profile name, model, capabilities, and pricing-known
+  status.
+- OpenAI-compatible profiles resolve through the Chat Completions protocol with their
+  configured base URL and auth.
 
 ### LingXi migration tests
 
@@ -578,12 +708,17 @@ Migration is phased but this document is not the detailed implementation plan.
 ## 18. Acceptance criteria
 
 - A reusable `llm-comm` crate exists with route/protocol/auth/transport/cost modules.
-- Anthropic first-party, OpenAI Chat Completions, and Gemini have fixture-backed
-  complete and stream support in the first implementation wave.
+- Anthropic first-party, OpenAI Chat Completions, OpenAI-compatible Chat Completions,
+  and Gemini have fixture-backed complete and stream support in the first
+  implementation wave.
 - OpenAI Responses has route-family design now, with fixtures required before its
   runtime enablement wave.
+- `available_models()` exposes configured profile/model listings and aliases without
+  hardcoded examples.
 - Cost estimation uses resolved provider/model plus token buckets.
-- Unknown pricing does not block LLM responses.
+- Unknown pricing follows the configured policy; the reusable core default does not
+  block LLM responses.
+- First-wave protocols have deterministic tool schema dialect fixtures.
 - LingXi can route main conversation and sidequery calls through the new crate via
   adapters.
 - Existing Claude Code parity tests for Anthropic still pass or any intentional change
@@ -608,9 +743,10 @@ These choices are fixed for the implementation plan:
 
 - Workspace crate name: `llm-comm`.
 - Core architecture: route composition, not a provider-only trait wrapper.
-- First-wave route families: Anthropic first-party, OpenAI Chat Completions, and
-  Gemini.
+- First-wave route families: Anthropic first-party, OpenAI Chat Completions,
+  OpenAI-compatible Chat Completions, and Gemini.
 - Cloud auth route families are designed now and implemented behind features.
 - Tower support is optional and not required for first runtime migration.
+- `count_tokens` is deferred outside the first implementation wave.
 - Cost estimation lives in the new crate; session aggregation remains outside.
 - LingXi-specific adapters are compatibility layers, not reusable crate core.

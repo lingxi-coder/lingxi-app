@@ -131,6 +131,75 @@ fn validate_content_tokens(content: &str, ext: Option<&str>, max_tokens: u64) ->
     Ok(())
 }
 
+/// Human-readable file size, byte-faithful to claude-code `formatFileSize`
+/// (`src/utils/format.ts`): `< 1KB` ⇒ `"{n} bytes"`; otherwise one decimal with a
+/// trailing `.0` trimmed, suffixed `KB`/`MB`/`GB` (no space). Used by the PDF
+/// routing/extraction messages.
+// The u64 → f64 cast loses precision for values > 2^53 (> 9 PB). File sizes
+// of that magnitude are not realistic for PDF extraction, and claude-code uses
+// JavaScript number (f64) for the same computation. The cast is intentional.
+// Gated on pdf-read: callers exist in both the no-pages routing (pdf-read, Edit A)
+// and the page-extraction payload (pdf-render). Since pdf-render implies pdf-read,
+// gating on pdf-read covers ALL reachable callers in every feature combination.
+#[cfg(feature = "pdf-read")]
+#[allow(clippy::cast_precision_loss)]
+pub(crate) fn format_file_size(size_in_bytes: u64) -> String {
+    fn trim(x: f64) -> String {
+        let s = format!("{x:.1}");
+        s.strip_suffix(".0").map(str::to_string).unwrap_or(s)
+    }
+    let kb = size_in_bytes as f64 / 1024.0;
+    if kb < 1.0 {
+        return format!("{size_in_bytes} bytes");
+    }
+    if kb < 1024.0 {
+        return format!("{}KB", trim(kb));
+    }
+    let mb = kb / 1024.0;
+    if mb < 1024.0 {
+        return format!("{}MB", trim(mb));
+    }
+    let gb = mb / 1024.0;
+    format!("{}GB", trim(gb))
+}
+
+/// Turn rendered page JPEGs into (image sources, tool-result data). Each page is
+/// run through [`crate::image_read::process_image`] (the claude-code image
+/// ladder) and becomes one [`protocol::ImageSource::Base64`]; the tool-result
+/// text mirrors claude-code `FileReadTool.ts:684`.
+///
+/// # Errors
+/// Propagates `process_image` failure (a page that fails to decode/encode).
+#[cfg(feature = "pdf-render")]
+pub(crate) fn build_pages_payload(
+    canon: &std::path::Path,
+    original_size: u64,
+    page_jpegs: Vec<Vec<u8>>,
+) -> Result<(Vec<protocol::ImageSource>, serde_json::Value), String> {
+    let count = page_jpegs.len();
+    let mut sources = Vec::with_capacity(count);
+    for jpeg in page_jpegs {
+        let processed = crate::image_read::process_image(jpeg)?;
+        sources.push(protocol::ImageSource::Base64 {
+            media_type: processed.media_type,
+            data: processed.base64,
+        });
+    }
+    let path_str = canon.display().to_string();
+    let model_content = format!(
+        "PDF pages extracted: {count} page(s) from {path_str} ({})",
+        format_file_size(original_size)
+    );
+    let data = serde_json::json!({
+        "type": "parts",
+        "file_path": path_str,
+        "original_size": original_size,
+        "count": count,
+        "model_content": model_content,
+    });
+    Ok((sources, data))
+}
+
 /// Build the byte-locked too-large error message per spec §5.
 #[must_use]
 pub fn format_too_large(path: &std::path::Path, size: u64) -> String {
@@ -507,10 +576,51 @@ impl FileReadTool {
         })
     }
 
+    /// Render `first..=last` of a PDF to page images and emit them on
+    /// `new_messages` (claude-code FileRead `pages` path).
+    #[cfg(feature = "pdf-render")]
+    async fn read_pdf_pages_result(
+        &self,
+        invocation_id: &str,
+        canon: &std::path::Path,
+        original_size: u64,
+        first: u32,
+        last: u32,
+        started: Instant,
+    ) -> Result<ToolCallResult, ToolError> {
+        let page_jpegs = match crate::pdf_render::render_pdf_pages(canon, original_size, first, last).await {
+            Ok(p) => p,
+            Err(e) => {
+                self.emit_failed(invocation_id, e.telemetry_code()).await;
+                return Err(ToolError::Io(e.message(&canon.display().to_string())));
+            }
+        };
+        let (sources, data) = match build_pages_payload(canon, original_size, page_jpegs) {
+            Ok(v) => v,
+            Err(e) => {
+                self.emit_failed(invocation_id, "pdf_page_encode").await;
+                return Err(ToolError::Io(e));
+            }
+        };
+        let msg = protocol::ConversationMessage::user_with_images(
+            protocol::MessageId::new(),
+            String::new(),
+            sources,
+        );
+        self.emit_completed(invocation_id, original_size, started.elapsed().as_millis() as u64)
+            .await;
+        Ok(ToolCallResult {
+            data,
+            new_messages: vec![msg],
+            context_modifier: None,
+            mcp_meta: None,
+        })
+    }
+
     /// Read a PDF as an inline document block (claude-code FileRead PDF path).
-    /// Routing: `pages` ⇒ validate then defer to P4b extraction (error); else
-    /// page-count > 10 ⇒ error; unsupported model OR size > 3MB ⇒ extraction-
-    /// required error; else inline document block on `new_messages`.
+    /// Routing: `pages` ⇒ validate then defer to P4b extraction; else
+    /// page-count > 10 ⇒ error; unsupported model ⇒ error; size > 20 MB ⇒
+    /// too_large error; else inline document block on `new_messages`.
     ///
     /// The PDF bytes ride on `new_messages` as a `ContentBlock::Document`
     /// (the frozen tool-result content is text-only); the tool-result text is a
@@ -529,7 +639,7 @@ impl FileReadTool {
     ) -> Result<ToolCallResult, ToolError> {
         use crate::pdf_read::{
             is_pdf_supported, parse_pdf_page_range, pdf_page_count, PDF_AT_MENTION_INLINE_THRESHOLD,
-            PDF_EXTRACT_SIZE_THRESHOLD, PDF_MAX_PAGES_PER_READ,
+            PDF_MAX_PAGES_PER_READ,
         };
         use base64::Engine;
 
@@ -584,11 +694,20 @@ impl FileReadTool {
                     "Page range \"{p}\" exceeds maximum of {PDF_MAX_PAGES_PER_READ} pages per request. Please use a smaller range."
                 )));
             }
-            self.emit_failed(invocation_id, "pdf_extraction_unavailable")
-                .await;
-            return Err(ToolError::Io(
-                "Reading specific PDF pages requires page extraction, which is not yet available. Read the whole PDF (omit pages) if it is small.".to_string(),
-            ));
+            #[cfg(feature = "pdf-render")]
+            {
+                return self
+                    .read_pdf_pages_result(invocation_id, canon, original_size, first, last, started)
+                    .await;
+            }
+            #[cfg(not(feature = "pdf-render"))]
+            {
+                self.emit_failed(invocation_id, "pdf_extraction_unavailable")
+                    .await;
+                return Err(ToolError::Io(
+                    "Reading specific PDF pages requires page extraction, which is not yet available. Read the whole PDF (omit pages) if it is small.".to_string(),
+                ));
+            }
         }
 
         // No `pages` ⇒ inline read. A parseable page count > 10 is too many to
@@ -603,14 +722,22 @@ impl FileReadTool {
             }
         }
 
-        // Unsupported model OR oversize ⇒ inline read is refused; the model
-        // must extract specific pages (P4b) or switch models.
-        if !supported || original_size > PDF_EXTRACT_SIZE_THRESHOLD {
-            self.emit_failed(invocation_id, "pdf_extraction_required")
-                .await;
+        // Unsupported model ⇒ refuse inline; tell the model to use a newer model
+        // or the `pages` parameter (claude-code FileReadTool.ts:979-985).
+        if !supported {
+            self.emit_failed(invocation_id, "pdf_unsupported_model").await;
             return Err(ToolError::Io(
-                "Reading full PDFs is not supported with this model or this file is too large. Use a newer model, or use the pages parameter to read specific page ranges (e.g., pages: \"1-5\", maximum 20 pages per request).".to_string(),
+                "Reading full PDFs is not supported with this model. Use a newer model (Sonnet 3.5 v2 or later), or use the pages parameter to read specific page ranges (e.g., pages: \"1-5\", maximum 20 pages per request). Page extraction requires poppler-utils: install with `brew install poppler` on macOS or `apt-get install poppler-utils` on Debian/Ubuntu.".to_string(),
             ));
+        }
+        // Supported model: inline up to PDF_TARGET_RAW_SIZE (20 MB), else
+        // too_large (claude-code readPDF, utils/pdf.ts:60-68).
+        if original_size > crate::pdf_read::PDF_TARGET_RAW_SIZE {
+            self.emit_failed(invocation_id, "pdf_too_large").await;
+            return Err(ToolError::Io(format!(
+                "PDF file exceeds maximum allowed size of {}.",
+                format_file_size(crate::pdf_read::PDF_TARGET_RAW_SIZE)
+            )));
         }
 
         let data = base64::engine::general_purpose::STANDARD.encode(&bytes);
@@ -634,7 +761,7 @@ impl FileReadTool {
                 "type": "pdf",
                 "file_path": canon.display().to_string(),
                 "original_size": original_size,
-                "model_content": format!("PDF file read: {} ({} bytes)", canon.display(), original_size),
+                "model_content": format!("PDF file read: {} ({})", canon.display(), format_file_size(original_size)),
             }),
             new_messages: vec![msg],
             context_modifier: None,
@@ -817,9 +944,10 @@ impl Tool for FileReadTool {
         let is_image = cfg!(feature = "image-read") && is_image_path(&canon);
 
         // PDF files route to the document path (claude-code routes by extension
-        // to the PDF reader, which applies its own 3MB extraction gate, not the
-        // 256KB text cap). Gated on the feature so the cap still applies — and
-        // PDFs still hit the binary guard — when `pdf-read` is off.
+        // to the PDF reader, which applies its own PDF size gates — 20MB inline /
+        // 100MB extraction — not the 256KB text cap). Gated on the feature so the
+        // cap still applies — and PDFs still hit the binary guard — when
+        // `pdf-read` is off.
         let is_pdf = cfg!(feature = "pdf-read") && is_pdf_path(&canon);
 
         // TS applies the byte cap ONLY when no `limit` is supplied
@@ -2260,5 +2388,149 @@ mod tests {
             })
             .expect("a base64 document block");
         assert_eq!(media_type, "application/pdf");
+    }
+
+    #[cfg(feature = "pdf-read")]
+    #[tokio::test]
+    async fn unsupported_model_pdf_returns_not_supported_message() {
+        // No-pages read on an UNSUPPORTED model (claude-3-haiku) is refused with
+        // claude-code's exact message (FileReadTool.ts:979-985) — never inlined.
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("doc.pdf");
+        std::fs::write(&target, MINIMAL_PDF).unwrap();
+        let (ctx, _sink) = make_ctx(&tmp);
+        let tool = FileReadTool::new(ctx);
+        let mut call_ctx = fresh_ctx();
+        call_ctx.options.main_loop_model = "claude-3-haiku-20240307".into();
+        let err = tool
+            .call(
+                json!({ "file_path": target.to_str().unwrap() }),
+                call_ctx,
+                fresh_tx(),
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains(
+                "Reading full PDFs is not supported with this model. Use a newer model (Sonnet 3.5 v2 or later), or use the pages parameter to read specific page ranges (e.g., pages: \"1-5\", maximum 20 pages per request). Page extraction requires poppler-utils: install with `brew install poppler` on macOS or `apt-get install poppler-utils` on Debian/Ubuntu."
+            ),
+            "got: {err}"
+        );
+    }
+
+    #[cfg(feature = "pdf-read")]
+    #[tokio::test]
+    async fn supported_model_inlines_pdf_between_3mb_and_20mb() {
+        // claude-code inlines a supported-model PDF up to PDF_TARGET_RAW_SIZE
+        // (20 MB); the old 3 MB error was a P4a simplification. A ~4 MB PDF must
+        // inline as a Document block, NOT error. (Padding breaks lopdf parsing →
+        // pdf_page_count None → the >10-page gate is skipped, which is fine here.)
+        use protocol::{ContentBlock, ConversationMessage, DocumentSource};
+        let mut bytes = vec![b'%'; 4 * 1024 * 1024];
+        bytes[..9].copy_from_slice(b"%PDF-1.4\n");
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("big.pdf");
+        std::fs::write(&target, &bytes).unwrap();
+        let (ctx, _sink) = make_ctx(&tmp);
+        let tool = FileReadTool::new(ctx);
+        let res = tool
+            .call(
+                json!({ "file_path": target.to_str().unwrap() }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .expect("4MB supported-model PDF must inline, not error");
+        assert_eq!(res.data["type"], "pdf");
+        assert_eq!(res.new_messages.len(), 1);
+        let content = match &res.new_messages[0] {
+            ConversationMessage::User { content, .. } => content,
+            other => panic!("expected a User message, got {other:?}"),
+        };
+        assert!(
+            content.iter().any(|b| matches!(
+                b,
+                ContentBlock::Document {
+                    source: DocumentSource::Base64 { .. }
+                }
+            )),
+            "expected an inline base64 document block"
+        );
+    }
+
+    #[cfg(feature = "pdf-read")]
+    #[tokio::test]
+    async fn supported_model_oversize_pdf_returns_too_large() {
+        // > 20 MB (PDF_TARGET_RAW_SIZE) ⇒ too_large with the human-readable size
+        // (claude-code readPDF, utils/pdf.ts:60-68).
+        let mut bytes = vec![b'%'; 20 * 1024 * 1024 + 1];
+        bytes[..9].copy_from_slice(b"%PDF-1.4\n");
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("huge.pdf");
+        std::fs::write(&target, &bytes).unwrap();
+        let (ctx, _sink) = make_ctx(&tmp);
+        let tool = FileReadTool::new(ctx);
+        let err = tool
+            .call(
+                json!({ "file_path": target.to_str().unwrap() }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("PDF file exceeds maximum allowed size of 20MB."),
+            "got: {err}"
+        );
+    }
+
+    #[cfg(feature = "pdf-render")]
+    #[test]
+    fn build_pages_payload_emits_one_image_per_page() {
+        use super::build_pages_payload;
+        use image::{DynamicImage, RgbImage};
+
+        fn jpeg(w: u32, h: u32) -> Vec<u8> {
+            let img = DynamicImage::ImageRgb8(RgbImage::new(w, h));
+            let mut buf = std::io::Cursor::new(Vec::new());
+            img.write_to(&mut buf, image::ImageFormat::Jpeg).unwrap();
+            buf.into_inner()
+        }
+
+        let pages = vec![jpeg(50, 50), jpeg(40, 60)];
+        let (sources, data) =
+            build_pages_payload(std::path::Path::new("/docs/report.pdf"), 4096, pages).unwrap();
+
+        assert_eq!(sources.len(), 2, "one ImageSource per rendered page");
+        for s in &sources {
+            match s {
+                protocol::ImageSource::Base64 { media_type, data } => {
+                    assert_eq!(media_type, "image/jpeg");
+                    assert!(!data.is_empty());
+                }
+                other => panic!("expected Base64 source, got {other:?}"),
+            }
+        }
+        assert_eq!(data["type"], "parts");
+        assert_eq!(data["file_path"], "/docs/report.pdf");
+        assert_eq!(
+            data["model_content"],
+            "PDF pages extracted: 2 page(s) from /docs/report.pdf (4KB)"
+        );
+    }
+
+    #[cfg(feature = "pdf-read")]
+    #[test]
+    fn format_file_size_matches_claude_code() {
+        use super::format_file_size;
+        assert_eq!(format_file_size(0), "0 bytes");
+        assert_eq!(format_file_size(512), "512 bytes");
+        assert_eq!(format_file_size(1024), "1KB");          // 1.0 → trim .0
+        assert_eq!(format_file_size(1536), "1.5KB");
+        assert_eq!(format_file_size(3 * 1024 * 1024), "3MB");
+        assert_eq!(format_file_size(20 * 1024 * 1024), "20MB");
+        assert_eq!(format_file_size(100 * 1024 * 1024), "100MB");
+        assert_eq!(format_file_size(2 * 1024 * 1024 * 1024), "2GB");
     }
 }

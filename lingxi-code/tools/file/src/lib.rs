@@ -31,6 +31,8 @@ pub mod notebook_edit;
 pub mod notebook_read;
 #[cfg(feature = "pdf-read")]
 pub mod pdf_read;
+#[cfg(feature = "pdf-render")]
+mod pdf_render;
 pub mod quotes;
 pub mod read;
 pub mod shared;

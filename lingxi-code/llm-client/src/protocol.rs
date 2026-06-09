@@ -147,11 +147,70 @@ pub enum LlmEvent {
         /// Delta text payload.
         text: String,
     },
+    /// Response start snapshot.
+    MessageStart {
+        /// Response metadata snapshot.
+        response: Box<LlmResponse>,
+    },
+    /// Content block start snapshot.
+    ContentBlockStart {
+        /// Block index in the response content list.
+        index: u32,
+        /// Content block snapshot at start.
+        content_block: ContentBlock,
+    },
+    /// Incremental content block delta.
+    ContentBlockDelta {
+        /// Block index in the response content list.
+        index: u32,
+        /// Incremental delta payload.
+        delta: ContentDelta,
+    },
+    /// Content block end marker.
+    ContentBlockStop {
+        /// Block index in the response content list.
+        index: u32,
+    },
+    /// Terminal response delta.
+    MessageDelta {
+        /// Terminal response delta payload.
+        delta: MessageDelta,
+        /// Normalized usage at the terminal boundary.
+        usage: Option<Usage>,
+    },
     /// Final response event.
     Completed {
         /// Completed response.
         response: Box<LlmResponse>,
     },
+}
+
+/// Canonical content delta.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ContentDelta {
+    /// Text delta payload.
+    TextDelta {
+        /// Partial text.
+        text: String,
+    },
+    /// Partial JSON payload.
+    InputJsonDelta {
+        /// Partial JSON text.
+        partial_json: String,
+    },
+    /// Reasoning/thinking delta payload.
+    ThinkingDelta {
+        /// Thinking text.
+        thinking: String,
+    },
+}
+
+/// Canonical terminal message delta.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MessageDelta {
+    /// Optional terminal stop reason.
+    pub stop_reason: Option<String>,
 }
 
 /// Canonical tool declaration.

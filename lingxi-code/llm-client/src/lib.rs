@@ -29,9 +29,9 @@ pub use credentials::{Credential, CredentialProvider, CredentialScope, EnvCreden
 pub use cost::{CostEstimator, PricingCatalog, PricingPolicy, TokenPricing};
 pub use error::LlmError;
 pub use protocol::{
-    validate_capabilities, ContentBlock, LlmEvent, LlmRequest, LlmResponse, Message, PreparedBody,
-    Protocol, RawResponse, RawStreamFrame, ResponseFormat, StreamDecoder, ToolChoice,
-    ToolDeclaration,
+    validate_capabilities, ContentBlock, ContentDelta, LlmEvent, LlmRequest, LlmResponse,
+    Message, MessageDelta, PreparedBody, Protocol, RawResponse, RawStreamFrame, ResponseFormat,
+    StreamDecoder, ToolChoice, ToolDeclaration,
 };
 pub use registry::{ModelListing, ModelRegistry, ResolvedRoute};
 pub use redaction::Redactor;

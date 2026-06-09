@@ -54,6 +54,10 @@ impl WireCodec for AnthropicMessagesCodec {
             body.insert("system".to_string(), Value::String(system.clone()));
         }
 
+        if request.stream {
+            body.insert("stream".to_string(), Value::Bool(true));
+        }
+
         if let Some(tool_choice) = &request.tool_choice {
             body.insert("tool_choice".to_string(), encode_tool_choice(tool_choice));
         }

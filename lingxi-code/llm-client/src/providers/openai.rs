@@ -1,7 +1,7 @@
 use crate::{
     ContentBlock, ContentDelta, LlmError, LlmEvent, LlmRequest, LlmResponse,
-    MessageDeltaPayload, ProviderRequest, ProviderResponse, RawStreamFrame, StreamDecoder,
-    ToolDeclaration, Usage, WireCodec,
+    MessageDeltaPayload, ProviderRequest, ProviderResponse, RawStreamFrame, ResponseFormat,
+    StreamDecoder, ToolDeclaration, ToolChoice, Usage, WireCodec,
 };
 
 use std::collections::BTreeMap;
@@ -30,6 +30,8 @@ impl OpenAiChatCodec {
 
 impl WireCodec for OpenAiChatCodec {
     fn encode_request(&self, request: &LlmRequest) -> Result<ProviderRequest, LlmError> {
+        reject_unsupported_content_blocks(request)?;
+
         let mut messages = Vec::new();
 
         if let Some(system) = &request.system {
@@ -41,6 +43,18 @@ impl WireCodec for OpenAiChatCodec {
         let mut body = serde_json::Map::new();
         body.insert("model".to_string(), Value::String(request.model.clone()));
         body.insert("messages".to_string(), Value::Array(messages));
+
+        if request.stream {
+            body.insert("stream".to_string(), Value::Bool(true));
+        }
+
+        if let Some(response_format) = &request.response_format {
+            body.insert("response_format".to_string(), encode_response_format(response_format));
+        }
+
+        if let Some(tool_choice) = &request.tool_choice {
+            body.insert("tool_choice".to_string(), encode_tool_choice(tool_choice));
+        }
 
         if !request.tools.is_empty() {
             body.insert(
@@ -362,6 +376,59 @@ fn encode_tool(tool: &ToolDeclaration) -> Value {
             "parameters": tool.input_schema,
         }
     })
+}
+
+fn encode_response_format(response_format: &ResponseFormat) -> Value {
+    match response_format {
+        ResponseFormat::JsonObject => serde_json::json!({"type": "json_object"}),
+        ResponseFormat::JsonSchema { schema } => serde_json::json!({
+            "type": "json_schema",
+            "json_schema": {
+                "name": "response",
+                "strict": true,
+                "schema": schema,
+            }
+        }),
+    }
+}
+
+fn encode_tool_choice(tool_choice: &ToolChoice) -> Value {
+    match tool_choice {
+        ToolChoice::Auto => Value::String("auto".to_string()),
+        ToolChoice::None => Value::String("none".to_string()),
+        ToolChoice::Required => Value::String("required".to_string()),
+        ToolChoice::Tool { name } => serde_json::json!({
+            "type": "function",
+            "function": {"name": name},
+        }),
+    }
+}
+
+fn reject_unsupported_content_blocks(request: &LlmRequest) -> Result<(), LlmError> {
+    for message in &request.messages {
+        for block in &message.content {
+            match block {
+                ContentBlock::Image { .. } => {
+                    return Err(LlmError::InvalidRequest {
+                        message: "OpenAiChatCodec does not encode image blocks yet".to_string(),
+                    });
+                }
+                ContentBlock::Document { .. } => {
+                    return Err(LlmError::InvalidRequest {
+                        message: "OpenAiChatCodec does not encode document blocks yet".to_string(),
+                    });
+                }
+                ContentBlock::Reasoning { .. } => {
+                    return Err(LlmError::InvalidRequest {
+                        message: "OpenAiChatCodec does not encode reasoning blocks yet".to_string(),
+                    });
+                }
+                _ => {}
+            }
+        }
+    }
+
+    Ok(())
 }
 
 fn decode_response_body(body_json: Value) -> Result<LlmResponse, LlmError> {

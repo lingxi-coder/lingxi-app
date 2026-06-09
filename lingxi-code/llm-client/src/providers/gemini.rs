@@ -32,6 +32,8 @@ impl GeminiCodec {
 
 impl WireCodec for GeminiCodec {
     fn encode_request(&self, request: &LlmRequest) -> Result<ProviderRequest, LlmError> {
+        reject_unsupported_request_intent(request)?;
+
         let tool_call_names = build_tool_call_name_map(&request.messages);
         let mut body = serde_json::Map::new();
         body.insert(
@@ -352,6 +354,51 @@ fn encode_tool(tool: &ToolDeclaration) -> Value {
         "description": tool.description,
         "parameters": tool.input_schema,
     })
+}
+
+fn reject_unsupported_request_intent(request: &LlmRequest) -> Result<(), LlmError> {
+    if request.stream {
+        return Err(LlmError::InvalidRequest {
+            message: "GeminiCodec does not encode streaming requests yet".to_string(),
+        });
+    }
+
+    if request.response_format.is_some() {
+        return Err(LlmError::InvalidRequest {
+            message: "GeminiCodec does not encode response_format yet".to_string(),
+        });
+    }
+
+    if request.tool_choice.is_some() {
+        return Err(LlmError::InvalidRequest {
+            message: "GeminiCodec does not encode tool_choice yet".to_string(),
+        });
+    }
+
+    for message in &request.messages {
+        for block in &message.content {
+            match block {
+                ContentBlock::Image { .. } => {
+                    return Err(LlmError::InvalidRequest {
+                        message: "GeminiCodec does not encode image blocks yet".to_string(),
+                    });
+                }
+                ContentBlock::Document { .. } => {
+                    return Err(LlmError::InvalidRequest {
+                        message: "GeminiCodec does not encode document blocks yet".to_string(),
+                    });
+                }
+                ContentBlock::Reasoning { .. } => {
+                    return Err(LlmError::InvalidRequest {
+                        message: "GeminiCodec does not encode reasoning blocks yet".to_string(),
+                    });
+                }
+                _ => {}
+            }
+        }
+    }
+
+    Ok(())
 }
 
 fn decode_response_body(body_json: Value) -> Result<LlmResponse, LlmError> {

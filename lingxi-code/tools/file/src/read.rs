@@ -131,6 +131,30 @@ fn validate_content_tokens(content: &str, ext: Option<&str>, max_tokens: u64) ->
     Ok(())
 }
 
+/// Human-readable file size, byte-faithful to claude-code `formatFileSize`
+/// (`src/utils/format.ts`): `< 1KB` ⇒ `"{n} bytes"`; otherwise one decimal with a
+/// trailing `.0` trimmed, suffixed `KB`/`MB`/`GB` (no space). Used by the PDF
+/// routing/extraction messages.
+pub(crate) fn format_file_size(size_in_bytes: u64) -> String {
+    fn trim(x: f64) -> String {
+        let s = format!("{x:.1}");
+        s.strip_suffix(".0").map(str::to_string).unwrap_or(s)
+    }
+    let kb = size_in_bytes as f64 / 1024.0;
+    if kb < 1.0 {
+        return format!("{size_in_bytes} bytes");
+    }
+    if kb < 1024.0 {
+        return format!("{}KB", trim(kb));
+    }
+    let mb = kb / 1024.0;
+    if mb < 1024.0 {
+        return format!("{}MB", trim(mb));
+    }
+    let gb = mb / 1024.0;
+    format!("{}GB", trim(gb))
+}
+
 /// Build the byte-locked too-large error message per spec §5.
 #[must_use]
 pub fn format_too_large(path: &std::path::Path, size: u64) -> String {
@@ -2260,5 +2284,18 @@ mod tests {
             })
             .expect("a base64 document block");
         assert_eq!(media_type, "application/pdf");
+    }
+
+    #[test]
+    fn format_file_size_matches_claude_code() {
+        use super::format_file_size;
+        assert_eq!(format_file_size(0), "0 bytes");
+        assert_eq!(format_file_size(512), "512 bytes");
+        assert_eq!(format_file_size(1024), "1KB");          // 1.0 → trim .0
+        assert_eq!(format_file_size(1536), "1.5KB");
+        assert_eq!(format_file_size(3 * 1024 * 1024), "3MB");
+        assert_eq!(format_file_size(20 * 1024 * 1024), "20MB");
+        assert_eq!(format_file_size(100 * 1024 * 1024), "100MB");
+        assert_eq!(format_file_size(2 * 1024 * 1024 * 1024), "2GB");
     }
 }

@@ -9,6 +9,12 @@ pub const PDF_EXTRACT_SIZE_THRESHOLD: u64 = 3 * 1024 * 1024;
 pub const PDF_MAX_PAGES_PER_READ: u32 = 20;
 /// Max page count for an inline (no-range) read.
 pub const PDF_AT_MENTION_INLINE_THRESHOLD: u32 = 10;
+/// Max raw size for an INLINE document read — claude-code `PDF_TARGET_RAW_SIZE`
+/// (apiLimits.ts, 20 MB). Above this, `readPDF` returns `too_large`.
+pub const PDF_TARGET_RAW_SIZE: u64 = 20 * 1024 * 1024;
+/// Max raw size for PAGE EXTRACTION — claude-code `PDF_MAX_EXTRACT_SIZE`
+/// (apiLimits.ts, 100 MB). Above this, `extractPDFPages` returns `too_large`.
+pub const PDF_MAX_EXTRACT_SIZE: u64 = 100 * 1024 * 1024;
 
 /// `.pdf` extension (claude-code DOCUMENT_EXTENSIONS).
 #[must_use]

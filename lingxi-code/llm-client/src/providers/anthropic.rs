@@ -192,6 +192,9 @@ fn decode_content_block(value: &Value) -> Result<ContentBlock, LlmError> {
         Some("text") => Ok(ContentBlock::Text {
             text: string_field(value, "text")?,
         }),
+        Some("thinking") => Ok(ContentBlock::Reasoning {
+            text: string_field(value, "thinking")?,
+        }),
         Some("tool_use") => Ok(ContentBlock::ToolCall {
             id: string_field(value, "id")?,
             name: string_field(value, "name")?,

@@ -148,3 +148,58 @@ fn stream_decoder_maps_text_delta_and_rejects_garbage() {
     ));
     assert!(decoder.decode_frame(llm_client::RawStreamFrame::new(b"not json".to_vec())).is_err());
 }
+
+#[test]
+fn stream_decoder_covers_required_event_paths_and_reasoning_blocks() {
+    let codec = AnthropicMessagesCodec::new("https://api.anthropic.com", "2023-06-01");
+    let mut decoder = codec.stream_decoder();
+
+    let message_start = decoder.decode_frame(llm_client::RawStreamFrame::new(
+        br#"{"type":"message_start","message":{"id":"msg_3","model":"claude-sonnet-4-20250514","content":[],"usage":{"input_tokens":2,"output_tokens":0}}}"#.to_vec(),
+    )).unwrap();
+    assert!(matches!(&message_start[0], LlmEvent::MessageStart { .. }));
+
+    let text_start = decoder.decode_frame(llm_client::RawStreamFrame::new(
+        br#"{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}"#.to_vec(),
+    )).unwrap();
+    assert!(matches!(&text_start[0], LlmEvent::ContentBlockStart { .. }));
+
+    let reasoning_start = decoder.decode_frame(llm_client::RawStreamFrame::new(
+        br#"{"type":"content_block_start","index":1,"content_block":{"type":"thinking","thinking":""}}"#.to_vec(),
+    ));
+    assert!(reasoning_start.is_ok());
+    let reasoning_start = reasoning_start.unwrap();
+    assert!(matches!(
+        &reasoning_start[0],
+        LlmEvent::ContentBlockStart { content_block: ContentBlock::Reasoning { .. }, .. }
+    ));
+
+    let reasoning_delta = decoder.decode_frame(llm_client::RawStreamFrame::new(
+        br#"{"type":"content_block_delta","index":1,"delta":{"type":"thinking_delta","thinking":"ponder"}}"#.to_vec(),
+    )).unwrap();
+    assert!(matches!(
+        &reasoning_delta[0],
+        LlmEvent::ContentBlockDelta { delta: ContentDelta::ThinkingDelta { thinking }, .. } if thinking == "ponder"
+    ));
+
+    let stop = decoder.decode_frame(llm_client::RawStreamFrame::new(
+        br#"{"type":"content_block_stop","index":1}"#.to_vec(),
+    )).unwrap();
+    assert!(matches!(&stop[0], LlmEvent::ContentBlockStop { index: 1 }));
+
+    let terminal = decoder.decode_frame(llm_client::RawStreamFrame::new(
+        br#"{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"input_tokens":2,"output_tokens":1}}"#.to_vec(),
+    )).unwrap();
+    assert!(matches!(&terminal[0], LlmEvent::MessageDelta { .. }));
+
+    let stop_event = decoder.decode_frame(llm_client::RawStreamFrame::new(
+        br#"{"type":"message_stop"}"#.to_vec(),
+    )).unwrap();
+    assert!(matches!(&stop_event[0], LlmEvent::MessageStop));
+
+    assert!(decoder.decode_frame(llm_client::RawStreamFrame::new(br#"{"type":"ping"}"#.to_vec())).unwrap().is_empty());
+    assert!(matches!(
+        decoder.decode_frame(llm_client::RawStreamFrame::new(br#"{"type":"error"}"#.to_vec())),
+        Err(llm_client::LlmError::ProviderInternal)
+    ));
+}

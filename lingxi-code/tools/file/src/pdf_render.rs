@@ -14,6 +14,10 @@ use crate::pdf_read::PDF_MAX_EXTRACT_SIZE;
 /// pdftoppm render timeout (claude-code `execFileNoThrow` `timeout: 120_000`).
 const PDFTOPPM_TIMEOUT: Duration = Duration::from_secs(120);
 
+/// pdftoppm availability-probe timeout (claude-code `isPdftoppmAvailable`
+/// `execFileNoThrow('pdftoppm', ['-v'], { timeout: 5000 })`).
+const PDFTOPPM_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// Structured failure of PDF page extraction — mirrors claude-code `PDFError`
 /// (`src/utils/pdf.ts`). Each variant maps to a fixed user-facing message and a
 /// stable telemetry code.
@@ -111,20 +115,27 @@ pub fn classify_pdftoppm_failure(stderr: &str) -> PdfRenderError {
 /// Whether `pdftoppm -v` runs (poppler-utils installed). claude-code
 /// (`isPdftoppmAvailable`, pdf.ts:160-169) treats either exit 0 OR any stderr
 /// output as "available" (pdftoppm prints its version banner to stderr and may
-/// exit non-zero on old builds). Not cached — extraction is rare, so we probe
-/// per call (claude-code caches purely as a perf optimization; behavior is
-/// identical).
+/// exit non-zero on old builds). Bounded by [`PDFTOPPM_PROBE_TIMEOUT`] (5s, like
+/// claude-code's `execFileNoThrow(..., { timeout: 5000 })`); a timeout, spawn
+/// error, or not-found all map to "not available" (`false`). `kill_on_drop`
+/// ensures a hung probe is reaped on timeout. Not cached — extraction is rare,
+/// so we probe per call (claude-code caches purely as a perf optimization;
+/// behavior is identical).
 pub async fn is_pdftoppm_available() -> bool {
-    match tokio::process::Command::new("pdftoppm")
+    let child = tokio::process::Command::new("pdftoppm")
         .arg("-v")
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::piped())
-        .output()
-        .await
-    {
-        Ok(out) => out.status.success() || !out.stderr.is_empty(),
-        Err(_) => false, // not found on PATH
+        .kill_on_drop(true)
+        .spawn();
+    let Ok(child) = child else {
+        return false; // not found on PATH / spawn error
+    };
+    match tokio::time::timeout(PDFTOPPM_PROBE_TIMEOUT, child.wait_with_output()).await {
+        Ok(Ok(out)) => out.status.success() || !out.stderr.is_empty(),
+        // timeout (child dropped → SIGKILL) or wait error ⇒ treat as unavailable.
+        _ => false,
     }
 }
 
@@ -162,16 +173,20 @@ pub async fn render_pdf_pages(
     let prefix = dir.path().join("page");
     let args = build_pdftoppm_args(first, last, path, &prefix);
 
-    let output = tokio::time::timeout(
-        PDFTOPPM_TIMEOUT,
-        tokio::process::Command::new("pdftoppm")
-            .args(&args)
-            .stdin(std::process::Stdio::null())
-            .output(),
-    )
-    .await
-    .map_err(|_| PdfRenderError::Unknown("pdftoppm timed out".to_string()))?
-    .map_err(|e| PdfRenderError::Unknown(e.to_string()))?;
+    // Spawn (not `.output()`) so the timeout future owns the `Child`: with
+    // `kill_on_drop(true)`, dropping it on timeout SIGKILLs pdftoppm instead of
+    // orphaning it (tokio `Child` defaults to `kill_on_drop = false`).
+    let child = tokio::process::Command::new("pdftoppm")
+        .args(&args)
+        .stdin(std::process::Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .map_err(|e| PdfRenderError::Unknown(e.to_string()))?;
+
+    let output = tokio::time::timeout(PDFTOPPM_TIMEOUT, child.wait_with_output())
+        .await
+        .map_err(|_| PdfRenderError::Unknown("pdftoppm timed out".to_string()))?
+        .map_err(|e| PdfRenderError::Unknown(e.to_string()))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);

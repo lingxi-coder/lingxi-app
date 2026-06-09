@@ -138,8 +138,10 @@ fn validate_content_tokens(content: &str, ext: Option<&str>, max_tokens: u64) ->
 // The u64 → f64 cast loses precision for values > 2^53 (> 9 PB). File sizes
 // of that magnitude are not realistic for PDF extraction, and claude-code uses
 // JavaScript number (f64) for the same computation. The cast is intentional.
-// Gated: only reachable under pdf-read or pdf-render; dead_code when both are off.
-#[cfg(any(feature = "pdf-read", feature = "pdf-render"))]
+// Gated: its only callers live in pdf-render-gated code (the PDF page-extraction
+// payload and the `TooLarge` render message), and pdf-render implies pdf-read, so
+// gating on pdf-render alone covers every reachable use.
+#[cfg(feature = "pdf-render")]
 #[allow(clippy::cast_precision_loss)]
 pub(crate) fn format_file_size(size_in_bytes: u64) -> String {
     fn trim(x: f64) -> String {
@@ -2414,7 +2416,7 @@ mod tests {
         );
     }
 
-    #[cfg(any(feature = "pdf-read", feature = "pdf-render"))]
+    #[cfg(feature = "pdf-render")]
     #[test]
     fn format_file_size_matches_claude_code() {
         use super::format_file_size;

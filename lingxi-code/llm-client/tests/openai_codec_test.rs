@@ -41,3 +41,49 @@ fn decode_text_and_tool_responses() {
     let decoded = codec.decode_response(tool).unwrap();
     assert!(matches!(decoded.content[0], ContentBlock::ToolCall { ref name, .. } if name == "Bash"));
 }
+
+#[test]
+fn encode_tool_result_as_tool_message_not_tool_call() {
+    let codec = OpenAiChatCodec::new("https://api.openai.com/v1");
+    let mut request = LlmRequest::new("gpt-4o");
+    request.messages.push(llm_client::Message {
+        role: "assistant".to_string(),
+        content: vec![ContentBlock::ToolResult {
+            tool_call_id: "call_1".to_string(),
+            output: serde_json::json!("done"),
+        }],
+    });
+
+    let provider_request = codec.encode_request(&request).unwrap();
+
+    assert_eq!(provider_request.body_json["messages"][0]["role"], "tool");
+    assert_eq!(provider_request.body_json["messages"][0]["tool_call_id"], "call_1");
+    assert_eq!(provider_request.body_json["messages"][0]["content"], "done");
+    assert!(provider_request.body_json["messages"][0].get("tool_calls").is_none());
+}
+
+#[test]
+fn decode_rejects_invalid_tool_call_arguments() {
+    let codec = OpenAiChatCodec::new("https://api.openai.com/v1");
+    let response = ProviderResponse::json(200, serde_json::json!({
+        "id":"chatcmpl-z",
+        "model":"gpt-4o",
+        "choices":[{"index":0,"message":{"role":"assistant","content":null,"tool_calls":[{"id":"call_1","type":"function","function":{"name":"Bash","arguments":"not-json"}}]},"finish_reason":"tool_calls"}]
+    }));
+
+    let err = codec.decode_response(response).unwrap_err();
+    assert!(matches!(err, llm_client::LlmError::InvalidRequest { .. }));
+}
+
+#[test]
+fn decode_rejects_missing_tool_call_arguments() {
+    let codec = OpenAiChatCodec::new("https://api.openai.com/v1");
+    let response = ProviderResponse::json(200, serde_json::json!({
+        "id":"chatcmpl-w",
+        "model":"gpt-4o",
+        "choices":[{"index":0,"message":{"role":"assistant","content":null,"tool_calls":[{"id":"call_1","type":"function","function":{"name":"Bash"}}]},"finish_reason":"tool_calls"}]
+    }));
+
+    let err = codec.decode_response(response).unwrap_err();
+    assert!(matches!(err, llm_client::LlmError::InvalidRequest { .. }));
+}

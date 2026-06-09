@@ -61,6 +61,16 @@ impl WireCodec for OpenAiChatCodec {
 }
 
 fn encode_message(message: &crate::Message) -> Value {
+    if message.content.len() == 1 {
+        if let ContentBlock::ToolResult { tool_call_id, output } = &message.content[0] {
+            return serde_json::json!({
+                "role": "tool",
+                "tool_call_id": tool_call_id,
+                "content": tool_result_content(output),
+            });
+        }
+    }
+
     let mut text = String::new();
     let mut tool_calls = Vec::new();
 
@@ -80,15 +90,10 @@ fn encode_message(message: &crate::Message) -> Value {
                     "arguments": input.to_string(),
                 }
             })),
-            ContentBlock::ToolResult { tool_call_id, output } => tool_calls.push(serde_json::json!({
-                "id": tool_call_id,
-                "type": "function",
-                "function": {
-                    "name": "",
-                    "arguments": output.to_string(),
-                }
-            })),
-            ContentBlock::Image { .. } | ContentBlock::Document { .. } | ContentBlock::Reasoning { .. } => {}
+            ContentBlock::ToolResult { .. }
+            | ContentBlock::Image { .. }
+            | ContentBlock::Document { .. }
+            | ContentBlock::Reasoning { .. } => {}
         }
     }
 
@@ -102,6 +107,13 @@ fn encode_message(message: &crate::Message) -> Value {
         message_json.insert("tool_calls".to_string(), Value::Array(tool_calls));
     }
     Value::Object(message_json)
+}
+
+fn tool_result_content(output: &Value) -> Value {
+    match output {
+        Value::String(text) => Value::String(text.clone()),
+        other => Value::String(other.to_string()),
+    }
 }
 
 fn encode_tool(tool: &ToolDeclaration) -> Value {
@@ -147,8 +159,12 @@ fn decode_response_body(body_json: Value) -> Result<LlmResponse, LlmError> {
                 message: "OpenAI tool call missing function".to_string(),
             })?;
             let name = string_field(function, "name")?;
-            let arguments = function.get("arguments").and_then(Value::as_str).unwrap_or("{}");
-            let input = serde_json::from_str::<Value>(arguments).unwrap_or_else(|_| Value::String(arguments.to_string()));
+            let arguments = function.get("arguments").and_then(Value::as_str).ok_or_else(|| LlmError::InvalidRequest {
+                message: "OpenAI tool call missing function.arguments".to_string(),
+            })?;
+            let input = serde_json::from_str::<Value>(arguments).map_err(|_| LlmError::InvalidRequest {
+                message: "OpenAI tool call has invalid function.arguments JSON".to_string(),
+            })?;
             content.push(ContentBlock::ToolCall { id, name, input });
         }
     }

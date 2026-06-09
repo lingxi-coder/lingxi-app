@@ -18,6 +18,7 @@ pub mod global_config;
 pub mod migrate_auto_updates;
 pub mod migrate_bypass_permissions;
 pub mod migrate_legacy_opus;
+pub mod migrate_mcp_servers;
 pub mod migrate_repl_bridge;
 pub mod migrate_sonnet1m_to_sonnet45;
 pub mod settings_update;

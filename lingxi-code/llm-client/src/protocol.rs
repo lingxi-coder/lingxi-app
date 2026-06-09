@@ -404,6 +404,12 @@ pub fn validate_capabilities(request: &LlmRequest, capabilities: Capabilities) -
         });
     }
 
+    if request.response_format.is_some() && !capabilities.structured_output {
+        return Err(LlmError::UnsupportedCapability {
+            capability: "structured_output".to_string(),
+        });
+    }
+
     for message in &request.messages {
         for block in &message.content {
             match block {

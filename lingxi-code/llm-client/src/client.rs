@@ -17,6 +17,11 @@ impl DefaultLlmClient {
         let mut routes = BTreeMap::new();
 
         for provider in config.providers {
+            if routes.contains_key(&provider.profile_name) {
+                return Err(LlmError::InvalidRequest {
+                    message: format!("duplicate provider profile_name: {}", provider.profile_name),
+                });
+            }
             let codec = build_codec(&provider)?;
             routes.insert(provider.profile_name, codec);
         }

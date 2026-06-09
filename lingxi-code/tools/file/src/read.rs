@@ -47,6 +47,18 @@ pub const DEFAULT_MAX_OUTPUT_TOKENS: u64 = 25_000;
 /// Tool name byte-lock — matches claude-code tool registry.
 pub const TOOL_NAME: &str = "Read";
 
+/// True for the FileRead image extensions (png/jpg/jpeg/gif/webp). Defined here
+/// (not via `image_read`) so it compiles when `image-read` is off.
+fn is_image_path(path: &std::path::Path) -> bool {
+    matches!(
+        path.extension()
+            .and_then(|e| e.to_str())
+            .map(str::to_ascii_lowercase)
+            .as_deref(),
+        Some("png" | "jpg" | "jpeg" | "gif" | "webp")
+    )
+}
+
 /// Bytes-per-token ratio for the rough local token estimate, keyed by file
 /// extension — 1:1 with `bytesPerTokenForFileType` (`tokenEstimation.ts:215-224`).
 /// Dense JSON has many single-char tokens, so its real ratio is ~2 not 4.
@@ -417,6 +429,72 @@ impl FileReadTool {
         );
         self.ctx.bus.log_event(FILE_READ_LIMITS_OVERRIDE, md).await;
     }
+
+    /// Process an image file and return it as multimodal content. The pixels ride
+    /// on `new_messages` as a `ContentBlock::Image` (the frozen tool-result content
+    /// is text-only); the tool-result text is a short placeholder. Mirrors
+    /// claude-code FileRead's image path (the model-facing image block + an
+    /// optional `[Image: original …]` metadata message when the image was resized).
+    #[cfg(feature = "image-read")]
+    async fn read_image_result(
+        &self,
+        invocation_id: &str,
+        canon: &std::path::Path,
+        bytes: Vec<u8>,
+        original_size: u64,
+        started: Instant,
+    ) -> Result<ToolCallResult, ToolError> {
+        let processed = match crate::image_read::process_image(bytes) {
+            Ok(p) => p,
+            Err(e) => {
+                self.emit_failed(invocation_id, "image_process").await;
+                return Err(ToolError::Io(e));
+            }
+        };
+
+        let source = protocol::ImageSource::Base64 {
+            media_type: processed.media_type.clone(),
+            data: processed.base64,
+        };
+        let text = match processed.resized {
+            Some((ow, oh, dw, dh)) => {
+                let scale = f64::from(ow) / f64::from(dw.max(1));
+                format!(
+                    "[Image: original {ow}x{oh}, displayed at {dw}x{dh}. Multiply coordinates by {scale:.2} to map to original image.]"
+                )
+            }
+            None => String::new(),
+        };
+        let msg = protocol::ConversationMessage::user_with_images(
+            protocol::MessageId::new(),
+            text,
+            vec![source],
+        );
+
+        // MIRROR the text-read success path's completion telemetry
+        // (`emit_completed(invocation_id, bytes_read, duration_ms)` at the
+        // `tengu_tool_read_completed` site). The image branch has no line/byte
+        // slice counts (`emit_session_file_read` is text-only — TS fires
+        // `tengu_session_file_read` only after a text read, not on images), so
+        // we emit the simpler completion event with the original file size as the
+        // `bytes_read` figure — telemetry is recorded, not silently skipped.
+        let duration_ms = started.elapsed().as_millis() as u64;
+        self.emit_completed(invocation_id, original_size, duration_ms)
+            .await;
+
+        Ok(ToolCallResult {
+            data: serde_json::json!({
+                "type": "image",
+                "file_path": canon.display().to_string(),
+                "media_type": processed.media_type,
+                "original_size": original_size,
+                "model_content": "[Image content provided in the following message.]",
+            }),
+            new_messages: vec![msg],
+            context_modifier: None,
+            mcp_meta: None,
+        })
+    }
 }
 
 static INPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
@@ -587,13 +665,17 @@ impl Tool for FileReadTool {
             }
         }
 
+        // Image files route to the multimodal image path (claude-code routes by
+        // extension to readImageWithTokenBudget, bypassing the text size cap).
+        let is_image = cfg!(feature = "image-read") && is_image_path(&canon);
+
         // TS applies the byte cap ONLY when no `limit` is supplied
         // (`readFileInRange(..., limit === undefined ? maxSizeBytes : undefined)`
         // — FileReadTool.ts:1026). A ranged read (offset+limit) of a >256KB file
         // must succeed and return just the requested lines, so the cap is gated
         // on `input_limit.is_none()`. A no-limit oversize read still errors with
         // the byte-locked template (fixture-pinned `error_template`).
-        if input_limit.is_none() && size > MAX_FILE_READ_SIZE {
+        if !is_image && input_limit.is_none() && size > MAX_FILE_READ_SIZE {
             self.emit_failed(&invocation_id, "file_too_large").await;
             return Err(ToolError::Io(format_too_large(&canon, size)));
         }
@@ -605,6 +687,13 @@ impl Tool for FileReadTool {
                 return Err(ToolError::Io(e.to_string()));
             }
         };
+
+        #[cfg(feature = "image-read")]
+        if is_image {
+            return self
+                .read_image_result(&invocation_id, &canon, bytes, size, started)
+                .await;
+        }
 
         let head = &bytes[..bytes.len().min(NUL_SCAN_WINDOW)];
         if looks_binary(head) {
@@ -1857,5 +1946,54 @@ mod tests {
             detect_session_file_type(std::path::Path::new("/definitely/not/claude/x.md")),
             None
         );
+    }
+
+    #[cfg(feature = "image-read")]
+    #[tokio::test]
+    async fn reads_image_as_multimodal_new_message() {
+        use protocol::{ContentBlock, ConversationMessage, ImageSource};
+
+        // Build a tiny PNG via the `image` crate (available under
+        // `--features image-read`) and write it under the trusted dir, mirroring
+        // the sibling text-read `call()` tests' tool/ctx/temp-file construction.
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("pic.png");
+        let mut buf = Vec::new();
+        image::DynamicImage::ImageRgb8(image::RgbImage::new(8, 8))
+            .write_to(&mut std::io::Cursor::new(&mut buf), image::ImageFormat::Png)
+            .unwrap();
+        std::fs::write(&target, &buf).unwrap();
+
+        let (ctx, _sink) = make_ctx(&tmp);
+        let tool = FileReadTool::new(ctx);
+        let res = tool
+            .call(
+                json!({ "file_path": target.to_str().unwrap() }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .expect("image read must succeed");
+
+        // The tool-result data is text-only and tagged as an image.
+        assert_eq!(res.data["type"], "image");
+
+        // The pixels ride on a single `new_messages` user message carrying a
+        // base64 `ContentBlock::Image` with the PNG media type.
+        assert_eq!(res.new_messages.len(), 1);
+        let content = match &res.new_messages[0] {
+            ConversationMessage::User { content, .. } => content,
+            other => panic!("expected a User message, got {other:?}"),
+        };
+        let media_type = content
+            .iter()
+            .find_map(|b| match b {
+                ContentBlock::Image {
+                    source: ImageSource::Base64 { media_type, .. },
+                } => Some(media_type.as_str()),
+                _ => None,
+            })
+            .expect("a base64 image block");
+        assert_eq!(media_type, "image/png");
     }
 }

@@ -6,12 +6,11 @@ plugins {
 
 android {
     namespace = "com.lingxi.code"
-    compileSdk = 35
+    compileSdk = 37
 
     defaultConfig {
         applicationId = "com.lingxi.code"
         minSdk = 26
-        targetSdk = 35
         versionCode = 1
         versionName = "0.1.0"
 
@@ -70,25 +69,25 @@ dependencies {
     // Coroutines — required by the extracted device-audio layer
     // (STT/TTS providers use suspendCancellableCoroutine + Flow) and by the
     // generated UniFFI bindings (async callback interfaces).
-    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.11.0")
 
     // UniFFI Kotlin runtime — the generated bindings in
     // com/lingxi/code/bindings/android_aar.kt (one merged file for all four
     // crates) load the Rust cdylib (jniLibs/<abi>/libandroid_aar.so) through
     // JNA. The @aar classifier pulls JNA's bundled native libs so Native.load
     // resolves on-device.
-    implementation("net.java.dev.jna:jna:5.14.0@aar")
+    implementation("net.java.dev.jna:jna:5.19.0@aar")
 
     // Core / lifecycle
-    implementation("androidx.core:core-ktx:1.15.0")
-    implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.9.0")
-    implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.9.0")
+    implementation("androidx.core:core-ktx:1.19.0")
+    implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.10.0")
+    implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.10.0")
     // SavedStateHandle + createSavedStateHandle() — the transcript / draft /
     // active session survive process death (low-memory kill while backgrounded).
-    implementation("androidx.lifecycle:lifecycle-viewmodel-savedstate:2.9.0")
+    implementation("androidx.lifecycle:lifecycle-viewmodel-savedstate:2.10.0")
 
     // Activity + Compose
-    implementation("androidx.activity:activity-compose:1.10.1")
+    implementation("androidx.activity:activity-compose:1.13.0")
 
     // Compose UI
     implementation("androidx.compose.ui:ui")
@@ -98,27 +97,27 @@ dependencies {
     implementation("androidx.compose.material:material-icons-extended")
 
     // Navigation
-    implementation("androidx.navigation:navigation-compose:2.9.6")
+    implementation("androidx.navigation:navigation-compose:2.9.8")
 
     // DataStore (preferences) for persisted theme / accent
-    implementation("androidx.datastore:datastore-preferences:1.1.7")
+    implementation("androidx.datastore:datastore-preferences:1.2.1")
 
     // Secure key store — the Anthropic API key + base URL are encrypted at rest
     // via EncryptedSharedPreferences (AES-256 GCM, key wrapped by the Android
     // Keystore). SHIP-BLOCKER #1: a shipped app has no process env, so the key
     // must live in an encrypted on-device store, never plain DataStore/prefs.
-    implementation("androidx.security:security-crypto:1.1.0-alpha03")
+    implementation("androidx.security:security-crypto:1.1.0")
 
     // Unit tests
     testImplementation("junit:junit:4.13.2")
     // Coroutine/Flow test harness — runTest + UnconfinedTestDispatcher drive the
     // engine reply-stream ordering tests (subscribe-before-submit, terminal
     // completion) on the plain JVM with virtual time.
-    testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.9.0")
+    testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.11.0")
 
     // Instrumented + Compose UI tests
-    androidTestImplementation("androidx.test.ext:junit:1.2.1")
-    androidTestImplementation("androidx.test.espresso:espresso-core:3.6.1")
+    androidTestImplementation("androidx.test.ext:junit:1.3.0")
+    androidTestImplementation("androidx.test.espresso:espresso-core:3.7.0")
     androidTestImplementation("androidx.compose.ui:ui-test-junit4")
 
     // Debug tooling

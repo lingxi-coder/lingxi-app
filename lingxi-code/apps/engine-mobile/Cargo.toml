@@ -31,6 +31,11 @@ uniffi = [
     # governing decision §0.3) so the dep-rule gate stays green.
     "dep:orchestrator",
     "dep:protocol",
+    # SESSIONS/HISTORY: the JSONL session enumerator
+    # (`session::jsonl::loader::list_recent_sessions`) the `ListSessions`
+    # command walks to build a `SessionList`. Engine-tier (no `apps/*` edge),
+    # optional + uniffi-gated like the rest of the runtime-wiring crates.
+    "dep:session",
     "dep:api-client",
     "dep:providers",
     "dep:anthropic-oauth",
@@ -80,6 +85,11 @@ uniffi = { workspace = true, optional = true }
 # is engine-tier (non-leaf) so no `apps/*` dep-rule edge is introduced.
 orchestrator = { path = "../../orchestrator", optional = true }
 protocol = { path = "../../protocol", optional = true }
+# SESSIONS/HISTORY: `list_recent_sessions` enumerates the on-disk JSONL session
+# catalog the mobile `ListSessions` command lowers into a `SessionList`. Same
+# crate `client-adapter::lower_session_metadata` reads its `SessionMetadata`
+# from, so the row type lines up 1:1.
+session = { path = "../../session", optional = true }
 api-client = { path = "../../api-client", optional = true }
 providers = { path = "../../providers", optional = true }
 anthropic-oauth = { path = "../../anthropic-oauth", optional = true }

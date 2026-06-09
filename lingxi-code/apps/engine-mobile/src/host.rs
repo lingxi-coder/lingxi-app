@@ -506,7 +506,27 @@ pub struct MobileEngineHandle {
     /// Number of builtin mobile skills assembled (the M8 smoke signal, retained
     /// so the existing Swift/Kotlin smoke test keeps working).
     skill_count: usize,
+    /// SESSIONS/HISTORY: the `~/.claude`-equivalent root + the `cwd` string +
+    /// the platform filesystem handle, retained from [`MobileConfig`] /
+    /// `Platform` so `submit(ListSessions)` can enumerate the on-disk JSONL
+    /// catalog via [`session::jsonl::loader::list_recent_sessions`] without
+    /// re-reading the environment. The orchestrator does not expose these (it
+    /// only holds the `cwd` as a `PathBuf` internally), so the host keeps its
+    /// own copy — the same pattern the desktop bridge keeps its claude_home for
+    /// the `/resume` picker.
+    claude_home: std::path::PathBuf,
+    /// The connection's working directory as a string (the `cwd` argument
+    /// `list_recent_sessions` keys the per-project JSONL dir on).
+    cwd: String,
+    /// The platform filesystem the JSONL reader walks (same `Arc<dyn
+    /// FileSystem>` the orchestrator's tool context uses).
+    fs: Arc<dyn traits::FileSystem>,
 }
+
+/// SESSIONS/HISTORY: a sensible cap on the number of resumable-session rows the
+/// mobile drawer renders for `ListSessions` when the client sends no explicit
+/// `limit`. Matches the "recent sessions" intent (newest-first, truncated).
+const DEFAULT_SESSION_LIST_LIMIT: usize = 100;
 
 impl MobileEngineHandle {
     /// Number of builtin mobile skills assembled. (Under `uniffi`:
@@ -633,8 +653,22 @@ impl MobileEngineHandle {
     /// - `ForceCompact` / `ClearSession` / `RequestExit` / `Login` / `Logout` →
     ///   their `OrchestratorHandle` / `AuthHandle` entries.
     ///
-    /// Reserved / host-driven commands (`NewSession`/`ResumeSession`/`ListSessions`,
-    /// the task commands — mobile binds no `TaskRegistry`) are accepted and
+    /// Session catalog / lifecycle (SESSIONS/HISTORY):
+    /// - `ListSessions` → enumerate the on-disk JSONL catalog for this
+    ///   connection's project via [`session::jsonl::loader::list_recent_sessions`],
+    ///   lower each row through `client_adapter::lower_session_metadata`, and reply
+    ///   with a `SessionList` (an empty list on any enumerate error — never a
+    ///   crash). A read-only host-owned pull, not a turn.
+    /// - `NewSession` → reset the live orchestrator in place via `clear_session`
+    ///   (clears history + mints a fresh `SessionId`) and report it back with
+    ///   `SessionStarted`. Rejected mid-turn. The DTO's `cwd`/`model` are not
+    ///   applied (changing them is the same orchestrator-swap as resume).
+    /// - `ResumeSession` → BLOCKED on the §0.5 host-owned orchestrator swap:
+    ///   there is no in-place resume seam (`OrchestratorHandle` has no
+    ///   `load_session`; `resume_session_id` is construction-time only). Returns
+    ///   `Rejected` rather than faking a `SessionResumed`.
+    ///
+    /// The task commands (mobile binds no `TaskRegistry`) are accepted and
     /// no-op'd in the foundation (the `#[non_exhaustive]` enum also requires a
     /// catch-all); lighting them up is additive and does not change this seam.
     ///
@@ -830,14 +864,134 @@ impl MobileEngineHandle {
                 Ok(())
             }
 
+            // ── Session catalog (SESSIONS/HISTORY) ──────────────────────────
+            //
+            // Enumerate the on-disk JSONL catalog for THIS connection's project
+            // (`claude_home` + `cwd`), lower each row via the shared
+            // `client_adapter::lower_session_metadata`, and reply with a
+            // `SessionList`. A read-only catalog pull — it does NOT touch the
+            // live orchestrator (decision §0.5: enumeration is host-owned, not a
+            // turn). On any enumerate error (no project dir yet, empty catalog,
+            // unreadable file) we emit an EMPTY `SessionList` rather than an
+            // `Error` or a crash — a fresh device legitimately has no sessions,
+            // and the drawer should render "no sessions", not a failure.
+            ClientCommand::ListSessions { limit } => {
+                let limit = limit
+                    .map_or(DEFAULT_SESSION_LIST_LIMIT, |l| l as usize)
+                    .max(1);
+                let sessions = match session::jsonl::loader::list_recent_sessions(
+                    &self.claude_home,
+                    &self.cwd,
+                    limit,
+                    self.fs.clone(),
+                )
+                .await
+                {
+                    Ok(rows) => rows
+                        .iter()
+                        .map(client_adapter::lowering::lower_session_metadata)
+                        .collect(),
+                    Err(e) => {
+                        // `EmptyDirectory` is the common, benign case (no
+                        // project dir / no `.jsonl` files yet); any other
+                        // LoaderError is logged but still yields an empty list so
+                        // the client never sees a half-state.
+                        tracing::debug!(error = %e, "engine-mobile: ListSessions enumerate yielded no rows");
+                        Vec::new()
+                    }
+                };
+                self.event_sink
+                    .emit(ClientEvent::SessionList { sessions })
+                    .await;
+                Ok(())
+            }
+
+            // ── New session (SESSIONS/HISTORY) ──────────────────────────────
+            //
+            // Reset THIS connection's live orchestrator to a fresh session in
+            // place via `clear_session`, which clears the in-memory history and
+            // mints a new `SessionId` (orchestrator/src/handle_impl.rs) — the
+            // SAME clean, non-swapping path `ClearSession` already uses. We then
+            // report the new id back via `SessionStarted` so the client resets
+            // its transcript (the `cwd` / `model` knobs in the DTO are NOT
+            // applied here — changing the working dir or model mid-connection is
+            // the same invasive orchestrator-swap as resume, so it is left for
+            // the §0.5 follow-up; switching the model already has its own
+            // `SetModel` command). Rejected mid-turn for the same reason
+            // `ClearSession` is.
+            ClientCommand::NewSession { .. } => {
+                let mid_turn = self
+                    .active_cancel
+                    .lock()
+                    .await
+                    .as_ref()
+                    .is_some_and(|t| !t.is_cancelled());
+                if mid_turn {
+                    return Err(ClientError::Rejected {
+                        message: "cannot start a new session while a turn is in flight".into(),
+                    });
+                }
+                let handle: Arc<dyn OrchestratorHandle> = self.inner.orchestrator.clone();
+                handle.clear_session().await.map_err(|e| ClientError::Internal {
+                    message: format!("clear_session failed: {e}"),
+                })?;
+                // Report the freshly-minted session id (bare UUID, matching the
+                // `SessionRowDto.uuid` form a later `ListSessions` returns).
+                let session_id = handle.current_session_id().await.as_uuid().to_string();
+                self.event_sink
+                    .emit(ClientEvent::SessionStarted { session_id })
+                    .await;
+                Ok(())
+            }
+
+            // ── Resume session (SESSIONS/HISTORY) ───────────────────────────
+            //
+            // BLOCKED on the §0.5 host-owned orchestrator swap. Resuming a prior
+            // session means loading that session's messages INTO the live
+            // orchestrator's history. There is NO clean in-place path for this:
+            //
+            //   * `OrchestratorHandle` exposes no `resume`/`load_session` method
+            //     — only `clear_session` (mints a NEW empty session), so it
+            //     cannot adopt an existing transcript.
+            //   * `OrchestratorConfig.resume_session_id` is a CONSTRUCTION-time
+            //     field (orchestrator/src/config.rs) read once when the
+            //     orchestrator is built; the JSONL replay happens during
+            //     construction, not against an already-running orchestrator.
+            //   * `session::SessionResumer` loads from the `SessionStorage`
+            //     directory layout (`<base>/<uuid>/{metadata.json,transcript.jsonl}`),
+            //     a DIFFERENT layout from the JSONL catalog `list_recent_sessions`
+            //     enumerates — and it returns a `LoadedSession`, with no seam to
+            //     splice that into the handle's single, already-constructed
+            //     `ConversationOrchestrator`.
+            //
+            // Genuinely loading the transcript therefore requires REBUILDING /
+            // SWAPPING the handle's single orchestrator (with
+            // `resume_session_id` set) behind the connection-scoped adapter
+            // sinks — exactly the invasive "host-owned orchestrator swap"
+            // follow-up. Per the task contract we do NOT fake it: no
+            // `SessionResumed` is emitted (it would mislead the client into
+            // resetting its transcript to a session we never loaded). We surface
+            // a `Rejected` so the client learns the resume did not happen, and
+            // leave the wiring documented for the follow-up.
+            ClientCommand::ResumeSession { session_id, .. } => {
+                tracing::info!(
+                    %session_id,
+                    "engine-mobile: ResumeSession needs the §0.5 orchestrator-swap follow-up; \
+                     not faking a resume"
+                );
+                Err(ClientError::Rejected {
+                    message: "resume needs the host-owned orchestrator-swap follow-up \
+                              (no in-place orchestrator resume seam yet)"
+                        .into(),
+                })
+            }
+
             // ── Host-driven / reserved in the foundation ────────────────────
             //
-            // Session New/Resume + `ListSessions` are HOST-owned orchestrator
-            // swaps (§0.5); the task commands have no engine handle on mobile
-            // (`build_mobile` binds `task_registry: None`). They are accepted and
-            // no-op'd here — lighting them up is additive and does not change this
-            // seam's shape. The `#[non_exhaustive]` enum also requires a
-            // catch-all.
+            // The task commands have no engine handle on mobile (`build_mobile`
+            // binds `task_registry: None`). They are accepted and no-op'd here —
+            // lighting them up is additive and does not change this seam's shape.
+            // The `#[non_exhaustive]` enum also requires a catch-all.
             other => {
                 tracing::debug!(?other, "engine-mobile: command not routed by submit in the foundation");
                 Ok(())
@@ -1019,6 +1173,16 @@ pub fn build_mobile_engine_inner(
         .build()
         .map_err(|e| MobileEngineError::Internal(format!("tokio runtime build failed: {e}")))?;
 
+    // SESSIONS/HISTORY: capture the session-enumeration inputs BEFORE `cfg` /
+    // `platform` are moved into `build_mobile_inner`. `list_recent_sessions`
+    // needs the `claude_home` root, the `cwd` string, and the platform
+    // filesystem; the orchestrator does not surface these, so the handle holds
+    // its own copy. `cwd` is lowered to a string here (the loader keys the
+    // per-project JSONL dir on the cwd string, decision §0.4 path handling).
+    let claude_home = cfg.claude_home.clone();
+    let cwd = cfg.cwd.to_string_lossy().into_owned();
+    let fs = platform.filesystem();
+
     // F3-05: interpose a recording sink so the inbound `ApprovePermission` /
     // `DenyPermission` command path (which carries only the `request_id`) can
     // recover the tool name for an `AllowAlways` rule append. The foreign sink
@@ -1051,6 +1215,9 @@ pub fn build_mobile_engine_inner(
         active_cancel: Arc::new(Mutex::new(None)),
         tool_names,
         skill_count,
+        claude_home,
+        cwd,
+        fs,
     }))
 }
 
@@ -1347,5 +1514,183 @@ mod tests {
             cancel_result.is_ok(),
             "submit must resolve on the handle-owned runtime: {cancel_result:?}"
         );
+    }
+
+    // ── SESSIONS/HISTORY: the session catalog / lifecycle commands ──────────
+
+    /// Seed ONE valid `<uuid>.jsonl` session file under the project dir
+    /// `list_recent_sessions` resolves for (`<claude_home>/projects/<sanitized
+    /// cwd>/<uuid>.jsonl`), with a single first-user-message line so
+    /// `extract_title` derives a non-empty title. Returns the session uuid +
+    /// the title it should surface, so the assertions are exact (not "any row").
+    fn seed_one_session(
+        cwd: &std::path::Path,
+        claude_home: &std::path::Path,
+    ) -> (String, String) {
+        let uuid = "11111111-1111-4111-8111-111111111111";
+        let cwd_str = cwd.to_string_lossy().into_owned();
+        // EXACTLY the path the loader resolves (it reuses `session_path`'s
+        // `<claude_home>/projects/<project_dir_name(cwd)>/<uuid>.jsonl` layout).
+        let path = session::jsonl::session_path(claude_home, &cwd_str, uuid);
+        std::fs::create_dir_all(path.parent().unwrap()).expect("mkdir project dir");
+
+        let title = "list my recent sessions";
+        // A minimal first-turn line: outer `type:"user"` + inner Anthropic
+        // user-message shape so `extract_title` returns `title`. `parentUuid`
+        // is null (first turn). All outer fields the schema requires are present.
+        let line = serde_json::json!({
+            "type": "user",
+            "uuid": uuid,
+            "parentUuid": null,
+            "sessionId": uuid,
+            "timestamp": "2026-06-04T12:00:00.000Z",
+            "cwd": cwd_str,
+            "version": "test",
+            "message": { "role": "user", "content": title },
+        });
+        std::fs::write(&path, format!("{line}\n")).expect("write jsonl");
+        (uuid.to_string(), title.to_string())
+    }
+
+    /// SESSIONS/HISTORY: `submit(ListSessions)` enumerates the on-disk JSONL
+    /// catalog for this connection's project and emits a `SessionList` whose row
+    /// is the lowered `SessionMetadata` of the seeded file — the same lowering
+    /// (`client_adapter::lower_session_metadata`) the desktop bridge uses, so the
+    /// mobile drawer gets a real catalog instead of MockData.
+    #[test]
+    fn submit_list_sessions_emits_seeded_row() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        // `test_config` roots `cwd` at the temp dir and `claude_home` at
+        // `<tmp>/.claude` — seed under exactly that pair.
+        let claude_home = tmp.path().join(".claude");
+        let (uuid, title) = seed_one_session(tmp.path(), &claude_home);
+
+        let (handle, listener) = build_submit_handle(tmp.path());
+
+        handle.runtime().block_on(async {
+            handle
+                .submit(ClientCommand::ListSessions { limit: None })
+                .await
+                .expect("submit(ListSessions) ok");
+
+            let received = listener.received.lock().await;
+            let list = received
+                .iter()
+                .find_map(|e| match e {
+                    Ev::SessionList { sessions } => Some(sessions.clone()),
+                    _ => None,
+                })
+                .expect("a SessionList event must have been emitted");
+
+            assert_eq!(list.len(), 1, "exactly the one seeded session row");
+            let row = &list[0];
+            assert_eq!(row.uuid, uuid, "row carries the seeded session uuid");
+            assert_eq!(row.title, title, "row carries the extracted title");
+            assert_eq!(row.message_count, 1, "one JSONL line was seeded");
+            assert!(
+                row.path.ends_with(&format!("{uuid}.jsonl")),
+                "row.path points at the seeded file, got {}",
+                row.path
+            );
+        });
+    }
+
+    /// SESSIONS/HISTORY: with NO project dir seeded, `submit(ListSessions)` still
+    /// emits a `SessionList` — an EMPTY one — rather than an `Error` or a crash
+    /// (a fresh device legitimately has no sessions; the drawer renders "none").
+    #[test]
+    fn submit_list_sessions_empty_when_no_catalog() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let (handle, listener) = build_submit_handle(tmp.path());
+
+        handle.runtime().block_on(async {
+            handle
+                .submit(ClientCommand::ListSessions { limit: Some(50) })
+                .await
+                .expect("submit(ListSessions) ok even with no catalog");
+
+            let received = listener.received.lock().await;
+            let list = received
+                .iter()
+                .find_map(|e| match e {
+                    Ev::SessionList { sessions } => Some(sessions.clone()),
+                    _ => None,
+                })
+                .expect("a SessionList event must still be emitted");
+            assert!(list.is_empty(), "no catalog ⇒ empty SessionList, not an error");
+        });
+    }
+
+    /// SESSIONS/HISTORY: `submit(NewSession)` resets the live orchestrator in
+    /// place (clears history + mints a fresh `SessionId`) and reports it back
+    /// with a `SessionStarted` carrying the new id, so the client can reset its
+    /// transcript. The id must differ from the connection's prior session id.
+    #[test]
+    fn submit_new_session_emits_session_started() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let (handle, listener) = build_submit_handle(tmp.path());
+
+        handle.runtime().block_on(async {
+            use traits::OrchestratorHandle;
+            let before = handle
+                .inner()
+                .orchestrator
+                .current_session_id()
+                .await
+                .as_uuid()
+                .to_string();
+
+            handle
+                .submit(ClientCommand::NewSession {
+                    cwd: None,
+                    model: None,
+                })
+                .await
+                .expect("submit(NewSession) ok");
+
+            let received = listener.received.lock().await;
+            let started = received
+                .iter()
+                .find_map(|e| match e {
+                    Ev::SessionStarted { session_id } => Some(session_id.clone()),
+                    _ => None,
+                })
+                .expect("a SessionStarted event must have been emitted");
+            assert!(!started.is_empty(), "SessionStarted carries the new id");
+            assert_ne!(
+                started, before,
+                "NewSession must mint a fresh session id (history reset)"
+            );
+        });
+    }
+
+    /// SESSIONS/HISTORY: `submit(ResumeSession)` is HONESTLY rejected — there is
+    /// no in-place orchestrator-resume seam yet (the §0.5 host-owned swap
+    /// follow-up). It must NOT emit a `SessionResumed` (which would mislead the
+    /// client into resetting its transcript to a session we never loaded).
+    #[test]
+    fn submit_resume_session_is_rejected_not_faked() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let (handle, listener) = build_submit_handle(tmp.path());
+
+        handle.runtime().block_on(async {
+            let result = handle
+                .submit(ClientCommand::ResumeSession {
+                    session_id: "11111111-1111-4111-8111-111111111111".into(),
+                    cwd: None,
+                })
+                .await;
+
+            assert!(
+                matches!(result, Err(client_protocol::error::ClientError::Rejected { .. })),
+                "resume must be Rejected (no in-place resume seam), got {result:?}"
+            );
+
+            let received = listener.received.lock().await;
+            assert!(
+                !received.iter().any(|e| matches!(e, Ev::SessionResumed { .. })),
+                "resume must NOT fake a SessionResumed event"
+            );
+        });
     }
 }

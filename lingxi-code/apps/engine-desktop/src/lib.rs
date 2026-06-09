@@ -60,6 +60,20 @@ use tokio::sync::RwLock;
 use tool_api::{BuiltinToolContext, ToolRegistry};
 use traits::{AuthHandle, McpTransport, OrchestratorHandle, OutputStream};
 
+/// Re-export the pure model-deprecation lookup (`providers::deprecation`) at the
+/// composition-root surface so the host binary can compute the startup
+/// deprecation notice without taking a direct `providers` dependency.
+///
+/// The CLI host (`apps/cli`) resolves the same model id it threads into
+/// [`DesktopConfig::default_model`] (argv `--model`, else the desktop default),
+/// passes it here, and surfaces the returned warning at startup — the bounded
+/// stand-in for claude-code's `getModelDeprecationWarning(resolvedInitialModel)`
+/// startup-notification-queue entry (`main.tsx:2873`/`2889-2896`). With any
+/// current (Claude 4-generation) default model the lookup returns `None`, so the
+/// startup output stays byte-identical until a user configures one of the
+/// deprecated Claude 3 ids.
+pub use providers::deprecation::model_deprecation_warning;
+
 /// M10 (T13): per-teammate `StateMachinePool` slot cap.
 ///
 /// Teammates are PERSISTENT: each one parks on `wait_for_message` between

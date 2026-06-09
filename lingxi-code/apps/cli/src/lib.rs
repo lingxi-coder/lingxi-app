@@ -120,6 +120,40 @@ pub async fn run_cli(args: Vec<OsString>) -> i32 {
         }
     };
 
+    // (W40-follow-up) One-time startup notices, the bounded stand-in for
+    // claude-code's startup notification queue (`main.tsx:2872-2896`). TS pushes
+    // up to two HIGH-priority notices onto a UI queue rendered above the REPL:
+    // the model-deprecation warning and the permission-mode notice. The Rust CLI
+    // has no UI notification queue, so — per the brief — we emit the bounded
+    // subset as a plain startup line instead of building that abstraction.
+    //
+    // Surfaced here: the DEPRECATION warning. `startup_deprecation_notice`
+    // resolves the same initial model `resolve_desktop_config` threads into the
+    // engine (`--model`, else the desktop default — the analog of TS
+    // `resolvedInitialModel = parseUserSpecifiedModel(initialMainLoopModel ??
+    // getDefaultMainLoopModel())`) and returns `Some` only when that model is
+    // deprecated for the active provider. It goes to STDERR so `--json` stdout
+    // stays parseable (the same channel discipline the REPL's `"> "` prompt
+    // uses). SAFETY: with any current (Claude 4-generation) default model the
+    // lookup is `None`, so this prints nothing and startup is byte-identical.
+    //
+    // DEFERRED: the sibling permission-mode notice (TS
+    // `permissionModeNotification`, `main.tsx:2882-2887`). In TS it is set ONLY
+    // when `--dangerously-skip-permissions` requested bypassPermissions mode AND
+    // that mode was disabled by org policy / settings (one of two exact strings,
+    // `permissionSetup.ts:783-789`). The Rust CLI exposes no
+    // `--permission-mode` / `--dangerously-skip-permissions` flag (`argv.rs`) and
+    // hardwires `BuiltinToolContext.permission_mode = PermissionMode::Default`
+    // (`engine-desktop:1395`); the only mode-resolution path
+    // (`engine-desktop:1066`) is gated behind opt-in `LINGXI_ENFORCE_PERMISSIONS`
+    // and never produces the bypass-disabled notification. So this notice is
+    // unreachable without first porting `initialPermissionModeFromCLI` (a new CLI
+    // flag + the bypass-disable settings check threaded to startup) — out of
+    // scope here, deferred with that precise missing piece.
+    if let Some(notice) = startup_deprecation_notice(&parsed) {
+        eprintln!("{notice}");
+    }
+
     // --resume routes through run::run_resume, which itself splits (M7-12):
     //   <uuid>            → load by id
     //   (none) + TTY      → iocraft Resume screen
@@ -130,4 +164,109 @@ pub async fn run_cli(args: Vec<OsString>) -> i32 {
 
     let chosen = mode::decide_mode(&parsed);
     mode::dispatch(chosen, &parsed, &runtime, sink).await
+}
+
+/// Resolve the initial main-loop model the engine will use, then return the
+/// model-deprecation startup notice for it (or `None` when current).
+///
+/// The model resolution is byte-identical to the one
+/// `init::resolve_desktop_config` threads into `DesktopConfig.default_model`:
+/// the `--model` override if present, else the desktop default
+/// (`engine_desktop::DesktopConfig::default().default_model`). This mirrors
+/// claude-code's `resolvedInitialModel = parseUserSpecifiedModel(
+/// initialMainLoopModel ?? getDefaultMainLoopModel())` (`main.tsx:2116`), the
+/// same value fed to `getModelDeprecationWarning` at `main.tsx:2873`.
+///
+/// The lookup itself is `providers::deprecation::model_deprecation_warning`
+/// (re-exported through `engine_desktop` so the CLI needs no direct `providers`
+/// dependency); it returns `Some(warning)` only for a deprecated model under the
+/// active provider and `None` otherwise — so a current default model yields
+/// `None` and the caller prints nothing (byte-identical startup).
+fn startup_deprecation_notice(argv: &Argv) -> Option<String> {
+    let resolved_model = argv
+        .model
+        .clone()
+        .unwrap_or_else(|| engine_desktop::DesktopConfig::default().default_model);
+    engine_desktop::model_deprecation_warning(Some(&resolved_model))
+}
+
+#[cfg(test)]
+mod startup_notice_tests {
+    use super::*;
+
+    fn argv_with_model(model: Option<&str>) -> Argv {
+        Argv {
+            prompt: None,
+            print: false,
+            resume: None,
+            model: model.map(String::from),
+            fallback_model: None,
+            cwd: None,
+            no_stream: false,
+            json: false,
+            debug: false,
+            no_tui: false,
+            continue_session: false,
+            fork_session: false,
+        }
+    }
+
+    /// SAFETY: the resolved DEFAULT model (no `--model`) is a current Claude 4
+    /// id, so the deprecation lookup returns `None` and startup prints nothing —
+    /// byte-identical to before this notice landed. This is the common-case
+    /// invariant the brief pins.
+    #[test]
+    fn default_model_yields_no_notice() {
+        // Belt-and-suspenders: assert against the actual desktop default rather
+        // than a hardcoded literal so a future default bump can't silently start
+        // emitting a notice at every startup.
+        let default_model = engine_desktop::DesktopConfig::default().default_model;
+        assert!(
+            engine_desktop::model_deprecation_warning(Some(&default_model)).is_none(),
+            "the shipped desktop default model ({default_model}) must not be deprecated, \
+             else every startup would emit a notice"
+        );
+        assert_eq!(startup_deprecation_notice(&argv_with_model(None)), None);
+    }
+
+    /// A `--model` override naming a CURRENT model still yields no notice.
+    #[test]
+    fn current_override_model_yields_no_notice() {
+        assert_eq!(
+            startup_deprecation_notice(&argv_with_model(Some("claude-opus-4-7"))),
+            None
+        );
+    }
+
+    /// A `--model` override naming a DEPRECATED model surfaces the exact
+    /// TS-faithful warning line (`deprecation.ts:100` text, byte-locked
+    /// including the leading `⚠ ` glyph). This is the only condition under which
+    /// startup emits anything. The provider env is cleared first so the
+    /// first-party retirement date is the one asserted (the table carries a
+    /// different date per provider; see `providers::deprecation`).
+    #[test]
+    fn deprecated_override_model_yields_first_party_notice() {
+        let prior = [
+            ("CLAUDE_CODE_USE_BEDROCK", std::env::var_os("CLAUDE_CODE_USE_BEDROCK")),
+            ("CLAUDE_CODE_USE_VERTEX", std::env::var_os("CLAUDE_CODE_USE_VERTEX")),
+            ("CLAUDE_CODE_USE_FOUNDRY", std::env::var_os("CLAUDE_CODE_USE_FOUNDRY")),
+        ];
+        for (k, _) in &prior {
+            std::env::remove_var(k);
+        }
+
+        let notice = startup_deprecation_notice(&argv_with_model(Some("claude-3-opus-20240229")))
+            .expect("a deprecated --model must produce a startup notice");
+        assert_eq!(
+            notice,
+            "⚠ Claude 3 Opus will be retired on January 5, 2026. Consider switching to a newer model."
+        );
+
+        // Restore any provider flags this test cleared.
+        for (k, v) in prior {
+            if let Some(v) = v {
+                std::env::set_var(k, v);
+            }
+        }
+    }
 }

@@ -19,8 +19,11 @@ pub mod migrate_auto_updates;
 pub mod migrate_bypass_permissions;
 pub mod migrate_legacy_opus;
 pub mod migrate_mcp_servers;
+pub mod migrate_opus_to_opus1m;
 pub mod migrate_repl_bridge;
+pub mod migrate_reset_pro_to_opus;
 pub mod migrate_sonnet1m_to_sonnet45;
+pub mod migrate_sonnet45_to_46;
 pub mod settings_update;
 
 #[cfg(test)]

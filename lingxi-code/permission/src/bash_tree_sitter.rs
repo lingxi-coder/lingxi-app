@@ -91,3 +91,247 @@ mod tests {
         assert_eq!(has_actual_operator_nodes(&"a".repeat(10_000)), Some(false));
     }
 }
+
+// ---------------------------------------------------------------------------
+// Quote-context extraction. Ports the `extractQuoteContext` half of
+// claude-code `src/utils/bash/treeSitterAnalysis.ts`. tree-sitter offsets
+// (start_byte/end_byte) are BYTE offsets, so every span is a byte range into
+// command.as_bytes(); final strings are rebuilt via String::from_utf8_lossy.
+// ---------------------------------------------------------------------------
+
+/// Quote spans collected in one DFS (TS `QuoteSpans`). Each `(start,end)` is a
+/// half-open byte range. `raw`=single-quoted, `ansi_c`=`$'…'` (span INCLUDES the
+/// leading `$`), `double`=`"…"` outermost-only, `heredoc`=QUOTED heredoc only.
+#[derive(Default)]
+struct QuoteSpans {
+    raw: Vec<(usize, usize)>,
+    ansi_c: Vec<(usize, usize)>,
+    double: Vec<(usize, usize)>,
+    heredoc: Vec<(usize, usize)>,
+}
+
+/// Single-pass DFS collecting every quote span (TS `collectQuoteSpans`):
+/// `raw_string/ansi_c_string` push + RETURN; string pushes outermost only then
+/// recurses `in_double=true` then RETURN; quoted `heredoc_redirect` (first
+/// `heredoc_start` byte is ' " or \\) pushes + RETURN, else falls through.
+fn collect_quote_spans(node: Node<'_>, src: &[u8], out: &mut QuoteSpans, in_double: bool) {
+    let span = (node.start_byte(), node.end_byte());
+    match node.kind() {
+        "raw_string" => {
+            out.raw.push(span);
+            return;
+        }
+        "ansi_c_string" => {
+            out.ansi_c.push(span);
+            return;
+        }
+        "string" => {
+            if !in_double {
+                out.double.push(span);
+            }
+            for child in children(node) {
+                collect_quote_spans(child, src, out, true);
+            }
+            return;
+        }
+        "heredoc_redirect" => {
+            let mut is_quoted = false;
+            for child in children(node) {
+                if child.kind() == "heredoc_start" {
+                    let first = src.get(child.start_byte()).copied();
+                    is_quoted = matches!(first, Some(b'\'' | b'"' | b'\\'));
+                    break;
+                }
+            }
+            if is_quoted {
+                out.heredoc.push(span);
+                return;
+            }
+        }
+        _ => {}
+    }
+    for child in children(node) {
+        collect_quote_spans(child, src, out, in_double);
+    }
+}
+
+/// Set of every byte position covered by `spans` (TS `buildPositionSet`).
+fn build_position_set(spans: &[(usize, usize)]) -> std::collections::HashSet<usize> {
+    let mut set = std::collections::HashSet::new();
+    for &(start, end) in spans {
+        for i in start..end {
+            set.insert(i);
+        }
+    }
+    set
+}
+
+/// Drop spans strictly contained within another (TS `dropContainedSpans`).
+/// Equal-extent duplicates both survive. Generic via a `bounds` closure.
+fn drop_contained_spans<T: Clone>(spans: &[T], bounds: impl Fn(&T) -> (usize, usize)) -> Vec<T> {
+    spans
+        .iter()
+        .enumerate()
+        .filter(|(i, s)| {
+            let (ss, se) = bounds(s);
+            !spans.iter().enumerate().any(|(j, other)| {
+                if j == *i {
+                    return false;
+                }
+                let (os, oe) = bounds(other);
+                os <= ss && oe >= se && (os < ss || oe > se)
+            })
+        })
+        .map(|(_, s)| s.clone())
+        .collect()
+}
+
+/// Remove `spans` from `command` (TS `removeSpans`): drop contained, sort by
+/// start descending, splice out.
+fn remove_spans(command: &str, spans: &[(usize, usize)]) -> String {
+    if spans.is_empty() {
+        return command.to_string();
+    }
+    let mut sorted: Vec<(usize, usize)> = drop_contained_spans(spans, |&(s, e)| (s, e));
+    sorted.sort_by(|a, b| b.0.cmp(&a.0));
+    let mut bytes = command.as_bytes().to_vec();
+    for &(start, end) in &sorted {
+        bytes.drain(start..end);
+    }
+    String::from_utf8_lossy(&bytes).into_owned()
+}
+
+/// Replace each span's content with `open + close` (TS `replaceSpansKeepQuotes`).
+fn replace_spans_keep_quotes(command: &str, spans: &[(usize, usize, String, String)]) -> String {
+    if spans.is_empty() {
+        return command.to_string();
+    }
+    let mut sorted = drop_contained_spans(spans, |s| (s.0, s.1));
+    sorted.sort_by(|a, b| b.0.cmp(&a.0));
+    let mut bytes = command.as_bytes().to_vec();
+    for (start, end, open, close) in &sorted {
+        let mut repl = Vec::with_capacity(open.len() + close.len());
+        repl.extend_from_slice(open.as_bytes());
+        repl.extend_from_slice(close.as_bytes());
+        bytes.splice(*start..*end, repl);
+    }
+    String::from_utf8_lossy(&bytes).into_owned()
+}
+
+/// Three quote-stripped views of a command (TS `QuoteContext`).
+pub struct QuoteContext {
+    /// Single-quoted/ANSI-C/heredoc content removed and double-quote delimiters
+    /// dropped, but content inside double quotes preserved.
+    pub with_double_quotes: String,
+    /// All quoted spans (single, ANSI-C, double, quoted heredoc) removed entirely.
+    pub fully_unquoted: String,
+    /// All quoted spans emptied but their surrounding quote characters kept.
+    pub unquoted_keep_quote_chars: String,
+}
+
+/// Extract quote context from the AST (TS `extractQuoteContext`). `None` when
+/// the command is empty / over the length cap / unparseable.
+#[must_use]
+pub fn extract_quote_context(command: &str) -> Option<QuoteContext> {
+    let tree = parse(command)?;
+    let src = command.as_bytes();
+
+    let mut spans = QuoteSpans::default();
+    collect_quote_spans(tree.root_node(), src, &mut spans, false);
+
+    let mut single_quote_positions: Vec<(usize, usize)> = Vec::new();
+    single_quote_positions.extend_from_slice(&spans.raw);
+    single_quote_positions.extend_from_slice(&spans.ansi_c);
+    single_quote_positions.extend_from_slice(&spans.heredoc);
+    let single_quote_set = build_position_set(&single_quote_positions);
+    let mut double_quote_delim_set = std::collections::HashSet::new();
+    for &(start, end) in &spans.double {
+        double_quote_delim_set.insert(start);
+        double_quote_delim_set.insert(end - 1);
+    }
+    let mut with_double_bytes: Vec<u8> = Vec::with_capacity(src.len());
+    for (i, &b) in src.iter().enumerate() {
+        if single_quote_set.contains(&i) || double_quote_delim_set.contains(&i) {
+            continue;
+        }
+        with_double_bytes.push(b);
+    }
+    let with_double_quotes = String::from_utf8_lossy(&with_double_bytes).into_owned();
+
+    let mut all_quote_spans: Vec<(usize, usize)> = Vec::new();
+    all_quote_spans.extend_from_slice(&spans.raw);
+    all_quote_spans.extend_from_slice(&spans.ansi_c);
+    all_quote_spans.extend_from_slice(&spans.double);
+    all_quote_spans.extend_from_slice(&spans.heredoc);
+    let fully_unquoted = remove_spans(command, &all_quote_spans);
+
+    let mut swap: Vec<(usize, usize, String, String)> = Vec::new();
+    for &(s, e) in &spans.raw {
+        swap.push((s, e, "'".to_string(), "'".to_string()));
+    }
+    for &(s, e) in &spans.ansi_c {
+        swap.push((s, e, "$'".to_string(), "'".to_string()));
+    }
+    for &(s, e) in &spans.double {
+        swap.push((s, e, "\"".to_string(), "\"".to_string()));
+    }
+    for &(s, e) in &spans.heredoc {
+        swap.push((s, e, String::new(), String::new()));
+    }
+    let unquoted_keep_quote_chars = replace_spans_keep_quotes(command, &swap);
+
+    Some(QuoteContext {
+        with_double_quotes,
+        fully_unquoted,
+        unquoted_keep_quote_chars,
+    })
+}
+
+#[cfg(test)]
+mod quote_context_tests {
+    use super::*;
+
+    fn ctx(cmd: &str) -> QuoteContext {
+        extract_quote_context(cmd).expect("parseable command")
+    }
+
+    #[test]
+    fn plain_command_unchanged() {
+        let c = ctx("echo hello world");
+        assert_eq!(c.with_double_quotes, "echo hello world");
+        assert_eq!(c.fully_unquoted, "echo hello world");
+        assert_eq!(c.unquoted_keep_quote_chars, "echo hello world");
+    }
+
+    #[test]
+    fn single_quotes_removed_double_path_and_fully() {
+        let c = ctx("echo 'a;b'");
+        assert_eq!(c.with_double_quotes, "echo ");
+        assert_eq!(c.fully_unquoted, "echo ");
+        assert_eq!(c.unquoted_keep_quote_chars, "echo ''");
+    }
+
+    #[test]
+    fn double_quotes_content_kept_for_with_double_delims_dropped() {
+        let c = ctx(r#"echo "a;b""#);
+        assert_eq!(c.with_double_quotes, "echo a;b");
+        assert_eq!(c.fully_unquoted, "echo ");
+        assert_eq!(c.unquoted_keep_quote_chars, r#"echo """#);
+    }
+
+    #[test]
+    fn nested_single_inside_double() {
+        let c = ctx(r#"echo "$(echo 'hi')""#);
+        assert_eq!(c.with_double_quotes, "echo $(echo )");
+        assert_eq!(c.fully_unquoted, "echo ");
+        assert_eq!(c.unquoted_keep_quote_chars, r#"echo """#);
+    }
+
+    #[test]
+    fn ansi_c_string_includes_leading_dollar() {
+        let c = ctx("echo $'x'");
+        assert_eq!(c.with_double_quotes, "echo ");
+        assert_eq!(c.fully_unquoted, "echo ");
+        assert_eq!(c.unquoted_keep_quote_chars, "echo $''");
+    }
+}

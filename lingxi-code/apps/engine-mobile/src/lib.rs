@@ -102,7 +102,7 @@ pub fn register_mobile_tools(reg: &mut ToolRegistry, ctx: BuiltinToolContext) {
     // ----- cross-platform subset (also linked by engine-desktop) -----------
     tool_file::register_all(reg, ctx.clone());
     tool_task::register_all(reg, ctx.clone());
-    tool_web::register_all(reg, ctx.clone());
+    tool_web::register_all(reg, ctx.clone(), None);
     tool_plan::register_all(reg, ctx.clone());
     tool_meta::register_all(reg, ctx.clone());
     tool_cron::register_all(reg, ctx.clone());

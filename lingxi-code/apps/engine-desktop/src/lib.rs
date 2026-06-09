@@ -339,7 +339,7 @@ pub fn desktop_tool_registry(
     // gets the hermetic `EmptySkillLoader` (tool name unchanged → snapshot-safe).
     // No `CwdChanged` firer here either (offline factory has no hook executor) —
     // the BashTool is the byte-identical no-firer variant.
-    register_desktop_tools(&mut reg, ctx, coordinator, cron_auth, None, None);
+    register_desktop_tools(&mut reg, ctx, coordinator, cron_auth, None, None, None);
     reg
 }
 
@@ -363,6 +363,7 @@ pub fn register_desktop_tools(
     cron_auth: Option<Arc<dyn tool_cron::ClaudeAiAuthProvider>>,
     skill_loader: Option<Arc<dyn tool_skill::skill::SkillLoader>>,
     cwd_changed_firer: hooks::OptionalCwdChangedFirer,
+    web_side_query: Option<Arc<dyn sidequery::SideQueryClient>>,
 ) {
     // ----- cross-platform tool crates (also linked by engine-mobile, P11) ---
     tool_file::register_all(reg, ctx.clone());
@@ -374,7 +375,7 @@ pub fn register_desktop_tools(
     // snapshot is unaffected. `engine-mobile` never reaches this call (it does
     // not register the shell tools).
     tool_shell::register_all_with_cwd_firer(reg, ctx.clone(), cwd_changed_firer);
-    tool_web::register_all(reg, ctx.clone());
+    tool_web::register_all(reg, ctx.clone(), web_side_query);
     tool_plan::register_all(reg, ctx.clone());
     tool_meta::register_all(reg, ctx.clone());
     // `RemoteTrigger` gets the credential-store auth provider on desktop so it
@@ -1287,7 +1288,7 @@ pub async fn build(
         ));
     let forked_runner = Arc::new(
         sidequery::ForkedAgentRunner::new(Arc::new(sidequery::NoopSubagentSlotProvider))
-            .with_side_query_client(side_query_client, orch_cfg.model.clone()),
+            .with_side_query_client(side_query_client.clone(), orch_cfg.model.clone()),
     );
     let autocompactor =
         compaction::Autocompactor::with_forked_runner(forked_runner, cache_safe_slot.clone());
@@ -1555,6 +1556,7 @@ pub async fn build(
         Some(cron_auth),
         Some(skill_loader),
         cwd_changed_firer,
+        Some(side_query_client.clone()),
     );
     for (conn_id, mcp_tools) in
         tool_mcp::build_registered_mcp_tools(&mcp_registry, mcp_tool_ctx).await

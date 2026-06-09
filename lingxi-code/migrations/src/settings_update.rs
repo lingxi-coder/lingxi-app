@@ -70,7 +70,8 @@ pub fn update_settings(
     }
     let serialized = serde_json::to_string_pretty(&Value::Object(map))
         .map_err(|e| format!("Failed to serialize settings for {}: {e}", path.display()))?;
-    std::fs::write(path, serialized + "\n")
+    // 0o600 on creation, like every TS settings/config write (`config.ts:1134`).
+    crate::global_config::write_secure(path, &(serialized + "\n"))
         .map_err(|e| format!("Failed to write settings to {}: {e}", path.display()))
 }
 
@@ -117,6 +118,17 @@ mod tests {
         let res = update_settings(&path, vec![("x".into(), Some(serde_json::json!(1)))]);
         assert!(res.is_err());
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "{ broken");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn update_creates_file_with_mode_0600() {
+        use std::os::unix::fs::PermissionsExt;
+        let t = temp_config();
+        let path = settings_path(SettingsSource::Local, &t.home, &t.project);
+        update_settings(&path, vec![("model".into(), Some(serde_json::json!("opus")))]).unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
     }
 
     #[test]

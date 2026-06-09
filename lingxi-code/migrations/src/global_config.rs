@@ -17,19 +17,27 @@
 //! - TS NFC-normalizes the config-home path; macOS paths are already NFC, so
 //!   this port uses the path as-is.
 
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use serde_json::{Map, Value};
 
 /// A raw JSON object — the in-memory shape of `~/.claude.json`.
 pub type JsonMap = Map<String, Value>;
 
+/// `$CLAUDE_CONFIG_DIR`, treating set-but-EMPTY as unset: the TS reads are
+/// all `process.env.CLAUDE_CONFIG_DIR || homedir()`-shaped, and `""` is falsy.
+fn claude_config_dir_env() -> Option<PathBuf> {
+    std::env::var_os("CLAUDE_CONFIG_DIR")
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+}
+
 /// `getClaudeConfigHomeDir` (`envUtils.ts:7-14`): `$CLAUDE_CONFIG_DIR` if
-/// set, else `$HOME/.claude`. `None` when neither env var exists.
+/// set (non-empty), else `$HOME/.claude`. `None` when neither env var exists.
 #[must_use]
 pub fn claude_config_home() -> Option<PathBuf> {
-    if let Some(dir) = std::env::var_os("CLAUDE_CONFIG_DIR") {
-        return Some(PathBuf::from(dir));
+    if let Some(dir) = claude_config_dir_env() {
+        return Some(dir);
     }
     std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".claude"))
 }
@@ -49,9 +57,8 @@ pub fn global_config_path() -> Option<PathBuf> {
     if legacy.exists() {
         return Some(legacy);
     }
-    let base = std::env::var_os("CLAUDE_CONFIG_DIR")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(PathBuf::from))?;
+    let base =
+        claude_config_dir_env().or_else(|| std::env::var_os("HOME").map(PathBuf::from))?;
     Some(base.join(".claude.json"))
 }
 
@@ -143,26 +150,108 @@ fn write_atomic(path: &Path, map: &JsonMap) -> Result<(), GlobalConfigError> {
         path.file_name().map(|n| n.to_string_lossy()).unwrap_or_default(),
         std::process::id()
     ));
-    std::fs::write(&tmp, serialized + "\n").map_err(GlobalConfigError::Io)?;
+    write_secure(&tmp, &(serialized + "\n")).map_err(GlobalConfigError::Io)?;
     std::fs::rename(&tmp, path).map_err(GlobalConfigError::Io)?;
     Ok(())
 }
 
-/// `getProjectPathForConfig` (`config.ts:1588-1601`): the canonical git root
-/// of the directory (walk up looking for a `.git` entry — dir OR file, for
-/// worktrees), else the canonicalized directory itself; forward slashes for
-/// stable JSON keys.
+/// Write `contents`, creating the file with mode `0o600` on unix — the TS
+/// `writeFileSyncAndFlush_DEPRECATED(file, …, { mode: 0o600 })`
+/// (`config.ts:1134-1141`). Like the TS `mode` option, the mode only applies
+/// to NEWLY created files; an existing file keeps its permissions. No-op
+/// mode-wise on non-unix.
+pub(crate) fn write_secure(path: &Path, contents: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    let mut file = opts.open(path)?;
+    file.write_all(contents.as_bytes())
+}
+
+/// `getProjectPathForConfig` (`config.ts:1588-1601`): the CANONICAL git root
+/// of the directory — walk up looking for a `.git` entry (dir OR file), then
+/// resolve a linked worktree's `.git` file through `gitdir:` → `commondir`
+/// to the MAIN repo root (`findCanonicalGitRoot`, `git.ts:123-210`) so all
+/// worktrees of a repo share one project key — else the canonicalized
+/// directory itself; forward slashes for stable JSON keys.
 #[must_use]
 pub fn project_path_for_config(dir: &Path) -> String {
     let resolved = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
     let mut cur: Option<&Path> = Some(&resolved);
     while let Some(p) = cur {
         if p.join(".git").exists() {
-            return p.to_string_lossy().replace('\\', "/");
+            return resolve_canonical_root(p).to_string_lossy().replace('\\', "/");
         }
         cur = p.parent();
     }
     resolved.to_string_lossy().replace('\\', "/")
+}
+
+/// `resolveCanonicalRoot` (`git.ts:123-185`): for a regular repo (`.git` is a
+/// directory) this is a no-op. For a linked worktree (`.git` is a file with a
+/// `gitdir: <path>` pointer) follow `gitdir:` → `commondir` to the main
+/// repo's working directory. Submodules (`.git` file, no `commondir`) and any
+/// read/validation failure fall through to the input root, exactly as the TS
+/// `catch` does. (The TS NFC-normalize is skipped per the module-level note.)
+fn resolve_canonical_root(git_root: &Path) -> PathBuf {
+    resolve_worktree_main_root(git_root).unwrap_or_else(|| git_root.to_path_buf())
+}
+
+/// The fallible body of [`resolve_canonical_root`]; `None` ⇒ keep `git_root`.
+fn resolve_worktree_main_root(git_root: &Path) -> Option<PathBuf> {
+    // In a worktree, `.git` is a file containing `gitdir: <path>`. In a
+    // regular repo it is a directory: read fails (TS EISDIR) ⇒ fall through.
+    let git_content = std::fs::read_to_string(git_root.join(".git")).ok()?;
+    let pointer = git_content.trim().strip_prefix("gitdir:")?;
+    // TS `resolve(gitRoot, pointer)` — relative pointers resolve against the
+    // worktree root, lexically (no symlink traversal).
+    let worktree_git_dir = lexical_resolve(git_root, Path::new(pointer.trim()));
+    // `commondir` points at the shared .git dir, RELATIVE TO the worktree
+    // gitdir. Submodules have no commondir (TS ENOENT) ⇒ fall through.
+    let commondir_raw = std::fs::read_to_string(worktree_git_dir.join("commondir")).ok()?;
+    let common_dir = lexical_resolve(&worktree_git_dir, Path::new(commondir_raw.trim()));
+    // SECURITY (per TS): validate the structure matches `git worktree add`.
+    // 1) worktreeGitDir must be a direct child of <commonDir>/worktrees/.
+    if worktree_git_dir.parent()? != common_dir.join("worktrees") {
+        return None;
+    }
+    // 2) <worktreeGitDir>/gitdir must point back to <gitRoot>/.git. TS
+    //    realpaths the backlink, and realpaths the root DIRECTORY then joins
+    //    `.git` (never realpathing the `.git` file itself).
+    let backlink_raw = std::fs::read_to_string(worktree_git_dir.join("gitdir")).ok()?;
+    let backlink = std::fs::canonicalize(backlink_raw.trim()).ok()?;
+    if backlink != std::fs::canonicalize(git_root).ok()?.join(".git") {
+        return None;
+    }
+    // Bare-repo worktrees: the common dir isn't a `.git` inside a working
+    // directory — use the common dir itself as the stable identity.
+    if common_dir.file_name() != Some(std::ffi::OsStr::new(".git")) {
+        return Some(common_dir);
+    }
+    Some(common_dir.parent()?.to_path_buf())
+}
+
+/// Node `path.resolve(base, p)`: absolute `p` wins, else join onto `base`;
+/// then normalize `.`/`..` LEXICALLY (no filesystem access), dropping any
+/// `..` that would climb above the root.
+fn lexical_resolve(base: &Path, p: &Path) -> PathBuf {
+    let joined = if p.is_absolute() { p.to_path_buf() } else { base.join(p) };
+    let mut out = PathBuf::new();
+    for comp in joined.components() {
+        match comp {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                out.pop();
+            }
+            other => out.push(other),
+        }
+    }
+    out
 }
 
 /// `getCurrentProjectConfig` (`config.ts:1602-1623`): the `projects[<key>]`
@@ -235,6 +324,23 @@ mod tests {
             claude_config_home(),
             Some(std::path::PathBuf::from("/tmp/cc-test-h2/.claude"))
         );
+    }
+
+    #[test]
+    fn config_home_treats_empty_claude_config_dir_as_unset() {
+        let _g = env_lock();
+        // TS: `process.env.CLAUDE_CONFIG_DIR || homedir()` — "" is falsy.
+        std::env::set_var("CLAUDE_CONFIG_DIR", "");
+        std::env::set_var("HOME", "/tmp/cc-test-h4");
+        assert_eq!(
+            claude_config_home(),
+            Some(std::path::PathBuf::from("/tmp/cc-test-h4/.claude"))
+        );
+        assert_eq!(
+            global_config_path(),
+            Some(std::path::PathBuf::from("/tmp/cc-test-h4/.claude.json"))
+        );
+        std::env::remove_var("CLAUDE_CONFIG_DIR");
     }
 
     #[test]
@@ -379,5 +485,69 @@ mod tests {
         std::fs::create_dir_all(&bare).unwrap();
         let key2 = project_path_for_config(&bare);
         assert_eq!(key2, bare.canonicalize().unwrap().to_string_lossy().replace('\\', "/"));
+    }
+
+    /// Simulated `git worktree add` layout: the worktree's key must be the
+    /// MAIN repo root (TS `findCanonicalGitRoot`), not the worktree dir.
+    #[test]
+    fn project_key_resolves_worktree_to_main_repo_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        let main = root.join("main");
+        let wt_git_dir = main.join(".git/worktrees/wt");
+        std::fs::create_dir_all(&wt_git_dir).unwrap();
+        std::fs::write(wt_git_dir.join("commondir"), "../..\n").unwrap();
+        let wt = root.join("wt");
+        std::fs::create_dir_all(&wt).unwrap();
+        std::fs::write(
+            wt_git_dir.join("gitdir"),
+            format!("{}\n", wt.join(".git").display()),
+        )
+        .unwrap();
+        std::fs::write(
+            wt.join(".git"),
+            format!("gitdir: {}\n", wt_git_dir.display()),
+        )
+        .unwrap();
+
+        let key = project_path_for_config(&wt);
+        assert_eq!(key, main.to_string_lossy().replace('\\', "/"));
+
+        // Nested dirs inside the worktree resolve to the same key.
+        let nested = wt.join("src/deep");
+        std::fs::create_dir_all(&nested).unwrap();
+        assert_eq!(project_path_for_config(&nested), key);
+    }
+
+    /// Submodule shape — `.git` file but NO `commondir` — keeps the
+    /// directory's own root (TS falls through on ENOENT).
+    #[test]
+    fn project_key_submodule_git_file_keeps_own_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        let sub = root.join("sub");
+        std::fs::create_dir_all(root.join("parent/.git/modules/sub")).unwrap();
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::write(
+            sub.join(".git"),
+            format!("gitdir: {}\n", root.join("parent/.git/modules/sub").display()),
+        )
+        .unwrap();
+        let key = project_path_for_config(&sub);
+        assert_eq!(key, sub.to_string_lossy().replace('\\', "/"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn save_map_creates_file_with_mode_0600() {
+        use std::os::unix::fs::PermissionsExt;
+        let t = temp_config();
+        save_map(&t.global, |mut m| {
+            m.insert("a".into(), serde_json::json!(1));
+            m
+        })
+        .unwrap();
+        let mode = std::fs::metadata(&t.global).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
     }
 }

@@ -532,6 +532,25 @@ impl FileReadTool {
             PDF_EXTRACT_SIZE_THRESHOLD, PDF_MAX_PAGES_PER_READ,
         };
         use base64::Engine;
+
+        // Reject empty / non-PDF bytes BEFORE any inline document block can enter
+        // history. claude-code (utils/pdf.ts readPDF) guards this deliberately: an
+        // invalid PDF document block POISONS the conversation — every later API
+        // call 400s with "The PDF specified was not valid" until /clear. Without
+        // this, a non-PDF renamed `.pdf` makes `pdf_page_count` return None (skips
+        // the page-count gate) and, if small + supported, inlines garbage.
+        if bytes.is_empty() {
+            self.emit_failed(invocation_id, "pdf_empty").await;
+            return Err(ToolError::Io(format!("PDF file is empty: {}", canon.display())));
+        }
+        if !crate::pdf_read::looks_like_pdf(&bytes) {
+            self.emit_failed(invocation_id, "pdf_invalid").await;
+            return Err(ToolError::Io(format!(
+                "File is not a valid PDF (missing %PDF- header): {}",
+                canon.display()
+            )));
+        }
+
         // Model comes from the per-call `ToolUseContext` (`ctx.options.
         // main_loop_model`), the same source the text path uses for the
         // cyber-risk-mitigation gate. claude-code canonicalizes the model name
@@ -2178,6 +2197,28 @@ mod tests {
             err.to_string().contains("exceeds maximum"),
             "got: {err}"
         );
+    }
+
+    #[cfg(feature = "pdf-read")]
+    #[tokio::test]
+    async fn non_pdf_with_pdf_extension_is_rejected_before_inlining() {
+        // A non-PDF renamed `.pdf` must NOT be inlined as a document block — an
+        // invalid PDF block poisons the conversation (every later API call 400s).
+        // The %PDF- guard rejects it instead.
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("fake.pdf");
+        std::fs::write(&target, b"this is not a pdf at all").unwrap();
+        let (ctx, _sink) = make_ctx(&tmp);
+        let tool = FileReadTool::new(ctx);
+        let err = tool
+            .call(
+                json!({ "file_path": target.to_str().unwrap() }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("not a valid PDF"), "got: {err}");
     }
 
     #[cfg(feature = "pdf-read")]

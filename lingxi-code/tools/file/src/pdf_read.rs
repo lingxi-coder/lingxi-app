@@ -88,6 +88,16 @@ mod tests {
     }
 
     #[test]
+    fn minimal_pdf_page_count_is_one() {
+        // A valid minimal 1-page PDF (proper xref table + startxref). lopdf
+        // 0.34 rejects PDFs without an xref table, so this fixture carries one;
+        // it is the same fixture the read.rs inline-success test uses.
+        let bytes: &[u8] = b"%PDF-1.4\n1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] >>\nendobj\nxref\n0 4\n0000000000 65535 f \n0000000009 00000 n \n0000000058 00000 n \n0000000115 00000 n \ntrailer\n<< /Size 4 /Root 1 0 R >>\nstartxref\n186\n%%EOF\n";
+        assert_eq!(pdf_page_count(bytes), Some(1));
+        assert_eq!(pdf_page_count(b"not a pdf"), None);
+    }
+
+    #[test]
     fn is_pdf_supported_excludes_haiku3() {
         assert!(is_pdf_supported("claude-sonnet-4-6"));
         assert!(!is_pdf_supported("claude-3-haiku-20240307"));

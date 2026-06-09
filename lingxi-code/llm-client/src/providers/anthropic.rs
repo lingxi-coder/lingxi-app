@@ -1,4 +1,8 @@
-use crate::{ContentBlock, LlmError, LlmRequest, NoopStreamDecoder, ProviderRequest, ProviderResponse, StreamDecoder, ToolDeclaration, WireCodec};
+use crate::{
+    normalize_anthropic_usage, ContentBlock, ContentDelta, LlmError, LlmEvent, LlmRequest,
+    LlmResponse, MessageDeltaPayload, ProviderRequest, ProviderResponse,
+    RawStreamFrame, StreamDecoder, ToolDeclaration, WireCodec,
+};
 
 use base64::Engine;
 use serde_json::Value;
@@ -65,14 +69,29 @@ impl WireCodec for AnthropicMessagesCodec {
         Ok(provider_request)
     }
 
-    fn decode_response(&self, _response: ProviderResponse) -> Result<crate::LlmResponse, LlmError> {
-        Err(LlmError::InvalidRequest {
-            message: "Anthropic response decoding is not implemented yet".to_string(),
-        })
+    fn decode_response(&self, response: ProviderResponse) -> Result<LlmResponse, LlmError> {
+        decode_response_body(response.body_json)
     }
 
     fn stream_decoder(&self) -> Box<dyn StreamDecoder> {
-        Box::new(NoopStreamDecoder)
+        Box::new(AnthropicStreamDecoder)
+    }
+}
+
+#[derive(Debug, Default)]
+struct AnthropicStreamDecoder;
+
+impl StreamDecoder for AnthropicStreamDecoder {
+    fn decode_frame(&mut self, frame: RawStreamFrame) -> Result<Vec<LlmEvent>, LlmError> {
+        let text = std::str::from_utf8(&frame.bytes).map_err(|_| LlmError::InvalidRequest {
+            message: "Anthropic stream frame is not valid UTF-8".to_string(),
+        })?;
+
+        let value: Value = serde_json::from_str(text).map_err(|_| LlmError::InvalidRequest {
+            message: "Anthropic stream frame is not valid JSON".to_string(),
+        })?;
+
+        decode_stream_event(&value)
     }
 }
 
@@ -142,4 +161,134 @@ fn encode_tool(tool: &ToolDeclaration) -> Value {
         "description": tool.description,
         "input_schema": tool.input_schema,
     })
+}
+
+fn decode_response_body(body_json: Value) -> Result<LlmResponse, LlmError> {
+    let id = string_field(&body_json, "id")?;
+    let model = string_field(&body_json, "model")?;
+    let content = body_json
+        .get("content")
+        .and_then(Value::as_array)
+        .map(|items| items.iter().map(decode_content_block).collect::<Result<Vec<_>, _>>())
+        .transpose()?
+        .unwrap_or_default();
+    let usage = body_json
+        .get("usage")
+        .map(normalize_anthropic_usage)
+        .unwrap_or_default();
+
+    Ok(LlmResponse {
+        id,
+        model,
+        content,
+        usage,
+        cost: None,
+        provider_metadata: body_json,
+    })
+}
+
+fn decode_content_block(value: &Value) -> Result<ContentBlock, LlmError> {
+    match value.get("type").and_then(Value::as_str) {
+        Some("text") => Ok(ContentBlock::Text {
+            text: string_field(value, "text")?,
+        }),
+        Some("tool_use") => Ok(ContentBlock::ToolCall {
+            id: string_field(value, "id")?,
+            name: string_field(value, "name")?,
+            input: value.get("input").cloned().unwrap_or(Value::Null),
+        }),
+        Some(other) => Err(LlmError::InvalidRequest {
+            message: format!("unsupported Anthropic content block type: {other}"),
+        }),
+        None => Err(LlmError::InvalidRequest {
+            message: "Anthropic content block missing type".to_string(),
+        }),
+    }
+}
+
+fn decode_stream_event(value: &Value) -> Result<Vec<LlmEvent>, LlmError> {
+    match value.get("type").and_then(Value::as_str) {
+        Some("message_start") => Ok(vec![LlmEvent::MessageStart {
+            response: Box::new(decode_message_start(value)?),
+        }]),
+        Some("content_block_start") => Ok(vec![LlmEvent::ContentBlockStart {
+            index: u32_field(value, "index")?,
+            content_block: decode_content_block(value.get("content_block").ok_or_else(|| LlmError::InvalidRequest {
+                message: "Anthropic content_block_start missing content_block".to_string(),
+            })?)?,
+        }]),
+        Some("content_block_delta") => Ok(vec![LlmEvent::ContentBlockDelta {
+            index: u32_field(value, "index")?,
+            delta: decode_content_delta(value.get("delta").ok_or_else(|| LlmError::InvalidRequest {
+                message: "Anthropic content_block_delta missing delta".to_string(),
+            })?)?,
+        }]),
+        Some("content_block_stop") => Ok(vec![LlmEvent::ContentBlockStop {
+            index: u32_field(value, "index")?,
+        }]),
+        Some("message_delta") => Ok(vec![LlmEvent::MessageDelta {
+            delta: MessageDeltaPayload {
+                stop_reason: value
+                    .get("delta")
+                    .and_then(|delta| delta.get("stop_reason"))
+                    .and_then(Value::as_str)
+                    .map(ToString::to_string),
+            },
+            usage: value.get("usage").map(normalize_anthropic_usage),
+        }]),
+        Some("message_stop") => Ok(vec![LlmEvent::MessageStop]),
+        Some("ping") => Ok(Vec::new()),
+        Some("error") => Err(LlmError::ProviderInternal),
+        Some(other) => Err(LlmError::InvalidRequest {
+            message: format!("unsupported Anthropic stream event type: {other}"),
+        }),
+        None => Err(LlmError::InvalidRequest {
+            message: "Anthropic stream frame missing type".to_string(),
+        }),
+    }
+}
+
+fn decode_message_start(value: &Value) -> Result<LlmResponse, LlmError> {
+    let message = value.get("message").unwrap_or(value);
+    decode_response_body(message.clone())
+}
+
+fn decode_content_delta(value: &Value) -> Result<ContentDelta, LlmError> {
+    match value.get("type").and_then(Value::as_str) {
+        Some("text_delta") => Ok(ContentDelta::TextDelta {
+            text: string_field(value, "text")?,
+        }),
+        Some("input_json_delta") => Ok(ContentDelta::InputJsonDelta {
+            partial_json: string_field(value, "partial_json")?,
+        }),
+        Some("thinking_delta") => Ok(ContentDelta::ThinkingDelta {
+            thinking: string_field(value, "thinking")?,
+        }),
+        Some(other) => Err(LlmError::InvalidRequest {
+            message: format!("unsupported Anthropic content delta type: {other}"),
+        }),
+        None => Err(LlmError::InvalidRequest {
+            message: "Anthropic content delta missing type".to_string(),
+        }),
+    }
+}
+
+fn string_field(value: &Value, field: &str) -> Result<String, LlmError> {
+    value
+        .get(field)
+        .and_then(Value::as_str)
+        .map(ToString::to_string)
+        .ok_or_else(|| LlmError::InvalidRequest {
+            message: format!("Anthropic payload missing string field: {field}"),
+        })
+}
+
+fn u32_field(value: &Value, field: &str) -> Result<u32, LlmError> {
+    value
+        .get(field)
+        .and_then(Value::as_u64)
+        .and_then(|n| u32::try_from(n).ok())
+        .ok_or_else(|| LlmError::InvalidRequest {
+            message: format!("Anthropic payload missing u32 field: {field}"),
+        })
 }

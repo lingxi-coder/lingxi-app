@@ -180,6 +180,8 @@ pub enum LlmEvent {
         /// Normalized usage at the terminal boundary.
         usage: Option<Usage>,
     },
+    /// Terminal response stop marker.
+    MessageStop,
     /// Final response event.
     Completed {
         /// Completed response.

@@ -1,4 +1,4 @@
-use llm_client::{AnthropicMessagesCodec, ContentBlock, LlmRequest, Message, ResponseFormat, ToolChoice, ToolDeclaration, WireCodec};
+use llm_client::{AnthropicMessagesCodec, ContentBlock, ContentDelta, LlmEvent, LlmRequest, Message, ProviderResponse, ResponseFormat, ToolChoice, ToolDeclaration, WireCodec};
 
 #[test]
 fn encode_request_shape_is_anthropic_messages() {
@@ -98,4 +98,53 @@ fn encode_request_pins_default_max_tokens_to_4096() {
     let provider_request = codec.encode_request(&request).unwrap();
 
     assert_eq!(provider_request.body_json["max_tokens"], 4096);
+}
+
+#[test]
+fn decode_text_response_maps_usage_and_stop_reason() {
+    let codec = AnthropicMessagesCodec::new("https://api.anthropic.com", "2023-06-01");
+    let response = ProviderResponse::json(200, serde_json::json!({
+        "id": "msg_1",
+        "model": "claude-sonnet-4-20250514",
+        "content": [{"type":"text","text":"hi"}],
+        "stop_reason": "end_turn",
+        "usage": {"input_tokens": 9, "output_tokens": 3}
+    }));
+
+    let decoded = codec.decode_response(response).unwrap();
+
+    assert_eq!(decoded.id, "msg_1");
+    assert_eq!(decoded.usage.billable_tokens.input, 9);
+    assert_eq!(decoded.usage.billable_tokens.output, 3);
+}
+
+#[test]
+fn decode_tool_use_response_maps_tool_call_block() {
+    let codec = AnthropicMessagesCodec::new("https://api.anthropic.com", "2023-06-01");
+    let response = ProviderResponse::json(200, serde_json::json!({
+        "id": "msg_2",
+        "model": "claude-sonnet-4-20250514",
+        "content": [{"type":"tool_use","id":"tool_1","name":"Read","input":{"path":"foo.txt"}}],
+        "usage": {"input_tokens": 1, "output_tokens": 1}
+    }));
+
+    let decoded = codec.decode_response(response).unwrap();
+
+    assert!(matches!(decoded.content[0], ContentBlock::ToolCall { ref id, ref name, .. } if id == "tool_1" && name == "Read"));
+}
+
+#[test]
+fn stream_decoder_maps_text_delta_and_rejects_garbage() {
+    let codec = AnthropicMessagesCodec::new("https://api.anthropic.com", "2023-06-01");
+    let mut decoder = codec.stream_decoder();
+
+    let events = decoder.decode_frame(llm_client::RawStreamFrame::new(
+        br#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hi"}}"#.to_vec(),
+    )).unwrap();
+
+    assert!(matches!(
+        &events[0],
+        LlmEvent::ContentBlockDelta { index: 0, delta: ContentDelta::TextDelta { text } } if text == "hi"
+    ));
+    assert!(decoder.decode_frame(llm_client::RawStreamFrame::new(b"not json".to_vec())).is_err());
 }

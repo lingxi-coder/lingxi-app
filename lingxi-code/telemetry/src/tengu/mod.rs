@@ -13,6 +13,7 @@ pub mod api;
 pub mod command;
 pub mod cost;
 pub mod memory;
+pub mod migration;
 pub mod oauth;
 pub mod orchestrator;
 pub mod release;
@@ -66,7 +67,8 @@ pub const ALL_EVENT_NAMES: &[&str] = {
     //        tengu_session_file_read, tengu_file_read_limits_override) — NOT in the
     //        tool concat block (they are not tengu_tool_*) → 339 total. The trailing
     //        `+ 3` is `tool::FILE_READ_ANALYTICS_NAMES.len()`.
-    const TOTAL: usize = 25 + 30 + 20 + 140 + 10 + 8 + 12 + 3 + 17 + 4 + 54 + 13 + 3;
+    // Config migrations: +9 (migration::NAMES, runMigrations port) → 348 total.
+    const TOTAL: usize = 25 + 30 + 20 + 140 + 10 + 8 + 12 + 3 + 17 + 4 + 54 + 13 + 3 + 9;
     const fn concat_all() -> [&'static str; TOTAL] {
         let mut out: [&'static str; TOTAL] = [""; TOTAL];
         let mut idx = 0;
@@ -150,6 +152,14 @@ pub const ALL_EVENT_NAMES: &[&str] = {
         let mut i = 0;
         while i < tool::FILE_READ_ANALYTICS_NAMES.len() {
             out[idx] = tool::FILE_READ_ANALYTICS_NAMES[i];
+            idx += 1;
+            i += 1;
+        }
+        // Config-migration block (tengu_migrate_* / model-migration markers) —
+        // appended after the FileRead global tail. Positions 339..348.
+        let mut i = 0;
+        while i < migration::NAMES.len() {
+            out[idx] = migration::NAMES[i];
             idx += 1;
             i += 1;
         }

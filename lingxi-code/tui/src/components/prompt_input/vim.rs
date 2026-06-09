@@ -1598,8 +1598,9 @@ mod tests {
         // no aggregator). The +4 vs the 326 M6 baseline is M7-16's
         // screen_opened/screen_closed/search_opened + lingxi_core_v0_8_0_released
         // (none from vim). This guard fails if vim accidentally mints an event.
-        // Baseline 330 → 336 (CronDelete/CronList +6, LSP.7b) → 339 (FileRead analytics +3, W36).
-        assert_eq!(telemetry::tengu::ALL_EVENT_NAMES.len(), 339);
+        // Baseline 330 → 336 (CronDelete/CronList +6, LSP.7b) → 339 (FileRead analytics +3, W36)
+        // → 348 (config migrations +9).
+        assert_eq!(telemetry::tengu::ALL_EVENT_NAMES.len(), 348);
     }
 
     #[test]
@@ -1609,8 +1610,9 @@ mod tests {
         // telemetry is explicitly NOT done; `vim_mode_entered` stayed deferred).
         // The +4 vs the 326 baseline is all M7-16 (screen/search + release
         // marker). This guard fails if vim registers a new event.
-        // Baseline 330 → 336 (CronDelete/CronList +6, LSP.7b) → 339 (FileRead analytics +3, W36).
-        assert_eq!(telemetry::tengu::ALL_EVENT_NAMES.len(), 339);
+        // Baseline 330 → 336 (CronDelete/CronList +6, LSP.7b) → 339 (FileRead analytics +3, W36)
+        // → 348 (config migrations +9).
+        assert_eq!(telemetry::tengu::ALL_EVENT_NAMES.len(), 348);
     }
 
     #[test]

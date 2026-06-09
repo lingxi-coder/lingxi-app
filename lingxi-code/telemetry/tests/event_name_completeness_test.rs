@@ -47,7 +47,9 @@ fn registry_is_exactly_330_entries() {
     // CronDelete/CronList added 6 (2 tools × 3 lifecycle stages): 330 + 6 = 336.
     // FileReadTool analytics added 3 at the global tail (tengu_file_read_dedup,
     // tengu_session_file_read, tengu_file_read_limits_override): 336 + 3 = 339.
-    assert_eq!(ALL_EVENT_NAMES.len(), 339);
+    // Config migrations added 9 as their own tail block (migration::NAMES,
+    // runMigrations port): 339 + 9 = 348.
+    assert_eq!(ALL_EVENT_NAMES.len(), 348);
 }
 
 #[test]
@@ -237,6 +239,14 @@ fn category_ordering_preserved() {
             "tengu_file_read_limits_override",
         ],
         "FileReadTool analytics tail block",
+    );
+    // Config-migration block (9 events) appended after the FileRead trio —
+    // order matches TS runMigrations execution order (main.tsx:328-336).
+    // Positions 339..348.
+    assert_eq!(
+        &ALL_EVENT_NAMES[339..348],
+        &telemetry::tengu::migration::NAMES,
+        "config-migration tail block",
     );
 }
 

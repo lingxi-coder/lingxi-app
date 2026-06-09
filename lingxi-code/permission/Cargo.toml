@@ -19,6 +19,15 @@ regex = "1"
 # Faithful gitignore-glob matcher for file-path permission rules (3a) — the
 # Rust analogue of claude-code's `ignore` npm lib; already in Cargo.lock.
 ignore = "0.4"
+# tree-sitter bash AST (claude-code's `treeSitterAnalysis`). Optional + gated
+# behind `bash-ast` so the default/minimal build never compiles the grammar.
+tree-sitter = { version = "=0.25.10", optional = true }
+tree-sitter-bash = { version = "=0.25.1", optional = true }
+
+[features]
+# AST-precision layer over bash safety (claude-code's tree-sitter path). OFF by
+# default; enabled by engine-desktop. Feature off => byte-identical legacy path.
+bash-ast = ["dep:tree-sitter", "dep:tree-sitter-bash"]
 
 [dev-dependencies]
 # M8-P7-final: the tool_name_parity_test reads TOOL_NAME constants directly from

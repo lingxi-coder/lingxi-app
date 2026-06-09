@@ -19,6 +19,17 @@ fn decode_jsonl_stream<C: WireCodec>(codec: &C, fixture: &str) -> Vec<LlmEvent> 
     events
 }
 
+fn assert_single_message_stop(events: &[LlmEvent]) {
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event, LlmEvent::MessageStop))
+            .count(),
+        1
+    );
+    assert!(matches!(events.last(), Some(LlmEvent::MessageStop)));
+}
+
 #[test]
 fn provider_fixtures_smoke_test() {
     let openai_fixture = include_str!(concat!(
@@ -38,13 +49,13 @@ fn provider_fixtures_smoke_test() {
         &OpenAiChatCodec::new("https://api.openai.com/v1"),
         openai_fixture,
     );
-    assert!(matches!(openai_events.last(), Some(LlmEvent::MessageStop)));
+    assert_single_message_stop(&openai_events);
 
     let gemini_events = decode_jsonl_stream(
         &GeminiCodec::new("https://generativelanguage.googleapis.com/v1beta"),
         gemini_fixture,
     );
-    assert!(matches!(gemini_events.last(), Some(LlmEvent::MessageStop)));
+    assert_single_message_stop(&gemini_events);
 
     let anthropic = AnthropicMessagesCodec::new("https://api.anthropic.com", "2023-06-01");
     let decoded = anthropic

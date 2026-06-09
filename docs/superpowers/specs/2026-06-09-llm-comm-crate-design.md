@@ -1,7 +1,7 @@
 # LLM Communication Crate - Provider Auth, Transport, Streaming, and Cost (Design)
 
 - **Date:** 2026-06-09
-- **Status:** Approved design; ready for written-spec review
+- **Status:** Draft spec; approved concept; pending written-spec review
 - **Scope choice:** External reusable Rust crate, not a LingXi-only wrapper
 - **Working workspace crate name:** `llm-comm`
 - **Primary references:** `opencode/packages/llm`, `codex/codex-rs/codex-api`,
@@ -67,10 +67,13 @@ Codex, opencode, and liter-llm are architecture references.
 - No direct ownership of LingXi's session-level cost summaries. The crate estimates
   per-call cost and emits normalized usage; LingXi's existing cost/session layer can
   aggregate it.
+- No dependency from the reusable core crate on LingXi runtime crates such as
+  `api-client`, `orchestrator`, `telemetry`, existing `providers`, existing `cost`, or
+  existing `protocol`.
 - Not every designed route family ships with runtime migration in the first
-  implementation wave. The first wave is Anthropic, OpenAI Chat Completions, OpenAI
-  Responses, and Gemini. Vertex, Bedrock, and Azure are designed here and implemented
-  in feature-gated follow-up waves.
+  implementation wave. The first wave is Anthropic first-party, OpenAI Chat
+  Completions, and Gemini. OpenAI Responses, Vertex, Bedrock, and Azure are designed
+  here and implemented in follow-up waves.
 - No mid-stream automatic provider failover unless a caller opts into a future
   resumable-stream policy.
 
@@ -87,6 +90,7 @@ Codex, opencode, and liter-llm are architecture references.
 | Tower | Optional adapter layer, not the core API |
 | Cloud SDKs | Feature-gated: AWS, GCP, Azure are optional |
 | LingXi migration | Use adapters first, then remove duplicated old communication paths after parity is locked |
+| Core dependencies | Core `llm-comm` does not depend on LingXi runtime crates |
 
 ## 6. Architecture
 
@@ -120,10 +124,25 @@ LlmClient
 | `redaction` | Secret redaction for logs, errors, and debug payloads |
 | `tower` | Optional `tower::Service` adapter layer |
 
-### 6.2 LingXi-only adapters
+### 6.2 Core dependency boundary
 
-LingXi adapters are not the core API. They are behind a workspace/internal feature or
-implemented in a LingXi integration crate:
+The reusable core crate must not depend on LingXi runtime crates:
+
+- no `api-client`
+- no `orchestrator`
+- no `telemetry`
+- no existing `providers`
+- no existing LingXi `cost`
+- no existing LingXi `protocol`
+
+The core crate owns its provider-neutral types, pricing structures, errors, and route
+configuration. LingXi may convert between these types and existing workspace types at
+adapter boundaries, but those conversions do not belong in the core crate.
+
+### 6.3 LingXi integration adapters
+
+LingXi adapters are not the core API. They live in a separate integration surface,
+preferably a workspace crate such as `llm-comm-lingxi-adapter`:
 
 - `OrchestratorApiClient` adapter
 - `StreamingApiClient` adapter
@@ -236,30 +255,40 @@ Cost output:
   pricing_source
 ```
 
-Canonical usage keeps totals and billable buckets explicit:
+Canonical usage separates billable buckets from provider/context totals. Billable
+buckets are the only inputs to cost calculation; totals are diagnostics and
+context-window inputs.
 
 ```text
 Usage {
-  input_tokens_total
-  input_tokens_uncached
-  cache_read_input_tokens
-  cache_write_input_tokens
-  output_tokens_total
-  output_tokens_visible
-  reasoning_output_tokens
-  server_tool_tokens
+  billable_tokens: TokenUsage
+  context_tokens: Option<u64>
+  provider_reported_total_tokens: Option<u64>
+  server_tool_use: Option<ServerToolUsage>
   provider_metadata
+}
+
+TokenUsage {
+  input
+  output
+  cache_write
+  cache_read
+  reasoning_output
 }
 ```
 
 Invariants:
 
-- `input_tokens_total = input_tokens_uncached + cache_read_input_tokens +
-  cache_write_input_tokens` when the provider supplies enough detail.
-- `output_tokens_total = output_tokens_visible + reasoning_output_tokens` when the
-  provider supplies enough detail.
-- If a provider only returns totals, the codec sets the known totals and leaves
-  unknown buckets at zero with metadata explaining the limitation.
+- Token buckets are independent billable classes. The crate does not assume that a
+  provider's reported `input_total` equals `input + cache_read + cache_write`.
+- `context_tokens` is separate from billing. When a provider reports a context-window
+  total, the codec preserves it. When it does not, the crate may derive a conservative
+  context total from known buckets and mark the derivation in metadata.
+- `reasoning_output` is populated only when the provider reports reasoning tokens as a
+  separately billable class. If reasoning tokens are already folded into output tokens,
+  they remain in `output` and metadata records that relationship.
+- If a provider only returns totals, the codec sets the known total fields and leaves
+  unknown billable buckets at zero with metadata explaining the limitation.
 - Unknown pricing never discards the LLM response. It returns `CostEstimate {
   estimated: false }` plus `Usage`.
 
@@ -389,18 +418,21 @@ Designed route families:
 
 | Family | Protocol | Auth | Notes |
 |---|---|---|---|
-| Anthropic | Messages API | API key, OAuth bearer, Bedrock wrapper, Vertex wrapper where applicable | Must preserve Claude Code parity edge cases |
-| OpenAI Responses | Responses API | Bearer/API key | Primary future OpenAI path |
+| Anthropic first-party | Messages API | API key, OAuth bearer | Must preserve Claude Code parity edge cases |
+| OpenAI Responses | Responses API | Bearer/API key | Primary future OpenAI path; follow-up wave after Chat/Gemini migration parity |
 | OpenAI Chat | Chat Completions | Bearer/API key | Needed for OpenAI-compatible endpoints |
 | OpenAI-compatible | Chat Completions-compatible | Bearer/header/custom | Base URL/profile driven |
 | Gemini | Gemini generateContent | API key or GCP token | Supports native Gemini usage metadata |
-| Vertex | Gemini via Vertex endpoint | GCP token | Request signing/token feature-gated |
-| Bedrock Claude | Anthropic body wrapped for Bedrock | AWS SigV4 or bearer | Claude-on-Bedrock only for first wave |
+| Vertex Gemini | Gemini via Vertex endpoint | GCP token | Separate provider id, endpoint, rate-limit, and pricing from first-party Gemini |
+| Vertex Claude | Anthropic Messages-compatible body via Vertex endpoint | GCP token | Separate route family for Claude-on-Vertex deployment parity |
+| Bedrock Claude | Anthropic body wrapped for Bedrock | AWS SigV4 or bearer | Separate provider id, endpoint, rate-limit, and pricing from first-party Anthropic |
 | Azure OpenAI | OpenAI body with Azure URL style | API key or Azure token | Deployment and API version in profile |
 
 Each family can have multiple route variants when the wire protocol differs. For
 example OpenAI Responses and OpenAI Chat are separate protocols, not one codec with
-hidden mode flags.
+hidden mode flags. Cloud-hosted Claude routes are also separate from first-party
+Anthropic because auth, endpoint shape, model ids, pricing, request ids, and
+rate-limit metadata differ.
 
 ## 14. Registry and profiles
 
@@ -502,7 +534,8 @@ Migration is phased but this document is not the detailed implementation plan.
 - Provider response -> `LlmResponse`.
 - SSE frames -> ordered `LlmEvent`.
 - Anthropic prompt-cache usage.
-- OpenAI Responses and Chat variants.
+- OpenAI Chat first-wave fixtures; OpenAI Responses fixtures before Responses runtime
+  enablement.
 - Gemini usage metadata.
 - Bedrock/Vertex wrapper paths.
 
@@ -527,8 +560,9 @@ Migration is phased but this document is not the detailed implementation plan.
 
 - Exact provider/model price match.
 - alias and pattern fallback.
-- cache read/write token pricing.
-- reasoning token pricing.
+- independent billable token buckets for input, output, cache write, cache read, and
+  reasoning output.
+- provider/context totals do not double-count billable buckets.
 - unknown model returns usage plus non-estimated cost.
 - external pricing override wins over built-in catalog.
 
@@ -544,8 +578,10 @@ Migration is phased but this document is not the detailed implementation plan.
 ## 18. Acceptance criteria
 
 - A reusable `llm-comm` crate exists with route/protocol/auth/transport/cost modules.
-- Anthropic, OpenAI Chat Completions, OpenAI Responses, and Gemini have
-  fixture-backed complete and stream support in the first implementation wave.
+- Anthropic first-party, OpenAI Chat Completions, and Gemini have fixture-backed
+  complete and stream support in the first implementation wave.
+- OpenAI Responses has route-family design now, with fixtures required before its
+  runtime enablement wave.
 - Cost estimation uses resolved provider/model plus token buckets.
 - Unknown pricing does not block LLM responses.
 - LingXi can route main conversation and sidequery calls through the new crate via
@@ -564,7 +600,7 @@ Migration is phased but this document is not the detailed implementation plan.
 | Cost catalog drift | Allow external pricing overrides and mark estimates with pricing source |
 | Provider error mismatch | Map all provider errors through canonical `LlmError` and keep raw metadata redacted |
 | Streaming replay bugs | Do not replay streams after semantic events are emitted |
-| LingXi adapter leakage | Keep adapters outside the core crate API or behind LingXi-only features |
+| LingXi adapter leakage | Keep adapters in a separate integration crate outside the core crate API |
 
 ## 20. Open implementation choices resolved for planning
 
@@ -572,8 +608,8 @@ These choices are fixed for the implementation plan:
 
 - Workspace crate name: `llm-comm`.
 - Core architecture: route composition, not a provider-only trait wrapper.
-- First-wave route families: Anthropic, OpenAI Chat Completions, OpenAI Responses,
-  and Gemini.
+- First-wave route families: Anthropic first-party, OpenAI Chat Completions, and
+  Gemini.
 - Cloud auth route families are designed now and implemented behind features.
 - Tower support is optional and not required for first runtime migration.
 - Cost estimation lives in the new crate; session aggregation remains outside.

@@ -259,6 +259,75 @@ impl WebFetchTool {
         )
     }
 
+    /// Resolve the small-fast model id for the apply step. Anthropic-family
+    /// default => Haiku; otherwise fall back to the configured default model.
+    fn apply_model(&self) -> String {
+        if self.ctx.default_model.contains("claude") {
+            "claude-haiku-4-5".to_string()
+        } else {
+            self.ctx.default_model.clone()
+        }
+    }
+
+    /// Run the secondary-model apply step over `markdown` with `prompt`. Returns
+    /// the model's text (or the fallback "No response from model").
+    #[cfg(feature = "web-markdown")]
+    async fn apply_prompt(
+        &self,
+        client: &std::sync::Arc<dyn sidequery::SideQueryClient>,
+        host: &str,
+        markdown: &str,
+        prompt: &str,
+    ) -> String {
+        use protocol::{ConversationMessage, MessageId};
+        use sidequery::{QuerySource, SideQueryRequest};
+        let truncated = crate::markdown::truncate_markdown(markdown.to_string());
+        let model_prompt = crate::markdown::make_secondary_model_prompt(
+            &truncated,
+            prompt,
+            crate::markdown::is_preapproved_domain(host),
+        );
+        let req = SideQueryRequest {
+            model: self.apply_model(),
+            system_prompt: None,
+            messages: vec![ConversationMessage::user(MessageId::new(), model_prompt)],
+            tools: vec![],
+            tool_choice: None,
+            output_format: None,
+            max_tokens: 1024,
+            max_retries: 1,
+            temperature: None,
+            thinking_budget: None,
+            stop_sequences: vec![],
+            query_source: QuerySource::WebFetchApply,
+            skip_system_prompt_prefix: true,
+        };
+        match client.query(req).await {
+            Ok(resp) => resp.text.unwrap_or_else(|| "No response from model".to_string()),
+            Err(_) => "No response from model".to_string(),
+        }
+    }
+
+    /// Returns `Some(model_output)` when the apply step ran, else `None`.
+    async fn maybe_apply(
+        &self,
+        host: &str,
+        content: &str,
+        prompt: Option<&str>,
+    ) -> Option<String> {
+        #[cfg(feature = "web-markdown")]
+        {
+            if let (Some(client), Some(p)) = (self.side_query.as_ref(), prompt) {
+                return Some(self.apply_prompt(client, host, content, p).await);
+            }
+        }
+        #[cfg(not(feature = "web-markdown"))]
+        {
+            let _ = (host, content, prompt);
+        }
+        None
+    }
+
     async fn emit_started(&self, invocation_id: &str, url: &str, prompt_present: bool) {
         let mut md: LogEventMetadata = HashMap::new();
         md.insert(
@@ -514,34 +583,42 @@ impl Tool for WebFetchTool {
                     .iter()
                     .find(|(k, _)| k.eq_ignore_ascii_case("content-type"))
                     .map_or_else(String::new, |(_, v)| v.clone());
-                let (final_body, truncated) = truncate_body(resp.body);
-                // Store the successful fetch under the *original* URL
-                // (`utils.ts:505-517`) so repeat fetches hit the cache. The
-                // markdown/Haiku conversion lands in later batches; the cache
-                // stores whatever `content` the current pipeline produced.
+                let (raw_body, truncated) = truncate_body(resp.body);
+
+                // HTML->markdown (claude-code converts HTML; non-HTML is used as-is).
+                // Behind `web-markdown`; feature off => content is the raw body.
+                #[cfg(feature = "web-markdown")]
+                let content = if crate::markdown::is_html_content_type(&content_type) {
+                    crate::markdown::html_to_markdown(&raw_body)
+                } else {
+                    raw_body
+                };
+                #[cfg(not(feature = "web-markdown"))]
+                let content = raw_body;
+
                 crate::cache::cache_set(
                     parsed_input.url.clone(),
                     crate::cache::CachedFetch {
-                        content: final_body.clone(),
+                        content: content.clone(),
                         status,
                         content_type,
                         bytes: body_bytes,
                         persisted_path: None,
                     },
                 );
-                self.emit_completed(
-                    &invocation_id,
-                    status,
-                    body_bytes as u64,
-                    truncated,
-                    elapsed_ms,
-                )
-                .await;
+                self.emit_completed(&invocation_id, status, body_bytes as u64, truncated, elapsed_ms)
+                    .await;
+
+                let out_content = self
+                    .maybe_apply(&host, &content, parsed_input.prompt.as_deref())
+                    .await
+                    .unwrap_or(content);
+
                 Ok(ToolCallResult {
                     data: json!({
                         "url": parsed_input.url,
                         "status": status,
-                        "content": final_body,
+                        "content": out_content,
                         "truncated": truncated,
                         "bytes": body_bytes,
                     }),
@@ -1382,6 +1459,91 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
         assert_eq!(reqs.len(), 1);
         assert!(!reqs[0].url.contains("/api/web/domain_info"));
         assert_eq!(reqs[0].url, "https://skip-preflight.example/page");
+    }
+
+    use sidequery::{SideQueryClient, SideQueryError, SideQueryRequest, SideQueryResponse};
+
+    struct CapturingSideQuery {
+        captured: std::sync::Mutex<Option<String>>,
+        reply: String,
+    }
+    #[async_trait]
+    impl SideQueryClient for CapturingSideQuery {
+        async fn query(
+            &self,
+            request: SideQueryRequest,
+        ) -> Result<SideQueryResponse, SideQueryError> {
+            // `text_content()` concatenates the message's Text blocks (protocol).
+            let user_text = request.messages.last().map(|m| m.text_content());
+            *self.captured.lock().unwrap() = user_text;
+            Ok(SideQueryResponse {
+                text: Some(self.reply.clone()),
+                structured: None,
+                tool_calls: vec![],
+                // cost::Usage derives Default; inferred from the field type so the
+                // test needs no direct `cost` dependency.
+                usage: Default::default(),
+                stop_reason: Some("end_turn".into()),
+            })
+        }
+    }
+
+    #[cfg(feature = "web-markdown")]
+    #[tokio::test]
+    async fn apply_step_runs_model_over_markdown() {
+        let _env = SKIP_ENV_LOCK.lock().await;
+        crate::cache::clear_web_fetch_cache();
+        crate::blocklist::clear_domain_check_cache();
+        let (ctx, http, _sink) = make_web_ctx();
+        http.enqueue(preflight_allow());
+        http.enqueue(ScriptedResponse::Sync(protocol::HttpResponse {
+            status: 200,
+            headers: vec![("content-type".into(), "text/html".into())],
+            body: "<h1>Title</h1><p>Body text</p>".into(),
+        }));
+        let capture = std::sync::Arc::new(CapturingSideQuery {
+            captured: std::sync::Mutex::new(None),
+            reply: "MODEL SUMMARY".into(),
+        });
+        let tool = WebFetchTool::new(ctx).with_side_query(capture.clone());
+        let res = tool
+            .call(
+                json!({ "url": "https://apply.example/x", "prompt": "summarize" }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .expect("ok");
+        assert_eq!(res.data["content"], "MODEL SUMMARY");
+        let seen = capture.captured.lock().unwrap().clone().unwrap();
+        assert!(seen.contains("# Title"), "model prompt should carry markdown: {seen}");
+        assert!(seen.contains("summarize"));
+        assert!(!seen.contains("<h1>"), "HTML must be converted, not raw");
+    }
+
+    #[cfg(feature = "web-markdown")]
+    #[tokio::test]
+    async fn no_side_query_returns_markdown_unchanged_behavior() {
+        let _env = SKIP_ENV_LOCK.lock().await;
+        crate::cache::clear_web_fetch_cache();
+        crate::blocklist::clear_domain_check_cache();
+        let (ctx, http, _sink) = make_web_ctx();
+        http.enqueue(preflight_allow());
+        http.enqueue(ScriptedResponse::Sync(protocol::HttpResponse {
+            status: 200,
+            headers: vec![("content-type".into(), "text/html".into())],
+            body: "<h1>Hi</h1>".into(),
+        }));
+        let tool = WebFetchTool::new(ctx);
+        let res = tool
+            .call(
+                json!({ "url": "https://nomarkdown.example/x", "prompt": "q" }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .expect("ok");
+        assert_eq!(res.data["content"], "# Hi");
     }
 
     #[test]

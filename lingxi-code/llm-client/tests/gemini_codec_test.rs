@@ -39,3 +39,42 @@ fn decode_text_and_function_call() {
     let decoded = codec.decode_response(tool).unwrap();
     assert!(matches!(decoded.content[0], ContentBlock::ToolCall { ref name, .. } if name == "Bash"));
 }
+
+#[test]
+fn encode_tool_result_uses_prior_tool_call_name() {
+    let codec = GeminiCodec::new("https://generativelanguage.googleapis.com/v1beta");
+    let mut request = LlmRequest::new("gemini-2.0-flash");
+    request.messages.push(llm_client::Message {
+        role: "assistant".to_string(),
+        content: vec![ContentBlock::ToolCall {
+            id: "call_1".to_string(),
+            name: "Bash".to_string(),
+            input: serde_json::json!({"command":"ls"}),
+        }],
+    });
+    request.messages.push(llm_client::Message {
+        role: "user".to_string(),
+        content: vec![ContentBlock::ToolResult {
+            tool_call_id: "call_1".to_string(),
+            output: serde_json::json!("done"),
+        }],
+    });
+
+    let provider_request = codec.encode_request(&request).unwrap();
+
+    assert_eq!(provider_request.body_json["contents"][1]["parts"][0]["functionResponse"]["name"], "Bash");
+}
+
+#[test]
+fn decode_cached_content_token_count_maps_to_cache_read_usage() {
+    let codec = GeminiCodec::new("https://generativelanguage.googleapis.com/v1beta");
+    let response = ProviderResponse::json(200, serde_json::json!({
+        "modelVersion":"gemini-2.0-flash",
+        "candidates":[{"content":{"role":"model","parts":[{"text":"hi"}]},"finishReason":"STOP"}],
+        "usageMetadata":{"promptTokenCount":9,"candidatesTokenCount":3,"cachedContentTokenCount":7}
+    }));
+
+    let decoded = codec.decode_response(response).unwrap();
+
+    assert_eq!(decoded.usage.billable_tokens.cache_read, 7);
+}

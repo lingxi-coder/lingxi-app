@@ -28,8 +28,12 @@ impl GeminiCodec {
 
 impl WireCodec for GeminiCodec {
     fn encode_request(&self, request: &LlmRequest) -> Result<ProviderRequest, LlmError> {
+        let tool_call_names = build_tool_call_name_map(&request.messages);
         let mut body = serde_json::Map::new();
-        body.insert("contents".to_string(), Value::Array(encode_messages(&request.messages)));
+        body.insert(
+            "contents".to_string(),
+            Value::Array(encode_messages(&request.messages, &tool_call_names)),
+        );
 
         if let Some(system) = &request.system {
             body.insert(
@@ -62,7 +66,21 @@ impl WireCodec for GeminiCodec {
     }
 }
 
-fn encode_messages(messages: &[crate::Message]) -> Vec<Value> {
+fn build_tool_call_name_map(messages: &[crate::Message]) -> std::collections::BTreeMap<String, String> {
+    let mut tool_call_names = std::collections::BTreeMap::new();
+
+    for message in messages {
+        for block in &message.content {
+            if let ContentBlock::ToolCall { id, name, .. } = block {
+                tool_call_names.entry(id.clone()).or_insert_with(|| name.clone());
+            }
+        }
+    }
+
+    tool_call_names
+}
+
+fn encode_messages(messages: &[crate::Message], tool_call_names: &std::collections::BTreeMap<String, String>) -> Vec<Value> {
     let mut out = Vec::new();
 
     for message in messages {
@@ -81,9 +99,9 @@ fn encode_messages(messages: &[crate::Message]) -> Vec<Value> {
                         "args": input,
                     }
                 })),
-                ContentBlock::ToolResult { output, .. } => parts.push(serde_json::json!({
+                ContentBlock::ToolResult { tool_call_id, output } => parts.push(serde_json::json!({
                     "functionResponse": {
-                        "name": "",
+                        "name": tool_call_names.get(tool_call_id).cloned().unwrap_or_default(),
                         "response": {"result": output},
                     }
                 })),
@@ -163,17 +181,21 @@ fn decode_response_body(body_json: Value) -> Result<LlmResponse, LlmError> {
     let usage = body_json
         .get("usageMetadata")
         .map(|usage| Usage {
-            billable_tokens: crate::TokenUsage {
-                input: usage
-                    .get("promptTokenCount")
-                    .and_then(Value::as_u64)
-                    .unwrap_or(0),
-                output: usage
-                    .get("candidatesTokenCount")
-                    .and_then(Value::as_u64)
-                    .unwrap_or(0),
-                ..Default::default()
-            },
+                billable_tokens: crate::TokenUsage {
+                    input: usage
+                        .get("promptTokenCount")
+                        .and_then(Value::as_u64)
+                        .unwrap_or(0),
+                    output: usage
+                        .get("candidatesTokenCount")
+                        .and_then(Value::as_u64)
+                        .unwrap_or(0),
+                    cache_read: usage
+                        .get("cachedContentTokenCount")
+                        .and_then(Value::as_u64)
+                        .unwrap_or(0),
+                    ..Default::default()
+                },
             ..Default::default()
         })
         .unwrap_or_default();

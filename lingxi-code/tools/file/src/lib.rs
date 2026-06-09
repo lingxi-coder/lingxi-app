@@ -25,6 +25,8 @@ pub mod edit;
 pub mod file_meta;
 pub mod glob;
 pub mod grep;
+#[cfg(feature = "image-read")]
+pub mod image_read;
 pub mod notebook_edit;
 pub mod notebook_read;
 pub mod quotes;

@@ -12,6 +12,7 @@ pub mod hooks;
 pub mod mcp;
 pub mod memory;
 pub mod model;
+pub mod permissions;
 pub mod repl;
 pub mod resume;
 pub mod scroll;
@@ -152,4 +153,15 @@ pub enum Screen {
     /// the status-line model. Unlike `theme`, there is NO live preview (the
     /// switch is an async write, not a sync palette swap).
     Model(model::ModelScreenState),
+    /// The `/permissions` viewer — claude-code `commands/permissions`. A
+    /// read-only list↔detail of the configured permission rules (behavior ·
+    /// rule; source in the detail) plus the active permission mode. Interactive
+    /// like Hooks/Mcp: `root::handle_screen_key` runs the pure
+    /// `permissions::handle_permissions_key`. Opened by `/permissions` via the
+    /// async OFF-DISK `pump_open_permissions` (reads the three settings tiers —
+    /// the same files the enforcement loader + 3c persistence use). The
+    /// interactive MANAGER (add/remove rule, switch mode → settings write) of
+    /// claude-code's full `/permissions` is deferred (the 3c persist mechanism
+    /// exists; wiring an add/remove UI onto it is a follow-up).
+    Permissions(permissions::PermissionsScreenState),
 }

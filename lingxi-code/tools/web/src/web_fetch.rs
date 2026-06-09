@@ -229,13 +229,26 @@ fn skip_web_fetch_preflight() -> bool {
 /// truncation suffix on overflow. Never self-retries on transient 5xx (spec §5).
 pub struct WebFetchTool {
     ctx: BuiltinToolContext,
+    /// Optional small-fast side-query client for the apply step. Wired only at
+    /// the desktop composition root (None on mobile/minimal — see plan).
+    side_query: Option<std::sync::Arc<dyn sidequery::SideQueryClient>>,
 }
 
 impl WebFetchTool {
-    /// Construct a new tool.
+    /// Construct a new tool (no apply step until [`Self::with_side_query`]).
     #[must_use]
     pub fn new(ctx: BuiltinToolContext) -> Self {
-        Self { ctx }
+        Self { ctx, side_query: None }
+    }
+
+    /// Attach the side-query client that powers the secondary-model apply step.
+    #[must_use]
+    pub fn with_side_query(
+        mut self,
+        client: std::sync::Arc<dyn sidequery::SideQueryClient>,
+    ) -> Self {
+        self.side_query = Some(client);
+        self
     }
 
     fn user_agent() -> String {
@@ -1369,6 +1382,13 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
         assert_eq!(reqs.len(), 1);
         assert!(!reqs[0].url.contains("/api/web/domain_info"));
         assert_eq!(reqs[0].url, "https://skip-preflight.example/page");
+    }
+
+    #[test]
+    fn with_side_query_sets_the_client() {
+        let (ctx, _http, _sink) = make_web_ctx();
+        let tool = WebFetchTool::new(ctx);
+        assert!(tool.side_query.is_none(), "default has no side-query client");
     }
 
     #[test]

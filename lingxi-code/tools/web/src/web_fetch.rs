@@ -261,6 +261,7 @@ impl WebFetchTool {
 
     /// Resolve the small-fast model id for the apply step. Anthropic-family
     /// default => Haiku; otherwise fall back to the configured default model.
+    #[cfg(feature = "web-markdown")]
     fn apply_model(&self) -> String {
         if self.ctx.default_model.contains("claude") {
             "claude-haiku-4-5".to_string()
@@ -309,22 +310,28 @@ impl WebFetchTool {
     }
 
     /// Returns `Some(model_output)` when the apply step ran, else `None`.
+    #[cfg(feature = "web-markdown")]
     async fn maybe_apply(
         &self,
         host: &str,
         content: &str,
         prompt: Option<&str>,
     ) -> Option<String> {
-        #[cfg(feature = "web-markdown")]
-        {
-            if let (Some(client), Some(p)) = (self.side_query.as_ref(), prompt) {
-                return Some(self.apply_prompt(client, host, content, p).await);
-            }
+        if let (Some(client), Some(p)) = (self.side_query.as_ref(), prompt) {
+            return Some(self.apply_prompt(client, host, content, p).await);
         }
-        #[cfg(not(feature = "web-markdown"))]
-        {
-            let _ = (host, content, prompt);
-        }
+        None
+    }
+
+    /// No-op fallback when `web-markdown` is disabled.
+    #[cfg(not(feature = "web-markdown"))]
+    #[allow(clippy::unused_async)]
+    async fn maybe_apply(
+        &self,
+        _host: &str,
+        _content: &str,
+        _prompt: Option<&str>,
+    ) -> Option<String> {
         None
     }
 
@@ -1461,30 +1468,32 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
         assert_eq!(reqs[0].url, "https://skip-preflight.example/page");
     }
 
-    use sidequery::{SideQueryClient, SideQueryError, SideQueryRequest, SideQueryResponse};
+    #[cfg(feature = "web-markdown")]
+    mod markdown_apply {
+        use super::*;
+        use sidequery::{SideQueryClient, SideQueryError, SideQueryRequest, SideQueryResponse};
 
-    struct CapturingSideQuery {
-        captured: std::sync::Mutex<Option<String>>,
-        reply: String,
-    }
-    #[async_trait]
-    impl SideQueryClient for CapturingSideQuery {
-        async fn query(
-            &self,
-            request: SideQueryRequest,
-        ) -> Result<SideQueryResponse, SideQueryError> {
-            // `text_content()` concatenates the message's Text blocks (protocol).
-            let user_text = request.messages.last().map(|m| m.text_content());
-            *self.captured.lock().unwrap() = user_text;
-            Ok(SideQueryResponse {
-                text: Some(self.reply.clone()),
-                structured: None,
-                tool_calls: vec![],
-                // cost::Usage derives Default; inferred from the field type so the
-                // test needs no direct `cost` dependency.
-                usage: Default::default(),
-                stop_reason: Some("end_turn".into()),
-            })
+        pub(super) struct CapturingSideQuery {
+            pub(super) captured: std::sync::Mutex<Option<String>>,
+            pub(super) reply: String,
+        }
+        #[async_trait]
+        impl SideQueryClient for CapturingSideQuery {
+            async fn query(
+                &self,
+                request: SideQueryRequest,
+            ) -> Result<SideQueryResponse, SideQueryError> {
+                // `text_content()` concatenates the message's Text blocks (protocol).
+                let user_text = request.messages.last().map(protocol::ConversationMessage::text_content);
+                *self.captured.lock().unwrap() = user_text;
+                Ok(SideQueryResponse {
+                    text: Some(self.reply.clone()),
+                    structured: None,
+                    tool_calls: vec![],
+                    usage: cost::Usage::default(),
+                    stop_reason: Some("end_turn".into()),
+                })
+            }
         }
     }
 
@@ -1501,7 +1510,7 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
             headers: vec![("content-type".into(), "text/html".into())],
             body: "<h1>Title</h1><p>Body text</p>".into(),
         }));
-        let capture = std::sync::Arc::new(CapturingSideQuery {
+        let capture = std::sync::Arc::new(markdown_apply::CapturingSideQuery {
             captured: std::sync::Mutex::new(None),
             reply: "MODEL SUMMARY".into(),
         });

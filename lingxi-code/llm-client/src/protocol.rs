@@ -1,5 +1,7 @@
 //! Canonical protocol types and codec traits.
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -254,6 +256,60 @@ pub enum ResponseFormat {
     },
 }
 
+/// Provider-native request envelope.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ProviderRequest {
+    /// HTTP method.
+    pub method: String,
+    /// Request URL.
+    pub url: String,
+    /// Request headers.
+    #[serde(default)]
+    pub headers: BTreeMap<String, String>,
+    /// JSON request body.
+    pub body_json: Value,
+}
+
+impl ProviderRequest {
+    /// Create a POST request with a JSON body.
+    #[must_use]
+    pub fn post_json(url: impl Into<String>, body_json: Value) -> Self {
+        Self {
+            method: "POST".to_string(),
+            url: url.into(),
+            headers: BTreeMap::new(),
+            body_json,
+        }
+    }
+}
+
+/// Provider-native response envelope.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ProviderResponse {
+    /// HTTP status code.
+    pub status: u16,
+    /// Response headers.
+    #[serde(default)]
+    pub headers: BTreeMap<String, String>,
+    /// JSON response body.
+    pub body_json: Value,
+    /// Optional provider request id.
+    pub request_id: Option<String>,
+}
+
+impl ProviderResponse {
+    /// Create a JSON response envelope.
+    #[must_use]
+    pub fn json(status: u16, body_json: Value) -> Self {
+        Self {
+            status,
+            headers: BTreeMap::new(),
+            body_json,
+            request_id: None,
+        }
+    }
+}
+
 /// Encoded provider request body.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum PreparedBody {
@@ -297,6 +353,26 @@ pub trait Protocol: std::fmt::Debug + Send + Sync {
     fn decode_response(&self, response: RawResponse) -> Result<LlmResponse, LlmError>;
     /// Create a stream decoder for this protocol.
     fn stream_decoder(&self) -> Box<dyn StreamDecoder>;
+}
+
+/// Provider wire codec.
+pub trait WireCodec: std::fmt::Debug + Send + Sync {
+    /// Encode a canonical request into a provider envelope.
+    fn encode_request(&self, request: &LlmRequest) -> Result<ProviderRequest, LlmError>;
+    /// Decode a provider envelope into a canonical response.
+    fn decode_response(&self, response: ProviderResponse) -> Result<LlmResponse, LlmError>;
+    /// Create a stream decoder for this codec.
+    fn stream_decoder(&self) -> Box<dyn StreamDecoder>;
+}
+
+/// Stream decoder that emits no events.
+#[derive(Debug, Default)]
+pub struct NoopStreamDecoder;
+
+impl StreamDecoder for NoopStreamDecoder {
+    fn decode_frame(&mut self, _frame: RawStreamFrame) -> Result<Vec<LlmEvent>, LlmError> {
+        Ok(Vec::new())
+    }
 }
 
 /// Provider stream decoder.

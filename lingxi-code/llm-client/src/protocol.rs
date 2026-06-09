@@ -256,14 +256,14 @@ pub enum ResponseFormat {
     },
 }
 
-/// Provider-native request envelope.
+/// Provider-native request envelope with normalized single-value headers.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ProviderRequest {
     /// HTTP method.
     pub method: String,
     /// Request URL.
     pub url: String,
-    /// Request headers.
+    /// Normalized single-value request headers.
     #[serde(default)]
     pub headers: BTreeMap<String, String>,
     /// JSON request body.
@@ -283,12 +283,12 @@ impl ProviderRequest {
     }
 }
 
-/// Provider-native response envelope.
+/// Provider-native response envelope with normalized single-value headers.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ProviderResponse {
     /// HTTP status code.
     pub status: u16,
-    /// Response headers.
+    /// Normalized single-value response headers.
     #[serde(default)]
     pub headers: BTreeMap<String, String>,
     /// JSON response body.

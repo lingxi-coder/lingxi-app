@@ -944,9 +944,10 @@ impl Tool for FileReadTool {
         let is_image = cfg!(feature = "image-read") && is_image_path(&canon);
 
         // PDF files route to the document path (claude-code routes by extension
-        // to the PDF reader, which applies its own 3MB extraction gate, not the
-        // 256KB text cap). Gated on the feature so the cap still applies — and
-        // PDFs still hit the binary guard — when `pdf-read` is off.
+        // to the PDF reader, which applies its own PDF size gates — 20MB inline /
+        // 100MB extraction — not the 256KB text cap). Gated on the feature so the
+        // cap still applies — and PDFs still hit the binary guard — when
+        // `pdf-read` is off.
         let is_pdf = cfg!(feature = "pdf-read") && is_pdf_path(&canon);
 
         // TS applies the byte cap ONLY when no `limit` is supplied

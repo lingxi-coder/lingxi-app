@@ -142,6 +142,9 @@ pub async fn render_pdf_pages(
     first: u32,
     last: u32,
 ) -> Result<Vec<Vec<u8>>, PdfRenderError> {
+    if original_size == 0 {
+        return Err(PdfRenderError::Empty);
+    }
     if original_size > PDF_MAX_EXTRACT_SIZE {
         return Err(PdfRenderError::TooLarge);
     }

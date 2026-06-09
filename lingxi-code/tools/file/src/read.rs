@@ -135,6 +135,12 @@ fn validate_content_tokens(content: &str, ext: Option<&str>, max_tokens: u64) ->
 /// (`src/utils/format.ts`): `< 1KB` ⇒ `"{n} bytes"`; otherwise one decimal with a
 /// trailing `.0` trimmed, suffixed `KB`/`MB`/`GB` (no space). Used by the PDF
 /// routing/extraction messages.
+// The u64 → f64 cast loses precision for values > 2^53 (> 9 PB). File sizes
+// of that magnitude are not realistic for PDF extraction, and claude-code uses
+// JavaScript number (f64) for the same computation. The cast is intentional.
+// Gated: only reachable under pdf-read or pdf-render; dead_code when both are off.
+#[cfg(any(feature = "pdf-read", feature = "pdf-render"))]
+#[allow(clippy::cast_precision_loss)]
 pub(crate) fn format_file_size(size_in_bytes: u64) -> String {
     fn trim(x: f64) -> String {
         let s = format!("{x:.1}");
@@ -153,6 +159,43 @@ pub(crate) fn format_file_size(size_in_bytes: u64) -> String {
     }
     let gb = mb / 1024.0;
     format!("{}GB", trim(gb))
+}
+
+/// Turn rendered page JPEGs into (image sources, tool-result data). Each page is
+/// run through [`crate::image_read::process_image`] (the claude-code image
+/// ladder) and becomes one [`protocol::ImageSource::Base64`]; the tool-result
+/// text mirrors claude-code `FileReadTool.ts:684`.
+///
+/// # Errors
+/// Propagates `process_image` failure (a page that fails to decode/encode).
+#[cfg(feature = "pdf-render")]
+pub(crate) fn build_pages_payload(
+    canon: &std::path::Path,
+    original_size: u64,
+    page_jpegs: Vec<Vec<u8>>,
+) -> Result<(Vec<protocol::ImageSource>, serde_json::Value), String> {
+    let count = page_jpegs.len();
+    let mut sources = Vec::with_capacity(count);
+    for jpeg in page_jpegs {
+        let processed = crate::image_read::process_image(jpeg)?;
+        sources.push(protocol::ImageSource::Base64 {
+            media_type: processed.media_type,
+            data: processed.base64,
+        });
+    }
+    let path_str = canon.display().to_string();
+    let model_content = format!(
+        "PDF pages extracted: {count} page(s) from {path_str} ({})",
+        format_file_size(original_size)
+    );
+    let data = serde_json::json!({
+        "type": "parts",
+        "file_path": path_str,
+        "original_size": original_size,
+        "count": count,
+        "model_content": model_content,
+    });
+    Ok((sources, data))
 }
 
 /// Build the byte-locked too-large error message per spec §5.
@@ -531,6 +574,47 @@ impl FileReadTool {
         })
     }
 
+    /// Render `first..=last` of a PDF to page images and emit them on
+    /// `new_messages` (claude-code FileRead `pages` path).
+    #[cfg(feature = "pdf-render")]
+    async fn read_pdf_pages_result(
+        &self,
+        invocation_id: &str,
+        canon: &std::path::Path,
+        original_size: u64,
+        first: u32,
+        last: u32,
+        started: Instant,
+    ) -> Result<ToolCallResult, ToolError> {
+        let page_jpegs = match crate::pdf_render::render_pdf_pages(canon, original_size, first, last).await {
+            Ok(p) => p,
+            Err(e) => {
+                self.emit_failed(invocation_id, e.telemetry_code()).await;
+                return Err(ToolError::Io(e.message(&canon.display().to_string())));
+            }
+        };
+        let (sources, data) = match build_pages_payload(canon, original_size, page_jpegs) {
+            Ok(v) => v,
+            Err(e) => {
+                self.emit_failed(invocation_id, "pdf_page_encode").await;
+                return Err(ToolError::Io(e));
+            }
+        };
+        let msg = protocol::ConversationMessage::user_with_images(
+            protocol::MessageId::new(),
+            String::new(),
+            sources,
+        );
+        self.emit_completed(invocation_id, original_size, started.elapsed().as_millis() as u64)
+            .await;
+        Ok(ToolCallResult {
+            data,
+            new_messages: vec![msg],
+            context_modifier: None,
+            mcp_meta: None,
+        })
+    }
+
     /// Read a PDF as an inline document block (claude-code FileRead PDF path).
     /// Routing: `pages` ⇒ validate then defer to P4b extraction (error); else
     /// page-count > 10 ⇒ error; unsupported model OR size > 3MB ⇒ extraction-
@@ -608,11 +692,20 @@ impl FileReadTool {
                     "Page range \"{p}\" exceeds maximum of {PDF_MAX_PAGES_PER_READ} pages per request. Please use a smaller range."
                 )));
             }
-            self.emit_failed(invocation_id, "pdf_extraction_unavailable")
-                .await;
-            return Err(ToolError::Io(
-                "Reading specific PDF pages requires page extraction, which is not yet available. Read the whole PDF (omit pages) if it is small.".to_string(),
-            ));
+            #[cfg(feature = "pdf-render")]
+            {
+                return self
+                    .read_pdf_pages_result(invocation_id, canon, original_size, first, last, started)
+                    .await;
+            }
+            #[cfg(not(feature = "pdf-render"))]
+            {
+                self.emit_failed(invocation_id, "pdf_extraction_unavailable")
+                    .await;
+                return Err(ToolError::Io(
+                    "Reading specific PDF pages requires page extraction, which is not yet available. Read the whole PDF (omit pages) if it is small.".to_string(),
+                ));
+            }
         }
 
         // No `pages` ⇒ inline read. A parseable page count > 10 is too many to
@@ -2286,6 +2379,42 @@ mod tests {
         assert_eq!(media_type, "application/pdf");
     }
 
+    #[cfg(feature = "pdf-render")]
+    #[test]
+    fn build_pages_payload_emits_one_image_per_page() {
+        use super::build_pages_payload;
+        use image::{DynamicImage, RgbImage};
+
+        fn jpeg(w: u32, h: u32) -> Vec<u8> {
+            let img = DynamicImage::ImageRgb8(RgbImage::new(w, h));
+            let mut buf = std::io::Cursor::new(Vec::new());
+            img.write_to(&mut buf, image::ImageFormat::Jpeg).unwrap();
+            buf.into_inner()
+        }
+
+        let pages = vec![jpeg(50, 50), jpeg(40, 60)];
+        let (sources, data) =
+            build_pages_payload(std::path::Path::new("/docs/report.pdf"), 4096, pages).unwrap();
+
+        assert_eq!(sources.len(), 2, "one ImageSource per rendered page");
+        for s in &sources {
+            match s {
+                protocol::ImageSource::Base64 { media_type, data } => {
+                    assert_eq!(media_type, "image/jpeg");
+                    assert!(!data.is_empty());
+                }
+                other => panic!("expected Base64 source, got {other:?}"),
+            }
+        }
+        assert_eq!(data["type"], "parts");
+        assert_eq!(data["file_path"], "/docs/report.pdf");
+        assert_eq!(
+            data["model_content"],
+            "PDF pages extracted: 2 page(s) from /docs/report.pdf (4KB)"
+        );
+    }
+
+    #[cfg(any(feature = "pdf-read", feature = "pdf-render"))]
     #[test]
     fn format_file_size_matches_claude_code() {
         use super::format_file_size;

@@ -12,6 +12,13 @@ protocol = { path = "../../protocol" }
 permission = { path = "../../permission" }
 telemetry = { path = "../../telemetry" }
 api-client = { path = "../../api-client" }
+# Side-query seam for the WebFetch "apply" step (process fetched markdown with
+# a small-fast model). The concrete client is injected at the desktop root.
+sidequery = { path = "../../sidequery" }
+# HTML→markdown for the WebFetch apply step (the Rust analogue of claude-code's
+# `turndown`). Optional + gated behind `web-markdown` so engine-mobile/minimal
+# never resolves it.
+htmd = { version = "=0.1.6", optional = true }
 async-trait.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -19,6 +26,11 @@ tokio = { workspace = true, features = ["sync"] }
 once_cell = "1"
 url = "2"
 thiserror.workspace = true
+
+[features]
+# Enables HTML→markdown conversion + the small-fast apply step. OFF by default
+# so the mobile/minimal builds (which never enable it) don't pull `htmd`.
+web-markdown = ["dep:htmd"]
 
 [dev-dependencies]
 tool-api = { path = "../../tool-api", features = ["test-support"] }

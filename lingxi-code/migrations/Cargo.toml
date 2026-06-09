@@ -1,0 +1,21 @@
+[package]
+name = "migrations"
+version = "0.12.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+# SubscriptionType for the subscriber-gated migrations' fail-closed context.
+anthropic-oauth = { path = "../anthropic-oauth" }
+telemetry = { path = "../telemetry" }
+serde_json.workspace = true
+tracing.workspace = true
+tokio = { workspace = true, features = ["fs"] }
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+
+[lints]
+workspace = true

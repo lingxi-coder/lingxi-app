@@ -23,7 +23,7 @@ pub mod types;
 
 pub use auth::{ApiKeyAuthenticator, Authenticator, BearerAuthenticator};
 pub use anthropic::normalize_anthropic_usage;
-pub use providers::AnthropicMessagesCodec;
+pub use providers::{AnthropicMessagesCodec, OpenAiChatCodec};
 pub use config::{
     AuthStrategy, Capabilities, ClientConfig, CredentialConfig, ModelProfile, PricingConfig,
     ProtocolFamily, ProviderProfile,

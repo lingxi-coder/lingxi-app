@@ -70,18 +70,20 @@ impl PdfRenderError {
 }
 
 /// Build the `pdftoppm` argument vector (claude-code `src/utils/pdf.ts:222-230`).
-/// `-jpeg -r 100`, then `-f first`, then `-l last` UNLESS `last == u32::MAX`
-/// (the open-ended `"N-"` range — claude-code's `Infinity` — renders to the end),
-/// then the input path and the output `<dir>/page` prefix.
+/// `-jpeg -r 100` are always present. Then `-f first` is pushed ONLY when
+/// `first != 0` — mirroring claude-code's `if (options?.firstPage)` (pdf.ts:224-226),
+/// where `0` is JS-falsy/undefined so the flag is omitted. Then `-l last` UNLESS
+/// `last == u32::MAX` (the open-ended `"N-"` range — claude-code's `Infinity` —
+/// renders to the end). Finally the input path and the output `<dir>/page` prefix.
+/// In practice the pages path always supplies `first >= 1`, so `-f` is present
+/// for every real call; the `first == 0` branch exists purely for faithful parity.
 #[must_use]
 pub fn build_pdftoppm_args(first: u32, last: u32, input: &Path, prefix: &Path) -> Vec<OsString> {
-    let mut args: Vec<OsString> = vec![
-        "-jpeg".into(),
-        "-r".into(),
-        "100".into(),
-        "-f".into(),
-        first.to_string().into(),
-    ];
+    let mut args: Vec<OsString> = vec!["-jpeg".into(), "-r".into(), "100".into()];
+    if first != 0 {
+        args.push("-f".into());
+        args.push(first.to_string().into());
+    }
     if last != u32::MAX {
         args.push("-l".into());
         args.push(last.to_string().into());
@@ -221,6 +223,17 @@ mod tests {
         assert_eq!(
             args_as_strings(&a),
             vec!["-jpeg", "-r", "100", "-f", "2", "-l", "7", "/in.pdf", "/tmp/x/page"]
+        );
+    }
+
+    #[test]
+    fn args_first_zero_omits_f() {
+        // first == 0 models claude-code's JS-falsy `firstPage` (pdf.ts:224-226):
+        // the `if (options?.firstPage)` guard is false, so -f is NOT pushed.
+        let a = build_pdftoppm_args(0, 5, Path::new("/in.pdf"), Path::new("/tmp/x/page"));
+        assert_eq!(
+            args_as_strings(&a),
+            vec!["-jpeg", "-r", "100", "-l", "5", "/in.pdf", "/tmp/x/page"]
         );
     }
 

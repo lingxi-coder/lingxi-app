@@ -2,9 +2,6 @@
 //! that mirror claude-code FileRead's PDF branch (utils/pdf.ts + pdfUtils.ts).
 //! lopdf is a pure-Rust PARSER (page count) — page-image extraction is P4b.
 
-/// Size threshold above which a full inline PDF read is refused and page
-/// extraction is required — byte-locked to claude-code apiLimits.ts (3 MB).
-pub const PDF_EXTRACT_SIZE_THRESHOLD: u64 = 3 * 1024 * 1024;
 /// Max pages per ranged request.
 pub const PDF_MAX_PAGES_PER_READ: u32 = 20;
 /// Max page count for an inline (no-range) read.

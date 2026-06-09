@@ -13,6 +13,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod context;
 pub mod global_config;
 pub mod settings_update;
 

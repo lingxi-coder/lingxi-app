@@ -87,9 +87,6 @@ pub struct MigrationEnv {
 
 impl MigrationEnv {
     /// Emit a tengu event if a bus is wired.
-    // `dead_code` allow: consumed by the migration emit sites (plan Task 6+);
-    // drop the allow when the first migration lands.
-    #[allow(dead_code)]
     pub(crate) async fn emit(&self, name: &str, metadata: telemetry::sink::LogEventMetadata) {
         if let Some(bus) = &self.bus {
             bus.log_event(name, metadata).await;
@@ -97,9 +94,6 @@ impl MigrationEnv {
     }
 
     /// Epoch milliseconds (`Date.now()` parity for the `*Timestamp` keys).
-    // `dead_code` allow: consumed by the timestamp-writing migrations (plan
-    // Task 7+); drop the allow when the first such migration lands.
-    #[allow(dead_code)]
     pub(crate) fn now_ms() -> i64 {
         i64::try_from(
             std::time::SystemTime::now()

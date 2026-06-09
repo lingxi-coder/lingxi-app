@@ -381,6 +381,11 @@ impl StreamDecoder for NoopStreamDecoder {
 pub trait StreamDecoder: std::fmt::Debug + Send {
     /// Decode one raw stream frame into zero or more canonical events.
     fn decode_frame(&mut self, frame: RawStreamFrame) -> Result<Vec<LlmEvent>, LlmError>;
+
+    /// Finish the stream and emit any terminal events.
+    fn finish(&mut self) -> Result<Vec<LlmEvent>, LlmError> {
+        Ok(Vec::new())
+    }
 }
 
 /// Validate request capabilities before transport I/O.

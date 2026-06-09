@@ -1,4 +1,7 @@
-use llm_client::{ContentBlock, LlmRequest, OpenAiChatCodec, ProviderResponse, ToolDeclaration, WireCodec};
+use llm_client::{
+    ContentBlock, ContentDelta, LlmEvent, LlmRequest, OpenAiChatCodec, ProviderResponse,
+    RawStreamFrame, ToolDeclaration, WireCodec,
+};
 
 #[test]
 fn encode_request_shape_is_openai_chat_completions() {
@@ -115,4 +118,35 @@ fn decode_rejects_missing_tool_call_arguments() {
 
     let err = codec.decode_response(response).unwrap_err();
     assert!(matches!(err, llm_client::LlmError::InvalidRequest { .. }));
+}
+
+#[test]
+fn sse_stream_reassembles_text_then_tool_call() {
+    let frames = [
+        r#"{"id":"c","model":"gpt-4o","choices":[{"index":0,"delta":{"role":"assistant","content":"On it. "}}]}"#,
+        r#"{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_z","type":"function","function":{"name":"Bash","arguments":"{\"command\":"}}]}}]}"#,
+        r#"{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"ls\"}"}}]}}]}"#,
+        r#"{"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}"#,
+        "[DONE]",
+    ];
+    let mut decoder = OpenAiChatCodec::new("https://api.openai.com/v1").stream_decoder();
+    let mut events = Vec::new();
+    for frame in frames {
+        events.extend(decoder.decode_frame(RawStreamFrame::new(frame.as_bytes().to_vec())).unwrap());
+    }
+    events.extend(decoder.finish().unwrap());
+
+    assert!(matches!(events.first(), Some(LlmEvent::MessageStart { .. })));
+    let args: String = events
+        .iter()
+        .filter_map(|event| match event {
+            LlmEvent::ContentBlockDelta {
+                delta: ContentDelta::InputJsonDelta { partial_json },
+                ..
+            } => Some(partial_json.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(args, "{\"command\":\"ls\"}");
+    assert!(matches!(events.last(), Some(LlmEvent::MessageStop)));
 }

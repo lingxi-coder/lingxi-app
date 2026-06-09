@@ -1185,11 +1185,45 @@ pub async fn build(
     //        (`execPromptHook.ts`) runs an inline single-turn query through the
     //        shared provider/routing/telemetry plumbing. Decoupled: the hooks
     //        crate only sees the `HookPromptRunner` trait, never the api-client.
+    // (5.255) B5 async hook registry. A matched hook with `blocking == false`
+    //         (the config-`async` analog — claude-code `hooks.ts:995-1030`
+    //         `executeInBackground`) is handed to this registry instead of being
+    //         awaited inline, so the originating turn proceeds IMMEDIATELY rather
+    //         than blocking on a slow non-blocking hook. The registry tracks each
+    //         in-flight handle (so it can be cancelled/joined), races it against
+    //         its `asyncTimeout` (default 15s), and publishes the eventual
+    //         `(HookId, HookResult)` on `async_hook_completion_tx`. Without this
+    //         wiring `HookExecutorImpl::background_hook` degrades to running the
+    //         hook inline-and-discard — which still can't `Block`, but DOES block
+    //         the turn — so attaching it here is what realizes the async behavior.
+    //
+    //         The SAME `Arc<PosixRuntime>` backs both the executor's
+    //         `RuntimeSpawner` and the registry's spawner, so backgrounded hooks
+    //         run on the one process runtime. The completion channel is drained by
+    //         a best-effort background loop (below) — the full claude-code
+    //         `getAsyncHookResponseAttachments` fold-back (re-injecting completed
+    //         async-hook stdout as `async_hook_response` attachments into the next
+    //         turn) is a separate, larger feature and is NOT part of this seam; the
+    //         drain keeps the bounded channel from back-pressuring a fire-and-forget
+    //         hook. When no hooks are configured nothing is ever backgrounded, so
+    //         this wiring is a no-op for the common case (byte-identical).
+    let hook_runtime = Arc::new(PosixRuntime::new());
+    let (async_hook_completion_tx, mut async_hook_completion_rx) =
+        tokio::sync::mpsc::channel::<(protocol::HookId, hooks::HookResult)>(64);
+    let async_hook_registry = Arc::new(hooks::AsyncHookRegistry::new(
+        hook_runtime.clone() as Arc<dyn traits::RuntimeSpawner>,
+        async_hook_completion_tx,
+    ));
+    // Best-effort drain so a completed background hook never back-pressures the
+    // channel (mirrors the cost-persist drain idiom above). Fire-and-forget:
+    // the result is observed only for in-flight bookkeeping, which the registry
+    // already cleared before publishing.
+    tokio::spawn(async move { while async_hook_completion_rx.recv().await.is_some() {} });
     let hooks = Arc::new(
         hooks::HookExecutorImpl::new(
             hook_registry.clone(),
             http.clone(),
-            Arc::new(PosixRuntime::new()),
+            hook_runtime as Arc<dyn traits::RuntimeSpawner>,
         )
         .with_process_runner(
             Arc::new(PosixProcess::new()) as Arc<dyn traits::ProcessRunner>,
@@ -1197,7 +1231,8 @@ pub async fn build(
         )
         .with_prompt_runner(Arc::new(orchestrator::ApiClientHookPromptRunner::new(
             api_client.clone(),
-        ))),
+        )))
+        .with_async_registry(async_hook_registry),
     );
 
     // (5.26) Build the MCP registry NOW (deferred from (5.1)) so it can carry

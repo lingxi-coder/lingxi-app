@@ -40,8 +40,11 @@ pub async fn run(env: &MigrationEnv) {
             &sp,
             vec![("skipDangerousModePermissionPrompt".into(), Some(json!(true)))],
         ) {
-            tracing::warn!(error = %e, "migrate_bypass_permissions: settings write failed");
-            return; // TS catch: config key NOT removed on failure
+            // TS `updateSettingsForSource` never throws — it returns `{error}`
+            // (settings.ts:416-523) and the migration discards it (TS:23-26),
+            // so the catch is unreachable from a settings-write failure: the
+            // event is still emitted and the config key still removed.
+            tracing::warn!(error = %e, "migrate_bypass_permissions: settings write failed (ignored, TS parity)");
         }
     }
 
@@ -101,6 +104,36 @@ mod tests {
         let s = read_settings_map(&sp).unwrap();
         assert!(s.get("skipDangerousModePermissionPrompt").is_none());
         // config key still removed
+        let m = crate::global_config::read_map(&t.global).unwrap();
+        assert!(m.get("bypassPermissionsModeAccepted").is_none());
+    }
+
+    /// Fix 3 continue branch: a failing settings WRITE must not block the
+    /// event + config-key removal (TS `updateSettingsForSource` returns an
+    /// ignored `{error}`, settings.ts:416-523; TS:28-34 proceed regardless —
+    /// the catch is unreachable from a settings-write failure).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn settings_write_failure_still_removes_config_key() {
+        use std::os::unix::fs::PermissionsExt;
+        let t = temp_config();
+        std::fs::write(&t.global, r#"{"bypassPermissionsModeAccepted": true}"#).unwrap();
+        let sp = settings_path(SettingsSource::User, &t.home, &t.project);
+        std::fs::create_dir_all(sp.parent().unwrap()).unwrap();
+        std::fs::write(&sp, "{}").unwrap();
+        std::fs::set_permissions(&sp, std::fs::Permissions::from_mode(0o444)).unwrap();
+        // Skip when perms don't bite (e.g. running as root).
+        if std::fs::OpenOptions::new().append(true).open(&sp).is_ok() {
+            return;
+        }
+        run(&test_env(&t)).await;
+        std::fs::set_permissions(&sp, std::fs::Permissions::from_mode(0o644)).unwrap();
+        // write failed → settings unchanged…
+        assert!(read_settings_map(&sp)
+            .unwrap()
+            .get("skipDangerousModePermissionPrompt")
+            .is_none());
+        // …but the config key is STILL removed.
         let m = crate::global_config::read_map(&t.global).unwrap();
         assert!(m.get("bypassPermissionsModeAccepted").is_none());
     }

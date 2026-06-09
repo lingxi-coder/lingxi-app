@@ -32,7 +32,9 @@ pub fn settings_path(source: SettingsSource, claude_home: &Path, project_dir: &P
 }
 
 /// Raw read of a settings file. Missing / blank ⇒ empty map; broken JSON ⇒
-/// `Err` (caller decides; migrations treat it as their TS catch path).
+/// `Err` (caller decides; in TS a broken file just yields `settings: null`
+/// from `getSettingsForSource`, so migration callers generally treat `Err`
+/// as "no settings" or warn-and-continue).
 pub fn read_settings_map(path: &Path) -> Result<Map<String, Value>, String> {
     match std::fs::read_to_string(path) {
         Ok(content) if content.trim().is_empty() => Ok(Map::new()),
@@ -49,6 +51,12 @@ pub fn read_settings_map(path: &Path) -> Result<Map<String, Value>, String> {
 /// `updateSettingsForSource`: apply top-level key updates. `Some(v)` sets the
 /// key, `None` deletes it (TS `mergeWith` treats `undefined` as delete).
 /// All other keys preserved; pretty-printed + trailing newline.
+///
+/// Error contract: the TS original NEVER throws — every failure path returns
+/// `{error: Error}` (settings.ts:416-523), and every migration discards that
+/// return. So in the migration ports `Err` from this function maps to
+/// warn-and-continue; only `global_config::save_map` failures (the
+/// `saveGlobalConfig` analog, which CAN throw in TS) map to a TS catch path.
 pub fn update_settings(
     path: &Path,
     updates: Vec<(String, Option<Value>)>,

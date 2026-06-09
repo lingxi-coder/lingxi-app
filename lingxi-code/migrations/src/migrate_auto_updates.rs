@@ -27,53 +27,53 @@ pub async fn run(env: &MigrationEnv) {
         return;
     }
 
-    // TS try block: settings write + event + env var + config-key removal;
-    // any failure → tengu_migrate_autoupdates_error.
-    let result: Result<bool, String> = async {
-        let sp = settings_path(SettingsSource::User, &env.claude_config_home, &env.project_dir);
-        let user = read_settings_map(&sp)?;
-        let already_had = user
-            .get("env")
-            .and_then(|e| e.get("DISABLE_AUTOUPDATER"))
-            .is_some_and(js_truthy);
-        let mut env_map: Map<String, Value> = user
-            .get("env")
-            .and_then(Value::as_object)
-            .cloned()
-            .unwrap_or_default();
-        env_map.insert("DISABLE_AUTOUPDATER".into(), json!("1"));
-        update_settings(&sp, vec![("env".into(), Some(Value::Object(env_map)))])?;
-        Ok(already_had)
+    // TS try block (TS:25-54): of everything inside it, only
+    // `saveGlobalConfig` (the config-key cleanup) can actually throw —
+    // `getSettingsForSource` returns null on a broken file (settings.ts:201-231)
+    // and `updateSettingsForSource` returns an ignored `{error}`
+    // (settings.ts:416-523). So only the cleanup failure reaches
+    // `tengu_migrate_autoupdates_error`.
+    let sp = settings_path(SettingsSource::User, &env.claude_config_home, &env.project_dir);
+    // TS: `getSettingsForSource('userSettings') || {}` (TS:26) — a broken
+    // settings file parses to null, never throws; proceed with an empty map.
+    let user = read_settings_map(&sp).unwrap_or_else(|e| {
+        tracing::warn!(error = %e, "migrate_auto_updates: settings read failed (treated as empty, TS parity)");
+        Map::new()
+    });
+    let already_had = user
+        .get("env")
+        .and_then(|e| e.get("DISABLE_AUTOUPDATER"))
+        .is_some_and(js_truthy);
+    let mut env_map: Map<String, Value> = user
+        .get("env")
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    env_map.insert("DISABLE_AUTOUPDATER".into(), json!("1"));
+    if let Err(e) = update_settings(&sp, vec![("env".into(), Some(Value::Object(env_map)))]) {
+        // TS discards the returned `{error}` (TS:30-36) — warn and continue.
+        tracing::warn!(error = %e, "migrate_auto_updates: settings write failed (ignored, TS parity)");
     }
-    .await;
 
-    match result {
-        Ok(already_had) => {
-            env.emit(
-                telemetry::tengu::migration::MIGRATE_AUTOUPDATES_TO_SETTINGS,
-                std::collections::HashMap::from([
-                    ("was_user_preference".to_string(), AnalyticsValue::Bool(true)),
-                    ("already_had_env_var".to_string(), AnalyticsValue::Bool(already_had)),
-                ]),
-            )
-            .await;
-            // explicitly set, so this takes effect immediately (TS:44)
-            std::env::set_var("DISABLE_AUTOUPDATER", "1");
-            if let Err(e) = global_config::save_map(&env.global_config_path, |mut m| {
-                m.remove("autoUpdates");
-                m.remove("autoUpdatesProtectedForNative");
-                m
-            }) {
-                // Still inside the TS try block (`saveGlobalConfig`, TS:47-54):
-                // a failure here routes to the same catch → error event.
-                tracing::warn!(error = %e, "migrate_auto_updates: config cleanup failed");
-                emit_error(env).await;
-            }
-        }
-        Err(e) => {
-            tracing::warn!(error = %e, "migrate_auto_updates failed");
-            emit_error(env).await;
-        }
+    env.emit(
+        telemetry::tengu::migration::MIGRATE_AUTOUPDATES_TO_SETTINGS,
+        std::collections::HashMap::from([
+            ("was_user_preference".to_string(), AnalyticsValue::Bool(true)),
+            ("already_had_env_var".to_string(), AnalyticsValue::Bool(already_had)),
+        ]),
+    )
+    .await;
+    // explicitly set, so this takes effect immediately (TS:44)
+    std::env::set_var("DISABLE_AUTOUPDATER", "1");
+    if let Err(e) = global_config::save_map(&env.global_config_path, |mut m| {
+        m.remove("autoUpdates");
+        m.remove("autoUpdatesProtectedForNative");
+        m
+    }) {
+        // `saveGlobalConfig` (TS:47-54) is the one throw-capable call inside
+        // the TS try: a failure here routes to the catch → error event.
+        tracing::warn!(error = %e, "migrate_auto_updates: config cleanup failed");
+        emit_error(env).await;
     }
 }
 
@@ -127,6 +127,36 @@ mod tests {
         assert!(m.get("autoUpdatesProtectedForNative").is_none());
         assert_eq!(m["keep"], json!(1));
         assert_eq!(std::env::var("DISABLE_AUTOUPDATER").unwrap(), "1");
+        std::env::remove_var("DISABLE_AUTOUPDATER");
+    }
+
+    /// Fix 4 continue branch: a broken settings file must NOT divert to the
+    /// error event — TS `getSettingsForSource(...) || {}` (TS:26) yields `{}`
+    /// on a broken file (parseSettingsFileUncached returns settings:null,
+    /// settings.ts:201-231) and `updateSettingsForSource` returns an ignored
+    /// `{error}` (settings.ts:416-523), so the success path (event + env var
+    /// + config cleanup) still runs.
+    // See migrates_explicit_false_to_settings_env for the lock rationale.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn broken_settings_file_still_takes_success_path() {
+        let _g = env_lock(); // sets process env DISABLE_AUTOUPDATER
+        std::env::remove_var("DISABLE_AUTOUPDATER");
+        let t = temp_config();
+        std::fs::write(&t.global, r#"{"autoUpdates": false}"#).unwrap();
+        let sp = settings_path(SettingsSource::User, &t.home, &t.project);
+        std::fs::create_dir_all(sp.parent().unwrap()).unwrap();
+        std::fs::write(&sp, "{ broken").unwrap();
+
+        run(&test_env(&t)).await;
+
+        // broken file untouched (update_settings bails without overwriting)…
+        assert_eq!(std::fs::read_to_string(&sp).unwrap(), "{ broken");
+        // …but the success path still ran: env var set, config keys removed.
+        assert_eq!(std::env::var("DISABLE_AUTOUPDATER").unwrap(), "1");
+        let m = crate::global_config::read_map(&t.global).unwrap();
+        assert!(m.get("autoUpdates").is_none());
+        assert!(m.get("autoUpdatesProtectedForNative").is_none());
         std::env::remove_var("DISABLE_AUTOUPDATER");
     }
 

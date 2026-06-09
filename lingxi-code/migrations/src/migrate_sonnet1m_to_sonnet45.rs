@@ -39,10 +39,11 @@ pub async fn run(env: &MigrationEnv) {
             &sp,
             vec![("model".into(), Some(json!("sonnet-4-5-20250929[1m]")))],
         ) {
-            // TS throws here, so the completion flag below is NOT set and the
-            // migration retries next startup — mirror that by returning.
-            tracing::warn!(error = %e, "migrate_sonnet1m_to_sonnet45: settings write failed");
-            return;
+            // TS `updateSettingsForSource` never throws — it returns
+            // `{error}` (settings.ts:416-523) and the migration discards it
+            // (TS:33-37), then unconditionally sets the completion flag
+            // (TS:44-48). Warn and continue so the flag is still set.
+            tracing::warn!(error = %e, "migrate_sonnet1m_to_sonnet45: settings write failed (ignored, TS parity)");
         }
     }
 
@@ -93,6 +94,45 @@ mod tests {
         std::fs::write(&sp, r#"{"model": "opus"}"#).unwrap();
         run(&test_env(&t)).await;
         assert_eq!(read_settings_map(&sp).unwrap()["model"], json!("opus"));
+        let m = crate::global_config::read_map(&t.global).unwrap();
+        assert_eq!(m["sonnet1m45MigrationComplete"], json!(true));
+    }
+
+    #[tokio::test]
+    async fn broken_settings_file_still_sets_flag() {
+        let t = temp_config();
+        let sp = settings_path(SettingsSource::User, &t.home, &t.project);
+        std::fs::create_dir_all(sp.parent().unwrap()).unwrap();
+        std::fs::write(&sp, "{ broken").unwrap();
+        run(&test_env(&t)).await;
+        // broken file untouched, flag still set (TS: read yields null, flag
+        // is set unconditionally → migration never retries)
+        assert_eq!(std::fs::read_to_string(&sp).unwrap(), "{ broken");
+        let m = crate::global_config::read_map(&t.global).unwrap();
+        assert_eq!(m["sonnet1m45MigrationComplete"], json!(true));
+    }
+
+    /// Fix 1 continue branch: a failing settings WRITE must not block the
+    /// completion flag (TS `updateSettingsForSource` returns an ignored
+    /// `{error}`, settings.ts:416-523; flag set unconditionally TS:44-48).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn settings_write_failure_still_sets_flag() {
+        use std::os::unix::fs::PermissionsExt;
+        let t = temp_config();
+        let sp = settings_path(SettingsSource::User, &t.home, &t.project);
+        std::fs::create_dir_all(sp.parent().unwrap()).unwrap();
+        std::fs::write(&sp, r#"{"model": "sonnet[1m]"}"#).unwrap();
+        std::fs::set_permissions(&sp, std::fs::Permissions::from_mode(0o444)).unwrap();
+        // Skip when perms don't bite (e.g. running as root).
+        if std::fs::OpenOptions::new().append(true).open(&sp).is_ok() {
+            return;
+        }
+        run(&test_env(&t)).await;
+        std::fs::set_permissions(&sp, std::fs::Permissions::from_mode(0o644)).unwrap();
+        // write failed → model unchanged…
+        assert_eq!(read_settings_map(&sp).unwrap()["model"], json!("sonnet[1m]"));
+        // …but the flag is STILL set.
         let m = crate::global_config::read_map(&t.global).unwrap();
         assert_eq!(m["sonnet1m45MigrationComplete"], json!(true));
     }

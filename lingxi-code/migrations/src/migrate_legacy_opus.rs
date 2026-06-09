@@ -39,8 +39,10 @@ pub async fn run(env: &MigrationEnv) {
     }
 
     if let Err(e) = update_settings(&sp, vec![("model".into(), Some(json!("opus")))]) {
-        tracing::warn!(error = %e, "migrate_legacy_opus: settings write failed");
-        return;
+        // TS `updateSettingsForSource` never throws — it returns `{error}`
+        // (settings.ts:416-523) and the migration discards it (TS:48), then
+        // still stamps the timestamp and emits the event. Warn and continue.
+        tracing::warn!(error = %e, "migrate_legacy_opus: settings write failed (ignored, TS parity)");
     }
     if let Err(e) = global_config::save_map(&env.global_config_path, |mut m| {
         m.insert(
@@ -103,6 +105,35 @@ mod tests {
             let m = crate::global_config::read_map(&t.global).unwrap();
             assert!(m["legacyOpusMigrationTimestamp"].is_i64());
         }
+    }
+
+    /// Fix 2 continue branch: a failing settings WRITE must not block the
+    /// timestamp stamp + event (TS `updateSettingsForSource` returns an
+    /// ignored `{error}`, settings.ts:416-523; TS:48-56 proceed regardless).
+    // See rewrites_each_legacy_string_and_stamps_timestamp for the lock rationale.
+    #[allow(clippy::await_holding_lock)]
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn settings_write_failure_still_stamps_timestamp() {
+        use std::os::unix::fs::PermissionsExt;
+        let _g = env_lock();
+        std::env::remove_var("CLAUDE_CODE_DISABLE_LEGACY_MODEL_REMAP");
+        let t = temp_config();
+        let sp = settings_path(SettingsSource::User, &t.home, &t.project);
+        std::fs::create_dir_all(sp.parent().unwrap()).unwrap();
+        std::fs::write(&sp, r#"{"model": "claude-opus-4-1"}"#).unwrap();
+        std::fs::set_permissions(&sp, std::fs::Permissions::from_mode(0o444)).unwrap();
+        // Skip when perms don't bite (e.g. running as root).
+        if std::fs::OpenOptions::new().append(true).open(&sp).is_ok() {
+            return;
+        }
+        run(&test_env(&t)).await;
+        std::fs::set_permissions(&sp, std::fs::Permissions::from_mode(0o644)).unwrap();
+        // write failed → model unchanged…
+        assert_eq!(read_settings_map(&sp).unwrap()["model"], json!("claude-opus-4-1"));
+        // …but the timestamp is STILL stamped (and the emit ran; bus is None).
+        let m = crate::global_config::read_map(&t.global).unwrap();
+        assert!(m["legacyOpusMigrationTimestamp"].is_i64());
     }
 
     // See rewrites_each_legacy_string_and_stamps_timestamp for the rationale.

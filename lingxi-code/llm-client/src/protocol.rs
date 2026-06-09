@@ -174,7 +174,7 @@ pub enum LlmEvent {
     /// Terminal response delta.
     MessageDelta {
         /// Terminal response delta payload.
-        delta: MessageDelta,
+        delta: MessageDeltaPayload,
         /// Normalized usage at the terminal boundary.
         usage: Option<Usage>,
     },
@@ -206,9 +206,9 @@ pub enum ContentDelta {
     },
 }
 
-/// Canonical terminal message delta.
+/// Canonical terminal message delta payload.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct MessageDelta {
+pub struct MessageDeltaPayload {
     /// Optional terminal stop reason.
     pub stop_reason: Option<String>,
 }

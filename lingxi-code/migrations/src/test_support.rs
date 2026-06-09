@@ -16,12 +16,12 @@ pub fn env_lock() -> MutexGuard<'static, ()> {
 
 /// A throwaway config universe: `dir` is a tempdir acting as the Claude
 /// config home; `global` is the `~/.claude.json`-equivalent path inside it.
-// `dead_code` allow: consumed from Task 2 onward (read/save tests).
-#[allow(dead_code)]
 pub struct TempConfig {
     /// Owns the tempdir (deleted on drop).
     pub _tmp: tempfile::TempDir,
     /// Stand-in for `~/.claude` (claude config home).
+    // `dead_code` allow: consumed from Task 3 onward (settings-path tests).
+    #[allow(dead_code)]
     pub home: PathBuf,
     /// Stand-in for `~/.claude.json` (global config file).
     pub global: PathBuf,
@@ -30,8 +30,6 @@ pub struct TempConfig {
 }
 
 /// Build a fresh [`TempConfig`]. No env mutation — APIs take explicit paths.
-// `dead_code` allow: consumed from Task 2 onward (read/save tests).
-#[allow(dead_code)]
 pub fn temp_config() -> TempConfig {
     let tmp = tempfile::tempdir().expect("tempdir");
     let home = tmp.path().join("claude-home");

@@ -336,4 +336,40 @@ mod tests {
         assert_eq!(PdfRenderError::NoOutput.telemetry_code(), "pdf_no_output");
         assert_eq!(PdfRenderError::Unknown(String::new()).telemetry_code(), "pdf_unknown");
     }
+
+    // A valid minimal 1-page PDF (same fixture pdf_read uses). pdftoppm renders one
+    // blank page from it.
+    const MINIMAL_PDF: &[u8] = b"%PDF-1.4\n1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] >>\nendobj\nxref\n0 4\n0000000000 65535 f \n0000000009 00000 n \n0000000058 00000 n \n0000000115 00000 n \ntrailer\n<< /Size 4 /Root 1 0 R >>\nstartxref\n186\n%%EOF\n";
+
+    #[tokio::test]
+    async fn render_pdf_pages_smoke() {
+        // ENV-GATED: poppler-utils may be absent (dev machine + some CI). Skip cleanly
+        // rather than fail — the parity-critical logic is covered by the pure-helper
+        // and build_pages_payload tests; this only exercises the real spawn when it can.
+        if !is_pdftoppm_available().await {
+            eprintln!("skipping render_pdf_pages_smoke: pdftoppm not installed");
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let pdf = dir.path().join("one.pdf");
+        std::fs::write(&pdf, MINIMAL_PDF).unwrap();
+
+        let pages = render_pdf_pages(&pdf, MINIMAL_PDF.len() as u64, 1, 1)
+            .await
+            .expect("render a 1-page PDF");
+        assert_eq!(pages.len(), 1, "one JPEG for a 1-page PDF");
+        assert!(pages[0].starts_with(&[0xFF, 0xD8]), "JPEG SOI marker");
+    }
+
+    #[tokio::test]
+    async fn render_rejects_oversize() {
+        // No pdftoppm needed: the size guard short-circuits before the spawn.
+        let dir = tempfile::tempdir().unwrap();
+        let pdf = dir.path().join("big.pdf");
+        std::fs::write(&pdf, MINIMAL_PDF).unwrap();
+        let err = render_pdf_pages(&pdf, PDF_MAX_EXTRACT_SIZE + 1, 1, 1)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, PdfRenderError::TooLarge));
+    }
 }

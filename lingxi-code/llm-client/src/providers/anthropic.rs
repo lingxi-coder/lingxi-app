@@ -1,7 +1,6 @@
-#![allow(missing_docs)]
-
 use crate::{ContentBlock, LlmError, LlmRequest, NoopStreamDecoder, ProviderRequest, ProviderResponse, StreamDecoder, ToolDeclaration, WireCodec};
 
+use base64::Engine;
 use serde_json::Value;
 
 #[derive(Debug, Clone)]
@@ -28,6 +27,18 @@ impl AnthropicMessagesCodec {
 
 impl WireCodec for AnthropicMessagesCodec {
     fn encode_request(&self, request: &LlmRequest) -> Result<ProviderRequest, LlmError> {
+        if request.tool_choice.is_some() {
+            return Err(LlmError::InvalidRequest {
+                message: "AnthropicMessagesCodec does not encode tool_choice yet".to_string(),
+            });
+        }
+
+        if request.response_format.is_some() {
+            return Err(LlmError::InvalidRequest {
+                message: "AnthropicMessagesCodec does not encode response_format yet".to_string(),
+            });
+        }
+
         let messages = request
             .messages
             .iter()
@@ -86,8 +97,27 @@ fn encode_content_block(block: &ContentBlock) -> Result<Value, LlmError> {
             "type": "text",
             "text": text,
         })),
-        _ => Err(LlmError::InvalidRequest {
-            message: "AnthropicMessagesCodec only encodes text content blocks yet".to_string(),
+        ContentBlock::Image { media_type, bytes } => Ok(serde_json::json!({
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": media_type,
+                "data": base64::engine::general_purpose::STANDARD.encode(bytes),
+            },
+        })),
+        ContentBlock::ToolCall { id, name, input } => Ok(serde_json::json!({
+            "type": "tool_use",
+            "id": id,
+            "name": name,
+            "input": input,
+        })),
+        ContentBlock::ToolResult { tool_call_id, output } => Ok(serde_json::json!({
+            "type": "tool_result",
+            "tool_use_id": tool_call_id,
+            "content": output,
+        })),
+        ContentBlock::Document { .. } | ContentBlock::Reasoning { .. } => Err(LlmError::InvalidRequest {
+            message: "AnthropicMessagesCodec does not encode document or reasoning blocks yet".to_string(),
         }),
     }
 }

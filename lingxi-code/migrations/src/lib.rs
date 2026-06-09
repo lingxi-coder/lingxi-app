@@ -14,6 +14,7 @@
 #![forbid(unsafe_code)]
 
 pub mod global_config;
+pub mod settings_update;
 
 #[cfg(test)]
 mod test_support;

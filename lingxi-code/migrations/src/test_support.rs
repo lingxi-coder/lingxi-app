@@ -20,8 +20,6 @@ pub struct TempConfig {
     /// Owns the tempdir (deleted on drop).
     pub _tmp: tempfile::TempDir,
     /// Stand-in for `~/.claude` (claude config home).
-    // `dead_code` allow: consumed from Task 3 onward (settings-path tests).
-    #[allow(dead_code)]
     pub home: PathBuf,
     /// Stand-in for `~/.claude.json` (global config file).
     pub global: PathBuf,

@@ -1,7 +1,7 @@
 //! T9 tests — `replay_session_state` reproduces the chain pointer + history
 //! from an on-disk JSONL so the next live turn's append chains correctly.
 
-use orchestrator::{replay_session_state, ResumeError};
+use orchestrator::{replay_session_state, state_from_messages, ResumeError};
 use platform_posix::fs::PosixFileSystem;
 use protocol::ConversationMessage;
 use serde_json::json;
@@ -84,6 +84,23 @@ async fn replay_returns_state_with_last_uuid_set() {
         ConversationMessage::Assistant { .. } => {}
         other => panic!("expected Assistant second, got {other:?}"),
     }
+}
+
+#[tokio::test]
+async fn state_from_messages_matches_disk_replay() {
+    // (M5-13) The CLI resume mount seeds the orchestrator session from the
+    // transcript ALREADY in hand (no second disk read). `state_from_messages`
+    // over `replayed.messages` must reproduce the SAME `SessionState.history` +
+    // `session_id` the on-disk `replay_session_state` produced.
+    let (_temp, claude_home, cwd, sid, _last_uuid, fs) = setup_two_turn_jsonl().await;
+    let replayed = replay_session_state(&claude_home, &cwd, sid, fs)
+        .await
+        .expect("replay ok");
+
+    let from_hand = state_from_messages(sid, &replayed.messages);
+    assert_eq!(from_hand.session_id, replayed.state.session_id);
+    assert_eq!(from_hand.history.len(), replayed.state.history.len());
+    assert_eq!(from_hand.history, replayed.state.history);
 }
 
 #[tokio::test]

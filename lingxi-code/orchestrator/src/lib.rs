@@ -66,4 +66,4 @@ pub use prompt::{
     assemble_system_prompt, FileTree, FileTreeEntry, GitStatus, MemoryFile, SystemPromptContext,
 };
 pub use provider_adapter::ProviderApiAdapter;
-pub use resume::{replay_session_state, ReplayedSession, ResumeError};
+pub use resume::{replay_session_state, state_from_messages, ReplayedSession, ResumeError};

@@ -79,6 +79,24 @@ pub async fn replay_session_state(
     })
 }
 
+/// Rebuild a replayed [`SessionState`] from transcript messages ALREADY loaded
+/// from disk (`session::jsonl::load_session` → `Vec<JsonlMessage>`).
+///
+/// (M5-13) The CLI's `--resume <uuid>` mount loads the transcript once (for the
+/// existence check + the TUI scrollback seed) and must NOT re-read it to seed the
+/// engine session: a second `load_session` is both wasteful and a TOCTOU window
+/// against a concurrent delete. This thin public wrapper exposes the SAME
+/// per-line mapping [`replay_session_state`] uses ([`build_state_from_jsonl`]) so
+/// the caller seeds the orchestrator's session directly from the in-hand
+/// messages. Returns only the [`SessionState`] (callers seeding an already-built
+/// orchestrator through its public `session()` accessor cannot set the
+/// `pub(crate)` `last_jsonl_uuid` chain pointer anyway; the desktop/CLI build
+/// wires no JSONL writer, so that pointer is inert on this path).
+#[must_use]
+pub fn state_from_messages(session_id: Uuid, messages: &[JsonlMessage]) -> SessionState {
+    build_state_from_jsonl(session_id, messages).0
+}
+
 /// Convert the replayed JSONL into a fresh [`SessionState`] + the UUID of
 /// the tail message. `type: "user" | "assistant"` lines are appended to
 /// `history`; `type: "system"` / `compact_boundary` / sidechain entries

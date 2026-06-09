@@ -110,11 +110,16 @@ pub async fn run_resume(argv: &Argv, runtime: &Runtime, sink: &dyn OutputSink) -
 ///
 /// Parses the arg as a UUID, then (SESSION.4) verifies the session actually
 /// exists on disk via [`load_session`] BEFORE reporting success: a valid-but-
-/// unknown id now errors with the TS "No conversation found with session ID:
-/// {id}" line and a non-zero exit instead of the old false "Resumed session
-/// {id}". Once confirmed present it surfaces the resolved id and runs a
-/// follow-up turn if a prompt is supplied; the full transcript replay into a
-/// live REPL is the deferred M5-13 milestone.
+/// unknown id errors with the TS "No conversation found with session ID: {id}"
+/// line and a non-zero exit instead of a false "Resumed session {id}".
+///
+/// Once confirmed present the dispatch mirrors the FRESH launch's
+/// [`crate::mode::decide_mode`]:
+///   - a non-empty prompt → run the follow-up turn one-shot (`run_oneshot`);
+///   - else under a full TTY (no `--no-tui`) → mount the live TUI with the
+///     prior conversation replayed (M5-13 — [`mount_resumed_tui`]);
+///   - else (`--no-tui` / non-TTY, no prompt) → keep the stdio fallback:
+///     surface "Resumed session {id}" + the not-yet-wired stdio REPL notice.
 async fn run_resume_by_id(argv: &Argv, runtime: &Runtime, sink: &dyn OutputSink) -> i32 {
     let arg = argv.resume.as_deref().unwrap_or("");
     let session_id = match resolve_session_id(arg) {
@@ -130,27 +135,104 @@ async fn run_resume_by_id(argv: &Argv, runtime: &Runtime, sink: &dyn OutputSink)
     // calls `loadConversationForResume(sessionId)` and, when it yields nothing,
     // exits via `exitWithError(root, "No conversation found with session ID:
     // {sessionId}")` (exit code 1). We mirror that by loading the session up
-    // front and only printing "Resumed session {id}" once it is confirmed to
-    // exist and parse.
+    // front and only proceeding once it is confirmed to exist and parse.
     let loaded = load_resume_session(session_id).await;
     if let Some((message, code)) = resume_by_id_error(session_id, loaded.as_ref()) {
         sink.error("runtime", &message).await;
         return code;
     }
-    // Session exists and parsed. The transcript replay into the live REPL is
-    // the deferred M5-13 milestone, so the loaded messages are not yet threaded
-    // anywhere; keep them named to document that intent.
-    let _messages = loaded.unwrap_or_default();
+    // Session exists and parsed — these are the raw transcript lines that seed
+    // both the orchestrator's `SessionState.history` (engine side) and the TUI
+    // scrollback (render side).
+    let messages = loaded.unwrap_or_default();
 
-    sink.text(&format!("Resumed session {session_id}\n")).await;
-
+    // A follow-up prompt keeps the one-shot path (matches the fresh
+    // `Mode::Print` arm): print the resume line then run the turn. The prompt
+    // continues the *resumed* conversation only when the orchestrator carries
+    // the replayed history — but the supplied `runtime` is the standard
+    // sink-adapter build, so seed its session here too before running.
     if let Some(p) = &argv.prompt {
         if !p.trim().is_empty() {
+            seed_orchestrator_session(&runtime.orchestrator, session_id, &messages).await;
+            sink.text(&format!("Resumed session {session_id}\n")).await;
             return run_oneshot(argv, runtime, sink).await;
         }
     }
-    eprintln!("lingxi-cli: resumed; REPL not yet wired (M5-13)");
+
+    // No prompt: mirror the fresh interactive dispatch. Under a full TTY (and no
+    // `--no-tui`) mount the live TUI with the prior conversation replayed (the
+    // M5-13 milestone); otherwise fall back to the stdio notice.
+    if crate::mode::is_full_tty() && !argv.no_tui {
+        return mount_resumed_tui(argv, session_id, messages).await;
+    }
+
+    sink.text(&format!("Resumed session {session_id}\n")).await;
+    eprintln!("lingxi-cli: resumed; stdio REPL not yet wired (M5-13)");
     exit_codes::NOT_IMPLEMENTED
+}
+
+/// (M5-13) Mount the live TUI for a resumed `--resume <uuid>` session, seeded
+/// with the prior conversation.
+///
+/// Reuses the FRESH TUI mount end-to-end ([`crate::init::build_runtime_for_tui`]
+/// → [`crate::mode::build_tui_runtime`] → [`crate::mode::mount_tui_runtime`]),
+/// adding exactly the two resume seeds the W38 seam + the engine resume path
+/// expose:
+///   1. ENGINE side — overwrite the freshly-built orchestrator's in-memory
+///      `SessionState` (`history` + `session_id`) with the replayed transcript
+///      via [`seed_orchestrator_session`], so a follow-up turn continues the
+///      prior conversation rather than starting empty.
+///   2. RENDER side — seed the TUI scrollback via
+///      `tui::replay::rebuild_from_jsonl(&messages)`, so the existing history is
+///      painted on the very first frame (the claude-code REPL `initialMessages`
+///      analog).
+///
+/// A FRESH launch never reaches here; the fresh `Mode::Tui` arm calls
+/// `build_tui_runtime` with an empty replay vec, so this change leaves the fresh
+/// path byte-identical.
+async fn mount_resumed_tui(argv: &Argv, session_id: uuid::Uuid, messages: Vec<JsonlMessage>) -> i32 {
+    let tui_build = match crate::init::build_runtime_for_tui(argv).await {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("lingxi-cli: tui init failed: {e}");
+            return exit_codes::RUNTIME_ERROR;
+        }
+    };
+    // ENGINE seed: replay the transcript into the orchestrator's session so a
+    // live turn continues the prior conversation.
+    seed_orchestrator_session(&tui_build.runtime.orchestrator, session_id, &messages).await;
+    // RENDER seed: map the raw JSONL into TUI scrollback rows (W38 seam).
+    let resumed_messages = tui::replay::rebuild_from_jsonl(&messages);
+    let tui_runtime = crate::mode::build_tui_runtime(tui_build, argv, resumed_messages).await;
+    crate::mode::mount_tui_runtime(tui_runtime).await
+}
+
+/// Seed an already-built orchestrator's in-memory [`engine::SessionState`] from
+/// a resumed transcript.
+///
+/// The fresh-mount path builds the orchestrator via `engine_desktop::build`,
+/// which hands back an `Arc<ConversationOrchestrator>` with a fresh, empty
+/// session — it has no resume parameter. Rather than introduce a second,
+/// divergent resumed-orchestrator construction path, we rebuild the
+/// `SessionState` from the transcript lines ALREADY in hand via the
+/// orchestrator's own public replay mapping
+/// ([`orchestrator::state_from_messages`], the same per-line conversion its
+/// `with_resume` constructor uses — no redundant disk re-read, no TOCTOU window),
+/// then overwrite the live session through its public `session()` accessor (an
+/// `Arc<Mutex<SessionState>>`). We copy `history` + `session_id` so the resumed
+/// id is reported and a follow-up turn appends onto the prior history.
+async fn seed_orchestrator_session(
+    orchestrator: &Arc<orchestrator::ConversationOrchestrator>,
+    session_id: uuid::Uuid,
+    messages: &[JsonlMessage],
+) {
+    let replayed = orchestrator::state_from_messages(session_id, messages);
+    // `session()` returns an owned `Arc<Mutex<SessionState>>`; bind it so the
+    // lock guard does not borrow a temporary that is freed at end-of-statement.
+    let session_handle = orchestrator.session();
+    let mut session = session_handle.lock().await;
+    session.session_id = replayed.session_id;
+    session.history = replayed.history;
 }
 
 /// `--resume` (no id) under `--no-tui` / non-TTY — the UNCHANGED M5-08 stdio
@@ -506,5 +588,161 @@ mod tests {
             resume_by_id_error(id, Err(&err)).expect("a loader failure must error");
         assert_eq!(message, format!("Failed to resume session {id}"));
         assert_eq!(code, exit_codes::RUNTIME_ERROR);
+    }
+
+    // ── M5-13: `--resume <uuid>` → live TUI mount wiring ────────────────────
+    //
+    // The full PTY mount (`run_tui_session`) can't run headless, so these tests
+    // assert the WIRING the resume mount builds: (a) the engine-side seed places
+    // the replayed history into the orchestrator's live session, and (b) the
+    // render-side `build_tui_runtime` carries the replayed scrollback + a live
+    // orchestrator/bridge — and a FRESH build carries neither.
+
+    /// A test `Argv` with a fresh (TUI-style, no prompt) shape.
+    fn tui_argv() -> Argv {
+        Argv {
+            prompt: None,
+            print: false,
+            resume: None,
+            model: None,
+            fallback_model: None,
+            cwd: None,
+            no_stream: false,
+            json: false,
+            debug: false,
+            no_tui: false,
+            continue_session: false,
+            fork_session: false,
+        }
+    }
+
+    /// A raw `JsonlMessage` (wire-shape line) the loader hands the resume path.
+    fn jsonl_line(message_type: &str, content: &serde_json::Value) -> JsonlMessage {
+        serde_json::from_value(serde_json::json!({
+            "type": message_type,
+            "uuid": Uuid::new_v4().to_string(),
+            "parentUuid": null,
+            "sessionId": Uuid::new_v4().to_string(),
+            "timestamp": "2026-05-25T12:00:00.000Z",
+            "cwd": "/tmp/workproj",
+            "version": "0.8.0",
+            "message": {"content": content},
+        }))
+        .expect("valid JsonlMessage")
+    }
+
+    #[tokio::test]
+    async fn seed_orchestrator_session_replays_history_and_id() {
+        // Build a real orchestrator (fresh, empty session) via the same TUI
+        // builder the mount uses, then seed it from a two-line transcript and
+        // assert the live session now carries the replayed history + the
+        // resumed session id (engine-side resume seed).
+        let argv = tui_argv();
+        let build = crate::init::build_runtime_for_tui(&argv)
+            .await
+            .expect("build_runtime_for_tui");
+        // Fresh session starts empty.
+        let resumed_id = Uuid::new_v4();
+        {
+            let handle = build.runtime.orchestrator.session();
+            let s = handle.lock().await;
+            assert!(s.history.is_empty(), "fresh session starts empty");
+            assert_ne!(
+                s.session_id,
+                protocol::SessionId::from_uuid(resumed_id),
+                "fresh id differs from the resumed id we will seed"
+            );
+        }
+
+        let messages = vec![
+            jsonl_line("user", &serde_json::json!("hello from the past")),
+            jsonl_line("assistant", &serde_json::json!("hi, welcome back")),
+        ];
+        seed_orchestrator_session(&build.runtime.orchestrator, resumed_id, &messages).await;
+
+        let handle = build.runtime.orchestrator.session();
+        let s = handle.lock().await;
+        assert_eq!(
+            s.session_id,
+            protocol::SessionId::from_uuid(resumed_id),
+            "seed overrides the session id with the resumed id"
+        );
+        assert_eq!(s.history.len(), 2, "both transcript lines replayed");
+        match &s.history[0] {
+            protocol::ConversationMessage::User { content, .. } => {
+                assert!(matches!(
+                    content.first(),
+                    Some(protocol::ContentBlock::Text { text }) if text == "hello from the past"
+                ));
+            }
+            other => panic!("expected first history entry User, got {other:?}"),
+        }
+        assert!(matches!(
+            &s.history[1],
+            protocol::ConversationMessage::Assistant { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn resumed_tui_runtime_carries_replay_and_live_orchestrator() {
+        // The render-side seam: `build_tui_runtime` with replayed scrollback
+        // produces a `tui::session::Runtime` whose `resumed_messages` match
+        // `rebuild_from_jsonl(transcript)` and which carries a live orchestrator
+        // + bridge (not NOT_IMPLEMENTED).
+        let argv = tui_argv();
+        let build = crate::init::build_runtime_for_tui(&argv)
+            .await
+            .expect("build_runtime_for_tui");
+
+        let messages = vec![
+            jsonl_line("user", &serde_json::json!("resume me")),
+            jsonl_line("assistant", &serde_json::json!("resumed")),
+        ];
+        let expected = tui::replay::rebuild_from_jsonl(&messages);
+        assert_eq!(expected.len(), 2, "two rows rebuilt from the transcript");
+
+        let tui_runtime = crate::mode::build_tui_runtime(build, &argv, expected.clone()).await;
+
+        // Replayed scrollback is carried verbatim into the TUI runtime.
+        assert_eq!(
+            tui_runtime.resumed_messages.len(),
+            expected.len(),
+            "resumed_messages match rebuild_from_jsonl output"
+        );
+        assert!(matches!(
+            &tui_runtime.resumed_messages[0],
+            tui::state::RenderedMessage::UserText { body, .. } if body == "resume me"
+        ));
+        // A live orchestrator + bridge are wired (the mount is real, not stubbed).
+        assert!(
+            tui_runtime.orchestrator.is_some(),
+            "resumed runtime carries a live orchestrator handle"
+        );
+        assert!(
+            tui_runtime.bridge.is_some(),
+            "resumed runtime carries a live streaming bridge"
+        );
+        assert!(
+            tui_runtime.turn_tx.is_some(),
+            "resumed runtime carries the turn-spawn sender"
+        );
+    }
+
+    #[tokio::test]
+    async fn fresh_tui_runtime_carries_no_replay() {
+        // SAFETY: a FRESH launch passes an empty replay vec, so the resulting
+        // runtime's `resumed_messages` is empty — byte-identical to the
+        // pre-M5-13 fresh mount (no scrollback seed).
+        let argv = tui_argv();
+        let build = crate::init::build_runtime_for_tui(&argv)
+            .await
+            .expect("build_runtime_for_tui");
+        let tui_runtime = crate::mode::build_tui_runtime(build, &argv, Vec::new()).await;
+        assert!(
+            tui_runtime.resumed_messages.is_empty(),
+            "a fresh mount seeds no replayed scrollback"
+        );
+        assert!(tui_runtime.orchestrator.is_some());
+        assert!(tui_runtime.bridge.is_some());
     }
 }

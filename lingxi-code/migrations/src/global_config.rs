@@ -16,6 +16,11 @@
 //!   write instead).
 //! - TS NFC-normalizes the config-home path; macOS paths are already NFC, so
 //!   this port uses the path as-is.
+//! - TS `writeFileSyncAndFlush_DEPRECATED` (`file.ts:439-477`) falls back to
+//!   a NON-atomic in-place write when the atomic tmp+rename path fails; this
+//!   port skips the fallback and surfaces the error — migrations treat any
+//!   write failure as "skip", and a torn half-write of `~/.claude.json` is
+//!   worse than a skipped migration.
 
 use std::path::{Component, Path, PathBuf};
 
@@ -24,8 +29,13 @@ use serde_json::{Map, Value};
 /// A raw JSON object — the in-memory shape of `~/.claude.json`.
 pub type JsonMap = Map<String, Value>;
 
-/// `$CLAUDE_CONFIG_DIR`, treating set-but-EMPTY as unset: the TS reads are
-/// all `process.env.CLAUDE_CONFIG_DIR || homedir()`-shaped, and `""` is falsy.
+/// `$CLAUDE_CONFIG_DIR`, treating set-but-EMPTY as unset. DELIBERATE
+/// divergence: in TS only `getGlobalClaudeFile`'s base (`env.ts:25`) is
+/// `process.env.CLAUDE_CONFIG_DIR || homedir()`-shaped (`""` falsy ⇒ home);
+/// `getClaudeConfigHomeDir` (`envUtils.ts:8-14`) is `??`-shaped, so under
+/// `CLAUDE_CONFIG_DIR=""` TS resolves config-home to `""` — a cwd-RELATIVE
+/// path, not `~/.claude`. That is pathological, not a behavior worth porting;
+/// this port treats `""` as unset everywhere.
 fn claude_config_dir_env() -> Option<PathBuf> {
     std::env::var_os("CLAUDE_CONFIG_DIR")
         .filter(|v| !v.is_empty())
@@ -33,7 +43,8 @@ fn claude_config_dir_env() -> Option<PathBuf> {
 }
 
 /// `getClaudeConfigHomeDir` (`envUtils.ts:7-14`): `$CLAUDE_CONFIG_DIR` if
-/// set (non-empty), else `$HOME/.claude`. `None` when neither env var exists.
+/// set (non-empty — see [`claude_config_dir_env`] for the empty-string
+/// divergence), else `$HOME/.claude`. `None` when neither env var exists.
 #[must_use]
 pub fn claude_config_home() -> Option<PathBuf> {
     if let Some(dir) = claude_config_dir_env() {
@@ -109,7 +120,9 @@ pub fn read_map(path: &Path) -> Result<JsonMap, GlobalConfigError> {
 /// The mutator's output is compared by VALUE — unchanged ⇒ zero write (the TS
 /// same-reference skip). On write: strip legacy per-project `history` keys
 /// (`removeProjectHistory`, `config.ts:966-989`) and write atomically
-/// (same-dir tmp file + rename), pretty-printed + trailing newline.
+/// (same-dir tmp file + rename), pretty-printed with NO trailing newline
+/// (TS `jsonStringify(filteredConfig, null, 2)`, `config.ts:1136` — only the
+/// settings writer appends `\n`).
 ///
 /// Returns `Ok(true)` if the file was written.
 pub fn save_map(
@@ -140,27 +153,68 @@ fn remove_project_history(map: &mut JsonMap) {
     }
 }
 
+/// Atomic global-config write: the port of `saveConfig`'s
+/// `writeFileSyncAndFlush_DEPRECATED(file, jsonStringify(.., null, 2),
+/// { mode: 0o600 })` call (`config.ts:1134-1141` → `file.ts:362-478`).
+/// Used by BOTH write paths ([`save_map`] and [`save_project_config`]), so
+/// both get the symlink / mode-preservation / tmp-cleanup behavior below.
 fn write_atomic(path: &Path, map: &JsonMap) -> Result<(), GlobalConfigError> {
     let dir = path.parent().unwrap_or_else(|| Path::new("."));
     std::fs::create_dir_all(dir).map_err(GlobalConfigError::Io)?;
     let serialized = serde_json::to_string_pretty(&Value::Object(map.clone()))
         .map_err(|e| GlobalConfigError::Broken(e.to_string()))?;
-    let tmp = dir.join(format!(
+    // Symlink write-through (`file.ts:369-383`): if `path` is a symlink,
+    // readlink it (a relative link target resolves against the link's
+    // directory, like TS `resolve(dirname(filePath), linkTarget)`) and do the
+    // tmp-write + rename at the RESOLVED destination so the symlink itself
+    // is preserved. `read_link` fails for missing or regular files (the TS
+    // ENOENT/EINVAL catch) — keep `path` as the target.
+    let target = match std::fs::read_link(path) {
+        Ok(link) if link.is_absolute() => link,
+        Ok(link) => dir.join(link),
+        Err(_) => path.to_path_buf(),
+    };
+    let tmp = target.parent().unwrap_or_else(|| Path::new(".")).join(format!(
         ".{}.tmp-{}",
-        path.file_name().map(|n| n.to_string_lossy()).unwrap_or_default(),
+        target.file_name().map(|n| n.to_string_lossy()).unwrap_or_default(),
         std::process::id()
     ));
-    write_secure(&tmp, &(serialized + "\n")).map_err(GlobalConfigError::Io)?;
-    std::fs::rename(&tmp, path).map_err(GlobalConfigError::Io)?;
-    Ok(())
+    write_tmp_and_rename(&tmp, &target, &serialized).map_err(|e| {
+        // Best-effort tmp cleanup on ANY failure (`file.ts:445-451`): the
+        // tmp may or may not have been created — a failed remove is ignored,
+        // exactly like the TS catch around `unlinkSync`.
+        let _ = std::fs::remove_file(&tmp);
+        GlobalConfigError::Io(e)
+    })
 }
 
-/// Write `contents`, creating the file with mode `0o600` on unix — the TS
-/// `writeFileSyncAndFlush_DEPRECATED(file, …, { mode: 0o600 })`
-/// (`config.ts:1134-1141`). Like the TS `mode` option, the mode only applies
-/// to NEWLY created files; an existing file keeps its permissions. No-op
-/// mode-wise on non-unix.
-pub(crate) fn write_secure(path: &Path, contents: &str) -> std::io::Result<()> {
+/// The fallible tail of [`write_atomic`], isolated so its caller can clean up
+/// the tmp file when ANY step here errors.
+fn write_tmp_and_rename(tmp: &Path, target: &Path, contents: &str) -> std::io::Result<()> {
+    // Existing-file mode wins over the new-file 0o600 (`file.ts:388-432`):
+    // stat the target BEFORE writing, and re-apply its mode to the tmp file
+    // before the rename (the TS `chmodSync(tempPath, targetMode)`). Only a
+    // brand-new target keeps the 0o600 set at tmp creation.
+    #[cfg(unix)]
+    let existing_mode = std::fs::metadata(target)
+        .ok()
+        .map(|m| std::os::unix::fs::PermissionsExt::mode(&m.permissions()));
+    write_secure(tmp, contents)?;
+    #[cfg(unix)]
+    if let Some(mode) = existing_mode {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(tmp, std::fs::Permissions::from_mode(mode))?;
+    }
+    std::fs::rename(tmp, target)
+}
+
+/// Write `contents` to a freshly created file with mode `0o600` on unix —
+/// the `{ mode: 0o600 }` option of `config.ts:1134-1141`. `OpenOptions::mode`
+/// only applies when the file is CREATED (like the TS `mode` option, which is
+/// only set when the target didn't exist); [`write_tmp_and_rename`] always
+/// calls this on a brand-new tmp path and separately re-applies an existing
+/// target's mode afterwards. No-op mode-wise on non-unix.
+fn write_secure(path: &Path, contents: &str) -> std::io::Result<()> {
     use std::io::Write;
     let mut opts = std::fs::OpenOptions::new();
     opts.write(true).create(true).truncate(true);
@@ -238,7 +292,10 @@ fn resolve_worktree_main_root(git_root: &Path) -> Option<PathBuf> {
 
 /// Node `path.resolve(base, p)`: absolute `p` wins, else join onto `base`;
 /// then normalize `.`/`..` LEXICALLY (no filesystem access), dropping any
-/// `..` that would climb above the root.
+/// `..` that would climb above the root. (Node would additionally prepend
+/// `cwd()` if the result were still relative — unreachable here because
+/// `base` is always absolute: the canonicalized git root or a path resolved
+/// from it.)
 fn lexical_resolve(base: &Path, p: &Path) -> PathBuf {
     let joined = if p.is_absolute() { p.to_path_buf() } else { base.join(p) };
     let mut out = PathBuf::new();
@@ -329,7 +386,9 @@ mod tests {
     #[test]
     fn config_home_treats_empty_claude_config_dir_as_unset() {
         let _g = env_lock();
-        // TS: `process.env.CLAUDE_CONFIG_DIR || homedir()` — "" is falsy.
+        // Deliberate divergence (see `claude_config_dir_env`): TS's
+        // `??`-shaped getClaudeConfigHomeDir would use "" (cwd-relative);
+        // this port treats "" as unset and falls back to ~/.claude.
         std::env::set_var("CLAUDE_CONFIG_DIR", "");
         std::env::set_var("HOME", "/tmp/cc-test-h4");
         assert_eq!(
@@ -537,6 +596,76 @@ mod tests {
         assert_eq!(key, sub.to_string_lossy().replace('\\', "/"));
     }
 
+    /// Negative worktree shape: the `commondir` pointer resolves somewhere
+    /// that is NOT the parent of `<commonDir>/worktrees/<wt>` — the security
+    /// check fails and the key falls back to the worktree dir itself.
+    #[test]
+    fn project_key_worktree_bad_commondir_parent_falls_back() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        let main = root.join("main");
+        let wt_git_dir = main.join(".git/worktrees/wt");
+        std::fs::create_dir_all(&wt_git_dir).unwrap();
+        // Broken invariant: commondir points at an unrelated dir, so
+        // `worktree_git_dir.parent() != <commonDir>/worktrees`.
+        let elsewhere = root.join("elsewhere/.git");
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        std::fs::write(
+            wt_git_dir.join("commondir"),
+            format!("{}\n", elsewhere.display()),
+        )
+        .unwrap();
+        let wt = root.join("wt");
+        std::fs::create_dir_all(&wt).unwrap();
+        std::fs::write(
+            wt_git_dir.join("gitdir"),
+            format!("{}\n", wt.join(".git").display()),
+        )
+        .unwrap();
+        std::fs::write(
+            wt.join(".git"),
+            format!("gitdir: {}\n", wt_git_dir.display()),
+        )
+        .unwrap();
+
+        let key = project_path_for_config(&wt);
+        assert_eq!(key, wt.to_string_lossy().replace('\\', "/"));
+    }
+
+    /// Negative worktree shape: the `gitdir` backlink is missing or points at
+    /// the wrong worktree — validation fails, key falls back to the worktree.
+    #[test]
+    fn project_key_worktree_bad_gitdir_backlink_falls_back() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        let main = root.join("main");
+        let wt_git_dir = main.join(".git/worktrees/wt");
+        std::fs::create_dir_all(&wt_git_dir).unwrap();
+        std::fs::write(wt_git_dir.join("commondir"), "../..\n").unwrap();
+        let wt = root.join("wt");
+        std::fs::create_dir_all(&wt).unwrap();
+        std::fs::write(
+            wt.join(".git"),
+            format!("gitdir: {}\n", wt_git_dir.display()),
+        )
+        .unwrap();
+
+        // (a) Missing backlink file entirely.
+        let key = project_path_for_config(&wt);
+        assert_eq!(key, wt.to_string_lossy().replace('\\', "/"));
+
+        // (b) Backlink present but pointing at a DIFFERENT directory's .git.
+        let other = root.join("other");
+        std::fs::create_dir_all(other.join(".git")).unwrap();
+        std::fs::write(
+            wt_git_dir.join("gitdir"),
+            format!("{}\n", other.join(".git").display()),
+        )
+        .unwrap();
+        let key = project_path_for_config(&wt);
+        assert_eq!(key, wt.to_string_lossy().replace('\\', "/"));
+    }
+
     #[cfg(unix)]
     #[test]
     fn save_map_creates_file_with_mode_0600() {
@@ -549,5 +678,51 @@ mod tests {
         .unwrap();
         let mode = std::fs::metadata(&t.global).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o600);
+        // TS `jsonStringify(.., null, 2)` writes NO trailing newline.
+        let content = std::fs::read_to_string(&t.global).unwrap();
+        assert!(!content.ends_with('\n'));
+    }
+
+    /// `file.ts:388-432`: an EXISTING file keeps its permissions across the
+    /// atomic rewrite — the 0o600 only applies to brand-new files.
+    #[cfg(unix)]
+    #[test]
+    fn save_map_preserves_existing_file_mode() {
+        use std::os::unix::fs::PermissionsExt;
+        let t = temp_config();
+        std::fs::write(&t.global, "{}").unwrap();
+        std::fs::set_permissions(&t.global, std::fs::Permissions::from_mode(0o644)).unwrap();
+        save_map(&t.global, |mut m| {
+            m.insert("a".into(), serde_json::json!(1));
+            m
+        })
+        .unwrap();
+        let mode = std::fs::metadata(&t.global).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o644);
+    }
+
+    /// `file.ts:369-383`: a symlinked global config is written THROUGH — the
+    /// rename lands at the resolved destination, the symlink survives.
+    #[cfg(unix)]
+    #[test]
+    fn save_map_writes_through_symlink() {
+        let t = temp_config();
+        let real = t.home.join("real-claude.json");
+        std::fs::write(&real, r#"{"keep":true}"#).unwrap();
+        std::os::unix::fs::symlink(&real, &t.global).unwrap();
+
+        save_map(&t.global, |mut m| {
+            m.insert("a".into(), serde_json::json!(1));
+            m
+        })
+        .unwrap();
+
+        // Link is still a symlink to the same target…
+        assert!(std::fs::symlink_metadata(&t.global).unwrap().file_type().is_symlink());
+        assert_eq!(std::fs::read_link(&t.global).unwrap(), real);
+        // …and the TARGET file got the update (unknown keys preserved).
+        let back = read_map(&real).unwrap();
+        assert_eq!(back["keep"], serde_json::json!(true));
+        assert_eq!(back["a"], serde_json::json!(1));
     }
 }

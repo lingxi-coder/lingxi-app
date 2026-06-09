@@ -93,6 +93,11 @@ struct Ctx {
     /// Quoted content stripped but quote DELIMITERS kept
     /// (TS `unquotedKeepQuoteChars`, `:2305`).
     unquoted_keep_quote_chars: String,
+    /// AST verdict: whether real `;`/`&&`/`||`/`list` operator nodes exist.
+    /// `Some(false)` lets `validate_backslash_escaped_operators` short-circuit
+    /// (claude-code `bashSecurity.ts:1702`). `None` => no AST (legacy behavior:
+    /// the `bash-ast` feature is off, or the parser had no tree).
+    has_actual_operator_nodes: Option<bool>,
 }
 
 // NOTE: TS `validateSafeCommandSubstitution` / `isSafeHeredoc` (the
@@ -1077,9 +1082,14 @@ fn has_backslash_escaped_operator(command: &str) -> bool {
     false
 }
 
-/// TS `validateBackslashEscapedOperators` (`bashSecurity.ts:1696-1721`). The
-/// tree-sitter short-circuit (`:1702-1704`) is N/A here (tree-sitter OFF).
+/// TS `validateBackslashEscapedOperators` (`bashSecurity.ts:1696-1721`),
+/// including the tree-sitter short-circuit (`:1702-1704`): when the AST proves
+/// there are no real operator nodes, a backslash-escaped operator is a literal
+/// argument (e.g. `find -exec \;`), not hidden structure — passthrough.
 fn validate_backslash_escaped_operators(ctx: &Ctx) -> Option<String> {
+    if ctx.has_actual_operator_nodes == Some(false) {
+        return None;
+    }
     if has_backslash_escaped_operator(&ctx.original) {
         return Some(
             "Command contains a backslash before a shell operator (;, |, &, <, >) which can hide command structure"
@@ -1621,6 +1631,12 @@ pub fn bash_command_is_safe(command: &str) -> BashSafetyVerdict {
     let is_jq = base_command == "jq";
     let (with_double_quotes, fully_unquoted, unquoted_keep_quote_chars) =
         extract_quoted_content(command, is_jq);
+    // AST operator-node detection (claude-code's tree-sitter precision layer).
+    // Feature off => None => every validator keeps the legacy regex path.
+    #[cfg(feature = "bash-ast")]
+    let has_actual_operator_nodes = crate::bash_tree_sitter::has_actual_operator_nodes(command);
+    #[cfg(not(feature = "bash-ast"))]
+    let has_actual_operator_nodes: Option<bool> = None;
     let ctx = Ctx {
         original: command.to_string(),
         base_command,
@@ -1628,6 +1644,7 @@ pub fn bash_command_is_safe(command: &str) -> BashSafetyVerdict {
         fully_unquoted: strip_safe_redirections(&fully_unquoted),
         fully_unquoted_pre_strip: fully_unquoted,
         unquoted_keep_quote_chars,
+        has_actual_operator_nodes,
     };
 
     // Empty command (`validateEmpty`, `:233-242`): an early-allow → passthrough
@@ -1904,9 +1921,29 @@ mod tests {
     }
 
     // ── validateBackslashEscapedOperators ───────────────────────────────
+    // Feature OFF (legacy regex): a backslash before any operator char asks.
+    #[cfg(not(feature = "bash-ast"))]
     #[test]
     fn backslash_escaped_operator_asks() {
         assert!(message(r"cat safe.txt \; echo secret")
+            .unwrap()
+            .contains("backslash before a shell operator"));
+    }
+
+    // Feature ON (AST): `\;` is a literal word arg, not a `;` operator node, so
+    // the AST suppresses the false-positive (bashSecurity.ts:1702). Command is Safe.
+    #[cfg(feature = "bash-ast")]
+    #[test]
+    fn backslash_escaped_operator_suppressed_when_no_ast_operators() {
+        assert!(!asks(r"cat safe.txt \; echo secret"));
+    }
+
+    // Feature ON: when REAL operator nodes exist, the AST does NOT relax the
+    // check — a backslash-escaped operator alongside a real `;` still asks.
+    #[cfg(feature = "bash-ast")]
+    #[test]
+    fn backslash_escaped_operator_still_asks_with_real_operators() {
+        assert!(message(r"a ; b \> c")
             .unwrap()
             .contains("backslash before a shell operator"));
     }
@@ -2008,11 +2045,26 @@ mod tests {
     }
 
     // ── ordering: misparsing beats deferred non-misparsing ──────────────
+    // Feature OFF (legacy regex): `\;` is treated as a backslash-op misparsing,
+    // whose message wins over the deferred `>` redirection.
+    #[cfg(not(feature = "bash-ast"))]
     #[test]
     fn misparsing_beats_deferred_redirection() {
         // `>` (redirection, deferred) AND `\;` (backslash-op, misparsing).
         // The misparsing message must win.
         let m = message(r"cat safe.txt \; echo /etc/passwd > out").unwrap();
         assert!(m.contains("backslash before a shell operator"));
+    }
+
+    // Feature ON (AST): there is no real `;`/`&&`/`||`/list operator node, so the
+    // `\;` backslash-op false-positive is suppressed (bashSecurity.ts:1702). The
+    // command still Asks — but now on the genuine `>` redirection, not the
+    // misparsing — so the redirection message wins instead.
+    #[cfg(feature = "bash-ast")]
+    #[test]
+    fn misparsing_suppressed_real_redirection_still_asks() {
+        let m = message(r"cat safe.txt \; echo /etc/passwd > out").unwrap();
+        assert!(!m.contains("backslash before a shell operator"));
+        assert!(m.contains("output redirection"));
     }
 }

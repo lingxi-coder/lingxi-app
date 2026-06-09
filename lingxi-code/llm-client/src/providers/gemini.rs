@@ -68,6 +68,10 @@ impl WireCodec for GeminiCodec {
     fn stream_decoder(&self) -> Box<dyn StreamDecoder> {
         Box::new(GeminiStreamDecoder::default())
     }
+
+    fn clone_box(&self) -> Box<dyn WireCodec> {
+        Box::new(self.clone())
+    }
 }
 
 #[derive(Debug, Default)]

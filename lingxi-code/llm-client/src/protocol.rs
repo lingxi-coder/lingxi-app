@@ -365,6 +365,14 @@ pub trait WireCodec: std::fmt::Debug + Send + Sync {
     fn decode_response(&self, response: ProviderResponse) -> Result<LlmResponse, LlmError>;
     /// Create a stream decoder for this codec.
     fn stream_decoder(&self) -> Box<dyn StreamDecoder>;
+    #[allow(missing_docs)]
+    fn clone_box(&self) -> Box<dyn WireCodec>;
+}
+
+impl Clone for Box<dyn WireCodec> {
+    fn clone(&self) -> Self {
+        self.clone_box()
+    }
 }
 
 /// Stream decoder that emits no events.

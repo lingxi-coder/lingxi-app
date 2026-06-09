@@ -64,6 +64,10 @@ impl WireCodec for OpenAiChatCodec {
     fn stream_decoder(&self) -> Box<dyn StreamDecoder> {
         Box::new(OpenAiStreamDecoder::default())
     }
+
+    fn clone_box(&self) -> Box<dyn WireCodec> {
+        Box::new(self.clone())
+    }
 }
 
 #[derive(Debug, Default)]

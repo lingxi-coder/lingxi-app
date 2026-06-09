@@ -76,6 +76,10 @@ impl WireCodec for AnthropicMessagesCodec {
     fn stream_decoder(&self) -> Box<dyn StreamDecoder> {
         Box::new(AnthropicStreamDecoder)
     }
+
+    fn clone_box(&self) -> Box<dyn WireCodec> {
+        Box::new(self.clone())
+    }
 }
 
 #[derive(Debug, Default)]

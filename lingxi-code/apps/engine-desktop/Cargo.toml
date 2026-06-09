@@ -29,7 +29,7 @@ providers = { path = "../../providers" }
 api-client = { path = "../../api-client" }
 anthropic-oauth = { path = "../../anthropic-oauth" }
 secret = { path = "../../secret" }
-permission = { path = "../../permission" }
+permission = { path = "../../permission", features = ["bash-ast"] }
 sandbox = { path = "../../sandbox" }
 telemetry = { path = "../../telemetry" }
 cost = { path = "../../cost" }

@@ -1,4 +1,4 @@
-use llm_client::{AnthropicMessagesCodec, ContentBlock, LlmRequest, Message, ToolDeclaration, WireCodec};
+use llm_client::{AnthropicMessagesCodec, ContentBlock, LlmRequest, Message, ResponseFormat, ToolChoice, ToolDeclaration, WireCodec};
 
 #[test]
 fn encode_request_shape_is_anthropic_messages() {
@@ -52,29 +52,42 @@ fn encode_request_maps_image_and_tool_result_blocks() {
     assert_eq!(provider_request.body_json["messages"][0]["content"][0]["source"]["data"], "AQID");
     assert_eq!(provider_request.body_json["messages"][0]["content"][1]["type"], "tool_result");
     assert_eq!(provider_request.body_json["messages"][0]["content"][1]["tool_use_id"], "tool-1");
+    assert_eq!(provider_request.body_json["messages"][0]["content"][1]["content"], "{\"ok\":true}");
 }
 
 #[test]
-fn encode_request_rejects_unsupported_tool_choice_and_response_format() {
+fn encode_request_maps_supported_tool_choice_variants() {
     let codec = AnthropicMessagesCodec::new("https://api.anthropic.com", "2023-06-01");
 
-    let mut tool_choice_request = LlmRequest::new("claude-sonnet-4-20250514");
-    tool_choice_request.tool_choice = Some(llm_client::ToolChoice::Auto);
+    let cases = [
+        (ToolChoice::Auto, "auto", None::<&str>),
+        (ToolChoice::None, "none", None::<&str>),
+        (ToolChoice::Required, "any", None::<&str>),
+        (ToolChoice::Tool { name: "Read".to_string() }, "tool", Some("Read")),
+    ];
 
-    let tool_choice_err = codec.encode_request(&tool_choice_request).unwrap_err();
-    assert!(matches!(
-        tool_choice_err,
-        llm_client::LlmError::InvalidRequest { .. } | llm_client::LlmError::UnsupportedCapability { .. }
-    ));
+    for (choice, expected_type, expected_name) in cases {
+        let mut request = LlmRequest::new("claude-sonnet-4-20250514");
+        request.tool_choice = Some(choice);
+
+        let provider_request = codec.encode_request(&request).unwrap();
+
+        assert_eq!(provider_request.body_json["tool_choice"]["type"], expected_type);
+        if let Some(name) = expected_name {
+            assert_eq!(provider_request.body_json["tool_choice"]["name"], name);
+        }
+    }
+}
+
+#[test]
+fn encode_request_rejects_response_format_explicitly() {
+    let codec = AnthropicMessagesCodec::new("https://api.anthropic.com", "2023-06-01");
 
     let mut response_format_request = LlmRequest::new("claude-sonnet-4-20250514");
-    response_format_request.response_format = Some(llm_client::ResponseFormat::JsonObject);
+    response_format_request.response_format = Some(ResponseFormat::JsonObject);
 
     let response_format_err = codec.encode_request(&response_format_request).unwrap_err();
-    assert!(matches!(
-        response_format_err,
-        llm_client::LlmError::InvalidRequest { .. } | llm_client::LlmError::UnsupportedCapability { .. }
-    ));
+    assert!(matches!(response_format_err, llm_client::LlmError::InvalidRequest { .. }));
 }
 
 #[test]

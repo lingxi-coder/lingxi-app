@@ -27,12 +27,6 @@ impl AnthropicMessagesCodec {
 
 impl WireCodec for AnthropicMessagesCodec {
     fn encode_request(&self, request: &LlmRequest) -> Result<ProviderRequest, LlmError> {
-        if request.tool_choice.is_some() {
-            return Err(LlmError::InvalidRequest {
-                message: "AnthropicMessagesCodec does not encode tool_choice yet".to_string(),
-            });
-        }
-
         if request.response_format.is_some() {
             return Err(LlmError::InvalidRequest {
                 message: "AnthropicMessagesCodec does not encode response_format yet".to_string(),
@@ -54,6 +48,10 @@ impl WireCodec for AnthropicMessagesCodec {
 
         if let Some(system) = &request.system {
             body.insert("system".to_string(), Value::String(system.clone()));
+        }
+
+        if let Some(tool_choice) = &request.tool_choice {
+            body.insert("tool_choice".to_string(), encode_tool_choice(tool_choice));
         }
 
         let mut provider_request = ProviderRequest::post_json(self.messages_url(), Value::Object(body));
@@ -114,11 +112,27 @@ fn encode_content_block(block: &ContentBlock) -> Result<Value, LlmError> {
         ContentBlock::ToolResult { tool_call_id, output } => Ok(serde_json::json!({
             "type": "tool_result",
             "tool_use_id": tool_call_id,
-            "content": output,
+            "content": normalize_tool_result_content(output),
         })),
         ContentBlock::Document { .. } | ContentBlock::Reasoning { .. } => Err(LlmError::InvalidRequest {
             message: "AnthropicMessagesCodec does not encode document or reasoning blocks yet".to_string(),
         }),
+    }
+}
+
+fn encode_tool_choice(tool_choice: &crate::ToolChoice) -> Value {
+    match tool_choice {
+        crate::ToolChoice::Auto => serde_json::json!({"type": "auto"}),
+        crate::ToolChoice::None => serde_json::json!({"type": "none"}),
+        crate::ToolChoice::Required => serde_json::json!({"type": "any"}),
+        crate::ToolChoice::Tool { name } => serde_json::json!({"type": "tool", "name": name}),
+    }
+}
+
+fn normalize_tool_result_content(output: &Value) -> Value {
+    match output {
+        Value::String(text) => Value::String(text.clone()),
+        other => Value::String(other.to_string()),
     }
 }
 

@@ -23,12 +23,26 @@ struct RootView: View {
     @State private var drawerOpen = false
     @State private var settingsOpen = false
     @State private var voiceActive = false
+    /// When the drawer itself drove the session change (engine resume / new
+    /// chat), it has ALREADY called `source.resumeSession` / `startNewConversation`.
+    /// This one-shot flag tells the `activeSession` `onChange` below to skip the
+    /// mock `openSession` so we don't double-handle the switch. Reset after each
+    /// observed change.
+    @State private var suppressOpenSession = false
 
     /// The conversation source ChatView drives — the real in-process engine when
     /// available (P3a), otherwise the canned mock. Held once for the app session.
     @State private var source: any ConversationSource = ConversationSourceFactory.make()
 
-    private var session: SessionRef { MockData.session(activeSession) }
+    /// The session for ChatView's title bar. Prefers a REAL engine session whose
+    /// UUID matches `activeSession`; falls back to the mock catalog otherwise (so
+    /// the bar still resolves a title when the engine is unavailable).
+    private var session: SessionRef {
+        if let s = source.model.engineSessions.first(where: { $0.id == activeSession }) {
+            return s.ref
+        }
+        return MockData.session(activeSession)
+    }
 
     var body: some View {
         ZStack {
@@ -44,10 +58,26 @@ struct RootView: View {
             if drawerOpen {
                 Drawer(activeWs: $activeWs,
                        activeSession: $activeSession,
+                       source: source,
                        onClose: { withAnimation(.spring(response: 0.32, dampingFraction: 0.86)) { drawerOpen = false } },
                        openSettings: {
                            withAnimation(.spring(response: 0.32, dampingFraction: 0.86)) { drawerOpen = false }
                            withAnimation(.spring(response: 0.34, dampingFraction: 0.86)) { settingsOpen = true }
+                       },
+                       // The drawer already drives `source.resumeSession`; mirror
+                       // the choice into `activeSession` so the title bar +
+                       // persisted @AppStorage reflect the resumed session. Guard
+                       // the `onChange` below from re-issuing a redundant
+                       // `openSession` for this engine-driven select.
+                       onSelectEngineSession: { uuid in
+                           suppressOpenSession = true
+                           activeSession = uuid
+                       },
+                       // The drawer already drove `startNewConversation`; just
+                       // reflect the reset locally without re-issuing openSession.
+                       onNewChat: {
+                           suppressOpenSession = true
+                           activeSession = ""
                        })
                 .zIndex(50)
             }
@@ -73,6 +103,13 @@ struct RootView: View {
         // session we just opened. The new session's title also drives ChatView's
         // top bar via the recomputed `session`.
         .onChange(of: activeSession) { _, newId in
+            // The drawer's engine-session select / new-chat already drove the
+            // source (`resumeSession` / `startNewConversation`); skip the mock
+            // `openSession` for that one change so we don't double-switch.
+            if suppressOpenSession {
+                suppressOpenSession = false
+                return
+            }
             source.openSession(MockData.session(newId))
         }
         // Lifecycle: clear a stuck streaming flag on background (so a turn parked

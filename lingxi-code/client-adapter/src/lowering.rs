@@ -40,6 +40,9 @@ use client_protocol::listings::{
     DoctorSummaryDto, HookDto, McpServerDto, McpStatusDto, SessionRowDto, StatusSnapshotDto,
     TaskRowDto, TaskStatusDto,
 };
+use client_protocol::message::{MessageBlockDto, MessageDto};
+
+use protocol::ConversationMessage;
 
 use permission::PromptDefault;
 use session::jsonl::loader::SessionMetadata;
@@ -304,6 +307,59 @@ pub fn lower_worker_agent(info: &WorkerInfo) -> CoordinatorWorkerDto {
         agent_type: info.agent_type.clone(),
         status: info.status.clone(),
     }
+}
+
+/// Lower one [`ConversationMessage`] to a [`MessageDto`] — the resumed-scrollback
+/// twin of the per-turn [`crate::turn::synthesize_message`].
+///
+/// The role is the message's wire role (`"user"` / `"assistant"` / `"system"`);
+/// the content blocks are lowered through the SAME
+/// [`crate::turn::lower_content_block`] path `MessageComplete` uses, so a resumed
+/// message and a live-turn message reproduce an IDENTICAL [`MessageDto`] block set
+/// for any given content. Blocks with no `MessageBlockDto` analog
+/// ([`protocol::ContentBlock::Image`]) are dropped, matching the live path.
+///
+/// A [`ConversationMessage::System`] carries a flat `content: String` (no blocks),
+/// so it lowers to a single [`MessageBlockDto::Text`] — a faithful, lossless
+/// scrollback rendering of the system body.
+#[must_use]
+pub fn lower_conversation_message(message: &ConversationMessage) -> MessageDto {
+    match message {
+        ConversationMessage::User { content, .. } => MessageDto {
+            role: "user".to_string(),
+            blocks: content
+                .iter()
+                .filter_map(crate::turn::lower_content_block)
+                .collect(),
+        },
+        ConversationMessage::Assistant { content, .. } => MessageDto {
+            role: "assistant".to_string(),
+            blocks: content
+                .iter()
+                .filter_map(crate::turn::lower_content_block)
+                .collect(),
+        },
+        ConversationMessage::System { content, .. } => MessageDto {
+            role: "system".to_string(),
+            blocks: vec![MessageBlockDto::Text {
+                text: content.clone(),
+            }],
+        },
+    }
+}
+
+/// Lower a replayed conversation `history` to the OLDEST-FIRST [`MessageDto`]
+/// transcript carried by [`ClientEvent::SessionResumed`](client_protocol::events::ClientEvent::SessionResumed).
+///
+/// `history` is already in chronological (oldest-first) order — the engine's
+/// resume path replays the JSONL in file order — so this preserves that order
+/// 1:1. Each message lowers through [`lower_conversation_message`], reusing the
+/// same `ContentBlock` → `MessageBlockDto` rules as the live `MessageComplete`
+/// path so the resumed scrollback is byte-identical to what a live turn would
+/// have produced.
+#[must_use]
+pub fn lower_transcript(history: &[ConversationMessage]) -> Vec<MessageDto> {
+    history.iter().map(lower_conversation_message).collect()
 }
 
 /// One lowered task-output chunk: the `(task_id, content, total_lines,
@@ -640,5 +696,116 @@ mod tests {
         assert_eq!(content, "line1\nline2");
         assert_eq!(lines, 2);
         assert!(truncated);
+    }
+
+    // ── Transcript lowering (live ResumeSession) ─────────────────────────────
+
+    #[test]
+    fn lower_transcript_preserves_order_role_and_blocks() {
+        use protocol::{ContentBlock, MessageId, ToolUseId};
+
+        let tu = ToolUseId::new();
+        let history = vec![
+            ConversationMessage::User {
+                id: MessageId::new(),
+                content: vec![ContentBlock::Text {
+                    text: "resume me".to_string(),
+                }],
+            },
+            ConversationMessage::Assistant {
+                id: MessageId::new(),
+                content: vec![
+                    ContentBlock::Text {
+                        text: "on it".to_string(),
+                    },
+                    ContentBlock::ToolUse {
+                        id: tu,
+                        name: "Read".to_string(),
+                        input: serde_json::json!({"file_path": "/tmp/x"}),
+                    },
+                ],
+                stop_reason: Some("tool_use".to_string()),
+            },
+        ];
+
+        let dtos = lower_transcript(&history);
+        // Order preserved oldest-first, one DTO per message.
+        assert_eq!(dtos.len(), 2);
+
+        // The user message lowers to role "user" with a single Text block.
+        assert_eq!(dtos[0].role, "user");
+        assert_eq!(
+            dtos[0].blocks,
+            vec![MessageBlockDto::Text {
+                text: "resume me".to_string()
+            }]
+        );
+
+        // The assistant message lowers to role "assistant", reusing the SAME
+        // ContentBlock -> MessageBlockDto rules as the live MessageComplete path
+        // (text + tool_use, id stringified, input lowered to a JSON String).
+        assert_eq!(dtos[1].role, "assistant");
+        assert_eq!(
+            dtos[1].blocks,
+            vec![
+                MessageBlockDto::Text {
+                    text: "on it".to_string()
+                },
+                MessageBlockDto::ToolUse {
+                    id: tu.to_string(),
+                    tool: "Read".to_string(),
+                    input_json: value_to_json_string(&serde_json::json!({"file_path": "/tmp/x"})),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn lower_transcript_empty_history_is_empty() {
+        assert!(lower_transcript(&[]).is_empty());
+    }
+
+    #[test]
+    fn lower_conversation_message_system_lowers_to_single_text_block() {
+        use protocol::MessageId;
+        let msg = ConversationMessage::System {
+            id: MessageId::new(),
+            content: "you are a helpful assistant".to_string(),
+        };
+        let dto = lower_conversation_message(&msg);
+        assert_eq!(dto.role, "system");
+        assert_eq!(
+            dto.blocks,
+            vec![MessageBlockDto::Text {
+                text: "you are a helpful assistant".to_string()
+            }]
+        );
+    }
+
+    #[test]
+    fn lower_conversation_message_drops_image_blocks() {
+        use protocol::{ContentBlock, ImageSource, MessageId};
+        // An image block has no MessageBlockDto analog — it is dropped, leaving
+        // only the text block (matching the live MessageComplete path).
+        let msg = ConversationMessage::User {
+            id: MessageId::new(),
+            content: vec![
+                ContentBlock::Text {
+                    text: "look".to_string(),
+                },
+                ContentBlock::Image {
+                    source: ImageSource::Url {
+                        url: "https://example.com/i.png".to_string(),
+                    },
+                },
+            ],
+        };
+        let dto = lower_conversation_message(&msg);
+        assert_eq!(
+            dto.blocks,
+            vec![MessageBlockDto::Text {
+                text: "look".to_string()
+            }]
+        );
     }
 }

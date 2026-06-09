@@ -154,10 +154,25 @@ pub enum ClientEvent {
     SessionEnded,
 
     /// Session lifecycle: a prior session was resumed on this connection.
-    /// Carries the resumed `session_id` (a connection attribute, decision §0.5).
+    /// Carries the resumed `session_id` (a connection attribute, decision §0.5)
+    /// AND the full restored transcript as `messages` (OLDEST-FIRST) so the
+    /// client renders the rehydrated conversation atomically — the live
+    /// `ResumeSession` path hot-restores the on-disk session into the running
+    /// orchestrator, so the next turn continues with full prior context.
+    ///
+    /// `messages` is REQUIRED (always present, may be empty for a zero-message
+    /// session) — it is the lowered [`MessageDto`] scrollback the host produces
+    /// from the replayed history via `client_adapter::lowering::lower_transcript`.
+    /// This is an ADDITIVE field on an existing variant (no new enum variant, no
+    /// renamed/retyped leaf), so it does NOT change the event COUNT and does NOT
+    /// require a `CLIENT_PROTOCOL_VERSION` major bump (decision §0.10).
     SessionResumed {
         /// The session id resumed onto the connection's orchestrator.
         session_id: String,
+        /// The full restored transcript, OLDEST-FIRST. Always present (may be
+        /// empty). Carries the rehydrated conversation so the client renders it
+        /// atomically on resume.
+        messages: Vec<MessageDto>,
     },
 
     /// The resumable-session catalog (`/resume` / session picker). Maps

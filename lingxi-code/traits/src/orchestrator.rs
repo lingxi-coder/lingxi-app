@@ -421,6 +421,33 @@ pub trait OrchestratorHandle: Send + Sync {
     async fn list_resumable_sessions(&self) -> Vec<(String, String)> {
         Vec::new()
     }
+
+    /// Adopt a previously-loaded session IN PLACE: replace the live history with
+    /// `history`, adopt the NAMED `session_id` (resume does NOT mint a fresh id —
+    /// that is `clear_session`'s job), and seed the JSONL parent-uuid chain to
+    /// `last_jsonl_uuid` so any future append chains via `parent_uuid` off the
+    /// resumed tail. The model is unchanged — resume keeps the live model.
+    ///
+    /// The symmetric twin of [`Self::clear_session`]: where `clear_session`
+    /// wipes + re-mints, `resume_session` adopts the on-disk session's id +
+    /// transcript so the next turn continues with the prior context. The
+    /// caller (engine host) has already loaded + validated the JSONL via the
+    /// orchestrator's resume path; this method only swaps the loaded values
+    /// into the running orchestrator.
+    ///
+    /// Default returns `Err(HandleError::Unimplemented(..))` so non-resuming
+    /// handle impls (the stdio REPL path, the test `MockOrchestratorHandle`)
+    /// keep compiling unchanged; the production `ConversationOrchestrator`
+    /// overrides it.
+    async fn resume_session(
+        &self,
+        session_id: SessionId,
+        history: Vec<protocol::ConversationMessage>,
+        last_jsonl_uuid: Option<String>,
+    ) -> Result<(), HandleError> {
+        let _ = (session_id, history, last_jsonl_uuid);
+        Err(HandleError::Unimplemented("resume_session".into()))
+    }
 }
 
 /// Captured output emission. Useful for tests and (M5-13) the stdio sink.

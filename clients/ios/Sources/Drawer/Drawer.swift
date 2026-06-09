@@ -7,6 +7,38 @@ struct Drawer: View {
     @Binding var activeSession: String
     let onClose: () -> Void
     let openSettings: () -> Void
+    /// The conversation source — drives REAL session history (`engineSessions`)
+    /// and the resume/new-chat actions. The drawer reads `source.model` for the
+    /// live session list (an `@ObservedObject`) and calls `source.resumeSession`
+    /// / `source.startNewConversation` on the user's choice.
+    let source: any ConversationSource
+    /// Triggered when the user picks the REAL engine session `uuid` (so the
+    /// parent can mirror the selection into its own `activeSession` state). The
+    /// drawer also drives `source.resumeSession` itself; this lets RootView keep
+    /// its title-bar / @AppStorage in sync.
+    let onSelectEngineSession: (String) -> Void
+    /// Triggered for "New chat" so the parent can reset its own session state in
+    /// step with `source.startNewConversation`.
+    let onNewChat: () -> Void
+
+    @ObservedObject private var convo: ConversationModel
+
+    init(activeWs: Binding<String>,
+         activeSession: Binding<String>,
+         source: any ConversationSource,
+         onClose: @escaping () -> Void,
+         openSettings: @escaping () -> Void,
+         onSelectEngineSession: @escaping (String) -> Void,
+         onNewChat: @escaping () -> Void) {
+        self._activeWs = activeWs
+        self._activeSession = activeSession
+        self.source = source
+        self.onClose = onClose
+        self.openSettings = openSettings
+        self.onSelectEngineSession = onSelectEngineSession
+        self.onNewChat = onNewChat
+        self.convo = source.model
+    }
 
     private enum Section: String { case chats, projects, crons }
     @State private var section: Section = .chats
@@ -16,6 +48,16 @@ struct Drawer: View {
     /// substring over the visible fields.
     @State private var query: String = ""
     @FocusState private var searchFocused: Bool
+
+    /// REAL engine sessions, newest-first, filtered by the search query. When
+    /// non-empty the chats section renders these in place of the mock chats; when
+    /// empty (engine unavailable / no history) the drawer falls back to MockData.
+    private var engineSessions: [EngineSession] {
+        convo.engineSessions.filter { matches($0.title, $0.relativeTime) }
+    }
+    /// True when the engine has reported real history — drives the chats section
+    /// between the real list and the MockData fallback.
+    private var hasEngineSessions: Bool { !convo.engineSessions.isEmpty }
 
     /// `s` trimmed + lowercased contains the trimmed query (empty query ⇒ match
     /// everything). The shared predicate every section filter runs through.
@@ -56,6 +98,10 @@ struct Drawer: View {
                 .overlay(Rectangle().frame(width: 0.5).foregroundColor(t.border), alignment: .trailing)
                 .shadow(color: .black.opacity(0.3), radius: 15, x: 8)
                 .transition(.move(edge: .leading))
+                // Refresh the REAL session catalog when the drawer opens so the
+                // chats list reflects sessions created since the last pull. A
+                // no-op on the mock; the engine re-submits `ListSessions`.
+                .onAppear { source.listSessions() }
         }
     }
 
@@ -143,7 +189,7 @@ struct Drawer: View {
     // MARK: section tabs
     private var sectionTabs: some View {
         HStack(spacing: 4) {
-            tab(.chats, .message, "对话", chats.count)
+            tab(.chats, .message, "对话", hasEngineSessions ? engineSessions.count : chats.count)
             tab(.projects, .folder, "项目", projects.count)
             tab(.crons, .clock, "定时", crons.count)
         }
@@ -190,7 +236,7 @@ struct Drawer: View {
     /// True when the active section has no rows under the current filter.
     private var currentSectionEmpty: Bool {
         switch section {
-        case .chats:    return chats.isEmpty
+        case .chats:    return hasEngineSessions ? engineSessions.isEmpty : chats.isEmpty
         case .projects: return projects.isEmpty
         case .crons:    return crons.isEmpty
         }
@@ -211,7 +257,78 @@ struct Drawer: View {
         .padding(.top, 40).padding(.horizontal, 16)
     }
 
+    @ViewBuilder
     private var chatsSection: some View {
+        if hasEngineSessions {
+            engineSessionsSection
+        } else {
+            mockChatsSection
+        }
+    }
+
+    /// REAL engine history: a "New chat" affordance + one row per resumable
+    /// session (newest-first, already filtered). Tapping a row resumes it; "New
+    /// chat" starts a fresh session. Shown only when the engine has reported
+    /// sessions (otherwise the mock list renders).
+    private var engineSessionsSection: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            if !searching { newChatButton }
+            ForEach(engineSessions) { s in engineSessionRow(s) }
+        }
+        .padding(.top, 4)
+    }
+
+    /// "New chat" — submits `NewSession` (resets the transcript on
+    /// `SessionStarted`) and lets the parent mirror the reset, then closes.
+    private var newChatButton: some View {
+        Button {
+            source.startNewConversation()
+            onNewChat()
+            onClose()
+        } label: {
+            HStack(spacing: 8) {
+                LXIcon(name: .plus, size: 14, color: t.accent, stroke: 2)
+                Text("新对话").font(.system(size: 13.5, weight: .medium)).foregroundColor(t.accent)
+                Spacer()
+            }
+            .padding(.horizontal, 14).padding(.vertical, 10)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(t.surface)
+            .clipShape(RoundedRectangle(cornerRadius: 10))
+            .overlay(RoundedRectangle(cornerRadius: 10).stroke(t.border, lineWidth: 0.5))
+        }
+        .accessibilityLabel("新对话")
+        .padding(.horizontal, 2).padding(.bottom, 8)
+    }
+
+    private func engineSessionRow(_ s: EngineSession) -> some View {
+        let active = s.id == convo.activeSessionId
+        return Button {
+            // Resume on the source AND select locally (so the UI reflects the
+            // choice even if engine-side resume is still a follow-up).
+            source.resumeSession(s.id)
+            onSelectEngineSession(s.id)
+            onClose()
+        } label: {
+            ZStack(alignment: .leading) {
+                if active { Capsule().fill(t.accent).frame(width: 2.5).padding(.vertical, 12) }
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(s.title).font(.scaledSystem(14, weight: active ? .semibold : .medium, relativeTo: .subheadline))
+                        .foregroundColor(active ? t.text : t.text2).lineLimit(1)
+                    Text("\(s.relativeTime) · \(s.messageCount) 条").font(.scaledSystem(12, relativeTo: .caption))
+                        .foregroundColor(t.text4).lineLimit(1)
+                }
+                .padding(.horizontal, 14).padding(.vertical, 10)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .background(active ? t.surfaceActive : .clear)
+            .clipShape(RoundedRectangle(cornerRadius: 10))
+        }
+        .accessibilityLabel("\(s.title)，\(s.messageCount) 条消息，\(s.relativeTime)")
+        .padding(.bottom, 2)
+    }
+
+    private var mockChatsSection: some View {
         let grouped = Dictionary(grouping: chats, by: { $0.group })
         let order = ["今天", "昨天", "本周"]
         return VStack(alignment: .leading, spacing: 0) {

@@ -49,6 +49,37 @@ impl OrchestratorHandle for ConversationOrchestrator {
         Ok(())
     }
 
+    /// Adopt a replayed session IN PLACE — the symmetric twin of
+    /// [`Self::clear_session`]. Where `clear_session` wipes the history and
+    /// MINTS a fresh `SessionId`, `resume_session` ADOPTS the named on-disk
+    /// session: it swaps in the replayed `history`, adopts the named
+    /// `session_id` (so the running orchestrator IS the resumed session), and
+    /// seeds the JSONL parent-uuid chain to `last_jsonl_uuid` so any future
+    /// append chains via `parent_uuid` off the resumed tail (the same field
+    /// `with_resume` overrides at construction time, here applied to a live
+    /// orchestrator).
+    ///
+    /// `s.model` is intentionally LEFT UNCHANGED — resume keeps the live model
+    /// the connection is running. (`build_state_from_jsonl` uses
+    /// `DEFAULT_MODEL` only for the throwaway `SessionState` the host loads +
+    /// discards; the live model is the source of truth.)
+    async fn resume_session(
+        &self,
+        session_id: protocol::SessionId,
+        history: Vec<protocol::ConversationMessage>,
+        last_jsonl_uuid: Option<String>,
+    ) -> Result<(), HandleError> {
+        let mut s = self.session.lock().await;
+        s.history = history;
+        // Adopt the NAMED id (clear_session mints a fresh one; resume does NOT).
+        s.session_id = session_id;
+        drop(s);
+        // Seed the parent-uuid chain so any future append chains off the
+        // resumed tail (matching the M5-07 writer's chain semantics).
+        *self.last_jsonl_uuid.lock().await = last_jsonl_uuid;
+        Ok(())
+    }
+
     async fn force_compact(&self) -> Result<CompactionSummary, HandleError> {
         // M6-08: dispatch to the cancelable inherent method with a fresh
         // (un-cancelled) token. The REPL/TUI can call

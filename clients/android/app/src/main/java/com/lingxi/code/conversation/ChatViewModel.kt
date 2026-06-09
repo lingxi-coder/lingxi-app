@@ -5,11 +5,13 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.lingxi.code.model.EngineModelCatalog
 import com.lingxi.code.model.EngineModelState
+import com.lingxi.code.model.EngineSessionState
 import com.lingxi.code.model.Message
 import com.lingxi.code.model.MockData
 import com.lingxi.code.model.ModelOption
 import com.lingxi.code.model.Role
 import com.lingxi.code.model.SessionRef
+import com.lingxi.code.model.SessionRow
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -181,6 +183,17 @@ class ChatViewModel(
     val state: StateFlow<ChatState> = _state.asStateFlow()
 
     /**
+     * The engine's REAL resumable-session catalog, mirrored from the source's
+     * OUT-OF-BAND [ConversationSource.sessionState] (sibling of the model
+     * catalog). The drawer observes this to render real history; an empty
+     * catalog (mock mode / before the first `SessionList`) means "fall back to
+     * MockData". Exposed as the ViewModel's own [StateFlow] so the drawer reads
+     * one surface and never reaches into the source directly.
+     */
+    private val _sessions = MutableStateFlow(EngineSessionState())
+    val sessions: StateFlow<EngineSessionState> = _sessions.asStateFlow()
+
+    /**
      * The composer draft, persisted into [savedState] so an in-progress (unsent)
      * message survives process death. Hoisted UI owns the editable draft (see
      * `RootScreen`); this exposes the restored value + a setter the draft mirrors
@@ -200,6 +213,22 @@ class ChatViewModel(
         // keep an empty state forever, so this never disturbs MockData.models.
         viewModelScope.launch {
             source.modelState.collect { engine -> applyModelState(engine) }
+        }
+        // Mirror the engine's OUT-OF-BAND session catalog (sibling of the model
+        // state above): a real `SessionList` populates the drawer with history;
+        // mock sources keep an empty state forever, so the drawer keeps MockData.
+        viewModelScope.launch {
+            source.sessionState.collect { engine -> _sessions.value = engine }
+        }
+        // Mirror the engine's OUT-OF-BAND live-resume result (sibling of the
+        // catalog above): a real `SessionResumed` carries the rehydrated
+        // transcript, which `applyRestoredSession` swaps into state so the user
+        // sees the prior conversation the next turn continues from. Mock sources
+        // keep this null forever, so this never disturbs the local-only resume.
+        viewModelScope.launch {
+            source.resumedSession.collect { restored ->
+                restored?.let { applyRestoredSession(it) }
+            }
         }
         // Keep the persisted transcript + session id in lock-step with state, so a
         // process-death kill at any moment restores the latest committed transcript.
@@ -230,6 +259,36 @@ class ChatViewModel(
         val options = EngineModelCatalog.options(engine.available)
         val active = options.firstOrNull { it.id == engine.active } ?: options.first()
         _state.update { it.copy(availableModels = options, model = active) }
+    }
+
+    /**
+     * Apply a LIVE resume the engine confirmed (`SessionResumed`): adopt the REAL
+     * session id and REPLACE the transcript with the rehydrated, oldest-first
+     * scrollback so the user sees the prior conversation the next turn continues
+     * from. Any in-flight turn is abandoned first (the orphaned-turn guard, so a
+     * late event from the pre-resume turn can't mutate the restored transcript).
+     *
+     * The title is preserved from the drawer's optimistic local select when the
+     * id matches (`resumeSession` set it before submitting `ResumeSession`), else
+     * resolved from the session catalog, else the current title — so the title
+     * bar never reverts to a placeholder on a real resume. Extracted (internal)
+     * so the rehydration is exercised directly in unit tests with a fake source.
+     */
+    internal fun applyRestoredSession(restored: RestoredSession) {
+        abandonInFlightTurn()
+        val title = _state.value.session.takeIf { it.id == restored.sessionId }?.title
+            ?: _sessions.value.rows.firstOrNull { it.uuid == restored.sessionId }?.title
+            ?: _state.value.session.title
+        _state.update {
+            it.copy(
+                session = SessionRef(id = restored.sessionId, title = title),
+                messages = restored.transcript, // clear-then-restore (oldest-first)
+                isNew = false,
+                streaming = false,
+                statusLine = null,
+                error = null,
+            )
+        }
     }
 
     /**
@@ -315,6 +374,41 @@ class ChatViewModel(
     fun selectModel(model: ModelOption) {
         _state.update { it.copy(model = model) }
         viewModelScope.launch { source.setModel(model.id) }
+    }
+
+    /**
+     * Ask the source to (re)report its resumable-session catalog (the drawer's
+     * open trigger). Drives `ListSessions`; the reply updates [sessions]
+     * out-of-band. A no-op for the mock source.
+     */
+    fun refreshSessions() {
+        viewModelScope.launch { source.refreshSessions() }
+    }
+
+    /**
+     * Resume a REAL engine session the user tapped in the drawer. Selects it
+     * LOCALLY immediately (snappy title swap + transcript reset, so the UI
+     * reflects the choice even if engine-side resume is still a follow-up), then
+     * submits `ResumeSession(uuid)` so the engine swaps its inner orchestrator
+     * (confirmed by `SessionResumed`, after which the resumed transcript streams).
+     * Routed through [openSession] so the in-flight turn is abandoned and the
+     * orphaned-turn guard holds, exactly like a mock-session switch.
+     */
+    fun resumeSession(row: SessionRow) {
+        openSession(SessionRef(id = row.uuid, title = row.title))
+        viewModelScope.launch { source.resumeSession(row.uuid) }
+    }
+
+    /**
+     * Start a fresh chat that ALSO tells the engine to begin a new session.
+     * Resets the local transcript immediately (via [newChat]) for snappiness,
+     * then submits `NewSession`; the engine confirms with `SessionStarted`. Used
+     * by the drawer's "新建对话" affordance (the top-bar new-chat button keeps
+     * calling [newChat], which is the local-only reset).
+     */
+    fun startNewSession() {
+        newChat()
+        viewModelScope.launch { source.newSession() }
     }
 
     /**

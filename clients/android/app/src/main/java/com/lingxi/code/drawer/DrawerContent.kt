@@ -48,6 +48,7 @@ import com.lingxi.code.model.Chat
 import com.lingxi.code.model.Cron
 import com.lingxi.code.model.MockData
 import com.lingxi.code.model.Project
+import com.lingxi.code.model.SessionRow
 import com.lingxi.code.model.Workspace
 import com.lingxi.code.theme.LingXiTheme
 
@@ -72,6 +73,15 @@ fun DrawerContent(
     onOpenSettings: () -> Unit,
     onClose: () -> Unit,
     modifier: Modifier = Modifier,
+    /**
+     * The engine's REAL resumable sessions (out-of-band catalog). When non-empty
+     * the 对话 tab renders THESE in place of the [MockData] chats; empty (mock
+     * mode / before the first `SessionList`) keeps the MockData list. The default
+     * is empty so previews / the mock shell render unchanged.
+     */
+    engineSessions: List<SessionRow> = emptyList(),
+    /** Resume a real engine session by its wire uuid. Defaults to [onSelectSession]. */
+    onResumeSession: (String) -> Unit = onSelectSession,
 ) {
     val t = LingXiTheme.palette
 
@@ -85,6 +95,10 @@ fun DrawerContent(
     val wsProjects = remember(ui.activeWs) { MockData.projects.filter { it.wsId == ui.activeWs } }
     val wsCrons = remember(ui.activeWs) { MockData.crons.filter { it.wsId == ui.activeWs } }
 
+    // The engine catalog is global (not workspace-scoped), so it ignores
+    // `activeWs`; the same live `query` filters it.
+    val hasEngineSessions = engineSessions.isNotEmpty()
+    val sessions = remember(engineSessions, query) { filterSessions(engineSessions, query) }
     val chats = remember(wsChats, query) { filterChats(wsChats, query) }
     val projects = remember(wsProjects, query) { filterProjects(wsProjects, query) }
     val crons = remember(wsCrons, query) { filterCrons(wsCrons, query) }
@@ -99,8 +113,10 @@ fun DrawerContent(
         WorkspacePills(activeWs = ui.activeWs, onSelect = ui::selectWorkspace)
         SearchBar(query = query, onQueryChange = { query = it })
         SectionTabs(
+            // The 对话 count reflects whichever list the tab renders: the engine
+            // catalog when available, else the MockData chats.
             section = ui.section,
-            chats = chats.size,
+            chats = if (hasEngineSessions) sessions.size else chats.size,
             projects = projects.size,
             crons = crons.size,
             onSelect = { ui.section = it },
@@ -116,11 +132,21 @@ fun DrawerContent(
                 .padding(top = 4.dp, bottom = 8.dp),
         ) {
             when (ui.section) {
-                DrawerSection.Chats -> ChatsSection(
-                    chats = chats,
-                    activeSession = ui.activeSession,
-                    onSelectSession = { onSelectSession(it) },
-                )
+                // Real engine history when the catalog is populated; the MockData
+                // chats otherwise (mock mode / before the first `SessionList`).
+                DrawerSection.Chats -> if (hasEngineSessions) {
+                    EngineSessionsSection(
+                        sessions = sessions,
+                        activeSession = ui.activeSession,
+                        onSelectSession = { onResumeSession(it) },
+                    )
+                } else {
+                    ChatsSection(
+                        chats = chats,
+                        activeSession = ui.activeSession,
+                        onSelectSession = { onSelectSession(it) },
+                    )
+                }
 
                 DrawerSection.Projects -> ProjectsSection(
                     projects = projects,
@@ -411,6 +437,21 @@ internal fun filterChats(chats: List<Chat>, query: String): List<Chat> {
         it.title.lowercase().contains(q) ||
             it.preview.lowercase().contains(q) ||
             it.group.lowercase().contains(q)
+    }
+}
+
+/**
+ * Filter the engine's REAL resumable sessions by the drawer search query —
+ * the [SessionRow] analog of [filterChats]. Matches the session title or its
+ * relative-time label (so "昨天" / a month-day narrows the list). Empty/blank
+ * query is a pass-through. PURE so it is unit-testable on the plain JVM.
+ */
+internal fun filterSessions(sessions: List<SessionRow>, query: String): List<SessionRow> {
+    val q = query.trim().lowercase()
+    if (q.isEmpty()) return sessions
+    return sessions.filter {
+        it.title.lowercase().contains(q) ||
+            it.relativeTime.lowercase().contains(q)
     }
 }
 

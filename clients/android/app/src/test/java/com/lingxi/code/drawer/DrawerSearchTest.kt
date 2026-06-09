@@ -1,6 +1,7 @@
 package com.lingxi.code.drawer
 
 import com.lingxi.code.model.MockData
+import com.lingxi.code.model.SessionRow
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -105,5 +106,36 @@ class DrawerSearchTest {
     @Test
     fun projects_noMatchAnywhere_dropsProject() {
         assertTrue(filterProjects(projects, "zzz-没有-zzz").isEmpty())
+    }
+
+    // --- engine sessions (the REAL drawer catalog) -------------------------
+
+    private val sessions = listOf(
+        SessionRow(uuid = "u1", title = "重装 Claude Code", messageCount = 8, relativeTime = "2 小时前"),
+        SessionRow(uuid = "u2", title = "客户邮件回复模板", messageCount = 4, relativeTime = "昨天"),
+        SessionRow(uuid = "u3", title = "上海差旅规划", messageCount = 17, relativeTime = "5月3日"),
+    )
+
+    @Test
+    fun sessions_emptyQuery_returnsAllRows() {
+        assertEquals(sessions, filterSessions(sessions, ""))
+        assertEquals(sessions, filterSessions(sessions, "   "))
+    }
+
+    @Test
+    fun sessions_matchOnTitle_caseInsensitive() {
+        val out = filterSessions(sessions, "claude")
+        assertEquals(listOf("u1"), out.map { it.uuid })
+    }
+
+    @Test
+    fun sessions_matchOnRelativeTimeLabel() {
+        // "昨天" is the relative time of u2 — searchable so a user can scan by recency.
+        assertEquals(listOf("u2"), filterSessions(sessions, "昨天").map { it.uuid })
+    }
+
+    @Test
+    fun sessions_noMatch_returnsEmpty() {
+        assertTrue(filterSessions(sessions, "zzz-没有-zzz").isEmpty())
     }
 }

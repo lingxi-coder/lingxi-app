@@ -20,6 +20,7 @@ use client_protocol::listings::{
     DoctorSummaryDto, HookDto, McpServerDto, McpStatusDto, MemoryEntryDto, MemoryTierDto,
     SessionRowDto, SlashCommandDto, StatusSnapshotDto, TaskRowDto, TaskStatusDto,
 };
+use client_protocol::message::{MessageBlockDto, MessageDto};
 
 // ── Sessions ─────────────────────────────────────────────────────────────────
 
@@ -76,12 +77,25 @@ fn session_lifecycle_events_round_trip() {
     let back: ClientEvent = serde_json::from_value(json).expect("deserialize SessionStarted");
     assert_eq!(back, started);
 
+    // `SessionResumed` now also carries the full restored transcript as
+    // `messages` (OLDEST-FIRST, REQUIRED — always present, may be empty) so the
+    // client renders the rehydrated conversation atomically on resume.
     let resumed = ClientEvent::SessionResumed {
         session_id: "sess-2".to_string(),
+        messages: vec![MessageDto {
+            role: "user".to_string(),
+            blocks: vec![MessageBlockDto::Text {
+                text: "prior turn".to_string(),
+            }],
+        }],
     };
     let json = serde_json::to_value(&resumed).expect("serialize SessionResumed");
     assert_eq!(json["type"], "session_resumed");
     assert_eq!(json["session_id"], "sess-2");
+    // `messages` is always present on the wire (REQUIRED, oldest-first).
+    assert_eq!(json["messages"][0]["role"], "user");
+    assert_eq!(json["messages"][0]["blocks"][0]["type"], "text");
+    assert_eq!(json["messages"][0]["blocks"][0]["text"], "prior turn");
     let back: ClientEvent = serde_json::from_value(json).expect("deserialize SessionResumed");
     assert_eq!(back, resumed);
 

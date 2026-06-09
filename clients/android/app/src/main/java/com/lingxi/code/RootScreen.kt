@@ -96,9 +96,21 @@ fun RootScreen(
     // AndroidPermissionSink (SHIP-BLOCKER #3). The mock source never emits one,
     // so this stays null and the prompt is never shown there.
     val pendingPermission by source.pendingPermission.collectAsState()
+    // The engine's REAL resumable-session catalog (out-of-band, sibling of the
+    // model catalog). Empty for the mock → the drawer keeps MockData; populated
+    // once the engine replies to ListSessions → the drawer renders real history.
+    val sessionState by chatViewModel.sessions.collectAsState()
     val drawerUi = rememberDrawerUiState()
     val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
     val scope = rememberCoroutineScope()
+
+    // Refresh the session catalog whenever the drawer transitions to open, so the
+    // list is fresh each time the user reaches for it (the engine re-reports via
+    // SessionList; a no-op for the mock). `isOpen` flips on the open animation's
+    // start, so this fires once per open, not per frame.
+    LaunchedEffect(drawerState.isOpen) {
+        if (drawerState.isOpen) chatViewModel.refreshSessions()
+    }
 
     // Voice-flow overlay visibility, hoisted here (the Android analog of the iOS
     // RootView's `voiceActive` flag): the composer's mic long-press flips it on,
@@ -174,6 +186,8 @@ fun RootScreen(
                     DrawerContent(
                         ui = drawerUi,
                         onSelectSession = { id ->
+                            // MockData path (mock mode / projects / crons tabs):
+                            // select + switch to the canned session.
                             drawerUi.selectSession(id)
                             chatViewModel.openSession(MockData.session(id))
                             closeDrawer()
@@ -183,6 +197,19 @@ fun RootScreen(
                             onOpenSettings()
                         },
                         onClose = { closeDrawer() },
+                        // The engine's REAL sessions; non-empty flips the 对话 tab
+                        // from MockData to real history.
+                        engineSessions = sessionState.rows,
+                        onResumeSession = { uuid ->
+                            // Tapping a real session: highlight it locally AND ask
+                            // the engine to resume it (ResumeSession). The local
+                            // select keeps the UI honest even before the engine's
+                            // SessionResumed lands.
+                            drawerUi.selectSession(uuid)
+                            sessionState.rows.firstOrNull { it.uuid == uuid }
+                                ?.let { chatViewModel.resumeSession(it) }
+                            closeDrawer()
+                        },
                     )
                 }
             },
@@ -191,7 +218,10 @@ fun RootScreen(
                 ChatScreen(
                     state = state,
                     onSend = chatViewModel::send,
-                    onNewChat = chatViewModel::newChat,
+                    // "新对话": reset the local transcript immediately AND tell the
+                    // engine to begin a new session (NewSession). For the mock the
+                    // engine call is a no-op, so this still behaves like newChat.
+                    onNewChat = chatViewModel::startNewSession,
                     onSelectModel = chatViewModel::selectModel,
                     isDark = isDark,
                     onToggleTheme = onToggleTheme,

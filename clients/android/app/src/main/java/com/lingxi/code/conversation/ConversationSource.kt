@@ -4,12 +4,17 @@ import android.content.Context
 import com.lingxi.code.bindings.ClientCommand
 import com.lingxi.code.bindings.ClientEvent
 import com.lingxi.code.bindings.ErrorKindDto
+import com.lingxi.code.bindings.MessageBlockDto
+import com.lingxi.code.bindings.MessageDto
 import com.lingxi.code.bindings.MobileEngineHandle
 import com.lingxi.code.bindings.PermissionRequest
 import com.lingxi.code.bindings.PermissionResponseDto
 import com.lingxi.code.model.EngineModelState
+import com.lingxi.code.model.EngineSessionState
 import com.lingxi.code.model.Message
+import com.lingxi.code.model.Role
 import com.lingxi.code.model.MockData
+import com.lingxi.code.model.SessionCatalog
 import com.lingxi.code.secure.SecureKeyStore
 import com.lingxi.code.secure.resolveEngineCredentials
 import com.lingxi.code.voice.buildVoiceEngine
@@ -107,6 +112,57 @@ interface ConversationSource {
      * mock keeps its local selection).
      */
     suspend fun setModel(id: String) {}
+
+    /**
+     * The engine's REAL resumable-session catalog — the SEPARATE, out-of-band
+     * session-state path, the exact sibling of [modelState]. `SessionList` (the
+     * reply to `ListSessions`) is NOT part of a text turn, so it flows here (a
+     * [StateFlow]) instead of through [submit]'s per-turn [ReplyEvent] stream.
+     * Empty for the mock (the drawer then keeps showing its [MockData] session
+     * list); the engine populates it after the `ListSessions` submitted at build
+     * time replies. The UI observes this to render real history; an empty state
+     * means "mock mode / no catalog yet".
+     */
+    val sessionState: StateFlow<EngineSessionState>
+        get() = MutableStateFlow(EngineSessionState()).asStateFlow()
+
+    /**
+     * Ask the engine to (re)report its resumable-session catalog, submitting
+     * `ClientCommand.ListSessions`. The reply (`SessionList`) updates
+     * [sessionState] out-of-band. Called when the drawer opens so the list is
+     * fresh. A no-op for sources with no engine (the mock keeps [MockData]).
+     */
+    suspend fun refreshSessions() {}
+
+    /**
+     * Resume the engine session named by the REAL wire [uuid], submitting
+     * `ClientCommand.ResumeSession`. The engine confirms with `SessionResumed`,
+     * which carries the full restored transcript — surfaced OUT-OF-BAND through
+     * [resumedSession] so the ViewModel rehydrates the prior conversation. A
+     * no-op for sources with no engine (the mock keeps its local selection).
+     */
+    suspend fun resumeSession(uuid: String) {}
+
+    /**
+     * The engine's most recent live-resume result — the SEPARATE, out-of-band
+     * session-RESTORE path, the sibling of [sessionState]. `SessionResumed` (the
+     * confirmation of a `ResumeSession`) is NOT part of a text turn, so its
+     * restored transcript flows here (a [StateFlow]) instead of through
+     * [submit]'s per-turn [ReplyEvent] stream — exactly like `SessionList` rides
+     * [sessionState]. `null` means "no resume has landed yet" (mock mode / before
+     * the first `SessionResumed`); the ViewModel observes a non-null value to
+     * swap the active session id AND replace the transcript with the rehydrated
+     * conversation (so the user sees the prior context the next turn continues).
+     */
+    val resumedSession: StateFlow<RestoredSession?>
+        get() = MutableStateFlow<RestoredSession?>(null).asStateFlow()
+
+    /**
+     * Start a fresh engine session, submitting `ClientCommand.NewSession`. The
+     * engine confirms with `SessionStarted`; the UI resets its transcript on
+     * that event. A no-op for sources with no engine (the mock).
+     */
+    suspend fun newSession() {}
 }
 
 /**
@@ -128,6 +184,119 @@ fun reduceModelEvent(prev: EngineModelState, event: ClientEvent): EngineModelSta
         is ClientEvent.ModelChanged -> prev.copy(active = event.model)
         else -> prev
     }
+
+/**
+ * PURE reducer for the out-of-band SESSION events — the exact sibling of
+ * [reduceModelEvent]. Folds one inbound engine [ClientEvent] into the prior
+ * [EngineSessionState], or returns `prev` unchanged for every event that isn't a
+ * session-catalog event.
+ *
+ *  - `SessionList` → replace the catalog with the engine's real rows, mapping
+ *                    each wire `SessionRowDto` to a UI [SessionRow] (title +
+ *                    message count + humanized relative time) via
+ *                    [SessionCatalog.rowFrom].
+ *  - anything else → unchanged (`#[non_exhaustive]`, so an `else` is required).
+ *
+ * `SessionStarted` / `SessionResumed` / `SessionEnded` are lifecycle events the
+ * ViewModel acts on (transcript reset / title swap), NOT catalog mutations, so
+ * they are intentionally ignored here. In particular `SessionResumed` carries
+ * the RESTORED TRANSCRIPT, which rides its own out-of-band path
+ * ([restoredSessionFrom] → [ConversationSource.resumedSession]) rather than the
+ * catalog. [nowEpochSeconds] is injected so the relative-time bucketing is
+ * deterministic in unit tests.
+ */
+fun reduceSessionEvent(
+    prev: EngineSessionState,
+    event: ClientEvent,
+    nowEpochSeconds: Long = System.currentTimeMillis() / 1000L,
+): EngineSessionState =
+    when (event) {
+        is ClientEvent.SessionList -> EngineSessionState(
+            rows = event.sessions.map { dto ->
+                SessionCatalog.rowFrom(
+                    uuid = dto.uuid,
+                    title = dto.title,
+                    messageCount = dto.messageCount.toInt(),
+                    modifiedRfc3339 = dto.modifiedRfc3339,
+                    nowEpochSeconds = nowEpochSeconds,
+                )
+            },
+        )
+        else -> prev
+    }
+
+/**
+ * The result of a LIVE resume: the engine adopted a prior on-disk session into
+ * the running orchestrator (so the next turn continues with full prior context),
+ * and handed back the rehydrated [transcript] to render. [sessionId] is the REAL
+ * wire uuid the engine resumed (the verbatim `SessionResumed.session_id`, no
+ * `sess:` prefix); [transcript] is OLDEST-FIRST, already lowered from the wire
+ * [MessageDto]s to the UI [Message] model. PURE (no engine / Android types) so
+ * the resume rehydration is unit-testable on the plain JVM.
+ */
+data class RestoredSession(
+    val sessionId: String,
+    val transcript: List<Message>,
+)
+
+/**
+ * PURE recognizer for the out-of-band RESUME-RESTORE event — the sibling of
+ * [reduceSessionEvent] for the catalog. Maps a [ClientEvent.SessionResumed] to
+ * the [RestoredSession] the ViewModel rehydrates (active session id + restored
+ * transcript), or `null` for every other event (so the listener leaves
+ * [ConversationSource.resumedSession] untouched). The wire [MessageDto]s are
+ * lowered OLDEST-FIRST via [messageDtoToMessage] — the same order the engine
+ * emits — so the scrollback renders in conversation order. A free function with
+ * NO engine / Android dependency so it is exhaustively unit-testable on the JVM.
+ */
+fun restoredSessionFrom(event: ClientEvent): RestoredSession? = when (event) {
+    is ClientEvent.SessionResumed -> RestoredSession(
+        sessionId = event.sessionId,
+        transcript = event.messages.map(::messageDtoToMessage),
+    )
+    else -> null
+}
+
+/**
+ * Lower one wire [MessageDto] to the UI [Message] model. The UI bubble is
+ * TEXT-ONLY (assistant text renders as Markdown; user text is plain), so the
+ * ordered content [MessageBlockDto]s are flattened to a single body string via
+ * [messageDtoText]. The wire `role` ("user" / "assistant" / "system") maps to
+ * [Role]: "user" → [Role.User]; everything else (assistant / system) → [Role.Ai]
+ * (the avatar+markdown bubble). PURE — no engine / Android dependency.
+ */
+fun messageDtoToMessage(dto: MessageDto): Message {
+    val role = if (dto.role.equals("user", ignoreCase = true)) Role.User else Role.Ai
+    return Message(role = role, text = messageDtoText(dto.blocks))
+}
+
+/**
+ * Flatten a message's ordered content [MessageBlockDto]s into the single body
+ * string the UI bubble renders, mirroring how the engine's live MessageComplete
+ * synthesis collapses a turn to text. Each block kind folds to a readable line:
+ *  - Text             → the text verbatim.
+ *  - Thinking         → the reasoning text (the bubble has no separate thinking
+ *                       region for restored scrollback; it reads inline).
+ *  - RedactedThinking → a placeholder marker (the payload is opaque).
+ *  - ToolUse          → a compact "调用工具 <tool>" activity line.
+ *  - ToolResult       → a compact "工具结果"/"工具失败" line.
+ * Blocks are joined by blank lines and blanks are dropped so an empty trailing
+ * block never leaves dangling whitespace. The `when` is exhaustive over the
+ * generated [MessageBlockDto] subclasses — a regen that adds a new block kind is
+ * a compile error here, mirroring the engine's exhaustive `ContentBlock` match.
+ */
+fun messageDtoText(blocks: List<MessageBlockDto>): String =
+    blocks.mapNotNull { block ->
+        val line: String = when (block) {
+            is MessageBlockDto.Text -> block.text
+            is MessageBlockDto.Thinking -> block.thinking
+            is MessageBlockDto.RedactedThinking -> "[已折叠的思考]"
+            is MessageBlockDto.ToolUse -> "调用工具 ${block.tool}…"
+            is MessageBlockDto.ToolResult ->
+                if (block.isError) "工具失败" else "工具结果"
+        }
+        line.takeUnless { it.isBlank() }
+    }.joinToString("\n\n")
 
 /**
  * Streamed assistant-reply events — the UI-facing analog of engine
@@ -252,6 +421,8 @@ class EngineConversationSource private constructor(
     private val events: MutableSharedFlow<ClientEvent>,
     private val permissions: MutableStateFlow<PermissionPromptState?>,
     private val models: MutableStateFlow<EngineModelState>,
+    private val sessions: MutableStateFlow<EngineSessionState>,
+    private val resumed: MutableStateFlow<RestoredSession?>,
 ) : ConversationSource {
 
     /** A fresh engine session starts empty (the engine streams the transcript). */
@@ -263,6 +434,55 @@ class EngineConversationSource private constructor(
      * (see [create]). The picker observes this; [setModel] confirms a pick.
      */
     override val modelState: StateFlow<EngineModelState> = models.asStateFlow()
+
+    /**
+     * The engine's REAL resumable-session catalog, driven OUT-OF-BAND by the
+     * listener folding `SessionList` through [reduceSessionEvent] (see [create]).
+     * The drawer observes this to render real history; [resumeSession] /
+     * [newSession] act on a pick.
+     */
+    override val sessionState: StateFlow<EngineSessionState> = sessions.asStateFlow()
+
+    /**
+     * The engine's most recent live-resume result, driven OUT-OF-BAND by the
+     * listener folding `SessionResumed` through [restoredSessionFrom] (see
+     * [create]). The ViewModel observes this to swap the active session id AND
+     * replace the transcript with the rehydrated conversation. Sibling of
+     * [sessionState] (the catalog); both ride the same listener, neither the
+     * per-turn stream.
+     */
+    override val resumedSession: StateFlow<RestoredSession?> = resumed.asStateFlow()
+
+    override suspend fun refreshSessions() {
+        try {
+            handle.submit(ClientCommand.ListSessions(limit = null))
+        } catch (_: Throwable) {
+            // A ListSessions that can't be delivered leaves the catalog as-is;
+            // the drawer keeps whatever it last rendered (mock list if empty).
+        }
+    }
+
+    override suspend fun resumeSession(uuid: String) {
+        if (uuid.isBlank()) return
+        try {
+            handle.submit(ClientCommand.ResumeSession(sessionId = uuid, cwd = null))
+        } catch (_: Throwable) {
+            // A ResumeSession that can't be delivered leaves the active session
+            // unchanged; the engine never emits SessionResumed, so `resumedSession`
+            // never fires and the UI keeps whatever it locally selected (no
+            // rehydrated transcript swap).
+        }
+    }
+
+    override suspend fun newSession() {
+        try {
+            handle.submit(ClientCommand.NewSession(cwd = null, model = null))
+        } catch (_: Throwable) {
+            // A NewSession that can't be delivered leaves the current session in
+            // place; the engine never emits SessionStarted, so the UI keeps its
+            // transcript (the local reset still ran for snappiness — see ViewModel).
+        }
+    }
 
     override suspend fun setModel(id: String) {
         if (id.isBlank()) return
@@ -390,6 +610,20 @@ class EngineConversationSource private constructor(
             // Starts empty → the UI shows MockData.models until the `ListModels`
             // submitted after build replies with the real catalog.
             val models = MutableStateFlow(EngineModelState())
+            // The engine's REAL resumable-session catalog (sibling of `models`).
+            // The listener below folds every inbound `SessionList` into this
+            // StateFlow via the pure `reduceSessionEvent`, so the drawer is driven
+            // by real history out-of-band from the per-turn stream. Starts empty →
+            // the drawer shows the MockData session list until the `ListSessions`
+            // submitted after build replies with the real catalog.
+            val sessions = MutableStateFlow(EngineSessionState())
+            // The engine's most recent live-resume result (sibling of `sessions`).
+            // The listener below folds every inbound `SessionResumed` into this
+            // StateFlow via the pure `restoredSessionFrom`, so the ViewModel
+            // rehydrates the prior conversation out-of-band from the per-turn
+            // stream. Starts null → no resume has landed (the drawer's optimistic
+            // local select stands until a real `SessionResumed` arrives).
+            val resumed = MutableStateFlow<RestoredSession?>(null)
             // Credentials: the encrypted-at-rest SecureKeyStore FIRST (the shipped
             // app's source of truth — SHIP-BLOCKER #1), falling back to the process
             // environment as a dev override. A shipped mobile app has no process
@@ -415,11 +649,19 @@ class EngineConversationSource private constructor(
                 // persist a model, so a fresh install always uses the real default.
                 model = creds.model,
                 onEvent = { event ->
-                    // The OUT-OF-BAND model-state path: fold model events into the
-                    // StateFlow the picker observes, BEFORE forwarding to the
-                    // per-turn stream. `reduceModelEvent` is a no-op for non-model
-                    // events, so every event still reaches `events` unchanged.
+                    // The OUT-OF-BAND state paths: fold model catalog + session
+                    // catalog + live-resume events into the StateFlows the picker /
+                    // drawer / conversation observe, BEFORE forwarding to the
+                    // per-turn stream. Every reducer is a no-op for unrelated
+                    // events, so every event still reaches `events` unchanged
+                    // (lifecycle events like SessionStarted ride the per-turn
+                    // stream; the ViewModel acts on them there).
                     models.value = reduceModelEvent(models.value, event)
+                    sessions.value = reduceSessionEvent(sessions.value, event)
+                    // `SessionResumed` carries the rehydrated transcript: surface
+                    // it so the ViewModel swaps the active session + restored
+                    // scrollback. `null` for every other event leaves it untouched.
+                    restoredSessionFrom(event)?.let { resumed.value = it }
                     events.emit(event)
                 },
                 onPermission = { request -> permissions.value = permissionRequestToPrompt(request) },
@@ -436,8 +678,17 @@ class EngineConversationSource private constructor(
                 } catch (_: Throwable) {
                     // benign: no catalog → picker keeps MockData.models
                 }
+                // Same out-of-band priming for the session catalog: the reply
+                // (`SessionList`) flows back through the listener into `sessions`,
+                // populating the drawer with real history. A failed ListSessions
+                // just leaves the catalog empty (drawer shows MockData).
+                try {
+                    handle.submit(ClientCommand.ListSessions(limit = null))
+                } catch (_: Throwable) {
+                    // benign: no catalog → drawer keeps MockData session list
+                }
             }
-            return EngineConversationSource(handle, events, permissions, models)
+            return EngineConversationSource(handle, events, permissions, models, sessions, resumed)
         }
     }
 }

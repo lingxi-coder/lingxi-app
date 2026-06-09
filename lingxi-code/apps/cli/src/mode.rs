@@ -109,54 +109,85 @@ pub async fn dispatch(
                     return exit_codes::RUNTIME_ERROR;
                 }
             };
-            // (M7-13 review) Coerce the concrete orchestrator to the
-            // `OrchestratorHandle` trait object so it can drive both the session
-            // id read and the Settings open pump inside the TUI mount.
-            let orchestrator: Arc<dyn OrchestratorHandle> = tui_build.runtime.orchestrator.clone();
-            let session_id = orchestrator.current_session_id().await;
-            let bridge = tui::session::TuiBridge {
-                rx: tui_build.bridge_rx,
-            };
-            // Status snapshot — model from argv (if set), cwd from current
-            // dir, cost placeholder. Full status wiring lands in M6-06.
-            let mut status = tui::state::StatusSnapshot::default();
-            if let Some(m) = &argv.model {
-                status.model.clone_from(m);
-            }
-            if let Ok(cwd) = std::env::current_dir() {
-                status.cwd = cwd;
-            }
-            // (M9-05) Wrap the desktop TaskRegistry in a `PollerFeed` so the TUI
-            // background-task footer + dialog read live state. The registry is
-            // the SAME one wired into the tool context (tools that spawn tasks
-            // update it; the feed polls it). Coerced to the narrow `traits`
-            // handle at the seam.
-            let task_feed: Arc<dyn tui::multiagent::MultiAgentFeed> = Arc::new(
-                tui::multiagent::PollerFeed::new(tui_build.runtime.task_registry.clone()
-                    as Arc<dyn traits::task_registry::TaskRegistryHandle>),
-            );
-            // (MULTIMODAL.1) Thread the bridge sender clone so the TUI live-key
-            // loop can spawn streaming turns (`tui::root::pump_turn`). Moved out
-            // of `tui_build` (a disjoint field from the already-taken `bridge_rx`).
-            // (ARGS.3) Thread the dispatcher's shared command registry so the TUI
-            // populates its progressive argument-hint map at init. `.registry()`
-            // only clones the inner `Arc<RwLock<CommandRegistry>>`, leaving the
-            // dispatcher in place on `tui_build.runtime` (read before `turn_tx`,
-            // a disjoint field, is moved out below — no borrow/move conflict).
-            let command_registry = tui_build.runtime.dispatcher.registry();
-            let tui_runtime = tui::session::Runtime::with_bridge(session_id, bridge, status)
-                .with_orchestrator(orchestrator)
-                .with_multiagent_feed(task_feed)
-                .with_turn_tx(tui_build.turn_tx)
-                .with_command_registry(command_registry);
-            let cancel = CancellationToken::new();
-            match tui::run_tui_session(tui_runtime, cancel).await {
-                Ok(()) => exit_codes::SUCCESS,
-                Err(e) => {
-                    eprintln!("lingxi-cli: tui session failed: {e}");
-                    exit_codes::RUNTIME_ERROR
-                }
-            }
+            // FRESH launch: no replayed scrollback. `build_tui_runtime` with an
+            // empty `resumed_messages` vec is byte-identical to the pre-refactor
+            // inline assembly — `Runtime::with_resumed_messages([])` is a no-op
+            // and `run_tui_session` skips the seed when the vec is empty.
+            let tui_runtime = build_tui_runtime(tui_build, argv, Vec::new()).await;
+            mount_tui_runtime(tui_runtime).await
+        }
+    }
+}
+
+/// Assemble the [`tui::session::Runtime`] from a [`crate::init::TuiBuild`].
+///
+/// (M5-13) Extracted from the `Mode::Tui` arm so the `--resume <uuid>` mount
+/// (`run::run_resume_by_id`) reuses the EXACT same wiring — orchestrator handle,
+/// bridge, status snapshot, multi-agent `PollerFeed`, turn-spawn sender, and the
+/// command registry — instead of duplicating it. The ONLY resume-specific input
+/// is `resumed_messages`: the prior conversation, already mapped to TUI
+/// scrollback rows via `tui::replay::rebuild_from_jsonl`. A FRESH launch passes
+/// an empty vec, so `with_resumed_messages([])` is a no-op and the fresh mount
+/// stays byte-identical to the pre-extraction inline code.
+pub(crate) async fn build_tui_runtime(
+    tui_build: crate::init::TuiBuild,
+    argv: &Argv,
+    resumed_messages: Vec<tui::state::RenderedMessage>,
+) -> tui::session::Runtime {
+    // (M7-13 review) Coerce the concrete orchestrator to the
+    // `OrchestratorHandle` trait object so it can drive both the session
+    // id read and the Settings open pump inside the TUI mount.
+    let orchestrator: Arc<dyn OrchestratorHandle> = tui_build.runtime.orchestrator.clone();
+    let session_id = orchestrator.current_session_id().await;
+    let bridge = tui::session::TuiBridge {
+        rx: tui_build.bridge_rx,
+    };
+    // Status snapshot — model from argv (if set), cwd from current
+    // dir, cost placeholder. Full status wiring lands in M6-06.
+    let mut status = tui::state::StatusSnapshot::default();
+    if let Some(m) = &argv.model {
+        status.model.clone_from(m);
+    }
+    if let Ok(cwd) = std::env::current_dir() {
+        status.cwd = cwd;
+    }
+    // (M9-05) Wrap the desktop TaskRegistry in a `PollerFeed` so the TUI
+    // background-task footer + dialog read live state. The registry is
+    // the SAME one wired into the tool context (tools that spawn tasks
+    // update it; the feed polls it). Coerced to the narrow `traits`
+    // handle at the seam.
+    let task_feed: Arc<dyn tui::multiagent::MultiAgentFeed> = Arc::new(
+        tui::multiagent::PollerFeed::new(tui_build.runtime.task_registry.clone()
+            as Arc<dyn traits::task_registry::TaskRegistryHandle>),
+    );
+    // (MULTIMODAL.1) Thread the bridge sender clone so the TUI live-key
+    // loop can spawn streaming turns (`tui::root::pump_turn`). Moved out
+    // of `tui_build` (a disjoint field from the already-taken `bridge_rx`).
+    // (ARGS.3) Thread the dispatcher's shared command registry so the TUI
+    // populates its progressive argument-hint map at init. `.registry()`
+    // only clones the inner `Arc<RwLock<CommandRegistry>>`, leaving the
+    // dispatcher in place on `tui_build.runtime` (read before `turn_tx`,
+    // a disjoint field, is moved out below — no borrow/move conflict).
+    let command_registry = tui_build.runtime.dispatcher.registry();
+    // (M5-13) Seed the prior conversation last so a resumed session paints its
+    // existing history on the first frame. For a fresh launch this is `[]`.
+    tui::session::Runtime::with_bridge(session_id, bridge, status)
+        .with_orchestrator(orchestrator)
+        .with_multiagent_feed(task_feed)
+        .with_turn_tx(tui_build.turn_tx)
+        .with_command_registry(command_registry)
+        .with_resumed_messages(resumed_messages)
+}
+
+/// Drive the TUI to a clean shutdown and map its result to a process exit code.
+/// Shared by the fresh `Mode::Tui` arm and the `--resume <uuid>` mount.
+pub(crate) async fn mount_tui_runtime(tui_runtime: tui::session::Runtime) -> i32 {
+    let cancel = CancellationToken::new();
+    match tui::run_tui_session(tui_runtime, cancel).await {
+        Ok(()) => exit_codes::SUCCESS,
+        Err(e) => {
+            eprintln!("lingxi-cli: tui session failed: {e}");
+            exit_codes::RUNTIME_ERROR
         }
     }
 }

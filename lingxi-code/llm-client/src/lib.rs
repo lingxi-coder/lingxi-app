@@ -13,6 +13,8 @@ pub mod error;
 pub mod config;
 pub mod credentials;
 pub mod protocol;
+#[allow(missing_docs)]
+mod providers;
 pub mod registry;
 pub mod redaction;
 pub mod transport;
@@ -21,6 +23,7 @@ pub mod types;
 
 pub use auth::{ApiKeyAuthenticator, Authenticator, BearerAuthenticator};
 pub use anthropic::normalize_anthropic_usage;
+pub use providers::AnthropicMessagesCodec;
 pub use config::{
     AuthStrategy, Capabilities, ClientConfig, CredentialConfig, ModelProfile, PricingConfig,
     ProtocolFamily, ProviderProfile,

@@ -30,7 +30,8 @@ pub use ids::{
 };
 pub use message_size::text_byte_size;
 pub use messages::{
-    ContentBlock, ConversationMessage, ImageSource, MemoryEntry, MemoryEntryTier, MessageRole,
+    ContentBlock, ConversationMessage, DocumentSource, ImageSource, MemoryEntry, MemoryEntryTier,
+    MessageRole,
 };
 pub use secret::{
     RedactableContent, Secret, SecretKindDto, SecureStorageData, SecureStorageMetadata,

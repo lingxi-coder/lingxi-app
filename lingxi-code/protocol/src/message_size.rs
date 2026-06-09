@@ -35,6 +35,9 @@ fn content_block_size(b: &ContentBlock) -> u64 {
             crate::ImageSource::Base64 { data, .. } => data.len() as u64,
             crate::ImageSource::Url { url } => url.len() as u64,
         },
+        ContentBlock::Document { source } => match source {
+            crate::DocumentSource::Base64 { data, .. } => data.len() as u64,
+        },
     }
 }
 

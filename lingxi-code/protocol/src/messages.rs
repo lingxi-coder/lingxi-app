@@ -59,6 +59,12 @@ pub enum ContentBlock {
         /// Where the image bytes come from.
         source: ImageSource,
     },
+    /// A document input (e.g. a PDF). Serializes to the Anthropic document-block
+    /// wire shape; the OpenAI/Gemini codecs translate or drop it.
+    Document {
+        /// Where the document bytes come from.
+        source: DocumentSource,
+    },
 }
 
 /// Source of a [`ContentBlock::Image`]. Serializes to Anthropic's
@@ -77,6 +83,20 @@ pub enum ImageSource {
     Url {
         /// The image URL.
         url: String,
+    },
+}
+
+/// Source of a [`ContentBlock::Document`]. Serializes to Anthropic's `source`
+/// wire shape (`{"type":"base64","media_type":"application/pdf","data":…}`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum DocumentSource {
+    /// Inline base64-encoded document bytes.
+    Base64 {
+        /// MIME type, e.g. `application/pdf`.
+        media_type: String,
+        /// Base64-encoded document bytes (no `data:` prefix).
+        data: String,
     },
 }
 
@@ -131,6 +151,19 @@ impl ConversationMessage {
         }
         for source in images {
             content.push(ContentBlock::Image { source });
+        }
+        Self::User { id, content }
+    }
+
+    /// Like [`Self::user_with_images`] but for document sources (P4a).
+    #[must_use]
+    pub fn user_with_documents(id: MessageId, text: String, documents: Vec<DocumentSource>) -> Self {
+        let mut content = Vec::new();
+        if !text.is_empty() {
+            content.push(ContentBlock::Text { text });
+        }
+        for source in documents {
+            content.push(ContentBlock::Document { source });
         }
         Self::User { id, content }
     }
@@ -307,6 +340,23 @@ mod tests {
                 "source": {"type": "base64", "media_type": "image/png", "data": "aGVsbG8="}
             })
         );
+        let back: ContentBlock = serde_json::from_value(v).unwrap();
+        assert_eq!(back, block);
+    }
+
+    #[test]
+    fn document_base64_block_matches_anthropic_wire() {
+        let block = ContentBlock::Document {
+            source: DocumentSource::Base64 {
+                media_type: "application/pdf".to_string(),
+                data: "JVBERi0=".to_string(),
+            },
+        };
+        let v = serde_json::to_value(&block).unwrap();
+        assert_eq!(v, serde_json::json!({
+            "type": "document",
+            "source": { "type": "base64", "media_type": "application/pdf", "data": "JVBERi0=" }
+        }));
         let back: ContentBlock = serde_json::from_value(v).unwrap();
         assert_eq!(back, block);
     }

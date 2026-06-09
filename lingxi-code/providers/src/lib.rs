@@ -17,6 +17,7 @@ pub mod bedrock;
 pub mod capabilities;
 pub mod client;
 pub mod codec;
+pub mod deprecation;
 pub mod error;
 pub mod eventstream;
 pub mod gemini;
@@ -44,6 +45,7 @@ pub use profile::AzureAdConfig;
 pub use capabilities::{Capabilities, ReasoningSupport, SystemStyle};
 pub use client::GenericClient;
 pub use codec::{SseDecoder, WireCodec};
+pub use deprecation::model_deprecation_warning;
 pub use error::CodecError;
 pub use gemini::GeminiCodec;
 pub use model_capabilities::{

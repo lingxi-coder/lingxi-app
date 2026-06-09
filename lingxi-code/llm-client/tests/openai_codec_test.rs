@@ -63,6 +63,35 @@ fn encode_tool_result_as_tool_message_not_tool_call() {
 }
 
 #[test]
+fn encode_multiple_tool_results_preserves_each_as_tool_message() {
+    let codec = OpenAiChatCodec::new("https://api.openai.com/v1");
+    let mut request = LlmRequest::new("gpt-4o");
+    request.messages.push(llm_client::Message {
+        role: "assistant".to_string(),
+        content: vec![
+            ContentBlock::ToolResult {
+                tool_call_id: "call_1".to_string(),
+                output: serde_json::json!("first"),
+            },
+            ContentBlock::ToolResult {
+                tool_call_id: "call_2".to_string(),
+                output: serde_json::json!("second"),
+            },
+        ],
+    });
+
+    let provider_request = codec.encode_request(&request).unwrap();
+
+    assert_eq!(provider_request.body_json["messages"][0]["role"], "tool");
+    assert_eq!(provider_request.body_json["messages"][0]["tool_call_id"], "call_1");
+    assert_eq!(provider_request.body_json["messages"][0]["content"], "first");
+    assert_eq!(provider_request.body_json["messages"][1]["role"], "tool");
+    assert_eq!(provider_request.body_json["messages"][1]["tool_call_id"], "call_2");
+    assert_eq!(provider_request.body_json["messages"][1]["content"], "second");
+    assert_eq!(provider_request.body_json["messages"].as_array().unwrap().len(), 2);
+}
+
+#[test]
 fn decode_rejects_invalid_tool_call_arguments() {
     let codec = OpenAiChatCodec::new("https://api.openai.com/v1");
     let response = ProviderResponse::json(200, serde_json::json!({

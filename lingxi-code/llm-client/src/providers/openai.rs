@@ -30,7 +30,7 @@ impl WireCodec for OpenAiChatCodec {
             messages.push(serde_json::json!({"role": "system", "content": system}));
         }
 
-        messages.extend(request.messages.iter().map(encode_message));
+        messages.extend(request.messages.iter().flat_map(encode_message));
 
         let mut body = serde_json::Map::new();
         body.insert("model".to_string(), Value::String(request.model.clone()));
@@ -60,19 +60,10 @@ impl WireCodec for OpenAiChatCodec {
     }
 }
 
-fn encode_message(message: &crate::Message) -> Value {
-    if message.content.len() == 1 {
-        if let ContentBlock::ToolResult { tool_call_id, output } = &message.content[0] {
-            return serde_json::json!({
-                "role": "tool",
-                "tool_call_id": tool_call_id,
-                "content": tool_result_content(output),
-            });
-        }
-    }
-
+fn encode_message(message: &crate::Message) -> Vec<Value> {
     let mut text = String::new();
     let mut tool_calls = Vec::new();
+    let mut messages = Vec::new();
 
     for block in &message.content {
         match block {
@@ -90,22 +81,46 @@ fn encode_message(message: &crate::Message) -> Value {
                     "arguments": input.to_string(),
                 }
             })),
-            ContentBlock::ToolResult { .. }
-            | ContentBlock::Image { .. }
-            | ContentBlock::Document { .. }
-            | ContentBlock::Reasoning { .. } => {}
+            ContentBlock::ToolResult { tool_call_id, output } => {
+                if !text.is_empty() {
+                    messages.push(text_message(&message.role, &text));
+                    text.clear();
+                }
+                if !tool_calls.is_empty() {
+                    messages.push(assistant_tool_call_message(&message.role, &tool_calls));
+                    tool_calls.clear();
+                }
+                messages.push(serde_json::json!({
+                    "role": "tool",
+                    "tool_call_id": tool_call_id,
+                    "content": tool_result_content(output),
+                }));
+            }
+            ContentBlock::Image { .. } | ContentBlock::Document { .. } | ContentBlock::Reasoning { .. } => {}
         }
     }
 
-    let mut message_json = serde_json::Map::new();
-    message_json.insert("role".to_string(), Value::String(message.role.clone()));
-    message_json.insert(
-        "content".to_string(),
-        if text.is_empty() { Value::Null } else { Value::String(text) },
-    );
-    if !tool_calls.is_empty() {
-        message_json.insert("tool_calls".to_string(), Value::Array(tool_calls));
+    if !text.is_empty() {
+        messages.push(text_message(&message.role, &text));
     }
+    if !tool_calls.is_empty() {
+        messages.push(assistant_tool_call_message(&message.role, &tool_calls));
+    }
+    messages
+}
+
+fn text_message(role: &str, text: &str) -> Value {
+    serde_json::json!({
+        "role": role,
+        "content": text,
+    })
+}
+
+fn assistant_tool_call_message(role: &str, tool_calls: &[Value]) -> Value {
+    let mut message_json = serde_json::Map::new();
+    message_json.insert("role".to_string(), Value::String(role.to_string()));
+    message_json.insert("content".to_string(), Value::Null);
+    message_json.insert("tool_calls".to_string(), Value::Array(tool_calls.to_vec()));
     Value::Object(message_json)
 }
 

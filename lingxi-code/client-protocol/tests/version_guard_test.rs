@@ -104,7 +104,7 @@ fn index_path() -> PathBuf {
 }
 
 fn bless() -> bool {
-    matches!(std::env::var("BLESS").as_deref(), Ok("1") | Ok("true"))
+    matches!(std::env::var("BLESS").as_deref(), Ok("1" | "true"))
 }
 
 /// Serialize a [`ContractIndex`] to the canonical golden string (pretty + a
@@ -141,9 +141,10 @@ fn write_index(index: &ContractIndex) {
 /// here forces the guard to confirm a major bump.
 ///
 /// Enum variants are recorded with a `<EnumName>::<Variant>` tag line (value
-/// `"<variant>"`, the snake_case wire tag) so a renamed/removed variant is a
+/// `"<variant>"`, the `snake_case` wire tag) so a renamed/removed variant is a
 /// removed key; each variant field is `<EnumName>::<Variant>.<field>`. Structs
 /// record `<StructName>.<field>`.
+#[allow(clippy::too_many_lines)] // a flat data table: one row per contract leaf
 fn current_contract_index() -> ContractIndex {
     let mut ix = ContractIndex::new();
 
@@ -677,13 +678,12 @@ fn current_contract_matches_index_or_version_bumped() {
         return;
     }
 
-    let checked_in = match read_checked_in_index() {
-        Some(ix) => ix,
-        None => panic!(
+    let Some(checked_in) = read_checked_in_index() else {
+        panic!(
             "missing contract index `{}`; regenerate with \
              `BLESS=1 cargo test -p client-protocol --test version_guard_test`",
             index_path().display()
-        ),
+        );
     };
 
     // Byte-identical contract → nothing to check.
@@ -734,6 +734,11 @@ fn current_contract_matches_index_or_version_bumped() {
 /// (This is a belt-and-braces exhaustiveness check; the real guarantee is the
 /// guard test above.)
 #[test]
+// Coverage anchors: each `let _foo = Dto::Variant{..}` instantiates a DTO so a
+// removed/renamed type breaks THIS compile. They are intentionally inert (no
+// effect, never read) — that is the whole point — so both pedantic lints are
+// allowed here rather than worked around.
+#[allow(clippy::too_many_lines, clippy::no_effect_underscore_binding)]
 fn contract_index_covers_every_dto() {
     use client_protocol::commands::{
         ClientCommand, CommandResultDto, ImageRefDto, ListingKindDto, PromptModeDto,
@@ -885,6 +890,4 @@ fn contract_index_covers_every_dto() {
         ix.contains_key("ClientEvent::TextDelta.text"),
         "the contract index must enumerate the contract leaves"
     );
-    // Silence unused-binding lints for the coverage anchors.
-    let _ = (&_ev, _outcome, &_cost, &_cmd, _mode, &_img, &_cmd_result, _lk, &_err, &_msg, &_req, &_resolved, &_rows);
 }

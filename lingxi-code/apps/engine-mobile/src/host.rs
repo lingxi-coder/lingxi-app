@@ -264,6 +264,9 @@ pub async fn build_mobile(
 /// which builds the orchestrator with the same mock. Engine behavior is unchanged
 /// either way: only the *source* of the stream's bytes differs.
 #[doc(hidden)]
+// A cohesive composition root: the 8 numbered build steps below read as one
+// linear sequence; splitting it only to satisfy the line cap would scatter them.
+#[allow(clippy::too_many_lines)]
 pub async fn build_mobile_inner(
     cfg: MobileConfig,
     platform: Arc<dyn Platform>,
@@ -460,7 +463,7 @@ pub enum MobileEngineError {
 ///
 /// - the **handle-owned tokio runtime** (`rt-multi-thread`) every turn / FFI
 ///   `submit` (F3-05) is driven on — so the engine never blocks the foreign UI
-///   thread, and F3-07 registers this same runtime as UniFFI's foreign async
+///   thread, and F3-07 registers this same runtime as `UniFFI`'s foreign async
 ///   executor;
 /// - the fully-wired [`MobileRuntime`] from [`build_mobile`] (F3-03): the
 ///   orchestrator bound to the [`AdapterOutputStream`] + the id-keyed
@@ -531,7 +534,7 @@ impl MobileEngineHandle {
     /// `#[uniffi::export]`.)
     #[must_use]
     pub fn skill_count(&self) -> u32 {
-        self.skill_count as u32
+        u32::try_from(self.skill_count).unwrap_or(u32::MAX)
     }
 
     /// Create a conversation session for `model`.
@@ -548,6 +551,10 @@ impl MobileEngineHandle {
     /// Returns [`MobileEngineError::InvalidState`] only if the handle were ever
     /// torn down mid-call (cannot happen with `&self`); kept typed so the FFI
     /// signature is stable for the F3-05 command path.
+    // `_model` is a deliberately-unused, by-value FFI-shape placeholder (see the
+    // doc above): the F3-05 command path keeps the owned `String` signature, so
+    // it is not narrowed to `&str` just to satisfy the lint.
+    #[allow(clippy::needless_pass_by_value)]
     pub fn create_session(&self, _model: String) -> Result<u64, MobileEngineError> {
         // One connection ⇒ one engine host ⇒ a single session ref (1). The
         // orchestrator is already constructed and bound; New/Resume swap it in
@@ -1529,7 +1536,7 @@ mod tests {
 
     /// F3-07: the async FFI exports resolve on the HANDLE-OWNED tokio runtime.
     ///
-    /// UniFFI's `#[uniffi::export(async_runtime = "tokio")]` (plus the workspace
+    /// `UniFFI`'s `#[uniffi::export(async_runtime = "tokio")]` (plus the workspace
     /// `uniffi` dep's `tokio` feature, pinned in F3-00) registers a tokio runtime
     /// as the foreign async executor; the mobile host registers the
     /// handle-owned `rt-multi-thread` runtime (§0.5 — one connection ⇒ one engine

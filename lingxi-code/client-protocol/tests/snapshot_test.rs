@@ -4,7 +4,7 @@
 //! instance of EVERY `ClientEvent` / `ClientCommand` variant + the `MessageDto`
 //! block set + each permission / error DTO into checked-in
 //! `client-protocol/snapshots/*.json` goldens, plus a `feed_status.json` golden
-//! enumerating the RenderedMessage feed-status table (LIVE-FED vs.
+//! enumerating the `RenderedMessage` feed-status table (LIVE-FED vs.
 //! RESERVED/feed-deferred). The snapshot IS the frozen wire format and the
 //! auditable feed-status record (plan F1-08, governing decisions §0.7 / §0.9).
 //!
@@ -59,7 +59,7 @@ fn snapshots_dir() -> PathBuf {
 
 /// `true` when the test is invoked in regeneration mode (`BLESS=1`).
 fn bless() -> bool {
-    matches!(std::env::var("BLESS").as_deref(), Ok("1") | Ok("true"))
+    matches!(std::env::var("BLESS").as_deref(), Ok("1" | "true"))
 }
 
 /// Pretty-print a DTO to the canonical golden string (trailing newline so the
@@ -125,6 +125,7 @@ where
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Every `ClientEvent` variant, paired with its golden filename.
+#[allow(clippy::too_many_lines)] // a flat data table: one row per ClientEvent variant
 fn event_goldens() -> Vec<(&'static str, ClientEvent)> {
     vec![
         (
@@ -773,8 +774,8 @@ fn message_dto_block_set_matches_golden() {
     );
 }
 
-/// The RenderedMessage feed-status table golden (plan F1-08): an auditable record
-/// of which RenderedMessage kinds are LIVE-FED vs. RESERVED / feed-deferred in
+/// The `RenderedMessage` feed-status table golden (plan F1-08): an auditable record
+/// of which `RenderedMessage` kinds are LIVE-FED vs. RESERVED / feed-deferred in
 /// the foundation (governing decisions §0.7 / §0.9). This makes the §5.3 "~22
 /// renderers parity" claim honest — feed-deferred entries are explicitly NOT
 /// claimed as live.
@@ -853,10 +854,10 @@ enum FeedStatus {
     Reserved,
 }
 
-/// One row of the RenderedMessage feed-status table.
+/// One row of the `RenderedMessage` feed-status table.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
 struct FeedStatusEntry {
-    /// The RenderedMessage / DTO kind being classified.
+    /// The `RenderedMessage` / DTO kind being classified.
     rendered_message: String,
     /// LIVE-FED or RESERVED in the foundation.
     status: FeedStatus,

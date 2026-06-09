@@ -161,7 +161,7 @@ fn mcp_servers_round_trips() {
 }
 
 /// `McpStatus::Error(String)` (a tuple variant in the engine) is lowered to a
-/// STRUCT variant `McpStatusDto::Error { reason }` for UniFFI flatness (plan
+/// STRUCT variant `McpStatusDto::Error { reason }` for `UniFFI` flatness (plan
 /// line 154 + the named test `mcp_status_error_is_struct_variant`).
 #[test]
 fn mcp_status_error_is_struct_variant() {
@@ -275,7 +275,7 @@ fn slash_command_catalog_round_trips() {
 // ── Memory ───────────────────────────────────────────────────────────────────
 
 /// `MemoryEntries { entries }` — mirrors `protocol::MemoryEntry`
-/// (`protocol/src/messages.rs:201`), tier lowered to a snake_case enum.
+/// (`protocol/src/messages.rs:201`), tier lowered to a `snake_case` enum.
 #[test]
 fn memory_entries_round_trips() {
     let ev = ClientEvent::MemoryEntries {
@@ -304,7 +304,7 @@ fn memory_entries_round_trips() {
     assert_eq!(back, ev);
 }
 
-/// All four memory tiers round-trip with snake_case tags (mirrors
+/// All four memory tiers round-trip with `snake_case` tags (mirrors
 /// `protocol::MemoryEntryTier`).
 #[test]
 fn memory_tier_variants_round_trip() {
@@ -529,7 +529,7 @@ fn doctor_report_round_trips() {
     assert_eq!(back, ev);
 }
 
-/// All three doctor check-status outcomes round-trip with snake_case tags.
+/// All three doctor check-status outcomes round-trip with `snake_case` tags.
 #[test]
 fn check_status_variants_round_trip() {
     for (status, tag) in [
@@ -602,7 +602,7 @@ fn task_status_changed_round_trips() {
     assert_eq!(back, ev);
 }
 
-/// All five task-status wire strings round-trip with snake_case tags (mirrors
+/// All five task-status wire strings round-trip with `snake_case` tags (mirrors
 /// `tasks::TaskStatus`, the 5 byte-locked statuses).
 #[test]
 fn task_status_variants_round_trip() {

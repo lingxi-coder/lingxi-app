@@ -6,14 +6,14 @@
 //!   - internally tagged: `#[serde(tag = "type", rename_all = "snake_case")]`
 //!     (matches `protocol::ContentBlock` / api-client `StreamEvent`),
 //!   - `#[non_exhaustive]` (mirrors `traits::OutputEvent`),
-//!   - snake_case field names.
+//!   - `snake_case` field names.
 //!
 //! `serde_json` is a DEV-ONLY dep — the contract crate itself never depends on
 //! `serde_json::Value` (§0.4).
 
 use client_protocol::events::{ClientEvent, ErrorKindDto};
 
-/// `ClientEvent::Error` serializes with the `"type": "error"` tag and snake_case
+/// `ClientEvent::Error` serializes with the `"type": "error"` tag and `snake_case`
 /// fields, and round-trips byte-stable.
 #[test]
 fn error_event_round_trips() {
@@ -35,7 +35,7 @@ fn error_event_round_trips() {
     assert_eq!(back, ev);
 }
 
-/// Every `ErrorKindDto` variant round-trips and serializes snake_case.
+/// Every `ErrorKindDto` variant round-trips and serializes `snake_case`.
 #[test]
 fn error_kind_variants_round_trip() {
     let cases = [

@@ -186,9 +186,11 @@ fn push_user_block(
                 file_path,
             });
         }
-        // A user message may also carry an Image block (paste path); the
-        // persisted block has no scrollback id/metadata, so it is not replayed.
+        // A user message may also carry an Image or Document block (paste/PDF
+        // path); the persisted block has no scrollback id/metadata, so it is not
+        // replayed.
         ContentBlock::Image { .. }
+        | ContentBlock::Document { .. }
         | ContentBlock::ToolUse { .. }
         | ContentBlock::Thinking { .. } => {}
     }
@@ -227,8 +229,10 @@ fn push_assistant_block(
             });
         }
         // A tool result block should never appear on an assistant message;
-        // images aren't replayed (see module docs).
-        ContentBlock::ToolResult { .. } | ContentBlock::Image { .. } => {}
+        // images and documents aren't replayed (see module docs).
+        ContentBlock::ToolResult { .. }
+        | ContentBlock::Image { .. }
+        | ContentBlock::Document { .. } => {}
     }
 }
 

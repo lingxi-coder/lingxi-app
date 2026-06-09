@@ -1,20 +1,23 @@
 //! Pre-summarization media stripping — port of `stripImagesFromMessages`
 //! (`compact.ts:145-200`).
 //!
-//! Before the auto-compact summary request, image content blocks in USER
-//! messages are replaced with a `[image]` text placeholder so the text
-//! summarizer never receives raw image data. claude-code also strips
-//! `document` blocks and media nested inside `tool_result` content arrays, but
-//! the Rust `protocol` has no `Document` variant and `ToolResult.content` is a
-//! flat `String` — so those two cases have no representation here (a documented
-//! divergence: nothing to strip). Only `user` messages are touched, matching
-//! `compact.ts:147`.
+//! Before the auto-compact summary request, image and document content blocks
+//! in USER messages are replaced with a text placeholder (`[image]` /
+//! `[document]`) so the text summarizer never receives raw media data.
+//! claude-code also strips media nested inside `tool_result` content arrays, but
+//! the Rust `protocol`'s `ToolResult.content` is a flat `String` — so that case
+//! has no representation here (a documented divergence: nothing to strip). Only
+//! `user` messages are touched, matching `compact.ts:147`.
 
 use protocol::{ContentBlock, ConversationMessage};
 
 /// Text placeholder substituted for a stripped image block — byte-locked to
 /// claude-code (`compact.ts:160`).
 pub const STRIPPED_IMAGE_PLACEHOLDER: &str = "[image]";
+
+/// Text placeholder substituted for a stripped document block — byte-locked to
+/// claude-code's `document` strip placeholder.
+pub const STRIPPED_DOCUMENT_PLACEHOLDER: &str = "[document]";
 
 /// Replace image blocks in user messages with a `[image]` text placeholder.
 /// Non-user messages and non-image blocks pass through unchanged. 1:1 with
@@ -34,6 +37,9 @@ fn strip_one(message: ConversationMessage) -> ConversationMessage {
         .map(|block| match block {
             ContentBlock::Image { .. } => ContentBlock::Text {
                 text: STRIPPED_IMAGE_PLACEHOLDER.to_string(),
+            },
+            ContentBlock::Document { .. } => ContentBlock::Text {
+                text: STRIPPED_DOCUMENT_PLACEHOLDER.to_string(),
             },
             other => other,
         })

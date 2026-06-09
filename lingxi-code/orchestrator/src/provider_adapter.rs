@@ -25,11 +25,14 @@ impl ProviderApiAdapter {
     }
 }
 
-/// Whether any message carries an image content block.
+/// Whether any message carries a media (image or document) content block —
+/// such a message routes to a vision/media-capable model.
 fn messages_contain_image(msgs: &[ConversationMessage]) -> bool {
     msgs.iter().any(|m| match m {
         ConversationMessage::User { content, .. } | ConversationMessage::Assistant { content, .. } => {
-            content.iter().any(|b| matches!(b, ContentBlock::Image { .. }))
+            content.iter().any(|b| {
+                matches!(b, ContentBlock::Image { .. }) || matches!(b, ContentBlock::Document { .. })
+            })
         }
         ConversationMessage::System { .. } => false,
     })
@@ -46,8 +49,8 @@ const MAX_MEDIA_PER_REQUEST: usize = 100;
 /// *including any nested inside `tool_result` content*.
 ///
 /// NOTE on the frozen wire types: in this port `ContentBlock::ToolResult.content`
-/// is a `String` and there is no `Document` variant, so the only media a message
-/// can structurally hold is a top-level `ContentBlock::Image`. There is no place
+/// is a `String`, so the only media a message can structurally hold is a
+/// top-level `ContentBlock::Image` or `ContentBlock::Document`. There is no place
 /// to nest media inside a `tool_result` here, so the "nested in `tool_result`" arm of
 /// the TS counter has nothing to count — this function already covers every media
 /// shape the frozen types permit.
@@ -57,7 +60,10 @@ fn count_media(msgs: &[ConversationMessage]) -> usize {
             ConversationMessage::User { content, .. }
             | ConversationMessage::Assistant { content, .. } => content
                 .iter()
-                .filter(|b| matches!(b, ContentBlock::Image { .. }))
+                .filter(|b| {
+                    matches!(b, ContentBlock::Image { .. })
+                        || matches!(b, ContentBlock::Document { .. })
+                })
                 .count(),
             ConversationMessage::System { .. } => 0,
         })
@@ -92,7 +98,10 @@ fn strip_excess_media(
             ConversationMessage::System { .. } => continue,
         };
         content.retain(|b| {
-            if to_remove > 0 && matches!(b, ContentBlock::Image { .. }) {
+            if to_remove > 0
+                && (matches!(b, ContentBlock::Image { .. })
+                    || matches!(b, ContentBlock::Document { .. }))
+            {
                 to_remove -= 1;
                 false
             } else {

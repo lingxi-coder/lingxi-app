@@ -112,6 +112,7 @@ fn render_blocks(content: &[ContentBlock]) -> String {
                 lines.push(format!("[thinking] {thinking}"));
             }
             ContentBlock::Image { .. } => lines.push("[image]".to_string()),
+            ContentBlock::Document { .. } => lines.push("[document]".to_string()),
         }
     }
     lines.join("\n")

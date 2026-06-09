@@ -64,11 +64,11 @@ const ASSISTANT_ROLE: &str = "assistant";
 /// Lower one engine [`ContentBlock`] to a [`MessageBlockDto`].
 ///
 /// Returns `None` for blocks that have no `MessageBlockDto` analog
-/// ([`ContentBlock::Image`]): the `MessageBlockDto` set equals the TUI
-/// scrollback block set (`Text | Thinking | RedactedThinking | ToolUse |
-/// ToolResult`, plan F1-02), which omits image input — so an image block in an
-/// assistant message is dropped from the reproduced scrollback rather than
-/// mismodeled. A pumped `assistant_blocks` carries only text + thinking in
+/// ([`ContentBlock::Image`], [`ContentBlock::Document`]): the `MessageBlockDto`
+/// set equals the TUI scrollback block set (`Text | Thinking |
+/// RedactedThinking | ToolUse | ToolResult`, plan F1-02), which omits image and
+/// document input — so such a block in an assistant message is dropped from the
+/// reproduced scrollback rather than mismodeled. A pumped `assistant_blocks` carries only text + thinking in
 /// practice (`streaming_loop.rs:42-44`); the `ToolUse` / `ToolResult` arms keep
 /// the lowering total for robustness. `ContentBlock` is exhaustively matched (it
 /// is NOT `#[non_exhaustive]`), so adding an engine block kind surfaces here as a
@@ -107,9 +107,10 @@ pub fn lower_content_block(block: &ContentBlock) -> Option<MessageBlockDto> {
             new_string: None,
             file_path: None,
         }),
-        // No `MessageBlockDto::Image` — image input is a uniform inline wire DTO
-        // elsewhere (decision §0.8), not a scrollback block. Drop it.
-        ContentBlock::Image { .. } => None,
+        // No `MessageBlockDto::Image`/`Document` — image and document input are
+        // uniform inline wire DTOs elsewhere (decision §0.8), not scrollback
+        // blocks. Drop them.
+        ContentBlock::Image { .. } | ContentBlock::Document { .. } => None,
     }
 }
 

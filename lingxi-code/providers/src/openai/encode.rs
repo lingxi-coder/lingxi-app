@@ -119,6 +119,14 @@ fn encode_user(content: &[ContentBlock], out: &mut Vec<Value>) {
                     "content": body,
                 }));
             }
+            // OpenAI has no native PDF input — emit a text placeholder so the
+            // model is at least told a document was present.
+            ContentBlock::Document { .. } => {
+                if !text.is_empty() {
+                    text.push('\n');
+                }
+                text.push_str("[PDF document — not supported on this provider]");
+            }
             // Thinking has no OpenAI equivalent; ToolUse in a user message is malformed — drop both.
             ContentBlock::Thinking { .. } | ContentBlock::ToolUse { .. } => {}
         }
@@ -161,7 +169,10 @@ fn encode_assistant(content: &[ContentBlock], out: &mut Vec<Value>) {
                     "function": {"name": name, "arguments": input.to_string()},
                 }));
             }
-            ContentBlock::ToolResult { .. } | ContentBlock::Thinking { .. } | ContentBlock::Image { .. } => {}
+            ContentBlock::ToolResult { .. }
+            | ContentBlock::Thinking { .. }
+            | ContentBlock::Image { .. }
+            | ContentBlock::Document { .. } => {}
         }
     }
     let mut m = Map::new();

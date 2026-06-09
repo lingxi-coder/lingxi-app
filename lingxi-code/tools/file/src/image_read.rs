@@ -95,7 +95,11 @@ pub fn process_image(bytes: Vec<u8>) -> Result<ProcessedImage, String> {
                 return Ok(ProcessedImage {
                     base64: b64(&enc),
                     media_type: "image/jpeg".to_string(),
-                    resized: Some((w, h, dw, dh)),
+                    // `resized` (and thus the coordinate-mapping metadata message)
+                    // only when dimensions actually changed — claude-code's
+                    // `wasResized` (a >budget re-encode at full resolution is NOT
+                    // a resize). A pure format change emits no metadata.
+                    resized: (dw != w || dh != h).then_some((w, h, dw, dh)),
                 });
             }
         }
@@ -108,7 +112,7 @@ pub fn process_image(bytes: Vec<u8>) -> Result<ProcessedImage, String> {
     Ok(ProcessedImage {
         base64: b64(&enc),
         media_type: "image/jpeg".to_string(),
-        resized: Some((w, h, sdw, sdh)),
+        resized: (sdw != w || sdh != h).then_some((w, h, sdw, sdh)),
     })
 }
 

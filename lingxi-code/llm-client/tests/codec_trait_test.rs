@@ -32,6 +32,10 @@ impl WireCodec for DummyCodec {
     fn stream_decoder(&self) -> Box<dyn llm_client::StreamDecoder> {
         Box::new(llm_client::NoopStreamDecoder)
     }
+
+    fn clone_box(&self) -> Box<dyn WireCodec> {
+        Box::new(DummyCodec)
+    }
 }
 
 fn wire_codec_round_trip(codec: &dyn WireCodec) -> (ProviderRequest, llm_client::LlmResponse) {

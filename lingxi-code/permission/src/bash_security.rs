@@ -98,6 +98,10 @@ struct Ctx {
     /// (claude-code `bashSecurity.ts:1702`). `None` => no AST (legacy behavior:
     /// the `bash-ast` feature is off, or the parser had no tree).
     has_actual_operator_nodes: Option<bool>,
+    /// Whether an AST quoteContext was obtained (claude-code `treeSitter != null`,
+    /// bashSecurity.ts:1998). `true` => the quote views are AST-derived and
+    /// validate_comment_quote_desync is a passthrough. `false` on the legacy path.
+    tree_sitter_present: bool,
 }
 
 // NOTE: TS `validateSafeCommandSubstitution` / `isSafeHeredoc` (the
@@ -1200,9 +1204,14 @@ fn collapse_continuations(s: &str) -> String {
     out
 }
 
-/// TS `validateCommentQuoteDesync` (`bashSecurity.ts:1990-2074`). The
-/// tree-sitter short-circuit (`:1998-2003`) is N/A here.
+/// TS `validateCommentQuoteDesync` (`bashSecurity.ts:1990-2089`), including the
+/// tree-sitter passthrough (`:1998-2003`): when an AST quoteContext is present,
+/// the other validators already read AST-accurate quote stripping, so a quote
+/// inside a `#` comment cannot desync them — passthrough.
 fn validate_comment_quote_desync(ctx: &Ctx) -> Option<String> {
+    if ctx.tree_sitter_present {
+        return None;
+    }
     let chars: Vec<char> = ctx.original.chars().collect();
     let n = chars.len();
     let mut in_single = false;
@@ -1629,8 +1638,28 @@ pub fn bash_command_is_safe(command: &str) -> BashSafetyVerdict {
     // Build the validation context (`:2295-2306`).
     let base_command = command.split(' ').next().unwrap_or("").to_string();
     let is_jq = base_command == "jq";
-    let (with_double_quotes, fully_unquoted, unquoted_keep_quote_chars) =
-        extract_quoted_content(command, is_jq);
+    // claude-code's tree-sitter path sources the quote views from the AST
+    // quoteContext (bashSecurity.ts:2468-2488), which is structural — NO is_jq
+    // special-case (that quirk is legacy-regex-only). None (empty/over-cap/
+    // unparseable) falls back to the legacy regex stripper.
+    #[cfg(feature = "bash-ast")]
+    let (with_double_quotes, fully_unquoted, unquoted_keep_quote_chars, tree_sitter_present) =
+        if let Some(qc) = crate::bash_tree_sitter::extract_quote_context(command) {
+            (
+                qc.with_double_quotes,
+                qc.fully_unquoted,
+                qc.unquoted_keep_quote_chars,
+                true,
+            )
+        } else {
+            let (a, b, c) = extract_quoted_content(command, is_jq);
+            (a, b, c, false)
+        };
+    #[cfg(not(feature = "bash-ast"))]
+    let (with_double_quotes, fully_unquoted, unquoted_keep_quote_chars, tree_sitter_present) = {
+        let (a, b, c) = extract_quoted_content(command, is_jq);
+        (a, b, c, false)
+    };
     // AST operator-node detection (claude-code's tree-sitter precision layer).
     // Feature off => None => every validator keeps the legacy regex path.
     #[cfg(feature = "bash-ast")]
@@ -1645,6 +1674,7 @@ pub fn bash_command_is_safe(command: &str) -> BashSafetyVerdict {
         fully_unquoted_pre_strip: fully_unquoted,
         unquoted_keep_quote_chars,
         has_actual_operator_nodes,
+        tree_sitter_present,
     };
 
     // Empty command (`validateEmpty`, `:233-242`): an early-allow → passthrough
@@ -1815,12 +1845,22 @@ mod tests {
     // NOTE: in the non-jq path `withDoubleQuotes` strips the quote DELIMITERS
     // (TS `extractQuotedContent`'s `if (!isJq) continue`), so the validator's
     // `["']...["']` regexes can only fire on the jq path, where quotes survive.
+    #[cfg(not(feature = "bash-ast"))]
     #[test]
     fn metachar_in_quoted_arg_asks() {
         // jq keeps quotes in `withDoubleQuotes`, so `"a;b"` reaches the regex.
         assert!(message(r#"jq "a;b" data.json"#)
             .unwrap()
             .contains("shell metacharacters"));
+    }
+    // Feature ON (AST): the structural AST strips the `"` delimiters uniformly
+    // (no legacy jq special-case), so the metachar regex can't match the quoted
+    // `;` (jq syntax, not shell separation). Safe — matches claude-code's
+    // tree-sitter path.
+    #[cfg(feature = "bash-ast")]
+    #[test]
+    fn metachar_in_quoted_jq_arg_safe_under_ast() {
+        assert!(!asks(r#"jq "a;b" data.json"#));
     }
     #[test]
     fn metachar_non_jq_quotes_stripped_is_safe() {
@@ -2002,11 +2042,22 @@ mod tests {
     }
 
     // ── validateCommentQuoteDesync ──────────────────────────────────────
+    #[cfg(not(feature = "bash-ast"))]
     #[test]
     fn comment_quote_desync_asks() {
         assert!(message("echo hi # ' \" rest")
             .unwrap()
             .contains("# comment"));
+    }
+
+    // Feature ON (AST): an AST quoteContext is present, so the other validators
+    // already read AST-accurate quote stripping and a quote inside a `#` comment
+    // cannot desync them — validateCommentQuoteDesync is a passthrough
+    // (bashSecurity.ts:1998-2003). The "# comment" desync message must be ABSENT.
+    #[cfg(feature = "bash-ast")]
+    #[test]
+    fn comment_quote_desync_passthrough_when_tree_present() {
+        assert!(message("echo hi # ' \" rest").map_or(true, |m| !m.contains("# comment")));
     }
 
     // ── validateQuotedNewline ───────────────────────────────────────────

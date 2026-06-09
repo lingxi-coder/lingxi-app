@@ -1,5 +1,8 @@
 //! HTML→markdown conversion + the secondary-model prompt for the WebFetch apply
 //! step. Ports `claude-code/src/tools/WebFetchTool/{utils.ts,prompt.ts}`.
+// Items in this private module will be used by sibling modules (web_fetch) in a
+// subsequent unit. Suppress until then.
+#![allow(dead_code)]
 
 use crate::web_fetch::WEBFETCH_TRUNCATION_SUFFIX;
 

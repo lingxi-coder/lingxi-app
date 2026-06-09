@@ -7,6 +7,8 @@
 
 pub mod auto_edit_safety;
 pub mod bash_security;
+#[cfg(feature = "bash-ast")]
+pub mod bash_tree_sitter;
 pub mod classifier;
 pub mod dangerous_patterns;
 pub mod dangerous_perms;

@@ -1,4 +1,5 @@
-use llm_client::{LlmRequest, ProviderRequest, ProviderResponse, WireCodec};
+use llm_client::{LlmRequest, ProviderRequest, ProviderResponse, Usage, WireCodec};
+use serde_json::Value;
 
 #[derive(Debug)]
 struct DummyCodec;
@@ -23,9 +24,9 @@ impl WireCodec for DummyCodec {
             id: "id".to_string(),
             model: "model".to_string(),
             content: vec![],
-            usage: Default::default(),
+            usage: Usage::default(),
             cost: None,
-            provider_metadata: Default::default(),
+            provider_metadata: Value::default(),
         })
     }
 

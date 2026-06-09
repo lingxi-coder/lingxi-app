@@ -1,7 +1,8 @@
 use llm_client::{
     validate_capabilities, Capabilities, ContentBlock, LlmEvent, LlmRequest, LlmResponse,
-    PreparedBody, Protocol, RawResponse, RawStreamFrame, StreamDecoder,
+    PreparedBody, Protocol, RawResponse, RawStreamFrame, StreamDecoder, Usage,
 };
+use serde_json::Value;
 
 #[derive(Debug)]
 struct DummyProtocol;
@@ -21,9 +22,9 @@ impl Protocol for DummyProtocol {
             content: vec![ContentBlock::Text {
                 text: String::from_utf8(response.body).expect("utf8"),
             }],
-            usage: Default::default(),
+            usage: Usage::default(),
             cost: None,
-            provider_metadata: Default::default(),
+            provider_metadata: Value::default(),
         })
     }
 

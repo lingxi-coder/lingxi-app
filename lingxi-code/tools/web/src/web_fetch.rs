@@ -295,7 +295,9 @@ impl WebFetchTool {
             tools: vec![],
             tool_choice: None,
             output_format: None,
-            max_tokens: 1024,
+            // claude-code's queryHaiku uses getMaxOutputTokensForModel = min(native,
+            // CAPPED_DEFAULT_MAX_TOKENS) = 8000 for the apply call.
+            max_tokens: 8000,
             max_retries: 1,
             temperature: None,
             thinking_budget: None,
@@ -517,11 +519,21 @@ impl Tool for WebFetchTool {
             // Cache hits do no network work, so the reported duration is 0 ms.
             self.emit_completed(&invocation_id, hit.status, hit.bytes as u64, truncated, 0)
                 .await;
+            // claude-code caches only the markdown; the prompt is applied on EVERY
+            // call (cache hit or miss). Run the apply step on the cached content.
+            let host = parsed_url.host_str().unwrap_or("<unknown>").to_string();
+            let out_content = match self
+                .maybe_apply(&host, &hit.content, parsed_input.prompt.as_deref())
+                .await
+            {
+                Some(applied) => applied,
+                None => hit.content,
+            };
             return Ok(ToolCallResult {
                 data: json!({
                     "url": parsed_input.url,
                     "status": hit.status,
-                    "content": hit.content,
+                    "content": out_content,
                     "truncated": truncated,
                     "bytes": hit.bytes,
                 }),
@@ -1490,10 +1502,42 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
                     text: Some(self.reply.clone()),
                     structured: None,
                     tool_calls: vec![],
-                    usage: cost::Usage::default(),
+                    // Inferred as `cost::Usage::default()`. Spelled `Default::default()`
+                    // so the mock needn't name `cost` (the dev-dep was dropped); the
+                    // clippy::default_trait_access lint that prefers the explicit type
+                    // is intentionally allowed here for that reason.
+                    #[allow(clippy::default_trait_access)]
+                    usage: Default::default(),
                     stop_reason: Some("end_turn".into()),
                 })
             }
+        }
+
+        #[tokio::test]
+        async fn cache_hit_still_runs_apply_step() {
+            let _env = SKIP_ENV_LOCK.lock().await;
+            crate::cache::clear_web_fetch_cache();
+            crate::blocklist::clear_domain_check_cache();
+            let (ctx, http, _sink) = make_web_ctx();
+            http.enqueue(preflight_allow());
+            http.enqueue(ScriptedResponse::Sync(protocol::HttpResponse {
+                status: 200,
+                headers: vec![("content-type".into(), "text/html".into())],
+                body: "<h1>Doc</h1>".into(),
+            }));
+            let capture = std::sync::Arc::new(CapturingSideQuery {
+                captured: std::sync::Mutex::new(None),
+                reply: "APPLIED".into(),
+            });
+            let tool = WebFetchTool::new(ctx).with_side_query(capture.clone());
+            let url = json!({ "url": "https://cachehit-apply.example/x", "prompt": "summarize" });
+            let first = tool.call(url.clone(), fresh_ctx(), fresh_tx()).await.expect("first ok");
+            assert_eq!(first.data["content"], "APPLIED");
+            let second = tool.call(url, fresh_ctx(), fresh_tx()).await.expect("second ok");
+            assert_eq!(second.data["content"], "APPLIED", "cache hit must still run the apply step");
+            let seen = capture.captured.lock().unwrap().clone().unwrap();
+            assert!(seen.contains("# Doc"));
+            assert_eq!(http.received_requests().len(), 2, "second call must be a cache hit (no new fetch)");
         }
     }
 

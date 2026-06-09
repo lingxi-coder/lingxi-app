@@ -4940,7 +4940,6 @@ version = "0.12.0"
 dependencies = [
  "api-client",
  "async-trait",
- "cost",
  "htmd",
  "once_cell",
  "permission",

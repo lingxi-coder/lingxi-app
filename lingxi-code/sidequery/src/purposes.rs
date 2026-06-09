@@ -29,7 +29,7 @@ pub enum QuerySource {
     PostTurnSummary,
     /// §9 skill execution helper (forked).
     SkillExecution,
-    /// WebFetch's secondary "apply" call: process fetched markdown with the
+    /// `WebFetch`'s secondary "apply" call: process fetched markdown with the
     /// caller's prompt via a small-fast model (claude-code `web_fetch_apply`).
     WebFetchApply,
     /// Caller-supplied label for purposes not enumerated above.

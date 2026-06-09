@@ -1,4 +1,4 @@
-use llm_client::{ContentBlock, LlmRequest, ProviderResponse, ToolDeclaration, WireCodec};
+use llm_client::{ContentBlock, LlmEvent, LlmRequest, ProviderResponse, RawStreamFrame, ToolDeclaration, WireCodec};
 use llm_client::providers::GeminiCodec;
 
 #[test]
@@ -77,4 +77,22 @@ fn decode_cached_content_token_count_maps_to_cache_read_usage() {
     let decoded = codec.decode_response(response).unwrap();
 
     assert_eq!(decoded.usage.billable_tokens.cache_read, 7);
+}
+
+#[test]
+fn sse_stream_reassembles_text_then_function_call() {
+    let frames = [
+        r#"{"candidates":[{"content":{"role":"model","parts":[{"text":"On it."}]}}]}"#,
+        r#"{"candidates":[{"content":{"role":"model","parts":[{"functionCall":{"name":"Bash","args":{"command":"ls"}}}]} ,"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":5,"candidatesTokenCount":2}}"#,
+    ];
+    let mut decoder = GeminiCodec::new("https://generativelanguage.googleapis.com/v1beta").stream_decoder();
+    let mut events = Vec::new();
+    for frame in frames {
+        events.extend(decoder.decode_frame(RawStreamFrame::new(frame.as_bytes().to_vec())).unwrap());
+    }
+    events.extend(decoder.finish().unwrap());
+
+    assert!(matches!(events.first(), Some(LlmEvent::MessageStart { .. })));
+    assert!(events.iter().any(|event| matches!(event, LlmEvent::ContentBlockStart { content_block: ContentBlock::ToolCall { name, .. }, .. } if name == "Bash")));
+    assert!(matches!(events.last(), Some(LlmEvent::MessageStop)));
 }

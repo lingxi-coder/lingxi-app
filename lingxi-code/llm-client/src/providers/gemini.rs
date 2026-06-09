@@ -1,4 +1,8 @@
-use crate::{ContentBlock, LlmError, LlmRequest, LlmResponse, NoopStreamDecoder, ProviderRequest, ProviderResponse, StreamDecoder, ToolDeclaration, Usage, WireCodec};
+use crate::{
+    ContentBlock, ContentDelta, LlmError, LlmEvent, LlmRequest, LlmResponse,
+    MessageDeltaPayload, ProviderRequest, ProviderResponse, RawStreamFrame,
+    StreamDecoder, ToolDeclaration, Usage, WireCodec,
+};
 
 use serde_json::Value;
 
@@ -62,7 +66,228 @@ impl WireCodec for GeminiCodec {
     }
 
     fn stream_decoder(&self) -> Box<dyn StreamDecoder> {
-        Box::new(NoopStreamDecoder)
+        Box::new(GeminiStreamDecoder::default())
+    }
+}
+
+#[derive(Debug, Default)]
+struct GeminiStreamDecoder {
+    started: bool,
+    done: bool,
+    next_index: u32,
+    text_index: Option<u32>,
+    thinking_index: Option<u32>,
+    usage: Option<Usage>,
+    stop_reason: Option<String>,
+    saw_function_call: bool,
+}
+
+impl StreamDecoder for GeminiStreamDecoder {
+    fn decode_frame(&mut self, frame: RawStreamFrame) -> Result<Vec<LlmEvent>, LlmError> {
+        let text = std::str::from_utf8(&frame.bytes).map_err(|_| LlmError::InvalidRequest {
+            message: "Gemini stream frame is not valid UTF-8".to_string(),
+        })?;
+
+        let root: Value = serde_json::from_str(text.trim()).map_err(|_| LlmError::InvalidRequest {
+            message: "Gemini stream frame is not valid JSON".to_string(),
+        })?;
+
+        let mut out = Vec::new();
+        let Some(candidate) = root
+            .get("candidates")
+            .and_then(Value::as_array)
+            .and_then(|candidates| candidates.first())
+        else {
+            return Ok(out);
+        };
+
+        if !self.started {
+            self.started = true;
+            out.push(LlmEvent::MessageStart {
+                response: Box::new(decode_stream_start(&root)),
+            });
+        }
+
+        if let Some(usage) = root.get("usageMetadata") {
+            self.usage = Some(decode_usage(usage));
+        }
+
+        if let Some(finish_reason) = candidate.get("finishReason").and_then(Value::as_str) {
+            self.stop_reason = Some(map_finish_reason(finish_reason));
+        }
+
+        if let Some(parts) = candidate
+            .get("content")
+            .and_then(|content| content.get("parts"))
+            .and_then(Value::as_array)
+        {
+            for part in parts {
+                if let Some(text) = part.get("text").and_then(Value::as_str) {
+                    self.handle_text(text, part.get("thought").and_then(Value::as_bool).unwrap_or(false), &mut out);
+                    continue;
+                }
+
+                if let Some(function_call) = part.get("functionCall") {
+                    self.handle_function_call(function_call, &mut out)?;
+                }
+            }
+        }
+
+        Ok(out)
+    }
+
+    fn finish(&mut self) -> Result<Vec<LlmEvent>, LlmError> {
+        let mut out = Vec::new();
+        if !self.started || self.done {
+            return Ok(out);
+        }
+
+        self.done = true;
+        if let Some(index) = self.thinking_index.take() {
+            out.push(LlmEvent::ContentBlockStop { index });
+        }
+        if let Some(index) = self.text_index.take() {
+            out.push(LlmEvent::ContentBlockStop { index });
+        }
+
+        let stop_reason = if self.saw_function_call {
+            Some("tool_use".to_string())
+        } else {
+            self.stop_reason.clone()
+        };
+
+        out.push(LlmEvent::MessageDelta {
+            delta: MessageDeltaPayload { stop_reason },
+            usage: self.usage.clone(),
+        });
+        out.push(LlmEvent::MessageStop);
+        Ok(out)
+    }
+}
+
+fn decode_stream_start(root: &Value) -> LlmResponse {
+    LlmResponse {
+        id: root
+            .get("responseId")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+        model: root
+            .get("modelVersion")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+        content: Vec::new(),
+        usage: root.get("usageMetadata").map(decode_usage).unwrap_or_default(),
+        cost: None,
+        provider_metadata: Value::Null,
+    }
+}
+
+fn decode_usage(value: &Value) -> Usage {
+    Usage {
+        billable_tokens: crate::TokenUsage {
+            input: value
+                .get("promptTokenCount")
+                .and_then(Value::as_u64)
+                .unwrap_or(0),
+            output: value
+                .get("candidatesTokenCount")
+                .and_then(Value::as_u64)
+                .unwrap_or(0),
+            cache_read: value
+                .get("cachedContentTokenCount")
+                .and_then(Value::as_u64)
+                .unwrap_or(0),
+            ..Default::default()
+        },
+        provider_metadata: value.clone(),
+        ..Default::default()
+    }
+}
+
+fn map_finish_reason(finish_reason: &str) -> String {
+    match finish_reason {
+        "STOP" | "stop" => "end_turn".to_string(),
+        "MAX_TOKENS" | "length" => "max_tokens".to_string(),
+        other => other.to_ascii_lowercase(),
+    }
+}
+
+impl GeminiStreamDecoder {
+    fn handle_text(&mut self, text: &str, thought: bool, out: &mut Vec<LlmEvent>) {
+        if text.is_empty() {
+            return;
+        }
+
+        if thought {
+            let index = *self.thinking_index.get_or_insert_with(|| {
+                let index = self.next_index;
+                self.next_index += 1;
+                out.push(LlmEvent::ContentBlockStart {
+                    index,
+                    content_block: ContentBlock::Reasoning { text: String::new() },
+                });
+                index
+            });
+
+            out.push(LlmEvent::ContentBlockDelta {
+                index,
+                delta: ContentDelta::ThinkingDelta {
+                    thinking: text.to_string(),
+                },
+            });
+            return;
+        }
+
+        let index = *self.text_index.get_or_insert_with(|| {
+            let index = self.next_index;
+            self.next_index += 1;
+            out.push(LlmEvent::ContentBlockStart {
+                index,
+                content_block: ContentBlock::Text { text: String::new() },
+            });
+            index
+        });
+
+        out.push(LlmEvent::ContentBlockDelta {
+            index,
+            delta: ContentDelta::TextDelta {
+                text: text.to_string(),
+            },
+        });
+    }
+
+    fn handle_function_call(&mut self, function_call: &Value, out: &mut Vec<LlmEvent>) -> Result<(), LlmError> {
+        self.saw_function_call = true;
+
+        let name = function_call
+            .get("name")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        let input = function_call.get("args").cloned().unwrap_or_else(|| Value::Object(serde_json::Map::new()));
+
+        let index = self.next_index;
+        self.next_index += 1;
+        out.push(LlmEvent::ContentBlockStart {
+            index,
+            content_block: ContentBlock::ToolCall {
+                id: String::new(),
+                name,
+                input: Value::Object(serde_json::Map::new()),
+            },
+        });
+        out.push(LlmEvent::ContentBlockDelta {
+            index,
+            delta: ContentDelta::InputJsonDelta {
+                partial_json: serde_json::to_string(&input).map_err(|_| LlmError::InvalidRequest {
+                    message: "Gemini functionCall args are not serializable".to_string(),
+                })?,
+            },
+        });
+        out.push(LlmEvent::ContentBlockStop { index });
+        Ok(())
     }
 }
 

@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans. Steps use checkbox (`- [ ]`).
 
-**Goal:** Port the PURE foundation of the sandbox network-filtering subsystem — the domain pattern grammar, `matches_domain_pattern`, `filter_network_request` (deny-first/allow/canonicalize/empty=deny-all), the `is_valid_host`/`canonicalize_host` host primitives, and the network config types — into a new isolated `sandbox-netfilter` crate. No proxy, no async, no bwrap — all unit-testable on macOS.
+**Goal:** Port the PURE foundation of the sandbox network-filtering subsystem — the domain pattern grammar, `matches_domain_pattern`, `filter_network_request` (deny-first/allow/canonicalize/empty=deny-all), the `is_valid_host`/`canonicalize_host` host primitives, and the network config types — into a new isolated `sandbox-runtime` crate. No proxy, no async, no bwrap — all unit-testable on macOS.
 
-**Architecture:** New leaf crate `lingxi-code/sandbox-netfilter/` (isolates the subsystem's deps from the lean `sandbox` crate + engine-mobile). P1 is pure functions + types; later sub-projects (P3 proxy, P6 MITM) add tokio/rustls here.
+**Architecture:** New leaf crate `lingxi-code/sandbox-runtime/` (isolates the subsystem's deps from the lean `sandbox` crate + engine-mobile). P1 is pure functions + types; later sub-projects (P3 proxy, P6 MITM) add tokio/rustls here.
 
 **Tech Stack:** Rust 1.82 / edition 2021, `serde`, `url` (2.5, WHATWG host canonicalization — already in lock), `std::net` (IP literals). No new heavy deps in P1.
 
@@ -18,7 +18,7 @@
 
 ### Task 1: crate scaffold + config types
 
-**Files:** Modify `lingxi-code/Cargo.toml` (members + default-members); Create `lingxi-code/sandbox-netfilter/Cargo.toml`, `src/lib.rs`, `src/config.rs`.
+**Files:** Modify `lingxi-code/Cargo.toml` (members + default-members); Create `lingxi-code/sandbox-runtime/Cargo.toml`, `src/lib.rs`, `src/config.rs`.
 
 - [ ] **Step 1: Workspace member.** Add `"sandbox-netfilter",` to BOTH `[workspace] members` and `default-members` (after `"sandbox",` in each).
 
@@ -141,13 +141,13 @@ pub fn is_valid_domain_pattern(val: &str) -> bool {
 }
 ```
 
-- [ ] **Step 6: Run `cargo test -p sandbox-netfilter` → PASS. Gate + commit** (`feat(sandbox-netfilter): crate scaffold + NetworkConfig + domain-pattern grammar`). Clippy `-p sandbox-netfilter`.
+- [ ] **Step 6: Run `cargo test -p sandbox-runtime` → PASS. Gate + commit** (`feat(sandbox-netfilter): crate scaffold + NetworkConfig + domain-pattern grammar`). Clippy `-p sandbox-runtime`.
 
 ---
 
 ### Task 2: host primitives (`host.rs`)
 
-**Files:** Create `lingxi-code/sandbox-netfilter/src/host.rs`.
+**Files:** Create `lingxi-code/sandbox-runtime/src/host.rs`.
 
 - [ ] **Step 1: Failing tests:**
 
@@ -260,7 +260,7 @@ NOTE for the implementer: verify the `url` crate's IPv4 normalization matches th
 
 ### Task 3: the matcher (`matcher.rs`)
 
-**Files:** Create `lingxi-code/sandbox-netfilter/src/matcher.rs`.
+**Files:** Create `lingxi-code/sandbox-runtime/src/matcher.rs`.
 
 - [ ] **Step 1: Failing tests:**
 
@@ -389,11 +389,11 @@ pub fn filter_network_request(port: u16, host: &str, config: &NetworkConfig) -> 
 
 ```bash
 cd /Users/luolingfeng/Projects/LingXi-Next/lingxi-code
-cargo test -p sandbox-netfilter
-cargo clippy -p sandbox-netfilter --all-targets --no-deps -- -D warnings
+cargo test -p sandbox-runtime
+cargo clippy -p sandbox-runtime --all-targets --no-deps -- -D warnings
 cargo test --workspace --no-run        # struct-trap (the new crate compiles into the graph)
 cargo build -p engine-mobile
-cargo tree -p engine-mobile -e normal | grep -c "sandbox-netfilter"  # MUST be 0 (mobile pulls none of it)
+cargo tree -p engine-mobile -e normal | grep -c "sandbox-runtime"  # MUST be 0 (mobile pulls none of it)
 ```
 
 - [ ] **Step 2: Frozen check.** `git diff main -- lingxi-code/traits lingxi-code/protocol` → empty.
@@ -402,7 +402,7 @@ cargo tree -p engine-mobile -e normal | grep -c "sandbox-netfilter"  # MUST be 0
 
 ## Final verification
 
-1. `cargo test -p sandbox-netfilter` green (expect ~10 tests).
-2. engine-mobile pulls ZERO `sandbox-netfilter`.
+1. `cargo test -p sandbox-runtime` green (expect ~10 tests).
+2. engine-mobile pulls ZERO `sandbox-runtime`.
 3. Frozen surfaces empty diff.
 4. Memory: note P1 done; P2-P7 remain (umbrella spec lists them).

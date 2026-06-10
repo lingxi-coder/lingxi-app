@@ -4,7 +4,7 @@
 
 **Goal:** Port the base (non-MITM) HTTPS `CONNECT` forward-proxy from `http-proxy.js` — parse the CONNECT target, run the P1 allowlist filter, 403 on deny, else dial the origin directly + opaque bidirectional tunnel. Hand-rolled over tokio (no hyper/rustls). The first RUNNABLE artifact; Docker-verified (allowed host reachable, denied host 403).
 
-**Architecture:** New module `lingxi-code/sandbox-netfilter/src/connect_proxy.rs` + `dial.rs`. Adds `tokio` to the crate. The filter is the P1 `filter_network_request(port, host, &NetworkConfig)`.
+**Architecture:** New module `lingxi-code/sandbox-runtime/src/connect_proxy.rs` + `dial.rs`. Adds `tokio` to the crate. The filter is the P1 `filter_network_request(port, host, &NetworkConfig)`.
 
 **Scope (this batch = the CONNECT/HTTPS security core + dominant case):** CONNECT parse + allowlist 403 + direct-dial opaque tunnel + the accept loop. DEFERRED to later sub-steps (documented, NOT in P3): plain-HTTP (`http://`) full-URI forwarding (needs an HTTP/1.1 parser/hyper), parent-proxy CONNECT chaining (P2 has the resolver; `connect_via_parent_proxy` dialer is a follow-up), the `filterRequest` body hook (P6/MITM territory), MITM TLS termination (P6).
 
@@ -94,7 +94,7 @@ pub async fn dial_direct(host: &str, port: u16) -> std::io::Result<TcpStream> {
 }
 ```
 
-- [ ] **Step 4: lib.rs** `pub mod dial;`. **Run `cargo test -p sandbox-netfilter` → PASS. Gate + commit** (`feat(sandbox-netfilter): CONNECT-target parse + direct dialer (P3)`).
+- [ ] **Step 4: lib.rs** `pub mod dial;`. **Run `cargo test -p sandbox-runtime` → PASS. Gate + commit** (`feat(sandbox-netfilter): CONNECT-target parse + direct dialer (P3)`).
 
 ---
 
@@ -287,7 +287,7 @@ async fn read_request_head(client: &mut TcpStream) -> std::io::Result<String> {
 
 NOTE: add `tracing = { workspace = true }` to `[dependencies]` if not present (used for the debug log). If the workspace forbids `tracing` in this leaf crate, drop the log + the line. The `copy_bidirectional` head-forwarding caveat: a real client may send the TLS ClientHello bytes in the same segment as the CONNECT terminator — `read_request_head` stops at `\r\n\r\n`, so any bytes AFTER it in `buf` are the client's first payload and would be LOST. For correctness, capture the leftover (bytes after the `\r\n\r\n`) and `upstream.write_all(leftover)` before `copy_bidirectional`. IMPLEMENT THAT: split `buf` at the terminator, keep the tail, write it to `upstream` after the 200. Add a test asserting early-payload bytes survive (send `CONNECT ...\r\n\r\nEARLY` and assert the upstream echo includes `EARLY`).
 
-- [ ] **Step 3: lib.rs** `pub mod connect_proxy;`. **Run `cargo test -p sandbox-netfilter` → PASS (incl. the early-payload test). Gate + commit** (`feat(sandbox-netfilter): base CONNECT allowlist proxy with opaque tunnel (P3)`).
+- [ ] **Step 3: lib.rs** `pub mod connect_proxy;`. **Run `cargo test -p sandbox-runtime` → PASS (incl. the early-payload test). Gate + commit** (`feat(sandbox-netfilter): base CONNECT allowlist proxy with opaque tunnel (P3)`).
 
 ---
 
@@ -295,17 +295,17 @@ NOTE: add `tracing = { workspace = true }` to `[dependencies]` if not present (u
 
 - [ ] **Step 1: Docker proxy assertion.** Add a `connect-proxy` group to `scripts/verify-bwrap.sh` (or a new `scripts/verify-netproxy.sh`) that, INSIDE a `--privileged arm64v8/debian:stable-slim` container with bubblewrap+curl, runs the COMPILED proxy binary... — but the Rust proxy isn't trivially runnable in the container. SIMPLER faithful gate: the proxy logic is exercised by the Rust integration tests (Task 2) which ARE the runtime proof (real tokio sockets, real tunnel, real 403). For the Docker layer, assert the PROXY-SHAPE behavior with a stand-in: run a one-liner that proves `curl -x http://127.0.0.1:PORT https://host` uses CONNECT (so our CONNECT parser handles real curl framing). Use a tiny socat/ncat CONNECT echo OR — cleanest — SKIP a separate Docker gate for P3 (the tokio integration tests cover the real socket behavior) and defer the end-to-end Docker proof to P4, where the proxy runs on the host and a bwrap child curls through it. DOCUMENT this: P3's runtime proof = the tokio integration tests; the bwrap-child end-to-end proof lands in P4.
 
-  Concretely for P3: run `cargo test -p sandbox-netfilter -- --include-ignored` is not needed; just ensure the Task-2 integration tests pass (they bind real loopback sockets). Note in the commit that the full bwrap-child Docker gate is P4.
+  Concretely for P3: run `cargo test -p sandbox-runtime -- --include-ignored` is not needed; just ensure the Task-2 integration tests pass (they bind real loopback sockets). Note in the commit that the full bwrap-child Docker gate is P4.
 
 - [ ] **Step 2: Full gate ritual.**
 
 ```bash
 cd /Users/luolingfeng/Projects/LingXi-Next/lingxi-code
-cargo test -p sandbox-netfilter
-cargo clippy -p sandbox-netfilter --all-targets --no-deps -- -D warnings
+cargo test -p sandbox-runtime
+cargo clippy -p sandbox-runtime --all-targets --no-deps -- -D warnings
 cargo test --workspace --no-run
 cargo build -p engine-mobile
-cargo tree -p engine-mobile -e normal | grep -c "sandbox-netfilter"  # 0
+cargo tree -p engine-mobile -e normal | grep -c "sandbox-runtime"  # 0
 ```
 
 - [ ] **Step 3: Frozen check** `git diff main -- lingxi-code/traits lingxi-code/protocol` → empty.
@@ -313,7 +313,7 @@ cargo tree -p engine-mobile -e normal | grep -c "sandbox-netfilter"  # 0
 - [ ] **Step 4: Commit** any fixups.
 
 ## Final verification
-1. `cargo test -p sandbox-netfilter` green (P1 8 + P2 4 + P3 dial/proxy tests incl. allow/deny/400/early-payload).
+1. `cargo test -p sandbox-runtime` green (P1 8 + P2 4 + P3 dial/proxy tests incl. allow/deny/400/early-payload).
 2. engine-mobile pulls 0 sandbox-netfilter (tokio is dev+lib dep of THIS crate only — confirm mobile graph clean).
 3. Frozen empty.
 4. The CONNECT path is the security core: allow→tunnel, deny→403, malformed→400, early-payload preserved. Plain-HTTP/parent-chaining/MITM deferred (documented).

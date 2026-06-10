@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: superpowers:subagent-driven-development. Steps use `- [ ]`.
 
-**Goal:** Port the pure parent-proxy chaining + `NO_PROXY` bypass logic (`resolve_parent_proxy`, `parse_no_proxy`, `should_bypass_parent_proxy`, `select_parent_proxy_url`) into the `sandbox-netfilter` crate. Pure, unit-testable on macOS, no async/Docker. Used by P3's proxy to chain through a corporate/upstream proxy + honor NO_PROXY.
+**Goal:** Port the pure parent-proxy chaining + `NO_PROXY` bypass logic (`resolve_parent_proxy`, `parse_no_proxy`, `should_bypass_parent_proxy`, `select_parent_proxy_url`) into the `sandbox-runtime` crate. Pure, unit-testable on macOS, no async/Docker. Used by P3's proxy to chain through a corporate/upstream proxy + honor NO_PROXY.
 
-**Architecture:** New module `lingxi-code/sandbox-netfilter/src/parent_proxy.rs`. CIDR matching via `ipnet` (already in lock). URL parsing via `url` (already a dep).
+**Architecture:** New module `lingxi-code/sandbox-runtime/src/parent_proxy.rs`. CIDR matching via `ipnet` (already in lock). URL parsing via `url` (already a dep).
 
 **Reference of truth:** `docs/superpowers/references/sandbox-runtime-0.0.54/dist/sandbox/parent-proxy.js:45-212` (`resolveParentProxy`, `parseNoProxy`, `shouldBypassParentProxy`, `selectParentProxyUrl`, `LOOPBACK`). Umbrella: `docs/superpowers/specs/2026-06-10-sandbox-netfilter-umbrella-design.md`.
 
@@ -16,7 +16,7 @@
 
 ### Task 1: add ipnet dep + the resolved types + NO_PROXY parser
 
-**Files:** Modify `lingxi-code/sandbox-netfilter/Cargo.toml` (+`ipnet`); Create `lingxi-code/sandbox-netfilter/src/parent_proxy.rs`; Modify `src/lib.rs` (+`pub mod parent_proxy;`).
+**Files:** Modify `lingxi-code/sandbox-runtime/Cargo.toml` (+`ipnet`); Create `lingxi-code/sandbox-runtime/src/parent_proxy.rs`; Modify `src/lib.rs` (+`pub mod parent_proxy;`).
 
 - [ ] **Step 1: Dep.** Add to `sandbox-netfilter/Cargo.toml` `[dependencies]`: `ipnet = "2"` (in the workspace lock already).
 
@@ -317,7 +317,7 @@ fn cidr_contains(r: &NoProxy, ip: &str) -> bool {
 
 NOTE for the implementer: verify `IpNet::contains` mixed-family behavior (an IPv4 addr against an IPv6 subnet must be false, not panic) — `ipnet` handles this. Also verify the `*.` → `.suffix` normalization matches the TS (`v.slice(1)` turns `*.example.com` into `.example.com`). And the golang suffix semantics in the tests must pass exactly. If `url::Url::parse` normalizes the proxy URL differently than `http://up:3128/` (e.g. trailing slash), adjust the test's expected `.as_str()` to the ACTUAL url output (it appends `/` for a path-less URL — the tests already expect the trailing slash).
 
-- [ ] **Step 4: Run `cargo test -p sandbox-netfilter` → PASS. Add `pub mod parent_proxy;` to lib.rs. Gate + commit** (`feat(sandbox-netfilter): parent-proxy resolution + NO_PROXY bypass (P2)`). Clippy `-p sandbox-netfilter`.
+- [ ] **Step 4: Run `cargo test -p sandbox-runtime` → PASS. Add `pub mod parent_proxy;` to lib.rs. Gate + commit** (`feat(sandbox-netfilter): parent-proxy resolution + NO_PROXY bypass (P2)`). Clippy `-p sandbox-runtime`.
 
 ---
 
@@ -327,14 +327,14 @@ NOTE for the implementer: verify `IpNet::contains` mixed-family behavior (an IPv
 
 ```bash
 cd /Users/luolingfeng/Projects/LingXi-Next/lingxi-code
-cargo test -p sandbox-netfilter
-cargo clippy -p sandbox-netfilter --all-targets --no-deps -- -D warnings
+cargo test -p sandbox-runtime
+cargo clippy -p sandbox-runtime --all-targets --no-deps -- -D warnings
 cargo test --workspace --no-run
-cargo tree -p engine-mobile -e normal | grep -c "sandbox-netfilter"  # 0
+cargo tree -p engine-mobile -e normal | grep -c "sandbox-runtime"  # 0
 ```
 
 - [ ] **Step 2: Frozen check** `git diff main -- lingxi-code/traits lingxi-code/protocol` → empty.
 
 ## Final verification
-1. `cargo test -p sandbox-netfilter` green (P1's 8 + P2's 4).
+1. `cargo test -p sandbox-runtime` green (P1's 8 + P2's 4).
 2. engine-mobile 0 sandbox-netfilter; frozen empty.

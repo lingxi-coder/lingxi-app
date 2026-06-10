@@ -3762,7 +3762,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "sandbox-netfilter"
+name = "sandbox-runtime"
 version = "0.12.0"
 dependencies = [
  "ipnet",

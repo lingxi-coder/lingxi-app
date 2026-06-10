@@ -5,6 +5,9 @@ use serde_json::Value;
 use crate::{ServerToolUsage, TokenUsage, Usage};
 
 /// Normalize Anthropic usage JSON into independent billable token buckets.
+///
+/// Populates `speed` from the `"speed"` key when present (e.g. `"fast"` for
+/// the priority tier). Mirrors `api-client::UsageApi.speed` semantics.
 #[must_use]
 pub fn normalize_anthropic_usage(value: &Value) -> Usage {
     Usage {
@@ -17,6 +20,10 @@ pub fn normalize_anthropic_usage(value: &Value) -> Usage {
         },
         server_tool_use: server_tool_usage(value),
         provider_metadata: value.clone(),
+        speed: value
+            .get("speed")
+            .and_then(Value::as_str)
+            .map(ToString::to_string),
         ..Usage::default()
     }
 }

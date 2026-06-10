@@ -189,6 +189,49 @@ pub enum ContentBlock {
         /// Provider-opaque payload.
         data: String,
     },
+    /// Anthropic server-side tool invocation (e.g. advisor / web_search).
+    ///
+    /// Wire tag: `server_tool_use`. Mirrors `api-client::ContentBlockApi::ServerToolUse`
+    /// exactly. Encode: round-trips back to `server_tool_use` (tool-use round-trip).
+    ServerToolUse {
+        /// Server-issued tool-use identifier.
+        id: String,
+        /// Name of the server tool being invoked.
+        name: String,
+        /// Tool input arguments (provider-specific JSON shape).
+        #[serde(default)]
+        input: Value,
+    },
+    /// Anthropic Connector-Text block.
+    ///
+    /// Wire tag: `connector_text`. Field name `connector_text` mirrors
+    /// `api-client::ContentBlockApi::ConnectorText` exactly (NOT `text`).
+    /// api-client decodes this unconditionally (no cfg gate) → llm-client
+    /// also decodes it unconditionally. Encode: rejected with a message (no
+    /// upstream use-case yet — mirrors Document handling).
+    ConnectorText {
+        /// Connector-emitted text payload.
+        #[serde(default)]
+        connector_text: String,
+        /// Optional provider integrity signature.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        signature: Option<String>,
+    },
+    /// Advisor tool result mirrored from the server.
+    ///
+    /// Wire tag: `advisor_tool_result`. Mirrors
+    /// `api-client::ContentBlockApi::AdvisorToolResult` exactly.
+    /// Encode: rejected with a message (no upstream use-case yet).
+    AdvisorToolResult {
+        /// Identifier of the originating `server_tool_use` block.
+        tool_use_id: String,
+        /// Tool result content (provider-specific JSON shape).
+        #[serde(default)]
+        content: Value,
+        /// Whether the tool reported an error.
+        #[serde(default)]
+        is_error: bool,
+    },
 }
 
 /// Canonical non-streaming response.
@@ -280,6 +323,23 @@ pub enum ContentDelta {
     SignatureDelta {
         /// Signature fragment for the open reasoning block.
         signature: String,
+    },
+    /// Append a citation reference to a `text` block.
+    ///
+    /// Wire tag: `citations_delta`. Field name `citation` mirrors
+    /// `api-client::ContentDelta::CitationsDelta` exactly.
+    CitationsDelta {
+        /// Provider-specific citation payload (URL, title, range, etc.).
+        citation: Value,
+    },
+    /// Append text to a `connector_text` block.
+    ///
+    /// Wire tag: `connector_text_delta`. Field name `connector_text` mirrors
+    /// `api-client::ContentDelta::ConnectorTextDelta` exactly (NOT `text`).
+    ConnectorTextDelta {
+        /// Connector-text fragment to append.
+        #[serde(default)]
+        connector_text: String,
     },
 }
 

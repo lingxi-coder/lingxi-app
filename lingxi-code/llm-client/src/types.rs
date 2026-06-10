@@ -78,6 +78,13 @@ pub struct Usage {
     /// Redacted provider metadata retained for diagnostics.
     #[serde(default)]
     pub provider_metadata: Value,
+    /// API speed tier actually used for this request (`"fast"` for the
+    /// priority/low-latency tier; absent = standard tier).
+    ///
+    /// Mirrors `api-client::UsageApi.speed` and claude-code's
+    /// `BetaUsage.speed` (`services/api/claude.ts:2985`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub speed: Option<String>,
 }
 
 /// Provider-side server tool usage counters.

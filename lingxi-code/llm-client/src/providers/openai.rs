@@ -397,7 +397,10 @@ fn encode_message(message: &crate::Message) -> Vec<Value> {
             ContentBlock::Image { .. }
             | ContentBlock::Document { .. }
             | ContentBlock::Reasoning { .. }
-            | ContentBlock::RedactedThinking { .. } => {}
+            | ContentBlock::RedactedThinking { .. }
+            | ContentBlock::ServerToolUse { .. }
+            | ContentBlock::ConnectorText { .. }
+            | ContentBlock::AdvisorToolResult { .. } => {}
         }
     }
 
@@ -486,6 +489,13 @@ fn reject_unsupported_content_blocks(request: &LlmRequest) -> Result<(), LlmErro
                 ContentBlock::Reasoning { .. } | ContentBlock::RedactedThinking { .. } => {
                     return Err(LlmError::InvalidRequest {
                         message: "OpenAiChatCodec does not encode reasoning blocks yet".to_string(),
+                    });
+                }
+                ContentBlock::ServerToolUse { .. }
+                | ContentBlock::ConnectorText { .. }
+                | ContentBlock::AdvisorToolResult { .. } => {
+                    return Err(LlmError::InvalidRequest {
+                        message: "OpenAiChatCodec does not encode Anthropic server-generated blocks".to_string(),
                     });
                 }
                 _ => {}

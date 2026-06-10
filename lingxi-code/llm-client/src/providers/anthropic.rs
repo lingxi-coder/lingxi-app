@@ -254,6 +254,22 @@ fn encode_content_block(block: &ContentBlock) -> Result<Value, LlmError> {
         ContentBlock::Document { .. } => Err(LlmError::InvalidRequest {
             message: "AnthropicMessagesCodec does not encode document blocks yet".to_string(),
         }),
+        // ServerToolUse round-trips back to the wire format (tool-use round-trip).
+        ContentBlock::ServerToolUse { id, name, input } => Ok(serde_json::json!({
+            "type": "server_tool_use",
+            "id": id,
+            "name": name,
+            "input": input,
+        })),
+        // ConnectorText and AdvisorToolResult are server-generated; no client
+        // use-case for encoding them back. Reject with a clear message, mirroring
+        // Document handling.
+        ContentBlock::ConnectorText { .. } => Err(LlmError::InvalidRequest {
+            message: "AnthropicMessagesCodec does not encode connector_text blocks".to_string(),
+        }),
+        ContentBlock::AdvisorToolResult { .. } => Err(LlmError::InvalidRequest {
+            message: "AnthropicMessagesCodec does not encode advisor_tool_result blocks".to_string(),
+        }),
     }
 }
 
@@ -332,6 +348,30 @@ fn decode_content_block(value: &Value) -> Result<Option<ContentBlock>, LlmError>
             id: string_field(value, "id")?,
             name: string_field(value, "name")?,
             input: value.get("input").cloned().unwrap_or(Value::Null),
+        })),
+        Some("server_tool_use") => Ok(Some(ContentBlock::ServerToolUse {
+            id: string_field(value, "id")?,
+            name: string_field(value, "name")?,
+            input: value.get("input").cloned().unwrap_or(Value::Null),
+        })),
+        Some("connector_text") => Ok(Some(ContentBlock::ConnectorText {
+            connector_text: value
+                .get("connector_text")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+            signature: value
+                .get("signature")
+                .and_then(Value::as_str)
+                .map(ToString::to_string),
+        })),
+        Some("advisor_tool_result") => Ok(Some(ContentBlock::AdvisorToolResult {
+            tool_use_id: string_field(value, "tool_use_id")?,
+            content: value.get("content").cloned().unwrap_or(Value::Null),
+            is_error: value
+                .get("is_error")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
         })),
         // Unknown block types must not break decoding; the raw payload stays
         // available through provider_metadata.
@@ -462,6 +502,16 @@ fn decode_content_delta(value: &Value) -> Result<Option<ContentDelta>, LlmError>
         })),
         Some("signature_delta") => Ok(Some(ContentDelta::SignatureDelta {
             signature: string_field(value, "signature")?,
+        })),
+        Some("citations_delta") => Ok(Some(ContentDelta::CitationsDelta {
+            citation: value.get("citation").cloned().unwrap_or(Value::Null),
+        })),
+        Some("connector_text_delta") => Ok(Some(ContentDelta::ConnectorTextDelta {
+            connector_text: value
+                .get("connector_text")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
         })),
         // Unknown delta types are ignored, mirroring unknown event handling.
         Some(_other) => Ok(None),

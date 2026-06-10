@@ -155,11 +155,17 @@ impl Default for RetryControl {
 ///
 /// ## Decision table
 ///
-/// 1. [`LlmError::Overloaded`] — check consecutive gate first:
-///    - `allow_fallback && fallback_model.is_some() && consecutive >= MAX_529_RETRIES`
+/// 1. [`LlmError::Overloaded`] — check consecutive gate first (evaluated in order,
+///    first match wins):
+///    - `allow_fallback && consecutive >= max_529_retries && fallback_model.is_some()`
 ///      → [`DriveStep::Fallback`] (does not consume an attempt).
-///    - Otherwise if budget remains → [`DriveStep::RetryAfter`] (jittered,
-///      consumes an attempt, increments consecutive counter).
+///    - `allow_fallback && consecutive >= max_529_retries && fallback_model.is_none()
+///      && is_external && !is_sandbox`
+///      → [`DriveStep::Terminal`] immediately — external non-sandbox callers with
+///      no fallback configured are terminated at the threshold rather than
+///      exhausting the full budget (mirrors api-client `withRetry.ts:354-359`).
+///    - Budget remains → [`DriveStep::RetryAfter`] (jittered, consumes an attempt,
+///      increments consecutive counter).
 ///    - Budget exhausted → [`DriveStep::Terminal`].
 /// 2. [`LlmError::RateLimited`] — server wins:
 ///    - `retry_after: Some(d)` → [`DriveStep::RetryAfter(d)`] verbatim (no jitter, consumes an attempt).
@@ -188,15 +194,23 @@ pub fn next_step(
             // so the count is accurate when allow_fallback later becomes true).
             state.consecutive_overloaded = state.consecutive_overloaded.saturating_add(1);
 
-            // Check the fallback gate BEFORE budget exhaustion (matches api-client
-            // withRetry.ts:335 — fallback fires even if we've exceeded retries).
-            if ctl.allow_fallback
-                && ctl.fallback_model.is_some()
-                && state.consecutive_overloaded >= ctl.max_529_retries
-            {
-                return DriveStep::Fallback {
-                    fallback_model: ctl.fallback_model.clone().expect("checked is_some"),
-                };
+            // Check the fallback / external-terminal gates BEFORE budget exhaustion
+            // (mirrors api-client withRetry.ts:335-359).
+            if ctl.allow_fallback && state.consecutive_overloaded >= ctl.max_529_retries {
+                if let Some(fallback) = &ctl.fallback_model {
+                    // api-client withRetry.ts:347 — signal the caller to re-issue
+                    // against the fallback model.
+                    return DriveStep::Fallback {
+                        fallback_model: fallback.clone(),
+                    };
+                }
+                // api-client withRetry.ts:354-359 — external, non-sandbox, no fallback
+                // configured → terminate immediately rather than exhausting budget.
+                if ctl.is_external && !ctl.is_sandbox {
+                    return DriveStep::Terminal;
+                }
+                // Neither branch applies (internal or sandbox) → fall through to the
+                // normal budget-driven retry path.
             }
 
             if state.attempt >= DEFAULT_RETRY_BUDGET {
@@ -445,6 +459,93 @@ mod next_step_tests {
             step,
             DriveStep::Terminal,
             "overloaded without fallback model should be terminal after budget"
+        );
+    }
+
+    // --- External no-fallback terminal branch (api-client withRetry.ts:354-359) ---
+
+    /// api-client gate: `allow_fallback && consecutive_529 >= max_529_retries
+    ///   && fallback_model.is_none() && is_external && !is_sandbox`
+    /// → Terminal immediately (does not wait for budget exhaustion).
+    #[test]
+    fn overloaded_external_without_fallback_terminates_at_threshold() {
+        let mut state = RetryState::default();
+        let ctl = RetryControl {
+            allow_fallback: true,
+            fallback_model: None,
+            primary_model: "claude-opus-4-6".into(),
+            is_external: true,
+            is_sandbox: false,
+            max_529_retries: MAX_529_RETRIES,
+        };
+        // Drive consecutive_overloaded up to max_529_retries.
+        // Attempts 1 and 2: below threshold, should still retry.
+        let s1 = next_step(&mut state, &ctl, &LlmError::Overloaded, 0);
+        assert!(
+            matches!(s1, DriveStep::RetryAfter(_)),
+            "attempt 1 should be RetryAfter, got {s1:?}"
+        );
+        let s2 = next_step(&mut state, &ctl, &LlmError::Overloaded, 0);
+        assert!(
+            matches!(s2, DriveStep::RetryAfter(_)),
+            "attempt 2 should be RetryAfter, got {s2:?}"
+        );
+        // Attempt 3: consecutive_overloaded reaches MAX_529_RETRIES (3).
+        // External + no-sandbox + no-fallback → Terminal (before budget exhaustion).
+        assert_eq!(
+            state.attempt, 2,
+            "should have used 2 budget slots (not budget exhausted)"
+        );
+        let s3 = next_step(&mut state, &ctl, &LlmError::Overloaded, 0);
+        assert_eq!(
+            s3,
+            DriveStep::Terminal,
+            "external no-fallback at threshold must be Terminal, got {s3:?}"
+        );
+    }
+
+    #[test]
+    fn overloaded_sandbox_external_keeps_retrying() {
+        // is_sandbox=true disables the early terminal, even if external + no fallback.
+        let mut state = RetryState::default();
+        let ctl = RetryControl {
+            allow_fallback: true,
+            fallback_model: None,
+            primary_model: "claude-opus-4-6".into(),
+            is_external: true,
+            is_sandbox: true,
+            max_529_retries: MAX_529_RETRIES,
+        };
+        // Drive through the threshold — sandbox must NOT terminate early.
+        next_step(&mut state, &ctl, &LlmError::Overloaded, 0);
+        next_step(&mut state, &ctl, &LlmError::Overloaded, 0);
+        let s3 = next_step(&mut state, &ctl, &LlmError::Overloaded, 0);
+        // consecutive_overloaded == 3 == MAX_529_RETRIES, but is_sandbox → keep retrying.
+        assert!(
+            matches!(s3, DriveStep::RetryAfter(_)),
+            "sandbox should keep retrying past threshold, got {s3:?}"
+        );
+    }
+
+    #[test]
+    fn overloaded_internal_without_fallback_keeps_retrying() {
+        // is_external=false → the external terminal branch never fires.
+        let mut state = RetryState::default();
+        let ctl = RetryControl {
+            allow_fallback: true,
+            fallback_model: None,
+            primary_model: "claude-opus-4-6".into(),
+            is_external: false,
+            is_sandbox: false,
+            max_529_retries: MAX_529_RETRIES,
+        };
+        next_step(&mut state, &ctl, &LlmError::Overloaded, 0);
+        next_step(&mut state, &ctl, &LlmError::Overloaded, 0);
+        let s3 = next_step(&mut state, &ctl, &LlmError::Overloaded, 0);
+        // consecutive_overloaded == 3, but is_external=false → keep retrying (budget-driven).
+        assert!(
+            matches!(s3, DriveStep::RetryAfter(_)),
+            "internal (non-external) should keep retrying past threshold, got {s3:?}"
         );
     }
 

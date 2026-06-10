@@ -1,0 +1,17 @@
+[package]
+name = "sandbox-netfilter"
+version = "0.12.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+url = "2.5"
+
+[dev-dependencies]
+# (P3+ add tokio etc.)
+
+[lints]
+workspace = true

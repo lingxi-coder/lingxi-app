@@ -15,10 +15,9 @@
 //! it. The production orchestrator adapter overrides the streaming method to
 //! delegate to its real SSE transport.
 
-use api_client::types::StreamEvent;
-use api_client::ApiError;
 use async_trait::async_trait;
 use futures::stream::{BoxStream, StreamExt};
+use llm_client::{LlmError, LlmEvent, LlmResponse};
 
 /// `messages.create` seam used by the subagent loop.
 ///
@@ -40,13 +39,14 @@ pub trait SubagentApiClient: Send + Sync {
         system: Option<&str>,
         messages: Vec<protocol::ConversationMessage>,
         tools: Vec<serde_json::Value>,
-    ) -> Result<api_client::MessageResponse, ApiError>;
+    ) -> Result<LlmResponse, LlmError>;
 
     /// Issue one model round-trip over the streaming SSE transport, returning
-    /// the wire-decoded [`StreamEvent`] stream (yielding until `message_stop`).
-    /// The [`crate::runner::run_subagent`] loop drains this through
-    /// `crate::accumulator::accumulate_stream` into the same `MessageResponse`
-    /// the non-streaming path returns, so the turn loop is transport-agnostic.
+    /// the wire-decoded [`LlmEvent`] stream (yielding until `message_stop` or
+    /// `completed`). The [`crate::runner::run_subagent`] loop drains this
+    /// through `crate::accumulator::accumulate_stream` into the same
+    /// `LlmResponse` the non-streaming path returns, so the turn loop is
+    /// transport-agnostic.
     ///
     /// The default wraps [`SubagentApiClient::messages_create`] in a synthetic,
     /// lossless event sequence — a client that only implements the
@@ -59,7 +59,7 @@ pub trait SubagentApiClient: Send + Sync {
         system: Option<&str>,
         messages: Vec<protocol::ConversationMessage>,
         tools: Vec<serde_json::Value>,
-    ) -> Result<BoxStream<'static, Result<StreamEvent, ApiError>>, ApiError> {
+    ) -> Result<BoxStream<'static, Result<LlmEvent, LlmError>>, LlmError> {
         let resp = self.messages_create(model, system, messages, tools).await?;
         let events = crate::accumulator::response_to_stream_events(resp);
         Ok(futures::stream::iter(events.into_iter().map(Ok)).boxed())

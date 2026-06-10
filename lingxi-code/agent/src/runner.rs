@@ -116,35 +116,59 @@ fn aggregate_text(content: &[protocol::ContentBlock]) -> String {
     out
 }
 
-/// Translate api-client content blocks into protocol content blocks.
+/// Parse a `tool_call` id string back into a [`protocol::ToolUseId`].
+///
+/// `convert.rs` serialises `ToolUseId` via `Display` (`"tu:<UUID>"`), so the
+/// round-trip strips the `"tu:"` prefix and parses the bare UUID via
+/// `serde_json`. Real Anthropic API ids (`"toolu_01..."`) will not parse as
+/// UUIDs; for those and any other non-UUID string we mint a fresh `ToolUseId`
+/// so the protocol invariant (non-nil id) is always upheld. The only contract
+/// the runner needs is stable identity within the turn (used to pair tool
+/// results); a fresh ID on a non-parseable string is safe because the model's
+/// reply referenced the same string, and the runner rebuilds history from its
+/// own accumulated `assistant_blocks`, not from the model's reply.
+fn parse_tool_use_id(id: &str) -> protocol::ToolUseId {
+    // Strip the `"tu:"` prefix produced by `ToolUseId::Display`, then try to
+    // deserialize the bare UUID string via serde_json (ToolUseId is
+    // `serde(transparent)` over Uuid, so it round-trips as a UUID string).
+    let bare = id.strip_prefix("tu:").unwrap_or(id);
+    serde_json::from_value::<protocol::ToolUseId>(serde_json::Value::String(bare.to_string()))
+        .unwrap_or_else(|_| protocol::ToolUseId::new())
+}
+
+/// Translate llm-client content blocks into protocol content blocks.
 ///
 /// Mirrors the orchestrator's `translate_response_blocks`: `Text` /
-/// `ToolUse` / `Thinking` map through; server-side variants are dropped.
-fn translate_response_blocks(
-    content: &[api_client::types::ContentBlockApi],
-) -> Vec<protocol::ContentBlock> {
-    use api_client::types::ContentBlockApi;
+/// `ToolCall` / `Reasoning` map through; server-side and other variants
+/// are dropped.
+fn translate_response_blocks(content: &[llm_client::ContentBlock]) -> Vec<protocol::ContentBlock> {
     content
         .iter()
         .filter_map(|b| match b {
-            ContentBlockApi::Text { text } => {
+            llm_client::ContentBlock::Text { text, .. } => {
                 Some(protocol::ContentBlock::Text { text: text.clone() })
             }
-            ContentBlockApi::ToolUse { id, name, input } => Some(protocol::ContentBlock::ToolUse {
-                id: *id,
-                name: name.clone(),
-                input: input.clone(),
-            }),
-            ContentBlockApi::Thinking {
-                thinking,
-                signature,
-            } => Some(protocol::ContentBlock::Thinking {
-                thinking: thinking.clone(),
-                signature: signature.clone(),
-            }),
-            ContentBlockApi::ServerToolUse { .. }
-            | ContentBlockApi::ConnectorText { .. }
-            | ContentBlockApi::AdvisorToolResult { .. } => None,
+            llm_client::ContentBlock::ToolCall { id, name, input } => {
+                Some(protocol::ContentBlock::ToolUse {
+                    id: parse_tool_use_id(id),
+                    name: name.clone(),
+                    input: input.clone(),
+                })
+            }
+            llm_client::ContentBlock::Reasoning { text, signature } => {
+                Some(protocol::ContentBlock::Thinking {
+                    thinking: text.clone(),
+                    signature: signature.clone(),
+                })
+            }
+            llm_client::ContentBlock::ServerToolUse { .. }
+            | llm_client::ContentBlock::ConnectorText { .. }
+            | llm_client::ContentBlock::AdvisorToolResult { .. }
+            | llm_client::ContentBlock::Image { .. }
+            | llm_client::ContentBlock::ImageUrl { .. }
+            | llm_client::ContentBlock::Document { .. }
+            | llm_client::ContentBlock::ToolResult { .. }
+            | llm_client::ContentBlock::RedactedThinking { .. } => None,
         })
         .collect()
 }
@@ -642,13 +666,13 @@ mod tests {
     /// one per `messages_create` call. Counts calls so tests can assert the
     /// number of model round-trips (`max_turns` bound, multi-turn loop).
     struct MockSubagentApiClient {
-        responses: Mutex<VecDeque<Result<api_client::MessageResponse, api_client::ApiError>>>,
+        responses: Mutex<VecDeque<Result<llm_client::LlmResponse, llm_client::LlmError>>>,
         calls: AtomicUsize,
     }
 
     impl MockSubagentApiClient {
         fn new(
-            responses: Vec<Result<api_client::MessageResponse, api_client::ApiError>>,
+            responses: Vec<Result<llm_client::LlmResponse, llm_client::LlmError>>,
         ) -> Arc<Self> {
             Arc::new(Self {
                 responses: Mutex::new(responses.into_iter().collect()),
@@ -668,7 +692,7 @@ mod tests {
             _system: Option<&str>,
             _messages: Vec<ConversationMessage>,
             _tools: Vec<serde_json::Value>,
-        ) -> Result<api_client::MessageResponse, api_client::ApiError> {
+        ) -> Result<llm_client::LlmResponse, llm_client::LlmError> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             self.responses.lock().unwrap().pop_front().unwrap_or_else(|| {
                 // Out of scripted responses: a non-terminal, no-tool turn keeps
@@ -679,12 +703,12 @@ mod tests {
     }
 
     /// `SubagentApiClient` that OVERRIDES the streaming seam with scripted
-    /// `StreamEvent` sequences (one `Vec` per turn) and makes the non-streaming
+    /// `LlmEvent` sequences (one `Vec` per turn) and makes the non-streaming
     /// `messages_create` unreachable — proving the runner drives the loop
     /// through `messages_create_stream` + `accumulate_stream`, not the
     /// non-streaming fallback.
     struct StreamingMockApiClient {
-        turns: Mutex<VecDeque<Vec<api_client::types::StreamEvent>>>,
+        turns: Mutex<VecDeque<Vec<llm_client::LlmEvent>>>,
         calls: AtomicUsize,
         /// Tools seen on the most recent `messages_create_stream` call — lets a
         /// test prove `ctx.tool_schemas` threads through the seam.
@@ -692,7 +716,7 @@ mod tests {
     }
 
     impl StreamingMockApiClient {
-        fn new(turns: Vec<Vec<api_client::types::StreamEvent>>) -> Arc<Self> {
+        fn new(turns: Vec<Vec<llm_client::LlmEvent>>) -> Arc<Self> {
             Arc::new(Self {
                 turns: Mutex::new(turns.into_iter().collect()),
                 calls: AtomicUsize::new(0),
@@ -715,7 +739,7 @@ mod tests {
             _system: Option<&str>,
             _messages: Vec<ConversationMessage>,
             _tools: Vec<serde_json::Value>,
-        ) -> Result<api_client::MessageResponse, api_client::ApiError> {
+        ) -> Result<llm_client::LlmResponse, llm_client::LlmError> {
             unreachable!("streaming mock must be driven through messages_create_stream")
         }
 
@@ -728,9 +752,9 @@ mod tests {
         ) -> Result<
             futures::stream::BoxStream<
                 'static,
-                Result<api_client::types::StreamEvent, api_client::ApiError>,
+                Result<llm_client::LlmEvent, llm_client::LlmError>,
             >,
-            api_client::ApiError,
+            llm_client::LlmError,
         > {
             use futures::StreamExt;
             self.calls.fetch_add(1, Ordering::SeqCst);
@@ -741,71 +765,74 @@ mod tests {
     }
 
     /// Build the `message_start` envelope shared by the streamed-turn builders.
-    fn ev_message_start() -> api_client::types::StreamEvent {
-        api_client::types::StreamEvent::MessageStart {
-            message: api_client::MessageResponse {
+    fn ev_message_start() -> llm_client::LlmEvent {
+        llm_client::LlmEvent::MessageStart {
+            response: Box::new(llm_client::LlmResponse {
                 id: "mock".into(),
                 model: "mock".into(),
                 content: vec![],
                 stop_reason: None,
-                usage: api_client::types::UsageApi::default(),
-            },
+                usage: llm_client::Usage::default(),
+                cost: None,
+                provider_metadata: serde_json::Value::Null,
+            }),
         }
     }
 
     /// One streamed turn carrying a single text block + `stop` reason.
-    fn streamed_text_turn(text: &str, stop: &str) -> Vec<api_client::types::StreamEvent> {
-        use api_client::types::{ContentBlockApi, ContentDelta, MessageDeltaPayload, StreamEvent};
+    fn streamed_text_turn(text: &str, stop: &str) -> Vec<llm_client::LlmEvent> {
+        use llm_client::{ContentBlock, ContentDelta, LlmEvent, MessageDeltaPayload};
         vec![
             ev_message_start(),
-            StreamEvent::ContentBlockStart {
+            LlmEvent::ContentBlockStart {
                 index: 0,
-                content_block: ContentBlockApi::Text {
+                content_block: ContentBlock::Text {
                     text: String::new(),
+                    cache_control: None,
                 },
             },
-            StreamEvent::ContentBlockDelta {
+            LlmEvent::ContentBlockDelta {
                 index: 0,
                 delta: ContentDelta::TextDelta { text: text.into() },
             },
-            StreamEvent::ContentBlockStop { index: 0 },
-            StreamEvent::MessageDelta {
+            LlmEvent::ContentBlockStop { index: 0 },
+            LlmEvent::MessageDelta {
                 delta: MessageDeltaPayload {
                     stop_reason: Some(stop.into()),
                 },
                 usage: None,
             },
-            StreamEvent::MessageStop,
+            LlmEvent::MessageStop,
         ]
     }
 
-    /// One streamed turn carrying a single `tool_use` block + `stop` reason.
-    fn streamed_tool_use_turn(name: &str, stop: &str) -> Vec<api_client::types::StreamEvent> {
-        use api_client::types::{ContentBlockApi, ContentDelta, MessageDeltaPayload, StreamEvent};
+    /// One streamed turn carrying a single `tool_call` block + `stop` reason.
+    fn streamed_tool_use_turn(name: &str, stop: &str) -> Vec<llm_client::LlmEvent> {
+        use llm_client::{ContentBlock, ContentDelta, LlmEvent, MessageDeltaPayload};
         vec![
             ev_message_start(),
-            StreamEvent::ContentBlockStart {
+            LlmEvent::ContentBlockStart {
                 index: 0,
-                content_block: ContentBlockApi::ToolUse {
-                    id: ToolUseId::new(),
+                content_block: ContentBlock::ToolCall {
+                    id: ToolUseId::new().to_string(),
                     name: name.into(),
                     input: serde_json::Value::Null,
                 },
             },
-            StreamEvent::ContentBlockDelta {
+            LlmEvent::ContentBlockDelta {
                 index: 0,
                 delta: ContentDelta::InputJsonDelta {
                     partial_json: "{}".into(),
                 },
             },
-            StreamEvent::ContentBlockStop { index: 0 },
-            StreamEvent::MessageDelta {
+            LlmEvent::ContentBlockStop { index: 0 },
+            LlmEvent::MessageDelta {
                 delta: MessageDeltaPayload {
                     stop_reason: Some(stop.into()),
                 },
                 usage: None,
             },
-            StreamEvent::MessageStop,
+            LlmEvent::MessageStop,
         ]
     }
 
@@ -863,29 +890,36 @@ mod tests {
         }
     }
 
-    /// Build an api-client `MessageResponse` carrying a single text block.
-    fn text_response(text: &str, stop_reason: Option<&str>) -> api_client::MessageResponse {
-        api_client::MessageResponse {
+    /// Build an `LlmResponse` carrying a single text block.
+    fn text_response(text: &str, stop_reason: Option<&str>) -> llm_client::LlmResponse {
+        llm_client::LlmResponse {
             id: "mock".into(),
             model: "mock".into(),
-            content: vec![api_client::types::ContentBlockApi::Text { text: text.into() }],
+            content: vec![llm_client::ContentBlock::Text {
+                text: text.into(),
+                cache_control: None,
+            }],
             stop_reason: stop_reason.map(str::to_string),
-            usage: api_client::types::UsageApi::default(),
+            usage: llm_client::Usage::default(),
+            cost: None,
+            provider_metadata: serde_json::Value::Null,
         }
     }
 
-    /// Build a `MessageResponse` carrying one `tool_use` block (+ the given `stop_reason`).
-    fn tool_use_response(name: &str, stop_reason: Option<&str>) -> api_client::MessageResponse {
-        api_client::MessageResponse {
+    /// Build an `LlmResponse` carrying one `tool_call` block (+ the given `stop_reason`).
+    fn tool_use_response(name: &str, stop_reason: Option<&str>) -> llm_client::LlmResponse {
+        llm_client::LlmResponse {
             id: "mock".into(),
             model: "mock".into(),
-            content: vec![api_client::types::ContentBlockApi::ToolUse {
-                id: ToolUseId::new(),
+            content: vec![llm_client::ContentBlock::ToolCall {
+                id: ToolUseId::new().to_string(),
                 name: name.into(),
                 input: serde_json::json!({}),
             }],
             stop_reason: stop_reason.map(str::to_string),
-            usage: api_client::types::UsageApi::default(),
+            usage: llm_client::Usage::default(),
+            cost: None,
+            provider_metadata: serde_json::Value::Null,
         }
     }
 
@@ -1274,14 +1308,15 @@ mod tests {
     #[tokio::test]
     async fn loop_streaming_protocol_error_surfaces_failed() {
         // A streamed turn that ends without `message_stop` accumulates to
-        // `ApiError::UnexpectedStreamEnd`, which the loop surfaces as Failed
+        // `LlmError::StreamInterrupted`, which the loop surfaces as Failed
         // (same path as a non-streaming api error).
         let truncated = vec![
             ev_message_start(),
-            api_client::types::StreamEvent::ContentBlockStart {
+            llm_client::LlmEvent::ContentBlockStart {
                 index: 0,
-                content_block: api_client::types::ContentBlockApi::Text {
+                content_block: llm_client::ContentBlock::Text {
                     text: String::new(),
+                    cache_control: None,
                 },
             },
             // no content_block_stop, no message_stop
@@ -1507,9 +1542,9 @@ mod tests {
 
     #[tokio::test]
     async fn loop_api_error_surfaces_failed() {
-        let api = MockSubagentApiClient::new(vec![Err(api_client::ApiError::Http(
-            traits::HttpError::InvalidRequest("boom".into()),
-        ))]);
+        let api = MockSubagentApiClient::new(vec![Err(llm_client::LlmError::InvalidRequest {
+            message: "boom".into(),
+        })]);
         let ctx = loop_ctx(api.clone(), None, 4);
 
         let (_tx, event_rx) = mpsc::channel::<engine::Event>(8);

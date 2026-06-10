@@ -18,7 +18,7 @@ use tokio::net::{TcpListener, TcpStream};
 use crate::config::NetworkConfig;
 use crate::dial::dial_direct;
 use crate::host::is_valid_host;
-use crate::matcher::filter_network_request;
+use crate::matcher::{filter_network_request_with_ask, AskFn};
 use crate::parent_proxy::{
     connect_via_parent_proxy, select_parent_proxy_url, should_bypass_parent_proxy,
     ResolvedParentProxy,
@@ -101,6 +101,11 @@ pub struct SocksOptions {
     pub config: Arc<NetworkConfig>,
     /// Resolved parent proxy; `None` ⇒ always dial direct.
     pub parent_proxy: Option<Arc<ResolvedParentProxy>>,
+    /// Optional interactive ask-callback (the TS `sandboxAskCallback`). Consulted
+    /// by [`filter_network_request_with_ask`] ONLY for hosts no allow/deny rule
+    /// decides. `None` ⇒ unmatched hosts denied (the P5 behaviour). Added for
+    /// P8b so the manager can thread its ask-callback into the live SOCKS gate.
+    pub ask: Option<AskFn>,
 }
 
 /// Build a SOCKS5 reply frame: `VER REP RSV ATYP=IPv4 BND.ADDR=0.0.0.0 BND.PORT=0`.
@@ -163,7 +168,9 @@ async fn handle_connection(mut client: TcpStream, opts: &SocksOptions) -> std::i
     // or malformed host gets REP_NOT_ALLOWED and NEVER reaches dial_direct /
     // connect_via_parent_proxy. SOCKS5 DOMAINNAME is an unvalidated byte string,
     // so is_valid_host is what stops CRLF/null reaching the matcher.
-    if !is_valid_host(&host) || !filter_network_request(port, &host, &opts.config) {
+    if !is_valid_host(&host)
+        || !filter_network_request_with_ask(port, &host, &opts.config, opts.ask.as_ref()).await
+    {
         let _ = client.write_all(&reply_frame(REP_NOT_ALLOWED)).await;
         return Ok(());
     }
@@ -313,6 +320,7 @@ mod tests {
         let opts = Arc::new(SocksOptions {
             config: cfg,
             parent_proxy: None,
+            ask: None,
         });
         let l = TokioListener::bind("127.0.0.1:0").await.unwrap();
         let port = l.local_addr().unwrap().port();

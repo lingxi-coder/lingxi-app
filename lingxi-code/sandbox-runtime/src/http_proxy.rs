@@ -33,7 +33,7 @@ use tokio::net::{TcpListener, TcpStream};
 
 use crate::config::NetworkConfig;
 use crate::dial::{dial_direct, parse_connect_target, CONNECT_TIMEOUT};
-use crate::matcher::filter_network_request;
+use crate::matcher::{filter_network_request_with_ask, AskFn};
 use crate::mitm_ca::MitmCa;
 use crate::parent_proxy::{
     connect_via_parent_proxy, proxy_auth_header, select_parent_proxy_url,
@@ -67,6 +67,13 @@ pub struct ProxyOptions {
     /// consulted when [`Self::mitm_ca`] is set.
     pub tls_terminate_upstream_ca:
         Option<Arc<Vec<rustls::pki_types::CertificateDer<'static>>>>,
+    /// Optional interactive ask-callback (the TS `sandboxAskCallback`). Consulted
+    /// by [`filter_network_request_with_ask`] ONLY for hosts that no
+    /// allow/deny rule decides. `None` ⇒ unmatched hosts are denied (the P3b
+    /// behaviour). Added for P8b so the [`crate::manager::SandboxManager`] can
+    /// thread its ask-callback into the live filter; existing callers set it to
+    /// `None`.
+    pub ask: Option<AskFn>,
 }
 
 impl std::fmt::Debug for ProxyOptions {
@@ -80,6 +87,7 @@ impl std::fmt::Debug for ProxyOptions {
                 "tls_terminate_upstream_ca",
                 &self.tls_terminate_upstream_ca.as_ref().map(|c| c.len()),
             )
+            .field("ask", &self.ask.is_some())
             .finish()
     }
 }
@@ -119,7 +127,7 @@ pub async fn serve(listener: TcpListener, options: Arc<ProxyOptions>) {
 /// Dispatch a single request to the CONNECT or plain-HTTP handler.
 async fn handle(req: Request<Incoming>, options: Arc<ProxyOptions>) -> Response<ProxyBody> {
     if req.method() == Method::CONNECT {
-        handle_connect(req, &options)
+        handle_connect(req, &options).await
     } else {
         handle_plain(req, &options).await
     }
@@ -163,7 +171,10 @@ fn full_body(s: &str) -> ProxyBody {
 /// direct), reply `200 Connection Established`, then upgrade the client stream
 /// and splice it to the upstream. Malformed target → 400; denied → byte-exact
 /// 403; dial failure → 502.
-fn handle_connect(req: Request<Incoming>, options: &Arc<ProxyOptions>) -> Response<ProxyBody> {
+async fn handle_connect(
+    req: Request<Incoming>,
+    options: &Arc<ProxyOptions>,
+) -> Response<ProxyBody> {
     // The CONNECT request-target is the authority (e.g. `host:443`), carried in
     // the URI. hyper exposes it via `uri().authority()` / the path-and-query.
     let target = req
@@ -178,7 +189,9 @@ fn handle_connect(req: Request<Incoming>, options: &Arc<ProxyOptions>) -> Respon
         return status_only(StatusCode::BAD_REQUEST);
     };
 
-    if !filter_network_request(port, &hostname, &options.config) {
+    if !filter_network_request_with_ask(port, &hostname, &options.config, options.ask.as_ref())
+        .await
+    {
         tracing::debug!(%hostname, port, "CONNECT blocked by allowlist");
         return blocked_by_allowlist();
     }
@@ -323,7 +336,9 @@ async fn handle_plain(
         .port_u16()
         .unwrap_or(if is_https { 443 } else { 80 });
 
-    if !filter_network_request(port, &hostname, &options.config) {
+    if !filter_network_request_with_ask(port, &hostname, &options.config, options.ask.as_ref())
+        .await
+    {
         tracing::debug!(%hostname, port, "HTTP request blocked by allowlist");
         return blocked_by_allowlist();
     }
@@ -519,6 +534,7 @@ mod tests {
             filter_request: None,
             mitm_ca: None,
             tls_terminate_upstream_ca: None,
+            ask: None,
         })
     }
 
@@ -909,6 +925,7 @@ mod tests {
             filter_request: filter,
             mitm_ca: Some(ca),
             tls_terminate_upstream_ca: Some(Arc::new(vec![upstream_ca])),
+            ask: None,
         })
     }
 

@@ -10,7 +10,9 @@ protocol = { path = "../protocol" }
 traits = { path = "../traits" }
 engine = { path = "../engine" }
 api-client = { path = "../api-client" }
+llm-client = { path = "../llm-client" }
 tool-api = { path = "../tool-api" }
+base64 = "0.22"
 mcp = { path = "../mcp" }
 memory = { path = "../memory" }
 hooks = { path = "../hooks" }

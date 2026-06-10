@@ -6,6 +6,7 @@ use llm_client::{
     CredentialScope, LlmError, LlmRequest, ModelProfile, PricingConfig, ProtocolFamily,
     ProviderId, ProviderProfile,
 };
+use llm_client::BoxFuture;
 
 fn profile(
     provider_id: ProviderId,
@@ -49,8 +50,8 @@ fn client_with(
     .expect("client")
 }
 
-#[test]
-fn api_key_strategy_uses_provider_specific_headers() {
+#[tokio::test]
+async fn api_key_strategy_uses_provider_specific_headers() {
     std::env::set_var("LLM_CLIENT_AUTH_TEST_ANTHROPIC", "anthropic-secret");
     let client = client_with(
         ProviderId::AnthropicFirstParty,
@@ -59,7 +60,7 @@ fn api_key_strategy_uses_provider_specific_headers() {
         AuthStrategy::ApiKey,
         CredentialConfig::Env { var: "LLM_CLIENT_AUTH_TEST_ANTHROPIC".to_string() },
     );
-    let prepared = client.prepare(&LlmRequest::new("p-model")).expect("prepare");
+    let prepared = client.prepare(&LlmRequest::new("p-model")).await.expect("prepare");
     assert_eq!(
         prepared.provider_request.headers.get("x-api-key").map(String::as_str),
         Some("anthropic-secret")
@@ -73,7 +74,7 @@ fn api_key_strategy_uses_provider_specific_headers() {
         AuthStrategy::ApiKey,
         CredentialConfig::Env { var: "LLM_CLIENT_AUTH_TEST_GEMINI".to_string() },
     );
-    let prepared = client.prepare(&LlmRequest::new("p-model")).expect("prepare");
+    let prepared = client.prepare(&LlmRequest::new("p-model")).await.expect("prepare");
     assert_eq!(
         prepared.provider_request.headers.get("x-goog-api-key").map(String::as_str),
         Some("gemini-secret")
@@ -87,15 +88,15 @@ fn api_key_strategy_uses_provider_specific_headers() {
         AuthStrategy::ApiKey,
         CredentialConfig::Env { var: "LLM_CLIENT_AUTH_TEST_OPENAI".to_string() },
     );
-    let prepared = client.prepare(&LlmRequest::new("p-model")).expect("prepare");
+    let prepared = client.prepare(&LlmRequest::new("p-model")).await.expect("prepare");
     assert_eq!(
         prepared.provider_request.headers.get("Authorization").map(String::as_str),
         Some("Bearer openai-secret")
     );
 }
 
-#[test]
-fn oauth_bearer_on_anthropic_adds_oauth_beta_header() {
+#[tokio::test]
+async fn oauth_bearer_on_anthropic_adds_oauth_beta_header() {
     std::env::set_var("LLM_CLIENT_AUTH_TEST_OAUTH", "oauth-token");
     let client = client_with(
         ProviderId::AnthropicFirstParty,
@@ -105,7 +106,7 @@ fn oauth_bearer_on_anthropic_adds_oauth_beta_header() {
         CredentialConfig::Env { var: "LLM_CLIENT_AUTH_TEST_OAUTH".to_string() },
     );
 
-    let prepared = client.prepare(&LlmRequest::new("p-model")).expect("prepare");
+    let prepared = client.prepare(&LlmRequest::new("p-model")).await.expect("prepare");
 
     assert_eq!(
         prepared.provider_request.headers.get("Authorization").map(String::as_str),
@@ -117,14 +118,17 @@ fn oauth_bearer_on_anthropic_adds_oauth_beta_header() {
     );
 }
 
-#[test]
-fn host_managed_credentials_resolve_through_injected_provider() {
+#[tokio::test]
+async fn host_managed_credentials_resolve_through_injected_provider() {
     #[derive(Debug)]
     struct RecordingStore;
     impl CredentialProvider for RecordingStore {
-        fn load(&self, scope: &CredentialScope) -> Result<Credential, LlmError> {
-            let id = scope.credential_id.as_deref().unwrap_or("missing");
-            Ok(Credential::BearerToken(format!("token-for-{id}")))
+        fn load<'a>(
+            &'a self,
+            scope: &'a CredentialScope,
+        ) -> BoxFuture<'a, Result<Credential, LlmError>> {
+            let id = scope.credential_id.as_deref().unwrap_or("missing").to_string();
+            Box::pin(async move { Ok(Credential::BearerToken(format!("token-for-{id}"))) })
         }
     }
 
@@ -140,7 +144,7 @@ fn host_managed_credentials_resolve_through_injected_provider() {
     .expect("client")
     .with_credential_provider(Arc::new(RecordingStore));
 
-    let prepared = client.prepare(&LlmRequest::new("p-model")).expect("prepare");
+    let prepared = client.prepare(&LlmRequest::new("p-model")).await.expect("prepare");
 
     assert_eq!(
         prepared.provider_request.headers.get("Authorization").map(String::as_str),
@@ -148,8 +152,8 @@ fn host_managed_credentials_resolve_through_injected_provider() {
     );
 }
 
-#[test]
-fn host_managed_credentials_without_provider_fail_authentication() {
+#[tokio::test]
+async fn host_managed_credentials_without_provider_fail_authentication() {
     let client = client_with(
         ProviderId::OpenAI,
         ProtocolFamily::OpenAiChat,
@@ -159,13 +163,13 @@ fn host_managed_credentials_without_provider_fail_authentication() {
     );
 
     assert!(matches!(
-        client.prepare(&LlmRequest::new("p-model")).unwrap_err(),
+        client.prepare(&LlmRequest::new("p-model")).await.unwrap_err(),
         LlmError::Authentication
     ));
 }
 
-#[test]
-fn unimplemented_signing_strategies_fail_at_prepare() {
+#[tokio::test]
+async fn unimplemented_signing_strategies_fail_at_prepare() {
     let client = client_with(
         ProviderId::AnthropicFirstParty,
         ProtocolFamily::AnthropicMessages,
@@ -175,13 +179,13 @@ fn unimplemented_signing_strategies_fail_at_prepare() {
     );
 
     assert!(matches!(
-        client.prepare(&LlmRequest::new("p-model")).unwrap_err(),
+        client.prepare(&LlmRequest::new("p-model")).await.unwrap_err(),
         LlmError::InvalidRequest { message } if message.contains("AwsSigV4")
     ));
 }
 
-#[test]
-fn missing_credential_config_sends_request_without_client_auth() {
+#[tokio::test]
+async fn missing_credential_config_sends_request_without_client_auth() {
     let client = client_with(
         ProviderId::OpenAI,
         ProtocolFamily::OpenAiChat,
@@ -190,8 +194,47 @@ fn missing_credential_config_sends_request_without_client_auth() {
         CredentialConfig::None,
     );
 
-    let prepared = client.prepare(&LlmRequest::new("p-model")).expect("prepare");
+    let prepared = client.prepare(&LlmRequest::new("p-model")).await.expect("prepare");
 
     assert!(!prepared.provider_request.headers.contains_key("Authorization"));
     assert!(!prepared.provider_request.headers.contains_key("x-api-key"));
+}
+
+#[tokio::test]
+async fn prepare_count_tokens_is_authenticated_for_anthropic_routes() {
+    std::env::set_var("LLM_CLIENT_AUTH_TEST_CT", "ct-key");
+    let client = client_with(
+        ProviderId::AnthropicFirstParty,
+        ProtocolFamily::AnthropicMessages,
+        "https://api.anthropic.com",
+        AuthStrategy::ApiKey,
+        CredentialConfig::Env { var: "LLM_CLIENT_AUTH_TEST_CT".to_string() },
+    );
+
+    let prepared = client
+        .prepare_count_tokens(&LlmRequest::new("p-model").with_user_text("hi"))
+        .await
+        .expect("prepared");
+
+    assert!(prepared.url.ends_with("/v1/messages/count_tokens"));
+    assert_eq!(prepared.headers.get("x-api-key").map(String::as_str), Some("ct-key"));
+    assert!(prepared.body_json.get("max_tokens").is_none());
+}
+
+#[tokio::test]
+async fn prepare_count_tokens_rejects_non_anthropic_routes() {
+    let client = client_with(
+        ProviderId::OpenAI,
+        ProtocolFamily::OpenAiChat,
+        "https://api.openai.com/v1",
+        AuthStrategy::None,
+        CredentialConfig::None,
+    );
+
+    let err = client
+        .prepare_count_tokens(&LlmRequest::new("p-model").with_user_text("hi"))
+        .await
+        .unwrap_err();
+
+    assert!(matches!(err, LlmError::InvalidRequest { message } if message.contains("count_tokens")));
 }

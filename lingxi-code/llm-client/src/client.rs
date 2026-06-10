@@ -23,6 +23,7 @@ struct RouteEntry {
     provider_id: ProviderId,
     auth: AuthStrategy,
     credential: CredentialConfig,
+    base_url: String,
 }
 
 impl DefaultLlmClient {
@@ -37,6 +38,7 @@ impl DefaultLlmClient {
                 });
             }
             let codec = build_codec(&provider)?;
+            let base_url = provider.base_url.clone();
             routes.insert(
                 provider.profile_name,
                 RouteEntry {
@@ -45,6 +47,7 @@ impl DefaultLlmClient {
                     provider_id: provider.provider_id,
                     auth: provider.auth,
                     credential: provider.credential,
+                    base_url,
                 },
             );
         }
@@ -73,7 +76,7 @@ impl DefaultLlmClient {
     ///
     /// The returned provider request may carry credentials in its headers;
     /// redact with [`crate::Redactor`] before logging.
-    pub fn prepare(&self, request: &LlmRequest) -> Result<PreparedLlmCall, LlmError> {
+    pub async fn prepare(&self, request: &LlmRequest) -> Result<PreparedLlmCall, LlmError> {
         let resolved_route = self.registry.resolve(&request.model)?;
         validate_capabilities(request, resolved_route.capabilities)?;
 
@@ -89,8 +92,9 @@ impl DefaultLlmClient {
             routed_request.model.clone_from(&resolved_route.request_model);
             entry.codec.encode_request(&routed_request)?
         };
-        let provider_request =
-            self.authenticate(entry, &resolved_route.profile_name, provider_request)?;
+        let provider_request = self
+            .authenticate(entry, &resolved_route.profile_name, provider_request)
+            .await?;
 
         Ok(PreparedLlmCall {
             route: Route {
@@ -110,7 +114,7 @@ impl DefaultLlmClient {
         request: &LlmRequest,
         transport: &dyn Transport,
     ) -> Result<LlmResponse, LlmError> {
-        let prepared = self.prepare(request)?;
+        let prepared = self.prepare(request).await?;
         let provider_response = transport.execute(&prepared.provider_request).await?;
         prepared.route.codec.decode_response(provider_response)
     }
@@ -130,7 +134,7 @@ impl DefaultLlmClient {
             });
         }
 
-        let prepared = self.prepare(request)?;
+        let prepared = self.prepare(request).await?;
         let streaming = transport.open_stream(&prepared.provider_request).await?;
 
         if streaming.status >= 400 {
@@ -143,7 +147,37 @@ impl DefaultLlmClient {
         ))
     }
 
-    fn authenticate(
+    /// Resolve, validate, encode, and authenticate an Anthropic
+    /// `count_tokens` call. Errors on non-Anthropic routes.
+    pub async fn prepare_count_tokens(
+        &self,
+        request: &LlmRequest,
+    ) -> Result<ProviderRequest, LlmError> {
+        let resolved_route = self.registry.resolve(&request.model)?;
+        validate_capabilities(request, resolved_route.capabilities)?;
+
+        let entry = self
+            .routes
+            .get(&resolved_route.profile_name)
+            .ok_or(LlmError::ModelUnavailable)?;
+        if !matches!(entry.protocol, ProtocolFamily::AnthropicMessages) {
+            return Err(LlmError::InvalidRequest {
+                message: format!(
+                    "count_tokens is only available on AnthropicMessages routes, not {:?}",
+                    entry.protocol
+                ),
+            });
+        }
+
+        let codec = crate::AnthropicMessagesCodec::new(&entry.base_url, "2023-06-01");
+        let mut routed_request = request.clone();
+        routed_request.model.clone_from(&resolved_route.request_model);
+        let provider_request = codec.encode_count_tokens_request(&routed_request)?;
+        self.authenticate(entry, &resolved_route.profile_name, provider_request)
+            .await
+    }
+
+    async fn authenticate(
         &self,
         entry: &RouteEntry,
         profile_name: &str,
@@ -160,7 +194,7 @@ impl DefaultLlmClient {
                 });
             }
             AuthStrategy::ApiKey | AuthStrategy::Bearer | AuthStrategy::OAuthBearer => {
-                let Some(secret) = self.load_secret(entry, profile_name)? else {
+                let Some(secret) = self.load_secret(entry, profile_name).await? else {
                     // CredentialConfig::None: the host opted out of
                     // client-applied authentication for this profile.
                     return Ok(request);
@@ -190,7 +224,7 @@ impl DefaultLlmClient {
         Ok(request)
     }
 
-    fn load_secret(
+    async fn load_secret(
         &self,
         entry: &RouteEntry,
         profile_name: &str,
@@ -198,15 +232,18 @@ impl DefaultLlmClient {
         let credential = match &entry.credential {
             CredentialConfig::None => return Ok(None),
             CredentialConfig::Env { var } => EnvCredentialProvider::new(var.clone())
-                .load(&CredentialScope::new(entry.provider_id.clone(), profile_name))?,
-            CredentialConfig::Static { id } | CredentialConfig::HostManaged { id } => self
-                .credentials
-                .as_ref()
-                .ok_or(LlmError::Authentication)?
-                .load(
-                    &CredentialScope::new(entry.provider_id.clone(), profile_name)
-                        .with_credential_id(id.clone()),
-                )?,
+                .load(&CredentialScope::new(entry.provider_id.clone(), profile_name))
+                .await?,
+            CredentialConfig::Static { id } | CredentialConfig::HostManaged { id } => {
+                self.credentials
+                    .as_ref()
+                    .ok_or(LlmError::Authentication)?
+                    .load(
+                        &CredentialScope::new(entry.provider_id.clone(), profile_name)
+                            .with_credential_id(id.clone()),
+                    )
+                    .await?
+            }
         };
 
         let (Credential::ApiKey(secret) | Credential::BearerToken(secret)) = credential;

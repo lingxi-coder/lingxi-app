@@ -2,7 +2,7 @@
 
 use std::fmt;
 
-use crate::{LlmError, ProviderId};
+use crate::{BoxFuture, LlmError, ProviderId};
 
 /// Scope used to resolve provider credentials.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -57,9 +57,15 @@ impl fmt::Debug for Credential {
 }
 
 /// Loads credentials for a provider/profile scope.
+///
+/// `load` is async so implementations can refresh expiring material
+/// (e.g. OAuth) inside the lookup.
 pub trait CredentialProvider: fmt::Debug + Send + Sync {
     /// Load credential material for a scope.
-    fn load(&self, scope: &CredentialScope) -> Result<Credential, LlmError>;
+    fn load<'a>(
+        &'a self,
+        scope: &'a CredentialScope,
+    ) -> BoxFuture<'a, Result<Credential, LlmError>>;
 }
 
 /// Credential provider backed by one static credential.
@@ -77,8 +83,12 @@ impl StaticCredentialProvider {
 }
 
 impl CredentialProvider for StaticCredentialProvider {
-    fn load(&self, _scope: &CredentialScope) -> Result<Credential, LlmError> {
-        Ok(self.credential.clone())
+    fn load<'a>(
+        &'a self,
+        _scope: &'a CredentialScope,
+    ) -> BoxFuture<'a, Result<Credential, LlmError>> {
+        let credential = self.credential.clone();
+        Box::pin(async move { Ok(credential) })
     }
 }
 
@@ -99,9 +109,13 @@ impl EnvCredentialProvider {
 }
 
 impl CredentialProvider for EnvCredentialProvider {
-    fn load(&self, _scope: &CredentialScope) -> Result<Credential, LlmError> {
-        std::env::var(&self.variable_name)
+    fn load<'a>(
+        &'a self,
+        _scope: &'a CredentialScope,
+    ) -> BoxFuture<'a, Result<Credential, LlmError>> {
+        let result = std::env::var(&self.variable_name)
             .map(Credential::ApiKey)
-            .map_err(|_| LlmError::Authentication)
+            .map_err(|_| LlmError::Authentication);
+        Box::pin(async move { result })
     }
 }

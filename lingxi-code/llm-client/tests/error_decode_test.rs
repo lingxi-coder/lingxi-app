@@ -52,7 +52,7 @@ fn anthropic_error_envelope_maps_to_taxonomy() {
     ));
     assert!(matches!(
         codec.decode_response(anthropic_error(529, "overloaded_error", "Overloaded")).unwrap_err(),
-        LlmError::ProviderInternal
+        LlmError::Overloaded
     ));
 }
 
@@ -149,5 +149,23 @@ fn error_status_without_envelope_falls_back_to_status_mapping() {
     assert!(matches!(
         gemini_codec().decode_response(ProviderResponse::json(429, serde_json::Value::Null)).unwrap_err(),
         LlmError::RateLimited { .. }
+    ));
+}
+
+#[test]
+fn overloaded_maps_to_dedicated_variant() {
+    let codec = anthropic_codec();
+
+    assert!(matches!(
+        codec.decode_response(anthropic_error(529, "overloaded_error", "Overloaded")).unwrap_err(),
+        LlmError::Overloaded
+    ));
+    assert!(matches!(
+        anthropic_codec().decode_response(ProviderResponse::json(529, serde_json::Value::Null)).unwrap_err(),
+        LlmError::Overloaded
+    ));
+    assert!(matches!(
+        codec.decode_response(anthropic_error(500, "api_error", "boom")).unwrap_err(),
+        LlmError::ProviderInternal
     ));
 }

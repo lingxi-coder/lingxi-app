@@ -401,7 +401,7 @@ fn stream_error_events_map_to_error_taxonomy() {
         decoder.decode_frame(llm_client::RawStreamFrame::new(
             br#"{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}"#.to_vec(),
         )),
-        Err(llm_client::LlmError::ProviderInternal)
+        Err(llm_client::LlmError::Overloaded)
     ));
     assert!(matches!(
         decoder.decode_frame(llm_client::RawStreamFrame::new(

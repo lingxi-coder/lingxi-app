@@ -1,6 +1,17 @@
 //! `RealBypassEnv` — the production [`permission::bypass_guard::BypassEnv`]
 //! impl: real `getuid`, `/.dockerenv`, process env, and a 1s HTTP HEAD probe
 //! to `http://1.1.1.1` via the posix HTTP transport (`platform-posix-minimal`).
+//!
+//! NOTE on `has_internet`: the CLI binds `platform_posix_minimal::PosixHttp`,
+//! which is currently a stub that returns `Err` for every request, so
+//! `has_internet()` always reports `false` in this build. That is INERT for
+//! external builds: the only caller (`enforce_bypass_safety` check 2) is
+//! behind the `USER_TYPE == "ant"` gate, which is never true here — so the
+//! internet sub-condition is unreachable. The HEAD-probe shape is kept
+//! faithful so it lights up if a real transport is bound and the ant path is
+//! ever exercised. Wiring a real transport (`platforms/common` `ReqwestHttp`)
+//! is a documented follow-up, deliberately deferred to avoid pulling the
+//! heavy HTTP stack back into the CLI (removed in F2-01).
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -72,6 +83,8 @@ impl BypassEnv for RealBypassEnv {
 
     async fn has_internet(&self) -> bool {
         // TS: axios HEAD http://1.1.1.1, 1s timeout, any success ⇒ true.
+        // NOTE: PosixHttp is a stub returning Err, so this is always `false`
+        // in the CLI build — inert (ant-only caller). See the module doc.
         let req = HttpRequest {
             method: HttpMethod::Head,
             url: "http://1.1.1.1".to_string(),

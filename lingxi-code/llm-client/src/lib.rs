@@ -22,6 +22,7 @@ pub mod redaction;
 #[allow(missing_docs)]
 pub mod route;
 pub mod retry;
+pub mod sse;
 pub mod types;
 
 pub use auth::{ApiKeyAuthenticator, Authenticator, BearerAuthenticator};
@@ -44,4 +45,5 @@ pub use registry::{ModelListing, ModelRegistry, ResolvedRoute};
 pub use redaction::Redactor;
 pub use route::Route;
 pub use retry::{ResponseMetadata, RetryDecision, RetryPolicy};
+pub use sse::SseFrameSplitter;
 pub use types::{CostEstimate, PricingModelRef, ProviderId, ServerToolUsage, TokenUsage, Usage};

@@ -189,7 +189,7 @@ pub enum ContentBlock {
         /// Provider-opaque payload.
         data: String,
     },
-    /// Anthropic server-side tool invocation (e.g. advisor / web_search).
+    /// Anthropic server-side tool invocation (e.g. advisor / `web_search`).
     ///
     /// Wire tag: `server_tool_use`. Mirrors `api-client::ContentBlockApi::ServerToolUse`
     /// exactly. Encode: round-trips back to `server_tool_use` (tool-use round-trip).

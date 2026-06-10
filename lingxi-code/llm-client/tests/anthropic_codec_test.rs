@@ -14,7 +14,7 @@ fn decode_server_tool_use_block() {
     let decoded = codec.decode_response(response).unwrap();
     assert!(matches!(
         &decoded.content[0],
-        ContentBlock::ServerToolUse { id, name, .. } if id == "stu_01" && name == "advisor"
+        ContentBlock::ServerToolUse { id, name, input } if id == "stu_01" && name == "advisor" && input["query"] == "?"
     ));
 }
 
@@ -30,7 +30,8 @@ fn decode_connector_text_block() {
     let decoded = codec.decode_response(response).unwrap();
     assert!(matches!(
         &decoded.content[0],
-        ContentBlock::ConnectorText { connector_text, .. } if connector_text == "[connector] hello"
+        ContentBlock::ConnectorText { connector_text, signature }
+            if connector_text == "[connector] hello" && signature.as_deref() == Some("ct-sig")
     ));
 }
 
@@ -46,7 +47,8 @@ fn decode_advisor_tool_result_block() {
     let decoded = codec.decode_response(response).unwrap();
     assert!(matches!(
         &decoded.content[0],
-        ContentBlock::AdvisorToolResult { tool_use_id, .. } if tool_use_id == "stu_01"
+        ContentBlock::AdvisorToolResult { tool_use_id, content, is_error }
+            if tool_use_id == "stu_01" && content == "result text" && !is_error
     ));
 }
 

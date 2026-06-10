@@ -12,3 +12,4 @@ pub mod prompt_too_long;
 pub mod rate_limit;
 pub mod retry;
 pub mod telemetry;
+pub mod user_agent;

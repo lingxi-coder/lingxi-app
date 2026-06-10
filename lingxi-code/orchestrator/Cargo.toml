@@ -49,7 +49,17 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "registry"] }
 
 [features]
+default = []
 test-support = []
+# Default-off feature flags mirroring api-client/betas.rs (which mirrors
+# claude-code `betas.ts` build features). When OFF (the external default) the
+# corresponding `anthropic-beta` entry is never emitted by
+# `model::betas::assemble_beta_header`, keeping the header byte-identical to
+# the external claude-code build.
+# - `connector_text`        ≙ TS `feature('CONNECTOR_TEXT')`        → SUMMARIZE_CONNECTOR_TEXT
+# - `transcript_classifier` ≙ TS `feature('TRANSCRIPT_CLASSIFIER')` → AFK_MODE
+connector_text = []
+transcript_classifier = []
 
 [lints]
 workspace = true

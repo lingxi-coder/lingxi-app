@@ -229,17 +229,44 @@ pub fn assemble_beta_header(provider: Provider, endpoint: Endpoint) -> String {
 
 /// Inject the assembled `anthropic-beta` header into a prepared request.
 ///
-/// Inserts the header value produced by [`assemble_beta_header`] for the given
-/// `provider` + `endpoint` combination into `request.headers`.
+/// Merges the header value produced by [`assemble_beta_header`] with any
+/// pre-existing `anthropic-beta` value already present in `request.headers`,
+/// using comma-join with deduplication.
+///
+/// **Merge semantics:** any values already in the header are preserved first
+/// (in their original order); assembled entries that are not already present
+/// are appended in declaration order.  Duplicate entries are silently dropped.
+///
+/// **Why merge instead of replace:** the auth layer (`llm_client::authenticate`)
+/// may inject `oauth-2025-04-20` into `anthropic-beta` BEFORE this policy
+/// function is called.  A plain `BTreeMap::insert` would silently overwrite
+/// that value, stripping the oauth beta and breaking messages.create calls
+/// under OAuth sessions (Plan 3).  Merge ensures the auth-layer value survives
+/// alongside the full assembled set.
 pub fn apply_beta_header(
     request: &mut llm_client::ProviderRequest,
     provider: Provider,
     endpoint: Endpoint,
 ) {
-    request.headers.insert(
-        "anthropic-beta".to_string(),
-        assemble_beta_header(provider, endpoint),
-    );
+    let assembled = assemble_beta_header(provider, endpoint);
+
+    let merged = match request.headers.get("anthropic-beta") {
+        None => assembled,
+        Some(existing) => {
+            // Collect pre-existing entries, preserving order.
+            let mut parts: Vec<&str> = existing.split(',').map(str::trim).collect();
+            // Append assembled entries that are not already present.
+            for entry in assembled.split(',') {
+                let entry = entry.trim();
+                if !entry.is_empty() && !parts.contains(&entry) {
+                    parts.push(entry);
+                }
+            }
+            parts.join(",")
+        }
+    };
+
+    request.headers.insert("anthropic-beta".to_string(), merged);
 }
 
 /// Runtime emit-gate for [`CLI_INTERNAL`]. Mirrors the `utils/betas.ts`
@@ -443,6 +470,75 @@ mod tests {
         // Whatever the exact subset, it must NOT carry OAuth or task-budgets etc.
         assert!(!s.split(',').any(|p| p == OAUTH));
         assert!(!s.split(',').any(|p| p == TASK_BUDGETS));
+    }
+
+    /// When a pre-existing `anthropic-beta` value is present (e.g., injected by
+    /// `llm-client`'s `authenticate()` for OAuth sessions), `apply_beta_header`
+    /// must PRESERVE it and comma-join the assembled betas after it rather than
+    /// overwriting.  The oauth-2025-04-20 beta must survive so that
+    /// messages.create calls under Plan 3 reach the Anthropic API with both the
+    /// oauth gate and the full assembled set.
+    #[test]
+    fn apply_beta_header_preserves_existing_values() {
+        let mut req = llm_client::ProviderRequest::post_json(
+            "https://api.anthropic.com/v1/messages",
+            serde_json::json!({"model": "claude-sonnet-4-6", "max_tokens": 1024}),
+        );
+
+        // Pre-insert the oauth beta that llm-client's authenticate() would set.
+        req.headers
+            .insert("anthropic-beta".to_string(), "oauth-2025-04-20".to_string());
+
+        apply_beta_header(&mut req, Provider::Anthropic, Endpoint::MessagesCreate);
+
+        let value = req
+            .headers
+            .get("anthropic-beta")
+            .expect("anthropic-beta header must be present after apply_beta_header");
+
+        // The pre-existing oauth value must be preserved (as the first segment).
+        assert!(
+            value.starts_with("oauth-2025-04-20,"),
+            "header must start with the pre-existing oauth value; got: {value}",
+        );
+
+        // The full assembled set must also be present.
+        let assembled = assemble_beta_header(Provider::Anthropic, Endpoint::MessagesCreate);
+        for beta in assembled.split(',') {
+            assert!(
+                value.split(',').any(|p| p == beta),
+                "assembled beta '{beta}' must appear in the merged header; got: {value}",
+            );
+        }
+    }
+
+    /// When the pre-existing `anthropic-beta` value already contains one of the
+    /// entries that `assemble_beta_header` would add, the final merged header
+    /// must NOT contain that entry more than once (no duplicates).
+    #[test]
+    fn apply_beta_header_does_not_duplicate_entries() {
+        let mut req = llm_client::ProviderRequest::post_json(
+            "https://api.anthropic.com/v1/messages",
+            serde_json::json!({"model": "claude-sonnet-4-6", "max_tokens": 1024}),
+        );
+
+        // Pre-insert a value that is already part of the assembled set.
+        req.headers
+            .insert("anthropic-beta".to_string(), CLAUDE_CODE_BETA.to_string());
+
+        apply_beta_header(&mut req, Provider::Anthropic, Endpoint::MessagesCreate);
+
+        let value = req
+            .headers
+            .get("anthropic-beta")
+            .expect("anthropic-beta header must be present after apply_beta_header");
+
+        // CLAUDE_CODE_BETA must appear exactly once — no duplicate.
+        assert_eq!(
+            value.split(',').filter(|p| *p == CLAUDE_CODE_BETA).count(),
+            1,
+            "CLAUDE_CODE_BETA must appear exactly once in the merged header; got: {value}",
+        );
     }
 
     /// A `ProviderRequest::post_json(...)` gains an `anthropic-beta` header

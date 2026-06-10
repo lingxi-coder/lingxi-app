@@ -1,0 +1,132 @@
+use llm_client::{
+    AuthStrategy, Capabilities, ClientConfig, CredentialConfig, LlmError, LlmRequest,
+    ModelProfile, PricingConfig, ProtocolFamily, ProviderId, ProviderProfile, ResponseFormat,
+};
+use llm_client::client::DefaultLlmClient;
+
+#[test]
+fn client_builds_routes_from_config_and_lists_models() {
+    let config = ClientConfig {
+        providers: vec![ProviderProfile {
+            provider_id: ProviderId::OpenAI,
+            profile_name: "openai".to_string(),
+            base_url: "https://api.openai.com/v1".to_string(),
+            protocol: ProtocolFamily::OpenAiChat,
+            auth: AuthStrategy::Bearer,
+            credential: CredentialConfig::None,
+            models: vec![ModelProfile {
+                display_model: "GPT-4o".to_string(),
+                request_model: "gpt-4o".to_string(),
+                billing_model: "gpt-4o".to_string(),
+                aliases: vec!["fast".to_string()],
+                capabilities: Capabilities { streaming: true, tools: true, ..Default::default() },
+            }],
+            pricing: PricingConfig::default(),
+        }],
+    };
+
+    let client = DefaultLlmClient::from_config(config).unwrap();
+    assert_eq!(client.available_models().len(), 1);
+    assert!(client.prepare(&LlmRequest::new("fast")).is_ok());
+}
+
+#[test]
+fn prepare_returns_route_identity_and_encodes_resolved_request_model() {
+    let config = ClientConfig {
+        providers: vec![ProviderProfile {
+            provider_id: ProviderId::OpenAI,
+            profile_name: "openai".to_string(),
+            base_url: "https://api.openai.com/v1".to_string(),
+            protocol: ProtocolFamily::OpenAiChat,
+            auth: AuthStrategy::Bearer,
+            credential: CredentialConfig::None,
+            models: vec![ModelProfile {
+                display_model: "GPT-4o".to_string(),
+                request_model: "gpt-4o".to_string(),
+                billing_model: "gpt-4o".to_string(),
+                aliases: vec!["fast".to_string()],
+                capabilities: Capabilities { streaming: true, tools: true, ..Default::default() },
+            }],
+            pricing: PricingConfig::default(),
+        }],
+    };
+
+    let client = DefaultLlmClient::from_config(config).unwrap();
+    let prepared = client.prepare(&LlmRequest::new("fast")).unwrap();
+
+    assert_eq!(prepared.route.resolved_route.profile_name, "openai");
+    assert_eq!(prepared.provider_request.url, "https://api.openai.com/v1/chat/completions");
+    assert_eq!(prepared.provider_request.body_json["model"], "gpt-4o");
+}
+
+#[test]
+fn duplicate_profile_names_are_rejected_during_client_construction() {
+    let config = ClientConfig {
+        providers: vec![
+            ProviderProfile {
+                provider_id: ProviderId::OpenAI,
+                profile_name: "shared".to_string(),
+                base_url: "https://api.openai.com/v1".to_string(),
+                protocol: ProtocolFamily::OpenAiChat,
+                auth: AuthStrategy::Bearer,
+                credential: CredentialConfig::None,
+                models: vec![ModelProfile {
+                    display_model: "GPT-4o".to_string(),
+                    request_model: "gpt-4o".to_string(),
+                    billing_model: "gpt-4o".to_string(),
+                    aliases: vec!["fast".to_string()],
+                    capabilities: Capabilities { streaming: true, tools: true, ..Default::default() },
+                }],
+                pricing: PricingConfig::default(),
+            },
+            ProviderProfile {
+                provider_id: ProviderId::AnthropicFirstParty,
+                profile_name: "shared".to_string(),
+                base_url: "https://api.anthropic.com".to_string(),
+                protocol: ProtocolFamily::AnthropicMessages,
+                auth: AuthStrategy::Bearer,
+                credential: CredentialConfig::None,
+                models: vec![ModelProfile {
+                    display_model: "Claude".to_string(),
+                    request_model: "claude-sonnet-4-20250514".to_string(),
+                    billing_model: "claude-sonnet-4-20250514".to_string(),
+                    aliases: vec![],
+                    capabilities: Capabilities { streaming: true, tools: true, ..Default::default() },
+                }],
+                pricing: PricingConfig::default(),
+            },
+        ],
+    };
+
+    let err = DefaultLlmClient::from_config(config).unwrap_err();
+    assert!(matches!(err, LlmError::InvalidRequest { .. }));
+}
+
+#[test]
+fn response_format_is_rejected_when_selected_model_lacks_structured_output() {
+    let config = ClientConfig {
+        providers: vec![ProviderProfile {
+            provider_id: ProviderId::OpenAI,
+            profile_name: "openai".to_string(),
+            base_url: "https://api.openai.com/v1".to_string(),
+            protocol: ProtocolFamily::OpenAiChat,
+            auth: AuthStrategy::Bearer,
+            credential: CredentialConfig::None,
+            models: vec![ModelProfile {
+                display_model: "GPT-4o".to_string(),
+                request_model: "gpt-4o".to_string(),
+                billing_model: "gpt-4o".to_string(),
+                aliases: vec!["fast".to_string()],
+                capabilities: Capabilities { streaming: true, tools: true, structured_output: false, ..Default::default() },
+            }],
+            pricing: PricingConfig::default(),
+        }],
+    };
+
+    let client = DefaultLlmClient::from_config(config).unwrap();
+    let mut request = LlmRequest::new("fast");
+    request.response_format = Some(ResponseFormat::JsonObject);
+
+    let err = client.prepare(&request).unwrap_err();
+    assert!(matches!(err, LlmError::UnsupportedCapability { capability } if capability == "structured_output"));
+}

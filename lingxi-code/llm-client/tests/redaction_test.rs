@@ -9,7 +9,7 @@ fn redacts_secret_headers_case_insensitively() {
     headers.insert("x-api-key".to_string(), "secret-key".to_string());
     headers.insert("content-type".to_string(), "application/json".to_string());
 
-    let redacted = Redactor::default().redact_headers(&headers);
+    let redacted = Redactor.redact_headers(&headers);
 
     assert_eq!(redacted.get("Authorization"), Some(&"[REDACTED]".to_string()));
     assert_eq!(redacted.get("x-api-key"), Some(&"[REDACTED]".to_string()));
@@ -20,7 +20,7 @@ fn redacts_secret_headers_case_insensitively() {
 fn redacts_secret_query_parameters() {
     let url = "https://example.com/v1/messages?api_key=secret&model=claude&access_token=token&signature=sig";
 
-    let redacted = Redactor::default().redact_url(url);
+    let redacted = Redactor.redact_url(url);
 
     assert!(redacted.contains("api_key=[REDACTED]"));
     assert!(redacted.contains("model=claude"));
@@ -45,7 +45,7 @@ fn redacts_secret_json_fields_recursively() {
         ]
     });
 
-    let redacted = Redactor::default().redact_json(&value);
+    let redacted = Redactor.redact_json(&value);
 
     assert_eq!(redacted["api_key"], "[REDACTED]");
     assert_eq!(redacted["nested"]["access_token"], "[REDACTED]");

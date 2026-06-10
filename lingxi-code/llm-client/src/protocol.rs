@@ -1,5 +1,7 @@
 //! Canonical protocol types and codec traits.
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -147,11 +149,72 @@ pub enum LlmEvent {
         /// Delta text payload.
         text: String,
     },
+    /// Response start snapshot.
+    MessageStart {
+        /// Response metadata snapshot.
+        response: Box<LlmResponse>,
+    },
+    /// Content block start snapshot.
+    ContentBlockStart {
+        /// Block index in the response content list.
+        index: u32,
+        /// Content block snapshot at start.
+        content_block: ContentBlock,
+    },
+    /// Incremental content block delta.
+    ContentBlockDelta {
+        /// Block index in the response content list.
+        index: u32,
+        /// Incremental delta payload.
+        delta: ContentDelta,
+    },
+    /// Content block end marker.
+    ContentBlockStop {
+        /// Block index in the response content list.
+        index: u32,
+    },
+    /// Terminal response delta.
+    MessageDelta {
+        /// Terminal response delta payload.
+        delta: MessageDeltaPayload,
+        /// Normalized usage at the terminal boundary.
+        usage: Option<Usage>,
+    },
+    /// Terminal response stop marker.
+    MessageStop,
     /// Final response event.
     Completed {
         /// Completed response.
         response: Box<LlmResponse>,
     },
+}
+
+/// Canonical content delta.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ContentDelta {
+    /// Text delta payload.
+    TextDelta {
+        /// Partial text.
+        text: String,
+    },
+    /// Partial JSON payload.
+    InputJsonDelta {
+        /// Partial JSON text.
+        partial_json: String,
+    },
+    /// Reasoning/thinking delta payload.
+    ThinkingDelta {
+        /// Thinking text.
+        thinking: String,
+    },
+}
+
+/// Canonical terminal message delta payload.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MessageDeltaPayload {
+    /// Optional terminal stop reason.
+    pub stop_reason: Option<String>,
 }
 
 /// Canonical tool declaration.
@@ -193,6 +256,60 @@ pub enum ResponseFormat {
         /// JSON schema value.
         schema: Value,
     },
+}
+
+/// Provider-native request envelope with normalized single-value headers.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ProviderRequest {
+    /// HTTP method.
+    pub method: String,
+    /// Request URL.
+    pub url: String,
+    /// Normalized single-value request headers.
+    #[serde(default)]
+    pub headers: BTreeMap<String, String>,
+    /// JSON request body.
+    pub body_json: Value,
+}
+
+impl ProviderRequest {
+    /// Create a POST request with a JSON body.
+    #[must_use]
+    pub fn post_json(url: impl Into<String>, body_json: Value) -> Self {
+        Self {
+            method: "POST".to_string(),
+            url: url.into(),
+            headers: BTreeMap::new(),
+            body_json,
+        }
+    }
+}
+
+/// Provider-native response envelope with normalized single-value headers.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ProviderResponse {
+    /// HTTP status code.
+    pub status: u16,
+    /// Normalized single-value response headers.
+    #[serde(default)]
+    pub headers: BTreeMap<String, String>,
+    /// JSON response body.
+    pub body_json: Value,
+    /// Optional provider request id.
+    pub request_id: Option<String>,
+}
+
+impl ProviderResponse {
+    /// Create a JSON response envelope.
+    #[must_use]
+    pub fn json(status: u16, body_json: Value) -> Self {
+        Self {
+            status,
+            headers: BTreeMap::new(),
+            body_json,
+            request_id: None,
+        }
+    }
 }
 
 /// Encoded provider request body.
@@ -240,10 +357,43 @@ pub trait Protocol: std::fmt::Debug + Send + Sync {
     fn stream_decoder(&self) -> Box<dyn StreamDecoder>;
 }
 
+/// Provider wire codec.
+pub trait WireCodec: std::fmt::Debug + Send + Sync {
+    /// Encode a canonical request into a provider envelope.
+    fn encode_request(&self, request: &LlmRequest) -> Result<ProviderRequest, LlmError>;
+    /// Decode a provider envelope into a canonical response.
+    fn decode_response(&self, response: ProviderResponse) -> Result<LlmResponse, LlmError>;
+    /// Create a stream decoder for this codec.
+    fn stream_decoder(&self) -> Box<dyn StreamDecoder>;
+    #[allow(missing_docs)]
+    fn clone_box(&self) -> Box<dyn WireCodec>;
+}
+
+impl Clone for Box<dyn WireCodec> {
+    fn clone(&self) -> Self {
+        self.clone_box()
+    }
+}
+
+/// Stream decoder that emits no events.
+#[derive(Debug, Default)]
+pub struct NoopStreamDecoder;
+
+impl StreamDecoder for NoopStreamDecoder {
+    fn decode_frame(&mut self, _frame: RawStreamFrame) -> Result<Vec<LlmEvent>, LlmError> {
+        Ok(Vec::new())
+    }
+}
+
 /// Provider stream decoder.
 pub trait StreamDecoder: std::fmt::Debug + Send {
     /// Decode one raw stream frame into zero or more canonical events.
     fn decode_frame(&mut self, frame: RawStreamFrame) -> Result<Vec<LlmEvent>, LlmError>;
+
+    /// Finish the stream and emit any terminal events.
+    fn finish(&mut self) -> Result<Vec<LlmEvent>, LlmError> {
+        Ok(Vec::new())
+    }
 }
 
 /// Validate request capabilities before transport I/O.
@@ -251,6 +401,12 @@ pub fn validate_capabilities(request: &LlmRequest, capabilities: Capabilities) -
     if request.stream && !capabilities.streaming {
         return Err(LlmError::UnsupportedCapability {
             capability: "streaming".to_string(),
+        });
+    }
+
+    if request.response_format.is_some() && !capabilities.structured_output {
+        return Err(LlmError::UnsupportedCapability {
+            capability: "structured_output".to_string(),
         });
     }
 

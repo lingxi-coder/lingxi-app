@@ -10,6 +10,7 @@ pub mod bash_security;
 #[cfg(feature = "bash-ast")]
 pub mod bash_tree_sitter;
 pub mod classifier;
+pub mod cli_mode;
 pub mod dangerous_patterns;
 pub mod dangerous_perms;
 pub mod dangerous_removal;
@@ -42,6 +43,7 @@ pub use auto_edit_safety::{
 };
 pub use bash_security::{bash_command_is_safe, BashSafetyVerdict};
 pub use classifier::is_classifier_permissions_enabled;
+pub use cli_mode::{initial_permission_mode_from_cli, permission_mode_from_cli_string, CliModeSettings};
 pub use dangerous_patterns::{
     dangerous_bash_patterns, CROSS_PLATFORM_CODE_EXEC, POWERSHELL_DANGEROUS_PATTERNS,
 };

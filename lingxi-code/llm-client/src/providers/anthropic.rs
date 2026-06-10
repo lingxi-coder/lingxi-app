@@ -76,6 +76,9 @@ impl WireCodec for AnthropicMessagesCodec {
     }
 
     fn decode_response(&self, response: ProviderResponse) -> Result<LlmResponse, LlmError> {
+        if response.status >= 400 {
+            return Err(decode_error_response(&response));
+        }
         decode_response_body(response.body_json)
     }
 
@@ -276,17 +279,33 @@ fn decode_stream_event(value: &Value) -> Result<Vec<LlmEvent>, LlmError> {
 }
 
 fn decode_error_event(value: &Value) -> LlmError {
-    let error = value.get("error");
-    let error_type = error
-        .and_then(|error| error.get("type"))
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-    let message = error
-        .and_then(|error| error.get("message"))
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .to_string();
+    let (error_type, message) = error_envelope(value);
     map_error(error_type, message, None)
+}
+
+fn decode_error_response(response: &ProviderResponse) -> LlmError {
+    let retry_after = crate::retry::retry_after_from_headers(&response.headers);
+    let (error_type, message) = error_envelope(&response.body_json);
+    if error_type.is_empty() {
+        super::map_error_status(response.status, message, retry_after)
+    } else {
+        map_error(error_type, message, retry_after)
+    }
+}
+
+fn error_envelope(value: &Value) -> (&str, String) {
+    let error = value.get("error");
+    (
+        error
+            .and_then(|error| error.get("type"))
+            .and_then(Value::as_str)
+            .unwrap_or_default(),
+        error
+            .and_then(|error| error.get("message"))
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+    )
 }
 
 fn map_error(error_type: &str, message: String, retry_after: Option<Duration>) -> LlmError {

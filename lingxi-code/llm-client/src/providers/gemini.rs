@@ -64,6 +64,9 @@ impl WireCodec for GeminiCodec {
     }
 
     fn decode_response(&self, response: ProviderResponse) -> Result<LlmResponse, LlmError> {
+        if response.status >= 400 {
+            return Err(decode_error_response(&response));
+        }
         decode_response_body(response.body_json)
     }
 
@@ -73,6 +76,32 @@ impl WireCodec for GeminiCodec {
 
     fn clone_box(&self) -> Box<dyn WireCodec> {
         Box::new(self.clone())
+    }
+}
+
+fn decode_error_response(response: &ProviderResponse) -> LlmError {
+    let retry_after = crate::retry::retry_after_from_headers(&response.headers);
+    let error = response.body_json.get("error");
+    let message = error
+        .and_then(|error| error.get("message"))
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let google_status = error
+        .and_then(|error| error.get("status"))
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+
+    match google_status {
+        "UNAUTHENTICATED" => LlmError::Authentication,
+        "PERMISSION_DENIED" => LlmError::PermissionDenied,
+        "NOT_FOUND" => LlmError::ModelUnavailable,
+        "RESOURCE_EXHAUSTED" => LlmError::RateLimited {
+            retry_after,
+            scope: None,
+        },
+        "INVALID_ARGUMENT" | "FAILED_PRECONDITION" => LlmError::InvalidRequest { message },
+        _ => super::map_error_status(response.status, message, retry_after),
     }
 }
 

@@ -72,6 +72,9 @@ impl WireCodec for OpenAiChatCodec {
     }
 
     fn decode_response(&self, response: ProviderResponse) -> Result<LlmResponse, LlmError> {
+        if response.status >= 400 {
+            return Err(decode_error_response(&response));
+        }
         decode_response_body(response.body_json)
     }
 
@@ -81,6 +84,29 @@ impl WireCodec for OpenAiChatCodec {
 
     fn clone_box(&self) -> Box<dyn WireCodec> {
         Box::new(self.clone())
+    }
+}
+
+fn decode_error_response(response: &ProviderResponse) -> LlmError {
+    let retry_after = crate::retry::retry_after_from_headers(&response.headers);
+    let error = response.body_json.get("error");
+    let message = error
+        .and_then(|error| error.get("message"))
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let code = error
+        .and_then(|error| error.get("code"))
+        .and_then(Value::as_str)
+        .or_else(|| error.and_then(|error| error.get("type")).and_then(Value::as_str))
+        .unwrap_or_default();
+
+    match code {
+        "insufficient_quota" => LlmError::QuotaExceeded,
+        "context_length_exceeded" => LlmError::ContextOverflow,
+        "invalid_api_key" | "invalid_authentication" => LlmError::Authentication,
+        "model_not_found" => LlmError::ModelUnavailable,
+        _ => super::map_error_status(response.status, message, retry_after),
     }
 }
 

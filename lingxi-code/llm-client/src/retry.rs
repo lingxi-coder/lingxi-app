@@ -84,9 +84,33 @@ impl ResponseMetadata {
     }
 
     fn retry_after(&self) -> Option<Duration> {
-        self.headers
-            .get("retry-after")
-            .and_then(|value| value.parse::<u64>().ok())
-            .map(Duration::from_secs)
+        retry_after_from_headers(&self.headers)
     }
+}
+
+/// Parse a retry delay from response headers.
+///
+/// Prefers the millisecond-precision `retry-after-ms` header over the
+/// standard `retry-after` seconds form. Names match case-insensitively so
+/// non-normalized header maps work too.
+pub(crate) fn retry_after_from_headers(headers: &BTreeMap<String, String>) -> Option<Duration> {
+    if let Some(value) = header_value(headers, "retry-after-ms") {
+        if let Ok(milliseconds) = value.trim().parse::<u64>() {
+            return Some(Duration::from_millis(milliseconds));
+        }
+    }
+    header_value(headers, "retry-after")
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .map(Duration::from_secs)
+}
+
+fn header_value<'headers>(
+    headers: &'headers BTreeMap<String, String>,
+    name: &str,
+) -> Option<&'headers str> {
+    headers.get(name).map(String::as_str).or_else(|| {
+        headers
+            .iter()
+            .find_map(|(key, value)| key.eq_ignore_ascii_case(name).then_some(value.as_str()))
+    })
 }

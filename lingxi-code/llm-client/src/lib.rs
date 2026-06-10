@@ -1,8 +1,8 @@
 //! Reusable LLM provider communication client.
 //!
 //! This crate owns provider-neutral request/response types, configuration,
-//! route construction, authentication seams, transport abstractions, retry
-//! classification, redaction, and per-call usage/cost estimation.
+//! route construction, authentication, retry classification, redaction, and
+//! per-call usage/cost estimation.
 
 #![forbid(unsafe_code)]
 
@@ -21,7 +21,6 @@ pub mod registry;
 pub mod redaction;
 #[allow(missing_docs)]
 pub mod route;
-pub mod transport;
 pub mod retry;
 pub mod types;
 
@@ -38,13 +37,11 @@ pub use cost::{CostEstimator, PricingCatalog, PricingPolicy, TokenPricing};
 pub use error::LlmError;
 pub use protocol::{
     validate_capabilities, ContentBlock, ContentDelta, LlmEvent, LlmRequest, LlmResponse,
-    Message, MessageDeltaPayload, NoopStreamDecoder, PreparedBody, Protocol, ProviderRequest,
-    ProviderResponse, RawResponse, RawStreamFrame, ResponseFormat, StreamDecoder, ToolChoice,
-    ToolDeclaration, WireCodec,
+    Message, MessageDeltaPayload, NoopStreamDecoder, ProviderRequest, ProviderResponse,
+    RawStreamFrame, ResponseFormat, StreamDecoder, ToolChoice, ToolDeclaration, WireCodec,
 };
 pub use registry::{ModelListing, ModelRegistry, ResolvedRoute};
 pub use redaction::Redactor;
 pub use route::Route;
 pub use retry::{ResponseMetadata, RetryDecision, RetryPolicy};
-pub use transport::PreparedRequest;
 pub use types::{CostEstimate, PricingModelRef, ProviderId, ServerToolUsage, TokenUsage, Usage};

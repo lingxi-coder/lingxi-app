@@ -21,12 +21,13 @@ impl GeminiCodec {
         }
     }
 
-    fn generate_content_url(&self, model: &str) -> String {
-        format!(
-            "{}/models/{}:generateContent",
-            self.base_url.trim_end_matches('/'),
-            model
-        )
+    fn generate_content_url(&self, model: &str, stream: bool) -> String {
+        let base_url = self.base_url.trim_end_matches('/');
+        if stream {
+            format!("{base_url}/models/{model}:streamGenerateContent?alt=sse")
+        } else {
+            format!("{base_url}/models/{model}:generateContent")
+        }
     }
 }
 
@@ -38,7 +39,7 @@ impl WireCodec for GeminiCodec {
         let mut body = serde_json::Map::new();
         body.insert(
             "contents".to_string(),
-            Value::Array(encode_messages(&request.messages, &tool_call_names)),
+            Value::Array(encode_messages(&request.messages, &tool_call_names)?),
         );
 
         if let Some(system) = &request.system {
@@ -52,8 +53,28 @@ impl WireCodec for GeminiCodec {
             body.insert("tools".to_string(), serde_json::json!([{ "functionDeclarations": request.tools.iter().map(encode_tool).collect::<Vec<_>>() }]));
         }
 
+        let mut generation_config = serde_json::Map::new();
+        if let Some(max_tokens) = request.max_tokens {
+            generation_config.insert("maxOutputTokens".to_string(), Value::from(max_tokens));
+        }
+        if let Some(temperature) = request.temperature {
+            generation_config.insert("temperature".to_string(), Value::from(temperature));
+        }
+        if let Some(top_p) = request.top_p {
+            generation_config.insert("topP".to_string(), Value::from(top_p));
+        }
+        if !request.stop_sequences.is_empty() {
+            generation_config.insert(
+                "stopSequences".to_string(),
+                Value::Array(request.stop_sequences.iter().cloned().map(Value::String).collect()),
+            );
+        }
+        if !generation_config.is_empty() {
+            body.insert("generationConfig".to_string(), Value::Object(generation_config));
+        }
+
         let mut provider_request = ProviderRequest::post_json(
-            self.generate_content_url(&request.model),
+            self.generate_content_url(&request.model, request.stream),
             Value::Object(body),
         );
         provider_request
@@ -64,6 +85,9 @@ impl WireCodec for GeminiCodec {
     }
 
     fn decode_response(&self, response: ProviderResponse) -> Result<LlmResponse, LlmError> {
+        if response.status >= 400 {
+            return Err(decode_error_response(&response));
+        }
         decode_response_body(response.body_json)
     }
 
@@ -73,6 +97,32 @@ impl WireCodec for GeminiCodec {
 
     fn clone_box(&self) -> Box<dyn WireCodec> {
         Box::new(self.clone())
+    }
+}
+
+fn decode_error_response(response: &ProviderResponse) -> LlmError {
+    let retry_after = crate::retry::retry_after_from_headers(&response.headers);
+    let error = response.body_json.get("error");
+    let message = error
+        .and_then(|error| error.get("message"))
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let google_status = error
+        .and_then(|error| error.get("status"))
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+
+    match google_status {
+        "UNAUTHENTICATED" => LlmError::Authentication,
+        "PERMISSION_DENIED" => LlmError::PermissionDenied,
+        "NOT_FOUND" => LlmError::ModelUnavailable,
+        "RESOURCE_EXHAUSTED" => LlmError::RateLimited {
+            retry_after,
+            scope: None,
+        },
+        "INVALID_ARGUMENT" | "FAILED_PRECONDITION" => LlmError::InvalidRequest { message },
+        _ => super::map_error_status(response.status, message, retry_after),
     }
 }
 
@@ -99,6 +149,12 @@ impl StreamDecoder for GeminiStreamDecoder {
         })?;
 
         let mut out = Vec::new();
+        // Usage can arrive on a frame without candidates (e.g. the final
+        // usage-only chunk), so capture it before the candidate guard.
+        if let Some(usage) = root.get("usageMetadata") {
+            self.usage = Some(decode_usage(usage));
+        }
+
         let Some(candidate) = root
             .get("candidates")
             .and_then(Value::as_array)
@@ -112,10 +168,6 @@ impl StreamDecoder for GeminiStreamDecoder {
             out.push(LlmEvent::MessageStart {
                 response: Box::new(decode_stream_start(&root)),
             });
-        }
-
-        if let Some(usage) = root.get("usageMetadata") {
-            self.usage = Some(decode_usage(usage));
         }
 
         if let Some(finish_reason) = candidate.get("finishReason").and_then(Value::as_str) {
@@ -184,6 +236,7 @@ fn decode_stream_start(root: &Value) -> LlmResponse {
             .unwrap_or_default()
             .to_string(),
         content: Vec::new(),
+        stop_reason: None,
         usage: root.get("usageMetadata").map(decode_usage).unwrap_or_default(),
         cost: None,
         provider_metadata: Value::Null,
@@ -191,22 +244,33 @@ fn decode_stream_start(root: &Value) -> LlmResponse {
 }
 
 fn decode_usage(value: &Value) -> Usage {
+    let prompt_tokens = value
+        .get("promptTokenCount")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    // Gemini reports cached tokens as a subset of promptTokenCount; subtract
+    // them so every TokenUsage bucket stays independently billable.
+    let cached_tokens = value
+        .get("cachedContentTokenCount")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+
     Usage {
         billable_tokens: crate::TokenUsage {
-            input: value
-                .get("promptTokenCount")
-                .and_then(Value::as_u64)
-                .unwrap_or(0),
+            input: prompt_tokens.saturating_sub(cached_tokens),
             output: value
                 .get("candidatesTokenCount")
                 .and_then(Value::as_u64)
                 .unwrap_or(0),
-            cache_read: value
-                .get("cachedContentTokenCount")
+            cache_read: cached_tokens,
+            reasoning_output: value
+                .get("thoughtsTokenCount")
                 .and_then(Value::as_u64)
                 .unwrap_or(0),
             ..Default::default()
         },
+        context_tokens: value.get("totalTokenCount").and_then(Value::as_u64),
+        provider_reported_total_tokens: value.get("totalTokenCount").and_then(Value::as_u64),
         provider_metadata: value.clone(),
         ..Default::default()
     }
@@ -232,7 +296,10 @@ impl GeminiStreamDecoder {
                 self.next_index += 1;
                 out.push(LlmEvent::ContentBlockStart {
                     index,
-                    content_block: ContentBlock::Reasoning { text: String::new() },
+                    content_block: ContentBlock::Reasoning {
+                        text: String::new(),
+                        signature: None,
+                    },
                 });
                 index
             });
@@ -279,7 +346,9 @@ impl GeminiStreamDecoder {
         out.push(LlmEvent::ContentBlockStart {
             index,
             content_block: ContentBlock::ToolCall {
-                id: String::new(),
+                // Gemini does not assign tool-call ids; synthesize unique ones
+                // so tool results can reference their call after a round trip.
+                id: format!("call_{index}"),
                 name,
                 input: Value::Object(serde_json::Map::new()),
             },
@@ -311,7 +380,7 @@ fn build_tool_call_name_map(messages: &[crate::Message]) -> std::collections::BT
     tool_call_names
 }
 
-fn encode_messages(messages: &[crate::Message], tool_call_names: &std::collections::BTreeMap<String, String>) -> Vec<Value> {
+fn encode_messages(messages: &[crate::Message], tool_call_names: &std::collections::BTreeMap<String, String>) -> Result<Vec<Value>, LlmError> {
     let mut out = Vec::new();
 
     for message in messages {
@@ -330,13 +399,28 @@ fn encode_messages(messages: &[crate::Message], tool_call_names: &std::collectio
                         "args": input,
                     }
                 })),
-                ContentBlock::ToolResult { tool_call_id, output } => parts.push(serde_json::json!({
-                    "functionResponse": {
-                        "name": tool_call_names.get(tool_call_id).cloned().unwrap_or_default(),
-                        "response": {"result": output},
-                    }
-                })),
-                ContentBlock::Image { .. } | ContentBlock::Document { .. } | ContentBlock::Reasoning { .. } => {}
+                ContentBlock::ToolResult { tool_call_id, output, is_error } => {
+                    let Some(name) = tool_call_names.get(tool_call_id) else {
+                        return Err(LlmError::InvalidRequest {
+                            message: format!("tool result references unknown tool call id: {tool_call_id}"),
+                        });
+                    };
+                    let response = if *is_error {
+                        serde_json::json!({"error": output})
+                    } else {
+                        serde_json::json!({"result": output})
+                    };
+                    parts.push(serde_json::json!({
+                        "functionResponse": {
+                            "name": name,
+                            "response": response,
+                        }
+                    }));
+                }
+                ContentBlock::Image { .. }
+                | ContentBlock::Document { .. }
+                | ContentBlock::Reasoning { .. }
+                | ContentBlock::RedactedThinking { .. } => {}
             }
         }
 
@@ -345,7 +429,7 @@ fn encode_messages(messages: &[crate::Message], tool_call_names: &std::collectio
         }
     }
 
-    out
+    Ok(out)
 }
 
 fn encode_tool(tool: &ToolDeclaration) -> Value {
@@ -357,12 +441,6 @@ fn encode_tool(tool: &ToolDeclaration) -> Value {
 }
 
 fn reject_unsupported_request_intent(request: &LlmRequest) -> Result<(), LlmError> {
-    if request.stream {
-        return Err(LlmError::InvalidRequest {
-            message: "GeminiCodec does not encode streaming requests yet".to_string(),
-        });
-    }
-
     if request.response_format.is_some() {
         return Err(LlmError::InvalidRequest {
             message: "GeminiCodec does not encode response_format yet".to_string(),
@@ -388,7 +466,7 @@ fn reject_unsupported_request_intent(request: &LlmRequest) -> Result<(), LlmErro
                         message: "GeminiCodec does not encode document blocks yet".to_string(),
                     });
                 }
-                ContentBlock::Reasoning { .. } => {
+                ContentBlock::Reasoning { .. } | ContentBlock::RedactedThinking { .. } => {
                     return Err(LlmError::InvalidRequest {
                         message: "GeminiCodec does not encode reasoning blocks yet".to_string(),
                     });
@@ -417,11 +495,22 @@ fn decode_response_body(body_json: Value) -> Result<LlmResponse, LlmError> {
         .get("candidates")
         .and_then(Value::as_array)
         .and_then(|candidates| candidates.first())
-        .ok_or_else(|| LlmError::InvalidRequest {
-            message: "Gemini response missing candidates".to_string(),
+        .ok_or_else(|| {
+            let message = match body_json
+                .get("promptFeedback")
+                .and_then(|feedback| feedback.get("blockReason"))
+                .and_then(Value::as_str)
+            {
+                Some(reason) => format!("Gemini blocked the prompt: {reason}"),
+                None => "Gemini response missing candidates".to_string(),
+            };
+            LlmError::InvalidRequest { message }
         })?;
 
     let mut content = Vec::new();
+    // Gemini does not assign tool-call ids; synthesize unique ones so tool
+    // results can reference their call after a round trip.
+    let mut tool_call_count = 0u32;
     if let Some(parts) = candidate
         .get("content")
         .and_then(|content| content.get("parts"))
@@ -439,7 +528,7 @@ fn decode_response_body(body_json: Value) -> Result<LlmResponse, LlmError> {
 
             if let Some(function_call) = part.get("functionCall") {
                 content.push(ContentBlock::ToolCall {
-                    id: String::new(),
+                    id: format!("call_{tool_call_count}"),
                     name: function_call
                         .get("name")
                         .and_then(Value::as_str)
@@ -450,36 +539,32 @@ fn decode_response_body(body_json: Value) -> Result<LlmResponse, LlmError> {
                         .cloned()
                         .unwrap_or_else(|| Value::Object(serde_json::Map::new())),
                 });
+                tool_call_count += 1;
             }
         }
     }
 
     let usage = body_json
         .get("usageMetadata")
-        .map(|usage| Usage {
-                billable_tokens: crate::TokenUsage {
-                    input: usage
-                        .get("promptTokenCount")
-                        .and_then(Value::as_u64)
-                        .unwrap_or(0),
-                    output: usage
-                        .get("candidatesTokenCount")
-                        .and_then(Value::as_u64)
-                        .unwrap_or(0),
-                    cache_read: usage
-                        .get("cachedContentTokenCount")
-                        .and_then(Value::as_u64)
-                        .unwrap_or(0),
-                    ..Default::default()
-                },
-            ..Default::default()
-        })
+        .map(decode_usage)
         .unwrap_or_default();
+
+    // Mirror the stream decoder: any function call normalizes the stop reason
+    // to tool_use regardless of Gemini's finishReason.
+    let stop_reason = if content.iter().any(|block| matches!(block, ContentBlock::ToolCall { .. })) {
+        Some("tool_use".to_string())
+    } else {
+        candidate
+            .get("finishReason")
+            .and_then(Value::as_str)
+            .map(map_finish_reason)
+    };
 
     Ok(LlmResponse {
         id,
         model,
         content,
+        stop_reason,
         usage,
         cost: None,
         provider_metadata: body_json,

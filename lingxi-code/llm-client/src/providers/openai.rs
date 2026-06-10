@@ -48,6 +48,22 @@ impl WireCodec for OpenAiChatCodec {
             body.insert("stream".to_string(), Value::Bool(true));
         }
 
+        if let Some(max_tokens) = request.max_tokens {
+            body.insert("max_tokens".to_string(), Value::from(max_tokens));
+        }
+        if let Some(temperature) = request.temperature {
+            body.insert("temperature".to_string(), Value::from(temperature));
+        }
+        if let Some(top_p) = request.top_p {
+            body.insert("top_p".to_string(), Value::from(top_p));
+        }
+        if !request.stop_sequences.is_empty() {
+            body.insert(
+                "stop".to_string(),
+                Value::Array(request.stop_sequences.iter().cloned().map(Value::String).collect()),
+            );
+        }
+
         if let Some(response_format) = &request.response_format {
             body.insert("response_format".to_string(), encode_response_format(response_format));
         }
@@ -72,6 +88,9 @@ impl WireCodec for OpenAiChatCodec {
     }
 
     fn decode_response(&self, response: ProviderResponse) -> Result<LlmResponse, LlmError> {
+        if response.status >= 400 {
+            return Err(decode_error_response(&response));
+        }
         decode_response_body(response.body_json)
     }
 
@@ -81,6 +100,29 @@ impl WireCodec for OpenAiChatCodec {
 
     fn clone_box(&self) -> Box<dyn WireCodec> {
         Box::new(self.clone())
+    }
+}
+
+fn decode_error_response(response: &ProviderResponse) -> LlmError {
+    let retry_after = crate::retry::retry_after_from_headers(&response.headers);
+    let error = response.body_json.get("error");
+    let message = error
+        .and_then(|error| error.get("message"))
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let code = error
+        .and_then(|error| error.get("code"))
+        .and_then(Value::as_str)
+        .or_else(|| error.and_then(|error| error.get("type")).and_then(Value::as_str))
+        .unwrap_or_default();
+
+    match code {
+        "insufficient_quota" => LlmError::QuotaExceeded,
+        "context_length_exceeded" => LlmError::ContextOverflow,
+        "invalid_api_key" | "invalid_authentication" => LlmError::Authentication,
+        "model_not_found" => LlmError::ModelUnavailable,
+        _ => super::map_error_status(response.status, message, retry_after),
     }
 }
 
@@ -161,6 +203,7 @@ impl OpenAiStreamDecoder {
             id: root.get("id").and_then(serde_json::Value::as_str).unwrap_or_default().to_string(),
             model: root.get("model").and_then(serde_json::Value::as_str).unwrap_or_default().to_string(),
             content: Vec::new(),
+            stop_reason: None,
             usage: Usage::default(),
             cost: None,
             provider_metadata: serde_json::Value::Null,
@@ -180,6 +223,7 @@ impl OpenAiStreamDecoder {
                 index: self.reasoning_index,
                 content_block: ContentBlock::Reasoning {
                     text: String::new(),
+                    signature: None,
                 },
             });
         }
@@ -215,9 +259,12 @@ impl OpenAiStreamDecoder {
     }
 
     fn handle_tool_fragment(&mut self, tool_call: &serde_json::Value, out: &mut Vec<LlmEvent>) {
-        let Some(openai_index) = tool_call.get("index").and_then(serde_json::Value::as_u64) else {
-            return;
-        };
+        // Some OpenAI-compatible servers omit `index` when there is a single
+        // tool call; treat that as slot zero instead of dropping the fragment.
+        let openai_index = tool_call
+            .get("index")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0);
 
         let index = *self.tool_index.entry(openai_index).or_insert_with(|| {
             let index = self.next_index;
@@ -317,7 +364,9 @@ fn encode_message(message: &crate::Message) -> Vec<Value> {
                     "arguments": input.to_string(),
                 }
             })),
-            ContentBlock::ToolResult { tool_call_id, output } => {
+            // OpenAI tool messages carry no error flag; the error text itself
+            // is the model-visible signal, so is_error is intentionally unused.
+            ContentBlock::ToolResult { tool_call_id, output, .. } => {
                 if !text.is_empty() {
                     messages.push(text_message(&message.role, &text));
                     text.clear();
@@ -332,7 +381,10 @@ fn encode_message(message: &crate::Message) -> Vec<Value> {
                     "content": tool_result_content(output),
                 }));
             }
-            ContentBlock::Image { .. } | ContentBlock::Document { .. } | ContentBlock::Reasoning { .. } => {}
+            ContentBlock::Image { .. }
+            | ContentBlock::Document { .. }
+            | ContentBlock::Reasoning { .. }
+            | ContentBlock::RedactedThinking { .. } => {}
         }
     }
 
@@ -418,7 +470,7 @@ fn reject_unsupported_content_blocks(request: &LlmRequest) -> Result<(), LlmErro
                         message: "OpenAiChatCodec does not encode document blocks yet".to_string(),
                     });
                 }
-                ContentBlock::Reasoning { .. } => {
+                ContentBlock::Reasoning { .. } | ContentBlock::RedactedThinking { .. } => {
                     return Err(LlmError::InvalidRequest {
                         message: "OpenAiChatCodec does not encode reasoning blocks yet".to_string(),
                     });
@@ -473,23 +525,17 @@ fn decode_response_body(body_json: Value) -> Result<LlmResponse, LlmError> {
         }
     }
 
-    let usage = body_json
-        .get("usage")
-        .map(|usage| crate::Usage {
-            billable_tokens: crate::TokenUsage {
-                input: usage.get("prompt_tokens").and_then(Value::as_u64).unwrap_or(0),
-                output: usage.get("completion_tokens").and_then(Value::as_u64).unwrap_or(0),
-                ..Default::default()
-            },
-            provider_metadata: usage.clone(),
-            ..Default::default()
-        })
-        .unwrap_or_default();
+    let usage = body_json.get("usage").map(normalize_usage).unwrap_or_default();
+    let stop_reason = choice
+        .get("finish_reason")
+        .and_then(Value::as_str)
+        .map(map_finish_reason);
 
     Ok(LlmResponse {
         id,
         model,
         content,
+        stop_reason,
         usage,
         cost: None,
         provider_metadata: body_json,
@@ -497,15 +543,27 @@ fn decode_response_body(body_json: Value) -> Result<LlmResponse, LlmError> {
 }
 
 fn normalize_usage(usage: &Value) -> Usage {
+    let prompt_tokens = usage.get("prompt_tokens").and_then(Value::as_u64).unwrap_or(0);
+    let completion_tokens = usage.get("completion_tokens").and_then(Value::as_u64).unwrap_or(0);
+    // OpenAI reports cached/reasoning tokens as subsets of prompt/completion
+    // counts; subtract them so every TokenUsage bucket stays independently billable.
+    let cached_tokens = usage
+        .get("prompt_tokens_details")
+        .and_then(|details| details.get("cached_tokens"))
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let reasoning_tokens = usage
+        .get("completion_tokens_details")
+        .and_then(|details| details.get("reasoning_tokens"))
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+
     Usage {
         billable_tokens: crate::TokenUsage {
-            input: usage.get("prompt_tokens").and_then(Value::as_u64).unwrap_or(0),
-            output: usage.get("completion_tokens").and_then(Value::as_u64).unwrap_or(0),
-            reasoning_output: usage
-                .get("completion_tokens_details")
-                .and_then(|details| details.get("reasoning_tokens"))
-                .and_then(Value::as_u64)
-                .unwrap_or(0),
+            input: prompt_tokens.saturating_sub(cached_tokens),
+            output: completion_tokens.saturating_sub(reasoning_tokens),
+            cache_read: cached_tokens,
+            reasoning_output: reasoning_tokens,
             ..Default::default()
         },
         context_tokens: usage.get("total_tokens").and_then(Value::as_u64),

@@ -24,6 +24,7 @@ impl WireCodec for DummyCodec {
             id: "id".to_string(),
             model: "model".to_string(),
             content: vec![],
+            stop_reason: None,
             usage: Usage::default(),
             cost: None,
             provider_metadata: Value::default(),

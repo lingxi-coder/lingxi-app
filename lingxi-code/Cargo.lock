@@ -3996,6 +3996,7 @@ version = "0.12.0"
 dependencies = [
  "base64",
  "bytes",
+ "clap",
  "dirs",
  "getrandom 0.2.17",
  "http 1.4.0",

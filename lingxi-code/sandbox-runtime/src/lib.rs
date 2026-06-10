@@ -18,7 +18,44 @@
 //! TLS-MITM (P6), seccomp, the `sandbox-manager` orchestration, the
 //! macOS/Windows backends, and the CLI.
 
+//! # Public API (the `index.js` surface)
+//!
+//! The crate re-exports a flat public API mirroring the npm package's
+//! `index.js`, so consumers can `use sandbox_runtime::{SandboxManager, ...}`
+//! without reaching into the module tree:
+//!
+//! - [`SandboxManager`] — the orchestrator ([`manager`]).
+//! - [`SandboxViolationStore`] + [`Violation`] — the violation store
+//!   ([`violation_store`]).
+//! - The config types [`SandboxRuntimeConfig`], [`NetworkConfig`],
+//!   [`FilesystemConfig`], [`IgnoreViolationsConfig`], [`RipgrepConfig`],
+//!   [`WindowsConfig`] (the Rust structs replace the TS zod `*Schema` exports)
+//!   ([`config`]).
+//! - The Windows status/path API [`get_srt_win_path`] plus the ported status
+//!   command-arg/parse helpers ([`group_status_args`] / [`parse_group_status`]
+//!   and [`wfp_status_args`] / [`parse_wfp_status`] — the Rust split of the TS
+//!   `getWindowsGroupStatus`/`getWindowsWfpStatus`, which build an argv and
+//!   parse its stdout), and the consts [`DEFAULT_WINDOWS_GROUP_NAME`] /
+//!   [`DEFAULT_WINDOWS_PROXY_PORT_RANGE`] ([`windows`]). The admin
+//!   install/uninstall flow (TS
+//!   `installWindowsSandbox`/`uninstallWindowsSandbox`) is a tracked gap and is
+//!   not yet re-exported.
+//! - [`get_default_write_paths`] — the default-write-path utility
+//!   ([`path_utils`]).
+
 #![forbid(unsafe_code)]
+
+pub use crate::config::{
+    FilesystemConfig, IgnoreViolationsConfig, NetworkConfig, RipgrepConfig, SandboxRuntimeConfig,
+    WindowsConfig,
+};
+pub use crate::manager::SandboxManager;
+pub use crate::path_utils::get_default_write_paths;
+pub use crate::violation_store::{SandboxViolationStore, Violation};
+pub use crate::windows::{
+    get_srt_win_path, group_status_args, parse_group_status, parse_wfp_status, wfp_status_args,
+    DEFAULT_WINDOWS_GROUP_NAME, DEFAULT_WINDOWS_PROXY_PORT_RANGE,
+};
 
 pub mod config;
 pub mod dial;

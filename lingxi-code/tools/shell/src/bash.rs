@@ -471,7 +471,6 @@ impl Tool for BashTool {
         _progress_tx: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
         use sandbox::decision::{should_use_sandbox, SandboxDecision};
-        use sandbox::wrap::wrap_with_sandbox;
         use traits::sandbox::ProcessCommand as SbxCommand;
 
         let cmd_str = input
@@ -567,7 +566,23 @@ impl Tool for BashTool {
         let inner_cmd = match decision {
             SandboxDecision::NoSandbox => spawn_cmd.clone(),
             SandboxDecision::Sandbox { policy: _ } => {
-                match wrap_with_sandbox(&spawn_cmd, &self.ctx.sandbox_runtime, self.ctx.platform) {
+                // Wrap through the injected async `SandboxRunner`. The default
+                // `LegacyWrapRunner` forwards straight to the sync
+                // `wrap_with_sandbox` (ignoring `bin_shell`/`cwd`), so this is
+                // byte-identical to the previous direct call; a live runner uses
+                // the shell + workspace cwd to scope the sandbox.
+                match self
+                    .ctx
+                    .sandbox_runner
+                    .wrap(
+                        &spawn_cmd,
+                        &self.ctx.sandbox_runtime,
+                        self.ctx.platform,
+                        Some(&shell),
+                        Some(self.ctx.workspace.as_path()),
+                    )
+                    .await
+                {
                     Ok(wrapped) => wrapped,
                     Err(sandbox::wrap::SandboxWrapError::Unsupported(s)) => {
                         emit_failed(&self.ctx.bus, &request_id, "sandbox_refused", started_at)
@@ -682,7 +697,12 @@ impl Tool for BashTool {
         let sandboxed = self.ctx.sandbox.bypass_with_audit(pcmd, "bash_tool_call");
 
         // ===== Foreground spawn =====
-        match self.ctx.process.run(&sandboxed).await {
+        let run_result = self.ctx.process.run(&sandboxed).await;
+        // The wrapped command has finished: tear down any per-command sandbox
+        // state (e.g. bwrap mount points). No-op for the default
+        // `LegacyWrapRunner`; only the live runner has anything to clean up.
+        self.ctx.sandbox_runner.cleanup_after_command().await;
+        match run_result {
             Ok(out) if out.timed_out => {
                 let mut meta: LogEventMetadata = HashMap::new();
                 meta.insert(
@@ -1238,6 +1258,94 @@ mod tests {
         assert!(
             !bypassed.contains("sandbox-exec") && !bypassed.contains("bwrap"),
             "dangerouslyDisableSandbox should bypass the sandbox, got: {bypassed}"
+        );
+    }
+
+    /// A `SandboxRunner` that records every `wrap`/`cleanup_after_command` call
+    /// and returns a sentinel-prefixed wrapped command, so a test can prove the
+    /// Bash tool routes through `ctx.sandbox_runner` (not the sync free fn) with
+    /// the right args and invokes cleanup after the command finishes.
+    struct WrapCall {
+        command: String,
+        bin_shell: Option<String>,
+        cwd: Option<std::path::PathBuf>,
+    }
+
+    #[derive(Default)]
+    struct RecordingSandboxRunner {
+        wrap_calls: std::sync::Mutex<Vec<WrapCall>>,
+        cleanups: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait]
+    impl tool_api::SandboxRunner for RecordingSandboxRunner {
+        async fn wrap(
+            &self,
+            command: &str,
+            _cfg: &sandbox::runtime_config::SandboxRuntimeConfig,
+            _platform: sandbox::runtime_config::Platform,
+            bin_shell: Option<&str>,
+            cwd: Option<&std::path::Path>,
+        ) -> Result<String, sandbox::wrap::SandboxWrapError> {
+            self.wrap_calls.lock().unwrap().push(WrapCall {
+                command: command.to_string(),
+                bin_shell: bin_shell.map(ToString::to_string),
+                cwd: cwd.map(std::path::Path::to_path_buf),
+            });
+            Ok(format!("WRAPPED::{command}"))
+        }
+
+        async fn cleanup_after_command(&self) {
+            self.cleanups
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    #[tokio::test]
+    async fn sandbox_branch_routes_through_injected_runner_and_cleans_up() {
+        use sandbox::decision::ProjectTrustLevel;
+        let last = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let runner = Arc::new(RecordingSandboxRunner::default());
+        let mut ctx = shell_test_ctx(ok_output());
+        // Force the Sandbox branch: available sandbox + untrusted project.
+        ctx.sandbox_available = true;
+        ctx.project_trust = ProjectTrustLevel::Untrusted;
+        ctx.workspace = std::path::PathBuf::from("/tmp");
+        ctx.sandbox_runner = runner.clone();
+        ctx.process = Arc::new(CapturingRunner {
+            out: ok_output(),
+            last_args: last.clone(),
+        });
+        let tool = BashTool::new(ctx);
+        tool.call(json!({"command": "echo hi"}), use_ctx(), fresh_tx())
+            .await
+            .expect("ok");
+
+        // The injected runner was called exactly once, with the resolved shell
+        // and the workspace cwd.
+        let calls = runner.wrap_calls.lock().unwrap();
+        assert_eq!(calls.len(), 1, "wrap should be called once");
+        let call = &calls[0];
+        assert!(
+            call.command.contains("echo hi"),
+            "runner received the spawn command, got: {}",
+            call.command
+        );
+        assert_eq!(call.bin_shell.as_deref(), Some(resolve_shell_path()));
+        assert_eq!(call.cwd.as_deref(), Some(std::path::Path::new("/tmp")));
+
+        // The runner's wrapped output (sentinel) is what actually got spawned.
+        let spawned = last.lock().unwrap()[2].clone();
+        assert!(
+            spawned.contains("WRAPPED::"),
+            "the runner's wrapped command must be spawned, got: {spawned}"
+        );
+
+        // cleanup_after_command ran after the command finished.
+        assert_eq!(
+            runner.cleanups.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "cleanup_after_command must be invoked once"
         );
     }
 

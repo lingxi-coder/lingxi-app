@@ -159,7 +159,6 @@ impl Tool for PowerShellTool {
         _progress_tx: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
         use sandbox::decision::{should_use_sandbox, SandboxDecision};
-        use sandbox::wrap::wrap_with_sandbox;
         use traits::sandbox::ProcessCommand as SbxCommand;
 
         let cmd_str = input
@@ -216,7 +215,23 @@ impl Tool for PowerShellTool {
         let final_cmd = match decision {
             SandboxDecision::NoSandbox => cmd_str.clone(),
             SandboxDecision::Sandbox { policy: _ } => {
-                match wrap_with_sandbox(&cmd_str, &self.ctx.sandbox_runtime, self.ctx.platform) {
+                // Wrap through the injected async `SandboxRunner`. The default
+                // `LegacyWrapRunner` forwards to the sync `wrap_with_sandbox`
+                // (ignoring `bin_shell`/`cwd`), so this is byte-identical to the
+                // previous direct call.
+                let bin_shell = bin.display().to_string();
+                match self
+                    .ctx
+                    .sandbox_runner
+                    .wrap(
+                        &cmd_str,
+                        &self.ctx.sandbox_runtime,
+                        self.ctx.platform,
+                        Some(&bin_shell),
+                        Some(self.ctx.workspace.as_path()),
+                    )
+                    .await
+                {
                     Ok(w) => w,
                     Err(sandbox::wrap::SandboxWrapError::Unsupported(s)) => {
                         return Err(ToolError::InvalidInput(s));
@@ -244,7 +259,11 @@ impl Tool for PowerShellTool {
             .sandbox
             .bypass_with_audit(pcmd, "powershell_tool_call");
 
-        match self.ctx.process.run(&sandboxed).await {
+        let run_result = self.ctx.process.run(&sandboxed).await;
+        // The wrapped command has finished: tear down any per-command sandbox
+        // state. No-op for the default `LegacyWrapRunner`.
+        self.ctx.sandbox_runner.cleanup_after_command().await;
+        match run_result {
             Ok(out) => {
                 let (stdout_clean, _ansi_out) = strip_ansi_count(&out.stdout);
                 let (stderr_clean, _ansi_err) = strip_ansi_count(&out.stderr);
@@ -422,5 +441,100 @@ mod tests {
         // `#[error("sandbox not supported on this platform")]`.
         let err = traits::sandbox::SandboxError::Unsupported;
         assert_eq!(err.to_string(), "sandbox not supported on this platform");
+    }
+
+    /// Records `wrap`/`cleanup_after_command` calls so a test can prove the
+    /// PowerShell tool routes through `ctx.sandbox_runner`.
+    struct WrapCall {
+        command: String,
+        bin_shell: Option<String>,
+        cwd: Option<std::path::PathBuf>,
+    }
+
+    #[derive(Default)]
+    struct RecordingSandboxRunner {
+        wrap_calls: std::sync::Mutex<Vec<WrapCall>>,
+        cleanups: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl tool_api::SandboxRunner for RecordingSandboxRunner {
+        async fn wrap(
+            &self,
+            command: &str,
+            _cfg: &sandbox::runtime_config::SandboxRuntimeConfig,
+            _platform: sandbox::runtime_config::Platform,
+            bin_shell: Option<&str>,
+            cwd: Option<&std::path::Path>,
+        ) -> Result<String, sandbox::wrap::SandboxWrapError> {
+            self.wrap_calls.lock().unwrap().push(WrapCall {
+                command: command.to_string(),
+                bin_shell: bin_shell.map(ToString::to_string),
+                cwd: cwd.map(std::path::Path::to_path_buf),
+            });
+            Ok(format!("WRAPPED::{command}"))
+        }
+
+        async fn cleanup_after_command(&self) {
+            self.cleanups
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[tokio::test]
+    async fn sandbox_branch_routes_through_injected_runner_and_cleans_up() {
+        use sandbox::decision::ProjectTrustLevel;
+        use std::os::unix::fs::PermissionsExt;
+        use std::sync::Arc;
+
+        let runner = Arc::new(RecordingSandboxRunner::default());
+        let mut ctx = shell_test_ctx(ProcessOutput {
+            stdout: String::new(),
+            stderr: String::new(),
+            exit_code: 0,
+            timed_out: false,
+        });
+        // Force the Sandbox branch: available sandbox + untrusted project.
+        ctx.sandbox_available = true;
+        ctx.project_trust = ProjectTrustLevel::Untrusted;
+        ctx.workspace = std::path::PathBuf::from("/tmp");
+        ctx.sandbox_runner = runner.clone();
+        let tool = PowerShellTool::new(ctx);
+
+        // Stub a `pwsh` on PATH so the tool gets past the binary probe.
+        let dir = tempfile::tempdir().unwrap();
+        let fake = dir.path().join("pwsh");
+        std::fs::write(&fake, "#!/bin/sh\necho stub\n").unwrap();
+        let mut p = std::fs::metadata(&fake).unwrap().permissions();
+        p.set_mode(0o755);
+        std::fs::set_permissions(&fake, p).unwrap();
+
+        let prior = std::env::var_os("PATH");
+        std::env::set_var("PATH", dir.path());
+        let res = tool
+            .call(json!({"command": "Get-Date"}), fresh_ctx(), fresh_tx())
+            .await;
+        match prior {
+            Some(p) => std::env::set_var("PATH", p),
+            None => std::env::remove_var("PATH"),
+        }
+        res.expect("ok");
+
+        let calls = runner.wrap_calls.lock().unwrap();
+        assert_eq!(calls.len(), 1, "wrap should be called once");
+        let call = &calls[0];
+        assert_eq!(call.command, "Get-Date");
+        // bin_shell is the resolved pwsh path.
+        assert_eq!(
+            call.bin_shell.as_deref(),
+            Some(fake.display().to_string().as_str())
+        );
+        assert_eq!(call.cwd.as_deref(), Some(std::path::Path::new("/tmp")));
+        assert_eq!(
+            runner.cleanups.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "cleanup_after_command must be invoked once"
+        );
     }
 }

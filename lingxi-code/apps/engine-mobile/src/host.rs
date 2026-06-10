@@ -364,6 +364,7 @@ pub async fn build_mobile_inner(
         sandbox,
         clock: clock.clone(),
         sandbox_runtime: SandboxRuntimeConfig::default(),
+        sandbox_runner: tool_api::default_sandbox_runner(),
         permission_mode: PermissionMode::Default,
         project_trust: ProjectTrustLevel::Trusted,
         sandbox_available: false,

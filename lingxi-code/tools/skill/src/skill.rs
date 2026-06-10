@@ -212,10 +212,15 @@ struct SkillShellRunner {
     project_trust: sandbox::decision::ProjectTrustLevel,
     /// Whether the host has a working sandbox backend (`bash.rs:504`).
     sandbox_available: bool,
-    /// Sandbox policy runtime config — drives `wrap_with_sandbox` (`bash.rs:533`).
+    /// Sandbox policy runtime config — drives the wrap (`bash.rs:533`).
     sandbox_runtime: sandbox::runtime_config::SandboxRuntimeConfig,
-    /// Detected platform — selects the `wrap_with_sandbox` branch (`bash.rs:533`).
+    /// Detected platform — selects the wrap branch (`bash.rs:533`).
     platform: sandbox::runtime_config::Platform,
+    /// Injected async sandbox seam, threaded from the `SkillTool`'s
+    /// `BuiltinToolContext` so embedded `!command` expansion wraps through the
+    /// same runner the Bash tool uses (default `LegacyWrapRunner` =
+    /// byte-identical to the previous direct `wrap_with_sandbox` call).
+    sandbox_runner: Arc<dyn tool_api::SandboxRunner>,
 }
 
 /// Resolve the login shell exactly like `bash.rs::resolve_shell_path`
@@ -250,7 +255,6 @@ impl command_api::ShellRunner for SkillShellRunner {
         _shell: Option<command_api::FrontmatterShell>,
     ) -> Result<command_api::ShellOut, command_api::ShellRunError> {
         use sandbox::decision::{should_use_sandbox, SandboxDecision};
-        use sandbox::wrap::wrap_with_sandbox;
         use traits::sandbox::ProcessCommand;
 
         let shell_path = resolve_skill_shell_path();
@@ -289,7 +293,21 @@ impl command_api::ShellRunner for SkillShellRunner {
             // generic failure (the inner string is preserved verbatim — the same
             // string bash surfaces). See the struct doc.
             SandboxDecision::Sandbox { policy: _ } => {
-                match wrap_with_sandbox(&spawn_cmd, &self.sandbox_runtime, self.platform) {
+                // Wrap through the injected async `SandboxRunner` (same seam the
+                // Bash tool uses). The default `LegacyWrapRunner` forwards to the
+                // sync `wrap_with_sandbox` (ignoring `bin_shell`/`cwd`), so this
+                // is byte-identical to the previous direct call.
+                match self
+                    .sandbox_runner
+                    .wrap(
+                        &spawn_cmd,
+                        &self.sandbox_runtime,
+                        self.platform,
+                        Some(shell_path),
+                        Some(self.workspace.as_path()),
+                    )
+                    .await
+                {
                     Ok(wrapped) => wrapped,
                     Err(sandbox::wrap::SandboxWrapError::Unsupported(s)
                     | sandbox::wrap::SandboxWrapError::SbplWrite(s)) => {
@@ -328,7 +346,11 @@ impl command_api::ShellRunner for SkillShellRunner {
         let sandboxed = self
             .sandbox
             .bypass_with_audit(pcmd, "skill_shell_expansion");
-        match self.process.run(&sandboxed).await {
+        let run_result = self.process.run(&sandboxed).await;
+        // The wrapped command has finished: tear down any per-command sandbox
+        // state. No-op for the default `LegacyWrapRunner`.
+        self.sandbox_runner.cleanup_after_command().await;
+        match run_result {
             // A timeout maps to the TS interrupted `ShellError` path so the engine
             // formats "Shell command interrupted …" (mirrors bash's timeout->error).
             Ok(out) if out.timed_out => Err(command_api::ShellRunError {
@@ -772,6 +794,9 @@ impl Tool for SkillTool {
                     sandbox_available: self.ctx.sandbox_available,
                     sandbox_runtime: self.ctx.sandbox_runtime.clone(),
                     platform: self.ctx.platform,
+                    // Thread the injected runner so the child wraps through the
+                    // same seam (default `LegacyWrapRunner` = byte-identical).
+                    sandbox_runner: self.ctx.sandbox_runner.clone(),
                 }),
                 permission_gate: Arc::new(SkillShellPermissionGate),
             };
@@ -1631,6 +1656,102 @@ mod tests {
             !seen[0].contains("${CLAUDE_SESSION_ID}"),
             "token must be substituted BEFORE shell expansion, got: {}",
             seen[0]
+        );
+    }
+
+    /// Records `wrap`/`cleanup_after_command` calls so a test can prove the
+    /// skill `!command` expansion routes through `ctx.sandbox_runner`.
+    struct WrapCall {
+        command: String,
+        bin_shell: Option<String>,
+        cwd: Option<std::path::PathBuf>,
+    }
+
+    #[derive(Default)]
+    struct RecordingSandboxRunner {
+        wrap_calls: std::sync::Mutex<Vec<WrapCall>>,
+        cleanups: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait]
+    impl tool_api::SandboxRunner for RecordingSandboxRunner {
+        async fn wrap(
+            &self,
+            command: &str,
+            _cfg: &sandbox::runtime_config::SandboxRuntimeConfig,
+            _platform: sandbox::runtime_config::Platform,
+            bin_shell: Option<&str>,
+            cwd: Option<&std::path::Path>,
+        ) -> Result<String, sandbox::wrap::SandboxWrapError> {
+            self.wrap_calls.lock().unwrap().push(WrapCall {
+                command: command.to_string(),
+                bin_shell: bin_shell.map(ToString::to_string),
+                cwd: cwd.map(std::path::Path::to_path_buf),
+            });
+            Ok(format!("WRAPPED::{command}"))
+        }
+
+        async fn cleanup_after_command(&self) {
+            self.cleanups
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    /// The embedded `!command` shell expansion routes through the injected
+    /// `ctx.sandbox_runner` (not the sync free fn): the runner's wrapped output
+    /// is what gets spawned, it sees the resolved shell + workspace cwd, and
+    /// `cleanup_after_command` runs after the command finishes.
+    #[tokio::test]
+    async fn shell_expansion_routes_through_injected_runner_and_cleans_up() {
+        use sandbox::decision::ProjectTrustLevel;
+
+        let capture = Arc::new(CapturingProcess {
+            seen: std::sync::Mutex::new(Vec::new()),
+            stdout: "OUT\n".into(),
+        });
+        let runner = Arc::new(RecordingSandboxRunner::default());
+        let mut ctx = shell_test_ctx(dummy_out());
+        ctx.process = capture.clone();
+        // Force the Sandbox branch: available sandbox + untrusted project.
+        ctx.sandbox_available = true;
+        ctx.project_trust = ProjectTrustLevel::Untrusted;
+        ctx.workspace = std::path::PathBuf::from("/tmp");
+        ctx.sandbox_runner = runner.clone();
+
+        let desc = SkillDescriptor {
+            body: "pre !`echo hi` post".into(),
+            ..prompt_desc("wrap")
+        };
+        let tool = SkillTool::with_loader(ctx, Arc::new(FixedLoader(Some(desc))));
+        tool.call(json!({"skill": "wrap"}), fresh_ctx(), fresh_tx())
+            .await
+            .expect("ok");
+
+        let calls = runner.wrap_calls.lock().unwrap();
+        assert_eq!(calls.len(), 1, "wrap should be called once");
+        let call = &calls[0];
+        assert!(
+            call.command.contains("echo hi"),
+            "runner received the embedded command, got: {}",
+            call.command
+        );
+        assert_eq!(call.bin_shell.as_deref(), Some(resolve_skill_shell_path()));
+        assert_eq!(call.cwd.as_deref(), Some(std::path::Path::new("/tmp")));
+
+        // The runner's wrapped output (sentinel) is what actually got spawned.
+        let seen = capture.seen.lock().unwrap();
+        assert_eq!(seen.len(), 1, "exactly one embedded command ran");
+        assert!(
+            seen[0].contains("WRAPPED::"),
+            "the runner's wrapped command must be spawned, got: {}",
+            seen[0]
+        );
+        drop(seen);
+
+        assert_eq!(
+            runner.cleanups.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "cleanup_after_command must be invoked once"
         );
     }
 

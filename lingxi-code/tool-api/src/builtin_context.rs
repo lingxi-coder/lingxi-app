@@ -8,6 +8,7 @@
 //! eventually slim this surface.
 
 use crate::read_file_state::ReadFileStateMap;
+use crate::sandbox_runner::SandboxRunner;
 use api_client::AnthropicProvider;
 use permission::PermissionMode;
 use traits::permission_gate::PermissionGate;
@@ -55,6 +56,11 @@ pub struct BuiltinToolContext {
     pub clock: Arc<dyn Clock>,
     /// Sandbox policy runtime config — drives `wrap_with_sandbox` (M4-02).
     pub sandbox_runtime: SandboxRuntimeConfig,
+    /// Async sandbox-wrap seam — the shell/skill tools call `wrap` through this
+    /// handle instead of `sandbox::wrap::wrap_with_sandbox` directly, so the
+    /// host can inject a live `sandbox-runtime`-backed runner. Defaults to
+    /// [`crate::sandbox_runner::LegacyWrapRunner`] (byte-identical to today).
+    pub sandbox_runner: Arc<dyn SandboxRunner>,
     /// Active permission mode (M4-02).
     pub permission_mode: PermissionMode,
     /// Whether the project workspace has been explicitly trusted (M4-02).

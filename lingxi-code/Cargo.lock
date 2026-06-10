@@ -1390,6 +1390,7 @@ dependencies = [
  "protocol",
  "providers",
  "sandbox",
+ "sandbox-runtime-runner",
  "secret",
  "serde_json",
  "sidequery",
@@ -4028,6 +4029,18 @@ dependencies = [
  "webpki-roots 0.26.11",
  "which",
  "x509-parser",
+]
+
+[[package]]
+name = "sandbox-runtime-runner"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "sandbox",
+ "sandbox-runtime",
+ "serde_json",
+ "tokio",
+ "tool-api",
 ]
 
 [[package]]

@@ -31,6 +31,12 @@ anthropic-oauth = { path = "../../anthropic-oauth" }
 secret = { path = "../../secret" }
 permission = { path = "../../permission", features = ["bash-ast"] }
 sandbox = { path = "../../sandbox" }
+# The LIVE `SandboxRunner` injected into the desktop tool context (Task 4):
+# `SandboxRuntimeRunner` brings up the faithful sandbox-runtime proxy / bridge /
+# MITM / seccomp stack. Desktop-only — `engine-mobile` deliberately does NOT
+# depend on this crate (nor on `sandbox-runtime`); mobile keeps the legacy
+# sync `default_sandbox_runner()`.
+sandbox-runtime-runner = { path = "../../sandbox-runtime-runner" }
 telemetry = { path = "../../telemetry" }
 cost = { path = "../../cost" }
 mcp = { path = "../../mcp" }

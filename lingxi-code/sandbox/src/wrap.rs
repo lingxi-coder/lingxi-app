@@ -208,10 +208,16 @@ pub(crate) fn generate_sbpl_profile(policy: &SandboxRuntimeConfig) -> String {
         let escaped = sbpl_regex_escape(p);
         out.push_str(&format!("(deny file-read* (regex \"^{escaped}\"))\n"));
     }
-    let want_network = !policy.network.allowed_domains.is_empty()
-        || policy.network.allow_local_binding
-        || policy.network.allow_all_unix_sockets;
-    if want_network {
+    // Conservative network posture (same keying as the bwrap path, finding 2):
+    // emit full `(allow network*)` ONLY for a full-allow policy (allowed_domains
+    // non-empty == NetworkPolicy::Allowed). LoopbackOnly/Disabled get NO network
+    // rule (default-deny) so a loopback policy can never leak external egress.
+    // `allow_local_binding`/unix-socket fields no longer widen this to full net.
+    // REFINEMENT (follow-up): macOS SBPL can express loopback-only via
+    // `(allow network* (local ...))`; until then LoopbackOnly is stricter on
+    // macOS (no loopback) than on Linux (--unshare-net keeps loopback) — safe,
+    // errs restrictive.
+    if !policy.network.allowed_domains.is_empty() {
         out.push_str("(allow network*)\n");
     }
     out
@@ -253,8 +259,25 @@ fn write_sbpl_tempfile(profile: &str) -> Result<String, SandboxWrapError> {
 
 #[cfg(test)]
 mod tests {
-    use super::wrap_linux_bwrap;
+    use super::{generate_sbpl_profile, wrap_linux_bwrap};
     use crate::runtime_config::SandboxRuntimeConfig;
+
+    #[test]
+    fn macos_sbpl_loopback_does_not_grant_full_network() {
+        // finding-2 analog on the macOS backend: a LoopbackOnly policy
+        // (allow_local_binding true, allowed_domains empty) must NOT emit the
+        // full `(allow network*)` egress rule.
+        let mut cfg = SandboxRuntimeConfig::default();
+        cfg.network.allow_local_binding = true;
+        cfg.network.allow_all_unix_sockets = true;
+        assert!(
+            !generate_sbpl_profile(&cfg).contains("(allow network*)"),
+            "loopback/unix-socket policy must not grant full macOS network egress"
+        );
+        // Only a full-allow policy (allowed_domains non-empty) gets full network.
+        cfg.network.allowed_domains = vec!["*".into()];
+        assert!(generate_sbpl_profile(&cfg).contains("(allow network*)"));
+    }
 
     #[test]
     fn bwrap_creates_a_user_namespace() {

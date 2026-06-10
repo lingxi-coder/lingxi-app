@@ -473,18 +473,7 @@ fn decode_response_body(body_json: Value) -> Result<LlmResponse, LlmError> {
         }
     }
 
-    let usage = body_json
-        .get("usage")
-        .map(|usage| crate::Usage {
-            billable_tokens: crate::TokenUsage {
-                input: usage.get("prompt_tokens").and_then(Value::as_u64).unwrap_or(0),
-                output: usage.get("completion_tokens").and_then(Value::as_u64).unwrap_or(0),
-                ..Default::default()
-            },
-            provider_metadata: usage.clone(),
-            ..Default::default()
-        })
-        .unwrap_or_default();
+    let usage = body_json.get("usage").map(normalize_usage).unwrap_or_default();
 
     Ok(LlmResponse {
         id,
@@ -497,15 +486,27 @@ fn decode_response_body(body_json: Value) -> Result<LlmResponse, LlmError> {
 }
 
 fn normalize_usage(usage: &Value) -> Usage {
+    let prompt_tokens = usage.get("prompt_tokens").and_then(Value::as_u64).unwrap_or(0);
+    let completion_tokens = usage.get("completion_tokens").and_then(Value::as_u64).unwrap_or(0);
+    // OpenAI reports cached/reasoning tokens as subsets of prompt/completion
+    // counts; subtract them so every TokenUsage bucket stays independently billable.
+    let cached_tokens = usage
+        .get("prompt_tokens_details")
+        .and_then(|details| details.get("cached_tokens"))
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let reasoning_tokens = usage
+        .get("completion_tokens_details")
+        .and_then(|details| details.get("reasoning_tokens"))
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+
     Usage {
         billable_tokens: crate::TokenUsage {
-            input: usage.get("prompt_tokens").and_then(Value::as_u64).unwrap_or(0),
-            output: usage.get("completion_tokens").and_then(Value::as_u64).unwrap_or(0),
-            reasoning_output: usage
-                .get("completion_tokens_details")
-                .and_then(|details| details.get("reasoning_tokens"))
-                .and_then(Value::as_u64)
-                .unwrap_or(0),
+            input: prompt_tokens.saturating_sub(cached_tokens),
+            output: completion_tokens.saturating_sub(reasoning_tokens),
+            cache_read: cached_tokens,
+            reasoning_output: reasoning_tokens,
             ..Default::default()
         },
         context_tokens: usage.get("total_tokens").and_then(Value::as_u64),

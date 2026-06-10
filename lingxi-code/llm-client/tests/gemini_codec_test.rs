@@ -106,3 +106,46 @@ fn sse_stream_reassembles_text_then_thought_then_function_call() {
     assert!(matches!(events[10], LlmEvent::MessageDelta { delta: llm_client::MessageDeltaPayload { stop_reason: Some(ref reason) }, .. } if reason == "tool_use"));
     assert!(matches!(events.last(), Some(LlmEvent::MessageStop)));
 }
+
+#[test]
+fn decode_usage_excludes_cached_tokens_from_input_and_maps_thoughts() {
+    let codec = GeminiCodec::new("https://generativelanguage.googleapis.com/v1beta");
+    let response = ProviderResponse::json(200, serde_json::json!({
+        "modelVersion":"gemini-2.0-flash",
+        "candidates":[{"content":{"role":"model","parts":[{"text":"hi"}]},"finishReason":"STOP"}],
+        "usageMetadata":{"promptTokenCount":100,"candidatesTokenCount":10,"cachedContentTokenCount":40,"thoughtsTokenCount":5,"totalTokenCount":115}
+    }));
+
+    let decoded = codec.decode_response(response).unwrap();
+
+    assert_eq!(decoded.usage.billable_tokens.input, 60);
+    assert_eq!(decoded.usage.billable_tokens.cache_read, 40);
+    assert_eq!(decoded.usage.billable_tokens.output, 10);
+    assert_eq!(decoded.usage.billable_tokens.reasoning_output, 5);
+    assert_eq!(decoded.usage.provider_reported_total_tokens, Some(115));
+}
+
+#[test]
+fn stream_usage_only_final_frame_is_not_lost() {
+    let frames = [
+        r#"{"candidates":[{"content":{"role":"model","parts":[{"text":"hi"}]},"finishReason":"STOP"}]}"#,
+        r#"{"usageMetadata":{"promptTokenCount":5,"candidatesTokenCount":2,"totalTokenCount":7}}"#,
+    ];
+    let mut decoder = GeminiCodec::new("https://generativelanguage.googleapis.com/v1beta").stream_decoder();
+    let mut events = Vec::new();
+    for frame in frames {
+        events.extend(decoder.decode_frame(RawStreamFrame::new(frame.as_bytes().to_vec())).unwrap());
+    }
+    events.extend(decoder.finish().unwrap());
+
+    let usage = events
+        .iter()
+        .find_map(|event| match event {
+            LlmEvent::MessageDelta { usage: Some(usage), .. } => Some(usage.clone()),
+            _ => None,
+        })
+        .expect("terminal usage should survive a usage-only final frame");
+
+    assert_eq!(usage.billable_tokens.input, 5);
+    assert_eq!(usage.billable_tokens.output, 2);
+}

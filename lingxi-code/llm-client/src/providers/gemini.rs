@@ -99,6 +99,12 @@ impl StreamDecoder for GeminiStreamDecoder {
         })?;
 
         let mut out = Vec::new();
+        // Usage can arrive on a frame without candidates (e.g. the final
+        // usage-only chunk), so capture it before the candidate guard.
+        if let Some(usage) = root.get("usageMetadata") {
+            self.usage = Some(decode_usage(usage));
+        }
+
         let Some(candidate) = root
             .get("candidates")
             .and_then(Value::as_array)
@@ -112,10 +118,6 @@ impl StreamDecoder for GeminiStreamDecoder {
             out.push(LlmEvent::MessageStart {
                 response: Box::new(decode_stream_start(&root)),
             });
-        }
-
-        if let Some(usage) = root.get("usageMetadata") {
-            self.usage = Some(decode_usage(usage));
         }
 
         if let Some(finish_reason) = candidate.get("finishReason").and_then(Value::as_str) {
@@ -191,22 +193,33 @@ fn decode_stream_start(root: &Value) -> LlmResponse {
 }
 
 fn decode_usage(value: &Value) -> Usage {
+    let prompt_tokens = value
+        .get("promptTokenCount")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    // Gemini reports cached tokens as a subset of promptTokenCount; subtract
+    // them so every TokenUsage bucket stays independently billable.
+    let cached_tokens = value
+        .get("cachedContentTokenCount")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+
     Usage {
         billable_tokens: crate::TokenUsage {
-            input: value
-                .get("promptTokenCount")
-                .and_then(Value::as_u64)
-                .unwrap_or(0),
+            input: prompt_tokens.saturating_sub(cached_tokens),
             output: value
                 .get("candidatesTokenCount")
                 .and_then(Value::as_u64)
                 .unwrap_or(0),
-            cache_read: value
-                .get("cachedContentTokenCount")
+            cache_read: cached_tokens,
+            reasoning_output: value
+                .get("thoughtsTokenCount")
                 .and_then(Value::as_u64)
                 .unwrap_or(0),
             ..Default::default()
         },
+        context_tokens: value.get("totalTokenCount").and_then(Value::as_u64),
+        provider_reported_total_tokens: value.get("totalTokenCount").and_then(Value::as_u64),
         provider_metadata: value.clone(),
         ..Default::default()
     }
@@ -456,24 +469,7 @@ fn decode_response_body(body_json: Value) -> Result<LlmResponse, LlmError> {
 
     let usage = body_json
         .get("usageMetadata")
-        .map(|usage| Usage {
-                billable_tokens: crate::TokenUsage {
-                    input: usage
-                        .get("promptTokenCount")
-                        .and_then(Value::as_u64)
-                        .unwrap_or(0),
-                    output: usage
-                        .get("candidatesTokenCount")
-                        .and_then(Value::as_u64)
-                        .unwrap_or(0),
-                    cache_read: usage
-                        .get("cachedContentTokenCount")
-                        .and_then(Value::as_u64)
-                        .unwrap_or(0),
-                    ..Default::default()
-                },
-            ..Default::default()
-        })
+        .map(decode_usage)
         .unwrap_or_default();
 
     Ok(LlmResponse {

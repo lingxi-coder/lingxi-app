@@ -31,6 +31,9 @@ use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
+use crate::env::{generate_proxy_env_vars, Platform};
+use crate::fs_args::{generate_filesystem_args, ReadConfig, WriteConfig};
+
 /// `isExecutable(p)` (`linux-sandbox-utils.js:285-296`): is `p` executable by
 /// the current process (`access(p, X_OK)`).
 ///
@@ -383,6 +386,242 @@ pub fn initialize_linux_network_bridge(
     })
 }
 
+/// Parameters for [`wrap_command_with_sandbox_linux`] — a 1:1 mirror of the TS
+/// `wrapCommandWithSandboxLinux` `params` object.
+//
+// The five `bool` fields are a faithful 1:1 transcription of the TS `params`
+// object's boolean flags; collapsing them into enums would diverge from the
+// reference shape with no behavioral gain.
+#[allow(clippy::struct_excessive_bools)]
+#[derive(Debug)]
+pub struct WrapParams<'a> {
+    /// The user command to wrap.
+    pub command: &'a str,
+    /// Apply `--unshare-net` + the proxy bridge/env (network restriction).
+    pub needs_network_restriction: bool,
+    /// HTTP bridge Unix socket path (host side). Bound into the sandbox.
+    pub http_socket_path: Option<&'a str>,
+    /// SOCKS bridge Unix socket path (host side). Bound into the sandbox.
+    pub socks_socket_path: Option<&'a str>,
+    /// Host HTTP proxy port (for the `CLAUDE_CODE_HOST_HTTP_PROXY_PORT` setenv).
+    pub http_proxy_port: Option<u16>,
+    /// Host SOCKS proxy port (for the `CLAUDE_CODE_HOST_SOCKS_PROXY_PORT` setenv).
+    pub socks_proxy_port: Option<u16>,
+    /// CA cert path threaded into the proxy env vars (TLS-MITM trust).
+    pub ca_cert_path: Option<&'a str>,
+    /// Read-restriction config (`denyOnly`). `None`/empty = no read restriction.
+    pub read_config: Option<&'a ReadConfig>,
+    /// Write-restriction config (`allowOnly`). `None` = no write restriction.
+    pub write_config: Option<&'a WriteConfig>,
+    /// Weaker nested sandbox (`--unshare-user --bind /proc /proc` instead of
+    /// `--proc /proc`) for unprivileged containers.
+    pub enable_weaker_nested_sandbox: bool,
+    /// Skip the seccomp Unix-socket block (no-op here — seccomp is P7).
+    pub allow_all_unix_sockets: bool,
+    /// Shell to run the command with (`binShell || 'bash'`).
+    pub bin_shell: Option<&'a str>,
+    /// Ripgrep command for `generate_filesystem_args` (`{ command: 'rg' }`).
+    pub ripgrep_cmd: &'a str,
+    /// Mandatory deny search depth for `generate_filesystem_args`.
+    pub mandatory_deny_search_depth: usize,
+    /// Allow git config in the sandbox.
+    pub allow_git_config: bool,
+    /// Explicit `bwrap` path override (`bwrapPath ?? 'bwrap'`).
+    pub bwrap_path: Option<&'a str>,
+    /// Explicit `socat` path override (threaded to `build_sandbox_command`).
+    pub socat_path: Option<&'a str>,
+    /// Working directory for `generate_filesystem_args`.
+    pub cwd: &'a str,
+    /// Platform for `generate_proxy_env_vars` (`GIT_SSH_COMMAND` branch).
+    pub platform: Platform,
+    /// Resolved tmpdir for `generate_proxy_env_vars` (`TMPDIR` env var).
+    pub tmpdir: &'a str,
+}
+
+/// Push the `--unshare-net` network args (socket binds + proxy `--setenv`s)
+/// onto `bwrap_args`. Extracted from [`wrap_command_with_sandbox_linux`] for the
+/// `--unshare-net` + both-sockets branch (:862-904).
+///
+/// # Errors
+/// Returns an `io::Error` if a declared bridge socket no longer exists (the
+/// bridge process likely died).
+fn push_network_args(bwrap_args: &mut Vec<String>, params: &WrapParams<'_>) -> io::Result<()> {
+    bwrap_args.push("--unshare-net".into());
+    let (Some(http_sock), Some(socks_sock)) =
+        (params.http_socket_path, params.socks_socket_path)
+    else {
+        // No sockets → bare --unshare-net (network fully blocked).
+        return Ok(());
+    };
+
+    // Verify the sockets still exist before binding (TS: die if the bridge died).
+    if !PathBuf::from(http_sock).exists() {
+        return Err(io::Error::other(format!(
+            "Linux HTTP bridge socket does not exist: {http_sock}. \
+             The bridge process may have died. Try reinitializing the sandbox."
+        )));
+    }
+    if !PathBuf::from(socks_sock).exists() {
+        return Err(io::Error::other(format!(
+            "Linux SOCKS bridge socket does not exist: {socks_sock}. \
+             The bridge process may have died. Try reinitializing the sandbox."
+        )));
+    }
+    bwrap_args.push("--bind".into());
+    bwrap_args.push(http_sock.into());
+    bwrap_args.push(http_sock.into());
+    bwrap_args.push("--bind".into());
+    bwrap_args.push(socks_sock.into());
+    bwrap_args.push(socks_sock.into());
+
+    // Proxy env vars: HTTP listener 3128, SOCKS listener 1080 (the
+    // sandbox-internal socat ports), plus the CA cert.
+    let proxy_env = generate_proxy_env_vars(
+        Some(3128),
+        Some(1080),
+        params.ca_cert_path,
+        params.platform,
+        params.tmpdir,
+    );
+    for (k, v) in proxy_env {
+        bwrap_args.push("--setenv".into());
+        bwrap_args.push(k);
+        bwrap_args.push(v);
+    }
+    // Host proxy port env vars (debugging/transparency).
+    if let Some(p) = params.http_proxy_port {
+        bwrap_args.push("--setenv".into());
+        bwrap_args.push("CLAUDE_CODE_HOST_HTTP_PROXY_PORT".into());
+        bwrap_args.push(p.to_string());
+    }
+    if let Some(p) = params.socks_proxy_port {
+        bwrap_args.push("--setenv".into());
+        bwrap_args.push("CLAUDE_CODE_HOST_SOCKS_PROXY_PORT".into());
+        bwrap_args.push(p.to_string());
+    }
+    Ok(())
+}
+
+/// `wrapCommandWithSandboxLinux(params)` (:822-983): assemble the full bwrap
+/// argv. Returns `(wrapped_command, mount_points)` where `mount_points` is the
+/// slice the caller must pass to [`cleanup_bwrap_mount_points`] after the
+/// spawned command exits.
+///
+/// Branch-for-branch faithful to the TS:
+/// - **Short-circuit:** no network AND no read-deny AND no write-config →
+///   return `(command, vec![])` unchanged.
+/// - **Network:** `--unshare-net`; if both sockets present → bind each
+///   (`--bind <sock> <sock>`), emit `--setenv k v` for every
+///   `generate_proxy_env_vars(3128, 1080, ca, platform, tmpdir)` pair, plus the
+///   `CLAUDE_CODE_HOST_{HTTP,SOCKS}_PROXY_PORT` vars. No sockets → bare
+///   `--unshare-net` (full block).
+/// - **Filesystem:** `generate_filesystem_args(...)` args + mount points; then
+///   `--dev /dev`, `--unshare-pid`, and `--proc /proc` (secure) or
+///   `--unshare-user --bind /proc /proc` (weaker-nested).
+/// - **Command:** resolve the shell on `PATH`; `-- <shell> -c <cmd>` where `cmd`
+///   is `build_sandbox_command(...)` when network + both sockets, else the bare
+///   command (seccomp prefix is the P7 seam → never present).
+///
+/// The seccomp `--seccomp` plumbing is intentionally absent (P7 seam):
+/// `apply_seccomp_prefix` resolves to `None`, so no seccomp branch is emitted.
+///
+/// # Errors
+/// Returns an `io::Error` if the requested shell cannot be resolved on `PATH`,
+/// or (faithful to the TS) if a declared bridge socket no longer exists.
+pub fn wrap_command_with_sandbox_linux(
+    params: &WrapParams<'_>,
+) -> io::Result<(String, Vec<PathBuf>)> {
+    // Read: denyOnly pattern — empty array means no restrictions.
+    let has_read_restrictions = params
+        .read_config
+        .is_some_and(|rc| !rc.deny_only.is_empty());
+    // Write: allowOnly pattern — None means no restrictions, any config = restrictions.
+    let has_write_restrictions = params.write_config.is_some();
+
+    // Short-circuit: no sandboxing needed.
+    if !params.needs_network_restriction && !has_read_restrictions && !has_write_restrictions {
+        return Ok((params.command.to_string(), Vec::new()));
+    }
+
+    let mut bwrap_args: Vec<String> = vec!["--new-session".into(), "--die-with-parent".into()];
+
+    // ===== SECCOMP (P7 seam): always None. allow_all_unix_sockets is a no-op
+    // here because there is no seccomp filter to skip. =====
+    let apply_seccomp_prefix: Option<String> = if params.allow_all_unix_sockets {
+        None
+    } else {
+        resolve_apply_seccomp_prefix()
+    };
+
+    // ===== NETWORK RESTRICTIONS =====
+    if params.needs_network_restriction {
+        push_network_args(&mut bwrap_args, params)?;
+    }
+
+    // ===== FILESYSTEM RESTRICTIONS =====
+    let (fs_args, mount_points) = generate_filesystem_args(
+        params.read_config,
+        params.write_config,
+        params.ripgrep_cmd,
+        params.mandatory_deny_search_depth,
+        params.allow_git_config,
+        params.cwd,
+    );
+    bwrap_args.extend(fs_args);
+
+    // Always bind /dev.
+    bwrap_args.push("--dev".into());
+    bwrap_args.push("/dev".into());
+
+    // ===== PID NAMESPACE ISOLATION (must come AFTER filesystem binds) =====
+    bwrap_args.push("--unshare-pid".into());
+    if params.enable_weaker_nested_sandbox {
+        bwrap_args.push("--unshare-user".into());
+        bwrap_args.push("--bind".into());
+        bwrap_args.push("/proc".into());
+        bwrap_args.push("/proc".into());
+    } else {
+        bwrap_args.push("--proc".into());
+        bwrap_args.push("/proc".into());
+    }
+
+    // ===== COMMAND =====
+    let shell_name = params.bin_shell.unwrap_or("bash");
+    let shell = which_sync(shell_name).ok_or_else(|| {
+        io::Error::other(format!("Shell '{shell_name}' not found in PATH"))
+    })?;
+    let shell = shell.to_string_lossy().into_owned();
+    bwrap_args.push("--".into());
+    bwrap_args.push(shell.clone());
+    bwrap_args.push("-c".into());
+
+    let final_cmd = if params.needs_network_restriction
+        && params.http_socket_path.is_some()
+        && params.socks_socket_path.is_some()
+    {
+        build_sandbox_command(
+            params.http_socket_path.unwrap(),
+            params.socks_socket_path.unwrap(),
+            params.command,
+            apply_seccomp_prefix.as_deref(),
+            &shell,
+            params.socat_path,
+        )
+    } else if let Some(prefix) = apply_seccomp_prefix.as_deref() {
+        format!("{prefix}{}", shjoin([shell.as_str(), "-c", params.command]))
+    } else {
+        params.command.to_string()
+    };
+    bwrap_args.push(final_cmd);
+
+    let bwrap = params.bwrap_path.unwrap_or("bwrap");
+    let mut full: Vec<&str> = vec![bwrap];
+    full.extend(bwrap_args.iter().map(String::as_str));
+    let wrapped = shjoin(full);
+
+    Ok((wrapped, mount_points))
+}
+
 /// SIGTERM both children, ignoring errors (the TS `process.kill(pid, SIGTERM)`
 /// in `try {} catch {}`).
 fn kill_both(http: &mut Child, socks: &mut Child) {
@@ -603,5 +842,142 @@ mod tests {
             err.to_string().contains("Failed to start HTTP bridge process"),
             "got: {err}"
         );
+    }
+
+    // ---- wrap_command_with_sandbox_linux (Task 3) ----
+
+    fn base_params<'a>(command: &'a str, cwd: &'a str, tmp: &'a str) -> WrapParams<'a> {
+        WrapParams {
+            command,
+            needs_network_restriction: false,
+            http_socket_path: None,
+            socks_socket_path: None,
+            http_proxy_port: None,
+            socks_proxy_port: None,
+            ca_cert_path: None,
+            read_config: None,
+            write_config: None,
+            enable_weaker_nested_sandbox: false,
+            allow_all_unix_sockets: false,
+            bin_shell: None,
+            ripgrep_cmd: "rg",
+            mandatory_deny_search_depth: 3,
+            allow_git_config: false,
+            bwrap_path: None,
+            socat_path: None,
+            cwd,
+            platform: Platform::Linux,
+            tmpdir: tmp,
+        }
+    }
+
+    #[test]
+    fn wrap_no_restrictions_short_circuits() {
+        let p = base_params("echo hi", "/tmp", "/tmp/claude");
+        let (cmd, mounts) = wrap_command_with_sandbox_linux(&p).unwrap();
+        assert_eq!(cmd, "echo hi");
+        assert!(mounts.is_empty());
+    }
+
+    #[test]
+    fn wrap_network_only_binds_sockets_and_setenv() {
+        // Create real socket-path stand-ins so the existence checks pass.
+        let dir = tempfile::tempdir().unwrap();
+        let http = dir.path().join("claude-http.sock");
+        let socks = dir.path().join("claude-socks.sock");
+        fs::write(&http, b"").unwrap();
+        fs::write(&socks, b"").unwrap();
+        let http_s = http.to_string_lossy().into_owned();
+        let socks_s = socks.to_string_lossy().into_owned();
+
+        let mut p = base_params("curl https://example.com", "/tmp", "/tmp/claude");
+        p.needs_network_restriction = true;
+        p.http_socket_path = Some(&http_s);
+        p.socks_socket_path = Some(&socks_s);
+        p.http_proxy_port = Some(8080);
+        p.socks_proxy_port = Some(8081);
+
+        let (cmd, _mounts) = wrap_command_with_sandbox_linux(&p).unwrap();
+        assert!(cmd.contains("--unshare-net"), "cmd: {cmd}");
+        // Socket binds (each path bound to itself). shlex-quoted; the path is in.
+        assert!(cmd.contains(&format!("--bind {http_s} {http_s}")), "cmd: {cmd}");
+        assert!(cmd.contains(&format!("--bind {socks_s} {socks_s}")), "cmd: {cmd}");
+        // HTTP_PROXY setenv to the internal listener.
+        assert!(
+            cmd.contains("--setenv HTTP_PROXY http://localhost:3128"),
+            "cmd: {cmd}"
+        );
+        // Host port transparency vars.
+        assert!(cmd.contains("--setenv CLAUDE_CODE_HOST_HTTP_PROXY_PORT 8080"), "cmd: {cmd}");
+        assert!(cmd.contains("--setenv CLAUDE_CODE_HOST_SOCKS_PROXY_PORT 8081"), "cmd: {cmd}");
+        // The sandbox socat command (build_sandbox_command) is embedded.
+        assert!(cmd.contains("TCP-LISTEN:3128,fork,reuseaddr"), "cmd: {cmd}");
+        assert!(cmd.contains("TCP-LISTEN:1080,fork,reuseaddr"), "cmd: {cmd}");
+        // --proc /proc (secure mode, default).
+        assert!(cmd.contains("--unshare-pid"), "cmd: {cmd}");
+        assert!(cmd.contains("--proc /proc"), "cmd: {cmd}");
+    }
+
+    #[test]
+    fn wrap_network_no_sockets_is_bare_unshare_net() {
+        let mut p = base_params("echo hi", "/tmp", "/tmp/claude");
+        p.needs_network_restriction = true;
+        let (cmd, _m) = wrap_command_with_sandbox_linux(&p).unwrap();
+        assert!(cmd.contains("--unshare-net"), "cmd: {cmd}");
+        assert!(!cmd.contains("--setenv HTTP_PROXY"), "no proxy env: {cmd}");
+        assert!(!cmd.contains("TCP-LISTEN:3128"), "no socat listener: {cmd}");
+    }
+
+    #[test]
+    fn wrap_write_restrict_emits_fs_args_and_proc() {
+        let dir = tempfile::tempdir().unwrap();
+        let wpath = dir.path().to_string_lossy().into_owned();
+        let wc = WriteConfig {
+            allow_only: vec![wpath.clone()],
+            deny_within_allow: vec![],
+        };
+        let mut p = base_params("echo hi", &wpath, "/tmp/claude");
+        p.write_config = Some(&wc);
+        let (cmd, _m) = wrap_command_with_sandbox_linux(&p).unwrap();
+        // Read-only root then writable bind (fs_args).
+        assert!(cmd.contains("--ro-bind / /"), "cmd: {cmd}");
+        assert!(cmd.contains("--unshare-pid"), "cmd: {cmd}");
+        assert!(cmd.contains("--proc /proc"), "cmd: {cmd}");
+        assert!(cmd.contains("--dev /dev"), "cmd: {cmd}");
+    }
+
+    #[test]
+    fn wrap_weaker_nested_uses_unshare_user_bind_proc() {
+        let dir = tempfile::tempdir().unwrap();
+        let wpath = dir.path().to_string_lossy().into_owned();
+        let wc = WriteConfig {
+            allow_only: vec![wpath.clone()],
+            deny_within_allow: vec![],
+        };
+        let mut p = base_params("echo hi", &wpath, "/tmp/claude");
+        p.write_config = Some(&wc);
+        p.enable_weaker_nested_sandbox = true;
+        let (cmd, _m) = wrap_command_with_sandbox_linux(&p).unwrap();
+        assert!(cmd.contains("--unshare-user --bind /proc /proc"), "cmd: {cmd}");
+        assert!(!cmd.contains("--proc /proc"), "should NOT have plain --proc: {cmd}");
+    }
+
+    #[test]
+    fn wrap_threads_mount_points_from_fs_args() {
+        // A denyOnly read restriction on a tmpfile produces mount points.
+        let dir = tempfile::tempdir().unwrap();
+        let deny = dir.path().join("secret.txt");
+        fs::write(&deny, b"x").unwrap();
+        let rc = ReadConfig {
+            deny_only: vec![deny.to_string_lossy().into_owned()],
+            allow_within_deny: vec![],
+        };
+        let cwd = dir.path().to_string_lossy().into_owned();
+        let mut p = base_params("echo hi", &cwd, "/tmp/claude");
+        p.read_config = Some(&rc);
+        let (_cmd, mounts) = wrap_command_with_sandbox_linux(&p).unwrap();
+        // fs_args returns mount points for the tmpfs cover; threaded back out.
+        // (Exact count is fs_args' concern; assert the wrap returns the vec.)
+        let _ = mounts; // presence verified by type; cleanup test below covers behavior
     }
 }

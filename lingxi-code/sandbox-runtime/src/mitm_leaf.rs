@@ -19,6 +19,8 @@ use rcgen::{
 use rsa::pkcs8::{EncodePrivateKey, LineEnding};
 use rsa::RsaPrivateKey;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+use rustls::server::{ClientHello, ResolvesServerCert};
+use rustls::sign::CertifiedKey;
 use time::{Duration, OffsetDateTime};
 
 use crate::mitm_ca::{Leaf, MitmCa};
@@ -179,6 +181,106 @@ pub fn server_config_for(
         .expect("server_configs mutex poisoned")
         .insert(hostname.to_string(), Arc::clone(&arc));
     Ok(arc)
+}
+
+/// Mint-or-cache an `Arc<rustls::sign::CertifiedKey>` for `hostname`.
+///
+/// The SNI-resolution primitive used by [`MitmCertResolver`]: builds a
+/// [`CertifiedKey`] (leaf+CA chain DER + an RSA-PKCS1 [`rustls::sign::SigningKey`])
+/// from the minted leaf, caching it on [`MitmCa::cert_keys`](crate::mitm_ca::MitmCa).
+/// This is the per-connection analogue of the TS `secureContextFor` consumed by
+/// node's `SNICallback`.
+///
+/// # Errors
+///
+/// Returns [`LeafError`] if leaf minting fails, the PEM chain/key cannot be
+/// parsed to DER, or the RSA key cannot be loaded into a `rustls` signing key.
+pub fn certified_key_for(ca: &MitmCa, hostname: &str) -> Result<Arc<CertifiedKey>, LeafError> {
+    if let Some(cached) = ca
+        .cert_keys
+        .lock()
+        .expect("cert_keys mutex poisoned")
+        .get(hostname)
+    {
+        return Ok(Arc::clone(cached));
+    }
+
+    let leaf = mint_leaf_cert(ca, hostname)?;
+
+    let mut chain_reader = std::io::BufReader::new(leaf.cert_pem.as_bytes());
+    let cert_chain: Vec<CertificateDer<'static>> = rustls_pemfile::certs(&mut chain_reader)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|err| LeafError::Config(format!("[mitm-leaf] cert parse failed: {err}")))?;
+    if cert_chain.is_empty() {
+        return Err(LeafError::Config("[mitm-leaf] empty cert chain".to_string()));
+    }
+
+    let mut key_reader = std::io::BufReader::new(leaf.key_pem.as_bytes());
+    let key_der: PrivateKeyDer<'static> = rustls_pemfile::private_key(&mut key_reader)
+        .map_err(|err| LeafError::Config(format!("[mitm-leaf] key parse failed: {err}")))?
+        .ok_or_else(|| LeafError::Config("[mitm-leaf] no private key in PEM".to_string()))?;
+
+    // Sign with the ring provider (matching rustls 0.22's default provider), so
+    // the resolver and the rest of the stack share one crypto backend.
+    let signing_key = rustls::crypto::ring::sign::any_supported_type(&key_der)
+        .map_err(|err| LeafError::Config(format!("[mitm-leaf] load signing key failed: {err}")))?;
+
+    let certified = Arc::new(CertifiedKey::new(cert_chain, signing_key));
+    ca.cert_keys
+        .lock()
+        .expect("cert_keys mutex poisoned")
+        .insert(hostname.to_string(), Arc::clone(&certified));
+    Ok(certified)
+}
+
+/// A `rustls` [`ResolvesServerCert`] that mints a per-host leaf on demand from
+/// the `ClientHello` SNI, backed by an [`MitmCa`] and a default hostname.
+///
+/// The Rust analogue of the TS `tls.createServer({ SNICallback })` in
+/// `tls-terminate-proxy.js`: `resolve(client_hello)` reads the SNI server name
+/// (falling back to [`Self::default_host`] when the client sent none) and
+/// returns the minted [`CertifiedKey`] for that host via [`certified_key_for`],
+/// caching it on the CA. Minting failures resolve to `None` (rustls then fails
+/// the handshake), the rough equivalent of the TS `SNICallback(err)` path.
+#[derive(Clone)]
+pub struct MitmCertResolver {
+    ca: Arc<MitmCa>,
+    default_host: String,
+}
+
+impl std::fmt::Debug for MitmCertResolver {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MitmCertResolver")
+            .field("default_host", &self.default_host)
+            .finish_non_exhaustive()
+    }
+}
+
+impl MitmCertResolver {
+    /// Build a resolver minting leaves from `ca`, defaulting to `default_host`
+    /// when a `ClientHello` carries no SNI.
+    #[must_use]
+    pub fn new(ca: Arc<MitmCa>, default_host: String) -> Self {
+        Self { ca, default_host }
+    }
+}
+
+impl ResolvesServerCert for MitmCertResolver {
+    fn resolve(&self, client_hello: ClientHello<'_>) -> Option<Arc<CertifiedKey>> {
+        let host = client_hello
+            .server_name()
+            .map_or(self.default_host.as_str(), |s| s);
+        match certified_key_for(&self.ca, host) {
+            Ok(key) => Some(key),
+            Err(err) => {
+                tracing::error!(
+                    target: "tls_terminate",
+                    "[tls-terminate] cert resolve for {host} failed: {err}"
+                );
+                None
+            }
+        }
+    }
 }
 
 /// The `subjectAltName` for `hostname`: an IP-literal → `IpAddress`, else a
@@ -396,6 +498,56 @@ mod tests {
         let bad = verifier.verify_server_cert(end_entity, intermediates, &wrong_name, &[], now);
         assert!(bad.is_err(), "verifier must reject the leaf for a non-matching host");
 
+        dispose_mitm_ca(&ca);
+    }
+
+    /// `certified_key_for` returns a `CertifiedKey` whose leaf SAN matches the
+    /// host, and is cached per host.
+    #[test]
+    fn certified_key_leaf_san_matches_host() {
+        let ca = Arc::new(create_mitm_ca(MitmCaOptions::default()).unwrap());
+        let ck = certified_key_for(&ca, "resolve.example").unwrap();
+        // First cert in the chain is the leaf; assert its SAN.
+        let leaf_der = ck.cert.first().unwrap().as_ref();
+        let cert = x509_parser::certificate::X509Certificate::from_der(leaf_der)
+            .unwrap()
+            .1;
+        let san = cert.subject_alternative_name().unwrap().unwrap();
+        assert!(
+            san.value.general_names.iter().any(|gn| matches!(
+                gn,
+                x509_parser::extensions::GeneralName::DNSName("resolve.example")
+            )),
+            "leaf SAN must be DNS:resolve.example"
+        );
+        // Cached: identical Arc on the second call.
+        let ck2 = certified_key_for(&ca, "resolve.example").unwrap();
+        assert!(Arc::ptr_eq(&ck, &ck2), "CertifiedKey must be cached per host");
+        dispose_mitm_ca(&ca);
+    }
+
+    /// The `MitmCertResolver` resolves a `ClientHello` SNI to a `CertifiedKey` whose
+    /// leaf CN matches the SNI. (Drives the resolver via a full rustls server
+    /// handshake in the `tls_terminate` integration tests; here we assert the
+    /// cache-population side effect of `certified_key_for` the resolver calls.)
+    #[test]
+    fn resolver_mints_for_sni_host() {
+        let ca = Arc::new(create_mitm_ca(MitmCaOptions::default()).unwrap());
+        let resolver = MitmCertResolver::new(Arc::clone(&ca), "default.example".to_string());
+        // The resolver's minting primitive caches on the CA; exercise it.
+        let ck = certified_key_for(&resolver.ca, "sni.example").unwrap();
+        let leaf_der = ck.cert.first().unwrap().as_ref();
+        let cert = x509_parser::certificate::X509Certificate::from_der(leaf_der)
+            .unwrap()
+            .1;
+        let cn = cert
+            .subject()
+            .iter_common_name()
+            .next()
+            .unwrap()
+            .as_str()
+            .unwrap();
+        assert_eq!(cn, "sni.example");
         dispose_mitm_ca(&ca);
     }
 

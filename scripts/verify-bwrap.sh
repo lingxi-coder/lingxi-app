@@ -20,6 +20,18 @@
 # :1080 listener, with `curl --socks5-hostname` so the DOMAINNAME path is
 # exercised. Stand-in == not the Rust allowlist; the Rust pre-connect filter +
 # wire parse are proven by the tokio integration tests in socks_proxy.rs.
+#
+# NOTE: there is no `mitm` group. The P6b TLS-terminating MITM proxy
+# (tls_terminate.rs) is pure in-process Rust — it adds no socat/bwrap/env
+# PLUMBING for this script to exercise (it is what the bridge tunnels TO). Its
+# runtime proof is the in-process, REAL-TLS integration tests in
+# sandbox-runtime/src/tls_terminate.rs and src/http_proxy.rs: a CA-trusting
+# tokio-rustls client drives a CONNECT + TLS + GET through the live hyper proxy
+# to a stand-in HTTPS origin, asserting the decrypted request is re-issued
+# upstream over real TLS (system roots + upstream_ca; verification NOT disabled)
+# and round-trips, the served leaf SAN matches the host, and a filterRequest
+# denial returns the byte-exact 403. Cross-compiling the Rust proxy into the
+# container would be needed to add a Docker group and buys nothing over those.
 set -euo pipefail
 GROUP="${1:-all}"
 IMG="arm64v8/debian:stable-slim"

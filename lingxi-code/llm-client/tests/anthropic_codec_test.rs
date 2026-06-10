@@ -478,3 +478,38 @@ fn encode_system_blocks_and_cache_control() {
     assert!(bare.body_json.get("system").is_none());
     assert!(bare.body_json["messages"][0]["content"][0].get("cache_control").is_none());
 }
+
+#[test]
+fn count_tokens_request_and_response_round_trip() {
+    let codec = AnthropicMessagesCodec::new("https://api.anthropic.com", "2023-06-01");
+    let mut request = LlmRequest::new("claude-sonnet-4-20250514").with_user_text("hello");
+    request.system = vec![llm_client::SystemBlock::text("sys")];
+
+    let provider_request = codec.encode_count_tokens_request(&request).unwrap();
+
+    assert!(provider_request.url.ends_with("/v1/messages/count_tokens"));
+    assert_eq!(provider_request.body_json["model"], "claude-sonnet-4-20250514");
+    assert_eq!(provider_request.body_json["messages"][0]["role"], "user");
+    assert_eq!(provider_request.body_json["system"][0]["text"], "sys");
+    assert!(provider_request.body_json.get("max_tokens").is_none());
+    assert!(provider_request.body_json.get("stream").is_none());
+
+    let count = codec
+        .decode_count_tokens_response(&ProviderResponse::json(200, serde_json::json!({"input_tokens": 2095})))
+        .unwrap();
+    assert_eq!(count, 2095);
+}
+
+#[test]
+fn count_tokens_error_status_maps_through_taxonomy() {
+    let codec = AnthropicMessagesCodec::new("https://api.anthropic.com", "2023-06-01");
+
+    let err = codec
+        .decode_count_tokens_response(&ProviderResponse::json(401, serde_json::json!({
+            "type": "error",
+            "error": {"type": "authentication_error", "message": "bad key"}
+        })))
+        .unwrap_err();
+
+    assert!(matches!(err, llm_client::LlmError::Authentication));
+}

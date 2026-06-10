@@ -127,6 +127,8 @@ fn sse(data: &str) -> Result<SseEvent, HttpError> {
 #[tokio::test]
 async fn open_stream_maps_sse_events_to_frames() {
     let fake = FakeHttp::default();
+    // The second payload is an artificial terminator demonstrating verbatim
+    // pass-through ([DONE] handling belongs to codecs, not the bridge).
     *fake.sse.lock().unwrap() = Some(Ok(vec![
         sse(r#"{"type":"message_stop"}"#),
         sse("[DONE]"),
@@ -177,7 +179,8 @@ async fn mid_stream_http_error_maps_to_llm_transport_error() {
         .await
         .expect("stream");
 
-    assert!(streaming.frames.next_frame().await.unwrap().is_some());
+    let first = streaming.frames.next_frame().await.unwrap().expect("first frame");
+    assert!(String::from_utf8(first.bytes).unwrap().contains("message_start"));
     let error = streaming.frames.next_frame().await.expect_err("mid-stream error");
     assert!(matches!(error, llm_client::LlmError::Transport { message } if message.contains("reset")));
 }

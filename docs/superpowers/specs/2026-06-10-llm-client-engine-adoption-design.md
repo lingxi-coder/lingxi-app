@@ -82,9 +82,11 @@ HTTP client; `llm-client` stays free of repo-internal dependencies.
 
 - **platforms/common**: `LlmTransportBridge<T: traits::HttpTransport>`
   implements `llm_client::Transport`. `execute` maps `ProviderRequest` →
-  `protocol::HttpRequest`; `open_stream` prefers `stream_sse`
-  (`SseEvent.data` → `RawStreamFrame`) and falls back to `stream_raw_bytes`
-  + `llm_client::SseFrameSplitter`. One generic adapter serves ReqwestHttp
+  `protocol::HttpRequest`; `open_stream` uses `stream_sse`
+  (`SseEvent.data` → `RawStreamFrame`);
+  `stream_sse` is a required `HttpTransport` method, so no raw-bytes
+  fallback is built (the `SseFrameSplitter` remains available for future
+  byte-level hosts). One generic adapter serves ReqwestHttp
   and the native mobile transports. platforms/common gains an `llm-client`
   dependency (dependency-light by construction).
 - **anthropic-oauth**: implements `llm_client::CredentialProvider` directly —

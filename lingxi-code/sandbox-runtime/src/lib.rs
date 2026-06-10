@@ -23,6 +23,7 @@
 pub mod config;
 pub mod dial;
 pub mod env;
+pub mod fs_args;
 pub mod host;
 pub mod http_proxy;
 pub mod matcher;

@@ -23,9 +23,10 @@
 //!
 //! # Platform
 //!
-//! Only the Linux `wrap_with_sandbox` branch is wired (this is the Linux
-//! capstone). macOS/Windows are documented P9 seams — see
-//! [`SandboxManager::wrap_with_sandbox`]. Proxy/CA initialization and the
+//! The Linux and macOS `wrap_with_sandbox` branches are wired (bwrap and
+//! Seatbelt `sandbox-exec` respectively). Windows returns a shell string and is
+//! a documented P9 seam — callers must use the argv path instead (see
+//! [`SandboxManager::wrap_with_sandbox`]). Proxy/CA initialization and the
 //! filter run on every platform; the `socat` bridge is Linux-only.
 
 use std::collections::HashMap;
@@ -44,6 +45,7 @@ use crate::linux::{
     wrap_command_with_sandbox_linux, LinuxBridge, LinuxDependencyCheck, LinuxDependencyOpts,
     WrapParams,
 };
+use crate::macos::{wrap_command_with_sandbox_macos, WrapParams as MacosWrapParams};
 use crate::matcher::AskFn;
 use crate::mitm_ca::{create_mitm_ca, dispose_mitm_ca, MitmCa, MitmCaOptions};
 use crate::parent_proxy::resolve_parent_proxy;
@@ -224,10 +226,15 @@ impl SandboxManager {
         self.running.as_ref().map(|r| r.socks_port)
     }
 
-    /// `SandboxManager.checkDependencies()` — the platform dependency check.
-    /// Linux delegates to [`check_linux_dependencies`]; macOS/Windows return the
-    /// P9-seam unsupported error. Reads `bwrapPath`/`socatPath`/`seccomp` from
-    /// the active config if present.
+    /// `SandboxManager.checkDependencies()` — the platform dependency check
+    /// (`sandbox-manager.js:359-388`). Linux delegates to
+    /// [`check_linux_dependencies`] (reading `bwrapPath`/`socatPath`/`seccomp`
+    /// from the active config); macOS needs no external dependencies (Seatbelt
+    /// is built in) and returns no errors — matching the TS, which only runs the
+    /// Linux/Windows branches and returns an empty result on macOS. Windows'
+    /// dependency check (group + WFP) is part of the tracked Windows admin gap,
+    /// so it currently reports the platform as unsupported. Truly unsupported
+    /// platforms also report `Unsupported platform`.
     #[must_use]
     pub fn check_dependencies(&self) -> LinuxDependencyCheck {
         match host_os() {
@@ -241,7 +248,14 @@ impl SandboxManager {
                     seccomp_apply_argv0: seccomp.and_then(|s| s.argv0.clone()),
                 })
             }
-            _ => LinuxDependencyCheck {
+            // macOS is a supported platform with no external sandbox deps.
+            HostOs::Macos => LinuxDependencyCheck {
+                errors: vec![],
+                warnings: vec![],
+            },
+            // Windows dep check (group/WFP status) is the tracked admin gap;
+            // `Other` is genuinely unsupported.
+            HostOs::Windows | HostOs::Other => LinuxDependencyCheck {
                 errors: vec!["Unsupported platform".to_string()],
                 warnings: vec![],
             },
@@ -436,9 +450,18 @@ impl SandboxManager {
     /// - `needs_network_restriction` = the active/custom config defines
     ///   `network` (even empty `allowedDomains` ⇒ block-all).
     ///
+    /// On macOS the wrap maps the same user-facing filesystem config into
+    /// `ReadConfig`/`WriteConfig` (globs are kept — Seatbelt subpath matching is
+    /// recursive), threads the running proxy ports + CA into
+    /// [`wrap_command_with_sandbox_macos`], and returns the shell-string
+    /// `env <PROXY...> /usr/bin/sandbox-exec -p <profile> <shell> -c <command>`
+    /// (with an empty mount-point list — macOS has no bwrap mount artifacts). The
+    /// caller runs that string via `sh -c` (the TS `spawn(cmd, {shell:true})`).
+    ///
     /// # Errors
-    /// [`ManagerError::Unsupported`] on macOS/Windows (documented P9 seams) or
-    /// when not initialized; [`ManagerError::Io`] from the bwrap wrap.
+    /// [`ManagerError::Unsupported`] on Windows (the argv path; documented P9
+    /// seam) or an unsupported platform; [`ManagerError::Io`] from the
+    /// platform wrap (e.g. the macOS shell resolution).
     pub fn wrap_with_sandbox(
         &self,
         command: &str,
@@ -448,10 +471,7 @@ impl SandboxManager {
     ) -> Result<(String, Vec<PathBuf>), ManagerError> {
         match host_os() {
             HostOs::Linux => self.wrap_linux(command, bin_shell, custom_config, cwd),
-            HostOs::Macos => Err(ManagerError::Unsupported(
-                "wrap_with_sandbox: macOS is a P9 seam (wrapCommandWithSandboxMacOS not ported)"
-                    .to_string(),
-            )),
+            HostOs::Macos => self.wrap_macos(command, bin_shell, custom_config),
             HostOs::Windows => Err(ManagerError::Unsupported(
                 "wrap_with_sandbox: Windows is a P9 seam (use the argv wrapper; \
                  wrapCommandWithSandboxWindows not ported)"
@@ -555,6 +575,82 @@ impl SandboxManager {
             tmpdir: &tmpdir,
         };
         wrap_command_with_sandbox_linux(&params).map_err(|e| ManagerError::Io(e.to_string()))
+    }
+
+    /// The macOS `wrap_with_sandbox` branch (`sandbox-manager.js:609-631`).
+    /// Returns `(wrapped_shell_string, vec![])` — macOS has no bwrap mount-point
+    /// artifacts, so the mount-point list is always empty (the TS
+    /// `cleanupAfterCommand` is a no-op on macOS).
+    fn wrap_macos(
+        &self,
+        command: &str,
+        bin_shell: Option<&str>,
+        custom_config: Option<&SandboxRuntimeConfig>,
+    ) -> Result<(String, Vec<PathBuf>), ManagerError> {
+        let active = self.config.as_ref();
+        let ca_cert_path = self
+            .mitm_ca()
+            .map(|ca| ca.cert_path.to_string_lossy().into_owned());
+        // macOS keeps glob patterns (Seatbelt subpath matching is recursive),
+        // so the FS mapping only strips a trailing `/**` and never filters or
+        // expands globs (unlike the Linux branch).
+        let (read_config, write_config) =
+            build_fs_configs_macos(active, custom_config, ca_cert_path.as_deref());
+
+        let needs_network_restriction = custom_config.is_some() || active.is_some();
+
+        // Only thread proxy ports when the proxy is running (network config AND
+        // a RunningState). Empty allowlist still routes through the proxy.
+        let running = self.running.as_ref();
+        let proxy_live = needs_network_restriction && running.is_some();
+        let http_proxy_port = if proxy_live {
+            running.map(|r| r.http_port)
+        } else {
+            None
+        };
+        let socks_proxy_port = if proxy_live {
+            running.map(|r| r.socks_port)
+        } else {
+            None
+        };
+
+        let net = active.map(|c| &c.network);
+        let allow_unix_sockets = net.and_then(|n| n.allow_unix_sockets.as_deref());
+        let allow_all_unix_sockets = net.and_then(|n| n.allow_all_unix_sockets).unwrap_or(false);
+        let allow_local_binding = net.and_then(|n| n.allow_local_binding).unwrap_or(false);
+        let allow_mach_lookup = net.and_then(|n| n.allow_mach_lookup.as_deref());
+        let allow_pty = active.and_then(|c| c.allow_pty).unwrap_or(false);
+        let allow_git_config = active
+            .and_then(|c| c.filesystem.allow_git_config)
+            .unwrap_or(false);
+        let enable_weaker_network_isolation = active
+            .and_then(|c| c.enable_weaker_network_isolation)
+            .unwrap_or(false);
+        let allow_apple_events = active.and_then(|c| c.allow_apple_events).unwrap_or(false);
+        let tmpdir = resolve_tmpdir();
+
+        let params = MacosWrapParams {
+            command,
+            needs_network_restriction,
+            http_proxy_port,
+            socks_proxy_port,
+            ca_cert_path: ca_cert_path.as_deref(),
+            allow_unix_sockets,
+            allow_all_unix_sockets,
+            allow_local_binding,
+            allow_mach_lookup,
+            read_config: Some(&read_config),
+            write_config: Some(&write_config),
+            allow_pty,
+            allow_git_config,
+            enable_weaker_network_isolation,
+            allow_apple_events,
+            bin_shell,
+            tmpdir: &tmpdir,
+        };
+        let wrapped =
+            wrap_command_with_sandbox_macos(&params).map_err(|e| ManagerError::Io(e.to_string()))?;
+        Ok((wrapped, Vec::new()))
     }
 
     /// `SandboxManager.updateConfig(newConfig)` (`sandbox-manager.js:736-748`).
@@ -699,6 +795,49 @@ fn build_fs_configs(
     )
 }
 
+/// The macOS counterpart of [`build_fs_configs`] (`sandbox-manager.js:542-587`,
+/// the non-Linux branch). Seatbelt subpath matching is recursive, so globs are
+/// kept: each path only has a trailing `/**` stripped — no glob filtering
+/// (write) and no glob expansion (read). The CA cert is force-added to the read
+/// allow-set so the child can read it under a user `denyRead`.
+fn build_fs_configs_macos(
+    active: Option<&SandboxRuntimeConfig>,
+    custom: Option<&SandboxRuntimeConfig>,
+    ca_cert_path: Option<&str>,
+) -> (ReadConfig, WriteConfig) {
+    let pick = |f: &dyn Fn(&SandboxRuntimeConfig) -> Vec<String>| -> Vec<String> {
+        custom.map(f).or_else(|| active.map(f)).unwrap_or_default()
+    };
+    let allow_write = pick(&|c| c.filesystem.allow_write.clone());
+    let deny_write = pick(&|c| c.filesystem.deny_write.clone());
+    let deny_read = pick(&|c| c.filesystem.deny_read.clone());
+    let allow_read = pick(&|c| c.filesystem.allow_read.clone().unwrap_or_default());
+
+    // macOS: map removeTrailingGlobSuffix only (no filter, no expand).
+    let strip = |paths: &[String]| -> Vec<String> {
+        paths.iter().map(|p| remove_trailing_glob_suffix(p)).collect()
+    };
+    let mut allow_only = get_default_write_paths();
+    allow_only.extend(strip(&allow_write));
+    let write_config = WriteConfig {
+        allow_only,
+        deny_within_allow: strip(&deny_write),
+    };
+
+    let deny_only = strip(&deny_read);
+    let mut allow_within_deny = strip(&allow_read);
+    if let Some(ca) = ca_cert_path {
+        allow_within_deny.push(ca.to_string());
+    }
+    (
+        ReadConfig {
+            deny_only,
+            allow_within_deny,
+        },
+        write_config,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -717,16 +856,50 @@ mod tests {
         }
     }
 
-    /// `wrap_with_sandbox` on a non-Linux host returns the documented P9 seam
-    /// error (the macOS/Windows backends are not ported). This dispatch happens
-    /// before any Linux work, so it is testable on any host. On Linux this
-    /// branch isn't taken, so the assertion is gated off there.
-    #[cfg(not(target_os = "linux"))]
+    /// `wrap_with_sandbox` on macOS wraps the command into the Seatbelt
+    /// `sandbox-exec` shell string (the macOS backend is wired) and returns an
+    /// empty mount-point list (no bwrap artifacts on macOS). Drives an
+    /// initialized manager so a config + proxy ports are present.
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn wrap_on_macos_emits_sandbox_exec() {
+        use crate::config::{FilesystemConfig, NetworkConfig};
+        let mut mgr = SandboxManager::new();
+        let cfg = SandboxRuntimeConfig {
+            network: NetworkConfig {
+                allowed_domains: vec!["github.com".into()],
+                ..Default::default()
+            },
+            filesystem: FilesystemConfig {
+                deny_read: vec!["/etc/secret".into()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        mgr.initialize(cfg, None, false)
+            .await
+            .expect("initialize should succeed on macOS (proxies bind locally)");
+        let (wrapped, mounts) = mgr
+            .wrap_with_sandbox("echo hi", Some("bash"), None, "/tmp")
+            .expect("wrap should succeed on macOS");
+        assert!(
+            wrapped.contains("/usr/bin/sandbox-exec"),
+            "wrapped: {wrapped}"
+        );
+        assert!(wrapped.contains("-c") && wrapped.contains("echo hi"), "wrapped: {wrapped}");
+        assert!(mounts.is_empty(), "macOS has no mount-point artifacts");
+        mgr.reset();
+    }
+
+    /// `wrap_with_sandbox` on Windows returns the documented P9 seam error (it
+    /// returns a shell string and is not supported on Windows — callers use the
+    /// argv path). Gated to Windows only.
+    #[cfg(target_os = "windows")]
     #[test]
-    fn wrap_on_non_linux_is_p9_seam() {
+    fn wrap_on_windows_is_p9_seam() {
         let mgr = SandboxManager::new();
         let err = mgr
-            .wrap_with_sandbox("echo hi", Some("bash"), None, "/tmp")
+            .wrap_with_sandbox("echo hi", Some("bash"), None, "C:\\")
             .unwrap_err();
         match err {
             ManagerError::Unsupported(msg) => assert!(msg.contains("P9")),

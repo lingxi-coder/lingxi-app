@@ -759,6 +759,7 @@ dependencies = [
  "filetime",
  "futures",
  "libc",
+ "migrations",
  "orchestrator",
  "platform-posix-minimal",
  "predicates",
@@ -2560,6 +2561,7 @@ name = "migrations"
 version = "0.12.0"
 dependencies = [
  "anthropic-oauth",
+ "async-trait",
  "serde_json",
  "telemetry",
  "tempfile",

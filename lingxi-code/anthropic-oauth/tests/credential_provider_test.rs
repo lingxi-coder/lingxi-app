@@ -79,7 +79,7 @@ fn fresh_driver() -> Arc<RefreshDriver> {
         Some(Secret::new("ref-fresh".to_string())),
         // Expires well in the future relative to CLOCK_NOW_SECS.
         SystemTime::UNIX_EPOCH + Duration::from_secs(CLOCK_NOW_SECS + 3_600),
-        // Transport panics if called — a fresh token must not trigger refresh.
+        // Transport must never be invoked here: a returned credential other than "tok-fresh" would fail the assertion below.
         Arc::new(FreshTokenTransport) as Arc<dyn HttpTransport>,
         Arc::new(FixedClock(SystemTime::UNIX_EPOCH + Duration::from_secs(CLOCK_NOW_SECS)))
             as Arc<dyn Clock>,

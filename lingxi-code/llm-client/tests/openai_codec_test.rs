@@ -198,3 +198,40 @@ fn decode_response_usage_normalization_matches_stream_path() {
     assert_eq!(decoded.usage.billable_tokens.reasoning_output, 30);
     assert_eq!(decoded.usage.provider_reported_total_tokens, Some(150));
 }
+
+#[test]
+fn stream_tool_fragment_without_index_defaults_to_slot_zero() {
+    let frames = [
+        r#"{"id":"c","model":"gpt-4o","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"id":"call_n","type":"function","function":{"name":"Bash","arguments":"{\"command\":"}}]}}]}"#,
+        r#"{"choices":[{"index":0,"delta":{"tool_calls":[{"function":{"arguments":"\"ls\"}"}}]}}]}"#,
+        r#"{"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}"#,
+        "[DONE]",
+    ];
+    let mut decoder = OpenAiChatCodec::new("https://api.openai.com/v1").stream_decoder();
+    let mut events = Vec::new();
+    for frame in frames {
+        events.extend(decoder.decode_frame(RawStreamFrame::new(frame.as_bytes().to_vec())).unwrap());
+    }
+    events.extend(decoder.finish().unwrap());
+
+    let starts = events
+        .iter()
+        .filter(|event| matches!(
+            event,
+            LlmEvent::ContentBlockStart { content_block: ContentBlock::ToolCall { .. }, .. }
+        ))
+        .count();
+    assert_eq!(starts, 1);
+
+    let args: String = events
+        .iter()
+        .filter_map(|event| match event {
+            LlmEvent::ContentBlockDelta {
+                delta: ContentDelta::InputJsonDelta { partial_json },
+                ..
+            } => Some(partial_json.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(args, "{\"command\":\"ls\"}");
+}

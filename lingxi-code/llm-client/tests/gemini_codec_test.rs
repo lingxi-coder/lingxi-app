@@ -149,3 +149,77 @@ fn stream_usage_only_final_frame_is_not_lost() {
     assert_eq!(usage.billable_tokens.input, 5);
     assert_eq!(usage.billable_tokens.output, 2);
 }
+
+#[test]
+fn decode_synthesizes_unique_tool_call_ids() {
+    let codec = GeminiCodec::new("https://generativelanguage.googleapis.com/v1beta");
+    let response = ProviderResponse::json(200, serde_json::json!({
+        "modelVersion":"gemini-2.0-flash",
+        "candidates":[{"content":{"role":"model","parts":[
+            {"functionCall":{"name":"Bash","args":{"command":"ls"}}},
+            {"functionCall":{"name":"Read","args":{"path":"a.txt"}}}
+        ]},"finishReason":"STOP"}]
+    }));
+
+    let decoded = codec.decode_response(response).unwrap();
+
+    let ids: Vec<&str> = decoded
+        .content
+        .iter()
+        .filter_map(|block| match block {
+            ContentBlock::ToolCall { id, .. } => Some(id.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(ids.len(), 2);
+    assert!(ids.iter().all(|id| !id.is_empty()));
+    assert_ne!(ids[0], ids[1]);
+}
+
+#[test]
+fn stream_synthesizes_unique_tool_call_ids() {
+    let frame = r#"{"candidates":[{"content":{"role":"model","parts":[{"functionCall":{"name":"Bash","args":{"command":"ls"}}},{"functionCall":{"name":"Read","args":{"path":"a.txt"}}}]},"finishReason":"STOP"}]}"#;
+    let mut decoder = GeminiCodec::new("https://generativelanguage.googleapis.com/v1beta").stream_decoder();
+    let mut events = decoder.decode_frame(RawStreamFrame::new(frame.as_bytes().to_vec())).unwrap();
+    events.extend(decoder.finish().unwrap());
+
+    let ids: Vec<String> = events
+        .iter()
+        .filter_map(|event| match event {
+            LlmEvent::ContentBlockStart { content_block: ContentBlock::ToolCall { id, .. }, .. } => Some(id.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(ids.len(), 2);
+    assert!(ids.iter().all(|id| !id.is_empty()));
+    assert_ne!(ids[0], ids[1]);
+}
+
+#[test]
+fn encode_tool_result_with_unknown_call_id_is_rejected() {
+    let codec = GeminiCodec::new("https://generativelanguage.googleapis.com/v1beta");
+    let mut request = LlmRequest::new("gemini-2.0-flash");
+    request.messages.push(llm_client::Message {
+        role: "user".to_string(),
+        content: vec![ContentBlock::ToolResult {
+            tool_call_id: "call_unseen".to_string(),
+            output: serde_json::json!("done"),
+        }],
+    });
+
+    let err = codec.encode_request(&request).unwrap_err();
+
+    assert!(matches!(err, llm_client::LlmError::InvalidRequest { message } if message.contains("call_unseen")));
+}
+
+#[test]
+fn decode_blocked_prompt_reports_block_reason() {
+    let codec = GeminiCodec::new("https://generativelanguage.googleapis.com/v1beta");
+    let response = ProviderResponse::json(200, serde_json::json!({
+        "promptFeedback":{"blockReason":"SAFETY"}
+    }));
+
+    let err = codec.decode_response(response).unwrap_err();
+
+    assert!(matches!(err, llm_client::LlmError::InvalidRequest { message } if message.contains("SAFETY")));
+}

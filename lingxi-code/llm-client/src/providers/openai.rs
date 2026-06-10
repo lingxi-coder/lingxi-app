@@ -215,9 +215,12 @@ impl OpenAiStreamDecoder {
     }
 
     fn handle_tool_fragment(&mut self, tool_call: &serde_json::Value, out: &mut Vec<LlmEvent>) {
-        let Some(openai_index) = tool_call.get("index").and_then(serde_json::Value::as_u64) else {
-            return;
-        };
+        // Some OpenAI-compatible servers omit `index` when there is a single
+        // tool call; treat that as slot zero instead of dropping the fragment.
+        let openai_index = tool_call
+            .get("index")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0);
 
         let index = *self.tool_index.entry(openai_index).or_insert_with(|| {
             let index = self.next_index;

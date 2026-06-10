@@ -4,6 +4,8 @@ use crate::{
     RawStreamFrame, StreamDecoder, ToolDeclaration, WireCodec,
 };
 
+use std::time::Duration;
+
 use base64::Engine;
 use serde_json::Value;
 
@@ -174,12 +176,14 @@ fn encode_tool(tool: &ToolDeclaration) -> Value {
 fn decode_response_body(body_json: Value) -> Result<LlmResponse, LlmError> {
     let id = string_field(&body_json, "id")?;
     let model = string_field(&body_json, "model")?;
-    let content = body_json
-        .get("content")
-        .and_then(Value::as_array)
-        .map(|items| items.iter().map(decode_content_block).collect::<Result<Vec<_>, _>>())
-        .transpose()?
-        .unwrap_or_default();
+    let mut content = Vec::new();
+    if let Some(items) = body_json.get("content").and_then(Value::as_array) {
+        for item in items {
+            if let Some(block) = decode_content_block(item)? {
+                content.push(block);
+            }
+        }
+    }
     let usage = body_json
         .get("usage")
         .map(normalize_anthropic_usage)
@@ -195,22 +199,22 @@ fn decode_response_body(body_json: Value) -> Result<LlmResponse, LlmError> {
     })
 }
 
-fn decode_content_block(value: &Value) -> Result<ContentBlock, LlmError> {
+fn decode_content_block(value: &Value) -> Result<Option<ContentBlock>, LlmError> {
     match value.get("type").and_then(Value::as_str) {
-        Some("text") => Ok(ContentBlock::Text {
+        Some("text") => Ok(Some(ContentBlock::Text {
             text: string_field(value, "text")?,
-        }),
-        Some("thinking") => Ok(ContentBlock::Reasoning {
+        })),
+        Some("thinking") => Ok(Some(ContentBlock::Reasoning {
             text: string_field(value, "thinking")?,
-        }),
-        Some("tool_use") => Ok(ContentBlock::ToolCall {
+        })),
+        Some("tool_use") => Ok(Some(ContentBlock::ToolCall {
             id: string_field(value, "id")?,
             name: string_field(value, "name")?,
             input: value.get("input").cloned().unwrap_or(Value::Null),
-        }),
-        Some(other) => Err(LlmError::InvalidRequest {
-            message: format!("unsupported Anthropic content block type: {other}"),
-        }),
+        })),
+        // Unknown block types must not break decoding; the raw payload stays
+        // available through provider_metadata.
+        Some(_other) => Ok(None),
         None => Err(LlmError::InvalidRequest {
             message: "Anthropic content block missing type".to_string(),
         }),
@@ -222,18 +226,30 @@ fn decode_stream_event(value: &Value) -> Result<Vec<LlmEvent>, LlmError> {
         Some("message_start") => Ok(vec![LlmEvent::MessageStart {
             response: Box::new(decode_message_start(value)?),
         }]),
-        Some("content_block_start") => Ok(vec![LlmEvent::ContentBlockStart {
-            index: u32_field(value, "index")?,
-            content_block: decode_content_block(value.get("content_block").ok_or_else(|| LlmError::InvalidRequest {
+        Some("content_block_start") => {
+            let block_value = value.get("content_block").ok_or_else(|| LlmError::InvalidRequest {
                 message: "Anthropic content_block_start missing content_block".to_string(),
-            })?)?,
-        }]),
-        Some("content_block_delta") => Ok(vec![LlmEvent::ContentBlockDelta {
-            index: u32_field(value, "index")?,
-            delta: decode_content_delta(value.get("delta").ok_or_else(|| LlmError::InvalidRequest {
+            })?;
+            match decode_content_block(block_value)? {
+                Some(content_block) => Ok(vec![LlmEvent::ContentBlockStart {
+                    index: u32_field(value, "index")?,
+                    content_block,
+                }]),
+                None => Ok(Vec::new()),
+            }
+        }
+        Some("content_block_delta") => {
+            let delta_value = value.get("delta").ok_or_else(|| LlmError::InvalidRequest {
                 message: "Anthropic content_block_delta missing delta".to_string(),
-            })?)?,
-        }]),
+            })?;
+            match decode_content_delta(delta_value)? {
+                Some(delta) => Ok(vec![LlmEvent::ContentBlockDelta {
+                    index: u32_field(value, "index")?,
+                    delta,
+                }]),
+                None => Ok(Vec::new()),
+            }
+        }
         Some("content_block_stop") => Ok(vec![LlmEvent::ContentBlockStop {
             index: u32_field(value, "index")?,
         }]),
@@ -249,13 +265,44 @@ fn decode_stream_event(value: &Value) -> Result<Vec<LlmEvent>, LlmError> {
         }]),
         Some("message_stop") => Ok(vec![LlmEvent::MessageStop]),
         Some("ping") => Ok(Vec::new()),
-        Some("error") => Err(LlmError::ProviderInternal),
-        Some(other) => Err(LlmError::InvalidRequest {
-            message: format!("unsupported Anthropic stream event type: {other}"),
-        }),
+        Some("error") => Err(decode_error_event(value)),
+        // Anthropic's streaming contract requires clients to tolerate unknown
+        // event types.
+        Some(_other) => Ok(Vec::new()),
         None => Err(LlmError::InvalidRequest {
             message: "Anthropic stream frame missing type".to_string(),
         }),
+    }
+}
+
+fn decode_error_event(value: &Value) -> LlmError {
+    let error = value.get("error");
+    let error_type = error
+        .and_then(|error| error.get("type"))
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let message = error
+        .and_then(|error| error.get("message"))
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    map_error(error_type, message, None)
+}
+
+fn map_error(error_type: &str, message: String, retry_after: Option<Duration>) -> LlmError {
+    match error_type {
+        "authentication_error" => LlmError::Authentication,
+        "permission_error" => LlmError::PermissionDenied,
+        "not_found_error" => LlmError::ModelUnavailable,
+        "rate_limit_error" => LlmError::RateLimited {
+            retry_after,
+            scope: None,
+        },
+        "request_too_large" => LlmError::ContextOverflow,
+        "invalid_request_error" if message.contains("prompt is too long") => LlmError::ContextOverflow,
+        "invalid_request_error" => LlmError::InvalidRequest { message },
+        // overloaded_error, api_error, and unknown types stay retryable.
+        _ => LlmError::ProviderInternal,
     }
 }
 
@@ -264,20 +311,19 @@ fn decode_message_start(value: &Value) -> Result<LlmResponse, LlmError> {
     decode_response_body(message.clone())
 }
 
-fn decode_content_delta(value: &Value) -> Result<ContentDelta, LlmError> {
+fn decode_content_delta(value: &Value) -> Result<Option<ContentDelta>, LlmError> {
     match value.get("type").and_then(Value::as_str) {
-        Some("text_delta") => Ok(ContentDelta::TextDelta {
+        Some("text_delta") => Ok(Some(ContentDelta::TextDelta {
             text: string_field(value, "text")?,
-        }),
-        Some("input_json_delta") => Ok(ContentDelta::InputJsonDelta {
+        })),
+        Some("input_json_delta") => Ok(Some(ContentDelta::InputJsonDelta {
             partial_json: string_field(value, "partial_json")?,
-        }),
-        Some("thinking_delta") => Ok(ContentDelta::ThinkingDelta {
+        })),
+        Some("thinking_delta") => Ok(Some(ContentDelta::ThinkingDelta {
             thinking: string_field(value, "thinking")?,
-        }),
-        Some(other) => Err(LlmError::InvalidRequest {
-            message: format!("unsupported Anthropic content delta type: {other}"),
-        }),
+        })),
+        // Unknown delta types are ignored, mirroring unknown event handling.
+        Some(_other) => Ok(None),
         None => Err(LlmError::InvalidRequest {
             message: "Anthropic content delta missing type".to_string(),
         }),

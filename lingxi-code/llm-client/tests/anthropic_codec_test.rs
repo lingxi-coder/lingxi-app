@@ -203,3 +203,74 @@ fn stream_decoder_covers_required_event_paths_and_reasoning_blocks() {
         Err(llm_client::LlmError::ProviderInternal)
     ));
 }
+
+#[test]
+fn decode_skips_unknown_content_block_types() {
+    let codec = AnthropicMessagesCodec::new("https://api.anthropic.com", "2023-06-01");
+    let response = ProviderResponse::json(200, serde_json::json!({
+        "id": "msg_4",
+        "model": "claude-sonnet-4-20250514",
+        "content": [
+            {"type":"server_tool_use","id":"srvtoolu_1","name":"web_search","input":{"query":"weather"}},
+            {"type":"text","text":"hi"}
+        ],
+        "usage": {"input_tokens": 1, "output_tokens": 1}
+    }));
+
+    let decoded = codec.decode_response(response).unwrap();
+
+    assert!(matches!(decoded.content.as_slice(), [ContentBlock::Text { text }] if text == "hi"));
+    assert_eq!(decoded.provider_metadata["content"][0]["type"], "server_tool_use");
+}
+
+#[test]
+fn stream_decoder_ignores_unknown_event_and_delta_types() {
+    let codec = AnthropicMessagesCodec::new("https://api.anthropic.com", "2023-06-01");
+    let mut decoder = codec.stream_decoder();
+
+    let unknown_event = decoder.decode_frame(llm_client::RawStreamFrame::new(
+        br#"{"type":"some_future_event","payload":{}}"#.to_vec(),
+    )).unwrap();
+    assert!(unknown_event.is_empty());
+
+    let unknown_block_start = decoder.decode_frame(llm_client::RawStreamFrame::new(
+        br#"{"type":"content_block_start","index":0,"content_block":{"type":"web_search_tool_result","content":[]}}"#.to_vec(),
+    )).unwrap();
+    assert!(unknown_block_start.is_empty());
+
+    let unknown_delta = decoder.decode_frame(llm_client::RawStreamFrame::new(
+        br#"{"type":"content_block_delta","index":0,"delta":{"type":"citations_delta","citation":{}}}"#.to_vec(),
+    )).unwrap();
+    assert!(unknown_delta.is_empty());
+}
+
+#[test]
+fn stream_error_events_map_to_error_taxonomy() {
+    let codec = AnthropicMessagesCodec::new("https://api.anthropic.com", "2023-06-01");
+    let mut decoder = codec.stream_decoder();
+
+    assert!(matches!(
+        decoder.decode_frame(llm_client::RawStreamFrame::new(
+            br#"{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}"#.to_vec(),
+        )),
+        Err(llm_client::LlmError::ProviderInternal)
+    ));
+    assert!(matches!(
+        decoder.decode_frame(llm_client::RawStreamFrame::new(
+            br#"{"type":"error","error":{"type":"rate_limit_error","message":"slow down"}}"#.to_vec(),
+        )),
+        Err(llm_client::LlmError::RateLimited { .. })
+    ));
+    assert!(matches!(
+        decoder.decode_frame(llm_client::RawStreamFrame::new(
+            br#"{"type":"error","error":{"type":"authentication_error","message":"bad key"}}"#.to_vec(),
+        )),
+        Err(llm_client::LlmError::Authentication)
+    ));
+    assert!(matches!(
+        decoder.decode_frame(llm_client::RawStreamFrame::new(
+            br#"{"type":"error","error":{"type":"invalid_request_error","message":"bad request"}}"#.to_vec(),
+        )),
+        Err(llm_client::LlmError::InvalidRequest { message }) if message.contains("bad request")
+    ));
+}

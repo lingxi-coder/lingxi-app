@@ -38,7 +38,7 @@ impl WireCodec for GeminiCodec {
         let mut body = serde_json::Map::new();
         body.insert(
             "contents".to_string(),
-            Value::Array(encode_messages(&request.messages, &tool_call_names)),
+            Value::Array(encode_messages(&request.messages, &tool_call_names)?),
         );
 
         if let Some(system) = &request.system {
@@ -292,7 +292,9 @@ impl GeminiStreamDecoder {
         out.push(LlmEvent::ContentBlockStart {
             index,
             content_block: ContentBlock::ToolCall {
-                id: String::new(),
+                // Gemini does not assign tool-call ids; synthesize unique ones
+                // so tool results can reference their call after a round trip.
+                id: format!("call_{index}"),
                 name,
                 input: Value::Object(serde_json::Map::new()),
             },
@@ -324,7 +326,7 @@ fn build_tool_call_name_map(messages: &[crate::Message]) -> std::collections::BT
     tool_call_names
 }
 
-fn encode_messages(messages: &[crate::Message], tool_call_names: &std::collections::BTreeMap<String, String>) -> Vec<Value> {
+fn encode_messages(messages: &[crate::Message], tool_call_names: &std::collections::BTreeMap<String, String>) -> Result<Vec<Value>, LlmError> {
     let mut out = Vec::new();
 
     for message in messages {
@@ -343,12 +345,19 @@ fn encode_messages(messages: &[crate::Message], tool_call_names: &std::collectio
                         "args": input,
                     }
                 })),
-                ContentBlock::ToolResult { tool_call_id, output } => parts.push(serde_json::json!({
-                    "functionResponse": {
-                        "name": tool_call_names.get(tool_call_id).cloned().unwrap_or_default(),
-                        "response": {"result": output},
-                    }
-                })),
+                ContentBlock::ToolResult { tool_call_id, output } => {
+                    let Some(name) = tool_call_names.get(tool_call_id) else {
+                        return Err(LlmError::InvalidRequest {
+                            message: format!("tool result references unknown tool call id: {tool_call_id}"),
+                        });
+                    };
+                    parts.push(serde_json::json!({
+                        "functionResponse": {
+                            "name": name,
+                            "response": {"result": output},
+                        }
+                    }));
+                }
                 ContentBlock::Image { .. } | ContentBlock::Document { .. } | ContentBlock::Reasoning { .. } => {}
             }
         }
@@ -358,7 +367,7 @@ fn encode_messages(messages: &[crate::Message], tool_call_names: &std::collectio
         }
     }
 
-    out
+    Ok(out)
 }
 
 fn encode_tool(tool: &ToolDeclaration) -> Value {
@@ -430,11 +439,22 @@ fn decode_response_body(body_json: Value) -> Result<LlmResponse, LlmError> {
         .get("candidates")
         .and_then(Value::as_array)
         .and_then(|candidates| candidates.first())
-        .ok_or_else(|| LlmError::InvalidRequest {
-            message: "Gemini response missing candidates".to_string(),
+        .ok_or_else(|| {
+            let message = match body_json
+                .get("promptFeedback")
+                .and_then(|feedback| feedback.get("blockReason"))
+                .and_then(Value::as_str)
+            {
+                Some(reason) => format!("Gemini blocked the prompt: {reason}"),
+                None => "Gemini response missing candidates".to_string(),
+            };
+            LlmError::InvalidRequest { message }
         })?;
 
     let mut content = Vec::new();
+    // Gemini does not assign tool-call ids; synthesize unique ones so tool
+    // results can reference their call after a round trip.
+    let mut tool_call_count = 0u32;
     if let Some(parts) = candidate
         .get("content")
         .and_then(|content| content.get("parts"))
@@ -452,7 +472,7 @@ fn decode_response_body(body_json: Value) -> Result<LlmResponse, LlmError> {
 
             if let Some(function_call) = part.get("functionCall") {
                 content.push(ContentBlock::ToolCall {
-                    id: String::new(),
+                    id: format!("call_{tool_call_count}"),
                     name: function_call
                         .get("name")
                         .and_then(Value::as_str)
@@ -463,6 +483,7 @@ fn decode_response_body(body_json: Value) -> Result<LlmResponse, LlmError> {
                         .cloned()
                         .unwrap_or_else(|| Value::Object(serde_json::Map::new())),
                 });
+                tool_call_count += 1;
             }
         }
     }

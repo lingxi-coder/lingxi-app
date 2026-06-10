@@ -28,7 +28,7 @@
 //!   [`escape_path`] uses `serde_json::to_string`, which produces the identical
 //!   JSON string-escaping (`"` → `\"`, `\` → `\\`, control chars → `\uXXXX`).
 
-use crate::env::encode_sandboxed_command;
+use crate::env::{encode_sandboxed_command, generate_proxy_env_vars, Platform};
 use crate::fs_args::{ReadConfig, WriteConfig};
 use crate::path_utils::{
     contains_glob_chars, get_dangerous_directories, glob_to_regex, normalize_path_for_sandbox,
@@ -790,6 +790,347 @@ const SYSCTL_READ_PREFIXES: [&str; 9] = [
     "net.routetable.",
 ];
 
+/// Shell-quote + space-join a list the way the TS `shellquote.quote([...])`
+/// does. Mirrors `shlex::try_join`, with a NUL-only fallback (a NUL cannot occur
+/// for the paths/commands/profile here).
+fn shjoin(parts: &[String]) -> String {
+    shlex::try_join(parts.iter().map(String::as_str))
+        .unwrap_or_else(|_| parts.join(" "))
+}
+
+/// Parameters for [`wrap_command_with_sandbox_macos`] — a 1:1 mirror of the TS
+/// `wrapCommandWithSandboxMacOS` `params` object
+/// (`macos-sandbox-utils.js:524-525`).
+//
+// The boolean flags are a faithful 1:1 transcription of the TS params object;
+// collapsing them into enums would diverge from the reference shape.
+#[allow(clippy::struct_excessive_bools)]
+#[derive(Debug, Default)]
+pub struct WrapParams<'a> {
+    /// The user command to wrap.
+    pub command: &'a str,
+    /// Whether to restrict the network.
+    pub needs_network_restriction: bool,
+    /// HTTP proxy port.
+    pub http_proxy_port: Option<u16>,
+    /// SOCKS proxy port.
+    pub socks_proxy_port: Option<u16>,
+    /// CA cert path threaded into the proxy env vars (TLS-MITM trust).
+    pub ca_cert_path: Option<&'a str>,
+    /// Specific Unix-socket subpaths to allow.
+    pub allow_unix_sockets: Option<&'a [String]>,
+    /// Allow all Unix sockets.
+    pub allow_all_unix_sockets: bool,
+    /// Allow local-IP binding.
+    pub allow_local_binding: bool,
+    /// User-specified XPC/Mach service names.
+    pub allow_mach_lookup: Option<&'a [String]>,
+    /// Read-restriction config (`denyOnly`).
+    pub read_config: Option<&'a ReadConfig>,
+    /// Write-restriction config (`allowOnly`).
+    pub write_config: Option<&'a WriteConfig>,
+    /// Allow pseudo-terminal (pty) support.
+    pub allow_pty: bool,
+    /// Allow git config in the sandbox.
+    pub allow_git_config: bool,
+    /// Enable weaker network isolation (trustd.agent mach-lookup).
+    pub enable_weaker_network_isolation: bool,
+    /// Allow Apple Events.
+    pub allow_apple_events: bool,
+    /// Shell to run the command with (`binShell || 'bash'`).
+    pub bin_shell: Option<&'a str>,
+    /// Resolved tmpdir for `generate_proxy_env_vars` (`TMPDIR` env var). In the
+    /// TS this is resolved inside `generateProxyEnvVars`; here the caller
+    /// resolves it (mirroring [`generate_proxy_env_vars`]'s pure signature).
+    pub tmpdir: &'a str,
+}
+
+/// Wrap a command with the macOS Seatbelt sandbox.
+///
+/// Builds the SBPL profile via [`generate_sandbox_profile`] and returns the
+/// shell-quoted `env <PROXY_ENV...> /usr/bin/sandbox-exec -p <profile> <shell> -c
+/// <command>` invocation. The profile is passed inline via `-p` (matching the TS,
+/// which uses `-p profile`, NOT a temp `.sb` file). When no restrictions apply
+/// (no network restriction, no read denies, no write config) the bare command is
+/// returned unchanged.
+///
+/// `which_sync` resolves the shell on `PATH`; the proxy env vars come from
+/// [`generate_proxy_env_vars`] with [`Platform::Macos`].
+///
+/// Ported from `macos-sandbox-utils.js:524-585` (`wrapCommandWithSandboxMacOS`).
+///
+/// # Errors
+/// Returns an `io::Error` if the requested shell cannot be resolved on `PATH`
+/// (faithful to the TS `throw new Error("Shell '...' not found in PATH")`).
+pub fn wrap_command_with_sandbox_macos(params: &WrapParams<'_>) -> std::io::Result<String> {
+    // Read: denyOnly pattern — empty array means no restrictions.
+    let has_read_restrictions = params
+        .read_config
+        .is_some_and(|rc| !rc.deny_only.is_empty());
+    // Write: allowOnly pattern — None means no restrictions, any config = restrictions.
+    let has_write_restrictions = params.write_config.is_some();
+
+    // No sandboxing needed.
+    if !params.needs_network_restriction && !has_read_restrictions && !has_write_restrictions {
+        return Ok(params.command.to_string());
+    }
+
+    let log_tag = generate_log_tag(params.command);
+    let profile = generate_sandbox_profile(&ProfileParams {
+        read_config: params.read_config,
+        write_config: params.write_config,
+        http_proxy_port: params.http_proxy_port,
+        socks_proxy_port: params.socks_proxy_port,
+        needs_network_restriction: params.needs_network_restriction,
+        allow_unix_sockets: params.allow_unix_sockets,
+        allow_all_unix_sockets: params.allow_all_unix_sockets,
+        allow_local_binding: params.allow_local_binding,
+        allow_mach_lookup: params.allow_mach_lookup,
+        allow_pty: params.allow_pty,
+        allow_git_config: params.allow_git_config,
+        enable_weaker_network_isolation: params.enable_weaker_network_isolation,
+        allow_apple_events: params.allow_apple_events,
+        log_tag: &log_tag,
+    });
+
+    // Proxy env vars (KEY=value strings) via the shared utility.
+    let proxy_env_args: Vec<String> = generate_proxy_env_vars(
+        params.http_proxy_port,
+        params.socks_proxy_port,
+        params.ca_cert_path,
+        Platform::Macos,
+        params.tmpdir,
+    )
+    .into_iter()
+    .map(|(k, v)| format!("{k}={v}"))
+    .collect();
+
+    // Resolve the shell on PATH (the TS `whichSync(shellName)`).
+    let shell_name = params.bin_shell.unwrap_or("bash");
+    let shell = which::which(shell_name).map_err(|_| {
+        std::io::Error::other(format!("Shell '{shell_name}' not found in PATH"))
+    })?;
+    let shell = shell.to_string_lossy().into_owned();
+
+    // shellquote.quote(['env', ...proxyEnvArgs, '/usr/bin/sandbox-exec', '-p',
+    // profile, shell, '-c', command]).
+    let mut argv: Vec<String> = Vec::with_capacity(proxy_env_args.len() + 7);
+    argv.push("env".to_string());
+    argv.extend(proxy_env_args);
+    argv.push("/usr/bin/sandbox-exec".to_string());
+    argv.push("-p".to_string());
+    argv.push(profile);
+    argv.push(shell);
+    argv.push("-c".to_string());
+    argv.push(params.command.to_string());
+
+    Ok(shjoin(&argv))
+}
+
+/// A sandbox violation surfaced by [`start_macos_sandbox_log_monitor`].
+///
+/// Mirrors the object the TS `callback` receives
+/// (`macos-sandbox-utils.js:659-664`): the violation detail line, the decoded
+/// command (if recoverable), its base64 form, and a timestamp.
+#[derive(Debug, Clone)]
+pub struct LogViolation {
+    /// The violation detail text (the part after `Sandbox: `).
+    pub line: String,
+    /// The decoded command, if a `CMD64_...` line was present and decodable.
+    pub command: Option<String>,
+    /// The base64-encoded command (the `CMD64_<this>_END` capture).
+    pub encoded_command: Option<String>,
+    /// Time the violation was observed (set when the line is processed).
+    pub timestamp: std::time::SystemTime,
+}
+
+/// Parse a chunk of `log stream` output into a [`LogViolation`], applying the
+/// same filtering the TS `startMacOSSandboxLogMonitor` data handler does
+/// (`macos-sandbox-utils.js:608-664`). Returns `None` when the chunk carries no
+/// reportable violation (no `Sandbox: ... deny` line, an un-parseable detail, a
+/// noisy mDNS/diagnosticd/analyticsd violation, or an ignore-list match).
+///
+/// `ignore_violations` mirrors the TS map: the `"*"` key holds wildcard path
+/// substrings checked for every command; other keys are command substrings whose
+/// value is a list of path substrings to ignore when the command matches.
+///
+/// Pulled out as a pure function so the filtering logic is unit-testable without
+/// spawning `log stream`.
+// The ignore-map mirrors the TS plain object; a fixed `HashMap` keeps the public
+// shape simple (generalizing the hasher would leak a type param for no benefit).
+#[allow(clippy::implicit_hasher)]
+#[must_use]
+pub fn parse_violation_chunk(
+    chunk: &str,
+    ignore_violations: Option<&std::collections::HashMap<String, Vec<String>>>,
+) -> Option<LogViolation> {
+    let lines: Vec<&str> = chunk.split('\n').collect();
+
+    // Violation line: contains "Sandbox:" AND "deny".
+    let violation_line = lines
+        .iter()
+        .find(|l| l.contains("Sandbox:") && l.contains("deny"))?;
+    // Command line: starts with "CMD64_".
+    let command_line = lines.iter().find(|l| l.starts_with("CMD64_"));
+
+    // Extract violation details: /Sandbox:\s+(.+)$/.
+    let violation_details = {
+        let idx = violation_line.find("Sandbox:")?;
+        let rest = &violation_line[idx + "Sandbox:".len()..];
+        let trimmed = rest.trim_start_matches([' ', '\t']);
+        if trimmed.is_empty() {
+            return None;
+        }
+        // (.+)$ — to end of line (the line is already a single log line).
+        trimmed.to_string()
+    };
+
+    // Try to recover the command: /CMD64_(.+?)_END/.
+    let mut command: Option<String> = None;
+    let mut encoded_command: Option<String> = None;
+    if let Some(cmd_line) = command_line {
+        if let Some(start) = cmd_line.find("CMD64_") {
+            let after = &cmd_line[start + "CMD64_".len()..];
+            if let Some(end) = after.find("_END") {
+                let enc = &after[..end];
+                encoded_command = Some(enc.to_string());
+                let decoded = crate::env::decode_sandboxed_command(enc);
+                if !decoded.is_empty() {
+                    command = Some(decoded);
+                }
+            }
+        }
+    }
+
+    // Always filter out noisy violations.
+    if violation_details.contains("mDNSResponder")
+        || violation_details.contains("mach-lookup com.apple.diagnosticd")
+        || violation_details.contains("mach-lookup com.apple.analyticsd")
+    {
+        return None;
+    }
+
+    // Ignore-list filtering (only when we recovered a command).
+    if let (Some(ignore), Some(cmd)) = (ignore_violations, command.as_ref()) {
+        // Wildcard patterns first.
+        if let Some(wildcard_paths) = ignore.get("*") {
+            if wildcard_paths.iter().any(|p| violation_details.contains(p)) {
+                return None;
+            }
+        }
+        // Command-specific patterns.
+        for (pattern, paths) in ignore {
+            if pattern == "*" {
+                continue;
+            }
+            if cmd.contains(pattern) && paths.iter().any(|p| violation_details.contains(p)) {
+                return None;
+            }
+        }
+    }
+
+    Some(LogViolation {
+        line: violation_details,
+        command,
+        encoded_command,
+        timestamp: std::time::SystemTime::now(),
+    })
+}
+
+/// Start monitoring macOS system logs for sandbox violations.
+///
+/// Spawns `log stream --predicate '(eventMessage ENDSWITH "<sessionSuffix>")'
+/// --style compact` and feeds each chunk through [`parse_violation_chunk`]; every
+/// surfaced [`LogViolation`] is handed to `callback`. Returns a join handle plus
+/// a stop closure that kills the `log` process (mirroring the TS returned
+/// `() => logProcess.kill('SIGTERM')`).
+///
+/// macOS-gated because it shells `log stream` (unavailable elsewhere). The pure
+/// parsing/filtering lives in [`parse_violation_chunk`] and is tested on every
+/// platform.
+///
+/// Ported from `macos-sandbox-utils.js:590-678` (`startMacOSSandboxLogMonitor`).
+#[cfg(target_os = "macos")]
+#[allow(clippy::implicit_hasher)]
+pub fn start_macos_sandbox_log_monitor<F>(
+    callback: F,
+    ignore_violations: Option<std::collections::HashMap<String, Vec<String>>>,
+) -> std::io::Result<MacosLogMonitor>
+where
+    F: Fn(LogViolation) + Send + 'static,
+{
+    use std::io::{BufRead, BufReader};
+    use std::process::{Command, Stdio};
+
+    let predicate = format!("(eventMessage ENDSWITH \"{}\")", session_suffix());
+    let mut child = Command::new("log")
+        .args(["stream", "--predicate", &predicate, "--style", "compact"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()?;
+
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| std::io::Error::other("log stream: no stdout"))?;
+
+    // The TS handler splits each `data` chunk on newlines and looks for a
+    // Sandbox line + an adjacent CMD64 line. `log --style compact` emits one
+    // record per line; we accumulate a small rolling window so a CMD64 line and
+    // its Sandbox line in the same flush are seen together.
+    let handle = std::thread::spawn(move || {
+        let reader = BufReader::new(stdout);
+        let mut window: Vec<String> = Vec::new();
+        for line in reader.lines().map_while(Result::ok) {
+            window.push(line);
+            if window.len() > 8 {
+                window.remove(0);
+            }
+            let chunk = window.join("\n");
+            if let Some(v) = parse_violation_chunk(&chunk, ignore_violations.as_ref()) {
+                callback(v);
+                window.clear();
+            }
+        }
+    });
+
+    Ok(MacosLogMonitor {
+        child,
+        handle: Some(handle),
+    })
+}
+
+/// Handle for a running [`start_macos_sandbox_log_monitor`]. Call [`MacosLogMonitor::stop`]
+/// (or drop) to terminate the underlying `log stream` process.
+#[cfg(target_os = "macos")]
+#[derive(Debug)]
+pub struct MacosLogMonitor {
+    child: std::process::Child,
+    handle: Option<std::thread::JoinHandle<()>>,
+}
+
+#[cfg(target_os = "macos")]
+impl MacosLogMonitor {
+    /// Kill the `log stream` process and join the reader thread (mirrors the TS
+    /// returned `() => logProcess.kill('SIGTERM')`).
+    pub fn stop(mut self) {
+        let _ = self.child.kill();
+        if let Some(h) = self.handle.take() {
+            let _ = h.join();
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl Drop for MacosLogMonitor {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        if let Some(h) = self.handle.take() {
+            let _ = h.join();
+        }
+    }
+}
+
 #[cfg(test)]
 mod profile_text_tests {
     use super::*;
@@ -1077,5 +1418,283 @@ mod profile_text_tests {
         // 49 names + 9 prefixes, matching the verbatim TS allowlist.
         assert_eq!(SYSCTL_READ_NAMES.len(), 49);
         assert_eq!(SYSCTL_READ_PREFIXES.len(), 9);
+    }
+
+    // --- wrap_command_with_sandbox_macos (macos-sandbox-utils.js:524-585) ---
+
+    #[test]
+    fn wrap_no_restrictions_returns_bare_command() {
+        let params = WrapParams {
+            command: "echo hi",
+            needs_network_restriction: false,
+            tmpdir: "/tmp/claude",
+            ..Default::default()
+        };
+        assert_eq!(wrap_command_with_sandbox_macos(&params).unwrap(), "echo hi");
+    }
+
+    #[test]
+    fn wrap_write_restriction_builds_sandbox_exec_invocation() {
+        let wcfg = wc(&["/tmp/work"], &[]);
+        let params = WrapParams {
+            command: "echo hi",
+            write_config: Some(&wcfg),
+            // sh is on PATH everywhere; avoids depending on bash location.
+            bin_shell: Some("sh"),
+            tmpdir: "/tmp/claude",
+            ..Default::default()
+        };
+        let out = wrap_command_with_sandbox_macos(&params).unwrap();
+        // env <PROXY_ENV...> /usr/bin/sandbox-exec -p <profile> <shell> -c <command>.
+        assert!(out.starts_with("env "), "must start with env; got {out}");
+        assert!(out.contains("/usr/bin/sandbox-exec"));
+        assert!(out.contains("-p"));
+        // The TMPDIR proxy env var is set (no proxy ports -> minimal env).
+        assert!(out.contains("TMPDIR=/tmp/claude"));
+        assert!(out.contains("SANDBOX_RUNTIME=1"));
+        // The command tail is shell-quoted and present.
+        assert!(out.contains("echo hi") || out.contains("'echo hi'"));
+    }
+
+    #[test]
+    fn wrap_network_restriction_threads_proxy_env() {
+        let params = WrapParams {
+            command: "curl example.com",
+            needs_network_restriction: true,
+            http_proxy_port: Some(3128),
+            bin_shell: Some("sh"),
+            tmpdir: "/tmp/claude",
+            ..Default::default()
+        };
+        let out = wrap_command_with_sandbox_macos(&params).unwrap();
+        // Proxy env vars woven in.
+        assert!(out.contains("HTTP_PROXY=http://localhost:3128"));
+        assert!(out.contains("/usr/bin/sandbox-exec"));
+    }
+
+    #[test]
+    fn wrap_unknown_shell_errors() {
+        let wcfg = wc(&["/tmp/work"], &[]);
+        let params = WrapParams {
+            command: "echo hi",
+            write_config: Some(&wcfg),
+            bin_shell: Some("definitely-not-a-real-shell-binary-xyz"),
+            tmpdir: "/tmp/claude",
+            ..Default::default()
+        };
+        assert!(wrap_command_with_sandbox_macos(&params).is_err());
+    }
+
+    // --- parse_violation_chunk (macos-sandbox-utils.js:608-664) ---
+
+    #[test]
+    fn parse_violation_extracts_details_and_command() {
+        let enc = encode_sandboxed_command("rm -rf /etc/passwd");
+        let chunk = format!(
+            "CMD64_{enc}_END_xyz_SBX\nkernel Sandbox: bash(123) deny file-write /etc/passwd"
+        );
+        let v = parse_violation_chunk(&chunk, None).expect("violation");
+        assert!(v.line.contains("deny file-write /etc/passwd"));
+        assert_eq!(v.encoded_command.as_deref(), Some(enc.as_str()));
+        assert_eq!(v.command.as_deref(), Some("rm -rf /etc/passwd"));
+    }
+
+    #[test]
+    fn parse_violation_none_without_sandbox_deny_line() {
+        let v = parse_violation_chunk("some unrelated log line", None);
+        assert!(v.is_none());
+    }
+
+    #[test]
+    fn parse_violation_filters_noisy() {
+        let chunk = "Sandbox: foo(1) deny mach-lookup com.apple.diagnosticd";
+        assert!(parse_violation_chunk(chunk, None).is_none());
+        let chunk2 = "Sandbox: foo(1) deny network-outbound mDNSResponder";
+        assert!(parse_violation_chunk(chunk2, None).is_none());
+    }
+
+    #[test]
+    fn parse_violation_wildcard_ignore_match() {
+        let enc = encode_sandboxed_command("git status");
+        let chunk = format!("CMD64_{enc}_END_z_SBX\nSandbox: git(1) deny file-read /private/var/x");
+        let mut ignore = std::collections::HashMap::new();
+        ignore.insert("*".to_string(), vec!["/private/var/x".to_string()]);
+        assert!(parse_violation_chunk(&chunk, Some(&ignore)).is_none());
+        // A non-matching wildcard path does not suppress it.
+        let mut ignore2 = std::collections::HashMap::new();
+        ignore2.insert("*".to_string(), vec!["/some/other".to_string()]);
+        assert!(parse_violation_chunk(&chunk, Some(&ignore2)).is_some());
+    }
+
+    #[test]
+    fn parse_violation_command_specific_ignore_match() {
+        let enc = encode_sandboxed_command("npm install");
+        let chunk = format!("CMD64_{enc}_END_z_SBX\nSandbox: node(1) deny file-read /home/u/.npmrc");
+        let mut ignore = std::collections::HashMap::new();
+        ignore.insert("npm".to_string(), vec![".npmrc".to_string()]);
+        assert!(parse_violation_chunk(&chunk, Some(&ignore)).is_none());
+    }
+}
+
+// ===== macOS runtime gate: these RUN on this host via sandbox-exec. =====
+#[cfg(all(test, target_os = "macos"))]
+mod runtime_gate_tests {
+    use super::*;
+    use std::process::Command;
+
+    /// Run `sandbox-exec -p <profile> <argv...>`, returning whether it exited 0.
+    fn sandbox_exec_ok(profile: &str, argv: &[&str]) -> std::process::Output {
+        let mut cmd = Command::new("/usr/bin/sandbox-exec");
+        cmd.arg("-p").arg(profile);
+        for a in argv {
+            cmd.arg(a);
+        }
+        cmd.output().expect("spawn sandbox-exec")
+    }
+
+    fn wc(allow: &[&str], deny: &[&str]) -> WriteConfig {
+        WriteConfig {
+            allow_only: allow.iter().map(ToString::to_string).collect(),
+            deny_within_allow: deny.iter().map(ToString::to_string).collect(),
+        }
+    }
+
+    fn rc(deny: &[&str], allow: &[&str]) -> ReadConfig {
+        ReadConfig {
+            deny_only: deny.iter().map(ToString::to_string).collect(),
+            allow_within_deny: allow.iter().map(ToString::to_string).collect(),
+        }
+    }
+
+    #[test]
+    fn gate_a_generated_profile_compiles_and_runs_true() {
+        // A non-trivial profile (network restriction + write config) must be
+        // accepted by sandbox-exec: `sandbox-exec -p <profile> /usr/bin/true`
+        // exits 0.
+        let tmp = std::env::temp_dir().join("p9a-gate-a");
+        let _ = std::fs::create_dir_all(&tmp);
+        let wcfg = wc(&[&tmp.to_string_lossy()], &[]);
+        let profile = generate_sandbox_profile(&ProfileParams {
+            write_config: Some(&wcfg),
+            needs_network_restriction: true,
+            http_proxy_port: Some(3128),
+            allow_local_binding: true,
+            log_tag: "GATE_A",
+            ..Default::default()
+        });
+        let out = sandbox_exec_ok(&profile, &["/usr/bin/true"]);
+        assert!(
+            out.status.success(),
+            "sandbox-exec rejected the generated profile: stderr={}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    #[test]
+    fn gate_b_write_deny_blocks_write_to_denied_dir() {
+        // A write-restricted profile that does NOT allow writes to <denied>
+        // must BLOCK `echo x > <denied>/f`.
+        let denied = std::env::temp_dir().join(format!("p9a-gate-b-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&denied);
+        // allow_only points elsewhere (a different temp dir), so <denied> is
+        // read-only root -> writes there fail.
+        let allowed = std::env::temp_dir().join(format!("p9a-gate-b-allow-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&allowed);
+        let wcfg = wc(&[&allowed.to_string_lossy()], &[]);
+        let profile = generate_sandbox_profile(&ProfileParams {
+            write_config: Some(&wcfg),
+            log_tag: "GATE_B",
+            ..Default::default()
+        });
+        let target = denied.join("f");
+        let script = format!("echo x > {}", target.to_string_lossy());
+        let out = sandbox_exec_ok(&profile, &["/bin/sh", "-c", &script]);
+        assert!(
+            !out.status.success(),
+            "write to denied dir SUCCEEDED but should be blocked"
+        );
+        assert!(
+            !target.exists(),
+            "denied file must not have been created: {target:?}"
+        );
+        let _ = std::fs::remove_dir_all(&denied);
+        let _ = std::fs::remove_dir_all(&allowed);
+    }
+
+    #[test]
+    fn gate_c_read_allow_within_deny_works() {
+        // Deny reads under <root>, but re-allow <root>/readable. Reading the
+        // allowed file must SUCCEED; reading a sibling under the deny must FAIL.
+        let root = std::env::temp_dir().join(format!("p9a-gate-c-{}", std::process::id()));
+        let readable = root.join("readable");
+        let hidden = root.join("hidden");
+        let _ = std::fs::create_dir_all(&readable);
+        let _ = std::fs::create_dir_all(&hidden);
+        let ok_file = readable.join("ok.txt");
+        let secret_file = hidden.join("secret.txt");
+        std::fs::write(&ok_file, "OK").unwrap();
+        std::fs::write(&secret_file, "SECRET").unwrap();
+
+        // Canonicalize because normalize_path_for_sandbox resolves /var -> /private/var.
+        let root_c = std::fs::canonicalize(&root).unwrap();
+        let readable_c = std::fs::canonicalize(&readable).unwrap();
+        let rcfg = rc(
+            &[&root_c.to_string_lossy()],
+            &[&readable_c.to_string_lossy()],
+        );
+        let profile = generate_sandbox_profile(&ProfileParams {
+            read_config: Some(&rcfg),
+            log_tag: "GATE_C",
+            ..Default::default()
+        });
+
+        let ok_c = std::fs::canonicalize(&ok_file).unwrap();
+        let secret_c = std::fs::canonicalize(&secret_file).unwrap();
+        let read_ok = sandbox_exec_ok(
+            &profile,
+            &["/bin/cat", &ok_c.to_string_lossy()],
+        );
+        assert!(
+            read_ok.status.success(),
+            "read of allow-within-deny file failed: stderr={}",
+            String::from_utf8_lossy(&read_ok.stderr)
+        );
+        let read_secret = sandbox_exec_ok(
+            &profile,
+            &["/bin/cat", &secret_c.to_string_lossy()],
+        );
+        assert!(
+            !read_secret.status.success(),
+            "read of a denied-region file SUCCEEDED but should be blocked"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn gate_d_wrap_command_invocation_runs_end_to_end() {
+        // The full wrap_command_with_sandbox_macos invocation must run via the
+        // user's shell: build it, then execute it with `sh -c <invocation>`.
+        let allowed = std::env::temp_dir().join(format!("p9a-gate-d-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&allowed);
+        let wcfg = wc(&[&allowed.to_string_lossy()], &[]);
+        let params = WrapParams {
+            command: "/usr/bin/true",
+            write_config: Some(&wcfg),
+            bin_shell: Some("sh"),
+            tmpdir: "/tmp/claude",
+            ..Default::default()
+        };
+        let invocation = wrap_command_with_sandbox_macos(&params).unwrap();
+        let out = Command::new("/bin/sh")
+            .arg("-c")
+            .arg(&invocation)
+            .output()
+            .expect("run wrapped invocation");
+        assert!(
+            out.status.success(),
+            "wrapped sandbox-exec invocation failed: stderr={}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let _ = std::fs::remove_dir_all(&allowed);
     }
 }

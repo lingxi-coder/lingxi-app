@@ -12,8 +12,11 @@
 pub trait BypassEnv: Send + Sync {
     /// `process.platform === 'win32'`.
     fn is_windows(&self) -> bool;
-    /// `process.getuid()` (effective uid). Non-unix hosts return a non-zero
-    /// sentinel so check 1 is a no-op.
+    /// The process uid checked against 0. claude-code calls `process.getuid()`
+    /// — the REAL uid (`setup.ts:404`), so the production impl returns
+    /// `getuid()`, NOT the effective uid (the method name is a slight misnomer
+    /// kept for the trait contract). Non-unix hosts return a non-zero sentinel
+    /// so check 1 is a no-op.
     fn effective_uid(&self) -> u32;
     /// Read a process env var.
     fn env(&self, key: &str) -> Option<String>;

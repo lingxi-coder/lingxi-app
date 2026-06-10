@@ -28,6 +28,7 @@ pub mod host;
 pub mod http_proxy;
 pub mod linux;
 pub mod matcher;
+pub mod mitm_ca;
 pub mod parent_proxy;
 pub mod path_utils;
 pub mod request_filter;

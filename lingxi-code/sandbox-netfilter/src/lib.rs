@@ -9,6 +9,7 @@
 #![forbid(unsafe_code)]
 
 pub mod config;
+pub mod dial;
 pub mod host;
 pub mod matcher;
 pub mod parent_proxy;

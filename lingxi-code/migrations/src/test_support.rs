@@ -1,7 +1,11 @@
-//! Test-only helpers: process-env serialization + temp config dirs.
+//! Test-only helpers: process-env serialization + temp config dirs + a
+//! capturing telemetry sink for emission-contract tests.
 
 use std::path::PathBuf;
-use std::sync::{Mutex, MutexGuard, OnceLock};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
+
+use telemetry::sink::{AnalyticsSink, LogEventMetadata};
+use telemetry::AnalyticsBus;
 
 /// Process-wide lock for tests that mutate env vars (`HOME`,
 /// `CLAUDE_CONFIG_DIR`, `DISABLE_AUTOUPDATER`, provider gates). Cargo runs
@@ -36,4 +40,48 @@ pub fn temp_config() -> TempConfig {
     std::fs::create_dir_all(&home).expect("mk home");
     std::fs::create_dir_all(&project).expect("mk project");
     TempConfig { _tmp: tmp, home, global, project }
+}
+
+/// Captured `(event name, metadata-as-JSON)` pairs, shared with the test
+/// body. Metadata is serialized to `serde_json::Value` because
+/// `AnalyticsValue` has no `PartialEq`; `json!` comparisons are exact thanks
+/// to its `#[serde(untagged)]` encoding.
+pub type CapturedEvents = Arc<Mutex<Vec<(String, serde_json::Value)>>>;
+
+/// [`AnalyticsSink`] that records every event for assertion.
+struct CapturingSink {
+    events: CapturedEvents,
+}
+
+#[async_trait::async_trait]
+impl AnalyticsSink for CapturingSink {
+    async fn log_event(&self, name: &str, metadata: LogEventMetadata) {
+        // std Mutex, never held across an await point.
+        self.events
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push((
+                name.to_string(),
+                serde_json::to_value(&metadata).expect("AnalyticsValue serializes"),
+            ));
+    }
+
+    async fn log_event_async(&self, name: &str, metadata: LogEventMetadata) {
+        self.log_event(name, metadata).await;
+    }
+
+    fn name(&self) -> &str {
+        "capturing-test-sink"
+    }
+}
+
+/// Build an [`AnalyticsBus`] with a capturing sink already attached (so
+/// events are delivered immediately, not buffered) plus the shared capture
+/// vector for assertions. Wire the bus into `MigrationEnv::bus`.
+pub async fn capture_bus() -> (Arc<AnalyticsBus>, CapturedEvents) {
+    let events: CapturedEvents = Arc::default();
+    let bus = AnalyticsBus::new();
+    bus.attach_sink(Arc::new(CapturingSink { events: events.clone() }))
+        .await;
+    (Arc::new(bus), events)
 }

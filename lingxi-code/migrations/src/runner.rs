@@ -145,6 +145,23 @@ mod tests {
         assert!(m.get("replBridgeEnabled").is_none());
     }
 
+    /// Emission contract: at version 11 the guard short-circuits before any
+    /// migration runs — zero events, even with a live bus.
+    #[tokio::test]
+    async fn at_version_11_emits_nothing() {
+        let t = temp_config();
+        std::fs::write(
+            &t.global,
+            r#"{"migrationVersion": 11, "replBridgeEnabled": true}"#,
+        )
+        .unwrap();
+        let (bus, events) = crate::test_support::capture_bus().await;
+        let mut env = test_env(&t);
+        env.bus = Some(bus);
+        run_migrations(&env).await;
+        assert!(events.lock().unwrap().is_empty());
+    }
+
     #[tokio::test]
     async fn broken_global_config_skips_run_untouched() {
         let t = temp_config();

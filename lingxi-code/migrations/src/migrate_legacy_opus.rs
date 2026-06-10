@@ -136,6 +136,29 @@ mod tests {
         assert!(m["legacyOpusMigrationTimestamp"].is_i64());
     }
 
+    /// Emission contract: the happy path logs `tengu_legacy_opus_migration`
+    /// with `from_model` = the ORIGINAL pinned string (captured before the
+    /// rewrite, `migrateLegacyOpusToCurrent.ts:53`).
+    // See rewrites_each_legacy_string_and_stamps_timestamp for the lock rationale.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn happy_path_emits_event_with_original_from_model() {
+        let _g = env_lock();
+        std::env::remove_var("CLAUDE_CODE_DISABLE_LEGACY_MODEL_REMAP");
+        let t = temp_config();
+        let sp = settings_path(SettingsSource::User, &t.home, &t.project);
+        std::fs::create_dir_all(sp.parent().unwrap()).unwrap();
+        std::fs::write(&sp, r#"{"model": "claude-opus-4-1-20250805"}"#).unwrap();
+        let (bus, events) = crate::test_support::capture_bus().await;
+        let mut env = test_env(&t);
+        env.bus = Some(bus);
+        run(&env).await;
+        let ev = events.lock().unwrap();
+        assert_eq!(ev.len(), 1);
+        assert_eq!(ev[0].0, telemetry::tengu::migration::LEGACY_OPUS_MIGRATION);
+        assert_eq!(ev[0].1, json!({"from_model": "claude-opus-4-1-20250805"}));
+    }
+
     // See rewrites_each_legacy_string_and_stamps_timestamp for the rationale.
     #[allow(clippy::await_holding_lock)]
     #[tokio::test]

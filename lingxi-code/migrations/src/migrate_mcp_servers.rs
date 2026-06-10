@@ -51,10 +51,11 @@ pub async fn run(env: &MigrationEnv) {
 
     // TS try block (TS:33-113): of everything inside it, only
     // `saveCurrentProjectConfig` can actually throw —
-    // `getSettingsForSource('localSettings') || {}` yields `{}` on a broken
-    // file (settings.ts:201-231) and `updateSettingsForSource` returns an
-    // ignored `{error}` (settings.ts:416-523). So only the project-config
-    // save failure reaches `tengu_migrate_mcp_approval_fields_error`.
+    // `getSettingsForSource('localSettings')` (settings.ts:309) reaches
+    // `parseSettingsFileUncached` (settings.ts:201-231), which yields `{}`
+    // on a broken file, and `updateSettingsForSource` returns an ignored
+    // `{error}` (settings.ts:416-523). So only the project-config save
+    // failure reaches `tengu_migrate_mcp_approval_fields_error`.
     let lp = settings_path(SettingsSource::Local, &env.claude_config_home, &env.project_dir);
     let existing = read_settings_map(&lp).unwrap_or_else(|e| {
         tracing::warn!(error = %e, "migrate_mcp_servers: settings read failed (treated as empty, TS parity)");
@@ -113,7 +114,7 @@ pub async fn run(env: &MigrationEnv) {
         p.remove("disabledMcpjsonServers");
         p
     }) {
-        tracing::warn!(error = %e, "migrate_mcp_servers failed");
+        tracing::warn!(error = %e, "migrate_mcp_servers: project-config cleanup failed");
         env.emit(
             telemetry::tengu::migration::MIGRATE_MCP_APPROVAL_FIELDS_ERROR,
             std::collections::HashMap::new(),
@@ -237,10 +238,11 @@ mod tests {
 
     /// Convention check: a broken local settings file must NOT divert to the
     /// error event or block the project-config cleanup — TS
-    /// `getSettingsForSource('localSettings') || {}` yields `{}` on a broken
-    /// file (never throws) and `updateSettingsForSource` returns an ignored
-    /// `{error}` (settings.ts:416-523), so `saveCurrentProjectConfig` still
-    /// runs and removes the fields.
+    /// `getSettingsForSource('localSettings')` (settings.ts:309) reaches
+    /// `parseSettingsFileUncached` (settings.ts:201-231), which yields `{}`
+    /// on a broken file (never throws), and `updateSettingsForSource` returns
+    /// an ignored `{error}` (settings.ts:416-523), so
+    /// `saveCurrentProjectConfig` still runs and removes the fields.
     #[tokio::test]
     async fn broken_local_settings_still_removes_project_fields() {
         let t = temp_config();

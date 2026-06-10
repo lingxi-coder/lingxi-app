@@ -17,6 +17,8 @@ tokio = { workspace = true, features = ["fs"] }
 
 [dev-dependencies]
 tempfile = "3"
+# Capturing AnalyticsSink impl in test_support (emission-contract tests).
+async-trait.workspace = true
 # Not used yet: required by plan Tasks 6-10 (async #[tokio::test] for runner/changelog).
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 

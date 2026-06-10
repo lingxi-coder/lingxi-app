@@ -17,7 +17,7 @@ pub async fn run(env: &MigrationEnv) {
     let cfg = match global_config::read_map(&env.global_config_path) {
         Ok(c) => c,
         Err(e) => {
-            tracing::warn!(error = %e, "reset_pro_to_opus: config read failed");
+            tracing::warn!(error = %e, "migrate_reset_pro_to_opus: config read failed");
             return;
         }
     };
@@ -33,7 +33,7 @@ pub async fn run(env: &MigrationEnv) {
         }) {
             // TS `saveGlobalConfig` throws here, before logEvent (no catch in
             // this migration) — mirror that by skipping the emit.
-            tracing::warn!(error = %e, "reset_pro_to_opus: flag write failed");
+            tracing::warn!(error = %e, "migrate_reset_pro_to_opus: skip-branch flag write failed");
             return;
         }
         env.emit(
@@ -59,7 +59,7 @@ pub async fn run(env: &MigrationEnv) {
         m
     }) {
         // TS throws here, before logEvent — mirror that by skipping the emit.
-        tracing::warn!(error = %e, "reset_pro_to_opus: flag write failed");
+        tracing::warn!(error = %e, "migrate_reset_pro_to_opus: eligible-branch flag write failed");
         return;
     }
     env.emit(
@@ -96,6 +96,22 @@ mod tests {
         let m = crate::global_config::read_map(&t.global).unwrap();
         assert_eq!(m["opusProMigrationComplete"], json!(true));
         assert!(m.get("opusProMigrationTimestamp").is_none());
+    }
+
+    /// Emission contract: the tier-`None` (not-Pro) branch still logs
+    /// `tengu_reset_pro_to_opus_default` with `skipped: true`
+    /// (`resetProToOpusDefault.ts` non-eligible path).
+    #[tokio::test]
+    async fn tier_none_emits_skipped_true() {
+        let t = temp_config();
+        let (bus, events) = crate::test_support::capture_bus().await;
+        let mut env = test_env(&t);
+        env.bus = Some(bus);
+        run(&env).await;
+        let ev = events.lock().unwrap();
+        assert_eq!(ev.len(), 1);
+        assert_eq!(ev[0].0, telemetry::tengu::migration::RESET_PRO_TO_OPUS_DEFAULT);
+        assert_eq!(ev[0].1, json!({"skipped": true}));
     }
 
     #[tokio::test]

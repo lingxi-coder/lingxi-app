@@ -139,6 +139,64 @@ mod tests {
         assert!(m2.get("sonnet45To46MigrationTimestamp").is_none());
     }
 
+    /// Emission contract: the Max-tier happy path logs
+    /// `tengu_sonnet45_to_46_migration` with `from_model` = the ORIGINAL
+    /// pinned string and `has_1m` (`migrateSonnet45ToSonnet46.ts:63`).
+    #[tokio::test]
+    async fn max_tier_happy_path_emits_from_model_and_has_1m() {
+        let t = temp_config();
+        std::fs::write(&t.global, r#"{"numStartups": 5}"#).unwrap();
+        let sp = settings_path(SettingsSource::User, &t.home, &t.project);
+        std::fs::create_dir_all(sp.parent().unwrap()).unwrap();
+        std::fs::write(&sp, r#"{"model": "sonnet-4-5-20250929[1m]"}"#).unwrap();
+        let (bus, events) = crate::test_support::capture_bus().await;
+        let mut env = test_env(&t);
+        env.ctx.subscription_type = Some(SubscriptionType::Max);
+        env.bus = Some(bus);
+        run(&env).await;
+        let ev = events.lock().unwrap();
+        assert_eq!(ev.len(), 1);
+        assert_eq!(ev[0].0, telemetry::tengu::migration::SONNET45_TO_46_MIGRATION);
+        assert_eq!(
+            ev[0].1,
+            serde_json::json!({"from_model": "sonnet-4-5-20250929[1m]", "has_1m": true})
+        );
+    }
+
+    /// Gate coverage: Pro is accepted, and Team is accepted — the module-doc
+    /// divergence pin (Rust `Team` cannot distinguish Premium from Standard;
+    /// TS gates on Team PREMIUM via `rateLimitTier`, auth.ts:1687-1692).
+    #[tokio::test]
+    async fn pro_and_team_tiers_are_accepted() {
+        for tier in [SubscriptionType::Pro, SubscriptionType::Team] {
+            let t = temp_config();
+            let sp = settings_path(SettingsSource::User, &t.home, &t.project);
+            std::fs::create_dir_all(sp.parent().unwrap()).unwrap();
+            std::fs::write(&sp, r#"{"model": "claude-sonnet-4-5-20250929"}"#).unwrap();
+            let mut env = test_env(&t);
+            env.ctx.subscription_type = Some(tier);
+            run(&env).await;
+            assert_eq!(read_settings_map(&sp).unwrap()["model"], serde_json::json!("sonnet"));
+        }
+    }
+
+    /// Gate coverage: not first-party is a noop even for an eligible tier.
+    #[tokio::test]
+    async fn not_first_party_is_noop() {
+        let t = temp_config();
+        let sp = settings_path(SettingsSource::User, &t.home, &t.project);
+        std::fs::create_dir_all(sp.parent().unwrap()).unwrap();
+        std::fs::write(&sp, r#"{"model": "claude-sonnet-4-5-20250929"}"#).unwrap();
+        let mut env = test_env(&t);
+        env.ctx.first_party = false;
+        env.ctx.subscription_type = Some(SubscriptionType::Max);
+        run(&env).await;
+        assert_eq!(
+            read_settings_map(&sp).unwrap()["model"],
+            serde_json::json!("claude-sonnet-4-5-20250929")
+        );
+    }
+
     /// Convention check: a failing settings WRITE must not block the
     /// timestamp stamp (TS `updateSettingsForSource` returns an ignored
     /// `{error}`, settings.ts:416-523; the numStartups gate + saveGlobalConfig

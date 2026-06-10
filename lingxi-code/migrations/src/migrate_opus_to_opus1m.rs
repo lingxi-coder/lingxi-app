@@ -154,6 +154,25 @@ mod tests {
         assert_eq!(read_settings_map(&sp).unwrap()["model"], serde_json::json!("opus[1m]"));
     }
 
+    /// Gate coverage: not first-party is a noop even with an eligible tier
+    /// (`is_opus1m_merge_enabled` requires `first_party`, model.ts:331).
+    // See tier_none_fails_closed for the lock rationale.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn not_first_party_max_tier_noop() {
+        let _g = env_lock();
+        std::env::remove_var("CLAUDE_CODE_DISABLE_1M_CONTEXT");
+        let t = temp_config();
+        let sp = settings_path(SettingsSource::User, &t.home, &t.project);
+        std::fs::create_dir_all(sp.parent().unwrap()).unwrap();
+        std::fs::write(&sp, r#"{"model": "opus"}"#).unwrap();
+        let mut env = test_env(&t);
+        env.ctx.first_party = false;
+        env.ctx.subscription_type = Some(SubscriptionType::Max);
+        run(&env).await;
+        assert_eq!(read_settings_map(&sp).unwrap()["model"], serde_json::json!("opus"));
+    }
+
     // See tier_none_fails_closed for the lock rationale.
     #[allow(clippy::await_holding_lock)]
     #[tokio::test]

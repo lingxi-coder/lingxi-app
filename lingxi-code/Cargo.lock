@@ -3765,6 +3765,7 @@ dependencies = [
 name = "sandbox-netfilter"
 version = "0.12.0"
 dependencies = [
+ "ipnet",
  "serde",
  "serde_json",
  "url",

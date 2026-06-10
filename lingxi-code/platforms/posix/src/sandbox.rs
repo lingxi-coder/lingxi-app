@@ -164,7 +164,27 @@ impl Sandbox for PosixSandbox {
         }
 
         // Translate M1 `SandboxPolicy` → `SandboxRuntimeConfig`.
-        let runtime_cfg = runtime_config_from_policy(policy);
+        let mut runtime_cfg = runtime_config_from_policy(policy);
+
+        // Deny-write by FS existence (finding 3). The bare-repo escape-defense
+        // set + the existing generic denied paths re-mount read-only IN PLACE
+        // for paths that exist now; absent bare-repo files go to the scrub list
+        // (wired into the wrap suffix in Task 5 — inert until then). This port's
+        // `prepare` carries one cwd, so `original_cwd == cwd` (the TS
+        // `[originalCwd, cwd]` widening collapses to a single dir).
+        if let Some(cwd) = &cmd.cwd {
+            let (ro_in_place, scrub) = split_bare_repo_paths(std::slice::from_ref(cwd));
+            let mut ro = ro_in_place;
+            // The wrapper ignored `deny_write` before; now it enforces it for
+            // existing paths (absent ones are simply not present to write to).
+            for d in &runtime_cfg.filesystem.deny_write {
+                if std::path::Path::new(d).exists() {
+                    ro.push(d.clone());
+                }
+            }
+            runtime_cfg.ro_bind_in_place = ro;
+            runtime_cfg.scrub_paths = scrub;
+        }
 
         // Build the full original command string for wrapping (command + args).
         let mut cmd_string = cmd.command.clone();
@@ -229,6 +249,31 @@ impl Sandbox for PosixSandbox {
     }
 }
 
+/// claude-code bare-repo escape-defense file set (sandbox-adapter.ts:267).
+const BARE_GIT_REPO_FILES: [&str; 5] = ["HEAD", "objects", "refs", "hooks", "config"];
+
+/// Split the bare-repo escape-defense paths under each dir by FS existence:
+/// existing → ro-bind-in-place (deny write); absent → scrub list (delete
+/// post-command). Mirrors sandbox-adapter.ts:264-280. `original_cwd == cwd`
+/// in this port (single `prepare` cwd), so the TS `[originalCwd, cwd]` widening
+/// collapses to the one dir.
+fn split_bare_repo_paths(dirs: &[std::path::PathBuf]) -> (Vec<String>, Vec<String>) {
+    let mut ro_in_place = Vec::new();
+    let mut scrub = Vec::new();
+    for dir in dirs {
+        for f in BARE_GIT_REPO_FILES {
+            let p = dir.join(f);
+            let s = p.to_string_lossy().into_owned();
+            if p.exists() {
+                ro_in_place.push(s);
+            } else {
+                scrub.push(s);
+            }
+        }
+    }
+    (ro_in_place, scrub)
+}
+
 /// Translate the M1 [`SandboxPolicy`] into a [`SandboxRuntimeConfig`] for the
 /// wrap dispatcher. The mapping is intentionally narrow — M1 callers only
 /// carry `writable_paths`, `denied_paths`, `network`, and `limits`.
@@ -247,10 +292,6 @@ fn runtime_config_from_policy(policy: &SandboxPolicy) -> SandboxRuntimeConfig {
         .iter()
         .map(|p| p.to_string_lossy().into_owned())
         .collect();
-    let want_net = matches!(
-        policy.network,
-        NetworkPolicy::Allowed | NetworkPolicy::LoopbackOnly
-    );
     SandboxRuntimeConfig {
         enabled: true,
         filesystem: FilesystemRestrictionConfig {
@@ -259,8 +300,11 @@ fn runtime_config_from_policy(policy: &SandboxPolicy) -> SandboxRuntimeConfig {
             ..Default::default()
         },
         network: NetworkRestrictionConfig {
+            // Conservative: only full-allow requests external egress. LoopbackOnly
+            // is satisfied by bwrap's fresh netns (loopback present, external
+            // blocked) → empty allowed_domains → `--unshare-net` in the wrapper.
             allow_local_binding: matches!(policy.network, NetworkPolicy::LoopbackOnly),
-            allowed_domains: if want_net {
+            allowed_domains: if matches!(policy.network, NetworkPolicy::Allowed) {
                 vec!["*".to_string()]
             } else {
                 vec![]
@@ -268,5 +312,55 @@ fn runtime_config_from_policy(policy: &SandboxPolicy) -> SandboxRuntimeConfig {
             ..Default::default()
         },
         ..Default::default()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{runtime_config_from_policy, split_bare_repo_paths};
+    use traits::{NetworkPolicy, ResourceLimits, SandboxPolicy};
+
+    /// Build a minimal `SandboxPolicy` literal for net-mapping tests.
+    /// `SandboxPolicy` does not derive `Default`, so construct each field.
+    fn policy_with_network(network: NetworkPolicy) -> SandboxPolicy {
+        SandboxPolicy {
+            network,
+            writable_paths: vec![],
+            denied_paths: vec![],
+            allow_subprocess: false,
+            limits: ResourceLimits::default(),
+        }
+    }
+
+    #[test]
+    fn loopback_and_disabled_do_not_request_full_egress() {
+        let mut p = policy_with_network(NetworkPolicy::LoopbackOnly);
+        let cfg = runtime_config_from_policy(&p);
+        assert!(
+            cfg.network.allowed_domains.is_empty(),
+            "loopback must not map to [*]"
+        );
+        p.network = NetworkPolicy::Disabled;
+        assert!(runtime_config_from_policy(&p)
+            .network
+            .allowed_domains
+            .is_empty());
+        p.network = NetworkPolicy::Allowed;
+        assert_eq!(
+            runtime_config_from_policy(&p).network.allowed_domains,
+            vec!["*".to_string()]
+        );
+    }
+
+    #[test]
+    fn existing_denied_paths_go_ro_in_place_absent_go_scrub() {
+        let tmp = tempfile::tempdir().unwrap();
+        let exists = tmp.path().join("HEAD");
+        std::fs::write(&exists, "x").unwrap();
+        let absent = tmp.path().join("objects");
+        let (ro, scrub) = split_bare_repo_paths(&[tmp.path().to_path_buf()]);
+        assert!(ro.contains(&exists.to_string_lossy().into_owned()));
+        assert!(scrub.contains(&absent.to_string_lossy().into_owned()));
+        assert!(!ro.iter().any(|p| p.ends_with("objects")));
     }
 }

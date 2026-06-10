@@ -62,6 +62,11 @@ fn wrap_linux_bwrap(command: &str, policy: &SandboxRuntimeConfig) -> String {
     // Default ro root + tmpfs ephemeral writes + procfs/devfs + pid-ns +
     // die-with-parent — match claude-code's defaults.
     let mut args: Vec<String> = vec![
+        // Create a user namespace where possible; degrade gracefully on kernels
+        // with unprivileged userns disabled (`-try`) instead of failing to start
+        // (finding 5). Without it an unprivileged bwrap cannot create the pid/net
+        // namespaces below. Verified to start + degrade under user.max_user_namespaces=0.
+        "--unshare-user-try".into(),
         "--ro-bind".into(),
         "/".into(),
         "/".into(),
@@ -82,24 +87,47 @@ fn wrap_linux_bwrap(command: &str, policy: &SandboxRuntimeConfig) -> String {
         args.push(path.clone());
     }
 
-    // Network.
-    let want_network = !policy.network.allowed_domains.is_empty()
-        || policy.network.allow_local_binding
-        || policy.network.allow_all_unix_sockets
-        || !policy.network.allow_unix_sockets.is_empty();
-    if want_network {
-        args.push("--share-net".into());
-        // TODO(M2-followup): wire socat companion process for domain
-        // filtering. For now, --share-net lets the wrapped command see the
-        // host's network; domain-level filtering is deferred to the
-        // process-lifecycle layer (platforms/posix/src/sandbox.rs).
-    } else {
+    // Deny-write: re-mount existing denied / bare-repo paths read-only IN PLACE.
+    // Placed after the allow_write `--bind`s so a deny overrides a writable
+    // parent (bwrap: later mounts win — verified). NEVER `--ro-bind-try /dev/null`
+    // (that blanks the host file); ro-bind-in-place preserves it read-only
+    // (finding 3, sandbox-adapter.ts:264).
+    for path in &policy.ro_bind_in_place {
+        args.push("--ro-bind".into());
+        args.push(path.clone());
+        args.push(path.clone());
+    }
+
+    // Conservative network posture: full host net ONLY for an allow-all policy
+    // (allowed_domains non-empty == NetworkPolicy::Allowed). LoopbackOnly /
+    // Disabled get a fresh network namespace (loopback-only, external blocked).
+    // The socat domain-filter companion is deferred; a domain-allowlist policy
+    // therefore gets no external egress (errs safe) until it lands.
+    if policy.network.allowed_domains.is_empty() {
         args.push("--unshare-net".into());
+    } else {
+        args.push("--share-net".into());
     }
 
     let quoted = shell_escape_single(command);
     let joined = args.join(" ");
-    format!("bwrap {joined} -- /bin/sh -c {quoted}")
+    let base = format!("bwrap {joined} -- /bin/sh -c {quoted}");
+    if policy.scrub_paths.is_empty() {
+        return base;
+    }
+    // Host-side post-command scrub of planted bare-repo files (finding 4,
+    // scrubBareGitRepoFiles in sandbox-adapter.ts:404). Runs OUTSIDE bwrap on
+    // the host cwd after the command — captures bwrap's exit code immediately
+    // (`rc=$?`), deletes the planted paths ENOENT-tolerantly (`rm -rf -- …
+    // 2>/dev/null`), then restores the exit code (`exit "$rc"`). Empty list →
+    // no suffix (byte-identical to the un-hardened string, handled above).
+    let scrub_args = policy
+        .scrub_paths
+        .iter()
+        .map(|p| shell_escape_single(p))
+        .collect::<Vec<_>>()
+        .join(" ");
+    format!("{base}\nrc=$?; rm -rf -- {scrub_args} 2>/dev/null; exit \"$rc\"")
 }
 
 /// Single-quote-escape `s` for `/bin/sh -c`.
@@ -180,10 +208,16 @@ pub(crate) fn generate_sbpl_profile(policy: &SandboxRuntimeConfig) -> String {
         let escaped = sbpl_regex_escape(p);
         out.push_str(&format!("(deny file-read* (regex \"^{escaped}\"))\n"));
     }
-    let want_network = !policy.network.allowed_domains.is_empty()
-        || policy.network.allow_local_binding
-        || policy.network.allow_all_unix_sockets;
-    if want_network {
+    // Conservative network posture (same keying as the bwrap path, finding 2):
+    // emit full `(allow network*)` ONLY for a full-allow policy (allowed_domains
+    // non-empty == NetworkPolicy::Allowed). LoopbackOnly/Disabled get NO network
+    // rule (default-deny) so a loopback policy can never leak external egress.
+    // `allow_local_binding`/unix-socket fields no longer widen this to full net.
+    // REFINEMENT (follow-up): macOS SBPL can express loopback-only via
+    // `(allow network* (local ...))`; until then LoopbackOnly is stricter on
+    // macOS (no loopback) than on Linux (--unshare-net keeps loopback) — safe,
+    // errs restrictive.
+    if !policy.network.allowed_domains.is_empty() {
         out.push_str("(allow network*)\n");
     }
     out
@@ -221,4 +255,96 @@ fn write_sbpl_tempfile(profile: &str) -> Result<String, SandboxWrapError> {
         .keep()
         .map_err(|e| SandboxWrapError::SbplWrite(e.error.to_string()))?;
     Ok(path.to_string_lossy().into_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{generate_sbpl_profile, wrap_linux_bwrap};
+    use crate::runtime_config::SandboxRuntimeConfig;
+
+    #[test]
+    fn macos_sbpl_loopback_does_not_grant_full_network() {
+        // finding-2 analog on the macOS backend: a LoopbackOnly policy
+        // (allow_local_binding true, allowed_domains empty) must NOT emit the
+        // full `(allow network*)` egress rule.
+        let mut cfg = SandboxRuntimeConfig::default();
+        cfg.network.allow_local_binding = true;
+        cfg.network.allow_all_unix_sockets = true;
+        assert!(
+            !generate_sbpl_profile(&cfg).contains("(allow network*)"),
+            "loopback/unix-socket policy must not grant full macOS network egress"
+        );
+        // Only a full-allow policy (allowed_domains non-empty) gets full network.
+        cfg.network.allowed_domains = vec!["*".into()];
+        assert!(generate_sbpl_profile(&cfg).contains("(allow network*)"));
+    }
+
+    #[test]
+    fn bwrap_creates_a_user_namespace() {
+        let w = wrap_linux_bwrap("true", &SandboxRuntimeConfig::default());
+        assert!(w.contains("--unshare-user-try"),
+            "bwrap must request a userns (degrading) so it can create pid/net ns unprivileged: {w}");
+    }
+
+    #[test]
+    fn share_net_only_when_allowed_domains_present() {
+        let mut cfg = SandboxRuntimeConfig::default();
+        // Allowed → ["*"] → --share-net
+        cfg.network.allowed_domains = vec!["*".into()];
+        assert!(wrap_linux_bwrap("true", &cfg).contains("--share-net"));
+        // LoopbackOnly: empty domains + allow_local_binding → NOT --share-net
+        cfg.network.allowed_domains.clear();
+        cfg.network.allow_local_binding = true;
+        let w = wrap_linux_bwrap("true", &cfg);
+        assert!(
+            !w.contains("--share-net"),
+            "loopback must not get full egress: {w}"
+        );
+        assert!(w.contains("--unshare-net"));
+    }
+
+    #[test]
+    fn ro_bind_in_place_comes_after_allow_write_so_deny_wins() {
+        let mut cfg = SandboxRuntimeConfig::default();
+        cfg.filesystem.allow_write = vec!["/work".into()];
+        cfg.ro_bind_in_place = vec!["/work/.git/HEAD".into()];
+        let w = wrap_linux_bwrap("true", &cfg);
+        let bind_pos = w.find("--bind /work /work").expect("allow_write bind");
+        let ro_pos = w
+            .find("--ro-bind /work/.git/HEAD /work/.git/HEAD")
+            .expect("ro-bind-in-place");
+        assert!(
+            ro_pos > bind_pos,
+            "ro-bind-in-place must follow allow_write bind to override it:\n{w}"
+        );
+    }
+
+    #[test]
+    fn scrub_paths_append_exit_preserving_host_side_rm() {
+        let cfg = SandboxRuntimeConfig {
+            // includes a quote to test escaping
+            scrub_paths: vec!["/s/HEAD".into(), "/s/ob'j".into()],
+            ..Default::default()
+        };
+        let w = wrap_linux_bwrap("true", &cfg);
+        assert!(w.contains("rc=$?"), "must capture bwrap exit: {w}");
+        assert!(
+            w.contains("exit \"$rc\"") || w.contains("exit $rc"),
+            "must restore exit code: {w}"
+        );
+        assert!(w.contains("rm -rf --"), "must rm the scrub paths: {w}");
+        assert!(
+            w.contains(r"'/s/ob'\''j'"),
+            "scrub paths single-quote escaped: {w}"
+        );
+    }
+
+    #[test]
+    fn no_scrub_suffix_when_list_empty() {
+        let w = wrap_linux_bwrap("true", &SandboxRuntimeConfig::default());
+        assert!(
+            !w.contains("rc=$?"),
+            "empty scrub list must not append a suffix (byte-identical): {w}"
+        );
+    }
 }

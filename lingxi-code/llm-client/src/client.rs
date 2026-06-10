@@ -4,8 +4,8 @@ use std::sync::Arc;
 use crate::{
     validate_capabilities, ApiKeyAuthenticator, AuthStrategy, Authenticator, BearerAuthenticator,
     ClientConfig, Credential, CredentialConfig, CredentialProvider, CredentialScope,
-    EnvCredentialProvider, LlmError, LlmRequest, ModelListing, ModelRegistry, ProtocolFamily,
-    ProviderId, ProviderRequest, Route, WireCodec,
+    EnvCredentialProvider, LlmError, LlmRequest, LlmResponse, ModelListing, ModelRegistry,
+    ProtocolFamily, ProviderId, ProviderRequest, Route, Transport, WireCodec,
 };
 
 #[derive(Debug)]
@@ -98,6 +98,20 @@ impl DefaultLlmClient {
             },
             provider_request,
         })
+    }
+
+    /// Execute a non-streaming call over `transport`.
+    ///
+    /// Prepares (resolve, validate, encode, authenticate), sends, and decodes
+    /// the response through the status-aware codec error taxonomy.
+    pub async fn execute(
+        &self,
+        request: &LlmRequest,
+        transport: &dyn Transport,
+    ) -> Result<LlmResponse, LlmError> {
+        let prepared = self.prepare(request)?;
+        let provider_response = transport.execute(&prepared.provider_request).await?;
+        prepared.route.codec.decode_response(provider_response)
     }
 
     fn authenticate(

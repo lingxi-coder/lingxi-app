@@ -12,5 +12,8 @@ thiserror.workspace = true
 url = "2"
 base64 = "0.22"
 
+[dev-dependencies]
+tokio = { workspace = true }
+
 [lints]
 workspace = true

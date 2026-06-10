@@ -23,6 +23,7 @@ pub mod redaction;
 pub mod route;
 pub mod retry;
 pub mod sse;
+pub mod transport;
 pub mod types;
 
 pub use auth::{ApiKeyAuthenticator, Authenticator, BearerAuthenticator};
@@ -46,4 +47,5 @@ pub use redaction::Redactor;
 pub use route::Route;
 pub use retry::{ResponseMetadata, RetryDecision, RetryPolicy};
 pub use sse::SseFrameSplitter;
+pub use transport::{BoxFuture, FrameStream, StreamingResponse, Transport};
 pub use types::{CostEstimate, PricingModelRef, ProviderId, ServerToolUsage, TokenUsage, Usage};

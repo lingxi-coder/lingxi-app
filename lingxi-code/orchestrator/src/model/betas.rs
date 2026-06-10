@@ -269,6 +269,49 @@ pub fn apply_beta_header(
     request.headers.insert("anthropic-beta".to_string(), merged);
 }
 
+/// Variant of [`apply_beta_header`] that also appends `oauth-2025-04-20` when
+/// `is_oauth_subscriber` is `true`.
+///
+/// **Parity:** mirrors `claude-code/src/utils/betas.ts:251-252`:
+/// ```text
+/// if (isClaudeAISubscriber()) { betaHeaders.push(OAUTH_BETA_HEADER) }
+/// ```
+/// where `OAUTH_BETA_HEADER = 'oauth-2025-04-20'` (`constants/oauth.ts:36`).
+///
+/// Under OAuth subscriber auth, `oauth-2025-04-20` is appended as one element of
+/// the comma-joined `anthropic-beta` list — never as a standalone clobbering
+/// insert.  When the header already contains `oauth-2025-04-20` (e.g., injected
+/// earlier by `llm_client::authenticate`), the deduplication pass ensures it
+/// appears exactly once.
+///
+/// For non-subscriber routes (`is_oauth_subscriber = false`) this function
+/// behaves identically to [`apply_beta_header`].
+pub fn apply_beta_header_with_auth(
+    request: &mut llm_client::ProviderRequest,
+    provider: Provider,
+    endpoint: Endpoint,
+    is_oauth_subscriber: bool,
+) {
+    apply_beta_header(request, provider, endpoint);
+
+    if is_oauth_subscriber {
+        let existing = request.headers.get("anthropic-beta").map(String::as_str);
+        let merged = match existing {
+            None => OAUTH.to_string(),
+            Some(current) => {
+                if current.split(',').any(|seg| seg == OAUTH) {
+                    current.to_string()
+                } else {
+                    format!("{current},{OAUTH}")
+                }
+            }
+        };
+        request
+            .headers
+            .insert("anthropic-beta".to_string(), merged);
+    }
+}
+
 /// Runtime emit-gate for [`CLI_INTERNAL`]. Mirrors the `utils/betas.ts`
 /// assembler condition `process.env.USER_TYPE === 'ant' &&
 /// process.env.CLAUDE_CODE_ENTRYPOINT === 'cli'`. Returns `false` (the default
@@ -538,6 +581,102 @@ mod tests {
             value.split(',').filter(|p| *p == CLAUDE_CODE_BETA).count(),
             1,
             "CLAUDE_CODE_BETA must appear exactly once in the merged header; got: {value}",
+        );
+    }
+
+    // ---- Task 2: OAuth subscriber beta parity tests ----
+    //
+    // Reference: `claude-code/src/utils/betas.ts:251-252`:
+    //   if (isClaudeAISubscriber()) { betaHeaders.push(OAUTH_BETA_HEADER) }
+    // Reference: `claude-code/src/constants/oauth.ts:36`:
+    //   export const OAUTH_BETA_HEADER = 'oauth-2025-04-20' as const
+
+    /// When `is_oauth_subscriber` is true, `apply_beta_header_with_auth` must
+    /// append `oauth-2025-04-20` alongside model betas (comma-joined, no clobber).
+    /// Mirrors `betas.ts:251-252`: `if (isClaudeAISubscriber()) { betaHeaders.push(OAUTH_BETA_HEADER) }`.
+    #[test]
+    fn oauth_beta_appended_for_subscriber() {
+        let mut req = llm_client::ProviderRequest::post_json(
+            "https://api.anthropic.com/v1/messages",
+            serde_json::json!({"model": "claude-sonnet-4-6", "max_tokens": 1024}),
+        );
+        apply_beta_header_with_auth(
+            &mut req,
+            Provider::Anthropic,
+            Endpoint::MessagesCreate,
+            true,
+        );
+        let value = req
+            .headers
+            .get("anthropic-beta")
+            .expect("anthropic-beta header must be present");
+
+        // Must contain the core model beta AND the oauth beta.
+        assert!(
+            value.split(',').any(|p| p == CLAUDE_CODE_BETA),
+            "claude-code beta must be present; got: {value}",
+        );
+        assert!(
+            value.split(',').any(|p| p == OAUTH),
+            "oauth-2025-04-20 must be present for subscriber; got: {value}",
+        );
+        // No duplicate oauth entries.
+        assert_eq!(
+            value.split(',').filter(|p| *p == OAUTH).count(),
+            1,
+            "oauth-2025-04-20 must appear exactly once; got: {value}",
+        );
+    }
+
+    /// When `is_oauth_subscriber` is false, `oauth-2025-04-20` must NOT be added.
+    /// Mirrors `betas.ts:251`: the push is conditional on `isClaudeAISubscriber()`.
+    #[test]
+    fn oauth_beta_absent_for_non_subscriber() {
+        let mut req = llm_client::ProviderRequest::post_json(
+            "https://api.anthropic.com/v1/messages",
+            serde_json::json!({"model": "claude-sonnet-4-6", "max_tokens": 1024}),
+        );
+        apply_beta_header_with_auth(
+            &mut req,
+            Provider::Anthropic,
+            Endpoint::MessagesCreate,
+            false,
+        );
+        let value = req
+            .headers
+            .get("anthropic-beta")
+            .expect("anthropic-beta header must be present");
+        assert!(
+            !value.split(',').any(|p| p == OAUTH),
+            "oauth-2025-04-20 must NOT be present for non-subscriber; got: {value}",
+        );
+    }
+
+    /// When `is_oauth_subscriber` is true but the header already contains
+    /// `oauth-2025-04-20`, the merged result must still contain it exactly once.
+    #[test]
+    fn oauth_beta_appended_for_subscriber_no_duplicate_if_already_present() {
+        let mut req = llm_client::ProviderRequest::post_json(
+            "https://api.anthropic.com/v1/messages",
+            serde_json::json!({"model": "claude-sonnet-4-6", "max_tokens": 1024}),
+        );
+        // Pre-seed the oauth beta (as authenticate() in llm-client would do).
+        req.headers
+            .insert("anthropic-beta".to_string(), OAUTH.to_string());
+        apply_beta_header_with_auth(
+            &mut req,
+            Provider::Anthropic,
+            Endpoint::MessagesCreate,
+            true,
+        );
+        let value = req
+            .headers
+            .get("anthropic-beta")
+            .expect("anthropic-beta header must be present");
+        assert_eq!(
+            value.split(',').filter(|p| *p == OAUTH).count(),
+            1,
+            "oauth-2025-04-20 must appear exactly once even when pre-seeded; got: {value}",
         );
     }
 

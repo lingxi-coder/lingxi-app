@@ -217,12 +217,19 @@ impl DefaultLlmClient {
 
         let mut request = authenticator.apply(request)?;
         // Anthropic accepts OAuth bearer tokens only with the oauth beta flag.
+        //
+        // Parity: `constants/oauth.ts:36` OAUTH_BETA_HEADER = 'oauth-2025-04-20';
+        // `utils/betas.ts:251-252` appends it via push() (list element, not clobber).
+        // Use append_beta so that any betas already present (e.g., set by the
+        // orchestrator's betas assembler before authenticate runs) are preserved.
         if matches!(entry.auth, AuthStrategy::OAuthBearer)
             && matches!(entry.protocol, ProtocolFamily::AnthropicMessages)
         {
+            let existing = request.headers.get("anthropic-beta").map(String::as_str);
+            let value = append_beta(existing, "oauth-2025-04-20");
             request
                 .headers
-                .insert("anthropic-beta".to_string(), "oauth-2025-04-20".to_string());
+                .insert("anthropic-beta".to_string(), value);
         }
         Ok(request)
     }
@@ -383,5 +390,102 @@ impl std::fmt::Debug for LlmEventStream {
             .field("yielded_any", &self.yielded_any)
             .field("finished", &self.finished)
             .finish_non_exhaustive()
+    }
+}
+
+/// Append `beta` to the comma-joined `anthropic-beta` header value if it is not
+/// already present.
+///
+/// - If `existing` is `None`, returns `beta.to_string()` (first entry).
+/// - If `existing` already contains `beta` as a comma-separated segment (exact
+///   match, no surrounding whitespace expected), the original value is returned
+///   unchanged.
+/// - Otherwise `", beta"` is appended to `existing`.
+///
+/// **Parity:** mirrors `claude-code/src/utils/betas.ts:251-252` semantics where
+/// `OAUTH_BETA_HEADER` is pushed into the beta list only when
+/// `isClaudeAISubscriber()` is true, and the list is later joined — it is never
+/// a standalone clobbering insert.
+///
+/// **`constants/oauth.ts:36`:** `OAUTH_BETA_HEADER = 'oauth-2025-04-20'` is the
+/// beta value passed to this function by `authenticate()` for OAuth sessions.
+#[must_use]
+pub(crate) fn append_beta(existing: Option<&str>, beta: &str) -> String {
+    match existing {
+        None => beta.to_string(),
+        Some(current) => {
+            // Check whether `beta` is already a segment.
+            if current.split(',').any(|seg| seg == beta) {
+                current.to_string()
+            } else {
+                format!("{current},{beta}")
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::append_beta;
+
+    // ---- Task 2: `append_beta` pure-fn unit tests ----
+    //
+    // Reference: `claude-code/src/utils/betas.ts:251-252`:
+    //   if (isClaudeAISubscriber()) { betaHeaders.push(OAUTH_BETA_HEADER) }
+    // Reference: `claude-code/src/constants/oauth.ts:36`:
+    //   export const OAUTH_BETA_HEADER = 'oauth-2025-04-20' as const
+
+    #[test]
+    fn append_beta_to_none_returns_beta_alone() {
+        assert_eq!(append_beta(None, "oauth-2025-04-20"), "oauth-2025-04-20");
+    }
+
+    #[test]
+    fn append_beta_to_existing_single_entry_comma_joins() {
+        assert_eq!(
+            append_beta(Some("claude-code-20250219"), "oauth-2025-04-20"),
+            "claude-code-20250219,oauth-2025-04-20",
+        );
+    }
+
+    #[test]
+    fn append_beta_to_existing_multi_entry_appends_at_end() {
+        assert_eq!(
+            append_beta(Some("claude-code-20250219,interleaved-thinking-2025-05-14"), "oauth-2025-04-20"),
+            "claude-code-20250219,interleaved-thinking-2025-05-14,oauth-2025-04-20",
+        );
+    }
+
+    #[test]
+    fn append_beta_does_not_duplicate_when_already_present() {
+        // oauth-2025-04-20 is already in the list — must not be added again.
+        assert_eq!(
+            append_beta(Some("claude-code-20250219,oauth-2025-04-20"), "oauth-2025-04-20"),
+            "claude-code-20250219,oauth-2025-04-20",
+        );
+    }
+
+    #[test]
+    fn append_beta_does_not_duplicate_when_only_entry() {
+        assert_eq!(
+            append_beta(Some("oauth-2025-04-20"), "oauth-2025-04-20"),
+            "oauth-2025-04-20",
+        );
+    }
+
+    /// Verify the `authenticate()` clobbering bug is exercised via `append_beta`:
+    /// a pre-existing multi-beta header must not be overwritten when oauth is added.
+    #[test]
+    fn oauth_beta_does_not_clobber_existing_betas() {
+        let existing = "claude-code-20250219,interleaved-thinking-2025-05-14";
+        let result = append_beta(Some(existing), "oauth-2025-04-20");
+        // Both pre-existing betas survive.
+        assert!(result.split(',').any(|p| p == "claude-code-20250219"),
+            "claude-code beta must survive; got: {result}");
+        assert!(result.split(',').any(|p| p == "interleaved-thinking-2025-05-14"),
+            "interleaved-thinking beta must survive; got: {result}");
+        // And oauth is now present.
+        assert!(result.split(',').any(|p| p == "oauth-2025-04-20"),
+            "oauth beta must be present; got: {result}");
     }
 }

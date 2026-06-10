@@ -13,8 +13,10 @@ use std::path::{Path, PathBuf};
 ///
 /// # Errors
 ///
-/// - [`SettingsError::ParseError`] on malformed JSON or unknown fields (the
-///   latter via `#[serde(deny_unknown_fields)]`).
+/// - [`SettingsError::ParseError`] on malformed JSON or a known field whose
+///   value has the wrong type. Unknown fields are NOT an error — they are
+///   tolerated-and-ignored, matching claude-code's zod `safeParse` strip
+///   semantics (`settings.ts:219`).
 /// - [`SettingsError::Io`] on permission-denied or other non-`NotFound` I/O
 ///   failure. `NotFound` is NOT an error — it returns `Ok(None)`.
 /// - [`SettingsError::SchemaViolation`] when [`SettingsJson::validate`] rejects
@@ -98,16 +100,21 @@ mod tests {
     }
 
     #[test]
-    fn returns_schema_violation_for_unknown_field() {
-        let tmp = tempfile::tempdir().unwrap();
-        let path = tmp.path().join("settings.json");
-        let mut f = std::fs::File::create(&path).unwrap();
-        // deny_unknown_fields surfaces as a ParseError because serde catches it.
-        writeln!(f, r#"{{"bogusField": 1}}"#).unwrap();
-        let err = read_settings_file(&path).unwrap_err();
-        assert!(matches!(
-            err,
-            crate::settings::SettingsError::ParseError { .. }
-        ));
+    fn tolerates_unknown_fields_like_zod_strip() {
+        // claude-code's zod SettingsSchema().safeParse STRIPS unknown keys
+        // (non-strict object schema, settings.ts:219) — strictness was a
+        // parity divergence that made e.g. /effort's persisted `effortLevel`
+        // silently kill the whole settings load.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        std::fs::write(
+            &path,
+            r#"{"model": "opus", "effortLevel": "high", "skipDangerousModePermissionPrompt": true, "env": {"DISABLE_AUTOUPDATER": "1"}, "futureKey": [1,2]}"#,
+        )
+        .unwrap();
+        let settings = read_settings_file(&path)
+            .expect("must load")
+            .expect("must be Some");
+        assert_eq!(settings.model.as_deref(), Some("opus"));
     }
 }

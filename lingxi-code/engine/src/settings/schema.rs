@@ -6,8 +6,13 @@
 //! land as `Option<T>` so deserializing an older file never fails on a
 //! missing key — this matches v3 Event/Effect stability policy.
 //!
+//! Unknown keys are tolerated-and-ignored across the board, matching
+//! claude-code's zod `SettingsSchema().safeParse` (non-strict object ⇒ strip,
+//! `settings.ts:219`). Typed fields exist so the engine can ACCESS known
+//! values — they are not a load-time acceptance gate.
+//!
 //! `$schema` is NOT emitted (claude-code @ commit 6a25909 doesn't emit one)
-//! but IS tolerated as an opaque ignored field for future-compat.
+//! but is kept as a typed field so a file that carries one round-trips it.
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -69,11 +74,22 @@ pub fn strategy_for(field: &str) -> Option<MergeStrategy> {
 /// All fields `Option<T>` so a partial file (one layer of the 4-layer stack)
 /// can omit a field without it showing up as `Some(Default::default())` —
 /// "absent" must round-trip distinctly from "explicitly set to default".
+///
+/// Unknown keys are tolerated-and-ignored, matching claude-code's zod
+/// `SettingsSchema().safeParse` (non-strict object ⇒ strip unknown keys;
+/// `settings.ts:219`). Known fields keep their typed parses. Tolerance also
+/// un-breaks settings files carrying keys written by `ConfigTool`, `/effort`
+/// (`effortLevel`), or the migrations subsystem (`env`,
+/// `skipDangerousModePermissionPrompt`, `enableAllProjectMcpServers`, …) —
+/// under the previous `deny_unknown_fields` strictness any such key made the
+/// whole-file load fail, and production callers' `.ok()` then silently
+/// dropped the entire settings layer.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
 pub struct SettingsJson {
-    /// Forward-compat: claude-code @ 6a25909 does NOT emit this; we tolerate
-    /// readers that do (some IDE tooling may inject a `$schema` reference).
+    /// Forward-compat: claude-code @ 6a25909 does NOT emit this; we keep it
+    /// typed so a `$schema` reference injected by IDE tooling round-trips
+    /// instead of being stripped on re-serialize.
     #[serde(rename = "$schema", default, skip_serializing_if = "Option::is_none")]
     pub dollar_schema: Option<String>,
 
@@ -105,10 +121,9 @@ pub struct SettingsJson {
     /// `{ "allow": [...], "deny": [...], "ask": [...], "defaultMode": "...",
     ///    "additionalDirectories": [...] }` (rule strings like `"Bash(npm run *)"`).
     /// Opaque here — projected into typed rules by
-    /// `permission::permission_rules_from_settings_json`. Without this field,
-    /// `deny_unknown_fields` would REJECT any settings.json carrying a
-    /// `permissions` block (breaking the whole load), so declaring it is
-    /// required even though enforcement is wired separately.
+    /// `permission::permission_rules_from_settings_json`. The typed field
+    /// exists for ACCESS (rule projection + the `DeepMerge` strategy), not as a
+    /// load gate — unknown keys are tolerated-and-ignored anyway.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub permissions: Option<BTreeMap<String, Value>>,
 
@@ -146,7 +161,8 @@ pub struct SettingsJson {
 }
 
 impl SettingsJson {
-    /// Run cross-field semantic checks beyond what `deny_unknown_fields` catches.
+    /// Run cross-field semantic checks beyond what serde's typed
+    /// deserialization catches (unknown keys are tolerated, not validated).
     ///
     /// # Errors
     ///
@@ -193,21 +209,26 @@ mod tests {
     }
 
     #[test]
-    fn rejects_unknown_fields() {
-        let json = r#"{"trustedDirectories": [], "bogusField": 1}"#;
-        let err = serde_json::from_str::<SettingsJson>(json).unwrap_err();
-        assert!(
-            err.to_string().contains("unknown field"),
-            "expected unknown-field error, got: {err}"
+    fn ignores_unknown_fields_zod_strip_parity() {
+        // zod `SettingsSchema().safeParse` strips unknown keys (non-strict
+        // object, settings.ts:219); known siblings must still parse typed.
+        let json = r#"{"trustedDirectories": ["/foo"], "bogusField": 1}"#;
+        let parsed: SettingsJson =
+            serde_json::from_str(json).expect("unknown keys must be ignored, not rejected");
+        assert_eq!(
+            parsed.trusted_directories.as_deref(),
+            Some(&["/foo".to_string()][..])
         );
     }
 
     #[test]
     fn accepts_permissions_block() {
-        // Regression: before the `permissions` field existed, `deny_unknown_fields`
-        // REJECTED any settings.json carrying a claude-code permissions block,
-        // breaking the entire load. It must now parse (the rules are projected
-        // out separately by `permission::permission_rules_from_settings_json`).
+        // Regression history: under the (since-removed) `deny_unknown_fields`
+        // strictness, a settings.json carrying a claude-code permissions block
+        // broke the entire load until the field was declared. Today unknown
+        // keys are tolerated anyway; the typed field exists for ACCESS — rule
+        // projection via `permission::permission_rules_from_settings_json`
+        // and the DeepMerge strategy — not load-gating.
         let json = r#"{
             "permissions": { "allow": ["Bash(npm run *)"], "deny": ["Read(./secrets/**)"], "ask": [], "defaultMode": "default" }
         }"#;
@@ -218,12 +239,13 @@ mod tests {
 
     #[test]
     fn accepts_string_output_style() {
-        // OUTSTYLE.1 regression: before this fix `output_style` was typed as a
+        // OUTSTYLE.1 regression history: `output_style` was once typed as a
         // map, so a real claude-code settings.json carrying the documented
-        // `"outputStyle": "Explanatory"` (a string) failed `deny_unknown_fields`
-        // deserialization and broke the ENTIRE settings load (dropping model /
-        // permissions / hooks in that layer). TS types it `z.string()` — it must
-        // now parse as a string.
+        // `"outputStyle": "Explanatory"` (a string) failed deserialization
+        // under the then-strict schema and broke the ENTIRE settings load
+        // (dropping model / permissions / hooks in that layer). TS types it
+        // `z.string()` — it must parse as a string so the value is ACCESSIBLE
+        // typed (unknown-key tolerance alone would strip it, not surface it).
         let json = r#"{ "outputStyle": "Explanatory", "model": "claude-sonnet-4-5" }"#;
         let parsed: SettingsJson =
             serde_json::from_str(json).expect("string outputStyle must parse");

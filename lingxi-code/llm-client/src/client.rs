@@ -397,10 +397,12 @@ impl std::fmt::Debug for LlmEventStream {
 /// already present.
 ///
 /// - If `existing` is `None`, returns `beta.to_string()` (first entry).
-/// - If `existing` already contains `beta` as a comma-separated segment (exact
-///   match, no surrounding whitespace expected), the original value is returned
-///   unchanged.
+/// - If `existing` already contains `beta` as a comma-separated segment (trimmed
+///   match — handles `"a, b"` spacing that arises when headers are joined with
+///   `", "`), the original value is returned unchanged.
 /// - Otherwise `", beta"` is appended to `existing`.
+///
+/// **Passing `Some("")` is not expected and would yield a leading comma.**
 ///
 /// **Parity:** mirrors `claude-code/src/utils/betas.ts:251-252` semantics where
 /// `OAUTH_BETA_HEADER` is pushed into the beta list only when
@@ -414,8 +416,8 @@ pub(crate) fn append_beta(existing: Option<&str>, beta: &str) -> String {
     match existing {
         None => beta.to_string(),
         Some(current) => {
-            // Check whether `beta` is already a segment.
-            if current.split(',').any(|seg| seg == beta) {
+            // Check whether `beta` is already a segment (trim to handle ", "-joined lists).
+            if current.split(',').any(|seg| seg.trim() == beta) {
                 current.to_string()
             } else {
                 format!("{current},{beta}")
@@ -487,5 +489,18 @@ mod tests {
         // And oauth is now present.
         assert!(result.split(',').any(|p| p == "oauth-2025-04-20"),
             "oauth beta must be present; got: {result}");
+    }
+
+    /// Dedup must work even when segments carry surrounding whitespace from a
+    /// `", "`-joined list (e.g., `"a, oauth-2025-04-20"` — the space after
+    /// the comma is present).  Passing the same beta again must be a no-op.
+    #[test]
+    fn append_beta_dedups_with_whitespace() {
+        // "a, oauth-2025-04-20" — note the space after the comma.
+        let result = append_beta(Some("a, oauth-2025-04-20"), "oauth-2025-04-20");
+        assert_eq!(
+            result, "a, oauth-2025-04-20",
+            "dedup must fire even when the segment has leading whitespace; got: {result}",
+        );
     }
 }

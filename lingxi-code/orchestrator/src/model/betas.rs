@@ -299,7 +299,8 @@ pub fn apply_beta_header_with_auth(
         let merged = match existing {
             None => OAUTH.to_string(),
             Some(current) => {
-                if current.split(',').any(|seg| seg == OAUTH) {
+                // mirrors llm_client's append_beta — not reachable cross-crate.
+                if current.split(',').any(|seg| seg.trim() == OAUTH) {
                     current.to_string()
                 } else {
                     format!("{current},{OAUTH}")

@@ -2922,6 +2922,7 @@ dependencies = [
  "engine",
  "futures",
  "hooks",
+ "iana-time-zone",
  "llm-client",
  "mcp",
  "memory",

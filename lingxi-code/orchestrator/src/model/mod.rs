@@ -5,4 +5,5 @@
 //! synchronous and unit-testable without a Tokio runtime.
 
 pub mod overflow;
+pub mod rate_limit;
 pub mod retry;

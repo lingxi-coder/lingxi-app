@@ -87,6 +87,19 @@ pub struct Argv {
     /// Disable TUI; use stdio REPL (line-editing fallback)
     #[arg(long = "no-tui")]
     pub no_tui: bool,
+
+    /// SECURITY-SENSITIVE: bypass all permission prompts for the session
+    /// (claude-code `--dangerously-skip-permissions`). Resolves to
+    /// `PermissionMode::BypassPermissions` subject to the safety guards
+    /// (root refusal; ant sandbox/no-internet) in `permission::bypass_guard`.
+    #[arg(long = "dangerously-skip-permissions")]
+    pub dangerously_skip_permissions: bool,
+
+    /// Initial permission mode (`--permission-mode <mode>`): one of
+    /// `default`/`plan`/`acceptEdits`/`bypassPermissions`/`dontAsk`. Unknown
+    /// values resolve to `default` (claude-code `permissionModeFromString`).
+    #[arg(long = "permission-mode", value_name = "MODE")]
+    pub permission_mode: Option<String>,
 }
 
 impl Argv {
@@ -301,6 +314,21 @@ mod tests {
     fn no_tui_flag_default_false() {
         let a = Argv::from_iter(["lingxi-cli"]).unwrap();
         assert!(!a.no_tui);
+    }
+
+    #[test]
+    fn dangerously_skip_permissions_flag_parses() {
+        let a = Argv::from_iter(["lingxi-cli", "--dangerously-skip-permissions"]).unwrap();
+        assert!(a.dangerously_skip_permissions);
+    }
+
+    #[test]
+    fn permission_mode_flag_parses() {
+        let a = Argv::from_iter(["lingxi-cli", "--permission-mode", "plan"]).unwrap();
+        assert_eq!(a.permission_mode.as_deref(), Some("plan"));
+        let b = Argv::from_iter(["lingxi-cli"]).unwrap();
+        assert!(b.permission_mode.is_none());
+        assert!(!b.dangerously_skip_permissions);
     }
 
     #[test]

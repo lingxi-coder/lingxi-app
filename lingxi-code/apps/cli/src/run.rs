@@ -190,6 +190,16 @@ async fn run_resume_by_id(argv: &Argv, runtime: &Runtime, sink: &dyn OutputSink)
 /// A FRESH launch never reaches here; the fresh `Mode::Tui` arm calls
 /// `build_tui_runtime` with an empty replay vec, so this change leaves the fresh
 /// path byte-identical.
+///
+/// PARITY-GAP (documented follow-up): this resume-into-TUI path does NOT mount
+/// the `BypassPermissionsModeDialog` that the fresh `Mode::Tui` arm shows
+/// (`mode.rs`). TS `showSetupScreens` runs the acknowledgement dialog on every
+/// interactive startup, resume included. NOT a security hole — the root/sandbox
+/// bypass guard already ran once in `run_cli` before this dispatch, so no
+/// un-acknowledged session reaches tool execution un-guarded; only the one-time
+/// acknowledgement UX is skipped when a first-time bypass user resumes straight
+/// into the TUI. `build_runtime_for_tui` still threads the resolved permission
+/// mode, so the mode itself is correct here.
 async fn mount_resumed_tui(argv: &Argv, session_id: uuid::Uuid, messages: Vec<JsonlMessage>) -> i32 {
     let tui_build = match crate::init::build_runtime_for_tui(argv).await {
         Ok(b) => b,
@@ -611,6 +621,8 @@ mod tests {
             json: false,
             debug: false,
             no_tui: false,
+            dangerously_skip_permissions: false,
+            permission_mode: None,
             continue_session: false,
             fork_session: false,
         }

@@ -55,6 +55,7 @@ fn sandbox_config() -> (tempfile::TempDir, DesktopConfig) {
         session_started_as_coordinator: false,
         // Deterministic e2e: empty memory, never the real FS.
         memory_provider: None,
+        permission_mode: permission::PermissionMode::Default,
     };
     (tmp, cfg)
 }

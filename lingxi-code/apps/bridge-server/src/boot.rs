@@ -213,6 +213,8 @@ pub fn resolve_desktop_config(args: &BridgeArgs) -> DesktopConfig {
         // `fire_instructions_loaded()` fire over those files. Tests inject a
         // controlled provider (or `None`); only this real-host path reads the FS.
         memory_provider: Some(orchestrator::prompt::real_provider()),
+        // The Electron bridge has no permission-mode CLI flag; default mode.
+        permission_mode: permission::PermissionMode::Default,
     }
 }
 
@@ -482,6 +484,7 @@ mod tests {
             session_started_as_coordinator: false,
             // Deterministic test: empty memory, never the real FS.
             memory_provider: None,
+            permission_mode: permission::PermissionMode::Default,
         };
         let bound = assemble(cfg).await.expect("assemble must succeed");
         // The gate handle is reachable only when bind() ran with a real gate.

@@ -45,7 +45,6 @@ use orchestrator::{
     ConversationOrchestrator, OrchestratorApiClient, OrchestratorConfig, ProviderApiAdapter,
 };
 use permission::gate::PermissionGate;
-use permission::PermissionMode;
 use platform_posix_minimal::{
     PlainTextSecureStorage, PosixClock, PosixFileSystem, PosixHttp, PosixMcp, PosixProcess,
     PosixRuntime, PosixSandbox, PosixWorktree,
@@ -488,6 +487,7 @@ pub fn desktop_skill_registry() -> SkillRegistry {
 ///     // `None` ⟶ empty memory (deterministic). A production host injects
 ///     // `Some(orchestrator::prompt::real_provider())` to load real CLAUDE.md.
 ///     memory_provider: None,
+///     permission_mode: permission::PermissionMode::Default,
 /// };
 ///
 /// assert_eq!(cfg.cwd, PathBuf::from("/tmp/project"));
@@ -552,6 +552,18 @@ pub struct DesktopConfig {
     /// in-memory [`StaticMemoryProvider::with_files`] and never touch the real
     /// filesystem.
     pub memory_provider: Option<Arc<dyn orchestrator::prompt::MemoryHierarchyProvider>>,
+    /// CLI-resolved session permission mode (claude-code
+    /// `initialPermissionModeFromCLI`). Replaces the previously hardwired
+    /// `BuiltinToolContext.permission_mode = Default`. When
+    /// `LINGXI_ENFORCE_PERMISSIONS` enforcement is ON, this OVERRIDES the
+    /// settings `defaultMode` as the highest-priority source; `BypassPermissions`
+    /// makes the policy allow-all (unless the bypass killswitch is set).
+    ///
+    /// EXECUTION-SEMANTICS NOTE: with the default `NoOpPermissionGate`
+    /// (enforcement OFF) this field is execution-neutral — tools already
+    /// all-allow — but it still drives `BuiltinToolContext.permission_mode`
+    /// state. The CLI flag deliberately does NOT switch enforcement on.
+    pub permission_mode: permission::PermissionMode,
 }
 
 impl std::fmt::Debug for DesktopConfig {
@@ -582,6 +594,7 @@ impl std::fmt::Debug for DesktopConfig {
                     &"None"
                 },
             )
+            .field("permission_mode", &self.permission_mode)
             .finish()
     }
 }
@@ -601,6 +614,7 @@ impl Default for DesktopConfig {
             use_noop_permission_gate: true,
             session_started_as_coordinator: false,
             memory_provider: None,
+            permission_mode: permission::PermissionMode::Default,
         }
     }
 }
@@ -1148,6 +1162,13 @@ pub async fn build(
             // whole block is skipped, so the layer stays a permanent no-op there.
             let raw_tier_refs: Vec<&str> = raw_tiers.iter().map(String::as_str).collect();
             let sandbox_auto_allow = sandbox_auto_allow_from_settings_tiers(&raw_tier_refs);
+            // CLI-resolved mode is the highest-priority source (TS orderedModes:
+            // the CLI flag / --permission-mode outranks the settings defaultMode).
+            // Apply it only when the CLI actually requested a non-default mode, so
+            // an unset CLI keeps the settings defaultMode computed above.
+            if cfg.permission_mode != permission::PermissionMode::Default {
+                mode = cfg.permission_mode;
+            }
             let mut policy = permission::PermissionPolicy::from_rules(mode, rules)
                 .with_roots(roots)
                 .with_sandbox_runtime(sandbox_auto_allow);
@@ -1442,7 +1463,7 @@ pub async fn build(
         sandbox: Arc::new(PosixSandbox::new()),
         clock: clock.clone(),
         sandbox_runtime: SandboxRuntimeConfig::default(),
-        permission_mode: PermissionMode::Default,
+        permission_mode: cfg.permission_mode,
         project_trust: ProjectTrustLevel::Trusted,
         sandbox_available: false,
         workspace: cwd.clone(),
@@ -1814,6 +1835,8 @@ mod tests {
         assert!(cfg.mcp_paths.is_empty());
         // CLI default — opt into `NoOpPermissionGate`.
         assert!(cfg.use_noop_permission_gate);
+        // The CLI-resolved permission mode defaults to `Default` (no override).
+        assert_eq!(cfg.permission_mode, permission::PermissionMode::Default);
 
         // Frozen field set is fully reachable via struct-update syntax, and the
         // type derives `Clone`/`Debug` so a host can fan it out + log it.
@@ -1823,6 +1846,64 @@ mod tests {
         };
         assert!(!custom.use_noop_permission_gate);
         let _ = format!("{custom:?}");
+    }
+
+    /// The CLI-resolved `permission_mode` threads from `DesktopConfig` into the
+    /// `BuiltinToolContext` and (under enforcement) into the policy mode.
+    ///
+    /// Two assertions, both via the lightest available seams:
+    ///   1. The field is reachable + struct-updatable on `DesktopConfig` to the
+    ///      non-default `BypassPermissions` value; `build()` then copies it into
+    ///      `BuiltinToolContext.permission_mode` (`permission_mode: cfg.permission_mode`).
+    ///   2. The policy the enforce block builds from that mode is allow-all for an
+    ///      unmatched tool, and with the bypass killswitch active falls back to Ask
+    ///      — i.e. exactly what `PermissionPolicy::from_rules(mode, rules)` yields
+    ///      for the overridden `mode = cfg.permission_mode`.
+    ///
+    /// The fuller end-to-end assertion (drive a real `build()` under
+    /// `LINGXI_ENFORCE_PERMISSIONS` and probe the wrapped `PolicyPermissionGate`)
+    /// is DEFERRED: it requires mutating process env behind a shared `Mutex`,
+    /// writing settings tiers to disk, and a live orchestrator/provider — heavier
+    /// than the engine-desktop unit-test patterns warrant. The override is a
+    /// one-line conditional over `cfg.permission_mode`; the policy semantics it
+    /// relies on are asserted directly here against the same constructor the
+    /// enforce block calls.
+    #[test]
+    fn permission_mode_threads_into_context_and_policy() {
+        use permission::{PermissionMode, PermissionPolicy, PermissionResult};
+
+        // (1) The field carries the CLI-resolved mode through struct-update —
+        //     this is the value `build()` copies into the tool context.
+        let cfg = DesktopConfig {
+            permission_mode: PermissionMode::BypassPermissions,
+            ..DesktopConfig::default()
+        };
+        assert_eq!(cfg.permission_mode, PermissionMode::BypassPermissions);
+
+        // (2) Policy semantics the enforce-block override relies on. The override
+        //     sets `mode = cfg.permission_mode` (non-default), then builds the
+        //     policy with no rules — an unmatched tool must be allow-all.
+        let policy = PermissionPolicy::from_rules(cfg.permission_mode, std::iter::empty());
+        let input = serde_json::json!({});
+        assert!(
+            matches!(
+                policy.authorize("SomeUnmatchedTool", &input),
+                PermissionResult::Allow { .. }
+            ),
+            "BypassPermissions with no rules must allow an unmatched tool"
+        );
+
+        // With the bypass killswitch active the policy refuses bypass and falls
+        // back to Ask for the same unmatched tool.
+        let mut gated = PermissionPolicy::from_rules(cfg.permission_mode, std::iter::empty());
+        gated.bypass_killswitch_active = true;
+        assert!(
+            matches!(
+                gated.authorize("SomeUnmatchedTool", &input),
+                PermissionResult::Ask { .. }
+            ),
+            "killswitch must override BypassPermissions back to Ask"
+        );
     }
 
     #[test]
@@ -1880,6 +1961,7 @@ mod tests {
             session_started_as_coordinator: false,
             // Boot tests stay deterministic: empty memory, never the real FS.
             memory_provider: None,
+            permission_mode: permission::PermissionMode::Default,
         };
         (tmp, cfg)
     }

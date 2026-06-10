@@ -26,6 +26,7 @@ pub mod env;
 pub mod fs_args;
 pub mod host;
 pub mod http_proxy;
+pub mod linux;
 pub mod matcher;
 pub mod parent_proxy;
 pub mod path_utils;

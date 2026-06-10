@@ -3765,12 +3765,22 @@ dependencies = [
 name = "sandbox-runtime"
 version = "0.12.0"
 dependencies = [
+ "base64",
+ "bytes",
+ "http 1.4.0",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
  "ipnet",
+ "percent-encoding",
+ "rustls 0.22.4",
  "serde",
  "serde_json",
  "tokio",
+ "tokio-rustls 0.25.0",
  "tracing",
  "url",
+ "webpki-roots 0.26.11",
 ]
 
 [[package]]

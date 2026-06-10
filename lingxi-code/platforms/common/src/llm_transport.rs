@@ -49,6 +49,8 @@ fn to_http_request(request: &ProviderRequest) -> Result<HttpRequest, LlmError> {
             .map(|(name, value)| (name.clone(), value.clone()))
             .collect(),
         body: Some(request.body_json.to_string()),
+        // ProviderRequest carries no timeout field yet; deadline enforcement
+        // lives above this seam in the retry layer.
         timeout: None,
     })
 }
@@ -120,6 +122,8 @@ impl<T: HttpTransport> llm_client::Transport for LlmTransportBridge<T> {
             match self.inner.stream_sse(http_request).await {
                 Ok(stream) => Ok(StreamingResponse {
                     status: 200,
+                    // SseStream surfaces no response metadata, so streaming
+                    // responses carry no headers through this bridge.
                     headers: BTreeMap::new(),
                     frames: Box::new(SseFrames { stream }),
                 }),

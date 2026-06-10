@@ -52,10 +52,12 @@ pub async fn run(env: &MigrationEnv) {
     // TS try block (TS:33-113): of everything inside it, only
     // `saveCurrentProjectConfig` can actually throw —
     // `getSettingsForSource('localSettings')` (settings.ts:309) reaches
-    // `parseSettingsFileUncached` (settings.ts:201-231), which yields `{}`
-    // on a broken file, and `updateSettingsForSource` returns an ignored
-    // `{error}` (settings.ts:416-523). So only the project-config save
-    // failure reaches `tengu_migrate_mcp_approval_fields_error`.
+    // `parseSettingsFileUncached` (settings.ts:201-231), which returns
+    // `{settings: null}` on a broken file (the `{}` comes from the
+    // migration's own `|| {}` at TS:34), and `updateSettingsForSource`
+    // returns an ignored `{error}` (settings.ts:416-523). So only the
+    // project-config save failure reaches
+    // `tengu_migrate_mcp_approval_fields_error`.
     let lp = settings_path(SettingsSource::Local, &env.claude_config_home, &env.project_dir);
     let existing = read_settings_map(&lp).unwrap_or_else(|e| {
         tracing::warn!(error = %e, "migrate_mcp_servers: settings read failed (treated as empty, TS parity)");
@@ -239,8 +241,9 @@ mod tests {
     /// Convention check: a broken local settings file must NOT divert to the
     /// error event or block the project-config cleanup — TS
     /// `getSettingsForSource('localSettings')` (settings.ts:309) reaches
-    /// `parseSettingsFileUncached` (settings.ts:201-231), which yields `{}`
-    /// on a broken file (never throws), and `updateSettingsForSource` returns
+    /// `parseSettingsFileUncached` (settings.ts:201-231), which returns
+    /// `{settings: null}` on a broken file (never throws; the migration's own
+    /// `|| {}` at TS:34 makes it `{}`), and `updateSettingsForSource` returns
     /// an ignored `{error}` (settings.ts:416-523), so
     /// `saveCurrentProjectConfig` still runs and removes the fields.
     #[tokio::test]

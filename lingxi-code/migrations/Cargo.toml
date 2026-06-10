@@ -10,16 +10,16 @@ license.workspace = true
 anthropic-oauth = { path = "../anthropic-oauth" }
 telemetry = { path = "../telemetry" }
 serde_json.workspace = true
-# Not used yet: required by plan Tasks 6-10 (tracing in every migration).
+# Used by every migration (warn-and-continue branches).
 tracing.workspace = true
-# Not used yet: required by plan Tasks 6-10 (tokio fs in runner + changelog).
+# tokio fs in the changelog migration (wx-create write).
 tokio = { workspace = true, features = ["fs"] }
 
 [dev-dependencies]
 tempfile = "3"
 # Capturing AnalyticsSink impl in test_support (emission-contract tests).
 async-trait.workspace = true
-# Not used yet: required by plan Tasks 6-10 (async #[tokio::test] for runner/changelog).
+# async #[tokio::test] runtimes across the crate.
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 
 [lints]

@@ -1,8 +1,8 @@
 //! `migrateChangelogFromConfig` (`releaseNotes.ts:55-76`) — move the
 //! deprecated `cachedChangelog` config field to
 //! `<claude-config-home>/cache/changelog.md`. Fire-and-forget at startup
-//! (the caller `tokio::spawn`s this); errors are silent (TS `.catch(() => {})`),
-//! retried next startup.
+//! (the caller must `tokio::spawn` this — wired in `apps/cli`); errors are
+//! silent (TS `.catch(() => {})`), retried next startup.
 
 use crate::context::MigrationEnv;
 use crate::global_config;
@@ -16,6 +16,12 @@ pub async fn migrate_changelog_from_config(env: &MigrationEnv) {
     let Some(Value::String(changelog)) = cfg.get("cachedChangelog").cloned() else {
         return;
     };
+    // TS gates on truthiness (`if (!config.cachedChangelog) return`,
+    // releaseNotes.ts:57): an EMPTY string early-returns and the key is never
+    // removed. Mirror that exactly.
+    if changelog.is_empty() {
+        return;
+    }
 
     let cache_dir = env.claude_config_home.join("cache");
     let cache_path = cache_dir.join("changelog.md");
@@ -89,5 +95,17 @@ mod tests {
         std::fs::write(&t.global, r#"{"a": 1}"#).unwrap();
         migrate_changelog_from_config(&test_env(&t)).await;
         assert!(!t.home.join("cache").join("changelog.md").exists());
+    }
+
+    /// TS truthiness gate (`releaseNotes.ts:57`): an EMPTY `cachedChangelog`
+    /// early-returns — no cache file, key NOT removed.
+    #[tokio::test]
+    async fn empty_string_is_noop_and_key_kept() {
+        let t = temp_config();
+        std::fs::write(&t.global, r#"{"cachedChangelog": ""}"#).unwrap();
+        migrate_changelog_from_config(&test_env(&t)).await;
+        assert!(!t.home.join("cache").join("changelog.md").exists());
+        let m = crate::global_config::read_map(&t.global).unwrap();
+        assert_eq!(m["cachedChangelog"], serde_json::json!(""));
     }
 }

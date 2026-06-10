@@ -6,7 +6,7 @@
 //!
 //! # Mapping table
 //!
-//! | Protocol | llm_client |
+//! | Protocol | `llm_client` |
 //! |---|---|
 //! | `ConversationMessage::User` | `Message { role: "user", .. }` |
 //! | `ConversationMessage::Assistant` | `Message { role: "assistant", .. }` |
@@ -16,8 +16,11 @@
 //! | `ContentBlock::ToolResult { tool_use_id, content, is_error }` | `ContentBlock::ToolResult { tool_call_id: …, output: Value::String(content), is_error, cache_control: None }` |
 //! | `ContentBlock::Thinking { thinking, signature }` | `ContentBlock::Reasoning { text: thinking, signature }` |
 //! | `ContentBlock::Image { source: ImageSource::Base64 { media_type, data } }` | `ContentBlock::Image { media_type, bytes: base64_decode(data) }` |
-//! | `ContentBlock::Image { source: ImageSource::Url { url } }` | rejected (llm_client Image requires bytes) |
+//! | `ContentBlock::Image { source: ImageSource::Url { url } }` | `ContentBlock::ImageUrl { url }` |
 //! | `ContentBlock::Document { source: DocumentSource::Base64 { media_type, data } }` | `ContentBlock::Document { media_type, bytes: base64_decode(data) }` |
+//!
+//! Output-only `llm_client` variants not reachable from protocol inputs:
+//! `RedactedThinking`, `ServerToolUse`, `ConnectorText`, `AdvisorToolResult`, `ImageUrl`-decode.
 
 use base64::Engine as _;
 use llm_client::{ContentBlock as LlmBlock, LlmError, Message, ToolDeclaration};
@@ -31,7 +34,7 @@ use serde_json::Value;
 /// message vec.
 ///
 /// Returns `Err(LlmError::InvalidRequest)` if any content block cannot be
-/// converted (e.g. URL image sources, bad base64).
+/// converted (e.g. bad base64).
 pub fn to_llm_messages(
     messages: Vec<ConversationMessage>,
 ) -> Result<Vec<Message>, LlmError> {
@@ -114,12 +117,7 @@ fn convert_image_source(source: ImageSource) -> Result<LlmBlock, LlmError> {
                 })?;
             Ok(LlmBlock::Image { media_type, bytes })
         }
-        ImageSource::Url { url } => Err(LlmError::InvalidRequest {
-            message: format!(
-                "URL image sources are not supported by llm_client (url={url}); \
-                 fetch the bytes and re-encode as base64 before calling to_llm_messages"
-            ),
-        }),
+        ImageSource::Url { url } => Ok(LlmBlock::ImageUrl { url }),
     }
 }
 
@@ -293,15 +291,51 @@ mod tests {
     }
 
     #[test]
-    fn image_url_source_rejected() {
+    fn image_url_source_maps_to_image_url() {
         let msg = ConversationMessage::User {
             id: MessageId::new(),
             content: vec![ProtoBlock::Image {
                 source: ImageSource::Url { url: "https://example.com/img.png".to_string() },
             }],
         };
-        let err = to_llm_messages(vec![msg]).unwrap_err();
-        assert!(matches!(err, LlmError::InvalidRequest { .. }));
+        let result = to_llm_messages(vec![msg]).unwrap();
+        assert!(matches!(
+            &result[0].content[0],
+            LlmBlock::ImageUrl { url } if url == "https://example.com/img.png"
+        ));
+    }
+
+    #[test]
+    fn multi_block_assistant_message_all_convert() {
+        let id = ToolUseId::new();
+        let id_str = id.to_string();
+        let msg = ConversationMessage::Assistant {
+            id: MessageId::new(),
+            content: vec![
+                ProtoBlock::Text { text: "sure".to_string() },
+                ProtoBlock::ToolUse {
+                    id,
+                    name: "Read".to_string(),
+                    input: serde_json::json!({"path": "/x"}),
+                },
+            ],
+            stop_reason: Some("tool_use".to_string()),
+        };
+        let result = to_llm_messages(vec![msg]).unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].role, "assistant");
+        assert_eq!(result[0].content.len(), 2);
+        assert!(matches!(&result[0].content[0], LlmBlock::Text { text, .. } if text == "sure"));
+        assert!(matches!(
+            &result[0].content[1],
+            LlmBlock::ToolCall { id, name, .. } if id == &id_str && name == "Read"
+        ));
+    }
+
+    #[test]
+    fn empty_messages_vec_returns_empty() {
+        let result = to_llm_messages(vec![]).unwrap();
+        assert!(result.is_empty());
     }
 
     #[test]

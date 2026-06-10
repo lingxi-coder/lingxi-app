@@ -147,6 +147,11 @@ pub enum ContentBlock {
         /// Raw image bytes.
         bytes: Vec<u8>,
     },
+    /// Image referenced by URL (Anthropic url image source).
+    ImageUrl {
+        /// Image URL.
+        url: String,
+    },
     /// Document block.
     Document {
         /// Document media type.
@@ -528,7 +533,7 @@ pub fn validate_capabilities(request: &LlmRequest, capabilities: Capabilities) -
     for message in &request.messages {
         for block in &message.content {
             match block {
-                ContentBlock::Image { .. } if !capabilities.vision => {
+                ContentBlock::Image { .. } | ContentBlock::ImageUrl { .. } if !capabilities.vision => {
                     return Err(LlmError::UnsupportedCapability {
                         capability: "vision".to_string(),
                     });

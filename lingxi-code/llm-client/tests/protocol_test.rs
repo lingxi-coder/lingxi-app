@@ -1,4 +1,4 @@
-use llm_client::{validate_capabilities, Capabilities, ContentBlock, LlmRequest};
+use llm_client::{validate_capabilities, Capabilities, ContentBlock, LlmRequest, Message};
 
 #[test]
 fn tool_declarations_require_tools_capability() {
@@ -49,6 +49,28 @@ fn unsupported_capabilities_fail_before_transport() {
         documents: false,
         reasoning: false,
         structured_output: false,
+    };
+
+    let error = validate_capabilities(&request, capabilities).expect_err("vision should fail");
+
+    assert!(matches!(
+        error,
+        llm_client::LlmError::UnsupportedCapability { capability } if capability == "vision"
+    ));
+}
+
+#[test]
+fn image_url_block_requires_vision_capability() {
+    let mut request = LlmRequest::new("m");
+    request.messages.push(Message {
+        role: "user".to_string(),
+        content: vec![ContentBlock::ImageUrl { url: "https://x/y.png".to_string() }],
+    });
+    let capabilities = Capabilities {
+        streaming: true,
+        tools: true,
+        vision: false,
+        ..Default::default()
     };
 
     let error = validate_capabilities(&request, capabilities).expect_err("vision should fail");

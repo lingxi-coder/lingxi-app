@@ -1,5 +1,22 @@
 use llm_client::{AnthropicMessagesCodec, ContentBlock, ContentDelta, LlmEvent, LlmRequest, Message, ProviderResponse, ResponseFormat, ToolChoice, ToolDeclaration, WireCodec};
 
+// ── ImageUrl encode test ──────────────────────────────────────────────────────
+
+#[test]
+fn encode_image_url_block_emits_url_source() {
+    let codec = AnthropicMessagesCodec::new("https://api.anthropic.com", "2023-06-01");
+    let mut request = LlmRequest::new("claude-sonnet-4-20250514");
+    request.messages.push(Message {
+        role: "user".to_string(),
+        content: vec![ContentBlock::ImageUrl { url: "https://x/y.png".to_string() }],
+    });
+    let provider_request = codec.encode_request(&request).unwrap();
+    let block = &provider_request.body_json["messages"][0]["content"][0];
+    assert_eq!(block["type"], "image");
+    assert_eq!(block["source"]["type"], "url");
+    assert_eq!(block["source"]["url"], "https://x/y.png");
+}
+
 // ── Task 1: extended block decode tests ──────────────────────────────────────
 
 #[test]

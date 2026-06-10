@@ -251,6 +251,13 @@ fn encode_content_block(block: &ContentBlock) -> Result<Value, LlmError> {
             "type": "redacted_thinking",
             "data": data,
         })),
+        ContentBlock::ImageUrl { url } => Ok(serde_json::json!({
+            "type": "image",
+            "source": {
+                "type": "url",
+                "url": url,
+            },
+        })),
         ContentBlock::Document { .. } => Err(LlmError::InvalidRequest {
             message: "AnthropicMessagesCodec does not encode document blocks yet".to_string(),
         }),

@@ -395,6 +395,7 @@ fn encode_message(message: &crate::Message) -> Vec<Value> {
                 }));
             }
             ContentBlock::Image { .. }
+            | ContentBlock::ImageUrl { .. }
             | ContentBlock::Document { .. }
             | ContentBlock::Reasoning { .. }
             | ContentBlock::RedactedThinking { .. }
@@ -476,7 +477,7 @@ fn reject_unsupported_content_blocks(request: &LlmRequest) -> Result<(), LlmErro
     for message in &request.messages {
         for block in &message.content {
             match block {
-                ContentBlock::Image { .. } => {
+                ContentBlock::Image { .. } | ContentBlock::ImageUrl { .. } => {
                     return Err(LlmError::InvalidRequest {
                         message: "OpenAiChatCodec does not encode image blocks yet".to_string(),
                     });

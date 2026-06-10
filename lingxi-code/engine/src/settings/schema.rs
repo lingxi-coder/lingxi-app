@@ -6,10 +6,18 @@
 //! land as `Option<T>` so deserializing an older file never fails on a
 //! missing key — this matches v3 Event/Effect stability policy.
 //!
-//! Unknown keys are tolerated-and-ignored across the board, matching
-//! claude-code's zod `SettingsSchema().safeParse` (non-strict object ⇒ strip,
-//! `settings.ts:219`). Typed fields exist so the engine can ACCESS known
+//! Unknown keys are tolerated-and-ignored across the board: claude-code's
+//! zod `SettingsSchema` is explicitly `.passthrough()` (`types.ts:1072`,
+//! consumed via `safeParse` at `settings.ts:219`), so unknown keys never fail
+//! a TS load either. Typed fields exist so the engine can ACCESS known
 //! values — they are not a load-time acceptance gate.
+//!
+//! KNOWN DIVERGENCE (safe while nothing round-trips this struct to disk):
+//! TS `.passthrough()` RETAINS unknown keys in the parsed/merged in-memory
+//! settings; this typed struct DROPS them, so a merged `SettingsJson`
+//! re-serialized to disk would lose them. No Rust path does that today —
+//! `/effort`, `ConfigTool`, and the migrations crate all write settings via
+//! raw `serde_json::Map` read-modify-write, which preserves unknown keys.
 //!
 //! `$schema` is NOT emitted (claude-code @ commit 6a25909 doesn't emit one)
 //! but is kept as a typed field so a file that carries one round-trips it.
@@ -76,7 +84,7 @@ pub fn strategy_for(field: &str) -> Option<MergeStrategy> {
 /// "absent" must round-trip distinctly from "explicitly set to default".
 ///
 /// Unknown keys are tolerated-and-ignored, matching claude-code's zod
-/// `SettingsSchema().safeParse` (non-strict object ⇒ strip unknown keys;
+/// `SettingsSchema` `.passthrough()` (`types.ts:1072`; `safeParse` at
 /// `settings.ts:219`). Known fields keep their typed parses. Tolerance also
 /// un-breaks settings files carrying keys written by `ConfigTool`, `/effort`
 /// (`effortLevel`), or the migrations subsystem (`env`,
@@ -209,9 +217,10 @@ mod tests {
     }
 
     #[test]
-    fn ignores_unknown_fields_zod_strip_parity() {
-        // zod `SettingsSchema().safeParse` strips unknown keys (non-strict
-        // object, settings.ts:219); known siblings must still parse typed.
+    fn ignores_unknown_fields_zod_passthrough_parity() {
+        // zod `SettingsSchema` is `.passthrough()` (types.ts:1072; safeParse
+        // at settings.ts:219) — unknown keys never fail a TS load; known
+        // siblings must still parse typed.
         let json = r#"{"trustedDirectories": ["/foo"], "bogusField": 1}"#;
         let parsed: SettingsJson =
             serde_json::from_str(json).expect("unknown keys must be ignored, not rejected");

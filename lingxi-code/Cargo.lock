@@ -3768,6 +3768,7 @@ dependencies = [
  "base64",
  "bytes",
  "dirs",
+ "getrandom 0.2.17",
  "http 1.4.0",
  "http-body-util",
  "hyper",
@@ -3778,12 +3779,14 @@ dependencies = [
  "rustls 0.22.4",
  "serde",
  "serde_json",
+ "shlex",
  "tempfile",
  "tokio",
  "tokio-rustls 0.25.0",
  "tracing",
  "url",
  "webpki-roots 0.26.11",
+ "which",
 ]
 
 [[package]]

@@ -10,17 +10,20 @@
 //! Built in phases (see the umbrella design spec under
 //! `docs/superpowers/specs/`). Landed so far: the pure core (domain pattern
 //! grammar plus host matcher in [`config`], [`host`], [`matcher`]), parent-proxy
-//! plus `NO_PROXY` resolution in [`parent_proxy`], and the base `CONNECT`
-//! allowlist proxy in [`dial`] and [`connect_proxy`]. Remaining: proxy
-//! completion (plain-HTTP forwarding, parent-proxy chaining, the request-filter
-//! body hook), the `socat`/bwrap bridge, `SOCKS5`, TLS-MITM, seccomp, the
-//! `sandbox-manager` orchestration, the macOS/Windows backends, and the CLI.
+//! plus `NO_PROXY` resolution and the CONNECT tunnel dialers in [`parent_proxy`],
+//! CONNECT-target parsing plus the bounded direct dial in [`dial`], the
+//! per-request filter body hook in [`request_filter`], and the unified hyper
+//! forward proxy (plain-HTTP forwarding + `CONNECT` tunnelling + parent-proxy
+//! chaining) in [`http_proxy`]. Remaining: the `socat`/bwrap bridge, `SOCKS5`,
+//! TLS-MITM (P6), seccomp, the `sandbox-manager` orchestration, the
+//! macOS/Windows backends, and the CLI.
 
 #![forbid(unsafe_code)]
 
 pub mod config;
-pub mod connect_proxy;
 pub mod dial;
 pub mod host;
+pub mod http_proxy;
 pub mod matcher;
 pub mod parent_proxy;
+pub mod request_filter;

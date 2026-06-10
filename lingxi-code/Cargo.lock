@@ -3766,6 +3766,11 @@ name = "sandbox-runtime"
 version = "0.12.0"
 dependencies = [
  "base64",
+ "bytes",
+ "http 1.4.0",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
  "ipnet",
  "percent-encoding",
  "rustls 0.22.4",

@@ -19,6 +19,12 @@ pub struct ProviderProfile {
     /// Human/config profile name.
     pub profile_name: String,
     /// Base URL for this provider profile.
+    ///
+    /// The expected shape differs by protocol family: `OpenAiChat` includes
+    /// the version segment (`https://api.openai.com/v1`), `AnthropicMessages`
+    /// is the bare origin (`https://api.anthropic.com`), and
+    /// `GeminiGenerateContent` is the versioned root
+    /// (`https://generativelanguage.googleapis.com/v1beta`).
     pub base_url: String,
     /// Wire protocol family used by this route.
     pub protocol: ProtocolFamily,

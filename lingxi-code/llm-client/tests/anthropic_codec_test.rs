@@ -92,6 +92,23 @@ fn encode_request_rejects_response_format_explicitly() {
 }
 
 #[test]
+fn encode_omits_empty_tools_array() {
+    let codec = AnthropicMessagesCodec::new("https://api.anthropic.com", "2023-06-01");
+
+    let bare = codec.encode_request(&LlmRequest::new("claude-sonnet-4-20250514")).unwrap();
+    assert!(bare.body_json.get("tools").is_none());
+
+    let mut with_tools = LlmRequest::new("claude-sonnet-4-20250514");
+    with_tools.tools.push(ToolDeclaration {
+        name: "Read".to_string(),
+        description: "d".to_string(),
+        input_schema: serde_json::json!({"type":"object"}),
+    });
+    let encoded = codec.encode_request(&with_tools).unwrap();
+    assert_eq!(encoded.body_json["tools"][0]["name"], "Read");
+}
+
+#[test]
 fn encode_request_pins_default_max_tokens_to_4096() {
     let codec = AnthropicMessagesCodec::new("https://api.anthropic.com", "2023-06-01");
     let request = LlmRequest::new("claude-sonnet-4-20250514");

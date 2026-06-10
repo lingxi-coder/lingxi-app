@@ -44,7 +44,6 @@ impl WireCodec for AnthropicMessagesCodec {
             .iter()
             .map(encode_message)
             .collect::<Result<Vec<_>, _>>()?;
-        let tools = request.tools.iter().map(encode_tool).collect::<Vec<_>>();
 
         let mut body = serde_json::Map::new();
         body.insert("model".to_string(), Value::String(request.model.clone()));
@@ -53,7 +52,13 @@ impl WireCodec for AnthropicMessagesCodec {
             Value::from(request.max_tokens.map_or(4096u64, u64::from)),
         );
         body.insert("messages".to_string(), Value::Array(messages));
-        body.insert("tools".to_string(), Value::Array(tools));
+        // Omitted when empty: an empty tools array changes prompt-cache keys.
+        if !request.tools.is_empty() {
+            body.insert(
+                "tools".to_string(),
+                Value::Array(request.tools.iter().map(encode_tool).collect()),
+            );
+        }
 
         if let Some(temperature) = request.temperature {
             body.insert("temperature".to_string(), Value::from(temperature));

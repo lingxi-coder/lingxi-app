@@ -38,9 +38,8 @@ pub use cost::{CostEstimator, PricingCatalog, PricingPolicy, TokenPricing};
 pub use error::LlmError;
 pub use protocol::{
     validate_capabilities, ContentBlock, ContentDelta, LlmEvent, LlmRequest, LlmResponse,
-    Message, MessageDeltaPayload, NoopStreamDecoder, PreparedBody, Protocol, ProviderRequest,
-    ProviderResponse, RawResponse, RawStreamFrame, ResponseFormat, StreamDecoder, ToolChoice,
-    ToolDeclaration, WireCodec,
+    Message, MessageDeltaPayload, NoopStreamDecoder, ProviderRequest, ProviderResponse,
+    RawStreamFrame, ResponseFormat, StreamDecoder, ToolChoice, ToolDeclaration, WireCodec,
 };
 pub use registry::{ModelListing, ModelRegistry, ResolvedRoute};
 pub use redaction::Redactor;

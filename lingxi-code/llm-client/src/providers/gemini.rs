@@ -21,12 +21,13 @@ impl GeminiCodec {
         }
     }
 
-    fn generate_content_url(&self, model: &str) -> String {
-        format!(
-            "{}/models/{}:generateContent",
-            self.base_url.trim_end_matches('/'),
-            model
-        )
+    fn generate_content_url(&self, model: &str, stream: bool) -> String {
+        let base_url = self.base_url.trim_end_matches('/');
+        if stream {
+            format!("{base_url}/models/{model}:streamGenerateContent?alt=sse")
+        } else {
+            format!("{base_url}/models/{model}:generateContent")
+        }
     }
 }
 
@@ -73,7 +74,7 @@ impl WireCodec for GeminiCodec {
         }
 
         let mut provider_request = ProviderRequest::post_json(
-            self.generate_content_url(&request.model),
+            self.generate_content_url(&request.model, request.stream),
             Value::Object(body),
         );
         provider_request
@@ -440,12 +441,6 @@ fn encode_tool(tool: &ToolDeclaration) -> Value {
 }
 
 fn reject_unsupported_request_intent(request: &LlmRequest) -> Result<(), LlmError> {
-    if request.stream {
-        return Err(LlmError::InvalidRequest {
-            message: "GeminiCodec does not encode streaming requests yet".to_string(),
-        });
-    }
-
     if request.response_format.is_some() {
         return Err(LlmError::InvalidRequest {
             message: "GeminiCodec does not encode response_format yet".to_string(),

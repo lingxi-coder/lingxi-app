@@ -20,6 +20,18 @@ fn encode_request_shape_is_gemini_generate_content() {
 }
 
 #[test]
+fn encode_stream_request_targets_stream_generate_content() {
+    let codec = GeminiCodec::new("https://generativelanguage.googleapis.com/v1beta");
+    let mut request = LlmRequest::new("gemini-2.0-flash");
+    request.stream = true;
+
+    let provider_request = codec.encode_request(&request).unwrap();
+
+    assert!(provider_request.url.contains(":streamGenerateContent"));
+    assert!(provider_request.url.ends_with("alt=sse"));
+}
+
+#[test]
 fn decode_text_and_function_call() {
     let codec = GeminiCodec::new("https://generativelanguage.googleapis.com/v1beta");
     let text = ProviderResponse::json(200, serde_json::json!({

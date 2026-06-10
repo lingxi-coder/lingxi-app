@@ -43,16 +43,6 @@ fn openai_encodes_stream_true() {
 }
 
 #[test]
-fn gemini_rejects_stream_requests() {
-    let mut request = LlmRequest::new("gemini-2.0-flash");
-    request.stream = true;
-
-    let err = gemini_codec().encode_request(&request).unwrap_err();
-
-    assert!(matches!(err, LlmError::InvalidRequest { .. } | LlmError::UnsupportedCapability { .. }));
-}
-
-#[test]
 fn openai_encodes_response_format_variants() {
     let cases = [
         (ResponseFormat::JsonObject, serde_json::json!({"type": "json_object"})),

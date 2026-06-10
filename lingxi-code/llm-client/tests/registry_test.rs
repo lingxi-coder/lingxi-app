@@ -51,6 +51,28 @@ fn available_models_lists_configured_profile_models_and_aliases() {
 }
 
 #[test]
+fn resolve_rejects_ambiguous_model_references() {
+    let mut config = test_config();
+    let mut second = config.providers[0].clone();
+    second.profile_name = "fallback-gateway".to_string();
+    second.models[0].aliases = vec![];
+    config.providers.push(second);
+    let registry = ModelRegistry::from_config(config).expect("registry");
+
+    let err = registry
+        .resolve("anthropic/claude-sonnet-4")
+        .expect_err("shared request_model must be ambiguous");
+    assert!(matches!(
+        err,
+        llm_client::LlmError::InvalidRequest { message }
+            if message.contains("openrouter") && message.contains("fallback-gateway")
+    ));
+
+    let route = registry.resolve("or-sonnet").expect("unique alias still resolves");
+    assert_eq!(route.profile_name, "openrouter");
+}
+
+#[test]
 fn resolve_uses_alias_without_model_string_provider_guessing() {
     let registry = ModelRegistry::from_config(test_config()).expect("registry");
 

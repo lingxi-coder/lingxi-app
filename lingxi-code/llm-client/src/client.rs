@@ -43,9 +43,13 @@ impl DefaultLlmClient {
             .get(&resolved_route.profile_name)
             .ok_or(LlmError::ModelUnavailable)?;
 
-        let mut routed_request = request.clone();
-        routed_request.model.clone_from(&resolved_route.request_model);
-        let provider_request = codec.encode_request(&routed_request)?;
+        let provider_request = if request.model == resolved_route.request_model {
+            codec.encode_request(request)?
+        } else {
+            let mut routed_request = request.clone();
+            routed_request.model.clone_from(&resolved_route.request_model);
+            codec.encode_request(&routed_request)?
+        };
 
         Ok(PreparedLlmCall {
             route: Route {
@@ -73,8 +77,11 @@ fn build_codec(provider: &crate::ProviderProfile) -> Result<Box<dyn WireCodec>, 
         | crate::ProtocolFamily::VertexGemini
         | crate::ProtocolFamily::VertexClaude
         | crate::ProtocolFamily::BedrockClaude
-        | crate::ProtocolFamily::AzureOpenAi => Err(LlmError::UnsupportedCapability {
-            capability: format!("protocol family {:?}", provider.protocol),
+        | crate::ProtocolFamily::AzureOpenAi => Err(LlmError::InvalidRequest {
+            message: format!(
+                "provider profile '{}' uses protocol family {:?}, which has no codec yet",
+                provider.profile_name, provider.protocol
+            ),
         }),
     }
 }

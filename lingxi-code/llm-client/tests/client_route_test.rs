@@ -103,6 +103,36 @@ fn duplicate_profile_names_are_rejected_during_client_construction() {
 }
 
 #[test]
+fn unsupported_protocol_family_yields_actionable_config_error() {
+    let config = ClientConfig {
+        providers: vec![ProviderProfile {
+            provider_id: ProviderId::BedrockClaude,
+            profile_name: "bedrock-us".to_string(),
+            base_url: "https://bedrock-runtime.us-east-1.amazonaws.com".to_string(),
+            protocol: ProtocolFamily::BedrockClaude,
+            auth: AuthStrategy::AwsSigV4,
+            credential: CredentialConfig::None,
+            models: vec![ModelProfile {
+                display_model: "Claude".to_string(),
+                request_model: "anthropic.claude-sonnet-4".to_string(),
+                billing_model: "claude-sonnet-4".to_string(),
+                aliases: vec![],
+                capabilities: Capabilities::default(),
+            }],
+            pricing: PricingConfig::default(),
+        }],
+    };
+
+    let err = DefaultLlmClient::from_config(config).unwrap_err();
+
+    assert!(matches!(
+        err,
+        LlmError::InvalidRequest { message }
+            if message.contains("bedrock-us") && message.contains("BedrockClaude")
+    ));
+}
+
+#[test]
 fn response_format_is_rejected_when_selected_model_lacks_structured_output() {
     let config = ClientConfig {
         providers: vec![ProviderProfile {

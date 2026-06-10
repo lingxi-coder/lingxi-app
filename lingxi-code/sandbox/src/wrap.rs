@@ -87,6 +87,17 @@ fn wrap_linux_bwrap(command: &str, policy: &SandboxRuntimeConfig) -> String {
         args.push(path.clone());
     }
 
+    // Deny-write: re-mount existing denied / bare-repo paths read-only IN PLACE.
+    // Placed after the allow_write `--bind`s so a deny overrides a writable
+    // parent (bwrap: later mounts win — verified). NEVER `--ro-bind-try /dev/null`
+    // (that blanks the host file); ro-bind-in-place preserves it read-only
+    // (finding 3, sandbox-adapter.ts:264).
+    for path in &policy.ro_bind_in_place {
+        args.push("--ro-bind".into());
+        args.push(path.clone());
+        args.push(path.clone());
+    }
+
     // Conservative network posture: full host net ONLY for an allow-all policy
     // (allowed_domains non-empty == NetworkPolicy::Allowed). LoopbackOnly /
     // Disabled get a fresh network namespace (loopback-only, external blocked).
@@ -251,5 +262,21 @@ mod tests {
             "loopback must not get full egress: {w}"
         );
         assert!(w.contains("--unshare-net"));
+    }
+
+    #[test]
+    fn ro_bind_in_place_comes_after_allow_write_so_deny_wins() {
+        let mut cfg = SandboxRuntimeConfig::default();
+        cfg.filesystem.allow_write = vec!["/work".into()];
+        cfg.ro_bind_in_place = vec!["/work/.git/HEAD".into()];
+        let w = wrap_linux_bwrap("true", &cfg);
+        let bind_pos = w.find("--bind /work /work").expect("allow_write bind");
+        let ro_pos = w
+            .find("--ro-bind /work/.git/HEAD /work/.git/HEAD")
+            .expect("ro-bind-in-place");
+        assert!(
+            ro_pos > bind_pos,
+            "ro-bind-in-place must follow allow_write bind to override it:\n{w}"
+        );
     }
 }

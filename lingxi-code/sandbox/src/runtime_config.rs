@@ -166,6 +166,20 @@ pub struct SandboxRuntimeConfig {
     /// Ripgrep override.
     #[serde(default)]
     pub ripgrep: RipgrepConfig,
+    /// Host paths to mount read-only IN PLACE (`--ro-bind <p> <p>`), overriding
+    /// any writable parent. Populated by the posix `prepare` layer from the
+    /// EXISTING subset of denied + bare-repo paths (FS access lives there, not
+    /// in the pure wrapper). claude-code denyWrite semantics
+    /// (sandbox-adapter.ts:264). `#[serde(skip)]` keeps the TS-mirror wire shape
+    /// byte-identical — this field is a host-side build artifact, not a managed
+    /// setting.
+    #[serde(skip)]
+    pub ro_bind_in_place: Vec<String>,
+    /// Host paths to delete AFTER the command (non-existent-at-config-time
+    /// bare-repo files planted during the run). See finding 4 / Task 5.
+    /// `#[serde(skip)]` for the same reason as [`Self::ro_bind_in_place`].
+    #[serde(skip)]
+    pub scrub_paths: Vec<String>,
 }
 
 // ============================================================================

@@ -32,6 +32,12 @@ impl WireCodec for OpenAiChatCodec {
     fn encode_request(&self, request: &LlmRequest) -> Result<ProviderRequest, LlmError> {
         reject_unsupported_content_blocks(request)?;
 
+        if request.reasoning.is_some() {
+            return Err(LlmError::InvalidRequest {
+                message: "OpenAiChatCodec does not encode reasoning budgets yet".to_string(),
+            });
+        }
+
         let mut messages = Vec::new();
 
         if let Some(system) = &request.system {

@@ -36,6 +36,9 @@ pub struct LlmRequest {
     /// Sequences that end generation early.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub stop_sequences: Vec<String>,
+    /// Optional reasoning/thinking budget request.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<ReasoningConfig>,
 }
 
 impl LlmRequest {
@@ -77,6 +80,13 @@ impl LlmRequest {
 
         self
     }
+}
+
+/// Provider-neutral reasoning/thinking budget.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReasoningConfig {
+    /// Maximum tokens the model may spend on reasoning.
+    pub budget_tokens: u32,
 }
 
 /// Canonical chat message.
@@ -404,6 +414,12 @@ pub fn validate_capabilities(request: &LlmRequest, capabilities: Capabilities) -
     if (!request.tools.is_empty() || request.tool_choice.is_some()) && !capabilities.tools {
         return Err(LlmError::UnsupportedCapability {
             capability: "tools".to_string(),
+        });
+    }
+
+    if request.reasoning.is_some() && !capabilities.reasoning {
+        return Err(LlmError::UnsupportedCapability {
+            capability: "reasoning".to_string(),
         });
     }
 

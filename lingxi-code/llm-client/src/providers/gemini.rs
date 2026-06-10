@@ -69,6 +69,12 @@ impl WireCodec for GeminiCodec {
                 Value::Array(request.stop_sequences.iter().cloned().map(Value::String).collect()),
             );
         }
+        if let Some(reasoning) = &request.reasoning {
+            generation_config.insert(
+                "thinkingConfig".to_string(),
+                serde_json::json!({"thinkingBudget": reasoning.budget_tokens}),
+            );
+        }
         if !generation_config.is_empty() {
             body.insert("generationConfig".to_string(), Value::Object(generation_config));
         }

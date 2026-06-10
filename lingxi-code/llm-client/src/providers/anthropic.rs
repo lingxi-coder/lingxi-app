@@ -73,6 +73,13 @@ impl WireCodec for AnthropicMessagesCodec {
             );
         }
 
+        if let Some(reasoning) = &request.reasoning {
+            body.insert(
+                "thinking".to_string(),
+                serde_json::json!({"type": "enabled", "budget_tokens": reasoning.budget_tokens}),
+            );
+        }
+
         if let Some(system) = &request.system {
             body.insert("system".to_string(), Value::String(system.clone()));
         }

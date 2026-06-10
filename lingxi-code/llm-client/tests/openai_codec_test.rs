@@ -263,3 +263,14 @@ fn stream_tool_fragment_without_index_defaults_to_slot_zero() {
         .collect();
     assert_eq!(args, "{\"command\":\"ls\"}");
 }
+
+#[test]
+fn reasoning_config_is_rejected_until_responses_api_exists() {
+    let codec = OpenAiChatCodec::new("https://api.openai.com/v1");
+    let mut request = LlmRequest::new("gpt-4o");
+    request.reasoning = Some(llm_client::ReasoningConfig { budget_tokens: 2048 });
+
+    let err = codec.encode_request(&request).unwrap_err();
+
+    assert!(matches!(err, llm_client::LlmError::InvalidRequest { message } if message.contains("reasoning")));
+}

@@ -288,3 +288,17 @@ fn decode_blocked_prompt_reports_block_reason() {
 
     assert!(matches!(err, llm_client::LlmError::InvalidRequest { message } if message.contains("SAFETY")));
 }
+
+#[test]
+fn encode_reasoning_budget_as_thinking_config() {
+    let codec = GeminiCodec::new("https://generativelanguage.googleapis.com/v1beta");
+    let mut request = LlmRequest::new("gemini-2.0-flash");
+    request.reasoning = Some(llm_client::ReasoningConfig { budget_tokens: 2048 });
+
+    let provider_request = codec.encode_request(&request).unwrap();
+
+    assert_eq!(
+        provider_request.body_json["generationConfig"]["thinkingConfig"]["thinkingBudget"],
+        2048
+    );
+}

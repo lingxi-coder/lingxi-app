@@ -419,3 +419,18 @@ fn stream_error_events_map_to_error_taxonomy() {
         Err(llm_client::LlmError::InvalidRequest { message }) if message.contains("bad request")
     ));
 }
+
+#[test]
+fn encode_reasoning_budget_as_thinking() {
+    let codec = AnthropicMessagesCodec::new("https://api.anthropic.com", "2023-06-01");
+    let mut request = LlmRequest::new("claude-sonnet-4-20250514");
+    request.reasoning = Some(llm_client::ReasoningConfig { budget_tokens: 2048 });
+
+    let provider_request = codec.encode_request(&request).unwrap();
+
+    assert_eq!(provider_request.body_json["thinking"]["type"], "enabled");
+    assert_eq!(provider_request.body_json["thinking"]["budget_tokens"], 2048);
+
+    let bare = codec.encode_request(&LlmRequest::new("claude-sonnet-4-20250514")).unwrap();
+    assert!(bare.body_json.get("thinking").is_none());
+}

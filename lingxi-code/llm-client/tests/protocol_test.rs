@@ -58,3 +58,22 @@ fn unsupported_capabilities_fail_before_transport() {
         llm_client::LlmError::UnsupportedCapability { capability } if capability == "vision"
     ));
 }
+
+#[test]
+fn reasoning_config_requires_reasoning_capability() {
+    let mut request = LlmRequest::new("m").with_user_text("hi");
+    request.reasoning = Some(llm_client::ReasoningConfig { budget_tokens: 1024 });
+    let capabilities = Capabilities {
+        streaming: true,
+        tools: true,
+        reasoning: false,
+        ..Default::default()
+    };
+
+    let error = validate_capabilities(&request, capabilities).expect_err("reasoning should fail");
+
+    assert!(matches!(
+        error,
+        llm_client::LlmError::UnsupportedCapability { capability } if capability == "reasoning"
+    ));
+}

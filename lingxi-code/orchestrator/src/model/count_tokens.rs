@@ -2,6 +2,7 @@
 //! character-based approximation elsewhere.
 
 use llm_client::{client::DefaultLlmClient, AnthropicMessagesCodec, LlmError, LlmRequest, Transport};
+use crate::model::betas::{apply_beta_header, Endpoint, Provider};
 
 /// Approximation divisor for non-Anthropic routes (byte-length/4 ≈ tokens).
 pub const APPROX_CHARS_PER_TOKEN: u64 = 4;
@@ -13,7 +14,8 @@ pub async fn count_tokens(
     request: &LlmRequest,
 ) -> Result<u64, LlmError> {
     match client.prepare_count_tokens(request).await {
-        Ok(provider_request) => {
+        Ok(mut provider_request) => {
+            apply_beta_header(&mut provider_request, Provider::Anthropic, Endpoint::CountTokens);
             let response = transport.execute(&provider_request).await?;
             // decode via a throwaway codec: decode is stateless and
             // base_url-independent.
@@ -222,6 +224,30 @@ mod tests {
         let seen = transport.seen.lock().unwrap().clone().expect("request sent");
         assert!(seen.url.ends_with("/v1/messages/count_tokens"), "url={}", seen.url);
         assert_eq!(seen.headers.get("x-api-key").map(String::as_str), Some("ct-test-key"));
+    }
+
+    #[tokio::test]
+    async fn anthropic_route_sends_count_tokens_beta_header() {
+        let transport = ScriptedTransport::returning(ProviderResponse::json(
+            200,
+            serde_json::json!({ "input_tokens": 42 }),
+        ));
+        let client = anthropic_client();
+        let req = LlmRequest::new("claude").with_user_text("hello");
+
+        let _ = count_tokens(&client, &transport, &req).await.expect("count");
+
+        let seen = transport.seen.lock().unwrap().clone().expect("request sent");
+        let expected = crate::model::betas::assemble_beta_header(
+            crate::model::betas::Provider::Anthropic,
+            crate::model::betas::Endpoint::CountTokens,
+        );
+        assert_eq!(
+            seen.headers.get("anthropic-beta").map(String::as_str),
+            Some(expected.as_str()),
+            "anthropic-beta header must equal assemble_beta_header(Anthropic, CountTokens); got: {:?}",
+            seen.headers.get("anthropic-beta"),
+        );
     }
 
     // ----------------------------------------------------------------

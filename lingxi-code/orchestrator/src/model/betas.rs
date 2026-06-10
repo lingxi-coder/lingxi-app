@@ -25,12 +25,12 @@
 // merely mirrors the TS file so a future build that flips a feature/env emits
 // the entry in the correct declaration-order slot.
 //
-// Note: the `connector_text` and `transcript_classifier` Cargo features are
-// defined in `api-client`'s `[features]` section (where the betas module
-// originated) but are absent from `orchestrator`'s `[features]`. The
-// `cfg!(feature = …)` gates below are therefore ALWAYS FALSE in this crate,
-// matching the external default build exactly — constants are inert, same as
-// external builds.
+// Note: the `connector_text` and `transcript_classifier` Cargo features ARE
+// declared (default-off) in `orchestrator`'s `[features]` section (mirroring
+// `api-client`, where the betas module originated). The `cfg!(feature = …)`
+// gates below therefore resolve identically in both crates: ALWAYS FALSE in
+// the default external build, matching the external default exactly — constants
+// are inert, same as external builds.
 
 /// Core claude-code feature gate.
 pub const CLAUDE_CODE_BETA: &str = "claude-code-20250219";

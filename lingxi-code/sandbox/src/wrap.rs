@@ -111,7 +111,23 @@ fn wrap_linux_bwrap(command: &str, policy: &SandboxRuntimeConfig) -> String {
 
     let quoted = shell_escape_single(command);
     let joined = args.join(" ");
-    format!("bwrap {joined} -- /bin/sh -c {quoted}")
+    let base = format!("bwrap {joined} -- /bin/sh -c {quoted}");
+    if policy.scrub_paths.is_empty() {
+        return base;
+    }
+    // Host-side post-command scrub of planted bare-repo files (finding 4,
+    // scrubBareGitRepoFiles in sandbox-adapter.ts:404). Runs OUTSIDE bwrap on
+    // the host cwd after the command — captures bwrap's exit code immediately
+    // (`rc=$?`), deletes the planted paths ENOENT-tolerantly (`rm -rf -- …
+    // 2>/dev/null`), then restores the exit code (`exit "$rc"`). Empty list →
+    // no suffix (byte-identical to the un-hardened string, handled above).
+    let scrub_args = policy
+        .scrub_paths
+        .iter()
+        .map(|p| shell_escape_single(p))
+        .collect::<Vec<_>>()
+        .join(" ");
+    format!("{base}\nrc=$?; rm -rf -- {scrub_args} 2>/dev/null; exit \"$rc\"")
 }
 
 /// Single-quote-escape `s` for `/bin/sh -c`.
@@ -277,6 +293,35 @@ mod tests {
         assert!(
             ro_pos > bind_pos,
             "ro-bind-in-place must follow allow_write bind to override it:\n{w}"
+        );
+    }
+
+    #[test]
+    fn scrub_paths_append_exit_preserving_host_side_rm() {
+        let cfg = SandboxRuntimeConfig {
+            // includes a quote to test escaping
+            scrub_paths: vec!["/s/HEAD".into(), "/s/ob'j".into()],
+            ..Default::default()
+        };
+        let w = wrap_linux_bwrap("true", &cfg);
+        assert!(w.contains("rc=$?"), "must capture bwrap exit: {w}");
+        assert!(
+            w.contains("exit \"$rc\"") || w.contains("exit $rc"),
+            "must restore exit code: {w}"
+        );
+        assert!(w.contains("rm -rf --"), "must rm the scrub paths: {w}");
+        assert!(
+            w.contains(r"'/s/ob'\''j'"),
+            "scrub paths single-quote escaped: {w}"
+        );
+    }
+
+    #[test]
+    fn no_scrub_suffix_when_list_empty() {
+        let w = wrap_linux_bwrap("true", &SandboxRuntimeConfig::default());
+        assert!(
+            !w.contains("rc=$?"),
+            "empty scrub list must not append a suffix (byte-identical): {w}"
         );
     }
 }

@@ -159,6 +159,7 @@ fn encode_message(message: &crate::Message) -> Result<Value, LlmError> {
     }))
 }
 
+// Apply the Anthropic cache_control wrapper; no-op when None.
 fn with_cache_control(mut block: Value, cache_control: Option<crate::CacheControl>) -> Value {
     if cache_control.is_some() {
         block["cache_control"] = serde_json::json!({"type": "ephemeral"});

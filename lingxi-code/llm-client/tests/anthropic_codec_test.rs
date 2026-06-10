@@ -448,10 +448,18 @@ fn encode_system_blocks_and_cache_control() {
     ];
     request.messages.push(Message {
         role: "user".to_string(),
-        content: vec![ContentBlock::Text {
-            text: "hello".to_string(),
-            cache_control: Some(llm_client::CacheControl::Ephemeral),
-        }],
+        content: vec![
+            ContentBlock::Text {
+                text: "hello".to_string(),
+                cache_control: Some(llm_client::CacheControl::Ephemeral),
+            },
+            ContentBlock::ToolResult {
+                tool_call_id: "tool-1".to_string(),
+                output: serde_json::json!("ok"),
+                is_error: false,
+                cache_control: Some(llm_client::CacheControl::Ephemeral),
+            },
+        ],
     });
 
     let provider_request = codec.encode_request(&request).unwrap();
@@ -462,6 +470,7 @@ fn encode_system_blocks_and_cache_control() {
     assert_eq!(body["system"][0]["cache_control"]["type"], "ephemeral");
     assert!(body["system"][1].get("cache_control").is_none());
     assert_eq!(body["messages"][0]["content"][0]["cache_control"]["type"], "ephemeral");
+    assert_eq!(body["messages"][0]["content"][1]["cache_control"]["type"], "ephemeral");
 
     let bare = codec
         .encode_request(&LlmRequest::new("claude-sonnet-4-20250514").with_user_text("hi"))

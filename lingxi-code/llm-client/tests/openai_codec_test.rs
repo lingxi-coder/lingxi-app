@@ -291,4 +291,9 @@ fn system_blocks_join_into_one_system_message() {
 
     assert_eq!(provider_request.body_json["messages"][0]["role"], "system");
     assert_eq!(provider_request.body_json["messages"][0]["content"], "a\n\nb");
+
+    let bare = codec
+        .encode_request(&LlmRequest::new("gpt-4o").with_user_text("hi"))
+        .unwrap();
+    assert_eq!(bare.body_json["messages"][0]["role"], "user");
 }

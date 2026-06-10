@@ -156,9 +156,12 @@ pub async fn run_cli(args: Vec<OsString>) -> i32 {
 
     // Config migrations (`main.tsx runMigrations`, CURRENT_MIGRATION_VERSION
     // = 11) — the same pre-REPL point as the deprecation notice above, common
-    // to Print/Tui/StdioRepl. On a machine where real claude-code already
-    // migrated `~/.claude.json` to v11 this is a read-only no-op (version
-    // guard). `bus: None`: no pre-boot telemetry bus substrate exists (same
+    // to Print/Tui/StdioRepl. At `migrationVersion == 11` this is a read-only
+    // no-op (version guard). A NEWER real claude-code may have moved the file
+    // past 11; the TS `!==` guard then re-runs the set (all 9 migrations
+    // no-op on an already-migrated config) and writes 11 back — the same
+    // bounded version ping-pong two coexisting real claude-code versions
+    // produce. `bus: None`: no pre-boot telemetry bus substrate exists (same
     // as the deprecation notice); the 9 event names are registered for when
     // one does. Tier is structurally None (no keychain subscriptionType) —
     // the subscriber-gated migrations take their faithful fail-closed

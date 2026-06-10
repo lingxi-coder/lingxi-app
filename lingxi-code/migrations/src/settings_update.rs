@@ -52,6 +52,20 @@ pub fn read_settings_map(path: &Path) -> Result<Map<String, Value>, String> {
 /// key, `None` deletes it (TS `mergeWith` treats `undefined` as delete).
 /// All other keys preserved; pretty-printed + trailing newline.
 ///
+/// CALLER CONTRACT — top-level REPLACE, not deep-merge: TS uses a lodash
+/// `mergeWith` (deep; arrays replace), but every migration pre-builds its
+/// nested values (e.g. the spread-merged `env` map), so top-level replace
+/// coincides for all current callers. A future caller passing a nested
+/// partial would silently diverge — pre-merge at the call site.
+///
+/// DOCUMENTED DIVERGENCE — non-atomic write: TS routes settings through the
+/// same atomic tmp+rename writer as the global config (`settings.ts:500-503`
+/// → `writeFileSyncAndFlush_DEPRECATED`); this port uses an in-place
+/// `std::fs::write`, following the workspace's `commands/core/effort.rs`
+/// precedent. A torn write parses as broken JSON, which every reader/writer
+/// here refuses to overwrite. Consolidating onto a shared atomic settings
+/// writer is a noted follow-up.
+///
 /// Error contract: the TS original NEVER throws — every failure path returns
 /// `{error: Error}` (settings.ts:416-523), and every migration discards that
 /// return. So in the migration ports `Err` from this function maps to

@@ -16,18 +16,31 @@
 //! no shared set to protect. The observable file-cleanup behavior (unlink empty
 //! files, rmdir empty dirs, ignore errors) is identical.
 //!
-//! # Seccomp seam (P7)
+//! # Seccomp (P7)
 //!
-//! [`resolve_apply_seccomp_prefix`] always returns `None` here: the
-//! `apply-seccomp` binary and its baked-in BPF filter are P7. Consequently
-//! [`build_sandbox_command`] always takes the no-seccomp branch (socat listeners
-//! plus `eval`), and [`wrap_command_with_sandbox_linux`] never emits a seccomp
-//! prefix. The `allow_all_unix_sockets` path skips seccomp entirely anyway.
+//! [`resolve_apply_seccomp_prefix`] locates the `apply-seccomp` helper binary
+//! (the faithful Rust port of the package's pre-built C `apply-seccomp`,
+//! living in this workspace's `apply-seccomp` crate). When a binary is
+//! resolved, [`build_sandbox_command`] takes the seccomp branch — prefixing the
+//! user command with `<apply-seccomp> bash -c '<cmd>'` so the workload runs
+//! under a seccomp BPF filter that returns `EPERM` for `socket(AF_UNIX)` and
+//! `socketpair(AF_UNIX)` (forcing all egress through the TCP proxy) — and
+//! [`wrap_command_with_sandbox_linux`] emits that prefix in the non-network
+//! branch too. The `allow_all_unix_sockets` path skips seccomp entirely.
+//!
+//! ## Documented divergence (the security-essential subset)
+//!
+//! The original C `apply-seccomp` ALSO creates a nested user+PID+mount
+//! namespace, remounts `/proc`, and becomes a PID-1 reaper. In this assembly
+//! bwrap already supplies `--unshare-pid` + `--proc /proc`, so the only part
+//! the helper must reproduce is the SECURITY-ESSENTIAL `socket(AF_UNIX)` block;
+//! the nested-ns/reaper aspects come from the surrounding bwrap args. The C
+//! source is unavailable to copy — we port the documented behavioral contract.
 
 use std::borrow::Cow;
 use std::fs;
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
@@ -64,15 +77,20 @@ pub fn which_sync(cmd: &str) -> Option<PathBuf> {
 }
 
 /// Options shared by [`get_linux_dependency_status`] and
-/// [`check_linux_dependencies`] — the explicit-override paths for the two
-/// required binaries. (The TS `opts` also carries `seccompConfig`; seccomp is
-/// the P7 seam so it is omitted — `has_seccomp_apply` is always `false`.)
+/// [`check_linux_dependencies`] — the explicit-override paths for the required
+/// binaries, plus the optional `apply-seccomp` locator inputs (the TS `opts`
+/// `seccompConfig`).
 #[derive(Debug, Default, Clone)]
 pub struct LinuxDependencyOpts {
     /// Explicit `bwrap` path override. `None` → resolve via `PATH`.
     pub bwrap_path: Option<String>,
     /// Explicit `socat` path override. `None` → resolve via `PATH`.
     pub socat_path: Option<String>,
+    /// Explicit `apply-seccomp` binary path (the TS `seccompConfig.binaryPath`).
+    /// Threaded into [`resolve_apply_seccomp_prefix`] for the availability probe.
+    pub seccomp_apply_path: Option<String>,
+    /// Trusted `apply-seccomp` argv0 (a bare command name resolved inside bwrap).
+    pub seccomp_apply_argv0: Option<String>,
 }
 
 /// Structured dependency status (`getLinuxDependencyStatus`, :297-311).
@@ -82,13 +100,16 @@ pub struct LinuxDependencyStatus {
     pub has_bwrap: bool,
     /// `socat` is installed/executable.
     pub has_socat: bool,
-    /// `apply-seccomp` is available. Always `false` here (P7 seam).
+    /// `apply-seccomp` is locatable for the current arch (`true` when
+    /// [`resolve_apply_seccomp_prefix`] resolves a prefix).
     pub has_seccomp_apply: bool,
 }
 
 /// `getLinuxDependencyStatus(opts)` (:297-311): probe each dependency. An
 /// explicit path is checked with [`is_executable`]; otherwise `PATH` is probed
-/// with [`which_sync`]. `has_seccomp_apply` is always `false` (P7 seam).
+/// with [`which_sync`]. `has_seccomp_apply` reflects the real
+/// [`resolve_apply_seccomp_prefix`] locator (explicit path / argv0 / workspace
+/// fallback, arch-gated).
 #[must_use]
 pub fn get_linux_dependency_status(opts: &LinuxDependencyOpts) -> LinuxDependencyStatus {
     LinuxDependencyStatus {
@@ -100,7 +121,11 @@ pub fn get_linux_dependency_status(opts: &LinuxDependencyOpts) -> LinuxDependenc
             .socat_path
             .as_deref()
             .map_or_else(|| which_sync("socat").is_some(), is_executable),
-        has_seccomp_apply: false,
+        has_seccomp_apply: resolve_apply_seccomp_prefix(
+            opts.seccomp_apply_path.as_deref().map(Path::new),
+            opts.seccomp_apply_argv0.as_deref(),
+        )
+        .is_some(),
     }
 }
 
@@ -138,20 +163,104 @@ pub fn check_linux_dependencies(opts: &LinuxDependencyOpts) -> LinuxDependencyCh
         errors.push("socat not installed".to_string());
     }
 
-    // Seccomp is the P7 seam — `apply-seccomp` is never available here, so the
-    // warning is always emitted (matching the TS branch when no binary resolves).
-    warnings.push("seccomp not available - unix socket access not restricted".to_string());
+    // Seccomp is a defense-in-depth warning, not an error: emit it only when
+    // the `apply-seccomp` helper cannot be located (matching the TS branch that
+    // pushes the warning when no binary resolves).
+    let has_seccomp_apply = resolve_apply_seccomp_prefix(
+        opts.seccomp_apply_path.as_deref().map(Path::new),
+        opts.seccomp_apply_argv0.as_deref(),
+    )
+    .is_some();
+    if !has_seccomp_apply {
+        warnings.push("seccomp not available - unix socket access not restricted".to_string());
+    }
 
     LinuxDependencyCheck { errors, warnings }
 }
 
-/// `resolveApplySeccompPrefix(...)` (:485-498) — **P7 seam**: always returns
-/// `None`. The `apply-seccomp` binary/BPF filter is implemented in P7; until
-/// then there is no seccomp prefix, so [`build_sandbox_command`] takes the
-/// `eval` branch and [`wrap_command_with_sandbox_linux`] emits no prefix.
+/// Is the host architecture one the `apply-seccomp` BPF filter supports
+/// (`x86_64`/`aarch64`)? Mirrors the TS `getVendorArchitecture` x64/arm64 gate
+/// — 32-bit x86 (`ia32`) and every other arch return `false` because the
+/// `socket(AF_UNIX)` filter does not block the `socketcall()` multiplexer those
+/// arches use (a security bypass). The gate is on the *compile-time* arch of
+/// this crate, which equals the host arch for the sandbox we are assembling.
 #[must_use]
-pub fn resolve_apply_seccomp_prefix() -> Option<String> {
+fn seccomp_arch_supported() -> bool {
+    cfg!(target_arch = "x86_64") || cfg!(target_arch = "aarch64")
+}
+
+/// Locate the `apply-seccomp` helper binary, returning the **prefix string**
+/// (the binary path followed by a single space) to prepend before the
+/// shell-quoted `<shell> -c <cmd>` — matching the TS
+/// `applySeccompPrefix + shellquote([shell, '-c', cmd])` shape. Returns `None`
+/// when no binary can be located or the architecture is unsupported.
+///
+/// Port of `getApplySeccompBinaryPath` (`generate-seccomp-filter.js`) search
+/// order, adapted to the `LingXi` build layout:
+/// 1. **Explicit `apply_path`** — if provided and it exists on disk, use it
+///    (highest priority; the TS `seccompBinaryPath` parameter).
+/// 2. **`argv0`** — a bare command name (e.g. `"apply-seccomp"`) that is trusted
+///    to resolve inside the bwrap sandbox via `PATH`. Used as-is without a
+///    host-side existence check (the TS treats an explicitly-configured name as
+///    authoritative; inside bwrap the host `target/` may not be on `PATH`).
+/// 3. **Relative/workspace fallback** — the built helper at
+///    `target/<profile>/apply-seccomp` relative to this crate, probed for
+///    existence. (The TS probes `vendor/seccomp/<arch>/apply-seccomp`; our
+///    equivalent vendor location is the workspace `target/` build output.)
+///
+/// The arch gate (step 0) returns `None` for non-x64/arm64 BEFORE any path
+/// probing, exactly as the TS `getVendorArchitecture` returns `null`.
+#[must_use]
+pub fn resolve_apply_seccomp_prefix(
+    apply_path: Option<&Path>,
+    argv0: Option<&str>,
+) -> Option<String> {
+    // Step 0: arch gate (TS getVendorArchitecture → null for ia32/other).
+    if !seccomp_arch_supported() {
+        return None;
+    }
+
+    // Step 1: explicit path that exists → use it.
+    if let Some(p) = apply_path {
+        if p.exists() {
+            return Some(format!("{} ", shquote(&p.to_string_lossy())));
+        }
+        // Explicit path provided but missing → fall through to argv0/search
+        // (matching the TS: it logs then continues to the local/global search).
+    }
+
+    // Step 2: trusted argv0 (bare name resolved inside bwrap via PATH).
+    if let Some(name) = argv0 {
+        if !name.is_empty() {
+            return Some(format!("{} ", shquote(name)));
+        }
+    }
+
+    // Step 3: workspace-relative build output fallback. Probe the standard
+    // cargo profiles' `apply-seccomp` next to this crate's compiled location.
+    for candidate in workspace_apply_seccomp_candidates() {
+        if candidate.exists() {
+            return Some(format!("{} ", shquote(&candidate.to_string_lossy())));
+        }
+    }
+
     None
+}
+
+/// Candidate paths for the workspace-built `apply-seccomp` binary, derived from
+/// the cargo `OUT`/manifest layout: `<workspace>/target/{debug,release}/apply-seccomp`.
+/// `CARGO_MANIFEST_DIR` points at `lingxi-code/sandbox-runtime`; the workspace
+/// `target/` is one level up.
+fn workspace_apply_seccomp_candidates() -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
+    // sandbox-runtime/.. == lingxi-code (the workspace root holding target/).
+    if let Some(workspace) = manifest.parent() {
+        for profile in ["debug", "release"] {
+            out.push(workspace.join("target").join(profile).join("apply-seccomp"));
+        }
+    }
+    out
 }
 
 /// `cleanupBwrapMountPoints(mountPoints)` (:247-283), refactored to take the
@@ -214,8 +323,11 @@ fn host_socat_args(socket_path: &str, proxy_port: u16) -> [String; 2] {
 /// forward to the bound Unix sockets, installs an EXIT trap killing them, then
 /// runs the user command. Ports 3128/1080 are hardcoded (matching the TS).
 ///
-/// Seccomp is the P7 seam so `apply_seccomp_prefix` is always `None` here → the
-/// `eval` branch is taken; the seccomp branch is ported for fidelity.
+/// When `apply_seccomp_prefix` is `Some`, the seccomp branch is taken: the user
+/// command runs as `<prefix><shell> -c '<cmd>'`, i.e. under the `apply-seccomp`
+/// helper that installs the `socket(AF_UNIX)` BPF block. When `None`, the `eval`
+/// branch is taken. apply-seccomp runs AFTER the socat listeners start so socat
+/// can still create its own Unix sockets.
 ///
 /// Returns `<shell> -c <shellquote(inner_script)>`.
 #[must_use]
@@ -416,8 +528,16 @@ pub struct WrapParams<'a> {
     /// Weaker nested sandbox (`--unshare-user --bind /proc /proc` instead of
     /// `--proc /proc`) for unprivileged containers.
     pub enable_weaker_nested_sandbox: bool,
-    /// Skip the seccomp Unix-socket block (no-op here — seccomp is P7).
+    /// Skip the seccomp Unix-socket block. When `true`,
+    /// [`resolve_apply_seccomp_prefix`] is NOT consulted and no `apply-seccomp`
+    /// prefix is emitted (the workload may freely create Unix sockets).
     pub allow_all_unix_sockets: bool,
+    /// Explicit `apply-seccomp` binary path (the TS `seccompConfig.binaryPath`).
+    /// Threaded into [`resolve_apply_seccomp_prefix`].
+    pub seccomp_apply_path: Option<&'a str>,
+    /// Trusted `apply-seccomp` argv0 (a bare command name resolved inside bwrap
+    /// via `PATH`). Threaded into [`resolve_apply_seccomp_prefix`].
+    pub seccomp_apply_argv0: Option<&'a str>,
     /// Shell to run the command with (`binShell || 'bash'`).
     pub bin_shell: Option<&'a str>,
     /// Ripgrep command for `generate_filesystem_args` (`{ command: 'rg' }`).
@@ -519,11 +639,13 @@ fn push_network_args(bwrap_args: &mut Vec<String>, params: &WrapParams<'_>) -> i
 ///   `--dev /dev`, `--unshare-pid`, and `--proc /proc` (secure) or
 ///   `--unshare-user --bind /proc /proc` (weaker-nested).
 /// - **Command:** resolve the shell on `PATH`; `-- <shell> -c <cmd>` where `cmd`
-///   is `build_sandbox_command(...)` when network + both sockets, else the bare
-///   command (seccomp prefix is the P7 seam → never present).
+///   is `build_sandbox_command(...)` when network + both sockets (the seccomp
+///   prefix is woven into its inner script), else — when an `apply-seccomp`
+///   prefix resolved — `<prefix><shell> -c <cmd>`, else the bare command.
 ///
-/// The seccomp `--seccomp` plumbing is intentionally absent (P7 seam):
-/// `apply_seccomp_prefix` resolves to `None`, so no seccomp branch is emitted.
+/// The `apply-seccomp` prefix (the `socket(AF_UNIX)` BPF block) is emitted
+/// whenever `!allow_all_unix_sockets` AND [`resolve_apply_seccomp_prefix`]
+/// resolves a binary for the current arch; `allow_all_unix_sockets` skips it.
 ///
 /// # Errors
 /// Returns an `io::Error` if the requested shell cannot be resolved on `PATH`,
@@ -545,12 +667,16 @@ pub fn wrap_command_with_sandbox_linux(
 
     let mut bwrap_args: Vec<String> = vec!["--new-session".into(), "--die-with-parent".into()];
 
-    // ===== SECCOMP (P7 seam): always None. allow_all_unix_sockets is a no-op
-    // here because there is no seccomp filter to skip. =====
+    // ===== SECCOMP: when NOT allowing all unix sockets, locate apply-seccomp
+    // and emit its prefix (the BPF `socket(AF_UNIX)` block). allow_all_unix_sockets
+    // → skip the locator entirely (no prefix). =====
     let apply_seccomp_prefix: Option<String> = if params.allow_all_unix_sockets {
         None
     } else {
-        resolve_apply_seccomp_prefix()
+        resolve_apply_seccomp_prefix(
+            params.seccomp_apply_path.map(Path::new),
+            params.seccomp_apply_argv0,
+        )
     };
 
     // ===== NETWORK RESTRICTIONS =====
@@ -670,6 +796,7 @@ mod tests {
         let opts = LinuxDependencyOpts {
             bwrap_path: Some("/nonexistent/bwrap".to_string()),
             socat_path: Some("/nonexistent/socat".to_string()),
+            ..Default::default()
         };
         let res = check_linux_dependencies(&opts);
         assert!(res
@@ -678,10 +805,14 @@ mod tests {
         assert!(res
             .errors
             .contains(&"socat not executable at /nonexistent/socat".to_string()));
-        // Seccomp warning always present (P7 seam).
-        assert!(res
-            .warnings
-            .contains(&"seccomp not available - unix socket access not restricted".to_string()));
+        // Seccomp warning is present iff apply-seccomp cannot be located (no
+        // explicit path/argv0 here → depends on the workspace fallback + arch).
+        let seccomp_available = resolve_apply_seccomp_prefix(None, None).is_some();
+        assert_eq!(
+            res.warnings
+                .contains(&"seccomp not available - unix socket access not restricted".to_string()),
+            !seccomp_available
+        );
     }
 
     #[test]
@@ -714,16 +845,95 @@ mod tests {
         let opts = LinuxDependencyOpts {
             bwrap_path: Some("/nonexistent/bwrap".to_string()),
             socat_path: Some("/nonexistent/socat".to_string()),
+            ..Default::default()
         };
         let st = get_linux_dependency_status(&opts);
         assert!(!st.has_bwrap);
         assert!(!st.has_socat);
-        assert!(!st.has_seccomp_apply);
+        // has_seccomp_apply reflects the real locator: with no explicit
+        // path/argv0 it depends only on whether the workspace fallback binary
+        // exists (and the arch is supported), independent of bwrap/socat.
     }
 
     #[test]
-    fn seccomp_prefix_is_none_p7_seam() {
-        assert!(resolve_apply_seccomp_prefix().is_none());
+    fn seccomp_status_with_explicit_path() {
+        // An explicit, existing apply-seccomp path → has_seccomp_apply true.
+        let tmp = tempfile::tempdir().unwrap();
+        let bin = tmp.path().join("apply-seccomp");
+        fs::write(&bin, b"#!/bin/sh\n").unwrap();
+        let opts = LinuxDependencyOpts {
+            seccomp_apply_path: Some(bin.to_string_lossy().into_owned()),
+            ..Default::default()
+        };
+        let st = get_linux_dependency_status(&opts);
+        // On x86_64/aarch64 the locator resolves; on an unsupported arch the
+        // gate returns None regardless (so only assert the supported case).
+        if cfg!(any(target_arch = "x86_64", target_arch = "aarch64")) {
+            assert!(st.has_seccomp_apply);
+            // ...and the no-seccomp warning is suppressed.
+            let chk = check_linux_dependencies(&opts);
+            assert!(!chk.warnings.iter().any(|w| w.contains("seccomp not available")));
+        } else {
+            assert!(!st.has_seccomp_apply);
+        }
+    }
+
+    // ---- resolve_apply_seccomp_prefix (Task 2) ----
+
+    #[test]
+    fn resolve_seccomp_explicit_existing_path() {
+        if !seccomp_arch_supported() {
+            assert!(resolve_apply_seccomp_prefix(None, None).is_none());
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let bin = tmp.path().join("apply-seccomp");
+        fs::write(&bin, b"x").unwrap();
+        let prefix = resolve_apply_seccomp_prefix(Some(&bin), None).unwrap();
+        // Prefix = shell-quoted path + a trailing space.
+        assert!(prefix.ends_with(' '), "prefix must be space-terminated: {prefix:?}");
+        assert!(prefix.contains(&*bin.to_string_lossy()), "prefix: {prefix}");
+    }
+
+    #[test]
+    fn resolve_seccomp_explicit_missing_falls_through_to_argv0() {
+        if !seccomp_arch_supported() {
+            return;
+        }
+        let missing = Path::new("/nonexistent/apply-seccomp");
+        // Missing explicit path + a trusted argv0 → argv0 is used (trusted,
+        // no host-side existence check).
+        let prefix = resolve_apply_seccomp_prefix(Some(missing), Some("apply-seccomp")).unwrap();
+        assert_eq!(prefix, "apply-seccomp ");
+    }
+
+    #[test]
+    fn resolve_seccomp_none_when_absent_and_no_argv0() {
+        if !seccomp_arch_supported() {
+            return;
+        }
+        // A missing explicit path + no argv0: only the workspace fallback could
+        // resolve. Point the explicit path at a definitely-missing file and
+        // assert that, absent a built fallback, nothing trusted leaks. We can't
+        // control the workspace target/ here, so only assert the explicit+argv0
+        // miss path: explicit missing + no argv0 must NOT return the missing
+        // explicit path itself.
+        let missing = Path::new("/nonexistent/apply-seccomp");
+        let got = resolve_apply_seccomp_prefix(Some(missing), None);
+        assert!(
+            got.as_deref().is_none_or(|p| !p.contains("/nonexistent/apply-seccomp")),
+            "missing explicit path must not be returned: {got:?}"
+        );
+    }
+
+    #[test]
+    fn resolve_seccomp_argv0_trusted_without_existence_check() {
+        if !seccomp_arch_supported() {
+            return;
+        }
+        // No explicit path, just a trusted argv0 → returned as-is + space.
+        let prefix = resolve_apply_seccomp_prefix(None, Some("apply-seccomp")).unwrap();
+        assert_eq!(prefix, "apply-seccomp ");
     }
 
     #[test]
@@ -787,6 +997,32 @@ mod tests {
         let expected_inner = "/usr/bin/socat TCP-LISTEN:3128,fork,reuseaddr UNIX-CONNECT:/tmp/claude-http-abc.sock >/dev/null 2>&1 &\n/usr/bin/socat TCP-LISTEN:1080,fork,reuseaddr UNIX-CONNECT:/tmp/claude-socks-abc.sock >/dev/null 2>&1 &\ntrap \"kill %1 %2 2>/dev/null; exit\" EXIT\neval 'echo hi'";
         let expected = format!("/bin/bash -c {}", shjoin([expected_inner]));
         assert_eq!(cmd, expected);
+    }
+
+    #[test]
+    fn build_sandbox_command_seccomp_branch_emits_prefix_not_eval() {
+        // With a seccomp prefix, the inner script runs
+        // `<prefix><shell> -c '<cmd>'` instead of `eval '<cmd>'`.
+        let cmd = build_sandbox_command(
+            "/tmp/h.sock",
+            "/tmp/s.sock",
+            "echo hi",
+            Some("/opt/apply-seccomp "),
+            "/bin/bash",
+            Some("/usr/bin/socat"),
+        );
+        // The seccomp-wrapped command line.
+        let wrapped = format!("/opt/apply-seccomp {}", shjoin(["/bin/bash", "-c", "echo hi"]));
+        let expected_inner = format!(
+            "/usr/bin/socat TCP-LISTEN:3128,fork,reuseaddr UNIX-CONNECT:/tmp/h.sock >/dev/null 2>&1 &\n\
+             /usr/bin/socat TCP-LISTEN:1080,fork,reuseaddr UNIX-CONNECT:/tmp/s.sock >/dev/null 2>&1 &\n\
+             trap \"kill %1 %2 2>/dev/null; exit\" EXIT\n{wrapped}"
+        );
+        let expected = format!("/bin/bash -c {}", shjoin([expected_inner.as_str()]));
+        assert_eq!(cmd, expected);
+        // It is the seccomp branch, NOT the eval branch.
+        assert!(cmd.contains("/opt/apply-seccomp"), "cmd: {cmd}");
+        assert!(!cmd.contains("eval "), "must not use eval branch: {cmd}");
     }
 
     #[test]
@@ -863,6 +1099,8 @@ mod tests {
             write_config: None,
             enable_weaker_nested_sandbox: false,
             allow_all_unix_sockets: false,
+            seccomp_apply_path: None,
+            seccomp_apply_argv0: None,
             bin_shell: None,
             ripgrep_cmd: "rg",
             mandatory_deny_search_depth: 3,
@@ -983,5 +1221,72 @@ mod tests {
         // fs_args returns mount points for the tmpfs cover; threaded back out.
         // (Exact count is fs_args' concern; assert the wrap returns the vec.)
         let _ = mounts; // presence verified by type; cleanup test below covers behavior
+    }
+
+    #[test]
+    fn wrap_seccomp_prefix_included_when_resolvable_and_not_allow_all() {
+        if !seccomp_arch_supported() {
+            return; // arch-gated: no prefix on unsupported arch
+        }
+        // A write restriction (no network) → the non-network command branch,
+        // where the apply-seccomp prefix is woven directly before `<shell> -c`.
+        let dir = tempfile::tempdir().unwrap();
+        let wpath = dir.path().to_string_lossy().into_owned();
+        let wc = WriteConfig {
+            allow_only: vec![wpath.clone()],
+            deny_within_allow: vec![],
+        };
+        let mut p = base_params("echo hi", &wpath, "/tmp/claude");
+        p.write_config = Some(&wc);
+        p.allow_all_unix_sockets = false;
+        // A trusted argv0 resolves without a host-side file (inside-bwrap PATH).
+        p.seccomp_apply_argv0 = Some("apply-seccomp");
+        let (cmd, _m) = wrap_command_with_sandbox_linux(&p).unwrap();
+        assert!(cmd.contains("apply-seccomp"), "seccomp prefix missing: {cmd}");
+    }
+
+    #[test]
+    fn wrap_seccomp_prefix_omitted_when_allow_all_unix_sockets() {
+        if !seccomp_arch_supported() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let wpath = dir.path().to_string_lossy().into_owned();
+        let wc = WriteConfig {
+            allow_only: vec![wpath.clone()],
+            deny_within_allow: vec![],
+        };
+        let mut p = base_params("echo hi", &wpath, "/tmp/claude");
+        p.write_config = Some(&wc);
+        // Even with a resolvable argv0, allow_all_unix_sockets skips the locator.
+        p.allow_all_unix_sockets = true;
+        p.seccomp_apply_argv0 = Some("apply-seccomp");
+        let (cmd, _m) = wrap_command_with_sandbox_linux(&p).unwrap();
+        assert!(!cmd.contains("apply-seccomp"), "seccomp prefix must be omitted: {cmd}");
+    }
+
+    #[test]
+    fn wrap_network_seccomp_prefix_woven_into_sandbox_command() {
+        if !seccomp_arch_supported() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let http = dir.path().join("claude-http.sock");
+        let socks = dir.path().join("claude-socks.sock");
+        fs::write(&http, b"").unwrap();
+        fs::write(&socks, b"").unwrap();
+        let http_s = http.to_string_lossy().into_owned();
+        let socks_s = socks.to_string_lossy().into_owned();
+
+        let mut p = base_params("curl https://example.com", "/tmp", "/tmp/claude");
+        p.needs_network_restriction = true;
+        p.http_socket_path = Some(&http_s);
+        p.socks_socket_path = Some(&socks_s);
+        p.seccomp_apply_argv0 = Some("apply-seccomp");
+        let (cmd, _m) = wrap_command_with_sandbox_linux(&p).unwrap();
+        // The seccomp prefix is embedded in build_sandbox_command's inner script,
+        // and the eval branch is NOT taken.
+        assert!(cmd.contains("apply-seccomp"), "cmd: {cmd}");
+        assert!(cmd.contains("TCP-LISTEN:3128"), "socat listener present: {cmd}");
     }
 }

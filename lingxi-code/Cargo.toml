@@ -61,6 +61,7 @@ members = [
     "cron",
     "sandbox",
     "sandbox-runtime",
+    "apply-seccomp",
     "lsp",
     "telemetry",
     "telemetry-macros",

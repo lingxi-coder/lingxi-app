@@ -4,7 +4,7 @@
 # blocks unprivileged userns). arm64 host → arm64v8/debian.
 #
 # Usage: scripts/verify-bwrap.sh            (runs all checks)
-#        scripts/verify-bwrap.sh net|userns|deny|scrub|netbridge|socks   (one group)
+#        scripts/verify-bwrap.sh net|userns|deny|scrub|netbridge|socks|seccomp   (one group)
 #
 # The `netbridge` group proves the socat/bwrap/env PLUMBING that
 # wrap_command_with_sandbox_linux emits: a host stand-in HTTP CONNECT proxy +
@@ -20,6 +20,21 @@
 # :1080 listener, with `curl --socks5-hostname` so the DOMAINNAME path is
 # exercised. Stand-in == not the Rust allowlist; the Rust pre-connect filter +
 # wire parse are proven by the tokio integration tests in socks_proxy.rs.
+#
+# The `seccomp` group proves the P7 `apply-seccomp` AF_UNIX block: a bwrap child
+# wrapped with the `apply-seccomp` helper runs a tiny C probe that asserts
+# `socket(AF_UNIX, SOCK_STREAM)` fails (EPERM/EACCES) while
+# `socket(AF_INET, SOCK_STREAM)` still succeeds -> UNIX_BLOCKED + INET_OK. This
+# is the defense-in-depth seccomp filter that forces all egress through the TCP
+# proxy listeners (the workload cannot create its own Unix sockets to reach the
+# bridge sockets directly). The `apply-seccomp` binary is cross-compiled ON THE
+# HOST as a static aarch64-musl ELF (pure-Rust deps + rust-lld, no C linker) and
+# mounted into the arm64v8 container — this AVOIDS the in-container cargo build
+# that OOM'd the LinuxKit VM in P4-2c/P5. If the host cross-build is unavailable
+# (e.g. the aarch64-unknown-linux-musl target is not installed), the group is
+# SKIPPED with a documented note + the runnable build/probe invocation; the
+# seccompiler filter itself is unit-tested for compilation in the apply-seccomp
+# crate (x86_64 + aarch64).
 #
 # NOTE: there is no `mitm` group. The P6b TLS-terminating MITM proxy
 # (tls_terminate.rs) is pure in-process Rust — it adds no socat/bwrap/env
@@ -317,8 +332,88 @@ curl -sS --max-time 20 --socks5-hostname localhost:1080 -o /dev/null https://'"$
   kill "$SSOCAT_PID" "$SPROXY_PID" 2>/dev/null || true
 fi
 
+if [ "$GROUP" = seccomp ] || [ "$GROUP" = all ]; then
+  # The host-cross-built apply-seccomp ELF is bind-mounted at /opt/apply-seccomp.
+  APPLY=/opt/apply-seccomp
+  if [ ! -x "$APPLY" ]; then
+    echo "WARN: $APPLY not present (host cross-build skipped) — seccomp group SKIPPED."
+    echo "       To run: rustup target add aarch64-unknown-linux-musl &&"
+    echo "       CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=rust-lld \\"
+    echo "         cargo build -p apply-seccomp --target aarch64-unknown-linux-musl"
+  else
+    apt-get install -y -qq gcc libc6-dev >/dev/null 2>&1
+    # Probe: AF_UNIX socket MUST fail (the seccomp EPERM), AF_INET MUST succeed.
+    cat > /tmp/probe.c <<'PROBE'
+#include <sys/socket.h>
+#include <stdio.h>
+#include <errno.h>
+#include <string.h>
+int main(void) {
+    int u = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (u >= 0) { printf("UNIX_OPEN\n"); }   /* leak: filter failed */
+    else        { printf("UNIX_BLOCKED errno=%d(%s)\n", errno, strerror(errno)); }
+    int i = socket(AF_INET, SOCK_STREAM, 0);
+    if (i >= 0) { printf("INET_OK\n"); }
+    else        { printf("INET_FAIL errno=%d(%s)\n", errno, strerror(errno)); }
+    return 0;
+}
+PROBE
+    if gcc -static -O0 -o /tmp/probe /tmp/probe.c 2>/tmp/gcc.log; then :; else
+      # Fall back to dynamic if -static libc is unavailable.
+      gcc -O0 -o /tmp/probe /tmp/probe.c 2>>/tmp/gcc.log || true
+    fi
+    if [ ! -x /tmp/probe ]; then bad "could not compile seccomp probe"; cat /tmp/gcc.log; fi
+
+    # --- SANITY: WITHOUT apply-seccomp, AF_UNIX must OPEN (proves the probe works). ---
+    SANE=$(bwrap --unshare-user-try --unshare-pid --ro-bind / / --proc /proc --dev /dev \
+             -- /tmp/probe 2>/dev/null || true)
+    echo "[seccomp] sanity (no filter) -> $(echo "$SANE" | tr '\n' ' ')"
+    case "$SANE" in
+      *UNIX_OPEN*INET_OK*) ok "probe: AF_UNIX opens & AF_INET ok without the filter (sanity)";;
+      *) echo "WARN: sanity probe unexpected (env may lack AF_UNIX/AF_INET): $SANE";;
+    esac
+
+    # --- WITH apply-seccomp: EXACT shape wrap_command_with_sandbox_linux emits in
+    # the non-network branch: `<apply-seccomp> <shell> -c '<cmd>'`. Here the cmd is
+    # the probe directly (apply-seccomp execs argv[1..]). ---
+    OUT=$(bwrap --unshare-user-try --unshare-pid --ro-bind / / --proc /proc --dev /dev \
+            -- "$APPLY" /tmp/probe 2>/dev/null || true)
+    echo "[seccomp] filtered -> $(echo "$OUT" | tr '\n' ' ')"
+    UB=0; IO=0
+    case "$OUT" in *UNIX_BLOCKED*) UB=1;; esac
+    case "$OUT" in *INET_OK*) IO=1;; esac
+    [ "$UB" = 1 ] && ok "socket(AF_UNIX) BLOCKED by apply-seccomp (UNIX_BLOCKED)" \
+                  || bad "socket(AF_UNIX) NOT blocked: $OUT"
+    [ "$IO" = 1 ] && ok "socket(AF_INET) still allowed (INET_OK — proxy egress intact)" \
+                  || bad "socket(AF_INET) wrongly blocked: $OUT"
+  fi
+fi
+
 echo "=== $([ $fail = 0 ] && echo ALL-PASS || echo SOME-FAIL) ==="
 exit $fail
 EOS
 
-docker run --rm --privileged "$IMG" /bin/bash -c "$INNER" _ "$GROUP"
+# For the seccomp group, cross-build the apply-seccomp helper on the HOST as a
+# static aarch64-musl ELF (pure-Rust deps + rust-lld → no C linker needed) and
+# bind-mount it into the container. This sidesteps the in-container cargo build
+# that OOM'd the LinuxKit VM in earlier phases.
+MOUNT_ARGS=()
+if [ "$GROUP" = seccomp ] || [ "$GROUP" = all ]; then
+  HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/lingxi-code"
+  TARGET=aarch64-unknown-linux-musl
+  BIN="$HERE/target/$TARGET/debug/apply-seccomp"
+  if rustup target list --installed 2>/dev/null | grep -q "$TARGET"; then
+    echo "[seccomp] cross-building apply-seccomp ($TARGET) on the host…"
+    ( cd "$HERE" && CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=rust-lld \
+        cargo build -p apply-seccomp --target "$TARGET" ) || \
+        echo "WARN: host cross-build failed — seccomp group will SKIP in-container."
+  else
+    echo "WARN: rustup target $TARGET not installed — seccomp group will SKIP."
+    echo "      Install with: rustup target add $TARGET"
+  fi
+  if [ -x "$BIN" ]; then
+    MOUNT_ARGS=(-v "$BIN:/opt/apply-seccomp:ro")
+  fi
+fi
+
+docker run --rm --privileged "${MOUNT_ARGS[@]}" "$IMG" /bin/bash -c "$INNER" _ "$GROUP"

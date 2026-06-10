@@ -19,7 +19,7 @@ fn stream_events_support_block_lifecycle_and_terminal_delta() {
     };
     let block_start = LlmEvent::ContentBlockStart {
         index: 0,
-        content_block: ContentBlock::Text { text: String::new() },
+        content_block: ContentBlock::Text { text: String::new(), cache_control: None },
     };
     let delta = LlmEvent::ContentBlockDelta {
         index: 0,
@@ -45,7 +45,7 @@ fn stream_event_json_has_expected_shape_and_round_trips() {
     };
     let block_start = LlmEvent::ContentBlockStart {
         index: 0,
-        content_block: ContentBlock::Text { text: String::new() },
+        content_block: ContentBlock::Text { text: String::new(), cache_control: None },
     };
     let delta = LlmEvent::ContentBlockDelta {
         index: 0,

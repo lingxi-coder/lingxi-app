@@ -29,36 +29,48 @@ impl AnthropicMessagesCodec {
     fn messages_url(&self) -> String {
         format!("{}/v1/messages", self.base_url.trim_end_matches('/'))
     }
+
+    fn count_tokens_url(&self) -> String {
+        format!("{}/v1/messages/count_tokens", self.base_url.trim_end_matches('/'))
+    }
+
+    /// Encode a `count_tokens` request (same prompt shape, no generation
+    /// controls).
+    pub fn encode_count_tokens_request(&self, request: &LlmRequest) -> Result<ProviderRequest, LlmError> {
+        let body = base_body(request)?;
+        let mut provider_request = ProviderRequest::post_json(self.count_tokens_url(), Value::Object(body));
+        provider_request
+            .headers
+            .insert("anthropic-version".to_string(), self.anthropic_version.clone());
+        provider_request
+            .headers
+            .insert("content-type".to_string(), "application/json".to_string());
+        Ok(provider_request)
+    }
+
+    /// Decode a `count_tokens` response into the input-token count.
+    pub fn decode_count_tokens_response(&self, response: &ProviderResponse) -> Result<u64, LlmError> {
+        if response.status >= 400 {
+            return Err(decode_error_response(response));
+        }
+        response
+            .body_json
+            .get("input_tokens")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| LlmError::InvalidRequest {
+                message: "Anthropic count_tokens response missing input_tokens".to_string(),
+            })
+    }
 }
 
 impl WireCodec for AnthropicMessagesCodec {
     fn encode_request(&self, request: &LlmRequest) -> Result<ProviderRequest, LlmError> {
-        if request.response_format.is_some() {
-            return Err(LlmError::InvalidRequest {
-                message: "AnthropicMessagesCodec does not encode response_format yet".to_string(),
-            });
-        }
+        let mut body = base_body(request)?;
 
-        let messages = request
-            .messages
-            .iter()
-            .map(encode_message)
-            .collect::<Result<Vec<_>, _>>()?;
-
-        let mut body = serde_json::Map::new();
-        body.insert("model".to_string(), Value::String(request.model.clone()));
         body.insert(
             "max_tokens".to_string(),
             Value::from(request.max_tokens.map_or(4096u64, u64::from)),
         );
-        body.insert("messages".to_string(), Value::Array(messages));
-        // Omitted when empty: an empty tools array changes prompt-cache keys.
-        if !request.tools.is_empty() {
-            body.insert(
-                "tools".to_string(),
-                Value::Array(request.tools.iter().map(encode_tool).collect()),
-            );
-        }
 
         if let Some(temperature) = request.temperature {
             body.insert("temperature".to_string(), Value::from(temperature));
@@ -71,10 +83,6 @@ impl WireCodec for AnthropicMessagesCodec {
                 "stop_sequences".to_string(),
                 Value::Array(request.stop_sequences.iter().cloned().map(Value::String).collect()),
             );
-        }
-
-        if let Some(system) = &request.system {
-            body.insert("system".to_string(), Value::String(system.clone()));
         }
 
         if request.stream {
@@ -129,6 +137,52 @@ impl StreamDecoder for AnthropicStreamDecoder {
     }
 }
 
+/// Prompt-shaped body fields shared by messages and `count_tokens`.
+fn base_body(request: &LlmRequest) -> Result<serde_json::Map<String, Value>, LlmError> {
+    if request.response_format.is_some() {
+        return Err(LlmError::InvalidRequest {
+            message: "AnthropicMessagesCodec does not encode response_format yet".to_string(),
+        });
+    }
+
+    let messages = request
+        .messages
+        .iter()
+        .map(encode_message)
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let mut body = serde_json::Map::new();
+    body.insert("model".to_string(), Value::String(request.model.clone()));
+    body.insert("messages".to_string(), Value::Array(messages));
+    // Omitted when empty: an empty tools array changes prompt-cache keys.
+    if !request.tools.is_empty() {
+        body.insert(
+            "tools".to_string(),
+            Value::Array(request.tools.iter().map(encode_tool).collect()),
+        );
+    }
+    if !request.system.is_empty() {
+        let system: Vec<Value> = request
+            .system
+            .iter()
+            .map(|block| {
+                with_cache_control(
+                    serde_json::json!({"type": "text", "text": block.text}),
+                    block.cache_control,
+                )
+            })
+            .collect();
+        body.insert("system".to_string(), Value::Array(system));
+    }
+    if let Some(reasoning) = &request.reasoning {
+        body.insert(
+            "thinking".to_string(),
+            serde_json::json!({"type": "enabled", "budget_tokens": reasoning.budget_tokens}),
+        );
+    }
+    Ok(body)
+}
+
 fn encode_message(message: &crate::Message) -> Result<Value, LlmError> {
     let content = message
         .content
@@ -142,12 +196,20 @@ fn encode_message(message: &crate::Message) -> Result<Value, LlmError> {
     }))
 }
 
+// Apply the Anthropic cache_control wrapper; no-op when None.
+fn with_cache_control(mut block: Value, cache_control: Option<crate::CacheControl>) -> Value {
+    if cache_control.is_some() {
+        block["cache_control"] = serde_json::json!({"type": "ephemeral"});
+    }
+    block
+}
+
 fn encode_content_block(block: &ContentBlock) -> Result<Value, LlmError> {
     match block {
-        ContentBlock::Text { text } => Ok(serde_json::json!({
-            "type": "text",
-            "text": text,
-        })),
+        ContentBlock::Text { text, cache_control } => Ok(with_cache_control(
+            serde_json::json!({"type": "text", "text": text}),
+            *cache_control,
+        )),
         ContentBlock::Image { media_type, bytes } => Ok(serde_json::json!({
             "type": "image",
             "source": {
@@ -162,7 +224,7 @@ fn encode_content_block(block: &ContentBlock) -> Result<Value, LlmError> {
             "name": name,
             "input": input,
         })),
-        ContentBlock::ToolResult { tool_call_id, output, is_error } => {
+        ContentBlock::ToolResult { tool_call_id, output, is_error, cache_control } => {
             let mut block = serde_json::json!({
                 "type": "tool_result",
                 "tool_use_id": tool_call_id,
@@ -171,7 +233,7 @@ fn encode_content_block(block: &ContentBlock) -> Result<Value, LlmError> {
             if *is_error {
                 block["is_error"] = Value::Bool(true);
             }
-            Ok(block)
+            Ok(with_cache_control(block, *cache_control))
         }
         ContentBlock::Reasoning { text, signature } => {
             let Some(signature) = signature else {
@@ -254,6 +316,7 @@ fn decode_content_block(value: &Value) -> Result<Option<ContentBlock>, LlmError>
     match value.get("type").and_then(Value::as_str) {
         Some("text") => Ok(Some(ContentBlock::Text {
             text: string_field(value, "text")?,
+            cache_control: None,
         })),
         Some("thinking") => Ok(Some(ContentBlock::Reasoning {
             text: string_field(value, "thinking")?,

@@ -2998,6 +2998,7 @@ dependencies = [
  "futures-util",
  "http 1.4.0",
  "jsonrpc",
+ "llm-client",
  "protocol",
  "reqwest",
  "serde",

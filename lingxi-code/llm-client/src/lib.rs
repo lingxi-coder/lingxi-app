@@ -38,9 +38,10 @@ pub use credentials::{Credential, CredentialProvider, CredentialScope, EnvCreden
 pub use cost::{CostEstimator, PricingCatalog, PricingPolicy, TokenPricing};
 pub use error::LlmError;
 pub use protocol::{
-    validate_capabilities, ContentBlock, ContentDelta, LlmEvent, LlmRequest, LlmResponse,
-    Message, MessageDeltaPayload, NoopStreamDecoder, ProviderRequest, ProviderResponse,
-    RawStreamFrame, ResponseFormat, StreamDecoder, ToolChoice, ToolDeclaration, WireCodec,
+    validate_capabilities, CacheControl, ContentBlock, ContentDelta, LlmEvent, LlmRequest,
+    LlmResponse, Message, MessageDeltaPayload, NoopStreamDecoder, ProviderRequest, ProviderResponse,
+    RawStreamFrame, ReasoningConfig, ResponseFormat, StreamDecoder, SystemBlock, ToolChoice,
+    ToolDeclaration, WireCodec,
 };
 pub use registry::{ModelListing, ModelRegistry, ResolvedRoute};
 pub use redaction::Redactor;

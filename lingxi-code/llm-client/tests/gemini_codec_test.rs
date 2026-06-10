@@ -5,7 +5,7 @@ use llm_client::providers::GeminiCodec;
 fn encode_request_shape_is_gemini_generate_content() {
     let codec = GeminiCodec::new("https://generativelanguage.googleapis.com/v1beta");
     let mut request = LlmRequest::new("gemini-2.0-flash");
-    request.system = Some("sys".to_string());
+    request.system = vec![llm_client::SystemBlock::text("sys")];
     request.tools = vec![ToolDeclaration {
         name: "Read".to_string(),
         description: "d".to_string(),
@@ -93,6 +93,7 @@ fn encode_tool_result_error_uses_error_response_shape() {
             tool_call_id: "call_0".to_string(),
             output: serde_json::json!("command failed"),
             is_error: true,
+            cache_control: None,
         }],
     });
 
@@ -121,6 +122,7 @@ fn encode_tool_result_uses_prior_tool_call_name() {
             tool_call_id: "call_1".to_string(),
             output: serde_json::json!("done"),
             is_error: false,
+            cache_control: None,
         }],
     });
 
@@ -269,6 +271,7 @@ fn encode_tool_result_with_unknown_call_id_is_rejected() {
             tool_call_id: "call_unseen".to_string(),
             output: serde_json::json!("done"),
             is_error: false,
+            cache_control: None,
         }],
     });
 
@@ -287,4 +290,33 @@ fn decode_blocked_prompt_reports_block_reason() {
     let err = codec.decode_response(response).unwrap_err();
 
     assert!(matches!(err, llm_client::LlmError::InvalidRequest { message } if message.contains("SAFETY")));
+}
+
+#[test]
+fn encode_reasoning_budget_as_thinking_config() {
+    let codec = GeminiCodec::new("https://generativelanguage.googleapis.com/v1beta");
+    let mut request = LlmRequest::new("gemini-2.0-flash");
+    request.reasoning = Some(llm_client::ReasoningConfig { budget_tokens: 2048 });
+
+    let provider_request = codec.encode_request(&request).unwrap();
+
+    assert_eq!(
+        provider_request.body_json["generationConfig"]["thinkingConfig"]["thinkingBudget"],
+        2048
+    );
+}
+
+#[test]
+fn system_blocks_become_system_instruction_parts() {
+    let codec = GeminiCodec::new("https://generativelanguage.googleapis.com/v1beta");
+    let mut request = LlmRequest::new("gemini-2.0-flash");
+    request.system = vec![
+        llm_client::SystemBlock { text: "a".to_string(), cache_control: None },
+        llm_client::SystemBlock { text: "b".to_string(), cache_control: Some(llm_client::CacheControl::Ephemeral) },
+    ];
+
+    let provider_request = codec.encode_request(&request).unwrap();
+
+    assert_eq!(provider_request.body_json["systemInstruction"]["parts"][0]["text"], "a");
+    assert_eq!(provider_request.body_json["systemInstruction"]["parts"][1]["text"], "b");
 }

@@ -283,6 +283,292 @@ pub fn wrap_command_with_sandbox_windows(p: &WindowsWrapParams) -> WindowsInvoca
 }
 
 // ────────────────────────────────────────────────────────────────────
+// Status / dependency queries
+// ────────────────────────────────────────────────────────────────────
+
+/// Parsed `srt-win group status` JSON (`getWindowsGroupStatus`,
+/// `windows-sandbox-utils.js:114-116`). `state` is `ready` /
+/// `created-not-on-token` / `absent` etc.; `sid`/`warning` are optional.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+pub struct WindowsGroupStatus {
+    /// Group state (`ready`, `created-not-on-token`, `absent`, …).
+    pub state: String,
+    /// The group SID, when known.
+    #[serde(default)]
+    pub sid: Option<String>,
+    /// An optional warning surfaced to the caller.
+    #[serde(default)]
+    pub warning: Option<String>,
+}
+
+/// Parsed `srt-win wfp status` JSON (`getWindowsWfpStatus`,
+/// `windows-sandbox-utils.js:123-133`). `port_range` (TS `portRange`) is
+/// optional.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+pub struct WindowsWfpStatus {
+    /// WFP state (`installed`, `absent`, …).
+    pub state: String,
+    /// Number of srt-win-tagged filters found under the sublayer.
+    #[serde(default)]
+    pub filters: Option<u32>,
+    /// The configured inclusive `[low, high]` proxy port range, when present.
+    #[serde(default)]
+    pub port_range: Option<(u16, u16)>,
+}
+
+/// Build the argv for the `srt-win group status` query
+/// (`windows-sandbox-utils.js:115`): `["group", "status", ...group_ref]`.
+#[must_use]
+pub fn group_status_args(ref_: &WindowsGroupRef) -> Vec<String> {
+    let mut args = vec!["group".to_string(), "status".to_string()];
+    args.extend(group_ref_args(ref_));
+    args
+}
+
+/// Build the argv for the `srt-win wfp status` query
+/// (`windows-sandbox-utils.js:124-126`): `["wfp", "status"]` plus
+/// `--sublayer-guid <guid>` when supplied.
+#[must_use]
+pub fn wfp_status_args(sublayer_guid: Option<&str>) -> Vec<String> {
+    let mut args = vec!["wfp".to_string(), "status".to_string()];
+    if let Some(g) = sublayer_guid {
+        args.push("--sublayer-guid".to_string());
+        args.push(g.to_string());
+    }
+    args
+}
+
+/// Parse `srt-win group status` stdout (one JSON line) into a
+/// [`WindowsGroupStatus`].
+///
+/// # Errors
+/// Returns a [`WindowsError`] when the stdout is not parseable JSON.
+pub fn parse_group_status(stdout: &str) -> WindowsResult<WindowsGroupStatus> {
+    serde_json::from_str(stdout.trim()).map_err(|e| {
+        WindowsError(format!(
+            "srt-win group status: unparseable JSON output {:?}: {e}",
+            stdout.trim()
+        ))
+    })
+}
+
+/// Parse `srt-win wfp status` stdout (one JSON line) into a [`WindowsWfpStatus`].
+///
+/// # Errors
+/// Returns a [`WindowsError`] when the stdout is not parseable JSON.
+pub fn parse_wfp_status(stdout: &str) -> WindowsResult<WindowsWfpStatus> {
+    serde_json::from_str(stdout.trim()).map_err(|e| {
+        WindowsError(format!(
+            "srt-win wfp status: unparseable JSON output {:?}: {e}",
+            stdout.trim()
+        ))
+    })
+}
+
+/// Install instructions surfaced verbatim in dependency-error messages
+/// (`windowsInstallInstructions`, `windows-sandbox-utils.js:354-373`).
+/// `group_state == "created-not-on-token"` yields the logout-only message.
+#[must_use]
+pub fn windows_install_instructions(
+    ref_: &WindowsGroupRef,
+    sublayer_guid: Option<&str>,
+    group_state: &str,
+) -> String {
+    if group_state == "created-not-on-token" {
+        return "The discriminator group exists but is not yet in this session's \
+                token. LOG OUT and back in to pick up the new group membership \
+                (it enters TokenGroups at logon). Network is not disrupted \
+                meanwhile — WFP filter-0 PERMITs traffic while the group is absent \
+                from your token."
+            .to_string();
+    }
+    let g = if let Some(sid) = &ref_.group_sid {
+        format!("--group-sid {sid}")
+    } else {
+        format!(
+            "--name {}",
+            ref_.group_name.as_deref().unwrap_or(DEFAULT_WINDOWS_GROUP_NAME)
+        )
+    };
+    let sl = sublayer_guid.map_or(String::new(), |g| format!(" --sublayer-guid {g}"));
+    format!(
+        "Windows sandbox needs a one-time install (one UAC prompt):\n\
+         \u{20}\u{20}npx sandbox-runtime windows-install\n\
+         \u{20}\u{20}— or call installWindowsSandbox(), or run \
+         `srt-win.exe install {g}{sl}` directly —\n\
+         then LOG OUT and back in (the group SID enters TokenGroups at logon).\n\
+         Network is not disrupted before the logout: while the group is absent \
+         from your token, WFP filter-0 PERMITs all traffic."
+    )
+}
+
+/// The result of [`check_windows_dependencies`]: blocking `errors` plus
+/// informational `warnings` (`{errors, warnings}`,
+/// `windows-sandbox-utils.js:378`).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WindowsDependencyReport {
+    /// Blocking errors (presence blocks `initialize()`).
+    pub errors: Vec<String>,
+    /// Non-blocking informational warnings.
+    pub warnings: Vec<String>,
+}
+
+/// The pure dependency-evaluation core (`checkWindowsDependencies` body,
+/// `windows-sandbox-utils.js:378-432`) given already-resolved status. Takes the
+/// `srt-win` outcomes as inputs so it is portable + unit-testable; the Windows
+/// subprocess glue ([`check_windows_dependencies`]) feeds it the live results.
+///
+/// `srt_win_err` short-circuits with a single binary-resolution error (TS step
+/// 1). `group` / `wfp` are the parsed statuses; a `None` represents a failed
+/// query whose error message is in `group_err` / `wfp_err`.
+#[must_use]
+pub fn evaluate_windows_dependencies(
+    ref_: &WindowsGroupRef,
+    sublayer_guid: Option<&str>,
+    srt_win_err: Option<&str>,
+    group: Result<&WindowsGroupStatus, &str>,
+    wfp: Result<&WindowsWfpStatus, &str>,
+) -> WindowsDependencyReport {
+    let mut report = WindowsDependencyReport::default();
+
+    // 1. Binary present.
+    if let Some(e) = srt_win_err {
+        report.errors.push(e.to_string());
+        return report;
+    }
+
+    // 2. Group ready (exists AND enabled in the caller's token).
+    let gs = match group {
+        Ok(gs) => gs,
+        Err(e) => {
+            report.errors.push(format!("srt-win group status failed: {e}"));
+            return report;
+        }
+    };
+    if gs.state != "ready" {
+        let sid_suffix = gs.sid.as_ref().map_or(String::new(), |s| format!(" (sid={s})"));
+        report.errors.push(format!(
+            "Discriminator group is {}{}. {}",
+            gs.state,
+            sid_suffix,
+            windows_install_instructions(ref_, sublayer_guid, &gs.state)
+        ));
+    }
+    if let Some(w) = &gs.warning {
+        report.warnings.push(w.clone());
+    }
+
+    // 3. WFP filters installed under the sublayer.
+    let ws = match wfp {
+        Ok(ws) => ws,
+        Err(e) => {
+            report.errors.push(format!("srt-win wfp status failed: {e}"));
+            return report;
+        }
+    };
+    if ws.state != "installed" {
+        // Only surface a separate WFP error when the group IS ready (otherwise
+        // the group error already gave the right instruction).
+        if gs.state == "ready" {
+            report.errors.push(format!(
+                "WFP filters not installed under sublayer {}. {}",
+                sublayer_guid.unwrap_or("(default)"),
+                windows_install_instructions(ref_, sublayer_guid, "absent")
+            ));
+        }
+    }
+
+    report
+}
+
+/// Check the Windows backend is ready to sandbox (`checkWindowsDependencies`,
+/// `windows-sandbox-utils.js:378-432`). Resolves the binary, runs the
+/// `srt-win group status` + `wfp status` queries, and evaluates them via
+/// [`evaluate_windows_dependencies`].
+///
+/// The `srt-win` subprocess invocation + JSON parse is `target_os = "windows"`
+/// only; on other hosts this returns a single "Windows-only" error.
+///
+/// `repo_root` resolves `srt-win.exe`.
+#[must_use]
+pub fn check_windows_dependencies(
+    ref_: &WindowsGroupRef,
+    sublayer_guid: Option<&str>,
+    repo_root: &Path,
+) -> WindowsDependencyReport {
+    #[cfg(target_os = "windows")]
+    {
+        // 1. Binary present.
+        let exe = match get_srt_win_path(repo_root) {
+            Ok(p) => p,
+            Err(e) => {
+                return WindowsDependencyReport { errors: vec![e.0], warnings: Vec::new() };
+            }
+        };
+
+        // 2 + 3. Live status queries.
+        let group = run_srt_win_group_status(&exe, ref_);
+        let wfp = run_srt_win_wfp_status(&exe, sublayer_guid);
+
+        evaluate_windows_dependencies(
+            ref_,
+            sublayer_guid,
+            None,
+            group.as_ref().map_err(String::as_str),
+            wfp.as_ref().map_err(String::as_str),
+        )
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = (ref_, sublayer_guid, repo_root);
+        WindowsDependencyReport {
+            errors: vec!["Windows sandbox backend is Windows-only".to_string()],
+            warnings: Vec::new(),
+        }
+    }
+}
+
+// ────────────────────────────────────────────────────────────────────
+// Windows-only subprocess glue
+// ────────────────────────────────────────────────────────────────────
+
+/// Run `srt-win group status` and parse its JSON output.
+#[cfg(target_os = "windows")]
+fn run_srt_win_group_status(exe: &Path, ref_: &WindowsGroupRef) -> Result<WindowsGroupStatus, String> {
+    let out = run_srt_win(exe, &group_status_args(ref_))?;
+    parse_group_status(&out).map_err(|e| e.0)
+}
+
+/// Run `srt-win wfp status` and parse its JSON output.
+#[cfg(target_os = "windows")]
+fn run_srt_win_wfp_status(
+    exe: &Path,
+    sublayer_guid: Option<&str>,
+) -> Result<WindowsWfpStatus, String> {
+    let out = run_srt_win(exe, &wfp_status_args(sublayer_guid))?;
+    parse_wfp_status(&out).map_err(|e| e.0)
+}
+
+/// Spawn `srt-win <args>` and return trimmed stdout, erroring on spawn failure
+/// or non-zero exit (`runSrtWin`/`runSrtWinJson`, `windows-sandbox-utils.js:77-103`).
+#[cfg(target_os = "windows")]
+fn run_srt_win(exe: &Path, args: &[String]) -> Result<String, String> {
+    use std::process::Command;
+    let output = Command::new(exe)
+        .args(args)
+        .output()
+        .map_err(|e| format!("srt-win {}: spawn failed: {e}", args.first().map_or("", |s| s)))?;
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    if !output.status.success() {
+        let code = output.status.code().unwrap_or(-1);
+        let detail = if stderr.is_empty() { &stdout } else { &stderr };
+        return Err(format!("srt-win {} exited {code}: {detail}", args.join(" ")));
+    }
+    Ok(stdout)
+}
+
+// ────────────────────────────────────────────────────────────────────
 // Tests (portable — run on macOS)
 // ────────────────────────────────────────────────────────────────────
 
@@ -502,5 +788,181 @@ mod tests {
         p.group = WindowsGroupRef { group_name: None, group_sid: Some("S-1-5-32".into()) };
         let inv = wrap_command_with_sandbox_windows(&p);
         assert_eq!(&inv.argv[1..5], &["exec", "--group-sid", "S-1-5-32", "--"]);
+    }
+
+    // ── status query argv ───────────────────────────────────────────
+
+    #[test]
+    fn group_status_args_shape() {
+        let r = WindowsGroupRef::default();
+        assert_eq!(group_status_args(&r), vec!["group", "status", "--name", "sandbox-runtime-net"]);
+    }
+
+    #[test]
+    fn wfp_status_args_with_and_without_guid() {
+        assert_eq!(wfp_status_args(None), vec!["wfp", "status"]);
+        assert_eq!(
+            wfp_status_args(Some("GUID-1")),
+            vec!["wfp", "status", "--sublayer-guid", "GUID-1"]
+        );
+    }
+
+    // ── JSON parse ──────────────────────────────────────────────────
+
+    #[test]
+    fn parse_group_status_sample() {
+        let gs = parse_group_status(r#"{"state":"ready","sid":"S-1-5-21-9"}"#).expect("parse");
+        assert_eq!(gs.state, "ready");
+        assert_eq!(gs.sid.as_deref(), Some("S-1-5-21-9"));
+        assert!(gs.warning.is_none());
+    }
+
+    #[test]
+    fn parse_group_status_with_warning() {
+        let gs = parse_group_status(
+            r#"{"state":"created-not-on-token","warning":"log out needed"}"#,
+        )
+        .expect("parse");
+        assert_eq!(gs.state, "created-not-on-token");
+        assert_eq!(gs.warning.as_deref(), Some("log out needed"));
+    }
+
+    #[test]
+    fn parse_group_status_bad_json_errors() {
+        let err = parse_group_status("not json").expect_err("bad");
+        assert!(err.0.contains("unparseable JSON output"));
+    }
+
+    #[test]
+    fn parse_wfp_status_sample_with_port_range() {
+        let ws = parse_wfp_status(r#"{"state":"installed","filters":3,"port_range":[60080,60089]}"#)
+            .expect("parse");
+        assert_eq!(ws.state, "installed");
+        assert_eq!(ws.filters, Some(3));
+        assert_eq!(ws.port_range, Some((60080, 60089)));
+    }
+
+    #[test]
+    fn parse_wfp_status_minimal() {
+        let ws = parse_wfp_status(r#"{"state":"absent"}"#).expect("parse");
+        assert_eq!(ws.state, "absent");
+        assert!(ws.filters.is_none());
+        assert!(ws.port_range.is_none());
+    }
+
+    // ── dependency evaluation ───────────────────────────────────────
+
+    #[test]
+    fn deps_binary_missing_short_circuits() {
+        let r = evaluate_windows_dependencies(
+            &WindowsGroupRef::default(),
+            None,
+            Some("srt-win.exe not found"),
+            Err("unused"),
+            Err("unused"),
+        );
+        assert_eq!(r.errors, vec!["srt-win.exe not found"]);
+        assert!(r.warnings.is_empty());
+    }
+
+    #[test]
+    fn deps_all_ready_no_errors() {
+        let gs = WindowsGroupStatus { state: "ready".into(), sid: None, warning: None };
+        let ws = WindowsWfpStatus {
+            state: "installed".into(),
+            filters: Some(2),
+            port_range: Some((60080, 60089)),
+        };
+        let r = evaluate_windows_dependencies(
+            &WindowsGroupRef::default(),
+            None,
+            None,
+            Ok(&gs),
+            Ok(&ws),
+        );
+        assert!(r.errors.is_empty(), "{:?}", r.errors);
+    }
+
+    #[test]
+    fn deps_group_not_ready_emits_instructions() {
+        let gs = WindowsGroupStatus {
+            state: "created-not-on-token".into(),
+            sid: Some("S-1-5-21-9".into()),
+            warning: None,
+        };
+        let ws = WindowsWfpStatus { state: "absent".into(), filters: None, port_range: None };
+        let r = evaluate_windows_dependencies(
+            &WindowsGroupRef::default(),
+            None,
+            None,
+            Ok(&gs),
+            Ok(&ws),
+        );
+        assert_eq!(r.errors.len(), 1, "{:?}", r.errors);
+        assert!(r.errors[0].contains("Discriminator group is created-not-on-token"));
+        assert!(r.errors[0].contains("(sid=S-1-5-21-9)"));
+        assert!(r.errors[0].contains("LOG OUT and back in"));
+        // WFP error suppressed because group isn't ready.
+        assert!(!r.errors[0].contains("WFP filters not installed"));
+    }
+
+    #[test]
+    fn deps_group_ready_but_wfp_absent_emits_wfp_error() {
+        let gs = WindowsGroupStatus { state: "ready".into(), sid: None, warning: None };
+        let ws = WindowsWfpStatus { state: "absent".into(), filters: None, port_range: None };
+        let r = evaluate_windows_dependencies(
+            &WindowsGroupRef::default(),
+            Some("GUID-7"),
+            None,
+            Ok(&gs),
+            Ok(&ws),
+        );
+        assert_eq!(r.errors.len(), 1, "{:?}", r.errors);
+        assert!(r.errors[0].contains("WFP filters not installed under sublayer GUID-7"));
+    }
+
+    #[test]
+    fn deps_group_query_failure() {
+        let r = evaluate_windows_dependencies(
+            &WindowsGroupRef::default(),
+            None,
+            None,
+            Err("exit 1"),
+            Err("unused"),
+        );
+        assert_eq!(r.errors, vec!["srt-win group status failed: exit 1"]);
+    }
+
+    #[test]
+    fn deps_warning_propagated() {
+        let gs = WindowsGroupStatus {
+            state: "ready".into(),
+            sid: None,
+            warning: Some("heads up".into()),
+        };
+        let ws = WindowsWfpStatus {
+            state: "installed".into(),
+            filters: Some(2),
+            port_range: None,
+        };
+        let r = evaluate_windows_dependencies(
+            &WindowsGroupRef::default(),
+            None,
+            None,
+            Ok(&gs),
+            Ok(&ws),
+        );
+        assert!(r.errors.is_empty());
+        assert_eq!(r.warnings, vec!["heads up"]);
+    }
+
+    #[test]
+    fn non_windows_check_returns_windows_only() {
+        // On this macOS host the cfg(not(windows)) branch runs.
+        #[cfg(not(target_os = "windows"))]
+        {
+            let r = check_windows_dependencies(&WindowsGroupRef::default(), None, Path::new("/repo"));
+            assert_eq!(r.errors, vec!["Windows sandbox backend is Windows-only"]);
+        }
     }
 }

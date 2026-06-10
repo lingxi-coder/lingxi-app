@@ -365,6 +365,447 @@ pub fn parse_wfp_status(stdout: &str) -> WindowsResult<WindowsWfpStatus> {
     })
 }
 
+// ────────────────────────────────────────────────────────────────────
+// Install / uninstall flow (`windows-sandbox-utils.js:156-290`)
+// ────────────────────────────────────────────────────────────────────
+
+/// Options for [`install_windows_sandbox`] (`installWindowsSandbox`,
+/// `windows-sandbox-utils.js:156-202`). Carries the discriminator-group
+/// reference (flattened name/sid) plus the install-only knobs.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WindowsInstallOptions {
+    /// Group name override (defaults to [`DEFAULT_WINDOWS_GROUP_NAME`]).
+    pub group_name: Option<String>,
+    /// Group SID; when set it takes precedence over `group_name`.
+    pub group_sid: Option<String>,
+    /// User SID to add to the group (defaults to the current user inside
+    /// `srt-win`); maps to `--user-sid`.
+    pub user_sid: Option<String>,
+    /// WFP sublayer GUID (`--sublayer-guid`); `None` ⇒ srt-win's default.
+    pub sublayer_guid: Option<String>,
+    /// Inclusive `[low, high]` proxy port range (`--proxy-port-range lo-hi`).
+    pub proxy_port_range: Option<(u16, u16)>,
+    /// Replace any existing filters under the sublayer (`--force`).
+    pub force: bool,
+}
+
+impl WindowsInstallOptions {
+    /// The [`WindowsGroupRef`] (name/sid) embedded in these options.
+    #[must_use]
+    pub fn group_ref(&self) -> WindowsGroupRef {
+        WindowsGroupRef {
+            group_name: self.group_name.clone(),
+            group_sid: self.group_sid.clone(),
+        }
+    }
+}
+
+/// The post-call group + WFP state returned by [`install_windows_sandbox`]
+/// (`{group, wfp}` / `{group, wfp, cancelled}`,
+/// `windows-sandbox-utils.js:181-201`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WindowsInstallResult {
+    /// Group status after the install attempt.
+    pub group: WindowsGroupStatus,
+    /// WFP status after the install attempt (under `sublayer_guid`).
+    pub wfp: WindowsWfpStatus,
+    /// `true` when the user dismissed the UAC elevation prompt (exit 10).
+    pub cancelled: bool,
+}
+
+/// The result of [`uninstall_windows_sandbox`] (`{}` / `{cancelled}`,
+/// `windows-sandbox-utils.js:221-225`). Carries only the cancellation flag —
+/// uninstall does NOT delete the discriminator group.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WindowsUninstallResult {
+    /// `true` when the user dismissed the UAC elevation prompt (exit 10).
+    pub cancelled: bool,
+}
+
+/// Build the argv for the `srt-win install` command
+/// (`installWindowsSandbox`, `windows-sandbox-utils.js:157-166`):
+/// `["install", ...group_ref, --user-sid?, --sublayer-guid?,
+///   --proxy-port-range "lo-hi"?, --force?]`.
+#[must_use]
+pub fn install_args(opts: &WindowsInstallOptions) -> Vec<String> {
+    let mut args = vec!["install".to_string()];
+    args.extend(group_ref_args(&opts.group_ref()));
+    if let Some(sid) = &opts.user_sid {
+        args.push("--user-sid".to_string());
+        args.push(sid.clone());
+    }
+    if let Some(guid) = &opts.sublayer_guid {
+        args.push("--sublayer-guid".to_string());
+        args.push(guid.clone());
+    }
+    if let Some((lo, hi)) = opts.proxy_port_range {
+        args.push("--proxy-port-range".to_string());
+        args.push(format!("{lo}-{hi}"));
+    }
+    if opts.force {
+        args.push("--force".to_string());
+    }
+    args
+}
+
+/// Build the argv for the `srt-win uninstall` command
+/// (`uninstallWindowsSandbox`, `windows-sandbox-utils.js:215-217`):
+/// `["uninstall", --sublayer-guid?]`.
+#[must_use]
+pub fn uninstall_args(sublayer_guid: Option<&str>) -> Vec<String> {
+    let mut args = vec!["uninstall".to_string()];
+    if let Some(guid) = sublayer_guid {
+        args.push("--sublayer-guid".to_string());
+        args.push(guid.to_string());
+    }
+    args
+}
+
+/// Build the argv for the `srt-win group delete` command
+/// (`deleteWindowsGroup`, `windows-sandbox-utils.js:234`):
+/// `["group", "delete", ...group_ref]`.
+#[must_use]
+pub fn group_delete_args(ref_: &WindowsGroupRef) -> Vec<String> {
+    let mut args = vec!["group".to_string(), "delete".to_string()];
+    args.extend(group_ref_args(ref_));
+    args
+}
+
+/// Options for [`create_windows_group`] (`createWindowsGroup`,
+/// `windows-sandbox-utils.js:248-258`): a group ref plus an optional user SID.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WindowsCreateGroupOptions {
+    /// Group name override (defaults to [`DEFAULT_WINDOWS_GROUP_NAME`]).
+    pub group_name: Option<String>,
+    /// Group SID; when set it takes precedence over `group_name`.
+    pub group_sid: Option<String>,
+    /// User SID to add to the group (`--user-sid`).
+    pub user_sid: Option<String>,
+}
+
+impl WindowsCreateGroupOptions {
+    /// The [`WindowsGroupRef`] embedded in these options.
+    #[must_use]
+    pub fn group_ref(&self) -> WindowsGroupRef {
+        WindowsGroupRef {
+            group_name: self.group_name.clone(),
+            group_sid: self.group_sid.clone(),
+        }
+    }
+}
+
+/// Build the argv for the `srt-win group create` command
+/// (`createWindowsGroup`, `windows-sandbox-utils.js:249-251`):
+/// `["group", "create", ...group_ref, --user-sid?]`.
+#[must_use]
+pub fn group_create_args(opts: &WindowsCreateGroupOptions) -> Vec<String> {
+    let mut args = vec!["group".to_string(), "create".to_string()];
+    args.extend(group_ref_args(&opts.group_ref()));
+    if let Some(sid) = &opts.user_sid {
+        args.push("--user-sid".to_string());
+        args.push(sid.clone());
+    }
+    args
+}
+
+/// Options for [`create_windows_wfp`] (`createWindowsWfp`,
+/// `windows-sandbox-utils.js:268-274`): a group ref plus the WFP knobs.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WindowsCreateWfpOptions {
+    /// Group name override (defaults to [`DEFAULT_WINDOWS_GROUP_NAME`]).
+    pub group_name: Option<String>,
+    /// Group SID; when set it takes precedence over `group_name`.
+    pub group_sid: Option<String>,
+    /// WFP sublayer GUID (`--sublayer-guid`).
+    pub sublayer_guid: Option<String>,
+    /// Inclusive `[low, high]` proxy port range (`--proxy-port-range lo-hi`).
+    pub proxy_port_range: Option<(u16, u16)>,
+}
+
+impl WindowsCreateWfpOptions {
+    /// The [`WindowsGroupRef`] embedded in these options.
+    #[must_use]
+    pub fn group_ref(&self) -> WindowsGroupRef {
+        WindowsGroupRef {
+            group_name: self.group_name.clone(),
+            group_sid: self.group_sid.clone(),
+        }
+    }
+}
+
+/// Build the argv for the `srt-win wfp install` command
+/// (`createWindowsWfp`, `windows-sandbox-utils.js:269-274`):
+/// `["wfp", "install", ...group_ref, --sublayer-guid?, --proxy-port-range?]`.
+#[must_use]
+pub fn wfp_install_args(opts: &WindowsCreateWfpOptions) -> Vec<String> {
+    let mut args = vec!["wfp".to_string(), "install".to_string()];
+    args.extend(group_ref_args(&opts.group_ref()));
+    if let Some(guid) = &opts.sublayer_guid {
+        args.push("--sublayer-guid".to_string());
+        args.push(guid.clone());
+    }
+    if let Some((lo, hi)) = opts.proxy_port_range {
+        args.push("--proxy-port-range".to_string());
+        args.push(format!("{lo}-{hi}"));
+    }
+    args
+}
+
+/// The pure decision of [`install_windows_sandbox`] over the `srt-win install`
+/// exit code (`installWindowsSandbox` switch, `windows-sandbox-utils.js:177-197`).
+/// Splitting this out keeps the exit-code contract portable + unit-testable; the
+/// Windows subprocess glue then runs the status queries for the
+/// [`InstallDecision::Succeeded`]/[`InstallDecision::Cancelled`] arms.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InstallDecision {
+    /// Exit 0 — query the post-install group + WFP status (`cancelled: false`).
+    Succeeded,
+    /// Exit 10 — the user dismissed UAC; still query status (`cancelled: true`).
+    Cancelled,
+    /// Any non-0/10 exit — fail with the TS-faithful message.
+    Failed(WindowsError),
+}
+
+/// Map a `srt-win install` exit `status` (`None` ⇒ killed by signal / no code)
+/// plus the combined `out` (`stderr || stdout`) to the [`InstallDecision`]
+/// (`windows-sandbox-utils.js:177-197`). The exit-code contract:
+///
+/// - `0`  → [`InstallDecision::Succeeded`]
+/// - `10` → [`InstallDecision::Cancelled`]
+/// - `11` → group create failed
+/// - `12` → WFP filter install failed
+/// - `13` → already exist under this sublayer with different config (use force)
+/// - else → `install failed (exit N)`
+#[must_use]
+pub fn map_install_status(status: Option<i32>, out: &str) -> InstallDecision {
+    match status {
+        Some(0) => InstallDecision::Succeeded,
+        Some(10) => InstallDecision::Cancelled,
+        Some(11) => {
+            InstallDecision::Failed(WindowsError(format!("srt-win install: group create failed: {out}")))
+        }
+        Some(12) => InstallDecision::Failed(WindowsError(format!(
+            "srt-win install: WFP filter install failed: {out}"
+        ))),
+        Some(13) => InstallDecision::Failed(WindowsError(format!(
+            "srt-win install: filters already exist under this sublayer with \
+             different configuration (group SID or port range). \
+             Pass {{force: true}} to replace, or pick a different sublayerGuid. \
+             Output: {out}"
+        ))),
+        other => {
+            // TS interpolates the raw status (a signal-killed process has no
+            // numeric code; the TS `r.status` would be `null` → `exit null`).
+            let code = other.map_or_else(|| "null".to_string(), |c| c.to_string());
+            InstallDecision::Failed(WindowsError(format!(
+                "srt-win install failed (exit {code}): {out}"
+            )))
+        }
+    }
+}
+
+/// Map a non-install (`group delete` / `group create` / `wfp install`) non-0
+/// exit to the shared "requires elevation" error. `template` selects the exact
+/// TS wording for the operation that failed.
+#[must_use]
+#[cfg_attr(not(any(target_os = "windows", test)), allow(dead_code))]
+fn elevation_error(template: ElevationTemplate, status: Option<i32>, out: &str) -> WindowsError {
+    let code = status.map_or_else(|| "null".to_string(), |c| c.to_string());
+    let msg = match template {
+        // `deleteWindowsGroup` (`windows-sandbox-utils.js:236-237`).
+        ElevationTemplate::GroupDelete => format!(
+            "srt-win group delete failed (exit {code}). Requires elevation. Output: {out}"
+        ),
+        // `createWindowsGroup` (`windows-sandbox-utils.js:254-256`).
+        ElevationTemplate::GroupCreate => format!(
+            "srt-win group create failed (exit {code}). \
+             This requires elevation — run as administrator. Output: {out}"
+        ),
+        // `createWindowsWfp` (`windows-sandbox-utils.js:277-279`).
+        ElevationTemplate::WfpInstall => format!(
+            "srt-win wfp install failed (exit {code}). \
+             This requires elevation — run as administrator. Output: {out}"
+        ),
+    };
+    WindowsError(msg)
+}
+
+/// Which "requires elevation" message [`elevation_error`] emits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(not(any(target_os = "windows", test)), allow(dead_code))]
+enum ElevationTemplate {
+    /// `deleteWindowsGroup` wording.
+    GroupDelete,
+    /// `createWindowsGroup` wording.
+    GroupCreate,
+    /// `createWindowsWfp` wording.
+    WfpInstall,
+}
+
+/// One-shot install (`installWindowsSandbox`, `windows-sandbox-utils.js:156-202`):
+/// creates the discriminator group, adds the current user (or `user_sid`), and
+/// installs the machine-wide WFP filter set in a single self-elevating process
+/// (one UAC prompt). Idempotent.
+///
+/// On exit 0 / 10 it returns the post-call group + WFP state (exit 10 sets
+/// `cancelled: true` — UAC cancellation is a user choice, not an error). The
+/// exit-code contract is in [`map_install_status`].
+///
+/// The `srt-win` subprocess + the post-call status queries are
+/// `target_os = "windows"` only; on other hosts this returns a "Windows-only"
+/// error. `repo_root` resolves `srt-win.exe`.
+///
+/// # Errors
+/// [`WindowsError`] on group/WFP creation failure, an already-installed-with-
+/// different-config conflict without `force` (exit 13), any other non-0/10 exit,
+/// a spawn/status-query failure, or (off Windows) the Windows-only guard.
+#[cfg_attr(not(target_os = "windows"), allow(unused_variables))]
+pub fn install_windows_sandbox(
+    opts: &WindowsInstallOptions,
+    repo_root: &Path,
+) -> WindowsResult<WindowsInstallResult> {
+    #[cfg(target_os = "windows")]
+    {
+        let exe = get_srt_win_path(repo_root)?;
+        let (status, out) = run_srt_win_capture(&exe, &install_args(opts))?;
+        match map_install_status(status, &out) {
+            InstallDecision::Succeeded => install_status_result(&exe, opts, false),
+            InstallDecision::Cancelled => install_status_result(&exe, opts, true),
+            InstallDecision::Failed(e) => Err(e),
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        Err(WindowsError("Windows sandbox backend is Windows-only".to_string()))
+    }
+}
+
+/// Uninstall (`uninstallWindowsSandbox`, `windows-sandbox-utils.js:214-226`):
+/// removes the WFP filter set under `sublayer_guid` (one UAC prompt). Idempotent.
+///
+/// **Does NOT delete the discriminator group** — group membership is persistent
+/// user state and removing it would force every member to re-do the logout dance
+/// on the next install. Call [`delete_windows_group`] explicitly for full
+/// teardown. Exit 10 ⇒ `{cancelled: true}`; exit 0 ⇒ `{}`.
+///
+/// Windows-only (see [`install_windows_sandbox`]).
+///
+/// # Errors
+/// [`WindowsError`] on a non-0/10 exit, a spawn failure, or (off Windows) the
+/// Windows-only guard.
+#[cfg_attr(not(target_os = "windows"), allow(unused_variables))]
+pub fn uninstall_windows_sandbox(
+    sublayer_guid: Option<&str>,
+    repo_root: &Path,
+) -> WindowsResult<WindowsUninstallResult> {
+    #[cfg(target_os = "windows")]
+    {
+        let exe = get_srt_win_path(repo_root)?;
+        let (status, out) = run_srt_win_capture(&exe, &uninstall_args(sublayer_guid))?;
+        match status {
+            Some(10) => Ok(WindowsUninstallResult { cancelled: true }),
+            Some(0) => Ok(WindowsUninstallResult { cancelled: false }),
+            other => {
+                let code = other.map_or_else(|| "null".to_string(), |c| c.to_string());
+                Err(WindowsError(format!("srt-win uninstall failed (exit {code}): {out}")))
+            }
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        Err(WindowsError("Windows sandbox backend is Windows-only".to_string()))
+    }
+}
+
+/// Delete the discriminator group (`deleteWindowsGroup`,
+/// `windows-sandbox-utils.js:233-240`). Separate from
+/// [`uninstall_windows_sandbox`] so uninstall→reinstall doesn't force a fresh
+/// logout for every member. **Requires elevation.** Idempotent (no-op if the
+/// group doesn't exist).
+///
+/// Windows-only (see [`install_windows_sandbox`]).
+///
+/// # Errors
+/// [`WindowsError`] ("requires elevation") on a non-0 exit, a spawn failure, or
+/// (off Windows) the Windows-only guard.
+#[cfg_attr(not(target_os = "windows"), allow(unused_variables))]
+pub fn delete_windows_group(ref_: &WindowsGroupRef, repo_root: &Path) -> WindowsResult<()> {
+    #[cfg(target_os = "windows")]
+    {
+        let exe = get_srt_win_path(repo_root)?;
+        let (status, out) = run_srt_win_capture(&exe, &group_delete_args(ref_))?;
+        if status == Some(0) {
+            Ok(())
+        } else {
+            Err(elevation_error(ElevationTemplate::GroupDelete, status, &out))
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        Err(WindowsError("Windows sandbox backend is Windows-only".to_string()))
+    }
+}
+
+/// Granular primitive (`createWindowsGroup`, `windows-sandbox-utils.js:248-258`):
+/// create the discriminator group and add the current user (or `user_sid`). Most
+/// callers should use [`install_windows_sandbox`]; this exists for enterprise/CI
+/// flows that manage group and WFP separately. **Requires elevation.** Idempotent.
+///
+/// Windows-only (see [`install_windows_sandbox`]).
+///
+/// # Errors
+/// [`WindowsError`] ("requires elevation") on a non-0 exit, a spawn failure, or
+/// (off Windows) the Windows-only guard.
+#[cfg_attr(not(target_os = "windows"), allow(unused_variables))]
+pub fn create_windows_group(
+    opts: &WindowsCreateGroupOptions,
+    repo_root: &Path,
+) -> WindowsResult<()> {
+    #[cfg(target_os = "windows")]
+    {
+        let exe = get_srt_win_path(repo_root)?;
+        let (status, out) = run_srt_win_capture(&exe, &group_create_args(opts))?;
+        if status == Some(0) {
+            Ok(())
+        } else {
+            Err(elevation_error(ElevationTemplate::GroupCreate, status, &out))
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        Err(WindowsError("Windows sandbox backend is Windows-only".to_string()))
+    }
+}
+
+/// Granular primitive (`createWindowsWfp`, `windows-sandbox-utils.js:268-282`):
+/// install the machine-wide WFP filter set under `sublayer_guid` keyed on the
+/// group SID. Most callers should use [`install_windows_sandbox`]; this exists
+/// for enterprise/CI flows. **Requires elevation.** Idempotent — re-running
+/// replaces any existing srt-win-tagged filters under that sublayer.
+///
+/// Windows-only (see [`install_windows_sandbox`]).
+///
+/// # Errors
+/// [`WindowsError`] ("requires elevation") on a non-0 exit, a spawn failure, or
+/// (off Windows) the Windows-only guard.
+#[cfg_attr(not(target_os = "windows"), allow(unused_variables))]
+pub fn create_windows_wfp(opts: &WindowsCreateWfpOptions, repo_root: &Path) -> WindowsResult<()> {
+    #[cfg(target_os = "windows")]
+    {
+        let exe = get_srt_win_path(repo_root)?;
+        let (status, out) = run_srt_win_capture(&exe, &wfp_install_args(opts))?;
+        if status == Some(0) {
+            Ok(())
+        } else {
+            Err(elevation_error(ElevationTemplate::WfpInstall, status, &out))
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        Err(WindowsError("Windows sandbox backend is Windows-only".to_string()))
+    }
+}
+
 /// Install instructions surfaced verbatim in dependency-error messages
 /// (`windowsInstallInstructions`, `windows-sandbox-utils.js:354-373`).
 /// `group_state == "created-not-on-token"` yields the logout-only message.
@@ -547,6 +988,43 @@ fn run_srt_win_wfp_status(
 ) -> Result<WindowsWfpStatus, String> {
     let out = run_srt_win(exe, &wfp_status_args(sublayer_guid))?;
     parse_wfp_status(&out).map_err(|e| e.0)
+}
+
+/// Spawn `srt-win <args>` and return `(exit_status, out)` where `out` is
+/// `stderr || stdout` (trimmed), WITHOUT failing on a non-zero exit — the
+/// install/uninstall flow inspects the exit code itself (`runSrtWin`,
+/// `windows-sandbox-utils.js:77-88`, the raw variant). `exit_status` is `None`
+/// when the process was killed by a signal (no numeric code; TS `r.status` null).
+///
+/// # Errors
+/// A spawn failure (the TS `r.error` branch), surfaced as the TS
+/// `srt-win <verb>: spawn failed: …` message.
+#[cfg(target_os = "windows")]
+fn run_srt_win_capture(exe: &Path, args: &[String]) -> WindowsResult<(Option<i32>, String)> {
+    use std::process::Command;
+    let output = Command::new(exe).args(args).output().map_err(|e| {
+        WindowsError(format!("srt-win {}: spawn failed: {e}", args.first().map_or("", |s| s)))
+    })?;
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    let out = if stderr.is_empty() { stdout } else { stderr };
+    Ok((output.status.code(), out))
+}
+
+/// Query the post-install group + WFP status and assemble a
+/// [`WindowsInstallResult`] (`installWindowsSandbox` success/cancel arms,
+/// `windows-sandbox-utils.js:181-201`).
+#[cfg(target_os = "windows")]
+fn install_status_result(
+    exe: &Path,
+    opts: &WindowsInstallOptions,
+    cancelled: bool,
+) -> WindowsResult<WindowsInstallResult> {
+    let group_ref = opts.group_ref();
+    let group = run_srt_win_group_status(exe, &group_ref).map_err(WindowsError)?;
+    let wfp =
+        run_srt_win_wfp_status(exe, opts.sublayer_guid.as_deref()).map_err(WindowsError)?;
+    Ok(WindowsInstallResult { group, wfp, cancelled })
 }
 
 /// Spawn `srt-win <args>` and return trimmed stdout, erroring on spawn failure
@@ -954,6 +1432,241 @@ mod tests {
         );
         assert!(r.errors.is_empty());
         assert_eq!(r.warnings, vec!["heads up"]);
+    }
+
+    // ── install / uninstall argv ────────────────────────────────────
+
+    #[test]
+    fn install_args_minimal_default_group() {
+        let opts = WindowsInstallOptions::default();
+        assert_eq!(install_args(&opts), vec!["install", "--name", "sandbox-runtime-net"]);
+    }
+
+    #[test]
+    fn install_args_all_flags() {
+        let opts = WindowsInstallOptions {
+            group_name: None,
+            group_sid: Some("S-1-5-21-7".into()),
+            user_sid: Some("S-1-5-21-9".into()),
+            sublayer_guid: Some("GUID-X".into()),
+            proxy_port_range: Some((60080, 60089)),
+            force: true,
+        };
+        assert_eq!(
+            install_args(&opts),
+            vec![
+                "install",
+                "--group-sid",
+                "S-1-5-21-7",
+                "--user-sid",
+                "S-1-5-21-9",
+                "--sublayer-guid",
+                "GUID-X",
+                "--proxy-port-range",
+                "60080-60089",
+                "--force",
+            ]
+        );
+    }
+
+    #[test]
+    fn install_args_port_range_format() {
+        let opts = WindowsInstallOptions {
+            proxy_port_range: Some((1234, 5678)),
+            ..Default::default()
+        };
+        let args = install_args(&opts);
+        let i = args.iter().position(|a| a == "--proxy-port-range").unwrap();
+        assert_eq!(args[i + 1], "1234-5678");
+    }
+
+    #[test]
+    fn install_args_omits_force_when_false() {
+        let opts = WindowsInstallOptions { force: false, ..Default::default() };
+        assert!(!install_args(&opts).contains(&"--force".to_string()));
+    }
+
+    #[test]
+    fn uninstall_args_with_and_without_guid() {
+        assert_eq!(uninstall_args(None), vec!["uninstall"]);
+        assert_eq!(
+            uninstall_args(Some("GUID-7")),
+            vec!["uninstall", "--sublayer-guid", "GUID-7"]
+        );
+    }
+
+    #[test]
+    fn group_delete_args_shape() {
+        let r = WindowsGroupRef::default();
+        assert_eq!(group_delete_args(&r), vec!["group", "delete", "--name", "sandbox-runtime-net"]);
+        let r2 = WindowsGroupRef { group_name: None, group_sid: Some("S-1-5-1".into()) };
+        assert_eq!(group_delete_args(&r2), vec!["group", "delete", "--group-sid", "S-1-5-1"]);
+    }
+
+    #[test]
+    fn group_create_args_with_and_without_user_sid() {
+        let opts = WindowsCreateGroupOptions::default();
+        assert_eq!(
+            group_create_args(&opts),
+            vec!["group", "create", "--name", "sandbox-runtime-net"]
+        );
+        let opts2 = WindowsCreateGroupOptions {
+            group_name: Some("g".into()),
+            group_sid: None,
+            user_sid: Some("S-1-5-21-2".into()),
+        };
+        assert_eq!(
+            group_create_args(&opts2),
+            vec!["group", "create", "--name", "g", "--user-sid", "S-1-5-21-2"]
+        );
+    }
+
+    #[test]
+    fn wfp_install_args_with_and_without_flags() {
+        let opts = WindowsCreateWfpOptions::default();
+        assert_eq!(wfp_install_args(&opts), vec!["wfp", "install", "--name", "sandbox-runtime-net"]);
+        let opts2 = WindowsCreateWfpOptions {
+            group_name: None,
+            group_sid: Some("S-1-5-9".into()),
+            sublayer_guid: Some("GUID-Q".into()),
+            proxy_port_range: Some((60080, 60089)),
+        };
+        assert_eq!(
+            wfp_install_args(&opts2),
+            vec![
+                "wfp",
+                "install",
+                "--group-sid",
+                "S-1-5-9",
+                "--sublayer-guid",
+                "GUID-Q",
+                "--proxy-port-range",
+                "60080-60089",
+            ]
+        );
+    }
+
+    // ── exit-code → InstallDecision mapping ──────────────────────────
+
+    #[test]
+    fn map_install_status_0_succeeded() {
+        assert_eq!(map_install_status(Some(0), "ok"), InstallDecision::Succeeded);
+    }
+
+    #[test]
+    fn map_install_status_10_cancelled() {
+        assert_eq!(map_install_status(Some(10), "user cancelled"), InstallDecision::Cancelled);
+    }
+
+    #[test]
+    fn map_install_status_11_group_create_failed() {
+        let d = map_install_status(Some(11), "boom");
+        let InstallDecision::Failed(e) = d else { panic!("expected Failed: {d:?}") };
+        assert_eq!(e.0, "srt-win install: group create failed: boom");
+    }
+
+    #[test]
+    fn map_install_status_12_wfp_failed() {
+        let d = map_install_status(Some(12), "wfp boom");
+        let InstallDecision::Failed(e) = d else { panic!("expected Failed: {d:?}") };
+        assert_eq!(e.0, "srt-win install: WFP filter install failed: wfp boom");
+    }
+
+    #[test]
+    fn map_install_status_13_already_exists_use_force() {
+        let d = map_install_status(Some(13), "conflict");
+        let InstallDecision::Failed(e) = d else { panic!("expected Failed: {d:?}") };
+        assert!(e.0.contains("filters already exist under this sublayer with different configuration"));
+        assert!(e.0.contains("(group SID or port range)"));
+        assert!(e.0.contains("Pass {force: true} to replace"));
+        assert!(e.0.ends_with("Output: conflict"));
+    }
+
+    #[test]
+    fn map_install_status_other_exit_and_signal() {
+        let d = map_install_status(Some(1), "other err");
+        let InstallDecision::Failed(e) = d else { panic!("expected Failed") };
+        assert_eq!(e.0, "srt-win install failed (exit 1): other err");
+        // Signal-killed (no code) → "exit null", matching the TS null status.
+        let d2 = map_install_status(None, "killed");
+        let InstallDecision::Failed(e2) = d2 else { panic!("expected Failed") };
+        assert_eq!(e2.0, "srt-win install failed (exit null): killed");
+    }
+
+    #[test]
+    fn elevation_error_messages_match_ts() {
+        let del = elevation_error(ElevationTemplate::GroupDelete, Some(5), "denied");
+        assert_eq!(
+            del.0,
+            "srt-win group delete failed (exit 5). Requires elevation. Output: denied"
+        );
+        let create = elevation_error(ElevationTemplate::GroupCreate, Some(5), "denied");
+        assert_eq!(
+            create.0,
+            "srt-win group create failed (exit 5). This requires elevation — run as administrator. Output: denied"
+        );
+        let wfp = elevation_error(ElevationTemplate::WfpInstall, None, "denied");
+        assert_eq!(
+            wfp.0,
+            "srt-win wfp install failed (exit null). This requires elevation — run as administrator. Output: denied"
+        );
+    }
+
+    // ── windows_install_instructions text ────────────────────────────
+
+    #[test]
+    fn install_instructions_created_not_on_token() {
+        let txt =
+            windows_install_instructions(&WindowsGroupRef::default(), None, "created-not-on-token");
+        assert!(txt.starts_with("The discriminator group exists but is not yet in this session's"));
+        assert!(txt.contains("LOG OUT and back in"));
+        assert!(txt.contains("WFP filter-0 PERMITs traffic"));
+    }
+
+    #[test]
+    fn install_instructions_default_group_no_sublayer() {
+        let txt = windows_install_instructions(&WindowsGroupRef::default(), None, "absent");
+        assert!(txt.contains("Windows sandbox needs a one-time install (one UAC prompt):"));
+        assert!(txt.contains("npx sandbox-runtime windows-install"));
+        assert!(txt.contains("`srt-win.exe install --name sandbox-runtime-net` directly"));
+        assert!(txt.contains("then LOG OUT and back in"));
+        // No sublayer arg when none supplied.
+        assert!(!txt.contains("--sublayer-guid"));
+    }
+
+    #[test]
+    fn install_instructions_with_sid_and_sublayer() {
+        let r = WindowsGroupRef { group_name: None, group_sid: Some("S-1-5-21-3".into()) };
+        let txt = windows_install_instructions(&r, Some("GUID-9"), "absent");
+        assert!(txt.contains("`srt-win.exe install --group-sid S-1-5-21-3 --sublayer-guid GUID-9` directly"));
+    }
+
+    // ── Windows-only guards on this (non-Windows) host ───────────────
+
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn install_flow_is_windows_only_off_windows() {
+        let repo = Path::new("/repo");
+        assert_eq!(
+            install_windows_sandbox(&WindowsInstallOptions::default(), repo).unwrap_err().0,
+            "Windows sandbox backend is Windows-only"
+        );
+        assert_eq!(
+            uninstall_windows_sandbox(None, repo).unwrap_err().0,
+            "Windows sandbox backend is Windows-only"
+        );
+        assert_eq!(
+            delete_windows_group(&WindowsGroupRef::default(), repo).unwrap_err().0,
+            "Windows sandbox backend is Windows-only"
+        );
+        assert_eq!(
+            create_windows_group(&WindowsCreateGroupOptions::default(), repo).unwrap_err().0,
+            "Windows sandbox backend is Windows-only"
+        );
+        assert_eq!(
+            create_windows_wfp(&WindowsCreateWfpOptions::default(), repo).unwrap_err().0,
+            "Windows sandbox backend is Windows-only"
+        );
     }
 
     #[test]

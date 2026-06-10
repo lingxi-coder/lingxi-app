@@ -37,9 +37,11 @@
 //!   `getWindowsGroupStatus`/`getWindowsWfpStatus`, which build an argv and
 //!   parse its stdout), and the consts [`DEFAULT_WINDOWS_GROUP_NAME`] /
 //!   [`DEFAULT_WINDOWS_PROXY_PORT_RANGE`] ([`windows`]). The admin
-//!   install/uninstall flow (TS
-//!   `installWindowsSandbox`/`uninstallWindowsSandbox`) is a tracked gap and is
-//!   not yet re-exported.
+//!   install/uninstall flow ([`install_windows_sandbox`],
+//!   [`uninstall_windows_sandbox`], [`delete_windows_group`],
+//!   [`create_windows_group`], [`create_windows_wfp`],
+//!   [`windows_install_instructions`]) is also re-exported (matching
+//!   `index.js`).
 //! - [`get_default_write_paths`] — the default-write-path utility
 //!   ([`path_utils`]).
 
@@ -53,7 +55,9 @@ pub use crate::manager::SandboxManager;
 pub use crate::path_utils::get_default_write_paths;
 pub use crate::violation_store::{SandboxViolationStore, Violation};
 pub use crate::windows::{
-    get_srt_win_path, group_status_args, parse_group_status, parse_wfp_status, wfp_status_args,
+    create_windows_group, create_windows_wfp, delete_windows_group, get_srt_win_path,
+    group_status_args, install_windows_sandbox, parse_group_status, parse_wfp_status,
+    uninstall_windows_sandbox, wfp_status_args, windows_install_instructions,
     DEFAULT_WINDOWS_GROUP_NAME, DEFAULT_WINDOWS_PROXY_PORT_RANGE,
 };
 

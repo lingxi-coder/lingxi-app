@@ -64,9 +64,6 @@ pub struct MitmCaOptions {
 /// Owns the rcgen signing material (`signing_key` + `ca_cert`) used to mint leaf
 /// certificates, the CA's own PEMs, and the on-disk paths the trust env vars
 /// point at.
-// `ca_cert`/`signing_key`/the caches are consumed by `mitm_leaf` (Task 2); they
-// are part of this struct's API surface from creation.
-#[allow(dead_code)]
 pub struct MitmCa {
     /// On-disk path of the CA certificate PEM (`ca.crt` for ephemeral CAs).
     pub cert_path: PathBuf,

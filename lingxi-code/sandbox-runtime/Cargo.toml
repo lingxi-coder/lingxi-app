@@ -20,6 +20,7 @@ rcgen = { version = "=0.13.2", default-features = false, features = ["ring", "pe
 regex = "1"
 rsa = { version = "0.9", features = ["pem"] }
 rustls = "0.22"
+rustls-pemfile = "2"
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 shlex = "1.3"

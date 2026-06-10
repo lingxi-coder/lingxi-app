@@ -3999,6 +3999,7 @@ dependencies = [
  "regex",
  "rsa",
  "rustls 0.22.4",
+ "rustls-pemfile",
  "serde",
  "serde_json",
  "shlex",

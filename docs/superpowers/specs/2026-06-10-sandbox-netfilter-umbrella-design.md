@@ -39,8 +39,53 @@ The current Rust sandbox (`sandbox/src/runtime_config.rs`, `platforms/posix/src/
 
 TDD; deterministic unit tests on macOS; the relevant `scripts/verify-bwrap.sh`-style Docker assertion (extend the harness per sub-project) as the runtime gate; `cargo test` + `clippy -D warnings` on touched crates; `cargo test --workspace --no-run` struct-trap; frozen `traits/protocol` empty diff; engine-mobile pulls none of the new net-filter code. New deps added per-sub-project (not all up front).
 
-## Out of scope / deferred
+## Scope: FULL 1:1 of the entire package (user-clarified 2026-06-10)
 
-- macOS network filtering (the macOS SBPL path; this subsystem is Linux bwrap). The merged hardening already made macOS LoopbackOnly safe (no full egress).
-- HTTP/2 to the sandbox (the proxy forces http/1.1, faithful).
-- The macOS violation-store log monitor.
+The goal is a **complete behavioral 1:1 Rust rewrite of every file in
+`@anthropic-ai/sandbox-runtime@0.0.54`** — not a partial/Linux-only subset.
+The 7-phase ordering below is the BUILD SEQUENCE, not a scope boundary: every
+component the package ships gets ported. Nothing is "out of scope" except
+artifacts that are faithfully reproduced by a Rust equivalent (noted inline).
+
+**Complete file-coverage map (every `dist/sandbox/*.js` + `dist/*.js` + `dist/utils/*.js`):**
+- `sandbox-config.js` / `sandbox-schemas.js` → P1 (config + the full zod schema surface:
+  `NetworkConfigSchema`, `domainPatternSchema`, `MitmProxyConfigSchema`,
+  `ParentProxyConfigSchema`, `SeccompConfigSchema`, `SandboxRuntimeConfigSchema`,
+  filesystem path schemas). P1 did the network subset; the remaining schemas are pending.
+- `sandbox-manager.js` (matcher + full orchestration/lifecycle) → matcher in P1; the
+  manager (proxy startup, MITM CA build, bridge start, `wrapWithSandbox`, `reset`,
+  `updateConfig`, the ask-callback) is its own late integration phase.
+- `parent-proxy.js` (FULL: resolve/NO_PROXY done in P2; PENDING: `openConnectTunnel`,
+  `connectViaParentProxy`, `proxyAuthHeader`, `stripHopByHop`, `redactUrl`).
+- `http-proxy.js` (FULL: CONNECT base done in P3; PENDING: plain-HTTP full-URI forwarding,
+  parent-proxy routing, MITM routing, the `filterRequest` body integration).
+- `request-filter.js` (the body-tee `decideAndRespond` hook) → with the proxy completion.
+- `socks-proxy.js` (full SOCKS5) → P5.
+- `mitm-ca.js` / `mitm-leaf.js` / `tls-terminate-proxy.js` (full MITM) → P6.
+- `generate-seccomp-filter.js` (the `socket(AF_UNIX)` BPF — reimplement via `seccompiler`,
+  NOT shell out to the vendored binary; that's the faithful Rust equivalent) → P7.
+- `linux-sandbox-utils.js` (FULL: bridge + bwrap argv + mount-point cleanup + dep check +
+  `wrapCommandWithSandboxLinux` + `buildSandboxCommand`) → P4.
+- `sandbox-utils.js` (`generateProxyEnvVars`, the env/CA-trust var lists) → P4.
+- `macos-sandbox-utils.js` (the FULL SBPL profile generation incl. the network rules) → a
+  macOS phase. NOT out of scope — full 1:1. (The merged bwrap hardening only touched the
+  existing simplified SBPL; the faithful `macos-sandbox-utils` SBPL is a port target.)
+- `windows-sandbox-utils.js` (the Windows AppContainer/job-object sandbox) → a Windows phase.
+- `sandbox-violation-store.js` (the ring-buffer + pub/sub) → small standalone port.
+- `cli.js` (`srt` CLI) + `index.js` (the public API surface) → a final integration phase.
+- `utils/{ripgrep,debug,which,platform,config-loader}.js` → ported as needed by consumers
+  (some already have LingXi equivalents — reuse where behaviorally identical, port where not).
+
+**Genuinely-faithful equivalents (not omissions):** HTTP/2 to the sandbox is faithfully
+http/1.1-forced (the package's own ALPN choice); the pre-built `apply-seccomp` binary blob is
+replaced by an in-Rust BPF (`seccompiler`) producing the same `socket(AF_UNIX)`-block (behavioral 1:1);
+`node-forge`/Node `crypto` → `rcgen`/`rustls` producing wire-equivalent certs.
+
+**Updated phase list (build order; each phase finishes ALL of its files' behavior):** P1 net-config+
+matcher (done) → P2 parent-proxy resolve/NO_PROXY (done) → P3 base CONNECT (done) → **P3b proxy
+completion** (plain-HTTP forwarding + parent-proxy routing + `openConnectTunnel`/`connectViaParentProxy`/
+`proxyAuthHeader`/`stripHopByHop`/`redactUrl` + `request-filter` body hook) → P4 socat bridge + bwrap +
+`sandbox-utils` env + `linux-sandbox-utils` full (Docker e2e) → P5 SOCKS5 → P6 MITM (ca/leaf/terminate) →
+P7 seccomp (seccompiler) → P8 sandbox-manager orchestration + violation-store + remaining schemas → P9
+macOS SBPL full + Windows sandbox → P10 CLI + public API. Every phase: full file behavior, no deferred
+remnants.

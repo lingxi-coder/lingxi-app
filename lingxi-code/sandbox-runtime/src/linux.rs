@@ -24,8 +24,12 @@
 //! plus `eval`), and [`wrap_command_with_sandbox_linux`] never emits a seccomp
 //! prefix. The `allow_all_unix_sockets` path skips seccomp entirely anyway.
 
+use std::borrow::Cow;
 use std::fs;
+use std::io;
 use std::path::PathBuf;
+use std::process::{Child, Command, Stdio};
+use std::time::Duration;
 
 /// `isExecutable(p)` (`linux-sandbox-utils.js:285-296`): is `p` executable by
 /// the current process (`access(p, X_OK)`).
@@ -174,6 +178,246 @@ pub fn cleanup_bwrap_mount_points(mount_points: &[PathBuf]) {
     }
 }
 
+/// Shell-quote a single argument the way the TS `shellquote.quote([s])` does
+/// for a one-element list. Falls back to the raw string only when `shlex`
+/// refuses (a NUL byte), which cannot occur for the paths/commands here.
+fn shquote(s: &str) -> String {
+    shlex::try_quote(s).map_or_else(|_| s.to_string(), Cow::into_owned)
+}
+
+/// Shell-quote + space-join a list the way the TS `shellquote.quote([...])`
+/// does. Mirrors `shlex::try_join`, with the same NUL-only fallback as
+/// [`shquote`].
+fn shjoin<'a, I>(parts: I) -> String
+where
+    I: IntoIterator<Item = &'a str>,
+{
+    let owned: Vec<&str> = parts.into_iter().collect();
+    shlex::try_join(owned.iter().copied()).unwrap_or_else(|_| owned.join(" "))
+}
+
+/// The exact `socat` argv for a host-side bridge (`UNIX-LISTEN` → `TCP`):
+/// `UNIX-LISTEN:<sock>,fork,reuseaddr` `TCP:localhost:<port>,keepalive,keepidle=10,keepintvl=5,keepcnt=3`
+#[must_use]
+fn host_socat_args(socket_path: &str, proxy_port: u16) -> [String; 2] {
+    [
+        format!("UNIX-LISTEN:{socket_path},fork,reuseaddr"),
+        format!("TCP:localhost:{proxy_port},keepalive,keepidle=10,keepintvl=5,keepcnt=3"),
+    ]
+}
+
+/// `buildSandboxCommand(...)` (:499-525): the command that runs *inside* the
+/// sandbox. Starts socat listeners on ports 3128 (HTTP) and 1080 (SOCKS) that
+/// forward to the bound Unix sockets, installs an EXIT trap killing them, then
+/// runs the user command. Ports 3128/1080 are hardcoded (matching the TS).
+///
+/// Seccomp is the P7 seam so `apply_seccomp_prefix` is always `None` here → the
+/// `eval` branch is taken; the seccomp branch is ported for fidelity.
+///
+/// Returns `<shell> -c <shellquote(inner_script)>`.
+#[must_use]
+pub fn build_sandbox_command(
+    http_socket_path: &str,
+    socks_socket_path: &str,
+    user_command: &str,
+    apply_seccomp_prefix: Option<&str>,
+    shell: &str,
+    socat_path: Option<&str>,
+) -> String {
+    // Default to bash for backward compatibility (TS: `shell || 'bash'`).
+    let shell_path = if shell.is_empty() { "bash" } else { shell };
+    // Host filesystem is bind-mounted into the sandbox, so an explicit socat
+    // path resolves to the same binary inside bwrap.
+    let socat = shquote(socat_path.unwrap_or("socat"));
+
+    let socat_commands = [
+        format!("{socat} TCP-LISTEN:3128,fork,reuseaddr UNIX-CONNECT:{http_socket_path} >/dev/null 2>&1 &"),
+        format!("{socat} TCP-LISTEN:1080,fork,reuseaddr UNIX-CONNECT:{socks_socket_path} >/dev/null 2>&1 &"),
+        "trap \"kill %1 %2 2>/dev/null; exit\" EXIT".to_string(),
+    ];
+
+    // apply-seccomp runs after socat so socat can still create Unix sockets.
+    let inner_script = if let Some(prefix) = apply_seccomp_prefix {
+        let apply_seccomp_cmd = format!("{prefix}{}", shjoin([shell_path, "-c", user_command]));
+        let mut lines: Vec<String> = socat_commands.to_vec();
+        lines.push(apply_seccomp_cmd);
+        lines.join("\n")
+    } else {
+        let mut lines: Vec<String> = socat_commands.to_vec();
+        lines.push(format!("eval {}", shjoin([user_command])));
+        lines.join("\n")
+    };
+
+    format!("{shell_path} -c {}", shjoin([inner_script.as_str()]))
+}
+
+/// A live `socat` network-namespace bridge: two host-side `socat` children
+/// forwarding Unix sockets to the host HTTP/SOCKS proxy ports. Tearing this
+/// down (via [`LinuxBridge::teardown`] or `Drop`) SIGTERMs both children.
+///
+/// Faithful to the TS `LinuxNetworkBridge` object (`initializeLinuxNetworkBridge`
+/// return value); the lifecycle is owned by this struct rather than the caller.
+#[derive(Debug)]
+pub struct LinuxBridge {
+    /// Path to the HTTP Unix socket (`claude-http-<id>.sock` under tmpdir).
+    pub http_socket_path: PathBuf,
+    /// Path to the SOCKS Unix socket (`claude-socks-<id>.sock` under tmpdir).
+    pub socks_socket_path: PathBuf,
+    /// Host port the HTTP bridge forwards to.
+    pub http_proxy_port: u16,
+    /// Host port the SOCKS bridge forwards to.
+    pub socks_proxy_port: u16,
+    http_child: Option<Child>,
+    socks_child: Option<Child>,
+}
+
+impl LinuxBridge {
+    /// SIGTERM both bridge children (idempotent). Called by `Drop`.
+    pub fn teardown(&mut self) {
+        for child in [self.http_child.as_mut(), self.socks_child.as_mut()]
+            .into_iter()
+            .flatten()
+        {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        self.http_child = None;
+        self.socks_child = None;
+    }
+}
+
+impl Drop for LinuxBridge {
+    fn drop(&mut self) {
+        self.teardown();
+    }
+}
+
+/// `initializeLinuxNetworkBridge(httpProxyPort, socksProxyPort, socatPath)`
+/// (:364-470). Spawns two host-side `socat` bridges with the EXACT argv, polls
+/// readiness (5 attempts, sleeping `i*100ms` before retry, both socket files
+/// must exist; error if a child died), and tears down any started child on
+/// failure. Returns a [`LinuxBridge`] whose `Drop` SIGTERMs both children.
+///
+/// # Errors
+/// Returns an `io::Error` if a `socat` child fails to spawn, dies during the
+/// readiness poll, or the sockets do not appear within 5 attempts.
+pub fn initialize_linux_network_bridge(
+    http_proxy_port: u16,
+    socks_proxy_port: u16,
+    socat_path: Option<&str>,
+) -> io::Result<LinuxBridge> {
+    let socat = socat_path.unwrap_or("socat");
+    let socket_id = random_hex_8();
+    let tmp = std::env::temp_dir();
+    let http_socket_path = tmp.join(format!("claude-http-{socket_id}.sock"));
+    let socks_socket_path = tmp.join(format!("claude-socks-{socket_id}.sock"));
+
+    let spawn_socat = |args: [String; 2]| -> io::Result<Child> {
+        Command::new(socat)
+            .args(&args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+    };
+
+    // Start HTTP bridge.
+    let http_args = host_socat_args(&http_socket_path.to_string_lossy(), http_proxy_port);
+    let mut http_child = spawn_socat(http_args).map_err(|e| {
+        io::Error::new(e.kind(), format!("Failed to start HTTP bridge process: {e}"))
+    })?;
+
+    // Start SOCKS bridge; tear down HTTP on failure.
+    let socks_args = host_socat_args(&socks_socket_path.to_string_lossy(), socks_proxy_port);
+    let socks_child = match spawn_socat(socks_args) {
+        Ok(c) => c,
+        Err(e) => {
+            let _ = http_child.kill();
+            let _ = http_child.wait();
+            return Err(io::Error::new(
+                e.kind(),
+                format!("Failed to start SOCKS bridge process: {e}"),
+            ));
+        }
+    };
+    let mut socks_child = socks_child;
+
+    // Wait for both sockets to be ready (5 attempts, sleep i*100ms).
+    let max_attempts: u32 = 5;
+    let mut ready = false;
+    for i in 0..max_attempts {
+        // A died child means the bridge cannot work — bail and clean up.
+        let http_dead = matches!(http_child.try_wait(), Ok(Some(_)) | Err(_));
+        let socks_dead = matches!(socks_child.try_wait(), Ok(Some(_)) | Err(_));
+        if http_dead || socks_dead {
+            kill_both(&mut http_child, &mut socks_child);
+            return Err(io::Error::other("Linux bridge process died unexpectedly"));
+        }
+        if http_socket_path.exists() && socks_socket_path.exists() {
+            ready = true;
+            break;
+        }
+        if i == max_attempts - 1 {
+            kill_both(&mut http_child, &mut socks_child);
+            return Err(io::Error::other(format!(
+                "Failed to create bridge sockets after {max_attempts} attempts"
+            )));
+        }
+        std::thread::sleep(Duration::from_millis(u64::from(i) * 100));
+    }
+
+    if !ready {
+        kill_both(&mut http_child, &mut socks_child);
+        return Err(io::Error::other(format!(
+            "Failed to create bridge sockets after {max_attempts} attempts"
+        )));
+    }
+
+    Ok(LinuxBridge {
+        http_socket_path,
+        socks_socket_path,
+        http_proxy_port,
+        socks_proxy_port,
+        http_child: Some(http_child),
+        socks_child: Some(socks_child),
+    })
+}
+
+/// SIGTERM both children, ignoring errors (the TS `process.kill(pid, SIGTERM)`
+/// in `try {} catch {}`).
+fn kill_both(http: &mut Child, socks: &mut Child) {
+    let _ = http.kill();
+    let _ = http.wait();
+    let _ = socks.kill();
+    let _ = socks.wait();
+}
+
+/// 8 random bytes as lowercase hex (`randomBytes(8).toString('hex')`). Uses the
+/// process+nanosecond clock as an entropy source — sufficient for a per-invocation
+/// socket-name nonce (the sockets live under a 0700 tmpdir; this is not a secret).
+fn random_hex_8() -> String {
+    use std::fmt::Write as _;
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0_u64, |d| d.subsec_nanos().into());
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0_u64, |d| d.as_secs());
+    let pid = u64::from(std::process::id());
+    // Mix pid + clock so concurrent invocations don't collide. Not a secret —
+    // sockets live under a 0700 tmpdir; this is only a per-invocation nonce.
+    let mixed = secs
+        .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+        ^ nanos.rotate_left(17)
+        ^ pid.rotate_left(31);
+    let mut out = String::with_capacity(16);
+    for b in mixed.to_le_bytes() {
+        let _ = write!(out, "{b:02x}");
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -275,5 +519,89 @@ mod tests {
     #[test]
     fn is_executable_false_for_missing() {
         assert!(!is_executable("/nonexistent/binary/xyz"));
+    }
+
+    #[test]
+    fn host_socat_args_exact() {
+        let args = host_socat_args("/tmp/claude-http-abc.sock", 8080);
+        assert_eq!(args[0], "UNIX-LISTEN:/tmp/claude-http-abc.sock,fork,reuseaddr");
+        assert_eq!(
+            args[1],
+            "TCP:localhost:8080,keepalive,keepidle=10,keepintvl=5,keepcnt=3"
+        );
+    }
+
+    #[test]
+    fn build_sandbox_command_no_seccomp_eval_branch_byte_exact() {
+        let cmd = build_sandbox_command(
+            "/tmp/claude-http-abc.sock",
+            "/tmp/claude-socks-abc.sock",
+            "echo hi",
+            None,
+            "/bin/bash",
+            Some("/usr/bin/socat"),
+        );
+        let expected_inner = "/usr/bin/socat TCP-LISTEN:3128,fork,reuseaddr UNIX-CONNECT:/tmp/claude-http-abc.sock >/dev/null 2>&1 &\n/usr/bin/socat TCP-LISTEN:1080,fork,reuseaddr UNIX-CONNECT:/tmp/claude-socks-abc.sock >/dev/null 2>&1 &\ntrap \"kill %1 %2 2>/dev/null; exit\" EXIT\neval 'echo hi'";
+        let expected = format!("/bin/bash -c {}", shjoin([expected_inner]));
+        assert_eq!(cmd, expected);
+    }
+
+    #[test]
+    fn build_sandbox_command_defaults_socat_and_shell() {
+        let cmd = build_sandbox_command(
+            "/tmp/h.sock",
+            "/tmp/s.sock",
+            "ls",
+            None,
+            "", // empty shell -> bash
+            None, // no socat -> "socat"
+        );
+        assert!(cmd.starts_with("bash -c "));
+        assert!(cmd.contains("socat TCP-LISTEN:3128,fork,reuseaddr UNIX-CONNECT:/tmp/h.sock"));
+        assert!(cmd.contains("socat TCP-LISTEN:1080,fork,reuseaddr UNIX-CONNECT:/tmp/s.sock"));
+    }
+
+    #[test]
+    fn random_hex_8_is_16_hex_chars() {
+        let h = random_hex_8();
+        assert_eq!(h.len(), 16);
+        assert!(h.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    // Bridge SPAWN test — gated to skip if `socat` is absent on the host.
+    #[test]
+    fn bridge_spawns_socat_and_creates_sockets() {
+        if which_sync("socat").is_none() {
+            eprintln!("SKIP bridge_spawns_socat_and_creates_sockets: socat not on PATH");
+            return;
+        }
+        // Bind a real TCP listener so socat's TCP target connects, then spawn the
+        // bridge. We use the same port for both http/socks (the listener accepts
+        // both connections). The sockets must appear and both children stay alive.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        // Accept-and-drop in a background thread so socat's connect succeeds.
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                drop(stream);
+            }
+        });
+
+        let bridge = initialize_linux_network_bridge(port, port, None)
+            .expect("bridge should initialize with socat present");
+        assert!(bridge.http_socket_path.exists(), "http socket created");
+        assert!(bridge.socks_socket_path.exists(), "socks socket created");
+        drop(bridge); // teardown SIGTERMs both children (must not panic/hang)
+    }
+
+    #[test]
+    fn bridge_fails_when_socat_missing() {
+        // Explicit bogus socat path -> spawn fails -> Err with the EXACT message.
+        let err = initialize_linux_network_bridge(8080, 8081, Some("/nonexistent/socat"))
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("Failed to start HTTP bridge process"),
+            "got: {err}"
+        );
     }
 }

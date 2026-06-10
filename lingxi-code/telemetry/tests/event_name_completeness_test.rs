@@ -49,7 +49,9 @@ fn registry_is_exactly_330_entries() {
     // tengu_session_file_read, tengu_file_read_limits_override): 336 + 3 = 339.
     // Config migrations added 9 as their own tail block (migration::NAMES,
     // runMigrations port): 339 + 9 = 348.
-    assert_eq!(ALL_EVENT_NAMES.len(), 348);
+    // Permission flow added 1 as its own tail block (permission::NAMES,
+    // bypass dialog accept): 348 + 1 = 349.
+    assert_eq!(ALL_EVENT_NAMES.len(), 349);
 }
 
 #[test]
@@ -247,6 +249,14 @@ fn category_ordering_preserved() {
         &ALL_EVENT_NAMES[339..348],
         &telemetry::tengu::migration::NAMES,
         "config-migration tail block",
+    );
+    // Permission-flow block (1 event) appended after the config-migration
+    // block — bypass dialog accept (BypassPermissionsModeDialog.tsx).
+    // Position 348..349.
+    assert_eq!(
+        &ALL_EVENT_NAMES[348..349],
+        &telemetry::tengu::permission::NAMES,
+        "permission-flow tail block",
     );
 }
 

@@ -143,9 +143,13 @@ fn m7_07_registers_no_new_telemetry_events() {
     // marker, NOT the palette. If this fails, the palette event leaked in.
     let names = telemetry::tengu::ALL_EVENT_NAMES;
     // 330 → 336 (CronDelete/CronList +6, LSP.7b) → 339 (FileRead analytics +3, W36)
-    // → 348 (config migrations +9);
+    // → 348 (config migrations +9) → 349 (permission flow +1);
     // the palette still mints nothing (the contains-check below is the real guard).
-    assert_eq!(names.len(), 348, "registry at 348 (339 + config migrations)");
+    assert_eq!(
+        names.len(),
+        349,
+        "registry at 349 (348 + permission flow)"
+    );
     assert!(
         !names.contains(&"tengu_tui_command_palette_opened"),
         "palette telemetry is deferred to M8"

@@ -16,6 +16,7 @@ pub mod memory;
 pub mod migration;
 pub mod oauth;
 pub mod orchestrator;
+pub mod permission;
 pub mod release;
 pub mod session;
 pub mod settings;
@@ -68,7 +69,8 @@ pub const ALL_EVENT_NAMES: &[&str] = {
     //        tool concat block (they are not tengu_tool_*) → 339 total. The trailing
     //        `+ 3` is `tool::FILE_READ_ANALYTICS_NAMES.len()`.
     // Config migrations: +9 (migration::NAMES, runMigrations port) → 348 total.
-    const TOTAL: usize = 25 + 30 + 20 + 140 + 10 + 8 + 12 + 3 + 17 + 4 + 54 + 13 + 3 + 9;
+    // Bypass-permissions dialog: +1 (permission::NAMES) → 349 total.
+    const TOTAL: usize = 25 + 30 + 20 + 140 + 10 + 8 + 12 + 3 + 17 + 4 + 54 + 13 + 3 + 9 + 1;
     const fn concat_all() -> [&'static str; TOTAL] {
         let mut out: [&'static str; TOTAL] = [""; TOTAL];
         let mut idx = 0;
@@ -160,6 +162,14 @@ pub const ALL_EVENT_NAMES: &[&str] = {
         let mut i = 0;
         while i < migration::NAMES.len() {
             out[idx] = migration::NAMES[i];
+            idx += 1;
+            i += 1;
+        }
+        // Permission-flow block (bypass dialog accept) — appended after the
+        // config-migration block. Position 348.
+        let mut i = 0;
+        while i < permission::NAMES.len() {
+            out[idx] = permission::NAMES[i];
             idx += 1;
             i += 1;
         }

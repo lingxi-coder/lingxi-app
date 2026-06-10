@@ -24,8 +24,32 @@ use std::time::Duration;
 /// `parity_messages_create.json`.
 pub const DEFAULT_BASE_DELAYS_MS: &[u64] = &[500, 1_000, 2_000];
 
-/// Default retry budget (3 attempts). **Locked against spec §7**.
-pub const DEFAULT_RETRY_BUDGET: u8 = 3;
+/// Default maximum number of retries. Byte-locked to claude-code
+/// `withRetry.ts:52` (`const DEFAULT_MAX_RETRIES = 10`). Combined with the
+/// loop bound `attempt <= maxRetries + 1` (`withRetry.ts:189`) this permits up
+/// to 11 executions / 10 sleeps at the default. Overridable via
+/// `CLAUDE_CODE_MAX_RETRIES` (see [`max_retries_from_env`]).
+pub const DEFAULT_MAX_RETRIES: u32 = 10;
+
+/// Resolve the configured max-retries from a raw `CLAUDE_CODE_MAX_RETRIES`
+/// value. Mirrors claude-code `getDefaultMaxRetries` (`withRetry.ts:789-793`):
+/// when the env var is present its `parseInt` is used, otherwise (absent or
+/// unparseable) the default of [`DEFAULT_MAX_RETRIES`] applies.
+#[must_use]
+pub fn max_retries_from_env_value(v: Option<&str>) -> u32 {
+    match v {
+        Some(s) => s.trim().parse::<u32>().unwrap_or(DEFAULT_MAX_RETRIES),
+        None => DEFAULT_MAX_RETRIES,
+    }
+}
+
+/// Read `CLAUDE_CODE_MAX_RETRIES` from the process environment and resolve the
+/// effective max-retries. Mirrors claude-code `getDefaultMaxRetries`
+/// (`withRetry.ts:789-796`).
+#[must_use]
+pub fn max_retries_from_env() -> u32 {
+    max_retries_from_env_value(std::env::var("CLAUDE_CODE_MAX_RETRIES").ok().as_deref())
+}
 
 /// Consecutive-529 threshold before the fallback / repeated-overload decision
 /// fires. Byte-locked to claude-code `withRetry.ts:54`
@@ -178,7 +202,7 @@ impl Default for RetryControl {
 ///      → [`DriveStep::AdjustMaxTokens(n)`] (does **not** consume an attempt).
 ///    - Otherwise → [`DriveStep::Terminal`].
 /// 5. All other errors → [`DriveStep::Terminal`].
-/// 6. Budget exhaustion: once `state.attempt >= DEFAULT_RETRY_BUDGET`, every
+/// 6. Budget exhaustion: once `state.attempt >= DEFAULT_MAX_RETRIES`, every
 ///    otherwise-retryable class → [`DriveStep::Terminal`].
 pub fn next_step(
     state: &mut RetryState,
@@ -213,7 +237,7 @@ pub fn next_step(
                 // normal budget-driven retry path.
             }
 
-            if state.attempt >= DEFAULT_RETRY_BUDGET {
+            if u32::from(state.attempt) >= DEFAULT_MAX_RETRIES {
                 return DriveStep::Terminal;
             }
 
@@ -226,7 +250,7 @@ pub fn next_step(
             // Reset the consecutive-overloaded counter: a rate-limit is not a 529.
             state.consecutive_overloaded = 0;
 
-            if state.attempt >= DEFAULT_RETRY_BUDGET {
+            if u32::from(state.attempt) >= DEFAULT_MAX_RETRIES {
                 return DriveStep::Terminal;
             }
 
@@ -242,7 +266,7 @@ pub fn next_step(
             // Reset the consecutive-overloaded counter.
             state.consecutive_overloaded = 0;
 
-            if state.attempt >= DEFAULT_RETRY_BUDGET {
+            if u32::from(state.attempt) >= DEFAULT_MAX_RETRIES {
                 return DriveStep::Terminal;
             }
 
@@ -330,7 +354,23 @@ mod jittered_delay_tests {
     #[test]
     fn default_base_delays_match_spec() {
         assert_eq!(DEFAULT_BASE_DELAYS_MS, &[500, 1_000, 2_000]);
-        assert_eq!(DEFAULT_RETRY_BUDGET, 3);
+    }
+
+    /// claude-code `withRetry.ts:52` — `const DEFAULT_MAX_RETRIES = 10`.
+    #[test]
+    fn default_retry_budget_matches_claude_code() {
+        assert_eq!(DEFAULT_MAX_RETRIES, 10);
+    }
+
+    /// claude-code `withRetry.ts:789-796` — `CLAUDE_CODE_MAX_RETRIES` overrides
+    /// the default when present and parseable; falls back to 10 otherwise.
+    #[test]
+    fn claude_code_max_retries_env_overrides() {
+        assert_eq!(max_retries_from_env_value(Some("5")), 5);
+        // Absent → default.
+        assert_eq!(max_retries_from_env_value(None), DEFAULT_MAX_RETRIES);
+        // Unparseable → default (mirrors parseInt fallback semantics here).
+        assert_eq!(max_retries_from_env_value(Some("notanint")), DEFAULT_MAX_RETRIES);
     }
 
     #[test]
@@ -345,6 +385,14 @@ mod next_step_tests {
     use super::*;
     use llm_client::{LlmError, RetryDecision, RetryPolicy};
     use std::time::Duration;
+
+    /// `state.attempt` value at which the default budget is exhausted (==
+    /// [`DEFAULT_MAX_RETRIES`], narrowed to the `u8` field type). 10 fits `u8`.
+    #[allow(
+        clippy::cast_possible_truncation,
+        reason = "DEFAULT_MAX_RETRIES is 10 and fits u8 trivially"
+    )]
+    const EXHAUSTED_ATTEMPT: u8 = DEFAULT_MAX_RETRIES as u8;
 
     fn ctl_default() -> RetryControl {
         RetryControl::default()
@@ -428,7 +476,7 @@ mod next_step_tests {
     #[test]
     fn overloaded_budget_exhausted_is_terminal() {
         let mut state = RetryState {
-            attempt: DEFAULT_RETRY_BUDGET,
+            attempt: EXHAUSTED_ATTEMPT,
             consecutive_overloaded: 0,
         };
         let ctl = ctl_default();
@@ -450,10 +498,17 @@ mod next_step_tests {
             primary_model: "claude-opus-4-6".into(),
             ..RetryControl::default()
         };
-        next_step(&mut state, &ctl, &LlmError::Overloaded, 0);
-        next_step(&mut state, &ctl, &LlmError::Overloaded, 0);
-        next_step(&mut state, &ctl, &LlmError::Overloaded, 0);
-        // Budget exhausted: 4th call is terminal.
+        // Internal (is_external=false) + no fallback model: the consecutive-529
+        // gate never terminates early, so the loop is budget-driven. Drive the
+        // full default budget (10 retries) then assert the 11th call is Terminal.
+        for _ in 0..DEFAULT_MAX_RETRIES {
+            let step = next_step(&mut state, &ctl, &LlmError::Overloaded, 0);
+            assert!(
+                matches!(step, DriveStep::RetryAfter(_)),
+                "within budget overloaded should RetryAfter, got {step:?}"
+            );
+        }
+        // Budget exhausted: the next call is terminal.
         let step = next_step(&mut state, &ctl, &LlmError::Overloaded, 0);
         assert_eq!(
             step,
@@ -651,7 +706,7 @@ mod next_step_tests {
     #[test]
     fn provider_internal_budget_exhausted_is_terminal() {
         let mut state = RetryState {
-            attempt: DEFAULT_RETRY_BUDGET,
+            attempt: EXHAUSTED_ATTEMPT,
             consecutive_overloaded: 0,
         };
         let ctl = ctl_default();
@@ -781,7 +836,7 @@ mod next_step_tests {
         ];
         for error in &retryable_errors {
             let mut state = RetryState {
-                attempt: DEFAULT_RETRY_BUDGET,
+                attempt: EXHAUSTED_ATTEMPT,
                 consecutive_overloaded: 0,
             };
             let ctl = ctl_default();
@@ -792,6 +847,41 @@ mod next_step_tests {
                 "budget-exhausted {error:?} must be Terminal"
             );
         }
+    }
+
+    // --- Loop bound: initial + DEFAULT_MAX_RETRIES retries (claude-code withRetry.ts:189) ---
+
+    /// claude-code `withRetry.ts:189` — `for (attempt = 1; attempt <= maxRetries + 1; attempt++)`
+    /// at the default permits up to 11 executions / 10 sleeps. Modeled here as
+    /// `next_step` returning `RetryAfter` for the first 10 invocations (each
+    /// consuming a budget slot / sleep) and only becoming `Terminal` on the
+    /// 11th invocation (the 11th execution would have no further retry).
+    #[test]
+    fn next_step_terminal_after_eleven_executions_at_default() {
+        let mut state = RetryState::default();
+        let ctl = ctl_default();
+        // 10 retryable failures each yield RetryAfter (10 sleeps after the
+        // initial execution = 11 total executions worth of attempts).
+        for i in 0..DEFAULT_MAX_RETRIES {
+            let step = next_step(&mut state, &ctl, &LlmError::ProviderInternal, 0);
+            assert!(
+                matches!(step, DriveStep::RetryAfter(_)),
+                "invocation {i} (attempt before={}) should RetryAfter, got {step:?}",
+                state.attempt
+            );
+        }
+        assert_eq!(
+            u32::from(state.attempt),
+            DEFAULT_MAX_RETRIES,
+            "after 10 RetryAfter steps the attempt counter equals the budget"
+        );
+        // 11th invocation: budget exhausted → Terminal.
+        let final_step = next_step(&mut state, &ctl, &LlmError::ProviderInternal, 0);
+        assert_eq!(
+            final_step,
+            DriveStep::Terminal,
+            "the 11th execution attempt must be Terminal at the default budget"
+        );
     }
 
     // --- Table point 8: cross-check with RetryPolicy ---

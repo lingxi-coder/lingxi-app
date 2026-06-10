@@ -31,3 +31,4 @@ pub mod matcher;
 pub mod parent_proxy;
 pub mod path_utils;
 pub mod request_filter;
+pub mod socks_proxy;

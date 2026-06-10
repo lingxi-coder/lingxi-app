@@ -38,3 +38,4 @@ pub mod request_filter;
 pub mod socks_proxy;
 pub mod tls_terminate;
 pub mod violation_store;
+pub mod windows;

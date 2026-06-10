@@ -25,6 +25,13 @@ pub enum Platform {
     Macos,
     /// Linux — `socat ... PROXY:` `ProxyCommand` (requires `http_port`).
     Linux,
+    /// Windows — no `GIT_SSH_COMMAND` is emitted. The TS `windows-sandbox-utils`
+    /// calls `generateProxyEnvVars` without a platform arg, and on Windows the
+    /// `getPlatform()==='windows'` branch fires neither the macOS-`nc` nor the
+    /// Linux-`socat` `GIT_SSH_COMMAND` arm. This additive variant preserves that
+    /// (the `match platform` Windows arm is a no-op) so the SOCKS branch on
+    /// Windows skips `GIT_SSH_COMMAND`. P9b.
+    Windows,
 }
 
 const NO_PROXY_ADDRESSES: &str =
@@ -78,6 +85,8 @@ pub fn generate_proxy_env_vars(
                     ));
                 }
             }
+            // Windows: TS getPlatform()==='windows' fires neither GIT_SSH arm.
+            Platform::Windows => {}
         }
         env.push(("FTP_PROXY".into(), format!("socks5h://localhost:{s}")));
         env.push(("ftp_proxy".into(), format!("socks5h://localhost:{s}")));

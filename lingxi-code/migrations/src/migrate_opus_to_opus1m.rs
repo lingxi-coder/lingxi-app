@@ -4,6 +4,16 @@
 //! (tier `None`) ⇒ dormant; the body is ported for when tier persistence
 //! lands.
 //!
+//! DOCUMENTED DIVERGENCE (live, conservative): TS fails closed only for
+//! claude.ai SUBSCRIBERS with an unknown tier (`isClaudeAISubscriber() &&
+//! getSubscriptionType() === null`, model.ts:328-330). A first-party
+//! API-key/external-token user has `isClaudeAISubscriber() === false`, skips
+//! that guard, and TS WOULD migrate their pinned `opus` → `opus[1m]`. This
+//! port's `subscription_type: None` cannot distinguish "API-key user" from
+//! "subscriber, tier unknown", so `None → false` skips both — a no-op in the
+//! conservative direction, matching the TS stated intent ("Max/Team Premium
+//! on 1P"). Revisit when tier/auth-kind persistence lands.
+//!
 //! Stand-ins for unported helpers (doc'd, dormant path only):
 //! - `getDefaultMainLoopModelSetting` (`model.ts:178-200`): Max/Team(≈Team
 //!   Premium — `rateLimitTier` has no Rust substrate) → `opus[1m]` under
@@ -25,8 +35,10 @@ fn is_opus1m_merge_enabled(env: &MigrationEnv) -> bool {
         return false;
     }
     match env.ctx.subscription_type {
-        // Unknown tier fails closed (model.ts:328-330); Pro keeps separate
-        // Opus / Opus 1M options (model.ts:317).
+        // `None` fails closed — see the module-doc DOCUMENTED DIVERGENCE
+        // (TS's fail-closed guard at model.ts:328-330 applies only to
+        // claude.ai subscribers; API-key users would pass in TS). Pro keeps
+        // separate Opus / Opus 1M options (model.ts:317).
         None | Some(SubscriptionType::Pro) => false,
         Some(_) => env.ctx.first_party,
     }

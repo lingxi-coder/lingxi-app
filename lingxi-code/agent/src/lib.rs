@@ -12,6 +12,7 @@
 
 mod accumulator;
 pub mod api;
+pub mod convert;
 pub mod builtins;
 pub mod catalog;
 pub mod color_manager;

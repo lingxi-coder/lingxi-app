@@ -426,9 +426,13 @@ fn encode_messages(messages: &[crate::Message], tool_call_names: &std::collectio
                     }));
                 }
                 ContentBlock::Image { .. }
+                | ContentBlock::ImageUrl { .. }
                 | ContentBlock::Document { .. }
                 | ContentBlock::Reasoning { .. }
-                | ContentBlock::RedactedThinking { .. } => {}
+                | ContentBlock::RedactedThinking { .. }
+                | ContentBlock::ServerToolUse { .. }
+                | ContentBlock::ConnectorText { .. }
+                | ContentBlock::AdvisorToolResult { .. } => {}
             }
         }
 
@@ -464,7 +468,7 @@ fn reject_unsupported_request_intent(request: &LlmRequest) -> Result<(), LlmErro
     for message in &request.messages {
         for block in &message.content {
             match block {
-                ContentBlock::Image { .. } => {
+                ContentBlock::Image { .. } | ContentBlock::ImageUrl { .. } => {
                     return Err(LlmError::InvalidRequest {
                         message: "GeminiCodec does not encode image blocks yet".to_string(),
                     });
@@ -477,6 +481,13 @@ fn reject_unsupported_request_intent(request: &LlmRequest) -> Result<(), LlmErro
                 ContentBlock::Reasoning { .. } | ContentBlock::RedactedThinking { .. } => {
                     return Err(LlmError::InvalidRequest {
                         message: "GeminiCodec does not encode reasoning blocks yet".to_string(),
+                    });
+                }
+                ContentBlock::ServerToolUse { .. }
+                | ContentBlock::ConnectorText { .. }
+                | ContentBlock::AdvisorToolResult { .. } => {
+                    return Err(LlmError::InvalidRequest {
+                        message: "GeminiCodec does not encode Anthropic server-generated blocks".to_string(),
                     });
                 }
                 _ => {}

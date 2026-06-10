@@ -319,6 +319,8 @@ mod tests {
             json: false,
             debug: false,
             no_tui: false,
+            dangerously_skip_permissions: false,
+            permission_mode: None,
             continue_session: false,
             fork_session: false,
         };
@@ -368,6 +370,8 @@ mod tests {
             json: false,
             debug: false,
             no_tui: false,
+            dangerously_skip_permissions: false,
+            permission_mode: None,
             continue_session: false,
             fork_session: false,
         };

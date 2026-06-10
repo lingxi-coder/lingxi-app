@@ -55,6 +55,7 @@
 #![forbid(unsafe_code)]
 
 pub mod argv;
+mod bypass_env;
 pub mod cwd;
 pub mod exit_codes;
 pub mod idle_notify;
@@ -245,6 +246,8 @@ mod startup_notice_tests {
             json: false,
             debug: false,
             no_tui: false,
+            dangerously_skip_permissions: false,
+            permission_mode: None,
             continue_session: false,
             fork_session: false,
         }

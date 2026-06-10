@@ -44,6 +44,9 @@ telemetry = { path = "../../telemetry" }
 migrations = { path = "../../migrations" }
 # Session resume loader (`run.rs`) constructs a `PosixFileSystem` directly.
 platform-posix-minimal = { path = "../../platforms/posix-minimal" }
+# CLI-resolved permission mode + bypass-safety guard substrate (cli_mode /
+# bypass_guard). The real `BypassEnv` impl (`bypass_env.rs`) names this directly.
+permission = { path = "../../permission" }
 
 # clap 4.6+ requires edition2024; pin to a release compatible with Rust 1.82.
 clap = { version = "=4.5.20", features = ["derive", "env"] }
@@ -68,6 +71,16 @@ predicates = "3"
 tempfile = "3"
 # Deterministic mtime staggering for the resume-loader fixture test.
 filetime = "0.2"
+
+[target.'cfg(unix)'.dependencies]
+# Real `BypassEnv::effective_uid` returns the REAL uid (parity with TS
+# `process.getuid()`). `nix::unistd::getuid()` is a SAFE wrapper around
+# `getuid(2)`, so `apps/cli` keeps its crate-level `#![forbid(unsafe_code)]`
+# (a plain `libc::getuid()` would require an `unsafe` block, which `forbid`
+# — unlike the workspace's `deny` — cannot be locally overridden). See
+# `apps/cli/src/bypass_env.rs`. Pinned to the same 0.27 series `platforms/posix`
+# already uses.
+nix = { version = "0.27", default-features = false, features = ["user"] }
 
 [target.'cfg(unix)'.dev-dependencies]
 libc = "0.2"

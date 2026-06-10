@@ -1463,6 +1463,7 @@ pub async fn build(
         sandbox: Arc::new(PosixSandbox::new()),
         clock: clock.clone(),
         sandbox_runtime: SandboxRuntimeConfig::default(),
+        sandbox_runner: tool_api::default_sandbox_runner(),
         permission_mode: cfg.permission_mode,
         project_trust: ProjectTrustLevel::Trusted,
         sandbox_available: false,

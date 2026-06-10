@@ -34,17 +34,21 @@ use tokio::net::{TcpListener, TcpStream};
 use crate::config::NetworkConfig;
 use crate::dial::{dial_direct, parse_connect_target, CONNECT_TIMEOUT};
 use crate::matcher::filter_network_request;
+use crate::mitm_ca::MitmCa;
 use crate::parent_proxy::{
     connect_via_parent_proxy, proxy_auth_header, select_parent_proxy_url,
     should_bypass_parent_proxy, strip_hop_by_hop, ResolvedParentProxy,
 };
 use crate::request_filter::{decide_and_respond, FilterOutcome, FilterRequestFn};
+use crate::tls_terminate::{peek_client_hello, terminate_and_forward, TlsTarget};
 
 /// Options for the forward proxy server.
 ///
-/// NO MITM fields yet — TLS-termination / external-MITM-socket routing lands in
-/// P6. The seams where `http-proxy.js` branches on `mitmCA` /
-/// `getMitmSocketPath` are marked `// P6:` below.
+/// The in-process TLS-MITM termination lands in P6b: when [`Self::mitm_ca`] is
+/// set, a `CONNECT` whose first bytes look like a TLS `ClientHello` is
+/// terminated and re-issued (see [`crate::tls_terminate`]) instead of being
+/// opaque-tunnelled. The remaining `getMitmSocketPath` (external MITM
+/// unix-socket) seam stays marked `// P6:` for the plain-HTTP path.
 #[derive(Clone)]
 pub struct ProxyOptions {
     /// Allow/deny network config (the allowlist enforced for HTTP + CONNECT).
@@ -53,6 +57,16 @@ pub struct ProxyOptions {
     pub parent_proxy: Option<Arc<ResolvedParentProxy>>,
     /// Optional per-request filter callback (the `filterRequest` body hook).
     pub filter_request: Option<FilterRequestFn>,
+    /// Optional MITM CA. When set, a `CONNECT` whose first post-`200` bytes are a
+    /// TLS `ClientHello` is TLS-terminated (per-host minted leaf) and each decrypted
+    /// request is re-issued upstream over real TLS; non-TLS CONNECT bytes still
+    /// opaque-tunnel. `None` ⇒ the P3b opaque-tunnel path, unchanged.
+    pub mitm_ca: Option<Arc<MitmCa>>,
+    /// Extra CA certificate(s) (DER) to trust for the terminator's upstream TLS
+    /// leg (the TS `target.upstreamCA`), in addition to the system roots. Only
+    /// consulted when [`Self::mitm_ca`] is set.
+    pub tls_terminate_upstream_ca:
+        Option<Arc<Vec<rustls::pki_types::CertificateDer<'static>>>>,
 }
 
 impl std::fmt::Debug for ProxyOptions {
@@ -61,6 +75,11 @@ impl std::fmt::Debug for ProxyOptions {
             .field("config", &self.config)
             .field("parent_proxy", &self.parent_proxy)
             .field("filter_request", &self.filter_request.is_some())
+            .field("mitm_ca", &self.mitm_ca.is_some())
+            .field(
+                "tls_terminate_upstream_ca",
+                &self.tls_terminate_upstream_ca.as_ref().map(|c| c.len()),
+            )
             .finish()
     }
 }
@@ -164,9 +183,11 @@ fn handle_connect(req: Request<Incoming>, options: &Arc<ProxyOptions>) -> Respon
         return blocked_by_allowlist();
     }
 
-    // P6: getMitmSocketPath / mitmCA routing seam here — when MITM is wired,
-    // route the CONNECT through the in-process TLS terminator or the external
-    // MITM unix socket before the parent/direct dial below.
+    // P6b: mitmCA routing — when a MITM CA is configured, the spawned tunnel
+    // task sniffs the upgraded stream for a TLS ClientHello and TLS-terminates it
+    // (per-request upstream re-issue); non-TLS bytes fall through to the opaque
+    // tunnel below. (`getMitmSocketPath` external-socket seam stays for plain
+    // HTTP.) `mitm_ca = None` ⇒ the opaque path is taken unconditionally.
 
     // Decide route: parent-proxy CONNECT (when set and not bypassed) > direct.
     let parent_url = options
@@ -192,22 +213,63 @@ fn handle_connect(req: Request<Incoming>, options: &Arc<ProxyOptions>) -> Respon
         .expect("200 Connection Established is always valid")
 }
 
-/// Await the upgraded client stream, dial the upstream (parent or direct), and
-/// splice them. Early client bytes are delivered cleanly by hyper as part of
-/// the upgraded stream (no separate `head` buffer to replay).
+/// Await the upgraded client stream, then either TLS-terminate it (when a MITM
+/// CA is configured AND the first bytes are a TLS `ClientHello`) or dial the
+/// upstream (parent or direct) and opaque-splice them.
+///
+/// When `mitm_ca` is `None` we never sniff: the upgraded stream is spliced
+/// directly (the P3b behavior, unchanged). Early client bytes are delivered as
+/// part of the upgraded stream; for the opaque path no separate `head` replay is
+/// needed, but the TLS-sniff consumes a few bytes which we replay into either
+/// the TLS acceptor (terminate) or a prepended copy (opaque fall-through).
 async fn run_connect_tunnel(
     req: Request<Incoming>,
     hostname: String,
     port: u16,
     parent_url: Option<url::Url>,
-    _options: Arc<ProxyOptions>,
+    options: Arc<ProxyOptions>,
 ) -> std::io::Result<()> {
     let upgraded = hyper::upgrade::on(req)
         .await
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
     let mut client = TokioIo::new(upgraded);
 
-    // Dial upstream: parent-proxy CONNECT or direct.
+    // P6b: TLS-MITM termination. Sniff the first bytes for a ClientHello; on TLS,
+    // terminate in-process (per-request origin re-issue, NO upstream dial here);
+    // non-TLS bytes fall through to the opaque tunnel with the sniffed head
+    // prepended (the SSH-over-CONNECT case).
+    if let Some(ca) = options.mitm_ca.clone() {
+        let (is_tls, head) = peek_client_hello(&mut client, Vec::new()).await;
+        if is_tls {
+            let target = TlsTarget {
+                hostname,
+                port,
+                upstream_ca: options.tls_terminate_upstream_ca.clone(),
+            };
+            return terminate_and_forward(ca, options.filter_request.clone(), client, head, target)
+                .await;
+        }
+        // Non-TLS: opaque-tunnel, replaying the sniffed head first.
+        return opaque_tunnel(client, hostname, port, parent_url, head).await;
+    }
+
+    opaque_tunnel(client, hostname, port, parent_url, Vec::new()).await
+}
+
+/// Dial the upstream (parent-proxy CONNECT or direct) and opaque-splice the raw
+/// `client` stream to it, writing `head` (any bytes consumed by the TLS sniff)
+/// to the upstream first so nothing is lost. This is the P3b byte-tunnel path,
+/// reused for both the non-MITM CONNECT and the MITM non-TLS fall-through.
+async fn opaque_tunnel<C>(
+    mut client: C,
+    hostname: String,
+    port: u16,
+    parent_url: Option<url::Url>,
+    head: Vec<u8>,
+) -> std::io::Result<()>
+where
+    C: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
     if let Some(url) = parent_url {
         let mut upstream =
             match tokio::time::timeout(CONNECT_TIMEOUT, connect_via_parent_proxy(&url, &hostname, port))
@@ -222,9 +284,15 @@ async fn run_connect_tunnel(
                     ))
                 }
             };
+        if !head.is_empty() {
+            tokio::io::AsyncWriteExt::write_all(&mut upstream, &head).await?;
+        }
         let _ = tokio::io::copy_bidirectional(&mut client, &mut upstream).await;
     } else {
         let mut upstream = dial_direct(&hostname, port).await?;
+        if !head.is_empty() {
+            tokio::io::AsyncWriteExt::write_all(&mut upstream, &head).await?;
+        }
         let _ = tokio::io::copy_bidirectional(&mut client, &mut upstream).await;
     }
     Ok(())
@@ -449,6 +517,8 @@ mod tests {
             config: Arc::new(cfg),
             parent_proxy: None,
             filter_request: None,
+            mitm_ca: None,
+            tls_terminate_upstream_ca: None,
         })
     }
 
@@ -702,5 +772,197 @@ mod tests {
         assert!(names.contains(&"x-keep".to_string()), "X-Keep lost: {names:?}");
         let host = seen.iter().find(|(k, _)| k.eq_ignore_ascii_case("host"));
         assert_eq!(host.map(|(_, v)| v.as_str()), Some(authority.as_str()));
+    }
+
+    // ─────────── P6b: CONNECT TLS-MITM wiring (real in-process TLS) ───────────
+
+    use crate::mitm_ca::{create_mitm_ca, dispose_mitm_ca, MitmCaOptions};
+    use crate::request_filter::{Decision, FilterRequest};
+    use rustls::pki_types::{CertificateDer, ServerName};
+    use std::future::Future;
+    use std::pin::Pin;
+    use tokio_rustls::{TlsAcceptor, TlsConnector};
+
+    /// Stand up a real HTTPS origin on loopback (host=127.0.0.1) returning 200
+    /// "ok", with a proper CA→leaf chain. Returns (port, the origin CA DER for
+    /// `upstream_ca` trust).
+    async fn https_origin_127() -> (u16, CertificateDer<'static>) {
+        let host = "127.0.0.1";
+        // Origin CA.
+        let ca_key = rcgen::KeyPair::generate().unwrap();
+        let mut ca_params = rcgen::CertificateParams::new(Vec::<String>::new()).unwrap();
+        ca_params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+        ca_params
+            .distinguished_name
+            .push(rcgen::DnType::CommonName, "test-origin-ca");
+        let ca_cert = ca_params.self_signed(&ca_key).unwrap();
+        let ca_der = CertificateDer::from(ca_cert.der().to_vec());
+        // Leaf (SAN=IP:127.0.0.1) signed by the origin CA.
+        let leaf_key = rcgen::KeyPair::generate().unwrap();
+        let leaf_params = rcgen::CertificateParams::new(vec![host.to_string()]).unwrap();
+        let leaf_cert = leaf_params.signed_by(&leaf_key, &ca_cert, &ca_key).unwrap();
+        let leaf_der = CertificateDer::from(leaf_cert.der().to_vec());
+        let leaf_key_der =
+            rustls::pki_types::PrivateKeyDer::try_from(leaf_key.serialize_der()).unwrap();
+
+        let mut config = rustls::ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(vec![leaf_der, ca_der.clone()], leaf_key_der)
+            .unwrap();
+        config.alpn_protocols = vec![b"http/1.1".to_vec()];
+        let acceptor = TlsAcceptor::from(Arc::new(config));
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            loop {
+                let Ok((tcp, _)) = listener.accept().await else {
+                    break;
+                };
+                let acceptor = acceptor.clone();
+                tokio::spawn(async move {
+                    let Ok(tls) = acceptor.accept(tcp).await else {
+                        return;
+                    };
+                    let io = TokioIo::new(tls);
+                    let svc = service_fn(|_req: Request<Incoming>| async {
+                        Ok::<_, hyper::Error>(Response::new(Full::new(Bytes::from_static(b"ok"))))
+                    });
+                    let _ = http1::Builder::new().serve_connection(io, svc).await;
+                });
+            }
+        });
+        (port, ca_der)
+    }
+
+    /// First cert (the CA) of a PEM string, as DER.
+    fn first_cert_der(pem: &str) -> CertificateDer<'static> {
+        let mut rd = std::io::BufReader::new(pem.as_bytes());
+        let der = rustls_pemfile::certs(&mut rd).next().unwrap().unwrap();
+        CertificateDer::from(der.to_vec())
+    }
+
+    /// Open a CONNECT tunnel through the proxy to `127.0.0.1:port`, then drive a
+    /// CA-trusting TLS client over it and `GET path`. Returns (status, body).
+    async fn connect_tls_get(
+        proxy_port: u16,
+        origin_port: u16,
+        ca_der: CertificateDer<'static>,
+        path: &str,
+    ) -> (u16, String) {
+        let mut s = TcpStream::connect(("127.0.0.1", proxy_port)).await.unwrap();
+        let target = format!("127.0.0.1:{origin_port}");
+        s.write_all(
+            format!("CONNECT {target} HTTP/1.1\r\nHost: {target}\r\n\r\n").as_bytes(),
+        )
+        .await
+        .unwrap();
+        // Read the 200 status line (up to the blank line).
+        let mut buf = [0u8; 256];
+        let n = s.read(&mut buf).await.unwrap();
+        let head = String::from_utf8_lossy(&buf[..n]).into_owned();
+        assert!(head.contains("200"), "CONNECT did not return 200: {head:?}");
+
+        let mut roots = rustls::RootCertStore::empty();
+        roots.add(ca_der).unwrap();
+        let mut config = rustls::ClientConfig::builder()
+            .with_root_certificates(roots)
+            .with_no_client_auth();
+        config.alpn_protocols = vec![b"http/1.1".to_vec()];
+        let connector = TlsConnector::from(Arc::new(config));
+        let server_name = ServerName::try_from("127.0.0.1").unwrap();
+        let tls = connector.connect(server_name, s).await.unwrap();
+
+        let io = TokioIo::new(tls);
+        let (mut sender, conn) = hyper::client::conn::http1::handshake(io).await.unwrap();
+        tokio::spawn(async move {
+            let _ = conn.await;
+        });
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri(path)
+            .header(http::header::HOST, "127.0.0.1")
+            .body(empty_body())
+            .unwrap();
+        let resp = sender.send_request(req).await.unwrap();
+        let status = resp.status().as_u16();
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        (status, String::from_utf8_lossy(&body).into_owned())
+    }
+
+    fn mitm_opts(
+        ca: Arc<MitmCa>,
+        upstream_ca: CertificateDer<'static>,
+        filter: Option<FilterRequestFn>,
+    ) -> Arc<ProxyOptions> {
+        Arc::new(ProxyOptions {
+            config: Arc::new(NetworkConfig {
+                allowed_domains: vec!["127.0.0.1".to_string()],
+                denied_domains: vec![],
+            }),
+            parent_proxy: None,
+            filter_request: filter,
+            mitm_ca: Some(ca),
+            tls_terminate_upstream_ca: Some(Arc::new(vec![upstream_ca])),
+        })
+    }
+
+    /// MITM CONNECT: a CA-trusting client does CONNECT + TLS + GET through the
+    /// proxy to a stand-in origin → 200 "ok" (the decrypted request is re-issued
+    /// upstream and the response round-trips).
+    #[tokio::test]
+    async fn connect_mitm_terminates_and_round_trips() {
+        let (oport, origin_ca) = https_origin_127().await;
+        let ca = Arc::new(create_mitm_ca(MitmCaOptions::default()).unwrap());
+        let ca_der = first_cert_der(&ca.cert_pem);
+        let pport = start_proxy(mitm_opts(Arc::clone(&ca), origin_ca, None)).await;
+
+        let (status, body) = connect_tls_get(pport, oport, ca_der, "/hello").await;
+        assert_eq!(status, 200);
+        assert_eq!(body, "ok");
+        dispose_mitm_ca(&ca);
+    }
+
+    /// MITM CONNECT with a denying filter → the CA-trusting client gets a 403.
+    #[tokio::test]
+    async fn connect_mitm_filter_denies_403() {
+        let (oport, origin_ca) = https_origin_127().await;
+        let ca = Arc::new(create_mitm_ca(MitmCaOptions::default()).unwrap());
+        let ca_der = first_cert_der(&ca.cert_pem);
+        let filter: FilterRequestFn = Arc::new(|req: FilterRequest| {
+            let denied = req.url.contains("/blocked");
+            Box::pin(async move {
+                if denied {
+                    Decision::Deny {
+                        reason: Some("blocked".to_string()),
+                    }
+                } else {
+                    Decision::Allow
+                }
+            }) as Pin<Box<dyn Future<Output = Decision> + Send>>
+        });
+        let pport = start_proxy(mitm_opts(Arc::clone(&ca), origin_ca, Some(filter))).await;
+
+        let (status, _) = connect_tls_get(pport, oport, ca_der, "/blocked").await;
+        assert_eq!(status, 403);
+        dispose_mitm_ca(&ca);
+    }
+
+    /// `mitm_ca = None` leaves the opaque tunnel intact: a CONNECT to a TCP echo
+    /// upstream still byte-tunnels (the P3b path is unchanged).
+    #[tokio::test]
+    async fn connect_without_mitm_still_opaque_tunnels() {
+        let (uhost, uport) = echo_upstream().await;
+        let cfg = NetworkConfig {
+            allowed_domains: vec![uhost.clone()],
+            denied_domains: vec![],
+        };
+        let pport = start_proxy(opts(cfg)).await;
+        let (line, mut tun) = connect_via_proxy(pport, &format!("{uhost}:{uport}")).await;
+        assert!(line.contains("200"), "expected 200, got {line}");
+        tun.write_all(b"pong").await.unwrap();
+        let mut buf = [0u8; 4];
+        tun.read_exact(&mut buf).await.unwrap();
+        assert_eq!(&buf, b"pong");
     }
 }

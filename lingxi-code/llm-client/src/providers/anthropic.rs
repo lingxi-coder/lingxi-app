@@ -438,7 +438,8 @@ fn map_error(error_type: &str, message: String, retry_after: Option<Duration>) -
         "request_too_large" => LlmError::ContextOverflow,
         "invalid_request_error" if message.contains("prompt is too long") => LlmError::ContextOverflow,
         "invalid_request_error" => LlmError::InvalidRequest { message },
-        // overloaded_error, api_error, and unknown types stay retryable.
+        "overloaded_error" => LlmError::Overloaded,
+        // api_error, and unknown types stay retryable.
         _ => LlmError::ProviderInternal,
     }
 }

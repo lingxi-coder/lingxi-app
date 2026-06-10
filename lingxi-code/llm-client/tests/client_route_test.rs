@@ -4,8 +4,8 @@ use llm_client::{
 };
 use llm_client::client::DefaultLlmClient;
 
-#[test]
-fn client_builds_routes_from_config_and_lists_models() {
+#[tokio::test]
+async fn client_builds_routes_from_config_and_lists_models() {
     let config = ClientConfig {
         providers: vec![ProviderProfile {
             provider_id: ProviderId::OpenAI,
@@ -27,11 +27,11 @@ fn client_builds_routes_from_config_and_lists_models() {
 
     let client = DefaultLlmClient::from_config(config).unwrap();
     assert_eq!(client.available_models().len(), 1);
-    assert!(client.prepare(&LlmRequest::new("fast")).is_ok());
+    assert!(client.prepare(&LlmRequest::new("fast")).await.is_ok());
 }
 
-#[test]
-fn prepare_returns_route_identity_and_encodes_resolved_request_model() {
+#[tokio::test]
+async fn prepare_returns_route_identity_and_encodes_resolved_request_model() {
     let config = ClientConfig {
         providers: vec![ProviderProfile {
             provider_id: ProviderId::OpenAI,
@@ -52,7 +52,7 @@ fn prepare_returns_route_identity_and_encodes_resolved_request_model() {
     };
 
     let client = DefaultLlmClient::from_config(config).unwrap();
-    let prepared = client.prepare(&LlmRequest::new("fast")).unwrap();
+    let prepared = client.prepare(&LlmRequest::new("fast")).await.unwrap();
 
     assert_eq!(prepared.route.resolved_route.profile_name, "openai");
     assert_eq!(prepared.provider_request.url, "https://api.openai.com/v1/chat/completions");
@@ -132,8 +132,8 @@ fn unsupported_protocol_family_yields_actionable_config_error() {
     ));
 }
 
-#[test]
-fn response_format_is_rejected_when_selected_model_lacks_structured_output() {
+#[tokio::test]
+async fn response_format_is_rejected_when_selected_model_lacks_structured_output() {
     let config = ClientConfig {
         providers: vec![ProviderProfile {
             provider_id: ProviderId::OpenAI,
@@ -157,6 +157,6 @@ fn response_format_is_rejected_when_selected_model_lacks_structured_output() {
     let mut request = LlmRequest::new("fast");
     request.response_format = Some(ResponseFormat::JsonObject);
 
-    let err = client.prepare(&request).unwrap_err();
+    let err = client.prepare(&request).await.unwrap_err();
     assert!(matches!(err, LlmError::UnsupportedCapability { capability } if capability == "structured_output"));
 }

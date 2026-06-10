@@ -3,8 +3,8 @@ use llm_client::{
     CredentialScope, EnvCredentialProvider, ProviderId, ProviderRequest, StaticCredentialProvider,
 };
 
-#[test]
-fn env_credential_provider_loads_secret_for_scope() {
+#[tokio::test]
+async fn env_credential_provider_loads_secret_for_scope() {
     std::env::set_var("LLM_CLIENT_TEST_API_KEY", "test-key");
     let provider = EnvCredentialProvider::new("LLM_CLIENT_TEST_API_KEY");
 
@@ -13,16 +13,17 @@ fn env_credential_provider_loads_secret_for_scope() {
             ProviderId::AnthropicFirstParty,
             "anthropic",
         ))
+        .await
         .expect("credential");
 
     assert_eq!(credential, Credential::ApiKey("test-key".to_string()));
 }
 
-#[test]
-fn static_credential_debug_is_redacted() {
+#[tokio::test]
+async fn static_credential_debug_is_redacted() {
     let provider = StaticCredentialProvider::new(Credential::BearerToken("secret-token".to_string()));
 
-    let debug = format!("{:?}", provider.load(&CredentialScope::new(ProviderId::OpenAI, "openai")));
+    let debug = format!("{:?}", provider.load(&CredentialScope::new(ProviderId::OpenAI, "openai")).await);
 
     assert!(debug.contains("[REDACTED]"));
     assert!(!debug.contains("secret-token"));

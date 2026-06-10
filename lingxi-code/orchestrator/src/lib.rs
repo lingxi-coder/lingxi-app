@@ -15,6 +15,7 @@
 
 pub mod config;
 pub mod conversation;
+pub mod model;
 pub mod cost_wiring;
 pub mod cwd_changed_firer;
 pub mod diagnostics;

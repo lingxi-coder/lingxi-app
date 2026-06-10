@@ -37,6 +37,9 @@ pub enum LlmError {
     /// Provider returned a transient/internal failure.
     #[error("provider internal error")]
     ProviderInternal,
+    /// Provider reported overload (Anthropic 529 / `overloaded_error`).
+    #[error("provider overloaded")]
+    Overloaded,
     /// Transport failed before a provider response was decoded.
     #[error("transport error: {message}")]
     Transport {

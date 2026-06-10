@@ -1,7 +1,7 @@
 # Engine adoption of llm-client (full replacement of api-client) — design
 
 Date: 2026-06-10
-Status: approved (user), revision 2 — no intermediate policy crate; supersedes
+Status: approved (user), revision 2.2 — no intermediate policy crate; supersedes
 api-client entirely with no backwards compatibility.
 
 ## Goal
@@ -77,6 +77,7 @@ HTTP client; `llm-client` stays free of repo-internal dependencies.
 - No llm-client change needed for beta headers: callers inject
   `anthropic-beta` into `PreparedLlmCall.provider_request.headers` after
   `prepare()` (headers are public by design).
+- `LlmError::Overloaded` distinguishes Anthropic 529/overloaded_error (retryable; drives MAX_529_RETRIES and opus fallback); `DefaultLlmClient::prepare_count_tokens` provides the authenticated count_tokens path.
 
 ### 2. Adapters at their endpoints
 
@@ -93,6 +94,7 @@ HTTP client; `llm-client` stays free of repo-internal dependencies.
   token refresh inside `load()`, attached by hosts via
   `DefaultLlmClient::with_credential_provider`. The api-client
   `OAuthRefreshHook` indirection is deleted with the crate.
+  `CredentialProvider::load` is async (BoxFuture) for exactly this reason.
 
 ### 3. Orchestrator wire adapter (policy home)
 
@@ -108,8 +110,7 @@ beside it (`orchestrator/src/model/…`), re-typed to llm-client:
   does not.
 - `rate_limit.rs`: tracker fed by response headers and
   `LlmError::RateLimited`; reset-time formatting (chrono/iana-time-zone)
-  ports unchanged. The **status type** moves to the shared protocol crate the
-  TUI already imports; the TUI components re-point their imports.
+  ports unchanged. The TUI consumes a pre-formatted message string from the orchestrator (verified: no api_client::rate_limit imports in tui), so all rate-limit types stay orchestrator-local.
 - `betas.rs`: unchanged join/dedupe logic; applied post-`prepare()` on
   Anthropic routes.
 - `fallback.rs` (from `opus.rs`): opus→sonnet fallback on Anthropic models
@@ -119,7 +120,7 @@ beside it (`orchestrator/src/model/…`), re-typed to llm-client:
   as-is to where ApiError copy is rendered today.
 - `count_tokens`: facade using `AnthropicMessagesCodec`'s inherent methods +
   the transport on Anthropic routes; documented character-based approximation
-  elsewhere (used by compaction).
+  elsewhere (used by compaction). (facade in `orchestrator::model::count_tokens`; approximation = chars/4, min 1).
 - cost/telemetry: emission points (`emit_started/succeeded/failed/...`) port
   unchanged; cost numbers come from `llm_client::CostEstimator` with a
   `PricingCatalog` populated from the existing `cost` crate price table.

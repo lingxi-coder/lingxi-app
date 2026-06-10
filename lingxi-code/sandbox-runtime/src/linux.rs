@@ -631,27 +631,31 @@ fn kill_both(http: &mut Child, socks: &mut Child) {
     let _ = socks.wait();
 }
 
-/// 8 random bytes as lowercase hex (`randomBytes(8).toString('hex')`). Uses the
-/// process+nanosecond clock as an entropy source — sufficient for a per-invocation
-/// socket-name nonce (the sockets live under a 0700 tmpdir; this is not a secret).
+/// 8 CSPRNG bytes as lowercase hex (`randomBytes(8).toString('hex')`). The
+/// bridge socket path lives under `std::env::temp_dir()` (typically `/tmp`,
+/// mode 1777 / world-writable), so an UNPREDICTABLE name is load-bearing: a
+/// predictable path lets a local process pre-create it and break the bridge
+/// (socat's `UNIX-LISTEN` fails `EADDRINUSE` on an existing path) or collide
+/// with a concurrent invocation. Use `getrandom` (kernel CSPRNG) to match the
+/// TS `crypto.randomBytes(8)` 64-bit entropy; fall back to the pid+clock mix
+/// only if the syscall fails (degraded but never panics).
 fn random_hex_8() -> String {
     use std::fmt::Write as _;
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0_u64, |d| d.subsec_nanos().into());
-    let secs = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0_u64, |d| d.as_secs());
-    let pid = u64::from(std::process::id());
-    // Mix pid + clock so concurrent invocations don't collide. Not a secret —
-    // sockets live under a 0700 tmpdir; this is only a per-invocation nonce.
-    let mixed = secs
-        .wrapping_mul(0x9E37_79B9_7F4A_7C15)
-        ^ nanos.rotate_left(17)
-        ^ pid.rotate_left(31);
+    let mut buf = [0_u8; 8];
+    if getrandom::getrandom(&mut buf).is_err() {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default();
+        let mixed = now
+            .as_secs()
+            .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+            ^ u64::from(now.subsec_nanos()).rotate_left(17)
+            ^ u64::from(std::process::id()).rotate_left(31);
+        buf = mixed.to_le_bytes();
+    }
     let mut out = String::with_capacity(16);
-    for b in mixed.to_le_bytes() {
+    for b in buf {
         let _ = write!(out, "{b:02x}");
     }
     out

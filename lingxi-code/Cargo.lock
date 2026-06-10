@@ -3768,6 +3768,7 @@ dependencies = [
  "base64",
  "bytes",
  "dirs",
+ "getrandom 0.2.17",
  "http 1.4.0",
  "http-body-util",
  "hyper",

@@ -40,6 +40,7 @@ fn encode_request_maps_image_and_tool_result_blocks() {
             ContentBlock::ToolResult {
                 tool_call_id: "tool-1".to_string(),
                 output: serde_json::json!({"ok": true}),
+                is_error: false,
             },
         ],
     });
@@ -116,6 +117,133 @@ fn decode_text_response_maps_usage_and_stop_reason() {
     assert_eq!(decoded.id, "msg_1");
     assert_eq!(decoded.usage.billable_tokens.input, 9);
     assert_eq!(decoded.usage.billable_tokens.output, 3);
+    assert_eq!(decoded.stop_reason.as_deref(), Some("end_turn"));
+}
+
+#[test]
+fn encode_thinking_round_trip_requires_signature() {
+    let codec = AnthropicMessagesCodec::new("https://api.anthropic.com", "2023-06-01");
+
+    let mut signed = LlmRequest::new("claude-sonnet-4-20250514");
+    signed.messages.push(Message {
+        role: "assistant".to_string(),
+        content: vec![ContentBlock::Reasoning {
+            text: "pondering".to_string(),
+            signature: Some("sig_abc".to_string()),
+        }],
+    });
+    let provider_request = codec.encode_request(&signed).unwrap();
+    let block = &provider_request.body_json["messages"][0]["content"][0];
+    assert_eq!(block["type"], "thinking");
+    assert_eq!(block["thinking"], "pondering");
+    assert_eq!(block["signature"], "sig_abc");
+
+    let mut unsigned = LlmRequest::new("claude-sonnet-4-20250514");
+    unsigned.messages.push(Message {
+        role: "assistant".to_string(),
+        content: vec![ContentBlock::Reasoning {
+            text: "pondering".to_string(),
+            signature: None,
+        }],
+    });
+    assert!(matches!(
+        codec.encode_request(&unsigned).unwrap_err(),
+        llm_client::LlmError::InvalidRequest { .. }
+    ));
+}
+
+#[test]
+fn redacted_thinking_round_trips() {
+    let codec = AnthropicMessagesCodec::new("https://api.anthropic.com", "2023-06-01");
+    let response = ProviderResponse::json(200, serde_json::json!({
+        "id": "msg_5",
+        "model": "claude-sonnet-4-20250514",
+        "content": [{"type":"redacted_thinking","data":"opaque-bytes"}],
+        "usage": {"input_tokens": 1, "output_tokens": 1}
+    }));
+
+    let decoded = codec.decode_response(response).unwrap();
+    assert!(matches!(
+        decoded.content.as_slice(),
+        [ContentBlock::RedactedThinking { data }] if data == "opaque-bytes"
+    ));
+
+    let mut request = LlmRequest::new("claude-sonnet-4-20250514");
+    request.messages.push(Message {
+        role: "assistant".to_string(),
+        content: decoded.content,
+    });
+    let provider_request = codec.encode_request(&request).unwrap();
+    let block = &provider_request.body_json["messages"][0]["content"][0];
+    assert_eq!(block["type"], "redacted_thinking");
+    assert_eq!(block["data"], "opaque-bytes");
+}
+
+#[test]
+fn stream_signature_delta_maps_to_signature_delta() {
+    let codec = AnthropicMessagesCodec::new("https://api.anthropic.com", "2023-06-01");
+    let mut decoder = codec.stream_decoder();
+
+    let events = decoder.decode_frame(llm_client::RawStreamFrame::new(
+        br#"{"type":"content_block_delta","index":1,"delta":{"type":"signature_delta","signature":"sig_abc"}}"#.to_vec(),
+    )).unwrap();
+
+    assert!(matches!(
+        &events[0],
+        LlmEvent::ContentBlockDelta {
+            index: 1,
+            delta: ContentDelta::SignatureDelta { signature },
+        } if signature == "sig_abc"
+    ));
+}
+
+#[test]
+fn encode_tool_result_error_flag() {
+    let codec = AnthropicMessagesCodec::new("https://api.anthropic.com", "2023-06-01");
+    let mut request = LlmRequest::new("claude-sonnet-4-20250514");
+    request.messages.push(Message {
+        role: "user".to_string(),
+        content: vec![
+            ContentBlock::ToolResult {
+                tool_call_id: "tool-1".to_string(),
+                output: serde_json::json!("boom"),
+                is_error: true,
+            },
+            ContentBlock::ToolResult {
+                tool_call_id: "tool-2".to_string(),
+                output: serde_json::json!("fine"),
+                is_error: false,
+            },
+        ],
+    });
+
+    let provider_request = codec.encode_request(&request).unwrap();
+    let content = &provider_request.body_json["messages"][0]["content"];
+
+    assert_eq!(content[0]["is_error"], true);
+    assert!(content[1].get("is_error").is_none());
+}
+
+#[test]
+fn encode_sampling_controls() {
+    let codec = AnthropicMessagesCodec::new("https://api.anthropic.com", "2023-06-01");
+    let mut request = LlmRequest::new("claude-sonnet-4-20250514");
+    request.max_tokens = Some(1024);
+    request.temperature = Some(0.5);
+    request.top_p = Some(0.9);
+    request.stop_sequences = vec!["END".to_string()];
+
+    let provider_request = codec.encode_request(&request).unwrap();
+
+    assert_eq!(provider_request.body_json["max_tokens"], 1024);
+    assert_eq!(provider_request.body_json["temperature"], 0.5);
+    assert_eq!(provider_request.body_json["top_p"], 0.9);
+    assert_eq!(provider_request.body_json["stop_sequences"], serde_json::json!(["END"]));
+
+    let bare = codec.encode_request(&LlmRequest::new("claude-sonnet-4-20250514")).unwrap();
+    assert!(bare.body_json.get("temperature").is_none());
+    assert!(bare.body_json.get("top_p").is_none());
+    assert!(bare.body_json.get("stop_sequences").is_none());
 }
 
 #[test]

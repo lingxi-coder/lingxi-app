@@ -48,9 +48,25 @@ impl WireCodec for AnthropicMessagesCodec {
 
         let mut body = serde_json::Map::new();
         body.insert("model".to_string(), Value::String(request.model.clone()));
-        body.insert("max_tokens".to_string(), Value::from(4096u64));
+        body.insert(
+            "max_tokens".to_string(),
+            Value::from(request.max_tokens.map_or(4096u64, u64::from)),
+        );
         body.insert("messages".to_string(), Value::Array(messages));
         body.insert("tools".to_string(), Value::Array(tools));
+
+        if let Some(temperature) = request.temperature {
+            body.insert("temperature".to_string(), Value::from(temperature));
+        }
+        if let Some(top_p) = request.top_p {
+            body.insert("top_p".to_string(), Value::from(top_p));
+        }
+        if !request.stop_sequences.is_empty() {
+            body.insert(
+                "stop_sequences".to_string(),
+                Value::Array(request.stop_sequences.iter().cloned().map(Value::String).collect()),
+            );
+        }
 
         if let Some(system) = &request.system {
             body.insert("system".to_string(), Value::String(system.clone()));
@@ -141,13 +157,35 @@ fn encode_content_block(block: &ContentBlock) -> Result<Value, LlmError> {
             "name": name,
             "input": input,
         })),
-        ContentBlock::ToolResult { tool_call_id, output } => Ok(serde_json::json!({
-            "type": "tool_result",
-            "tool_use_id": tool_call_id,
-            "content": normalize_tool_result_content(output),
+        ContentBlock::ToolResult { tool_call_id, output, is_error } => {
+            let mut block = serde_json::json!({
+                "type": "tool_result",
+                "tool_use_id": tool_call_id,
+                "content": normalize_tool_result_content(output),
+            });
+            if *is_error {
+                block["is_error"] = Value::Bool(true);
+            }
+            Ok(block)
+        }
+        ContentBlock::Reasoning { text, signature } => {
+            let Some(signature) = signature else {
+                return Err(LlmError::InvalidRequest {
+                    message: "Anthropic thinking blocks require a signature to round-trip".to_string(),
+                });
+            };
+            Ok(serde_json::json!({
+                "type": "thinking",
+                "thinking": text,
+                "signature": signature,
+            }))
+        }
+        ContentBlock::RedactedThinking { data } => Ok(serde_json::json!({
+            "type": "redacted_thinking",
+            "data": data,
         })),
-        ContentBlock::Document { .. } | ContentBlock::Reasoning { .. } => Err(LlmError::InvalidRequest {
-            message: "AnthropicMessagesCodec does not encode document or reasoning blocks yet".to_string(),
+        ContentBlock::Document { .. } => Err(LlmError::InvalidRequest {
+            message: "AnthropicMessagesCodec does not encode document blocks yet".to_string(),
         }),
     }
 }
@@ -191,11 +229,16 @@ fn decode_response_body(body_json: Value) -> Result<LlmResponse, LlmError> {
         .get("usage")
         .map(normalize_anthropic_usage)
         .unwrap_or_default();
+    let stop_reason = body_json
+        .get("stop_reason")
+        .and_then(Value::as_str)
+        .map(ToString::to_string);
 
     Ok(LlmResponse {
         id,
         model,
         content,
+        stop_reason,
         usage,
         cost: None,
         provider_metadata: body_json,
@@ -209,6 +252,13 @@ fn decode_content_block(value: &Value) -> Result<Option<ContentBlock>, LlmError>
         })),
         Some("thinking") => Ok(Some(ContentBlock::Reasoning {
             text: string_field(value, "thinking")?,
+            signature: value
+                .get("signature")
+                .and_then(Value::as_str)
+                .map(ToString::to_string),
+        })),
+        Some("redacted_thinking") => Ok(Some(ContentBlock::RedactedThinking {
+            data: string_field(value, "data")?,
         })),
         Some("tool_use") => Ok(Some(ContentBlock::ToolCall {
             id: string_field(value, "id")?,
@@ -340,6 +390,9 @@ fn decode_content_delta(value: &Value) -> Result<Option<ContentDelta>, LlmError>
         })),
         Some("thinking_delta") => Ok(Some(ContentDelta::ThinkingDelta {
             thinking: string_field(value, "thinking")?,
+        })),
+        Some("signature_delta") => Ok(Some(ContentDelta::SignatureDelta {
+            signature: string_field(value, "signature")?,
         })),
         // Unknown delta types are ignored, mirroring unknown event handling.
         Some(_other) => Ok(None),

@@ -48,6 +48,22 @@ impl WireCodec for OpenAiChatCodec {
             body.insert("stream".to_string(), Value::Bool(true));
         }
 
+        if let Some(max_tokens) = request.max_tokens {
+            body.insert("max_tokens".to_string(), Value::from(max_tokens));
+        }
+        if let Some(temperature) = request.temperature {
+            body.insert("temperature".to_string(), Value::from(temperature));
+        }
+        if let Some(top_p) = request.top_p {
+            body.insert("top_p".to_string(), Value::from(top_p));
+        }
+        if !request.stop_sequences.is_empty() {
+            body.insert(
+                "stop".to_string(),
+                Value::Array(request.stop_sequences.iter().cloned().map(Value::String).collect()),
+            );
+        }
+
         if let Some(response_format) = &request.response_format {
             body.insert("response_format".to_string(), encode_response_format(response_format));
         }
@@ -187,6 +203,7 @@ impl OpenAiStreamDecoder {
             id: root.get("id").and_then(serde_json::Value::as_str).unwrap_or_default().to_string(),
             model: root.get("model").and_then(serde_json::Value::as_str).unwrap_or_default().to_string(),
             content: Vec::new(),
+            stop_reason: None,
             usage: Usage::default(),
             cost: None,
             provider_metadata: serde_json::Value::Null,
@@ -206,6 +223,7 @@ impl OpenAiStreamDecoder {
                 index: self.reasoning_index,
                 content_block: ContentBlock::Reasoning {
                     text: String::new(),
+                    signature: None,
                 },
             });
         }
@@ -346,7 +364,9 @@ fn encode_message(message: &crate::Message) -> Vec<Value> {
                     "arguments": input.to_string(),
                 }
             })),
-            ContentBlock::ToolResult { tool_call_id, output } => {
+            // OpenAI tool messages carry no error flag; the error text itself
+            // is the model-visible signal, so is_error is intentionally unused.
+            ContentBlock::ToolResult { tool_call_id, output, .. } => {
                 if !text.is_empty() {
                     messages.push(text_message(&message.role, &text));
                     text.clear();
@@ -361,7 +381,10 @@ fn encode_message(message: &crate::Message) -> Vec<Value> {
                     "content": tool_result_content(output),
                 }));
             }
-            ContentBlock::Image { .. } | ContentBlock::Document { .. } | ContentBlock::Reasoning { .. } => {}
+            ContentBlock::Image { .. }
+            | ContentBlock::Document { .. }
+            | ContentBlock::Reasoning { .. }
+            | ContentBlock::RedactedThinking { .. } => {}
         }
     }
 
@@ -447,7 +470,7 @@ fn reject_unsupported_content_blocks(request: &LlmRequest) -> Result<(), LlmErro
                         message: "OpenAiChatCodec does not encode document blocks yet".to_string(),
                     });
                 }
-                ContentBlock::Reasoning { .. } => {
+                ContentBlock::Reasoning { .. } | ContentBlock::RedactedThinking { .. } => {
                     return Err(LlmError::InvalidRequest {
                         message: "OpenAiChatCodec does not encode reasoning blocks yet".to_string(),
                     });
@@ -503,11 +526,16 @@ fn decode_response_body(body_json: Value) -> Result<LlmResponse, LlmError> {
     }
 
     let usage = body_json.get("usage").map(normalize_usage).unwrap_or_default();
+    let stop_reason = choice
+        .get("finish_reason")
+        .and_then(Value::as_str)
+        .map(map_finish_reason);
 
     Ok(LlmResponse {
         id,
         model,
         content,
+        stop_reason,
         usage,
         cost: None,
         provider_metadata: body_json,

@@ -52,6 +52,26 @@ impl WireCodec for GeminiCodec {
             body.insert("tools".to_string(), serde_json::json!([{ "functionDeclarations": request.tools.iter().map(encode_tool).collect::<Vec<_>>() }]));
         }
 
+        let mut generation_config = serde_json::Map::new();
+        if let Some(max_tokens) = request.max_tokens {
+            generation_config.insert("maxOutputTokens".to_string(), Value::from(max_tokens));
+        }
+        if let Some(temperature) = request.temperature {
+            generation_config.insert("temperature".to_string(), Value::from(temperature));
+        }
+        if let Some(top_p) = request.top_p {
+            generation_config.insert("topP".to_string(), Value::from(top_p));
+        }
+        if !request.stop_sequences.is_empty() {
+            generation_config.insert(
+                "stopSequences".to_string(),
+                Value::Array(request.stop_sequences.iter().cloned().map(Value::String).collect()),
+            );
+        }
+        if !generation_config.is_empty() {
+            body.insert("generationConfig".to_string(), Value::Object(generation_config));
+        }
+
         let mut provider_request = ProviderRequest::post_json(
             self.generate_content_url(&request.model),
             Value::Object(body),
@@ -215,6 +235,7 @@ fn decode_stream_start(root: &Value) -> LlmResponse {
             .unwrap_or_default()
             .to_string(),
         content: Vec::new(),
+        stop_reason: None,
         usage: root.get("usageMetadata").map(decode_usage).unwrap_or_default(),
         cost: None,
         provider_metadata: Value::Null,
@@ -274,7 +295,10 @@ impl GeminiStreamDecoder {
                 self.next_index += 1;
                 out.push(LlmEvent::ContentBlockStart {
                     index,
-                    content_block: ContentBlock::Reasoning { text: String::new() },
+                    content_block: ContentBlock::Reasoning {
+                        text: String::new(),
+                        signature: None,
+                    },
                 });
                 index
             });
@@ -374,20 +398,28 @@ fn encode_messages(messages: &[crate::Message], tool_call_names: &std::collectio
                         "args": input,
                     }
                 })),
-                ContentBlock::ToolResult { tool_call_id, output } => {
+                ContentBlock::ToolResult { tool_call_id, output, is_error } => {
                     let Some(name) = tool_call_names.get(tool_call_id) else {
                         return Err(LlmError::InvalidRequest {
                             message: format!("tool result references unknown tool call id: {tool_call_id}"),
                         });
                     };
+                    let response = if *is_error {
+                        serde_json::json!({"error": output})
+                    } else {
+                        serde_json::json!({"result": output})
+                    };
                     parts.push(serde_json::json!({
                         "functionResponse": {
                             "name": name,
-                            "response": {"result": output},
+                            "response": response,
                         }
                     }));
                 }
-                ContentBlock::Image { .. } | ContentBlock::Document { .. } | ContentBlock::Reasoning { .. } => {}
+                ContentBlock::Image { .. }
+                | ContentBlock::Document { .. }
+                | ContentBlock::Reasoning { .. }
+                | ContentBlock::RedactedThinking { .. } => {}
             }
         }
 
@@ -439,7 +471,7 @@ fn reject_unsupported_request_intent(request: &LlmRequest) -> Result<(), LlmErro
                         message: "GeminiCodec does not encode document blocks yet".to_string(),
                     });
                 }
-                ContentBlock::Reasoning { .. } => {
+                ContentBlock::Reasoning { .. } | ContentBlock::RedactedThinking { .. } => {
                     return Err(LlmError::InvalidRequest {
                         message: "GeminiCodec does not encode reasoning blocks yet".to_string(),
                     });
@@ -522,10 +554,22 @@ fn decode_response_body(body_json: Value) -> Result<LlmResponse, LlmError> {
         .map(decode_usage)
         .unwrap_or_default();
 
+    // Mirror the stream decoder: any function call normalizes the stop reason
+    // to tool_use regardless of Gemini's finishReason.
+    let stop_reason = if content.iter().any(|block| matches!(block, ContentBlock::ToolCall { .. })) {
+        Some("tool_use".to_string())
+    } else {
+        candidate
+            .get("finishReason")
+            .and_then(Value::as_str)
+            .map(map_finish_reason)
+    };
+
     Ok(LlmResponse {
         id,
         model,
         content,
+        stop_reason,
         usage,
         cost: None,
         provider_metadata: body_json,

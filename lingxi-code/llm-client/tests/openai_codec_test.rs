@@ -35,6 +35,7 @@ fn decode_text_and_tool_responses() {
     assert_eq!(decoded.usage.billable_tokens.input, 9);
     assert_eq!(decoded.usage.billable_tokens.output, 3);
     assert!(matches!(decoded.content[0], ContentBlock::Text { .. }));
+    assert_eq!(decoded.stop_reason.as_deref(), Some("end_turn"));
 
     let tool = ProviderResponse::json(200, serde_json::json!({
         "id":"chatcmpl-y",
@@ -43,6 +44,30 @@ fn decode_text_and_tool_responses() {
     }));
     let decoded = codec.decode_response(tool).unwrap();
     assert!(matches!(decoded.content[0], ContentBlock::ToolCall { ref name, .. } if name == "Bash"));
+    assert_eq!(decoded.stop_reason.as_deref(), Some("tool_use"));
+}
+
+#[test]
+fn encode_sampling_controls() {
+    let codec = OpenAiChatCodec::new("https://api.openai.com/v1");
+    let mut request = LlmRequest::new("gpt-4o");
+    request.max_tokens = Some(1024);
+    request.temperature = Some(0.5);
+    request.top_p = Some(0.9);
+    request.stop_sequences = vec!["END".to_string()];
+
+    let provider_request = codec.encode_request(&request).unwrap();
+
+    assert_eq!(provider_request.body_json["max_tokens"], 1024);
+    assert_eq!(provider_request.body_json["temperature"], 0.5);
+    assert_eq!(provider_request.body_json["top_p"], 0.9);
+    assert_eq!(provider_request.body_json["stop"], serde_json::json!(["END"]));
+
+    let bare = codec.encode_request(&LlmRequest::new("gpt-4o")).unwrap();
+    assert!(bare.body_json.get("max_tokens").is_none());
+    assert!(bare.body_json.get("temperature").is_none());
+    assert!(bare.body_json.get("top_p").is_none());
+    assert!(bare.body_json.get("stop").is_none());
 }
 
 #[test]
@@ -54,6 +79,7 @@ fn encode_tool_result_as_tool_message_not_tool_call() {
         content: vec![ContentBlock::ToolResult {
             tool_call_id: "call_1".to_string(),
             output: serde_json::json!("done"),
+            is_error: false,
         }],
     });
 
@@ -75,10 +101,12 @@ fn encode_multiple_tool_results_preserves_each_as_tool_message() {
             ContentBlock::ToolResult {
                 tool_call_id: "call_1".to_string(),
                 output: serde_json::json!("first"),
+                is_error: false,
             },
             ContentBlock::ToolResult {
                 tool_call_id: "call_2".to_string(),
                 output: serde_json::json!("second"),
+                is_error: false,
             },
         ],
     });

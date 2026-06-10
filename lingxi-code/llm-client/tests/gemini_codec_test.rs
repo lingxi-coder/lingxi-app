@@ -31,6 +31,7 @@ fn decode_text_and_function_call() {
     assert_eq!(decoded.usage.billable_tokens.input, 9);
     assert_eq!(decoded.usage.billable_tokens.output, 3);
     assert!(matches!(decoded.content[0], ContentBlock::Text { .. }));
+    assert_eq!(decoded.stop_reason.as_deref(), Some("end_turn"));
 
     let tool = ProviderResponse::json(200, serde_json::json!({
         "modelVersion":"gemini-2.0-flash",
@@ -38,6 +39,56 @@ fn decode_text_and_function_call() {
     }));
     let decoded = codec.decode_response(tool).unwrap();
     assert!(matches!(decoded.content[0], ContentBlock::ToolCall { ref name, .. } if name == "Bash"));
+    assert_eq!(decoded.stop_reason.as_deref(), Some("tool_use"));
+}
+
+#[test]
+fn encode_generation_config_from_sampling_controls() {
+    let codec = GeminiCodec::new("https://generativelanguage.googleapis.com/v1beta");
+    let mut request = LlmRequest::new("gemini-2.0-flash");
+    request.max_tokens = Some(1024);
+    request.temperature = Some(0.5);
+    request.top_p = Some(0.9);
+    request.stop_sequences = vec!["END".to_string()];
+
+    let provider_request = codec.encode_request(&request).unwrap();
+    let config = &provider_request.body_json["generationConfig"];
+
+    assert_eq!(config["maxOutputTokens"], 1024);
+    assert_eq!(config["temperature"], 0.5);
+    assert_eq!(config["topP"], 0.9);
+    assert_eq!(config["stopSequences"], serde_json::json!(["END"]));
+
+    let bare = codec.encode_request(&LlmRequest::new("gemini-2.0-flash")).unwrap();
+    assert!(bare.body_json.get("generationConfig").is_none());
+}
+
+#[test]
+fn encode_tool_result_error_uses_error_response_shape() {
+    let codec = GeminiCodec::new("https://generativelanguage.googleapis.com/v1beta");
+    let mut request = LlmRequest::new("gemini-2.0-flash");
+    request.messages.push(llm_client::Message {
+        role: "assistant".to_string(),
+        content: vec![ContentBlock::ToolCall {
+            id: "call_0".to_string(),
+            name: "Bash".to_string(),
+            input: serde_json::json!({"command":"ls"}),
+        }],
+    });
+    request.messages.push(llm_client::Message {
+        role: "user".to_string(),
+        content: vec![ContentBlock::ToolResult {
+            tool_call_id: "call_0".to_string(),
+            output: serde_json::json!("command failed"),
+            is_error: true,
+        }],
+    });
+
+    let provider_request = codec.encode_request(&request).unwrap();
+    let response = &provider_request.body_json["contents"][1]["parts"][0]["functionResponse"]["response"];
+
+    assert_eq!(response["error"], "command failed");
+    assert!(response.get("result").is_none());
 }
 
 #[test]
@@ -57,6 +108,7 @@ fn encode_tool_result_uses_prior_tool_call_name() {
         content: vec![ContentBlock::ToolResult {
             tool_call_id: "call_1".to_string(),
             output: serde_json::json!("done"),
+            is_error: false,
         }],
     });
 
@@ -204,6 +256,7 @@ fn encode_tool_result_with_unknown_call_id_is_rejected() {
         content: vec![ContentBlock::ToolResult {
             tool_call_id: "call_unseen".to_string(),
             output: serde_json::json!("done"),
+            is_error: false,
         }],
     });
 

@@ -22,6 +22,7 @@ impl Protocol for DummyProtocol {
             content: vec![ContentBlock::Text {
                 text: String::from_utf8(response.body).expect("utf8"),
             }],
+            stop_reason: None,
             usage: Usage::default(),
             cost: None,
             provider_metadata: Value::default(),

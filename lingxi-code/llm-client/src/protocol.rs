@@ -24,6 +24,18 @@ pub struct LlmRequest {
     pub response_format: Option<ResponseFormat>,
     /// Whether caller requested streaming.
     pub stream: bool,
+    /// Optional maximum output tokens.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_tokens: Option<u32>,
+    /// Optional sampling temperature.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub temperature: Option<f64>,
+    /// Optional nucleus-sampling parameter.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub top_p: Option<f64>,
+    /// Sequences that end generation early.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub stop_sequences: Vec<String>,
 }
 
 impl LlmRequest {
@@ -114,11 +126,22 @@ pub enum ContentBlock {
         tool_call_id: String,
         /// Tool result JSON.
         output: Value,
+        /// Whether the result reports a tool failure.
+        #[serde(default)]
+        is_error: bool,
     },
     /// Reasoning block.
     Reasoning {
         /// Reasoning text or provider-supplied summary.
         text: String,
+        /// Provider integrity signature required to round-trip the block.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        signature: Option<String>,
+    },
+    /// Opaque redacted-reasoning block that must round-trip unmodified.
+    RedactedThinking {
+        /// Provider-opaque payload.
+        data: String,
     },
 }
 
@@ -131,6 +154,10 @@ pub struct LlmResponse {
     pub model: String,
     /// Output content blocks.
     pub content: Vec<ContentBlock>,
+    /// Normalized terminal stop reason (Anthropic vocabulary: `end_turn`,
+    /// `tool_use`, `max_tokens`, `stop_sequence`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stop_reason: Option<String>,
     /// Normalized usage.
     pub usage: Usage,
     /// Optional per-call cost estimate.
@@ -207,6 +234,11 @@ pub enum ContentDelta {
     ThinkingDelta {
         /// Thinking text.
         thinking: String,
+    },
+    /// Reasoning signature delta payload.
+    SignatureDelta {
+        /// Signature fragment for the open reasoning block.
+        signature: String,
     },
 }
 
@@ -430,7 +462,9 @@ pub fn validate_capabilities(request: &LlmRequest, capabilities: Capabilities) -
                         capability: "tools".to_string(),
                     });
                 }
-                ContentBlock::Reasoning { .. } if !capabilities.reasoning => {
+                ContentBlock::Reasoning { .. } | ContentBlock::RedactedThinking { .. }
+                    if !capabilities.reasoning =>
+                {
                     return Err(LlmError::UnsupportedCapability {
                         capability: "reasoning".to_string(),
                     });

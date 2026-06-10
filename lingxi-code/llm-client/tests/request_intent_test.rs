@@ -153,6 +153,7 @@ fn openai_rejects_unsupported_content_blocks() {
         },
         ContentBlock::Reasoning {
             text: "thought".to_string(),
+            signature: None,
         },
     ] {
         let request = request_with_block("gpt-4o", block);
@@ -176,6 +177,7 @@ fn gemini_rejects_unsupported_content_blocks() {
         },
         ContentBlock::Reasoning {
             text: "thought".to_string(),
+            signature: None,
         },
     ] {
         let request = request_with_block("gemini-2.0-flash", block);

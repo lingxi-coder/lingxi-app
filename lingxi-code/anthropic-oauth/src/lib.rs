@@ -21,6 +21,7 @@
 pub mod callback;
 pub mod client;
 pub mod config;
+pub mod credential_provider;
 pub mod handle;
 pub mod limits;
 pub mod pkce;
@@ -44,6 +45,7 @@ pub use profile::{
     fetch_profile_from_api_key, fetch_profile_from_oauth_token, OAuthAccount, OAuthOrganization,
     OAuthProfileResponse,
 };
+pub use credential_provider::OAuthCredentialProvider;
 pub use refresh::{AuthState, RefreshDriver};
 pub use subscription::{
     apply_profile, has_profile_scope, is_enterprise, is_subscriber_tier, subscription_from_scopes,

@@ -129,6 +129,7 @@ dependencies = [
  "async-trait",
  "base64",
  "futures",
+ "llm-client",
  "loom",
  "protocol",
  "rand 0.9.4",

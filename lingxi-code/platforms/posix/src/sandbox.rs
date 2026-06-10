@@ -247,10 +247,6 @@ fn runtime_config_from_policy(policy: &SandboxPolicy) -> SandboxRuntimeConfig {
         .iter()
         .map(|p| p.to_string_lossy().into_owned())
         .collect();
-    let want_net = matches!(
-        policy.network,
-        NetworkPolicy::Allowed | NetworkPolicy::LoopbackOnly
-    );
     SandboxRuntimeConfig {
         enabled: true,
         filesystem: FilesystemRestrictionConfig {
@@ -259,8 +255,11 @@ fn runtime_config_from_policy(policy: &SandboxPolicy) -> SandboxRuntimeConfig {
             ..Default::default()
         },
         network: NetworkRestrictionConfig {
+            // Conservative: only full-allow requests external egress. LoopbackOnly
+            // is satisfied by bwrap's fresh netns (loopback present, external
+            // blocked) → empty allowed_domains → `--unshare-net` in the wrapper.
             allow_local_binding: matches!(policy.network, NetworkPolicy::LoopbackOnly),
-            allowed_domains: if want_net {
+            allowed_domains: if matches!(policy.network, NetworkPolicy::Allowed) {
                 vec!["*".to_string()]
             } else {
                 vec![]
@@ -268,5 +267,43 @@ fn runtime_config_from_policy(policy: &SandboxPolicy) -> SandboxRuntimeConfig {
             ..Default::default()
         },
         ..Default::default()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::runtime_config_from_policy;
+    use traits::{NetworkPolicy, ResourceLimits, SandboxPolicy};
+
+    /// Build a minimal `SandboxPolicy` literal for net-mapping tests.
+    /// `SandboxPolicy` does not derive `Default`, so construct each field.
+    fn policy_with_network(network: NetworkPolicy) -> SandboxPolicy {
+        SandboxPolicy {
+            network,
+            writable_paths: vec![],
+            denied_paths: vec![],
+            allow_subprocess: false,
+            limits: ResourceLimits::default(),
+        }
+    }
+
+    #[test]
+    fn loopback_and_disabled_do_not_request_full_egress() {
+        let mut p = policy_with_network(NetworkPolicy::LoopbackOnly);
+        let cfg = runtime_config_from_policy(&p);
+        assert!(
+            cfg.network.allowed_domains.is_empty(),
+            "loopback must not map to [*]"
+        );
+        p.network = NetworkPolicy::Disabled;
+        assert!(runtime_config_from_policy(&p)
+            .network
+            .allowed_domains
+            .is_empty());
+        p.network = NetworkPolicy::Allowed;
+        assert_eq!(
+            runtime_config_from_policy(&p).network.allowed_domains,
+            vec!["*".to_string()]
+        );
     }
 }

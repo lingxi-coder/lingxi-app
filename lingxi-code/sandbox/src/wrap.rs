@@ -82,19 +82,15 @@ fn wrap_linux_bwrap(command: &str, policy: &SandboxRuntimeConfig) -> String {
         args.push(path.clone());
     }
 
-    // Network.
-    let want_network = !policy.network.allowed_domains.is_empty()
-        || policy.network.allow_local_binding
-        || policy.network.allow_all_unix_sockets
-        || !policy.network.allow_unix_sockets.is_empty();
-    if want_network {
-        args.push("--share-net".into());
-        // TODO(M2-followup): wire socat companion process for domain
-        // filtering. For now, --share-net lets the wrapped command see the
-        // host's network; domain-level filtering is deferred to the
-        // process-lifecycle layer (platforms/posix/src/sandbox.rs).
-    } else {
+    // Conservative network posture: full host net ONLY for an allow-all policy
+    // (allowed_domains non-empty == NetworkPolicy::Allowed). LoopbackOnly /
+    // Disabled get a fresh network namespace (loopback-only, external blocked).
+    // The socat domain-filter companion is deferred; a domain-allowlist policy
+    // therefore gets no external egress (errs safe) until it lands.
+    if policy.network.allowed_domains.is_empty() {
         args.push("--unshare-net".into());
+    } else {
+        args.push("--share-net".into());
     }
 
     let quoted = shell_escape_single(command);
@@ -221,4 +217,27 @@ fn write_sbpl_tempfile(profile: &str) -> Result<String, SandboxWrapError> {
         .keep()
         .map_err(|e| SandboxWrapError::SbplWrite(e.error.to_string()))?;
     Ok(path.to_string_lossy().into_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::wrap_linux_bwrap;
+    use crate::runtime_config::SandboxRuntimeConfig;
+
+    #[test]
+    fn share_net_only_when_allowed_domains_present() {
+        let mut cfg = SandboxRuntimeConfig::default();
+        // Allowed → ["*"] → --share-net
+        cfg.network.allowed_domains = vec!["*".into()];
+        assert!(wrap_linux_bwrap("true", &cfg).contains("--share-net"));
+        // LoopbackOnly: empty domains + allow_local_binding → NOT --share-net
+        cfg.network.allowed_domains.clear();
+        cfg.network.allow_local_binding = true;
+        let w = wrap_linux_bwrap("true", &cfg);
+        assert!(
+            !w.contains("--share-net"),
+            "loopback must not get full egress: {w}"
+        );
+        assert!(w.contains("--unshare-net"));
+    }
 }

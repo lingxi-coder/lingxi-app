@@ -45,9 +45,11 @@ impl MissingDeps {
         if self.bwrap {
             errors.push("bwrap not found".to_string());
         }
-        if self.socat {
-            errors.push("socat not found".to_string());
-        }
+        // socat is NOT a blocking error: the conservative network posture does
+        // not shell to socat (a non-full-allow policy maps to --unshare-net, no
+        // proxy). A missing socat must NEVER disable the sandbox (finding 1) —
+        // it only limits the (deferred) domain-filter companion. Surfaced as a
+        // warning by `check_dependencies` instead.
         errors
     }
 }
@@ -80,9 +82,16 @@ pub fn check_dependencies(
         }
     }
 
+    let mut warnings = Vec::new();
+    if missing.socat {
+        warnings.push(
+            "socat not found (domain-filtered networking unavailable; sandbox still enforced)"
+                .to_string(),
+        );
+    }
     SandboxDependencyCheck {
         errors: missing.into_errors(),
-        warnings: vec![],
+        warnings,
         in_enabled_list,
     }
 }
@@ -185,4 +194,24 @@ pub mod error_strings {
     /// Hint suffix for missing-deps on Linux/WSL.
     pub const MISSING_DEPS_HINT_LINUX: &str =
         "install missing tools (e.g. apt install bubblewrap socat) or run /sandbox for details";
+}
+
+#[cfg(test)]
+mod tests {
+    use super::MissingDeps;
+
+    #[test]
+    fn missing_socat_is_a_warning_not_a_blocking_error() {
+        // `MissingDeps` is the real struct (plan referenced `MissingTools`);
+        // same three pub fields.
+        let missing = MissingDeps {
+            sandbox_exec: false,
+            bwrap: false,
+            socat: true,
+        };
+        assert!(
+            missing.into_errors().is_empty(),
+            "socat must not block the sandbox"
+        );
+    }
 }

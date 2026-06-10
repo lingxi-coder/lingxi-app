@@ -40,6 +40,8 @@ session = { path = "../../session" }
 # built by `engine_desktop::build` for the TUI poller).
 tasks = { path = "../../tasks" }
 telemetry = { path = "../../telemetry" }
+# config migrations at startup (runMigrations port)
+migrations = { path = "../../migrations" }
 # Session resume loader (`run.rs`) constructs a `PosixFileSystem` directly.
 platform-posix-minimal = { path = "../../platforms/posix-minimal" }
 

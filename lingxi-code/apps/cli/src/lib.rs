@@ -154,6 +154,45 @@ pub async fn run_cli(args: Vec<OsString>) -> i32 {
         eprintln!("{notice}");
     }
 
+    // Config migrations (`main.tsx runMigrations`, CURRENT_MIGRATION_VERSION
+    // = 11) — the same pre-REPL point as the deprecation notice above, common
+    // to Print/Tui/StdioRepl. At `migrationVersion == 11` this is a read-only
+    // no-op (version guard). A NEWER real claude-code may have moved the file
+    // past 11; the TS `!==` guard then re-runs the set (all 9 migrations
+    // no-op on an already-migrated config) and writes 11 back — the same
+    // bounded version ping-pong two coexisting real claude-code versions
+    // produce. `bus: None`: no pre-boot telemetry bus substrate exists (same
+    // as the deprecation notice); the 9 event names are registered for when
+    // one does. Tier is structurally None (no keychain subscriptionType) —
+    // the subscriber-gated migrations take their faithful fail-closed
+    // branches; the CLI deliberately does not read the keychain pre-boot
+    // (avoids a second keychain prompt).
+    //
+    // `project_dir`: `std::env::current_dir()` is read AFTER `cwd::apply_cwd`
+    // above, so it reflects the effective `--cwd` project directory — the CLI
+    // keeps no pre-chdir "original cwd"; the post-chdir dir is the project
+    // dir the migrations should target (matches TS, where migrations run
+    // against the resolved working directory).
+    if let (Some(global_config_path), Some(claude_home)) = (
+        migrations::global_config::global_config_path(),
+        migrations::global_config::claude_config_home(),
+    ) {
+        let project_dir =
+            std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+        let env = migrations::MigrationEnv {
+            global_config_path,
+            claude_config_home: claude_home,
+            project_dir,
+            ctx: migrations::MigrationContext::from_env(),
+            bus: None,
+        };
+        migrations::run_migrations(&env).await;
+        // Async fire-and-forget (TS `.catch(() => {})`): retried next startup.
+        tokio::spawn(async move {
+            migrations::migrate_changelog_from_config(&env).await;
+        });
+    }
+
     // --resume routes through run::run_resume, which itself splits (M7-12):
     //   <uuid>            → load by id
     //   (none) + TTY      → iocraft Resume screen

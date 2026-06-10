@@ -49,7 +49,10 @@ pub enum SettingsError {
         /// The raw value as received from the process env.
         value: String,
     },
-    /// Schema validation rejected the file (unknown field, type mismatch).
+    /// Semantic validation ([`SettingsJson::validate`]) rejected the file
+    /// (e.g. empty string in an array field). Unknown fields are NOT a
+    /// violation — they are tolerated-and-ignored (zod `.passthrough()`
+    /// parity, `types.ts:1072`).
     #[error("schema validation failed: {0}")]
     SchemaViolation(String),
     /// Underlying IO failure (permission denied, etc.).

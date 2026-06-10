@@ -11,6 +11,9 @@ pub struct CredentialScope {
     pub provider_id: ProviderId,
     /// Provider profile name requesting credentials.
     pub profile_name: String,
+    /// Host-defined credential id from `CredentialConfig::Static` or
+    /// `CredentialConfig::HostManaged`, when one was configured.
+    pub credential_id: Option<String>,
 }
 
 impl CredentialScope {
@@ -20,7 +23,15 @@ impl CredentialScope {
         Self {
             provider_id,
             profile_name: profile_name.into(),
+            credential_id: None,
         }
+    }
+
+    /// Attach the host-defined credential id to the scope.
+    #[must_use]
+    pub fn with_credential_id(mut self, credential_id: impl Into<String>) -> Self {
+        self.credential_id = Some(credential_id.into());
+        self
     }
 }
 
@@ -46,7 +57,7 @@ impl fmt::Debug for Credential {
 }
 
 /// Loads credentials for a provider/profile scope.
-pub trait CredentialProvider {
+pub trait CredentialProvider: fmt::Debug + Send + Sync {
     /// Load credential material for a scope.
     fn load(&self, scope: &CredentialScope) -> Result<Credential, LlmError>;
 }

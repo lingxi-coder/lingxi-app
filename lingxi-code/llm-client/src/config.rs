@@ -101,7 +101,8 @@ pub enum CredentialConfig {
         /// Host-managed secret id.
         id: String,
     },
-    /// No credential is required.
+    /// No credential is loaded; requests for this profile are sent without
+    /// client-applied authentication.
     None,
 }
 

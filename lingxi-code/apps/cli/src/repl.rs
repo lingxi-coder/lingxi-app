@@ -55,7 +55,10 @@ pub async fn run_repl(argv: &Argv) -> i32 {
     };
     let adapter: Arc<dyn OutputStream> = Arc::new(SinkAdapter::new(sink.clone()));
 
-    let runtime = match crate::init::build_runtime(argv, adapter).await {
+    // Task 5 threads the CLI-resolved mode through the one-shot/print path in
+    // `run_cli`. The stdio-REPL path mints its own runtime here and keeps
+    // `Default` until Task 8 threads the resolved mode through `mode::dispatch`.
+    let runtime = match crate::init::build_runtime(argv, adapter, permission::PermissionMode::Default).await {
         Ok(r) => r,
         Err(e) => {
             eprintln!("lingxi-cli: {e}");

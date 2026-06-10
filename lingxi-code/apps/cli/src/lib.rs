@@ -97,6 +97,33 @@ pub async fn run_cli(args: Vec<OsString>) -> i32 {
         return exit_codes::RUNTIME_ERROR;
     }
 
+    // (Item B) Resolve the session permission mode from CLI flags + settings,
+    // run the bypass safety guards, and capture the startup notice. This must
+    // happen AFTER `cwd::apply_cwd` (so the project `.claude/settings.json` is
+    // read from the effective project dir) and BEFORE `build_runtime` — a
+    // refused bypass exits before the runtime is constructed, and the resolved
+    // mode threads into `DesktopConfig.permission_mode`.
+    let (permission_mode, permission_notice) = {
+        let settings = read_cli_mode_settings(&parsed);
+        let (mode, notice) = permission::initial_permission_mode_from_cli(
+            parsed.permission_mode.as_deref(),
+            parsed.dangerously_skip_permissions,
+            &settings,
+        );
+        // Guards run when bypass is requested OR resolved (setup.ts:396).
+        if mode == permission::PermissionMode::BypassPermissions
+            || parsed.dangerously_skip_permissions
+        {
+            if let Err(msg) =
+                permission::enforce_bypass_safety(&bypass_env::RealBypassEnv::new()).await
+            {
+                eprintln!("{msg}");
+                return exit_codes::RUNTIME_ERROR; // TS process.exit(1)
+            }
+        }
+        (mode, notice)
+    };
+
     // Pick the sink first so we can install it on the orchestrator at
     // construction time. For `--json` the session id used in `turn_start`
     // is minted afresh (synchronous mint via `SessionId::new`); for
@@ -113,7 +140,7 @@ pub async fn run_cli(args: Vec<OsString>) -> i32 {
     // and `Mode::Tui` we also build it once so `mode::dispatch` can pass
     // the orchestrator's session id into the TUI. Building the runtime
     // is cheap (no API calls until `run_turn`).
-    let runtime = match init::build_runtime(&parsed, adapter).await {
+    let runtime = match init::build_runtime(&parsed, adapter, permission_mode).await {
         Ok(r) => r,
         Err(e) => {
             eprintln!("lingxi-cli: {e}");
@@ -138,20 +165,21 @@ pub async fn run_cli(args: Vec<OsString>) -> i32 {
     // uses). SAFETY: with any current (Claude 4-generation) default model the
     // lookup is `None`, so this prints nothing and startup is byte-identical.
     //
-    // DEFERRED: the sibling permission-mode notice (TS
-    // `permissionModeNotification`, `main.tsx:2882-2887`). In TS it is set ONLY
-    // when `--dangerously-skip-permissions` requested bypassPermissions mode AND
-    // that mode was disabled by org policy / settings (one of two exact strings,
-    // `permissionSetup.ts:783-789`). The Rust CLI exposes no
-    // `--permission-mode` / `--dangerously-skip-permissions` flag (`argv.rs`) and
-    // hardwires `BuiltinToolContext.permission_mode = PermissionMode::Default`
-    // (`engine-desktop:1395`); the only mode-resolution path
-    // (`engine-desktop:1066`) is gated behind opt-in `LINGXI_ENFORCE_PERMISSIONS`
-    // and never produces the bypass-disabled notification. So this notice is
-    // unreachable without first porting `initialPermissionModeFromCLI` (a new CLI
-    // flag + the bypass-disable settings check threaded to startup) — out of
-    // scope here, deferred with that precise missing piece.
+    // The sibling permission-mode notice (TS `permissionModeNotification`,
+    // `main.tsx:2882-2887`) is now wired below: `initialPermissionModeFromCLI`
+    // (resolved pre-`build_runtime` above) sets `permission_notice` when the
+    // bypass killswitch suppressed a requested bypass.
     if let Some(notice) = startup_deprecation_notice(&parsed) {
+        eprintln!("{notice}");
+    }
+
+    // (Item B) Permission-mode startup notice (TS `permissionModeNotification`,
+    // `main.tsx:2882-2887`): set only when the bypass killswitch suppressed a
+    // requested bypass (`initialPermissionModeFromCLI`). Emitted on the same
+    // bounded stderr channel as the deprecation/migration notices (no UI
+    // notification-queue substrate); `None` in the common case, so startup is
+    // byte-identical when no bypass was disabled.
+    if let Some(notice) = &permission_notice {
         eprintln!("{notice}");
     }
 
@@ -204,6 +232,46 @@ pub async fn run_cli(args: Vec<OsString>) -> i32 {
 
     let chosen = mode::decide_mode(&parsed);
     mode::dispatch(chosen, &parsed, &runtime, sink).await
+}
+
+/// Build [`permission::CliModeSettings`] from the merged user+project
+/// `settings.json` files (the bypass-killswitch + settings `defaultMode`
+/// inputs the mode resolver reads).
+///
+/// Reads the user `~/.claude/settings.json` then the project
+/// `<cwd>/.claude/settings.json` raw, deriving the two fields via the existing
+/// `permission` helpers: `defaultMode` takes project-wins precedence (project
+/// read last), and the bypass-disable killswitch is sticky (set by any tier).
+/// On any load failure (missing/unreadable/malformed file) it degrades to the
+/// no-op default `{ default_mode: None, bypass_disabled: false }` — a faithful
+/// port of TS `getSettings_DEPRECATED() || {}`.
+///
+/// `parsed` is currently unused (the CLI has no settings-path override flag);
+/// it is threaded for forward-compatibility with such a flag.
+fn read_cli_mode_settings(parsed: &Argv) -> permission::CliModeSettings {
+    let _ = parsed; // reserved (no settings-path override flag today)
+    let project_dir =
+        std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let mut default_mode = None;
+    let mut bypass_disabled = false;
+    let home = dirs::home_dir().map(|h| h.join(".claude").join("settings.json"));
+    let proj = project_dir.join(".claude").join("settings.json");
+    // User first, then project (ascending priority): project read last wins on
+    // `defaultMode`; `bypass_disabled` is sticky across tiers.
+    for path in [home, Some(proj)].into_iter().flatten() {
+        if let Ok(raw) = std::fs::read_to_string(&path) {
+            if let Some(m) = permission::default_mode_from_settings_json(&raw) {
+                default_mode = Some(m);
+            }
+            if permission::bypass_permissions_disabled_from_settings_json(&raw) {
+                bypass_disabled = true;
+            }
+        }
+    }
+    permission::CliModeSettings {
+        default_mode,
+        bypass_disabled,
+    }
 }
 
 /// Resolve the initial main-loop model the engine will use, then return the
@@ -309,6 +377,103 @@ mod startup_notice_tests {
             if let Some(v) = v {
                 std::env::set_var(k, v);
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod cli_mode_settings_tests {
+    use super::*;
+    use std::sync::{Mutex, OnceLock};
+
+    /// `read_cli_mode_settings` reads process-global state (`$HOME` via
+    /// `dirs::home_dir` + the process cwd), so the two tests that mutate those
+    /// must not run concurrently. A local mutex serializes them (the rest of the
+    /// resolver is pure and tested env-free in `permission::cli_mode`).
+    fn env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    fn argv() -> Argv {
+        Argv {
+            prompt: None,
+            print: false,
+            resume: None,
+            model: None,
+            fallback_model: None,
+            cwd: None,
+            no_stream: false,
+            json: false,
+            debug: false,
+            no_tui: false,
+            dangerously_skip_permissions: false,
+            permission_mode: None,
+            continue_session: false,
+            fork_session: false,
+        }
+    }
+
+    /// With no `~/.claude/settings.json` and no `<cwd>/.claude/settings.json`,
+    /// the helper degrades to the no-op default (the faithful TS
+    /// `getSettings_DEPRECATED() || {}` fallback).
+    #[test]
+    fn degrades_to_default_when_no_settings_files() {
+        let _g = env_lock().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let prior_home = std::env::var_os("HOME");
+        let prior_cwd = std::env::current_dir().ok();
+
+        // Point HOME + cwd at fresh empty dirs (no `.claude/settings.json`).
+        let home = tempfile::tempdir().expect("home tempdir");
+        let proj = tempfile::tempdir().expect("proj tempdir");
+        std::env::set_var("HOME", home.path());
+        std::env::set_current_dir(proj.path()).expect("chdir proj");
+
+        let s = read_cli_mode_settings(&argv());
+        assert!(s.default_mode.is_none());
+        assert!(!s.bypass_disabled);
+
+        // Restore process-global state.
+        if let Some(cwd) = prior_cwd {
+            let _ = std::env::set_current_dir(cwd);
+        }
+        match prior_home {
+            Some(h) => std::env::set_var("HOME", h),
+            None => std::env::remove_var("HOME"),
+        }
+    }
+
+    /// The project `<cwd>/.claude/settings.json` `defaultMode` is read and wins
+    /// over the user tier, and `disableBypassPermissionsMode: "disable"` sets the
+    /// killswitch — exercising the parse path, not just the empty degrade.
+    #[test]
+    fn reads_project_settings_default_mode_and_killswitch() {
+        let _g = env_lock().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let prior_home = std::env::var_os("HOME");
+        let prior_cwd = std::env::current_dir().ok();
+
+        let home = tempfile::tempdir().expect("home tempdir");
+        let proj = tempfile::tempdir().expect("proj tempdir");
+        let proj_claude = proj.path().join(".claude");
+        std::fs::create_dir_all(&proj_claude).expect("mkdir .claude");
+        std::fs::write(
+            proj_claude.join("settings.json"),
+            r#"{"permissions":{"defaultMode":"acceptEdits","disableBypassPermissionsMode":"disable"}}"#,
+        )
+        .expect("write settings");
+        std::env::set_var("HOME", home.path());
+        std::env::set_current_dir(proj.path()).expect("chdir proj");
+
+        let s = read_cli_mode_settings(&argv());
+        assert_eq!(s.default_mode, Some(permission::PermissionMode::AcceptEdits));
+        assert!(s.bypass_disabled);
+
+        if let Some(cwd) = prior_cwd {
+            let _ = std::env::set_current_dir(cwd);
+        }
+        match prior_home {
+            Some(h) => std::env::set_var("HOME", h),
+            None => std::env::remove_var("HOME"),
         }
     }
 }

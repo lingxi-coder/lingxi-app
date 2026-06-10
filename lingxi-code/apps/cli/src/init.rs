@@ -193,8 +193,14 @@ fn load_routing() -> Option<serde_json::Value> {
 ///   preferred over global), matching the precedence the old loader used.
 /// - `use_noop_permission_gate` ← `true` (the CLI always binds the always-allow
 ///   `NoOpPermissionGate`; a transport binds `AdapterPermissionGate`).
+/// - `permission_mode` ← the CLI-resolved session mode threaded in by `run_cli`
+///   (`initialPermissionModeFromCLI`), replacing the previously hardwired
+///   `Default`.
 #[must_use]
-fn resolve_desktop_config(argv: &Argv) -> DesktopConfig {
+fn resolve_desktop_config(
+    argv: &Argv,
+    permission_mode: permission::PermissionMode,
+) -> DesktopConfig {
     let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
     let claude_home = dirs::home_dir().map_or_else(
         || std::path::PathBuf::from("/dev/null"),
@@ -246,9 +252,9 @@ fn resolve_desktop_config(argv: &Argv) -> DesktopConfig {
         // `fire_instructions_loaded()` fire over those files. Tests inject a
         // controlled provider (or `None`); only this real-host path reads the FS.
         memory_provider: Some(orchestrator::prompt::real_provider()),
-        // Default until Task 5 threads the CLI-resolved mode through here. The
-        // override is then applied by `resolve_desktop_config`'s mode argument.
-        permission_mode: permission::PermissionMode::Default,
+        // CLI-resolved session permission mode (`initialPermissionModeFromCLI`),
+        // threaded in by `run_cli`.
+        permission_mode,
     }
 }
 
@@ -269,8 +275,9 @@ fn resolve_desktop_config(argv: &Argv) -> DesktopConfig {
 pub async fn build_runtime(
     argv: &Argv,
     output: Arc<dyn OutputStream>,
+    permission_mode: permission::PermissionMode,
 ) -> Result<Runtime, InitError> {
-    let cfg = resolve_desktop_config(argv);
+    let cfg = resolve_desktop_config(argv, permission_mode);
     let permission_sink: Arc<dyn client_adapter::PermissionRequestSink> =
         Arc::new(NoopPermissionRequestSink);
     let rt = build(cfg, output, permission_sink).await?;
@@ -297,7 +304,11 @@ pub async fn build_runtime_for_tui(argv: &Argv) -> Result<TuiBuild, InitError> {
     // `TurnStarted`/`TurnEnded` on the same channel the orchestrator streams on.
     let turn_tx = bridge_tx.clone();
     let bridge: Arc<dyn OutputStream> = Arc::new(tui::BridgeOutputStream::new(bridge_tx));
-    let runtime = build_runtime(argv, bridge).await?;
+    // Task 5 threads the CLI-resolved mode only through the one-shot/print path
+    // (`build_runtime`). The interactive TUI path keeps `Default` here until
+    // Task 8 wires the resolved mode + the TTY bypass-confirm dialog through
+    // `mode::dispatch`.
+    let runtime = build_runtime(argv, bridge, permission::PermissionMode::Default).await?;
     Ok(TuiBuild {
         runtime,
         bridge_rx,
@@ -329,7 +340,7 @@ mod tests {
         };
         let output: Arc<dyn OutputStream> =
             Arc::new(orchestrator::test_support::MockOutputStream::new());
-        let r = build_runtime(&argv, output).await;
+        let r = build_runtime(&argv, output, permission::PermissionMode::Default).await;
         let r = r.expect("build_runtime failed");
         // M6-06: cost tracker must be wired.
         assert!(
@@ -380,7 +391,7 @@ mod tests {
         };
 
         // `--print` ⟶ honored.
-        let cfg = resolve_desktop_config(&base);
+        let cfg = resolve_desktop_config(&base, permission::PermissionMode::Default);
         assert_eq!(
             cfg.fallback_model.as_deref(),
             Some("claude-opus-4-20250514")
@@ -391,7 +402,7 @@ mod tests {
             print: false,
             ..base.clone()
         };
-        let cfg = resolve_desktop_config(&interactive);
+        let cfg = resolve_desktop_config(&interactive, permission::PermissionMode::Default);
         assert!(cfg.fallback_model.is_none());
 
         // No flag at all ⟶ `None` even in print mode.
@@ -399,7 +410,7 @@ mod tests {
             fallback_model: None,
             ..base
         };
-        let cfg = resolve_desktop_config(&absent);
+        let cfg = resolve_desktop_config(&absent, permission::PermissionMode::Default);
         assert!(cfg.fallback_model.is_none());
     }
 

@@ -4,7 +4,7 @@
 # blocks unprivileged userns). arm64 host → arm64v8/debian.
 #
 # Usage: scripts/verify-bwrap.sh            (runs all checks)
-#        scripts/verify-bwrap.sh net|userns|deny|scrub|netbridge   (one group)
+#        scripts/verify-bwrap.sh net|userns|deny|scrub|netbridge|socks   (one group)
 #
 # The `netbridge` group proves the socat/bwrap/env PLUMBING that
 # wrap_command_with_sandbox_linux emits: a host stand-in HTTP CONNECT proxy +
@@ -13,6 +13,13 @@
 # The in-container python CONNECT proxy is a STAND-IN for the Rust hyper proxy
 # (P3b, separately tested) that only allows one host — the e2e proves the
 # socat/bwrap/env bridge, NOT the proxy's domain-filtering logic.
+#
+# The `socks` group is the SOCKS5 analogue of `netbridge` for the Rust
+# serve_socks proxy (P5): a host stand-in RFC-1928 SOCKS5 proxy (no-auth,
+# CONNECT, one allowed host) reached through the SAME socat/bwrap bridge on a
+# :1080 listener, with `curl --socks5-hostname` so the DOMAINNAME path is
+# exercised. Stand-in == not the Rust allowlist; the Rust pre-connect filter +
+# wire parse are proven by the tokio integration tests in socks_proxy.rs.
 set -euo pipefail
 GROUP="${1:-all}"
 IMG="arm64v8/debian:stable-slim"
@@ -183,6 +190,119 @@ curl -sS --max-time 20 -o /dev/null https://'"$ALLOWED"'/ && echo NET_OK || echo
   esac
 
   kill "$SOCAT_PID" "$PROXY_PID" 2>/dev/null || true
+fi
+
+if [ "$GROUP" = socks ] || [ "$GROUP" = all ]; then
+  # SOCKS5 analogue of netbridge for the Rust serve_socks proxy (P5).
+  apt-get install -y -qq socat curl python3 ca-certificates >/dev/null 2>&1
+  ALLOWED=example.com
+  SSOCK=/tmp/claude-socks-e2e.sock
+  rm -f "$SSOCK"
+
+  # --- Stand-in RFC 1928 SOCKS5 proxy (no-auth, CONNECT, one allowed host). ---
+  # STAND-IN for the Rust serve_socks proxy; proves the socat/bwrap bridge for a
+  # :1080 SOCKS listener, NOT the Rust allowlist (that is the tokio tests' job).
+  cat > /tmp/socksproxy.py <<'PY'
+import socket, threading, sys, select, struct
+ALLOWED = sys.argv[1] if len(sys.argv) > 1 else "example.com"
+def pipe(a, b):
+    try:
+        while True:
+            r,_,_ = select.select([a,b],[],[])
+            for s in r:
+                d = s.recv(65536)
+                if not d: return
+                (b if s is a else a).sendall(d)
+    except OSError:
+        pass
+def recvn(c, n):
+    buf = b""
+    while len(buf) < n:
+        d = c.recv(n - len(buf))
+        if not d: return None
+        buf += d
+    return buf
+def handle(c):
+    try:
+        # Greeting: VER NMETHODS METHODS[]
+        head = recvn(c, 2)
+        if not head or head[0] != 5: return
+        nm = head[1]
+        if recvn(c, nm) is None: return
+        c.sendall(b"\x05\x00")  # no-auth
+        # Request: VER CMD RSV ATYP ...
+        req = recvn(c, 4)
+        if not req or req[0] != 5 or req[1] != 1:
+            c.sendall(b"\x05\x01\x00\x01\x00\x00\x00\x00\x00\x00"); return
+        atyp = req[3]
+        if atyp == 1:
+            raw = recvn(c, 4); host = socket.inet_ntoa(raw)
+        elif atyp == 3:
+            ln = recvn(c, 1)[0]; host = recvn(c, ln).decode("idna")
+        elif atyp == 4:
+            raw = recvn(c, 16); host = socket.inet_ntop(socket.AF_INET6, raw)
+        else:
+            c.sendall(b"\x05\x08\x00\x01\x00\x00\x00\x00\x00\x00"); return
+        port = struct.unpack("!H", recvn(c, 2))[0]
+        if host != ALLOWED:
+            c.sendall(b"\x05\x02\x00\x01\x00\x00\x00\x00\x00\x00"); return  # NOT_ALLOWED
+        try:
+            u = socket.create_connection((host, port), timeout=10)
+        except OSError:
+            c.sendall(b"\x05\x04\x00\x01\x00\x00\x00\x00\x00\x00"); return  # HOST_UNREACHABLE
+        c.sendall(b"\x05\x00\x00\x01\x00\x00\x00\x00\x00\x00")  # GRANTED
+        pipe(c, u); u.close()
+    finally:
+        c.close()
+srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+srv.bind(("127.0.0.1", 9999)); srv.listen(64)
+print("SOCKS_UP", flush=True)
+while True:
+    c,_ = srv.accept()
+    threading.Thread(target=handle, args=(c,), daemon=True).start()
+PY
+  python3 /tmp/socksproxy.py "$ALLOWED" >/tmp/socks.log 2>&1 &
+  SPROXY_PID=$!
+  for _ in $(seq 1 50); do grep -q SOCKS_UP /tmp/socks.log 2>/dev/null && break; sleep 0.1; done
+
+  # --- Host socat: UNIX-LISTEN <sock> -> TCP:localhost:9999 (the SOCKS proxy). ---
+  socat "UNIX-LISTEN:$SSOCK,fork,reuseaddr" \
+        "TCP:localhost:9999,keepalive,keepidle=10,keepintvl=5,keepcnt=3" \
+        >/dev/null 2>&1 &
+  SSOCAT_PID=$!
+  for _ in $(seq 1 50); do [ -S "$SSOCK" ] && break; sleep 0.1; done
+  if [ -S "$SSOCK" ]; then ok "host socat UNIX-LISTEN socket created (socks)"; else bad "host socat socks socket missing"; fi
+
+  # --- bwrap child: sandbox-side socat TCP-LISTEN:1080 -> UNIX-CONNECT, then
+  # curl --socks5-hostname localhost:1080 (DOMAINNAME path) THROUGH the bridge. ---
+  SOCKS_INNER='socat TCP-LISTEN:1080,fork,reuseaddr UNIX-CONNECT:'"$SSOCK"' >/dev/null 2>&1 &
+trap "kill %1 2>/dev/null; exit" EXIT
+sleep 0.5
+curl -sS --max-time 20 --socks5-hostname localhost:1080 -o /dev/null https://'"$ALLOWED"'/ && echo SOCKS_OK || echo SOCKS_FAIL'
+  SOUT=$(bwrap --unshare-user-try --unshare-net \
+          --bind "$SSOCK" "$SSOCK" \
+          --ro-bind / / --proc /proc --dev /dev --unshare-pid \
+          -- /bin/bash -c "$SOCKS_INNER" 2>/dev/null || true)
+  echo "[socks] bridged curl --socks5-hostname -> $SOUT"
+  case "$SOUT" in
+    *SOCKS_OK*) ok "allowed host reachable THROUGH the SOCKS5 bridge (SOCKS_OK)";;
+    *)          bad "allowed host NOT reachable through SOCKS bridge: $SOUT";;
+  esac
+
+  # --- DIRECT curl in a fresh netns (no proxy) must be blocked. ---
+  SDOUT=$(bwrap --unshare-user-try --unshare-net \
+           --ro-bind / / --proc /proc --dev /dev --unshare-pid \
+           -- /bin/bash -c \
+           'curl -sS --noproxy "*" --max-time 8 -o /dev/null https://'"$ALLOWED"'/ && echo NET_LEAK || echo NET_BLOCKED' \
+           2>/dev/null || true)
+  echo "[socks] direct curl -> $SDOUT"
+  case "$SDOUT" in
+    *NET_BLOCKED*) ok "direct egress blocked in fresh netns (socks group)";;
+    *)             bad "direct egress NOT blocked (socks group): $SDOUT";;
+  esac
+
+  kill "$SSOCAT_PID" "$SPROXY_PID" 2>/dev/null || true
 fi
 
 echo "=== $([ $fail = 0 ] && echo ALL-PASS || echo SOME-FAIL) ==="

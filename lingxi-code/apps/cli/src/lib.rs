@@ -103,26 +103,23 @@ pub async fn run_cli(args: Vec<OsString>) -> i32 {
     // read from the effective project dir) and BEFORE `build_runtime` — a
     // refused bypass exits before the runtime is constructed, and the resolved
     // mode threads into `DesktopConfig.permission_mode`.
-    let (permission_mode, permission_notice) = {
-        let settings = read_cli_mode_settings(&parsed);
-        let (mode, notice) = permission::initial_permission_mode_from_cli(
-            parsed.permission_mode.as_deref(),
-            parsed.dangerously_skip_permissions,
-            &settings,
-        );
-        // Guards run when bypass is requested OR resolved (setup.ts:396).
-        if mode == permission::PermissionMode::BypassPermissions
-            || parsed.dangerously_skip_permissions
+    //
+    // (Task 8) The resolution itself is now the shared `resolve_permission_mode`
+    // helper so the interactive TUI/REPL paths resolve the SAME mode without
+    // re-implementing it. The bypass-safety GUARD stays HERE in `run_cli`: it
+    // runs exactly once, before mode dispatch, for ALL modes — a refusal exits 1
+    // before any runtime is built, so the interactive paths never re-run it.
+    let (permission_mode, permission_notice) = resolve_permission_mode(&parsed);
+    // Guards run when bypass is requested OR resolved (setup.ts:396).
+    if permission_mode == permission::PermissionMode::BypassPermissions
+        || parsed.dangerously_skip_permissions
+    {
+        if let Err(msg) = permission::enforce_bypass_safety(&bypass_env::RealBypassEnv::new()).await
         {
-            if let Err(msg) =
-                permission::enforce_bypass_safety(&bypass_env::RealBypassEnv::new()).await
-            {
-                eprintln!("{msg}");
-                return exit_codes::RUNTIME_ERROR; // TS process.exit(1)
-            }
+            eprintln!("{msg}");
+            return exit_codes::RUNTIME_ERROR; // TS process.exit(1)
         }
-        (mode, notice)
-    };
+    }
 
     // Pick the sink first so we can install it on the orchestrator at
     // construction time. For `--json` the session id used in `turn_start`
@@ -234,6 +231,28 @@ pub async fn run_cli(args: Vec<OsString>) -> i32 {
     mode::dispatch(chosen, &parsed, &runtime, sink).await
 }
 
+/// Resolve the session permission mode (and any suppression notice) from CLI
+/// flags + merged `settings.json` — the shared resolver every dispatch path
+/// uses so the one-shot/print, interactive TUI, and stdio-REPL paths all see
+/// the SAME `initialPermissionModeFromCLI` result.
+///
+/// This is `read_cli_mode_settings` + `permission::initial_permission_mode_from_cli`,
+/// with NO bypass-safety guard: the guard runs exactly once in [`run_cli`]
+/// (before mode dispatch, for all modes), so the interactive paths that call
+/// this helper to re-derive the mode must NOT re-run it. Returns
+/// `(mode, notice)` where `notice` is `Some` only when the bypass killswitch
+/// suppressed a requested bypass (`permissionModeNotification`).
+pub(crate) fn resolve_permission_mode(
+    argv: &Argv,
+) -> (permission::PermissionMode, Option<String>) {
+    let settings = read_cli_mode_settings(argv);
+    permission::initial_permission_mode_from_cli(
+        argv.permission_mode.as_deref(),
+        argv.dangerously_skip_permissions,
+        &settings,
+    )
+}
+
 /// Build [`permission::CliModeSettings`] from the merged user+project
 /// `settings.json` files (the bypass-killswitch + settings `defaultMode`
 /// inputs the mode resolver reads).
@@ -248,7 +267,7 @@ pub async fn run_cli(args: Vec<OsString>) -> i32 {
 ///
 /// `parsed` is currently unused (the CLI has no settings-path override flag);
 /// it is threaded for forward-compatibility with such a flag.
-fn read_cli_mode_settings(parsed: &Argv) -> permission::CliModeSettings {
+pub(crate) fn read_cli_mode_settings(parsed: &Argv) -> permission::CliModeSettings {
     let _ = parsed; // reserved (no settings-path override flag today)
     let project_dir =
         std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));

@@ -8,7 +8,7 @@
 //! lives in the CLI (`apps/cli/src/mode.rs`) and is thin (cannot be driven
 //! headless, same caveat as `run_tui_session`).
 
-use crossterm::event::{KeyCode, KeyEvent};
+use crossterm::event::{Event, KeyCode, KeyEvent};
 
 /// The two dialog choices (Select order: decline first, accept second).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -85,6 +85,110 @@ pub fn render_lines() -> Vec<String> {
 #[must_use]
 pub fn should_show_bypass_dialog(is_bypass_mode: bool, skip_prompt_already_set: bool) -> bool {
     is_bypass_mode && !skip_prompt_already_set
+}
+
+/// Mount the bypass-permissions confirmation dialog on a real TTY and block
+/// until the user accepts or declines.
+///
+/// Acquires the crate's [`crate::terminal::RawGuard`] (raw mode + alt screen +
+/// panic-safe restore), paints [`render_lines`] with the highlighted option,
+/// then loops on `crossterm::event::read()` feeding [`handle_key`] until it
+/// returns an outcome. The guard restores the terminal on EVERY return path
+/// (outcome OR error) via its `exit()` / `Drop`.
+///
+/// UNTESTABLE-HEADLESS CAVEAT: this is the one piece that can't be driven
+/// without a TTY (same caveat as `run_tui_session`) — it is deliberately
+/// minimal and side-effect-only. ALL decision logic lives in the pure,
+/// fully-tested [`handle_key`] / [`should_show_bypass_dialog`]; this wrapper
+/// only does terminal I/O.
+///
+/// # Errors
+/// Returns the underlying `std::io::Error` if entering/leaving raw mode, a
+/// draw, or a `crossterm::event::read()` fails. The terminal is restored
+/// regardless.
+// `async` with no `.await`: the body is synchronous crossterm terminal I/O, but
+// the fn is `async` BY CONTRACT — the mount seam is `.await`-ed in the CLI
+// (`mode::dispatch`), mirroring `run_tui_session`, so the interactive entry
+// points stay uniformly async. The lint is allowed, not worked around.
+#[allow(clippy::unused_async)]
+pub async fn mount_bypass_dialog() -> std::io::Result<BypassDialogOutcome> {
+    let guard = crate::terminal::RawGuard::enter()?;
+    let mut state = BypassDialogState::default();
+
+    // First paint, then re-paint after each navigation key.
+    if let Err(e) = draw_dialog(state) {
+        // Best-effort restore before surfacing the draw error.
+        let _ = guard.exit();
+        return Err(e);
+    }
+
+    let outcome = loop {
+        match crossterm::event::read() {
+            Ok(Event::Key(key)) => {
+                if let Some(outcome) = handle_key(&mut state, key) {
+                    break outcome;
+                }
+                if let Err(e) = draw_dialog(state) {
+                    let _ = guard.exit();
+                    return Err(e);
+                }
+            }
+            // Resize / focus / paste / mouse: re-paint defensively and keep going.
+            Ok(_) => {
+                if let Err(e) = draw_dialog(state) {
+                    let _ = guard.exit();
+                    return Err(e);
+                }
+            }
+            Err(e) => {
+                let _ = guard.exit();
+                return Err(e);
+            }
+        }
+    };
+
+    // Voluntary restore so an IO error leaving the alt screen is surfaced
+    // rather than swallowed in `Drop`.
+    guard.exit()?;
+    Ok(outcome)
+}
+
+/// Clear the screen and paint the dialog with the selected option marked
+/// (`> ` prefix on the highlighted row). Minimal crossterm render — the exact
+/// text comes from the byte-locked [`render_lines`]. Takes `state` by value
+/// (it is `Copy` — one enum field).
+fn draw_dialog(state: BypassDialogState) -> std::io::Result<()> {
+    use crossterm::{
+        cursor::MoveTo,
+        execute,
+        terminal::{Clear, ClearType},
+    };
+    use std::io::Write;
+
+    let lines = render_lines();
+    // render_lines layout: [title, body1, body2, body3, link, decline, accept].
+    let (body, decline, accept) = (&lines[..5], &lines[5], &lines[6]);
+
+    let mut out = std::io::stdout();
+    execute!(out, Clear(ClearType::All), MoveTo(0, 0))?;
+    let mut row: u16 = 0;
+    for line in body {
+        execute!(out, MoveTo(0, row))?;
+        write!(out, "{line}")?;
+        row += 1;
+    }
+    // Blank spacer row before the two options.
+    row += 1;
+    for (choice, label) in [
+        (BypassChoice::Decline, decline),
+        (BypassChoice::Accept, accept),
+    ] {
+        execute!(out, MoveTo(0, row))?;
+        let marker = if state.selected == choice { "> " } else { "  " };
+        write!(out, "{marker}{label}")?;
+        row += 1;
+    }
+    out.flush()
 }
 
 #[cfg(test)]

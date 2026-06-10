@@ -55,10 +55,14 @@ pub async fn run_repl(argv: &Argv) -> i32 {
     };
     let adapter: Arc<dyn OutputStream> = Arc::new(SinkAdapter::new(sink.clone()));
 
-    // Task 5 threads the CLI-resolved mode through the one-shot/print path in
-    // `run_cli`. The stdio-REPL path mints its own runtime here and keeps
-    // `Default` until Task 8 threads the resolved mode through `mode::dispatch`.
-    let runtime = match crate::init::build_runtime(argv, adapter, permission::PermissionMode::Default).await {
+    // (Task 8) The stdio-REPL path mints its own runtime here, so it re-derives
+    // the CLI-resolved session permission mode via the shared resolver
+    // (`initialPermissionModeFromCLI`) and threads it into the orchestrator —
+    // instead of the previously-hardwired `Default`. The bypass-safety guard /
+    // notice already ran once in `run_cli` before dispatch (a refusal exits
+    // before this fn is reached), so we take only the mode here.
+    let (permission_mode, _notice) = crate::resolve_permission_mode(argv);
+    let runtime = match crate::init::build_runtime(argv, adapter, permission_mode).await {
         Ok(r) => r,
         Err(e) => {
             eprintln!("lingxi-cli: {e}");

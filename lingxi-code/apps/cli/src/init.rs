@@ -297,6 +297,13 @@ pub async fn build_runtime(
 /// its `output` so streaming `emit_text` calls route into the bridge
 /// channel returned alongside the runtime. The TUI render loop drains
 /// this channel through `tui::streaming::apply_event`.
+///
+/// (Task 8) The interactive TUI path now threads the CLI-resolved session
+/// permission mode (`initialPermissionModeFromCLI` via
+/// [`crate::resolve_permission_mode`]) into the orchestrator's
+/// `DesktopConfig.permission_mode`, instead of the previously-hardwired
+/// `Default`. The bypass-safety guard is NOT re-run here — `run_cli` already
+/// ran it once before dispatch (a refusal exits before this fn is reached).
 pub async fn build_runtime_for_tui(argv: &Argv) -> Result<TuiBuild, InitError> {
     let (bridge_tx, bridge_rx) = tokio::sync::mpsc::unbounded_channel();
     // (MULTIMODAL.1) Clone the sender BEFORE it is moved into the
@@ -304,11 +311,11 @@ pub async fn build_runtime_for_tui(argv: &Argv) -> Result<TuiBuild, InitError> {
     // `TurnStarted`/`TurnEnded` on the same channel the orchestrator streams on.
     let turn_tx = bridge_tx.clone();
     let bridge: Arc<dyn OutputStream> = Arc::new(tui::BridgeOutputStream::new(bridge_tx));
-    // Task 5 threads the CLI-resolved mode only through the one-shot/print path
-    // (`build_runtime`). The interactive TUI path keeps `Default` here until
-    // Task 8 wires the resolved mode + the TTY bypass-confirm dialog through
-    // `mode::dispatch`.
-    let runtime = build_runtime(argv, bridge, permission::PermissionMode::Default).await?;
+    // (Task 8) Thread the CLI-resolved mode through the interactive TUI path.
+    // The guard already ran in `run_cli` (notice already printed there too), so
+    // this drops the notice and takes only the mode.
+    let (permission_mode, _notice) = crate::resolve_permission_mode(argv);
+    let runtime = build_runtime(argv, bridge, permission_mode).await?;
     Ok(TuiBuild {
         runtime,
         bridge_rx,

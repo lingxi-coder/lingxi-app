@@ -109,6 +109,40 @@ pub async fn dispatch(
                     return exit_codes::RUNTIME_ERROR;
                 }
             };
+            // (Task 8) Startup bypass-permissions confirmation dialog
+            // (`BypassPermissionsModeDialog`, shown by `showSetupScreens` BEFORE
+            // the REPL). TTY-only — this arm is only reached when stdin+stdout
+            // are terminals (`mode::decide_mode`), so the raw-mode mount is safe
+            // here. Gated on bypass-mode resolved AND no settings tier already
+            // carrying `skipDangerousModePermissionPrompt`.
+            let (bypass_mode, _) = crate::resolve_permission_mode(argv);
+            let is_bypass = bypass_mode == permission::PermissionMode::BypassPermissions;
+            let skip_set = read_skip_dangerous_prompt();
+            if tui::startup_bypass::should_show_bypass_dialog(is_bypass, skip_set) {
+                match tui::startup_bypass::mount_bypass_dialog().await {
+                    Ok(tui::startup_bypass::BypassDialogOutcome::Accept) => {
+                        // Persist so subsequent launches skip the prompt
+                        // (`onConfirm` → `saveCurrentProjectConfig`). Best-effort.
+                        persist_skip_dangerous_prompt();
+                        // TELEMETRY (`tengu_bypass_permissions_mode_dialog_accept`,
+                        // registered in Task 6): DEFERRED. There is no pre-session
+                        // analytics sink wired at this seam (same situation as the
+                        // startup migrations, which emit with `bus: None`). Emitting
+                        // here would buffer onto a bus that is never flushed pre-REPL
+                        // — an honest no-op is preferable to a call that looks wired
+                        // but silently drops. The event name is registered and the
+                        // emit lands once a pre-session sink exists.
+                    }
+                    Ok(tui::startup_bypass::BypassDialogOutcome::Decline) => {
+                        // User declined (or pressed Esc): exit 1 (TS `process.exit(1)`).
+                        return exit_codes::RUNTIME_ERROR;
+                    }
+                    Err(e) => {
+                        eprintln!("lingxi-cli: bypass dialog failed: {e}");
+                        return exit_codes::RUNTIME_ERROR;
+                    }
+                }
+            }
             // FRESH launch: no replayed scrollback. `build_tui_runtime` with an
             // empty `resumed_messages` vec is byte-identical to the pre-refactor
             // inline assembly — `Runtime::with_resumed_messages([])` is a no-op
@@ -189,6 +223,61 @@ pub(crate) async fn mount_tui_runtime(tui_runtime: tui::session::Runtime) -> i32
             eprintln!("lingxi-cli: tui session failed: {e}");
             exit_codes::RUNTIME_ERROR
         }
+    }
+}
+
+/// Resolve `(claude_home, project_dir)` the settings reader/writer address.
+///
+/// `claude_home = ~/.claude` (the user settings root; `/dev/null` when no home
+/// dir, matching `init::resolve_desktop_config`'s degrade); `project_dir =
+/// std::env::current_dir()`, read AFTER `cwd::apply_cwd` so it reflects any
+/// `--cwd`. These feed `migrations::settings_update::settings_path`.
+fn settings_dirs() -> (std::path::PathBuf, std::path::PathBuf) {
+    let claude_home = dirs::home_dir().map_or_else(
+        || std::path::PathBuf::from("/dev/null"),
+        |h| h.join(".claude"),
+    );
+    let project_dir =
+        std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    (claude_home, project_dir)
+}
+
+/// True iff `skipDangerousModePermissionPrompt` is truthy in EITHER the user
+/// (`~/.claude/settings.json`) OR local (`<cwd>/.claude/settings.local.json`)
+/// settings — the `hasSkipDangerousModePermissionPrompt` user+local check
+/// (claude-code `settings.ts:882-889`; the flag/policy tiers have no Rust
+/// substrate). On any read failure the tier degrades to `false`.
+fn read_skip_dangerous_prompt() -> bool {
+    use migrations::settings_update::{read_settings_map, settings_path, SettingsSource};
+    let (claude_home, project_dir) = settings_dirs();
+    [SettingsSource::User, SettingsSource::Local].iter().any(|s| {
+        let p = settings_path(*s, &claude_home, &project_dir);
+        read_settings_map(&p)
+            .ok()
+            .and_then(|m| {
+                m.get("skipDangerousModePermissionPrompt")
+                    .map(migrations::context::js_truthy)
+            })
+            .unwrap_or(false)
+    })
+}
+
+/// Persist `skipDangerousModePermissionPrompt = true` to the USER
+/// `settings.json` (`onConfirm` → save in claude-code). Best-effort: a write
+/// failure warns and is otherwise ignored (TS `updateSettingsForSource` never
+/// throws; the migration port follows the same warn-and-continue contract).
+fn persist_skip_dangerous_prompt() {
+    use migrations::settings_update::{settings_path, update_settings, SettingsSource};
+    let (claude_home, project_dir) = settings_dirs();
+    let path = settings_path(SettingsSource::User, &claude_home, &project_dir);
+    if let Err(e) = update_settings(
+        &path,
+        vec![(
+            "skipDangerousModePermissionPrompt".into(),
+            Some(serde_json::json!(true)),
+        )],
+    ) {
+        tracing::warn!(error = %e, "persist skipDangerousModePermissionPrompt failed (ignored)");
     }
 }
 

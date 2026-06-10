@@ -31,7 +31,7 @@ use hyper::{Method, Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
 use tokio::net::{TcpListener, TcpStream};
 
-use crate::config::NetworkConfig;
+use crate::config::{current_network_config, shared_network_config, NetworkConfig, SharedNetworkConfig};
 use crate::dial::{dial_direct, parse_connect_target, CONNECT_TIMEOUT};
 use crate::matcher::{filter_network_request_with_ask, AskFn};
 use crate::mitm_ca::MitmCa;
@@ -51,8 +51,13 @@ use crate::tls_terminate::{peek_client_hello, terminate_and_forward, TlsTarget};
 /// unix-socket) seam stays marked `// P6:` for the plain-HTTP path.
 #[derive(Clone)]
 pub struct ProxyOptions {
-    /// Allow/deny network config (the allowlist enforced for HTTP + CONNECT).
-    pub config: Arc<NetworkConfig>,
+    /// Live, swappable allow/deny network config (the allowlist enforced for
+    /// HTTP + CONNECT). Read **per request** so a
+    /// [`crate::manager::SandboxManager::update_config`] allow/deny swap takes
+    /// effect on already-running connections with no rebind (the TS reads the
+    /// shared module `config` per request). Build a non-live one with
+    /// [`ProxyOptions::with_static_config`].
+    pub config: SharedNetworkConfig,
     /// Optional resolved parent/upstream proxy (chaining). `None` ⇒ direct.
     pub parent_proxy: Option<Arc<ResolvedParentProxy>>,
     /// Optional per-request filter callback (the `filterRequest` body hook).
@@ -74,6 +79,31 @@ pub struct ProxyOptions {
     /// thread its ask-callback into the live filter; existing callers set it to
     /// `None`.
     pub ask: Option<AskFn>,
+}
+
+impl ProxyOptions {
+    /// Build a [`ProxyOptions`] whose `config` is a fresh non-live
+    /// [`SharedNetworkConfig`] wrapping `config` (no external writer). For direct
+    /// callers + tests that don't need the manager's live-swap; the per-request
+    /// read path is identical, just nobody ever writes the handle.
+    #[must_use]
+    pub fn with_static_config(
+        config: NetworkConfig,
+        parent_proxy: Option<Arc<ResolvedParentProxy>>,
+        filter_request: Option<FilterRequestFn>,
+        mitm_ca: Option<Arc<MitmCa>>,
+        tls_terminate_upstream_ca: Option<Arc<Vec<rustls::pki_types::CertificateDer<'static>>>>,
+        ask: Option<AskFn>,
+    ) -> Self {
+        Self {
+            config: shared_network_config(config),
+            parent_proxy,
+            filter_request,
+            mitm_ca,
+            tls_terminate_upstream_ca,
+            ask,
+        }
+    }
 }
 
 impl std::fmt::Debug for ProxyOptions {
@@ -189,9 +219,10 @@ async fn handle_connect(
         return status_only(StatusCode::BAD_REQUEST);
     };
 
-    if !filter_network_request_with_ask(port, &hostname, &options.config, options.ask.as_ref())
-        .await
-    {
+    // Read the CURRENT live config (clone the inner Arc), then DROP the guard
+    // before the await — the std RwLock is never held across a suspension point.
+    let net = current_network_config(&options.config);
+    if !filter_network_request_with_ask(port, &hostname, &net, options.ask.as_ref()).await {
         tracing::debug!(%hostname, port, "CONNECT blocked by allowlist");
         return blocked_by_allowlist();
     }
@@ -336,9 +367,10 @@ async fn handle_plain(
         .port_u16()
         .unwrap_or(if is_https { 443 } else { 80 });
 
-    if !filter_network_request_with_ask(port, &hostname, &options.config, options.ask.as_ref())
-        .await
-    {
+    // Read the CURRENT live config (clone the inner Arc), then DROP the guard
+    // before the await — the std RwLock is never held across a suspension point.
+    let net = current_network_config(&options.config);
+    if !filter_network_request_with_ask(port, &hostname, &net, options.ask.as_ref()).await {
         tracing::debug!(%hostname, port, "HTTP request blocked by allowlist");
         return blocked_by_allowlist();
     }
@@ -528,14 +560,7 @@ mod tests {
     use tokio::net::{TcpListener, TcpStream};
 
     fn opts(cfg: NetworkConfig) -> Arc<ProxyOptions> {
-        Arc::new(ProxyOptions {
-            config: Arc::new(cfg),
-            parent_proxy: None,
-            filter_request: None,
-            mitm_ca: None,
-            tls_terminate_upstream_ca: None,
-            ask: None,
-        })
+        Arc::new(ProxyOptions::with_static_config(cfg, None, None, None, None, None))
     }
 
     async fn start_proxy(options: Arc<ProxyOptions>) -> u16 {
@@ -915,18 +940,18 @@ mod tests {
         upstream_ca: CertificateDer<'static>,
         filter: Option<FilterRequestFn>,
     ) -> Arc<ProxyOptions> {
-        Arc::new(ProxyOptions {
-            config: Arc::new(NetworkConfig {
+        Arc::new(ProxyOptions::with_static_config(
+            NetworkConfig {
                 allowed_domains: vec!["127.0.0.1".to_string()],
                 denied_domains: vec![],
-                    ..Default::default()
-            }),
-            parent_proxy: None,
-            filter_request: filter,
-            mitm_ca: Some(ca),
-            tls_terminate_upstream_ca: Some(Arc::new(vec![upstream_ca])),
-            ask: None,
-        })
+                ..Default::default()
+            },
+            None,
+            filter,
+            Some(ca),
+            Some(Arc::new(vec![upstream_ca])),
+            None,
+        ))
     }
 
     /// MITM CONNECT: a CA-trusting client does CONNECT + TLS + GET through the
@@ -968,6 +993,50 @@ mod tests {
         let (status, _) = connect_tls_get(pport, oport, ca_der, "/blocked").await;
         assert_eq!(status, 403);
         dispose_mitm_ca(&ca);
+    }
+
+    /// LIVE update_config proof on a RUNNING proxy: with `allowedDomains=[]`
+    /// (deny-all), a CONNECT to the echo upstream is denied (403); after writing
+    /// a new config (`allowedDomains=[host]`) into the SHARED handle the proxy is
+    /// reading, a NEW CONNECT to the same host is allowed (tunnels) — no rebind,
+    /// no restart. This is the Rust equivalent of the TS per-request config read.
+    #[tokio::test]
+    async fn live_config_swap_changes_decision_on_running_proxy() {
+        use crate::config::shared_network_config;
+
+        let (uhost, uport) = echo_upstream().await;
+
+        // Start deny-all (empty allowlist) on a shared, swappable handle.
+        let shared = shared_network_config(NetworkConfig::default());
+        let options = Arc::new(ProxyOptions {
+            config: Arc::clone(&shared),
+            parent_proxy: None,
+            filter_request: None,
+            mitm_ca: None,
+            tls_terminate_upstream_ca: None,
+            ask: None,
+        });
+        let pport = start_proxy(options).await;
+
+        // Deny-all → 403.
+        let (line, _) = connect_via_proxy(pport, &format!("{uhost}:{uport}")).await;
+        assert!(line.contains("403"), "expected 403 before update, got {line}");
+
+        // LIVE swap: allow the upstream host. The running proxy reads this on the
+        // next request with no rebind.
+        *shared.write().unwrap() = Arc::new(NetworkConfig {
+            allowed_domains: vec![uhost.clone()],
+            denied_domains: vec![],
+            ..Default::default()
+        });
+
+        // A NEW request is now allowed and tunnels end-to-end.
+        let (line, mut tun) = connect_via_proxy(pport, &format!("{uhost}:{uport}")).await;
+        assert!(line.contains("200"), "expected 200 after update, got {line}");
+        tun.write_all(b"live").await.unwrap();
+        let mut buf = [0u8; 4];
+        tun.read_exact(&mut buf).await.unwrap();
+        assert_eq!(&buf, b"live", "live-allowed tunnel should echo");
     }
 
     /// `mitm_ca = None` leaves the opaque tunnel intact: a CONNECT to a TCP echo

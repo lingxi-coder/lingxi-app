@@ -36,7 +36,7 @@ use std::sync::Arc;
 use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
 
-use crate::config::SandboxRuntimeConfig;
+use crate::config::{shared_network_config, SandboxRuntimeConfig, SharedNetworkConfig};
 use crate::env::Platform;
 use crate::fs_args::{ReadConfig, WriteConfig};
 use crate::http_proxy::{serve, ProxyOptions};
@@ -116,6 +116,11 @@ struct RunningState {
     http_socket_path: Option<String>,
     /// SOCKS bridge Unix socket path (Linux only), threaded into the wrap.
     socks_socket_path: Option<String>,
+    /// The LIVE network config the running proxies read per request. Shared with
+    /// both proxy tasks; [`SandboxManager::update_config`] writes the new
+    /// `network` here so an allow/deny change is live with no rebind (the TS
+    /// per-request read of the shared module `config`).
+    shared_network: SharedNetworkConfig,
 }
 
 /// Errors from [`SandboxManager`] operations.
@@ -345,7 +350,8 @@ impl SandboxManager {
 
         let net = &config.network;
         let parent_proxy = resolve_parent_proxy(net.parent_proxy.as_ref(), &env_map()).map(Arc::new);
-        let net_config = Arc::new(net.clone());
+        // The LIVE, swappable network config both proxies read per request.
+        let shared_network = shared_network_config(net.clone());
 
         // ── HTTP proxy ──
         let (http_port, http_task) = if let Some(p) = net.http_proxy_port {
@@ -359,7 +365,7 @@ impl SandboxManager {
                 .map_err(|e| ManagerError::Io(format!("HTTP proxy addr: {e}")))?
                 .port();
             let options = Arc::new(ProxyOptions {
-                config: Arc::clone(&net_config),
+                config: Arc::clone(&shared_network),
                 parent_proxy: parent_proxy.clone(),
                 // The TS `config.network.filterRequest` is a runtime closure the
                 // host supplies; the Rust `NetworkConfig` is a serde struct and
@@ -388,7 +394,7 @@ impl SandboxManager {
                 .map_err(|e| ManagerError::Io(format!("SOCKS proxy addr: {e}")))?
                 .port();
             let options = Arc::new(SocksOptions {
-                config: Arc::clone(&net_config),
+                config: Arc::clone(&shared_network),
                 parent_proxy: parent_proxy.clone(),
                 ask: self.ask_callback.clone(),
             });
@@ -422,6 +428,7 @@ impl SandboxManager {
             mitm_ca,
             http_socket_path,
             socks_socket_path,
+            shared_network,
         });
         Ok(())
     }
@@ -655,24 +662,36 @@ impl SandboxManager {
 
     /// `SandboxManager.updateConfig(newConfig)` (`sandbox-manager.js:736-748`).
     ///
-    /// Replaces the active config.
+    /// Replaces the active config AND **live-swaps the running proxies' network
+    /// allow/deny lists** by writing `new_config.network` into the
+    /// [`SharedNetworkConfig`] the proxies read per request — so an allow/deny
+    /// change takes effect on already-running connections with NO rebind and no
+    /// port change, on every platform (the TS reassigns the shared module
+    /// `config`, whose `filterNetworkRequest` re-reads `allowedDomains` /
+    /// `deniedDomains` each request).
     ///
-    /// # Per-request vs structural (a documented divergence from the TS)
+    /// # Live vs structural (faithful to the TS)
     ///
-    /// In the TS, the running proxies read `config.network.allowedDomains` /
-    /// `deniedDomains` **per request** off the shared module `config`, so an
-    /// allowlist change here is a **live swap** that affects already-running
-    /// proxies with no rebind. The Rust proxies, by contrast, capture an
-    /// `Arc<NetworkConfig>` **snapshot** at `serve()` time
-    /// ([`ProxyOptions::config`]/[`SocksOptions::config`] are immutable `Arc`s),
-    /// so this `update_config` does **NOT** retro-apply the new allowlist to
-    /// proxies already running. It DOES take effect for the next
-    /// `wrap_with_sandbox` (FS/network mapping) and for the next `initialize`.
-    /// To make a network/allowlist change live, `reset()` then `initialize()`
-    /// with the new config. (Filesystem changes are baked at wrap time on every
-    /// platform, so they are never live — same as the TS.) A future enhancement
-    /// could back the proxy config with an `ArcSwap` to restore TS live-swap.
+    /// Only the **network allow/deny domain lists** are live — that is all the
+    /// TS per-request `filterNetworkRequest` re-reads. **Structural** changes
+    /// (proxy ports, MITM/`tlsTerminate`, parent proxy, filesystem read/write
+    /// rules) are NOT applied to the running session: the proxies/bridge are
+    /// bound and the FS rules are baked into the bwrap/seatbelt wrap at
+    /// `wrap_with_sandbox` time. Those take effect only for the next
+    /// `wrap_with_sandbox` (FS/network mapping reads `self.config`) and the next
+    /// `reset()` + `initialize()`. To change ports/MITM/FS live, `reset()` then
+    /// `initialize()` with the new config. (Same as the TS, whose
+    /// `updateConfig` also re-resolves `parentProxy` only for the next
+    /// `initialize`, and bakes FS at wrap time.)
     pub fn update_config(&mut self, new_config: SandboxRuntimeConfig) {
+        // Live-swap the running proxies' allow/deny lists (no-op if not running).
+        if let Some(running) = self.running.as_ref() {
+            // Read+write a std RwLock; never held across an await (synchronous).
+            if let Ok(mut guard) = running.shared_network.write() {
+                *guard = Arc::new(new_config.network.clone());
+            }
+        }
+        // Keep the full config for get_config / wrap_with_sandbox / next init.
         self.config = Some(new_config);
     }
 
@@ -888,6 +907,57 @@ mod tests {
         );
         assert!(wrapped.contains("-c") && wrapped.contains("echo hi"), "wrapped: {wrapped}");
         assert!(mounts.is_empty(), "macOS has no mount-point artifacts");
+        mgr.reset();
+    }
+
+    /// LIVE `update_config` proof through the MANAGER on a running proxy
+    /// (macOS, where the proxies bind locally with no bridge): initialize with
+    /// `allowedDomains=[]` (deny-all) → a CONNECT to github.com via the running
+    /// HTTP proxy is 403; `update_config` with `allowedDomains=[github.com]` →
+    /// the SAME running proxy now allows a NEW CONNECT (200) — no reset, no
+    /// rebind. (We only assert the 200 status line; we don't complete the TLS
+    /// tunnel to the real host.)
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn update_config_live_swaps_running_proxy_decision() {
+        use crate::config::{NetworkConfig, SandboxRuntimeConfig};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpStream;
+
+        async fn connect_status(http_port: u16, target: &str) -> String {
+            let mut c = TcpStream::connect(("127.0.0.1", http_port)).await.unwrap();
+            c.write_all(format!("CONNECT {target} HTTP/1.1\r\nHost: {target}\r\n\r\n").as_bytes())
+                .await
+                .unwrap();
+            let mut buf = vec![0u8; 128];
+            let n = c.read(&mut buf).await.unwrap();
+            String::from_utf8_lossy(&buf[..n]).lines().next().unwrap_or("").to_string()
+        }
+
+        let mut mgr = SandboxManager::new();
+        // Deny-all (empty allowlist) — the proxy still binds and routes.
+        mgr.initialize(SandboxRuntimeConfig::default(), None, false)
+            .await
+            .expect("initialize should bind proxies locally on macOS");
+        let http_port = mgr.http_proxy_port().expect("http proxy port");
+
+        // Deny-all → 403.
+        let line = connect_status(http_port, "github.com:443").await;
+        assert!(line.contains("403"), "expected 403 before update, got {line}");
+
+        // LIVE update: allow github.com — same running proxy, no reset.
+        mgr.update_config(SandboxRuntimeConfig {
+            network: NetworkConfig {
+                allowed_domains: vec!["github.com".into()],
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+
+        // A NEW CONNECT is now allowed (200 Connection Established line).
+        let line = connect_status(http_port, "github.com:443").await;
+        assert!(line.contains("200"), "expected 200 after live update, got {line}");
+
         mgr.reset();
     }
 

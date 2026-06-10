@@ -15,7 +15,9 @@ use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
-use crate::config::NetworkConfig;
+use crate::config::{
+    current_network_config, shared_network_config, NetworkConfig, SharedNetworkConfig,
+};
 use crate::dial::dial_direct;
 use crate::host::is_valid_host;
 use crate::matcher::{filter_network_request_with_ask, AskFn};
@@ -97,8 +99,13 @@ const MAX_REQUEST_LEN: usize = 4 + 1 + 255 + 2;
 /// Runtime config for [`serve_socks`] (mirrors the TS `options` closure capture:
 /// the allowlist filter config + the optional resolved parent proxy).
 pub struct SocksOptions {
-    /// Allow/deny domain config consulted by [`filter_network_request`].
-    pub config: Arc<NetworkConfig>,
+    /// Live, swappable allow/deny domain config consulted **per request** by
+    /// [`filter_network_request_with_ask`]. A
+    /// [`crate::manager::SandboxManager::update_config`] allow/deny swap takes
+    /// effect on already-running connections with no rebind (the TS reads the
+    /// shared module `config` per request). Build a non-live one with
+    /// [`SocksOptions::with_static_config`].
+    pub config: SharedNetworkConfig,
     /// Resolved parent proxy; `None` ⇒ always dial direct.
     pub parent_proxy: Option<Arc<ResolvedParentProxy>>,
     /// Optional interactive ask-callback (the TS `sandboxAskCallback`). Consulted
@@ -106,6 +113,25 @@ pub struct SocksOptions {
     /// decides. `None` ⇒ unmatched hosts denied (the P5 behaviour). Added for
     /// P8b so the manager can thread its ask-callback into the live SOCKS gate.
     pub ask: Option<AskFn>,
+}
+
+impl SocksOptions {
+    /// Build a [`SocksOptions`] whose `config` is a fresh non-live
+    /// [`SharedNetworkConfig`] wrapping `config` (no external writer). For direct
+    /// callers + tests; the per-request read path is identical, just nobody ever
+    /// writes the handle.
+    #[must_use]
+    pub fn with_static_config(
+        config: NetworkConfig,
+        parent_proxy: Option<Arc<ResolvedParentProxy>>,
+        ask: Option<AskFn>,
+    ) -> Self {
+        Self {
+            config: shared_network_config(config),
+            parent_proxy,
+            ask,
+        }
+    }
 }
 
 /// Build a SOCKS5 reply frame: `VER REP RSV ATYP=IPv4 BND.ADDR=0.0.0.0 BND.PORT=0`.
@@ -168,8 +194,11 @@ async fn handle_connection(mut client: TcpStream, opts: &SocksOptions) -> std::i
     // or malformed host gets REP_NOT_ALLOWED and NEVER reaches dial_direct /
     // connect_via_parent_proxy. SOCKS5 DOMAINNAME is an unvalidated byte string,
     // so is_valid_host is what stops CRLF/null reaching the matcher.
+    // Read the CURRENT live config (clone the inner Arc), then DROP the guard
+    // before the await — the std RwLock is never held across a suspension point.
+    let net = current_network_config(&opts.config);
     if !is_valid_host(&host)
-        || !filter_network_request_with_ask(port, &host, &opts.config, opts.ask.as_ref()).await
+        || !filter_network_request_with_ask(port, &host, &net, opts.ask.as_ref()).await
     {
         let _ = client.write_all(&reply_frame(REP_NOT_ALLOWED)).await;
         return Ok(());
@@ -312,16 +341,12 @@ mod tests {
 
     /// Spawn the SOCKS proxy with the given allowlist; returns its bound port.
     async fn spawn_socks(allowed: Vec<String>) -> u16 {
-        let cfg = Arc::new(NetworkConfig {
+        let cfg = NetworkConfig {
             allowed_domains: allowed,
             denied_domains: vec![],
-                ..Default::default()
-        });
-        let opts = Arc::new(SocksOptions {
-            config: cfg,
-            parent_proxy: None,
-            ask: None,
-        });
+            ..Default::default()
+        };
+        let opts = Arc::new(SocksOptions::with_static_config(cfg, None, None));
         let l = TokioListener::bind("127.0.0.1:0").await.unwrap();
         let port = l.local_addr().unwrap().port();
         tokio::spawn(async move {
@@ -445,5 +470,57 @@ mod tests {
         c.read_exact(&mut got).await.unwrap();
         assert_eq!(&got, b"dn");
         assert_eq!(seen.load(Ordering::SeqCst), 1);
+    }
+
+    /// LIVE update_config proof on a RUNNING SOCKS proxy: deny-all (empty
+    /// allowlist) → REP_NOT_ALLOWED; after writing `allowedDomains=[127.0.0.1]`
+    /// into the SHARED handle the proxy reads, a NEW request to the echo upstream
+    /// is REP_GRANTED and tunnels — no rebind.
+    #[tokio::test]
+    async fn live_config_swap_changes_socks_decision() {
+        use crate::config::shared_network_config;
+
+        let seen = Arc::new(AtomicU32::new(0));
+        let echo_port = spawn_echo(Arc::clone(&seen)).await;
+
+        // Deny-all on a shared, swappable handle.
+        let shared = shared_network_config(NetworkConfig::default());
+        let opts = Arc::new(SocksOptions {
+            config: Arc::clone(&shared),
+            parent_proxy: None,
+            ask: None,
+        });
+        let l = TokioListener::bind("127.0.0.1:0").await.unwrap();
+        let socks_port = l.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let _ = serve_socks(l, opts).await;
+        });
+
+        // Denied before update.
+        let mut c = TcpStream::connect(("127.0.0.1", socks_port)).await.unwrap();
+        let reply =
+            socks_handshake_and_request(&mut c, &req_ipv4(std::net::Ipv4Addr::LOCALHOST, echo_port))
+                .await;
+        assert_eq!(reply[1], REP_NOT_ALLOWED, "deny-all before update");
+
+        // LIVE swap: allow loopback.
+        *shared.write().unwrap() = Arc::new(NetworkConfig {
+            allowed_domains: vec!["127.0.0.1".into()],
+            denied_domains: vec![],
+            ..Default::default()
+        });
+
+        // A NEW request is now granted and the tunnel echoes.
+        let mut c2 = TcpStream::connect(("127.0.0.1", socks_port)).await.unwrap();
+        let reply2 = socks_handshake_and_request(
+            &mut c2,
+            &req_ipv4(std::net::Ipv4Addr::LOCALHOST, echo_port),
+        )
+        .await;
+        assert_eq!(reply2[1], REP_GRANTED, "granted after live update");
+        c2.write_all(b"livesocks").await.unwrap();
+        let mut got = [0u8; 9];
+        c2.read_exact(&mut got).await.unwrap();
+        assert_eq!(&got, b"livesocks");
     }
 }

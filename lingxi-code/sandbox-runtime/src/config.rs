@@ -19,10 +19,48 @@
 
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::{Arc, RwLock};
 
 use serde::{Deserialize, Serialize};
 
 use crate::parent_proxy::ParentProxyConfig;
+
+/// A live, swappable [`NetworkConfig`] handle shared between the
+/// [`crate::manager::SandboxManager`] and the running proxies.
+///
+/// The TS keeps the network config in a module-level `let config` that the
+/// running http/socks proxies read **per request** (via `filterNetworkRequest`),
+/// so `updateConfig` is a **live swap**: changing the allow/deny lists takes
+/// effect on the next connection with no proxy rebind. To reproduce that the
+/// Rust proxies hold this shared handle and read the CURRENT inner
+/// `Arc<NetworkConfig>` on every request; [`crate::manager::SandboxManager::update_config`]
+/// writes the new network into it so already-running proxies see it immediately.
+///
+/// The outer [`RwLock`] is a **`std::sync::RwLock`**, deliberately. Each request
+/// takes a read lock, clones the inner `Arc` to a local, and **drops the guard
+/// BEFORE any `.await`** (see the proxy filter paths) — so the lock is never
+/// held across a suspension point and cannot stall the async runtime.
+pub type SharedNetworkConfig = Arc<RwLock<Arc<NetworkConfig>>>;
+
+/// Build a [`SharedNetworkConfig`] from an owned [`NetworkConfig`] (the common
+/// case: `manager.initialize` wraps `config.network`).
+#[must_use]
+pub fn shared_network_config(config: NetworkConfig) -> SharedNetworkConfig {
+    Arc::new(RwLock::new(Arc::new(config)))
+}
+
+/// Read the CURRENT inner `Arc<NetworkConfig>` out of a [`SharedNetworkConfig`],
+/// cloning the `Arc` (cheap) and **releasing the read guard before returning** —
+/// so callers can `.await` on the result without holding the lock. A poisoned
+/// lock (a writer panicked mid-swap) falls back to the poisoned inner value
+/// rather than panicking the request path.
+#[must_use]
+pub fn current_network_config(shared: &SharedNetworkConfig) -> Arc<NetworkConfig> {
+    match shared.read() {
+        Ok(guard) => Arc::clone(&guard),
+        Err(poisoned) => Arc::clone(&poisoned.into_inner()),
+    }
+}
 
 /// A config-validation error carrying the (TS-faithful) message.
 #[derive(Debug, Clone, PartialEq, Eq)]

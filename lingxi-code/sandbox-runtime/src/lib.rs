@@ -27,6 +27,7 @@ pub mod fs_args;
 pub mod host;
 pub mod http_proxy;
 pub mod linux;
+pub mod macos;
 pub mod manager;
 pub mod matcher;
 pub mod mitm_ca;

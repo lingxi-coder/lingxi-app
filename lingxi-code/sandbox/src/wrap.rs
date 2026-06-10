@@ -62,6 +62,11 @@ fn wrap_linux_bwrap(command: &str, policy: &SandboxRuntimeConfig) -> String {
     // Default ro root + tmpfs ephemeral writes + procfs/devfs + pid-ns +
     // die-with-parent — match claude-code's defaults.
     let mut args: Vec<String> = vec![
+        // Create a user namespace where possible; degrade gracefully on kernels
+        // with unprivileged userns disabled (`-try`) instead of failing to start
+        // (finding 5). Without it an unprivileged bwrap cannot create the pid/net
+        // namespaces below. Verified to start + degrade under user.max_user_namespaces=0.
+        "--unshare-user-try".into(),
         "--ro-bind".into(),
         "/".into(),
         "/".into(),
@@ -223,6 +228,13 @@ fn write_sbpl_tempfile(profile: &str) -> Result<String, SandboxWrapError> {
 mod tests {
     use super::wrap_linux_bwrap;
     use crate::runtime_config::SandboxRuntimeConfig;
+
+    #[test]
+    fn bwrap_creates_a_user_namespace() {
+        let w = wrap_linux_bwrap("true", &SandboxRuntimeConfig::default());
+        assert!(w.contains("--unshare-user-try"),
+            "bwrap must request a userns (degrading) so it can create pid/net ns unprivileged: {w}");
+    }
 
     #[test]
     fn share_net_only_when_allowed_domains_present() {

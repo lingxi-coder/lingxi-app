@@ -1463,7 +1463,30 @@ pub async fn build(
         sandbox: Arc::new(PosixSandbox::new()),
         clock: clock.clone(),
         sandbox_runtime: SandboxRuntimeConfig::default(),
-        sandbox_runner: tool_api::default_sandbox_runner(),
+        // Inject the LIVE runner: the desktop session routes its sandboxed
+        // bash/powershell/skill commands through `sandbox-runtime`'s
+        // `SandboxManager` (forward proxies + Linux socat bridge + MITM/seccomp),
+        // rather than the legacy sync `wrap_with_sandbox`. The manager is brought
+        // up lazily on the first `wrap` and reused for the session.
+        //
+        // Teardown is Drop-based: engine-desktop has NO per-session teardown hook
+        // (see the `fire_session_start` note below — `build` returns the runtime
+        // and the host drops it on process exit; there is no hook-capable shutdown
+        // seam, so `reset().await` cannot be called from here). The `Arc<dyn
+        // SandboxRunner>` lives inside `tool_ctx` → the tool registry → the
+        // runtime; when the last `Arc` ref drops, `SandboxRuntimeRunner` drops,
+        // dropping its `SandboxManager` and the owned `RunningState`. That abort
+        // the proxy accept-loop tasks (`JoinHandle` aborts on drop) and drops the
+        // `LinuxBridge`, whose `Drop` SIGTERMs the `socat` bridge children
+        // (`sandbox-runtime/src/linux.rs:404`). The only thing the explicit
+        // `SandboxManager::reset()` does that Drop does not is remove the leftover
+        // Unix socket files / dispose the ephemeral MITM-CA temp dir — cosmetic
+        // temp-file cleanup, not a leaked process. When a host teardown seam is
+        // added (the future-batch note on `fire_session_end`), call
+        // `sandbox_runner.reset().await` there for the tidy socket/CA cleanup.
+        sandbox_runner: std::sync::Arc::new(
+            sandbox_runtime_runner::SandboxRuntimeRunner::new(),
+        ),
         permission_mode: cfg.permission_mode,
         project_trust: ProjectTrustLevel::Trusted,
         sandbox_available: false,

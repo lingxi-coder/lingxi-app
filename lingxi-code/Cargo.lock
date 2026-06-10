@@ -1389,6 +1389,7 @@ dependencies = [
  "protocol",
  "providers",
  "sandbox",
+ "sandbox-runtime-runner",
  "secret",
  "serde_json",
  "sidequery",

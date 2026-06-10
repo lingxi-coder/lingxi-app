@@ -246,6 +246,9 @@ fn resolve_desktop_config(argv: &Argv) -> DesktopConfig {
         // `fire_instructions_loaded()` fire over those files. Tests inject a
         // controlled provider (or `None`); only this real-host path reads the FS.
         memory_provider: Some(orchestrator::prompt::real_provider()),
+        // Default until Task 5 threads the CLI-resolved mode through here. The
+        // override is then applied by `resolve_desktop_config`'s mode argument.
+        permission_mode: permission::PermissionMode::Default,
     }
 }
 

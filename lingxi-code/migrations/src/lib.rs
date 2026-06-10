@@ -13,6 +13,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod changelog;
 pub mod context;
 pub mod global_config;
 pub mod migrate_auto_updates;
@@ -24,7 +25,12 @@ pub mod migrate_repl_bridge;
 pub mod migrate_reset_pro_to_opus;
 pub mod migrate_sonnet1m_to_sonnet45;
 pub mod migrate_sonnet45_to_46;
+pub mod runner;
 pub mod settings_update;
+
+pub use changelog::migrate_changelog_from_config;
+pub use context::{MigrationContext, MigrationEnv};
+pub use runner::{run_migrations, CURRENT_MIGRATION_VERSION};
 
 #[cfg(test)]
 mod test_support;

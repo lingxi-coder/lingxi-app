@@ -16,11 +16,15 @@ hyper = { version = "1", features = ["server", "client", "http1"] }
 hyper-util = { version = "0.1", features = ["tokio", "server", "client-legacy", "http1"] }
 ipnet = "2"
 percent-encoding = "2.3"
+rcgen = { version = "=0.13.2", default-features = false, features = ["ring", "pem", "x509-parser"] }
 regex = "1"
+rsa = { version = "0.9", features = ["pem"] }
 rustls = "0.22"
+rustls-pemfile = "2"
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 shlex = "1.3"
+time = "0.3"
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "net", "io-util", "time", "macros"] }
 tokio-rustls = "0.25"
 tracing = { workspace = true }
@@ -31,6 +35,7 @@ which = "6"
 [dev-dependencies]
 tempfile = "3"
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "io-util", "time"] }
+x509-parser = "0.16"
 
 [lints]
 workspace = true

@@ -1,11 +1,12 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::sync::Arc;
 
 use crate::{
     validate_capabilities, ApiKeyAuthenticator, AuthStrategy, Authenticator, BearerAuthenticator,
     ClientConfig, Credential, CredentialConfig, CredentialProvider, CredentialScope,
-    EnvCredentialProvider, LlmError, LlmRequest, LlmResponse, ModelListing, ModelRegistry,
-    ProtocolFamily, ProviderId, ProviderRequest, Route, Transport, WireCodec,
+    EnvCredentialProvider, FrameStream, LlmError, LlmEvent, LlmRequest, LlmResponse,
+    ModelListing, ModelRegistry, ProtocolFamily, ProviderId, ProviderRequest, ProviderResponse,
+    Route, StreamDecoder, StreamingResponse, Transport, WireCodec,
 };
 
 #[derive(Debug)]
@@ -114,6 +115,34 @@ impl DefaultLlmClient {
         prepared.route.codec.decode_response(provider_response)
     }
 
+    /// Execute a streaming call over `transport`.
+    ///
+    /// The request must set `stream: true`. Error statuses are drained and
+    /// routed through the same codec error taxonomy as non-streaming calls.
+    pub async fn execute_stream(
+        &self,
+        request: &LlmRequest,
+        transport: &dyn Transport,
+    ) -> Result<LlmEventStream, LlmError> {
+        if !request.stream {
+            return Err(LlmError::InvalidRequest {
+                message: "execute_stream requires LlmRequest.stream = true".to_string(),
+            });
+        }
+
+        let prepared = self.prepare(request)?;
+        let streaming = transport.open_stream(&prepared.provider_request).await?;
+
+        if streaming.status >= 400 {
+            return Err(decode_stream_error(&prepared, streaming).await);
+        }
+
+        Ok(LlmEventStream::new(
+            prepared.route.codec.stream_decoder(),
+            streaming.frames,
+        ))
+    }
+
     fn authenticate(
         &self,
         entry: &RouteEntry,
@@ -214,4 +243,105 @@ fn build_codec(provider: &crate::ProviderProfile) -> Result<Box<dyn WireCodec>, 
 pub struct PreparedLlmCall {
     pub route: Route,
     pub provider_request: ProviderRequest,
+}
+
+/// Drain an error-status stream and map it through the codec taxonomy.
+async fn decode_stream_error(prepared: &PreparedLlmCall, streaming: StreamingResponse) -> LlmError {
+    let mut frames = streaming.frames;
+    let mut body = Vec::new();
+    loop {
+        match frames.next_frame().await {
+            Ok(Some(frame)) => body.extend_from_slice(&frame.bytes),
+            Ok(None) => break,
+            Err(error) => return error,
+        }
+    }
+
+    let body_json = serde_json::from_slice(&body).unwrap_or(serde_json::Value::Null);
+    let response = ProviderResponse {
+        status: streaming.status,
+        headers: streaming.headers,
+        body_json,
+        request_id: None,
+    };
+    match prepared.route.codec.decode_response(response) {
+        Err(error) => error,
+        // decode_response rejects every status >= 400, so this arm is
+        // unreachable for the statuses that route here.
+        Ok(_) => LlmError::ProviderInternal,
+    }
+}
+
+/// Pull-based stream of canonical events from a streaming call.
+pub struct LlmEventStream {
+    decoder: Box<dyn StreamDecoder>,
+    frames: Box<dyn FrameStream>,
+    queue: VecDeque<LlmEvent>,
+    yielded_any: bool,
+    finished: bool,
+}
+
+impl LlmEventStream {
+    fn new(decoder: Box<dyn StreamDecoder>, frames: Box<dyn FrameStream>) -> Self {
+        Self {
+            decoder,
+            frames,
+            queue: VecDeque::new(),
+            yielded_any: false,
+            finished: false,
+        }
+    }
+
+    /// Next canonical event; `Ok(None)` after the stream completes or
+    /// following a terminal error.
+    pub async fn next_event(&mut self) -> Result<Option<LlmEvent>, LlmError> {
+        loop {
+            if let Some(event) = self.queue.pop_front() {
+                self.yielded_any = true;
+                return Ok(Some(event));
+            }
+            if self.finished {
+                return Ok(None);
+            }
+
+            match self.frames.next_frame().await {
+                Ok(Some(frame)) => match self.decoder.decode_frame(frame) {
+                    Ok(events) => self.queue.extend(events),
+                    Err(error) => {
+                        self.finished = true;
+                        return Err(error);
+                    }
+                },
+                Ok(None) => {
+                    self.finished = true;
+                    match self.decoder.finish() {
+                        Ok(events) => self.queue.extend(events),
+                        Err(error) => return Err(error),
+                    }
+                }
+                Err(error) => {
+                    self.finished = true;
+                    // A drop after events were delivered is not safely
+                    // retryable; upgrade so RetryPolicy will not replay it.
+                    return Err(match error {
+                        LlmError::Transport { message } if self.yielded_any => {
+                            LlmError::StreamInterrupted { message }
+                        }
+                        other => other,
+                    });
+                }
+            }
+        }
+    }
+}
+
+impl std::fmt::Debug for LlmEventStream {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("LlmEventStream")
+            .field("queued_events", &self.queue.len())
+            .field("yielded_any", &self.yielded_any)
+            .field("finished", &self.finished)
+            .finish_non_exhaustive()
+    }
 }

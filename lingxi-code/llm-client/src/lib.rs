@@ -28,7 +28,7 @@ pub mod types;
 
 pub use auth::{ApiKeyAuthenticator, Authenticator, BearerAuthenticator};
 pub use anthropic::normalize_anthropic_usage;
-pub use client::{DefaultLlmClient, PreparedLlmCall};
+pub use client::{DefaultLlmClient, LlmEventStream, PreparedLlmCall};
 pub use providers::{AnthropicMessagesCodec, GeminiCodec, OpenAiChatCodec};
 pub use config::{
     AuthStrategy, Capabilities, ClientConfig, CredentialConfig, ModelProfile, PricingConfig,

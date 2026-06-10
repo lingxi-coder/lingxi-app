@@ -29,8 +29,10 @@ if [ "$GROUP" = net ] || [ "$GROUP" = all ]; then
        /bin/sh -c 'getent hosts example.com >/dev/null 2>&1' ; then
     bad "unshare-net leaked external DNS"
   else ok "unshare-net blocks external"; fi
+  # Read the kernel's per-netns interface list directly (no iproute2 in the
+  # slim image): a fresh netns from --unshare-net always exposes `lo` here.
   if bwrap --unshare-user-try --unshare-net --ro-bind / / --proc /proc --dev /dev -- \
-       /bin/sh -c 'ip link show lo >/dev/null 2>&1 || true; echo lo-ok' | grep -q lo-ok ; then
+       /bin/sh -c 'grep -qw "lo:" /proc/net/dev && echo lo-ok' | grep -q lo-ok ; then
     ok "unshare-net keeps loopback ns"
   else bad "unshare-net loopback missing"; fi
   # Allowed shape == --share-net : external resolvable (host has net).

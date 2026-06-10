@@ -607,6 +607,7 @@ mod tests {
         let cfg = NetworkConfig {
             allowed_domains: vec![uhost.clone()],
             denied_domains: vec![],
+            ..Default::default()
         };
         let pport = start_proxy(opts(cfg)).await;
 
@@ -647,6 +648,7 @@ mod tests {
         let cfg = NetworkConfig {
             allowed_domains: vec![uhost.clone()],
             denied_domains: vec![],
+            ..Default::default()
         };
         let pport = start_proxy(opts(cfg)).await;
 
@@ -708,6 +710,7 @@ mod tests {
         let cfg = NetworkConfig {
             allowed_domains: vec![ohost.clone()],
             denied_domains: vec![],
+            ..Default::default()
         };
         let pport = start_proxy(opts(cfg)).await;
         let authority = format!("{ohost}:{oport}");
@@ -743,6 +746,7 @@ mod tests {
         let cfg = NetworkConfig {
             allowed_domains: vec![ohost.clone()],
             denied_domains: vec![],
+            ..Default::default()
         };
         let pport = start_proxy(opts(cfg)).await;
         let authority = format!("{ohost}:{oport}");
@@ -899,6 +903,7 @@ mod tests {
             config: Arc::new(NetworkConfig {
                 allowed_domains: vec!["127.0.0.1".to_string()],
                 denied_domains: vec![],
+                    ..Default::default()
             }),
             parent_proxy: None,
             filter_request: filter,
@@ -956,6 +961,7 @@ mod tests {
         let cfg = NetworkConfig {
             allowed_domains: vec![uhost.clone()],
             denied_domains: vec![],
+            ..Default::default()
         };
         let pport = start_proxy(opts(cfg)).await;
         let (line, mut tun) = connect_via_proxy(pport, &format!("{uhost}:{uport}")).await;

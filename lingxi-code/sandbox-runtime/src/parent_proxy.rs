@@ -37,15 +37,20 @@ pub struct ResolvedParentProxy {
     pub no_proxy: NoProxy,
 }
 
-/// Explicit config overrides (mirrors the TS `cfg` arg). `None` fields fall
-/// back to env.
-#[derive(Debug, Clone, Default)]
+/// Explicit config overrides (mirrors the TS `cfg` arg / `ParentProxyConfigSchema`,
+/// `sandbox-config.js:73-89`). `None` fields fall back to env. Serializes
+/// camelCase (`noProxy`) so it can be a field of the umbrella config.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ParentProxyConfig {
     /// Override for `HTTP_PROXY`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub http: Option<String>,
     /// Override for `HTTPS_PROXY`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub https: Option<String>,
     /// Override for `NO_PROXY`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub no_proxy: Option<String>,
 }
 

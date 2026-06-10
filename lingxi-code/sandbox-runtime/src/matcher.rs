@@ -78,6 +78,7 @@ mod tests {
         let allow = NetworkConfig {
             allowed_domains: vec!["*.example.com".into()],
             denied_domains: vec![],
+            ..Default::default()
         };
         assert!(filter_network_request(443, "api.example.com", &allow));
         assert!(!filter_network_request(443, "other.com", &allow));
@@ -85,6 +86,7 @@ mod tests {
         let both = NetworkConfig {
             allowed_domains: vec!["*.example.com".into()],
             denied_domains: vec!["evil.example.com".into()],
+            ..Default::default()
         };
         assert!(filter_network_request(443, "ok.example.com", &both));
         assert!(!filter_network_request(443, "evil.example.com", &both));
@@ -101,6 +103,7 @@ mod tests {
         let cfg = NetworkConfig {
             allowed_domains: vec!["*.example.com".into()],
             denied_domains: vec!["169.254.169.254".into()],
+            ..Default::default()
         };
         // 2852039166 == 169.254.169.254 — the dotted denylist entry must catch it.
         assert!(!filter_network_request(80, "2852039166", &cfg));
@@ -111,6 +114,7 @@ mod tests {
         let allow_all = NetworkConfig {
             allowed_domains: vec!["*.example.com".into()],
             denied_domains: vec![],
+            ..Default::default()
         };
         assert!(!filter_network_request(
             443,

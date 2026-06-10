@@ -308,6 +308,7 @@ mod tests {
         let cfg = Arc::new(NetworkConfig {
             allowed_domains: allowed,
             denied_domains: vec![],
+                ..Default::default()
         });
         let opts = Arc::new(SocksOptions {
             config: cfg,

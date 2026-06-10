@@ -42,11 +42,13 @@ impl WireCodec for GeminiCodec {
             Value::Array(encode_messages(&request.messages, &tool_call_names)?),
         );
 
-        if let Some(system) = &request.system {
-            body.insert(
-                "systemInstruction".to_string(),
-                serde_json::json!({"parts": [{"text": system}]}),
-            );
+        if !request.system.is_empty() {
+            let parts: Vec<Value> = request
+                .system
+                .iter()
+                .map(|block| serde_json::json!({"text": block.text}))
+                .collect();
+            body.insert("systemInstruction".to_string(), serde_json::json!({"parts": parts}));
         }
 
         if !request.tools.is_empty() {
@@ -324,7 +326,7 @@ impl GeminiStreamDecoder {
             self.next_index += 1;
             out.push(LlmEvent::ContentBlockStart {
                 index,
-                content_block: ContentBlock::Text { text: String::new() },
+                content_block: ContentBlock::Text { text: String::new(), cache_control: None },
             });
             index
         });
@@ -398,14 +400,14 @@ fn encode_messages(messages: &[crate::Message], tool_call_names: &std::collectio
         let mut parts = Vec::new();
         for block in &message.content {
             match block {
-                ContentBlock::Text { text } => parts.push(serde_json::json!({"text": text})),
+                ContentBlock::Text { text, .. } => parts.push(serde_json::json!({"text": text})),
                 ContentBlock::ToolCall { name, input, .. } => parts.push(serde_json::json!({
                     "functionCall": {
                         "name": name,
                         "args": input,
                     }
                 })),
-                ContentBlock::ToolResult { tool_call_id, output, is_error } => {
+                ContentBlock::ToolResult { tool_call_id, output, is_error, .. } => {
                     let Some(name) = tool_call_names.get(tool_call_id) else {
                         return Err(LlmError::InvalidRequest {
                             message: format!("tool result references unknown tool call id: {tool_call_id}"),
@@ -527,6 +529,7 @@ fn decode_response_body(body_json: Value) -> Result<LlmResponse, LlmError> {
                 if !text.is_empty() {
                     content.push(ContentBlock::Text {
                         text: text.to_string(),
+                        cache_control: None,
                     });
                 }
                 continue;

@@ -40,8 +40,14 @@ impl WireCodec for OpenAiChatCodec {
 
         let mut messages = Vec::new();
 
-        if let Some(system) = &request.system {
-            messages.push(serde_json::json!({"role": "system", "content": system}));
+        if !request.system.is_empty() {
+            let text = request
+                .system
+                .iter()
+                .map(|block| block.text.as_str())
+                .collect::<Vec<_>>()
+                .join("\n\n");
+            messages.push(serde_json::json!({"role": "system", "content": text}));
         }
 
         messages.extend(request.messages.iter().flat_map(encode_message));
@@ -253,6 +259,7 @@ impl OpenAiStreamDecoder {
                 index: self.text_index,
                 content_block: ContentBlock::Text {
                     text: String::new(),
+                    cache_control: None,
                 },
             });
         }
@@ -356,7 +363,7 @@ fn encode_message(message: &crate::Message) -> Vec<Value> {
 
     for block in &message.content {
         match block {
-            ContentBlock::Text { text: block_text } => {
+            ContentBlock::Text { text: block_text, .. } => {
                 if !text.is_empty() {
                     text.push('\n');
                 }
@@ -371,7 +378,7 @@ fn encode_message(message: &crate::Message) -> Vec<Value> {
                 }
             })),
             // OpenAI tool messages carry no error flag; the error text itself
-            // is the model-visible signal, so is_error is intentionally unused.
+            // is the model-visible signal, so is_error and cache_control are intentionally unused.
             ContentBlock::ToolResult { tool_call_id, output, .. } => {
                 if !text.is_empty() {
                     messages.push(text_message(&message.role, &text));
@@ -510,6 +517,7 @@ fn decode_response_body(body_json: Value) -> Result<LlmResponse, LlmError> {
         if !text.is_empty() {
             content.push(ContentBlock::Text {
                 text: text.to_string(),
+                cache_control: None,
             });
         }
     }

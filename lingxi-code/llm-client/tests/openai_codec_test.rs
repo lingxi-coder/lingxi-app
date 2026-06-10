@@ -7,7 +7,7 @@ use llm_client::{
 fn encode_request_shape_is_openai_chat_completions() {
     let codec = OpenAiChatCodec::new("https://api.openai.com/v1");
     let mut request = LlmRequest::new("gpt-4o");
-    request.system = Some("sys".to_string());
+    request.system = vec![llm_client::SystemBlock::text("sys")];
     request.tools = vec![ToolDeclaration {
         name: "Read".to_string(),
         description: "d".to_string(),
@@ -80,6 +80,7 @@ fn encode_tool_result_as_tool_message_not_tool_call() {
             tool_call_id: "call_1".to_string(),
             output: serde_json::json!("done"),
             is_error: false,
+            cache_control: None,
         }],
     });
 
@@ -102,11 +103,13 @@ fn encode_multiple_tool_results_preserves_each_as_tool_message() {
                 tool_call_id: "call_1".to_string(),
                 output: serde_json::json!("first"),
                 is_error: false,
+                cache_control: None,
             },
             ContentBlock::ToolResult {
                 tool_call_id: "call_2".to_string(),
                 output: serde_json::json!("second"),
                 is_error: false,
+                cache_control: None,
             },
         ],
     });
@@ -273,4 +276,19 @@ fn reasoning_config_is_rejected_until_responses_api_exists() {
     let err = codec.encode_request(&request).unwrap_err();
 
     assert!(matches!(err, llm_client::LlmError::InvalidRequest { message } if message.contains("reasoning")));
+}
+
+#[test]
+fn system_blocks_join_into_one_system_message() {
+    let codec = OpenAiChatCodec::new("https://api.openai.com/v1");
+    let mut request = LlmRequest::new("gpt-4o");
+    request.system = vec![
+        llm_client::SystemBlock { text: "a".to_string(), cache_control: Some(llm_client::CacheControl::Ephemeral) },
+        llm_client::SystemBlock { text: "b".to_string(), cache_control: None },
+    ];
+
+    let provider_request = codec.encode_request(&request).unwrap();
+
+    assert_eq!(provider_request.body_json["messages"][0]["role"], "system");
+    assert_eq!(provider_request.body_json["messages"][0]["content"], "a\n\nb");
 }

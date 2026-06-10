@@ -14,8 +14,9 @@ pub struct LlmRequest {
     pub model: String,
     /// Conversation messages, oldest first.
     pub messages: Vec<Message>,
-    /// Optional top-level system prompt.
-    pub system: Option<String>,
+    /// System prompt blocks, in order (empty = no system prompt).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub system: Vec<SystemBlock>,
     /// Tool declarations available to the model.
     pub tools: Vec<ToolDeclaration>,
     /// Optional tool-choice policy.
@@ -56,7 +57,7 @@ impl LlmRequest {
     pub fn with_user_text(mut self, text: impl Into<String>) -> Self {
         self.messages.push(Message {
             role: "user".to_string(),
-            content: vec![ContentBlock::Text { text: text.into() }],
+            content: vec![ContentBlock::Text { text: text.into(), cache_control: None }],
         });
         self
     }
@@ -89,6 +90,35 @@ pub struct ReasoningConfig {
     pub budget_tokens: u32,
 }
 
+/// One system-prompt block.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SystemBlock {
+    /// System text.
+    pub text: String,
+    /// Optional prompt-cache breakpoint.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_control: Option<CacheControl>,
+}
+
+impl SystemBlock {
+    /// Create a plain system block without a cache breakpoint.
+    #[must_use]
+    pub fn text(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            cache_control: None,
+        }
+    }
+}
+
+/// Prompt-cache control marker.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CacheControl {
+    /// Anthropic ephemeral cache breakpoint.
+    Ephemeral,
+}
+
 /// Canonical chat message.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Message {
@@ -106,6 +136,9 @@ pub enum ContentBlock {
     Text {
         /// Text payload.
         text: String,
+        /// Optional prompt-cache breakpoint.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cache_control: Option<CacheControl>,
     },
     /// Image block.
     Image {
@@ -139,6 +172,9 @@ pub enum ContentBlock {
         /// Whether the result reports a tool failure.
         #[serde(default)]
         is_error: bool,
+        /// Optional prompt-cache breakpoint.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cache_control: Option<CacheControl>,
     },
     /// Reasoning block.
     Reasoning {

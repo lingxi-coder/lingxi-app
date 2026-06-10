@@ -90,7 +90,7 @@ async fn execute_sends_authenticated_request_and_decodes_response() {
         .await
         .expect("response");
 
-    assert!(matches!(response.content.as_slice(), [ContentBlock::Text { text }] if text == "hi"));
+    assert!(matches!(response.content.as_slice(), [ContentBlock::Text { text, .. }] if text == "hi"));
     assert_eq!(response.stop_reason.as_deref(), Some("end_turn"));
     assert_eq!(response.usage.billable_tokens.input, 9);
 

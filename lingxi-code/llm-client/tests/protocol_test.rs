@@ -27,7 +27,7 @@ fn with_image_attaches_to_last_user_message_or_starts_one() {
     let mut request = LlmRequest::new("vision-model").with_user_text("look at this");
     request.messages.push(llm_client::Message {
         role: "assistant".to_string(),
-        content: vec![ContentBlock::Text { text: "ok".to_string() }],
+        content: vec![ContentBlock::Text { text: "ok".to_string(), cache_control: None }],
     });
 
     let request = request.with_image("image/png", vec![1, 2, 3]);

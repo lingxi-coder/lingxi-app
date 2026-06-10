@@ -80,8 +80,18 @@ impl WireCodec for AnthropicMessagesCodec {
             );
         }
 
-        if let Some(system) = &request.system {
-            body.insert("system".to_string(), Value::String(system.clone()));
+        if !request.system.is_empty() {
+            let system: Vec<Value> = request
+                .system
+                .iter()
+                .map(|block| {
+                    with_cache_control(
+                        serde_json::json!({"type": "text", "text": block.text}),
+                        block.cache_control,
+                    )
+                })
+                .collect();
+            body.insert("system".to_string(), Value::Array(system));
         }
 
         if request.stream {
@@ -149,12 +159,19 @@ fn encode_message(message: &crate::Message) -> Result<Value, LlmError> {
     }))
 }
 
+fn with_cache_control(mut block: Value, cache_control: Option<crate::CacheControl>) -> Value {
+    if cache_control.is_some() {
+        block["cache_control"] = serde_json::json!({"type": "ephemeral"});
+    }
+    block
+}
+
 fn encode_content_block(block: &ContentBlock) -> Result<Value, LlmError> {
     match block {
-        ContentBlock::Text { text } => Ok(serde_json::json!({
-            "type": "text",
-            "text": text,
-        })),
+        ContentBlock::Text { text, cache_control } => Ok(with_cache_control(
+            serde_json::json!({"type": "text", "text": text}),
+            *cache_control,
+        )),
         ContentBlock::Image { media_type, bytes } => Ok(serde_json::json!({
             "type": "image",
             "source": {
@@ -169,7 +186,7 @@ fn encode_content_block(block: &ContentBlock) -> Result<Value, LlmError> {
             "name": name,
             "input": input,
         })),
-        ContentBlock::ToolResult { tool_call_id, output, is_error } => {
+        ContentBlock::ToolResult { tool_call_id, output, is_error, cache_control } => {
             let mut block = serde_json::json!({
                 "type": "tool_result",
                 "tool_use_id": tool_call_id,
@@ -178,7 +195,7 @@ fn encode_content_block(block: &ContentBlock) -> Result<Value, LlmError> {
             if *is_error {
                 block["is_error"] = Value::Bool(true);
             }
-            Ok(block)
+            Ok(with_cache_control(block, *cache_control))
         }
         ContentBlock::Reasoning { text, signature } => {
             let Some(signature) = signature else {
@@ -261,6 +278,7 @@ fn decode_content_block(value: &Value) -> Result<Option<ContentBlock>, LlmError>
     match value.get("type").and_then(Value::as_str) {
         Some("text") => Ok(Some(ContentBlock::Text {
             text: string_field(value, "text")?,
+            cache_control: None,
         })),
         Some("thinking") => Ok(Some(ContentBlock::Reasoning {
             text: string_field(value, "thinking")?,

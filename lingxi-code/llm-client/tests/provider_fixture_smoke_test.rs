@@ -171,7 +171,7 @@ fn provider_fixtures_smoke_test() {
 
     assert!(matches!(
         decoded.content.as_slice(),
-        [llm_client::ContentBlock::Text { text }] if text == "hi"
+        [llm_client::ContentBlock::Text { text, .. }] if text == "hi"
     ));
     assert_eq!(decoded.stop_reason.as_deref(), Some("end_turn"));
     assert_eq!(

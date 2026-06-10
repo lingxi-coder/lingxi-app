@@ -6,12 +6,17 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+base64 = "0.22"
 ipnet = "2"
+percent-encoding = "2.3"
+rustls = "0.22"
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "net", "io-util", "time", "macros"] }
+tokio-rustls = "0.25"
 tracing = { workspace = true }
 url = "2.5"
+webpki-roots = "0.26"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "io-util", "time"] }

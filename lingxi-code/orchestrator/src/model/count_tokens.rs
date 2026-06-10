@@ -3,7 +3,7 @@
 
 use llm_client::{client::DefaultLlmClient, AnthropicMessagesCodec, LlmError, LlmRequest, Transport};
 
-/// Approximation divisor for non-Anthropic routes (chars/4 ≈ tokens).
+/// Approximation divisor for non-Anthropic routes (byte-length/4 ≈ tokens).
 pub const APPROX_CHARS_PER_TOKEN: u64 = 4;
 
 /// Count input tokens for `request`'s resolved route.
@@ -20,6 +20,7 @@ pub async fn count_tokens(
             AnthropicMessagesCodec::new("https://api.anthropic.com", "2023-06-01")
                 .decode_count_tokens_response(&response)
         }
+        // Coupled to prepare_count_tokens' error message ("count_tokens is only available on AnthropicMessages routes").
         Err(LlmError::InvalidRequest { message }) if message.contains("count_tokens") => {
             Ok(approximate_tokens(request))
         }
@@ -27,21 +28,23 @@ pub async fn count_tokens(
     }
 }
 
-/// Character-count approximation used on non-Anthropic routes.
+/// Byte-length approximation used on non-Anthropic routes.
+///
+/// Only Text block content and system text are counted; tool/reasoning/image payloads contribute nothing.
 #[must_use]
 pub fn approximate_tokens(request: &LlmRequest) -> u64 {
-    let mut chars = 0u64;
+    let mut byte_len = 0u64;
     for block in &request.system {
-        chars += block.text.len() as u64;
+        byte_len += block.text.len() as u64;
     }
     for message in &request.messages {
         for block in &message.content {
             if let llm_client::ContentBlock::Text { text, .. } = block {
-                chars += text.len() as u64;
+                byte_len += text.len() as u64;
             }
         }
     }
-    (chars / APPROX_CHARS_PER_TOKEN).max(1)
+    (byte_len / APPROX_CHARS_PER_TOKEN).max(1)
 }
 
 #[cfg(test)]
@@ -57,7 +60,7 @@ mod tests {
     use std::sync::Mutex;
 
     // ----------------------------------------------------------------
-    // Approximation math tests
+    // Byte-length approximation math tests
     // ----------------------------------------------------------------
 
     #[test]
@@ -68,7 +71,7 @@ mod tests {
 
     #[test]
     fn approximate_tokens_known_char_count_divides_by_four() {
-        // 40 chars → 10 tokens
+        // 40 bytes → 10 tokens
         let req = LlmRequest::new("model").with_user_text("1234567890123456789012345678901234567890");
         assert_eq!(req.messages[0].content.len(), 1);
         assert_eq!(approximate_tokens(&req), 10);
@@ -77,7 +80,7 @@ mod tests {
     #[test]
     fn approximate_tokens_system_blocks_are_counted() {
         let mut req = LlmRequest::new("model");
-        req.system.push(SystemBlock::text("12345678")); // 8 chars
+        req.system.push(SystemBlock::text("12345678")); // 8 bytes
         assert_eq!(approximate_tokens(&req), 2); // 8/4 = 2
     }
 
@@ -98,7 +101,7 @@ mod tests {
 
     #[test]
     fn approximate_tokens_minimum_is_one_even_for_very_short_text() {
-        // 3 chars < 4 → floor to 1
+        // 3 bytes < 4 → floor to 1
         let req = LlmRequest::new("model").with_user_text("hi!");
         assert_eq!(approximate_tokens(&req), 1);
     }
@@ -234,7 +237,7 @@ mod tests {
             serde_json::json!({ "input_tokens": 9999 }),
         ));
         let client = openai_client();
-        // 20 chars of text → 5 tokens
+        // 20 bytes of text → 5 tokens
         let req = LlmRequest::new("gpt").with_user_text("12345678901234567890");
 
         let count = count_tokens(&client, &transport, &req).await.expect("count");

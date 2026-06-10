@@ -534,6 +534,8 @@ fn parse_iso8601_utc(s: &str) -> Option<u64> {
 /// Returns `Some(secs)` for a `RateLimited` error with a `retry_after` duration
 /// (minimum 1 second), `None` for `RateLimited` with no duration, and `None`
 /// for all other error types.
+///
+/// Note: the retry driver sleeps on the `LlmError`'s Duration verbatim; this helper is only for user-facing display.
 #[must_use]
 pub fn retry_secs_from_error(error: &llm_client::LlmError) -> Option<u64> {
     match error {

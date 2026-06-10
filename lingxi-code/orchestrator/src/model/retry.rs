@@ -318,6 +318,12 @@ mod jittered_delay_tests {
         assert_eq!(DEFAULT_BASE_DELAYS_MS, &[500, 1_000, 2_000]);
         assert_eq!(DEFAULT_RETRY_BUDGET, 3);
     }
+
+    #[test]
+    fn max_529_retries_is_byte_locked() {
+        assert_eq!(MAX_529_RETRIES, 3);
+        assert_eq!(RetryControl::default().max_529_retries, 3);
+    }
 }
 
 #[cfg(test)]

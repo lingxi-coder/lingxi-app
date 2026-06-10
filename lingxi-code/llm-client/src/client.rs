@@ -9,6 +9,9 @@ use crate::{
     Route, StreamDecoder, StreamingResponse, Transport, WireCodec,
 };
 
+/// Anthropic Messages API version sent by codecs this client constructs.
+const ANTHROPIC_VERSION: &str = "2023-06-01";
+
 #[derive(Debug)]
 pub struct DefaultLlmClient {
     registry: ModelRegistry,
@@ -169,7 +172,7 @@ impl DefaultLlmClient {
             });
         }
 
-        let codec = crate::AnthropicMessagesCodec::new(&entry.base_url, "2023-06-01");
+        let codec = crate::AnthropicMessagesCodec::new(&entry.base_url, ANTHROPIC_VERSION);
         let mut routed_request = request.clone();
         routed_request.model.clone_from(&resolved_route.request_model);
         let provider_request = codec.encode_count_tokens_request(&routed_request)?;
@@ -255,7 +258,7 @@ fn build_codec(provider: &crate::ProviderProfile) -> Result<Box<dyn WireCodec>, 
     match &provider.protocol {
         crate::ProtocolFamily::AnthropicMessages => Ok(Box::new(crate::AnthropicMessagesCodec::new(
             provider.base_url.clone(),
-            "2023-06-01",
+            ANTHROPIC_VERSION,
         ))),
         crate::ProtocolFamily::OpenAiChat => {
             Ok(Box::new(crate::OpenAiChatCodec::new(provider.base_url.clone())))

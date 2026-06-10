@@ -90,6 +90,12 @@ pub struct MitmCa {
     /// Per-host `rustls::ServerConfig` cache (the Rust analogue of the TS
     /// `ca.secureContexts` `SNICallback` cache). Keyed by hostname.
     pub(crate) server_configs: Mutex<HashMap<String, Arc<rustls::ServerConfig>>>,
+    /// Per-host `rustls::sign::CertifiedKey` cache, keyed by hostname. This is
+    /// the SNI-resolution cache for the P6b `MitmCertResolver` (the Rust
+    /// analogue of node `tls.createServer`'s `SNICallback` secure-context map):
+    /// one minted leaf chain + signing key per host, resolved live from the
+    /// `ClientHello` SNI.
+    pub(crate) cert_keys: Mutex<HashMap<String, Arc<rustls::sign::CertifiedKey>>>,
 }
 
 impl std::fmt::Debug for MitmCa {
@@ -252,6 +258,7 @@ fn load_ca(cert_path: &Path, key_path: &Path) -> Result<MitmCa, MitmCaError> {
         signing_key,
         leaf_certs: Mutex::new(HashMap::new()),
         server_configs: Mutex::new(HashMap::new()),
+        cert_keys: Mutex::new(HashMap::new()),
     })
 }
 
@@ -315,6 +322,7 @@ fn generate_ephemeral_ca() -> Result<MitmCa, MitmCaError> {
         signing_key,
         leaf_certs: Mutex::new(HashMap::new()),
         server_configs: Mutex::new(HashMap::new()),
+        cert_keys: Mutex::new(HashMap::new()),
     })
 }
 

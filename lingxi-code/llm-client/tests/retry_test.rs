@@ -27,6 +27,22 @@ fn retry_after_header_seconds_are_preserved() {
 }
 
 #[test]
+fn retry_after_ms_header_takes_precedence_over_seconds() {
+    let metadata = ResponseMetadata::new(429)
+        .with_header("retry-after", "7")
+        .with_header("retry-after-ms", "250");
+
+    let decision = RetryPolicy.classify_response(&metadata);
+
+    assert_eq!(
+        decision,
+        RetryDecision::Retry {
+            after: Some(Duration::from_millis(250))
+        }
+    );
+}
+
+#[test]
 fn non_retryable_errors_do_not_retry() {
     let policy = RetryPolicy;
     let errors = [

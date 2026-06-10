@@ -173,6 +173,7 @@ fn provider_fixtures_smoke_test() {
         decoded.content.as_slice(),
         [llm_client::ContentBlock::Text { text }] if text == "hi"
     ));
+    assert_eq!(decoded.stop_reason.as_deref(), Some("end_turn"));
     assert_eq!(
         decoded.provider_metadata["stop_reason"],
         serde_json::json!("end_turn")

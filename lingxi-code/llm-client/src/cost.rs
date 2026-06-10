@@ -9,8 +9,6 @@ use crate::{CostEstimate, LlmError, PricingModelRef, ProviderId, Usage};
 pub enum PricingPolicy {
     /// Return an unestimated cost when pricing is unknown.
     MarkUnestimated,
-    /// Apply a configured fallback tier when pricing is unknown.
-    ApplyFallbackTier,
     /// Return an error when pricing is unknown.
     RequirePriced,
 }
@@ -125,9 +123,7 @@ impl CostEstimator {
     ) -> Result<CostEstimate, LlmError> {
         let Some((pricing, source)) = self.catalog.lookup(&pricing_model) else {
             return match self.policy {
-                PricingPolicy::MarkUnestimated | PricingPolicy::ApplyFallbackTier => {
-                    Ok(CostEstimate::unestimated(pricing_model))
-                }
+                PricingPolicy::MarkUnestimated => Ok(CostEstimate::unestimated(pricing_model)),
                 PricingPolicy::RequirePriced => Err(LlmError::CostUnavailable {
                     message: format!(
                         "missing pricing for {:?}/{}",

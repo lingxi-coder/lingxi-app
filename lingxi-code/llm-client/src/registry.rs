@@ -19,8 +19,6 @@ pub struct ModelListing {
     pub aliases: Vec<String>,
     /// Model capabilities for this listing.
     pub capabilities: Capabilities,
-    /// Whether pricing is known for this model listing.
-    pub pricing_known: bool,
 }
 
 /// Resolved route identity for one requested model.
@@ -73,38 +71,54 @@ impl ModelRegistry {
                     billing_model: model.billing_model.clone(),
                     aliases: model.aliases.clone(),
                     capabilities: model.capabilities,
-                    pricing_known: !provider.pricing.require_priced,
                 })
             })
             .collect()
     }
 
     /// Resolve a requested model id or alias without guessing provider from model text.
+    ///
+    /// A reference matching more than one configured model is rejected as
+    /// ambiguous instead of silently resolving by configuration order.
     pub fn resolve(&self, requested: &str) -> Result<ResolvedRoute, LlmError> {
+        let mut matches = Vec::new();
         for provider in &self.config.providers {
             for model in &provider.models {
-                let matches = model.display_model == requested
+                let is_match = model.display_model == requested
                     || model.request_model == requested
                     || model.aliases.iter().any(|alias| alias == requested);
 
-                if matches {
-                    return Ok(ResolvedRoute {
-                        provider_id: provider.provider_id.clone(),
-                        profile_name: provider.profile_name.clone(),
-                        request_model: model.request_model.clone(),
-                        display_model: model.display_model.clone(),
-                        pricing_model: PricingModelRef {
-                            pricing_provider_id: provider.provider_id.clone(),
-                            billing_model: model.billing_model.clone(),
-                            request_model: model.request_model.clone(),
-                            display_model: model.display_model.clone(),
-                        },
-                        capabilities: model.capabilities,
-                    });
+                if is_match {
+                    matches.push((provider, model));
                 }
             }
         }
 
-        Err(LlmError::ModelUnavailable)
+        match matches.as_slice() {
+            [] => Err(LlmError::ModelUnavailable),
+            [(provider, model)] => Ok(ResolvedRoute {
+                provider_id: provider.provider_id.clone(),
+                profile_name: provider.profile_name.clone(),
+                request_model: model.request_model.clone(),
+                display_model: model.display_model.clone(),
+                pricing_model: PricingModelRef {
+                    pricing_provider_id: provider.provider_id.clone(),
+                    billing_model: model.billing_model.clone(),
+                    request_model: model.request_model.clone(),
+                    display_model: model.display_model.clone(),
+                },
+                capabilities: model.capabilities,
+            }),
+            multiple => Err(LlmError::InvalidRequest {
+                message: format!(
+                    "model reference '{requested}' is ambiguous across profiles: {}",
+                    multiple
+                        .iter()
+                        .map(|(provider, _)| provider.profile_name.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+            }),
+        }
     }
 }

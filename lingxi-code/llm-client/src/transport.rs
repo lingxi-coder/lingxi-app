@@ -1,33 +1,55 @@
-//! Transport-neutral request and response primitives.
+//! Transport contract between prepared provider requests and host HTTP stacks.
+//!
+//! `llm-client` never talks HTTP itself. Hosts implement [`Transport`] over
+//! their HTTP client and the client orchestrates encode → send → decode
+//! around it.
 
 use std::collections::BTreeMap;
+use std::future::Future;
+use std::pin::Pin;
 
-/// HTTP request after protocol and endpoint preparation.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PreparedRequest {
-    /// Absolute request URL.
-    pub url: String,
-    /// Header map ready for authentication and transport.
-    pub headers: BTreeMap<String, String>,
-    /// Serialized request body.
-    pub body: Vec<u8>,
+use crate::{LlmError, ProviderRequest, ProviderResponse, RawStreamFrame};
+
+/// Boxed future alias keeping [`Transport`] object-safe without an
+/// `async_trait` dependency.
+pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
+
+/// Asynchronous HTTP seam implemented by hosts.
+///
+/// Implementations own HTTP semantics only: connection, TLS, and timeout
+/// failures map to [`LlmError::Transport`]. Provider payloads are never
+/// interpreted here — non-2xx responses come back as data and the
+/// orchestration layer routes them through the codec error taxonomy.
+pub trait Transport: Send + Sync {
+    /// Send a request and await the complete response.
+    fn execute<'a>(
+        &'a self,
+        request: &'a ProviderRequest,
+    ) -> BoxFuture<'a, Result<ProviderResponse, LlmError>>;
+
+    /// Open a streaming response.
+    ///
+    /// On success each frame is one SSE `data:` payload without the field
+    /// prefix (see [`crate::SseFrameSplitter`] for byte-stream hosts). For
+    /// non-2xx statuses the frames carry raw body bytes instead.
+    fn open_stream<'a>(
+        &'a self,
+        request: &'a ProviderRequest,
+    ) -> BoxFuture<'a, Result<StreamingResponse, LlmError>>;
 }
 
-impl PreparedRequest {
-    /// Create a prepared request with no headers or body.
-    #[must_use]
-    pub fn new(url: impl Into<String>) -> Self {
-        Self {
-            url: url.into(),
-            headers: BTreeMap::new(),
-            body: Vec::new(),
-        }
-    }
+/// Status line and headers of a streaming response, plus its frame stream.
+pub struct StreamingResponse {
+    /// HTTP status code.
+    pub status: u16,
+    /// Response headers; lowercase names expected.
+    pub headers: BTreeMap<String, String>,
+    /// Frame stream, drained by the orchestration layer.
+    pub frames: Box<dyn FrameStream>,
+}
 
-    /// Attach a serialized request body.
-    #[must_use]
-    pub fn with_body(mut self, body: Vec<u8>) -> Self {
-        self.body = body;
-        self
-    }
+/// Pull-based stream of raw frames.
+pub trait FrameStream: Send {
+    /// Next frame; `Ok(None)` is the normal end of stream.
+    fn next_frame(&mut self) -> BoxFuture<'_, Result<Option<RawStreamFrame>, LlmError>>;
 }

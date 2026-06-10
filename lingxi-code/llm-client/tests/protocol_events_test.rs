@@ -5,6 +5,7 @@ fn sample_response() -> LlmResponse {
         id: "resp_1".to_string(),
         model: "model-a".to_string(),
         content: vec![],
+        stop_reason: None,
         usage: Usage::default(),
         cost: None,
         provider_metadata: serde_json::json!({}),

@@ -32,7 +32,9 @@ impl Redactor {
     #[must_use]
     pub fn redact_url(&self, url: &str) -> String {
         let Ok(mut parsed) = url::Url::parse(url) else {
-            return url.to_string();
+            // Relative or malformed URLs still get their query scrubbed —
+            // returning the input unredacted would leak secrets.
+            return redact_raw_query(url);
         };
 
         let pairs: Vec<(String, String)> = parsed
@@ -91,6 +93,34 @@ fn redact_json_object(map: &Map<String, Value>) -> Map<String, Value> {
         .collect()
 }
 
+fn redact_raw_query(url: &str) -> String {
+    let Some((base, rest)) = url.split_once('?') else {
+        return url.to_string();
+    };
+    let (query, fragment) = match rest.split_once('#') {
+        Some((query, fragment)) => (query, Some(fragment)),
+        None => (rest, None),
+    };
+
+    let pairs: Vec<(String, String)> = url::form_urlencoded::parse(query.as_bytes())
+        .map(|(key, value)| {
+            let value = if is_secret_key(&key) {
+                REDACTED.to_string()
+            } else {
+                value.into_owned()
+            };
+            (key.into_owned(), value)
+        })
+        .collect();
+
+    let mut redacted = format!("{base}?{}", encode_pairs(&pairs));
+    if let Some(fragment) = fragment {
+        redacted.push('#');
+        redacted.push_str(fragment);
+    }
+    redacted
+}
+
 fn encode_pairs(pairs: &[(String, String)]) -> String {
     pairs
         .iter()
@@ -114,7 +144,15 @@ fn percent_encode(value: &str) -> String {
 fn is_secret_header(name: &str) -> bool {
     matches!(
         name.to_ascii_lowercase().as_str(),
-        "authorization" | "x-api-key" | "api-key" | "x-goog-api-key"
+        "authorization"
+            | "proxy-authorization"
+            | "x-api-key"
+            | "api-key"
+            | "x-goog-api-key"
+            | "x-auth-token"
+            | "x-amz-security-token"
+            | "cookie"
+            | "set-cookie"
     )
 }
 
@@ -126,8 +164,14 @@ fn is_secret_key(name: &str) -> bool {
             | "key"
             | "access_token"
             | "refresh_token"
+            | "id_token"
+            | "token"
             | "authorization"
+            | "assertion"
+            | "client_secret"
             | "secret_access_key"
+            | "password"
             | "signature"
+            | "sig"
     )
 }

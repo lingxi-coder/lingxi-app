@@ -24,6 +24,18 @@ pub struct LlmRequest {
     pub response_format: Option<ResponseFormat>,
     /// Whether caller requested streaming.
     pub stream: bool,
+    /// Optional maximum output tokens.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_tokens: Option<u32>,
+    /// Optional sampling temperature.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub temperature: Option<f64>,
+    /// Optional nucleus-sampling parameter.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub top_p: Option<f64>,
+    /// Sequences that end generation early.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub stop_sequences: Vec<String>,
 }
 
 impl LlmRequest {
@@ -46,7 +58,8 @@ impl LlmRequest {
         self
     }
 
-    /// Add an image block to the most recent user message.
+    /// Add an image block to the most recent user message, or start a new
+    /// user message when the conversation does not end with one.
     #[must_use]
     pub fn with_image(mut self, media_type: impl Into<String>, bytes: Vec<u8>) -> Self {
         let block = ContentBlock::Image {
@@ -54,13 +67,12 @@ impl LlmRequest {
             bytes,
         };
 
-        if let Some(message) = self.messages.last_mut() {
-            message.content.push(block);
-        } else {
-            self.messages.push(Message {
+        match self.messages.last_mut() {
+            Some(message) if message.role == "user" => message.content.push(block),
+            _ => self.messages.push(Message {
                 role: "user".to_string(),
                 content: vec![block],
-            });
+            }),
         }
 
         self
@@ -114,11 +126,22 @@ pub enum ContentBlock {
         tool_call_id: String,
         /// Tool result JSON.
         output: Value,
+        /// Whether the result reports a tool failure.
+        #[serde(default)]
+        is_error: bool,
     },
     /// Reasoning block.
     Reasoning {
         /// Reasoning text or provider-supplied summary.
         text: String,
+        /// Provider integrity signature required to round-trip the block.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        signature: Option<String>,
+    },
+    /// Opaque redacted-reasoning block that must round-trip unmodified.
+    RedactedThinking {
+        /// Provider-opaque payload.
+        data: String,
     },
 }
 
@@ -131,6 +154,10 @@ pub struct LlmResponse {
     pub model: String,
     /// Output content blocks.
     pub content: Vec<ContentBlock>,
+    /// Normalized terminal stop reason (Anthropic vocabulary: `end_turn`,
+    /// `tool_use`, `max_tokens`, `stop_sequence`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stop_reason: Option<String>,
     /// Normalized usage.
     pub usage: Usage,
     /// Optional per-call cost estimate.
@@ -144,11 +171,6 @@ pub struct LlmResponse {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum LlmEvent {
-    /// Text delta event.
-    TextDelta {
-        /// Delta text payload.
-        text: String,
-    },
     /// Response start snapshot.
     MessageStart {
         /// Response metadata snapshot.
@@ -207,6 +229,11 @@ pub enum ContentDelta {
     ThinkingDelta {
         /// Thinking text.
         thinking: String,
+    },
+    /// Reasoning signature delta payload.
+    SignatureDelta {
+        /// Signature fragment for the open reasoning block.
+        signature: String,
     },
 }
 
@@ -312,26 +339,6 @@ impl ProviderResponse {
     }
 }
 
-/// Encoded provider request body.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub enum PreparedBody {
-    /// JSON request body.
-    Json(Value),
-    /// Raw bytes request body.
-    Bytes(Vec<u8>),
-}
-
-/// Raw provider response.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RawResponse {
-    /// HTTP status code.
-    pub status: u16,
-    /// Raw body bytes.
-    pub body: Vec<u8>,
-    /// Optional provider request id.
-    pub request_id: Option<String>,
-}
-
 /// Raw streaming frame.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RawStreamFrame {
@@ -345,16 +352,6 @@ impl RawStreamFrame {
     pub fn new(bytes: Vec<u8>) -> Self {
         Self { bytes }
     }
-}
-
-/// Provider protocol codec.
-pub trait Protocol: std::fmt::Debug + Send + Sync {
-    /// Encode a canonical request into provider body bytes or JSON.
-    fn encode(&self, request: &LlmRequest) -> Result<PreparedBody, LlmError>;
-    /// Decode a raw response into a canonical response.
-    fn decode_response(&self, response: RawResponse) -> Result<LlmResponse, LlmError>;
-    /// Create a stream decoder for this protocol.
-    fn stream_decoder(&self) -> Box<dyn StreamDecoder>;
 }
 
 /// Provider wire codec.
@@ -404,6 +401,12 @@ pub fn validate_capabilities(request: &LlmRequest, capabilities: Capabilities) -
         });
     }
 
+    if (!request.tools.is_empty() || request.tool_choice.is_some()) && !capabilities.tools {
+        return Err(LlmError::UnsupportedCapability {
+            capability: "tools".to_string(),
+        });
+    }
+
     if request.response_format.is_some() && !capabilities.structured_output {
         return Err(LlmError::UnsupportedCapability {
             capability: "structured_output".to_string(),
@@ -430,7 +433,9 @@ pub fn validate_capabilities(request: &LlmRequest, capabilities: Capabilities) -
                         capability: "tools".to_string(),
                     });
                 }
-                ContentBlock::Reasoning { .. } if !capabilities.reasoning => {
+                ContentBlock::Reasoning { .. } | ContentBlock::RedactedThinking { .. }
+                    if !capabilities.reasoning =>
+                {
                     return Err(LlmError::UnsupportedCapability {
                         capability: "reasoning".to_string(),
                     });

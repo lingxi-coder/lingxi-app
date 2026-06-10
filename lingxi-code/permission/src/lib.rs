@@ -9,6 +9,7 @@ pub mod auto_edit_safety;
 pub mod bash_security;
 #[cfg(feature = "bash-ast")]
 pub mod bash_tree_sitter;
+pub mod bypass_guard;
 pub mod classifier;
 pub mod cli_mode;
 pub mod dangerous_patterns;
@@ -42,6 +43,7 @@ pub use auto_edit_safety::{
     DANGEROUS_DIRECTORIES, DANGEROUS_FILES,
 };
 pub use bash_security::{bash_command_is_safe, BashSafetyVerdict};
+pub use bypass_guard::{enforce_bypass_safety, BypassEnv};
 pub use classifier::is_classifier_permissions_enabled;
 pub use cli_mode::{initial_permission_mode_from_cli, permission_mode_from_cli_string, CliModeSettings};
 pub use dangerous_patterns::{

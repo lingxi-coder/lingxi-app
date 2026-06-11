@@ -59,7 +59,7 @@ pub struct RoutingOverrides {
 
 use llm_client::{
     AuthStrategy, Capabilities, ClientConfig, CredentialConfig, LlmError, ModelProfile,
-    PricingConfig, ProtocolFamily, ProviderId, ProviderProfile,
+    PricingConfig, ProtocolFamily, ProviderId, ProviderProfile, TokenPricing,
 };
 
 /// Build the built-in Anthropic [`ClientConfig`] for [`llm_client::DefaultLlmClient`].
@@ -311,6 +311,14 @@ fn apply_one_provider(
         model_profiles.push(parse_model_entry(profile_name, m)?);
     }
 
+    // Parse optional "pricing" block → per-model price overrides.
+    let pricing =
+        if let Some(pricing_val) = entry.get("pricing") {
+            parse_pricing_overrides(profile_name, pricing_val, &model_profiles)?
+        } else {
+            PricingConfig::default()
+        };
+
     cfg.providers.push(ProviderProfile {
         provider_id,
         profile_name: profile_name.to_string(),
@@ -319,9 +327,154 @@ fn apply_one_provider(
         auth: AuthStrategy::ApiKey,
         credential: CredentialConfig::Env { var: api_key_env },
         models: model_profiles,
-        pricing: PricingConfig::default(),
+        pricing,
     });
     Ok(())
+}
+
+/// Parse a `providers.<name>.pricing` JSON object into [`PricingConfig::overrides`].
+///
+/// ## Settings shape
+///
+/// ```json
+/// "pricing": {
+///   "<model-id>": {
+///     "inputPerMtok": 1.5,
+///     "outputPerMtok": 6.0,
+///     "cacheWritePerMtok": 1.875,
+///     "cacheReadPerMtok": 0.15,
+///     "reasoningPerMtok": 6.0
+///   }
+/// }
+/// ```
+///
+/// `model-id` is the display model `id` from the `models` array (e.g.
+/// `"gpt-4o"` in `"models": [{"id": "gpt-4o"}]`).  Unknown model ids (not
+/// present in `model_profiles`) are rejected as config bugs.  Negative prices
+/// and non-number values are also rejected.  Unknown keys inside a model's
+/// pricing object are rejected (strict — typos in field names could silently
+/// produce wrong pricing).
+///
+/// # Errors
+///
+/// Returns [`LlmError::InvalidRequest`] for any of the above violations.
+fn parse_pricing_overrides(
+    profile_name: &str,
+    pricing_val: &serde_json::Value,
+    model_profiles: &[ModelProfile],
+) -> Result<PricingConfig, LlmError> {
+    const KNOWN_PRICING_KEYS: &[&str] = &[
+        "inputPerMtok",
+        "outputPerMtok",
+        "cacheWritePerMtok",
+        "cacheReadPerMtok",
+        "reasoningPerMtok",
+    ];
+
+    let pricing_obj = pricing_val.as_object().ok_or_else(|| LlmError::InvalidRequest {
+        message: format!(
+            "provider {profile_name:?}: \"pricing\" must be an object (got {})",
+            match pricing_val {
+                serde_json::Value::Array(_) => "array",
+                serde_json::Value::Bool(_) => "bool",
+                serde_json::Value::Number(_) => "number",
+                serde_json::Value::String(_) => "string",
+                serde_json::Value::Null => "null",
+                serde_json::Value::Object(_) => "object",
+            }
+        ),
+    })?;
+
+    let mut overrides = Vec::new();
+
+    for (model_id, model_pricing_val) in pricing_obj {
+        // Verify the model id is known in this profile's models list.
+        let is_known = model_profiles.iter().any(|m| m.display_model == *model_id);
+        if !is_known {
+            return Err(LlmError::InvalidRequest {
+                message: format!(
+                    "provider {profile_name:?}: pricing key {model_id:?} is not in the models list — add the model first or remove the override"
+                ),
+            });
+        }
+
+        let model_pricing_obj = model_pricing_val.as_object().ok_or_else(|| LlmError::InvalidRequest {
+            message: format!(
+                "provider {profile_name:?}: pricing[{model_id:?}] must be an object"
+            ),
+        })?;
+
+        // Validate: no unknown keys.
+        for key in model_pricing_obj.keys() {
+            if !KNOWN_PRICING_KEYS.contains(&key.as_str()) {
+                return Err(LlmError::InvalidRequest {
+                    message: format!(
+                        "provider {profile_name:?}: pricing[{model_id:?}] unknown key {key:?} (known: inputPerMtok, outputPerMtok, cacheWritePerMtok, cacheReadPerMtok, reasoningPerMtok)"
+                    ),
+                });
+            }
+        }
+
+        // Parse required fields.
+        let input_per_million = parse_price_field(profile_name, model_id, model_pricing_obj, "inputPerMtok", true)?
+            .unwrap_or(0.0);
+        let output_per_million = parse_price_field(profile_name, model_id, model_pricing_obj, "outputPerMtok", true)?
+            .unwrap_or(0.0);
+        let cache_write_per_million = parse_price_field(profile_name, model_id, model_pricing_obj, "cacheWritePerMtok", false)?
+            .unwrap_or(0.0);
+        let cache_read_per_million = parse_price_field(profile_name, model_id, model_pricing_obj, "cacheReadPerMtok", false)?
+            .unwrap_or(0.0);
+        let reasoning_per_million = parse_price_field(profile_name, model_id, model_pricing_obj, "reasoningPerMtok", false)?
+            .unwrap_or(0.0);
+
+        let pricing = TokenPricing {
+            input_per_million,
+            output_per_million,
+            cache_write_per_million,
+            cache_read_per_million,
+            reasoning_per_million,
+        };
+        overrides.push((model_id.clone(), pricing));
+    }
+
+    Ok(PricingConfig { require_priced: false, overrides })
+}
+
+/// Parse and validate one price field from a model's pricing object.
+///
+/// Returns `Ok(None)` when `required = false` and the key is absent;
+/// `Ok(Some(v))` when present and valid; `Err` on missing-required, non-number,
+/// or negative.
+fn parse_price_field(
+    profile_name: &str,
+    model_id: &str,
+    obj: &serde_json::Map<String, serde_json::Value>,
+    key: &str,
+    required: bool,
+) -> Result<Option<f64>, LlmError> {
+    match obj.get(key) {
+        None if required => Err(LlmError::InvalidRequest {
+            message: format!(
+                "provider {profile_name:?}: pricing[{model_id:?}] missing required field {key:?}"
+            ),
+        }),
+        None => Ok(None),
+        Some(val) => {
+            let v = val.as_f64().ok_or_else(|| LlmError::InvalidRequest {
+                message: format!(
+                    "provider {profile_name:?}: pricing[{model_id:?}].{key} must be a number, got {val}"
+                ),
+            })?;
+            if v < 0.0 {
+                return Err(LlmError::InvalidRequest {
+                    message: format!(
+                        "provider {profile_name:?}: pricing[{model_id:?}].{key} must be >= 0 (got {v})"
+                    ),
+                });
+            }
+            Ok(Some(v))
+        }
+    }
 }
 
 /// Parse one `models[n]` entry from the settings JSON into a [`ModelProfile`].
@@ -1103,5 +1256,188 @@ mod tests {
             Some(&"claude-sonnet-4-20250514".to_string()),
             "alias key 'llama' must resolve to display model 'llama-3.3-70b'"
         );
+    }
+
+    // ── parse_pricing_overrides (Task 2) tests ─────────────────────────────────
+
+    /// Happy path: a provider with a pricing block parses correctly and
+    /// `PricingConfig::overrides` carries the right `TokenPricing` values.
+    #[test]
+    fn pricing_overrides_happy_path() {
+        let mut cfg = builtin_anthropic_config("https://api.anthropic.com", false);
+        let providers: BTreeMap<String, serde_json::Value> = serde_json::from_str(r#"{
+            "myprovider": {
+                "type": "openai",
+                "baseUrl": "https://api.example.com/v1",
+                "apiKeyEnv": "MY_API_KEY",
+                "models": [{ "id": "gpt-custom" }],
+                "pricing": {
+                    "gpt-custom": {
+                        "inputPerMtok": 1.5,
+                        "outputPerMtok": 6.0,
+                        "cacheWritePerMtok": 1.875,
+                        "cacheReadPerMtok": 0.15,
+                        "reasoningPerMtok": 6.0
+                    }
+                }
+            }
+        }"#).unwrap();
+
+        apply_settings_providers(&mut cfg, &providers, None).expect("must succeed");
+
+        let p = cfg.providers.iter().find(|p| p.profile_name == "myprovider").unwrap();
+        assert_eq!(p.pricing.overrides.len(), 1);
+        let (model_id, tp) = &p.pricing.overrides[0];
+        assert_eq!(model_id, "gpt-custom");
+        assert!((tp.input_per_million - 1.5).abs() < 1e-12, "input_per_million");
+        assert!((tp.output_per_million - 6.0).abs() < 1e-12, "output_per_million");
+        assert!((tp.cache_write_per_million - 1.875).abs() < 1e-12, "cache_write_per_million");
+        assert!((tp.cache_read_per_million - 0.15).abs() < 1e-12, "cache_read_per_million");
+        assert!((tp.reasoning_per_million - 6.0).abs() < 1e-12, "reasoning_per_million");
+    }
+
+    /// Absent pricing block → empty overrides (existing behavior preserved).
+    #[test]
+    fn pricing_overrides_absent_gives_empty() {
+        let mut cfg = builtin_anthropic_config("https://api.anthropic.com", false);
+        let providers: BTreeMap<String, serde_json::Value> = serde_json::from_str(r#"{
+            "myprovider": {
+                "type": "openai",
+                "baseUrl": "https://api.example.com/v1",
+                "apiKeyEnv": "MY_API_KEY",
+                "models": [{ "id": "gpt-custom" }]
+            }
+        }"#).unwrap();
+
+        apply_settings_providers(&mut cfg, &providers, None).expect("must succeed");
+
+        let p = cfg.providers.iter().find(|p| p.profile_name == "myprovider").unwrap();
+        assert!(
+            p.pricing.overrides.is_empty(),
+            "absent pricing must produce empty overrides"
+        );
+    }
+
+    /// Unknown model id in the pricing block → `LlmError::InvalidRequest`.
+    #[test]
+    fn pricing_overrides_unknown_model_is_error() {
+        let mut cfg = builtin_anthropic_config("https://api.anthropic.com", false);
+        let providers: BTreeMap<String, serde_json::Value> = serde_json::from_str(r#"{
+            "myprovider": {
+                "type": "openai",
+                "baseUrl": "https://api.example.com/v1",
+                "apiKeyEnv": "MY_API_KEY",
+                "models": [{ "id": "gpt-custom" }],
+                "pricing": {
+                    "nonexistent-model": { "inputPerMtok": 1.0, "outputPerMtok": 2.0 }
+                }
+            }
+        }"#).unwrap();
+
+        let err = apply_settings_providers(&mut cfg, &providers, None).unwrap_err();
+        assert!(
+            matches!(&err, LlmError::InvalidRequest { message } if message.contains("nonexistent-model")),
+            "expected InvalidRequest naming the unknown model, got: {err:?}"
+        );
+    }
+
+    /// Negative price → `LlmError::InvalidRequest`.
+    #[test]
+    fn pricing_overrides_negative_price_is_error() {
+        let mut cfg = builtin_anthropic_config("https://api.anthropic.com", false);
+        let providers: BTreeMap<String, serde_json::Value> = serde_json::from_str(r#"{
+            "myprovider": {
+                "type": "openai",
+                "baseUrl": "https://api.example.com/v1",
+                "apiKeyEnv": "MY_API_KEY",
+                "models": [{ "id": "gpt-custom" }],
+                "pricing": {
+                    "gpt-custom": { "inputPerMtok": -1.0, "outputPerMtok": 2.0 }
+                }
+            }
+        }"#).unwrap();
+
+        let err = apply_settings_providers(&mut cfg, &providers, None).unwrap_err();
+        assert!(
+            matches!(&err, LlmError::InvalidRequest { message } if message.contains("inputPerMtok") && message.contains(">= 0")),
+            "expected InvalidRequest about negative price, got: {err:?}"
+        );
+    }
+
+    /// Unknown key in a model's pricing object → `LlmError::InvalidRequest` naming it.
+    #[test]
+    fn pricing_overrides_unknown_key_is_error() {
+        let mut cfg = builtin_anthropic_config("https://api.anthropic.com", false);
+        let providers: BTreeMap<String, serde_json::Value> = serde_json::from_str(r#"{
+            "myprovider": {
+                "type": "openai",
+                "baseUrl": "https://api.example.com/v1",
+                "apiKeyEnv": "MY_API_KEY",
+                "models": [{ "id": "gpt-custom" }],
+                "pricing": {
+                    "gpt-custom": {
+                        "inputPerMtok": 1.0,
+                        "outputPerMtok": 2.0,
+                        "typoKey": 3.0
+                    }
+                }
+            }
+        }"#).unwrap();
+
+        let err = apply_settings_providers(&mut cfg, &providers, None).unwrap_err();
+        assert!(
+            matches!(&err, LlmError::InvalidRequest { message } if message.contains("typoKey")),
+            "expected InvalidRequest naming the unknown key, got: {err:?}"
+        );
+    }
+
+    /// Non-number price value → `LlmError::InvalidRequest`.
+    #[test]
+    fn pricing_overrides_non_number_price_is_error() {
+        let mut cfg = builtin_anthropic_config("https://api.anthropic.com", false);
+        let providers: BTreeMap<String, serde_json::Value> = serde_json::from_str(r#"{
+            "myprovider": {
+                "type": "openai",
+                "baseUrl": "https://api.example.com/v1",
+                "apiKeyEnv": "MY_API_KEY",
+                "models": [{ "id": "gpt-custom" }],
+                "pricing": {
+                    "gpt-custom": { "inputPerMtok": "not-a-number", "outputPerMtok": 2.0 }
+                }
+            }
+        }"#).unwrap();
+
+        let err = apply_settings_providers(&mut cfg, &providers, None).unwrap_err();
+        assert!(
+            matches!(&err, LlmError::InvalidRequest { message } if message.contains("inputPerMtok") && message.contains("number")),
+            "expected InvalidRequest about non-number, got: {err:?}"
+        );
+    }
+
+    /// Optional fields (cacheWrite/cacheRead/reasoning) may be omitted.
+    #[test]
+    fn pricing_overrides_optional_fields_may_be_absent() {
+        let mut cfg = builtin_anthropic_config("https://api.anthropic.com", false);
+        let providers: BTreeMap<String, serde_json::Value> = serde_json::from_str(r#"{
+            "myprovider": {
+                "type": "openai",
+                "baseUrl": "https://api.example.com/v1",
+                "apiKeyEnv": "MY_API_KEY",
+                "models": [{ "id": "gpt-custom" }],
+                "pricing": {
+                    "gpt-custom": { "inputPerMtok": 2.0, "outputPerMtok": 8.0 }
+                }
+            }
+        }"#).unwrap();
+
+        apply_settings_providers(&mut cfg, &providers, None).expect("must succeed with minimal pricing");
+
+        let p = cfg.providers.iter().find(|p| p.profile_name == "myprovider").unwrap();
+        let (_, tp) = &p.pricing.overrides[0];
+        assert!((tp.input_per_million - 2.0).abs() < 1e-12);
+        assert!((tp.output_per_million - 8.0).abs() < 1e-12);
+        assert!((tp.cache_write_per_million - 0.0).abs() < 1e-12, "cache_write defaults to 0");
+        assert!((tp.cache_read_per_million - 0.0).abs() < 1e-12, "cache_read defaults to 0");
+        assert!((tp.reasoning_per_million - 0.0).abs() < 1e-12, "reasoning defaults to 0");
     }
 }

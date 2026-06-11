@@ -311,7 +311,7 @@ pub async fn build_mobile_inner(
     //      built-in Anthropic profile (same pattern as engine-desktop).
     let llm_transport: Arc<dyn Transport> =
         Arc::new(LlmTransportBridge::new(DynHttp(http.clone())));
-    let (llm_client, routing_overrides) = {
+    let (llm_client, routing_overrides, pricing_overrides) = {
         let mut cfg_obj = builtin_anthropic_config(&cfg.api_base, false);
         // Run whenever EITHER key is present: a routing-only settings file
         // (aliases onto builtin models, no custom providers) must still apply.
@@ -336,20 +336,33 @@ pub async fn build_mobile_inner(
                 }
             }
         }).unwrap_or_default();
+        // Extract per-profile pricing overrides before cfg_obj is consumed.
+        let pricing_overrides: Vec<(llm_client::ProviderId, String, llm_client::TokenPricing)> =
+            cfg_obj.providers.iter().flat_map(|p| {
+                p.pricing.overrides.iter().filter_map(|(model_id, tp)| {
+                    p.models.iter()
+                        .find(|m| m.display_model == *model_id)
+                        .map(|m| (p.provider_id.clone(), m.billing_model.clone(), *tp))
+                })
+            }).collect();
         let client = Arc::new(
             DefaultLlmClient::from_config(cfg_obj)
                 .map_err(|e| MobileBuildError::ApiBase(e.to_string()))?,
         );
-        (client, routing_overrides)
+        (client, routing_overrides, pricing_overrides)
     };
     let subscriber_state = SubscriberState { is_subscriber: false, is_enterprise: false };
 
     // 3c-T3: build the cost estimator from the builtin reference catalog.
+    // T2: apply per-profile pricing overrides from settings.
     let cost_estimator = {
         use llm_client::{CostEstimator, PricingPolicy};
         use orchestrator::cost_wiring::llm_catalog_from_cost;
         let cost_cat = cost::pricing::PricingCatalog::builtin_reference();
-        let llm_cat = llm_catalog_from_cost(&cost_cat);
+        let mut llm_cat = llm_catalog_from_cost(&cost_cat);
+        for (provider_id, billing_model, tp) in &pricing_overrides {
+            llm_cat.add_override(provider_id.clone(), billing_model.clone(), *tp);
+        }
         Arc::new(CostEstimator::new(llm_cat, PricingPolicy::MarkUnestimated))
     };
 

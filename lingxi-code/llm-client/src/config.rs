@@ -142,8 +142,26 @@ pub struct Capabilities {
 }
 
 /// Pricing resolution behavior for a profile.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// ## Per-model overrides
+///
+/// `overrides` is a list of `(model_id, TokenPricing)` pairs, where `model_id`
+/// is the **display model** (the `id` key from the `models` array in settings).
+/// At the host build step, each override is applied onto the `PricingCatalog`
+/// keyed by the model's **billing model** (resolved via the profile's
+/// [`ModelProfile`] table).
+///
+/// Serde round-trips the field; absent → empty vec (existing configs unaffected).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct PricingConfig {
     /// Whether missing pricing must fail instead of returning unestimated cost.
+    #[serde(default)]
     pub require_priced: bool,
+    /// Per-model price overrides declared in the `providers.<name>.pricing` object.
+    ///
+    /// Each entry is `(display_model_id, TokenPricing)`.  The billing-model
+    /// resolution and catalog insertion happen at the host build step, not at
+    /// parse time.  Absent → empty (no overrides).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub overrides: Vec<(String, crate::cost::TokenPricing)>,
 }

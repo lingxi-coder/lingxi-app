@@ -7,7 +7,7 @@
 //!
 //! See plan `docs/superpowers/plans/2026-05-25-m5-14-release-v0.6.0.md` Task 4.
 
-use api_client::types::ContentBlockApi;
+use llm_client::ContentBlock as LlmContentBlock;
 use orchestrator::test_support::{
     mock_message_response, MockApiClient, MockOutputStream, NoOpPermissionGate,
     StaticMemoryProvider,
@@ -99,8 +99,9 @@ async fn single_turn_produces_two_jsonl_lines() {
     let writer = Arc::new(JsonlWriter::new(path.clone(), Arc::clone(&fs)));
 
     let api = Arc::new(MockApiClient::new(vec![mock_message_response(
-        vec![ContentBlockApi::Text {
+        vec![LlmContentBlock::Text {
             text: "hello".into(),
+            cache_control: None,
         }],
         Some("end_turn"),
     )]));
@@ -135,8 +136,9 @@ async fn single_turn_line_types_are_user_then_assistant() {
     let writer = Arc::new(JsonlWriter::new(path.clone(), Arc::clone(&fs)));
 
     let api = Arc::new(MockApiClient::new(vec![mock_message_response(
-        vec![ContentBlockApi::Text {
+        vec![LlmContentBlock::Text {
             text: "hello".into(),
+            cache_control: None,
         }],
         Some("end_turn"),
     )]));
@@ -176,8 +178,9 @@ async fn single_turn_parent_uuid_chain_is_correct() {
     let writer = Arc::new(JsonlWriter::new(path.clone(), Arc::clone(&fs)));
 
     let api = Arc::new(MockApiClient::new(vec![mock_message_response(
-        vec![ContentBlockApi::Text {
+        vec![LlmContentBlock::Text {
             text: "hello".into(),
+            cache_control: None,
         }],
         Some("end_turn"),
     )]));
@@ -217,8 +220,9 @@ async fn single_turn_all_lines_share_session_id() {
     let writer = Arc::new(JsonlWriter::new(path.clone(), Arc::clone(&fs)));
 
     let api = Arc::new(MockApiClient::new(vec![mock_message_response(
-        vec![ContentBlockApi::Text {
+        vec![LlmContentBlock::Text {
             text: "hello".into(),
+            cache_control: None,
         }],
         Some("end_turn"),
     )]));
@@ -252,8 +256,9 @@ async fn single_turn_file_has_lf_only_terminator_and_compact_json() {
     let writer = Arc::new(JsonlWriter::new(path.clone(), Arc::clone(&fs)));
 
     let api = Arc::new(MockApiClient::new(vec![mock_message_response(
-        vec![ContentBlockApi::Text {
+        vec![LlmContentBlock::Text {
             text: "hello".into(),
+            cache_control: None,
         }],
         Some("end_turn"),
     )]));
@@ -308,8 +313,9 @@ async fn single_turn_user_line_has_usertype_external() {
     let writer = Arc::new(JsonlWriter::new(path.clone(), Arc::clone(&fs)));
 
     let api = Arc::new(MockApiClient::new(vec![mock_message_response(
-        vec![ContentBlockApi::Text {
+        vec![LlmContentBlock::Text {
             text: "hello".into(),
+            cache_control: None,
         }],
         Some("end_turn"),
     )]));
@@ -345,8 +351,9 @@ async fn single_turn_is_sidechain_is_false() {
     let writer = Arc::new(JsonlWriter::new(path.clone(), Arc::clone(&fs)));
 
     let api = Arc::new(MockApiClient::new(vec![mock_message_response(
-        vec![ContentBlockApi::Text {
+        vec![LlmContentBlock::Text {
             text: "hello".into(),
+            cache_control: None,
         }],
         Some("end_turn"),
     )]));

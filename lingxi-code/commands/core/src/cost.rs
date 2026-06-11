@@ -156,19 +156,22 @@ mod tests {
     // M6-06 T7: end-to-end smoke against a real ConversationOrchestrator
     // with a wired CostTracker — confirms the /cost slash command reflects
     // real numbers (not the M5-10 zero stub).
-    fn end_turn_response_with_usage(input: u64, output: u64) -> api_client::types::MessageResponse {
-        api_client::types::MessageResponse {
+    fn end_turn_response_with_usage(input: u64, output: u64) -> llm_client::LlmResponse {
+        llm_client::LlmResponse {
             id: "msg_mock".to_string(),
             model: "claude-opus-4-6".to_string(),
             content: Vec::new(),
             stop_reason: Some("end_turn".to_string()),
-            usage: api_client::types::UsageApi {
-                input_tokens: input,
-                output_tokens: output,
-                cache_creation_input_tokens: 0,
-                cache_read_input_tokens: 0,
+            usage: llm_client::Usage {
+                billable_tokens: llm_client::TokenUsage {
+                    input,
+                    output,
+                    ..Default::default()
+                },
                 ..Default::default()
             },
+            cost: None,
+            provider_metadata: serde_json::Value::Null,
         }
     }
 

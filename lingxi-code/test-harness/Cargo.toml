@@ -18,6 +18,7 @@ protocol = { path = "../protocol" }
 traits = { path = "../traits" }
 engine = { path = "../engine" }
 api-client = { path = "../api-client" }
+llm-client = { path = "../llm-client" }
 cost = { path = "../cost" }
 hooks = { path = "../hooks" }
 mcp = { path = "../mcp" }

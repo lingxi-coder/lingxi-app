@@ -23,7 +23,7 @@
 
 use std::sync::Arc;
 
-use api_client::types::ContentBlockApi;
+use llm_client::ContentBlock as LlmContentBlock;
 use mcp::{ConfigScope, McpRegistry, McpServerConfig, RawConnectionProvider};
 use orchestrator::test_support::{
     mock_message_response, MockApiClient, MockOutputStream, NoOpPermissionGate,
@@ -215,16 +215,17 @@ async fn denied_fqn_tool_use_yields_permission_denied_result_and_skips_server() 
 
     let api = Arc::new(MockApiClient::new(vec![
         mock_message_response(
-            vec![ContentBlockApi::ToolUse {
-                id: ToolUseId::new(),
+            vec![LlmContentBlock::ToolCall {
+                id: ToolUseId::new().to_string(),
                 name: "mcp__mock__a".into(),
                 input: serde_json::json!({ "x": 1 }),
             }],
             Some("tool_use"),
         ),
         mock_message_response(
-            vec![ContentBlockApi::Text {
+            vec![LlmContentBlock::Text {
                 text: "recovered".into(),
+                cache_control: None,
             }],
             Some("end_turn"),
         ),
@@ -272,16 +273,17 @@ async fn allowed_fqn_tool_use_reaches_server() {
 
     let api = Arc::new(MockApiClient::new(vec![
         mock_message_response(
-            vec![ContentBlockApi::ToolUse {
-                id: ToolUseId::new(),
+            vec![LlmContentBlock::ToolCall {
+                id: ToolUseId::new().to_string(),
                 name: "mcp__mock__b".into(),
                 input: serde_json::json!({}),
             }],
             Some("tool_use"),
         ),
         mock_message_response(
-            vec![ContentBlockApi::Text {
+            vec![LlmContentBlock::Text {
                 text: "done".into(),
+                cache_control: None,
             }],
             Some("end_turn"),
         ),

@@ -84,6 +84,19 @@ impl DefaultLlmClient {
     /// The returned provider request may carry credentials in its headers;
     /// redact with [`crate::Redactor`] before logging.
     pub async fn prepare(&self, request: &LlmRequest) -> Result<PreparedLlmCall, LlmError> {
+        use std::time::SystemTime;
+        self.prepare_at(request, SystemTime::now()).await
+    }
+
+    /// Clock-injectable variant of [`prepare`] used by tests to pin the `SigV4`
+    /// timestamp and produce a deterministic `Authorization` header.
+    ///
+    /// Production code uses [`prepare`] which passes `SystemTime::now()`.
+    pub async fn prepare_at(
+        &self,
+        request: &LlmRequest,
+        now: std::time::SystemTime,
+    ) -> Result<PreparedLlmCall, LlmError> {
         let resolved_route = self.registry.resolve(&request.model)?;
         validate_capabilities(request, resolved_route.capabilities)?;
 
@@ -100,7 +113,7 @@ impl DefaultLlmClient {
             entry.codec.encode_request(&routed_request)?
         };
         let provider_request = self
-            .authenticate(entry, &resolved_route.profile_name, provider_request)
+            .authenticate_at(entry, &resolved_route.profile_name, provider_request, now)
             .await?;
 
         Ok(PreparedLlmCall {
@@ -190,7 +203,24 @@ impl DefaultLlmClient {
         &self,
         entry: &RouteEntry,
         profile_name: &str,
+        request: ProviderRequest,
+    ) -> Result<ProviderRequest, LlmError> {
+        use std::time::SystemTime;
+        self.authenticate_at(entry, profile_name, request, SystemTime::now()).await
+    }
+
+    /// Injectable-clock variant used by tests to pin the `SigV4` timestamp.
+    ///
+    /// Production code calls `authenticate` which passes `SystemTime::now()`.
+    /// Called from `prepare_at` (public) so that integration tests can use it
+    /// without needing access to the private `RouteEntry` type.
+    #[allow(clippy::too_many_lines)]
+    async fn authenticate_at(
+        &self,
+        entry: &RouteEntry,
+        profile_name: &str,
         mut request: ProviderRequest,
+        now: std::time::SystemTime,
     ) -> Result<ProviderRequest, LlmError> {
         match entry.auth {
             AuthStrategy::None => return Ok(request),
@@ -228,20 +258,17 @@ impl DefaultLlmClient {
                     }
                 };
 
-                // Body bytes: match what LlmTransportBridge sends on the wire
-                // (`body_json.to_string()` = compact JSON, no trailing newline).
-                let body_bytes = if request.body_json.is_null() {
-                    Vec::new()
-                } else {
-                    request.body_json.to_string().into_bytes()
-                };
+                // Body bytes: sign exactly what LlmTransportBridge sends on the wire.
+                // LlmTransportBridge calls `body_json.to_string()` unconditionally —
+                // Value::Null serialises to the 4-byte string "null", not an empty body.
+                // Signing empty bytes for Null would diverge from the wire payload → 403.
+                let body_bytes = request.body_json.to_string().into_bytes();
 
-                // Use SystemTime::now for the timestamp.
-                // The signer is pure-function with injectable clock for testing;
-                // here in production we use the wall clock.
+                // Use the injected clock (now) for the timestamp.
+                // Production code passes SystemTime::now(); tests pass a fixed instant.
                 let datetime = {
-                    use std::time::{SystemTime, UNIX_EPOCH};
-                    let secs = SystemTime::now()
+                    use std::time::UNIX_EPOCH;
+                    let secs = now
                         .duration_since(UNIX_EPOCH)
                         .unwrap_or_default()
                         .as_secs();
@@ -412,7 +439,7 @@ impl DefaultLlmClient {
     clippy::cast_sign_loss,
     clippy::bool_to_int_with_if
 )]
-fn secs_to_ymdhms(secs: u64) -> (u32, u32, u32, u32, u32, u32) {
+pub(crate) fn secs_to_ymdhms(secs: u64) -> (u32, u32, u32, u32, u32, u32) {
     let days = secs / 86_400;
     let time = secs % 86_400;
     let hour = (time / 3600) as u32;

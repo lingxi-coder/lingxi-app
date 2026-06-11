@@ -58,8 +58,9 @@ impl AzureOpenAiCodec {
     pub fn new(base_url: impl Into<String>, api_version: impl Into<String>) -> Self {
         let base_url = base_url.into();
         let api_version = api_version.into();
-        // The inner codec is constructed with the base_url only for structural
-        // reasons; we never call its encode_request (which would inject a wrong URL).
+        // The inner codec is constructed with the base_url as a placeholder; its
+        // encode_request is called for body encoding, but the resulting URL is
+        // overridden by the Azure deployment URL before returning.
         let inner = OpenAiChatCodec::new(base_url.clone());
         Self { base_url, api_version, inner }
     }

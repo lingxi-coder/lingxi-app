@@ -1,4 +1,3 @@
-//! T9 tests — `replay_session_state` reproduces the chain pointer + history
 //! from an on-disk JSONL so the next live turn's append chains correctly.
 
 use orchestrator::{replay_session_state, state_from_messages, ResumeError};

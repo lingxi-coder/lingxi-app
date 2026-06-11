@@ -7,7 +7,7 @@
 //! See plan `docs/superpowers/plans/2026-05-25-m5-14-release-v0.6.0.md` Task 2.
 #![allow(clippy::field_reassign_with_default)]
 
-use api_client::types::ContentBlockApi;
+use llm_client::ContentBlock as LlmContentBlock;
 use orchestrator::test_support::{
     mock_message_response, MockApiClient, MockOutputStream, NoOpPermissionGate,
     StaticMemoryProvider,
@@ -129,8 +129,9 @@ async fn single_turn_no_tools_completes_with_end_turn() {
         .unwrap();
 
     let api = Arc::new(MockApiClient::new(vec![mock_message_response(
-        vec![ContentBlockApi::Text {
+        vec![LlmContentBlock::Text {
             text: "Hello!".into(),
+            cache_control: None,
         }],
         Some("end_turn"),
     )]));
@@ -190,8 +191,9 @@ async fn max_turns_cap_returns_max_turns_reached_error() {
     let responses: Vec<_> = (0..max + 2)
         .map(|_| {
             mock_message_response(
-                vec![ContentBlockApi::Text {
+                vec![LlmContentBlock::Text {
                     text: "still going".into(),
+                    cache_control: None,
                 }],
                 // "tool_use" stop_reason keeps the loop going — but the test
                 // below just needs the orchestrator to exhaust max_turns when
@@ -312,28 +314,30 @@ fn fixture_scenarios_names_unique_and_outcomes_valid() {
 
 #[tokio::test]
 async fn parity_cost_after_one_turn() {
-    use api_client::types::{MessageResponse, UsageApi};
     use cost::pricing::PricingCatalog;
     use cost::CostTracker;
     use protocol::SessionId;
     use tokio::sync::mpsc;
     use traits::OrchestratorHandle;
 
-    let response = MessageResponse {
+    let response = llm_client::LlmResponse {
         id: "msg_mock".into(),
         model: "claude-opus-4-6".into(),
         content: Vec::new(),
         stop_reason: Some("end_turn".into()),
-        usage: UsageApi {
-            input_tokens: 1_000,
-            output_tokens: 500,
-            cache_creation_input_tokens: 0,
-            cache_read_input_tokens: 0,
-            // COST.3/5: new UsageApi fields default to None (no web-search /
-            // non-fast) → base pricing, so this fixture's asserted cost is
-            // unchanged.
+        // COST.3/5: new UsageApi fields default to None (no web-search /
+        // non-fast) → base pricing, so this fixture's asserted cost is
+        // unchanged.
+        usage: llm_client::Usage {
+            billable_tokens: llm_client::TokenUsage {
+                input: 1_000,
+                output: 500,
+                ..Default::default()
+            },
             ..Default::default()
         },
+        cost: None,
+        provider_metadata: serde_json::Value::Null,
     };
     let api = Arc::new(MockApiClient::new(vec![response]));
     let (tx, _rx) = mpsc::channel(64);

@@ -1,5 +1,3 @@
-//! Byte-locks for the system prompt header (M5-03 Task 4).
-
 use orchestrator::prompt::locked_templates::{HEADER, SECTION_SEP, TRAILING_NL};
 
 #[test]

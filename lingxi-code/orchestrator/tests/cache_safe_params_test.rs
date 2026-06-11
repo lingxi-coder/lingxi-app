@@ -8,6 +8,7 @@
 //! `Autocompactor::with_forked_runner` with the SAME slot) can replay the prefix
 //! verbatim and hit Anthropic's prompt cache. Without a slot wired the save is a
 //! strict no-op.
+use llm_client::ContentBlock as LlmContentBlock;
 
 use orchestrator::test_support::{
     mock_message_response, noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate,
@@ -25,8 +26,9 @@ fn make_orch(
     slot: Option<Arc<CacheSafeParamsSlot>>,
 ) -> (Arc<ConversationOrchestrator>, Arc<MockApiClient>) {
     let api = Arc::new(MockApiClient::new(vec![mock_message_response(
-        vec![api_client::types::ContentBlockApi::Text {
+        vec![LlmContentBlock::Text {
             text: "done".to_string(),
+            cache_control: None,
         }],
         Some("end_turn"),
     )]));

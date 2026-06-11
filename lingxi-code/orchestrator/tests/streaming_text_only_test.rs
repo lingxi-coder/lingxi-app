@@ -1,4 +1,3 @@
-//! Streaming happy path — text-only response (M5-04 Task 3 — RED).
 //!
 //! Scripts a stream that emits three text deltas plus the standard
 //! lifecycle events. Asserts the orchestrator's `OutputStream` receives

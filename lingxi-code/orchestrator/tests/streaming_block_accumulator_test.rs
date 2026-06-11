@@ -1,4 +1,3 @@
-//! Unit tests for the `BlockAccumulator` (M5-04 Task 2 — RED).
 //!
 //! Each test asserts an invariant of the per-block state machine.
 //! These tests fail to compile until Task 5 lands the implementation.

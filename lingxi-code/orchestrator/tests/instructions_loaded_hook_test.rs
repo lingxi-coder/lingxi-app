@@ -1,4 +1,3 @@
-//! hooks (instruction-load lifecycle) — `InstructionsLoaded` fired from the
 //! orchestrator's `fire_instructions_loaded` helper, the seam the host
 //! composition root (`engine-desktop`) calls once at session startup, right
 //! after `fire_session_start`.

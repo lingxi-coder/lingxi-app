@@ -34,6 +34,8 @@ uniffi = [
     "dep:api-client",
     "dep:providers",
     "dep:anthropic-oauth",
+    "dep:llm-client",
+    "dep:platform-common",
     "dep:secret",
     "dep:permission",
     "dep:sandbox",
@@ -94,6 +96,9 @@ protocol = { path = "../../protocol", optional = true }
 api-client = { path = "../../api-client", optional = true }
 providers = { path = "../../providers", optional = true }
 anthropic-oauth = { path = "../../anthropic-oauth", optional = true }
+# Task 10: DefaultLlmClient construction + LlmTransportBridge.
+llm-client = { path = "../../llm-client", optional = true }
+platform-common = { path = "../../platforms/common", optional = true }
 secret = { path = "../../secret", optional = true }
 permission = { path = "../../permission", optional = true }
 sandbox = { path = "../../sandbox", optional = true }

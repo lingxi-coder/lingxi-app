@@ -5,11 +5,8 @@
 //! pulling them into release builds.
 
 use crate::conversation::OrchestratorApiClient;
-use api_client::{
-    types::{MessageResponse, UsageApi},
-    ApiError,
-};
 use async_trait::async_trait;
+use llm_client::{ContentBlock as LlmContentBlock, LlmError, LlmResponse, Usage};
 use protocol::ConversationMessage;
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -24,26 +21,27 @@ use traits::{CostSnapshot, OutputEvent, OutputStream};
 /// time, in order. Captures each `msgs` argument for later assertion.
 ///
 /// If the queue is exhausted, `messages_create` returns
-/// `ApiError::Server { status: 500, body: "mock script exhausted" }` so the
-/// orchestrator's max-turns guard is exercised honestly (the M3-03 `ApiError`
-/// enum has no generic `ProviderError` variant; `Server` is the closest match
-/// for a synthetic upstream-side failure with a string payload).
+/// `LlmError::Transport { message: "mock script exhausted" }` — synthetic
+/// upstream failure so the orchestrator's max-turns guard is exercised.
 pub struct MockApiClient {
-    queue: Arc<Mutex<VecDeque<MessageResponse>>>,
+    queue: Arc<Mutex<VecDeque<LlmResponse>>>,
     captured_msgs: Arc<Mutex<Vec<Vec<ConversationMessage>>>>,
     captured_systems: Arc<Mutex<Vec<Option<String>>>>,
     captured_tools: Arc<Mutex<Vec<Vec<serde_json::Value>>>>,
+    /// Task 7: seeds passed to `messages_create_seeded`; one entry per call.
+    captured_seeds: Arc<Mutex<Vec<u8>>>,
 }
 
 impl MockApiClient {
     /// Construct a mock with a script of `responses` returned in order.
     #[must_use]
-    pub fn new(responses: Vec<MessageResponse>) -> Self {
+    pub fn new(responses: Vec<LlmResponse>) -> Self {
         Self {
             queue: Arc::new(Mutex::new(VecDeque::from(responses))),
             captured_msgs: Arc::new(Mutex::new(Vec::new())),
             captured_systems: Arc::new(Mutex::new(Vec::new())),
             captured_tools: Arc::new(Mutex::new(Vec::new())),
+            captured_seeds: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -66,6 +64,12 @@ impl MockApiClient {
         self.captured_systems.lock().await.clone()
     }
 
+    /// Task 7: seeds from `messages_create_seeded` calls (one per call).
+    /// Empty when only `messages_create` was called.
+    pub async fn captured_seeds(&self) -> Vec<u8> {
+        self.captured_seeds.lock().await.clone()
+    }
+
     /// Number of responses still queued.
     pub async fn remaining(&self) -> usize {
         self.queue.lock().await.len()
@@ -80,7 +84,7 @@ impl OrchestratorApiClient for MockApiClient {
         system: Option<&str>,
         msgs: Vec<ConversationMessage>,
         tools: Vec<serde_json::Value>,
-    ) -> Result<MessageResponse, ApiError> {
+    ) -> Result<LlmResponse, LlmError> {
         self.captured_msgs.lock().await.push(msgs);
         self.captured_systems
             .lock()
@@ -88,27 +92,45 @@ impl OrchestratorApiClient for MockApiClient {
             .push(system.map(str::to_string));
         self.captured_tools.lock().await.push(tools);
         let mut q = self.queue.lock().await;
-        q.pop_front().ok_or_else(|| ApiError::Server {
-            status: 500,
-            body: "mock script exhausted".into(),
+        q.pop_front().ok_or_else(|| LlmError::Transport {
+            message: "mock script exhausted".into(),
         })
+    }
+
+    /// Task 7: captures the seed for assertion in streaming-fallback tests.
+    async fn messages_create_seeded(
+        &self,
+        model: &str,
+        system: Option<&str>,
+        msgs: Vec<ConversationMessage>,
+        tools: Vec<serde_json::Value>,
+        initial_consecutive_overloaded: u8,
+    ) -> Result<LlmResponse, LlmError> {
+        self.captured_seeds
+            .lock()
+            .await
+            .push(initial_consecutive_overloaded);
+        // Delegate to the plain seam so the queue logic is reused.
+        self.messages_create(model, system, msgs, tools).await
     }
 }
 
-/// Tiny helper for tests to construct a fully populated `MessageResponse`
+/// Tiny helper for tests to construct a fully populated `LlmResponse`
 /// without typing out every field. Defaults: zero usage, no thinking,
 /// caller picks the content blocks + `stop_reason`.
 #[must_use]
 pub fn mock_message_response(
-    content: Vec<api_client::types::ContentBlockApi>,
+    content: Vec<LlmContentBlock>,
     stop_reason: Option<&str>,
-) -> MessageResponse {
-    MessageResponse {
+) -> LlmResponse {
+    LlmResponse {
         id: "msg_mock".to_string(),
         model: "claude-opus-4-7".to_string(),
         content,
         stop_reason: stop_reason.map(str::to_string),
-        usage: UsageApi::default(),
+        usage: Usage::default(),
+        cost: None,
+        provider_metadata: serde_json::Value::Null,
     }
 }
 
@@ -739,18 +761,17 @@ impl OrchestratorHandle for MockOrchestratorHandle {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use api_client::types::ContentBlockApi;
 
     // -------- MockApiClient (Task 6) --------
 
     #[tokio::test]
     async fn mock_returns_responses_in_order() {
         let r1 = mock_message_response(
-            vec![ContentBlockApi::Text { text: "one".into() }],
+            vec![LlmContentBlock::Text { text: "one".into(), cache_control: None }],
             Some("end_turn"),
         );
         let r2 = mock_message_response(
-            vec![ContentBlockApi::Text { text: "two".into() }],
+            vec![LlmContentBlock::Text { text: "two".into(), cache_control: None }],
             Some("end_turn"),
         );
         let mock = MockApiClient::new(vec![r1, r2]);
@@ -762,10 +783,10 @@ mod tests {
             .messages_create("m", None, vec![], vec![])
             .await
             .expect("second");
-        let ContentBlockApi::Text { text: first_text } = &resp1.content[0] else {
+        let LlmContentBlock::Text { text: first_text, .. } = &resp1.content[0] else {
             panic!("expected text block");
         };
-        let ContentBlockApi::Text { text: second_text } = &resp2.content[0] else {
+        let LlmContentBlock::Text { text: second_text, .. } = &resp2.content[0] else {
             panic!("expected text block");
         };
         assert_eq!(first_text, "one");

@@ -34,6 +34,10 @@ use anthropic_oauth::client::ClaudeAiOAuthClient;
 use anthropic_oauth::config::ClaudeAiOAuthConfig;
 use anthropic_oauth::handle::OAuthHandle;
 use api_client::AnthropicProvider;
+use llm_client::{DefaultLlmClient, Transport};
+use orchestrator::model::user_agent::UserAgentEnv;
+use orchestrator::provider_adapter::SubscriberState;
+use platform_common::LlmTransportBridge;
 use async_trait::async_trait;
 use client_adapter::{
     AdapterOutputStream, AdapterPermissionGate, ClientEventListener, ListenerSink,
@@ -53,7 +57,7 @@ use orchestrator::{
 };
 use permission::gate::PermissionGate;
 use permission::PermissionMode;
-use providers::{builtin_profiles, parse_profiles, parse_routing, ModelRouter, ProviderRegistry};
+use providers::{builtin_profiles, parse_profiles, parse_routing, ProviderRegistry};
 use sandbox::decision::ProjectTrustLevel;
 use sandbox::runtime_config::{Platform as SandboxPlatform, SandboxRuntimeConfig};
 use secret::CredentialManager;
@@ -223,6 +227,11 @@ impl PermissionRequestSink for RecordingPermissionSink {
     }
 }
 
+// `builtin_anthropic_config` lives in `platform_common::llm_config` so both
+// composition roots share the same 10-entry model table (including
+// `claude-opus-4-7`, the orchestrator DEFAULT_MODEL).
+use platform_common::builtin_anthropic_config;
+
 /// Build a fully-wired mobile [`MobileRuntime`] from a deterministic
 /// [`MobileConfig`] + an `Arc<dyn Platform>` (plan F3-03 — the mobile sibling of
 /// `engine_desktop::build`).
@@ -286,9 +295,8 @@ pub async fn build_mobile_inner(
     let worktree = platform.worktree();
     let storage = Arc::new(platform_posix_minimal::PlainTextSecureStorage::new());
 
-    // (2) api-client via ProviderRegistry. An empty `api_key` is accepted (the
-    //     orchestrator builds and only fails at `run_turn` with a 401). The
-    //     settings `providers` / `routing` blocks arrive via `cfg`.
+    // (2) ProviderRegistry — no longer on the live model path (adapter now drives
+    //     DefaultLlmClient directly, Task 10). Kept for Plan 3b removal.
     let env_snapshot: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
     let mut profiles = builtin_profiles(Some(cfg.api_base.clone()));
     match parse_profiles(cfg.provider_profiles.as_ref()) {
@@ -296,20 +304,38 @@ pub async fn build_mobile_inner(
         Err(e) => tracing::warn!(error = %e, "ignoring malformed settings `providers` block"),
     }
     let routing = parse_routing(cfg.routing.as_ref());
-    // `ProviderRegistry` needs a sized transport — wrap the platform's
-    // `Arc<dyn HttpTransport>` in the delegating `DynHttp` newtype (the device's
-    // backend is preserved, just made sized).
-    let registry = Arc::new(ProviderRegistry::new(
+    let _registry = Arc::new(ProviderRegistry::new(
         profiles,
         env_snapshot,
         Arc::new(DynHttp(http.clone())),
         routing,
     ));
-    // ONE router-backed adapter implements BOTH `OrchestratorApiClient` (batched)
-    // and `StreamingApiClient` (the streaming turn path the mobile transport
-    // always drives). Production wires it for both paths; a test may substitute
-    // the streaming side via `streaming_override` (plan F3-06).
-    let provider_adapter = Arc::new(ProviderApiAdapter::new(registry as Arc<dyn ModelRouter>));
+
+    // (2a) Task 10: DefaultLlmClient over LlmTransportBridge.
+    //      Mobile uses the platform's `Arc<dyn HttpTransport>` wrapped in `DynHttp`
+    //      so the device backend is preserved; no desktop-only deps are pulled.
+    //      OAuth is not yet wired on mobile (no credential-manager path exists here);
+    //      the API-key path via ANTHROPIC_API_KEY covers the mobile use case.
+    let llm_transport: Arc<dyn Transport> =
+        Arc::new(LlmTransportBridge::new(DynHttp(http.clone())));
+    let llm_client = Arc::new(
+        DefaultLlmClient::from_config(builtin_anthropic_config(&cfg.api_base, false))
+            .map_err(|e| MobileBuildError::ApiBase(e.to_string()))?,
+    );
+    let subscriber_state = SubscriberState { is_subscriber: false, is_enterprise: false };
+    // ONE adapter implements BOTH `OrchestratorApiClient` (batched) and
+    // `StreamingApiClient` (the streaming turn path the mobile transport always
+    // drives). Production wires it for both paths; a test may substitute the
+    // streaming side via `streaming_override` (plan F3-06).
+    let provider_adapter = Arc::new(ProviderApiAdapter::new(
+        llm_client,
+        llm_transport,
+        subscriber_state,
+        UserAgentEnv::from_process_env(),
+        env!("CARGO_PKG_VERSION"),
+        None,
+        None,
+    ));
     let api_client: Arc<dyn OrchestratorApiClient> = provider_adapter.clone();
     let streaming_api: Arc<dyn StreamingApiClient> =
         streaming_override.unwrap_or(provider_adapter as Arc<dyn StreamingApiClient>);

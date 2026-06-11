@@ -13,7 +13,7 @@
 
 use super::accumulator::{BlockAccumulator, BlockKind, CompletedBlock};
 use super::StreamingError;
-use api_client::types::{ContentBlockApi, ContentDelta, StreamEvent, UsageApi};
+use llm_client::{ContentBlock as LlmContentBlock, ContentDelta, LlmEvent, Usage};
 use protocol::{ContentBlock, ToolUseId};
 use std::sync::Arc;
 use traits::OutputStream;
@@ -65,12 +65,12 @@ pub enum RouterAction {
 /// # Errors
 /// Propagates [`StreamingError`] from accumulator mutations.
 pub async fn dispatch_event(
-    event: StreamEvent,
+    event: LlmEvent,
     acc: &mut BlockAccumulator,
     output: &Arc<dyn OutputStream>,
 ) -> Result<RouterAction, StreamingError> {
     match event {
-        StreamEvent::MessageStart { message } => {
+        LlmEvent::MessageStart { response } => {
             // No-op for state; the loop already knows the model + id from
             // the turn invocation. claude-code captures `partialMessage`
             // and `ttftMs` here; we don't need those at the M5-04 wire.
@@ -79,28 +79,37 @@ pub async fn dispatch_event(
             // initial usage snapshot (input + cache-read tokens). Surface
             // it to the output sink so consumers see an early token count;
             // the final `message_delta` usage supersedes it.
-            emit_usage_if_present(output, &message.usage).await;
+            emit_usage_if_present(output, &response.usage).await;
             Ok(RouterAction::Continue)
         }
-        StreamEvent::ContentBlockStart {
+        LlmEvent::ContentBlockStart {
             index,
             content_block,
         } => {
             let kind = match &content_block {
-                ContentBlockApi::Text { .. } => BlockKind::Text,
-                ContentBlockApi::ToolUse { id, name, .. } => BlockKind::ToolUse {
-                    id: *id,
+                LlmContentBlock::Text { .. } => BlockKind::Text,
+                LlmContentBlock::ToolCall { id, name, .. } => BlockKind::ToolUse {
+                    // LlmContentBlock::ToolCall uses String ids; parse to ToolUseId.
+                    id: serde_json::from_value::<ToolUseId>(
+                        serde_json::Value::String(id.clone()),
+                    )
+                    .unwrap_or_else(|_| ToolUseId::new()),
                     name: name.clone(),
                 },
-                ContentBlockApi::Thinking { .. } => BlockKind::Thinking,
-                ContentBlockApi::ServerToolUse { .. }
-                | ContentBlockApi::ConnectorText { .. }
-                | ContentBlockApi::AdvisorToolResult { .. } => BlockKind::Other,
+                LlmContentBlock::Reasoning { .. } => BlockKind::Thinking,
+                LlmContentBlock::ServerToolUse { .. }
+                | LlmContentBlock::ConnectorText { .. }
+                | LlmContentBlock::AdvisorToolResult { .. }
+                | LlmContentBlock::Image { .. }
+                | LlmContentBlock::ImageUrl { .. }
+                | LlmContentBlock::Document { .. }
+                | LlmContentBlock::ToolResult { .. }
+                | LlmContentBlock::RedactedThinking { .. } => BlockKind::Other,
             };
             acc.start_block(index, kind)?;
             Ok(RouterAction::Continue)
         }
-        StreamEvent::ContentBlockDelta { index, delta } => {
+        LlmEvent::ContentBlockDelta { index, delta } => {
             match delta {
                 ContentDelta::TextDelta { text } => {
                     acc.append_text(index, &text)?;
@@ -131,7 +140,7 @@ pub async fn dispatch_event(
             }
             Ok(RouterAction::Continue)
         }
-        StreamEvent::ContentBlockStop { index } => {
+        LlmEvent::ContentBlockStop { index } => {
             let completed = acc.stop_block(index)?;
             match completed {
                 CompletedBlock::Text { text } => {
@@ -152,14 +161,14 @@ pub async fn dispatch_event(
                 CompletedBlock::Skipped => Ok(RouterAction::Continue),
             }
         }
-        StreamEvent::MessageDelta { delta, usage } => {
+        LlmEvent::MessageDelta { delta, usage } => {
             // §0.7 "light up thinking/usage": `message_delta` carries the
             // final usage snapshot. Surface it to the output sink BEFORE
             // computing the router action — the stop-reason behavior below
             // is unchanged.
             // A3: capture the output-token count before `usage` is consumed
             // by the emit helper, so the budget loop can accumulate it.
-            let output_tokens = usage.as_ref().map_or(0, |u| u.output_tokens);
+            let output_tokens = usage.as_ref().map_or(0, |u| u.billable_tokens.output);
             if let Some(usage) = usage {
                 emit_usage_if_present(output, &usage).await;
             }
@@ -174,30 +183,30 @@ pub async fn dispatch_event(
                 Ok(RouterAction::Continue)
             }
         }
-        StreamEvent::MessageStop => Ok(RouterAction::EndOfStream),
-        StreamEvent::Ping => Ok(RouterAction::Continue),
-        StreamEvent::Error { error } => Ok(RouterAction::ServerError(format!(
-            "{}: {}",
-            error.kind, error.message
-        ))),
+        // NOTE: LlmEvent has no Ping or Error variants — errors surface as
+        // Err(LlmError) from the stream, and keepalives are never forwarded
+        // from the transport layer. The Completed short-circuit terminal is
+        // treated as an end-of-stream signal (the full response is available
+        // in the response field but we forward the already-accumulated blocks).
+        LlmEvent::MessageStop | LlmEvent::Completed { .. } => Ok(RouterAction::EndOfStream),
     }
 }
 
 /// Surface an SSE `usage` snapshot to the output sink as a live usage
 /// update (§0.7 "light up thinking/usage").
 ///
-/// Maps `UsageApi` onto the four bare `u64` arguments of
-/// [`OutputStream::emit_usage`] with the SAME field mapping the cost
-/// pipeline uses (`api-client/src/anthropic.rs`): `input` ←
-/// `input_tokens`, `output` ← `output_tokens`, `cache_read` ←
-/// `cache_read_input_tokens`, `cache_write` ← `cache_creation_input_tokens`.
-async fn emit_usage_if_present(output: &Arc<dyn OutputStream>, usage: &UsageApi) {
+/// Maps `llm_client::Usage` onto the four bare `u64` arguments of
+/// [`OutputStream::emit_usage`] with the same field mapping the cost
+/// pipeline uses: `input` ← `billable_tokens.input`, `output` ←
+/// `billable_tokens.output`, `cache_read` ← `billable_tokens.cache_read`,
+/// `cache_write` ← `billable_tokens.cache_write`.
+async fn emit_usage_if_present(output: &Arc<dyn OutputStream>, usage: &Usage) {
     output
         .emit_usage(
-            usage.input_tokens,
-            usage.output_tokens,
-            usage.cache_read_input_tokens,
-            usage.cache_creation_input_tokens,
+            usage.billable_tokens.input,
+            usage.billable_tokens.output,
+            usage.billable_tokens.cache_read,
+            usage.billable_tokens.cache_write,
         )
         .await;
 }
@@ -206,7 +215,7 @@ async fn emit_usage_if_present(output: &Arc<dyn OutputStream>, usage: &UsageApi)
 mod tests {
     use super::*;
     use crate::test_support::MockOutputStream;
-    use api_client::types::MessageDeltaPayload;
+    use llm_client::MessageDeltaPayload;
 
     #[tokio::test]
     async fn text_delta_emits_to_output_and_accumulates() {
@@ -215,10 +224,11 @@ mod tests {
         let out: Arc<dyn OutputStream> = mock.clone();
         // start a text block
         dispatch_event(
-            StreamEvent::ContentBlockStart {
+            LlmEvent::ContentBlockStart {
                 index: 0,
-                content_block: ContentBlockApi::Text {
+                content_block: LlmContentBlock::Text {
                     text: String::new(),
+                    cache_control: None,
                 },
             },
             &mut acc,
@@ -228,7 +238,7 @@ mod tests {
         .expect("start");
         // delta
         dispatch_event(
-            StreamEvent::ContentBlockDelta {
+            LlmEvent::ContentBlockDelta {
                 index: 0,
                 delta: ContentDelta::TextDelta { text: "hi".into() },
             },
@@ -243,24 +253,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ping_is_noop() {
-        let mut acc = BlockAccumulator::new();
-        let mock = Arc::new(MockOutputStream::new());
-        let out: Arc<dyn OutputStream> = mock.clone();
-        let action = dispatch_event(StreamEvent::Ping, &mut acc, &out)
-            .await
-            .expect("ok");
-        assert!(matches!(action, RouterAction::Continue));
-        assert!(acc.is_idle());
-    }
-
-    #[tokio::test]
     async fn message_delta_records_stop_reason() {
         let mut acc = BlockAccumulator::new();
         let mock = Arc::new(MockOutputStream::new());
         let out: Arc<dyn OutputStream> = mock.clone();
         let action = dispatch_event(
-            StreamEvent::MessageDelta {
+            LlmEvent::MessageDelta {
                 delta: MessageDeltaPayload {
                     stop_reason: Some("end_turn".into()),
                 },
@@ -284,9 +282,34 @@ mod tests {
         let mut acc = BlockAccumulator::new();
         let mock = Arc::new(MockOutputStream::new());
         let out: Arc<dyn OutputStream> = mock.clone();
-        let action = dispatch_event(StreamEvent::MessageStop, &mut acc, &out)
+        let action = dispatch_event(LlmEvent::MessageStop, &mut acc, &out)
             .await
             .expect("ok");
+        assert!(matches!(action, RouterAction::EndOfStream));
+    }
+
+    #[tokio::test]
+    async fn completed_event_ends_stream() {
+        use llm_client::{LlmResponse, Usage};
+        let mut acc = BlockAccumulator::new();
+        let mock = Arc::new(MockOutputStream::new());
+        let out: Arc<dyn OutputStream> = mock.clone();
+        let resp = LlmResponse {
+            id: "msg_1".into(),
+            model: "claude-opus-4-7".into(),
+            content: vec![],
+            stop_reason: Some("end_turn".into()),
+            usage: Usage::default(),
+            cost: None,
+            provider_metadata: serde_json::Value::Null,
+        };
+        let action = dispatch_event(
+            LlmEvent::Completed { response: Box::new(resp) },
+            &mut acc,
+            &out,
+        )
+        .await
+        .expect("ok");
         assert!(matches!(action, RouterAction::EndOfStream));
     }
 }

@@ -1,4 +1,3 @@
-//! In-Loop Compaction Batch 5 (orchestrator loop) — 413 / prompt-too-long
 //! reactive recovery on the BATCHED path.
 //!
 //! Verifies the `execute_one_turn` PTL recovery loop (TS `compact.ts:450-491`,
@@ -12,9 +11,7 @@
 //!   retry budget the loop attempts ONE reactive full compact and retries; when
 //!   that STILL 413s, the turn ends with the byte-exact
 //!   `PROMPT_TOO_LONG_ERROR_MESSAGE` assistant message (no hard error bubbled).
-
-use api_client::types::{ContentBlockApi, MessageResponse};
-use api_client::ApiError;
+use llm_client::{ContentBlock as LlmContentBlock, LlmError, LlmResponse};
 use async_trait::async_trait;
 use compaction::CompactionOrchestrator;
 use orchestrator::test_support::{
@@ -28,16 +25,16 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use traits::OutputEvent;
 
-/// A mock API client whose queue is `Result<MessageResponse, ApiError>` so a
-/// test can script `ApiError::PromptTooLong` responses. Captures per-call
+/// A mock API client whose queue is `Result<LlmResponse, LlmError>` so a
+/// test can script `LlmError::ContextOverflow` responses. Captures per-call
 /// message counts so the test can assert head-truncation shrank the prompt.
 struct PtlMockApi {
-    queue: Mutex<VecDeque<Result<MessageResponse, ApiError>>>,
+    queue: Mutex<VecDeque<Result<LlmResponse, LlmError>>>,
     captured_lens: Mutex<Vec<usize>>,
 }
 
 impl PtlMockApi {
-    fn new(script: Vec<Result<MessageResponse, ApiError>>) -> Self {
+    fn new(script: Vec<Result<LlmResponse, LlmError>>) -> Self {
         Self {
             queue: Mutex::new(VecDeque::from(script)),
             captured_lens: Mutex::new(Vec::new()),
@@ -56,32 +53,29 @@ impl OrchestratorApiClient for PtlMockApi {
         _system: Option<&str>,
         msgs: Vec<ConversationMessage>,
         _tools: Vec<serde_json::Value>,
-    ) -> Result<MessageResponse, ApiError> {
+    ) -> Result<LlmResponse, LlmError> {
         self.captured_lens.lock().await.push(msgs.len());
         let mut q = self.queue.lock().await;
         q.pop_front().unwrap_or_else(|| {
-            Err(ApiError::Server {
-                status: 500,
-                body: "ptl mock script exhausted".into(),
+            Err(LlmError::Transport {
+                message: "ptl mock script exhausted".into(),
             })
         })
     }
 }
 
-fn ptl_err(token_gap: u64) -> Result<MessageResponse, ApiError> {
-    Err(ApiError::PromptTooLong {
-        token_gap,
-        raw: format!("prompt is too long: gap {token_gap}"),
-    })
+fn ptl_err(token_gap: u64) -> Result<LlmResponse, LlmError> {
+    Err(LlmError::ContextOverflow { token_gap })
 }
 
 // The `Result` wrap is required: `ok_text` is pushed into the same scripted
 // response vec as `ptl_err` (which returns `Err`), so the type must match.
 #[allow(clippy::unnecessary_wraps)]
-fn ok_text(text: &str) -> Result<MessageResponse, ApiError> {
+fn ok_text(text: &str) -> Result<LlmResponse, LlmError> {
     Ok(mock_message_response(
-        vec![ContentBlockApi::Text {
+        vec![LlmContentBlock::Text {
             text: text.to_string(),
+            cache_control: None,
         }],
         Some("end_turn"),
     ))
@@ -157,7 +151,9 @@ async fn ptl_twice_then_success_truncates_twice() {
     ]));
     // No compactor needed — truncation alone recovers before exhaustion.
     let (orch, output) = make_orch(api.clone(), None);
-    seed_rounds(&orch, 8).await;
+    // Use 20 rounds so the 20% fallback (used with ContextOverflow, gap=0)
+    // drops 4+ groups — producing a strictly shorter message list on each retry.
+    seed_rounds(&orch, 20).await;
 
     let outcome = orch.run_turn("trigger").await.expect("turn ends ok");
     let _ = outcome;
@@ -205,7 +201,7 @@ async fn ptl_exhausted_attempts_reactive_compact_then_surfaces_error() {
     // Script: PTL on every call (more than MAX_PTL_RETRIES + the one
     // reactive-compact retry), so recovery exhausts and the turn ends with the
     // byte-exact error message.
-    let script: Vec<Result<MessageResponse, ApiError>> =
+    let script: Vec<Result<LlmResponse, LlmError>> =
         (0..12).map(|_| ptl_err(500)).collect();
     let api = Arc::new(PtlMockApi::new(script));
     // Low-threshold compactor so the reactive full-compact fallback actually

@@ -1,5 +1,3 @@
-//! Git status probe smoke + env-block integration.
-
 use orchestrator::prompt::{env_block, git_status, FileTree, SystemPromptContext};
 use std::path::PathBuf;
 use std::process::Command;

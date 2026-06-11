@@ -1,4 +1,3 @@
-//! M6-07 — `list_mcp_servers` reads the wired `Arc<McpRegistry>`.
 
 use async_trait::async_trait;
 use mcp::{ConfigScope, McpRegistry, McpServerConfig};

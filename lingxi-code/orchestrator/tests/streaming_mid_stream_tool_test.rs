@@ -1,4 +1,3 @@
-//! Mid-stream tool dispatch (M5-04 Task 10 — RED).
 //!
 //! Asserts that a `tool_use` block is dispatched THE MOMENT its
 //! `content_block_stop` arrives — i.e. BEFORE the subsequent

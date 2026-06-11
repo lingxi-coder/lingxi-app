@@ -17,7 +17,7 @@
 
 use std::sync::Arc;
 
-use api_client::types::ContentBlockApi;
+use llm_client::ContentBlock as LlmContentBlock;
 use mcp::{ConfigScope, McpRegistry, McpServerConfig, RawConnectionProvider};
 use orchestrator::test_support::{
     mock_message_response, MockApiClient, MockOutputStream, NoOpPermissionGate,
@@ -120,8 +120,9 @@ async fn wire_tools_contain_per_server_fqn_entries_with_server_schema() {
     // wire `tools` array and the `MockApiClient` captures it — `build_wire_tools`
     // is crate-private, so we observe its output through the captured argument.
     let api = Arc::new(MockApiClient::new(vec![mock_message_response(
-        vec![ContentBlockApi::Text {
+        vec![LlmContentBlock::Text {
             text: "done".into(),
+            cache_control: None,
         }],
         Some("end_turn"),
     )]));
@@ -187,16 +188,17 @@ async fn dispatch_routes_fqn_tool_use_to_server_call_tool() {
     // Turn 1: model invokes mcp__mock__a. Turn 2: model ends.
     let api = Arc::new(MockApiClient::new(vec![
         mock_message_response(
-            vec![ContentBlockApi::ToolUse {
-                id: ToolUseId::new(),
+            vec![LlmContentBlock::ToolCall {
+                id: ToolUseId::new().to_string(),
                 name: "mcp__mock__a".into(),
                 input: serde_json::json!({ "x": 1 }),
             }],
             Some("tool_use"),
         ),
         mock_message_response(
-            vec![ContentBlockApi::Text {
+            vec![LlmContentBlock::Text {
                 text: "all done".into(),
+                cache_control: None,
             }],
             Some("end_turn"),
         ),
@@ -268,16 +270,17 @@ async fn dispatch_unknown_mcp_tool_hits_tool_not_found() {
 
     let api = Arc::new(MockApiClient::new(vec![
         mock_message_response(
-            vec![ContentBlockApi::ToolUse {
-                id: ToolUseId::new(),
+            vec![LlmContentBlock::ToolCall {
+                id: ToolUseId::new().to_string(),
                 name: "mcp__unknown__x".into(),
                 input: serde_json::json!({}),
             }],
             Some("tool_use"),
         ),
         mock_message_response(
-            vec![ContentBlockApi::Text {
+            vec![LlmContentBlock::Text {
                 text: "recovered".into(),
+                cache_control: None,
             }],
             Some("end_turn"),
         ),

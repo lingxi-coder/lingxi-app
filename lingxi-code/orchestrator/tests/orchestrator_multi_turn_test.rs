@@ -1,6 +1,5 @@
-//! M5-02 Task 11: multi-turn loop with one `tool_use` in the first response.
+use llm_client::ContentBlock as LlmContentBlock;
 
-use api_client::types::ContentBlockApi;
 use async_trait::async_trait;
 use orchestrator::test_support::{
     mock_message_response, MockApiClient, MockOutputStream, NoOpPermissionGate,
@@ -92,11 +91,12 @@ async fn two_turns_with_one_tool_use_drives_loop_to_end_turn() {
     let tool_use_id = ToolUseId::new();
     let r1 = mock_message_response(
         vec![
-            ContentBlockApi::Text {
+            LlmContentBlock::Text {
                 text: "let me check".into(),
+                cache_control: None,
             },
-            ContentBlockApi::ToolUse {
-                id: tool_use_id,
+            LlmContentBlock::ToolCall {
+                id: tool_use_id.as_uuid().to_string(),
                 name: "AlwaysOk".into(),
                 input: json!({"x": 1}),
             },
@@ -104,8 +104,9 @@ async fn two_turns_with_one_tool_use_drives_loop_to_end_turn() {
         Some("tool_use"),
     );
     let r2 = mock_message_response(
-        vec![ContentBlockApi::Text {
+        vec![LlmContentBlock::Text {
             text: "all good".into(),
+            cache_control: None,
         }],
         Some("end_turn"),
     );

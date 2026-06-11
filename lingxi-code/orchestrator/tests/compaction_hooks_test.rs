@@ -17,6 +17,7 @@
 //! 2. A registered `PostCompact` hook fires after, carrying a summary.
 //! 3. A `PreCompact` hook that FAILS (and one that returns `Block`) does NOT
 //!    break the compaction or the turn — best-effort, like `PostToolUse`.
+use llm_client::ContentBlock as LlmContentBlock;
 
 use async_trait::async_trait;
 use hooks::definition::{HookDefinition, HookExecutor as DefHookExecutor, HookSource};
@@ -186,8 +187,9 @@ fn make_orch(
     threshold: u64,
 ) -> (Arc<ConversationOrchestrator>, Arc<MockOutputStream>) {
     let api = Arc::new(MockApiClient::new(vec![mock_message_response(
-        vec![api_client::types::ContentBlockApi::Text {
+        vec![LlmContentBlock::Text {
             text: "done".to_string(),
+            cache_control: None,
         }],
         Some("end_turn"),
     )]));

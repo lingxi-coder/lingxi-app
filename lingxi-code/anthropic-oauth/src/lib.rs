@@ -8,8 +8,9 @@
 //! - Reactive + proactive token refresh (M3-04)
 //! - Scope upgrade flow (M3-04)
 //!
-//! M3-04 implements `api_client::oauth_hook::OAuthRefreshHook` (frozen
-//! in M3-03 §3); we extend, never modify, the api-client trait surface.
+//! Plan 3a Task 9: `BearerToken`/`OAuthHookError`/`TokenHash` are now owned
+//! locally in `refresh.rs`; `RefreshDriver::refresh` is an inherent method.
+//! api-client coupling removed from this crate.
 
 #![forbid(unsafe_code)]
 

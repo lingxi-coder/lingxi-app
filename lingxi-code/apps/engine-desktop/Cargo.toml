@@ -28,6 +28,9 @@ orchestrator = { path = "../../orchestrator" }
 providers = { path = "../../providers" }
 api-client = { path = "../../api-client" }
 anthropic-oauth = { path = "../../anthropic-oauth" }
+# Task 10: DefaultLlmClient construction + LlmTransportBridge.
+llm-client = { path = "../../llm-client" }
+platform-common = { path = "../../platforms/common" }
 secret = { path = "../../secret" }
 permission = { path = "../../permission", features = ["bash-ast"] }
 sandbox = { path = "../../sandbox" }

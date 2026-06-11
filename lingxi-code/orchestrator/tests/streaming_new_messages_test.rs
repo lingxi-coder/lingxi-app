@@ -1,4 +1,3 @@
-//! SKILLEXEC.3 (streaming twin): a tool whose `ToolCallResult.new_messages` is
 //! non-empty (the Skill-tool shape — the expanded skill prompt) must have those
 //! injected messages replayed into session history right after the turn's
 //! `tool_result` user message, in tool-dispatch order, with each injected

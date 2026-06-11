@@ -1,4 +1,4 @@
-//! Reactive `OAuthRefreshHook::refresh` invoked from api-client middleware.
+//! Reactive refresh invoked directly on `RefreshDriver::refresh` (inherent).
 //!
 //! Locks the double-check-after-acquire behavior: two near-simultaneous calls
 //! with the same `prev_token_hash` must collapse to one HTTP refresh.
@@ -8,7 +8,6 @@
 
 use anthropic_oauth::refresh::{AuthState, RefreshDriver};
 use anthropic_oauth::ClaudeAiOAuthConfig;
-use api_client::oauth_hook::OAuthRefreshHook;
 use async_trait::async_trait;
 use protocol::{HttpRequest, HttpResponse, Secret};
 use std::sync::atomic::{AtomicU32, Ordering};

@@ -1,4 +1,3 @@
-//! `run_turn_streaming_with_cancel` happy path + cancellation. (M6-03 Task 1)
 //!
 //! Mirrors the M5-13 `repl_turn_test.rs` structure but exercises the
 //! streaming path. The orchestrator races `try_run_turn_streaming` against

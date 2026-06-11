@@ -1,7 +1,5 @@
-//! M5-02 Task 9: smoke test that drives `ConversationOrchestrator::run_turn`
 //! happy path — single turn, no tools.
-
-use api_client::types::ContentBlockApi;
+use llm_client::ContentBlock as LlmContentBlock;
 use orchestrator::test_support::{
     mock_message_response, MockApiClient, MockOutputStream, NoOpPermissionGate,
     StaticMemoryProvider,
@@ -13,8 +11,9 @@ use traits::OutputEvent;
 #[tokio::test]
 async fn single_turn_no_tools_returns_end_turn_and_emits_text_and_end_turn() {
     let response = mock_message_response(
-        vec![ContentBlockApi::Text {
+        vec![LlmContentBlock::Text {
             text: "hello world".into(),
+            cache_control: None,
         }],
         Some("end_turn"),
     );

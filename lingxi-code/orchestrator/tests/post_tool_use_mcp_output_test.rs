@@ -1,4 +1,3 @@
-//! hooks (`PostToolUse` output mutation) — a `PostToolUse` hook may REPLACE an
 //! MCP tool's output via `hookSpecificOutput.updatedMCPToolOutput`, threaded
 //! back into the model-facing tool result.
 //!
@@ -14,8 +13,7 @@
 //!    `isMcpTool` gate suppresses the mutation).
 //! 3. An MCP tool + NO hook (or a hook that doesn't set the field) → the result
 //!    is the tool's own output, byte-identical (strict no-op).
-
-use api_client::types::ContentBlockApi;
+use llm_client::ContentBlock as LlmContentBlock;
 use async_trait::async_trait;
 use hooks::definition::{HookDefinition, HookExecutor as DefHookExecutor, HookSource};
 use hooks::events::{HookEvent, HookEventType};
@@ -231,16 +229,17 @@ fn orch_with(
 fn two_turn_api(tool_use_id: ToolUseId, tool_name: &str) -> Arc<MockApiClient> {
     Arc::new(MockApiClient::new(vec![
         mock_message_response(
-            vec![ContentBlockApi::ToolUse {
-                id: tool_use_id,
+            vec![LlmContentBlock::ToolCall {
+                id: tool_use_id.as_uuid().to_string(),
                 name: tool_name.into(),
                 input: json!({}),
             }],
             Some("tool_use"),
         ),
         mock_message_response(
-            vec![ContentBlockApi::Text {
+            vec![LlmContentBlock::Text {
                 text: "done".into(),
+                cache_control: None,
             }],
             Some("end_turn"),
         ),

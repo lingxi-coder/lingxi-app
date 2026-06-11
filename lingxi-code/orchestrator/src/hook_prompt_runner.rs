@@ -21,12 +21,10 @@
 
 use std::sync::Arc;
 
-use api_client::types::{ContentBlockApi, MessageResponse};
-use api_client::ApiError;
 use async_trait::async_trait;
 use hooks::{HookPromptRunner, PromptHookError, PromptHookRequest};
+use llm_client::{ContentBlock as LlmContentBlock, LlmError, LlmResponse};
 use protocol::{ConversationMessage, MessageId};
-use traits::HttpError;
 
 use crate::conversation::OrchestratorApiClient;
 
@@ -72,14 +70,14 @@ impl ApiClientHookPromptRunner {
 
     /// Concatenate the assistant message's text blocks (the analog of
     /// `extractTextContent(response.message.content)`; `execPromptHook.ts:105`).
-    /// `Text` and `ConnectorText` blocks contribute; tool-use / thinking blocks
+    /// `Text` and `ConnectorText` blocks contribute; tool-use / reasoning blocks
     /// are ignored, matching `extractTextContent`'s text-only projection.
-    fn extract_text(response: &MessageResponse) -> String {
+    fn extract_text(response: &LlmResponse) -> String {
         let mut out = String::new();
         for block in &response.content {
             match block {
-                ContentBlockApi::Text { text } => out.push_str(text),
-                ContentBlockApi::ConnectorText { connector_text, .. } => {
+                LlmContentBlock::Text { text, .. } => out.push_str(text),
+                LlmContentBlock::ConnectorText { connector_text, .. } => {
                     out.push_str(connector_text);
                 }
                 _ => {}
@@ -88,13 +86,17 @@ impl ApiClientHookPromptRunner {
         out
     }
 
-    /// Map an [`ApiError`] to a [`PromptHookError`]. A transport timeout becomes
+    /// Map an [`LlmError`] to a [`PromptHookError`]. A transport timeout becomes
     /// [`PromptHookError::Timeout`] (the `execPromptHook.ts` aborted-signal
     /// path); every other failure is a [`PromptHookError::Query`]
     /// (`outcome: 'non_blocking_error'`).
-    fn map_error(err: ApiError) -> PromptHookError {
+    fn map_error(err: LlmError) -> PromptHookError {
         match err {
-            ApiError::Http(HttpError::Timeout(d)) => PromptHookError::Timeout(d),
+            LlmError::Transport { ref message } if message.contains("timeout") || message.contains("Timeout") => {
+                // Best-effort: `LlmError::Transport` doesn't carry a Duration,
+                // so we synthesize a zero-duration timeout for the hook error.
+                PromptHookError::Timeout(std::time::Duration::ZERO)
+            }
             other => PromptHookError::Query(other.to_string()),
         }
     }
@@ -121,29 +123,35 @@ impl HookPromptRunner for ApiClientHookPromptRunner {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use api_client::types::UsageApi;
+    use llm_client::{LlmResponse, Usage};
     use std::sync::Mutex;
 
     /// One recorded `messages_create` call: `(model, system, messages)`.
     type RecordedCall = (String, Option<String>, Vec<ConversationMessage>);
 
+    fn make_text_response(body: &str) -> LlmResponse {
+        LlmResponse {
+            id: "msg_1".into(),
+            model: "claude-haiku-4-5".into(),
+            content: vec![LlmContentBlock::Text { text: body.into(), cache_control: None }],
+            stop_reason: Some("end_turn".into()),
+            usage: Usage::default(),
+            cost: None,
+            provider_metadata: serde_json::Value::Null,
+        }
+    }
+
     /// Records each `messages_create` call and returns a scripted response.
     struct MockApi {
         recorded: Mutex<Vec<RecordedCall>>,
-        response: Mutex<Option<Result<MessageResponse, ApiError>>>,
+        response: Mutex<Option<Result<LlmResponse, LlmError>>>,
     }
     impl MockApi {
         fn text(model_echo: &str, body: &str) -> Arc<Self> {
             let _ = model_echo;
             Arc::new(Self {
                 recorded: Mutex::new(Vec::new()),
-                response: Mutex::new(Some(Ok(MessageResponse {
-                    id: "msg_1".into(),
-                    model: "claude-haiku-4-5".into(),
-                    content: vec![ContentBlockApi::Text { text: body.into() }],
-                    stop_reason: Some("end_turn".into()),
-                    usage: UsageApi::default(),
-                }))),
+                response: Mutex::new(Some(Ok(make_text_response(body)))),
             })
         }
     }
@@ -155,7 +163,7 @@ mod tests {
             system: Option<&str>,
             msgs: Vec<ConversationMessage>,
             _tools: Vec<serde_json::Value>,
-        ) -> Result<MessageResponse, ApiError> {
+        ) -> Result<LlmResponse, LlmError> {
             self.recorded
                 .lock()
                 .unwrap()
@@ -164,7 +172,7 @@ mod tests {
                 .lock()
                 .unwrap()
                 .take()
-                .unwrap_or(Err(ApiError::UnexpectedStreamEnd))
+                .unwrap_or(Err(LlmError::Transport { message: "exhausted".into() }))
         }
     }
 
@@ -221,9 +229,9 @@ mod tests {
     async fn timeout_error_maps_to_prompt_timeout() {
         let api = Arc::new(MockApi {
             recorded: Mutex::new(Vec::new()),
-            response: Mutex::new(Some(Err(ApiError::Http(HttpError::Timeout(
-                std::time::Duration::from_secs(30),
-            ))))),
+            response: Mutex::new(Some(Err(LlmError::Transport {
+                message: "request timeout after 30s".into(),
+            }))),
         });
         let runner = ApiClientHookPromptRunner::new(api);
 
@@ -235,7 +243,7 @@ mod tests {
     async fn other_error_maps_to_query_error() {
         let api = Arc::new(MockApi {
             recorded: Mutex::new(Vec::new()),
-            response: Mutex::new(Some(Err(ApiError::Unauthorized("bad key".into())))),
+            response: Mutex::new(Some(Err(LlmError::Authentication))),
         });
         let runner = ApiClientHookPromptRunner::new(api);
 

@@ -9,6 +9,21 @@
 //! actually sleeping (`tokio::time::sleep`) and re-executing the request.
 //! This separation keeps the driver unit-testable without a Tokio runtime and
 //! leaves all transport / UI emission to Plan 3 wiring.
+//!
+//! ## 429 subscriber gate (parity `withRetry.ts:767`)
+//!
+//! `RateLimited` (HTTP 429) is retried **only when** `!is_subscriber ||
+//! is_enterprise`. A plain Claude.ai subscriber (non-enterprise) hits their
+//! rate limit and must wait; retrying would just burn the budget and hammer
+//! the server. Enterprise subscribers and API-key users do retry (same as
+//! claude-code).
+//!
+//! ## `resolve_retry_control` (parity `api-client/src/anthropic.rs:1187-1211`)
+//!
+//! Computes the per-request [`RetryControl`] from env + subscriber state.
+//! Injectable via [`ResolveRetryEnv`] for deterministic tests.
+//! `CLAUDE_CODE_UNATTENDED_RETRY` / persistent-mode is Anthropic-internal-only —
+//! not ported.
 
 #![forbid(unsafe_code)]
 
@@ -24,8 +39,32 @@ use std::time::Duration;
 /// `parity_messages_create.json`.
 pub const DEFAULT_BASE_DELAYS_MS: &[u64] = &[500, 1_000, 2_000];
 
-/// Default retry budget (3 attempts). **Locked against spec §7**.
-pub const DEFAULT_RETRY_BUDGET: u8 = 3;
+/// Default maximum number of retries. Byte-locked to claude-code
+/// `withRetry.ts:52` (`const DEFAULT_MAX_RETRIES = 10`). Combined with the
+/// loop bound `attempt <= maxRetries + 1` (`withRetry.ts:189`) this permits up
+/// to 11 executions / 10 sleeps at the default. Overridable via
+/// `CLAUDE_CODE_MAX_RETRIES` (see [`max_retries_from_env`]).
+pub const DEFAULT_MAX_RETRIES: u32 = 10;
+
+/// Resolve the configured max-retries from a raw `CLAUDE_CODE_MAX_RETRIES`
+/// value. Mirrors claude-code `getDefaultMaxRetries` (`withRetry.ts:789-793`):
+/// when the env var is present its `parseInt` is used, otherwise (absent or
+/// unparseable) the default of [`DEFAULT_MAX_RETRIES`] applies.
+#[must_use]
+pub fn max_retries_from_env_value(v: Option<&str>) -> u32 {
+    match v {
+        Some(s) => s.trim().parse::<u32>().unwrap_or(DEFAULT_MAX_RETRIES),
+        None => DEFAULT_MAX_RETRIES,
+    }
+}
+
+/// Read `CLAUDE_CODE_MAX_RETRIES` from the process environment and resolve the
+/// effective max-retries. Mirrors claude-code `getDefaultMaxRetries`
+/// (`withRetry.ts:789-796`).
+#[must_use]
+pub fn max_retries_from_env() -> u32 {
+    max_retries_from_env_value(std::env::var("CLAUDE_CODE_MAX_RETRIES").ok().as_deref())
+}
 
 /// Consecutive-529 threshold before the fallback / repeated-overload decision
 /// fires. Byte-locked to claude-code `withRetry.ts:54`
@@ -79,6 +118,15 @@ pub enum DriveStep {
     },
     /// Surface the error to the caller.
     Terminal,
+    /// Surface a "Repeated 529 Overloaded errors" error to the caller.
+    ///
+    /// Emitted when `allow_fallback && consecutive_overloaded >= max_529_retries
+    /// && fallback_model.is_none() && is_external && !is_sandbox` — the external
+    /// non-sandbox terminal branch (TS `withRetry.ts:354-362`). Distinct from
+    /// [`Terminal`] so callers can produce the byte-locked
+    /// `REPEATED_529_ERROR_MESSAGE` copy (`errors.ts:166`) without needing to
+    /// re-inspect the [`RetryState`].
+    RepeatedOverloaded,
 }
 
 /// Per-call mutable retry state (attempts, consecutive overloads).
@@ -89,6 +137,17 @@ pub struct RetryState {
     /// Count of consecutive `Overloaded` errors without an intervening
     /// non-overloaded outcome.
     pub consecutive_overloaded: u8,
+    /// `true` when the configured credential is a Claude.ai OAuth subscriber.
+    ///
+    /// Gates the 429 retry: `!is_subscriber || is_enterprise` mirrors
+    /// `withRetry.ts:767`. A subscriber-non-enterprise 429 is **terminal**;
+    /// enterprise subscribers and API-key users retry.
+    pub is_subscriber: bool,
+    /// `true` when the subscriber is an enterprise account.
+    ///
+    /// Re-enables 429 retry for subscribers on enterprise plans
+    /// (`withRetry.ts:767`).
+    pub is_enterprise: bool,
 }
 
 /// Consecutive-529 / Opus-fallback policy threaded into [`next_step`].
@@ -108,6 +167,12 @@ pub struct RetryState {
 pub struct RetryControl {
     /// Consecutive-529 threshold. Defaults to [`MAX_529_RETRIES`] (3).
     pub max_529_retries: u8,
+    /// Maximum number of retries. Defaults to [`DEFAULT_MAX_RETRIES`] (10).
+    ///
+    /// Overridable via `CLAUDE_CODE_MAX_RETRIES` — wired by
+    /// [`resolve_retry_control`] reading [`ResolveRetryEnv::max_retries`].
+    /// Mirrors `withRetry.ts:789-796` (`getMaxRetries`).
+    pub max_retries: u32,
     /// Fallback model to signal via [`DriveStep::Fallback`] once the
     /// threshold trips; `None` disables the fallback signal.
     pub fallback_model: Option<String>,
@@ -132,12 +197,103 @@ impl Default for RetryControl {
     fn default() -> Self {
         Self {
             max_529_retries: MAX_529_RETRIES,
+            max_retries: DEFAULT_MAX_RETRIES,
             fallback_model: None,
             primary_model: String::new(),
             allow_fallback: false,
             is_external: false,
             is_sandbox: false,
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// resolve_retry_control — ported from api-client/src/anthropic.rs:1187-1211
+// ---------------------------------------------------------------------------
+
+/// Injectable environment for [`resolve_retry_control`].
+///
+/// Mirrors the same `UserAgentEnv` injectable pattern (Task 3) so tests can
+/// supply deterministic values without mutating `std::env`.  The
+/// `from_process_env()` constructor reads the real process environment for
+/// production callers.
+///
+/// **Not ported:** `CLAUDE_CODE_UNATTENDED_RETRY` / persistent-mode is
+/// Anthropic-internal-only and has no effect in external builds.
+#[derive(Debug, Clone, Default)]
+pub struct ResolveRetryEnv {
+    /// Raw value of `FALLBACK_FOR_ALL_PRIMARY_MODELS`. A non-empty string is
+    /// truthy (mirrors JS `process.env.FALLBACK_FOR_ALL_PRIMARY_MODELS ||`).
+    pub fallback_for_all: Option<String>,
+    /// Raw value of `USER_TYPE`. `"external"` means `is_external = true`.
+    pub user_type: Option<String>,
+    /// Whether `IS_SANDBOX` is defined at all. Any defined value (including
+    /// empty string) counts as sandboxed — mirrors TS `!!process.env.IS_SANDBOX`.
+    pub is_sandbox_defined: bool,
+    /// Raw value of `CLAUDE_CODE_MAX_RETRIES`. When `Some`, parsed as `u32`;
+    /// absent or unparseable → [`DEFAULT_MAX_RETRIES`].
+    /// Mirrors `withRetry.ts:789-796` (`getMaxRetries`).
+    pub max_retries: Option<String>,
+}
+
+impl ResolveRetryEnv {
+    /// Read the live process environment. For production callers.
+    #[must_use]
+    pub fn from_process_env() -> Self {
+        Self {
+            fallback_for_all: std::env::var("FALLBACK_FOR_ALL_PRIMARY_MODELS").ok(),
+            user_type: std::env::var("USER_TYPE").ok(),
+            is_sandbox_defined: std::env::var_os("IS_SANDBOX").is_some(),
+            max_retries: std::env::var("CLAUDE_CODE_MAX_RETRIES").ok(),
+        }
+    }
+}
+
+/// Compute the per-request [`RetryControl`] from env + subscriber state.
+///
+/// Ports `api-client/src/anthropic.rs::resolve_retry_control` (`:1187-1211`)
+/// re-typed off api-client. Accepts an injectable [`ResolveRetryEnv`] so
+/// tests can supply deterministic values.
+///
+/// **Policy:**
+/// - `allow_fallback` = `FALLBACK_FOR_ALL_PRIMARY_MODELS` truthy **or**
+///   (`!is_subscriber` and `is_non_custom_opus(model)`)
+/// - `is_external` = `USER_TYPE == "external"`
+/// - `is_sandbox` = `IS_SANDBOX` env var is defined (any value)
+/// - `max_retries` = `CLAUDE_CODE_MAX_RETRIES` parsed as `u32`, or
+///   [`DEFAULT_MAX_RETRIES`] when absent/unparseable (mirrors
+///   `withRetry.ts:789-796`)
+///
+/// **Not ported:** `CLAUDE_CODE_UNATTENDED_RETRY` / persistent-mode is
+/// ant-only.
+#[must_use]
+pub fn resolve_retry_control(
+    model: &str,
+    fallback_model: Option<String>,
+    is_subscriber: bool,
+    env: &ResolveRetryEnv,
+) -> RetryControl {
+    // TS raw `process.env.FALLBACK_FOR_ALL_PRIMARY_MODELS ||` — truthy means a
+    // non-empty string; an empty string is falsy in JS.
+    let fallback_for_all = env
+        .fallback_for_all
+        .as_deref()
+        .is_some_and(|v| !v.is_empty());
+    let allow_fallback =
+        fallback_for_all || (!is_subscriber && crate::model::fallback::is_non_custom_opus(model));
+    let is_external = env.user_type.as_deref() == Some("external");
+    // TS `!!process.env.IS_SANDBOX` — present (defined) is sandboxed.
+    let is_sandbox = env.is_sandbox_defined;
+    // `CLAUDE_CODE_MAX_RETRIES` → withRetry.ts:789-796 `getMaxRetries`.
+    let max_retries = max_retries_from_env_value(env.max_retries.as_deref());
+    RetryControl {
+        fallback_model,
+        primary_model: model.to_string(),
+        allow_fallback,
+        is_external,
+        is_sandbox,
+        max_retries,
+        ..RetryControl::default()
     }
 }
 
@@ -178,8 +334,10 @@ impl Default for RetryControl {
 ///      → [`DriveStep::AdjustMaxTokens(n)`] (does **not** consume an attempt).
 ///    - Otherwise → [`DriveStep::Terminal`].
 /// 5. All other errors → [`DriveStep::Terminal`].
-/// 6. Budget exhaustion: once `state.attempt >= DEFAULT_RETRY_BUDGET`, every
+/// 6. Budget exhaustion: once `state.attempt >= ctl.max_retries`, every
 ///    otherwise-retryable class → [`DriveStep::Terminal`].
+///    `ctl.max_retries` defaults to [`DEFAULT_MAX_RETRIES`] and is overridden
+///    by `CLAUDE_CODE_MAX_RETRIES` via [`resolve_retry_control`].
 pub fn next_step(
     state: &mut RetryState,
     ctl: &RetryControl,
@@ -189,7 +347,7 @@ pub fn next_step(
     use llm_client::LlmError;
 
     match error {
-        LlmError::Overloaded => {
+        LlmError::Overloaded { .. } => {
             // Increment consecutive counter (always, regardless of allow_fallback,
             // so the count is accurate when allow_fallback later becomes true).
             state.consecutive_overloaded = state.consecutive_overloaded.saturating_add(1);
@@ -204,16 +362,17 @@ pub fn next_step(
                         fallback_model: fallback.clone(),
                     };
                 }
-                // api-client withRetry.ts:354-359 — external, non-sandbox, no fallback
-                // configured → terminate immediately rather than exhausting budget.
+                // api-client withRetry.ts:354-362 — external, non-sandbox, no fallback
+                // configured → terminate immediately with the byte-locked
+                // "Repeated 529 Overloaded errors" copy (errors.ts:166).
                 if ctl.is_external && !ctl.is_sandbox {
-                    return DriveStep::Terminal;
+                    return DriveStep::RepeatedOverloaded;
                 }
                 // Neither branch applies (internal or sandbox) → fall through to the
                 // normal budget-driven retry path.
             }
 
-            if state.attempt >= DEFAULT_RETRY_BUDGET {
+            if u32::from(state.attempt) >= ctl.max_retries {
                 return DriveStep::Terminal;
             }
 
@@ -226,7 +385,16 @@ pub fn next_step(
             // Reset the consecutive-overloaded counter: a rate-limit is not a 529.
             state.consecutive_overloaded = 0;
 
-            if state.attempt >= DEFAULT_RETRY_BUDGET {
+            // 429 subscriber gate (parity withRetry.ts:767):
+            //   retry_429_allowed = !is_subscriber || is_enterprise
+            // A plain Claude.ai subscriber (non-enterprise) must NOT retry 429s
+            // — they've hit their usage limit and the server won't honour more
+            // requests until the window resets. Enterprise + API-key users retry.
+            if state.is_subscriber && !state.is_enterprise {
+                return DriveStep::Terminal;
+            }
+
+            if u32::from(state.attempt) >= ctl.max_retries {
                 return DriveStep::Terminal;
             }
 
@@ -242,7 +410,7 @@ pub fn next_step(
             // Reset the consecutive-overloaded counter.
             state.consecutive_overloaded = 0;
 
-            if state.attempt >= DEFAULT_RETRY_BUDGET {
+            if u32::from(state.attempt) >= ctl.max_retries {
                 return DriveStep::Terminal;
             }
 
@@ -271,7 +439,7 @@ pub fn next_step(
         // All other LlmError variants are unconditionally terminal.
         LlmError::Authentication
         | LlmError::PermissionDenied
-        | LlmError::ContextOverflow
+        | LlmError::ContextOverflow { .. }
         | LlmError::QuotaExceeded
         | LlmError::ModelUnavailable
         | LlmError::StreamInterrupted { .. }
@@ -330,7 +498,23 @@ mod jittered_delay_tests {
     #[test]
     fn default_base_delays_match_spec() {
         assert_eq!(DEFAULT_BASE_DELAYS_MS, &[500, 1_000, 2_000]);
-        assert_eq!(DEFAULT_RETRY_BUDGET, 3);
+    }
+
+    /// claude-code `withRetry.ts:52` — `const DEFAULT_MAX_RETRIES = 10`.
+    #[test]
+    fn default_retry_budget_matches_claude_code() {
+        assert_eq!(DEFAULT_MAX_RETRIES, 10);
+    }
+
+    /// claude-code `withRetry.ts:789-796` — `CLAUDE_CODE_MAX_RETRIES` overrides
+    /// the default when present and parseable; falls back to 10 otherwise.
+    #[test]
+    fn claude_code_max_retries_env_overrides() {
+        assert_eq!(max_retries_from_env_value(Some("5")), 5);
+        // Absent → default.
+        assert_eq!(max_retries_from_env_value(None), DEFAULT_MAX_RETRIES);
+        // Unparseable → default (mirrors parseInt fallback semantics here).
+        assert_eq!(max_retries_from_env_value(Some("notanint")), DEFAULT_MAX_RETRIES);
     }
 
     #[test]
@@ -345,6 +529,14 @@ mod next_step_tests {
     use super::*;
     use llm_client::{LlmError, RetryDecision, RetryPolicy};
     use std::time::Duration;
+
+    /// `state.attempt` value at which the default budget is exhausted (==
+    /// [`DEFAULT_MAX_RETRIES`], narrowed to the `u8` field type). 10 fits `u8`.
+    #[allow(
+        clippy::cast_possible_truncation,
+        reason = "DEFAULT_MAX_RETRIES is 10 and fits u8 trivially"
+    )]
+    const EXHAUSTED_ATTEMPT: u8 = DEFAULT_MAX_RETRIES as u8;
 
     fn ctl_default() -> RetryControl {
         RetryControl::default()
@@ -368,7 +560,7 @@ mod next_step_tests {
         let mut state = RetryState::default();
         let ctl = ctl_with_fallback();
         // First two overloads: counter < MAX_529_RETRIES (3), budget not exhausted.
-        let step = next_step(&mut state, &ctl, &LlmError::Overloaded, 0);
+        let step = next_step(&mut state, &ctl, &LlmError::Overloaded { repeated: false }, 0);
         assert!(
             matches!(step, DriveStep::RetryAfter(_)),
             "first overload should retry, got {step:?}"
@@ -376,7 +568,7 @@ mod next_step_tests {
         assert_eq!(state.consecutive_overloaded, 1);
         assert_eq!(state.attempt, 1);
 
-        let step2 = next_step(&mut state, &ctl, &LlmError::Overloaded, 0);
+        let step2 = next_step(&mut state, &ctl, &LlmError::Overloaded { repeated: false }, 0);
         assert!(
             matches!(step2, DriveStep::RetryAfter(_)),
             "second overload should retry, got {step2:?}"
@@ -390,9 +582,9 @@ mod next_step_tests {
         let mut state = RetryState::default();
         let ctl = ctl_with_fallback();
         // Drive 3 overloads: on the 3rd, consecutive >= MAX_529_RETRIES.
-        next_step(&mut state, &ctl, &LlmError::Overloaded, 0); // consecutive=1
-        next_step(&mut state, &ctl, &LlmError::Overloaded, 0); // consecutive=2
-        let step = next_step(&mut state, &ctl, &LlmError::Overloaded, 0); // consecutive=3
+        next_step(&mut state, &ctl, &LlmError::Overloaded { repeated: false }, 0); // consecutive=1
+        next_step(&mut state, &ctl, &LlmError::Overloaded { repeated: false }, 0); // consecutive=2
+        let step = next_step(&mut state, &ctl, &LlmError::Overloaded { repeated: false }, 0); // consecutive=3
         assert_eq!(
             step,
             DriveStep::Fallback {
@@ -407,8 +599,8 @@ mod next_step_tests {
         let mut state = RetryState::default();
         let ctl = ctl_with_fallback();
         // Two overloads then a transport error resets the counter.
-        next_step(&mut state, &ctl, &LlmError::Overloaded, 0);
-        next_step(&mut state, &ctl, &LlmError::Overloaded, 0);
+        next_step(&mut state, &ctl, &LlmError::Overloaded { repeated: false }, 0);
+        next_step(&mut state, &ctl, &LlmError::Overloaded { repeated: false }, 0);
         assert_eq!(state.consecutive_overloaded, 2);
 
         next_step(
@@ -428,11 +620,12 @@ mod next_step_tests {
     #[test]
     fn overloaded_budget_exhausted_is_terminal() {
         let mut state = RetryState {
-            attempt: DEFAULT_RETRY_BUDGET,
+            attempt: EXHAUSTED_ATTEMPT,
             consecutive_overloaded: 0,
+            ..RetryState::default()
         };
         let ctl = ctl_default();
-        let step = next_step(&mut state, &ctl, &LlmError::Overloaded, 0);
+        let step = next_step(&mut state, &ctl, &LlmError::Overloaded { repeated: false }, 0);
         assert_eq!(
             step,
             DriveStep::Terminal,
@@ -450,11 +643,18 @@ mod next_step_tests {
             primary_model: "claude-opus-4-6".into(),
             ..RetryControl::default()
         };
-        next_step(&mut state, &ctl, &LlmError::Overloaded, 0);
-        next_step(&mut state, &ctl, &LlmError::Overloaded, 0);
-        next_step(&mut state, &ctl, &LlmError::Overloaded, 0);
-        // Budget exhausted: 4th call is terminal.
-        let step = next_step(&mut state, &ctl, &LlmError::Overloaded, 0);
+        // Internal (is_external=false) + no fallback model: the consecutive-529
+        // gate never terminates early, so the loop is budget-driven. Drive the
+        // full default budget (10 retries) then assert the 11th call is Terminal.
+        for _ in 0..DEFAULT_MAX_RETRIES {
+            let step = next_step(&mut state, &ctl, &LlmError::Overloaded { repeated: false }, 0);
+            assert!(
+                matches!(step, DriveStep::RetryAfter(_)),
+                "within budget overloaded should RetryAfter, got {step:?}"
+            );
+        }
+        // Budget exhausted: the next call is terminal.
+        let step = next_step(&mut state, &ctl, &LlmError::Overloaded { repeated: false }, 0);
         assert_eq!(
             step,
             DriveStep::Terminal,
@@ -466,7 +666,11 @@ mod next_step_tests {
 
     /// api-client gate: `allow_fallback && consecutive_529 >= max_529_retries
     ///   && fallback_model.is_none() && is_external && !is_sandbox`
-    /// → Terminal immediately (does not wait for budget exhaustion).
+    /// → `RepeatedOverloaded` immediately (does not wait for budget exhaustion).
+    ///
+    /// The `RepeatedOverloaded` step is distinct from `Terminal` so the adapter
+    /// can produce the byte-locked `"Repeated 529 Overloaded errors"` copy
+    /// (`errors.ts:166`, TS `withRetry.ts:359-362`).
     #[test]
     fn overloaded_external_without_fallback_terminates_at_threshold() {
         let mut state = RetryState::default();
@@ -477,30 +681,31 @@ mod next_step_tests {
             is_external: true,
             is_sandbox: false,
             max_529_retries: MAX_529_RETRIES,
+            max_retries: DEFAULT_MAX_RETRIES,
         };
         // Drive consecutive_overloaded up to max_529_retries.
         // Attempts 1 and 2: below threshold, should still retry.
-        let s1 = next_step(&mut state, &ctl, &LlmError::Overloaded, 0);
+        let s1 = next_step(&mut state, &ctl, &LlmError::Overloaded { repeated: false }, 0);
         assert!(
             matches!(s1, DriveStep::RetryAfter(_)),
             "attempt 1 should be RetryAfter, got {s1:?}"
         );
-        let s2 = next_step(&mut state, &ctl, &LlmError::Overloaded, 0);
+        let s2 = next_step(&mut state, &ctl, &LlmError::Overloaded { repeated: false }, 0);
         assert!(
             matches!(s2, DriveStep::RetryAfter(_)),
             "attempt 2 should be RetryAfter, got {s2:?}"
         );
         // Attempt 3: consecutive_overloaded reaches MAX_529_RETRIES (3).
-        // External + no-sandbox + no-fallback → Terminal (before budget exhaustion).
+        // External + no-sandbox + no-fallback → RepeatedOverloaded (before budget exhaustion).
         assert_eq!(
             state.attempt, 2,
             "should have used 2 budget slots (not budget exhausted)"
         );
-        let s3 = next_step(&mut state, &ctl, &LlmError::Overloaded, 0);
+        let s3 = next_step(&mut state, &ctl, &LlmError::Overloaded { repeated: false }, 0);
         assert_eq!(
             s3,
-            DriveStep::Terminal,
-            "external no-fallback at threshold must be Terminal, got {s3:?}"
+            DriveStep::RepeatedOverloaded,
+            "external no-fallback at threshold must be RepeatedOverloaded, got {s3:?}"
         );
     }
 
@@ -515,11 +720,12 @@ mod next_step_tests {
             is_external: true,
             is_sandbox: true,
             max_529_retries: MAX_529_RETRIES,
+            max_retries: DEFAULT_MAX_RETRIES,
         };
         // Drive through the threshold — sandbox must NOT terminate early.
-        next_step(&mut state, &ctl, &LlmError::Overloaded, 0);
-        next_step(&mut state, &ctl, &LlmError::Overloaded, 0);
-        let s3 = next_step(&mut state, &ctl, &LlmError::Overloaded, 0);
+        next_step(&mut state, &ctl, &LlmError::Overloaded { repeated: false }, 0);
+        next_step(&mut state, &ctl, &LlmError::Overloaded { repeated: false }, 0);
+        let s3 = next_step(&mut state, &ctl, &LlmError::Overloaded { repeated: false }, 0);
         // consecutive_overloaded == 3 == MAX_529_RETRIES, but is_sandbox → keep retrying.
         assert!(
             matches!(s3, DriveStep::RetryAfter(_)),
@@ -538,10 +744,11 @@ mod next_step_tests {
             is_external: false,
             is_sandbox: false,
             max_529_retries: MAX_529_RETRIES,
+            max_retries: DEFAULT_MAX_RETRIES,
         };
-        next_step(&mut state, &ctl, &LlmError::Overloaded, 0);
-        next_step(&mut state, &ctl, &LlmError::Overloaded, 0);
-        let s3 = next_step(&mut state, &ctl, &LlmError::Overloaded, 0);
+        next_step(&mut state, &ctl, &LlmError::Overloaded { repeated: false }, 0);
+        next_step(&mut state, &ctl, &LlmError::Overloaded { repeated: false }, 0);
+        let s3 = next_step(&mut state, &ctl, &LlmError::Overloaded { repeated: false }, 0);
         // consecutive_overloaded == 3, but is_external=false → keep retrying (budget-driven).
         assert!(
             matches!(s3, DriveStep::RetryAfter(_)),
@@ -549,7 +756,89 @@ mod next_step_tests {
         );
     }
 
-    // --- Table point 2: RateLimited ---
+    // --- Table point 2: RateLimited + subscriber gate (withRetry.ts:767) ---
+
+    /// withRetry.ts:767: subscriber non-enterprise 429 → terminal (no retry).
+    #[test]
+    fn subscriber_429_is_terminal() {
+        let mut state = RetryState {
+            is_subscriber: true,
+            is_enterprise: false,
+            ..RetryState::default()
+        };
+        let ctl = ctl_default();
+        let step = next_step(
+            &mut state,
+            &ctl,
+            &LlmError::RateLimited {
+                retry_after: Some(Duration::from_secs(5)),
+                scope: None,
+            },
+            0,
+        );
+        assert_eq!(
+            step,
+            DriveStep::Terminal,
+            "subscriber non-enterprise 429 must be terminal (withRetry.ts:767)"
+        );
+        // No budget should be consumed (terminal path).
+        assert_eq!(
+            state.attempt, 0,
+            "terminal 429 must not consume a budget slot"
+        );
+    }
+
+    /// withRetry.ts:767: enterprise subscriber 429 → retries (enterprise re-enables).
+    #[test]
+    fn enterprise_subscriber_429_retries() {
+        let mut state = RetryState {
+            is_subscriber: true,
+            is_enterprise: true,
+            ..RetryState::default()
+        };
+        let ctl = ctl_default();
+        let server_delay = Duration::from_secs(10);
+        let step = next_step(
+            &mut state,
+            &ctl,
+            &LlmError::RateLimited {
+                retry_after: Some(server_delay),
+                scope: None,
+            },
+            0,
+        );
+        assert_eq!(
+            step,
+            DriveStep::RetryAfter(server_delay),
+            "enterprise subscriber 429 must retry (withRetry.ts:767)"
+        );
+        assert_eq!(state.attempt, 1);
+    }
+
+    /// withRetry.ts:767: API-key user (non-subscriber) 429 → retries.
+    #[test]
+    fn api_key_user_429_retries() {
+        let mut state = RetryState {
+            is_subscriber: false,
+            is_enterprise: false,
+            ..RetryState::default()
+        };
+        let ctl = ctl_default();
+        let step = next_step(
+            &mut state,
+            &ctl,
+            &LlmError::RateLimited {
+                retry_after: None,
+                scope: None,
+            },
+            0,
+        );
+        assert!(
+            matches!(step, DriveStep::RetryAfter(_)),
+            "API-key (non-subscriber) 429 must retry, got {step:?}"
+        );
+        assert_eq!(state.attempt, 1);
+    }
 
     #[test]
     fn rate_limited_server_delay_used_verbatim() {
@@ -598,6 +887,7 @@ mod next_step_tests {
         let mut state = RetryState {
             attempt: 0,
             consecutive_overloaded: 2,
+            ..RetryState::default()
         };
         let ctl = ctl_default();
         next_step(
@@ -651,8 +941,9 @@ mod next_step_tests {
     #[test]
     fn provider_internal_budget_exhausted_is_terminal() {
         let mut state = RetryState {
-            attempt: DEFAULT_RETRY_BUDGET,
+            attempt: EXHAUSTED_ATTEMPT,
             consecutive_overloaded: 0,
+            ..RetryState::default()
         };
         let ctl = ctl_default();
         let step = next_step(&mut state, &ctl, &LlmError::ProviderInternal, 0);
@@ -738,7 +1029,7 @@ mod next_step_tests {
         let errors = vec![
             LlmError::Authentication,
             LlmError::PermissionDenied,
-            LlmError::ContextOverflow,
+            LlmError::ContextOverflow { token_gap: 0 },
             LlmError::QuotaExceeded,
             LlmError::ModelUnavailable,
             LlmError::StreamInterrupted {
@@ -777,12 +1068,13 @@ mod next_step_tests {
                 scope: None,
             },
             // Overloaded without fallback configured:
-            LlmError::Overloaded,
+            LlmError::Overloaded { repeated: false },
         ];
         for error in &retryable_errors {
             let mut state = RetryState {
-                attempt: DEFAULT_RETRY_BUDGET,
+                attempt: EXHAUSTED_ATTEMPT,
                 consecutive_overloaded: 0,
+                ..RetryState::default()
             };
             let ctl = ctl_default();
             let step = next_step(&mut state, &ctl, error, 0);
@@ -792,6 +1084,41 @@ mod next_step_tests {
                 "budget-exhausted {error:?} must be Terminal"
             );
         }
+    }
+
+    // --- Loop bound: initial + DEFAULT_MAX_RETRIES retries (claude-code withRetry.ts:189) ---
+
+    /// claude-code `withRetry.ts:189` — `for (attempt = 1; attempt <= maxRetries + 1; attempt++)`
+    /// at the default permits up to 11 executions / 10 sleeps. Modeled here as
+    /// `next_step` returning `RetryAfter` for the first 10 invocations (each
+    /// consuming a budget slot / sleep) and only becoming `Terminal` on the
+    /// 11th invocation (the 11th execution would have no further retry).
+    #[test]
+    fn next_step_terminal_after_eleven_executions_at_default() {
+        let mut state = RetryState::default();
+        let ctl = ctl_default();
+        // 10 retryable failures each yield RetryAfter (10 sleeps after the
+        // initial execution = 11 total executions worth of attempts).
+        for i in 0..DEFAULT_MAX_RETRIES {
+            let step = next_step(&mut state, &ctl, &LlmError::ProviderInternal, 0);
+            assert!(
+                matches!(step, DriveStep::RetryAfter(_)),
+                "invocation {i} (attempt before={}) should RetryAfter, got {step:?}",
+                state.attempt
+            );
+        }
+        assert_eq!(
+            u32::from(state.attempt),
+            DEFAULT_MAX_RETRIES,
+            "after 10 RetryAfter steps the attempt counter equals the budget"
+        );
+        // 11th invocation: budget exhausted → Terminal.
+        let final_step = next_step(&mut state, &ctl, &LlmError::ProviderInternal, 0);
+        assert_eq!(
+            final_step,
+            DriveStep::Terminal,
+            "the 11th execution attempt must be Terminal at the default budget"
+        );
     }
 
     // --- Table point 8: cross-check with RetryPolicy ---
@@ -812,7 +1139,7 @@ mod next_step_tests {
         let do_not_retry = vec![
             LlmError::Authentication,
             LlmError::PermissionDenied,
-            LlmError::ContextOverflow,
+            LlmError::ContextOverflow { token_gap: 0 },
             LlmError::QuotaExceeded,
             LlmError::ModelUnavailable,
             LlmError::StreamInterrupted {
@@ -845,7 +1172,7 @@ mod next_step_tests {
         // next_step when budget is fresh.
         let do_retry = vec![
             LlmError::ProviderInternal,
-            LlmError::Overloaded,
+            LlmError::Overloaded { repeated: false },
             LlmError::Transport {
                 message: "err".into(),
             },
@@ -915,6 +1242,7 @@ mod next_step_tests {
                 let mut state = RetryState {
                     attempt: attempt_u8,
                     consecutive_overloaded: 0,
+                    ..RetryState::default()
                 };
                 let ctl = ctl_default();
                 let step = next_step(&mut state, &ctl, &LlmError::ProviderInternal, 0);
@@ -931,5 +1259,205 @@ mod next_step_tests {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod resolve_retry_control_tests {
+    //! Env-matrix tests mirroring api-client's `resolve_retry_control` tests.
+    use super::*;
+    use llm_client::LlmError;
+
+    fn env(fallback_for_all: Option<&str>, user_type: Option<&str>, is_sandbox: bool) -> ResolveRetryEnv {
+        ResolveRetryEnv {
+            fallback_for_all: fallback_for_all.map(str::to_string),
+            user_type: user_type.map(str::to_string),
+            is_sandbox_defined: is_sandbox,
+            max_retries: None,
+        }
+    }
+
+    const OPUS_MODEL: &str = "claude-opus-4-6";
+    const SONNET_MODEL: &str = "claude-sonnet-4-20250514";
+
+    // --- allow_fallback ---
+
+    /// `FALLBACK_FOR_ALL_PRIMARY_MODELS` non-empty → `allow_fallback = true`
+    /// regardless of model or subscriber status.
+    #[test]
+    fn fallback_for_all_truthy_enables_allow_fallback() {
+        let ctl = resolve_retry_control(
+            SONNET_MODEL,
+            None,
+            true, // is_subscriber
+            &env(Some("1"), None, false),
+        );
+        assert!(ctl.allow_fallback, "non-empty FALLBACK_FOR_ALL_PRIMARY_MODELS must set allow_fallback");
+    }
+
+    /// `FALLBACK_FOR_ALL_PRIMARY_MODELS` empty string is falsy (JS semantics).
+    #[test]
+    fn fallback_for_all_empty_string_is_falsy() {
+        let ctl = resolve_retry_control(
+            SONNET_MODEL,
+            None,
+            false,
+            &env(Some(""), None, false),
+        );
+        assert!(
+            !ctl.allow_fallback,
+            "empty FALLBACK_FOR_ALL_PRIMARY_MODELS must be falsy"
+        );
+    }
+
+    /// Non-subscriber + Opus model → `allow_fallback = true`.
+    #[test]
+    fn non_subscriber_opus_allows_fallback() {
+        let ctl = resolve_retry_control(
+            OPUS_MODEL,
+            Some("claude-sonnet-4-6".into()),
+            false, // not subscriber
+            &env(None, None, false),
+        );
+        assert!(ctl.allow_fallback, "non-subscriber + opus → allow_fallback");
+    }
+
+    /// Subscriber + Opus model → `allow_fallback = false` (unless `FALLBACK_FOR_ALL`).
+    #[test]
+    fn subscriber_opus_no_fallback_unless_env() {
+        let ctl = resolve_retry_control(
+            OPUS_MODEL,
+            Some("claude-sonnet-4-6".into()),
+            true, // subscriber
+            &env(None, None, false),
+        );
+        assert!(!ctl.allow_fallback, "subscriber + opus must NOT set allow_fallback unless FALLBACK_FOR_ALL");
+    }
+
+    /// Non-subscriber + non-Opus model → `allow_fallback = false`.
+    #[test]
+    fn non_subscriber_non_opus_no_fallback() {
+        let ctl = resolve_retry_control(
+            SONNET_MODEL,
+            None,
+            false,
+            &env(None, None, false),
+        );
+        assert!(!ctl.allow_fallback, "non-subscriber + non-opus must NOT allow fallback");
+    }
+
+    // --- is_external ---
+
+    #[test]
+    fn user_type_external_sets_is_external() {
+        let ctl = resolve_retry_control(SONNET_MODEL, None, false, &env(None, Some("external"), false));
+        assert!(ctl.is_external);
+    }
+
+    #[test]
+    fn user_type_non_external_clears_is_external() {
+        let ctl = resolve_retry_control(SONNET_MODEL, None, false, &env(None, Some("internal"), false));
+        assert!(!ctl.is_external);
+    }
+
+    #[test]
+    fn user_type_absent_clears_is_external() {
+        let ctl = resolve_retry_control(SONNET_MODEL, None, false, &env(None, None, false));
+        assert!(!ctl.is_external);
+    }
+
+    // --- is_sandbox ---
+
+    #[test]
+    fn is_sandbox_defined_sets_is_sandbox() {
+        let ctl = resolve_retry_control(SONNET_MODEL, None, false, &env(None, None, true));
+        assert!(ctl.is_sandbox);
+    }
+
+    #[test]
+    fn is_sandbox_absent_clears_is_sandbox() {
+        let ctl = resolve_retry_control(SONNET_MODEL, None, false, &env(None, None, false));
+        assert!(!ctl.is_sandbox);
+    }
+
+    // --- fallback_model is threaded through ---
+
+    #[test]
+    fn fallback_model_is_threaded_through() {
+        let ctl = resolve_retry_control(
+            SONNET_MODEL,
+            Some("claude-sonnet-4-6".into()),
+            false,
+            &env(None, None, false),
+        );
+        assert_eq!(ctl.fallback_model.as_deref(), Some("claude-sonnet-4-6"));
+        assert_eq!(ctl.primary_model, SONNET_MODEL);
+    }
+
+    // --- from_process_env smoke test (should not panic) ---
+
+    #[test]
+    fn from_process_env_does_not_panic() {
+        let _ = ResolveRetryEnv::from_process_env();
+    }
+
+    // --- Fix 1: CLAUDE_CODE_MAX_RETRIES drives next_step via resolve_retry_control ---
+
+    /// `CLAUDE_CODE_MAX_RETRIES=2` → `ctl.max_retries = 2` → `next_step` returns
+    /// `Terminal` after 3 executions (2 sleeps), not 11.
+    ///
+    /// Mirrors `withRetry.ts:789-796` `getMaxRetries → options.maxRetries ??
+    /// CLAUDE_CODE_MAX_RETRIES ?? 10`.
+    #[test]
+    fn claude_code_max_retries_env_drives_next_step() {
+        // Inject max_retries="2" via ResolveRetryEnv (avoids mutating std::env).
+        let env = ResolveRetryEnv {
+            max_retries: Some("2".to_string()),
+            ..ResolveRetryEnv::default()
+        };
+        let ctl = resolve_retry_control(SONNET_MODEL, None, false, &env);
+        assert_eq!(ctl.max_retries, 2, "ctl.max_retries must be 2");
+
+        let mut state = RetryState::default();
+        // First 2 calls → RetryAfter (2 sleeps).
+        for i in 0..2u32 {
+            let step = next_step(&mut state, &ctl, &LlmError::ProviderInternal, 0);
+            assert!(
+                matches!(step, DriveStep::RetryAfter(_)),
+                "call {i}: expected RetryAfter, got {step:?}"
+            );
+        }
+        // 3rd call → budget exhausted (attempt=2 >= max_retries=2) → Terminal.
+        let final_step = next_step(&mut state, &ctl, &LlmError::ProviderInternal, 0);
+        assert_eq!(
+            final_step,
+            DriveStep::Terminal,
+            "3rd call must be Terminal (CLAUDE_CODE_MAX_RETRIES=2)"
+        );
+    }
+
+    /// Absent or unparseable `CLAUDE_CODE_MAX_RETRIES` falls back to `DEFAULT_MAX_RETRIES`.
+    #[test]
+    fn claude_code_max_retries_absent_uses_default() {
+        let env = ResolveRetryEnv::default(); // max_retries: None
+        let ctl = resolve_retry_control(SONNET_MODEL, None, false, &env);
+        assert_eq!(
+            ctl.max_retries, DEFAULT_MAX_RETRIES,
+            "absent CLAUDE_CODE_MAX_RETRIES must default to {DEFAULT_MAX_RETRIES}"
+        );
+    }
+
+    /// Unparseable value falls back to `DEFAULT_MAX_RETRIES` (mirrors parseInt semantics).
+    #[test]
+    fn claude_code_max_retries_unparseable_uses_default() {
+        let env = ResolveRetryEnv {
+            max_retries: Some("notanumber".to_string()),
+            ..ResolveRetryEnv::default()
+        };
+        let ctl = resolve_retry_control(SONNET_MODEL, None, false, &env);
+        assert_eq!(
+            ctl.max_retries, DEFAULT_MAX_RETRIES,
+            "unparseable CLAUDE_CODE_MAX_RETRIES must default to {DEFAULT_MAX_RETRIES}"
+        );
     }
 }

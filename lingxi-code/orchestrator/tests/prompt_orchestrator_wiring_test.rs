@@ -1,8 +1,7 @@
-//! Integration: `ConversationOrchestrator::run_turn` assembles a
 //! system prompt via `assemble_system_prompt` and passes it to the
 //! API client.
+use llm_client::ContentBlock as LlmContentBlock;
 
-use api_client::types::ContentBlockApi;
 use orchestrator::test_support::{
     mock_message_response, MockApiClient, MockOutputStream, NoOpPermissionGate,
     StaticMemoryProvider,
@@ -16,7 +15,7 @@ use tool_api::registry::ToolRegistry;
 async fn run_turn_passes_assembled_system_prompt_to_api_client() {
     let tmp = TempDir::new().unwrap();
     let api = Arc::new(MockApiClient::new(vec![mock_message_response(
-        vec![ContentBlockApi::Text { text: "ok".into() }],
+        vec![LlmContentBlock::Text { text: "ok".into(), cache_control: None }],
         Some("end_turn"),
     )]));
     let tools = Arc::new(ToolRegistry::new());

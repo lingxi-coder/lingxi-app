@@ -3,23 +3,73 @@
 //! See spec §3 (cross-plan trait), §4 Flow A (lifecycle), §7 (wire identifiers),
 //! §8 M3-04 phase list.
 //!
-//! M3-04 implements [`api_client::oauth_hook::OAuthRefreshHook`] (frozen
-//! in M3-03 §3). The single-flight invariant is enforced via [`AuthState::refresh_lock`]
+//! The single-flight invariant is enforced via [`AuthState::refresh_lock`]
 //! with double-check-after-acquire (v3 §16.3).
+//!
+//! ## api-client decoupling (Plan 3a Task 9)
+//!
+//! `BearerToken`, `OAuthHookError`, and `TokenHash` are now owned locally in
+//! this module (re-typed from the api-client shapes they mirror). The
+//! `api_client::oauth_hook::OAuthRefreshHook` trait impl has been deleted;
+//! `RefreshDriver::refresh` is now an inherent `pub async fn`. The reactive-401
+//! retry path that api-client's middleware exercised via `current_hook()` is
+//! deferred to a follow-up (3b removes api-client entirely; the credential seam
+//! already handles token refresh proactively via `OAuthCredentialProvider`).
 
 // Task 2 lands the data model; Task 4+ consumes these fields via the
-// `OAuthRefreshHook` impl + `spawn_proactive`. Allow until then.
+// inherent `refresh` + `spawn_proactive`. Allow until then.
 #![allow(dead_code)]
 
 use crate::client::OAuthError;
 use crate::config::ClaudeAiOAuthConfig;
-use api_client::oauth_hook::{BearerToken, OAuthHookError, OAuthRefreshHook, TokenHash};
 use async_trait::async_trait;
 use protocol::{HttpMethod, HttpRequest, Secret};
+use thiserror::Error;
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 use tokio::sync::{Mutex, RwLock};
+
+// ---------------------------------------------------------------------------
+// Local OAuth types (re-typed from api_client::oauth_hook shapes, Plan 3a T9)
+// ---------------------------------------------------------------------------
+
+/// Bearer token wrapper.
+///
+/// Mirrors `api_client::oauth_hook::BearerToken` (owned locally so 3b can
+/// delete api-client without touching this crate).
+///
+/// Note: does not implement `Clone` because `Secret<T>` intentionally does not.
+/// Callers that need shared ownership must wrap in `Arc`.
+#[derive(Debug)]
+pub struct BearerToken(pub Secret<String>);
+
+/// SHA-256 of the in-use access token.
+///
+/// Passed to [`RefreshDriver::refresh`] so the single-flight double-check can
+/// detect whether another task already rotated the token.
+/// Mirrors `api_client::oauth_hook::TokenHash`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct TokenHash(pub [u8; 32]);
+
+/// Errors returned by [`RefreshDriver::refresh`].
+///
+/// Mirrors `api_client::oauth_hook::OAuthHookError` variants verbatim so
+/// callers (`credential_provider.rs`) can match on the same variant names.
+#[derive(Debug, Clone, Error)]
+pub enum OAuthHookError {
+    /// Refresh attempted but the `IdP` rejected the `refresh_token`.
+    #[error("refresh failed: {0}")]
+    RefreshFailed(String),
+    /// The token hash passed to `refresh` is older than what the driver has
+    /// stored; another caller already rotated. Caller should retry with the
+    /// fresh token.
+    #[error("token stale; reload from store")]
+    TokenStale,
+    /// Network or transport failure reaching the `IdP`.
+    #[error("provider unreachable: {0}")]
+    ProviderUnreachable(String),
+}
 
 /// Timeout for the refresh-token POST. Matches claude-code's
 /// `refreshOAuthToken` deadline of `timeout: 15000` (15s)
@@ -328,9 +378,22 @@ struct TokenEndpointResponse {
     scope: Option<String>,
 }
 
-#[async_trait]
-impl OAuthRefreshHook for RefreshDriver {
-    async fn refresh(&self, prev_token_hash: TokenHash) -> Result<BearerToken, OAuthHookError> {
+impl RefreshDriver {
+    /// Perform a single-flight OAuth token refresh.
+    ///
+    /// Inherent method (Plan 3a Task 9 — replaces the former
+    /// `api_client::oauth_hook::OAuthRefreshHook` trait impl). All callers
+    /// within this crate (`credential_provider.rs`, `proactive_loop`) and
+    /// tests call this directly without trait indirection.
+    ///
+    /// **Single-flight contract (v3 §16.3):** acquires `refresh_lock`, then
+    /// double-checks the `prev_token_hash`. If another task already rotated
+    /// the token under the lock, returns the current token without making an
+    /// HTTP call.
+    pub async fn refresh(
+        &self,
+        prev_token_hash: TokenHash,
+    ) -> Result<BearerToken, OAuthHookError> {
         // 1. Acquire the single-flight lock (v3 §16.3).
         let _guard = self.state.refresh_lock.lock().await;
 
@@ -431,13 +494,6 @@ impl OAuthRefreshHook for RefreshDriver {
         .await;
 
         Ok(BearerToken(Secret::new(new_access_token_str)))
-    }
-
-    async fn proactive_refresh(&self) -> Result<(), OAuthHookError> {
-        // The proactive driver lives in the spawned task; this default impl
-        // would only fire if the api-client middleware calls it directly,
-        // which it does NOT in M3-04. Stub returning Ok per the trait default.
-        Ok(())
     }
 }
 
@@ -597,16 +653,12 @@ async fn proactive_loop(state: Arc<AuthState>, spawner: Arc<dyn traits::RuntimeS
         // Fire a refresh. If it fails we emit a `_failed` event and back off
         // for 30 seconds; on hard failure (RefreshExpired) we exit the loop —
         // the next API call will surface the auth error to the user.
-        match <RefreshDriver as api_client::oauth_hook::OAuthRefreshHook>::refresh(
-            &driver, prev_hash,
-        )
-        .await
-        {
+        match driver.refresh(prev_hash).await {
             Ok(_) => {
                 // Success — loop continues against the freshly-rotated token.
                 continue;
             }
-            Err(api_client::oauth_hook::OAuthHookError::RefreshFailed(msg))
+            Err(OAuthHookError::RefreshFailed(msg))
                 if msg == "Session expired. Re-authenticate?" =>
             {
                 tracing::error!(
@@ -634,7 +686,6 @@ async fn proactive_loop(state: Arc<AuthState>, spawner: Arc<dyn traits::RuntimeS
 mod wire_and_persist_tests {
     use super::*;
     use crate::testsupport::{mem_credential_manager, Canned, MemStorage, MockHttp, TestClock};
-    use api_client::oauth_hook::OAuthRefreshHook;
 
     /// Reactive refresh must send a JSON body carrying the `scope` param and
     /// persist the rotated tokens to the attached `CredentialManager`.

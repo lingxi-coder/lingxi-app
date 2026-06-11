@@ -473,6 +473,51 @@ fn error_envelope(value: &Value) -> (&str, String) {
     )
 }
 
+/// Parse the `token_gap` out of Anthropic's prompt-too-long error message.
+///
+/// Pattern: `(?i)prompt is too long[^0-9]*(\d+)\s*tokens?\s*>\s*(\d+)` — identical
+/// to the orchestrator's `prompt_too_long.rs` regex. We do a manual no-regex parse
+/// here to avoid adding a `regex` dependency to `llm-client`:
+///
+/// 1. Case-insensitively find "prompt is too long" in the message.
+/// 2. Scan forward to the first digit run — that is `actual`.
+/// 3. Skip the `tokens?` / `>` glyph run and parse the next digit run as `limit`.
+/// 4. Return `actual - limit` when `actual > limit`, else `0` (unknown).
+fn ptl_token_gap(message: &str) -> u64 {
+    let lower = message.to_ascii_lowercase();
+    let start = match lower.find("prompt is too long") {
+        Some(i) => i + "prompt is too long".len(),
+        None => return 0,
+    };
+    let rest = &message[start..];
+
+    // Collect up to two digit runs.
+    let mut nums: [u64; 2] = [0; 2];
+    let mut found = 0usize;
+    let bytes = rest.as_bytes();
+    let mut i = 0usize;
+    while i < bytes.len() && found < 2 {
+        if bytes[i].is_ascii_digit() {
+            let start_i = i;
+            while i < bytes.len() && bytes[i].is_ascii_digit() {
+                i += 1;
+            }
+            if let Ok(n) = rest[start_i..i].parse::<u64>() {
+                nums[found] = n;
+                found += 1;
+            }
+        } else {
+            i += 1;
+        }
+    }
+
+    if found >= 2 && nums[0] > nums[1] {
+        nums[0] - nums[1]
+    } else {
+        0
+    }
+}
+
 fn map_error(error_type: &str, message: String, retry_after: Option<Duration>) -> LlmError {
     match error_type {
         "authentication_error" => LlmError::Authentication,
@@ -482,10 +527,14 @@ fn map_error(error_type: &str, message: String, retry_after: Option<Duration>) -
             retry_after,
             scope: None,
         },
-        "request_too_large" => LlmError::ContextOverflow,
-        "invalid_request_error" if message.contains("prompt is too long") => LlmError::ContextOverflow,
+        "request_too_large" => LlmError::ContextOverflow { token_gap: 0 },
+        "invalid_request_error" if message.to_ascii_lowercase().contains("prompt is too long") => {
+            LlmError::ContextOverflow {
+                token_gap: ptl_token_gap(&message),
+            }
+        }
         "invalid_request_error" => LlmError::InvalidRequest { message },
-        "overloaded_error" => LlmError::Overloaded,
+        "overloaded_error" => LlmError::Overloaded { repeated: false },
         // api_error, and unknown types stay retryable.
         _ => LlmError::ProviderInternal,
     }

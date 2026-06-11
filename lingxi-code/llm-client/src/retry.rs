@@ -13,7 +13,7 @@ impl RetryPolicy {
     #[must_use]
     pub fn classify_error(&self, error: &LlmError) -> RetryDecision {
         match error {
-            LlmError::Transport { .. } | LlmError::ProviderInternal | LlmError::Overloaded => {
+            LlmError::Transport { .. } | LlmError::ProviderInternal | LlmError::Overloaded { .. } => {
                 RetryDecision::Retry { after: None }
             }
             LlmError::RateLimited { retry_after, .. } => RetryDecision::Retry {
@@ -23,7 +23,7 @@ impl RetryPolicy {
             | LlmError::PermissionDenied
             | LlmError::InvalidRequest { .. }
             | LlmError::QuotaExceeded
-            | LlmError::ContextOverflow
+            | LlmError::ContextOverflow { .. }
             | LlmError::ModelUnavailable
             | LlmError::StreamInterrupted { .. }
             | LlmError::CostUnavailable { .. }

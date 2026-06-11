@@ -1,4 +1,3 @@
-//! `<memory>...</memory>` byte-locks + hierarchy splice order.
 
 use orchestrator::prompt::{memory_block, MemoryFile};
 use std::path::PathBuf;

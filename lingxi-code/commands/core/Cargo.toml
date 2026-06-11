@@ -30,6 +30,7 @@ orchestrator = { path = "../../orchestrator" }
 tool-api = { path = "../../tool-api" }
 cost = { path = "../../cost" }
 api-client = { path = "../../api-client" }
+llm-client = { path = "../../llm-client" }
 compaction = { path = "../../compaction" }
 sha2 = "0.10"
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync"] }

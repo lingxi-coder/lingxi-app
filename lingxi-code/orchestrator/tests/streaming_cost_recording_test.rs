@@ -1,4 +1,4 @@
-//! Streaming-turn billing gap: verify CostTracker receives usage after
+//! Streaming-turn billing gap: verify `CostTracker` receives usage after
 //! `run_turn_streaming` (was never recorded before this fix).
 //!
 //! Mirror of `cost_recording_test.rs` for the non-streaming path.
@@ -11,8 +11,8 @@ use orchestrator::test_support::{
     noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider,
 };
 use orchestrator::test_support_stream::{
-    content_block_start_text, content_block_stop, message_delta_stop_with_usage, message_start,
-    message_stop, text_delta, MockStreamingApiClient,
+    content_block_start_text, content_block_stop, message_delta_stop_with_usage,
+    message_start_with_usage, message_stop, text_delta, MockStreamingApiClient,
 };
 use orchestrator::{scripted, ConversationOrchestrator, OrchestratorConfig};
 use protocol::SessionId;
@@ -21,11 +21,25 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 use tool_api::registry::ToolRegistry;
 
-/// Build a `Usage` with the given input + output token counts.
-fn usage_with_tokens(input: u64, output: u64) -> Usage {
+/// Build a `Usage` with input tokens only (the `message_start` shape on the
+/// real Anthropic wire: input + cache counts present, output = 0).
+fn start_usage_with_input(input: u64) -> Usage {
     Usage {
         billable_tokens: TokenUsage {
             input,
+            output: 0,
+            ..Default::default()
+        },
+        ..Default::default()
+    }
+}
+
+/// Build a `Usage` with output tokens only (the `message_delta` shape on the
+/// real Anthropic wire: output present, input/cache = 0).
+fn delta_usage_with_output(output: u64) -> Usage {
+    Usage {
+        billable_tokens: TokenUsage {
+            input: 0,
             output,
             ..Default::default()
         },
@@ -33,9 +47,9 @@ fn usage_with_tokens(input: u64, output: u64) -> Usage {
     }
 }
 
-/// Construct a streaming orchestrator wired with a CostTracker and a
-/// scripted MockStreamingApiClient. Returns (orch, rx) where rx is the
-/// CostTracker's persist channel.
+/// Construct a streaming orchestrator wired with a `CostTracker` and a
+/// scripted `MockStreamingApiClient`. Returns (orch, rx) where rx is the
+/// `CostTracker`'s persist channel.
 fn make_streaming_orch_with_tracker(
     turns: Vec<Vec<llm_client::LlmEvent>>,
 ) -> (
@@ -79,18 +93,22 @@ fn make_streaming_orch_with_tracker(
     (orch, rx, output)
 }
 
-/// Streaming turn with known usage → CostTracker must receive a snapshot
+/// Streaming turn with known usage → `CostTracker` must receive a snapshot
 /// with the correct total_nano_usd (1000 input × 5000 + 500 output × 25000
 /// = 17_500_000 nano-USD for claude-opus-4-6, matching the batched-path test).
+///
+/// Wire shape: `message_start` carries input=1000 (real Anthropic wire);
+/// `message_delta` carries output=500 only. The per-field merge must combine
+/// them correctly so billing sees input=1000, output=500.
 #[tokio::test]
 async fn streaming_turn_records_cost_in_tracker() {
-    // MessageDelta carries the final authoritative usage: input=1000, output=500.
+    // Real wire: MessageStart carries input=1000, MessageDelta carries output=500.
     let stream = scripted![
-        message_start("msg_01", "claude-opus-4-6"),
+        message_start_with_usage("msg_01", "claude-opus-4-6", start_usage_with_input(1_000)),
         content_block_start_text(0),
         text_delta(0, "hi"),
         content_block_stop(0),
-        message_delta_stop_with_usage("end_turn", usage_with_tokens(1_000, 500)),
+        message_delta_stop_with_usage("end_turn", delta_usage_with_output(500)),
         message_stop(),
     ];
 
@@ -111,11 +129,11 @@ async fn streaming_turn_records_cost_in_tracker() {
 #[tokio::test]
 async fn streaming_turn_increments_api_calls_recorded() {
     let stream = scripted![
-        message_start("msg_01", "claude-opus-4-6"),
+        message_start_with_usage("msg_01", "claude-opus-4-6", start_usage_with_input(100)),
         content_block_start_text(0),
         text_delta(0, "ok"),
         content_block_stop(0),
-        message_delta_stop_with_usage("end_turn", usage_with_tokens(100, 50)),
+        message_delta_stop_with_usage("end_turn", delta_usage_with_output(50)),
         message_stop(),
     ];
 

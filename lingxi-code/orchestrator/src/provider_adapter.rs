@@ -80,6 +80,12 @@ pub struct ProviderApiAdapter {
     /// target display model.  A per-model entry **wins** over `fallback_model`
     /// (global).
     fallback_overrides: std::collections::BTreeMap<String, String>,
+    /// Alias → display-model map built at construction from
+    /// `client.available_models()`. Used by `messages_create_with_fallback`
+    /// to normalize an alias request string to the display model before
+    /// probing `fallback_overrides` (whose keys are display-normalized at
+    /// parse time).
+    alias_to_display: std::collections::BTreeMap<String, String>,
     /// `routing.retry.maxAttempts` override.
     ///
     /// Precedence: `CLAUDE_CODE_MAX_RETRIES` env > this > `DEFAULT_MAX_RETRIES`.
@@ -201,11 +207,20 @@ impl ProviderApiAdapter {
         settings_max_retries: Option<u32>,
         settings_backoff_ms: Option<u64>,
     ) -> Self {
-        let available_model_ids = client
-            .available_models()
-            .into_iter()
-            .map(|m| m.display_model)
-            .collect();
+        let models = client.available_models();
+        let available_model_ids = models.iter().map(|m| m.display_model.clone()).collect();
+        // Build alias→display map once so `messages_create_with_fallback` can
+        // normalize an alias request to the display model before looking up
+        // per-model fallback overrides (whose keys are display-normalized).
+        let mut alias_to_display = std::collections::BTreeMap::new();
+        for m in &models {
+            for alias in &m.aliases {
+                alias_to_display.insert(alias.clone(), m.display_model.clone());
+            }
+            // Map display_model → itself so the lookup is always correct
+            // whether the caller used the canonical name or an alias.
+            alias_to_display.insert(m.display_model.clone(), m.display_model.clone());
+        }
         Self {
             client,
             transport,
@@ -215,6 +230,7 @@ impl ProviderApiAdapter {
             analytics,
             fallback_model,
             fallback_overrides,
+            alias_to_display,
             settings_max_retries,
             settings_backoff_ms,
             available_model_ids,
@@ -952,7 +968,12 @@ impl OrchestratorApiClient for ProviderApiAdapter {
         // Per-model settings fallback wins over global fallback_model.
         // Call-site fallback_model (from OrchestratorApiClient) wins over both when
         // it's explicitly passed.
-        let settings_per_model = self.fallback_overrides.get(model).map(String::as_str);
+        //
+        // Normalize the request model via alias_to_display so that an alias
+        // request (e.g. "claude-3-5-sonnet" → display "claude-sonnet-4-5")
+        // still finds the per-model fallback entry whose key is the display model.
+        let display_model = self.alias_to_display.get(model).map_or(model, String::as_str);
+        let settings_per_model = self.fallback_overrides.get(display_model).map(String::as_str);
         let effective_fallback = fallback_model
             .or(settings_per_model)
             .or(self.fallback_model.as_deref());
@@ -2370,6 +2391,69 @@ mod tests {
 
         assert!(result.is_ok(), "global fallback should work: {result:?}");
         assert_eq!(transport.seen_count(), 4);
+    }
+
+    /// Per-model fallback fires even when the request uses an ALIAS of the
+    /// primary model.
+    ///
+    /// `fallback_overrides` keys are keyed by the display model; if the request
+    /// arrives as an alias (e.g. `"claude"` instead of `"claude-sonnet-4-20250514"`)
+    /// the lookup must normalize via `alias_to_display` before probing the map.
+    ///
+    /// RED on the old code (raw model probe skips the per-model entry when an
+    /// alias is used); GREEN after the alias normalization fix.
+    #[tokio::test]
+    async fn per_model_fallback_fires_via_alias() {
+        // Three 529s then a success on the fallback (haiku).
+        let overloaded_json = serde_json::json!({
+            "type": "error",
+            "error": {"type": "overloaded_error", "message": "overloaded"}
+        });
+        let transport = FakeTransport::sequence(vec![
+            FakeResponse::Ok(ProviderResponse::json(529, overloaded_json.clone())),
+            FakeResponse::Ok(ProviderResponse::json(529, overloaded_json.clone())),
+            FakeResponse::Ok(ProviderResponse::json(529, overloaded_json.clone())),
+            FakeResponse::Ok(ProviderResponse::json(200, routing_ok_response_json())),
+        ]);
+
+        // Per-model fallback: display "claude-sonnet-4-20250514" → "claude-haiku-4-20250307".
+        let mut fallback_overrides = std::collections::BTreeMap::new();
+        fallback_overrides.insert(
+            "claude-sonnet-4-20250514".to_string(),
+            "claude-haiku-4-20250307".to_string(),
+        );
+
+        let adapter = make_adapter_with_routing(
+            transport.clone(),
+            fallback_overrides,
+            None,
+            None,
+        );
+
+        // Request via ALIAS — the alias_to_display map must normalize this to
+        // "claude-sonnet-4-20250514" before the fallback_overrides lookup.
+        let result = OrchestratorApiClient::messages_create_with_fallback(
+            &adapter,
+            "claude",      // alias of "claude-sonnet-4-20250514"
+            Some("sys"),
+            Vec::new(),
+            Vec::new(),
+            None,          // no explicit call-site fallback (per-model must activate)
+            false,
+            false,
+        )
+        .await;
+
+        assert!(
+            result.is_ok(),
+            "alias-keyed per-model fallback should fire and succeed; got: {result:?}"
+        );
+        // 3 primary 529s + 1 fallback success = 4 transport calls.
+        assert_eq!(
+            transport.seen_count(),
+            4,
+            "expected 3 failing primary calls + 1 successful fallback call"
+        );
     }
 
     /// `settings_max_retries=2` causes terminal after 3 executions (not 11).

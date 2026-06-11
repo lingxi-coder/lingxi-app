@@ -318,11 +318,18 @@ fn canonical_uri_path(parsed: &url::Url) -> String {
 /// RFC 3986 path normalization: collapse empty segments and resolve `.`/`..`.
 ///
 /// Does NOT touch percent-encoding — that is handled separately.
+///
+/// Trailing slash is preserved: a path that ends with `/` (e.g. `/foo/`)
+/// keeps the trailing slash after normalization.  This matches botocore
+/// behavior (AWS `SigV4` reference implementation).
 fn normalize_path(path: &str) -> String {
     // A path "" or "/" → "/".
     if path.is_empty() || path == "/" {
         return "/".to_string();
     }
+
+    // Remember whether the original path had a trailing slash.
+    let had_trailing_slash = path.ends_with('/');
 
     let segments: Vec<&str> = path.split('/').collect();
     // segments[0] is always "" for absolute paths (path starts with /).
@@ -342,6 +349,8 @@ fn normalize_path(path: &str) -> String {
 
     if stack.is_empty() {
         "/".to_string()
+    } else if had_trailing_slash {
+        format!("/{}/", stack.join("/"))
     } else {
         format!("/{}", stack.join("/"))
     }
@@ -926,6 +935,26 @@ mod tests {
         // url::Url always gives "/" for the path even if absent, but test normalize_path directly.
         assert_eq!(normalize_path(""), "/");
         assert_eq!(normalize_path("/"), "/");
+    }
+
+    /// Minor: trailing slash is preserved after normalization (botocore behavior).
+    /// `/foo/` → `/foo/`; `/foo/bar/` → `/foo/bar/`.
+    #[test]
+    fn normalize_path_preserves_trailing_slash() {
+        assert_eq!(normalize_path("/foo/"), "/foo/", "/foo/ must stay /foo/");
+        assert_eq!(
+            normalize_path("/foo/bar/"),
+            "/foo/bar/",
+            "/foo/bar/ must stay /foo/bar/"
+        );
+        // Trailing slash after dot-segment resolution.
+        assert_eq!(
+            normalize_path("/a/./b/"),
+            "/a/b/",
+            "dot segment resolved and trailing slash kept"
+        );
+        // No trailing slash → unchanged behavior.
+        assert_eq!(normalize_path("/foo"), "/foo", "/foo must stay /foo");
     }
 
     /// Fix 2: A Bedrock-style `:` in a segment double-encodes to `%253A`.

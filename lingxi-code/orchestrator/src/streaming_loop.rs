@@ -14,7 +14,7 @@ use crate::sse::accumulator::BlockAccumulator;
 use crate::sse::event_router::{dispatch_event, RouterAction};
 use crate::turn_loop::dispatch_tool_uses_tracked;
 use futures::stream::{BoxStream, StreamExt};
-use llm_client::{LlmError, LlmEvent, Usage as LlmUsage};
+use llm_client::{LlmError, LlmEvent, TokenUsage, Usage as LlmUsage};
 use protocol::{ContentBlock, ToolUseId};
 use serde_json::Value;
 use std::sync::Arc;
@@ -61,6 +61,49 @@ pub struct PumpedTurn {
     /// Used by `try_run_turn_streaming` to record into `CostTracker`
     /// (mirrors the non-streaming path in `turn_loop.rs`).
     pub usage: Option<LlmUsage>,
+}
+
+/// Merge a `MessageDelta` usage snapshot into the `MessageStart` seed.
+///
+/// On the real Anthropic wire, `message_start.usage` carries `input_tokens`
+/// plus cache counts; `message_delta.usage` carries the final `output_tokens`
+/// only (input/cache arrive as `0` in the delta). A naïve `or_else` replaces
+/// the whole seed with the delta, zeroing input + cache in the recorded billing.
+///
+/// Per-field merge semantics (mirrors `agent::accumulator::merge_usage`):
+///
+/// - `output` always takes the delta value (authoritative).
+/// - `input` / `cache_write` / `cache_read` / `reasoning_output` take the
+///   delta value only when it is non-zero; otherwise keep the seed.
+/// - `server_tool_use` / `speed` / context fields: delta wins when present,
+///   otherwise keep seed.
+fn merge_usage(seed: &LlmUsage, delta: &LlmUsage) -> LlmUsage {
+    let bs = &seed.billable_tokens;
+    let bd = &delta.billable_tokens;
+    LlmUsage {
+        billable_tokens: TokenUsage {
+            input: if bd.input > 0 { bd.input } else { bs.input },
+            output: bd.output,
+            cache_write: if bd.cache_write > 0 { bd.cache_write } else { bs.cache_write },
+            cache_read: if bd.cache_read > 0 { bd.cache_read } else { bs.cache_read },
+            reasoning_output: if bd.reasoning_output > 0 {
+                bd.reasoning_output
+            } else {
+                bs.reasoning_output
+            },
+        },
+        server_tool_use: delta.server_tool_use.or(seed.server_tool_use),
+        speed: delta.speed.clone().or_else(|| seed.speed.clone()),
+        context_tokens: delta.context_tokens.or(seed.context_tokens),
+        provider_reported_total_tokens: delta
+            .provider_reported_total_tokens
+            .or(seed.provider_reported_total_tokens),
+        provider_metadata: if delta.provider_metadata.is_null() {
+            seed.provider_metadata.clone()
+        } else {
+            delta.provider_metadata.clone()
+        },
+    }
 }
 
 /// Consume the given stream to completion, routing events through the
@@ -114,15 +157,25 @@ pub async fn pump_stream(
                 if output_tokens > 0 {
                     turn.output_tokens = output_tokens;
                 }
-                // BILLING: take the MessageDelta usage as authoritative; fall
-                // back to MessageStart if absent (preserves input-token billing
-                // even when the delta carries no snapshot).
-                turn.usage = usage.or_else(|| message_start_usage.clone());
+                // BILLING: per-field merge — MessageStart is the seed
+                // (input + cache tokens); MessageDelta overlays output.
+                // A whole-delta `or_else` would zero input/cache when the
+                // delta is present but carries `0` for those fields (real
+                // Anthropic wire shape). Mirrors `agent::accumulator::merge_usage`.
+                turn.usage = match (usage.as_ref(), message_start_usage.as_ref()) {
+                    (Some(delta), Some(seed)) => Some(merge_usage(seed, delta)),
+                    (Some(delta), None) => Some(delta.clone()),
+                    (None, seed) => seed.cloned(),
+                };
             }
             RouterAction::RecordUsage { output_tokens, usage } => {
                 // Usage-only delta (no stop_reason yet): keep the latest count.
                 turn.output_tokens = output_tokens;
-                turn.usage = usage.or_else(|| message_start_usage.clone());
+                turn.usage = match (usage.as_ref(), message_start_usage.as_ref()) {
+                    (Some(delta), Some(seed)) => Some(merge_usage(seed, delta)),
+                    (Some(delta), None) => Some(delta.clone()),
+                    (None, seed) => seed.cloned(),
+                };
             }
             RouterAction::EndOfStream => {
                 return Ok(turn);
@@ -237,9 +290,10 @@ mod tests {
     use crate::test_support_stream::{
         content_block_start_text, content_block_start_thinking, content_block_start_tool_use,
         content_block_stop, input_json_delta, message_delta_stop, message_delta_stop_with_usage,
-        message_start, message_stop, text_delta, thinking_delta,
+        message_start, message_start_with_usage, message_stop, text_delta, thinking_delta,
     };
     use futures::stream;
+    use llm_client::TokenUsage;
     use protocol::ToolUseId;
 
     fn boxed(events: Vec<LlmEvent>) -> BoxStream<'static, Result<LlmEvent, LlmError>> {
@@ -424,5 +478,60 @@ mod tests {
         .boxed();
         let err = pump_stream(s, &out).await.expect_err("network");
         assert!(matches!(err, OrchestratorError::Streaming(_)));
+    }
+
+    /// Wire-shape per-field merge: `message_start` carries input+cache_read;
+    /// `message_delta` carries output only (real Anthropic wire shape).
+    /// After merge the recorded `usage` must have all three fields non-zero.
+    ///
+    /// RED on the old `or_else` (MessageDelta replaces the whole seed);
+    /// GREEN after per-field merge mirrors `agent::accumulator::merge_usage`.
+    #[tokio::test]
+    async fn per_field_usage_merge_preserves_input_and_cache_from_message_start() {
+        let out: Arc<dyn OutputStream> = Arc::new(MockOutputStream::new());
+
+        // Real wire: MessageStart carries input=1000, cache_read=200, output=0.
+        let start_usage = LlmUsage {
+            billable_tokens: TokenUsage {
+                input: 1_000,
+                output: 0,
+                cache_write: 0,
+                cache_read: 200,
+                reasoning_output: 0,
+            },
+            ..LlmUsage::default()
+        };
+        // Real wire: MessageDelta carries output=500 only (input/cache absent = 0).
+        let delta_usage = LlmUsage {
+            billable_tokens: TokenUsage {
+                input: 0,
+                output: 500,
+                cache_write: 0,
+                cache_read: 0,
+                reasoning_output: 0,
+            },
+            ..LlmUsage::default()
+        };
+
+        let evs = vec![
+            message_start_with_usage("m1", "claude-opus-4-7", start_usage),
+            content_block_start_text(0),
+            text_delta(0, "hi"),
+            content_block_stop(0),
+            message_delta_stop_with_usage("end_turn", delta_usage),
+            message_stop(),
+        ];
+
+        let turn = pump_stream(boxed(evs), &out).await.expect("pump");
+
+        let usage = turn.usage.expect("usage must be recorded");
+        let bt = usage.billable_tokens;
+        assert_eq!(bt.input, 1_000, "input tokens must come from MessageStart; got {}", bt.input);
+        assert_eq!(
+            bt.cache_read, 200,
+            "cache_read tokens must come from MessageStart; got {}",
+            bt.cache_read
+        );
+        assert_eq!(bt.output, 500, "output tokens must come from MessageDelta; got {}", bt.output);
     }
 }

@@ -303,11 +303,16 @@ parse time.
 - **AwsSigV4**: implemented from scratch with AWS official test vectors.
   Hardening: query-string values are decode-then-re-encode normalized to
   RFC3986 percent-encoding; path segments are double-percent-encoded per SigV4
-  spec; header values are trimall-normalized; null-body canonical hash uses the
-  empty-string SHA256 (not the missing-body hash); clock is injectable for
-  deterministic tests.
-- **GcpToken**: Bearer-token auth via GCP service-account or metadata-server
-  flow, surfaced as `CredentialProvider`.
+  spec; header values are trimall-normalized; null-body (empty request body)
+  canonical hash uses the empty-string SHA256
+  (`e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855`) — the
+  4-byte literal `"null"` hash is NOT used here; clock is injectable for
+  deterministic tests; trailing slashes in the URI path are preserved
+  (botocore behavior).
+- **GcpToken**: Bearer-token auth via a host-loaded token injected as a
+  `Bearer` `Authorization` header, reusing `BearerAuthenticator` — no
+  service-account or metadata-server flow is implemented; the authenticator
+  reads a pre-fetched token string surfaced as `CredentialProvider`.
 - **AzureToken**: Azure Entra token injected as `api-key` header (Azure
   OpenAI's expected header name for token auth).
 - **AzureOpenAi codec**: deployment-URL construction (base URL + deployment
@@ -339,8 +344,9 @@ Fix implemented (TDD):
   (input tokens) when the delta carries no snapshot.
 - `RouterAction::RecordStopReason` and `RecordUsage` gained `usage: Option<Usage>`
   (cloned before `emit_usage_if_present` consumes it).
-- `pump_stream` captures `MessageStart.usage` as fallback; sets `turn.usage`
-  on each `RecordStopReason`/`RecordUsage` action.
+- `pump_stream` captures `MessageStart.usage` as seed; sets `turn.usage`
+  on each `RecordStopReason`/`RecordUsage` action via **per-field merge**
+  (see below).
 - `try_run_turn_streaming` in `conversation.rs` calls `record_api_response_v2`
   + `api_calls_recorded.fetch_add(1)` after every successful `pump_stream`,
   mirroring `turn_loop.rs:375-393` with `Duration::ZERO` / `retries=0` / no bus.
@@ -349,6 +355,21 @@ Fix implemented (TDD):
 - Two new tests in `orchestrator/tests/streaming_cost_recording_test.rs`:
   `streaming_turn_records_cost_in_tracker` (17_500_000 nano-USD for 1000 input +
   500 output on claude-opus-4-6) and `streaming_turn_increments_api_calls_recorded`.
+  Both tests use the real Anthropic wire shape: `message_start` carries input
+  tokens; `message_delta` carries output tokens only.
 - Remaining secondary gap (batch 2): `LlmResponse.cost` on the streaming path
   is still `None` (streaming response never passes through `decode_response`);
   this is cosmetic only now that `CostTracker` records the real usage.
+
+**Per-field usage merge (batch 1, rev 2.6 fix)**: a naïve
+`delta.or_else(seed)` in `pump_stream` would zero input + cache tokens whenever
+`message_delta.usage` is present (because the delta carries `output` only; its
+`input`/`cache_*` fields are `0`). The fix implements per-field merge identical
+to `agent::accumulator::merge_usage`: `output` always takes the delta value;
+`input`/`cache_write`/`cache_read`/`reasoning_output` take the delta value only
+when non-zero, otherwise keep the `MessageStart` seed. This is the real
+Anthropic wire contract. TDD: wire-shaped RED test
+(`per_field_usage_merge_preserves_input_and_cache_from_message_start` in
+`streaming_loop.rs`) observed failing on old code; GREEN after fix. The existing
+`streaming_cost_recording_test.rs` tests were reshaped to use the real wire form
+(start=input-only, delta=output-only) to prevent them from masking the bug.

@@ -153,17 +153,32 @@ pub struct SettingsJson {
     pub model: Option<String>,
 
     /// Object-merge field (deep-merge). `LingXi` extension (claude-code has no
-    /// such key): named LLM provider profiles, e.g.
-    /// `{ "groq": { "type": "openai", "baseUrl": "...", "apiKeyEnv": "GROQ_API_KEY" } }`.
-    /// Passed as raw JSON to `llm_client::ClientConfig` via the host `build()`.
+    /// such key): named LLM provider profiles. Each entry has the shape:
+    /// `{ "type": "openai"|"anthropic"|"gemini", "baseUrl": "...",
+    ///    "apiKeyEnv": "GROQ_API_KEY",
+    ///    "models": [{ "id": "model-id", "aliases": ["alias"]?,
+    ///                 "capabilities": {...}? }] }`.
+    ///
+    /// **Wired (3c-T2):** parsed by `platform_common::apply_settings_providers`
+    /// and appended to `llm_client::ClientConfig` in `build()`.  `models` is
+    /// REQUIRED per entry; an absent or empty list is an error at engine startup.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub providers: Option<BTreeMap<String, Value>>,
 
     /// Object-merge field (deep-merge). `LingXi` extension: routing config
     /// for model aliases, fallback chains, and retry policy. Shape:
-    /// `{ "aliases": {alias: "provider/model"}, "fallback": {key: ["provider/model", …]},
+    /// `{ "aliases": {alias: "profile/model"},
+    ///    "fallback": {key: ["profile/model", …]},
     ///    "retry": {"maxAttempts": n, "backoffMs": n} }`.
-    /// Passed as raw JSON to `llm_client::ClientConfig` via the host `build()`.
+    ///
+    /// **Wiring status (3c-T2):**
+    /// - `aliases`: **WIRED** — each alias is pushed onto the target
+    ///   `ModelProfile` (resolved across all configured + builtin profiles).
+    /// - `fallback`: **INERT** — fallback model comes from
+    ///   `DesktopConfig.fallback_model` / argv today; wiring it here is future
+    ///   work.
+    /// - `retry`: **INERT** — retry policy comes from
+    ///   `CLAUDE_CODE_MAX_RETRIES`; wiring it here is future work.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub routing: Option<Value>,
 }

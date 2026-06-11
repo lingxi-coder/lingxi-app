@@ -233,10 +233,10 @@ impl PermissionRequestSink for RecordingPermissionSink {
     }
 }
 
-// `builtin_anthropic_config` lives in `platform_common::llm_config` so both
-// composition roots share the same 10-entry model table (including
-// `claude-opus-4-7`, the orchestrator DEFAULT_MODEL).
-use platform_common::builtin_anthropic_config;
+// `builtin_anthropic_config` + `apply_settings_providers` live in
+// `platform_common::llm_config` so both composition roots share the same
+// model table and settings-wiring logic.
+use platform_common::{apply_settings_providers, builtin_anthropic_config};
 
 /// Build a fully-wired mobile [`MobileRuntime`] from a deterministic
 /// [`MobileConfig`] + an `Arc<dyn Platform>` (plan F3-03 — the mobile sibling of
@@ -306,12 +306,27 @@ pub async fn build_mobile_inner(
     //      so the device backend is preserved; no desktop-only deps are pulled.
     //      OAuth is not yet wired on mobile (no credential-manager path exists here);
     //      the API-key path via ANTHROPIC_API_KEY covers the mobile use case.
+    //
+    //      3c-T2: apply settings `providers` / `routing` on top of the
+    //      built-in Anthropic profile (same pattern as engine-desktop).
     let llm_transport: Arc<dyn Transport> =
         Arc::new(LlmTransportBridge::new(DynHttp(http.clone())));
-    let llm_client = Arc::new(
-        DefaultLlmClient::from_config(builtin_anthropic_config(&cfg.api_base, false))
-            .map_err(|e| MobileBuildError::ApiBase(e.to_string()))?,
-    );
+    let llm_client = {
+        let mut cfg_obj = builtin_anthropic_config(&cfg.api_base, false);
+        if let Some(providers) = &cfg.provider_profiles {
+            if let Err(e) = apply_settings_providers(
+                &mut cfg_obj,
+                providers,
+                cfg.routing.as_ref(),
+            ) {
+                tracing::warn!(error = %e, "settings providers/routing parse error; using built-in profile only");
+            }
+        }
+        Arc::new(
+            DefaultLlmClient::from_config(cfg_obj)
+                .map_err(|e| MobileBuildError::ApiBase(e.to_string()))?,
+        )
+    };
     let subscriber_state = SubscriberState { is_subscriber: false, is_enterprise: false };
     // ONE adapter implements BOTH `OrchestratorApiClient` (batched) and
     // `StreamingApiClient` (the streaming turn path the mobile transport always

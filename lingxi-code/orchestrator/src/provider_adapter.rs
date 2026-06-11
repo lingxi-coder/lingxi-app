@@ -747,14 +747,22 @@ impl ProviderApiAdapter {
                         };
 
                         let step = next_step_with_backoff(&mut state, &ctl, &effective_err, thinking_budget, self.settings_backoff_ms);
-                        match step {
-                            DriveStep::RetryAfter(delay) => {
-                                tokio::time::sleep(delay).await;
-                                // Re-prepare on next iteration so headers stay fresh.
-                                continue;
-                            }
-                            _ => return Err(decode_err),
+                        if let DriveStep::RetryAfter(delay) = step {
+                            tokio::time::sleep(delay).await;
+                            // Re-prepare on next iteration so headers stay fresh.
+                            continue;
                         }
+                        // Terminal twin for the connect-phase emit_started
+                        // (mirrors the non-stream terminal arms).
+                        telemetry::emit_failed(
+                            &self.analytics,
+                            &req.model,
+                            &request_id,
+                            Self::error_kind(&decode_err),
+                            Self::status_of(&decode_err),
+                        )
+                        .await;
+                        return Err(decode_err);
                     }
 
                     // Feed rate-limit headers from the connect-success response.

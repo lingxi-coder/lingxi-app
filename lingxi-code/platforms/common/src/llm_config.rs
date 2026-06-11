@@ -30,6 +30,33 @@
 
 use std::collections::BTreeMap;
 
+/// Parsed routing overrides from the settings `routing` object.
+///
+/// Returned by [`parse_routing_overrides`].  Hosts pass these into the adapter
+/// constructor so the retry/fallback machinery uses the settings-configured
+/// values rather than the compile-time defaults.
+///
+/// ## Fields
+///
+/// - `fallback`: per-model fallback target. Key is the **display model** of
+///   the primary model (alias-resolved); value is the display model of the
+///   fallback target (must resolve in `cfg`). Only chain[0] is stored; longer
+///   chains warn via `tracing::warn!`.
+/// - `max_retries`: `routing.retry.maxAttempts` parsed as `u32`. When `None`,
+///   `CLAUDE_CODE_MAX_RETRIES` env (then `DEFAULT_MAX_RETRIES`) applies.
+/// - `backoff_ms`: `routing.retry.backoffMs` as the base-delay for the jitter
+///   ladder's first rung (scales `DEFAULT_BASE_DELAYS_MS` proportionally).
+///   When `None`, the default `[500, 1000, 2000]` ladder is used.
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct RoutingOverrides {
+    /// Per-model fallback targets: display-model → display-model.
+    pub fallback: BTreeMap<String, String>,
+    /// `routing.retry.maxAttempts` override.
+    pub max_retries: Option<u32>,
+    /// `routing.retry.backoffMs` override (first rung of the jitter ladder).
+    pub backoff_ms: Option<u64>,
+}
+
 use llm_client::{
     AuthStrategy, Capabilities, ClientConfig, CredentialConfig, LlmError, ModelProfile,
     PricingConfig, ProtocolFamily, ProviderId, ProviderProfile,
@@ -241,12 +268,26 @@ fn apply_one_provider(
         .and_then(serde_json::Value::as_str)
         .unwrap_or("")
         .to_string();
+    if base_url.is_empty() {
+        return Err(LlmError::InvalidRequest {
+            message: format!(
+                "provider {profile_name:?}: \"baseUrl\" is required and must not be empty"
+            ),
+        });
+    }
 
     let api_key_env = entry
         .get("apiKeyEnv")
         .and_then(serde_json::Value::as_str)
         .unwrap_or("")
         .to_string();
+    if api_key_env.is_empty() {
+        return Err(LlmError::InvalidRequest {
+            message: format!(
+                "provider {profile_name:?}: \"apiKeyEnv\" is required and must not be empty"
+            ),
+        });
+    }
 
     // models is REQUIRED; absent or empty → error.
     let models_val = entry.get("models").ok_or_else(|| LlmError::InvalidRequest {
@@ -349,10 +390,147 @@ fn parse_capabilities(caps_val: Option<&serde_json::Value>) -> Capabilities {
     }
 }
 
+/// Resolve a display model from `cfg` using the `profile/model` target string.
+///
+/// Returns the `display_model` string of the resolved model (same as the
+/// `model_id` part in most cases, but normalised via the registry).
+fn resolve_display_model<'a>(
+    cfg: &'a llm_client::ClientConfig,
+    profile_part: &str,
+    model_part: &str,
+) -> Option<&'a str> {
+    cfg.providers
+        .iter()
+        .find(|p| p.profile_name == profile_part)
+        .and_then(|p| p.models.iter().find(|m| m.display_model == model_part || m.aliases.contains(&model_part.to_string())))
+        .map(|m| m.display_model.as_str())
+}
+
+/// Parse `routing.fallback`, `routing.retry.maxAttempts`, and
+/// `routing.retry.backoffMs` from the settings `routing` object.
+///
+/// ## Fallback shape
+///
+/// ```json
+/// "fallback": { "<primary-model-or-alias>": ["<profile/model>", ...] }
+/// ```
+///
+/// - Key is normalised to the display model via registry-style resolution
+///   against `cfg` (same as how `apply_routing_aliases` resolves targets).
+///   When the key doesn't resolve as a `profile/model` it is tried as a bare
+///   display model or alias across all providers.
+/// - Only chain[0] is used.  Longer chains emit a `tracing::warn!` and the
+///   extra entries are discarded.
+/// - The target (`chain[0]`) must resolve to a known `profile/model`; an
+///   unknown target is an [`LlmError::InvalidRequest`].
+///
+/// ## Retry shape
+///
+/// ```json
+/// "retry": { "maxAttempts": 5, "backoffMs": 1000 }
+/// ```
+///
+/// - `maxAttempts` (u32) → [`RoutingOverrides::max_retries`].
+/// - `backoffMs` (u64) → [`RoutingOverrides::backoff_ms`].
+///
+/// ## Precedence (adapter)
+///
+/// `CLAUDE_CODE_MAX_RETRIES` env > `routing.retry.maxAttempts` > `DEFAULT_MAX_RETRIES` (10).
+/// Per-model `routing.fallback` entry wins over the adapter's global `fallback_model`.
+///
+/// # Errors
+///
+/// Returns [`LlmError::InvalidRequest`] when a fallback target (`chain[0]`)
+/// cannot be resolved in `cfg`.
+pub fn parse_routing_overrides(
+    routing: &serde_json::Value,
+    cfg: &llm_client::ClientConfig,
+) -> Result<RoutingOverrides, llm_client::LlmError> {
+    let mut overrides = RoutingOverrides::default();
+
+    // ── fallback ──────────────────────────────────────────────────────────────
+    if let Some(fallback_map) = routing.get("fallback").and_then(serde_json::Value::as_object) {
+        for (key, chain_val) in fallback_map {
+            // Resolve the KEY to a display model.
+            // The key may be "profile/model" or a bare alias/display model.
+            let key_display = if let Some((profile_part, model_part)) = key.split_once('/') {
+                resolve_display_model(cfg, profile_part, model_part)
+                    .map_or_else(|| key.clone(), str::to_string)
+            } else {
+                // Bare name: search all providers for an alias or display match.
+                cfg.providers
+                    .iter()
+                    .flat_map(|p| p.models.iter())
+                    .find(|m| m.display_model == *key || m.aliases.contains(key))
+                    .map_or_else(|| key.clone(), |m| m.display_model.clone())
+            };
+
+            // chain_val must be an array; we only use chain[0].
+            let chain = chain_val.as_array().ok_or_else(|| llm_client::LlmError::InvalidRequest {
+                message: format!(
+                    "routing.fallback[{key:?}]: value must be an array of \"profile/model\" strings"
+                ),
+            })?;
+            if chain.is_empty() {
+                return Err(llm_client::LlmError::InvalidRequest {
+                    message: format!(
+                        "routing.fallback[{key:?}]: chain must have at least one entry"
+                    ),
+                });
+            }
+            if chain.len() > 1 {
+                tracing::warn!(
+                    "routing.fallback[{key:?}]: fallback chains beyond the first entry are not yet supported; using chain[0] only"
+                );
+            }
+            let target = chain[0].as_str().ok_or_else(|| llm_client::LlmError::InvalidRequest {
+                message: format!(
+                    "routing.fallback[{key:?}]: chain[0] must be a \"profile/model\" string"
+                ),
+            })?;
+            // Validate the target resolves.
+            let (profile_part, model_part) = target.split_once('/').ok_or_else(|| {
+                llm_client::LlmError::InvalidRequest {
+                    message: format!(
+                        "routing.fallback[{key:?}]: target {target:?} must be \"profile/model\""
+                    ),
+                }
+            })?;
+            let target_display = resolve_display_model(cfg, profile_part, model_part)
+                .ok_or_else(|| llm_client::LlmError::InvalidRequest {
+                    message: format!(
+                        "routing.fallback[{key:?}]: target {target:?} not found in any configured profile"
+                    ),
+                })?
+                .to_string();
+
+            overrides.fallback.insert(key_display, target_display);
+        }
+    }
+
+    // ── retry ────────────────────────────────────────────────────────────────
+    if let Some(retry_obj) = routing.get("retry").and_then(serde_json::Value::as_object) {
+        if let Some(max_attempts_val) = retry_obj.get("maxAttempts") {
+            let n = max_attempts_val.as_u64().ok_or_else(|| llm_client::LlmError::InvalidRequest {
+                message: "routing.retry.maxAttempts must be a non-negative integer".to_string(),
+            })?;
+            overrides.max_retries = Some(u32::try_from(n).unwrap_or(u32::MAX));
+        }
+        if let Some(backoff_val) = retry_obj.get("backoffMs") {
+            let n = backoff_val.as_u64().ok_or_else(|| llm_client::LlmError::InvalidRequest {
+                message: "routing.retry.backoffMs must be a non-negative integer".to_string(),
+            })?;
+            overrides.backoff_ms = Some(n);
+        }
+    }
+
+    Ok(overrides)
+}
+
 /// Wire `routing.aliases` into the target model profiles already in `cfg`.
 ///
-/// `routing.fallback` and `routing.retry` are intentionally ignored here —
-/// they are future work documented in the schema comment.
+/// `routing.fallback` and `routing.retry` are parsed by [`parse_routing_overrides`]
+/// separately and threaded into the adapter constructor.
 fn apply_routing_aliases(
     cfg: &mut ClientConfig,
     routing: Option<&serde_json::Value>,
@@ -681,6 +859,84 @@ mod tests {
         );
     }
 
+    /// A provider entry with a missing `baseUrl` is rejected.
+    #[test]
+    fn missing_base_url_is_error() {
+        let mut cfg = builtin_anthropic_config("https://api.anthropic.com", false);
+        let providers: BTreeMap<String, serde_json::Value> = serde_json::from_str(r#"{
+            "no-url": {
+                "type": "openai",
+                "apiKeyEnv": "SOME_KEY",
+                "models": [{ "id": "some-model" }]
+            }
+        }"#).unwrap();
+
+        let err = apply_settings_providers(&mut cfg, &providers, None).unwrap_err();
+        assert!(
+            matches!(&err, LlmError::InvalidRequest { message } if message.contains("baseUrl")),
+            "expected InvalidRequest about missing baseUrl, got: {err:?}"
+        );
+    }
+
+    /// A provider entry with an empty `baseUrl` is rejected.
+    #[test]
+    fn empty_base_url_is_error() {
+        let mut cfg = builtin_anthropic_config("https://api.anthropic.com", false);
+        let providers: BTreeMap<String, serde_json::Value> = serde_json::from_str(r#"{
+            "empty-url": {
+                "type": "openai",
+                "baseUrl": "",
+                "apiKeyEnv": "SOME_KEY",
+                "models": [{ "id": "some-model" }]
+            }
+        }"#).unwrap();
+
+        let err = apply_settings_providers(&mut cfg, &providers, None).unwrap_err();
+        assert!(
+            matches!(&err, LlmError::InvalidRequest { message } if message.contains("baseUrl")),
+            "expected InvalidRequest about empty baseUrl, got: {err:?}"
+        );
+    }
+
+    /// A provider entry with a missing `apiKeyEnv` is rejected.
+    #[test]
+    fn missing_api_key_env_is_error() {
+        let mut cfg = builtin_anthropic_config("https://api.anthropic.com", false);
+        let providers: BTreeMap<String, serde_json::Value> = serde_json::from_str(r#"{
+            "no-key-env": {
+                "type": "openai",
+                "baseUrl": "https://example.com",
+                "models": [{ "id": "some-model" }]
+            }
+        }"#).unwrap();
+
+        let err = apply_settings_providers(&mut cfg, &providers, None).unwrap_err();
+        assert!(
+            matches!(&err, LlmError::InvalidRequest { message } if message.contains("apiKeyEnv")),
+            "expected InvalidRequest about missing apiKeyEnv, got: {err:?}"
+        );
+    }
+
+    /// A provider entry with an empty `apiKeyEnv` is rejected.
+    #[test]
+    fn empty_api_key_env_is_error() {
+        let mut cfg = builtin_anthropic_config("https://api.anthropic.com", false);
+        let providers: BTreeMap<String, serde_json::Value> = serde_json::from_str(r#"{
+            "empty-key-env": {
+                "type": "openai",
+                "baseUrl": "https://example.com",
+                "apiKeyEnv": "",
+                "models": [{ "id": "some-model" }]
+            }
+        }"#).unwrap();
+
+        let err = apply_settings_providers(&mut cfg, &providers, None).unwrap_err();
+        assert!(
+            matches!(&err, LlmError::InvalidRequest { message } if message.contains("apiKeyEnv")),
+            "expected InvalidRequest about empty apiKeyEnv, got: {err:?}"
+        );
+    }
+
     /// An alias targeting an unknown profile/model is rejected.
     #[test]
     fn alias_unknown_target_is_error() {
@@ -693,6 +949,135 @@ mod tests {
         assert!(
             matches!(&err, LlmError::InvalidRequest { message } if message.contains("not found")),
             "expected InvalidRequest about unknown alias target, got: {err:?}"
+        );
+    }
+
+    // ── parse_routing_overrides tests ─────────────────────────────────────────
+
+    fn routing_test_cfg() -> ClientConfig {
+        let mut cfg = builtin_anthropic_config("https://api.anthropic.com", false);
+        // Add a second provider so we can test cross-profile fallback.
+        cfg.providers.push(llm_client::ProviderProfile {
+            provider_id: llm_client::ProviderId::OpenAICompatible { name: "groq".to_string() },
+            profile_name: "groq".to_string(),
+            base_url: "https://api.groq.com".to_string(),
+            protocol: llm_client::ProtocolFamily::OpenAiChat,
+            auth: llm_client::AuthStrategy::ApiKey,
+            credential: llm_client::CredentialConfig::Env { var: "GROQ_KEY".to_string() },
+            models: vec![llm_client::ModelProfile {
+                display_model: "llama-3.3-70b".to_string(),
+                request_model: "llama-3.3-70b".to_string(),
+                billing_model: "llama-3.3-70b".to_string(),
+                aliases: vec!["llama".to_string()],
+                capabilities: llm_client::Capabilities { streaming: true, tools: true, ..Default::default() },
+            }],
+            pricing: PricingConfig::default(),
+        });
+        cfg
+    }
+
+    /// Happy path: fallback + retry numbers parsed correctly.
+    #[test]
+    fn parse_routing_overrides_happy() {
+        let cfg = routing_test_cfg();
+        let routing: serde_json::Value = serde_json::from_str(r#"{
+            "fallback": {
+                "anthropic/claude-opus-4-7": ["anthropic/claude-sonnet-4-20250514"]
+            },
+            "retry": { "maxAttempts": 5, "backoffMs": 1000 }
+        }"#).unwrap();
+
+        let overrides = parse_routing_overrides(&routing, &cfg).expect("must succeed");
+        assert_eq!(
+            overrides.fallback.get("claude-opus-4-7"),
+            Some(&"claude-sonnet-4-20250514".to_string()),
+            "fallback key must normalize to display model"
+        );
+        assert_eq!(overrides.max_retries, Some(5));
+        assert_eq!(overrides.backoff_ms, Some(1000));
+    }
+
+    /// Unknown fallback target errors with not found.
+    #[test]
+    fn parse_routing_overrides_unknown_fallback_target_error() {
+        let cfg = routing_test_cfg();
+        let routing: serde_json::Value = serde_json::from_str(r#"{
+            "fallback": {
+                "anthropic/claude-opus-4-7": ["nonexistent/model"]
+            }
+        }"#).unwrap();
+
+        let err = parse_routing_overrides(&routing, &cfg).unwrap_err();
+        assert!(
+            matches!(&err, LlmError::InvalidRequest { message } if message.contains("not found")),
+            "expected not found error, got: {err:?}"
+        );
+    }
+
+    /// Chain >1 uses first entry and logs a warning (no error).
+    #[test]
+    fn parse_routing_overrides_chain_gt1_uses_first_entry() {
+        let cfg = routing_test_cfg();
+        let routing: serde_json::Value = serde_json::from_str(r#"{
+            "fallback": {
+                "anthropic/claude-opus-4-7": [
+                    "anthropic/claude-sonnet-4-20250514",
+                    "groq/llama-3.3-70b"
+                ]
+            }
+        }"#).unwrap();
+
+        let overrides = parse_routing_overrides(&routing, &cfg).expect("must succeed with chain>1");
+        // chain[0] must be used
+        assert_eq!(
+            overrides.fallback.get("claude-opus-4-7"),
+            Some(&"claude-sonnet-4-20250514".to_string()),
+            "chain[0] must be used when chain length > 1"
+        );
+    }
+
+    /// Retry numbers parsed: maxAttempts and backoffMs.
+    #[test]
+    fn parse_routing_overrides_retry_numbers() {
+        let cfg = routing_test_cfg();
+        let routing: serde_json::Value = serde_json::from_str(r#"{
+            "retry": { "maxAttempts": 3, "backoffMs": 2000 }
+        }"#).unwrap();
+
+        let overrides = parse_routing_overrides(&routing, &cfg).expect("must succeed");
+        assert_eq!(overrides.max_retries, Some(3));
+        assert_eq!(overrides.backoff_ms, Some(2000));
+        assert!(overrides.fallback.is_empty());
+    }
+
+    /// Absent routing → defaults (no overrides).
+    #[test]
+    fn parse_routing_overrides_absent_gives_defaults() {
+        let cfg = routing_test_cfg();
+        let routing: serde_json::Value = serde_json::from_str("{}").unwrap();
+
+        let overrides = parse_routing_overrides(&routing, &cfg).expect("must succeed");
+        assert!(overrides.fallback.is_empty());
+        assert!(overrides.max_retries.is_none());
+        assert!(overrides.backoff_ms.is_none());
+    }
+
+    /// Alias in key is resolved to display model.
+    #[test]
+    fn parse_routing_overrides_key_alias_resolves_to_display_model() {
+        let cfg = routing_test_cfg();
+        // "llama" is an alias for "llama-3.3-70b" in the groq profile.
+        let routing: serde_json::Value = serde_json::from_str(r#"{
+            "fallback": {
+                "llama": ["anthropic/claude-sonnet-4-20250514"]
+            }
+        }"#).unwrap();
+
+        let overrides = parse_routing_overrides(&routing, &cfg).expect("must succeed");
+        assert_eq!(
+            overrides.fallback.get("llama-3.3-70b"),
+            Some(&"claude-sonnet-4-20250514".to_string()),
+            "alias key 'llama' must resolve to display model 'llama-3.3-70b'"
         );
     }
 }

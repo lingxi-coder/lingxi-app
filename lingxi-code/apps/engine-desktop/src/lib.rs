@@ -896,7 +896,7 @@ fn oauth_subscriber_flag(api_key_present: bool, auth_token_present: bool, scopes
 // `platform_common::llm_config` so both composition roots share the same
 // model table and settings-wiring logic.  The re-exports make the names
 // available locally without changing any call site.
-use platform_common::{apply_settings_providers, builtin_anthropic_config};
+use platform_common::{apply_settings_providers, builtin_anthropic_config, parse_routing_overrides};
 
 /// Load the merged `settings.outputStyle` (project + user + env layers) for the
 /// given project dir. Mirrors the CLI's `load_routing`/`load_provider_profiles`
@@ -1025,7 +1025,7 @@ pub async fn build(
     //       available to the orchestrator.  Errors are logged and silently
     //       dropped (a bad `providers` entry must NOT prevent the engine from
     //       starting with the built-in profile still functional).
-    let llm_client = {
+    let (llm_client, routing_overrides) = {
         let mut cfg_obj = builtin_anthropic_config(&cfg.api_base, llm_oauth_path);
         // Run whenever EITHER key is present: a routing-only settings file
         // (aliases onto builtin models, no custom providers) must still apply.
@@ -1040,13 +1040,24 @@ pub async fn build(
                 tracing::warn!(error = %e, "settings providers/routing entry rejected; earlier entries and the built-in profile remain active");
             }
         }
+        // Parse routing overrides (fallback/retry) AFTER providers are applied so
+        // cross-profile fallback targets can be resolved against the full config.
+        let routing_overrides = cfg.routing.as_ref().and_then(|r| {
+            match parse_routing_overrides(r, &cfg_obj) {
+                Ok(o) => Some(o),
+                Err(e) => {
+                    tracing::warn!(error = %e, "routing.fallback/retry overrides rejected; using defaults");
+                    None
+                }
+            }
+        }).unwrap_or_default();
         let mut client = DefaultLlmClient::from_config(cfg_obj)
             .map_err(|e| BuildError::ApiBase(e.to_string()))?;
         if let Some(auth_state) = llm_oauth_state {
             let driver = Arc::new(RefreshDriver::new(auth_state));
             client = client.with_credential_provider(Arc::new(OAuthCredentialProvider::new(driver)));
         }
-        Arc::new(client)
+        (Arc::new(client), routing_overrides)
     };
     let subscriber_state = SubscriberState { is_subscriber, is_enterprise: false };
 
@@ -1064,7 +1075,7 @@ pub async fn build(
     // Build the CONCRETE adapter so it can be coerced to BOTH the
     // orchestrator seam (`OrchestratorApiClient`) and the agent seam
     // (`agent::SubagentApiClient`). `ProviderApiAdapter` impls both.
-    let provider_adapter = Arc::new(ProviderApiAdapter::new_with_estimator(
+    let provider_adapter = Arc::new(ProviderApiAdapter::new_with_routing(
         llm_client,
         llm_transport,
         subscriber_state,
@@ -1073,6 +1084,9 @@ pub async fn build(
         Some(Arc::new(telemetry::AnalyticsBus::new())),
         cfg.fallback_model.clone(),
         Some(cost_estimator),
+        routing_overrides.fallback,
+        routing_overrides.max_retries,
+        routing_overrides.backoff_ms,
     ));
     let api_client: Arc<dyn OrchestratorApiClient> = provider_adapter.clone();
     let subagent_api: Arc<dyn agent::SubagentApiClient> = provider_adapter;

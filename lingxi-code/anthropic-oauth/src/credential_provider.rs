@@ -3,11 +3,23 @@
 //! [`OAuthCredentialProvider`] serves the current OAuth access token,
 //! refreshing in place (single-flight via the underlying `refresh_lock`)
 //! when the token is expired per the state's clock.
+//!
+//! ## Reactive-401 deferral (Plan 3a Task 9)
+//!
+//! Today this provider only performs **proactive** refresh: it checks the
+//! token expiry under a read lock and refreshes when `expires_at <= now`.
+//! The reactive-401 path — where the API returns 401 mid-request and the
+//! client retries once with a freshly-rotated token — is deferred to a
+//! follow-up (Plan 3b / 3c). The api-client middleware previously handled
+//! 401 retries via `current_hook()`, but that indirection is removed in 3a.
+//! The practical impact is low: proactive refresh fires well before expiry
+//! (½-remaining or 5 min lead), so the access token is fresh on every call
+//! in the steady state; a 401 would require the clock to be wrong or the
+//! token to be revoked externally.
 
 use std::fmt;
 use std::sync::Arc;
 
-use api_client::oauth_hook::OAuthRefreshHook;
 use llm_client::{BoxFuture, Credential, CredentialProvider, CredentialScope, LlmError};
 
 use crate::refresh::RefreshDriver;
@@ -15,8 +27,8 @@ use crate::refresh::RefreshDriver;
 /// Serves the current OAuth access token, refreshing in place when expired
 /// (single-flight via the underlying refresh lock).
 ///
-/// Wraps an `Arc<RefreshDriver>` and bridges into `llm_client`'s credential
-/// seam without requiring the `api-client` hook indirection at the call site.
+/// Wraps an `Arc<RefreshDriver>` and calls [`RefreshDriver::refresh`] (inherent
+/// — no api-client trait dependency) when the in-memory token is expired.
 pub struct OAuthCredentialProvider {
     driver: Arc<RefreshDriver>,
 }
@@ -62,12 +74,9 @@ impl CredentialProvider for OAuthCredentialProvider {
             // Expired → single-flight refresh (double-check-after-acquire lives
             // inside `RefreshDriver::refresh`).  Map any failure to
             // LlmError::Authentication with NO secret material in the message.
-            let bearer = <RefreshDriver as OAuthRefreshHook>::refresh(
-                &*self.driver,
-                token_hash,
-            )
-            .await
-            .map_err(|_| LlmError::Authentication)?;
+            let bearer = self.driver.refresh(token_hash)
+                .await
+                .map_err(|_| LlmError::Authentication)?;
 
             Ok(Credential::BearerToken(
                 bearer.0.expose_secret().clone(),

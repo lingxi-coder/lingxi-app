@@ -7,7 +7,6 @@
 use crate::config::ClaudeAiOAuthConfig;
 use crate::pkce::{generate_pkce, generate_state_token};
 use crate::refresh::{AuthState, RefreshDriver};
-use api_client::oauth_hook::register_oauth_hook;
 use protocol::{HttpMethod, HttpRequest, Secret};
 use secret::CredentialManager;
 use serde::{Deserialize, Serialize};
@@ -347,17 +346,11 @@ pub async fn init_refresh_driver(
         bus,
         credentials,
     );
-    let driver: Arc<dyn api_client::oauth_hook::OAuthRefreshHook> =
-        Arc::new(RefreshDriver::new(state.clone()));
-    // Process-global registration. Second-call-in-same-process is a logic
-    // bug but not fatal in tests; tolerate by warning.
-    if let Err(e) = register_oauth_hook(driver) {
-        tracing::warn!(
-            target: "lingxi::anthropic_oauth::init",
-            error = ?e,
-            "OAuth hook already registered (likely a second init in same process)",
-        );
-    }
+    // Spawn the proactive refresh loop. The api-client hook registration
+    // (register_oauth_hook) was removed in Plan 3a Task 9: the live model
+    // path no longer goes through api-client's AnthropicProvider, so there
+    // is no caller for current_hook(). The WebSearch AnthropicProvider uses
+    // an API key (not OAuth) and never triggers the 401-refresh path.
     RefreshDriver::spawn_proactive(state.clone(), spawner)
         .await
         .map_err(|e| OAuthError::TokenExchange(format!("spawn_proactive: {e}")))?;

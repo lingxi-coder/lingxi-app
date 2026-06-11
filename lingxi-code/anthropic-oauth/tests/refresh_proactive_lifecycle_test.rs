@@ -251,7 +251,7 @@ async fn proactive_then_reactive_collapses_to_one_refresh() {
     // Fire a reactive refresh BEFORE the proactive timer's 30s wake.
     let driver = anthropic_oauth::refresh::RefreshDriver::new(state.clone());
     let prev = state.token.read().await.token_hash();
-    let r = api_client::oauth_hook::OAuthRefreshHook::refresh(&driver, prev).await;
+    let r = driver.refresh(prev).await;
     assert!(r.is_ok(), "reactive refresh ok: {r:?}");
     let after_reactive = calls.load(Ordering::SeqCst);
     assert_eq!(after_reactive, 1, "reactive made exactly one call");

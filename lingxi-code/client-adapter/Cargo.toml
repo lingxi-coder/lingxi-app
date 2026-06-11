@@ -82,6 +82,10 @@ uuid = { version = "1.10", features = ["v4"] }
 # `ApiError` for the `OrchestratorError::Streaming` / `ApiCall` → `Error.kind`
 # table. Already in `Cargo.lock` (via `orchestrator`), so `--offline` stays green.
 api-client = { path = "../api-client" }
+# `llm-client` is used by the F1-13 turn-wrapper tests after `OrchestratorError::Streaming`
+# / `::ApiCall` were retyped from `ApiError` → `LlmError` in Task 5 (commit 5f8b3e35).
+# Already in `Cargo.lock` (transitive via `orchestrator`), no new download needed.
+llm-client = { path = "../llm-client" }
 
 [lints]
 workspace = true

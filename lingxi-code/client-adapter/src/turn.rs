@@ -173,7 +173,11 @@ pub fn error_kind_for(err: &OrchestratorError) -> ErrorKindDto {
         OrchestratorError::StreamEndedWithoutStop
         | OrchestratorError::Internal(_)
         | OrchestratorError::Compaction(_)
-        | OrchestratorError::CompactionCancelled => ErrorKindDto::Internal,
+        | OrchestratorError::CompactionCancelled
+        // Task 7: all consecutive-overloaded retries exhausted with no fallback model.
+        // Byte-locked message: "Repeated 529 Overloaded errors" (errors.ts:166).
+        // Treated as a fatal API-side condition — same class as a hard API failure.
+        | OrchestratorError::RepeatedOverloaded => ErrorKindDto::Internal,
     }
 }
 
@@ -240,9 +244,15 @@ mod tests {
     use crate::test_support::MockSink;
     use protocol::{ContentBlock, ToolUseId};
 
-    /// Construct an `ApiError` for the transport-class table rows.
-    fn api_error() -> api_client::ApiError {
-        api_client::ApiError::Http(traits::HttpError::Connection("nope".into()))
+    /// Construct an `LlmError` for the transport-class table rows.
+    ///
+    /// `OrchestratorError::Streaming` and `::ApiCall` both wrap `llm_client::LlmError`
+    /// after the Task 5 retype (commit 5f8b3e35); the previous `api_client::ApiError`
+    /// type no longer matches.
+    fn api_error() -> llm_client::LlmError {
+        llm_client::LlmError::Transport {
+            message: "nope".into(),
+        }
     }
 
     /// Every `OrchestratorError` variant maps to the correct coarse
@@ -275,6 +285,8 @@ mod tests {
             (OrchestratorError::StreamEndedWithoutStop, ErrorKindDto::Internal),
             (OrchestratorError::Internal("boom".into()), ErrorKindDto::Internal),
             (OrchestratorError::CompactionCancelled, ErrorKindDto::Internal),
+            // Task 7: exhausted 529 retries with no fallback model configured.
+            (OrchestratorError::RepeatedOverloaded, ErrorKindDto::Internal),
         ];
 
         for (err, expected) in &cases {

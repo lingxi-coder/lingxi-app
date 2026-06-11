@@ -1932,6 +1932,18 @@ impl ConversationOrchestrator {
             // The env gate name is locked byte-for-byte to TS:
             //   `process.env.CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK` (claude.ts:2470)
             // Truthiness follows `isEnvTruthy` (non-empty, non-"false", non-"0").
+            //
+            // M1 parity note (Task 7 review): TS yields partial deltas LIVE to callers
+            // as they arrive (claude.ts:2210 `yield m` fires inside the for-await loop,
+            // at each `content_block_stop`).  Our path likewise dispatches text deltas live
+            // via `event_router.rs` → `output.emit_text` for each `TextDelta`, so partial
+            // output DOES reach callers before the fallback fires.  This matches TS: both
+            // implementations dispatch partial output live, then dispatch the fallback-only
+            // output after the non-streaming call completes.  The PERSISTED assistant message
+            // (and the final `ConversationOutcome`) contains ONLY the fallback blocks —
+            // `pumped_from_fallback.assistant_blocks` — not the discarded partial stream
+            // fragments, which is correct: the partial stream never reached `content_block_stop`
+            // for its text block, so no completed block was accumulated.
             let pumped = match pump_stream(stream, &self.output).await {
                 Ok(p) => p,
                 Err(OrchestratorError::Streaming(ref e @ (LlmError::Overloaded | LlmError::ProviderInternal)))
@@ -3732,6 +3744,14 @@ mod task7_midstream_fallback_tests {
 
     const DISABLE_FALLBACK_ENV: &str = "CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK";
 
+    /// Serializes the two midstream tests that read/write `DISABLE_FALLBACK_ENV`.
+    ///
+    /// `std::env::set_var` / `remove_var` are not thread-safe when other threads
+    /// read the same variable concurrently.  Tokio runs `#[tokio::test]` functions
+    /// in the same process and may schedule them in parallel; holding this lock for
+    /// the duration of each test makes the pair race-free without any new crate dep.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     /// Build a one-ContentBlockStart-then-Err(Overloaded) stream: the first
     /// event is yielded successfully (proving partial events arrived), then the
     /// stream errors with `LlmError::Overloaded`.
@@ -3766,6 +3786,10 @@ mod task7_midstream_fallback_tests {
     /// (`initialConsecutive529Errors: is529Error(streamingError) ? 1 : 0`)
     #[tokio::test]
     async fn midstream_529_triggers_nonstreaming_fallback() {
+        // Serialize with the sibling test that also reads/writes DISABLE_FALLBACK_ENV.
+        // `set_var`/`remove_var` are not thread-safe; the mutex makes the pair race-free
+        // without introducing a new crate dependency (serial_test or similar).
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         // Ensure fallback is ENABLED for this test.
         std::env::remove_var(DISABLE_FALLBACK_ENV);
 
@@ -3823,6 +3847,36 @@ mod task7_midstream_fallback_tests {
             matches!(outcome, ConversationOutcome::EndTurn { .. }),
             "outcome must be EndTurn after non-streaming fallback; got {outcome:?}"
         );
+
+        // M1 (Task 7 review): the PERSISTED assistant message must contain ONLY the
+        // fallback body, not the partial streaming fragments.  TS yields deltas live
+        // (claude.ts:2210 `yield m` fires inside the for-await loop at each
+        // `content_block_stop`), so partial output reaching callers before the fallback
+        // is parity — but the final persisted turn must reflect ONLY the fallback result.
+        let session_arc = orch.session();
+        let session_guard = session_arc.lock().await;
+        let final_assistant = session_guard
+            .history
+            .iter()
+            .filter_map(|msg| match msg {
+                ConversationMessage::Assistant { content, .. } => Some(content),
+                _ => None,
+            })
+            .last()
+            .expect("session must contain at least one assistant message");
+        let persisted_texts: Vec<&str> = final_assistant
+            .iter()
+            .filter_map(|blk| match blk {
+                protocol::ContentBlock::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            persisted_texts,
+            vec!["fallback body"],
+            "M1: final persisted assistant message must contain ONLY the fallback body; \
+             got {persisted_texts:?}"
+        );
     }
 
     /// Task 7 Step 1 (twin with CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK=1):
@@ -3832,6 +3886,10 @@ mod task7_midstream_fallback_tests {
     /// Parity: claude.ts:2476-2501 (disableFallback branch).
     #[tokio::test]
     async fn midstream_529_propagates_when_fallback_disabled() {
+        // Serialize with the sibling test that also reads/writes DISABLE_FALLBACK_ENV.
+        // `set_var`/`remove_var` are not thread-safe; the mutex makes the pair race-free
+        // without introducing a new crate dependency (serial_test or similar).
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         // Set the disable flag for this test.
         std::env::set_var(DISABLE_FALLBACK_ENV, "1");
 

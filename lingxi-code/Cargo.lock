@@ -860,6 +860,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "client-protocol",
+ "llm-client",
  "orchestrator",
  "permission",
  "protocol",

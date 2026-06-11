@@ -838,7 +838,7 @@ mod tests {
     // ═══════════════════════════════════════════════════════════════════════════
 
     /// Fix 1 RED → GREEN: A pre-encoded `%20` value must round-trip correctly
-    /// through canonical_query_string.  Before the fix, `%20` was double-encoded
+    /// through `canonical_query_string`.  Before the fix, `%20` was double-encoded
     /// to `%2520`; after the fix, it decodes to space and re-encodes to `%20`.
     #[test]
     fn canonical_query_percent20_roundtrips_correctly() {
@@ -851,7 +851,7 @@ mod tests {
     }
 
     /// Fix 1: A literal `+` in the raw query must NOT be decoded as space.
-    /// The AWS SigV4 spec encodes space as `%20`; a literal `+` in the query
+    /// The AWS `SigV4` spec encodes space as `%20`; a literal `+` in the query
     /// is percent-encoded as `%2B`.  `query_pairs()` decodes `+` as space which
     /// would corrupt a literal plus — our manual parsing avoids this.
     #[test]
@@ -962,7 +962,7 @@ mod tests {
         assert_eq!(trimall(""), "", "empty string");
     }
 
-    /// Fix 3: header values passed to sign_request have interior whitespace collapsed.
+    /// Fix 3: header values passed to `sign_request` have interior whitespace collapsed.
     #[test]
     fn sign_request_collapses_header_interior_whitespace() {
         let mut headers = BTreeMap::new();
@@ -1005,7 +1005,7 @@ mod tests {
     // Fix 6 (LOW batch): secs_to_ymdhms pin tests + datetime guard
     // ═══════════════════════════════════════════════════════════════════════════
 
-    /// Fix 6: secs_to_ymdhms(0) → 1970-01-01T00:00:00Z (Unix epoch).
+    /// Fix 6: `secs_to_ymdhms(0)` → 1970-01-01T00:00:00Z (Unix epoch).
     #[test]
     fn secs_to_ymdhms_epoch() {
         use crate::client::secs_to_ymdhms;
@@ -1015,22 +1015,22 @@ mod tests {
         assert_eq!(dt, "19700101T000000Z");
     }
 
-    /// Fix 6: secs_to_ymdhms(1440938160) → 2015-08-30T12:36:00Z (DATETIME constant).
+    /// Fix 6: `secs_to_ymdhms(1_440_938_160)` → 2015-08-30T12:36:00Z (DATETIME constant).
     #[test]
     fn secs_to_ymdhms_datetime_vector() {
         use crate::client::secs_to_ymdhms;
-        let (y, mo, d, h, mi, s) = secs_to_ymdhms(1440938160);
+        let (y, mo, d, h, mi, s) = secs_to_ymdhms(1_440_938_160);
         assert_eq!((y, mo, d, h, mi, s), (2015, 8, 30, 12, 36, 0));
         let dt = format!("{y:04}{mo:02}{d:02}T{h:02}{mi:02}{s:02}Z");
         assert_eq!(dt, "20150830T123600Z");
     }
 
-    /// Fix 6: secs_to_ymdhms — 2024-02-29 leap day (Unix: 1709164800).
+    /// Fix 6: `secs_to_ymdhms` — 2024-02-29 leap day (Unix: `1_709_164_800`).
     #[test]
     fn secs_to_ymdhms_leap_day_2024() {
         use crate::client::secs_to_ymdhms;
-        // 2024-02-29 00:00:00 UTC = 1709164800 seconds since epoch
-        let (y, mo, d, h, mi, s) = secs_to_ymdhms(1709164800);
+        // 2024-02-29 00:00:00 UTC = 1_709_164_800 seconds since epoch
+        let (y, mo, d, h, mi, s) = secs_to_ymdhms(1_709_164_800);
         assert_eq!((y, mo, d, h, mi, s), (2024, 2, 29, 0, 0, 0));
         let dt = format!("{y:04}{mo:02}{d:02}T{h:02}{mi:02}{s:02}Z");
         assert_eq!(dt, "20240229T000000Z");

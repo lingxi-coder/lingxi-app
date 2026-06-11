@@ -416,10 +416,7 @@ async fn sigv4_null_body_signs_as_null_string() {
 /// SHA-256("null"), not SHA-256("").
 #[tokio::test]
 async fn sigv4_null_body_content_sha256_via_client() {
-    // SHA-256("null") — the 4-byte ASCII string "null".
-    // Value::Null.to_string() == "null", so that's what the bridge sends.
-    let expected_hash = "74234e98afe7498fb5daf1f36ac2d78acc339464f950703b8c019892f982b90b";
-
+    use std::time::{Duration, UNIX_EPOCH};
     #[derive(Debug)]
     struct NullBodyStore;
     impl CredentialProvider for NullBodyStore {
@@ -436,6 +433,10 @@ async fn sigv4_null_body_content_sha256_via_client() {
             })
         }
     }
+
+    // SHA-256("null") — the 4-byte ASCII string "null".
+    // Value::Null.to_string() == "null", so that's what the bridge sends.
+    let expected_hash = "74234e98afe7498fb5daf1f36ac2d78acc339464f950703b8c019892f982b90b";
 
     let client = DefaultLlmClient::from_config(ClientConfig {
         providers: vec![ProviderProfile {
@@ -468,8 +469,7 @@ async fn sigv4_null_body_content_sha256_via_client() {
     .with_credential_provider(Arc::new(NullBodyStore));
 
     // Use a fixed timestamp so the hash is deterministic.
-    use std::time::{Duration, UNIX_EPOCH};
-    let fixed_time = UNIX_EPOCH + Duration::from_secs(1440938160); // 20150830T123600Z
+    let fixed_time = UNIX_EPOCH + Duration::from_secs(1_440_938_160); // 20150830T123600Z
 
     let prepared = client
         .prepare_at(&LlmRequest::new("p-model"), fixed_time)
@@ -533,9 +533,11 @@ async fn sigv4_null_body_content_sha256_via_client() {
 /// inputs and hardcoded here.  This pins: clock seam, body-byte derivation,
 /// header injection, and the full SigV4 pipeline end-to-end.
 #[tokio::test]
+#[allow(clippy::too_many_lines)]
 async fn sigv4_exact_authorization_header_with_fixed_clock() {
     #[derive(Debug)]
     struct FixedSigV4Store;
+    use std::time::{Duration, UNIX_EPOCH};
     impl CredentialProvider for FixedSigV4Store {
         fn load<'a>(
             &'a self,
@@ -582,9 +584,8 @@ async fn sigv4_exact_authorization_header_with_fixed_clock() {
     .expect("client")
     .with_credential_provider(Arc::new(FixedSigV4Store));
 
-    // Fixed timestamp: 20150830T123600Z = 1440938160 Unix seconds.
-    use std::time::{Duration, UNIX_EPOCH};
-    let fixed_time = UNIX_EPOCH + Duration::from_secs(1440938160);
+    // Fixed timestamp: 20150830T123600Z = 1_440_938_160 Unix seconds.
+    let fixed_time = UNIX_EPOCH + Duration::from_secs(1_440_938_160);
 
     // Prepare the request with the fixed clock.
     let request = LlmRequest::new("p-model");

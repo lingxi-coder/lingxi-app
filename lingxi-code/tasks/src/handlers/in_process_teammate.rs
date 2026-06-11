@@ -628,7 +628,7 @@ mod tests {
     /// terminates and the persistent runner parks for the next message. An
     /// `Err` entry surfaces as an API error (driving the runner to `Failed`).
     struct ScriptedApiClient {
-        responses: StdMutex<VecDeque<Result<api_client::MessageResponse, String>>>,
+        responses: StdMutex<VecDeque<Result<llm_client::LlmResponse, String>>>,
         calls: AtomicUsize,
     }
     impl ScriptedApiClient {
@@ -663,26 +663,29 @@ mod tests {
             _system: Option<&str>,
             _messages: Vec<protocol::ConversationMessage>,
             _tools: Vec<serde_json::Value>,
-        ) -> Result<api_client::MessageResponse, api_client::ApiError> {
+        ) -> Result<llm_client::LlmResponse, llm_client::LlmError> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             let next = self.responses.lock().unwrap().pop_front();
             match next {
                 Some(Ok(resp)) => Ok(resp),
-                Some(Err(msg)) => Err(api_client::ApiError::Http(
-                    traits::HttpError::InvalidRequest(msg),
-                )),
+                Some(Err(msg)) => Err(llm_client::LlmError::InvalidRequest { message: msg }),
                 None => Ok(text_response("(idle)")),
             }
         }
     }
 
-    fn text_response(text: &str) -> api_client::MessageResponse {
-        api_client::MessageResponse {
+    fn text_response(text: &str) -> llm_client::LlmResponse {
+        llm_client::LlmResponse {
             id: "mock".into(),
             model: "mock".into(),
-            content: vec![api_client::types::ContentBlockApi::Text { text: text.into() }],
+            content: vec![llm_client::ContentBlock::Text {
+                text: text.into(),
+                cache_control: None,
+            }],
             stop_reason: Some("end_turn".into()),
-            usage: api_client::types::UsageApi::default(),
+            usage: llm_client::Usage::default(),
+            cost: None,
+            provider_metadata: serde_json::Value::Null,
         }
     }
 

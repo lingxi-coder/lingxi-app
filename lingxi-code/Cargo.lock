@@ -4632,6 +4632,7 @@ dependencies = [
  "engine",
  "futures",
  "hooks",
+ "llm-client",
  "mcp",
  "protocol",
  "rand 0.9.4",

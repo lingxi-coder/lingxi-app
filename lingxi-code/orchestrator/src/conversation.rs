@@ -1946,7 +1946,7 @@ impl ConversationOrchestrator {
             // for its text block, so no completed block was accumulated.
             let pumped = match pump_stream(stream, &self.output).await {
                 Ok(p) => p,
-                Err(OrchestratorError::Streaming(ref e @ (LlmError::Overloaded | LlmError::ProviderInternal)))
+                Err(OrchestratorError::Streaming(ref e @ (LlmError::Overloaded { .. } | LlmError::ProviderInternal)))
                     if !is_env_truthy(
                         std::env::var("CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK")
                             .as_deref()
@@ -1957,7 +1957,7 @@ impl ConversationOrchestrator {
                     // 529 budget (LlmError::Overloaded = 529).  Other in-band errors
                     // (e.g. ProviderInternal) seed 0 — matching TS
                     // `is529Error(streamingError) ? 1 : 0` (claude.ts:2559).
-                    let seed: u8 = u8::from(matches!(e, LlmError::Overloaded));
+                    let seed: u8 = u8::from(matches!(e, LlmError::Overloaded { .. }));
 
                     // Re-snapshot history for the non-streaming call (the partial
                     // stream never touched session.history, so it is still the same
@@ -3760,7 +3760,7 @@ mod task7_midstream_fallback_tests {
             Ok(message_start("m1", "claude-opus-4-7")),
             Ok(content_block_start_text(0)),
             Ok(text_delta(0, "partial")),
-            Err(llm_client::LlmError::Overloaded),
+            Err(llm_client::LlmError::Overloaded { repeated: false }),
         ]
     }
 

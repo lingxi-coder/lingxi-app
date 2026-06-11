@@ -44,8 +44,18 @@ pub enum LlmError {
     #[error("provider internal error")]
     ProviderInternal,
     /// Provider reported overload (Anthropic 529 / `overloaded_error`).
+    ///
+    /// `repeated` is `true` when the caller has seen `consecutive_overloaded >=
+    /// MAX_529_RETRIES` with no fallback available — the orchestrator sets this
+    /// flag so upper layers can surface the byte-locked
+    /// `"Repeated 529 Overloaded errors"` copy (`errors.ts:166`).  All sources
+    /// that decode a fresh 529 from the wire set `repeated: false`.
     #[error("provider overloaded")]
-    Overloaded,
+    Overloaded {
+        /// `true` when this is the repeated-overload terminal error; `false`
+        /// for a fresh 529 from the wire.
+        repeated: bool,
+    },
     /// Transport failed before a provider response was decoded.
     #[error("transport error: {message}")]
     Transport {

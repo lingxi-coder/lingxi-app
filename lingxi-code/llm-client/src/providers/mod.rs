@@ -30,7 +30,7 @@ pub(crate) fn map_error_status(
             scope: None,
         },
         400 | 422 => LlmError::InvalidRequest { message },
-        529 => LlmError::Overloaded,
+        529 => LlmError::Overloaded { repeated: false },
         _ => LlmError::ProviderInternal,
     }
 }

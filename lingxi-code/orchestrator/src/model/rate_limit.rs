@@ -715,7 +715,7 @@ mod tests {
     fn retry_secs_from_non_rate_limit_error_is_none() {
         assert_eq!(retry_secs_from_error(&llm_client::LlmError::ProviderInternal), None);
         assert_eq!(retry_secs_from_error(&llm_client::LlmError::Authentication), None);
-        assert_eq!(retry_secs_from_error(&llm_client::LlmError::Overloaded), None);
+        assert_eq!(retry_secs_from_error(&llm_client::LlmError::Overloaded { repeated: false }), None);
     }
 
     #[test]

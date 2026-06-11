@@ -621,7 +621,7 @@ async fn call_api_with_ptl_recovery(
     // NOTE: `ApiError::FallbackTriggered` interception is REMOVED — `LlmError`
     // has no `FallbackTriggered` variant. The model-fallback logic moves into
     // `ProviderApiAdapter` in Task 6 (the adapter handles the 529 switch
-    // internally and emits a `warning` on the output stream there).
+    // internally and falls back silently without emitting a separate warning).
 
     // Map `LlmError::ContextOverflow` to the PTL recovery path.
     // The `token_gap` field carries the actual-minus-limit count parsed from the

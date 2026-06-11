@@ -534,7 +534,7 @@ fn map_error(error_type: &str, message: String, retry_after: Option<Duration>) -
             }
         }
         "invalid_request_error" => LlmError::InvalidRequest { message },
-        "overloaded_error" => LlmError::Overloaded,
+        "overloaded_error" => LlmError::Overloaded { repeated: false },
         // api_error, and unknown types stay retryable.
         _ => LlmError::ProviderInternal,
     }

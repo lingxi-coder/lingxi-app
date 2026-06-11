@@ -77,7 +77,7 @@ fn stream_interruption_after_events_is_not_replayed() {
 #[test]
 fn overloaded_errors_are_retryable() {
     assert_eq!(
-        RetryPolicy.classify_error(&LlmError::Overloaded),
+        RetryPolicy.classify_error(&LlmError::Overloaded { repeated: false }),
         RetryDecision::Retry { after: None }
     );
 }

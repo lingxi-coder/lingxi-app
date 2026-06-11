@@ -39,8 +39,12 @@ pub enum OrchestratorError {
     /// The model API call failed (transport, rate-limit, context overflow,
     /// etc). Wraps `llm_client::LlmError` — the live path flows through
     /// `ProviderApiAdapter → DefaultLlmClient`.
+    ///
+    /// Note: `LlmError::Overloaded { repeated: true }` is **not** wrapped here;
+    /// it is converted to [`OrchestratorError::RepeatedOverloaded`] instead.
+    /// See the manual `From<LlmError>` impl below.
     #[error("api call failed: {0}")]
-    ApiCall(#[from] LlmError),
+    ApiCall(LlmError),
 
     /// A non-tool runtime error inside the orchestrator. Used for
     /// internal invariants (unexpected content block variant in the
@@ -87,10 +91,26 @@ pub enum OrchestratorError {
     /// `"Repeated 529 Overloaded errors"` — do not change without a
     /// corresponding spec amendment.
     ///
-    /// Task 7 (claude.ts parity): produced by `ProviderApiAdapter` when the
-    /// external-non-sandbox terminal branch fires in `drive_non_stream_seeded`.
+    /// Task 7 (claude.ts parity): `ProviderApiAdapter` returns
+    /// `LlmError::Overloaded { repeated: true }` from the
+    /// `DriveStep::RepeatedOverloaded` arm; the `From<LlmError>` impl on
+    /// `OrchestratorError` converts it to this variant.
     #[error("{}", REPEATED_529_ERROR_MESSAGE)]
     RepeatedOverloaded,
+}
+
+/// Convert `LlmError` → `OrchestratorError`.
+///
+/// `Overloaded { repeated: true }` maps to [`OrchestratorError::RepeatedOverloaded`]
+/// so the byte-locked "Repeated 529 Overloaded errors" message surfaces correctly
+/// (errors.ts:166).  All other variants wrap as [`OrchestratorError::ApiCall`].
+impl From<LlmError> for OrchestratorError {
+    fn from(e: LlmError) -> Self {
+        match e {
+            LlmError::Overloaded { repeated: true } => OrchestratorError::RepeatedOverloaded,
+            other => OrchestratorError::ApiCall(other),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -187,5 +207,51 @@ mod tests {
     fn compaction_cancelled_renders() {
         let e = OrchestratorError::CompactionCancelled;
         assert_eq!(e.to_string(), "compaction cancelled");
+    }
+
+    // ── Fix 2: From<LlmError> routes repeated bit correctly ──────────────────
+
+    /// `LlmError::Overloaded { repeated: true }` must convert to
+    /// `OrchestratorError::RepeatedOverloaded` (not `ApiCall`).
+    #[test]
+    fn overloaded_repeated_true_converts_to_repeated_overloaded() {
+        let e: OrchestratorError = LlmError::Overloaded { repeated: true }.into();
+        assert!(
+            matches!(e, OrchestratorError::RepeatedOverloaded),
+            "Overloaded {{ repeated: true }} must convert to RepeatedOverloaded, got {e:?}"
+        );
+        assert_eq!(e.to_string(), REPEATED_529_ERROR_MESSAGE);
+    }
+
+    /// `LlmError::Overloaded { repeated: false }` must convert to `ApiCall`
+    /// (the normal error path).
+    #[test]
+    fn overloaded_repeated_false_converts_to_api_call() {
+        let e: OrchestratorError = LlmError::Overloaded { repeated: false }.into();
+        assert!(
+            matches!(e, OrchestratorError::ApiCall(_)),
+            "Overloaded {{ repeated: false }} must convert to ApiCall, got {e:?}"
+        );
+    }
+
+    /// All non-overloaded `LlmError` variants must convert to `ApiCall`.
+    #[test]
+    fn non_overloaded_llm_errors_convert_to_api_call() {
+        let variants: Vec<LlmError> = vec![
+            LlmError::Authentication,
+            LlmError::PermissionDenied,
+            LlmError::ProviderInternal,
+            LlmError::Transport { message: "t".into() },
+            LlmError::RateLimited { retry_after: None, scope: None },
+            LlmError::ContextOverflow { token_gap: 0 },
+            LlmError::InvalidRequest { message: "bad".into() },
+        ];
+        for variant in variants {
+            let e: OrchestratorError = variant.clone().into();
+            assert!(
+                matches!(e, OrchestratorError::ApiCall(_)),
+                "{variant:?} must convert to ApiCall, got {e:?}"
+            );
+        }
     }
 }

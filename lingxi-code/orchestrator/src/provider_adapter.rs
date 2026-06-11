@@ -223,7 +223,7 @@ impl ProviderApiAdapter {
             // "malformed_stream" — api-client `MalformedStream(_) => "malformed_stream"` (:1155)
             LlmError::StreamInterrupted { .. } => "malformed_stream",
             // "overloaded" — api-client `Overloaded { .. } => "overloaded"` (:1149)
-            LlmError::Overloaded => "overloaded",
+            LlmError::Overloaded { .. } => "overloaded",
             // "rate_limited" — api-client `RateLimited { .. } => "rate_limited"` (:1148)
             LlmError::RateLimited { .. } => "rate_limited",
             // "prompt_too_long" — api-client `PromptTooLong { .. } => "prompt_too_long"` (:1147)
@@ -246,7 +246,7 @@ impl ProviderApiAdapter {
             LlmError::RateLimited { .. } | LlmError::QuotaExceeded => Some(429),
             LlmError::ModelUnavailable => Some(404),
             LlmError::ProviderInternal => Some(500),
-            LlmError::Overloaded => Some(529),
+            LlmError::Overloaded { .. } => Some(529),
             LlmError::Transport { .. }
             | LlmError::StreamInterrupted { .. }
             | LlmError::CostUnavailable { .. }
@@ -421,7 +421,7 @@ impl ProviderApiAdapter {
                                     req.model = fallback_model;
                                     continue;
                                 }
-                                DriveStep::Terminal | DriveStep::RepeatedOverloaded => {
+                                DriveStep::Terminal => {
                                     telemetry::emit_failed(
                                         &self.analytics,
                                         &req.model,
@@ -431,6 +431,23 @@ impl ProviderApiAdapter {
                                     )
                                     .await;
                                     return Err(decode_err);
+                                }
+                                DriveStep::RepeatedOverloaded => {
+                                    // External non-sandbox threshold: surface the
+                                    // repeated bit so the conversion layer produces
+                                    // `OrchestratorError::RepeatedOverloaded` with the
+                                    // byte-locked "Repeated 529 Overloaded errors" copy
+                                    // (errors.ts:166).
+                                    let repeated_err = LlmError::Overloaded { repeated: true };
+                                    telemetry::emit_failed(
+                                        &self.analytics,
+                                        &req.model,
+                                        &request_id,
+                                        Self::error_kind(&repeated_err),
+                                        Self::status_of(&repeated_err),
+                                    )
+                                    .await;
+                                    return Err(repeated_err);
                                 }
                             }
                         }
@@ -626,12 +643,12 @@ impl OrchestratorApiClient for ProviderApiAdapter {
     /// Non-streaming call with Opus-fallback policy wired.
     ///
     /// Routes through [`resolve_retry_control`] which computes `allow_fallback`
-    /// from the env + subscriber state (Task 8). The caller-supplied
-    /// `_is_subscriber` / `_is_enterprise` override the adapter's own
-    /// subscriber state when the host passes explicit values; the `_` prefix
-    /// documents that the adapter reads from `self.subscriber` via the env
-    /// resolver (the call-site values are preserved in the method signature for
-    /// API compatibility — Task 10 will drop them).
+    /// from the env + subscriber state (Task 8). The `_is_subscriber` /
+    /// `_is_enterprise` parameters are **ignored** — the adapter always reads
+    /// subscriber state from `self.subscriber` (wired at construction time).
+    /// The underscore prefix signals that these call-site values are not used;
+    /// the parameters are kept for API compatibility and will be removed in
+    /// Task 10.
     async fn messages_create_with_fallback(
         &self,
         model: &str,
@@ -1338,7 +1355,7 @@ mod tests {
             "malformed_stream"
         );
         // api-client: Overloaded → "overloaded"
-        assert_eq!(ProviderApiAdapter::error_kind(&LlmError::Overloaded), "overloaded");
+        assert_eq!(ProviderApiAdapter::error_kind(&LlmError::Overloaded { repeated: false }), "overloaded");
         // api-client: RateLimited → "rate_limited"
         assert_eq!(
             ProviderApiAdapter::error_kind(&LlmError::RateLimited { retry_after: None, scope: None }),
@@ -1451,5 +1468,67 @@ mod tests {
             }
             other => panic!("expected ContextOverflow {{ token_gap: 10000 }}, got {other:?}"),
         }
+    }
+
+    // ── Fix 2: RepeatedOverloaded → LlmError::Overloaded { repeated: true } → OrchestratorError ──
+
+    /// Fix 2 end-to-end: a scripted transport that returns 529 three times triggers
+    /// the external non-sandbox `DriveStep::RepeatedOverloaded` branch, which the
+    /// adapter surfaces as `LlmError::Overloaded { repeated: true }`.  The
+    /// `From<LlmError>` conversion on `OrchestratorError` then produces
+    /// `OrchestratorError::RepeatedOverloaded` whose Display equals the byte-locked
+    /// `"Repeated 529 Overloaded errors"` copy (`errors.ts:166`).
+    #[tokio::test]
+    async fn repeated_529_terminal_maps_to_byte_locked_copy() {
+        use crate::error::{OrchestratorError, REPEATED_529_ERROR_MESSAGE};
+
+        // Transport that always returns 529 overloaded.
+        let overloaded_body = serde_json::json!({
+            "type": "error",
+            "error": {"type": "overloaded_error", "message": "Overloaded"}
+        });
+        let transport = FakeTransport::always(ProviderResponse::json(529, overloaded_body));
+        // make_adapter wires user_type=Some("external") in the UserAgentEnv but
+        // resolve_retry_control reads USER_TYPE from ResolveRetryEnv::from_process_env().
+        // Set the env vars temporarily to gate allow_fallback + is_external.
+        // std::env::set_var is deprecated (Rust 2024) but not removed; acceptable
+        // in test-only code.
+        #[allow(deprecated)]
+        std::env::set_var("USER_TYPE", "external");
+        #[allow(deprecated)]
+        std::env::set_var("FALLBACK_FOR_ALL_PRIMARY_MODELS", "1");
+        #[allow(deprecated)]
+        std::env::remove_var("IS_SANDBOX");
+
+        let adapter = make_adapter(transport);
+        let llm_result = adapter
+            .messages_create("claude-sonnet-4-20250514", None, Vec::new(), Vec::new())
+            .await;
+
+        // Clean up before any assert that might panic.
+        #[allow(deprecated)]
+        std::env::remove_var("FALLBACK_FOR_ALL_PRIMARY_MODELS");
+        #[allow(deprecated)]
+        std::env::remove_var("USER_TYPE");
+
+        // The adapter must return Err(LlmError::Overloaded { repeated: true }).
+        match &llm_result {
+            Err(LlmError::Overloaded { repeated: true }) => {} // correct
+            other => panic!(
+                "expected Err(LlmError::Overloaded {{ repeated: true }}), got {other:?}"
+            ),
+        }
+
+        // The OrchestratorError conversion must yield RepeatedOverloaded.
+        let orch_err: OrchestratorError = llm_result.unwrap_err().into();
+        assert!(
+            matches!(orch_err, OrchestratorError::RepeatedOverloaded),
+            "OrchestratorError must be RepeatedOverloaded, got {orch_err:?}"
+        );
+        assert_eq!(
+            orch_err.to_string(),
+            REPEATED_529_ERROR_MESSAGE,
+            "Display must equal the byte-locked copy"
+        );
     }
 }

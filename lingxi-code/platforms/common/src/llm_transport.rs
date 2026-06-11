@@ -10,7 +10,7 @@ use llm_client::{
     StreamingResponse,
 };
 use protocol::{HttpMethod, HttpRequest, HttpResponse};
-use traits::http::SseStream;
+use traits::http::{SseStream, SseStreamWithMeta};
 use traits::{HttpError, HttpTransport};
 
 /// Adapter exposing a [`traits::HttpTransport`] as an [`llm_client::Transport`].
@@ -119,14 +119,21 @@ impl<T: HttpTransport> llm_client::Transport for LlmTransportBridge<T> {
     ) -> BoxFuture<'a, Result<StreamingResponse, LlmError>> {
         Box::pin(async move {
             let http_request = to_http_request(request)?;
-            match self.inner.stream_sse(http_request).await {
-                Ok(stream) => Ok(StreamingResponse {
-                    status: 200,
-                    // SseStream surfaces no response metadata, so streaming
-                    // responses carry no headers through this bridge.
-                    headers: BTreeMap::new(),
+            match self.inner.stream_sse_with_meta(http_request).await {
+                Ok(SseStreamWithMeta {
+                    status,
+                    headers,
+                    stream,
+                }) => Ok(StreamingResponse {
+                    status,
+                    // Vec<(String,String)> → BTreeMap<String,String>; names are
+                    // already lowercased by the SseStreamWithMeta contract.
+                    headers: lowercase_headers(&headers),
                     frames: Box::new(SseFrames { stream }),
                 }),
+                // Error path: `reqwest`'s error arm has no headers at this
+                // point (the response was consumed into the Status variant
+                // before headers could be captured), so headers remain empty.
                 Err(HttpError::Status { status, body }) => Ok(StreamingResponse {
                     status,
                     headers: BTreeMap::new(),

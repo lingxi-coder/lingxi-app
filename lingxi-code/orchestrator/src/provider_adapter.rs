@@ -14,7 +14,10 @@ use crate::model::user_agent::{user_agent, UserAgentEnv};
 use agent::convert::{to_llm_messages, to_tool_declarations};
 use async_trait::async_trait;
 use futures::stream::BoxStream;
-use llm_client::{DefaultLlmClient, LlmError, LlmEvent, LlmRequest, LlmResponse, ProviderRequest, SystemBlock, Transport};
+use llm_client::{
+    CostEstimator, DefaultLlmClient, LlmError, LlmEvent, LlmRequest, LlmResponse,
+    ProviderRequest, SystemBlock, Transport,
+};
 use protocol::{ContentBlock, ConversationMessage};
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -62,12 +65,23 @@ pub struct ProviderApiAdapter {
     fallback_model: Option<String>,
     /// Available model ids from the client registry (for `available_models`).
     available_model_ids: Vec<String>,
+    /// Optional cost estimator for populating `LlmResponse.cost`.
+    ///
+    /// When `Some`, a successful `decode_response` triggers a cost estimate using
+    /// the model's resolved `PricingModelRef` and usage counters.  Unpriced or
+    /// unknown models leave `response.cost = None` (never an error).  The
+    /// `CostTracker` budget authority is UNTOUCHED by this path.
+    estimator: Option<Arc<CostEstimator>>,
 }
 
 impl ProviderApiAdapter {
     /// Construct the adapter.  Called by Task 10 host constructors.
     ///
     /// `version` is the build version string embedded in the User-Agent header.
+    ///
+    /// `estimator` — when `Some`, a successful response decode populates
+    /// `LlmResponse.cost` via the llm-client `CostEstimator`.  Pass
+    /// `None` to leave cost estimation disabled (existing behaviour before 3c-T3).
     #[must_use]
     pub fn new(
         client: Arc<DefaultLlmClient>,
@@ -77,6 +91,25 @@ impl ProviderApiAdapter {
         version: impl Into<String>,
         analytics: Option<Arc<::telemetry::AnalyticsBus>>,
         fallback_model: Option<String>,
+    ) -> Self {
+        Self::new_with_estimator(client, transport, subscriber, ua, version, analytics, fallback_model, None)
+    }
+
+    /// Construct the adapter with an explicit cost estimator.
+    ///
+    /// Hosts that have the `cost::PricingCatalog` available (desktop + mobile)
+    /// call this instead of [`Self::new`] to get live `LlmResponse.cost` values.
+    #[must_use]
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_estimator(
+        client: Arc<DefaultLlmClient>,
+        transport: Arc<dyn Transport>,
+        subscriber: SubscriberState,
+        ua: UserAgentEnv,
+        version: impl Into<String>,
+        analytics: Option<Arc<::telemetry::AnalyticsBus>>,
+        fallback_model: Option<String>,
+        estimator: Option<Arc<CostEstimator>>,
     ) -> Self {
         let available_model_ids = client
             .available_models()
@@ -92,6 +125,7 @@ impl ProviderApiAdapter {
             analytics,
             fallback_model,
             available_model_ids,
+            estimator,
         }
     }
 
@@ -347,7 +381,18 @@ impl ProviderApiAdapter {
                     // (Rate-limit state recording is best-effort for now.)
 
                     match prepared.route.codec.decode_response(provider_resp.clone()) {
-                        Ok(response) => {
+                        Ok(mut response) => {
+                            // 3c-T3: populate response.cost when an estimator is wired.
+                            // Unpriced or unknown models leave response.cost = None — never an error.
+                            if let Some(est) = &self.estimator {
+                                let pricing_ref =
+                                    prepared.route.resolved_route.pricing_model.clone();
+                                if let Ok(estimate) = est.estimate(pricing_ref, &response.usage) {
+                                    if estimate.total_cost_usd.is_some() {
+                                        response.cost = Some(estimate);
+                                    }
+                                }
+                            }
                             let elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
                             telemetry::emit_succeeded(
                                 &self.analytics,
@@ -466,13 +511,12 @@ impl ProviderApiAdapter {
     /// on each attempt so a fresh `PreparedLlmCall` (with correct auth headers) is
     /// sent even after a previous attempt fails.
     ///
-    /// **Streaming rate-limit headers (prereqs item 11):** `execute_stream` does
-    /// not surface response headers from the streaming path via the current
-    /// `Transport::open_stream` signature (headers are only available inside
-    /// `StreamingResponse` which `execute_stream` consumes internally). Rate-limit
-    /// header tracking on the streaming path is therefore best-effort / not
-    /// implemented in 3a.  An additive `stream_sse` metadata return on
-    /// `traits::HttpTransport` is the preferred follow-up.
+    /// **Streaming rate-limit headers (3c-T1 closed):** `Transport::open_stream`
+    /// now returns real `StreamingResponse{status, headers}` via the additive
+    /// `stream_sse_with_meta` path added in plan 3c.  The connect-phase ≥400
+    /// branch below reads `streaming.headers` and calls `resolve_retry_after`
+    /// just as the non-stream path does, so 429+`retry-after` delays are
+    /// honoured on the streaming path.
     #[allow(clippy::too_many_lines)]
     async fn drive_stream(
         &self,
@@ -515,6 +559,7 @@ impl ProviderApiAdapter {
                 Ok(streaming) => {
                     // Connect-phase status ≥ 400: drain and decode as error.
                     if streaming.status >= 400 {
+                        let response_headers = streaming.headers;
                         let mut frames = streaming.frames;
                         let mut body = Vec::new();
                         loop {
@@ -528,7 +573,7 @@ impl ProviderApiAdapter {
                             serde_json::from_slice(&body).unwrap_or(serde_json::Value::Null);
                         let err_response = llm_client::ProviderResponse {
                             status: streaming.status,
-                            headers: streaming.headers,
+                            headers: response_headers.clone(),
                             body_json,
                             request_id: None,
                         };
@@ -537,7 +582,21 @@ impl ProviderApiAdapter {
                             Ok(_) => LlmError::ProviderInternal,
                         };
 
-                        let step = next_step(&mut state, &ctl, &decode_err, thinking_budget);
+                        // Mirror the non-stream path: for 429s, resolve the
+                        // actual retry delay from the real response headers
+                        // (retry-after / anthropic-ratelimit-*).  Empty headers
+                        // fall through to the 1 s fallback inside
+                        // `resolve_retry_after`.
+                        let effective_err = if let LlmError::RateLimited { .. } = &decode_err {
+                            LlmError::RateLimited {
+                                retry_after: Some(Self::resolve_retry_after(&response_headers)),
+                                scope: None,
+                            }
+                        } else {
+                            decode_err.clone()
+                        };
+
+                        let step = next_step(&mut state, &ctl, &effective_err, thinking_budget);
                         match step {
                             DriveStep::RetryAfter(delay) => {
                                 tokio::time::sleep(delay).await;
@@ -1529,6 +1588,336 @@ mod tests {
             orch_err.to_string(),
             REPEATED_529_ERROR_MESSAGE,
             "Display must equal the byte-locked copy"
+        );
+    }
+
+    // ── 3c-T3: LlmResponse.cost populated from cost estimator ─────────────────
+
+    fn make_adapter_with_estimator(transport: Arc<dyn Transport>) -> ProviderApiAdapter {
+        use cost::pricing::PricingCatalog as CostCatalog;
+        use crate::cost_wiring::llm_catalog_from_cost;
+        use llm_client::{CostEstimator, PricingPolicy};
+        #[allow(deprecated)]
+        std::env::set_var("ADAPTER_TEST_KEY", "test-key");
+        let cost_cat = CostCatalog::builtin_reference();
+        let llm_cat = llm_catalog_from_cost(&cost_cat);
+        let estimator = Arc::new(CostEstimator::new(llm_cat, PricingPolicy::MarkUnestimated));
+
+        let client = Arc::new(
+            DefaultLlmClient::from_config(ClientConfig {
+                providers: vec![ProviderProfile {
+                    provider_id: ProviderId::AnthropicFirstParty,
+                    profile_name: "anthropic".to_string(),
+                    base_url: "https://api.anthropic.com".to_string(),
+                    protocol: ProtocolFamily::AnthropicMessages,
+                    auth: AuthStrategy::ApiKey,
+                    credential: CredentialConfig::Env {
+                        var: "ADAPTER_TEST_KEY".to_string(),
+                    },
+                    models: vec![ModelProfile {
+                        display_model: "claude-sonnet-4-20250514".to_string(),
+                        request_model: "claude-sonnet-4-20250514".to_string(),
+                        billing_model: "claude-sonnet-4".to_string(),
+                        aliases: vec!["claude".to_string()],
+                        capabilities: Capabilities {
+                            streaming: true,
+                            tools: true,
+                            ..Default::default()
+                        },
+                    }],
+                    pricing: PricingConfig::default(),
+                }],
+            })
+            .expect("client"),
+        );
+        ProviderApiAdapter::new_with_estimator(
+            client,
+            transport,
+            SubscriberState::default(),
+            UserAgentEnv {
+                user_type: Some("external".to_string()),
+                entrypoint: Some("cli".to_string()),
+                ..Default::default()
+            },
+            "0.0.0",
+            None,
+            None,
+            Some(estimator),
+        )
+    }
+
+    /// 3c-T3: adapter populates response.cost for a priced model.
+    ///
+    /// claude-sonnet-4 billing_model → catalog hit → cost is Some(estimate with
+    /// total_cost_usd present).
+    #[tokio::test]
+    async fn cost_populated_for_priced_model() {
+        let response_json = serde_json::json!({
+            "id": "msg_cost_test",
+            "model": "claude-sonnet-4-20250514",
+            "content": [{"type": "text", "text": "hello"}],
+            "stop_reason": "end_turn",
+            "usage": {"input_tokens": 1_000_000, "output_tokens": 1_000_000}
+        });
+        let transport = FakeTransport::always(ProviderResponse::json(200, response_json));
+        let adapter = make_adapter_with_estimator(transport);
+        let resp = adapter
+            .messages_create("claude-sonnet-4-20250514", None, Vec::new(), Vec::new())
+            .await
+            .expect("ok");
+        let cost = resp.cost.expect("cost must be Some for a priced model");
+        let total = cost.total_cost_usd.expect("total_cost_usd must be Some");
+        // claude-sonnet-4: input 3_000 nano → 3.0 usd/M × 1M + output 15_000 → 15.0 × 1M = 18.0
+        assert!(
+            (total - 18.0).abs() < 1e-9,
+            "expected total $18.0 for 1M in + 1M out at $3/$15, got ${total}"
+        );
+    }
+
+    /// 3c-T3: unknown billing model → cost stays None (no error).
+    ///
+    /// The adapter uses a model profile whose billing_model ("claude-sonnet-4")
+    /// IS in the catalog; to test the None path we use a profile with a
+    /// billing_model that has no entry.
+    #[tokio::test]
+    async fn cost_none_for_unpriced_model() {
+        // Build an adapter with an estimator but a billing model not in the catalog.
+        use cost::pricing::PricingCatalog as CostCatalog;
+        use crate::cost_wiring::llm_catalog_from_cost;
+        use llm_client::{CostEstimator, PricingPolicy};
+        #[allow(deprecated)]
+        std::env::set_var("ADAPTER_TEST_KEY2", "test-key");
+        let cost_cat = CostCatalog::builtin_reference();
+        let llm_cat = llm_catalog_from_cost(&cost_cat);
+        let estimator = Arc::new(CostEstimator::new(llm_cat, PricingPolicy::MarkUnestimated));
+
+        let client = Arc::new(
+            DefaultLlmClient::from_config(ClientConfig {
+                providers: vec![ProviderProfile {
+                    provider_id: ProviderId::AnthropicFirstParty,
+                    profile_name: "anthropic".to_string(),
+                    base_url: "https://api.anthropic.com".to_string(),
+                    protocol: ProtocolFamily::AnthropicMessages,
+                    auth: AuthStrategy::ApiKey,
+                    credential: CredentialConfig::Env {
+                        var: "ADAPTER_TEST_KEY2".to_string(),
+                    },
+                    models: vec![ModelProfile {
+                        display_model: "claude-future-9999".to_string(),
+                        request_model: "claude-future-9999".to_string(),
+                        // billing_model not in any catalog entry
+                        billing_model: "claude-future-9999".to_string(),
+                        aliases: vec![],
+                        capabilities: Capabilities::default(),
+                    }],
+                    pricing: PricingConfig::default(),
+                }],
+            })
+            .expect("client"),
+        );
+        let response_json = serde_json::json!({
+            "id": "msg_unpriced",
+            "model": "claude-future-9999",
+            "content": [{"type": "text", "text": "hello"}],
+            "stop_reason": "end_turn",
+            "usage": {"input_tokens": 100, "output_tokens": 50}
+        });
+        let transport = FakeTransport::always(ProviderResponse::json(200, response_json));
+        let adapter = ProviderApiAdapter::new_with_estimator(
+            client,
+            transport,
+            SubscriberState::default(),
+            UserAgentEnv {
+                user_type: Some("external".to_string()),
+                entrypoint: Some("cli".to_string()),
+                ..Default::default()
+            },
+            "0.0.0",
+            None,
+            None,
+            Some(estimator),
+        );
+        let resp = adapter
+            .messages_create("claude-future-9999", None, Vec::new(), Vec::new())
+            .await
+            .expect("ok");
+        assert!(
+            resp.cost.is_none(),
+            "unpriced billing_model must leave cost = None; got {:?}",
+            resp.cost
+        );
+    }
+
+    /// 3c-T3: cost tracker recording is unchanged (existing CostTracker tests still pass).
+    ///
+    /// When no estimator is wired, response.cost stays None — backward-compat.
+    #[tokio::test]
+    async fn no_estimator_leaves_cost_none() {
+        let response_json = serde_json::json!({
+            "id": "msg_no_est",
+            "model": "claude-sonnet-4-20250514",
+            "content": [{"type": "text", "text": "hello"}],
+            "stop_reason": "end_turn",
+            "usage": {"input_tokens": 100, "output_tokens": 50}
+        });
+        let transport = FakeTransport::always(ProviderResponse::json(200, response_json));
+        // make_adapter wires None estimator (ProviderApiAdapter::new default path)
+        let adapter = make_adapter(transport);
+        let resp = adapter
+            .messages_create("claude-sonnet-4-20250514", None, Vec::new(), Vec::new())
+            .await
+            .expect("ok");
+        assert!(resp.cost.is_none(), "no estimator → cost must be None");
+    }
+
+    // ── 3c-T1: streaming 429 + retry-after header drives correct delay ────────
+
+    /// Empty frame-stream for scripted streaming errors.
+    struct EmptyFrames;
+    impl llm_client::FrameStream for EmptyFrames {
+        fn next_frame(
+            &mut self,
+        ) -> BoxFuture<'_, Result<Option<llm_client::RawStreamFrame>, LlmError>> {
+            Box::pin(async { Ok(None) })
+        }
+    }
+
+    /// A Transport that sequences execute responses AND can return scripted
+    /// streaming (`open_stream`) responses.
+    struct FakeStreamTransport {
+        /// Sequence of `open_stream` results.
+        stream_resps: Mutex<Vec<FakeStreamResp>>,
+        stream_call_count: Mutex<usize>,
+    }
+
+    #[allow(dead_code)]
+    enum FakeStreamResp {
+        /// Streaming response with given status + headers + no frames.
+        Status {
+            status: u16,
+            headers: BTreeMap<String, String>,
+        },
+        /// Terminal transport error (e.g. connection failure).
+        Err(LlmError),
+    }
+
+    impl FakeStreamTransport {
+        fn sequence(stream_resps: Vec<FakeStreamResp>) -> Arc<Self> {
+            Arc::new(Self {
+                stream_resps: Mutex::new(stream_resps),
+                stream_call_count: Mutex::new(0),
+            })
+        }
+
+        fn stream_call_count(&self) -> usize {
+            *self.stream_call_count.lock().unwrap()
+        }
+    }
+
+    impl Transport for FakeStreamTransport {
+        fn execute<'a>(
+            &'a self,
+            _request: &'a ProviderRequest,
+        ) -> BoxFuture<'a, Result<ProviderResponse, LlmError>> {
+            Box::pin(async move {
+                Err(LlmError::Transport {
+                    message: "execute not scripted in FakeStreamTransport".to_string(),
+                })
+            })
+        }
+
+        fn open_stream<'a>(
+            &'a self,
+            _request: &'a ProviderRequest,
+        ) -> BoxFuture<'a, Result<StreamingResponse, LlmError>> {
+            let mut count = self.stream_call_count.lock().unwrap();
+            let idx = (*count).min(
+                self.stream_resps
+                    .lock()
+                    .unwrap()
+                    .len()
+                    .saturating_sub(1),
+            );
+            *count += 1;
+            drop(count);
+            let resp = {
+                let resps = self.stream_resps.lock().unwrap();
+                match &resps[idx] {
+                    FakeStreamResp::Status { status, headers } => {
+                        Ok(StreamingResponse {
+                            status: *status,
+                            headers: headers.clone(),
+                            frames: Box::new(EmptyFrames),
+                        })
+                    }
+                    FakeStreamResp::Err(e) => Err(e.clone()),
+                }
+            };
+            Box::pin(async move { resp })
+        }
+    }
+
+    /// 3c-T1 pin: a connect-phase 429 with `retry-after: 7` on the streaming
+    /// path must drive a 7 s `RetryAfter` delay (not the 1 s fallback).
+    ///
+    /// We use `tokio::time::pause()` so the test completes instantly; the
+    /// `drive_stream` loop sleeps via `tokio::time::sleep` which respects the
+    /// paused clock.  After the first 429 the test advances time past 7 s and
+    /// the second (200) attempt is served, confirming the delay was honoured.
+    #[tokio::test(start_paused = true)]
+    async fn streaming_429_with_retry_after_header_drives_7s_not_1s() {
+        // Attempt 1: 429 with retry-after: 7.
+        let mut headers_429 = BTreeMap::new();
+        headers_429.insert("retry-after".to_string(), "7".to_string());
+
+        // Attempt 2: 200 with an empty body (the codec will produce
+        // StreamInterrupted on an empty frame-stream, but that is terminal and
+        // proves two calls were made — what we care about).
+        let stream_transport = FakeStreamTransport::sequence(vec![
+            FakeStreamResp::Status {
+                status: 429,
+                headers: headers_429,
+            },
+            FakeStreamResp::Status {
+                status: 200,
+                headers: BTreeMap::new(),
+            },
+        ]);
+
+        let adapter = make_adapter(Arc::clone(&stream_transport) as Arc<dyn Transport>);
+
+        // Record the instant before calling drive_stream.
+        let before = tokio::time::Instant::now();
+
+        // drive_stream is private; call it through the StreamingApiClient trait.
+        // The result will be an error (empty frame-stream on attempt 2) or Ok
+        // depending on the codec — we only care that two open_stream calls were
+        // made and that the elapsed time is ≥ 7 s (the retry-after delay).
+        let _result = StreamingApiClient::stream(
+            &adapter,
+            "claude-sonnet-4-20250514",
+            None,
+            Vec::new(),
+            Vec::new(),
+        )
+        .await;
+
+        let elapsed = before.elapsed();
+        // The sleep was for exactly 7 s (retry-after value).  With time paused
+        // the sleep advances the mock clock, so elapsed reports ≥ 7 s.
+        assert!(
+            elapsed >= std::time::Duration::from_secs(7),
+            "retry-after:7 must drive a ≥7 s delay; elapsed={elapsed:?}"
+        );
+        assert!(
+            elapsed < std::time::Duration::from_secs(8),
+            "delay must be close to 7 s (not jittered / not 1 s fallback); elapsed={elapsed:?}"
+        );
+        // Two open_stream calls: 429 then 200.
+        assert_eq!(
+            stream_transport.stream_call_count(),
+            2,
+            "must retry exactly once (429 → 200)"
         );
     }
 }

@@ -892,10 +892,11 @@ fn oauth_subscriber_flag(api_key_present: bool, auth_token_present: bool, scopes
         && anthropic_oauth::subscription_from_scopes(scopes)
 }
 
-// `builtin_anthropic_config` lives in `platform_common::llm_config` so both
-// composition roots share the same 10-entry model table.  The re-export makes
-// the name available locally without changing any call site.
-use platform_common::builtin_anthropic_config;
+// `builtin_anthropic_config` + `apply_settings_providers` live in
+// `platform_common::llm_config` so both composition roots share the same
+// model table and settings-wiring logic.  The re-exports make the names
+// available locally without changing any call site.
+use platform_common::{apply_settings_providers, builtin_anthropic_config};
 
 /// Load the merged `settings.outputStyle` (project + user + env layers) for the
 /// given project dir. Mirrors the CLI's `load_routing`/`load_provider_profiles`
@@ -1017,8 +1018,28 @@ pub async fn build(
     //       OAuth path: `OAuthBearer` + `HostManaged` credential, backed by
     //       `OAuthCredentialProvider` over the refresh driver.
     //       API-key path: `ApiKey` + `Env { ANTHROPIC_API_KEY }`.
+    //
+    //       3c-T2: apply settings `providers` / `routing` on top of the
+    //       built-in Anthropic profile so custom provider profiles (e.g. groq,
+    //       gemini, other openai-compat endpoints) and routing aliases are
+    //       available to the orchestrator.  Errors are logged and silently
+    //       dropped (a bad `providers` entry must NOT prevent the engine from
+    //       starting with the built-in profile still functional).
     let llm_client = {
-        let cfg_obj = builtin_anthropic_config(&cfg.api_base, llm_oauth_path);
+        let mut cfg_obj = builtin_anthropic_config(&cfg.api_base, llm_oauth_path);
+        // Run whenever EITHER key is present: a routing-only settings file
+        // (aliases onto builtin models, no custom providers) must still apply.
+        if cfg.provider_profiles.is_some() || cfg.routing.is_some() {
+            let empty = std::collections::BTreeMap::new();
+            let providers = cfg.provider_profiles.as_ref().unwrap_or(&empty);
+            if let Err(e) = apply_settings_providers(
+                &mut cfg_obj,
+                providers,
+                cfg.routing.as_ref(),
+            ) {
+                tracing::warn!(error = %e, "settings providers/routing entry rejected; earlier entries and the built-in profile remain active");
+            }
+        }
         let mut client = DefaultLlmClient::from_config(cfg_obj)
             .map_err(|e| BuildError::ApiBase(e.to_string()))?;
         if let Some(auth_state) = llm_oauth_state {
@@ -1028,10 +1049,22 @@ pub async fn build(
         Arc::new(client)
     };
     let subscriber_state = SubscriberState { is_subscriber, is_enterprise: false };
+
+    // 3c-T3: build the cost estimator from the builtin reference catalog so
+    // LlmResponse.cost is populated on every successful decode.  Unpriced /
+    // unknown models leave cost = None (never an error; CostTracker path unchanged).
+    let cost_estimator = {
+        use llm_client::{CostEstimator, PricingPolicy};
+        use orchestrator::cost_wiring::llm_catalog_from_cost;
+        let cost_cat = cost::pricing::PricingCatalog::builtin_reference();
+        let llm_cat = llm_catalog_from_cost(&cost_cat);
+        Arc::new(CostEstimator::new(llm_cat, PricingPolicy::MarkUnestimated))
+    };
+
     // Build the CONCRETE adapter so it can be coerced to BOTH the
     // orchestrator seam (`OrchestratorApiClient`) and the agent seam
     // (`agent::SubagentApiClient`). `ProviderApiAdapter` impls both.
-    let provider_adapter = Arc::new(ProviderApiAdapter::new(
+    let provider_adapter = Arc::new(ProviderApiAdapter::new_with_estimator(
         llm_client,
         llm_transport,
         subscriber_state,
@@ -1039,6 +1072,7 @@ pub async fn build(
         env!("CARGO_PKG_VERSION"),
         Some(Arc::new(telemetry::AnalyticsBus::new())),
         cfg.fallback_model.clone(),
+        Some(cost_estimator),
     ));
     let api_client: Arc<dyn OrchestratorApiClient> = provider_adapter.clone();
     let subagent_api: Arc<dyn agent::SubagentApiClient> = provider_adapter;
@@ -2899,5 +2933,144 @@ mod tests {
         // (7) Empty / malformed tiers are skipped without panicking.
         let robust = sandbox_auto_allow_from_settings_tiers(&["", "not json", r#"{ "sandbox": { "enabled": true } }"#]);
         assert!(robust.enabled);
+    }
+
+    // ── 3c-T2: providers/routing settings → ClientConfig (e2e-flavored) ───
+
+    /// 3c-T2: a `DesktopConfig` with a groq-style openai-compat provider profile
+    /// and a routing alias produces a `build()` that succeeds, and the same
+    /// `apply_settings_providers` path exposes the custom model in
+    /// `available_models()` + the alias resolves via the registry.
+    ///
+    /// This exercises the full settings → `apply_settings_providers` →
+    /// `DefaultLlmClient::from_config` → registry path without any network call.
+    /// The `build()` call is the composition-root assertion; the model/alias
+    /// assertions use `apply_settings_providers` directly (same code path, but
+    /// callable without digging into the orchestrator internals).
+    #[tokio::test]
+    async fn custom_openai_profile_available_and_alias_resolves() {
+        let (_tmp, mut cfg) = test_config(true);
+
+        // Inject a groq-style provider profile + an alias.
+        cfg.provider_profiles = Some({
+            let mut m = std::collections::BTreeMap::new();
+            m.insert(
+                "groq".to_string(),
+                serde_json::json!({
+                    "type": "openai",
+                    "baseUrl": "https://api.groq.com/openai/v1",
+                    "apiKeyEnv": "GROQ_API_KEY",
+                    "models": [{ "id": "llama-3.3-70b-versatile" }]
+                }),
+            );
+            m
+        });
+        cfg.routing = Some(serde_json::json!({
+            "aliases": { "llama": "groq/llama-3.3-70b-versatile" }
+        }));
+
+        let output: Arc<dyn traits::OutputStream> =
+            Arc::new(orchestrator::test_support::MockOutputStream::new());
+        let perm_sink: Arc<dyn client_adapter::PermissionRequestSink> =
+            Arc::new(RecordingPermissionSink::default());
+
+        // The composition-root assertion: build() must not fail when
+        // provider_profiles is set.
+        let rt = build(cfg, output, perm_sink).await.expect("build() failed with custom provider profile");
+        let _ = rt;
+
+        // Model/alias assertions via apply_settings_providers directly (same
+        // code path build() uses; no need to crack open orchestrator internals).
+        let mut llm_cfg =
+            platform_common::builtin_anthropic_config("https://api.anthropic.com", false);
+        let providers = {
+            let mut m = std::collections::BTreeMap::new();
+            m.insert(
+                "groq".to_string(),
+                serde_json::json!({
+                    "type": "openai",
+                    "baseUrl": "https://api.groq.com/openai/v1",
+                    "apiKeyEnv": "GROQ_API_KEY",
+                    "models": [{ "id": "llama-3.3-70b-versatile" }]
+                }),
+            );
+            m
+        };
+        let routing = serde_json::json!({
+            "aliases": { "llama": "groq/llama-3.3-70b-versatile" }
+        });
+        platform_common::apply_settings_providers(&mut llm_cfg, &providers, Some(&routing))
+            .expect("apply_settings_providers must succeed");
+
+        let client =
+            llm_client::DefaultLlmClient::from_config(llm_cfg).expect("config must be valid");
+
+        // (1) available_models() includes the custom groq model.
+        let available: Vec<String> = client
+            .available_models()
+            .into_iter()
+            .map(|m| m.display_model)
+            .collect();
+        assert!(
+            available.contains(&"llama-3.3-70b-versatile".to_string()),
+            "custom model must be in available_models; got: {available:?}"
+        );
+
+        // (2) alias "llama" resolves to the groq model.
+        let groq_with_alias = client
+            .available_models()
+            .into_iter()
+            .find(|m| m.aliases.contains(&"llama".to_string()));
+        assert!(
+            groq_with_alias.is_some(),
+            "alias 'llama' must appear on the groq model; available_models: {available:?}"
+        );
+        assert_eq!(
+            groq_with_alias.unwrap().display_model,
+            "llama-3.3-70b-versatile"
+        );
+    }
+
+    /// 3c final-review fix: a ROUTING-ONLY settings file (aliases onto builtin
+    /// models, no custom `providers` key) must still be applied — the apply
+    /// gate runs when EITHER key is present.
+    #[tokio::test]
+    async fn routing_only_settings_alias_applies_to_builtin_model() {
+        let (_tmp, mut cfg) = test_config(true);
+        cfg.provider_profiles = None;
+        cfg.routing = Some(serde_json::json!({
+            "aliases": { "best": "anthropic/claude-opus-4-7" }
+        }));
+
+        // Composition-root assertion: build() succeeds with routing-only settings.
+        let output: Arc<dyn traits::OutputStream> =
+            Arc::new(orchestrator::test_support::MockOutputStream::new());
+        let perm_sink: Arc<dyn client_adapter::PermissionRequestSink> =
+            Arc::new(RecordingPermissionSink::default());
+        let rt = build(cfg, output, perm_sink)
+            .await
+            .expect("build() failed with routing-only settings");
+        let _ = rt;
+
+        // Same code path, directly: the alias lands on the BUILTIN model.
+        let mut llm_cfg =
+            platform_common::builtin_anthropic_config("https://api.anthropic.com", false);
+        let empty = std::collections::BTreeMap::new();
+        let routing = serde_json::json!({
+            "aliases": { "best": "anthropic/claude-opus-4-7" }
+        });
+        platform_common::apply_settings_providers(&mut llm_cfg, &empty, Some(&routing))
+            .expect("routing-only apply must succeed");
+        let client =
+            llm_client::DefaultLlmClient::from_config(llm_cfg).expect("config must be valid");
+        let aliased = client
+            .available_models()
+            .into_iter()
+            .find(|m| m.aliases.contains(&"best".to_string()));
+        assert_eq!(
+            aliased.map(|m| m.display_model).as_deref(),
+            Some("claude-opus-4-7"),
+            "routing-only alias must land on the builtin model"
+        );
     }
 }

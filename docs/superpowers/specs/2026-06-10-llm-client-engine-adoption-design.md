@@ -1,7 +1,7 @@
 # Engine adoption of llm-client (full replacement of api-client) — design
 
 Date: 2026-06-10
-Status: approved (user), revision 2.4 — 3a + 3b DONE; 3c remaining.
+Status: approved (user), revision 2.5 — 3a + 3b + 3c DONE; llm-client adoption COMPLETE end-to-end.
 
 **Revision history:**
 - 2.2 — no intermediate policy crate; supersedes api-client entirely with no backwards compatibility.
@@ -12,6 +12,15 @@ Status: approved (user), revision 2.4 — 3a + 3b DONE; 3c remaining.
   engine settings schema fields are not yet consumed (wired in as `None` / passthrough today);
   also pending: `PricingCatalog` population from the `cost` crate price table, and streaming
   rate-limit header metadata traits (`stream_sse` response-header surface).
+- 2.5 — Plan 3c complete: providers/routing settings wired via
+  `platform_common::apply_settings_providers` (`routing.aliases` live; `routing.fallback`/
+  `routing.retry` keys parsed but inert, documented in the settings schema);
+  `LlmResponse.cost` live via a cost-crate-derived `CostEstimator` in `ProviderApiAdapter`;
+  streaming responses carry real status/headers via the additive
+  `traits::HttpTransport::stream_sse_with_meta`. llm-client adoption COMPLETE end-to-end.
+  Remaining future work: wire `routing.fallback`/`routing.retry` to the fallback/retry
+  drivers; `AwsSigV4`/`GcpToken`/`AzureToken` auth signing; streaming error-path headers
+  (reqwest error arm carries none); per-profile pricing overrides from settings.
 
 ## Goal
 

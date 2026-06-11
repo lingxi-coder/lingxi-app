@@ -21,6 +21,30 @@ pub type SseStream = Pin<Box<dyn Stream<Item = Result<SseEvent, HttpError>> + Se
 /// interprets the bytes.
 pub type RawByteStream = Pin<Box<dyn Stream<Item = Result<Vec<u8>, HttpError>> + Send>>;
 
+/// SSE stream together with the HTTP response metadata that preceded it.
+///
+/// Returned by [`HttpTransport::stream_sse_with_meta`]. The status and headers
+/// are captured from the response line/headers before any SSE data arrives, so
+/// callers can inspect them immediately — for example, to honour a
+/// `retry-after` header on a connect-phase 429.
+///
+/// # Note on the default implementation
+///
+/// The default [`HttpTransport::stream_sse_with_meta`] loses metadata: it
+/// delegates to [`HttpTransport::stream_sse`] which surfaces neither status nor
+/// headers.  Real transports (e.g. `ReqwestHttp` in `platform-common`)
+/// override this method to capture the metadata before handing the
+/// byte-stream to the SSE decoder.  Use the override wherever accurate
+/// retry-after / rate-limit tracking matters.
+pub struct SseStreamWithMeta {
+    /// HTTP status of the streaming response (e.g. 200, 429).
+    pub status: u16,
+    /// Response headers, lowercased names (e.g. `"retry-after"`).
+    pub headers: Vec<(String, String)>,
+    /// The SSE event stream; drive to completion as usual.
+    pub stream: SseStream,
+}
+
 /// A `Stream` that yields a single chunk then ends. Backs the default
 /// [`HttpTransport::stream_raw_bytes`] (buffer-the-body) impl without pulling a
 /// stream-combinator dependency into this leaf crate.
@@ -45,6 +69,28 @@ pub trait HttpTransport: Send + Sync {
 
     /// Open an SSE stream. Caller drives the stream to completion.
     async fn stream_sse(&self, req: HttpRequest) -> Result<SseStream, HttpError>;
+
+    /// Open an SSE stream, also capturing the HTTP status and response headers.
+    ///
+    /// The default implementation wraps [`Self::stream_sse`] with a synthetic
+    /// `status: 200` and empty headers — it loses metadata that the platform
+    /// transport would otherwise surface.  Override in production transports so
+    /// connect-phase rate-limit headers (`retry-after`, etc.) are preserved.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`HttpError`] on connection failure or a non-2xx status that the
+    /// transport surfaces as an error (behaviour depends on the implementation).
+    async fn stream_sse_with_meta(
+        &self,
+        req: HttpRequest,
+    ) -> Result<SseStreamWithMeta, HttpError> {
+        Ok(SseStreamWithMeta {
+            status: 200,
+            headers: Vec::new(),
+            stream: self.stream_sse(req).await?,
+        })
+    }
 
     /// Open a raw byte stream for a binary response protocol (e.g. the AWS
     /// event-stream used by Bedrock streaming). The caller drives it to
@@ -141,6 +187,48 @@ mod tests {
             body: None,
             timeout: None,
         }
+    }
+
+    /// The default `stream_sse_with_meta` wraps `stream_sse` with status 200
+    /// and empty headers — it must compile and forward events correctly.
+    #[tokio::test]
+    async fn default_stream_sse_with_meta_uses_status_200_empty_headers() {
+        struct SseOnce;
+
+        #[async_trait]
+        impl HttpTransport for SseOnce {
+            async fn request(&self, _req: HttpRequest) -> Result<HttpResponse, HttpError> {
+                Err(HttpError::InvalidRequest("not used".to_string()))
+            }
+            async fn stream_sse(
+                &self,
+                _req: HttpRequest,
+            ) -> Result<SseStream, HttpError> {
+                // Return an empty stream.
+                use futures_core::stream::Stream;
+                use std::pin::Pin;
+                use std::task::{Context, Poll};
+                struct Empty;
+                impl Stream for Empty {
+                    type Item = Result<protocol::SseEvent, HttpError>;
+                    fn poll_next(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+                        Poll::Ready(None)
+                    }
+                }
+                Ok(Box::pin(Empty))
+            }
+        }
+
+        let t = SseOnce;
+        let meta = t
+            .stream_sse_with_meta(get_req())
+            .await
+            .expect("default must succeed");
+        assert_eq!(meta.status, 200, "default status must be 200");
+        assert!(
+            meta.headers.is_empty(),
+            "default headers must be empty"
+        );
     }
 
     #[tokio::test]

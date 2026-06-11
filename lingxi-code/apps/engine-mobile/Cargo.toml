@@ -59,6 +59,8 @@ uniffi = [
     "dep:thiserror",
     "dep:serde_json",
     "dep:async-trait",
+    # 3c-T3: populate LlmResponse.cost from the builtin pricing catalog.
+    "dep:cost",
 ]
 
 [dependencies]
@@ -100,6 +102,9 @@ permission = { path = "../../permission", optional = true }
 sandbox = { path = "../../sandbox", optional = true }
 telemetry = { path = "../../telemetry", optional = true }
 platform-posix-minimal = { path = "../../platforms/posix-minimal", optional = true }
+# 3c-T3: builtin pricing catalog for LlmResponse.cost population. Optional +
+# uniffi-gated (the cost estimator is constructed inside build_mobile_inner).
+cost = { path = "../../cost", optional = true }
 # SESSIONS/HISTORY: enumerates the on-disk `<claude_home>/projects/<cwd>/*.jsonl`
 # session catalog for the `ListSessions` command. Engine-tier, optional +
 # uniffi-gated like its siblings above.

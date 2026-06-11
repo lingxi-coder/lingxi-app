@@ -20,7 +20,7 @@ pub mod mcp_stdio;
 pub mod mcp_ws;
 
 pub use http::ReqwestHttp;
-pub use llm_config::builtin_anthropic_config;
+pub use llm_config::{apply_settings_providers, builtin_anthropic_config};
 pub use llm_transport::LlmTransportBridge;
 pub use mcp_http::{connect_http, HttpConnectError};
 pub use mcp_sse::{connect_sse, SseConnectError, IDE_AUTH_HEADER};

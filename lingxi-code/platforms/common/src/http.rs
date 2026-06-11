@@ -15,7 +15,7 @@ use bytes::BytesMut;
 use futures_core::stream::Stream;
 use futures_util::stream::StreamExt;
 use protocol::{HttpRequest, HttpResponse, SseEvent};
-use traits::http::SseStream;
+use traits::http::{SseStream, SseStreamWithMeta};
 use traits::{HttpError, HttpTransport};
 
 /// Production HTTP transport using `reqwest::Client`.
@@ -61,20 +61,34 @@ fn to_reqwest_method(method: protocol::HttpMethod) -> reqwest::Method {
     }
 }
 
+/// Build a `reqwest::RequestBuilder` from a protocol `HttpRequest`.
+///
+/// Shared by all `HttpTransport` method impls on [`ReqwestHttp`] so headers,
+/// body, and timeout are applied identically regardless of which method
+/// ([`HttpTransport::request`] / [`HttpTransport::stream_sse`] /
+/// [`HttpTransport::stream_sse_with_meta`] / [`HttpTransport::stream_raw_bytes`])
+/// calls it.
+fn build_reqwest(
+    client: &reqwest::Client,
+    req: HttpRequest,
+) -> reqwest::RequestBuilder {
+    let mut rb = client.request(to_reqwest_method(req.method), &req.url);
+    for (k, v) in &req.headers {
+        rb = rb.header(k, v);
+    }
+    if let Some(body) = req.body {
+        rb = rb.body(body);
+    }
+    if let Some(timeout) = req.timeout {
+        rb = rb.timeout(timeout);
+    }
+    rb
+}
+
 #[async_trait]
 impl HttpTransport for ReqwestHttp {
     async fn request(&self, req: HttpRequest) -> Result<HttpResponse, HttpError> {
-        let mut rb = self.client.request(to_reqwest_method(req.method), &req.url);
-        for (k, v) in &req.headers {
-            rb = rb.header(k, v);
-        }
-        if let Some(body) = req.body {
-            rb = rb.body(body);
-        }
-        if let Some(timeout) = req.timeout {
-            rb = rb.timeout(timeout);
-        }
-        let resp = rb
+        let resp = build_reqwest(&self.client, req)
             .send()
             .await
             .map_err(|e| HttpError::Connection(e.to_string()))?;
@@ -96,17 +110,7 @@ impl HttpTransport for ReqwestHttp {
     }
 
     async fn stream_sse(&self, req: HttpRequest) -> Result<SseStream, HttpError> {
-        let mut rb = self.client.request(to_reqwest_method(req.method), &req.url);
-        for (k, v) in &req.headers {
-            rb = rb.header(k, v);
-        }
-        if let Some(body) = req.body {
-            rb = rb.body(body);
-        }
-        if let Some(timeout) = req.timeout {
-            rb = rb.timeout(timeout);
-        }
-        let resp = rb
+        let resp = build_reqwest(&self.client, req)
             .send()
             .await
             .map_err(|e| HttpError::Connection(e.to_string()))?;
@@ -125,21 +129,59 @@ impl HttpTransport for ReqwestHttp {
         Ok(Box::pin(event_stream))
     }
 
+    /// Override that captures the real HTTP status and response headers
+    /// (lowercased) before the SSE event stream begins.
+    ///
+    /// Unlike the default (which loses metadata by delegating to
+    /// [`Self::stream_sse`]), this override reads the response line and
+    /// headers before handing the byte-stream to the SSE decoder — so callers
+    /// can immediately inspect rate-limit headers such as `retry-after`.
+    ///
+    /// # Error arm note
+    ///
+    /// For non-2xx responses this method returns `Err(HttpError::Status{..})`
+    /// (same contract as `stream_sse`); headers are NOT preserved in that
+    /// error arm because `reqwest` has already consumed the response by the
+    /// time the error is materialised.
+    async fn stream_sse_with_meta(
+        &self,
+        req: HttpRequest,
+    ) -> Result<SseStreamWithMeta, HttpError> {
+        let resp = build_reqwest(&self.client, req)
+            .send()
+            .await
+            .map_err(|e| HttpError::Connection(e.to_string()))?;
+        let status = resp.status().as_u16();
+        if status >= 400 {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(HttpError::Status { status, body });
+        }
+        // Capture headers (lowercased) BEFORE moving `resp` into the byte stream.
+        let headers: Vec<(String, String)> = resp
+            .headers()
+            .iter()
+            .map(|(k, v)| {
+                (
+                    k.as_str().to_ascii_lowercase(),
+                    v.to_str().unwrap_or("").to_string(),
+                )
+            })
+            .collect();
+
+        let byte_stream = resp.bytes_stream();
+        let event_stream = sse_event_stream(byte_stream);
+        Ok(SseStreamWithMeta {
+            status,
+            headers,
+            stream: Box::pin(event_stream),
+        })
+    }
+
     async fn stream_raw_bytes(
         &self,
         req: HttpRequest,
     ) -> Result<traits::http::RawByteStream, HttpError> {
-        let mut rb = self.client.request(to_reqwest_method(req.method), &req.url);
-        for (k, v) in &req.headers {
-            rb = rb.header(k, v);
-        }
-        if let Some(body) = req.body {
-            rb = rb.body(body);
-        }
-        if let Some(timeout) = req.timeout {
-            rb = rb.timeout(timeout);
-        }
-        let resp = rb
+        let resp = build_reqwest(&self.client, req)
             .send()
             .await
             .map_err(|e| HttpError::Connection(e.to_string()))?;
@@ -271,6 +313,70 @@ pub(crate) fn find_event_boundary(buf: &BytesMut) -> Option<(usize, usize)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use traits::http::SseStreamWithMeta;
+
+    /// `ReqwestHttp::stream_sse_with_meta` must capture the real status and headers
+    /// (including `retry-after`) before the SSE event stream begins, and still
+    /// deliver the SSE events normally.
+    ///
+    /// Uses the existing axum-based in-process test harness pattern.
+    #[tokio::test]
+    async fn stream_sse_with_meta_captures_status_and_headers() {
+        use axum::response::{IntoResponse, Response};
+        use axum::routing::post;
+        use axum::Router;
+        use futures_util::StreamExt as _;
+        use protocol::HttpMethod;
+        use tokio::net::TcpListener;
+
+        async fn handler() -> Response {
+            (
+                axum::http::StatusCode::OK,
+                [
+                    ("content-type", "text/event-stream"),
+                    ("retry-after", "7"),
+                    ("x-custom", "meta"),
+                ],
+                "event: test\ndata: hello\n\n",
+            )
+                .into_response()
+        }
+
+        let app = Router::new().route("/stream", post(handler));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let transport = ReqwestHttp::new();
+        let req = HttpRequest {
+            method: HttpMethod::Post,
+            url: format!("http://{addr}/stream"),
+            headers: vec![],
+            body: None,
+            timeout: None,
+        };
+
+        let SseStreamWithMeta {
+            status,
+            headers,
+            mut stream,
+        } = transport.stream_sse_with_meta(req).await.unwrap();
+
+        assert_eq!(status, 200, "status must be captured");
+        let has_retry = headers
+            .iter()
+            .any(|(k, v)| k == "retry-after" && v == "7");
+        assert!(has_retry, "retry-after header must be captured; got: {headers:?}");
+        let has_custom = headers.iter().any(|(k, _)| k == "x-custom");
+        assert!(has_custom, "x-custom header must be captured");
+
+        // Events still arrive normally.
+        let event = stream.next().await.expect("at least one event").unwrap();
+        assert_eq!(event.event_type.as_deref(), Some("test"));
+        assert_eq!(event.data, "hello");
+    }
 
     /// Keepalive comment lines (`:`) are silently skipped; the event is still
     /// yielded. Ported from the deleted `api-client/src/sse.rs` test suite.

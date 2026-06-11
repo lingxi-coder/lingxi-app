@@ -1,9 +1,12 @@
 //! Translation helpers between `llm_client::Usage` and
 //! `cost::Usage` plus model-string → `ProviderId` resolution.
 //!
+//! Also contains the bridge that populates an `llm_client::PricingCatalog` from
+//! the `cost::PricingCatalog` so `LlmResponse.cost` carries real estimates.
+//!
 //! Used by M6-06 to feed `LlmResponse.usage` into `CostTracker`.
 
-use cost::pricing::ProviderId;
+use cost::pricing::{ProviderId, TokenClass};
 use cost::usage::{ApiSpeed, ServerToolUsage, TokenUsage, Usage};
 use cost::ModelRef;
 use llm_client::Usage as LlmUsage;
@@ -100,6 +103,66 @@ pub(crate) fn model_ref_from_string(model: &str) -> ModelRef {
         provider: provider_id_for_profile(&profile),
         model: bare,
     }
+}
+
+/// Map a `cost::pricing::ProviderId` to its `llm_client::ProviderId` equivalent.
+///
+/// Mapping:
+/// - `Anthropic` → `AnthropicFirstParty`
+/// - `OpenAI` → `OpenAI`
+/// - `GoogleGemini` → `Gemini`
+/// - `AmazonBedrock` → `BedrockClaude`
+/// - `OpenAICompatible { name }` → `OpenAICompatible { name }`
+/// - `Custom { name }` → `Custom { name }`
+fn cost_provider_to_llm_provider(p: &ProviderId) -> llm_client::ProviderId {
+    match p {
+        ProviderId::Anthropic => llm_client::ProviderId::AnthropicFirstParty,
+        ProviderId::OpenAI => llm_client::ProviderId::OpenAI,
+        ProviderId::GoogleGemini => llm_client::ProviderId::Gemini,
+        ProviderId::AmazonBedrock => llm_client::ProviderId::BedrockClaude,
+        ProviderId::OpenAICompatible { name } => llm_client::ProviderId::OpenAICompatible {
+            name: name.clone(),
+        },
+        ProviderId::Custom { name } => llm_client::ProviderId::Custom { name: name.clone() },
+    }
+}
+
+/// Build an `llm_client::PricingCatalog` populated from a `cost::PricingCatalog`.
+///
+/// Conversion: for each [`cost::ModelPricing`] entry, the `billing_model` is the
+/// catalog key (the stripped model name the cost crate uses, e.g. `"claude-opus-4-6"`),
+/// and per-bucket rates are converted from **nano-USD per token** to
+/// **USD per million tokens** via `usd_per_million = nano_usd_per_token as f64 / 1000.0`.
+///
+/// Missing token classes in a cost entry produce `0.0` for that bucket in the
+/// llm-client `TokenPricing` (never an error).  Provider defaults are not
+/// iterable from the cost catalog and are omitted; only explicitly-keyed model
+/// entries are transferred.
+#[must_use]
+#[allow(clippy::cast_precision_loss)]
+pub fn llm_catalog_from_cost(
+    catalog: &cost::pricing::PricingCatalog,
+) -> llm_client::PricingCatalog {
+    let mut out = llm_client::PricingCatalog::empty();
+    for entry in catalog.entries() {
+        let provider = cost_provider_to_llm_provider(&entry.model_ref.provider);
+        let billing_model = entry.model_ref.model.clone();
+        let nano_to_usd = |class: TokenClass| -> f64 {
+            entry
+                .token_rates
+                .get(&class)
+                .map_or(0.0, |m| m.nano_usd_per_token as f64 / 1000.0)
+        };
+        let pricing = llm_client::TokenPricing {
+            input_per_million: nano_to_usd(TokenClass::Input),
+            output_per_million: nano_to_usd(TokenClass::Output),
+            cache_write_per_million: nano_to_usd(TokenClass::CacheWrite),
+            cache_read_per_million: nano_to_usd(TokenClass::CacheRead),
+            reasoning_per_million: nano_to_usd(TokenClass::ReasoningOutput),
+        };
+        out = out.with_price(provider, billing_model, pricing);
+    }
+    out
 }
 
 #[cfg(test)]
@@ -290,5 +353,118 @@ mod tests {
         let mr = model_ref_from_string("claude-opus-4-7");
         assert_eq!(mr.provider, ProviderId::Anthropic);
         assert_eq!(mr.model, "claude-opus-4-7");
+    }
+
+    // ── 3c-T3: llm_catalog_from_cost bridge conversion tests ────────────────
+
+    /// Pinned conversion: `claude-opus-4-6` input rate is `5_000` `nano_usd/token`
+    /// (= `5_000 / 1_000` = `5.0` `usd/million`).  Output is `25_000` nano → `25.0` `usd/M`.
+    /// Cache-write is `6_250` → `6.25` `usd/M`.  Cache-read is `500` → `0.5` `usd/M`.
+    #[test]
+    fn bridge_opus_4_6_converts_exact_rates() {
+        use cost::pricing::PricingCatalog as CostCatalog;
+        use llm_client::{CostEstimator, PricingPolicy, Usage as LlmUsage, TokenUsage};
+
+        let cost_cat = CostCatalog::builtin_reference();
+        let llm_cat = llm_catalog_from_cost(&cost_cat);
+
+        // Build an estimator with MarkUnestimated so unknown models return None-cost.
+        let estimator = CostEstimator::new(llm_cat, PricingPolicy::MarkUnestimated);
+
+        // Construct the PricingModelRef that the estimator needs.
+        // billing_model is the raw model name (no prefix) as stored in the catalog.
+        let pricing_ref = llm_client::PricingModelRef {
+            pricing_provider_id: llm_client::ProviderId::AnthropicFirstParty,
+            billing_model: "claude-opus-4-6".to_string(),
+            request_model: "claude-opus-4-6".to_string(),
+            display_model: "Claude Opus 4.6".to_string(),
+        };
+        let usage = LlmUsage {
+            billable_tokens: TokenUsage {
+                input: 1_000_000,
+                output: 1_000_000,
+                cache_write: 0,
+                cache_read: 0,
+                reasoning_output: 0,
+            },
+            ..Default::default()
+        };
+        let estimate = estimator.estimate(pricing_ref, &usage).expect("opus-4-6 must be priced");
+        // 1M input × $5.0/M = $5.0
+        let total = estimate.total_cost_usd.expect("total_cost_usd must be Some");
+        let expected = 5.0 + 25.0; // input + output
+        assert!(
+            (total - expected).abs() < 1e-9,
+            "expected total ${expected}, got ${total}"
+        );
+        let input = estimate.input_cost_usd.unwrap();
+        assert!(
+            (input - 5.0).abs() < 1e-9,
+            "input cost must be $5.0/M, got ${input}"
+        );
+        let output = estimate.output_cost_usd.unwrap();
+        assert!(
+            (output - 25.0).abs() < 1e-9,
+            "output cost must be $25.0/M, got ${output}"
+        );
+    }
+
+    /// Unknown model → cost stays `None` (`MarkUnestimated` policy).
+    #[test]
+    fn bridge_unknown_model_returns_unestimated() {
+        use cost::pricing::PricingCatalog as CostCatalog;
+        use llm_client::{CostEstimator, PricingPolicy, Usage as LlmUsage};
+
+        let cost_cat = CostCatalog::builtin_reference();
+        let llm_cat = llm_catalog_from_cost(&cost_cat);
+        let estimator = CostEstimator::new(llm_cat, PricingPolicy::MarkUnestimated);
+
+        let pricing_ref = llm_client::PricingModelRef {
+            pricing_provider_id: llm_client::ProviderId::AnthropicFirstParty,
+            billing_model: "claude-nonexistent-9999".to_string(),
+            request_model: "claude-nonexistent-9999".to_string(),
+            display_model: "Claude Nonexistent".to_string(),
+        };
+        let estimate = estimator
+            .estimate(pricing_ref, &LlmUsage::default())
+            .expect("MarkUnestimated must not error");
+        // Unpriced → total_cost_usd is None.
+        assert!(
+            estimate.total_cost_usd.is_none(),
+            "unpriced model must yield None total_cost_usd"
+        );
+        assert!(!estimate.estimated, "estimated flag must be false for unpriced");
+    }
+
+    /// Provider mapping: `OpenAI` `gpt-4o` converts at the expected rates.
+    #[test]
+    fn bridge_openai_gpt4o_maps_to_correct_provider() {
+        use cost::pricing::PricingCatalog as CostCatalog;
+        use llm_client::{CostEstimator, PricingPolicy, Usage as LlmUsage, TokenUsage};
+
+        let cost_cat = CostCatalog::builtin_reference();
+        let llm_cat = llm_catalog_from_cost(&cost_cat);
+        let estimator = CostEstimator::new(llm_cat, PricingPolicy::MarkUnestimated);
+
+        let pricing_ref = llm_client::PricingModelRef {
+            pricing_provider_id: llm_client::ProviderId::OpenAI,
+            billing_model: "gpt-4o".to_string(),
+            request_model: "gpt-4o".to_string(),
+            display_model: "GPT-4o".to_string(),
+        };
+        let usage = LlmUsage {
+            billable_tokens: TokenUsage {
+                input: 1_000_000,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let estimate = estimator.estimate(pricing_ref, &usage).expect("gpt-4o must be priced");
+        // gpt-4o input = 2_500 nano_usd/token → 2.5 usd/M
+        let input = estimate.input_cost_usd.expect("input_cost_usd must be Some");
+        assert!(
+            (input - 2.5).abs() < 1e-9,
+            "gpt-4o input must be $2.5/M, got ${input}"
+        );
     }
 }

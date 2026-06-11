@@ -63,7 +63,7 @@ use secret::CredentialManager;
 use tokio::sync::{Mutex, RwLock};
 use tokio_util::sync::CancellationToken;
 use tool_api::BuiltinToolContext;
-use traits::http::{HttpError, RawByteStream, SseStream};
+use traits::http::{HttpError, RawByteStream, SseStream, SseStreamWithMeta};
 use traits::{
     AuthHandle, HttpTransport, OrchestratorHandle, OutputStream, Platform, SlashCommandDispatcher,
 };
@@ -89,6 +89,14 @@ impl HttpTransport for DynHttp {
     }
     async fn stream_sse(&self, req: protocol::HttpRequest) -> Result<SseStream, HttpError> {
         self.0.stream_sse(req).await
+    }
+    /// Forward to the inner transport so the device backend's real headers are
+    /// preserved (the default would silently drop them via the `stream_sse` path).
+    async fn stream_sse_with_meta(
+        &self,
+        req: protocol::HttpRequest,
+    ) -> Result<SseStreamWithMeta, HttpError> {
+        self.0.stream_sse_with_meta(req).await
     }
     async fn stream_raw_bytes(
         &self,
@@ -225,10 +233,10 @@ impl PermissionRequestSink for RecordingPermissionSink {
     }
 }
 
-// `builtin_anthropic_config` lives in `platform_common::llm_config` so both
-// composition roots share the same 10-entry model table (including
-// `claude-opus-4-7`, the orchestrator DEFAULT_MODEL).
-use platform_common::builtin_anthropic_config;
+// `builtin_anthropic_config` + `apply_settings_providers` live in
+// `platform_common::llm_config` so both composition roots share the same
+// model table and settings-wiring logic.
+use platform_common::{apply_settings_providers, builtin_anthropic_config};
 
 /// Build a fully-wired mobile [`MobileRuntime`] from a deterministic
 /// [`MobileConfig`] + an `Arc<dyn Platform>` (plan F3-03 — the mobile sibling of
@@ -298,18 +306,47 @@ pub async fn build_mobile_inner(
     //      so the device backend is preserved; no desktop-only deps are pulled.
     //      OAuth is not yet wired on mobile (no credential-manager path exists here);
     //      the API-key path via ANTHROPIC_API_KEY covers the mobile use case.
+    //
+    //      3c-T2: apply settings `providers` / `routing` on top of the
+    //      built-in Anthropic profile (same pattern as engine-desktop).
     let llm_transport: Arc<dyn Transport> =
         Arc::new(LlmTransportBridge::new(DynHttp(http.clone())));
-    let llm_client = Arc::new(
-        DefaultLlmClient::from_config(builtin_anthropic_config(&cfg.api_base, false))
-            .map_err(|e| MobileBuildError::ApiBase(e.to_string()))?,
-    );
+    let llm_client = {
+        let mut cfg_obj = builtin_anthropic_config(&cfg.api_base, false);
+        // Run whenever EITHER key is present: a routing-only settings file
+        // (aliases onto builtin models, no custom providers) must still apply.
+        if cfg.provider_profiles.is_some() || cfg.routing.is_some() {
+            let empty = std::collections::BTreeMap::new();
+            let providers = cfg.provider_profiles.as_ref().unwrap_or(&empty);
+            if let Err(e) = apply_settings_providers(
+                &mut cfg_obj,
+                providers,
+                cfg.routing.as_ref(),
+            ) {
+                tracing::warn!(error = %e, "settings providers/routing entry rejected; earlier entries and the built-in profile remain active");
+            }
+        }
+        Arc::new(
+            DefaultLlmClient::from_config(cfg_obj)
+                .map_err(|e| MobileBuildError::ApiBase(e.to_string()))?,
+        )
+    };
     let subscriber_state = SubscriberState { is_subscriber: false, is_enterprise: false };
+
+    // 3c-T3: build the cost estimator from the builtin reference catalog.
+    let cost_estimator = {
+        use llm_client::{CostEstimator, PricingPolicy};
+        use orchestrator::cost_wiring::llm_catalog_from_cost;
+        let cost_cat = cost::pricing::PricingCatalog::builtin_reference();
+        let llm_cat = llm_catalog_from_cost(&cost_cat);
+        Arc::new(CostEstimator::new(llm_cat, PricingPolicy::MarkUnestimated))
+    };
+
     // ONE adapter implements BOTH `OrchestratorApiClient` (batched) and
     // `StreamingApiClient` (the streaming turn path the mobile transport always
     // drives). Production wires it for both paths; a test may substitute the
     // streaming side via `streaming_override` (plan F3-06).
-    let provider_adapter = Arc::new(ProviderApiAdapter::new(
+    let provider_adapter = Arc::new(ProviderApiAdapter::new_with_estimator(
         llm_client,
         llm_transport,
         subscriber_state,
@@ -317,6 +354,7 @@ pub async fn build_mobile_inner(
         env!("CARGO_PKG_VERSION"),
         None,
         None,
+        Some(cost_estimator),
     ));
     let api_client: Arc<dyn OrchestratorApiClient> = provider_adapter.clone();
     let streaming_api: Arc<dyn StreamingApiClient> =

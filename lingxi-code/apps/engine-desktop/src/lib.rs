@@ -36,10 +36,7 @@ use anthropic_oauth::handle::OAuthHandle;
 use anthropic_oauth::{OAuthCredentialProvider, RefreshDriver};
 use api_client::AnthropicProvider;
 use client_adapter::{AdapterPermissionGate, PermissionRequestSink};
-use llm_client::{
-    AuthStrategy, Capabilities, ClientConfig, CredentialConfig, DefaultLlmClient, ModelProfile,
-    PricingConfig, ProtocolFamily, ProviderId, ProviderProfile, Transport,
-};
+use llm_client::{DefaultLlmClient, Transport};
 use orchestrator::model::user_agent::UserAgentEnv;
 use orchestrator::provider_adapter::SubscriberState;
 use platform_common::LlmTransportBridge;
@@ -784,81 +781,10 @@ fn oauth_subscriber_flag(api_key_present: bool, auth_token_present: bool, scopes
         && anthropic_oauth::subscription_from_scopes(scopes)
 }
 
-/// Build the built-in Anthropic `ClientConfig` for `DefaultLlmClient`.
-///
-/// One `ProviderProfile` with the full Claude-4-generation model table.
-/// Auth strategy is controlled by `oauth_path`:
-/// - `false` → `ApiKey` + `CredentialConfig::Env { var: "ANTHROPIC_API_KEY" }`
-/// - `true`  → `OAuthBearer` + `CredentialConfig::HostManaged { id: "anthropic_oauth" }`
-///
-/// All models get streaming, tools, vision, and documents capabilities; the
-/// Opus variants additionally get `reasoning: true`.
-///
-/// **3c note:** `modelProviders` settings merging (multi-provider routing) is
-/// deferred to Plan 3c; this profile covers the default Anthropic-only path.
-fn builtin_anthropic_config(api_base: &str, oauth_path: bool) -> ClientConfig {
-    /// Build a `ModelProfile` for a Claude model (inner helper).
-    fn model(display: &str, billing: &str, aliases: &[&str], reasoning: bool) -> ModelProfile {
-        ModelProfile {
-            display_model: display.to_string(),
-            request_model: display.to_string(),
-            billing_model: billing.to_string(),
-            aliases: aliases.iter().map(|s| (*s).to_string()).collect(),
-            capabilities: Capabilities {
-                streaming: true,
-                tools: true,
-                vision: true,
-                documents: true,
-                reasoning,
-                structured_output: false,
-            },
-        }
-    }
-
-    let (auth, credential) = if oauth_path {
-        (
-            AuthStrategy::OAuthBearer,
-            CredentialConfig::HostManaged { id: "anthropic_oauth".to_string() },
-        )
-    } else {
-        (
-            AuthStrategy::ApiKey,
-            CredentialConfig::Env { var: "ANTHROPIC_API_KEY".to_string() },
-        )
-    };
-
-    ClientConfig {
-        providers: vec![ProviderProfile {
-            provider_id: ProviderId::AnthropicFirstParty,
-            profile_name: "anthropic".to_string(),
-            base_url: api_base.to_string(),
-            protocol: ProtocolFamily::AnthropicMessages,
-            auth,
-            credential,
-            pricing: PricingConfig::default(),
-            models: vec![
-                // — Claude Sonnet 4 (default engine model) —
-                model("claude-sonnet-4-20250514", "claude-sonnet-4", &["claude-sonnet-4", "claude-sonnet", "claude"], false),
-                // — Claude Sonnet 4.5 —
-                model("claude-sonnet-4-5-20250929", "claude-sonnet-4-5", &["claude-sonnet-4-5"], false),
-                // — Claude Sonnet 4.6 —
-                model("claude-sonnet-4-6", "claude-sonnet-4-6", &[], false),
-                // — Claude Opus 4 (Opus-fallback gate target) —
-                model("claude-opus-4-20250514", "claude-opus-4", &["claude-opus-4", "claude-opus"], true),
-                // — Claude Opus 4.1 —
-                model("claude-opus-4-1-20250805", "claude-opus-4-1", &["claude-opus-4-1"], true),
-                // — Claude Opus 4.5 —
-                model("claude-opus-4-5-20251101", "claude-opus-4-5", &["claude-opus-4-5"], true),
-                // — Claude Opus 4.6 —
-                model("claude-opus-4-6", "claude-opus-4-6", &[], true),
-                // — Claude Haiku 4 —
-                model("claude-haiku-4-20250307", "claude-haiku-4", &["claude-haiku-4", "claude-haiku"], false),
-                // — Claude Haiku 4.5 —
-                model("claude-haiku-4-5", "claude-haiku-4-5", &[], false),
-            ],
-        }],
-    }
-}
+// `builtin_anthropic_config` lives in `platform_common::llm_config` so both
+// composition roots share the same 10-entry model table.  The re-export makes
+// the name available locally without changing any call site.
+use platform_common::builtin_anthropic_config;
 
 /// Load the merged `settings.outputStyle` (project + user + env layers) for the
 /// given project dir. Mirrors the CLI's `load_routing`/`load_provider_profiles`

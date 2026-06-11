@@ -34,10 +34,7 @@ use anthropic_oauth::client::ClaudeAiOAuthClient;
 use anthropic_oauth::config::ClaudeAiOAuthConfig;
 use anthropic_oauth::handle::OAuthHandle;
 use api_client::AnthropicProvider;
-use llm_client::{
-    AuthStrategy, Capabilities, ClientConfig, CredentialConfig, DefaultLlmClient, ModelProfile,
-    PricingConfig, ProtocolFamily, ProviderId, ProviderProfile, Transport,
-};
+use llm_client::{DefaultLlmClient, Transport};
 use orchestrator::model::user_agent::UserAgentEnv;
 use orchestrator::provider_adapter::SubscriberState;
 use platform_common::LlmTransportBridge;
@@ -230,64 +227,10 @@ impl PermissionRequestSink for RecordingPermissionSink {
     }
 }
 
-/// Build the built-in Anthropic `ClientConfig` for `DefaultLlmClient` (mobile).
-///
-/// Mirrors the desktop helper exactly; extracted here so the mobile build
-/// keeps zero desktop-only dependencies (no `engine-desktop` crate dep).
-fn builtin_anthropic_config(api_base: &str, oauth_path: bool) -> ClientConfig {
-    /// Build a `ModelProfile` for a Claude model (inner helper).
-    fn model(display: &str, billing: &str, aliases: &[&str], reasoning: bool) -> ModelProfile {
-        ModelProfile {
-            display_model: display.to_string(),
-            request_model: display.to_string(),
-            billing_model: billing.to_string(),
-            aliases: aliases.iter().map(|s| (*s).to_string()).collect(),
-            capabilities: Capabilities {
-                streaming: true,
-                tools: true,
-                vision: true,
-                documents: true,
-                reasoning,
-                structured_output: false,
-            },
-        }
-    }
-
-    let (auth, credential) = if oauth_path {
-        (
-            AuthStrategy::OAuthBearer,
-            CredentialConfig::HostManaged { id: "anthropic_oauth".to_string() },
-        )
-    } else {
-        (
-            AuthStrategy::ApiKey,
-            CredentialConfig::Env { var: "ANTHROPIC_API_KEY".to_string() },
-        )
-    };
-
-    ClientConfig {
-        providers: vec![ProviderProfile {
-            provider_id: ProviderId::AnthropicFirstParty,
-            profile_name: "anthropic".to_string(),
-            base_url: api_base.to_string(),
-            protocol: ProtocolFamily::AnthropicMessages,
-            auth,
-            credential,
-            pricing: PricingConfig::default(),
-            models: vec![
-                model("claude-sonnet-4-20250514", "claude-sonnet-4", &["claude-sonnet-4", "claude-sonnet", "claude"], false),
-                model("claude-sonnet-4-5-20250929", "claude-sonnet-4-5", &["claude-sonnet-4-5"], false),
-                model("claude-sonnet-4-6", "claude-sonnet-4-6", &[], false),
-                model("claude-opus-4-20250514", "claude-opus-4", &["claude-opus-4", "claude-opus"], true),
-                model("claude-opus-4-1-20250805", "claude-opus-4-1", &["claude-opus-4-1"], true),
-                model("claude-opus-4-5-20251101", "claude-opus-4-5", &["claude-opus-4-5"], true),
-                model("claude-opus-4-6", "claude-opus-4-6", &[], true),
-                model("claude-haiku-4-20250307", "claude-haiku-4", &["claude-haiku-4", "claude-haiku"], false),
-                model("claude-haiku-4-5", "claude-haiku-4-5", &[], false),
-            ],
-        }],
-    }
-}
+// `builtin_anthropic_config` lives in `platform_common::llm_config` so both
+// composition roots share the same 10-entry model table (including
+// `claude-opus-4-7`, the orchestrator DEFAULT_MODEL).
+use platform_common::builtin_anthropic_config;
 
 /// Build a fully-wired mobile [`MobileRuntime`] from a deterministic
 /// [`MobileConfig`] + an `Arc<dyn Platform>` (plan F3-03 — the mobile sibling of

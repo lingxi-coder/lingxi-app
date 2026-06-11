@@ -55,8 +55,6 @@ pub enum RouterAction {
     },
     /// `message_stop` arrived — terminate the per-turn loop.
     EndOfStream,
-    /// A server-emitted `Error` event — surface as a streaming error.
-    ServerError(String),
 }
 
 /// Route one event through the accumulator + output sink. Returns the

@@ -137,12 +137,19 @@ impl HttpTransport for ReqwestHttp {
     /// headers before handing the byte-stream to the SSE decoder — so callers
     /// can immediately inspect rate-limit headers such as `retry-after`.
     ///
-    /// # Error arm note
+    /// # ≥400 error-arm behaviour
     ///
-    /// For non-2xx responses this method returns `Err(HttpError::Status{..})`
-    /// (same contract as `stream_sse`); headers are NOT preserved in that
-    /// error arm because `reqwest` has already consumed the response by the
-    /// time the error is materialised.
+    /// For non-2xx responses this method returns `Ok(SseStreamWithMeta{status:
+    /// 4xx, headers: <real headers>, stream: <body-as-single-raw-data-frame>})`
+    /// so the bridge's existing ≥400 drain path receives real response headers
+    /// (including `retry-after`, `anthropic-ratelimit-*`, etc.) instead of an
+    /// empty `BTreeMap`. The body is emitted as a single SSE-`data:`-style raw
+    /// frame that the bridge drains and passes to the codec.
+    ///
+    /// The bare `Err(HttpError::Status)` arm is now only reached by transports
+    /// that do NOT override `stream_sse_with_meta` (i.e. the default
+    /// implementation in `traits`). Those callers produce empty headers as
+    /// before — no behaviour change for default-impl transports.
     async fn stream_sse_with_meta(
         &self,
         req: HttpRequest,
@@ -152,11 +159,9 @@ impl HttpTransport for ReqwestHttp {
             .await
             .map_err(|e| HttpError::Connection(e.to_string()))?;
         let status = resp.status().as_u16();
-        if status >= 400 {
-            let body = resp.text().await.unwrap_or_default();
-            return Err(HttpError::Status { status, body });
-        }
-        // Capture headers (lowercased) BEFORE moving `resp` into the byte stream.
+        // Capture headers (lowercased) BEFORE consuming the body, whether the
+        // response is a success or an error — this is the key improvement over
+        // `stream_sse`: error responses now carry real headers.
         let headers: Vec<(String, String)> = resp
             .headers()
             .iter()
@@ -167,6 +172,21 @@ impl HttpTransport for ReqwestHttp {
                 )
             })
             .collect();
+
+        if status >= 400 {
+            // Return Ok so the bridge receives real headers alongside the body.
+            // The body is delivered as a single raw SSE data frame so the
+            // bridge's drain loop (which calls `next_frame()` until `None`)
+            // accumulates it into the JSON body handed to `decode_response`.
+            let body = resp.bytes().await.unwrap_or_default();
+            let body_bytes = body.to_vec();
+            let stream = body_error_stream(body_bytes);
+            return Ok(SseStreamWithMeta {
+                status,
+                headers,
+                stream: Box::pin(stream),
+            });
+        }
 
         let byte_stream = resp.bytes_stream();
         let event_stream = sse_event_stream(byte_stream);
@@ -284,6 +304,30 @@ where
     )
 }
 
+/// Adapt an error-response body (raw bytes) into a single-item `SseEvent` stream.
+///
+/// The body is delivered as one `SseEvent{data: <body-as-utf8>, …}` frame so the
+/// bridge's `SseFrames::next_frame` path yields the raw bytes that the codec
+/// `decode_response` call expects.  The stream terminates immediately after that
+/// single frame (returns `None` on the second poll) so the bridge drain loop sees
+/// exactly one frame.
+///
+/// This is the companion to the `stream_sse_with_meta` ≥400 path — it lets the
+/// bridge receive real headers and the error body without an `Err(HttpError::Status)`
+/// short-circuit.
+pub(crate) fn body_error_stream(
+    body: Vec<u8>,
+) -> impl Stream<Item = Result<SseEvent, HttpError>> + Send {
+    futures_util::stream::once(async move {
+        let data = String::from_utf8_lossy(&body).into_owned();
+        Ok(SseEvent {
+            event_type: None,
+            data,
+            id: None,
+        })
+    })
+}
+
 /// Locate the first SSE event boundary in `buf`.
 ///
 /// Returns `(event_len, boundary_len)` where `event_len` is the byte length of
@@ -376,6 +420,75 @@ mod tests {
         let event = stream.next().await.expect("at least one event").unwrap();
         assert_eq!(event.event_type.as_deref(), Some("test"));
         assert_eq!(event.data, "hello");
+    }
+
+    /// `stream_sse_with_meta` on a 429 response must return `Ok` carrying the real
+    /// status, real headers (including `retry-after`), and the JSON error body as
+    /// a single frame.  This lets the bridge + codec see the full picture rather
+    /// than an empty-header `Err(HttpError::Status)`.
+    #[tokio::test]
+    async fn stream_sse_with_meta_429_returns_ok_with_real_headers_and_body() {
+        use axum::response::{IntoResponse, Response};
+        use axum::routing::post;
+        use axum::Router;
+        use futures_util::StreamExt as _;
+        use protocol::HttpMethod;
+        use tokio::net::TcpListener;
+
+        async fn handler_429() -> Response {
+            (
+                axum::http::StatusCode::TOO_MANY_REQUESTS,
+                [
+                    ("content-type", "application/json"),
+                    ("retry-after", "42"),
+                    ("x-custom-error", "rate-limit-hit"),
+                ],
+                r#"{"type":"error","error":{"type":"rate_limit_error","message":"Rate limited"}}"#,
+            )
+                .into_response()
+        }
+
+        let app = Router::new().route("/stream429", post(handler_429));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let transport = ReqwestHttp::new();
+        let req = HttpRequest {
+            method: HttpMethod::Post,
+            url: format!("http://{addr}/stream429"),
+            headers: vec![],
+            body: None,
+            timeout: None,
+        };
+
+        // Must be Ok — not Err — so the bridge receives real headers.
+        let meta = transport
+            .stream_sse_with_meta(req)
+            .await
+            .expect("429 must return Ok with real headers");
+
+        assert_eq!(meta.status, 429);
+        let has_retry = meta
+            .headers
+            .iter()
+            .any(|(k, v)| k == "retry-after" && v == "42");
+        assert!(has_retry, "retry-after header must be present; got: {:?}", meta.headers);
+        let has_custom = meta
+            .headers
+            .iter()
+            .any(|(k, _)| k == "x-custom-error");
+        assert!(has_custom, "x-custom-error header must be present");
+
+        // The error body arrives as a single SSE data frame.
+        let event = meta.stream.boxed().next().await.expect("one frame").unwrap();
+        assert!(
+            event.data.contains("rate_limit_error"),
+            "error body must be in frame data; got: {}",
+            event.data
+        );
     }
 
     /// Keepalive comment lines (`:`) are silently skipped; the event is still

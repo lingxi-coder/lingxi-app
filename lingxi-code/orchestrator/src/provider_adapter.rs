@@ -7,7 +7,7 @@
 
 use crate::conversation::{OrchestratorApiClient, StreamingApiClient};
 use crate::model::betas::{apply_beta_header_with_auth, Endpoint, Provider};
-use crate::model::rate_limit::{parse_retry_after, parse_unified_reset};
+use crate::model::rate_limit::{parse_retry_after, parse_unified_reset, RateLimitInfo};
 use crate::model::retry::{next_step_with_backoff, resolve_retry_control_with_settings, DriveStep, ResolveRetryEnv, RetryControl, RetryState};
 use crate::model::telemetry;
 use crate::model::user_agent::{user_agent, UserAgentEnv};
@@ -20,7 +20,7 @@ use llm_client::{
 };
 use protocol::{ContentBlock, ConversationMessage};
 use std::collections::VecDeque;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 // ── Subscriber state ─────────────────────────────────────────────────────────
@@ -45,6 +45,16 @@ struct StreamState {
     frames: Box<dyn llm_client::FrameStream>,
     queue: VecDeque<LlmEvent>,
     finished: bool,
+    /// Guard against double-emit: once we have fired succeed/fail we never fire again.
+    done: bool,
+    /// Optional analytics bus for stream telemetry twins (`emit_succeeded` / `emit_failed`).
+    analytics: Option<Arc<::telemetry::AnalyticsBus>>,
+    /// Request model string for telemetry labels.
+    model: String,
+    /// Client-side request id for telemetry correlation.
+    request_id: String,
+    /// Wall-clock start of the stream for `duration_ms`.
+    started: Instant,
 }
 
 // ── Adapter state ─────────────────────────────────────────────────────────────
@@ -89,6 +99,20 @@ pub struct ProviderApiAdapter {
     /// unknown models leave `response.cost = None` (never an error).  The
     /// `CostTracker` budget authority is UNTOUCHED by this path.
     estimator: Option<Arc<CostEstimator>>,
+    /// Most recently observed 2xx rate-limit header snapshot.
+    ///
+    /// Parsed via [`RateLimitInfo::from_headers`] on every successful
+    /// `drive_non_stream` and `drive_stream` connect-success response.
+    /// Exposed via [`Self::last_rate_limit_info`].  `None` until the first
+    /// successful response is received.  Interior-mutable so non-`&mut self`
+    /// callers (the `OrchestratorApiClient` impls) can update it.
+    ///
+    /// TUI wiring: no existing `OrchestratorHandle` surface maps naturally to
+    /// per-request rate-limit metadata (all status APIs are session-wide
+    /// snapshots). Callers that need this should call `last_rate_limit_info()`
+    /// on the adapter directly. A future task can thread it into the handle if
+    /// needed.
+    last_rate_limit: Mutex<Option<RateLimitInfo>>,
 }
 
 impl ProviderApiAdapter {
@@ -195,6 +219,7 @@ impl ProviderApiAdapter {
             settings_backoff_ms,
             available_model_ids,
             estimator,
+            last_rate_limit: Mutex::new(None),
         }
     }
 
@@ -340,6 +365,56 @@ impl ProviderApiAdapter {
         }
     }
 
+    /// Return the most recently observed 2xx rate-limit header snapshot, if any.
+    ///
+    /// Populated on every successful response from `drive_non_stream` and on the
+    /// connect-success path of `drive_stream`.  `None` until the first successful
+    /// response is received.
+    ///
+    /// TUI wiring note: no existing `OrchestratorHandle` surface maps naturally
+    /// to per-request rate-limit metadata.  Callers that need this should hold an
+    /// `Arc<ProviderApiAdapter>` and call this method directly.  A future task can
+    /// wire it through the handle if needed.
+    pub fn last_rate_limit_info(&self) -> Option<RateLimitInfo> {
+        self.last_rate_limit.lock().unwrap().clone()
+    }
+
+    /// Parse rate-limit headers from a 2xx response and update the cached snapshot.
+    ///
+    /// Emits a `tracing::warn!` when the overage status indicates the account is
+    /// at or near exhaustion (`overage_status == "rejected"` or `"allowed_warning"`).
+    fn record_rate_limit_from_headers(
+        &self,
+        headers: &std::collections::BTreeMap<String, String>,
+    ) {
+        let hvec: Vec<(String, String)> = headers
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        let info = RateLimitInfo::from_headers(&hvec);
+        if info.has_unified_headers() {
+            // Warn when the account is near or at exhaustion.
+            match info.overage_status.as_deref() {
+                Some("rejected") => {
+                    tracing::warn!(
+                        overage_status = "rejected",
+                        rate_limit_type = ?info.rate_limit_type,
+                        "Rate limit: overage rejected — usage limit exhausted"
+                    );
+                }
+                Some("allowed_warning") => {
+                    tracing::warn!(
+                        overage_status = "allowed_warning",
+                        rate_limit_type = ?info.rate_limit_type,
+                        "Rate limit: overage warning — nearing usage limit"
+                    );
+                }
+                _ => {}
+            }
+            *self.last_rate_limit.lock().unwrap() = Some(info);
+        }
+    }
+
     /// HTTP status code approximation for `emit_failed` (best-effort: only the
     /// variants that carry an HTTP status are non-None).
     fn status_of(err: &LlmError) -> Option<u16> {
@@ -446,11 +521,10 @@ impl ProviderApiAdapter {
                         .get("x-should-retry")
                         .is_some_and(|v| v.as_str() == "false");
 
-                    // Feed headers to rate-limit tracker for 429.
-                    // (Rate-limit state recording is best-effort for now.)
-
                     match prepared.route.codec.decode_response(provider_resp.clone()) {
                         Ok(mut response) => {
+                            // Feed rate-limit headers from every 2xx success response.
+                            self.record_rate_limit_from_headers(&provider_resp.headers);
                             // 3c-T3: populate response.cost when an estimator is wired.
                             // Unpriced or unknown models leave response.cost = None — never an error.
                             if let Some(est) = &self.estimator {
@@ -683,10 +757,20 @@ impl ProviderApiAdapter {
                         }
                     }
 
+                    // Feed rate-limit headers from the connect-success response.
+                    self.record_rate_limit_from_headers(&streaming.headers);
+
                     // Success: wrap the LlmEventStream from the codec into a BoxStream.
                     // Build the event stream from the codec decoder + raw frames.
                     let decoder = prepared.route.codec.stream_decoder();
                     let frames = streaming.frames;
+
+                    // Clone analytics + metadata into the unfold state so
+                    // emit_succeeded / emit_failed can fire from inside the async closure.
+                    let stream_started = Instant::now();
+                    let stream_analytics = self.analytics.clone();
+                    let stream_model = req.model.clone();
+                    let stream_request_id = request_id.clone();
 
                     // Assemble events via a manual unfold that drives next_frame + decode.
                     // We keep a queue of pre-decoded events and drain them first.
@@ -695,12 +779,38 @@ impl ProviderApiAdapter {
                         frames,
                         queue: VecDeque::new(),
                         finished: false,
+                        done: false,
+                        analytics: stream_analytics,
+                        model: stream_model,
+                        request_id: stream_request_id,
+                        started: stream_started,
                     };
 
                     let boxed: BoxStream<'static, Result<LlmEvent, LlmError>> = Box::pin(
                         futures::stream::unfold(stream_state, |mut s| async move {
                             loop {
                                 if let Some(event) = s.queue.pop_front() {
+                                    // Emit succeed telemetry on the terminal event
+                                    // (MessageStop or Completed) — once, guarded by `done`.
+                                    let is_terminal = matches!(
+                                        event,
+                                        LlmEvent::MessageStop | LlmEvent::Completed { .. }
+                                    );
+                                    if is_terminal && !s.done {
+                                        s.done = true;
+                                        let elapsed_ms = u64::try_from(
+                                            s.started.elapsed().as_millis()
+                                        )
+                                        .unwrap_or(u64::MAX);
+                                        telemetry::emit_succeeded(
+                                            &s.analytics,
+                                            &s.model,
+                                            &s.request_id,
+                                            elapsed_ms,
+                                            200,
+                                        )
+                                        .await;
+                                    }
                                     return Some((Ok(event), s));
                                 }
                                 if s.finished {
@@ -711,6 +821,17 @@ impl ProviderApiAdapter {
                                         Ok(events) => s.queue.extend(events),
                                         Err(e) => {
                                             s.finished = true;
+                                            if !s.done {
+                                                s.done = true;
+                                                telemetry::emit_failed(
+                                                    &s.analytics,
+                                                    &s.model,
+                                                    &s.request_id,
+                                                    ProviderApiAdapter::error_kind(&e),
+                                                    ProviderApiAdapter::status_of(&e),
+                                                )
+                                                .await;
+                                            }
                                             return Some((Err(e), s));
                                         }
                                     },
@@ -718,11 +839,35 @@ impl ProviderApiAdapter {
                                         s.finished = true;
                                         match s.decoder.finish() {
                                             Ok(events) => s.queue.extend(events),
-                                            Err(e) => return Some((Err(e), s)),
+                                            Err(e) => {
+                                                if !s.done {
+                                                    s.done = true;
+                                                    telemetry::emit_failed(
+                                                        &s.analytics,
+                                                        &s.model,
+                                                        &s.request_id,
+                                                        ProviderApiAdapter::error_kind(&e),
+                                                        ProviderApiAdapter::status_of(&e),
+                                                    )
+                                                    .await;
+                                                }
+                                                return Some((Err(e), s));
+                                            }
                                         }
                                     }
                                     Err(e) => {
                                         s.finished = true;
+                                        if !s.done {
+                                            s.done = true;
+                                            telemetry::emit_failed(
+                                                &s.analytics,
+                                                &s.model,
+                                                &s.request_id,
+                                                ProviderApiAdapter::error_kind(&e),
+                                                ProviderApiAdapter::status_of(&e),
+                                            )
+                                            .await;
+                                        }
                                         return Some((Err(e), s));
                                     }
                                 }
@@ -2331,6 +2476,324 @@ mod tests {
         assert!(
             elapsed < std::time::Duration::from_millis(1200),
             "backoff_ms=1000 delay should be < 1200 ms; elapsed={elapsed:?}"
+        );
+    }
+
+    // ── T3 Step 2: 2xx rate-limit header feed ────────────────────────────────
+
+    /// A 2xx response with `anthropic-ratelimit-unified-overage-status: rejected`
+    /// must be stored in `last_rate_limit_info` and trigger a `tracing::warn!`.
+    ///
+    /// We only assert the data is stored; the warn fires on a live-log subscriber
+    /// which we do not attach in tests — the absence of a panic is the assertion.
+    #[tokio::test]
+    async fn rate_limit_info_stored_from_2xx_response() {
+        let mut headers = BTreeMap::new();
+        headers.insert(
+            "anthropic-ratelimit-unified-representative-claim".to_string(),
+            "five_hour".to_string(),
+        );
+        headers.insert(
+            "anthropic-ratelimit-unified-overage-status".to_string(),
+            "rejected".to_string(),
+        );
+
+        let transport = FakeTransport::always(ProviderResponse {
+            status: 200,
+            headers,
+            body_json: ok_response_json(),
+            request_id: None,
+        });
+        let adapter = make_adapter(transport);
+        let _ = adapter
+            .messages_create("claude-sonnet-4-20250514", None, Vec::new(), Vec::new())
+            .await
+            .expect("ok");
+
+        let info = adapter
+            .last_rate_limit_info()
+            .expect("last_rate_limit_info must be Some after a 2xx with unified headers");
+        assert_eq!(
+            info.rate_limit_type.as_deref(),
+            Some("five_hour"),
+            "rate_limit_type must be five_hour"
+        );
+        assert_eq!(
+            info.overage_status.as_deref(),
+            Some("rejected"),
+            "overage_status must be rejected"
+        );
+    }
+
+    /// Without unified rate-limit headers the cached info stays `None`.
+    #[tokio::test]
+    async fn rate_limit_info_none_when_no_unified_headers() {
+        let transport = FakeTransport::always(ProviderResponse::json(200, ok_response_json()));
+        let adapter = make_adapter(transport);
+        let _ = adapter
+            .messages_create("claude-sonnet-4-20250514", None, Vec::new(), Vec::new())
+            .await
+            .expect("ok");
+
+        // No unified headers → None still.
+        assert!(
+            adapter.last_rate_limit_info().is_none(),
+            "last_rate_limit_info must be None when no unified headers are present"
+        );
+    }
+
+    // ── T3 Step 3: stream telemetry twins ────────────────────────────────────
+
+    /// A `FrameStream` that yields scripted raw SSE frames (encoded as
+    /// JSON byte sequences) then terminates. Used to drive the stream decoder
+    /// with a controlled event sequence so the `drive_stream` unfold
+    /// emits telemetry at the right points.
+    struct ScriptedFrames {
+        frames: Vec<Vec<u8>>,
+        idx: usize,
+    }
+
+    impl ScriptedFrames {
+        fn new(frames: Vec<Vec<u8>>) -> Self {
+            Self { frames, idx: 0 }
+        }
+    }
+
+    impl llm_client::FrameStream for ScriptedFrames {
+        fn next_frame(
+            &mut self,
+        ) -> BoxFuture<'_, Result<Option<llm_client::RawStreamFrame>, LlmError>> {
+            let result = if self.idx < self.frames.len() {
+                let bytes = self.frames[self.idx].clone();
+                self.idx += 1;
+                Ok(Some(llm_client::RawStreamFrame::new(bytes)))
+            } else {
+                Ok(None)
+            };
+            Box::pin(async move { result })
+        }
+    }
+
+    /// A transport that delivers a fixed successful stream ending in `message_stop`.
+    ///
+    /// Builds valid Anthropic SSE frames (as raw JSON lines) so the `AnthropicMessages`
+    /// codec can decode them. The stream ends with `message_stop` which is the
+    /// terminal event → should trigger `emit_succeeded` once.
+    struct ScriptedStreamTransport {
+        frames: Vec<Vec<u8>>,
+        headers: BTreeMap<String, String>,
+        status: u16,
+    }
+
+    impl ScriptedStreamTransport {
+        /// Build a transport that delivers a minimal valid anthropic stream:
+        /// `message_start` → `message_delta(stop_reason=end_turn)` → `message_stop`.
+        fn anthropic_success() -> Arc<Self> {
+            let frames = vec![
+                br#"{"type":"message_start","message":{"id":"msg_t","model":"claude-sonnet-4-20250514","usage":{"input_tokens":1,"output_tokens":0,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}}"#.to_vec(),
+                br#"{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":1}}"#.to_vec(),
+                br#"{"type":"message_stop"}"#.to_vec(),
+            ];
+            Arc::new(Self {
+                frames,
+                headers: BTreeMap::new(),
+                status: 200,
+            })
+        }
+
+        /// Build a transport that delivers a single malformed frame → decoder error.
+        fn malformed_frame() -> Arc<Self> {
+            let frames = vec![b"not-valid-json".to_vec()];
+            Arc::new(Self {
+                frames,
+                headers: BTreeMap::new(),
+                status: 200,
+            })
+        }
+    }
+
+    impl Transport for ScriptedStreamTransport {
+        fn execute<'a>(
+            &'a self,
+            _request: &'a ProviderRequest,
+        ) -> BoxFuture<'a, Result<ProviderResponse, LlmError>> {
+            Box::pin(async move {
+                Err(LlmError::Transport {
+                    message: "execute not used in ScriptedStreamTransport".into(),
+                })
+            })
+        }
+
+        fn open_stream<'a>(
+            &'a self,
+            _request: &'a ProviderRequest,
+        ) -> BoxFuture<'a, Result<StreamingResponse, LlmError>> {
+            let frames: Vec<Vec<u8>> = self.frames.clone();
+            let headers = self.headers.clone();
+            let status = self.status;
+            Box::pin(async move {
+                Ok(StreamingResponse {
+                    status,
+                    headers,
+                    frames: Box::new(ScriptedFrames::new(frames)),
+                })
+            })
+        }
+    }
+
+    /// Build a streaming adapter with an attached analytics bus.
+    async fn make_stream_adapter_with_bus(
+        transport: Arc<dyn Transport>,
+    ) -> (ProviderApiAdapter, Arc<::telemetry::InMemorySink>) {
+        use ::telemetry::{AnalyticsBus, InMemorySink};
+
+        #[allow(deprecated)]
+        std::env::set_var("STREAM_TELEM_TEST_KEY", "test-key");
+        let client = Arc::new(
+            DefaultLlmClient::from_config(ClientConfig {
+                providers: vec![ProviderProfile {
+                    provider_id: ProviderId::AnthropicFirstParty,
+                    profile_name: "anthropic".to_string(),
+                    base_url: "https://api.anthropic.com".to_string(),
+                    protocol: ProtocolFamily::AnthropicMessages,
+                    auth: AuthStrategy::ApiKey,
+                    credential: CredentialConfig::Env {
+                        var: "STREAM_TELEM_TEST_KEY".to_string(),
+                    },
+                    models: vec![ModelProfile {
+                        display_model: "claude-sonnet-4-20250514".to_string(),
+                        request_model: "claude-sonnet-4-20250514".to_string(),
+                        billing_model: "claude-sonnet-4".to_string(),
+                        aliases: vec![],
+                        capabilities: Capabilities {
+                            streaming: true,
+                            tools: true,
+                            ..Default::default()
+                        },
+                    }],
+                    pricing: PricingConfig::default(),
+                }],
+            })
+            .expect("client"),
+        );
+
+        let bus = Arc::new(AnalyticsBus::new());
+        let sink = Arc::new(InMemorySink::new());
+        bus.attach_sink(sink.clone()).await;
+
+        let adapter = ProviderApiAdapter::new(
+            client,
+            transport,
+            SubscriberState::default(),
+            UserAgentEnv {
+                user_type: Some("external".to_string()),
+                entrypoint: Some("cli".to_string()),
+                ..Default::default()
+            },
+            "0.0.0",
+            Some(bus),
+            None,
+        );
+        (adapter, sink)
+    }
+
+    /// Stream telemetry twin — succeed path:
+    /// a clean stream (message_stop at the end) must emit:
+    /// 1. `tengu_api_request_started` (stream=true)
+    /// 2. `tengu_api_request_succeeded` (from the unfold's terminal-event arm)
+    #[tokio::test]
+    async fn stream_emit_succeeded_fires_on_message_stop() {
+        use futures::StreamExt as _;
+        use ::telemetry::AnalyticsValue;
+
+        let transport = ScriptedStreamTransport::anthropic_success();
+        let (adapter, sink) = make_stream_adapter_with_bus(transport).await;
+
+        let mut stream = StreamingApiClient::stream(
+            &adapter,
+            "claude-sonnet-4-20250514",
+            None,
+            Vec::new(),
+            Vec::new(),
+        )
+        .await
+        .expect("stream open ok");
+
+        // Drain all events.
+        while stream.next().await.is_some() {}
+
+        let events = sink.events().await;
+        let names: Vec<&str> = events.iter().map(|e| e.name.as_str()).collect();
+
+        assert!(
+            names.contains(&"tengu_api_request_started"),
+            "started must fire; got {names:?}"
+        );
+        assert!(
+            names.contains(&"tengu_api_request_succeeded"),
+            "succeeded must fire on message_stop; got {names:?}"
+        );
+
+        // Must NOT fire multiple times.
+        let succeeded_count = names
+            .iter()
+            .filter(|&&n| n == "tengu_api_request_succeeded")
+            .count();
+        assert_eq!(
+            succeeded_count, 1,
+            "succeeded must fire exactly once; got {succeeded_count}"
+        );
+
+        // Verify stream=true on the started event.
+        let started = events
+            .iter()
+            .find(|e| e.name == "tengu_api_request_started")
+            .unwrap();
+        assert!(
+            matches!(&started.metadata["stream"], AnalyticsValue::Bool(true)),
+            "stream must be true on the started event"
+        );
+    }
+
+    /// Stream telemetry twin — fail path:
+    /// a stream that produces a decode error must emit `tengu_api_request_failed`
+    /// and NOT emit `tengu_api_request_succeeded`.
+    #[tokio::test]
+    async fn stream_emit_failed_fires_on_decode_error() {
+        use futures::StreamExt as _;
+
+        let transport = ScriptedStreamTransport::malformed_frame();
+        let (adapter, sink) = make_stream_adapter_with_bus(transport).await;
+
+        let stream_result = StreamingApiClient::stream(
+            &adapter,
+            "claude-sonnet-4-20250514",
+            None,
+            Vec::new(),
+            Vec::new(),
+        )
+        .await;
+
+        // May error at open or during drain.
+        if let Ok(mut stream) = stream_result {
+            while let Some(item) = stream.next().await {
+                // consume until error or end
+                let _ = item;
+            }
+        }
+
+        let events = sink.events().await;
+        let names: Vec<&str> = events.iter().map(|e| e.name.as_str()).collect();
+
+        // failed must fire (decode error or stream-interrupted)
+        // succeeded must NOT fire
+        assert!(
+            names.contains(&"tengu_api_request_failed"),
+            "failed must fire on decode error; got {names:?}"
+        );
+        assert!(
+            !names.contains(&"tengu_api_request_succeeded"),
+            "succeeded must NOT fire on error; got {names:?}"
         );
     }
 }

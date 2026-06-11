@@ -104,11 +104,6 @@ pub async fn pump_stream(
             RouterAction::EndOfStream => {
                 return Ok(turn);
             }
-            RouterAction::ServerError(reason) => {
-                return Err(OrchestratorError::StreamingProtocol(format!(
-                    "server-emitted error event: {reason}"
-                )));
-            }
         }
     }
     // Stream ended without a MessageStop.

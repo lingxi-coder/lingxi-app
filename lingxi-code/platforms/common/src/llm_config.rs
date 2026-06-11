@@ -520,6 +520,14 @@ pub fn parse_routing_overrides(
             let n = backoff_val.as_u64().ok_or_else(|| llm_client::LlmError::InvalidRequest {
                 message: "routing.retry.backoffMs must be a non-negative integer".to_string(),
             })?;
+            if n == 0 {
+                // 0 would collapse the jitter ladder to zero-delay retries (a
+                // tight retry loop hammering the provider) — reject up front.
+                return Err(llm_client::LlmError::InvalidRequest {
+                    message: "routing.retry.backoffMs must be >= 1 (0 would disable backoff entirely)"
+                        .to_string(),
+                });
+            }
             overrides.backoff_ms = Some(n);
         }
     }
@@ -1048,6 +1056,22 @@ mod tests {
         assert_eq!(overrides.max_retries, Some(3));
         assert_eq!(overrides.backoff_ms, Some(2000));
         assert!(overrides.fallback.is_empty());
+    }
+
+    /// `backoffMs: 0` is rejected at parse time (zero-delay retries are a
+    /// tight loop hammering the provider).
+    #[test]
+    fn parse_routing_overrides_backoff_zero_rejected() {
+        let cfg = routing_test_cfg();
+        let routing: serde_json::Value = serde_json::from_str(r#"{
+            "retry": { "backoffMs": 0 }
+        }"#).unwrap();
+
+        let err = parse_routing_overrides(&routing, &cfg).expect_err("backoffMs=0 must error");
+        let llm_client::LlmError::InvalidRequest { message } = err else {
+            panic!("expected InvalidRequest, got {err:?}");
+        };
+        assert!(message.contains("backoffMs must be >= 1"), "got: {message}");
     }
 
     /// Absent routing → defaults (no overrides).

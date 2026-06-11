@@ -527,11 +527,15 @@ pub fn scaled_base_delay_ms(attempt: u8, backoff_ms: Option<u64>) -> u64 {
         None => default,
         Some(b) => {
             // ratio = b / DEFAULT_BASE_DELAYS_MS[0], applied as integer multiply-then-divide.
-            // Use saturating arithmetic so extreme values don't wrap.
+            // Use saturating arithmetic so extreme values don't wrap.  Floor at
+            // 1ms: settings parsing rejects backoffMs=0, but this is the last
+            // line of defense against a zero-delay tight retry loop (e.g. a
+            // future caller passing Some(0) directly).
             default
                 .saturating_mul(b)
                 .checked_div(DEFAULT_BASE_DELAYS_MS[0])
                 .unwrap_or(default)
+                .max(1)
         }
     }
 }
@@ -1620,5 +1624,13 @@ mod backoff_scaling_tests {
         assert_eq!(scaled_base_delay_ms(0, Some(250)), 250);
         assert_eq!(scaled_base_delay_ms(1, Some(250)), 500);
         assert_eq!(scaled_base_delay_ms(2, Some(250)), 1000);
+    }
+
+    /// `backoff_ms=0` (unreachable via settings — parse rejects it) floors at
+    /// 1ms instead of producing a zero-delay tight retry loop.
+    #[test]
+    fn backoff_zero_floors_at_one_ms() {
+        assert_eq!(scaled_base_delay_ms(0, Some(0)), 1);
+        assert_eq!(scaled_base_delay_ms(2, Some(0)), 1);
     }
 }

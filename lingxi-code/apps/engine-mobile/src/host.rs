@@ -313,13 +313,17 @@ pub async fn build_mobile_inner(
         Arc::new(LlmTransportBridge::new(DynHttp(http.clone())));
     let llm_client = {
         let mut cfg_obj = builtin_anthropic_config(&cfg.api_base, false);
-        if let Some(providers) = &cfg.provider_profiles {
+        // Run whenever EITHER key is present: a routing-only settings file
+        // (aliases onto builtin models, no custom providers) must still apply.
+        if cfg.provider_profiles.is_some() || cfg.routing.is_some() {
+            let empty = std::collections::BTreeMap::new();
+            let providers = cfg.provider_profiles.as_ref().unwrap_or(&empty);
             if let Err(e) = apply_settings_providers(
                 &mut cfg_obj,
                 providers,
                 cfg.routing.as_ref(),
             ) {
-                tracing::warn!(error = %e, "settings providers/routing parse error; using built-in profile only");
+                tracing::warn!(error = %e, "settings providers/routing entry rejected; earlier entries and the built-in profile remain active");
             }
         }
         Arc::new(

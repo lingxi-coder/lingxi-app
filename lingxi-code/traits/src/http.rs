@@ -32,12 +32,10 @@ pub type RawByteStream = Pin<Box<dyn Stream<Item = Result<Vec<u8>, HttpError>> +
 ///
 /// The default [`HttpTransport::stream_sse_with_meta`] loses metadata: it
 /// delegates to [`HttpTransport::stream_sse`] which surfaces neither status nor
-/// headers.  Real transports (e.g. [`ReqwestHttp`]) override this method to
-/// capture the metadata before handing the byte-stream to the SSE decoder.
-/// Use the override wherever accurate retry-after / rate-limit tracking
-/// matters.
-///
-/// [`ReqwestHttp`]: platform_common::http::ReqwestHttp
+/// headers.  Real transports (e.g. `ReqwestHttp` in `platform-common`)
+/// override this method to capture the metadata before handing the
+/// byte-stream to the SSE decoder.  Use the override wherever accurate
+/// retry-after / rate-limit tracking matters.
 pub struct SseStreamWithMeta {
     /// HTTP status of the streaming response (e.g. 200, 429).
     pub status: u16,

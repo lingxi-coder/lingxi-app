@@ -1027,13 +1027,17 @@ pub async fn build(
     //       starting with the built-in profile still functional).
     let llm_client = {
         let mut cfg_obj = builtin_anthropic_config(&cfg.api_base, llm_oauth_path);
-        if let Some(providers) = &cfg.provider_profiles {
+        // Run whenever EITHER key is present: a routing-only settings file
+        // (aliases onto builtin models, no custom providers) must still apply.
+        if cfg.provider_profiles.is_some() || cfg.routing.is_some() {
+            let empty = std::collections::BTreeMap::new();
+            let providers = cfg.provider_profiles.as_ref().unwrap_or(&empty);
             if let Err(e) = apply_settings_providers(
                 &mut cfg_obj,
                 providers,
                 cfg.routing.as_ref(),
             ) {
-                tracing::warn!(error = %e, "settings providers/routing parse error; using built-in profile only");
+                tracing::warn!(error = %e, "settings providers/routing entry rejected; earlier entries and the built-in profile remain active");
             }
         }
         let mut client = DefaultLlmClient::from_config(cfg_obj)
@@ -3024,6 +3028,49 @@ mod tests {
         assert_eq!(
             groq_with_alias.unwrap().display_model,
             "llama-3.3-70b-versatile"
+        );
+    }
+
+    /// 3c final-review fix: a ROUTING-ONLY settings file (aliases onto builtin
+    /// models, no custom `providers` key) must still be applied — the apply
+    /// gate runs when EITHER key is present.
+    #[tokio::test]
+    async fn routing_only_settings_alias_applies_to_builtin_model() {
+        let (_tmp, mut cfg) = test_config(true);
+        cfg.provider_profiles = None;
+        cfg.routing = Some(serde_json::json!({
+            "aliases": { "best": "anthropic/claude-opus-4-7" }
+        }));
+
+        // Composition-root assertion: build() succeeds with routing-only settings.
+        let output: Arc<dyn traits::OutputStream> =
+            Arc::new(orchestrator::test_support::MockOutputStream::new());
+        let perm_sink: Arc<dyn client_adapter::PermissionRequestSink> =
+            Arc::new(RecordingPermissionSink::default());
+        let rt = build(cfg, output, perm_sink)
+            .await
+            .expect("build() failed with routing-only settings");
+        let _ = rt;
+
+        // Same code path, directly: the alias lands on the BUILTIN model.
+        let mut llm_cfg =
+            platform_common::builtin_anthropic_config("https://api.anthropic.com", false);
+        let empty = std::collections::BTreeMap::new();
+        let routing = serde_json::json!({
+            "aliases": { "best": "anthropic/claude-opus-4-7" }
+        });
+        platform_common::apply_settings_providers(&mut llm_cfg, &empty, Some(&routing))
+            .expect("routing-only apply must succeed");
+        let client =
+            llm_client::DefaultLlmClient::from_config(llm_cfg).expect("config must be valid");
+        let aliased = client
+            .available_models()
+            .into_iter()
+            .find(|m| m.aliases.contains(&"best".to_string()));
+        assert_eq!(
+            aliased.map(|m| m.display_model).as_deref(),
+            Some("claude-opus-4-7"),
+            "routing-only alias must land on the builtin model"
         );
     }
 }

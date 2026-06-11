@@ -409,6 +409,10 @@ fn encode_messages(messages: &[crate::Message], tool_call_names: &std::collectio
                 ContentBlock::Image { media_type, bytes }
                 | ContentBlock::Document { media_type, bytes } => {
                     let b64 = base64::engine::general_purpose::STANDARD.encode(bytes);
+                    // snake_case here is intentional: the Gemini REST proto
+                    // names are inline_data/mime_type and the API accepts both
+                    // casings; the rest of this codec uses the camelCase JSON
+                    // mapping (generationConfig, functionCall, ...).
                     parts.push(serde_json::json!({
                         "inline_data": {
                             "mime_type": media_type,

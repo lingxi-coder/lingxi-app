@@ -8,7 +8,7 @@
 use crate::conversation::{OrchestratorApiClient, StreamingApiClient};
 use crate::model::betas::{apply_beta_header_with_auth, Endpoint, Provider};
 use crate::model::rate_limit::{parse_retry_after, parse_unified_reset};
-use crate::model::retry::{next_step, DriveStep, RetryControl, RetryState};
+use crate::model::retry::{next_step, resolve_retry_control, DriveStep, ResolveRetryEnv, RetryControl, RetryState};
 use crate::model::telemetry;
 use crate::model::user_agent::{user_agent, UserAgentEnv};
 use agent::convert::{to_llm_messages, to_tool_declarations};
@@ -309,6 +309,8 @@ impl ProviderApiAdapter {
 
         let mut state = RetryState {
             consecutive_overloaded: initial_consecutive_overloaded,
+            is_subscriber: self.subscriber.is_subscriber,
+            is_enterprise: self.subscriber.is_enterprise,
             ..RetryState::default()
         };
         // thinking_budget: Task 6 drives with 0; extended-thinking wiring in Task 10+.
@@ -609,10 +611,12 @@ impl OrchestratorApiClient for ProviderApiAdapter {
         tools: Vec<serde_json::Value>,
     ) -> Result<LlmResponse, LlmError> {
         let req = self.build_request(model, system, msgs, tools, false, None)?;
-        let ctl = RetryControl {
-            primary_model: model.to_string(),
-            ..RetryControl::default()
-        };
+        let ctl = resolve_retry_control(
+            model,
+            None,
+            self.subscriber.is_subscriber,
+            &ResolveRetryEnv::from_process_env(),
+        );
         self.drive_non_stream(req, ctl).await
     }
 
@@ -625,18 +629,24 @@ impl OrchestratorApiClient for ProviderApiAdapter {
         max_tokens: u32,
     ) -> Result<LlmResponse, LlmError> {
         let req = self.build_request(model, system, msgs, tools, false, Some(max_tokens))?;
-        let ctl = RetryControl {
-            primary_model: model.to_string(),
-            ..RetryControl::default()
-        };
+        let ctl = resolve_retry_control(
+            model,
+            None,
+            self.subscriber.is_subscriber,
+            &ResolveRetryEnv::from_process_env(),
+        );
         self.drive_non_stream(req, ctl).await
     }
 
     /// Non-streaming call with Opus-fallback policy wired.
     ///
-    /// `allow_fallback` is set whenever `fallback_model.is_some()` (Task 8 adds
-    /// the full `resolve_retry_control` env logic; for now this is sufficient for
-    /// callers that pass an explicit fallback).
+    /// Routes through [`resolve_retry_control`] which computes `allow_fallback`
+    /// from the env + subscriber state (Task 8). The caller-supplied
+    /// `_is_subscriber` / `_is_enterprise` override the adapter's own
+    /// subscriber state when the host passes explicit values; the `_` prefix
+    /// documents that the adapter reads from `self.subscriber` via the env
+    /// resolver (the call-site values are preserved in the method signature for
+    /// API compatibility — Task 10 will drop them).
     async fn messages_create_with_fallback(
         &self,
         model: &str,
@@ -649,12 +659,19 @@ impl OrchestratorApiClient for ProviderApiAdapter {
     ) -> Result<LlmResponse, LlmError> {
         let effective_fallback = fallback_model.or(self.fallback_model.as_deref());
         let req = self.build_request(model, system, msgs, tools, false, None)?;
-        let ctl = RetryControl {
-            primary_model: model.to_string(),
-            fallback_model: effective_fallback.map(str::to_string),
-            allow_fallback: effective_fallback.is_some(),
-            ..RetryControl::default()
-        };
+        let mut ctl = resolve_retry_control(
+            model,
+            effective_fallback.map(str::to_string),
+            self.subscriber.is_subscriber,
+            &ResolveRetryEnv::from_process_env(),
+        );
+        // If caller passed an explicit fallback model, honour it even when
+        // resolve_retry_control would not have set allow_fallback (e.g. Sonnet
+        // primary with a configured fallback).  This preserves the pre-Task-8
+        // contract: an explicit `fallback_model` always enables the fallback gate.
+        if effective_fallback.is_some() {
+            ctl.allow_fallback = true;
+        }
         self.drive_non_stream(req, ctl).await
     }
 
@@ -674,10 +691,12 @@ impl OrchestratorApiClient for ProviderApiAdapter {
         initial_consecutive_overloaded: u8,
     ) -> Result<LlmResponse, LlmError> {
         let req = self.build_request(model, system, msgs, tools, false, None)?;
-        let ctl = RetryControl {
-            primary_model: model.to_string(),
-            ..RetryControl::default()
-        };
+        let ctl = resolve_retry_control(
+            model,
+            None,
+            self.subscriber.is_subscriber,
+            &ResolveRetryEnv::from_process_env(),
+        );
         self.drive_non_stream_seeded(req, ctl, initial_consecutive_overloaded)
             .await
     }
@@ -899,6 +918,53 @@ mod tests {
             "stop_reason": "end_turn",
             "usage": {"input_tokens": 5, "output_tokens": 2}
         })
+    }
+
+    fn make_adapter_with_subscriber(
+        transport: Arc<dyn Transport>,
+        subscriber: SubscriberState,
+    ) -> ProviderApiAdapter {
+        std::env::set_var("ADAPTER_TEST_KEY", "test-key");
+        let client = Arc::new(
+            DefaultLlmClient::from_config(ClientConfig {
+                providers: vec![ProviderProfile {
+                    provider_id: ProviderId::AnthropicFirstParty,
+                    profile_name: "anthropic".to_string(),
+                    base_url: "https://api.anthropic.com".to_string(),
+                    protocol: ProtocolFamily::AnthropicMessages,
+                    auth: AuthStrategy::ApiKey,
+                    credential: CredentialConfig::Env {
+                        var: "ADAPTER_TEST_KEY".to_string(),
+                    },
+                    models: vec![ModelProfile {
+                        display_model: "claude-sonnet-4-20250514".to_string(),
+                        request_model: "claude-sonnet-4-20250514".to_string(),
+                        billing_model: "claude-sonnet-4".to_string(),
+                        aliases: vec!["claude".to_string()],
+                        capabilities: Capabilities {
+                            streaming: true,
+                            tools: true,
+                            ..Default::default()
+                        },
+                    }],
+                    pricing: PricingConfig::default(),
+                }],
+            })
+            .expect("client"),
+        );
+        ProviderApiAdapter::new(
+            client,
+            transport,
+            subscriber,
+            UserAgentEnv {
+                user_type: Some("external".to_string()),
+                entrypoint: Some("cli".to_string()),
+                ..Default::default()
+            },
+            "0.0.0",
+            None,
+            None,
+        )
     }
 
     fn make_adapter(transport: Arc<dyn Transport>) -> ProviderApiAdapter {
@@ -1298,6 +1364,73 @@ mod tests {
             ProviderApiAdapter::error_kind(&LlmError::ContextOverflow { token_gap: 0 }),
             "prompt_too_long"
         );
+    }
+
+    // ── Task 8: subscriber 429 gate end-to-end through the adapter ───────────
+
+    /// Task 8 gate: subscriber non-enterprise 429 → terminal immediately (no retry).
+    ///
+    /// Wire: `SubscriberState { is_subscriber: true, is_enterprise: false }` +
+    /// a transport that always returns 429 → the adapter returns an error without
+    /// making a second request.
+    #[tokio::test]
+    async fn subscriber_429_is_terminal_in_adapter() {
+        let transport = FakeTransport::always(ProviderResponse {
+            status: 429,
+            headers: BTreeMap::new(),
+            body_json: serde_json::json!({
+                "type": "error",
+                "error": {"type": "rate_limit_error", "message": "You have reached your usage limit"}
+            }),
+            request_id: None,
+        });
+        let adapter = make_adapter_with_subscriber(
+            transport.clone(),
+            SubscriberState { is_subscriber: true, is_enterprise: false },
+        );
+        let result = adapter
+            .messages_create("claude-sonnet-4-20250514", None, Vec::new(), Vec::new())
+            .await;
+        assert!(result.is_err(), "subscriber 429 must be terminal");
+        // Only ONE execution — no retries.
+        assert_eq!(
+            transport.seen_count(),
+            1,
+            "subscriber 429 must not retry (seen_count should be 1)"
+        );
+    }
+
+    /// Task 8 gate: enterprise subscriber 429 → retries through the full budget.
+    ///
+    /// Wire: `SubscriberState { is_subscriber: true, is_enterprise: true }` +
+    /// a transport that returns 429 then 200 → the adapter retries and succeeds.
+    #[tokio::test]
+    async fn enterprise_subscriber_429_retries_in_adapter() {
+        let transport = FakeTransport::sequence(vec![
+            FakeResponse::Ok(ProviderResponse {
+                status: 429,
+                headers: {
+                    let mut h = BTreeMap::new();
+                    h.insert("retry-after".to_string(), "0".to_string());
+                    h
+                },
+                body_json: serde_json::json!({
+                    "type": "error",
+                    "error": {"type": "rate_limit_error", "message": "rate limited"}
+                }),
+                request_id: None,
+            }),
+            FakeResponse::Ok(ProviderResponse::json(200, ok_response_json())),
+        ]);
+        let adapter = make_adapter_with_subscriber(
+            transport.clone(),
+            SubscriberState { is_subscriber: true, is_enterprise: true },
+        );
+        let result = adapter
+            .messages_create("claude-sonnet-4-20250514", None, Vec::new(), Vec::new())
+            .await;
+        assert!(result.is_ok(), "enterprise subscriber 429 must retry and succeed");
+        assert_eq!(transport.seen_count(), 2, "should have made 2 requests (429 then 200)");
     }
 
     /// Fix 1 end-to-end: a fake transport returns a 400 PTL envelope with counts;

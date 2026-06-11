@@ -9,6 +9,21 @@
 //! actually sleeping (`tokio::time::sleep`) and re-executing the request.
 //! This separation keeps the driver unit-testable without a Tokio runtime and
 //! leaves all transport / UI emission to Plan 3 wiring.
+//!
+//! ## 429 subscriber gate (parity `withRetry.ts:767`)
+//!
+//! `RateLimited` (HTTP 429) is retried **only when** `!is_subscriber ||
+//! is_enterprise`. A plain Claude.ai subscriber (non-enterprise) hits their
+//! rate limit and must wait; retrying would just burn the budget and hammer
+//! the server. Enterprise subscribers and API-key users do retry (same as
+//! claude-code).
+//!
+//! ## `resolve_retry_control` (parity `api-client/src/anthropic.rs:1187-1211`)
+//!
+//! Computes the per-request [`RetryControl`] from env + subscriber state.
+//! Injectable via [`ResolveRetryEnv`] for deterministic tests.
+//! `CLAUDE_CODE_UNATTENDED_RETRY` / persistent-mode is Anthropic-internal-only —
+//! not ported.
 
 #![forbid(unsafe_code)]
 
@@ -122,6 +137,17 @@ pub struct RetryState {
     /// Count of consecutive `Overloaded` errors without an intervening
     /// non-overloaded outcome.
     pub consecutive_overloaded: u8,
+    /// `true` when the configured credential is a Claude.ai OAuth subscriber.
+    ///
+    /// Gates the 429 retry: `!is_subscriber || is_enterprise` mirrors
+    /// `withRetry.ts:767`. A subscriber-non-enterprise 429 is **terminal**;
+    /// enterprise subscribers and API-key users retry.
+    pub is_subscriber: bool,
+    /// `true` when the subscriber is an enterprise account.
+    ///
+    /// Re-enables 429 retry for subscribers on enterprise plans
+    /// (`withRetry.ts:767`).
+    pub is_enterprise: bool,
 }
 
 /// Consecutive-529 / Opus-fallback policy threaded into [`next_step`].
@@ -171,6 +197,85 @@ impl Default for RetryControl {
             is_external: false,
             is_sandbox: false,
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// resolve_retry_control — ported from api-client/src/anthropic.rs:1187-1211
+// ---------------------------------------------------------------------------
+
+/// Injectable environment for [`resolve_retry_control`].
+///
+/// Mirrors the same `UserAgentEnv` injectable pattern (Task 3) so tests can
+/// supply deterministic values without mutating `std::env`.  The
+/// `from_process_env()` constructor reads the real process environment for
+/// production callers.
+///
+/// **Not ported:** `CLAUDE_CODE_UNATTENDED_RETRY` / persistent-mode is
+/// Anthropic-internal-only and has no effect in external builds.
+#[derive(Debug, Clone, Default)]
+pub struct ResolveRetryEnv {
+    /// Raw value of `FALLBACK_FOR_ALL_PRIMARY_MODELS`. A non-empty string is
+    /// truthy (mirrors JS `process.env.FALLBACK_FOR_ALL_PRIMARY_MODELS ||`).
+    pub fallback_for_all: Option<String>,
+    /// Raw value of `USER_TYPE`. `"external"` means `is_external = true`.
+    pub user_type: Option<String>,
+    /// Whether `IS_SANDBOX` is defined at all. Any defined value (including
+    /// empty string) counts as sandboxed — mirrors TS `!!process.env.IS_SANDBOX`.
+    pub is_sandbox_defined: bool,
+}
+
+impl ResolveRetryEnv {
+    /// Read the live process environment. For production callers.
+    #[must_use]
+    pub fn from_process_env() -> Self {
+        Self {
+            fallback_for_all: std::env::var("FALLBACK_FOR_ALL_PRIMARY_MODELS").ok(),
+            user_type: std::env::var("USER_TYPE").ok(),
+            is_sandbox_defined: std::env::var_os("IS_SANDBOX").is_some(),
+        }
+    }
+}
+
+/// Compute the per-request [`RetryControl`] from env + subscriber state.
+///
+/// Ports `api-client/src/anthropic.rs::resolve_retry_control` (`:1187-1211`)
+/// re-typed off api-client. Accepts an injectable [`ResolveRetryEnv`] so
+/// tests can supply deterministic values.
+///
+/// **Policy:**
+/// - `allow_fallback` = `FALLBACK_FOR_ALL_PRIMARY_MODELS` truthy **or**
+///   (`!is_subscriber` and `is_non_custom_opus(model)`)
+/// - `is_external` = `USER_TYPE == "external"`
+/// - `is_sandbox` = `IS_SANDBOX` env var is defined (any value)
+///
+/// **Not ported:** `CLAUDE_CODE_UNATTENDED_RETRY` / persistent-mode is
+/// ant-only.
+#[must_use]
+pub fn resolve_retry_control(
+    model: &str,
+    fallback_model: Option<String>,
+    is_subscriber: bool,
+    env: &ResolveRetryEnv,
+) -> RetryControl {
+    // TS raw `process.env.FALLBACK_FOR_ALL_PRIMARY_MODELS ||` — truthy means a
+    // non-empty string; an empty string is falsy in JS.
+    let fallback_for_all = env
+        .fallback_for_all
+        .as_deref()
+        .is_some_and(|v| !v.is_empty());
+    let allow_fallback =
+        fallback_for_all || (!is_subscriber && crate::model::fallback::is_non_custom_opus(model));
+    let is_external = env.user_type.as_deref() == Some("external");
+    // TS `!!process.env.IS_SANDBOX` — present (defined) is sandboxed.
+    let is_sandbox = env.is_sandbox_defined;
+    RetryControl {
+        fallback_model,
+        primary_model: model.to_string(),
+        allow_fallback,
+        is_external,
+        is_sandbox,
+        ..RetryControl::default()
     }
 }
 
@@ -259,6 +364,15 @@ pub fn next_step(
         LlmError::RateLimited { retry_after, .. } => {
             // Reset the consecutive-overloaded counter: a rate-limit is not a 529.
             state.consecutive_overloaded = 0;
+
+            // 429 subscriber gate (parity withRetry.ts:767):
+            //   retry_429_allowed = !is_subscriber || is_enterprise
+            // A plain Claude.ai subscriber (non-enterprise) must NOT retry 429s
+            // — they've hit their usage limit and the server won't honour more
+            // requests until the window resets. Enterprise + API-key users retry.
+            if state.is_subscriber && !state.is_enterprise {
+                return DriveStep::Terminal;
+            }
 
             if u32::from(state.attempt) >= DEFAULT_MAX_RETRIES {
                 return DriveStep::Terminal;
@@ -488,6 +602,7 @@ mod next_step_tests {
         let mut state = RetryState {
             attempt: EXHAUSTED_ATTEMPT,
             consecutive_overloaded: 0,
+            ..RetryState::default()
         };
         let ctl = ctl_default();
         let step = next_step(&mut state, &ctl, &LlmError::Overloaded, 0);
@@ -618,7 +733,89 @@ mod next_step_tests {
         );
     }
 
-    // --- Table point 2: RateLimited ---
+    // --- Table point 2: RateLimited + subscriber gate (withRetry.ts:767) ---
+
+    /// withRetry.ts:767: subscriber non-enterprise 429 → terminal (no retry).
+    #[test]
+    fn subscriber_429_is_terminal() {
+        let mut state = RetryState {
+            is_subscriber: true,
+            is_enterprise: false,
+            ..RetryState::default()
+        };
+        let ctl = ctl_default();
+        let step = next_step(
+            &mut state,
+            &ctl,
+            &LlmError::RateLimited {
+                retry_after: Some(Duration::from_secs(5)),
+                scope: None,
+            },
+            0,
+        );
+        assert_eq!(
+            step,
+            DriveStep::Terminal,
+            "subscriber non-enterprise 429 must be terminal (withRetry.ts:767)"
+        );
+        // No budget should be consumed (terminal path).
+        assert_eq!(
+            state.attempt, 0,
+            "terminal 429 must not consume a budget slot"
+        );
+    }
+
+    /// withRetry.ts:767: enterprise subscriber 429 → retries (enterprise re-enables).
+    #[test]
+    fn enterprise_subscriber_429_retries() {
+        let mut state = RetryState {
+            is_subscriber: true,
+            is_enterprise: true,
+            ..RetryState::default()
+        };
+        let ctl = ctl_default();
+        let server_delay = Duration::from_secs(10);
+        let step = next_step(
+            &mut state,
+            &ctl,
+            &LlmError::RateLimited {
+                retry_after: Some(server_delay),
+                scope: None,
+            },
+            0,
+        );
+        assert_eq!(
+            step,
+            DriveStep::RetryAfter(server_delay),
+            "enterprise subscriber 429 must retry (withRetry.ts:767)"
+        );
+        assert_eq!(state.attempt, 1);
+    }
+
+    /// withRetry.ts:767: API-key user (non-subscriber) 429 → retries.
+    #[test]
+    fn api_key_user_429_retries() {
+        let mut state = RetryState {
+            is_subscriber: false,
+            is_enterprise: false,
+            ..RetryState::default()
+        };
+        let ctl = ctl_default();
+        let step = next_step(
+            &mut state,
+            &ctl,
+            &LlmError::RateLimited {
+                retry_after: None,
+                scope: None,
+            },
+            0,
+        );
+        assert!(
+            matches!(step, DriveStep::RetryAfter(_)),
+            "API-key (non-subscriber) 429 must retry, got {step:?}"
+        );
+        assert_eq!(state.attempt, 1);
+    }
 
     #[test]
     fn rate_limited_server_delay_used_verbatim() {
@@ -667,6 +864,7 @@ mod next_step_tests {
         let mut state = RetryState {
             attempt: 0,
             consecutive_overloaded: 2,
+            ..RetryState::default()
         };
         let ctl = ctl_default();
         next_step(
@@ -722,6 +920,7 @@ mod next_step_tests {
         let mut state = RetryState {
             attempt: EXHAUSTED_ATTEMPT,
             consecutive_overloaded: 0,
+            ..RetryState::default()
         };
         let ctl = ctl_default();
         let step = next_step(&mut state, &ctl, &LlmError::ProviderInternal, 0);
@@ -852,6 +1051,7 @@ mod next_step_tests {
             let mut state = RetryState {
                 attempt: EXHAUSTED_ATTEMPT,
                 consecutive_overloaded: 0,
+                ..RetryState::default()
             };
             let ctl = ctl_default();
             let step = next_step(&mut state, &ctl, error, 0);
@@ -1019,6 +1219,7 @@ mod next_step_tests {
                 let mut state = RetryState {
                     attempt: attempt_u8,
                     consecutive_overloaded: 0,
+                    ..RetryState::default()
                 };
                 let ctl = ctl_default();
                 let step = next_step(&mut state, &ctl, &LlmError::ProviderInternal, 0);
@@ -1035,5 +1236,143 @@ mod next_step_tests {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod resolve_retry_control_tests {
+    //! Env-matrix tests mirroring api-client's `resolve_retry_control` tests.
+    use super::*;
+
+    fn env(fallback_for_all: Option<&str>, user_type: Option<&str>, is_sandbox: bool) -> ResolveRetryEnv {
+        ResolveRetryEnv {
+            fallback_for_all: fallback_for_all.map(str::to_string),
+            user_type: user_type.map(str::to_string),
+            is_sandbox_defined: is_sandbox,
+        }
+    }
+
+    const OPUS_MODEL: &str = "claude-opus-4-6";
+    const SONNET_MODEL: &str = "claude-sonnet-4-20250514";
+
+    // --- allow_fallback ---
+
+    /// `FALLBACK_FOR_ALL_PRIMARY_MODELS` non-empty → `allow_fallback = true`
+    /// regardless of model or subscriber status.
+    #[test]
+    fn fallback_for_all_truthy_enables_allow_fallback() {
+        let ctl = resolve_retry_control(
+            SONNET_MODEL,
+            None,
+            true, // is_subscriber
+            &env(Some("1"), None, false),
+        );
+        assert!(ctl.allow_fallback, "non-empty FALLBACK_FOR_ALL_PRIMARY_MODELS must set allow_fallback");
+    }
+
+    /// `FALLBACK_FOR_ALL_PRIMARY_MODELS` empty string is falsy (JS semantics).
+    #[test]
+    fn fallback_for_all_empty_string_is_falsy() {
+        let ctl = resolve_retry_control(
+            SONNET_MODEL,
+            None,
+            false,
+            &env(Some(""), None, false),
+        );
+        assert!(
+            !ctl.allow_fallback,
+            "empty FALLBACK_FOR_ALL_PRIMARY_MODELS must be falsy"
+        );
+    }
+
+    /// Non-subscriber + Opus model → `allow_fallback = true`.
+    #[test]
+    fn non_subscriber_opus_allows_fallback() {
+        let ctl = resolve_retry_control(
+            OPUS_MODEL,
+            Some("claude-sonnet-4-6".into()),
+            false, // not subscriber
+            &env(None, None, false),
+        );
+        assert!(ctl.allow_fallback, "non-subscriber + opus → allow_fallback");
+    }
+
+    /// Subscriber + Opus model → `allow_fallback = false` (unless FALLBACK_FOR_ALL).
+    #[test]
+    fn subscriber_opus_no_fallback_unless_env() {
+        let ctl = resolve_retry_control(
+            OPUS_MODEL,
+            Some("claude-sonnet-4-6".into()),
+            true, // subscriber
+            &env(None, None, false),
+        );
+        assert!(!ctl.allow_fallback, "subscriber + opus must NOT set allow_fallback unless FALLBACK_FOR_ALL");
+    }
+
+    /// Non-subscriber + non-Opus model → `allow_fallback = false`.
+    #[test]
+    fn non_subscriber_non_opus_no_fallback() {
+        let ctl = resolve_retry_control(
+            SONNET_MODEL,
+            None,
+            false,
+            &env(None, None, false),
+        );
+        assert!(!ctl.allow_fallback, "non-subscriber + non-opus must NOT allow fallback");
+    }
+
+    // --- is_external ---
+
+    #[test]
+    fn user_type_external_sets_is_external() {
+        let ctl = resolve_retry_control(SONNET_MODEL, None, false, &env(None, Some("external"), false));
+        assert!(ctl.is_external);
+    }
+
+    #[test]
+    fn user_type_non_external_clears_is_external() {
+        let ctl = resolve_retry_control(SONNET_MODEL, None, false, &env(None, Some("internal"), false));
+        assert!(!ctl.is_external);
+    }
+
+    #[test]
+    fn user_type_absent_clears_is_external() {
+        let ctl = resolve_retry_control(SONNET_MODEL, None, false, &env(None, None, false));
+        assert!(!ctl.is_external);
+    }
+
+    // --- is_sandbox ---
+
+    #[test]
+    fn is_sandbox_defined_sets_is_sandbox() {
+        let ctl = resolve_retry_control(SONNET_MODEL, None, false, &env(None, None, true));
+        assert!(ctl.is_sandbox);
+    }
+
+    #[test]
+    fn is_sandbox_absent_clears_is_sandbox() {
+        let ctl = resolve_retry_control(SONNET_MODEL, None, false, &env(None, None, false));
+        assert!(!ctl.is_sandbox);
+    }
+
+    // --- fallback_model is threaded through ---
+
+    #[test]
+    fn fallback_model_is_threaded_through() {
+        let ctl = resolve_retry_control(
+            SONNET_MODEL,
+            Some("claude-sonnet-4-6".into()),
+            false,
+            &env(None, None, false),
+        );
+        assert_eq!(ctl.fallback_model.as_deref(), Some("claude-sonnet-4-6"));
+        assert_eq!(ctl.primary_model, SONNET_MODEL);
+    }
+
+    // --- from_process_env smoke test (should not panic) ---
+
+    #[test]
+    fn from_process_env_does_not_panic() {
+        let _ = ResolveRetryEnv::from_process_env();
     }
 }

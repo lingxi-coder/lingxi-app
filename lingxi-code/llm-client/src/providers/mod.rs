@@ -1,6 +1,8 @@
 #[allow(missing_docs)]
 mod anthropic;
 #[allow(missing_docs)]
+mod azure_openai;
+#[allow(missing_docs)]
 mod gemini;
 #[allow(missing_docs)]
 mod openai;
@@ -10,6 +12,7 @@ use std::time::Duration;
 use crate::LlmError;
 
 pub use anthropic::AnthropicMessagesCodec;
+pub use azure_openai::AzureOpenAiCodec;
 pub use gemini::GeminiCodec;
 pub use openai::OpenAiChatCodec;
 

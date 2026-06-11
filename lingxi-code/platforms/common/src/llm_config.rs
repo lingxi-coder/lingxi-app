@@ -58,8 +58,8 @@ pub struct RoutingOverrides {
 }
 
 use llm_client::{
-    AuthStrategy, Capabilities, ClientConfig, CredentialConfig, LlmError, ModelProfile,
-    PricingConfig, ProtocolFamily, ProviderId, ProviderProfile, TokenPricing,
+    AuthStrategy, AzureConfig, Capabilities, ClientConfig, CredentialConfig, LlmError,
+    ModelProfile, PricingConfig, ProtocolFamily, ProviderId, ProviderProfile, TokenPricing,
 };
 
 /// Build the built-in Anthropic [`ClientConfig`] for [`llm_client::DefaultLlmClient`].
@@ -110,6 +110,8 @@ pub fn builtin_anthropic_config(api_base: &str, oauth_path: bool) -> ClientConfi
             auth,
             credential,
             pricing: PricingConfig::default(),
+            signing: None,
+            azure: None,
             models: vec![
                 // — Claude Sonnet 4 (default engine model) —
                 model(
@@ -228,6 +230,8 @@ pub fn apply_settings_providers(
 }
 
 /// Parse and append one settings provider entry to `cfg`.
+// Each provider type is a large self-contained arm; the line count is inherent.
+#[allow(clippy::too_many_lines)]
 fn apply_one_provider(
     cfg: &mut ClientConfig,
     profile_name: &str,
@@ -254,10 +258,14 @@ fn apply_one_provider(
         ),
         "anthropic" => (ProviderId::AnthropicFirstParty, ProtocolFamily::AnthropicMessages),
         "gemini" => (ProviderId::Gemini, ProtocolFamily::GeminiGenerateContent),
+        "azure-openai" => (
+            ProviderId::OpenAICompatible { name: profile_name.to_string() },
+            ProtocolFamily::AzureOpenAi,
+        ),
         other => {
             return Err(LlmError::InvalidRequest {
                 message: format!(
-                    "provider {profile_name:?}: unknown type {other:?} (supported: openai, anthropic, gemini)"
+                    "provider {profile_name:?}: unknown type {other:?} (supported: openai, anthropic, gemini, azure-openai)"
                 ),
             });
         }
@@ -289,6 +297,25 @@ fn apply_one_provider(
         });
     }
 
+    // For azure-openai, apiVersion is required.
+    let azure_config = if type_str == "azure-openai" {
+        let api_version = entry
+            .get("apiVersion")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        if api_version.is_empty() {
+            return Err(LlmError::InvalidRequest {
+                message: format!(
+                    "provider {profile_name:?}: \"apiVersion\" is required for azure-openai type"
+                ),
+            });
+        }
+        Some(AzureConfig { api_version })
+    } else {
+        None
+    };
+
     // models is REQUIRED; absent or empty → error.
     let models_val = entry.get("models").ok_or_else(|| LlmError::InvalidRequest {
         message: format!(
@@ -319,15 +346,25 @@ fn apply_one_provider(
             PricingConfig::default()
         };
 
+    // azure-openai uses AzureToken auth (injects `api-key:` header rather than
+    // `Authorization: Bearer`). All other types use the standard ApiKey auth.
+    let auth = if type_str == "azure-openai" {
+        AuthStrategy::AzureToken
+    } else {
+        AuthStrategy::ApiKey
+    };
+
     cfg.providers.push(ProviderProfile {
         provider_id,
         profile_name: profile_name.to_string(),
         base_url,
         protocol,
-        auth: AuthStrategy::ApiKey,
+        auth,
         credential: CredentialConfig::Env { var: api_key_env },
         models: model_profiles,
         pricing,
+        signing: None,
+        azure: azure_config,
     });
     Ok(())
 }
@@ -1133,6 +1170,8 @@ mod tests {
                 capabilities: llm_client::Capabilities { streaming: true, tools: true, ..Default::default() },
             }],
             pricing: PricingConfig::default(),
+            signing: None,
+            azure: None,
         });
         cfg
     }
@@ -1439,5 +1478,142 @@ mod tests {
         assert!((tp.cache_write_per_million - 0.0).abs() < 1e-12, "cache_write defaults to 0");
         assert!((tp.cache_read_per_million - 0.0).abs() < 1e-12, "cache_read defaults to 0");
         assert!((tp.reasoning_per_million - 0.0).abs() < 1e-12, "reasoning defaults to 0");
+    }
+
+    // ── azure-openai settings type (Task 5) tests ─────────────────────────────
+
+    /// E2E: an azure-openai profile parses correctly, is built into a
+    /// `DefaultLlmClient`, and `prepare()` produces:
+    /// - A URL with `/openai/deployments/<model>/chat/completions?api-version=...`
+    /// - An `api-key` header (AzureToken auth)
+    /// - No `model` key in the request body
+    ///
+    /// Settings E2E test name: `azure_profile_prepare_url_and_api_key_header`
+    #[tokio::test]
+    async fn azure_profile_prepare_url_and_api_key_header() {
+        std::env::set_var("PLATFORM_COMMON_TEST_AZURE_KEY", "my-azure-api-key");
+
+        let mut cfg = builtin_anthropic_config("https://api.anthropic.com", false);
+        let providers: BTreeMap<String, serde_json::Value> = serde_json::from_str(r#"{
+            "my-azure": {
+                "type": "azure-openai",
+                "baseUrl": "https://myresource.openai.azure.com",
+                "apiKeyEnv": "PLATFORM_COMMON_TEST_AZURE_KEY",
+                "apiVersion": "2024-02-01",
+                "models": [
+                    { "id": "gpt-4o-deployment" }
+                ]
+            }
+        }"#).unwrap();
+
+        apply_settings_providers(&mut cfg, &providers, None).expect("must succeed");
+
+        // Verify the profile was parsed correctly.
+        let azure_profile = cfg.providers.iter().find(|p| p.profile_name == "my-azure")
+            .expect("my-azure profile must be present");
+        assert_eq!(azure_profile.protocol, llm_client::ProtocolFamily::AzureOpenAi);
+        assert_eq!(azure_profile.auth, llm_client::AuthStrategy::AzureToken);
+        assert!(
+            azure_profile.azure.as_ref().map(|a| a.api_version.as_str()) == Some("2024-02-01"),
+            "azure config must have apiVersion=2024-02-01"
+        );
+
+        // Build a client and prepare a request.
+        let client = DefaultLlmClient::from_config(cfg).expect("client must build");
+        let req = llm_client::LlmRequest::new("gpt-4o-deployment");
+        let prepared = client.prepare(&req).await.expect("prepare must succeed");
+
+        // URL check: deployment pattern.
+        assert!(
+            prepared.provider_request.url.contains("/openai/deployments/gpt-4o-deployment/chat/completions"),
+            "URL must include deployment path; got: {}",
+            prepared.provider_request.url
+        );
+        assert!(
+            prepared.provider_request.url.contains("api-version=2024-02-01"),
+            "URL must include api-version; got: {}",
+            prepared.provider_request.url
+        );
+
+        // Auth check: api-key header present.
+        assert_eq!(
+            prepared.provider_request.headers.get("api-key").map(String::as_str),
+            Some("my-azure-api-key"),
+            "api-key header must be injected by AzureToken auth"
+        );
+
+        // No Authorization header (Azure uses api-key, not Bearer).
+        assert!(
+            !prepared.provider_request.headers.contains_key("Authorization"),
+            "AzureToken must NOT inject Authorization header"
+        );
+
+        // Model key must be absent from body (deployment is in the URL).
+        assert!(
+            prepared.provider_request.body_json.get("model").is_none(),
+            "Azure request body must not include model key; got: {}",
+            prepared.provider_request.body_json
+        );
+    }
+
+    /// azure-openai with missing apiVersion → error naming apiVersion.
+    #[test]
+    fn azure_openai_missing_api_version_is_error() {
+        let mut cfg = builtin_anthropic_config("https://api.anthropic.com", false);
+        let providers: BTreeMap<String, serde_json::Value> = serde_json::from_str(r#"{
+            "my-azure": {
+                "type": "azure-openai",
+                "baseUrl": "https://myresource.openai.azure.com",
+                "apiKeyEnv": "SOME_KEY",
+                "models": [{ "id": "gpt-4o" }]
+            }
+        }"#).unwrap();
+
+        let err = apply_settings_providers(&mut cfg, &providers, None).unwrap_err();
+        assert!(
+            matches!(&err, LlmError::InvalidRequest { message } if message.contains("apiVersion")),
+            "expected InvalidRequest about missing apiVersion, got: {err:?}"
+        );
+    }
+
+    /// azure-openai with empty apiVersion → error.
+    #[test]
+    fn azure_openai_empty_api_version_is_error() {
+        let mut cfg = builtin_anthropic_config("https://api.anthropic.com", false);
+        let providers: BTreeMap<String, serde_json::Value> = serde_json::from_str(r#"{
+            "my-azure": {
+                "type": "azure-openai",
+                "baseUrl": "https://myresource.openai.azure.com",
+                "apiKeyEnv": "SOME_KEY",
+                "apiVersion": "",
+                "models": [{ "id": "gpt-4o" }]
+            }
+        }"#).unwrap();
+
+        let err = apply_settings_providers(&mut cfg, &providers, None).unwrap_err();
+        assert!(
+            matches!(&err, LlmError::InvalidRequest { message } if message.contains("apiVersion")),
+            "expected InvalidRequest about empty apiVersion, got: {err:?}"
+        );
+    }
+
+    /// The error message for unknown type now includes "azure-openai".
+    #[test]
+    fn unknown_type_mentions_azure_openai_in_supported_list() {
+        let mut cfg = builtin_anthropic_config("https://api.anthropic.com", false);
+        let providers: BTreeMap<String, serde_json::Value> = serde_json::from_str(r#"{
+            "weird": {
+                "type": "bedrock",
+                "baseUrl": "https://bedrock.us-east-1.amazonaws.com",
+                "apiKeyEnv": "BEDROCK_KEY",
+                "models": [{ "id": "claude" }]
+            }
+        }"#).unwrap();
+
+        let err = apply_settings_providers(&mut cfg, &providers, None).unwrap_err();
+        assert!(
+            matches!(&err, LlmError::InvalidRequest { message } if message.contains("azure-openai")),
+            "error for unknown type must list azure-openai as supported, got: {err:?}"
+        );
     }
 }

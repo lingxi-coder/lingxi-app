@@ -90,18 +90,34 @@ impl ResponseMetadata {
 
 /// Parse a retry delay from response headers.
 ///
-/// Prefers the millisecond-precision `retry-after-ms` header over the
-/// standard `retry-after` seconds form. Names match case-insensitively so
-/// non-normalized header maps work too.
+/// Preference order (highest first):
+/// 1. `retry-after-ms` — millisecond-precision (e.g. Anthropic)
+/// 2. `retry-after` — RFC 7231 delta-seconds **or** IMF-fixdate
+///    (`Tue, 03 Jun 2025 17:00:00 GMT`). For fixdates the duration is
+///    `date - now` clamped to ≥0 (past dates yield `Duration::ZERO`).
+///    Unrecognised values yield `None`.
+///
+/// Header names match case-insensitively so non-normalized maps work too.
 pub(crate) fn retry_after_from_headers(headers: &BTreeMap<String, String>) -> Option<Duration> {
     if let Some(value) = header_value(headers, "retry-after-ms") {
         if let Ok(milliseconds) = value.trim().parse::<u64>() {
             return Some(Duration::from_millis(milliseconds));
         }
     }
-    header_value(headers, "retry-after")
-        .and_then(|value| value.trim().parse::<u64>().ok())
-        .map(Duration::from_secs)
+    if let Some(value) = header_value(headers, "retry-after") {
+        let trimmed = value.trim();
+        // Delta-seconds form: all ASCII digits.
+        if let Ok(secs) = trimmed.parse::<u64>() {
+            return Some(Duration::from_secs(secs));
+        }
+        // IMF-fixdate form: parse via httpdate, then date − now (clamped ≥0).
+        if let Ok(target) = httpdate::parse_http_date(trimmed) {
+            let now = std::time::SystemTime::now();
+            let duration = target.duration_since(now).unwrap_or(Duration::ZERO);
+            return Some(duration);
+        }
+    }
+    None
 }
 
 fn header_value<'headers>(

@@ -2,6 +2,49 @@ use std::time::Duration;
 
 use llm_client::{LlmError, ResponseMetadata, RetryDecision, RetryPolicy};
 
+// ── Item 1: HTTP-date Retry-After ─────────────────────────────────────────────
+
+#[test]
+fn retry_after_imf_fixdate_produces_positive_duration() {
+    // A fixdate well in the future must yield Some(duration > 0).
+    // Year 9999-01-01 is a Friday — confirmed via Python datetime.
+    let metadata = ResponseMetadata::new(429)
+        .with_header("retry-after", "Fri, 01 Jan 9999 00:00:00 GMT");
+    let decision = RetryPolicy.classify_response(&metadata);
+    // Must be Retry with a non-None duration.
+    match decision {
+        RetryDecision::Retry { after: Some(d) } => assert!(d.as_secs() > 0),
+        other => panic!("expected Retry with duration, got {other:?}"),
+    }
+}
+
+#[test]
+fn retry_after_past_imf_fixdate_clamps_to_zero() {
+    // A fixdate in the past must yield Some(Duration::ZERO) (past → 0).
+    // 2001-01-01 is a Monday — confirmed via Python datetime.
+    let metadata = ResponseMetadata::new(429)
+        .with_header("retry-after", "Mon, 01 Jan 2001 00:00:00 GMT");
+    let decision = RetryPolicy.classify_response(&metadata);
+    assert_eq!(decision, RetryDecision::Retry { after: Some(Duration::ZERO) });
+}
+
+#[test]
+fn retry_after_garbage_string_yields_none() {
+    let metadata = ResponseMetadata::new(429)
+        .with_header("retry-after", "not-a-date-or-number");
+    let decision = RetryPolicy.classify_response(&metadata);
+    assert_eq!(decision, RetryDecision::Retry { after: None });
+}
+
+#[test]
+fn retry_after_ms_still_takes_precedence_over_fixdate() {
+    let metadata = ResponseMetadata::new(429)
+        .with_header("retry-after", "Fri, 01 Jan 9999 00:00:00 GMT")
+        .with_header("retry-after-ms", "250");
+    let decision = RetryPolicy.classify_response(&metadata);
+    assert_eq!(decision, RetryDecision::Retry { after: Some(Duration::from_millis(250)) });
+}
+
 #[test]
 fn retryable_response_statuses_are_retried() {
     let policy = RetryPolicy;

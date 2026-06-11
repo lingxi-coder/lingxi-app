@@ -109,6 +109,33 @@ pub trait OrchestratorApiClient: Send + Sync {
         self.messages_create(model, system, msgs, tools).await
     }
 
+    /// Non-streaming `messages.create` with a pre-seeded consecutive-529 counter.
+    ///
+    /// Used by the mid-stream 529 → non-streaming fallback (Task 7 / claude.ts parity):
+    /// when a streaming call fails with `LlmError::Overloaded` after the first event,
+    /// the turn loop issues a FRESH non-streaming call seeded with
+    /// `initial_consecutive_overloaded = 1` so the retry budget accounts for the
+    /// streaming 529 that triggered the fallback (`initialConsecutive529Errors` in
+    /// `claude.ts:2559`).
+    ///
+    /// The DEFAULT body delegates to [`Self::messages_create`], ignoring the seed —
+    /// so every mock / non-Anthropic impl compiles unchanged and the seeding is a
+    /// strict no-op there (the mock retries from 0, which is conservative / safe).
+    /// Only [`crate::provider_adapter::ProviderApiAdapter`] overrides it to thread
+    /// `initial_consecutive_overloaded` into the non-stream retry driver.
+    async fn messages_create_seeded(
+        &self,
+        model: &str,
+        system: Option<&str>,
+        msgs: Vec<ConversationMessage>,
+        tools: Vec<serde_json::Value>,
+        _initial_consecutive_overloaded: u8,
+    ) -> Result<LlmResponse, LlmError> {
+        // Default: ignore the seed and use the plain seam. Keeps all
+        // non-Anthropic impls (and mocks) byte-identical.
+        self.messages_create(model, system, msgs, tools).await
+    }
+
     /// Enumerate available `provider/model` ids + `@aliases` for `/model`'s
     /// list mode. Default returns empty so non-routing impls (mocks / the
     /// no-streaming stub) need no override; `ProviderApiAdapter` overrides it
@@ -1894,8 +1921,73 @@ impl ConversationOrchestrator {
                 .await
                 .map_err(OrchestratorError::Streaming)?;
 
-            // 3. Pump the stream.
-            let pumped = pump_stream(stream, &self.output).await?;
+            // 3. Pump the stream (with mid-stream 529 → non-streaming fallback).
+            //
+            // Task 7 / claude.ts parity: if the stream errors with `LlmError::Overloaded`
+            // after the first event — AND `CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK` is not
+            // set — discard the partial accumulation and issue a fresh non-streaming call
+            // seeded with `initial_consecutive_overloaded = 1`.  This mirrors
+            // `claude.ts:2469-2594` + `withRetry.ts:186` (`initialConsecutive529Errors`).
+            //
+            // The env gate name is locked byte-for-byte to TS:
+            //   `process.env.CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK` (claude.ts:2470)
+            // Truthiness follows `isEnvTruthy` (non-empty, non-"false", non-"0").
+            let pumped = match pump_stream(stream, &self.output).await {
+                Ok(p) => p,
+                Err(OrchestratorError::Streaming(ref e @ (LlmError::Overloaded | LlmError::ProviderInternal)))
+                    if !is_env_truthy(
+                        std::env::var("CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK")
+                            .as_deref()
+                            .ok(),
+                    ) =>
+                {
+                    // Seed: a streaming overload counts as 1 toward the consecutive
+                    // 529 budget (LlmError::Overloaded = 529).  Other in-band errors
+                    // (e.g. ProviderInternal) seed 0 — matching TS
+                    // `is529Error(streamingError) ? 1 : 0` (claude.ts:2559).
+                    let seed: u8 = u8::from(matches!(e, LlmError::Overloaded));
+
+                    // Re-snapshot history for the non-streaming call (the partial
+                    // stream never touched session.history, so it is still the same
+                    // snapshot we used for the stream — no reset needed).
+                    let (non_stream_snapshot, non_stream_model) = {
+                        let s = self.session.lock().await;
+                        (s.history.clone(), s.model.clone())
+                    };
+                    let tools_for_fallback = wire_tools.clone();
+
+                    let resp = self
+                        .api
+                        .messages_create_seeded(
+                            &non_stream_model,
+                            system_prompt.as_deref(),
+                            non_stream_snapshot,
+                            tools_for_fallback,
+                            seed,
+                        )
+                        .await
+                        .map_err(OrchestratorError::ApiCall)?;
+
+                    // Convert LlmResponse → PumpedTurn so the rest of the streaming
+                    // turn loop can proceed identically.
+                    let pumped_from_fallback = llm_response_to_pumped_turn(&resp);
+
+                    // Emit text blocks from the non-streaming response to the output
+                    // stream, mirroring the batched path (turn_loop.rs step 4:
+                    // `orch.output.emit_text(text).await`).  In the normal streaming
+                    // path `pump_stream` calls `dispatch_event` → `emit_text` for each
+                    // `TextDelta`; the non-streaming path has no SSE events, so we
+                    // replicate the whole-body emit here.
+                    for blk in &pumped_from_fallback.assistant_blocks {
+                        if let ContentBlock::Text { text } = blk {
+                            self.output.emit_text(text).await;
+                        }
+                    }
+
+                    pumped_from_fallback
+                }
+                Err(other) => return Err(other),
+            };
             // A3: accumulate this turn's output tokens (TS `getTurnOutputTokens()`).
             global_turn_tokens = global_turn_tokens.saturating_add(pumped.output_tokens);
 
@@ -2470,6 +2562,69 @@ impl ConversationOrchestrator {
     #[must_use]
     pub fn session(&self) -> Arc<Mutex<SessionState>> {
         self.session.clone()
+    }
+}
+
+// ── Task 7 helpers ──────────────────────────────────────────────────────────
+
+/// Convert an `LlmResponse` (from the non-streaming fallback call) into the
+/// same [`crate::streaming_loop::PumpedTurn`] shape the streaming loop uses,
+/// so the remainder of the streaming turn handler works unchanged.
+///
+/// Mirrors the batched path's `translate_response_blocks` call: content blocks
+/// are translated to `protocol::ContentBlock`; `ToolCall` blocks additionally
+/// populate the `tool_uses` vec so the concurrent dispatch runs exactly as in a
+/// real stream.
+fn llm_response_to_pumped_turn(resp: &LlmResponse) -> crate::streaming_loop::PumpedTurn {
+    use crate::streaming_loop::{ObservedToolUse, PumpedTurn};
+    use crate::turn_loop::translate_response_blocks;
+    use protocol::ContentBlock;
+
+    let output_tokens = resp.usage.billable_tokens.output;
+    let stop_reason = resp.stop_reason.clone();
+
+    // Translate LlmResponse content → protocol::ContentBlock (same as batched path).
+    // Then split into (assistant_blocks, tool_uses): text/thinking go into
+    // assistant_blocks; ToolUse blocks go into tool_uses for the concurrent dispatch.
+    // The streaming loop step 4 re-assembles them into the assistant message by
+    // appending ToolUse blocks from tool_uses — so we must NOT include ToolUse in
+    // assistant_blocks (or they appear twice in the assistant message).
+    let mut assistant_blocks: Vec<ContentBlock> = Vec::new();
+    let mut tool_uses: Vec<ObservedToolUse> = Vec::new();
+
+    for blk in translate_response_blocks(&resp.content) {
+        match blk {
+            ContentBlock::ToolUse { id, ref name, ref input } => {
+                tool_uses.push(ObservedToolUse {
+                    id,
+                    name: name.clone(),
+                    input: input.clone(),
+                });
+                // Not pushed to assistant_blocks — step 4 appends ToolUse from tool_uses.
+            }
+            other => {
+                assistant_blocks.push(other);
+            }
+        }
+    }
+
+    PumpedTurn {
+        assistant_blocks,
+        tool_uses,
+        stop_reason,
+        output_tokens,
+    }
+}
+
+/// Mirror TS `isEnvTruthy` (utils/env.ts): a value is truthy when it is present,
+/// non-empty, and not equal to `"false"` or `"0"`.
+///
+/// Locked against the TS helper used at `claude.ts:2470`:
+/// `isEnvTruthy(process.env.CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK)`.
+fn is_env_truthy(val: Option<&str>) -> bool {
+    match val {
+        None | Some("" | "false" | "0") => false,
+        Some(_) => true,
     }
 }
 
@@ -3552,5 +3707,185 @@ mod skill_model_override_tests {
             calls.iter().all(|c| c.model == crate::config::DEFAULT_MODEL),
             "every streaming call used the unchanged default model"
         );
+    }
+}
+
+// ============================================================================
+// Task 7: mid-stream 529 → non-streaming fallback tests
+//
+// Parity: `claude.ts:2469-2594`, `withRetry.ts:141,186`
+// Env gate: `CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK` (claude.ts:2470)
+// Error copy: `errors.ts:166` REPEATED_529_ERROR_MESSAGE = "Repeated 529 Overloaded errors"
+// ============================================================================
+#[cfg(test)]
+mod task7_midstream_fallback_tests {
+    use super::*;
+    use crate::test_support::{
+        content_block_start_text, message_start, mock_message_response, noop_hook_executor,
+        text_delta, MockApiClient, MockOutputStream, MockStreamingApiClient, NoOpPermissionGate,
+        StaticMemoryProvider,
+    };
+    use crate::OrchestratorConfig;
+    use llm_client::ContentBlock as LlmContentBlock;
+    use std::sync::Arc;
+    use tool_api::registry::ToolRegistry;
+
+    const DISABLE_FALLBACK_ENV: &str = "CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK";
+
+    /// Build a one-ContentBlockStart-then-Err(Overloaded) stream: the first
+    /// event is yielded successfully (proving partial events arrived), then the
+    /// stream errors with `LlmError::Overloaded`.
+    fn one_event_then_overloaded() -> Vec<Result<llm_client::LlmEvent, llm_client::LlmError>> {
+        vec![
+            Ok(message_start("m1", "claude-opus-4-7")),
+            Ok(content_block_start_text(0)),
+            Ok(text_delta(0, "partial")),
+            Err(llm_client::LlmError::Overloaded),
+        ]
+    }
+
+    /// Build an end_turn non-streaming response for the fallback.
+    fn fallback_response() -> llm_client::LlmResponse {
+        mock_message_response(
+            vec![LlmContentBlock::Text {
+                text: "fallback body".into(),
+                cache_control: None,
+            }],
+            Some("end_turn"),
+        )
+    }
+
+    /// Task 7 Step 1 (a)(b)(c)(d):
+    /// A stream that yields one ContentBlockStart then Err(Overloaded):
+    /// (a) the stream is NOT replayed (streaming_api called exactly once),
+    /// (b) a fresh non-streaming `messages_create_seeded` is issued,
+    /// (c) the seed is 1 (streaming 529 counts toward the budget),
+    /// (d) the final response is built from the non-streaming reply only.
+    ///
+    /// Parity: claude.ts:2551-2594, withRetry.ts:186
+    /// (`initialConsecutive529Errors: is529Error(streamingError) ? 1 : 0`)
+    #[tokio::test]
+    async fn midstream_529_triggers_nonstreaming_fallback() {
+        // Ensure fallback is ENABLED for this test.
+        std::env::remove_var(DISABLE_FALLBACK_ENV);
+
+        let streaming = Arc::new(MockStreamingApiClient::with_fallible_turns(vec![
+            one_event_then_overloaded(),
+        ]));
+        let api = Arc::new(MockApiClient::new(vec![fallback_response()]));
+        let output = Arc::new(MockOutputStream::new());
+        let orch = ConversationOrchestrator::new_with_streaming(
+            OrchestratorConfig::default(),
+            api.clone(),
+            streaming.clone(),
+            Arc::new(ToolRegistry::new()),
+            noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            output.clone(),
+            Arc::new(StaticMemoryProvider::empty()),
+            std::env::temp_dir(),
+        );
+
+        let outcome = orch
+            .run_turn_streaming("hello")
+            .await
+            .expect("turn must succeed via fallback");
+
+        // (a) Stream was called exactly once — NOT replayed.
+        let stream_calls = streaming.captured_calls().await;
+        assert_eq!(stream_calls.len(), 1, "(a) stream must be called exactly once");
+
+        // (b) A fresh non-streaming messages_create_seeded was called.
+        let seeds = api.captured_seeds().await;
+        assert_eq!(seeds.len(), 1, "(b) messages_create_seeded must be called exactly once");
+
+        // (c) The seed is 1 (the streaming 529 counts toward the consecutive 529 budget).
+        assert_eq!(seeds[0], 1, "(c) seed must be 1 for a streaming Overloaded error");
+
+        // (d) The final turn outcome is built from the non-streaming reply only.
+        // The output must contain "fallback body" (from the non-streaming response),
+        // NOT just "partial" (the partial stream events are discarded).
+        let events = output.snapshot().await;
+        use traits::OutputEvent;
+        let texts: Vec<_> = events
+            .iter()
+            .filter_map(|e| match e {
+                OutputEvent::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            texts.contains(&"fallback body"),
+            "(d) output must contain the fallback body; texts={texts:?}"
+        );
+        // The turn must have ended with end_turn (not an error).
+        assert!(
+            matches!(outcome, ConversationOutcome::EndTurn { .. }),
+            "outcome must be EndTurn after non-streaming fallback; got {outcome:?}"
+        );
+    }
+
+    /// Task 7 Step 1 (twin with CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK=1):
+    /// When the env gate is set, the streaming error propagates instead of
+    /// triggering the non-streaming fallback.
+    ///
+    /// Parity: claude.ts:2476-2501 (disableFallback branch).
+    #[tokio::test]
+    async fn midstream_529_propagates_when_fallback_disabled() {
+        // Set the disable flag for this test.
+        std::env::set_var(DISABLE_FALLBACK_ENV, "1");
+
+        let streaming = Arc::new(MockStreamingApiClient::with_fallible_turns(vec![
+            one_event_then_overloaded(),
+        ]));
+        let api = Arc::new(MockApiClient::new(vec![]));
+        let orch = ConversationOrchestrator::new_with_streaming(
+            OrchestratorConfig::default(),
+            api.clone(),
+            streaming.clone(),
+            Arc::new(ToolRegistry::new()),
+            noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            std::env::temp_dir(),
+        );
+
+        let result = orch.run_turn_streaming("hello").await;
+
+        // Restore env BEFORE assertions to avoid leaking even on panic.
+        std::env::remove_var(DISABLE_FALLBACK_ENV);
+
+        // The error MUST propagate — no fallback.
+        assert!(result.is_err(), "error must propagate when fallback is disabled");
+        // No non-streaming call was made.
+        assert!(
+            api.captured_seeds().await.is_empty(),
+            "messages_create_seeded must NOT be called when fallback is disabled"
+        );
+        // The stream was called exactly once.
+        assert_eq!(
+            streaming.captured_calls().await.len(),
+            1,
+            "stream was called exactly once"
+        );
+    }
+
+    /// `is_env_truthy` covers the exact semantics of TS `isEnvTruthy`:
+    /// absent / empty / "false" / "0" → not truthy; anything else → truthy.
+    #[test]
+    fn is_env_truthy_matches_ts_semantics() {
+        // Not set → not truthy.
+        assert!(!is_env_truthy(None));
+        // Empty → not truthy.
+        assert!(!is_env_truthy(Some("")));
+        // "false" → not truthy.
+        assert!(!is_env_truthy(Some("false")));
+        // "0" → not truthy.
+        assert!(!is_env_truthy(Some("0")));
+        // Non-empty, non-false, non-zero → truthy.
+        assert!(is_env_truthy(Some("1")));
+        assert!(is_env_truthy(Some("true")));
+        assert!(is_env_truthy(Some("yes")));
     }
 }

@@ -3,9 +3,24 @@
 //! `MaxTurnsReached` carries the byte-locked Display literal
 //! `"Reached maximum number of turns (<n>)"` — verified against
 //! `claude-code/src/QueryEngine.ts:870` on 2026-05-25.
+//!
+//! Task 7: `RepeatedOverloaded` carries the byte-locked
+//! `"Repeated 529 Overloaded errors"` copy from
+//! `claude-code/src/services/api/errors.ts:166`.
 
 use llm_client::LlmError;
 use thiserror::Error;
+
+/// Byte-locked copy for the "Repeated 529 Overloaded errors" error message.
+///
+/// Locked against `claude-code/src/services/api/errors.ts:166`:
+/// ```ts
+/// export const REPEATED_529_ERROR_MESSAGE = 'Repeated 529 Overloaded errors'
+/// ```
+/// Thrown by `withRetry.ts:359-362` for external, non-sandbox callers when
+/// `consecutive_overloaded >= MAX_529_RETRIES` and no fallback model is
+/// configured.  The Rust equivalent is [`OrchestratorError::RepeatedOverloaded`].
+pub const REPEATED_529_ERROR_MESSAGE: &str = "Repeated 529 Overloaded errors";
 
 /// Failure modes of `ConversationOrchestrator::run_turn`.
 ///
@@ -63,11 +78,48 @@ pub enum OrchestratorError {
     /// `CancellationToken`. (M6-08)
     #[error("compaction cancelled")]
     CompactionCancelled,
+
+    /// The API returned `Overloaded` (529) on every retry attempt and
+    /// `consecutive_overloaded >= MAX_529_RETRIES` for an external,
+    /// non-sandbox caller with no fallback model configured.
+    ///
+    /// Display is byte-locked to `errors.ts:166`:
+    /// `"Repeated 529 Overloaded errors"` — do not change without a
+    /// corresponding spec amendment.
+    ///
+    /// Task 7 (claude.ts parity): produced by `ProviderApiAdapter` when the
+    /// external-non-sandbox terminal branch fires in `drive_non_stream_seeded`.
+    #[error("{}", REPEATED_529_ERROR_MESSAGE)]
+    RepeatedOverloaded,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Step 3b (Task 7): byte-locked copy for the "Repeated 529 Overloaded errors" error.
+    ///
+    /// Source: `claude-code/src/services/api/errors.ts:166`
+    /// ```ts
+    /// export const REPEATED_529_ERROR_MESSAGE = 'Repeated 529 Overloaded errors'
+    /// ```
+    /// Thrown by `withRetry.ts:359-362` for external, non-sandbox callers when
+    /// `consecutive_overloaded >= MAX_529_RETRIES` and no fallback model is configured.
+    #[test]
+    fn repeated_529_terminal_renders_byte_locked_copy() {
+        // Locked against errors.ts:166: REPEATED_529_ERROR_MESSAGE = 'Repeated 529 Overloaded errors'
+        assert_eq!(
+            REPEATED_529_ERROR_MESSAGE,
+            "Repeated 529 Overloaded errors",
+            "REPEATED_529_ERROR_MESSAGE constant must be byte-locked"
+        );
+        let err = OrchestratorError::RepeatedOverloaded;
+        assert_eq!(
+            err.to_string(),
+            "Repeated 529 Overloaded errors",
+            "OrchestratorError::RepeatedOverloaded must display the byte-locked copy"
+        );
+    }
 
     #[test]
     fn max_turns_reached_display_is_byte_locked_against_query_engine_ts_870() {

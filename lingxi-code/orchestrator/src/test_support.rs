@@ -28,6 +28,8 @@ pub struct MockApiClient {
     captured_msgs: Arc<Mutex<Vec<Vec<ConversationMessage>>>>,
     captured_systems: Arc<Mutex<Vec<Option<String>>>>,
     captured_tools: Arc<Mutex<Vec<Vec<serde_json::Value>>>>,
+    /// Task 7: seeds passed to `messages_create_seeded`; one entry per call.
+    captured_seeds: Arc<Mutex<Vec<u8>>>,
 }
 
 impl MockApiClient {
@@ -39,6 +41,7 @@ impl MockApiClient {
             captured_msgs: Arc::new(Mutex::new(Vec::new())),
             captured_systems: Arc::new(Mutex::new(Vec::new())),
             captured_tools: Arc::new(Mutex::new(Vec::new())),
+            captured_seeds: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -59,6 +62,12 @@ impl MockApiClient {
     /// support prompt-wiring assertions.
     pub async fn captured_systems(&self) -> Vec<Option<String>> {
         self.captured_systems.lock().await.clone()
+    }
+
+    /// Task 7: seeds from `messages_create_seeded` calls (one per call).
+    /// Empty when only `messages_create` was called.
+    pub async fn captured_seeds(&self) -> Vec<u8> {
+        self.captured_seeds.lock().await.clone()
     }
 
     /// Number of responses still queued.
@@ -86,6 +95,23 @@ impl OrchestratorApiClient for MockApiClient {
         q.pop_front().ok_or_else(|| LlmError::Transport {
             message: "mock script exhausted".into(),
         })
+    }
+
+    /// Task 7: captures the seed for assertion in streaming-fallback tests.
+    async fn messages_create_seeded(
+        &self,
+        model: &str,
+        system: Option<&str>,
+        msgs: Vec<ConversationMessage>,
+        tools: Vec<serde_json::Value>,
+        initial_consecutive_overloaded: u8,
+    ) -> Result<LlmResponse, LlmError> {
+        self.captured_seeds
+            .lock()
+            .await
+            .push(initial_consecutive_overloaded);
+        // Delegate to the plain seam so the queue logic is reused.
+        self.messages_create(model, system, msgs, tools).await
     }
 }
 

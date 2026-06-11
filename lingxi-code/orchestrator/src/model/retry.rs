@@ -103,6 +103,15 @@ pub enum DriveStep {
     },
     /// Surface the error to the caller.
     Terminal,
+    /// Surface a "Repeated 529 Overloaded errors" error to the caller.
+    ///
+    /// Emitted when `allow_fallback && consecutive_overloaded >= max_529_retries
+    /// && fallback_model.is_none() && is_external && !is_sandbox` — the external
+    /// non-sandbox terminal branch (TS `withRetry.ts:354-362`). Distinct from
+    /// [`Terminal`] so callers can produce the byte-locked
+    /// `REPEATED_529_ERROR_MESSAGE` copy (`errors.ts:166`) without needing to
+    /// re-inspect the [`RetryState`].
+    RepeatedOverloaded,
 }
 
 /// Per-call mutable retry state (attempts, consecutive overloads).
@@ -228,10 +237,11 @@ pub fn next_step(
                         fallback_model: fallback.clone(),
                     };
                 }
-                // api-client withRetry.ts:354-359 — external, non-sandbox, no fallback
-                // configured → terminate immediately rather than exhausting budget.
+                // api-client withRetry.ts:354-362 — external, non-sandbox, no fallback
+                // configured → terminate immediately with the byte-locked
+                // "Repeated 529 Overloaded errors" copy (errors.ts:166).
                 if ctl.is_external && !ctl.is_sandbox {
-                    return DriveStep::Terminal;
+                    return DriveStep::RepeatedOverloaded;
                 }
                 // Neither branch applies (internal or sandbox) → fall through to the
                 // normal budget-driven retry path.
@@ -521,7 +531,11 @@ mod next_step_tests {
 
     /// api-client gate: `allow_fallback && consecutive_529 >= max_529_retries
     ///   && fallback_model.is_none() && is_external && !is_sandbox`
-    /// → Terminal immediately (does not wait for budget exhaustion).
+    /// → `RepeatedOverloaded` immediately (does not wait for budget exhaustion).
+    ///
+    /// The `RepeatedOverloaded` step is distinct from `Terminal` so the adapter
+    /// can produce the byte-locked `"Repeated 529 Overloaded errors"` copy
+    /// (`errors.ts:166`, TS `withRetry.ts:359-362`).
     #[test]
     fn overloaded_external_without_fallback_terminates_at_threshold() {
         let mut state = RetryState::default();
@@ -546,7 +560,7 @@ mod next_step_tests {
             "attempt 2 should be RetryAfter, got {s2:?}"
         );
         // Attempt 3: consecutive_overloaded reaches MAX_529_RETRIES (3).
-        // External + no-sandbox + no-fallback → Terminal (before budget exhaustion).
+        // External + no-sandbox + no-fallback → RepeatedOverloaded (before budget exhaustion).
         assert_eq!(
             state.attempt, 2,
             "should have used 2 budget slots (not budget exhausted)"
@@ -554,8 +568,8 @@ mod next_step_tests {
         let s3 = next_step(&mut state, &ctl, &LlmError::Overloaded, 0);
         assert_eq!(
             s3,
-            DriveStep::Terminal,
-            "external no-fallback at threshold must be Terminal, got {s3:?}"
+            DriveStep::RepeatedOverloaded,
+            "external no-fallback at threshold must be RepeatedOverloaded, got {s3:?}"
         );
     }
 

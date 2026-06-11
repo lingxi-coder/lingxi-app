@@ -913,7 +913,7 @@ async fn handle_max_output_tokens(
 /// is interpreted as a JSON string and deserialized via `ToolUseId`'s
 /// `#[serde(transparent)]` UUID impl; if it fails a fresh UUID is minted to
 /// keep history coherent.
-fn translate_response_blocks(content: &[LlmContentBlock]) -> Vec<ContentBlock> {
+pub(crate) fn translate_response_blocks(content: &[LlmContentBlock]) -> Vec<ContentBlock> {
     use protocol::ToolUseId;
     content
         .iter()

@@ -285,14 +285,32 @@ impl ProviderApiAdapter {
     #[allow(clippy::too_many_lines)]
     async fn drive_non_stream(
         &self,
+        req: LlmRequest,
+        retry_control: RetryControl,
+    ) -> Result<LlmResponse, LlmError> {
+        self.drive_non_stream_seeded(req, retry_control, 0).await
+    }
+
+    /// Non-stream retry driver with a pre-seeded `consecutive_overloaded` counter.
+    ///
+    /// The seed is set to 1 when this call is a non-streaming fallback triggered by
+    /// a mid-stream `LlmError::Overloaded` — mirroring TS `claude.ts:2559`
+    /// (`initialConsecutive529Errors: is529Error(streamingError) ? 1 : 0`).
+    #[allow(clippy::too_many_lines)]
+    async fn drive_non_stream_seeded(
+        &self,
         mut req: LlmRequest,
         retry_control: RetryControl,
+        initial_consecutive_overloaded: u8,
     ) -> Result<LlmResponse, LlmError> {
         let request_id = new_request_id();
         let started = Instant::now();
         telemetry::emit_started(&self.analytics, &req.model, &request_id, false).await;
 
-        let mut state = RetryState::default();
+        let mut state = RetryState {
+            consecutive_overloaded: initial_consecutive_overloaded,
+            ..RetryState::default()
+        };
         // thinking_budget: Task 6 drives with 0; extended-thinking wiring in Task 10+.
         let thinking_budget: u32 = req.reasoning.map_or(0, |r| r.budget_tokens);
 
@@ -420,7 +438,7 @@ impl ProviderApiAdapter {
                                     req.model = fallback_model;
                                     continue;
                                 }
-                                DriveStep::Terminal => {
+                                DriveStep::Terminal | DriveStep::RepeatedOverloaded => {
                                     telemetry::emit_failed(
                                         &self.analytics,
                                         &req.model,
@@ -638,6 +656,30 @@ impl OrchestratorApiClient for ProviderApiAdapter {
             ..RetryControl::default()
         };
         self.drive_non_stream(req, ctl).await
+    }
+
+    /// Non-streaming call seeded with a pre-counted consecutive-529 value.
+    ///
+    /// Used by the mid-stream 529 fallback (Task 7): the streaming 529 that
+    /// triggered the fallback is pre-counted into the retry budget so total
+    /// 529s-before-fallback is consistent whether the overload was hit in
+    /// streaming or non-streaming mode.  Mirrors TS `claude.ts:2559`
+    /// (`initialConsecutive529Errors: is529Error(streamingError) ? 1 : 0`).
+    async fn messages_create_seeded(
+        &self,
+        model: &str,
+        system: Option<&str>,
+        msgs: Vec<ConversationMessage>,
+        tools: Vec<serde_json::Value>,
+        initial_consecutive_overloaded: u8,
+    ) -> Result<LlmResponse, LlmError> {
+        let req = self.build_request(model, system, msgs, tools, false, None)?;
+        let ctl = RetryControl {
+            primary_model: model.to_string(),
+            ..RetryControl::default()
+        };
+        self.drive_non_stream_seeded(req, ctl, initial_consecutive_overloaded)
+            .await
     }
 
     fn available_models(&self) -> Vec<String> {

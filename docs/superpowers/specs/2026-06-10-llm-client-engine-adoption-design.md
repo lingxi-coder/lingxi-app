@@ -1,7 +1,7 @@
 # Engine adoption of llm-client (full replacement of api-client) — design
 
 Date: 2026-06-10
-Status: approved (user), revision 2.5 — 3a + 3b + 3c DONE; llm-client adoption COMPLETE end-to-end.
+Status: approved (user), revision 2.6 — future-work batch 1 COMPLETE.
 
 **Revision history:**
 - 2.2 — no intermediate policy crate; supersedes api-client entirely with no backwards compatibility.
@@ -21,6 +21,10 @@ Status: approved (user), revision 2.5 — 3a + 3b + 3c DONE; llm-client adoption
   Remaining future work: wire `routing.fallback`/`routing.retry` to the fallback/retry
   drivers; `AwsSigV4`/`GcpToken`/`AzureToken` auth signing; streaming error-path headers
   (reqwest error arm carries none); per-profile pricing overrides from settings.
+- 2.6 — Future-work batch 1 COMPLETE (see §Future work — batch 1 detail below). Remaining
+  (batch 2 candidates): Vertex/Bedrock codecs + AWS event-stream framing, OpenAI document
+  parts, Gemini File API ImageUrl, fallback chains beyond chain[0], rate-limit TUI surface,
+  streaming-path CostTracker recording (real gap — see streaming-cost evidence note below).
 
 ## Goal
 
@@ -238,3 +242,109 @@ Each phase lands with the full workspace compiling and green.
   transport failures to `StreamInterrupted` (non-retryable) — matches the
   old client's no-replay-after-events behavior; the retry driver only
   retries connect-phase failures.
+
+## Future work — batch 1 detail (rev 2.6, merged to main)
+
+### fw-T1 — routing.fallback/retry wiring + settings validation
+
+`routing.fallback` is a per-model fallback chain; only chain[0] (the first
+fallback target) is consumed by the driver in batch 1. `routing.retry` has
+fields `maxAttempts` and `backoffMs`; env vars take precedence over settings
+take precedence over compiled-in defaults (standard three-tier precedence).
+`backoffMs = 0` is rejected at settings-parse time. `baseUrl` and `apiKeyEnv`
+are now required fields in a `modelProviders` profile entry (previously
+optional with silent defaults).
+
+### fw-T2 — per-profile pricing overrides
+
+A USD-per-million-tokens shape (`input`, `output`, `cacheRead`, `cacheWrite`)
+may be specified per `modelProviders` profile in settings. This overrides the
+built-in catalog for that profile's models. **Limitation**: the `"anthropic"`
+profile name is reserved for the built-in Anthropic provider; overriding
+prices for built-in Anthropic model names requires declaring a second
+`anthropic`-typed profile with a distinct name and listing those models there.
+Profiles that declare `pricing` but name an unknown provider are rejected at
+parse time.
+
+### fw-T3 — header observability + cleanups
+
+- Streaming error-arm now surfaces real HTTP response headers (previously
+  the reqwest error arm carried none); the adapter surfaces them via the
+  `last_rate_limit_info` getter on the adapter.
+- 2xx responses with a `Retry-After` or `x-ratelimit-*` header are tracked
+  as soft rate-limit signals even when the status is success (2xx rate-limit
+  tracking).
+- Stream telemetry twins: `emit_started`/`emit_succeeded`/`emit_failed`
+  events fire on the streaming path as well as the batched path (previously
+  only the batched path fired them).
+- Dead `ServerError` variant removed from the error taxonomy (was unused
+  after the LlmError unification in 3c).
+
+### fw-T4 — codec backlog
+
+- **HTTP-date `Retry-After`**: llm-client now parses both the `delay-seconds`
+  form and the `HTTP-date` form of `Retry-After` response headers.
+- **OpenAI content-array decode**: `messages_create` responses whose `content`
+  field is a JSON array (multi-part) are decoded correctly; previously only
+  the string form was handled.
+- **Image encode (data-URI)**: `ContentBlock::Image` with a `data:` URI source
+  is encoded for OpenAI (base64-stripped, MIME type passed through). Document
+  blocks are still rejected for OpenAI (no document support in Chat API).
+- **Gemini inline_data image + document encode**: both image and document
+  inline_data parts are encoded for Gemini; `tool_choice` is wired for Gemini
+  (previously silently dropped).
+- **Anthropic response_format**: kept as a rejected field (beta-only
+  `output_config` available in TS `sidequery.ts:190`; not yet surfaced in the
+  Rust codec — documented divergence, not a bug).
+
+### fw-T5 — cloud auth (SigV4 + GCP + Azure) + AzureOpenAi codec
+
+- **AwsSigV4**: implemented from scratch with AWS official test vectors.
+  Hardening: query-string values are decode-then-re-encode normalized to
+  RFC3986 percent-encoding; path segments are double-percent-encoded per SigV4
+  spec; header values are trimall-normalized; null-body canonical hash uses the
+  empty-string SHA256 (not the missing-body hash); clock is injectable for
+  deterministic tests.
+- **GcpToken**: Bearer-token auth via GCP service-account or metadata-server
+  flow, surfaced as `CredentialProvider`.
+- **AzureToken**: Azure Entra token injected as `api-key` header (Azure
+  OpenAI's expected header name for token auth).
+- **AzureOpenAi codec**: deployment-URL construction (base URL + deployment
+  name suffix), model field stripped from the wire request (Azure derives model
+  from the deployment URL). The settings type `"azure-openai"` maps to this
+  codec.
+
+### Streaming-cost evidence (Job 1 conclusion, rev 2.6)
+
+**Verdict: real gap — streaming turns are NEVER billed to `CostTracker`.**
+
+Evidence:
+- `orchestrator/src/turn_loop.rs:381` — sole call site of
+  `CostTracker::record_api_response_v2` + `api_calls_recorded.fetch_add`; this
+  is the **non-streaming** (batched) path only, inside `execute_one_turn`.
+- `orchestrator/src/conversation.rs:1765` — `try_run_turn_streaming` loop
+  calls `pump_stream` then processes `PumpedTurn`, but contains **no**
+  `record_api_response_v2` call and never increments `api_calls_recorded`
+  (grep returns zero matches for either identifier in `conversation.rs`
+  outside of field declarations at lines 311/424/924).
+- `orchestrator/src/streaming_loop.rs:54` — `PumpedTurn.output_tokens` carries
+  only the final `MessageDelta` output-token count. The full `LlmUsage`
+  (input tokens + cache read + cache write) is consumed by
+  `emit_usage_if_present` at `event_router.rs:170-171` and discarded; it is
+  not stored in `PumpedTurn`.
+- Secondary gap: `LlmResponse.cost` is populated by the estimator in
+  `ProviderApiAdapter::decode_response` (non-streaming path). The streaming
+  path never passes through `decode_response`, so streaming turns also lack
+  the `LlmResponse.cost` estimate on the response object.
+
+**Batch 2 work item**: wire `record_api_response_v2` in
+`try_run_turn_streaming` after each `pump_stream` call. Requires: (a) storing
+the full `LlmUsage` in `PumpedTurn` (add field; populate from the
+`MessageDelta` usage in `event_router.rs:162-182`); (b) calling
+`record_api_response_v2` + `api_calls_recorded.fetch_add` after `pump_stream`
+returns in `conversation.rs`, mirroring `turn_loop.rs:375-393`. The non-stream
+fallback path (`llm_response_to_pumped_turn`, `conversation.rs:2590`) already
+has the full `LlmResponse.usage`; it should call `record_api_response_v2`
+there too. Test: add a streaming-turn fixture to
+`cost/tests/cost_pipeline_integration_test.rs` asserting that
+`snapshot_cost_real()` shows non-zero usage after a streaming turn.

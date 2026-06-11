@@ -3750,7 +3750,7 @@ mod task7_midstream_fallback_tests {
     /// read the same variable concurrently.  Tokio runs `#[tokio::test]` functions
     /// in the same process and may schedule them in parallel; holding this lock for
     /// the duration of each test makes the pair race-free without any new crate dep.
-    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
     /// Build a one-ContentBlockStart-then-Err(Overloaded) stream: the first
     /// event is yielded successfully (proving partial events arrived), then the
@@ -3764,7 +3764,7 @@ mod task7_midstream_fallback_tests {
         ]
     }
 
-    /// Build an end_turn non-streaming response for the fallback.
+    /// Build an `end_turn` non-streaming response for the fallback.
     fn fallback_response() -> llm_client::LlmResponse {
         mock_message_response(
             vec![LlmContentBlock::Text {
@@ -3787,9 +3787,10 @@ mod task7_midstream_fallback_tests {
     #[tokio::test]
     async fn midstream_529_triggers_nonstreaming_fallback() {
         // Serialize with the sibling test that also reads/writes DISABLE_FALLBACK_ENV.
-        // `set_var`/`remove_var` are not thread-safe; the mutex makes the pair race-free
-        // without introducing a new crate dependency (serial_test or similar).
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // `set_var`/`remove_var` are not thread-safe; the (tokio) mutex makes the
+        // pair race-free without a new crate dependency, and its guard is safe to
+        // hold across the .await points below.
+        let _guard = ENV_LOCK.lock().await;
         // Ensure fallback is ENABLED for this test.
         std::env::remove_var(DISABLE_FALLBACK_ENV);
 
@@ -3830,11 +3831,10 @@ mod task7_midstream_fallback_tests {
         // The output must contain "fallback body" (from the non-streaming response),
         // NOT just "partial" (the partial stream events are discarded).
         let events = output.snapshot().await;
-        use traits::OutputEvent;
         let texts: Vec<_> = events
             .iter()
             .filter_map(|e| match e {
-                OutputEvent::Text { text } => Some(text.as_str()),
+                traits::OutputEvent::Text { text } => Some(text.as_str()),
                 _ => None,
             })
             .collect();
@@ -3887,9 +3887,10 @@ mod task7_midstream_fallback_tests {
     #[tokio::test]
     async fn midstream_529_propagates_when_fallback_disabled() {
         // Serialize with the sibling test that also reads/writes DISABLE_FALLBACK_ENV.
-        // `set_var`/`remove_var` are not thread-safe; the mutex makes the pair race-free
-        // without introducing a new crate dependency (serial_test or similar).
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // `set_var`/`remove_var` are not thread-safe; the (tokio) mutex makes the
+        // pair race-free without a new crate dependency, and its guard is safe to
+        // hold across the .await points below.
+        let _guard = ENV_LOCK.lock().await;
         // Set the disable flag for this test.
         std::env::set_var(DISABLE_FALLBACK_ENV, "1");
 

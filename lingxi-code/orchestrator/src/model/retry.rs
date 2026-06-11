@@ -1297,7 +1297,7 @@ mod resolve_retry_control_tests {
         assert!(ctl.allow_fallback, "non-subscriber + opus → allow_fallback");
     }
 
-    /// Subscriber + Opus model → `allow_fallback = false` (unless FALLBACK_FOR_ALL).
+    /// Subscriber + Opus model → `allow_fallback = false` (unless `FALLBACK_FOR_ALL`).
     #[test]
     fn subscriber_opus_no_fallback_unless_env() {
         let ctl = resolve_retry_control(

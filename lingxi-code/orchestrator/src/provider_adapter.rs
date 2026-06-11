@@ -483,7 +483,11 @@ impl ProviderApiAdapter {
         let request_id = new_request_id();
         telemetry::emit_started(&self.analytics, &req.model, &request_id, true).await;
 
-        let mut state = RetryState::default();
+        let mut state = RetryState {
+            is_subscriber: self.subscriber.is_subscriber,
+            is_enterprise: self.subscriber.is_enterprise,
+            ..RetryState::default()
+        };
         let ctl = RetryControl::default();
         let thinking_budget: u32 = req.reasoning.map_or(0, |r| r.budget_tokens);
 

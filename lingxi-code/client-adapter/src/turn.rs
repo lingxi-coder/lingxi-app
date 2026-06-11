@@ -342,6 +342,7 @@ mod tests {
             ],
             tool_uses: Vec::new(),
             stop_reason: Some("end_turn".into()),
+            usage: None,
         };
 
         match message_complete_event(&turn) {
@@ -385,6 +386,7 @@ mod tests {
             ],
             tool_uses: Vec::new(),
             stop_reason: None,
+            usage: None,
         };
         let msg = synthesize_message(&turn);
         assert_eq!(
@@ -460,6 +462,7 @@ mod tests {
             assistant_blocks: vec![ContentBlock::Text { text: "hi".into() }],
             tool_uses: Vec::new(),
             stop_reason: Some("end_turn".into()),
+            usage: None,
         };
         wrapper.complete(Ok(turn)).await;
 

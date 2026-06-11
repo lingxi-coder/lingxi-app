@@ -42,6 +42,20 @@ pub enum Credential {
     ApiKey(String),
     /// Bearer or OAuth access token.
     BearerToken(String),
+    /// AWS `SigV4` signing credentials.
+    ///
+    /// For `EnvCredentialProvider`, `SigV4` is not supported — use a
+    /// `StaticCredentialProvider` or a host-managed credential store instead
+    /// (loading them requires knowing the three fields together, which the
+    /// single-env-variable model cannot express).
+    AwsSigV4 {
+        /// AWS access key ID.
+        access_key_id: String,
+        /// AWS secret access key.
+        secret_access_key: String,
+        /// Optional session token (for temporary credentials / STS).
+        session_token: Option<String>,
+    },
 }
 
 impl fmt::Debug for Credential {
@@ -51,6 +65,12 @@ impl fmt::Debug for Credential {
             Self::BearerToken(_) => formatter
                 .debug_tuple("BearerToken")
                 .field(&"[REDACTED]")
+                .finish(),
+            Self::AwsSigV4 { .. } => formatter
+                .debug_struct("AwsSigV4")
+                .field("access_key_id", &"[REDACTED]")
+                .field("secret_access_key", &"[REDACTED]")
+                .field("session_token", &"[REDACTED]")
                 .finish(),
         }
     }

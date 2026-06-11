@@ -168,17 +168,21 @@ pub struct SettingsJson {
     /// Object-merge field (deep-merge). `LingXi` extension: routing config
     /// for model aliases, fallback chains, and retry policy. Shape:
     /// `{ "aliases": {alias: "profile/model"},
-    ///    "fallback": {key: ["profile/model", …]},
+    ///    "fallback": {"<primary-model-or-alias>": ["profile/model", …]},
     ///    "retry": {"maxAttempts": n, "backoffMs": n} }`.
     ///
-    /// **Wiring status (3c-T2):**
+    /// **Wiring status (batch-1 T1):**
     /// - `aliases`: **WIRED** — each alias is pushed onto the target
     ///   `ModelProfile` (resolved across all configured + builtin profiles).
-    /// - `fallback`: **INERT** — fallback model comes from
-    ///   `DesktopConfig.fallback_model` / argv today; wiring it here is future
-    ///   work.
-    /// - `retry`: **INERT** — retry policy comes from
-    ///   `CLAUDE_CODE_MAX_RETRIES`; wiring it here is future work.
+    /// - `fallback`: **WIRED** — parsed by `platform_common::parse_routing_overrides`
+    ///   and threaded into the adapter as per-model fallback overrides.
+    ///   Per-model entry wins over the global `DesktopConfig.fallback_model` /
+    ///   argv fallback.  Only chain[0] is used; longer chains log a warning.
+    /// - `retry.maxAttempts`: **WIRED** — sets `RetryControl.max_retries`.
+    ///   Precedence: `CLAUDE_CODE_MAX_RETRIES` env > `maxAttempts` > default (10).
+    /// - `retry.backoffMs`: **WIRED** — scales the jitter ladder's first rung.
+    ///   Default `[500, 1000, 2000]` ms; `backoffMs=1000` → `[1000, 2000, 4000]`.
+    ///   Jitter ±20% still applies.  Server-sent `Retry-After` is never scaled.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub routing: Option<Value>,
 }

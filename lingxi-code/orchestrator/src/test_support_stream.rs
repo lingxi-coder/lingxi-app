@@ -153,6 +153,26 @@ pub fn message_start(id: &str, model: &str) -> LlmEvent {
     }
 }
 
+/// `message_start` event with an explicit `usage` snapshot.
+///
+/// On the real Anthropic wire, `message_start.usage` carries the
+/// `input_tokens` + cache counts; `output_tokens` is `0` here and
+/// arrives later in `message_delta.usage`.
+#[must_use]
+pub fn message_start_with_usage(id: &str, model: &str, usage: Usage) -> LlmEvent {
+    LlmEvent::MessageStart {
+        response: Box::new(LlmResponse {
+            id: id.to_string(),
+            model: model.to_string(),
+            content: Vec::new(),
+            stop_reason: None,
+            usage,
+            cost: None,
+            provider_metadata: serde_json::Value::Null,
+        }),
+    }
+}
+
 /// `content_block_start` for a `text` block at `index`.
 #[must_use]
 pub fn content_block_start_text(index: u32) -> LlmEvent {

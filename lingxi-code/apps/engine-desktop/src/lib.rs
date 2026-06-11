@@ -896,7 +896,7 @@ fn oauth_subscriber_flag(api_key_present: bool, auth_token_present: bool, scopes
 // `platform_common::llm_config` so both composition roots share the same
 // model table and settings-wiring logic.  The re-exports make the names
 // available locally without changing any call site.
-use platform_common::{apply_settings_providers, builtin_anthropic_config};
+use platform_common::{apply_settings_providers, builtin_anthropic_config, parse_routing_overrides};
 
 /// Load the merged `settings.outputStyle` (project + user + env layers) for the
 /// given project dir. Mirrors the CLI's `load_routing`/`load_provider_profiles`
@@ -1025,7 +1025,7 @@ pub async fn build(
     //       available to the orchestrator.  Errors are logged and silently
     //       dropped (a bad `providers` entry must NOT prevent the engine from
     //       starting with the built-in profile still functional).
-    let llm_client = {
+    let (llm_client, routing_overrides, pricing_overrides) = {
         let mut cfg_obj = builtin_anthropic_config(&cfg.api_base, llm_oauth_path);
         // Run whenever EITHER key is present: a routing-only settings file
         // (aliases onto builtin models, no custom providers) must still apply.
@@ -1040,31 +1040,61 @@ pub async fn build(
                 tracing::warn!(error = %e, "settings providers/routing entry rejected; earlier entries and the built-in profile remain active");
             }
         }
+        // Parse routing overrides (fallback/retry) AFTER providers are applied so
+        // cross-profile fallback targets can be resolved against the full config.
+        let routing_overrides = cfg.routing.as_ref().and_then(|r| {
+            match parse_routing_overrides(r, &cfg_obj) {
+                Ok(o) => Some(o),
+                Err(e) => {
+                    tracing::warn!(error = %e, "routing.fallback/retry overrides rejected; using defaults");
+                    None
+                }
+            }
+        }).unwrap_or_default();
+        // Extract per-profile pricing overrides before cfg_obj is consumed by
+        // DefaultLlmClient::from_config.  Each entry carries (provider_id,
+        // billing_model, TokenPricing) so the cost estimator block can apply them
+        // onto the llm_client catalog after the cost-crate bridge populates it.
+        let pricing_overrides: Vec<(llm_client::ProviderId, String, llm_client::TokenPricing)> = {
+            cfg_obj.providers.iter().flat_map(|p| {
+                p.pricing.overrides.iter().filter_map(|(model_id, tp)| {
+                    // Resolve display_model → billing_model for the estimator key.
+                    p.models.iter()
+                        .find(|m| m.display_model == *model_id)
+                        .map(|m| (p.provider_id.clone(), m.billing_model.clone(), *tp))
+                })
+            }).collect()
+        };
         let mut client = DefaultLlmClient::from_config(cfg_obj)
             .map_err(|e| BuildError::ApiBase(e.to_string()))?;
         if let Some(auth_state) = llm_oauth_state {
             let driver = Arc::new(RefreshDriver::new(auth_state));
             client = client.with_credential_provider(Arc::new(OAuthCredentialProvider::new(driver)));
         }
-        Arc::new(client)
+        (Arc::new(client), routing_overrides, pricing_overrides)
     };
     let subscriber_state = SubscriberState { is_subscriber, is_enterprise: false };
 
     // 3c-T3: build the cost estimator from the builtin reference catalog so
     // LlmResponse.cost is populated on every successful decode.  Unpriced /
     // unknown models leave cost = None (never an error; CostTracker path unchanged).
+    // T2: apply per-profile pricing overrides from settings onto the catalog so
+    // custom profiles get user-declared rates.
     let cost_estimator = {
         use llm_client::{CostEstimator, PricingPolicy};
         use orchestrator::cost_wiring::llm_catalog_from_cost;
         let cost_cat = cost::pricing::PricingCatalog::builtin_reference();
-        let llm_cat = llm_catalog_from_cost(&cost_cat);
+        let mut llm_cat = llm_catalog_from_cost(&cost_cat);
+        for (provider_id, billing_model, tp) in &pricing_overrides {
+            llm_cat.add_override(provider_id.clone(), billing_model.clone(), *tp);
+        }
         Arc::new(CostEstimator::new(llm_cat, PricingPolicy::MarkUnestimated))
     };
 
     // Build the CONCRETE adapter so it can be coerced to BOTH the
     // orchestrator seam (`OrchestratorApiClient`) and the agent seam
     // (`agent::SubagentApiClient`). `ProviderApiAdapter` impls both.
-    let provider_adapter = Arc::new(ProviderApiAdapter::new_with_estimator(
+    let provider_adapter = Arc::new(ProviderApiAdapter::new_with_routing(
         llm_client,
         llm_transport,
         subscriber_state,
@@ -1073,6 +1103,9 @@ pub async fn build(
         Some(Arc::new(telemetry::AnalyticsBus::new())),
         cfg.fallback_model.clone(),
         Some(cost_estimator),
+        routing_overrides.fallback,
+        routing_overrides.max_retries,
+        routing_overrides.backoff_ms,
     ));
     let api_client: Arc<dyn OrchestratorApiClient> = provider_adapter.clone();
     let subagent_api: Arc<dyn agent::SubagentApiClient> = provider_adapter;
@@ -3071,6 +3104,96 @@ mod tests {
             aliased.map(|m| m.display_model).as_deref(),
             Some("claude-opus-4-7"),
             "routing-only alias must land on the builtin model"
+        );
+    }
+
+    // ── Task 2: per-profile pricing override end-to-end ───────────────────────
+
+    /// Full pipeline test: a settings-declared custom profile with a `"pricing"`
+    /// block flows through `apply_settings_providers` → extract overrides →
+    /// `llm_catalog_from_cost` → `add_override` → `CostEstimator`.
+    ///
+    /// The estimator must yield the user-declared override price (not the
+    /// built-in catalog price) for the custom model.  Asserted figure: 1M input
+    /// tokens × $2.50/M = $2.50 exactly.
+    #[test]
+    fn pricing_override_end_to_end_estimator_yields_overridden_cost() {
+        use llm_client::{CostEstimator, PricingModelRef, PricingPolicy, TokenUsage, Usage};
+        use orchestrator::cost_wiring::llm_catalog_from_cost;
+
+        // Build a ClientConfig with a custom "myprovider" profile that declares a
+        // pricing override for "my-model" at $2.50 input / $10.0 output.
+        let mut cfg_obj =
+            platform_common::builtin_anthropic_config("https://api.anthropic.com", false);
+        let providers: std::collections::BTreeMap<String, serde_json::Value> =
+            serde_json::from_str(r#"{
+                "myprovider": {
+                    "type": "openai",
+                    "baseUrl": "https://api.example.com/v1",
+                    "apiKeyEnv": "MY_API_KEY",
+                    "models": [{ "id": "my-model" }],
+                    "pricing": {
+                        "my-model": { "inputPerMtok": 2.50, "outputPerMtok": 10.0 }
+                    }
+                }
+            }"#)
+            .unwrap();
+
+        platform_common::apply_settings_providers(&mut cfg_obj, &providers, None)
+            .expect("apply_settings_providers must succeed");
+
+        // Extract pricing overrides (mirrors the build() block: display_model →
+        // billing_model resolution inside each profile).
+        let pricing_overrides: Vec<(llm_client::ProviderId, String, llm_client::TokenPricing)> =
+            cfg_obj.providers.iter().flat_map(|p| {
+                p.pricing.overrides.iter().filter_map(|(model_id, tp)| {
+                    p.models.iter()
+                        .find(|m| m.display_model == *model_id)
+                        .map(|m| (p.provider_id.clone(), m.billing_model.clone(), *tp))
+                })
+            }).collect();
+
+        assert_eq!(pricing_overrides.len(), 1, "one override expected");
+        let (ref prov_id, ref billing_model, _) = pricing_overrides[0];
+        assert_eq!(billing_model, "my-model");
+
+        // Build the catalog the same way build() does.
+        let cost_cat = cost::pricing::PricingCatalog::builtin_reference();
+        let mut llm_cat = llm_catalog_from_cost(&cost_cat);
+        for (provider_id, bm, tp) in &pricing_overrides {
+            llm_cat.add_override(provider_id.clone(), bm.clone(), *tp);
+        }
+        let estimator = CostEstimator::new(llm_cat, PricingPolicy::MarkUnestimated);
+
+        // Construct the PricingModelRef: the estimator key is (provider_id, billing_model).
+        let pricing_ref = PricingModelRef {
+            pricing_provider_id: prov_id.clone(),
+            billing_model: billing_model.clone(),
+            request_model: "my-model".to_string(),
+            display_model: "my-model".to_string(),
+        };
+        let usage = Usage {
+            billable_tokens: TokenUsage { input: 1_000_000, ..Default::default() },
+            ..Default::default()
+        };
+        let estimate = estimator.estimate(pricing_ref, &usage).expect("must yield cost for overridden model");
+
+        // Assert exact figure: 1M input × $2.50/M = $2.50
+        let input_cost = estimate.input_cost_usd.expect("input_cost_usd must be Some");
+        assert!(
+            (input_cost - 2.50).abs() < 1e-9,
+            "overridden input cost must be $2.50 (1M tokens × $2.50/M), got ${input_cost}"
+        );
+        assert_eq!(
+            estimate.pricing_source.as_deref(),
+            Some("override"),
+            "pricing_source must reflect that an override was used"
+        );
+        // Total: 1M input × $2.50 + 0 output = $2.50 exactly.
+        let total = estimate.total_cost_usd.expect("total_cost_usd must be Some");
+        assert!(
+            (total - 2.50).abs() < 1e-9,
+            "total cost must be $2.50, got ${total}"
         );
     }
 }

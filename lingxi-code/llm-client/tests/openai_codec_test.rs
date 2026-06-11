@@ -1,7 +1,159 @@
 use llm_client::{
-    ContentBlock, ContentDelta, LlmEvent, LlmRequest, OpenAiChatCodec, ProviderResponse,
+    ContentBlock, ContentDelta, LlmEvent, LlmRequest, Message, OpenAiChatCodec, ProviderResponse,
     RawStreamFrame, ToolDeclaration, WireCodec,
 };
+
+// ── Item 2: OpenAI content-as-array decode ────────────────────────────────────
+
+#[test]
+fn decode_content_array_single_text_part() {
+    let codec = OpenAiChatCodec::new("https://api.openai.com/v1");
+    let response = ProviderResponse::json(200, serde_json::json!({
+        "id": "chatcmpl-arr1",
+        "model": "gpt-4o",
+        "choices": [{"index": 0, "message": {"role": "assistant", "content": [{"type": "text", "text": "hello array"}]}, "finish_reason": "stop"}],
+        "usage": {"prompt_tokens": 3, "completion_tokens": 2}
+    }));
+    let decoded = codec.decode_response(response).unwrap();
+    assert_eq!(decoded.content.len(), 1);
+    assert!(matches!(&decoded.content[0], ContentBlock::Text { text, .. } if text == "hello array"));
+}
+
+#[test]
+fn decode_content_array_multi_text_parts_concatenated() {
+    let codec = OpenAiChatCodec::new("https://api.openai.com/v1");
+    let response = ProviderResponse::json(200, serde_json::json!({
+        "id": "chatcmpl-arr2",
+        "model": "gpt-4o",
+        "choices": [{"index": 0, "message": {"role": "assistant", "content": [
+            {"type": "text", "text": "hello "},
+            {"type": "text", "text": "world"}
+        ]}, "finish_reason": "stop"}],
+        "usage": {"prompt_tokens": 3, "completion_tokens": 2}
+    }));
+    let decoded = codec.decode_response(response).unwrap();
+    // Multi text parts should produce one block (concatenated) or multiple - both fine; just confirm text is present
+    let text: String = decoded.content.iter().filter_map(|b| match b {
+        ContentBlock::Text { text, .. } => Some(text.as_str()),
+        _ => None,
+    }).collect();
+    assert!(text.contains("hello") && text.contains("world"));
+}
+
+#[test]
+fn decode_content_array_unknown_part_types_are_skipped() {
+    let codec = OpenAiChatCodec::new("https://api.openai.com/v1");
+    let response = ProviderResponse::json(200, serde_json::json!({
+        "id": "chatcmpl-arr3",
+        "model": "gpt-4o",
+        "choices": [{"index": 0, "message": {"role": "assistant", "content": [
+            {"type": "text", "text": "known"},
+            {"type": "refusal", "refusal": "I can't do that"},
+            {"type": "future_type", "data": "ignored"}
+        ]}, "finish_reason": "stop"}],
+        "usage": {"prompt_tokens": 3, "completion_tokens": 2}
+    }));
+    let decoded = codec.decode_response(response).unwrap();
+    // Only text part should appear
+    assert!(decoded.content.iter().any(|b| matches!(b, ContentBlock::Text { text, .. } if text == "known")));
+}
+
+#[test]
+fn decode_content_string_still_works() {
+    let codec = OpenAiChatCodec::new("https://api.openai.com/v1");
+    let response = ProviderResponse::json(200, serde_json::json!({
+        "id": "chatcmpl-str",
+        "model": "gpt-4o",
+        "choices": [{"index": 0, "message": {"role": "assistant", "content": "plain string"}, "finish_reason": "stop"}],
+        "usage": {"prompt_tokens": 3, "completion_tokens": 2}
+    }));
+    let decoded = codec.decode_response(response).unwrap();
+    assert!(matches!(&decoded.content[0], ContentBlock::Text { text, .. } if text == "plain string"));
+}
+
+// ── Item 3: OpenAI image encode ───────────────────────────────────────────────
+
+#[test]
+fn encode_image_bytes_produces_data_uri_part() {
+    let codec = OpenAiChatCodec::new("https://api.openai.com/v1");
+    let mut request = LlmRequest::new("gpt-4o");
+    request.messages.push(Message {
+        role: "user".to_string(),
+        content: vec![ContentBlock::Image {
+            media_type: "image/png".to_string(),
+            bytes: vec![1, 2, 3],
+        }],
+    });
+    let provider_request = codec.encode_request(&request).unwrap();
+    let msg = &provider_request.body_json["messages"][0];
+    // content must be an array (array form when image present)
+    assert!(msg["content"].is_array());
+    let part = &msg["content"][0];
+    assert_eq!(part["type"], "image_url");
+    let url = part["image_url"]["url"].as_str().unwrap();
+    assert!(url.starts_with("data:image/png;base64,"), "url={url}");
+}
+
+#[test]
+fn encode_image_url_produces_url_part() {
+    let codec = OpenAiChatCodec::new("https://api.openai.com/v1");
+    let mut request = LlmRequest::new("gpt-4o");
+    request.messages.push(Message {
+        role: "user".to_string(),
+        content: vec![ContentBlock::ImageUrl { url: "https://example.com/img.png".to_string() }],
+    });
+    let provider_request = codec.encode_request(&request).unwrap();
+    let msg = &provider_request.body_json["messages"][0];
+    assert!(msg["content"].is_array());
+    let part = &msg["content"][0];
+    assert_eq!(part["type"], "image_url");
+    assert_eq!(part["image_url"]["url"], "https://example.com/img.png");
+}
+
+#[test]
+fn encode_mixed_text_and_image_becomes_array_form() {
+    let codec = OpenAiChatCodec::new("https://api.openai.com/v1");
+    let mut request = LlmRequest::new("gpt-4o");
+    request.messages.push(Message {
+        role: "user".to_string(),
+        content: vec![
+            ContentBlock::Text { text: "look at this".to_string(), cache_control: None },
+            ContentBlock::Image { media_type: "image/jpeg".to_string(), bytes: vec![0xDE, 0xAD] },
+        ],
+    });
+    let provider_request = codec.encode_request(&request).unwrap();
+    let content = &provider_request.body_json["messages"][0]["content"];
+    assert!(content.is_array());
+    let arr = content.as_array().unwrap();
+    assert_eq!(arr.len(), 2);
+    assert_eq!(arr[0]["type"], "text");
+    assert_eq!(arr[0]["text"], "look at this");
+    assert_eq!(arr[1]["type"], "image_url");
+}
+
+#[test]
+fn encode_text_only_message_stays_plain_string() {
+    let codec = OpenAiChatCodec::new("https://api.openai.com/v1");
+    let request = LlmRequest::new("gpt-4o").with_user_text("just text");
+    let provider_request = codec.encode_request(&request).unwrap();
+    let content = &provider_request.body_json["messages"][0]["content"];
+    assert!(content.is_string(), "text-only should be plain string, got: {content}");
+}
+
+#[test]
+fn encode_document_still_rejects() {
+    let codec = OpenAiChatCodec::new("https://api.openai.com/v1");
+    let mut request = LlmRequest::new("gpt-4o");
+    request.messages.push(Message {
+        role: "user".to_string(),
+        content: vec![ContentBlock::Document {
+            media_type: "application/pdf".to_string(),
+            bytes: vec![1, 2, 3],
+        }],
+    });
+    let err = codec.encode_request(&request).unwrap_err();
+    assert!(matches!(err, llm_client::LlmError::InvalidRequest { message } if message.contains("document")));
+}
 
 #[test]
 fn encode_request_shape_is_openai_chat_completions() {

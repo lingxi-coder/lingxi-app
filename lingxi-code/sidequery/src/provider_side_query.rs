@@ -113,6 +113,8 @@ impl ProviderSideQueryClient {
                     id: SIDEQUERY_CRED_ID.to_string(),
                 },
                 pricing: PricingConfig::default(),
+                signing: None,
+                azure: None,
                 // Wildcard model support: sidequery uses any model string the
                 // caller passes (e.g. "claude-haiku-4-5" for memory summaries,
                 // "claude-opus-4-6" for compaction). We register a catch-all

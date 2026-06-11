@@ -22,6 +22,8 @@ async fn client_builds_routes_from_config_and_lists_models() {
                 capabilities: Capabilities { streaming: true, tools: true, ..Default::default() },
             }],
             pricing: PricingConfig::default(),
+            signing: None,
+            azure: None,
         }],
     };
 
@@ -48,6 +50,8 @@ async fn prepare_returns_route_identity_and_encodes_resolved_request_model() {
                 capabilities: Capabilities { streaming: true, tools: true, ..Default::default() },
             }],
             pricing: PricingConfig::default(),
+            signing: None,
+            azure: None,
         }],
     };
 
@@ -78,6 +82,8 @@ fn duplicate_profile_names_are_rejected_during_client_construction() {
                     capabilities: Capabilities { streaming: true, tools: true, ..Default::default() },
                 }],
                 pricing: PricingConfig::default(),
+                signing: None,
+                azure: None,
             },
             ProviderProfile {
                 provider_id: ProviderId::AnthropicFirstParty,
@@ -94,6 +100,8 @@ fn duplicate_profile_names_are_rejected_during_client_construction() {
                     capabilities: Capabilities { streaming: true, tools: true, ..Default::default() },
                 }],
                 pricing: PricingConfig::default(),
+                signing: None,
+                azure: None,
             },
         ],
     };
@@ -120,6 +128,8 @@ fn unsupported_protocol_family_yields_actionable_config_error() {
                 capabilities: Capabilities::default(),
             }],
             pricing: PricingConfig::default(),
+            signing: None,
+            azure: None,
         }],
     };
 
@@ -150,6 +160,8 @@ async fn response_format_is_rejected_when_selected_model_lacks_structured_output
                 capabilities: Capabilities { streaming: true, tools: true, structured_output: false, ..Default::default() },
             }],
             pricing: PricingConfig::default(),
+            signing: None,
+            azure: None,
         }],
     };
 

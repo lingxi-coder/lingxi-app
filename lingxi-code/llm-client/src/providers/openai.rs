@@ -6,6 +6,7 @@ use crate::{
 
 use std::collections::BTreeMap;
 
+use base64::Engine;
 use serde_json::Value;
 
 #[derive(Debug, Clone)]
@@ -358,8 +359,10 @@ impl OpenAiStreamDecoder {
 
 fn encode_message(message: &crate::Message) -> Vec<Value> {
     let mut text = String::new();
+    let mut media_parts: Vec<Value> = Vec::new();
     let mut tool_calls = Vec::new();
     let mut messages = Vec::new();
+    let mut has_media = false;
 
     for block in &message.content {
         match block {
@@ -368,6 +371,22 @@ fn encode_message(message: &crate::Message) -> Vec<Value> {
                     text.push('\n');
                 }
                 text.push_str(block_text);
+            }
+            ContentBlock::Image { media_type, bytes } => {
+                has_media = true;
+                let b64 = base64::engine::general_purpose::STANDARD.encode(bytes);
+                let url = format!("data:{media_type};base64,{b64}");
+                media_parts.push(serde_json::json!({
+                    "type": "image_url",
+                    "image_url": {"url": url},
+                }));
+            }
+            ContentBlock::ImageUrl { url } => {
+                has_media = true;
+                media_parts.push(serde_json::json!({
+                    "type": "image_url",
+                    "image_url": {"url": url},
+                }));
             }
             ContentBlock::ToolCall { id, name, input } => tool_calls.push(serde_json::json!({
                 "id": id,
@@ -380,9 +399,11 @@ fn encode_message(message: &crate::Message) -> Vec<Value> {
             // OpenAI tool messages carry no error flag; the error text itself
             // is the model-visible signal, so is_error and cache_control are intentionally unused.
             ContentBlock::ToolResult { tool_call_id, output, .. } => {
-                if !text.is_empty() {
-                    messages.push(text_message(&message.role, &text));
+                if !text.is_empty() || !media_parts.is_empty() {
+                    messages.push(build_user_message(&message.role, &text, &media_parts, has_media));
                     text.clear();
+                    media_parts.clear();
+                    has_media = false;
                 }
                 if !tool_calls.is_empty() {
                     messages.push(assistant_tool_call_message(&message.role, &tool_calls));
@@ -394,9 +415,7 @@ fn encode_message(message: &crate::Message) -> Vec<Value> {
                     "content": tool_result_content(output),
                 }));
             }
-            ContentBlock::Image { .. }
-            | ContentBlock::ImageUrl { .. }
-            | ContentBlock::Document { .. }
+            ContentBlock::Document { .. }
             | ContentBlock::Reasoning { .. }
             | ContentBlock::RedactedThinking { .. }
             | ContentBlock::ServerToolUse { .. }
@@ -405,13 +424,34 @@ fn encode_message(message: &crate::Message) -> Vec<Value> {
         }
     }
 
-    if !text.is_empty() {
-        messages.push(text_message(&message.role, &text));
+    if !text.is_empty() || !media_parts.is_empty() {
+        messages.push(build_user_message(&message.role, &text, &media_parts, has_media));
     }
     if !tool_calls.is_empty() {
         messages.push(assistant_tool_call_message(&message.role, &tool_calls));
     }
     messages
+}
+
+/// Build a user/assistant message, using array form only when media is present.
+///
+/// Wire-stability invariant: text-only messages keep the plain-string form
+/// (`"content": "..."`) so existing downstream consumers are unaffected.
+fn build_user_message(role: &str, text: &str, media_parts: &[Value], has_media: bool) -> Value {
+    if !has_media {
+        // Plain-string form — preserves existing wire pins.
+        return text_message(role, text);
+    }
+    // Array form: text parts first, then media parts.
+    let mut parts: Vec<Value> = Vec::new();
+    if !text.is_empty() {
+        parts.push(serde_json::json!({"type": "text", "text": text}));
+    }
+    parts.extend_from_slice(media_parts);
+    serde_json::json!({
+        "role": role,
+        "content": parts,
+    })
 }
 
 fn text_message(role: &str, text: &str) -> Value {
@@ -477,14 +517,11 @@ fn reject_unsupported_content_blocks(request: &LlmRequest) -> Result<(), LlmErro
     for message in &request.messages {
         for block in &message.content {
             match block {
-                ContentBlock::Image { .. } | ContentBlock::ImageUrl { .. } => {
-                    return Err(LlmError::InvalidRequest {
-                        message: "OpenAiChatCodec does not encode image blocks yet".to_string(),
-                    });
-                }
+                // Image and ImageUrl are now supported — encoded as image_url parts.
                 ContentBlock::Document { .. } => {
                     return Err(LlmError::InvalidRequest {
-                        message: "OpenAiChatCodec does not encode document blocks yet".to_string(),
+                        // OpenAI chat/completions has no first-class document part.
+                        message: "OpenAiChatCodec does not encode document blocks (chat/completions has no document part type)".to_string(),
                     });
                 }
                 ContentBlock::Reasoning { .. } | ContentBlock::RedactedThinking { .. } => {
@@ -524,13 +561,30 @@ fn decode_response_body(body_json: Value) -> Result<LlmResponse, LlmError> {
         })?;
 
     let mut content = Vec::new();
-    if let Some(text) = message.get("content").and_then(Value::as_str) {
-        if !text.is_empty() {
+    match message.get("content") {
+        Some(Value::String(text)) if !text.is_empty() => {
             content.push(ContentBlock::Text {
-                text: text.to_string(),
+                text: text.clone(),
                 cache_control: None,
             });
         }
+        Some(Value::Array(parts)) => {
+            for part in parts {
+                // Only emit text parts; unknown/refusal/image parts are skipped
+                // (tolerant decode per OpenAI's extensible content-part schema).
+                if part.get("type").and_then(Value::as_str) == Some("text") {
+                    if let Some(text) = part.get("text").and_then(Value::as_str) {
+                        if !text.is_empty() {
+                            content.push(ContentBlock::Text {
+                                text: text.to_string(),
+                                cache_control: None,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+        _ => {}
     }
 
     if let Some(tool_calls) = message.get("tool_calls").and_then(Value::as_array) {

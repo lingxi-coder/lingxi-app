@@ -2003,6 +2003,34 @@ impl ConversationOrchestrator {
             // A3: accumulate this turn's output tokens (TS `getTurnOutputTokens()`).
             global_turn_tokens = global_turn_tokens.saturating_add(pumped.output_tokens);
 
+            // BILLING: record streaming-turn usage into CostTracker — mirrors the
+            // non-streaming path in `turn_loop.rs:375-393`. Uses the same
+            // `record_api_response_v2` function + arg semantics: `Duration::ZERO`
+            // (adapter doesn't surface per-call wall-clock) and `retries = 0`
+            // (retries are swallowed internally by the adapter, same as batch path).
+            if let Some(tracker) = self.cost_tracker.as_ref() {
+                if let Some(ref usage) = pumped.usage {
+                    let cost_usage = crate::cost_wiring::llm_usage_to_cost_usage(usage);
+                    let cache_read = usage.billable_tokens.cache_read;
+                    let cache_create = usage.billable_tokens.cache_write;
+                    let model_ref = crate::cost_wiring::model_ref_from_string(&model);
+                    let _cost = tracker
+                        .record_api_response_v2(
+                            model_ref,
+                            cost_usage,
+                            std::time::Duration::ZERO,
+                            0,    // retries — not yet exposed from the adapter
+                            cache_read,
+                            cache_create,
+                            false, // is_batch_request — streaming is never batch
+                            None,  // bus — orchestrator does not yet carry an AnalyticsBus
+                        )
+                        .await;
+                    self.api_calls_recorded
+                        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                }
+            }
+
             // In-Loop Compaction Batch 6: snapshot the cache-safe prompt prefix
             // after a successful stream (streaming twin of the batched save).
             // `session.history` here equals the streamed snapshot — the streaming
@@ -2594,6 +2622,10 @@ fn llm_response_to_pumped_turn(resp: &LlmResponse) -> crate::streaming_loop::Pum
 
     let output_tokens = resp.usage.billable_tokens.output;
     let stop_reason = resp.stop_reason.clone();
+    // BILLING: carry the full usage so the streaming turn loop records it
+    // in CostTracker. The non-streaming fallback issues a real messages_create
+    // call (seeded) whose response includes the authoritative usage.
+    let usage = Some(resp.usage.clone());
 
     // Translate LlmResponse content → protocol::ContentBlock (same as batched path).
     // Then split into (assistant_blocks, tool_uses): text/thinking go into
@@ -2625,6 +2657,7 @@ fn llm_response_to_pumped_turn(resp: &LlmResponse) -> crate::streaming_loop::Pum
         tool_uses,
         stop_reason,
         output_tokens,
+        usage,
     }
 }
 

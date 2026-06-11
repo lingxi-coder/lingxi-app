@@ -218,6 +218,8 @@ async fn bridge_drives_llm_client_event_stream_end_to_end() {
                 },
             }],
             pricing: llm_client::PricingConfig::default(),
+            signing: None,
+            azure: None,
         }],
     })
     .expect("client");

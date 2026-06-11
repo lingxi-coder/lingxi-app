@@ -14,17 +14,27 @@ pub enum PricingPolicy {
 }
 
 /// Per-million-token prices for independent billable buckets.
-#[derive(Debug, Clone, Copy, PartialEq)]
+///
+/// All fields are USD per million tokens (llm-client native unit).  Use
+/// [`TokenPricing::input_output`] to create a value with only input/output
+/// buckets set; remaining buckets default to `0.0`.
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct TokenPricing {
     /// Input-token price per million tokens.
+    #[serde(rename = "inputPerMtok")]
     pub input_per_million: f64,
     /// Output-token price per million tokens.
+    #[serde(rename = "outputPerMtok")]
     pub output_per_million: f64,
     /// Cache-write price per million tokens.
+    #[serde(rename = "cacheWritePerMtok", default)]
     pub cache_write_per_million: f64,
     /// Cache-read price per million tokens.
+    #[serde(rename = "cacheReadPerMtok", default)]
     pub cache_read_per_million: f64,
     /// Reasoning-token price per million tokens.
+    #[serde(rename = "reasoningPerMtok", default)]
     pub reasoning_per_million: f64,
 }
 
@@ -80,6 +90,23 @@ impl PricingCatalog {
         self.overrides
             .insert(PricingKey::new(provider_id, billing_model), pricing);
         self
+    }
+
+    /// Mutably insert an override entry (post-construction — mirrors
+    /// [`PricingCatalog::with_override`] but takes `&mut self` instead of
+    /// consuming `self`).
+    ///
+    /// Use in the build phase after `llm_catalog_from_cost` populates the
+    /// built-in prices, so settings-declared per-profile price overrides are
+    /// applied before handing the catalog to `CostEstimator::new`.
+    pub fn add_override(
+        &mut self,
+        provider_id: ProviderId,
+        billing_model: impl Into<String>,
+        pricing: TokenPricing,
+    ) {
+        self.overrides
+            .insert(PricingKey::new(provider_id, billing_model), pricing);
     }
 
     fn lookup(&self, pricing_model: &PricingModelRef) -> Option<(TokenPricing, &'static str)> {

@@ -273,6 +273,27 @@ pub fn resolve_retry_control(
     is_subscriber: bool,
     env: &ResolveRetryEnv,
 ) -> RetryControl {
+    resolve_retry_control_with_settings(model, fallback_model, is_subscriber, env, None)
+}
+
+/// Extended form of [`resolve_retry_control`] that additionally accepts a
+/// `settings_max_retries` value from `routing.retry.maxAttempts`.
+///
+/// ## Precedence
+///
+/// `CLAUDE_CODE_MAX_RETRIES` env **>** `settings_max_retries` **>** [`DEFAULT_MAX_RETRIES`].
+///
+/// When `env.max_retries` is present and parseable, it wins regardless of
+/// `settings_max_retries`.  When the env var is absent, `settings_max_retries`
+/// is used as the effective default before falling back to [`DEFAULT_MAX_RETRIES`].
+#[must_use]
+pub fn resolve_retry_control_with_settings(
+    model: &str,
+    fallback_model: Option<String>,
+    is_subscriber: bool,
+    env: &ResolveRetryEnv,
+    settings_max_retries: Option<u32>,
+) -> RetryControl {
     // TS raw `process.env.FALLBACK_FOR_ALL_PRIMARY_MODELS ||` — truthy means a
     // non-empty string; an empty string is falsy in JS.
     let fallback_for_all = env
@@ -284,8 +305,14 @@ pub fn resolve_retry_control(
     let is_external = env.user_type.as_deref() == Some("external");
     // TS `!!process.env.IS_SANDBOX` — present (defined) is sandboxed.
     let is_sandbox = env.is_sandbox_defined;
-    // `CLAUDE_CODE_MAX_RETRIES` → withRetry.ts:789-796 `getMaxRetries`.
-    let max_retries = max_retries_from_env_value(env.max_retries.as_deref());
+    // Precedence: env > settings > DEFAULT.
+    let max_retries = if env.max_retries.is_some() {
+        // Env present: it wins (parse or default).
+        max_retries_from_env_value(env.max_retries.as_deref())
+    } else {
+        // Env absent: settings value or DEFAULT.
+        settings_max_retries.unwrap_or(DEFAULT_MAX_RETRIES)
+    };
     RetryControl {
         fallback_model,
         primary_model: model.to_string(),
@@ -344,6 +371,24 @@ pub fn next_step(
     error: &llm_client::LlmError,
     thinking_budget: u32,
 ) -> DriveStep {
+    next_step_with_backoff(state, ctl, error, thinking_budget, None)
+}
+
+/// Extended form of [`next_step`] with an optional `backoff_ms` override for
+/// the jitter ladder's first rung.
+///
+/// When `backoff_ms` is `Some(b)`, the jitter ladder is scaled proportionally:
+/// `b / DEFAULT_BASE_DELAYS_MS[0]` ratio applied to each rung.  E.g.
+/// `backoff_ms = 1000` → `[1000, 2000, 4000]`.  Server-sent `retry_after`
+/// values are **never** scaled (they are used verbatim regardless of
+/// `backoff_ms`).
+pub fn next_step_with_backoff(
+    state: &mut RetryState,
+    ctl: &RetryControl,
+    error: &llm_client::LlmError,
+    thinking_budget: u32,
+    backoff_ms: Option<u64>,
+) -> DriveStep {
     use llm_client::LlmError;
 
     match error {
@@ -376,7 +421,7 @@ pub fn next_step(
                 return DriveStep::Terminal;
             }
 
-            let base = base_delay_ms(state.attempt);
+            let base = scaled_base_delay_ms(state.attempt, backoff_ms);
             state.attempt = state.attempt.saturating_add(1);
             DriveStep::RetryAfter(jittered_delay(base))
         }
@@ -399,8 +444,9 @@ pub fn next_step(
             }
 
             let delay = match retry_after {
+                // Server-sent delay is verbatim — never scaled by backoff_ms.
                 Some(d) => *d,
-                None => jittered_delay(base_delay_ms(state.attempt)),
+                None => jittered_delay(scaled_base_delay_ms(state.attempt, backoff_ms)),
             };
             state.attempt = state.attempt.saturating_add(1);
             DriveStep::RetryAfter(delay)
@@ -414,7 +460,7 @@ pub fn next_step(
                 return DriveStep::Terminal;
             }
 
-            let base = base_delay_ms(state.attempt);
+            let base = scaled_base_delay_ms(state.attempt, backoff_ms);
             state.attempt = state.attempt.saturating_add(1);
             DriveStep::RetryAfter(jittered_delay(base))
         }
@@ -453,9 +499,45 @@ pub fn next_step(
 
 /// Select the base delay for attempt index `attempt` from the default table,
 /// clamping to the last entry if the index is out of range.
-fn base_delay_ms(attempt: u8) -> u64 {
+pub(crate) fn base_delay_ms(attempt: u8) -> u64 {
     let idx = (attempt as usize).min(DEFAULT_BASE_DELAYS_MS.len() - 1);
     DEFAULT_BASE_DELAYS_MS[idx]
+}
+
+/// Select the base delay scaled by an optional custom `backoff_ms` value.
+///
+/// When `backoff_ms` is `None`, delegates to [`base_delay_ms`] for the
+/// default `[500, 1000, 2000]` ladder.
+///
+/// When `backoff_ms` is `Some(b)`, the ladder is scaled proportionally:
+/// `ratio = b / DEFAULT_BASE_DELAYS_MS[0]` (= b / 500), so each rung
+/// becomes `DEFAULT[i] * ratio`.  E.g. `backoff_ms = 1000` →
+/// `[1000, 2000, 4000]`.  Jitter ±20% still applies via the caller.
+///
+/// `ratio` is computed in `u64` arithmetic (no float) by multiplying first
+/// to avoid integer truncation issues.
+#[must_use]
+#[allow(
+    clippy::cast_possible_truncation,
+    reason = "scaling within reasonable ms ranges; overflow saturates to u64::MAX"
+)]
+pub fn scaled_base_delay_ms(attempt: u8, backoff_ms: Option<u64>) -> u64 {
+    let default = base_delay_ms(attempt);
+    match backoff_ms {
+        None => default,
+        Some(b) => {
+            // ratio = b / DEFAULT_BASE_DELAYS_MS[0], applied as integer multiply-then-divide.
+            // Use saturating arithmetic so extreme values don't wrap.  Floor at
+            // 1ms: settings parsing rejects backoffMs=0, but this is the last
+            // line of defense against a zero-delay tight retry loop (e.g. a
+            // future caller passing Some(0) directly).
+            default
+                .saturating_mul(b)
+                .checked_div(DEFAULT_BASE_DELAYS_MS[0])
+                .unwrap_or(default)
+                .max(1)
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1459,5 +1541,96 @@ mod resolve_retry_control_tests {
             ctl.max_retries, DEFAULT_MAX_RETRIES,
             "unparseable CLAUDE_CODE_MAX_RETRIES must default to {DEFAULT_MAX_RETRIES}"
         );
+    }
+
+    // ── Precedence: env > settings > default ──────────────────────────────────
+
+    /// `CLAUDE_CODE_MAX_RETRIES` env beats `settings_max_retries`.
+    #[test]
+    fn env_beats_settings_max_retries() {
+        let env = ResolveRetryEnv {
+            max_retries: Some("2".to_string()), // env says 2
+            ..ResolveRetryEnv::default()
+        };
+        let ctl = resolve_retry_control_with_settings(SONNET_MODEL, None, false, &env, Some(7));
+        assert_eq!(
+            ctl.max_retries, 2,
+            "env(2) must beat settings(7)"
+        );
+    }
+
+    /// `settings_max_retries` beats `DEFAULT_MAX_RETRIES` when env absent.
+    #[test]
+    fn settings_beats_default_max_retries() {
+        let env = ResolveRetryEnv::default(); // no env var
+        let ctl = resolve_retry_control_with_settings(SONNET_MODEL, None, false, &env, Some(7));
+        assert_eq!(
+            ctl.max_retries, 7,
+            "settings(7) must beat default(10) when env absent"
+        );
+    }
+
+    /// When both env and settings absent, DEFAULT applies.
+    #[test]
+    fn neither_env_nor_settings_gives_default() {
+        let env = ResolveRetryEnv::default();
+        let ctl = resolve_retry_control_with_settings(SONNET_MODEL, None, false, &env, None);
+        assert_eq!(ctl.max_retries, DEFAULT_MAX_RETRIES);
+    }
+}
+
+#[cfg(test)]
+mod backoff_scaling_tests {
+    use super::*;
+
+    /// `scaled_base_delay_ms` with `None` matches `base_delay_ms`.
+    #[test]
+    fn scaled_none_matches_default() {
+        for attempt in 0u8..5 {
+            assert_eq!(
+                scaled_base_delay_ms(attempt, None),
+                base_delay_ms(attempt),
+                "scaled(None) must equal base_delay_ms for attempt={attempt}"
+            );
+        }
+    }
+
+    /// `backoff_ms=1000` → ladder `[1000, 2000, 4000]` (ratio = 1000/500 = 2).
+    #[test]
+    fn backoff_1000_scales_to_doubled_ladder() {
+        // DEFAULT [500, 1000, 2000] × 2 = [1000, 2000, 4000]
+        assert_eq!(scaled_base_delay_ms(0, Some(1000)), 1000);
+        assert_eq!(scaled_base_delay_ms(1, Some(1000)), 2000);
+        assert_eq!(scaled_base_delay_ms(2, Some(1000)), 4000);
+        // Clamp at last entry (attempt >= len).
+        assert_eq!(scaled_base_delay_ms(10, Some(1000)), 4000);
+    }
+
+    /// `backoff_ms=500` → same as default (ratio = 1).
+    #[test]
+    fn backoff_500_same_as_default() {
+        for attempt in 0u8..5 {
+            assert_eq!(
+                scaled_base_delay_ms(attempt, Some(500)),
+                base_delay_ms(attempt),
+                "backoff_ms=500 should reproduce default ladder at attempt={attempt}"
+            );
+        }
+    }
+
+    /// `backoff_ms=250` → halved ladder `[250, 500, 1000]`.
+    #[test]
+    fn backoff_250_halves_ladder() {
+        assert_eq!(scaled_base_delay_ms(0, Some(250)), 250);
+        assert_eq!(scaled_base_delay_ms(1, Some(250)), 500);
+        assert_eq!(scaled_base_delay_ms(2, Some(250)), 1000);
+    }
+
+    /// `backoff_ms=0` (unreachable via settings — parse rejects it) floors at
+    /// 1ms instead of producing a zero-delay tight retry loop.
+    #[test]
+    fn backoff_zero_floors_at_one_ms() {
+        assert_eq!(scaled_base_delay_ms(0, Some(0)), 1);
+        assert_eq!(scaled_base_delay_ms(2, Some(0)), 1);
     }
 }

@@ -46,17 +46,20 @@ pub enum RouterAction {
         stop_reason: String,
         /// Cumulative output tokens from this delta's usage (`0` if absent).
         output_tokens: u64,
+        /// Full usage snapshot from the `message_delta` (authoritative for
+        /// billing). `None` when the delta carried no usage.
+        usage: Option<Usage>,
     },
     /// `message_delta` arrived with usage but NO `stop_reason` (A3). The
     /// streaming loop records `output_tokens` and continues.
     RecordUsage {
         /// Cumulative output tokens from this delta's usage.
         output_tokens: u64,
+        /// Full usage snapshot from this delta.
+        usage: Option<Usage>,
     },
     /// `message_stop` arrived — terminate the per-turn loop.
     EndOfStream,
-    /// A server-emitted `Error` event — surface as a streaming error.
-    ServerError(String),
 }
 
 /// Route one event through the accumulator + output sink. Returns the
@@ -168,7 +171,12 @@ pub async fn dispatch_event(
             // is unchanged.
             // A3: capture the output-token count before `usage` is consumed
             // by the emit helper, so the budget loop can accumulate it.
+            // BILLING: clone the full usage BEFORE emit consumes it so the
+            // caller (pump_stream → try_run_turn_streaming) can record it in
+            // CostTracker. The `message_delta` usage is the authoritative
+            // final snapshot (includes both input and output tokens).
             let output_tokens = usage.as_ref().map_or(0, |u| u.billable_tokens.output);
+            let usage_for_billing = usage.clone();
             if let Some(usage) = usage {
                 emit_usage_if_present(output, &usage).await;
             }
@@ -176,9 +184,13 @@ pub async fn dispatch_event(
                 Ok(RouterAction::RecordStopReason {
                     stop_reason: sr,
                     output_tokens,
+                    usage: usage_for_billing,
                 })
             } else if output_tokens > 0 {
-                Ok(RouterAction::RecordUsage { output_tokens })
+                Ok(RouterAction::RecordUsage {
+                    output_tokens,
+                    usage: usage_for_billing,
+                })
             } else {
                 Ok(RouterAction::Continue)
             }

@@ -236,7 +236,7 @@ impl PermissionRequestSink for RecordingPermissionSink {
 // `builtin_anthropic_config` + `apply_settings_providers` live in
 // `platform_common::llm_config` so both composition roots share the same
 // model table and settings-wiring logic.
-use platform_common::{apply_settings_providers, builtin_anthropic_config};
+use platform_common::{apply_settings_providers, builtin_anthropic_config, parse_routing_overrides};
 
 /// Build a fully-wired mobile [`MobileRuntime`] from a deterministic
 /// [`MobileConfig`] + an `Arc<dyn Platform>` (plan F3-03 — the mobile sibling of
@@ -311,7 +311,7 @@ pub async fn build_mobile_inner(
     //      built-in Anthropic profile (same pattern as engine-desktop).
     let llm_transport: Arc<dyn Transport> =
         Arc::new(LlmTransportBridge::new(DynHttp(http.clone())));
-    let llm_client = {
+    let (llm_client, routing_overrides, pricing_overrides) = {
         let mut cfg_obj = builtin_anthropic_config(&cfg.api_base, false);
         // Run whenever EITHER key is present: a routing-only settings file
         // (aliases onto builtin models, no custom providers) must still apply.
@@ -326,19 +326,43 @@ pub async fn build_mobile_inner(
                 tracing::warn!(error = %e, "settings providers/routing entry rejected; earlier entries and the built-in profile remain active");
             }
         }
-        Arc::new(
+        // Parse routing overrides after providers are applied.
+        let routing_overrides = cfg.routing.as_ref().and_then(|r| {
+            match parse_routing_overrides(r, &cfg_obj) {
+                Ok(o) => Some(o),
+                Err(e) => {
+                    tracing::warn!(error = %e, "routing.fallback/retry overrides rejected; using defaults");
+                    None
+                }
+            }
+        }).unwrap_or_default();
+        // Extract per-profile pricing overrides before cfg_obj is consumed.
+        let pricing_overrides: Vec<(llm_client::ProviderId, String, llm_client::TokenPricing)> =
+            cfg_obj.providers.iter().flat_map(|p| {
+                p.pricing.overrides.iter().filter_map(|(model_id, tp)| {
+                    p.models.iter()
+                        .find(|m| m.display_model == *model_id)
+                        .map(|m| (p.provider_id.clone(), m.billing_model.clone(), *tp))
+                })
+            }).collect();
+        let client = Arc::new(
             DefaultLlmClient::from_config(cfg_obj)
                 .map_err(|e| MobileBuildError::ApiBase(e.to_string()))?,
-        )
+        );
+        (client, routing_overrides, pricing_overrides)
     };
     let subscriber_state = SubscriberState { is_subscriber: false, is_enterprise: false };
 
     // 3c-T3: build the cost estimator from the builtin reference catalog.
+    // T2: apply per-profile pricing overrides from settings.
     let cost_estimator = {
         use llm_client::{CostEstimator, PricingPolicy};
         use orchestrator::cost_wiring::llm_catalog_from_cost;
         let cost_cat = cost::pricing::PricingCatalog::builtin_reference();
-        let llm_cat = llm_catalog_from_cost(&cost_cat);
+        let mut llm_cat = llm_catalog_from_cost(&cost_cat);
+        for (provider_id, billing_model, tp) in &pricing_overrides {
+            llm_cat.add_override(provider_id.clone(), billing_model.clone(), *tp);
+        }
         Arc::new(CostEstimator::new(llm_cat, PricingPolicy::MarkUnestimated))
     };
 
@@ -346,7 +370,7 @@ pub async fn build_mobile_inner(
     // `StreamingApiClient` (the streaming turn path the mobile transport always
     // drives). Production wires it for both paths; a test may substitute the
     // streaming side via `streaming_override` (plan F3-06).
-    let provider_adapter = Arc::new(ProviderApiAdapter::new_with_estimator(
+    let provider_adapter = Arc::new(ProviderApiAdapter::new_with_routing(
         llm_client,
         llm_transport,
         subscriber_state,
@@ -355,6 +379,9 @@ pub async fn build_mobile_inner(
         None,
         None,
         Some(cost_estimator),
+        routing_overrides.fallback,
+        routing_overrides.max_retries,
+        routing_overrides.backoff_ms,
     ));
     let api_client: Arc<dyn OrchestratorApiClient> = provider_adapter.clone();
     let streaming_api: Arc<dyn StreamingApiClient> =

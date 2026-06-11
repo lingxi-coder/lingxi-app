@@ -1,5 +1,102 @@
-use llm_client::{ContentBlock, LlmEvent, LlmRequest, ProviderResponse, RawStreamFrame, ToolDeclaration, WireCodec};
+use llm_client::{ContentBlock, LlmEvent, LlmRequest, Message, ProviderResponse, RawStreamFrame, ToolChoice, ToolDeclaration, WireCodec};
 use llm_client::providers::GeminiCodec;
+
+// ── Item 4: Gemini image+document encode ──────────────────────────────────────
+
+#[test]
+fn encode_image_bytes_as_inline_data() {
+    let codec = GeminiCodec::new("https://generativelanguage.googleapis.com/v1beta");
+    let mut request = LlmRequest::new("gemini-2.0-flash");
+    request.messages.push(Message {
+        role: "user".to_string(),
+        content: vec![ContentBlock::Image {
+            media_type: "image/png".to_string(),
+            bytes: vec![1, 2, 3],
+        }],
+    });
+    let provider_request = codec.encode_request(&request).unwrap();
+    let part = &provider_request.body_json["contents"][0]["parts"][0];
+    assert_eq!(part["inline_data"]["mime_type"], "image/png");
+    let b64 = part["inline_data"]["data"].as_str().unwrap();
+    assert!(!b64.is_empty());
+}
+
+#[test]
+fn encode_document_bytes_as_inline_data() {
+    let codec = GeminiCodec::new("https://generativelanguage.googleapis.com/v1beta");
+    let mut request = LlmRequest::new("gemini-2.0-flash");
+    request.messages.push(Message {
+        role: "user".to_string(),
+        content: vec![ContentBlock::Document {
+            media_type: "application/pdf".to_string(),
+            bytes: vec![0x25, 0x50, 0x44, 0x46],
+        }],
+    });
+    let provider_request = codec.encode_request(&request).unwrap();
+    let part = &provider_request.body_json["contents"][0]["parts"][0];
+    assert_eq!(part["inline_data"]["mime_type"], "application/pdf");
+    assert!(part["inline_data"]["data"].as_str().is_some());
+}
+
+#[test]
+fn encode_image_url_still_rejects() {
+    let codec = GeminiCodec::new("https://generativelanguage.googleapis.com/v1beta");
+    let mut request = LlmRequest::new("gemini-2.0-flash");
+    request.messages.push(Message {
+        role: "user".to_string(),
+        content: vec![ContentBlock::ImageUrl { url: "https://example.com/img.png".to_string() }],
+    });
+    let err = codec.encode_request(&request).unwrap_err();
+    assert!(matches!(err, llm_client::LlmError::InvalidRequest { message } if message.contains("ImageUrl")));
+}
+
+// ── Item 5: Gemini tool_choice ────────────────────────────────────────────────
+
+#[test]
+fn encode_tool_choice_auto() {
+    let codec = GeminiCodec::new("https://generativelanguage.googleapis.com/v1beta");
+    let mut request = LlmRequest::new("gemini-2.0-flash");
+    request.tool_choice = Some(ToolChoice::Auto);
+    let provider_request = codec.encode_request(&request).unwrap();
+    assert_eq!(provider_request.body_json["toolConfig"]["functionCallingConfig"]["mode"], "AUTO");
+}
+
+#[test]
+fn encode_tool_choice_none() {
+    let codec = GeminiCodec::new("https://generativelanguage.googleapis.com/v1beta");
+    let mut request = LlmRequest::new("gemini-2.0-flash");
+    request.tool_choice = Some(ToolChoice::None);
+    let provider_request = codec.encode_request(&request).unwrap();
+    assert_eq!(provider_request.body_json["toolConfig"]["functionCallingConfig"]["mode"], "NONE");
+}
+
+#[test]
+fn encode_tool_choice_required_maps_to_any() {
+    let codec = GeminiCodec::new("https://generativelanguage.googleapis.com/v1beta");
+    let mut request = LlmRequest::new("gemini-2.0-flash");
+    request.tool_choice = Some(ToolChoice::Required);
+    let provider_request = codec.encode_request(&request).unwrap();
+    assert_eq!(provider_request.body_json["toolConfig"]["functionCallingConfig"]["mode"], "ANY");
+}
+
+#[test]
+fn encode_tool_choice_specific_tool() {
+    let codec = GeminiCodec::new("https://generativelanguage.googleapis.com/v1beta");
+    let mut request = LlmRequest::new("gemini-2.0-flash");
+    request.tool_choice = Some(ToolChoice::Tool { name: "Bash".to_string() });
+    let provider_request = codec.encode_request(&request).unwrap();
+    let config = &provider_request.body_json["toolConfig"]["functionCallingConfig"];
+    assert_eq!(config["mode"], "ANY");
+    assert_eq!(config["allowedFunctionNames"][0], "Bash");
+}
+
+#[test]
+fn omit_tool_config_when_no_tool_choice() {
+    let codec = GeminiCodec::new("https://generativelanguage.googleapis.com/v1beta");
+    let request = LlmRequest::new("gemini-2.0-flash");
+    let provider_request = codec.encode_request(&request).unwrap();
+    assert!(provider_request.body_json.get("toolConfig").is_none());
+}
 
 #[test]
 fn encode_request_shape_is_gemini_generate_content() {

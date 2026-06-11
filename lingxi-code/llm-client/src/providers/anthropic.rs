@@ -138,10 +138,31 @@ impl StreamDecoder for AnthropicStreamDecoder {
 }
 
 /// Prompt-shaped body fields shared by messages and `count_tokens`.
+///
+/// # Anthropic `response_format` / `output_config` evidence
+///
+/// The claude-code TypeScript reference encodes structured output via a **beta**
+/// SDK field `output_config: { format: output_format }` sent to
+/// `client.beta.messages.create(...)` together with the `STRUCTURED_OUTPUTS_BETA_HEADER`
+/// header (see `sideQuery.ts:190`).  This is a **beta-only** wire key that requires
+/// the beta SDK path and is NOT part of the stable `POST /v1/messages` API.
+///
+/// `LlmRequest::response_format` is encoded for `OpenAI` (stable `response_format` key).
+/// For Anthropic we **reject** it explicitly — the beta wire key (`output_config`) is
+/// intentionally out of scope here to avoid sending unapproved beta fields.  Callers
+/// that need Anthropic structured output should use the beta SDK path directly.
 fn base_body(request: &LlmRequest) -> Result<serde_json::Map<String, Value>, LlmError> {
     if request.response_format.is_some() {
         return Err(LlmError::InvalidRequest {
-            message: "AnthropicMessagesCodec does not encode response_format yet".to_string(),
+            // Anthropic's structured output uses a beta-only `output_config` key
+            // (sideQuery.ts:190) — not the stable /v1/messages API.  We reject
+            // rather than silently drop or invent the beta wire key.
+            // Evidence: claude-code/src/utils/sideQuery.ts:190
+            //   `...(output_format && { output_config: { format: output_format } })`
+            // sent via `client.beta.messages.create` + STRUCTURED_OUTPUTS_BETA_HEADER.
+            message: "AnthropicMessagesCodec: response_format is not encoded (Anthropic's \
+                      structured output uses a beta-only output_config key, not the stable \
+                      /v1/messages API — see sideQuery.ts:190)".to_string(),
         });
     }
 

@@ -11,6 +11,42 @@ pub struct ClientConfig {
     pub providers: Vec<ProviderProfile>,
 }
 
+/// AWS `SigV4` signing region + service for a provider profile.
+///
+/// Required when [`AuthStrategy::AwsSigV4`] is used. The region and service
+/// are needed to build the credential scope string in the `Authorization`
+/// header: `<date>/<region>/<service>/aws4_request`.
+///
+/// Example for Amazon Bedrock in us-east-1:
+/// ```json
+/// { "region": "us-east-1", "service": "bedrock" }
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SigningConfig {
+    /// AWS region (e.g. `"us-east-1"`).
+    pub region: String,
+    /// AWS service name (e.g. `"bedrock"`, `"execute-api"`).
+    pub service: String,
+}
+
+/// Azure `OpenAI` API-version configuration.
+///
+/// Required when [`ProtocolFamily::AzureOpenAi`] is used. The API version is
+/// appended as a query parameter (`?api-version=<api_version>`) per the Azure
+/// `OpenAI` REST specification:
+/// <https://learn.microsoft.com/en-us/azure/ai-services/openai/reference>
+///
+/// Example:
+/// ```json
+/// { "apiVersion": "2024-02-01" }
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AzureConfig {
+    /// Azure `OpenAI` API version string (e.g. `"2024-02-01"`).
+    #[serde(rename = "apiVersion")]
+    pub api_version: String,
+}
+
 /// Provider profile used to build one or more routes.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProviderProfile {
@@ -25,6 +61,11 @@ pub struct ProviderProfile {
     /// is the bare origin (`https://api.anthropic.com`), and
     /// `GeminiGenerateContent` is the versioned root
     /// (`https://generativelanguage.googleapis.com/v1beta`).
+    ///
+    /// For `AzureOpenAi` the base URL should be the resource endpoint without
+    /// the deployment segment, e.g.
+    /// `https://<resource>.openai.azure.com`.  The codec appends
+    /// `/openai/deployments/{model}/chat/completions?api-version=...`.
     pub base_url: String,
     /// Wire protocol family used by this route.
     pub protocol: ProtocolFamily,
@@ -38,6 +79,18 @@ pub struct ProviderProfile {
     /// Pricing behavior for this profile.
     #[serde(default)]
     pub pricing: PricingConfig,
+    /// AWS `SigV4` signing region + service.
+    ///
+    /// Required when `auth = AwsSigV4`.  Missing → `InvalidRequest` at auth
+    /// time (naming the profile and field).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signing: Option<SigningConfig>,
+    /// Azure `OpenAI` API-version configuration.
+    ///
+    /// Required when `protocol = AzureOpenAi`.  Missing → `InvalidRequest` at
+    /// codec-build time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub azure: Option<AzureConfig>,
 }
 
 /// Wire protocol route family.
@@ -142,8 +195,26 @@ pub struct Capabilities {
 }
 
 /// Pricing resolution behavior for a profile.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// ## Per-model overrides
+///
+/// `overrides` is a list of `(model_id, TokenPricing)` pairs, where `model_id`
+/// is the **display model** (the `id` key from the `models` array in settings).
+/// At the host build step, each override is applied onto the `PricingCatalog`
+/// keyed by the model's **billing model** (resolved via the profile's
+/// [`ModelProfile`] table).
+///
+/// Serde round-trips the field; absent → empty vec (existing configs unaffected).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct PricingConfig {
     /// Whether missing pricing must fail instead of returning unestimated cost.
+    #[serde(default)]
     pub require_priced: bool,
+    /// Per-model price overrides declared in the `providers.<name>.pricing` object.
+    ///
+    /// Each entry is `(display_model_id, TokenPricing)`.  The billing-model
+    /// resolution and catalog insertion happen at the host build step, not at
+    /// parse time.  Absent → empty (no overrides).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub overrides: Vec<(String, crate::cost::TokenPricing)>,
 }

@@ -4,6 +4,7 @@ use crate::{
     StreamDecoder, ToolDeclaration, Usage, WireCodec,
 };
 
+use base64::Engine;
 use serde_json::Value;
 
 #[derive(Debug, Clone)]
@@ -79,6 +80,10 @@ impl WireCodec for GeminiCodec {
         }
         if !generation_config.is_empty() {
             body.insert("generationConfig".to_string(), Value::Object(generation_config));
+        }
+
+        if let Some(tool_choice) = &request.tool_choice {
+            body.insert("toolConfig".to_string(), encode_tool_choice(tool_choice));
         }
 
         let mut provider_request = ProviderRequest::post_json(
@@ -401,6 +406,20 @@ fn encode_messages(messages: &[crate::Message], tool_call_names: &std::collectio
         for block in &message.content {
             match block {
                 ContentBlock::Text { text, .. } => parts.push(serde_json::json!({"text": text})),
+                ContentBlock::Image { media_type, bytes }
+                | ContentBlock::Document { media_type, bytes } => {
+                    let b64 = base64::engine::general_purpose::STANDARD.encode(bytes);
+                    // snake_case here is intentional: the Gemini REST proto
+                    // names are inline_data/mime_type and the API accepts both
+                    // casings; the rest of this codec uses the camelCase JSON
+                    // mapping (generationConfig, functionCall, ...).
+                    parts.push(serde_json::json!({
+                        "inline_data": {
+                            "mime_type": media_type,
+                            "data": b64,
+                        }
+                    }));
+                }
                 ContentBlock::ToolCall { name, input, .. } => parts.push(serde_json::json!({
                     "functionCall": {
                         "name": name,
@@ -425,9 +444,7 @@ fn encode_messages(messages: &[crate::Message], tool_call_names: &std::collectio
                         }
                     }));
                 }
-                ContentBlock::Image { .. }
-                | ContentBlock::ImageUrl { .. }
-                | ContentBlock::Document { .. }
+                ContentBlock::ImageUrl { .. }
                 | ContentBlock::Reasoning { .. }
                 | ContentBlock::RedactedThinking { .. }
                 | ContentBlock::ServerToolUse { .. }
@@ -452,6 +469,33 @@ fn encode_tool(tool: &ToolDeclaration) -> Value {
     })
 }
 
+/// Encode a `ToolChoice` into a Gemini `toolConfig` object.
+///
+/// Mapping:
+/// - `Auto`            → `{"functionCallingConfig": {"mode": "AUTO"}}`
+/// - `None`            → `{"functionCallingConfig": {"mode": "NONE"}}`
+/// - `Required` (Any)  → `{"functionCallingConfig": {"mode": "ANY"}}`
+/// - `Tool { name }`   → `{"functionCallingConfig": {"mode": "ANY", "allowedFunctionNames": [name]}}`
+fn encode_tool_choice(tool_choice: &crate::ToolChoice) -> Value {
+    match tool_choice {
+        crate::ToolChoice::Auto => serde_json::json!({
+            "functionCallingConfig": {"mode": "AUTO"},
+        }),
+        crate::ToolChoice::None => serde_json::json!({
+            "functionCallingConfig": {"mode": "NONE"},
+        }),
+        crate::ToolChoice::Required => serde_json::json!({
+            "functionCallingConfig": {"mode": "ANY"},
+        }),
+        crate::ToolChoice::Tool { name } => serde_json::json!({
+            "functionCallingConfig": {
+                "mode": "ANY",
+                "allowedFunctionNames": [name],
+            },
+        }),
+    }
+}
+
 fn reject_unsupported_request_intent(request: &LlmRequest) -> Result<(), LlmError> {
     if request.response_format.is_some() {
         return Err(LlmError::InvalidRequest {
@@ -459,23 +503,15 @@ fn reject_unsupported_request_intent(request: &LlmRequest) -> Result<(), LlmErro
         });
     }
 
-    if request.tool_choice.is_some() {
-        return Err(LlmError::InvalidRequest {
-            message: "GeminiCodec does not encode tool_choice yet".to_string(),
-        });
-    }
-
     for message in &request.messages {
         for block in &message.content {
             match block {
-                ContentBlock::Image { .. } | ContentBlock::ImageUrl { .. } => {
+                // Image and Document are now encoded as inline_data parts.
+                ContentBlock::ImageUrl { .. } => {
                     return Err(LlmError::InvalidRequest {
-                        message: "GeminiCodec does not encode image blocks yet".to_string(),
-                    });
-                }
-                ContentBlock::Document { .. } => {
-                    return Err(LlmError::InvalidRequest {
-                        message: "GeminiCodec does not encode document blocks yet".to_string(),
+                        // Gemini ImageUrl requires the File API (file_data), which needs
+                        // an upload step — not supported in the direct codec path.
+                        message: "GeminiCodec does not encode ImageUrl blocks (requires File API / file_data — use Image with bytes instead)".to_string(),
                     });
                 }
                 ContentBlock::Reasoning { .. } | ContentBlock::RedactedThinking { .. } => {

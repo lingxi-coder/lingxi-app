@@ -31,6 +31,8 @@ fn test_config() -> ClientConfig {
                 },
             }],
             pricing: PricingConfig::default(),
+            signing: None,
+            azure: None,
         }],
     }
 }

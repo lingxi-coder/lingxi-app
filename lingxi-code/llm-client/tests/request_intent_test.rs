@@ -107,7 +107,8 @@ fn openai_encodes_tool_choice_variants() {
 }
 
 #[test]
-fn gemini_rejects_tool_choice_requests() {
+fn gemini_encodes_tool_choice_variants() {
+    // tool_choice is now supported for Gemini — verify it succeeds and emits toolConfig.
     let cases = [
         ToolChoice::Auto,
         ToolChoice::None,
@@ -124,19 +125,15 @@ fn gemini_rejects_tool_choice_requests() {
             input_schema: serde_json::json!({"type": "object"}),
         }];
 
-        let err = gemini_codec().encode_request(&request).unwrap_err();
-
-        assert!(matches!(err, LlmError::InvalidRequest { .. } | LlmError::UnsupportedCapability { .. }));
+        let provider_request = gemini_codec().encode_request(&request).unwrap();
+        assert!(provider_request.body_json.get("toolConfig").is_some());
     }
 }
 
 #[test]
 fn openai_rejects_unsupported_content_blocks() {
+    // Image and ImageUrl are now supported. Remaining rejects: Document, Reasoning.
     for block in [
-        ContentBlock::Image {
-            media_type: "image/png".to_string(),
-            bytes: vec![1, 2, 3],
-        },
         ContentBlock::Document {
             media_type: "application/pdf".to_string(),
             bytes: vec![4, 5, 6],
@@ -155,16 +152,25 @@ fn openai_rejects_unsupported_content_blocks() {
 }
 
 #[test]
-fn gemini_rejects_unsupported_content_blocks() {
+fn openai_now_accepts_image_and_image_url_blocks() {
+    // Image and ImageUrl are supported as of the codec backlog update.
     for block in [
         ContentBlock::Image {
             media_type: "image/png".to_string(),
             bytes: vec![1, 2, 3],
         },
-        ContentBlock::Document {
-            media_type: "application/pdf".to_string(),
-            bytes: vec![4, 5, 6],
-        },
+        ContentBlock::ImageUrl { url: "https://example.com/img.png".to_string() },
+    ] {
+        let request = request_with_block("gpt-4o", block);
+        openai_codec().encode_request(&request).expect("image/imageurl should be accepted");
+    }
+}
+
+#[test]
+fn gemini_rejects_unsupported_content_blocks() {
+    // Image and Document are now supported. Remaining rejects: ImageUrl, Reasoning.
+    for block in [
+        ContentBlock::ImageUrl { url: "https://example.com/img.png".to_string() },
         ContentBlock::Reasoning {
             text: "thought".to_string(),
             signature: None,
@@ -175,5 +181,23 @@ fn gemini_rejects_unsupported_content_blocks() {
         let err = gemini_codec().encode_request(&request).unwrap_err();
 
         assert!(matches!(err, LlmError::InvalidRequest { .. } | LlmError::UnsupportedCapability { .. }));
+    }
+}
+
+#[test]
+fn gemini_now_accepts_image_and_document_blocks() {
+    // Image and Document are now supported as inline_data parts.
+    for block in [
+        ContentBlock::Image {
+            media_type: "image/png".to_string(),
+            bytes: vec![1, 2, 3],
+        },
+        ContentBlock::Document {
+            media_type: "application/pdf".to_string(),
+            bytes: vec![0x25, 0x50, 0x44, 0x46],
+        },
+    ] {
+        let request = request_with_block("gemini-2.0-flash", block);
+        gemini_codec().encode_request(&request).expect("image/document should be accepted");
     }
 }

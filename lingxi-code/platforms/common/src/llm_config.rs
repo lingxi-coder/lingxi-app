@@ -30,9 +30,36 @@
 
 use std::collections::BTreeMap;
 
+/// Parsed routing overrides from the settings `routing` object.
+///
+/// Returned by [`parse_routing_overrides`].  Hosts pass these into the adapter
+/// constructor so the retry/fallback machinery uses the settings-configured
+/// values rather than the compile-time defaults.
+///
+/// ## Fields
+///
+/// - `fallback`: per-model fallback target. Key is the **display model** of
+///   the primary model (alias-resolved); value is the display model of the
+///   fallback target (must resolve in `cfg`). Only chain[0] is stored; longer
+///   chains warn via `tracing::warn!`.
+/// - `max_retries`: `routing.retry.maxAttempts` parsed as `u32`. When `None`,
+///   `CLAUDE_CODE_MAX_RETRIES` env (then `DEFAULT_MAX_RETRIES`) applies.
+/// - `backoff_ms`: `routing.retry.backoffMs` as the base-delay for the jitter
+///   ladder's first rung (scales `DEFAULT_BASE_DELAYS_MS` proportionally).
+///   When `None`, the default `[500, 1000, 2000]` ladder is used.
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct RoutingOverrides {
+    /// Per-model fallback targets: display-model → display-model.
+    pub fallback: BTreeMap<String, String>,
+    /// `routing.retry.maxAttempts` override.
+    pub max_retries: Option<u32>,
+    /// `routing.retry.backoffMs` override (first rung of the jitter ladder).
+    pub backoff_ms: Option<u64>,
+}
+
 use llm_client::{
-    AuthStrategy, Capabilities, ClientConfig, CredentialConfig, LlmError, ModelProfile,
-    PricingConfig, ProtocolFamily, ProviderId, ProviderProfile,
+    AuthStrategy, AzureConfig, Capabilities, ClientConfig, CredentialConfig, LlmError,
+    ModelProfile, PricingConfig, ProtocolFamily, ProviderId, ProviderProfile, TokenPricing,
 };
 
 /// Build the built-in Anthropic [`ClientConfig`] for [`llm_client::DefaultLlmClient`].
@@ -83,6 +110,8 @@ pub fn builtin_anthropic_config(api_base: &str, oauth_path: bool) -> ClientConfi
             auth,
             credential,
             pricing: PricingConfig::default(),
+            signing: None,
+            azure: None,
             models: vec![
                 // — Claude Sonnet 4 (default engine model) —
                 model(
@@ -201,6 +230,8 @@ pub fn apply_settings_providers(
 }
 
 /// Parse and append one settings provider entry to `cfg`.
+// Each provider type is a large self-contained arm; the line count is inherent.
+#[allow(clippy::too_many_lines)]
 fn apply_one_provider(
     cfg: &mut ClientConfig,
     profile_name: &str,
@@ -227,10 +258,14 @@ fn apply_one_provider(
         ),
         "anthropic" => (ProviderId::AnthropicFirstParty, ProtocolFamily::AnthropicMessages),
         "gemini" => (ProviderId::Gemini, ProtocolFamily::GeminiGenerateContent),
+        "azure-openai" => (
+            ProviderId::OpenAICompatible { name: profile_name.to_string() },
+            ProtocolFamily::AzureOpenAi,
+        ),
         other => {
             return Err(LlmError::InvalidRequest {
                 message: format!(
-                    "provider {profile_name:?}: unknown type {other:?} (supported: openai, anthropic, gemini)"
+                    "provider {profile_name:?}: unknown type {other:?} (supported: openai, anthropic, gemini, azure-openai)"
                 ),
             });
         }
@@ -241,12 +276,45 @@ fn apply_one_provider(
         .and_then(serde_json::Value::as_str)
         .unwrap_or("")
         .to_string();
+    if base_url.is_empty() {
+        return Err(LlmError::InvalidRequest {
+            message: format!(
+                "provider {profile_name:?}: \"baseUrl\" is required and must not be empty"
+            ),
+        });
+    }
 
     let api_key_env = entry
         .get("apiKeyEnv")
         .and_then(serde_json::Value::as_str)
         .unwrap_or("")
         .to_string();
+    if api_key_env.is_empty() {
+        return Err(LlmError::InvalidRequest {
+            message: format!(
+                "provider {profile_name:?}: \"apiKeyEnv\" is required and must not be empty"
+            ),
+        });
+    }
+
+    // For azure-openai, apiVersion is required.
+    let azure_config = if type_str == "azure-openai" {
+        let api_version = entry
+            .get("apiVersion")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        if api_version.is_empty() {
+            return Err(LlmError::InvalidRequest {
+                message: format!(
+                    "provider {profile_name:?}: \"apiVersion\" is required for azure-openai type"
+                ),
+            });
+        }
+        Some(AzureConfig { api_version })
+    } else {
+        None
+    };
 
     // models is REQUIRED; absent or empty → error.
     let models_val = entry.get("models").ok_or_else(|| LlmError::InvalidRequest {
@@ -270,17 +338,180 @@ fn apply_one_provider(
         model_profiles.push(parse_model_entry(profile_name, m)?);
     }
 
+    // Parse optional "pricing" block → per-model price overrides.
+    let pricing =
+        if let Some(pricing_val) = entry.get("pricing") {
+            parse_pricing_overrides(profile_name, pricing_val, &model_profiles)?
+        } else {
+            PricingConfig::default()
+        };
+
+    // azure-openai uses AzureToken auth (injects `api-key:` header rather than
+    // `Authorization: Bearer`). All other types use the standard ApiKey auth.
+    let auth = if type_str == "azure-openai" {
+        AuthStrategy::AzureToken
+    } else {
+        AuthStrategy::ApiKey
+    };
+
     cfg.providers.push(ProviderProfile {
         provider_id,
         profile_name: profile_name.to_string(),
         base_url,
         protocol,
-        auth: AuthStrategy::ApiKey,
+        auth,
         credential: CredentialConfig::Env { var: api_key_env },
         models: model_profiles,
-        pricing: PricingConfig::default(),
+        pricing,
+        signing: None,
+        azure: azure_config,
     });
     Ok(())
+}
+
+/// Parse a `providers.<name>.pricing` JSON object into [`PricingConfig::overrides`].
+///
+/// ## Settings shape
+///
+/// ```json
+/// "pricing": {
+///   "<model-id>": {
+///     "inputPerMtok": 1.5,
+///     "outputPerMtok": 6.0,
+///     "cacheWritePerMtok": 1.875,
+///     "cacheReadPerMtok": 0.15,
+///     "reasoningPerMtok": 6.0
+///   }
+/// }
+/// ```
+///
+/// `model-id` is the display model `id` from the `models` array (e.g.
+/// `"gpt-4o"` in `"models": [{"id": "gpt-4o"}]`).  Unknown model ids (not
+/// present in `model_profiles`) are rejected as config bugs.  Negative prices
+/// and non-number values are also rejected.  Unknown keys inside a model's
+/// pricing object are rejected (strict — typos in field names could silently
+/// produce wrong pricing).
+///
+/// # Errors
+///
+/// Returns [`LlmError::InvalidRequest`] for any of the above violations.
+fn parse_pricing_overrides(
+    profile_name: &str,
+    pricing_val: &serde_json::Value,
+    model_profiles: &[ModelProfile],
+) -> Result<PricingConfig, LlmError> {
+    const KNOWN_PRICING_KEYS: &[&str] = &[
+        "inputPerMtok",
+        "outputPerMtok",
+        "cacheWritePerMtok",
+        "cacheReadPerMtok",
+        "reasoningPerMtok",
+    ];
+
+    let pricing_obj = pricing_val.as_object().ok_or_else(|| LlmError::InvalidRequest {
+        message: format!(
+            "provider {profile_name:?}: \"pricing\" must be an object (got {})",
+            match pricing_val {
+                serde_json::Value::Array(_) => "array",
+                serde_json::Value::Bool(_) => "bool",
+                serde_json::Value::Number(_) => "number",
+                serde_json::Value::String(_) => "string",
+                serde_json::Value::Null => "null",
+                serde_json::Value::Object(_) => "object",
+            }
+        ),
+    })?;
+
+    let mut overrides = Vec::new();
+
+    for (model_id, model_pricing_val) in pricing_obj {
+        // Verify the model id is known in this profile's models list.
+        let is_known = model_profiles.iter().any(|m| m.display_model == *model_id);
+        if !is_known {
+            return Err(LlmError::InvalidRequest {
+                message: format!(
+                    "provider {profile_name:?}: pricing key {model_id:?} is not in the models list — add the model first or remove the override"
+                ),
+            });
+        }
+
+        let model_pricing_obj = model_pricing_val.as_object().ok_or_else(|| LlmError::InvalidRequest {
+            message: format!(
+                "provider {profile_name:?}: pricing[{model_id:?}] must be an object"
+            ),
+        })?;
+
+        // Validate: no unknown keys.
+        for key in model_pricing_obj.keys() {
+            if !KNOWN_PRICING_KEYS.contains(&key.as_str()) {
+                return Err(LlmError::InvalidRequest {
+                    message: format!(
+                        "provider {profile_name:?}: pricing[{model_id:?}] unknown key {key:?} (known: inputPerMtok, outputPerMtok, cacheWritePerMtok, cacheReadPerMtok, reasoningPerMtok)"
+                    ),
+                });
+            }
+        }
+
+        // Parse required fields.
+        let input_per_million = parse_price_field(profile_name, model_id, model_pricing_obj, "inputPerMtok", true)?
+            .unwrap_or(0.0);
+        let output_per_million = parse_price_field(profile_name, model_id, model_pricing_obj, "outputPerMtok", true)?
+            .unwrap_or(0.0);
+        let cache_write_per_million = parse_price_field(profile_name, model_id, model_pricing_obj, "cacheWritePerMtok", false)?
+            .unwrap_or(0.0);
+        let cache_read_per_million = parse_price_field(profile_name, model_id, model_pricing_obj, "cacheReadPerMtok", false)?
+            .unwrap_or(0.0);
+        let reasoning_per_million = parse_price_field(profile_name, model_id, model_pricing_obj, "reasoningPerMtok", false)?
+            .unwrap_or(0.0);
+
+        let pricing = TokenPricing {
+            input_per_million,
+            output_per_million,
+            cache_write_per_million,
+            cache_read_per_million,
+            reasoning_per_million,
+        };
+        overrides.push((model_id.clone(), pricing));
+    }
+
+    Ok(PricingConfig { require_priced: false, overrides })
+}
+
+/// Parse and validate one price field from a model's pricing object.
+///
+/// Returns `Ok(None)` when `required = false` and the key is absent;
+/// `Ok(Some(v))` when present and valid; `Err` on missing-required, non-number,
+/// or negative.
+fn parse_price_field(
+    profile_name: &str,
+    model_id: &str,
+    obj: &serde_json::Map<String, serde_json::Value>,
+    key: &str,
+    required: bool,
+) -> Result<Option<f64>, LlmError> {
+    match obj.get(key) {
+        None if required => Err(LlmError::InvalidRequest {
+            message: format!(
+                "provider {profile_name:?}: pricing[{model_id:?}] missing required field {key:?}"
+            ),
+        }),
+        None => Ok(None),
+        Some(val) => {
+            let v = val.as_f64().ok_or_else(|| LlmError::InvalidRequest {
+                message: format!(
+                    "provider {profile_name:?}: pricing[{model_id:?}].{key} must be a number, got {val}"
+                ),
+            })?;
+            if v < 0.0 {
+                return Err(LlmError::InvalidRequest {
+                    message: format!(
+                        "provider {profile_name:?}: pricing[{model_id:?}].{key} must be >= 0 (got {v})"
+                    ),
+                });
+            }
+            Ok(Some(v))
+        }
+    }
 }
 
 /// Parse one `models[n]` entry from the settings JSON into a [`ModelProfile`].
@@ -349,10 +580,155 @@ fn parse_capabilities(caps_val: Option<&serde_json::Value>) -> Capabilities {
     }
 }
 
+/// Resolve a display model from `cfg` using the `profile/model` target string.
+///
+/// Returns the `display_model` string of the resolved model (same as the
+/// `model_id` part in most cases, but normalised via the registry).
+fn resolve_display_model<'a>(
+    cfg: &'a llm_client::ClientConfig,
+    profile_part: &str,
+    model_part: &str,
+) -> Option<&'a str> {
+    cfg.providers
+        .iter()
+        .find(|p| p.profile_name == profile_part)
+        .and_then(|p| p.models.iter().find(|m| m.display_model == model_part || m.aliases.contains(&model_part.to_string())))
+        .map(|m| m.display_model.as_str())
+}
+
+/// Parse `routing.fallback`, `routing.retry.maxAttempts`, and
+/// `routing.retry.backoffMs` from the settings `routing` object.
+///
+/// ## Fallback shape
+///
+/// ```json
+/// "fallback": { "<primary-model-or-alias>": ["<profile/model>", ...] }
+/// ```
+///
+/// - Key is normalised to the display model via registry-style resolution
+///   against `cfg` (same as how `apply_routing_aliases` resolves targets).
+///   When the key doesn't resolve as a `profile/model` it is tried as a bare
+///   display model or alias across all providers.
+/// - Only chain[0] is used.  Longer chains emit a `tracing::warn!` and the
+///   extra entries are discarded.
+/// - The target (`chain[0]`) must resolve to a known `profile/model`; an
+///   unknown target is an [`LlmError::InvalidRequest`].
+///
+/// ## Retry shape
+///
+/// ```json
+/// "retry": { "maxAttempts": 5, "backoffMs": 1000 }
+/// ```
+///
+/// - `maxAttempts` (u32) → [`RoutingOverrides::max_retries`].
+/// - `backoffMs` (u64) → [`RoutingOverrides::backoff_ms`].
+///
+/// ## Precedence (adapter)
+///
+/// `CLAUDE_CODE_MAX_RETRIES` env > `routing.retry.maxAttempts` > `DEFAULT_MAX_RETRIES` (10).
+/// Per-model `routing.fallback` entry wins over the adapter's global `fallback_model`.
+///
+/// # Errors
+///
+/// Returns [`LlmError::InvalidRequest`] when a fallback target (`chain[0]`)
+/// cannot be resolved in `cfg`.
+pub fn parse_routing_overrides(
+    routing: &serde_json::Value,
+    cfg: &llm_client::ClientConfig,
+) -> Result<RoutingOverrides, llm_client::LlmError> {
+    let mut overrides = RoutingOverrides::default();
+
+    // ── fallback ──────────────────────────────────────────────────────────────
+    if let Some(fallback_map) = routing.get("fallback").and_then(serde_json::Value::as_object) {
+        for (key, chain_val) in fallback_map {
+            // Resolve the KEY to a display model.
+            // The key may be "profile/model" or a bare alias/display model.
+            let key_display = if let Some((profile_part, model_part)) = key.split_once('/') {
+                resolve_display_model(cfg, profile_part, model_part)
+                    .map_or_else(|| key.clone(), str::to_string)
+            } else {
+                // Bare name: search all providers for an alias or display match.
+                cfg.providers
+                    .iter()
+                    .flat_map(|p| p.models.iter())
+                    .find(|m| m.display_model == *key || m.aliases.contains(key))
+                    .map_or_else(|| key.clone(), |m| m.display_model.clone())
+            };
+
+            // chain_val must be an array; we only use chain[0].
+            let chain = chain_val.as_array().ok_or_else(|| llm_client::LlmError::InvalidRequest {
+                message: format!(
+                    "routing.fallback[{key:?}]: value must be an array of \"profile/model\" strings"
+                ),
+            })?;
+            if chain.is_empty() {
+                return Err(llm_client::LlmError::InvalidRequest {
+                    message: format!(
+                        "routing.fallback[{key:?}]: chain must have at least one entry"
+                    ),
+                });
+            }
+            if chain.len() > 1 {
+                tracing::warn!(
+                    "routing.fallback[{key:?}]: fallback chains beyond the first entry are not yet supported; using chain[0] only"
+                );
+            }
+            let target = chain[0].as_str().ok_or_else(|| llm_client::LlmError::InvalidRequest {
+                message: format!(
+                    "routing.fallback[{key:?}]: chain[0] must be a \"profile/model\" string"
+                ),
+            })?;
+            // Validate the target resolves.
+            let (profile_part, model_part) = target.split_once('/').ok_or_else(|| {
+                llm_client::LlmError::InvalidRequest {
+                    message: format!(
+                        "routing.fallback[{key:?}]: target {target:?} must be \"profile/model\""
+                    ),
+                }
+            })?;
+            let target_display = resolve_display_model(cfg, profile_part, model_part)
+                .ok_or_else(|| llm_client::LlmError::InvalidRequest {
+                    message: format!(
+                        "routing.fallback[{key:?}]: target {target:?} not found in any configured profile"
+                    ),
+                })?
+                .to_string();
+
+            overrides.fallback.insert(key_display, target_display);
+        }
+    }
+
+    // ── retry ────────────────────────────────────────────────────────────────
+    if let Some(retry_obj) = routing.get("retry").and_then(serde_json::Value::as_object) {
+        if let Some(max_attempts_val) = retry_obj.get("maxAttempts") {
+            let n = max_attempts_val.as_u64().ok_or_else(|| llm_client::LlmError::InvalidRequest {
+                message: "routing.retry.maxAttempts must be a non-negative integer".to_string(),
+            })?;
+            overrides.max_retries = Some(u32::try_from(n).unwrap_or(u32::MAX));
+        }
+        if let Some(backoff_val) = retry_obj.get("backoffMs") {
+            let n = backoff_val.as_u64().ok_or_else(|| llm_client::LlmError::InvalidRequest {
+                message: "routing.retry.backoffMs must be a non-negative integer".to_string(),
+            })?;
+            if n == 0 {
+                // 0 would collapse the jitter ladder to zero-delay retries (a
+                // tight retry loop hammering the provider) — reject up front.
+                return Err(llm_client::LlmError::InvalidRequest {
+                    message: "routing.retry.backoffMs must be >= 1 (0 would disable backoff entirely)"
+                        .to_string(),
+                });
+            }
+            overrides.backoff_ms = Some(n);
+        }
+    }
+
+    Ok(overrides)
+}
+
 /// Wire `routing.aliases` into the target model profiles already in `cfg`.
 ///
-/// `routing.fallback` and `routing.retry` are intentionally ignored here —
-/// they are future work documented in the schema comment.
+/// `routing.fallback` and `routing.retry` are parsed by [`parse_routing_overrides`]
+/// separately and threaded into the adapter constructor.
 fn apply_routing_aliases(
     cfg: &mut ClientConfig,
     routing: Option<&serde_json::Value>,
@@ -681,6 +1057,84 @@ mod tests {
         );
     }
 
+    /// A provider entry with a missing `baseUrl` is rejected.
+    #[test]
+    fn missing_base_url_is_error() {
+        let mut cfg = builtin_anthropic_config("https://api.anthropic.com", false);
+        let providers: BTreeMap<String, serde_json::Value> = serde_json::from_str(r#"{
+            "no-url": {
+                "type": "openai",
+                "apiKeyEnv": "SOME_KEY",
+                "models": [{ "id": "some-model" }]
+            }
+        }"#).unwrap();
+
+        let err = apply_settings_providers(&mut cfg, &providers, None).unwrap_err();
+        assert!(
+            matches!(&err, LlmError::InvalidRequest { message } if message.contains("baseUrl")),
+            "expected InvalidRequest about missing baseUrl, got: {err:?}"
+        );
+    }
+
+    /// A provider entry with an empty `baseUrl` is rejected.
+    #[test]
+    fn empty_base_url_is_error() {
+        let mut cfg = builtin_anthropic_config("https://api.anthropic.com", false);
+        let providers: BTreeMap<String, serde_json::Value> = serde_json::from_str(r#"{
+            "empty-url": {
+                "type": "openai",
+                "baseUrl": "",
+                "apiKeyEnv": "SOME_KEY",
+                "models": [{ "id": "some-model" }]
+            }
+        }"#).unwrap();
+
+        let err = apply_settings_providers(&mut cfg, &providers, None).unwrap_err();
+        assert!(
+            matches!(&err, LlmError::InvalidRequest { message } if message.contains("baseUrl")),
+            "expected InvalidRequest about empty baseUrl, got: {err:?}"
+        );
+    }
+
+    /// A provider entry with a missing `apiKeyEnv` is rejected.
+    #[test]
+    fn missing_api_key_env_is_error() {
+        let mut cfg = builtin_anthropic_config("https://api.anthropic.com", false);
+        let providers: BTreeMap<String, serde_json::Value> = serde_json::from_str(r#"{
+            "no-key-env": {
+                "type": "openai",
+                "baseUrl": "https://example.com",
+                "models": [{ "id": "some-model" }]
+            }
+        }"#).unwrap();
+
+        let err = apply_settings_providers(&mut cfg, &providers, None).unwrap_err();
+        assert!(
+            matches!(&err, LlmError::InvalidRequest { message } if message.contains("apiKeyEnv")),
+            "expected InvalidRequest about missing apiKeyEnv, got: {err:?}"
+        );
+    }
+
+    /// A provider entry with an empty `apiKeyEnv` is rejected.
+    #[test]
+    fn empty_api_key_env_is_error() {
+        let mut cfg = builtin_anthropic_config("https://api.anthropic.com", false);
+        let providers: BTreeMap<String, serde_json::Value> = serde_json::from_str(r#"{
+            "empty-key-env": {
+                "type": "openai",
+                "baseUrl": "https://example.com",
+                "apiKeyEnv": "",
+                "models": [{ "id": "some-model" }]
+            }
+        }"#).unwrap();
+
+        let err = apply_settings_providers(&mut cfg, &providers, None).unwrap_err();
+        assert!(
+            matches!(&err, LlmError::InvalidRequest { message } if message.contains("apiKeyEnv")),
+            "expected InvalidRequest about empty apiKeyEnv, got: {err:?}"
+        );
+    }
+
     /// An alias targeting an unknown profile/model is rejected.
     #[test]
     fn alias_unknown_target_is_error() {
@@ -693,6 +1147,473 @@ mod tests {
         assert!(
             matches!(&err, LlmError::InvalidRequest { message } if message.contains("not found")),
             "expected InvalidRequest about unknown alias target, got: {err:?}"
+        );
+    }
+
+    // ── parse_routing_overrides tests ─────────────────────────────────────────
+
+    fn routing_test_cfg() -> ClientConfig {
+        let mut cfg = builtin_anthropic_config("https://api.anthropic.com", false);
+        // Add a second provider so we can test cross-profile fallback.
+        cfg.providers.push(llm_client::ProviderProfile {
+            provider_id: llm_client::ProviderId::OpenAICompatible { name: "groq".to_string() },
+            profile_name: "groq".to_string(),
+            base_url: "https://api.groq.com".to_string(),
+            protocol: llm_client::ProtocolFamily::OpenAiChat,
+            auth: llm_client::AuthStrategy::ApiKey,
+            credential: llm_client::CredentialConfig::Env { var: "GROQ_KEY".to_string() },
+            models: vec![llm_client::ModelProfile {
+                display_model: "llama-3.3-70b".to_string(),
+                request_model: "llama-3.3-70b".to_string(),
+                billing_model: "llama-3.3-70b".to_string(),
+                aliases: vec!["llama".to_string()],
+                capabilities: llm_client::Capabilities { streaming: true, tools: true, ..Default::default() },
+            }],
+            pricing: PricingConfig::default(),
+            signing: None,
+            azure: None,
+        });
+        cfg
+    }
+
+    /// Happy path: fallback + retry numbers parsed correctly.
+    #[test]
+    fn parse_routing_overrides_happy() {
+        let cfg = routing_test_cfg();
+        let routing: serde_json::Value = serde_json::from_str(r#"{
+            "fallback": {
+                "anthropic/claude-opus-4-7": ["anthropic/claude-sonnet-4-20250514"]
+            },
+            "retry": { "maxAttempts": 5, "backoffMs": 1000 }
+        }"#).unwrap();
+
+        let overrides = parse_routing_overrides(&routing, &cfg).expect("must succeed");
+        assert_eq!(
+            overrides.fallback.get("claude-opus-4-7"),
+            Some(&"claude-sonnet-4-20250514".to_string()),
+            "fallback key must normalize to display model"
+        );
+        assert_eq!(overrides.max_retries, Some(5));
+        assert_eq!(overrides.backoff_ms, Some(1000));
+    }
+
+    /// Unknown fallback target errors with not found.
+    #[test]
+    fn parse_routing_overrides_unknown_fallback_target_error() {
+        let cfg = routing_test_cfg();
+        let routing: serde_json::Value = serde_json::from_str(r#"{
+            "fallback": {
+                "anthropic/claude-opus-4-7": ["nonexistent/model"]
+            }
+        }"#).unwrap();
+
+        let err = parse_routing_overrides(&routing, &cfg).unwrap_err();
+        assert!(
+            matches!(&err, LlmError::InvalidRequest { message } if message.contains("not found")),
+            "expected not found error, got: {err:?}"
+        );
+    }
+
+    /// Chain >1 uses first entry and logs a warning (no error).
+    #[test]
+    fn parse_routing_overrides_chain_gt1_uses_first_entry() {
+        let cfg = routing_test_cfg();
+        let routing: serde_json::Value = serde_json::from_str(r#"{
+            "fallback": {
+                "anthropic/claude-opus-4-7": [
+                    "anthropic/claude-sonnet-4-20250514",
+                    "groq/llama-3.3-70b"
+                ]
+            }
+        }"#).unwrap();
+
+        let overrides = parse_routing_overrides(&routing, &cfg).expect("must succeed with chain>1");
+        // chain[0] must be used
+        assert_eq!(
+            overrides.fallback.get("claude-opus-4-7"),
+            Some(&"claude-sonnet-4-20250514".to_string()),
+            "chain[0] must be used when chain length > 1"
+        );
+    }
+
+    /// Retry numbers parsed: maxAttempts and backoffMs.
+    #[test]
+    fn parse_routing_overrides_retry_numbers() {
+        let cfg = routing_test_cfg();
+        let routing: serde_json::Value = serde_json::from_str(r#"{
+            "retry": { "maxAttempts": 3, "backoffMs": 2000 }
+        }"#).unwrap();
+
+        let overrides = parse_routing_overrides(&routing, &cfg).expect("must succeed");
+        assert_eq!(overrides.max_retries, Some(3));
+        assert_eq!(overrides.backoff_ms, Some(2000));
+        assert!(overrides.fallback.is_empty());
+    }
+
+    /// `backoffMs: 0` is rejected at parse time (zero-delay retries are a
+    /// tight loop hammering the provider).
+    #[test]
+    fn parse_routing_overrides_backoff_zero_rejected() {
+        let cfg = routing_test_cfg();
+        let routing: serde_json::Value = serde_json::from_str(r#"{
+            "retry": { "backoffMs": 0 }
+        }"#).unwrap();
+
+        let err = parse_routing_overrides(&routing, &cfg).expect_err("backoffMs=0 must error");
+        let llm_client::LlmError::InvalidRequest { message } = err else {
+            panic!("expected InvalidRequest, got {err:?}");
+        };
+        assert!(message.contains("backoffMs must be >= 1"), "got: {message}");
+    }
+
+    /// Absent routing → defaults (no overrides).
+    #[test]
+    fn parse_routing_overrides_absent_gives_defaults() {
+        let cfg = routing_test_cfg();
+        let routing: serde_json::Value = serde_json::from_str("{}").unwrap();
+
+        let overrides = parse_routing_overrides(&routing, &cfg).expect("must succeed");
+        assert!(overrides.fallback.is_empty());
+        assert!(overrides.max_retries.is_none());
+        assert!(overrides.backoff_ms.is_none());
+    }
+
+    /// Alias in key is resolved to display model.
+    #[test]
+    fn parse_routing_overrides_key_alias_resolves_to_display_model() {
+        let cfg = routing_test_cfg();
+        // "llama" is an alias for "llama-3.3-70b" in the groq profile.
+        let routing: serde_json::Value = serde_json::from_str(r#"{
+            "fallback": {
+                "llama": ["anthropic/claude-sonnet-4-20250514"]
+            }
+        }"#).unwrap();
+
+        let overrides = parse_routing_overrides(&routing, &cfg).expect("must succeed");
+        assert_eq!(
+            overrides.fallback.get("llama-3.3-70b"),
+            Some(&"claude-sonnet-4-20250514".to_string()),
+            "alias key 'llama' must resolve to display model 'llama-3.3-70b'"
+        );
+    }
+
+    // ── parse_pricing_overrides (Task 2) tests ─────────────────────────────────
+
+    /// Happy path: a provider with a pricing block parses correctly and
+    /// `PricingConfig::overrides` carries the right `TokenPricing` values.
+    #[test]
+    fn pricing_overrides_happy_path() {
+        let mut cfg = builtin_anthropic_config("https://api.anthropic.com", false);
+        let providers: BTreeMap<String, serde_json::Value> = serde_json::from_str(r#"{
+            "myprovider": {
+                "type": "openai",
+                "baseUrl": "https://api.example.com/v1",
+                "apiKeyEnv": "MY_API_KEY",
+                "models": [{ "id": "gpt-custom" }],
+                "pricing": {
+                    "gpt-custom": {
+                        "inputPerMtok": 1.5,
+                        "outputPerMtok": 6.0,
+                        "cacheWritePerMtok": 1.875,
+                        "cacheReadPerMtok": 0.15,
+                        "reasoningPerMtok": 6.0
+                    }
+                }
+            }
+        }"#).unwrap();
+
+        apply_settings_providers(&mut cfg, &providers, None).expect("must succeed");
+
+        let p = cfg.providers.iter().find(|p| p.profile_name == "myprovider").unwrap();
+        assert_eq!(p.pricing.overrides.len(), 1);
+        let (model_id, tp) = &p.pricing.overrides[0];
+        assert_eq!(model_id, "gpt-custom");
+        assert!((tp.input_per_million - 1.5).abs() < 1e-12, "input_per_million");
+        assert!((tp.output_per_million - 6.0).abs() < 1e-12, "output_per_million");
+        assert!((tp.cache_write_per_million - 1.875).abs() < 1e-12, "cache_write_per_million");
+        assert!((tp.cache_read_per_million - 0.15).abs() < 1e-12, "cache_read_per_million");
+        assert!((tp.reasoning_per_million - 6.0).abs() < 1e-12, "reasoning_per_million");
+    }
+
+    /// Absent pricing block → empty overrides (existing behavior preserved).
+    #[test]
+    fn pricing_overrides_absent_gives_empty() {
+        let mut cfg = builtin_anthropic_config("https://api.anthropic.com", false);
+        let providers: BTreeMap<String, serde_json::Value> = serde_json::from_str(r#"{
+            "myprovider": {
+                "type": "openai",
+                "baseUrl": "https://api.example.com/v1",
+                "apiKeyEnv": "MY_API_KEY",
+                "models": [{ "id": "gpt-custom" }]
+            }
+        }"#).unwrap();
+
+        apply_settings_providers(&mut cfg, &providers, None).expect("must succeed");
+
+        let p = cfg.providers.iter().find(|p| p.profile_name == "myprovider").unwrap();
+        assert!(
+            p.pricing.overrides.is_empty(),
+            "absent pricing must produce empty overrides"
+        );
+    }
+
+    /// Unknown model id in the pricing block → `LlmError::InvalidRequest`.
+    #[test]
+    fn pricing_overrides_unknown_model_is_error() {
+        let mut cfg = builtin_anthropic_config("https://api.anthropic.com", false);
+        let providers: BTreeMap<String, serde_json::Value> = serde_json::from_str(r#"{
+            "myprovider": {
+                "type": "openai",
+                "baseUrl": "https://api.example.com/v1",
+                "apiKeyEnv": "MY_API_KEY",
+                "models": [{ "id": "gpt-custom" }],
+                "pricing": {
+                    "nonexistent-model": { "inputPerMtok": 1.0, "outputPerMtok": 2.0 }
+                }
+            }
+        }"#).unwrap();
+
+        let err = apply_settings_providers(&mut cfg, &providers, None).unwrap_err();
+        assert!(
+            matches!(&err, LlmError::InvalidRequest { message } if message.contains("nonexistent-model")),
+            "expected InvalidRequest naming the unknown model, got: {err:?}"
+        );
+    }
+
+    /// Negative price → `LlmError::InvalidRequest`.
+    #[test]
+    fn pricing_overrides_negative_price_is_error() {
+        let mut cfg = builtin_anthropic_config("https://api.anthropic.com", false);
+        let providers: BTreeMap<String, serde_json::Value> = serde_json::from_str(r#"{
+            "myprovider": {
+                "type": "openai",
+                "baseUrl": "https://api.example.com/v1",
+                "apiKeyEnv": "MY_API_KEY",
+                "models": [{ "id": "gpt-custom" }],
+                "pricing": {
+                    "gpt-custom": { "inputPerMtok": -1.0, "outputPerMtok": 2.0 }
+                }
+            }
+        }"#).unwrap();
+
+        let err = apply_settings_providers(&mut cfg, &providers, None).unwrap_err();
+        assert!(
+            matches!(&err, LlmError::InvalidRequest { message } if message.contains("inputPerMtok") && message.contains(">= 0")),
+            "expected InvalidRequest about negative price, got: {err:?}"
+        );
+    }
+
+    /// Unknown key in a model's pricing object → `LlmError::InvalidRequest` naming it.
+    #[test]
+    fn pricing_overrides_unknown_key_is_error() {
+        let mut cfg = builtin_anthropic_config("https://api.anthropic.com", false);
+        let providers: BTreeMap<String, serde_json::Value> = serde_json::from_str(r#"{
+            "myprovider": {
+                "type": "openai",
+                "baseUrl": "https://api.example.com/v1",
+                "apiKeyEnv": "MY_API_KEY",
+                "models": [{ "id": "gpt-custom" }],
+                "pricing": {
+                    "gpt-custom": {
+                        "inputPerMtok": 1.0,
+                        "outputPerMtok": 2.0,
+                        "typoKey": 3.0
+                    }
+                }
+            }
+        }"#).unwrap();
+
+        let err = apply_settings_providers(&mut cfg, &providers, None).unwrap_err();
+        assert!(
+            matches!(&err, LlmError::InvalidRequest { message } if message.contains("typoKey")),
+            "expected InvalidRequest naming the unknown key, got: {err:?}"
+        );
+    }
+
+    /// Non-number price value → `LlmError::InvalidRequest`.
+    #[test]
+    fn pricing_overrides_non_number_price_is_error() {
+        let mut cfg = builtin_anthropic_config("https://api.anthropic.com", false);
+        let providers: BTreeMap<String, serde_json::Value> = serde_json::from_str(r#"{
+            "myprovider": {
+                "type": "openai",
+                "baseUrl": "https://api.example.com/v1",
+                "apiKeyEnv": "MY_API_KEY",
+                "models": [{ "id": "gpt-custom" }],
+                "pricing": {
+                    "gpt-custom": { "inputPerMtok": "not-a-number", "outputPerMtok": 2.0 }
+                }
+            }
+        }"#).unwrap();
+
+        let err = apply_settings_providers(&mut cfg, &providers, None).unwrap_err();
+        assert!(
+            matches!(&err, LlmError::InvalidRequest { message } if message.contains("inputPerMtok") && message.contains("number")),
+            "expected InvalidRequest about non-number, got: {err:?}"
+        );
+    }
+
+    /// Optional fields (cacheWrite/cacheRead/reasoning) may be omitted.
+    #[test]
+    fn pricing_overrides_optional_fields_may_be_absent() {
+        let mut cfg = builtin_anthropic_config("https://api.anthropic.com", false);
+        let providers: BTreeMap<String, serde_json::Value> = serde_json::from_str(r#"{
+            "myprovider": {
+                "type": "openai",
+                "baseUrl": "https://api.example.com/v1",
+                "apiKeyEnv": "MY_API_KEY",
+                "models": [{ "id": "gpt-custom" }],
+                "pricing": {
+                    "gpt-custom": { "inputPerMtok": 2.0, "outputPerMtok": 8.0 }
+                }
+            }
+        }"#).unwrap();
+
+        apply_settings_providers(&mut cfg, &providers, None).expect("must succeed with minimal pricing");
+
+        let p = cfg.providers.iter().find(|p| p.profile_name == "myprovider").unwrap();
+        let (_, tp) = &p.pricing.overrides[0];
+        assert!((tp.input_per_million - 2.0).abs() < 1e-12);
+        assert!((tp.output_per_million - 8.0).abs() < 1e-12);
+        assert!((tp.cache_write_per_million - 0.0).abs() < 1e-12, "cache_write defaults to 0");
+        assert!((tp.cache_read_per_million - 0.0).abs() < 1e-12, "cache_read defaults to 0");
+        assert!((tp.reasoning_per_million - 0.0).abs() < 1e-12, "reasoning defaults to 0");
+    }
+
+    // ── azure-openai settings type (Task 5) tests ─────────────────────────────
+
+    /// E2E: an azure-openai profile parses correctly, is built into a
+    /// `DefaultLlmClient`, and `prepare()` produces:
+    /// - A URL with `/openai/deployments/<model>/chat/completions?api-version=...`
+    /// - An `api-key` header (AzureToken auth)
+    /// - No `model` key in the request body
+    ///
+    /// Settings E2E test name: `azure_profile_prepare_url_and_api_key_header`
+    #[tokio::test]
+    async fn azure_profile_prepare_url_and_api_key_header() {
+        std::env::set_var("PLATFORM_COMMON_TEST_AZURE_KEY", "my-azure-api-key");
+
+        let mut cfg = builtin_anthropic_config("https://api.anthropic.com", false);
+        let providers: BTreeMap<String, serde_json::Value> = serde_json::from_str(r#"{
+            "my-azure": {
+                "type": "azure-openai",
+                "baseUrl": "https://myresource.openai.azure.com",
+                "apiKeyEnv": "PLATFORM_COMMON_TEST_AZURE_KEY",
+                "apiVersion": "2024-02-01",
+                "models": [
+                    { "id": "gpt-4o-deployment" }
+                ]
+            }
+        }"#).unwrap();
+
+        apply_settings_providers(&mut cfg, &providers, None).expect("must succeed");
+
+        // Verify the profile was parsed correctly.
+        let azure_profile = cfg.providers.iter().find(|p| p.profile_name == "my-azure")
+            .expect("my-azure profile must be present");
+        assert_eq!(azure_profile.protocol, llm_client::ProtocolFamily::AzureOpenAi);
+        assert_eq!(azure_profile.auth, llm_client::AuthStrategy::AzureToken);
+        assert!(
+            azure_profile.azure.as_ref().map(|a| a.api_version.as_str()) == Some("2024-02-01"),
+            "azure config must have apiVersion=2024-02-01"
+        );
+
+        // Build a client and prepare a request.
+        let client = DefaultLlmClient::from_config(cfg).expect("client must build");
+        let req = llm_client::LlmRequest::new("gpt-4o-deployment");
+        let prepared = client.prepare(&req).await.expect("prepare must succeed");
+
+        // URL check: deployment pattern.
+        assert!(
+            prepared.provider_request.url.contains("/openai/deployments/gpt-4o-deployment/chat/completions"),
+            "URL must include deployment path; got: {}",
+            prepared.provider_request.url
+        );
+        assert!(
+            prepared.provider_request.url.contains("api-version=2024-02-01"),
+            "URL must include api-version; got: {}",
+            prepared.provider_request.url
+        );
+
+        // Auth check: api-key header present.
+        assert_eq!(
+            prepared.provider_request.headers.get("api-key").map(String::as_str),
+            Some("my-azure-api-key"),
+            "api-key header must be injected by AzureToken auth"
+        );
+
+        // No Authorization header (Azure uses api-key, not Bearer).
+        assert!(
+            !prepared.provider_request.headers.contains_key("Authorization"),
+            "AzureToken must NOT inject Authorization header"
+        );
+
+        // Model key must be absent from body (deployment is in the URL).
+        assert!(
+            prepared.provider_request.body_json.get("model").is_none(),
+            "Azure request body must not include model key; got: {}",
+            prepared.provider_request.body_json
+        );
+    }
+
+    /// azure-openai with missing apiVersion → error naming apiVersion.
+    #[test]
+    fn azure_openai_missing_api_version_is_error() {
+        let mut cfg = builtin_anthropic_config("https://api.anthropic.com", false);
+        let providers: BTreeMap<String, serde_json::Value> = serde_json::from_str(r#"{
+            "my-azure": {
+                "type": "azure-openai",
+                "baseUrl": "https://myresource.openai.azure.com",
+                "apiKeyEnv": "SOME_KEY",
+                "models": [{ "id": "gpt-4o" }]
+            }
+        }"#).unwrap();
+
+        let err = apply_settings_providers(&mut cfg, &providers, None).unwrap_err();
+        assert!(
+            matches!(&err, LlmError::InvalidRequest { message } if message.contains("apiVersion")),
+            "expected InvalidRequest about missing apiVersion, got: {err:?}"
+        );
+    }
+
+    /// azure-openai with empty apiVersion → error.
+    #[test]
+    fn azure_openai_empty_api_version_is_error() {
+        let mut cfg = builtin_anthropic_config("https://api.anthropic.com", false);
+        let providers: BTreeMap<String, serde_json::Value> = serde_json::from_str(r#"{
+            "my-azure": {
+                "type": "azure-openai",
+                "baseUrl": "https://myresource.openai.azure.com",
+                "apiKeyEnv": "SOME_KEY",
+                "apiVersion": "",
+                "models": [{ "id": "gpt-4o" }]
+            }
+        }"#).unwrap();
+
+        let err = apply_settings_providers(&mut cfg, &providers, None).unwrap_err();
+        assert!(
+            matches!(&err, LlmError::InvalidRequest { message } if message.contains("apiVersion")),
+            "expected InvalidRequest about empty apiVersion, got: {err:?}"
+        );
+    }
+
+    /// The error message for unknown type now includes "azure-openai".
+    #[test]
+    fn unknown_type_mentions_azure_openai_in_supported_list() {
+        let mut cfg = builtin_anthropic_config("https://api.anthropic.com", false);
+        let providers: BTreeMap<String, serde_json::Value> = serde_json::from_str(r#"{
+            "weird": {
+                "type": "bedrock",
+                "baseUrl": "https://bedrock.us-east-1.amazonaws.com",
+                "apiKeyEnv": "BEDROCK_KEY",
+                "models": [{ "id": "claude" }]
+            }
+        }"#).unwrap();
+
+        let err = apply_settings_providers(&mut cfg, &providers, None).unwrap_err();
+        assert!(
+            matches!(&err, LlmError::InvalidRequest { message } if message.contains("azure-openai")),
+            "error for unknown type must list azure-openai as supported, got: {err:?}"
         );
     }
 }

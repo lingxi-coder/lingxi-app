@@ -69,6 +69,8 @@ fn anthropic_client() -> DefaultLlmClient {
                 },
             }],
             pricing: PricingConfig::default(),
+            signing: None,
+            azure: None,
         }],
     })
     .expect("client")

@@ -22,6 +22,7 @@ pub mod redaction;
 #[allow(missing_docs)]
 pub mod route;
 pub mod retry;
+pub mod sigv4;
 pub mod sse;
 pub mod transport;
 pub mod types;
@@ -29,10 +30,10 @@ pub mod types;
 pub use auth::{ApiKeyAuthenticator, Authenticator, BearerAuthenticator};
 pub use anthropic::normalize_anthropic_usage;
 pub use client::{DefaultLlmClient, LlmEventStream, PreparedLlmCall};
-pub use providers::{AnthropicMessagesCodec, GeminiCodec, OpenAiChatCodec};
+pub use providers::{AnthropicMessagesCodec, AzureOpenAiCodec, GeminiCodec, OpenAiChatCodec};
 pub use config::{
-    AuthStrategy, Capabilities, ClientConfig, CredentialConfig, ModelProfile, PricingConfig,
-    ProtocolFamily, ProviderProfile,
+    AuthStrategy, AzureConfig, Capabilities, ClientConfig, CredentialConfig, ModelProfile,
+    PricingConfig, ProtocolFamily, ProviderProfile, SigningConfig,
 };
 pub use credentials::{Credential, CredentialProvider, CredentialScope, EnvCredentialProvider, StaticCredentialProvider};
 pub use cost::{CostEstimator, PricingCatalog, PricingPolicy, TokenPricing};

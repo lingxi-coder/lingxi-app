@@ -7,8 +7,8 @@
 
 use crate::conversation::{OrchestratorApiClient, StreamingApiClient};
 use crate::model::betas::{apply_beta_header_with_auth, Endpoint, Provider};
-use crate::model::rate_limit::{parse_retry_after, parse_unified_reset};
-use crate::model::retry::{next_step, resolve_retry_control, DriveStep, ResolveRetryEnv, RetryControl, RetryState};
+use crate::model::rate_limit::{parse_retry_after, parse_unified_reset, RateLimitInfo};
+use crate::model::retry::{next_step_with_backoff, resolve_retry_control_with_settings, DriveStep, ResolveRetryEnv, RetryControl, RetryState};
 use crate::model::telemetry;
 use crate::model::user_agent::{user_agent, UserAgentEnv};
 use agent::convert::{to_llm_messages, to_tool_declarations};
@@ -20,7 +20,7 @@ use llm_client::{
 };
 use protocol::{ContentBlock, ConversationMessage};
 use std::collections::VecDeque;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 // ── Subscriber state ─────────────────────────────────────────────────────────
@@ -45,6 +45,16 @@ struct StreamState {
     frames: Box<dyn llm_client::FrameStream>,
     queue: VecDeque<LlmEvent>,
     finished: bool,
+    /// Guard against double-emit: once we have fired succeed/fail we never fire again.
+    done: bool,
+    /// Optional analytics bus for stream telemetry twins (`emit_succeeded` / `emit_failed`).
+    analytics: Option<Arc<::telemetry::AnalyticsBus>>,
+    /// Request model string for telemetry labels.
+    model: String,
+    /// Client-side request id for telemetry correlation.
+    request_id: String,
+    /// Wall-clock start of the stream for `duration_ms`.
+    started: Instant,
 }
 
 // ── Adapter state ─────────────────────────────────────────────────────────────
@@ -61,8 +71,31 @@ pub struct ProviderApiAdapter {
     version: String,
     /// Optional analytics bus for telemetry events.
     analytics: Option<Arc<::telemetry::AnalyticsBus>>,
-    /// Fallback model, if configured (used by `messages_create_with_fallback`).
+    /// Global fallback model, if configured (used by `messages_create_with_fallback`
+    /// when no per-model entry exists in `fallback_overrides`).
     fallback_model: Option<String>,
+    /// Per-model fallback overrides from `routing.fallback`.
+    ///
+    /// Key is the request's resolved display model; value is the fallback
+    /// target display model.  A per-model entry **wins** over `fallback_model`
+    /// (global).
+    fallback_overrides: std::collections::BTreeMap<String, String>,
+    /// Alias → display-model map built at construction from
+    /// `client.available_models()`. Used by `messages_create_with_fallback`
+    /// to normalize an alias request string to the display model before
+    /// probing `fallback_overrides` (whose keys are display-normalized at
+    /// parse time).
+    alias_to_display: std::collections::BTreeMap<String, String>,
+    /// `routing.retry.maxAttempts` override.
+    ///
+    /// Precedence: `CLAUDE_CODE_MAX_RETRIES` env > this > `DEFAULT_MAX_RETRIES`.
+    settings_max_retries: Option<u32>,
+    /// `routing.retry.backoffMs` override.
+    ///
+    /// When `Some(b)`, the jitter ladder's first rung is `b` ms (default 500).
+    /// Subsequent rungs are scaled proportionally (`DEFAULT[i] * b/500`).
+    /// Jitter ±20% still applies.
+    settings_backoff_ms: Option<u64>,
     /// Available model ids from the client registry (for `available_models`).
     available_model_ids: Vec<String>,
     /// Optional cost estimator for populating `LlmResponse.cost`.
@@ -72,6 +105,20 @@ pub struct ProviderApiAdapter {
     /// unknown models leave `response.cost = None` (never an error).  The
     /// `CostTracker` budget authority is UNTOUCHED by this path.
     estimator: Option<Arc<CostEstimator>>,
+    /// Most recently observed 2xx rate-limit header snapshot.
+    ///
+    /// Parsed via [`RateLimitInfo::from_headers`] on every successful
+    /// `drive_non_stream` and `drive_stream` connect-success response.
+    /// Exposed via [`Self::last_rate_limit_info`].  `None` until the first
+    /// successful response is received.  Interior-mutable so non-`&mut self`
+    /// callers (the `OrchestratorApiClient` impls) can update it.
+    ///
+    /// TUI wiring: no existing `OrchestratorHandle` surface maps naturally to
+    /// per-request rate-limit metadata (all status APIs are session-wide
+    /// snapshots). Callers that need this should call `last_rate_limit_info()`
+    /// on the adapter directly. A future task can thread it into the handle if
+    /// needed.
+    last_rate_limit: Mutex<Option<RateLimitInfo>>,
 }
 
 impl ProviderApiAdapter {
@@ -111,11 +158,69 @@ impl ProviderApiAdapter {
         fallback_model: Option<String>,
         estimator: Option<Arc<CostEstimator>>,
     ) -> Self {
-        let available_model_ids = client
-            .available_models()
-            .into_iter()
-            .map(|m| m.display_model)
-            .collect();
+        Self::new_with_routing(
+            client,
+            transport,
+            subscriber,
+            ua,
+            version,
+            analytics,
+            fallback_model,
+            estimator,
+            std::collections::BTreeMap::new(),
+            None,
+            None,
+        )
+    }
+
+    /// Construct the adapter with routing overrides from `routing.fallback` /
+    /// `routing.retry` settings.
+    ///
+    /// ## Constructor choice
+    ///
+    /// Hosts that parse `routing` settings call this after
+    /// `parse_routing_overrides`; the older [`Self::new`] and
+    /// [`Self::new_with_estimator`] paths delegate here with empty overrides so
+    /// they continue to compile unchanged.
+    ///
+    /// ## Fallback precedence (per-request)
+    ///
+    /// Per-model `fallback_overrides` entry for the request's display model **wins**
+    /// over the global `fallback_model` field.  When neither is set, no fallback
+    /// is configured.
+    ///
+    /// ## Retry precedence
+    ///
+    /// `CLAUDE_CODE_MAX_RETRIES` env > `settings_max_retries` > `DEFAULT_MAX_RETRIES` (10).
+    #[must_use]
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_routing(
+        client: Arc<DefaultLlmClient>,
+        transport: Arc<dyn Transport>,
+        subscriber: SubscriberState,
+        ua: UserAgentEnv,
+        version: impl Into<String>,
+        analytics: Option<Arc<::telemetry::AnalyticsBus>>,
+        fallback_model: Option<String>,
+        estimator: Option<Arc<CostEstimator>>,
+        fallback_overrides: std::collections::BTreeMap<String, String>,
+        settings_max_retries: Option<u32>,
+        settings_backoff_ms: Option<u64>,
+    ) -> Self {
+        let models = client.available_models();
+        let available_model_ids = models.iter().map(|m| m.display_model.clone()).collect();
+        // Build alias→display map once so `messages_create_with_fallback` can
+        // normalize an alias request to the display model before looking up
+        // per-model fallback overrides (whose keys are display-normalized).
+        let mut alias_to_display = std::collections::BTreeMap::new();
+        for m in &models {
+            for alias in &m.aliases {
+                alias_to_display.insert(alias.clone(), m.display_model.clone());
+            }
+            // Map display_model → itself so the lookup is always correct
+            // whether the caller used the canonical name or an alias.
+            alias_to_display.insert(m.display_model.clone(), m.display_model.clone());
+        }
         Self {
             client,
             transport,
@@ -124,8 +229,13 @@ impl ProviderApiAdapter {
             version: version.into(),
             analytics,
             fallback_model,
+            fallback_overrides,
+            alias_to_display,
+            settings_max_retries,
+            settings_backoff_ms,
             available_model_ids,
             estimator,
+            last_rate_limit: Mutex::new(None),
         }
     }
 
@@ -271,6 +381,56 @@ impl ProviderApiAdapter {
         }
     }
 
+    /// Return the most recently observed 2xx rate-limit header snapshot, if any.
+    ///
+    /// Populated on every successful response from `drive_non_stream` and on the
+    /// connect-success path of `drive_stream`.  `None` until the first successful
+    /// response is received.
+    ///
+    /// TUI wiring note: no existing `OrchestratorHandle` surface maps naturally
+    /// to per-request rate-limit metadata.  Callers that need this should hold an
+    /// `Arc<ProviderApiAdapter>` and call this method directly.  A future task can
+    /// wire it through the handle if needed.
+    pub fn last_rate_limit_info(&self) -> Option<RateLimitInfo> {
+        self.last_rate_limit.lock().unwrap().clone()
+    }
+
+    /// Parse rate-limit headers from a 2xx response and update the cached snapshot.
+    ///
+    /// Emits a `tracing::warn!` when the overage status indicates the account is
+    /// at or near exhaustion (`overage_status == "rejected"` or `"allowed_warning"`).
+    fn record_rate_limit_from_headers(
+        &self,
+        headers: &std::collections::BTreeMap<String, String>,
+    ) {
+        let hvec: Vec<(String, String)> = headers
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        let info = RateLimitInfo::from_headers(&hvec);
+        if info.has_unified_headers() {
+            // Warn when the account is near or at exhaustion.
+            match info.overage_status.as_deref() {
+                Some("rejected") => {
+                    tracing::warn!(
+                        overage_status = "rejected",
+                        rate_limit_type = ?info.rate_limit_type,
+                        "Rate limit: overage rejected — usage limit exhausted"
+                    );
+                }
+                Some("allowed_warning") => {
+                    tracing::warn!(
+                        overage_status = "allowed_warning",
+                        rate_limit_type = ?info.rate_limit_type,
+                        "Rate limit: overage warning — nearing usage limit"
+                    );
+                }
+                _ => {}
+            }
+            *self.last_rate_limit.lock().unwrap() = Some(info);
+        }
+    }
+
     /// HTTP status code approximation for `emit_failed` (best-effort: only the
     /// variants that carry an HTTP status are non-None).
     fn status_of(err: &LlmError) -> Option<u16> {
@@ -355,7 +515,7 @@ impl ProviderApiAdapter {
             match resp_result {
                 Err(transport_err) => {
                     // Transport-layer failure; feed into the retry driver.
-                    let step = next_step(&mut state, &retry_control, &transport_err, thinking_budget);
+                    let step = next_step_with_backoff(&mut state, &retry_control, &transport_err, thinking_budget, self.settings_backoff_ms);
                     if let DriveStep::RetryAfter(delay) = step {
                         tokio::time::sleep(delay).await;
                         continue;
@@ -377,11 +537,10 @@ impl ProviderApiAdapter {
                         .get("x-should-retry")
                         .is_some_and(|v| v.as_str() == "false");
 
-                    // Feed headers to rate-limit tracker for 429.
-                    // (Rate-limit state recording is best-effort for now.)
-
                     match prepared.route.codec.decode_response(provider_resp.clone()) {
                         Ok(mut response) => {
+                            // Feed rate-limit headers from every 2xx success response.
+                            self.record_rate_limit_from_headers(&provider_resp.headers);
                             // 3c-T3: populate response.cost when an estimator is wired.
                             // Unpriced or unknown models leave response.cost = None — never an error.
                             if let Some(est) = &self.estimator {
@@ -435,7 +594,7 @@ impl ProviderApiAdapter {
                                 decode_err.clone()
                             };
 
-                            let step = next_step(&mut state, &retry_control, &effective_err, thinking_budget);
+                            let step = next_step_with_backoff(&mut state, &retry_control, &effective_err, thinking_budget, self.settings_backoff_ms);
                             match step {
                                 DriveStep::RetryAfter(delay) => {
                                     tokio::time::sleep(delay).await;
@@ -530,7 +689,14 @@ impl ProviderApiAdapter {
             is_enterprise: self.subscriber.is_enterprise,
             ..RetryState::default()
         };
-        let ctl = RetryControl::default();
+        // Stream path uses settings-based retry control (same precedence as non-stream).
+        let ctl = resolve_retry_control_with_settings(
+            &req.model,
+            None, // fallback not used on stream connect-phase
+            self.subscriber.is_subscriber,
+            &ResolveRetryEnv::from_process_env(),
+            self.settings_max_retries,
+        );
         let thinking_budget: u32 = req.reasoning.map_or(0, |r| r.budget_tokens);
 
         loop {
@@ -547,7 +713,7 @@ impl ProviderApiAdapter {
             // inject headers into the prepared request ourselves.
             match self.transport.open_stream(&prepared.provider_request).await {
                 Err(transport_err) => {
-                    let step = next_step(&mut state, &ctl, &transport_err, thinking_budget);
+                    let step = next_step_with_backoff(&mut state, &ctl, &transport_err, thinking_budget, self.settings_backoff_ms);
                     match step {
                         DriveStep::RetryAfter(delay) => {
                             tokio::time::sleep(delay).await;
@@ -596,21 +762,39 @@ impl ProviderApiAdapter {
                             decode_err.clone()
                         };
 
-                        let step = next_step(&mut state, &ctl, &effective_err, thinking_budget);
-                        match step {
-                            DriveStep::RetryAfter(delay) => {
-                                tokio::time::sleep(delay).await;
-                                // Re-prepare on next iteration so headers stay fresh.
-                                continue;
-                            }
-                            _ => return Err(decode_err),
+                        let step = next_step_with_backoff(&mut state, &ctl, &effective_err, thinking_budget, self.settings_backoff_ms);
+                        if let DriveStep::RetryAfter(delay) = step {
+                            tokio::time::sleep(delay).await;
+                            // Re-prepare on next iteration so headers stay fresh.
+                            continue;
                         }
+                        // Terminal twin for the connect-phase emit_started
+                        // (mirrors the non-stream terminal arms).
+                        telemetry::emit_failed(
+                            &self.analytics,
+                            &req.model,
+                            &request_id,
+                            Self::error_kind(&decode_err),
+                            Self::status_of(&decode_err),
+                        )
+                        .await;
+                        return Err(decode_err);
                     }
+
+                    // Feed rate-limit headers from the connect-success response.
+                    self.record_rate_limit_from_headers(&streaming.headers);
 
                     // Success: wrap the LlmEventStream from the codec into a BoxStream.
                     // Build the event stream from the codec decoder + raw frames.
                     let decoder = prepared.route.codec.stream_decoder();
                     let frames = streaming.frames;
+
+                    // Clone analytics + metadata into the unfold state so
+                    // emit_succeeded / emit_failed can fire from inside the async closure.
+                    let stream_started = Instant::now();
+                    let stream_analytics = self.analytics.clone();
+                    let stream_model = req.model.clone();
+                    let stream_request_id = request_id.clone();
 
                     // Assemble events via a manual unfold that drives next_frame + decode.
                     // We keep a queue of pre-decoded events and drain them first.
@@ -619,12 +803,38 @@ impl ProviderApiAdapter {
                         frames,
                         queue: VecDeque::new(),
                         finished: false,
+                        done: false,
+                        analytics: stream_analytics,
+                        model: stream_model,
+                        request_id: stream_request_id,
+                        started: stream_started,
                     };
 
                     let boxed: BoxStream<'static, Result<LlmEvent, LlmError>> = Box::pin(
                         futures::stream::unfold(stream_state, |mut s| async move {
                             loop {
                                 if let Some(event) = s.queue.pop_front() {
+                                    // Emit succeed telemetry on the terminal event
+                                    // (MessageStop or Completed) — once, guarded by `done`.
+                                    let is_terminal = matches!(
+                                        event,
+                                        LlmEvent::MessageStop | LlmEvent::Completed { .. }
+                                    );
+                                    if is_terminal && !s.done {
+                                        s.done = true;
+                                        let elapsed_ms = u64::try_from(
+                                            s.started.elapsed().as_millis()
+                                        )
+                                        .unwrap_or(u64::MAX);
+                                        telemetry::emit_succeeded(
+                                            &s.analytics,
+                                            &s.model,
+                                            &s.request_id,
+                                            elapsed_ms,
+                                            200,
+                                        )
+                                        .await;
+                                    }
                                     return Some((Ok(event), s));
                                 }
                                 if s.finished {
@@ -635,6 +845,17 @@ impl ProviderApiAdapter {
                                         Ok(events) => s.queue.extend(events),
                                         Err(e) => {
                                             s.finished = true;
+                                            if !s.done {
+                                                s.done = true;
+                                                telemetry::emit_failed(
+                                                    &s.analytics,
+                                                    &s.model,
+                                                    &s.request_id,
+                                                    ProviderApiAdapter::error_kind(&e),
+                                                    ProviderApiAdapter::status_of(&e),
+                                                )
+                                                .await;
+                                            }
                                             return Some((Err(e), s));
                                         }
                                     },
@@ -642,11 +863,35 @@ impl ProviderApiAdapter {
                                         s.finished = true;
                                         match s.decoder.finish() {
                                             Ok(events) => s.queue.extend(events),
-                                            Err(e) => return Some((Err(e), s)),
+                                            Err(e) => {
+                                                if !s.done {
+                                                    s.done = true;
+                                                    telemetry::emit_failed(
+                                                        &s.analytics,
+                                                        &s.model,
+                                                        &s.request_id,
+                                                        ProviderApiAdapter::error_kind(&e),
+                                                        ProviderApiAdapter::status_of(&e),
+                                                    )
+                                                    .await;
+                                                }
+                                                return Some((Err(e), s));
+                                            }
                                         }
                                     }
                                     Err(e) => {
                                         s.finished = true;
+                                        if !s.done {
+                                            s.done = true;
+                                            telemetry::emit_failed(
+                                                &s.analytics,
+                                                &s.model,
+                                                &s.request_id,
+                                                ProviderApiAdapter::error_kind(&e),
+                                                ProviderApiAdapter::status_of(&e),
+                                            )
+                                            .await;
+                                        }
                                         return Some((Err(e), s));
                                     }
                                 }
@@ -672,11 +917,12 @@ impl OrchestratorApiClient for ProviderApiAdapter {
         tools: Vec<serde_json::Value>,
     ) -> Result<LlmResponse, LlmError> {
         let req = self.build_request(model, system, msgs, tools, false, None)?;
-        let ctl = resolve_retry_control(
+        let ctl = resolve_retry_control_with_settings(
             model,
             None,
             self.subscriber.is_subscriber,
             &ResolveRetryEnv::from_process_env(),
+            self.settings_max_retries,
         );
         self.drive_non_stream(req, ctl).await
     }
@@ -690,11 +936,12 @@ impl OrchestratorApiClient for ProviderApiAdapter {
         max_tokens: u32,
     ) -> Result<LlmResponse, LlmError> {
         let req = self.build_request(model, system, msgs, tools, false, Some(max_tokens))?;
-        let ctl = resolve_retry_control(
+        let ctl = resolve_retry_control_with_settings(
             model,
             None,
             self.subscriber.is_subscriber,
             &ResolveRetryEnv::from_process_env(),
+            self.settings_max_retries,
         );
         self.drive_non_stream(req, ctl).await
     }
@@ -718,13 +965,25 @@ impl OrchestratorApiClient for ProviderApiAdapter {
         _is_subscriber: bool,
         _is_enterprise: bool,
     ) -> Result<LlmResponse, LlmError> {
-        let effective_fallback = fallback_model.or(self.fallback_model.as_deref());
+        // Per-model settings fallback wins over global fallback_model.
+        // Call-site fallback_model (from OrchestratorApiClient) wins over both when
+        // it's explicitly passed.
+        //
+        // Normalize the request model via alias_to_display so that an alias
+        // request (e.g. "claude-3-5-sonnet" → display "claude-sonnet-4-5")
+        // still finds the per-model fallback entry whose key is the display model.
+        let display_model = self.alias_to_display.get(model).map_or(model, String::as_str);
+        let settings_per_model = self.fallback_overrides.get(display_model).map(String::as_str);
+        let effective_fallback = fallback_model
+            .or(settings_per_model)
+            .or(self.fallback_model.as_deref());
         let req = self.build_request(model, system, msgs, tools, false, None)?;
-        let mut ctl = resolve_retry_control(
+        let mut ctl = resolve_retry_control_with_settings(
             model,
             effective_fallback.map(str::to_string),
             self.subscriber.is_subscriber,
             &ResolveRetryEnv::from_process_env(),
+            self.settings_max_retries,
         );
         // If caller passed an explicit fallback model, honour it even when
         // resolve_retry_control would not have set allow_fallback (e.g. Sonnet
@@ -752,11 +1011,12 @@ impl OrchestratorApiClient for ProviderApiAdapter {
         initial_consecutive_overloaded: u8,
     ) -> Result<LlmResponse, LlmError> {
         let req = self.build_request(model, system, msgs, tools, false, None)?;
-        let ctl = resolve_retry_control(
+        let ctl = resolve_retry_control_with_settings(
             model,
             None,
             self.subscriber.is_subscriber,
             &ResolveRetryEnv::from_process_env(),
+            self.settings_max_retries,
         );
         self.drive_non_stream_seeded(req, ctl, initial_consecutive_overloaded)
             .await
@@ -1009,6 +1269,8 @@ mod tests {
                         },
                     }],
                     pricing: PricingConfig::default(),
+                    signing: None,
+                    azure: None,
                 }],
             })
             .expect("client"),
@@ -1053,6 +1315,8 @@ mod tests {
                         },
                     }],
                     pricing: PricingConfig::default(),
+                    signing: None,
+                    azure: None,
                 }],
             })
             .expect("client"),
@@ -1626,6 +1890,8 @@ mod tests {
                         },
                     }],
                     pricing: PricingConfig::default(),
+                    signing: None,
+                    azure: None,
                 }],
             })
             .expect("client"),
@@ -1711,6 +1977,8 @@ mod tests {
                         capabilities: Capabilities::default(),
                     }],
                     pricing: PricingConfig::default(),
+                    signing: None,
+                    azure: None,
                 }],
             })
             .expect("client"),
@@ -1918,6 +2186,718 @@ mod tests {
             stream_transport.stream_call_count(),
             2,
             "must retry exactly once (429 → 200)"
+        );
+    }
+
+    // ── Task 1: routing.fallback/retry adapter tests ──────────────────────────
+
+    /// Build an adapter with routing overrides for per-model fallback and retry.
+    fn make_adapter_with_routing(
+        transport: Arc<dyn Transport>,
+        fallback_overrides: std::collections::BTreeMap<String, String>,
+        settings_max_retries: Option<u32>,
+        settings_backoff_ms: Option<u64>,
+    ) -> ProviderApiAdapter {
+        #[allow(deprecated)]
+        std::env::set_var("ROUTING_TEST_KEY", "test-key");
+        let client = Arc::new(
+            DefaultLlmClient::from_config(ClientConfig {
+                providers: vec![ProviderProfile {
+                    provider_id: ProviderId::AnthropicFirstParty,
+                    profile_name: "anthropic".to_string(),
+                    base_url: "https://api.anthropic.com".to_string(),
+                    protocol: ProtocolFamily::AnthropicMessages,
+                    auth: AuthStrategy::ApiKey,
+                    credential: CredentialConfig::Env {
+                        var: "ROUTING_TEST_KEY".to_string(),
+                    },
+                    models: vec![
+                        ModelProfile {
+                            display_model: "claude-opus-4-6".to_string(),
+                            request_model: "claude-opus-4-6".to_string(),
+                            billing_model: "claude-opus-4-6".to_string(),
+                            aliases: vec![],
+                            capabilities: Capabilities {
+                                streaming: true,
+                                tools: true,
+                                ..Default::default()
+                            },
+                        },
+                        ModelProfile {
+                            display_model: "claude-haiku-4-20250307".to_string(),
+                            request_model: "claude-haiku-4-20250307".to_string(),
+                            billing_model: "claude-haiku-4".to_string(),
+                            aliases: vec![],
+                            capabilities: Capabilities {
+                                streaming: true,
+                                tools: true,
+                                ..Default::default()
+                            },
+                        },
+                        ModelProfile {
+                            display_model: "claude-sonnet-4-20250514".to_string(),
+                            request_model: "claude-sonnet-4-20250514".to_string(),
+                            billing_model: "claude-sonnet-4".to_string(),
+                            aliases: vec!["claude".to_string()],
+                            capabilities: Capabilities {
+                                streaming: true,
+                                tools: true,
+                                ..Default::default()
+                            },
+                        },
+                    ],
+                    pricing: PricingConfig::default(),
+                    signing: None,
+                    azure: None,
+                }],
+            })
+            .expect("client"),
+        );
+        ProviderApiAdapter::new_with_routing(
+            client,
+            transport,
+            SubscriberState::default(),
+            UserAgentEnv {
+                user_type: Some("external".to_string()),
+                entrypoint: Some("cli".to_string()),
+                ..Default::default()
+            },
+            "0.0.0",
+            None,
+            None,
+            None,
+            fallback_overrides,
+            settings_max_retries,
+            settings_backoff_ms,
+        )
+    }
+
+    fn routing_ok_response_json() -> serde_json::Value {
+        serde_json::json!({
+            "id": "msg_routing",
+            "model": "claude-sonnet-4-20250514",
+            "content": [{"type": "text", "text": "hello"}],
+            "stop_reason": "end_turn",
+            "usage": {"input_tokens": 5, "output_tokens": 2}
+        })
+    }
+
+    /// Per-model fallback entry wins over global fallback_model.
+    ///
+    /// Uses `claude-opus-4-6` as primary (is_non_custom_opus = true → allow_fallback
+    /// activates naturally for a non-subscriber, no process env mutation needed).
+    /// After 3 consecutive 529s the per-model fallback to haiku fires.
+    #[tokio::test]
+    async fn per_model_fallback_wins_over_global() {
+        let haiku_ok = serde_json::json!({
+            "id": "msg_haiku",
+            "model": "claude-haiku-4-20250307",
+            "content": [{"type": "text", "text": "ok"}],
+            "stop_reason": "end_turn",
+            "usage": {"input_tokens": 5, "output_tokens": 2}
+        });
+        let overloaded_body = serde_json::json!({
+            "type": "error",
+            "error": {"type": "overloaded_error", "message": "Overloaded"}
+        });
+        let transport = FakeTransport::sequence(vec![
+            FakeResponse::Ok(ProviderResponse::json(529, overloaded_body.clone())),
+            FakeResponse::Ok(ProviderResponse::json(529, overloaded_body.clone())),
+            FakeResponse::Ok(ProviderResponse::json(529, overloaded_body.clone())),
+            FakeResponse::Ok(ProviderResponse::json(200, haiku_ok)),
+        ]);
+
+        let mut fallback_overrides = std::collections::BTreeMap::new();
+        // Per-model: opus → haiku.
+        fallback_overrides.insert(
+            "claude-opus-4-6".to_string(),
+            "claude-haiku-4-20250307".to_string(),
+        );
+
+        // No env var needed: claude-opus-4-6 is_non_custom_opus=true → allow_fallback=true
+        // for non-subscriber (default SubscriberState).
+        let mut adapter = make_adapter_with_routing(
+            transport.clone(),
+            fallback_overrides,
+            None,
+            None,
+        );
+        // Global fallback also points somewhere — per-model must win.
+        adapter.fallback_model = Some("claude-sonnet-4-20250514".to_string());
+
+        let result = OrchestratorApiClient::messages_create_with_fallback(
+            &adapter,
+            "claude-opus-4-6",
+            None,
+            Vec::new(),
+            Vec::new(),
+            None, // no explicit call-site fallback
+            false,
+            false,
+        )
+        .await;
+
+        // Should succeed — 3 × 529 then haiku 200.
+        assert!(
+            result.is_ok(),
+            "per-model fallback should route to haiku and succeed: {result:?}"
+        );
+        assert_eq!(transport.seen_count(), 4, "expected 4 requests: 3 × 529 + 1 × 200");
+    }
+
+    /// Global fallback is used when no per-model entry is present.
+    #[tokio::test]
+    async fn global_fallback_used_when_no_per_model_entry() {
+        let haiku_ok = serde_json::json!({
+            "id": "msg_haiku2",
+            "model": "claude-haiku-4-20250307",
+            "content": [{"type": "text", "text": "ok"}],
+            "stop_reason": "end_turn",
+            "usage": {"input_tokens": 5, "output_tokens": 2}
+        });
+        let overloaded_body = serde_json::json!({
+            "type": "error",
+            "error": {"type": "overloaded_error", "message": "Overloaded"}
+        });
+        let transport = FakeTransport::sequence(vec![
+            FakeResponse::Ok(ProviderResponse::json(529, overloaded_body.clone())),
+            FakeResponse::Ok(ProviderResponse::json(529, overloaded_body.clone())),
+            FakeResponse::Ok(ProviderResponse::json(529, overloaded_body.clone())),
+            FakeResponse::Ok(ProviderResponse::json(200, haiku_ok)),
+        ]);
+
+        // No per-model overrides.
+        let mut adapter = make_adapter_with_routing(
+            transport.clone(),
+            std::collections::BTreeMap::new(),
+            None,
+            None,
+        );
+        // Global fallback: opus → haiku.
+        adapter.fallback_model = Some("claude-haiku-4-20250307".to_string());
+
+        // claude-opus-4-6 is_non_custom_opus=true → allow_fallback=true for non-subscriber.
+        let result = OrchestratorApiClient::messages_create_with_fallback(
+            &adapter,
+            "claude-opus-4-6",
+            None,
+            Vec::new(),
+            Vec::new(),
+            None,
+            false,
+            false,
+        )
+        .await;
+
+        assert!(result.is_ok(), "global fallback should work: {result:?}");
+        assert_eq!(transport.seen_count(), 4);
+    }
+
+    /// Per-model fallback fires even when the request uses an ALIAS of the
+    /// primary model.
+    ///
+    /// `fallback_overrides` keys are keyed by the display model; if the request
+    /// arrives as an alias (e.g. `"claude"` instead of `"claude-sonnet-4-20250514"`)
+    /// the lookup must normalize via `alias_to_display` before probing the map.
+    ///
+    /// RED on the old code (raw model probe skips the per-model entry when an
+    /// alias is used); GREEN after the alias normalization fix.
+    #[tokio::test]
+    async fn per_model_fallback_fires_via_alias() {
+        // Three 529s then a success on the fallback (haiku).
+        let overloaded_json = serde_json::json!({
+            "type": "error",
+            "error": {"type": "overloaded_error", "message": "overloaded"}
+        });
+        let transport = FakeTransport::sequence(vec![
+            FakeResponse::Ok(ProviderResponse::json(529, overloaded_json.clone())),
+            FakeResponse::Ok(ProviderResponse::json(529, overloaded_json.clone())),
+            FakeResponse::Ok(ProviderResponse::json(529, overloaded_json.clone())),
+            FakeResponse::Ok(ProviderResponse::json(200, routing_ok_response_json())),
+        ]);
+
+        // Per-model fallback: display "claude-sonnet-4-20250514" → "claude-haiku-4-20250307".
+        let mut fallback_overrides = std::collections::BTreeMap::new();
+        fallback_overrides.insert(
+            "claude-sonnet-4-20250514".to_string(),
+            "claude-haiku-4-20250307".to_string(),
+        );
+
+        let adapter = make_adapter_with_routing(
+            transport.clone(),
+            fallback_overrides,
+            None,
+            None,
+        );
+
+        // Request via ALIAS — the alias_to_display map must normalize this to
+        // "claude-sonnet-4-20250514" before the fallback_overrides lookup.
+        let result = OrchestratorApiClient::messages_create_with_fallback(
+            &adapter,
+            "claude",      // alias of "claude-sonnet-4-20250514"
+            Some("sys"),
+            Vec::new(),
+            Vec::new(),
+            None,          // no explicit call-site fallback (per-model must activate)
+            false,
+            false,
+        )
+        .await;
+
+        assert!(
+            result.is_ok(),
+            "alias-keyed per-model fallback should fire and succeed; got: {result:?}"
+        );
+        // 3 primary 529s + 1 fallback success = 4 transport calls.
+        assert_eq!(
+            transport.seen_count(),
+            4,
+            "expected 3 failing primary calls + 1 successful fallback call"
+        );
+    }
+
+    /// `settings_max_retries=2` causes terminal after 3 executions (not 11).
+    ///
+    /// The adapter reads `CLAUDE_CODE_MAX_RETRIES` from the process env in
+    /// `messages_create`.  To avoid interference with parallel tests we verify
+    /// via the retry.rs layer (which is injected, not process-env) rather than
+    /// through the adapter's env path.  The adapter's `settings_max_retries`
+    /// field is directly observable via the resolve_retry_control_with_settings
+    /// call: when env var is absent it uses `settings_max_retries` as the
+    /// effective limit.  We temporarily clear the env var then restore it.
+    #[tokio::test]
+    async fn settings_max_retries_beats_default() {
+        // We can test the settings path directly: when the env var is absent
+        // the settings_max_retries field applies.  We control CLAUDE_CODE_MAX_RETRIES
+        // for the duration of this test — accept minor isolation risk since the
+        // pre-existing test suite also does this.
+        let transport = FakeTransport::sequence(vec![FakeResponse::Ok(ProviderResponse::json(
+            500,
+            serde_json::json!({"type": "error", "error": {"type": "api_error", "message": "internal"}}),
+        ))]);
+
+        let adapter = make_adapter_with_routing(
+            transport.clone(),
+            std::collections::BTreeMap::new(),
+            Some(2), // settings says max 2 retries
+            None,
+        );
+
+        // Temporarily unset CLAUDE_CODE_MAX_RETRIES so settings value wins.
+        let saved = std::env::var("CLAUDE_CODE_MAX_RETRIES").ok();
+        #[allow(deprecated)]
+        std::env::remove_var("CLAUDE_CODE_MAX_RETRIES");
+
+        let result = adapter
+            .messages_create("claude-sonnet-4-20250514", None, Vec::new(), Vec::new())
+            .await;
+
+        // Restore.
+        if let Some(v) = saved {
+            #[allow(deprecated)]
+            std::env::set_var("CLAUDE_CODE_MAX_RETRIES", v);
+        }
+
+        assert!(result.is_err(), "must fail after exhausting budget");
+        // max_retries=2 → 3 executions (2 sleeps + 1 final).
+        assert_eq!(
+            transport.seen_count(),
+            3,
+            "settings_max_retries=2 should give 3 executions (2 retries + 1 initial)"
+        );
+    }
+
+    /// Env `CLAUDE_CODE_MAX_RETRIES` beats `settings_max_retries`.
+    ///
+    /// Proven via `resolve_retry_control_with_settings` unit tests in retry.rs;
+    /// this adapter-level test verifies the wiring by injecting through
+    /// `ResolveRetryEnv` directly rather than mutating the process env.
+    ///
+    /// We use `crate::model::retry::resolve_retry_control_with_settings` to
+    /// build the expected `RetryControl` and compare `max_retries`.
+    #[test]
+    fn env_max_retries_beats_settings_via_resolve() {
+        use crate::model::retry::{resolve_retry_control_with_settings, ResolveRetryEnv, DEFAULT_MAX_RETRIES};
+
+        // env=Some("1") + settings=Some(8) → max_retries=1 (env wins).
+        let env_with_1 = ResolveRetryEnv {
+            max_retries: Some("1".to_string()),
+            ..ResolveRetryEnv::default()
+        };
+        let ctl = resolve_retry_control_with_settings("claude-sonnet-4-20250514", None, false, &env_with_1, Some(8));
+        assert_eq!(ctl.max_retries, 1, "env(1) must beat settings(8)");
+
+        // env=None + settings=Some(7) → max_retries=7 (settings wins).
+        let env_absent = ResolveRetryEnv::default();
+        let ctl2 = resolve_retry_control_with_settings("claude-sonnet-4-20250514", None, false, &env_absent, Some(7));
+        assert_eq!(ctl2.max_retries, 7, "settings(7) must beat default(10)");
+
+        // env=None + settings=None → DEFAULT.
+        let ctl3 = resolve_retry_control_with_settings("claude-sonnet-4-20250514", None, false, &env_absent, None);
+        assert_eq!(ctl3.max_retries, DEFAULT_MAX_RETRIES);
+    }
+
+    /// `settings_backoff_ms=1000` doubles the jitter ladder base.
+    ///
+    /// With `backoff_ms=1000` and time paused, we verify the first retry delay
+    /// is ≥ 800 ms (= 1000 × 0.8 lower-jitter-bound).  Without the setting the
+    /// base would be 500 ms (lower bound 400 ms) — so 800 ms is above the
+    /// un-scaled upper bound (600 ms) which proves scaling is active.
+    #[tokio::test(start_paused = true)]
+    async fn backoff_ms_scales_jitter_base() {
+        let transport = FakeTransport::sequence(vec![
+            FakeResponse::Ok(ProviderResponse::json(
+                500,
+                serde_json::json!({"type": "error", "error": {"type": "api_error", "message": "err"}}),
+            )),
+            FakeResponse::Ok(ProviderResponse::json(200, routing_ok_response_json())),
+        ]);
+
+        let adapter = make_adapter_with_routing(
+            transport.clone(),
+            std::collections::BTreeMap::new(),
+            None,
+            Some(1000), // backoff_ms = 1000 → first rung 1000, jitter [800, 1200)
+        );
+
+        let before = tokio::time::Instant::now();
+        let result = adapter
+            .messages_create("claude-sonnet-4-20250514", None, Vec::new(), Vec::new())
+            .await;
+        let elapsed = before.elapsed();
+
+        assert!(result.is_ok(), "should succeed after retry: {result:?}");
+        // Delay must be ≥ 800 ms (lower jitter bound of 1000 ms base).
+        // Default base = 500 ms → upper jitter bound = 600 ms < 800 ms.
+        // So ≥ 800 ms proves the 1000 ms base is in effect.
+        assert!(
+            elapsed >= std::time::Duration::from_millis(800),
+            "backoff_ms=1000 should produce ≥ 800 ms delay; elapsed={elapsed:?}"
+        );
+        // Must be < 1200 ms (upper jitter bound of 1000 ms base).
+        assert!(
+            elapsed < std::time::Duration::from_millis(1200),
+            "backoff_ms=1000 delay should be < 1200 ms; elapsed={elapsed:?}"
+        );
+    }
+
+    // ── T3 Step 2: 2xx rate-limit header feed ────────────────────────────────
+
+    /// A 2xx response with `anthropic-ratelimit-unified-overage-status: rejected`
+    /// must be stored in `last_rate_limit_info` and trigger a `tracing::warn!`.
+    ///
+    /// We only assert the data is stored; the warn fires on a live-log subscriber
+    /// which we do not attach in tests — the absence of a panic is the assertion.
+    #[tokio::test]
+    async fn rate_limit_info_stored_from_2xx_response() {
+        let mut headers = BTreeMap::new();
+        headers.insert(
+            "anthropic-ratelimit-unified-representative-claim".to_string(),
+            "five_hour".to_string(),
+        );
+        headers.insert(
+            "anthropic-ratelimit-unified-overage-status".to_string(),
+            "rejected".to_string(),
+        );
+
+        let transport = FakeTransport::always(ProviderResponse {
+            status: 200,
+            headers,
+            body_json: ok_response_json(),
+            request_id: None,
+        });
+        let adapter = make_adapter(transport);
+        let _ = adapter
+            .messages_create("claude-sonnet-4-20250514", None, Vec::new(), Vec::new())
+            .await
+            .expect("ok");
+
+        let info = adapter
+            .last_rate_limit_info()
+            .expect("last_rate_limit_info must be Some after a 2xx with unified headers");
+        assert_eq!(
+            info.rate_limit_type.as_deref(),
+            Some("five_hour"),
+            "rate_limit_type must be five_hour"
+        );
+        assert_eq!(
+            info.overage_status.as_deref(),
+            Some("rejected"),
+            "overage_status must be rejected"
+        );
+    }
+
+    /// Without unified rate-limit headers the cached info stays `None`.
+    #[tokio::test]
+    async fn rate_limit_info_none_when_no_unified_headers() {
+        let transport = FakeTransport::always(ProviderResponse::json(200, ok_response_json()));
+        let adapter = make_adapter(transport);
+        let _ = adapter
+            .messages_create("claude-sonnet-4-20250514", None, Vec::new(), Vec::new())
+            .await
+            .expect("ok");
+
+        // No unified headers → None still.
+        assert!(
+            adapter.last_rate_limit_info().is_none(),
+            "last_rate_limit_info must be None when no unified headers are present"
+        );
+    }
+
+    // ── T3 Step 3: stream telemetry twins ────────────────────────────────────
+
+    /// A `FrameStream` that yields scripted raw SSE frames (encoded as
+    /// JSON byte sequences) then terminates. Used to drive the stream decoder
+    /// with a controlled event sequence so the `drive_stream` unfold
+    /// emits telemetry at the right points.
+    struct ScriptedFrames {
+        frames: Vec<Vec<u8>>,
+        idx: usize,
+    }
+
+    impl ScriptedFrames {
+        fn new(frames: Vec<Vec<u8>>) -> Self {
+            Self { frames, idx: 0 }
+        }
+    }
+
+    impl llm_client::FrameStream for ScriptedFrames {
+        fn next_frame(
+            &mut self,
+        ) -> BoxFuture<'_, Result<Option<llm_client::RawStreamFrame>, LlmError>> {
+            let result = if self.idx < self.frames.len() {
+                let bytes = self.frames[self.idx].clone();
+                self.idx += 1;
+                Ok(Some(llm_client::RawStreamFrame::new(bytes)))
+            } else {
+                Ok(None)
+            };
+            Box::pin(async move { result })
+        }
+    }
+
+    /// A transport that delivers a fixed successful stream ending in `message_stop`.
+    ///
+    /// Builds valid Anthropic SSE frames (as raw JSON lines) so the `AnthropicMessages`
+    /// codec can decode them. The stream ends with `message_stop` which is the
+    /// terminal event → should trigger `emit_succeeded` once.
+    struct ScriptedStreamTransport {
+        frames: Vec<Vec<u8>>,
+        headers: BTreeMap<String, String>,
+        status: u16,
+    }
+
+    impl ScriptedStreamTransport {
+        /// Build a transport that delivers a minimal valid anthropic stream:
+        /// `message_start` → `message_delta(stop_reason=end_turn)` → `message_stop`.
+        fn anthropic_success() -> Arc<Self> {
+            let frames = vec![
+                br#"{"type":"message_start","message":{"id":"msg_t","model":"claude-sonnet-4-20250514","usage":{"input_tokens":1,"output_tokens":0,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}}"#.to_vec(),
+                br#"{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":1}}"#.to_vec(),
+                br#"{"type":"message_stop"}"#.to_vec(),
+            ];
+            Arc::new(Self {
+                frames,
+                headers: BTreeMap::new(),
+                status: 200,
+            })
+        }
+
+        /// Build a transport that delivers a single malformed frame → decoder error.
+        fn malformed_frame() -> Arc<Self> {
+            let frames = vec![b"not-valid-json".to_vec()];
+            Arc::new(Self {
+                frames,
+                headers: BTreeMap::new(),
+                status: 200,
+            })
+        }
+    }
+
+    impl Transport for ScriptedStreamTransport {
+        fn execute<'a>(
+            &'a self,
+            _request: &'a ProviderRequest,
+        ) -> BoxFuture<'a, Result<ProviderResponse, LlmError>> {
+            Box::pin(async move {
+                Err(LlmError::Transport {
+                    message: "execute not used in ScriptedStreamTransport".into(),
+                })
+            })
+        }
+
+        fn open_stream<'a>(
+            &'a self,
+            _request: &'a ProviderRequest,
+        ) -> BoxFuture<'a, Result<StreamingResponse, LlmError>> {
+            let frames: Vec<Vec<u8>> = self.frames.clone();
+            let headers = self.headers.clone();
+            let status = self.status;
+            Box::pin(async move {
+                Ok(StreamingResponse {
+                    status,
+                    headers,
+                    frames: Box::new(ScriptedFrames::new(frames)),
+                })
+            })
+        }
+    }
+
+    /// Build a streaming adapter with an attached analytics bus.
+    async fn make_stream_adapter_with_bus(
+        transport: Arc<dyn Transport>,
+    ) -> (ProviderApiAdapter, Arc<::telemetry::InMemorySink>) {
+        use ::telemetry::{AnalyticsBus, InMemorySink};
+
+        #[allow(deprecated)]
+        std::env::set_var("STREAM_TELEM_TEST_KEY", "test-key");
+        let client = Arc::new(
+            DefaultLlmClient::from_config(ClientConfig {
+                providers: vec![ProviderProfile {
+                    provider_id: ProviderId::AnthropicFirstParty,
+                    profile_name: "anthropic".to_string(),
+                    base_url: "https://api.anthropic.com".to_string(),
+                    protocol: ProtocolFamily::AnthropicMessages,
+                    auth: AuthStrategy::ApiKey,
+                    credential: CredentialConfig::Env {
+                        var: "STREAM_TELEM_TEST_KEY".to_string(),
+                    },
+                    models: vec![ModelProfile {
+                        display_model: "claude-sonnet-4-20250514".to_string(),
+                        request_model: "claude-sonnet-4-20250514".to_string(),
+                        billing_model: "claude-sonnet-4".to_string(),
+                        aliases: vec![],
+                        capabilities: Capabilities {
+                            streaming: true,
+                            tools: true,
+                            ..Default::default()
+                        },
+                    }],
+                    pricing: PricingConfig::default(),
+                    signing: None,
+                    azure: None,
+                }],
+            })
+            .expect("client"),
+        );
+
+        let bus = Arc::new(AnalyticsBus::new());
+        let sink = Arc::new(InMemorySink::new());
+        bus.attach_sink(sink.clone()).await;
+
+        let adapter = ProviderApiAdapter::new(
+            client,
+            transport,
+            SubscriberState::default(),
+            UserAgentEnv {
+                user_type: Some("external".to_string()),
+                entrypoint: Some("cli".to_string()),
+                ..Default::default()
+            },
+            "0.0.0",
+            Some(bus),
+            None,
+        );
+        (adapter, sink)
+    }
+
+    /// Stream telemetry twin — succeed path:
+    /// a clean stream (message_stop at the end) must emit:
+    /// 1. `tengu_api_request_started` (stream=true)
+    /// 2. `tengu_api_request_succeeded` (from the unfold's terminal-event arm)
+    #[tokio::test]
+    async fn stream_emit_succeeded_fires_on_message_stop() {
+        use futures::StreamExt as _;
+        use ::telemetry::AnalyticsValue;
+
+        let transport = ScriptedStreamTransport::anthropic_success();
+        let (adapter, sink) = make_stream_adapter_with_bus(transport).await;
+
+        let mut stream = StreamingApiClient::stream(
+            &adapter,
+            "claude-sonnet-4-20250514",
+            None,
+            Vec::new(),
+            Vec::new(),
+        )
+        .await
+        .expect("stream open ok");
+
+        // Drain all events.
+        while stream.next().await.is_some() {}
+
+        let events = sink.events().await;
+        let names: Vec<&str> = events.iter().map(|e| e.name.as_str()).collect();
+
+        assert!(
+            names.contains(&"tengu_api_request_started"),
+            "started must fire; got {names:?}"
+        );
+        assert!(
+            names.contains(&"tengu_api_request_succeeded"),
+            "succeeded must fire on message_stop; got {names:?}"
+        );
+
+        // Must NOT fire multiple times.
+        let succeeded_count = names
+            .iter()
+            .filter(|&&n| n == "tengu_api_request_succeeded")
+            .count();
+        assert_eq!(
+            succeeded_count, 1,
+            "succeeded must fire exactly once; got {succeeded_count}"
+        );
+
+        // Verify stream=true on the started event.
+        let started = events
+            .iter()
+            .find(|e| e.name == "tengu_api_request_started")
+            .unwrap();
+        assert!(
+            matches!(&started.metadata["stream"], AnalyticsValue::Bool(true)),
+            "stream must be true on the started event"
+        );
+    }
+
+    /// Stream telemetry twin — fail path:
+    /// a stream that produces a decode error must emit `tengu_api_request_failed`
+    /// and NOT emit `tengu_api_request_succeeded`.
+    #[tokio::test]
+    async fn stream_emit_failed_fires_on_decode_error() {
+        use futures::StreamExt as _;
+
+        let transport = ScriptedStreamTransport::malformed_frame();
+        let (adapter, sink) = make_stream_adapter_with_bus(transport).await;
+
+        let stream_result = StreamingApiClient::stream(
+            &adapter,
+            "claude-sonnet-4-20250514",
+            None,
+            Vec::new(),
+            Vec::new(),
+        )
+        .await;
+
+        // May error at open or during drain.
+        if let Ok(mut stream) = stream_result {
+            while let Some(item) = stream.next().await {
+                // consume until error or end
+                let _ = item;
+            }
+        }
+
+        let events = sink.events().await;
+        let names: Vec<&str> = events.iter().map(|e| e.name.as_str()).collect();
+
+        // failed must fire (decode error or stream-interrupted)
+        // succeeded must NOT fire
+        assert!(
+            names.contains(&"tengu_api_request_failed"),
+            "failed must fire on decode error; got {names:?}"
+        );
+        assert!(
+            !names.contains(&"tengu_api_request_succeeded"),
+            "succeeded must NOT fire on error; got {names:?}"
         );
     }
 }

@@ -21,7 +21,6 @@ tracing.workspace = true
 
 [dev-dependencies]
 test-harness = { path = "../test-harness" }
-api-client = { path = "../api-client" }
 llm-client = { path = "../llm-client" }
 tempfile = "3.13"
 futures = "0.3"

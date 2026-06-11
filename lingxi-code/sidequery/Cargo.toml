@@ -9,9 +9,11 @@ license.workspace = true
 protocol = { path = "../protocol" }
 traits = { path = "../traits" }
 engine = { path = "../engine" }
-api-client = { path = "../api-client" }
+llm-client = { path = "../llm-client" }
+platform-common = { path = "../platforms/common" }
 cost = { path = "../cost" }
 tool-api = { path = "../tool-api" }
+base64 = "0.22"
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

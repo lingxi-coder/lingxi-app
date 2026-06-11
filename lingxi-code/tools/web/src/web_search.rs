@@ -7,11 +7,9 @@
 //! - `WEB_SEARCH_TOOL_BLOCK_NAME = "web_search"` (tool block `name`)
 //! - `WEB_SEARCH_MAX_USES = 8` (upstream `WebSearchTool.ts:80`)
 //! - `WEB_SEARCH_DEFAULT_MAX_TOKENS = 4096`
-//! - `anthropic-beta: web-search-2025-03-05` (via `api_client::betas::WEB_SEARCH`)
+//! - `anthropic-beta: web-search-2025-03-05` (via `WEB_SEARCH_BETA` local const)
 
 use crate::web_fetch::WEBFETCH_USER_AGENT_PREFIX;
-use api_client::betas::WEB_SEARCH as WEB_SEARCH_BETA;
-use api_client::types::UsageApi;
 use async_trait::async_trait;
 use once_cell::sync::Lazy;
 use permission::result::PermissionMetadata;
@@ -47,6 +45,36 @@ pub const WEB_SEARCH_DEFAULT_MAX_TOKENS: u32 = 4096;
 
 /// Canonical tool name in the registry.
 pub const TOOL_NAME: &str = "WebSearch";
+
+/// `anthropic-beta` value that gates the web-search tool on the Anthropic API.
+///
+/// Wire-locked byte-for-byte against `claude-code/src/constants/betas.ts`
+/// (`WEB_SEARCH = "web-search-2025-03-05"`). Local copy so tools/web does not
+/// depend on api-client.
+const WEB_SEARCH_BETA: &str = "web-search-2025-03-05";
+
+/// Minimal usage counters decoded from a WebSearch `POST /v1/messages` response.
+///
+/// Only `input_tokens` and `output_tokens` are needed; other fields on the
+/// Anthropic `usage` object are ignored. Matches the two fields `WebSearchTool`
+/// read from the two usage fields in the response — ported here so tools/web does not
+/// depend on api-client.
+///
+/// The usage field in `WebSearchMessageResponse` is itself `#[serde(default)]`,
+/// which requires `Default`. `input_tokens` and `output_tokens` also carry
+/// `#[serde(default)]` so that a partial or missing `usage` object decodes to
+/// zeros rather than failing — consistent with the parent field's defaulting
+/// contract (unlike the standalone `UsageApi` type in the old api-client, which
+/// required both fields).
+#[derive(Debug, Default, serde::Deserialize)]
+struct WebSearchUsage {
+    /// Number of input tokens billed.
+    #[serde(default)]
+    input_tokens: u64,
+    /// Number of output tokens billed.
+    #[serde(default)]
+    output_tokens: u64,
+}
 
 /// Input schema for `WebSearchTool`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -110,7 +138,7 @@ pub enum SearchResultEntry {
 /// Minimal view of the `messages` response consumed by WebSearch.
 ///
 /// `content` is intentionally kept as raw `serde_json::Value` blocks rather than
-/// `api_client::types::ContentBlockApi`: the web-search response carries
+/// a typed content-block enum: the web-search response carries
 /// `web_search_tool_result` blocks that `ContentBlockApi` does not model, and
 /// adding that variant would break the exhaustive `ContentBlockApi` matches in
 /// the agent/orchestrator/sidequery crates. This mirrors how upstream consumes
@@ -120,7 +148,7 @@ struct WebSearchMessageResponse {
     #[serde(default)]
     content: Vec<Value>,
     #[serde(default)]
-    usage: UsageApi,
+    usage: WebSearchUsage,
 }
 
 /// Walk a response `content` array and produce the search output, mirroring
@@ -818,7 +846,6 @@ mod tests {
 
     // ---- async impl Tool tests using MockHttpTransport ---------------------
 
-    use api_client::AnthropicProvider;
     use std::sync::Arc;
     use telemetry::sinks::InMemorySink;
     use telemetry::AnalyticsBus;
@@ -840,7 +867,7 @@ mod tests {
             vec![std::path::PathBuf::from("/tmp")],
         );
         ctx.http = http.clone() as Arc<dyn HttpTransport>;
-        ctx.provider = Arc::new(AnthropicProvider::new("test-key", None));
+        ctx.provider = Arc::new(tool_api::AnthropicRequestBuilder::new("test-key", None));
         ctx.default_model = "claude-sonnet-4-20250514".into();
         (ctx, http, sink)
     }

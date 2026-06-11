@@ -1,7 +1,7 @@
 //! End-to-end: drive the reducer through a complete single-turn conversation
 //! against `MockHttpTransport`. This is the M1.1 acceptance test.
 
-use api_client::AnthropicProvider;
+use tool_api::anthropic_request::AnthropicRequestBuilder;
 use engine::{reduce, ConversationState, Event, SessionState, Usage};
 use protocol::{ConversationMessage, Effect, HttpResponse, MessageId, RequestId, SessionId};
 use std::sync::Arc;
@@ -99,7 +99,7 @@ async fn single_turn_conversation_against_mock_http() {
 
 #[tokio::test]
 async fn anthropic_provider_against_mock_http_does_one_roundtrip() {
-    // This proves the api-client + MockHttpTransport pipeline works.
+    // This proves the AnthropicRequestBuilder + MockHttpTransport pipeline works.
     let transport = Arc::new(MockHttpTransport::new());
     transport.enqueue(ScriptedResponse::Sync(HttpResponse {
         status: 200,
@@ -107,9 +107,9 @@ async fn anthropic_provider_against_mock_http_does_one_roundtrip() {
         body: r#"{"id":"msg_test","model":"claude-opus-4-6","content":[{"type":"text","text":"Hi"}],"stop_reason":"end_turn","usage":{"input_tokens":3,"output_tokens":2}}"#.into(),
     }));
 
-    let provider = AnthropicProvider::new("sk-ant-test", None);
+    let builder = AnthropicRequestBuilder::new("sk-ant-test", None);
     let body = serde_json::json!({"model":"claude-opus-4-6","max_tokens":1024,"messages":[{"role":"user","content":"hi"}]});
-    let req = provider.build_request(&body);
+    let req = builder.build_request(&body);
     let resp = transport
         .request(req)
         .await

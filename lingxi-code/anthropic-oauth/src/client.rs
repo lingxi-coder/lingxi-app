@@ -346,11 +346,10 @@ pub async fn init_refresh_driver(
         bus,
         credentials,
     );
-    // Spawn the proactive refresh loop. The api-client hook registration
-    // (register_oauth_hook) was removed in Plan 3a Task 9: the live model
-    // path no longer goes through api-client's AnthropicProvider, so there
-    // is no caller for current_hook(). The WebSearch AnthropicProvider uses
-    // an API key (not OAuth) and never triggers the 401-refresh path.
+    // Spawn the proactive refresh loop. The api-client hook seam
+    // (register_oauth_hook / current_hook) was removed in Plan 3a; the live
+    // model path runs entirely through llm-client. The WebSearch builder
+    // uses an API key (not OAuth) and never triggers the 401-refresh path.
     RefreshDriver::spawn_proactive(state.clone(), spawner)
         .await
         .map_err(|e| OAuthError::TokenExchange(format!("spawn_proactive: {e}")))?;

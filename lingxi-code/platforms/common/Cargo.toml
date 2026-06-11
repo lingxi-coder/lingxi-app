@@ -10,9 +10,6 @@ jsonrpc = { path = "../../jsonrpc" }
 llm-client = { path = "../../llm-client" }
 traits = { path = "../../traits" }
 protocol = { path = "../../protocol" }
-# Shared real HttpTransport delegates SSE framing to api_client::sse. api-client
-# does NOT depend on platform-common, so this edge is acyclic.
-api-client = { path = "../../api-client" }
 async-trait = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 tokio-util = { version = "0.7", features = ["codec"] }

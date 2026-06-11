@@ -3,7 +3,8 @@
 //! Mirrors the posix implementation verbatim — `notify`-style duplication
 //! keeps the two platform crates library-less. SSE streaming uses
 //! `reqwest::Response::bytes_stream()` and a buffered boundary scanner that
-//! defers framing to `api_client::sse::parse_sse_chunks`.
+//! parses SSE events via the local `parse_sse_chunks` helper (ported verbatim
+//! from the former api-client crate, same as `platform-common/src/http.rs`).
 
 use async_trait::async_trait;
 use bytes::BytesMut;
@@ -158,6 +159,42 @@ impl HttpTransport for WindowsHttp {
     }
 }
 
+/// Parse one or more complete SSE events out of a raw chunk.
+///
+/// The chunk MUST end with `\n\n` to terminate the last event; partial events
+/// are dropped. Ported verbatim from the former `api-client/src/sse.rs`.
+fn parse_sse_chunks(raw: &str) -> Vec<SseEvent> {
+    let mut events = Vec::new();
+    for block in raw.split("\n\n") {
+        if block.trim().is_empty() {
+            continue;
+        }
+        let mut event_type: Option<String> = None;
+        let mut data_lines: Vec<String> = Vec::new();
+        let mut id: Option<String> = None;
+        for line in block.lines() {
+            if line.starts_with(':') {
+                continue;
+            }
+            if let Some(rest) = line.strip_prefix("event:") {
+                event_type = Some(rest.trim().to_string());
+            } else if let Some(rest) = line.strip_prefix("data:") {
+                data_lines.push(rest.trim().to_string());
+            } else if let Some(rest) = line.strip_prefix("id:") {
+                id = Some(rest.trim().to_string());
+            }
+        }
+        if !data_lines.is_empty() {
+            events.push(SseEvent {
+                event_type,
+                data: data_lines.join("\n"),
+                id,
+            });
+        }
+    }
+    events
+}
+
 /// Adapt a byte stream into a stream of complete `SseEvent`s.
 ///
 /// Buffers raw bytes until an event boundary (`\n\n` or `\r\n\r\n`) is found,
@@ -178,7 +215,7 @@ where
                     let event_bytes = buf.split_to(event_len).to_vec();
                     drop(buf.split_to(boundary_len));
                     let chunk = String::from_utf8_lossy(&event_bytes).to_string();
-                    let events = api_client::sse::parse_sse_chunks(&format!("{chunk}\n\n"));
+                    let events = parse_sse_chunks(&format!("{chunk}\n\n"));
                     if let Some(ev) = events.into_iter().next() {
                         return Some((Ok(ev), (s, buf)));
                     }

@@ -6,15 +6,13 @@
 //! The single-flight invariant is enforced via [`AuthState::refresh_lock`]
 //! with double-check-after-acquire (v3 §16.3).
 //!
-//! ## api-client decoupling (Plan 3a Task 9)
+//! ## api-client decoupling (Plan 3a Task 9, finalised 3b)
 //!
-//! `BearerToken`, `OAuthHookError`, and `TokenHash` are now owned locally in
-//! this module (re-typed from the api-client shapes they mirror). The
-//! `api_client::oauth_hook::OAuthRefreshHook` trait impl has been deleted;
-//! `RefreshDriver::refresh` is now an inherent `pub async fn`. The reactive-401
-//! retry path that api-client's middleware exercised via `current_hook()` is
-//! deferred to a follow-up (3b removes api-client entirely; the credential seam
-//! already handles token refresh proactively via `OAuthCredentialProvider`).
+//! `BearerToken`, `OAuthHookError`, and `TokenHash` are owned locally in
+//! this module (re-typed from the former api-client shapes). The
+//! `OAuthRefreshHook` trait impl and `current_hook()` seam have been deleted;
+//! `RefreshDriver::refresh` is now an inherent `pub async fn`. The credential
+//! seam handles token refresh proactively via `OAuthCredentialProvider`.
 
 // Task 2 lands the data model; Task 4+ consumes these fields via the
 // inherent `refresh` + `spawn_proactive`. Allow until then.
@@ -31,13 +29,12 @@ use std::time::{Duration, SystemTime};
 use tokio::sync::{Mutex, RwLock};
 
 // ---------------------------------------------------------------------------
-// Local OAuth types (re-typed from api_client::oauth_hook shapes, Plan 3a T9)
+// Local OAuth types (re-typed from the former api-client oauth_hook shapes)
 // ---------------------------------------------------------------------------
 
 /// Bearer token wrapper.
 ///
-/// Mirrors `api_client::oauth_hook::BearerToken` (owned locally so 3b can
-/// delete api-client without touching this crate).
+/// Owned locally (re-typed from the former `api_client::oauth_hook::BearerToken`).
 ///
 /// Note: does not implement `Clone` because `Secret<T>` intentionally does not.
 /// Callers that need shared ownership must wrap in `Arc`.
@@ -48,14 +45,14 @@ pub struct BearerToken(pub Secret<String>);
 ///
 /// Passed to [`RefreshDriver::refresh`] so the single-flight double-check can
 /// detect whether another task already rotated the token.
-/// Mirrors `api_client::oauth_hook::TokenHash`.
+/// Re-typed from the former `api_client::oauth_hook::TokenHash`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct TokenHash(pub [u8; 32]);
 
 /// Errors returned by [`RefreshDriver::refresh`].
 ///
-/// Mirrors `api_client::oauth_hook::OAuthHookError` variants verbatim so
-/// callers (`credential_provider.rs`) can match on the same variant names.
+/// Re-typed from the former `api_client::oauth_hook::OAuthHookError`; variant
+/// names kept identical so callers (`credential_provider.rs`) match unchanged.
 #[derive(Debug, Clone, Error)]
 pub enum OAuthHookError {
     /// Refresh attempted but the `IdP` rejected the `refresh_token`.
@@ -381,10 +378,10 @@ struct TokenEndpointResponse {
 impl RefreshDriver {
     /// Perform a single-flight OAuth token refresh.
     ///
-    /// Inherent method (Plan 3a Task 9 — replaces the former
-    /// `api_client::oauth_hook::OAuthRefreshHook` trait impl). All callers
-    /// within this crate (`credential_provider.rs`, `proactive_loop`) and
-    /// tests call this directly without trait indirection.
+    /// Inherent method (replaces the former `OAuthRefreshHook` trait impl from
+    /// api-client, removed in Plan 3a/3b). All callers within this crate
+    /// (`credential_provider.rs`, `proactive_loop`) and tests call this
+    /// directly without trait indirection.
     ///
     /// **Single-flight contract (v3 §16.3):** acquires `refresh_lock`, then
     /// double-checks the `prev_token_hash`. If another task already rotated

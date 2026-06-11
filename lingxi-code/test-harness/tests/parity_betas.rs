@@ -1,6 +1,6 @@
 //! Parity driver: per-provider × per-endpoint expected `anthropic-beta` header.
 
-use api_client::betas::{assemble_beta_header, Endpoint, Provider};
+use orchestrator::model::betas::{assemble_beta_header, Endpoint, Provider};
 use serde::Deserialize;
 use test_harness::parity::load_fixture;
 

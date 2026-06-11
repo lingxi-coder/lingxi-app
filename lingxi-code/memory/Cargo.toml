@@ -8,7 +8,6 @@ license.workspace = true
 [dependencies]
 protocol = { path = "../protocol" }
 traits = { path = "../traits" }
-api-client = { path = "../api-client" }
 sidequery = { path = "../sidequery" }
 secret = { path = "../secret" }
 telemetry = { path = "../telemetry" }

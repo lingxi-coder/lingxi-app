@@ -247,8 +247,7 @@ mod tests {
     /// Construct an `LlmError` for the transport-class table rows.
     ///
     /// `OrchestratorError::Streaming` and `::ApiCall` both wrap `llm_client::LlmError`
-    /// after the Task 5 retype (commit 5f8b3e35); the previous `api_client::ApiError`
-    /// type no longer matches.
+    /// (retyped in 3a Task 5, commit 5f8b3e35).
     fn api_error() -> llm_client::LlmError {
         llm_client::LlmError::Transport {
             message: "nope".into(),

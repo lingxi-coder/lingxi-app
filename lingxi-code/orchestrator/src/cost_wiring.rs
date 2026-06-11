@@ -7,7 +7,28 @@ use cost::pricing::ProviderId;
 use cost::usage::{ApiSpeed, ServerToolUsage, TokenUsage, Usage};
 use cost::ModelRef;
 use llm_client::Usage as LlmUsage;
-use providers::ModelSpec;
+
+/// The default profile name used for bare / `claude-*` model strings.
+/// Mirrors `providers::model_spec::DEFAULT_PROFILE`.
+const DEFAULT_PROFILE: &str = "anthropic";
+
+/// Parse a model string into `(profile, bare_model)` for cost routing.
+///
+/// Replicates `providers::ModelSpec::parse` semantics:
+/// - `"claude-*"` → profile `"anthropic"`, model = full string (back-compat).
+/// - `"profile/model"` (non-empty both sides) → `(profile, model)`.
+/// - Everything else (bare string, no `/`) → `("anthropic", full string)`.
+fn split_profile(model: &str) -> (String, String) {
+    if model.starts_with("claude-") {
+        return (DEFAULT_PROFILE.to_string(), model.to_string());
+    }
+    match model.split_once('/') {
+        Some((profile, bare)) if !profile.is_empty() && !bare.is_empty() => {
+            (profile.to_string(), bare.to_string())
+        }
+        _ => (DEFAULT_PROFILE.to_string(), model.to_string()),
+    }
+}
 
 /// Translate an `llm_client::Usage` into the cost crate's `Usage` shape.
 ///
@@ -68,22 +89,16 @@ fn provider_id_for_profile(profile: &str) -> ProviderId {
     }
 }
 
-/// Resolve a model-name string to its `ProviderId` by parsing the
-/// `provider/model` prefix (bare / `claude-*` → Anthropic, for back-compat).
-#[must_use]
-pub(crate) fn provider_from_model(model: &str) -> ProviderId {
-    provider_id_for_profile(&ModelSpec::parse(model).profile)
-}
-
 /// Build a fully-qualified [`ModelRef`] from a model string: the prefix selects
 /// the provider, and the local model id (prefix stripped) is what the price
 /// catalog is keyed on. `claude-*` / bare strings keep the full string as the
 /// model id, so Anthropic cost attribution is byte-identical to before.
 #[must_use]
 pub(crate) fn model_ref_from_string(model: &str) -> ModelRef {
+    let (profile, bare) = split_profile(model);
     ModelRef {
-        provider: provider_from_model(model),
-        model: ModelSpec::parse(model).model,
+        provider: provider_id_for_profile(&profile),
+        model: bare,
     }
 }
 
@@ -91,6 +106,52 @@ pub(crate) fn model_ref_from_string(model: &str) -> ModelRef {
 mod tests {
     use super::*;
     use llm_client::{ServerToolUsage as LlmServerToolUsage, TokenUsage as LlmTokenUsage};
+
+    /// Resolve a model-name string to its `ProviderId` by parsing the
+    /// `provider/model` prefix. Only needed in tests — the production path goes
+    /// through `model_ref_from_string`.
+    fn provider_from_model(model: &str) -> ProviderId {
+        let (profile, _) = split_profile(model);
+        provider_id_for_profile(&profile)
+    }
+
+    // --- split_profile tests (ported from providers::model_spec::tests) -----
+
+    #[test]
+    fn split_prefixed_splits_profile_and_model() {
+        let (p, m) = split_profile("openai/gpt-4o");
+        assert_eq!(p, "openai");
+        assert_eq!(m, "gpt-4o");
+    }
+
+    #[test]
+    fn split_bare_string_is_anthropic_backcompat() {
+        let (p, m) = split_profile("claude-opus-4-7");
+        assert_eq!(p, "anthropic");
+        assert_eq!(m, "claude-opus-4-7");
+    }
+
+    #[test]
+    fn split_claude_with_slash_stays_anthropic() {
+        // A claude model id is never reinterpreted as profile/model.
+        let (p, m) = split_profile("claude-3-5/sonnet");
+        assert_eq!(p, "anthropic");
+        assert_eq!(m, "claude-3-5/sonnet");
+    }
+
+    #[test]
+    fn split_non_claude_no_slash_is_anthropic_profile() {
+        let (p, m) = split_profile("some-model");
+        assert_eq!(p, "anthropic");
+        assert_eq!(m, "some-model");
+    }
+
+    #[test]
+    fn split_custom_profile_name() {
+        let (p, m) = split_profile("groq/llama-3.3-70b");
+        assert_eq!(p, "groq");
+        assert_eq!(m, "llama-3.3-70b");
+    }
 
     fn make_llm_usage(
         input: u64, output: u64, cache_write: u64, cache_read: u64,

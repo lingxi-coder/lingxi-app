@@ -11,7 +11,7 @@
 //!
 //! 1. `platform-posix-minimal` provides `HttpTransport` + `Clock` +
 //!    `SecureStorage`.
-//! 2. The api-client is built (via `ProviderRegistry`) from `cfg.api_base`
+//! 2. The llm-client transport bridge is built from `cfg.api_base`
 //!    (default `https://api.anthropic.com`) + `cfg.api_key`.
 //! 3. `anthropic-oauth::ClaudeAiOAuthClient` wraps the credential manager so
 //!    `/login` + `/logout` have a real handle.

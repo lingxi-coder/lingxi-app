@@ -19,7 +19,6 @@ engine = { path = "../engine" }
 traits = { path = "../traits" }
 telemetry = { path = "../telemetry" }
 sandbox = { path = "../sandbox" }
-api-client = { path = "../api-client" }
 mcp = { path = "../mcp" }
 lsp = { path = "../lsp" }
 serde.workspace = true

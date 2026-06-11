@@ -1,8 +1,17 @@
 # Engine adoption of llm-client (full replacement of api-client) — design
 
 Date: 2026-06-10
-Status: approved (user), revision 2.2 — no intermediate policy crate; supersedes
-api-client entirely with no backwards compatibility.
+Status: approved (user), revision 2.4 — 3a + 3b DONE; 3c remaining.
+
+**Revision history:**
+- 2.2 — no intermediate policy crate; supersedes api-client entirely with no backwards compatibility.
+- 2.3 — Plan 3a complete: live path swapped onto llm-client; 5 TS parity fixes merged to main.
+- 2.4 — Plan 3b complete: api-client + providers crates deleted; ~16 dependents re-homed.
+  3c remaining: modelProviders settings wiring — `DesktopConfig.provider_profiles` / `routing`
+  and `SettingsJson.providers` / `routing` are loaded into `llm_client::ClientConfig` but the
+  engine settings schema fields are not yet consumed (wired in as `None` / passthrough today);
+  also pending: `PricingCatalog` population from the `cost` crate price table, and streaming
+  rate-limit header metadata traits (`stream_sse` response-header surface).
 
 ## Goal
 

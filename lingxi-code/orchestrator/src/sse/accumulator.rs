@@ -19,10 +19,10 @@ use std::collections::HashMap;
 
 /// Tag identifying what kind of content block is being accumulated.
 ///
-/// Constructed from a [`api_client::types::StreamEvent::ContentBlockStart`]
-/// payload at the call site. `ToolUse` carries the API-provided id + name
-/// verbatim; the input JSON is reassembled from `input_json_delta`
-/// chunks.
+/// Constructed from a `StreamEvent::ContentBlockStart` payload at the call
+/// site (formerly `api_client::types::StreamEvent`; now
+/// `llm_client::LlmEvent`). `ToolUse` carries the API-provided id + name
+/// verbatim; the input JSON is reassembled from `input_json_delta` chunks.
 #[derive(Debug, Clone)]
 pub enum BlockKind {
     /// A `text` block — accumulates `text_delta` chunks.

@@ -11,7 +11,6 @@ traits = { path = "../../traits" }
 jsonrpc = { path = "../../jsonrpc" }
 lsp = { path = "../../lsp" }
 platform-common = { path = "../common" }
-api-client = { path = "../../api-client" }
 async-trait = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 tokio-util = { workspace = true }

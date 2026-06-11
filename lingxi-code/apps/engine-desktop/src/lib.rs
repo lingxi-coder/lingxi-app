@@ -34,7 +34,7 @@ use anthropic_oauth::client::ClaudeAiOAuthClient;
 use anthropic_oauth::config::ClaudeAiOAuthConfig;
 use anthropic_oauth::handle::OAuthHandle;
 use anthropic_oauth::{OAuthCredentialProvider, RefreshDriver};
-use api_client::AnthropicProvider;
+use tool_api::AnthropicRequestBuilder;
 use client_adapter::{AdapterPermissionGate, PermissionRequestSink};
 use llm_client::{DefaultLlmClient, Transport};
 use orchestrator::model::user_agent::UserAgentEnv;
@@ -54,7 +54,6 @@ use platform_posix_minimal::{
     PlainTextSecureStorage, PosixClock, PosixFileSystem, PosixHttp, PosixMcp, PosixProcess,
     PosixRuntime, PosixSandbox, PosixWorktree,
 };
-use providers::{builtin_profiles, parse_profiles, parse_routing, ProviderRegistry};
 use sandbox::decision::ProjectTrustLevel;
 use sandbox::runtime_config::{Platform as SandboxPlatform, SandboxRuntimeConfig};
 use secret::CredentialManager;
@@ -64,19 +63,131 @@ use tokio::sync::RwLock;
 use tool_api::{BuiltinToolContext, ToolRegistry};
 use traits::{AuthHandle, McpTransport, OrchestratorHandle, OutputStream};
 
-/// Re-export the pure model-deprecation lookup (`providers::deprecation`) at the
-/// composition-root surface so the host binary can compute the startup
-/// deprecation notice without taking a direct `providers` dependency.
+/// API provider, mirroring `APIProvider` (`utils/model/providers.ts:4`).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum ApiProvider {
+    FirstParty,
+    Bedrock,
+    Vertex,
+    Foundry,
+}
+
+/// Port of `isEnvTruthy` (`envUtils.ts:32-37`).
+fn is_env_truthy(key: &str) -> bool {
+    std::env::var(key)
+        .is_ok_and(|v| matches!(v.to_lowercase().trim(), "1" | "true" | "yes" | "on"))
+}
+
+/// Port of `getAPIProvider()` (`utils/model/providers.ts:6-14`).
+fn api_provider() -> ApiProvider {
+    if is_env_truthy("CLAUDE_CODE_USE_BEDROCK") {
+        ApiProvider::Bedrock
+    } else if is_env_truthy("CLAUDE_CODE_USE_VERTEX") {
+        ApiProvider::Vertex
+    } else if is_env_truthy("CLAUDE_CODE_USE_FOUNDRY") {
+        ApiProvider::Foundry
+    } else {
+        ApiProvider::FirstParty
+    }
+}
+
+/// A deprecated model's display name and its per-provider retirement dates.
+struct DeprecationEntry {
+    model_name: &'static str,
+    first_party: Option<&'static str>,
+    bedrock: Option<&'static str>,
+    vertex: Option<&'static str>,
+    foundry: Option<&'static str>,
+}
+
+impl DeprecationEntry {
+    fn retirement_date(&self, provider: ApiProvider) -> Option<&'static str> {
+        match provider {
+            ApiProvider::FirstParty => self.first_party,
+            ApiProvider::Bedrock => self.bedrock,
+            ApiProvider::Vertex => self.vertex,
+            ApiProvider::Foundry => self.foundry,
+        }
+    }
+}
+
+/// Deprecated models and their retirement dates by provider.
+/// Byte-locked to `DEPRECATED_MODELS` (`utils/model/deprecation.ts:33-61`).
+const DEPRECATED_MODELS: &[(&str, DeprecationEntry)] = &[
+    (
+        "claude-3-opus",
+        DeprecationEntry {
+            model_name: "Claude 3 Opus",
+            first_party: Some("January 5, 2026"),
+            bedrock: Some("January 15, 2026"),
+            vertex: Some("January 5, 2026"),
+            foundry: Some("January 5, 2026"),
+        },
+    ),
+    (
+        "claude-3-7-sonnet",
+        DeprecationEntry {
+            model_name: "Claude 3.7 Sonnet",
+            first_party: Some("February 19, 2026"),
+            bedrock: Some("April 28, 2026"),
+            vertex: Some("May 11, 2026"),
+            foundry: Some("February 19, 2026"),
+        },
+    ),
+    (
+        "claude-3-5-haiku",
+        DeprecationEntry {
+            model_name: "Claude 3.5 Haiku",
+            first_party: Some("February 19, 2026"),
+            bedrock: None,
+            vertex: None,
+            foundry: None,
+        },
+    ),
+];
+
+struct DeprecatedModelInfo {
+    model_name: &'static str,
+    retirement_date: &'static str,
+}
+
+fn deprecated_model_info(model_id: &str) -> Option<DeprecatedModelInfo> {
+    let lowercase = model_id.to_lowercase();
+    let provider = api_provider();
+    for (key, value) in DEPRECATED_MODELS {
+        let Some(retirement_date) = value.retirement_date(provider) else {
+            continue;
+        };
+        if !lowercase.contains(key) {
+            continue;
+        }
+        return Some(DeprecatedModelInfo {
+            model_name: value.model_name,
+            retirement_date,
+        });
+    }
+    None
+}
+
+/// Get a deprecation warning message for a model, or `None` if not deprecated.
 ///
-/// The CLI host (`apps/cli`) resolves the same model id it threads into
-/// [`DesktopConfig::default_model`] (argv `--model`, else the desktop default),
-/// passes it here, and surfaces the returned warning at startup — the bounded
-/// stand-in for claude-code's `getModelDeprecationWarning(resolvedInitialModel)`
-/// startup-notification-queue entry (`main.tsx:2873`/`2889-2896`). With any
-/// current (Claude 4-generation) default model the lookup returns `None`, so the
-/// startup output stays byte-identical until a user configures one of the
-/// deprecated Claude 3 ids.
-pub use providers::deprecation::model_deprecation_warning;
+/// Direct port of `getModelDeprecationWarning` (`deprecation.ts:88-101`).
+/// Moved here from `providers::deprecation` (Plan 3b Task 3) so the CLI host
+/// can call it without a direct `providers` dependency; re-exported at this
+/// composition-root surface for backward compatibility.
+///
+/// With any current (Claude 4-generation) default model the lookup returns
+/// `None`, so the startup output stays byte-identical until a user configures
+/// one of the deprecated Claude 3 ids.
+#[must_use]
+pub fn model_deprecation_warning(model_id: Option<&str>) -> Option<String> {
+    let model_id = model_id.filter(|m| !m.is_empty())?;
+    let info = deprecated_model_info(model_id)?;
+    Some(format!(
+        "⚠ {} will be retired on {}. Consider switching to a newer model.",
+        info.model_name, info.retirement_date
+    ))
+}
 
 /// M10 (T13): per-teammate `StateMachinePool` slot cap.
 ///
@@ -461,8 +572,8 @@ pub fn desktop_skill_registry() -> SkillRegistry {
 ///   bridge-server can point it at a sandbox in tests.
 /// - `default_model` — `Argv::model` ⟶ `OrchestratorConfig.model` (init.rs:213).
 /// - `provider_profiles` — the settings `providers` block as raw JSON, fed
-///   verbatim to `providers::parse_profiles` (`load_provider_profiles()`,
-///   init.rs:175). `None` ⟶ built-in profiles only.
+///   verbatim to `llm_client::ClientConfig` via `build()`. `None` ⟶ built-in
+///   profiles only.
 /// - `mcp_paths` — the precedence-ordered `.mcp.json` paths (project then
 ///   global) handed to `mcp::load_mcp_json_with_precedence` (init.rs:253-258).
 /// - `use_noop_permission_gate` — lets the CLI opt into `NoOpPermissionGate`
@@ -523,10 +634,10 @@ pub struct DesktopConfig {
     /// applies that gate before filling this field (`resolve_desktop_config`).
     pub fallback_model: Option<String>,
     /// Settings-declared `providers` block as raw JSON, fed verbatim to
-    /// `providers::parse_profiles`. `None` ⟶ built-in profiles only.
+    /// `llm_client::ClientConfig` via `build()`. `None` ⟶ built-in profiles only.
     pub provider_profiles: Option<std::collections::BTreeMap<String, serde_json::Value>>,
     /// Settings-declared `routing` block as raw JSON, fed verbatim to
-    /// `providers::parse_routing` (model aliases / fallback / retry). `None` ⟶
+    /// `llm_client::ClientConfig` (model aliases / fallback / retry). `None` ⟶
     /// the default (empty) routing config. Mirrors `load_routing()` in
     /// `apps/cli/src/init.rs` — additive to the F2-00 field set so the lift
     /// preserves byte-equivalent engine behavior (no silent routing drop).
@@ -820,23 +931,6 @@ pub async fn build(
     let clock = Arc::new(PosixClock::new());
     let storage = Arc::new(PlainTextSecureStorage::new());
 
-    // (2) ProviderRegistry — no longer on the live model path (adapter now drives
-    //     DefaultLlmClient directly, Task 10). Kept in the tree as a dead path so
-    //     Plan 3b can remove it in one patch. The `_` prefix suppresses the
-    //     unused-variable lint until then.
-    let env_snapshot: std::collections::BTreeMap<String, String> = std::env::vars().collect();
-    let mut profiles = builtin_profiles(Some(cfg.api_base.clone()));
-    match parse_profiles(cfg.provider_profiles.as_ref()) {
-        Ok(extra) => profiles.extend(extra),
-        Err(e) => tracing::warn!(error = %e, "ignoring malformed settings `providers` block"),
-    }
-    let routing = parse_routing(cfg.routing.as_ref());
-    let _registry = Arc::new(ProviderRegistry::new(
-        profiles,
-        env_snapshot,
-        http.clone(),
-        routing,
-    ));
     // (2a) Task 10: LlmTransportBridge wraps the PosixHttp transport for
     //      `DefaultLlmClient`. A second `PosixHttp` instance is used so the
     //      bridge owns its own (stateless) handle; the original `http` Arc
@@ -849,7 +943,7 @@ pub async fn build(
     let mut llm_oauth_state: Option<Arc<anthropic_oauth::refresh::AuthState>> = None;
     // WebSearch builds Anthropic `POST /v1/messages` requests via its own
     // provider (server-side web search is Anthropic-only in v1).
-    let tool_provider = Arc::new(AnthropicProvider::new(
+    let tool_provider = Arc::new(AnthropicRequestBuilder::new(
         cfg.api_key.clone(),
         Some(cfg.api_base.clone()),
     ));
@@ -1886,8 +1980,95 @@ pub async fn build(
 
 #[cfg(test)]
 mod tests {
-    use super::{build, desktop_tool_registry, CoordinatorWiring, DesktopConfig};
+    use super::{build, desktop_tool_registry, model_deprecation_warning, CoordinatorWiring, DesktopConfig};
     use std::sync::Arc;
+
+    // ── deprecation tests ────────────────────────────────────────────────────
+    // Ported from the deleted `providers/src/deprecation.rs` unit tests
+    // (Plan 3b Task 5) so the behaviour stays covered at the new home.
+
+    /// Env access in these tests is process-global; serialize them so the
+    /// provider flags one test sets can't leak into another running in parallel.
+    static DEPR_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn clear_provider_env() {
+        std::env::remove_var("CLAUDE_CODE_USE_BEDROCK");
+        std::env::remove_var("CLAUDE_CODE_USE_VERTEX");
+        std::env::remove_var("CLAUDE_CODE_USE_FOUNDRY");
+    }
+
+    #[test]
+    fn depr_bedrock_and_vertex_env_matrix() {
+        let _guard = DEPR_ENV_LOCK.lock().unwrap();
+        clear_provider_env();
+
+        // Bedrock: Opus has a different (later) date; Haiku 3.5 has none → None.
+        std::env::set_var("CLAUDE_CODE_USE_BEDROCK", "1");
+        assert_eq!(
+            model_deprecation_warning(Some("claude-3-opus-20240229")).as_deref(),
+            Some("⚠ Claude 3 Opus will be retired on January 15, 2026. Consider switching to a newer model.")
+        );
+        assert_eq!(model_deprecation_warning(Some("claude-3-5-haiku-20241022")), None);
+        clear_provider_env();
+
+        // Vertex: 3.7 Sonnet has a different date.
+        std::env::set_var("CLAUDE_CODE_USE_VERTEX", "1");
+        assert_eq!(
+            model_deprecation_warning(Some("claude-3-7-sonnet-20250219")).as_deref(),
+            Some("⚠ Claude 3.7 Sonnet will be retired on May 11, 2026. Consider switching to a newer model.")
+        );
+        clear_provider_env();
+    }
+
+    #[test]
+    fn depr_bedrock_null_haiku() {
+        let _guard = DEPR_ENV_LOCK.lock().unwrap();
+        clear_provider_env();
+        std::env::set_var("CLAUDE_CODE_USE_BEDROCK", "1");
+        // claude-3-5-haiku has `bedrock: None` in the table → no warning.
+        assert_eq!(model_deprecation_warning(Some("claude-3-5-haiku-20241022")), None);
+        clear_provider_env();
+    }
+
+    #[test]
+    fn depr_case_insensitive_substring() {
+        let _guard = DEPR_ENV_LOCK.lock().unwrap();
+        clear_provider_env();
+        // The key match is lowercased, so uppercase input still matches.
+        assert_eq!(
+            model_deprecation_warning(Some("CLAUDE-3-OPUS-20240229")).as_deref(),
+            Some("⚠ Claude 3 Opus will be retired on January 5, 2026. Consider switching to a newer model.")
+        );
+        // Bedrock-prefixed id still matches the substring.
+        assert!(model_deprecation_warning(Some("anthropic.claude-3-opus-20240229-v1:0")).is_some());
+    }
+
+    #[test]
+    fn depr_first_party_deprecated_models_warn() {
+        let _guard = DEPR_ENV_LOCK.lock().unwrap();
+        clear_provider_env();
+        assert_eq!(
+            model_deprecation_warning(Some("claude-3-opus-20240229")).as_deref(),
+            Some("⚠ Claude 3 Opus will be retired on January 5, 2026. Consider switching to a newer model.")
+        );
+        assert_eq!(
+            model_deprecation_warning(Some("claude-3-7-sonnet-20250219")).as_deref(),
+            Some("⚠ Claude 3.7 Sonnet will be retired on February 19, 2026. Consider switching to a newer model.")
+        );
+        assert_eq!(
+            model_deprecation_warning(Some("claude-3-5-haiku-20241022")).as_deref(),
+            Some("⚠ Claude 3.5 Haiku will be retired on February 19, 2026. Consider switching to a newer model.")
+        );
+    }
+
+    #[test]
+    fn depr_none_or_empty_model_yields_no_warning() {
+        let _guard = DEPR_ENV_LOCK.lock().unwrap();
+        clear_provider_env();
+        assert_eq!(model_deprecation_warning(None), None);
+        assert_eq!(model_deprecation_warning(Some("")), None);
+    }
+    // ── end deprecation tests ────────────────────────────────────────────────
 
     /// F2-00: the deliverable-zero config is constructible from `Default` and
     /// its frozen field set is reachable. The actual `build()` lift is F2-01;

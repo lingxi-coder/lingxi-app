@@ -304,11 +304,11 @@ pub(crate) fn read_cli_mode_settings(parsed: &Argv) -> permission::CliModeSettin
 /// initialMainLoopModel ?? getDefaultMainLoopModel())` (`main.tsx:2116`), the
 /// same value fed to `getModelDeprecationWarning` at `main.tsx:2873`.
 ///
-/// The lookup itself is `providers::deprecation::model_deprecation_warning`
-/// (re-exported through `engine_desktop` so the CLI needs no direct `providers`
-/// dependency); it returns `Some(warning)` only for a deprecated model under the
-/// active provider and `None` otherwise — so a current default model yields
-/// `None` and the caller prints nothing (byte-identical startup).
+/// The lookup itself is `engine_desktop::model_deprecation_warning`
+/// (moved from the deleted `providers` crate in Plan 3b); it returns
+/// `Some(warning)` only for a deprecated model under the active provider and
+/// `None` otherwise — so a current default model yields `None` and the caller
+/// prints nothing (byte-identical startup).
 fn startup_deprecation_notice(argv: &Argv) -> Option<String> {
     let resolved_model = argv
         .model
@@ -372,7 +372,7 @@ mod startup_notice_tests {
     /// including the leading `⚠ ` glyph). This is the only condition under which
     /// startup emits anything. The provider env is cleared first so the
     /// first-party retirement date is the one asserted (the table carries a
-    /// different date per provider; see `providers::deprecation`).
+    /// different date per provider; see `engine_desktop::model_deprecation_warning`).
     #[test]
     fn deprecated_override_model_yields_first_party_notice() {
         let prior = [

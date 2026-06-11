@@ -1,6 +1,6 @@
 //! Parity driver for `web_tools.json` — cross-checks every M4-03 locked
 //! literal against the production constants in `lingxi-tools` /
-//! `lingxi-telemetry` / `lingxi-api-client`. Spec §7 + protocol v3 §32.6.
+//! `lingxi-telemetry`. Spec §7 + protocol v3 §32.6.
 
 #![allow(
     clippy::too_many_lines,
@@ -8,7 +8,7 @@
     clippy::used_underscore_binding
 )]
 
-use api_client::betas::WEB_SEARCH as API_CLIENT_WEB_SEARCH_BETA;
+use orchestrator::model::betas::WEB_SEARCH as ORCHESTRATOR_WEB_SEARCH_BETA;
 use serde::Deserialize;
 use telemetry::tengu::tool::{
     WEB_FETCH_COMPLETED, WEB_FETCH_FAILED, WEB_FETCH_STARTED, WEB_SEARCH_COMPLETED,
@@ -79,7 +79,7 @@ fn websearch_constants_match_fixture() {
         fix.websearch_default_max_tokens,
         WEB_SEARCH_DEFAULT_MAX_TOKENS
     );
-    assert_eq!(fix.websearch_anthropic_beta, API_CLIENT_WEB_SEARCH_BETA);
+    assert_eq!(fix.websearch_anthropic_beta, ORCHESTRATOR_WEB_SEARCH_BETA);
     assert_eq!(fix.websearch_anthropic_beta, "web-search-2025-03-05");
 }
 

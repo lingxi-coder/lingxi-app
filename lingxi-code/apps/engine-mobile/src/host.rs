@@ -33,7 +33,7 @@ use std::sync::Arc;
 use anthropic_oauth::client::ClaudeAiOAuthClient;
 use anthropic_oauth::config::ClaudeAiOAuthConfig;
 use anthropic_oauth::handle::OAuthHandle;
-use api_client::AnthropicProvider;
+use tool_api::AnthropicRequestBuilder;
 use llm_client::{DefaultLlmClient, Transport};
 use orchestrator::model::user_agent::UserAgentEnv;
 use orchestrator::provider_adapter::SubscriberState;
@@ -57,7 +57,6 @@ use orchestrator::{
 };
 use permission::gate::PermissionGate;
 use permission::PermissionMode;
-use providers::{builtin_profiles, parse_profiles, parse_routing, ProviderRegistry};
 use sandbox::decision::ProjectTrustLevel;
 use sandbox::runtime_config::{Platform as SandboxPlatform, SandboxRuntimeConfig};
 use secret::CredentialManager;
@@ -73,12 +72,11 @@ use crate::{mobile_command_registry, mobile_tool_registry};
 
 /// A sized newtype over the platform's `Arc<dyn HttpTransport>`.
 ///
-/// [`providers::ProviderRegistry`] is generic over a **sized** `T: HttpTransport`
-/// (`providers/src/registry.rs:51`) — desktop satisfies it by passing the
-/// concrete `Arc<PosixHttp>`. Mobile reads its transport from the aggregate
-/// `Platform` as an `Arc<dyn HttpTransport>` (unsized), so we wrap it in this
-/// thin delegating newtype to satisfy the bound WITHOUT bypassing the device's
-/// HTTP backend — every call forwards verbatim to the platform transport.
+/// [`LlmTransportBridge`] requires a `Sized` `HttpTransport` implementor.
+/// Mobile reads its transport from the aggregate `Platform` as an
+/// `Arc<dyn HttpTransport>` (unsized), so we wrap it in this thin delegating
+/// newtype to satisfy the bound WITHOUT bypassing the device's HTTP backend —
+/// every call forwards verbatim to the platform transport.
 struct DynHttp(Arc<dyn HttpTransport>);
 
 #[async_trait::async_trait]
@@ -129,10 +127,10 @@ pub struct MobileConfig {
     /// Model id the build defaults to (`OrchestratorConfig.model`).
     pub default_model: String,
     /// Settings-declared `providers` block as raw JSON, fed verbatim to
-    /// `providers::parse_profiles`. `None` ⟶ built-in profiles only.
+    /// `llm_client::ClientConfig` via `build()`. `None` ⟶ built-in profiles only.
     pub provider_profiles: Option<std::collections::BTreeMap<String, serde_json::Value>>,
     /// Settings-declared `routing` block as raw JSON, fed verbatim to
-    /// `providers::parse_routing`. `None` ⟶ the default (empty) routing config.
+    /// `llm_client::ClientConfig`. `None` ⟶ the default (empty) routing config.
     pub routing: Option<serde_json::Value>,
 }
 
@@ -295,22 +293,6 @@ pub async fn build_mobile_inner(
     let worktree = platform.worktree();
     let storage = Arc::new(platform_posix_minimal::PlainTextSecureStorage::new());
 
-    // (2) ProviderRegistry — no longer on the live model path (adapter now drives
-    //     DefaultLlmClient directly, Task 10). Kept for Plan 3b removal.
-    let env_snapshot: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
-    let mut profiles = builtin_profiles(Some(cfg.api_base.clone()));
-    match parse_profiles(cfg.provider_profiles.as_ref()) {
-        Ok(extra) => profiles.extend(extra),
-        Err(e) => tracing::warn!(error = %e, "ignoring malformed settings `providers` block"),
-    }
-    let routing = parse_routing(cfg.routing.as_ref());
-    let _registry = Arc::new(ProviderRegistry::new(
-        profiles,
-        env_snapshot,
-        Arc::new(DynHttp(http.clone())),
-        routing,
-    ));
-
     // (2a) Task 10: DefaultLlmClient over LlmTransportBridge.
     //      Mobile uses the platform's `Arc<dyn HttpTransport>` wrapped in `DynHttp`
     //      so the device backend is preserved; no desktop-only deps are pulled.
@@ -341,7 +323,7 @@ pub async fn build_mobile_inner(
         streaming_override.unwrap_or(provider_adapter as Arc<dyn StreamingApiClient>);
     // WebSearch builds Anthropic `POST /v1/messages` requests via its own
     // provider (server-side web search is Anthropic-only in v1).
-    let tool_provider = Arc::new(AnthropicProvider::new(
+    let tool_provider = Arc::new(AnthropicRequestBuilder::new(
         cfg.api_key.clone(),
         Some(cfg.api_base.clone()),
     ));

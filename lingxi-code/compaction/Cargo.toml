@@ -9,7 +9,7 @@ license.workspace = true
 protocol = { path = "../protocol" }
 traits = { path = "../traits" }
 engine = { path = "../engine" }
-api-client = { path = "../api-client" }
+llm-client = { path = "../llm-client" }
 cost = { path = "../cost" }
 hooks = { path = "../hooks" }
 sidequery = { path = "../sidequery" }
@@ -19,6 +19,7 @@ thiserror.workspace = true
 async-trait.workspace = true
 tokio = { workspace = true }
 tracing.workspace = true
+regex = "1"
 
 [dev-dependencies]
 # Only used by the autocompact unit test to construct a `CacheSafeParams`

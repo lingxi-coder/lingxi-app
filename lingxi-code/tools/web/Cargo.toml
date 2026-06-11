@@ -11,7 +11,6 @@ traits = { path = "../../traits" }
 protocol = { path = "../../protocol" }
 permission = { path = "../../permission" }
 telemetry = { path = "../../telemetry" }
-api-client = { path = "../../api-client" }
 # Side-query seam for the WebFetch "apply" step (process fetched markdown with
 # a small-fast model). The concrete client is injected at the desktop root.
 sidequery = { path = "../../sidequery" }

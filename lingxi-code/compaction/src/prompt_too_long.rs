@@ -1,5 +1,10 @@
 //! Prompt-too-long (413 / "prompt is too long") detection + token-gap parsing.
 //!
+//! Moved here from `orchestrator::model::prompt_too_long` so that the compaction
+//! crate's PTL retry loop can use these helpers without depending on the
+//! orchestrator (which would create a dependency cycle — orchestrator → compaction
+//! already holds).
+//!
 //! When the Messages API rejects a request because the assembled prompt exceeds
 //! the model's **input** token limit, it returns a 4xx (commonly **400** on
 //! Anthropic, **413** elsewhere) whose error message has the shape:
@@ -8,13 +13,8 @@
 //! prompt is too long: 137500 tokens > 135000 maximum
 //! ```
 //!
-//! claude-code parses the two numbers to learn how far over the limit the
-//! prompt is, then the reactive-recovery loop drops the oldest API rounds to
-//! shave off that gap and retries (see `compaction::ptl_retry`). Without a typed
-//! error variant the orchestrator's recovery loop has nothing to match on, so
-//! this module ports the classification + parsing and the
-//! [`AnthropicProvider`](crate::AnthropicProvider) wires
-//! [`reclassify_prompt_too_long`] into its non-2xx funnel.
+//! The compaction PTL retry loop drops the oldest API rounds to shave off that
+//! gap and retries (see `compaction::ptl_retry`).
 //!
 //! Ports of claude-code `src/services/api/errors.ts:62-118`:
 //! * [`PROMPT_TOO_LONG_ERROR_MESSAGE`] — `PROMPT_TOO_LONG_ERROR_MESSAGE` (`:62`).
@@ -25,7 +25,6 @@
 
 #![forbid(unsafe_code)]
 
-use crate::ApiError;
 use regex::Regex;
 use std::sync::OnceLock;
 
@@ -92,41 +91,6 @@ pub fn prompt_too_long_token_gap(body: &str) -> u64 {
     }
 }
 
-/// Build a typed [`ApiError::PromptTooLong`] from a non-2xx `(status, body)`
-/// when it is a prompt-too-long rejection: **HTTP 413**, or any status whose
-/// body says "prompt is too long" (Anthropic returns this as a 400). Returns
-/// `None` for everything else so the caller keeps the original classification.
-///
-/// claude-code classifies these from the 400/413 error bodies; mirroring that
-/// here is what makes the orchestrator's reactive recovery reachable.
-#[must_use]
-pub fn classify_prompt_too_long(status: u16, body: &str) -> Option<ApiError> {
-    if status == 413 || is_prompt_too_long_body(body) {
-        Some(ApiError::PromptTooLong {
-            token_gap: prompt_too_long_token_gap(body),
-            raw: body.to_string(),
-        })
-    } else {
-        None
-    }
-}
-
-/// Reclassify a generic [`ApiError::Server`] into [`ApiError::PromptTooLong`]
-/// when its `(status, body)` is a prompt-too-long rejection; pass every other
-/// error (and non-`Server` variants) through unchanged.
-///
-/// Applied at the [`AnthropicProvider`](crate::AnthropicProvider) non-2xx funnel
-/// so the typed variant is actually constructed on the live path.
-#[must_use]
-pub fn reclassify_prompt_too_long(error: ApiError) -> ApiError {
-    if let ApiError::Server { status, body } = &error {
-        if let Some(ptl) = classify_prompt_too_long(*status, body) {
-            return ptl;
-        }
-    }
-    error
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -183,57 +147,5 @@ mod tests {
             prompt_too_long_token_gap("prompt is too long: 100 tokens > 200 maximum"),
             0
         );
-    }
-
-    #[test]
-    fn classifies_413_without_counts() {
-        let e = classify_prompt_too_long(413, "Payload Too Large").expect("413 is PTL");
-        match e {
-            ApiError::PromptTooLong { token_gap, raw } => {
-                assert_eq!(token_gap, 0); // no counts in the body
-                assert_eq!(raw, "Payload Too Large");
-            }
-            other => panic!("expected PromptTooLong, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn classifies_400_prompt_too_long_body_with_gap() {
-        let body = "prompt is too long: 137500 tokens > 135000 maximum";
-        let e = classify_prompt_too_long(400, body).expect("PTL body is PTL");
-        match e {
-            ApiError::PromptTooLong { token_gap, .. } => assert_eq!(token_gap, 2_500),
-            other => panic!("expected PromptTooLong, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn does_not_classify_unrelated_errors() {
-        assert!(classify_prompt_too_long(500, "internal error").is_none());
-        assert!(classify_prompt_too_long(429, "rate limited").is_none());
-    }
-
-    #[test]
-    fn reclassify_only_rewrites_matching_server_errors() {
-        // A PTL Server error is rewritten.
-        let rewritten = reclassify_prompt_too_long(ApiError::Server {
-            status: 400,
-            body: "prompt is too long: 9 tokens > 4 maximum".into(),
-        });
-        assert!(matches!(
-            rewritten,
-            ApiError::PromptTooLong { token_gap: 5, .. }
-        ));
-        // A plain 500 Server error is left untouched.
-        let untouched = reclassify_prompt_too_long(ApiError::Server {
-            status: 500,
-            body: "boom".into(),
-        });
-        assert!(matches!(untouched, ApiError::Server { status: 500, .. }));
-        // Non-Server variants pass through.
-        let rl = reclassify_prompt_too_long(ApiError::RateLimited {
-            retry_after_secs: 3,
-        });
-        assert!(matches!(rl, ApiError::RateLimited { .. }));
     }
 }

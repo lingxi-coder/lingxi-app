@@ -833,7 +833,7 @@ pub async fn build(
     // (`agent::SubagentApiClient`). `ProviderApiAdapter` impls both (see
     // orchestrator/src/provider_adapter.rs); type-erasing to one trait object
     // up front would forfeit the other coercion.
-    let provider_adapter = Arc::new(ProviderApiAdapter::new(
+    let provider_adapter = Arc::new(ProviderApiAdapter::new_from_router(
         Arc::clone(&registry) as Arc<dyn ModelRouter>,
     ));
     let api_client: Arc<dyn OrchestratorApiClient> = provider_adapter.clone();

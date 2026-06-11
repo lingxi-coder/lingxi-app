@@ -38,10 +38,11 @@ pub struct OrchestratorConfig {
 
     /// Opus-fallback model (claude-code `--fallback-model`). When `Some(id)`,
     /// the batched turn loop routes its primary API call through the
-    /// fallback-aware api-client path so a consecutive-529 gate on a non-custom
-    /// Opus primary model can surface [`api_client::ApiError::FallbackTriggered`];
-    /// the turn loop then switches the session model to `id`, warns the user,
-    /// and re-issues against it (1:1 with claude-code `query.ts:894-948`).
+    /// fallback-aware path so a consecutive-529 gate on a non-custom Opus
+    /// primary model can surface `llm_client::LlmError::Overloaded` with
+    /// fallback triggered; the turn loop then switches the session model to
+    /// `id`, warns the user, and re-issues against it
+    /// (1:1 with claude-code `query.ts:894-948`).
     ///
     /// `None` (the parity default) is a STRICT no-op: the primary call keeps
     /// using the plain `messages_create` seam (fallback disabled), so the locked

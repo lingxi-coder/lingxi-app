@@ -166,6 +166,8 @@ impl HttpTransport for ReqwestHttp {
 ///
 /// Ported verbatim from the former `api-client/src/sse.rs` so the wire
 /// behaviour is byte-identical after the api-client crate is removed.
+///
+/// NOTE: duplicated in `platforms/windows/src/http.rs` — keep in sync.
 fn parse_sse_chunks(raw: &str) -> Vec<SseEvent> {
     let mut events = Vec::new();
     for block in raw.split("\n\n") {
@@ -263,5 +265,56 @@ pub(crate) fn find_event_boundary(buf: &BytesMut) -> Option<(usize, usize)> {
         (Some(lf), None) => Some((lf, 2)),
         (None, Some(crlf)) => Some((crlf, 4)),
         (None, None) => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Keepalive comment lines (`:`) are silently skipped; the event is still
+    /// yielded. Ported from the deleted `api-client/src/sse.rs` test suite.
+    #[test]
+    fn ignore_keepalive_lines() {
+        let raw = ": this is a comment\nevent: a\ndata: 1\n\n";
+        let events = parse_sse_chunks(raw);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].event_type.as_deref(), Some("a"));
+        assert_eq!(events[0].data, "1");
+    }
+
+    /// Multiple `data:` lines within one event are joined with `\n`.
+    #[test]
+    fn multi_line_data_concatenates() {
+        let raw = "event: x\ndata: line1\ndata: line2\n\n";
+        let events = parse_sse_chunks(raw);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].data, "line1\nline2");
+    }
+
+    /// Two `\n\n`-separated events in a single chunk both decode.
+    #[test]
+    fn parse_multiple_events() {
+        let raw = "event: a\ndata: 1\n\nevent: b\ndata: 2\n\n";
+        let events = parse_sse_chunks(raw);
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].event_type.as_deref(), Some("a"));
+        assert_eq!(events[1].event_type.as_deref(), Some("b"));
+    }
+
+    /// A keepalive-only block (no `data:` line) is silently dropped — it does
+    /// not produce a spurious event. This is the "partial drop" behaviour from
+    /// the original `api-client/src/sse.rs` test suite: blocks without data
+    /// are ignored regardless of whether they contain comment or event-type
+    /// lines.
+    #[test]
+    fn partial_event_dropped() {
+        // A block that contains only a comment and an event-type line but no
+        // data line must not yield an event.
+        let raw = ": keepalive\nevent: noop\n\nevent: real\ndata: value\n\n";
+        let events = parse_sse_chunks(raw);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].event_type.as_deref(), Some("real"));
+        assert_eq!(events[0].data, "value");
     }
 }

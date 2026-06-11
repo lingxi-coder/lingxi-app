@@ -154,7 +154,7 @@ mod tests {
         cfg
     }
 
-    /// Every display_model in the builtin table must be resolvable via
+    /// Every `display_model` in the builtin table must be resolvable via
     /// `available_models()`. This pins the complete 10-entry table so a
     /// future edit that accidentally drops a model is caught immediately.
     #[test]

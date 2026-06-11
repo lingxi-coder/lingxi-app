@@ -127,10 +127,10 @@ pub struct MobileConfig {
     /// Model id the build defaults to (`OrchestratorConfig.model`).
     pub default_model: String,
     /// Settings-declared `providers` block as raw JSON, fed verbatim to
-    /// `providers::parse_profiles`. `None` ⟶ built-in profiles only.
+    /// `llm_client::ClientConfig` via `build()`. `None` ⟶ built-in profiles only.
     pub provider_profiles: Option<std::collections::BTreeMap<String, serde_json::Value>>,
     /// Settings-declared `routing` block as raw JSON, fed verbatim to
-    /// `providers::parse_routing`. `None` ⟶ the default (empty) routing config.
+    /// `llm_client::ClientConfig`. `None` ⟶ the default (empty) routing config.
     pub routing: Option<serde_json::Value>,
 }
 

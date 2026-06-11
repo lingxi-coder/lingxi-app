@@ -1,15 +1,15 @@
 //! Minimal Anthropic request builder for the WebSearch tool path.
 //!
-//! This replaces the `AnthropicProvider::build_request` seam used
+//! Replaces the `AnthropicProvider::build_request` seam formerly used
 //! by `BuiltinToolContext.provider` + `WebSearchTool`. Only the non-streaming
 //! `POST /v1/messages` request assembly is needed here; all retry, OAuth,
-//! telemetry, and streaming logic stays in the api-client crate (used by the
-//! main engine path via llm-client).
+//! telemetry, and streaming logic lives in `llm-client` (used by the
+//! main engine path via `orchestrator`).
 //!
 //! **Origin:** ported 1:1 from `AnthropicProvider::build_request`
-//! (lingxi-code/api-client/src/anthropic.rs). The exact header set and URL
-//! join semantics are preserved byte-for-byte so existing wire tests pass
-//! unchanged.
+//! (lingxi-code/api-client/src/anthropic.rs, deleted in Plan 3b). The exact
+//! header set and URL join semantics are preserved byte-for-byte so existing
+//! wire tests pass unchanged.
 
 use protocol::{HttpMethod, HttpRequest};
 

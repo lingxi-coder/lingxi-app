@@ -80,11 +80,9 @@ futures-core = { workspace = true }
 tokio-stream = { workspace = true }
 
 # F2-00: `DesktopConfig` carries the settings-declared `providers` block as
-# raw JSON values so `build()` (F2-01) can feed them to
-# `providers::parse_profiles` unchanged — the same shape `build_runtime`
-# loads from settings today. `serde_json::Value` is allowed in this app-tier
-# composition root (governing decision §0.4 only forbids it in
-# `client-protocol`).
+# raw JSON values so `build()` (F2-01) can feed them to `llm_client::ClientConfig`
+# unchanged. `serde_json::Value` is allowed in this app-tier composition root
+# (governing decision §0.4 only forbids it in `client-protocol`).
 serde_json = { workspace = true }
 
 # Skill composition (P8): the abstraction crate + the builtin skill set.

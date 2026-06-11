@@ -59,6 +59,13 @@ const WEB_SEARCH_BETA: &str = "web-search-2025-03-05";
 /// Anthropic `usage` object are ignored. Matches the two fields `WebSearchTool`
 /// read from the two usage fields in the response — ported here so tools/web does not
 /// depend on api-client.
+///
+/// The usage field in `WebSearchMessageResponse` is itself `#[serde(default)]`,
+/// which requires `Default`. `input_tokens` and `output_tokens` also carry
+/// `#[serde(default)]` so that a partial or missing `usage` object decodes to
+/// zeros rather than failing — consistent with the parent field's defaulting
+/// contract (unlike the standalone `UsageApi` type in the old api-client, which
+/// required both fields).
 #[derive(Debug, Default, serde::Deserialize)]
 struct WebSearchUsage {
     /// Number of input tokens billed.

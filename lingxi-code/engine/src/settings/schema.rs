@@ -155,7 +155,7 @@ pub struct SettingsJson {
     /// Object-merge field (deep-merge). `LingXi` extension (claude-code has no
     /// such key): named LLM provider profiles, e.g.
     /// `{ "groq": { "type": "openai", "baseUrl": "...", "apiKeyEnv": "GROQ_API_KEY" } }`.
-    /// Parsed into typed profiles by `providers::parse_profiles`.
+    /// Passed as raw JSON to `llm_client::ClientConfig` via the host `build()`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub providers: Option<BTreeMap<String, Value>>,
 
@@ -163,7 +163,7 @@ pub struct SettingsJson {
     /// for model aliases, fallback chains, and retry policy. Shape:
     /// `{ "aliases": {alias: "provider/model"}, "fallback": {key: ["provider/model", …]},
     ///    "retry": {"maxAttempts": n, "backoffMs": n} }`.
-    /// Parsed by `providers::parse_routing`.
+    /// Passed as raw JSON to `llm_client::ClientConfig` via the host `build()`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub routing: Option<Value>,
 }

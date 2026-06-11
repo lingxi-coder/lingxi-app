@@ -95,25 +95,6 @@ impl ProviderApiAdapter {
         }
     }
 
-    /// Temporary bridge constructor for host callers that still pass the old
-    /// `Arc<dyn ModelRouter>` argument (Task 10 will replace these call sites
-    /// with the full `new(client, transport, …)` form).
-    ///
-    /// # Panics
-    ///
-    /// Always panics at runtime — this exists only to keep `cargo check
-    /// --workspace` green while host wiring is pending.
-    #[doc(hidden)]
-    #[must_use]
-    #[allow(clippy::needless_pass_by_value)]
-    #[deprecated(note = "Task 10 replaces router construction; panics at runtime")]
-    pub fn new_from_router(_router: Arc<dyn providers::ModelRouter>) -> Self {
-        unimplemented!(
-            "ProviderApiAdapter::new_from_router is a compile-only bridge; Task 10 replaces \
-             host call sites with ProviderApiAdapter::new(client, transport, …)"
-        )
-    }
-
     // ── Shared request build ─────────────────────────────────────────────────
 
     /// Convert orchestrator-layer inputs into an `LlmRequest`.

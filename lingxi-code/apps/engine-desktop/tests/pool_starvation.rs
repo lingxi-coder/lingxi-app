@@ -67,16 +67,19 @@ impl SubagentApiClient for ScriptedApiClient {
         _system: Option<&str>,
         _messages: Vec<protocol::ConversationMessage>,
         _tools: Vec<serde_json::Value>,
-    ) -> Result<api_client::MessageResponse, api_client::ApiError> {
+    ) -> Result<llm_client::LlmResponse, llm_client::LlmError> {
         *self.calls.lock().unwrap() += 1;
-        Ok(api_client::MessageResponse {
+        Ok(llm_client::LlmResponse {
             id: "scripted".into(),
             model: "scripted".into(),
-            content: vec![api_client::types::ContentBlockApi::Text {
+            content: vec![llm_client::ContentBlock::Text {
                 text: "done".into(),
+                cache_control: None,
             }],
             stop_reason: Some("end_turn".into()),
-            usage: api_client::types::UsageApi::default(),
+            usage: llm_client::Usage::default(),
+            cost: None,
+            provider_metadata: serde_json::Value::Null,
         })
     }
 }

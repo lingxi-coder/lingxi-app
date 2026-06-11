@@ -66,7 +66,7 @@ use traits::{OutputStream, RuntimeSpawner};
 // ---------------------------------------------------------------------------
 
 struct ScriptedApiClient {
-    responses: StdMutex<VecDeque<api_client::MessageResponse>>,
+    responses: StdMutex<VecDeque<llm_client::LlmResponse>>,
     calls: AtomicUsize,
 }
 
@@ -90,17 +90,20 @@ impl agent::api::SubagentApiClient for ScriptedApiClient {
         _system: Option<&str>,
         _messages: Vec<protocol::ConversationMessage>,
         _tools: Vec<serde_json::Value>,
-    ) -> Result<api_client::MessageResponse, api_client::ApiError> {
+    ) -> Result<llm_client::LlmResponse, llm_client::LlmError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         let next = self.responses.lock().unwrap().pop_front();
-        Ok(next.unwrap_or_else(|| api_client::MessageResponse {
+        Ok(next.unwrap_or_else(|| llm_client::LlmResponse {
             id: "scripted".into(),
             model: "scripted".into(),
-            content: vec![api_client::types::ContentBlockApi::Text {
+            content: vec![llm_client::ContentBlock::Text {
                 text: "done".into(),
+                cache_control: None,
             }],
             stop_reason: Some("end_turn".into()),
-            usage: api_client::types::UsageApi::default(),
+            usage: llm_client::Usage::default(),
+            cost: None,
+            provider_metadata: serde_json::Value::Null,
         }))
     }
 }

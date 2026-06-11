@@ -33,8 +33,16 @@ mod skill_loader;
 use anthropic_oauth::client::ClaudeAiOAuthClient;
 use anthropic_oauth::config::ClaudeAiOAuthConfig;
 use anthropic_oauth::handle::OAuthHandle;
+use anthropic_oauth::{OAuthCredentialProvider, RefreshDriver};
 use api_client::AnthropicProvider;
 use client_adapter::{AdapterPermissionGate, PermissionRequestSink};
+use llm_client::{
+    AuthStrategy, Capabilities, ClientConfig, CredentialConfig, DefaultLlmClient, ModelProfile,
+    PricingConfig, ProtocolFamily, ProviderId, ProviderProfile, Transport,
+};
+use orchestrator::model::user_agent::UserAgentEnv;
+use orchestrator::provider_adapter::SubscriberState;
+use platform_common::LlmTransportBridge;
 use command_api::{CommandRegistry, RegistrySlashDispatcher};
 use command_core::{
     register_all_builtin_commands, register_core_batch_1, register_core_batch_2,
@@ -49,7 +57,7 @@ use platform_posix_minimal::{
     PlainTextSecureStorage, PosixClock, PosixFileSystem, PosixHttp, PosixMcp, PosixProcess,
     PosixRuntime, PosixSandbox, PosixWorktree,
 };
-use providers::{builtin_profiles, parse_profiles, parse_routing, ModelRouter, ProviderRegistry};
+use providers::{builtin_profiles, parse_profiles, parse_routing, ProviderRegistry};
 use sandbox::decision::ProjectTrustLevel;
 use sandbox::runtime_config::{Platform as SandboxPlatform, SandboxRuntimeConfig};
 use secret::CredentialManager;
@@ -776,6 +784,82 @@ fn oauth_subscriber_flag(api_key_present: bool, auth_token_present: bool, scopes
         && anthropic_oauth::subscription_from_scopes(scopes)
 }
 
+/// Build the built-in Anthropic `ClientConfig` for `DefaultLlmClient`.
+///
+/// One `ProviderProfile` with the full Claude-4-generation model table.
+/// Auth strategy is controlled by `oauth_path`:
+/// - `false` → `ApiKey` + `CredentialConfig::Env { var: "ANTHROPIC_API_KEY" }`
+/// - `true`  → `OAuthBearer` + `CredentialConfig::HostManaged { id: "anthropic_oauth" }`
+///
+/// All models get streaming, tools, vision, and documents capabilities; the
+/// Opus variants additionally get `reasoning: true`.
+///
+/// **3c note:** `modelProviders` settings merging (multi-provider routing) is
+/// deferred to Plan 3c; this profile covers the default Anthropic-only path.
+fn builtin_anthropic_config(api_base: &str, oauth_path: bool) -> ClientConfig {
+    /// Build a `ModelProfile` for a Claude model (inner helper).
+    fn model(display: &str, billing: &str, aliases: &[&str], reasoning: bool) -> ModelProfile {
+        ModelProfile {
+            display_model: display.to_string(),
+            request_model: display.to_string(),
+            billing_model: billing.to_string(),
+            aliases: aliases.iter().map(|s| (*s).to_string()).collect(),
+            capabilities: Capabilities {
+                streaming: true,
+                tools: true,
+                vision: true,
+                documents: true,
+                reasoning,
+                structured_output: false,
+            },
+        }
+    }
+
+    let (auth, credential) = if oauth_path {
+        (
+            AuthStrategy::OAuthBearer,
+            CredentialConfig::HostManaged { id: "anthropic_oauth".to_string() },
+        )
+    } else {
+        (
+            AuthStrategy::ApiKey,
+            CredentialConfig::Env { var: "ANTHROPIC_API_KEY".to_string() },
+        )
+    };
+
+    ClientConfig {
+        providers: vec![ProviderProfile {
+            provider_id: ProviderId::AnthropicFirstParty,
+            profile_name: "anthropic".to_string(),
+            base_url: api_base.to_string(),
+            protocol: ProtocolFamily::AnthropicMessages,
+            auth,
+            credential,
+            pricing: PricingConfig::default(),
+            models: vec![
+                // — Claude Sonnet 4 (default engine model) —
+                model("claude-sonnet-4-20250514", "claude-sonnet-4", &["claude-sonnet-4", "claude-sonnet", "claude"], false),
+                // — Claude Sonnet 4.5 —
+                model("claude-sonnet-4-5-20250929", "claude-sonnet-4-5", &["claude-sonnet-4-5"], false),
+                // — Claude Sonnet 4.6 —
+                model("claude-sonnet-4-6", "claude-sonnet-4-6", &[], false),
+                // — Claude Opus 4 (Opus-fallback gate target) —
+                model("claude-opus-4-20250514", "claude-opus-4", &["claude-opus-4", "claude-opus"], true),
+                // — Claude Opus 4.1 —
+                model("claude-opus-4-1-20250805", "claude-opus-4-1", &["claude-opus-4-1"], true),
+                // — Claude Opus 4.5 —
+                model("claude-opus-4-5-20251101", "claude-opus-4-5", &["claude-opus-4-5"], true),
+                // — Claude Opus 4.6 —
+                model("claude-opus-4-6", "claude-opus-4-6", &[], true),
+                // — Claude Haiku 4 —
+                model("claude-haiku-4-20250307", "claude-haiku-4", &["claude-haiku-4", "claude-haiku"], false),
+                // — Claude Haiku 4.5 —
+                model("claude-haiku-4-5", "claude-haiku-4-5", &[], false),
+            ],
+        }],
+    }
+}
+
 /// Load the merged `settings.outputStyle` (project + user + env layers) for the
 /// given project dir. Mirrors the CLI's `load_routing`/`load_provider_profiles`
 /// helpers (same `engine::settings::Settings::load` seam). Returns `None` on any
@@ -810,11 +894,10 @@ pub async fn build(
     let clock = Arc::new(PosixClock::new());
     let storage = Arc::new(PlainTextSecureStorage::new());
 
-    // (2) api-client via ProviderRegistry. An empty `api_key` is accepted — the
-    //     orchestrator builds and only fails at `run_turn` with a 401, so
-    //     slash-command dispatch still works with no key configured. The
-    //     settings `providers` / `routing` blocks now arrive via `cfg`
-    //     (previously `load_provider_profiles()` / `load_routing()` read env).
+    // (2) ProviderRegistry — no longer on the live model path (adapter now drives
+    //     DefaultLlmClient directly, Task 10). Kept in the tree as a dead path so
+    //     Plan 3b can remove it in one patch. The `_` prefix suppresses the
+    //     unused-variable lint until then.
     let env_snapshot: std::collections::BTreeMap<String, String> = std::env::vars().collect();
     let mut profiles = builtin_profiles(Some(cfg.api_base.clone()));
     match parse_profiles(cfg.provider_profiles.as_ref()) {
@@ -822,22 +905,22 @@ pub async fn build(
         Err(e) => tracing::warn!(error = %e, "ignoring malformed settings `providers` block"),
     }
     let routing = parse_routing(cfg.routing.as_ref());
-    let registry = Arc::new(ProviderRegistry::new(
+    let _registry = Arc::new(ProviderRegistry::new(
         profiles,
         env_snapshot,
         http.clone(),
         routing,
     ));
-    // Build the CONCRETE adapter first so it can be coerced to BOTH the
-    // orchestrator seam (`OrchestratorApiClient`) and the agent seam
-    // (`agent::SubagentApiClient`). `ProviderApiAdapter` impls both (see
-    // orchestrator/src/provider_adapter.rs); type-erasing to one trait object
-    // up front would forfeit the other coercion.
-    let provider_adapter = Arc::new(ProviderApiAdapter::new_from_router(
-        Arc::clone(&registry) as Arc<dyn ModelRouter>,
-    ));
-    let api_client: Arc<dyn OrchestratorApiClient> = provider_adapter.clone();
-    let subagent_api: Arc<dyn agent::SubagentApiClient> = provider_adapter;
+    // (2a) Task 10: LlmTransportBridge wraps the PosixHttp transport for
+    //      `DefaultLlmClient`. A second `PosixHttp` instance is used so the
+    //      bridge owns its own (stateless) handle; the original `http` Arc
+    //      continues to serve MCP / hooks / side-query.
+    let llm_transport: Arc<dyn Transport> =
+        Arc::new(LlmTransportBridge::new(PosixHttp::new()));
+    // Defer client construction to step 3.1 where we know whether OAuth is
+    // active (determines auth strategy + credential config). Placeholders:
+    let mut llm_oauth_path = false;
+    let mut llm_oauth_state: Option<Arc<anthropic_oauth::refresh::AuthState>> = None;
     // WebSearch builds Anthropic `POST /v1/messages` requests via its own
     // provider (server-side web search is Anthropic-only in v1).
     let tool_provider = Arc::new(AnthropicProvider::new(
@@ -855,14 +938,12 @@ pub async fn build(
     ));
     let auth: Arc<dyn AuthHandle> = Arc::new(OAuthHandle::new(oauth_client));
 
-    // (3.1) M5-13: attach the OAuth refresh driver to the api-client when the
-    //        keychain already holds a logged-in OAuth token. `init_refresh_driver`
-    //        registers the process-global `OAuthRefreshHook` (so the api-client's
-    //        401-retry path calls `refresh` instead of `NoOpOAuthHook`) and spawns
-    //        the proactive-refresh task. It MUST be called at most once per
-    //        process; gating it on "tokens present" keeps the API-key path on the
-    //        correct `NoOpOAuthHook`. When no OAuth token is stored (the common
-    //        API-key case) we skip it entirely.
+    // (3.1) M5-13 / Task 10: build the OAuth refresh driver when the keychain
+    //        already holds a logged-in OAuth token.  `init_refresh_driver` spawns
+    //        the proactive-refresh task and returns the shared `AuthState`.  The
+    //        returned state is used BOTH for the old api-client hook path (removed
+    //        in Plan 3a Task 9) and to wire `OAuthCredentialProvider` into the
+    //        new `DefaultLlmClient` path.
     //
     //        (3.2) API.6: while we have the token in hand, resolve the Claude.ai
     //        subscriber flag from its scopes (see [`oauth_subscriber_flag`]).
@@ -874,7 +955,7 @@ pub async fn build(
                 std::env::var_os("ANTHROPIC_AUTH_TOKEN").is_some(),
                 &tokens.scopes,
             );
-            if let Err(e) = anthropic_oauth::client::init_refresh_driver(
+            match anthropic_oauth::client::init_refresh_driver(
                 oauth_cfg,
                 tokens.access_token,
                 tokens.refresh_token,
@@ -887,17 +968,60 @@ pub async fn build(
             )
             .await
             {
-                tracing::warn!(error = %e, "failed to attach OAuth refresh driver; 401 auto-refresh disabled");
+                Ok(auth_state) => {
+                    // Task 10: mark as OAuth path so DefaultLlmClient uses
+                    // OAuthBearer auth + the credential provider below.
+                    // Only active when the subscriber flag confirms OAuth
+                    // is the effective auth source (API-key overrides it).
+                    if is_subscriber {
+                        llm_oauth_path = true;
+                        llm_oauth_state = Some(auth_state);
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "failed to attach OAuth refresh driver; 401 auto-refresh disabled");
+                }
             }
         }
         Ok(None) => {
-            // No stored OAuth session — API-key path. Leave `current_hook()` as
-            // the NoOpOAuthHook (correct: nothing to refresh).
+            // No stored OAuth session — API-key path.
         }
         Err(e) => {
             tracing::warn!(error = %e, "could not read OAuth tokens from keychain; skipping refresh-driver wiring");
         }
     }
+
+    // (3.3) Task 10: build `DefaultLlmClient` with the chosen auth strategy and
+    //       wire the adapter over the llm-client + transport.
+    //
+    //       OAuth path: `OAuthBearer` + `HostManaged` credential, backed by
+    //       `OAuthCredentialProvider` over the refresh driver.
+    //       API-key path: `ApiKey` + `Env { ANTHROPIC_API_KEY }`.
+    let llm_client = {
+        let cfg_obj = builtin_anthropic_config(&cfg.api_base, llm_oauth_path);
+        let mut client = DefaultLlmClient::from_config(cfg_obj)
+            .map_err(|e| BuildError::ApiBase(e.to_string()))?;
+        if let Some(auth_state) = llm_oauth_state {
+            let driver = Arc::new(RefreshDriver::new(auth_state));
+            client = client.with_credential_provider(Arc::new(OAuthCredentialProvider::new(driver)));
+        }
+        Arc::new(client)
+    };
+    let subscriber_state = SubscriberState { is_subscriber, is_enterprise: false };
+    // Build the CONCRETE adapter so it can be coerced to BOTH the
+    // orchestrator seam (`OrchestratorApiClient`) and the agent seam
+    // (`agent::SubagentApiClient`). `ProviderApiAdapter` impls both.
+    let provider_adapter = Arc::new(ProviderApiAdapter::new(
+        llm_client,
+        llm_transport,
+        subscriber_state,
+        UserAgentEnv::from_process_env(),
+        env!("CARGO_PKG_VERSION"),
+        Some(Arc::new(telemetry::AnalyticsBus::new())),
+        cfg.fallback_model.clone(),
+    ));
+    let api_client: Arc<dyn OrchestratorApiClient> = provider_adapter.clone();
+    let subagent_api: Arc<dyn agent::SubagentApiClient> = provider_adapter;
 
     // (4) Orchestrator config from `cfg` (was `argv.model`).
     let mut orch_cfg = OrchestratorConfig::default();

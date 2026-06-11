@@ -303,10 +303,10 @@ parse time.
 - **AwsSigV4**: implemented from scratch with AWS official test vectors.
   Hardening: query-string values are decode-then-re-encode normalized to
   RFC3986 percent-encoding; path segments are double-percent-encoded per SigV4
-  spec; header values are trimall-normalized; null-body (empty request body)
-  canonical hash uses the empty-string SHA256
-  (`e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855`) — the
-  4-byte literal `"null"` hash is NOT used here; clock is injectable for
+  spec; header values are trimall-normalized; a `Value::Null` body signs the
+  4-byte literal `"null"` — matching exactly what `LlmTransportBridge` puts on
+  the wire (`body_json.to_string()` unconditionally; pinned by
+  `sigv4_null_body_signs_as_null_string`); clock is injectable for
   deterministic tests; trailing slashes in the URI path are preserved
   (botocore behavior).
 - **GcpToken**: Bearer-token auth via a host-loaded token injected as a

@@ -11,7 +11,6 @@ engine = { path = "../engine" }
 traits = { path = "../traits" }
 api-client = { path = "../api-client" }
 llm-client = { path = "../llm-client" }
-providers = { path = "../providers" }
 tool-api = { path = "../tool-api" }
 memory = { path = "../memory" }
 permission = { path = "../permission" }

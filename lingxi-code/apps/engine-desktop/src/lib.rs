@@ -54,7 +54,6 @@ use platform_posix_minimal::{
     PlainTextSecureStorage, PosixClock, PosixFileSystem, PosixHttp, PosixMcp, PosixProcess,
     PosixRuntime, PosixSandbox, PosixWorktree,
 };
-use providers::{builtin_profiles, parse_profiles, parse_routing, ProviderRegistry};
 use sandbox::decision::ProjectTrustLevel;
 use sandbox::runtime_config::{Platform as SandboxPlatform, SandboxRuntimeConfig};
 use secret::CredentialManager;
@@ -64,19 +63,131 @@ use tokio::sync::RwLock;
 use tool_api::{BuiltinToolContext, ToolRegistry};
 use traits::{AuthHandle, McpTransport, OrchestratorHandle, OutputStream};
 
-/// Re-export the pure model-deprecation lookup (`providers::deprecation`) at the
-/// composition-root surface so the host binary can compute the startup
-/// deprecation notice without taking a direct `providers` dependency.
+/// API provider, mirroring `APIProvider` (`utils/model/providers.ts:4`).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum ApiProvider {
+    FirstParty,
+    Bedrock,
+    Vertex,
+    Foundry,
+}
+
+/// Port of `isEnvTruthy` (`envUtils.ts:32-37`).
+fn is_env_truthy(key: &str) -> bool {
+    std::env::var(key)
+        .is_ok_and(|v| matches!(v.to_lowercase().trim(), "1" | "true" | "yes" | "on"))
+}
+
+/// Port of `getAPIProvider()` (`utils/model/providers.ts:6-14`).
+fn api_provider() -> ApiProvider {
+    if is_env_truthy("CLAUDE_CODE_USE_BEDROCK") {
+        ApiProvider::Bedrock
+    } else if is_env_truthy("CLAUDE_CODE_USE_VERTEX") {
+        ApiProvider::Vertex
+    } else if is_env_truthy("CLAUDE_CODE_USE_FOUNDRY") {
+        ApiProvider::Foundry
+    } else {
+        ApiProvider::FirstParty
+    }
+}
+
+/// A deprecated model's display name and its per-provider retirement dates.
+struct DeprecationEntry {
+    model_name: &'static str,
+    first_party: Option<&'static str>,
+    bedrock: Option<&'static str>,
+    vertex: Option<&'static str>,
+    foundry: Option<&'static str>,
+}
+
+impl DeprecationEntry {
+    fn retirement_date(&self, provider: ApiProvider) -> Option<&'static str> {
+        match provider {
+            ApiProvider::FirstParty => self.first_party,
+            ApiProvider::Bedrock => self.bedrock,
+            ApiProvider::Vertex => self.vertex,
+            ApiProvider::Foundry => self.foundry,
+        }
+    }
+}
+
+/// Deprecated models and their retirement dates by provider.
+/// Byte-locked to `DEPRECATED_MODELS` (`utils/model/deprecation.ts:33-61`).
+const DEPRECATED_MODELS: &[(&str, DeprecationEntry)] = &[
+    (
+        "claude-3-opus",
+        DeprecationEntry {
+            model_name: "Claude 3 Opus",
+            first_party: Some("January 5, 2026"),
+            bedrock: Some("January 15, 2026"),
+            vertex: Some("January 5, 2026"),
+            foundry: Some("January 5, 2026"),
+        },
+    ),
+    (
+        "claude-3-7-sonnet",
+        DeprecationEntry {
+            model_name: "Claude 3.7 Sonnet",
+            first_party: Some("February 19, 2026"),
+            bedrock: Some("April 28, 2026"),
+            vertex: Some("May 11, 2026"),
+            foundry: Some("February 19, 2026"),
+        },
+    ),
+    (
+        "claude-3-5-haiku",
+        DeprecationEntry {
+            model_name: "Claude 3.5 Haiku",
+            first_party: Some("February 19, 2026"),
+            bedrock: None,
+            vertex: None,
+            foundry: None,
+        },
+    ),
+];
+
+struct DeprecatedModelInfo {
+    model_name: &'static str,
+    retirement_date: &'static str,
+}
+
+fn deprecated_model_info(model_id: &str) -> Option<DeprecatedModelInfo> {
+    let lowercase = model_id.to_lowercase();
+    let provider = api_provider();
+    for (key, value) in DEPRECATED_MODELS {
+        let Some(retirement_date) = value.retirement_date(provider) else {
+            continue;
+        };
+        if !lowercase.contains(key) {
+            continue;
+        }
+        return Some(DeprecatedModelInfo {
+            model_name: value.model_name,
+            retirement_date,
+        });
+    }
+    None
+}
+
+/// Get a deprecation warning message for a model, or `None` if not deprecated.
 ///
-/// The CLI host (`apps/cli`) resolves the same model id it threads into
-/// [`DesktopConfig::default_model`] (argv `--model`, else the desktop default),
-/// passes it here, and surfaces the returned warning at startup — the bounded
-/// stand-in for claude-code's `getModelDeprecationWarning(resolvedInitialModel)`
-/// startup-notification-queue entry (`main.tsx:2873`/`2889-2896`). With any
-/// current (Claude 4-generation) default model the lookup returns `None`, so the
-/// startup output stays byte-identical until a user configures one of the
-/// deprecated Claude 3 ids.
-pub use providers::deprecation::model_deprecation_warning;
+/// Direct port of `getModelDeprecationWarning` (`deprecation.ts:88-101`).
+/// Moved here from `providers::deprecation` (Plan 3b Task 3) so the CLI host
+/// can call it without a direct `providers` dependency; re-exported at this
+/// composition-root surface for backward compatibility.
+///
+/// With any current (Claude 4-generation) default model the lookup returns
+/// `None`, so the startup output stays byte-identical until a user configures
+/// one of the deprecated Claude 3 ids.
+#[must_use]
+pub fn model_deprecation_warning(model_id: Option<&str>) -> Option<String> {
+    let model_id = model_id.filter(|m| !m.is_empty())?;
+    let info = deprecated_model_info(model_id)?;
+    Some(format!(
+        "⚠ {} will be retired on {}. Consider switching to a newer model.",
+        info.model_name, info.retirement_date
+    ))
+}
 
 /// M10 (T13): per-teammate `StateMachinePool` slot cap.
 ///
@@ -820,23 +931,6 @@ pub async fn build(
     let clock = Arc::new(PosixClock::new());
     let storage = Arc::new(PlainTextSecureStorage::new());
 
-    // (2) ProviderRegistry — no longer on the live model path (adapter now drives
-    //     DefaultLlmClient directly, Task 10). Kept in the tree as a dead path so
-    //     Plan 3b can remove it in one patch. The `_` prefix suppresses the
-    //     unused-variable lint until then.
-    let env_snapshot: std::collections::BTreeMap<String, String> = std::env::vars().collect();
-    let mut profiles = builtin_profiles(Some(cfg.api_base.clone()));
-    match parse_profiles(cfg.provider_profiles.as_ref()) {
-        Ok(extra) => profiles.extend(extra),
-        Err(e) => tracing::warn!(error = %e, "ignoring malformed settings `providers` block"),
-    }
-    let routing = parse_routing(cfg.routing.as_ref());
-    let _registry = Arc::new(ProviderRegistry::new(
-        profiles,
-        env_snapshot,
-        http.clone(),
-        routing,
-    ));
     // (2a) Task 10: LlmTransportBridge wraps the PosixHttp transport for
     //      `DefaultLlmClient`. A second `PosixHttp` instance is used so the
     //      bridge owns its own (stateless) handle; the original `http` Arc

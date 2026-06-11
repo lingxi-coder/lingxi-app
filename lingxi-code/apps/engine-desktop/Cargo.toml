@@ -25,7 +25,6 @@ command-desktop = { path = "../../commands/desktop" }
 protocol = { path = "../../protocol" }
 engine = { path = "../../engine" }
 orchestrator = { path = "../../orchestrator" }
-providers = { path = "../../providers" }
 api-client = { path = "../../api-client" }
 anthropic-oauth = { path = "../../anthropic-oauth" }
 # Task 10: DefaultLlmClient construction + LlmTransportBridge.

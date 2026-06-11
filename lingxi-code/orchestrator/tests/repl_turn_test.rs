@@ -1,7 +1,5 @@
-//! M5-13 T2: tests for `run_turn_with_cancel`, `TurnOutcome`, and
 //! `current_should_exit`.
-
-use api_client::types::ContentBlockApi;
+use llm_client::ContentBlock as LlmContentBlock;
 use orchestrator::test_support::{
     mock_message_response, MockApiClient, MockOutputStream, NoOpPermissionGate,
     StaticMemoryProvider,
@@ -12,7 +10,7 @@ use tokio_util::sync::CancellationToken;
 use traits::OrchestratorHandle;
 
 fn build_orch_with_response(
-    response: api_client::types::MessageResponse,
+    response: llm_client::LlmResponse,
 ) -> (
     ConversationOrchestrator,
     Arc<MockApiClient>,
@@ -39,7 +37,7 @@ fn build_orch_with_response(
 #[tokio::test]
 async fn run_turn_with_cancel_returns_end_turn_on_normal_completion() {
     let resp = mock_message_response(
-        vec![ContentBlockApi::Text { text: "Hi!".into() }],
+        vec![LlmContentBlock::Text { text: "Hi!".into(), cache_control: None }],
         Some("end_turn"),
     );
     let (orch, api, _output) = build_orch_with_response(resp);
@@ -56,8 +54,9 @@ async fn run_turn_with_cancel_returns_end_turn_on_normal_completion() {
 #[tokio::test]
 async fn run_turn_with_cancel_returns_cancelled_when_token_fires_before_turn() {
     let resp = mock_message_response(
-        vec![ContentBlockApi::Text {
+        vec![LlmContentBlock::Text {
             text: "Should not see this".into(),
+            cache_control: None,
         }],
         Some("end_turn"),
     );

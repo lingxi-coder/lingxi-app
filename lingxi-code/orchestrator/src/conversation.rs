@@ -11,11 +11,11 @@ use crate::turn_loop::{
     RecoveryState, TurnStepOutcome, MAX_OUTPUT_TOKENS_RECOVERY_LIMIT,
     MAX_OUTPUT_TOKENS_RECOVERY_NUDGE,
 };
-use api_client::{types::MessageResponse, AnthropicProvider, ApiError};
 use async_trait::async_trait;
 use engine::SessionState;
 use hooks::events::HookEvent;
 use hooks::registry::HookContext;
+use llm_client::{LlmError, LlmEvent, LlmResponse};
 use protocol::{ConversationMessage, MessageId, SessionId};
 use session::JsonlWriter;
 
@@ -29,12 +29,13 @@ use telemetry::tengu::orchestrator as orch_events;
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 use tool_api::registry::ToolRegistry;
-use traits::{HttpTransport, OutputStream};
+use traits::OutputStream;
 
 /// Minimal contract the orchestrator needs from the API client.
 ///
-/// Production: `AnthropicProviderAdapter` wraps `AnthropicProvider` +
-/// `HttpTransport` into this shape. Tests: `MockApiClient`.
+/// Production: [`crate::provider_adapter::ProviderApiAdapter`] (Task 6)
+/// drives `llm_client::DefaultLlmClient` into this shape.
+/// Tests: `MockApiClient`.
 #[async_trait]
 pub trait OrchestratorApiClient: Send + Sync {
     /// Non-streaming `messages.create` with optional system prompt.
@@ -54,7 +55,7 @@ pub trait OrchestratorApiClient: Send + Sync {
         system: Option<&str>,
         msgs: Vec<ConversationMessage>,
         tools: Vec<serde_json::Value>,
-    ) -> Result<MessageResponse, ApiError>;
+    ) -> Result<LlmResponse, LlmError>;
 
     /// Non-streaming `messages.create` with an explicit `max_tokens` override
     /// (REC.A1 8k→64k escalation, TS `query.ts:1199-1221`). The turn loop calls
@@ -64,7 +65,7 @@ pub trait OrchestratorApiClient: Send + Sync {
     ///
     /// The DEFAULT body delegates to [`Self::messages_create`], dropping the
     /// override — so every mock / non-Anthropic impl compiles unchanged and the
-    /// escalation is a strict no-op there. Only [`AnthropicProviderAdapter`]
+    /// escalation is a strict no-op there. Only [`ProviderApiAdapter`]
     /// overrides it to thread `max_tokens` into the provider call.
     async fn messages_create_with_opts(
         &self,
@@ -73,25 +74,25 @@ pub trait OrchestratorApiClient: Send + Sync {
         msgs: Vec<ConversationMessage>,
         tools: Vec<serde_json::Value>,
         _max_tokens: u32,
-    ) -> Result<MessageResponse, ApiError> {
+    ) -> Result<LlmResponse, LlmError> {
         self.messages_create(model, system, msgs, tools).await
     }
 
     /// Non-streaming `messages.create` with the **Opus-fallback** policy wired
     /// (Opus-fallback batch). Identical to [`Self::messages_create`] except the
     /// caller hands in the configured `fallback_model` (+ the pre-computed
-    /// subscription flags `is_subscriber` / `is_enterprise`) so the api-client
-    /// can surface [`ApiError::FallbackTriggered`] after
-    /// [`api_client::MAX_529_RETRIES`] consecutive 529s on a non-custom Opus
-    /// primary model (1:1 with claude-code `withRetry.ts:326-365`).
+    /// subscription flags `is_subscriber` / `is_enterprise`).
     ///
     /// The DEFAULT body delegates to [`Self::messages_create`], dropping the
-    /// fallback args — so every existing impl (mocks, the router adapter, the
+    /// fallback args — so every existing impl (mocks, adapter, the
     /// hook-prompt mock) compiles unchanged and behaves byte-identically. Only
-    /// [`AnthropicProviderAdapter`] overrides it to thread the fallback into
-    /// `AnthropicProvider::messages_create_non_stream_with_fallback`. The turn
-    /// loop only calls THIS method when `config.fallback_model.is_some()`; with
-    /// no fallback configured it stays on `messages_create`, a strict no-op.
+    /// [`ProviderApiAdapter`] overrides it to thread the fallback (Task 6).
+    /// The turn loop only calls THIS method when `config.fallback_model.is_some()`;
+    /// with no fallback configured it stays on `messages_create`, a strict no-op.
+    ///
+    /// NOTE: `LlmError` has no `FallbackTriggered` variant — that becomes
+    /// adapter-internal in Task 6. The turn-loop interception of `FallbackTriggered`
+    /// is removed; fallback is handled entirely within `ProviderApiAdapter`.
     #[allow(clippy::too_many_arguments)]
     async fn messages_create_with_fallback(
         &self,
@@ -102,7 +103,7 @@ pub trait OrchestratorApiClient: Send + Sync {
         _fallback_model: Option<&str>,
         _is_subscriber: bool,
         _is_enterprise: bool,
-    ) -> Result<MessageResponse, ApiError> {
+    ) -> Result<LlmResponse, LlmError> {
         // Default: ignore the fallback args and use the plain seam. Keeps all
         // non-Anthropic impls (and mocks) byte-identical.
         self.messages_create(model, system, msgs, tools).await
@@ -120,20 +121,19 @@ pub trait OrchestratorApiClient: Send + Sync {
 /// Streaming-API surface used by the orchestrator's streaming turn loop.
 ///
 /// Mirrors [`OrchestratorApiClient`] but returns a typed
-/// `BoxStream<'static, Result<StreamEvent, ApiError>>` instead of a
-/// single `MessageResponse`. The orchestrator owns the stream and drives
-/// it to completion (or `message_stop`).
+/// `BoxStream<'static, Result<LlmEvent, LlmError>>` instead of a
+/// single `LlmResponse`. The orchestrator owns the stream and drives
+/// it to completion (or `message_stop` / `Completed`).
 ///
-/// Production: `AnthropicProviderStreamingAdapter` (added in Task 11)
-/// wraps `AnthropicProvider::messages_create_stream` + a transport.
-/// Tests: `MockStreamingApiClient` in `test_support_stream.rs`.
+/// Production: [`ProviderApiAdapter`] (Task 6) drives `DefaultLlmClient`
+/// directly. Tests: `MockStreamingApiClient` in `test_support_stream.rs`.
 #[async_trait]
 pub trait StreamingApiClient: Send + Sync {
     /// Open a streaming `messages.create` request. The returned stream
-    /// yields wire-decoded `StreamEvent` values until the server emits
-    /// `message_stop`. The implementation is responsible for HTTP, SSE
-    /// chunk buffering, and JSON-decoding the `data:` lines into typed
-    /// `StreamEvent` values.
+    /// yields wire-decoded `LlmEvent` values until the server emits
+    /// `message_stop` or a `Completed` event. The implementation is
+    /// responsible for HTTP, SSE chunk buffering, and JSON-decoding the
+    /// `data:` lines into typed `LlmEvent` values.
     async fn stream(
         &self,
         model: &str,
@@ -141,8 +141,8 @@ pub trait StreamingApiClient: Send + Sync {
         messages: Vec<ConversationMessage>,
         tools: Vec<serde_json::Value>,
     ) -> Result<
-        futures::stream::BoxStream<'static, Result<api_client::types::StreamEvent, ApiError>>,
-        ApiError,
+        futures::stream::BoxStream<'static, Result<LlmEvent, LlmError>>,
+        LlmError,
     >;
 }
 
@@ -2473,162 +2473,16 @@ impl ConversationOrchestrator {
     }
 }
 
-/// Production adapter: wraps `AnthropicProvider` + an `HttpTransport` into
-/// the `OrchestratorApiClient` shape.
-///
-/// Concrete type so callers can construct without knowing the transport
-/// type parameter (the constructor takes `Arc<dyn OrchestratorApiClient>`).
-pub struct AnthropicProviderAdapter<T: HttpTransport + Send + Sync + 'static> {
-    provider: AnthropicProvider,
-    transport: Arc<T>,
-}
-
-impl<T: HttpTransport + Send + Sync + 'static> AnthropicProviderAdapter<T> {
-    /// Construct from an existing provider + transport.
-    #[must_use]
-    pub fn new(provider: AnthropicProvider, transport: Arc<T>) -> Self {
-        Self {
-            provider,
-            transport,
-        }
-    }
-}
-
-#[async_trait]
-impl<T: HttpTransport + Send + Sync + 'static> OrchestratorApiClient
-    for AnthropicProviderAdapter<T>
-{
-    async fn messages_create(
-        &self,
-        model: &str,
-        system: Option<&str>,
-        msgs: Vec<ConversationMessage>,
-        tools: Vec<serde_json::Value>,
-    ) -> Result<MessageResponse, ApiError> {
-        // Thread `tools` through `_with_opts`, keeping this legacy adapter's
-        // historical `max_tokens = 4096` / no-temperature defaults.
-        self.provider
-            .messages_create_non_stream_with_opts(
-                model,
-                system,
-                msgs,
-                4096,
-                tools,
-                None,
-                self.transport.as_ref(),
-            )
-            .await
-    }
-
-    async fn messages_create_with_opts(
-        &self,
-        model: &str,
-        system: Option<&str>,
-        msgs: Vec<ConversationMessage>,
-        tools: Vec<serde_json::Value>,
-        max_tokens: u32,
-    ) -> Result<MessageResponse, ApiError> {
-        // REC.A1: same call as `messages_create` but with the escalated
-        // `max_tokens` (8k→64k) the turn loop passes through the recovery state.
-        self.provider
-            .messages_create_non_stream_with_opts(
-                model,
-                system,
-                msgs,
-                max_tokens,
-                tools,
-                None,
-                self.transport.as_ref(),
-            )
-            .await
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    async fn messages_create_with_fallback(
-        &self,
-        model: &str,
-        system: Option<&str>,
-        msgs: Vec<ConversationMessage>,
-        tools: Vec<serde_json::Value>,
-        fallback_model: Option<&str>,
-        is_subscriber: bool,
-        is_enterprise: bool,
-    ) -> Result<MessageResponse, ApiError> {
-        // Thread the configured fallback + subscription flags into the
-        // fallback-aware provider seam. Same `max_tokens = 4096` / no-temperature
-        // defaults as `messages_create` above; when `fallback_model` is `None`
-        // this is byte-identical to `messages_create` (the consecutive-529 gate
-        // stays closed). `is_subscriber` / `is_enterprise` are the resolved
-        // subscription flags the turn loop sources from `OrchestratorConfig`
-        // (populated at `engine_desktop::build` from the OAuth token scopes via
-        // `anthropic_oauth::subscription_from_scopes`); `false`/`false` in tests
-        // and non-OAuth sessions keeps the gates byte-identical to the prior stub.
-        self.provider
-            .messages_create_non_stream_with_fallback(
-                model,
-                system,
-                msgs,
-                4096,
-                tools,
-                None,
-                fallback_model.map(str::to_owned),
-                is_subscriber,
-                is_enterprise,
-                self.transport.as_ref(),
-            )
-            .await
-    }
-}
-
-/// Production adapter: wraps `AnthropicProvider` + an `HttpTransport`
-/// into the `StreamingApiClient` shape.
-///
-/// Mirrors [`AnthropicProviderAdapter`] but for the streaming endpoint.
-/// The provider is held in an `Arc` so the adapter can be cloned cheaply
-/// when the caller wants to share one provider across both the batched
-/// and streaming paths.
-pub struct AnthropicProviderStreamingAdapter<T: HttpTransport + Send + Sync + 'static> {
-    provider: Arc<AnthropicProvider>,
-    transport: Arc<T>,
-}
-
-impl<T: HttpTransport + Send + Sync + 'static> AnthropicProviderStreamingAdapter<T> {
-    /// Construct from an existing provider + transport.
-    #[must_use]
-    pub fn new(provider: Arc<AnthropicProvider>, transport: Arc<T>) -> Self {
-        Self {
-            provider,
-            transport,
-        }
-    }
-}
-
-#[async_trait]
-impl<T: HttpTransport + Send + Sync + 'static> StreamingApiClient
-    for AnthropicProviderStreamingAdapter<T>
-{
-    async fn stream(
-        &self,
-        model: &str,
-        system: Option<&str>,
-        messages: Vec<ConversationMessage>,
-        tools: Vec<serde_json::Value>,
-    ) -> Result<
-        futures::stream::BoxStream<'static, Result<api_client::types::StreamEvent, ApiError>>,
-        ApiError,
-    > {
-        self.provider
-            .messages_create_stream(model, system, messages, tools, self.transport.clone())
-            .await
-    }
-}
+// NOTE: `AnthropicProviderAdapter` and `AnthropicProviderStreamingAdapter`
+// were removed in Task 5 — they drove `api_client::AnthropicProvider` directly.
+// The live path is now `ProviderApiAdapter` (provider_adapter.rs), retargeted
+// in Task 6 to drive `llm_client::DefaultLlmClient`. (3b deletes api-client.)
 
 /// Internal no-op streaming client used by [`ConversationOrchestrator::new`]
 /// when the caller doesn't supply a streaming transport. Every call to
-/// `stream` returns `ApiError::Http(HttpError::Connection("no streaming
-/// client configured"))`. Wired in Task 12 when the legacy `new()`
-/// constructor delegates to `new_with_streaming(..., NoStreamingApiClient,
-/// ...)`.
+/// `stream` returns `LlmError::Transport("no streaming client configured")`.
+/// Wired in Task 12 when the legacy `new()` constructor delegates to
+/// `new_with_streaming(..., NoStreamingApiClient, ...)`.
 #[allow(dead_code)]
 pub(crate) struct NoStreamingApiClient;
 
@@ -2641,12 +2495,12 @@ impl StreamingApiClient for NoStreamingApiClient {
         _messages: Vec<ConversationMessage>,
         _tools: Vec<serde_json::Value>,
     ) -> Result<
-        futures::stream::BoxStream<'static, Result<api_client::types::StreamEvent, ApiError>>,
-        ApiError,
+        futures::stream::BoxStream<'static, Result<LlmEvent, LlmError>>,
+        LlmError,
     > {
-        Err(ApiError::Http(traits::HttpError::Connection(
-            "no streaming client configured".into(),
-        )))
+        Err(LlmError::Transport {
+            message: "no streaming client configured".into(),
+        })
     }
 }
 
@@ -2672,7 +2526,7 @@ mod turn_recovery_tests {
         MockOutputStream, MockStreamingApiClient, NoOpPermissionGate, StaticMemoryProvider,
     };
     use crate::OrchestratorConfig;
-    use api_client::types::ContentBlockApi;
+    use llm_client::ContentBlock as LlmContentBlock;
     use hooks::definition::{HookDefinition, HookExecutor as DefHookExecutor, HookSource};
     use hooks::events::HookEventType;
     use hooks::executor::BuiltinHookHandler;
@@ -2684,7 +2538,7 @@ mod turn_recovery_tests {
     use std::sync::Mutex as StdMutex;
     use std::time::Duration;
     use tokio::sync::RwLock;
-    use traits::{HttpError, OutputEvent, RuntimeError, RuntimeSpawner};
+    use traits::{HttpError, HttpTransport, OutputEvent, RuntimeError, RuntimeSpawner};
 
     // ---- unused HTTP / Runtime stubs (Builtin hooks never touch them) ----
     struct UnusedHttp;
@@ -2944,15 +2798,16 @@ mod turn_recovery_tests {
         // more calls (5 total, 3 nudges).
         let mt = || {
             mock_message_response(
-                vec![ContentBlockApi::Text {
+                vec![LlmContentBlock::Text {
                     text: "partial".into(),
+                    cache_control: None,
                 }],
                 Some("max_tokens"),
             )
         };
         let et = || {
             mock_message_response(
-                vec![ContentBlockApi::Text { text: "done".into() }],
+                vec![LlmContentBlock::Text { text: "done".into(), cache_control: None }],
                 Some("end_turn"),
             )
         };
@@ -3018,7 +2873,7 @@ mod output_style_reminder_tests {
         MockOutputStream, MockStreamingApiClient, NoOpPermissionGate, StaticMemoryProvider,
     };
     use crate::OrchestratorConfig;
-    use api_client::types::ContentBlockApi;
+    use llm_client::ContentBlock as LlmContentBlock;
     use protocol::ContentBlock;
     use std::sync::Arc;
     use tool_api::registry::ToolRegistry;
@@ -3141,8 +2996,9 @@ mod output_style_reminder_tests {
         ));
 
         let resp = mock_message_response(
-            vec![ContentBlockApi::Text {
+            vec![LlmContentBlock::Text {
                 text: "assistant body".into(),
+                cache_control: None,
             }],
             Some("end_turn"),
         );
@@ -3197,8 +3053,9 @@ mod output_style_reminder_tests {
     #[tokio::test]
     async fn batched_default_style_sends_no_reminder() {
         let resp = mock_message_response(
-            vec![ContentBlockApi::Text {
+            vec![LlmContentBlock::Text {
                 text: "body".into(),
+                cache_control: None,
             }],
             Some("end_turn"),
         );
@@ -3348,7 +3205,7 @@ mod skill_model_override_tests {
         StaticMemoryProvider,
     };
     use crate::OrchestratorConfig;
-    use api_client::types::ContentBlockApi;
+    use llm_client::ContentBlock as LlmContentBlock;
     use protocol::ToolUseId;
     use std::sync::Arc;
     use tool_api::context::ToolUseContext;
@@ -3525,16 +3382,17 @@ mod skill_model_override_tests {
     async fn batched_skill_model_override_switches_session_model() {
         let tu = ToolUseId::new();
         let resp1 = mock_message_response(
-            vec![ContentBlockApi::ToolUse {
-                id: tu,
+            vec![LlmContentBlock::ToolCall {
+                id: tu.as_uuid().to_string(),
                 name: "ModelSwitch".into(),
                 input: serde_json::json!({}),
             }],
             Some("tool_use"),
         );
         let resp2 = mock_message_response(
-            vec![ContentBlockApi::Text {
+            vec![LlmContentBlock::Text {
                 text: "done".into(),
+                cache_control: None,
             }],
             Some("end_turn"),
         );
@@ -3566,16 +3424,17 @@ mod skill_model_override_tests {
         // `session.model`.
         let tu = ToolUseId::new();
         let resp1 = mock_message_response(
-            vec![ContentBlockApi::ToolUse {
-                id: tu,
+            vec![LlmContentBlock::ToolCall {
+                id: tu.as_uuid().to_string(),
                 name: "Plain".into(),
                 input: serde_json::json!({}),
             }],
             Some("tool_use"),
         );
         let resp2 = mock_message_response(
-            vec![ContentBlockApi::Text {
+            vec![LlmContentBlock::Text {
                 text: "done".into(),
+                cache_control: None,
             }],
             Some("end_turn"),
         );

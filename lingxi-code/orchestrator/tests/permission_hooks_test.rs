@@ -1,4 +1,3 @@
-//! hooks (permission lifecycle) — `PermissionRequest` and `PermissionDenied`
 //! fired from the turn loop's tool-dispatch chokepoint (`turn_loop.rs`) around
 //! the permission gate.
 //!
@@ -22,8 +21,8 @@
 //!    — the gate is never consulted.
 //! 4. No permission hooks registered → both fires are strict no-ops; the turn is
 //!    byte-identical (allow → tool runs; deny → error result, turn completes).
+use llm_client::ContentBlock as LlmContentBlock;
 
-use api_client::types::ContentBlockApi;
 use async_trait::async_trait;
 use hooks::definition::{HookDefinition, HookExecutor as DefHookExecutor, HookSource};
 use hooks::events::{HookEvent, HookEventType};
@@ -308,16 +307,17 @@ fn two_turn_api(
 ) -> Arc<MockApiClient> {
     Arc::new(MockApiClient::new(vec![
         mock_message_response(
-            vec![ContentBlockApi::ToolUse {
-                id: tool_use_id,
+            vec![LlmContentBlock::ToolCall {
+                id: tool_use_id.as_uuid().to_string(),
                 name: tool_name.into(),
                 input,
             }],
             Some("tool_use"),
         ),
         mock_message_response(
-            vec![ContentBlockApi::Text {
+            vec![LlmContentBlock::Text {
                 text: "done".into(),
+                cache_control: None,
             }],
             Some("end_turn"),
         ),

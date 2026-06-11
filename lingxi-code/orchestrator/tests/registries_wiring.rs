@@ -1,4 +1,3 @@
-//! M6-07 — `with_mcp_registry` / `with_hook_registry` / `with_agent_catalog`
 //! builders attach the three optional registries onto
 //! [`orchestrator::ConversationOrchestrator`].
 

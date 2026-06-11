@@ -10,6 +10,7 @@
 //!   and a `CompactionCompleted` event is emitted.
 //! - With the history under the threshold (or no compactor wired), the trigger
 //!   is a strict NO-OP: history is identical and no `CompactionCompleted` fires.
+use llm_client::ContentBlock as LlmContentBlock;
 
 use compaction::CompactionOrchestrator;
 use orchestrator::test_support::{
@@ -28,8 +29,9 @@ fn make_orch(
     threshold: Option<u64>,
 ) -> (Arc<ConversationOrchestrator>, Arc<MockApiClient>, Arc<MockOutputStream>) {
     let api = Arc::new(MockApiClient::new(vec![mock_message_response(
-        vec![api_client::types::ContentBlockApi::Text {
+        vec![LlmContentBlock::Text {
             text: "done".to_string(),
+            cache_control: None,
         }],
         Some("end_turn"),
     )]));

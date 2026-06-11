@@ -1,4 +1,3 @@
-//! hooks (session lifecycle) — `SessionEnd` fired from the orchestrator's
 //! `fire_session_end` helper, the seam the host composition root
 //! (`apps/cli` repl loop) calls once at session teardown.
 //!
@@ -21,7 +20,6 @@
 //!    break the (best-effort) fire helper.
 //! 4. No `SessionEnd` hook registered ⇒ firing is a strict no-op (nothing
 //!    observed), so a session with no session-lifecycle hooks is unaffected.
-
 use async_trait::async_trait;
 use hooks::definition::{HookDefinition, HookExecutor as DefHookExecutor, HookSource};
 use hooks::events::{HookEvent, HookEventType};

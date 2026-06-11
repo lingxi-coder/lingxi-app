@@ -1,11 +1,9 @@
-//! Same conversational outcome whether the turn runs via batched or
 //! streaming (M5-04 Task 17).
 //!
 //! Asserts:
 //!   - both paths produce `ConversationOutcome::EndTurn { turn_count: 1, .. }`
 //!   - both paths append identical assistant message bodies to the session.
-
-use api_client::types::{ContentBlockApi, MessageResponse, UsageApi};
+use llm_client::{ContentBlock as LlmContentBlock, LlmResponse, Usage};
 use orchestrator::test_support::{
     content_block_start_text, content_block_stop, message_delta_stop, message_start, message_stop,
     text_delta, MockApiClient, MockOutputStream, MockStreamingApiClient, NoOpPermissionGate,
@@ -17,13 +15,15 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tool_api::registry::ToolRegistry;
 
-fn batched_response(text: &str) -> MessageResponse {
-    MessageResponse {
+fn batched_response(text: &str) -> LlmResponse {
+    LlmResponse {
         id: "msg_eq".into(),
         model: "claude-opus-4-7".into(),
-        content: vec![ContentBlockApi::Text { text: text.into() }],
+        content: vec![LlmContentBlock::Text { text: text.into(), cache_control: None }],
         stop_reason: Some("end_turn".into()),
-        usage: UsageApi::default(),
+        usage: Usage::default(),
+        cost: None,
+        provider_metadata: serde_json::Value::Null,
     }
 }
 

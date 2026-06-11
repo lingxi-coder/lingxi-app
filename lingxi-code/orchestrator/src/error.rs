@@ -4,7 +4,7 @@
 //! `"Reached maximum number of turns (<n>)"` — verified against
 //! `claude-code/src/QueryEngine.ts:870` on 2026-05-25.
 
-use api_client::ApiError;
+use llm_client::LlmError;
 use thiserror::Error;
 
 /// Failure modes of `ConversationOrchestrator::run_turn`.
@@ -21,13 +21,14 @@ pub enum OrchestratorError {
         max_turns: u32,
     },
 
-    /// The Anthropic API call failed after exhausting `AnthropicProvider`'s
-    /// own retry budget (3 attempts, 500ms/1s/2s ± 20% jitter — see M3-03).
+    /// The model API call failed (transport, rate-limit, context overflow,
+    /// etc). Wraps `llm_client::LlmError` — the live path flows through
+    /// `ProviderApiAdapter → DefaultLlmClient`.
     #[error("api call failed: {0}")]
-    ApiCall(#[from] ApiError),
+    ApiCall(#[from] LlmError),
 
     /// A non-tool runtime error inside the orchestrator. Used for
-    /// internal invariants (unexpected `ContentBlockApi` variant in the
+    /// internal invariants (unexpected content block variant in the
     /// hot path, etc.). Test stubs use this for synthetic failures.
     #[error("orchestrator internal error: {0}")]
     Internal(String),
@@ -36,10 +37,10 @@ pub enum OrchestratorError {
     /// when the SSE chunk fails to decode or the HTTP body is cut.
     ///
     /// No `#[from]` impl — the batched `ApiCall` variant already claims
-    /// it. Convert manually at the streaming call site via
-    /// `OrchestratorError::Streaming(api_err)`.
+    /// `LlmError`. Convert manually at the streaming call site via
+    /// `OrchestratorError::Streaming(llm_err)`.
     #[error("streaming transport error: {0}")]
-    Streaming(ApiError),
+    Streaming(LlmError),
 
     /// Stream produced an event that violates the per-block protocol
     /// (out-of-order delta, double stop, type mismatch, malformed
@@ -96,9 +97,9 @@ mod tests {
 
     #[test]
     fn streaming_display_starts_with_locked_prefix() {
-        let e = OrchestratorError::Streaming(ApiError::Http(traits::HttpError::Connection(
-            "nope".into(),
-        )));
+        let e = OrchestratorError::Streaming(llm_client::LlmError::Transport {
+            message: "nope".into(),
+        });
         let s = format!("{e}");
         assert!(s.starts_with("streaming transport error: "), "{s}");
     }
@@ -122,8 +123,9 @@ mod tests {
 
     #[test]
     fn compaction_variant_projects_to_string() {
-        let api_err = api_client::ApiError::Http(traits::HttpError::Connection("nope".into()));
-        let compact_err = compaction::CompactionError::Api(api_err);
+        // CompactionError::Api still wraps api_client::ApiError (until 3b);
+        // construct via the string variant to keep error.rs free of api_client.
+        let compact_err = compaction::CompactionError::Internal("test".into());
         let e = OrchestratorError::Compaction(compact_err);
         let s = e.to_string();
         assert!(s.contains("compaction"), "got: {s}");

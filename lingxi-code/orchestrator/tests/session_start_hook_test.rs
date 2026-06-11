@@ -1,4 +1,3 @@
-//! hooks (session lifecycle) — `SessionStart` fired from the orchestrator's
 //! `fire_session_start` helper, the seam the host composition root
 //! (`engine-desktop` / `engine-mobile`) calls once at session startup.
 //!

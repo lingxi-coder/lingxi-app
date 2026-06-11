@@ -1,4 +1,3 @@
-//! M6-07 — `list_agents` reads the wired `Arc<RwLock<Vec<AgentDefinition>>>`.
 
 use agent::definition::{
     AgentDefinition, AgentModel, AgentPermissionMode, AgentSource, AgentToolPolicy,

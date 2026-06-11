@@ -1,7 +1,5 @@
-//! `OrchestratorConfig::system_prompt_override = Some(_)` skips the
 //! prompt assembler and forwards the literal byte-for-byte.
-
-use api_client::types::ContentBlockApi;
+use llm_client::ContentBlock as LlmContentBlock;
 use orchestrator::test_support::{
     mock_message_response, MockApiClient, MockOutputStream, NoOpPermissionGate,
     StaticMemoryProvider,
@@ -10,9 +8,9 @@ use orchestrator::{ConversationOrchestrator, OrchestratorConfig};
 use std::sync::Arc;
 use tool_api::registry::ToolRegistry;
 
-fn end_turn() -> api_client::types::MessageResponse {
+fn end_turn() -> llm_client::LlmResponse {
     mock_message_response(
-        vec![ContentBlockApi::Text { text: "ok".into() }],
+        vec![LlmContentBlock::Text { text: "ok".into(), cache_control: None }],
         Some("end_turn"),
     )
 }

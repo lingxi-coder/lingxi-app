@@ -1,4 +1,3 @@
-//! Two `tool_use` blocks in one streaming response (M5-04 Task 14).
 //!
 //! Asserts that both tools dispatch CONCURRENTLY (the slower one does
 //! NOT delay the faster one's `OutputStream::ToolResult` emission) AND

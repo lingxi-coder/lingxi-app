@@ -1,4 +1,3 @@
-//! End-to-end orchestrator turn with `PreToolUse` + `PostToolUse` hooks
 //! registered through `hooks::HookExecutorImpl`.
 //!
 //! Exercises the M5-06 Task 14 swap: the orchestrator now consults the
@@ -10,8 +9,7 @@
 //!    a hook-blocked `ToolResult` (`is_error: true`).
 //! 2. `PostToolUse` hook returns `system_message` → the orchestrator
 //!    appends it to the result content.
-
-use api_client::types::ContentBlockApi;
+use llm_client::ContentBlock as LlmContentBlock;
 use async_trait::async_trait;
 use hooks::definition::{HookDefinition, HookExecutor as DefHookExecutor, HookSource};
 use hooks::events::{HookEvent, HookEventType};
@@ -167,8 +165,8 @@ async fn pre_hook_blocks_bash_tool() {
     let responses = vec![
         // Turn 1: model emits tool_use Bash
         mock_message_response(
-            vec![ContentBlockApi::ToolUse {
-                id: tool_use_id,
+            vec![LlmContentBlock::ToolCall {
+                id: tool_use_id.as_uuid().to_string(),
                 name: "Bash".into(),
                 input: json!({"command": "rm -rf /"}),
             }],
@@ -176,8 +174,9 @@ async fn pre_hook_blocks_bash_tool() {
         ),
         // Turn 2: after tool result, model ends
         mock_message_response(
-            vec![ContentBlockApi::Text {
+            vec![LlmContentBlock::Text {
                 text: "stopped".into(),
+                cache_control: None,
             }],
             Some("end_turn"),
         ),

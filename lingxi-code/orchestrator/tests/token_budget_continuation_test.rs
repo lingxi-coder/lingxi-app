@@ -1,11 +1,9 @@
-//! A3: token-budget auto-continuation wiring (conversation turn loop).
 //!
 //! Verifies that the batched turn loop, when the `TOKEN_BUDGET` gate is enabled
 //! AND a budget is configured, keeps nudging the model past `end_turn` until
 //! ~90% of the budget is spent — and that with the gate OFF (the parity
 //! default) the loop stops at the first `end_turn` (NO-OP).
-
-use api_client::types::{ContentBlockApi, MessageResponse, UsageApi};
+use llm_client::{ContentBlock as LlmContentBlock, LlmResponse, TokenUsage, Usage};
 use orchestrator::test_support::{
     MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider,
 };
@@ -16,21 +14,24 @@ use tool_api::registry::ToolRegistry;
 
 /// Build an `end_turn` response with a single text block and a given
 /// `output_tokens` usage count.
-fn end_turn_with_output_tokens(output_tokens: u64) -> MessageResponse {
-    MessageResponse {
+fn end_turn_with_output_tokens(output_tokens: u64) -> LlmResponse {
+    LlmResponse {
         id: "msg_mock".to_string(),
         model: "claude-opus-4-7".to_string(),
-        content: vec![ContentBlockApi::Text {
+        content: vec![LlmContentBlock::Text {
             text: "done".into(),
+            cache_control: None,
         }],
         stop_reason: Some("end_turn".to_string()),
-        usage: UsageApi {
-            input_tokens: 0,
-            output_tokens,
-            cache_creation_input_tokens: 0,
-            cache_read_input_tokens: 0,
+        usage: Usage {
+            billable_tokens: TokenUsage {
+                output: output_tokens,
+                ..Default::default()
+            },
             ..Default::default()
         },
+        cost: None,
+        provider_metadata: serde_json::Value::Null,
     }
 }
 

@@ -1,4 +1,3 @@
-//! hooks (settings lifecycle) — `ConfigChange` fired from the orchestrator's
 //! `fire_config_change` helper, the seam the desktop composition root's
 //! settings watcher (`engine_desktop::settings_watch`) calls on every detected
 //! settings-file change.
@@ -17,7 +16,6 @@
 //! 2. A `ConfigChange` hook that returns an error outcome does NOT panic / break
 //!    the (best-effort) fire helper.
 //! 3. No `ConfigChange` hook registered ⇒ firing is a strict no-op.
-
 use async_trait::async_trait;
 use hooks::definition::{HookDefinition, HookExecutor as DefHookExecutor, HookSource};
 use hooks::events::{ConfigChangeSource, HookEvent, HookEventType};

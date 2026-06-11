@@ -1,6 +1,4 @@
-//! M5-02 Task 12: `max_turns` enforcement + API-error propagation.
-
-use api_client::types::ContentBlockApi;
+use llm_client::ContentBlock as LlmContentBlock;
 use orchestrator::test_support::{
     mock_message_response, MockApiClient, MockOutputStream, NoOpPermissionGate,
     StaticMemoryProvider,
@@ -15,8 +13,9 @@ use tool_api::registry::ToolRegistry;
 async fn never_ending_loop_aborts_with_max_turns_reached() {
     let make_resp = || {
         mock_message_response(
-            vec![ContentBlockApi::Text {
+            vec![LlmContentBlock::Text {
                 text: "still thinking".into(),
+                cache_control: None,
             }],
             Some("max_tokens"), // any value other than "end_turn"
         )

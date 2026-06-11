@@ -1,4 +1,3 @@
-//! hooks (runtime lifecycle) — `Notification` fired from the orchestrator's
 //! `fire_notification` helper, the seam the CLI repl's idle-prompt timer calls
 //! once the REPL has been idle for `messageIdleNotifThresholdMs` after the last
 //! response.

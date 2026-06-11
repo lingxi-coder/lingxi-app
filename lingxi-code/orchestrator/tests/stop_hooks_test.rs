@@ -1,4 +1,3 @@
-//! hooks B4 — Stop / `UserPromptSubmit` lifecycle hooks fired from the turn loop.
 //!
 //! Exercises the core Stop continuation contract (TS `query.ts:1262-1308`):
 //! - a Stop hook `Block` (keep working) continues ONE extra turn with the
@@ -6,8 +5,8 @@
 //!   NOT loop forever (re-entry guard);
 //! - `preventContinuation` (`continue:false`) terminates as `StopHookPrevented`;
 //! - a `UserPromptSubmit` `Block` aborts the turn BEFORE any API call.
+use llm_client::ContentBlock as LlmContentBlock;
 
-use api_client::types::ContentBlockApi;
 use async_trait::async_trait;
 use hooks::definition::{HookDefinition, HookExecutor as DefHookExecutor, HookSource};
 use hooks::events::{HookEvent, HookEventType};
@@ -170,9 +169,9 @@ fn orch(
     ))
 }
 
-fn end_turn(text: &str) -> api_client::types::MessageResponse {
+fn end_turn(text: &str) -> llm_client::LlmResponse {
     mock_message_response(
-        vec![ContentBlockApi::Text { text: text.into() }],
+        vec![LlmContentBlock::Text { text: text.into(), cache_control: None }],
         Some("end_turn"),
     )
 }

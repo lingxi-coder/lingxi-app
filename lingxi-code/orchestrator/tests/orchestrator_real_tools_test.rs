@@ -1,12 +1,10 @@
-//! M5-02 Task 14: integration with a real-fs-touching tool registered in
 //! the `ToolRegistry`.
 //!
 //! Uses a minimal `SimpleReadTool` rather than M4-01's `FileReadTool` so the
 //! test does not have to construct a full `BuiltinToolContext` (analytics
 //! bus, sandbox, etc.). The intent — exercise the orchestrator driving a
 //! tool that performs real I/O — is preserved.
-
-use api_client::types::ContentBlockApi;
+use llm_client::ContentBlock as LlmContentBlock;
 use async_trait::async_trait;
 use orchestrator::test_support::{
     mock_message_response, MockApiClient, MockOutputStream, NoOpPermissionGate,
@@ -120,16 +118,17 @@ async fn orchestrator_drives_real_file_read_tool_on_a_tempfile() {
 
     let tool_use_id = ToolUseId::new();
     let r1 = mock_message_response(
-        vec![ContentBlockApi::ToolUse {
-            id: tool_use_id,
+        vec![LlmContentBlock::ToolCall {
+            id: tool_use_id.as_uuid().to_string(),
             name: "Read".into(),
             input: json!({ "file_path": path.to_string_lossy() }),
         }],
         Some("tool_use"),
     );
     let r2 = mock_message_response(
-        vec![ContentBlockApi::Text {
+        vec![LlmContentBlock::Text {
             text: "I read it".into(),
+            cache_control: None,
         }],
         Some("end_turn"),
     );

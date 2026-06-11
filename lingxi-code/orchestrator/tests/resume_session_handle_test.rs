@@ -1,4 +1,3 @@
-//! Live `OrchestratorHandle::resume_session` — adopt a replayed session IN
 //! PLACE on a RUNNING orchestrator (the symmetric twin of `clear_session`).
 //!
 //! Verifies that resuming:
@@ -7,7 +6,6 @@
 //! - ADOPTS the named session id (resume does NOT mint a fresh one, unlike
 //!   `clear_session`), and
 //! - leaves the live model UNCHANGED (resume keeps the running model).
-
 use orchestrator::test_support::{
     noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider,
 };

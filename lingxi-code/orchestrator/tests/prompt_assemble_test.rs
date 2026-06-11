@@ -1,4 +1,3 @@
-//! Full `assemble_system_prompt` byte-locks (M5-03 Task 11).
 
 use orchestrator::prompt::{assemble_system_prompt, FileTree, MemoryFile, SystemPromptContext};
 use std::path::PathBuf;

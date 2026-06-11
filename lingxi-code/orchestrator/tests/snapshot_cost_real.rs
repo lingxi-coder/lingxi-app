@@ -1,13 +1,12 @@
-//! M6-06 — `snapshot_cost` reads real numbers from the wired `CostTracker`.
 #![allow(
     clippy::field_reassign_with_default,
     clippy::float_cmp,
     clippy::unused_async
 )]
 
-use api_client::types::{MessageResponse, UsageApi};
 use cost::pricing::PricingCatalog;
 use cost::CostTracker;
+use llm_client::{LlmResponse, TokenUsage, Usage};
 use orchestrator::test_support::{
     noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider,
 };
@@ -18,19 +17,22 @@ use tokio::sync::mpsc;
 use tool_api::registry::ToolRegistry;
 use traits::OrchestratorHandle;
 
-fn end_turn_response_with_usage(input: u64, output: u64) -> MessageResponse {
-    MessageResponse {
+fn end_turn_response_with_usage(input: u64, output: u64) -> LlmResponse {
+    LlmResponse {
         id: "msg_mock".to_string(),
         model: "claude-opus-4-6".to_string(),
         content: Vec::new(),
         stop_reason: Some("end_turn".to_string()),
-        usage: UsageApi {
-            input_tokens: input,
-            output_tokens: output,
-            cache_creation_input_tokens: 0,
-            cache_read_input_tokens: 0,
+        usage: Usage {
+            billable_tokens: TokenUsage {
+                input,
+                output,
+                ..Default::default()
+            },
             ..Default::default()
         },
+        cost: None,
+        provider_metadata: serde_json::Value::Null,
     }
 }
 

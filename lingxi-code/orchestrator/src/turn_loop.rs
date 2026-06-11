@@ -3,8 +3,7 @@
 use crate::conversation::ConversationOrchestrator;
 use crate::error::OrchestratorError;
 use crate::test_support::PermissionDecision;
-use api_client::types::{ContentBlockApi, MessageResponse};
-use api_client::ApiError;
+use llm_client::{ContentBlock as LlmContentBlock, LlmError, LlmResponse};
 use hooks::events::HookEvent;
 use hooks::registry::HookContext;
 use hooks::response::HookDecision;
@@ -176,10 +175,9 @@ pub(crate) const MAX_OUTPUT_TOKENS_RECOVERY_NUDGE: &str = concat!(
 /// reactive 413 recovery (Batch 5) is exhausted. 1:1 with claude-code
 /// `errors.ts` `PROMPT_TOO_LONG_ERROR_MESSAGE = 'Prompt is too long'`.
 ///
-/// Re-exported from the api-client crate (which owns the prompt-too-long
-/// classification + this const) so the model-facing string has a single source
-/// of truth and the two cannot drift.
-pub(crate) use api_client::PROMPT_TOO_LONG_ERROR_MESSAGE;
+/// Re-exported from `model::prompt_too_long` (the orchestrator's own copy),
+/// which is the authoritative source for this string in this crate.
+pub(crate) use crate::model::prompt_too_long::PROMPT_TOO_LONG_ERROR_MESSAGE;
 
 /// Per-conversation recovery bookkeeping carried by the turn drivers in
 /// `conversation.rs` and threaded `&mut` into [`execute_one_turn_with_recovery`].
@@ -359,7 +357,7 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
 
     // A3: this call's output-token count, returned to the budget loop so it can
     // accumulate `global_turn_tokens` (TS `getTurnOutputTokens()`).
-    let output_tokens = response.usage.output_tokens;
+    let output_tokens = response.usage.billable_tokens.output;
 
     // In-Loop Compaction Batch 6: snapshot the cache-safe prompt prefix now the
     // call has succeeded, so the forked autocompact summarizer can replay this
@@ -375,16 +373,16 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
     // swallowed internally). Both inaccuracies are documented in v0.7.0
     // release notes; M7 wires through real timing.
     if let Some(tracker) = orch.cost_tracker.as_ref() {
-        let usage = crate::cost_wiring::usage_api_to_cost_usage(&response.usage);
-        let cache_read = response.usage.cache_read_input_tokens;
-        let cache_create = response.usage.cache_creation_input_tokens;
+        let usage = crate::cost_wiring::llm_usage_to_cost_usage(&response.usage);
+        let cache_read = response.usage.billable_tokens.cache_read;
+        let cache_create = response.usage.billable_tokens.cache_write;
         let model_ref = crate::cost_wiring::model_ref_from_string(&model);
         let _cost_for_this_call = tracker
             .record_api_response_v2(
                 model_ref,
                 usage,
                 std::time::Duration::ZERO,
-                0, // retries — not exposed from api-client adapter today
+                0, // retries — not yet exposed from the adapter
                 cache_read,
                 cache_create,
                 false, // is_batch_request — M6 always false
@@ -395,7 +393,7 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     }
 
-    // 2. Translate `MessageResponse.content` -> `ContentBlock` history entry.
+    // 2. Translate `LlmResponse.content` -> `ContentBlock` history entry.
     let assistant_blocks = translate_response_blocks(&response.content);
 
     // 3. Append the assistant message to the session. We need the
@@ -517,12 +515,12 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
 }
 
 /// Outcome of [`call_api_with_ptl_recovery`]: either a successful
-/// `MessageResponse`, or a signal that the prompt-too-long reactive recovery
+/// `LlmResponse`, or a signal that the prompt-too-long reactive recovery
 /// (Batch 5) was exhausted and the turn should end with the byte-exact
 /// [`PROMPT_TOO_LONG_ERROR_MESSAGE`].
 enum PtlCallOutcome {
     /// The API call (or a retry after truncation/compaction) succeeded.
-    Response(Box<MessageResponse>),
+    Response(Box<LlmResponse>),
     /// The blocking-limit preempt fired, or the PTL retry budget +
     /// reactive-compact fallback were all exhausted. End the turn.
     PromptTooLong,
@@ -543,7 +541,7 @@ enum PtlCallOutcome {
 ///    i.e. `effective_window − MANUAL_COMPACT_BUFFER_TOKENS`), surface
 ///    `PromptTooLong` WITHOUT calling the API.
 /// 2. Call the API. On `Ok` → `Response`. On a non-PTL `Err` → bubble.
-/// 3. On `Err(ApiError::PromptTooLong { token_gap, .. })` run a PTL retry loop
+/// 3. On `Err(LlmError::ContextOverflow)` run a PTL retry loop
 ///    (≤ [`compaction::MAX_PTL_RETRIES`]):
 ///    [`compaction::ptl_retry::truncate_head_for_ptl_retry`]`(history, gap)` →
 ///    if `Some`, swap `session.history`, retry; if `None`, break (nothing safe
@@ -587,14 +585,12 @@ async fn call_api_with_ptl_recovery(
     }
 
     // (2) Initial call. When an Opus-fallback model is configured, route the
-    // primary request through the fallback-aware seam so a consecutive-529 gate
-    // on a non-custom Opus primary model can surface
-    // `ApiError::FallbackTriggered` (Opus-fallback batch, 1:1 with claude-code
-    // `withRetry.ts:326-365`). With NO fallback configured this is a STRICT
-    // no-op: the plain `messages_create` seam is taken, byte-identical to before
-    // — so the locked turn-loop fixtures (which wire no fallback) are unaffected,
-    // and `FallbackTriggered` can never arise on that path (the adapter passes
-    // `fallback_model = None` to the api-client, leaving the 529 gate closed).
+    // primary request through the fallback-aware seam. In Task 6, `LlmError`
+    // has no `FallbackTriggered` variant — fallback becomes adapter-internal.
+    // The `messages_create_with_fallback` seam still passes the fallback hint to
+    // `ProviderApiAdapter`, which handles the 529-triggered switch internally.
+    // With NO fallback configured the plain `messages_create` seam is taken,
+    // byte-identical to before — locked turn-loop fixtures are unaffected.
     let first = if let Some(max_tokens) = max_tokens_override {
         // REC.A1 escalated single-shot (TS `query.ts:1199-1221`): re-issue with
         // the override `max_tokens` (8k→64k). The escalation is orthogonal to the
@@ -622,30 +618,17 @@ async fn call_api_with_ptl_recovery(
             .messages_create(model, system, history_snapshot, tools.clone())
             .await
     };
-    // Opus-fallback interception: catch `ApiError::FallbackTriggered` BEFORE the
-    // OrchestratorError conversion and re-issue ONCE against the fallback model
-    // (port of `query.ts:894-948`). This arm is dead on the no-fallback path
-    // (that path can't raise it), so the interception is gated by construction
-    // on `config.fallback_model.is_some()` and is a strict no-op otherwise.
-    let first = match first {
-        Err(ApiError::FallbackTriggered {
-            original_model,
-            fallback_model,
-        }) => {
-            reissue_after_model_fallback(
-                orch,
-                system,
-                &original_model,
-                fallback_model,
-                tools.clone(),
-            )
-            .await
-        }
-        other => other,
-    };
-    let mut token_gap = match first {
+    // NOTE: `ApiError::FallbackTriggered` interception is REMOVED — `LlmError`
+    // has no `FallbackTriggered` variant. The model-fallback logic moves into
+    // `ProviderApiAdapter` in Task 6 (the adapter handles the 529 switch
+    // internally and emits a `warning` on the output stream there).
+
+    // Map `LlmError::ContextOverflow` to the PTL recovery path;
+    // a non-zero `token_gap` is unknown at this level — use 0 as the sentinel
+    // (the PTL truncation loop is best-effort without an exact gap).
+    let token_gap: u64 = match first {
         Ok(resp) => return Ok(PtlCallOutcome::Response(Box::new(resp))),
-        Err(ApiError::PromptTooLong { token_gap, .. }) => token_gap,
+        Err(LlmError::ContextOverflow) => 0,
         Err(other) => return Err(other.into()),
     };
 
@@ -672,8 +655,8 @@ async fn call_api_with_ptl_recovery(
             .await
         {
             Ok(resp) => return Ok(PtlCallOutcome::Response(Box::new(resp))),
-            Err(ApiError::PromptTooLong { token_gap: gap, .. }) => {
-                token_gap = gap;
+            Err(LlmError::ContextOverflow) => {
+                // token_gap stays 0 — truncation keeps halving the history.
             }
             Err(other) => return Err(other.into()),
         }
@@ -725,7 +708,7 @@ async fn call_api_with_ptl_recovery(
                     .await
                 {
                     Ok(resp) => return Ok(PtlCallOutcome::Response(Box::new(resp))),
-                    Err(ApiError::PromptTooLong { .. }) => {}
+                    Err(LlmError::ContextOverflow) => {}
                     Err(other) => return Err(other.into()),
                 }
             }
@@ -740,10 +723,9 @@ async fn call_api_with_ptl_recovery(
 /// Port of the Opus-fallback re-issue (claude-code `query.ts:894-948`'s
 /// `catch (FallbackTriggeredError)` arm).
 ///
-/// Invoked when the primary batched call surfaces
-/// [`ApiError::FallbackTriggered`] — only possible when
-/// `config.fallback_model.is_some()` (see [`call_api_with_ptl_recovery`]). Ports
-/// the TS arm MINIMALLY and faithfully:
+/// Invoked when the primary batched call should fall back to a secondary model —
+/// only possible when `config.fallback_model.is_some()` (see
+/// [`call_api_with_ptl_recovery`]). Ports the TS arm MINIMALLY and faithfully:
 ///
 /// 1. **(i) switch the working/session model** to `fallback_model` (TS
 ///    `currentModel = fallbackModel`). The next turn step re-snapshots
@@ -781,13 +763,19 @@ async fn call_api_with_ptl_recovery(
 /// so only `session.model` (which drives the API model) switches. TS's ant-only
 /// `stripSignatureBlocks` thinking-signature scrub is omitted — it is
 /// `USER_TYPE === 'ant'`-gated and this port carries no protected-thinking replay.
+///
+/// NOTE: Task 5 dead code — the `FallbackTriggered` interception was removed from
+/// the turn loop; this function is called by `messages_create_with_fallback` in
+/// Task 6 once the adapter wires the fallback logic. Kept to preserve the
+/// business logic until then.
+#[allow(dead_code)]
 async fn reissue_after_model_fallback(
     orch: &ConversationOrchestrator,
     system: Option<&str>,
     original_model: &str,
     fallback_model: String,
     tools: Vec<serde_json::Value>,
-) -> Result<MessageResponse, ApiError> {
+) -> Result<LlmResponse, LlmError> {
     // (i) Switch the working/session model to the fallback.
     {
         let mut s = orch.session.lock().await;
@@ -918,30 +906,48 @@ async fn handle_max_output_tokens(
     })
 }
 
-/// Translate api-client content blocks into protocol content blocks.
+/// Translate llm-client content blocks into protocol content blocks.
 /// Server-side variants (`ServerToolUse`, `ConnectorText`, `AdvisorToolResult`)
-/// are dropped in M5-02. M5-04 may revisit Thinking.
-fn translate_response_blocks(content: &[ContentBlockApi]) -> Vec<ContentBlock> {
+/// are dropped. `ToolCall.id: String` is converted to `ToolUseId`: the string
+/// is interpreted as a JSON string and deserialized via `ToolUseId`'s
+/// `#[serde(transparent)]` UUID impl; if it fails a fresh UUID is minted to
+/// keep history coherent.
+fn translate_response_blocks(content: &[LlmContentBlock]) -> Vec<ContentBlock> {
+    use protocol::ToolUseId;
     content
         .iter()
         .filter_map(|b| match b {
-            ContentBlockApi::Text { text } => Some(ContentBlock::Text { text: text.clone() }),
-            ContentBlockApi::ToolUse { id, name, input } => Some(ContentBlock::ToolUse {
-                id: *id,
-                name: name.clone(),
-                input: input.clone(),
-            }),
-            ContentBlockApi::Thinking {
-                thinking,
-                signature,
-            } => Some(ContentBlock::Thinking {
-                thinking: thinking.clone(),
+            LlmContentBlock::Text { text, .. } => Some(ContentBlock::Text { text: text.clone() }),
+            LlmContentBlock::ToolCall { id, name, input } => {
+                // `llm_client::ContentBlock::ToolCall.id` is a plain `String`;
+                // `protocol::ContentBlock::ToolUse.id` is a `ToolUseId` (newtype
+                // wrapping a UUID, serde transparent). Try to round-trip via JSON;
+                // if the string is not a UUID (e.g. Anthropic `toolu_...`) mint a fresh
+                // UUID so history stays coherent (Task 6 will preserve the Anthropic id
+                // separately in provider_metadata).
+                let tool_use_id = serde_json::from_value::<ToolUseId>(
+                    serde_json::Value::String(id.clone()),
+                )
+                .unwrap_or_else(|_| ToolUseId::new());
+                Some(ContentBlock::ToolUse {
+                    id: tool_use_id,
+                    name: name.clone(),
+                    input: input.clone(),
+                })
+            }
+            LlmContentBlock::Reasoning { text, signature } => Some(ContentBlock::Thinking {
+                thinking: text.clone(),
                 signature: signature.clone(),
             }),
-            // Server-side variants are skipped in M5-02; M5-04 may revisit.
-            ContentBlockApi::ServerToolUse { .. }
-            | ContentBlockApi::ConnectorText { .. }
-            | ContentBlockApi::AdvisorToolResult { .. } => None,
+            // Server-side variants are dropped (matches agent::runner::translate_response_blocks).
+            LlmContentBlock::ServerToolUse { .. }
+            | LlmContentBlock::ConnectorText { .. }
+            | LlmContentBlock::AdvisorToolResult { .. }
+            | LlmContentBlock::Image { .. }
+            | LlmContentBlock::ImageUrl { .. }
+            | LlmContentBlock::Document { .. }
+            | LlmContentBlock::ToolResult { .. }
+            | LlmContentBlock::RedactedThinking { .. } => None,
         })
         .collect()
 }
@@ -1845,8 +1851,9 @@ mod read_file_state_tests {
         // leg's twin is `streaming_concurrent_tools_test`.)
         let cwd = PathBuf::from("/tmp");
         let api = Arc::new(MockApiClient::new(vec![mock_message_response(
-            vec![api_client::types::ContentBlockApi::Text {
+            vec![llm_client::ContentBlock::Text {
                 text: "done".into(),
+                cache_control: None,
             }],
             Some("end_turn"),
         )]));
@@ -2102,17 +2109,17 @@ mod max_output_tokens_recovery_tests {
         NoOpPermissionGate, StaticMemoryProvider,
     };
     use crate::OrchestratorConfig;
-    use api_client::types::ContentBlockApi;
+    use llm_client::LlmResponse;
     use protocol::{ContentBlock, ConversationMessage};
     use std::path::PathBuf;
     use std::sync::Arc;
     use tool_api::registry::ToolRegistry;
 
     /// Build an orchestrator whose batched API returns the given scripted
-    /// `MessageResponse`s in order. No tools registered (recovery never needs
+    /// `LlmResponse`s in order. No tools registered (recovery never needs
     /// them).
     fn orch_with_responses(
-        responses: Vec<api_client::types::MessageResponse>,
+        responses: Vec<LlmResponse>,
     ) -> ConversationOrchestrator {
         ConversationOrchestrator::new(
             OrchestratorConfig::default(),
@@ -2127,10 +2134,11 @@ mod max_output_tokens_recovery_tests {
     }
 
     /// A `max_tokens` response carrying one text block.
-    fn max_tokens_response() -> api_client::types::MessageResponse {
+    fn max_tokens_response() -> LlmResponse {
         mock_message_response(
-            vec![ContentBlockApi::Text {
+            vec![llm_client::ContentBlock::Text {
                 text: "partial".into(),
+                cache_control: None,
             }],
             Some("max_tokens"),
         )
@@ -2267,7 +2275,7 @@ mod max_output_tokens_recovery_tests {
     #[tokio::test]
     async fn normal_end_turn_unaffected_by_recovery() {
         let orch = orch_with_responses(vec![mock_message_response(
-            vec![ContentBlockApi::Text { text: "done".into() }],
+            vec![llm_client::ContentBlock::Text { text: "done".into(), cache_control: None }],
             Some("end_turn"),
         )]);
         let mut state = RecoveryState::default();
@@ -2293,7 +2301,7 @@ mod max_output_tokens_recovery_tests {
 
     /// As [`orch_with_responses`] but with the REC.A1 8k→64k escalation enabled.
     fn orch_with_responses_escalating(
-        responses: Vec<api_client::types::MessageResponse>,
+        responses: Vec<LlmResponse>,
     ) -> ConversationOrchestrator {
         ConversationOrchestrator::new(
             OrchestratorConfig {
@@ -2662,7 +2670,7 @@ mod pre_tool_hook_tests {
     fn orch_with(
         hooks: Arc<HookExecutorImpl>,
         perms: Arc<dyn PermissionGate>,
-        responses: Vec<api_client::types::MessageResponse>,
+        responses: Vec<llm_client::LlmResponse>,
     ) -> ConversationOrchestrator {
         let mut registry = ToolRegistry::new();
         registry.register_builtin(Arc::new(EchoTool) as Arc<dyn Tool>);
@@ -2743,8 +2751,8 @@ mod pre_tool_hook_tests {
     async fn injected_message_sources_records_tool_use_id() {
         let tu = ToolUseId::new();
         let api_resp = mock_message_response(
-            vec![api_client::types::ContentBlockApi::ToolUse {
-                id: tu,
+            vec![llm_client::ContentBlock::ToolCall {
+                id: tu.as_uuid().to_string(),
                 name: "Inject".into(),
                 input: json!({}),
             }],
@@ -2793,8 +2801,8 @@ mod pre_tool_hook_tests {
     async fn normal_tool_records_no_source_and_serializes_no_field() {
         let tu = ToolUseId::new();
         let api_resp = mock_message_response(
-            vec![api_client::types::ContentBlockApi::ToolUse {
-                id: tu,
+            vec![llm_client::ContentBlock::ToolCall {
+                id: tu.as_uuid().to_string(),
                 name: "Echo".into(),
                 input: json!({}),
             }],
@@ -2831,8 +2839,8 @@ mod pre_tool_hook_tests {
     async fn new_messages_appended_to_history_after_tool_result() {
         let tu = ToolUseId::new();
         let api_resp = mock_message_response(
-            vec![api_client::types::ContentBlockApi::ToolUse {
-                id: tu,
+            vec![llm_client::ContentBlock::ToolCall {
+                id: tu.as_uuid().to_string(),
                 name: "Inject".into(),
                 input: json!({}),
             }],
@@ -2939,8 +2947,8 @@ mod pre_tool_hook_tests {
         // ends with stop_reason "hook_stopped" (TS query.ts `{reason:'hook_stopped'}`).
         let tu = ToolUseId::new();
         let api_resp = mock_message_response(
-            vec![api_client::types::ContentBlockApi::ToolUse {
-                id: tu,
+            vec![llm_client::ContentBlock::ToolCall {
+                id: tu.as_uuid().to_string(),
                 name: "Echo".into(),
                 input: json!({}),
             }],
@@ -2968,8 +2976,8 @@ mod pre_tool_hook_tests {
         // Without continue:false a tool-bearing step keeps looping (Continue).
         let tu = ToolUseId::new();
         let api_resp = mock_message_response(
-            vec![api_client::types::ContentBlockApi::ToolUse {
-                id: tu,
+            vec![llm_client::ContentBlock::ToolCall {
+                id: tu.as_uuid().to_string(),
                 name: "Echo".into(),
                 input: json!({}),
             }],

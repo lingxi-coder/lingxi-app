@@ -1,4 +1,3 @@
-//! `file_tree::probe` + format byte-locks (M5-03 Task 8).
 
 use orchestrator::prompt::file_tree;
 use std::fs;

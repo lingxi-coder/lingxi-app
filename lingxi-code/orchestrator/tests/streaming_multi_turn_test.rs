@@ -1,4 +1,3 @@
-//! Multi-turn streaming — turn 1 `tool_use`, turn 2 `end_turn` (M5-04 Task 15).
 
 use async_trait::async_trait;
 use orchestrator::test_support::{

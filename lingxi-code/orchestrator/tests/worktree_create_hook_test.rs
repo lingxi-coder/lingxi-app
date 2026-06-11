@@ -1,4 +1,3 @@
-//! hooks (worktree-creation) — `WorktreeCreate` fired from the turn loop's
 //! tool-dispatch chokepoint (`turn_loop.rs`) after a successful `EnterWorktree`.
 //!
 //! Parity with claude-code: `executeWorktreeCreateHook(slug)` (`utils/hooks.ts:4928`)
@@ -18,8 +17,7 @@
 //! 3. A non-worktree tool never fires `WorktreeCreate`.
 //! 4. A `WorktreeCreate` hook that itself fails does NOT break the turn
 //!    (best-effort, like the `PostToolUse` arm).
-
-use api_client::types::ContentBlockApi;
+use llm_client::ContentBlock as LlmContentBlock;
 use async_trait::async_trait;
 use hooks::definition::{HookDefinition, HookExecutor as DefHookExecutor, HookSource};
 use hooks::events::{HookEvent, HookEventType};
@@ -326,16 +324,17 @@ fn two_turn_api(
 ) -> Arc<MockApiClient> {
     Arc::new(MockApiClient::new(vec![
         mock_message_response(
-            vec![ContentBlockApi::ToolUse {
-                id: tool_use_id,
+            vec![LlmContentBlock::ToolCall {
+                id: tool_use_id.as_uuid().to_string(),
                 name: tool_name.into(),
                 input,
             }],
             Some("tool_use"),
         ),
         mock_message_response(
-            vec![ContentBlockApi::Text {
+            vec![LlmContentBlock::Text {
                 text: "done".into(),
+                cache_control: None,
             }],
             Some("end_turn"),
         ),

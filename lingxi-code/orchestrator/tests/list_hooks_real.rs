@@ -1,4 +1,3 @@
-//! M6-07 — `list_hooks` reads the wired `Arc<RwLock<HookRegistry>>`.
 
 use hooks::definition::{HookCondition, HookExecutor, HookSource};
 use hooks::events::HookEventType;

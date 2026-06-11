@@ -13,9 +13,8 @@ use crate::error::OrchestratorError;
 use crate::sse::accumulator::BlockAccumulator;
 use crate::sse::event_router::{dispatch_event, RouterAction};
 use crate::turn_loop::dispatch_tool_uses_tracked;
-use api_client::types::StreamEvent;
-use api_client::ApiError;
 use futures::stream::{BoxStream, StreamExt};
+use llm_client::{LlmError, LlmEvent};
 use protocol::{ContentBlock, ToolUseId};
 use serde_json::Value;
 use std::sync::Arc;
@@ -61,7 +60,7 @@ pub struct PumpedTurn {
 /// to session history.
 ///
 /// # Errors
-/// - [`OrchestratorError::Streaming`] wrapping an [`ApiError`] if the
+/// - [`OrchestratorError::Streaming`] wrapping an [`LlmError`] if the
 ///   underlying transport surfaces an error mid-stream.
 /// - [`OrchestratorError::StreamingProtocol`] if the wire-level event
 ///   sequence violates the per-block protocol (out-of-order delta,
@@ -69,7 +68,7 @@ pub struct PumpedTurn {
 /// - [`OrchestratorError::StreamEndedWithoutStop`] if the stream
 ///   produced no `MessageStop` event before terminating.
 pub async fn pump_stream(
-    mut stream: BoxStream<'static, Result<StreamEvent, ApiError>>,
+    mut stream: BoxStream<'static, Result<LlmEvent, LlmError>>,
     output: &Arc<dyn OutputStream>,
 ) -> Result<PumpedTurn, OrchestratorError> {
     let mut acc = BlockAccumulator::new();
@@ -225,7 +224,7 @@ mod tests {
     use futures::stream;
     use protocol::ToolUseId;
 
-    fn boxed(events: Vec<StreamEvent>) -> BoxStream<'static, Result<StreamEvent, ApiError>> {
+    fn boxed(events: Vec<LlmEvent>) -> BoxStream<'static, Result<LlmEvent, LlmError>> {
         stream::iter(events.into_iter().map(Ok)).boxed()
     }
 
@@ -311,7 +310,7 @@ mod tests {
     #[tokio::test]
     async fn thinking_and_usage_deltas_emit_to_output() {
         use crate::test_support::MockOutputStream;
-        use api_client::types::UsageApi;
+        use llm_client::Usage;
         use traits::OutputEvent;
 
         let mock = Arc::new(MockOutputStream::new());
@@ -329,12 +328,15 @@ mod tests {
             // final message_delta with stop_reason AND usage
             message_delta_stop_with_usage(
                 "end_turn",
-                UsageApi {
-                    input_tokens: 120,
-                    output_tokens: 35,
-                    cache_creation_input_tokens: 10,
-                    cache_read_input_tokens: 5,
-                    ..Default::default()
+                Usage {
+                    billable_tokens: llm_client::TokenUsage {
+                        input: 120,
+                        output: 35,
+                        cache_write: 10,
+                        cache_read: 5,
+                        reasoning_output: 0,
+                    },
+                    ..Usage::default()
                 },
             ),
             message_stop(),
@@ -395,11 +397,11 @@ mod tests {
     #[tokio::test]
     async fn underlying_stream_error_surfaces_as_streaming_variant() {
         let out: Arc<dyn OutputStream> = Arc::new(MockOutputStream::new());
-        let s: BoxStream<'static, Result<StreamEvent, ApiError>> = stream::iter(vec![
+        let s: BoxStream<'static, Result<LlmEvent, LlmError>> = stream::iter(vec![
             Ok(message_start("m1", "claude-opus-4-7")),
-            Err(ApiError::Http(traits::HttpError::Connection(
-                "dropped".into(),
-            ))),
+            Err(LlmError::Transport {
+                message: "dropped".into(),
+            }),
         ])
         .boxed();
         let err = pump_stream(s, &out).await.expect_err("network");

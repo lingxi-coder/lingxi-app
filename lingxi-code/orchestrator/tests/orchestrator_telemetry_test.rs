@@ -1,6 +1,4 @@
-//! M5-02 Task 15: verify orchestrator emits the 3 lifecycle events.
-
-use api_client::types::ContentBlockApi;
+use llm_client::ContentBlock as LlmContentBlock;
 use orchestrator::test_support::{
     mock_message_response, MockApiClient, MockOutputStream, NoOpPermissionGate,
     StaticMemoryProvider,
@@ -52,7 +50,7 @@ async fn run_turn_emits_started_and_completed_in_order() {
     let _guard = tracing::subscriber::set_default(subscriber);
 
     let resp = mock_message_response(
-        vec![ContentBlockApi::Text { text: "hi".into() }],
+        vec![LlmContentBlock::Text { text: "hi".into(), cache_control: None }],
         Some("end_turn"),
     );
     let api = Arc::new(MockApiClient::new(vec![resp]));

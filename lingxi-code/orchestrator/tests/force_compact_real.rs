@@ -1,4 +1,3 @@
-//! M6-08 — real `force_compact` wiring.
 //!
 //! Verifies that:
 //! - A 50-message history compacts to fewer than 50 messages and the
@@ -10,6 +9,7 @@
 //!   its last message, so the next turn's system-prompt assembly sees
 //!   the compaction transition.
 //! - Five consecutive `force_compact` calls do not panic / leak.
+use llm_client::ContentBlock as LlmContentBlock;
 
 use compaction::CompactionOrchestrator;
 use orchestrator::test_support::{
@@ -291,15 +291,17 @@ fn history_is_valid(history: &[ConversationMessage]) -> bool {
 
 #[tokio::test]
 async fn compaction_safety_gate() {
-    use api_client::types::{ContentBlockApi, MessageResponse, UsageApi};
+    use llm_client::{LlmResponse, Usage};
 
     // Scripted end_turn response so the post-compaction turn can run.
-    let response = MessageResponse {
+    let response = LlmResponse {
         id: "msg_gate".into(),
         model: "claude-opus-4-7".into(),
-        content: vec![ContentBlockApi::Text { text: "ack".into() }],
+        content: vec![LlmContentBlock::Text { text: "ack".into(), cache_control: None }],
         stop_reason: Some("end_turn".into()),
-        usage: UsageApi::default(),
+        usage: Usage::default(),
+        cost: None,
+        provider_metadata: serde_json::Value::Null,
     };
     let api = Arc::new(MockApiClient::new(vec![response]));
     let orch = Arc::new(

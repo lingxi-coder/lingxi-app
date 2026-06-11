@@ -1,18 +1,18 @@
-//! Translation helpers between `api_client::types::UsageApi` and
+//! Translation helpers between `llm_client::Usage` and
 //! `cost::Usage` plus model-string → `ProviderId` resolution.
 //!
-//! Used by M6-06 to feed `MessageResponse.usage` into `CostTracker`.
+//! Used by M6-06 to feed `LlmResponse.usage` into `CostTracker`.
 
-use api_client::types::UsageApi;
 use cost::pricing::ProviderId;
 use cost::usage::{ApiSpeed, ServerToolUsage, TokenUsage, Usage};
 use cost::ModelRef;
+use llm_client::Usage as LlmUsage;
 use providers::ModelSpec;
 
-/// Translate an API-client `UsageApi` into the cost crate's `Usage` shape.
+/// Translate an `llm_client::Usage` into the cost crate's `Usage` shape.
 ///
-/// Maps Anthropic's `cache_creation_input_tokens` to `TokenUsage::cache_write`
-/// and `cache_read_input_tokens` to `TokenUsage::cache_read`.
+/// Maps `billable_tokens.cache_write` → `TokenUsage::cache_write`
+/// and `billable_tokens.cache_read` → `TokenUsage::cache_read`.
 ///
 /// Also surfaces the two cost-side billing signals the API response carries:
 /// `server_tool_use.web_search_requests` (billed per request — COST.5) and the
@@ -21,20 +21,20 @@ use providers::ModelSpec;
 /// [`ApiSpeed::Standard`]; an absent `speed`/`server_tool_use` stays `None`,
 /// matching claude-code (`utils/cost-tracker.ts:282`, `utils/modelCost.ts:139`).
 #[must_use]
-pub(crate) fn usage_api_to_cost_usage(api: &UsageApi) -> Usage {
+pub(crate) fn llm_usage_to_cost_usage(usage: &LlmUsage) -> Usage {
     Usage {
         tokens: TokenUsage {
-            input: api.input_tokens,
-            output: api.output_tokens,
-            cache_write: api.cache_creation_input_tokens,
-            cache_read: api.cache_read_input_tokens,
-            reasoning_output: 0,
+            input: usage.billable_tokens.input,
+            output: usage.billable_tokens.output,
+            cache_write: usage.billable_tokens.cache_write,
+            cache_read: usage.billable_tokens.cache_read,
+            reasoning_output: usage.billable_tokens.reasoning_output,
         },
-        server_tool_use: api.server_tool_use.map(|s| ServerToolUsage {
+        server_tool_use: usage.server_tool_use.map(|s| ServerToolUsage {
             // cost's counter is u32; clamp the (u64) wire value defensively.
             web_search_requests: u32::try_from(s.web_search_requests).unwrap_or(u32::MAX),
         }),
-        speed: api.speed.as_deref().map(|s| {
+        speed: usage.speed.as_deref().map(|s| {
             if s == "fast" {
                 ApiSpeed::Fast
             } else {
@@ -90,17 +90,31 @@ pub(crate) fn model_ref_from_string(model: &str) -> ModelRef {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use llm_client::{ServerToolUsage as LlmServerToolUsage, TokenUsage as LlmTokenUsage};
+
+    fn make_llm_usage(
+        input: u64, output: u64, cache_write: u64, cache_read: u64,
+        server_tool_use: Option<LlmServerToolUsage>,
+        speed: Option<String>,
+    ) -> LlmUsage {
+        LlmUsage {
+            billable_tokens: LlmTokenUsage {
+                input,
+                output,
+                cache_write,
+                cache_read,
+                reasoning_output: 0,
+            },
+            server_tool_use,
+            speed,
+            ..Default::default()
+        }
+    }
 
     #[test]
     fn translates_tokens_one_to_one() {
-        let api = UsageApi {
-            input_tokens: 100,
-            output_tokens: 50,
-            cache_creation_input_tokens: 20,
-            cache_read_input_tokens: 10,
-            ..Default::default()
-        };
-        let u = usage_api_to_cost_usage(&api);
+        let usage = make_llm_usage(100, 50, 20, 10, None, None);
+        let u = llm_usage_to_cost_usage(&usage);
         assert_eq!(u.tokens.input, 100);
         assert_eq!(u.tokens.output, 50);
         assert_eq!(u.tokens.cache_write, 20);
@@ -111,7 +125,6 @@ mod tests {
         assert!(u.speed.is_none());
     }
 
-    use api_client::types::ServerToolUseApi;
     use cost::pricing::{ModelRef, PricingCatalog, ProviderId};
     use cost::{ApiSpeed, CostCalculator};
 
@@ -128,13 +141,8 @@ mod tests {
     fn web_search_requests_thread_through_and_bill_one_cent_each() {
         // COST.5: usage.server_tool_use.web_search_requests on the wire → cost
         // Usage → billed at $0.01 (10_000_000 nano-USD) per request.
-        let api = UsageApi {
-            server_tool_use: Some(ServerToolUseApi {
-                web_search_requests: 3,
-            }),
-            ..Default::default()
-        };
-        let u = usage_api_to_cost_usage(&api);
+        let usage = make_llm_usage(0, 0, 0, 0, Some(LlmServerToolUsage { web_search_requests: 3 }), None);
+        let u = llm_usage_to_cost_usage(&usage);
         assert_eq!(u.server_tool_use.unwrap().web_search_requests, 3);
         // No tokens → only the web-search charge: 3 × $0.01 = 30_000_000 nano-USD.
         assert_eq!(
@@ -147,12 +155,8 @@ mod tests {
     fn speed_fast_threads_through_and_bills_opus_4_6_fast_tier() {
         // COST.3: usage.speed == "fast" → cost ApiSpeed::Fast → Opus-4.6
         // rebills at the $30/$150 fast tier instead of the catalog $5/$25.
-        let api = UsageApi {
-            input_tokens: 1_000_000,
-            speed: Some("fast".to_string()),
-            ..Default::default()
-        };
-        let u = usage_api_to_cost_usage(&api);
+        let usage = make_llm_usage(1_000_000, 0, 0, 0, None, Some("fast".to_string()));
+        let u = llm_usage_to_cost_usage(&usage);
         assert_eq!(u.speed, Some(ApiSpeed::Fast));
         // 1M input × $30/Mtok = 30e9 nano-USD.
         assert_eq!(
@@ -165,12 +169,8 @@ mod tests {
     fn non_fast_speed_maps_to_standard_and_keeps_base_tier() {
         // A non-"fast" speed string maps to Standard (explicitly not fast), so
         // Opus-4.6 stays on the $5/$25 catalog tier.
-        let api = UsageApi {
-            input_tokens: 1_000_000,
-            speed: Some("standard".to_string()),
-            ..Default::default()
-        };
-        let u = usage_api_to_cost_usage(&api);
+        let usage = make_llm_usage(1_000_000, 0, 0, 0, None, Some("standard".to_string()));
+        let u = llm_usage_to_cost_usage(&usage);
         assert_eq!(u.speed, Some(ApiSpeed::Standard));
         assert_eq!(
             CostCalculator::calculate_nano_usd(&u, &opus_4_6_pricing()),

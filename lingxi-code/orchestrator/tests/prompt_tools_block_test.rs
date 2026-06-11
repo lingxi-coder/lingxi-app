@@ -1,5 +1,3 @@
-//! `<tools>` block byte-locks (M5-03 Task 10).
-
 use orchestrator::prompt::tools_block;
 
 #[test]

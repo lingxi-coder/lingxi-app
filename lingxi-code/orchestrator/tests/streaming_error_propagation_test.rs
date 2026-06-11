@@ -1,6 +1,4 @@
-//! Mid-stream `Err` propagates as [`OrchestratorError::Streaming`] (M5-04 Task 17).
-
-use api_client::ApiError;
+use llm_client::{LlmError, LlmEvent};
 use orchestrator::test_support::{
     content_block_start_text, message_start, text_delta, MockApiClient, MockOutputStream,
     MockStreamingApiClient, NoOpPermissionGate, StaticMemoryProvider,
@@ -9,18 +7,17 @@ use orchestrator::{ConversationOrchestrator, OrchestratorConfig, OrchestratorErr
 use std::path::PathBuf;
 use std::sync::Arc;
 use tool_api::registry::ToolRegistry;
-use traits::HttpError;
 
 #[tokio::test]
 async fn mid_stream_err_surfaces_as_streaming_variant() {
     // First three events OK, fourth event is an Err.
-    let turn: Vec<Result<api_client::types::StreamEvent, ApiError>> = vec![
+    let turn: Vec<Result<LlmEvent, LlmError>> = vec![
         Ok(message_start("m1", "claude-opus-4-7")),
         Ok(content_block_start_text(0)),
         Ok(text_delta(0, "before err")),
-        Err(ApiError::Http(HttpError::Connection(
-            "connection reset by peer".into(),
-        ))),
+        Err(LlmError::Transport {
+            message: "connection reset by peer".into(),
+        }),
     ];
 
     let api = Arc::new(MockStreamingApiClient::with_fallible_turns(vec![turn]));

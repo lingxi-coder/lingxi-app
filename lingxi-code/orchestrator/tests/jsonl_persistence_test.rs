@@ -1,11 +1,9 @@
-//! M5-07 Task 13: integration test for `ConversationOrchestrator::with_jsonl_writer`.
 //!
 //! Drives turns through the public `run_turn` API with a `JsonlWriter`
 //! attached, then reads the file back via `JsonlReader` and asserts the
 //! `parentUuid` chain — proves on-disk persistence is wired correctly and
 //! the chain is monotonic.
-
-use api_client::types::ContentBlockApi;
+use llm_client::ContentBlock as LlmContentBlock;
 use orchestrator::test_support::{
     mock_message_response, MockApiClient, MockOutputStream, NoOpPermissionGate,
     StaticMemoryProvider,
@@ -29,14 +27,16 @@ async fn two_turns_persist_user_assistant_messages_with_parent_uuid_chain() {
     // run_turn calls that share the same orchestrator (and thus the same
     // `last_jsonl_uuid` chain).
     let r1 = mock_message_response(
-        vec![ContentBlockApi::Text {
+        vec![LlmContentBlock::Text {
             text: "first reply".into(),
+            cache_control: None,
         }],
         Some("end_turn"),
     );
     let r2 = mock_message_response(
-        vec![ContentBlockApi::Text {
+        vec![LlmContentBlock::Text {
             text: "second reply".into(),
+            cache_control: None,
         }],
         Some("end_turn"),
     );
@@ -121,8 +121,9 @@ async fn orchestrator_without_writer_creates_no_file() {
     let dir = tempdir().expect("tempdir");
 
     let response = mock_message_response(
-        vec![ContentBlockApi::Text {
+        vec![LlmContentBlock::Text {
             text: "hello".into(),
+            cache_control: None,
         }],
         Some("end_turn"),
     );

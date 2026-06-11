@@ -1,4 +1,3 @@
-//! M6-06 — verify the new `cost_tracker` field + builder are present
 //! and wired correctly.
 
 use cost::pricing::PricingCatalog;

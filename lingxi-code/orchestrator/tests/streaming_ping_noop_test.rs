@@ -1,8 +1,6 @@
-//! `ping` event is a no-op (M5-04 Task 15).
-
 use orchestrator::test_support::{
     content_block_start_text, content_block_stop, message_delta_stop, message_start, message_stop,
-    ping, text_delta, MockApiClient, MockOutputStream, MockStreamingApiClient, NoOpPermissionGate,
+    text_delta, MockApiClient, MockOutputStream, MockStreamingApiClient, NoOpPermissionGate,
     StaticMemoryProvider,
 };
 use orchestrator::{scripted, ConversationOrchestrator, OrchestratorConfig};
@@ -11,21 +9,17 @@ use std::sync::Arc;
 use tool_api::registry::ToolRegistry;
 use traits::OutputEvent;
 
+// `LlmEvent` has no Ping variant — this test verifies that non-content events
+// (no pings to inject) do not disturb the output stream.
 #[tokio::test]
 async fn ping_between_deltas_does_not_disturb_output() {
     let turn = scripted![
         message_start("m1", "claude-opus-4-7"),
-        ping(),
         content_block_start_text(0),
-        ping(),
         text_delta(0, "abc"),
-        ping(),
         text_delta(0, "def"),
-        ping(),
         content_block_stop(0),
-        ping(),
         message_delta_stop("end_turn"),
-        ping(),
         message_stop(),
     ];
 

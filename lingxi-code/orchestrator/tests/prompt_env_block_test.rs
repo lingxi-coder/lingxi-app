@@ -1,4 +1,3 @@
-//! `<env>...</env>` block byte-locks (M5-03 Task 5 — RED).
 //!
 //! Asserts the exact wire shape of [`env_block::format`] before the
 //! implementation lands in Task 6. Expected to FAIL at this task.

@@ -1,6 +1,4 @@
-//! M5-02 Task 13: tool errors propagate as `ToolResult { is_error: true }`.
-
-use api_client::types::ContentBlockApi;
+use llm_client::ContentBlock as LlmContentBlock;
 use async_trait::async_trait;
 use orchestrator::test_support::{
     mock_message_response, MockApiClient, MockOutputStream, NoOpPermissionGate,
@@ -85,16 +83,17 @@ impl Tool for AlwaysFailingTool {
 async fn tool_error_becomes_tool_result_with_is_error_true_and_loop_continues() {
     let tool_use_id = ToolUseId::new();
     let r1 = mock_message_response(
-        vec![ContentBlockApi::ToolUse {
-            id: tool_use_id,
+        vec![LlmContentBlock::ToolCall {
+            id: tool_use_id.as_uuid().to_string(),
             name: "AlwaysFail".into(),
             input: json!({}),
         }],
         Some("tool_use"),
     );
     let r2 = mock_message_response(
-        vec![ContentBlockApi::Text {
+        vec![LlmContentBlock::Text {
             text: "sorry, fix it later".into(),
+            cache_control: None,
         }],
         Some("end_turn"),
     );

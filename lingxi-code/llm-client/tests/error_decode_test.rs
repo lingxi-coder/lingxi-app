@@ -44,7 +44,7 @@ fn anthropic_error_envelope_maps_to_taxonomy() {
     ));
     assert!(matches!(
         codec.decode_response(anthropic_error(400, "invalid_request_error", "prompt is too long: 250000 tokens")).unwrap_err(),
-        LlmError::ContextOverflow
+        LlmError::ContextOverflow { .. }
     ));
     assert!(matches!(
         codec.decode_response(anthropic_error(400, "invalid_request_error", "messages: roles must alternate")).unwrap_err(),
@@ -94,7 +94,7 @@ fn openai_error_envelope_maps_to_taxonomy() {
     ));
     assert!(matches!(
         codec.decode_response(openai_error(400, "context_length_exceeded", "This model's maximum context length is exceeded")).unwrap_err(),
-        LlmError::ContextOverflow
+        LlmError::ContextOverflow { .. }
     ));
     assert!(matches!(
         codec.decode_response(openai_error(400, "invalid_value", "Invalid value for tool_choice")).unwrap_err(),
@@ -150,6 +150,61 @@ fn error_status_without_envelope_falls_back_to_status_mapping() {
         gemini_codec().decode_response(ProviderResponse::json(429, serde_json::Value::Null)).unwrap_err(),
         LlmError::RateLimited { .. }
     ));
+}
+
+/// PTL error carries the parsed `token_gap` (actual - limit).
+/// Regression test for Fix 1: `LlmError::ContextOverflow { token_gap }`.
+#[test]
+fn ptl_context_overflow_carries_token_gap() {
+    let codec = anthropic_codec();
+
+    // "prompt is too long: 200001 tokens > 200000 maximum" → gap = 1
+    let err = codec
+        .decode_response(anthropic_error(
+            400,
+            "invalid_request_error",
+            "prompt is too long: 200001 tokens > 200000 maximum",
+        ))
+        .unwrap_err();
+    assert!(
+        matches!(err, LlmError::ContextOverflow { token_gap: 1 }),
+        "gap should be 1; got {err:?}"
+    );
+
+    // Larger gap: 250000 > 200000 → 50000
+    let err2 = codec
+        .decode_response(anthropic_error(
+            400,
+            "invalid_request_error",
+            "prompt is too long: 250000 tokens > 200000 maximum",
+        ))
+        .unwrap_err();
+    assert!(
+        matches!(err2, LlmError::ContextOverflow { token_gap: 50000 }),
+        "gap should be 50000; got {err2:?}"
+    );
+
+    // PTL message without counts → gap = 0
+    let err3 = codec
+        .decode_response(anthropic_error(
+            400,
+            "invalid_request_error",
+            "prompt is too long for this model",
+        ))
+        .unwrap_err();
+    assert!(
+        matches!(err3, LlmError::ContextOverflow { token_gap: 0 }),
+        "gap should be 0 (no counts); got {err3:?}"
+    );
+
+    // request_too_large → gap = 0 (no message to parse)
+    let err4 = codec
+        .decode_response(anthropic_error(413, "request_too_large", "request too large"))
+        .unwrap_err();
+    assert!(
+        matches!(err4, LlmError::ContextOverflow { token_gap: 0 }),
+        "request_too_large gap should be 0; got {err4:?}"
+    );
 }
 
 #[test]

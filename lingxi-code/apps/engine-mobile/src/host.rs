@@ -309,6 +309,7 @@ pub async fn build_mobile_inner(
     // and `StreamingApiClient` (the streaming turn path the mobile transport
     // always drives). Production wires it for both paths; a test may substitute
     // the streaming side via `streaming_override` (plan F3-06).
+    #[allow(deprecated)]
     let provider_adapter = Arc::new(ProviderApiAdapter::new_from_router(registry as Arc<dyn ModelRouter>));
     let api_client: Arc<dyn OrchestratorApiClient> = provider_adapter.clone();
     let streaming_api: Arc<dyn StreamingApiClient> =

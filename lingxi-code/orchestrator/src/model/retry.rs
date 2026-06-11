@@ -295,7 +295,7 @@ pub fn next_step(
         // All other LlmError variants are unconditionally terminal.
         LlmError::Authentication
         | LlmError::PermissionDenied
-        | LlmError::ContextOverflow
+        | LlmError::ContextOverflow { .. }
         | LlmError::QuotaExceeded
         | LlmError::ModelUnavailable
         | LlmError::StreamInterrupted { .. }
@@ -793,7 +793,7 @@ mod next_step_tests {
         let errors = vec![
             LlmError::Authentication,
             LlmError::PermissionDenied,
-            LlmError::ContextOverflow,
+            LlmError::ContextOverflow { token_gap: 0 },
             LlmError::QuotaExceeded,
             LlmError::ModelUnavailable,
             LlmError::StreamInterrupted {
@@ -902,7 +902,7 @@ mod next_step_tests {
         let do_not_retry = vec![
             LlmError::Authentication,
             LlmError::PermissionDenied,
-            LlmError::ContextOverflow,
+            LlmError::ContextOverflow { token_gap: 0 },
             LlmError::QuotaExceeded,
             LlmError::ModelUnavailable,
             LlmError::StreamInterrupted {

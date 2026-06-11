@@ -51,7 +51,7 @@ fn non_retryable_errors_do_not_retry() {
         LlmError::InvalidRequest {
             message: "bad".to_string(),
         },
-        LlmError::ContextOverflow,
+        LlmError::ContextOverflow { token_gap: 0 },
         LlmError::UnsupportedCapability {
             capability: "vision".to_string(),
         },

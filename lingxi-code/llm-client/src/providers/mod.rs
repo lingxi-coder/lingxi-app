@@ -24,7 +24,7 @@ pub(crate) fn map_error_status(
         401 => LlmError::Authentication,
         403 => LlmError::PermissionDenied,
         404 => LlmError::ModelUnavailable,
-        413 => LlmError::ContextOverflow,
+        413 => LlmError::ContextOverflow { token_gap: 0 },
         429 => LlmError::RateLimited {
             retry_after,
             scope: None,

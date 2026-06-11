@@ -623,12 +623,13 @@ async fn call_api_with_ptl_recovery(
     // `ProviderApiAdapter` in Task 6 (the adapter handles the 529 switch
     // internally and emits a `warning` on the output stream there).
 
-    // Map `LlmError::ContextOverflow` to the PTL recovery path;
-    // a non-zero `token_gap` is unknown at this level — use 0 as the sentinel
-    // (the PTL truncation loop is best-effort without an exact gap).
+    // Map `LlmError::ContextOverflow` to the PTL recovery path.
+    // The `token_gap` field carries the actual-minus-limit count parsed from the
+    // provider error message by `llm_client`; the PTL truncator treats `0` as
+    // "unknown" and falls back to its 20% heuristic.
     let token_gap: u64 = match first {
         Ok(resp) => return Ok(PtlCallOutcome::Response(Box::new(resp))),
-        Err(LlmError::ContextOverflow) => 0,
+        Err(LlmError::ContextOverflow { token_gap }) => token_gap,
         Err(other) => return Err(other.into()),
     };
 
@@ -655,8 +656,8 @@ async fn call_api_with_ptl_recovery(
             .await
         {
             Ok(resp) => return Ok(PtlCallOutcome::Response(Box::new(resp))),
-            Err(LlmError::ContextOverflow) => {
-                // token_gap stays 0 — truncation keeps halving the history.
+            Err(LlmError::ContextOverflow { .. }) => {
+                // token_gap not used in the inner loop — truncation keeps halving.
             }
             Err(other) => return Err(other.into()),
         }
@@ -708,7 +709,7 @@ async fn call_api_with_ptl_recovery(
                     .await
                 {
                     Ok(resp) => return Ok(PtlCallOutcome::Response(Box::new(resp))),
-                    Err(LlmError::ContextOverflow) => {}
+                    Err(LlmError::ContextOverflow { .. }) => {}
                     Err(other) => return Err(other.into()),
                 }
             }

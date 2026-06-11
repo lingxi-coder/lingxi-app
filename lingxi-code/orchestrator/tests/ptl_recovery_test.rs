@@ -64,8 +64,8 @@ impl OrchestratorApiClient for PtlMockApi {
     }
 }
 
-fn ptl_err(_token_gap: u64) -> Result<LlmResponse, LlmError> {
-    Err(LlmError::ContextOverflow)
+fn ptl_err(token_gap: u64) -> Result<LlmResponse, LlmError> {
+    Err(LlmError::ContextOverflow { token_gap })
 }
 
 // The `Result` wrap is required: `ok_text` is pushed into the same scripted

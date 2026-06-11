@@ -29,8 +29,14 @@ pub enum LlmError {
     #[error("quota exceeded")]
     QuotaExceeded,
     /// Request exceeded provider/model context limits.
+    ///
+    /// `token_gap` is the actual-minus-limit token gap when the provider
+    /// reported counts in the error message; `0` when unknown.
     #[error("context overflow")]
-    ContextOverflow,
+    ContextOverflow {
+        /// How many tokens over the limit the prompt was, or `0` when unknown.
+        token_gap: u64,
+    },
     /// Requested model is unavailable.
     #[error("model unavailable")]
     ModelUnavailable,

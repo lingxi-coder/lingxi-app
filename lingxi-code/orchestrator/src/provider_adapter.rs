@@ -106,6 +106,7 @@ impl ProviderApiAdapter {
     #[doc(hidden)]
     #[must_use]
     #[allow(clippy::needless_pass_by_value)]
+    #[deprecated(note = "Task 10 replaces router construction; panics at runtime")]
     pub fn new_from_router(_router: Arc<dyn providers::ModelRouter>) -> Self {
         unimplemented!(
             "ProviderApiAdapter::new_from_router is a compile-only bridge; Task 10 replaces \
@@ -210,20 +211,46 @@ impl ProviderApiAdapter {
 
     /// Stable `error_kind` label for `emit_failed`.
     ///
-    /// Labels are locked against `api-client/src/anthropic.rs::error_kind` /
-    /// `status_of` helpers (the plan requires TS-locked strings from api-client).
+    /// Strings are **spec-locked** to the originals from
+    /// `api-client/src/anthropic.rs::error_kind` (`:1144`) to keep telemetry
+    /// dashboards consistent across the api-client and llm-client codepaths.
+    ///
+    /// Mapping table (api-client variant → llm-client variant → label):
+    ///
+    /// | api-client             | LlmError                           | label            |
+    /// |------------------------|------------------------------------|------------------|
+    /// | `Unauthorized`         | `Authentication \| PermissionDenied` | `"unauthorized"` |
+    /// | `Server`               | `ProviderInternal`                 | `"server"`       |
+    /// | `Http`                 | `Transport`                        | `"http"`         |
+    /// | `MalformedStream`      | `StreamInterrupted`                | `"malformed_stream"` |
+    /// | `Overloaded`           | `Overloaded`                       | `"overloaded"`   |
+    /// | `RateLimited`          | `RateLimited`                      | `"rate_limited"` |
+    /// | `PromptTooLong`        | `ContextOverflow`                  | `"prompt_too_long"` |
+    /// | *(llm-client only)*    | `InvalidRequest`                   | `"invalid_request"` |
+    /// | *(llm-client only)*    | `QuotaExceeded`                    | `"quota_exceeded"` |
+    /// | *(llm-client only)*    | `ModelUnavailable`                 | `"model_unavailable"` |
+    /// | *(llm-client only)*    | `CostUnavailable`                  | `"cost_unavailable"` |
+    /// | *(llm-client only)*    | `UnsupportedCapability`            | `"unsupported_capability"` |
     fn error_kind(err: &LlmError) -> &'static str {
         match err {
-            LlmError::Authentication | LlmError::PermissionDenied => "authentication",
-            LlmError::InvalidRequest { .. } => "invalid_request",
-            LlmError::RateLimited { .. } => "rate_limited",
-            LlmError::QuotaExceeded => "quota_exceeded",
-            LlmError::ContextOverflow => "context_overflow",
-            LlmError::ModelUnavailable => "model_unavailable",
-            LlmError::ProviderInternal => "provider_internal",
+            // "unauthorized" — api-client `Unauthorized(_) => "unauthorized"` (:1153)
+            LlmError::Authentication | LlmError::PermissionDenied => "unauthorized",
+            // "server" — api-client `Server { .. } => "server"` (:1157)
+            LlmError::ProviderInternal => "server",
+            // "http" — api-client `Http(_) => "http"` (:1146)
+            LlmError::Transport { .. } => "http",
+            // "malformed_stream" — api-client `MalformedStream(_) => "malformed_stream"` (:1155)
+            LlmError::StreamInterrupted { .. } => "malformed_stream",
+            // "overloaded" — api-client `Overloaded { .. } => "overloaded"` (:1149)
             LlmError::Overloaded => "overloaded",
-            LlmError::Transport { .. } => "transport",
-            LlmError::StreamInterrupted { .. } => "stream_interrupted",
+            // "rate_limited" — api-client `RateLimited { .. } => "rate_limited"` (:1148)
+            LlmError::RateLimited { .. } => "rate_limited",
+            // "prompt_too_long" — api-client `PromptTooLong { .. } => "prompt_too_long"` (:1147)
+            LlmError::ContextOverflow { .. } => "prompt_too_long",
+            // llm-client-only classes — no api-client analogue; use descriptive names.
+            LlmError::InvalidRequest { .. } => "invalid_request",
+            LlmError::QuotaExceeded => "quota_exceeded",
+            LlmError::ModelUnavailable => "model_unavailable",
             LlmError::CostUnavailable { .. } => "cost_unavailable",
             LlmError::UnsupportedCapability { .. } => "unsupported_capability",
         }
@@ -234,7 +261,7 @@ impl ProviderApiAdapter {
     fn status_of(err: &LlmError) -> Option<u16> {
         match err {
             LlmError::Authentication | LlmError::PermissionDenied => Some(401),
-            LlmError::InvalidRequest { .. } | LlmError::ContextOverflow => Some(400),
+            LlmError::InvalidRequest { .. } | LlmError::ContextOverflow { .. } => Some(400),
             LlmError::RateLimited { .. } | LlmError::QuotaExceeded => Some(429),
             LlmError::ModelUnavailable => Some(404),
             LlmError::ProviderInternal => Some(500),
@@ -1192,5 +1219,77 @@ mod tests {
         let before = msgs.clone();
         let out = strip_excess_media(msgs, MAX_MEDIA_PER_REQUEST);
         assert_eq!(out, before);
+    }
+
+    // ── Fix 2: error_kind label-parity test ──────────────────────────────────
+
+    /// Labels must be locked to api-client originals (Fix 2).
+    ///
+    /// Ensures that re-naming a label here triggers a test failure so the
+    /// telemetry schema change is explicit.
+    #[test]
+    fn error_kind_labels_match_api_client_originals() {
+        // api-client: Unauthorized → "unauthorized"
+        assert_eq!(ProviderApiAdapter::error_kind(&LlmError::Authentication), "unauthorized");
+        assert_eq!(ProviderApiAdapter::error_kind(&LlmError::PermissionDenied), "unauthorized");
+        // api-client: Server → "server"
+        assert_eq!(ProviderApiAdapter::error_kind(&LlmError::ProviderInternal), "server");
+        // api-client: Http → "http"
+        assert_eq!(
+            ProviderApiAdapter::error_kind(&LlmError::Transport { message: "t".into() }),
+            "http"
+        );
+        // api-client: MalformedStream → "malformed_stream"
+        assert_eq!(
+            ProviderApiAdapter::error_kind(&LlmError::StreamInterrupted { message: "s".into() }),
+            "malformed_stream"
+        );
+        // api-client: Overloaded → "overloaded"
+        assert_eq!(ProviderApiAdapter::error_kind(&LlmError::Overloaded), "overloaded");
+        // api-client: RateLimited → "rate_limited"
+        assert_eq!(
+            ProviderApiAdapter::error_kind(&LlmError::RateLimited { retry_after: None, scope: None }),
+            "rate_limited"
+        );
+        // api-client: PromptTooLong → "prompt_too_long"
+        assert_eq!(
+            ProviderApiAdapter::error_kind(&LlmError::ContextOverflow { token_gap: 0 }),
+            "prompt_too_long"
+        );
+    }
+
+    /// Fix 1 end-to-end: a fake transport returns a 400 PTL envelope with counts;
+    /// the resulting `LlmError::ContextOverflow` carries the parsed `token_gap`.
+    ///
+    /// This pins the adapter→codec→LlmError path: the adapter decodes the 400
+    /// PTL response through the AnthropicMessagesCodec and surfaces the variant
+    /// with the correct non-zero gap, so the turn-loop's `token_gap` binding is
+    /// non-zero instead of the old `0` sentinel.
+    #[tokio::test]
+    async fn ptl_response_surfaces_context_overflow_with_gap() {
+        // The 400 PTL envelope that Anthropic returns.
+        let ptl_body = serde_json::json!({
+            "type": "error",
+            "error": {
+                "type": "invalid_request_error",
+                "message": "prompt is too long: 210000 tokens > 200000 maximum"
+            }
+        });
+        let transport = FakeTransport::always(ProviderResponse::json(400, ptl_body));
+        let adapter = make_adapter(transport);
+
+        let result = adapter
+            .messages_create("claude-sonnet-4-20250514", None, Vec::new(), Vec::new())
+            .await;
+
+        match result {
+            Err(LlmError::ContextOverflow { token_gap }) => {
+                assert_eq!(
+                    token_gap, 10_000,
+                    "token_gap must be 210000 - 200000 = 10000; got {token_gap}"
+                );
+            }
+            other => panic!("expected ContextOverflow {{ token_gap: 10000 }}, got {other:?}"),
+        }
     }
 }

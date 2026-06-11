@@ -7,9 +7,9 @@
 //! reshape (individual `Arc<dyn Platform>` handles, no god-object) will
 //! eventually slim this surface.
 
+use crate::anthropic_request::AnthropicRequestBuilder;
 use crate::read_file_state::ReadFileStateMap;
 use crate::sandbox_runner::SandboxRunner;
-use api_client::AnthropicProvider;
 use permission::PermissionMode;
 use traits::permission_gate::PermissionGate;
 use sandbox::decision::ProjectTrustLevel;
@@ -74,10 +74,10 @@ pub struct BuiltinToolContext {
     /// HTTP transport for web tools (WebFetch + WebSearch) (M4-03). M1 trait;
     /// tests inject `MockHttpTransport`.
     pub http: Arc<dyn HttpTransport>,
-    /// Anthropic provider for assembling `POST /v1/messages` requests (M3-03).
+    /// Anthropic request builder for assembling `POST /v1/messages` requests.
     /// `WebSearchTool` uses it to build the HTTP request, then attaches a tool
     /// block + custom `anthropic-beta` header.
-    pub provider: Arc<AnthropicProvider>,
+    pub provider: Arc<AnthropicRequestBuilder>,
     /// Model used by `WebSearch` when calling `POST /v1/messages` (M4-03).
     /// Sourced from the session's `coordinator_model` at registration time.
     pub default_model: String,

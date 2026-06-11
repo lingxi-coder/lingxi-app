@@ -34,7 +34,7 @@ use anthropic_oauth::client::ClaudeAiOAuthClient;
 use anthropic_oauth::config::ClaudeAiOAuthConfig;
 use anthropic_oauth::handle::OAuthHandle;
 use anthropic_oauth::{OAuthCredentialProvider, RefreshDriver};
-use api_client::AnthropicProvider;
+use tool_api::AnthropicRequestBuilder;
 use client_adapter::{AdapterPermissionGate, PermissionRequestSink};
 use llm_client::{DefaultLlmClient, Transport};
 use orchestrator::model::user_agent::UserAgentEnv;
@@ -849,7 +849,7 @@ pub async fn build(
     let mut llm_oauth_state: Option<Arc<anthropic_oauth::refresh::AuthState>> = None;
     // WebSearch builds Anthropic `POST /v1/messages` requests via its own
     // provider (server-side web search is Anthropic-only in v1).
-    let tool_provider = Arc::new(AnthropicProvider::new(
+    let tool_provider = Arc::new(AnthropicRequestBuilder::new(
         cfg.api_key.clone(),
         Some(cfg.api_base.clone()),
     ));

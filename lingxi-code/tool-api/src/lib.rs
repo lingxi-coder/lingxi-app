@@ -16,6 +16,7 @@
     clippy::doc_markdown
 )]
 
+pub mod anthropic_request;
 pub mod builtin_context;
 pub mod content_replacement;
 pub mod context;
@@ -31,6 +32,7 @@ pub mod wire;
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;
 
+pub use anthropic_request::AnthropicRequestBuilder;
 pub use builtin_context::BuiltinToolContext;
 pub use content_replacement::ContentReplacementState;
 pub use context::{ToolUseContext, ToolUseOptions};

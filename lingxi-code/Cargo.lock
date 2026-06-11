@@ -5072,7 +5072,6 @@ dependencies = [
 name = "tool-api"
 version = "0.12.0"
 dependencies = [
- "api-client",
  "async-trait",
  "engine",
  "futures",
@@ -5433,7 +5432,6 @@ dependencies = [
 name = "tool-web"
 version = "0.12.0"
 dependencies = [
- "api-client",
  "async-trait",
  "htmd",
  "once_cell",

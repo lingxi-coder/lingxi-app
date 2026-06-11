@@ -33,7 +33,7 @@ use std::sync::Arc;
 use anthropic_oauth::client::ClaudeAiOAuthClient;
 use anthropic_oauth::config::ClaudeAiOAuthConfig;
 use anthropic_oauth::handle::OAuthHandle;
-use api_client::AnthropicProvider;
+use tool_api::AnthropicRequestBuilder;
 use llm_client::{DefaultLlmClient, Transport};
 use orchestrator::model::user_agent::UserAgentEnv;
 use orchestrator::provider_adapter::SubscriberState;
@@ -341,7 +341,7 @@ pub async fn build_mobile_inner(
         streaming_override.unwrap_or(provider_adapter as Arc<dyn StreamingApiClient>);
     // WebSearch builds Anthropic `POST /v1/messages` requests via its own
     // provider (server-side web search is Anthropic-only in v1).
-    let tool_provider = Arc::new(AnthropicProvider::new(
+    let tool_provider = Arc::new(AnthropicRequestBuilder::new(
         cfg.api_key.clone(),
         Some(cfg.api_base.clone()),
     ));

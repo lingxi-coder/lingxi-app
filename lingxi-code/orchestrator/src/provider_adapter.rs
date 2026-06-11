@@ -1248,6 +1248,8 @@ mod tests {
                         },
                     }],
                     pricing: PricingConfig::default(),
+                    signing: None,
+                    azure: None,
                 }],
             })
             .expect("client"),
@@ -1292,6 +1294,8 @@ mod tests {
                         },
                     }],
                     pricing: PricingConfig::default(),
+                    signing: None,
+                    azure: None,
                 }],
             })
             .expect("client"),
@@ -1865,6 +1869,8 @@ mod tests {
                         },
                     }],
                     pricing: PricingConfig::default(),
+                    signing: None,
+                    azure: None,
                 }],
             })
             .expect("client"),
@@ -1950,6 +1956,8 @@ mod tests {
                         capabilities: Capabilities::default(),
                     }],
                     pricing: PricingConfig::default(),
+                    signing: None,
+                    azure: None,
                 }],
             })
             .expect("client"),
@@ -2218,6 +2226,8 @@ mod tests {
                         },
                     ],
                     pricing: PricingConfig::default(),
+                    signing: None,
+                    azure: None,
                 }],
             })
             .expect("client"),
@@ -2680,6 +2690,8 @@ mod tests {
                         },
                     }],
                     pricing: PricingConfig::default(),
+                    signing: None,
+                    azure: None,
                 }],
             })
             .expect("client"),

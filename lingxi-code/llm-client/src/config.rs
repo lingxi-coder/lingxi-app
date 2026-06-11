@@ -11,6 +11,42 @@ pub struct ClientConfig {
     pub providers: Vec<ProviderProfile>,
 }
 
+/// AWS `SigV4` signing region + service for a provider profile.
+///
+/// Required when [`AuthStrategy::AwsSigV4`] is used. The region and service
+/// are needed to build the credential scope string in the `Authorization`
+/// header: `<date>/<region>/<service>/aws4_request`.
+///
+/// Example for Amazon Bedrock in us-east-1:
+/// ```json
+/// { "region": "us-east-1", "service": "bedrock" }
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SigningConfig {
+    /// AWS region (e.g. `"us-east-1"`).
+    pub region: String,
+    /// AWS service name (e.g. `"bedrock"`, `"execute-api"`).
+    pub service: String,
+}
+
+/// Azure `OpenAI` API-version configuration.
+///
+/// Required when [`ProtocolFamily::AzureOpenAi`] is used. The API version is
+/// appended as a query parameter (`?api-version=<api_version>`) per the Azure
+/// `OpenAI` REST specification:
+/// <https://learn.microsoft.com/en-us/azure/ai-services/openai/reference>
+///
+/// Example:
+/// ```json
+/// { "apiVersion": "2024-02-01" }
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AzureConfig {
+    /// Azure `OpenAI` API version string (e.g. `"2024-02-01"`).
+    #[serde(rename = "apiVersion")]
+    pub api_version: String,
+}
+
 /// Provider profile used to build one or more routes.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProviderProfile {
@@ -25,6 +61,11 @@ pub struct ProviderProfile {
     /// is the bare origin (`https://api.anthropic.com`), and
     /// `GeminiGenerateContent` is the versioned root
     /// (`https://generativelanguage.googleapis.com/v1beta`).
+    ///
+    /// For `AzureOpenAi` the base URL should be the resource endpoint without
+    /// the deployment segment, e.g.
+    /// `https://<resource>.openai.azure.com`.  The codec appends
+    /// `/openai/deployments/{model}/chat/completions?api-version=...`.
     pub base_url: String,
     /// Wire protocol family used by this route.
     pub protocol: ProtocolFamily,
@@ -38,6 +79,18 @@ pub struct ProviderProfile {
     /// Pricing behavior for this profile.
     #[serde(default)]
     pub pricing: PricingConfig,
+    /// AWS `SigV4` signing region + service.
+    ///
+    /// Required when `auth = AwsSigV4`.  Missing → `InvalidRequest` at auth
+    /// time (naming the profile and field).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signing: Option<SigningConfig>,
+    /// Azure `OpenAI` API-version configuration.
+    ///
+    /// Required when `protocol = AzureOpenAi`.  Missing → `InvalidRequest` at
+    /// codec-build time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub azure: Option<AzureConfig>,
 }
 
 /// Wire protocol route family.

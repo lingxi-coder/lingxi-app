@@ -104,6 +104,8 @@ fn client(protocol: ProtocolFamily, provider_id: ProviderId, base_url: &str) -> 
                 },
             }],
             pricing: PricingConfig::default(),
+            signing: None,
+            azure: None,
         }],
     })
     .expect("client")

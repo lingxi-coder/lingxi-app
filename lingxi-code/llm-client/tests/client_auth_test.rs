@@ -2,9 +2,9 @@ use std::sync::Arc;
 
 use llm_client::client::DefaultLlmClient;
 use llm_client::{
-    AuthStrategy, Capabilities, ClientConfig, Credential, CredentialConfig, CredentialProvider,
-    CredentialScope, LlmError, LlmRequest, ModelProfile, PricingConfig, ProtocolFamily,
-    ProviderId, ProviderProfile,
+    AuthStrategy, AzureConfig, Capabilities, ClientConfig, Credential, CredentialConfig,
+    CredentialProvider, CredentialScope, LlmError, LlmRequest, ModelProfile, PricingConfig,
+    ProtocolFamily, ProviderId, ProviderProfile,
 };
 use llm_client::BoxFuture;
 
@@ -34,6 +34,8 @@ fn profile(
             },
         }],
         pricing: PricingConfig::default(),
+        signing: None,
+        azure: None,
     }
 }
 
@@ -168,20 +170,140 @@ async fn host_managed_credentials_without_provider_fail_authentication() {
     ));
 }
 
+/// AwsSigV4 with a missing signing config (no region/service) must return
+/// InvalidRequest naming the missing config — even when the credential itself
+/// is loaded successfully.
 #[tokio::test]
-async fn unimplemented_signing_strategies_fail_at_prepare() {
+async fn sigv4_without_signing_config_fails_at_prepare() {
+    #[derive(Debug)]
+    struct SigV4Store;
+    impl CredentialProvider for SigV4Store {
+        fn load<'a>(
+            &'a self,
+            _scope: &'a CredentialScope,
+        ) -> BoxFuture<'a, Result<Credential, LlmError>> {
+            Box::pin(async {
+                Ok(Credential::AwsSigV4 {
+                    access_key_id: "AKIDEXAMPLE".to_string(),
+                    secret_access_key: "secret".to_string(),
+                    session_token: None,
+                })
+            })
+        }
+    }
+
+    // Build a profile with AwsSigV4 auth but NO signing config.
+    let client = DefaultLlmClient::from_config(ClientConfig {
+        providers: vec![ProviderProfile {
+            provider_id: ProviderId::BedrockClaude,
+            profile_name: "p".to_string(),
+            base_url: "https://bedrock-runtime.us-east-1.amazonaws.com".to_string(),
+            // AzureOpenAi would fail at codec build; use AnthropicMessages to
+            // get past codec construction and hit the auth path.
+            protocol: ProtocolFamily::AnthropicMessages,
+            auth: AuthStrategy::AwsSigV4,
+            credential: CredentialConfig::HostManaged { id: "bedrock-key".to_string() },
+            models: vec![ModelProfile {
+                display_model: "p-model".to_string(),
+                request_model: "p-model".to_string(),
+                billing_model: "p-model".to_string(),
+                aliases: vec![],
+                capabilities: Capabilities { streaming: true, tools: true, ..Default::default() },
+            }],
+            pricing: PricingConfig::default(),
+            // No signing config → must fail at prepare() with InvalidRequest.
+            signing: None,
+            azure: None,
+        }],
+    })
+    .expect("client")
+    .with_credential_provider(Arc::new(SigV4Store));
+
+    let err = client.prepare(&LlmRequest::new("p-model")).await.unwrap_err();
+    assert!(
+        matches!(&err, LlmError::InvalidRequest { message } if message.contains("signing")),
+        "expected InvalidRequest about missing signing config, got: {err:?}"
+    );
+}
+
+/// GcpToken auth injects an `Authorization: Bearer` header (reuses BearerAuthenticator).
+#[tokio::test]
+async fn gcp_token_injects_bearer_header() {
+    std::env::set_var("LLM_CLIENT_AUTH_TEST_GCP", "gcp-bearer-token");
     let client = client_with(
-        ProviderId::AnthropicFirstParty,
-        ProtocolFamily::AnthropicMessages,
-        "https://api.anthropic.com",
-        AuthStrategy::AwsSigV4,
-        CredentialConfig::None,
+        ProviderId::Gemini,
+        ProtocolFamily::GeminiGenerateContent,
+        "https://generativelanguage.googleapis.com/v1beta",
+        AuthStrategy::GcpToken,
+        CredentialConfig::Env { var: "LLM_CLIENT_AUTH_TEST_GCP".to_string() },
     );
 
-    assert!(matches!(
-        client.prepare(&LlmRequest::new("p-model")).await.unwrap_err(),
-        LlmError::InvalidRequest { message } if message.contains("AwsSigV4")
-    ));
+    let prepared = client.prepare(&LlmRequest::new("p-model")).await.expect("prepare");
+    assert_eq!(
+        prepared.provider_request.headers.get("Authorization").map(String::as_str),
+        Some("Bearer gcp-bearer-token"),
+        "GcpToken must inject Authorization: Bearer"
+    );
+}
+
+/// AzureToken auth injects an `api-key: <secret>` header.
+#[tokio::test]
+async fn azure_token_injects_api_key_header() {
+    std::env::set_var("LLM_CLIENT_AUTH_TEST_AZURE", "azure-api-key-value");
+
+    // Build an Azure OpenAI profile with AzureToken auth.
+    let client = DefaultLlmClient::from_config(ClientConfig {
+        providers: vec![ProviderProfile {
+            provider_id: ProviderId::OpenAICompatible { name: "azure".to_string() },
+            profile_name: "p".to_string(),
+            base_url: "https://myresource.openai.azure.com".to_string(),
+            protocol: ProtocolFamily::AzureOpenAi,
+            auth: AuthStrategy::AzureToken,
+            credential: CredentialConfig::Env { var: "LLM_CLIENT_AUTH_TEST_AZURE".to_string() },
+            models: vec![ModelProfile {
+                display_model: "p-model".to_string(),
+                request_model: "p-model".to_string(),
+                billing_model: "p-model".to_string(),
+                aliases: vec![],
+                capabilities: Capabilities { streaming: true, tools: true, ..Default::default() },
+            }],
+            pricing: PricingConfig::default(),
+            signing: None,
+            azure: Some(AzureConfig { api_version: "2024-02-01".to_string() }),
+        }],
+    })
+    .expect("client");
+
+    let prepared = client.prepare(&LlmRequest::new("p-model")).await.expect("prepare");
+
+    // api-key header must be present with the secret value.
+    assert_eq!(
+        prepared.provider_request.headers.get("api-key").map(String::as_str),
+        Some("azure-api-key-value"),
+        "AzureToken must inject api-key header"
+    );
+    // Authorization must NOT be present (Azure uses api-key, not Bearer).
+    assert!(
+        !prepared.provider_request.headers.contains_key("Authorization"),
+        "AzureToken must NOT inject Authorization header"
+    );
+    // URL must use the Azure deployment pattern.
+    assert!(
+        prepared.provider_request.url.contains("/openai/deployments/"),
+        "Azure URL must include deployment segment; got: {}",
+        prepared.provider_request.url
+    );
+    assert!(
+        prepared.provider_request.url.contains("api-version=2024-02-01"),
+        "Azure URL must include api-version; got: {}",
+        prepared.provider_request.url
+    );
+    // model key must be ABSENT from the body (deployment is in the URL).
+    assert!(
+        prepared.provider_request.body_json.get("model").is_none(),
+        "Azure request body must not include model key; got: {}",
+        prepared.provider_request.body_json
+    );
 }
 
 #[tokio::test]

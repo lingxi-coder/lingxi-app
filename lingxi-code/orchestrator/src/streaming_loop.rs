@@ -14,7 +14,7 @@ use crate::sse::accumulator::BlockAccumulator;
 use crate::sse::event_router::{dispatch_event, RouterAction};
 use crate::turn_loop::dispatch_tool_uses_tracked;
 use futures::stream::{BoxStream, StreamExt};
-use llm_client::{LlmError, LlmEvent};
+use llm_client::{LlmError, LlmEvent, Usage as LlmUsage};
 use protocol::{ContentBlock, ToolUseId};
 use serde_json::Value;
 use std::sync::Arc;
@@ -52,6 +52,15 @@ pub struct PumpedTurn {
     /// streamed message). `0` if the stream carried no usage. The token-budget
     /// continuation loop accumulates this into `global_turn_tokens`.
     pub output_tokens: u64,
+    /// Full usage snapshot for billing. The `message_delta` usage is
+    /// authoritative when present (it includes both input + output tokens
+    /// as the final cumulative snapshot). Falls back to `message_start`
+    /// usage when `message_delta` carried no usage. `None` only when the
+    /// stream carried no usage at all (unusual; treated as zero-cost).
+    ///
+    /// Used by `try_run_turn_streaming` to record into `CostTracker`
+    /// (mirrors the non-streaming path in `turn_loop.rs`).
+    pub usage: Option<LlmUsage>,
 }
 
 /// Consume the given stream to completion, routing events through the
@@ -73,9 +82,17 @@ pub async fn pump_stream(
 ) -> Result<PumpedTurn, OrchestratorError> {
     let mut acc = BlockAccumulator::new();
     let mut turn = PumpedTurn::default();
+    // Capture the MessageStart usage as the fallback billing source for
+    // input tokens, in case MessageDelta carries no usage (rare). The
+    // MessageDelta usage supersedes this when present.
+    let mut message_start_usage: Option<LlmUsage> = None;
 
     while let Some(item) = stream.next().await {
         let event = item.map_err(OrchestratorError::Streaming)?;
+        // Capture MessageStart usage before dispatching (dispatch consumes the event).
+        if let LlmEvent::MessageStart { ref response } = event {
+            message_start_usage = Some(response.usage.clone());
+        }
         let action = dispatch_event(event, &mut acc, output)
             .await
             .map_err(|e| OrchestratorError::StreamingProtocol(e.to_string()))?;
@@ -90,16 +107,22 @@ pub async fn pump_stream(
             RouterAction::RecordStopReason {
                 stop_reason,
                 output_tokens,
+                usage,
             } => {
                 turn.stop_reason = Some(stop_reason);
                 // The final delta's usage supersedes any earlier snapshot.
                 if output_tokens > 0 {
                     turn.output_tokens = output_tokens;
                 }
+                // BILLING: take the MessageDelta usage as authoritative; fall
+                // back to MessageStart if absent (preserves input-token billing
+                // even when the delta carries no snapshot).
+                turn.usage = usage.or_else(|| message_start_usage.clone());
             }
-            RouterAction::RecordUsage { output_tokens } => {
+            RouterAction::RecordUsage { output_tokens, usage } => {
                 // Usage-only delta (no stop_reason yet): keep the latest count.
                 turn.output_tokens = output_tokens;
+                turn.usage = usage.or_else(|| message_start_usage.clone());
             }
             RouterAction::EndOfStream => {
                 return Ok(turn);

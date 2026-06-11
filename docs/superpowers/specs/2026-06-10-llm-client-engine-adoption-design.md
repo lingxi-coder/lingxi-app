@@ -21,10 +21,11 @@ Status: approved (user), revision 2.6 — future-work batch 1 COMPLETE.
   Remaining future work: wire `routing.fallback`/`routing.retry` to the fallback/retry
   drivers; `AwsSigV4`/`GcpToken`/`AzureToken` auth signing; streaming error-path headers
   (reqwest error arm carries none); per-profile pricing overrides from settings.
-- 2.6 — Future-work batch 1 COMPLETE (see §Future work — batch 1 detail below). Remaining
-  (batch 2 candidates): Vertex/Bedrock codecs + AWS event-stream framing, OpenAI document
-  parts, Gemini File API ImageUrl, fallback chains beyond chain[0], rate-limit TUI surface,
-  streaming-path CostTracker recording (real gap — see streaming-cost evidence note below).
+- 2.6 — Future-work batch 1 COMPLETE (see §Future work — batch 1 detail below). Also fixed
+  in batch 1: streaming-path CostTracker recording (was a real gap — now wired; see
+  §Streaming-cost evidence below). Remaining (batch 2 candidates): Vertex/Bedrock codecs +
+  AWS event-stream framing, OpenAI document parts, Gemini File API ImageUrl, fallback chains
+  beyond chain[0], rate-limit TUI surface.
 
 ## Goal
 
@@ -314,37 +315,40 @@ parse time.
   from the deployment URL). The settings type `"azure-openai"` maps to this
   codec.
 
-### Streaming-cost evidence (Job 1 conclusion, rev 2.6)
+### Streaming-cost evidence + fix (batch 1, rev 2.6)
 
-**Verdict: real gap — streaming turns are NEVER billed to `CostTracker`.**
+**Original verdict (pre-fix): real gap — streaming turns were NEVER billed to `CostTracker`.**
 
-Evidence:
+**Fixed in batch 1** (`fix(orchestrator): record streaming-turn usage in CostTracker`).
+
+Evidence (pre-fix):
 - `orchestrator/src/turn_loop.rs:381` — sole call site of
   `CostTracker::record_api_response_v2` + `api_calls_recorded.fetch_add`; this
-  is the **non-streaming** (batched) path only, inside `execute_one_turn`.
+  was the **non-streaming** (batched) path only, inside `execute_one_turn`.
 - `orchestrator/src/conversation.rs:1765` — `try_run_turn_streaming` loop
-  calls `pump_stream` then processes `PumpedTurn`, but contains **no**
-  `record_api_response_v2` call and never increments `api_calls_recorded`
-  (grep returns zero matches for either identifier in `conversation.rs`
-  outside of field declarations at lines 311/424/924).
-- `orchestrator/src/streaming_loop.rs:54` — `PumpedTurn.output_tokens` carries
+  called `pump_stream` then processed `PumpedTurn`, but contained **no**
+  `record_api_response_v2` call and never incremented `api_calls_recorded`.
+- `orchestrator/src/streaming_loop.rs:54` — `PumpedTurn.output_tokens` carried
   only the final `MessageDelta` output-token count. The full `LlmUsage`
-  (input tokens + cache read + cache write) is consumed by
-  `emit_usage_if_present` at `event_router.rs:170-171` and discarded; it is
-  not stored in `PumpedTurn`.
-- Secondary gap: `LlmResponse.cost` is populated by the estimator in
-  `ProviderApiAdapter::decode_response` (non-streaming path). The streaming
-  path never passes through `decode_response`, so streaming turns also lack
-  the `LlmResponse.cost` estimate on the response object.
+  (input tokens + cache read + cache write) was consumed by
+  `emit_usage_if_present` at `event_router.rs:170-171` and discarded.
 
-**Batch 2 work item**: wire `record_api_response_v2` in
-`try_run_turn_streaming` after each `pump_stream` call. Requires: (a) storing
-the full `LlmUsage` in `PumpedTurn` (add field; populate from the
-`MessageDelta` usage in `event_router.rs:162-182`); (b) calling
-`record_api_response_v2` + `api_calls_recorded.fetch_add` after `pump_stream`
-returns in `conversation.rs`, mirroring `turn_loop.rs:375-393`. The non-stream
-fallback path (`llm_response_to_pumped_turn`, `conversation.rs:2590`) already
-has the full `LlmResponse.usage`; it should call `record_api_response_v2`
-there too. Test: add a streaming-turn fixture to
-`cost/tests/cost_pipeline_integration_test.rs` asserting that
-`snapshot_cost_real()` shows non-zero usage after a streaming turn.
+Fix implemented (TDD):
+- `PumpedTurn` gained `usage: Option<LlmUsage>` — populated from the final
+  `MessageDelta` usage (authoritative) or falls back to `MessageStart` usage
+  (input tokens) when the delta carries no snapshot.
+- `RouterAction::RecordStopReason` and `RecordUsage` gained `usage: Option<Usage>`
+  (cloned before `emit_usage_if_present` consumes it).
+- `pump_stream` captures `MessageStart.usage` as fallback; sets `turn.usage`
+  on each `RecordStopReason`/`RecordUsage` action.
+- `try_run_turn_streaming` in `conversation.rs` calls `record_api_response_v2`
+  + `api_calls_recorded.fetch_add(1)` after every successful `pump_stream`,
+  mirroring `turn_loop.rs:375-393` with `Duration::ZERO` / `retries=0` / no bus.
+- The midstream-fallback path (`llm_response_to_pumped_turn`) sets
+  `usage: Some(resp.usage.clone())` so the same billing block records it.
+- Two new tests in `orchestrator/tests/streaming_cost_recording_test.rs`:
+  `streaming_turn_records_cost_in_tracker` (17_500_000 nano-USD for 1000 input +
+  500 output on claude-opus-4-6) and `streaming_turn_increments_api_calls_recorded`.
+- Remaining secondary gap (batch 2): `LlmResponse.cost` on the streaming path
+  is still `None` (streaming response never passes through `decode_response`);
+  this is cosmetic only now that `CostTracker` records the real usage.

@@ -466,13 +466,12 @@ impl ProviderApiAdapter {
     /// on each attempt so a fresh `PreparedLlmCall` (with correct auth headers) is
     /// sent even after a previous attempt fails.
     ///
-    /// **Streaming rate-limit headers (prereqs item 11):** `execute_stream` does
-    /// not surface response headers from the streaming path via the current
-    /// `Transport::open_stream` signature (headers are only available inside
-    /// `StreamingResponse` which `execute_stream` consumes internally). Rate-limit
-    /// header tracking on the streaming path is therefore best-effort / not
-    /// implemented in 3a.  An additive `stream_sse` metadata return on
-    /// `traits::HttpTransport` is the preferred follow-up.
+    /// **Streaming rate-limit headers (3c-T1 closed):** `Transport::open_stream`
+    /// now returns real `StreamingResponse{status, headers}` via the additive
+    /// `stream_sse_with_meta` path added in plan 3c.  The connect-phase ≥400
+    /// branch below reads `streaming.headers` and calls `resolve_retry_after`
+    /// just as the non-stream path does, so 429+`retry-after` delays are
+    /// honoured on the streaming path.
     #[allow(clippy::too_many_lines)]
     async fn drive_stream(
         &self,
@@ -515,6 +514,7 @@ impl ProviderApiAdapter {
                 Ok(streaming) => {
                     // Connect-phase status ≥ 400: drain and decode as error.
                     if streaming.status >= 400 {
+                        let response_headers = streaming.headers;
                         let mut frames = streaming.frames;
                         let mut body = Vec::new();
                         loop {
@@ -528,7 +528,7 @@ impl ProviderApiAdapter {
                             serde_json::from_slice(&body).unwrap_or(serde_json::Value::Null);
                         let err_response = llm_client::ProviderResponse {
                             status: streaming.status,
-                            headers: streaming.headers,
+                            headers: response_headers.clone(),
                             body_json,
                             request_id: None,
                         };
@@ -537,7 +537,21 @@ impl ProviderApiAdapter {
                             Ok(_) => LlmError::ProviderInternal,
                         };
 
-                        let step = next_step(&mut state, &ctl, &decode_err, thinking_budget);
+                        // Mirror the non-stream path: for 429s, resolve the
+                        // actual retry delay from the real response headers
+                        // (retry-after / anthropic-ratelimit-*).  Empty headers
+                        // fall through to the 1 s fallback inside
+                        // `resolve_retry_after`.
+                        let effective_err = if let LlmError::RateLimited { .. } = &decode_err {
+                            LlmError::RateLimited {
+                                retry_after: Some(Self::resolve_retry_after(&response_headers)),
+                                scope: None,
+                            }
+                        } else {
+                            decode_err.clone()
+                        };
+
+                        let step = next_step(&mut state, &ctl, &effective_err, thinking_budget);
                         match step {
                             DriveStep::RetryAfter(delay) => {
                                 tokio::time::sleep(delay).await;
@@ -1529,6 +1543,157 @@ mod tests {
             orch_err.to_string(),
             REPEATED_529_ERROR_MESSAGE,
             "Display must equal the byte-locked copy"
+        );
+    }
+
+    // ── 3c-T1: streaming 429 + retry-after header drives correct delay ────────
+
+    /// Empty frame-stream for scripted streaming errors.
+    struct EmptyFrames;
+    impl llm_client::FrameStream for EmptyFrames {
+        fn next_frame(
+            &mut self,
+        ) -> BoxFuture<'_, Result<Option<llm_client::RawStreamFrame>, LlmError>> {
+            Box::pin(async { Ok(None) })
+        }
+    }
+
+    /// A Transport that sequences execute responses AND can return scripted
+    /// streaming (`open_stream`) responses.
+    struct FakeStreamTransport {
+        /// Sequence of `open_stream` results.
+        stream_resps: Mutex<Vec<FakeStreamResp>>,
+        stream_call_count: Mutex<usize>,
+    }
+
+    #[allow(dead_code)]
+    enum FakeStreamResp {
+        /// Streaming response with given status + headers + no frames.
+        Status {
+            status: u16,
+            headers: BTreeMap<String, String>,
+        },
+        /// Terminal transport error (e.g. connection failure).
+        Err(LlmError),
+    }
+
+    impl FakeStreamTransport {
+        fn sequence(stream_resps: Vec<FakeStreamResp>) -> Arc<Self> {
+            Arc::new(Self {
+                stream_resps: Mutex::new(stream_resps),
+                stream_call_count: Mutex::new(0),
+            })
+        }
+
+        fn stream_call_count(&self) -> usize {
+            *self.stream_call_count.lock().unwrap()
+        }
+    }
+
+    impl Transport for FakeStreamTransport {
+        fn execute<'a>(
+            &'a self,
+            _request: &'a ProviderRequest,
+        ) -> BoxFuture<'a, Result<ProviderResponse, LlmError>> {
+            Box::pin(async move {
+                Err(LlmError::Transport {
+                    message: "execute not scripted in FakeStreamTransport".to_string(),
+                })
+            })
+        }
+
+        fn open_stream<'a>(
+            &'a self,
+            _request: &'a ProviderRequest,
+        ) -> BoxFuture<'a, Result<StreamingResponse, LlmError>> {
+            let mut count = self.stream_call_count.lock().unwrap();
+            let idx = (*count).min(
+                self.stream_resps
+                    .lock()
+                    .unwrap()
+                    .len()
+                    .saturating_sub(1),
+            );
+            *count += 1;
+            drop(count);
+            let resp = {
+                let resps = self.stream_resps.lock().unwrap();
+                match &resps[idx] {
+                    FakeStreamResp::Status { status, headers } => {
+                        Ok(StreamingResponse {
+                            status: *status,
+                            headers: headers.clone(),
+                            frames: Box::new(EmptyFrames),
+                        })
+                    }
+                    FakeStreamResp::Err(e) => Err(e.clone()),
+                }
+            };
+            Box::pin(async move { resp })
+        }
+    }
+
+    /// 3c-T1 pin: a connect-phase 429 with `retry-after: 7` on the streaming
+    /// path must drive a 7 s `RetryAfter` delay (not the 1 s fallback).
+    ///
+    /// We use `tokio::time::pause()` so the test completes instantly; the
+    /// `drive_stream` loop sleeps via `tokio::time::sleep` which respects the
+    /// paused clock.  After the first 429 the test advances time past 7 s and
+    /// the second (200) attempt is served, confirming the delay was honoured.
+    #[tokio::test(start_paused = true)]
+    async fn streaming_429_with_retry_after_header_drives_7s_not_1s() {
+        // Attempt 1: 429 with retry-after: 7.
+        let mut headers_429 = BTreeMap::new();
+        headers_429.insert("retry-after".to_string(), "7".to_string());
+
+        // Attempt 2: 200 with an empty body (the codec will produce
+        // StreamInterrupted on an empty frame-stream, but that is terminal and
+        // proves two calls were made — what we care about).
+        let stream_transport = FakeStreamTransport::sequence(vec![
+            FakeStreamResp::Status {
+                status: 429,
+                headers: headers_429,
+            },
+            FakeStreamResp::Status {
+                status: 200,
+                headers: BTreeMap::new(),
+            },
+        ]);
+
+        let adapter = make_adapter(Arc::clone(&stream_transport) as Arc<dyn Transport>);
+
+        // Record the instant before calling drive_stream.
+        let before = tokio::time::Instant::now();
+
+        // drive_stream is private; call it through the StreamingApiClient trait.
+        // The result will be an error (empty frame-stream on attempt 2) or Ok
+        // depending on the codec — we only care that two open_stream calls were
+        // made and that the elapsed time is ≥ 7 s (the retry-after delay).
+        let _result = StreamingApiClient::stream(
+            &adapter,
+            "claude-sonnet-4-20250514",
+            None,
+            Vec::new(),
+            Vec::new(),
+        )
+        .await;
+
+        let elapsed = before.elapsed();
+        // The sleep was for exactly 7 s (retry-after value).  With time paused
+        // the sleep advances the mock clock, so elapsed reports ≥ 7 s.
+        assert!(
+            elapsed >= std::time::Duration::from_secs(7),
+            "retry-after:7 must drive a ≥7 s delay; elapsed={elapsed:?}"
+        );
+        assert!(
+            elapsed < std::time::Duration::from_secs(8),
+            "delay must be close to 7 s (not jittered / not 1 s fallback); elapsed={elapsed:?}"
+        );
+        // Two open_stream calls: 429 then 200.
+        assert_eq!(
+            stream_transport.stream_call_count(),
+            2,
+            "must retry exactly once (429 → 200)"
         );
     }
 }

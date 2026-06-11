@@ -174,7 +174,8 @@ impl TeamRegistry {
     /// Non-terminal = `Idle` | `Working { .. }` | `AwaitingMessage`.
     /// Terminal (excluded) = `Completed` | `Failed { .. }` | `Killed`.
     pub async fn active_worker_count(&self) -> u32 {
-        self.workers
+        let count = self
+            .workers
             .read()
             .await
             .values()
@@ -186,7 +187,8 @@ impl TeamRegistry {
                         | WorkerStatus::AwaitingMessage
                 )
             })
-            .count() as u32
+            .count();
+        u32::try_from(count).unwrap_or(u32::MAX)
     }
 }
 

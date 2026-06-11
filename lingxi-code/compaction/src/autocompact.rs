@@ -18,7 +18,6 @@
 //! the divergence note on [`Autocompactor::compact`].
 
 use crate::thresholds::MAX_OUTPUT_TOKENS_FOR_SUMMARY;
-use api_client::ApiError;
 use cost::Usage;
 use protocol::ConversationMessage;
 use sidequery::{CacheSafeParamsSlot, ForkedAgentRequest, ForkedAgentRunner, QuerySource};
@@ -45,7 +44,7 @@ pub struct CompactionResult {
 pub enum CompactionError {
     /// Underlying API call failed.
     #[error(transparent)]
-    Api(#[from] ApiError),
+    Api(#[from] llm_client::LlmError),
     /// Exhausted PTL retries without success.
     #[error("max retries exceeded")]
     MaxRetriesExceeded,
@@ -204,7 +203,7 @@ impl Autocompactor {
                 // Not a prompt-too-long summary → accept it (TS `break`).
                 if !result
                     .final_text
-                    .starts_with(api_client::PROMPT_TOO_LONG_ERROR_MESSAGE)
+                    .starts_with(crate::prompt_too_long::PROMPT_TOO_LONG_ERROR_MESSAGE)
                 {
                     break result;
                 }
@@ -218,7 +217,7 @@ impl Autocompactor {
                 let truncated = if ptl_attempts <= crate::thresholds::MAX_PTL_RETRIES {
                     crate::ptl_retry::truncate_head_for_ptl_retry(
                         cache_params.fork_context_messages.clone(),
-                        api_client::prompt_too_long_token_gap(&result.final_text),
+                        crate::prompt_too_long::prompt_too_long_token_gap(&result.final_text),
                     )
                 } else {
                     None

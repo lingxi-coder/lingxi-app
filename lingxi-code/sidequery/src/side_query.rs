@@ -10,7 +10,6 @@
 //! [`crate::forked_agent::ForkedAgentRunner`] instead.
 
 use crate::purposes::QuerySource;
-use api_client::ApiError;
 use async_trait::async_trait;
 use protocol::ConversationMessage;
 use serde::{Deserialize, Serialize};
@@ -68,7 +67,7 @@ pub struct SideQueryResponse {
 pub enum SideQueryError {
     /// Underlying API call failed (transport, 4xx/5xx, malformed stream).
     #[error(transparent)]
-    Api(#[from] ApiError),
+    Api(#[from] llm_client::LlmError),
     /// Provider returned a response we could not decode into a
     /// [`SideQueryResponse`].
     #[error("invalid response: {0}")]

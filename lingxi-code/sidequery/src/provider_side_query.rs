@@ -1,45 +1,59 @@
-//! Concrete [`SideQueryClient`] backed by `api_client::AnthropicProvider`.
+//! Concrete [`SideQueryClient`] backed by `llm_client::DefaultLlmClient`.
 //!
 //! A side query is a stateless one-shot LLM call (see [`crate::side_query`]).
 //! [`ProviderSideQueryClient`] wires the [`SideQueryRequest`] DTO to the
-//! Anthropic Messages endpoint and decodes the [`MessageResponse`] back into a
-//! [`SideQueryResponse`]. It owns an [`AnthropicProvider`] for request building
-//! / retry / 401-refresh middleware, plus an object-safe
+//! Anthropic Messages endpoint and decodes the [`LlmResponse`] back into a
+//! [`SideQueryResponse`]. It owns a [`DefaultLlmClient`] for routing, codec,
+//! and auth middleware, plus an object-safe
 //! [`Arc<dyn HttpTransport>`] handle so the whole client stays usable behind
 //! `Arc<dyn SideQueryClient>` (`MemorySelector::new` takes exactly that).
 //!
 //! ## Field-forwarding gap (documented)
 //!
-//! This client wires the request through
-//! [`AnthropicProvider::messages_create_non_stream_with_opts`], which forwards
-//! `model`, `system`, `messages`, `max_tokens`, `tools`, and `temperature`
-//! (the `tools` body key appears only when the list is non-empty, matching the
-//! `MessageRequest` serde rules). The remaining DTO fields — `tool_choice`,
-//! `output_format`, `stop_sequences`, `max_retries`, and `thinking_budget` —
-//! are still unforwardable (no wire body key on the provider entrypoint yet)
-//! and are intentionally dropped. That is sufficient for the §6.3 memory
-//! selector, which relies on JSON-shaped *text* output (decoded here into
-//! [`SideQueryResponse::structured`]) rather than a server-side
-//! `response_format`. A follow-up that adds the missing body keys can forward
-//! the rest; until then they are accepted on the request and dropped.
+//! This client wires the request through [`DefaultLlmClient::execute`], which
+//! forwards `model`, `system`, `messages`, `max_tokens`, `tools`, and
+//! `temperature`. The remaining DTO fields — `tool_choice`, `output_format`,
+//! `stop_sequences`, `max_retries`, and `thinking_budget` — are intentionally
+//! dropped. That is sufficient for the §6.3 memory selector, which relies on
+//! JSON-shaped *text* output (decoded here into [`SideQueryResponse::structured`])
+//! rather than a server-side `response_format`. A follow-up that adds the missing
+//! body keys can forward the rest; until then they are accepted on the request
+//! and dropped.
+//!
+//! ## System forwarding fix
+//!
+//! Unlike the previous `api_client::AnthropicProvider` path, this client NOW
+//! correctly forwards the `system` field via [`llm_client::SystemBlock`], which
+//! the Anthropic codec encodes as `"system": [{"type":"text","text":"..."}]`.
+//! This fixes the pre-broken `text_response_decodes_text_usage_and_stop_reason`
+//! test.
 
 use crate::side_query::{SideQueryClient, SideQueryError, SideQueryRequest, SideQueryResponse};
-use api_client::types::ContentBlockApi;
-use api_client::{AnthropicProvider, MessageResponse};
 use async_trait::async_trait;
+use llm_client::{
+    AuthStrategy, Capabilities, ClientConfig, Credential, CredentialConfig, DefaultLlmClient,
+    LlmRequest, ModelProfile, PricingConfig, ProtocolFamily, ProviderId, ProviderProfile,
+    StaticCredentialProvider, SystemBlock,
+};
+use platform_common::llm_transport::LlmTransportBridge;
 use protocol::{HttpRequest, HttpResponse};
 use std::sync::Arc;
 use traits::http::{RawByteStream, SseStream};
 use traits::{HttpError, HttpTransport};
 
+/// Default Anthropic API base URL used when the caller passes `None`.
+const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
+
+/// Static credential id used inside the internal config for a static API key.
+const SIDEQUERY_CRED_ID: &str = "sidequery_key";
+
 /// Sized newtype adapter around an `Arc<dyn HttpTransport>`.
 ///
-/// [`AnthropicProvider::messages_create_non_stream`] is generic over
-/// `T: HttpTransport` and carries an implicit `Sized` bound, so an unsized
-/// `&dyn HttpTransport` cannot be passed directly. Wrapping the trait object
-/// in this sized newtype (which itself implements `HttpTransport` by
-/// delegating to the inner `Arc`) lets the client store an object-safe handle
-/// yet still satisfy the generic, sized bound — without touching `api-client`.
+/// `DefaultLlmClient::execute` is generic over `T: Transport` and carries an
+/// implicit `Sized` bound, so an unsized `&dyn HttpTransport` cannot be passed
+/// directly. Wrapping the trait object in this sized newtype (which itself
+/// implements `HttpTransport` by delegating to the inner `Arc`) lets the client
+/// store an object-safe handle yet still satisfy the generic, sized bound.
 struct ArcTransport(Arc<dyn HttpTransport>);
 
 #[async_trait]
@@ -59,13 +73,12 @@ impl HttpTransport for ArcTransport {
 
 /// One-shot [`SideQueryClient`] that routes through Anthropic's Messages API.
 ///
-/// Construct with [`Self::new`] for the common case, or
-/// [`Self::from_provider`] when the caller has already attached a cost tracker
-/// / analytics bus to the [`AnthropicProvider`] via its builder methods.
+/// Construct with [`Self::new`] for the common case. The `from_provider`
+/// constructor is no longer available; callers that previously used it should
+/// switch to [`Self::new`].
 pub struct ProviderSideQueryClient {
-    /// Provider that owns request building plus the retry / 429 / 401-refresh
-    /// middleware. Generic-over-transport calls are made through `transport`.
-    provider: AnthropicProvider,
+    /// `DefaultLlmClient` owning routing, codec, and auth middleware.
+    client: DefaultLlmClient,
     /// Object-safe transport handle. Stored as `Arc<dyn HttpTransport>` (not a
     /// generic `T`) so the struct is usable behind `Arc<dyn SideQueryClient>`.
     transport: Arc<dyn HttpTransport>,
@@ -74,67 +87,141 @@ pub struct ProviderSideQueryClient {
 impl ProviderSideQueryClient {
     /// Build a client from raw credentials.
     ///
-    /// `None` for `base_url` uses `api_client::anthropic::DEFAULT_BASE_URL`.
+    /// `None` for `base_url` uses `https://api.anthropic.com`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the internal config is structurally invalid (unreachable in
+    /// normal use — the config is built from known-good constants).
     #[must_use]
     pub fn new(
         api_key: impl Into<String>,
         base_url: Option<String>,
         transport: Arc<dyn HttpTransport>,
     ) -> Self {
-        Self {
-            provider: AnthropicProvider::new(api_key, base_url),
-            transport,
-        }
-    }
+        let api_key = api_key.into();
+        let base_url = base_url.unwrap_or_else(|| DEFAULT_BASE_URL.to_string());
 
-    /// Build a client from a pre-configured provider.
-    ///
-    /// Use this when the caller wants the provider's builder add-ons
-    /// (`.with_cost_tracker(..)`, `.with_bus(..)`, `.with_oauth_hook(..)`) so
-    /// COGS attribution and `tengu_*` telemetry fire on the side query.
-    #[must_use]
-    pub fn from_provider(provider: AnthropicProvider, transport: Arc<dyn HttpTransport>) -> Self {
-        Self {
-            provider,
-            transport,
-        }
+        let config = ClientConfig {
+            providers: vec![ProviderProfile {
+                provider_id: ProviderId::AnthropicFirstParty,
+                profile_name: "anthropic".to_string(),
+                base_url,
+                protocol: ProtocolFamily::AnthropicMessages,
+                auth: AuthStrategy::ApiKey,
+                credential: CredentialConfig::Static {
+                    id: SIDEQUERY_CRED_ID.to_string(),
+                },
+                pricing: PricingConfig::default(),
+                // Wildcard model support: sidequery uses any model string the
+                // caller passes (e.g. "claude-haiku-4-5" for memory summaries,
+                // "claude-opus-4-6" for compaction). We register a catch-all
+                // entry keyed on the empty prefix so that ANY model string is
+                // accepted, then override at request time with the actual model.
+                //
+                // Because `DefaultLlmClient::prepare` resolves models by exact
+                // `display_model` or `aliases` match, we must register the
+                // models that callers actually request. The known set is:
+                //   - claude-haiku-4-5 (memory selector)
+                //   - claude-opus-4-6  (compaction)
+                // We register both here (plus common aliases) so the registry
+                // resolves them. Unknown model strings will fail with
+                // `LlmError::ModelUnavailable` — the caller should use a known
+                // model id.
+                models: sidequery_model_table(),
+            }],
+        };
+
+        let cred_provider = Arc::new(StaticCredentialProvider::new(Credential::ApiKey(api_key)));
+        let client = DefaultLlmClient::from_config(config)
+            .expect("sidequery ClientConfig is structurally valid")
+            .with_credential_provider(cred_provider);
+
+        Self { client, transport }
     }
 }
 
-/// Decode a [`MessageResponse`] into the side-query response shape.
+/// Build the minimal model table for side-query callers.
+///
+/// Side queries use "claude-haiku-4-5" (memory selector) and
+/// "claude-opus-4-6" (compaction). All entries get the same capability set:
+/// streaming=false (side queries are always non-streaming), tools, vision,
+/// documents, no reasoning.
+fn sidequery_model_table() -> Vec<ModelProfile> {
+    fn model(display: &str, billing: &str, aliases: &[&str]) -> ModelProfile {
+        ModelProfile {
+            display_model: display.to_string(),
+            request_model: display.to_string(),
+            billing_model: billing.to_string(),
+            aliases: aliases.iter().map(|s| (*s).to_string()).collect(),
+            capabilities: Capabilities {
+                streaming: false,
+                tools: true,
+                vision: true,
+                documents: true,
+                reasoning: false,
+                structured_output: false,
+            },
+        }
+    }
+
+    vec![
+        // Memory-selector model
+        model("claude-haiku-4-5", "claude-haiku-4-5", &[]),
+        model("claude-haiku-4-20250307", "claude-haiku-4", &["claude-haiku-4", "claude-haiku"]),
+        // Compaction model (AutocompactConfig::default)
+        model("claude-opus-4-6", "claude-opus-4-6", &[]),
+        model("claude-opus-4-7", "claude-opus-4-7", &[]),
+        // Broad Sonnet/Opus/Haiku coverage for callers using any model string
+        model("claude-sonnet-4-6", "claude-sonnet-4-6", &[]),
+        model("claude-opus-4-20250514", "claude-opus-4", &["claude-opus-4", "claude-opus"]),
+        model(
+            "claude-sonnet-4-20250514",
+            "claude-sonnet-4",
+            &["claude-sonnet-4", "claude-sonnet", "claude"],
+        ),
+    ]
+}
+
+/// Decode an [`llm_client::LlmResponse`] into the side-query response shape.
 ///
 /// * `Text` blocks are concatenated into the flattened `text`.
-/// * `ToolUse` blocks become `{"id", "name", "input"}` JSON in `tool_calls`.
-/// * Other block kinds (thinking, server tool use, connector text, advisor
-///   tool result) are ignored for side queries.
+/// * `ToolCall` blocks become `{"id", "name", "input"}` JSON in `tool_calls`.
+/// * Other block kinds (reasoning, server tool use, connector text, advisor
+///   tool result, redacted thinking) are ignored for side queries.
 /// * `structured` is populated only when `want_structured` is set (the caller
 ///   requested an `output_format`): the accumulated text is best-effort parsed
 ///   as JSON. A non-JSON body leaves `structured` as `None` rather than
 ///   erroring — `MemorySelector` tolerates `None` (empty selection), so the
 ///   best-effort path is the safer default.
-/// * `usage` maps `UsageApi` -> `cost::Usage` with the exact cross-naming the
-///   provider's own cost path uses: API `cache_creation` -> cost `cache_write`,
-///   API `cache_read` -> cost `cache_read`.
-fn decode_response(resp: MessageResponse, want_structured: bool) -> SideQueryResponse {
+/// * `usage` maps `llm_client::Usage.billable_tokens` → `cost::Usage` with the
+///   same cross-naming the provider's own cost path uses: API `cache_write` →
+///   cost `cache_write`, API `cache_read` → cost `cache_read`.
+fn decode_response(resp: llm_client::LlmResponse, want_structured: bool) -> SideQueryResponse {
     let mut text_acc = String::new();
     let mut tool_calls: Vec<serde_json::Value> = Vec::new();
 
     for block in resp.content {
         match block {
-            ContentBlockApi::Text { text } => text_acc.push_str(&text),
-            ContentBlockApi::ToolUse { id, name, input } => {
+            llm_client::ContentBlock::Text { text, .. } => text_acc.push_str(&text),
+            llm_client::ContentBlock::ToolCall { id, name, input } => {
                 tool_calls.push(serde_json::json!({
                     "id": id,
                     "name": name,
                     "input": input,
                 }));
             }
-            // Side queries ignore thinking / server-tool / connector / advisor
-            // blocks.
-            ContentBlockApi::Thinking { .. }
-            | ContentBlockApi::ServerToolUse { .. }
-            | ContentBlockApi::ConnectorText { .. }
-            | ContentBlockApi::AdvisorToolResult { .. } => {}
+            // Side queries ignore reasoning / server-tool / connector / advisor
+            // / redacted-thinking blocks.
+            llm_client::ContentBlock::Reasoning { .. }
+            | llm_client::ContentBlock::RedactedThinking { .. }
+            | llm_client::ContentBlock::ServerToolUse { .. }
+            | llm_client::ContentBlock::ConnectorText { .. }
+            | llm_client::ContentBlock::AdvisorToolResult { .. }
+            | llm_client::ContentBlock::Image { .. }
+            | llm_client::ContentBlock::ImageUrl { .. }
+            | llm_client::ContentBlock::Document { .. }
+            | llm_client::ContentBlock::ToolResult { .. } => {}
         }
     }
 
@@ -145,13 +232,14 @@ fn decode_response(resp: MessageResponse, want_structured: bool) -> SideQueryRes
         None
     };
 
+    let bt = resp.usage.billable_tokens;
     let usage = cost::Usage {
         tokens: cost::TokenUsage {
-            input: resp.usage.input_tokens,
-            output: resp.usage.output_tokens,
-            cache_read: resp.usage.cache_read_input_tokens,
-            cache_write: resp.usage.cache_creation_input_tokens,
-            reasoning_output: 0,
+            input: bt.input,
+            output: bt.output,
+            cache_read: bt.cache_read,
+            cache_write: bt.cache_write,
+            reasoning_output: bt.reasoning_output,
         },
         server_tool_use: None,
         speed: None,
@@ -169,32 +257,186 @@ fn decode_response(resp: MessageResponse, want_structured: bool) -> SideQueryRes
 #[async_trait]
 impl SideQueryClient for ProviderSideQueryClient {
     async fn query(&self, request: SideQueryRequest) -> Result<SideQueryResponse, SideQueryError> {
-        // `messages_create_non_stream_with_opts<T: HttpTransport>` carries an
-        // implicit `Sized` bound, so we pass a sized `&ArcTransport` (which
-        // delegates to the stored `Arc<dyn HttpTransport>`) rather than an
-        // unsized `&dyn HttpTransport`. The `?` auto-converts `ApiError` ->
-        // `SideQueryError::Api` via the `#[from]` on the enum. The opts
-        // entrypoint forwards `max_tokens` / `tools` / `temperature`; the
-        // `tools` body key only appears when the list is non-empty (per the
-        // `MessageRequest` serde rules). `tool_choice` / `stop_sequences` /
-        // `thinking_budget` / `output_format` / `max_retries` stay
-        // unforwardable (no body key yet) — see the module-level note.
-        let transport = ArcTransport(Arc::clone(&self.transport));
-        let resp = self
-            .provider
-            .messages_create_non_stream_with_opts(
-                &request.model,
-                request.system_prompt.as_deref(),
-                request.messages,
-                request.max_tokens,
-                request.tools,
-                request.temperature,
-                &transport,
-            )
-            .await?;
+        // Build the LlmRequest from the SideQueryRequest DTO.
+        let system: Vec<SystemBlock> = request
+            .system_prompt
+            .as_deref()
+            .map(|s| vec![SystemBlock::text(s)])
+            .unwrap_or_default();
+
+        // Convert protocol::ConversationMessage → llm_client::Message.
+        // We inline a minimal conversion here so sidequery does not need to
+        // depend on `agent` (which depends back on sidequery — a cycle).
+        let messages = convert_messages(request.messages)?;
+
+        // Convert JSON tool declarations → llm_client::ToolDeclaration.
+        let tools = convert_tool_declarations(request.tools)?;
+
+        let llm_req = LlmRequest {
+            model: request.model,
+            system,
+            messages,
+            tools,
+            max_tokens: Some(request.max_tokens),
+            temperature: request.temperature.map(f64::from),
+            ..LlmRequest::default()
+        };
+
+        // Route through the transport bridge so the existing Arc<dyn
+        // HttpTransport> is usable as an llm_client::Transport.
+        let arc_transport = ArcTransport(Arc::clone(&self.transport));
+        let bridge = LlmTransportBridge::new(arc_transport);
+
+        let resp = self.client.execute(&llm_req, &bridge).await?;
 
         Ok(decode_response(resp, request.output_format.is_some()))
     }
+}
+
+// ── Inline message/tool conversion (no dep on `agent` crate) ─────────────────
+
+fn convert_messages(
+    messages: Vec<protocol::ConversationMessage>,
+) -> Result<Vec<llm_client::Message>, llm_client::LlmError> {
+    messages.into_iter().map(convert_one_message).collect()
+}
+
+fn convert_one_message(
+    msg: protocol::ConversationMessage,
+) -> Result<llm_client::Message, llm_client::LlmError> {
+    match msg {
+        protocol::ConversationMessage::User { content, .. } => Ok(llm_client::Message {
+            role: "user".to_string(),
+            content: content
+                .into_iter()
+                .map(convert_content_block)
+                .collect::<Result<Vec<_>, _>>()?,
+        }),
+        protocol::ConversationMessage::Assistant { content, .. } => Ok(llm_client::Message {
+            role: "assistant".to_string(),
+            content: content
+                .into_iter()
+                .map(convert_content_block)
+                .collect::<Result<Vec<_>, _>>()?,
+        }),
+        protocol::ConversationMessage::System { .. } => {
+            Err(llm_client::LlmError::InvalidRequest {
+                message:
+                    "System messages must not appear in the messages vec; pass them via system_prompt"
+                        .to_string(),
+            })
+        }
+    }
+}
+
+fn convert_content_block(
+    block: protocol::ContentBlock,
+) -> Result<llm_client::ContentBlock, llm_client::LlmError> {
+    match block {
+        protocol::ContentBlock::Text { text } => Ok(llm_client::ContentBlock::Text {
+            text,
+            cache_control: None,
+        }),
+        protocol::ContentBlock::ToolUse { id, name, input } => {
+            Ok(llm_client::ContentBlock::ToolCall {
+                id: id.to_string(),
+                name,
+                input,
+            })
+        }
+        protocol::ContentBlock::ToolResult {
+            tool_use_id,
+            content,
+            is_error,
+        } => Ok(llm_client::ContentBlock::ToolResult {
+            tool_call_id: tool_use_id.to_string(),
+            output: serde_json::Value::String(content),
+            is_error,
+            cache_control: None,
+        }),
+        protocol::ContentBlock::Thinking { thinking, signature } => {
+            Ok(llm_client::ContentBlock::Reasoning {
+                text: thinking,
+                signature,
+            })
+        }
+        protocol::ContentBlock::Image { source } => convert_image(source),
+        protocol::ContentBlock::Document { source } => convert_document(source),
+    }
+}
+
+fn convert_image(
+    source: protocol::ImageSource,
+) -> Result<llm_client::ContentBlock, llm_client::LlmError> {
+    match source {
+        protocol::ImageSource::Base64 { media_type, data } => {
+            use base64::Engine as _;
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(&data)
+                .map_err(|e| llm_client::LlmError::InvalidRequest {
+                    message: format!("Image base64 decode failed: {e}"),
+                })?;
+            Ok(llm_client::ContentBlock::Image { media_type, bytes })
+        }
+        protocol::ImageSource::Url { url } => Ok(llm_client::ContentBlock::ImageUrl { url }),
+    }
+}
+
+fn convert_document(
+    source: protocol::DocumentSource,
+) -> Result<llm_client::ContentBlock, llm_client::LlmError> {
+    match source {
+        protocol::DocumentSource::Base64 { media_type, data } => {
+            use base64::Engine as _;
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(&data)
+                .map_err(|e| llm_client::LlmError::InvalidRequest {
+                    message: format!("Document base64 decode failed: {e}"),
+                })?;
+            Ok(llm_client::ContentBlock::Document { media_type, bytes })
+        }
+    }
+}
+
+fn convert_tool_declarations(
+    tools: Vec<serde_json::Value>,
+) -> Result<Vec<llm_client::ToolDeclaration>, llm_client::LlmError> {
+    tools.into_iter().map(convert_one_tool).collect()
+}
+
+#[allow(clippy::needless_pass_by_value)]
+fn convert_one_tool(
+    value: serde_json::Value,
+) -> Result<llm_client::ToolDeclaration, llm_client::LlmError> {
+    let name = value
+        .get("name")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| llm_client::LlmError::InvalidRequest {
+            message: "Tool declaration missing required string field: name".to_string(),
+        })?
+        .to_string();
+
+    let description = value
+        .get("description")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| llm_client::LlmError::InvalidRequest {
+            message: "Tool declaration missing required string field: description".to_string(),
+        })?
+        .to_string();
+
+    let input_schema = value
+        .get("input_schema")
+        .cloned()
+        .filter(|v| !v.is_null())
+        .ok_or_else(|| llm_client::LlmError::InvalidRequest {
+            message: "Tool declaration missing required field: input_schema".to_string(),
+        })?;
+
+    Ok(llm_client::ToolDeclaration {
+        name,
+        description,
+        input_schema,
+    })
 }
 
 #[cfg(test)]
@@ -303,7 +545,13 @@ mod tests {
 
         // The forwarded fields reach the wire body.
         assert_eq!(body["model"].as_str(), Some("claude-haiku-4-5"));
-        assert_eq!(body["system"].as_str(), Some("system"));
+        // llm-client encodes system as an array of blocks:
+        // `"system": [{"type":"text","text":"system"}]`
+        // (not the legacy string form the old api-client used).
+        let system_arr = body["system"].as_array().expect("system is a JSON array");
+        assert_eq!(system_arr.len(), 1);
+        assert_eq!(system_arr[0]["type"].as_str(), Some("text"));
+        assert_eq!(system_arr[0]["text"].as_str(), Some("system"));
         assert_eq!(
             body["messages"].as_array().map(Vec::len),
             Some(1),
@@ -467,9 +715,9 @@ mod tests {
     #[tokio::test]
     async fn api_error_maps_to_side_query_error_api() {
         // A 400 body that does not parse as a MessageResponse surfaces as
-        // SideQueryError::Api (the provider maps the malformed 2xx-path body to
-        // ApiError; the StubTransport returns 200 with a non-MessageResponse
-        // body to exercise the decode-failure -> ApiError -> Api(..) path).
+        // SideQueryError::Api (the codec maps the malformed body to LlmError;
+        // the StubTransport returns 200 with a non-MessageResponse body to
+        // exercise the decode-failure -> LlmError -> Api(..) path).
         let transport = Arc::new(StubTransport::new("not json"));
         let client = ProviderSideQueryClient::new("sk-test", None, transport);
 

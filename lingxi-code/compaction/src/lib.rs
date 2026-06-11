@@ -6,6 +6,7 @@
 
 pub mod autocompact;
 pub mod boundary;
+pub mod prompt_too_long;
 pub mod cached_microcompact;
 pub mod context_collapse;
 pub mod context_window;
@@ -49,6 +50,10 @@ pub use prompt::{
     BASE_COMPACT_PROMPT, NO_TOOLS_PREAMBLE, NO_TOOLS_TRAILER,
 };
 pub use ptl_retry::{truncate_head_for_ptl_retry, PTL_RETRY_MARKER};
+pub use prompt_too_long::{
+    is_prompt_too_long_body, parse_prompt_too_long_token_counts, prompt_too_long_token_gap,
+    PROMPT_TOO_LONG_ERROR_MESSAGE,
+};
 pub use snip::{SnipCompactor, SnipResult};
 pub use thresholds::*;
 // Pure threshold kernels (Batch 3). `threshold_calc::auto_compact_threshold`

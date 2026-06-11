@@ -656,6 +656,15 @@ impl PricingCatalog {
         }
     }
 
+    /// Return an iterator over every [`ModelPricing`] entry in the catalog.
+    ///
+    /// Used by bridge code (e.g. `orchestrator::cost_wiring`) that needs to
+    /// populate a foreign pricing catalog from the built-in reference sheet.
+    /// Provider defaults are NOT included — only explicitly-keyed model entries.
+    pub fn entries(&self) -> impl Iterator<Item = &ModelPricing> {
+        self.entries.values()
+    }
+
     /// COST.3 — the Opus 4.6 **fast-mode** pricing tier ($30 in / $150 out /
     /// $37.5 cache-write / $3 cache-read per Mtok, web search $0.01/request).
     ///
@@ -711,6 +720,25 @@ impl PricingCatalog {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn entries_iter_covers_all_builtin_models() {
+        let c = PricingCatalog::builtin_reference();
+        let all: Vec<&ModelPricing> = c.entries().collect();
+        // The builtin reference has at least the core Anthropic + OpenAI + Gemini
+        // + Bedrock entries (≥ 15 distinct models).
+        assert!(
+            all.len() >= 15,
+            "expected ≥ 15 builtin entries, got {}",
+            all.len()
+        );
+        // Spot-check: opus-4-6 must appear exactly once.
+        let opus_count = all
+            .iter()
+            .filter(|p| p.model_ref.model == "claude-opus-4-6")
+            .count();
+        assert_eq!(opus_count, 1, "claude-opus-4-6 must appear exactly once");
+    }
 
     #[test]
     fn builtin_has_opus_4_6() {

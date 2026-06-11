@@ -14,7 +14,10 @@ use crate::model::user_agent::{user_agent, UserAgentEnv};
 use agent::convert::{to_llm_messages, to_tool_declarations};
 use async_trait::async_trait;
 use futures::stream::BoxStream;
-use llm_client::{DefaultLlmClient, LlmError, LlmEvent, LlmRequest, LlmResponse, ProviderRequest, SystemBlock, Transport};
+use llm_client::{
+    CostEstimator, DefaultLlmClient, LlmError, LlmEvent, LlmRequest, LlmResponse,
+    ProviderRequest, SystemBlock, Transport,
+};
 use protocol::{ContentBlock, ConversationMessage};
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -62,12 +65,23 @@ pub struct ProviderApiAdapter {
     fallback_model: Option<String>,
     /// Available model ids from the client registry (for `available_models`).
     available_model_ids: Vec<String>,
+    /// Optional cost estimator for populating `LlmResponse.cost`.
+    ///
+    /// When `Some`, a successful `decode_response` triggers a cost estimate using
+    /// the model's resolved `PricingModelRef` and usage counters.  Unpriced or
+    /// unknown models leave `response.cost = None` (never an error).  The
+    /// `CostTracker` budget authority is UNTOUCHED by this path.
+    estimator: Option<Arc<CostEstimator>>,
 }
 
 impl ProviderApiAdapter {
     /// Construct the adapter.  Called by Task 10 host constructors.
     ///
     /// `version` is the build version string embedded in the User-Agent header.
+    ///
+    /// `estimator` — when `Some`, a successful response decode populates
+    /// `LlmResponse.cost` via the llm-client `CostEstimator`.  Pass
+    /// `None` to leave cost estimation disabled (existing behaviour before 3c-T3).
     #[must_use]
     pub fn new(
         client: Arc<DefaultLlmClient>,
@@ -77,6 +91,25 @@ impl ProviderApiAdapter {
         version: impl Into<String>,
         analytics: Option<Arc<::telemetry::AnalyticsBus>>,
         fallback_model: Option<String>,
+    ) -> Self {
+        Self::new_with_estimator(client, transport, subscriber, ua, version, analytics, fallback_model, None)
+    }
+
+    /// Construct the adapter with an explicit cost estimator.
+    ///
+    /// Hosts that have the `cost::PricingCatalog` available (desktop + mobile)
+    /// call this instead of [`Self::new`] to get live `LlmResponse.cost` values.
+    #[must_use]
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_estimator(
+        client: Arc<DefaultLlmClient>,
+        transport: Arc<dyn Transport>,
+        subscriber: SubscriberState,
+        ua: UserAgentEnv,
+        version: impl Into<String>,
+        analytics: Option<Arc<::telemetry::AnalyticsBus>>,
+        fallback_model: Option<String>,
+        estimator: Option<Arc<CostEstimator>>,
     ) -> Self {
         let available_model_ids = client
             .available_models()
@@ -92,6 +125,7 @@ impl ProviderApiAdapter {
             analytics,
             fallback_model,
             available_model_ids,
+            estimator,
         }
     }
 
@@ -347,7 +381,18 @@ impl ProviderApiAdapter {
                     // (Rate-limit state recording is best-effort for now.)
 
                     match prepared.route.codec.decode_response(provider_resp.clone()) {
-                        Ok(response) => {
+                        Ok(mut response) => {
+                            // 3c-T3: populate response.cost when an estimator is wired.
+                            // Unpriced or unknown models leave response.cost = None — never an error.
+                            if let Some(est) = &self.estimator {
+                                let pricing_ref =
+                                    prepared.route.resolved_route.pricing_model.clone();
+                                if let Ok(estimate) = est.estimate(pricing_ref, &response.usage) {
+                                    if estimate.total_cost_usd.is_some() {
+                                        response.cost = Some(estimate);
+                                    }
+                                }
+                            }
                             let elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
                             telemetry::emit_succeeded(
                                 &self.analytics,
@@ -1544,6 +1589,185 @@ mod tests {
             REPEATED_529_ERROR_MESSAGE,
             "Display must equal the byte-locked copy"
         );
+    }
+
+    // ── 3c-T3: LlmResponse.cost populated from cost estimator ─────────────────
+
+    fn make_adapter_with_estimator(transport: Arc<dyn Transport>) -> ProviderApiAdapter {
+        use cost::pricing::PricingCatalog as CostCatalog;
+        use crate::cost_wiring::llm_catalog_from_cost;
+        use llm_client::{CostEstimator, PricingPolicy};
+        #[allow(deprecated)]
+        std::env::set_var("ADAPTER_TEST_KEY", "test-key");
+        let cost_cat = CostCatalog::builtin_reference();
+        let llm_cat = llm_catalog_from_cost(&cost_cat);
+        let estimator = Arc::new(CostEstimator::new(llm_cat, PricingPolicy::MarkUnestimated));
+
+        let client = Arc::new(
+            DefaultLlmClient::from_config(ClientConfig {
+                providers: vec![ProviderProfile {
+                    provider_id: ProviderId::AnthropicFirstParty,
+                    profile_name: "anthropic".to_string(),
+                    base_url: "https://api.anthropic.com".to_string(),
+                    protocol: ProtocolFamily::AnthropicMessages,
+                    auth: AuthStrategy::ApiKey,
+                    credential: CredentialConfig::Env {
+                        var: "ADAPTER_TEST_KEY".to_string(),
+                    },
+                    models: vec![ModelProfile {
+                        display_model: "claude-sonnet-4-20250514".to_string(),
+                        request_model: "claude-sonnet-4-20250514".to_string(),
+                        billing_model: "claude-sonnet-4".to_string(),
+                        aliases: vec!["claude".to_string()],
+                        capabilities: Capabilities {
+                            streaming: true,
+                            tools: true,
+                            ..Default::default()
+                        },
+                    }],
+                    pricing: PricingConfig::default(),
+                }],
+            })
+            .expect("client"),
+        );
+        ProviderApiAdapter::new_with_estimator(
+            client,
+            transport,
+            SubscriberState::default(),
+            UserAgentEnv {
+                user_type: Some("external".to_string()),
+                entrypoint: Some("cli".to_string()),
+                ..Default::default()
+            },
+            "0.0.0",
+            None,
+            None,
+            Some(estimator),
+        )
+    }
+
+    /// 3c-T3: adapter populates response.cost for a priced model.
+    ///
+    /// claude-sonnet-4 billing_model → catalog hit → cost is Some(estimate with
+    /// total_cost_usd present).
+    #[tokio::test]
+    async fn cost_populated_for_priced_model() {
+        let response_json = serde_json::json!({
+            "id": "msg_cost_test",
+            "model": "claude-sonnet-4-20250514",
+            "content": [{"type": "text", "text": "hello"}],
+            "stop_reason": "end_turn",
+            "usage": {"input_tokens": 1_000_000, "output_tokens": 1_000_000}
+        });
+        let transport = FakeTransport::always(ProviderResponse::json(200, response_json));
+        let adapter = make_adapter_with_estimator(transport);
+        let resp = adapter
+            .messages_create("claude-sonnet-4-20250514", None, Vec::new(), Vec::new())
+            .await
+            .expect("ok");
+        let cost = resp.cost.expect("cost must be Some for a priced model");
+        let total = cost.total_cost_usd.expect("total_cost_usd must be Some");
+        // claude-sonnet-4: input 3_000 nano → 3.0 usd/M × 1M + output 15_000 → 15.0 × 1M = 18.0
+        assert!(
+            (total - 18.0).abs() < 1e-9,
+            "expected total $18.0 for 1M in + 1M out at $3/$15, got ${total}"
+        );
+    }
+
+    /// 3c-T3: unknown billing model → cost stays None (no error).
+    ///
+    /// The adapter uses a model profile whose billing_model ("claude-sonnet-4")
+    /// IS in the catalog; to test the None path we use a profile with a
+    /// billing_model that has no entry.
+    #[tokio::test]
+    async fn cost_none_for_unpriced_model() {
+        // Build an adapter with an estimator but a billing model not in the catalog.
+        use cost::pricing::PricingCatalog as CostCatalog;
+        use crate::cost_wiring::llm_catalog_from_cost;
+        use llm_client::{CostEstimator, PricingPolicy};
+        #[allow(deprecated)]
+        std::env::set_var("ADAPTER_TEST_KEY2", "test-key");
+        let cost_cat = CostCatalog::builtin_reference();
+        let llm_cat = llm_catalog_from_cost(&cost_cat);
+        let estimator = Arc::new(CostEstimator::new(llm_cat, PricingPolicy::MarkUnestimated));
+
+        let client = Arc::new(
+            DefaultLlmClient::from_config(ClientConfig {
+                providers: vec![ProviderProfile {
+                    provider_id: ProviderId::AnthropicFirstParty,
+                    profile_name: "anthropic".to_string(),
+                    base_url: "https://api.anthropic.com".to_string(),
+                    protocol: ProtocolFamily::AnthropicMessages,
+                    auth: AuthStrategy::ApiKey,
+                    credential: CredentialConfig::Env {
+                        var: "ADAPTER_TEST_KEY2".to_string(),
+                    },
+                    models: vec![ModelProfile {
+                        display_model: "claude-future-9999".to_string(),
+                        request_model: "claude-future-9999".to_string(),
+                        // billing_model not in any catalog entry
+                        billing_model: "claude-future-9999".to_string(),
+                        aliases: vec![],
+                        capabilities: Capabilities::default(),
+                    }],
+                    pricing: PricingConfig::default(),
+                }],
+            })
+            .expect("client"),
+        );
+        let response_json = serde_json::json!({
+            "id": "msg_unpriced",
+            "model": "claude-future-9999",
+            "content": [{"type": "text", "text": "hello"}],
+            "stop_reason": "end_turn",
+            "usage": {"input_tokens": 100, "output_tokens": 50}
+        });
+        let transport = FakeTransport::always(ProviderResponse::json(200, response_json));
+        let adapter = ProviderApiAdapter::new_with_estimator(
+            client,
+            transport,
+            SubscriberState::default(),
+            UserAgentEnv {
+                user_type: Some("external".to_string()),
+                entrypoint: Some("cli".to_string()),
+                ..Default::default()
+            },
+            "0.0.0",
+            None,
+            None,
+            Some(estimator),
+        );
+        let resp = adapter
+            .messages_create("claude-future-9999", None, Vec::new(), Vec::new())
+            .await
+            .expect("ok");
+        assert!(
+            resp.cost.is_none(),
+            "unpriced billing_model must leave cost = None; got {:?}",
+            resp.cost
+        );
+    }
+
+    /// 3c-T3: cost tracker recording is unchanged (existing CostTracker tests still pass).
+    ///
+    /// When no estimator is wired, response.cost stays None — backward-compat.
+    #[tokio::test]
+    async fn no_estimator_leaves_cost_none() {
+        let response_json = serde_json::json!({
+            "id": "msg_no_est",
+            "model": "claude-sonnet-4-20250514",
+            "content": [{"type": "text", "text": "hello"}],
+            "stop_reason": "end_turn",
+            "usage": {"input_tokens": 100, "output_tokens": 50}
+        });
+        let transport = FakeTransport::always(ProviderResponse::json(200, response_json));
+        // make_adapter wires None estimator (ProviderApiAdapter::new default path)
+        let adapter = make_adapter(transport);
+        let resp = adapter
+            .messages_create("claude-sonnet-4-20250514", None, Vec::new(), Vec::new())
+            .await
+            .expect("ok");
+        assert!(resp.cost.is_none(), "no estimator → cost must be None");
     }
 
     // ── 3c-T1: streaming 429 + retry-after header drives correct delay ────────

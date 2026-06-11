@@ -328,11 +328,21 @@ pub async fn build_mobile_inner(
         )
     };
     let subscriber_state = SubscriberState { is_subscriber: false, is_enterprise: false };
+
+    // 3c-T3: build the cost estimator from the builtin reference catalog.
+    let cost_estimator = {
+        use llm_client::{CostEstimator, PricingPolicy};
+        use orchestrator::cost_wiring::llm_catalog_from_cost;
+        let cost_cat = cost::pricing::PricingCatalog::builtin_reference();
+        let llm_cat = llm_catalog_from_cost(&cost_cat);
+        Arc::new(CostEstimator::new(llm_cat, PricingPolicy::MarkUnestimated))
+    };
+
     // ONE adapter implements BOTH `OrchestratorApiClient` (batched) and
     // `StreamingApiClient` (the streaming turn path the mobile transport always
     // drives). Production wires it for both paths; a test may substitute the
     // streaming side via `streaming_override` (plan F3-06).
-    let provider_adapter = Arc::new(ProviderApiAdapter::new(
+    let provider_adapter = Arc::new(ProviderApiAdapter::new_with_estimator(
         llm_client,
         llm_transport,
         subscriber_state,
@@ -340,6 +350,7 @@ pub async fn build_mobile_inner(
         env!("CARGO_PKG_VERSION"),
         None,
         None,
+        Some(cost_estimator),
     ));
     let api_client: Arc<dyn OrchestratorApiClient> = provider_adapter.clone();
     let streaming_api: Arc<dyn StreamingApiClient> =

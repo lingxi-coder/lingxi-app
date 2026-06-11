@@ -1269,6 +1269,7 @@ dependencies = [
  "command-api",
  "command-core",
  "command-mobile",
+ "cost",
  "insta",
  "llm-client",
  "orchestrator",

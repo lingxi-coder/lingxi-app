@@ -1045,10 +1045,22 @@ pub async fn build(
         Arc::new(client)
     };
     let subscriber_state = SubscriberState { is_subscriber, is_enterprise: false };
+
+    // 3c-T3: build the cost estimator from the builtin reference catalog so
+    // LlmResponse.cost is populated on every successful decode.  Unpriced /
+    // unknown models leave cost = None (never an error; CostTracker path unchanged).
+    let cost_estimator = {
+        use llm_client::{CostEstimator, PricingPolicy};
+        use orchestrator::cost_wiring::llm_catalog_from_cost;
+        let cost_cat = cost::pricing::PricingCatalog::builtin_reference();
+        let llm_cat = llm_catalog_from_cost(&cost_cat);
+        Arc::new(CostEstimator::new(llm_cat, PricingPolicy::MarkUnestimated))
+    };
+
     // Build the CONCRETE adapter so it can be coerced to BOTH the
     // orchestrator seam (`OrchestratorApiClient`) and the agent seam
     // (`agent::SubagentApiClient`). `ProviderApiAdapter` impls both.
-    let provider_adapter = Arc::new(ProviderApiAdapter::new(
+    let provider_adapter = Arc::new(ProviderApiAdapter::new_with_estimator(
         llm_client,
         llm_transport,
         subscriber_state,
@@ -1056,6 +1068,7 @@ pub async fn build(
         env!("CARGO_PKG_VERSION"),
         Some(Arc::new(telemetry::AnalyticsBus::new())),
         cfg.fallback_model.clone(),
+        Some(cost_estimator),
     ));
     let api_client: Arc<dyn OrchestratorApiClient> = provider_adapter.clone();
     let subagent_api: Arc<dyn agent::SubagentApiClient> = provider_adapter;

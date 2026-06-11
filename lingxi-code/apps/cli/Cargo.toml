@@ -17,9 +17,9 @@ path = "src/lib.rs"
 # M8-P6 / F2-01: the desktop composition root owns the orchestrator assembly.
 # `engine_desktop::build(DesktopConfig)` now constructs the full runtime; this
 # binary only resolves a `DesktopConfig` from `Argv`/env and delegates. The
-# ~270-line wiring (and the dozen crates it pulled in — api-client, providers,
-# compaction, mcp, hooks, agent, cost, anthropic-oauth, secret, tool-api,
-# permission, sandbox) moved with it and is no longer a direct CLI dependency.
+# ~270-line wiring (and the dozen crates it pulled in — compaction, mcp, hooks,
+# agent, cost, anthropic-oauth, secret, tool-api, permission, sandbox) moved
+# with it and is no longer a direct CLI dependency.
 engine-desktop = { path = "../engine-desktop" }
 # F2-01: `engine_desktop::build` takes an `Arc<dyn client_adapter::PermissionRequestSink>`
 # whose method carries a `client_protocol::permission::PermissionRequest`. The CLI

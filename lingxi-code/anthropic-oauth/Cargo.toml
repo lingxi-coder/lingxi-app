@@ -10,7 +10,6 @@ protocol = { path = "../protocol" }
 traits = { path = "../traits" }
 secret = { path = "../secret" }
 telemetry = { path = "../telemetry" }
-api-client = { path = "../api-client" }
 llm-client = { path = "../llm-client" }
 serde.workspace = true
 serde_json.workspace = true

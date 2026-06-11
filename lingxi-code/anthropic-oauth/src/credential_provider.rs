@@ -9,9 +9,8 @@
 //! Today this provider only performs **proactive** refresh: it checks the
 //! token expiry under a read lock and refreshes when `expires_at <= now`.
 //! The reactive-401 path — where the API returns 401 mid-request and the
-//! client retries once with a freshly-rotated token — is deferred to a
-//! follow-up (Plan 3b / 3c). The api-client middleware previously handled
-//! 401 retries via `current_hook()`, but that indirection is removed in 3a.
+//! client retries once with a freshly-rotated token — is a future concern.
+//! The former api-client `current_hook()` seam was removed in Plan 3a/3b.
 //! The practical impact is low: proactive refresh fires well before expiry
 //! (½-remaining or 5 min lead), so the access token is fresh on every call
 //! in the steady state; a 401 would require the clock to be wrong or the

@@ -7,8 +7,8 @@
 //!
 //! Implements request/response via `reqwest::Client`. SSE streaming is wired
 //! through `reqwest::Response::bytes_stream()` and a buffered `\n\n` /
-//! `\r\n\r\n` boundary scanner that defers framing details to
-//! `api_client::sse::parse_sse_chunks`.
+//! `\r\n\r\n` boundary scanner that parses SSE events via the local
+//! `parse_sse_chunks` helper (ported verbatim from the former api-client crate).
 
 use async_trait::async_trait;
 use bytes::BytesMut;
@@ -158,6 +158,46 @@ impl HttpTransport for ReqwestHttp {
     }
 }
 
+/// Parse one or more complete SSE events out of a raw chunk.
+///
+/// The chunk MUST end with `\n\n` to terminate the last event; partial events
+/// are dropped. Conforms to the HTML SSE spec (event / data / id fields;
+/// comment lines starting with `:` are skipped).
+///
+/// Ported verbatim from the former `api-client/src/sse.rs` so the wire
+/// behaviour is byte-identical after the api-client crate is removed.
+fn parse_sse_chunks(raw: &str) -> Vec<SseEvent> {
+    let mut events = Vec::new();
+    for block in raw.split("\n\n") {
+        if block.trim().is_empty() {
+            continue;
+        }
+        let mut event_type: Option<String> = None;
+        let mut data_lines: Vec<String> = Vec::new();
+        let mut id: Option<String> = None;
+        for line in block.lines() {
+            if line.starts_with(':') {
+                continue; // comment / keepalive
+            }
+            if let Some(rest) = line.strip_prefix("event:") {
+                event_type = Some(rest.trim().to_string());
+            } else if let Some(rest) = line.strip_prefix("data:") {
+                data_lines.push(rest.trim().to_string());
+            } else if let Some(rest) = line.strip_prefix("id:") {
+                id = Some(rest.trim().to_string());
+            }
+        }
+        if !data_lines.is_empty() {
+            events.push(SseEvent {
+                event_type,
+                data: data_lines.join("\n"),
+                id,
+            });
+        }
+    }
+    events
+}
+
 /// Adapt a byte stream into a stream of complete `SseEvent`s.
 ///
 /// Buffers raw bytes until an event boundary (`\n\n` or `\r\n\r\n`) is found,
@@ -180,7 +220,7 @@ where
                     // Consume the boundary itself.
                     drop(buf.split_to(boundary_len));
                     let chunk = String::from_utf8_lossy(&event_bytes).to_string();
-                    let events = api_client::sse::parse_sse_chunks(&format!("{chunk}\n\n"));
+                    let events = parse_sse_chunks(&format!("{chunk}\n\n"));
                     if let Some(ev) = events.into_iter().next() {
                         return Some((Ok(ev), (s, buf)));
                     }

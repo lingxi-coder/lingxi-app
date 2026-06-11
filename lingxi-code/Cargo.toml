@@ -30,7 +30,6 @@ members = [
     "tools/ios-use",
     "engine",
     "traits",
-    "api-client",
     "test-harness",
     "secret",
     "cost",
@@ -42,7 +41,6 @@ members = [
     "mcp",
     "llm-client",
     "orchestrator",
-    "providers",
     "compaction",
     "agent",
     "tasks",
@@ -83,7 +81,6 @@ members = [
     "platforms/ios",
     "platforms/android",
     "platforms/posix/tests/fixtures/mock_stdio_mcp",
-    "examples/cli-demo",
 ]
 
 # Fixtures are workspace members so they share lockfile + target/ dir, but
@@ -119,7 +116,6 @@ default-members = [
     "tools/ios-use",
     "engine",
     "traits",
-    "api-client",
     "test-harness",
     "secret",
     "cost",
@@ -131,7 +127,6 @@ default-members = [
     "mcp",
     "llm-client",
     "orchestrator",
-    "providers",
     "compaction",
     "agent",
     "tasks",
@@ -170,7 +165,6 @@ default-members = [
     "platforms/windows",
     "platforms/ios",
     "platforms/android",
-    "examples/cli-demo",
 ]
 
 [workspace.package]

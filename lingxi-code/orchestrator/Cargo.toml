@@ -9,7 +9,6 @@ license.workspace = true
 protocol = { path = "../protocol" }
 engine = { path = "../engine" }
 traits = { path = "../traits" }
-api-client = { path = "../api-client" }
 llm-client = { path = "../llm-client" }
 tool-api = { path = "../tool-api" }
 memory = { path = "../memory" }
@@ -50,9 +49,9 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "registry"] }
 [features]
 default = []
 test-support = []
-# Default-off feature flags mirroring api-client/betas.rs (which mirrors
-# claude-code `betas.ts` build features). When OFF (the external default) the
-# corresponding `anthropic-beta` entry is never emitted by
+# Default-off feature flags mirroring claude-code `betas.ts` build features
+# (ported from the former api-client/betas.rs). When OFF (the external default)
+# the corresponding `anthropic-beta` entry is never emitted by
 # `model::betas::assemble_beta_header`, keeping the header byte-identical to
 # the external claude-code build.
 # - `connector_text`        ≙ TS `feature('CONNECTOR_TEXT')`        → SUMMARIZE_CONNECTOR_TEXT

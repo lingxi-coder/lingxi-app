@@ -195,8 +195,8 @@ mod tests {
 
     #[test]
     fn compaction_variant_projects_to_string() {
-        // CompactionError::Api still wraps api_client::ApiError (until 3b);
-        // construct via the string variant to keep error.rs free of api_client.
+        // CompactionError::Api now wraps llm_client::LlmError (retyped in 3b-T1);
+        // construct via the string variant for simplicity.
         let compact_err = compaction::CompactionError::Internal("test".into());
         let e = OrchestratorError::Compaction(compact_err);
         let s = e.to_string();

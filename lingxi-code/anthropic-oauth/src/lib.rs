@@ -8,9 +8,9 @@
 //! - Reactive + proactive token refresh (M3-04)
 //! - Scope upgrade flow (M3-04)
 //!
-//! Plan 3a Task 9: `BearerToken`/`OAuthHookError`/`TokenHash` are now owned
-//! locally in `refresh.rs`; `RefreshDriver::refresh` is an inherent method.
-//! api-client coupling removed from this crate.
+//! Plan 3a/3b: `BearerToken`/`OAuthHookError`/`TokenHash` are owned locally
+//! in `refresh.rs`; `RefreshDriver::refresh` is an inherent method. The
+//! api-client crate has been removed from the workspace entirely.
 
 #![forbid(unsafe_code)]
 

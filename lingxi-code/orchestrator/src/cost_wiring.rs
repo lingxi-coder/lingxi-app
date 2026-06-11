@@ -89,14 +89,6 @@ fn provider_id_for_profile(profile: &str) -> ProviderId {
     }
 }
 
-/// Resolve a model-name string to its `ProviderId` by parsing the
-/// `provider/model` prefix (bare / `claude-*` → Anthropic, for back-compat).
-#[must_use]
-pub(crate) fn provider_from_model(model: &str) -> ProviderId {
-    let (profile, _) = split_profile(model);
-    provider_id_for_profile(&profile)
-}
-
 /// Build a fully-qualified [`ModelRef`] from a model string: the prefix selects
 /// the provider, and the local model id (prefix stripped) is what the price
 /// catalog is keyed on. `claude-*` / bare strings keep the full string as the
@@ -114,6 +106,14 @@ pub(crate) fn model_ref_from_string(model: &str) -> ModelRef {
 mod tests {
     use super::*;
     use llm_client::{ServerToolUsage as LlmServerToolUsage, TokenUsage as LlmTokenUsage};
+
+    /// Resolve a model-name string to its `ProviderId` by parsing the
+    /// `provider/model` prefix. Only needed in tests — the production path goes
+    /// through `model_ref_from_string`.
+    fn provider_from_model(model: &str) -> ProviderId {
+        let (profile, _) = split_profile(model);
+        provider_id_for_profile(&profile)
+    }
 
     // --- split_profile tests (ported from providers::model_spec::tests) -----
 

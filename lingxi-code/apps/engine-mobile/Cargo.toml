@@ -31,7 +31,6 @@ uniffi = [
     # governing decision §0.3) so the dep-rule gate stays green.
     "dep:orchestrator",
     "dep:protocol",
-    "dep:api-client",
     "dep:anthropic-oauth",
     "dep:llm-client",
     "dep:platform-common",
@@ -92,7 +91,6 @@ uniffi = { workspace = true, optional = true }
 # is engine-tier (non-leaf) so no `apps/*` dep-rule edge is introduced.
 orchestrator = { path = "../../orchestrator", optional = true }
 protocol = { path = "../../protocol", optional = true }
-api-client = { path = "../../api-client", optional = true }
 anthropic-oauth = { path = "../../anthropic-oauth", optional = true }
 # Task 10: DefaultLlmClient construction + LlmTransportBridge.
 llm-client = { path = "../../llm-client", optional = true }

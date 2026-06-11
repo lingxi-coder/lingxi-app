@@ -78,10 +78,6 @@ tracing.workspace = true
 # `uuid` is used ONLY by the F1-11 lowering unit tests to construct a
 # `SessionMetadata.uuid` fixture (same version `session` pins).
 uuid = { version = "1.10", features = ["v4"] }
-# `api-client` is used ONLY by the F1-13 turn-wrapper tests to construct an
-# `ApiError` for the `OrchestratorError::Streaming` / `ApiCall` → `Error.kind`
-# table. Already in `Cargo.lock` (via `orchestrator`), so `--offline` stays green.
-api-client = { path = "../api-client" }
 # `llm-client` is used by the F1-13 turn-wrapper tests after `OrchestratorError::Streaming`
 # / `::ApiCall` were retyped from `ApiError` → `LlmError` in Task 5 (commit 5f8b3e35).
 # Already in `Cargo.lock` (transitive via `orchestrator`), no new download needed.

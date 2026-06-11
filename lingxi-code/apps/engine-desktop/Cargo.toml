@@ -25,7 +25,6 @@ command-desktop = { path = "../../commands/desktop" }
 protocol = { path = "../../protocol" }
 engine = { path = "../../engine" }
 orchestrator = { path = "../../orchestrator" }
-api-client = { path = "../../api-client" }
 anthropic-oauth = { path = "../../anthropic-oauth" }
 # Task 10: DefaultLlmClient construction + LlmTransportBridge.
 llm-client = { path = "../../llm-client" }
@@ -123,7 +122,6 @@ client-protocol = { path = "../../client-protocol" }
 # M10 (T14): the `pool_starvation` regression drives the real
 # `agent::StateMachinePool` / `agent::PoolSubagentSpawner` with the
 # tokio-backed `MockRuntimeSpawner`. Dev-only — never reaches production builds.
-# (`api-client` is already a non-dev dependency above, reused by the test.)
 test-harness = { path = "../../test-harness" }
 
 [lints]

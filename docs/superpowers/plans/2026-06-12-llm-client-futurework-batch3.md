@@ -150,6 +150,8 @@ TDD; commit.
 
 - [ ] RED → implement → GREEN → frozen-diff check on traits (added lines only) → clippy → commit.
 
+> **T8 as-built note:** the shipped `OutputEvent::RateLimit` variant carries 9 fields — it ADDS `claim_resets_at` and DROPS `is_using_overage` vs the sketch above. `is_using_overage` must be derived sink-side (TUI) from `overage_status`/TS semantics in Task 9.
+
 ## Task 9: TUI rate-limit wiring + message composer port
 
 **Files:**

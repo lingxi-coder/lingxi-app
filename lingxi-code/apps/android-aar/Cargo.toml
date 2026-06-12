@@ -34,6 +34,7 @@ uniffi = [
     "dep:platform-posix-minimal",
     "dep:tokio",
     "dep:orchestrator",
+    "dep:tool-api",
     "engine-mobile/uniffi",
 ]
 
@@ -56,6 +57,10 @@ client-protocol = { path = "../../client-protocol", optional = true }
 platform-posix-minimal = { path = "../../platforms/posix-minimal", optional = true }
 orchestrator = { path = "../../orchestrator", optional = true }
 tokio = { workspace = true, optional = true, features = ["rt-multi-thread", "macros", "sync"] }
+# P3-T5: the `AndroidShellToolCtx` carrier type assigned onto `MobileConfig`
+# (the Shell-tool registration gate result). Optional + pulled under `uniffi` so
+# the plain (no-feature) build stays minimal.
+tool-api = { path = "../../tool-api", optional = true }
 
 [target.'cfg(target_os = "android")'.dependencies]
 platform-android = { path = "../../platforms/android" }

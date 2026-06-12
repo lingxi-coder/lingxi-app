@@ -979,6 +979,33 @@ impl ClientEventListener for AndroidListenerBridge {
     }
 }
 
+/// The mobile `Shell`-tool registration gate (spec r3 §Registration gates +
+/// D11): enabled iff config opts in AND the device probe proves the enforcement
+/// we promise. Pure; host-testable (NOT `cfg(target_os)`-gated, so the host
+/// tests reach it). The five conjuncts are `enable_shell` + the D11 secrets
+/// gate (config opt-in) and capability-available + seccomp-filter +
+/// net-deny-verified (probe-proven enforcement).
+///
+/// Called from the `cfg(target_os = "android")` branch of
+/// [`build_android_engine`]; on the host build the only caller is the unit test,
+/// so `allow(dead_code)` there (mirrors the file's other host-unused items).
+#[cfg(feature = "uniffi")]
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+// The five conjuncts ARE distinct boolean gate inputs (spec r3 §Registration
+// gates + D11) named 1:1 at the single call site; a struct/enum would obscure
+// the formula, not clarify it.
+#[allow(clippy::fn_params_excessive_bools)]
+#[must_use]
+fn android_shell_gate(
+    enable_shell: bool,
+    secrets_gate_satisfied: bool,
+    caps_available: bool,
+    seccomp_filter: bool,
+    net_deny_verified: bool,
+) -> bool {
+    enable_shell && secrets_gate_satisfied && caps_available && seccomp_filter && net_deny_verified
+}
+
 /// Foreign-callable constructor for the Android app (plan T2.2).
 ///
 /// Builds a fully-wired [`MobileEngineHandle`] from the Kotlin-supplied event
@@ -1057,6 +1084,10 @@ pub fn build_android_engine(
             secrets_in_keystore: s.secrets_in_keystore,
             shell_data_exposure_accepted: s.shell_data_exposure_accepted,
         });
+        // P3-T5: keep a clone of the shell config before it is moved into
+        // `AndroidPlatformInputs.shell` — the registration gate (computed below,
+        // after the probe) needs `enable_shell` + the D11 secrets gate from it.
+        let shell_cfg_for_gate = shell_cfg.clone();
         let android_platform = AndroidPlatform::new(AndroidPlatformInputs {
             app_files_root: std::path::PathBuf::from(app_files_root),
             camera: Arc::new(AndroidCameraBridge { inner: camera }),
@@ -1099,6 +1130,26 @@ pub fn build_android_engine(
             let caps =
                 probe_rt.block_on(platform_android::capabilities::probe_android_capabilities());
             cache.set(caps);
+
+            // P3-T5: compute the Shell-tool registration gate + prompt info from
+            // the just-probed capabilities + the `AndroidShellConfig`, and thread
+            // it onto `MobileConfig` for `tool-shell-mobile::register_all` (the
+            // registration gate) + the tool prompt. Absent (`None`) whenever no
+            // shell config was supplied — shell support then stays fully absent.
+            if let Some(shell_cfg) = shell_cfg_for_gate {
+                let caps = cache.get();
+                cfg.android_shell = Some(tool_api::AndroidShellToolCtx {
+                    enabled: android_shell_gate(
+                        shell_cfg.enable_shell,
+                        shell_cfg.secrets_gate_satisfied(),
+                        caps.available(),
+                        caps.seccomp_filter,
+                        caps.net_deny_verified,
+                    ),
+                    applets: caps.toybox_applets.clone(),
+                    sh_version: caps.system_sh_version.clone(),
+                });
+            }
         }
 
         let platform: Arc<dyn Platform> = Arc::new(android_platform);
@@ -1462,5 +1513,36 @@ mod tests {
             .create_session("claude-sonnet-4-20250514".to_string())
             .expect("create_session must no longer be stubbed");
         assert_eq!(session, 1);
+    }
+
+    /// P3-T5: the Shell-tool registration gate is the conjunction of all five
+    /// inputs — it is `true` ONLY when every input is `true`, and `false` if any
+    /// single input is `false`. Host-testable without a device.
+    #[test]
+    fn android_shell_gate_is_all_five_conjuncts() {
+        use super::android_shell_gate;
+
+        // All five true → enabled.
+        assert!(
+            android_shell_gate(true, true, true, true, true),
+            "gate must be enabled when all five conjuncts hold"
+        );
+
+        // Each single-false case → disabled. (input index, label) drives the row.
+        let cases = [
+            (0, "enable_shell"),
+            (1, "secrets_gate_satisfied"),
+            (2, "caps_available"),
+            (3, "seccomp_filter"),
+            (4, "net_deny_verified"),
+        ];
+        for (false_idx, label) in cases {
+            let mut args = [true; 5];
+            args[false_idx] = false;
+            assert!(
+                !android_shell_gate(args[0], args[1], args[2], args[3], args[4]),
+                "gate must be disabled when {label} is false"
+            );
+        }
     }
 }

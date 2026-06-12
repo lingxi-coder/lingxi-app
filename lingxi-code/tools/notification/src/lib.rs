@@ -2,7 +2,7 @@
 //!
 //! Routes to `ctx.notifications` (`Arc<dyn NotificationService>`). `None` on
 //! desktop; mobile composition roots wire a native Swift / Kotlin impl via
-//! UniFFI. Engine-driven: the model posts a local system notification (the
+//! `UniFFI`. Engine-driven: the model posts a local system notification (the
 //! analog of the camera/voice/share seams) — there is no user-facing UI
 //! affordance. The single action is `post` (title, body, optional tag).
 
@@ -58,7 +58,7 @@ fn map_notification_err(e: &NotificationError) -> ToolError {
         NotificationError::PermissionDenied => {
             ToolError::PermissionDenied("notification permission denied".into())
         }
-        other => ToolError::Internal(other.to_string()),
+        other @ NotificationError::Other(_) => ToolError::Internal(other.to_string()),
     }
 }
 

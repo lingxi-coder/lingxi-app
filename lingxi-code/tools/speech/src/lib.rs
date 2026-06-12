@@ -2,7 +2,7 @@
 //!
 //! Routes to `ctx.stt` (`Arc<dyn SpeechToText>`) and `ctx.tts`
 //! (`Arc<dyn TextToSpeech>`). `None` on desktop; mobile composition roots wire a
-//! native Swift / Kotlin impl via UniFFI. Sibling of `tool-voice` (raw mic
+//! native Swift / Kotlin impl via `UniFFI`. Sibling of `tool-voice` (raw mic
 //! capture) — this is recognition (`transcribe`) and synthesis (`speak`).
 
 #![forbid(unsafe_code)]
@@ -148,48 +148,45 @@ impl Tool for SpeechTool {
             .and_then(Value::as_str)
             .unwrap_or("transcribe");
 
-        let data = match action {
-            "speak" => {
-                let tts = self.ctx.tts.as_ref().ok_or_else(|| {
-                    ToolError::Internal("text-to-speech not available on this platform".into())
-                })?;
-                let text = input
-                    .get("text")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .to_string();
-                let voice = input
-                    .get("voice")
-                    .and_then(Value::as_str)
-                    .map(str::to_string);
-                let audio = tts
-                    .synthesize(TtsOpts { text, voice })
-                    .await
-                    .map_err(|e| map_tts_err(&e))?;
-                json!({
-                    "spoken": true,
-                    "sample_rate_hz": audio.sample_rate_hz,
-                    "pcm_bytes_len": audio.pcm.len(),
-                })
-            }
-            _ => {
-                let stt = self.ctx.stt.as_ref().ok_or_else(|| {
-                    ToolError::Internal("speech recognition not available on this platform".into())
-                })?;
-                let language = input
-                    .get("language")
-                    .and_then(Value::as_str)
-                    .map(str::to_string);
-                let t = stt
-                    .transcribe(SttOpts { language })
-                    .await
-                    .map_err(|e| map_stt_err(&e))?;
-                json!({
-                    "text": t.text,
-                    "language": t.language,
-                    "confidence": t.confidence,
-                })
-            }
+        let data = if action == "speak" {
+            let tts = self.ctx.tts.as_ref().ok_or_else(|| {
+                ToolError::Internal("text-to-speech not available on this platform".into())
+            })?;
+            let text = input
+                .get("text")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            let voice = input
+                .get("voice")
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            let audio = tts
+                .synthesize(TtsOpts { text, voice })
+                .await
+                .map_err(|e| map_tts_err(&e))?;
+            json!({
+                "spoken": true,
+                "sample_rate_hz": audio.sample_rate_hz,
+                "pcm_bytes_len": audio.pcm.len(),
+            })
+        } else {
+            let stt = self.ctx.stt.as_ref().ok_or_else(|| {
+                ToolError::Internal("speech recognition not available on this platform".into())
+            })?;
+            let language = input
+                .get("language")
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            let t = stt
+                .transcribe(SttOpts { language })
+                .await
+                .map_err(|e| map_stt_err(&e))?;
+            json!({
+                "text": t.text,
+                "language": t.language,
+                "confidence": t.confidence,
+            })
         };
 
         Ok(ToolCallResult {

@@ -2,7 +2,7 @@
 //!
 //! Screen capture + mouse/keyboard automation, routed to `ctx.computer_control`
 //! (`Arc<dyn ComputerControl>`). `None` unless a backend is wired — a desktop
-//! automation impl, or a mobile UniFFI impl. Pure-Rust dispatch.
+//! automation impl, or a mobile `UniFFI` impl. Pure-Rust dispatch.
 
 #![forbid(unsafe_code)]
 
@@ -69,6 +69,7 @@ fn map_err(e: &ComputerError) -> ToolError {
 fn xy(input: &Value) -> Result<(u32, u32), ToolError> {
     let x = input.get("x").and_then(Value::as_u64);
     let y = input.get("y").and_then(Value::as_u64);
+    #[allow(clippy::cast_possible_truncation)] // coordinate space never exceeds u32
     match (x, y) {
         (Some(x), Some(y)) => Ok((x as u32, y as u32)),
         _ => Err(ToolError::InvalidInput(
@@ -197,7 +198,9 @@ impl Tool for ComputerTool {
             }
             "scroll" => {
                 let (x, y) = xy(&input)?;
+                #[allow(clippy::cast_possible_truncation)] // scroll delta never exceeds i32
                 let dx = input.get("dx").and_then(Value::as_i64).unwrap_or(0) as i32;
+                #[allow(clippy::cast_possible_truncation)] // scroll delta never exceeds i32
                 let dy = input.get("dy").and_then(Value::as_i64).unwrap_or(0) as i32;
                 cc.scroll(x, y, dx, dy).await.map_err(|e| map_err(&e))?;
                 json!({ "ok": true })

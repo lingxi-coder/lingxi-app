@@ -235,7 +235,9 @@ mod tests {
             })
         }
         async fn stream_sse(&self, _req: HttpRequest) -> Result<SseStream, HttpError> {
-            Err(HttpError::InvalidRequest("sse not supported in this mock".to_string()))
+            Err(HttpError::InvalidRequest(
+                "sse not supported in this mock".to_string(),
+            ))
         }
     }
 

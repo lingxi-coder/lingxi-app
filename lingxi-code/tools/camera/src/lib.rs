@@ -3,7 +3,7 @@
 //! Routes to the `Arc<dyn CameraControl>` carried in [`BuiltinToolContext`]
 //! (`ctx.camera`). On desktop that handle is `None`, so the tool reports the
 //! capability is unavailable; mobile composition roots wire a native Swift /
-//! Kotlin impl via UniFFI (P12). The Rust side is platform-agnostic.
+//! Kotlin impl via `UniFFI` (P12). The Rust side is platform-agnostic.
 
 #![forbid(unsafe_code)]
 
@@ -131,28 +131,27 @@ impl Tool for CameraTool {
             .get("action")
             .and_then(Value::as_str)
             .unwrap_or("capture");
-        let image = match action {
-            "pick_from_library" => camera
+        let image = if action == "pick_from_library" {
+            camera
                 .pick_from_library()
                 .await
-                .map_err(|e| map_camera_err(&e))?,
-            _ => {
-                let position = match input.get("position").and_then(Value::as_str) {
-                    Some("front") => CameraPosition::Front,
-                    _ => CameraPosition::Back,
-                };
-                let allow_editing = input
-                    .get("allow_editing")
-                    .and_then(Value::as_bool)
-                    .unwrap_or(false);
-                camera
-                    .capture_photo(CapturePhotoOpts {
-                        position,
-                        allow_editing,
-                    })
-                    .await
-                    .map_err(|e| map_camera_err(&e))?
-            }
+                .map_err(|e| map_camera_err(&e))?
+        } else {
+            let position = match input.get("position").and_then(Value::as_str) {
+                Some("front") => CameraPosition::Front,
+                _ => CameraPosition::Back,
+            };
+            let allow_editing = input
+                .get("allow_editing")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            camera
+                .capture_photo(CapturePhotoOpts {
+                    position,
+                    allow_editing,
+                })
+                .await
+                .map_err(|e| map_camera_err(&e))?
         };
 
         Ok(ToolCallResult {

@@ -1,4 +1,4 @@
-//! `android-aar` (M8-P12 → M10-F3) — the Android UniFFI packager.
+//! `android-aar` (M8-P12 → M10-F3) — the Android `UniFFI` packager.
 //!
 //! The FFI boundary between the Rust engine and the Android app. The Kotlin
 //! layer implements the [`traits::CameraControl`] / [`traits::VoiceRecorder`] /
@@ -41,10 +41,10 @@
 //! `async_submit_resolves_on_handle_runtime` host test proves the registration by
 //! asserting an async export resolves on exactly that runtime.
 //!
-//! ## UniFFI status
-//! The `uniffi` feature (default-on) lights up the real UniFFI surface: the
+//! ## `UniFFI` status
+//! The `uniffi` feature (default-on) lights up the real `UniFFI` surface: the
 //! re-exported [`MobileEngineHandle`] is a `#[derive(uniffi::Object)]`, the
-//! listener a callback interface, the DTOs UniFFI types. `engine-mobile` carries
+//! listener a callback interface, the DTOs `UniFFI` types. `engine-mobile` carries
 //! the `setup_scaffolding!()`; this crate re-exports it (and adds its own for
 //! the Android-local exports) so the symbols land in the final library.
 
@@ -66,20 +66,46 @@ pub use engine_mobile::{
 };
 
 /// The foreign (Kotlin) capability objects + config needed to build an
-/// `AndroidPlatform`. UniFFI marshals each `Arc<dyn …>` as a callback-interface
+/// `AndroidPlatform`. `UniFFI` marshals each `Arc<dyn …>` as a callback-interface
 /// reference; `app_files_root` is the app's private files-dir.
 pub struct PlatformImpls {
-    /// Kotlin `CameraControl` impl (CameraX).
+    /// Kotlin `CameraControl` impl (`CameraX`).
     pub camera: Arc<dyn CameraControl>,
-    /// Kotlin `VoiceRecorder` impl (MediaRecorder).
+    /// Kotlin `VoiceRecorder` impl (`MediaRecorder`).
     pub voice: Arc<dyn VoiceRecorder>,
-    /// Kotlin `SharingService` impl (Intent.ACTION_SEND).
+    /// Kotlin `SharingService` impl (`Intent.ACTION_SEND`).
     pub share: Arc<dyn SharingService>,
     /// The app's private files-dir root.
     pub app_files_root: String,
 }
 
-/// Top-level UniFFI constructor: build the mobile engine from the Kotlin-supplied
+/// FFI carrier for the Android shell/sandbox configuration (spec r3 §Android
+/// inputs). `None` anywhere upstream keeps shell support fully absent.
+#[cfg(feature = "uniffi")]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+#[derive(Debug, Clone)]
+pub struct AndroidShellConfigFfi {
+    /// `ApplicationInfo.nativeLibraryDir`.
+    pub native_library_dir: String,
+    /// Directory the shell treats as `$HOME` / workspace.
+    pub shell_workspace_root: String,
+    /// App cache dir (`$TMPDIR`).
+    pub app_cache_root: String,
+    /// Application package name.
+    pub package_name: String,
+    /// `PackageInfo.longVersionCode`.
+    pub package_version_code: i64,
+    /// filesDir / cacheDir / codeCacheDir / noBackupFilesDir roots.
+    pub app_writable_roots: Vec<String>,
+    /// Master enable flag.
+    pub enable_shell: bool,
+    /// D11: host attests secrets are Keystore-backed.
+    pub secrets_in_keystore: bool,
+    /// D11: explicit user acceptance of data exposure.
+    pub shell_data_exposure_accepted: bool,
+}
+
+/// Top-level `UniFFI` constructor: build the mobile engine from the Kotlin-supplied
 /// platform callbacks + event listener. (Under `uniffi`: `#[uniffi::export]`.)
 ///
 /// This is a THIN wrapper: it constructs the Android-specific `Platform` from the
@@ -116,6 +142,7 @@ pub fn build_mobile_engine(
             tts: None,
             notifications: None,
             clipboard: None,
+            shell: None,
         }));
         engine_mobile::build_mobile_engine(cfg, platform, listener, permission_sink)
     }
@@ -148,7 +175,7 @@ pub fn build_mobile_engine(
 // `PermissionDenied`, etc.).
 
 /// FFI error surface for the Android speech callback interfaces. A flat enum so
-/// UniFFI can render it for an async `callback_interface` method; the bridge
+/// `UniFFI` can render it for an async `callback_interface` method; the bridge
 /// fans it back out onto the richer `traits::SttError` / `traits::TtsError`.
 #[cfg(feature = "uniffi")]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Error))]
@@ -233,7 +260,7 @@ pub struct TtsAudioFfi {
 // maps the FFI result/error back onto `traits::ShareResult` / `traits::ShareError`.
 
 /// FFI error surface for the Android share callback interface. A flat enum so
-/// UniFFI can render it for an async `callback_interface` method; the bridge
+/// `UniFFI` can render it for an async `callback_interface` method; the bridge
 /// fans it back out onto the richer [`traits::ShareError`].
 #[cfg(feature = "uniffi")]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Error))]
@@ -327,7 +354,7 @@ impl traits::SharingService for AndroidShareBridge {
 // (the model posts a notification) — no user-facing UI affordance.
 
 /// FFI error surface for the Android notification callback interface. A flat
-/// enum so UniFFI can render it for an async `callback_interface` method; the
+/// enum so `UniFFI` can render it for an async `callback_interface` method; the
 /// bridge fans it back out onto the richer [`traits::NotificationError`].
 #[cfg(feature = "uniffi")]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Error))]
@@ -409,7 +436,7 @@ impl traits::NotificationService for AndroidNotificationBridge {
 // gracefully rather than crashing.
 
 /// FFI error surface for the Android clipboard callback interface. A flat enum
-/// so UniFFI can render it for an async `callback_interface` method; the bridge
+/// so `UniFFI` can render it for an async `callback_interface` method; the bridge
 /// fans it back out onto the richer [`traits::ClipboardError`].
 #[cfg(feature = "uniffi")]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Error))]
@@ -463,7 +490,10 @@ impl traits::Clipboard for AndroidClipboardBridge {
             .map_err(clipboard_error_from_ffi)
     }
     async fn get_text(&self) -> Result<Option<String>, traits::ClipboardError> {
-        self.inner.get_text().await.map_err(clipboard_error_from_ffi)
+        self.inner
+            .get_text()
+            .await
+            .map_err(clipboard_error_from_ffi)
     }
 }
 
@@ -491,7 +521,7 @@ fn clipboard_error_from_ffi(e: ClipboardFfiError) -> traits::ClipboardError {
 // the FFI flat; the bridge maps it to `traits::CameraPosition`.
 
 /// FFI error surface for the Android camera callback interface. A flat enum so
-/// UniFFI can render it for an async `callback_interface` method; the bridge
+/// `UniFFI` can render it for an async `callback_interface` method; the bridge
 /// fans it back out onto the richer [`traits::CameraError`].
 #[cfg(feature = "uniffi")]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Error))]
@@ -529,7 +559,7 @@ pub struct CapturedImageFfi {
 }
 
 /// Crate-local foreign callback interface for native camera access — the Kotlin
-/// app implements it over CameraX (capture) and the system photo picker
+/// app implements it over `CameraX` (capture) and the system photo picker
 /// (library). Bridged to [`traits::CameraControl`] by [`AndroidCameraBridge`].
 #[cfg(feature = "uniffi")]
 #[cfg_attr(feature = "uniffi", uniffi::export(callback_interface))]
@@ -618,7 +648,7 @@ fn camera_error_from_ffi(e: CameraFfiError) -> traits::CameraError {
 // onto `traits::VoiceRecording` / `traits::VoiceError`.
 
 /// FFI error surface for the Android mic-recorder callback interface. A flat
-/// enum so UniFFI can render it for an async `callback_interface` method; the
+/// enum so `UniFFI` can render it for an async `callback_interface` method; the
 /// bridge fans it back out onto the richer [`traits::VoiceError`].
 #[cfg(feature = "uniffi")]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Error))]
@@ -877,7 +907,7 @@ impl engine_mobile::PermissionRequestSink for NoopPermissionSink {
 
 /// The Kotlin-implemented permission sink the Android app registers when it builds
 /// the engine. Defined in THIS crate (not re-used from `engine-mobile`) so its
-/// UniFFI converter registers under `android_aar`'s tag — a prerequisite for
+/// `UniFFI` converter registers under `android_aar`'s tag — a prerequisite for
 /// naming it as a parameter type in [`build_android_engine`]. Mirrors
 /// `AndroidEventListener`: where the listener carries OUTBOUND events, this carries
 /// the engine's OUTBOUND permission requests to the Kotlin host's prompt UI; the
@@ -917,7 +947,7 @@ impl engine_mobile::PermissionRequestSink for AndroidPermissionSinkBridge {
 
 /// The Kotlin-implemented event listener the Android app registers when it builds
 /// the engine. Defined in THIS crate (not re-used from `client-adapter`) so its
-/// UniFFI converter registers under `android_aar`'s tag — a prerequisite for
+/// `UniFFI` converter registers under `android_aar`'s tag — a prerequisite for
 /// naming it as a parameter type in [`build_android_engine`]. Mirrors
 /// `ios-framework::IosEventListener`.
 #[cfg(feature = "uniffi")]
@@ -967,16 +997,19 @@ impl ClientEventListener for AndroidListenerBridge {
 /// - `stt` / `tts` — the foreign speech callbacks (bridged to
 ///   [`traits::SpeechToText`] / [`traits::TextToSpeech`]).
 /// - `camera` — the foreign camera callback (bridged to
-///   [`traits::CameraControl`]) so `tool-camera` routes through CameraX +
+///   [`traits::CameraControl`]) so `tool-camera` routes through `CameraX` +
 ///   the system photo picker.
 /// - `share` — the foreign share callback (bridged to
 ///   [`traits::SharingService`]) so `tool-share` routes through the system
 ///   `Intent.ACTION_SEND` share sheet.
+/// - `shell` — optional Android sandbox/shell config (spec r3 §Android
+///   inputs); `None`/`null` keeps shell support fully absent.
 ///
 /// On non-Android hosts this returns [`MobileEngineError::PlatformUnavailable`]
 /// (the `AndroidPlatform` is only linked under `cfg(target_os = "android")`).
 #[cfg(feature = "uniffi")]
 #[cfg_attr(feature = "uniffi", uniffi::export)]
+#[allow(clippy::too_many_arguments)] // FFI constructor: one flat arg per Kotlin callback.
 pub fn build_android_engine(
     api_base: String,
     api_key: String,
@@ -991,6 +1024,7 @@ pub fn build_android_engine(
     notifications: Box<dyn AndroidNotification>,
     clipboard: Box<dyn AndroidClipboard>,
     permissions: Box<dyn AndroidPermissionSink>,
+    shell: Option<AndroidShellConfigFfi>,
 ) -> Result<Arc<MobileEngineHandle>, MobileEngineError> {
     let listener: Arc<dyn ClientEventListener> =
         Arc::new(AndroidListenerBridge { inner: listener });
@@ -1009,6 +1043,17 @@ pub fn build_android_engine(
         if !model.is_empty() {
             cfg.default_model = model;
         }
+        let shell_cfg = shell.map(|s| platform_android::AndroidShellConfig {
+            native_library_dir: std::path::PathBuf::from(s.native_library_dir),
+            shell_workspace_root: std::path::PathBuf::from(s.shell_workspace_root),
+            app_cache_root: std::path::PathBuf::from(s.app_cache_root),
+            package_name: s.package_name,
+            package_version_code: s.package_version_code,
+            app_writable_roots: s.app_writable_roots.into_iter().map(Into::into).collect(),
+            enable_shell: s.enable_shell,
+            secrets_in_keystore: s.secrets_in_keystore,
+            shell_data_exposure_accepted: s.shell_data_exposure_accepted,
+        });
         let platform: Arc<dyn Platform> = Arc::new(AndroidPlatform::new(AndroidPlatformInputs {
             app_files_root: std::path::PathBuf::from(app_files_root),
             camera: Arc::new(AndroidCameraBridge { inner: camera }),
@@ -1020,6 +1065,7 @@ pub fn build_android_engine(
                 inner: notifications,
             })),
             clipboard: Some(Arc::new(AndroidClipboardBridge { inner: clipboard })),
+            shell: shell_cfg,
         }));
         let permission_sink: Arc<dyn PermissionRequestSink> =
             Arc::new(AndroidPermissionSinkBridge { inner: permissions });
@@ -1041,8 +1087,28 @@ pub fn build_android_engine(
             notifications,
             clipboard,
             permissions,
+            shell,
         );
         Err(MobileEngineError::PlatformUnavailable)
+    }
+}
+
+/// P0a gate probe: run the on-device minijail smoke and return it as JSON
+/// (`{"ok":bool,"no_new_privs":bool,"child_exit_zero":bool,"reason":...}`).
+/// Keys are serde's default `snake_case` (`SmokeResult` has no `rename_all`).
+/// Host builds report the structural reason.
+#[cfg(feature = "uniffi")]
+#[cfg_attr(feature = "uniffi", uniffi::export)]
+#[must_use]
+pub fn android_sandbox_smoke() -> String {
+    #[cfg(target_os = "android")]
+    {
+        serde_json::to_string(&platform_android_minijail::minijail_smoke())
+            .unwrap_or_else(|e| format!("{{\"ok\":false,\"reason\":\"serialize: {e}\"}}"))
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        "{\"ok\":false,\"reason\":\"host build\"}".to_string()
     }
 }
 
@@ -1147,8 +1213,7 @@ mod tests {
     #[async_trait]
     impl PermissionRequestSink for RecordingPermissionSink {
         async fn emit_request(&self, _request: PermissionRequestDto) {
-            self.count
-                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         }
     }
 

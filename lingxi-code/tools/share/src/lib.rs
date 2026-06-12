@@ -1,7 +1,7 @@
 //! `tool-share` (M8-P11) — the mobile-exclusive `share` tool.
 //!
 //! Routes to `ctx.share` (`Arc<dyn SharingService>`). `None` on desktop; mobile
-//! composition roots wire a native Swift / Kotlin impl via UniFFI (P12).
+//! composition roots wire a native Swift / Kotlin impl via `UniFFI` (P12).
 
 #![forbid(unsafe_code)]
 

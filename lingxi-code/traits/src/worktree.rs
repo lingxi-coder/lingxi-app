@@ -107,7 +107,11 @@ impl WorktreeChangeSummary {
         if self.changed_files == 0 {
             return None;
         }
-        let noun = if self.changed_files == 1 { "file" } else { "files" };
+        let noun = if self.changed_files == 1 {
+            "file"
+        } else {
+            "files"
+        };
         Some(format!("{} uncommitted {noun}", self.changed_files))
     }
 
@@ -121,7 +125,11 @@ impl WorktreeChangeSummary {
         if self.commits == 0 {
             return None;
         }
-        let noun = if self.commits == 1 { "commit" } else { "commits" };
+        let noun = if self.commits == 1 {
+            "commit"
+        } else {
+            "commits"
+        };
         Some(format!("{} {noun} on {branch}", self.commits))
     }
 
@@ -135,7 +143,11 @@ impl WorktreeChangeSummary {
     pub fn discard_note(&self) -> String {
         let mut parts: Vec<String> = Vec::new();
         if self.commits > 0 {
-            let noun = if self.commits == 1 { "commit" } else { "commits" };
+            let noun = if self.commits == 1 {
+                "commit"
+            } else {
+                "commits"
+            };
             parts.push(format!("{} {noun}", self.commits));
         }
         if let Some(files) = self.changed_files_phrase() {
@@ -205,24 +217,52 @@ mod m2_01_tests {
 
     #[test]
     fn change_summary_is_dirty_reflects_either_count() {
-        assert!(!WorktreeChangeSummary { changed_files: 0, commits: 0 }.is_dirty());
-        assert!(WorktreeChangeSummary { changed_files: 1, commits: 0 }.is_dirty());
-        assert!(WorktreeChangeSummary { changed_files: 0, commits: 1 }.is_dirty());
-        assert!(WorktreeChangeSummary { changed_files: 3, commits: 2 }.is_dirty());
+        assert!(!WorktreeChangeSummary {
+            changed_files: 0,
+            commits: 0
+        }
+        .is_dirty());
+        assert!(WorktreeChangeSummary {
+            changed_files: 1,
+            commits: 0
+        }
+        .is_dirty());
+        assert!(WorktreeChangeSummary {
+            changed_files: 0,
+            commits: 1
+        }
+        .is_dirty());
+        assert!(WorktreeChangeSummary {
+            changed_files: 3,
+            commits: 2
+        }
+        .is_dirty());
     }
 
     #[test]
     fn changed_files_phrase_singular_and_plural() {
         assert_eq!(
-            WorktreeChangeSummary { changed_files: 0, commits: 0 }.changed_files_phrase(),
+            WorktreeChangeSummary {
+                changed_files: 0,
+                commits: 0
+            }
+            .changed_files_phrase(),
             None
         );
         assert_eq!(
-            WorktreeChangeSummary { changed_files: 1, commits: 0 }.changed_files_phrase(),
+            WorktreeChangeSummary {
+                changed_files: 1,
+                commits: 0
+            }
+            .changed_files_phrase(),
             Some("1 uncommitted file".to_string())
         );
         assert_eq!(
-            WorktreeChangeSummary { changed_files: 5, commits: 0 }.changed_files_phrase(),
+            WorktreeChangeSummary {
+                changed_files: 5,
+                commits: 0
+            }
+            .changed_files_phrase(),
             Some("5 uncommitted files".to_string())
         );
     }
@@ -230,18 +270,27 @@ mod m2_01_tests {
     #[test]
     fn commits_phrase_singular_and_plural_with_branch() {
         assert_eq!(
-            WorktreeChangeSummary { changed_files: 0, commits: 0 }
-                .commits_phrase("worktree-feat"),
+            WorktreeChangeSummary {
+                changed_files: 0,
+                commits: 0
+            }
+            .commits_phrase("worktree-feat"),
             None
         );
         assert_eq!(
-            WorktreeChangeSummary { changed_files: 0, commits: 1 }
-                .commits_phrase("worktree-feat"),
+            WorktreeChangeSummary {
+                changed_files: 0,
+                commits: 1
+            }
+            .commits_phrase("worktree-feat"),
             Some("1 commit on worktree-feat".to_string())
         );
         assert_eq!(
-            WorktreeChangeSummary { changed_files: 0, commits: 4 }
-                .commits_phrase("worktree-feat"),
+            WorktreeChangeSummary {
+                changed_files: 0,
+                commits: 4
+            }
+            .commits_phrase("worktree-feat"),
             Some("4 commits on worktree-feat".to_string())
         );
     }
@@ -250,27 +299,47 @@ mod m2_01_tests {
     fn discard_note_byte_faithful_to_ts() {
         // Nothing to discard → empty string (no leading space).
         assert_eq!(
-            WorktreeChangeSummary { changed_files: 0, commits: 0 }.discard_note(),
+            WorktreeChangeSummary {
+                changed_files: 0,
+                commits: 0
+            }
+            .discard_note(),
             ""
         );
         // Only uncommitted files.
         assert_eq!(
-            WorktreeChangeSummary { changed_files: 2, commits: 0 }.discard_note(),
+            WorktreeChangeSummary {
+                changed_files: 2,
+                commits: 0
+            }
+            .discard_note(),
             " Discarded 2 uncommitted files."
         );
         // Only commits (no branch in the discard note, matching TS).
         assert_eq!(
-            WorktreeChangeSummary { changed_files: 0, commits: 1 }.discard_note(),
+            WorktreeChangeSummary {
+                changed_files: 0,
+                commits: 1
+            }
+            .discard_note(),
             " Discarded 1 commit."
         );
         // Both — commits first, then files, joined by " and " (TS order).
         assert_eq!(
-            WorktreeChangeSummary { changed_files: 3, commits: 2 }.discard_note(),
+            WorktreeChangeSummary {
+                changed_files: 3,
+                commits: 2
+            }
+            .discard_note(),
             " Discarded 2 commits and 3 uncommitted files."
         );
         // Singular both.
         assert_eq!(
-            WorktreeChangeSummary { changed_files: 1, commits: 1 }.discard_note(),
+            WorktreeChangeSummary {
+                changed_files: 1,
+                commits: 1
+            }
+            .discard_note(),
             " Discarded 1 commit and 1 uncommitted file."
         );
     }

@@ -11,7 +11,9 @@
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
+use std::any::Any;
 use std::path::PathBuf;
+use std::sync::Arc;
 use thiserror::Error;
 
 /// Platform-specific sandbox backend.
@@ -60,6 +62,9 @@ pub enum SandboxBackend {
     MacOsSandboxExec,
     /// Windows Job Object + restricted token.
     WindowsJobObject,
+    /// Android in-engine Minijail (`no_new_privs` / rlimits / seccomp via
+    /// libminijail linked into the engine .so). Spec r3 D6.
+    AndroidMinijail,
     /// No sandbox enforcement (used for explicit bypass).
     None,
 }
@@ -176,9 +181,43 @@ pub struct ProcessCommand {
     pub stdin: Option<String>,
 }
 
+/// Opaque, backend-owned prepared execution plan riding on a
+/// [`SandboxedCommand`] from `prepare()` to the runner (spec r3 D7).
+///
+/// In-process only — never serialized. Only the backend that minted it can
+/// (and should) downcast it back. `Debug` prints a placeholder so command
+/// logging cannot leak plan internals.
+#[derive(Clone)]
+pub struct BackendPlanHandle(Arc<dyn Any + Send + Sync>);
+
+impl BackendPlanHandle {
+    /// Wrap a backend plan value.
+    ///
+    /// Pass the plan by value, not pre-`Arc`'d — wrapping an `Arc<T>` makes
+    /// the stored type `Arc<T>` and `downcast::<T>()` will return `None`.
+    #[must_use]
+    pub fn new<T: Any + Send + Sync>(plan: T) -> Self {
+        Self(Arc::new(plan))
+    }
+
+    /// Recover the concrete plan type. Returns `None` when the handle holds
+    /// a different type (runners treat that as a malformed plan).
+    #[must_use]
+    pub fn downcast<T: Any + Send + Sync>(&self) -> Option<Arc<T>> {
+        self.0.clone().downcast::<T>().ok()
+    }
+}
+
+impl std::fmt::Debug for BackendPlanHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("BackendPlanHandle(..)")
+    }
+}
+
 /// Opaque newtype — only constructible via [`Sandbox::prepare`],
-/// [`Sandbox::bypass_with_audit`], or the `__new_sandboxed` constructor
-/// (which is the seam external [`Sandbox`] impls call into).
+/// [`Sandbox::bypass_with_audit`], [`SandboxedCommand::__new_sandboxed`], or
+/// [`SandboxedCommand::__new_sandboxed_with_plan`] (the seams external
+/// [`Sandbox`] impls call into).
 ///
 /// [`crate::process::ProcessRunner::run`] accepts only this type, making it
 /// impossible to bypass the sandbox decision (D2 / spec A1).
@@ -186,6 +225,7 @@ pub struct ProcessCommand {
 pub struct SandboxedCommand {
     inner: ProcessCommand,
     tag: SandboxedTag,
+    plan: Option<BackendPlanHandle>,
 }
 
 /// Provenance of a [`SandboxedCommand`].
@@ -214,7 +254,28 @@ impl SandboxedCommand {
     /// runs.
     #[must_use]
     pub fn __new_sandboxed(inner: ProcessCommand, tag: SandboxedTag) -> Self {
-        Self { inner, tag }
+        Self {
+            inner,
+            tag,
+            plan: None,
+        }
+    }
+
+    /// INTERNAL constructor for backends that carry a prepared plan to their
+    /// runner (Android). Same visibility convention as [`__new_sandboxed`].
+    ///
+    /// [`__new_sandboxed`]: SandboxedCommand::__new_sandboxed
+    #[must_use]
+    pub fn __new_sandboxed_with_plan(
+        inner: ProcessCommand,
+        tag: SandboxedTag,
+        plan: BackendPlanHandle,
+    ) -> Self {
+        Self {
+            inner,
+            tag,
+            plan: Some(plan),
+        }
     }
 
     /// Access the underlying [`ProcessCommand`] (for the runner to actually
@@ -229,11 +290,24 @@ impl SandboxedCommand {
     pub fn tag(&self) -> &SandboxedTag {
         &self.tag
     }
+
+    /// The backend-owned prepared plan, when the minting backend attached one.
+    #[must_use]
+    pub fn backend_plan(&self) -> Option<&BackendPlanHandle> {
+        self.plan.as_ref()
+    }
 }
 
 #[cfg(test)]
 mod m2_01_tests {
     use super::*;
+
+    #[test]
+    fn plan_handle_is_send_sync_clone() {
+        fn assert_bounds<T: Send + Sync + Clone>() {}
+        assert_bounds::<BackendPlanHandle>();
+        assert_bounds::<SandboxedCommand>();
+    }
 
     #[test]
     fn sandbox_error_unsupported_displays() {
@@ -247,5 +321,79 @@ mod m2_01_tests {
         let a = SandboxError::Unavailable("bwrap missing".into());
         assert!(!matches!(u, SandboxError::Unavailable(_)));
         assert!(matches!(a, SandboxError::Unavailable(_)));
+    }
+
+    #[test]
+    fn android_minijail_backend_serde_roundtrip() {
+        let b = SandboxBackend::AndroidMinijail;
+        let json = serde_json::to_string(&b).expect("serialize");
+        assert_eq!(json, "\"AndroidMinijail\"");
+        let back: SandboxBackend = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back, SandboxBackend::AndroidMinijail);
+    }
+
+    #[derive(Debug, PartialEq)]
+    struct FakePlan {
+        marker: u32,
+    }
+
+    fn cmd_for_plan_tests() -> ProcessCommand {
+        ProcessCommand {
+            command: "echo".into(),
+            args: vec![],
+            cwd: None,
+            env: std::collections::HashMap::new(),
+            timeout: None,
+            stdin: None,
+        }
+    }
+
+    #[test]
+    fn new_sandboxed_has_no_plan() {
+        let sc = SandboxedCommand::__new_sandboxed(
+            cmd_for_plan_tests(),
+            SandboxedTag::Wrapped {
+                backend: SandboxBackend::None,
+            },
+        );
+        assert!(sc.backend_plan().is_none());
+    }
+
+    #[test]
+    fn with_plan_roundtrips_through_downcast() {
+        let sc = SandboxedCommand::__new_sandboxed_with_plan(
+            cmd_for_plan_tests(),
+            SandboxedTag::Wrapped {
+                backend: SandboxBackend::AndroidMinijail,
+            },
+            BackendPlanHandle::new(FakePlan { marker: 7 }),
+        );
+        let plan = sc
+            .backend_plan()
+            .expect("plan attached")
+            .downcast::<FakePlan>()
+            .expect("downcast to FakePlan");
+        assert_eq!(plan.marker, 7);
+        // Wrong type downcasts to None, not a panic.
+        assert!(sc.backend_plan().unwrap().downcast::<String>().is_none());
+    }
+
+    #[test]
+    fn plan_handle_debug_is_opaque_and_clone_shares() {
+        let h = BackendPlanHandle::new(FakePlan { marker: 1 });
+        assert_eq!(format!("{h:?}"), "BackendPlanHandle(..)");
+        let sc = SandboxedCommand::__new_sandboxed_with_plan(
+            cmd_for_plan_tests(),
+            SandboxedTag::Wrapped {
+                backend: SandboxBackend::AndroidMinijail,
+            },
+            h,
+        );
+        let cloned = sc.clone();
+        assert!(cloned
+            .backend_plan()
+            .unwrap()
+            .downcast::<FakePlan>()
+            .is_some());
     }
 }

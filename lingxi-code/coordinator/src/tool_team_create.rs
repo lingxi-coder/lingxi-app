@@ -436,8 +436,8 @@ mod tests {
         }
     }
 
-    /// Build a TeamCreate tool with coordinator mode ENABLED (the normal path),
-    /// a recording seam returning the given handler task_id, and a spy output
+    /// Build a `TeamCreate` tool with coordinator mode ENABLED (the normal path),
+    /// a recording seam returning the given handler `task_id`, and a spy output
     /// the test can inspect for the activation PUSH.
     fn make_tool_with_seam_and_spy(
         seam: Arc<RecordingSeam>,
@@ -460,8 +460,8 @@ mod tests {
         (tool, registry, mode, spy)
     }
 
-    /// Build a TeamCreate tool with coordinator mode ENABLED (the normal path)
-    /// and a recording seam returning the given handler task_id.
+    /// Build a `TeamCreate` tool with coordinator mode ENABLED (the normal path)
+    /// and a recording seam returning the given handler `task_id`.
     fn make_tool_with_seam(
         seam: Arc<RecordingSeam>,
     ) -> (TeamCreateTool, Arc<TeamRegistry>, Arc<CoordinatorMode>) {

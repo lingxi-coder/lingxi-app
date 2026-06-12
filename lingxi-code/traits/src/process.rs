@@ -77,10 +77,43 @@ pub enum ProcessError {
     /// Platform does not implement process execution.
     #[error("unsupported on this platform")]
     Unsupported,
+    /// A requested policy guarantee cannot be enforced on this platform.
+    /// The payload names the guarantee (spec: "errors must name the
+    /// unenforceable guarantee").
+    #[error("policy unsupported: {0}")]
+    PolicyUnsupported(String),
+    /// The runner received a [`SandboxedCommand`] whose backend plan is
+    /// missing, malformed, or minted for a different backend.
+    #[error("malformed sandbox plan: {0}")]
+    MalformedSandboxPlan(String),
+    /// Jail setup failed at runtime (after prepare admitted the command).
+    #[error("sandbox enforcement failed: {0}")]
+    SandboxEnforcementFailed(String),
     /// Underlying I/O failure.
     #[error("io: {0}")]
     Io(String),
     /// Timeout fired before the command completed.
     #[error("timeout")]
     Timeout,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ProcessError;
+
+    #[test]
+    fn structured_variants_name_the_guarantee() {
+        assert_eq!(
+            ProcessError::PolicyUnsupported("networked shell is not supported".into()).to_string(),
+            "policy unsupported: networked shell is not supported"
+        );
+        assert_eq!(
+            ProcessError::MalformedSandboxPlan("missing android plan".into()).to_string(),
+            "malformed sandbox plan: missing android plan"
+        );
+        assert_eq!(
+            ProcessError::SandboxEnforcementFailed("seccomp load failed".into()).to_string(),
+            "sandbox enforcement failed: seccomp load failed"
+        );
+    }
 }

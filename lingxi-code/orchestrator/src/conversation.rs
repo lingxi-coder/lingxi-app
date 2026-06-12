@@ -190,6 +190,50 @@ pub trait OrchestratorApiClient: Send + Sync {
     fn last_raw_utilization(&self) -> Option<crate::model::rate_limit::RawUtilization> {
         None
     }
+
+    /// Return the limits-specific copy composed from the most recent 429
+    /// **error** response's unified rate-limit headers, if any.
+    ///
+    /// Task 6 (llm-client future-work batch 5): claude-code builds the
+    /// rejected-limits view from the terminal 429's own headers and renders
+    /// `getRateLimitErrorMessage` as the user-visible error content
+    /// (`errors.ts:480-524`). `ProviderApiAdapter` overrides this to expose
+    /// the copy it composed when it decoded the 429 (`None` when the 429
+    /// carried no unified headers — the `if (rateLimitType || overageStatus)`
+    /// gate at `errors.ts:480`). The public turn drivers consult it to
+    /// re-map a terminal `RateLimited` error into
+    /// [`OrchestratorError::RateLimitRejected`].
+    ///
+    /// Default returns `None` (mocks / non-Anthropic impls keep the generic
+    /// `"api call failed: rate limited"` surface).
+    fn last_rate_limit_error_message(&self) -> Option<String> {
+        None
+    }
+}
+
+/// Re-map a terminal `RateLimited` turn error onto the limits-specific copy
+/// composed from the 429's own headers (claude-code `errors.ts:480-524`):
+/// when the turn died on a 429 AND the API client recorded a composed
+/// rejected-limits message, the user-visible error becomes that copy
+/// ([`OrchestratorError::RateLimitRejected`]); otherwise the error passes
+/// through untouched. Covers both wrappers a 429 can ride in on — the
+/// batched `ApiCall` and the streaming connect-phase `Streaming`.
+fn enrich_rate_limited_error(
+    err: OrchestratorError,
+    composed: Option<String>,
+) -> OrchestratorError {
+    let is_rate_limited = matches!(
+        &err,
+        OrchestratorError::ApiCall(LlmError::RateLimited { .. })
+            | OrchestratorError::Streaming(LlmError::RateLimited { .. })
+    );
+    if !is_rate_limited {
+        return err;
+    }
+    match composed {
+        Some(message) => OrchestratorError::RateLimitRejected { message },
+        None => err,
+    }
 }
 
 /// Streaming-API surface used by the orchestrator's streaming turn loop.
@@ -1301,6 +1345,19 @@ impl ConversationOrchestrator {
         )
     }
 
+    /// Task 6 (llm-client future-work batch 5): re-map a terminal
+    /// `RateLimited` error onto the limits-specific copy the API client
+    /// composed from the 429's own unified headers (claude-code
+    /// `errors.ts:480-524`). Applied by every public turn driver so each
+    /// consumer of the error's `Display` (CLI stderr, TUI scrollback,
+    /// `client-adapter` `ClientEvent::Error`) sees the
+    /// `"You've hit your … limit · resets …"` copy instead of the generic
+    /// `"api call failed: rate limited"`. No-op for non-429 errors and when
+    /// the 429 carried no unified headers.
+    fn enrich_api_error(&self, err: OrchestratorError) -> OrchestratorError {
+        enrich_rate_limited_error(err, self.api.last_rate_limit_error_message())
+    }
+
     /// Drive one user prompt through the turn loop until `end_turn` or
     /// `max_turns` is exhausted.
     ///
@@ -1313,7 +1370,10 @@ impl ConversationOrchestrator {
             event = orch_events::CONVERSATION_STARTED,
             prompt_len = prompt.len()
         );
-        let result = self.try_run_turn(prompt).await;
+        let result = self
+            .try_run_turn(prompt)
+            .await
+            .map_err(|e| self.enrich_api_error(e));
         // ConversationOutcome is #[non_exhaustive] so future variants will
         // also log as Completed when the only existing variant is EndTurn.
         match &result {
@@ -1891,7 +1951,10 @@ impl ConversationOrchestrator {
             event = orch_events::TURN_STREAMING_STARTED,
             prompt_len = prompt.len()
         );
-        let result = self.try_run_turn_streaming(prompt, Vec::new()).await;
+        let result = self
+            .try_run_turn_streaming(prompt, Vec::new())
+            .await
+            .map_err(|e| self.enrich_api_error(e));
         match &result {
             Ok(ConversationOutcome::EndTurn { turn_count, .. }
             | ConversationOutcome::StopHookPrevented { turn_count, .. }) => {
@@ -2427,7 +2490,9 @@ impl ConversationOrchestrator {
             event = orch_events::CONVERSATION_STARTED,
             prompt_len = prompt.len()
         );
-        self.try_run_turn_cancelable(prompt, cancel).await
+        self.try_run_turn_cancelable(prompt, cancel)
+            .await
+            .map_err(|e| self.enrich_api_error(e))
     }
 
     /// Internal implementation of the REPL turn loop with cancellation.
@@ -2592,7 +2657,7 @@ impl ConversationOrchestrator {
                 Err(OrchestratorError::MaxTurnsReached { .. }) => {
                     Ok(TurnOutcome::MaxTurns)
                 }
-                Err(e) => Err(e),
+                Err(e) => Err(self.enrich_api_error(e)),
             },
         }
     }
@@ -4140,5 +4205,60 @@ mod task7_midstream_fallback_tests {
         assert!(is_env_truthy(Some("1")));
         assert!(is_env_truthy(Some("true")));
         assert!(is_env_truthy(Some("yes")));
+    }
+}
+
+/// Task 6 (llm-client future-work batch 5): the terminal-429 limits-copy
+/// re-map (`enrich_rate_limited_error`). The integration test
+/// (`tests/rate_limit_terminal_429_test.rs`) drives the batched `ApiCall`
+/// wrapper end-to-end; these cover the `Streaming` wrapper and the
+/// pass-through arms directly.
+#[cfg(test)]
+mod enrich_rate_limited_error_tests {
+    use super::*;
+
+    fn rate_limited() -> LlmError {
+        LlmError::RateLimited {
+            retry_after: None,
+            scope: None,
+        }
+    }
+
+    /// A streaming connect-phase 429 (the wrapper `try_run_turn_streaming`
+    /// produces) re-maps onto the composed copy too.
+    #[test]
+    fn streaming_429_with_copy_maps_to_rate_limit_rejected() {
+        let err = enrich_rate_limited_error(
+            OrchestratorError::Streaming(rate_limited()),
+            Some("You've hit your weekly limit · resets 3pm".to_string()),
+        );
+        assert!(
+            matches!(err, OrchestratorError::RateLimitRejected { .. }),
+            "got {err:?}"
+        );
+        assert_eq!(err.to_string(), "You've hit your weekly limit · resets 3pm");
+    }
+
+    /// No composed copy → both wrappers pass through untouched.
+    #[test]
+    fn rate_limited_without_copy_passes_through() {
+        let api = enrich_rate_limited_error(OrchestratorError::ApiCall(rate_limited()), None);
+        assert!(matches!(api, OrchestratorError::ApiCall(LlmError::RateLimited { .. })));
+        let stream =
+            enrich_rate_limited_error(OrchestratorError::Streaming(rate_limited()), None);
+        assert!(matches!(
+            stream,
+            OrchestratorError::Streaming(LlmError::RateLimited { .. })
+        ));
+    }
+
+    /// A non-429 error never consults the copy — even when one is cached.
+    #[test]
+    fn non_rate_limited_ignores_copy() {
+        let err = enrich_rate_limited_error(
+            OrchestratorError::StreamEndedWithoutStop,
+            Some("You've hit your weekly limit".to_string()),
+        );
+        assert!(matches!(err, OrchestratorError::StreamEndedWithoutStop));
     }
 }

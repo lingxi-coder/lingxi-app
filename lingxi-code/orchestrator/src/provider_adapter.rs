@@ -7,7 +7,10 @@
 
 use crate::conversation::{OrchestratorApiClient, StreamingApiClient};
 use crate::model::betas::{apply_beta_header_with_auth, Endpoint, Provider};
-use crate::model::rate_limit::{parse_retry_after, parse_unified_reset, RateLimitInfo, RawUtilization};
+use crate::model::rate_limit::{
+    formatted_reset_times_from_headers, parse_retry_after, parse_unified_reset,
+    rate_limit_error_message, RateLimitInfo, RawUtilization, SubscriptionContext,
+};
 use crate::model::retry::{next_step_with_backoff, resolve_retry_control_with_settings, DriveStep, ResolveRetryEnv, RetryControl, RetryState};
 use crate::model::telemetry;
 use crate::model::user_agent::{user_agent, UserAgentEnv};
@@ -145,6 +148,20 @@ pub struct ProviderApiAdapter {
     /// `last_rate_limit`. Exposed via the
     /// `OrchestratorApiClient::last_raw_utilization` override.
     last_raw_utilization: Mutex<Option<RawUtilization>>,
+    /// Limits-specific copy composed from the most recent 429 **error**
+    /// response's unified headers.
+    ///
+    /// Task 6 (llm-client future-work batch 5): claude-code builds the
+    /// rejected-limits view from the terminal 429's own headers and renders
+    /// `getRateLimitErrorMessage` as the user-visible error content
+    /// (`errors.ts:480-524`). Set on EVERY decoded 429 by
+    /// [`Self::record_rate_limit_from_429`] — `Some(copy)` when the 429
+    /// carried unified headers, `None` otherwise (the
+    /// `if (rateLimitType || overageStatus)` gate at `errors.ts:480`) — and
+    /// cleared on every successful response, so it always reflects the most
+    /// recent response seen. Exposed via the
+    /// `OrchestratorApiClient::last_rate_limit_error_message` override.
+    last_429_message: Mutex<Option<String>>,
 }
 
 impl ProviderApiAdapter {
@@ -264,6 +281,7 @@ impl ProviderApiAdapter {
             estimator,
             last_rate_limit: Mutex::new(None),
             last_raw_utilization: Mutex::new(None),
+            last_429_message: Mutex::new(None),
         }
     }
 
@@ -497,6 +515,73 @@ impl ProviderApiAdapter {
             }
             *self.last_rate_limit.lock().unwrap() = Some(info);
         }
+        // Task 6 (batch 5): a successful response supersedes any cached 429
+        // limits copy — the slot always reflects the most recent response.
+        *self.last_429_message.lock().unwrap() = None;
+    }
+
+    /// Whether the live subscription snapshot is a Pro or Enterprise plan —
+    /// the `getSubscriptionType() === 'pro' || 'enterprise'` predicate gating
+    /// the `seven_day_sonnet` wording (claude-code
+    /// `rateLimitMessages.ts:176-181`).
+    ///
+    /// Reads the live [`Self::subscription`] slot directly (the snapshot
+    /// carries `subscription_type`; [`SubscriberState`] does not). With no
+    /// resolved snapshot, falls back to the build-time enterprise bit —
+    /// `pro` is unknowable pre-snapshot, matching an unresolved
+    /// `getSubscriptionType()` evaluating to neither.
+    fn is_pro_or_enterprise(&self) -> bool {
+        if let Some(slot) = &self.subscription {
+            if let Ok(guard) = slot.read() {
+                if let Some(snap) = guard.as_ref() {
+                    return matches!(
+                        snap.subscription_type.as_deref(),
+                        Some("pro" | "enterprise")
+                    );
+                }
+            }
+        }
+        self.subscriber.is_enterprise
+    }
+
+    /// Record the unified rate-limit context from a 429 **error** response —
+    /// the Rust seam for claude-code `errors.ts:471-524`, which extracts the
+    /// unified headers from the error itself when a turn dies on a 429
+    /// (success-path recording never sees them).
+    ///
+    /// When the 429 carries unified headers (the
+    /// `if (rateLimitType || overageStatus)` gate, `errors.ts:480`):
+    /// 1. the forced-`rejected` limits view replaces the cached snapshot
+    ///    (TS updates its limits state from the error headers with
+    ///    `status: 'rejected'`, `errors.ts:482-516`), and
+    /// 2. the composed `getRateLimitErrorMessage` copy is cached for the
+    ///    orchestrator's terminal-error re-map
+    ///    (`OrchestratorError::RateLimitRejected`).
+    ///
+    /// Without unified headers the copy slot is cleared (the generic 429
+    /// surface applies) and the limits snapshot is left untouched — TS only
+    /// updates inside the gated branch.
+    fn record_rate_limit_from_429(&self, headers: &std::collections::BTreeMap<String, String>) {
+        let hvec: Vec<(String, String)> = headers
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        let composed = RateLimitInfo::from_429_error_headers(&hvec).map(|info| {
+            // errors.ts:482-516 — the limits state is updated from the
+            // error's headers with status forced to 'rejected'.
+            *self.last_rate_limit.lock().unwrap() = Some(info.clone());
+            // `formatResetTime(…, true)` analogue for both reset headers
+            // (`rateLimitMessages.ts:144-148`), formatted at error time.
+            let formatted = formatted_reset_times_from_headers(&hvec);
+            rate_limit_error_message(
+                &info,
+                &formatted.as_reset_times(),
+                SubscriptionContext {
+                    is_pro_or_enterprise: self.is_pro_or_enterprise(),
+                },
+            )
+        });
+        *self.last_429_message.lock().unwrap() = composed.flatten();
     }
 
     /// HTTP status code approximation for `emit_failed` (best-effort: only the
@@ -666,6 +751,10 @@ impl ProviderApiAdapter {
 
                             // Rate-limited: resolve delay from headers.
                             let effective_err = if let LlmError::RateLimited { .. } = &decode_err {
+                                // Task 6 (batch 5): capture the 429's OWN
+                                // unified headers (errors.ts:471-516) so a
+                                // terminal 429 can surface the limits copy.
+                                self.record_rate_limit_from_429(&provider_resp.headers);
                                 let delay = Self::resolve_retry_after(&provider_resp.headers);
                                 telemetry::emit_rate_limited(
                                     &self.analytics,
@@ -866,6 +955,9 @@ impl ProviderApiAdapter {
                         // fall through to the 1 s fallback inside
                         // `resolve_retry_after`.
                         let effective_err = if let LlmError::RateLimited { .. } = &decode_err {
+                            // Task 6 (batch 5): same 429-error-header capture
+                            // as the non-stream path (errors.ts:471-516).
+                            self.record_rate_limit_from_429(&response_headers);
                             LlmError::RateLimited {
                                 retry_after: Some(Self::resolve_retry_after(&response_headers)),
                                 scope: None,
@@ -1180,6 +1272,14 @@ impl OrchestratorApiClient for ProviderApiAdapter {
     /// drivers' `emit_raw_utilization` seam.
     fn last_raw_utilization(&self) -> Option<RawUtilization> {
         *self.last_raw_utilization.lock().unwrap()
+    }
+
+    /// Task 6 (llm-client future-work batch 5): expose the limits copy
+    /// composed by [`Self::record_rate_limit_from_429`] from the most recent
+    /// 429 error response's unified headers, for the orchestrator's
+    /// terminal-429 re-map (claude-code `errors.ts:480-524`).
+    fn last_rate_limit_error_message(&self) -> Option<String> {
+        self.last_429_message.lock().unwrap().clone()
     }
 }
 
@@ -1944,6 +2044,139 @@ mod tests {
             transport.seen_count(),
             1,
             "subscriber 429 must not retry (seen_count should be 1)"
+        );
+    }
+
+    /// Task 6 (batch 5): a terminal 429 whose response carries the unified
+    /// headers records the forced-`rejected` snapshot AND the composed
+    /// limits copy (byte-pinned: no reset header → no ` · resets …` clause,
+    /// `rateLimitMessages.ts:149` + `:333-344`).
+    #[tokio::test]
+    async fn terminal_429_with_unified_headers_records_limits_copy() {
+        let transport = FakeTransport::always(ProviderResponse {
+            status: 429,
+            headers: {
+                let mut h = BTreeMap::new();
+                h.insert(
+                    "anthropic-ratelimit-unified-representative-claim".to_string(),
+                    "seven_day".to_string(),
+                );
+                h.insert(
+                    "anthropic-ratelimit-unified-status".to_string(),
+                    "rejected".to_string(),
+                );
+                h
+            },
+            body_json: serde_json::json!({
+                "type": "error",
+                "error": {"type": "rate_limit_error", "message": "You have reached your usage limit"}
+            }),
+            request_id: None,
+        });
+        // Subscriber (non-enterprise) → the 429 is terminal on the first try.
+        let adapter = make_adapter_with_subscriber(
+            transport.clone(),
+            SubscriberState { is_subscriber: true, is_enterprise: false },
+        );
+        let result = adapter
+            .messages_create("claude-sonnet-4-20250514", None, Vec::new(), Vec::new())
+            .await;
+        assert!(matches!(result, Err(LlmError::RateLimited { .. })), "got {result:?}");
+
+        // The composed copy is cached for the orchestrator's terminal re-map.
+        assert_eq!(
+            OrchestratorApiClient::last_rate_limit_error_message(&adapter).as_deref(),
+            Some("You've hit your weekly limit"),
+            "seven_day → formatLimitReachedText('weekly limit', '') verbatim"
+        );
+        // errors.ts:482-516 — the limits snapshot is updated from the error's
+        // headers with status FORCED 'rejected'.
+        let info = OrchestratorApiClient::last_rate_limit_full(&adapter).expect("snapshot");
+        assert_eq!(info.status.as_deref(), Some("rejected"));
+        assert_eq!(info.rate_limit_type.as_deref(), Some("seven_day"));
+    }
+
+    /// Task 6 (batch 5): a 429 WITHOUT unified headers fails the
+    /// `if (rateLimitType || overageStatus)` gate (errors.ts:480) — no copy
+    /// is composed, and a copy from an earlier 429 is superseded (the slot
+    /// reflects the most recent 429), so the generic surface applies.
+    #[tokio::test]
+    async fn terminal_429_without_unified_headers_records_no_copy() {
+        let transport = FakeTransport::always(ProviderResponse {
+            status: 429,
+            headers: BTreeMap::new(),
+            body_json: serde_json::json!({
+                "type": "error",
+                "error": {"type": "rate_limit_error", "message": "rate limited"}
+            }),
+            request_id: None,
+        });
+        let adapter = make_adapter_with_subscriber(
+            transport.clone(),
+            SubscriberState { is_subscriber: true, is_enterprise: false },
+        );
+        let result = adapter
+            .messages_create("claude-sonnet-4-20250514", None, Vec::new(), Vec::new())
+            .await;
+        assert!(result.is_err());
+        assert_eq!(
+            OrchestratorApiClient::last_rate_limit_error_message(&adapter),
+            None,
+            "no unified headers on the 429 → no limits copy"
+        );
+    }
+
+    /// Task 6 (batch 5): the live subscription slot's `pro` plan flips the
+    /// `seven_day_sonnet` wording to "weekly limit"
+    /// (`rateLimitMessages.ts:176-181`).
+    #[tokio::test]
+    async fn terminal_429_sonnet_copy_uses_pro_subscription_wording() {
+        let resp_429 = |claim: &str| ProviderResponse {
+            status: 429,
+            headers: {
+                let mut h = BTreeMap::new();
+                h.insert(
+                    "anthropic-ratelimit-unified-representative-claim".to_string(),
+                    claim.to_string(),
+                );
+                h
+            },
+            body_json: serde_json::json!({
+                "type": "error",
+                "error": {"type": "rate_limit_error", "message": "rate limited"}
+            }),
+            request_id: None,
+        };
+
+        // Without a pro/enterprise snapshot → "Sonnet limit".
+        let adapter = make_adapter_with_subscriber(
+            FakeTransport::always(resp_429("seven_day_sonnet")),
+            SubscriberState { is_subscriber: true, is_enterprise: false },
+        );
+        let _ = adapter
+            .messages_create("claude-sonnet-4-20250514", None, Vec::new(), Vec::new())
+            .await;
+        assert_eq!(
+            OrchestratorApiClient::last_rate_limit_error_message(&adapter).as_deref(),
+            Some("You've hit your Sonnet limit")
+        );
+
+        // With a live `pro` snapshot → "weekly limit".
+        let pro = make_adapter_with_subscriber(
+            FakeTransport::always(resp_429("seven_day_sonnet")),
+            SubscriberState { is_subscriber: true, is_enterprise: false },
+        )
+        .with_subscription(shared_slot(Some(traits::subscription::SubscriptionSnapshot {
+            is_subscriber: true,
+            subscription_type: Some("pro".to_string()),
+            ..Default::default()
+        })));
+        let _ = pro
+            .messages_create("claude-sonnet-4-20250514", None, Vec::new(), Vec::new())
+            .await;
+        assert_eq!(
+            OrchestratorApiClient::last_rate_limit_error_message(&pro).as_deref(),
+            Some("You've hit your weekly limit")
         );
     }
 

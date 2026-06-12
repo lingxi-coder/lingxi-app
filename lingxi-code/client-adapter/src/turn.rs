@@ -23,6 +23,7 @@
 //! |----------------------------------|----------------|-----------|
 //! | `Streaming(ApiError)`            | `Transport`    | mid-stream transport failure |
 //! | `ApiCall(ApiError)`              | `Transport`    | batched transport failure (same class) |
+//! | `RateLimitRejected`              | `Transport`    | terminal-429 limits copy (same class as the `ApiCall(RateLimited)` it replaces) |
 //! | `StreamingProtocol(reason)` — server-emitted | `Server` | the mid-stream server-error event (`streaming_loop.rs:93`) |
 //! | `StreamingProtocol(reason)` — other          | `Protocol` | wire-level per-block protocol violation |
 //! | `StreamEndedWithoutStop`         | `Internal`     | stream cut before `message_stop` |
@@ -161,7 +162,12 @@ pub fn turn_started_event(turn_id: Option<u64>) -> ClientEvent {
 #[must_use]
 pub fn error_kind_for(err: &OrchestratorError) -> ErrorKindDto {
     match err {
-        OrchestratorError::Streaming(_) | OrchestratorError::ApiCall(_) => ErrorKindDto::Transport,
+        // Task 6 (llm-client future-work batch 5): the terminal-429 limits
+        // copy ("You've hit your … limit · resets …") — an API-side failure,
+        // same coarse class as the `ApiCall` it replaces.
+        OrchestratorError::Streaming(_)
+        | OrchestratorError::ApiCall(_)
+        | OrchestratorError::RateLimitRejected { .. } => ErrorKindDto::Transport,
         OrchestratorError::StreamingProtocol(reason) => {
             if reason.starts_with(SERVER_ERROR_PREFIX) {
                 ErrorKindDto::Server
@@ -262,6 +268,14 @@ mod tests {
             // Transport: both the streaming and batched API-failure variants.
             (OrchestratorError::Streaming(api_error()), ErrorKindDto::Transport),
             (OrchestratorError::ApiCall(api_error()), ErrorKindDto::Transport),
+            // Task 6 (batch 5): terminal-429 limits copy — same coarse class
+            // as the ApiCall(RateLimited) it replaces.
+            (
+                OrchestratorError::RateLimitRejected {
+                    message: "You've hit your weekly limit · resets 3pm".into(),
+                },
+                ErrorKindDto::Transport,
+            ),
             // Server: a `StreamingProtocol` carrying the `streaming_loop.rs:93`
             // server-emitted-error prefix.
             (

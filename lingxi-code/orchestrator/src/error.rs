@@ -97,6 +97,25 @@ pub enum OrchestratorError {
     /// `OrchestratorError` converts it to this variant.
     #[error("{}", REPEATED_529_ERROR_MESSAGE)]
     RepeatedOverloaded,
+
+    /// A terminal 429 whose error response carried the unified rate-limit
+    /// headers — the user-visible copy is the composed
+    /// `getRateLimitErrorMessage` text (claude-code `errors.ts:480-516` →
+    /// `rateLimitMessages.ts:333-344`), e.g.
+    /// `"You've hit your weekly limit · resets 3pm"`.
+    ///
+    /// Task 6 (llm-client future-work batch 5): produced by the public turn
+    /// drivers when the turn dies on `LlmError::RateLimited` AND the API
+    /// client recorded a composed limits copy from the 429's own headers
+    /// (`OrchestratorApiClient::last_rate_limit_error_message`). Without that
+    /// context the generic `ApiCall(RateLimited)` surface is unchanged.
+    #[error("{message}")]
+    RateLimitRejected {
+        /// The pre-composed limits-specific copy (templates byte-locked in
+        /// `model::rate_limit::rate_limit_error_message`; the reset-time
+        /// substring is locale/timezone formatted at record time).
+        message: String,
+    },
 }
 
 /// Convert `LlmError` → `OrchestratorError`.
@@ -139,6 +158,17 @@ mod tests {
             "Repeated 529 Overloaded errors",
             "OrchestratorError::RepeatedOverloaded must display the byte-locked copy"
         );
+    }
+
+    /// Task 6 (batch 5): `RateLimitRejected` Display is the composed copy
+    /// verbatim — no prefix, no suffix (the TS error content is the message
+    /// itself, errors.ts:521-524).
+    #[test]
+    fn rate_limit_rejected_display_is_message_verbatim() {
+        let err = OrchestratorError::RateLimitRejected {
+            message: "You've hit your weekly limit · resets 3pm".into(),
+        };
+        assert_eq!(err.to_string(), "You've hit your weekly limit · resets 3pm");
     }
 
     #[test]

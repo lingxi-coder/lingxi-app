@@ -298,7 +298,9 @@ pub fn overage_disabled_reason(headers: &[(String, String)]) -> Option<&str> {
 /// The reset-time strings are pre-formatted by the caller (claude-code threads
 /// `formatResetTime(...)` output, which is locale/timezone dependent and thus
 /// not byte-reproducible here) — the *templates* around them are byte-locked.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+// `Eq` cannot be derived since `utilization: Option<f64>` (NaN never occurs —
+// parsing filters non-finite values — but the type still forbids `Eq`).
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct RateLimitInfo {
     /// `anthropic-ratelimit-unified-representative-claim` — which window was
     /// exhausted (`five_hour` / `seven_day` / `seven_day_opus` /
@@ -310,6 +312,61 @@ pub struct RateLimitInfo {
     /// `anthropic-ratelimit-unified-overage-disabled-reason` — e.g.
     /// `out_of_credits`. `None` when the header is absent.
     pub overage_disabled_reason: Option<String>,
+    /// `anthropic-ratelimit-unified-status` — `allowed` / `allowed_warning` /
+    /// `rejected`. `None` when the header is absent or empty; claude-code
+    /// defaults that case to `'allowed'` via `headers.get(…) || 'allowed'`
+    /// (`claudeAiLimits.ts:379-381`), so `status.as_deref().unwrap_or("allowed")`
+    /// reproduces the TS value exactly.
+    pub status: Option<String>,
+    /// `anthropic-ratelimit-unified-reset` — Unix-epoch **seconds** when the
+    /// representative window resets (`claudeAiLimits.ts:382-383`,
+    /// `Number(resetsAtHeader)`). Absent/malformed → `None` (TS would store
+    /// `NaN` for a malformed value; we fail soft, same as
+    /// [`parse_unified_reset`]).
+    pub resets_at: Option<u64>,
+    /// Per-claim `anthropic-ratelimit-unified-{abbrev}-utilization` (0-1
+    /// fraction) for the representative claim's abbrev — see [`claim_abbrev`]
+    /// and `extractRawUtilization` (`claudeAiLimits.ts:164-179`). `None` when
+    /// the claim has no per-claim headers (`seven_day_opus` /
+    /// `seven_day_sonnet` / unknown), the header is absent, or the value is
+    /// malformed/non-finite.
+    pub utilization: Option<f64>,
+    /// Per-claim `anthropic-ratelimit-unified-{abbrev}-reset` — Unix-epoch
+    /// seconds when the representative claim's window resets
+    /// (`claudeAiLimits.ts:173,272-279`). Same `None` conditions as
+    /// [`Self::utilization`].
+    pub claim_resets_at: Option<u64>,
+    /// `anthropic-ratelimit-unified-overage-reset` — Unix-epoch seconds when
+    /// the overage window resets (`claudeAiLimits.ts:394-399`).
+    /// Absent/malformed → `None`.
+    pub overage_resets_at: Option<u64>,
+    /// `anthropic-ratelimit-unified-fallback` strict-equals `"available"`
+    /// (`claudeAiLimits.ts:384-385`, no trim/case-fold). `None` when the
+    /// header is absent (TS collapses that to `false`;
+    /// `fallback_available.unwrap_or(false)` reproduces the exact TS boolean);
+    /// `Some(false)` when present with any other value.
+    pub fallback_available: Option<bool>,
+}
+
+/// Map a representative-claim value to the abbreviation used in the per-claim
+/// headers `anthropic-ratelimit-unified-{abbrev}-utilization` / `-{abbrev}-reset`.
+///
+/// Pinned 1:1 to the only claim↔abbrev associations in claude-code:
+/// `extractRawUtilization` pairs `['five_hour','5h']` / `['seven_day','7d']`
+/// (`claudeAiLimits.ts:166-169`) and `EARLY_WARNING_CLAIM_MAP`
+/// `{'5h':'five_hour','7d':'seven_day','overage':'overage'}`
+/// (`claudeAiLimits.ts:73-77`). `seven_day_opus` / `seven_day_sonnet` have NO
+/// per-claim headers anywhere in the TS — the full unified-header inventory
+/// (`mockRateLimits.ts:33-40`) lists only `5h` / `7d` / `overage` variants —
+/// so they, like unknown claims, return `None` (TS never attaches a
+/// utilization to those claims).
+fn claim_abbrev(claim: &str) -> Option<&'static str> {
+    match claim {
+        "five_hour" => Some("5h"),
+        "seven_day" => Some("7d"),
+        "overage" => Some("overage"),
+        _ => None,
+    }
 }
 
 impl RateLimitInfo {
@@ -318,15 +375,61 @@ impl RateLimitInfo {
     /// `errors.ts:471-516` + `claudeAiLimits.ts` `computeNewLimitsFromHeaders`.
     #[must_use]
     pub fn from_headers(headers: &[(String, String)]) -> Self {
+        // Tolerant numeric reads, mirroring TS `Number(header)` fail-soft:
+        // absent/blank/non-numeric → None. Divergence (same stance as
+        // `parse_unified_reset`): TS `Number()` accepts decimal/scientific
+        // epoch forms; we parse integer epoch seconds (the form the server
+        // sends) and fail soft otherwise.
+        let parse_epoch_secs = |name: &str| -> Option<u64> {
+            header_value(headers, name)
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .and_then(|s| s.parse::<u64>().ok())
+        };
+        // Utilization is a 0-1 fraction; non-finite values (`NaN`/`inf` parse
+        // as valid f64 in Rust) are rejected so `RateLimitInfo: PartialEq`
+        // comparisons stay total in practice.
+        let parse_fraction = |name: &str| -> Option<f64> {
+            header_value(headers, name)
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .and_then(|s| s.parse::<f64>().ok())
+                .filter(|f| f.is_finite())
+        };
+
+        let rate_limit_type = header_value(
+            headers,
+            "anthropic-ratelimit-unified-representative-claim",
+        )
+        .map(str::to_string);
+
+        // Per-claim window reads keyed by the representative claim's abbrev
+        // (`anthropic-ratelimit-unified-{abbrev}-utilization` / `-reset`,
+        // claudeAiLimits.ts:164-179). No abbrev → no per-claim read.
+        let abbrev = rate_limit_type.as_deref().and_then(claim_abbrev);
+        let utilization = abbrev
+            .and_then(|a| parse_fraction(&format!("anthropic-ratelimit-unified-{a}-utilization")));
+        let claim_resets_at =
+            abbrev.and_then(|a| parse_epoch_secs(&format!("anthropic-ratelimit-unified-{a}-reset")));
+
         Self {
-            rate_limit_type: header_value(
-                headers,
-                "anthropic-ratelimit-unified-representative-claim",
-            )
-            .map(str::to_string),
+            rate_limit_type,
             overage_status: header_value(headers, "anthropic-ratelimit-unified-overage-status")
                 .map(str::to_string),
             overage_disabled_reason: overage_disabled_reason(headers).map(str::to_string),
+            // `headers.get(…) || 'allowed'` (claudeAiLimits.ts:379-381) —
+            // empty string is falsy in TS, so it is "no usable value" → None.
+            status: header_value(headers, "anthropic-ratelimit-unified-status")
+                .filter(|s| !s.is_empty())
+                .map(str::to_string),
+            resets_at: parse_epoch_secs("anthropic-ratelimit-unified-reset"),
+            utilization,
+            claim_resets_at,
+            overage_resets_at: parse_epoch_secs("anthropic-ratelimit-unified-overage-reset"),
+            // `=== 'available'` (claudeAiLimits.ts:384-385): strict equality
+            // on the verbatim header value — no trim, no case-fold.
+            fallback_available: header_value(headers, "anthropic-ratelimit-unified-fallback")
+                .map(|v| v == "available"),
         }
     }
 
@@ -923,6 +1026,7 @@ mod format_reset_time_tests {
             rate_limit_type: Some("five_hour".into()),
             overage_status: None,
             overage_disabled_reason: None,
+            ..RateLimitInfo::default()
         };
         let msg = rate_limit_error_message(
             &info,
@@ -985,6 +1089,7 @@ mod rate_limit_message {
             rate_limit_type: rate_limit_type.map(str::to_string),
             overage_status: overage_status.map(str::to_string),
             overage_disabled_reason: None,
+            ..RateLimitInfo::default()
         }
     }
 
@@ -1097,6 +1202,7 @@ mod rate_limit_message {
             rate_limit_type: Some("five_hour".into()),
             overage_status: Some("rejected".into()),
             overage_disabled_reason: Some("out_of_credits".into()),
+            ..RateLimitInfo::default()
         };
         let msg = rate_limit_error_message(
             &limits,
@@ -1119,6 +1225,7 @@ mod rate_limit_message {
             rate_limit_type: Some("seven_day".into()),
             overage_status: Some("rejected".into()),
             overage_disabled_reason: None,
+            ..RateLimitInfo::default()
         };
         let msg = rate_limit_error_message(
             &limits,
@@ -1139,6 +1246,7 @@ mod rate_limit_message {
             rate_limit_type: Some("seven_day".into()),
             overage_status: Some("rejected".into()),
             overage_disabled_reason: None,
+            ..RateLimitInfo::default()
         };
         // resetsAt is the earlier window → use its formatted string.
         let earlier_primary = rate_limit_error_message(
@@ -1163,5 +1271,240 @@ mod rate_limit_message {
             SubscriptionContext::default(),
         );
         assert_eq!(earlier_overage.as_deref(), Some("You've hit your limit · resets 3pm"));
+    }
+}
+
+#[cfg(test)]
+mod unified_header_parse {
+    //! Tests for the additive `RateLimitInfo` unified-header extension
+    //! (`status` / `resets_at` / `utilization` / `claim_resets_at` /
+    //! `overage_resets_at` / `fallback_available`), pinned against claude-code
+    //! `computeNewLimitsFromHeaders` (`claudeAiLimits.ts:376-436`) and the
+    //! claim→abbrev associations in `extractRawUtilization` /
+    //! `EARLY_WARNING_CLAIM_MAP` (`claudeAiLimits.ts:73-77`, `:164-179`).
+    use super::*;
+
+    fn hdrs(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
+        pairs
+            .iter()
+            .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn full_header_set_parses_every_field() {
+        let headers = hdrs(&[
+            ("anthropic-ratelimit-unified-status", "rejected"),
+            ("anthropic-ratelimit-unified-reset", "1750000000"),
+            (
+                "anthropic-ratelimit-unified-representative-claim",
+                "five_hour",
+            ),
+            ("anthropic-ratelimit-unified-5h-utilization", "0.92"),
+            ("anthropic-ratelimit-unified-5h-reset", "1750000100"),
+            ("anthropic-ratelimit-unified-overage-status", "allowed"),
+            ("anthropic-ratelimit-unified-overage-reset", "1750000200"),
+            (
+                "anthropic-ratelimit-unified-overage-disabled-reason",
+                "out_of_credits",
+            ),
+            ("anthropic-ratelimit-unified-fallback", "available"),
+        ]);
+        let p = RateLimitInfo::from_headers(&headers);
+        // Existing three fields — behaviour unchanged.
+        assert_eq!(p.rate_limit_type.as_deref(), Some("five_hour"));
+        assert_eq!(p.overage_status.as_deref(), Some("allowed"));
+        assert_eq!(p.overage_disabled_reason.as_deref(), Some("out_of_credits"));
+        // New additive fields.
+        assert_eq!(p.status.as_deref(), Some("rejected"));
+        assert_eq!(p.resets_at, Some(1_750_000_000));
+        assert_eq!(p.utilization, Some(0.92));
+        assert_eq!(p.claim_resets_at, Some(1_750_000_100));
+        assert_eq!(p.overage_resets_at, Some(1_750_000_200));
+        assert_eq!(p.fallback_available, Some(true));
+    }
+
+    #[test]
+    fn no_headers_yield_all_none() {
+        let p = RateLimitInfo::from_headers(&[]);
+        assert_eq!(p, RateLimitInfo::default());
+        assert_eq!(p.status, None);
+        assert_eq!(p.resets_at, None);
+        assert_eq!(p.utilization, None);
+        assert_eq!(p.claim_resets_at, None);
+        assert_eq!(p.overage_resets_at, None);
+        assert_eq!(p.fallback_available, None);
+    }
+
+    #[test]
+    fn partial_headers_leave_missing_fields_none() {
+        // Only the representative claim — no per-claim headers, no status.
+        let headers = hdrs(&[(
+            "anthropic-ratelimit-unified-representative-claim",
+            "seven_day",
+        )]);
+        let p = RateLimitInfo::from_headers(&headers);
+        assert_eq!(p.rate_limit_type.as_deref(), Some("seven_day"));
+        assert_eq!(p.status, None);
+        assert_eq!(p.resets_at, None);
+        assert_eq!(p.utilization, None);
+        assert_eq!(p.claim_resets_at, None);
+        assert_eq!(p.overage_resets_at, None);
+        assert_eq!(p.fallback_available, None);
+    }
+
+    #[test]
+    fn empty_status_header_is_none_like_ts_falsy_default() {
+        // TS: `headers.get('anthropic-ratelimit-unified-status') || 'allowed'`
+        // (claudeAiLimits.ts:379-381) — an empty string is falsy, so the header
+        // value is discarded. Our `None` is that "no usable value" state.
+        let headers = hdrs(&[("anthropic-ratelimit-unified-status", "")]);
+        assert_eq!(RateLimitInfo::from_headers(&headers).status, None);
+    }
+
+    #[test]
+    fn malformed_utilization_is_none() {
+        for bad in ["abc", "", "NaN", "inf"] {
+            let headers = hdrs(&[
+                (
+                    "anthropic-ratelimit-unified-representative-claim",
+                    "five_hour",
+                ),
+                ("anthropic-ratelimit-unified-5h-utilization", bad),
+                ("anthropic-ratelimit-unified-5h-reset", "1750000100"),
+            ]);
+            let p = RateLimitInfo::from_headers(&headers);
+            assert_eq!(p.utilization, None, "utilization {bad:?} should be None");
+            // The sibling reset header still parses on its own.
+            assert_eq!(p.claim_resets_at, Some(1_750_000_100));
+        }
+    }
+
+    #[test]
+    fn malformed_resets_are_none() {
+        let headers = hdrs(&[
+            ("anthropic-ratelimit-unified-reset", "soon"),
+            (
+                "anthropic-ratelimit-unified-representative-claim",
+                "five_hour",
+            ),
+            ("anthropic-ratelimit-unified-5h-reset", ""),
+            ("anthropic-ratelimit-unified-overage-reset", "-5"),
+        ]);
+        let p = RateLimitInfo::from_headers(&headers);
+        assert_eq!(p.resets_at, None);
+        assert_eq!(p.claim_resets_at, None);
+        assert_eq!(p.overage_resets_at, None);
+    }
+
+    /// Per-claim headers for BOTH known windows; which one is read must follow
+    /// the representative claim's abbrev.
+    fn both_window_headers(claim: &str) -> Vec<(String, String)> {
+        hdrs(&[
+            ("anthropic-ratelimit-unified-representative-claim", claim),
+            ("anthropic-ratelimit-unified-5h-utilization", "0.55"),
+            ("anthropic-ratelimit-unified-5h-reset", "1750000005"),
+            ("anthropic-ratelimit-unified-7d-utilization", "0.77"),
+            ("anthropic-ratelimit-unified-7d-reset", "1750000007"),
+        ])
+    }
+
+    #[test]
+    fn five_hour_claim_reads_5h_window() {
+        let p = RateLimitInfo::from_headers(&both_window_headers("five_hour"));
+        assert_eq!(p.utilization, Some(0.55));
+        assert_eq!(p.claim_resets_at, Some(1_750_000_005));
+    }
+
+    #[test]
+    fn seven_day_claim_reads_7d_window() {
+        let p = RateLimitInfo::from_headers(&both_window_headers("seven_day"));
+        assert_eq!(p.utilization, Some(0.77));
+        assert_eq!(p.claim_resets_at, Some(1_750_000_007));
+    }
+
+    #[test]
+    fn opus_and_sonnet_claims_have_no_per_claim_headers() {
+        // claude-code has NO per-claim headers for seven_day_opus /
+        // seven_day_sonnet (mockRateLimits.ts:33-40 lists only 5h/7d/overage
+        // variants), so no utilization is ever attached to those claims.
+        for claim in ["seven_day_opus", "seven_day_sonnet"] {
+            let p = RateLimitInfo::from_headers(&both_window_headers(claim));
+            assert_eq!(p.rate_limit_type.as_deref(), Some(claim));
+            assert_eq!(p.utilization, None, "claim {claim} must not read windows");
+            assert_eq!(p.claim_resets_at, None);
+        }
+    }
+
+    #[test]
+    fn unknown_claim_reads_no_per_claim_headers() {
+        let p = RateLimitInfo::from_headers(&both_window_headers("lunar_month"));
+        assert_eq!(p.rate_limit_type.as_deref(), Some("lunar_month"));
+        assert_eq!(p.utilization, None);
+        assert_eq!(p.claim_resets_at, None);
+    }
+
+    #[test]
+    fn overage_claim_reads_overage_window() {
+        // EARLY_WARNING_CLAIM_MAP maps 'overage' → overage
+        // (claudeAiLimits.ts:76); its per-claim headers are
+        // `…-overage-utilization` / `…-overage-reset` (mockRateLimits.ts:27,39).
+        let headers = hdrs(&[
+            (
+                "anthropic-ratelimit-unified-representative-claim",
+                "overage",
+            ),
+            ("anthropic-ratelimit-unified-overage-utilization", "0.33"),
+            ("anthropic-ratelimit-unified-overage-reset", "1750000009"),
+        ]);
+        let p = RateLimitInfo::from_headers(&headers);
+        assert_eq!(p.utilization, Some(0.33));
+        assert_eq!(p.claim_resets_at, Some(1_750_000_009));
+        // The same header doubles as the overage window reset.
+        assert_eq!(p.overage_resets_at, Some(1_750_000_009));
+    }
+
+    #[test]
+    fn per_claim_headers_without_representative_claim_are_ignored() {
+        let headers = hdrs(&[
+            ("anthropic-ratelimit-unified-5h-utilization", "0.55"),
+            ("anthropic-ratelimit-unified-5h-reset", "1750000005"),
+        ]);
+        let p = RateLimitInfo::from_headers(&headers);
+        assert_eq!(p.utilization, None);
+        assert_eq!(p.claim_resets_at, None);
+    }
+
+    #[test]
+    fn claim_abbrev_mapping_is_pinned() {
+        assert_eq!(claim_abbrev("five_hour"), Some("5h"));
+        assert_eq!(claim_abbrev("seven_day"), Some("7d"));
+        assert_eq!(claim_abbrev("overage"), Some("overage"));
+        assert_eq!(claim_abbrev("seven_day_opus"), None);
+        assert_eq!(claim_abbrev("seven_day_sonnet"), None);
+        assert_eq!(claim_abbrev("lunar_month"), None);
+        assert_eq!(claim_abbrev(""), None);
+    }
+
+    #[test]
+    fn fallback_absent_available_and_other_values() {
+        // Absent → None (TS collapses to `false`; `unwrap_or(false)` restores
+        // the exact TS boolean).
+        assert_eq!(RateLimitInfo::from_headers(&[]).fallback_available, None);
+        // `=== 'available'` (claudeAiLimits.ts:384-385) → Some(true).
+        let avail = hdrs(&[("anthropic-ratelimit-unified-fallback", "available")]);
+        assert_eq!(
+            RateLimitInfo::from_headers(&avail).fallback_available,
+            Some(true)
+        );
+        // Present but any other value → strict-equality false → Some(false).
+        for other in ["unavailable", "", "AVAILABLE", " available "] {
+            let h = hdrs(&[("anthropic-ratelimit-unified-fallback", other)]);
+            assert_eq!(
+                RateLimitInfo::from_headers(&h).fallback_available,
+                Some(false),
+                "value {other:?} must be Some(false)"
+            );
+        }
     }
 }

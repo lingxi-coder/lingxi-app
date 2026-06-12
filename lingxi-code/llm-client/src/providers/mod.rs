@@ -6,8 +6,11 @@ mod azure_openai;
 pub mod bedrock_claude;
 #[allow(missing_docs)]
 mod gemini;
+pub mod gemini_files;
 #[allow(missing_docs)]
 mod openai;
+#[allow(missing_docs)]
+mod openai_responses;
 #[allow(missing_docs)]
 pub mod vertex_claude;
 #[allow(missing_docs)]
@@ -21,7 +24,9 @@ pub use anthropic::AnthropicMessagesCodec;
 pub use azure_openai::AzureOpenAiCodec;
 pub use bedrock_claude::BedrockClaudeCodec;
 pub use gemini::GeminiCodec;
+pub use gemini_files::GeminiFile;
 pub use openai::OpenAiChatCodec;
+pub use openai_responses::OpenAiResponsesCodec;
 pub use vertex_claude::VertexClaudeCodec;
 pub use vertex_gemini::VertexGeminiCodec;
 

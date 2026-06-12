@@ -382,6 +382,10 @@ pub fn dispatch(action: KeyAction, st: &mut AppState) -> bool {
                 st.prompt_cursor = 0;
                 st.messages.clear();
                 st.scroll_offset = 0;
+                // The rate-limit dedupe slot must reset with the scrollback: a
+                // suppressed identical notice would otherwise never reappear in
+                // the now-empty transcript.
+                st.last_rate_limit_text = None;
                 return false;
             }
             if matches!(st.prompt_text.trim(), "/exit" | "/quit") {
@@ -650,6 +654,9 @@ pub async fn handle_submit_line(
             "clear" => {
                 st.messages.clear();
                 st.scroll_offset = 0;
+                // Same rationale as the sync `/clear` intercept above: the
+                // rate-limit dedupe slot resets with the scrollback.
+                st.last_rate_limit_text = None;
                 return false;
             }
             "exit" | "quit" => {

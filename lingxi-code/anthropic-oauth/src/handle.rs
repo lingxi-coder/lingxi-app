@@ -150,6 +150,7 @@ impl OAuthHandle {
                 ("accept".into(), "application/json".into()),
             ],
             body: None,
+            body_bytes: None,
             timeout: Some(Duration::from_secs(15)),
         };
         let resp = self

@@ -111,6 +111,44 @@ pub fn apply_event(state: &mut AppState, ev: TurnEvent, notify: &Notify) {
                 messages_after,
             });
         }
+        TurnEvent::RateLimit {
+            status,
+            rate_limit_type,
+            utilization,
+            resets_at,
+            claim_resets_at,
+            overage_status,
+            overage_resets_at,
+            overage_disabled_reason,
+            fallback_available,
+        } => {
+            // (Batch-3 Task 9) Compose the claude-code rate-limit notice from
+            // the header snapshot. Push only when the composed text DIFFERS
+            // from the last rendered one (`state.last_rate_limit_text`), so
+            // identical consecutive notices never stack — the orchestrator
+            // already dedupes on raw headers, but distinct snapshots can
+            // compose to the same text.
+            let info = crate::rate_limit_messages::RateLimitInfo {
+                status,
+                rate_limit_type,
+                utilization,
+                resets_at,
+                claim_resets_at,
+                overage_status,
+                overage_resets_at,
+                overage_disabled_reason,
+                fallback_available,
+            };
+            if let Some(composed) = crate::rate_limit_messages::compose_rate_limit(&info) {
+                if state.last_rate_limit_text.as_deref() != Some(composed.text.as_str()) {
+                    state.last_rate_limit_text = Some(composed.text.clone());
+                    state.messages.push(RenderedMessage::RateLimit {
+                        text: composed.text,
+                        upsell: composed.upsell,
+                    });
+                }
+            }
+        }
     }
     notify.notify_one();
 }
@@ -223,6 +261,112 @@ mod tests {
         apply_event(&mut s, TurnEvent::TextDelta("x".into()), &n);
         let poll = futures::poll!(waiter.as_mut());
         assert!(matches!(poll, std::task::Poll::Ready(())));
+    }
+
+    // ── TurnEvent::RateLimit (batch-3 Task 9) ─────────────────────────────
+
+    /// A `rejected`/`five_hour` snapshot that composes to
+    /// `"You've hit your session limit"`.
+    fn rate_limit_event(rate_limit_type: &str) -> TurnEvent {
+        TurnEvent::RateLimit {
+            status: Some("rejected".into()),
+            rate_limit_type: Some(rate_limit_type.into()),
+            utilization: None,
+            resets_at: None,
+            claim_resets_at: None,
+            overage_status: None,
+            overage_resets_at: None,
+            overage_disabled_reason: None,
+            fallback_available: None,
+        }
+    }
+
+    fn rate_limit_texts(s: &AppState) -> Vec<&str> {
+        s.messages
+            .iter()
+            .filter_map(|m| match m {
+                RenderedMessage::RateLimit { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn rate_limit_event_pushes_one_rendered_message() {
+        let mut s = new_state();
+        let n = Notify::new();
+        apply_event(&mut s, rate_limit_event("five_hour"), &n);
+        assert_eq!(
+            rate_limit_texts(&s),
+            vec!["You've hit your session limit"]
+        );
+        assert_eq!(
+            s.last_rate_limit_text.as_deref(),
+            Some("You've hit your session limit")
+        );
+    }
+
+    #[test]
+    fn identical_consecutive_rate_limit_events_do_not_duplicate() {
+        let mut s = new_state();
+        let n = Notify::new();
+        apply_event(&mut s, rate_limit_event("five_hour"), &n);
+        apply_event(&mut s, rate_limit_event("five_hour"), &n);
+        assert_eq!(rate_limit_texts(&s).len(), 1);
+    }
+
+    #[test]
+    fn changed_rate_limit_text_pushes_second_message() {
+        let mut s = new_state();
+        let n = Notify::new();
+        apply_event(&mut s, rate_limit_event("five_hour"), &n);
+        apply_event(&mut s, rate_limit_event("seven_day"), &n);
+        assert_eq!(
+            rate_limit_texts(&s),
+            vec![
+                "You've hit your session limit",
+                "You've hit your weekly limit"
+            ]
+        );
+    }
+
+    #[test]
+    fn rate_limit_event_composing_nothing_pushes_nothing() {
+        let mut s = new_state();
+        let n = Notify::new();
+        apply_event(
+            &mut s,
+            TurnEvent::RateLimit {
+                status: Some("allowed".into()),
+                rate_limit_type: None,
+                utilization: None,
+                resets_at: None,
+                claim_resets_at: None,
+                overage_status: None,
+                overage_resets_at: None,
+                overage_disabled_reason: None,
+                fallback_available: None,
+            },
+            &n,
+        );
+        assert!(rate_limit_texts(&s).is_empty());
+        assert!(s.last_rate_limit_text.is_none());
+    }
+
+    #[test]
+    fn rejected_rate_limit_message_carries_upsell() {
+        let mut s = new_state();
+        let n = Notify::new();
+        apply_event(&mut s, rate_limit_event("five_hour"), &n);
+        match s.messages.last() {
+            Some(RenderedMessage::RateLimit { upsell, .. }) => {
+                assert_eq!(
+                    upsell.as_deref(),
+                    Some(crate::components::messages::rate_limit::upsell::UPGRADE)
+                );
+            }
+            other => panic!("expected RateLimit message, got: {other:?}"),
+        }
     }
 
     #[test]

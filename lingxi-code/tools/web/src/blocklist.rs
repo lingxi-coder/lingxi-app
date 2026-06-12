@@ -270,6 +270,7 @@ pub async fn check_domain_blocklist_at(
         url: domain_info_url(domain),
         headers: vec![],
         body: None,
+        body_bytes: None,
         timeout: Some(DOMAIN_CHECK_TIMEOUT),
     };
 

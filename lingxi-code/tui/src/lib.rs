@@ -20,6 +20,7 @@ pub mod error;
 pub mod events;
 pub mod multiagent;
 pub mod permission_bridge;
+pub mod rate_limit_messages;
 pub mod render;
 pub mod replay;
 pub mod root;

@@ -571,6 +571,44 @@ pub enum OutputEvent {
         /// Input tokens used to create a fresh cache entry.
         cache_creation_tokens: u64,
     },
+    /// The latest unified rate-limit header snapshot, forwarded by the
+    /// orchestrator after a completed API call ONLY when it differs from the
+    /// previously emitted snapshot (emit-on-change). (llm-client future-work
+    /// batch 3, Task 8.) Each field is parsed from an
+    /// `anthropic-ratelimit-unified-*` response header (claude-code
+    /// `claudeAiLimits.ts`); `None` means the provider did not send that
+    /// header on the most recent 2xx response.
+    RateLimit {
+        /// `anthropic-ratelimit-unified-status` — `"allowed"` /
+        /// `"allowed_warning"` / `"rejected"`.
+        status: Option<String>,
+        /// `anthropic-ratelimit-unified-representative-claim` — which window
+        /// is representative (`"five_hour"` / `"seven_day"` /
+        /// `"seven_day_opus"` / `"seven_day_sonnet"`).
+        rate_limit_type: Option<String>,
+        /// Per-claim `anthropic-ratelimit-unified-{abbrev}-utilization` —
+        /// the representative claim's 0-1 utilization fraction (abbrev `5h`
+        /// / `7d` / `overage`).
+        utilization: Option<f64>,
+        /// `anthropic-ratelimit-unified-reset` — Unix-epoch seconds when the
+        /// representative window resets.
+        resets_at: Option<u64>,
+        /// Per-claim `anthropic-ratelimit-unified-{abbrev}-reset` —
+        /// Unix-epoch seconds when the representative claim's window resets.
+        claim_resets_at: Option<u64>,
+        /// `anthropic-ratelimit-unified-overage-status` — `"allowed"` /
+        /// `"allowed_warning"` / `"rejected"`.
+        overage_status: Option<String>,
+        /// `anthropic-ratelimit-unified-overage-reset` — Unix-epoch seconds
+        /// when the overage window resets.
+        overage_resets_at: Option<u64>,
+        /// `anthropic-ratelimit-unified-overage-disabled-reason` — why
+        /// overage spend is disabled (e.g. `"out_of_credits"`).
+        overage_disabled_reason: Option<String>,
+        /// `anthropic-ratelimit-unified-fallback` strict-equals
+        /// `"available"`; `None` when the header is absent.
+        fallback_available: Option<bool>,
+    },
 }
 
 /// Sink for orchestrator-emitted output events.
@@ -659,6 +697,37 @@ pub trait OutputStream: Send + Sync {
     /// keep compiling unchanged. The client-adapter overrides this to surface
     /// a `ClientEvent::CoordinatorStatus`.
     async fn emit_coordinator_status(&self, _active_workers: u32, _team: Option<&str>) {}
+
+    /// Emit the latest unified rate-limit header snapshot.
+    ///
+    /// Added by llm-client future-work batch 3 (Task 8). Called by the
+    /// orchestrator turn drivers after each completed API call whose
+    /// rate-limit snapshot DIFFERS from the previously emitted one — the
+    /// orchestrator dedupes, so sinks only ever see changes. The nine
+    /// arguments map field-for-field onto [`OutputEvent::RateLimit`]; see
+    /// that variant's per-field docs for the `anthropic-ratelimit-unified-*`
+    /// header each value is parsed from (claude-code `claudeAiLimits.ts`).
+    ///
+    /// **Default no-op**: pre-existing sinks (TUI, CLI, `MockOutputStream`)
+    /// keep compiling unchanged. The TUI bridge overrides this to surface
+    /// the rate-limit status message.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "mirrors OutputEvent::RateLimit's nine header-derived fields; the bare-argument shape matches the emit_usage convention on this trait"
+    )]
+    async fn emit_rate_limit(
+        &self,
+        _status: Option<&str>,
+        _rate_limit_type: Option<&str>,
+        _utilization: Option<f64>,
+        _resets_at: Option<u64>,
+        _claim_resets_at: Option<u64>,
+        _overage_status: Option<&str>,
+        _overage_resets_at: Option<u64>,
+        _overage_disabled_reason: Option<&str>,
+        _fallback_available: Option<bool>,
+    ) {
+    }
 }
 
 #[cfg(test)]
@@ -925,5 +994,89 @@ mod tests {
             h.last_rate_limit_info().await.is_none(),
             "default impl must return None"
         );
+    }
+
+    // ── OutputEvent::RateLimit (llm-client future-work batch 3, Task 8) ──────
+
+    /// The additive `RateLimit` variant round-trips through the enum's
+    /// default serde conventions (externally tagged, named struct fields),
+    /// both fully populated and all-`None`.
+    #[test]
+    fn output_event_rate_limit_round_trips_through_json() {
+        let ev = OutputEvent::RateLimit {
+            status: Some("allowed_warning".to_string()),
+            rate_limit_type: Some("five_hour".to_string()),
+            utilization: Some(0.85),
+            resets_at: Some(1_760_000_000),
+            claim_resets_at: Some(1_760_000_100),
+            overage_status: Some("allowed".to_string()),
+            overage_resets_at: Some(1_760_000_200),
+            overage_disabled_reason: Some("out_of_credits".to_string()),
+            fallback_available: Some(true),
+        };
+        let s = serde_json::to_string(&ev).unwrap();
+        let back: OutputEvent = serde_json::from_str(&s).unwrap();
+        assert_eq!(ev, back);
+
+        let empty = OutputEvent::RateLimit {
+            status: None,
+            rate_limit_type: None,
+            utilization: None,
+            resets_at: None,
+            claim_resets_at: None,
+            overage_status: None,
+            overage_resets_at: None,
+            overage_disabled_reason: None,
+            fallback_available: None,
+        };
+        let s = serde_json::to_string(&empty).unwrap();
+        let back: OutputEvent = serde_json::from_str(&s).unwrap();
+        assert_eq!(empty, back);
+    }
+
+    /// Task 8: the additive `emit_rate_limit` PUSH hook ships as a default
+    /// no-op so every pre-existing `OutputStream` impl keeps compiling
+    /// without an override. A bare sink implementing only the four required
+    /// methods must accept the call (populated and all-`None`) and return.
+    #[tokio::test]
+    async fn emit_rate_limit_default_is_noop() {
+        struct BareSink;
+
+        #[async_trait]
+        impl OutputStream for BareSink {
+            async fn emit_text(&self, _text: &str) {}
+            async fn emit_tool_call(
+                &self,
+                _id: &protocol::ToolUseId,
+                _tool: &str,
+                _input: &serde_json::Value,
+            ) {
+            }
+            async fn emit_tool_result(
+                &self,
+                _id: &protocol::ToolUseId,
+                _tool: &str,
+                _result: &serde_json::Value,
+            ) {
+            }
+            async fn emit_end_turn(&self, _stop_reason: &str, _cost: &CostSnapshot) {}
+        }
+
+        // Object-safe behind `dyn` (matches how the orchestrator holds it).
+        let sink: Box<dyn OutputStream> = Box::new(BareSink);
+        sink.emit_rate_limit(
+            Some("allowed_warning"),
+            Some("five_hour"),
+            Some(0.85),
+            Some(1_760_000_000),
+            Some(1_760_000_100),
+            Some("allowed"),
+            Some(1_760_000_200),
+            Some("out_of_credits"),
+            Some(true),
+        )
+        .await;
+        sink.emit_rate_limit(None, None, None, None, None, None, None, None, None)
+            .await;
     }
 }

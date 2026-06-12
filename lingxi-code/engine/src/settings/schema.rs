@@ -154,7 +154,8 @@ pub struct SettingsJson {
 
     /// Object-merge field (deep-merge). `LingXi` extension (claude-code has no
     /// such key): named LLM provider profiles. Each entry has the shape:
-    /// `{ "type": "openai"|"anthropic"|"gemini", "baseUrl": "...",
+    /// `{ "type": "openai"|"openai-responses"|"anthropic"|"gemini"|"azure-openai"
+    ///           |"bedrock-claude"|"vertex-claude"|"vertex-gemini", "baseUrl": "...",
     ///    "apiKeyEnv": "GROQ_API_KEY",
     ///    "models": [{ "id": "model-id", "aliases": ["alias"]?,
     ///                 "capabilities": {...}? }] }`.

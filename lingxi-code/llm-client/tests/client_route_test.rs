@@ -110,10 +110,10 @@ fn duplicate_profile_names_are_rejected_during_client_construction() {
     assert!(matches!(err, LlmError::InvalidRequest { .. }));
 }
 
-/// `OpenAiResponses` has no codec yet; construction must fail with an
-/// actionable error naming the profile and protocol family.
-#[test]
-fn unsupported_protocol_family_yields_actionable_config_error() {
+/// `OpenAiResponses` profiles construct successfully (the old "no codec yet"
+/// error is gone) and `prepare` targets `{base_url}/responses` with POST.
+#[tokio::test]
+async fn openai_responses_profile_prepares_post_to_responses_endpoint() {
     let config = ClientConfig {
         providers: vec![ProviderProfile {
             provider_id: ProviderId::OpenAI,
@@ -127,7 +127,7 @@ fn unsupported_protocol_family_yields_actionable_config_error() {
                 request_model: "gpt-4o".to_string(),
                 billing_model: "gpt-4o".to_string(),
                 aliases: vec![],
-                capabilities: Capabilities::default(),
+                capabilities: Capabilities { streaming: true, tools: true, ..Default::default() },
             }],
             pricing: PricingConfig::default(),
             signing: None,
@@ -135,13 +135,21 @@ fn unsupported_protocol_family_yields_actionable_config_error() {
         }],
     };
 
-    let err = DefaultLlmClient::from_config(config).unwrap_err();
+    // The old build_codec arm returned LlmError::InvalidRequest ("no codec
+    // yet"); construction must now succeed.
+    let client = DefaultLlmClient::from_config(config)
+        .expect("OpenAiResponses must have a codec; the 'no codec yet' error is gone");
 
-    assert!(matches!(
-        err,
-        LlmError::InvalidRequest { message }
-            if message.contains("openai-responses") && message.contains("OpenAiResponses")
-    ));
+    let prepared = client.prepare(&LlmRequest::new("gpt-4o")).await.unwrap();
+    assert_eq!(prepared.route.resolved_route.profile_name, "openai-responses");
+    assert_eq!(prepared.provider_request.method, "POST");
+    assert!(
+        prepared.provider_request.url.ends_with("/responses"),
+        "URL must end with /responses; got: {}",
+        prepared.provider_request.url
+    );
+    assert_eq!(prepared.provider_request.url, "https://api.openai.com/v1/responses");
+    assert_eq!(prepared.provider_request.body_json["model"], "gpt-4o");
 }
 
 #[tokio::test]

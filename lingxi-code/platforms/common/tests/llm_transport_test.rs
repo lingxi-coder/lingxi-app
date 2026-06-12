@@ -77,6 +77,61 @@ async fn execute_maps_request_and_response() {
     assert_eq!(seen.body.as_deref(), Some(r#"{"model":"m"}"#));
 }
 
+/// A `ProviderRequest` carrying `body_bytes` must reach the transport with
+/// those bytes verbatim and NO string body (the JSON body is suppressed so a
+/// transport never double-sends).
+#[tokio::test]
+async fn execute_body_bytes_pass_through_verbatim_and_suppress_json_body() {
+    let fake = FakeHttp::default();
+    *fake.response.lock().unwrap() = Some(Ok(HttpResponse {
+        status: 200,
+        headers: vec![],
+        body: "{}".to_string(),
+    }));
+    let bridge = LlmTransportBridge::new(fake);
+
+    let mut request = provider_request();
+    // PNG magic — deliberately not valid UTF-8 JSON.
+    request.body_bytes = Some(vec![0x89, 0x50, 0x4E, 0x47, 0x00, 0xFF]);
+
+    llm_client::Transport::execute(&bridge, &request)
+        .await
+        .expect("response");
+
+    let seen = bridge.inner().seen.lock().unwrap().take().expect("request sent");
+    assert_eq!(
+        seen.body_bytes.as_deref(),
+        Some(&[0x89u8, 0x50, 0x4E, 0x47, 0x00, 0xFF][..]),
+        "raw bytes must pass through verbatim"
+    );
+    assert!(
+        seen.body.is_none(),
+        "string body must be None when body_bytes is set; got: {:?}",
+        seen.body
+    );
+}
+
+/// Regression pin: without `body_bytes` the bridge keeps the existing JSON
+/// body behavior unchanged.
+#[tokio::test]
+async fn execute_without_body_bytes_keeps_json_body_behavior() {
+    let fake = FakeHttp::default();
+    *fake.response.lock().unwrap() = Some(Ok(HttpResponse {
+        status: 200,
+        headers: vec![],
+        body: "{}".to_string(),
+    }));
+    let bridge = LlmTransportBridge::new(fake);
+
+    llm_client::Transport::execute(&bridge, &provider_request())
+        .await
+        .expect("response");
+
+    let seen = bridge.inner().seen.lock().unwrap().take().expect("request sent");
+    assert_eq!(seen.body.as_deref(), Some(r#"{"model":"m"}"#));
+    assert!(seen.body_bytes.is_none(), "no raw bytes unless explicitly set");
+}
+
 #[tokio::test]
 async fn execute_passes_error_statuses_through_as_data() {
     let fake = FakeHttp::default();

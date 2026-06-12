@@ -380,6 +380,7 @@ impl Tool for RemoteTriggerTool {
                 ("x-organization-uuid".into(), org_uuid),
             ],
             body: request_body,
+            body_bytes: None,
             timeout: Some(REQUEST_TIMEOUT),
         };
 

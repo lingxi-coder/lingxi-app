@@ -59,6 +59,7 @@ async fn stream_sse_parses_message_start_and_deltas() {
         url: format!("http://{addr}/v1/messages"),
         headers: vec![("accept".into(), "text/event-stream".into())],
         body: Some("{\"stream\":true}".into()),
+        body_bytes: None,
         timeout: Some(Duration::from_secs(5)),
     };
 
@@ -100,6 +101,7 @@ async fn stream_sse_surfaces_non_2xx_at_open_time() {
         url: format!("http://{addr}/v1/messages"),
         headers: vec![],
         body: None,
+        body_bytes: None,
         timeout: Some(Duration::from_secs(5)),
     };
     let result = http.stream_sse(req).await;

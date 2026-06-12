@@ -367,6 +367,13 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
     // is appended below. Strict no-op when no cache-safe slot is wired.
     orch.save_cache_safe_params(system, &model).await;
 
+    // Task 8 (llm-client future-work batch 3): the call succeeded — forward
+    // the adapter's unified rate-limit snapshot to the output stream when it
+    // changed since the last emission (emit-on-change; no-op for clients
+    // without a snapshot). Covers the batched AND cancelable drivers (both
+    // funnel through this function).
+    orch.emit_rate_limit_if_changed().await;
+
     // 1.5 M6-06: record this response's usage into the wired CostTracker (if any).
     // We pass `Duration::ZERO` (the api-client adapter does not currently
     // surface per-call wall-clock duration) and `retries = 0` (retries are

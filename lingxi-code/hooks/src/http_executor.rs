@@ -118,6 +118,7 @@ impl HttpExecutor {
             url: url.to_string(),
             headers: req_headers,
             body: Some(body.to_string()),
+            body_bytes: None,
             timeout: Some(effective_timeout),
         };
 

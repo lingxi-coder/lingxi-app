@@ -197,6 +197,80 @@ impl DefaultLlmClient {
             .await
     }
 
+    /// Upload raw media bytes via the Gemini File API resumable protocol.
+    ///
+    /// Resolves `model_or_alias` exactly like [`prepare`](Self::prepare) and
+    /// requires the resolved profile's protocol family to be EXACTLY
+    /// [`ProtocolFamily::GeminiGenerateContent`] — Vertex Gemini does not use
+    /// the File API (media goes through GCS URIs there), so `VertexGemini`
+    /// routes are rejected with [`LlmError::InvalidRequest`].
+    ///
+    /// Two-leg flow, both legs authenticated through the same path as
+    /// `prepare` (`x-goog-api-key` for `ApiKey`-auth Gemini profiles):
+    ///
+    /// 1. START — `POST {upload_base}/upload/v1beta/files` with metadata; the
+    ///    response's `x-goog-upload-url` header is the session URL.
+    /// 2. UPLOAD+FINALIZE — `POST` the raw `bytes` (via
+    ///    `ProviderRequest::body_bytes`) to that session URL.
+    ///
+    /// Non-2xx responses on either leg map through the shared Gemini error
+    /// taxonomy. The returned [`crate::GeminiFile`] is NOT polled here
+    /// (llm-client has no timer dependency): callers must poll
+    /// [`crate::providers::gemini_files::file_status_request`] until
+    /// `state == "ACTIVE"` for video/PDF uploads; images are typically
+    /// `ACTIVE` immediately. A `FAILED` state passes through as data, not an
+    /// error. The resulting `uri` plugs into
+    /// [`crate::ContentBlock::ImageUrl`], which the Gemini codec encodes as a
+    /// `file_data.file_uri` part.
+    pub async fn upload_file(
+        &self,
+        model_or_alias: &str,
+        bytes: Vec<u8>,
+        mime_type: &str,
+        display_name: &str,
+        transport: &dyn Transport,
+    ) -> Result<crate::GeminiFile, LlmError> {
+        use crate::providers::gemini_files;
+
+        let resolved_route = self.registry.resolve(model_or_alias)?;
+        let entry = self
+            .routes
+            .get(&resolved_route.profile_name)
+            .ok_or(LlmError::ModelUnavailable)?;
+        if !matches!(entry.protocol, ProtocolFamily::GeminiGenerateContent) {
+            return Err(LlmError::InvalidRequest {
+                message: "file upload requires a gemini provider profile".to_string(),
+            });
+        }
+
+        // Leg 1: START — metadata only; returns the resumable session URL.
+        let start = gemini_files::start_upload_request(
+            &entry.base_url,
+            bytes.len(),
+            mime_type,
+            display_name,
+        );
+        let start = self
+            .authenticate(entry, &resolved_route.profile_name, start)
+            .await?;
+        let start_response = transport.execute(&start).await?;
+        if start_response.status >= 400 {
+            return Err(gemini_files::decode_upload_error(&start_response));
+        }
+        let upload_url = gemini_files::parse_start_response(&start_response.headers)?;
+
+        // Leg 2: UPLOAD+FINALIZE — raw bytes to the session URL.
+        let upload = gemini_files::upload_finalize_request(&upload_url, bytes);
+        let upload = self
+            .authenticate(entry, &resolved_route.profile_name, upload)
+            .await?;
+        let upload_response = transport.execute(&upload).await?;
+        if upload_response.status >= 400 {
+            return Err(gemini_files::decode_upload_error(&upload_response));
+        }
+        gemini_files::parse_upload_response(&upload_response.body_json)
+    }
+
     // Each auth strategy is a self-contained arm; the length is necessary.
     #[allow(clippy::too_many_lines)]
     async fn authenticate(
@@ -494,13 +568,9 @@ fn build_codec(provider: &crate::ProviderProfile) -> Result<Box<dyn WireCodec>, 
         crate::ProtocolFamily::BedrockClaude => {
             Ok(Box::new(crate::BedrockClaudeCodec::new(provider.base_url.clone())))
         }
-        crate::ProtocolFamily::OpenAiResponses => Err(LlmError::InvalidRequest {
-            message: format!(
-                "provider profile '{}' uses OpenAiResponses, which has no codec yet — \
-                 see futurework batch 2",
-                provider.profile_name
-            ),
-        }),
+        crate::ProtocolFamily::OpenAiResponses => {
+            Ok(Box::new(crate::OpenAiResponsesCodec::new(provider.base_url.clone())))
+        }
     }
 }
 

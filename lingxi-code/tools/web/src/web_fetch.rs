@@ -582,6 +582,7 @@ impl Tool for WebFetchTool {
                 ("accept".into(), "text/markdown, text/html, */*".into()),
             ],
             body: None,
+            body_bytes: None,
             timeout: Some(WEBFETCH_TIMEOUT),
         };
         let resp_result = self.ctx.http.request(req).await;

@@ -90,6 +90,7 @@ impl BypassEnv for RealBypassEnv {
             url: "http://1.1.1.1".to_string(),
             headers: Vec::new(),
             body: None,
+            body_bytes: None,
             timeout: Some(Duration::from_secs(1)),
         };
         self.http.request(req).await.is_ok()

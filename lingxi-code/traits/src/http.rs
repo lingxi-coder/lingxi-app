@@ -245,6 +245,7 @@ mod tests {
             url: "http://x.local".to_string(),
             headers: vec![],
             body: None,
+            body_bytes: None,
             timeout: None,
         }
     }

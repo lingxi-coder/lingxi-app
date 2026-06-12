@@ -256,6 +256,7 @@ impl AuthState {
                 ("accept".into(), "application/json".into()),
             ],
             body: Some(body),
+            body_bytes: None,
             timeout: Some(REFRESH_TIMEOUT),
         };
         let resp = self

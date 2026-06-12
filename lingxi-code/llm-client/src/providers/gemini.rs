@@ -113,7 +113,9 @@ impl WireCodec for GeminiCodec {
     }
 }
 
-fn decode_error_response(response: &ProviderResponse) -> LlmError {
+// pub(crate): also reused by `gemini_files::decode_upload_error` so the File
+// API upload driver maps non-2xx responses through the same Google taxonomy.
+pub(crate) fn decode_error_response(response: &ProviderResponse) -> LlmError {
     let retry_after = crate::retry::retry_after_from_headers(&response.headers);
     let error = response.body_json.get("error");
     let message = error

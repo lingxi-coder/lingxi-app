@@ -1089,6 +1089,15 @@ impl OrchestratorApiClient for ProviderApiAdapter {
             overage_disabled_reason: info.overage_disabled_reason,
         })
     }
+
+    /// Task 8 (llm-client future-work batch 3): expose the FULL internal
+    /// nine-field snapshot for the turn drivers' `emit_rate_limit` seam.
+    /// Delegates to the inherent [`Self::last_rate_limit_info`] (which
+    /// already returns the internal `RateLimitInfo`); the trait method of
+    /// the same name above keeps its three-field projection untouched.
+    fn last_rate_limit_full(&self) -> Option<RateLimitInfo> {
+        self.last_rate_limit_info()
+    }
 }
 
 /// Subagent API seam — delegates to the orchestrator impl.

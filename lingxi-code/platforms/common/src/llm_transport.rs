@@ -40,6 +40,13 @@ fn to_http_request(request: &ProviderRequest) -> Result<HttpRequest, LlmError> {
             })
         }
     };
+    // Raw bytes take precedence: when set, the JSON body is suppressed so a
+    // transport can never double-send.
+    let body = if request.body_bytes.is_some() {
+        None
+    } else {
+        Some(request.body_json.to_string())
+    };
     Ok(HttpRequest {
         method,
         url: request.url.clone(),
@@ -48,7 +55,8 @@ fn to_http_request(request: &ProviderRequest) -> Result<HttpRequest, LlmError> {
             .iter()
             .map(|(name, value)| (name.clone(), value.clone()))
             .collect(),
-        body: Some(request.body_json.to_string()),
+        body,
+        body_bytes: request.body_bytes.clone(),
         // ProviderRequest carries no timeout field yet; deadline enforcement
         // lives above this seam in the retry layer.
         timeout: None,

@@ -43,8 +43,8 @@ pub use handle::OAuthHandle;
 pub use limits::{ClaudeAiLimitsState, ClaudeAiLimitsTracker, SubscriptionType};
 pub use pkce::{generate_pkce, generate_state_token};
 pub use profile::{
-    fetch_profile_from_api_key, fetch_profile_from_oauth_token, OAuthAccount, OAuthOrganization,
-    OAuthProfileResponse,
+    fetch_profile_from_api_key, fetch_profile_from_oauth_token, fetch_user_roles, OAuthAccount,
+    OAuthOrganization, OAuthProfileResponse, UserRolesResponse,
 };
 pub use credential_provider::OAuthCredentialProvider;
 pub use refresh::{AuthState, RefreshDriver};

@@ -14,6 +14,65 @@ pub use seccomp::{build_net_deny_bpf, net_deny_bpf_hash, net_deny_policy_name, B
 
 use serde::Serialize;
 
+/// An rlimit to apply in the jailed child (resource = a raw `RLIMIT_*` int).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct JailRlimit {
+    /// Raw `RLIMIT_*` constant (resolved by the caller — `platform-android`
+    /// has no libc, so the resource is passed as the integer).
+    pub resource: i32,
+    /// Soft limit.
+    pub soft: u64,
+    /// Hard limit.
+    pub hard: u64,
+}
+
+/// Everything `run_jailed` needs to fork+jail+exec one command. Built by the
+/// safe `platform-android` side from an `AndroidSandboxPlan`.
+#[derive(Debug, Clone)]
+pub struct JailSpec {
+    /// Absolute exec target (`/system/bin/sh` for v1).
+    pub filename: String,
+    /// Full argv (argv[0] included).
+    pub argv: Vec<String>,
+    /// The complete child environment (scrubbed allowlist — the ONLY env).
+    pub envp: Vec<(String, String)>,
+    /// Working directory applied via a `PRE_EXECVE` hook (minijail has no cwd API).
+    pub cwd: String,
+    /// Rlimits to apply before exec.
+    pub rlimits: Vec<JailRlimit>,
+    /// Whether to install the net-deny seccomp filter.
+    pub net_deny: bool,
+    /// The net-deny classic-BPF program (from `build_net_deny_bpf`, empty when
+    /// `!net_deny`); `run_jailed` maps it to `sock_fprog` and injects it via
+    /// `minijail_set_seccomp_filters`.
+    pub bpf: Vec<BpfInsn>,
+    /// Wall-clock budget; the watchdog kills the process group past this.
+    pub timeout_ms: u64,
+}
+
+/// Result of a completed (or timed-out / enforcement-failed) jailed run.
+#[derive(Debug, Clone)]
+pub struct JailedOutput {
+    /// Captured stdout (UTF-8 lossy).
+    pub stdout: String,
+    /// Captured stderr (UTF-8 lossy).
+    pub stderr: String,
+    /// Exit code (`-1` if signalled).
+    pub exit_code: i32,
+    /// True when the watchdog killed the group for exceeding `timeout_ms`.
+    pub timed_out: bool,
+    /// `Some(reason)` when jail SETUP failed (filter load, rlimit, fork) —
+    /// the runner maps this to `SandboxEnforcementFailed`, never a silent run.
+    pub enforcement_failed: Option<String>,
+}
+
+/// `RLIMIT_CPU` as an `i32` for [`JailRlimit`] — a tiny helper so the host test
+/// (and `platform-android`) need not depend on libc just to name the constant.
+#[must_use]
+pub fn libc_rlimit_cpu() -> i32 {
+    0 // RLIMIT_CPU == 0 on Linux/Android.
+}
+
 /// Result of the on-device minijail smoke (serialized to the instrumentation
 /// test through the `android_sandbox_smoke()` `UniFFI` export).
 #[derive(Debug, Clone, Serialize)]
@@ -199,5 +258,32 @@ mod tests {
         assert!(!r.no_new_privs);
         assert!(!r.child_exit_zero);
         assert!(r.reason.unwrap().contains("Android"));
+    }
+
+    #[test]
+    fn jail_spec_and_output_construct() {
+        let spec = JailSpec {
+            filename: "/system/bin/sh".into(),
+            argv: vec!["sh".into(), "-c".into(), "true".into()],
+            envp: vec![("HOME".into(), "/data/x".into())],
+            cwd: "/data/x".into(),
+            rlimits: vec![JailRlimit {
+                resource: libc_rlimit_cpu(),
+                soft: 30,
+                hard: 30,
+            }],
+            net_deny: true,
+            bpf: build_net_deny_bpf(&[198, 199], 0xC000_00B7),
+            timeout_ms: 120_000,
+        };
+        assert_eq!(spec.argv.len(), 3);
+        let out = JailedOutput {
+            stdout: "ok\n".into(),
+            stderr: String::new(),
+            exit_code: 0,
+            timed_out: false,
+            enforcement_failed: None,
+        };
+        assert!(out.enforcement_failed.is_none());
     }
 }

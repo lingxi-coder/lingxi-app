@@ -186,23 +186,34 @@ pub fn plan_from_policy(
     })
 }
 
-/// Keys that are never forwarded from the caller, even if explicitly set
-/// (env-hygiene intent of spec r3 §Environment / Threat model — injection + credential vectors).
-const ENV_DENYLIST: &[&str] = &[
-    "LD_PRELOAD",
-    "LD_LIBRARY_PATH",
-    "DYLD_INSERT_LIBRARIES",
-    "DYLD_LIBRARY_PATH",
+/// Exact-match credential keys that are never forwarded from the caller overlay.
+/// The real credential guarantee is the scrub-and-rebuild approach: the
+/// inherited process environment is DISCARDED entirely; these entries are only
+/// defense-in-depth for explicit caller overlays and are NOT a complete
+/// credential list.
+const ENV_DENYLIST_EXACT: &[&str] = &[
     "ANTHROPIC_API_KEY",
     "AWS_SECRET_ACCESS_KEY",
     "AWS_SESSION_TOKEN",
     "GOOGLE_APPLICATION_CREDENTIALS",
 ];
 
+/// Returns `true` if `key` is denied by the security policy.
+///
+/// Prefix rules (`LD_`, `DYLD_`) catch dynamic-linker injection vectors;
+/// exact matches cover credential keys.
+fn is_denied(key: &str) -> bool {
+    key.starts_with("LD_") || key.starts_with("DYLD_") || ENV_DENYLIST_EXACT.contains(&key)
+}
+
 /// Build the child environment: the inherited environment is DISCARDED
 /// entirely and rebuilt from the spec's allowlist table (spec r3 §Environment);
 /// `caller_env` (the tool's explicit `cmd.env`) overlays last — explicit wins,
-/// except keys in the security denylist which are always stripped.
+/// except keys rejected by the security policy (see `is_denied`).
+///
+/// The real credential guarantee is the scrub-and-rebuild (inherited env never
+/// enters); the denylist is only defense-in-depth for explicit caller overlays
+/// and is not a complete credential list.
 #[must_use]
 pub fn build_shell_env<S: std::hash::BuildHasher>(
     workspace_root: &Path,
@@ -214,6 +225,7 @@ pub fn build_shell_env<S: std::hash::BuildHasher>(
         Some(dir) => format!("{}:/system/bin", dir.display()),
         None => "/system/bin".to_string(),
     };
+    // P4: add GIT_CONFIG_NOSYSTEM=1 when the bundled git ships (spec §Environment).
     let mut env: Vec<(String, String)> = vec![
         ("HOME".into(), workspace_root.display().to_string()),
         ("TMPDIR".into(), cache_dir.display().to_string()),
@@ -223,10 +235,20 @@ pub fn build_shell_env<S: std::hash::BuildHasher>(
         ("ANDROID_ROOT".into(), "/system".into()),
         ("ANDROID_DATA".into(), "/data".into()),
     ];
-    for (k, v) in caller_env {
-        if ENV_DENYLIST.contains(&k.as_str()) {
-            continue;
-        }
+    // Collect overlay entries and sort by key for deterministic ordering
+    // (receipts may hash env in P2; HashMap iteration order is not stable).
+    let mut overlay: Vec<(&String, &String)> = caller_env
+        .iter()
+        .filter(|(k, _)| {
+            // Skip malformed keys: execve splits at the FIRST '=', so a key
+            // like "LD_PRELOAD=x" would assemble into "LD_PRELOAD=x=y",
+            // bypassing the exact-match denylist and setting LD_PRELOAD anyway.
+            // NUL bytes and empty keys are also invalid in environ.
+            !k.is_empty() && !k.contains('=') && !k.contains('\0') && !is_denied(k)
+        })
+        .collect();
+    overlay.sort_by(|(a, _), (b, _)| a.cmp(b));
+    for (k, v) in overlay {
         if let Some(slot) = env.iter_mut().find(|(name, _)| name == k) {
             slot.1.clone_from(v);
         } else {
@@ -434,5 +456,59 @@ mod tests {
         );
         assert_eq!(map.get("GIT_TRACE").map(String::as_str), Some("1"));
         assert_eq!(map.get("TERM").map(String::as_str), Some("xterm"));
+    }
+
+    #[test]
+    fn disabled_network_with_bundled_helper_maps_to_deny_net() {
+        let p = base_policy(); // network: Disabled
+        let plan = plan_from_policy(
+            ExecTarget::BundledHelper {
+                name: "git".into(),
+                path: PathBuf::from("/data/app/x/lib/arm64/libgit.so"),
+                hash: "abc".into(),
+            },
+            &p,
+            vec![],
+        )
+        .expect("deny-net bundled helper plan");
+        assert_eq!(plan.network, NetProfile::DenyNet);
+    }
+
+    #[test]
+    fn malformed_overlay_keys_are_skipped() {
+        let mut caller = HashMap::new();
+        caller.insert("LD_PRELOAD=x".to_string(), "y".to_string());
+        caller.insert(String::new(), "empty".to_string());
+        caller.insert("OK_KEY".to_string(), "ok".to_string());
+        let env = build_shell_env(
+            std::path::Path::new("/w"),
+            std::path::Path::new("/c"),
+            None,
+            &caller,
+        );
+        assert!(env.iter().all(|(k, _)| !k.contains('=') && !k.is_empty()));
+        let map: HashMap<_, _> = env.iter().cloned().collect();
+        assert_eq!(map.get("OK_KEY").map(String::as_str), Some("ok"));
+    }
+
+    #[test]
+    fn denylist_is_prefix_based_for_loader_vars_and_case_sensitive() {
+        let mut caller = HashMap::new();
+        caller.insert("LD_AUDIT".to_string(), "x".to_string()); // prefix-denied
+        caller.insert("DYLD_INSERT_LIBRARIES".to_string(), "x".to_string()); // prefix-denied
+        caller.insert("ld_preload".to_string(), "inert-on-linux".to_string()); // lowercase passes (Bionic ignores it)
+        let env = build_shell_env(
+            std::path::Path::new("/w"),
+            std::path::Path::new("/c"),
+            None,
+            &caller,
+        );
+        let map: HashMap<_, _> = env.iter().cloned().collect();
+        assert!(!map.contains_key("LD_AUDIT"));
+        assert!(!map.contains_key("DYLD_INSERT_LIBRARIES"));
+        assert_eq!(
+            map.get("ld_preload").map(String::as_str),
+            Some("inert-on-linux")
+        );
     }
 }

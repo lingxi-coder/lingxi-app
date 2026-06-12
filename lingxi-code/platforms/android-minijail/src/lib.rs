@@ -52,6 +52,15 @@ pub fn minijail_smoke() -> SmokeResult {
 
 #[cfg(target_os = "android")]
 mod android_impl {
+    // LINK ANCHOR — do not remove. `platform-android-libcap` is a build-only
+    // crate (empty lib.rs) whose rlib BUNDLES the static libcap objects that
+    // resolve libminijail's `cap_*` references. rustc only links crates that
+    // are actually referenced, and a `-shared` (cdylib) link does not error on
+    // the resulting undefined symbols — without this reference the `.so`
+    // builds fine but `dlopen` fails on-device with
+    // `cannot locate symbol "cap_get_proc"` (caught by the P0a smoke gate).
+    use platform_android_libcap as _;
+
     use super::SmokeResult;
     use std::ffi::CString;
     use std::os::raw::{c_char, c_int};

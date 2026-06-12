@@ -1093,6 +1093,25 @@ pub fn build_android_engine(
     }
 }
 
+/// P0a gate probe: run the on-device minijail smoke and return it as JSON
+/// (`{"ok":bool,"no_new_privs":bool,"child_exit_zero":bool,"reason":...}`).
+/// Keys are serde's default `snake_case` (`SmokeResult` has no `rename_all`).
+/// Host builds report the structural reason.
+#[cfg(feature = "uniffi")]
+#[cfg_attr(feature = "uniffi", uniffi::export)]
+#[must_use]
+pub fn android_sandbox_smoke() -> String {
+    #[cfg(target_os = "android")]
+    {
+        serde_json::to_string(&platform_android_minijail::minijail_smoke())
+            .unwrap_or_else(|e| format!("{{\"ok\":false,\"reason\":\"serialize: {e}\"}}"))
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        "{\"ok\":false,\"reason\":\"host build\"}".to_string()
+    }
+}
+
 // F3-04: re-export `engine-mobile`'s UniFFI scaffolding so the shared host's FFI
 // symbols (the re-exported `MobileEngineHandle` / `MobileEngineError`) land in
 // this crate's final library. Under the `uniffi` feature only.

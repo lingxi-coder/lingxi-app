@@ -191,6 +191,15 @@ mod android_impl {
     /// exit code (`status & 0xFF`); a child terminated by signal `n` is reported
     /// by minijail as `128 + n` (>= 128). A SIGKILL (9) → 137, which we map to
     /// `exit_code` -1 and let the `timed_out` flag carry the real cause.
+    ///
+    /// CAVEAT — 126/127 are NOT guaranteed child exit codes. `minijail_wait`
+    /// returns `MINIJAIL_ERR_NO_ACCESS` (126) / `MINIJAIL_ERR_NO_COMMAND` (127)
+    /// when minijail itself could not `exec` the target (e.g. not executable /
+    /// not found), so a 126/127 here may be a minijail exec-failure code rather
+    /// than something the child returned. We surface them as-is: they coincide
+    /// with bash's own 126 ("cannot execute") / 127 ("command not found")
+    /// conventions, so the value is meaningful to callers either way and needs no
+    /// special-casing.
     fn decode_exit(status: c_int) -> i32 {
         if status < 0 {
             // minijail internal error (e.g. wait failed).
@@ -411,6 +420,23 @@ mod android_impl {
             return fail(format!("minijail_run returned pid {pid}"));
         }
         if stdout_fd < 0 || stderr_fd < 0 {
+            // Should never happen: minijail_run succeeded (rc == 0, pid > 0) but
+            // handed back a bad fd. Stay fail-closed AND leak-free: close any
+            // valid fd we did get, and reap the live child so we leave no zombie.
+            // SAFETY: each `close` targets a fd value minijail just returned to
+            // us by value; we only close the ones that are >= 0 (valid), and we
+            // own them (the reader threads that would otherwise own them have not
+            // been spawned on this path). `minijail_wait` reaps `jail.0`'s child,
+            // which has not been waited on.
+            unsafe {
+                if stdout_fd >= 0 {
+                    libc::close(stdout_fd);
+                }
+                if stderr_fd >= 0 {
+                    libc::close(stderr_fd);
+                }
+                minijail_wait(jail.0);
+            }
             return fail(format!(
                 "minijail_run gave bad pipe fds (out={stdout_fd}, err={stderr_fd})"
             ));
@@ -428,12 +454,12 @@ mod android_impl {
         let stderr_reader = spawn_reader(stderr_fd);
 
         // (10) Watchdog: after timeout_ms, set `timed_out` and kill the child's
-        // process group. It is CANCELLABLE — `done` is set the instant the child
-        // is reaped, so a child that exits first stops the watchdog before it can
-        // signal, eliminating the reused-pgid kill hazard (we never kill once the
-        // pgid could have been recycled). The watchdog polls `done` on a short
-        // interval rather than sleeping the full timeout, so cancellation is
-        // prompt.
+        // process group. It is CANCELLABLE via `done`, and — crucially — it is
+        // ALWAYS joined BEFORE the reaping `minijail_wait` (see the ordering
+        // proof at step 11), so a `kill(-pgid)` can never fire on a pgid that
+        // `minijail_wait` has already reaped and the OS may have recycled. The
+        // watchdog polls `done` on a short interval rather than sleeping the full
+        // timeout, so cancellation is prompt (returns within one tick of `done`).
         let timed_out = Arc::new(AtomicBool::new(false));
         let done = Arc::new(AtomicBool::new(false));
         let watchdog = {
@@ -445,25 +471,34 @@ mod android_impl {
                 let tick = Duration::from_millis(20);
                 loop {
                     if done.load(Ordering::SeqCst) {
-                        // Child already reaped — do NOT signal; the pgid may be
-                        // recycled the instant after reap.
+                        // Normal path: the child exited, the readers hit EOF and
+                        // were joined, and `done` was set — all BEFORE the reaping
+                        // minijail_wait. Returning here means no kill fires, so
+                        // there is no recycled-pgid hazard.
                         return;
                     }
                     if start.elapsed() >= timeout {
-                        // Mark BEFORE the kill so the result reports timed_out
-                        // regardless of how wait() decodes the SIGKILL. Re-check
-                        // `done` to narrow the race: only kill if the child has
-                        // not been reaped (its pgid is still ours).
+                        // Timeout path: the child is genuinely hung (it ignored
+                        // the deadline and has not closed its pipes), so it is
+                        // still LIVE and UNREAPED — minijail_wait runs only after
+                        // this watchdog is joined, and that join happens only
+                        // after the readers hit EOF, which the kill below causes.
+                        // So the kill always precedes the reap; the pgid cannot be
+                        // recycled yet. Re-check `done` once more to lose the race
+                        // to a child that exited in the last tick.
                         if done.load(Ordering::SeqCst) {
                             return;
                         }
+                        // Mark BEFORE the kill so the result reports timed_out
+                        // regardless of how wait() decodes the SIGKILL.
                         timed_out.store(true, Ordering::SeqCst);
                         // SAFETY: `child_pgid` is the child's own pgid (== its
                         // pid; it leads a fresh session from create_session).
                         // Negating it targets that group ONLY — never the
                         // engine's group (which has a different, positive pgid).
-                        // Killing a not-yet-reaped child is safe; the `done`
-                        // re-check above prevents killing a recycled pgid.
+                        // The child is unreaped here (reap is the very last step,
+                        // after this thread is joined), so the pgid is still ours
+                        // and cannot have been recycled.
                         #[allow(unsafe_code)]
                         unsafe {
                             libc::kill(-child_pgid, libc::SIGKILL);
@@ -475,19 +510,50 @@ mod android_impl {
             })
         };
 
-        // (11) Reap. minijail_wait blocks until the (only) child exits — which
-        // happens promptly once it finishes or is SIGKILLed by the watchdog.
-        // SAFETY: `jail.0` is valid and its child has not been waited on yet.
-        let status = unsafe { minijail_wait(jail.0) };
+        // (11) Tear down in an order that closes the kill/reap TOCTOU window.
+        //
+        // ORDERING GUARANTEE (why a kill can never hit a recycled pgid):
+        // `minijail_wait` is the ONLY reap, and it is the LAST step below — it
+        // runs strictly after the watchdog has been joined. The watchdog only
+        // ever issues `kill(-pgid)` while the child is still UNREAPED, so the
+        // pgid cannot have been recycled at kill time. Walk both paths:
+        //
+        //  - Normal exit: the child exits and closes its stdout/stderr write
+        //    ends → the reader threads hit EOF and return → we join them, set
+        //    `done`, and join the watchdog. The watchdog sees `done` (or its
+        //    deadline has not elapsed) and returns WITHOUT killing. Only then do
+        //    we call minijail_wait. No kill ever fires.
+        //
+        //  - Hang/timeout: the child ignores the deadline and keeps its pipes
+        //    open, so the readers stay blocked. The watchdog's deadline elapses
+        //    while the child is still live+unreaped; it sets `timed_out` and
+        //    SIGKILLs the (still-ours) pgid. The kill closes the pipes → readers
+        //    EOF → we join the readers, set `done`, join the watchdog (already
+        //    returned post-kill), THEN minijail_wait reaps the killed child. The
+        //    kill happens-before the readers' EOF, which happens-before the
+        //    join+reap — so kill strictly precedes reap.
+        //
+        // Joining the readers FIRST is safe from deadlock: in both paths the
+        // child's pipes get closed (natural exit, or the watchdog's kill), so
+        // read_to_end returns.
 
-        // Child reaped: stop the watchdog so it can never fire on a recycled
-        // pgid, then join it (it returns immediately on seeing `done`).
+        // Readers finish at EOF (child closed the pipes — it has exited or been
+        // killed). Join both before touching the watchdog or reaping.
+        let stdout_bytes = stdout_reader.join().unwrap_or_default();
+        let stderr_bytes = stderr_reader.join().unwrap_or_default();
+
+        // Cancel + join the watchdog BEFORE the reaping minijail_wait. Setting
+        // `done` makes a not-yet-fired watchdog return on its next tick without
+        // killing; if it already fired (timeout path) it has returned. Either
+        // way, once this join completes no kill can ever run again — so the
+        // subsequent reap cannot race a recycled pgid.
         done.store(true, Ordering::SeqCst);
         let _ = watchdog.join();
 
-        // Readers finish at EOF (pipes close when the child dies). Join both.
-        let stdout_bytes = stdout_reader.join().unwrap_or_default();
-        let stderr_bytes = stderr_reader.join().unwrap_or_default();
+        // Reap LAST. minijail_wait blocks until the (only) child exits — prompt
+        // because by now it has either exited naturally or been SIGKILLed.
+        // SAFETY: `jail.0` is valid and its child has not been waited on yet.
+        let status = unsafe { minijail_wait(jail.0) };
 
         let was_timed_out = timed_out.load(Ordering::SeqCst);
         let exit_code = if was_timed_out {

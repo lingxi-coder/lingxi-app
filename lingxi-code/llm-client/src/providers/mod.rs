@@ -8,6 +8,10 @@ pub mod bedrock_claude;
 mod gemini;
 #[allow(missing_docs)]
 mod openai;
+#[allow(missing_docs)]
+pub mod vertex_claude;
+#[allow(missing_docs)]
+pub mod vertex_gemini;
 
 use std::time::Duration;
 
@@ -18,6 +22,8 @@ pub use azure_openai::AzureOpenAiCodec;
 pub use bedrock_claude::BedrockClaudeCodec;
 pub use gemini::GeminiCodec;
 pub use openai::OpenAiChatCodec;
+pub use vertex_claude::VertexClaudeCodec;
+pub use vertex_gemini::VertexGeminiCodec;
 
 /// Create an inner Anthropic stream decoder for delegation.
 ///

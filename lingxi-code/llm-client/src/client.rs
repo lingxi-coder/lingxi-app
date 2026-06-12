@@ -485,15 +485,11 @@ fn build_codec(provider: &crate::ProviderProfile) -> Result<Box<dyn WireCodec>, 
                 azure.api_version.clone(),
             )))
         }
-        // Vertex and Bedrock families are deferred to futurework batch 2.
-        crate::ProtocolFamily::VertexGemini | crate::ProtocolFamily::VertexClaude => {
-            Err(LlmError::InvalidRequest {
-                message: format!(
-                    "provider profile '{}' uses protocol family {:?}, which has no codec yet — \
-                     see futurework batch 2",
-                    provider.profile_name, provider.protocol
-                ),
-            })
+        crate::ProtocolFamily::VertexClaude => {
+            Ok(Box::new(crate::VertexClaudeCodec::new(provider.base_url.clone())))
+        }
+        crate::ProtocolFamily::VertexGemini => {
+            Ok(Box::new(crate::VertexGeminiCodec::new(provider.base_url.clone())))
         }
         crate::ProtocolFamily::BedrockClaude => {
             Ok(Box::new(crate::BedrockClaudeCodec::new(provider.base_url.clone())))

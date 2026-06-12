@@ -34,6 +34,7 @@ pub mod secure_storage;
 pub mod share;
 pub mod stt;
 pub mod subagent_spawn;
+pub mod subscription;
 pub mod swarm;
 pub mod task_registry;
 pub mod team_registry;

@@ -154,6 +154,24 @@ pub fn apply_event(state: &mut AppState, ev: TurnEvent, notify: &Notify) {
                 }
             }
         }
+        TurnEvent::RawUtilization {
+            five_hour_utilization,
+            five_hour_resets_at,
+            seven_day_utilization,
+            seven_day_resets_at,
+        } => {
+            // (Batch-5 Task 4) Store the latest raw per-window snapshot
+            // (last-write-wins) for the statusline command input's
+            // `rate_limits` field (StatusLine.tsx:50-65). No transcript
+            // message — this track is statusline-only, unlike RateLimit.
+            state.raw_utilization =
+                Some(crate::components::status_line_command::RawUtilizationSnapshot {
+                    five_hour_utilization,
+                    five_hour_resets_at,
+                    seven_day_utilization,
+                    seven_day_resets_at,
+                });
+        }
     }
     notify.notify_one();
 }
@@ -374,6 +392,51 @@ mod tests {
             }
             other => panic!("expected RateLimit message, got: {other:?}"),
         }
+    }
+
+    // ── TurnEvent::RawUtilization (batch-5 Task 4) ────────────────────────
+
+    /// A `RawUtilization` event stores the snapshot on
+    /// `state.raw_utilization`; a second event OVERWRITES (last-write-wins,
+    /// mirroring claude-code's per-response `rawUtilization` tracking).
+    #[test]
+    fn raw_utilization_event_updates_state() {
+        let mut s = new_state();
+        let n = Notify::new();
+        // Defaults pin to None before any event.
+        assert!(s.raw_utilization.is_none());
+        apply_event(
+            &mut s,
+            TurnEvent::RawUtilization {
+                five_hour_utilization: Some(0.42),
+                five_hour_resets_at: Some(1_750_000_000),
+                seven_day_utilization: Some(0.07),
+                seven_day_resets_at: Some(1_750_600_000),
+            },
+            &n,
+        );
+        let snap = s.raw_utilization.expect("snapshot stored");
+        assert_eq!(snap.five_hour_utilization, Some(0.42));
+        assert_eq!(snap.five_hour_resets_at, Some(1_750_000_000));
+        assert_eq!(snap.seven_day_utilization, Some(0.07));
+        assert_eq!(snap.seven_day_resets_at, Some(1_750_600_000));
+
+        // Second event overwrites (including dropping a window back to None).
+        apply_event(
+            &mut s,
+            TurnEvent::RawUtilization {
+                five_hour_utilization: Some(0.5),
+                five_hour_resets_at: Some(1_750_000_100),
+                seven_day_utilization: None,
+                seven_day_resets_at: None,
+            },
+            &n,
+        );
+        let snap = s.raw_utilization.expect("snapshot stored");
+        assert_eq!(snap.five_hour_utilization, Some(0.5));
+        assert_eq!(snap.five_hour_resets_at, Some(1_750_000_100));
+        assert_eq!(snap.seven_day_utilization, None);
+        assert_eq!(snap.seven_day_resets_at, None);
     }
 
     #[test]

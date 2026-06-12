@@ -818,6 +818,14 @@ pub struct AppState {
     /// prop so the custom row pads identically to claude-code's
     /// `<Box paddingX={paddingX}>`. Read once at startup from the settings JSON.
     pub status_line_config: Option<crate::components::status_line_command::StatusLineConfig>,
+    /// (Batch-5 Task 4) Latest raw per-window rate-limit utilization snapshot,
+    /// written by `apply_event` on every `TurnEvent::RawUtilization`
+    /// (last-write-wins, mirroring claude-code's per-response `rawUtilization`
+    /// tracking in `claudeAiLimits.ts`). `None` until the first API response
+    /// carries the `anthropic-ratelimit-unified-{5h,7d}-*` headers. Feeds the
+    /// status-line command input's always-present `rate_limits` field
+    /// (`StatusLine.tsx:50-65`).
+    pub raw_utilization: Option<crate::components::status_line_command::RawUtilizationSnapshot>,
     /// Shared subscription slot from the composition root (None in tests /
     /// print mode). Read at rate-limit compose time via
     /// [`Self::subscription_snapshot`].
@@ -888,6 +896,7 @@ impl AppState {
             pending_copy_clipboard: None,
             status_line_text: None,
             status_line_config: None,
+            raw_utilization: None,
             subscription: None,
         }
     }

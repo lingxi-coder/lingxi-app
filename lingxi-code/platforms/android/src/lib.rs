@@ -16,9 +16,11 @@
 
 #![forbid(unsafe_code)]
 
+pub mod capabilities;
 pub mod config;
 pub mod policy;
 
+pub use capabilities::{AndroidSandboxCapabilities, CapabilityCache};
 pub use config::AndroidShellConfig;
 pub use policy::{
     build_shell_env, plan_from_policy, AndroidSandboxPlan, ExecTarget, NetProfile, ProcessCleanup,

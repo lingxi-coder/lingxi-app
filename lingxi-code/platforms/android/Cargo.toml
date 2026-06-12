@@ -19,5 +19,8 @@ traits = { path = "../../traits" }
 platform-posix-minimal = { path = "../posix-minimal" }
 platform-common = { path = "../common" }
 
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt"] }
+
 [lints]
 workspace = true

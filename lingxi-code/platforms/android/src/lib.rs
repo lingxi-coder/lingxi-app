@@ -84,6 +84,10 @@ pub struct AndroidPlatform {
     tts: Option<Arc<dyn TextToSpeech>>,
     notifications: Option<Arc<dyn NotificationService>>,
     clipboard: Option<Arc<dyn Clipboard>>,
+    /// The shared capability cache when shell support is wired (`None` for the
+    /// posix-minimal-stub configuration). Held so the eager probe (engine-mobile)
+    /// and the runner can read/populate the SAME instance the sandbox reads.
+    shell_caps: Option<std::sync::Arc<crate::capabilities::CapabilityCache>>,
 }
 
 impl AndroidPlatform {
@@ -93,17 +97,21 @@ impl AndroidPlatform {
         use platform_posix_minimal::{
             PosixClock, PosixFileSystem, PosixProcess, PosixSandbox, PosixWorktree,
         };
-        let (process, sandbox): (Arc<dyn ProcessRunner>, Arc<dyn Sandbox>) = match inputs.shell {
+        let (process, sandbox, shell_caps) = match inputs.shell {
             Some(shell_cfg) => {
                 let caps = Arc::new(crate::capabilities::CapabilityCache::new());
-                (
-                    Arc::new(crate::process::AndroidMinijailProcessRunner::new()),
-                    Arc::new(crate::sandbox::AndroidMinijailSandbox::new(shell_cfg, caps)),
-                )
+                // Task 2: runner gets caps.clone()
+                let process: Arc<dyn ProcessRunner> =
+                    Arc::new(crate::process::AndroidMinijailProcessRunner::new());
+                let sandbox: Arc<dyn Sandbox> = Arc::new(
+                    crate::sandbox::AndroidMinijailSandbox::new(shell_cfg, caps.clone()),
+                );
+                (process, sandbox, Some(caps))
             }
             None => (
                 Arc::new(PosixProcess::new()) as Arc<dyn ProcessRunner>,
                 Arc::new(PosixSandbox::new()) as Arc<dyn Sandbox>,
+                None,
             ),
         };
         Self {
@@ -120,7 +128,22 @@ impl AndroidPlatform {
             tts: inputs.tts,
             notifications: inputs.notifications,
             clipboard: inputs.clipboard,
+            shell_caps,
         }
+    }
+
+    /// The shared shell capability cache, when shell support is wired.
+    ///
+    /// Returns `Some(Arc<CapabilityCache>)` when the platform was constructed
+    /// with an [`AndroidShellConfig`], `None` for the posix-minimal-stub
+    /// configuration. The eager probe (engine-mobile) uses this to populate the
+    /// cache before tool registration; the runner uses it to gate per-plan
+    /// admission (e.g., `DenyNet` requires `seccomp_filter + net_deny_verified`).
+    #[must_use]
+    pub fn shell_capability_cache(
+        &self,
+    ) -> Option<std::sync::Arc<crate::capabilities::CapabilityCache>> {
+        self.shell_caps.clone()
     }
 }
 
@@ -251,5 +274,27 @@ mod tests {
     fn no_shell_config_keeps_posix_minimal_stubs() {
         let p = AndroidPlatform::new(inputs(None));
         assert_eq!(p.sandbox().backend(), SandboxBackend::None);
+    }
+
+    #[test]
+    fn shell_platform_exposes_shared_capability_cache() {
+        let p = AndroidPlatform::new(inputs(Some(shell_cfg())));
+        let cache = p
+            .shell_capability_cache()
+            .expect("shell platform exposes its cache");
+        // Same instance the sandbox reads: setting it flips is_available().
+        cache.set(crate::capabilities::AndroidSandboxCapabilities {
+            probed: true,
+            minijail_smoke: true,
+            no_new_privs: true,
+            ..crate::capabilities::AndroidSandboxCapabilities::default()
+        });
+        assert!(p.sandbox().is_available(), "sandbox reads the shared cache");
+    }
+
+    #[test]
+    fn no_shell_platform_has_no_cache() {
+        let p = AndroidPlatform::new(inputs(None));
+        assert!(p.shell_capability_cache().is_none());
     }
 }

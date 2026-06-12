@@ -9,6 +9,9 @@
 //! `build.rs`). Host builds compile no unsafe code at all and report the
 //! smoke as structurally unavailable.
 
+pub mod seccomp;
+pub use seccomp::{net_deny_policy_hash, net_deny_policy_name, net_deny_policy_text};
+
 use serde::Serialize;
 
 /// Result of the on-device minijail smoke (serialized to the instrumentation

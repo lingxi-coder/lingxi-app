@@ -2932,9 +2932,11 @@ name = "platform-android-minijail"
 version = "0.1.0"
 dependencies = [
  "cc",
+ "hex",
  "libc",
  "platform-android-libcap",
  "serde",
+ "sha2",
 ]
 
 [[package]]

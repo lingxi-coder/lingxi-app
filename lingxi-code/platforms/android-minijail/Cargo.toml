@@ -22,6 +22,9 @@ platform-android-libcap = { path = "../android-libcap" }
 
 [dependencies]
 serde = { workspace = true }
+# Pinned to match sibling crates (anthropic-oauth, filestate, llm-client, etc.)
+sha2 = "0.10"
+hex = "0.4"
 
 [build-dependencies]
 # `cc` is not in [workspace.dependencies]; declared directly here.

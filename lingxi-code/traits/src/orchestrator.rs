@@ -13,6 +13,25 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use thiserror::Error;
 
+/// Snapshot of the latest provider rate-limit headers seen on the live path.
+///
+/// Returned by [`OrchestratorHandle::last_rate_limit_info`] so callers (e.g.
+/// the TUI rate-limit status ticker) can inspect all three header values
+/// without depending on the orchestrator-internal `RateLimitInfo` struct.
+///
+/// All fields are `Option<String>` — a missing header means the provider did
+/// not send it in the most-recent 2xx response.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RateLimitSnapshot {
+    /// `anthropic-ratelimit-type` (e.g. `"five_hour"`, `"seven_day"`).
+    pub rate_limit_type: Option<String>,
+    /// Overage status: `"allowed"`, `"allowed_warning"`, or `"rejected"`.
+    pub overage_status: Option<String>,
+    /// Why overage is disabled (e.g. `"out_of_credits"`) — drives upsell copy
+    /// parity. Maps `anthropic-ratelimit-unified-overage-disabled-reason`.
+    pub overage_disabled_reason: Option<String>,
+}
+
 /// Snapshot of cumulative cost at a single point in time.
 ///
 /// Lightweight echo of `cost::SessionCostSummary` — see that type for
@@ -331,13 +350,14 @@ pub trait OrchestratorHandle: Send + Sync {
 
     /// Return the most recently observed provider rate-limit header snapshot.
     ///
-    /// Returns `Some((rate_limit_type, overage_status))` when the underlying
-    /// `ProviderApiAdapter` has received at least one successful 2xx response
-    /// with `anthropic-ratelimit-unified-*` headers; `None` until then.
+    /// Returns `Some(snapshot)` when the underlying `ProviderApiAdapter` has
+    /// received at least one successful 2xx response with
+    /// `anthropic-ratelimit-unified-*` headers; `None` until then.
     ///
-    /// Primitive types are returned to avoid leaking the orchestrator-internal
-    /// `RateLimitInfo` struct through the `traits` crate (which must not depend
-    /// on `orchestrator`).
+    /// The returned [`RateLimitSnapshot`] avoids leaking the
+    /// orchestrator-internal `RateLimitInfo` struct through the `traits` crate
+    /// (which must not depend on `orchestrator`).  It carries all three
+    /// header-derived fields including `overage_disabled_reason`.
     ///
     /// **TUI wiring note:** the TUI's existing `rate_limit.rs` renderer is fed
     /// from `RenderedMessage::RateLimit` events that flow through the output
@@ -347,7 +367,7 @@ pub trait OrchestratorHandle: Send + Sync {
     /// This method is the handle-layer surface; callers that need live polling
     /// can call it from a ticker and push a `RenderedMessage::RateLimit` when
     /// the value changes.
-    async fn last_rate_limit_info(&self) -> Option<(Option<String>, Option<String>)> {
+    async fn last_rate_limit_info(&self) -> Option<RateLimitSnapshot> {
         None
     }
 
@@ -820,5 +840,90 @@ mod tests {
         let fail = CheckStatus::Fail;
         assert_ne!(pass, warn);
         assert_ne!(warn, fail);
+    }
+
+    // ── RateLimitSnapshot ─────────────────────────────────────────────────────
+
+    /// `RateLimitSnapshot::default()` has all three fields `None`.
+    #[test]
+    fn rate_limit_snapshot_default_all_none() {
+        let s = RateLimitSnapshot::default();
+        assert!(s.rate_limit_type.is_none());
+        assert!(s.overage_status.is_none());
+        assert!(s.overage_disabled_reason.is_none());
+    }
+
+    /// A fully-populated snapshot round-trips through equality checks correctly.
+    #[test]
+    fn rate_limit_snapshot_fields_round_trip() {
+        let s = RateLimitSnapshot {
+            rate_limit_type: Some("five_hour".to_string()),
+            overage_status: Some("allowed_warning".to_string()),
+            overage_disabled_reason: Some("out_of_credits".to_string()),
+        };
+        assert_eq!(s.rate_limit_type.as_deref(), Some("five_hour"));
+        assert_eq!(s.overage_status.as_deref(), Some("allowed_warning"));
+        assert_eq!(
+            s.overage_disabled_reason.as_deref(),
+            Some("out_of_credits"),
+            "overage_disabled_reason must round-trip"
+        );
+    }
+
+    /// Two snapshots with identical fields compare equal (`PartialEq`).
+    #[test]
+    fn rate_limit_snapshot_eq() {
+        let a = RateLimitSnapshot {
+            rate_limit_type: Some("seven_day".to_string()),
+            overage_status: Some("rejected".to_string()),
+            overage_disabled_reason: None,
+        };
+        let b = a.clone();
+        assert_eq!(a, b);
+        let c = RateLimitSnapshot {
+            overage_disabled_reason: Some("out_of_credits".to_string()),
+            ..b
+        };
+        assert_ne!(a, c, "different overage_disabled_reason must compare unequal");
+    }
+
+    /// The default impl of `last_rate_limit_info` on `OrchestratorHandle`
+    /// returns `None` — ensures implementors that don't override get a safe
+    /// default.
+    #[tokio::test]
+    async fn last_rate_limit_info_default_is_none() {
+        struct MinimalHandle;
+
+        #[async_trait]
+        impl OrchestratorHandle for MinimalHandle {
+            async fn current_session_id(&self) -> SessionId { SessionId::new() }
+            async fn clear_session(&self) -> Result<(), HandleError> { Ok(()) }
+            async fn force_compact(&self) -> Result<CompactionSummary, HandleError> { Ok(CompactionSummary::default()) }
+            async fn snapshot_cost(&self) -> CostSnapshot { CostSnapshot::default() }
+            async fn switch_model(&self, _: &str) -> Result<(), HandleError> { Ok(()) }
+            async fn request_exit(&self) {}
+            async fn current_should_exit(&self) -> bool { false }
+            async fn open_memory_editor(&self) -> Result<MemoryEditorOutcome, HandleError> {
+                Ok(MemoryEditorOutcome { edited_path: PathBuf::new(), exit_code: 0 })
+            }
+            async fn list_mcp_servers(&self) -> Vec<McpServerInfo> { Vec::new() }
+            async fn list_hooks(&self) -> Vec<HookInfo> { Vec::new() }
+            async fn list_agents(&self) -> Vec<AgentInfo> { Vec::new() }
+            async fn run_doctor_checks(&self) -> DoctorReport { DoctorReport::default() }
+            async fn get_status_snapshot(&self) -> StatusSnapshot { StatusSnapshot::default() }
+            async fn edit_config_file(&self) -> Result<MemoryEditorOutcome, HandleError> {
+                Ok(MemoryEditorOutcome { edited_path: PathBuf::new(), exit_code: 0 })
+            }
+            async fn edit_permissions_file(&self) -> Result<MemoryEditorOutcome, HandleError> {
+                Ok(MemoryEditorOutcome { edited_path: PathBuf::new(), exit_code: 0 })
+            }
+            async fn list_available_models(&self) -> Vec<String> { Vec::new() }
+        }
+
+        let h = MinimalHandle;
+        assert!(
+            h.last_rate_limit_info().await.is_none(),
+            "default impl must return None"
+        );
     }
 }

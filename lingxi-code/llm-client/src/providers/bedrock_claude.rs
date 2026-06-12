@@ -120,7 +120,46 @@ impl WireCodec for BedrockClaudeCodec {
     }
 
     fn decode_response(&self, response: ProviderResponse) -> Result<LlmResponse, LlmError> {
-        // Bedrock non-streaming responses use the same JSON shape as Anthropic.
+        // Bedrock non-streaming error responses sometimes use a top-level
+        // `{"message": "..."}` shape instead of the Anthropic
+        // `{"type":"error","error":{"type":...,"message":...}}` envelope.
+        // When we see status >= 400 with a top-level "message" key but no "error"
+        // object, synthesize the Anthropic envelope so the inner decoder's
+        // classification logic runs unchanged (keeps all error mapping in one place).
+        let response = if response.status >= 400
+            && response.body_json.get("message").is_some()
+            && response.body_json.get("error").is_none()
+        {
+            let msg = response
+                .body_json
+                .get("message")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            // Map the HTTP status to a canonical Anthropic error type string so
+            // the inner `map_error` function can classify it correctly.
+            let error_type = match response.status {
+                401 => "authentication_error",
+                403 => "permission_error",
+                404 => "not_found_error",
+                429 => "rate_limit_error",
+                500 | 529 => "overloaded_error",
+                _ => "invalid_request_error",
+            };
+            ProviderResponse {
+                body_json: serde_json::json!({
+                    "type": "error",
+                    "error": {
+                        "type": error_type,
+                        "message": msg,
+                    }
+                }),
+                ..response
+            }
+        } else {
+            response
+        };
+        // Delegate to the inner Anthropic codec for body decode.
         self.inner.decode_response(response)
     }
 
@@ -394,6 +433,75 @@ mod tests {
         assert!(
             msg.contains("ModelStreamErrorException"),
             "error must name the exception type; got: {msg}"
+        );
+    }
+
+    // ── decode_response: Bedrock top-level error extraction ──────────────────
+
+    fn make_response(status: u16, body: Value) -> ProviderResponse {
+        ProviderResponse {
+            status,
+            headers: std::collections::BTreeMap::new(),
+            body_json: body,
+            request_id: None,
+        }
+    }
+
+    /// Bedrock 400 with a top-level `{"message": "..."}` body (no `"error"` key)
+    /// must map to `LlmError::InvalidRequest` whose `message` contains the
+    /// Bedrock-provided string.
+    #[test]
+    fn decode_response_bedrock_400_top_level_message_becomes_invalid_request() {
+        let codec = BedrockClaudeCodec::new("https://bedrock-runtime.us-east-1.amazonaws.com");
+        let response = make_response(400, serde_json::json!({"message": "Input validation failed"}));
+
+        let err = codec.decode_response(response).expect_err("400 must be an error");
+        match err {
+            LlmError::InvalidRequest { message } => {
+                assert!(
+                    message.contains("Input validation failed"),
+                    "message must contain the Bedrock error string; got: {message}"
+                );
+            }
+            other => panic!("expected InvalidRequest, got: {other:?}"),
+        }
+    }
+
+    /// Bedrock 429 with a top-level `{"message": "..."}` body must map to
+    /// `LlmError::RateLimited`.
+    #[test]
+    fn decode_response_bedrock_429_top_level_message_becomes_rate_limited() {
+        let codec = BedrockClaudeCodec::new("https://bedrock-runtime.us-east-1.amazonaws.com");
+        let response = make_response(429, serde_json::json!({"message": "Too many requests"}));
+
+        let err = codec.decode_response(response).expect_err("429 must be an error");
+        assert!(
+            matches!(err, LlmError::RateLimited { .. }),
+            "expected RateLimited, got: {err:?}"
+        );
+    }
+
+    /// A standard Anthropic error envelope (has an `"error"` object) must still
+    /// be handled correctly by the inner decoder — the Bedrock fix must not break
+    /// the common Anthropic path.
+    #[test]
+    fn decode_response_anthropic_envelope_still_works() {
+        let codec = BedrockClaudeCodec::new("https://bedrock-runtime.us-east-1.amazonaws.com");
+        let response = make_response(
+            400,
+            serde_json::json!({
+                "type": "error",
+                "error": {
+                    "type": "invalid_request_error",
+                    "message": "prompt too long"
+                }
+            }),
+        );
+
+        let err = codec.decode_response(response).expect_err("400 must be an error");
+        assert!(
+            matches!(err, LlmError::InvalidRequest { .. } | LlmError::ContextOverflow { .. }),
+            "expected InvalidRequest or ContextOverflow for 400 with anthropic envelope; got: {err:?}"
         );
     }
 }

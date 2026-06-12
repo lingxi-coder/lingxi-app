@@ -249,7 +249,7 @@ impl OrchestratorHandle for ConversationOrchestrator {
     /// Wiring it into `RenderedMessage::RateLimit` requires a new protocol
     /// event or a dedicated status-poll channel — both outside this task's
     /// scope (frozen protocol guard).  See the trait doc for details.
-    async fn last_rate_limit_info(&self) -> Option<(Option<String>, Option<String>)> {
+    async fn last_rate_limit_info(&self) -> Option<traits::RateLimitSnapshot> {
         self.api.last_rate_limit_info()
     }
 

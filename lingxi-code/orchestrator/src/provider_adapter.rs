@@ -1078,11 +1078,16 @@ impl OrchestratorApiClient for ProviderApiAdapter {
 
     /// Return the most recently observed rate-limit header snapshot.
     ///
-    /// Delegates to [`Self::last_rate_limit_info`] and re-shapes into the
-    /// primitive `(rate_limit_type, overage_status)` tuple expected by the
-    /// trait (avoids leaking the orchestrator-internal `RateLimitInfo` type).
-    fn last_rate_limit_info(&self) -> Option<(Option<String>, Option<String>)> {
-        self.last_rate_limit_info().map(|info| (info.rate_limit_type, info.overage_status))
+    /// Delegates to [`Self::last_rate_limit_info`] and maps the internal
+    /// `RateLimitInfo` struct into the public [`traits::RateLimitSnapshot`]
+    /// (all three fields: `rate_limit_type`, `overage_status`, and
+    /// `overage_disabled_reason`).
+    fn last_rate_limit_info(&self) -> Option<traits::RateLimitSnapshot> {
+        self.last_rate_limit_info().map(|info| traits::RateLimitSnapshot {
+            rate_limit_type: info.rate_limit_type,
+            overage_status: info.overage_status,
+            overage_disabled_reason: info.overage_disabled_reason,
+        })
     }
 }
 
@@ -2956,10 +2961,11 @@ mod tests {
     // ── Task 5 Part B: OrchestratorApiClient::last_rate_limit_info ──────────────
 
     /// `OrchestratorApiClient::last_rate_limit_info` returns the adapter's stored
-    /// rate-limit info (the trait override re-shapes `RateLimitInfo` to primitives).
+    /// rate-limit info mapped into a `traits::RateLimitSnapshot`.
     ///
-    /// After a 2xx response with unified headers the tuple must carry the
-    /// `rate_limit_type` and `overage_status` values.
+    /// After a 2xx response with unified headers the snapshot must carry all
+    /// three fields: `rate_limit_type`, `overage_status`, and
+    /// `overage_disabled_reason`.
     #[tokio::test]
     async fn orchestrator_api_client_last_rate_limit_info_returns_stored_info() {
         let mut headers = BTreeMap::new();
@@ -2970,6 +2976,10 @@ mod tests {
         headers.insert(
             "anthropic-ratelimit-unified-overage-status".to_string(),
             "allowed_warning".to_string(),
+        );
+        headers.insert(
+            "anthropic-ratelimit-unified-overage-disabled-reason".to_string(),
+            "out_of_credits".to_string(),
         );
 
         let transport = FakeTransport::always(ProviderResponse {
@@ -2984,18 +2994,23 @@ mod tests {
             .await
             .expect("ok");
 
-        // Via the OrchestratorApiClient trait method (primitive tuple).
-        let info = OrchestratorApiClient::last_rate_limit_info(&adapter)
+        // Via the OrchestratorApiClient trait method (RateLimitSnapshot).
+        let snapshot = OrchestratorApiClient::last_rate_limit_info(&adapter)
             .expect("must be Some after 2xx with unified headers");
         assert_eq!(
-            info.0.as_deref(),
+            snapshot.rate_limit_type.as_deref(),
             Some("five_hour"),
-            "rate_limit_type must round-trip through the trait tuple"
+            "rate_limit_type must round-trip through the snapshot"
         );
         assert_eq!(
-            info.1.as_deref(),
+            snapshot.overage_status.as_deref(),
             Some("allowed_warning"),
-            "overage_status must round-trip through the trait tuple"
+            "overage_status must round-trip through the snapshot"
+        );
+        assert_eq!(
+            snapshot.overage_disabled_reason.as_deref(),
+            Some("out_of_credits"),
+            "overage_disabled_reason must round-trip through the snapshot"
         );
     }
 

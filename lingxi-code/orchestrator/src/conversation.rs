@@ -150,11 +150,11 @@ pub trait OrchestratorApiClient: Send + Sync {
     /// to [`crate::provider_adapter::ProviderApiAdapter::last_rate_limit_info`],
     /// which is populated from every successful 2xx response's headers.
     ///
-    /// The returned tuple is `(rate_limit_type, overage_status)` — the two
-    /// fields from `RateLimitInfo` that the TUI renders in its rate-limit
-    /// message component.  Primitive types are used so this method does not
-    /// leak the orchestrator-internal `RateLimitInfo` struct through the trait.
-    fn last_rate_limit_info(&self) -> Option<(Option<String>, Option<String>)> {
+    /// Returns a [`traits::RateLimitSnapshot`] carrying all three header-derived
+    /// fields (`rate_limit_type`, `overage_status`, `overage_disabled_reason`).
+    /// Using the public snapshot type avoids leaking the orchestrator-internal
+    /// `RateLimitInfo` struct through the trait.
+    fn last_rate_limit_info(&self) -> Option<traits::RateLimitSnapshot> {
         None
     }
 }

@@ -978,13 +978,667 @@ fn decode_response_http_400_maps_invalid_request_with_message() {
     );
 }
 
-// ── stubs (stream decode lands in batch-3 T3) ─────────────────────────────────
+// ── stream decoder ────────────────────────────────────────────────────────────
+
+use llm_client::{
+    ContentDelta, LlmEvent, LlmResponse, MessageDeltaPayload, RawStreamFrame, TokenUsage, Usage,
+};
+
+/// Feed SSE data payloads (already de-framed) through a fresh stream decoder.
+fn decode_stream(frames: &[serde_json::Value]) -> Vec<LlmEvent> {
+    let mut decoder = codec().stream_decoder();
+    let mut events = Vec::new();
+    for frame in frames {
+        events.extend(
+            decoder
+                .decode_frame(RawStreamFrame::new(frame.to_string().into_bytes()))
+                .unwrap(),
+        );
+    }
+    events
+}
+
+fn created_frame() -> serde_json::Value {
+    serde_json::json!({
+        "type": "response.created",
+        "response": {"id": "resp_1", "model": "gpt-5", "status": "in_progress"},
+    })
+}
 
 #[test]
-fn stream_decoder_stub_errors_until_t3() {
+fn stream_created_emits_message_start_snapshot() {
+    let events = decode_stream(&[created_frame()]);
+
+    assert_eq!(
+        events,
+        vec![LlmEvent::MessageStart {
+            response: Box::new(LlmResponse {
+                id: "resp_1".to_string(),
+                model: "gpt-5".to_string(),
+                content: Vec::new(),
+                stop_reason: None,
+                usage: Usage::default(),
+                cost: None,
+                provider_metadata: serde_json::Value::Null,
+            }),
+        }]
+    );
+}
+
+#[test]
+fn stream_text_delta_opens_block_once_then_deltas() {
+    let events = decode_stream(&[
+        created_frame(),
+        serde_json::json!({
+            "type": "response.output_text.delta",
+            "item_id": "msg_1", "output_index": 0, "content_index": 0,
+            "delta": "Hel",
+        }),
+        serde_json::json!({
+            "type": "response.output_text.delta",
+            "item_id": "msg_1", "output_index": 0, "content_index": 0,
+            "delta": "lo",
+        }),
+    ]);
+
+    assert_eq!(events.len(), 4);
+    assert_eq!(
+        events[1],
+        LlmEvent::ContentBlockStart {
+            index: 0,
+            content_block: ContentBlock::Text {
+                text: String::new(),
+                cache_control: None,
+            },
+        }
+    );
+    assert_eq!(
+        events[2],
+        LlmEvent::ContentBlockDelta {
+            index: 0,
+            delta: ContentDelta::TextDelta { text: "Hel".to_string() },
+        }
+    );
+    assert_eq!(
+        events[3],
+        LlmEvent::ContentBlockDelta {
+            index: 0,
+            delta: ContentDelta::TextDelta { text: "lo".to_string() },
+        }
+    );
+}
+
+#[test]
+fn stream_function_call_added_starts_tool_block_with_empty_input() {
+    let events = decode_stream(&[
+        created_frame(),
+        serde_json::json!({
+            "type": "response.output_item.added",
+            "output_index": 0,
+            "item": {"type": "function_call", "id": "fc_1", "call_id": "call_1", "name": "Bash", "arguments": ""},
+        }),
+    ]);
+
+    assert_eq!(
+        events[1],
+        LlmEvent::ContentBlockStart {
+            index: 0,
+            content_block: ContentBlock::ToolCall {
+                id: "call_1".to_string(),
+                name: "Bash".to_string(),
+                input: serde_json::Value::Object(serde_json::Map::new()),
+            },
+        }
+    );
+}
+
+#[test]
+fn stream_function_call_arguments_delta_emits_input_json_delta() {
+    let events = decode_stream(&[
+        created_frame(),
+        serde_json::json!({
+            "type": "response.output_item.added",
+            "output_index": 0,
+            "item": {"type": "function_call", "id": "fc_1", "call_id": "call_1", "name": "Bash", "arguments": ""},
+        }),
+        serde_json::json!({
+            "type": "response.function_call_arguments.delta",
+            "item_id": "fc_1", "output_index": 0,
+            "delta": "{\"command\":",
+        }),
+        serde_json::json!({
+            "type": "response.function_call_arguments.delta",
+            "item_id": "fc_1", "output_index": 0,
+            "delta": "\"ls\"}",
+        }),
+    ]);
+
+    assert_eq!(
+        &events[2..],
+        &[
+            LlmEvent::ContentBlockDelta {
+                index: 0,
+                delta: ContentDelta::InputJsonDelta {
+                    partial_json: "{\"command\":".to_string(),
+                },
+            },
+            LlmEvent::ContentBlockDelta {
+                index: 0,
+                delta: ContentDelta::InputJsonDelta {
+                    partial_json: "\"ls\"}".to_string(),
+                },
+            },
+        ]
+    );
+}
+
+#[test]
+fn stream_reasoning_text_delta_opens_reasoning_block_once() {
+    let events = decode_stream(&[
+        created_frame(),
+        serde_json::json!({
+            "type": "response.reasoning_text.delta",
+            "item_id": "rs_1", "output_index": 0, "content_index": 0,
+            "delta": "thinking ",
+        }),
+        serde_json::json!({
+            "type": "response.reasoning_text.delta",
+            "item_id": "rs_1", "output_index": 0, "content_index": 0,
+            "delta": "hard",
+        }),
+    ]);
+
+    assert_eq!(events.len(), 4);
+    assert_eq!(
+        events[1],
+        LlmEvent::ContentBlockStart {
+            index: 0,
+            content_block: ContentBlock::Reasoning {
+                text: String::new(),
+                signature: None,
+            },
+        }
+    );
+    assert_eq!(
+        events[2],
+        LlmEvent::ContentBlockDelta {
+            index: 0,
+            delta: ContentDelta::ThinkingDelta {
+                thinking: "thinking ".to_string(),
+            },
+        }
+    );
+}
+
+#[test]
+fn stream_reasoning_summary_delta_shares_reasoning_block() {
+    // Both reasoning_text.delta and reasoning_summary_text.delta target the
+    // same item's single Reasoning block: one start, two thinking deltas.
+    let events = decode_stream(&[
+        created_frame(),
+        serde_json::json!({
+            "type": "response.reasoning_summary_text.delta",
+            "item_id": "rs_1", "output_index": 0, "summary_index": 0,
+            "delta": "summary ",
+        }),
+        serde_json::json!({
+            "type": "response.reasoning_text.delta",
+            "item_id": "rs_1", "output_index": 0, "content_index": 0,
+            "delta": "raw",
+        }),
+    ]);
+
+    let starts = events
+        .iter()
+        .filter(|event| matches!(event, LlmEvent::ContentBlockStart { .. }))
+        .count();
+    assert_eq!(starts, 1);
+    let thinking: String = events
+        .iter()
+        .filter_map(|event| match event {
+            LlmEvent::ContentBlockDelta {
+                delta: ContentDelta::ThinkingDelta { thinking },
+                ..
+            } => Some(thinking.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(thinking, "summary raw");
+}
+
+#[test]
+fn stream_output_item_done_emits_content_block_stop() {
+    let events = decode_stream(&[
+        created_frame(),
+        serde_json::json!({
+            "type": "response.output_text.delta",
+            "item_id": "msg_1", "output_index": 0, "content_index": 0,
+            "delta": "hi",
+        }),
+        serde_json::json!({
+            "type": "response.output_item.done",
+            "output_index": 0,
+            "item": {"type": "message", "id": "msg_1", "role": "assistant"},
+        }),
+    ]);
+
+    assert_eq!(events.last(), Some(&LlmEvent::ContentBlockStop { index: 0 }));
+}
+
+#[test]
+fn stream_output_index_keys_block_mapping() {
+    // Interleaved deltas for two wire items route to two sequential block
+    // indices keyed by output_index.
+    let events = decode_stream(&[
+        created_frame(),
+        serde_json::json!({
+            "type": "response.reasoning_text.delta",
+            "item_id": "rs_1", "output_index": 0, "content_index": 0,
+            "delta": "think",
+        }),
+        serde_json::json!({
+            "type": "response.output_text.delta",
+            "item_id": "msg_1", "output_index": 1, "content_index": 0,
+            "delta": "answer",
+        }),
+        serde_json::json!({
+            "type": "response.reasoning_text.delta",
+            "item_id": "rs_1", "output_index": 0, "content_index": 0,
+            "delta": " more",
+        }),
+    ]);
+
+    assert_eq!(
+        events[1],
+        LlmEvent::ContentBlockStart {
+            index: 0,
+            content_block: ContentBlock::Reasoning {
+                text: String::new(),
+                signature: None,
+            },
+        }
+    );
+    assert_eq!(
+        events[3],
+        LlmEvent::ContentBlockStart {
+            index: 1,
+            content_block: ContentBlock::Text {
+                text: String::new(),
+                cache_control: None,
+            },
+        }
+    );
+    assert_eq!(
+        events[5],
+        LlmEvent::ContentBlockDelta {
+            index: 0,
+            delta: ContentDelta::ThinkingDelta {
+                thinking: " more".to_string(),
+            },
+        }
+    );
+}
+
+#[test]
+fn stream_completed_closes_open_blocks_then_message_delta_and_stop() {
+    let usage_json = serde_json::json!({
+        "input_tokens": 100,
+        "input_tokens_details": {"cached_tokens": 40},
+        "output_tokens": 50,
+        "output_tokens_details": {"reasoning_tokens": 30},
+        "total_tokens": 150,
+    });
+    let events = decode_stream(&[
+        created_frame(),
+        serde_json::json!({
+            "type": "response.output_text.delta",
+            "item_id": "msg_1", "output_index": 0, "content_index": 0,
+            "delta": "hi",
+        }),
+        serde_json::json!({
+            "type": "response.completed",
+            "response": {
+                "id": "resp_1", "model": "gpt-5", "status": "completed",
+                "usage": usage_json,
+            },
+        }),
+    ]);
+
+    // The still-open text block is closed before the terminal events.
+    assert_eq!(
+        &events[3..],
+        &[
+            LlmEvent::ContentBlockStop { index: 0 },
+            LlmEvent::MessageDelta {
+                delta: MessageDeltaPayload {
+                    stop_reason: Some("end_turn".to_string()),
+                },
+                usage: Some(Usage {
+                    billable_tokens: TokenUsage {
+                        input: 60,
+                        output: 20,
+                        cache_read: 40,
+                        reasoning_output: 30,
+                        ..Default::default()
+                    },
+                    context_tokens: Some(150),
+                    provider_reported_total_tokens: Some(150),
+                    provider_metadata: usage_json,
+                    ..Default::default()
+                }),
+            },
+            LlmEvent::MessageStop,
+        ]
+    );
+}
+
+#[test]
+fn stream_completed_after_function_call_maps_tool_use() {
+    let events = decode_stream(&[
+        created_frame(),
+        serde_json::json!({
+            "type": "response.output_item.added",
+            "output_index": 0,
+            "item": {"type": "function_call", "id": "fc_1", "call_id": "call_1", "name": "Bash", "arguments": ""},
+        }),
+        serde_json::json!({
+            "type": "response.output_item.done",
+            "output_index": 0,
+            "item": {"type": "function_call", "id": "fc_1", "call_id": "call_1", "name": "Bash", "arguments": "{}"},
+        }),
+        serde_json::json!({
+            "type": "response.completed",
+            "response": {"id": "resp_1", "model": "gpt-5", "status": "completed"},
+        }),
+    ]);
+
+    let stop_reason = events
+        .iter()
+        .find_map(|event| match event {
+            LlmEvent::MessageDelta { delta, .. } => delta.stop_reason.clone(),
+            _ => None,
+        })
+        .expect("terminal stop reason");
+    assert_eq!(stop_reason, "tool_use");
+}
+
+#[test]
+fn stream_incomplete_max_output_tokens_maps_max_tokens() {
+    let events = decode_stream(&[
+        created_frame(),
+        serde_json::json!({
+            "type": "response.incomplete",
+            "response": {
+                "id": "resp_1", "model": "gpt-5", "status": "incomplete",
+                "incomplete_details": {"reason": "max_output_tokens"},
+            },
+        }),
+    ]);
+
+    assert_eq!(
+        &events[1..],
+        &[
+            LlmEvent::MessageDelta {
+                delta: MessageDeltaPayload {
+                    stop_reason: Some("max_tokens".to_string()),
+                },
+                usage: None,
+            },
+            LlmEvent::MessageStop,
+        ]
+    );
+}
+
+#[test]
+fn stream_failed_maps_error_taxonomy() {
+    let mut decoder = codec().stream_decoder();
+    decoder
+        .decode_frame(RawStreamFrame::new(created_frame().to_string().into_bytes()))
+        .unwrap();
+    let err = decoder
+        .decode_frame(RawStreamFrame::new(
+            serde_json::json!({
+                "type": "response.failed",
+                "response": {
+                    "id": "resp_1", "status": "failed",
+                    "error": {"code": "context_length_exceeded", "message": "too long"},
+                },
+            })
+            .to_string()
+            .into_bytes(),
+        ))
+        .unwrap_err();
+
+    assert!(matches!(err, llm_client::LlmError::ContextOverflow { .. }));
+}
+
+#[test]
+fn stream_failed_quota_maps_quota_exceeded() {
     let mut decoder = codec().stream_decoder();
     let err = decoder
-        .decode_frame(llm_client::RawStreamFrame::new(b"{}".to_vec()))
+        .decode_frame(RawStreamFrame::new(
+            serde_json::json!({
+                "type": "response.failed",
+                "response": {
+                    "id": "resp_1", "status": "failed",
+                    "error": {"code": "insufficient_quota", "message": "quota gone"},
+                },
+            })
+            .to_string()
+            .into_bytes(),
+        ))
         .unwrap_err();
-    assert!(matches!(err, llm_client::LlmError::InvalidRequest { .. }));
+
+    assert!(matches!(err, llm_client::LlmError::QuotaExceeded));
+}
+
+#[test]
+fn stream_unknown_event_types_ignored() {
+    let events = decode_stream(&[
+        created_frame(),
+        serde_json::json!({"type": "response.in_progress", "response": {"id": "resp_1"}}),
+        serde_json::json!({"type": "response.output_text.done", "item_id": "msg_1", "output_index": 0, "text": "hi"}),
+        serde_json::json!({"type": "response.some_future_event"}),
+    ]);
+
+    assert_eq!(events.len(), 1);
+    assert!(matches!(events[0], LlmEvent::MessageStart { .. }));
+}
+
+#[test]
+fn stream_finish_without_completed_closes_blocks_and_stops() {
+    let mut decoder = codec().stream_decoder();
+    let mut events = Vec::new();
+    for frame in [
+        created_frame(),
+        serde_json::json!({
+            "type": "response.output_text.delta",
+            "item_id": "msg_1", "output_index": 0, "content_index": 0,
+            "delta": "hi",
+        }),
+    ] {
+        events.extend(
+            decoder
+                .decode_frame(RawStreamFrame::new(frame.to_string().into_bytes()))
+                .unwrap(),
+        );
+    }
+    events.extend(decoder.finish().unwrap());
+
+    assert_eq!(
+        &events[3..],
+        &[
+            LlmEvent::ContentBlockStop { index: 0 },
+            LlmEvent::MessageDelta {
+                delta: MessageDeltaPayload { stop_reason: None },
+                usage: None,
+            },
+            LlmEvent::MessageStop,
+        ]
+    );
+    // finish() is idempotent: a second call emits nothing.
+    assert_eq!(decoder.finish().unwrap(), Vec::new());
+}
+
+#[test]
+fn stream_delta_without_output_index_defaults_to_slot_zero() {
+    // Mirror the OpenAiChatCodec tolerance: a single-item stream that omits
+    // output_index routes to slot zero instead of dropping the fragment.
+    let events = decode_stream(&[
+        created_frame(),
+        serde_json::json!({"type": "response.output_text.delta", "item_id": "msg_1", "delta": "a"}),
+        serde_json::json!({"type": "response.output_text.delta", "item_id": "msg_1", "delta": "b"}),
+    ]);
+
+    let starts = events
+        .iter()
+        .filter(|event| matches!(event, LlmEvent::ContentBlockStart { .. }))
+        .count();
+    assert_eq!(starts, 1);
+    let text: String = events
+        .iter()
+        .filter_map(|event| match event {
+            LlmEvent::ContentBlockDelta {
+                delta: ContentDelta::TextDelta { text },
+                ..
+            } => Some(text.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(text, "ab");
+}
+
+#[test]
+#[allow(clippy::too_many_lines)] // full-transcript pin: every event in sequence
+fn stream_happy_path_exact_event_sequence() {
+    let usage_json = serde_json::json!({
+        "input_tokens": 100,
+        "input_tokens_details": {"cached_tokens": 40},
+        "output_tokens": 50,
+        "output_tokens_details": {"reasoning_tokens": 30},
+        "total_tokens": 150,
+    });
+    let events = decode_stream(&[
+        created_frame(),
+        serde_json::json!({
+            "type": "response.output_item.added",
+            "output_index": 0,
+            "item": {"type": "message", "id": "msg_1", "role": "assistant"},
+        }),
+        serde_json::json!({
+            "type": "response.output_text.delta",
+            "item_id": "msg_1", "output_index": 0, "content_index": 0,
+            "delta": "On ",
+        }),
+        serde_json::json!({
+            "type": "response.output_text.delta",
+            "item_id": "msg_1", "output_index": 0, "content_index": 0,
+            "delta": "it.",
+        }),
+        serde_json::json!({
+            "type": "response.output_item.done",
+            "output_index": 0,
+            "item": {"type": "message", "id": "msg_1", "role": "assistant"},
+        }),
+        serde_json::json!({
+            "type": "response.output_item.added",
+            "output_index": 1,
+            "item": {"type": "function_call", "id": "fc_1", "call_id": "call_1", "name": "Bash", "arguments": ""},
+        }),
+        serde_json::json!({
+            "type": "response.function_call_arguments.delta",
+            "item_id": "fc_1", "output_index": 1,
+            "delta": "{\"command\":",
+        }),
+        serde_json::json!({
+            "type": "response.function_call_arguments.delta",
+            "item_id": "fc_1", "output_index": 1,
+            "delta": "\"ls\"}",
+        }),
+        serde_json::json!({
+            "type": "response.output_item.done",
+            "output_index": 1,
+            "item": {"type": "function_call", "id": "fc_1", "call_id": "call_1", "name": "Bash", "arguments": "{\"command\":\"ls\"}"},
+        }),
+        serde_json::json!({
+            "type": "response.completed",
+            "response": {
+                "id": "resp_1", "model": "gpt-5", "status": "completed",
+                "usage": usage_json,
+            },
+        }),
+    ]);
+
+    assert_eq!(
+        events,
+        vec![
+            LlmEvent::MessageStart {
+                response: Box::new(LlmResponse {
+                    id: "resp_1".to_string(),
+                    model: "gpt-5".to_string(),
+                    content: Vec::new(),
+                    stop_reason: None,
+                    usage: Usage::default(),
+                    cost: None,
+                    provider_metadata: serde_json::Value::Null,
+                }),
+            },
+            LlmEvent::ContentBlockStart {
+                index: 0,
+                content_block: ContentBlock::Text {
+                    text: String::new(),
+                    cache_control: None,
+                },
+            },
+            LlmEvent::ContentBlockDelta {
+                index: 0,
+                delta: ContentDelta::TextDelta { text: "On ".to_string() },
+            },
+            LlmEvent::ContentBlockDelta {
+                index: 0,
+                delta: ContentDelta::TextDelta { text: "it.".to_string() },
+            },
+            LlmEvent::ContentBlockStop { index: 0 },
+            LlmEvent::ContentBlockStart {
+                index: 1,
+                content_block: ContentBlock::ToolCall {
+                    id: "call_1".to_string(),
+                    name: "Bash".to_string(),
+                    input: serde_json::Value::Object(serde_json::Map::new()),
+                },
+            },
+            LlmEvent::ContentBlockDelta {
+                index: 1,
+                delta: ContentDelta::InputJsonDelta {
+                    partial_json: "{\"command\":".to_string(),
+                },
+            },
+            LlmEvent::ContentBlockDelta {
+                index: 1,
+                delta: ContentDelta::InputJsonDelta {
+                    partial_json: "\"ls\"}".to_string(),
+                },
+            },
+            LlmEvent::ContentBlockStop { index: 1 },
+            LlmEvent::MessageDelta {
+                delta: MessageDeltaPayload {
+                    stop_reason: Some("tool_use".to_string()),
+                },
+                usage: Some(Usage {
+                    billable_tokens: TokenUsage {
+                        input: 60,
+                        output: 20,
+                        cache_read: 40,
+                        reasoning_output: 30,
+                        ..Default::default()
+                    },
+                    context_tokens: Some(150),
+                    provider_reported_total_tokens: Some(150),
+                    provider_metadata: usage_json,
+                    ..Default::default()
+                }),
+            },
+            LlmEvent::MessageStop,
+        ]
+    );
 }

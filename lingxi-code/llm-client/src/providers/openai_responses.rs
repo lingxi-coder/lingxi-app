@@ -125,7 +125,7 @@ impl WireCodec for OpenAiResponsesCodec {
     }
 
     fn stream_decoder(&self) -> Box<dyn StreamDecoder> {
-        Box::new(OpenAiResponsesStreamDecoder)
+        Box::new(OpenAiResponsesStreamDecoder::default())
     }
 
     fn clone_box(&self) -> Box<dyn WireCodec> {
@@ -300,16 +300,330 @@ fn string_field(value: &Value, field: &str) -> Result<String, LlmError> {
         })
 }
 
-/// Stub stream decoder: implemented by batch-3 Task 3.
+/// Per-wire-item block bookkeeping: the canonical block index assigned to a
+/// wire `output_index`, and whether the block is currently open.
 #[derive(Debug)]
-struct OpenAiResponsesStreamDecoder;
+struct BlockState {
+    index: u32,
+    open: bool,
+}
+
+/// Streaming decoder for the Responses API typed SSE events.
+///
+/// The discriminator is the JSON `type` field of each `data:` payload (codex
+/// sse/responses.rs `ResponsesStreamEvent { #[serde(rename = "type")] kind }`).
+/// Item-scoped events are keyed by the wire `output_index` (present on
+/// `response.output_item.added/done` and every per-item delta event); a
+/// missing `output_index` defaults to slot zero, mirroring the
+/// `OpenAiChatCodec` tolerance for single-tool streams that omit `index`.
+///
+/// Unlike the Chat API, blocks are explicitly delimited on the wire
+/// (`output_item.added` / `output_item.done`), but text/reasoning blocks are
+/// still opened lazily on their first delta so an item that never produces
+/// content (e.g. an encrypted-only reasoning item) emits no events.
+#[derive(Debug, Default)]
+struct OpenAiResponsesStreamDecoder {
+    started: bool,
+    next_index: u32,
+    /// Wire `output_index` → block state.
+    blocks: std::collections::BTreeMap<u64, BlockState>,
+    has_function_call: bool,
+    stop_reason: Option<String>,
+    usage: Option<crate::Usage>,
+    done: bool,
+}
 
 impl StreamDecoder for OpenAiResponsesStreamDecoder {
-    fn decode_frame(&mut self, _frame: RawStreamFrame) -> Result<Vec<LlmEvent>, LlmError> {
-        Err(LlmError::InvalidRequest {
-            message: "OpenAiResponsesCodec stream decoding lands in batch-3 T3".to_string(),
-        })
+    fn decode_frame(&mut self, frame: RawStreamFrame) -> Result<Vec<LlmEvent>, LlmError> {
+        let text = std::str::from_utf8(&frame.bytes).map_err(|_| LlmError::InvalidRequest {
+            message: "OpenAI Responses stream frame is not valid UTF-8".to_string(),
+        })?;
+
+        let mut out = Vec::new();
+        let data = text.trim();
+        // The Responses API ends after response.completed without a [DONE]
+        // sentinel, but OpenAI-compatible gateways may append one; tolerate it.
+        if data == "[DONE]" {
+            self.finish_into(&mut out);
+            return Ok(out);
+        }
+
+        let root: Value = serde_json::from_str(data).map_err(|_| LlmError::InvalidRequest {
+            message: "OpenAI Responses stream frame is not valid JSON".to_string(),
+        })?;
+
+        match root.get("type").and_then(Value::as_str) {
+            Some("response.created") => {
+                self.ensure_started(root.get("response"), &mut out);
+            }
+            Some("response.output_item.added") => {
+                self.handle_item_added(&root, &mut out);
+            }
+            Some("response.output_text.delta") => {
+                if let Some(delta) = root.get("delta").and_then(Value::as_str) {
+                    self.handle_text_delta(&root, delta, &mut out);
+                }
+            }
+            Some("response.function_call_arguments.delta") => {
+                if let Some(delta) = root.get("delta").and_then(Value::as_str) {
+                    self.handle_arguments_delta(&root, delta, &mut out);
+                }
+            }
+            Some("response.reasoning_text.delta" | "response.reasoning_summary_text.delta") => {
+                if let Some(delta) = root.get("delta").and_then(Value::as_str) {
+                    self.handle_reasoning_delta(&root, delta, &mut out);
+                }
+            }
+            Some("response.output_item.done") => {
+                self.handle_item_done(&root, &mut out);
+            }
+            Some("response.completed" | "response.incomplete") => {
+                self.handle_terminal_response(root.get("response"), &mut out);
+            }
+            Some("response.failed") => {
+                return Err(decode_failed_event(&root));
+            }
+            // Unknown event types (response.in_progress, response.output_text.done,
+            // future additions, ...) are ignored tolerantly.
+            _ => {}
+        }
+
+        Ok(out)
     }
+
+    fn finish(&mut self) -> Result<Vec<LlmEvent>, LlmError> {
+        let mut out = Vec::new();
+        self.finish_into(&mut out);
+        Ok(out)
+    }
+}
+
+impl OpenAiResponsesStreamDecoder {
+    /// Emit the `MessageStart` snapshot once. `response.created` carries the
+    /// response object with id/model; content events arriving first (no
+    /// payload) fall back to an empty snapshot, mirroring `OpenAiChatCodec`.
+    fn ensure_started(&mut self, response: Option<&Value>, out: &mut Vec<LlmEvent>) {
+        if self.started {
+            return;
+        }
+        self.started = true;
+        let response = response.unwrap_or(&Value::Null);
+        out.push(LlmEvent::MessageStart {
+            response: Box::new(LlmResponse {
+                id: response.get("id").and_then(Value::as_str).unwrap_or_default().to_string(),
+                model: response.get("model").and_then(Value::as_str).unwrap_or_default().to_string(),
+                content: Vec::new(),
+                stop_reason: None,
+                usage: crate::Usage::default(),
+                cost: None,
+                provider_metadata: Value::Null,
+            }),
+        });
+    }
+
+    /// Wire `output_index` of an item-scoped event; missing → slot zero.
+    fn output_index(root: &Value) -> u64 {
+        root.get("output_index").and_then(Value::as_u64).unwrap_or(0)
+    }
+
+    fn handle_item_added(&mut self, root: &Value, out: &mut Vec<LlmEvent>) {
+        self.ensure_started(None, out);
+        let Some(item) = root.get("item") else {
+            return;
+        };
+        // Only function_call items open their block eagerly: the start event
+        // must carry call_id/name, which never appear in argument deltas.
+        // message/reasoning items open lazily on their first delta instead.
+        if item.get("type").and_then(Value::as_str) != Some("function_call") {
+            return;
+        }
+        self.has_function_call = true;
+        let output_index = Self::output_index(root);
+        if self.blocks.contains_key(&output_index) {
+            return;
+        }
+        let index = self.next_index;
+        self.next_index += 1;
+        self.blocks.insert(output_index, BlockState { index, open: true });
+        out.push(LlmEvent::ContentBlockStart {
+            index,
+            content_block: ContentBlock::ToolCall {
+                id: item.get("call_id").and_then(Value::as_str).unwrap_or_default().to_string(),
+                name: item.get("name").and_then(Value::as_str).unwrap_or_default().to_string(),
+                input: Value::Object(serde_json::Map::new()),
+            },
+        });
+    }
+
+    /// Look up the block for an item-scoped event, lazily opening it with
+    /// `make_block` (and emitting the `ContentBlockStart`) on first contact.
+    fn block_index(
+        &mut self,
+        root: &Value,
+        make_block: fn() -> ContentBlock,
+        out: &mut Vec<LlmEvent>,
+    ) -> u32 {
+        let output_index = Self::output_index(root);
+        if let Some(state) = self.blocks.get(&output_index) {
+            return state.index;
+        }
+        let index = self.next_index;
+        self.next_index += 1;
+        self.blocks.insert(output_index, BlockState { index, open: true });
+        out.push(LlmEvent::ContentBlockStart {
+            index,
+            content_block: make_block(),
+        });
+        index
+    }
+
+    fn handle_text_delta(&mut self, root: &Value, delta: &str, out: &mut Vec<LlmEvent>) {
+        if delta.is_empty() {
+            return;
+        }
+        self.ensure_started(None, out);
+        let index = self.block_index(
+            root,
+            || ContentBlock::Text {
+                text: String::new(),
+                cache_control: None,
+            },
+            out,
+        );
+        out.push(LlmEvent::ContentBlockDelta {
+            index,
+            delta: crate::ContentDelta::TextDelta { text: delta.to_string() },
+        });
+    }
+
+    fn handle_arguments_delta(&mut self, root: &Value, delta: &str, out: &mut Vec<LlmEvent>) {
+        if delta.is_empty() {
+            return;
+        }
+        self.ensure_started(None, out);
+        // Normally opened by output_item.added; an arguments delta arriving
+        // first opens a ToolCall block with empty id/name (same tolerance as
+        // OpenAiChatCodec fragment-first streams).
+        let index = self.block_index(
+            root,
+            || ContentBlock::ToolCall {
+                id: String::new(),
+                name: String::new(),
+                input: Value::Object(serde_json::Map::new()),
+            },
+            out,
+        );
+        out.push(LlmEvent::ContentBlockDelta {
+            index,
+            delta: crate::ContentDelta::InputJsonDelta {
+                partial_json: delta.to_string(),
+            },
+        });
+    }
+
+    /// `response.reasoning_text.delta` and `response.reasoning_summary_text.delta`
+    /// both target the item's single Reasoning block (one start per item).
+    fn handle_reasoning_delta(&mut self, root: &Value, delta: &str, out: &mut Vec<LlmEvent>) {
+        if delta.is_empty() {
+            return;
+        }
+        self.ensure_started(None, out);
+        let index = self.block_index(
+            root,
+            || ContentBlock::Reasoning {
+                text: String::new(),
+                signature: None,
+            },
+            out,
+        );
+        out.push(LlmEvent::ContentBlockDelta {
+            index,
+            delta: crate::ContentDelta::ThinkingDelta {
+                thinking: delta.to_string(),
+            },
+        });
+    }
+
+    fn handle_item_done(&mut self, root: &Value, out: &mut Vec<LlmEvent>) {
+        // Tolerate a done without an added (function_call still influences
+        // the terminal stop reason).
+        if root
+            .get("item")
+            .and_then(|item| item.get("type"))
+            .and_then(Value::as_str)
+            == Some("function_call")
+        {
+            self.has_function_call = true;
+        }
+        let output_index = Self::output_index(root);
+        if let Some(state) = self.blocks.get_mut(&output_index) {
+            if state.open {
+                state.open = false;
+                out.push(LlmEvent::ContentBlockStop { index: state.index });
+            }
+        }
+    }
+
+    /// `response.completed` / `response.incomplete`: the payload `response`
+    /// object is a full Responses body, so the non-streaming stop-reason and
+    /// usage normalization apply verbatim.
+    fn handle_terminal_response(&mut self, response: Option<&Value>, out: &mut Vec<LlmEvent>) {
+        self.ensure_started(response, out);
+        if let Some(response) = response {
+            self.stop_reason = map_stop_reason(response, self.has_function_call);
+            self.usage = response.get("usage").map(normalize_usage);
+        }
+        self.finish_into(out);
+    }
+
+    fn finish_into(&mut self, out: &mut Vec<LlmEvent>) {
+        if !self.started || self.done {
+            return;
+        }
+        self.done = true;
+        self.close_open_blocks(out);
+        out.push(LlmEvent::MessageDelta {
+            delta: crate::MessageDeltaPayload {
+                stop_reason: self.stop_reason.clone(),
+            },
+            usage: self.usage.clone(),
+        });
+        out.push(LlmEvent::MessageStop);
+    }
+
+    fn close_open_blocks(&mut self, out: &mut Vec<LlmEvent>) {
+        let mut open_indices: Vec<u32> = self
+            .blocks
+            .values()
+            .filter(|state| state.open)
+            .map(|state| state.index)
+            .collect();
+        open_indices.sort_unstable();
+        for index in open_indices {
+            out.push(LlmEvent::ContentBlockStop { index });
+        }
+        for state in self.blocks.values_mut() {
+            state.open = false;
+        }
+    }
+}
+
+/// Map a `response.failed` event onto the error taxonomy by routing its
+/// `response.error {code, message}` through the shared Chat-envelope error
+/// decoder (the code vocabulary is shared; there is no HTTP status on a
+/// stream failure, so the fallback is the generic 5xx mapping).
+fn decode_failed_event(root: &Value) -> LlmError {
+    let error = root
+        .get("response")
+        .and_then(|response| response.get("error"))
+        .cloned()
+        .unwrap_or(Value::Null);
+    super::openai::decode_error_response(&ProviderResponse {
+        status: 500,
+        headers: std::collections::BTreeMap::new(),
+        body_json: serde_json::json!({ "error": error }),
+        request_id: None,
+    })
 }
 
 /// Map a provider-neutral reasoning token budget onto the Responses API

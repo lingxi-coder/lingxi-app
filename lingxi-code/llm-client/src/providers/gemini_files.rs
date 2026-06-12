@@ -167,7 +167,9 @@ pub fn parse_upload_response(body: &Value) -> Result<GeminiFile, LlmError> {
 /// where `file_name` is the resource name (`files/<id>`).
 ///
 /// Callers poll this until `state == "ACTIVE"` for video/PDF uploads; the
-/// driver never polls (no timer dependency in llm-client).
+/// upload driver never polls — use
+/// [`crate::client::DefaultLlmClient::wait_for_file_active`] for a ready-made
+/// polling loop.
 #[must_use]
 pub fn file_status_request(base_url: &str, file_name: &str) -> ProviderRequest {
     let root = upload_base(base_url);

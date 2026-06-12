@@ -181,6 +181,52 @@ pub async fn fetch_profile_from_api_key(
     serde_json::from_str::<OAuthProfileResponse>(&resp.body).ok()
 }
 
+/// Roles endpoint path — `constants/oauth.ts:93` (`ROLES_URL`).
+pub const ROLES_URL_PATH: &str = "/api/oauth/claude_cli/roles";
+
+/// Subset of the TS `UserRolesResponse` we consume
+/// (`services/oauth/client.ts:283-301`).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+pub struct UserRolesResponse {
+    /// e.g. `"admin" | "billing" | "owner" | "primary_owner" | "member"`.
+    #[serde(default)]
+    pub organization_role: Option<String>,
+    /// Workspace-scoped role.
+    #[serde(default)]
+    pub workspace_role: Option<String>,
+    /// Human-readable organization name.
+    #[serde(default)]
+    pub organization_name: Option<String>,
+}
+
+/// Fetch the signed-in user's org/workspace roles.
+///
+/// `GET {BASE_API_URL}/api/oauth/claude_cli/roles` with `Authorization:
+/// Bearer <token>`, 10s timeout. TS (`fetchAndStoreUserRoles`,
+/// `client.ts:276-309`) THROWS on failure because the login flow wants the
+/// error; this read-side port swallows everything → `None` (callers treat
+/// missing roles as "role unknown", same stance as the profile fetch above).
+pub async fn fetch_user_roles(
+    access_token: &str,
+    transport: &Arc<dyn HttpTransport>,
+) -> Option<UserRolesResponse> {
+    let req = HttpRequest {
+        method: HttpMethod::Get,
+        url: format!("{BASE_API_URL}{ROLES_URL_PATH}"),
+        // Unlike the profile fetcher above, the TS sends ONLY the
+        // Authorization header here (axios GET, no Content-Type) — mirrored.
+        headers: vec![("Authorization".into(), format!("Bearer {access_token}"))],
+        body: None,
+        body_bytes: None,
+        timeout: Some(PROFILE_TIMEOUT),
+    };
+    let resp = transport.request(req).await.ok()?;
+    if resp.status != 200 {
+        return None;
+    }
+    serde_json::from_str::<UserRolesResponse>(&resp.body).ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -271,6 +317,58 @@ mod tests {
             .iter()
             .any(|(k, v)| k == "anthropic-beta" && v == "oauth-2025-04-20"));
         assert_eq!(req.timeout, Some(Duration::from_secs(10)));
+    }
+
+    #[tokio::test]
+    async fn fetch_user_roles_parses_role_fields() {
+        let t = transport(
+            200,
+            r#"{"organization_role":"admin","workspace_role":"workspace_developer",
+                "organization_name":"Acme"}"#,
+        );
+        let roles = fetch_user_roles("tok", &t).await.expect("200 → Some(roles)");
+        assert_eq!(roles.organization_role.as_deref(), Some("admin"));
+        assert_eq!(roles.workspace_role.as_deref(), Some("workspace_developer"));
+        assert_eq!(roles.organization_name.as_deref(), Some("Acme"));
+    }
+
+    #[tokio::test]
+    async fn fetch_user_roles_swallows_non_200_and_transport_errors() {
+        let t = transport(403, r#"{"error":"forbidden"}"#);
+        assert!(fetch_user_roles("tok", &t).await.is_none());
+        // No routes → MockHttp returns Err (transport failure) → swallowed.
+        let failing = MockHttp::new(vec![]) as Arc<dyn HttpTransport>;
+        assert!(fetch_user_roles("tok", &failing).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn fetch_user_roles_requests_roles_url_with_bearer() {
+        let mock = MockHttp::new(vec![(
+            "anthropic.com",
+            Canned { status: 200, body: r#"{"organization_role":"member"}"#.into() },
+        )]);
+        let arc = mock.clone() as Arc<dyn HttpTransport>;
+        let roles = fetch_user_roles("test-token", &arc).await.unwrap();
+        assert_eq!(roles.organization_role.as_deref(), Some("member"));
+        let req = mock.last_request().expect("a request was sent");
+        assert_eq!(req.url, "https://api.anthropic.com/api/oauth/claude_cli/roles");
+        assert_eq!(req.method, HttpMethod::Get);
+        assert!(req
+            .headers
+            .iter()
+            .any(|(k, v)| k == "Authorization" && v == "Bearer test-token"));
+        // TS sends ONLY the Authorization header on this endpoint.
+        assert!(!req.headers.iter().any(|(k, _)| k == "Content-Type"));
+        assert_eq!(req.timeout, Some(Duration::from_secs(10)));
+    }
+
+    #[tokio::test]
+    async fn fetch_user_roles_tolerates_unknown_and_missing_fields() {
+        let t = transport(200, r#"{"organization_role":"member","unknown_field":1}"#);
+        let roles = fetch_user_roles("tok", &t).await.unwrap();
+        assert_eq!(roles.organization_role.as_deref(), Some("member"));
+        assert_eq!(roles.workspace_role, None);
+        assert_eq!(roles.organization_name, None);
     }
 
     #[tokio::test]

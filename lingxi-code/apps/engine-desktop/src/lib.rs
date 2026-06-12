@@ -828,6 +828,13 @@ pub struct DesktopRuntime {
     /// (RAII teardown). An empty handle (no tasks) when no `FileChanged` hook is
     /// configured — the no-watch case is byte-identical to before.
     pub file_changed_watcher: file_changed_watch::FileChangedWatcherHandle,
+    /// Shared Claude.ai subscription snapshot (Task 4). Seeded at build time
+    /// with the scope-derived `is_subscriber` flag; for subscribers a
+    /// background OAuth profile + roles fetch overwrites it with the full
+    /// tier/billing/role snapshot once the endpoints respond. UI layers read
+    /// it at compose time and treat `None` / a poisoned lock as the
+    /// conservative default snapshot.
+    pub subscription: traits::subscription::SharedSubscription,
 }
 
 /// Errors surfaced while building a [`DesktopRuntime`].
@@ -892,6 +899,38 @@ fn oauth_subscriber_flag(api_key_present: bool, auth_token_present: bool, scopes
         && anthropic_oauth::subscription_from_scopes(scopes)
 }
 
+/// Fold the profile + roles responses into the shared snapshot. Pure —
+/// unit-tested without IO. Tier mapping mirrors
+/// `OAuthProfileResponse::subscription_type()` (TS string union values);
+/// `Free`/`Unknown` resolve to `None` (conservative, same as the TS `null`;
+/// note `subscription_type()` never actually returns those variants today, so
+/// that arm is purely defensive).
+fn subscription_snapshot_from(
+    is_subscriber: bool,
+    profile: Option<&anthropic_oauth::OAuthProfileResponse>,
+    roles: Option<&anthropic_oauth::UserRolesResponse>,
+) -> traits::subscription::SubscriptionSnapshot {
+    use anthropic_oauth::SubscriptionType;
+    let org = profile.and_then(|p| p.organization.as_ref());
+    let subscription_type = profile
+        .and_then(anthropic_oauth::OAuthProfileResponse::subscription_type)
+        .and_then(|t| match t {
+            SubscriptionType::Pro => Some("pro"),
+            SubscriptionType::Max => Some("max"),
+            SubscriptionType::Team => Some("team"),
+            SubscriptionType::Enterprise => Some("enterprise"),
+            SubscriptionType::Free | SubscriptionType::Unknown => None,
+        });
+    traits::subscription::SubscriptionSnapshot {
+        is_subscriber,
+        subscription_type: subscription_type.map(str::to_owned),
+        rate_limit_tier: org.and_then(|o| o.rate_limit_tier.clone()),
+        has_extra_usage_enabled: org.and_then(|o| o.has_extra_usage_enabled) == Some(true),
+        billing_type: org.and_then(|o| o.billing_type.clone()),
+        organization_role: roles.and_then(|r| r.organization_role.clone()),
+    }
+}
+
 // `builtin_anthropic_config` + `apply_settings_providers` live in
 // `platform_common::llm_config` so both composition roots share the same
 // model table and settings-wiring logic.  The re-exports make the names
@@ -950,6 +989,15 @@ pub async fn build(
     ));
 
     // (3) Credential manager + OAuth client (used by /login, /logout).
+    //
+    // Task 4 (future-work batch 4): the shared subscription slot UI layers read
+    // at compose time. Seeded with the conservative default snapshot here; the
+    // `Ok(Some(tokens))` arm below re-seeds it with the resolved subscriber
+    // flag, and (for subscribers) a background profile+roles fetch overwrites
+    // it with the full snapshot once the endpoints respond.
+    let subscription: traits::subscription::SharedSubscription = std::sync::Arc::new(
+        std::sync::RwLock::new(Some(traits::subscription::SubscriptionSnapshot::default())),
+    );
     let credentials = Arc::new(CredentialManager::new(storage, clock.clone(), http.clone()));
     let oauth_cfg = ClaudeAiOAuthConfig::default_with_port(0);
     let oauth_client = Arc::new(ClaudeAiOAuthClient::new(
@@ -976,6 +1024,21 @@ pub async fn build(
                 std::env::var_os("ANTHROPIC_AUTH_TOKEN").is_some(),
                 &tokens.scopes,
             );
+            // Re-seed the shared slot with the resolved subscriber flag so
+            // readers see it even before (or without) the background
+            // profile+roles fetch landing. SECRECY: deliberately copy the
+            // access token (a `Secret<String>`, intentionally non-`Clone`) by
+            // exposing + re-wrapping — the audited copy pattern — BEFORE the
+            // original moves into `init_refresh_driver`; it is exposed again
+            // only inside the spawned fetch task.
+            if let Ok(mut guard) = subscription.write() {
+                *guard = Some(traits::subscription::SubscriptionSnapshot {
+                    is_subscriber,
+                    ..Default::default()
+                });
+            }
+            let profile_token =
+                protocol::Secret::new(tokens.access_token.expose_secret().clone());
             match anthropic_oauth::client::init_refresh_driver(
                 oauth_cfg,
                 tokens.access_token,
@@ -997,6 +1060,49 @@ pub async fn build(
                     if is_subscriber {
                         llm_oauth_path = true;
                         llm_oauth_state = Some(auth_state);
+
+                        // Task 4: background OAuth profile + roles fetch. This
+                        // closes the RENDERING half of the profile-fetch
+                        // PARITY-GAP documented at `orchestrator/src/config.rs:134`
+                        // (tier/billing/role data for rate-limit copy), without
+                        // touching the build hot path. Both fetchers swallow
+                        // every error → `None` (matching the TS `logError` /
+                        // `return undefined` stance), so on any failure the
+                        // seeded `is_subscriber`-only snapshot simply stays.
+                        //
+                        // SharedSubscription locking contract (std `RwLock`):
+                        // the guard must NEVER be held across an `.await` —
+                        // build the full snapshot FIRST, then write-and-drop.
+                        // Poisoned-lock stance: writer skips on poison
+                        // (`if let Ok(mut guard)`); readers degrade to the
+                        // default snapshot. SECRECY: the access token is
+                        // exposed (`expose_secret`) only into the two fetch
+                        // calls and never logged or formatted.
+                        {
+                            let slot = subscription.clone();
+                            let transport: std::sync::Arc<dyn traits::HttpTransport> =
+                                http.clone();
+                            // Move (not copy) the token into the task — its
+                            // only consumer.
+                            let token = profile_token;
+                            tokio::spawn(async move {
+                                let token = token.expose_secret();
+                                let profile = anthropic_oauth::fetch_profile_from_oauth_token(
+                                    token, &transport,
+                                )
+                                .await;
+                                let roles =
+                                    anthropic_oauth::fetch_user_roles(token, &transport).await;
+                                let snap = subscription_snapshot_from(
+                                    true,
+                                    profile.as_ref(),
+                                    roles.as_ref(),
+                                );
+                                if let Ok(mut guard) = slot.write() {
+                                    *guard = Some(snap);
+                                }
+                            });
+                        }
                     }
                 }
                 Err(e) => {
@@ -2042,6 +2148,7 @@ pub async fn build(
         permission_gate: adapter_gate,
         settings_watcher,
         file_changed_watcher,
+        subscription,
     })
 }
 
@@ -3195,5 +3302,84 @@ mod tests {
             (total - 2.50).abs() < 1e-9,
             "total cost must be $2.50, got ${total}"
         );
+    }
+
+    // ── subscription_snapshot_from (Task 4: background profile+roles fetch) ──
+
+    #[test]
+    fn subscription_snapshot_maps_profile_and_roles() {
+        let profile = anthropic_oauth::OAuthProfileResponse {
+            organization: Some(anthropic_oauth::OAuthOrganization {
+                organization_type: Some("claude_team".to_string()),
+                rate_limit_tier: Some("default_claude_max_5x".to_string()),
+                billing_type: Some("stripe_subscription".to_string()),
+                has_extra_usage_enabled: Some(true),
+                ..Default::default()
+            }),
+            account: None,
+        };
+        let roles = anthropic_oauth::UserRolesResponse {
+            organization_role: Some("admin".to_string()),
+            ..Default::default()
+        };
+        let snap = super::subscription_snapshot_from(true, Some(&profile), Some(&roles));
+        assert!(snap.is_subscriber);
+        assert_eq!(snap.subscription_type.as_deref(), Some("team"));
+        assert_eq!(snap.rate_limit_tier.as_deref(), Some("default_claude_max_5x"));
+        assert_eq!(snap.billing_type.as_deref(), Some("stripe_subscription"));
+        assert!(snap.has_extra_usage_enabled);
+        assert_eq!(snap.organization_role.as_deref(), Some("admin"));
+        // Team + admin org role ⇒ billing access (the predicate the TUI gates on).
+        assert!(snap.has_claude_ai_billing_access());
+    }
+
+    #[test]
+    fn subscription_snapshot_absent_profile_is_conservative() {
+        let snap = super::subscription_snapshot_from(true, None, None);
+        assert!(snap.is_subscriber);
+        assert_eq!(snap.subscription_type, None);
+        assert_eq!(snap.rate_limit_tier, None);
+        assert_eq!(snap.billing_type, None);
+        assert!(!snap.has_extra_usage_enabled);
+        assert_eq!(snap.organization_role, None);
+        assert!(!snap.has_claude_ai_billing_access());
+    }
+
+    #[test]
+    fn subscription_snapshot_free_or_unknown_tier_maps_to_none() {
+        // `OAuthProfileResponse::subscription_type()` (profile.rs:104-117) only
+        // ever returns Max/Pro/Enterprise/Team — an unrecognized
+        // `organization_type` already resolves to `None` at that layer, so the
+        // `Free | Unknown → None` arm of `subscription_snapshot_from`'s match
+        // is unreachable from real profile parsing (purely defensive). This
+        // test pins the observable contract: a non-paid/unknown org type folds
+        // to `subscription_type: None` in the snapshot.
+        let profile = anthropic_oauth::OAuthProfileResponse {
+            organization: Some(anthropic_oauth::OAuthOrganization {
+                organization_type: Some("claude_free".to_string()),
+                ..Default::default()
+            }),
+            account: None,
+        };
+        let snap = super::subscription_snapshot_from(true, Some(&profile), None);
+        assert_eq!(snap.subscription_type, None);
+        assert!(!snap.is_team_or_enterprise());
+    }
+
+    #[test]
+    fn subscription_snapshot_explicit_extra_usage_false_stays_false() {
+        // Pins the `== Some(true)` flattening: a profile org that EXPLICITLY
+        // reports `has_extra_usage_enabled: Some(false)` must fold to `false`
+        // in the snapshot (same as the absent-`None` case, distinct from
+        // `Some(true)`).
+        let profile = anthropic_oauth::OAuthProfileResponse {
+            organization: Some(anthropic_oauth::OAuthOrganization {
+                has_extra_usage_enabled: Some(false),
+                ..Default::default()
+            }),
+            account: None,
+        };
+        let snap = super::subscription_snapshot_from(true, Some(&profile), None);
+        assert!(!snap.has_extra_usage_enabled);
     }
 }

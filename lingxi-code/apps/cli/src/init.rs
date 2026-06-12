@@ -57,6 +57,12 @@ pub struct Runtime {
     /// exit, the watcher would stop immediately after boot — so it lives on
     /// `Runtime`, exactly like `settings_watcher`.
     pub file_changed_watcher: engine_desktop::file_changed_watch::FileChangedWatcherHandle,
+    /// (B4 Task 5) Shared subscription slot, projected straight from
+    /// [`engine_desktop::DesktopRuntime::subscription`] (seeded at build,
+    /// refined by the background profile+roles fetch). The TUI mount threads a
+    /// clone into `tui::session::Runtime::with_subscription` so the rate-limit
+    /// composer reads the live snapshot.
+    pub subscription: traits::subscription::SharedSubscription,
 }
 
 /// Build-result for the TUI startup path. (M6-03)
@@ -288,6 +294,7 @@ pub async fn build_runtime(
         task_registry: rt.task_registry,
         settings_watcher: rt.settings_watcher,
         file_changed_watcher: rt.file_changed_watcher,
+        subscription: rt.subscription,
     })
 }
 

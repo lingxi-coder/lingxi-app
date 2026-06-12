@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::Arc;
+use std::time::Duration;
 
 use crate::{
     validate_capabilities, ApiKeyAuthenticator, AuthStrategy, Authenticator, BearerAuthenticator,
@@ -29,6 +30,26 @@ struct RouteEntry {
     credential: CredentialConfig,
     base_url: String,
     signing: Option<crate::SigningConfig>,
+}
+
+/// Polling knobs for [`DefaultLlmClient::wait_for_file_active`]. The defaults
+/// (2s interval, 300s budget) are this crate's own convenience choice — there
+/// is no claude-code/codex counterpart to pin against; tune per call site.
+#[derive(Debug, Clone, Copy)]
+pub struct FileActivationPoll {
+    /// Delay between consecutive status requests.
+    pub interval: Duration,
+    /// Total budget before giving up with [`LlmError::Transport`].
+    pub max_wait: Duration,
+}
+
+impl Default for FileActivationPoll {
+    fn default() -> Self {
+        Self {
+            interval: Duration::from_secs(2),
+            max_wait: Duration::from_secs(300),
+        }
+    }
 }
 
 impl DefaultLlmClient {
@@ -214,10 +235,11 @@ impl DefaultLlmClient {
     ///    `ProviderRequest::body_bytes`) to that session URL.
     ///
     /// Non-2xx responses on either leg map through the shared Gemini error
-    /// taxonomy. The returned [`crate::GeminiFile`] is NOT polled here
-    /// (llm-client has no timer dependency): callers must poll
+    /// taxonomy. The returned [`crate::GeminiFile`] is NOT polled here:
+    /// callers must poll
     /// [`crate::providers::gemini_files::file_status_request`] until
-    /// `state == "ACTIVE"` for video/PDF uploads; images are typically
+    /// `state == "ACTIVE"` for video/PDF uploads (or use the
+    /// [`Self::wait_for_file_active`] convenience); images are typically
     /// `ACTIVE` immediately. A `FAILED` state passes through as data, not an
     /// error. The resulting `uri` plugs into
     /// [`crate::ContentBlock::ImageUrl`], which the Gemini codec encodes as a
@@ -269,6 +291,71 @@ impl DefaultLlmClient {
             return Err(gemini_files::decode_upload_error(&upload_response));
         }
         gemini_files::parse_upload_response(&upload_response.body_json)
+    }
+
+    /// Poll the Gemini File API until `file_name` leaves `PROCESSING`.
+    ///
+    /// Convenience layer over [`Self::upload_file`]'s "callers poll
+    /// `file_status_request` until `ACTIVE`" contract: same
+    /// Gemini-family-only guard, same authenticated request path. Returns
+    /// the final [`crate::GeminiFile`] on `ACTIVE`; `FAILED` →
+    /// [`LlmError::InvalidRequest`]; budget exhausted →
+    /// [`LlmError::Transport`]. State strings are matched verbatim (tolerant
+    /// decoder convention — any unknown state keeps polling until the budget
+    /// runs out). Cadence comes from [`FileActivationPoll`]; its defaults are
+    /// this crate's own choice (no upstream counterpart to pin against).
+    pub async fn wait_for_file_active(
+        &self,
+        model_or_alias: &str,
+        file_name: &str,
+        transport: &dyn Transport,
+        poll: FileActivationPoll,
+    ) -> Result<crate::GeminiFile, LlmError> {
+        use crate::providers::gemini_files;
+
+        // Same resolution + family guard as `upload_file`.
+        let resolved_route = self.registry.resolve(model_or_alias)?;
+        let entry = self
+            .routes
+            .get(&resolved_route.profile_name)
+            .ok_or(LlmError::ModelUnavailable)?;
+        if !matches!(entry.protocol, ProtocolFamily::GeminiGenerateContent) {
+            return Err(LlmError::InvalidRequest {
+                message: "file upload requires a gemini provider profile".to_string(),
+            });
+        }
+
+        let deadline = tokio::time::Instant::now() + poll.max_wait;
+        loop {
+            let status = gemini_files::file_status_request(&entry.base_url, file_name);
+            let status = self
+                .authenticate(entry, &resolved_route.profile_name, status)
+                .await?;
+            let response = transport.execute(&status).await?;
+            if response.status >= 400 {
+                return Err(gemini_files::decode_upload_error(&response));
+            }
+            let file = gemini_files::parse_file_status(&response.body_json)?;
+
+            match file.state.as_str() {
+                "ACTIVE" => return Ok(file),
+                "FAILED" => {
+                    return Err(LlmError::InvalidRequest {
+                        message: format!("gemini file processing failed: {file_name}"),
+                    })
+                }
+                _ => {}
+            }
+            if tokio::time::Instant::now() + poll.interval > deadline {
+                return Err(LlmError::Transport {
+                    message: format!(
+                        "gemini file did not become ACTIVE within {}s",
+                        poll.max_wait.as_secs()
+                    ),
+                });
+            }
+            tokio::time::sleep(poll.interval).await;
+        }
     }
 
     // Each auth strategy is a self-contained arm; the length is necessary.

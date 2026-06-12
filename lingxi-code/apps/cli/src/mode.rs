@@ -210,6 +210,9 @@ pub(crate) async fn build_tui_runtime(
         .with_multiagent_feed(task_feed)
         .with_turn_tx(tui_build.turn_tx)
         .with_command_registry(command_registry)
+        // (B4 Task 5) Thread the composition root's shared subscription slot so
+        // the TUI rate-limit composer reads the live snapshot at compose time.
+        .with_subscription(tui_build.runtime.subscription.clone())
         .with_resumed_messages(resumed_messages)
 }
 

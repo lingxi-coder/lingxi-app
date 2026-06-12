@@ -1,7 +1,7 @@
 # Engine adoption of llm-client (full replacement of api-client) — design
 
 Date: 2026-06-10
-Status: approved (user), revision 2.8 — future-work batch 3 COMPLETE.
+Status: approved (user), revision 2.9 — future-work batch 4 COMPLETE.
 
 **Revision history:**
 - 2.2 — no intermediate policy crate; supersedes api-client entirely with no backwards compatibility.
@@ -93,6 +93,63 @@ Status: approved (user), revision 2.8 — future-work batch 3 COMPLETE.
   - Remaining: TUI subscription-granularity upsell arms (needs subscription-type
     plumbing), Gemini upload polling convenience (host-side, needs a timer),
     OpenAiResponses real-traffic validation.
+- 2.9 — Future-work batch 4 COMPLETE: subscription plumbing + granular upsell arms,
+  orchestrator early-warning port, Gemini upload polling. The rev-2.8 "subscription
+  granularity not plumbed" and "upload polling convenience" remaining items are
+  closed.
+  - **Subscription plumbing end-to-end** (7e75e17d, 5ffaf761, 66151c80, cad57380):
+    `traits::subscription::SubscriptionSnapshot` (frozen-additive new module) with
+    the TS-ported billing/upsell predicates; `anthropic_oauth::fetch_user_roles`
+    (`claude_cli/roles`; error-swallowing read-side divergence from TS's throwing
+    `fetchAndStoreUserRoles`, documented); engine-desktop background profile+roles
+    fetch into a `SharedSubscription` slot (std `RwLock` contract documented:
+    build-before-write, never held across an await, poison → conservative default;
+    the access token is copied via the audited Secret re-wrap pattern and exposed
+    only into the two fetchers); threaded CLI Runtime → tui Runtime → AppState.
+  - **TUI composer subscription arms** (c0824c10, 58a74bbd): warning suppression
+    (TS rateLimitMessages.ts:80-94); `seven_day_sonnet` naming via
+    `is_pro_or_enterprise` (:175-182); `getWarningUpsellText` port (:261-297; two
+    new straight-ASCII strings "/extra-usage to request more" and "/upgrade to
+    keep using Claude Code"); `getUpsellMessage` full port
+    (RateLimitMessage.tsx:18-47) replacing the rev-2.8 generic-arm scope guard —
+    behavior change: unknown-subscription error notices now carry NO upsell
+    (TSX :26 — `shouldShowUpsell = isClaudeAISubscriber`);
+    `shouldAutoOpenRateLimitOptionsMenu` is structurally false (no TUI options
+    menu; `OPENING_OPTIONS` stays byte-locked unused); local `isEnvTruthy` port
+    (envUtils.ts:32-37) for `DISABLE_EXTRA_USAGE_COMMAND`.
+  - **Orchestrator early-warning port** (de254ebc, f0a1d88a) inside
+    `RateLimitInfo::from_headers_at`: surpassed-threshold header detection
+    (claim order 5h→7d→overage; fires on header presence; fresh-object
+    replacement clearing the overage fields; new `surpassed_threshold` field);
+    time-relative fallback (5h 0.9/0.72; 7d 0.75/0.6, 0.5/0.35, 0.25/0.15;
+    `computeTimeProgress` clamp); `computeNewLimitsFromHeaders` final-status
+    semantics incl. the allowed_warning → allowed DOWNGRADE when nothing fires
+    (TS :423) and the missing-status divergence-guard (`None` is preserved, no
+    fabricated `allowed` — protects `has_unified_headers` consumers).
+  - **Gemini upload polling** (cbddba6b): `DefaultLlmClient::wait_for_file_active`
+    + `FileActivationPoll` (2s/300s defaults explicitly NON-PINNED — no upstream
+    counterpart); llm-client gained a runtime tokio dep (`time`) — assessed:
+    every dependent already has runtime tokio; engine-mobile feature-gates both
+    behind uniffi together.
+  - **CLOSED by audit (no code)** — mobile `body_bytes` marshaling: `PosixHttp`
+    is a re-export alias of `platform_common::http::ReqwestHttp`
+    (platforms/posix/src/http.rs:16), which honors `body_bytes`; android-aar
+    constructs `PosixHttp` directly (lib.rs:1089), so HTTP never crosses the FFI
+    boundary; engine-mobile `DynHttp` forwards `HttpRequest` verbatim. Note: IF
+    a host-injected (Kotlin/Swift) HttpTransport is ever added, its marshaling
+    must carry `body_bytes` verbatim.
+  - Remaining: OpenAiResponses real-traffic validation (still blocked: no
+    OpenAI key in this environment); orchestrator `is_enterprise` retry-gate +
+    `SubscriptionContext` 429-message wiring onto the live snapshot (the
+    OrchestratorConfig PARITY-GAP at config.rs:134 — the RENDERING half is now
+    closed via the TUI snapshot; the retry-gate half still reads the build-time
+    `false`); `/mock-limits` + an interactive rate-limit options menu (would
+    unlock `OPENING_OPTIONS` + the `shouldShowUpsell` mock arm); TS
+    `rawUtilization` statusline export (no statusline consumer in the TUI yet);
+    `getUsingOverageText` transient overage-transition notification
+    (TS rateLimitMessages.ts:303-331) — not ported; the TUI renders no
+    overage-mode transition notice today; `isEnvTruthy` consolidation (≈5
+    private copies across crates; candidate for traits).
 
 ## Goal
 

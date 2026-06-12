@@ -30,7 +30,9 @@ fn end_turn_response(text: &str) -> llm_client::LlmResponse {
     )
 }
 
-/// A fully-populated internal snapshot (all nine post-T7 fields).
+/// A fully-populated internal snapshot (all nine post-T7 fields, plus the
+/// B4-T2 `surpassed_threshold` — internal-only: the nine-argument
+/// `emit_rate_limit` event surface is unchanged).
 fn sample_info() -> RateLimitInfo {
     RateLimitInfo {
         rate_limit_type: Some("five_hour".into()),
@@ -42,6 +44,7 @@ fn sample_info() -> RateLimitInfo {
         claim_resets_at: Some(1_760_000_100),
         overage_resets_at: Some(1_760_000_200),
         fallback_available: Some(true),
+        surpassed_threshold: Some(0.9),
     }
 }
 

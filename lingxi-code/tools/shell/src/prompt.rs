@@ -97,6 +97,8 @@ fn prepend_bullets(items: &[Bullet]) -> Vec<String> {
 /// Port of `isEnvTruthy` for the one env var this module gates on. claude-code's
 /// `isEnvTruthy` treats `"1"`/`"true"` (and any non-empty value other than
 /// `"0"`/`"false"`) as truthy; we mirror that for `CLAUDE_CODE_*` toggles.
+/// Deliberately divergent from `traits::env::is_env_truthy` (the
+/// `envUtils.ts:32-37` allowlist) — denylist semantics, so it stays local.
 fn is_env_truthy(name: &str) -> bool {
     match std::env::var(name) {
         Ok(v) => {

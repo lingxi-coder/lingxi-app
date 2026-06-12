@@ -72,10 +72,10 @@ enum ApiProvider {
     Foundry,
 }
 
-/// Port of `isEnvTruthy` (`envUtils.ts:32-37`).
+/// Port of `isEnvTruthy` (`envUtils.ts:32-37`); value test delegated to
+/// [`traits::env::is_env_truthy`].
 fn is_env_truthy(key: &str) -> bool {
-    std::env::var(key)
-        .is_ok_and(|v| matches!(v.to_lowercase().trim(), "1" | "true" | "yes" | "on"))
+    traits::env::is_env_truthy(std::env::var(key).ok().as_deref())
 }
 
 /// Port of `getAPIProvider()` (`utils/model/providers.ts:6-14`).

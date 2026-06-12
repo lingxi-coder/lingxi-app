@@ -9,7 +9,9 @@ use serde_json::Value;
 use telemetry::AnalyticsBus;
 
 /// `isEnvTruthy` (`envUtils.ts:32-37`): unset/empty ⇒ false; else
-/// lowercase-trim ∈ {1, true, yes, on}.
+/// lowercase-trim ∈ {1, true, yes, on}. Same semantics as
+/// `traits::env::is_env_truthy`; consolidation blocked: no `traits` dep (and
+/// this is pub API of the crate).
 #[must_use]
 pub fn is_env_truthy(value: Option<&str>) -> bool {
     let Some(v) = value else { return false };

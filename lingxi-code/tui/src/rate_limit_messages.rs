@@ -40,6 +40,7 @@
 
 use crate::components::messages::rate_limit::upsell;
 use orchestrator::model::rate_limit::format_reset_time;
+use traits::env::is_env_truthy;
 use traits::subscription::SubscriptionSnapshot;
 
 /// The nine header-derived fields of `traits::OutputEvent::RateLimit`
@@ -87,21 +88,6 @@ pub struct ComposedRateLimit {
 
 /// TS `WARNING_THRESHOLD` (rateLimitMessages.ts:72).
 const WARNING_THRESHOLD: f64 = 0.7;
-
-/// `isEnvTruthy` port (`utils/envUtils.ts:32-37`): unset/empty ⇒ false; else
-/// lowercase-trim ∈ {`1`, `true`, `yes`, `on`}. (The workspace carries several
-/// private copies of this helper — `migrations`/`tools/*` and a semantically
-/// divergent one in `orchestrator::conversation` — none publicly exported, so
-/// the 4-line helper is ported locally rather than adding a crate edge or
-/// widening another crate's API. Consolidation into `traits` is a future
-/// cleanup, out of scope here.)
-fn is_env_truthy(value: Option<&str>) -> bool {
-    let Some(v) = value else { return false };
-    matches!(
-        v.to_lowercase().trim(),
-        "1" | "true" | "yes" | "on"
-    )
-}
 
 /// Port of `getRateLimitMessage` (rateLimitMessages.ts:45-104), branch order
 /// preserved. Returns `None` when no message should be shown.

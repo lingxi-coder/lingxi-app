@@ -249,16 +249,10 @@ fn percent_left_of(threshold: u64, usage: u64) -> u8 {
     u8::try_from(rounded.clamp(0, 100)).unwrap_or(0)
 }
 
-/// Read an env var and apply [`isEnvTruthy`](crate::context_window) semantics
-/// (`1` / `true` / `yes` / `on`, case-insensitive, trimmed).
+/// Read an env var and apply `isEnvTruthy` ([`traits::env::is_env_truthy`])
+/// semantics (`1` / `true` / `yes` / `on`, case-insensitive, trimmed).
 fn env_truthy(name: &str) -> bool {
-    match std::env::var(name) {
-        Ok(v) => {
-            let normalized = v.to_lowercase();
-            matches!(normalized.trim(), "1" | "true" | "yes" | "on")
-        }
-        Err(_) => false,
-    }
+    traits::env::is_env_truthy(std::env::var(name).ok().as_deref())
 }
 
 /// Parse a base-10 unsigned integer that must be `> 0`; returns `None`

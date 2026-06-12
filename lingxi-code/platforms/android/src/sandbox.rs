@@ -29,7 +29,15 @@ impl AndroidMinijailSandbox {
 
     /// Canonicalize `cwd` (default: workspace root) and require containment
     /// inside the canonicalized workspace root — symlink escapes are refused.
-    fn resolve_cwd(&self, cwd: Option<&PathBuf>) -> Result<PathBuf, SandboxError> {
+    ///
+    /// Returns `(canonical_root, canonical_cwd)`. The root is used as
+    /// `workspace_root` for `build_shell_env` (so HOME is always the workspace
+    /// root, not the per-command cwd); the cwd is set on `inner.cwd`.
+    ///
+    /// Input hygiene, not a boundary (spec non-goal 2): the directory can be
+    /// swapped after this check (canonicalize-then-use); the app UID is the
+    /// actual boundary.
+    fn resolve_cwd(&self, cwd: Option<&PathBuf>) -> Result<(PathBuf, PathBuf), SandboxError> {
         let root = self
             .cfg
             .shell_workspace_root
@@ -42,7 +50,7 @@ impl AndroidMinijailSandbox {
         if !canon.starts_with(&root) {
             return Err(SandboxError::SymlinkEscape(canon.display().to_string()));
         }
-        Ok(canon)
+        Ok((root, canon))
     }
 }
 
@@ -56,6 +64,10 @@ impl Sandbox for AndroidMinijailSandbox {
         SandboxBackend::AndroidMinijail
     }
 
+    /// Build a sandboxed command for the `SystemShell` target.
+    ///
+    /// For the `SystemShell` target the caller's `command` field is ignored and
+    /// normalized to `/system/bin/sh`; only `args` are honored.
     fn prepare(
         &self,
         cmd: ProcessCommand,
@@ -74,24 +86,33 @@ impl Sandbox for AndroidMinijailSandbox {
         // caps.net_deny_verified — available() alone is the coarse
         // registration gate, not the per-plan requirement check.
 
-        let resolved_cwd = self.resolve_cwd(cmd.cwd.as_ref())?;
+        let (canonical_root, canonical_cwd) = self.resolve_cwd(cmd.cwd.as_ref())?;
 
+        // HOME must be the workspace root, not the per-command cwd (spec env
+        // table: "HOME = configured shell workspace root").
         let env = build_shell_env(
-            &resolved_cwd,
+            &canonical_root,
             &self.cfg.app_cache_root,
             None, // bundled helper dir joins the PATH in P4
             &cmd.env,
         );
 
-        let mut plan = plan_from_policy(ExecTarget::SystemShell, policy, env)?;
+        let mut plan = plan_from_policy(ExecTarget::SystemShell, policy, env.clone())?;
         // argv[0] convention: "sh"; the runner execs /system/bin/sh.
         plan.argv = std::iter::once("sh".to_string())
             .chain(cmd.args.iter().cloned())
             .collect();
 
+        // inner must never contradict plan.env ("the ONLY env the child sees"):
+        // normalize command to the actual exec target and replace env with the
+        // scrubbed env so that anything auditing/logging inner() sees the truth.
         let inner = ProcessCommand {
-            cwd: Some(resolved_cwd),
-            ..cmd
+            command: "/system/bin/sh".to_string(),
+            env: env.into_iter().collect(),
+            cwd: Some(canonical_cwd),
+            args: cmd.args,
+            timeout: cmd.timeout,
+            stdin: cmd.stdin,
         };
         Ok(SandboxedCommand::__new_sandboxed_with_plan(
             inner,
@@ -271,5 +292,63 @@ mod tests {
         let cap = sb.probe_capability().await;
         assert!(cap.available);
         assert!(cap.features.no_new_privileges);
+    }
+
+    #[test]
+    fn subdir_cwd_keeps_home_at_workspace_root() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let sub = tmp.path().join("repo");
+        std::fs::create_dir(&sub).expect("mkdir");
+        let sb = sandbox_with(tmp.path(), ready_caps());
+        let sc = sb
+            .prepare(cmd(Some(sub.clone())), &deny_net_policy())
+            .expect("prepare");
+        let plan = sc
+            .backend_plan()
+            .unwrap()
+            .downcast::<AndroidSandboxPlan>()
+            .unwrap();
+        let env: std::collections::HashMap<_, _> = plan.env.iter().cloned().collect();
+        let root = tmp.path().canonicalize().unwrap();
+        assert_eq!(env.get("HOME").map(String::as_str), root.to_str());
+        assert_eq!(
+            sc.inner().cwd.as_deref(),
+            Some(sub.canonicalize().unwrap().as_path())
+        );
+    }
+
+    #[test]
+    fn nonexistent_cwd_is_path_canonicalize_error() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let sb = sandbox_with(tmp.path(), ready_caps());
+        let err = sb
+            .prepare(cmd(Some(tmp.path().join("missing"))), &deny_net_policy())
+            .unwrap_err();
+        assert!(matches!(err, traits::SandboxError::PathCanonicalize(_)));
+    }
+
+    #[test]
+    fn inner_command_and_env_match_the_plan_not_the_caller() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let sb = sandbox_with(tmp.path(), ready_caps());
+        let mut c = cmd(None);
+        c.command = "/system/bin/id".into(); // ignored + normalized
+        c.env.insert("LD_PRELOAD".into(), "/evil.so".into()); // scrubbed
+        let sc = sb.prepare(c, &deny_net_policy()).expect("prepare");
+        assert_eq!(sc.inner().command, "/system/bin/sh");
+        assert!(!sc.inner().env.contains_key("LD_PRELOAD"));
+        let plan = sc
+            .backend_plan()
+            .unwrap()
+            .downcast::<AndroidSandboxPlan>()
+            .unwrap();
+        let plan_env: std::collections::HashMap<_, _> = plan.env.iter().cloned().collect();
+        let inner_env: std::collections::HashMap<_, _> = sc
+            .inner()
+            .env
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        assert_eq!(plan_env, inner_env, "inner env must mirror plan env");
     }
 }

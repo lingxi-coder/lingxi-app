@@ -38,10 +38,11 @@ use std::collections::BTreeMap;
 ///
 /// ## Fields
 ///
-/// - `fallback`: per-model fallback target. Key is the **display model** of
-///   the primary model (alias-resolved); value is the display model of the
-///   fallback target (must resolve in `cfg`). Only chain[0] is stored; longer
-///   chains warn via `tracing::warn!`.
+/// - `fallback`: per-model fallback chain. Key is the **display model** of
+///   the primary model (alias-resolved); value is an ordered list of fallback
+///   targets (display models, each validated against `cfg`). The adapter walks
+///   the chain on consecutive overload events: chain[0] fires first, chain[1]
+///   when chain[0] is also overloaded, and so on until exhausted.
 /// - `max_retries`: `routing.retry.maxAttempts` parsed as `u32`. When `None`,
 ///   `CLAUDE_CODE_MAX_RETRIES` env (then `DEFAULT_MAX_RETRIES`) applies.
 /// - `backoff_ms`: `routing.retry.backoffMs` as the base-delay for the jitter
@@ -49,8 +50,8 @@ use std::collections::BTreeMap;
 ///   When `None`, the default `[500, 1000, 2000]` ladder is used.
 #[derive(Debug, Default, Clone, PartialEq)]
 pub struct RoutingOverrides {
-    /// Per-model fallback targets: display-model → display-model.
-    pub fallback: BTreeMap<String, String>,
+    /// Per-model fallback chains: display-model → ordered Vec of display-models.
+    pub fallback: BTreeMap<String, Vec<String>>,
     /// `routing.retry.maxAttempts` override.
     pub max_retries: Option<u32>,
     /// `routing.retry.backoffMs` override (first rung of the jitter ladder).
@@ -678,10 +679,11 @@ fn resolve_display_model<'a>(
 ///   against `cfg` (same as how `apply_routing_aliases` resolves targets).
 ///   When the key doesn't resolve as a `profile/model` it is tried as a bare
 ///   display model or alias across all providers.
-/// - Only chain[0] is used.  Longer chains emit a `tracing::warn!` and the
-///   extra entries are discarded.
-/// - The target (`chain[0]`) must resolve to a known `profile/model`; an
-///   unknown target is an [`LlmError::InvalidRequest`].
+/// - The **full chain** is validated and stored.  Every entry must resolve to
+///   a known `profile/model`; an unknown entry is an [`LlmError::InvalidRequest`].
+///   The adapter walks the chain in order: chain[0] fires first on the initial
+///   overload fallback, chain[1] when chain[0] is also overloaded, and so on
+///   until exhausted.
 ///
 /// ## Retry shape
 ///
@@ -699,7 +701,7 @@ fn resolve_display_model<'a>(
 ///
 /// # Errors
 ///
-/// Returns [`LlmError::InvalidRequest`] when a fallback target (`chain[0]`)
+/// Returns [`LlmError::InvalidRequest`] when any fallback target in the chain
 /// cannot be resolved in `cfg`.
 pub fn parse_routing_overrides(
     routing: &serde_json::Value,
@@ -724,7 +726,7 @@ pub fn parse_routing_overrides(
                     .map_or_else(|| key.clone(), |m| m.display_model.clone())
             };
 
-            // chain_val must be an array; we only use chain[0].
+            // chain_val must be a non-empty array; every entry is validated.
             let chain = chain_val.as_array().ok_or_else(|| llm_client::LlmError::InvalidRequest {
                 message: format!(
                     "routing.fallback[{key:?}]: value must be an array of \"profile/model\" strings"
@@ -737,33 +739,32 @@ pub fn parse_routing_overrides(
                     ),
                 });
             }
-            if chain.len() > 1 {
-                tracing::warn!(
-                    "routing.fallback[{key:?}]: fallback chains beyond the first entry are not yet supported; using chain[0] only"
-                );
+            // Validate every entry in the chain and collect display models.
+            let mut resolved_chain: Vec<String> = Vec::with_capacity(chain.len());
+            for (i, entry_val) in chain.iter().enumerate() {
+                let target = entry_val.as_str().ok_or_else(|| llm_client::LlmError::InvalidRequest {
+                    message: format!(
+                        "routing.fallback[{key:?}]: chain[{i}] must be a \"profile/model\" string"
+                    ),
+                })?;
+                let (profile_part, model_part) = target.split_once('/').ok_or_else(|| {
+                    llm_client::LlmError::InvalidRequest {
+                        message: format!(
+                            "routing.fallback[{key:?}]: chain[{i}] target {target:?} must be \"profile/model\""
+                        ),
+                    }
+                })?;
+                let target_display = resolve_display_model(cfg, profile_part, model_part)
+                    .ok_or_else(|| llm_client::LlmError::InvalidRequest {
+                        message: format!(
+                            "routing.fallback[{key:?}]: chain[{i}] target {target:?} not found in any configured profile"
+                        ),
+                    })?
+                    .to_string();
+                resolved_chain.push(target_display);
             }
-            let target = chain[0].as_str().ok_or_else(|| llm_client::LlmError::InvalidRequest {
-                message: format!(
-                    "routing.fallback[{key:?}]: chain[0] must be a \"profile/model\" string"
-                ),
-            })?;
-            // Validate the target resolves.
-            let (profile_part, model_part) = target.split_once('/').ok_or_else(|| {
-                llm_client::LlmError::InvalidRequest {
-                    message: format!(
-                        "routing.fallback[{key:?}]: target {target:?} must be \"profile/model\""
-                    ),
-                }
-            })?;
-            let target_display = resolve_display_model(cfg, profile_part, model_part)
-                .ok_or_else(|| llm_client::LlmError::InvalidRequest {
-                    message: format!(
-                        "routing.fallback[{key:?}]: target {target:?} not found in any configured profile"
-                    ),
-                })?
-                .to_string();
 
-            overrides.fallback.insert(key_display, target_display);
+            overrides.fallback.insert(key_display, resolved_chain);
         }
     }
 
@@ -1259,8 +1260,8 @@ mod tests {
         let overrides = parse_routing_overrides(&routing, &cfg).expect("must succeed");
         assert_eq!(
             overrides.fallback.get("claude-opus-4-7"),
-            Some(&"claude-sonnet-4-20250514".to_string()),
-            "fallback key must normalize to display model"
+            Some(&vec!["claude-sonnet-4-20250514".to_string()]),
+            "fallback key must normalize to display model; chain stored as Vec"
         );
         assert_eq!(overrides.max_retries, Some(5));
         assert_eq!(overrides.backoff_ms, Some(1000));
@@ -1283,9 +1284,29 @@ mod tests {
         );
     }
 
-    /// Chain >1 uses first entry and logs a warning (no error).
+    /// Unknown fallback target in chain[1] also errors (every entry validated).
     #[test]
-    fn parse_routing_overrides_chain_gt1_uses_first_entry() {
+    fn parse_routing_overrides_unknown_chain1_target_error() {
+        let cfg = routing_test_cfg();
+        let routing: serde_json::Value = serde_json::from_str(r#"{
+            "fallback": {
+                "anthropic/claude-opus-4-7": [
+                    "anthropic/claude-sonnet-4-20250514",
+                    "nonexistent/model-two"
+                ]
+            }
+        }"#).unwrap();
+
+        let err = parse_routing_overrides(&routing, &cfg).unwrap_err();
+        assert!(
+            matches!(&err, LlmError::InvalidRequest { message } if message.contains("not found")),
+            "chain[1] unknown target must error with not found, got: {err:?}"
+        );
+    }
+
+    /// Multi-entry chain: all entries validated and stored in order (no warn, no truncation).
+    #[test]
+    fn parse_routing_overrides_full_chain_stored() {
         let cfg = routing_test_cfg();
         let routing: serde_json::Value = serde_json::from_str(r#"{
             "fallback": {
@@ -1296,12 +1317,15 @@ mod tests {
             }
         }"#).unwrap();
 
-        let overrides = parse_routing_overrides(&routing, &cfg).expect("must succeed with chain>1");
-        // chain[0] must be used
+        let overrides = parse_routing_overrides(&routing, &cfg).expect("must succeed with multi-entry chain");
+        // Full chain must be stored in order.
         assert_eq!(
             overrides.fallback.get("claude-opus-4-7"),
-            Some(&"claude-sonnet-4-20250514".to_string()),
-            "chain[0] must be used when chain length > 1"
+            Some(&vec![
+                "claude-sonnet-4-20250514".to_string(),
+                "llama-3.3-70b".to_string(),
+            ]),
+            "full chain must be stored with all entries in order"
         );
     }
 
@@ -1361,7 +1385,7 @@ mod tests {
         let overrides = parse_routing_overrides(&routing, &cfg).expect("must succeed");
         assert_eq!(
             overrides.fallback.get("llama-3.3-70b"),
-            Some(&"claude-sonnet-4-20250514".to_string()),
+            Some(&vec!["claude-sonnet-4-20250514".to_string()]),
             "alias key 'llama' must resolve to display model 'llama-3.3-70b'"
         );
     }

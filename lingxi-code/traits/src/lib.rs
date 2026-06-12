@@ -74,12 +74,12 @@ pub use prompting_gate::{
 pub use runtime::{BackgroundTaskHandle, RuntimeError, RuntimeSpawner};
 pub use sandbox::{
     BackendPlanHandle, NetworkPolicy, ProcessCommand, ResourceLimits, Sandbox, SandboxBackend,
-    SandboxCapability, SandboxError, SandboxFeatures, SandboxPolicy, SandboxedCommand, SandboxedTag,
+    SandboxCapability, SandboxError, SandboxFeatures, SandboxPolicy, SandboxedCommand,
+    SandboxedTag,
 };
 pub use secure_storage::{SecureStorage, SecureStorageBackend, SecureStorageError};
 pub use share::{ShareError, SharePayload, ShareResult, SharingService};
 pub use stt::{SpeechToText, SttError, SttOpts, SttTranscript};
-pub use tts::{TextToSpeech, TtsAudio, TtsError, TtsOpts};
 pub use subagent_spawn::{
     SubagentInheritance, SubagentResult, SubagentSpawnError, SubagentSpawnRequest, SubagentSpawner,
     SubagentUsage,
@@ -92,6 +92,7 @@ pub use task_registry::{
 pub use team_registry::{TeamRegistryHandle, WorkerInfo};
 pub use team_spawn::{TeamSpawnError, TeamSpawnSeam};
 pub use tool_invoker::{SubagentInvocationContext, ToolInvoker, ToolInvokerError};
+pub use tts::{TextToSpeech, TtsAudio, TtsError, TtsOpts};
 pub use voice::{VoiceError, VoiceRecorder, VoiceRecording, VoiceRecordingOpts};
 #[allow(unused_imports)]
 pub use worktree::*;

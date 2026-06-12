@@ -104,8 +104,7 @@ mod tests {
     #[test]
     fn structured_variants_name_the_guarantee() {
         assert_eq!(
-            ProcessError::PolicyUnsupported("networked shell is not supported".into())
-                .to_string(),
+            ProcessError::PolicyUnsupported("networked shell is not supported".into()).to_string(),
             "policy unsupported: networked shell is not supported"
         );
         assert_eq!(

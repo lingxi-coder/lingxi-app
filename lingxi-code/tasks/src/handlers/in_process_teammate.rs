@@ -1081,6 +1081,7 @@ mod tests {
 
     /// Yield until the firer has recorded at least `n` fires, or the budget runs
     /// out. Returns the recorded fires.
+    #[allow(clippy::similar_names)] // `fires` is the plural noun form of `firer`'s fires method
     async fn await_fires(
         firer: &Arc<RecordingIdleFirer>,
         n: usize,
@@ -1100,6 +1101,7 @@ mod tests {
     /// team_name, the leaf-scope gap). Driving a second turn-set via an injected
     /// message proves it fires again each time the teammate parks.
     #[tokio::test]
+    #[allow(clippy::similar_names)] // `fires` (results) vs `firer` (sender) are semantically distinct
     async fn completed_turn_set_fires_teammate_idle_hook() {
         let api = ScriptedApiClient::new(vec!["answer one", "answer two"]);
         let (dir, fs, rt, handler, firer) = make_handler_with_idle_firer(api);

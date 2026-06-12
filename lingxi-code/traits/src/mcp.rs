@@ -281,7 +281,11 @@ pub struct McpResourceContentsRich {
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub text: Option<String>,
     /// Filesystem path a decoded binary blob was persisted to, if any.
-    #[serde(rename = "blobSavedTo", skip_serializing_if = "Option::is_none", default)]
+    #[serde(
+        rename = "blobSavedTo",
+        skip_serializing_if = "Option::is_none",
+        default
+    )]
     pub blob_saved_to: Option<String>,
 }
 

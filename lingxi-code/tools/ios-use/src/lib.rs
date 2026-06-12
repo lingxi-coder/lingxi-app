@@ -2,7 +2,7 @@
 //!
 //! On-device iOS UI automation. The M8 skeleton routes to the shared
 //! `ctx.computer_control` (`Arc<dyn ComputerControl>`) seam — an iOS
-//! XCUITest/accessibility backend injected via UniFFI (P12) supplies the impl.
+//! XCUITest/accessibility backend injected via `UniFFI` (P12) supplies the impl.
 
 #![forbid(unsafe_code)]
 
@@ -142,6 +142,7 @@ impl Tool for IosUseTool {
             "tap" => {
                 let x = input.get("x").and_then(Value::as_u64);
                 let y = input.get("y").and_then(Value::as_u64);
+                #[allow(clippy::cast_possible_truncation)] // coordinate space never exceeds u32
                 let (x, y) = match (x, y) {
                     (Some(x), Some(y)) => (x as u32, y as u32),
                     _ => return Err(ToolError::InvalidInput("`tap` requires `x` and `y`".into())),

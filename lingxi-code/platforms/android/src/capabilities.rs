@@ -1,8 +1,10 @@
 //! One-shot capability probe + session cache (spec r3 §Capability probing).
 //!
-//! Eager (D8): `engine_mobile::build_mobile_engine` runs the probe via
-//! `block_on` BEFORE the synchronous tool registry is assembled; everything
-//! downstream (`prepare()`, registration gates) reads the cache only.
+//! The eager probe seam is wired in P2. Two options under consideration: either
+//! the probe runs inside `AndroidMinijailSandbox::probe_capability()`, which can
+//! call `CapabilityCache::set()` on its own field and is reachable through the
+//! `Sandbox` trait object, or `AndroidPlatform` grows a cache accessor the
+//! engine can `block_on` before assembling the tool registry. The P2 plan decides.
 
 use std::sync::OnceLock;
 

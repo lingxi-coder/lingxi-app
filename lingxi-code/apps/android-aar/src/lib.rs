@@ -1002,6 +1002,8 @@ impl ClientEventListener for AndroidListenerBridge {
 /// - `share` — the foreign share callback (bridged to
 ///   [`traits::SharingService`]) so `tool-share` routes through the system
 ///   `Intent.ACTION_SEND` share sheet.
+/// - `shell` — optional Android sandbox/shell config (spec r3 §Android
+///   inputs); `None`/`null` keeps shell support fully absent.
 ///
 /// On non-Android hosts this returns [`MobileEngineError::PlatformUnavailable`]
 /// (the `AndroidPlatform` is only linked under `cfg(target_os = "android")`).

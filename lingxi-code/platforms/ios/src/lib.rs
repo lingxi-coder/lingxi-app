@@ -9,7 +9,7 @@
 //! keyed conversation streams against the real provider rather than the
 //! posix-minimal stub. The iOS-specific device capabilities (camera, voice,
 //! share) are injected as `Arc<dyn …>` trait objects implemented natively in
-//! Swift via UniFFI (P12).
+//! Swift via `UniFFI` (P12).
 //!
 //! M9 replaces the reused posix handles with App-Sandbox-aware iOS impls. The
 //! crate is intentionally **not** `#[cfg(target_os = "ios")]`-gated: the
@@ -28,7 +28,7 @@ use traits::{
 
 /// Construction inputs for [`IosPlatform`].
 ///
-/// The native capabilities are supplied by the Swift layer (via UniFFI in P12);
+/// The native capabilities are supplied by the Swift layer (via `UniFFI` in P12);
 /// `app_sandbox_root` is the container directory the filesystem is confined to.
 pub struct IosPlatformInputs {
     /// The app's writable sandbox container root.

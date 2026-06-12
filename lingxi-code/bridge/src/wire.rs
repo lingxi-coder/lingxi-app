@@ -25,6 +25,7 @@ use serde::{Deserialize, Serialize};
 pub const BRIDGE_PROTOCOL_VERSION: &str = "0.2.0";
 
 /// Capability flags advertised in the handshake.
+#[allow(clippy::struct_excessive_bools)] // mirrors the wire protocol's flag list verbatim
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Capabilities {
     /// Endpoint can stream incremental turn events.
@@ -121,7 +122,7 @@ pub struct BridgeRequest {
     pub id: u64,
     /// Method name (e.g. `"run_turn"`, `"dispatch_tool"`).
     pub method: String,
-    /// Method parameters. // M9: typed against protocol::Effect.
+    /// Method parameters. // M9: typed against `protocol::Effect`.
     pub params: serde_json::Value,
 }
 
@@ -130,7 +131,7 @@ pub struct BridgeRequest {
 pub struct BridgeResponse {
     /// Correlation id of the originating request.
     pub id: u64,
-    /// Success payload. // M9: typed against protocol::EffectResult.
+    /// Success payload. // M9: typed against `protocol::EffectResult`.
     pub result: Option<serde_json::Value>,
     /// Error payload (mutually exclusive with `result`).
     pub error: Option<BridgeWireError>,

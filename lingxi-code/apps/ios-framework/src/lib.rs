@@ -1,4 +1,4 @@
-//! `ios-framework` (M8-P12 → M10-F3) — the iOS UniFFI packager.
+//! `ios-framework` (M8-P12 → M10-F3) — the iOS `UniFFI` packager.
 //!
 //! This crate is the FFI boundary between the Rust engine and the iOS app. The
 //! Swift layer implements the [`traits::CameraControl`] / [`traits::VoiceRecorder`]
@@ -6,7 +6,7 @@
 //! `swift/`), hands them across as a [`PlatformImpls`] record, and Rust uses
 //! them to construct an `IosPlatform` and assemble the mobile engine — so Rust
 //! drives the device's native capabilities by calling *back* into Swift. That
-//! bidirectional flow is the whole point of the UniFFI seam.
+//! bidirectional flow is the whole point of the `UniFFI` seam.
 //!
 //! ## Shared session host (F3-04)
 //!
@@ -42,10 +42,10 @@
 //! `async_submit_resolves_on_handle_runtime` host test proves the registration by
 //! asserting an async export resolves on exactly that runtime.
 //!
-//! ## UniFFI status
-//! The `uniffi` feature (default-on) lights up the real UniFFI surface: the
+//! ## `UniFFI` status
+//! The `uniffi` feature (default-on) lights up the real `UniFFI` surface: the
 //! re-exported [`MobileEngineHandle`] is a `#[derive(uniffi::Object)]`, the
-//! listener a callback interface, the DTOs UniFFI types. `engine-mobile` carries
+//! listener a callback interface, the DTOs `UniFFI` types. `engine-mobile` carries
 //! the `setup_scaffolding!()`; this crate re-exports it (and adds its own for
 //! the iOS-local exports) so the symbols land in the final `staticlib`/cdylib.
 
@@ -69,7 +69,7 @@ pub use engine_mobile::{
 };
 
 /// The foreign (Swift) capability objects + config the engine needs to build an
-/// `IosPlatform`. UniFFI marshals each `Arc<dyn …>` as a callback-interface
+/// `IosPlatform`. `UniFFI` marshals each `Arc<dyn …>` as a callback-interface
 /// reference; `app_sandbox_root` is the app container path.
 pub struct PlatformImpls {
     /// Swift `CameraControl` impl.
@@ -82,7 +82,7 @@ pub struct PlatformImpls {
     pub app_sandbox_root: String,
 }
 
-/// Top-level UniFFI constructor: build the mobile engine from the Swift-supplied
+/// Top-level `UniFFI` constructor: build the mobile engine from the Swift-supplied
 /// platform callbacks + event listener. (Under `uniffi`: `#[uniffi::export]`.)
 ///
 /// This is a THIN wrapper: it constructs the iOS-specific `Platform` from the
@@ -299,7 +299,7 @@ pub trait IosEventListener: Send + Sync {
 
 /// Adapts the crate-local [`IosEventListener`] callback interface to the shared
 /// [`ClientEventListener`] the engine's adapter sink expects. One forwarding hop
-/// per event; no transformation. (UniFFI lifts a `callback_interface` as a
+/// per event; no transformation. (`UniFFI` lifts a `callback_interface` as a
 /// `Box<dyn …>`, so the bridge owns the boxed foreign object directly.)
 #[cfg(feature = "uniffi")]
 struct IosListenerBridge {
@@ -331,7 +331,7 @@ impl ClientEventListener for IosListenerBridge {
 // `Result<T, E>` where `E` is a `#[derive(uniffi::Error)]` enum.
 
 /// FFI error surface for the iOS speech callback interfaces. A flat enum so
-/// UniFFI can render it for an async `callback_interface` method; the bridge
+/// `UniFFI` can render it for an async `callback_interface` method; the bridge
 /// fans it back out onto the richer `traits::SttError` / `traits::TtsError`.
 #[cfg(feature = "uniffi")]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Error))]
@@ -401,7 +401,7 @@ pub struct TtsAudioFfi {
     pub sample_rate_hz: u32,
 }
 
-/// FFI error surface for the iOS share callback interface. A flat enum so UniFFI
+/// FFI error surface for the iOS share callback interface. A flat enum so `UniFFI`
 /// can render it for an async `callback_interface` method; the bridge fans it
 /// back out onto the richer [`traits::ShareError`].
 #[cfg(feature = "uniffi")]
@@ -482,7 +482,7 @@ impl traits::SharingService for IosShareBridge {
 }
 
 /// FFI error surface for the iOS notification callback interface. A flat enum so
-/// UniFFI can render it for an async `callback_interface` method; the bridge
+/// `UniFFI` can render it for an async `callback_interface` method; the bridge
 /// fans it back out onto the richer [`traits::NotificationError`].
 #[cfg(feature = "uniffi")]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Error))]
@@ -548,7 +548,7 @@ impl traits::NotificationService for IosNotificationBridge {
 }
 
 /// FFI error surface for the iOS clipboard callback interface. A flat enum so
-/// UniFFI can render it for an async `callback_interface` method; the bridge
+/// `UniFFI` can render it for an async `callback_interface` method; the bridge
 /// fans it back out onto the richer [`traits::ClipboardError`].
 #[cfg(feature = "uniffi")]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Error))]
@@ -614,7 +614,7 @@ fn clipboard_error_from_ffi(e: ClipboardFfiError) -> traits::ClipboardError {
 }
 
 /// FFI error surface for the iOS camera callback interface. A flat enum so
-/// UniFFI can render it for an async `callback_interface` method; the bridge
+/// `UniFFI` can render it for an async `callback_interface` method; the bridge
 /// fans it back out onto the richer [`traits::CameraError`].
 #[cfg(feature = "uniffi")]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Error))]
@@ -726,7 +726,7 @@ fn camera_error_from_ffi(e: CameraFfiError) -> traits::CameraError {
 }
 
 /// FFI error surface for the iOS mic-recorder callback interface. A flat enum so
-/// UniFFI can render it for an async `callback_interface` method; the bridge
+/// `UniFFI` can render it for an async `callback_interface` method; the bridge
 /// fans it back out onto the richer [`traits::VoiceError`].
 #[cfg(feature = "uniffi")]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Error))]
@@ -922,6 +922,7 @@ impl traits::TextToSpeech for IosTtsBridge {
 /// returns [`MobileEngineError::PlatformUnavailable`].
 #[cfg(feature = "uniffi")]
 #[cfg_attr(feature = "uniffi", uniffi::export)]
+#[allow(clippy::too_many_arguments)] // FFI constructor: one flat arg per Swift callback.
 pub fn build_ios_engine(
     api_base: String,
     api_key: String,

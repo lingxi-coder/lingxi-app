@@ -303,7 +303,14 @@ mod tests {
 
         // The forwarded fields reach the wire body.
         assert_eq!(body["model"].as_str(), Some("claude-haiku-4-5"));
-        assert_eq!(body["system"].as_str(), Some("system"));
+        // `api_client`'s `apply_prompt_caching` converts the plain-string system
+        // prompt into a one-element block array with a cache_control stamp.
+        let sys_arr = body["system"]
+            .as_array()
+            .expect("system is a cached block array (prompt-caching transform)");
+        assert_eq!(sys_arr.len(), 1);
+        assert_eq!(sys_arr[0]["type"].as_str(), Some("text"));
+        assert_eq!(sys_arr[0]["text"].as_str(), Some("system"));
         assert_eq!(
             body["messages"].as_array().map(Vec::len),
             Some(1),

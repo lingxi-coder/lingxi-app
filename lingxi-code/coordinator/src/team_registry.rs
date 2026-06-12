@@ -174,7 +174,9 @@ impl TeamRegistry {
     /// Non-terminal = `Idle` | `Working { .. }` | `AwaitingMessage`.
     /// Terminal (excluded) = `Completed` | `Failed { .. }` | `Killed`.
     pub async fn active_worker_count(&self) -> u32 {
-        self.workers
+        #[allow(clippy::cast_possible_truncation)] // worker count is bounded by team size
+        let count = self
+            .workers
             .read()
             .await
             .values()
@@ -186,7 +188,8 @@ impl TeamRegistry {
                         | WorkerStatus::AwaitingMessage
                 )
             })
-            .count() as u32
+            .count() as u32;
+        count
     }
 }
 

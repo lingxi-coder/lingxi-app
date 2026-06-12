@@ -390,6 +390,10 @@ mod m2_01_tests {
             h,
         );
         let cloned = sc.clone();
-        assert!(cloned.backend_plan().unwrap().downcast::<FakePlan>().is_some());
+        assert!(cloned
+            .backend_plan()
+            .unwrap()
+            .downcast::<FakePlan>()
+            .is_some());
     }
 }

@@ -18,21 +18,17 @@ use crate::hook_payload::{
     HookEventNameConfigChange, HookEventNameCwdChanged, HookEventNameElicitation,
     HookEventNameFileChanged, HookEventNameInstructionsLoaded, HookEventNameNotification,
     HookEventNamePermissionDenied, HookEventNamePermissionRequest, HookEventNamePost,
-    HookEventNamePostCompact,
-    HookEventNamePostToolUseFailure, HookEventNamePre, HookEventNamePreCompact,
-    HookEventNameSessionEnd, HookEventNameSessionStart, HookEventNameSetup, HookEventNameStop,
-    HookEventNameStopFailure, HookEventNameSubagentStart, HookEventNameSubagentStop,
-    HookEventNameTaskCompleted, HookEventNameTaskCreated, HookEventNameTeammateIdle,
-    HookEventNameUserPromptSubmit,
-    HookEventNameWorktreeCreate,
+    HookEventNamePostCompact, HookEventNamePostToolUseFailure, HookEventNamePre,
+    HookEventNamePreCompact, HookEventNameSessionEnd, HookEventNameSessionStart,
+    HookEventNameSetup, HookEventNameStop, HookEventNameStopFailure, HookEventNameSubagentStart,
+    HookEventNameSubagentStop, HookEventNameTaskCompleted, HookEventNameTaskCreated,
+    HookEventNameTeammateIdle, HookEventNameUserPromptSubmit, HookEventNameWorktreeCreate,
     HookEventNameWorktreeRemove, InstructionsLoadedPayload, NotificationPayload,
     PermissionDeniedPayload, PermissionRequestPayload, PostCompactPayload,
-    PostToolUseFailurePayload, PostToolUsePayload,
-    PreCompactPayload, PreToolUsePayload, SessionEndPayload, SessionStartPayload, SetupPayload,
-    StopFailurePayload, StopPayload, SubagentStartPayload, SubagentStopPayload,
-    TaskCompletedPayload, TaskCreatedPayload, TeammateIdlePayload, UserPromptSubmitPayload,
-    WorktreeCreatePayload,
-    WorktreeRemovePayload,
+    PostToolUseFailurePayload, PostToolUsePayload, PreCompactPayload, PreToolUsePayload,
+    SessionEndPayload, SessionStartPayload, SetupPayload, StopFailurePayload, StopPayload,
+    SubagentStartPayload, SubagentStopPayload, TaskCompletedPayload, TaskCreatedPayload,
+    TeammateIdlePayload, UserPromptSubmitPayload, WorktreeCreatePayload, WorktreeRemovePayload,
 };
 use crate::http_executor::{HttpExecutionSignal, HttpExecutor};
 use crate::prompt_executor::{
@@ -47,9 +43,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::RwLock;
 use traits::subagent_spawn::SubagentSpawner;
-use traits::{
-    HttpTransport, ProcessCommand, ProcessError, ProcessRunner, RuntimeSpawner, Sandbox,
-};
+use traits::{HttpTransport, ProcessCommand, ProcessError, ProcessRunner, RuntimeSpawner, Sandbox};
 
 /// Default HTTP hook timeout (10 minutes — matches
 /// `claude-code/src/utils/hooks/execHttpHook.ts:12` `DEFAULT_HTTP_HOOK_TIMEOUT_MS`).
@@ -310,7 +304,6 @@ impl HookExecutorImpl {
             );
         }
     }
-
 }
 
 /// Cheaply-cloneable snapshot of the executor dependencies needed to run a
@@ -444,10 +437,7 @@ impl Dispatcher {
                 // `subprocessEnv()` base-env replication and `CLAUDE_ENV_FILE`
                 // are out of B2 scope.
                 let mut child_env = env.clone();
-                let project_dir = ctx
-                    .project_dir
-                    .clone()
-                    .unwrap_or_else(|| ctx.cwd.clone());
+                let project_dir = ctx.project_dir.clone().unwrap_or_else(|| ctx.cwd.clone());
                 child_env.insert(
                     "CLAUDE_PROJECT_DIR".to_string(),
                     project_dir.to_string_lossy().into_owned(),
@@ -532,9 +522,7 @@ impl Dispatcher {
                     runner: self.prompt_runner.clone(),
                     timeout: effective_timeout,
                 };
-                let outcome = exec
-                    .execute(hook, prompt, model.as_deref(), &body)
-                    .await;
+                let outcome = exec.execute(hook, prompt, model.as_deref(), &body).await;
                 emit_prompt_signal(hook, &outcome.signal, effective_timeout);
                 outcome.result
             }
@@ -1376,9 +1364,7 @@ mod command_arm_tests {
     use std::path::PathBuf;
     use std::sync::Mutex;
     use traits::sandbox::{SandboxBackend, SandboxCapability, SandboxedTag};
-    use traits::{
-        ProcessHandle, ProcessOutput, RuntimeError, SandboxPolicy, SandboxedCommand,
-    };
+    use traits::{ProcessHandle, ProcessOutput, RuntimeError, SandboxPolicy, SandboxedCommand};
 
     /// Mock `ProcessRunner` that returns a canned `ProcessOutput` (or
     /// `ProcessError`) and records the `SandboxedCommand` it was handed so the
@@ -1488,10 +1474,7 @@ mod command_arm_tests {
             Err(RuntimeError::Internal("unused".into()))
         }
         async fn sleep(&self, _duration: Duration) {}
-        async fn cancel(
-            &self,
-            _handle: &traits::BackgroundTaskHandle,
-        ) -> Result<(), RuntimeError> {
+        async fn cancel(&self, _handle: &traits::BackgroundTaskHandle) -> Result<(), RuntimeError> {
             Ok(())
         }
     }
@@ -1714,7 +1697,10 @@ mod command_arm_tests {
 
     /// Executor wired with a single Command hook (custom `env`) + the recording
     /// runner, so the test can assert the child env the sandbox received.
-    fn executor_with_hook(hook: HookDefinition, process: Arc<dyn ProcessRunner>) -> HookExecutorImpl {
+    fn executor_with_hook(
+        hook: HookDefinition,
+        process: Arc<dyn ProcessRunner>,
+    ) -> HookExecutorImpl {
         let mut registry = HookRegistry::new();
         registry.register(hook);
         let reg = Arc::new(RwLock::new(registry));
@@ -2093,7 +2079,9 @@ mod command_arm_tests {
             HookEventType::ConfigChange,
             HookEvent::ConfigChange {
                 source: crate::events::ConfigChangeSource::LocalSettings,
-                file_path: Some(std::path::PathBuf::from("/work/.claude/settings.local.json")),
+                file_path: Some(std::path::PathBuf::from(
+                    "/work/.claude/settings.local.json",
+                )),
             },
         )
         .await;
@@ -2806,7 +2794,11 @@ mod async_path_tests {
         // Synchronous: exit 2 ⇒ Block surfaces in the aggregate, result recorded.
         assert_eq!(agg.decision, Some(HookDecision::Block));
         assert_eq!(agg.reason.as_deref(), Some("policy violation"));
-        assert_eq!(agg.all_results.len(), 1, "blocking hook IS in the aggregate");
+        assert_eq!(
+            agg.all_results.len(),
+            1,
+            "blocking hook IS in the aggregate"
+        );
     }
 
     /// (5) Mixed: one async (`blocking == false`) + one blocking hook fire for
@@ -2976,11 +2968,7 @@ mod once_and_status_message_tests {
 
     /// A Builtin hook subscribed to `PreToolUse`, with the supplied `once` flag,
     /// `status_message`, and handler id.
-    fn builtin_hook(
-        handler_id: &str,
-        once: bool,
-        status_message: Option<&str>,
-    ) -> HookDefinition {
+    fn builtin_hook(handler_id: &str, once: bool, status_message: Option<&str>) -> HookDefinition {
         HookDefinition {
             id: HookId::new(),
             name: "once-hook".into(),
@@ -3187,7 +3175,11 @@ mod once_and_status_message_tests {
         );
 
         let agg = exec.execute(pre_event(), HookContext::default()).await;
-        assert_eq!(agg.progress.len(), 1, "one progress event per matching hook");
+        assert_eq!(
+            agg.progress.len(),
+            1,
+            "one progress event per matching hook"
+        );
         let p = &agg.progress[0];
         assert_eq!(p.hook_event, "PreToolUse");
         assert_eq!(p.hook_name, "once-hook");
@@ -3479,7 +3471,9 @@ mod http_agent_dispatch_tests {
             "prompt template is spliced ahead of the payload",
         );
         assert!(
-            recorded[0].prompt.contains(r#""hook_event_name":"PreToolUse""#),
+            recorded[0]
+                .prompt
+                .contains(r#""hook_event_name":"PreToolUse""#),
             "the serialized event payload is appended to the prompt",
         );
         drop(recorded);
@@ -3620,7 +3614,9 @@ mod prompt_dispatch_tests {
             recorded[0].prompt,
         );
         assert!(
-            recorded[0].prompt.contains(r#""hook_event_name":"PreToolUse""#),
+            recorded[0]
+                .prompt
+                .contains(r#""hook_event_name":"PreToolUse""#),
             "the serialized event payload is spliced into $ARGUMENTS",
         );
         assert_eq!(recorded[0].model.as_deref(), Some("claude-sonnet-4-6"));

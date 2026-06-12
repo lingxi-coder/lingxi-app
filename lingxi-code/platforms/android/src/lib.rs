@@ -241,6 +241,10 @@ mod tests {
         let p = AndroidPlatform::new(inputs(Some(shell_cfg())));
         assert_eq!(p.sandbox().backend(), SandboxBackend::AndroidMinijail);
         assert!(!p.process().is_available(), "execution disabled until P2");
+        assert!(
+            !p.sandbox().is_available(),
+            "fresh cache reads conservative-unavailable until the eager probe (P2)"
+        );
     }
 
     #[test]

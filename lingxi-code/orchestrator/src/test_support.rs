@@ -30,6 +30,10 @@ pub struct MockApiClient {
     captured_tools: Arc<Mutex<Vec<Vec<serde_json::Value>>>>,
     /// Task 7: seeds passed to `messages_create_seeded`; one entry per call.
     captured_seeds: Arc<Mutex<Vec<u8>>>,
+    /// Task 8 (llm-client future-work batch 3): the FULL internal rate-limit
+    /// snapshot returned by `last_rate_limit_full()`. A `std::sync::Mutex`
+    /// (not tokio) because the trait accessor is a sync `fn`.
+    rate_limit_full: std::sync::Mutex<Option<crate::model::rate_limit::RateLimitInfo>>,
 }
 
 impl MockApiClient {
@@ -42,7 +46,16 @@ impl MockApiClient {
             captured_systems: Arc::new(Mutex::new(Vec::new())),
             captured_tools: Arc::new(Mutex::new(Vec::new())),
             captured_seeds: Arc::new(Mutex::new(Vec::new())),
+            rate_limit_full: std::sync::Mutex::new(None),
         }
+    }
+
+    /// Task 8: pre-load the FULL internal rate-limit snapshot returned by
+    /// `last_rate_limit_full()`. Pass `None` to clear it (the default).
+    /// Synchronous so tests can flip the value between `run_turn` calls
+    /// without an `await`.
+    pub fn set_rate_limit_full(&self, info: Option<crate::model::rate_limit::RateLimitInfo>) {
+        *self.rate_limit_full.lock().unwrap() = info;
     }
 
     /// Snapshot the captured `tools` arguments (one entry per `messages_create`
@@ -112,6 +125,11 @@ impl OrchestratorApiClient for MockApiClient {
             .push(initial_consecutive_overloaded);
         // Delegate to the plain seam so the queue logic is reused.
         self.messages_create(model, system, msgs, tools).await
+    }
+
+    /// Task 8: return the snapshot pre-loaded via [`Self::set_rate_limit_full`].
+    fn last_rate_limit_full(&self) -> Option<crate::model::rate_limit::RateLimitInfo> {
+        self.rate_limit_full.lock().unwrap().clone()
     }
 }
 
@@ -260,6 +278,36 @@ impl OutputStream for MockOutputStream {
             output_tokens,
             cache_read_tokens,
             cache_creation_tokens,
+        });
+    }
+    /// Task 8 (llm-client future-work batch 3): record the rate-limit
+    /// emission so tests can assert the emit-on-change behaviour.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "mirrors the nine-argument trait signature (see traits::OutputStream::emit_rate_limit)"
+    )]
+    async fn emit_rate_limit(
+        &self,
+        status: Option<&str>,
+        rate_limit_type: Option<&str>,
+        utilization: Option<f64>,
+        resets_at: Option<u64>,
+        claim_resets_at: Option<u64>,
+        overage_status: Option<&str>,
+        overage_resets_at: Option<u64>,
+        overage_disabled_reason: Option<&str>,
+        fallback_available: Option<bool>,
+    ) {
+        self.events.lock().await.push(OutputEvent::RateLimit {
+            status: status.map(str::to_string),
+            rate_limit_type: rate_limit_type.map(str::to_string),
+            utilization,
+            resets_at,
+            claim_resets_at,
+            overage_status: overage_status.map(str::to_string),
+            overage_resets_at,
+            overage_disabled_reason: overage_disabled_reason.map(str::to_string),
+            fallback_available,
         });
     }
 }

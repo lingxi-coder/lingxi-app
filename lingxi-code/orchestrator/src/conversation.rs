@@ -157,6 +157,23 @@ pub trait OrchestratorApiClient: Send + Sync {
     fn last_rate_limit_info(&self) -> Option<traits::RateLimitSnapshot> {
         None
     }
+
+    /// Return the FULL most recently observed rate-limit header snapshot.
+    ///
+    /// Task 8 (llm-client future-work batch 3): unlike
+    /// [`Self::last_rate_limit_info`] — whose signature is kept untouched and
+    /// projects the three-field public `traits::RateLimitSnapshot` — this
+    /// returns the orchestrator-internal nine-field
+    /// [`crate::model::rate_limit::RateLimitInfo`] so the turn drivers can
+    /// forward every unified header value to
+    /// `traits::OutputStream::emit_rate_limit`.
+    ///
+    /// Default returns `None` (mocks / non-Anthropic impls compile
+    /// unchanged); `ProviderApiAdapter` overrides it to expose its cached
+    /// per-response snapshot.
+    fn last_rate_limit_full(&self) -> Option<crate::model::rate_limit::RateLimitInfo> {
+        None
+    }
 }
 
 /// Streaming-API surface used by the orchestrator's streaming turn loop.
@@ -394,6 +411,13 @@ pub struct ConversationOrchestrator {
     /// `BuiltinToolContext`. Allow `dead_code` until those land.
     #[allow(dead_code)]
     pub(crate) read_state_map: tool_api::read_file_state::ReadFileStateMap,
+    /// Task 8 (llm-client future-work batch 3): the last rate-limit snapshot
+    /// forwarded to [`traits::OutputStream::emit_rate_limit`], for the
+    /// emit-on-change dedup in [`Self::emit_rate_limit_if_changed`]. Lives on
+    /// the orchestrator (not per-turn loop state) so the dedup spans turns —
+    /// an identical snapshot across two `run_turn` calls emits exactly once.
+    /// `None` until the first emission.
+    pub(crate) last_emitted_rate_limit: Mutex<Option<crate::model::rate_limit::RateLimitInfo>>,
 }
 
 impl ConversationOrchestrator {
@@ -444,6 +468,7 @@ impl ConversationOrchestrator {
             cache_safe_slot: None,
             read_file_state: Arc::new(Mutex::new(Vec::new())),
             read_state_map: tool_api::read_file_state::new_read_file_state_map(),
+            last_emitted_rate_limit: Mutex::new(None),
         }
     }
 
@@ -591,6 +616,48 @@ impl ConversationOrchestrator {
             generation: 0,
         })
         .await;
+    }
+
+    /// Task 8 (llm-client future-work batch 3): forward the API client's
+    /// latest unified rate-limit header snapshot to
+    /// [`traits::OutputStream::emit_rate_limit`], emitting ONLY when it
+    /// differs from the last emitted value (emit-on-change dedup against
+    /// [`Self::last_emitted_rate_limit`]).
+    ///
+    /// Called by the turn drivers after each completed API call — the
+    /// batched/cancelable seam in `turn_loop::execute_one_turn_with_recovery_tracked`
+    /// and the streaming seam in `try_run_turn_streaming` (both right after
+    /// `save_cache_safe_params`, the existing "API call succeeded" point).
+    /// `self.api` and `self.streaming_api` are the same `ProviderApiAdapter`
+    /// in production, and the adapter records headers on both
+    /// `drive_non_stream` and the `drive_stream` connect-success path, so
+    /// reading `self.api` covers both drivers.
+    ///
+    /// A strict no-op when the client has no snapshot (the default
+    /// `last_rate_limit_full()` returns `None` — mocks / non-Anthropic
+    /// providers), so all pre-existing fixtures see zero extra events.
+    pub(crate) async fn emit_rate_limit_if_changed(&self) {
+        let Some(info) = self.api.last_rate_limit_full() else {
+            return;
+        };
+        let mut last = self.last_emitted_rate_limit.lock().await;
+        if last.as_ref() == Some(&info) {
+            return;
+        }
+        self.output
+            .emit_rate_limit(
+                info.status.as_deref(),
+                info.rate_limit_type.as_deref(),
+                info.utilization,
+                info.resets_at,
+                info.claim_resets_at,
+                info.overage_status.as_deref(),
+                info.overage_resets_at,
+                info.overage_disabled_reason.as_deref(),
+                info.fallback_available,
+            )
+            .await;
+        *last = Some(info);
     }
 
     /// Whether a [`compaction::CompactionOrchestrator`] has been
@@ -2052,6 +2119,14 @@ impl ConversationOrchestrator {
             // reply is appended below. Strict no-op when no slot is wired.
             self.save_cache_safe_params(system_prompt.as_deref(), &model)
                 .await;
+
+            // Task 8 (llm-client future-work batch 3): the streamed call (or
+            // its non-streaming 529 fallback) completed — forward the
+            // adapter's unified rate-limit snapshot when it changed since the
+            // last emission. `self.api` is the same `ProviderApiAdapter` as
+            // `self.streaming_api` in production; the adapter records headers
+            // on the `drive_stream` connect-success path too.
+            self.emit_rate_limit_if_changed().await;
 
             // 4. Assemble + append the assistant message.
             let assistant_id = MessageId::new();

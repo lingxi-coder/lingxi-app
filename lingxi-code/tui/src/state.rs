@@ -637,6 +637,12 @@ pub struct AppState {
     /// snapshots can compose to the same text — e.g. a utilization tick
     /// within the same floored percentage).
     pub last_rate_limit_text: Option<String>,
+    /// (B5 Task 5) One-shot guard for the overage-transition notice
+    /// (`useRateLimitWarningNotification.tsx` `hasShownOverageNotification`).
+    /// Set when the notice fires; reset when a `RateLimit` event shows the
+    /// session is NOT using overage (tsx :70-72) — NOT by `/clear` (the TS
+    /// flag is component state, untouched by transcript clears).
+    pub has_shown_overage_notification: bool,
     /// (M6-05) Oneshot back-channel to the orchestrator for the active
     /// permission round-trip. `Some(_)` whenever `pending_permission`
     /// holds a real request that arrived over the bridge; `None` for
@@ -863,6 +869,7 @@ impl AppState {
             expanded: HashMap::new(),
             tool_call_inputs: HashMap::new(),
             last_rate_limit_text: None,
+            has_shown_overage_notification: false,
             pending_permission_resp_tx: None,
             pending_permission_started_at: None,
             tool_use_dialog_state:

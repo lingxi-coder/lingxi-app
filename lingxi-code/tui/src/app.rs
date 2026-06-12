@@ -385,6 +385,8 @@ pub fn dispatch(action: KeyAction, st: &mut AppState) -> bool {
                 // The rate-limit dedupe slot must reset with the scrollback: a
                 // suppressed identical notice would otherwise never reappear in
                 // the now-empty transcript.
+                // (`has_shown_overage_notification` deliberately NOT reset: the
+                // TS flag is component state, surviving transcript clears.)
                 st.last_rate_limit_text = None;
                 return false;
             }
@@ -655,7 +657,9 @@ pub async fn handle_submit_line(
                 st.messages.clear();
                 st.scroll_offset = 0;
                 // Same rationale as the sync `/clear` intercept above: the
-                // rate-limit dedupe slot resets with the scrollback.
+                // rate-limit dedupe slot resets with the scrollback
+                // (`has_shown_overage_notification` deliberately NOT reset —
+                // TS component state survives transcript clears).
                 st.last_rate_limit_text = None;
                 return false;
             }

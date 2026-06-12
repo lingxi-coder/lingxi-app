@@ -136,16 +136,9 @@ fn compose_with(
     let status = info.status.as_deref();
     let overage_status = info.overage_status.as_deref();
 
-    // isUsingOverage derivation, ported verbatim from claudeAiLimits.ts:406-409:
-    //   const isUsingOverage =
-    //     status === 'rejected' &&
-    //     (overageStatus === 'allowed' || overageStatus === 'allowed_warning')
-    let is_using_overage = status == Some("rejected")
-        && matches!(overage_status, Some("allowed" | "allowed_warning"));
-
     // "Check overage scenarios first (when subscription is rejected but
     // overage is available)" — rateLimitMessages.ts:49-60.
-    if is_using_overage {
+    if is_using_overage(info) {
         if overage_status == Some("allowed_warning") {
             return Some(ComposedRateLimit {
                 text: "You're close to your extra usage spending limit".to_owned(),
@@ -191,9 +184,66 @@ fn compose_with(
     None
 }
 
+/// `isUsingOverage` derivation, ported verbatim from claudeAiLimits.ts:406-409:
+///
+/// ```text
+/// const isUsingOverage =
+///   status === 'rejected' &&
+///   (overageStatus === 'allowed' || overageStatus === 'allowed_warning')
+/// ```
+///
+/// `pub` so the streaming layer's overage-transition notice
+/// (`useRateLimitWarningNotification.tsx`) shares the one derivation instead
+/// of re-deriving it.
+#[must_use]
+pub fn is_using_overage(info: &RateLimitInfo) -> bool {
+    info.status.as_deref() == Some("rejected")
+        && matches!(
+            info.overage_status.as_deref(),
+            Some("allowed" | "allowed_warning")
+        )
+}
+
 /// TS `formatResetTime(ts, true)` — showTimezone, showTime defaulted true.
 fn fmt_reset(ts: Option<u64>) -> Option<String> {
     format_reset_time(ts.and_then(|t| i64::try_from(t).ok()), true, true)
+}
+
+/// Port of `getUsingOverageText` (rateLimitMessages.ts:303-331) — the
+/// transient notice shown once when the session rolls into extra usage
+/// (`useRateLimitWarningNotification.tsx` fires it on the overage
+/// transition).
+#[must_use]
+pub fn using_overage_text(info: &RateLimitInfo, sub: &SubscriptionSnapshot) -> String {
+    // TS :304-306: `resetTime = limits.resetsAt ? formatResetTime(resetsAt,
+    // true) : ''` — the falsy-0 guard lives inside `format_reset_time`.
+    let reset_time = fmt_reset(info.resets_at);
+    // TS :308-321 limitName chain.
+    let limit_name = match info.rate_limit_type.as_deref() {
+        Some("five_hour") => "session limit",
+        Some("seven_day") => "weekly limit",
+        Some("seven_day_opus") => "Opus limit",
+        Some("seven_day_sonnet") => {
+            // "For pro and enterprise, Sonnet limit is the same as weekly"
+            // — TS :316-320.
+            if sub.is_pro_or_enterprise() {
+                "weekly limit"
+            } else {
+                "Sonnet limit"
+            }
+        }
+        _ => "",
+    };
+    // TS :323-325: no limitName → the bare copy, BEFORE any reset suffix.
+    if limit_name.is_empty() {
+        return "Now using extra usage".to_owned();
+    }
+    // TS :327-330: `resetMessage = resetTime ? ` · Your ${limitName} resets
+    // ${resetTime}` : ''` — straight ASCII apostrophe, U+00B7 separator.
+    match reset_time {
+        Some(t) => format!("You're now using extra usage \u{b7} Your {limit_name} resets {t}"),
+        None => "You're now using extra usage".to_owned(),
+    }
 }
 
 /// Port of `getLimitReachedText` (rateLimitMessages.ts:143-197).
@@ -959,6 +1009,100 @@ mod tests {
             got.text,
             "Approaching extra usage limit \u{b7} /extra-usage to request more"
         );
+    }
+
+    // ── getUsingOverageText (rateLimitMessages.ts:303-331) ────────────────
+    //
+    // `using_overage_text` reads only `rate_limit_type`/`resets_at` plus the
+    // subscription, so the `rejected(...)` constructor doubles as its input.
+
+    #[test]
+    fn using_overage_text_per_limit_type() {
+        let unknown = SubscriptionSnapshot::default();
+        let ts = ts_in(3600);
+        // five_hour → 'session limit' (TS :309-310); separator placement is
+        // ` · Your {limitName} resets {resetTime}` (TS :328), U+00B7.
+        assert_eq!(
+            using_overage_text(&rejected(Some("five_hour"), Some(ts)), &unknown),
+            format!(
+                "You're now using extra usage \u{b7} Your session limit resets {}",
+                reset(ts)
+            )
+        );
+        // seven_day → 'weekly limit' (TS :311-312).
+        assert_eq!(
+            using_overage_text(&rejected(Some("seven_day"), Some(ts)), &unknown),
+            format!(
+                "You're now using extra usage \u{b7} Your weekly limit resets {}",
+                reset(ts)
+            )
+        );
+        // seven_day_opus → 'Opus limit' (TS :313-314).
+        assert_eq!(
+            using_overage_text(&rejected(Some("seven_day_opus"), Some(ts)), &unknown),
+            format!(
+                "You're now using extra usage \u{b7} Your Opus limit resets {}",
+                reset(ts)
+            )
+        );
+        // seven_day_sonnet: "For pro and enterprise, Sonnet limit is the same
+        // as weekly" (TS :315-320); everyone else keeps 'Sonnet limit'.
+        assert_eq!(
+            using_overage_text(&rejected(Some("seven_day_sonnet"), Some(ts)), &pro()),
+            format!(
+                "You're now using extra usage \u{b7} Your weekly limit resets {}",
+                reset(ts)
+            )
+        );
+        let enterprise = SubscriptionSnapshot {
+            subscription_type: Some("enterprise".into()),
+            ..pro()
+        };
+        assert_eq!(
+            using_overage_text(&rejected(Some("seven_day_sonnet"), Some(ts)), &enterprise),
+            format!(
+                "You're now using extra usage \u{b7} Your weekly limit resets {}",
+                reset(ts)
+            )
+        );
+        assert_eq!(
+            using_overage_text(&rejected(Some("seven_day_sonnet"), Some(ts)), &unknown),
+            format!(
+                "You're now using extra usage \u{b7} Your Sonnet limit resets {}",
+                reset(ts)
+            )
+        );
+        // No limit type → the bare copy, EVEN with resetsAt set: TS :323
+        // checks `!limitName` before the reset message is ever built.
+        assert_eq!(
+            using_overage_text(&rejected(None, Some(ts)), &unknown),
+            "Now using extra usage"
+        );
+        // five_hour without a reset → no ` · Your …` suffix (TS :327-329:
+        // empty resetTime ⇒ empty resetMessage).
+        assert_eq!(
+            using_overage_text(&rejected(Some("five_hour"), None), &unknown),
+            "You're now using extra usage"
+        );
+    }
+
+    #[test]
+    fn using_overage_text_is_straight_ascii() {
+        // TS :324/:330 use straight ASCII apostrophes (U+0027), never the
+        // curly U+2019; the only non-ASCII byte allowed is the U+00B7
+        // separator.
+        let unknown = SubscriptionSnapshot::default();
+        for info in [
+            rejected(Some("five_hour"), Some(ts_in(3600))),
+            rejected(Some("five_hour"), None),
+            rejected(None, None),
+        ] {
+            let got = using_overage_text(&info, &unknown);
+            assert!(
+                !got.contains('\u{2019}'),
+                "curly apostrophe in {got:?} — TS uses straight ASCII"
+            );
+        }
     }
 
     #[test]

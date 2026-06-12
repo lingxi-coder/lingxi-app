@@ -829,8 +829,8 @@ pub struct AppState {
     /// (last-write-wins, mirroring claude-code's per-response `rawUtilization`
     /// tracking in `claudeAiLimits.ts`). `None` until the first API response
     /// carries the `anthropic-ratelimit-unified-{5h,7d}-*` headers. Feeds the
-    /// status-line command input's always-present `rate_limits` field
-    /// (`StatusLine.tsx:50-65`).
+    /// status-line command input's OPTIONAL `rate_limits` field — omitted
+    /// when no window resolved (`StatusLine.tsx:99-101`).
     pub raw_utilization: Option<crate::components::status_line_command::RawUtilizationSnapshot>,
     /// Shared subscription slot from the composition root (None in tests /
     /// print mode). Read at rate-limit compose time via

@@ -143,10 +143,11 @@ pub struct ProviderApiAdapter {
     /// without the per-window quartet resets it to the empty snapshot
     /// exactly like the TS module state. `None` until the first recorded
     /// response. NOT recorded on 429 error responses — TS also extracts raw
-    /// utilization from error headers (`claudeAiLimits.ts:500`); this seam
-    /// records on success paths only, the same pre-existing limitation as
-    /// `last_rate_limit`. Exposed via the
-    /// `OrchestratorApiClient::last_raw_utilization` override.
+    /// utilization from error headers (`claudeAiLimits.ts:500`); this RAW
+    /// cache records on success paths only (`last_rate_limit` DOES get a
+    /// rejected snapshot from 429 headers via `record_rate_limit_from_429`;
+    /// extending that to the raw cache is a tracked follow-up). Exposed via
+    /// the `OrchestratorApiClient::last_raw_utilization` override.
     last_raw_utilization: Mutex<Option<RawUtilization>>,
     /// Limits-specific copy composed from the most recent 429 **error**
     /// response's unified headers.

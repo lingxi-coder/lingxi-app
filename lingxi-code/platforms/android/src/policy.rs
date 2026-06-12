@@ -187,7 +187,7 @@ pub fn plan_from_policy(
 }
 
 /// Keys that are never forwarded from the caller, even if explicitly set
-/// (spec r3 §Environment: security denylist — injection + credential vectors).
+/// (env-hygiene intent of spec r3 §Environment / Threat model — injection + credential vectors).
 const ENV_DENYLIST: &[&str] = &[
     "LD_PRELOAD",
     "LD_LIBRARY_PATH",
@@ -396,14 +396,23 @@ mod tests {
             &inherited,
         );
         let map: HashMap<_, _> = env.iter().cloned().collect();
-        assert_eq!(map.get("HOME").map(String::as_str), Some("/data/user/0/app/files/workspace"));
-        assert_eq!(map.get("TMPDIR").map(String::as_str), Some("/data/user/0/app/cache"));
+        assert_eq!(
+            map.get("HOME").map(String::as_str),
+            Some("/data/user/0/app/files/workspace")
+        );
+        assert_eq!(
+            map.get("TMPDIR").map(String::as_str),
+            Some("/data/user/0/app/cache")
+        );
         assert_eq!(map.get("PATH").map(String::as_str), Some("/system/bin"));
         assert_eq!(map.get("LANG").map(String::as_str), Some("C.UTF-8"));
         assert_eq!(map.get("TERM").map(String::as_str), Some("dumb"));
         assert_eq!(map.get("ANDROID_ROOT").map(String::as_str), Some("/system"));
         assert_eq!(map.get("ANDROID_DATA").map(String::as_str), Some("/data"));
-        assert!(!map.contains_key("LD_PRELOAD"), "inherited env must be scrubbed");
+        assert!(
+            !map.contains_key("LD_PRELOAD"),
+            "inherited env must be scrubbed"
+        );
         assert!(!map.contains_key("ANTHROPIC_API_KEY"));
     }
 

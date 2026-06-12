@@ -19,8 +19,8 @@
 pub mod policy;
 
 pub use policy::{
-    plan_from_policy, build_shell_env, AndroidSandboxPlan, ExecTarget, NetProfile,
-    ProcessCleanup, Rlimit, RlimitResource, SeccompRef,
+    build_shell_env, plan_from_policy, AndroidSandboxPlan, ExecTarget, NetProfile, ProcessCleanup,
+    Rlimit, RlimitResource, SeccompRef,
 };
 
 use std::path::PathBuf;

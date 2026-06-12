@@ -123,15 +123,19 @@ pub async fn probe_android_capabilities() -> AndroidSandboxCapabilities {
     #[cfg(target_os = "android")]
     {
         let smoke = platform_android_minijail::minijail_smoke();
+        let extras = platform_android_minijail::probe_extras();
         AndroidSandboxCapabilities {
             probed: true,
             minijail_smoke: smoke.ok,
             no_new_privs: smoke.no_new_privs,
-            // The remaining probe items (seccomp install, TSYNC, net-deny
-            // socket()==EPERM, pgid kill, landlock ABI, sh version, toybox
-            // inventory) land with the P2 runner plan.
+            seccomp_filter: extras.seccomp_filter,
+            seccomp_tsync: extras.seccomp_tsync,
+            net_deny_verified: extras.net_deny_verified,
+            pgid_kill: extras.pgid_kill,
+            landlock_abi: extras.landlock_abi,
+            system_sh_version: extras.system_sh_version,
+            toybox_applets: extras.toybox_applets,
             reason: smoke.reason,
-            ..AndroidSandboxCapabilities::default()
         }
     }
 }

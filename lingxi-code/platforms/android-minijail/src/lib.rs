@@ -18,6 +18,9 @@ pub use seccomp::{
 mod run;
 pub use run::run_jailed;
 
+mod probe;
+pub use probe::{probe_extras, ProbeExtras};
+
 use serde::Serialize;
 
 /// An rlimit to apply in the jailed child (resource = a raw `RLIMIT_*` int).

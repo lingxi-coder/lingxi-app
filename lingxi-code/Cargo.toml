@@ -82,6 +82,7 @@ members = [
     "platforms/windows",
     "platforms/ios",
     "platforms/android",
+    "platforms/android-libcap",
     "platforms/posix/tests/fixtures/mock_stdio_mcp",
     "examples/cli-demo",
 ]

@@ -3181,6 +3181,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "platform-android-libcap"
+version = "0.1.0"
+dependencies = [
+ "cc",
+]
+
+[[package]]
 name = "platform-common"
 version = "0.12.0"
 dependencies = [

@@ -567,8 +567,17 @@ impl ProviderApiAdapter {
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
         let composed = RateLimitInfo::from_429_error_headers(&hvec).map(|info| {
-            // errors.ts:482-516 — the limits state is updated from the
-            // error's headers with status forced to 'rejected'.
+            // The MESSAGE composition ports errors.ts:482-516 (a LOCAL limits
+            // object built from the error headers). Writing the snapshot into
+            // `last_rate_limit` additionally mirrors the TS STATE update
+            // `extractQuotaStatusFromError` (claudeAiLimits.ts:487-515), with
+            // a documented divergence: TS updates state only on the TERMINAL
+            // 429 (the catch handler), while this records per-attempt — a
+            // retried-then-recovered 429 plants a rejected snapshot that a
+            // subsequent unified-header-less success would not overwrite (TS
+            // would reset to allowed). Low probability (subscriber successes
+            // carry the headers); terminal-only recording is a tracked
+            // follow-up.
             *self.last_rate_limit.lock().unwrap() = Some(info.clone());
             // `formatResetTime(…, true)` analogue for both reset headers
             // (`rateLimitMessages.ts:144-148`), formatted at error time.

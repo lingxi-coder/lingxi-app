@@ -101,9 +101,11 @@ impl OrchestratorTurnDriver {
     /// other internal failure is `Internal`.
     fn error_event(err: &OrchestratorError) -> ClientEvent {
         let kind = match err {
-            OrchestratorError::ApiCall(_) | OrchestratorError::Streaming(_) => {
-                ErrorKindDto::Transport
-            }
+            // RateLimitRejected is an enriched ApiCall(RateLimited) — same
+            // Transport class as the error it replaces (matches client-adapter).
+            OrchestratorError::ApiCall(_)
+            | OrchestratorError::Streaming(_)
+            | OrchestratorError::RateLimitRejected { .. } => ErrorKindDto::Transport,
             OrchestratorError::StreamingProtocol(_)
             | OrchestratorError::StreamEndedWithoutStop => ErrorKindDto::Protocol,
             OrchestratorError::MaxTurnsReached { .. } => ErrorKindDto::MaxTurns,

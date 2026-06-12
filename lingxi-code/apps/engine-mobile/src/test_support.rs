@@ -23,8 +23,8 @@
 //! definition (no drift). Behind the `uniffi` feature — they name the FFI-surface
 //! types.
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use client_adapter::{ClientEventListener, PermissionRequestSink};
@@ -37,7 +37,9 @@ use traits::{
     SharingService, VoiceRecorder, WorktreeManager,
 };
 
-pub use crate::host::{build_mobile_engine_inner, MobileConfig, MobileEngineError, MobileEngineHandle};
+pub use crate::host::{
+    build_mobile_engine_inner, MobileConfig, MobileEngineError, MobileEngineHandle,
+};
 
 /// Off-device fake [`Platform`] shim: reuses the portable
 /// `platform-posix-minimal` handles (`std::fs` over a temp root, `std::time`,

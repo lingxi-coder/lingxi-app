@@ -406,9 +406,15 @@ mod tests {
             seen: seen.clone(),
         });
         let invoker = RegistryToolInvoker::new(registry_with_echo()).with_gate(gate);
-        match invoker.invoke("TestEcho", json!({ "a": 1 }), no_ctx()).await {
+        match invoker
+            .invoke("TestEcho", json!({ "a": 1 }), no_ctx())
+            .await
+        {
             Err(ToolInvokerError::Internal(reason)) => {
-                assert!(reason.contains("denied by permission rule Bash"), "got {reason}");
+                assert!(
+                    reason.contains("denied by permission rule Bash"),
+                    "got {reason}"
+                );
             }
             other => panic!("expected Internal(deny), got {other:?}"),
         }
@@ -455,6 +461,9 @@ mod tests {
         let invoker = RegistryToolInvoker::new(registry_with_echo()).with_gate(gate);
         let result = invoker.invoke("NotARealTool", json!({}), no_ctx()).await;
         assert!(matches!(result, Err(ToolInvokerError::NotFound(_))));
-        assert!(seen.lock().unwrap().is_empty(), "gate not consulted for unknown tool");
+        assert!(
+            seen.lock().unwrap().is_empty(),
+            "gate not consulted for unknown tool"
+        );
     }
 }

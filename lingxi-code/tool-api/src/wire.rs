@@ -97,7 +97,11 @@ mod tests {
         fn is_read_only(&self, _input: &Value) -> bool {
             true
         }
-        async fn check_permissions(&self, _input: &Value, _ctx: &ToolUseContext) -> PermissionResult {
+        async fn check_permissions(
+            &self,
+            _input: &Value,
+            _ctx: &ToolUseContext,
+        ) -> PermissionResult {
             PermissionResult::Allow {
                 reason: PermissionDecisionReason::Other {
                     reason: "test".into(),

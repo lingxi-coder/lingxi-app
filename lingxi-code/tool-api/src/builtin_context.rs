@@ -11,7 +11,6 @@ use crate::anthropic_request::AnthropicRequestBuilder;
 use crate::read_file_state::ReadFileStateMap;
 use crate::sandbox_runner::SandboxRunner;
 use permission::PermissionMode;
-use traits::permission_gate::PermissionGate;
 use sandbox::decision::ProjectTrustLevel;
 use sandbox::runtime_config::{Platform, SandboxRuntimeConfig};
 use std::path::PathBuf;
@@ -26,13 +25,14 @@ use traits::filesystem::FileSystem;
 use traits::http::HttpTransport;
 use traits::mailbox::MailboxRouterHandle;
 use traits::notification::NotificationService;
+use traits::permission_gate::PermissionGate;
 use traits::process::ProcessRunner;
 use traits::sandbox::Sandbox;
 use traits::share::SharingService;
 use traits::stt::SpeechToText;
-use traits::tts::TextToSpeech;
 use traits::subagent_spawn::SubagentSpawner;
 use traits::task_registry::TaskRegistryHandle;
+use traits::tts::TextToSpeech;
 use traits::voice::VoiceRecorder;
 use traits::worktree::WorktreeManager;
 
@@ -160,4 +160,79 @@ pub struct BuiltinToolContext {
     /// others (and to the future staleness guards / Read dedup that will read
     /// this map). Cheap to clone (`Arc`).
     pub read_file_state: ReadFileStateMap,
+
+    // ===== Android-sandbox P3 seam =====
+    /// Android-only `Shell` tool wiring (spec r3 §Shell tool). `None` on
+    /// desktop / iOS. Built by `android-aar` from the probed capability cache +
+    /// the `AndroidShellConfig` gate; consumed by `tool-shell-mobile::register_all`
+    /// (registration gate) and the tool's prompt.
+    pub android_shell: Option<AndroidShellToolCtx>,
+}
+
+/// Android-only `Shell` tool wiring (spec r3 §Shell tool). `None` on desktop /
+/// iOS. Built by `android-aar` from the probed capability cache + the
+/// `AndroidShellConfig` gate; consumed by `tool-shell-mobile::register_all`
+/// (registration gate) and the tool's prompt.
+#[derive(Debug, Clone)]
+pub struct AndroidShellToolCtx {
+    /// The full registration gate result: capability-probe OK + `enable_shell`
+    /// + D11 secrets gate all satisfied.
+    ///
+    /// When `false`, the Shell tool is NOT registered (absent, not erroring).
+    pub enabled: bool,
+    /// Probed toybox applet inventory (for the tool prompt; may be empty).
+    pub applets: Vec<String>,
+    /// System sh version string (`KSH_VERSION`) when probed, for the prompt.
+    pub sh_version: Option<String>,
+}
+
+// =============================================================================
+// Tests
+// =============================================================================
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_support::{ctx_for_file_tools, make_dummy_fs};
+    use std::sync::Arc;
+    use telemetry::AnalyticsBus;
+
+    /// TDD anchor for Task 1 (P3).
+    ///
+    /// Asserts:
+    /// 1. `AndroidShellToolCtx` constructs with all three fields.
+    /// 2. The test-builder `ctx_for_file_tools` defaults `android_shell` to
+    ///    `None` (i.e. the field exists on `BuiltinToolContext`).
+    #[test]
+    fn android_shell_tool_ctx_constructs_and_defaults_to_none() {
+        // Construct the carrier type — enabled.
+        let carrier = AndroidShellToolCtx {
+            enabled: true,
+            applets: vec!["grep".into(), "ls".into()],
+            sh_version: Some("@(#)MIRBSD KSH R59 2020/01/19".into()),
+        };
+        assert!(carrier.enabled);
+        assert_eq!(carrier.applets, vec!["grep", "ls"]);
+        assert!(carrier.sh_version.is_some());
+
+        // Disabled variant.
+        let disabled = AndroidShellToolCtx {
+            enabled: false,
+            applets: vec![],
+            sh_version: None,
+        };
+        assert!(!disabled.enabled);
+        assert!(disabled.applets.is_empty());
+        assert!(disabled.sh_version.is_none());
+
+        // The test-support builder must produce a ctx with `android_shell: None`.
+        let ctx = ctx_for_file_tools(
+            make_dummy_fs(),
+            Arc::new(AnalyticsBus::new()),
+            vec![std::path::PathBuf::from("/tmp")],
+        );
+        assert!(
+            ctx.android_shell.is_none(),
+            "android_shell must default to None in test builder"
+        );
+    }
 }

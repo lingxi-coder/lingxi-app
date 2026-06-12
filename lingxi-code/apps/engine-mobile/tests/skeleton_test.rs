@@ -67,14 +67,9 @@ fn submit_send_prompt_drives_listener_text_then_turn_ended() {
         claude_home: tmp.path().join(".claude"),
         ..MobileConfig::default()
     };
-    let handle = new_engine_with_streaming(
-        cfg,
-        platform,
-        listener.clone(),
-        perm_sink,
-        Some(streaming),
-    )
-    .expect("build engine with scripted streaming");
+    let handle =
+        new_engine_with_streaming(cfg, platform, listener.clone(), perm_sink, Some(streaming))
+            .expect("build engine with scripted streaming");
 
     // (3) `submit(SendPrompt)` — spawns the turn on the handle-owned runtime and
     //     returns promptly; the streamed events arrive on the listener.

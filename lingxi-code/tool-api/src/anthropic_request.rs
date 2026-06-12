@@ -53,8 +53,7 @@ impl AnthropicRequestBuilder {
     pub fn new(api_key: impl Into<String>, base_url: Option<String>) -> Self {
         Self {
             api_key: api_key.into(),
-            base_url: base_url
-                .unwrap_or_else(|| "https://api.anthropic.com".to_string()),
+            base_url: base_url.unwrap_or_else(|| "https://api.anthropic.com".to_string()),
         }
     }
 
@@ -132,10 +131,7 @@ mod tests {
             req.headers[2],
             ("content-type".into(), "application/json".into())
         );
-        assert_eq!(
-            req.headers[3],
-            ("accept".into(), "application/json".into())
-        );
+        assert_eq!(req.headers[3], ("accept".into(), "application/json".into()));
         assert_eq!(req.headers.len(), 4);
     }
 
@@ -145,8 +141,7 @@ mod tests {
         let body_val = json!({"model": "x", "max_tokens": 4096});
         let req = b.build_request(&body_val);
         let body_str = req.body.expect("body present");
-        let roundtrip: serde_json::Value =
-            serde_json::from_str(&body_str).expect("valid JSON");
+        let roundtrip: serde_json::Value = serde_json::from_str(&body_str).expect("valid JSON");
         assert_eq!(roundtrip, body_val);
     }
 

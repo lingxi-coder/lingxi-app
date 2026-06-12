@@ -1168,7 +1168,11 @@ fn map_command_output(
             },
             true,
         ),
-        Err(e @ (ProcessError::Io(_) | ProcessError::Unsupported)) => (
+        Err(e @ (ProcessError::Io(_)
+            | ProcessError::Unsupported
+            | ProcessError::PolicyUnsupported(_)
+            | ProcessError::MalformedSandboxPlan(_)
+            | ProcessError::SandboxEnforcementFailed(_))) => (
             HookResult {
                 outcome: HookOutcome::Error,
                 stdout: String::new(),

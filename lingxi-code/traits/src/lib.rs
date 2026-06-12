@@ -73,8 +73,8 @@ pub use prompting_gate::{
 };
 pub use runtime::{BackgroundTaskHandle, RuntimeError, RuntimeSpawner};
 pub use sandbox::{
-    NetworkPolicy, ProcessCommand, ResourceLimits, Sandbox, SandboxBackend, SandboxCapability,
-    SandboxError, SandboxFeatures, SandboxPolicy, SandboxedCommand, SandboxedTag,
+    BackendPlanHandle, NetworkPolicy, ProcessCommand, ResourceLimits, Sandbox, SandboxBackend,
+    SandboxCapability, SandboxError, SandboxFeatures, SandboxPolicy, SandboxedCommand, SandboxedTag,
 };
 pub use secure_storage::{SecureStorage, SecureStorageBackend, SecureStorageError};
 pub use share::{ShareError, SharePayload, ShareResult, SharingService};

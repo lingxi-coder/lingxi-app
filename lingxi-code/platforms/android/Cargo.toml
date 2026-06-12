@@ -18,9 +18,11 @@ license.workspace = true
 traits = { path = "../../traits" }
 platform-posix-minimal = { path = "../posix-minimal" }
 platform-common = { path = "../common" }
+async-trait.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt"] }
+tempfile = "3"
 
 [lints]
 workspace = true

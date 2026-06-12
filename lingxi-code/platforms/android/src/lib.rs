@@ -19,6 +19,7 @@
 pub mod capabilities;
 pub mod config;
 pub mod policy;
+pub mod process;
 pub mod sandbox;
 
 pub use capabilities::{AndroidSandboxCapabilities, CapabilityCache};
@@ -27,6 +28,7 @@ pub use policy::{
     build_shell_env, plan_from_policy, AndroidSandboxPlan, ExecTarget, NetProfile, ProcessCleanup,
     Rlimit, RlimitResource, SeccompRef,
 };
+pub use process::AndroidMinijailProcessRunner;
 pub use sandbox::AndroidMinijailSandbox;
 
 use std::path::PathBuf;

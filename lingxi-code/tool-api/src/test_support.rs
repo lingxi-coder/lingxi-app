@@ -535,7 +535,9 @@ pub fn ctx_for_file_tools(
             Platform::Linux
         },
         http: make_stub_http(),
-        provider: Arc::new(crate::anthropic_request::AnthropicRequestBuilder::new("test-key", None)),
+        provider: Arc::new(crate::anthropic_request::AnthropicRequestBuilder::new(
+            "test-key", None,
+        )),
         default_model: "claude-sonnet-4-20250514".to_string(),
         worktree: make_mock_worktree(),
         subagent_spawner: None,
@@ -554,6 +556,7 @@ pub fn ctx_for_file_tools(
         clipboard: None,
         computer_control: None,
         read_file_state: crate::read_file_state::new_read_file_state_map(),
+        android_shell: None,
     }
 }
 
@@ -586,7 +589,9 @@ pub fn shell_test_ctx(out: ProcessOutput) -> super::BuiltinToolContext {
             Platform::Linux
         },
         http: make_stub_http(),
-        provider: Arc::new(crate::anthropic_request::AnthropicRequestBuilder::new("test-key", None)),
+        provider: Arc::new(crate::anthropic_request::AnthropicRequestBuilder::new(
+            "test-key", None,
+        )),
         default_model: "claude-sonnet-4-20250514".to_string(),
         worktree: make_mock_worktree(),
         subagent_spawner: None,
@@ -605,5 +610,6 @@ pub fn shell_test_ctx(out: ProcessOutput) -> super::BuiltinToolContext {
         clipboard: None,
         computer_control: None,
         read_file_state: crate::read_file_state::new_read_file_state_map(),
+        android_shell: None,
     }
 }

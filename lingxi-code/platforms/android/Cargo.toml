@@ -20,8 +20,15 @@ platform-posix-minimal = { path = "../posix-minimal" }
 platform-common = { path = "../common" }
 async-trait.workspace = true
 tracing.workspace = true
-
-[target.'cfg(target_os = "android")'.dependencies]
+# `rt` for `tokio::task::spawn_blocking` (the runner wraps the blocking jailed
+# spawn so it never stalls the async executor).
+tokio = { workspace = true, features = ["rt"] }
+# Unconditional (NOT target-gated): the runner's safe translation layer
+# (JailSpec/JailedOutput/build_net_deny_bpf/run_jailed + the per-arch helpers)
+# must be reachable from the host build of `platform-android` so the runner can
+# be host-tested. The FFI inside `platform-android-minijail` is itself
+# `cfg(target_os = "android")`, so its host build compiles a pure stub (P0a) —
+# `platform-android` stays `forbid(unsafe_code)` either way.
 platform-android-minijail = { path = "../android-minijail" }
 
 [dev-dependencies]

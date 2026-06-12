@@ -1,26 +1,97 @@
-//! [`traits::ProcessRunner`] for Android. P1 ships the SECURITY INVARIANTS
-//! only — execution stays disabled until the P0a gate passes and the P2 plan
-//! lands the in-engine `minijail_run_pid_pipes` path.
+//! [`traits::ProcessRunner`] for Android. P2 turns on execution: after the P1
+//! security invariants pass, the runner translates the prepared
+//! [`AndroidSandboxPlan`] into a [`platform_android_minijail::JailSpec`] and
+//! runs it through `run_jailed` on a blocking thread. `platform-android` stays
+//! `forbid(unsafe_code)` — all FFI lives in `platform-android-minijail`.
 
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use platform_android_minijail::{JailRlimit, JailSpec};
 use traits::{
     ProcessError, ProcessHandle, ProcessOutput, ProcessRunner, SandboxBackend, SandboxedCommand,
     SandboxedTag,
 };
 
-use crate::policy::AndroidSandboxPlan;
+use crate::capabilities::CapabilityCache;
+use crate::policy::{AndroidSandboxPlan, NetProfile, RlimitResource};
+use crate::receipt::AndroidSandboxReceipt;
 
-/// Android process runner. Holds no state in P1.
-#[derive(Default)]
-pub struct AndroidMinijailProcessRunner;
+/// Default wall-clock budget when the command carries no explicit timeout
+/// (mirrors the desktop shell's default; the watchdog kills the group past it).
+const DEFAULT_TIMEOUT_MS: u64 = 120_000;
+
+/// Android process runner. Holds the shared capability cache so per-plan
+/// admission (e.g. `DenyNet` requiring a working net-deny seccomp filter) reads
+/// the SAME probed result the sandbox/registration gate read.
+pub struct AndroidMinijailProcessRunner {
+    caps: Arc<CapabilityCache>,
+}
+
+/// Map a [`RlimitResource`] to its raw `RLIMIT_*` integer.
+///
+/// These are the stable Linux/Android ABI numbers from
+/// `<asm-generic/resource.h>` (identical across `arm64`/`x86_64`): `RLIMIT_CPU=0`,
+/// `RLIMIT_FSIZE=1`, `RLIMIT_CORE=4`, `RLIMIT_NOFILE=7`, `RLIMIT_AS=9`. Hardcoded
+/// here so `platform-android` stays libc-free (and `forbid(unsafe_code)`); the
+/// runner passes the int to `minijail_rlimit` via the spec.
+#[must_use]
+fn rlimit_resource_int(r: RlimitResource) -> i32 {
+    match r {
+        RlimitResource::Cpu => 0,    // RLIMIT_CPU
+        RlimitResource::Core => 4,   // RLIMIT_CORE
+        RlimitResource::NoFile => 7, // RLIMIT_NOFILE
+        RlimitResource::As => 9,     // RLIMIT_AS
+    }
+}
 
 impl AndroidMinijailProcessRunner {
-    /// Construct.
+    /// Construct over the shared capability cache.
     #[must_use]
-    pub fn new() -> Self {
-        Self
+    pub fn new(caps: Arc<CapabilityCache>) -> Self {
+        Self { caps }
+    }
+
+    /// Translate the admitted plan + the audit-mirror inner command into the
+    /// FFI boundary [`JailSpec`]. `plan.argv`/`plan.env` are authoritative; the
+    /// cwd and timeout come from the inner command (canonicalized in prepare).
+    fn build_spec(plan: &AndroidSandboxPlan, sandboxed: &SandboxedCommand) -> JailSpec {
+        let inner = sandboxed.inner();
+        let net_deny = plan.network == NetProfile::DenyNet;
+        let bpf = if net_deny {
+            // Per-arch socket nrs + AUDIT_ARCH resolved on-device; empty on host
+            // (the host run_jailed reports enforcement failure before BPF use).
+            platform_android_minijail::net_deny_bpf_for_target()
+        } else {
+            Vec::new()
+        };
+        let rlimits = plan
+            .rlimits
+            .iter()
+            .map(|r| JailRlimit {
+                resource: rlimit_resource_int(r.resource),
+                soft: r.soft,
+                hard: r.hard,
+            })
+            .collect();
+        let cwd = inner
+            .cwd
+            .as_ref()
+            .map(|p| p.display().to_string())
+            .unwrap_or_default();
+        let timeout_ms = inner.timeout.map_or(DEFAULT_TIMEOUT_MS, |d| {
+            u64::try_from(d.as_millis()).unwrap_or(u64::MAX)
+        });
+        JailSpec {
+            filename: inner.command.clone(),
+            argv: plan.argv.clone(),
+            envp: plan.env.clone(),
+            cwd,
+            rlimits,
+            net_deny,
+            bpf,
+            timeout_ms,
+        }
     }
 
     /// Validate the three security invariants and return the admitted plan.
@@ -71,10 +142,54 @@ impl AndroidMinijailProcessRunner {
 #[async_trait]
 impl ProcessRunner for AndroidMinijailProcessRunner {
     async fn run(&self, cmd: &SandboxedCommand) -> Result<ProcessOutput, ProcessError> {
-        // P2: plan.argv/plan.env are authoritative over cmd.inner() (inner mirrors them for audit only) — spawn from the plan.
-        let _plan = Self::admitted_plan(cmd)?;
-        // P2 (gated on P0a): spawn_blocking → minijail_run_pid_pipes.
-        Err(ProcessError::Unsupported)
+        // (0) Security invariants first (P1) — execution only past these.
+        // plan.argv/plan.env are authoritative; cmd.inner() mirrors them for audit.
+        let plan = Self::admitted_plan(cmd)?;
+
+        // (1) Per-plan capability gate (spec sandbox.rs P2 NOTE): a DenyNet plan
+        // MUST NOT run unless the device proved it can install a net-deny seccomp
+        // filter AND observed socket() == EPERM under it. Otherwise we'd run a
+        // shell with full network access while claiming deny-net — fail closed.
+        let caps = self.caps.get();
+        if plan.network == NetProfile::DenyNet && !(caps.seccomp_filter && caps.net_deny_verified) {
+            return Err(ProcessError::PolicyUnsupported(
+                "net-deny seccomp filter unavailable; cannot honor deny-net".into(),
+            ));
+        }
+
+        // (2) Translate the plan + inner command into the FFI boundary spec, run
+        // it on a blocking thread (the jailed fork/exec + watchdog is blocking).
+        let spec = Self::build_spec(&plan, cmd);
+        let out = tokio::task::spawn_blocking(move || platform_android_minijail::run_jailed(&spec))
+            .await
+            .map_err(|e| ProcessError::Io(format!("jailed run task panicked/cancelled: {e}")))?;
+
+        // (3) A setup failure (filter load, rlimit, fork, host-build stub) maps to
+        // a structured enforcement error — NEVER a silent unconfined run.
+        if let Some(reason) = out.enforcement_failed {
+            return Err(ProcessError::SandboxEnforcementFailed(reason));
+        }
+
+        // (4) Honest receipt for the process log / tool meta.
+        let receipt = AndroidSandboxReceipt::from_plan(&plan);
+        tracing::info!(
+            backend = ?receipt.backend,
+            target = %receipt.target,
+            no_new_privs = receipt.no_new_privs,
+            net_deny = receipt.net_deny,
+            seccomp_policy = ?receipt.seccomp_policy,
+            rlimits = ?receipt.rlimits,
+            landlock_enforced = receipt.landlock_enforced,
+            fs_confinement = %receipt.fs_confinement,
+            "android jailed run completed"
+        );
+
+        Ok(ProcessOutput {
+            stdout: out.stdout,
+            stderr: out.stderr,
+            exit_code: out.exit_code,
+            timed_out: out.timed_out,
+        })
     }
 
     async fn spawn_background(
@@ -94,9 +209,10 @@ impl ProcessRunner for AndroidMinijailProcessRunner {
     }
 
     fn is_available(&self) -> bool {
-        // Flips with the P2 execution plan; false keeps registration gate #5
-        // closed so no tool registers against the P1 skeleton.
-        false
+        // Reads the shared probed cache (was hard-false in P1). The coarse gate
+        // (probed + smoke + no_new_privs); per-plan requirements like the
+        // net-deny filter are enforced in `run()`.
+        self.caps.get().available()
     }
 }
 
@@ -120,20 +236,63 @@ mod tests {
         }
     }
 
+    use crate::capabilities::{AndroidSandboxCapabilities, CapabilityCache};
+
+    /// A fully-capable probed cache: smoke + nnp + `seccomp_filter` +
+    /// `net_deny_verified` all true — admits a `DenyNet` plan through to
+    /// `run_jailed`.
+    fn ready_cache() -> Arc<CapabilityCache> {
+        let cache = CapabilityCache::new();
+        cache.set(AndroidSandboxCapabilities {
+            probed: true,
+            minijail_smoke: true,
+            no_new_privs: true,
+            seccomp_filter: true,
+            net_deny_verified: true,
+            ..AndroidSandboxCapabilities::default()
+        });
+        Arc::new(cache)
+    }
+
     fn runner() -> AndroidMinijailProcessRunner {
-        AndroidMinijailProcessRunner::new()
+        AndroidMinijailProcessRunner::new(ready_cache())
     }
 
     fn valid_plan() -> crate::policy::AndroidSandboxPlan {
+        deny_net_plan_with_seccomp()
+    }
+
+    /// A `DenyNet` `AndroidSandboxPlan` carrying its net-deny `SeccompRef`,
+    /// mirroring what `plan_from_policy` mints for a deny-net shell.
+    fn deny_net_plan_with_seccomp() -> crate::policy::AndroidSandboxPlan {
         crate::policy::AndroidSandboxPlan {
             target: crate::policy::ExecTarget::SystemShell,
-            argv: vec!["sh".into()],
+            argv: vec!["sh".into(), "-c".into(), "true".into()],
             env: vec![],
             network: crate::policy::NetProfile::DenyNet,
-            rlimits: vec![],
-            seccomp_policy: None,
+            rlimits: vec![crate::policy::Rlimit {
+                resource: crate::policy::RlimitResource::Core,
+                soft: 0,
+                hard: 0,
+            }],
+            seccomp_policy: Some(crate::policy::SeccompRef {
+                name: "net-deny-v1".into(),
+                hash: "id".into(),
+            }),
             cleanup: crate::policy::ProcessCleanup::KillProcessGroup,
         }
+    }
+
+    /// Wrap a plan in an `AndroidMinijail`-tagged `SandboxedCommand` (mirrors the
+    /// P1 helper shape: a `Wrapped{AndroidMinijail}` tag + the attached plan).
+    fn sandboxed_with_plan(plan: crate::policy::AndroidSandboxPlan) -> SandboxedCommand {
+        SandboxedCommand::__new_sandboxed_with_plan(
+            cmd(),
+            SandboxedTag::Wrapped {
+                backend: SandboxBackend::AndroidMinijail,
+            },
+            BackendPlanHandle::new(plan),
+        )
     }
 
     #[tokio::test]
@@ -187,17 +346,53 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn valid_plan_is_unsupported_until_p2() {
-        let sc = SandboxedCommand::__new_sandboxed_with_plan(
-            cmd(),
-            SandboxedTag::Wrapped {
-                backend: SandboxBackend::AndroidMinijail,
-            },
-            BackendPlanHandle::new(valid_plan()),
-        );
-        let err = runner().run(&sc).await.unwrap_err();
-        assert!(matches!(err, ProcessError::Unsupported));
-        assert!(!runner().is_available());
+    async fn host_run_maps_enforcement_failure_to_structured_error() {
+        // A valid AndroidMinijail plan over a fully-capable cache passes the
+        // per-plan gate and reaches run_jailed, which on the host reports
+        // enforcement failure → SandboxEnforcementFailed (NOT Io/Unsupported).
+        let sc = sandboxed_with_plan(deny_net_plan_with_seccomp());
+        let err = AndroidMinijailProcessRunner::new(ready_cache())
+            .run(&sc)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ProcessError::SandboxEnforcementFailed(_)));
+    }
+
+    #[tokio::test]
+    async fn deny_net_plan_without_filter_capability_fails_closed() {
+        // caps say seccomp_filter=false → a DenyNet plan must be refused with a
+        // named PolicyUnsupported, never run unconfined.
+        let cache = CapabilityCache::new();
+        cache.set(AndroidSandboxCapabilities {
+            probed: true,
+            minijail_smoke: true,
+            no_new_privs: true,
+            seccomp_filter: false,
+            net_deny_verified: false,
+            ..AndroidSandboxCapabilities::default()
+        });
+        let err = AndroidMinijailProcessRunner::new(Arc::new(cache))
+            .run(&sandboxed_with_plan(deny_net_plan_with_seccomp()))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ProcessError::PolicyUnsupported(ref m) if m.contains("seccomp")));
+    }
+
+    #[test]
+    fn rlimit_resource_ints_pin_linux_abi() {
+        // Stable Linux/Android ABI numbers (<asm-generic/resource.h>).
+        assert_eq!(rlimit_resource_int(RlimitResource::Cpu), 0);
+        assert_eq!(rlimit_resource_int(RlimitResource::Core), 4);
+        assert_eq!(rlimit_resource_int(RlimitResource::NoFile), 7);
+        assert_eq!(rlimit_resource_int(RlimitResource::As), 9);
+    }
+
+    #[test]
+    fn is_available_reads_the_shared_cache() {
+        // Unprobed cache → unavailable; a probed+smoke+nnp cache → available.
+        let unprobed = AndroidMinijailProcessRunner::new(Arc::new(CapabilityCache::new()));
+        assert!(!unprobed.is_available());
+        assert!(runner().is_available());
     }
 
     #[tokio::test]

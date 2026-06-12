@@ -51,6 +51,138 @@ pub fn net_deny_policy_name() -> &'static str {
     "net-deny-v1"
 }
 
+/// The arch-independent socket-family syscall *names* the net-deny policy
+/// denies. This is the POLICY IDENTITY: it is the same on every architecture
+/// (only the per-arch syscall *numbers* differ, and those are resolved on
+/// device). Used by [`net_deny_policy_identity_hash`].
+///
+/// Kept in sorted order so the identity hash is stable regardless of source
+/// ordering.
+const NET_DENY_SYSCALL_NAMES: &[&str] = &[
+    "accept",
+    "accept4",
+    "bind",
+    "connect",
+    "getpeername",
+    "getsockname",
+    "getsockopt",
+    "listen",
+    "recvfrom",
+    "recvmsg",
+    "recvmmsg",
+    "sendmmsg",
+    "sendmsg",
+    "sendto",
+    "setsockopt",
+    "shutdown",
+    "socket",
+    "socketpair",
+];
+
+/// Arch-INDEPENDENT identity hash of the net-deny policy, for the prepare-time
+/// `SeccompRef.hash`.
+///
+/// # Why this and not the concrete BPF hash
+///
+/// `prepare()` is host-buildable and arch-agnostic — it runs before the runner
+/// knows the device's architecture, so it cannot compute the per-arch BPF hash
+/// (which depends on the concrete socket syscall *numbers* and the `AUDIT_ARCH`
+/// tag; see [`net_deny_bpf_hash`]). To still give the receipt a stable,
+/// verifiable policy identity at prepare time, we hash the POLICY DEFINITION:
+/// the version name plus the sorted socket syscall *name* list. This is
+/// identical on every arch (the policy is the same; only the numbers differ),
+/// so two devices preparing the same plan record the same `SeccompRef`. The
+/// runner can additionally note the concrete per-arch BPF hash in the receipt
+/// when it has the device arch in hand.
+#[must_use]
+pub fn net_deny_policy_identity_hash() -> String {
+    let mut h = Sha256::new();
+    h.update(net_deny_policy_name().as_bytes());
+    // Sort defensively so the identity is independent of source order.
+    let mut names: Vec<&str> = NET_DENY_SYSCALL_NAMES.to_vec();
+    names.sort_unstable();
+    for name in names {
+        h.update(b"\0");
+        h.update(name.as_bytes());
+    }
+    hex::encode(h.finalize())
+}
+
+/// The net-deny classic-BPF program for the CURRENT build target.
+///
+/// On Android it resolves the per-arch socket syscall numbers (`libc::SYS_*`)
+/// and the matching `AUDIT_ARCH_*` tag, then builds the program via
+/// [`build_net_deny_bpf`]. On the host (where the runner cannot jail anyway)
+/// it returns an empty program — the host `run_jailed` reports an enforcement
+/// failure before the BPF would ever be consulted.
+#[must_use]
+pub fn net_deny_bpf_for_target() -> Vec<BpfInsn> {
+    #[cfg(not(target_os = "android"))]
+    {
+        Vec::new()
+    }
+    #[cfg(target_os = "android")]
+    {
+        build_net_deny_bpf(&target_socket_nrs(), target_audit_arch())
+    }
+}
+
+/// The per-arch socket-family syscall numbers for the current Android target.
+/// Resolved from `libc::SYS_*` so they track the device ABI exactly.
+#[cfg(target_os = "android")]
+fn target_socket_nrs() -> Vec<u32> {
+    // The socket-family syscalls. Cast each `libc::SYS_*` (c_long) to u32 — all
+    // syscall numbers fit in u32. Names mirror NET_DENY_SYSCALL_NAMES.
+    #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+    let nrs: Vec<u32> = vec![
+        libc::SYS_socket,
+        libc::SYS_socketpair,
+        libc::SYS_bind,
+        libc::SYS_connect,
+        libc::SYS_listen,
+        libc::SYS_accept,
+        libc::SYS_accept4,
+        libc::SYS_getsockname,
+        libc::SYS_getpeername,
+        libc::SYS_getsockopt,
+        libc::SYS_setsockopt,
+        libc::SYS_sendto,
+        libc::SYS_recvfrom,
+        libc::SYS_sendmsg,
+        libc::SYS_recvmsg,
+        libc::SYS_sendmmsg,
+        libc::SYS_recvmmsg,
+        libc::SYS_shutdown,
+    ]
+    .into_iter()
+    .map(|n| n as u32)
+    .collect();
+    nrs
+}
+
+/// The `AUDIT_ARCH_*` tag for the current Android target — used by the BPF
+/// arch guard. `libc` does not export `AUDIT_ARCH_*`, so the constants are
+/// reproduced from `<linux/audit.h>` (stable kernel ABI).
+#[cfg(target_os = "android")]
+fn target_audit_arch() -> u32 {
+    // AUDIT_ARCH = arch number | __AUDIT_ARCH_64BIT(0x8000_0000) |
+    // __AUDIT_ARCH_LE(0x4000_0000). EM_AARCH64=183(0xB7), EM_X86_64=62(0x3E).
+    #[cfg(target_arch = "aarch64")]
+    {
+        0xC000_00B7
+    }
+    #[cfg(target_arch = "x86_64")]
+    {
+        0xC000_003E
+    }
+    #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
+    {
+        // 32-bit Android targets are out of scope for v1; the arch guard would
+        // KILL anyway. Return 0 so a wrong-arch invocation is denied.
+        0
+    }
+}
+
 /// Build the net-deny classic-BPF program for one architecture.
 ///
 /// Shape (one JEQ per syscall, jumping to a shared EPERM ret):
@@ -225,6 +357,26 @@ mod tests {
     #[test]
     fn policy_name_is_versioned() {
         assert_eq!(net_deny_policy_name(), "net-deny-v1");
+    }
+
+    #[test]
+    fn policy_identity_hash_is_stable_arch_independent_hex() {
+        let a = net_deny_policy_identity_hash();
+        let b = net_deny_policy_identity_hash();
+        // Stable across calls and a 64-char lowercase hex digest.
+        assert_eq!(a, b);
+        assert_eq!(a.len(), 64);
+        assert!(a.chars().all(|c| c.is_ascii_hexdigit()));
+        // Unlike net_deny_bpf_hash, it does NOT depend on per-arch numbers —
+        // it is the policy DEFINITION identity, the same on every device.
+        let arm = net_deny_bpf_hash(ARM64_SOCKET_NRS, AUDIT_ARCH_AARCH64);
+        assert_ne!(a, arm, "identity hash is the policy def, not the BPF bytes");
+    }
+
+    #[test]
+    fn bpf_for_target_is_empty_on_host() {
+        // The host runner path never jails, so the per-target BPF is empty.
+        assert!(net_deny_bpf_for_target().is_empty());
     }
 
     /// Simulate BPF execution for a given syscall number.

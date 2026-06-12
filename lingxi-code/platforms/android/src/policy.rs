@@ -173,15 +173,28 @@ pub fn plan_from_policy(
         hard: 0,
     });
 
+    // DenyNet plans carry a stable, arch-INDEPENDENT seccomp policy identity
+    // recorded at prepare() time. prepare() is host-buildable and arch-agnostic
+    // — it runs before the runner knows the device arch, so it cannot compute
+    // the per-arch BPF hash (which depends on the concrete socket syscall
+    // numbers + AUDIT_ARCH). Instead we hash the POLICY DEFINITION (version name
+    // + sorted socket syscall NAME list), which is the same on every device. The
+    // runner builds the concrete per-arch BPF from this same policy at run time.
+    let seccomp_policy = match network {
+        NetProfile::DenyNet => Some(SeccompRef {
+            name: platform_android_minijail::net_deny_policy_name().to_string(),
+            hash: platform_android_minijail::net_deny_policy_identity_hash(),
+        }),
+        NetProfile::AllowNet => None,
+    };
+
     Ok(AndroidSandboxPlan {
         target,
         argv: Vec::new(),
         env,
         network,
         rlimits,
-        // The compiled net-deny BPF lands in P2; the plan records the stance
-        // via `network` either way.
-        seccomp_policy: None,
+        seccomp_policy,
         cleanup: ProcessCleanup::KillProcessGroup,
     })
 }
@@ -402,8 +415,39 @@ mod tests {
             "NPROC must not be mapped in v1 (UID-scoped)"
         );
         assert_eq!(plan.network, NetProfile::DenyNet);
-        assert!(plan.seccomp_policy.is_none(), "filter compiled in P2");
+        // P2: DenyNet plans carry the net-deny policy identity (arch-independent).
+        let sref = plan
+            .seccomp_policy
+            .as_ref()
+            .expect("DenyNet plan records a SeccompRef");
+        assert_eq!(sref.name, "net-deny-v1");
+        assert_eq!(
+            sref.hash,
+            platform_android_minijail::net_deny_policy_identity_hash(),
+            "hash is the arch-independent policy identity"
+        );
         assert_eq!(plan.cleanup, ProcessCleanup::KillProcessGroup);
+    }
+
+    #[test]
+    fn allow_net_plan_has_no_seccomp_ref() {
+        let mut p = base_policy();
+        p.network = NetworkPolicy::Allowed;
+        let plan = plan_from_policy(
+            ExecTarget::BundledHelper {
+                name: "git".into(),
+                path: PathBuf::from("/data/app/x/lib/arm64/libgit.so"),
+                hash: "abc".into(),
+            },
+            &p,
+            vec![],
+        )
+        .expect("allow-net bundled helper plan");
+        assert_eq!(plan.network, NetProfile::AllowNet);
+        assert!(
+            plan.seccomp_policy.is_none(),
+            "AllowNet installs no net-deny filter, so no SeccompRef"
+        );
     }
 
     #[test]

@@ -10,7 +10,10 @@
 //! smoke as structurally unavailable.
 
 pub mod seccomp;
-pub use seccomp::{build_net_deny_bpf, net_deny_bpf_hash, net_deny_policy_name, BpfInsn};
+pub use seccomp::{
+    build_net_deny_bpf, net_deny_bpf_for_target, net_deny_bpf_hash, net_deny_policy_identity_hash,
+    net_deny_policy_name, BpfInsn,
+};
 
 mod run;
 pub use run::run_jailed;

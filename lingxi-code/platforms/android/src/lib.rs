@@ -20,6 +20,7 @@ pub mod capabilities;
 pub mod config;
 pub mod policy;
 pub mod process;
+pub mod receipt;
 pub mod sandbox;
 
 pub use capabilities::{AndroidSandboxCapabilities, CapabilityCache};
@@ -29,6 +30,7 @@ pub use policy::{
     Rlimit, RlimitResource, SeccompRef,
 };
 pub use process::AndroidMinijailProcessRunner;
+pub use receipt::AndroidSandboxReceipt;
 pub use sandbox::AndroidMinijailSandbox;
 
 use std::path::PathBuf;
@@ -100,9 +102,9 @@ impl AndroidPlatform {
         let (process, sandbox, shell_caps) = match inputs.shell {
             Some(shell_cfg) => {
                 let caps = Arc::new(crate::capabilities::CapabilityCache::new());
-                // Task 2: runner gets caps.clone()
-                let process: Arc<dyn ProcessRunner> =
-                    Arc::new(crate::process::AndroidMinijailProcessRunner::new());
+                let process: Arc<dyn ProcessRunner> = Arc::new(
+                    crate::process::AndroidMinijailProcessRunner::new(caps.clone()),
+                );
                 let sandbox: Arc<dyn Sandbox> = Arc::new(
                     crate::sandbox::AndroidMinijailSandbox::new(shell_cfg, caps.clone()),
                 );
@@ -263,7 +265,10 @@ mod tests {
     fn shell_config_wires_android_sandbox_and_runner() {
         let p = AndroidPlatform::new(inputs(Some(shell_cfg())));
         assert_eq!(p.sandbox().backend(), SandboxBackend::AndroidMinijail);
-        assert!(!p.process().is_available(), "execution disabled until P2");
+        assert!(
+            !p.process().is_available(),
+            "fresh (unprobed) cache reads conservative-unavailable until the eager probe"
+        );
         assert!(
             !p.sandbox().is_available(),
             "fresh cache reads conservative-unavailable until the eager probe (P2)"

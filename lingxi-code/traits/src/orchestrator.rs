@@ -609,6 +609,22 @@ pub enum OutputEvent {
         /// `"available"`; `None` when the header is absent.
         fallback_available: Option<bool>,
     },
+    /// Raw per-window unified rate-limit utilization — claude-code
+    /// `rawUtilization` (`claudeAiLimits.ts:145-179`), tracked on every API
+    /// response (unlike the warning-gated [`Self::RateLimit`] fields) and
+    /// consumed by the statusline command input (`StatusLine.tsx:50-65`). A
+    /// window is `None` when the response lacked either of its two headers.
+    /// (llm-client future-work batch 5, Task 1.)
+    RawUtilization {
+        /// `anthropic-ratelimit-unified-5h-utilization` (0-1 fraction).
+        five_hour_utilization: Option<f64>,
+        /// `anthropic-ratelimit-unified-5h-reset` (unix epoch seconds).
+        five_hour_resets_at: Option<u64>,
+        /// `anthropic-ratelimit-unified-7d-utilization` (0-1 fraction).
+        seven_day_utilization: Option<f64>,
+        /// `anthropic-ratelimit-unified-7d-reset` (unix epoch seconds).
+        seven_day_resets_at: Option<u64>,
+    },
 }
 
 /// Sink for orchestrator-emitted output events.
@@ -726,6 +742,30 @@ pub trait OutputStream: Send + Sync {
         _overage_resets_at: Option<u64>,
         _overage_disabled_reason: Option<&str>,
         _fallback_available: Option<bool>,
+    ) {
+    }
+
+    /// Push a raw-utilization snapshot.
+    ///
+    /// Added by llm-client future-work batch 5 (Task 1). Called by the
+    /// orchestrator turn drivers after every completed API call — unlike the
+    /// deduped, warning-gated [`Self::emit_rate_limit`], this mirrors
+    /// claude-code's `rawUtilization` tracking (`claudeAiLimits.ts:145-179`),
+    /// which records the per-window headers on every response for the
+    /// statusline command input (`StatusLine.tsx:50-65`). The four arguments
+    /// map field-for-field onto [`OutputEvent::RawUtilization`]; see that
+    /// variant's per-field docs for the `anthropic-ratelimit-unified-*`
+    /// header each value is parsed from.
+    ///
+    /// **Default no-op**: hosts without a statusline ignore it, and every
+    /// pre-existing sink (TUI, CLI, `MockOutputStream`) keeps compiling
+    /// unchanged.
+    async fn emit_raw_utilization(
+        &self,
+        _five_hour_utilization: Option<f64>,
+        _five_hour_resets_at: Option<u64>,
+        _seven_day_utilization: Option<f64>,
+        _seven_day_resets_at: Option<u64>,
     ) {
     }
 }
@@ -1078,5 +1118,75 @@ mod tests {
         .await;
         sink.emit_rate_limit(None, None, None, None, None, None, None, None, None)
             .await;
+    }
+
+    // ── OutputEvent::RawUtilization (llm-client future-work batch 5, Task 1) ─
+
+    /// The additive `RawUtilization` variant constructs and round-trips
+    /// through the enum's default serde conventions (externally tagged,
+    /// named struct fields), both fully populated and all-`None`.
+    #[test]
+    fn raw_utilization_variant_constructs() {
+        let ev = OutputEvent::RawUtilization {
+            five_hour_utilization: Some(0.42),
+            five_hour_resets_at: Some(1_760_000_000),
+            seven_day_utilization: Some(0.9),
+            seven_day_resets_at: Some(1_760_500_000),
+        };
+        assert!(matches!(ev, OutputEvent::RawUtilization { .. }));
+        let s = serde_json::to_string(&ev).unwrap();
+        let back: OutputEvent = serde_json::from_str(&s).unwrap();
+        assert_eq!(ev, back);
+
+        let empty = OutputEvent::RawUtilization {
+            five_hour_utilization: None,
+            five_hour_resets_at: None,
+            seven_day_utilization: None,
+            seven_day_resets_at: None,
+        };
+        let s = serde_json::to_string(&empty).unwrap();
+        let back: OutputEvent = serde_json::from_str(&s).unwrap();
+        assert_eq!(empty, back);
+    }
+
+    /// Batch 5, Task 1: the additive `emit_raw_utilization` PUSH hook ships
+    /// as a default no-op so every pre-existing `OutputStream` impl keeps
+    /// compiling without an override. A bare sink implementing only the four
+    /// required methods must accept the call (populated and all-`None`) and
+    /// return.
+    #[tokio::test]
+    async fn emit_raw_utilization_default_is_noop() {
+        struct BareSink;
+
+        #[async_trait]
+        impl OutputStream for BareSink {
+            async fn emit_text(&self, _text: &str) {}
+            async fn emit_tool_call(
+                &self,
+                _id: &protocol::ToolUseId,
+                _tool: &str,
+                _input: &serde_json::Value,
+            ) {
+            }
+            async fn emit_tool_result(
+                &self,
+                _id: &protocol::ToolUseId,
+                _tool: &str,
+                _result: &serde_json::Value,
+            ) {
+            }
+            async fn emit_end_turn(&self, _stop_reason: &str, _cost: &CostSnapshot) {}
+        }
+
+        // Object-safe behind `dyn` (matches how the orchestrator holds it).
+        let sink: Box<dyn OutputStream> = Box::new(BareSink);
+        sink.emit_raw_utilization(
+            Some(0.42),
+            Some(1_760_000_000),
+            Some(0.9),
+            Some(1_760_500_000),
+        )
+        .await;
+        sink.emit_raw_utilization(None, None, None, None).await;
     }
 }

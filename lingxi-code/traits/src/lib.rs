@@ -17,6 +17,7 @@ pub mod clock;
 pub mod commands;
 pub mod computer_control;
 pub mod effect_handler;
+pub mod env;
 pub mod filesystem;
 pub mod http;
 pub mod lsp;

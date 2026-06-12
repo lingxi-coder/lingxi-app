@@ -118,54 +118,64 @@ git commit -m "feat(platform-android): share + expose the shell capability cache
 
 ---
 
-### Task 2: net-deny seccomp policy text + hash (host-testable, no FFI)
+### Task 2: net-deny seccomp BPF builder + hash (host-testable, no FFI)
 
-The DenyNet stance is enforced by a minijail seccomp policy that allows everything by default and returns EPERM for the socket-family syscalls. The policy TEXT and its hash are pure data — generated and hashed on the host, fed to the jail (as an fd) on-device in Task 4.
+> **CORRECTION (verified against vendored source).** Minijail's seccomp *policy files* are an **allowlist with a default KILL/TRAP fall-through** (`third_party/minijail/syscall_filter.c:817-846`) — there is **no `@default ALLOW`** (the only `@` directives are `@include`/`@frequency`). A policy listing only socket syscalls would therefore KILL the shell on its first `read()`. The spec wants the opposite: allow-by-default, deny only socket-family with a clean EPERM. The correct path is a **hand-built raw BPF program** injected via `minijail_set_seccomp_filters(j, &fprog)` (libminijail.c:1597 — installs the caller's filter verbatim, does not own/modify it), paired with `minijail_use_seccomp_filter(j)`. Constraint: `set_seccomp_filters` **dies if `minijail_log_seccomp_filter_failures()` was called** — Task 4 must NOT log-and-set together.
+
+The BPF program is pure data: validate arch, load the syscall nr, jump-equal each socket-family nr → `RET ERRNO(EPERM)`, default → `RET ALLOW`. Build + hash it on the host; convert to `sock_filter`/`sock_fprog` and inject on-device (Task 4). The per-arch socket syscall numbers and `AUDIT_ARCH` are passed IN (so the builder stays host-testable; on-device the caller supplies `libc::SYS_socket as u32`, … and the right `AUDIT_ARCH_*`).
 
 **Files:**
 - Create: `platforms/android-minijail/src/seccomp.rs`
 - Modify: `platforms/android-minijail/src/lib.rs` (`pub mod seccomp;` + re-export)
-- Modify: `platforms/android-minijail/Cargo.toml` (add `sha2` + `hex` — they ARE workspace deps used by anthropic-oauth/api-client; verify the exact keys and mirror)
+- Modify: `platforms/android-minijail/Cargo.toml` (add `sha2` + `hex`; verify keys vs anthropic-oauth/api-client and mirror — `sha2 = "0.10"`, `hex = "0.4"` if not workspace deps)
 
 - [ ] **Step 1: Write the failing tests** — create `seccomp.rs` with tests first:
 
 ```rust
-//! Net-deny seccomp policy text (spec r3 §Policy mapping: `network = Disabled`
-//! ⇒ seccomp deny of socket-family syscalls). Pure data — generated and hashed
-//! on the host, parsed into BPF by libminijail on-device (`run.rs`).
-//!
-//! Minijail policy format: one `syscall: action` line per rule plus a
-//! `@default` action. We default-ALLOW and deny only the network-creating
-//! syscalls with `return EPERM`, so a deny-net shell can still do everything
-//! except open sockets (spec: "seccomp deny of socket-family syscalls for the
-//! whole process tree").
+//! Net-deny seccomp BPF (spec r3 §Policy mapping: `network = Disabled` ⇒ seccomp
+//! deny of socket-family syscalls). A hand-built classic-BPF program: allow by
+//! default, return EPERM for socket-family syscalls. Pure data here; converted
+//! to `sock_fprog` and injected via `minijail_set_seccomp_filters` on-device
+//! (`run.rs`). Minijail policy *files* are allowlist/default-KILL and cannot
+//! express allow-by-default — hence the raw filter (see plan Task 2 CORRECTION).
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    // arm64 socket-family nrs (sample for the host test; on-device the caller
+    // passes libc::SYS_* — see `socket_syscall_nrs()` in run.rs).
+    const ARM64_SOCKET_NRS: &[u32] = &[198, 199, 200, 201, 202, 203, 206, 207, 212];
+    const AUDIT_ARCH_AARCH64: u32 = 0xC000_00B7;
+
     #[test]
-    fn net_deny_policy_denies_socket_family_and_defaults_allow() {
-        let p = net_deny_policy_text();
-        assert!(p.contains("@default ALLOW"));
-        for sc in ["socket", "socketpair", "connect", "bind", "sendto", "recvfrom"] {
-            assert!(
-                p.lines().any(|l| l.starts_with(&format!("{sc}:"))),
-                "policy must deny {sc}"
-            );
-        }
-        // Deny action is EPERM (1), not KILL — a misbehaving net call gets a
-        // clean error, not a crash (spec: shell commands degrade gracefully).
-        assert!(p.contains("return 1"));
+    fn bpf_validates_arch_loads_nr_and_denies_then_allows() {
+        let prog = build_net_deny_bpf(ARM64_SOCKET_NRS, AUDIT_ARCH_AARCH64);
+        // First insns load+check arch (offset 4 in seccomp_data), then load nr
+        // (offset 0). Last insn is the default RET ALLOW.
+        assert!(prog.len() >= ARM64_SOCKET_NRS.len() + 4, "arch+nr+jumps+rets");
+        let last = prog.last().copied().unwrap();
+        assert_eq!(last.code, BPF_RET_K, "default action is the final insn");
+        assert_eq!(last.k, SECCOMP_RET_ALLOW, "default = ALLOW");
+        // Exactly one ERRNO(EPERM) return present.
+        assert!(
+            prog.iter().any(|i| i.code == BPF_RET_K && i.k == seccomp_ret_errno(1)),
+            "denied syscalls return EPERM(1)"
+        );
+        // A RET KILL must NOT appear — net denial is graceful, not fatal.
+        assert!(!prog.iter().any(|i| i.code == BPF_RET_K && i.k == SECCOMP_RET_KILL));
     }
 
     #[test]
-    fn policy_hash_is_stable_and_hex() {
-        let h1 = net_deny_policy_hash();
-        let h2 = net_deny_policy_hash();
-        assert_eq!(h1, h2, "hash is deterministic");
-        assert_eq!(h1.len(), 64, "sha256 hex");
-        assert!(h1.chars().all(|c| c.is_ascii_hexdigit()));
+    fn bpf_hash_is_stable_hex_and_arch_sensitive() {
+        let a = net_deny_bpf_hash(ARM64_SOCKET_NRS, AUDIT_ARCH_AARCH64);
+        let b = net_deny_bpf_hash(ARM64_SOCKET_NRS, AUDIT_ARCH_AARCH64);
+        assert_eq!(a, b);
+        assert_eq!(a.len(), 64);
+        assert!(a.chars().all(|c| c.is_ascii_hexdigit()));
+        // Different arch ⇒ different program ⇒ different hash.
+        let x86 = net_deny_bpf_hash(&[41, 42, 43, 49, 50], 0xC000_003E);
+        assert_ne!(a, x86);
     }
 
     #[test]
@@ -175,37 +185,50 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Run to verify failure**
+- [ ] **Step 2: Run → FAIL** (`cargo test -p platform-android-minijail seccomp`).
 
-Run: `cargo test -p platform-android-minijail seccomp`
-Expected: FAIL — functions undefined.
-
-- [ ] **Step 3: Implement** — above the tests:
+- [ ] **Step 3: Implement** — above the tests. A `BpfInsn` mirrors `struct sock_filter` (host-portable plain data; `run.rs` transmutes/maps it to `libc::sock_filter`):
 
 ```rust
 use sha2::{Digest, Sha256};
 
-/// Network-creating syscalls denied for a DenyNet plan. `socketcall` covers
-/// the multiplexed 32-bit path; the rest are the direct entries present on
-/// arm64/x86_64. Denying `socket`/`socketpair` alone blocks new sockets; the
-/// connect/bind/send/recv entries are belt-and-braces for any fd smuggled in.
-const NET_SYSCALLS: &[&str] = &[
-    "socket",
-    "socketpair",
-    "connect",
-    "bind",
-    "listen",
-    "accept",
-    "accept4",
-    "sendto",
-    "sendmsg",
-    "sendmmsg",
-    "recvfrom",
-    "recvmsg",
-    "recvmmsg",
-    "getpeername",
-    "socketcall",
-];
+/// One classic-BPF instruction — the four fields of `struct sock_filter`.
+/// Plain data so the program is built+hashed on the host; `run.rs` maps it to
+/// `libc::sock_filter` on-device.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BpfInsn {
+    /// Opcode.
+    pub code: u16,
+    /// Jump-true offset.
+    pub jt: u8,
+    /// Jump-false offset.
+    pub jf: u8,
+    /// Generic field (immediate / return value).
+    pub k: u32,
+}
+
+// Classic-BPF / seccomp constants (linux/bpf_common.h, linux/seccomp.h).
+/// `BPF_LD | BPF_W | BPF_ABS` — load a 32-bit word from seccomp_data at `k`.
+pub const BPF_LD_W_ABS: u16 = 0x20;
+/// `BPF_JMP | BPF_JEQ | BPF_K` — jump if A == k.
+pub const BPF_JEQ_K: u16 = 0x15;
+/// `BPF_RET | BPF_K` — return constant k.
+pub const BPF_RET_K: u16 = 0x06;
+/// seccomp_data offsets: nr at 0, arch at 4.
+const SECCOMP_DATA_NR_OFF: u32 = 0;
+const SECCOMP_DATA_ARCH_OFF: u32 = 4;
+/// `SECCOMP_RET_ALLOW`.
+pub const SECCOMP_RET_ALLOW: u32 = 0x7fff_0000;
+/// `SECCOMP_RET_KILL` (== SECCOMP_RET_KILL_THREAD 0x0000_0000).
+pub const SECCOMP_RET_KILL: u32 = 0x0000_0000;
+const SECCOMP_RET_ERRNO_BASE: u32 = 0x0005_0000;
+const SECCOMP_RET_DATA: u32 = 0x0000_ffff;
+
+/// `SECCOMP_RET_ERRNO | (errno & DATA)`.
+#[must_use]
+pub fn seccomp_ret_errno(errno: u32) -> u32 {
+    SECCOMP_RET_ERRNO_BASE | (errno & SECCOMP_RET_DATA)
+}
 
 /// The policy name recorded in the receipt's `SeccompRef`.
 #[must_use]
@@ -213,41 +236,67 @@ pub fn net_deny_policy_name() -> &'static str {
     "net-deny-v1"
 }
 
-/// The minijail seccomp policy text for the DenyNet stance: allow by default,
-/// return EPERM (errno 1) for every network-creating syscall.
+/// Build the net-deny classic-BPF program for one architecture.
+///
+/// Shape: (1) load `arch`, kill if it isn't `audit_arch` (defeats the x86_64
+/// vs x32 nr-aliasing trick); (2) load `nr`; (3) for each socket-family nr, if
+/// equal return EPERM; (4) default return ALLOW. `socket_nrs` and `audit_arch`
+/// are arch-specific and passed in by the on-device caller (`libc::SYS_*`,
+/// `AUDIT_ARCH_*`) so this stays host-testable.
 #[must_use]
-pub fn net_deny_policy_text() -> String {
-    let mut s = String::from("@default ALLOW\n");
-    for sc in NET_SYSCALLS {
-        // `return 1` = the policy DSL form for "fail with errno EPERM".
-        s.push_str(&format!("{sc}: return 1\n"));
+pub fn build_net_deny_bpf(socket_nrs: &[u32], audit_arch: u32) -> Vec<BpfInsn> {
+    let mut prog = Vec::new();
+    // Arch guard: load arch; if != audit_arch jump to the KILL at the very end.
+    // We compute the KILL offset after building the body, so emit a placeholder
+    // jump and patch — simplest is: arch-mismatch → next insn is RET KILL.
+    prog.push(BpfInsn { code: BPF_LD_W_ABS, jt: 0, jf: 0, k: SECCOMP_DATA_ARCH_OFF });
+    // if arch == audit_arch, skip the next (KILL) insn.
+    prog.push(BpfInsn { code: BPF_JEQ_K, jt: 1, jf: 0, k: audit_arch });
+    prog.push(BpfInsn { code: BPF_RET_K, jt: 0, jf: 0, k: SECCOMP_RET_KILL });
+    // Load the syscall nr.
+    prog.push(BpfInsn { code: BPF_LD_W_ABS, jt: 0, jf: 0, k: SECCOMP_DATA_NR_OFF });
+    // For each socket nr: if nr == sc, jump to the ERRNO ret (placed right after
+    // the comparison chain). Compute the chain so each match jumps to the ERRNO
+    // insn which sits immediately before the final ALLOW.
+    let n = socket_nrs.len() as u8;
+    for (i, nr) in socket_nrs.iter().enumerate() {
+        // Distance from this insn to the ERRNO insn = remaining comparisons.
+        let jt = n - 1 - i as u8;
+        prog.push(BpfInsn { code: BPF_JEQ_K, jt, jf: 0, k: *nr });
     }
-    s
+    // ERRNO(EPERM) for any matched socket syscall.
+    prog.push(BpfInsn { code: BPF_RET_K, jt: 0, jf: 0, k: seccomp_ret_errno(1) });
+    // Default: ALLOW.
+    prog.push(BpfInsn { code: BPF_RET_K, jt: 0, jf: 0, k: SECCOMP_RET_ALLOW });
+    prog
 }
 
-/// Hex SHA-256 of [`net_deny_policy_text`], for the receipt's `SeccompRef.hash`.
+/// Hex SHA-256 over the serialized program (each insn as little-endian
+/// code|jt|jf|k) — for the receipt's `SeccompRef.hash`.
 #[must_use]
-pub fn net_deny_policy_hash() -> String {
+pub fn net_deny_bpf_hash(socket_nrs: &[u32], audit_arch: u32) -> String {
+    let prog = build_net_deny_bpf(socket_nrs, audit_arch);
     let mut h = Sha256::new();
-    h.update(net_deny_policy_text().as_bytes());
+    for insn in &prog {
+        h.update(insn.code.to_le_bytes());
+        h.update([insn.jt, insn.jf]);
+        h.update(insn.k.to_le_bytes());
+    }
     hex::encode(h.finalize())
 }
 ```
 
-In `lib.rs`: `pub mod seccomp;` (NOT android-gated — it's pure data, host-testable) + `pub use seccomp::{net_deny_policy_hash, net_deny_policy_name, net_deny_policy_text};`.
+In `lib.rs`: `pub mod seccomp;` (host-testable, not android-gated) + `pub use seccomp::{build_net_deny_bpf, net_deny_bpf_hash, net_deny_policy_name, BpfInsn};`.
 
-> If `cargo test` reveals minijail's policy DSL spells the EPERM action differently (e.g. `return EPERM` vs `return 1`) — verify against `third_party/minijail/syscall_filter.c` / the bundled `seccomp` docs and the on-device parse in Task 4. The DSL accepts `return <errno-number>`; `1` is EPERM. Keep the test and impl in sync with whatever parses cleanly in Task 4's instrumentation.
+> Verify the JEQ jump arithmetic by tracing the test program by hand: matched syscall → falls to the ERRNO ret; no match → drops through to ALLOW. If the offset math is fiddly, an equally valid (clearer) shape is "JEQ nr, jt=<to ERRNO via absolute>" using one ERRNO ret per syscall — correctness over compactness; the hash just has to be stable. Whatever shape, the test's invariants (default ALLOW last, exactly EPERM for denies, no KILL except the arch guard) must hold.
 
-- [ ] **Step 4: Run tests**
-
-Run: `cargo test -p platform-android-minijail seccomp`
-Expected: 3 PASS.
+- [ ] **Step 4: Run → 3 PASS.**
 
 - [ ] **Step 5: Commit**
 
 ```bash
 git add platforms/android-minijail/src/seccomp.rs platforms/android-minijail/src/lib.rs platforms/android-minijail/Cargo.toml lingxi-code/Cargo.lock
-git commit -m "feat(android-minijail): net-deny seccomp policy text + sha256 hash (host)"
+git commit -m "feat(android-minijail): net-deny seccomp BPF builder + hash (host); raw-filter not policy-file"
 ```
 
 ---
@@ -271,7 +320,7 @@ The safe `platform-android` side builds a plain `JailSpec` from the `AndroidSand
             cwd: "/data/x".into(),
             rlimits: vec![JailRlimit { resource: libc_rlimit_cpu(), soft: 30, hard: 30 }],
             net_deny: true,
-            net_deny_policy: Some("@default ALLOW\nsocket: return 1\n".into()),
+            bpf: build_net_deny_bpf(&[198, 199], 0xC000_00B7),
             timeout_ms: 120_000,
         };
         assert_eq!(spec.argv.len(), 3);
@@ -319,8 +368,10 @@ pub struct JailSpec {
     pub rlimits: Vec<JailRlimit>,
     /// Whether to install the net-deny seccomp filter.
     pub net_deny: bool,
-    /// The net-deny policy text (required when `net_deny`; parsed into BPF).
-    pub net_deny_policy: Option<String>,
+    /// The net-deny classic-BPF program (from `build_net_deny_bpf`, empty when
+    /// `!net_deny`); `run_jailed` maps it to `sock_fprog` and injects it via
+    /// `minijail_set_seccomp_filters`.
+    pub bpf: Vec<BpfInsn>,
     /// Wall-clock budget; the watchdog kills the process group past this.
     pub timeout_ms: u64,
 }
@@ -411,7 +462,7 @@ mod tests {
             cwd: "/".into(),
             rlimits: vec![],
             net_deny: false,
-            net_deny_policy: None,
+            bpf: vec![],
             timeout_ms: 1000,
         };
         let out = run_jailed(&spec);
@@ -424,8 +475,8 @@ mod tests {
 - [ ] **Step 2: Run → host test PASS** (`cargo test -p platform-android-minijail run_jailed`).
 
 - [ ] **Step 3: Implement the android module.** Add to `run.rs` an `#[cfg(target_os = "android")] mod android_impl` that:
-  1. Extends the FFI block (the P0a `extern "C"` already binds `minijail_new/no_new_privs/preserve_fd/run_env_pid_pipes_no_preload?/wait/destroy` — ADD the entries this needs): `minijail_rlimit(j, type: c_int, cur: u64, max: u64) -> c_int`, `minijail_use_seccomp_filter(j)`, `minijail_set_seccomp_filter_tsync(j)`, `minijail_parse_seccomp_filters_from_fd(j, fd: c_int)`, `minijail_log_seccomp_filter_failures(j)`, `minijail_create_session(j) -> c_int`, `minijail_add_hook(j, hook: extern "C" fn(*mut c_void) -> c_int, payload: *mut c_void, event: c_int) -> c_int`, and **switch the exec call to `minijail_run_env_pid_pipes_no_preload`** (the env variant — we pass the scrubbed `envp` explicitly; the no-env P0a variant inherited the engine env, which v1 must NOT do). Confirm every signature against `third_party/minijail/libminijail.h` (the recon notes: `run_env_pid_pipes_no_preload(j, filename, argv, envp, *pid, *in, *out, *err)`; `MINIJAIL_HOOK_EVENT_PRE_EXECVE` is the enum value for the chdir hook — read the enum's numeric position).
-  2. Builds the jail: `minijail_new` → `minijail_no_new_privs` → each `minijail_rlimit` → if `net_deny`: write `net_deny_policy` text to a pipe/memfd, `minijail_use_seccomp_filter` + `minijail_set_seccomp_filter_tsync` + `minijail_log_seccomp_filter_failures` + `minijail_parse_seccomp_filters_from_fd(fd)` (close the write end after the parse) → `minijail_create_session` (new session/pgid so the watchdog can `kill(-pgid)`) → register a PRE_EXECVE chdir hook whose payload is the `cwd` CString (the hook calls `chdir(payload)` and returns 0/-errno).
+  1. Extends the FFI block (the P0a `extern "C"` already binds `minijail_new/no_new_privs/preserve_fd/wait/destroy` + the P0a exec call — ADD the entries this needs): `minijail_rlimit(j, type: c_int, cur: u64, max: u64) -> c_int`, `minijail_use_seccomp_filter(j)`, `minijail_set_seccomp_filters(j, filter: *const SockFprog)` (raw-filter injection — NOT the policy-file path; see Task 2 CORRECTION), `minijail_create_session(j) -> c_int`, `minijail_add_hook(j, hook: extern "C" fn(*mut c_void) -> c_int, payload: *mut c_void, event: c_int) -> c_int`, and **switch the exec call to `minijail_run_env_pid_pipes_no_preload`** (the env variant — we pass the scrubbed `envp` explicitly; the no-env P0a variant inherited the engine env, which v1 must NOT do). Define a local `#[repr(C)] struct SockFprog { len: c_ushort, filter: *mut SockFilter }` and `#[repr(C)] struct SockFilter { code: u16, jt: u8, jf: u8, k: u32 }` (or use `libc::sock_filter`/`libc::sock_fprog` if the pinned libc exposes them — check `libc::sock_fprog`). Confirm every signature against `third_party/minijail/libminijail.h` (`run_env_pid_pipes_no_preload(j, filename, argv, envp, *pid, *in, *out, *err)`; `set_seccomp_filters(j, const struct sock_fprog *)`; `MINIJAIL_HOOK_EVENT_PRE_EXECVE` = read the enum's numeric position). **Do NOT bind/call `minijail_log_seccomp_filter_failures` — libminijail.c:1603 `die()`s if it was called together with `set_seccomp_filters`.**
+  2. Builds the jail: `minijail_new` → `minijail_no_new_privs` → each `minijail_rlimit` → if `net_deny`: map `spec.bpf` (the `Vec<BpfInsn>` from Task 2, passed in the spec) to a `Vec<SockFilter>`, build a `SockFprog { len, filter: vec.as_mut_ptr() }` (KEEP the Vec alive until after the jail is fully built/run), `minijail_use_seccomp_filter(j)` + optional `minijail_set_seccomp_filter_tsync(j)` (TSYNC applies the filter to all threads — bind it too; it is NOT the log fn and is compatible) + `minijail_set_seccomp_filters(j, &fprog)` → `minijail_create_session` (new session/pgid so the watchdog can `kill(-pgid)`) → register a PRE_EXECVE chdir hook whose payload is the `cwd` CString (the hook calls `chdir(payload)` and returns 0/-errno). The arch guard inside the BPF means a wrong-arch kernel KILLs rather than misfiring — acceptable (the probe already confirmed the arch).
   3. Marshals `argv`/`envp` as NULL-terminated `*mut c_char` arrays (CStrings kept alive across the call, exactly like the P0a smoke).
   4. `minijail_run_env_pid_pipes_no_preload(...)` → child pid + stdout/stderr fd out-params (pass NULL for stdin fd; feed `spec` has no stdin in v1 — note: ProcessCommand.stdin exists but the Shell tool doesn't set it; wire stdin in a later task, leave a `// stdin deferred` marker). On nonzero return → `enforcement_failed`.
   5. Timeout + capture: spawn a watchdog thread that sleeps `timeout_ms` then `kill(-pgid, SIGKILL)` and sets a shared `timed_out` flag; read stdout+stderr fds to EOF on the calling thread (or two reader threads to avoid pipe-buffer deadlock — a 64KB stderr + large stdout will deadlock a single-threaded sequential read; use two threads or poll both); `minijail_wait` → exit status (P0a established its encoding: `n & 0xFF` for exit, signal-base for signals; a SIGKILL from the watchdog reads as timed-out). Cancel the watchdog if the child exits first.
@@ -550,7 +601,7 @@ Tests: `from_plan` for a DenyNet SystemShell plan (net_deny true, seccomp_policy
 
 - [ ] **Step 3: implement.** `AndroidMinijailProcessRunner` gains `caps: Arc<CapabilityCache>` + `new(caps)`. Update `lib.rs` Task-1 site to pass `caps.clone()` into the runner. In `run()`, AFTER `admitted_plan` succeeds:
   1. **Per-plan capability gate (spec sandbox.rs P2 NOTE):** if `plan.network == DenyNet` and not (`caps.seccomp_filter && caps.net_deny_verified`) → `Err(PolicyUnsupported("net-deny seccomp filter unavailable; cannot honor deny-net"))`.
-  2. Translate `AndroidSandboxPlan` → `JailSpec`: map each `RlimitResource` → the raw `RLIMIT_*` int (`Cpu=0, As=9? — VERIFY the Linux ABI numbers: RLIMIT_CPU=0, RLIMIT_FSIZE=1, RLIMIT_AS=9, RLIMIT_NOFILE=7, RLIMIT_CORE=4`; encode the four the policy uses); `net_deny` = DenyNet; `net_deny_policy` = `Some(platform_android_minijail::net_deny_policy_text())` when DenyNet; `cwd` = `inner.cwd` (canonicalized in prepare); `timeout_ms` = `inner.timeout` or the default; `envp`/`argv`/`filename` from plan+inner.
+  2. Translate `AndroidSandboxPlan` → `JailSpec`: map each `RlimitResource` → the raw `RLIMIT_*` int (`Cpu=0, As=9? — VERIFY the Linux ABI numbers: RLIMIT_CPU=0, RLIMIT_FSIZE=1, RLIMIT_AS=9, RLIMIT_NOFILE=7, RLIMIT_CORE=4`; encode the four the policy uses); `net_deny` = DenyNet; `bpf` = `platform_android_minijail::build_net_deny_bpf(socket_nrs, audit_arch)` when DenyNet else `vec![]` (the runner gets `socket_nrs`/`audit_arch` from a tiny `platform-android-minijail` helper that returns the per-arch `libc::SYS_*`/`AUDIT_ARCH_*` — host-stub returns empties); `cwd` = `inner.cwd` (canonicalized in prepare); `timeout_ms` = `inner.timeout` or the default; `envp`/`argv`/`filename` from plan+inner.
   3. `tokio::task::spawn_blocking(move || platform_android_minijail::run_jailed(&spec)).await` → `JailedOutput`.
   4. `out.enforcement_failed` → `Err(SandboxEnforcementFailed(reason))`. Else `Ok(ProcessOutput { stdout, stderr, exit_code, timed_out })` (mirrors `platforms/posix` contract incl. `timed_out`; the Shell tool's timeout-message path reads it).
   5. Build `AndroidSandboxReceipt::from_plan(plan)` and log it (`tracing::info!`). `is_available()` now returns `self.caps.get().available()` (was hard-false in P1).
@@ -668,7 +719,7 @@ git commit -m "chore(android-sandbox): P2 gate — workspace + android-target cl
 ## Self-review / spec coverage
 
 - Spec §AndroidMinijailProcessRunner: jailed fork/exec (T4), no_new_privs+rlimits+net-deny seccomp (T4/T5), `run_*_pid_pipes` for stdio capture (T4), setsid+pgid timeout kill (T4), receipt (T5), `spawn_background`/`kill` stay `Unsupported` (unchanged from P1 — non-goal 5). ✓
-- Spec §Policy mapping `network=Disabled` ⇒ socket-family seccomp deny: T2 (text) + T4 (load) + T5 (per-plan gate). ✓
+- Spec §Policy mapping `network=Disabled` ⇒ socket-family seccomp deny: T2 (BPF builder) + T4 (raw-filter inject) + T5 (per-plan gate). ✓
 - Spec §Capability probing items 2-9 (seccomp/tsync/net-deny/pgid/landlock/sh/toybox): T6. ✓
 - D8 eager probe before sync registration: T7. ✓
 - Fail-closed: DenyNet without filter capability refused (T5 test); enforcement failure → structured error not silent run (T4/T5). ✓
@@ -680,5 +731,5 @@ git commit -m "chore(android-sandbox): P2 gate — workspace + android-target cl
 - **Pipe-buffer deadlock**: single-threaded sequential read of stdout then stderr deadlocks when the child fills the stderr pipe buffer first. T4 must read both concurrently (two threads or poll). Called out in T4 Step 3.
 - **Watchdog races the natural exit**: the watchdog thread must be cancellable (the child may exit in 1ms); a stale `kill(-pgid)` after the pgid is reused could kill an unrelated group — guard with the `timed_out` flag set BEFORE the kill and only kill if the child hasn't been reaped.
 - **`minijail_wait` after watchdog SIGKILL**: confirm the exit encoding for a signalled child maps to `timed_out`, not a misleading exit code.
-- **seccomp policy DSL EPERM spelling** (`return 1` vs `return EPERM`): pinned by T2 test + verified by T4's on-device parse; keep them in sync.
+- **seccomp model**: minijail policy *files* are allowlist/default-KILL (verified `syscall_filter.c:817`), so net-deny is a hand-built raw BPF (allow-default, socket→EPERM) injected via `minijail_set_seccomp_filters` (NOT a policy file). Per-arch socket nrs + `AUDIT_ARCH` come from `libc::SYS_*` on-device; the BPF builder is host-tested with sample nrs. `set_seccomp_filters` is incompatible with `log_seccomp_filter_failures` (libminijail.c:1603 die) — never call both.
 - **Device gate availability**: the emulator is the only verification for the unsafe path; if CI lacks it, the cross-build + host translation tests gate the merge and the device run is a tracked acceptance step.

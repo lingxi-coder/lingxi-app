@@ -192,6 +192,9 @@ pub struct BackendPlanHandle(Arc<dyn Any + Send + Sync>);
 
 impl BackendPlanHandle {
     /// Wrap a backend plan value.
+    ///
+    /// Pass the plan by value, not pre-`Arc`'d — wrapping an `Arc<T>` makes
+    /// the stored type `Arc<T>` and `downcast::<T>()` will return `None`.
     #[must_use]
     pub fn new<T: Any + Send + Sync>(plan: T) -> Self {
         Self(Arc::new(plan))
@@ -298,6 +301,13 @@ impl SandboxedCommand {
 #[cfg(test)]
 mod m2_01_tests {
     use super::*;
+
+    #[test]
+    fn plan_handle_is_send_sync_clone() {
+        fn assert_bounds<T: Send + Sync + Clone>() {}
+        assert_bounds::<BackendPlanHandle>();
+        assert_bounds::<SandboxedCommand>();
+    }
 
     #[test]
     fn sandbox_error_unsupported_displays() {

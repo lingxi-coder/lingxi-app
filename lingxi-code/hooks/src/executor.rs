@@ -1139,6 +1139,20 @@ fn build_lifecycle_envelope_body(
     }
 }
 
+/// Build the `(HookResult, timed_out)` pair for a non-timeout process error.
+fn process_error_outcome(hook: &HookDefinition, e: &ProcessError) -> (HookResult, bool) {
+    (
+        HookResult {
+            outcome: HookOutcome::Error,
+            stdout: String::new(),
+            stderr: format!("Hook {} failed: process error: {e}", hook.id),
+            exit_code: None,
+            response: None,
+        },
+        false,
+    )
+}
+
 /// Map a [`ProcessRunner::run`] result onto a [`HookResult`] per the
 /// claude-code command-hook contract (`claude-code/src/utils/hooks.ts`).
 ///
@@ -1168,20 +1182,13 @@ fn map_command_output(
             },
             true,
         ),
-        Err(e @ (ProcessError::Io(_)
+        Err(
+            e @ (ProcessError::Io(_)
             | ProcessError::Unsupported
             | ProcessError::PolicyUnsupported(_)
             | ProcessError::MalformedSandboxPlan(_)
-            | ProcessError::SandboxEnforcementFailed(_))) => (
-            HookResult {
-                outcome: HookOutcome::Error,
-                stdout: String::new(),
-                stderr: format!("Hook {} failed: process error: {e}", hook.id),
-                exit_code: None,
-                response: None,
-            },
-            false,
-        ),
+            | ProcessError::SandboxEnforcementFailed(_)),
+        ) => process_error_outcome(hook, &e),
         Ok(o) if o.timed_out => (
             HookResult {
                 outcome: HookOutcome::Timeout,

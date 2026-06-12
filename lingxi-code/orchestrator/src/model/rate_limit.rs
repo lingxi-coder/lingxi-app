@@ -461,7 +461,7 @@ const EARLY_WARNING_CLAIM_MAP: [(&str, &str); 3] = [
 /// window that has elapsed — `clamp((now − (resetsAt − window)) / window, 0, 1)`.
 #[allow(
     clippy::cast_precision_loss,
-    reason = "epoch seconds (< 2^53) and the fixed window constants are exactly representable in f64 — same number math as the TS"
+    reason = "realistic epoch seconds (< 2^53) and the fixed window constants are exactly representable in f64 — same number math as the TS; an adversarial u64 above 2^53 does lose precision but stays finite and the clamp(0, 1) keeps the result safe"
 )]
 fn compute_time_progress(resets_at: u64, window_seconds: u64, now: SystemTime) -> f64 {
     // `Date.now() / 1000` (ts:99). A pre-epoch clock cannot happen in
@@ -509,8 +509,9 @@ fn header_based_early_warning(
             fallback_available,
             // `Number(surpassedThreshold)` (ts:288). Divergence (same
             // fail-soft stance as `parse_fraction` everywhere else): TS would
-            // store `NaN` for a malformed value; we store `None`. The warning
-            // itself still fires on header PRESENCE alone (ts:268).
+            // store `NaN` for a malformed value — but `0` for an EMPTY string
+            // (`Number('')` is `0`, not `NaN`); we store `None` for both. The
+            // warning itself still fires on header PRESENCE alone (ts:268).
             surpassed_threshold: parse_fraction(headers, &surpassed_name),
             // Fresh-object semantics: overage fields stay `None`
             // (`isUsingOverage: false` in TS has no struct counterpart).
@@ -672,7 +673,12 @@ impl RateLimitInfo {
             // the branch above — but fabricating a status with zero unified
             // headers present would break `has_unified_headers()` consumers,
             // so an absent header stays `None` (readers apply
-            // `.unwrap_or("allowed")`).
+            // `.unwrap_or("allowed")`). Note the guard's reach: it suppresses
+            // the early-warning check for ANY response missing the status
+            // header — even one carrying other unified headers, where TS's
+            // 'allowed' default could still fire a warning — not just the
+            // zero-header case. Improbable in practice: the server sends the
+            // status header alongside the per-claim headers.
             Some(_) | None => parsed,
         }
     }
@@ -1831,6 +1837,26 @@ mod early_warning {
     }
 
     #[test]
+    fn surpassed_threshold_header_fires_on_presence_even_when_malformed() {
+        // getHeaderBasedEarlyWarning gates on header PRESENCE alone
+        // (`!== null`, claudeAiLimits.ts:268) — the value is only `Number()`ed
+        // for storage (ts:288). A malformed value therefore still fires the
+        // warning; our documented divergence stores `None` where TS would
+        // store `NaN`.
+        let headers = h(&[
+            ("anthropic-ratelimit-unified-status", "allowed"),
+            (
+                "anthropic-ratelimit-unified-5h-surpassed-threshold",
+                "garbage",
+            ),
+        ]);
+        let p = RateLimitInfo::from_headers_at(&headers, at(1_000_000));
+        assert_eq!(p.status.as_deref(), Some("allowed_warning"));
+        assert_eq!(p.rate_limit_type.as_deref(), Some("five_hour"));
+        assert_eq!(p.surpassed_threshold, None);
+    }
+
+    #[test]
     fn time_relative_5h_fires_at_high_utilization_early_in_window() {
         // getTimeRelativeEarlyWarning, five_hour config (claudeAiLimits.ts:54-59):
         // threshold {utilization: 0.9, timePct: 0.72}, window 18000s.
@@ -1863,6 +1889,28 @@ mod early_warning {
         ]);
         let p = RateLimitInfo::from_headers_at(&headers, at(1_000_000));
         assert_eq!(p.status.as_deref(), Some("allowed"));
+        assert_eq!(p.surpassed_threshold, None);
+    }
+
+    #[test]
+    fn time_relative_boundaries_are_inclusive() {
+        // Both comparisons are INCLUSIVE (`utilization >= t.utilization &&
+        // timeProgress <= t.timePct`, claudeAiLimits.ts:324-326): utilization
+        // EXACTLY 0.9 and timeProgress EXACTLY 0.72 still warn on the
+        // five_hour config. Exact-representable arithmetic: window 18_000,
+        // elapsed = 1_000_000 − (1_005_040 − 18_000) = 12_960 →
+        // 12_960 / 18_000 == 0.72 exactly (correctly rounded quotient equals
+        // the 0.72 literal).
+        let headers = h(&[
+            ("anthropic-ratelimit-unified-status", "allowed"),
+            ("anthropic-ratelimit-unified-5h-utilization", "0.9"),
+            ("anthropic-ratelimit-unified-5h-reset", "1005040"),
+        ]);
+        let p = RateLimitInfo::from_headers_at(&headers, at(1_000_000));
+        assert_eq!(p.status.as_deref(), Some("allowed_warning"));
+        assert_eq!(p.rate_limit_type.as_deref(), Some("five_hour"));
+        assert_eq!(p.utilization, Some(0.9));
+        assert_eq!(p.resets_at, Some(1_005_040));
         assert_eq!(p.surpassed_threshold, None);
     }
 

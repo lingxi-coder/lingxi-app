@@ -10,7 +10,7 @@
 //! smoke as structurally unavailable.
 
 pub mod seccomp;
-pub use seccomp::{net_deny_policy_hash, net_deny_policy_name, net_deny_policy_text};
+pub use seccomp::{build_net_deny_bpf, net_deny_bpf_hash, net_deny_policy_name, BpfInsn};
 
 use serde::Serialize;
 

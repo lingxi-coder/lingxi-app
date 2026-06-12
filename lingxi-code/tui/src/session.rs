@@ -75,6 +75,9 @@ pub struct Runtime {
     /// (no replay). Set by the CLI's resume branch via
     /// [`Runtime::with_resumed_messages`].
     pub resumed_messages: Vec<crate::state::RenderedMessage>,
+    /// Shared subscription slot from the composition root (None in print mode /
+    /// tests). Threaded into [`AppState::subscription`] at mount.
+    subscription: Option<traits::subscription::SharedSubscription>,
 }
 
 impl Runtime {
@@ -90,6 +93,7 @@ impl Runtime {
             turn_tx: None,
             command_registry: None,
             resumed_messages: Vec::new(),
+            subscription: None,
         }
     }
 
@@ -109,6 +113,7 @@ impl Runtime {
             turn_tx: None,
             command_registry: None,
             resumed_messages: Vec::new(),
+            subscription: None,
         }
     }
 
@@ -156,6 +161,18 @@ impl Runtime {
         registry: Arc<tokio::sync::RwLock<command_api::CommandRegistry>>,
     ) -> Self {
         self.command_registry = Some(registry);
+        self
+    }
+
+    /// (B4 Task 5) Attach the composition root's shared subscription slot
+    /// (`DesktopRuntime.subscription`, filled by the background profile+roles
+    /// fetch). Threaded into [`AppState::subscription`] at mount so the
+    /// rate-limit composer can read the live snapshot. `None` (print mode /
+    /// smoke gates / resume picker) leaves the snapshot absent — the composer
+    /// falls back to its subscription-less arms.
+    #[must_use]
+    pub fn with_subscription(mut self, sub: traits::subscription::SharedSubscription) -> Self {
+        self.subscription = Some(sub);
         self
     }
 
@@ -214,6 +231,11 @@ pub async fn run_tui_session(
         let guard = reg.read().await;
         initial_state.set_command_argument_names(&guard);
     }
+    // (B4 Task 5) Thread the composition root's shared subscription slot into
+    // the state so the rate-limit composer can read the live snapshot via
+    // `AppState::subscription_snapshot`. `None` (smoke gates / resume picker /
+    // print mode) leaves the snapshot absent — same route as `command_registry`.
+    initial_state.subscription = runtime.subscription.take();
     // (M7-15) Apply the stored theme preference from ~/.claude/settings.json
     // (best-effort; absent/unreadable → session-default `auto`). Read once at
     // startup, before the first render, so the very first frame uses the saved

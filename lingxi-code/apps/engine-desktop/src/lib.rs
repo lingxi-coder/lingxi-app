@@ -3365,4 +3365,21 @@ mod tests {
         assert_eq!(snap.subscription_type, None);
         assert!(!snap.is_team_or_enterprise());
     }
+
+    #[test]
+    fn subscription_snapshot_explicit_extra_usage_false_stays_false() {
+        // Pins the `== Some(true)` flattening: a profile org that EXPLICITLY
+        // reports `has_extra_usage_enabled: Some(false)` must fold to `false`
+        // in the snapshot (same as the absent-`None` case, distinct from
+        // `Some(true)`).
+        let profile = anthropic_oauth::OAuthProfileResponse {
+            organization: Some(anthropic_oauth::OAuthOrganization {
+                has_extra_usage_enabled: Some(false),
+                ..Default::default()
+            }),
+            account: None,
+        };
+        let snap = super::subscription_snapshot_from(true, Some(&profile), None);
+        assert!(!snap.has_extra_usage_enabled);
+    }
 }

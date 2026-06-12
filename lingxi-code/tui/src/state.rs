@@ -818,6 +818,10 @@ pub struct AppState {
     /// prop so the custom row pads identically to claude-code's
     /// `<Box paddingX={paddingX}>`. Read once at startup from the settings JSON.
     pub status_line_config: Option<crate::components::status_line_command::StatusLineConfig>,
+    /// Shared subscription slot from the composition root (None in tests /
+    /// print mode). Read at rate-limit compose time via
+    /// [`Self::subscription_snapshot`].
+    pub subscription: Option<traits::subscription::SharedSubscription>,
 }
 
 impl AppState {
@@ -884,7 +888,20 @@ impl AppState {
             pending_copy_clipboard: None,
             status_line_text: None,
             status_line_config: None,
+            subscription: None,
         }
+    }
+
+    /// Current resolved subscription snapshot, if the composition root provided
+    /// a slot and the seed/background fetch has filled it. A poisoned lock
+    /// degrades to `None` (conservative copy, never a panic in the render
+    /// path) — the documented `SharedSubscription` reader stance.
+    #[must_use]
+    pub fn subscription_snapshot(&self) -> Option<traits::subscription::SubscriptionSnapshot> {
+        self.subscription
+            .as_ref()
+            .and_then(|s| s.read().ok())
+            .and_then(|guard| guard.clone())
     }
 
     /// (A6) Read the `statusLine` setting out of a loaded settings JSON value
@@ -1248,6 +1265,24 @@ mod tests {
         );
         st.close_screen();
         assert_eq!(st.active_screen, None);
+    }
+
+    /// (B4 Task 5) The composition-root subscription slot defaults to `None`
+    /// (tests / print mode), and once a filled slot is attached,
+    /// `subscription_snapshot` reads the snapshot through the shared lock.
+    #[test]
+    fn app_state_subscription_defaults_none_and_snapshot_reads_through() {
+        let mut st = AppState::new(StatusSnapshot::default());
+        assert!(st.subscription_snapshot().is_none());
+        let slot: traits::subscription::SharedSubscription =
+            std::sync::Arc::new(std::sync::RwLock::new(Some(
+                traits::subscription::SubscriptionSnapshot {
+                    is_subscriber: true,
+                    ..Default::default()
+                },
+            )));
+        st.subscription = Some(slot);
+        assert!(st.subscription_snapshot().expect("snap").is_subscriber);
     }
 
     #[test]

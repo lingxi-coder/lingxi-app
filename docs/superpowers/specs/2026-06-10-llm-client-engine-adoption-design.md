@@ -1,7 +1,7 @@
 # Engine adoption of llm-client (full replacement of api-client) — design
 
 Date: 2026-06-10
-Status: approved (user), revision 2.7 — future-work batch 2 COMPLETE.
+Status: approved (user), revision 2.8 — future-work batch 3 COMPLETE.
 
 **Revision history:**
 - 2.2 — no intermediate policy crate; supersedes api-client entirely with no backwards compatibility.
@@ -48,6 +48,51 @@ Status: approved (user), revision 2.7 — future-work batch 2 COMPLETE.
     (frozen-protocol scope guard — a full TUI feed needs a protocol event, documented).
   - Remaining: OpenAiResponses codec (no demand), Gemini File API upload flow, TUI
     rate-limit rendering via a future protocol event.
+- 2.8 — Future-work batch 3 COMPLETE: EVERY protocol family now has a codec (the
+  rev-2.7 "except OpenAiResponses" caveat is closed).
+  - **OpenAiResponsesCodec**: encode (system blocks joined → `instructions`, messages →
+    `input` items, flattened tool shape, `max_output_tokens`, reasoning
+    `budget_tokens` → `effort` lossy mapping ≤1024 low / ≤8192 medium / else high,
+    `response_format` via `text.format`, `store: false` always); tolerant decode
+    (`output[]` items, usage subset normalization per the openai.rs rules, status ≥400
+    via the shared error decode); typed-SSE stream decoder incl. the `response.failed`
+    taxonomy (`rate_limit_exceeded` → `RateLimited` with message-parsed retry-after,
+    `invalid_prompt` → `InvalidRequest`). Wired into `build_codec`; new settings type
+    `"openai-responses"`.
+  - **Raw-byte body channel**: additive `protocol::HttpRequest.body_bytes`
+    (serde back-compat); honored by ReqwestHttp/WindowsHttp at every body site;
+    `ProviderRequest.body_bytes`; bridge precedence — bytes win, JSON body suppressed.
+  - **Gemini File API upload flow**: `providers/gemini_files.rs` (resumable
+    start / upload+finalize / status request builders + parsers, `upload_base`
+    derivation convention, `GeminiFile { name, uri, mime_type, state }`);
+    `DefaultLlmClient::upload_file` two-step authenticated driver, Gemini-family
+    routes only. Scope guard: NO polling inside the driver (no timer dep in
+    llm-client) — callers poll `file_status_request` until `ACTIVE` (video/PDF;
+    images are ACTIVE immediately). The returned `uri` plugs into the existing
+    batch-2 `ImageUrl → file_data.file_uri` encoding.
+  - **TUI rate-limit rendering**: orchestrator `RateLimitInfo` extended
+    (status / resets_at / utilization / claim_resets_at / overage_resets_at /
+    fallback_available; per-claim 5h|7d|overage abbrevs ONLY — the TS has no
+    opus/sonnet per-claim headers; claudeAiLimits.ts-pinned); additive
+    `traits::OutputEvent::RateLimit` (9 fields) + `OutputStream::emit_rate_limit`
+    default no-op; orchestrator emit-on-change (dedupe Mutex, both batched and
+    streaming seams); TUI composer port of `getRateLimitMessage`
+    (WARNING_THRESHOLD 0.7, byte-locked copy — straight ASCII apostrophes per
+    rateLimitMessages.ts, U+00B7 separators) feeding the existing
+    `RateLimitMessage` component; `/clear` resets the dedupe slot. Scope guard:
+    upsell selection uses the generic `UPGRADE`/`UPGRADE_OR_EXTRA` arms only —
+    subscription granularity (e.g. Max-20x) is not plumbed to the TUI
+    (documented gap).
+  - **CLOSED by design (no code)** — streaming-path `LlmResponse.cost` estimate:
+    the streaming path yields only `LlmEvent`s and never assembles an
+    `LlmResponse`, so there is no response object to carry a cost; billing for
+    streamed turns is already recorded via the batch-1 per-field usage merge →
+    `CostTracker::record_api_response_v2`, and TUI cost display flows from
+    `EndTurn`. The rev-2.6 "remaining secondary gap" note is closed
+    WONTFIX-by-design.
+  - Remaining: TUI subscription-granularity upsell arms (needs subscription-type
+    plumbing), Gemini upload polling convenience (host-side, needs a timer),
+    OpenAiResponses real-traffic validation.
 
 ## Goal
 
@@ -106,7 +151,9 @@ HTTP client; `llm-client` stays free of repo-internal dependencies.
   `ReasoningConfig { budget_tokens: u32 }`. Anthropic encodes
   `thinking: {type: "enabled", budget_tokens}`; Gemini encodes
   `generationConfig.thinkingConfig.thinkingBudget`; OpenAI Chat rejects
-  explicitly (staged until the Responses API codec exists). Capability
+  explicitly (was staged until the Responses API codec existed — as of rev 2.8
+  `OpenAiResponsesCodec` maps `budget_tokens` → `reasoning.effort`, lossy:
+  ≤1024 low / ≤8192 medium / else high). Capability
   preflight: requires `capabilities.reasoning`.
 - Prompt caching: `ContentBlock` gains optional
   `cache_control: Option<CacheControl>` (`CacheControl::Ephemeral`,
@@ -382,6 +429,9 @@ Fix implemented (TDD):
 - Remaining secondary gap (batch 2): `LlmResponse.cost` on the streaming path
   is still `None` (streaming response never passes through `decode_response`);
   this is cosmetic only now that `CostTracker` records the real usage.
+  **Closed in rev 2.8 WONTFIX-by-design** — see the 2.8 revision entry: the
+  streaming path never assembles an `LlmResponse` at all, so there is nothing
+  to carry a cost on; real billing is the usage-merge → `CostTracker` path.
 
 **Per-field usage merge (batch 1, rev 2.6 fix)**: a naïve
 `delta.or_else(seed)` in `pump_stream` would zero input + cache tokens whenever

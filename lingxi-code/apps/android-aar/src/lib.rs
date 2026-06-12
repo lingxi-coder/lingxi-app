@@ -1147,6 +1147,162 @@ pub fn android_sandbox_smoke() -> String {
     }
 }
 
+/// P2 acceptance probe: exercise the REAL prepare→runner→`run_jailed` path for
+/// one `command` rooted at `workspace`, and return the outcome as JSON
+/// (`{"stdout","stderr","exit_code","timed_out","enforcement_failed"}`).
+///
+/// This is NOT a bypass: it constructs a probed [`CapabilityCache`], an
+/// [`AndroidMinijailSandbox`] + [`AndroidMinijailProcessRunner`] over that SAME
+/// cache, `prepare()`s the command under a deny-net policy, and `run()`s it
+/// through the same jailed fork/exec the engine uses. The wall-clock timeout is
+/// hardcoded to **2 seconds** so a `sleep 10` probe reliably trips the watchdog
+/// (`timed_out=true`) without making the instrumentation test slow.
+///
+/// `enforcement_failed` is `null` on success; on the host build (no Android
+/// device) it is `"host build"` and the rest are empty/zero — so a JVM-host run
+/// fails loudly rather than silently passing.
+#[cfg(feature = "uniffi")]
+#[cfg_attr(feature = "uniffi", uniffi::export)]
+#[allow(clippy::needless_pass_by_value)] // FFI export: UniFFI marshals owned `String`.
+#[must_use]
+pub fn android_sandbox_run_probe(command: String, workspace: String) -> String {
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = (command, workspace);
+        "{\"enforcement_failed\":\"host build\"}".to_string()
+    }
+    #[cfg(target_os = "android")]
+    {
+        use platform_android::{
+            capabilities::{probe_android_capabilities, CapabilityCache},
+            AndroidMinijailProcessRunner, AndroidMinijailSandbox, AndroidShellConfig,
+        };
+        use std::collections::HashMap;
+        use traits::{
+            NetworkPolicy, ProcessCommand, ProcessRunner, ResourceLimits, Sandbox, SandboxPolicy,
+        };
+
+        // The probe runtime: capability probe + the jailed run are independent
+        // of the engine runtime, so spin up a transient current-thread runtime
+        // and drop it (mirrors `build_android_engine`'s eager-probe seam).
+        let rt = match tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        {
+            Ok(rt) => rt,
+            Err(e) => {
+                return format!("{{\"enforcement_failed\":\"probe runtime build: {e}\"}}");
+            }
+        };
+
+        // Probe REAL capabilities and share ONE cache across sandbox + runner —
+        // exactly as `AndroidPlatform::new` does.
+        let cache = Arc::new(CapabilityCache::new());
+        cache.set(rt.block_on(probe_android_capabilities()));
+
+        let ws = std::path::PathBuf::from(&workspace);
+        let cfg = AndroidShellConfig {
+            native_library_dir: ws.join("native-lib"),
+            shell_workspace_root: ws.clone(),
+            app_cache_root: ws.join("cache"),
+            package_name: "com.lingxi.code".to_string(),
+            package_version_code: 1,
+            app_writable_roots: vec![ws.clone()],
+            enable_shell: true,
+            secrets_in_keystore: true,
+            shell_data_exposure_accepted: true,
+        };
+        let sandbox = AndroidMinijailSandbox::new(cfg, cache.clone());
+        let runner = AndroidMinijailProcessRunner::new(cache);
+
+        // Deny-net policy (the P2 acceptance default). 2s wall-clock timeout so
+        // `sleep 10` trips the watchdog.
+        // Request NO filesystem confinement: Android's fs boundary is the app
+        // UID, not Landlock (shipping kernels disable it), so `plan_from_policy`
+        // rejects any non-empty writable/denied path set. Net-deny is the only
+        // active confinement here.
+        let policy = SandboxPolicy {
+            network: NetworkPolicy::Disabled,
+            writable_paths: vec![],
+            denied_paths: vec![],
+            allow_subprocess: true,
+            limits: ResourceLimits::default(),
+        };
+        let proc_cmd = ProcessCommand {
+            command: "/system/bin/sh".to_string(),
+            args: vec!["-c".to_string(), command],
+            cwd: Some(ws),
+            env: HashMap::new(),
+            timeout: Some(std::time::Duration::from_secs(2)),
+            stdin: None,
+        };
+
+        let prepared = match sandbox.prepare(proc_cmd, &policy) {
+            Ok(p) => p,
+            Err(e) => {
+                return format!(
+                    "{{\"enforcement_failed\":\"prepare: {}\"}}",
+                    e.to_string().replace('"', "'")
+                );
+            }
+        };
+        match rt.block_on(runner.run(&prepared)) {
+            Ok(out) => serde_json::json!({
+                "stdout": out.stdout,
+                "stderr": out.stderr,
+                "exit_code": out.exit_code,
+                "timed_out": out.timed_out,
+                "enforcement_failed": serde_json::Value::Null,
+            })
+            .to_string(),
+            Err(e) => format!(
+                "{{\"enforcement_failed\":\"run: {}\"}}",
+                e.to_string().replace('"', "'")
+            ),
+        }
+    }
+}
+
+/// P2 acceptance probe: run the REAL capability probe and return the matrix as
+/// JSON (`{"net_deny_verified":bool,"seccomp_filter":bool,...}`). The strong
+/// proof of net-deny enforcement is `net_deny_verified` — the probe forked a
+/// child under the net-deny seccomp filter and observed `socket()` ⇒ `EPERM`.
+/// Host builds report `{"probed":false,"net_deny_verified":false}`.
+#[cfg(feature = "uniffi")]
+#[cfg_attr(feature = "uniffi", uniffi::export)]
+#[must_use]
+pub fn android_sandbox_capabilities() -> String {
+    #[cfg(not(target_os = "android"))]
+    {
+        "{\"probed\":false,\"net_deny_verified\":false,\"reason\":\"host build\"}".to_string()
+    }
+    #[cfg(target_os = "android")]
+    {
+        let rt = match tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        {
+            Ok(rt) => rt,
+            Err(e) => return format!("{{\"probed\":false,\"reason\":\"probe runtime: {e}\"}}"),
+        };
+        let caps = rt.block_on(platform_android::capabilities::probe_android_capabilities());
+        serde_json::json!({
+            "probed": caps.probed,
+            "minijail_smoke": caps.minijail_smoke,
+            "no_new_privs": caps.no_new_privs,
+            "seccomp_filter": caps.seccomp_filter,
+            "seccomp_tsync": caps.seccomp_tsync,
+            "net_deny_verified": caps.net_deny_verified,
+            "pgid_kill": caps.pgid_kill,
+            "landlock_abi": caps.landlock_abi,
+            "system_sh_version": caps.system_sh_version,
+            "toybox_applets": caps.toybox_applets,
+            "reason": caps.reason,
+        })
+        .to_string()
+    }
+}
+
 // F3-04: re-export `engine-mobile`'s UniFFI scaffolding so the shared host's FFI
 // symbols (the re-exported `MobileEngineHandle` / `MobileEngineError`) land in
 // this crate's final library. Under the `uniffi` feature only.

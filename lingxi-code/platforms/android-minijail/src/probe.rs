@@ -316,21 +316,64 @@ mod android_impl {
     /// `landlock_create_ruleset(NULL, 0, LANDLOCK_CREATE_RULESET_VERSION)`.
     /// Returns `Some(version)` when the kernel reports a positive ABI version,
     /// else `None` (expected on GKI devices, which return -1/ENOSYS).
+    ///
+    /// CRITICAL: this MUST run in a forked child, not in-process. Android
+    /// installs an app-domain seccomp policy on every app process that does NOT
+    /// allow `landlock_create_ruleset` (arm64 nr 444) — a bare in-process
+    /// `syscall(444, …)` raises SIGSYS and aborts the WHOLE app (observed on the
+    /// API-34 emulator: "seccomp prevented call to disallowed arm64 system call
+    /// 444"). Forking contains that SIGSYS to a throwaway child: the parent reaps
+    /// it and reports `None` for any non-clean exit (signalled, or non-zero) just
+    /// as it would for ENOSYS — best-effort, never crashes the host process.
+    ///
+    /// The ABI version travels back through the child's exit code: a positive
+    /// version `v` (always small — current Landlock ABI is single digits) exits
+    /// `v`; anything else exits 0 meaning "no Landlock". The `0` sentinel is
+    /// safe because Landlock ABI versions are `>= 1`.
     #[allow(unsafe_code)]
     fn probe_landlock_abi() -> Option<u32> {
-        // SAFETY: `SYS_landlock_create_ruleset` is exported by libc on android.
-        // Calling it with a NULL attr and the VERSION flag asks the kernel to
-        // report the supported ABI — it creates nothing and touches no memory.
-        let rc = unsafe {
-            libc::syscall(
-                libc::SYS_landlock_create_ruleset,
-                std::ptr::null::<libc::c_void>(),
-                0usize,
-                LANDLOCK_CREATE_RULESET_VERSION as libc::c_ulong,
-            )
-        };
-        if rc > 0 {
-            u32::try_from(rc).ok()
+        // SAFETY: `fork` duplicates the process; we handle all three outcomes.
+        // The child runs only async-signal-safe syscalls and ends in `_exit`.
+        let pid = unsafe { libc::fork() };
+        if pid < 0 {
+            return None; // fork failed — best-effort probe stays None.
+        }
+        if pid == 0 {
+            // Child: ask the kernel for the Landlock ABI. If Android's seccomp
+            // policy blocks the syscall it SIGSYS-kills THIS child (contained);
+            // otherwise we map a positive ABI onto the exit code.
+            // SAFETY (child, async-signal-safe path): a single syscall + _exit;
+            // no heap growth, no destructors. `SYS_landlock_create_ruleset` is
+            // exported by libc on android; NULL attr + VERSION flag creates
+            // nothing and touches no memory.
+            unsafe {
+                let rc = libc::syscall(
+                    libc::SYS_landlock_create_ruleset,
+                    std::ptr::null::<libc::c_void>(),
+                    0usize,
+                    LANDLOCK_CREATE_RULESET_VERSION as libc::c_long,
+                );
+                // Clamp into the 1..=125 exit-code range; 0 (and anything out
+                // of range) means "no usable Landlock". `try_from` keeps the
+                // conversion lossless and `(1..=125).contains` keeps it in range.
+                let code = i32::try_from(rc)
+                    .ok()
+                    .filter(|v| (1..=125).contains(v))
+                    .unwrap_or(0);
+                libc::_exit(code);
+            }
+        }
+        // Parent: reap and decode. A signalled child (e.g. Android's SIGSYS) or
+        // a 0 exit both mean "no Landlock" → None.
+        let mut status: libc::c_int = 0;
+        // SAFETY: `pid` is our direct child; `&mut status` is a valid out-param.
+        let rc = unsafe { libc::waitpid(pid, &raw mut status, 0) };
+        if rc != pid || !libc::WIFEXITED(status) {
+            return None;
+        }
+        let code = libc::WEXITSTATUS(status);
+        if code >= 1 {
+            u32::try_from(code).ok()
         } else {
             None
         }

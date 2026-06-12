@@ -33,11 +33,6 @@ use std::sync::Arc;
 use anthropic_oauth::client::ClaudeAiOAuthClient;
 use anthropic_oauth::config::ClaudeAiOAuthConfig;
 use anthropic_oauth::handle::OAuthHandle;
-use tool_api::AnthropicRequestBuilder;
-use llm_client::{DefaultLlmClient, Transport};
-use orchestrator::model::user_agent::UserAgentEnv;
-use orchestrator::provider_adapter::SubscriberState;
-use platform_common::LlmTransportBridge;
 use async_trait::async_trait;
 use client_adapter::{
     AdapterOutputStream, AdapterPermissionGate, ClientEventListener, ListenerSink,
@@ -50,6 +45,9 @@ use client_protocol::permission::{
     PermissionKindDto, PermissionRequest as PermissionRequestDto, PermissionResponseDto,
 };
 use command_api::RegistrySlashDispatcher;
+use llm_client::{DefaultLlmClient, Transport};
+use orchestrator::model::user_agent::UserAgentEnv;
+use orchestrator::provider_adapter::SubscriberState;
 use orchestrator::test_support::{noop_hook_executor, StaticMemoryProvider};
 use orchestrator::{
     ConversationOrchestrator, OrchestratorApiClient, OrchestratorConfig, ProviderApiAdapter,
@@ -57,11 +55,13 @@ use orchestrator::{
 };
 use permission::gate::PermissionGate;
 use permission::PermissionMode;
+use platform_common::LlmTransportBridge;
 use sandbox::decision::ProjectTrustLevel;
 use sandbox::runtime_config::{Platform as SandboxPlatform, SandboxRuntimeConfig};
 use secret::CredentialManager;
 use tokio::sync::{Mutex, RwLock};
 use tokio_util::sync::CancellationToken;
+use tool_api::AnthropicRequestBuilder;
 use tool_api::BuiltinToolContext;
 use traits::http::{HttpError, RawByteStream, RawByteStreamWithMeta, SseStream, SseStreamWithMeta};
 use traits::{
@@ -148,6 +148,12 @@ pub struct MobileConfig {
     /// Settings-declared `routing` block as raw JSON, fed verbatim to
     /// `llm_client::ClientConfig`. `None` ⟶ the default (empty) routing config.
     pub routing: Option<serde_json::Value>,
+    /// Android-only Shell tool gate + prompt carrier (spec r3 §Registration gates,
+    /// P3). `None` on iOS and desktop — the Shell tool is absent on those
+    /// platforms. Built by `android-aar::build_android_engine` from the probed
+    /// capability cache + the `AndroidShellConfig` gate; consumed by
+    /// `tool_shell_mobile::register_all` in the composition root.
+    pub android_shell: Option<tool_api::AndroidShellToolCtx>,
 }
 
 impl Default for MobileConfig {
@@ -160,6 +166,7 @@ impl Default for MobileConfig {
             default_model: crate::MobileEngineConfig::default().default_model,
             provider_profiles: None,
             routing: None,
+            android_shell: None,
         }
     }
 }
@@ -244,7 +251,9 @@ impl PermissionRequestSink for RecordingPermissionSink {
 // `builtin_anthropic_config` + `apply_settings_providers` live in
 // `platform_common::llm_config` so both composition roots share the same
 // model table and settings-wiring logic.
-use platform_common::{apply_settings_providers, builtin_anthropic_config, parse_routing_overrides};
+use platform_common::{
+    apply_settings_providers, builtin_anthropic_config, parse_routing_overrides,
+};
 
 /// Build a fully-wired mobile [`MobileRuntime`] from a deterministic
 /// [`MobileConfig`] + an `Arc<dyn Platform>` (plan F3-03 — the mobile sibling of
@@ -326,11 +335,8 @@ pub async fn build_mobile_inner(
         if cfg.provider_profiles.is_some() || cfg.routing.is_some() {
             let empty = std::collections::BTreeMap::new();
             let providers = cfg.provider_profiles.as_ref().unwrap_or(&empty);
-            if let Err(e) = apply_settings_providers(
-                &mut cfg_obj,
-                providers,
-                cfg.routing.as_ref(),
-            ) {
+            if let Err(e) = apply_settings_providers(&mut cfg_obj, providers, cfg.routing.as_ref())
+            {
                 tracing::warn!(error = %e, "settings providers/routing entry rejected; earlier entries and the built-in profile remain active");
             }
         }
@@ -346,20 +352,28 @@ pub async fn build_mobile_inner(
         }).unwrap_or_default();
         // Extract per-profile pricing overrides before cfg_obj is consumed.
         let pricing_overrides: Vec<(llm_client::ProviderId, String, llm_client::TokenPricing)> =
-            cfg_obj.providers.iter().flat_map(|p| {
-                p.pricing.overrides.iter().filter_map(|(model_id, tp)| {
-                    p.models.iter()
-                        .find(|m| m.display_model == *model_id)
-                        .map(|m| (p.provider_id.clone(), m.billing_model.clone(), *tp))
+            cfg_obj
+                .providers
+                .iter()
+                .flat_map(|p| {
+                    p.pricing.overrides.iter().filter_map(|(model_id, tp)| {
+                        p.models
+                            .iter()
+                            .find(|m| m.display_model == *model_id)
+                            .map(|m| (p.provider_id.clone(), m.billing_model.clone(), *tp))
+                    })
                 })
-            }).collect();
+                .collect();
         let client = Arc::new(
             DefaultLlmClient::from_config(cfg_obj)
                 .map_err(|e| MobileBuildError::ApiBase(e.to_string()))?,
         );
         (client, routing_overrides, pricing_overrides)
     };
-    let subscriber_state = SubscriberState { is_subscriber: false, is_enterprise: false };
+    let subscriber_state = SubscriberState {
+        is_subscriber: false,
+        is_enterprise: false,
+    };
 
     // 3c-T3: build the cost estimator from the builtin reference catalog.
     // T2: apply per-profile pricing overrides from settings.
@@ -404,7 +418,11 @@ pub async fn build_mobile_inner(
     // (3) Credential manager + OAuth client (used by /login, /logout).
     let credentials = Arc::new(CredentialManager::new(storage, clock.clone(), http.clone()));
     let oauth_cfg = ClaudeAiOAuthConfig::default_with_port(0);
-    let oauth_client = Arc::new(ClaudeAiOAuthClient::new(oauth_cfg, http.clone(), credentials));
+    let oauth_client = Arc::new(ClaudeAiOAuthClient::new(
+        oauth_cfg,
+        http.clone(),
+        credentials,
+    ));
     let auth: Arc<dyn AuthHandle> = Arc::new(OAuthHandle::new(oauth_client));
 
     // (4) Orchestrator config from `cfg` (was a host env/arg read).
@@ -477,7 +495,9 @@ pub async fn build_mobile_inner(
         notifications: platform.notifications(),
         clipboard: platform.clipboard(),
         computer_control: platform.computer_control(),
-        android_shell: None,
+        // P3: thread the Android Shell gate + prompt carrier from MobileConfig.
+        // `None` on iOS and desktop (cfg.android_shell defaults to None).
+        android_shell: cfg.android_shell.clone(),
     };
     let tools = Arc::new(mobile_tool_registry(tool_ctx));
 
@@ -773,9 +793,7 @@ impl MobileEngineHandle {
     pub async fn submit(&self, command: ClientCommand) -> Result<(), ClientError> {
         match command {
             // ── Turn driving (SPAWN + return promptly) ─────────────────────
-            ClientCommand::SendPrompt {
-                text, turn_id, ..
-            } => {
+            ClientCommand::SendPrompt { text, turn_id, .. } => {
                 // Arm a fresh cancellation token for this turn and record it so
                 // a later `Cancel` can fire it (one in-flight turn per
                 // connection, §0.5).
@@ -801,7 +819,8 @@ impl MobileEngineHandle {
                 let sink = self.event_sink.clone();
                 self.runtime.spawn(async move {
                     if let Err(err) = orch.run_turn_streaming_with_cancel(&text, cancel).await {
-                        sink.emit(client_adapter::map_orchestrator_error(&err)).await;
+                        sink.emit(client_adapter::map_orchestrator_error(&err))
+                            .await;
                     }
                 });
                 Ok(())
@@ -831,11 +850,12 @@ impl MobileEngineHandle {
             // ── Model ──────────────────────────────────────────────────────
             ClientCommand::SetModel { model } => {
                 let handle: Arc<dyn OrchestratorHandle> = self.inner.orchestrator.clone();
-                handle.switch_model(&model).await.map_err(|e| {
-                    ClientError::Internal {
+                handle
+                    .switch_model(&model)
+                    .await
+                    .map_err(|e| ClientError::Internal {
                         message: format!("switch_model failed: {e}"),
-                    }
-                })?;
+                    })?;
                 self.event_sink
                     .emit(ClientEvent::ModelChanged { model })
                     .await;
@@ -883,9 +903,7 @@ impl MobileEngineHandle {
                         lower_auth_state(self.inner.auth.current_user().await)
                     }
                 };
-                self.event_sink
-                    .emit(ClientEvent::AuthState { state })
-                    .await;
+                self.event_sink.emit(ClientEvent::AuthState { state }).await;
                 Ok(())
             }
             ClientCommand::Logout => {
@@ -940,9 +958,12 @@ impl MobileEngineHandle {
                     });
                 }
                 let handle: Arc<dyn OrchestratorHandle> = self.inner.orchestrator.clone();
-                handle.clear_session().await.map_err(|e| ClientError::Internal {
-                    message: format!("clear_session failed: {e}"),
-                })?;
+                handle
+                    .clear_session()
+                    .await
+                    .map_err(|e| ClientError::Internal {
+                        message: format!("clear_session failed: {e}"),
+                    })?;
                 self.event_sink.emit(ClientEvent::SessionEnded).await;
                 Ok(())
             }
@@ -963,8 +984,7 @@ impl MobileEngineHandle {
             // an empty list (the loader's `EmptyDirectory` is not an error here —
             // it is "no resumable sessions yet").
             ClientCommand::ListSessions { limit } => {
-                let limit = limit
-                    .map_or(DEFAULT_SESSION_LIST_LIMIT, |l| l as usize);
+                let limit = limit.map_or(DEFAULT_SESSION_LIST_LIMIT, |l| l as usize);
                 self.emit_session_list(limit).await;
                 Ok(())
             }
@@ -993,15 +1013,19 @@ impl MobileEngineHandle {
                     });
                 }
                 let handle: Arc<dyn OrchestratorHandle> = self.inner.orchestrator.clone();
-                handle.clear_session().await.map_err(|e| ClientError::Internal {
-                    message: format!("new session (clear_session) failed: {e}"),
-                })?;
-                if let Some(model) = model {
-                    handle.switch_model(&model).await.map_err(|e| {
-                        ClientError::Internal {
-                            message: format!("new session model switch failed: {e}"),
-                        }
+                handle
+                    .clear_session()
+                    .await
+                    .map_err(|e| ClientError::Internal {
+                        message: format!("new session (clear_session) failed: {e}"),
                     })?;
+                if let Some(model) = model {
+                    handle
+                        .switch_model(&model)
+                        .await
+                        .map_err(|e| ClientError::Internal {
+                            message: format!("new session model switch failed: {e}"),
+                        })?;
                 }
                 let session_id = handle.current_session_id().await.to_string();
                 self.event_sink
@@ -1104,7 +1128,10 @@ impl MobileEngineHandle {
             // lighting them up is additive and does not change this seam's shape.
             // The `#[non_exhaustive]` enum also requires a catch-all.
             other => {
-                tracing::debug!(?other, "engine-mobile: command not routed by submit in the foundation");
+                tracing::debug!(
+                    ?other,
+                    "engine-mobile: command not routed by submit in the foundation"
+                );
                 Ok(())
             }
         }
@@ -1224,11 +1251,21 @@ impl MobileEngineHandle {
                     .await;
             }
             ProtocolListingKind::Hooks => {
-                let hooks = handle.list_hooks().await.iter().map(lower_hook_info).collect();
+                let hooks = handle
+                    .list_hooks()
+                    .await
+                    .iter()
+                    .map(lower_hook_info)
+                    .collect();
                 self.event_sink.emit(ClientEvent::Hooks { hooks }).await;
             }
             ProtocolListingKind::Agents => {
-                let agents = handle.list_agents().await.iter().map(lower_agent_info).collect();
+                let agents = handle
+                    .list_agents()
+                    .await
+                    .iter()
+                    .map(lower_agent_info)
+                    .collect();
                 self.event_sink.emit(ClientEvent::Agents { agents }).await;
             }
             ProtocolListingKind::Status => {
@@ -1249,7 +1286,10 @@ impl MobileEngineHandle {
             }
             // No engine handle on mobile in the foundation — additive to wire.
             _ => {
-                tracing::debug!(?kind, "engine-mobile: listing kind unhandled in the foundation");
+                tracing::debug!(
+                    ?kind,
+                    "engine-mobile: listing kind unhandled in the foundation"
+                );
             }
         }
     }
@@ -1258,7 +1298,9 @@ impl MobileEngineHandle {
 /// Lower an `Option<LoginInfo>` to the auth-state DTO (the inverse copy of the
 /// bridge-server router's helper — kept private to the shared host so iOS /
 /// Android cannot drift).
-fn lower_auth_state(info: Option<traits::auth::LoginInfo>) -> client_protocol::listings::AuthStateDto {
+fn lower_auth_state(
+    info: Option<traits::auth::LoginInfo>,
+) -> client_protocol::listings::AuthStateDto {
     match info {
         Some(li) => client_protocol::listings::AuthStateDto::SignedIn {
             email: li.email,
@@ -1461,8 +1503,12 @@ mod tests {
 
         // Resolve so the parked future returns (request id starts at 1).
         assert!(
-            gate.resolve(1, client_protocol::permission::PermissionResponseDto::Deny, "Bash")
-                .await
+            gate.resolve(
+                1,
+                client_protocol::permission::PermissionResponseDto::Deny,
+                "Bash"
+            )
+            .await
         );
         let _ = task.await.unwrap();
     }
@@ -1479,9 +1525,7 @@ mod tests {
     /// `Platform`) so the F3-05 `submit` path is exercised on CI. Returns the
     /// handle plus the recording listener so a test can read back delivered
     /// events.
-    fn build_submit_handle(
-        root: &std::path::Path,
-    ) -> (Arc<MobileEngineHandle>, Arc<FakeListener>) {
+    fn build_submit_handle(root: &std::path::Path) -> (Arc<MobileEngineHandle>, Arc<FakeListener>) {
         let platform: Arc<dyn traits::Platform> =
             Arc::new(HostFakePlatform::new(root.to_path_buf()));
         let listener = Arc::new(FakeListener::default());
@@ -1514,7 +1558,10 @@ mod tests {
                 })
                 .await
         });
-        assert!(result.is_ok(), "submit(SendPrompt) returned an error: {result:?}");
+        assert!(
+            result.is_ok(),
+            "submit(SendPrompt) returned an error: {result:?}"
+        );
 
         // The turn was SPAWNED, so `submit` returned before any `TurnEnded` was
         // delivered to the listener. (A `TurnStarted` may have been synthesized
@@ -1694,8 +1741,11 @@ mod tests {
             "userType": "external",
             "message": {"role": "user", "content": "hello from a prior session"}
         });
-        std::fs::write(&path, format!("{}\n", serde_json::to_string(&line).unwrap()))
-            .expect("write session file");
+        std::fs::write(
+            &path,
+            format!("{}\n", serde_json::to_string(&line).unwrap()),
+        )
+        .expect("write session file");
         uuid
     }
 
@@ -1780,7 +1830,10 @@ mod tests {
             let before = oh.current_session_id().await.to_string();
 
             handle
-                .submit(ClientCommand::NewSession { cwd: None, model: None })
+                .submit(ClientCommand::NewSession {
+                    cwd: None,
+                    model: None,
+                })
                 .await
                 .expect("submit(NewSession) ok");
 
@@ -1885,8 +1938,14 @@ mod tests {
             let messages = events
                 .iter()
                 .find_map(|e| match e {
-                    Ev::SessionResumed { session_id, messages } => {
-                        assert_eq!(session_id, &file_uuid, "resumed id must be the named session");
+                    Ev::SessionResumed {
+                        session_id,
+                        messages,
+                    } => {
+                        assert_eq!(
+                            session_id, &file_uuid,
+                            "resumed id must be the named session"
+                        );
                         Some(messages.clone())
                     }
                     _ => None,
@@ -1938,7 +1997,9 @@ mod tests {
             );
             let events = drained(&listener).await;
             assert!(
-                !events.iter().any(|e| matches!(e, Ev::SessionResumed { .. })),
+                !events
+                    .iter()
+                    .any(|e| matches!(e, Ev::SessionResumed { .. })),
                 "a rejected ResumeSession must NOT emit a (false) SessionResumed event"
             );
         });
@@ -1965,7 +2026,9 @@ mod tests {
             );
             let events = drained(&listener).await;
             assert!(
-                !events.iter().any(|e| matches!(e, Ev::SessionResumed { .. })),
+                !events
+                    .iter()
+                    .any(|e| matches!(e, Ev::SessionResumed { .. })),
                 "a rejected ResumeSession must NOT emit a SessionResumed event"
             );
         });

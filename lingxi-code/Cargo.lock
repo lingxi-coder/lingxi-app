@@ -1302,6 +1302,7 @@ dependencies = [
  "tool-notification",
  "tool-plan",
  "tool-share",
+ "tool-shell-mobile",
  "tool-skill",
  "tool-speech",
  "tool-task",

@@ -1433,6 +1433,222 @@ fn stream_failed_quota_maps_quota_exceeded() {
 }
 
 #[test]
+fn stream_failed_rate_limit_exceeded_maps_rate_limited() {
+    // Wire fixture pinned to codex codex-api/src/sse/responses.rs
+    // error_when_error_event: a response.failed carrying rate_limit_exceeded
+    // must map to RateLimited (retryable), with the retry-after delay parsed
+    // out of the "Please try again in 11.054s" message text.
+    let mut decoder = codec().stream_decoder();
+    let err = decoder
+        .decode_frame(RawStreamFrame::new(
+            serde_json::json!({
+                "type": "response.failed",
+                "response": {
+                    "id": "resp_1", "status": "failed",
+                    "error": {
+                        "code": "rate_limit_exceeded",
+                        "message": "Rate limit reached for gpt-5.1 in organization org-AAA on tokens per min (TPM): Limit 30000, Used 22999, Requested 12528. Please try again in 11.054s. Visit https://platform.openai.com/account/rate-limits to learn more.",
+                    },
+                },
+            })
+            .to_string()
+            .into_bytes(),
+        ))
+        .unwrap_err();
+
+    match err {
+        llm_client::LlmError::RateLimited { retry_after, scope } => {
+            assert_eq!(
+                retry_after,
+                Some(std::time::Duration::from_secs_f64(11.054))
+            );
+            assert_eq!(scope, None);
+        }
+        other => panic!("expected RateLimited, got: {other:?}"),
+    }
+}
+
+#[test]
+fn stream_failed_rate_limit_exceeded_without_delay_text_still_maps_rate_limited() {
+    let mut decoder = codec().stream_decoder();
+    let err = decoder
+        .decode_frame(RawStreamFrame::new(
+            serde_json::json!({
+                "type": "response.failed",
+                "response": {
+                    "id": "resp_1", "status": "failed",
+                    "error": {"code": "rate_limit_exceeded", "message": "Rate limit reached."},
+                },
+            })
+            .to_string()
+            .into_bytes(),
+        ))
+        .unwrap_err();
+
+    assert!(
+        matches!(
+            err,
+            llm_client::LlmError::RateLimited {
+                retry_after: None,
+                ..
+            }
+        ),
+        "got: {err:?}"
+    );
+}
+
+#[test]
+fn stream_failed_invalid_prompt_maps_invalid_request() {
+    // codex responses.rs is_invalid_prompt_error: code "invalid_prompt" is a
+    // non-retryable invalid request, not a generic 5xx fallthrough.
+    let mut decoder = codec().stream_decoder();
+    let err = decoder
+        .decode_frame(RawStreamFrame::new(
+            serde_json::json!({
+                "type": "response.failed",
+                "response": {
+                    "id": "resp_1", "status": "failed",
+                    "error": {"code": "invalid_prompt", "message": "prompt was flagged"},
+                },
+            })
+            .to_string()
+            .into_bytes(),
+        ))
+        .unwrap_err();
+
+    assert!(
+        matches!(
+            err,
+            llm_client::LlmError::InvalidRequest { ref message } if message == "prompt was flagged"
+        ),
+        "got: {err:?}"
+    );
+}
+
+#[test]
+fn stream_failed_unknown_code_falls_back_to_provider_internal() {
+    // Genuinely unknown codes keep the generic 5xx (retryable) fallthrough.
+    let mut decoder = codec().stream_decoder();
+    let err = decoder
+        .decode_frame(RawStreamFrame::new(
+            serde_json::json!({
+                "type": "response.failed",
+                "response": {
+                    "id": "resp_1", "status": "failed",
+                    "error": {"code": "some_future_code", "message": "??"},
+                },
+            })
+            .to_string()
+            .into_bytes(),
+        ))
+        .unwrap_err();
+
+    assert!(matches!(err, llm_client::LlmError::ProviderInternal), "got: {err:?}");
+}
+
+#[test]
+fn stream_arguments_delta_before_item_added_opens_lazy_tool_block() {
+    // Documented tolerance (openai_responses.rs handle_arguments_delta): an
+    // arguments delta arriving before output_item.added opens a ToolCall
+    // block with empty id/name instead of dropping the fragment.
+    let events = decode_stream(&[
+        created_frame(),
+        serde_json::json!({
+            "type": "response.function_call_arguments.delta",
+            "item_id": "fc_1", "output_index": 0,
+            "delta": "{\"command\":\"ls\"}",
+        }),
+    ]);
+
+    assert_eq!(
+        &events[1..],
+        &[
+            LlmEvent::ContentBlockStart {
+                index: 0,
+                content_block: ContentBlock::ToolCall {
+                    id: String::new(),
+                    name: String::new(),
+                    input: serde_json::Value::Object(serde_json::Map::new()),
+                },
+            },
+            LlmEvent::ContentBlockDelta {
+                index: 0,
+                delta: ContentDelta::InputJsonDelta {
+                    partial_json: "{\"command\":\"ls\"}".to_string(),
+                },
+            },
+        ]
+    );
+}
+
+#[test]
+fn stream_done_sentinel_is_tolerated() {
+    // The Responses API ends after response.completed without a [DONE]
+    // sentinel, but OpenAI-compatible gateways may append one: it must not
+    // error and must not duplicate the terminal events.
+    let mut decoder = codec().stream_decoder();
+    let mut events = Vec::new();
+    for frame in [
+        created_frame(),
+        serde_json::json!({
+            "type": "response.completed",
+            "response": {"id": "resp_1", "model": "gpt-5", "status": "completed"},
+        }),
+    ] {
+        events.extend(
+            decoder
+                .decode_frame(RawStreamFrame::new(frame.to_string().into_bytes()))
+                .unwrap(),
+        );
+    }
+    assert_eq!(events.last(), Some(&LlmEvent::MessageStop));
+    let terminal_count = events.len();
+
+    let extra = decoder
+        .decode_frame(RawStreamFrame::new(b"[DONE]".to_vec()))
+        .unwrap();
+
+    assert_eq!(extra, Vec::new());
+    assert_eq!(events.len(), terminal_count);
+}
+
+#[test]
+fn stream_content_delta_before_created_emits_synthetic_message_start() {
+    // Documented tolerance (ensure_started): content events arriving before
+    // response.created synthesize an empty MessageStart snapshot first,
+    // mirroring OpenAiChatCodec.
+    let events = decode_stream(&[serde_json::json!({
+        "type": "response.output_text.delta",
+        "item_id": "msg_1", "output_index": 0, "content_index": 0,
+        "delta": "hi",
+    })]);
+
+    assert_eq!(
+        &events[..2],
+        &[
+            LlmEvent::MessageStart {
+                response: Box::new(LlmResponse {
+                    id: String::new(),
+                    model: String::new(),
+                    content: Vec::new(),
+                    stop_reason: None,
+                    usage: Usage::default(),
+                    cost: None,
+                    provider_metadata: serde_json::Value::Null,
+                }),
+            },
+            LlmEvent::ContentBlockStart {
+                index: 0,
+                content_block: ContentBlock::Text {
+                    text: String::new(),
+                    cache_control: None,
+                },
+            },
+        ]
+    );
+}
+
+#[test]
 fn stream_unknown_event_types_ignored() {
     let events = decode_stream(&[
         created_frame(),

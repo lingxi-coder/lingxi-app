@@ -612,18 +612,78 @@ impl OpenAiResponsesStreamDecoder {
 /// `response.error {code, message}` through the shared Chat-envelope error
 /// decoder (the code vocabulary is shared; there is no HTTP status on a
 /// stream failure, so the fallback is the generic 5xx mapping).
+///
+/// Two wire codes the shared decoder only recognizes by HTTP status are
+/// pre-matched here (codex sse/responses.rs `response.failed` handling):
+/// `rate_limit_exceeded` → [`LlmError::RateLimited`] with the retry-after
+/// delay parsed from the message text, and `invalid_prompt` →
+/// [`LlmError::InvalidRequest`] (non-retryable).
 fn decode_failed_event(root: &Value) -> LlmError {
     let error = root
         .get("response")
         .and_then(|response| response.get("error"))
         .cloned()
         .unwrap_or(Value::Null);
+
+    let code = error.get("code").and_then(Value::as_str).unwrap_or_default();
+    let message = error
+        .get("message")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    match code {
+        "rate_limit_exceeded" => {
+            return LlmError::RateLimited {
+                retry_after: parse_retry_after_from_message(message),
+                scope: None,
+            };
+        }
+        "invalid_prompt" => {
+            return LlmError::InvalidRequest {
+                message: message.to_string(),
+            };
+        }
+        _ => {}
+    }
+
     super::openai::decode_error_response(&ProviderResponse {
         status: 500,
         headers: std::collections::BTreeMap::new(),
         body_json: serde_json::json!({ "error": error }),
         request_id: None,
     })
+}
+
+/// Parse the retry-after hint out of a `rate_limit_exceeded` message such as
+/// "... Please try again in 11.054s. ...".
+///
+/// Plain-string port of the codex sse/responses.rs `rate_limit_regex`
+/// (`(?i)try again in\s*(\d+(?:\.\d+)?)\s*(s|ms|seconds?)`): seconds (`s`,
+/// `second`, `seconds`) and milliseconds (`ms`) units are recognized; any
+/// other shape yields `None`.
+fn parse_retry_after_from_message(message: &str) -> Option<std::time::Duration> {
+    const NEEDLE: &str = "try again in";
+    let lower = message.to_ascii_lowercase();
+    let start = lower.find(NEEDLE)? + NEEDLE.len();
+    let rest = lower[start..].trim_start();
+
+    let digits_end = rest
+        .char_indices()
+        .take_while(|(_, c)| c.is_ascii_digit() || *c == '.')
+        .map(|(i, c)| i + c.len_utf8())
+        .last()?;
+    let value: f64 = rest[..digits_end].parse().ok()?;
+
+    let unit = rest[digits_end..].trim_start();
+    if unit.starts_with("ms") {
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        return Some(std::time::Duration::from_millis(value as u64));
+    }
+    if unit.starts_with('s') {
+        // try_ variant: a degenerate digit run can parse to inf, which the
+        // panicking from_secs_f64 constructor would abort on.
+        return std::time::Duration::try_from_secs_f64(value).ok();
+    }
+    None
 }
 
 /// Map a provider-neutral reasoning token budget onto the Responses API

@@ -20,6 +20,8 @@
 //! names rather than importing the per-tool name constants from other crates
 //! (scope-locked, and the names are fixture-locked wire identifiers anyway).
 
+use traits::env::is_env_truthy;
+
 /// Tools that are only accessible via REPL when REPL mode is enabled.
 ///
 /// When REPL mode is on, these tools are hidden from Claude's direct use,
@@ -60,20 +62,6 @@ pub fn is_repl_mode_enabled() -> bool {
     }
     std::env::var("USER_TYPE").ok().as_deref() == Some("ant")
         && std::env::var("CLAUDE_CODE_ENTRYPOINT").ok().as_deref() == Some("cli")
-}
-
-/// Port of `isEnvTruthy` (`utils/envUtils.ts:32-37`): a non-empty value that
-/// normalizes (lowercase + trim) to one of `1`/`true`/`yes`/`on`.
-fn is_env_truthy(env_var: Option<&str>) -> bool {
-    match env_var {
-        None => false,
-        Some(v) => {
-            if v.is_empty() {
-                return false;
-            }
-            matches!(v.to_lowercase().trim(), "1" | "true" | "yes" | "on")
-        }
-    }
 }
 
 /// Port of `isEnvDefinedFalsy` (`utils/envUtils.ts:39-47`): a defined,

@@ -146,9 +146,7 @@ const NON_INTERACTIVE_SESSION_FLAG: &str = "is_non_interactive_session";
 /// Port of `isEnvTruthy(process.env[key])` (`envUtils.ts:32-37`): lower-cased,
 /// trimmed value ∈ {`1`,`true`,`yes`,`on`}.
 fn env_truthy(key: &str) -> bool {
-    std::env::var(key).is_ok_and(|v| {
-        matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on")
-    })
+    traits::env::is_env_truthy(std::env::var(key).ok().as_deref())
 }
 
 /// Pure core of [`is_todo_v2_enabled`] (`isTodoV2Enabled`,

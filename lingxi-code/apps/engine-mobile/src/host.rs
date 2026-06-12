@@ -359,6 +359,7 @@ pub async fn build_mobile_inner(
         );
         (client, routing_overrides, pricing_overrides)
     };
+    // No live subscription slot on mobile (no OAuth profile fetch) — static state stands.
     let subscriber_state = SubscriberState { is_subscriber: false, is_enterprise: false };
 
     // 3c-T3: build the cost estimator from the builtin reference catalog.

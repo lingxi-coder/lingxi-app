@@ -7,7 +7,10 @@
 
 use crate::conversation::{OrchestratorApiClient, StreamingApiClient};
 use crate::model::betas::{apply_beta_header_with_auth, Endpoint, Provider};
-use crate::model::rate_limit::{parse_retry_after, parse_unified_reset, RateLimitInfo};
+use crate::model::rate_limit::{
+    formatted_reset_times_from_headers, parse_retry_after, parse_unified_reset,
+    rate_limit_error_message, RateLimitInfo, RawUtilization, SubscriptionContext,
+};
 use crate::model::retry::{next_step_with_backoff, resolve_retry_control_with_settings, DriveStep, ResolveRetryEnv, RetryControl, RetryState};
 use crate::model::telemetry;
 use crate::model::user_agent::{user_agent, UserAgentEnv};
@@ -64,7 +67,15 @@ pub struct ProviderApiAdapter {
     client: Arc<DefaultLlmClient>,
     transport: Arc<dyn Transport>,
     /// Subscriber state for the 429 gate (Task 8 wires real value).
+    ///
+    /// Build-time seed/fallback: when [`Self::subscription`] is attached and
+    /// resolved, [`Self::effective_subscriber`] prefers the live snapshot.
     subscriber: SubscriberState,
+    /// Live shared subscription slot (batch-5 Task 3). Filled asynchronously
+    /// by the composition root's background profile/roles fetch (batch 4);
+    /// `None` when the host has no OAuth profile fetch (mobile) or predates
+    /// the wiring. Read via [`Self::effective_subscriber`].
+    subscription: Option<traits::subscription::SharedSubscription>,
     /// User-agent environment snapshot (Task 3).
     ua: UserAgentEnv,
     /// Build version string for the User-Agent header.
@@ -120,6 +131,38 @@ pub struct ProviderApiAdapter {
     /// on the adapter directly. A future task can thread it into the handle if
     /// needed.
     last_rate_limit: Mutex<Option<RateLimitInfo>>,
+    /// Most recently observed RAW per-window utilization snapshot.
+    ///
+    /// Task 2 (llm-client future-work batch 5): parsed via
+    /// [`RawUtilization::from_headers`] alongside the [`RateLimitInfo`]
+    /// parse in `record_rate_limit_from_headers` — claude-code assigns
+    /// `rawUtilization = extractRawUtilization(headers)` on the same passes
+    /// that compute the limits (`claudeAiLimits.ts:476`). Assigned
+    /// UNCONDITIONALLY on every recorded response (unlike `last_rate_limit`,
+    /// which is gated on `has_unified_headers()`), so a later response
+    /// without the per-window quartet resets it to the empty snapshot
+    /// exactly like the TS module state. `None` until the first recorded
+    /// response. NOT recorded on 429 error responses — TS also extracts raw
+    /// utilization from error headers (`claudeAiLimits.ts:500`); this RAW
+    /// cache records on success paths only (`last_rate_limit` DOES get a
+    /// rejected snapshot from 429 headers via `record_rate_limit_from_429`;
+    /// extending that to the raw cache is a tracked follow-up). Exposed via
+    /// the `OrchestratorApiClient::last_raw_utilization` override.
+    last_raw_utilization: Mutex<Option<RawUtilization>>,
+    /// Limits-specific copy composed from the most recent 429 **error**
+    /// response's unified headers.
+    ///
+    /// Task 6 (llm-client future-work batch 5): claude-code builds the
+    /// rejected-limits view from the terminal 429's own headers and renders
+    /// `getRateLimitErrorMessage` as the user-visible error content
+    /// (`errors.ts:480-524`). Set on EVERY decoded 429 by
+    /// [`Self::record_rate_limit_from_429`] — `Some(copy)` when the 429
+    /// carried unified headers, `None` otherwise (the
+    /// `if (rateLimitType || overageStatus)` gate at `errors.ts:480`) — and
+    /// cleared on every successful response, so it always reflects the most
+    /// recent response seen. Exposed via the
+    /// `OrchestratorApiClient::last_rate_limit_error_message` override.
+    last_429_message: Mutex<Option<String>>,
 }
 
 impl ProviderApiAdapter {
@@ -226,6 +269,7 @@ impl ProviderApiAdapter {
             client,
             transport,
             subscriber,
+            subscription: None,
             ua,
             version: version.into(),
             analytics,
@@ -237,6 +281,38 @@ impl ProviderApiAdapter {
             available_model_ids,
             estimator,
             last_rate_limit: Mutex::new(None),
+            last_raw_utilization: Mutex::new(None),
+            last_429_message: Mutex::new(None),
+        }
+    }
+
+    /// Attach the live subscription slot (batch-5 Task 3). When present and
+    /// resolved, the drive loops read subscriber/enterprise state from it at
+    /// call time instead of the build-time [`SubscriberState`] copy.
+    #[must_use]
+    pub fn with_subscription(mut self, slot: traits::subscription::SharedSubscription) -> Self {
+        self.subscription = Some(slot);
+        self
+    }
+
+    /// Effective subscriber state: the live shared snapshot when provided and
+    /// resolved (closes the retry-gate half of the `OrchestratorConfig`
+    /// PARITY-GAP — `is_enterprise` was build-time `false` because the profile
+    /// fetch lands after construction), else the static build-time state.
+    /// Poisoned/empty slot → static fallback (conservative, pre-batch-5
+    /// behavior).
+    ///
+    /// Granularity: each drive fn hoists this ONCE before its retry loop, so
+    /// `RetryState`'s 429/enterprise gate is stable across a request's retry
+    /// attempts — the TS-faithful behaviour (`getSubscriptionType()` reads per
+    /// attempt-ish but the gate effectively stabilizes per request).
+    fn effective_subscriber(&self) -> SubscriberState {
+        let Some(slot) = &self.subscription else { return self.subscriber; };
+        let Ok(guard) = slot.read() else { return self.subscriber; };
+        let Some(snap) = guard.as_ref() else { return self.subscriber; };
+        SubscriberState {
+            is_subscriber: snap.is_subscriber,
+            is_enterprise: snap.subscription_type.as_deref() == Some("enterprise"),
         }
     }
 
@@ -271,13 +347,18 @@ impl ProviderApiAdapter {
     ///
     /// **Header name `x-request-id`** — sourced from `api-client/src/anthropic.rs`
     /// where it is written as `("x-request-id".into(), new_request_id())`.
+    ///
+    /// Reads [`Self::effective_subscriber`] directly (one resolver call per
+    /// attempt — these injectors run once per prepare/execute attempt, so the
+    /// live-slot read here is per-attempt, the lighter diff vs. threading the
+    /// hoisted value through as a parameter).
     fn inject_headers(&self, prepared: &mut ProviderRequest, request_id: &str) {
         // anthropic-beta (Task 2): full assembled list merged with any auth-injected betas.
         apply_beta_header_with_auth(
             prepared,
             Provider::Anthropic,
             Endpoint::MessagesCreate,
-            self.subscriber.is_subscriber,
+            self.effective_subscriber().is_subscriber,
         );
         // User-Agent (Task 3).
         prepared
@@ -295,7 +376,7 @@ impl ProviderApiAdapter {
             prepared,
             Provider::Anthropic,
             Endpoint::MessagesCreateStream,
-            self.subscriber.is_subscriber,
+            self.effective_subscriber().is_subscriber,
         );
         prepared
             .headers
@@ -408,6 +489,11 @@ impl ProviderApiAdapter {
             .iter()
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
+        // Task 2 (llm-client future-work batch 5): track the raw per-window
+        // snapshot on EVERY recorded headers pass — `rawUtilization =
+        // extractRawUtilization(headersToUse)` (claudeAiLimits.ts:476), NOT
+        // gated on `has_unified_headers()` like the limits snapshot below.
+        *self.last_raw_utilization.lock().unwrap() = Some(RawUtilization::from_headers(&hvec));
         let info = RateLimitInfo::from_headers(&hvec);
         if info.has_unified_headers() {
             // Warn when the account is near or at exhaustion.
@@ -430,6 +516,82 @@ impl ProviderApiAdapter {
             }
             *self.last_rate_limit.lock().unwrap() = Some(info);
         }
+        // Task 6 (batch 5): a successful response supersedes any cached 429
+        // limits copy — the slot always reflects the most recent response.
+        *self.last_429_message.lock().unwrap() = None;
+    }
+
+    /// Whether the live subscription snapshot is a Pro or Enterprise plan —
+    /// the `getSubscriptionType() === 'pro' || 'enterprise'` predicate gating
+    /// the `seven_day_sonnet` wording (claude-code
+    /// `rateLimitMessages.ts:176-181`).
+    ///
+    /// Reads the live [`Self::subscription`] slot directly (the snapshot
+    /// carries `subscription_type`; [`SubscriberState`] does not). With no
+    /// resolved snapshot, falls back to the build-time enterprise bit —
+    /// `pro` is unknowable pre-snapshot, matching an unresolved
+    /// `getSubscriptionType()` evaluating to neither.
+    fn is_pro_or_enterprise(&self) -> bool {
+        if let Some(slot) = &self.subscription {
+            if let Ok(guard) = slot.read() {
+                if let Some(snap) = guard.as_ref() {
+                    return matches!(
+                        snap.subscription_type.as_deref(),
+                        Some("pro" | "enterprise")
+                    );
+                }
+            }
+        }
+        self.subscriber.is_enterprise
+    }
+
+    /// Record the unified rate-limit context from a 429 **error** response —
+    /// the Rust seam for claude-code `errors.ts:471-524`, which extracts the
+    /// unified headers from the error itself when a turn dies on a 429
+    /// (success-path recording never sees them).
+    ///
+    /// When the 429 carries unified headers (the
+    /// `if (rateLimitType || overageStatus)` gate, `errors.ts:480`):
+    /// 1. the forced-`rejected` limits view replaces the cached snapshot
+    ///    (TS updates its limits state from the error headers with
+    ///    `status: 'rejected'`, `errors.ts:482-516`), and
+    /// 2. the composed `getRateLimitErrorMessage` copy is cached for the
+    ///    orchestrator's terminal-error re-map
+    ///    (`OrchestratorError::RateLimitRejected`).
+    ///
+    /// Without unified headers the copy slot is cleared (the generic 429
+    /// surface applies) and the limits snapshot is left untouched — TS only
+    /// updates inside the gated branch.
+    fn record_rate_limit_from_429(&self, headers: &std::collections::BTreeMap<String, String>) {
+        let hvec: Vec<(String, String)> = headers
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        let composed = RateLimitInfo::from_429_error_headers(&hvec).map(|info| {
+            // The MESSAGE composition ports errors.ts:482-516 (a LOCAL limits
+            // object built from the error headers). Writing the snapshot into
+            // `last_rate_limit` additionally mirrors the TS STATE update
+            // `extractQuotaStatusFromError` (claudeAiLimits.ts:487-515), with
+            // a documented divergence: TS updates state only on the TERMINAL
+            // 429 (the catch handler), while this records per-attempt — a
+            // retried-then-recovered 429 plants a rejected snapshot that a
+            // subsequent unified-header-less success would not overwrite (TS
+            // would reset to allowed). Low probability (subscriber successes
+            // carry the headers); terminal-only recording is a tracked
+            // follow-up.
+            *self.last_rate_limit.lock().unwrap() = Some(info.clone());
+            // `formatResetTime(…, true)` analogue for both reset headers
+            // (`rateLimitMessages.ts:144-148`), formatted at error time.
+            let formatted = formatted_reset_times_from_headers(&hvec);
+            rate_limit_error_message(
+                &info,
+                &formatted.as_reset_times(),
+                SubscriptionContext {
+                    is_pro_or_enterprise: self.is_pro_or_enterprise(),
+                },
+            )
+        });
+        *self.last_429_message.lock().unwrap() = composed.flatten();
     }
 
     /// HTTP status code approximation for `emit_failed` (best-effort: only the
@@ -492,10 +654,15 @@ impl ProviderApiAdapter {
         let started = Instant::now();
         telemetry::emit_started(&self.analytics, &req.model, &request_id, false).await;
 
+        // Batch-5 Task 3: resolve the live subscriber state ONCE per drive call
+        // (not per attempt) — RetryState persists across the retry loop, so the
+        // 429/enterprise gate is stable for the whole request, matching the TS
+        // granularity (the gate effectively stabilizes per request).
+        let sub = self.effective_subscriber();
         let mut state = RetryState {
             consecutive_overloaded: initial_consecutive_overloaded,
-            is_subscriber: self.subscriber.is_subscriber,
-            is_enterprise: self.subscriber.is_enterprise,
+            is_subscriber: sub.is_subscriber,
+            is_enterprise: sub.is_enterprise,
             ..RetryState::default()
         };
         // thinking_budget: Task 6 drives with 0; extended-thinking wiring in Task 10+.
@@ -594,6 +761,10 @@ impl ProviderApiAdapter {
 
                             // Rate-limited: resolve delay from headers.
                             let effective_err = if let LlmError::RateLimited { .. } = &decode_err {
+                                // Task 6 (batch 5): capture the 429's OWN
+                                // unified headers (errors.ts:471-516) so a
+                                // terminal 429 can surface the limits copy.
+                                self.record_rate_limit_from_429(&provider_resp.headers);
                                 let delay = Self::resolve_retry_after(&provider_resp.headers);
                                 telemetry::emit_rate_limited(
                                     &self.analytics,
@@ -653,7 +824,7 @@ impl ProviderApiAdapter {
                                     retry_control = resolve_retry_control_with_settings(
                                         &req.model,
                                         next_fallback,
-                                        self.subscriber.is_subscriber,
+                                        sub.is_subscriber,
                                         &ResolveRetryEnv::from_process_env(),
                                         self.settings_max_retries,
                                     );
@@ -721,16 +892,19 @@ impl ProviderApiAdapter {
         let request_id = new_request_id();
         telemetry::emit_started(&self.analytics, &req.model, &request_id, true).await;
 
+        // Batch-5 Task 3: live subscriber state, resolved ONCE per drive call
+        // (see `drive_non_stream_seeded_with_chain` for the granularity note).
+        let sub = self.effective_subscriber();
         let mut state = RetryState {
-            is_subscriber: self.subscriber.is_subscriber,
-            is_enterprise: self.subscriber.is_enterprise,
+            is_subscriber: sub.is_subscriber,
+            is_enterprise: sub.is_enterprise,
             ..RetryState::default()
         };
         // Stream path uses settings-based retry control (same precedence as non-stream).
         let ctl = resolve_retry_control_with_settings(
             &req.model,
             None, // fallback not used on stream connect-phase
-            self.subscriber.is_subscriber,
+            sub.is_subscriber,
             &ResolveRetryEnv::from_process_env(),
             self.settings_max_retries,
         );
@@ -791,6 +965,9 @@ impl ProviderApiAdapter {
                         // fall through to the 1 s fallback inside
                         // `resolve_retry_after`.
                         let effective_err = if let LlmError::RateLimited { .. } = &decode_err {
+                            // Task 6 (batch 5): same 429-error-header capture
+                            // as the non-stream path (errors.ts:471-516).
+                            self.record_rate_limit_from_429(&response_headers);
                             LlmError::RateLimited {
                                 retry_after: Some(Self::resolve_retry_after(&response_headers)),
                                 scope: None,
@@ -957,7 +1134,7 @@ impl OrchestratorApiClient for ProviderApiAdapter {
         let ctl = resolve_retry_control_with_settings(
             model,
             None,
-            self.subscriber.is_subscriber,
+            self.effective_subscriber().is_subscriber,
             &ResolveRetryEnv::from_process_env(),
             self.settings_max_retries,
         );
@@ -976,7 +1153,7 @@ impl OrchestratorApiClient for ProviderApiAdapter {
         let ctl = resolve_retry_control_with_settings(
             model,
             None,
-            self.subscriber.is_subscriber,
+            self.effective_subscriber().is_subscriber,
             &ResolveRetryEnv::from_process_env(),
             self.settings_max_retries,
         );
@@ -988,7 +1165,8 @@ impl OrchestratorApiClient for ProviderApiAdapter {
     /// Routes through [`resolve_retry_control`] which computes `allow_fallback`
     /// from the env + subscriber state (Task 8). The `_is_subscriber` /
     /// `_is_enterprise` parameters are **ignored** — the adapter always reads
-    /// subscriber state from `self.subscriber` (wired at construction time).
+    /// subscriber state via [`Self::effective_subscriber`] (the live shared
+    /// snapshot when attached, else the construction-time copy).
     /// The underscore prefix signals that these call-site values are not used;
     /// the parameters are kept for API compatibility and will be removed in
     /// Task 10.
@@ -1032,7 +1210,7 @@ impl OrchestratorApiClient for ProviderApiAdapter {
         let mut ctl = resolve_retry_control_with_settings(
             model,
             effective_chain.first().cloned(),
-            self.subscriber.is_subscriber,
+            self.effective_subscriber().is_subscriber,
             &ResolveRetryEnv::from_process_env(),
             self.settings_max_retries,
         );
@@ -1064,7 +1242,7 @@ impl OrchestratorApiClient for ProviderApiAdapter {
         let ctl = resolve_retry_control_with_settings(
             model,
             None,
-            self.subscriber.is_subscriber,
+            self.effective_subscriber().is_subscriber,
             &ResolveRetryEnv::from_process_env(),
             self.settings_max_retries,
         );
@@ -1097,6 +1275,21 @@ impl OrchestratorApiClient for ProviderApiAdapter {
     /// the same name above keeps its three-field projection untouched.
     fn last_rate_limit_full(&self) -> Option<RateLimitInfo> {
         self.last_rate_limit_info()
+    }
+
+    /// Task 2 (llm-client future-work batch 5): expose the raw per-window
+    /// snapshot cached by `record_rate_limit_from_headers` for the turn
+    /// drivers' `emit_raw_utilization` seam.
+    fn last_raw_utilization(&self) -> Option<RawUtilization> {
+        *self.last_raw_utilization.lock().unwrap()
+    }
+
+    /// Task 6 (llm-client future-work batch 5): expose the limits copy
+    /// composed by [`Self::record_rate_limit_from_429`] from the most recent
+    /// 429 error response's unified headers, for the orchestrator's
+    /// terminal-429 re-map (claude-code `errors.ts:480-524`).
+    fn last_rate_limit_error_message(&self) -> Option<String> {
+        self.last_429_message.lock().unwrap().clone()
     }
 }
 
@@ -1417,6 +1610,62 @@ mod tests {
             None,
             None,
         )
+    }
+
+    // ── effective_subscriber (batch-5 Task 3: live SharedSubscription) ───────
+
+    fn shared_slot(
+        snap: Option<traits::subscription::SubscriptionSnapshot>,
+    ) -> traits::subscription::SharedSubscription {
+        Arc::new(std::sync::RwLock::new(snap))
+    }
+
+    #[test]
+    fn effective_subscriber_prefers_live_snapshot() {
+        let transport = FakeTransport::always(ProviderResponse::json(200, ok_response_json()));
+        let adapter = make_adapter_with_subscriber(transport, SubscriberState::default())
+            .with_subscription(shared_slot(Some(traits::subscription::SubscriptionSnapshot {
+                is_subscriber: true,
+                subscription_type: Some("enterprise".to_string()),
+                ..Default::default()
+            })));
+        let sub = adapter.effective_subscriber();
+        assert!(sub.is_subscriber);
+        assert!(sub.is_enterprise);
+    }
+
+    #[test]
+    fn effective_subscriber_falls_back_when_slot_empty_or_absent() {
+        let static_state = SubscriberState { is_subscriber: true, is_enterprise: false };
+
+        // No slot attached → static build-time state.
+        let transport = FakeTransport::always(ProviderResponse::json(200, ok_response_json()));
+        let adapter = make_adapter_with_subscriber(transport, static_state);
+        let sub = adapter.effective_subscriber();
+        assert!(sub.is_subscriber);
+        assert!(!sub.is_enterprise);
+
+        // Slot attached but unresolved (None) → static build-time state.
+        let transport = FakeTransport::always(ProviderResponse::json(200, ok_response_json()));
+        let adapter = make_adapter_with_subscriber(transport, static_state)
+            .with_subscription(shared_slot(None));
+        let sub = adapter.effective_subscriber();
+        assert!(sub.is_subscriber);
+        assert!(!sub.is_enterprise);
+    }
+
+    #[test]
+    fn effective_subscriber_non_enterprise_tier_is_not_enterprise() {
+        let transport = FakeTransport::always(ProviderResponse::json(200, ok_response_json()));
+        let adapter = make_adapter_with_subscriber(transport, SubscriberState::default())
+            .with_subscription(shared_slot(Some(traits::subscription::SubscriptionSnapshot {
+                is_subscriber: true,
+                subscription_type: Some("team".to_string()),
+                ..Default::default()
+            })));
+        let sub = adapter.effective_subscriber();
+        assert!(sub.is_subscriber);
+        assert!(!sub.is_enterprise);
     }
 
     // ── Previously-ignored tests (un-ignored, ported to FakeTransport) ────────
@@ -1805,6 +2054,139 @@ mod tests {
             transport.seen_count(),
             1,
             "subscriber 429 must not retry (seen_count should be 1)"
+        );
+    }
+
+    /// Task 6 (batch 5): a terminal 429 whose response carries the unified
+    /// headers records the forced-`rejected` snapshot AND the composed
+    /// limits copy (byte-pinned: no reset header → no ` · resets …` clause,
+    /// `rateLimitMessages.ts:149` + `:333-344`).
+    #[tokio::test]
+    async fn terminal_429_with_unified_headers_records_limits_copy() {
+        let transport = FakeTransport::always(ProviderResponse {
+            status: 429,
+            headers: {
+                let mut h = BTreeMap::new();
+                h.insert(
+                    "anthropic-ratelimit-unified-representative-claim".to_string(),
+                    "seven_day".to_string(),
+                );
+                h.insert(
+                    "anthropic-ratelimit-unified-status".to_string(),
+                    "rejected".to_string(),
+                );
+                h
+            },
+            body_json: serde_json::json!({
+                "type": "error",
+                "error": {"type": "rate_limit_error", "message": "You have reached your usage limit"}
+            }),
+            request_id: None,
+        });
+        // Subscriber (non-enterprise) → the 429 is terminal on the first try.
+        let adapter = make_adapter_with_subscriber(
+            transport.clone(),
+            SubscriberState { is_subscriber: true, is_enterprise: false },
+        );
+        let result = adapter
+            .messages_create("claude-sonnet-4-20250514", None, Vec::new(), Vec::new())
+            .await;
+        assert!(matches!(result, Err(LlmError::RateLimited { .. })), "got {result:?}");
+
+        // The composed copy is cached for the orchestrator's terminal re-map.
+        assert_eq!(
+            OrchestratorApiClient::last_rate_limit_error_message(&adapter).as_deref(),
+            Some("You've hit your weekly limit"),
+            "seven_day → formatLimitReachedText('weekly limit', '') verbatim"
+        );
+        // errors.ts:482-516 — the limits snapshot is updated from the error's
+        // headers with status FORCED 'rejected'.
+        let info = OrchestratorApiClient::last_rate_limit_full(&adapter).expect("snapshot");
+        assert_eq!(info.status.as_deref(), Some("rejected"));
+        assert_eq!(info.rate_limit_type.as_deref(), Some("seven_day"));
+    }
+
+    /// Task 6 (batch 5): a 429 WITHOUT unified headers fails the
+    /// `if (rateLimitType || overageStatus)` gate (errors.ts:480) — no copy
+    /// is composed, and a copy from an earlier 429 is superseded (the slot
+    /// reflects the most recent 429), so the generic surface applies.
+    #[tokio::test]
+    async fn terminal_429_without_unified_headers_records_no_copy() {
+        let transport = FakeTransport::always(ProviderResponse {
+            status: 429,
+            headers: BTreeMap::new(),
+            body_json: serde_json::json!({
+                "type": "error",
+                "error": {"type": "rate_limit_error", "message": "rate limited"}
+            }),
+            request_id: None,
+        });
+        let adapter = make_adapter_with_subscriber(
+            transport.clone(),
+            SubscriberState { is_subscriber: true, is_enterprise: false },
+        );
+        let result = adapter
+            .messages_create("claude-sonnet-4-20250514", None, Vec::new(), Vec::new())
+            .await;
+        assert!(result.is_err());
+        assert_eq!(
+            OrchestratorApiClient::last_rate_limit_error_message(&adapter),
+            None,
+            "no unified headers on the 429 → no limits copy"
+        );
+    }
+
+    /// Task 6 (batch 5): the live subscription slot's `pro` plan flips the
+    /// `seven_day_sonnet` wording to "weekly limit"
+    /// (`rateLimitMessages.ts:176-181`).
+    #[tokio::test]
+    async fn terminal_429_sonnet_copy_uses_pro_subscription_wording() {
+        let resp_429 = |claim: &str| ProviderResponse {
+            status: 429,
+            headers: {
+                let mut h = BTreeMap::new();
+                h.insert(
+                    "anthropic-ratelimit-unified-representative-claim".to_string(),
+                    claim.to_string(),
+                );
+                h
+            },
+            body_json: serde_json::json!({
+                "type": "error",
+                "error": {"type": "rate_limit_error", "message": "rate limited"}
+            }),
+            request_id: None,
+        };
+
+        // Without a pro/enterprise snapshot → "Sonnet limit".
+        let adapter = make_adapter_with_subscriber(
+            FakeTransport::always(resp_429("seven_day_sonnet")),
+            SubscriberState { is_subscriber: true, is_enterprise: false },
+        );
+        let _ = adapter
+            .messages_create("claude-sonnet-4-20250514", None, Vec::new(), Vec::new())
+            .await;
+        assert_eq!(
+            OrchestratorApiClient::last_rate_limit_error_message(&adapter).as_deref(),
+            Some("You've hit your Sonnet limit")
+        );
+
+        // With a live `pro` snapshot → "weekly limit".
+        let pro = make_adapter_with_subscriber(
+            FakeTransport::always(resp_429("seven_day_sonnet")),
+            SubscriberState { is_subscriber: true, is_enterprise: false },
+        )
+        .with_subscription(shared_slot(Some(traits::subscription::SubscriptionSnapshot {
+            is_subscriber: true,
+            subscription_type: Some("pro".to_string()),
+            ..Default::default()
+        })));
+        let _ = pro
+            .messages_create("claude-sonnet-4-20250514", None, Vec::new(), Vec::new())
+            .await;
+        assert_eq!(
+            OrchestratorApiClient::last_rate_limit_error_message(&pro).as_deref(),
+            Some("You've hit your weekly limit")
         );
     }
 

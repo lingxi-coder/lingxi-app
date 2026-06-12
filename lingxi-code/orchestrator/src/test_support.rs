@@ -34,6 +34,19 @@ pub struct MockApiClient {
     /// snapshot returned by `last_rate_limit_full()`. A `std::sync::Mutex`
     /// (not tokio) because the trait accessor is a sync `fn`.
     rate_limit_full: std::sync::Mutex<Option<crate::model::rate_limit::RateLimitInfo>>,
+    /// Task 2 (llm-client future-work batch 5): the raw per-window snapshot
+    /// returned by `last_raw_utilization()`. Same sync-Mutex rationale as
+    /// `rate_limit_full`.
+    raw_utilization: std::sync::Mutex<Option<crate::model::rate_limit::RawUtilization>>,
+    /// Task 6 (llm-client future-work batch 5): when `Some`, every
+    /// `messages_create` call fails with a clone of this error instead of
+    /// consuming the queue — lets tests drive a terminal API failure (e.g.
+    /// `LlmError::RateLimited`) through the turn loop.
+    fail_with: std::sync::Mutex<Option<LlmError>>,
+    /// Task 6 (batch 5): the composed limits copy returned by
+    /// `last_rate_limit_error_message()`. Same sync-Mutex rationale as
+    /// `rate_limit_full`.
+    rate_limit_error_message: std::sync::Mutex<Option<String>>,
 }
 
 impl MockApiClient {
@@ -47,7 +60,24 @@ impl MockApiClient {
             captured_tools: Arc::new(Mutex::new(Vec::new())),
             captured_seeds: Arc::new(Mutex::new(Vec::new())),
             rate_limit_full: std::sync::Mutex::new(None),
+            raw_utilization: std::sync::Mutex::new(None),
+            fail_with: std::sync::Mutex::new(None),
+            rate_limit_error_message: std::sync::Mutex::new(None),
         }
+    }
+
+    /// Task 6 (batch 5): make every subsequent `messages_create` fail with a
+    /// clone of `err` (the queue is bypassed). Pass `None` to restore the
+    /// scripted-queue behaviour.
+    pub fn set_fail_with(&self, err: Option<LlmError>) {
+        *self.fail_with.lock().unwrap() = err;
+    }
+
+    /// Task 6 (batch 5): pre-load the composed limits copy returned by
+    /// `last_rate_limit_error_message()`. Pass `None` to clear it (the
+    /// default).
+    pub fn set_rate_limit_error_message(&self, msg: Option<String>) {
+        *self.rate_limit_error_message.lock().unwrap() = msg;
     }
 
     /// Task 8: pre-load the FULL internal rate-limit snapshot returned by
@@ -56,6 +86,14 @@ impl MockApiClient {
     /// without an `await`.
     pub fn set_rate_limit_full(&self, info: Option<crate::model::rate_limit::RateLimitInfo>) {
         *self.rate_limit_full.lock().unwrap() = info;
+    }
+
+    /// Task 2 (batch 5): pre-load the raw per-window snapshot returned by
+    /// `last_raw_utilization()`. Pass `None` to clear it (the default).
+    /// Synchronous for the same between-turns flipping reason as
+    /// [`Self::set_rate_limit_full`].
+    pub fn set_raw_utilization(&self, raw: Option<crate::model::rate_limit::RawUtilization>) {
+        *self.raw_utilization.lock().unwrap() = raw;
     }
 
     /// Snapshot the captured `tools` arguments (one entry per `messages_create`
@@ -104,6 +142,10 @@ impl OrchestratorApiClient for MockApiClient {
             .await
             .push(system.map(str::to_string));
         self.captured_tools.lock().await.push(tools);
+        // Task 6 (batch 5): scripted failure wins over the queue.
+        if let Some(err) = self.fail_with.lock().unwrap().clone() {
+            return Err(err);
+        }
         let mut q = self.queue.lock().await;
         q.pop_front().ok_or_else(|| LlmError::Transport {
             message: "mock script exhausted".into(),
@@ -130,6 +172,18 @@ impl OrchestratorApiClient for MockApiClient {
     /// Task 8: return the snapshot pre-loaded via [`Self::set_rate_limit_full`].
     fn last_rate_limit_full(&self) -> Option<crate::model::rate_limit::RateLimitInfo> {
         self.rate_limit_full.lock().unwrap().clone()
+    }
+
+    /// Task 2 (batch 5): return the snapshot pre-loaded via
+    /// [`Self::set_raw_utilization`].
+    fn last_raw_utilization(&self) -> Option<crate::model::rate_limit::RawUtilization> {
+        *self.raw_utilization.lock().unwrap()
+    }
+
+    /// Task 6 (batch 5): return the copy pre-loaded via
+    /// [`Self::set_rate_limit_error_message`].
+    fn last_rate_limit_error_message(&self) -> Option<String> {
+        self.rate_limit_error_message.lock().unwrap().clone()
     }
 }
 
@@ -308,6 +362,22 @@ impl OutputStream for MockOutputStream {
             overage_resets_at,
             overage_disabled_reason: overage_disabled_reason.map(str::to_string),
             fallback_available,
+        });
+    }
+    /// Task 2 (llm-client future-work batch 5): record the raw-utilization
+    /// emission so tests can assert the emit-on-change behaviour.
+    async fn emit_raw_utilization(
+        &self,
+        five_hour_utilization: Option<f64>,
+        five_hour_resets_at: Option<u64>,
+        seven_day_utilization: Option<f64>,
+        seven_day_resets_at: Option<u64>,
+    ) {
+        self.events.lock().await.push(OutputEvent::RawUtilization {
+            five_hour_utilization,
+            five_hour_resets_at,
+            seven_day_utilization,
+            seven_day_resets_at,
         });
     }
 }

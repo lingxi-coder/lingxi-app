@@ -23,13 +23,17 @@
 //!     looks like `"$N.NNNN"`; the other `cost.*` timing/line counters are
 //!     omitted — the orchestrator does not expose them to the TUI yet)
 //!   - `context_window.used_percentage`, `context_window.remaining_percentage`
+//!   - `rate_limits` (OPTIONAL — only when at least one window resolved,
+//!     `StatusLine.tsx:99-101`; per-window `five_hour`/`seven_day` keys
+//!     conditionally spread from the [`RawUtilizationSnapshot`],
+//!     `StatusLine.tsx:50-65`)
 //!
 //! Keys claude-code emits that are OMITTED here (not available to the TUI):
 //!   `session_name`, `output_style`, `cost.total_duration_ms`,
 //!   `cost.total_api_duration_ms`, `cost.total_lines_added`,
 //!   `cost.total_lines_removed`, `context_window.total_input_tokens`,
 //!   `context_window.total_output_tokens`, `context_window.context_window_size`,
-//!   `context_window.current_usage`, `exceeds_200k_tokens`, `rate_limits`,
+//!   `context_window.current_usage`, `exceeds_200k_tokens`,
 //!   `vim`, `agent`, `remote`, `worktree`.
 //!
 //! **Trust gating is simplified.** claude-code gates execution on workspace
@@ -38,6 +42,12 @@
 //! loader does not expose those flags here, so [`StatusLineConfig::should_run`]
 //! gates only on `type == "command"` + a `trusted` bool the caller supplies
 //! (default-false fail-closed). Wiring the real trust store is a follow-up.
+//!
+//! **The execution pump itself is also a follow-up**: nothing in production
+//! calls [`build_status_line_input`] / [`run_status_line_command`] yet — the
+//! A6 statusline command path renders `AppState.status_line_text` but no task
+//! populates it. The payload (incl. `rate_limits` from
+//! `AppState.raw_utilization`) is ready for when the pump lands.
 
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -52,6 +62,21 @@ pub const STATUS_HOOK_EVENT_NAME: &str = "Status";
 
 /// Default (and claude-code's) status-line command timeout: 5 seconds.
 pub const STATUS_LINE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Raw per-window utilization snapshot mirrored from
+/// `OutputEvent::RawUtilization` (orchestrator `rawUtilization` track).
+/// Windows are atomic: a window's two fields are both `Some` or both `None`.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct RawUtilizationSnapshot {
+    /// `anthropic-ratelimit-unified-5h-utilization` (0-1 fraction).
+    pub five_hour_utilization: Option<f64>,
+    /// `anthropic-ratelimit-unified-5h-reset` (Unix-epoch seconds).
+    pub five_hour_resets_at: Option<u64>,
+    /// `anthropic-ratelimit-unified-7d-utilization` (0-1 fraction).
+    pub seven_day_utilization: Option<f64>,
+    /// `anthropic-ratelimit-unified-7d-reset` (Unix-epoch seconds).
+    pub seven_day_resets_at: Option<u64>,
+}
 
 /// Parsed `statusLine` setting (the subset this batch honors). Mirrors
 /// claude-code's `settings.statusLine`; only `type == "command"` is executable.
@@ -107,10 +132,12 @@ impl StatusLineConfig {
 /// context-window *used* fraction in `[0.0, 1.0]` (the same value the built-in
 /// row renders as `{:.0}%`); `remaining_percentage` is derived as
 /// `100 - used_percentage`, matching claude-code's `calculateContextPercentages`.
+/// `raw_utilization` is the latest per-window rate-limit snapshot (`None`
+/// before any API response carried the headers) feeding `rate_limits`.
 #[must_use]
 // One parameter per JSON field the payload carries (mirroring the flat
 // `buildStatusLineCommandInput` arg list). Bundling them into a struct would
-// add a parallel type with no behavioral benefit, so the 8-arg form is kept.
+// add a parallel type with no behavioral benefit, so the 9-arg form is kept.
 #[allow(clippy::too_many_arguments)]
 pub fn build_status_line_input(
     model_id: &str,
@@ -121,10 +148,32 @@ pub fn build_status_line_input(
     version: &str,
     cost_usd: f64,
     context_pct: f32,
+    raw_utilization: Option<&RawUtilizationSnapshot>,
 ) -> Value {
     let used = f64::from(context_pct) * 100.0;
     let remaining = 100.0 - used;
-    json!({
+    // `rate_limits` is OPTIONAL: TS only spreads it into the payload when at
+    // least one window resolved (StatusLine.tsx:99-101
+    // `...((rateLimits.five_hour || rateLimits.seven_day) && {rate_limits})`;
+    // statuslineSetup.ts:67 documents it as "Only present for subscribers
+    // after first API response"). A window with either header missing omits
+    // its key entirely (TS conditional spread, not `null`).
+    let mut rate_limits = serde_json::Map::new();
+    if let Some(raw) = raw_utilization {
+        if let (Some(u), Some(r)) = (raw.five_hour_utilization, raw.five_hour_resets_at) {
+            rate_limits.insert(
+                "five_hour".into(),
+                json!({ "used_percentage": u * 100.0, "resets_at": r }),
+            );
+        }
+        if let (Some(u), Some(r)) = (raw.seven_day_utilization, raw.seven_day_resets_at) {
+            rate_limits.insert(
+                "seven_day".into(),
+                json!({ "used_percentage": u * 100.0, "resets_at": r }),
+            );
+        }
+    }
+    let mut payload = json!({
         "hook_event_name": STATUS_HOOK_EVENT_NAME,
         "model": {
             "id": model_id,
@@ -143,7 +192,11 @@ pub fn build_status_line_input(
             "used_percentage": used,
             "remaining_percentage": remaining,
         },
-    })
+    });
+    if !rate_limits.is_empty() {
+        payload["rate_limits"] = Value::Object(rate_limits);
+    }
+    payload
 }
 
 /// Parse a pre-formatted cost string (e.g. `"$0.0042"`) into a dollar amount.
@@ -246,6 +299,7 @@ mod tests {
             "0.8.0",
             0.0123,
             0.42,
+            None,
         );
         // Top-level keys.
         assert_eq!(v["hook_event_name"], "Status");
@@ -264,6 +318,68 @@ mod tests {
         assert!((v["context_window"]["used_percentage"].as_f64().unwrap() - 42.0).abs() < 1e-3);
         assert!(
             (v["context_window"]["remaining_percentage"].as_f64().unwrap() - 58.0).abs() < 1e-3
+        );
+    }
+
+    // ── rate_limits (llm-client future-work batch 5, Task 4) ────────────
+
+    /// `StatusLine.tsx:50-65`: each window spreads
+    /// `{used_percentage: utilization * 100, resets_at}` into `rate_limits`
+    /// only when BOTH values are present; an absent window leaves its key
+    /// absent entirely (not `null`).
+    #[test]
+    fn rate_limits_field_mirrors_ts_shape() {
+        let raw = RawUtilizationSnapshot {
+            five_hour_utilization: Some(0.42),
+            five_hour_resets_at: Some(1_750_000_000),
+            seven_day_utilization: None,
+            seven_day_resets_at: None,
+        };
+        let v = build_status_line_input(
+            "claude-sonnet-4.5",
+            "Claude Sonnet 4.5",
+            &PathBuf::from("/work/cur"),
+            &PathBuf::from("/work/proj"),
+            &[],
+            "0.8.0",
+            0.0,
+            0.0,
+            Some(&raw),
+        );
+        let rl = v["rate_limits"]
+            .as_object()
+            .expect("rate_limits must be an object");
+        let five = rl.get("five_hour").expect("five_hour window present");
+        assert!((five["used_percentage"].as_f64().unwrap() - 42.0).abs() < 1e-9);
+        assert_eq!(five["resets_at"].as_u64(), Some(1_750_000_000));
+        assert!(
+            rl.get("seven_day").is_none(),
+            "absent window must omit its key (TS conditional spread)"
+        );
+    }
+
+    /// `StatusLine.tsx:99-101`: `rate_limits` is OPTIONAL — TS spreads it in
+    /// only when at least one window resolved
+    /// (`...((rateLimits.five_hour || rateLimits.seven_day) && {...})`);
+    /// with no raw utilization tracked the key is ABSENT entirely
+    /// (statuslineSetup.ts:67 "Only present for subscribers after first API
+    /// response").
+    #[test]
+    fn rate_limits_key_absent_when_no_window_resolved() {
+        let v = build_status_line_input(
+            "m",
+            "M",
+            &PathBuf::from("/c"),
+            &PathBuf::from("/p"),
+            &[],
+            "0.8.0",
+            0.0,
+            0.0,
+            None,
+        );
+        assert!(
+            v.get("rate_limits").is_none(),
+            "rate_limits must be omitted when no window resolved: {v:?}"
         );
     }
 

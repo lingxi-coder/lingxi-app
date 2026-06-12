@@ -107,6 +107,22 @@ pub enum TurnEvent {
         /// `anthropic-ratelimit-unified-fallback` == `available`.
         fallback_available: Option<bool>,
     },
+    /// Raw per-window utilization snapshot (llm-client future-work batch 5,
+    /// Task 4). Mirrors `traits::OutputEvent::RawUtilization`'s four fields —
+    /// tracked on every API response (unlike the warning-gated
+    /// [`Self::RateLimit`]) and stored on `AppState.raw_utilization` for the
+    /// statusline command input's `rate_limits` field (`StatusLine.tsx:50-65`).
+    /// Windows are atomic: a window's two fields are both `Some` or both `None`.
+    RawUtilization {
+        /// `anthropic-ratelimit-unified-5h-utilization` (0-1 fraction).
+        five_hour_utilization: Option<f64>,
+        /// `anthropic-ratelimit-unified-5h-reset` (Unix-epoch seconds).
+        five_hour_resets_at: Option<u64>,
+        /// `anthropic-ratelimit-unified-7d-utilization` (0-1 fraction).
+        seven_day_utilization: Option<f64>,
+        /// `anthropic-ratelimit-unified-7d-reset` (Unix-epoch seconds).
+        seven_day_resets_at: Option<u64>,
+    },
 }
 
 /// `OutputStream` impl that forwards every callback as a `TurnEvent` on
@@ -213,6 +229,21 @@ impl OutputStream for BridgeOutputStream {
             overage_resets_at,
             overage_disabled_reason: overage_disabled_reason.map(str::to_owned),
             fallback_available,
+        });
+    }
+
+    async fn emit_raw_utilization(
+        &self,
+        five_hour_utilization: Option<f64>,
+        five_hour_resets_at: Option<u64>,
+        seven_day_utilization: Option<f64>,
+        seven_day_resets_at: Option<u64>,
+    ) {
+        let _ = self.tx.send(TurnEvent::RawUtilization {
+            five_hour_utilization,
+            five_hour_resets_at,
+            seven_day_utilization,
+            seven_day_resets_at,
         });
     }
 }
@@ -355,6 +386,29 @@ mod tests {
             rx.try_recv().expect("bridge must forward a TurnEvent"),
             TurnEvent::RateLimit { status: None, .. }
         ));
+    }
+
+    #[tokio::test]
+    async fn emit_raw_utilization_translates_to_event() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let bridge = BridgeOutputStream::new(tx);
+        bridge
+            .emit_raw_utilization(Some(0.42), Some(1_750_000_000), None, None)
+            .await;
+        match rx.try_recv().expect("bridge must forward a TurnEvent") {
+            TurnEvent::RawUtilization {
+                five_hour_utilization,
+                five_hour_resets_at,
+                seven_day_utilization,
+                seven_day_resets_at,
+            } => {
+                assert_eq!(five_hour_utilization, Some(0.42));
+                assert_eq!(five_hour_resets_at, Some(1_750_000_000));
+                assert_eq!(seven_day_utilization, None);
+                assert_eq!(seven_day_resets_at, None);
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
     }
 
     #[tokio::test]

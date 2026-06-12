@@ -1,7 +1,7 @@
 # Engine adoption of llm-client (full replacement of api-client) — design
 
 Date: 2026-06-10
-Status: approved (user), revision 2.9 — future-work batch 4 COMPLETE.
+Status: approved (user), revision 2.10 — future-work batch 5 COMPLETE.
 
 **Revision history:**
 - 2.2 — no intermediate policy crate; supersedes api-client entirely with no backwards compatibility.
@@ -150,6 +150,66 @@ Status: approved (user), revision 2.9 — future-work batch 4 COMPLETE.
     (TS rateLimitMessages.ts:303-331) — not ported; the TUI renders no
     overage-mode transition notice today; `isEnvTruthy` consolidation (≈5
     private copies across crates; candidate for traits).
+- 2.10 — Future-work batch 5 COMPLETE: live retry gates, statusline rawUtilization,
+  overage-transition notice, limits-specific 429 terminal copy, `is_env_truthy`
+  consolidation. The rev-2.9 "retry-gate half", "rawUtilization statusline export",
+  "getUsingOverageText" and "isEnvTruthy consolidation" remaining items are closed.
+  - **Live retry gates** (a8e1b4da): `ProviderApiAdapter::with_subscription` +
+    `effective_subscriber()` read the `SharedSubscription` slot at drive time
+    (`is_enterprise` = `tier == "enterprise"`), so the 429/enterprise retry gates
+    see the live snapshot instead of the build-time `false` — this closes the
+    RETRY half of the `OrchestratorConfig` PARITY-GAP at config.rs:134 (the
+    RENDERING half was closed in batch 4). `RetryState` is constructed per drive
+    and the header injectors run per attempt (documented: TS-equivalent or
+    stricter — never staler than the TS read).
+  - **RawUtilization track** (bdd8f14d, daf17eca, 4566dbe1, 48d03bf6, 2cefa0e5):
+    orchestrator `RawWindow`/`RawUtilization` (port of `extractRawUtilization`;
+    atomic both-headers-per-window rule, ts:174); the adapter cache is assigned
+    unconditionally on recorded responses; emit-on-change via the additive
+    `traits::OutputEvent::RawUtilization` at both the batched and streaming
+    seams (streaming seam pinned by test). Documented divergence: TS updates its
+    store unconditionally (ts:476/:500) while we change-gate the event; recording
+    happens on success paths only — raw extraction from 429-response headers is a
+    noted limitation. TUI side: bridge → `AppState.raw_utilization` →
+    `build_status_line_input` `rate_limits` field — the key is OPTIONAL and
+    omitted when no window resolved, per StatusLine.tsx:99-101 (a reviewer-caught
+    plan misread; originally written as always-present). NOTE honestly: the A6
+    statusline execution pump has NO production caller yet — the payload is
+    ready; pump wiring is a pre-existing follow-up.
+  - **Overage-transition notice** (1710db14): `getUsingOverageText` port
+    (rateLimitMessages.ts:303-331, byte-pinned) + the
+    `useRateLimitWarningNotification` transition logic — fires once on entering
+    overage when `!team/enterprise || billing access`; the fired flag resets on
+    leaving overage; the flag survives `/clear` (it is TS component state, not
+    conversation state). Shared `is_using_overage` helper extracted
+    (claudeAiLimits.ts:406-409).
+  - **429 terminal error copy** (1244c6e2, 2bdfda4e):
+    `RateLimitInfo::from_429_error_headers` (errors.ts:480-516; status forced
+    `rejected`; gated on `rateLimitType || overageStatus`); the adapter records
+    at both 429 decode sites and composes the message via the existing
+    byte-locked `rate_limit_error_message` with a live-snapshot
+    `SubscriptionContext`, cached in `last_429_message` (cleared on success —
+    airtight per review); `OrchestratorError::RateLimitRejected` surfaces the
+    bare copy at CLI/TUI/bridge (bridge maps it to the `Transport` kind).
+    Reviewer-verified: NO double-render (the `RateLimit` event only emits at
+    success seams) — Rust slightly UNDER-renders vs TS (TS also emits a status
+    change on a terminal 429); noted as follow-up. Documented divergence:
+    per-attempt snapshot recording vs TS terminal-only (terminal-only recording
+    is a tracked follow-up).
+  - **`is_env_truthy` consolidation** (bdd8f14d, 361845be):
+    `traits::env::is_env_truthy` is the shared TS-faithful copy; 7 private
+    copies switched onto it (tui, tool-skill, tool-meta, tool-task wrapper,
+    compaction ×2 wrappers, engine-desktop wrapper). Kept-divergent with notes:
+    tools/shell `prompt.rs` and orchestrator `conversation.rs` (they port the
+    utils/env.ts denylist variants, not envUtils.ts). Kept-no-dep: `migrations`
+    (its copy is pub API and the crate takes no traits dep).
+  - Remaining: `/mock-limits` + an interactive rate-limit options menu
+    (deferred; 1k+ TS lines); OpenAiResponses real-traffic validation (still
+    key-blocked); the A6 statusline execution pump (pre-existing — now the ONLY
+    missing piece for statusline `rate_limits` to reach user scripts);
+    terminal-429 immediate status-change emit (TS
+    `extractQuotaStatusFromError` → `emitStatusChange`); terminal-only 429
+    snapshot recording; 429-headers rawUtilization extraction.
 
 ## Goal
 

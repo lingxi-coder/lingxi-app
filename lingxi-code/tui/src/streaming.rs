@@ -153,6 +153,44 @@ pub fn apply_event(state: &mut AppState, ev: TurnEvent, notify: &Notify) {
                     });
                 }
             }
+            // (Batch-5 Task 5) Overage-transition notice
+            // (`useRateLimitWarningNotification.tsx`): fire ONCE on entering
+            // overage when `!isTeamOrEnterprise || hasBillingAccess` (tsx
+            // :62); reset the one-shot flag on leaving overage (tsx :70-72).
+            // The TS `getIsRemoteMode()` skip is structurally false — the TUI
+            // is never remote. The flag is guarded here (not by the text
+            // dedupe slot) and survives `/clear`, like the TS component state.
+            if crate::rate_limit_messages::is_using_overage(&info) {
+                if !state.has_shown_overage_notification
+                    && (!sub.is_team_or_enterprise() || sub.has_claude_ai_billing_access())
+                {
+                    state.has_shown_overage_notification = true;
+                    state.messages.push(RenderedMessage::RateLimit {
+                        text: crate::rate_limit_messages::using_overage_text(&info, &sub),
+                        upsell: None,
+                    });
+                }
+            } else {
+                state.has_shown_overage_notification = false;
+            }
+        }
+        TurnEvent::RawUtilization {
+            five_hour_utilization,
+            five_hour_resets_at,
+            seven_day_utilization,
+            seven_day_resets_at,
+        } => {
+            // (Batch-5 Task 4) Store the latest raw per-window snapshot
+            // (last-write-wins) for the statusline command input's
+            // `rate_limits` field (StatusLine.tsx:50-65). No transcript
+            // message — this track is statusline-only, unlike RateLimit.
+            state.raw_utilization =
+                Some(crate::components::status_line_command::RawUtilizationSnapshot {
+                    five_hour_utilization,
+                    five_hour_resets_at,
+                    seven_day_utilization,
+                    seven_day_resets_at,
+                });
         }
     }
     notify.notify_one();
@@ -374,6 +412,155 @@ mod tests {
             }
             other => panic!("expected RateLimit message, got: {other:?}"),
         }
+    }
+
+    // ── overage-transition notice (useRateLimitWarningNotification.tsx) ───
+
+    /// A `rejected` snapshot WITH overage allowed — `isUsingOverage`
+    /// (claudeAiLimits.ts:406-409). `compose_rate_limit` returns `None` for a
+    /// plain `allowed` overage status (rateLimitMessages.ts:51-60), so the
+    /// ONLY push from this event is the transition notice itself.
+    fn overage_event() -> TurnEvent {
+        TurnEvent::RateLimit {
+            status: Some("rejected".into()),
+            rate_limit_type: Some("five_hour".into()),
+            utilization: None,
+            resets_at: None,
+            claim_resets_at: None,
+            overage_status: Some("allowed".into()),
+            overage_resets_at: None,
+            overage_disabled_reason: None,
+            fallback_available: None,
+        }
+    }
+
+    fn subscription_slot(
+        snap: traits::subscription::SubscriptionSnapshot,
+    ) -> traits::subscription::SharedSubscription {
+        std::sync::Arc::new(std::sync::RwLock::new(Some(snap)))
+    }
+
+    #[test]
+    fn overage_transition_fires_once() {
+        let mut s = new_state();
+        let n = Notify::new();
+        apply_event(&mut s, overage_event(), &n);
+        // five_hour without resetsAt → the no-reset copy (TS :327-330).
+        assert_eq!(rate_limit_texts(&s), vec!["You're now using extra usage"]);
+        assert!(s.has_shown_overage_notification);
+        // Identical second event → no second push: the one-shot flag guards
+        // it (tsx :62 `!hasShownOverageNotification`), not the text dedupe.
+        apply_event(&mut s, overage_event(), &n);
+        assert_eq!(rate_limit_texts(&s).len(), 1);
+    }
+
+    #[test]
+    fn overage_flag_resets_on_leaving_overage() {
+        let mut s = new_state();
+        let n = Notify::new();
+        apply_event(&mut s, overage_event(), &n);
+        assert!(s.has_shown_overage_notification);
+        // Leaving overage (status allowed → !isUsingOverage) resets the flag
+        // (tsx :70-72).
+        apply_event(
+            &mut s,
+            TurnEvent::RateLimit {
+                status: Some("allowed".into()),
+                rate_limit_type: None,
+                utilization: None,
+                resets_at: None,
+                claim_resets_at: None,
+                overage_status: None,
+                overage_resets_at: None,
+                overage_disabled_reason: None,
+                fallback_available: None,
+            },
+            &n,
+        );
+        assert!(!s.has_shown_overage_notification);
+        // Re-entering overage fires a second notice.
+        apply_event(&mut s, overage_event(), &n);
+        assert_eq!(rate_limit_texts(&s).len(), 2);
+    }
+
+    #[test]
+    fn team_without_billing_access_suppressed() {
+        // Suppression arm (tsx :62): `isTeamOrEnterprise && !hasBillingAccess`
+        // → no notice; the flag stays UNSET (TS only sets it when it fires).
+        let mut s = new_state();
+        let n = Notify::new();
+        s.subscription = Some(subscription_slot(
+            traits::subscription::SubscriptionSnapshot {
+                is_subscriber: true,
+                subscription_type: Some("team".into()),
+                has_extra_usage_enabled: true,
+                organization_role: None,
+                ..Default::default()
+            },
+        ));
+        apply_event(&mut s, overage_event(), &n);
+        assert!(rate_limit_texts(&s).is_empty());
+        assert!(!s.has_shown_overage_notification);
+
+        // Team admin (billing access) → notice fires.
+        let mut s = new_state();
+        s.subscription = Some(subscription_slot(
+            traits::subscription::SubscriptionSnapshot {
+                is_subscriber: true,
+                subscription_type: Some("team".into()),
+                has_extra_usage_enabled: true,
+                organization_role: Some("admin".into()),
+                ..Default::default()
+            },
+        ));
+        apply_event(&mut s, overage_event(), &n);
+        assert_eq!(rate_limit_texts(&s), vec!["You're now using extra usage"]);
+        assert!(s.has_shown_overage_notification);
+    }
+
+    // ── TurnEvent::RawUtilization (batch-5 Task 4) ────────────────────────
+
+    /// A `RawUtilization` event stores the snapshot on
+    /// `state.raw_utilization`; a second event OVERWRITES (last-write-wins,
+    /// mirroring claude-code's per-response `rawUtilization` tracking).
+    #[test]
+    fn raw_utilization_event_updates_state() {
+        let mut s = new_state();
+        let n = Notify::new();
+        // Defaults pin to None before any event.
+        assert!(s.raw_utilization.is_none());
+        apply_event(
+            &mut s,
+            TurnEvent::RawUtilization {
+                five_hour_utilization: Some(0.42),
+                five_hour_resets_at: Some(1_750_000_000),
+                seven_day_utilization: Some(0.07),
+                seven_day_resets_at: Some(1_750_600_000),
+            },
+            &n,
+        );
+        let snap = s.raw_utilization.expect("snapshot stored");
+        assert_eq!(snap.five_hour_utilization, Some(0.42));
+        assert_eq!(snap.five_hour_resets_at, Some(1_750_000_000));
+        assert_eq!(snap.seven_day_utilization, Some(0.07));
+        assert_eq!(snap.seven_day_resets_at, Some(1_750_600_000));
+
+        // Second event overwrites (including dropping a window back to None).
+        apply_event(
+            &mut s,
+            TurnEvent::RawUtilization {
+                five_hour_utilization: Some(0.5),
+                five_hour_resets_at: Some(1_750_000_100),
+                seven_day_utilization: None,
+                seven_day_resets_at: None,
+            },
+            &n,
+        );
+        let snap = s.raw_utilization.expect("snapshot stored");
+        assert_eq!(snap.five_hour_utilization, Some(0.5));
+        assert_eq!(snap.five_hour_resets_at, Some(1_750_000_100));
+        assert_eq!(snap.seven_day_utilization, None);
+        assert_eq!(snap.seven_day_resets_at, None);
     }
 
     #[test]

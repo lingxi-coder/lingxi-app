@@ -235,3 +235,202 @@ async fn no_emit_when_no_snapshot() {
     let events = rate_limit_events(&output.snapshot().await);
     assert!(events.is_empty(), "no snapshot → no emit: {events:?}");
 }
+
+// ════════════════════════════════════════════════════════════════════════
+// RawUtilization (llm-client future-work batch 5, Task 2): the orchestrator
+// forwards the adapter's raw per-window utilization snapshot to
+// `OutputStream::emit_raw_utilization` next to the `emit_rate_limit` seam,
+// emitting only on change and never for the empty snapshot.
+// ════════════════════════════════════════════════════════════════════════
+
+use orchestrator::model::rate_limit::RawUtilization;
+
+/// Header vec carrying BOTH windows (the unified per-window quartet).
+fn both_window_headers(five_h_util: &str) -> Vec<(String, String)> {
+    [
+        ("anthropic-ratelimit-unified-5h-utilization", five_h_util),
+        ("anthropic-ratelimit-unified-5h-reset", "1750000005"),
+        ("anthropic-ratelimit-unified-7d-utilization", "0.77"),
+        ("anthropic-ratelimit-unified-7d-reset", "1750000007"),
+    ]
+    .iter()
+    .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+    .collect()
+}
+
+/// Project the captured `RawUtilization` events out of the full event stream.
+fn raw_utilization_events(events: &[OutputEvent]) -> Vec<OutputEvent> {
+    events
+        .iter()
+        .filter(|e| matches!(e, OutputEvent::RawUtilization { .. }))
+        .cloned()
+        .collect()
+}
+
+/// (a) Response with 5h+7d unified headers → exactly one `RawUtilization`
+/// event with all four fields `Some` (each window emitted atomically).
+#[tokio::test]
+async fn emits_raw_utilization_on_first_snapshot() {
+    let api = Arc::new(MockApiClient::new(vec![end_turn_response("hi")]));
+    api.set_raw_utilization(Some(RawUtilization::from_headers(&both_window_headers(
+        "0.42",
+    ))));
+    let output = Arc::new(MockOutputStream::new());
+    let orch = build_orch(api.clone(), output.clone());
+
+    orch.run_turn("hello").await.expect("turn 1");
+
+    let events = raw_utilization_events(&output.snapshot().await);
+    assert_eq!(events.len(), 1, "exactly one RawUtilization event: {events:?}");
+    let OutputEvent::RawUtilization {
+        five_hour_utilization,
+        five_hour_resets_at,
+        seven_day_utilization,
+        seven_day_resets_at,
+    } = &events[0]
+    else {
+        panic!("expected RawUtilization event");
+    };
+    assert_eq!(*five_hour_utilization, Some(0.42));
+    assert_eq!(*five_hour_resets_at, Some(1_750_000_005));
+    assert_eq!(*seven_day_utilization, Some(0.77));
+    assert_eq!(*seven_day_resets_at, Some(1_750_000_007));
+}
+
+/// (b) An IDENTICAL snapshot across two turns → no second emit (TS updates
+/// `rawUtilization` unconditionally on every headers pass — our event
+/// channel dedupes; documented divergence).
+#[tokio::test]
+async fn no_duplicate_raw_utilization_for_identical_snapshot_across_turns() {
+    let api = Arc::new(MockApiClient::new(vec![
+        end_turn_response("one"),
+        end_turn_response("two"),
+    ]));
+    api.set_raw_utilization(Some(RawUtilization::from_headers(&both_window_headers(
+        "0.42",
+    ))));
+    let output = Arc::new(MockOutputStream::new());
+    let orch = build_orch(api.clone(), output.clone());
+
+    orch.run_turn("first").await.expect("turn 1");
+    orch.run_turn("second").await.expect("turn 2");
+
+    let events = raw_utilization_events(&output.snapshot().await);
+    assert_eq!(
+        events.len(),
+        1,
+        "identical snapshot must emit exactly once: {events:?}"
+    );
+}
+
+/// (c) A changed 5h utilization re-emits with the new value.
+#[tokio::test]
+async fn re_emits_raw_utilization_when_five_hour_utilization_changes() {
+    let api = Arc::new(MockApiClient::new(vec![
+        end_turn_response("one"),
+        end_turn_response("two"),
+    ]));
+    api.set_raw_utilization(Some(RawUtilization::from_headers(&both_window_headers(
+        "0.42",
+    ))));
+    let output = Arc::new(MockOutputStream::new());
+    let orch = build_orch(api.clone(), output.clone());
+
+    orch.run_turn("first").await.expect("turn 1");
+
+    api.set_raw_utilization(Some(RawUtilization::from_headers(&both_window_headers(
+        "0.55",
+    ))));
+    orch.run_turn("second").await.expect("turn 2");
+
+    let events = raw_utilization_events(&output.snapshot().await);
+    assert_eq!(events.len(), 2, "changed snapshot must re-emit: {events:?}");
+    let OutputEvent::RawUtilization {
+        five_hour_utilization,
+        seven_day_utilization,
+        ..
+    } = &events[1]
+    else {
+        panic!("expected RawUtilization event");
+    };
+    assert_eq!(*five_hour_utilization, Some(0.55));
+    assert_eq!(*seven_day_utilization, Some(0.77));
+}
+
+/// (d) No unified per-window headers → no `RawUtilization` event: neither
+/// for the default `None` snapshot nor for the parsed-but-EMPTY snapshot
+/// (the empty `{}` is never emitted).
+#[tokio::test]
+async fn no_raw_utilization_emit_without_unified_headers() {
+    // Default: no snapshot at all.
+    let api = Arc::new(MockApiClient::new(vec![end_turn_response("hi")]));
+    let output = Arc::new(MockOutputStream::new());
+    let orch = build_orch(api.clone(), output.clone());
+    orch.run_turn("hello").await.expect("turn 1");
+    let events = raw_utilization_events(&output.snapshot().await);
+    assert!(events.is_empty(), "no snapshot → no emit: {events:?}");
+
+    // Headers present but with NO per-window quartet → empty parse → no emit.
+    let api = Arc::new(MockApiClient::new(vec![end_turn_response("hi")]));
+    api.set_raw_utilization(Some(RawUtilization::from_headers(&[(
+        "anthropic-ratelimit-unified-status".to_string(),
+        "allowed".to_string(),
+    )])));
+    let output = Arc::new(MockOutputStream::new());
+    let orch = build_orch(api.clone(), output.clone());
+    orch.run_turn("hello").await.expect("turn 1");
+    let events = raw_utilization_events(&output.snapshot().await);
+    assert!(events.is_empty(), "empty snapshot → no emit: {events:?}");
+}
+
+/// (e) The STREAMING seam also forwards raw utilization: `run_turn_streaming`
+/// over a scripted SSE stream → exactly one `RawUtilization` event (the raw
+/// hook sits next to `emit_rate_limit_if_changed` in `try_run_turn_streaming`
+/// and reads the same `self.api` adapter the batched seam reads).
+#[tokio::test]
+async fn streaming_turn_emits_raw_utilization() {
+    use orchestrator::test_support_stream::{
+        content_block_start_text, content_block_stop, message_delta_stop, message_start,
+        message_stop, text_delta, MockStreamingApiClient,
+    };
+
+    let stream = orchestrator::scripted![
+        message_start("msg_01", "claude-opus-4-7"),
+        content_block_start_text(0),
+        text_delta(0, "hi"),
+        content_block_stop(0),
+        message_delta_stop("end_turn"),
+        message_stop(),
+    ];
+    let streaming = Arc::new(MockStreamingApiClient::with_turns(vec![stream]));
+    let batched = Arc::new(MockApiClient::new(Vec::new()));
+    batched.set_raw_utilization(Some(RawUtilization::from_headers(&both_window_headers(
+        "0.42",
+    ))));
+    let output = Arc::new(MockOutputStream::new());
+    let orch = ConversationOrchestrator::new_with_streaming(
+        OrchestratorConfig::default(),
+        batched,
+        streaming,
+        Arc::new(ToolRegistry::new()),
+        orchestrator::test_support::noop_hook_executor(),
+        Arc::new(NoOpPermissionGate),
+        output.clone(),
+        Arc::new(StaticMemoryProvider::empty()),
+        std::env::temp_dir(),
+    );
+
+    orch.run_turn_streaming("hello").await.expect("turn 1");
+
+    let events = raw_utilization_events(&output.snapshot().await);
+    assert_eq!(
+        events.len(),
+        1,
+        "streaming seam must emit exactly once: {events:?}"
+    );
+    assert!(matches!(
+        &events[0],
+        OutputEvent::RawUtilization { five_hour_utilization, .. }
+            if *five_hour_utilization == Some(0.42)
+    ));
+}

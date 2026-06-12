@@ -131,11 +131,16 @@ pub struct OrchestratorConfig {
     /// [`Self::is_subscriber`] is `true`, where it re-enables the 429 retry that
     /// `is_subscriber` would otherwise suppress (`!is_subscriber || is_enterprise`).
     ///
-    /// `false` (the parity default) is conservative. PARITY-GAP: enterprise tier
-    /// requires the subscription type, which comes from a profile fetch
-    /// (`anthropic_oauth::fetch_profile_from_oauth_token` + `apply_profile`) not
-    /// performed in the desktop build hot path; `engine_desktop::build` leaves
-    /// this `false` pending that fetch.
+    /// `false` (the parity default) is conservative — and remains the
+    /// seed/fallback only. The former PARITY-GAP here is closed: the profile
+    /// fetch (`anthropic_oauth::fetch_profile_from_oauth_token` +
+    /// `fetch_user_roles`) now runs as a background task in
+    /// `engine_desktop::build` (llm-client future-work batch 4), filling the
+    /// shared `traits::subscription::SharedSubscription` slot, and the
+    /// provider adapter reads that live slot at drive time via
+    /// `effective_subscriber()` (batch 5) — so the 429/enterprise retry gate
+    /// sees the resolved tier even though this static field stays `false` at
+    /// construction.
     #[serde(default)]
     pub is_enterprise: bool,
 

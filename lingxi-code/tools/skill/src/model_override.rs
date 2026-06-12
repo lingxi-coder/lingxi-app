@@ -31,6 +31,8 @@
 
 use std::env;
 
+use traits::env::is_env_truthy;
+
 /// Resolve `skill_model` against `current_model`, carrying `[1m]` over when the
 /// target family supports it. 1:1 with `resolveSkillModelOverride`
 /// (`model.ts:523-536`).
@@ -176,15 +178,6 @@ fn canonical_name(model: &str) -> String {
     // Fall back to the lowercased input when no pattern matches (the TS regex
     // only narrows the unmatched case; substring checks are equivalent here).
     name
-}
-
-/// Mirrors `isEnvTruthy` (`utils/envUtils.ts:32-37`): `1` / `true` / `yes` /
-/// `on` (case-insensitive, trimmed) are truthy.
-fn is_env_truthy(value: Option<&str>) -> bool {
-    match value {
-        Some(v) => matches!(v.to_lowercase().trim(), "1" | "true" | "yes" | "on"),
-        None => false,
-    }
 }
 
 #[cfg(test)]

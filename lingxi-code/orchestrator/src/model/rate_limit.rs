@@ -398,6 +398,66 @@ fn parse_fraction(headers: &[(String, String)], name: &str) -> Option<f64> {
         .filter(|f| f.is_finite())
 }
 
+/// One window of raw utilization (`RawWindowUtilization`,
+/// `claudeAiLimits.ts:150-153`). Both fields are required — a window is
+/// parsed ATOMICALLY (both `-utilization` and `-reset` headers, ts:174) or
+/// not at all, so a `RawWindow` can never carry a dangling half.
+// `Eq` cannot be derived (`utilization: f64`); `parse_fraction` filters
+// non-finite values so `PartialEq` stays total in practice.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RawWindow {
+    /// 0-1 utilization fraction.
+    pub utilization: f64,
+    /// Unix epoch seconds when the window resets.
+    pub resets_at: u64,
+}
+
+/// Raw per-window utilization — claude-code `extractRawUtilization`
+/// (`claudeAiLimits.ts:164-179`). Tracked on EVERY response with unified
+/// headers, independent of the warning-gated [`RateLimitInfo`] fields
+/// (which only surface the representative claim's window). A window needs
+/// BOTH its `-utilization` and `-reset` headers (`util !== null && reset
+/// !== null`, ts:174); the default (both `None`) is the TS empty `{}`.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct RawUtilization {
+    /// 5-hour window (`anthropic-ratelimit-unified-5h-*`).
+    pub five_hour: Option<RawWindow>,
+    /// 7-day window (`anthropic-ratelimit-unified-7d-*`).
+    pub seven_day: Option<RawWindow>,
+}
+
+impl RawUtilization {
+    /// Parse from response headers. Absent/empty headers → `Self::default()`.
+    ///
+    /// Per window (`['five_hour','5h'] / ['seven_day','7d']`,
+    /// `claudeAiLimits.ts:166-169`): both the `-utilization` and `-reset`
+    /// header must be present AND parse (the file's tolerant-parse stance —
+    /// TS `Number()` would store `NaN` for a present-but-malformed value; we
+    /// drop the window instead, the same fail-soft divergence documented on
+    /// [`parse_fraction`] / [`parse_epoch_secs`]).
+    #[must_use]
+    pub fn from_headers(headers: &[(String, String)]) -> Self {
+        let window = |abbrev: &str| -> Option<RawWindow> {
+            let utilization = parse_fraction(
+                headers,
+                &format!("anthropic-ratelimit-unified-{abbrev}-utilization"),
+            )?;
+            let resets_at = parse_epoch_secs(
+                headers,
+                &format!("anthropic-ratelimit-unified-{abbrev}-reset"),
+            )?;
+            Some(RawWindow {
+                utilization,
+                resets_at,
+            })
+        };
+        Self {
+            five_hour: window("5h"),
+            seven_day: window("7d"),
+        }
+    }
+}
+
 /// One early-warning threshold pair (`claudeAiLimits.ts:38-41`): warn when
 /// usage `>= utilization` AND the elapsed window fraction `<= time_pct`
 /// (high consumption early in the window).
@@ -689,6 +749,60 @@ impl RateLimitInfo {
     #[must_use]
     pub fn has_unified_headers(&self) -> bool {
         self.rate_limit_type.is_some() || self.overage_status.is_some()
+    }
+
+    /// Build the rejected-limits view from a 429 **error** response's headers
+    /// — 1:1 with claude-code `errors.ts:471-516`, which constructs a FRESH
+    /// `ClaudeAILimits` object directly from `error.headers` (it does NOT run
+    /// `computeNewLimitsFromHeaders`, so no early-warning replacement and no
+    /// final-status downgrade apply here).
+    ///
+    /// Returns `None` when neither the representative-claim nor the
+    /// overage-status header carries a non-empty value — the
+    /// `if (rateLimitType || overageStatus)` gate (`errors.ts:480`; an empty
+    /// header value is falsy in TS). On `Some`, `status` is FORCED to
+    /// `"rejected"` (`errors.ts:482-486` builds `{ status: 'rejected', … }`)
+    /// and only the five fields the TS object sets are populated:
+    /// `resetsAt`/`rateLimitType`/`overageStatus`/`overageResetsAt`/
+    /// `overageDisabledReason` (`errors.ts:488-517`, each behind its own
+    /// truthiness check).
+    #[must_use]
+    pub fn from_429_error_headers(headers: &[(String, String)]) -> Option<Self> {
+        // `headers?.get?.(…)` + TS truthiness: empty string is falsy, so it
+        // neither passes the gate nor is assigned onto the limits object.
+        let rate_limit_type = header_value(
+            headers,
+            "anthropic-ratelimit-unified-representative-claim",
+        )
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+        let overage_status = header_value(headers, "anthropic-ratelimit-unified-overage-status")
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
+        if rate_limit_type.is_none() && overage_status.is_none() {
+            return None;
+        }
+        Some(Self {
+            // errors.ts:483 — status is 'rejected' regardless of any
+            // `anthropic-ratelimit-unified-status` header on the error.
+            status: Some("rejected".to_string()),
+            rate_limit_type,
+            overage_status,
+            // `if (resetHeader) limits.resetsAt = Number(resetHeader)`
+            // (errors.ts:489-494) — the tolerant parse reproduces the
+            // absent/empty→skip collapse; malformed values fail soft to
+            // `None` (the documented divergence from TS storing `NaN`).
+            resets_at: parse_epoch_secs(headers, "anthropic-ratelimit-unified-reset"),
+            overage_resets_at: parse_epoch_secs(
+                headers,
+                "anthropic-ratelimit-unified-overage-reset",
+            ),
+            // `if (overageDisabledReason)` (errors.ts:511-516) — empty is falsy.
+            overage_disabled_reason: overage_disabled_reason(headers)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string),
+            ..Self::default()
+        })
     }
 }
 
@@ -1760,6 +1874,82 @@ mod unified_header_parse {
 }
 
 #[cfg(test)]
+mod raw_utilization {
+    //! Tests for [`RawUtilization::from_headers`], pinned against claude-code
+    //! `extractRawUtilization` (`claudeAiLimits.ts:164-179`): a window needs
+    //! BOTH its `-utilization` AND `-reset` headers (ts:174) — emitted
+    //! atomically (both fields) or not at all.
+    use super::*;
+
+    fn h(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
+        pairs
+            .iter()
+            .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn raw_utilization_requires_both_headers_per_window() {
+        // 5h has BOTH headers → Some; 7d has only -utilization → None
+        // (`util !== null && reset !== null`, claudeAiLimits.ts:174).
+        let headers = h(&[
+            ("anthropic-ratelimit-unified-5h-utilization", "0.42"),
+            ("anthropic-ratelimit-unified-5h-reset", "1750000005"),
+            ("anthropic-ratelimit-unified-7d-utilization", "0.77"),
+        ]);
+        let raw = RawUtilization::from_headers(&headers);
+        assert_eq!(
+            raw.five_hour,
+            Some(RawWindow {
+                utilization: 0.42,
+                resets_at: 1_750_000_005,
+            })
+        );
+        assert_eq!(raw.seven_day, None);
+    }
+
+    #[test]
+    fn raw_utilization_empty_headers_is_default() {
+        let raw = RawUtilization::from_headers(&[]);
+        assert_eq!(raw, RawUtilization::default());
+        assert_eq!(raw.five_hour, None);
+        assert_eq!(raw.seven_day, None);
+    }
+
+    #[test]
+    fn raw_utilization_malformed_values_drop_window() {
+        // Malformed 5h utilization drops ONLY that window (the file's
+        // tolerant-parse stance; TS would store NaN — we fail soft to None);
+        // the well-formed 7d window still parses.
+        let headers = h(&[
+            ("anthropic-ratelimit-unified-5h-utilization", "garbage"),
+            ("anthropic-ratelimit-unified-5h-reset", "1750000005"),
+            ("anthropic-ratelimit-unified-7d-utilization", "0.77"),
+            ("anthropic-ratelimit-unified-7d-reset", "1750000007"),
+        ]);
+        let raw = RawUtilization::from_headers(&headers);
+        assert_eq!(raw.five_hour, None);
+        assert_eq!(
+            raw.seven_day,
+            Some(RawWindow {
+                utilization: 0.77,
+                resets_at: 1_750_000_007,
+            })
+        );
+
+        // Malformed RESET also drops the window — atomic either-both-or-none.
+        let headers = h(&[
+            ("anthropic-ratelimit-unified-5h-utilization", "0.42"),
+            ("anthropic-ratelimit-unified-5h-reset", "soon"),
+        ]);
+        let raw = RawUtilization::from_headers(&headers);
+        assert_eq!(raw.five_hour, None);
+        assert_eq!(raw.seven_day, None);
+        assert_eq!(raw, RawUtilization::default());
+    }
+}
+
+#[cfg(test)]
 mod early_warning {
     //! Early-warning port tests, pinned against claude-code
     //! `getHeaderBasedEarlyWarning` (`claudeAiLimits.ts:255-294`),
@@ -1965,5 +2155,102 @@ mod early_warning {
         let headers = h(&[("anthropic-ratelimit-unified-status", "rejected")]);
         let p = RateLimitInfo::from_headers(&headers);
         assert_eq!(p.status.as_deref(), Some("rejected"));
+    }
+}
+
+/// Task 6 (llm-client future-work batch 5): the fresh-from-error-headers
+/// rejected-limits constructor (`errors.ts:471-516`).
+#[cfg(test)]
+mod from_429_error_headers {
+    use super::*;
+
+    fn h(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
+        pairs
+            .iter()
+            .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+            .collect()
+    }
+
+    /// Gate (`errors.ts:480`): no representative-claim AND no overage-status
+    /// → `None` (claude-code falls through to the generic 429 branch).
+    #[test]
+    fn gate_fails_without_unified_headers() {
+        assert_eq!(RateLimitInfo::from_429_error_headers(&[]), None);
+        // Other unified headers alone don't pass the gate.
+        let headers = h(&[
+            ("anthropic-ratelimit-unified-reset", "1760000000"),
+            ("anthropic-ratelimit-unified-status", "rejected"),
+        ]);
+        assert_eq!(RateLimitInfo::from_429_error_headers(&headers), None);
+        // Empty values are falsy in the TS gate.
+        let empty = h(&[
+            ("anthropic-ratelimit-unified-representative-claim", ""),
+            ("anthropic-ratelimit-unified-overage-status", ""),
+        ]);
+        assert_eq!(RateLimitInfo::from_429_error_headers(&empty), None);
+    }
+
+    /// Full header set maps the five TS-set fields; status is FORCED
+    /// 'rejected' (errors.ts:483) even when the status header says otherwise.
+    #[test]
+    fn full_headers_map_with_forced_rejected_status() {
+        let headers = h(&[
+            ("anthropic-ratelimit-unified-representative-claim", "seven_day"),
+            ("anthropic-ratelimit-unified-overage-status", "rejected"),
+            ("anthropic-ratelimit-unified-status", "allowed"),
+            ("anthropic-ratelimit-unified-reset", "1760000000"),
+            ("anthropic-ratelimit-unified-overage-reset", "1760000200"),
+            (
+                "anthropic-ratelimit-unified-overage-disabled-reason",
+                "out_of_credits",
+            ),
+        ]);
+        let info = RateLimitInfo::from_429_error_headers(&headers).expect("gate passes");
+        assert_eq!(info.status.as_deref(), Some("rejected"), "forced (errors.ts:483)");
+        assert_eq!(info.rate_limit_type.as_deref(), Some("seven_day"));
+        assert_eq!(info.overage_status.as_deref(), Some("rejected"));
+        assert_eq!(info.resets_at, Some(1_760_000_000));
+        assert_eq!(info.overage_resets_at, Some(1_760_000_200));
+        assert_eq!(info.overage_disabled_reason.as_deref(), Some("out_of_credits"));
+        // Fields the TS error path never sets stay at their defaults.
+        assert_eq!(info.utilization, None);
+        assert_eq!(info.claim_resets_at, None);
+        assert_eq!(info.fallback_available, None);
+        assert_eq!(info.surpassed_threshold, None);
+    }
+
+    /// representative-claim alone passes the gate; NO early-warning
+    /// replacement runs (unlike `from_headers`, the error path builds the
+    /// object directly — a surpassed-threshold header is ignored).
+    #[test]
+    fn claim_only_passes_gate_and_skips_early_warning() {
+        let headers = h(&[
+            ("anthropic-ratelimit-unified-representative-claim", "five_hour"),
+            ("anthropic-ratelimit-unified-5h-surpassed-threshold", "0.9"),
+        ]);
+        let info = RateLimitInfo::from_429_error_headers(&headers).expect("gate passes");
+        assert_eq!(info.status.as_deref(), Some("rejected"));
+        assert_eq!(info.rate_limit_type.as_deref(), Some("five_hour"));
+        assert_eq!(info.surpassed_threshold, None, "no early-warning on the error path");
+    }
+
+    /// The constructed info composes the byte-locked rejected copy through
+    /// `rate_limit_error_message` (rateLimitMessages.ts:333-344).
+    #[test]
+    fn composes_byte_locked_rejected_copy() {
+        let headers = h(&[(
+            "anthropic-ratelimit-unified-representative-claim",
+            "seven_day",
+        )]);
+        let info = RateLimitInfo::from_429_error_headers(&headers).expect("gate passes");
+        let msg = rate_limit_error_message(
+            &info,
+            &ResetTimes {
+                reset_time: Some("3pm"),
+                ..ResetTimes::default()
+            },
+            SubscriptionContext::default(),
+        );
+        assert_eq!(msg.as_deref(), Some("You've hit your weekly limit · resets 3pm"));
     }
 }

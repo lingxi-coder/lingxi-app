@@ -27,6 +27,8 @@
 //!   returns the model's native default. The `CLAUDE_CODE_MAX_OUTPUT_TOKENS`
 //!   env override (a pure env read) IS honored, clamped to the upper limit.
 
+use traits::env::is_env_truthy;
+
 /// Default model context window (200k tokens for all models right now).
 /// Mirrors `MODEL_CONTEXT_WINDOW_DEFAULT` in `utils/context.ts`.
 pub const MODEL_CONTEXT_WINDOW_DEFAULT: u64 = 200_000;
@@ -220,19 +222,6 @@ fn parse_positive_i64(raw: &str) -> Option<u64> {
         return None;
     }
     digits.parse::<u64>().ok().filter(|&v| v > 0)
-}
-
-/// Mirrors `isEnvTruthy` (`utils/envUtils.ts:32-37`): `1` / `true` / `yes` /
-/// `on` (case-insensitive, trimmed) are truthy.
-fn is_env_truthy(value: Option<&str>) -> bool {
-    match value {
-        Some(v) => {
-            let normalized = v.to_lowercase();
-            let normalized = normalized.trim();
-            matches!(normalized, "1" | "true" | "yes" | "on")
-        }
-        None => false,
-    }
 }
 
 #[cfg(test)]

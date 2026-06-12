@@ -93,14 +93,25 @@ impl AndroidPlatform {
         use platform_posix_minimal::{
             PosixClock, PosixFileSystem, PosixProcess, PosixSandbox, PosixWorktree,
         };
-        // Task 11 swaps the sandbox/process handles when shell is Some.
-        let _ = &inputs.shell;
+        let (process, sandbox): (Arc<dyn ProcessRunner>, Arc<dyn Sandbox>) = match inputs.shell {
+            Some(shell_cfg) => {
+                let caps = Arc::new(crate::capabilities::CapabilityCache::new());
+                (
+                    Arc::new(crate::process::AndroidMinijailProcessRunner::new()),
+                    Arc::new(crate::sandbox::AndroidMinijailSandbox::new(shell_cfg, caps)),
+                )
+            }
+            None => (
+                Arc::new(PosixProcess::new()) as Arc<dyn ProcessRunner>,
+                Arc::new(PosixSandbox::new()) as Arc<dyn Sandbox>,
+            ),
+        };
         Self {
             fs: Arc::new(PosixFileSystem::new(inputs.app_files_root)),
             http: Arc::new(platform_common::http::ReqwestHttp::new()),
             clock: Arc::new(PosixClock::new()),
-            process: Arc::new(PosixProcess::new()),
-            sandbox: Arc::new(PosixSandbox::new()),
+            process,
+            sandbox,
             worktree: Arc::new(PosixWorktree::new()),
             camera: inputs.camera,
             voice: inputs.voice,
@@ -154,4 +165,87 @@ impl Platform for AndroidPlatform {
         self.clipboard.clone()
     }
     // computer_control() defaults to None.
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use async_trait::async_trait;
+    use traits::{
+        CameraControl, CameraError, CapturePhotoOpts, CapturedImage, Platform, SandboxBackend,
+        ShareError, SharePayload, ShareResult, SharingService, VoiceError, VoiceRecorder,
+        VoiceRecording, VoiceRecordingOpts,
+    };
+
+    struct NoCam;
+    #[async_trait]
+    impl CameraControl for NoCam {
+        async fn capture_photo(&self, _: CapturePhotoOpts) -> Result<CapturedImage, CameraError> {
+            Err(CameraError::DeviceUnavailable)
+        }
+        async fn pick_from_library(&self) -> Result<CapturedImage, CameraError> {
+            Err(CameraError::DeviceUnavailable)
+        }
+    }
+    struct NoVoice;
+    #[async_trait]
+    impl VoiceRecorder for NoVoice {
+        async fn start_recording(&self, _: VoiceRecordingOpts) -> Result<(), VoiceError> {
+            Err(VoiceError::NotRecording)
+        }
+        async fn stop_recording(&self) -> Result<VoiceRecording, VoiceError> {
+            Err(VoiceError::NotRecording)
+        }
+        async fn is_recording(&self) -> bool {
+            false
+        }
+    }
+    struct NoShare;
+    #[async_trait]
+    impl SharingService for NoShare {
+        async fn share(&self, _: SharePayload) -> Result<ShareResult, ShareError> {
+            Err(ShareError::Unsupported)
+        }
+    }
+
+    fn inputs(shell: Option<AndroidShellConfig>) -> AndroidPlatformInputs {
+        AndroidPlatformInputs {
+            app_files_root: std::env::temp_dir(),
+            camera: std::sync::Arc::new(NoCam),
+            voice: std::sync::Arc::new(NoVoice),
+            share: std::sync::Arc::new(NoShare),
+            stt: None,
+            tts: None,
+            notifications: None,
+            clipboard: None,
+            shell,
+        }
+    }
+
+    fn shell_cfg() -> AndroidShellConfig {
+        AndroidShellConfig {
+            native_library_dir: std::env::temp_dir(),
+            shell_workspace_root: std::env::temp_dir(),
+            app_cache_root: std::env::temp_dir(),
+            package_name: "com.example".into(),
+            package_version_code: 1,
+            app_writable_roots: vec![],
+            enable_shell: true,
+            secrets_in_keystore: true,
+            shell_data_exposure_accepted: false,
+        }
+    }
+
+    #[test]
+    fn shell_config_wires_android_sandbox_and_runner() {
+        let p = AndroidPlatform::new(inputs(Some(shell_cfg())));
+        assert_eq!(p.sandbox().backend(), SandboxBackend::AndroidMinijail);
+        assert!(!p.process().is_available(), "execution disabled until P2");
+    }
+
+    #[test]
+    fn no_shell_config_keeps_posix_minimal_stubs() {
+        let p = AndroidPlatform::new(inputs(None));
+        assert_eq!(p.sandbox().backend(), SandboxBackend::None);
+    }
 }

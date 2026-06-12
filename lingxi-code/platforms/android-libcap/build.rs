@@ -43,4 +43,8 @@ fn main() {
         .warnings(false)
         .compile("cap");
     println!("cargo:rerun-if-changed={}", libcap_src.display());
+    println!(
+        "cargo:rerun-if-changed={}",
+        manifest.join("gen/cap_names.h").display()
+    );
 }

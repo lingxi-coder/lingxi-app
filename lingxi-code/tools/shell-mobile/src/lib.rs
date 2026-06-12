@@ -47,6 +47,11 @@ const ANDROID_SHELL: &str = "/system/bin/sh";
 /// Maximum shell timeout (ms) — mirrors the desktop Bash 10-minute ceiling.
 const SHELL_MAX_TIMEOUT_MS: u64 = 600_000;
 
+/// Default shell timeout (ms) when the caller omits one — mirrors the desktop
+/// Bash 2-minute default so an unspecified-timeout command is always bounded
+/// by the runner watchdog, never left to run to the runner's own ceiling.
+const SHELL_DEFAULT_TIMEOUT_MS: u64 = 120_000;
+
 /// `ShellMobileTool` — run a deny-net shell command through the P2 runner.
 #[derive(Clone)]
 pub struct ShellMobileTool {
@@ -254,13 +259,16 @@ impl Tool for ShellMobileTool {
             return Err(ToolError::InvalidInput(advice));
         }
 
-        // 3. Build the raw command (system mksh, -c).
+        // 3. Build the raw command (system mksh, -c). An unspecified timeout
+        //    falls back to the default so the runner watchdog always has a
+        //    bound (never relies on the runner's own ceiling).
+        let effective_timeout = timeout_ms.unwrap_or(SHELL_DEFAULT_TIMEOUT_MS);
         let pcmd = ProcessCommand {
             command: ANDROID_SHELL.to_string(),
             args: vec!["-c".to_string(), command],
             cwd: Some(self.ctx.workspace.clone()),
             env: HashMap::new(),
-            timeout: timeout_ms.map(Duration::from_millis),
+            timeout: Some(Duration::from_millis(effective_timeout)),
             stdin: None,
         };
 
@@ -281,7 +289,6 @@ impl Tool for ShellMobileTool {
             .map_err(|e| map_sandbox_err(&e))?;
 
         // 6. run() — map each ProcessError variant to a named tool error.
-        let effective_timeout = timeout_ms.unwrap_or(SHELL_MAX_TIMEOUT_MS);
         let out = self
             .ctx
             .process

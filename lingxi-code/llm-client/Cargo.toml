@@ -14,9 +14,10 @@ base64 = "0.22"
 httpdate = "1"
 hmac = "0.12"
 sha2 = "0.10"
+tokio = { workspace = true }
 
 [dev-dependencies]
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["test-util"] }
 
 [lints]
 workspace = true

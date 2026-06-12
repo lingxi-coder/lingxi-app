@@ -57,7 +57,10 @@ impl HttpTransport for WindowsHttp {
         for (k, v) in &req.headers {
             rb = rb.header(k, v);
         }
-        if let Some(body) = req.body {
+        // Raw bytes take precedence over the string body (see `HttpRequest::body_bytes`).
+        if let Some(bytes) = req.body_bytes {
+            rb = rb.body(bytes);
+        } else if let Some(body) = req.body {
             rb = rb.body(body);
         }
         if let Some(timeout) = req.timeout {
@@ -98,7 +101,10 @@ impl HttpTransport for WindowsHttp {
         for (k, v) in &req.headers {
             rb = rb.header(k, v);
         }
-        if let Some(body) = req.body {
+        // Raw bytes take precedence over the string body (see `HttpRequest::body_bytes`).
+        if let Some(bytes) = req.body_bytes {
+            rb = rb.body(bytes);
+        } else if let Some(body) = req.body {
             rb = rb.body(body);
         }
         if let Some(timeout) = req.timeout {
@@ -136,7 +142,10 @@ impl HttpTransport for WindowsHttp {
         for (k, v) in &req.headers {
             rb = rb.header(k, v);
         }
-        if let Some(body) = req.body {
+        // Raw bytes take precedence over the string body (see `HttpRequest::body_bytes`).
+        if let Some(bytes) = req.body_bytes {
+            rb = rb.body(bytes);
+        } else if let Some(body) = req.body {
             rb = rb.body(body);
         }
         if let Some(timeout) = req.timeout {

@@ -76,7 +76,10 @@ fn build_reqwest(
     for (k, v) in &req.headers {
         rb = rb.header(k, v);
     }
-    if let Some(body) = req.body {
+    // Raw bytes take precedence over the string body (see `HttpRequest::body_bytes`).
+    if let Some(bytes) = req.body_bytes {
+        rb = rb.body(bytes);
+    } else if let Some(body) = req.body {
         rb = rb.body(body);
     }
     if let Some(timeout) = req.timeout {
@@ -458,6 +461,7 @@ mod tests {
             url: format!("http://{addr}/stream"),
             headers: vec![],
             body: None,
+            body_bytes: None,
             timeout: None,
         };
 
@@ -520,6 +524,7 @@ mod tests {
             url: format!("http://{addr}/stream429"),
             headers: vec![],
             body: None,
+            body_bytes: None,
             timeout: None,
         };
 
@@ -548,6 +553,98 @@ mod tests {
             "error body must be in frame data; got: {}",
             event.data
         );
+    }
+
+    /// `body_bytes` must be sent as the raw request body, verbatim (including
+    /// non-UTF-8 bytes), and the string `body` must be ignored when bytes are
+    /// set. Uses the existing axum-based in-process harness; the server
+    /// captures the received body so binary fidelity is asserted end-to-end.
+    #[tokio::test]
+    async fn request_sends_body_bytes_verbatim_and_ignores_string_body() {
+        use axum::extract::State;
+        use axum::routing::post;
+        use axum::Router;
+        use protocol::HttpMethod;
+        use std::sync::{Arc, Mutex};
+        use tokio::net::TcpListener;
+
+        type Captured = Arc<Mutex<Option<Vec<u8>>>>;
+
+        async fn capture(State(seen): State<Captured>, body: axum::body::Bytes) -> &'static str {
+            *seen.lock().unwrap() = Some(body.to_vec());
+            "ok"
+        }
+
+        let seen: Captured = Arc::new(Mutex::new(None));
+        let app = Router::new()
+            .route("/upload", post(capture))
+            .with_state(Arc::clone(&seen));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let raw = vec![0x89u8, 0x50, 0x4E, 0x47, 0x00, 0xFF, 0x7F];
+        let transport = ReqwestHttp::new();
+        let req = HttpRequest {
+            method: HttpMethod::Post,
+            url: format!("http://{addr}/upload"),
+            headers: vec![("content-type".into(), "application/octet-stream".into())],
+            // Deliberately set BOTH: the string body must be ignored.
+            body: Some("IGNORED-JSON-BODY".to_string()),
+            body_bytes: Some(raw.clone()),
+            timeout: None,
+        };
+
+        let resp = transport.request(req).await.expect("request succeeds");
+        assert_eq!(resp.status, 200);
+        let captured = seen.lock().unwrap().take().expect("server saw a body");
+        assert_eq!(captured, raw, "raw bytes must arrive verbatim");
+    }
+
+    /// Regression pin: without `body_bytes`, the string `body` is still sent
+    /// unchanged.
+    #[tokio::test]
+    async fn request_without_body_bytes_sends_string_body() {
+        use axum::extract::State;
+        use axum::routing::post;
+        use axum::Router;
+        use protocol::HttpMethod;
+        use std::sync::{Arc, Mutex};
+        use tokio::net::TcpListener;
+
+        type Captured = Arc<Mutex<Option<Vec<u8>>>>;
+
+        async fn capture(State(seen): State<Captured>, body: axum::body::Bytes) -> &'static str {
+            *seen.lock().unwrap() = Some(body.to_vec());
+            "ok"
+        }
+
+        let seen: Captured = Arc::new(Mutex::new(None));
+        let app = Router::new()
+            .route("/json", post(capture))
+            .with_state(Arc::clone(&seen));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let transport = ReqwestHttp::new();
+        let req = HttpRequest {
+            method: HttpMethod::Post,
+            url: format!("http://{addr}/json"),
+            headers: vec![],
+            body: Some(r#"{"model":"m"}"#.to_string()),
+            body_bytes: None,
+            timeout: None,
+        };
+
+        let resp = transport.request(req).await.expect("request succeeds");
+        assert_eq!(resp.status, 200);
+        let captured = seen.lock().unwrap().take().expect("server saw a body");
+        assert_eq!(captured, br#"{"model":"m"}"#.to_vec());
     }
 
     /// Keepalive comment lines (`:`) are silently skipped; the event is still
@@ -634,6 +731,7 @@ mod tests {
             url: format!("http://{addr}/binary"),
             headers: vec![],
             body: None,
+            body_bytes: None,
             timeout: None,
         };
 
@@ -695,6 +793,7 @@ mod tests {
             url: format!("http://{addr}/err"),
             headers: vec![],
             body: None,
+            body_bytes: None,
             timeout: None,
         };
 

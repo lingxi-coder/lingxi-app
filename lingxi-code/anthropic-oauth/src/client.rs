@@ -272,6 +272,7 @@ impl ClaudeAiOAuthClient {
                 ("accept".into(), "application/json".into()),
             ],
             body: Some(body),
+            body_bytes: None,
             timeout: Some(EXCHANGE_TIMEOUT),
         };
         let resp = self

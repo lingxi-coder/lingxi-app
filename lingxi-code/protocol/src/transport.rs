@@ -34,6 +34,9 @@ pub struct HttpRequest {
     pub headers: Vec<(String, String)>,
     /// Optional request body (typically UTF-8 JSON).
     pub body: Option<String>,
+    /// Optional raw request body; takes precedence over `body` when set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body_bytes: Option<Vec<u8>>,
     /// Optional overall request timeout.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub timeout: Option<Duration>,
@@ -73,6 +76,7 @@ mod tests {
             url: "https://api.anthropic.com/v1/messages".into(),
             headers: vec![("authorization".into(), "Bearer xyz".into())],
             body: Some(r#"{"model":"claude-opus-4-6"}"#.into()),
+            body_bytes: None,
             timeout: Some(Duration::from_secs(30)),
         };
         let s = serde_json::to_string(&req).unwrap();
@@ -90,5 +94,44 @@ mod tests {
         };
         let s = serde_json::to_string(&e).unwrap();
         assert!(!s.contains("id"));
+    }
+
+    #[test]
+    fn http_request_body_bytes_none_omitted_from_json() {
+        let req = HttpRequest {
+            method: HttpMethod::Get,
+            url: "https://example.com".into(),
+            headers: vec![],
+            body: None,
+            body_bytes: None,
+            timeout: None,
+        };
+        let s = serde_json::to_string(&req).unwrap();
+        assert!(
+            !s.contains("body_bytes"),
+            "None must be omitted for backward compat; got: {s}"
+        );
+        // Legacy JSON without the field still deserializes (serde default).
+        let legacy = r#"{"method":"GET","url":"https://example.com","headers":[],"body":null}"#;
+        let req2: HttpRequest = serde_json::from_str(legacy).unwrap();
+        assert!(req2.body_bytes.is_none());
+    }
+
+    #[test]
+    fn http_request_body_bytes_some_roundtrips() {
+        let req = HttpRequest {
+            method: HttpMethod::Post,
+            url: "https://example.com/upload".into(),
+            headers: vec![],
+            body: None,
+            body_bytes: Some(vec![0x00, 0xFF, 0x10, 0x7F]),
+            timeout: None,
+        };
+        let s = serde_json::to_string(&req).unwrap();
+        let req2: HttpRequest = serde_json::from_str(&s).unwrap();
+        assert_eq!(
+            req2.body_bytes.as_deref(),
+            Some(&[0x00u8, 0xFF, 0x10, 0x7F][..])
+        );
     }
 }

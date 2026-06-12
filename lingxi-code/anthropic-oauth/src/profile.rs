@@ -134,6 +134,7 @@ pub async fn fetch_profile_from_oauth_token(
             ("Content-Type".into(), "application/json".into()),
         ],
         body: None,
+        body_bytes: None,
         timeout: Some(PROFILE_TIMEOUT),
     };
     let resp = transport.request(req).await.ok()?;
@@ -170,6 +171,7 @@ pub async fn fetch_profile_from_api_key(
             ("anthropic-beta".into(), OAUTH_BETA_HEADER.into()),
         ],
         body: None,
+        body_bytes: None,
         timeout: Some(PROFILE_TIMEOUT),
     };
     let resp = transport.request(req).await.ok()?;

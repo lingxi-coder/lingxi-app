@@ -85,6 +85,7 @@ impl AnthropicRequestBuilder {
                 ("accept".into(), "application/json".into()),
             ],
             body: Some(body.to_string()),
+            body_bytes: None,
             timeout: Some(std::time::Duration::from_secs(120)),
         }
     }

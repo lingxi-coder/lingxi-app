@@ -37,6 +37,7 @@ async fn test_request_returns_status_and_body<H: HttpTransport>(http: &H, base_u
         url: format!("{base_url}/ok"),
         headers: Vec::new(),
         body: None,
+        body_bytes: None,
         timeout: Some(Duration::from_secs(5)),
     };
     let resp = http.request(req).await.expect("request must succeed");
@@ -54,6 +55,7 @@ async fn test_request_failure_yields_error<H: HttpTransport>(http: &H) {
         url: "http://127.0.0.1:1/never-listens".into(),
         headers: Vec::new(),
         body: None,
+        body_bytes: None,
         timeout: Some(Duration::from_secs(2)),
     };
     let r = http.request(req).await;
@@ -69,6 +71,7 @@ async fn test_stream_sse_terminates<H: HttpTransport>(http: &H, base_url: &str) 
         url: format!("{base_url}/sse"),
         headers: vec![("Accept".into(), "text/event-stream".into())],
         body: None,
+        body_bytes: None,
         timeout: Some(Duration::from_secs(5)),
     };
     let mut stream = http.stream_sse(req).await.expect("stream_sse must succeed");

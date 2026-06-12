@@ -436,6 +436,14 @@ pub struct ProviderRequest {
     /// [`StreamFraming::AwsEventStream`] during `encode_request`.
     #[serde(default)]
     pub stream_framing: StreamFraming,
+    /// Optional raw request body; takes precedence over `body_json` when set.
+    ///
+    /// Used by binary upload flows (e.g. the Gemini File API resumable
+    /// protocol) where the request body is raw media bytes, not JSON. The
+    /// transport bridge sends these bytes verbatim and suppresses the JSON
+    /// body.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body_bytes: Option<Vec<u8>>,
 }
 
 impl ProviderRequest {
@@ -452,6 +460,7 @@ impl ProviderRequest {
             headers: BTreeMap::new(),
             body_json,
             stream_framing: StreamFraming::Sse,
+            body_bytes: None,
         }
     }
 }

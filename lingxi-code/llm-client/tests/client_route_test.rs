@@ -110,19 +110,21 @@ fn duplicate_profile_names_are_rejected_during_client_construction() {
     assert!(matches!(err, LlmError::InvalidRequest { .. }));
 }
 
+/// `VertexClaude` is still deferred (batch 2 T3); construction must fail
+/// with an actionable error naming the profile and protocol family.
 #[test]
 fn unsupported_protocol_family_yields_actionable_config_error() {
     let config = ClientConfig {
         providers: vec![ProviderProfile {
-            provider_id: ProviderId::BedrockClaude,
-            profile_name: "bedrock-us".to_string(),
-            base_url: "https://bedrock-runtime.us-east-1.amazonaws.com".to_string(),
-            protocol: ProtocolFamily::BedrockClaude,
-            auth: AuthStrategy::AwsSigV4,
+            provider_id: ProviderId::OpenAICompatible { name: "vertex-us".to_string() },
+            profile_name: "vertex-us".to_string(),
+            base_url: "https://us-central1-aiplatform.googleapis.com/v1/projects/p/locations/us-central1".to_string(),
+            protocol: ProtocolFamily::VertexClaude,
+            auth: AuthStrategy::GcpToken,
             credential: CredentialConfig::None,
             models: vec![ModelProfile {
-                display_model: "Claude".to_string(),
-                request_model: "anthropic.claude-sonnet-4".to_string(),
+                display_model: "claude-sonnet-4".to_string(),
+                request_model: "claude-sonnet-4@20250514".to_string(),
                 billing_model: "claude-sonnet-4".to_string(),
                 aliases: vec![],
                 capabilities: Capabilities::default(),
@@ -138,7 +140,7 @@ fn unsupported_protocol_family_yields_actionable_config_error() {
     assert!(matches!(
         err,
         LlmError::InvalidRequest { message }
-            if message.contains("bedrock-us") && message.contains("BedrockClaude")
+            if message.contains("vertex-us") && message.contains("VertexClaude")
     ));
 }
 

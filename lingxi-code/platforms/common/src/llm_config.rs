@@ -59,7 +59,8 @@ pub struct RoutingOverrides {
 
 use llm_client::{
     AuthStrategy, AzureConfig, Capabilities, ClientConfig, CredentialConfig, LlmError,
-    ModelProfile, PricingConfig, ProtocolFamily, ProviderId, ProviderProfile, TokenPricing,
+    ModelProfile, PricingConfig, ProtocolFamily, ProviderId, ProviderProfile, SigningConfig,
+    TokenPricing,
 };
 
 /// Build the built-in Anthropic [`ClientConfig`] for [`llm_client::DefaultLlmClient`].
@@ -262,40 +263,89 @@ fn apply_one_provider(
             ProviderId::OpenAICompatible { name: profile_name.to_string() },
             ProtocolFamily::AzureOpenAi,
         ),
+        "bedrock-claude" => (
+            ProviderId::OpenAICompatible { name: profile_name.to_string() },
+            ProtocolFamily::BedrockClaude,
+        ),
         other => {
             return Err(LlmError::InvalidRequest {
                 message: format!(
-                    "provider {profile_name:?}: unknown type {other:?} (supported: openai, anthropic, gemini, azure-openai)"
+                    "provider {profile_name:?}: unknown type {other:?} (supported: openai, anthropic, gemini, azure-openai, bedrock-claude)"
                 ),
             });
         }
     };
 
-    let base_url = entry
-        .get("baseUrl")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or("")
-        .to_string();
-    if base_url.is_empty() {
-        return Err(LlmError::InvalidRequest {
-            message: format!(
-                "provider {profile_name:?}: \"baseUrl\" is required and must not be empty"
-            ),
-        });
-    }
+    // For bedrock-claude, `region` is required and `baseUrl` may be omitted
+    // (defaults to the Bedrock runtime endpoint for the region).
+    // For all other types, `baseUrl` is required.
+    let (base_url, bedrock_signing) = if type_str == "bedrock-claude" {
+        let region = entry
+            .get("region")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        if region.is_empty() {
+            return Err(LlmError::InvalidRequest {
+                message: format!(
+                    "provider {profile_name:?}: \"region\" is required for bedrock-claude type"
+                ),
+            });
+        }
+        let base_url = entry
+            .get("baseUrl")
+            .and_then(serde_json::Value::as_str)
+            .filter(|s| !s.is_empty())
+            .map_or_else(
+                || format!("https://bedrock-runtime.{region}.amazonaws.com"),
+                str::to_string,
+            );
+        let signing = SigningConfig { region, service: "bedrock".to_string() };
+        (base_url, Some(signing))
+    } else {
+        let base_url = entry
+            .get("baseUrl")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        if base_url.is_empty() {
+            return Err(LlmError::InvalidRequest {
+                message: format!(
+                    "provider {profile_name:?}: \"baseUrl\" is required and must not be empty"
+                ),
+            });
+        }
+        (base_url, None)
+    };
 
-    let api_key_env = entry
-        .get("apiKeyEnv")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or("")
-        .to_string();
-    if api_key_env.is_empty() {
-        return Err(LlmError::InvalidRequest {
-            message: format!(
-                "provider {profile_name:?}: \"apiKeyEnv\" is required and must not be empty"
-            ),
-        });
-    }
+    // For bedrock-claude, apiKeyEnv is NOT required — SigV4 credentials are
+    // host-managed or loaded via StaticCredentialProvider (three-field AWS
+    // credentials cannot be expressed through a single environment variable).
+    // `CredentialConfig::HostManaged { id: "bedrock_sigv4" }` is used so that
+    // a StaticCredentialProvider (or host-managed store) can supply the three-
+    // field Credential::AwsSigV4 at request time.
+    // Credential errors (missing access key / secret / session token) surface
+    // at request time via LlmError::Authentication.
+    //
+    // For all other types, apiKeyEnv is required.
+    let credential_config = if type_str == "bedrock-claude" {
+        // Use HostManaged so the client's injected CredentialProvider is consulted.
+        CredentialConfig::HostManaged { id: "bedrock_sigv4".to_string() }
+    } else {
+        let api_key_env = entry
+            .get("apiKeyEnv")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        if api_key_env.is_empty() {
+            return Err(LlmError::InvalidRequest {
+                message: format!(
+                    "provider {profile_name:?}: \"apiKeyEnv\" is required and must not be empty"
+                ),
+            });
+        }
+        CredentialConfig::Env { var: api_key_env }
+    };
 
     // For azure-openai, apiVersion is required.
     let azure_config = if type_str == "azure-openai" {
@@ -346,10 +396,14 @@ fn apply_one_provider(
             PricingConfig::default()
         };
 
-    // azure-openai uses AzureToken auth (injects `api-key:` header rather than
-    // `Authorization: Bearer`). All other types use the standard ApiKey auth.
+    // Auth strategy by type:
+    // - azure-openai: AzureToken (injects `api-key:` header rather than `Authorization: Bearer`)
+    // - bedrock-claude: AwsSigV4 (SigV4 request signing; credentials via StaticCredentialProvider)
+    // - all others: standard ApiKey
     let auth = if type_str == "azure-openai" {
         AuthStrategy::AzureToken
+    } else if type_str == "bedrock-claude" {
+        AuthStrategy::AwsSigV4
     } else {
         AuthStrategy::ApiKey
     };
@@ -360,10 +414,10 @@ fn apply_one_provider(
         base_url,
         protocol,
         auth,
-        credential: CredentialConfig::Env { var: api_key_env },
+        credential: credential_config,
         models: model_profiles,
         pricing,
-        signing: None,
+        signing: bedrock_signing,
         azure: azure_config,
     });
     Ok(())
@@ -1597,16 +1651,16 @@ mod tests {
         );
     }
 
-    /// The error message for unknown type now includes "azure-openai".
+    /// The error message for unknown type now includes both "azure-openai" and "bedrock-claude".
     #[test]
     fn unknown_type_mentions_azure_openai_in_supported_list() {
         let mut cfg = builtin_anthropic_config("https://api.anthropic.com", false);
         let providers: BTreeMap<String, serde_json::Value> = serde_json::from_str(r#"{
             "weird": {
-                "type": "bedrock",
-                "baseUrl": "https://bedrock.us-east-1.amazonaws.com",
-                "apiKeyEnv": "BEDROCK_KEY",
-                "models": [{ "id": "claude" }]
+                "type": "cohere-v2",
+                "baseUrl": "https://api.cohere.ai",
+                "apiKeyEnv": "COHERE_KEY",
+                "models": [{ "id": "command-r" }]
             }
         }"#).unwrap();
 
@@ -1614,6 +1668,205 @@ mod tests {
         assert!(
             matches!(&err, LlmError::InvalidRequest { message } if message.contains("azure-openai")),
             "error for unknown type must list azure-openai as supported, got: {err:?}"
+        );
+        assert!(
+            matches!(&err, LlmError::InvalidRequest { message } if message.contains("bedrock-claude")),
+            "error for unknown type must list bedrock-claude as supported, got: {err:?}"
+        );
+    }
+
+    // ── bedrock-claude settings type tests ────────────────────────────────────
+
+    /// A bedrock-claude profile with `region` and no `baseUrl` defaults the base
+    /// URL to `https://bedrock-runtime.<region>.amazonaws.com`.
+    #[test]
+    fn bedrock_claude_default_base_url_from_region() {
+        let mut cfg = builtin_anthropic_config("https://api.anthropic.com", false);
+        let providers: BTreeMap<String, serde_json::Value> = serde_json::from_str(r#"{
+            "my-bedrock": {
+                "type": "bedrock-claude",
+                "region": "us-east-1",
+                "models": [{ "id": "anthropic.claude-3-5-sonnet-20241022-v2:0" }]
+            }
+        }"#).unwrap();
+
+        apply_settings_providers(&mut cfg, &providers, None).expect("must succeed");
+
+        let bedrock = cfg.providers.iter().find(|p| p.profile_name == "my-bedrock").unwrap();
+        assert_eq!(
+            bedrock.base_url,
+            "https://bedrock-runtime.us-east-1.amazonaws.com",
+            "base_url must default to region-derived endpoint"
+        );
+        assert_eq!(bedrock.protocol, ProtocolFamily::BedrockClaude);
+        assert_eq!(bedrock.auth, AuthStrategy::AwsSigV4);
+        assert!(
+            bedrock.signing.as_ref().map(|s| (s.region.as_str(), s.service.as_str())) == Some(("us-east-1", "bedrock")),
+            "signing config must have region=us-east-1 and service=bedrock; got {:?}", bedrock.signing
+        );
+        assert_eq!(
+            bedrock.credential,
+            CredentialConfig::HostManaged { id: "bedrock_sigv4".to_string() },
+            "bedrock-claude must use CredentialConfig::HostManaged so the injected provider is consulted"
+        );
+    }
+
+    /// A bedrock-claude profile with an explicit `baseUrl` must use that URL
+    /// instead of the default region-derived endpoint.
+    #[test]
+    fn bedrock_claude_explicit_base_url_overrides_default() {
+        let mut cfg = builtin_anthropic_config("https://api.anthropic.com", false);
+        let providers: BTreeMap<String, serde_json::Value> = serde_json::from_str(r#"{
+            "my-bedrock": {
+                "type": "bedrock-claude",
+                "region": "eu-west-1",
+                "baseUrl": "https://custom-bedrock.example.com",
+                "models": [{ "id": "anthropic.claude-3-haiku-20240307-v1:0" }]
+            }
+        }"#).unwrap();
+
+        apply_settings_providers(&mut cfg, &providers, None).expect("must succeed");
+
+        let bedrock = cfg.providers.iter().find(|p| p.profile_name == "my-bedrock").unwrap();
+        assert_eq!(
+            bedrock.base_url,
+            "https://custom-bedrock.example.com",
+            "explicit baseUrl must override the region-derived default"
+        );
+        assert!(
+            bedrock.signing.as_ref().map(|s| s.region.as_str()) == Some("eu-west-1"),
+            "region in signing config must still come from \"region\" key"
+        );
+    }
+
+    /// A bedrock-claude profile without a `region` key is rejected.
+    #[test]
+    fn bedrock_claude_missing_region_is_error() {
+        let mut cfg = builtin_anthropic_config("https://api.anthropic.com", false);
+        let providers: BTreeMap<String, serde_json::Value> = serde_json::from_str(r#"{
+            "my-bedrock": {
+                "type": "bedrock-claude",
+                "models": [{ "id": "anthropic.claude-3-5-sonnet-20241022-v2:0" }]
+            }
+        }"#).unwrap();
+
+        let err = apply_settings_providers(&mut cfg, &providers, None).unwrap_err();
+        assert!(
+            matches!(&err, LlmError::InvalidRequest { message } if message.contains("region")),
+            "expected InvalidRequest about missing region, got: {err:?}"
+        );
+    }
+
+    /// E2E: a `bedrock-claude` profile parsed from settings builds a
+    /// [`DefaultLlmClient`], and `prepare_at` with a fixed clock produces:
+    /// - URL: `{base_url}/model/{model_id}/invoke`
+    /// - `x-amz-date` header present
+    /// - `x-amz-content-sha256` header present
+    /// - `Authorization` header starting with `AWS4-HMAC-SHA256`
+    /// - No `model` key in the request body
+    /// - `anthropic_version: "bedrock-2023-05-31"` in body
+    ///
+    /// Test name: `bedrock_claude_prepare_e2e_sigv4_headers`
+    #[tokio::test]
+    async fn bedrock_claude_prepare_e2e_sigv4_headers() {
+        use std::sync::Arc;
+        use std::time::{Duration, UNIX_EPOCH};
+        use llm_client::{
+            Credential, DefaultLlmClient, StaticCredentialProvider,
+        };
+
+        let mut cfg = builtin_anthropic_config("https://api.anthropic.com", false);
+        let providers: BTreeMap<String, serde_json::Value> = serde_json::from_str(r#"{
+            "my-bedrock": {
+                "type": "bedrock-claude",
+                "region": "us-east-1",
+                "models": [
+                    { "id": "anthropic.claude-3-5-sonnet-20241022-v2:0", "capabilities": {"streaming": true, "tools": true} }
+                ]
+            }
+        }"#).unwrap();
+
+        apply_settings_providers(&mut cfg, &providers, None).expect("must succeed");
+
+        // Inject static SigV4 credentials so prepare_at succeeds without
+        // requiring real AWS environment variables.
+        let credentials = Arc::new(StaticCredentialProvider::new(Credential::AwsSigV4 {
+            access_key_id: "AKIAIOSFODNN7EXAMPLE".to_string(),
+            secret_access_key: "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY".to_string(),
+            session_token: None,
+        }));
+
+        let client = DefaultLlmClient::from_config(cfg)
+            .expect("client must build")
+            .with_credential_provider(credentials);
+
+        // Fixed clock: 2024-01-15T12:34:56Z (Unix epoch 1705322096)
+        let fixed_now = UNIX_EPOCH + Duration::from_secs(1_705_322_096);
+        let req = llm_client::LlmRequest::new("anthropic.claude-3-5-sonnet-20241022-v2:0");
+        let prepared = client
+            .prepare_at(&req, fixed_now)
+            .await
+            .expect("prepare_at must succeed");
+
+        // URL: non-streaming must use /invoke.
+        assert!(
+            prepared.provider_request.url.ends_with("/invoke"),
+            "URL must end with /invoke; got: {}",
+            prepared.provider_request.url
+        );
+        assert!(
+            prepared.provider_request.url.contains("anthropic.claude-3-5-sonnet-20241022-v2:0"),
+            "URL must contain model id with raw ':'; got: {}",
+            prepared.provider_request.url
+        );
+
+        // x-amz-date must be present and match the fixed clock.
+        let amz_date = prepared.provider_request.headers
+            .get("x-amz-date")
+            .expect("x-amz-date header must be present");
+        assert_eq!(amz_date, "20240115T123456Z", "x-amz-date must match the fixed clock");
+
+        // x-amz-content-sha256 must be present.
+        assert!(
+            prepared.provider_request.headers.contains_key("x-amz-content-sha256"),
+            "x-amz-content-sha256 header must be present"
+        );
+
+        // Authorization header must use AWS4-HMAC-SHA256.
+        let auth = prepared.provider_request.headers
+            .get("Authorization")
+            .expect("Authorization header must be present");
+        assert!(
+            auth.starts_with("AWS4-HMAC-SHA256"),
+            "Authorization must start with AWS4-HMAC-SHA256; got: {auth}"
+        );
+        assert!(
+            auth.contains("20240115"),
+            "Authorization must contain the signing date 20240115; got: {auth}"
+        );
+        assert!(
+            auth.contains("us-east-1/bedrock/aws4_request"),
+            "Authorization must contain the credential scope; got: {auth}"
+        );
+
+        // Model key must be absent from body.
+        assert!(
+            prepared.provider_request.body_json.get("model").is_none(),
+            "body must not contain model key; got: {}",
+            prepared.provider_request.body_json
+        );
+
+        // anthropic_version must be in body.
+        assert_eq!(
+            prepared.provider_request.body_json.get("anthropic_version").and_then(serde_json::Value::as_str),
+            Some("bedrock-2023-05-31"),
+            "body must contain anthropic_version=bedrock-2023-05-31"
+        );
+
+        // No anthropic-version header.
+        assert!(
+            !prepared.provider_request.headers.contains_key("anthropic-version"),
+            "anthropic-version header must NOT be present for Bedrock"
         );
     }
 }

@@ -3,18 +3,29 @@ mod anthropic;
 #[allow(missing_docs)]
 mod azure_openai;
 #[allow(missing_docs)]
+pub mod bedrock_claude;
+#[allow(missing_docs)]
 mod gemini;
 #[allow(missing_docs)]
 mod openai;
 
 use std::time::Duration;
 
-use crate::LlmError;
+use crate::{LlmError, StreamDecoder, WireCodec};
 
 pub use anthropic::AnthropicMessagesCodec;
 pub use azure_openai::AzureOpenAiCodec;
+pub use bedrock_claude::BedrockClaudeCodec;
 pub use gemini::GeminiCodec;
 pub use openai::OpenAiChatCodec;
+
+/// Create an inner Anthropic stream decoder for delegation.
+///
+/// Used by [`BedrockClaudeCodec`]'s stream decoder to unwrap base64-encoded
+/// Bedrock event payloads and forward them to the canonical Anthropic decoder.
+pub(crate) fn bedrock_claude_inner_decoder() -> Box<dyn StreamDecoder> {
+    AnthropicMessagesCodec::new("", "bedrock-2023-05-31").stream_decoder()
+}
 
 /// HTTP-status fallback used when a provider error envelope is missing or
 /// carries an unrecognized code.

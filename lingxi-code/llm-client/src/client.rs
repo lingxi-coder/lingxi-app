@@ -495,14 +495,9 @@ fn build_codec(provider: &crate::ProviderProfile) -> Result<Box<dyn WireCodec>, 
                 ),
             })
         }
-        // BedrockClaude additionally blocked on AWS event-stream framing.
-        crate::ProtocolFamily::BedrockClaude => Err(LlmError::InvalidRequest {
-            message: format!(
-                "provider profile '{}' uses BedrockClaude, which has no codec yet — \
-                 blocked on AWS event-stream framing; see futurework batch 2",
-                provider.profile_name
-            ),
-        }),
+        crate::ProtocolFamily::BedrockClaude => {
+            Ok(Box::new(crate::BedrockClaudeCodec::new(provider.base_url.clone())))
+        }
         crate::ProtocolFamily::OpenAiResponses => Err(LlmError::InvalidRequest {
             message: format!(
                 "provider profile '{}' uses OpenAiResponses, which has no codec yet — \

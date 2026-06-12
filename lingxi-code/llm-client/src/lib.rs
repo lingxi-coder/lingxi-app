@@ -31,7 +31,7 @@ pub mod types;
 pub use auth::{ApiKeyAuthenticator, Authenticator, BearerAuthenticator};
 pub use anthropic::normalize_anthropic_usage;
 pub use client::{DefaultLlmClient, LlmEventStream, PreparedLlmCall};
-pub use providers::{AnthropicMessagesCodec, AzureOpenAiCodec, GeminiCodec, OpenAiChatCodec};
+pub use providers::{AnthropicMessagesCodec, AzureOpenAiCodec, BedrockClaudeCodec, GeminiCodec, OpenAiChatCodec};
 pub use config::{
     AuthStrategy, AzureConfig, Capabilities, ClientConfig, CredentialConfig, ModelProfile,
     PricingConfig, ProtocolFamily, ProviderProfile, SigningConfig,

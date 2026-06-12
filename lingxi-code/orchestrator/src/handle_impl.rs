@@ -239,6 +239,20 @@ impl OrchestratorHandle for ConversationOrchestrator {
         ]
     }
 
+    /// Return the most recently observed provider rate-limit header snapshot.
+    ///
+    /// Delegates to [`OrchestratorApiClient::last_rate_limit_info`] on the
+    /// `api` field.  `ProviderApiAdapter` overrides the default (None) to
+    /// return the cached 2xx header snapshot from `last_rate_limit`.
+    ///
+    /// TUI note: this surface is available for polling (e.g. from a ticker).
+    /// Wiring it into `RenderedMessage::RateLimit` requires a new protocol
+    /// event or a dedicated status-poll channel — both outside this task's
+    /// scope (frozen protocol guard).  See the trait doc for details.
+    async fn last_rate_limit_info(&self) -> Option<traits::RateLimitSnapshot> {
+        self.api.last_rate_limit_info()
+    }
+
     async fn run_turn_streaming_with_cancel(
         &self,
         prompt: &str,

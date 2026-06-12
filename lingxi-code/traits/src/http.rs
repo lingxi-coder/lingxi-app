@@ -45,6 +45,34 @@ pub struct SseStreamWithMeta {
     pub stream: SseStream,
 }
 
+/// Raw byte stream together with the HTTP response metadata that preceded it.
+///
+/// Returned by [`HttpTransport::stream_raw_bytes_with_meta`]. The status and
+/// headers are captured from the response line/headers before any body bytes
+/// arrive — exactly as [`SseStreamWithMeta`] does for SSE — so callers can
+/// inspect rate-limit and other headers immediately.
+///
+/// Used by the bridge's AWS event-stream path: the bridge calls this method
+/// instead of [`HttpTransport::stream_raw_bytes`] so it can forward real
+/// response headers (e.g. `retry-after`) upstream even for binary-framed
+/// responses.
+///
+/// # Note on the default implementation
+///
+/// The default [`HttpTransport::stream_raw_bytes_with_meta`] delegates to
+/// [`HttpTransport::stream_raw_bytes`] with a synthetic `status: 200` and
+/// empty headers — it loses metadata that a real transport would surface.
+/// Override in production transports (e.g. `ReqwestHttp`) to capture the
+/// metadata before streaming body bytes.
+pub struct RawByteStreamWithMeta {
+    /// HTTP status of the streaming response (e.g. 200, 429).
+    pub status: u16,
+    /// Response headers, lowercased names (e.g. `"retry-after"`).
+    pub headers: Vec<(String, String)>,
+    /// The raw byte chunk stream; drive to completion and interpret framing.
+    pub stream: RawByteStream,
+}
+
 /// A `Stream` that yields a single chunk then ends. Backs the default
 /// [`HttpTransport::stream_raw_bytes`] (buffer-the-body) impl without pulling a
 /// stream-combinator dependency into this leaf crate.
@@ -110,6 +138,38 @@ pub trait HttpTransport: Send + Sync {
             });
         }
         Ok(Box::pin(OnceBytes(Some(Ok(resp.body.into_bytes())))))
+    }
+
+    /// Open a raw byte stream, also capturing the HTTP status and response
+    /// headers before any body bytes arrive.
+    ///
+    /// The default implementation wraps [`Self::stream_raw_bytes`] with a
+    /// synthetic `status: 200` and empty headers — it loses metadata that the
+    /// platform transport would otherwise surface.  Override in production
+    /// transports so connect-phase rate-limit headers (`retry-after`, etc.)
+    /// are preserved for binary-framed streaming responses.
+    ///
+    /// # ≥400 error-arm behaviour
+    ///
+    /// Production overrides (e.g. `ReqwestHttp`) return `Ok` with the real
+    /// status and headers even for error responses, mirroring the
+    /// [`Self::stream_sse_with_meta`] contract.  The default falls back to
+    /// [`Self::stream_raw_bytes`], which surfaces `Err(HttpError::Status)` for
+    /// non-2xx — callers of the default lose headers on error paths.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`HttpError`] on connection failure. Non-2xx handling depends
+    /// on the implementation (see above).
+    async fn stream_raw_bytes_with_meta(
+        &self,
+        req: HttpRequest,
+    ) -> Result<RawByteStreamWithMeta, HttpError> {
+        Ok(RawByteStreamWithMeta {
+            status: 200,
+            headers: Vec::new(),
+            stream: self.stream_raw_bytes(req).await?,
+        })
     }
 }
 
@@ -240,5 +300,29 @@ mod tests {
         // stream ends after the single chunk
         let second = std::future::poll_fn(|cx| s.as_mut().poll_next(cx)).await;
         assert!(second.is_none());
+    }
+
+    /// The default `stream_raw_bytes_with_meta` wraps `stream_raw_bytes` with a
+    /// synthetic status 200 and empty headers — it must compile, forward the body
+    /// chunk, and report the synthetic metadata.
+    #[tokio::test]
+    async fn default_stream_raw_bytes_with_meta_uses_status_200_empty_headers() {
+        let t = OneShot;
+        let meta = t
+            .stream_raw_bytes_with_meta(get_req())
+            .await
+            .expect("default must succeed");
+        assert_eq!(meta.status, 200, "default status must be 200");
+        assert!(meta.headers.is_empty(), "default headers must be empty");
+
+        let mut s = meta.stream;
+        let first = std::future::poll_fn(|cx| s.as_mut().poll_next(cx)).await;
+        assert_eq!(
+            first.unwrap().unwrap(),
+            b"hello".to_vec(),
+            "body chunk must be forwarded"
+        );
+        let second = std::future::poll_fn(|cx| s.as_mut().poll_next(cx)).await;
+        assert!(second.is_none(), "stream must end after single chunk");
     }
 }

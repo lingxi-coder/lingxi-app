@@ -54,6 +54,7 @@ pub use computer_control::{ComputerControl, ComputerError, Screenshot};
 pub use effect_handler::EffectHandler;
 pub use filesystem::{FileContent, FileEvent, FileEventKind, FileSystem, FlockGuard, FsError};
 pub use http::{HttpError, HttpTransport};
+pub use http::RawByteStreamWithMeta;
 pub use lsp::{LspError, LspRawConnection, LspServerCapabilities, LspServerConfig, LspTransport};
 pub use mailbox::{
     MailboxError as RouterMailboxError, MailboxMessage, MailboxRouterHandle, RouteAck,
@@ -63,7 +64,7 @@ pub use notification::{NotificationError, NotificationRequest, NotificationServi
 pub use orchestrator::{
     AgentInfo, CheckStatus, CompactionSummary, CostSnapshot, DoctorCheck, DoctorReport,
     DoctorSummary, HandleError, HookInfo, McpServerInfo, McpStatus, MemoryEditorOutcome,
-    OrchestratorHandle, OutputEvent, OutputStream, StatusSnapshot, TurnOutcome,
+    OrchestratorHandle, OutputEvent, OutputStream, RateLimitSnapshot, StatusSnapshot, TurnOutcome,
 };
 pub use permission_gate::{PermissionDecision, PermissionGate};
 pub use platform::Platform;

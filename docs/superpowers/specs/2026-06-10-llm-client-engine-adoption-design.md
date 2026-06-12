@@ -1,7 +1,7 @@
 # Engine adoption of llm-client (full replacement of api-client) — design
 
 Date: 2026-06-10
-Status: approved (user), revision 2.6 — future-work batch 1 COMPLETE.
+Status: approved (user), revision 2.7 — future-work batch 2 COMPLETE.
 
 **Revision history:**
 - 2.2 — no intermediate policy crate; supersedes api-client entirely with no backwards compatibility.
@@ -26,6 +26,28 @@ Status: approved (user), revision 2.6 — future-work batch 1 COMPLETE.
   §Streaming-cost evidence below). Remaining (batch 2 candidates): Vertex/Bedrock codecs +
   AWS event-stream framing, OpenAI document parts, Gemini File API ImageUrl, fallback chains
   beyond chain[0], rate-limit TUI surface.
+- 2.7 — Future-work batch 2 COMPLETE: ALL protocol families except OpenAiResponses now have
+  codecs.
+  - **BedrockClaude**: AWS event-stream binary framing via a hand-rolled CRC32-validated
+    splitter (prelude-CRC-validated-before-buffering hostile-length defense + 8 MiB frame
+    bound); each frame's `{"bytes": b64}` payload is unwrapped and fed to the inner anthropic
+    decoder; SigV4 signs streaming bodies; new `"bedrock-claude"` settings type maps
+    `region` → `SigningConfig` and derives the `base_url`.
+  - **VertexClaude**: `rawPredict`/`streamRawPredict` SSE endpoints;
+    `anthropic_version: vertex-2023-10-16`; `base_url` carries the full
+    project/location prefix by convention.
+  - **VertexGemini**: URL-only wrapper over `GeminiCodec` (`alt=sse` streaming).
+  - Settings types `vertex-claude`/`vertex-gemini`: `apiKeyEnv` holds the Bearer-token env
+    var; `GcpToken` accepts Env-loaded credentials.
+  - **Media completions**: OpenAI `Document` → file parts with data-URI + `"document"`
+    default filename (was REJECT before); Gemini `ImageUrl` → `file_data.file_uri` with
+    `mimeType` omitted (service-inferred).
+  - **Fallback chains walk ALL entries**: per-model `Vec` of fallbacks; the retry `ctl` is
+    rebuilt per Fallback step with a consecutive-529 reset; `retry.rs` untouched.
+  - **Rate-limit surface** stopped at `OrchestratorHandle::last_rate_limit_info`
+    (frozen-protocol scope guard — a full TUI feed needs a protocol event, documented).
+  - Remaining: OpenAiResponses codec (no demand), Gemini File API upload flow, TUI
+    rate-limit rendering via a future protocol event.
 
 ## Goal
 

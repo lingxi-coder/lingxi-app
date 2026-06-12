@@ -38,10 +38,11 @@ use std::collections::BTreeMap;
 ///
 /// ## Fields
 ///
-/// - `fallback`: per-model fallback target. Key is the **display model** of
-///   the primary model (alias-resolved); value is the display model of the
-///   fallback target (must resolve in `cfg`). Only chain[0] is stored; longer
-///   chains warn via `tracing::warn!`.
+/// - `fallback`: per-model fallback chain. Key is the **display model** of
+///   the primary model (alias-resolved); value is an ordered list of fallback
+///   targets (display models, each validated against `cfg`). The adapter walks
+///   the chain on consecutive overload events: chain[0] fires first, chain[1]
+///   when chain[0] is also overloaded, and so on until exhausted.
 /// - `max_retries`: `routing.retry.maxAttempts` parsed as `u32`. When `None`,
 ///   `CLAUDE_CODE_MAX_RETRIES` env (then `DEFAULT_MAX_RETRIES`) applies.
 /// - `backoff_ms`: `routing.retry.backoffMs` as the base-delay for the jitter
@@ -49,8 +50,8 @@ use std::collections::BTreeMap;
 ///   When `None`, the default `[500, 1000, 2000]` ladder is used.
 #[derive(Debug, Default, Clone, PartialEq)]
 pub struct RoutingOverrides {
-    /// Per-model fallback targets: display-model → display-model.
-    pub fallback: BTreeMap<String, String>,
+    /// Per-model fallback chains: display-model → ordered Vec of display-models.
+    pub fallback: BTreeMap<String, Vec<String>>,
     /// `routing.retry.maxAttempts` override.
     pub max_retries: Option<u32>,
     /// `routing.retry.backoffMs` override (first rung of the jitter ladder).
@@ -59,7 +60,8 @@ pub struct RoutingOverrides {
 
 use llm_client::{
     AuthStrategy, AzureConfig, Capabilities, ClientConfig, CredentialConfig, LlmError,
-    ModelProfile, PricingConfig, ProtocolFamily, ProviderId, ProviderProfile, TokenPricing,
+    ModelProfile, PricingConfig, ProtocolFamily, ProviderId, ProviderProfile, SigningConfig,
+    TokenPricing,
 };
 
 /// Build the built-in Anthropic [`ClientConfig`] for [`llm_client::DefaultLlmClient`].
@@ -262,40 +264,99 @@ fn apply_one_provider(
             ProviderId::OpenAICompatible { name: profile_name.to_string() },
             ProtocolFamily::AzureOpenAi,
         ),
+        "bedrock-claude" => (
+            ProviderId::OpenAICompatible { name: profile_name.to_string() },
+            ProtocolFamily::BedrockClaude,
+        ),
+        // Vertex AI: Claude on Vertex (rawPredict/streamRawPredict SSE)
+        "vertex-claude" => (
+            ProviderId::OpenAICompatible { name: profile_name.to_string() },
+            ProtocolFamily::VertexClaude,
+        ),
+        // Vertex AI: Gemini on Vertex (generateContent/streamGenerateContent SSE)
+        "vertex-gemini" => (
+            ProviderId::OpenAICompatible { name: profile_name.to_string() },
+            ProtocolFamily::VertexGemini,
+        ),
         other => {
             return Err(LlmError::InvalidRequest {
                 message: format!(
-                    "provider {profile_name:?}: unknown type {other:?} (supported: openai, anthropic, gemini, azure-openai)"
+                    "provider {profile_name:?}: unknown type {other:?} (supported: openai, anthropic, gemini, azure-openai, bedrock-claude, vertex-claude, vertex-gemini)"
                 ),
             });
         }
     };
 
-    let base_url = entry
-        .get("baseUrl")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or("")
-        .to_string();
-    if base_url.is_empty() {
-        return Err(LlmError::InvalidRequest {
-            message: format!(
-                "provider {profile_name:?}: \"baseUrl\" is required and must not be empty"
-            ),
-        });
-    }
+    // For bedrock-claude, `region` is required and `baseUrl` may be omitted
+    // (defaults to the Bedrock runtime endpoint for the region).
+    // For all other types, `baseUrl` is required.
+    let (base_url, bedrock_signing) = if type_str == "bedrock-claude" {
+        let region = entry
+            .get("region")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        if region.is_empty() {
+            return Err(LlmError::InvalidRequest {
+                message: format!(
+                    "provider {profile_name:?}: \"region\" is required for bedrock-claude type"
+                ),
+            });
+        }
+        let base_url = entry
+            .get("baseUrl")
+            .and_then(serde_json::Value::as_str)
+            .filter(|s| !s.is_empty())
+            .map_or_else(
+                || format!("https://bedrock-runtime.{region}.amazonaws.com"),
+                str::to_string,
+            );
+        let signing = SigningConfig { region, service: "bedrock".to_string() };
+        (base_url, Some(signing))
+    } else {
+        let base_url = entry
+            .get("baseUrl")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        if base_url.is_empty() {
+            return Err(LlmError::InvalidRequest {
+                message: format!(
+                    "provider {profile_name:?}: \"baseUrl\" is required and must not be empty"
+                ),
+            });
+        }
+        (base_url, None)
+    };
 
-    let api_key_env = entry
-        .get("apiKeyEnv")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or("")
-        .to_string();
-    if api_key_env.is_empty() {
-        return Err(LlmError::InvalidRequest {
-            message: format!(
-                "provider {profile_name:?}: \"apiKeyEnv\" is required and must not be empty"
-            ),
-        });
-    }
+    // For bedrock-claude, apiKeyEnv is NOT required — SigV4 credentials are
+    // host-managed or loaded via StaticCredentialProvider (three-field AWS
+    // credentials cannot be expressed through a single environment variable).
+    // `CredentialConfig::HostManaged { id: "bedrock_sigv4" }` is used so that
+    // a StaticCredentialProvider (or host-managed store) can supply the three-
+    // field Credential::AwsSigV4 at request time.
+    // Credential errors (missing access key / secret / session token) surface
+    // at request time via LlmError::Authentication.
+    //
+    // For all other types, apiKeyEnv is required.
+    let credential_config = if type_str == "bedrock-claude" {
+        // Use HostManaged so the client's injected CredentialProvider is consulted.
+        CredentialConfig::HostManaged { id: "bedrock_sigv4".to_string() }
+    } else {
+        let api_key_env = entry
+            .get("apiKeyEnv")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        if api_key_env.is_empty() {
+            return Err(LlmError::InvalidRequest {
+                message: format!(
+                    "provider {profile_name:?}: \"apiKeyEnv\" is required and must not be empty"
+                ),
+            });
+        }
+        CredentialConfig::Env { var: api_key_env }
+    };
 
     // For azure-openai, apiVersion is required.
     let azure_config = if type_str == "azure-openai" {
@@ -346,10 +407,19 @@ fn apply_one_provider(
             PricingConfig::default()
         };
 
-    // azure-openai uses AzureToken auth (injects `api-key:` header rather than
-    // `Authorization: Bearer`). All other types use the standard ApiKey auth.
+    // Auth strategy by type:
+    // - azure-openai: AzureToken (injects `api-key:` header rather than `Authorization: Bearer`)
+    // - bedrock-claude: AwsSigV4 (SigV4 request signing; credentials via StaticCredentialProvider)
+    // - vertex-claude / vertex-gemini: GcpToken (Bearer token; `apiKeyEnv` holds the bearer token
+    //   env var; `EnvCredentialProvider` loads it as `Credential::ApiKey(value)`, and the
+    //   `GcpToken` authenticate arm accepts both `ApiKey` and `BearerToken` via `load_secret`)
+    // - all others: standard ApiKey
     let auth = if type_str == "azure-openai" {
         AuthStrategy::AzureToken
+    } else if type_str == "bedrock-claude" {
+        AuthStrategy::AwsSigV4
+    } else if type_str == "vertex-claude" || type_str == "vertex-gemini" {
+        AuthStrategy::GcpToken
     } else {
         AuthStrategy::ApiKey
     };
@@ -360,10 +430,10 @@ fn apply_one_provider(
         base_url,
         protocol,
         auth,
-        credential: CredentialConfig::Env { var: api_key_env },
+        credential: credential_config,
         models: model_profiles,
         pricing,
-        signing: None,
+        signing: bedrock_signing,
         azure: azure_config,
     });
     Ok(())
@@ -609,10 +679,11 @@ fn resolve_display_model<'a>(
 ///   against `cfg` (same as how `apply_routing_aliases` resolves targets).
 ///   When the key doesn't resolve as a `profile/model` it is tried as a bare
 ///   display model or alias across all providers.
-/// - Only chain[0] is used.  Longer chains emit a `tracing::warn!` and the
-///   extra entries are discarded.
-/// - The target (`chain[0]`) must resolve to a known `profile/model`; an
-///   unknown target is an [`LlmError::InvalidRequest`].
+/// - The **full chain** is validated and stored.  Every entry must resolve to
+///   a known `profile/model`; an unknown entry is an [`LlmError::InvalidRequest`].
+///   The adapter walks the chain in order: chain[0] fires first on the initial
+///   overload fallback, chain[1] when chain[0] is also overloaded, and so on
+///   until exhausted.
 ///
 /// ## Retry shape
 ///
@@ -630,7 +701,7 @@ fn resolve_display_model<'a>(
 ///
 /// # Errors
 ///
-/// Returns [`LlmError::InvalidRequest`] when a fallback target (`chain[0]`)
+/// Returns [`LlmError::InvalidRequest`] when any fallback target in the chain
 /// cannot be resolved in `cfg`.
 pub fn parse_routing_overrides(
     routing: &serde_json::Value,
@@ -655,7 +726,7 @@ pub fn parse_routing_overrides(
                     .map_or_else(|| key.clone(), |m| m.display_model.clone())
             };
 
-            // chain_val must be an array; we only use chain[0].
+            // chain_val must be a non-empty array; every entry is validated.
             let chain = chain_val.as_array().ok_or_else(|| llm_client::LlmError::InvalidRequest {
                 message: format!(
                     "routing.fallback[{key:?}]: value must be an array of \"profile/model\" strings"
@@ -668,33 +739,32 @@ pub fn parse_routing_overrides(
                     ),
                 });
             }
-            if chain.len() > 1 {
-                tracing::warn!(
-                    "routing.fallback[{key:?}]: fallback chains beyond the first entry are not yet supported; using chain[0] only"
-                );
+            // Validate every entry in the chain and collect display models.
+            let mut resolved_chain: Vec<String> = Vec::with_capacity(chain.len());
+            for (i, entry_val) in chain.iter().enumerate() {
+                let target = entry_val.as_str().ok_or_else(|| llm_client::LlmError::InvalidRequest {
+                    message: format!(
+                        "routing.fallback[{key:?}]: chain[{i}] must be a \"profile/model\" string"
+                    ),
+                })?;
+                let (profile_part, model_part) = target.split_once('/').ok_or_else(|| {
+                    llm_client::LlmError::InvalidRequest {
+                        message: format!(
+                            "routing.fallback[{key:?}]: chain[{i}] target {target:?} must be \"profile/model\""
+                        ),
+                    }
+                })?;
+                let target_display = resolve_display_model(cfg, profile_part, model_part)
+                    .ok_or_else(|| llm_client::LlmError::InvalidRequest {
+                        message: format!(
+                            "routing.fallback[{key:?}]: chain[{i}] target {target:?} not found in any configured profile"
+                        ),
+                    })?
+                    .to_string();
+                resolved_chain.push(target_display);
             }
-            let target = chain[0].as_str().ok_or_else(|| llm_client::LlmError::InvalidRequest {
-                message: format!(
-                    "routing.fallback[{key:?}]: chain[0] must be a \"profile/model\" string"
-                ),
-            })?;
-            // Validate the target resolves.
-            let (profile_part, model_part) = target.split_once('/').ok_or_else(|| {
-                llm_client::LlmError::InvalidRequest {
-                    message: format!(
-                        "routing.fallback[{key:?}]: target {target:?} must be \"profile/model\""
-                    ),
-                }
-            })?;
-            let target_display = resolve_display_model(cfg, profile_part, model_part)
-                .ok_or_else(|| llm_client::LlmError::InvalidRequest {
-                    message: format!(
-                        "routing.fallback[{key:?}]: target {target:?} not found in any configured profile"
-                    ),
-                })?
-                .to_string();
 
-            overrides.fallback.insert(key_display, target_display);
+            overrides.fallback.insert(key_display, resolved_chain);
         }
     }
 
@@ -1190,8 +1260,8 @@ mod tests {
         let overrides = parse_routing_overrides(&routing, &cfg).expect("must succeed");
         assert_eq!(
             overrides.fallback.get("claude-opus-4-7"),
-            Some(&"claude-sonnet-4-20250514".to_string()),
-            "fallback key must normalize to display model"
+            Some(&vec!["claude-sonnet-4-20250514".to_string()]),
+            "fallback key must normalize to display model; chain stored as Vec"
         );
         assert_eq!(overrides.max_retries, Some(5));
         assert_eq!(overrides.backoff_ms, Some(1000));
@@ -1214,9 +1284,29 @@ mod tests {
         );
     }
 
-    /// Chain >1 uses first entry and logs a warning (no error).
+    /// Unknown fallback target in chain[1] also errors (every entry validated).
     #[test]
-    fn parse_routing_overrides_chain_gt1_uses_first_entry() {
+    fn parse_routing_overrides_unknown_chain1_target_error() {
+        let cfg = routing_test_cfg();
+        let routing: serde_json::Value = serde_json::from_str(r#"{
+            "fallback": {
+                "anthropic/claude-opus-4-7": [
+                    "anthropic/claude-sonnet-4-20250514",
+                    "nonexistent/model-two"
+                ]
+            }
+        }"#).unwrap();
+
+        let err = parse_routing_overrides(&routing, &cfg).unwrap_err();
+        assert!(
+            matches!(&err, LlmError::InvalidRequest { message } if message.contains("not found")),
+            "chain[1] unknown target must error with not found, got: {err:?}"
+        );
+    }
+
+    /// Multi-entry chain: all entries validated and stored in order (no warn, no truncation).
+    #[test]
+    fn parse_routing_overrides_full_chain_stored() {
         let cfg = routing_test_cfg();
         let routing: serde_json::Value = serde_json::from_str(r#"{
             "fallback": {
@@ -1227,12 +1317,15 @@ mod tests {
             }
         }"#).unwrap();
 
-        let overrides = parse_routing_overrides(&routing, &cfg).expect("must succeed with chain>1");
-        // chain[0] must be used
+        let overrides = parse_routing_overrides(&routing, &cfg).expect("must succeed with multi-entry chain");
+        // Full chain must be stored in order.
         assert_eq!(
             overrides.fallback.get("claude-opus-4-7"),
-            Some(&"claude-sonnet-4-20250514".to_string()),
-            "chain[0] must be used when chain length > 1"
+            Some(&vec![
+                "claude-sonnet-4-20250514".to_string(),
+                "llama-3.3-70b".to_string(),
+            ]),
+            "full chain must be stored with all entries in order"
         );
     }
 
@@ -1292,7 +1385,7 @@ mod tests {
         let overrides = parse_routing_overrides(&routing, &cfg).expect("must succeed");
         assert_eq!(
             overrides.fallback.get("llama-3.3-70b"),
-            Some(&"claude-sonnet-4-20250514".to_string()),
+            Some(&vec!["claude-sonnet-4-20250514".to_string()]),
             "alias key 'llama' must resolve to display model 'llama-3.3-70b'"
         );
     }
@@ -1597,16 +1690,16 @@ mod tests {
         );
     }
 
-    /// The error message for unknown type now includes "azure-openai".
+    /// The error message for unknown type now includes both "azure-openai" and "bedrock-claude".
     #[test]
     fn unknown_type_mentions_azure_openai_in_supported_list() {
         let mut cfg = builtin_anthropic_config("https://api.anthropic.com", false);
         let providers: BTreeMap<String, serde_json::Value> = serde_json::from_str(r#"{
             "weird": {
-                "type": "bedrock",
-                "baseUrl": "https://bedrock.us-east-1.amazonaws.com",
-                "apiKeyEnv": "BEDROCK_KEY",
-                "models": [{ "id": "claude" }]
+                "type": "cohere-v2",
+                "baseUrl": "https://api.cohere.ai",
+                "apiKeyEnv": "COHERE_KEY",
+                "models": [{ "id": "command-r" }]
             }
         }"#).unwrap();
 
@@ -1615,5 +1708,445 @@ mod tests {
             matches!(&err, LlmError::InvalidRequest { message } if message.contains("azure-openai")),
             "error for unknown type must list azure-openai as supported, got: {err:?}"
         );
+        assert!(
+            matches!(&err, LlmError::InvalidRequest { message } if message.contains("bedrock-claude")),
+            "error for unknown type must list bedrock-claude as supported, got: {err:?}"
+        );
+    }
+
+    // ── bedrock-claude settings type tests ────────────────────────────────────
+
+    /// A bedrock-claude profile with `region` and no `baseUrl` defaults the base
+    /// URL to `https://bedrock-runtime.<region>.amazonaws.com`.
+    #[test]
+    fn bedrock_claude_default_base_url_from_region() {
+        let mut cfg = builtin_anthropic_config("https://api.anthropic.com", false);
+        let providers: BTreeMap<String, serde_json::Value> = serde_json::from_str(r#"{
+            "my-bedrock": {
+                "type": "bedrock-claude",
+                "region": "us-east-1",
+                "models": [{ "id": "anthropic.claude-3-5-sonnet-20241022-v2:0" }]
+            }
+        }"#).unwrap();
+
+        apply_settings_providers(&mut cfg, &providers, None).expect("must succeed");
+
+        let bedrock = cfg.providers.iter().find(|p| p.profile_name == "my-bedrock").unwrap();
+        assert_eq!(
+            bedrock.base_url,
+            "https://bedrock-runtime.us-east-1.amazonaws.com",
+            "base_url must default to region-derived endpoint"
+        );
+        assert_eq!(bedrock.protocol, ProtocolFamily::BedrockClaude);
+        assert_eq!(bedrock.auth, AuthStrategy::AwsSigV4);
+        assert!(
+            bedrock.signing.as_ref().map(|s| (s.region.as_str(), s.service.as_str())) == Some(("us-east-1", "bedrock")),
+            "signing config must have region=us-east-1 and service=bedrock; got {:?}", bedrock.signing
+        );
+        assert_eq!(
+            bedrock.credential,
+            CredentialConfig::HostManaged { id: "bedrock_sigv4".to_string() },
+            "bedrock-claude must use CredentialConfig::HostManaged so the injected provider is consulted"
+        );
+    }
+
+    /// A bedrock-claude profile with an explicit `baseUrl` must use that URL
+    /// instead of the default region-derived endpoint.
+    #[test]
+    fn bedrock_claude_explicit_base_url_overrides_default() {
+        let mut cfg = builtin_anthropic_config("https://api.anthropic.com", false);
+        let providers: BTreeMap<String, serde_json::Value> = serde_json::from_str(r#"{
+            "my-bedrock": {
+                "type": "bedrock-claude",
+                "region": "eu-west-1",
+                "baseUrl": "https://custom-bedrock.example.com",
+                "models": [{ "id": "anthropic.claude-3-haiku-20240307-v1:0" }]
+            }
+        }"#).unwrap();
+
+        apply_settings_providers(&mut cfg, &providers, None).expect("must succeed");
+
+        let bedrock = cfg.providers.iter().find(|p| p.profile_name == "my-bedrock").unwrap();
+        assert_eq!(
+            bedrock.base_url,
+            "https://custom-bedrock.example.com",
+            "explicit baseUrl must override the region-derived default"
+        );
+        assert!(
+            bedrock.signing.as_ref().map(|s| s.region.as_str()) == Some("eu-west-1"),
+            "region in signing config must still come from \"region\" key"
+        );
+    }
+
+    /// A bedrock-claude profile without a `region` key is rejected.
+    #[test]
+    fn bedrock_claude_missing_region_is_error() {
+        let mut cfg = builtin_anthropic_config("https://api.anthropic.com", false);
+        let providers: BTreeMap<String, serde_json::Value> = serde_json::from_str(r#"{
+            "my-bedrock": {
+                "type": "bedrock-claude",
+                "models": [{ "id": "anthropic.claude-3-5-sonnet-20241022-v2:0" }]
+            }
+        }"#).unwrap();
+
+        let err = apply_settings_providers(&mut cfg, &providers, None).unwrap_err();
+        assert!(
+            matches!(&err, LlmError::InvalidRequest { message } if message.contains("region")),
+            "expected InvalidRequest about missing region, got: {err:?}"
+        );
+    }
+
+    /// E2E: a `bedrock-claude` profile parsed from settings builds a
+    /// [`DefaultLlmClient`], and `prepare_at` with a fixed clock produces:
+    /// - URL: `{base_url}/model/{model_id}/invoke`
+    /// - `x-amz-date` header present
+    /// - `x-amz-content-sha256` header present
+    /// - `Authorization` header starting with `AWS4-HMAC-SHA256`
+    /// - No `model` key in the request body
+    /// - `anthropic_version: "bedrock-2023-05-31"` in body
+    ///
+    /// Test name: `bedrock_claude_prepare_e2e_sigv4_headers`
+    #[tokio::test]
+    async fn bedrock_claude_prepare_e2e_sigv4_headers() {
+        use std::sync::Arc;
+        use std::time::{Duration, UNIX_EPOCH};
+        use llm_client::{
+            Credential, DefaultLlmClient, StaticCredentialProvider,
+        };
+
+        let mut cfg = builtin_anthropic_config("https://api.anthropic.com", false);
+        let providers: BTreeMap<String, serde_json::Value> = serde_json::from_str(r#"{
+            "my-bedrock": {
+                "type": "bedrock-claude",
+                "region": "us-east-1",
+                "models": [
+                    { "id": "anthropic.claude-3-5-sonnet-20241022-v2:0", "capabilities": {"streaming": true, "tools": true} }
+                ]
+            }
+        }"#).unwrap();
+
+        apply_settings_providers(&mut cfg, &providers, None).expect("must succeed");
+
+        // Inject static SigV4 credentials so prepare_at succeeds without
+        // requiring real AWS environment variables.
+        let credentials = Arc::new(StaticCredentialProvider::new(Credential::AwsSigV4 {
+            access_key_id: "AKIAIOSFODNN7EXAMPLE".to_string(),
+            secret_access_key: "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY".to_string(),
+            session_token: None,
+        }));
+
+        let client = DefaultLlmClient::from_config(cfg)
+            .expect("client must build")
+            .with_credential_provider(credentials);
+
+        // Fixed clock: 2024-01-15T12:34:56Z (Unix epoch 1705322096)
+        let fixed_now = UNIX_EPOCH + Duration::from_secs(1_705_322_096);
+        let req = llm_client::LlmRequest::new("anthropic.claude-3-5-sonnet-20241022-v2:0");
+        let prepared = client
+            .prepare_at(&req, fixed_now)
+            .await
+            .expect("prepare_at must succeed");
+
+        // URL: non-streaming must use /invoke.
+        assert!(
+            prepared.provider_request.url.ends_with("/invoke"),
+            "URL must end with /invoke; got: {}",
+            prepared.provider_request.url
+        );
+        assert!(
+            prepared.provider_request.url.contains("anthropic.claude-3-5-sonnet-20241022-v2:0"),
+            "URL must contain model id with raw ':'; got: {}",
+            prepared.provider_request.url
+        );
+
+        // x-amz-date must be present and match the fixed clock.
+        let amz_date = prepared.provider_request.headers
+            .get("x-amz-date")
+            .expect("x-amz-date header must be present");
+        assert_eq!(amz_date, "20240115T123456Z", "x-amz-date must match the fixed clock");
+
+        // x-amz-content-sha256 must be present.
+        assert!(
+            prepared.provider_request.headers.contains_key("x-amz-content-sha256"),
+            "x-amz-content-sha256 header must be present"
+        );
+
+        // Authorization header must use AWS4-HMAC-SHA256.
+        let auth = prepared.provider_request.headers
+            .get("Authorization")
+            .expect("Authorization header must be present");
+        assert!(
+            auth.starts_with("AWS4-HMAC-SHA256"),
+            "Authorization must start with AWS4-HMAC-SHA256; got: {auth}"
+        );
+        assert!(
+            auth.contains("20240115"),
+            "Authorization must contain the signing date 20240115; got: {auth}"
+        );
+        assert!(
+            auth.contains("us-east-1/bedrock/aws4_request"),
+            "Authorization must contain the credential scope; got: {auth}"
+        );
+
+        // Model key must be absent from body.
+        assert!(
+            prepared.provider_request.body_json.get("model").is_none(),
+            "body must not contain model key; got: {}",
+            prepared.provider_request.body_json
+        );
+
+        // anthropic_version must be in body.
+        assert_eq!(
+            prepared.provider_request.body_json.get("anthropic_version").and_then(serde_json::Value::as_str),
+            Some("bedrock-2023-05-31"),
+            "body must contain anthropic_version=bedrock-2023-05-31"
+        );
+
+        // No anthropic-version header.
+        assert!(
+            !prepared.provider_request.headers.contains_key("anthropic-version"),
+            "anthropic-version header must NOT be present for Bedrock"
+        );
+    }
+
+    // ── vertex-claude settings type tests ─────────────────────────────────────
+
+    /// A `vertex-claude` profile parses correctly: `VertexClaude` protocol,
+    /// `GcpToken` auth, `CredentialConfig::Env` from `apiKeyEnv`, `baseUrl` REQUIRED.
+    #[test]
+    fn vertex_claude_profile_parses() {
+        let mut cfg = builtin_anthropic_config("https://api.anthropic.com", false);
+        let providers: BTreeMap<String, serde_json::Value> = serde_json::from_str(r#"{
+            "my-vertex-claude": {
+                "type": "vertex-claude",
+                "baseUrl": "https://us-central1-aiplatform.googleapis.com/v1/projects/my-proj/locations/us-central1",
+                "apiKeyEnv": "VERTEX_BEARER_TOKEN",
+                "models": [{ "id": "claude-sonnet-4@20250514" }]
+            }
+        }"#).unwrap();
+
+        apply_settings_providers(&mut cfg, &providers, None).expect("must succeed");
+
+        let p = cfg.providers.iter().find(|p| p.profile_name == "my-vertex-claude").unwrap();
+        assert_eq!(p.protocol, ProtocolFamily::VertexClaude);
+        assert_eq!(p.auth, AuthStrategy::GcpToken);
+        assert_eq!(
+            p.credential,
+            CredentialConfig::Env { var: "VERTEX_BEARER_TOKEN".to_string() },
+            "vertex-claude must use CredentialConfig::Env so the token env var is consulted"
+        );
+        assert_eq!(
+            p.base_url,
+            "https://us-central1-aiplatform.googleapis.com/v1/projects/my-proj/locations/us-central1"
+        );
+    }
+
+    /// `vertex-claude` with missing `baseUrl` is rejected (baseUrl is REQUIRED).
+    #[test]
+    fn vertex_claude_missing_base_url_is_error() {
+        let mut cfg = builtin_anthropic_config("https://api.anthropic.com", false);
+        let providers: BTreeMap<String, serde_json::Value> = serde_json::from_str(r#"{
+            "my-vertex-claude": {
+                "type": "vertex-claude",
+                "apiKeyEnv": "VERTEX_BEARER_TOKEN",
+                "models": [{ "id": "claude-sonnet-4@20250514" }]
+            }
+        }"#).unwrap();
+
+        let err = apply_settings_providers(&mut cfg, &providers, None).unwrap_err();
+        assert!(
+            matches!(&err, LlmError::InvalidRequest { message } if message.contains("baseUrl")),
+            "expected InvalidRequest about missing baseUrl, got: {err:?}"
+        );
+    }
+
+    /// E2E: a `vertex-claude` profile parsed from settings builds a
+    /// [`DefaultLlmClient`], and `prepare()` with a token env var produces:
+    /// - URL: `{base_url}/publishers/anthropic/models/{model}:rawPredict`
+    /// - `Authorization: Bearer <token>` header
+    /// - No `model` key in body
+    /// - `anthropic_version: "vertex-2023-10-16"` in body
+    /// - No `anthropic-version` header
+    ///
+    /// Credential-loading choice: `CredentialConfig::Env { var }` causes
+    /// `EnvCredentialProvider` to load the env var as `Credential::ApiKey(value)`.
+    /// The `GcpToken` authenticate arm calls `load_secret()`, which accepts both
+    /// `Credential::ApiKey` and `Credential::BearerToken` as a plain string and
+    /// passes it to `BearerAuthenticator` → `Authorization: Bearer <value>`.
+    #[tokio::test]
+    async fn vertex_claude_prepare_e2e_bearer_header() {
+        std::env::set_var("PLATFORM_COMMON_TEST_VERTEX_CLAUDE_TOKEN", "my-gcp-bearer-token");
+
+        let mut cfg = builtin_anthropic_config("https://api.anthropic.com", false);
+        let providers: BTreeMap<String, serde_json::Value> = serde_json::from_str(r#"{
+            "my-vertex-claude": {
+                "type": "vertex-claude",
+                "baseUrl": "https://us-central1-aiplatform.googleapis.com/v1/projects/my-proj/locations/us-central1",
+                "apiKeyEnv": "PLATFORM_COMMON_TEST_VERTEX_CLAUDE_TOKEN",
+                "models": [
+                    { "id": "claude-sonnet-4@20250514", "capabilities": {"streaming": true, "tools": true} }
+                ]
+            }
+        }"#).unwrap();
+
+        apply_settings_providers(&mut cfg, &providers, None).expect("must succeed");
+
+        let client = DefaultLlmClient::from_config(cfg).expect("client must build");
+        let req = llm_client::LlmRequest::new("claude-sonnet-4@20250514");
+        let prepared = client.prepare(&req).await.expect("prepare must succeed");
+
+        // URL: non-streaming must use :rawPredict.
+        assert!(
+            prepared.provider_request.url.ends_with(":rawPredict"),
+            "URL must end with :rawPredict; got: {}",
+            prepared.provider_request.url
+        );
+        assert!(
+            prepared.provider_request.url.contains("/publishers/anthropic/models/"),
+            "URL must contain /publishers/anthropic/models/; got: {}",
+            prepared.provider_request.url
+        );
+
+        // Authorization: Bearer <token> must be present.
+        let auth_header = prepared.provider_request.headers
+            .get("Authorization")
+            .expect("Authorization header must be present for GcpToken");
+        assert_eq!(
+            auth_header, "Bearer my-gcp-bearer-token",
+            "Authorization must be Bearer <token>"
+        );
+
+        // No model key in body.
+        assert!(
+            prepared.provider_request.body_json.get("model").is_none(),
+            "body must not contain model key; got: {}",
+            prepared.provider_request.body_json
+        );
+
+        // anthropic_version: vertex-2023-10-16 in body.
+        assert_eq!(
+            prepared.provider_request.body_json
+                .get("anthropic_version")
+                .and_then(serde_json::Value::as_str),
+            Some("vertex-2023-10-16"),
+            "body must contain anthropic_version=vertex-2023-10-16"
+        );
+
+        // No anthropic-version header.
+        assert!(
+            !prepared.provider_request.headers.contains_key("anthropic-version"),
+            "anthropic-version header must NOT be present for VertexClaude"
+        );
+    }
+
+    // ── vertex-gemini settings type tests ─────────────────────────────────────
+
+    /// A `vertex-gemini` profile parses correctly: `VertexGemini` protocol,
+    /// `GcpToken` auth, `CredentialConfig::Env` from `apiKeyEnv`, `baseUrl` REQUIRED.
+    #[test]
+    fn vertex_gemini_profile_parses() {
+        let mut cfg = builtin_anthropic_config("https://api.anthropic.com", false);
+        let providers: BTreeMap<String, serde_json::Value> = serde_json::from_str(r#"{
+            "my-vertex-gemini": {
+                "type": "vertex-gemini",
+                "baseUrl": "https://us-central1-aiplatform.googleapis.com/v1/projects/my-proj/locations/us-central1",
+                "apiKeyEnv": "VERTEX_BEARER_TOKEN",
+                "models": [{ "id": "gemini-2.0-flash" }]
+            }
+        }"#).unwrap();
+
+        apply_settings_providers(&mut cfg, &providers, None).expect("must succeed");
+
+        let p = cfg.providers.iter().find(|p| p.profile_name == "my-vertex-gemini").unwrap();
+        assert_eq!(p.protocol, ProtocolFamily::VertexGemini);
+        assert_eq!(p.auth, AuthStrategy::GcpToken);
+        assert_eq!(
+            p.credential,
+            CredentialConfig::Env { var: "VERTEX_BEARER_TOKEN".to_string() },
+            "vertex-gemini must use CredentialConfig::Env so the token env var is consulted"
+        );
+    }
+
+    /// E2E: a `vertex-gemini` profile parsed from settings builds a
+    /// [`DefaultLlmClient`], and `prepare()` with a token env var produces:
+    /// - URL: `{base_url}/publishers/google/models/{model}:generateContent`
+    /// - `Authorization: Bearer <token>` header
+    /// - `contents` array in body (Gemini format)
+    #[tokio::test]
+    async fn vertex_gemini_prepare_e2e_bearer_header() {
+        std::env::set_var("PLATFORM_COMMON_TEST_VERTEX_GEMINI_TOKEN", "my-vertex-gemini-token");
+
+        let mut cfg = builtin_anthropic_config("https://api.anthropic.com", false);
+        let providers: BTreeMap<String, serde_json::Value> = serde_json::from_str(r#"{
+            "my-vertex-gemini": {
+                "type": "vertex-gemini",
+                "baseUrl": "https://us-central1-aiplatform.googleapis.com/v1/projects/my-proj/locations/us-central1",
+                "apiKeyEnv": "PLATFORM_COMMON_TEST_VERTEX_GEMINI_TOKEN",
+                "models": [
+                    { "id": "gemini-2.0-flash", "capabilities": {"streaming": true, "tools": true} }
+                ]
+            }
+        }"#).unwrap();
+
+        apply_settings_providers(&mut cfg, &providers, None).expect("must succeed");
+
+        let client = DefaultLlmClient::from_config(cfg).expect("client must build");
+        let req = llm_client::LlmRequest::new("gemini-2.0-flash");
+        let prepared = client.prepare(&req).await.expect("prepare must succeed");
+
+        // URL: non-streaming must use :generateContent.
+        assert!(
+            prepared.provider_request.url.ends_with(":generateContent"),
+            "URL must end with :generateContent; got: {}",
+            prepared.provider_request.url
+        );
+        assert!(
+            prepared.provider_request.url.contains("/publishers/google/models/"),
+            "URL must contain /publishers/google/models/; got: {}",
+            prepared.provider_request.url
+        );
+
+        // Authorization: Bearer <token> must be present.
+        let auth_header = prepared.provider_request.headers
+            .get("Authorization")
+            .expect("Authorization header must be present for GcpToken");
+        assert_eq!(
+            auth_header, "Bearer my-vertex-gemini-token",
+            "Authorization must be Bearer <token>"
+        );
+
+        // Body must have contents array (Gemini format).
+        assert!(
+            prepared.provider_request.body_json.get("contents").is_some(),
+            "body must have 'contents' (Gemini format); got: {}",
+            prepared.provider_request.body_json
+        );
+
+        // No x-goog-api-key header (Vertex uses Bearer, not api-key).
+        assert!(
+            !prepared.provider_request.headers.contains_key("x-goog-api-key"),
+            "x-goog-api-key must NOT be present for Vertex Gemini"
+        );
+    }
+
+    /// The error message for unknown type includes `vertex-claude` and `vertex-gemini`.
+    #[test]
+    fn unknown_type_mentions_vertex_types_in_supported_list() {
+        let mut cfg = builtin_anthropic_config("https://api.anthropic.com", false);
+        let providers: BTreeMap<String, serde_json::Value> = serde_json::from_str(r#"{
+            "weird": {
+                "type": "cohere-v3",
+                "baseUrl": "https://api.cohere.ai",
+                "apiKeyEnv": "COHERE_KEY",
+                "models": [{ "id": "command-r" }]
+            }
+        }"#).unwrap();
+
+        let err = apply_settings_providers(&mut cfg, &providers, None).unwrap_err();
+        let LlmError::InvalidRequest { message } = err else {
+            panic!("expected InvalidRequest, got something else");
+        };
+        assert!(message.contains("vertex-claude"), "must list vertex-claude; got: {message}");
+        assert!(message.contains("vertex-gemini"), "must list vertex-gemini; got: {message}");
     }
 }

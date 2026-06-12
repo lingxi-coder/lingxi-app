@@ -74,12 +74,13 @@ pub struct ProviderApiAdapter {
     /// Global fallback model, if configured (used by `messages_create_with_fallback`
     /// when no per-model entry exists in `fallback_overrides`).
     fallback_model: Option<String>,
-    /// Per-model fallback overrides from `routing.fallback`.
+    /// Per-model fallback chains from `routing.fallback`.
     ///
-    /// Key is the request's resolved display model; value is the fallback
-    /// target display model.  A per-model entry **wins** over `fallback_model`
-    /// (global).
-    fallback_overrides: std::collections::BTreeMap<String, String>,
+    /// Key is the request's resolved display model; value is the ordered chain
+    /// of fallback target display models.  A per-model entry **wins** over
+    /// `fallback_model` (global).  The adapter walks the chain in order on
+    /// consecutive overload events: chain[0] fires first, chain[1] next, etc.
+    fallback_overrides: std::collections::BTreeMap<String, Vec<String>>,
     /// Alias → display-model map built at construction from
     /// `client.available_models()`. Used by `messages_create_with_fallback`
     /// to normalize an alias request string to the display model before
@@ -203,7 +204,7 @@ impl ProviderApiAdapter {
         analytics: Option<Arc<::telemetry::AnalyticsBus>>,
         fallback_model: Option<String>,
         estimator: Option<Arc<CostEstimator>>,
-        fallback_overrides: std::collections::BTreeMap<String, String>,
+        fallback_overrides: std::collections::BTreeMap<String, Vec<String>>,
         settings_max_retries: Option<u32>,
         settings_backoff_ms: Option<u64>,
     ) -> Self {
@@ -463,20 +464,29 @@ impl ProviderApiAdapter {
         req: LlmRequest,
         retry_control: RetryControl,
     ) -> Result<LlmResponse, LlmError> {
-        self.drive_non_stream_seeded(req, retry_control, 0).await
+        self.drive_non_stream_seeded_with_chain(req, retry_control, 0, &[]).await
     }
 
-    /// Non-stream retry driver with a pre-seeded `consecutive_overloaded` counter.
+    /// Non-stream retry driver with a pre-seeded `consecutive_overloaded` counter
+    /// and an optional fallback chain.
     ///
     /// The seed is set to 1 when this call is a non-streaming fallback triggered by
     /// a mid-stream `LlmError::Overloaded` — mirroring TS `claude.ts:2559`
     /// (`initialConsecutive529Errors: is529Error(streamingError) ? 1 : 0`).
+    ///
+    /// `chain` is the ordered slice of fallback models to walk on consecutive
+    /// overload events.  `retry_control` must already carry `chain[0]` as
+    /// `fallback_model` (set by [`Self::messages_create_with_fallback`]); on
+    /// each [`DriveStep::Fallback`] the loop advances `chain_idx` and rebuilds
+    /// `retry_control` with `chain[chain_idx]` (or disables fallback when
+    /// exhausted).
     #[allow(clippy::too_many_lines)]
-    async fn drive_non_stream_seeded(
+    async fn drive_non_stream_seeded_with_chain(
         &self,
         mut req: LlmRequest,
-        retry_control: RetryControl,
+        mut retry_control: RetryControl,
         initial_consecutive_overloaded: u8,
+        chain: &[String],
     ) -> Result<LlmResponse, LlmError> {
         let request_id = new_request_id();
         let started = Instant::now();
@@ -490,6 +500,11 @@ impl ProviderApiAdapter {
         };
         // thinking_budget: Task 6 drives with 0; extended-thinking wiring in Task 10+.
         let thinking_budget: u32 = req.reasoning.map_or(0, |r| r.budget_tokens);
+        // Index into `chain` for the NEXT fallback entry to use.
+        // chain_idx=0 means chain[0] is the current fallback in `retry_control`.
+        // After a Fallback step, chain_idx advances to point at the next entry.
+        // When chain_idx >= chain.len(), the chain is exhausted.
+        let mut chain_idx: usize = 0;
 
         loop {
             // prepare → inject headers → execute.
@@ -622,7 +637,29 @@ impl ProviderApiAdapter {
                                     continue;
                                 }
                                 DriveStep::Fallback { fallback_model } => {
+                                    // Switch to the fallback model; advance the
+                                    // chain index so the next iteration's ctl
+                                    // points at chain[chain_idx] (or is
+                                    // exhausted → allow_fallback=false).
                                     req.model = fallback_model;
+                                    chain_idx += 1;
+                                    // Reset the consecutive-overload counter so
+                                    // the new primary model's 529 budget is fresh.
+                                    state.consecutive_overloaded = 0;
+                                    // Rebuild retry_control with the next chain
+                                    // entry (None when exhausted).
+                                    let next_fallback = chain.get(chain_idx).cloned();
+                                    let allow_fallback = next_fallback.is_some();
+                                    retry_control = resolve_retry_control_with_settings(
+                                        &req.model,
+                                        next_fallback,
+                                        self.subscriber.is_subscriber,
+                                        &ResolveRetryEnv::from_process_env(),
+                                        self.settings_max_retries,
+                                    );
+                                    if allow_fallback {
+                                        retry_control.allow_fallback = true;
+                                    }
                                     continue;
                                 }
                                 DriveStep::Terminal => {
@@ -973,26 +1010,39 @@ impl OrchestratorApiClient for ProviderApiAdapter {
         // request (e.g. "claude-3-5-sonnet" → display "claude-sonnet-4-5")
         // still finds the per-model fallback entry whose key is the display model.
         let display_model = self.alias_to_display.get(model).map_or(model, String::as_str);
-        let settings_per_model = self.fallback_overrides.get(display_model).map(String::as_str);
-        let effective_fallback = fallback_model
-            .or(settings_per_model)
-            .or(self.fallback_model.as_deref());
+
+        // Build the effective chain:
+        //   1. explicit call-site fallback_model → single-entry chain (legacy path)
+        //   2. per-model settings chain          → full multi-entry chain
+        //   3. global fallback_model             → single-entry chain
+        // The chain is walked entry-by-entry in the drive loop.
+        let effective_chain: Vec<String> = if let Some(fb) = fallback_model {
+            // Explicit call-site model → single-entry chain (preserves pre-Task-8 contract).
+            vec![fb.to_string()]
+        } else if let Some(chain) = self.fallback_overrides.get(display_model) {
+            chain.clone()
+        } else if let Some(global) = &self.fallback_model {
+            vec![global.clone()]
+        } else {
+            vec![]
+        };
+
         let req = self.build_request(model, system, msgs, tools, false, None)?;
+        // Initial ctl: chain[0] as fallback_model (None when chain is empty).
         let mut ctl = resolve_retry_control_with_settings(
             model,
-            effective_fallback.map(str::to_string),
+            effective_chain.first().cloned(),
             self.subscriber.is_subscriber,
             &ResolveRetryEnv::from_process_env(),
             self.settings_max_retries,
         );
-        // If caller passed an explicit fallback model, honour it even when
-        // resolve_retry_control would not have set allow_fallback (e.g. Sonnet
-        // primary with a configured fallback).  This preserves the pre-Task-8
-        // contract: an explicit `fallback_model` always enables the fallback gate.
-        if effective_fallback.is_some() {
+        // If any fallback is configured, honour allow_fallback regardless of
+        // the model-type heuristic (preserves the pre-Task-8 contract: an
+        // explicit or configured fallback always enables the gate).
+        if !effective_chain.is_empty() {
             ctl.allow_fallback = true;
         }
-        self.drive_non_stream(req, ctl).await
+        self.drive_non_stream_seeded_with_chain(req, ctl, 0, &effective_chain).await
     }
 
     /// Non-streaming call seeded with a pre-counted consecutive-529 value.
@@ -1018,12 +1068,26 @@ impl OrchestratorApiClient for ProviderApiAdapter {
             &ResolveRetryEnv::from_process_env(),
             self.settings_max_retries,
         );
-        self.drive_non_stream_seeded(req, ctl, initial_consecutive_overloaded)
+        self.drive_non_stream_seeded_with_chain(req, ctl, initial_consecutive_overloaded, &[])
             .await
     }
 
     fn available_models(&self) -> Vec<String> {
         self.available_model_ids.clone()
+    }
+
+    /// Return the most recently observed rate-limit header snapshot.
+    ///
+    /// Delegates to [`Self::last_rate_limit_info`] and maps the internal
+    /// `RateLimitInfo` struct into the public [`traits::RateLimitSnapshot`]
+    /// (all three fields: `rate_limit_type`, `overage_status`, and
+    /// `overage_disabled_reason`).
+    fn last_rate_limit_info(&self) -> Option<traits::RateLimitSnapshot> {
+        self.last_rate_limit_info().map(|info| traits::RateLimitSnapshot {
+            rate_limit_type: info.rate_limit_type,
+            overage_status: info.overage_status,
+            overage_disabled_reason: info.overage_disabled_reason,
+        })
     }
 }
 
@@ -1191,6 +1255,16 @@ mod tests {
 
         fn seen_headers(&self, idx: usize) -> BTreeMap<String, String> {
             self.seen.lock().unwrap()[idx].headers.clone()
+        }
+
+        /// Return the `"model"` field from the JSON body of the `idx`-th request.
+        /// Useful for asserting chain-walk model sequences.
+        fn seen_body_model(&self, idx: usize) -> Option<String> {
+            self.seen.lock().unwrap()[idx]
+                .body_json
+                .get("model")
+                .and_then(|v| v.as_str())
+                .map(str::to_string)
         }
     }
 
@@ -2194,7 +2268,7 @@ mod tests {
     /// Build an adapter with routing overrides for per-model fallback and retry.
     fn make_adapter_with_routing(
         transport: Arc<dyn Transport>,
-        fallback_overrides: std::collections::BTreeMap<String, String>,
+        fallback_overrides: std::collections::BTreeMap<String, Vec<String>>,
         settings_max_retries: Option<u32>,
         settings_backoff_ms: Option<u64>,
     ) -> ProviderApiAdapter {
@@ -2308,10 +2382,10 @@ mod tests {
         ]);
 
         let mut fallback_overrides = std::collections::BTreeMap::new();
-        // Per-model: opus → haiku.
+        // Per-model: opus → haiku (single-entry chain).
         fallback_overrides.insert(
             "claude-opus-4-6".to_string(),
-            "claude-haiku-4-20250307".to_string(),
+            vec!["claude-haiku-4-20250307".to_string()],
         );
 
         // No env var needed: claude-opus-4-6 is_non_custom_opus=true → allow_fallback=true
@@ -2416,11 +2490,12 @@ mod tests {
             FakeResponse::Ok(ProviderResponse::json(200, routing_ok_response_json())),
         ]);
 
-        // Per-model fallback: display "claude-sonnet-4-20250514" → "claude-haiku-4-20250307".
+        // Per-model fallback: display "claude-sonnet-4-20250514" → "claude-haiku-4-20250307"
+        // (single-entry chain).
         let mut fallback_overrides = std::collections::BTreeMap::new();
         fallback_overrides.insert(
             "claude-sonnet-4-20250514".to_string(),
-            "claude-haiku-4-20250307".to_string(),
+            vec!["claude-haiku-4-20250307".to_string()],
         );
 
         let adapter = make_adapter_with_routing(
@@ -2453,6 +2528,245 @@ mod tests {
             transport.seen_count(),
             4,
             "expected 3 failing primary calls + 1 successful fallback call"
+        );
+    }
+
+    // ── Task 5: fallback chain walk tests ────────────────────────────────────
+
+    /// 2-entry chain: primary → chain[0] → chain[1] when all 529s.
+    ///
+    /// Scripted: 3×529 on primary, 3×529 on chain[0], then 200 on chain[1].
+    /// Asserts the model sequence primary→c0→c1 via captured request bodies.
+    #[tokio::test]
+    async fn two_entry_chain_walks_both_entries() {
+        let overloaded = serde_json::json!({
+            "type": "error",
+            "error": {"type": "overloaded_error", "message": "Overloaded"}
+        });
+        let c1_ok = serde_json::json!({
+            "id": "msg_c1",
+            "model": "claude-haiku-4-20250307",
+            "content": [{"type": "text", "text": "c1 ok"}],
+            "stop_reason": "end_turn",
+            "usage": {"input_tokens": 5, "output_tokens": 2}
+        });
+        // 3 × 529 on primary (claude-opus-4-6)
+        // 3 × 529 on chain[0] (claude-sonnet-4-20250514)
+        // 1 × 200 on chain[1] (claude-haiku-4-20250307)
+        let transport = FakeTransport::sequence(vec![
+            FakeResponse::Ok(ProviderResponse::json(529, overloaded.clone())),
+            FakeResponse::Ok(ProviderResponse::json(529, overloaded.clone())),
+            FakeResponse::Ok(ProviderResponse::json(529, overloaded.clone())),
+            FakeResponse::Ok(ProviderResponse::json(529, overloaded.clone())),
+            FakeResponse::Ok(ProviderResponse::json(529, overloaded.clone())),
+            FakeResponse::Ok(ProviderResponse::json(529, overloaded.clone())),
+            FakeResponse::Ok(ProviderResponse::json(200, c1_ok)),
+        ]);
+
+        let mut fallback_overrides = std::collections::BTreeMap::new();
+        // 2-entry chain: opus-4-6 → sonnet-4-20250514 → haiku-4-20250307
+        fallback_overrides.insert(
+            "claude-opus-4-6".to_string(),
+            vec![
+                "claude-sonnet-4-20250514".to_string(),
+                "claude-haiku-4-20250307".to_string(),
+            ],
+        );
+
+        let adapter = make_adapter_with_routing(transport.clone(), fallback_overrides, None, None);
+
+        let result = OrchestratorApiClient::messages_create_with_fallback(
+            &adapter,
+            "claude-opus-4-6",
+            None,
+            Vec::new(),
+            Vec::new(),
+            None,
+            false,
+            false,
+        )
+        .await;
+
+        assert!(result.is_ok(), "chain walk must succeed on chain[1]: {result:?}");
+        assert_eq!(transport.seen_count(), 7, "3 primary + 3 chain[0] + 1 chain[1]");
+
+        // Assert the model sequence: first 3 requests use primary, next 3 use chain[0],
+        // last 1 uses chain[1].
+        let primary = "claude-opus-4-6";
+        let c0 = "claude-sonnet-4-20250514";
+        let c1 = "claude-haiku-4-20250307";
+        for i in 0..3 {
+            assert_eq!(
+                transport.seen_body_model(i).as_deref(),
+                Some(primary),
+                "request {i} must use primary model"
+            );
+        }
+        for i in 3..6 {
+            assert_eq!(
+                transport.seen_body_model(i).as_deref(),
+                Some(c0),
+                "request {i} must use chain[0]"
+            );
+        }
+        assert_eq!(
+            transport.seen_body_model(6).as_deref(),
+            Some(c1),
+            "request 6 must use chain[1]"
+        );
+    }
+
+    /// Chain exhaustion: when all entries are overloaded, the call is terminal.
+    ///
+    /// Single-entry chain: primary 3×529 → chain[0] persistent 529 → terminal error.
+    #[tokio::test]
+    async fn chain_exhausted_gives_terminal_error() {
+        let overloaded = serde_json::json!({
+            "type": "error",
+            "error": {"type": "overloaded_error", "message": "Overloaded"}
+        });
+        // primary: 3 × 529 → Fallback
+        // chain[0]: persistent 529 → RepeatedOverloaded (is_external=true in make_adapter_with_routing)
+        let transport = FakeTransport::always(ProviderResponse::json(529, overloaded));
+
+        let mut fallback_overrides = std::collections::BTreeMap::new();
+        fallback_overrides.insert(
+            "claude-opus-4-6".to_string(),
+            vec!["claude-haiku-4-20250307".to_string()],
+        );
+
+        let adapter = make_adapter_with_routing(transport.clone(), fallback_overrides, None, None);
+
+        let result = OrchestratorApiClient::messages_create_with_fallback(
+            &adapter,
+            "claude-opus-4-6",
+            None,
+            Vec::new(),
+            Vec::new(),
+            None,
+            false,
+            false,
+        )
+        .await;
+
+        assert!(result.is_err(), "exhausted chain must produce terminal error");
+        // The error must be Overloaded (either repeated=true from external path or
+        // plain Overloaded — either variant indicates the chain was walked and terminated).
+        assert!(
+            matches!(result.unwrap_err(), LlmError::Overloaded { .. }),
+            "terminal error must be LlmError::Overloaded"
+        );
+    }
+
+    /// Single-entry chain behaves like batch-1 (exactly one fallback hop).
+    ///
+    /// Uses the existing `per_model_fallback_wins_over_global` scenario but
+    /// verifies via `seen_body_model` that the model sequence is correct.
+    #[tokio::test]
+    async fn single_entry_chain_behaves_like_batch1() {
+        let overloaded = serde_json::json!({
+            "type": "error",
+            "error": {"type": "overloaded_error", "message": "Overloaded"}
+        });
+        let haiku_ok = serde_json::json!({
+            "id": "msg_haiku",
+            "model": "claude-haiku-4-20250307",
+            "content": [{"type": "text", "text": "ok"}],
+            "stop_reason": "end_turn",
+            "usage": {"input_tokens": 5, "output_tokens": 2}
+        });
+        let transport = FakeTransport::sequence(vec![
+            FakeResponse::Ok(ProviderResponse::json(529, overloaded.clone())),
+            FakeResponse::Ok(ProviderResponse::json(529, overloaded.clone())),
+            FakeResponse::Ok(ProviderResponse::json(529, overloaded.clone())),
+            FakeResponse::Ok(ProviderResponse::json(200, haiku_ok)),
+        ]);
+
+        let mut fallback_overrides = std::collections::BTreeMap::new();
+        fallback_overrides.insert(
+            "claude-opus-4-6".to_string(),
+            vec!["claude-haiku-4-20250307".to_string()],
+        );
+        let adapter = make_adapter_with_routing(transport.clone(), fallback_overrides, None, None);
+
+        let result = OrchestratorApiClient::messages_create_with_fallback(
+            &adapter,
+            "claude-opus-4-6",
+            None,
+            Vec::new(),
+            Vec::new(),
+            None,
+            false,
+            false,
+        )
+        .await;
+
+        assert!(result.is_ok(), "single-entry chain must succeed: {result:?}");
+        assert_eq!(transport.seen_count(), 4, "3 primary 529s + 1 fallback 200");
+        // First 3 requests: primary model.
+        for i in 0..3 {
+            assert_eq!(
+                transport.seen_body_model(i).as_deref(),
+                Some("claude-opus-4-6"),
+                "request {i} must use primary"
+            );
+        }
+        // 4th request: fallback model.
+        assert_eq!(
+            transport.seen_body_model(3).as_deref(),
+            Some("claude-haiku-4-20250307"),
+            "request 3 must use chain[0]"
+        );
+    }
+
+    /// Global fallback_model still works when no per-model chain is configured.
+    ///
+    /// The global `fallback_model` is wrapped into a single-entry chain and walks
+    /// the same code path; this test guards that wiring.
+    #[tokio::test]
+    async fn global_fallback_model_works_without_chain_entry() {
+        let overloaded = serde_json::json!({
+            "type": "error",
+            "error": {"type": "overloaded_error", "message": "Overloaded"}
+        });
+        let sonnet_ok = serde_json::json!({
+            "id": "msg_sonnet",
+            "model": "claude-sonnet-4-20250514",
+            "content": [{"type": "text", "text": "ok"}],
+            "stop_reason": "end_turn",
+            "usage": {"input_tokens": 5, "output_tokens": 2}
+        });
+        let transport = FakeTransport::sequence(vec![
+            FakeResponse::Ok(ProviderResponse::json(529, overloaded.clone())),
+            FakeResponse::Ok(ProviderResponse::json(529, overloaded.clone())),
+            FakeResponse::Ok(ProviderResponse::json(529, overloaded.clone())),
+            FakeResponse::Ok(ProviderResponse::json(200, sonnet_ok)),
+        ]);
+
+        let mut adapter =
+            make_adapter_with_routing(transport.clone(), std::collections::BTreeMap::new(), None, None);
+        // Set global fallback only (no per-model chain).
+        adapter.fallback_model = Some("claude-sonnet-4-20250514".to_string());
+
+        let result = OrchestratorApiClient::messages_create_with_fallback(
+            &adapter,
+            "claude-opus-4-6",
+            None,
+            Vec::new(),
+            Vec::new(),
+            None,
+            false,
+            false,
+        )
+        .await;
+
+        assert!(result.is_ok(), "global fallback must work: {result:?}");
+        assert_eq!(transport.seen_count(), 4);
+        // Request 3 must use the global fallback model.
+        assert_eq!(
+            transport.seen_body_model(3).as_deref(),
+            Some("claude-sonnet-4-20250514"),
+            "request 3 must use global fallback model"
         );
     }
 
@@ -2641,6 +2955,80 @@ mod tests {
         assert!(
             adapter.last_rate_limit_info().is_none(),
             "last_rate_limit_info must be None when no unified headers are present"
+        );
+    }
+
+    // ── Task 5 Part B: OrchestratorApiClient::last_rate_limit_info ──────────────
+
+    /// `OrchestratorApiClient::last_rate_limit_info` returns the adapter's stored
+    /// rate-limit info mapped into a `traits::RateLimitSnapshot`.
+    ///
+    /// After a 2xx response with unified headers the snapshot must carry all
+    /// three fields: `rate_limit_type`, `overage_status`, and
+    /// `overage_disabled_reason`.
+    #[tokio::test]
+    async fn orchestrator_api_client_last_rate_limit_info_returns_stored_info() {
+        let mut headers = BTreeMap::new();
+        headers.insert(
+            "anthropic-ratelimit-unified-representative-claim".to_string(),
+            "five_hour".to_string(),
+        );
+        headers.insert(
+            "anthropic-ratelimit-unified-overage-status".to_string(),
+            "allowed_warning".to_string(),
+        );
+        headers.insert(
+            "anthropic-ratelimit-unified-overage-disabled-reason".to_string(),
+            "out_of_credits".to_string(),
+        );
+
+        let transport = FakeTransport::always(ProviderResponse {
+            status: 200,
+            headers,
+            body_json: ok_response_json(),
+            request_id: None,
+        });
+        let adapter = make_adapter(transport);
+        let _ = adapter
+            .messages_create("claude-sonnet-4-20250514", None, Vec::new(), Vec::new())
+            .await
+            .expect("ok");
+
+        // Via the OrchestratorApiClient trait method (RateLimitSnapshot).
+        let snapshot = OrchestratorApiClient::last_rate_limit_info(&adapter)
+            .expect("must be Some after 2xx with unified headers");
+        assert_eq!(
+            snapshot.rate_limit_type.as_deref(),
+            Some("five_hour"),
+            "rate_limit_type must round-trip through the snapshot"
+        );
+        assert_eq!(
+            snapshot.overage_status.as_deref(),
+            Some("allowed_warning"),
+            "overage_status must round-trip through the snapshot"
+        );
+        assert_eq!(
+            snapshot.overage_disabled_reason.as_deref(),
+            Some("out_of_credits"),
+            "overage_disabled_reason must round-trip through the snapshot"
+        );
+    }
+
+    /// `OrchestratorApiClient::last_rate_limit_info` returns `None` before any
+    /// response with unified headers.
+    #[tokio::test]
+    async fn orchestrator_api_client_last_rate_limit_info_none_initially() {
+        let transport = FakeTransport::always(ProviderResponse::json(200, ok_response_json()));
+        let adapter = make_adapter(transport);
+        let _ = adapter
+            .messages_create("claude-sonnet-4-20250514", None, Vec::new(), Vec::new())
+            .await
+            .expect("ok");
+
+        // No unified headers → trait method also returns None.
+        assert!(
+            OrchestratorApiClient::last_rate_limit_info(&adapter).is_none(),
+            "trait method must return None when adapter has no unified header snapshot"
         );
     }
 

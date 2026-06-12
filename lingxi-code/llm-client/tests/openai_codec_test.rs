@@ -1,3 +1,4 @@
+use base64::Engine as _;
 use llm_client::{
     ContentBlock, ContentDelta, LlmEvent, LlmRequest, Message, OpenAiChatCodec, ProviderResponse,
     RawStreamFrame, ToolDeclaration, WireCodec,
@@ -141,18 +142,54 @@ fn encode_text_only_message_stays_plain_string() {
 }
 
 #[test]
-fn encode_document_still_rejects() {
+fn encode_document_produces_file_part() {
+    // Document bytes must be encoded as a {"type":"file"} media part with a data-URI.
     let codec = OpenAiChatCodec::new("https://api.openai.com/v1");
     let mut request = LlmRequest::new("gpt-4o");
+    let pdf_bytes = vec![0x25u8, 0x50, 0x44, 0x46]; // %PDF
     request.messages.push(Message {
         role: "user".to_string(),
         content: vec![ContentBlock::Document {
             media_type: "application/pdf".to_string(),
-            bytes: vec![1, 2, 3],
+            bytes: pdf_bytes.clone(),
         }],
     });
-    let err = codec.encode_request(&request).unwrap_err();
-    assert!(matches!(err, llm_client::LlmError::InvalidRequest { message } if message.contains("document")));
+    let provider_request = codec.encode_request(&request).unwrap();
+    let content = &provider_request.body_json["messages"][0]["content"];
+    // Document triggers array form (has_media=true).
+    assert!(content.is_array(), "expected array form, got: {content}");
+    let parts = content.as_array().unwrap();
+    assert_eq!(parts.len(), 1);
+    let part = &parts[0];
+    assert_eq!(part["type"], "file");
+    assert_eq!(part["file"]["filename"], "document");
+    let data_uri = part["file"]["file_data"].as_str().unwrap();
+    let expected_b64 = base64::engine::general_purpose::STANDARD.encode(&pdf_bytes);
+    assert_eq!(data_uri, format!("data:application/pdf;base64,{expected_b64}"));
+}
+
+#[test]
+fn encode_mixed_text_and_document_becomes_array_form() {
+    let codec = OpenAiChatCodec::new("https://api.openai.com/v1");
+    let mut request = LlmRequest::new("gpt-4o");
+    request.messages.push(Message {
+        role: "user".to_string(),
+        content: vec![
+            ContentBlock::Text { text: "see the attached".to_string(), cache_control: None },
+            ContentBlock::Document {
+                media_type: "application/pdf".to_string(),
+                bytes: vec![0x25, 0x50, 0x44, 0x46],
+            },
+        ],
+    });
+    let provider_request = codec.encode_request(&request).unwrap();
+    let content = &provider_request.body_json["messages"][0]["content"];
+    assert!(content.is_array(), "mixed text+document must produce array form");
+    let parts = content.as_array().unwrap();
+    assert_eq!(parts.len(), 2);
+    assert_eq!(parts[0]["type"], "text");
+    assert_eq!(parts[0]["text"], "see the attached");
+    assert_eq!(parts[1]["type"], "file");
 }
 
 #[test]

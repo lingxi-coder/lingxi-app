@@ -143,6 +143,20 @@ pub trait OrchestratorApiClient: Send + Sync {
     fn available_models(&self) -> Vec<String> {
         Vec::new()
     }
+
+    /// Return the most recently observed rate-limit header snapshot, if any.
+    ///
+    /// Default returns `None`.  `ProviderApiAdapter` overrides this to delegate
+    /// to [`crate::provider_adapter::ProviderApiAdapter::last_rate_limit_info`],
+    /// which is populated from every successful 2xx response's headers.
+    ///
+    /// Returns a [`traits::RateLimitSnapshot`] carrying all three header-derived
+    /// fields (`rate_limit_type`, `overage_status`, `overage_disabled_reason`).
+    /// Using the public snapshot type avoids leaking the orchestrator-internal
+    /// `RateLimitInfo` struct through the trait.
+    fn last_rate_limit_info(&self) -> Option<traits::RateLimitSnapshot> {
+        None
+    }
 }
 
 /// Streaming-API surface used by the orchestrator's streaming turn loop.

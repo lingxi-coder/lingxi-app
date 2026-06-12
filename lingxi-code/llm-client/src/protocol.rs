@@ -7,6 +7,23 @@ use serde_json::Value;
 
 use crate::{Capabilities, CostEstimate, LlmError, Usage};
 
+/// Which on-wire streaming framing is used for this provider request.
+///
+/// Set by codecs before the request is sent; the bridge uses it to choose
+/// between SSE splitting and raw binary framing.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StreamFraming {
+    /// Server-Sent Events (text, `data: …\n\n` boundaries).  This is the
+    /// default for Anthropic, `OpenAI`, Gemini, and Azure.
+    #[default]
+    Sse,
+    /// AWS binary event-stream framing used by Amazon Bedrock streaming
+    /// responses.  The bridge passes raw byte chunks directly to the codec's
+    /// [`crate::StreamDecoder`] without SSE parsing.
+    AwsEventStream,
+}
+
 /// Canonical request passed to provider protocols.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct LlmRequest {
@@ -397,6 +414,10 @@ pub enum ResponseFormat {
 }
 
 /// Provider-native request envelope with normalized single-value headers.
+///
+/// The `stream_framing` field is additive with `#[serde(default)]`: existing
+/// serialised envelopes (and test literals that omit it) default to
+/// [`StreamFraming::Sse`] without a compile error.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ProviderRequest {
     /// HTTP method.
@@ -408,10 +429,21 @@ pub struct ProviderRequest {
     pub headers: BTreeMap<String, String>,
     /// JSON request body.
     pub body_json: Value,
+    /// Which streaming framing protocol to use for this request.
+    ///
+    /// Defaults to [`StreamFraming::Sse`]; codecs that target the AWS
+    /// event-stream binary protocol (e.g. Bedrock) set this to
+    /// [`StreamFraming::AwsEventStream`] during `encode_request`.
+    #[serde(default)]
+    pub stream_framing: StreamFraming,
 }
 
 impl ProviderRequest {
     /// Create a POST request with a JSON body.
+    ///
+    /// `stream_framing` defaults to [`StreamFraming::Sse`]; codecs that need
+    /// AWS binary framing set `request.stream_framing = StreamFraming::AwsEventStream`
+    /// after calling this constructor.
     #[must_use]
     pub fn post_json(url: impl Into<String>, body_json: Value) -> Self {
         Self {
@@ -419,6 +451,7 @@ impl ProviderRequest {
             url: url.into(),
             headers: BTreeMap::new(),
             body_json,
+            stream_framing: StreamFraming::Sse,
         }
     }
 }

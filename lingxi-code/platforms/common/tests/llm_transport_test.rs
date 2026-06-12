@@ -3,15 +3,17 @@ use std::sync::Mutex;
 use async_trait::async_trait;
 use platform_common::LlmTransportBridge;
 use protocol::{HttpRequest, HttpResponse, SseEvent};
-use traits::http::SseStream;
+use traits::http::{RawByteStream, RawByteStreamWithMeta, SseStream};
 use traits::{HttpError, HttpTransport};
 
 type ScriptedSse = Mutex<Option<Result<Vec<Result<SseEvent, HttpError>>, HttpError>>>;
+type ScriptedRaw = Mutex<Option<Result<RawByteStreamWithMeta, HttpError>>>;
 
 #[derive(Default)]
 struct FakeHttp {
     response: Mutex<Option<Result<HttpResponse, HttpError>>>,
     sse: ScriptedSse,
+    raw: ScriptedRaw,
     seen: Mutex<Option<HttpRequest>>,
 }
 
@@ -26,6 +28,14 @@ impl HttpTransport for FakeHttp {
         *self.seen.lock().expect("seen") = Some(req);
         let events = self.sse.lock().expect("sse").take().expect("scripted sse")?;
         Ok(Box::pin(futures_util::stream::iter(events)))
+    }
+
+    async fn stream_raw_bytes_with_meta(
+        &self,
+        req: HttpRequest,
+    ) -> Result<RawByteStreamWithMeta, HttpError> {
+        *self.seen.lock().expect("seen") = Some(req);
+        self.raw.lock().expect("raw").take().expect("scripted raw")
     }
 }
 
@@ -242,4 +252,44 @@ async fn bridge_drives_llm_client_event_stream_end_to_end() {
     }
     assert_eq!(texts, "hi");
     assert_eq!(stop_reason.as_deref(), Some("end_turn"));
+}
+
+/// When `stream_framing == AwsEventStream` the bridge calls
+/// `stream_raw_bytes_with_meta` instead of `stream_sse_with_meta`, and raw
+/// byte chunks arrive as `RawStreamFrame`s without SSE splitting.
+#[tokio::test]
+async fn open_stream_aws_event_stream_routes_to_raw_bytes_path() {
+    let chunk1 = b"\x00\x00\x00\x10".to_vec(); // first 4 bytes of a fake frame
+    let chunk2 = b"\xFF\xFE\xFD\xFC".to_vec();
+
+    let raw_stream: RawByteStream = Box::pin(futures_util::stream::iter(vec![
+        Ok::<Vec<u8>, HttpError>(chunk1.clone()),
+        Ok::<Vec<u8>, HttpError>(chunk2.clone()),
+    ]));
+
+    let fake = FakeHttp::default();
+    *fake.raw.lock().unwrap() = Some(Ok(RawByteStreamWithMeta {
+        status: 200,
+        headers: vec![("x-amzn-requestid".to_string(), "req-123".to_string())],
+        stream: raw_stream,
+    }));
+    let bridge = LlmTransportBridge::new(fake);
+
+    // Build a request with AwsEventStream framing.
+    let mut request = provider_request();
+    request.stream_framing = llm_client::StreamFraming::AwsEventStream;
+
+    let mut streaming = llm_client::Transport::open_stream(&bridge, &request)
+        .await
+        .expect("raw stream");
+
+    assert_eq!(streaming.status, 200);
+    assert_eq!(streaming.headers.get("x-amzn-requestid").map(String::as_str), Some("req-123"));
+
+    // Frames are raw byte chunks — NOT SSE-parsed.
+    let f1 = streaming.frames.next_frame().await.unwrap().expect("chunk1");
+    assert_eq!(f1.bytes, chunk1);
+    let f2 = streaming.frames.next_frame().await.unwrap().expect("chunk2");
+    assert_eq!(f2.bytes, chunk2);
+    assert!(streaming.frames.next_frame().await.unwrap().is_none());
 }

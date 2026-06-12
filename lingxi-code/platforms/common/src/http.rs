@@ -15,7 +15,7 @@ use bytes::BytesMut;
 use futures_core::stream::Stream;
 use futures_util::stream::StreamExt;
 use protocol::{HttpRequest, HttpResponse, SseEvent};
-use traits::http::{SseStream, SseStreamWithMeta};
+use traits::http::{RawByteStream, RawByteStreamWithMeta, SseStream, SseStreamWithMeta};
 use traits::{HttpError, HttpTransport};
 
 /// Production HTTP transport using `reqwest::Client`.
@@ -200,7 +200,7 @@ impl HttpTransport for ReqwestHttp {
     async fn stream_raw_bytes(
         &self,
         req: HttpRequest,
-    ) -> Result<traits::http::RawByteStream, HttpError> {
+    ) -> Result<RawByteStream, HttpError> {
         let resp = build_reqwest(&self.client, req)
             .send()
             .await
@@ -217,6 +217,65 @@ impl HttpTransport for ReqwestHttp {
                 .map_err(|e| HttpError::Connection(e.to_string()))
         });
         Ok(Box::pin(s))
+    }
+
+    /// Override that captures the real HTTP status and response headers before
+    /// the raw byte stream begins.
+    ///
+    /// Mirrors the [`Self::stream_sse_with_meta`] override: status and headers
+    /// are captured from the response line before any body bytes are consumed,
+    /// so callers can immediately inspect rate-limit headers.
+    ///
+    /// # ≥400 error-arm behaviour
+    ///
+    /// For non-2xx responses this method returns
+    /// `Ok(RawByteStreamWithMeta{status: 4xx, headers: <real headers>, stream:
+    /// <body-as-one-chunk>})` so the bridge's drain path receives real response
+    /// headers instead of an empty set.  The body is emitted as a single chunk.
+    async fn stream_raw_bytes_with_meta(
+        &self,
+        req: HttpRequest,
+    ) -> Result<RawByteStreamWithMeta, HttpError> {
+        let resp = build_reqwest(&self.client, req)
+            .send()
+            .await
+            .map_err(|e| HttpError::Connection(e.to_string()))?;
+        let status = resp.status().as_u16();
+        // Capture headers (lowercased) BEFORE consuming the body.
+        let headers: Vec<(String, String)> = resp
+            .headers()
+            .iter()
+            .map(|(k, v)| {
+                (
+                    k.as_str().to_ascii_lowercase(),
+                    v.to_str().unwrap_or("").to_string(),
+                )
+            })
+            .collect();
+
+        if status >= 400 {
+            // Return Ok so the bridge can receive real headers alongside the body.
+            let body_bytes = resp.bytes().await.unwrap_or_default().to_vec();
+            let stream: RawByteStream = Box::pin(futures_util::stream::once(async move {
+                Ok::<Vec<u8>, HttpError>(body_bytes)
+            }));
+            return Ok(RawByteStreamWithMeta {
+                status,
+                headers,
+                stream,
+            });
+        }
+
+        // Success: map reqwest's `Bytes` chunks to owned `Vec<u8>`.
+        let byte_stream = resp.bytes_stream().map(|r| {
+            r.map(|b| b.to_vec())
+                .map_err(|e| HttpError::Connection(e.to_string()))
+        });
+        Ok(RawByteStreamWithMeta {
+            status,
+            headers,
+            stream: Box::pin(byte_stream),
+        })
     }
 }
 
@@ -535,5 +594,126 @@ mod tests {
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].event_type.as_deref(), Some("real"));
         assert_eq!(events[0].data, "value");
+    }
+
+    /// `stream_raw_bytes_with_meta` must capture real status + headers before
+    /// the byte stream begins, and deliver body bytes incrementally.
+    #[tokio::test]
+    async fn stream_raw_bytes_with_meta_captures_status_and_headers() {
+        use axum::body::Body;
+        use axum::response::{IntoResponse, Response};
+        use axum::routing::post;
+        use axum::Router;
+        use futures_util::StreamExt as _;
+        use protocol::HttpMethod;
+        use tokio::net::TcpListener;
+
+        async fn binary_handler() -> Response {
+            let body = Body::from(b"\x00\x01\x02\x03".as_ref());
+            (
+                axum::http::StatusCode::OK,
+                [
+                    ("content-type", "application/octet-stream"),
+                    ("x-binary-meta", "yes"),
+                ],
+                body,
+            )
+                .into_response()
+        }
+
+        let app = Router::new().route("/binary", post(binary_handler));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let transport = ReqwestHttp::new();
+        let req = HttpRequest {
+            method: HttpMethod::Post,
+            url: format!("http://{addr}/binary"),
+            headers: vec![],
+            body: None,
+            timeout: None,
+        };
+
+        let meta = transport
+            .stream_raw_bytes_with_meta(req)
+            .await
+            .expect("binary stream must succeed");
+
+        assert_eq!(meta.status, 200, "status must be captured");
+        let has_meta = meta
+            .headers
+            .iter()
+            .any(|(k, v)| k == "x-binary-meta" && v == "yes");
+        assert!(has_meta, "x-binary-meta header must be captured; got: {:?}", meta.headers);
+
+        // Collect all chunks.
+        let mut all_bytes: Vec<u8> = Vec::new();
+        let mut stream = meta.stream;
+        while let Some(chunk) = stream.next().await {
+            all_bytes.extend_from_slice(&chunk.unwrap());
+        }
+        assert_eq!(all_bytes, &[0x00, 0x01, 0x02, 0x03], "binary body must arrive intact");
+    }
+
+    /// `stream_raw_bytes_with_meta` on a ≥400 response must return `Ok` with
+    /// real status, real headers, and body as a single chunk — mirroring the
+    /// `stream_sse_with_meta` error-arm contract.
+    #[tokio::test]
+    async fn stream_raw_bytes_with_meta_error_returns_ok_with_headers() {
+        use axum::response::{IntoResponse, Response};
+        use axum::routing::post;
+        use axum::Router;
+        use futures_util::StreamExt as _;
+        use protocol::HttpMethod;
+        use tokio::net::TcpListener;
+
+        async fn error_handler() -> Response {
+            (
+                axum::http::StatusCode::TOO_MANY_REQUESTS,
+                [
+                    ("content-type", "application/json"),
+                    ("retry-after", "30"),
+                ],
+                r#"{"error":"rate_limit"}"#,
+            )
+                .into_response()
+        }
+
+        let app = Router::new().route("/err", post(error_handler));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let transport = ReqwestHttp::new();
+        let req = HttpRequest {
+            method: HttpMethod::Post,
+            url: format!("http://{addr}/err"),
+            headers: vec![],
+            body: None,
+            timeout: None,
+        };
+
+        let meta = transport
+            .stream_raw_bytes_with_meta(req)
+            .await
+            .expect("429 must return Ok — not Err — so bridge gets real headers");
+        assert_eq!(meta.status, 429);
+        let has_retry = meta
+            .headers
+            .iter()
+            .any(|(k, v)| k == "retry-after" && v == "30");
+        assert!(has_retry, "retry-after must be present; got: {:?}", meta.headers);
+
+        // Body arrives as a single chunk.
+        let chunk = meta.stream.boxed().next().await.expect("one chunk").unwrap();
+        assert!(
+            chunk.windows(b"rate_limit".len()).any(|w| w == b"rate_limit"),
+            "body chunk must contain error; got: {chunk:?}"
+        );
     }
 }

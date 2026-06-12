@@ -116,7 +116,12 @@ impl WireCodec for OpenAiChatCodec {
     }
 }
 
-fn decode_error_response(response: &ProviderResponse) -> LlmError {
+/// Decode the `OpenAI` `{error: {message, code, type}}` envelope into the error
+/// taxonomy, falling back to [`super::map_error_status`].
+///
+/// `pub(crate)` so [`super::OpenAiResponsesCodec`] can reuse it: the Responses
+/// API shares the Chat API error envelope.
+pub(crate) fn decode_error_response(response: &ProviderResponse) -> LlmError {
     let retry_after = crate::retry::retry_after_from_headers(&response.headers);
     let error = response.body_json.get("error");
     let message = error

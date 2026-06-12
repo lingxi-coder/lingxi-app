@@ -616,15 +616,369 @@ fn encode_request_full_body_golden() {
     );
 }
 
-// ── stubs (decode lands in batch-3 T2/T3) ─────────────────────────────────────
+// ── decode_response ───────────────────────────────────────────────────────────
+//
+// Wire shapes pinned to the vendored Codex CLI reference:
+// output items per codex-rs/protocol/src/models.rs ResponseItem
+// (message{role,content:[{type:"output_text",text}]},
+//  function_call{call_id,name,arguments-as-JSON-string},
+//  reasoning{summary:[{type:"summary_text",text}]}),
+// usage per codex-rs/codex-api/src/sse/responses.rs ResponseCompletedUsage.
+
+fn decode(body: serde_json::Value) -> llm_client::LlmResponse {
+    codec()
+        .decode_response(llm_client::ProviderResponse::json(200, body))
+        .unwrap()
+}
+
+fn completed_body(output: &serde_json::Value) -> serde_json::Value {
+    serde_json::json!({
+        "id": "resp_1",
+        "model": "gpt-5",
+        "status": "completed",
+        "output": output,
+    })
+}
 
 #[test]
-fn decode_response_stub_errors_until_t2() {
+fn decode_response_parses_id_and_model() {
+    let decoded = decode(completed_body(&serde_json::json!([])));
+    assert_eq!(decoded.id, "resp_1");
+    assert_eq!(decoded.model, "gpt-5");
+}
+
+#[test]
+fn decode_response_message_output_text_parts_become_text_blocks() {
+    let decoded = decode(completed_body(&serde_json::json!([{
+        "type": "message",
+        "role": "assistant",
+        "content": [
+            {"type": "output_text", "text": "hello"},
+            {"type": "refusal", "refusal": "nope"},
+            {"type": "output_text", "text": "world"},
+        ],
+    }])));
+    assert_eq!(
+        decoded.content,
+        vec![
+            ContentBlock::Text { text: "hello".to_string(), cache_control: None },
+            ContentBlock::Text { text: "world".to_string(), cache_control: None },
+        ]
+    );
+}
+
+#[test]
+fn decode_response_function_call_becomes_tool_call_with_parsed_arguments() {
+    let decoded = decode(completed_body(&serde_json::json!([{
+        "type": "function_call",
+        "call_id": "call_7",
+        "name": "Bash",
+        "arguments": "{\"command\":\"ls\"}",
+    }])));
+    assert_eq!(
+        decoded.content,
+        vec![ContentBlock::ToolCall {
+            id: "call_7".to_string(),
+            name: "Bash".to_string(),
+            input: serde_json::json!({"command": "ls"}),
+        }]
+    );
+}
+
+#[test]
+fn decode_response_unparseable_arguments_fall_back_to_raw_string() {
+    let decoded = decode(completed_body(&serde_json::json!([{
+        "type": "function_call",
+        "call_id": "call_7",
+        "name": "Bash",
+        "arguments": "{not json",
+    }])));
+    assert_eq!(
+        decoded.content,
+        vec![ContentBlock::ToolCall {
+            id: "call_7".to_string(),
+            name: "Bash".to_string(),
+            input: serde_json::Value::String("{not json".to_string()),
+        }]
+    );
+}
+
+#[test]
+fn decode_response_function_call_missing_call_id_errors() {
     let err = codec()
-        .decode_response(llm_client::ProviderResponse::json(200, serde_json::json!({})))
+        .decode_response(llm_client::ProviderResponse::json(
+            200,
+            completed_body(&serde_json::json!([{
+                "type": "function_call",
+                "name": "Bash",
+                "arguments": "{}",
+            }])),
+        ))
         .unwrap_err();
     assert!(matches!(err, llm_client::LlmError::InvalidRequest { .. }));
 }
+
+#[test]
+fn decode_response_reasoning_summary_parts_become_reasoning_block() {
+    let decoded = decode(completed_body(&serde_json::json!([{
+        "type": "reasoning",
+        "id": "rs_1",
+        "summary": [
+            {"type": "summary_text", "text": "first thought"},
+            {"type": "summary_text", "text": "second thought"},
+        ],
+    }])));
+    assert_eq!(
+        decoded.content,
+        vec![ContentBlock::Reasoning {
+            text: "first thought\n\nsecond thought".to_string(),
+            signature: None,
+        }]
+    );
+}
+
+#[test]
+fn decode_response_reasoning_without_summary_is_skipped() {
+    let decoded = decode(completed_body(&serde_json::json!([
+        {"type": "reasoning", "id": "rs_1", "summary": []},
+        {"type": "reasoning", "id": "rs_2"},
+        {"type": "message", "role": "assistant",
+         "content": [{"type": "output_text", "text": "hi"}]},
+    ])));
+    assert_eq!(
+        decoded.content,
+        vec![ContentBlock::Text { text: "hi".to_string(), cache_control: None }]
+    );
+}
+
+#[test]
+fn decode_response_unknown_output_items_are_skipped() {
+    let decoded = decode(completed_body(&serde_json::json!([
+        {"type": "web_search_call", "id": "ws_1", "status": "completed"},
+        {"type": "message", "role": "assistant",
+         "content": [{"type": "output_text", "text": "hi"}]},
+    ])));
+    assert_eq!(
+        decoded.content,
+        vec![ContentBlock::Text { text: "hi".to_string(), cache_control: None }]
+    );
+}
+
+#[test]
+fn decode_response_preserves_output_item_order() {
+    let decoded = decode(completed_body(&serde_json::json!([
+        {"type": "reasoning", "id": "rs_1",
+         "summary": [{"type": "summary_text", "text": "thinking"}]},
+        {"type": "message", "role": "assistant",
+         "content": [{"type": "output_text", "text": "I'll run it"}]},
+        {"type": "function_call", "call_id": "call_1", "name": "Bash",
+         "arguments": "{}"},
+    ])));
+    assert_eq!(
+        decoded.content,
+        vec![
+            ContentBlock::Reasoning { text: "thinking".to_string(), signature: None },
+            ContentBlock::Text { text: "I'll run it".to_string(), cache_control: None },
+            ContentBlock::ToolCall {
+                id: "call_1".to_string(),
+                name: "Bash".to_string(),
+                input: serde_json::json!({}),
+            },
+        ]
+    );
+}
+
+#[test]
+fn decode_response_completed_maps_end_turn() {
+    let decoded = decode(completed_body(&serde_json::json!([])));
+    assert_eq!(decoded.stop_reason.as_deref(), Some("end_turn"));
+}
+
+#[test]
+fn decode_response_completed_with_function_call_maps_tool_use() {
+    let decoded = decode(completed_body(&serde_json::json!([{
+        "type": "function_call", "call_id": "call_1", "name": "Bash", "arguments": "{}",
+    }])));
+    assert_eq!(decoded.stop_reason.as_deref(), Some("tool_use"));
+}
+
+#[test]
+fn decode_response_incomplete_max_output_tokens_maps_max_tokens() {
+    let decoded = decode(serde_json::json!({
+        "id": "resp_1",
+        "model": "gpt-5",
+        "status": "incomplete",
+        "incomplete_details": {"reason": "max_output_tokens"},
+        "output": [],
+    }));
+    assert_eq!(decoded.stop_reason.as_deref(), Some("max_tokens"));
+}
+
+#[test]
+fn decode_response_incomplete_other_reason_passes_through_verbatim() {
+    let decoded = decode(serde_json::json!({
+        "id": "resp_1",
+        "model": "gpt-5",
+        "status": "incomplete",
+        "incomplete_details": {"reason": "content_filter"},
+        "output": [],
+    }));
+    assert_eq!(decoded.stop_reason.as_deref(), Some("content_filter"));
+}
+
+#[test]
+fn decode_response_incomplete_without_reason_passes_status_verbatim() {
+    let decoded = decode(serde_json::json!({
+        "id": "resp_1",
+        "model": "gpt-5",
+        "status": "incomplete",
+        "output": [],
+    }));
+    assert_eq!(decoded.stop_reason.as_deref(), Some("incomplete"));
+}
+
+#[test]
+fn decode_response_usage_subset_normalization() {
+    let decoded = decode(serde_json::json!({
+        "id": "resp_1",
+        "model": "gpt-5",
+        "status": "completed",
+        "output": [],
+        "usage": {
+            "input_tokens": 100,
+            "input_tokens_details": {"cached_tokens": 30},
+            "output_tokens": 50,
+            "output_tokens_details": {"reasoning_tokens": 20},
+            "total_tokens": 150,
+        },
+    }));
+    assert_eq!(decoded.usage.billable_tokens.input, 70);
+    assert_eq!(decoded.usage.billable_tokens.cache_read, 30);
+    assert_eq!(decoded.usage.billable_tokens.output, 30);
+    assert_eq!(decoded.usage.billable_tokens.reasoning_output, 20);
+    assert_eq!(decoded.usage.billable_tokens.cache_write, 0);
+    assert_eq!(decoded.usage.provider_reported_total_tokens, Some(150));
+    assert_eq!(decoded.usage.context_tokens, Some(150));
+}
+
+#[test]
+fn decode_response_usage_subtraction_saturates() {
+    let decoded = decode(serde_json::json!({
+        "id": "resp_1",
+        "model": "gpt-5",
+        "status": "completed",
+        "output": [],
+        "usage": {
+            "input_tokens": 10,
+            "input_tokens_details": {"cached_tokens": 30},
+            "output_tokens": 5,
+            "output_tokens_details": {"reasoning_tokens": 20},
+            "total_tokens": 15,
+        },
+    }));
+    assert_eq!(decoded.usage.billable_tokens.input, 0);
+    assert_eq!(decoded.usage.billable_tokens.output, 0);
+    assert_eq!(decoded.usage.billable_tokens.cache_read, 30);
+    assert_eq!(decoded.usage.billable_tokens.reasoning_output, 20);
+}
+
+#[test]
+fn decode_response_usage_missing_details_objects_zero_tolerantly() {
+    let decoded = decode(serde_json::json!({
+        "id": "resp_1",
+        "model": "gpt-5",
+        "status": "completed",
+        "output": [],
+        "usage": {
+            "input_tokens": 100,
+            "output_tokens": 50,
+            "total_tokens": 150,
+        },
+    }));
+    assert_eq!(decoded.usage.billable_tokens.input, 100);
+    assert_eq!(decoded.usage.billable_tokens.cache_read, 0);
+    assert_eq!(decoded.usage.billable_tokens.output, 50);
+    assert_eq!(decoded.usage.billable_tokens.reasoning_output, 0);
+}
+
+#[test]
+fn decode_response_missing_usage_defaults_to_zero() {
+    let decoded = decode(completed_body(&serde_json::json!([])));
+    assert_eq!(decoded.usage, llm_client::Usage::default());
+}
+
+#[test]
+fn decode_response_cost_is_none_and_metadata_is_body() {
+    let body = serde_json::json!({
+        "id": "resp_1",
+        "model": "gpt-5",
+        "status": "completed",
+        "output": [],
+        "vendor_extra": {"k": "v"},
+    });
+    let decoded = decode(body.clone());
+    assert!(decoded.cost.is_none());
+    assert_eq!(decoded.provider_metadata, body);
+}
+
+#[test]
+fn decode_response_missing_id_errors() {
+    let err = codec()
+        .decode_response(llm_client::ProviderResponse::json(
+            200,
+            serde_json::json!({"model": "gpt-5", "status": "completed", "output": []}),
+        ))
+        .unwrap_err();
+    assert!(matches!(err, llm_client::LlmError::InvalidRequest { .. }));
+}
+
+#[test]
+fn decode_response_http_429_maps_rate_limited() {
+    let err = codec()
+        .decode_response(llm_client::ProviderResponse::json(
+            429,
+            serde_json::json!({"error": {"message": "slow down", "type": "rate_limit_error"}}),
+        ))
+        .unwrap_err();
+    assert!(matches!(err, llm_client::LlmError::RateLimited { .. }));
+}
+
+#[test]
+fn decode_response_http_401_maps_authentication() {
+    let err = codec()
+        .decode_response(llm_client::ProviderResponse::json(
+            401,
+            serde_json::json!({"error": {"message": "bad key", "code": "invalid_api_key"}}),
+        ))
+        .unwrap_err();
+    assert!(matches!(err, llm_client::LlmError::Authentication));
+}
+
+#[test]
+fn decode_response_insufficient_quota_maps_quota_exceeded() {
+    let err = codec()
+        .decode_response(llm_client::ProviderResponse::json(
+            429,
+            serde_json::json!({"error": {"message": "quota", "code": "insufficient_quota"}}),
+        ))
+        .unwrap_err();
+    assert!(matches!(err, llm_client::LlmError::QuotaExceeded));
+}
+
+#[test]
+fn decode_response_http_400_maps_invalid_request_with_message() {
+    let err = codec()
+        .decode_response(llm_client::ProviderResponse::json(
+            400,
+            serde_json::json!({"error": {"message": "bad input", "type": "invalid_request_error"}}),
+        ))
+        .unwrap_err();
+    assert!(
+        matches!(err, llm_client::LlmError::InvalidRequest { ref message } if message == "bad input")
+    );
+}
+
+// ── stubs (stream decode lands in batch-3 T3) ─────────────────────────────────
 
 #[test]
 fn stream_decoder_stub_errors_until_t3() {

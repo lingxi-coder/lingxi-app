@@ -116,11 +116,12 @@ impl WireCodec for OpenAiResponsesCodec {
         Ok(provider_request)
     }
 
-    fn decode_response(&self, _response: ProviderResponse) -> Result<LlmResponse, LlmError> {
-        // Stub: implemented by batch-3 Task 2.
-        Err(LlmError::InvalidRequest {
-            message: "OpenAiResponsesCodec decode_response lands in batch-3 T2".to_string(),
-        })
+    fn decode_response(&self, response: ProviderResponse) -> Result<LlmResponse, LlmError> {
+        if response.status >= 400 {
+            // The Responses API shares the Chat API `{error: {...}}` envelope.
+            return Err(super::openai::decode_error_response(&response));
+        }
+        decode_response_body(response.body_json)
     }
 
     fn stream_decoder(&self) -> Box<dyn StreamDecoder> {
@@ -130,6 +131,173 @@ impl WireCodec for OpenAiResponsesCodec {
     fn clone_box(&self) -> Box<dyn WireCodec> {
         Box::new(self.clone())
     }
+}
+
+/// Decode a non-error Responses API body into an [`LlmResponse`].
+///
+/// Output item shapes are pinned to the vendored Codex CLI reference
+/// (`codex-rs/protocol/src/models.rs` `ResponseItem`): `message` carries
+/// `content[]` with `output_text` parts, `function_call` carries
+/// `{call_id, name, arguments}` with `arguments` a raw JSON *string*, and
+/// `reasoning` carries `summary[]` of `{type: "summary_text", text}` parts.
+/// Unknown item types are skipped (tolerant-decoder convention).
+fn decode_response_body(body_json: Value) -> Result<LlmResponse, LlmError> {
+    let id = string_field(&body_json, "id")?;
+    let model = string_field(&body_json, "model")?;
+
+    let mut content = Vec::new();
+    let mut has_function_call = false;
+    if let Some(output) = body_json.get("output").and_then(Value::as_array) {
+        for item in output {
+            match item.get("type").and_then(Value::as_str) {
+                Some("message") => decode_message_item(item, &mut content),
+                Some("function_call") => {
+                    has_function_call = true;
+                    content.push(decode_function_call_item(item)?);
+                }
+                Some("reasoning") => decode_reasoning_item(item, &mut content),
+                // Unknown output item types (web_search_call, ...) are skipped.
+                _ => {}
+            }
+        }
+    }
+
+    let stop_reason = map_stop_reason(&body_json, has_function_call);
+    let usage = body_json.get("usage").map(normalize_usage).unwrap_or_default();
+
+    Ok(LlmResponse {
+        id,
+        model,
+        content,
+        stop_reason,
+        usage,
+        cost: None,
+        provider_metadata: body_json,
+    })
+}
+
+fn decode_message_item(item: &Value, content: &mut Vec<ContentBlock>) {
+    let Some(parts) = item.get("content").and_then(Value::as_array) else {
+        return;
+    };
+    for part in parts {
+        // Only output_text parts carry model text; refusal/unknown parts are
+        // skipped (tolerant decode, mirrors OpenAiChatCodec content parts).
+        if part.get("type").and_then(Value::as_str) == Some("output_text") {
+            if let Some(text) = part.get("text").and_then(Value::as_str) {
+                if !text.is_empty() {
+                    content.push(ContentBlock::Text {
+                        text: text.to_string(),
+                        cache_control: None,
+                    });
+                }
+            }
+        }
+    }
+}
+
+fn decode_function_call_item(item: &Value) -> Result<ContentBlock, LlmError> {
+    let id = string_field(item, "call_id")?;
+    let name = string_field(item, "name")?;
+    let arguments = item.get("arguments").and_then(Value::as_str).unwrap_or("");
+    // The wire carries arguments as a raw JSON string (codex models.rs
+    // FunctionCall); unparseable arguments fall back to the raw string so a
+    // malformed model emission never aborts the whole response decode.
+    let input = serde_json::from_str::<Value>(arguments)
+        .unwrap_or_else(|_| Value::String(arguments.to_string()));
+    Ok(ContentBlock::ToolCall { id, name, input })
+}
+
+fn decode_reasoning_item(item: &Value, content: &mut Vec<ContentBlock>) {
+    let Some(summary) = item.get("summary").and_then(Value::as_array) else {
+        return;
+    };
+    let text = summary
+        .iter()
+        .filter(|part| part.get("type").and_then(Value::as_str) == Some("summary_text"))
+        .filter_map(|part| part.get("text").and_then(Value::as_str))
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    // A reasoning item without summary text (encrypted-only) is skipped
+    // tolerantly; the Responses API never returns raw reasoning text here.
+    if !text.is_empty() {
+        content.push(ContentBlock::Reasoning {
+            text,
+            signature: None,
+        });
+    }
+}
+
+/// Map the Responses API terminal `status` onto the normalized Anthropic
+/// stop-reason vocabulary: `completed` → `tool_use`/`end_turn`, `incomplete`
+/// with `incomplete_details.reason == "max_output_tokens"` → `max_tokens`,
+/// any other incomplete reason (or the bare status when details are absent)
+/// passes through verbatim. Missing status → `None`.
+fn map_stop_reason(body_json: &Value, has_function_call: bool) -> Option<String> {
+    let status = body_json.get("status").and_then(Value::as_str)?;
+    match status {
+        "completed" => Some(if has_function_call { "tool_use" } else { "end_turn" }.to_string()),
+        "incomplete" => {
+            let reason = body_json
+                .get("incomplete_details")
+                .and_then(|details| details.get("reason"))
+                .and_then(Value::as_str)
+                .unwrap_or(status);
+            Some(if reason == "max_output_tokens" {
+                "max_tokens".to_string()
+            } else {
+                reason.to_string()
+            })
+        }
+        other => Some(other.to_string()),
+    }
+}
+
+/// Normalize `ResponseCompletedUsage` (codex sse/responses.rs: `input_tokens`,
+/// `input_tokens_details.cached_tokens`, `output_tokens`,
+/// `output_tokens_details.reasoning_tokens`, `total_tokens`).
+///
+/// Cached/reasoning tokens are SUBSETS of the input/output counts — subtract
+/// them (saturating) so every `TokenUsage` bucket stays independently billable
+/// (same rule as `OpenAiChatCodec`). Missing details objects → zeros.
+fn normalize_usage(usage: &Value) -> crate::Usage {
+    let input_tokens = usage.get("input_tokens").and_then(Value::as_u64).unwrap_or(0);
+    let output_tokens = usage.get("output_tokens").and_then(Value::as_u64).unwrap_or(0);
+    let cached_tokens = usage
+        .get("input_tokens_details")
+        .and_then(|details| details.get("cached_tokens"))
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let reasoning_tokens = usage
+        .get("output_tokens_details")
+        .and_then(|details| details.get("reasoning_tokens"))
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let total_tokens = usage.get("total_tokens").and_then(Value::as_u64);
+
+    crate::Usage {
+        billable_tokens: crate::TokenUsage {
+            input: input_tokens.saturating_sub(cached_tokens),
+            output: output_tokens.saturating_sub(reasoning_tokens),
+            cache_read: cached_tokens,
+            reasoning_output: reasoning_tokens,
+            ..Default::default()
+        },
+        context_tokens: total_tokens,
+        provider_reported_total_tokens: total_tokens,
+        provider_metadata: usage.clone(),
+        ..Default::default()
+    }
+}
+
+fn string_field(value: &Value, field: &str) -> Result<String, LlmError> {
+    value
+        .get(field)
+        .and_then(Value::as_str)
+        .map(ToString::to_string)
+        .ok_or_else(|| LlmError::InvalidRequest {
+            message: format!("OpenAI Responses response missing {field}"),
+        })
 }
 
 /// Stub stream decoder: implemented by batch-3 Task 3.

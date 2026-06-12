@@ -1,7 +1,7 @@
 //! `tool-voice` (M8-P11) — the mobile-exclusive `voice` tool.
 //!
 //! Routes to `ctx.voice` (`Arc<dyn VoiceRecorder>`). `None` on desktop; mobile
-//! composition roots wire a native Swift / Kotlin impl via UniFFI (P12).
+//! composition roots wire a native Swift / Kotlin impl via `UniFFI` (P12).
 
 #![forbid(unsafe_code)]
 
@@ -142,7 +142,8 @@ impl Tool for VoiceTool {
                 let sample_rate_hz = input
                     .get("sample_rate_hz")
                     .and_then(Value::as_u64)
-                    .unwrap_or(16_000) as u32;
+                    .and_then(|v| u32::try_from(v).ok())
+                    .unwrap_or(16_000);
                 let format = input
                     .get("format")
                     .and_then(Value::as_str)

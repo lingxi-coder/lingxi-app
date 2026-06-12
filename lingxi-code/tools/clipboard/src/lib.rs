@@ -1,7 +1,7 @@
 //! `tool-clipboard` — the mobile-exclusive `clipboard` tool.
 //!
 //! Routes to `ctx.clipboard` (`Arc<dyn Clipboard>`). `None` on desktop; mobile
-//! composition roots wire a native Swift / Kotlin impl via UniFFI. Engine-
+//! composition roots wire a native Swift / Kotlin impl via `UniFFI`. Engine-
 //! driven: the model reads/writes the system clipboard (the analog of the
 //! camera/voice/share seams) — there is no user-facing UI affordance. The two
 //! actions are `set` (write `text`) and `get` (read the current contents).
@@ -56,7 +56,7 @@ fn map_clipboard_err(e: &ClipboardError) -> ToolError {
         ClipboardError::Unsupported => {
             ToolError::Internal("clipboard operation unsupported on this platform".into())
         }
-        other => ToolError::Internal(other.to_string()),
+        other @ ClipboardError::Other(_) => ToolError::Internal(other.to_string()),
     }
 }
 

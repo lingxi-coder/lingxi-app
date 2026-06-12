@@ -12,6 +12,9 @@
 pub mod seccomp;
 pub use seccomp::{build_net_deny_bpf, net_deny_bpf_hash, net_deny_policy_name, BpfInsn};
 
+mod run;
+pub use run::run_jailed;
+
 use serde::Serialize;
 
 /// An rlimit to apply in the jailed child (resource = a raw `RLIMIT_*` int).

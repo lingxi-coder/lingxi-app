@@ -1077,7 +1077,9 @@ impl AndroidSandboxCapabilities {
             features: SandboxFeatures {
                 network_isolation: false, // seccomp deny ≠ namespace isolation
                 fs_readonly: false,
-                fs_readwrite_paths: self.landlock_abi.is_some(),
+                // Recorded, not relied on: plan_from_policy rejects FS
+                // confinement unconditionally — never overstate (review fix).
+                fs_readwrite_paths: false,
                 process_limit: self.seccomp_filter,
                 no_new_privileges: self.no_new_privs,
             },

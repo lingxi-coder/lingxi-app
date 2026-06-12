@@ -16,8 +16,10 @@
 
 #![forbid(unsafe_code)]
 
+pub mod config;
 pub mod policy;
 
+pub use config::AndroidShellConfig;
 pub use policy::{
     build_shell_env, plan_from_policy, AndroidSandboxPlan, ExecTarget, NetProfile, ProcessCleanup,
     Rlimit, RlimitResource, SeccompRef,
@@ -56,6 +58,9 @@ pub struct AndroidPlatformInputs {
     /// Native system clipboard (Kotlin impl), when wired. `None` keeps the
     /// `clipboard` tool reporting "unavailable".
     pub clipboard: Option<Arc<dyn Clipboard>>,
+    /// Android shell/sandbox configuration (spec r3). `None` keeps shell
+    /// support fully absent (posix-minimal stubs stay wired).
+    pub shell: Option<AndroidShellConfig>,
 }
 
 /// The Android [`Platform`].
@@ -82,6 +87,8 @@ impl AndroidPlatform {
         use platform_posix_minimal::{
             PosixClock, PosixFileSystem, PosixProcess, PosixSandbox, PosixWorktree,
         };
+        // Task 11 swaps the sandbox/process handles when shell is Some.
+        let _ = &inputs.shell;
         Self {
             fs: Arc::new(PosixFileSystem::new(inputs.app_files_root)),
             http: Arc::new(platform_common::http::ReqwestHttp::new()),

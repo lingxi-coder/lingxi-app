@@ -116,6 +116,7 @@ pub fn build_mobile_engine(
             tts: None,
             notifications: None,
             clipboard: None,
+            shell: None,
         }));
         engine_mobile::build_mobile_engine(cfg, platform, listener, permission_sink)
     }
@@ -1020,6 +1021,7 @@ pub fn build_android_engine(
                 inner: notifications,
             })),
             clipboard: Some(Arc::new(AndroidClipboardBridge { inner: clipboard })),
+            shell: None,
         }));
         let permission_sink: Arc<dyn PermissionRequestSink> =
             Arc::new(AndroidPermissionSinkBridge { inner: permissions });

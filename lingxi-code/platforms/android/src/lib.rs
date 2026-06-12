@@ -7,7 +7,7 @@
 //! `reqwest` + `rustls-tls`), so a keyed conversation streams against the real
 //! provider rather than the posix-minimal stub. The Android-specific device
 //! capabilities (camera, voice, share) are injected as `Arc<dyn …>` trait
-//! objects implemented natively in Kotlin via UniFFI (P12).
+//! objects implemented natively in Kotlin via `UniFFI` (P12).
 //!
 //! M9 replaces the reused posix handles with scoped-storage-aware Android
 //! impls. The crate is intentionally **not** `#[cfg(target_os = "android")]`-
@@ -15,6 +15,13 @@
 //! build and cross-compiles to `aarch64-linux-android` unchanged.
 
 #![forbid(unsafe_code)]
+
+pub mod policy;
+
+pub use policy::{
+    plan_from_policy, build_shell_env, AndroidSandboxPlan, ExecTarget, NetProfile,
+    ProcessCleanup, Rlimit, RlimitResource, SeccompRef,
+};
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -26,7 +33,7 @@ use traits::{
 
 /// Construction inputs for [`AndroidPlatform`].
 ///
-/// The native capabilities are supplied by the Kotlin layer (via UniFFI in
+/// The native capabilities are supplied by the Kotlin layer (via `UniFFI` in
 /// P12); `app_files_root` is the app-private files directory the filesystem is
 /// confined to.
 pub struct AndroidPlatformInputs {

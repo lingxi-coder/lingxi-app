@@ -132,61 +132,44 @@ fn gemini_encodes_tool_choice_variants() {
 
 #[test]
 fn openai_rejects_unsupported_content_blocks() {
-    // Image and ImageUrl are now supported. Remaining rejects: Document, Reasoning.
-    for block in [
-        ContentBlock::Document {
-            media_type: "application/pdf".to_string(),
-            bytes: vec![4, 5, 6],
-        },
-        ContentBlock::Reasoning {
-            text: "thought".to_string(),
-            signature: None,
-        },
-    ] {
-        let request = request_with_block("gpt-4o", block);
-
-        let err = openai_codec().encode_request(&request).unwrap_err();
-
-        assert!(matches!(err, LlmError::InvalidRequest { .. } | LlmError::UnsupportedCapability { .. }));
-    }
+    // Image, ImageUrl, and Document are now supported. Remaining reject: Reasoning.
+    let block = ContentBlock::Reasoning { text: "thought".to_string(), signature: None };
+    let request = request_with_block("gpt-4o", block);
+    let err = openai_codec().encode_request(&request).unwrap_err();
+    assert!(matches!(err, LlmError::InvalidRequest { .. } | LlmError::UnsupportedCapability { .. }));
 }
 
 #[test]
-fn openai_now_accepts_image_and_image_url_blocks() {
-    // Image and ImageUrl are supported as of the codec backlog update.
+fn openai_now_accepts_image_image_url_and_document_blocks() {
+    // Image, ImageUrl, and Document are all supported.
     for block in [
         ContentBlock::Image {
             media_type: "image/png".to_string(),
             bytes: vec![1, 2, 3],
         },
         ContentBlock::ImageUrl { url: "https://example.com/img.png".to_string() },
+        ContentBlock::Document {
+            media_type: "application/pdf".to_string(),
+            bytes: vec![0x25, 0x50, 0x44, 0x46],
+        },
     ] {
         let request = request_with_block("gpt-4o", block);
-        openai_codec().encode_request(&request).expect("image/imageurl should be accepted");
+        openai_codec().encode_request(&request).expect("image/imageurl/document should be accepted");
     }
 }
 
 #[test]
 fn gemini_rejects_unsupported_content_blocks() {
-    // Image and Document are now supported. Remaining rejects: ImageUrl, Reasoning.
-    for block in [
-        ContentBlock::ImageUrl { url: "https://example.com/img.png".to_string() },
-        ContentBlock::Reasoning {
-            text: "thought".to_string(),
-            signature: None,
-        },
-    ] {
-        let request = request_with_block("gemini-2.0-flash", block);
-
-        let err = gemini_codec().encode_request(&request).unwrap_err();
-
-        assert!(matches!(err, LlmError::InvalidRequest { .. } | LlmError::UnsupportedCapability { .. }));
-    }
+    // Image, Document, and ImageUrl are now supported. Remaining reject: Reasoning.
+    let block = ContentBlock::Reasoning { text: "thought".to_string(), signature: None };
+    let request = request_with_block("gemini-2.0-flash", block);
+    let err = gemini_codec().encode_request(&request).unwrap_err();
+    assert!(matches!(err, LlmError::InvalidRequest { .. } | LlmError::UnsupportedCapability { .. }));
 }
 
 #[test]
-fn gemini_now_accepts_image_and_document_blocks() {
-    // Image and Document are now supported as inline_data parts.
+fn gemini_now_accepts_image_document_and_image_url_blocks() {
+    // Image, Document, and ImageUrl are all supported.
     for block in [
         ContentBlock::Image {
             media_type: "image/png".to_string(),
@@ -196,8 +179,9 @@ fn gemini_now_accepts_image_and_document_blocks() {
             media_type: "application/pdf".to_string(),
             bytes: vec![0x25, 0x50, 0x44, 0x46],
         },
+        ContentBlock::ImageUrl { url: "https://example.com/img.png".to_string() },
     ] {
         let request = request_with_block("gemini-2.0-flash", block);
-        gemini_codec().encode_request(&request).expect("image/document should be accepted");
+        gemini_codec().encode_request(&request).expect("image/document/imageurl should be accepted");
     }
 }

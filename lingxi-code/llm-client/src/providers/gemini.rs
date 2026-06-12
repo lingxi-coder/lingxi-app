@@ -444,8 +444,18 @@ fn encode_messages(messages: &[crate::Message], tool_call_names: &std::collectio
                         }
                     }));
                 }
-                ContentBlock::ImageUrl { .. }
-                | ContentBlock::Reasoning { .. }
+                ContentBlock::ImageUrl { url } => {
+                    // Encode as a file_data part referencing the URL directly.
+                    // mime_type is intentionally omitted: for https file_uri values the
+                    // Gemini v1beta API infers the MIME type from the Content-Type header
+                    // returned by the server, so the field is optional and we leave it out.
+                    parts.push(serde_json::json!({
+                        "file_data": {
+                            "file_uri": url,
+                        }
+                    }));
+                }
+                ContentBlock::Reasoning { .. }
                 | ContentBlock::RedactedThinking { .. }
                 | ContentBlock::ServerToolUse { .. }
                 | ContentBlock::ConnectorText { .. }
@@ -506,14 +516,7 @@ fn reject_unsupported_request_intent(request: &LlmRequest) -> Result<(), LlmErro
     for message in &request.messages {
         for block in &message.content {
             match block {
-                // Image and Document are now encoded as inline_data parts.
-                ContentBlock::ImageUrl { .. } => {
-                    return Err(LlmError::InvalidRequest {
-                        // Gemini ImageUrl requires the File API (file_data), which needs
-                        // an upload step — not supported in the direct codec path.
-                        message: "GeminiCodec does not encode ImageUrl blocks (requires File API / file_data — use Image with bytes instead)".to_string(),
-                    });
-                }
+                // Image, Document, and ImageUrl are now encoded as inline_data / file_data parts.
                 ContentBlock::Reasoning { .. } | ContentBlock::RedactedThinking { .. } => {
                     return Err(LlmError::InvalidRequest {
                         message: "GeminiCodec does not encode reasoning blocks yet".to_string(),

@@ -39,15 +39,20 @@ fn encode_document_bytes_as_inline_data() {
 }
 
 #[test]
-fn encode_image_url_still_rejects() {
+fn encode_image_url_produces_file_data_part() {
+    // ImageUrl is encoded as a file_data part; mime_type is omitted for https URIs
+    // because Gemini v1beta infers it from the Content-Type served at that URL.
     let codec = GeminiCodec::new("https://generativelanguage.googleapis.com/v1beta");
     let mut request = LlmRequest::new("gemini-2.0-flash");
     request.messages.push(Message {
         role: "user".to_string(),
         content: vec![ContentBlock::ImageUrl { url: "https://example.com/img.png".to_string() }],
     });
-    let err = codec.encode_request(&request).unwrap_err();
-    assert!(matches!(err, llm_client::LlmError::InvalidRequest { message } if message.contains("ImageUrl")));
+    let provider_request = codec.encode_request(&request).unwrap();
+    let part = &provider_request.body_json["contents"][0]["parts"][0];
+    assert_eq!(part["file_data"]["file_uri"], "https://example.com/img.png");
+    // mime_type intentionally absent — Gemini infers it for https file_uri values.
+    assert!(part["file_data"]["mime_type"].is_null(), "mime_type should be omitted");
 }
 
 // ── Item 5: Gemini tool_choice ────────────────────────────────────────────────

@@ -415,8 +415,22 @@ fn encode_message(message: &crate::Message) -> Vec<Value> {
                     "content": tool_result_content(output),
                 }));
             }
-            ContentBlock::Document { .. }
-            | ContentBlock::Reasoning { .. }
+            ContentBlock::Document { media_type, bytes } => {
+                // OpenAI Responses API / file-enabled chat supports a "file" content part.
+                // ContentBlock::Document carries no filename; use the stable default "document".
+                // The data URI format is: data:<media_type>;base64,<b64>.
+                has_media = true;
+                let b64 = base64::engine::general_purpose::STANDARD.encode(bytes);
+                let file_data = format!("data:{media_type};base64,{b64}");
+                media_parts.push(serde_json::json!({
+                    "type": "file",
+                    "file": {
+                        "filename": "document",
+                        "file_data": file_data,
+                    },
+                }));
+            }
+            ContentBlock::Reasoning { .. }
             | ContentBlock::RedactedThinking { .. }
             | ContentBlock::ServerToolUse { .. }
             | ContentBlock::ConnectorText { .. }
@@ -517,13 +531,7 @@ fn reject_unsupported_content_blocks(request: &LlmRequest) -> Result<(), LlmErro
     for message in &request.messages {
         for block in &message.content {
             match block {
-                // Image and ImageUrl are now supported — encoded as image_url parts.
-                ContentBlock::Document { .. } => {
-                    return Err(LlmError::InvalidRequest {
-                        // OpenAI chat/completions has no first-class document part.
-                        message: "OpenAiChatCodec does not encode document blocks (chat/completions has no document part type)".to_string(),
-                    });
-                }
+                // Image, ImageUrl, and Document are now encoded as content parts.
                 ContentBlock::Reasoning { .. } | ContentBlock::RedactedThinking { .. } => {
                     return Err(LlmError::InvalidRequest {
                         message: "OpenAiChatCodec does not encode reasoning blocks yet".to_string(),

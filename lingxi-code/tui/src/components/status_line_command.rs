@@ -23,8 +23,9 @@
 //!     looks like `"$N.NNNN"`; the other `cost.*` timing/line counters are
 //!     omitted — the orchestrator does not expose them to the TUI yet)
 //!   - `context_window.used_percentage`, `context_window.remaining_percentage`
-//!   - `rate_limits` (always present; per-window `five_hour`/`seven_day` keys
-//!     conditionally spread from the [`RawUtilizationSnapshot`] —
+//!   - `rate_limits` (OPTIONAL — only when at least one window resolved,
+//!     `StatusLine.tsx:99-101`; per-window `five_hour`/`seven_day` keys
+//!     conditionally spread from the [`RawUtilizationSnapshot`],
 //!     `StatusLine.tsx:50-65`)
 //!
 //! Keys claude-code emits that are OMITTED here (not available to the TUI):
@@ -41,6 +42,12 @@
 //! loader does not expose those flags here, so [`StatusLineConfig::should_run`]
 //! gates only on `type == "command"` + a `trusted` bool the caller supplies
 //! (default-false fail-closed). Wiring the real trust store is a follow-up.
+//!
+//! **The execution pump itself is also a follow-up**: nothing in production
+//! calls [`build_status_line_input`] / [`run_status_line_command`] yet — the
+//! A6 statusline command path renders `AppState.status_line_text` but no task
+//! populates it. The payload (incl. `rate_limits` from
+//! `AppState.raw_utilization`) is ready for when the pump lands.
 
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -145,9 +152,12 @@ pub fn build_status_line_input(
 ) -> Value {
     let used = f64::from(context_pct) * 100.0;
     let remaining = 100.0 - used;
-    // `rate_limits` is ALWAYS present (StatusLine.tsx:50-65 spreads each
-    // window into an always-set object); a window with either header missing
-    // omits its key entirely (TS conditional spread, not `null`).
+    // `rate_limits` is OPTIONAL: TS only spreads it into the payload when at
+    // least one window resolved (StatusLine.tsx:99-101
+    // `...((rateLimits.five_hour || rateLimits.seven_day) && {rate_limits})`;
+    // statuslineSetup.ts:67 documents it as "Only present for subscribers
+    // after first API response"). A window with either header missing omits
+    // its key entirely (TS conditional spread, not `null`).
     let mut rate_limits = serde_json::Map::new();
     if let Some(raw) = raw_utilization {
         if let (Some(u), Some(r)) = (raw.five_hour_utilization, raw.five_hour_resets_at) {
@@ -163,7 +173,7 @@ pub fn build_status_line_input(
             );
         }
     }
-    json!({
+    let mut payload = json!({
         "hook_event_name": STATUS_HOOK_EVENT_NAME,
         "model": {
             "id": model_id,
@@ -182,8 +192,11 @@ pub fn build_status_line_input(
             "used_percentage": used,
             "remaining_percentage": remaining,
         },
-        "rate_limits": rate_limits,
-    })
+    });
+    if !rate_limits.is_empty() {
+        payload["rate_limits"] = Value::Object(rate_limits);
+    }
+    payload
 }
 
 /// Parse a pre-formatted cost string (e.g. `"$0.0042"`) into a dollar amount.
@@ -345,10 +358,14 @@ mod tests {
         );
     }
 
-    /// `StatusLine.tsx:50`: `rate_limits` is ALWAYS present — with no raw
-    /// utilization tracked yet it is an empty object, never absent/null.
+    /// `StatusLine.tsx:99-101`: `rate_limits` is OPTIONAL — TS spreads it in
+    /// only when at least one window resolved
+    /// (`...((rateLimits.five_hour || rateLimits.seven_day) && {...})`);
+    /// with no raw utilization tracked the key is ABSENT entirely
+    /// (statuslineSetup.ts:67 "Only present for subscribers after first API
+    /// response").
     #[test]
-    fn rate_limits_always_present_when_empty() {
+    fn rate_limits_key_absent_when_no_window_resolved() {
         let v = build_status_line_input(
             "m",
             "M",
@@ -360,10 +377,10 @@ mod tests {
             0.0,
             None,
         );
-        let rl = v
-            .get("rate_limits")
-            .expect("rate_limits key always present");
-        assert_eq!(rl, &json!({}));
+        assert!(
+            v.get("rate_limits").is_none(),
+            "rate_limits must be omitted when no window resolved: {v:?}"
+        );
     }
 
     #[test]

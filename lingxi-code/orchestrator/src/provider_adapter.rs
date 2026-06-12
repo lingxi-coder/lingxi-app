@@ -64,7 +64,15 @@ pub struct ProviderApiAdapter {
     client: Arc<DefaultLlmClient>,
     transport: Arc<dyn Transport>,
     /// Subscriber state for the 429 gate (Task 8 wires real value).
+    ///
+    /// Build-time seed/fallback: when [`Self::subscription`] is attached and
+    /// resolved, [`Self::effective_subscriber`] prefers the live snapshot.
     subscriber: SubscriberState,
+    /// Live shared subscription slot (batch-5 Task 3). Filled asynchronously
+    /// by the composition root's background profile/roles fetch (batch 4);
+    /// `None` when the host has no OAuth profile fetch (mobile) or predates
+    /// the wiring. Read via [`Self::effective_subscriber`].
+    subscription: Option<traits::subscription::SharedSubscription>,
     /// User-agent environment snapshot (Task 3).
     ua: UserAgentEnv,
     /// Build version string for the User-Agent header.
@@ -243,6 +251,7 @@ impl ProviderApiAdapter {
             client,
             transport,
             subscriber,
+            subscription: None,
             ua,
             version: version.into(),
             analytics,
@@ -255,6 +264,36 @@ impl ProviderApiAdapter {
             estimator,
             last_rate_limit: Mutex::new(None),
             last_raw_utilization: Mutex::new(None),
+        }
+    }
+
+    /// Attach the live subscription slot (batch-5 Task 3). When present and
+    /// resolved, the drive loops read subscriber/enterprise state from it at
+    /// call time instead of the build-time [`SubscriberState`] copy.
+    #[must_use]
+    pub fn with_subscription(mut self, slot: traits::subscription::SharedSubscription) -> Self {
+        self.subscription = Some(slot);
+        self
+    }
+
+    /// Effective subscriber state: the live shared snapshot when provided and
+    /// resolved (closes the retry-gate half of the `OrchestratorConfig`
+    /// PARITY-GAP — `is_enterprise` was build-time `false` because the profile
+    /// fetch lands after construction), else the static build-time state.
+    /// Poisoned/empty slot → static fallback (conservative, pre-batch-5
+    /// behavior).
+    ///
+    /// Granularity: each drive fn hoists this ONCE before its retry loop, so
+    /// `RetryState`'s 429/enterprise gate is stable across a request's retry
+    /// attempts — the TS-faithful behaviour (`getSubscriptionType()` reads per
+    /// attempt-ish but the gate effectively stabilizes per request).
+    fn effective_subscriber(&self) -> SubscriberState {
+        let Some(slot) = &self.subscription else { return self.subscriber; };
+        let Ok(guard) = slot.read() else { return self.subscriber; };
+        let Some(snap) = guard.as_ref() else { return self.subscriber; };
+        SubscriberState {
+            is_subscriber: snap.is_subscriber,
+            is_enterprise: snap.subscription_type.as_deref() == Some("enterprise"),
         }
     }
 
@@ -289,13 +328,18 @@ impl ProviderApiAdapter {
     ///
     /// **Header name `x-request-id`** — sourced from `api-client/src/anthropic.rs`
     /// where it is written as `("x-request-id".into(), new_request_id())`.
+    ///
+    /// Reads [`Self::effective_subscriber`] directly (one resolver call per
+    /// attempt — these injectors run once per prepare/execute attempt, so the
+    /// live-slot read here is per-attempt, the lighter diff vs. threading the
+    /// hoisted value through as a parameter).
     fn inject_headers(&self, prepared: &mut ProviderRequest, request_id: &str) {
         // anthropic-beta (Task 2): full assembled list merged with any auth-injected betas.
         apply_beta_header_with_auth(
             prepared,
             Provider::Anthropic,
             Endpoint::MessagesCreate,
-            self.subscriber.is_subscriber,
+            self.effective_subscriber().is_subscriber,
         );
         // User-Agent (Task 3).
         prepared
@@ -313,7 +357,7 @@ impl ProviderApiAdapter {
             prepared,
             Provider::Anthropic,
             Endpoint::MessagesCreateStream,
-            self.subscriber.is_subscriber,
+            self.effective_subscriber().is_subscriber,
         );
         prepared
             .headers
@@ -515,10 +559,15 @@ impl ProviderApiAdapter {
         let started = Instant::now();
         telemetry::emit_started(&self.analytics, &req.model, &request_id, false).await;
 
+        // Batch-5 Task 3: resolve the live subscriber state ONCE per drive call
+        // (not per attempt) — RetryState persists across the retry loop, so the
+        // 429/enterprise gate is stable for the whole request, matching the TS
+        // granularity (the gate effectively stabilizes per request).
+        let sub = self.effective_subscriber();
         let mut state = RetryState {
             consecutive_overloaded: initial_consecutive_overloaded,
-            is_subscriber: self.subscriber.is_subscriber,
-            is_enterprise: self.subscriber.is_enterprise,
+            is_subscriber: sub.is_subscriber,
+            is_enterprise: sub.is_enterprise,
             ..RetryState::default()
         };
         // thinking_budget: Task 6 drives with 0; extended-thinking wiring in Task 10+.
@@ -676,7 +725,7 @@ impl ProviderApiAdapter {
                                     retry_control = resolve_retry_control_with_settings(
                                         &req.model,
                                         next_fallback,
-                                        self.subscriber.is_subscriber,
+                                        sub.is_subscriber,
                                         &ResolveRetryEnv::from_process_env(),
                                         self.settings_max_retries,
                                     );
@@ -744,16 +793,19 @@ impl ProviderApiAdapter {
         let request_id = new_request_id();
         telemetry::emit_started(&self.analytics, &req.model, &request_id, true).await;
 
+        // Batch-5 Task 3: live subscriber state, resolved ONCE per drive call
+        // (see `drive_non_stream_seeded_with_chain` for the granularity note).
+        let sub = self.effective_subscriber();
         let mut state = RetryState {
-            is_subscriber: self.subscriber.is_subscriber,
-            is_enterprise: self.subscriber.is_enterprise,
+            is_subscriber: sub.is_subscriber,
+            is_enterprise: sub.is_enterprise,
             ..RetryState::default()
         };
         // Stream path uses settings-based retry control (same precedence as non-stream).
         let ctl = resolve_retry_control_with_settings(
             &req.model,
             None, // fallback not used on stream connect-phase
-            self.subscriber.is_subscriber,
+            sub.is_subscriber,
             &ResolveRetryEnv::from_process_env(),
             self.settings_max_retries,
         );
@@ -980,7 +1032,7 @@ impl OrchestratorApiClient for ProviderApiAdapter {
         let ctl = resolve_retry_control_with_settings(
             model,
             None,
-            self.subscriber.is_subscriber,
+            self.effective_subscriber().is_subscriber,
             &ResolveRetryEnv::from_process_env(),
             self.settings_max_retries,
         );
@@ -999,7 +1051,7 @@ impl OrchestratorApiClient for ProviderApiAdapter {
         let ctl = resolve_retry_control_with_settings(
             model,
             None,
-            self.subscriber.is_subscriber,
+            self.effective_subscriber().is_subscriber,
             &ResolveRetryEnv::from_process_env(),
             self.settings_max_retries,
         );
@@ -1011,7 +1063,8 @@ impl OrchestratorApiClient for ProviderApiAdapter {
     /// Routes through [`resolve_retry_control`] which computes `allow_fallback`
     /// from the env + subscriber state (Task 8). The `_is_subscriber` /
     /// `_is_enterprise` parameters are **ignored** — the adapter always reads
-    /// subscriber state from `self.subscriber` (wired at construction time).
+    /// subscriber state via [`Self::effective_subscriber`] (the live shared
+    /// snapshot when attached, else the construction-time copy).
     /// The underscore prefix signals that these call-site values are not used;
     /// the parameters are kept for API compatibility and will be removed in
     /// Task 10.
@@ -1055,7 +1108,7 @@ impl OrchestratorApiClient for ProviderApiAdapter {
         let mut ctl = resolve_retry_control_with_settings(
             model,
             effective_chain.first().cloned(),
-            self.subscriber.is_subscriber,
+            self.effective_subscriber().is_subscriber,
             &ResolveRetryEnv::from_process_env(),
             self.settings_max_retries,
         );
@@ -1087,7 +1140,7 @@ impl OrchestratorApiClient for ProviderApiAdapter {
         let ctl = resolve_retry_control_with_settings(
             model,
             None,
-            self.subscriber.is_subscriber,
+            self.effective_subscriber().is_subscriber,
             &ResolveRetryEnv::from_process_env(),
             self.settings_max_retries,
         );
@@ -1447,6 +1500,62 @@ mod tests {
             None,
             None,
         )
+    }
+
+    // ── effective_subscriber (batch-5 Task 3: live SharedSubscription) ───────
+
+    fn shared_slot(
+        snap: Option<traits::subscription::SubscriptionSnapshot>,
+    ) -> traits::subscription::SharedSubscription {
+        Arc::new(std::sync::RwLock::new(snap))
+    }
+
+    #[test]
+    fn effective_subscriber_prefers_live_snapshot() {
+        let transport = FakeTransport::always(ProviderResponse::json(200, ok_response_json()));
+        let adapter = make_adapter_with_subscriber(transport, SubscriberState::default())
+            .with_subscription(shared_slot(Some(traits::subscription::SubscriptionSnapshot {
+                is_subscriber: true,
+                subscription_type: Some("enterprise".to_string()),
+                ..Default::default()
+            })));
+        let sub = adapter.effective_subscriber();
+        assert!(sub.is_subscriber);
+        assert!(sub.is_enterprise);
+    }
+
+    #[test]
+    fn effective_subscriber_falls_back_when_slot_empty_or_absent() {
+        let static_state = SubscriberState { is_subscriber: true, is_enterprise: false };
+
+        // No slot attached → static build-time state.
+        let transport = FakeTransport::always(ProviderResponse::json(200, ok_response_json()));
+        let adapter = make_adapter_with_subscriber(transport, static_state);
+        let sub = adapter.effective_subscriber();
+        assert!(sub.is_subscriber);
+        assert!(!sub.is_enterprise);
+
+        // Slot attached but unresolved (None) → static build-time state.
+        let transport = FakeTransport::always(ProviderResponse::json(200, ok_response_json()));
+        let adapter = make_adapter_with_subscriber(transport, static_state)
+            .with_subscription(shared_slot(None));
+        let sub = adapter.effective_subscriber();
+        assert!(sub.is_subscriber);
+        assert!(!sub.is_enterprise);
+    }
+
+    #[test]
+    fn effective_subscriber_non_enterprise_tier_is_not_enterprise() {
+        let transport = FakeTransport::always(ProviderResponse::json(200, ok_response_json()));
+        let adapter = make_adapter_with_subscriber(transport, SubscriberState::default())
+            .with_subscription(shared_slot(Some(traits::subscription::SubscriptionSnapshot {
+                is_subscriber: true,
+                subscription_type: Some("team".to_string()),
+                ..Default::default()
+            })));
+        let sub = adapter.effective_subscriber();
+        assert!(sub.is_subscriber);
+        assert!(!sub.is_enterprise);
     }
 
     // ── Previously-ignored tests (un-ignored, ported to FakeTransport) ────────

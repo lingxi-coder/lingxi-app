@@ -1200,19 +1200,27 @@ pub async fn build(
     // Build the CONCRETE adapter so it can be coerced to BOTH the
     // orchestrator seam (`OrchestratorApiClient`) and the agent seam
     // (`agent::SubagentApiClient`). `ProviderApiAdapter` impls both.
-    let provider_adapter = Arc::new(ProviderApiAdapter::new_with_routing(
-        llm_client,
-        llm_transport,
-        subscriber_state,
-        UserAgentEnv::from_process_env(),
-        env!("CARGO_PKG_VERSION"),
-        Some(Arc::new(telemetry::AnalyticsBus::new())),
-        cfg.fallback_model.clone(),
-        Some(cost_estimator),
-        routing_overrides.fallback,
-        routing_overrides.max_retries,
-        routing_overrides.backoff_ms,
-    ));
+    //
+    // Batch-5 Task 3: attach the live subscription slot (created in step 3.2,
+    // filled by the background profile/roles fetch) so the drive loops read
+    // subscriber/enterprise state at call time — `subscriber_state` above
+    // remains the build-time seed/fallback.
+    let provider_adapter = Arc::new(
+        ProviderApiAdapter::new_with_routing(
+            llm_client,
+            llm_transport,
+            subscriber_state,
+            UserAgentEnv::from_process_env(),
+            env!("CARGO_PKG_VERSION"),
+            Some(Arc::new(telemetry::AnalyticsBus::new())),
+            cfg.fallback_model.clone(),
+            Some(cost_estimator),
+            routing_overrides.fallback,
+            routing_overrides.max_retries,
+            routing_overrides.backoff_ms,
+        )
+        .with_subscription(subscription.clone()),
+    );
     let api_client: Arc<dyn OrchestratorApiClient> = provider_adapter.clone();
     let subagent_api: Arc<dyn agent::SubagentApiClient> = provider_adapter;
 

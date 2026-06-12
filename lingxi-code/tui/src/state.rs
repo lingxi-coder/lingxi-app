@@ -629,6 +629,14 @@ pub struct AppState {
     /// because M7-03 will window the visible message slice — a stash keyed by
     /// id is robust to that windowing.
     pub tool_call_inputs: HashMap<ToolUseId, serde_json::Value>,
+    /// (Batch-3 Task 9) Text of the most recently rendered
+    /// [`RenderedMessage::RateLimit`] notice. `apply_event` compares the
+    /// freshly composed text against this before pushing, so identical
+    /// consecutive rate-limit notices never stack in the scrollback (the
+    /// orchestrator already emits on header CHANGE, but distinct header
+    /// snapshots can compose to the same text — e.g. a utilization tick
+    /// within the same floored percentage).
+    pub last_rate_limit_text: Option<String>,
     /// (M6-05) Oneshot back-channel to the orchestrator for the active
     /// permission round-trip. `Some(_)` whenever `pending_permission`
     /// holds a real request that arrived over the bridge; `None` for
@@ -842,6 +850,7 @@ impl AppState {
             focused_tool_id: None,
             expanded: HashMap::new(),
             tool_call_inputs: HashMap::new(),
+            last_rate_limit_text: None,
             pending_permission_resp_tx: None,
             pending_permission_started_at: None,
             tool_use_dialog_state:

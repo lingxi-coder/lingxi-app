@@ -81,6 +81,32 @@ pub enum TurnEvent {
         /// UX estimate of bytes freed.
         bytes_saved: u64,
     },
+    /// Unified rate-limit header snapshot (llm-client future-work batch 3,
+    /// Task 9). Mirrors `traits::OutputEvent::RateLimit`'s nine fields —
+    /// see that variant's per-field docs for the
+    /// `anthropic-ratelimit-unified-*` header each value comes from. The
+    /// orchestrator emits on-change only; `apply_event` additionally dedupes
+    /// on the COMPOSED text so identical consecutive notices never stack.
+    RateLimit {
+        /// `anthropic-ratelimit-unified-status`.
+        status: Option<String>,
+        /// `anthropic-ratelimit-unified-representative-claim`.
+        rate_limit_type: Option<String>,
+        /// Representative claim's 0-1 utilization fraction.
+        utilization: Option<f64>,
+        /// `anthropic-ratelimit-unified-reset` (Unix-epoch seconds).
+        resets_at: Option<u64>,
+        /// Per-claim reset (Unix-epoch seconds).
+        claim_resets_at: Option<u64>,
+        /// `anthropic-ratelimit-unified-overage-status`.
+        overage_status: Option<String>,
+        /// `anthropic-ratelimit-unified-overage-reset` (Unix-epoch seconds).
+        overage_resets_at: Option<u64>,
+        /// `anthropic-ratelimit-unified-overage-disabled-reason`.
+        overage_disabled_reason: Option<String>,
+        /// `anthropic-ratelimit-unified-fallback` == `available`.
+        fallback_available: Option<bool>,
+    },
 }
 
 /// `OutputStream` impl that forwards every callback as a `TurnEvent` on
@@ -159,6 +185,35 @@ impl OutputStream for BridgeOutputStream {
             _ => TurnOutcome::EndTurn,
         };
         let _ = self.tx.send(TurnEvent::TurnEnded(outcome));
+    }
+
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "mirrors the trait method's nine header-derived fields (see traits::OutputStream::emit_rate_limit)"
+    )]
+    async fn emit_rate_limit(
+        &self,
+        status: Option<&str>,
+        rate_limit_type: Option<&str>,
+        utilization: Option<f64>,
+        resets_at: Option<u64>,
+        claim_resets_at: Option<u64>,
+        overage_status: Option<&str>,
+        overage_resets_at: Option<u64>,
+        overage_disabled_reason: Option<&str>,
+        fallback_available: Option<bool>,
+    ) {
+        let _ = self.tx.send(TurnEvent::RateLimit {
+            status: status.map(str::to_owned),
+            rate_limit_type: rate_limit_type.map(str::to_owned),
+            utilization,
+            resets_at,
+            claim_resets_at,
+            overage_status: overage_status.map(str::to_owned),
+            overage_resets_at,
+            overage_disabled_reason: overage_disabled_reason.map(str::to_owned),
+            fallback_available,
+        });
     }
 }
 
@@ -244,6 +299,62 @@ mod tests {
             TurnEvent::CostUpdated(s) => assert_eq!(s, "$0.0234"),
             other => panic!("expected CostUpdated($0.0234), got: {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn emit_rate_limit_translates_to_rate_limit_event() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let bridge = BridgeOutputStream::new(tx);
+        bridge
+            .emit_rate_limit(
+                Some("rejected"),
+                Some("five_hour"),
+                Some(0.95),
+                Some(1_900_000_000),
+                Some(1_900_000_100),
+                Some("allowed_warning"),
+                Some(1_900_000_200),
+                Some("out_of_credits"),
+                Some(true),
+            )
+            .await;
+        match rx.try_recv().expect("bridge must forward a TurnEvent") {
+            TurnEvent::RateLimit {
+                status,
+                rate_limit_type,
+                utilization,
+                resets_at,
+                claim_resets_at,
+                overage_status,
+                overage_resets_at,
+                overage_disabled_reason,
+                fallback_available,
+            } => {
+                assert_eq!(status.as_deref(), Some("rejected"));
+                assert_eq!(rate_limit_type.as_deref(), Some("five_hour"));
+                assert_eq!(utilization, Some(0.95));
+                assert_eq!(resets_at, Some(1_900_000_000));
+                assert_eq!(claim_resets_at, Some(1_900_000_100));
+                assert_eq!(overage_status.as_deref(), Some("allowed_warning"));
+                assert_eq!(overage_resets_at, Some(1_900_000_200));
+                assert_eq!(overage_disabled_reason.as_deref(), Some("out_of_credits"));
+                assert_eq!(fallback_available, Some(true));
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn emit_rate_limit_all_none_still_forwards() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let bridge = BridgeOutputStream::new(tx);
+        bridge
+            .emit_rate_limit(None, None, None, None, None, None, None, None, None)
+            .await;
+        assert!(matches!(
+            rx.try_recv().expect("bridge must forward a TurnEvent"),
+            TurnEvent::RateLimit { status: None, .. }
+        ));
     }
 
     #[tokio::test]

@@ -169,6 +169,56 @@ async fn re_emits_when_snapshot_changes() {
     assert_eq!(rate_limit_type.as_deref(), Some("five_hour"));
 }
 
+/// (Task 9 bonus) The STREAMING seam in `try_run_turn_streaming` also
+/// forwards the snapshot: `run_turn_streaming` over a scripted SSE stream →
+/// exactly one `RateLimit` event. (`emit_rate_limit_if_changed` reads
+/// `self.api`, which is the same `ProviderApiAdapter` as `streaming_api` in
+/// production — here the batched mock carries the snapshot.)
+#[tokio::test]
+async fn streaming_turn_emits_rate_limit() {
+    use orchestrator::test_support_stream::{
+        content_block_start_text, content_block_stop, message_delta_stop, message_start,
+        message_stop, text_delta, MockStreamingApiClient,
+    };
+
+    let stream = orchestrator::scripted![
+        message_start("msg_01", "claude-opus-4-7"),
+        content_block_start_text(0),
+        text_delta(0, "hi"),
+        content_block_stop(0),
+        message_delta_stop("end_turn"),
+        message_stop(),
+    ];
+    let streaming = Arc::new(MockStreamingApiClient::with_turns(vec![stream]));
+    let batched = Arc::new(MockApiClient::new(Vec::new()));
+    batched.set_rate_limit_full(Some(sample_info()));
+    let output = Arc::new(MockOutputStream::new());
+    let orch = ConversationOrchestrator::new_with_streaming(
+        OrchestratorConfig::default(),
+        batched,
+        streaming,
+        Arc::new(ToolRegistry::new()),
+        orchestrator::test_support::noop_hook_executor(),
+        Arc::new(NoOpPermissionGate),
+        output.clone(),
+        Arc::new(StaticMemoryProvider::empty()),
+        std::env::temp_dir(),
+    );
+
+    orch.run_turn_streaming("hello").await.expect("turn 1");
+
+    let events = rate_limit_events(&output.snapshot().await);
+    assert_eq!(
+        events.len(),
+        1,
+        "streaming seam must emit exactly once: {events:?}"
+    );
+    assert!(matches!(
+        &events[0],
+        OutputEvent::RateLimit { status, .. } if status.as_deref() == Some("allowed_warning")
+    ));
+}
+
 /// No snapshot (the default `last_rate_limit_full() == None`, e.g. a
 /// provider that never sent unified headers) → no `RateLimit` event at all.
 #[tokio::test]

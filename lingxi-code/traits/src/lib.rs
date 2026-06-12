@@ -54,6 +54,7 @@ pub use computer_control::{ComputerControl, ComputerError, Screenshot};
 pub use effect_handler::EffectHandler;
 pub use filesystem::{FileContent, FileEvent, FileEventKind, FileSystem, FlockGuard, FsError};
 pub use http::{HttpError, HttpTransport};
+pub use http::RawByteStreamWithMeta;
 pub use lsp::{LspError, LspRawConnection, LspServerCapabilities, LspServerConfig, LspTransport};
 pub use mailbox::{
     MailboxError as RouterMailboxError, MailboxMessage, MailboxRouterHandle, RouteAck,

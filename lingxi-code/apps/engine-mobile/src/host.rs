@@ -63,7 +63,7 @@ use secret::CredentialManager;
 use tokio::sync::{Mutex, RwLock};
 use tokio_util::sync::CancellationToken;
 use tool_api::BuiltinToolContext;
-use traits::http::{HttpError, RawByteStream, SseStream, SseStreamWithMeta};
+use traits::http::{HttpError, RawByteStream, RawByteStreamWithMeta, SseStream, SseStreamWithMeta};
 use traits::{
     AuthHandle, HttpTransport, OrchestratorHandle, OutputStream, Platform, SlashCommandDispatcher,
 };
@@ -103,6 +103,14 @@ impl HttpTransport for DynHttp {
         req: protocol::HttpRequest,
     ) -> Result<RawByteStream, HttpError> {
         self.0.stream_raw_bytes(req).await
+    }
+    /// Forward to the inner transport so the device backend's real status and
+    /// headers are preserved on binary (AWS event-stream) responses.
+    async fn stream_raw_bytes_with_meta(
+        &self,
+        req: protocol::HttpRequest,
+    ) -> Result<RawByteStreamWithMeta, HttpError> {
+        self.0.stream_raw_bytes_with_meta(req).await
     }
 }
 

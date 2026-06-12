@@ -23,6 +23,7 @@ use tokio::sync::Notify;
 ///
 /// After mutation, calls `notify.notify_one()`. The render loop is
 /// expected to debounce these to ~30fps.
+#[allow(clippy::too_many_lines, reason = "flat per-TurnEvent match dispatcher; one arm per variant")]
 pub fn apply_event(state: &mut AppState, ev: TurnEvent, notify: &Notify) {
     match ev {
         TurnEvent::TurnStarted => {
@@ -139,7 +140,11 @@ pub fn apply_event(state: &mut AppState, ev: TurnEvent, notify: &Notify) {
                 overage_disabled_reason,
                 fallback_available,
             };
-            if let Some(composed) = crate::rate_limit_messages::compose_rate_limit(&info) {
+            // (Batch-4 Task 6) Subscription-granular copy: the snapshot the
+            // composition root resolved (None until the background fetch
+            // lands → default = unknown subscription, TS-conservative).
+            let sub = state.subscription_snapshot().unwrap_or_default();
+            if let Some(composed) = crate::rate_limit_messages::compose_rate_limit(&info, &sub) {
                 if state.last_rate_limit_text.as_deref() != Some(composed.text.as_str()) {
                     state.last_rate_limit_text = Some(composed.text.clone());
                     state.messages.push(RenderedMessage::RateLimit {
@@ -354,16 +359,18 @@ mod tests {
     }
 
     #[test]
-    fn rejected_rate_limit_message_carries_upsell() {
+    fn rejected_rate_limit_message_has_no_upsell_for_unknown_subscription() {
+        // (Batch-4 Task 6) `getUpsellMessage` gates on `shouldShowUpsell =
+        // isClaudeAISubscriber()` (RateLimitMessage.tsx:26 + :78); the test
+        // state has no subscription snapshot → unknown subscription → no
+        // upsell. (Pre-batch-4 this asserted the generic `upsell::UPGRADE`
+        // proxy — a documented scope-guard.)
         let mut s = new_state();
         let n = Notify::new();
         apply_event(&mut s, rate_limit_event("five_hour"), &n);
         match s.messages.last() {
             Some(RenderedMessage::RateLimit { upsell, .. }) => {
-                assert_eq!(
-                    upsell.as_deref(),
-                    Some(crate::components::messages::rate_limit::upsell::UPGRADE)
-                );
+                assert_eq!(upsell, &None);
             }
             other => panic!("expected RateLimit message, got: {other:?}"),
         }

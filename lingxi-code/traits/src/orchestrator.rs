@@ -329,6 +329,28 @@ pub trait OrchestratorHandle: Send + Sync {
     /// [`Self::switch_model`]. Used by `/model` (no-arg list mode).
     async fn list_available_models(&self) -> Vec<String>;
 
+    /// Return the most recently observed provider rate-limit header snapshot.
+    ///
+    /// Returns `Some((rate_limit_type, overage_status))` when the underlying
+    /// `ProviderApiAdapter` has received at least one successful 2xx response
+    /// with `anthropic-ratelimit-unified-*` headers; `None` until then.
+    ///
+    /// Primitive types are returned to avoid leaking the orchestrator-internal
+    /// `RateLimitInfo` struct through the `traits` crate (which must not depend
+    /// on `orchestrator`).
+    ///
+    /// **TUI wiring note:** the TUI's existing `rate_limit.rs` renderer is fed
+    /// from `RenderedMessage::RateLimit` events that flow through the output
+    /// stream (protocol layer).  Feeding this method's value into that path
+    /// would require a new protocol event or a separate status-poll tick — both
+    /// changes are outside the scope of this task (frozen protocol guard).
+    /// This method is the handle-layer surface; callers that need live polling
+    /// can call it from a ticker and push a `RenderedMessage::RateLimit` when
+    /// the value changes.
+    async fn last_rate_limit_info(&self) -> Option<(Option<String>, Option<String>)> {
+        None
+    }
+
     // M6-03 addition:
 
     /// Streaming twin of the M5-13 cancel-aware turn entry point. The

@@ -60,6 +60,9 @@ pub enum SandboxBackend {
     MacOsSandboxExec,
     /// Windows Job Object + restricted token.
     WindowsJobObject,
+    /// Android in-engine Minijail (no_new_privs / rlimits / seccomp via
+    /// libminijail linked into the engine .so). Spec r3 D6.
+    AndroidMinijail,
     /// No sandbox enforcement (used for explicit bypass).
     None,
 }
@@ -247,5 +250,14 @@ mod m2_01_tests {
         let a = SandboxError::Unavailable("bwrap missing".into());
         assert!(!matches!(u, SandboxError::Unavailable(_)));
         assert!(matches!(a, SandboxError::Unavailable(_)));
+    }
+
+    #[test]
+    fn android_minijail_backend_serde_roundtrip() {
+        let b = SandboxBackend::AndroidMinijail;
+        let json = serde_json::to_string(&b).expect("serialize");
+        assert_eq!(json, "\"AndroidMinijail\"");
+        let back: SandboxBackend = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back, SandboxBackend::AndroidMinijail);
     }
 }

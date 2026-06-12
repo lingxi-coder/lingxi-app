@@ -382,3 +382,55 @@ async fn no_raw_utilization_emit_without_unified_headers() {
     let events = raw_utilization_events(&output.snapshot().await);
     assert!(events.is_empty(), "empty snapshot → no emit: {events:?}");
 }
+
+/// (e) The STREAMING seam also forwards raw utilization: `run_turn_streaming`
+/// over a scripted SSE stream → exactly one `RawUtilization` event (the raw
+/// hook sits next to `emit_rate_limit_if_changed` in `try_run_turn_streaming`
+/// and reads the same `self.api` adapter the batched seam reads).
+#[tokio::test]
+async fn streaming_turn_emits_raw_utilization() {
+    use orchestrator::test_support_stream::{
+        content_block_start_text, content_block_stop, message_delta_stop, message_start,
+        message_stop, text_delta, MockStreamingApiClient,
+    };
+
+    let stream = orchestrator::scripted![
+        message_start("msg_01", "claude-opus-4-7"),
+        content_block_start_text(0),
+        text_delta(0, "hi"),
+        content_block_stop(0),
+        message_delta_stop("end_turn"),
+        message_stop(),
+    ];
+    let streaming = Arc::new(MockStreamingApiClient::with_turns(vec![stream]));
+    let batched = Arc::new(MockApiClient::new(Vec::new()));
+    batched.set_raw_utilization(Some(RawUtilization::from_headers(&both_window_headers(
+        "0.42",
+    ))));
+    let output = Arc::new(MockOutputStream::new());
+    let orch = ConversationOrchestrator::new_with_streaming(
+        OrchestratorConfig::default(),
+        batched,
+        streaming,
+        Arc::new(ToolRegistry::new()),
+        orchestrator::test_support::noop_hook_executor(),
+        Arc::new(NoOpPermissionGate),
+        output.clone(),
+        Arc::new(StaticMemoryProvider::empty()),
+        std::env::temp_dir(),
+    );
+
+    orch.run_turn_streaming("hello").await.expect("turn 1");
+
+    let events = raw_utilization_events(&output.snapshot().await);
+    assert_eq!(
+        events.len(),
+        1,
+        "streaming seam must emit exactly once: {events:?}"
+    );
+    assert!(matches!(
+        &events[0],
+        OutputEvent::RawUtilization { five_hour_utilization, .. }
+            if *five_hour_utilization == Some(0.42)
+    ));
+}

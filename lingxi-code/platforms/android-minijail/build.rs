@@ -41,6 +41,9 @@ const CORE_SOURCES: [&str; 9] = [
 
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
+    // Explicit rerun-if-changed disables cargo's whole-package default — the
+    // security-relevant shim header must retrigger the C build when edited.
+    println!("cargo:rerun-if-changed=shim-include");
     // Only Android targets get a real build; host builds emit nothing.
     if env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("android") {
         return;

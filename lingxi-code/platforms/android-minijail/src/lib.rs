@@ -130,14 +130,14 @@ mod android_impl {
 
         // (c) Fork + exec `/system/bin/sh -c true` inside the jail.
         let filename = CString::new("/system/bin/sh").expect("static path");
-        let args = ["sh", "-c", "true"].map(|a| CString::new(a).expect("static arg"));
-        let mut argv: Vec<*mut c_char> = args
+        let arg_cstrings = ["sh", "-c", "true"].map(|a| CString::new(a).expect("static arg"));
+        let mut argv: Vec<*mut c_char> = arg_cstrings
             .iter()
             .map(|a| a.as_ptr().cast_mut())
             .chain(std::iter::once(ptr::null_mut()))
             .collect();
         let mut pid: libc::pid_t = 0;
-        // SAFETY: `filename`/`args` CStrings outlive the call, `argv` is
+        // SAFETY: `filename`/`arg_cstrings` CStrings outlive the call, `argv` is
         // NULL-terminated, `pid` is a valid out-pointer, and the NULL pipe
         // pointers mean "no pipes" per libminijail.h.
         let rc = unsafe {

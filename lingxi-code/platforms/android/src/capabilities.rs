@@ -122,8 +122,17 @@ pub async fn probe_android_capabilities() -> AndroidSandboxCapabilities {
     }
     #[cfg(target_os = "android")]
     {
-        // P0a Task 16 replaces this body with the minijail smoke call.
-        AndroidSandboxCapabilities::unavailable("on-device probe not yet implemented (P0a/P2)")
+        let smoke = platform_android_minijail::minijail_smoke();
+        AndroidSandboxCapabilities {
+            probed: true,
+            minijail_smoke: smoke.ok,
+            no_new_privs: smoke.no_new_privs,
+            // The remaining probe items (seccomp install, TSYNC, net-deny
+            // socket()==EPERM, pgid kill, landlock ABI, sh version, toybox
+            // inventory) land with the P2 runner plan.
+            reason: smoke.reason,
+            ..AndroidSandboxCapabilities::default()
+        }
     }
 }
 

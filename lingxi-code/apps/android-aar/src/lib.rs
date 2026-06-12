@@ -79,6 +79,32 @@ pub struct PlatformImpls {
     pub app_files_root: String,
 }
 
+/// FFI carrier for the Android shell/sandbox configuration (spec r3 §Android
+/// inputs). `None` anywhere upstream keeps shell support fully absent.
+#[cfg(feature = "uniffi")]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+#[derive(Debug, Clone)]
+pub struct AndroidShellConfigFfi {
+    /// `ApplicationInfo.nativeLibraryDir`.
+    pub native_library_dir: String,
+    /// Directory the shell treats as `$HOME` / workspace.
+    pub shell_workspace_root: String,
+    /// App cache dir (`$TMPDIR`).
+    pub app_cache_root: String,
+    /// Application package name.
+    pub package_name: String,
+    /// `PackageInfo.longVersionCode`.
+    pub package_version_code: i64,
+    /// filesDir / cacheDir / codeCacheDir / noBackupFilesDir roots.
+    pub app_writable_roots: Vec<String>,
+    /// Master enable flag.
+    pub enable_shell: bool,
+    /// D11: host attests secrets are Keystore-backed.
+    pub secrets_in_keystore: bool,
+    /// D11: explicit user acceptance of data exposure.
+    pub shell_data_exposure_accepted: bool,
+}
+
 /// Top-level `UniFFI` constructor: build the mobile engine from the Kotlin-supplied
 /// platform callbacks + event listener. (Under `uniffi`: `#[uniffi::export]`.)
 ///
@@ -996,6 +1022,7 @@ pub fn build_android_engine(
     notifications: Box<dyn AndroidNotification>,
     clipboard: Box<dyn AndroidClipboard>,
     permissions: Box<dyn AndroidPermissionSink>,
+    shell: Option<AndroidShellConfigFfi>,
 ) -> Result<Arc<MobileEngineHandle>, MobileEngineError> {
     let listener: Arc<dyn ClientEventListener> =
         Arc::new(AndroidListenerBridge { inner: listener });
@@ -1014,6 +1041,17 @@ pub fn build_android_engine(
         if !model.is_empty() {
             cfg.default_model = model;
         }
+        let shell_cfg = shell.map(|s| platform_android::AndroidShellConfig {
+            native_library_dir: std::path::PathBuf::from(s.native_library_dir),
+            shell_workspace_root: std::path::PathBuf::from(s.shell_workspace_root),
+            app_cache_root: std::path::PathBuf::from(s.app_cache_root),
+            package_name: s.package_name,
+            package_version_code: s.package_version_code,
+            app_writable_roots: s.app_writable_roots.into_iter().map(Into::into).collect(),
+            enable_shell: s.enable_shell,
+            secrets_in_keystore: s.secrets_in_keystore,
+            shell_data_exposure_accepted: s.shell_data_exposure_accepted,
+        });
         let platform: Arc<dyn Platform> = Arc::new(AndroidPlatform::new(AndroidPlatformInputs {
             app_files_root: std::path::PathBuf::from(app_files_root),
             camera: Arc::new(AndroidCameraBridge { inner: camera }),
@@ -1025,7 +1063,7 @@ pub fn build_android_engine(
                 inner: notifications,
             })),
             clipboard: Some(Arc::new(AndroidClipboardBridge { inner: clipboard })),
-            shell: None,
+            shell: shell_cfg,
         }));
         let permission_sink: Arc<dyn PermissionRequestSink> =
             Arc::new(AndroidPermissionSinkBridge { inner: permissions });
@@ -1047,6 +1085,7 @@ pub fn build_android_engine(
             notifications,
             clipboard,
             permissions,
+            shell,
         );
         Err(MobileEngineError::PlatformUnavailable)
     }

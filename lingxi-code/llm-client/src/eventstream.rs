@@ -3,25 +3,26 @@
 //! Implements the AWS event-stream wire format used by Bedrock streaming:
 //! `[u32 BE total_len][u32 BE headers_len][u32 BE prelude_crc][headers][payload][u32 BE message_crc]`
 //!
-//! The CRC is IEEE CRC32 (reflected, poly 0xEDB88320) computed with a
+//! The CRC is IEEE CRC32 (reflected, poly `0xEDB8_8320`) computed with a
 //! hand-rolled lookup table — no external crate dependency.
 
 use crate::LlmError;
 
-// ── CRC32 (IEEE, reflected, poly 0xEDB88320) ────────────────────────────────
+// ── CRC32 (IEEE, reflected, poly `0xEDB8_8320`) ────────────────────────────────
 
 /// Generate the 256-entry CRC32 lookup table at compile time.
 ///
-/// Uses the standard IEEE reflected polynomial 0xEDB88320.
+/// Uses the standard IEEE reflected polynomial `0xEDB8_8320`.
 const fn make_crc_table() -> [u32; 256] {
     let mut table = [0u32; 256];
     let mut i = 0usize;
     while i < 256 {
+        #[allow(clippy::cast_possible_truncation, reason = "i < 256 fits u32")]
         let mut crc = i as u32;
         let mut j = 0usize;
         while j < 8 {
             if crc & 1 != 0 {
-                crc = (crc >> 1) ^ 0xEDB88320;
+                crc = (crc >> 1) ^ 0xEDB8_8320;
             } else {
                 crc >>= 1;
             }
@@ -33,13 +34,14 @@ const fn make_crc_table() -> [u32; 256] {
     table
 }
 
-/// IEEE CRC32 lookup table (256 entries, reflected poly 0xEDB88320).
+/// IEEE CRC32 lookup table (256 entries, reflected poly `0xEDB8_8320`).
 const CRC_TABLE: [u32; 256] = make_crc_table();
 
 /// Compute IEEE CRC32 over `data`.
 ///
 /// The result matches the standard CRC32 of the POSIX/zlib/gzip family.
 /// Verified: `crc32(b"123456789") == 0xCBF43926`.
+#[must_use]
 pub fn crc32(data: &[u8]) -> u32 {
     let mut crc: u32 = 0xFFFF_FFFF;
     for &byte in data {
@@ -90,8 +92,11 @@ pub struct EventStreamSplitter {
 
 /// Minimum number of bytes needed to know a frame's total length.
 const PRELUDE_BYTES: usize = 12; // total_len(4) + headers_len(4) + prelude_crc(4)
-/// Fixed overhead added to the payload+headers region: prelude(12) + message_crc(4).
+/// Fixed overhead added to the payload+headers region: prelude(12) + `message_crc`(4).
 const FRAME_OVERHEAD: usize = 16;
+/// Hard upper bound on a single frame (defense-in-depth vs hostile lengths;
+/// real Bedrock frames are well under 1 MiB).
+const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 
 impl EventStreamSplitter {
     /// Feed a chunk of bytes and return every complete frame decoded so far.
@@ -119,11 +124,35 @@ impl EventStreamSplitter {
             let total_len = u32::from_be_bytes(self.buf[0..4].try_into().unwrap()) as usize;
             let headers_len = u32::from_be_bytes(self.buf[4..8].try_into().unwrap()) as usize;
 
+            // ── Prelude CRC ─────────────────────────────────────────────────
+            // Validated BEFORE waiting for `total_len` bytes: a fabricated
+            // length field fails here immediately instead of making the
+            // splitter buffer gigabytes waiting for a frame that never ends.
+            let expected_prelude_crc =
+                u32::from_be_bytes(self.buf[8..12].try_into().unwrap());
+            let actual_prelude_crc = crc32(&self.buf[0..8]);
+            if actual_prelude_crc != expected_prelude_crc {
+                return Err(LlmError::StreamInterrupted {
+                    message: format!(
+                        "event-stream prelude CRC mismatch: expected 0x{expected_prelude_crc:08X}, got 0x{actual_prelude_crc:08X}"
+                    ),
+                });
+            }
+
             // Validate that total_len is geometrically consistent.
             if total_len < FRAME_OVERHEAD {
                 return Err(LlmError::StreamInterrupted {
                     message: format!(
                         "event-stream frame total_len={total_len} is smaller than the minimum {FRAME_OVERHEAD}"
+                    ),
+                });
+            }
+            // Defense-in-depth bound even for CRC-valid frames: Bedrock frames
+            // are well under 1 MiB; refuse anything claiming more than 8 MiB.
+            if total_len > MAX_FRAME_BYTES {
+                return Err(LlmError::StreamInterrupted {
+                    message: format!(
+                        "event-stream frame total_len={total_len} exceeds the {MAX_FRAME_BYTES}-byte limit"
                     ),
                 });
             }
@@ -135,18 +164,6 @@ impl EventStreamSplitter {
 
             // We have a full frame in `self.buf[0..total_len]`.
             let frame = &self.buf[..total_len];
-
-            // ── Prelude CRC ─────────────────────────────────────────────────
-            let expected_prelude_crc =
-                u32::from_be_bytes(frame[8..12].try_into().unwrap());
-            let actual_prelude_crc = crc32(&frame[0..8]);
-            if actual_prelude_crc != expected_prelude_crc {
-                return Err(LlmError::StreamInterrupted {
-                    message: format!(
-                        "event-stream prelude CRC mismatch: expected 0x{expected_prelude_crc:08X}, got 0x{actual_prelude_crc:08X}"
-                    ),
-                });
-            }
 
             // ── Message CRC ─────────────────────────────────────────────────
             let expected_message_crc =
@@ -344,6 +361,11 @@ fn read_exact<'a>(data: &mut &'a [u8], n: usize, ctx: &str) -> Result<&'a [u8], 
 /// round-trip tests work correctly. For an independent CRC verification use the
 /// `crc32_pin` unit test.
 #[cfg(test)]
+#[must_use]
+#[allow(
+    clippy::cast_possible_truncation,
+    reason = "test fixture builder; sizes are tiny"
+)]
 pub fn build_frame(headers_bytes: &[u8], payload: &[u8]) -> Vec<u8> {
     let headers_len = headers_bytes.len() as u32;
     let payload_len = payload.len();
@@ -372,6 +394,11 @@ pub fn build_frame(headers_bytes: &[u8], payload: &[u8]) -> Vec<u8> {
 
 /// Encode a single string header (`value_type == 7`) into wire bytes.
 #[cfg(test)]
+#[must_use]
+#[allow(
+    clippy::cast_possible_truncation,
+    reason = "test fixture builder; sizes are tiny"
+)]
 pub fn encode_string_header(name: &str, value: &str) -> Vec<u8> {
     let mut out = Vec::new();
     let name_bytes = name.as_bytes();
@@ -419,11 +446,11 @@ mod tests {
     /// `build_frame` helper and the parser are consistent.
     ///
     /// Byte layout:
-    ///   offset 0..4  : total_len = 20 (16 overhead + 4 payload)
-    ///   offset 4..8  : headers_len = 0
-    ///   offset 8..12 : prelude_crc = crc32(bytes[0..8])
-    ///   offset 12..16: payload [1, 2, 3, 4]
-    ///   offset 16..20: message_crc = crc32(bytes[0..16])
+    ///   offset 0..4  : `total_len` = 20 (16 overhead + 4 payload)
+    ///   offset 4..8  : `headers_len` = 0
+    ///   offset 8..12 : `prelude_crc` = crc32(bytes\[0..8\])
+    ///   offset 12..16: payload \[1, 2, 3, 4\]
+    ///   offset 16..20: `message_crc` = crc32(bytes\[0..16\])
     #[test]
     fn hand_computed_empty_headers_tiny_payload() {
         let payload = &[1u8, 2, 3, 4];
@@ -595,6 +622,44 @@ mod tests {
         );
     }
 
+    // ── Hostile-length defense ──────────────────────────────────────────────
+
+    /// A fabricated huge `total_len` with a WRONG prelude CRC fails immediately
+    /// (the CRC is validated before waiting for `total_len` bytes).
+    #[test]
+    fn fabricated_total_len_fails_on_prelude_crc_immediately() {
+        let mut splitter = EventStreamSplitter::default();
+        let mut hostile = Vec::new();
+        hostile.extend_from_slice(&u32::MAX.to_be_bytes()); // total_len = 4 GiB
+        hostile.extend_from_slice(&0u32.to_be_bytes()); // headers_len
+        hostile.extend_from_slice(&0xDEAD_BEEFu32.to_be_bytes()); // bogus prelude CRC
+
+        let err = splitter.feed(&hostile).unwrap_err();
+        assert!(
+            format!("{err}").contains("prelude CRC"),
+            "must fail on prelude CRC before buffering; got: {err}"
+        );
+    }
+
+    /// A CRC-VALID frame claiming more than `MAX_FRAME_BYTES` is refused
+    /// (defense-in-depth: never buffer multi-gigabyte frames).
+    #[test]
+    fn crc_valid_oversize_frame_is_refused() {
+        let mut splitter = EventStreamSplitter::default();
+        let total_len = u32::try_from(MAX_FRAME_BYTES + 1).unwrap();
+        let mut hostile = Vec::new();
+        hostile.extend_from_slice(&total_len.to_be_bytes());
+        hostile.extend_from_slice(&0u32.to_be_bytes());
+        let crc = crc32(&hostile[0..8]); // valid prelude CRC
+        hostile.extend_from_slice(&crc.to_be_bytes());
+
+        let err = splitter.feed(&hostile).unwrap_err();
+        assert!(
+            format!("{err}").contains("exceeds"),
+            "must refuse oversize frames; got: {err}"
+        );
+    }
+
     // ── Non-string header types skipped correctly ───────────────────────────
 
     #[test]
@@ -604,7 +669,7 @@ mod tests {
 
         // Bool true header ":flag" (type 0, no payload bytes)
         let flag_name = b":flag";
-        headers_bytes.push(flag_name.len() as u8);
+        headers_bytes.push(u8::try_from(flag_name.len()).unwrap());
         headers_bytes.extend_from_slice(flag_name);
         headers_bytes.push(VALUE_TYPE_BOOL_TRUE);
 

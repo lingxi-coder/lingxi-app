@@ -15,7 +15,7 @@ use crate::{Capabilities, CostEstimate, LlmError, Usage};
 #[serde(rename_all = "snake_case")]
 pub enum StreamFraming {
     /// Server-Sent Events (text, `data: …\n\n` boundaries).  This is the
-    /// default for Anthropic, OpenAI, Gemini, and Azure.
+    /// default for Anthropic, `OpenAI`, Gemini, and Azure.
     #[default]
     Sse,
     /// AWS binary event-stream framing used by Amazon Bedrock streaming

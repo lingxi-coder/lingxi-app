@@ -1,7 +1,8 @@
 //! Rate-limit message composer — port of claude-code
 //! `services/rateLimitMessages.ts` `getRateLimitMessage` (lines 45-104) plus
 //! the upsell selection from `components/messages/RateLimitMessage.tsx`
-//! `getUpsellMessage` (llm-client future-work batch 3, Task 9).
+//! `getUpsellMessage` (byte-locked strings landed in batch 3; the full
+//! subscription-aware arm port landed in batch 4 — see the CLOSED list below).
 //!
 //! Pure function: the nine `OutputEvent::RateLimit` header-derived fields in,
 //! `Option<ComposedRateLimit { text, upsell }>` out. Copy strings are
@@ -88,9 +89,12 @@ pub struct ComposedRateLimit {
 const WARNING_THRESHOLD: f64 = 0.7;
 
 /// `isEnvTruthy` port (`utils/envUtils.ts:32-37`): unset/empty ⇒ false; else
-/// lowercase-trim ∈ {`1`, `true`, `yes`, `on`}. (The existing in-workspace
-/// ports live in `migrations`/`tools/*` — none of which are tui deps — so the
-/// 4-line helper is ported locally rather than adding a crate edge.)
+/// lowercase-trim ∈ {`1`, `true`, `yes`, `on`}. (The workspace carries several
+/// private copies of this helper — `migrations`/`tools/*` and a semantically
+/// divergent one in `orchestrator::conversation` — none publicly exported, so
+/// the 4-line helper is ported locally rather than adding a crate edge or
+/// widening another crate's API. Consolidation into `traits` is a future
+/// cleanup, out of scope here.)
 fn is_env_truthy(value: Option<&str>) -> bool {
     let Some(v) = value else { return false };
     matches!(
@@ -681,6 +685,10 @@ mod tests {
         let got = compose_with(&rejected(Some("seven_day_sonnet"), None), false, &pro(), false)
             .unwrap();
         assert_eq!(got.text, "You've hit your weekly limit");
+        // End-to-end wiring pin: a subscriber's rejected notice carries the
+        // error upsell out of compose_with (TSX :36-38 — pro without the
+        // extra-usage command → UPGRADE), not just from error_upsell directly.
+        assert_eq!(got.upsell.as_deref(), Some(upsell::UPGRADE));
 
         let enterprise = SubscriptionSnapshot {
             subscription_type: Some("enterprise".into()),
@@ -742,6 +750,16 @@ mod tests {
         );
         assert_eq!(
             error_upsell(&team(false, Some("member")), true).as_deref(),
+            Some(upsell::EXTRA_USAGE_ADMIN)
+        );
+        // Enterprise rides the same is_team_or_enterprise() predicate
+        // (TSX :74); pin one variant so the arm isn't team-only-tested.
+        let enterprise = SubscriptionSnapshot {
+            subscription_type: Some("enterprise".into()),
+            ..team(false, Some("member"))
+        };
+        assert_eq!(
+            error_upsell(&enterprise, true).as_deref(),
             Some(upsell::EXTRA_USAGE_ADMIN)
         );
     }
@@ -870,6 +888,14 @@ mod tests {
                 reset(ts)
             )
         );
+        assert!(got.text.ends_with(" \u{b7} /upgrade to keep using Claude Code"));
+        // TS :281 matches subscription_type directly ('pro' || 'max') — pin
+        // the max arm too (max here is NOT the 20x tier; tier is separate).
+        let max = SubscriptionSnapshot {
+            subscription_type: Some("max".into()),
+            ..pro()
+        };
+        let got = compose_with(&info, false, &max, false).unwrap();
         assert!(got.text.ends_with(" \u{b7} /upgrade to keep using Claude Code"));
     }
 

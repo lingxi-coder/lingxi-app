@@ -47,6 +47,10 @@ impl AndroidSandboxCapabilities {
     }
 
     /// Whether `prepare()` may admit commands at all.
+    ///
+    /// This is the coarse registration gate (spec gate #2); per-plan
+    /// requirements (e.g. the net-deny seccomp filter for deny-net plans)
+    /// are checked in `prepare()` itself, not here.
     #[must_use]
     pub fn available(&self) -> bool {
         self.probed && self.minijail_smoke && self.no_new_privs
@@ -62,7 +66,10 @@ impl AndroidSandboxCapabilities {
             features: SandboxFeatures {
                 network_isolation: false, // seccomp deny ≠ namespace isolation
                 fs_readonly: false,
-                fs_readwrite_paths: self.landlock_abi.is_some(),
+                // Landlock ABI is recorded, not relied on: `plan_from_policy`
+                // unconditionally rejects FS confinement (no enforcement path
+                // exists). Flip only when one does — never overstate.
+                fs_readwrite_paths: false,
                 process_limit: self.seccomp_filter,
                 no_new_privileges: self.no_new_privs,
             },
@@ -150,6 +157,42 @@ mod tests {
         let cap = caps.to_sandbox_capability();
         assert!(!cap.available);
         assert!(!cap.features.network_isolation);
+        assert!(!cap.features.fs_readonly);
+    }
+
+    #[test]
+    fn available_requires_every_gate_conjunct() {
+        let full = AndroidSandboxCapabilities {
+            probed: true,
+            minijail_smoke: true,
+            no_new_privs: true,
+            ..AndroidSandboxCapabilities::default()
+        };
+        assert!(full.available());
+        for missing in ["probed", "smoke", "nnp"] {
+            let mut c = full.clone();
+            match missing {
+                "probed" => c.probed = false,
+                "smoke" => c.minijail_smoke = false,
+                _ => c.no_new_privs = false,
+            }
+            assert!(!c.available(), "gate must fail without {missing}");
+        }
+    }
+
+    #[test]
+    fn landlock_abi_presence_does_not_overstate_fs_features() {
+        let caps = AndroidSandboxCapabilities {
+            probed: true,
+            minijail_smoke: true,
+            no_new_privs: true,
+            landlock_abi: Some(4),
+            ..AndroidSandboxCapabilities::default()
+        };
+        let cap = caps.to_sandbox_capability();
+        // No FS enforcement path exists (plan_from_policy rejects FS
+        // confinement unconditionally) — the flag must stay false.
+        assert!(!cap.features.fs_readwrite_paths);
         assert!(!cap.features.fs_readonly);
     }
 }

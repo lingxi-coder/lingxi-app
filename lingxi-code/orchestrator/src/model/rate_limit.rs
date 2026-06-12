@@ -346,6 +346,12 @@ pub struct RateLimitInfo {
     /// `fallback_available.unwrap_or(false)` reproduces the exact TS boolean);
     /// `Some(false)` when present with any other value.
     pub fallback_available: Option<bool>,
+    /// `surpassedThreshold` (`claudeAiLimits.ts:135`) — the warning-threshold
+    /// fraction from `anthropic-ratelimit-unified-{abbrev}-surpassed-threshold`.
+    /// Set ONLY by the header-based early-warning replacement
+    /// (`claudeAiLimits.ts:288`); the base header parse and the time-relative
+    /// fallback leave it `None` (the TS fresh object at `:332-339` omits it).
+    pub surpassed_threshold: Option<f64>,
 }
 
 /// Map a representative-claim value to the abbreviation used in the per-claim
@@ -369,34 +375,232 @@ fn claim_abbrev(claim: &str) -> Option<&'static str> {
     }
 }
 
+/// Tolerant epoch-seconds read, mirroring TS `Number(header)` fail-soft:
+/// absent/blank/non-numeric → `None`. Divergence (same stance as
+/// `parse_unified_reset`): TS `Number()` accepts decimal/scientific epoch
+/// forms; we parse integer epoch seconds (the form the server sends) and fail
+/// soft otherwise.
+fn parse_epoch_secs(headers: &[(String, String)], name: &str) -> Option<u64> {
+    header_value(headers, name)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .and_then(|s| s.parse::<u64>().ok())
+}
+
+/// Tolerant 0-1-fraction read (utilization / surpassed-threshold headers).
+/// Non-finite values (`NaN`/`inf` parse as valid f64 in Rust) are rejected so
+/// `RateLimitInfo: PartialEq` comparisons stay total in practice.
+fn parse_fraction(headers: &[(String, String)], name: &str) -> Option<f64> {
+    header_value(headers, name)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .and_then(|s| s.parse::<f64>().ok())
+        .filter(|f| f.is_finite())
+}
+
+/// One early-warning threshold pair (`claudeAiLimits.ts:38-41`): warn when
+/// usage `>= utilization` AND the elapsed window fraction `<= time_pct`
+/// (high consumption early in the window).
+struct EarlyWarningThreshold {
+    utilization: f64,
+    time_pct: f64,
+}
+
+/// One time-relative early-warning configuration (`claudeAiLimits.ts:43-48`).
+struct EarlyWarningConfig {
+    rate_limit_type: &'static str,
+    claim_abbrev: &'static str,
+    window_seconds: u64,
+    thresholds: &'static [EarlyWarningThreshold],
+}
+
+/// `EARLY_WARNING_CONFIGS` (`claudeAiLimits.ts:53-70`) — time-relative
+/// fallback configs in priority order (checked first to last), used when the
+/// server doesn't send a surpassed-threshold header.
+const EARLY_WARNING_CONFIGS: [EarlyWarningConfig; 2] = [
+    EarlyWarningConfig {
+        rate_limit_type: "five_hour",
+        claim_abbrev: "5h",
+        window_seconds: 5 * 60 * 60,
+        thresholds: &[EarlyWarningThreshold {
+            utilization: 0.9,
+            time_pct: 0.72,
+        }],
+    },
+    EarlyWarningConfig {
+        rate_limit_type: "seven_day",
+        claim_abbrev: "7d",
+        window_seconds: 7 * 24 * 60 * 60,
+        thresholds: &[
+            EarlyWarningThreshold {
+                utilization: 0.75,
+                time_pct: 0.6,
+            },
+            EarlyWarningThreshold {
+                utilization: 0.5,
+                time_pct: 0.35,
+            },
+            EarlyWarningThreshold {
+                utilization: 0.25,
+                time_pct: 0.15,
+            },
+        ],
+    },
+];
+
+/// `EARLY_WARNING_CLAIM_MAP` (`claudeAiLimits.ts:73-77`) in the object's
+/// insertion order — `Object.entries` iteration order is what gives `5h`
+/// priority over `7d` over `overage` in the header-based check (`:260-262`).
+const EARLY_WARNING_CLAIM_MAP: [(&str, &str); 3] = [
+    ("5h", "five_hour"),
+    ("7d", "seven_day"),
+    ("overage", "overage"),
+];
+
+/// `computeTimeProgress` (`claudeAiLimits.ts:98-103`): fraction (0-1) of the
+/// window that has elapsed — `clamp((now − (resetsAt − window)) / window, 0, 1)`.
+#[allow(
+    clippy::cast_precision_loss,
+    reason = "epoch seconds (< 2^53) and the fixed window constants are exactly representable in f64 — same number math as the TS"
+)]
+fn compute_time_progress(resets_at: u64, window_seconds: u64, now: SystemTime) -> f64 {
+    // `Date.now() / 1000` (ts:99). A pre-epoch clock cannot happen in
+    // practice; fail soft to 0.0 rather than panic.
+    let now_seconds = now
+        .duration_since(UNIX_EPOCH)
+        .map_or(0.0, |d| d.as_secs_f64());
+    let window_start = resets_at as f64 - window_seconds as f64;
+    let elapsed = now_seconds - window_start;
+    (elapsed / window_seconds as f64).clamp(0.0, 1.0)
+}
+
+/// `getHeaderBasedEarlyWarning` (`claudeAiLimits.ts:255-294`): iterate the
+/// claim map in order; the first claim whose
+/// `anthropic-ratelimit-unified-{abbrev}-surpassed-threshold` header is
+/// PRESENT (`!== null`, `:268`) wins and yields a FRESH replacement limits
+/// object (`:281-289`) — only the fields the TS object sets are populated.
+fn header_based_early_warning(
+    headers: &[(String, String)],
+    fallback_available: Option<bool>,
+) -> Option<RateLimitInfo> {
+    for (abbrev, rate_limit_type) in EARLY_WARNING_CLAIM_MAP {
+        let surpassed_name = format!("anthropic-ratelimit-unified-{abbrev}-surpassed-threshold");
+        if header_value(headers, &surpassed_name).is_none() {
+            continue;
+        }
+        // `utilizationHeader ? Number(...) : undefined` (ts:276-279) — the
+        // tolerant parsers reproduce the absent→undefined collapse.
+        let resets_at = parse_epoch_secs(
+            headers,
+            &format!("anthropic-ratelimit-unified-{abbrev}-reset"),
+        );
+        return Some(RateLimitInfo {
+            status: Some("allowed_warning".to_string()),
+            // The TS fresh object folds the per-claim reset into the
+            // top-level `resetsAt` (ts:283); our struct also splits out the
+            // per-claim value, so the same timestamp lands in both.
+            resets_at,
+            claim_resets_at: resets_at,
+            rate_limit_type: Some(rate_limit_type.to_string()),
+            utilization: parse_fraction(
+                headers,
+                &format!("anthropic-ratelimit-unified-{abbrev}-utilization"),
+            ),
+            fallback_available,
+            // `Number(surpassedThreshold)` (ts:288). Divergence (same
+            // fail-soft stance as `parse_fraction` everywhere else): TS would
+            // store `NaN` for a malformed value; we store `None`. The warning
+            // itself still fires on header PRESENCE alone (ts:268).
+            surpassed_threshold: parse_fraction(headers, &surpassed_name),
+            // Fresh-object semantics: overage fields stay `None`
+            // (`isUsingOverage: false` in TS has no struct counterpart).
+            ..RateLimitInfo::default()
+        });
+    }
+    None
+}
+
+/// `getTimeRelativeEarlyWarning` (`claudeAiLimits.ts:301-340`): client-side
+/// fallback for one config. Requires BOTH per-claim headers (`:315`); warns
+/// when ANY threshold has `utilization >= t.utilization && timeProgress <=
+/// t.timePct` (`:324-326`). The fresh object carries NO `surpassedThreshold`
+/// (`:332-339`).
+fn time_relative_early_warning(
+    headers: &[(String, String)],
+    config: &EarlyWarningConfig,
+    fallback_available: Option<bool>,
+    now: SystemTime,
+) -> Option<RateLimitInfo> {
+    let abbrev = config.claim_abbrev;
+    // TS gates on header PRESENCE (`=== null`) then `Number()`s the values; a
+    // malformed value becomes `NaN`, every `NaN` comparison is false, and no
+    // warning fires — requiring a successful parse here is behaviourally
+    // identical and keeps the fail-soft stance of the tolerant parsers.
+    let utilization = parse_fraction(
+        headers,
+        &format!("anthropic-ratelimit-unified-{abbrev}-utilization"),
+    )?;
+    let resets_at = parse_epoch_secs(
+        headers,
+        &format!("anthropic-ratelimit-unified-{abbrev}-reset"),
+    )?;
+    let time_progress = compute_time_progress(resets_at, config.window_seconds, now);
+    let should_warn = config
+        .thresholds
+        .iter()
+        .any(|t| utilization >= t.utilization && time_progress <= t.time_pct);
+    if !should_warn {
+        return None;
+    }
+    Some(RateLimitInfo {
+        status: Some("allowed_warning".to_string()),
+        // Same `resetsAt` fold as the header-based path (ts:334).
+        resets_at: Some(resets_at),
+        claim_resets_at: Some(resets_at),
+        rate_limit_type: Some(config.rate_limit_type.to_string()),
+        utilization: Some(utilization),
+        fallback_available,
+        ..RateLimitInfo::default()
+    })
+}
+
+/// `getEarlyWarningFromHeaders` (`claudeAiLimits.ts:347-374`): header-based
+/// detection first (preferred when the API sends the header), else the
+/// time-relative configs in priority order.
+fn early_warning_from_headers(
+    headers: &[(String, String)],
+    fallback_available: Option<bool>,
+    now: SystemTime,
+) -> Option<RateLimitInfo> {
+    if let Some(warning) = header_based_early_warning(headers, fallback_available) {
+        return Some(warning);
+    }
+    EARLY_WARNING_CONFIGS
+        .iter()
+        .find_map(|config| time_relative_early_warning(headers, config, fallback_available, now))
+}
+
 impl RateLimitInfo {
     /// Parse the unified rate-limit headers the 429 error-message path reads.
     /// 1:1 with the `error.headers?.get(...)` reads in claude-code
     /// `errors.ts:471-516` + `claudeAiLimits.ts` `computeNewLimitsFromHeaders`.
+    /// Thin wrapper over [`Self::from_headers_at`] with the wall clock.
     #[must_use]
     pub fn from_headers(headers: &[(String, String)]) -> Self {
-        // Tolerant numeric reads, mirroring TS `Number(header)` fail-soft:
-        // absent/blank/non-numeric → None. Divergence (same stance as
-        // `parse_unified_reset`): TS `Number()` accepts decimal/scientific
-        // epoch forms; we parse integer epoch seconds (the form the server
-        // sends) and fail soft otherwise.
-        let parse_epoch_secs = |name: &str| -> Option<u64> {
-            header_value(headers, name)
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .and_then(|s| s.parse::<u64>().ok())
-        };
-        // Utilization is a 0-1 fraction; non-finite values (`NaN`/`inf` parse
-        // as valid f64 in Rust) are rejected so `RateLimitInfo: PartialEq`
-        // comparisons stay total in practice.
-        let parse_fraction = |name: &str| -> Option<f64> {
-            header_value(headers, name)
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .and_then(|s| s.parse::<f64>().ok())
-                .filter(|f| f.is_finite())
-        };
+        Self::from_headers_at(headers, SystemTime::now())
+    }
 
+    /// Testable core of [`Self::from_headers`] with an injected `now` — the
+    /// clock only feeds `computeTimeProgress` (`claudeAiLimits.ts:98-103`) on
+    /// the time-relative early-warning fallback path.
+    ///
+    /// After the raw header parse, the `computeNewLimitsFromHeaders`
+    /// final-status semantics apply (`claudeAiLimits.ts:411-424`): when the
+    /// parsed status is `allowed`/`allowed_warning`, a firing early warning
+    /// REPLACES the whole parse, and otherwise a bare `allowed_warning` is
+    /// downgraded to `allowed`; `rejected` passes through untouched.
+    #[must_use]
+    pub fn from_headers_at(headers: &[(String, String)], now: SystemTime) -> Self {
         let rate_limit_type = header_value(
             headers,
             "anthropic-ratelimit-unified-representative-claim",
@@ -407,12 +611,14 @@ impl RateLimitInfo {
         // (`anthropic-ratelimit-unified-{abbrev}-utilization` / `-reset`,
         // claudeAiLimits.ts:164-179). No abbrev → no per-claim read.
         let abbrev = rate_limit_type.as_deref().and_then(claim_abbrev);
-        let utilization = abbrev
-            .and_then(|a| parse_fraction(&format!("anthropic-ratelimit-unified-{a}-utilization")));
-        let claim_resets_at =
-            abbrev.and_then(|a| parse_epoch_secs(&format!("anthropic-ratelimit-unified-{a}-reset")));
+        let utilization = abbrev.and_then(|a| {
+            parse_fraction(headers, &format!("anthropic-ratelimit-unified-{a}-utilization"))
+        });
+        let claim_resets_at = abbrev.and_then(|a| {
+            parse_epoch_secs(headers, &format!("anthropic-ratelimit-unified-{a}-reset"))
+        });
 
-        Self {
+        let mut parsed = Self {
             rate_limit_type,
             overage_status: header_value(headers, "anthropic-ratelimit-unified-overage-status")
                 .map(str::to_string),
@@ -422,14 +628,52 @@ impl RateLimitInfo {
             status: header_value(headers, "anthropic-ratelimit-unified-status")
                 .filter(|s| !s.is_empty())
                 .map(str::to_string),
-            resets_at: parse_epoch_secs("anthropic-ratelimit-unified-reset"),
+            resets_at: parse_epoch_secs(headers, "anthropic-ratelimit-unified-reset"),
             utilization,
             claim_resets_at,
-            overage_resets_at: parse_epoch_secs("anthropic-ratelimit-unified-overage-reset"),
+            overage_resets_at: parse_epoch_secs(
+                headers,
+                "anthropic-ratelimit-unified-overage-reset",
+            ),
             // `=== 'available'` (claudeAiLimits.ts:384-385): strict equality
             // on the verbatim header value — no trim, no case-fold.
             fallback_available: header_value(headers, "anthropic-ratelimit-unified-fallback")
                 .map(|v| v == "available"),
+            // Only ever set by the header-based early-warning replacement
+            // below (claudeAiLimits.ts:288) — never by the raw parse.
+            surpassed_threshold: None,
+        };
+
+        // Final-status semantics (claudeAiLimits.ts:411-424) — the early
+        // warning is only consulted when status is allowed/allowed_warning.
+        match parsed.status.as_deref() {
+            Some("allowed" | "allowed_warning") => {
+                if let Some(warning) =
+                    early_warning_from_headers(headers, parsed.fallback_available, now)
+                {
+                    // TS RETURNS the fresh early-warning object (ts:419-421),
+                    // discarding the regular parse — including every overage
+                    // field. Every field on this struct maps to a
+                    // `ClaudeAILimits` member (claudeAiLimits.ts:122-136), so
+                    // there are no transport-only fields to carry over.
+                    return warning;
+                }
+                // No early-warning threshold surpassed → a bare
+                // allowed_warning is DOWNGRADED (ts:423 `finalStatus = 'allowed'`).
+                parsed.status = Some("allowed".to_string());
+                parsed
+            }
+            // `Some(_)`: 'rejected' (and any other non-empty value) passes
+            // through — ts:413 keeps `finalStatus = status` outside the
+            // allowed branch.
+            //
+            // `None`: deliberate divergence-guard. TS defaults a missing
+            // status to 'allowed' (ts:379-381), which would route it through
+            // the branch above — but fabricating a status with zero unified
+            // headers present would break `has_unified_headers()` consumers,
+            // so an absent header stays `None` (readers apply
+            // `.unwrap_or("allowed")`).
+            Some(_) | None => parsed,
         }
     }
 
@@ -1506,5 +1750,172 @@ mod unified_header_parse {
                 "value {other:?} must be Some(false)"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod early_warning {
+    //! Early-warning port tests, pinned against claude-code
+    //! `getHeaderBasedEarlyWarning` (`claudeAiLimits.ts:255-294`),
+    //! `getTimeRelativeEarlyWarning` (`:301-340`),
+    //! `getEarlyWarningFromHeaders` (`:347-374`) and the
+    //! `computeNewLimitsFromHeaders` final-status semantics (`:411-424`).
+    use super::*;
+
+    fn h(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
+        pairs
+            .iter()
+            .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+            .collect()
+    }
+
+    /// Fixed clock: `UNIX_EPOCH + secs` (the TS code reads `Date.now()/1000`).
+    fn at(secs: u64) -> SystemTime {
+        UNIX_EPOCH + Duration::from_secs(secs)
+    }
+
+    #[test]
+    fn surpassed_threshold_header_forces_allowed_warning_replacement() {
+        // getHeaderBasedEarlyWarning (claudeAiLimits.ts:255-294): the
+        // surpassed-threshold header replaces the regular parse with a FRESH
+        // allowed_warning object built from the per-claim headers.
+        let headers = h(&[
+            ("anthropic-ratelimit-unified-status", "allowed"),
+            ("anthropic-ratelimit-unified-fallback", "available"),
+            ("anthropic-ratelimit-unified-7d-surpassed-threshold", "0.5"),
+            ("anthropic-ratelimit-unified-7d-utilization", "0.55"),
+            ("anthropic-ratelimit-unified-7d-reset", "1750000000"),
+            ("anthropic-ratelimit-unified-overage-status", "allowed"),
+        ]);
+        let p = RateLimitInfo::from_headers_at(&headers, at(1_000_000));
+        assert_eq!(p.status.as_deref(), Some("allowed_warning"));
+        assert_eq!(p.rate_limit_type.as_deref(), Some("seven_day"));
+        assert_eq!(p.utilization, Some(0.55));
+        assert_eq!(p.resets_at, Some(1_750_000_000));
+        assert_eq!(p.surpassed_threshold, Some(0.5));
+        assert_eq!(p.fallback_available, Some(true));
+        // Fresh-object semantics (claudeAiLimits.ts:281-289): the replacement
+        // carries NO overage fields even though the header was present.
+        assert_eq!(p.overage_status, None);
+    }
+
+    #[test]
+    fn claim_priority_is_5h_then_7d_then_overage() {
+        // EARLY_WARNING_CLAIM_MAP iteration order (claudeAiLimits.ts:73-77,
+        // :260-262): '5h' is checked first, so it wins over '7d'.
+        let headers = h(&[
+            ("anthropic-ratelimit-unified-status", "allowed"),
+            ("anthropic-ratelimit-unified-5h-surpassed-threshold", "0.9"),
+            ("anthropic-ratelimit-unified-7d-surpassed-threshold", "0.5"),
+        ]);
+        let p = RateLimitInfo::from_headers_at(&headers, at(1_000_000));
+        assert_eq!(p.status.as_deref(), Some("allowed_warning"));
+        assert_eq!(p.rate_limit_type.as_deref(), Some("five_hour"));
+        assert_eq!(p.surpassed_threshold, Some(0.9));
+    }
+
+    #[test]
+    fn overage_claim_surpassed_threshold_maps_to_overage_type() {
+        // 'overage' → 'overage' (claudeAiLimits.ts:76).
+        let headers = h(&[
+            ("anthropic-ratelimit-unified-status", "allowed"),
+            (
+                "anthropic-ratelimit-unified-overage-surpassed-threshold",
+                "0.8",
+            ),
+        ]);
+        let p = RateLimitInfo::from_headers_at(&headers, at(1_000_000));
+        assert_eq!(p.status.as_deref(), Some("allowed_warning"));
+        assert_eq!(p.rate_limit_type.as_deref(), Some("overage"));
+        assert_eq!(p.surpassed_threshold, Some(0.8));
+    }
+
+    #[test]
+    fn time_relative_5h_fires_at_high_utilization_early_in_window() {
+        // getTimeRelativeEarlyWarning, five_hour config (claudeAiLimits.ts:54-59):
+        // threshold {utilization: 0.9, timePct: 0.72}, window 18000s.
+        // elapsed = 1_000_000 − (1_009_000 − 18_000) = 9_000 → progress 0.5 ≤ 0.72
+        // and 0.95 ≥ 0.9 → warn.
+        let headers = h(&[
+            ("anthropic-ratelimit-unified-status", "allowed"),
+            ("anthropic-ratelimit-unified-5h-utilization", "0.95"),
+            ("anthropic-ratelimit-unified-5h-reset", "1009000"),
+        ]);
+        let p = RateLimitInfo::from_headers_at(&headers, at(1_000_000));
+        assert_eq!(p.status.as_deref(), Some("allowed_warning"));
+        assert_eq!(p.rate_limit_type.as_deref(), Some("five_hour"));
+        assert_eq!(p.utilization, Some(0.95));
+        assert_eq!(p.resets_at, Some(1_009_000));
+        // The time-relative fresh object has NO surpassedThreshold
+        // (claudeAiLimits.ts:332-339).
+        assert_eq!(p.surpassed_threshold, None);
+    }
+
+    #[test]
+    fn time_relative_5h_does_not_fire_late_in_window() {
+        // elapsed = 1_000_000 − (1_001_000 − 18_000) = 17_000 → progress
+        // ≈ 0.944 > 0.72 → no warn. The bare allowed_warning status is then
+        // DOWNGRADED to allowed (claudeAiLimits.ts:423 `finalStatus = 'allowed'`).
+        let headers = h(&[
+            ("anthropic-ratelimit-unified-status", "allowed_warning"),
+            ("anthropic-ratelimit-unified-5h-utilization", "0.95"),
+            ("anthropic-ratelimit-unified-5h-reset", "1001000"),
+        ]);
+        let p = RateLimitInfo::from_headers_at(&headers, at(1_000_000));
+        assert_eq!(p.status.as_deref(), Some("allowed"));
+        assert_eq!(p.surpassed_threshold, None);
+    }
+
+    #[test]
+    fn time_relative_7d_middle_threshold() {
+        // seven_day config (claudeAiLimits.ts:60-69), middle threshold
+        // {utilization: 0.5, timePct: 0.35}: window 604_800s,
+        // reset = 2_000_000 + (604_800 − 181_440) → elapsed 181_440 →
+        // progress 0.3 ≤ 0.35 and 0.6 ≥ 0.5 → warn (utilization 0.6 < 0.75
+        // keeps the first threshold from firing — `.some()` over all).
+        let reset = 2_000_000 + (604_800 - 181_440);
+        let headers = h(&[
+            ("anthropic-ratelimit-unified-status", "allowed"),
+            ("anthropic-ratelimit-unified-7d-utilization", "0.6"),
+            ("anthropic-ratelimit-unified-7d-reset", &reset.to_string()),
+        ]);
+        let p = RateLimitInfo::from_headers_at(&headers, at(2_000_000));
+        assert_eq!(p.status.as_deref(), Some("allowed_warning"));
+        assert_eq!(p.rate_limit_type.as_deref(), Some("seven_day"));
+        assert_eq!(p.utilization, Some(0.6));
+    }
+
+    #[test]
+    fn rejected_status_passes_through_untouched_by_early_warning() {
+        // computeNewLimitsFromHeaders only consults the early warning when
+        // status is allowed/allowed_warning (claudeAiLimits.ts:414); 'rejected'
+        // falls through to the regular parse, overage fields intact.
+        let headers = h(&[
+            ("anthropic-ratelimit-unified-status", "rejected"),
+            ("anthropic-ratelimit-unified-5h-surpassed-threshold", "0.9"),
+            ("anthropic-ratelimit-unified-overage-status", "allowed"),
+        ]);
+        let p = RateLimitInfo::from_headers_at(&headers, at(1_000_000));
+        assert_eq!(p.status.as_deref(), Some("rejected"));
+        assert_eq!(p.overage_status.as_deref(), Some("allowed"));
+        assert_eq!(p.surpassed_threshold, None);
+    }
+
+    #[test]
+    fn missing_status_header_stays_none_no_fabricated_allowed() {
+        // Deliberate divergence-guard: TS defaults a missing status to
+        // 'allowed' (claudeAiLimits.ts:379-381), but fabricating a status from
+        // zero unified headers would break `has_unified_headers()` consumers.
+        let p = RateLimitInfo::from_headers_at(&[], at(1_000_000));
+        assert_eq!(p.status, None);
+        assert_eq!(p, RateLimitInfo::default());
+    }
+
+    #[test]
+    fn from_headers_delegates_with_wall_clock() {
+        // The public wrapper still exists and parses with `SystemTime::now()`.
+        let headers = h(&[("anthropic-ratelimit-unified-status", "rejected")]);
+        let p = RateLimitInfo::from_headers(&headers);
+        assert_eq!(p.status.as_deref(), Some("rejected"));
     }
 }

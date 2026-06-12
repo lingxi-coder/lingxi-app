@@ -896,7 +896,10 @@ mod stub_capabilities {
 /// permission gate; with no foreign permission UI yet, an unanswered request
 /// simply parks the turn (still cancellable).
 #[cfg(feature = "uniffi")]
-#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+// Reference implementation mirroring `ios-framework`'s `NoopPermissionSink`; the
+// Android constructor binds `AndroidPermissionSinkBridge` instead, so this is
+// unconstructed on every target — keep it as the documented no-op shape.
+#[allow(dead_code)]
 struct NoopPermissionSink;
 
 #[cfg(feature = "uniffi")]
@@ -1054,7 +1057,7 @@ pub fn build_android_engine(
             secrets_in_keystore: s.secrets_in_keystore,
             shell_data_exposure_accepted: s.shell_data_exposure_accepted,
         });
-        let platform: Arc<dyn Platform> = Arc::new(AndroidPlatform::new(AndroidPlatformInputs {
+        let android_platform = AndroidPlatform::new(AndroidPlatformInputs {
             app_files_root: std::path::PathBuf::from(app_files_root),
             camera: Arc::new(AndroidCameraBridge { inner: camera }),
             voice: Arc::new(AndroidVoiceBridge { inner: voice }),
@@ -1066,7 +1069,39 @@ pub fn build_android_engine(
             })),
             clipboard: Some(Arc::new(AndroidClipboardBridge { inner: clipboard })),
             shell: shell_cfg,
-        }));
+        });
+
+        // D8: run the eager capability probe and populate the SHARED cache
+        // BEFORE erasing to `Arc<dyn Platform>` and assembling the (synchronous)
+        // tool registry inside `build_mobile_engine`. The probe result drives
+        // both `Sandbox::prepare` and the per-plan registration gates, so it MUST
+        // be cached before any of those read it.
+        //
+        // We hold the CONCRETE `AndroidPlatform` here (the shared
+        // `build_mobile_engine` takes `Arc<dyn Platform>` and cannot downcast to
+        // reach `shell_capability_cache()`), so this is the only seam that owns
+        // both the cache and a pre-registration moment.
+        //
+        // Runtime for the `block_on`: the handle-owned engine runtime is built
+        // INSIDE `build_mobile_engine`, so no `tokio::runtime::Handle` exists yet
+        // at this point. The probe is independent of the engine runtime, so we
+        // spin up a transient current-thread runtime just for this one call and
+        // drop it immediately — clean and correct (option (b) per the plan).
+        if let Some(cache) = android_platform.shell_capability_cache() {
+            let probe_rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|e| {
+                    MobileEngineError::Internal(format!(
+                        "capability probe runtime build failed: {e}"
+                    ))
+                })?;
+            let caps =
+                probe_rt.block_on(platform_android::capabilities::probe_android_capabilities());
+            cache.set(caps);
+        }
+
+        let platform: Arc<dyn Platform> = Arc::new(android_platform);
         let permission_sink: Arc<dyn PermissionRequestSink> =
             Arc::new(AndroidPermissionSinkBridge { inner: permissions });
         engine_mobile::build_mobile_engine(cfg, platform, listener, permission_sink)

@@ -83,6 +83,7 @@ members = [
     "platforms/ios",
     "platforms/android",
     "platforms/android-libcap",
+    "platforms/android-minijail",
     "platforms/posix/tests/fixtures/mock_stdio_mcp",
     "examples/cli-demo",
 ]

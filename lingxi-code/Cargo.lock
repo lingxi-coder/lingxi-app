@@ -5052,6 +5052,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "tool-shell-mobile"
+version = "0.12.0"
+
+[[package]]
 name = "tool-skill"
 version = "0.12.0"
 dependencies = [

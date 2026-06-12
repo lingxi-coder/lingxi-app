@@ -398,6 +398,66 @@ fn parse_fraction(headers: &[(String, String)], name: &str) -> Option<f64> {
         .filter(|f| f.is_finite())
 }
 
+/// One window of raw utilization (`RawWindowUtilization`,
+/// `claudeAiLimits.ts:150-153`). Both fields are required — a window is
+/// parsed ATOMICALLY (both `-utilization` and `-reset` headers, ts:174) or
+/// not at all, so a `RawWindow` can never carry a dangling half.
+// `Eq` cannot be derived (`utilization: f64`); `parse_fraction` filters
+// non-finite values so `PartialEq` stays total in practice.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RawWindow {
+    /// 0-1 utilization fraction.
+    pub utilization: f64,
+    /// Unix epoch seconds when the window resets.
+    pub resets_at: u64,
+}
+
+/// Raw per-window utilization — claude-code `extractRawUtilization`
+/// (`claudeAiLimits.ts:164-179`). Tracked on EVERY response with unified
+/// headers, independent of the warning-gated [`RateLimitInfo`] fields
+/// (which only surface the representative claim's window). A window needs
+/// BOTH its `-utilization` and `-reset` headers (`util !== null && reset
+/// !== null`, ts:174); the default (both `None`) is the TS empty `{}`.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct RawUtilization {
+    /// 5-hour window (`anthropic-ratelimit-unified-5h-*`).
+    pub five_hour: Option<RawWindow>,
+    /// 7-day window (`anthropic-ratelimit-unified-7d-*`).
+    pub seven_day: Option<RawWindow>,
+}
+
+impl RawUtilization {
+    /// Parse from response headers. Absent/empty headers → `Self::default()`.
+    ///
+    /// Per window (`['five_hour','5h'] / ['seven_day','7d']`,
+    /// `claudeAiLimits.ts:166-169`): both the `-utilization` and `-reset`
+    /// header must be present AND parse (the file's tolerant-parse stance —
+    /// TS `Number()` would store `NaN` for a present-but-malformed value; we
+    /// drop the window instead, the same fail-soft divergence documented on
+    /// [`parse_fraction`] / [`parse_epoch_secs`]).
+    #[must_use]
+    pub fn from_headers(headers: &[(String, String)]) -> Self {
+        let window = |abbrev: &str| -> Option<RawWindow> {
+            let utilization = parse_fraction(
+                headers,
+                &format!("anthropic-ratelimit-unified-{abbrev}-utilization"),
+            )?;
+            let resets_at = parse_epoch_secs(
+                headers,
+                &format!("anthropic-ratelimit-unified-{abbrev}-reset"),
+            )?;
+            Some(RawWindow {
+                utilization,
+                resets_at,
+            })
+        };
+        Self {
+            five_hour: window("5h"),
+            seven_day: window("7d"),
+        }
+    }
+}
+
 /// One early-warning threshold pair (`claudeAiLimits.ts:38-41`): warn when
 /// usage `>= utilization` AND the elapsed window fraction `<= time_pct`
 /// (high consumption early in the window).
@@ -1756,6 +1816,82 @@ mod unified_header_parse {
                 "value {other:?} must be Some(false)"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod raw_utilization {
+    //! Tests for [`RawUtilization::from_headers`], pinned against claude-code
+    //! `extractRawUtilization` (`claudeAiLimits.ts:164-179`): a window needs
+    //! BOTH its `-utilization` AND `-reset` headers (ts:174) — emitted
+    //! atomically (both fields) or not at all.
+    use super::*;
+
+    fn h(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
+        pairs
+            .iter()
+            .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn raw_utilization_requires_both_headers_per_window() {
+        // 5h has BOTH headers → Some; 7d has only -utilization → None
+        // (`util !== null && reset !== null`, claudeAiLimits.ts:174).
+        let headers = h(&[
+            ("anthropic-ratelimit-unified-5h-utilization", "0.42"),
+            ("anthropic-ratelimit-unified-5h-reset", "1750000005"),
+            ("anthropic-ratelimit-unified-7d-utilization", "0.77"),
+        ]);
+        let raw = RawUtilization::from_headers(&headers);
+        assert_eq!(
+            raw.five_hour,
+            Some(RawWindow {
+                utilization: 0.42,
+                resets_at: 1_750_000_005,
+            })
+        );
+        assert_eq!(raw.seven_day, None);
+    }
+
+    #[test]
+    fn raw_utilization_empty_headers_is_default() {
+        let raw = RawUtilization::from_headers(&[]);
+        assert_eq!(raw, RawUtilization::default());
+        assert_eq!(raw.five_hour, None);
+        assert_eq!(raw.seven_day, None);
+    }
+
+    #[test]
+    fn raw_utilization_malformed_values_drop_window() {
+        // Malformed 5h utilization drops ONLY that window (the file's
+        // tolerant-parse stance; TS would store NaN — we fail soft to None);
+        // the well-formed 7d window still parses.
+        let headers = h(&[
+            ("anthropic-ratelimit-unified-5h-utilization", "garbage"),
+            ("anthropic-ratelimit-unified-5h-reset", "1750000005"),
+            ("anthropic-ratelimit-unified-7d-utilization", "0.77"),
+            ("anthropic-ratelimit-unified-7d-reset", "1750000007"),
+        ]);
+        let raw = RawUtilization::from_headers(&headers);
+        assert_eq!(raw.five_hour, None);
+        assert_eq!(
+            raw.seven_day,
+            Some(RawWindow {
+                utilization: 0.77,
+                resets_at: 1_750_000_007,
+            })
+        );
+
+        // Malformed RESET also drops the window — atomic either-both-or-none.
+        let headers = h(&[
+            ("anthropic-ratelimit-unified-5h-utilization", "0.42"),
+            ("anthropic-ratelimit-unified-5h-reset", "soon"),
+        ]);
+        let raw = RawUtilization::from_headers(&headers);
+        assert_eq!(raw.five_hour, None);
+        assert_eq!(raw.seven_day, None);
+        assert_eq!(raw, RawUtilization::default());
     }
 }
 

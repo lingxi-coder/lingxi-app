@@ -373,6 +373,9 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
     // without a snapshot). Covers the batched AND cancelable drivers (both
     // funnel through this function).
     orch.emit_rate_limit_if_changed().await;
+    // Task 2 (llm-client future-work batch 5): same seam, raw per-window
+    // utilization snapshot (emit-on-change; empty snapshot never emitted).
+    orch.emit_raw_utilization_if_changed().await;
 
     // 1.5 M6-06: record this response's usage into the wired CostTracker (if any).
     // We pass `Duration::ZERO` (the api-client adapter does not currently

@@ -174,6 +174,22 @@ pub trait OrchestratorApiClient: Send + Sync {
     fn last_rate_limit_full(&self) -> Option<crate::model::rate_limit::RateLimitInfo> {
         None
     }
+
+    /// Return the most recently observed RAW per-window utilization snapshot.
+    ///
+    /// Task 2 (llm-client future-work batch 5): the parallel accessor to
+    /// [`Self::last_rate_limit_full`] for claude-code's `rawUtilization`
+    /// tracking (`extractRawUtilization`, `claudeAiLimits.ts:164-179`) —
+    /// per-window 5h/7d values recorded on every unified-headers response,
+    /// independent of the warning-gated [`Self::last_rate_limit_full`]
+    /// fields.
+    ///
+    /// Default returns `None` (mocks / non-Anthropic impls compile
+    /// unchanged); `ProviderApiAdapter` overrides it to expose the snapshot
+    /// cached alongside the rate-limit parse.
+    fn last_raw_utilization(&self) -> Option<crate::model::rate_limit::RawUtilization> {
+        None
+    }
 }
 
 /// Streaming-API surface used by the orchestrator's streaming turn loop.
@@ -418,6 +434,15 @@ pub struct ConversationOrchestrator {
     /// an identical snapshot across two `run_turn` calls emits exactly once.
     /// `None` until the first emission.
     pub(crate) last_emitted_rate_limit: Mutex<Option<crate::model::rate_limit::RateLimitInfo>>,
+    /// Task 2 (llm-client future-work batch 5): the last RAW per-window
+    /// utilization snapshot forwarded to
+    /// [`traits::OutputStream::emit_raw_utilization`], for the
+    /// emit-on-change dedup in [`Self::emit_raw_utilization_if_changed`].
+    /// Same lifetime/placement rationale as
+    /// [`Self::last_emitted_rate_limit`]: lives on the orchestrator so the
+    /// dedup spans turns. `None` until the first emission.
+    pub(crate) last_emitted_raw_utilization:
+        Mutex<Option<crate::model::rate_limit::RawUtilization>>,
 }
 
 impl ConversationOrchestrator {
@@ -469,6 +494,7 @@ impl ConversationOrchestrator {
             read_file_state: Arc::new(Mutex::new(Vec::new())),
             read_state_map: tool_api::read_file_state::new_read_file_state_map(),
             last_emitted_rate_limit: Mutex::new(None),
+            last_emitted_raw_utilization: Mutex::new(None),
         }
     }
 
@@ -658,6 +684,50 @@ impl ConversationOrchestrator {
             )
             .await;
         *last = Some(info);
+    }
+
+    /// Task 2 (llm-client future-work batch 5): forward the API client's
+    /// latest RAW per-window utilization snapshot to
+    /// [`traits::OutputStream::emit_raw_utilization`] when it CHANGED since
+    /// the last emit and is non-empty.
+    ///
+    /// Called immediately next to [`Self::emit_rate_limit_if_changed`] at
+    /// both turn-driver seams (the batched/cancelable funnel in
+    /// `turn_loop::execute_one_turn_with_recovery_tracked` and the streaming
+    /// seam in `try_run_turn_streaming`), reading the same
+    /// `self.api`-cached snapshot source.
+    ///
+    /// Documented divergence: TS updates `rawUtilization` unconditionally on
+    /// every headers pass (`claudeAiLimits.ts:476` and the 429 path `:500`),
+    /// because it is module state polled by `getRawUtilization()`; our event
+    /// channel emits on change to avoid spamming the stream — the same
+    /// dedupe stance as [`Self::emit_rate_limit_if_changed`]. The EMPTY
+    /// snapshot is never emitted (TS clears raw state only via the
+    /// subscriber-gating path we don't model, `claudeAiLimits.ts:462`).
+    ///
+    /// Atomic-window invariant: each window contributes either both `Some`
+    /// values or both `None` — guaranteed by construction, since
+    /// [`crate::model::rate_limit::RawWindow`] only exists with both fields.
+    pub(crate) async fn emit_raw_utilization_if_changed(&self) {
+        let Some(raw) = self.api.last_raw_utilization() else {
+            return;
+        };
+        if raw == crate::model::rate_limit::RawUtilization::default() {
+            return;
+        }
+        let mut last = self.last_emitted_raw_utilization.lock().await;
+        if last.as_ref() == Some(&raw) {
+            return;
+        }
+        self.output
+            .emit_raw_utilization(
+                raw.five_hour.map(|w| w.utilization),
+                raw.five_hour.map(|w| w.resets_at),
+                raw.seven_day.map(|w| w.utilization),
+                raw.seven_day.map(|w| w.resets_at),
+            )
+            .await;
+        *last = Some(raw);
     }
 
     /// Whether a [`compaction::CompactionOrchestrator`] has been
@@ -2127,6 +2197,8 @@ impl ConversationOrchestrator {
             // `self.streaming_api` in production; the adapter records headers
             // on the `drive_stream` connect-success path too.
             self.emit_rate_limit_if_changed().await;
+            // Task 2 (batch 5): same seam, raw per-window snapshot.
+            self.emit_raw_utilization_if_changed().await;
 
             // 4. Assemble + append the assistant message.
             let assistant_id = MessageId::new();

@@ -7,7 +7,7 @@
 
 use crate::conversation::{OrchestratorApiClient, StreamingApiClient};
 use crate::model::betas::{apply_beta_header_with_auth, Endpoint, Provider};
-use crate::model::rate_limit::{parse_retry_after, parse_unified_reset, RateLimitInfo};
+use crate::model::rate_limit::{parse_retry_after, parse_unified_reset, RateLimitInfo, RawUtilization};
 use crate::model::retry::{next_step_with_backoff, resolve_retry_control_with_settings, DriveStep, ResolveRetryEnv, RetryControl, RetryState};
 use crate::model::telemetry;
 use crate::model::user_agent::{user_agent, UserAgentEnv};
@@ -120,6 +120,20 @@ pub struct ProviderApiAdapter {
     /// on the adapter directly. A future task can thread it into the handle if
     /// needed.
     last_rate_limit: Mutex<Option<RateLimitInfo>>,
+    /// Most recently observed RAW per-window utilization snapshot.
+    ///
+    /// Task 2 (llm-client future-work batch 5): parsed via
+    /// [`RawUtilization::from_headers`] alongside the [`RateLimitInfo`]
+    /// parse in `record_rate_limit_from_headers` — claude-code assigns
+    /// `rawUtilization = extractRawUtilization(headers)` on the same passes
+    /// that compute the limits (`claudeAiLimits.ts:476`). Assigned
+    /// UNCONDITIONALLY on every recorded response (unlike `last_rate_limit`,
+    /// which is gated on `has_unified_headers()`), so a later response
+    /// without the per-window quartet resets it to the empty snapshot
+    /// exactly like the TS module state. `None` until the first recorded
+    /// response. Exposed via the `OrchestratorApiClient::last_raw_utilization`
+    /// override.
+    last_raw_utilization: Mutex<Option<RawUtilization>>,
 }
 
 impl ProviderApiAdapter {
@@ -237,6 +251,7 @@ impl ProviderApiAdapter {
             available_model_ids,
             estimator,
             last_rate_limit: Mutex::new(None),
+            last_raw_utilization: Mutex::new(None),
         }
     }
 
@@ -408,6 +423,11 @@ impl ProviderApiAdapter {
             .iter()
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
+        // Task 2 (llm-client future-work batch 5): track the raw per-window
+        // snapshot on EVERY recorded headers pass — `rawUtilization =
+        // extractRawUtilization(headersToUse)` (claudeAiLimits.ts:476), NOT
+        // gated on `has_unified_headers()` like the limits snapshot below.
+        *self.last_raw_utilization.lock().unwrap() = Some(RawUtilization::from_headers(&hvec));
         let info = RateLimitInfo::from_headers(&hvec);
         if info.has_unified_headers() {
             // Warn when the account is near or at exhaustion.
@@ -1097,6 +1117,13 @@ impl OrchestratorApiClient for ProviderApiAdapter {
     /// the same name above keeps its three-field projection untouched.
     fn last_rate_limit_full(&self) -> Option<RateLimitInfo> {
         self.last_rate_limit_info()
+    }
+
+    /// Task 2 (llm-client future-work batch 5): expose the raw per-window
+    /// snapshot cached by `record_rate_limit_from_headers` for the turn
+    /// drivers' `emit_raw_utilization` seam.
+    fn last_raw_utilization(&self) -> Option<RawUtilization> {
+        *self.last_raw_utilization.lock().unwrap()
     }
 }
 

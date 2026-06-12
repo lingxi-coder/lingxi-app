@@ -34,6 +34,10 @@ pub struct MockApiClient {
     /// snapshot returned by `last_rate_limit_full()`. A `std::sync::Mutex`
     /// (not tokio) because the trait accessor is a sync `fn`.
     rate_limit_full: std::sync::Mutex<Option<crate::model::rate_limit::RateLimitInfo>>,
+    /// Task 2 (llm-client future-work batch 5): the raw per-window snapshot
+    /// returned by `last_raw_utilization()`. Same sync-Mutex rationale as
+    /// `rate_limit_full`.
+    raw_utilization: std::sync::Mutex<Option<crate::model::rate_limit::RawUtilization>>,
 }
 
 impl MockApiClient {
@@ -47,6 +51,7 @@ impl MockApiClient {
             captured_tools: Arc::new(Mutex::new(Vec::new())),
             captured_seeds: Arc::new(Mutex::new(Vec::new())),
             rate_limit_full: std::sync::Mutex::new(None),
+            raw_utilization: std::sync::Mutex::new(None),
         }
     }
 
@@ -56,6 +61,14 @@ impl MockApiClient {
     /// without an `await`.
     pub fn set_rate_limit_full(&self, info: Option<crate::model::rate_limit::RateLimitInfo>) {
         *self.rate_limit_full.lock().unwrap() = info;
+    }
+
+    /// Task 2 (batch 5): pre-load the raw per-window snapshot returned by
+    /// `last_raw_utilization()`. Pass `None` to clear it (the default).
+    /// Synchronous for the same between-turns flipping reason as
+    /// [`Self::set_rate_limit_full`].
+    pub fn set_raw_utilization(&self, raw: Option<crate::model::rate_limit::RawUtilization>) {
+        *self.raw_utilization.lock().unwrap() = raw;
     }
 
     /// Snapshot the captured `tools` arguments (one entry per `messages_create`
@@ -130,6 +143,12 @@ impl OrchestratorApiClient for MockApiClient {
     /// Task 8: return the snapshot pre-loaded via [`Self::set_rate_limit_full`].
     fn last_rate_limit_full(&self) -> Option<crate::model::rate_limit::RateLimitInfo> {
         self.rate_limit_full.lock().unwrap().clone()
+    }
+
+    /// Task 2 (batch 5): return the snapshot pre-loaded via
+    /// [`Self::set_raw_utilization`].
+    fn last_raw_utilization(&self) -> Option<crate::model::rate_limit::RawUtilization> {
+        *self.raw_utilization.lock().unwrap()
     }
 }
 
@@ -308,6 +327,22 @@ impl OutputStream for MockOutputStream {
             overage_resets_at,
             overage_disabled_reason: overage_disabled_reason.map(str::to_string),
             fallback_available,
+        });
+    }
+    /// Task 2 (llm-client future-work batch 5): record the raw-utilization
+    /// emission so tests can assert the emit-on-change behaviour.
+    async fn emit_raw_utilization(
+        &self,
+        five_hour_utilization: Option<f64>,
+        five_hour_resets_at: Option<u64>,
+        seven_day_utilization: Option<f64>,
+        seven_day_resets_at: Option<u64>,
+    ) {
+        self.events.lock().await.push(OutputEvent::RawUtilization {
+            five_hour_utilization,
+            five_hour_resets_at,
+            seven_day_utilization,
+            seven_day_resets_at,
         });
     }
 }

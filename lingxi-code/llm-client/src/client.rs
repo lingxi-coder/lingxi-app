@@ -494,13 +494,9 @@ fn build_codec(provider: &crate::ProviderProfile) -> Result<Box<dyn WireCodec>, 
         crate::ProtocolFamily::BedrockClaude => {
             Ok(Box::new(crate::BedrockClaudeCodec::new(provider.base_url.clone())))
         }
-        crate::ProtocolFamily::OpenAiResponses => Err(LlmError::InvalidRequest {
-            message: format!(
-                "provider profile '{}' uses OpenAiResponses, which has no codec yet — \
-                 see futurework batch 2",
-                provider.profile_name
-            ),
-        }),
+        crate::ProtocolFamily::OpenAiResponses => {
+            Ok(Box::new(crate::OpenAiResponsesCodec::new(provider.base_url.clone())))
+        }
     }
 }
 

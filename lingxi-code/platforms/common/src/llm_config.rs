@@ -179,7 +179,8 @@ pub fn builtin_anthropic_config(api_base: &str, oauth_path: bool) -> ClientConfi
 /// ```json
 /// {
 ///   "<profile_name>": {
-///     "type": "openai" | "anthropic" | "gemini",
+///     "type": "openai" | "openai-responses" | "anthropic" | "gemini"
+///           | "azure-openai" | "bedrock-claude" | "vertex-claude" | "vertex-gemini",
 ///     "baseUrl": "<url>",
 ///     "apiKeyEnv": "<ENV_VAR>",
 ///     "models": [
@@ -258,6 +259,12 @@ fn apply_one_provider(
             ProviderId::OpenAICompatible { name: profile_name.to_string() },
             ProtocolFamily::OpenAiChat,
         ),
+        // OpenAI Responses API (`POST {baseUrl}/responses`); same baseUrl /
+        // apiKeyEnv requirements and ApiKey (Bearer) auth as "openai".
+        "openai-responses" => (
+            ProviderId::OpenAICompatible { name: profile_name.to_string() },
+            ProtocolFamily::OpenAiResponses,
+        ),
         "anthropic" => (ProviderId::AnthropicFirstParty, ProtocolFamily::AnthropicMessages),
         "gemini" => (ProviderId::Gemini, ProtocolFamily::GeminiGenerateContent),
         "azure-openai" => (
@@ -281,7 +288,7 @@ fn apply_one_provider(
         other => {
             return Err(LlmError::InvalidRequest {
                 message: format!(
-                    "provider {profile_name:?}: unknown type {other:?} (supported: openai, anthropic, gemini, azure-openai, bedrock-claude, vertex-claude, vertex-gemini)"
+                    "provider {profile_name:?}: unknown type {other:?} (supported: openai, openai-responses, anthropic, gemini, azure-openai, bedrock-claude, vertex-claude, vertex-gemini)"
                 ),
             });
         }
@@ -2148,5 +2155,150 @@ mod tests {
         };
         assert!(message.contains("vertex-claude"), "must list vertex-claude; got: {message}");
         assert!(message.contains("vertex-gemini"), "must list vertex-gemini; got: {message}");
+    }
+
+    // ── openai-responses settings type tests ──────────────────────────────────
+
+    /// An `openai-responses` profile parses correctly: `OpenAiResponses`
+    /// protocol, `ApiKey` auth, `CredentialConfig::Env` from `apiKeyEnv`,
+    /// `baseUrl` REQUIRED (mirrors the `"openai"` type exactly).
+    #[test]
+    fn openai_responses_profile_parses() {
+        let mut cfg = builtin_anthropic_config("https://api.anthropic.com", false);
+        let providers: BTreeMap<String, serde_json::Value> = serde_json::from_str(r#"{
+            "my-responses": {
+                "type": "openai-responses",
+                "baseUrl": "https://api.openai.com/v1",
+                "apiKeyEnv": "OPENAI_API_KEY",
+                "models": [
+                    { "id": "gpt-4o" }
+                ]
+            }
+        }"#).unwrap();
+
+        apply_settings_providers(&mut cfg, &providers, None).expect("must succeed");
+
+        assert_eq!(cfg.providers.len(), 2, "builtin + my-responses");
+        let p = cfg.providers.iter().find(|p| p.profile_name == "my-responses").unwrap();
+        assert_eq!(p.base_url, "https://api.openai.com/v1");
+        assert_eq!(p.protocol, ProtocolFamily::OpenAiResponses);
+        assert_eq!(p.auth, AuthStrategy::ApiKey);
+        assert!(
+            matches!(&p.provider_id, ProviderId::OpenAICompatible { name } if name == "my-responses"),
+            "provider_id must be OpenAICompatible with name=my-responses"
+        );
+        assert_eq!(
+            p.credential,
+            CredentialConfig::Env { var: "OPENAI_API_KEY".to_string() }
+        );
+        assert_eq!(p.models.len(), 1);
+        assert_eq!(p.models[0].display_model, "gpt-4o");
+        // Default capabilities: streaming + tools, no vision/docs/reasoning.
+        assert!(p.models[0].capabilities.streaming);
+        assert!(p.models[0].capabilities.tools);
+        assert!(!p.models[0].capabilities.vision);
+        assert!(!p.models[0].capabilities.reasoning);
+    }
+
+    /// openai-responses with no baseUrl → error (same rule as `"openai"`).
+    #[test]
+    fn openai_responses_missing_base_url_is_error() {
+        let mut cfg = builtin_anthropic_config("https://api.anthropic.com", false);
+        let providers: BTreeMap<String, serde_json::Value> = serde_json::from_str(r#"{
+            "my-responses": {
+                "type": "openai-responses",
+                "apiKeyEnv": "OPENAI_API_KEY",
+                "models": [{ "id": "gpt-4o" }]
+            }
+        }"#).unwrap();
+
+        let err = apply_settings_providers(&mut cfg, &providers, None).unwrap_err();
+        assert!(
+            matches!(&err, LlmError::InvalidRequest { message } if message.contains("baseUrl")),
+            "expected InvalidRequest about missing baseUrl, got: {err:?}"
+        );
+    }
+
+    /// openai-responses with no apiKeyEnv → error (same rule as `"openai"`).
+    #[test]
+    fn openai_responses_missing_api_key_env_is_error() {
+        let mut cfg = builtin_anthropic_config("https://api.anthropic.com", false);
+        let providers: BTreeMap<String, serde_json::Value> = serde_json::from_str(r#"{
+            "my-responses": {
+                "type": "openai-responses",
+                "baseUrl": "https://api.openai.com/v1",
+                "models": [{ "id": "gpt-4o" }]
+            }
+        }"#).unwrap();
+
+        let err = apply_settings_providers(&mut cfg, &providers, None).unwrap_err();
+        assert!(
+            matches!(&err, LlmError::InvalidRequest { message } if message.contains("apiKeyEnv")),
+            "expected InvalidRequest about missing apiKeyEnv, got: {err:?}"
+        );
+    }
+
+    /// E2E: an `openai-responses` profile parsed from settings builds a
+    /// [`DefaultLlmClient`], and `prepare()` with a key env var produces:
+    /// - URL: `{base_url}/responses`, method POST
+    /// - `Authorization: Bearer <key>` header (OpenAI family ApiKey auth)
+    #[tokio::test]
+    async fn openai_responses_prepare_e2e_responses_url_and_bearer_header() {
+        std::env::set_var("PLATFORM_COMMON_TEST_OPENAI_RESPONSES_KEY", "my-responses-key");
+
+        let mut cfg = builtin_anthropic_config("https://api.anthropic.com", false);
+        let providers: BTreeMap<String, serde_json::Value> = serde_json::from_str(r#"{
+            "my-responses": {
+                "type": "openai-responses",
+                "baseUrl": "https://api.openai.com/v1",
+                "apiKeyEnv": "PLATFORM_COMMON_TEST_OPENAI_RESPONSES_KEY",
+                "models": [
+                    { "id": "gpt-4o", "capabilities": {"streaming": true, "tools": true} }
+                ]
+            }
+        }"#).unwrap();
+
+        apply_settings_providers(&mut cfg, &providers, None).expect("must succeed");
+
+        let client = DefaultLlmClient::from_config(cfg).expect("client must build");
+        let req = llm_client::LlmRequest::new("gpt-4o");
+        let prepared = client.prepare(&req).await.expect("prepare must succeed");
+
+        assert_eq!(prepared.provider_request.method, "POST");
+        assert_eq!(
+            prepared.provider_request.url, "https://api.openai.com/v1/responses",
+            "URL must be {{baseUrl}}/responses"
+        );
+
+        let auth_header = prepared.provider_request.headers
+            .get("Authorization")
+            .expect("Authorization header must be present for ApiKey auth");
+        assert_eq!(
+            auth_header, "Bearer my-responses-key",
+            "Authorization must be Bearer <key>"
+        );
+    }
+
+    /// The error message for unknown type includes `openai-responses`.
+    #[test]
+    fn unknown_type_mentions_openai_responses_in_supported_list() {
+        let mut cfg = builtin_anthropic_config("https://api.anthropic.com", false);
+        let providers: BTreeMap<String, serde_json::Value> = serde_json::from_str(r#"{
+            "weird": {
+                "type": "cohere-v4",
+                "baseUrl": "https://api.cohere.ai",
+                "apiKeyEnv": "COHERE_KEY",
+                "models": [{ "id": "command-r" }]
+            }
+        }"#).unwrap();
+
+        let err = apply_settings_providers(&mut cfg, &providers, None).unwrap_err();
+        let LlmError::InvalidRequest { message } = err else {
+            panic!("expected InvalidRequest, got something else");
+        };
+        assert!(
+            message.contains("openai-responses"),
+            "must list openai-responses; got: {message}"
+        );
     }
 }

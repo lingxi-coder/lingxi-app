@@ -14,16 +14,14 @@ const NET_HEADS: &[&str] = &[
     "curl", "wget", "nc", "ncat", "ssh", "scp", "sftp", "rsync", "telnet", "ftp",
 ];
 
-/// `git` subcommands that hit the network.
-const GIT_NET_SUBCMDS: &[&str] = &[
-    "clone",
-    "fetch",
-    "pull",
-    "push",
-    "ls-remote",
-    "remote",
-    "submodule",
-];
+/// `git` subcommands that always hit the network.
+const GIT_NET_SUBCMDS: &[&str] = &["clone", "fetch", "pull", "push", "ls-remote"];
+
+/// `git` subcommands that hit the network ONLY in their `… update` form
+/// (`git remote update`, `git submodule update`). Their other forms
+/// (`git remote -v`, `git remote add`, `git submodule status`) are local and
+/// must NOT be refused.
+const GIT_NET_SUBCMDS_UPDATE_ONLY: &[&str] = &["remote", "submodule"];
 
 /// If the command shows network intent, return a human advisory string
 /// (for the tool error). `None` = no detected intent (still run deny-net).
@@ -47,7 +45,10 @@ pub fn network_intent(command: &str) -> Option<String> {
         }
         if base == "git" {
             if let Some(sub) = words.next() {
-                if GIT_NET_SUBCMDS.contains(&sub) {
+                let is_net = GIT_NET_SUBCMDS.contains(&sub)
+                    || (GIT_NET_SUBCMDS_UPDATE_ONLY.contains(&sub)
+                        && words.next() == Some("update"));
+                if is_net {
                     return Some(format!(
                         "`git {sub}` needs network access, which the Shell tool does not allow. \
                          Use the Git tool for remote git operations; local git (status/diff/commit/log) \
@@ -116,6 +117,9 @@ mod tests {
             "git clone https://x",
             "git fetch origin",
             "git push",
+            "git ls-remote origin",
+            "git remote update",    // `update` form hits the network
+            "git submodule update", // fetches submodules
             "curl https://x",
             "wget http://x",
             "nc 10.0.0.1 80",
@@ -136,6 +140,9 @@ mod tests {
             "git status",
             "git diff",
             "git commit -m x", // local git is allowed (P4 git runs deny-net)
+            "git remote -v",   // local: list remotes (NOT the `update` form)
+            "git remote add origin url", // local: configures a remote
+            "git submodule status", // local: no `update`
             "grep -r foo .",
             "cat file | sed s/a/b/",
         ] {

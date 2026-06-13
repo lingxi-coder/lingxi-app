@@ -1,7 +1,7 @@
 # Engine adoption of llm-client (full replacement of api-client) — design
 
 Date: 2026-06-10
-Status: approved (user), revision 2.10 — future-work batch 5 COMPLETE.
+Status: approved (user), revision 2.11 — future-work batch 6 COMPLETE.
 
 **Revision history:**
 - 2.2 — no intermediate policy crate; supersedes api-client entirely with no backwards compatibility.
@@ -210,6 +210,61 @@ Status: approved (user), revision 2.10 — future-work batch 5 COMPLETE.
     terminal-429 immediate status-change emit (TS
     `extractQuotaStatusFromError` → `emitStatusChange`); terminal-only 429
     snapshot recording; 429-headers rawUtilization extraction.
+- 2.11 — Future-work batch 6 COMPLETE: terminal-429 parity + A6 statusline pump.
+  The rev-2.10 "A6 statusline execution pump", "terminal-429 immediate
+  status-change emit" and "terminal-only 429 snapshot recording" remaining items
+  are closed.
+  - **Terminal-only 429 state promotion + emit parity** (6b9edf9f, afa285a6):
+    the adapter's 429 recording is now staged in a `pending_429` slot and
+    promoted into `last_rate_limit`/`last_raw_utilization` ONLY at the TERMINAL
+    429 (gated `matches!(RateLimited)` at both decode-terminal returns), never
+    per-attempt — matching TS `extractQuotaStatusFromError` running only in the
+    terminal catch handler (claudeAiLimits.ts:487). Raw utilization is extracted
+    from the error headers UNCONDITIONALLY (ts:500, independent of the limits
+    gate). The 4 conversation drive sites de-sugar their sync `enrich_api_error`
+    `map_err` into bind-then-await so they fire the existing
+    `emit_rate_limit_if_changed`/`emit_raw_utilization_if_changed` on a
+    rate-limited terminal — the `emitStatusChange` parity (ts:509-511): the TUI
+    now renders the rate-limit banner (+ T5 overage notice when applicable)
+    ALONGSIDE the terminal error copy, exactly as TS double-renders. Active
+    cross-drive isolation is the per-attempt record stage-or-clear; drive-entry +
+    success `clear_pending_429()` are defensive backstops (now genuinely guarded
+    by a RED-verified unit test). DOCUMENTED DIVERGENCE (B1): TS forces
+    `status='rejected'` and emits even on a HEADERLESS terminal 429 (ts:506-507,
+    outside the headers block); the Rust promotes/emits only when the
+    unified-header gate passes (our `last_rate_limit` has no "bare rejected, no
+    windows" representation; the terminal error copy already conveys rejection).
+  - **A6 statusline execution pump wired** (aca8851f, 9a3df704): a third
+    `use_future` pump in the TUI root (mirroring the bridge pump) — `TurnEnded`
+    sets `AppState.status_line_dirty`; a 300ms `tokio::interval`
+    (`MissedTickBehavior::Skip` = debounce analog), SINGLE-FLIGHT (no generation
+    guard — re-trigger rides the dirty flag), snapshots the payload under the
+    lock, runs the command via `spawn_blocking(run_status_line_command,
+    STATUS_LINE_TIMEOUT=5s)` with NO lock held across the await, and writes
+    `status_line_text` set-only-on-change (silent error catch). The `rate_limits`
+    field (batch-5 raw utilization) now reaches user statusline scripts
+    end-to-end. Settings: `statusLine` is NOT a typed `SettingsJson` field, so
+    it's read via raw `read_settings_map` (User+Local, Local-over-User) and
+    threaded CLI→TUI via a `Runtime::with_status_line_config` builder (the
+    now-redundant `load_status_line_setting` was removed — no dead code). Trust:
+    launched with `trusted=true` (no `hasTrustDialogAccepted` Rust port; the
+    `should_run(trusted)` fail-closed parameter is retained for a future trust
+    store). DIVERGENCES: project/flag/policy settings tiers have no Rust
+    substrate (a `statusLine` in project `.claude/settings.json` is dropped —
+    same limit as `read_skip_dangerous_prompt`); whole-object replace vs TS
+    deep-merge of the `statusLine` object across tiers (real configs carry the
+    whole object in one tier).
+  - **Process note**: this batch ran an upfront adversarial plan-review workflow
+    that caught 2 blocking + 5 important plan errors (a TS-semantics inversion on
+    headerless-429, a mechanically-broken settings path) BEFORE implementation,
+    plus per-task multi-lens review workflows (one IMPORTANT test-vacuity fix in
+    T1; 4 doc minors in T2).
+  - Remaining: `/mock-limits` + an interactive rate-limit options menu (deferred;
+    1k+ TS lines); OpenAiResponses real-traffic validation (still key-blocked);
+    trust-dialog store port (`hasTrustDialogAccepted`); project/flag/policy
+    settings-tier substrate (would carry project `statusLine` + close other
+    tiered-settings gaps); TS permission-mode/vim/model statusline re-run triggers
+    (deferred until those mutate AppState).
 
 ## Goal
 

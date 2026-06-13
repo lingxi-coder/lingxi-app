@@ -78,6 +78,8 @@ static INPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
         "type": "object",
         "properties": {
             "operation":   { "type": "string", "enum": OPERATIONS, "description": "The git operation to run." },
+            "repo":        { "type": "string", "description": "Repository path relative to the workspace root; defaults to '.'." },
+            "max":         { "type": "integer", "description": "Max number of commits to walk (log); defaults to a built-in cap." },
             "repo_url":    { "type": "string", "description": "Remote HTTPS URL (clone)." },
             "remote":      { "type": "string", "description": "Remote name (fetch/pull); defaults to origin." },
             "branch":      { "type": "string", "description": "Branch name (checkout/branch_create/merge target)." },
@@ -216,18 +218,132 @@ impl Tool for GitTool {
             ));
         }
 
-        // T3 dispatch stub: every operation is wired in Tasks 4-6/8 to a real
-        // `ops::` call. Until then, return a named (non-panicking) error so the
-        // tool registers and answers without `todo!`/`unimplemented!`.
-        match operation {
-            "clone" | "fetch" | "pull" | "status" | "diff" | "log" | "show" | "branch_list"
-            | "checkout" | "add" | "commit" | "branch_create" | "merge" => Err(
-                ToolError::InvalidInput(format!("git operation '{operation}' not yet implemented")),
-            ),
-            other => Err(ToolError::InvalidInput(format!(
-                "unknown git operation '{other}'"
-            ))),
+        // Anchor every op to the host-supplied workspace root; the repo sub-path
+        // comes from the `repo` param (default ".").
+        let workspace_root = self
+            .ctx
+            .android_git
+            .as_ref()
+            .map(|g| g.workspace_root.clone())
+            .ok_or_else(|| ToolError::InvalidInput("android_git context is absent".into()))?;
+        let repo_rel = input.get("repo").and_then(Value::as_str).unwrap_or(".");
+
+        // Network ops are filled by Task 8; until then they report a named,
+        // non-panicking error rather than touching libgit2.
+        if matches!(operation, "clone" | "fetch" | "pull") {
+            return Err(ToolError::InvalidInput(
+                "network operation requires P4c".into(),
+            ));
         }
+
+        // All local ops open the repo first, then dispatch (errors mapped
+        // below). The dispatch is factored into `dispatch_local` to keep this
+        // method short.
+        match dispatch_local(
+            std::path::Path::new(&workspace_root),
+            repo_rel,
+            operation,
+            &input,
+        ) {
+            Ok(data) => Ok(ToolCallResult {
+                data,
+                new_messages: Vec::new(),
+                context_modifier: None,
+                mcp_meta: None,
+            }),
+            Err(e) => Err(map_git_op_error(e)),
+        }
+    }
+}
+
+/// Open the repo at `workspace_root/repo_rel` and run the local `operation`,
+/// returning the op's JSON payload. Param extraction + `ops::` dispatch live
+/// here so `GitTool::call` stays small. Network ops are handled by the caller.
+fn dispatch_local(
+    workspace_root: &std::path::Path,
+    repo_rel: &str,
+    operation: &str,
+    input: &Value,
+) -> Result<Value, ops::GitOpError> {
+    let str_param = |key: &str| input.get(key).and_then(Value::as_str);
+    let repo = ops::open_repo(workspace_root, repo_rel)?;
+    match operation {
+        "status" => Ok(json!({ "entries": ops::status(&repo)? })),
+        "log" => {
+            let max = input
+                .get("max")
+                .and_then(Value::as_u64)
+                .and_then(|n| usize::try_from(n).ok());
+            Ok(json!({ "commits": ops::log(&repo, max)? }))
+        }
+        "diff" => Ok(serde_json::to_value(ops::diff(&repo)?).unwrap_or(Value::Null)),
+        "show" => {
+            let rev = str_param("rev")
+                .ok_or_else(|| ops::GitOpError::InvalidInput("show requires `rev`".into()))?;
+            let (info, diff) = ops::show(&repo, rev)?;
+            Ok(json!({ "commit": info, "diff": diff }))
+        }
+        "branch_list" => Ok(json!({ "branches": ops::branch_list(&repo)? })),
+        "add" => {
+            let paths: Vec<String> = input
+                .get("paths")
+                .and_then(Value::as_array)
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(str::to_owned))
+                        .collect()
+                })
+                .unwrap_or_default();
+            Ok(serde_json::to_value(ops::add(&repo, &paths)?).unwrap_or(Value::Null))
+        }
+        "commit" => {
+            let message = str_param("message")
+                .ok_or_else(|| ops::GitOpError::InvalidInput("commit requires `message`".into()))?;
+            Ok(serde_json::to_value(ops::commit(&repo, message)?).unwrap_or(Value::Null))
+        }
+        "branch_create" => {
+            let name = str_param("new_branch")
+                .or_else(|| str_param("branch"))
+                .ok_or_else(|| {
+                    ops::GitOpError::InvalidInput("branch_create requires `new_branch`".into())
+                })?;
+            Ok(serde_json::to_value(ops::branch_create(&repo, name)?).unwrap_or(Value::Null))
+        }
+        "checkout" => {
+            let target = str_param("branch")
+                .or_else(|| str_param("rev"))
+                .ok_or_else(|| {
+                    ops::GitOpError::InvalidInput("checkout requires `branch` or `rev`".into())
+                })?;
+            Ok(serde_json::to_value(ops::checkout(&repo, target)?).unwrap_or(Value::Null))
+        }
+        "merge" => {
+            let source = str_param("branch")
+                .or_else(|| str_param("rev"))
+                .ok_or_else(|| {
+                    ops::GitOpError::InvalidInput(
+                        "merge requires `branch` or `rev` (source)".into(),
+                    )
+                })?;
+            Ok(serde_json::to_value(ops::merge(&repo, source)?).unwrap_or(Value::Null))
+        }
+        other => Err(ops::GitOpError::InvalidInput(format!(
+            "unknown git operation '{other}'"
+        ))),
+    }
+}
+
+/// Map a [`ops::GitOpError`] into a [`ToolError`]. The named reason is preserved
+/// in the message so the engine surface (and the model) can see *why* it
+/// failed (dirty worktree, non-fast-forward, path escape, …).
+fn map_git_op_error(e: ops::GitOpError) -> ToolError {
+    use ops::GitOpError as G;
+    match e {
+        G::Dirty(_) | G::NonFastForward(_) | G::InvalidInput(_) | G::NotFound(_) => {
+            ToolError::InvalidInput(e.to_string())
+        }
+        G::Escape(_) => ToolError::InvalidInput(e.to_string()),
+        G::Libgit2(msg) => ToolError::Internal(format!("libgit2: {msg}")),
     }
 }
 
@@ -355,6 +471,78 @@ mod tests {
         assert!(
             prompt.contains("credentials"),
             "no-token prompt should mention credentials: {prompt}"
+        );
+    }
+
+    #[tokio::test]
+    async fn call_dispatches_commit() {
+        use tool_api::test_support::{fresh_ctx, fresh_tx};
+
+        // Prepare a real repo at <workspace>/r with one commit, then stage a new
+        // file so `commit` has something to write.
+        let ws = tempfile::tempdir().expect("tempdir");
+        let repo_dir = ws.path().join("r");
+        std::fs::create_dir(&repo_dir).unwrap();
+        let repo = git2::Repository::init(&repo_dir).unwrap();
+        let sig = git2::Signature::now("Tester", "tester@example.com").unwrap();
+        std::fs::write(repo_dir.join("a.txt"), "alpha\n").unwrap();
+        {
+            let mut index = repo.index().unwrap();
+            index.add_path(std::path::Path::new("a.txt")).unwrap();
+            index.write().unwrap();
+            let tree = repo.find_tree(index.write_tree().unwrap()).unwrap();
+            repo.commit(Some("HEAD"), &sig, &sig, "first", &tree, &[])
+                .unwrap();
+        }
+        // Stage a second file for the commit-under-test.
+        std::fs::write(repo_dir.join("b.txt"), "beta\n").unwrap();
+        {
+            let mut index = repo.index().unwrap();
+            index.add_path(std::path::Path::new("b.txt")).unwrap();
+            index.write().unwrap();
+        }
+
+        let mut ctx = shell_test_ctx(ok_output());
+        ctx.android_git = Some(AndroidGitToolCtx {
+            enabled: true,
+            has_token: true,
+            workspace_root: ws.path().to_string_lossy().into_owned(),
+        });
+        let tool = GitTool::new(ctx);
+
+        let result = tool
+            .call(
+                json!({ "operation": "commit", "repo": "r", "message": "dispatched" }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .expect("commit dispatch should succeed");
+
+        let oid = result.data["oid"]
+            .as_str()
+            .expect("commit result carries an oid");
+        // The reported oid is the new HEAD with the right message.
+        let head = repo.head().unwrap().peel_to_commit().unwrap();
+        assert_eq!(head.id().to_string(), oid, "data.oid is the new HEAD");
+        assert_eq!(head.summary().unwrap(), Some("dispatched"));
+    }
+
+    #[tokio::test]
+    async fn call_network_op_reports_p4c_stub() {
+        use tool_api::test_support::{fresh_ctx, fresh_tx};
+        let tool = GitTool::new(test_ctx_git_enabled());
+        let err = tool
+            .call(
+                json!({ "operation": "clone", "repo_url": "https://example/x.git" }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .expect_err("network op should be stubbed");
+        assert!(
+            err.to_string().contains("P4c"),
+            "network op should name the P4c follow-up, got: {err}"
         );
     }
 

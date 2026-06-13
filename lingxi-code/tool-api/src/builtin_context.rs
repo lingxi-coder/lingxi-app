@@ -245,15 +245,34 @@ pub struct AndroidGitSecret {
     /// CA-certificate directory for TLS verification (Android system cacerts),
     /// or `None` to use the libgit2/OpenSSL defaults.
     pub ca_dir: Option<String>,
+    /// Filesystem path to the SSH private key (spec §G7), or `None` for
+    /// HTTPS-only. Host-supplied and validated to stay inside the app sandbox by
+    /// `android-aar` before reaching this seam. A non-secret path.
+    pub ssh_private_key_path: Option<String>,
+    /// Optional path to the matching SSH public key (libssh2 can derive it from
+    /// the private key when `None`). A non-secret path.
+    pub ssh_public_key_path: Option<String>,
+    /// Optional passphrase decrypting the SSH private key. In-memory only;
+    /// never logged (masked by this struct's `Debug`) or persisted.
+    pub ssh_passphrase: Option<String>,
+    /// Pinned SSH host-key fingerprints (lowercase-hex SHA-256). The remote's
+    /// host key is accepted only if its SHA-256 is a member; an empty list
+    /// rejects every host key (fail-closed). Non-secret hashes.
+    pub ssh_known_hosts_sha256_hex: Vec<String>,
 }
 
-// A manual `Debug` that redacts the token so it can never leak via a debug
-// print of the context.
+// A manual `Debug` that redacts the token + SSH passphrase so neither can leak
+// via a debug print of the context. The key/public-key paths and pinned host
+// hashes are non-secret and shown normally.
 impl std::fmt::Debug for AndroidGitSecret {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("AndroidGitSecret")
             .field("token", &self.token.as_ref().map(|_| "<redacted>"))
             .field("ca_dir", &self.ca_dir)
+            .field("ssh_private_key_path", &self.ssh_private_key_path)
+            .field("ssh_public_key_path", &self.ssh_public_key_path)
+            .field("ssh_passphrase", &self.ssh_passphrase.as_ref().map(|_| "<redacted>"))
+            .field("ssh_known_hosts_sha256_hex", &self.ssh_known_hosts_sha256_hex)
             .finish()
     }
 }
@@ -267,6 +286,13 @@ mod tests {
     use crate::test_support::{ctx_for_file_tools, make_dummy_fs};
     use std::sync::Arc;
     use telemetry::AnalyticsBus;
+
+    #[test]
+    fn android_git_secret_debug_redacts_ssh_passphrase() {
+        let s = AndroidGitSecret { ssh_passphrase: Some("hunter2".into()), ..Default::default() };
+        let dbg = format!("{s:?}");
+        assert!(!dbg.contains("hunter2"), "ssh passphrase must be redacted: {dbg}");
+    }
 
     /// TDD anchor for Task 7 (P4).
     ///

@@ -671,6 +671,13 @@ pub struct GitNetConfig {
     /// CA-certificate directory for TLS verification, or `None` to use the
     /// libgit2/OpenSSL defaults (the host `file://` tests need none).
     pub ca_dir: Option<String>,
+    /// SSH-key authentication material + pinned host keys (spec §G7), or `None`
+    /// when SSH is not configured (HTTPS-only). When `None`, an SSH remote URL
+    /// is rejected by [`ssh_allowed`]; when `Some`, SSH clone/fetch/pull/push
+    /// work through [`crate::auth::make_network_callbacks`]. Host-supplied; never
+    /// model-supplied. Never logged (the key path/host keys are non-secret; the
+    /// passphrase is masked by `SshConfig`'s carrier).
+    pub ssh: Option<crate::auth::SshConfig>,
 }
 
 // Manual redacting Debug — `token` must never reach a log line, mirroring
@@ -681,6 +688,9 @@ impl std::fmt::Debug for GitNetConfig {
         f.debug_struct("GitNetConfig")
             .field("token", &self.token.as_ref().map(|_| "<redacted>"))
             .field("ca_dir", &self.ca_dir)
+            // `SshConfig` carries a (masked) passphrase + key material; never
+            // print its contents — only whether SSH is configured.
+            .field("ssh", &self.ssh.as_ref().map(|_| "<configured>"))
             .finish()
     }
 }
@@ -724,15 +734,15 @@ pub struct GitPushResult {
     pub set_upstream: bool,
 }
 
-/// Reject `git@…` / `ssh://…` remote URLs (G7 — HTTPS-only in v1).
+/// Is `url` an SSH-transport remote (`ssh://…`, `git+ssh://…`, `git@…`, or the
+/// generic `user@host:path` scp syntax)?
 ///
-/// # Errors
-///
-/// [`GitOpError::InvalidInput`] naming ssh/HTTPS when `url` is an SSH remote.
-fn reject_ssh_url(url: &str) -> Result<(), GitOpError> {
+/// Shared by [`ssh_allowed`] so the SSH-detection logic lives in exactly one
+/// place.
+fn is_ssh_url(url: &str) -> bool {
     let lower = url.trim().to_ascii_lowercase();
     // scp-like `git@host:path` or explicit `ssh://` / `git+ssh://`.
-    let is_ssh = lower.starts_with("ssh://")
+    lower.starts_with("ssh://")
         || lower.starts_with("git+ssh://")
         || lower.starts_with("git@")
         // generic `user@host:path` scp syntax (has `@` and a `:` before any `/`).
@@ -740,10 +750,27 @@ fn reject_ssh_url(url: &str) -> Result<(), GitOpError> {
             && !lower.contains("://")
             && lower
                 .split_once(':')
-                .is_some_and(|(left, _)| left.contains('@')));
-    if is_ssh {
+                .is_some_and(|(left, _)| left.contains('@')))
+}
+
+/// Gate an SSH remote URL on whether SSH credentials are configured (spec §G7).
+///
+/// An SSH URL is allowed only when `ssh` is `Some` (key material + pinned host
+/// keys supplied by the host); otherwise it is rejected with the named
+/// SSH-unsupported error. Non-SSH (HTTPS / `file://`) URLs are always allowed,
+/// regardless of `ssh`.
+///
+/// # Errors
+///
+/// [`GitOpError::InvalidInput`] naming ssh/HTTPS when `url` is an SSH remote and
+/// no SSH config is present.
+pub(crate) fn ssh_allowed(
+    url: &str,
+    ssh: Option<&crate::auth::SshConfig>,
+) -> Result<(), GitOpError> {
+    if is_ssh_url(url) && ssh.is_none() {
         return Err(GitOpError::InvalidInput(
-            "ssh URLs are not supported; use HTTPS".into(),
+            "ssh URLs are not supported without SSH credentials configured; use HTTPS".into(),
         ));
     }
     Ok(())
@@ -773,7 +800,7 @@ pub fn clone(
     if repo_url.is_empty() {
         return Err(GitOpError::InvalidInput("clone requires `repo_url`".into()));
     }
-    reject_ssh_url(repo_url)?;
+    ssh_allowed(repo_url, net.ssh.as_ref())?;
 
     // Resolve + validate the destination. `dest` itself does not exist yet, so
     // canonicalize its PARENT and require that to be inside the workspace root,
@@ -796,9 +823,13 @@ pub fn clone(
     }
     let dest = canonical_parent.join(file_name);
 
-    // CA wiring first, then clone with token-bearing fetch options.
+    // CA wiring first, then clone with the unified network callbacks (HTTPS
+    // token and/or SSH key + strict host-key check).
     crate::auth::set_ca_location(net.ca_dir.as_deref())?;
-    let fetch_opts = crate::auth::make_fetch_options(net.token.as_deref());
+    let fetch_opts = crate::auth::make_fetch_options_net(&crate::auth::NetCallbacks {
+        token: net.token.as_deref(),
+        ssh: net.ssh.as_ref(),
+    });
     let mut builder = git2::build::RepoBuilder::new();
     builder.fetch_options(fetch_opts);
     let repo = builder
@@ -836,10 +867,13 @@ pub fn fetch(
         .find_remote(name)
         .map_err(|e| GitOpError::from_git2(&e))?;
     if let Ok(url) = remote.url() {
-        reject_ssh_url(url)?;
+        ssh_allowed(url, net.ssh.as_ref())?;
     }
     crate::auth::set_ca_location(net.ca_dir.as_deref())?;
-    let mut fetch_opts = crate::auth::make_fetch_options(net.token.as_deref());
+    let mut fetch_opts = crate::auth::make_fetch_options_net(&crate::auth::NetCallbacks {
+        token: net.token.as_deref(),
+        ssh: net.ssh.as_ref(),
+    });
     // Empty refspec slice -> libgit2 uses the remote's configured default
     // refspecs (refs/heads/* -> refs/remotes/<remote>/*).
     let empty: [&str; 0] = [];
@@ -949,15 +983,20 @@ pub fn push(
         .find_remote(remote_name)
         .map_err(|e| GitOpError::from_git2(&e))?;
     if let Ok(url) = remote.url() {
-        reject_ssh_url(url)?;
+        ssh_allowed(url, net.ssh.as_ref())?;
     }
 
     crate::auth::set_ca_location(net.ca_dir.as_deref())?;
 
     let rejection: std::rc::Rc<std::cell::RefCell<Option<String>>> =
         std::rc::Rc::new(std::cell::RefCell::new(None));
-    let mut callbacks = git2::RemoteCallbacks::new();
-    crate::auth::install_token_credentials(&mut callbacks, net.token.as_deref());
+    // Unified network callbacks (HTTPS token and/or SSH key + strict host-key
+    // check), with the existing non-ff `push_update_reference` capture ADDED on
+    // top so push works over SSH while preserving the rejection detection.
+    let mut callbacks = crate::auth::make_network_callbacks(&crate::auth::NetCallbacks {
+        token: net.token.as_deref(),
+        ssh: net.ssh.as_ref(),
+    });
     {
         let rejection = std::rc::Rc::clone(&rejection);
         callbacks.push_update_reference(move |refname, status| {
@@ -1034,6 +1073,16 @@ pub fn push(
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    #[test]
+    fn ssh_url_allowed_only_with_ssh_config() {
+        let ssh = crate::auth::SshConfig { private_key_path: "/x/id".into(), ..Default::default() };
+        assert!(ssh_allowed("git@github.com:o/r.git", Some(&ssh)).is_ok());
+        let err = ssh_allowed("git@github.com:o/r.git", None).unwrap_err();
+        assert!(matches!(err, GitOpError::InvalidInput(ref m) if m.to_lowercase().contains("ssh")));
+        assert!(ssh_allowed("https://github.com/o/r.git", None).is_ok(), "https unaffected");
+        assert!(ssh_allowed("ssh://git@host/o/r.git", Some(&ssh)).is_ok(), "ssh:// allowed with config");
+    }
 
     /// Build a repo at `dir` with a known two-commit history:
     /// - commit "first": adds file `a.txt` = "alpha\n".

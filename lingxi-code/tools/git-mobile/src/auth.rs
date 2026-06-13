@@ -242,6 +242,21 @@ pub fn make_network_callbacks<'a>(p: &NetCallbacks<'a>) -> git2::RemoteCallbacks
     callbacks
 }
 
+/// Build a [`git2::FetchOptions`] whose `RemoteCallbacks` come from
+/// [`make_network_callbacks`] — i.e. the unified HTTPS-token + SSH-key
+/// credentials closure plus (when SSH is in play) the strict host-key
+/// `certificate_check`. This is the network-op fetch path for clone / fetch /
+/// pull, so SSH and HTTPS both work through the same callbacks.
+///
+/// Secrets borrowed by the callbacks live for the returned options' lifetime
+/// (`'a`); they only flow into libgit2 in-process and are never logged.
+#[must_use]
+pub fn make_fetch_options_net<'a>(p: &NetCallbacks<'a>) -> git2::FetchOptions<'a> {
+    let mut opts = git2::FetchOptions::new();
+    opts.remote_callbacks(make_network_callbacks(p));
+    opts
+}
+
 /// Point libgit2's TLS backend at a CA-certificate location for verification.
 ///
 /// `ca_dir`, when `Some`, is treated as a **directory** of one-cert-per-file CA

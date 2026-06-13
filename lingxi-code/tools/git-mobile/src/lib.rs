@@ -271,6 +271,22 @@ impl GitTool {
             Some(secret) => ops::GitNetConfig {
                 token: secret.token.clone(),
                 ca_dir: secret.ca_dir.clone(),
+                // SSH is configured only when a (non-empty) private-key path is
+                // present; otherwise leave `None` so an SSH-URL op surfaces the
+                // named `ssh_allowed` "not configured" error via dispatch.
+                ssh: secret
+                    .ssh_private_key_path
+                    .as_ref()
+                    .filter(|p| !p.is_empty())
+                    .map(|private_key_path| auth::SshConfig {
+                        private_key_path: private_key_path.clone(),
+                        public_key_path: secret
+                            .ssh_public_key_path
+                            .clone()
+                            .filter(|p| !p.is_empty()),
+                        passphrase: secret.ssh_passphrase.clone(),
+                        known_hosts_sha256_hex: secret.ssh_known_hosts_sha256_hex.clone(),
+                    }),
             },
             None => ops::GitNetConfig::default(),
         }

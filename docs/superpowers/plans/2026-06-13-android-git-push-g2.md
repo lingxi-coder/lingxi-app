@@ -594,3 +594,29 @@ git commit -m "chore(tool-git-mobile): G2 push gate — workspace + android-targ
 - Auth DRY (spec risk): Task 1 `install_token_credentials`. ✓
 - `deny(unsafe_code)` preserved: no new unsafe in any task. ✓
 - Testing via file:// bare remotes: Tasks 2-3. ✓ Device acceptance PENDING-DEVICE: Task 4 Step 4. ✓
+
+---
+
+## Device acceptance (PENDING-DEVICE)
+
+The G2 host-merge gate (workspace tests + workspace clippy + android-target clippy on `tool-git-mobile` + both-ABI AAR cross-build) is GREEN. The items below require a physical Android device plus a test-only HTTPS token and are **NOT** required for the host-merge gate — they are recorded here so a future device run is turn-key.
+
+### (a) HTTPS-push device runbook
+
+When a device + a test HTTPS token are available, extend the existing P4 `android_git_probe` UniFFI path in `apps/android-aar/src/lib.rs` with a **push** case (additive to the existing clone probe):
+
+1. Clone a scratch repo to the device (reuse the P4 clone probe path).
+2. Make a local commit on the checked-out branch.
+3. Call the `push` op through the real `GitTool` (same dispatch the production tool uses — `dispatch_network` / `has_token` gated path).
+4. Assert the **remote ref advanced** to the new commit (re-fetch / ls-remote the ref and compare OIDs).
+5. Gate the whole probe behind a **test-only token env var**, exactly as P4's HTTPS-clone probe is gated (no token → probe skips, never hard-fails CI).
+
+This mirrors P4's clone-probe posture: additive, env-gated, and excluded from the host gate.
+
+### (b) RESIDUAL RISK — HTTP smart-protocol non-fast-forward route is UNTESTED on host (flagged by code review)
+
+The host tests cover non-fast-forward **rejection** only via the `file://` local transport, where libgit2 surfaces the rejection as a **top-level error** (test `push_non_fast_forward_is_rejected`). That route is verified.
+
+The **HTTP smart-protocol** non-ff route is different: over a real HTTPS remote, libgit2 reports a rejected ref update via the **`push_update_reference` callback** (per-ref status string) rather than as a top-level error. The push code **is wired** for this — the `push_update_reference` callback is installed and maps a non-empty rejection status to `GitError::NonFastForward` — but there is **NO host test** exercising it, because the `file://` transport doesn't drive that callback. It is therefore exercised only against a real HTTPS remote and remains **UNTESTED until the device run**.
+
+**Action for the device run:** the (a) runbook above MUST include an explicit **non-ff HTTPS push** case — push a branch, advance the remote out-of-band so the local push is no longer fast-forward, attempt the push, and assert the operation fails with the `NonFastForward` error mapped from the `push_update_reference` callback. This is the only path that validates the callback-based rejection route end-to-end.

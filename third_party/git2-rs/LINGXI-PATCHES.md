@@ -16,6 +16,28 @@ Re-apply after any re-vendor: `rg '[^:]str::from_utf8' git2/src` should return
 nothing; if it does, qualify each to `std::str::from_utf8`. (Or bump the
 workspace rustc pin to >= 1.84 and drop this patch.)
 
+## libssh2-sys (G7a)
+
+To enable the SSH transport, `libssh2-sys` is vendored into
+`third_party/libssh2-sys/` (libssh2-sys 0.3.1 — the version that resolves from
+the declared `^0.3.0` constraint — bundling the libssh2 C sources under
+`third_party/libssh2-sys/libssh2/`). The `.cargo_vcs_info.json` / `.cargo-ok`
+/ checksum / `Cargo.toml.orig` files were stripped from the copy.
+
+`libgit2-sys/Cargo.toml`'s `[dependencies.libssh2-sys]` was repointed from
+`version = "0.3.0"` to `path = "../../libssh2-sys"` (kept `optional = true`).
+**Re-apply this repoint on any re-vendor / version bump.**
+
+libssh2 is built with the **OpenSSL** crypto backend (`LIBSSH2_OPENSSL`), sharing
+the same vendored OpenSSL as the `https` path: openssl-sys's `vendored` feature
+unifies across the dep graph, and libssh2-sys's build.rs picks up
+`DEP_OPENSSL_INCLUDE` (and links `ssl`/`crypto` via openssl-sys). No
+mbedtls/wolfSSL backend.
+
+rustc-1.82 compat: libssh2-sys's Rust sources (`lib.rs`, `build.rs`) use no bare
+`str::from_utf8` — no qualification patch needed (unlike git2). Verify on
+re-vendor: `rg '[^:]str::from_utf8' third_party/libssh2-sys/*.rs` should be empty.
+
 ## TLS backend
 
 Built with `vendored-libgit2 + vendored-openssl + https` (Path V) — NOT mbedtls

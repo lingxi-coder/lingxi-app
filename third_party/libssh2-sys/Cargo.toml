@@ -10,53 +10,32 @@
 # See Cargo.toml.orig for the original contents.
 
 [package]
-edition = "2021"
-name = "libgit2-sys"
-version = "0.18.5+1.9.4"
+name = "libssh2-sys"
+version = "0.3.1"
 authors = [
-    "Josh Triplett <josh@joshtriplett.org>",
     "Alex Crichton <alex@alexcrichton.com>",
+    "Wez Furlong <wez@wezfurlong.org>",
+    "Matteo Bigoi <bigo@crisidev.org>",
 ]
 build = "build.rs"
-links = "git2"
-exclude = [
-    "libgit2/ci/*",
-    "libgit2/docs/*",
-    "libgit2/examples/*",
-    "libgit2/fuzzers/*",
-    "libgit2/tests/*",
-]
+links = "ssh2"
 autolib = false
 autobins = false
 autoexamples = false
 autotests = false
 autobenches = false
-description = "Native bindings to the libgit2 library"
+description = "Native bindings to the libssh2 library"
+documentation = "https://docs.rs/libssh2-sys"
 readme = false
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/rust-lang/git2-rs"
-
-[features]
-https = ["openssl-sys"]
-ssh = ["libssh2-sys"]
-unstable-sha256 = []
-vendored = []
-vendored-openssl = ["openssl-sys/vendored"]
-zlib-ng-compat = [
-    "libz-sys/zlib-ng",
-    "libssh2-sys?/zlib-ng-compat",
-]
+repository = "https://github.com/alexcrichton/ssh2-rs"
 
 [lib]
-name = "libgit2_sys"
+name = "libssh2_sys"
 path = "lib.rs"
 
 [dependencies.libc]
 version = "0.2"
-
-[dependencies.libssh2-sys]
-path = "../../libssh2-sys"
-optional = true
 
 [dependencies.libz-sys]
 version = "1.1.0"
@@ -64,12 +43,22 @@ features = ["libc"]
 default-features = false
 
 [build-dependencies.cc]
-version = "1.0.43"
-features = ["parallel"]
+version = "1.0.25"
 
 [build-dependencies.pkg-config]
-version = "0.3.15"
+version = "0.3.11"
+
+[features]
+openssl-on-win32 = ["openssl-sys"]
+vendored-openssl = ["openssl-sys/vendored"]
+zlib-ng-compat = ["libz-sys/zlib-ng"]
+
+[target.'cfg(target_env = "msvc")'.build-dependencies.vcpkg]
+version = "0.2"
 
 [target."cfg(unix)".dependencies.openssl-sys]
-version = "0.9.45"
+version = "0.9.35"
+
+[target."cfg(windows)".dependencies.openssl-sys]
+version = "0.9.35"
 optional = true

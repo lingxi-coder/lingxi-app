@@ -35,8 +35,13 @@ const TOKEN_USERNAME: &str = "x-access-token";
 /// the callbacks' lifetime (`'a`), never copied into a longer-lived store. When
 /// `None`, nothing is installed (public/anonymous HTTPS + `file://` still work).
 /// The token is never logged or written anywhere; it only flows into libgit2's
-/// in-process credential callback. Shared by `make_fetch_options` (clone/fetch/
-/// pull) and `ops::push`.
+/// in-process credential callback.
+///
+/// NOTE (G7): the live network ops now build their callbacks via
+/// [`make_network_callbacks`] (which handles BOTH the HTTPS token and the SSH
+/// key + host-key verification). This helper + [`make_fetch_options`] are
+/// retained (HTTPS-only convenience, still unit-tested) but are no longer on the
+/// clone/fetch/pull/push path; prefer `make_network_callbacks` for new callers.
 pub fn install_token_credentials<'a>(
     callbacks: &mut git2::RemoteCallbacks<'a>,
     token: Option<&'a str>,

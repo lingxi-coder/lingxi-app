@@ -170,6 +170,22 @@ git commit -m "feat(android-shell): package mksh/toybox as lib*.so + on-device W
 - [ ] **Step 3: Implement** — in `AndroidMinijailSandbox::prepare`: when `self.cfg.bundled_ready()`, build `ExecTarget::BundledHelper { name: "mksh".into(), path: bundled_mksh_path, hash: bundled_mksh_hash }` and pass `Some(&bundled_applet_dir)` as the `bundled_helper_dir` arg to `build_shell_env` (P1 left that param — it prepends the dir to PATH). Otherwise keep `ExecTarget::SystemShell` + `None`. argv stays `["sh"] + cmd.args` (mksh accepts `sh -c`). Everything else (deny-net mapping, cwd, rlimits) unchanged. (If `plan_from_policy` takes the target as a param — it does — pass the chosen target; the bundled-helper AllowNet rule is irrelevant here since Shell is always DenyNet.)
 - [ ] **Step 4: Run → PASS** + `cargo clippy -p platform-android --all-targets -- -D warnings` + `cargo ndk -t arm64-v8a clippy -p platform-android -- -D warnings` + `cargo check --workspace`; **Commit** `feat(platform-android): prepare() targets bundled mksh + applet PATH when bundled-ready (P5b)`.
 
+### Task 4b: runner honors `BundledHelper` — exec the bundled path + content-hash identity check
+
+**Why this task exists (discovered during T4 review):** P2 built the `ExecTarget::BundledHelper` enum + the prepare-side plan plumbing, but its only intended consumer (P4 git) pivoted to **libgit2, an in-process library** — so the minijail runner's *execute-a-bundled-executable* path was never wired or exercised. `process.rs::build_spec` sets `filename: inner.command.clone()` (always `/system/bin/sh`) and never reads `plan.target`; `run()` has no content-hash check. P5's mksh is the **first real executable BundledHelper**, so without this task a bundled-ready config still execs system `/system/bin/sh` (bundled mksh inert; only toybox applets leak in via PATH), defeating B1's interpreter-lock, and the spec-promised identity check is absent.
+
+**Files:** Modify `platforms/android/src/process.rs`; `platforms/android/Cargo.toml` (add `sha2 = "0.10"`, `hex = "0.4"` — both pure-safe, `forbid(unsafe_code)` preserved).
+
+- [ ] **Step 1: Failing tests** (host) in `process.rs`:
+  - `build_spec_uses_bundled_path_as_filename`: a `BundledHelper{ path:"/nl/libmksh.so", hash, name:"mksh" }` plan → `JailSpec.filename == "/nl/libmksh.so"` (and `argv[0]=="sh"` unchanged). A `SystemShell` plan → `filename == "/system/bin/sh"` (= `inner.command`).
+  - `bundled_helper_hash_mismatch_fails_closed`: write a temp file with known bytes; build a `BundledHelper` plan whose `path` points at it but `hash` is wrong → `run()` returns `ProcessError::SandboxEnforcementFailed` (or `MalformedSandboxPlan`) mentioning hash/identity, and **never reaches `run_jailed`**. A matching hash → passes the identity check (then hits the host `run_jailed` enforcement-failure stub, same as existing host tests).
+- [ ] **Step 2: Run → FAIL.**
+- [ ] **Step 3: Implement.**
+  - `build_spec`: `let filename = match &plan.target { ExecTarget::BundledHelper { path, .. } => path.display().to_string(), ExecTarget::SystemShell => inner.command.clone() };` and use it for `JailSpec.filename`. (argv/env/cwd/rlimits/bpf/timeout all unchanged.)
+  - Add a `fn verify_bundled_identity(path: &Path, expected_hex: &str) -> Result<(), ProcessError>`: `std::fs::read(path)` (read failure → `SandboxEnforcementFailed("bundled helper unreadable: …")`), `Sha256::digest`, `hex::encode`, compare case-insensitively to `expected_hex`; mismatch → `SandboxEnforcementFailed("bundled helper <name> hash mismatch (identity check failed)")`. No early-return path may exec on mismatch.
+  - In `run()`, AFTER `admitted_plan` + the per-plan deny-net capability gate, BEFORE `build_spec`/`spawn_blocking`: `if let ExecTarget::BundledHelper { path, hash, name } = &plan.target { verify_bundled_identity(path, hash)?; }`. (Content hash is the strong identity guarantee; path-under-`nativeLibraryDir` origin is enforced at config-construction time in T7's android-aar wiring.)
+- [ ] **Step 4: Run → PASS** + `cargo test -p platform-android` + `cargo clippy -p platform-android --all-targets -- -D warnings` + `cargo ndk -t arm64-v8a clippy -p platform-android -- -D warnings` + `cargo check --workspace`; **Commit** `feat(platform-android): runner execs bundled helper path + content-hash identity check (P5b)`.
+
 ### Task 5: capability probe — `bundled_shell_exec` + fixed applet inventory + mksh version
 
 **Files:** Modify `platforms/android/src/capabilities.rs` (+ `platforms/android-minijail` if the probe needs the exec helper).

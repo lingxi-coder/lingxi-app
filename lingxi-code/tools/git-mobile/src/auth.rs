@@ -327,6 +327,9 @@ mod tests {
         assert!(!host_key_is_pinned(&other, &pinned), "unknown key rejected");
         let pinned_upper = vec![hex.to_uppercase()];
         assert!(host_key_is_pinned(&raw, &pinned_upper), "pinned hex compared case-insensitively");
+        // Fail-closed: an empty pinned set NEVER trusts a host key (no MITM defense
+        // would otherwise be bypassed by an unconfigured known_hosts).
+        assert!(!host_key_is_pinned(&raw, &[]), "empty pinned list must reject (fail-closed)");
     }
 
     #[test]

@@ -35,6 +35,12 @@ uniffi = [
     "dep:tokio",
     "dep:orchestrator",
     "dep:tool-api",
+    # P4-T11: the on-device `android_git_probe` export builds a
+    # `BuiltinToolContext` via tool-api's test-support stubs (the git ops use
+    # real libgit2 + the filesystem directly, not the ctx's fs/process handles,
+    # so the stubs are inert for Git). Gated to `uniffi` so the plain build is
+    # unaffected; the probe body itself is `cfg(target_os = "android")`.
+    "tool-api/test-support",
     "engine-mobile/uniffi",
 ]
 
@@ -69,6 +75,11 @@ platform-android = { path = "../../platforms/android" }
 # named inside `cfg(target_os = "android")` blocks, so target-gated like
 # `platform-android` to keep host builds dep-minimal.
 platform-android-minijail = { path = "../../platforms/android-minijail" }
+# P4-T11: the real `GitTool` (libgit2 in-process) behind the
+# `android_git_probe()` UniFFI export. Target-gated to keep host builds
+# dep-minimal and to anchor the libgit2 cdylib link from a reachable crate
+# (the P2 libcap link-anchor lesson).
+tool-git-mobile = { path = "../../tools/git-mobile" }
 serde_json = { workspace = true }
 
 [dev-dependencies]

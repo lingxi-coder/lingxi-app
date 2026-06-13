@@ -147,6 +147,9 @@ fun buildVoiceEngine(
             // P1: shell/sandbox config not surfaced in the app UI yet — null
             // keeps shell support fully absent (spec r3 registration gate).
             shell = null,
+            // P4: Git-tool config not surfaced in the app UI yet — null keeps
+            // Git support fully absent (spec P4 §G5 registration gate).
+            git = null,
         )
     } catch (t: Throwable) {
         // PlatformUnavailable on a host build, or UnsatisfiedLinkError when the

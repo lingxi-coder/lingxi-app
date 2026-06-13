@@ -1131,6 +1131,9 @@ pub fn build_android_engine(
             enable_shell: s.enable_shell,
             secrets_in_keystore: s.secrets_in_keystore,
             shell_data_exposure_accepted: s.shell_data_exposure_accepted,
+            bundled_mksh_path: None,
+            bundled_mksh_hash: None,
+            bundled_applet_dir: None,
         });
         // P3-T5: keep a clone of the shell config before it is moved into
         // `AndroidPlatformInputs.shell` — the registration gate (computed below,
@@ -1338,6 +1341,9 @@ pub fn android_sandbox_run_probe(command: String, workspace: String) -> String {
             enable_shell: true,
             secrets_in_keystore: true,
             shell_data_exposure_accepted: true,
+            bundled_mksh_path: None,
+            bundled_mksh_hash: None,
+            bundled_applet_dir: None,
         };
         let sandbox = AndroidMinijailSandbox::new(cfg, cache.clone());
         let runner = AndroidMinijailProcessRunner::new(cache);

@@ -212,8 +212,8 @@ Status: approved (user), revision 2.11 — future-work batch 6 COMPLETE.
     snapshot recording; 429-headers rawUtilization extraction.
 - 2.11 — Future-work batch 6 COMPLETE: terminal-429 parity + A6 statusline pump.
   The rev-2.10 "A6 statusline execution pump", "terminal-429 immediate
-  status-change emit" and "terminal-only 429 snapshot recording" remaining items
-  are closed.
+  status-change emit", "terminal-only 429 snapshot recording" and "429-headers
+  rawUtilization extraction" remaining items are closed.
   - **Terminal-only 429 state promotion + emit parity** (6b9edf9f, afa285a6):
     the adapter's 429 recording is now staged in a `pending_429` slot and
     promoted into `last_rate_limit`/`last_raw_utilization` ONLY at the TERMINAL

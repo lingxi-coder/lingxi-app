@@ -1557,6 +1557,146 @@ pub fn android_sandbox_run_probe(command: String, workspace: String) -> String {
     }
 }
 
+/// P5c acceptance probe: exercise the REAL prepare→runner→`run_jailed` path for
+/// one `command` running through the BUNDLED mksh+toybox (not the device's
+/// system sh), and return the outcome as JSON
+/// (`{"stdout","stderr","exit_code","timed_out","enforcement_failed"}`).
+///
+/// This is the on-device end-to-end proof of the P5 bundled-shell chain. It
+/// mirrors [`android_sandbox_run_probe`] but first bootstraps the bundled shell
+/// via [`bootstrap_bundled_shell`] (stage the toybox applet symlink farm, verify
+/// bundled execve + dispatch, sha256 `libmksh.so`), then sets the THREE bundled
+/// `AndroidShellConfig` fields from the result. Because those fields are set,
+/// `prepare()` selects `ExecTarget::BundledHelper{mksh}` and leads PATH with the
+/// applet farm, and the runner content-identity-checks the recorded sha256
+/// against the real `libmksh.so` before execve (spec P5b §T4b). So a non-empty
+/// `stdout` from a bundled command implicitly proves staging + the hash check +
+/// the jailed bundled exec all passed end-to-end.
+///
+/// The wall-clock timeout is hardcoded to **2 seconds** so a `sleep 10` probe
+/// reliably trips the watchdog (`timed_out=true`). The deny-net `SandboxPolicy`
+/// is the same one P2 proved (`net_deny_verified`).
+///
+/// `enforcement_failed` is `null` on success; on the host build (no Android
+/// device) it is `"host build"`, and `"bundled bootstrap failed"` if
+/// `bootstrap_bundled_shell` returns `None` — so a JVM-host run or a broken
+/// bundle fails loudly rather than silently passing.
+#[cfg(feature = "uniffi")]
+#[cfg_attr(feature = "uniffi", uniffi::export)]
+#[allow(clippy::needless_pass_by_value)] // FFI export: UniFFI marshals owned `String`.
+#[must_use]
+pub fn android_bundled_shell_run_probe(
+    native_lib_dir: String,
+    app_files_root: String,
+    command: String,
+) -> String {
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = (native_lib_dir, app_files_root, command);
+        "{\"enforcement_failed\":\"host build\"}".to_string()
+    }
+    #[cfg(target_os = "android")]
+    {
+        use platform_android::{
+            capabilities::{probe_android_capabilities, CapabilityCache},
+            AndroidMinijailProcessRunner, AndroidMinijailSandbox, AndroidShellConfig,
+        };
+        use std::collections::HashMap;
+        use traits::{
+            NetworkPolicy, ProcessCommand, ProcessRunner, ResourceLimits, Sandbox, SandboxPolicy,
+        };
+
+        // Bootstrap the bundled shell: stage the applet symlink farm, verify
+        // bundled execve + dispatch, sha256 libmksh.so. `None` = fail-closed.
+        let Some(bundled) = bootstrap_bundled_shell(&native_lib_dir, &app_files_root) else {
+            return "{\"enforcement_failed\":\"bundled bootstrap failed\"}".to_string();
+        };
+
+        // The probe runtime: capability probe + the jailed run are independent
+        // of the engine runtime, so spin up a transient current-thread runtime
+        // and drop it (mirrors `android_sandbox_run_probe`).
+        let rt = match tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        {
+            Ok(rt) => rt,
+            Err(e) => {
+                return format!("{{\"enforcement_failed\":\"probe runtime build: {e}\"}}");
+            }
+        };
+
+        // Probe REAL capabilities and share ONE cache across sandbox + runner.
+        let cache = Arc::new(CapabilityCache::new());
+        cache.set(rt.block_on(probe_android_capabilities()));
+
+        let root = std::path::PathBuf::from(&app_files_root);
+        let cfg = AndroidShellConfig {
+            native_library_dir: std::path::PathBuf::from(&native_lib_dir),
+            shell_workspace_root: root.clone(),
+            app_cache_root: root.join("cache"),
+            package_name: "com.lingxi.code".to_string(),
+            package_version_code: 1,
+            app_writable_roots: vec![root.clone()],
+            enable_shell: true,
+            secrets_in_keystore: true,
+            shell_data_exposure_accepted: true,
+            // The three bundled fields drive `prepare` onto BundledHelper{mksh}
+            // + the applet-farm PATH, and the runner's content-identity check.
+            bundled_mksh_path: Some(bundled.mksh_path),
+            bundled_mksh_hash: Some(bundled.mksh_hash),
+            bundled_applet_dir: Some(bundled.applet_dir),
+        };
+        let sandbox = AndroidMinijailSandbox::new(cfg, cache.clone());
+        let runner = AndroidMinijailProcessRunner::new(cache);
+
+        // Deny-net policy (the P2 acceptance default, same filter P2 proved via
+        // `net_deny_verified`). 2s wall-clock timeout so `sleep 10` trips the
+        // watchdog. No filesystem confinement (Android's fs boundary is the app
+        // UID, not Landlock); net-deny is the only active confinement here.
+        let policy = SandboxPolicy {
+            network: NetworkPolicy::Disabled,
+            writable_paths: vec![],
+            denied_paths: vec![],
+            allow_subprocess: true,
+            limits: ResourceLimits::default(),
+        };
+        let proc_cmd = ProcessCommand {
+            // `prepare` normalizes the system-sh sentinel onto BundledHelper{mksh}
+            // because the bundled fields are set.
+            command: "/system/bin/sh".to_string(),
+            args: vec!["-c".to_string(), command],
+            cwd: Some(root),
+            env: HashMap::new(),
+            timeout: Some(std::time::Duration::from_secs(2)),
+            stdin: None,
+        };
+
+        let prepared = match sandbox.prepare(proc_cmd, &policy) {
+            Ok(p) => p,
+            Err(e) => {
+                return format!(
+                    "{{\"enforcement_failed\":\"prepare: {}\"}}",
+                    e.to_string().replace('"', "'")
+                );
+            }
+        };
+        match rt.block_on(runner.run(&prepared)) {
+            Ok(out) => serde_json::json!({
+                "stdout": out.stdout,
+                "stderr": out.stderr,
+                "exit_code": out.exit_code,
+                "timed_out": out.timed_out,
+                "enforcement_failed": serde_json::Value::Null,
+            })
+            .to_string(),
+            Err(e) => format!(
+                "{{\"enforcement_failed\":\"run: {}\"}}",
+                e.to_string().replace('"', "'")
+            ),
+        }
+    }
+}
+
 /// P2 acceptance probe: run the REAL capability probe and return the matrix as
 /// JSON (`{"net_deny_verified":bool,"seccomp_filter":bool,...}`). The strong
 /// proof of net-deny enforcement is `net_deny_verified` — the probe forked a

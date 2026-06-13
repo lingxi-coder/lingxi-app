@@ -19,7 +19,7 @@
 //! `#[allow(unsafe_code)]`; the rest of the crate keeps the deny lint, so no
 //! other unsafe can slip in. See the Task 8 report for the deviation note.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::ops::GitOpError;
 
@@ -67,6 +67,179 @@ pub fn make_fetch_options(token: Option<&str>) -> git2::FetchOptions<'_> {
     let mut opts = git2::FetchOptions::new();
     opts.remote_callbacks(callbacks);
     opts
+}
+
+/// SSH-key authentication material for a network git op, supplied in-memory by
+/// the Kotlin host (spec §G7). The private key is a **file path** (validated to
+/// stay inside the app sandbox by [`validate_ssh_key_path`] before use); the
+/// passphrase, when present, is held in memory and flows only into libgit2's
+/// in-process credential callback (never logged, never written, never exec'd).
+/// The host key is verified strictly: only fingerprints in
+/// `known_hosts_sha256_hex` (lowercase-hex SHA-256) are accepted.
+#[derive(Clone, Default)]
+pub struct SshConfig {
+    /// Filesystem path to the private key. Validated against the sandbox root
+    /// (see [`validate_ssh_key_path`]) before being handed to libgit2.
+    pub private_key_path: String,
+    /// Optional path to the matching public key. libgit2/libssh2 can derive it
+    /// from the private key when `None`.
+    pub public_key_path: Option<String>,
+    /// Optional passphrase decrypting the private key. In-memory only.
+    pub passphrase: Option<String>,
+    /// Pinned host-key fingerprints (lowercase-hex SHA-256). The remote's host
+    /// key is accepted only if its SHA-256 is a member (compared
+    /// case-insensitively); an empty list rejects every host key.
+    pub known_hosts_sha256_hex: Vec<String>,
+}
+
+/// Hex-encode a host-key SHA-256 digest as a lowercase 64-char string.
+///
+/// libgit2 (`git2::Cert::as_hostkey().hash_sha256()`) hands us the raw 32-byte
+/// SHA-256 of the remote's host key; we render it as lowercase hex to compare
+/// against the host-supplied pinned `known_hosts_sha256_hex`.
+#[must_use]
+pub fn hostkey_sha256_hex(sha256: &[u8]) -> String {
+    let mut out = String::with_capacity(sha256.len() * 2);
+    for b in sha256 {
+        use std::fmt::Write as _;
+        let _ = write!(out, "{b:02x}");
+    }
+    out
+}
+
+/// Strict host-key pinning check: is the remote's host-key SHA-256 in the
+/// host-supplied pinned set?
+///
+/// `sha256` is the raw digest from the certificate; `pinned_hex` are
+/// hex-encoded fingerprints (any case). Returns `true` only on an exact hex
+/// match (compared case-insensitively). An empty `pinned_hex` rejects every
+/// key — fail-closed.
+#[must_use]
+pub fn host_key_is_pinned(sha256: &[u8], pinned_hex: &[String]) -> bool {
+    let actual = hostkey_sha256_hex(sha256);
+    pinned_hex.iter().any(|p| p.eq_ignore_ascii_case(&actual))
+}
+
+/// Validate that an SSH private-key path stays inside the app sandbox.
+///
+/// Both `path` and `sandbox_root` are canonicalized (resolving `..`/symlinks),
+/// then the key must lie under the canonical root — mirroring
+/// [`crate::ops::open_repo`]'s containment check. A nonexistent key (or root)
+/// fails to canonicalize and is rejected.
+///
+/// # Errors
+///
+/// - [`GitOpError::NotFound`] — `path` or `sandbox_root` cannot be canonicalized
+///   (does not exist).
+/// - [`GitOpError::InvalidInput`] — the canonical key path lies outside the
+///   canonical sandbox root.
+pub fn validate_ssh_key_path(
+    path: &str,
+    sandbox_root: &Path,
+) -> Result<PathBuf, GitOpError> {
+    let canonical_root = sandbox_root.canonicalize().map_err(|e| {
+        GitOpError::NotFound(format!("sandbox root {}: {e}", sandbox_root.display()))
+    })?;
+    let canonical_key = Path::new(path)
+        .canonicalize()
+        .map_err(|e| GitOpError::NotFound(format!("ssh key {path}: {e}")))?;
+    if !canonical_key.starts_with(&canonical_root) {
+        return Err(GitOpError::InvalidInput(format!(
+            "ssh key path {} escapes the app sandbox",
+            canonical_key.display()
+        )));
+    }
+    Ok(canonical_key)
+}
+
+/// Borrowed credential/host-key inputs for a single network op. Exactly one of
+/// `token` (HTTPS) / `ssh` is expected in practice, but both being present is
+/// handled (the credentials closure picks per the libgit2-requested type).
+pub struct NetCallbacks<'a> {
+    /// HTTPS token (PAT), presented as the password with the sentinel username.
+    pub token: Option<&'a str>,
+    /// SSH-key material + pinned host keys.
+    pub ssh: Option<&'a SshConfig>,
+}
+
+/// Build the [`git2::RemoteCallbacks`] for a network op, installing a unified
+/// `credentials` closure (HTTPS token and/or SSH key) and — when SSH is in play
+/// — a strict `certificate_check` host-key verifier.
+///
+/// The `credentials` closure dispatches on the libgit2-requested
+/// [`git2::CredentialType`] in order:
+/// - `USERNAME` → [`git2::Cred::username`] (libssh2 asks for the username first
+///   when none is in the URL).
+/// - `SSH_KEY` (and `ssh` present) → [`git2::Cred::ssh_key`] with the validated
+///   private-key path + optional public key + optional passphrase.
+/// - `USER_PASS_PLAINTEXT` (and `token` present) → [`git2::Cred::userpass_plaintext`]
+///   with the `x-access-token` sentinel.
+/// - otherwise → an error (no usable credential).
+///
+/// The SSH username is taken from the URL (`username_from_url`) when libgit2
+/// supplies it, else defaults to `git`.
+///
+/// When `ssh` is present, `certificate_check` reads the remote host key's
+/// SHA-256 and returns [`git2::CertificateCheckStatus::CertificateOk`] iff it is
+/// pinned in `known_hosts_sha256_hex`; an unknown/mismatched host key is a hard
+/// error (fail-closed). A non-host-key certificate (e.g. an HTTPS X.509 cert,
+/// which can't occur on an SSH transport) is passed through to libgit2's default
+/// verification.
+///
+/// Secrets (token, passphrase, key bytes) flow only into libgit2 in-process and
+/// are never logged.
+#[must_use]
+pub fn make_network_callbacks<'a>(p: &NetCallbacks<'a>) -> git2::RemoteCallbacks<'a> {
+    let mut callbacks = git2::RemoteCallbacks::new();
+
+    let token = p.token;
+    let ssh = p.ssh;
+    callbacks.credentials(move |_url, username_from_url, allowed| {
+        let user = username_from_url.unwrap_or("git");
+        if allowed.contains(git2::CredentialType::USERNAME) {
+            return git2::Cred::username(user);
+        }
+        if let Some(ssh) = ssh {
+            if allowed.contains(git2::CredentialType::SSH_KEY) {
+                let public = ssh.public_key_path.as_deref().map(Path::new);
+                return git2::Cred::ssh_key(
+                    user,
+                    public,
+                    Path::new(&ssh.private_key_path),
+                    ssh.passphrase.as_deref(),
+                );
+            }
+        }
+        if let Some(token) = token {
+            if allowed.contains(git2::CredentialType::USER_PASS_PLAINTEXT) {
+                return git2::Cred::userpass_plaintext(TOKEN_USERNAME, token);
+            }
+        }
+        Err(git2::Error::from_str(
+            "no usable git credential for the requested authentication type",
+        ))
+    });
+
+    if let Some(ssh) = ssh {
+        let pinned = ssh.known_hosts_sha256_hex.clone();
+        callbacks.certificate_check(move |cert, _host| {
+            let Some(hostkey) = cert.as_hostkey() else {
+                // Not an SSH host key (e.g. an X.509 cert) — defer to libgit2's
+                // default verification rather than vouching for it here.
+                return Ok(git2::CertificateCheckStatus::CertificatePassthrough);
+            };
+            match hostkey.hash_sha256() {
+                Some(sha256) if host_key_is_pinned(sha256, &pinned) => {
+                    Ok(git2::CertificateCheckStatus::CertificateOk)
+                }
+                _ => Err(git2::Error::from_str(
+                    "unknown or mismatched SSH host key (not in pinned known_hosts)",
+                )),
+            }
+        });
+    }
+
+    callbacks
 }
 
 /// Point libgit2's TLS backend at a CA-certificate location for verification.
@@ -140,6 +313,44 @@ mod tests {
     #[test]
     fn set_ca_location_none_is_noop() {
         set_ca_location(None).expect("None CA dir is a no-op");
+    }
+
+    #[test]
+    fn hostkey_hex_matches_pinned() {
+        let raw = [0xABu8; 32];
+        let hex = hostkey_sha256_hex(&raw);
+        assert_eq!(hex.len(), 64);
+        assert!(hex.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
+        let pinned = vec![hex.clone()];
+        assert!(host_key_is_pinned(&raw, &pinned), "exact hex match accepted");
+        let other = [0x00u8; 32];
+        assert!(!host_key_is_pinned(&other, &pinned), "unknown key rejected");
+        let pinned_upper = vec![hex.to_uppercase()];
+        assert!(host_key_is_pinned(&raw, &pinned_upper), "pinned hex compared case-insensitively");
+    }
+
+    #[test]
+    fn validate_ssh_key_path_rejects_outside_sandbox() {
+        let sandbox = tempfile::tempdir().unwrap();
+        let key = sandbox.path().join("id_ed25519");
+        std::fs::write(&key, b"-----BEGIN OPENSSH PRIVATE KEY-----\n").unwrap();
+        validate_ssh_key_path(key.to_str().unwrap(), sandbox.path())
+            .expect("in-sandbox key path accepted");
+        let missing = sandbox.path().join("nope");
+        assert!(validate_ssh_key_path(missing.to_str().unwrap(), sandbox.path()).is_err());
+        let outside = sandbox.path().join("../escape");
+        assert!(validate_ssh_key_path(outside.to_str().unwrap(), sandbox.path()).is_err());
+    }
+
+    #[test]
+    fn make_network_callbacks_assembles_for_https_and_ssh() {
+        let _cb = make_network_callbacks(&NetCallbacks { token: Some("tok"), ssh: None });
+        let ssh = SshConfig {
+            private_key_path: "/sandbox/id".into(),
+            known_hosts_sha256_hex: vec!["abc".into()],
+            ..Default::default()
+        };
+        let _cb2 = make_network_callbacks(&NetCallbacks { token: None, ssh: Some(&ssh) });
     }
 
     /// `set_ca_location(Some(dir))` exercises the `GIT_OPT_SET_SSL_CERT_LOCATIONS`

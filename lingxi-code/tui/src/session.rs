@@ -78,6 +78,12 @@ pub struct Runtime {
     /// Shared subscription slot from the composition root (None in print mode /
     /// tests). Threaded into [`AppState::subscription`] at mount.
     subscription: Option<traits::subscription::SharedSubscription>,
+    /// (A6 batch-6 Task 2) Parsed `statusLine` setting (User+Local merged,
+    /// Local-over-User), or `None` when unset / not a `command` config. Threaded
+    /// into [`AppState::status_line_config`] at mount so the debounced statusline
+    /// pump (root.rs) can run the configured command. `None` (smoke gates /
+    /// resume picker / no settings) leaves the built-in status row in place.
+    status_line_config: Option<crate::components::status_line_command::StatusLineConfig>,
 }
 
 impl Runtime {
@@ -94,6 +100,7 @@ impl Runtime {
             command_registry: None,
             resumed_messages: Vec::new(),
             subscription: None,
+            status_line_config: None,
         }
     }
 
@@ -114,6 +121,7 @@ impl Runtime {
             command_registry: None,
             resumed_messages: Vec::new(),
             subscription: None,
+            status_line_config: None,
         }
     }
 
@@ -173,6 +181,20 @@ impl Runtime {
     #[must_use]
     pub fn with_subscription(mut self, sub: traits::subscription::SharedSubscription) -> Self {
         self.subscription = Some(sub);
+        self
+    }
+
+    /// (A6 batch-6 Task 2) Attach the parsed `statusLine` config (User+Local
+    /// merged at the CLI seam). Threaded into [`AppState::status_line_config`]
+    /// at mount so the debounced statusline pump (root.rs) runs the configured
+    /// command. `None` leaves the built-in status row in place — byte-identical
+    /// to today.
+    #[must_use]
+    pub fn with_status_line_config(
+        mut self,
+        config: Option<crate::components::status_line_command::StatusLineConfig>,
+    ) -> Self {
+        self.status_line_config = config;
         self
     }
 
@@ -236,6 +258,11 @@ pub async fn run_tui_session(
     // `AppState::subscription_snapshot`. `None` (smoke gates / resume picker /
     // print mode) leaves the snapshot absent — same route as `command_registry`.
     initial_state.subscription = runtime.subscription.take();
+    // (A6 batch-6 Task 2) Thread the merged `statusLine` config onto the state
+    // so the debounced statusline pump (root.rs) runs the configured command.
+    // `None` (smoke gates / resume picker / no settings) leaves the built-in
+    // status row in place — same route as `subscription`.
+    initial_state.status_line_config = runtime.status_line_config.take();
     // (M7-15) Apply the stored theme preference from ~/.claude/settings.json
     // (best-effort; absent/unreadable → session-default `auto`). Read once at
     // startup, before the first render, so the very first frame uses the saved
@@ -380,6 +407,33 @@ mod tests {
         let (_, rx) = mpsc::unbounded_channel();
         let r = Runtime::with_bridge(id, TuiBridge { rx }, StatusSnapshot::default());
         assert!(r.bridge.is_some());
+    }
+
+    /// (A6 batch-6 Task 2) `status_line_config` defaults to `None`, and the
+    /// `with_status_line_config` builder threads a parsed config through, which
+    /// `run_tui_session` lifts onto `AppState.status_line_config` at mount
+    /// (mirroring the `with_subscription` end-to-end path).
+    #[test]
+    fn with_status_line_config_defaults_none_and_threads_through() {
+        use crate::components::status_line_command::StatusLineConfig;
+        // Default builder leaves it absent.
+        let runtime = Runtime::new(protocol::SessionId::new());
+        assert!(runtime.status_line_config.is_none());
+
+        // The builder threads a parsed config through the runtime.
+        let cfg = StatusLineConfig::from_settings_value(
+            &serde_json::json!({"type": "command", "command": "echo hi"}),
+        )
+        .expect("command config parses");
+        let mut runtime = Runtime::new(protocol::SessionId::new())
+            .with_status_line_config(Some(cfg.clone()));
+        assert_eq!(runtime.status_line_config.as_ref(), Some(&cfg));
+
+        // Replicate `run_tui_session`'s init-application step: lift the config
+        // off the runtime onto the AppState (same route as `subscription`).
+        let mut state = AppState::new(StatusSnapshot::default());
+        state.status_line_config = runtime.status_line_config.take();
+        assert_eq!(state.status_line_config.as_ref(), Some(&cfg));
     }
 
     /// (ARGS.3) End-to-end live-data-path proof without a PTY: a registry with a

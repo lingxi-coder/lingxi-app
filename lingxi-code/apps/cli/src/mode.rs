@@ -213,6 +213,11 @@ pub(crate) async fn build_tui_runtime(
         // (B4 Task 5) Thread the composition root's shared subscription slot so
         // the TUI rate-limit composer reads the live snapshot at compose time.
         .with_subscription(tui_build.runtime.subscription.clone())
+        // (A6 batch-6 Task 2) Read + merge the `statusLine` setting (User+Local,
+        // Local-over-User) and thread it through so the TUI's debounced
+        // statusline pump runs the configured command. `None` (no setting)
+        // leaves the built-in status row in place.
+        .with_status_line_config(read_status_line_config())
         .with_resumed_messages(resumed_messages)
 }
 
@@ -250,6 +255,45 @@ fn settings_dirs() -> (std::path::PathBuf, std::path::PathBuf) {
 /// settings — the `hasSkipDangerousModePermissionPrompt` user+local check
 /// (claude-code `settings.ts:882-889`; the flag/policy tiers have no Rust
 /// substrate). On any read failure the tier degrades to `false`.
+/// (A6 batch-6 Task 2) Read + merge the `statusLine` setting from the USER
+/// (`~/.claude/settings.json`) and LOCAL (`<proj>/.claude/settings.local.json`)
+/// tiers, Local-over-User, and parse it into a [`StatusLineConfig`]. `None` when
+/// neither tier carries a `command`-shaped `statusLine` (then the built-in row
+/// renders). Pure over the two settings roots so it is unit-testable; the live
+/// caller [`read_status_line_config`] resolves them via [`settings_dirs`].
+///
+/// `statusLine` is NOT a typed `SettingsJson` field (`Settings::load` cannot
+/// carry it), so this reads the raw per-tier maps directly via
+/// `read_settings_map`. A broken/unreadable tier degrades to "no value" for that
+/// tier (read error → treated as absent), matching the TS warn-and-continue
+/// settings stance.
+fn read_status_line_config_from(
+    claude_home: &std::path::Path,
+    project_dir: &std::path::Path,
+) -> Option<tui::components::status_line_command::StatusLineConfig> {
+    use migrations::settings_update::{read_settings_map, settings_path, SettingsSource};
+    // Local-over-User: read User first, then let Local's `statusLine` override.
+    let mut status_line: Option<serde_json::Value> = None;
+    for source in [SettingsSource::User, SettingsSource::Local] {
+        let p = settings_path(source, claude_home, project_dir);
+        if let Ok(map) = read_settings_map(&p) {
+            if let Some(v) = map.get("statusLine") {
+                status_line = Some(v.clone());
+            }
+        }
+    }
+    status_line
+        .as_ref()
+        .and_then(tui::components::status_line_command::StatusLineConfig::from_settings_value)
+}
+
+/// (A6 batch-6 Task 2) Live wrapper over [`read_status_line_config_from`],
+/// resolving the User+Local settings roots via [`settings_dirs`].
+fn read_status_line_config() -> Option<tui::components::status_line_command::StatusLineConfig> {
+    let (claude_home, project_dir) = settings_dirs();
+    read_status_line_config_from(&claude_home, &project_dir)
+}
+
 fn read_skip_dangerous_prompt() -> bool {
     use migrations::settings_update::{read_settings_map, settings_path, SettingsSource};
     let (claude_home, project_dir) = settings_dirs();
@@ -342,5 +386,65 @@ mod tests {
         // -p with piped input should still print one-shot (matches v0.6.0).
         let a = argv(Some("hi"), false);
         assert_eq!(decide_mode_with(&a, false), Mode::Print("hi".into()));
+    }
+
+    // ── (A6 batch-6 Task 2) statusLine settings merge ─────────────────────
+
+    fn write_settings(path: &std::path::Path, body: &str) {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(path, body).unwrap();
+    }
+
+    /// A real `{"statusLine":{"type":"command","command":"echo hi"}}` in USER
+    /// settings reaches a `Some(StatusLineConfig)` via the merge helper. This is
+    /// the B2 RED — nothing parsed `statusLine` into the runtime before.
+    #[test]
+    fn status_line_config_read_from_user_settings() {
+        let tmp = std::env::temp_dir().join(format!("slc-user-{}", std::process::id()));
+        let claude_home = tmp.join("home");
+        let project_dir = tmp.join("proj");
+        write_settings(
+            &claude_home.join("settings.json"),
+            r#"{"statusLine":{"type":"command","command":"echo hi"}}"#,
+        );
+        let cfg = read_status_line_config_from(&claude_home, &project_dir);
+        let cfg = cfg.expect("user statusLine parses");
+        assert_eq!(cfg.command, "echo hi");
+        assert_eq!(cfg.kind, "command");
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    /// Local settings (`<proj>/.claude/settings.local.json`) WIN over User for
+    /// the `statusLine` key (Local-over-User precedence).
+    #[test]
+    fn status_line_config_local_overrides_user() {
+        let tmp = std::env::temp_dir().join(format!("slc-prec-{}", std::process::id()));
+        let claude_home = tmp.join("home");
+        let project_dir = tmp.join("proj");
+        write_settings(
+            &claude_home.join("settings.json"),
+            r#"{"statusLine":{"type":"command","command":"user-cmd"}}"#,
+        );
+        write_settings(
+            &project_dir.join(".claude").join("settings.local.json"),
+            r#"{"statusLine":{"type":"command","command":"local-cmd"}}"#,
+        );
+        let cfg = read_status_line_config_from(&claude_home, &project_dir)
+            .expect("merged statusLine parses");
+        assert_eq!(cfg.command, "local-cmd", "Local wins over User");
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    /// No `statusLine` key anywhere → `None` (built-in row renders).
+    #[test]
+    fn status_line_config_absent_is_none() {
+        let tmp = std::env::temp_dir().join(format!("slc-none-{}", std::process::id()));
+        let claude_home = tmp.join("home");
+        let project_dir = tmp.join("proj");
+        write_settings(&claude_home.join("settings.json"), r#"{"theme":"dark"}"#);
+        assert!(read_status_line_config_from(&claude_home, &project_dir).is_none());
+        std::fs::remove_dir_all(&tmp).ok();
     }
 }

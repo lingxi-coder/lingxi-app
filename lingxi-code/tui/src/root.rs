@@ -1898,6 +1898,67 @@ pub fn TuiRoot(mut hooks: Hooks, props: &TuiRootProps) -> impl Into<AnyElement<'
         });
     }
 
+    // ---- Statusline pump (A6 batch-6 Task 2): debounced, single-flight -----
+    // The TUI analog of claude-code's `StatusLine.tsx` execute-on-change effect
+    // (debounce 300ms, abortable execute, set-only-on-change, silent errors).
+    // A 300ms `Skip` interval is the debounce analog; the dirty flag is the
+    // re-trigger (set ONLY by `apply_event` on `TurnEnded`). Single-flight: the
+    // command runs to completion before the next tick can re-arm — no
+    // generation counter needed (re-trigger rides `status_line_dirty`).
+    //
+    // Lock discipline: the payload build and the result apply are each scoped
+    // blocks; NO lock is held across the `spawn_blocking().await` (the command
+    // is sync `std::process` so it runs off the async runtime). On any failure
+    // (spawn error / timeout / non-zero / empty output / JoinError) the result
+    // is `None` and the previous `status_line_text` is kept.
+    {
+        let state = state.clone();
+        let mut tick_for_status = tick;
+        hooks.use_future(async move {
+            let mut interval = tokio::time::interval(Duration::from_millis(300));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                interval.tick().await;
+                // Build the (command, stdin-json) payload under the lock, then
+                // DROP the lock before the off-thread command run. Skip the tick
+                // unless a turn re-armed the pump (clear-on-consume).
+                let payload = {
+                    let mut st = state.lock().await;
+                    if !st.status_line_dirty {
+                        continue;
+                    }
+                    st.status_line_dirty = false;
+                    crate::state::build_pump_payload(&st)
+                };
+                let Some((command, stdin_json)) = payload else {
+                    continue;
+                };
+                // Run the sync command off the async runtime. `JoinError`
+                // (panic / cancel) maps to `None` via `unwrap_or_default`.
+                let out = tokio::task::spawn_blocking(move || {
+                    crate::components::status_line_command::run_status_line_command(
+                        &command,
+                        &stdin_json,
+                        crate::components::status_line_command::STATUS_LINE_TIMEOUT,
+                    )
+                })
+                .await
+                .unwrap_or_default();
+                // `run_status_line_command` ALREADY returns formatted text —
+                // assign directly (do NOT format again). Set-only-on-change +
+                // repaint (claude-code `prev.statusLineText === text` guard).
+                if let Some(text) = out {
+                    let mut st = state.lock().await;
+                    if st.status_line_text.as_deref() != Some(text.as_str()) {
+                        st.status_line_text = Some(text);
+                        drop(st);
+                        tick_for_status.set(tick_for_status.get().wrapping_add(1));
+                    }
+                }
+            }
+        });
+    }
+
     // ---- Ticker: 100ms spinner refresh + paste idle-flush + Settings open pump
     {
         let state = state.clone();

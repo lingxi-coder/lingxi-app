@@ -16,6 +16,7 @@ license.workspace = true
 tool-api = { path = "../../tool-api" }
 traits = { path = "../../traits" }
 permission = { path = "../../permission" }
+thiserror.workspace = true
 # Vendored git2 (T1). The `https` feature is REQUIRED — it enables the OpenSSL
 # TLS backend; without it clone/fetch fail. `vendored-libgit2`+`vendored-openssl`
 # build their bundled C under the NDK (and on the host, which keeps the local

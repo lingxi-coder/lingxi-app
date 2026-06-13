@@ -381,3 +381,68 @@ Keep `install_token_credentials` for the HTTPS-only fetch path OR refactor `make
 - **git2 0.21 SSH API drift:** `Cred::ssh_key` / `certificate_check` / `Cert::as_hostkey` / `CertificateCheckStatus` signatures verified against the vendored source; adapt as G2 did for `shorthand()`. The pure helpers (`host_key_is_pinned`, `validate_ssh_key_path`) are signature-independent and fully host-tested.
 - **Private key on disk (GS2):** mitigated by sandbox-path validation + host-owned at-rest protection + in-memory passphrase; documented departure.
 - **Live SSH not host-testable:** host covers pure helpers + callback assembly + gate; the handshake/host-key-callback is PENDING-DEVICE (GS4).
+
+---
+
+## Device acceptance (PENDING-DEVICE)
+
+The G7 host-merge gate (workspace tests + workspace clippy + android-target clippy for
+`tool-git-mobile`/`android-aar` + both-ABI `android-aar` link) is GREEN. The live SSH
+handshake and the `certificate_check` host-key callback firing against a real server can
+only be exercised on a device/emulator with network egress, so they are deferred. The
+steps below are **additive** and are **NOT required** for the host-merge gate.
+
+### (a) SSH device runbook
+
+Extend the existing P4 env-gated `android_git_probe` UniFFI path in
+`apps/android-aar/src/lib.rs` (the same shape as P4's clone probe — test-only, gated
+behind env so it never fires in a normal build) with an SSH case:
+
+1. **Setup (host-supplied, app-private storage).**
+   - Place the test private key file in app-private storage (e.g.
+     `<filesDir>/ssh/id_ed25519`, mode 0600). Expose its path via a test-only env, e.g.
+     `LINGXI_GIT_SSH_KEY_PATH`, exactly as P4's clone probe gates on a test-only env.
+   - Supply the expected server host key as a **lowercase-hex SHA-256** fingerprint via
+     a test-only env, e.g. `LINGXI_GIT_SSH_HOSTKEY_SHA256` (the wire format pinned in the
+     header and validated by `host_key_is_pinned`).
+   - Optionally an in-memory passphrase via the `AndroidGitSecret` ssh seam (never on disk).
+
+2. **Clone — correct pinned host key (ACCEPT).** Drive `android_git_probe` to
+   `clone git@<host>:<repo>` (or `ssh://git@<host>/<repo>`) with the key path + the
+   **correct** pinned host-key SHA-256. Expected: clone succeeds; the `certificate_check`
+   callback observes the server host key, `host_key_is_pinned` returns true, and
+   `CertificateCheckStatus::CertificateOk` is returned.
+
+3. **Clone — wrong OR absent pinned host key (REJECT, fail-closed).** Repeat with a
+   **wrong** SHA-256, and again with an **empty/absent** pin list. Expected: clone fails
+   closed with the named host-key error (mismatch / not-pinned) — never a silent
+   trust-on-first-use accept. The empty-list case must fail closed (covered by the
+   `host_key_is_pinned` empty-list host test, but here verified end-to-end through the
+   live callback).
+
+4. **Push round-trip.** With the correct pinned host key, `push` a commit to the SSH
+   remote and confirm the remote ref advances (then reset). Exercises the shared
+   `make_network_callbacks` credentials + host-key path on a write op (GS5).
+
+All SSH cases stay behind the test-only key-path + host-key env, mirroring P4's clone
+probe; with the env unset the probe is inert.
+
+### (b) Residual-risk note
+
+The host test suite covers, with no live network:
+
+- the pure helpers — `host_key_is_pinned` (including the **empty-list fail-closed** case)
+  and `validate_ssh_key_path`;
+- the credentials + host-key **callback assembly** in `make_network_callbacks`
+  (construction only — no live dispatch); and
+- the `ssh_allowed` gate (the narrowed replacement for per-op `reject_ssh_url`).
+
+What is exercised **only on-device** is the live SSH handshake and the
+`certificate_check` callback **actually firing** against a real server host key.
+Therefore the device run **MUST** include **both**:
+
+- the **correct-host-key** case (ACCEPT), and
+- the **wrong/absent-host-key** case (REJECT, fail-closed with the named host-key error).
+
+Until that on-device run is completed and recorded, strict host-key verification is
+proven by construction + unit tests but not by a live handshake.

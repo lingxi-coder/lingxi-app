@@ -496,6 +496,9 @@ pub async fn build_mobile_inner(
         // P3: thread the Android Shell gate + prompt carrier from MobileConfig.
         // `None` on iOS and desktop (cfg.android_shell defaults to None).
         android_shell: cfg.android_shell.clone(),
+        // P4: thread the Android Git gate + workspace carrier from MobileConfig.
+        // `None` on iOS and desktop (cfg.android_git defaults to None).
+        android_git: None,
     };
     let tools = Arc::new(mobile_tool_registry(tool_ctx));
 

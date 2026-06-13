@@ -34,7 +34,25 @@ git2/libgit2-sys, and (now) minijail — are vendored into `third_party/`.
 | G3 | Auth | Kotlin host supplies HTTPS token via FFI, in-process to libgit2's credential callback, per-operation; never disk/env; under the D11 Keystore gate |
 | G4 | Vendoring convention | **all third-party libs vendored into `third_party/`**; libgit2 + git2-rs added there; **minijail symlink → properly vendored** (debt repaid) as part of P4 |
 | G5 | Registration gate | independent of the minijail sandbox (libgit2 is in-process); gate = `enable_git && workspace ready && CA store reachable`; **token NOT in the gate** (missing token disables only network ops, not the tool) |
-| G6 | TLS / CA | libgit2 TLS backend = mbedtls; CA store = Android system `/system/etc/security/cacerts` (no bundle), fallback bundled Mozilla CA PEM |
+| G6 | TLS / CA | libgit2 TLS backend = **vendored-openssl** (primary; mbedtls **deferred** — see note); CA store = Android system `/system/etc/security/cacerts` (no bundle), fallback bundled Mozilla CA PEM |
+
+> **G6 amendment (P4a, 2026-06-13 — Path V chosen).** The brainstorm picked
+> mbedtls for size. P4a's NDK build proof switched the primary backend to
+> **vendored-openssl** (the `git2` `vendored-libgit2 + vendored-openssl +
+> https` feature set). Reason: the pinned `libgit2-sys 0.18.5+1.9.4` vendored
+> build is **`cc`-based, not cmake-based**, and its `build.rs` hardcodes
+> `GIT_OPENSSL` for all non-Windows/non-Apple targets — it has **no
+> `-DUSE_HTTPS=mbedTLS` code path at all**. mbedtls would therefore require
+> building libgit2 *entirely ourselves* in a separate cmake `android-libgit2`
+> crate + `LIBGIT2_NO_VENDOR=1` + cross-compile pkg-config wiring (high risk,
+> well beyond the 3-iteration budget). vendored-openssl cross-compiled cleanly
+> for **arm64 + x86_64 on the first attempt** (NDK 27.0.12077973, cargo-ndk
+> 4.1.2). **Size delta:** OpenSSL is heavier than mbedtls — per-ABI static
+> archives (unstripped, before link-GC) are libcrypto.a ~36 MB + libssl.a
+> ~9.7 MB + libgit2.a ~11 MB; the actual `.so` contribution after dead-code
+> elimination + strip is far smaller and measured at the P4d/Task-12 cdylib
+> link. mbedtls remains a documented later size optimization if the OpenSSL
+> footprint proves unacceptable on-device.
 | G7 | SSH | out of v1 (HTTPS + token only); `git@…` URLs return a named error |
 | G8 | merge/pull | fast-forward only in v1; non-ff returns a named error (no auto conflict resolution, no leftover conflict markers) |
 
@@ -114,11 +132,20 @@ lingxi-code/
 - **License.** libgit2 is "GPLv2 with a linking exception" (permits linking
   into any app); `git2`/`libgit2-sys` are MIT/Apache. OSS notice; no source
   offer burden.
-- **TLS / CA (G6).** libgit2 TLS backend = mbedtls (lightest pure-C, good
-  cross-compile). CA store = Android system `/system/etc/security/cacerts` via
+- **TLS / CA (G6 — amended P4a, Path V).** libgit2 TLS backend =
+  **vendored-openssl** (primary). The brainstorm chose mbedtls for size, but
+  P4a's NDK build proof found the pinned `libgit2-sys 0.18.5+1.9.4` vendored
+  build is `cc`-based and hardcodes `GIT_OPENSSL` for Android — no mbedtls code
+  path exists, so mbedtls would mean self-building libgit2 via cmake
+  (`LIBGIT2_NO_VENDOR`), beyond the proof budget. vendored-openssl
+  cross-compiled cleanly for arm64 + x86_64 on the first attempt. CA store =
+  Android system `/system/etc/security/cacerts` via
   `git_libgit2_opts(GIT_OPT_SET_SSL_CERT_LOCATIONS)` (device-provided, no
-  bundle); fallback = a bundled Mozilla CA PEM if the system dir is
-  unreachable. Budget ~2–3 MB/ABI (well under a bundled git's ~8 MB).
+  bundle; OpenSSL honors the same cert-locations opt); fallback = a bundled
+  Mozilla CA PEM if the system dir is unreachable. Size delta is larger than
+  mbedtls (OpenSSL static archives are tens of MB unstripped; the GC'd/stripped
+  `.so` contribution is measured at the cdylib link in P4d) — mbedtls is a
+  documented later size optimization.
 
 ## The Git tool
 

@@ -130,7 +130,7 @@ impl<'repo> Remote<'repo> {
     /// Returns `Ok(None)` if this remote has not yet been named.
     pub fn name(&self) -> Result<Option<&str>, Error> {
         match self.name_bytes() {
-            Some(nb) => str::from_utf8(nb).map(|s| Some(s)).map_err(|e| e.into()),
+            Some(nb) => std::str::from_utf8(nb).map(|s| Some(s)).map_err(|e| e.into()),
             None => Ok(None),
         }
     }
@@ -144,7 +144,7 @@ impl<'repo> Remote<'repo> {
 
     /// Get the remote's URL.
     pub fn url(&self) -> Result<&str, Error> {
-        str::from_utf8(self.url_bytes()).map_err(|e| e.into())
+        std::str::from_utf8(self.url_bytes()).map_err(|e| e.into())
     }
 
     /// Get the remote's URL as a byte array.
@@ -157,7 +157,7 @@ impl<'repo> Remote<'repo> {
     /// Returns `Ok(None)` if no special url for pushing is set.
     pub fn pushurl(&self) -> Result<Option<&str>, Error> {
         match self.pushurl_bytes() {
-            Some(pb) => str::from_utf8(pb).map(|s| Some(s)).map_err(|e| e.into()),
+            Some(pb) => std::str::from_utf8(pb).map(|s| Some(s)).map_err(|e| e.into()),
             None => Ok(None),
         }
     }
@@ -517,12 +517,12 @@ impl<'remote> RemoteHead<'remote> {
 
     pub fn name(&self) -> &str {
         let b = unsafe { crate::opt_bytes(self, (*self.raw).name).unwrap() };
-        str::from_utf8(b).unwrap()
+        std::str::from_utf8(b).unwrap()
     }
 
     pub fn symref_target(&self) -> Option<&str> {
         let b = unsafe { crate::opt_bytes(self, (*self.raw).symref_target) };
-        b.map(|b| str::from_utf8(b).unwrap())
+        b.map(|b| std::str::from_utf8(b).unwrap())
     }
 }
 

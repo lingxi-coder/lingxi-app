@@ -239,7 +239,7 @@ extern "C" fn subtransport_action(
 ) -> c_int {
     panic::wrap(|| unsafe {
         let url = CStr::from_ptr(url).to_bytes();
-        let url = match str::from_utf8(url).ok() {
+        let url = match std::str::from_utf8(url).ok() {
             Some(s) => s,
             None => return -1,
         };

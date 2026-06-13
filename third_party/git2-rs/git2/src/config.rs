@@ -242,7 +242,7 @@ impl Config {
     ///
     /// [`snapshot`]: `crate::Config::snapshot`
     pub fn get_str(&self, name: &str) -> Result<&str, Error> {
-        str::from_utf8(self.get_bytes(name)?)
+        std::str::from_utf8(self.get_bytes(name)?)
             .map_err(|_| Error::from_str("configuration value is not valid utf8"))
     }
 
@@ -274,7 +274,7 @@ impl Config {
         unsafe {
             try_call!(raw::git_config_get_string_buf(ret.raw(), self.raw, name));
         }
-        str::from_utf8(&ret)
+        std::str::from_utf8(&ret)
             .map(|s| s.to_string())
             .map_err(|_| Error::from_str("configuration value is not valid utf8"))
     }
@@ -523,7 +523,7 @@ impl Drop for Config {
 impl<'cfg> ConfigEntry<'cfg> {
     /// Gets the name of this entry.
     pub fn name(&self) -> Result<&str, Error> {
-        str::from_utf8(self.name_bytes()).map_err(|e| e.into())
+        std::str::from_utf8(self.name_bytes()).map_err(|e| e.into())
     }
 
     /// Gets the name of this entry as a byte slice.
@@ -537,7 +537,7 @@ impl<'cfg> ConfigEntry<'cfg> {
     ///
     /// Panics when no value is defined.
     pub fn value(&self) -> Result<&str, Error> {
-        str::from_utf8(self.value_bytes()).map_err(|e| e.into())
+        std::str::from_utf8(self.value_bytes()).map_err(|e| e.into())
     }
 
     /// Gets the value of this entry as a byte slice.

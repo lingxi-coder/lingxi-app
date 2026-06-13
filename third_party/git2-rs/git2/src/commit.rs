@@ -64,7 +64,7 @@ impl<'repo> Commit<'repo> {
     /// The returned message will be slightly prettified by removing any
     /// potential leading newlines.
     pub fn message(&self) -> Result<&str, Error> {
-        str::from_utf8(self.message_bytes()).map_err(|e| e.into())
+        std::str::from_utf8(self.message_bytes()).map_err(|e| e.into())
     }
 
     /// Get the full message of a commit as a byte slice.
@@ -82,14 +82,14 @@ impl<'repo> Commit<'repo> {
     pub fn message_encoding(&self) -> Result<Option<&str>, Error> {
         let bytes = unsafe { crate::opt_bytes(self, raw::git_commit_message_encoding(&*self.raw)) };
         match bytes {
-            Some(b) => str::from_utf8(b).map(|s| Some(s)).map_err(|e| e.into()),
+            Some(b) => std::str::from_utf8(b).map(|s| Some(s)).map_err(|e| e.into()),
             None => Ok(None),
         }
     }
 
     /// Get the full raw message of a commit.
     pub fn message_raw(&self) -> Result<&str, Error> {
-        str::from_utf8(self.message_raw_bytes()).map_err(|e| e.into())
+        std::str::from_utf8(self.message_raw_bytes()).map_err(|e| e.into())
     }
 
     /// Get the full raw message of a commit.
@@ -99,7 +99,7 @@ impl<'repo> Commit<'repo> {
 
     /// Get the full raw text of the commit header.
     pub fn raw_header(&self) -> Result<&str, Error> {
-        str::from_utf8(self.raw_header_bytes()).map_err(|e| e.into())
+        std::str::from_utf8(self.raw_header_bytes()).map_err(|e| e.into())
     }
 
     /// Get an arbitrary header field.
@@ -129,7 +129,7 @@ impl<'repo> Commit<'repo> {
     /// `Ok(None)` may be returned if there is no summary
     pub fn summary(&self) -> Result<Option<&str>, Error> {
         match self.summary_bytes() {
-            Some(sb) => str::from_utf8(sb).map(|s| Some(s)).map_err(|e| e.into()),
+            Some(sb) => std::str::from_utf8(sb).map(|s| Some(s)).map_err(|e| e.into()),
             None => Ok(None),
         }
     }
@@ -153,7 +153,7 @@ impl<'repo> Commit<'repo> {
     /// `Ok(None)` may be returned if there is no body.
     pub fn body(&self) -> Result<Option<&str>, Error> {
         match self.body_bytes() {
-            Some(sb) => str::from_utf8(sb).map(|s| Some(s)).map_err(|e| e.into()),
+            Some(sb) => std::str::from_utf8(sb).map(|s| Some(s)).map_err(|e| e.into()),
             None => Ok(None),
         }
     }

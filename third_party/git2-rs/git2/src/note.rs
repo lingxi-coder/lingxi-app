@@ -40,7 +40,7 @@ impl<'repo> Note<'repo> {
 
     /// Get the note message as a string.
     pub fn message(&self) -> Result<&str, Error> {
-        str::from_utf8(self.message_bytes()).map_err(|e| e.into())
+        std::str::from_utf8(self.message_bytes()).map_err(|e| e.into())
     }
 
     /// Get the note object's id

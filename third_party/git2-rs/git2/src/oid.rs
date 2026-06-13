@@ -322,7 +322,7 @@ impl fmt::Display for Oid {
             );
         }
         let s = &dst[..dst.iter().position(|&a| a == 0).unwrap()];
-        str::from_utf8(s).unwrap().fmt(f)
+        std::str::from_utf8(s).unwrap().fmt(f)
     }
 }
 

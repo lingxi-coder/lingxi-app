@@ -330,7 +330,7 @@ impl<'statuses> StatusEntry<'statuses> {
 
     /// Access this entry's path name as a string.
     pub fn path(&self) -> Result<&str, Error> {
-        str::from_utf8(self.path_bytes()).map_err(|e| e.into())
+        std::str::from_utf8(self.path_bytes()).map_err(|e| e.into())
     }
 
     /// Access the status flags for this file

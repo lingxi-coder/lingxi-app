@@ -81,7 +81,7 @@ extern "C" fn fetchhead_foreach_cb(
             assert!(!remote_url.is_null());
             assert!(!oid.is_null());
 
-            let ref_name = str::from_utf8(CStr::from_ptr(ref_name).to_bytes()).unwrap();
+            let ref_name = std::str::from_utf8(CStr::from_ptr(ref_name).to_bytes()).unwrap();
             let remote_url = CStr::from_ptr(remote_url).to_bytes();
             let oid = Binding::from_raw(oid);
             let is_merge = is_merge == 1;
@@ -543,7 +543,7 @@ impl Repository {
     /// If there is no namespace, Ok(None) is returned.
     pub fn namespace(&self) -> Result<Option<&str>, Error> {
         match self.namespace_bytes() {
-            Some(nb) => str::from_utf8(nb).map(|s| Some(s)).map_err(|e| e.into()),
+            Some(nb) => std::str::from_utf8(nb).map(|s| Some(s)).map_err(|e| e.into()),
             None => Ok(None),
         }
     }
@@ -583,7 +583,7 @@ impl Repository {
         unsafe {
             let buf = Buf::new();
             try_call!(raw::git_repository_message(buf.raw(), self.raw));
-            Ok(str::from_utf8(&buf).unwrap().to_string())
+            Ok(std::str::from_utf8(&buf).unwrap().to_string())
         }
     }
 
@@ -1117,7 +1117,7 @@ impl Repository {
     ) -> Result<Option<&str>, Error> {
         Ok(self
             .get_attr_bytes(path, name, flags)?
-            .and_then(|a| str::from_utf8(a).ok()))
+            .and_then(|a| std::str::from_utf8(a).ok()))
     }
 
     /// Get the value of a git attribute for a path as a byte slice.
@@ -1372,7 +1372,7 @@ impl Repository {
 
     /// Create a commit object and return that as a Buf.
     ///
-    /// That can be converted to a string like this `str::from_utf8(&buf).unwrap().to_string()`.
+    /// That can be converted to a string like this `std::str::from_utf8(&buf).unwrap().to_string()`.
     /// And that string can be passed to the `commit_signed` function,
     /// the arguments behave the same as in the `commit` function.
     pub fn commit_create_buffer(
@@ -2467,7 +2467,7 @@ impl Repository {
         unsafe {
             try_call!(raw::git_note_default_ref(ret.raw(), self.raw));
         }
-        Ok(str::from_utf8(&ret).unwrap().to_string())
+        Ok(std::str::from_utf8(&ret).unwrap().to_string())
     }
 
     /// Creates a new iterator for notes in this repository.

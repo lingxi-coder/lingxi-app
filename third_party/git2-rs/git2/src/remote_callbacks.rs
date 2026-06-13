@@ -319,11 +319,11 @@ extern "C" fn credentials_cb(
                 .as_mut()
                 .ok_or(raw::GIT_PASSTHROUGH as c_int)?;
             *ret = ptr::null_mut();
-            let url = str::from_utf8(CStr::from_ptr(url).to_bytes())
+            let url = std::str::from_utf8(CStr::from_ptr(url).to_bytes())
                 .map_err(|_| raw::GIT_PASSTHROUGH as c_int)?;
             let username_from_url = match crate::opt_bytes(&url, username_from_url) {
                 Some(username) => {
-                    Some(str::from_utf8(username).map_err(|_| raw::GIT_PASSTHROUGH as c_int)?)
+                    Some(std::str::from_utf8(username).map_err(|_| raw::GIT_PASSTHROUGH as c_int)?)
                 }
                 None => None,
             };
@@ -398,7 +398,7 @@ extern "C" fn update_tips_cb(
             Some(ref mut c) => c,
             None => return true,
         };
-        let refname = str::from_utf8(CStr::from_ptr(refname).to_bytes()).unwrap();
+        let refname = std::str::from_utf8(CStr::from_ptr(refname).to_bytes()).unwrap();
         let a = Binding::from_raw(a);
         let b = Binding::from_raw(b);
         callback(refname, a, b)
@@ -423,7 +423,7 @@ extern "C" fn certificate_check_cb(
             None => return Ok(CertificateCheckStatus::CertificatePassthrough),
         };
         let cert = Binding::from_raw(cert);
-        let hostname = str::from_utf8(CStr::from_ptr(hostname).to_bytes()).unwrap();
+        let hostname = std::str::from_utf8(CStr::from_ptr(hostname).to_bytes()).unwrap();
         callback(&cert, hostname)
     });
     match ok {
@@ -448,11 +448,11 @@ extern "C" fn push_update_reference_cb(
             Some(ref mut c) => c,
             None => return 0,
         };
-        let refname = str::from_utf8(CStr::from_ptr(refname).to_bytes()).unwrap();
+        let refname = std::str::from_utf8(CStr::from_ptr(refname).to_bytes()).unwrap();
         let status = if status.is_null() {
             None
         } else {
-            Some(str::from_utf8(CStr::from_ptr(status).to_bytes()).unwrap())
+            Some(std::str::from_utf8(CStr::from_ptr(status).to_bytes()).unwrap())
         };
         match callback(refname, status) {
             Ok(()) => 0,

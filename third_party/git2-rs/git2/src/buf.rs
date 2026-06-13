@@ -36,7 +36,7 @@ impl Buf {
 
     /// Attempt to view this buffer as a string slice.
     pub fn as_str(&self) -> Result<&str, Error> {
-        str::from_utf8(&**self).map_err(|e| e.into())
+        std::str::from_utf8(&**self).map_err(|e| e.into())
     }
 }
 

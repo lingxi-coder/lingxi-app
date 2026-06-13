@@ -45,7 +45,7 @@ impl<'repo> AnnotatedCommit<'repo> {
 
     /// Get the refname that the given git_annotated_commit refers to
     pub fn refname(&self) -> Result<&str, Error> {
-        str::from_utf8(self.refname_bytes()).map_err(|e| e.into())
+        std::str::from_utf8(self.refname_bytes()).map_err(|e| e.into())
     }
 
     /// Get the refname that the given git_annotated_commit refers to.
@@ -362,7 +362,7 @@ impl MergeFileResult {
     /// returns `Ok(None)` if a filename conflict would occur
     pub fn path(&self) -> Result<Option<&str>, Error> {
         match self.path_bytes() {
-            Some(pb) => str::from_utf8(pb).map(|s| Some(s)).map_err(|e| e.into()),
+            Some(pb) => std::str::from_utf8(pb).map(|s| Some(s)).map_err(|e| e.into()),
             None => Ok(None),
         }
     }

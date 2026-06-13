@@ -290,7 +290,7 @@ impl<'tree> TreeEntry<'tree> {
 
     /// Get the filename of a tree entry
     pub fn name(&self) -> Result<&str, Error> {
-        str::from_utf8(self.name_bytes()).map_err(|e| e.into())
+        std::str::from_utf8(self.name_bytes()).map_err(|e| e.into())
     }
 
     /// Get the filename of a tree entry

@@ -30,7 +30,7 @@ impl PushUpdate<'_> {
 
     /// Returns the source name of the reference.
     pub fn src_refname(&self) -> Result<&str, Error> {
-        str::from_utf8(self.src_refname_bytes()).map_err(|e| e.into())
+        std::str::from_utf8(self.src_refname_bytes()).map_err(|e| e.into())
     }
 
     /// Returns the name of the reference to update on the server as a byte slice.
@@ -40,7 +40,7 @@ impl PushUpdate<'_> {
 
     /// Returns the name of the reference to update on the server.
     pub fn dst_refname(&self) -> Result<&str, Error> {
-        str::from_utf8(self.dst_refname_bytes()).map_err(|e| e.into())
+        std::str::from_utf8(self.dst_refname_bytes()).map_err(|e| e.into())
     }
 
     /// Returns the current target of the reference.

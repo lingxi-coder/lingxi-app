@@ -27,7 +27,7 @@ impl<'remote> Refspec<'remote> {
 
     /// Get the destination specifier.
     pub fn dst(&self) -> Result<&str, Error> {
-        str::from_utf8(self.dst_bytes()).map_err(|e| e.into())
+        std::str::from_utf8(self.dst_bytes()).map_err(|e| e.into())
     }
 
     /// Get the destination specifier, in bytes.
@@ -43,7 +43,7 @@ impl<'remote> Refspec<'remote> {
 
     /// Get the source specifier.
     pub fn src(&self) -> Result<&str, Error> {
-        str::from_utf8(self.src_bytes()).map_err(|e| e.into())
+        std::str::from_utf8(self.src_bytes()).map_err(|e| e.into())
     }
 
     /// Get the source specifier, in bytes.
@@ -64,7 +64,7 @@ impl<'remote> Refspec<'remote> {
 
     /// Get the refspec's string.
     pub fn str(&self) -> Result<&str, Error> {
-        str::from_utf8(self.bytes()).map_err(|e| e.into())
+        std::str::from_utf8(self.bytes()).map_err(|e| e.into())
     }
 
     /// Get the refspec's string as a byte array

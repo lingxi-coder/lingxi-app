@@ -51,7 +51,7 @@ impl<'string> AttrValue<'string> {
     pub fn from_bytes(value: Option<&'string [u8]>) -> Self {
         let mut value = Self::always_bytes(value);
         if let Self::Bytes(bytes) = value {
-            if let Ok(string) = str::from_utf8(bytes) {
+            if let Ok(string) = std::str::from_utf8(bytes) {
                 value = Self::String(string);
             }
         }

@@ -63,7 +63,7 @@ impl<'a> Signature<'a> {
 
     /// Gets the name on the signature.
     pub fn name(&self) -> Result<&str, Error> {
-        str::from_utf8(self.name_bytes()).map_err(|e| e.into())
+        std::str::from_utf8(self.name_bytes()).map_err(|e| e.into())
     }
 
     /// Gets the name on the signature as a byte slice.
@@ -73,7 +73,7 @@ impl<'a> Signature<'a> {
 
     /// Gets the email on the signature.
     pub fn email(&self) -> Result<&str, Error> {
-        str::from_utf8(self.email_bytes()).map_err(|e| e.into())
+        std::str::from_utf8(self.email_bytes()).map_err(|e| e.into())
     }
 
     /// Gets the email on the signature as a byte slice.

@@ -166,7 +166,7 @@ impl<'repo> Reference<'repo> {
                 flags.bits()
             ));
             let s = &dst[..dst.iter().position(|&a| a == 0).unwrap()];
-            Ok(str::from_utf8(s).unwrap().to_owned())
+            Ok(std::str::from_utf8(s).unwrap().to_owned())
         }
     }
 
@@ -218,7 +218,7 @@ impl<'repo> Reference<'repo> {
 
     /// Get the full name of a reference.
     pub fn name(&self) -> Result<&str, Error> {
-        str::from_utf8(self.name_bytes()).map_err(|e| e.into())
+        std::str::from_utf8(self.name_bytes()).map_err(|e| e.into())
     }
 
     /// Get the full name of a reference.
@@ -231,7 +231,7 @@ impl<'repo> Reference<'repo> {
     /// This will transform the reference name into a name "human-readable"
     /// version. If no shortname is appropriate, it will return the full name.
     pub fn shorthand(&self) -> Result<&str, Error> {
-        str::from_utf8(self.shorthand_bytes()).map_err(|e| e.into())
+        std::str::from_utf8(self.shorthand_bytes()).map_err(|e| e.into())
     }
 
     /// Get the full shorthand of a reference.
@@ -260,7 +260,7 @@ impl<'repo> Reference<'repo> {
     /// May return `Ok(None)` if the reference is not symbolic.
     pub fn symbolic_target(&self) -> Result<Option<&str>, Error> {
         match self.symbolic_target_bytes() {
-            Some(stb) => str::from_utf8(stb).map(|s| Some(s)).map_err(|e| e.into()),
+            Some(stb) => std::str::from_utf8(stb).map(|s| Some(s)).map_err(|e| e.into()),
             None => Ok(None),
         }
     }
@@ -506,7 +506,7 @@ impl<'repo, 'references> Iterator for ReferenceNames<'repo, 'references> {
         unsafe {
             try_call_iter!(raw::git_reference_next_name(&mut out, self.inner.raw));
             let bytes = crate::opt_bytes(self, out).unwrap();
-            let s = match str::from_utf8(bytes) {
+            let s = match std::str::from_utf8(bytes) {
                 Ok(s) => s,
                 Err(e) => return Some(Err(e.into())),
             };

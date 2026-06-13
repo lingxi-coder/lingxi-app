@@ -209,7 +209,7 @@ impl<'blame> BlameHunk<'blame> {
     /// `Ok(None)` may be returned if there is no summary.
     pub fn summary(&self) -> Result<Option<&str>, Error> {
         match self.summary_bytes() {
-            Some(sb) => str::from_utf8(sb).map(|s| Some(s)).map_err(|e| e.into()),
+            Some(sb) => std::str::from_utf8(sb).map(|s| Some(s)).map_err(|e| e.into()),
             None => Ok(None),
         }
     }

@@ -924,7 +924,7 @@ impl ObjectType {
         unsafe {
             let ptr = call!(raw::git_object_type2string(*self)) as *const _;
             let data = CStr::from_ptr(ptr).to_bytes();
-            str::from_utf8(data).unwrap()
+            std::str::from_utf8(data).unwrap()
         }
     }
 

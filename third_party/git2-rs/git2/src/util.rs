@@ -104,7 +104,7 @@ pub fn bytes2path(b: &[u8]) -> &Path {
 #[cfg(windows)]
 pub fn bytes2path(b: &[u8]) -> &Path {
     use std::str;
-    Path::new(str::from_utf8(b).unwrap())
+    Path::new(std::str::from_utf8(b).unwrap())
 }
 
 /// A class of types that can be converted to C strings.

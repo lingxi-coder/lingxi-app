@@ -4,7 +4,9 @@
 
 **Goal:** Close the remaining actionable rev2.10 leftovers: terminal-429 state/emit parity (status-change emit + terminal-only snapshot + 429 raw extraction, one coherent change) and the A6 statusline execution pump (the missing piece that lets `rate_limits` reach user scripts).
 
-**Architecture:** (1) The adapter's per-attempt 429 recording becomes a pending slot promoted to the real caches only at the TERMINAL 429 (matching TS `extractQuotaStatusFromError`, which runs in the catch handler only), now also extracting raw utilization from the error headers; the conversation drivers then fire the existing emit-on-change helpers before returning the enriched error — giving the TS `emitStatusChange` parity (the TUI renders BOTH the terminal copy and the event-driven banner, as TS does). (2) A third pump in the TUI root mirrors the bridge/multiagent pump pattern: TurnEnded sets a dirty flag, a 300ms debounce loop snapshots the payload inputs, runs the statusline command on the blocking pool with a generation guard (TS abort analog), and writes `status_line_text` back.
+**Architecture:** (1) The adapter's per-attempt 429 recording becomes a pending slot promoted to the real caches only at the TERMINAL 429 (matching TS `extractQuotaStatusFromError`, which on the drive path runs in the terminal catch handler only); raw utilization is extracted from the error headers UNCONDITIONALLY (TS extracts raw for any error headers, independent of the limits gate); the conversation drivers then fire the existing emit-on-change helpers before returning the enriched error — giving the TS `emitStatusChange` parity (the TUI renders BOTH the terminal copy and the event-driven banner, as TS does). (2) A third pump in the TUI root mirrors the bridge/multiagent pump pattern: TurnEnded sets a dirty flag, a 300ms debounce loop snapshots the payload inputs, runs the statusline command on the blocking pool (single-flight — no generation guard needed: the loop awaits each command inline, and re-trigger rides the dirty flag), and writes `status_line_text` back.
+
+**Pre-implementation plan-review:** this plan was adversarially pressure-tested (4-lens workflow) against the TS and live code before implementation. Load-bearing corrections already folded in: the headerless-429 emit is a DOCUMENTED DIVERGENCE (not a faithful `extractQuotaStatusFromError` port — see B1 in Task 1); the settings-wiring uses `read_settings_map` raw JSON (statusLine is NOT a typed `SettingsJson` field — see Task 2); the emit helpers are no-arg `&self` async methods reached by de-sugaring sync `map_err` sites; promotion needs drive-entry reset + `matches!(RateLimited)` gating; raw is uncoupled from the limits gate. Frozen-crate-safe: both tasks reuse existing `OutputEvent::RateLimit`/`RawUtilization`, `RateLimitInfo::from_429_error_headers`, `RawUtilization::from_headers`, `enrich_rate_limited_error` — NO new variants, NO traits/protocol edits.
 
 **Tech Stack:** Rust workspace (`lingxi-code/`). Ground truth: vendored claude-code TS at `/Users/luolingfeng/Projects/LingXi-Next/claude-code/` (read-only — primary checkout).
 
@@ -24,22 +26,23 @@
 
 | Topic | File (primary checkout, READ ONLY) | Key lines |
 |---|---|---|
-| Terminal-429 state update | `claude-code/src/services/claudeAiLimits.ts` | 487-515 (`extractQuotaStatusFromError`: terminal catch handler ONLY; updates `rawUtilization` from error headers :500; builds limits via `computeNewLimitsFromHeaders` then FORCES rejected :507; `emitStatusChange` on change :509-511) |
-| Where TS calls it | `claude-code/src/services/api/claude.ts` | grep `extractQuotaStatusFromError` (~:2710, :2765 — the terminal catch, NOT the retry loop) |
+| Terminal-429 state update (TS REFERENCE — Rust ports a NARROWER gate, see B1) | `claude-code/src/services/claudeAiLimits.ts` | 487-515 (`extractQuotaStatusFromError`: updates `rawUtilization` from error headers :500 for ANY headers; builds limits via `computeNewLimitsFromHeaders` only when `error.headers` present; then FORCES `status='rejected'` at :507 **UNCONDITIONALLY — outside the `if (error.headers)` block**; `emitStatusChange` if `!isEqual` :509-511 — so a HEADERLESS terminal 429 still emits a bare rejected). DIVERGENCE the Rust takes: our `last_rate_limit` cache has no "bare rejected, no windows" representation, so the Rust path promotes/emits only when the unified-header gate (`from_429_error_headers`/errors.ts:480) passes; a headerless terminal 429 emits no RateLimit event (the terminal error copy already conveys rejection). |
+| The MESSAGE gate the Rust actually ports | `claude-code/src/services/api/errors.ts` | 480-516 (builds a local limits object from error headers, gate `rateLimitType \|\| overageStatus`, status forced rejected) — this is `RateLimitInfo::from_429_error_headers`, already in the tree (batch 5) |
+| Where TS calls `extractQuotaStatusFromError` | `claude-code/src/services/api/claude.ts` | ~:2710, :2765 — on the drive path only in the terminal catch (post-retry), NOT the retry loop. (A 3rd call exists in `checkQuotaStatus` pre-flight, claudeAiLimits.ts:246 — not modeled by the Rust adapter.) |
 | Statusline pump | `claude-code/src/components/StatusLine.tsx` | 138-258 (debounce 300ms on lastAssistantMessageId/permissionMode/vimMode/model change; abortable `executeStatusLineCommand`; set statusLineText only when text changed; errors silently ignored) |
 | Statusline trust gate | `claude-code/src/utils/hooks.ts` | 286-296 (`shouldSkipHookDueToTrust` — trust dialog state; NO Rust port of `hasTrustDialogAccepted` exists) |
 
 ## Survey facts (verified — do NOT re-derive)
 
 - Batch-5 T6 layout (`orchestrator/src/provider_adapter.rs`): `record_rate_limit_from_429(headers)` called at the two 429 decode sites (non-stream `decode_err` arm ~:757-region; stream connect ≥400 ~:960-region); it currently writes `last_rate_limit` PER-ATTEMPT (documented divergence, this batch fixes it) and composes/caches `last_429_message`; `last_429_message` cleared on success at both success seams; `last_raw_utilization` assigned only by `record_rate_limit_from_headers` (success paths).
-- Conversation drivers: `enrich_rate_limited_error` applied at 4 sites covering all 6 public run_turn drivers; `emit_rate_limit_if_changed` + `emit_raw_utilization_if_changed` helpers exist on `ConversationOrchestrator` and are called at the two SUCCESS seams (`turn_loop.rs:376-378`, streaming `conversation.rs:~2262`); both read `self.api` accessors (`last_rate_limit_full()` / `last_raw_utilization()`).
-- Tests pinning current behavior: `orchestrator/tests/rate_limit_terminal_429_test.rs` (3), `rate_limit_emit_test.rs` (10), adapter unit tests in provider_adapter — terminal-only promotion will require updating any test that asserted the per-attempt `last_rate_limit` write; that change is THE SPEC (cite claudeAiLimits.ts:487 terminal-only), document in the test.
-- TUI pump pattern (`tui/src/root.rs:1855-1870`): `hooks.use_future` + `Arc<Mutex<AppState>>` + drain loop + `tick.set(tick+1)` redraw; a 100ms `tokio::time::interval` ticker exists nearby (:1924); `spawn_blocking` precedent at :1366/:1407.
-- `apply_event` (`tui/src/streaming.rs:27`) handles `TurnEvent::TurnEnded` (:290 region); takes `&mut AppState` + `&Notify`.
-- Statusline pieces ALL exist but unwired: `StatusLineConfig::from_settings_value` / `should_run(trusted)` (fail-closed bool param), `build_status_line_input(9 args incl. raw_utilization)`, `run_status_line_command(command, stdin_json, timeout)` (sync, std::process), `format_custom_status_line`, `AppState.status_line_text` (rendered via app.rs:1068 → repl.rs:212), `AppState.status_line_config` + `load_status_line_setting(&settings_json)` (NO caller yet), `AppState.raw_utilization`.
-- NO Rust trust-store port exists (`hasTrustDialogAccepted` unported; `hooks/src/executor.rs:457` comment says workspace trust is handled "upstream"). Settings `trustedDirectories` exists but is a different mechanism (claude-code gates the statusline on the trust DIALOG, not trustedDirectories).
-- `AppState.status` is a `StatusSnapshot` (model, cwd, cost string, context pct — read its fields in state.rs when wiring payload inputs); `parse_cost_usd` exists for the cost string.
-- TS statusline timeout: claude-code uses a 5s default in `executeStatusLineCommand` (VERIFY in utils/hooks.ts when implementing — grep `STATUS_LINE` constants; use whatever the TS uses).
+- Conversation drivers: `enrich_rate_limited_error` (aka `enrich_api_error`) applied at 4 sites covering all 6 public run_turn drivers — `conversation.rs:1376`, `:1957`, `:2495` (all `.map_err(|e| self.enrich_api_error(e))` SYNC closures), and `:2660` (sync match arm `Err(e) => Err(self.enrich_api_error(e))`). `:2495` and `:2660` are tail-position. The emit helpers are `async fn emit_rate_limit_if_changed(&self)` / `emit_raw_utilization_if_changed(&self)` — **NO args** (conversation.rs:709, :755), read `self.api`/`self.output`. They are called at the two SUCCESS seams (`turn_loop.rs:376-378`, streaming `conversation.rs:~2262`). ⇒ You CANNOT `.await` inside the sync `map_err` closures; each site must be de-sugared (see Task 1 step 3).
+- Tests: NO existing test pins a PER-ATTEMPT `last_rate_limit` write. The only post-429 snapshot assertion is `terminal_429_with_unified_headers_records_limits_copy` (provider_adapter.rs:2104) — it drives a TERMINAL 429 (FakeTransport), so it SURVIVES terminal-only promotion UNCHANGED and becomes the regression guard that `promote_pending_429` fires. Do NOT weaken it. `rate_limit_emit_test.rs` uses `MockApiClient` + `set_rate_limit_full` (stubs `last_rate_limit_full()` directly, bypassing `promote_pending_429`) — so an "emit" test there does NOT exercise promotion (see Task 1 test split, I4).
+- TUI pump pattern (`tui/src/root.rs:1855-1870`): `hooks.use_future` + `state: Arc<tokio::sync::Mutex<AppState>>` (TOKIO mutex — `let mut st = state.lock().await`) + drain loop + `tick.set(tick.get().wrapping_add(1))` redraw; a 100ms `tokio::time::interval` ticker exists nearby (:1924, `MissedTickBehavior::Skip`); `spawn_blocking` precedent at :1366/:1407 (its `.await` yields a `Result<T, JoinError>` — unwrap via `.unwrap_or_default()` per :1370).
+- `apply_event` (`tui/src/streaming.rs:27`) — the PRODUCTION `TurnEvent::TurnEnded(_outcome)` handler is at **streaming.rs:92** (line 290 is a test fixture); takes `&mut AppState` + `&Notify`. Set `status_line_dirty = true` here.
+- Statusline pieces ALL exist but unwired: `StatusLineConfig::from_settings_value` / `should_run(trusted)` (fail-closed bool param), `build_status_line_input(9 args incl. `raw_utilization: Option<&RawUtilizationSnapshot>`)`, `run_status_line_command(command, stdin_json, timeout)` (sync, std::process — **already runs stdout through `format_custom_status_line` and returns FORMATTED text**, status_line_command.rs:251-256; do NOT format again), `STATUS_LINE_TIMEOUT = Duration::from_secs(5)` const (status_line_command.rs:64 — matches TS hooks.ts 5000ms; reuse it, don't re-derive), `format_custom_status_line` (lives in status_line.rs:131 — not needed if you assign `run_status_line_command`'s output directly), `AppState.status_line_text` (rendered via app.rs:1068 → repl.rs:212), `AppState.status_line_config` + `load_status_line_setting(&self, settings: &serde_json::Value)` (state.rs:928 — NO caller yet; needs a raw `Value`), `AppState.raw_utilization`.
+- **Settings wiring (B2):** `statusLine` is NOT a typed `SettingsJson` field (schema.rs drops unknown keys), so `Settings::load`/`load_merged_output_style` CANNOT carry it. Use the raw-map precedent `migrations::settings_update::read_settings_map` (returns `BTreeMap<String, Value>` per tier; already used at apps/cli/src/mode.rs:254-265). Read User+Local(+project), merge the `statusLine` key in claude-code precedence (Local over User), pass that `Value` to `load_status_line_setting`.
+- NO Rust trust-store port exists (`hasTrustDialogAccepted` unported; `hooks/src/executor.rs:457` comment says workspace trust is handled "upstream"). Settings `trustedDirectories` is a DIFFERENT mechanism (claude-code gates the statusline on the trust DIALOG, not trustedDirectories).
+- `AppState.status` is a `StatusSnapshot` (state.rs:421) with `model: String` (one string — reuse for both `model_id`+`model_display_name`) and `cwd: PathBuf` (reuse for both `current_dir`+`project_dir`; document the divergence); cost string + context pct also there; `parse_cost_usd` recovers the dollar value.
 
 ## Deferred (record in spec, Task 3)
 
@@ -57,40 +60,71 @@
 - Modify: `lingxi-code/orchestrator/src/model/rate_limit.rs` (only if a helper is needed; prefer none)
 - Tests: `lingxi-code/orchestrator/tests/rate_limit_terminal_429_test.rs` (extend), adapter unit tests
 
-**Design (port of `extractQuotaStatusFromError`, claudeAiLimits.ts:487-515):**
+**Design.** TS reference is `extractQuotaStatusFromError` (claudeAiLimits.ts:487-515) but the Rust ports a NARROWER gate (the `from_429_error_headers` message gate) — see the ground-truth table and B1 below. Read the existing `record_rate_limit_from_429` (provider_adapter.rs:~564-593) and both drive fns FIRST.
 
-1. **Pending slot.** `record_rate_limit_from_429` no longer writes `last_rate_limit`. Instead it stores `pending_429: Mutex<Option<Pending429>>` where
+1. **Pending slot.** `record_rate_limit_from_429` no longer writes `last_rate_limit`. Instead it stores `pending_429: Mutex<Option<Pending429>>`. **Split the existing `.map(|info| {...})` closure (provider_adapter.rs:570-593):** that closure currently couples the snapshot write WITH `last_429_message` composition — keep the message composition exactly as-is (per-attempt compose+cache is unobservable; do NOT touch its tests), but move ONLY the snapshot into the pending slot. **Uncouple `raw` from the limits gate (I3):** TS runs `extractRawUtilization(headersToUse)` for ANY error headers (ts:500), independent of the `computeNewLimitsFromHeaders` gate. So compute `raw = RawUtilization::from_headers(&hvec)` UNCONDITIONALLY (the closure already builds `hvec`), and store the pending slot whenever EITHER the limits gate passes OR raw is non-empty:
 ```rust
 /// 429-attempt state held until the retry loop declares the error TERMINAL —
-/// TS only updates module state in the catch handler
+/// TS updates module state only in the terminal catch handler
 /// (`extractQuotaStatusFromError`, claudeAiLimits.ts:487), never on retried
-/// attempts. Promoted by [`Self::promote_pending_429`]; discarded on any
-/// subsequent success (the existing success seams overwrite/clear).
+/// attempts. Promoted by [`Self::promote_pending_429`]; discarded on
+/// drive-entry and on any subsequent success.
 struct Pending429 {
-    /// Forced-rejected limits snapshot (`from_429_error_headers`).
-    info: RateLimitInfo,
-    /// Raw per-window utilization from the SAME error headers
-    /// (`extractRawUtilization` runs on the error pass too, ts:500).
+    /// Forced-rejected limits snapshot (`from_429_error_headers`); `None`
+    /// when the unified-header limits gate did not pass but raw windows did.
+    info: Option<RateLimitInfo>,
+    /// Raw per-window utilization from the SAME error headers, computed
+    /// UNCONDITIONALLY (`extractRawUtilization`, ts:500 — independent of the
+    /// limits gate).
     raw: RawUtilization,
 }
 ```
-`last_429_message` composition stays exactly as-is (per-attempt compose+cache is unobservable — it is only read after a terminal RateLimited error; do NOT touch its tests).
-A 429 whose headers fail the gate (`from_429_error_headers` → None) clears the pending slot (mirror of the current message-clearing behavior) — a later headerless 429 must not promote an earlier attempt's snapshot.
+A 429 whose headers yield NEITHER a gated `info` NOR any raw window clears the pending slot (→ `None`) — a later headerless 429 must not leave a stale earlier-attempt snapshot.
 
-2. **Promotion at terminal.** New `fn promote_pending_429(&self)` on the adapter: takes the pending slot (`.take()`); if Some: `*last_rate_limit.lock() = Some(info)`; `*last_raw_utilization.lock() = Some(raw)` ONLY when `raw != RawUtilization::default()` (TS assigns unconditionally — but our raw cache convention never stores/emits the empty snapshot; keep convention, document the line). Call sites: in BOTH drive fns (`drive_non_stream_seeded_with_chain`, `drive_stream`), at every `return Err(e)` path where `e` matches `LlmError::RateLimited { .. }` — find them all (the terminal next_step Fail branch + any early-return). Prefer ONE choke point per drive fn if the code shape allows (e.g. wrap the final error return); do not call it on retried attempts.
-Also: SUCCESS must discard a stale pending slot — add `*pending_429.lock() = None` next to the existing `last_429_message` clearing at both success seams.
+2. **Promotion at terminal + drive-entry reset (I2).** New `fn promote_pending_429(&self)` on the adapter: `.take()` the slot; if `Some`: when `info` is `Some`, `*last_rate_limit.lock() = Some(info)`; when `raw != RawUtilization::default()`, `*last_raw_utilization.lock() = Some(raw)` (our raw cache convention never stores the empty snapshot — document the line; TS assigns unconditionally). Promotion is idempotent (`.take()` empties the slot). **Hook points — NAMED, gated on `matches!(e, LlmError::RateLimited { .. })`** (do NOT promote on non-RateLimited terminals like `RepeatedOverloaded`):
+   - non-stream `drive_non_stream_seeded_with_chain`: the `DriveStep::Terminal` arm, right before `return Err(decode_err)` (~:845).
+   - stream `drive_stream`: the post-RetryAfter terminal `return Err(decode_err)` (~:995).
+   (Verify these are the actual decode-terminal returns when you read the fns; gate each on the RateLimited match.)
+   **Drive-entry reset:** add `*pending_429.lock() = None` at the TOP of BOTH drive fns. Rationale (verified): the slot is a cross-call Mutex; the Fallback/AdjustMaxTokens arms `continue` without clearing, the transport-error arm (~:713) surfaces a RateLimited that never recorded headers, and `RepeatedOverloaded` returns a non-RateLimited terminal leaving `pending=Some` — so without a per-drive reset a later turn could promote a stale earlier-turn snapshot. TS has no such window (`extractQuotaStatusFromError` reads only the current error's headers).
+   **Success-clear:** add `*pending_429.lock() = None` next to the existing `last_429_message` clearing at BOTH success seams (covers the retried-429-then-success case).
 
-3. **Emit at the terminal error (conversation.rs).** Where `enrich_rate_limited_error` runs (the 4 driver sites), when the error IS the rate-limited one (i.e. enrichment matched — both `ApiCall(RateLimited)` and the enriched `RateLimitRejected` count), call `self.emit_rate_limit_if_changed(output).await` and `self.emit_raw_utilization_if_changed(output).await` BEFORE returning the error (adapt to the helpers' actual signatures). This is the `emitStatusChange` parity (ts:509-511): the promoted rejected snapshot flows out as an `OutputEvent::RateLimit`, so the TUI shows the banner + the T5 overage notice when applicable, IN ADDITION to the terminal error copy — exactly what TS renders (assistant error message + RateLimitMessage component). Document this at the call site.
-If the emit helpers take no args / different shape, hook in however the success seams do it — same calls, same order.
+3. **Emit at the terminal error (conversation.rs) — de-sugar the 4 sync sites (I1).** The emit helpers are no-arg `async fn …(&self)` reading `self.api`/`self.output`; the 4 enrich sites are SYNC (`.map_err`/match-arm), so you must restructure each to bind-then-await. The shape (apply at all 4: `:1376`, `:1957`, `:2495`, `:2660`):
+```rust
+// before:  RESULT.map_err(|e| self.enrich_api_error(e))
+// after:
+let result = RESULT;                  // bind the Result<_, OrchestratorError-or-LlmError>
+if let Err(e) = &result {
+    if matches!(e, /* the RateLimited / RateLimitRejected discriminant this site carries */) {
+        // emitStatusChange parity (claudeAiLimits.ts:509-511): the drive fn
+        // already promoted the pending 429 into self.api's caches, so these
+        // emit-on-change helpers flow the rejected snapshot out as an
+        // OutputEvent::RateLimit (+ RawUtilization), giving the TUI the banner
+        // + the T5 overage notice ALONGSIDE the terminal error copy — exactly
+        // what TS renders (assistant error message + RateLimitMessage).
+        self.emit_rate_limit_if_changed().await;
+        self.emit_raw_utilization_if_changed().await;
+    }
+}
+result.map_err(|e| self.enrich_api_error(e))
+```
+   For `:2495`/`:2660` (tail-position) use the same bind-then-match-then-return scaffold. Check each site's exact error type (some carry `LlmError`, some already `OrchestratorError`) and match the right discriminant — the emit must fire for the rate-limited terminal whether it surfaces as `ApiCall(RateLimited)` or enriched `RateLimitRejected`. The emits run AFTER the drive fn returned (so promotion already happened) and BEFORE `enrich_api_error` rewrites the message.
 
-4. **Doc updates**: `record_rate_limit_from_429`'s divergence comment (per-attempt → now terminal-only, divergence CLOSED), `last_raw_utilization`'s "NOT recorded on 429" sentence (now it is, at terminal), spec follow-ups list shrinks (Task 3).
+4. **Doc updates**: `record_rate_limit_from_429` divergence comment (per-attempt → now terminal-only via the pending slot; divergence CLOSED); `last_raw_utilization` "NOT recorded on 429" sentence → now recorded at terminal; B1 divergence comment (headerless-429 emits no RateLimit event — see test); spec follow-ups shrink (Task 3).
 
-**Tests (TDD; extend the terminal-429 + emit integration suites + adapter units):**
-- `retried_429_does_not_update_limits_snapshot` — a 429 followed by a SUCCESS within the same drive: `last_rate_limit_full()` reflects the success headers (or None if success headerless), NOT the 429; pending slot cleared. (Drive-level test using whatever fake transport the adapter unit tests use — read them first.)
-- `terminal_429_promotes_snapshot_and_raw` — drive exhausts retries on 429-with-headers: `last_rate_limit_full()` has status rejected; `last_raw_utilization()` has the windows from the error headers.
-- `terminal_429_emits_rate_limit_event` — end-to-end (rate_limit_emit_test.rs style): run_turn fails on terminal 429 → exactly one `OutputEvent::RateLimit` with status rejected AND (if windows present) one `RawUtilization` event; the turn error is still the enriched copy.
-- `headerless_terminal_429_emits_nothing_new` — no unified headers on the 429: no RateLimit event from the error path (the pending slot was None), generic error string surfaces.
-- UPDATE existing tests that pinned per-attempt `last_rate_limit` writes (cite ts:487 terminal-only in the update).
+**B1 — headerless-429 is a DOCUMENTED DIVERGENCE, not parity.** Do NOT claim a faithful `extractQuotaStatusFromError` port. TS forces `status='rejected'` and emits even on a headerless terminal 429 (ts:506-507, outside the headers block); the Rust promotes/emits only when the header gate passes, because `last_rate_limit` has no "bare rejected, no windows" representation and the terminal error copy already conveys rejection. State this in code + test comments.
+
+**Tests (TDD; RED first). Two layers that do NOT meet end-to-end with current harnesses (I4) — keep them separate:**
+
+*Adapter-level (FakeTransport drive sequences — read the existing `provider_adapter.rs` FakeTransport tests like `terminal_429_with_unified_headers_records_limits_copy:2104` first and mirror them):*
+- `terminal_429_promotes_snapshot_and_raw` — drive exhausts retries on a 429 with unified headers (limits + per-window): `last_rate_limit_full()` status rejected; `last_raw_utilization()` has the windows from the error headers.
+- `retried_429_does_not_update_limits_snapshot` — `[429-with-headers, then SUCCESS]` in one drive: `last_rate_limit_full()` reflects the success (or None if headerless), NOT the 429; pending slot cleared.
+- `stale_pending_429_not_promoted_across_drives` (the I2 guard) — drive A = `[429-with-headers, then RepeatedOverloaded terminal]` (non-RateLimited terminal, leaves no promotion); drive B = a terminal that is RateLimited but recorded NO fresh 429 headers (transport-surfaced) → assert B does NOT promote A's snapshot (drive-entry reset cleared it).
+- `terminal_429_with_unified_headers_records_limits_copy` (existing, :2104) must continue to PASS UNCHANGED — it is the load-bearing guard that `promote_pending_429` fires. Do NOT weaken it.
+
+*Emit-on-change (MockApiClient + `set_rate_limit_full`/`set_raw_utilization` in `rate_limit_emit_test.rs` style) — these stub the snapshot directly and do NOT exercise promotion; they verify the conversation-side de-sugared emit fires on a rate-limited terminal:*
+- `terminal_rate_limited_error_emits_rate_limit_event` — a run_turn that fails with a rate-limited terminal, with the mock's `last_rate_limit_full()` set to a rejected snapshot → exactly one `OutputEvent::RateLimit` (status rejected) AND (when raw set) one `RawUtilization`; the returned error is still the enriched copy. (Do NOT call this an "end-to-end promotion" test — it is the emit-seam test.)
+- `non_rate_limited_terminal_emits_no_rate_limit_event` — a terminal that is NOT rate-limited (e.g. Overloaded) → no RateLimit event from the error path.
+- `headerless_terminal_429_emits_no_rate_limit_event` (B1 divergence) — rate-limited terminal but mock snapshot is `None`/default → no RateLimit event; pin with a comment citing the B1 divergence (TS would emit a bare rejected).
 
 **Verify:** `cargo test -p orchestrator` full; clippy; `cargo check --workspace`.
 **Commit:** `feat(orchestrator): terminal-only 429 state promotion + status-change emit parity`
@@ -101,54 +135,77 @@ If the emit helpers take no args / different shape, hook in however the success 
 
 **Files:**
 - Modify: `lingxi-code/tui/src/root.rs` (third pump block)
-- Modify: `lingxi-code/tui/src/streaming.rs` (dirty flag on TurnEnded)
-- Modify: `lingxi-code/tui/src/state.rs` (dirty flag field + settings wiring call site if needed)
-- Modify: `lingxi-code/tui/src/session.rs` and/or `lingxi-code/apps/cli/src/mode.rs` — wherever merged settings JSON is available at mount to call `load_status_line_setting` (INVESTIGATE: find where the TUI/CLI loads merged settings; `engine::settings::Settings::load` is the seam the CLI uses — see `engine_desktop::load_merged_output_style` for the pattern; the TUI needs the `statusLine` value once at mount. If no settings JSON reaches the TUI today, load it in `build_tui_runtime` (cli/mode.rs) via the same `Settings::load` pattern and pass the parsed `StatusLineConfig` through a new `Runtime::with_status_line_config` builder — mirroring `with_subscription` from batch 4/5.)
-- Modify: `lingxi-code/tui/src/components/status_line_command.rs` (module-doc "pump is a follow-up" note → wired; `should_run` doc)
+- Modify: `lingxi-code/tui/src/streaming.rs` (dirty flag on TurnEnded at streaming.rs:92)
+- Modify: `lingxi-code/tui/src/state.rs` (`status_line_dirty` field + `build_pump_payload` pure core)
+- Modify: `lingxi-code/tui/src/session.rs` (`Runtime::with_status_line_config` builder, mount-thread into AppState — mirror batch-5 `with_subscription`) + `lingxi-code/apps/cli/src/mode.rs` (`build_tui_runtime`: read+merge `statusLine` via `read_settings_map`, parse `StatusLineConfig`, pass through the builder)
+- Modify: `lingxi-code/tui/src/components/status_line_command.rs` (module-doc "pump is a follow-up" note → wired)
 
-**Design (port of StatusLine.tsx:138-258):**
+**Design (port of StatusLine.tsx:138-258).**
 
-1. **Trigger + debounce.** `AppState.status_line_dirty: bool` (doc: TS re-runs on lastAssistantMessageId/permissionMode/vimMode/model change; the TUI's analog is end-of-turn — set in `apply_event` on `TurnEvent::TurnEnded`; permission-mode/model changes mid-session may be added when those mutate state — note where). Pump loop (new `use_future` block in root.rs, mirroring the bridge pump's structure and comments):
+1. **Trigger.** `AppState.status_line_dirty: bool`. Set `= true` ONLY in `apply_event` on `TurnEvent::TurnEnded` (streaming.rs:92). **Do NOT add a RawUtilization/RateLimit dirty trigger (M8):** a terminal 429 emits `ClientEvent::Error`, not `TurnEnded`, so the statusline deliberately does NOT refresh after a terminal 429 — and that is TS-faithful (StatusLine.tsx re-runs on lastAssistantMessageId/mode/model, none of which fire on a terminal 429). (TS also re-runs on permission-mode/vim/model change; the TUI analog for those can be added when those mutate AppState — out of scope here, note it.)
+
+2. **Pure core (testable, in state.rs or status_line_command.rs).** Extract the gate+snapshot+build so the loop is thin:
+```rust
+/// Build the (command, stdin-json) pair for the statusline pump, or None when
+/// the pump should not run. Pure — the render loop calls this under the lock.
+fn build_pump_payload(state: &AppState) -> Option<(String, String)> {
+    let cfg = state.status_line_config.as_ref()?;
+    // trusted=true: claude-code gates the statusline on the trust DIALOG
+    // (hooks.ts:286-296 shouldSkipHookDueToTrust); lingxi has no
+    // hasTrustDialogAccepted port — the hooks executor takes the same
+    // upstream-trust stance (hooks/src/executor.rs:457). should_run keeps its
+    // fail-closed `trusted` parameter for when a trust store lands.
+    if !cfg.should_run(true) { return None; }
+    // StatusSnapshot has one model string + cwd only — reuse model for
+    // id+display and cwd for current_dir+project_dir (documented divergence);
+    // added_dirs not tracked in TUI state → empty.
+    let json = build_status_line_input(
+        &state.status.model, &state.status.model,
+        &state.status.cwd, &state.status.cwd,
+        &[], env!("CARGO_PKG_VERSION"),
+        parse_cost_usd(&state.status.cost /* the cost string field */),
+        /* context_pct from state.status */,
+        state.raw_utilization.as_ref(),
+    );
+    Some((cfg.command.clone(), json.to_string()))
+}
+```
+(Adapt field accessors to `StatusSnapshot`'s real names.)
+
+3. **Pump loop (new `use_future` block in root.rs, mirroring the bridge pump at :1855 — `state: Arc<tokio::sync::Mutex<AppState>>`, `tokio::time::interval(Duration::from_millis(300))` + `MissedTickBehavior::Skip` as the debounce analog).** Single-flight (awaits each command inline) — NO generation counter (I5: a generation guard would be dead code here; re-trigger rides `status_line_dirty`):
 ```text
-loop every 300ms (tokio interval, MissedTickBehavior::Skip — the TS debounce analog):
-  lock state;
-  if !state.status_line_dirty → drop, continue;
-  let Some(cfg) = state.status_line_config.clone() else { dirty=false; drop; continue };
-  if !cfg.should_run(true) → dirty=false; drop; continue;   // trusted=true, see note
-  snapshot inputs (model id/display from state.status, cwd, project_dir, added_dirs (empty — not tracked in TUI state; document), version env!("CARGO_PKG_VERSION"), parse_cost_usd(state.status.cost), context_pct, state.raw_utilization);
-  state.status_line_dirty = false;
-  generation += 1; let my_gen = generation;            // TS AbortController analog
-  drop(state lock);
-  let text = tokio::task::spawn_blocking(move || run_status_line_command(&cfg.command, &input_json, TIMEOUT)).await;
-  lock state;
-  if my_gen == generation && text.is_some() {           // stale results discarded
-      let formatted = format_custom_status_line(&text.unwrap());
-      if state.status_line_text.as_deref() != Some(formatted.as_str()) {
-          state.status_line_text = Some(formatted);
-          tick redraw;
+interval 300ms (Skip):
+  let payload = { let mut st = state.lock().await;
+                  if !st.status_line_dirty { continue }
+                  st.status_line_dirty = false;
+                  build_pump_payload(&st) };           // lock dropped here
+  let Some((command, stdin_json)) = payload else { continue };
+  // spawn_blocking: run_status_line_command spawns a child + 5s timeout
+  let out = tokio::task::spawn_blocking(move ||
+      run_status_line_command(&command, &stdin_json, STATUS_LINE_TIMEOUT))
+      .await.unwrap_or_default();                       // JoinError → None (root.rs:1370 precedent)
+  if let Some(text) = out {                             // command failure → None → keep previous text (TS silent catch)
+      let mut st = state.lock().await;
+      // run_status_line_command ALREADY returns format_custom_status_line'd
+      // text (status_line_command.rs:251-256) — assign directly, do NOT format again (M3).
+      if st.status_line_text.as_deref() != Some(text.as_str()) {
+          st.status_line_text = Some(text);
+          tick.set(tick.get().wrapping_add(1));         // redraw, bridge-pump style
       }
   }
-  drop;
 ```
-(Adapt to the actual pump idioms in root.rs — the multiagent pump shows how a ticker-driven loop locks/mutates/ticks. Errors from the command → `run_status_line_command` returns None → leave the previous text, matching TS's silent catch. CHECK the TS timeout constant in utils/hooks.ts `executeStatusLineCommand` and use it.)
-2. **Trust note** (doc at the `should_run(true)` call):
-```rust
-// trusted=true: claude-code gates the statusline on the trust DIALOG
-// (hooks.ts:286-296 shouldSkipHookDueToTrust); lingxi has no
-// hasTrustDialogAccepted port — the hooks executor takes the same
-// upstream-trust stance (hooks/src/executor.rs:457). should_run keeps its
-// fail-closed `trusted` parameter for when a trust store lands.
-```
-3. **Settings wiring**: per the INVESTIGATE note above — minimal faithful path; if `load_status_line_setting` ends up unused after wiring through a builder instead, delete it or use it — no dead code.
+No lock is held across the `spawn_blocking().await` (both locks are scoped blocks dropped before/after). `STATUS_LINE_TIMEOUT` is the existing `status_line_command::STATUS_LINE_TIMEOUT` (5s, matches TS) — do not introduce a new constant.
 
-**Tests (TDD):**
-- streaming.rs: `turn_ended_sets_status_line_dirty`.
-- status_line_command.rs or state tests: pure pieces already tested; add a `should_run` doc-behavior test only if behavior changes (it shouldn't).
-- The pump loop itself is render-loop glue — cover its pure core: extract a testable `fn build_pump_payload(state: &AppState) -> Option<(String /*command*/, String /*stdin json*/)>` that does the gate+snapshot+build, unit-tested for: no config → None; non-command/should_run-false → None; armed config → Some with rate_limits present when raw_utilization set. The loop calls this under the lock.
-- If a Runtime builder was added: a session.rs/state default test mirroring batch-5 T5's.
+4. **Settings wiring (B2 — real work, NOT a one-liner).** `statusLine` is not a typed `SettingsJson` field, so route raw JSON: in `build_tui_runtime` (cli/mode.rs) read User+Local(+project) via `migrations::settings_update::read_settings_map`, merge the `statusLine` key in claude-code precedence (Local over User), parse via `StatusLineConfig::from_settings_value`, and pass the `Option<StatusLineConfig>` through a new `Runtime::with_status_line_config` builder threaded into `AppState.status_line_config` at mount (mirror batch-5 `with_subscription` end-to-end). `load_status_line_setting(&mut self, &Value)` may become redundant if you parse in mode.rs — if so, either use it (pass the merged `Value`) or remove it; **no dead code**.
 
-**Verify:** `cargo test -p tui` full; clippy; `cargo build -p cli`.
-**Commit:** `feat(tui): wire the A6 statusline command pump (debounced, generation-guarded)`
+**Tests (TDD; RED first):**
+- streaming.rs: `turn_ended_sets_status_line_dirty` — `apply_event(.., TurnEnded, ..)` flips the flag.
+- state.rs `build_pump_payload` unit tests: no `status_line_config` → None; config present but `should_run(true)` false (non-command kind / empty command) → None; armed command config → `Some((command, json))` where the json (M6) carries `rate_limits` ONLY when `state.raw_utilization` has at least one FULLY-RESOLVED window (both utilization AND resets_at Some), and OMITS `rate_limits` when windows are unresolved/absent.
+- session.rs/state: a `with_status_line_config` default-None + threads-through test (mirror batch-5 T5's `with_subscription` test).
+- cli/mode.rs (or a focused unit on the merge helper): a real `{"statusLine":{"type":"command","command":"echo hi"}}` in a settings map reaches `status_line_config = Some(..)` with Local-over-User precedence — this is the B2 RED that fails today.
+
+**Verify:** `cargo test -p tui` full; `cargo test -p cli`; clippy on tui + cli; `cargo build -p cli`.
+**Commit:** `feat(tui): wire the A6 statusline command pump (debounced, single-flight)`
 
 ---
 

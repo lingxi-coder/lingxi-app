@@ -553,7 +553,7 @@ impl ProviderApiAdapter {
         // B6-T1: a success also discards any staged-but-unpromoted 429 from an
         // earlier retried attempt (TS resets module state to the success's
         // `status`, never leaving a stale `rejected` behind).
-        *self.pending_429.lock().unwrap() = None;
+        self.clear_pending_429();
     }
 
     /// Whether the live subscription snapshot is a Pro or Enterprise plan —
@@ -649,6 +649,17 @@ impl ProviderApiAdapter {
         *self.pending_429.lock().unwrap() = staged;
     }
 
+    /// Discard any staged 429 snapshot. Called at drive entry and on success so
+    /// a retried-then-recovered 429 (or a non-RateLimited terminal that leaves a
+    /// staged slot) cannot promote into a LATER drive. Defensive backstop: the
+    /// active cross-drive isolation is the per-attempt record stage-or-clear in
+    /// [`Self::record_rate_limit_from_429`] (a fresh attempt always overwrites
+    /// or clears the slot before the terminal promote runs); this guards against
+    /// a future refactor that adds a promote-without-record path.
+    fn clear_pending_429(&self) {
+        *self.pending_429.lock().expect("pending_429 poisoned") = None;
+    }
+
     /// Promote a staged 429 snapshot into the live caches — the Rust analogue
     /// of the TS terminal catch handler `extractQuotaStatusFromError`
     /// (claudeAiLimits.ts:487-515), which updates module state only when the
@@ -741,7 +752,7 @@ impl ProviderApiAdapter {
         // terminal was non-rate-limited, so it never promoted) — TS module
         // state for the terminal catch handler is per-error, never carried
         // across calls.
-        *self.pending_429.lock().unwrap() = None;
+        self.clear_pending_429();
 
         // Batch-5 Task 3: resolve the live subscriber state ONCE per drive call
         // (not per attempt) — RetryState persists across the retry loop, so the
@@ -993,7 +1004,7 @@ impl ProviderApiAdapter {
 
         // B6-T1: discard any 429 snapshot staged by a PRIOR drive (see the
         // non-stream drive fn) — per-error state, never carried across calls.
-        *self.pending_429.lock().unwrap() = None;
+        self.clear_pending_429();
 
         // Batch-5 Task 3: live subscriber state, resolved ONCE per drive call
         // (see `drive_non_stream_seeded_with_chain` for the granularity note).
@@ -2168,6 +2179,50 @@ mod tests {
         );
     }
 
+    /// Directly guards [`ProviderApiAdapter::clear_pending_429`]: a staged 429
+    /// snapshot must be discarded so a subsequent promote writes NOTHING. This
+    /// goes RED iff `clear_pending_429`'s body is emptied (a no-op clear leaves
+    /// the slot `Some`, so promote would copy A's `rejected` snapshot into
+    /// `last_rate_limit`). The active cross-drive isolation is the per-attempt
+    /// record stage-or-clear; this test is the credibility guard for the
+    /// defensive drive-entry / success backstop.
+    #[test]
+    fn clear_pending_429_discards_staged_snapshot() {
+        let transport = FakeTransport::always(ProviderResponse::json(200, ok_response_json()));
+        let adapter = make_adapter(transport);
+
+        // Stage: a 429 carrying a representative-claim → pending = Some(info).
+        let headers = {
+            let mut h = std::collections::BTreeMap::new();
+            h.insert(
+                "anthropic-ratelimit-unified-representative-claim".to_string(),
+                "seven_day".to_string(),
+            );
+            h.insert(
+                "anthropic-ratelimit-unified-status".to_string(),
+                "rejected".to_string(),
+            );
+            h
+        };
+        adapter.record_rate_limit_from_429(&headers);
+        // Sanity: the slot is genuinely staged before we clear it.
+        assert!(
+            adapter.pending_429.lock().unwrap().is_some(),
+            "precondition: record_rate_limit_from_429 must stage a snapshot"
+        );
+
+        // Clear, then a terminal promote: with the slot emptied, promote is a
+        // no-op and `last_rate_limit` stays None.
+        adapter.clear_pending_429();
+        adapter.promote_pending_429();
+
+        assert_eq!(
+            OrchestratorApiClient::last_rate_limit_full(&adapter),
+            None,
+            "clear_pending_429 must discard the staged snapshot so promote writes nothing"
+        );
+    }
+
     /// Task 6 (batch 5): a terminal 429 whose response carries the unified
     /// headers records the forced-`rejected` snapshot AND the composed
     /// limits copy (byte-pinned: no reset header → no ` · resets …` clause,
@@ -2294,10 +2349,12 @@ mod tests {
     }
 
     /// A 429-with-headers that is RETRIED and then RECOVERS on a 200 must NOT
-    /// leave the rejected snapshot behind: the success seam overwrites the
-    /// limits cache (here the 200 carries no unified headers → `None`), and
-    /// the pending slot is cleared. TS updates state only in the terminal
-    /// catch handler, so a retried 429 never plants a `rejected` snapshot.
+    /// leave the rejected snapshot behind. This verifies the SUCCESS PATH:
+    /// after recovery, `last_rate_limit` reflects the 200 (here headerless →
+    /// `None`), NOT the retried 429 — because the limits cache is only written
+    /// at the terminal promote, which never fires on a recovered turn. (The
+    /// success-clear of the pending SLOT itself is guarded directly by
+    /// `clear_pending_429_discards_staged_snapshot`, not here.)
     #[tokio::test]
     async fn retried_429_does_not_update_limits_snapshot() {
         let headers_429 = {
@@ -2351,38 +2408,48 @@ mod tests {
         );
     }
 
-    /// Drive-entry reset: a pending 429 from an EARLIER drive (whose terminal
-    /// was non-rate-limited, so it never promoted) must not leak into a LATER
-    /// drive that records no fresh headers. Drive A = `[429-with-headers,
-    /// 400-invalid-request terminal]` (the 400 is non-RateLimited → no
-    /// promotion → pending lingers); Drive B = a headerless terminal 429 (no
-    /// fresh limits/raw) → drive-entry reset discards A's pending, and B's own
-    /// headerless 429 promotes nothing → the snapshot stays `None`.
+    /// Cross-drive isolation, asserted on the OBSERVABLE promoted snapshot: a
+    /// pending 429 staged by an EARLIER drive must never survive into a LATER
+    /// drive's terminal promote. Drive A = `[429-with-headers(seven_day),
+    /// 400-invalid-request terminal]` — A stages a `seven_day` snapshot but the
+    /// 400 is non-RateLimited, so it never promotes and the slot is orphaned.
+    /// Drive B ends on a TERMINAL 429 carrying its OWN fresh headers
+    /// (`five_hour`, DIFFERENT from A's) → B promotes B's snapshot. The promoted
+    /// `last_rate_limit_full()` must read `five_hour` (DRIVE B), proving A's
+    /// orphaned `seven_day` slot did NOT leak in.
+    ///
+    /// The ACTIVE isolation mechanism this asserts is the per-attempt record
+    /// stage-or-clear in `record_rate_limit_from_429` (drive B's first attempt
+    /// overwrites the slot with B's snapshot before the terminal promote runs).
+    /// The drive-entry reset is a defensive backstop, not what this test
+    /// exercises — `clear_pending_429_discards_staged_snapshot` guards that
+    /// directly. This test is non-vacuous: it fails if promotion ever reads a
+    /// stale slot (B's snapshot would be wrong, or `seven_day` would surface).
     #[tokio::test]
     async fn stale_pending_429_not_promoted_across_drives() {
-        let headers_429_full = {
-            let mut h = BTreeMap::new();
-            h.insert(
-                "anthropic-ratelimit-unified-representative-claim".to_string(),
-                "seven_day".to_string(),
-            );
-            h.insert(
-                "anthropic-ratelimit-unified-status".to_string(),
-                "rejected".to_string(),
-            );
-            h.insert("retry-after".to_string(), "0".to_string());
-            h
-        };
-        let resp_429_full = ProviderResponse {
+        // Drive A's 429: representative-claim = seven_day. Staged then orphaned.
+        let resp_429_a = ProviderResponse {
             status: 429,
-            headers: headers_429_full,
+            headers: {
+                let mut h = BTreeMap::new();
+                h.insert(
+                    "anthropic-ratelimit-unified-representative-claim".to_string(),
+                    "seven_day".to_string(),
+                );
+                h.insert(
+                    "anthropic-ratelimit-unified-status".to_string(),
+                    "rejected".to_string(),
+                );
+                h.insert("retry-after".to_string(), "0".to_string());
+                h
+            },
             body_json: serde_json::json!({
                 "type": "error",
                 "error": {"type": "rate_limit_error", "message": "rate limited"}
             }),
             request_id: None,
         };
-        // A plain 400 invalid_request → terminal, NON-rate-limited.
+        // A plain 400 invalid_request → terminal, NON-rate-limited (no promote).
         let resp_400 = ProviderResponse {
             status: 400,
             headers: BTreeMap::new(),
@@ -2392,10 +2459,20 @@ mod tests {
             }),
             request_id: None,
         };
-        let resp_429_bare = ProviderResponse {
+        // Drive B's 429: representative-claim = five_hour (DIFFERENT from A).
+        // Terminal here → B promotes B's OWN fresh snapshot.
+        let resp_429_b = ProviderResponse {
             status: 429,
             headers: {
                 let mut h = BTreeMap::new();
+                h.insert(
+                    "anthropic-ratelimit-unified-representative-claim".to_string(),
+                    "five_hour".to_string(),
+                );
+                h.insert(
+                    "anthropic-ratelimit-unified-status".to_string(),
+                    "rejected".to_string(),
+                );
                 h.insert("retry-after".to_string(), "0".to_string());
                 h
             },
@@ -2407,10 +2484,10 @@ mod tests {
         };
         // Drive A consumes idx 0,1; Drive B consumes idx 2,3 (global cursor).
         let transport = FakeTransport::sequence(vec![
-            FakeResponse::Ok(resp_429_full),
+            FakeResponse::Ok(resp_429_a),
             FakeResponse::Ok(resp_400),
-            FakeResponse::Ok(resp_429_bare.clone()),
-            FakeResponse::Ok(resp_429_bare),
+            FakeResponse::Ok(resp_429_b.clone()),
+            FakeResponse::Ok(resp_429_b),
         ]);
         // Non-subscriber (429 is retryable), settings_max_retries=1 so each
         // drive retries exactly once then terminates; backoff 0 → no sleeps.
@@ -2421,7 +2498,7 @@ mod tests {
             Some(0),
         );
 
-        // Drive A: 429-with-headers (retried, pending set) → 400 (terminal,
+        // Drive A: 429(seven_day) (retried, pending set) → 400 (terminal,
         // non-RateLimited → no promotion). Pending lingers with A's snapshot.
         let a = adapter
             .messages_create("claude-haiku-4-20250307", None, Vec::new(), Vec::new())
@@ -2431,22 +2508,26 @@ mod tests {
             "drive A must die on the 400, got {a:?}"
         );
 
-        // Drive B: drive-entry reset discards A's stale pending; the headerless
-        // terminal 429 records no fresh limits/raw → promotes nothing.
+        // Drive B: 429(five_hour) (retried, pending OVERWRITTEN with B's
+        // snapshot) → 429(five_hour) terminal → promotes B's snapshot.
         let b = adapter
             .messages_create("claude-haiku-4-20250307", None, Vec::new(), Vec::new())
             .await;
         assert!(
             matches!(b, Err(LlmError::RateLimited { .. })),
-            "drive B must die on the headerless 429, got {b:?}"
+            "drive B must die on its terminal 429, got {b:?}"
         );
 
-        // A's rejected snapshot must NOT have leaked into B's terminal.
+        // The promoted snapshot must be DRIVE B's (five_hour), proving drive A's
+        // orphaned seven_day slot did not survive into B's promote.
+        let info = OrchestratorApiClient::last_rate_limit_full(&adapter)
+            .expect("drive B promotes its own snapshot");
         assert_eq!(
-            OrchestratorApiClient::last_rate_limit_full(&adapter),
-            None,
-            "stale pending from drive A must not be promoted by drive B"
+            info.rate_limit_type.as_deref(),
+            Some("five_hour"),
+            "promoted snapshot must reflect DRIVE B (five_hour), not A's stale seven_day"
         );
+        assert_eq!(info.status.as_deref(), Some("rejected"));
     }
 
     /// Task 6 (batch 5): a 429 WITHOUT unified headers fails the

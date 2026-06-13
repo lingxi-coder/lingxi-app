@@ -19,7 +19,8 @@ use tokio::sync::Notify;
 /// - `ToolUseStart{..}` / `ToolUseResult{..}` → push placeholder
 ///   `SystemText` rows (proper rendering lands in M6-04).
 /// - `PermissionRequest{..}` → set `state.pending_permission` (M6-05).
-/// - `TurnEnded(_)` → clear `state.streaming` and `state.cancel_token`.
+/// - `TurnEnded(_)` → clear `state.streaming` and `state.cancel_token`, and set
+///   `state.status_line_dirty` to arm one statusline-pump pass (A6).
 ///
 /// After mutation, calls `notify.notify_one()`. The render loop is
 /// expected to debounce these to ~30fps.
@@ -92,6 +93,14 @@ pub fn apply_event(state: &mut AppState, ev: TurnEvent, notify: &Notify) {
         TurnEvent::TurnEnded(_outcome) => {
             state.streaming = None;
             state.cancel_token = None;
+            // (A6 batch-6 Task 2) Arm one statusline-pump pass — the TUI analog
+            // of claude-code's `StatusLine.tsx` re-run on `lastAssistantMessageId`
+            // (a turn just produced its final assistant message). The 300ms
+            // pump in `root.rs` consumes the flag, builds + runs the command,
+            // and re-paints on change. The SOLE dirty trigger: a terminal 429
+            // emits `ClientEvent::Error` (not `TurnEnded`), so it does NOT
+            // re-arm the statusline — TS-faithful (M8).
+            state.status_line_dirty = true;
         }
         TurnEvent::CostUpdated(cost_str) => {
             // M6-06: update the StatusSnapshot cost so the next render
@@ -292,6 +301,24 @@ mod tests {
         );
         assert!(s.streaming.is_none());
         assert!(s.cancel_token.is_none());
+    }
+
+    /// (A6 batch-6 Task 2) `TurnEnded` arms the statusline pump — the sole
+    /// dirty trigger (TS `StatusLine.tsx` re-runs on `lastAssistantMessageId`,
+    /// whose TUI analog is "a turn just ended"). A terminal 429 emits
+    /// `ClientEvent::Error`, not `TurnEnded`, so it deliberately does NOT
+    /// re-arm the statusline (M8 — TS-faithful).
+    #[test]
+    fn turn_ended_sets_status_line_dirty() {
+        let mut s = new_state();
+        let n = Notify::new();
+        assert!(!s.status_line_dirty, "dirty starts cleared");
+        apply_event(
+            &mut s,
+            TurnEvent::TurnEnded(traits::TurnOutcome::EndTurn),
+            &n,
+        );
+        assert!(s.status_line_dirty, "TurnEnded arms the statusline pump");
     }
 
     #[tokio::test]

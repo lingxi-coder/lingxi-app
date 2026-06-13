@@ -824,6 +824,17 @@ pub struct AppState {
     /// prop so the custom row pads identically to claude-code's
     /// `<Box paddingX={paddingX}>`. Read once at startup from the settings JSON.
     pub status_line_config: Option<crate::components::status_line_command::StatusLineConfig>,
+    /// (A6 batch-6 Task 2) Set `true` by `apply_event` on `TurnEvent::TurnEnded`
+    /// to arm one statusline-pump pass (the TUI analog of claude-code's
+    /// `StatusLine.tsx` re-run on `lastAssistantMessageId`). The 300ms-debounced
+    /// pump in `root.rs` consumes (clears) the flag, builds the command payload,
+    /// runs it off-thread, and re-paints when the text changes. A terminal 429
+    /// emits `ClientEvent::Error` (not `TurnEnded`), so it deliberately does NOT
+    /// re-arm the statusline — TS-faithful (M8). DEFERRED: TS also re-runs on
+    /// `permissionMode` / `vimMode` / `mainLoopModel` change (`StatusLine.tsx:236`);
+    /// the TUI analogs are deferred until those values mutate `AppState`
+    /// (intentional, recorded in spec rev2.11) — not a missed requirement.
+    pub status_line_dirty: bool,
     /// (Batch-5 Task 4) Latest raw per-window rate-limit utilization snapshot,
     /// written by `apply_event` on every `TurnEvent::RawUtilization`
     /// (last-write-wins, mirroring claude-code's per-response `rawUtilization`
@@ -903,6 +914,7 @@ impl AppState {
             pending_copy_clipboard: None,
             status_line_text: None,
             status_line_config: None,
+            status_line_dirty: false,
             raw_utilization: None,
             subscription: None,
         }
@@ -918,17 +930,6 @@ impl AppState {
             .as_ref()
             .and_then(|s| s.read().ok())
             .and_then(|guard| guard.clone())
-    }
-
-    /// (A6) Read the `statusLine` setting out of a loaded settings JSON value
-    /// and stash the parsed [`StatusLineConfig`] on the state. A `command`-typed
-    /// config arms the async status-line pump; any other shape (absent, or
-    /// `type != "command"`) leaves `status_line_config == None` so the built-in
-    /// status row renders. Idempotent — safe to call on each settings reload.
-    pub fn load_status_line_setting(&mut self, settings: &serde_json::Value) {
-        self.status_line_config = settings
-            .get("statusLine")
-            .and_then(crate::components::status_line_command::StatusLineConfig::from_settings_value);
     }
 
     /// (ARGS.3) Populate the command name → `argNames` lookup from a command
@@ -1216,6 +1217,44 @@ impl AppState {
     }
 }
 
+/// (A6 batch-6 Task 2) Build the `(command, stdin-json)` pair for the
+/// statusline pump, or `None` when the pump should not run. Pure — the render
+/// loop calls this under the lock, then drops the lock before spawning the
+/// command off-thread.
+///
+/// Returns `None` when no `statusLine` config is armed or `should_run` rejects
+/// it. The JSON payload mirrors `buildStatusLineCommandInput` (the documented
+/// subset — see [`crate::components::status_line_command`]).
+#[must_use]
+pub fn build_pump_payload(state: &AppState) -> Option<(String, String)> {
+    use crate::components::status_line_command::{build_status_line_input, parse_cost_usd};
+
+    let cfg = state.status_line_config.as_ref()?;
+    // trusted=true: claude-code gates the statusline on the trust DIALOG
+    // (hooks.ts:286-296 shouldSkipHookDueToTrust); lingxi has no
+    // hasTrustDialogAccepted port — the hooks executor takes the same
+    // upstream-trust stance (hooks/src/executor.rs:457). `should_run` keeps its
+    // fail-closed `trusted` parameter for when a trust store lands.
+    if !cfg.should_run(true) {
+        return None;
+    }
+    // StatusSnapshot has one model string + cwd only — reuse `model` for
+    // id+display and `cwd` for current_dir+project_dir (documented divergence);
+    // `added_dirs` is not tracked in TUI state → empty.
+    let json = build_status_line_input(
+        &state.status.model,
+        &state.status.model,
+        &state.status.cwd,
+        &state.status.cwd,
+        &[],
+        env!("CARGO_PKG_VERSION"),
+        parse_cost_usd(&state.status.cost),
+        state.status.context_pct,
+        state.raw_utilization.as_ref(),
+    );
+    Some((cfg.command.clone(), json.to_string()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1299,6 +1338,99 @@ mod tests {
             )));
         st.subscription = Some(slot);
         assert!(st.subscription_snapshot().expect("snap").is_subscriber);
+    }
+
+    // ── (A6 batch-6 Task 2) build_pump_payload ─────────────────────────────
+
+    use crate::components::status_line_command::{RawUtilizationSnapshot, StatusLineConfig};
+
+    /// No `statusLine` config → the pump produces nothing.
+    #[test]
+    fn build_pump_payload_none_when_no_config() {
+        let st = AppState::new(fake_status());
+        assert!(st.status_line_config.is_none());
+        assert!(build_pump_payload(&st).is_none());
+    }
+
+    /// A config present but not `should_run(true)` (non-`command` kind) → None.
+    #[test]
+    fn build_pump_payload_none_when_should_not_run() {
+        let mut st = AppState::new(fake_status());
+        // A `static`-typed config never runs (should_run gates type==command).
+        st.status_line_config = StatusLineConfig::from_settings_value(
+            &serde_json::json!({"type": "static", "command": "echo hi"}),
+        );
+        assert!(st.status_line_config.is_some());
+        assert!(build_pump_payload(&st).is_none());
+    }
+
+    /// An armed `command` config → `Some((command, json))` carrying the
+    /// stdin payload. `rate_limits` is OMITTED here (no raw utilization).
+    #[test]
+    fn build_pump_payload_some_for_armed_command_omits_rate_limits_without_windows() {
+        let mut st = AppState::new(fake_status());
+        st.status_line_config = StatusLineConfig::from_settings_value(
+            &serde_json::json!({"type": "command", "command": "echo hi"}),
+        );
+        let (command, json) = build_pump_payload(&st).expect("armed config produces a payload");
+        assert_eq!(command, "echo hi");
+        let v: serde_json::Value = serde_json::from_str(&json).expect("stdin json parses");
+        // Model + cwd reuse (StatusSnapshot has one model string + cwd only).
+        assert_eq!(v["model"]["id"], "claude-sonnet-4.5");
+        assert_eq!(v["model"]["display_name"], "claude-sonnet-4.5");
+        assert_eq!(v["workspace"]["current_dir"], "/a/b");
+        assert_eq!(v["workspace"]["project_dir"], "/a/b");
+        assert_eq!(v["hook_event_name"], "Status");
+        // No window resolved → rate_limits omitted (StatusLine.tsx:99-101).
+        assert!(
+            v.get("rate_limits").is_none(),
+            "rate_limits absent when no window resolved: {v:?}"
+        );
+    }
+
+    /// The payload carries `rate_limits` ONLY when `raw_utilization` has a
+    /// fully-resolved window (both utilization AND `resets_at` Some) — the
+    /// `build_status_line_input` conditional, asserted through the pump wiring.
+    #[test]
+    fn build_pump_payload_includes_rate_limits_when_window_resolved() {
+        let mut st = AppState::new(fake_status());
+        st.status_line_config = StatusLineConfig::from_settings_value(
+            &serde_json::json!({"type": "command", "command": "echo hi"}),
+        );
+        st.raw_utilization = Some(RawUtilizationSnapshot {
+            five_hour_utilization: Some(0.42),
+            five_hour_resets_at: Some(1_750_000_000),
+            seven_day_utilization: None,
+            seven_day_resets_at: None,
+        });
+        let (_command, json) = build_pump_payload(&st).expect("armed config produces a payload");
+        let v: serde_json::Value = serde_json::from_str(&json).expect("stdin json parses");
+        let rl = v["rate_limits"].as_object().expect("rate_limits present");
+        assert!((rl["five_hour"]["used_percentage"].as_f64().unwrap() - 42.0).abs() < 1e-9);
+        assert_eq!(rl["five_hour"]["resets_at"].as_u64(), Some(1_750_000_000));
+        assert!(rl.get("seven_day").is_none(), "partial window omitted");
+    }
+
+    /// A window with only utilization (no `resets_at`) is NOT fully resolved →
+    /// `rate_limits` stays omitted.
+    #[test]
+    fn build_pump_payload_omits_rate_limits_for_partial_window() {
+        let mut st = AppState::new(fake_status());
+        st.status_line_config = StatusLineConfig::from_settings_value(
+            &serde_json::json!({"type": "command", "command": "echo hi"}),
+        );
+        st.raw_utilization = Some(RawUtilizationSnapshot {
+            five_hour_utilization: Some(0.42),
+            five_hour_resets_at: None,
+            seven_day_utilization: None,
+            seven_day_resets_at: None,
+        });
+        let (_command, json) = build_pump_payload(&st).expect("payload");
+        let v: serde_json::Value = serde_json::from_str(&json).expect("json");
+        assert!(
+            v.get("rate_limits").is_none(),
+            "partial window (no resets_at) omits rate_limits: {v:?}"
+        );
     }
 
     #[test]

@@ -1358,6 +1358,45 @@ impl ConversationOrchestrator {
         enrich_rate_limited_error(err, self.api.last_rate_limit_error_message())
     }
 
+    /// B6-T1: status-change emit parity for a turn that DIED on a rate limit.
+    ///
+    /// claude-code's terminal catch handler `extractQuotaStatusFromError`
+    /// (claudeAiLimits.ts:487) forces the limits to `status='rejected'` and
+    /// runs `emitStatusChange` (ts:509-511) ALONGSIDE rendering the terminal
+    /// error copy — so the TUI shows the rate-limit banner (+ the T5 overage
+    /// notice) next to the assistant error message. By the time a turn driver
+    /// surfaces a terminal `RateLimited`, the drive fn has already PROMOTED
+    /// the staged 429 into `self.api`'s caches (via
+    /// [`crate::provider_adapter::ProviderApiAdapter::promote_pending_429`]),
+    /// so these emit-on-change helpers flow the rejected snapshot (+ raw
+    /// windows) out as an [`traits::OutputEvent::RateLimit`] (+ `RawUtilization`).
+    ///
+    /// Gated on the rate-limited discriminant a terminal error carries BEFORE
+    /// enrichment — `ApiCall(RateLimited)` (batched) or `Streaming(RateLimited)`
+    /// (stream connect-phase) — so a non-429 terminal never emits. Called
+    /// AFTER the drive fn returned (promotion done) and BEFORE
+    /// [`Self::enrich_api_error`].
+    ///
+    /// B1 — DOCUMENTED DIVERGENCE (not parity): TS forces `status='rejected'`
+    /// and emits even on a HEADERLESS terminal 429 (claudeAiLimits.ts:506-507,
+    /// outside the headers block). The Rust `last_rate_limit` has no "bare
+    /// rejected, no windows" representation, so a headerless terminal 429
+    /// promotes nothing and these emit-on-change helpers are no-ops — the
+    /// terminal error copy already conveys the rejection.
+    async fn emit_terminal_rate_limit_if_changed<T>(
+        &self,
+        result: &Result<T, OrchestratorError>,
+    ) {
+        if let Err(
+            OrchestratorError::ApiCall(LlmError::RateLimited { .. })
+            | OrchestratorError::Streaming(LlmError::RateLimited { .. }),
+        ) = result
+        {
+            self.emit_rate_limit_if_changed().await;
+            self.emit_raw_utilization_if_changed().await;
+        }
+    }
+
     /// Drive one user prompt through the turn loop until `end_turn` or
     /// `max_turns` is exhausted.
     ///
@@ -1370,10 +1409,9 @@ impl ConversationOrchestrator {
             event = orch_events::CONVERSATION_STARTED,
             prompt_len = prompt.len()
         );
-        let result = self
-            .try_run_turn(prompt)
-            .await
-            .map_err(|e| self.enrich_api_error(e));
+        let result = self.try_run_turn(prompt).await;
+        self.emit_terminal_rate_limit_if_changed(&result).await;
+        let result = result.map_err(|e| self.enrich_api_error(e));
         // ConversationOutcome is #[non_exhaustive] so future variants will
         // also log as Completed when the only existing variant is EndTurn.
         match &result {
@@ -1951,10 +1989,9 @@ impl ConversationOrchestrator {
             event = orch_events::TURN_STREAMING_STARTED,
             prompt_len = prompt.len()
         );
-        let result = self
-            .try_run_turn_streaming(prompt, Vec::new())
-            .await
-            .map_err(|e| self.enrich_api_error(e));
+        let result = self.try_run_turn_streaming(prompt, Vec::new()).await;
+        self.emit_terminal_rate_limit_if_changed(&result).await;
+        let result = result.map_err(|e| self.enrich_api_error(e));
         match &result {
             Ok(ConversationOutcome::EndTurn { turn_count, .. }
             | ConversationOutcome::StopHookPrevented { turn_count, .. }) => {
@@ -2490,9 +2527,9 @@ impl ConversationOrchestrator {
             event = orch_events::CONVERSATION_STARTED,
             prompt_len = prompt.len()
         );
-        self.try_run_turn_cancelable(prompt, cancel)
-            .await
-            .map_err(|e| self.enrich_api_error(e))
+        let result = self.try_run_turn_cancelable(prompt, cancel).await;
+        self.emit_terminal_rate_limit_if_changed(&result).await;
+        result.map_err(|e| self.enrich_api_error(e))
     }
 
     /// Internal implementation of the REPL turn loop with cancellation.
@@ -2657,7 +2694,23 @@ impl ConversationOrchestrator {
                 Err(OrchestratorError::MaxTurnsReached { .. }) => {
                     Ok(TurnOutcome::MaxTurns)
                 }
-                Err(e) => Err(self.enrich_api_error(e)),
+                Err(e) => {
+                    // B6-T1: status-change emit parity — fire the emit-on-change
+                    // helpers for a terminal rate-limited error (the drive fn
+                    // already promoted the staged 429), BEFORE enrichment. Same
+                    // discriminant + B1 divergence as
+                    // `emit_terminal_rate_limit_if_changed` (de-sugared here
+                    // because the `select!` arm already owns `e` by value).
+                    if matches!(
+                        e,
+                        OrchestratorError::ApiCall(LlmError::RateLimited { .. })
+                            | OrchestratorError::Streaming(LlmError::RateLimited { .. })
+                    ) {
+                        self.emit_rate_limit_if_changed().await;
+                        self.emit_raw_utilization_if_changed().await;
+                    }
+                    Err(self.enrich_api_error(e))
+                }
             },
         }
     }

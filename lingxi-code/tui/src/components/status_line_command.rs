@@ -43,11 +43,14 @@
 //! gates only on `type == "command"` + a `trusted` bool the caller supplies
 //! (default-false fail-closed). Wiring the real trust store is a follow-up.
 //!
-//! **The execution pump itself is also a follow-up**: nothing in production
-//! calls [`build_status_line_input`] / [`run_status_line_command`] yet — the
-//! A6 statusline command path renders `AppState.status_line_text` but no task
-//! populates it. The payload (incl. `rate_limits` from
-//! `AppState.raw_utilization`) is ready for when the pump lands.
+//! **The execution pump is wired** (A6 batch-6 Task 2): the debounced,
+//! single-flight pump in `root.rs` calls `crate::state::build_pump_payload`
+//! (which calls [`build_status_line_input`]) then [`run_status_line_command`]
+//! off-thread, and writes the formatted result onto `AppState.status_line_text`
+//! (rendered by the `custom` prop on `StatusLine`). It re-arms only on
+//! `TurnEvent::TurnEnded` (`AppState.status_line_dirty`), the TUI analog of
+//! claude-code's `StatusLine.tsx` re-run on `lastAssistantMessageId`. The
+//! payload's OPTIONAL `rate_limits` comes from `AppState.raw_utilization`.
 
 use std::path::Path;
 use std::process::{Command, Stdio};

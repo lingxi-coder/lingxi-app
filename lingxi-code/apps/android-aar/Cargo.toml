@@ -81,6 +81,12 @@ platform-android-minijail = { path = "../../platforms/android-minijail" }
 # (the P2 libcap link-anchor lesson).
 tool-git-mobile = { path = "../../tools/git-mobile" }
 serde_json = { workspace = true }
+# P5b-T7: the bundled-shell bootstrap (`bootstrap_bundled_shell`) sha256-hashes
+# `libmksh.so` for the runner's content-identity check and hex-encodes it.
+# Target-gated (android-only) like `platform-android` to keep host builds
+# dep-minimal. Pins match `platforms/android/Cargo.toml`.
+sha2 = "0.10"
+hex = "0.4"
 
 [dev-dependencies]
 # F3-04: a sandboxed cwd/claude_home root for the handle-host tests (the host

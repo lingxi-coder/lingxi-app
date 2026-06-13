@@ -4,9 +4,9 @@
 //! `git2` crate) running **in-process** — there is no `git` binary, no exec, no
 //! sandbox/minijail involvement. Operations are a fixed enum (clone / fetch /
 //! pull / status / diff / log / show / `branch_list` / checkout / add / commit
-//! / `branch_create` / merge),
-//! NOT a free-form shell string. v1 is read + local-write only: there is **no
-//! push**, merge/pull are **fast-forward-only**, and remotes are **HTTPS-only**
+//! / `branch_create` / merge / push),
+//! NOT a free-form shell string. v1 is read + local-write + **push**;
+//! merge/pull/push are **fast-forward-only**, and remotes are **HTTPS-only**
 //! (token supplied in-memory by the Kotlin host via the libgit2 credential
 //! callback — never to disk or a child-process env).
 //!
@@ -237,8 +237,8 @@ impl Tool for GitTool {
         let repo_rel = input.get("repo").and_then(Value::as_str).unwrap_or(".");
         let workspace_path = std::path::Path::new(&workspace_root);
 
-        // Network ops (clone/fetch/pull) read the in-memory secret (token + CA
-        // dir) from the SEPARATE `android_git_secret` seam — never the public
+        // Network ops (clone/fetch/pull/push) read the in-memory secret (token +
+        // CA dir) from the SEPARATE `android_git_secret` seam — never the public
         // `android_git` carrier — and never touch disk/env.
         let dispatch_result = if matches!(operation, "clone" | "fetch" | "pull" | "push") {
             let net = self.git_net_config();
@@ -277,9 +277,9 @@ impl GitTool {
     }
 }
 
-/// Dispatch a network op (clone/fetch/pull) to `ops::`. clone targets the
-/// workspace-relative `dest` (`repo` param, default `cloned`); fetch/pull open
-/// the existing repo at `repo` first.
+/// Dispatch a network op (clone/fetch/pull/push) to `ops::`. clone targets the
+/// workspace-relative `dest` (`repo` param, default `cloned`); fetch/pull/push
+/// open the existing repo at `repo` first.
 fn dispatch_network(
     net: &ops::GitNetConfig,
     workspace_root: &std::path::Path,

@@ -142,12 +142,14 @@ pub struct ProviderApiAdapter {
     /// which is gated on `has_unified_headers()`), so a later response
     /// without the per-window quartet resets it to the empty snapshot
     /// exactly like the TS module state. `None` until the first recorded
-    /// response. NOT recorded on 429 error responses — TS also extracts raw
-    /// utilization from error headers (`claudeAiLimits.ts:500`); this RAW
-    /// cache records on success paths only (`last_rate_limit` DOES get a
-    /// rejected snapshot from 429 headers via `record_rate_limit_from_429`;
-    /// extending that to the raw cache is a tracked follow-up). Exposed via
-    /// the `OrchestratorApiClient::last_raw_utilization` override.
+    /// response. Recorded on success passes here AND, as of B6-T1, on a
+    /// TERMINAL 429 — TS extracts raw utilization from error headers too
+    /// (`extractRawUtilization`, `claudeAiLimits.ts:500`). The 429 path stages
+    /// the raw snapshot in [`Self::pending_429`] and promotes it into this
+    /// cache only when the turn dies on the 429 (via
+    /// [`Self::promote_pending_429`]), never on a retried-then-recovered
+    /// attempt. Exposed via the `OrchestratorApiClient::last_raw_utilization`
+    /// override.
     last_raw_utilization: Mutex<Option<RawUtilization>>,
     /// Limits-specific copy composed from the most recent 429 **error**
     /// response's unified headers.
@@ -163,6 +165,34 @@ pub struct ProviderApiAdapter {
     /// recent response seen. Exposed via the
     /// `OrchestratorApiClient::last_rate_limit_error_message` override.
     last_429_message: Mutex<Option<String>>,
+    /// 429-attempt state staged until the retry loop declares the error
+    /// TERMINAL.
+    ///
+    /// B6-T1: claude-code updates the limits/raw module state ONLY in the
+    /// terminal catch handler `extractQuotaStatusFromError`
+    /// (claudeAiLimits.ts:487), never on a retried attempt that later
+    /// recovers. [`Self::record_rate_limit_from_429`] writes this slot on
+    /// every decoded 429; [`Self::promote_pending_429`] promotes it into
+    /// `last_rate_limit` / `last_raw_utilization` only at the decode-terminal
+    /// returns of both drive fns. Discarded at drive-entry and on any
+    /// subsequent success — so a retried-then-recovered 429 never plants a
+    /// rejected snapshot (the prior per-attempt-write divergence, CLOSED).
+    pending_429: Mutex<Option<Pending429>>,
+}
+
+/// 429-attempt state held until the retry loop declares the error TERMINAL —
+/// TS updates module state only in the terminal catch handler
+/// (`extractQuotaStatusFromError`, claudeAiLimits.ts:487), never on retried
+/// attempts. Promoted by [`ProviderApiAdapter::promote_pending_429`]; discarded
+/// on drive-entry and on any subsequent success.
+struct Pending429 {
+    /// Forced-rejected limits snapshot (`from_429_error_headers`); `None`
+    /// when the unified-header limits gate did not pass but raw windows did.
+    info: Option<RateLimitInfo>,
+    /// Raw per-window utilization from the SAME error headers, computed
+    /// UNCONDITIONALLY (`extractRawUtilization`, ts:500 — independent of the
+    /// limits gate).
+    raw: RawUtilization,
 }
 
 impl ProviderApiAdapter {
@@ -283,6 +313,7 @@ impl ProviderApiAdapter {
             last_rate_limit: Mutex::new(None),
             last_raw_utilization: Mutex::new(None),
             last_429_message: Mutex::new(None),
+            pending_429: Mutex::new(None),
         }
     }
 
@@ -519,6 +550,10 @@ impl ProviderApiAdapter {
         // Task 6 (batch 5): a successful response supersedes any cached 429
         // limits copy — the slot always reflects the most recent response.
         *self.last_429_message.lock().unwrap() = None;
+        // B6-T1: a success also discards any staged-but-unpromoted 429 from an
+        // earlier retried attempt (TS resets module state to the success's
+        // `status`, never leaving a stale `rejected` behind).
+        *self.pending_429.lock().unwrap() = None;
     }
 
     /// Whether the live subscription snapshot is a Pro or Enterprise plan —
@@ -552,39 +587,50 @@ impl ProviderApiAdapter {
     ///
     /// When the 429 carries unified headers (the
     /// `if (rateLimitType || overageStatus)` gate, `errors.ts:480`):
-    /// 1. the forced-`rejected` limits view replaces the cached snapshot
+    /// 1. the forced-`rejected` limits view is STAGED in [`Self::pending_429`]
     ///    (TS updates its limits state from the error headers with
     ///    `status: 'rejected'`, `errors.ts:482-516`), and
     /// 2. the composed `getRateLimitErrorMessage` copy is cached for the
     ///    orchestrator's terminal-error re-map
     ///    (`OrchestratorError::RateLimitRejected`).
     ///
-    /// Without unified headers the copy slot is cleared (the generic 429
-    /// surface applies) and the limits snapshot is left untouched — TS only
-    /// updates inside the gated branch.
+    /// The RAW per-window utilization is parsed from the SAME error headers
+    /// UNCONDITIONALLY — `extractRawUtilization(headersToUse)` runs for ANY
+    /// error headers (claudeAiLimits.ts:500), independent of the limits gate —
+    /// and staged alongside.
+    ///
+    /// The staged slot is PROMOTED into the live `last_rate_limit` /
+    /// `last_raw_utilization` caches only when the retry loop declares the
+    /// error TERMINAL (via [`Self::promote_pending_429`]), mirroring the TS
+    /// terminal catch handler `extractQuotaStatusFromError`
+    /// (claudeAiLimits.ts:487) — NOT on a retried attempt that later recovers.
+    /// This closes the prior per-attempt-write divergence (a
+    /// retried-then-recovered 429 no longer plants a rejected snapshot).
+    ///
+    /// When the 429 yields NEITHER a gated `info` NOR any raw window, the
+    /// pending slot is cleared (`None`); the copy slot is likewise cleared
+    /// (the generic 429 surface applies) — TS only updates inside the gated
+    /// branch.
     fn record_rate_limit_from_429(&self, headers: &std::collections::BTreeMap<String, String>) {
         let hvec: Vec<(String, String)> = headers
             .iter()
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
-        let composed = RateLimitInfo::from_429_error_headers(&hvec).map(|info| {
-            // The MESSAGE composition ports errors.ts:482-516 (a LOCAL limits
-            // object built from the error headers). Writing the snapshot into
-            // `last_rate_limit` additionally mirrors the TS STATE update
-            // `extractQuotaStatusFromError` (claudeAiLimits.ts:487-515), with
-            // a documented divergence: TS updates state only on the TERMINAL
-            // 429 (the catch handler), while this records per-attempt — a
-            // retried-then-recovered 429 plants a rejected snapshot that a
-            // subsequent unified-header-less success would not overwrite (TS
-            // would reset to allowed). Low probability (subscriber successes
-            // carry the headers); terminal-only recording is a tracked
-            // follow-up.
-            *self.last_rate_limit.lock().unwrap() = Some(info.clone());
+        // `extractRawUtilization(headersToUse)` (claudeAiLimits.ts:500) runs
+        // for ANY error headers, independent of the limits gate below.
+        let raw = RawUtilization::from_headers(&hvec);
+        let info = RateLimitInfo::from_429_error_headers(&hvec);
+
+        // MESSAGE composition ports errors.ts:482-516 (a LOCAL limits object
+        // built from the error headers) — kept verbatim; it is NOT staged and
+        // is set per-attempt because the terminal error re-map reads it
+        // directly (the most-recent-429 slot, cleared on success).
+        let composed = info.as_ref().map(|info| {
             // `formatResetTime(…, true)` analogue for both reset headers
             // (`rateLimitMessages.ts:144-148`), formatted at error time.
             let formatted = formatted_reset_times_from_headers(&hvec);
             rate_limit_error_message(
-                &info,
+                info,
                 &formatted.as_reset_times(),
                 SubscriptionContext {
                     is_pro_or_enterprise: self.is_pro_or_enterprise(),
@@ -592,6 +638,43 @@ impl ProviderApiAdapter {
             )
         });
         *self.last_429_message.lock().unwrap() = composed.flatten();
+
+        // Stage the snapshot whenever EITHER the limits gate passed OR raw
+        // windows are present. A 429 that yields neither clears the slot.
+        let staged = if info.is_some() || raw != RawUtilization::default() {
+            Some(Pending429 { info, raw })
+        } else {
+            None
+        };
+        *self.pending_429.lock().unwrap() = staged;
+    }
+
+    /// Promote a staged 429 snapshot into the live caches — the Rust analogue
+    /// of the TS terminal catch handler `extractQuotaStatusFromError`
+    /// (claudeAiLimits.ts:487-515), which updates module state only when the
+    /// turn DIES on a 429.
+    ///
+    /// `.take()`s [`Self::pending_429`]; when `Some`:
+    /// - `info` `Some` → the forced-`rejected` limits snapshot replaces
+    ///   `last_rate_limit`;
+    /// - `raw != RawUtilization::default()` → the raw per-window snapshot
+    ///   replaces `last_raw_utilization`.
+    ///
+    /// Convention: the EMPTY raw snapshot is NEVER stored (the `last_raw…`
+    /// cache and the `emit_raw_utilization_if_changed` seam treat the empty
+    /// `{}` as "no windows" and skip it) — a documented divergence from TS,
+    /// which assigns `rawUtilization` unconditionally. Idempotent via
+    /// `.take()`: a second call after promotion is a no-op.
+    fn promote_pending_429(&self) {
+        let Some(pending) = self.pending_429.lock().unwrap().take() else {
+            return;
+        };
+        if let Some(info) = pending.info {
+            *self.last_rate_limit.lock().unwrap() = Some(info);
+        }
+        if pending.raw != RawUtilization::default() {
+            *self.last_raw_utilization.lock().unwrap() = Some(pending.raw);
+        }
     }
 
     /// HTTP status code approximation for `emit_failed` (best-effort: only the
@@ -653,6 +736,12 @@ impl ProviderApiAdapter {
         let request_id = new_request_id();
         let started = Instant::now();
         telemetry::emit_started(&self.analytics, &req.model, &request_id, false).await;
+
+        // B6-T1: discard any 429 snapshot staged by a PRIOR drive (whose
+        // terminal was non-rate-limited, so it never promoted) — TS module
+        // state for the terminal catch handler is per-error, never carried
+        // across calls.
+        *self.pending_429.lock().unwrap() = None;
 
         // Batch-5 Task 3: resolve the live subscriber state ONCE per drive call
         // (not per attempt) — RetryState persists across the retry loop, so the
@@ -834,6 +923,16 @@ impl ProviderApiAdapter {
                                     continue;
                                 }
                                 DriveStep::Terminal => {
+                                    // B6-T1: the turn DIES here — promote the
+                                    // 429 snapshot staged this attempt into the
+                                    // live caches (the TS terminal catch handler
+                                    // `extractQuotaStatusFromError`,
+                                    // claudeAiLimits.ts:487). Gated on the
+                                    // RateLimited discriminant so a non-429
+                                    // terminal never promotes a stale slot.
+                                    if matches!(decode_err, LlmError::RateLimited { .. }) {
+                                        self.promote_pending_429();
+                                    }
                                     telemetry::emit_failed(
                                         &self.analytics,
                                         &req.model,
@@ -891,6 +990,10 @@ impl ProviderApiAdapter {
     ) -> Result<BoxStream<'static, Result<LlmEvent, LlmError>>, LlmError> {
         let request_id = new_request_id();
         telemetry::emit_started(&self.analytics, &req.model, &request_id, true).await;
+
+        // B6-T1: discard any 429 snapshot staged by a PRIOR drive (see the
+        // non-stream drive fn) — per-error state, never carried across calls.
+        *self.pending_429.lock().unwrap() = None;
 
         // Batch-5 Task 3: live subscriber state, resolved ONCE per drive call
         // (see `drive_non_stream_seeded_with_chain` for the granularity note).
@@ -981,6 +1084,14 @@ impl ProviderApiAdapter {
                             tokio::time::sleep(delay).await;
                             // Re-prepare on next iteration so headers stay fresh.
                             continue;
+                        }
+                        // B6-T1: the stream connect DIES here — promote the
+                        // 429 snapshot staged this attempt (TS terminal catch
+                        // handler, claudeAiLimits.ts:487). Gated on the
+                        // RateLimited discriminant so a non-429 terminal never
+                        // promotes a stale slot.
+                        if matches!(decode_err, LlmError::RateLimited { .. }) {
+                            self.promote_pending_429();
                         }
                         // Terminal twin for the connect-phase emit_started
                         // (mirrors the non-stream terminal arms).
@@ -2104,6 +2215,238 @@ mod tests {
         let info = OrchestratorApiClient::last_rate_limit_full(&adapter).expect("snapshot");
         assert_eq!(info.status.as_deref(), Some("rejected"));
         assert_eq!(info.rate_limit_type.as_deref(), Some("seven_day"));
+    }
+
+    // ── B6-T1: terminal-only 429 state promotion (pending slot) ──────────────
+    //
+    // claude-code updates the limits/raw module state ONLY in the terminal
+    // catch handler `extractQuotaStatusFromError` (claudeAiLimits.ts:487),
+    // never on a retried attempt that later recovers. The Rust seam stages
+    // each 429 attempt's snapshot in a `pending_429` slot and promotes it into
+    // the live caches only when the retry loop declares the error TERMINAL —
+    // and discards it on drive-entry and on any subsequent success.
+
+    /// A 429 carrying BOTH the unified limits headers (gate passes) AND the
+    /// per-window quartet (raw non-empty) that exhausts the retry budget
+    /// promotes BOTH: the forced-`rejected` limits snapshot
+    /// (`last_rate_limit_full`) and the raw per-window utilization
+    /// (`last_raw_utilization`) — `extractRawUtilization` runs on the SAME
+    /// error headers (claudeAiLimits.ts:500).
+    #[tokio::test]
+    async fn terminal_429_promotes_snapshot_and_raw() {
+        let headers = {
+            let mut h = BTreeMap::new();
+            // Limits gate (from_429_error_headers → Some).
+            h.insert(
+                "anthropic-ratelimit-unified-representative-claim".to_string(),
+                "seven_day".to_string(),
+            );
+            // Per-window quartet → raw non-empty.
+            h.insert(
+                "anthropic-ratelimit-unified-5h-utilization".to_string(),
+                "0.42".to_string(),
+            );
+            h.insert(
+                "anthropic-ratelimit-unified-5h-reset".to_string(),
+                "1750000005".to_string(),
+            );
+            h.insert(
+                "anthropic-ratelimit-unified-7d-utilization".to_string(),
+                "0.77".to_string(),
+            );
+            h.insert(
+                "anthropic-ratelimit-unified-7d-reset".to_string(),
+                "1750000007".to_string(),
+            );
+            h
+        };
+        let transport = FakeTransport::always(ProviderResponse {
+            status: 429,
+            headers,
+            body_json: serde_json::json!({
+                "type": "error",
+                "error": {"type": "rate_limit_error", "message": "rate limited"}
+            }),
+            request_id: None,
+        });
+        // Subscriber (non-enterprise) → the 429 is terminal on the first try.
+        let adapter = make_adapter_with_subscriber(
+            transport.clone(),
+            SubscriberState { is_subscriber: true, is_enterprise: false },
+        );
+        let result = adapter
+            .messages_create("claude-sonnet-4-20250514", None, Vec::new(), Vec::new())
+            .await;
+        assert!(matches!(result, Err(LlmError::RateLimited { .. })), "got {result:?}");
+
+        // Promoted at the terminal: rejected limits snapshot.
+        let info = OrchestratorApiClient::last_rate_limit_full(&adapter).expect("snapshot");
+        assert_eq!(info.status.as_deref(), Some("rejected"));
+        assert_eq!(info.rate_limit_type.as_deref(), Some("seven_day"));
+
+        // Promoted at the terminal: raw per-window utilization from the SAME
+        // error headers (extractRawUtilization, ts:500).
+        let raw = OrchestratorApiClient::last_raw_utilization(&adapter).expect("raw");
+        assert_eq!(raw.five_hour.map(|w| w.utilization), Some(0.42));
+        assert_eq!(raw.five_hour.map(|w| w.resets_at), Some(1_750_000_005));
+        assert_eq!(raw.seven_day.map(|w| w.utilization), Some(0.77));
+        assert_eq!(raw.seven_day.map(|w| w.resets_at), Some(1_750_000_007));
+    }
+
+    /// A 429-with-headers that is RETRIED and then RECOVERS on a 200 must NOT
+    /// leave the rejected snapshot behind: the success seam overwrites the
+    /// limits cache (here the 200 carries no unified headers → `None`), and
+    /// the pending slot is cleared. TS updates state only in the terminal
+    /// catch handler, so a retried 429 never plants a `rejected` snapshot.
+    #[tokio::test]
+    async fn retried_429_does_not_update_limits_snapshot() {
+        let headers_429 = {
+            let mut h = BTreeMap::new();
+            h.insert(
+                "anthropic-ratelimit-unified-representative-claim".to_string(),
+                "seven_day".to_string(),
+            );
+            h.insert(
+                "anthropic-ratelimit-unified-status".to_string(),
+                "rejected".to_string(),
+            );
+            // retry-after 0 → no real sleep.
+            h.insert("retry-after".to_string(), "0".to_string());
+            h
+        };
+        let transport = FakeTransport::sequence(vec![
+            FakeResponse::Ok(ProviderResponse {
+                status: 429,
+                headers: headers_429,
+                body_json: serde_json::json!({
+                    "type": "error",
+                    "error": {"type": "rate_limit_error", "message": "rate limited"}
+                }),
+                request_id: None,
+            }),
+            // Recovery: a 200 with NO unified headers.
+            FakeResponse::Ok(ProviderResponse::json(200, ok_response_json())),
+        ]);
+        // Enterprise subscriber → the 429 is retried, then the 200 recovers.
+        let adapter = make_adapter_with_subscriber(
+            transport.clone(),
+            SubscriberState { is_subscriber: true, is_enterprise: true },
+        );
+        let result = adapter
+            .messages_create("claude-sonnet-4-20250514", None, Vec::new(), Vec::new())
+            .await;
+        assert!(result.is_ok(), "429 then 200 must recover: {result:?}");
+
+        // The success seam cleared the limits cache (the 200 carried no unified
+        // headers); the retried 429's rejected snapshot was NEVER promoted.
+        assert_eq!(
+            OrchestratorApiClient::last_rate_limit_full(&adapter),
+            None,
+            "retried-then-recovered 429 must not plant a rejected snapshot"
+        );
+        // The 429 message copy was likewise cleared on success.
+        assert_eq!(
+            OrchestratorApiClient::last_rate_limit_error_message(&adapter),
+            None,
+        );
+    }
+
+    /// Drive-entry reset: a pending 429 from an EARLIER drive (whose terminal
+    /// was non-rate-limited, so it never promoted) must not leak into a LATER
+    /// drive that records no fresh headers. Drive A = `[429-with-headers,
+    /// 400-invalid-request terminal]` (the 400 is non-RateLimited → no
+    /// promotion → pending lingers); Drive B = a headerless terminal 429 (no
+    /// fresh limits/raw) → drive-entry reset discards A's pending, and B's own
+    /// headerless 429 promotes nothing → the snapshot stays `None`.
+    #[tokio::test]
+    async fn stale_pending_429_not_promoted_across_drives() {
+        let headers_429_full = {
+            let mut h = BTreeMap::new();
+            h.insert(
+                "anthropic-ratelimit-unified-representative-claim".to_string(),
+                "seven_day".to_string(),
+            );
+            h.insert(
+                "anthropic-ratelimit-unified-status".to_string(),
+                "rejected".to_string(),
+            );
+            h.insert("retry-after".to_string(), "0".to_string());
+            h
+        };
+        let resp_429_full = ProviderResponse {
+            status: 429,
+            headers: headers_429_full,
+            body_json: serde_json::json!({
+                "type": "error",
+                "error": {"type": "rate_limit_error", "message": "rate limited"}
+            }),
+            request_id: None,
+        };
+        // A plain 400 invalid_request → terminal, NON-rate-limited.
+        let resp_400 = ProviderResponse {
+            status: 400,
+            headers: BTreeMap::new(),
+            body_json: serde_json::json!({
+                "type": "error",
+                "error": {"type": "invalid_request_error", "message": "bad request"}
+            }),
+            request_id: None,
+        };
+        let resp_429_bare = ProviderResponse {
+            status: 429,
+            headers: {
+                let mut h = BTreeMap::new();
+                h.insert("retry-after".to_string(), "0".to_string());
+                h
+            },
+            body_json: serde_json::json!({
+                "type": "error",
+                "error": {"type": "rate_limit_error", "message": "rate limited"}
+            }),
+            request_id: None,
+        };
+        // Drive A consumes idx 0,1; Drive B consumes idx 2,3 (global cursor).
+        let transport = FakeTransport::sequence(vec![
+            FakeResponse::Ok(resp_429_full),
+            FakeResponse::Ok(resp_400),
+            FakeResponse::Ok(resp_429_bare.clone()),
+            FakeResponse::Ok(resp_429_bare),
+        ]);
+        // Non-subscriber (429 is retryable), settings_max_retries=1 so each
+        // drive retries exactly once then terminates; backoff 0 → no sleeps.
+        let adapter = make_adapter_with_routing(
+            transport.clone(),
+            std::collections::BTreeMap::new(),
+            Some(1),
+            Some(0),
+        );
+
+        // Drive A: 429-with-headers (retried, pending set) → 400 (terminal,
+        // non-RateLimited → no promotion). Pending lingers with A's snapshot.
+        let a = adapter
+            .messages_create("claude-haiku-4-20250307", None, Vec::new(), Vec::new())
+            .await;
+        assert!(
+            matches!(a, Err(LlmError::InvalidRequest { .. })),
+            "drive A must die on the 400, got {a:?}"
+        );
+
+        // Drive B: drive-entry reset discards A's stale pending; the headerless
+        // terminal 429 records no fresh limits/raw → promotes nothing.
+        let b = adapter
+            .messages_create("claude-haiku-4-20250307", None, Vec::new(), Vec::new())
+            .await;
+        assert!(
+            matches!(b, Err(LlmError::RateLimited { .. })),
+            "drive B must die on the headerless 429, got {b:?}"
+        );
+
+        // A's rejected snapshot must NOT have leaked into B's terminal.
+        assert_eq!(
+            OrchestratorApiClient::last_rate_limit_full(&adapter),
+            None,
+            "stale pending from drive A must not be promoted by drive B"
+        );
     }
 
     /// Task 6 (batch 5): a 429 WITHOUT unified headers fails the

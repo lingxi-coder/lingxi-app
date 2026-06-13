@@ -434,3 +434,128 @@ async fn streaming_turn_emits_raw_utilization() {
             if *five_hour_utilization == Some(0.42)
     ));
 }
+
+// ════════════════════════════════════════════════════════════════════════
+// B6-T1: terminal-429 status-change emit parity.
+//
+// claude-code's terminal catch handler `extractQuotaStatusFromError`
+// (claudeAiLimits.ts:487) forces the limits to `status='rejected'` and runs
+// `emitStatusChange` (ts:509-511) ALONGSIDE rendering the terminal error
+// copy, so the TUI shows the rate-limit banner (+ the T5 overage notice)
+// next to the assistant error message. The Rust seam fires
+// `emit_rate_limit_if_changed` / `emit_raw_utilization_if_changed` at the
+// terminal-error mapping sites (`run_turn` & co.), AFTER the drive fn
+// promoted the pending 429 into `self.api`'s caches and BEFORE
+// `enrich_api_error` builds the terminal copy.
+//
+// These are EMIT-SEAM tests: the mock stubs the snapshot directly
+// (`set_rate_limit_full` / `set_raw_utilization`) and forces a terminal
+// rate-limited error (`set_fail_with`), so they exercise the emit-on-change
+// hooks at the terminal sites — NOT the adapter-level pending-slot promotion
+// (covered in provider_adapter.rs).
+// ════════════════════════════════════════════════════════════════════════
+
+use llm_client::LlmError;
+
+/// A terminal rate-limited error with a rejected snapshot (+ raw windows)
+/// cached on the API client emits exactly one `RateLimit` event (rejected)
+/// AND one `RawUtilization` event, while the returned error is still the
+/// enriched terminal copy. The banner renders alongside the error copy.
+#[tokio::test]
+async fn terminal_rate_limited_error_emits_rate_limit_event() {
+    let api = Arc::new(MockApiClient::new(vec![]));
+    api.set_fail_with(Some(LlmError::RateLimited {
+        retry_after: None,
+        scope: None,
+    }));
+    let rejected = RateLimitInfo {
+        status: Some("rejected".into()),
+        rate_limit_type: Some("seven_day".into()),
+        ..RateLimitInfo::default()
+    };
+    api.set_rate_limit_full(Some(rejected));
+    api.set_raw_utilization(Some(RawUtilization::from_headers(&both_window_headers(
+        "0.42",
+    ))));
+    // A composed copy so the terminal error maps to the enriched surface.
+    api.set_rate_limit_error_message(Some("You've hit your weekly limit".to_string()));
+    let output = Arc::new(MockOutputStream::new());
+    let orch = build_orch(api.clone(), output.clone());
+
+    let err = orch
+        .run_turn("hello")
+        .await
+        .expect_err("turn must die on the terminal 429");
+    // The returned error is still the enriched terminal copy.
+    assert_eq!(err.to_string(), "You've hit your weekly limit");
+
+    // Exactly one rejected RateLimit event, emitted at the terminal site.
+    let rl = rate_limit_events(&output.snapshot().await);
+    assert_eq!(rl.len(), 1, "exactly one RateLimit event: {rl:?}");
+    assert!(matches!(
+        &rl[0],
+        OutputEvent::RateLimit { status, rate_limit_type, .. }
+            if status.as_deref() == Some("rejected")
+                && rate_limit_type.as_deref() == Some("seven_day")
+    ));
+
+    // And one RawUtilization event (the raw windows from the same terminal).
+    let raw = raw_utilization_events(&output.snapshot().await);
+    assert_eq!(raw.len(), 1, "exactly one RawUtilization event: {raw:?}");
+}
+
+/// A NON-rate-limited terminal error (e.g. transport failure) must NOT emit a
+/// `RateLimit` event even if a snapshot happens to be cached — the emit hook
+/// is gated on the rate-limited discriminant only.
+#[tokio::test]
+async fn non_rate_limited_terminal_emits_no_rate_limit_event() {
+    let api = Arc::new(MockApiClient::new(vec![]));
+    api.set_fail_with(Some(LlmError::Transport {
+        message: "boom".to_string(),
+    }));
+    // A snapshot is cached, but the terminal is not rate-limited.
+    api.set_rate_limit_full(Some(sample_info()));
+    let output = Arc::new(MockOutputStream::new());
+    let orch = build_orch(api.clone(), output.clone());
+
+    let _ = orch
+        .run_turn("hello")
+        .await
+        .expect_err("turn must die on the transport error");
+
+    let rl = rate_limit_events(&output.snapshot().await);
+    assert!(
+        rl.is_empty(),
+        "non-rate-limited terminal must not emit a RateLimit event: {rl:?}"
+    );
+}
+
+/// B1 — DOCUMENTED DIVERGENCE (not parity). TS forces `status='rejected'` and
+/// emits even on a HEADERLESS terminal 429 (claudeAiLimits.ts:506-507 — the
+/// `newLimits.status = 'rejected'` assignment sits OUTSIDE the `if
+/// (error.headers)` block). The Rust seam has no "bare rejected, no windows"
+/// representation in `last_rate_limit`, so a headerless terminal 429 (mock
+/// snapshot `None`) emits NOTHING — the terminal error copy already conveys
+/// the rejection. Pinned so the divergence stays intentional.
+#[tokio::test]
+async fn headerless_terminal_429_emits_no_rate_limit_event() {
+    let api = Arc::new(MockApiClient::new(vec![]));
+    api.set_fail_with(Some(LlmError::RateLimited {
+        retry_after: None,
+        scope: None,
+    }));
+    // Headerless terminal 429: no snapshot was recorded (default None).
+    let output = Arc::new(MockOutputStream::new());
+    let orch = build_orch(api.clone(), output.clone());
+
+    let _ = orch
+        .run_turn("hello")
+        .await
+        .expect_err("turn must die on the headerless 429");
+
+    let rl = rate_limit_events(&output.snapshot().await);
+    assert!(
+        rl.is_empty(),
+        "headerless terminal 429 emits no RateLimit event (B1 divergence): {rl:?}"
+    );
+}

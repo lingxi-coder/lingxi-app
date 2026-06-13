@@ -105,6 +105,30 @@ pub struct AndroidShellConfigFfi {
     pub shell_data_exposure_accepted: bool,
 }
 
+/// FFI carrier for the Android `Git`-tool configuration (spec P4 §G5 gate +
+/// §G3 auth). `None`/`null` anywhere upstream keeps Git support fully absent.
+///
+/// Mirrors [`AndroidShellConfigFfi`]: the Kotlin host supplies the enable flag,
+/// the repository workspace root, the system CA-certificate directory, and the
+/// in-memory HTTPS token. The token rides this FFI record only long enough to be
+/// copied into the engine's `AndroidGitSecret` (held outside the broadly-cloned
+/// public [`tool_api::AndroidGitToolCtx`]); it is never written to disk or a
+/// child-process env (libgit2 is in-process).
+#[cfg(feature = "uniffi")]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+#[derive(Debug, Clone)]
+pub struct AndroidGitConfigFfi {
+    /// Master enable flag for the Git tool.
+    pub enable_git: bool,
+    /// App-private repository root (absolute path); all git ops are anchored here.
+    pub workspace_root: String,
+    /// System CA-certificate directory for TLS verification. Empty = use the
+    /// libgit2/OpenSSL defaults.
+    pub ca_cert_dir: String,
+    /// In-memory HTTPS token (PAT) for network ops, or `None` for public remotes.
+    pub https_token: Option<String>,
+}
+
 /// Top-level `UniFFI` constructor: build the mobile engine from the Kotlin-supplied
 /// platform callbacks + event listener. (Under `uniffi`: `#[uniffi::export]`.)
 ///
@@ -1006,6 +1030,22 @@ fn android_shell_gate(
     enable_shell && secrets_gate_satisfied && caps_available && seccomp_filter && net_deny_verified
 }
 
+/// The mobile `Git`-tool registration gate (spec P4 §G5): enabled iff config
+/// opts in AND the workspace is a ready directory AND the CA store is reachable.
+/// The token is deliberately NOT part of the gate (spec §G5) — a missing token
+/// disables only the network ops (clone/fetch/pull), surfaced via `has_token`.
+/// Pure; host-testable (NOT `cfg(target_os)`-gated, so the host tests reach it).
+///
+/// Called from the `cfg(target_os = "android")` branch of
+/// [`build_android_engine`]; on the host build the only caller is the unit test,
+/// so `allow(dead_code)` there (mirrors the file's other host-unused items).
+#[cfg(feature = "uniffi")]
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+#[must_use]
+fn android_git_gate(enable_git: bool, workspace_ready: bool, ca_store_reachable: bool) -> bool {
+    enable_git && workspace_ready && ca_store_reachable
+}
+
 /// Foreign-callable constructor for the Android app (plan T2.2).
 ///
 /// Builds a fully-wired [`MobileEngineHandle`] from the Kotlin-supplied event
@@ -1034,12 +1074,18 @@ fn android_shell_gate(
 ///   `Intent.ACTION_SEND` share sheet.
 /// - `shell` — optional Android sandbox/shell config (spec r3 §Android
 ///   inputs); `None`/`null` keeps shell support fully absent.
+/// - `git` — optional Android Git-tool config (spec P4 §G5 gate + §G3 auth);
+///   `None`/`null` keeps Git support fully absent.
 ///
 /// On non-Android hosts this returns [`MobileEngineError::PlatformUnavailable`]
 /// (the `AndroidPlatform` is only linked under `cfg(target_os = "android")`).
 #[cfg(feature = "uniffi")]
 #[cfg_attr(feature = "uniffi", uniffi::export)]
 #[allow(clippy::too_many_arguments)] // FFI constructor: one flat arg per Kotlin callback.
+// Single linear constructor body: probe → shell gate → git gate → delegate. The
+// per-tool gate blocks (spec r3 §Registration gates + P4 §G5) read most clearly
+// inline at the one call site, so the length is intrinsic, not decomposable.
+#[allow(clippy::too_many_lines)]
 pub fn build_android_engine(
     api_base: String,
     api_key: String,
@@ -1055,6 +1101,7 @@ pub fn build_android_engine(
     clipboard: Box<dyn AndroidClipboard>,
     permissions: Box<dyn AndroidPermissionSink>,
     shell: Option<AndroidShellConfigFfi>,
+    git: Option<AndroidGitConfigFfi>,
 ) -> Result<Arc<MobileEngineHandle>, MobileEngineError> {
     let listener: Arc<dyn ClientEventListener> =
         Arc::new(AndroidListenerBridge { inner: listener });
@@ -1152,6 +1199,33 @@ pub fn build_android_engine(
             }
         }
 
+        // P4-T10: compute the Git-tool registration gate + thread the in-process
+        // HTTPS token onto `MobileConfig`. Independent of the capability probe
+        // (Git is decoupled from minijail — spec §G5: no sandbox capability in
+        // its gate, no exec). Absent (`None`) whenever no git config was supplied
+        // — Git support then stays fully absent. The token rides the separate
+        // `android_git_secret` field (NOT the broadly-cloned public
+        // `AndroidGitToolCtx`, which only exposes `has_token`), so it never
+        // enters the public tool carrier.
+        if let Some(c) = git {
+            let workspace_ready = std::path::Path::new(&c.workspace_root).is_dir();
+            let ca_store_reachable =
+                c.ca_cert_dir.is_empty() || std::path::Path::new(&c.ca_cert_dir).exists();
+            cfg.android_git = Some(tool_api::AndroidGitToolCtx {
+                enabled: android_git_gate(c.enable_git, workspace_ready, ca_store_reachable),
+                has_token: c.https_token.is_some(),
+                workspace_root: c.workspace_root.clone(),
+            });
+            cfg.android_git_secret = Some(tool_api::AndroidGitSecret {
+                token: c.https_token,
+                ca_dir: if c.ca_cert_dir.is_empty() {
+                    None
+                } else {
+                    Some(c.ca_cert_dir)
+                },
+            });
+        }
+
         let platform: Arc<dyn Platform> = Arc::new(android_platform);
         let permission_sink: Arc<dyn PermissionRequestSink> =
             Arc::new(AndroidPermissionSinkBridge { inner: permissions });
@@ -1174,6 +1248,7 @@ pub fn build_android_engine(
             clipboard,
             permissions,
             shell,
+            git,
         );
         Err(MobileEngineError::PlatformUnavailable)
     }
@@ -1544,5 +1619,73 @@ mod tests {
                 "gate must be disabled when {label} is false"
             );
         }
+    }
+
+    /// P4-T10: the Git-tool registration gate is the conjunction of all three
+    /// inputs — `true` ONLY when every input is `true`, `false` if any single
+    /// input is `false`. The token is NOT a gate input (spec §G5). Host-testable.
+    #[test]
+    fn android_git_gate_is_all_three_conjuncts() {
+        use super::android_git_gate;
+
+        // All three true → enabled.
+        assert!(
+            android_git_gate(true, true, true),
+            "gate must be enabled when all three conjuncts hold"
+        );
+
+        // Each single-false case → disabled.
+        let cases = [
+            (0, "enable_git"),
+            (1, "workspace_ready"),
+            (2, "ca_store_reachable"),
+        ];
+        for (false_idx, label) in cases {
+            let mut args = [true; 3];
+            args[false_idx] = false;
+            assert!(
+                !android_git_gate(args[0], args[1], args[2]),
+                "gate must be disabled when {label} is false"
+            );
+        }
+    }
+
+    /// P4-T10: the FFI → `AndroidGitToolCtx` mapping yields `enabled = false`
+    /// when `enable_git` is false even if the other gate inputs (workspace +
+    /// CA store) are satisfied, and regardless of a present token. Pure-fn level
+    /// (mirrors the body of [`build_android_engine`]'s git mapping).
+    #[test]
+    fn ffi_mapping_disabled_when_enable_git_false() {
+        use super::android_git_gate;
+
+        let cfg = super::AndroidGitConfigFfi {
+            enable_git: false,
+            // Use the workspace's own dir so the readiness check would pass.
+            workspace_root: env!("CARGO_MANIFEST_DIR").to_string(),
+            // Empty CA dir is treated as reachable (libgit2/OpenSSL defaults).
+            ca_cert_dir: String::new(),
+            https_token: Some("pat-token".to_string()),
+        };
+
+        let workspace_ready = std::path::Path::new(&cfg.workspace_root).is_dir();
+        let ca_store_reachable =
+            cfg.ca_cert_dir.is_empty() || std::path::Path::new(&cfg.ca_cert_dir).exists();
+        assert!(workspace_ready, "fixture workspace_root must be a real dir");
+        assert!(ca_store_reachable, "empty CA dir must count as reachable");
+
+        let ctx = tool_api::AndroidGitToolCtx {
+            enabled: android_git_gate(cfg.enable_git, workspace_ready, ca_store_reachable),
+            has_token: cfg.https_token.is_some(),
+            workspace_root: cfg.workspace_root.clone(),
+        };
+
+        assert!(
+            !ctx.enabled,
+            "Git must be disabled when enable_git is false, even with workspace + CA + token set"
+        );
+        assert!(
+            ctx.has_token,
+            "has_token must still reflect a supplied token"
+        );
     }
 }

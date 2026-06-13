@@ -351,8 +351,9 @@ pub const DEFAULT_SIGNATURE_EMAIL: &str = "noreply@lingxi";
 /// Result of an [`add`] call.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct GitAddResult {
-    /// Number of paths staged into the index.
-    pub staged: usize,
+    /// Total entries in the index after staging (not the delta added by this
+    /// call — the index includes all previously-tracked paths).
+    pub index_entries: usize,
 }
 
 /// Result of a [`commit`] call.
@@ -430,7 +431,7 @@ pub fn add(repo: &git2::Repository, paths: &[String]) -> Result<GitAddResult, Gi
         .map_err(|e| GitOpError::from_git2(&e))?;
     index.write().map_err(|e| GitOpError::from_git2(&e))?;
     Ok(GitAddResult {
-        staged: index.len(),
+        index_entries: index.len(),
     })
 }
 
@@ -843,6 +844,17 @@ mod tests {
             matches!(err, GitOpError::Escape(_)),
             "symlink escape must produce GitOpError::Escape, got: {err:?}"
         );
+
+        // An ABSOLUTE repo param escapes too: `Path::join` replaces the base
+        // with an absolute arg, so `<ws>.join("/abs/repo")` == `/abs/repo`,
+        // which canonicalizes outside ws → strict Escape. Locks the guarantee
+        // against a future join refactor.
+        let abs = outside.path().to_str().unwrap().to_string();
+        let err = expect_err(ws.path(), &abs, "absolute-path escape");
+        assert!(
+            matches!(err, GitOpError::Escape(_)),
+            "absolute-path escape must produce GitOpError::Escape, got: {err:?}"
+        );
     }
 
     #[test]
@@ -875,7 +887,7 @@ mod tests {
 
         std::fs::write(dir.path().join("c.txt"), "gamma\n").unwrap();
         let added = add(&repo, &["c.txt".to_owned()]).unwrap();
-        assert!(added.staged >= 1, "at least one path staged");
+        assert!(added.index_entries >= 1, "at least one path staged");
 
         let res = commit(&repo, "third").unwrap();
         let head = head_commit(&repo);

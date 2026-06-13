@@ -1529,6 +1529,152 @@ pub fn android_git_probe(operation_json: String, workspace: String, ca_cert_dir:
     }
 }
 
+/// P5a make-or-break gate probe: prove that bundled executables packaged as
+/// `lib*.so` under `native_lib_dir` can `execve` under Android 10+ W^X, and
+/// decide which toybox applet-resolution mechanism works on-device.
+///
+/// This is a RAW exec probe — NOT jailed. It only proves the W^X/packaging
+/// story (the minijail/deny-net path is unchanged from P2/P3 and proven
+/// elsewhere). It returns JSON:
+///
+/// ```json
+/// {"mksh_exec_ok":bool,"applet_symlink_ok":bool,"applet_rewrite_ok":bool,"reason":"..."}
+/// ```
+///
+/// - `mksh_exec_ok`: `<native_lib_dir>/libmksh.so -c 'echo hi'` runs and stdout
+///   contains `hi` — proves W^X execve of a bundled executable from
+///   nativeLibraryDir works at all.
+/// - `applet_symlink_ok`: a symlink `<applet_dir>/grep` → `libtoybox.so`,
+///   exec'd as `<applet_dir>/grep foo` over stdin `foo\nbar`, outputs `foo` —
+///   proves execve-through-a-symlink-into-nativeLibraryDir + toybox `argv[0]`
+///   multicall dispatch under W^X (the PREFERRED applet mechanism for P5b).
+/// - `applet_rewrite_ok`: `<native_lib_dir>/libtoybox.so grep foo` over the same
+///   stdin outputs `foo` — the command-rewrite FALLBACK mechanism.
+///
+/// Host builds return `{"error":"host build"}` so a JVM-host run fails loudly
+/// rather than silently passing.
+#[cfg(feature = "uniffi")]
+#[cfg_attr(feature = "uniffi", uniffi::export)]
+#[allow(clippy::needless_pass_by_value)] // FFI export: UniFFI marshals owned `String`.
+#[must_use]
+pub fn android_bundled_shell_probe(native_lib_dir: String, applet_dir: String) -> String {
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = (native_lib_dir, applet_dir);
+        "{\"error\":\"host build\"}".to_string()
+    }
+    #[cfg(target_os = "android")]
+    {
+        use std::io::Write;
+        use std::os::unix::fs::symlink;
+        use std::path::Path;
+        use std::process::{Command, Stdio};
+
+        let nl = Path::new(&native_lib_dir);
+        let mksh = nl.join("libmksh.so");
+        let toybox = nl.join("libtoybox.so");
+        let mut reason = String::new();
+
+        // (a) RAW mksh execve proof — the make-or-break W^X gate.
+        let mksh_exec_ok = match Command::new(&mksh).args(["-c", "echo hi"]).output() {
+            Ok(out) => {
+                let so = String::from_utf8_lossy(&out.stdout);
+                let ok = so.contains("hi");
+                if !ok {
+                    reason.push_str(&format!(
+                        "mksh: status={:?} stdout={:?} stderr={:?}; ",
+                        out.status.code(),
+                        so,
+                        String::from_utf8_lossy(&out.stderr)
+                    ));
+                }
+                ok
+            }
+            Err(e) => {
+                reason.push_str(&format!("mksh spawn: {e}; "));
+                false
+            }
+        };
+
+        // Helper: run a command with stdin "foo\nbar" and assert stdout == "foo".
+        let run_grep = |mut cmd: Command, label: &str, reason: &mut String| -> bool {
+            cmd.stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped());
+            let mut child = match cmd.spawn() {
+                Ok(c) => c,
+                Err(e) => {
+                    reason.push_str(&format!("{label} spawn: {e}; "));
+                    return false;
+                }
+            };
+            if let Some(mut sin) = child.stdin.take() {
+                let _ = sin.write_all(b"foo\nbar\n");
+            }
+            match child.wait_with_output() {
+                Ok(out) => {
+                    let so = String::from_utf8_lossy(&out.stdout);
+                    let ok = so.lines().any(|l| l.trim() == "foo");
+                    if !ok {
+                        reason.push_str(&format!(
+                            "{label}: status={:?} stdout={:?} stderr={:?}; ",
+                            out.status.code(),
+                            so,
+                            String::from_utf8_lossy(&out.stderr)
+                        ));
+                    }
+                    ok
+                }
+                Err(e) => {
+                    reason.push_str(&format!("{label} wait: {e}; "));
+                    false
+                }
+            }
+        };
+
+        // (b) Symlink-farm applet resolution (PREFERRED).
+        let applet_symlink_ok = {
+            let dir = Path::new(&applet_dir);
+            let link = dir.join("grep");
+            let setup_ok = std::fs::create_dir_all(dir)
+                .map_err(|e| reason.push_str(&format!("applet_dir mkdir: {e}; ")))
+                .is_ok();
+            // Refresh the symlink (ignore a pre-existing one from a warm run).
+            let _ = std::fs::remove_file(&link);
+            if setup_ok {
+                match symlink(&toybox, &link) {
+                    Ok(()) => {
+                        let mut c = Command::new(&link);
+                        c.arg("foo");
+                        run_grep(c, "applet_symlink", &mut reason)
+                    }
+                    Err(e) => {
+                        reason.push_str(&format!("symlink: {e}; "));
+                        false
+                    }
+                }
+            } else {
+                false
+            }
+        };
+
+        // (c) Command-rewrite applet resolution (FALLBACK).
+        let applet_rewrite_ok = {
+            let mut c = Command::new(&toybox);
+            c.args(["grep", "foo"]);
+            run_grep(c, "applet_rewrite", &mut reason)
+        };
+
+        serde_json::json!({
+            "mksh_exec_ok": mksh_exec_ok,
+            "applet_symlink_ok": applet_symlink_ok,
+            "applet_rewrite_ok": applet_rewrite_ok,
+            "reason": if reason.is_empty() { "ok".to_string() } else { reason },
+        })
+        .to_string()
+    }
+}
+
 // F3-04: re-export `engine-mobile`'s UniFFI scaffolding so the shared host's FFI
 // symbols (the re-exported `MobileEngineHandle` / `MobileEngineError`) land in
 // this crate's final library. Under the `uniffi` feature only.

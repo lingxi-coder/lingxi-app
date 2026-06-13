@@ -830,7 +830,10 @@ pub struct AppState {
     /// pump in `root.rs` consumes (clears) the flag, builds the command payload,
     /// runs it off-thread, and re-paints when the text changes. A terminal 429
     /// emits `ClientEvent::Error` (not `TurnEnded`), so it deliberately does NOT
-    /// re-arm the statusline — TS-faithful (M8).
+    /// re-arm the statusline — TS-faithful (M8). DEFERRED: TS also re-runs on
+    /// `permissionMode` / `vimMode` / `mainLoopModel` change (`StatusLine.tsx:236`);
+    /// the TUI analogs are deferred until those values mutate `AppState`
+    /// (intentional, recorded in spec rev2.11) — not a missed requirement.
     pub status_line_dirty: bool,
     /// (Batch-5 Task 4) Latest raw per-window rate-limit utilization snapshot,
     /// written by `apply_event` on every `TurnEvent::RawUtilization`

@@ -250,11 +250,6 @@ fn settings_dirs() -> (std::path::PathBuf, std::path::PathBuf) {
     (claude_home, project_dir)
 }
 
-/// True iff `skipDangerousModePermissionPrompt` is truthy in EITHER the user
-/// (`~/.claude/settings.json`) OR local (`<cwd>/.claude/settings.local.json`)
-/// settings — the `hasSkipDangerousModePermissionPrompt` user+local check
-/// (claude-code `settings.ts:882-889`; the flag/policy tiers have no Rust
-/// substrate). On any read failure the tier degrades to `false`.
 /// (A6 batch-6 Task 2) Read + merge the `statusLine` setting from the USER
 /// (`~/.claude/settings.json`) and LOCAL (`<proj>/.claude/settings.local.json`)
 /// tiers, Local-over-User, and parse it into a [`StatusLineConfig`]. `None` when
@@ -267,6 +262,19 @@ fn settings_dirs() -> (std::path::PathBuf, std::path::PathBuf) {
 /// `read_settings_map`. A broken/unreadable tier degrades to "no value" for that
 /// tier (read error → treated as absent), matching the TS warn-and-continue
 /// settings stance.
+///
+/// DIVERGENCES from claude-code (documented, intentional): (1) TS resolves
+/// `statusLine` from the fully-merged settings across User → Project
+/// (`.claude/settings.json`) → Local → flag → policy (`constants.ts`
+/// `SETTING_SOURCES`); the Rust `migrations::settings_update::SettingsSource`
+/// has only `User`/`Local` substrate (same limit as [`read_skip_dangerous_prompt`]),
+/// so a `statusLine` committed in project `.claude/settings.json` is silently
+/// dropped — recorded in spec rev2.11's remaining list. (2) TS deep-merges the
+/// `statusLine` OBJECT across tiers (lodash default merge); this does a whole-
+/// object replace (Local's `statusLine` wholly replaces User's), so a config
+/// SPLIT across tiers (e.g. `{type,command}` in User + `{padding}` in Local)
+/// diverges — real configs carry the whole object in one tier, so this is
+/// acceptable.
 fn read_status_line_config_from(
     claude_home: &std::path::Path,
     project_dir: &std::path::Path,
@@ -294,6 +302,11 @@ fn read_status_line_config() -> Option<tui::components::status_line_command::Sta
     read_status_line_config_from(&claude_home, &project_dir)
 }
 
+/// True iff `skipDangerousModePermissionPrompt` is truthy in EITHER the user
+/// (`~/.claude/settings.json`) OR local (`<cwd>/.claude/settings.local.json`)
+/// settings — the `hasSkipDangerousModePermissionPrompt` user+local check
+/// (claude-code `settings.ts:882-889`; the flag/policy tiers have no Rust
+/// substrate). On any read failure the tier degrades to `false`.
 fn read_skip_dangerous_prompt() -> bool {
     use migrations::settings_update::{read_settings_map, settings_path, SettingsSource};
     let (claude_home, project_dir) = settings_dirs();

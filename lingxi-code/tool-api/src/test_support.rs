@@ -558,6 +558,7 @@ pub fn ctx_for_file_tools(
         read_file_state: crate::read_file_state::new_read_file_state_map(),
         android_shell: None,
         android_git: None,
+        android_git_secret: None,
     }
 }
 
@@ -613,5 +614,6 @@ pub fn shell_test_ctx(out: ProcessOutput) -> super::BuiltinToolContext {
         read_file_state: crate::read_file_state::new_read_file_state_map(),
         android_shell: None,
         android_git: None,
+        android_git_secret: None,
     }
 }

@@ -16,11 +16,18 @@
 //! `MobileConfig` -> `BuiltinToolContext.android_git`. On desktop / iOS the
 //! `android_git` carrier is `None`, so the tool is absent (not erroring).
 //!
-//! `git2` is a safe wrapper; the only C is `libgit2-sys` at build time, so the
-//! crate stays `#![forbid(unsafe_code)]`.
+//! `git2` is a safe wrapper; the only C is `libgit2-sys` at build time. The
+//! crate is `#![deny(unsafe_code)]` (NOT `forbid`) for a SINGLE audited
+//! carve-out: the vendored `git2` exposes the CA-location option as the
+//! **`unsafe`** `git2::opts::set_ssl_cert_dir` (it mutates a libgit2 global
+//! without synchronization — the spec G6 assumed a safe `set_ssl_cert_locations`
+//! that does not exist in the pinned `git2 0.21`). That one `unsafe` block is
+//! isolated in [`auth::set_ca_location`] under a localized
+//! `#[allow(unsafe_code)]`; `deny` keeps every other line unsafe-free.
 
-#![forbid(unsafe_code)]
+#![deny(unsafe_code)]
 
+pub mod auth;
 pub mod ops;
 
 use async_trait::async_trait;
@@ -227,24 +234,20 @@ impl Tool for GitTool {
             .map(|g| g.workspace_root.clone())
             .ok_or_else(|| ToolError::InvalidInput("android_git context is absent".into()))?;
         let repo_rel = input.get("repo").and_then(Value::as_str).unwrap_or(".");
+        let workspace_path = std::path::Path::new(&workspace_root);
 
-        // Network ops are filled by Task 8; until then they report a named,
-        // non-panicking error rather than touching libgit2.
-        if matches!(operation, "clone" | "fetch" | "pull") {
-            return Err(ToolError::InvalidInput(
-                "network operation requires P4c".into(),
-            ));
-        }
+        // Network ops (clone/fetch/pull) read the in-memory secret (token + CA
+        // dir) from the SEPARATE `android_git_secret` seam — never the public
+        // `android_git` carrier — and never touch disk/env.
+        let dispatch_result = if matches!(operation, "clone" | "fetch" | "pull") {
+            let net = self.git_net_config();
+            dispatch_network(&net, workspace_path, repo_rel, operation, &input)
+        } else {
+            // All local ops open the repo first, then dispatch.
+            dispatch_local(workspace_path, repo_rel, operation, &input)
+        };
 
-        // All local ops open the repo first, then dispatch (errors mapped
-        // below). The dispatch is factored into `dispatch_local` to keep this
-        // method short.
-        match dispatch_local(
-            std::path::Path::new(&workspace_root),
-            repo_rel,
-            operation,
-            &input,
-        ) {
+        match dispatch_result {
             Ok(data) => Ok(ToolCallResult {
                 data,
                 new_messages: Vec::new(),
@@ -253,6 +256,63 @@ impl Tool for GitTool {
             }),
             Err(e) => Err(map_git_op_error(e)),
         }
+    }
+}
+
+impl GitTool {
+    /// Build the per-operation [`ops::GitNetConfig`] from the in-memory secret
+    /// seam (`ctx.android_git_secret`). The token is cloned out of the secret
+    /// carrier only for the duration of the call; it is never logged, written
+    /// to disk, or passed to a child process. When no secret is configured the
+    /// config is empty (anonymous / public remotes, default CA).
+    fn git_net_config(&self) -> ops::GitNetConfig {
+        match self.ctx.android_git_secret.as_ref() {
+            Some(secret) => ops::GitNetConfig {
+                token: secret.token.clone(),
+                ca_dir: secret.ca_dir.clone(),
+            },
+            None => ops::GitNetConfig::default(),
+        }
+    }
+}
+
+/// Dispatch a network op (clone/fetch/pull) to `ops::`. clone targets the
+/// workspace-relative `dest` (`repo` param, default `cloned`); fetch/pull open
+/// the existing repo at `repo` first.
+fn dispatch_network(
+    net: &ops::GitNetConfig,
+    workspace_root: &std::path::Path,
+    repo_rel: &str,
+    operation: &str,
+    input: &Value,
+) -> Result<Value, ops::GitOpError> {
+    let str_param = |key: &str| input.get(key).and_then(Value::as_str);
+    match operation {
+        "clone" => {
+            let repo_url = str_param("repo_url")
+                .ok_or_else(|| ops::GitOpError::InvalidInput("clone requires `repo_url`".into()))?;
+            // Destination is the workspace-relative `repo` path; default to a
+            // `cloned` sub-dir so a bare `clone` never targets the ws root.
+            let dest = if repo_rel == "." { "cloned" } else { repo_rel };
+            Ok(
+                serde_json::to_value(ops::clone(net, workspace_root, repo_url, dest)?)
+                    .unwrap_or(Value::Null),
+            )
+        }
+        "fetch" => {
+            let repo = ops::open_repo(workspace_root, repo_rel)?;
+            let remote = str_param("remote").unwrap_or("origin");
+            Ok(serde_json::to_value(ops::fetch(net, &repo, remote)?).unwrap_or(Value::Null))
+        }
+        "pull" => {
+            let repo = ops::open_repo(workspace_root, repo_rel)?;
+            let remote = str_param("remote").unwrap_or("origin");
+            let branch = str_param("branch").unwrap_or("");
+            Ok(serde_json::to_value(ops::pull(net, &repo, remote, branch)?).unwrap_or(Value::Null))
+        }
+        other => Err(ops::GitOpError::InvalidInput(format!(
+            "unknown network git operation '{other}'"
+        ))),
     }
 }
 
@@ -528,21 +588,76 @@ mod tests {
         assert_eq!(head.summary().unwrap(), Some("dispatched"));
     }
 
+    /// `clone` of a `file://` bare remote through `GitTool::call` produces a
+    /// working repo under the workspace — exercises the full call -> ops::clone
+    /// path (no real network/token).
     #[tokio::test]
-    async fn call_network_op_reports_p4c_stub() {
+    async fn call_dispatches_clone_from_file_remote() {
         use tool_api::test_support::{fresh_ctx, fresh_tx};
-        let tool = GitTool::new(test_ctx_git_enabled());
-        let err = tool
+
+        // Build a `file://` source repo with one commit.
+        let remote_dir = tempfile::tempdir().expect("tempdir");
+        let src = git2::Repository::init(remote_dir.path()).unwrap();
+        let sig = git2::Signature::now("R", "r@example.com").unwrap();
+        std::fs::write(remote_dir.path().join("f.txt"), "hi\n").unwrap();
+        {
+            let mut index = src.index().unwrap();
+            index.add_path(std::path::Path::new("f.txt")).unwrap();
+            index.write().unwrap();
+            let tree = src.find_tree(index.write_tree().unwrap()).unwrap();
+            src.commit(Some("HEAD"), &sig, &sig, "c1", &tree, &[])
+                .unwrap();
+        }
+        let url = format!(
+            "file://{}",
+            remote_dir.path().canonicalize().unwrap().display()
+        );
+
+        // ctx anchored at a fresh workspace.
+        let ws = tempfile::tempdir().expect("tempdir");
+        let mut ctx = shell_test_ctx(ok_output());
+        ctx.android_git = Some(AndroidGitToolCtx {
+            enabled: true,
+            has_token: false,
+            workspace_root: ws.path().to_string_lossy().into_owned(),
+        });
+        let tool = GitTool::new(ctx);
+
+        let result = tool
             .call(
-                json!({ "operation": "clone", "repo_url": "https://example/x.git" }),
+                json!({ "operation": "clone", "repo_url": url, "repo": "cloned" }),
                 fresh_ctx(),
                 fresh_tx(),
             )
             .await
-            .expect_err("network op should be stubbed");
+            .expect("clone dispatch should succeed");
         assert!(
-            err.to_string().contains("P4c"),
-            "network op should name the P4c follow-up, got: {err}"
+            result.data["head"].as_str().is_some(),
+            "clone result carries a head oid"
+        );
+        assert!(
+            ws.path().join("cloned").join("f.txt").exists(),
+            "cloned working file present"
+        );
+    }
+
+    /// An ssh URL routed through `GitTool::call` is rejected (G7).
+    #[tokio::test]
+    async fn call_rejects_ssh_clone() {
+        use tool_api::test_support::{fresh_ctx, fresh_tx};
+        let tool = GitTool::new(test_ctx_git_enabled());
+        let err = tool
+            .call(
+                json!({ "operation": "clone", "repo_url": "git@github.com:x/y.git" }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .expect_err("ssh clone should be rejected");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("ssh") && msg.contains("HTTPS"),
+            "ssh rejection should name ssh + HTTPS, got: {msg}"
         );
     }
 

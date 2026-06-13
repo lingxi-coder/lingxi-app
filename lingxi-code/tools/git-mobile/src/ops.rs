@@ -11,10 +11,10 @@
 //! - Task 8: network operations (clone / fetch / pull) with the in-process
 //!   credential callback + CA wiring.
 //!
-//! Tasks 4-6 are implemented (repo open + read + local-write ops); the network
-//! ops (clone/fetch/pull) land in Task 8. `GitTool::call` dispatches the
-//! local ops here and reports the network ops as a named "requires P4c" error
-//! until then.
+//! Tasks 4-6 are implemented (repo open + read + local-write ops); Task 8 adds
+//! the network ops (clone/fetch/pull) with the in-process token credential
+//! callback + CA wiring (see [`crate::auth`]). `GitTool::call` dispatches the
+//! local ops and the network ops here.
 
 use std::path::Path;
 
@@ -651,6 +651,230 @@ pub fn merge(repo: &git2::Repository, source: &str) -> Result<GitMergeResult, Gi
     })
 }
 
+// =============================================================================
+// Network operations (Task 8) — clone / fetch / pull
+// =============================================================================
+
+/// Per-operation network configuration carried by `GitTool::call` into the
+/// network ops. The HTTPS `token` is supplied in-memory by the Kotlin host and
+/// is never written to disk or a child-process env; `ca_dir` points libgit2's
+/// TLS backend at a CA-certificate directory (Android system cacerts).
+///
+/// This rides a SEPARATE secret seam from the public `AndroidGitToolCtx` so the
+/// token never enters the broadly-cloned public tool context — see
+/// `tool-api`'s `BuiltinToolContext.android_git_secret`.
+#[derive(Debug, Clone, Default)]
+pub struct GitNetConfig {
+    /// HTTPS token (PAT) used as the password in the credential callback, or
+    /// `None` for anonymous / public remotes. Never logged or persisted.
+    pub token: Option<String>,
+    /// CA-certificate directory for TLS verification, or `None` to use the
+    /// libgit2/OpenSSL defaults (the host `file://` tests need none).
+    pub ca_dir: Option<String>,
+}
+
+/// Result of a [`clone`] call.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct GitCloneResult {
+    /// Absolute path of the freshly cloned working tree.
+    pub path: String,
+    /// OID of the cloned HEAD commit, hex-encoded.
+    pub head: String,
+}
+
+/// Result of a [`fetch`] call.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct GitFetchResult {
+    /// The remote that was fetched from.
+    pub remote: String,
+}
+
+/// Result of a [`pull`] call (fetch + fast-forward merge).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct GitPullResult {
+    /// Whether the merge half was a fast-forward (the only kind v1 performs).
+    pub fast_forward: bool,
+    /// OID HEAD points at after the pull.
+    pub oid: String,
+}
+
+/// Reject `git@…` / `ssh://…` remote URLs (G7 — HTTPS-only in v1).
+///
+/// # Errors
+///
+/// [`GitOpError::InvalidInput`] naming ssh/HTTPS when `url` is an SSH remote.
+fn reject_ssh_url(url: &str) -> Result<(), GitOpError> {
+    let lower = url.trim().to_ascii_lowercase();
+    // scp-like `git@host:path` or explicit `ssh://` / `git+ssh://`.
+    let is_ssh = lower.starts_with("ssh://")
+        || lower.starts_with("git+ssh://")
+        || lower.starts_with("git@")
+        // generic `user@host:path` scp syntax (has `@` and a `:` before any `/`).
+        || (lower.contains('@')
+            && !lower.contains("://")
+            && lower
+                .split_once(':')
+                .is_some_and(|(left, _)| left.contains('@')));
+    if is_ssh {
+        return Err(GitOpError::InvalidInput(
+            "ssh URLs are not supported; use HTTPS".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// Clone `repo_url` into `dest_rel` (relative to `workspace_root`).
+///
+/// SSH URLs are rejected (G7). The destination is validated to stay inside the
+/// canonicalized workspace root — since `dest` does not exist yet, its PARENT
+/// is canonicalized and checked (mirrors [`open_repo`]'s containment guard).
+/// The CA location is set first, then `RepoBuilder` clones with the
+/// token-bearing fetch options.
+///
+/// # Errors
+///
+/// - [`GitOpError::InvalidInput`] — SSH URL, or empty `repo_url`.
+/// - [`GitOpError::Escape`] — `dest_rel` resolves outside the workspace root.
+/// - [`GitOpError::NotFound`] — the workspace root / dest parent cannot be
+///   canonicalized.
+/// - [`GitOpError::Libgit2`] — the clone (network / TLS / auth) failed.
+pub fn clone(
+    net: &GitNetConfig,
+    workspace_root: &Path,
+    repo_url: &str,
+    dest_rel: &str,
+) -> Result<GitCloneResult, GitOpError> {
+    if repo_url.is_empty() {
+        return Err(GitOpError::InvalidInput("clone requires `repo_url`".into()));
+    }
+    reject_ssh_url(repo_url)?;
+
+    // Resolve + validate the destination. `dest` itself does not exist yet, so
+    // canonicalize its PARENT and require that to be inside the workspace root,
+    // then re-attach the final component.
+    let canonical_root = workspace_root.canonicalize().map_err(|e| {
+        GitOpError::NotFound(format!("workspace root {}: {e}", workspace_root.display()))
+    })?;
+    let requested = canonical_root.join(dest_rel);
+    let parent = requested
+        .parent()
+        .ok_or_else(|| GitOpError::InvalidInput(format!("dest {dest_rel} has no parent")))?;
+    let file_name = requested.file_name().ok_or_else(|| {
+        GitOpError::InvalidInput(format!("dest {dest_rel} has no final component"))
+    })?;
+    let canonical_parent = parent
+        .canonicalize()
+        .map_err(|e| GitOpError::NotFound(format!("{}: {e}", parent.display())))?;
+    if !canonical_parent.starts_with(&canonical_root) {
+        return Err(GitOpError::Escape(canonical_parent.display().to_string()));
+    }
+    let dest = canonical_parent.join(file_name);
+
+    // CA wiring first, then clone with token-bearing fetch options.
+    crate::auth::set_ca_location(net.ca_dir.as_deref())?;
+    let fetch_opts = crate::auth::make_fetch_options(net.token.as_deref());
+    let mut builder = git2::build::RepoBuilder::new();
+    builder.fetch_options(fetch_opts);
+    let repo = builder
+        .clone(repo_url, &dest)
+        .map_err(|e| GitOpError::from_git2(&e))?;
+
+    let head = repo
+        .head()
+        .and_then(|h| h.peel_to_commit())
+        .map_err(|e| GitOpError::from_git2(&e))?;
+    Ok(GitCloneResult {
+        path: dest.display().to_string(),
+        head: head.id().to_string(),
+    })
+}
+
+/// Fetch from `remote_name` (default `origin`) using the token-bearing fetch
+/// options. The remote's configured URL is also checked against the SSH guard.
+///
+/// # Errors
+///
+/// - [`GitOpError::InvalidInput`] — the remote URL is an SSH URL.
+/// - [`GitOpError::Libgit2`] — the remote is missing or the fetch failed.
+pub fn fetch(
+    net: &GitNetConfig,
+    repo: &git2::Repository,
+    remote_name: &str,
+) -> Result<GitFetchResult, GitOpError> {
+    let name = if remote_name.is_empty() {
+        "origin"
+    } else {
+        remote_name
+    };
+    let mut remote = repo
+        .find_remote(name)
+        .map_err(|e| GitOpError::from_git2(&e))?;
+    if let Ok(url) = remote.url() {
+        reject_ssh_url(url)?;
+    }
+    crate::auth::set_ca_location(net.ca_dir.as_deref())?;
+    let mut fetch_opts = crate::auth::make_fetch_options(net.token.as_deref());
+    // Empty refspec slice -> libgit2 uses the remote's configured default
+    // refspecs (refs/heads/* -> refs/remotes/<remote>/*).
+    let empty: [&str; 0] = [];
+    remote
+        .fetch(&empty, Some(&mut fetch_opts), None)
+        .map_err(|e| GitOpError::from_git2(&e))?;
+    Ok(GitFetchResult {
+        remote: name.to_owned(),
+    })
+}
+
+/// Pull: [`fetch`] then a **fast-forward-only** merge of the fetched
+/// remote-tracking ref (`<remote>/<branch>`) into the current branch, reusing
+/// [`merge`]'s ff logic. A diverged history yields [`GitOpError::NonFastForward`]
+/// (no 3-way merge, no conflict markers).
+///
+/// `branch` defaults to the short name of the current HEAD branch when empty.
+///
+/// # Errors
+///
+/// - [`GitOpError::InvalidInput`] — the remote URL is SSH, or HEAD is detached
+///   and no `branch` was supplied.
+/// - [`GitOpError::NonFastForward`] — the merge is not a fast-forward.
+/// - [`GitOpError::Libgit2`] — the fetch / ref resolution failed.
+pub fn pull(
+    net: &GitNetConfig,
+    repo: &git2::Repository,
+    remote_name: &str,
+    branch: &str,
+) -> Result<GitPullResult, GitOpError> {
+    let remote = if remote_name.is_empty() {
+        "origin"
+    } else {
+        remote_name
+    };
+    fetch(net, repo, remote)?;
+
+    // Resolve the branch short name: explicit param, else current HEAD branch.
+    let branch_name = if branch.is_empty() {
+        let head = repo.head().map_err(|e| GitOpError::from_git2(&e))?;
+        if !head.is_branch() {
+            return Err(GitOpError::InvalidInput(
+                "pull on a detached HEAD requires an explicit `branch`".into(),
+            ));
+        }
+        head.shorthand()
+            .map_err(|e| GitOpError::from_git2(&e))?
+            .to_owned()
+    } else {
+        branch.to_owned()
+    };
+
+    // The fetched remote-tracking ref to fast-forward onto.
+    let tracking = format!("refs/remotes/{remote}/{branch_name}");
+    let merge_result = merge(repo, &tracking)?;
+    Ok(GitPullResult {
+        fast_forward: merge_result.fast_forward,
+        oid: merge_result.oid,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1089,5 +1313,140 @@ mod tests {
             !d_content.contains("<<<<<<<") && !d_content.contains(">>>>>>>"),
             "no conflict markers should be written on a refused non-ff merge"
         );
+    }
+
+    // ===== Network ops (Task 8) — file:// bare remotes, no real network =====
+
+    /// Build a non-bare repo at `dir` with one commit (file `r.txt` = "v1\n")
+    /// that can serve as a `file://` clone source, and return its `file://` URL
+    /// plus the HEAD oid. A normal (non-bare) repo is a valid clone source.
+    fn init_remote(dir: &Path) -> (String, git2::Oid) {
+        let repo = git2::Repository::init(dir).unwrap();
+        let sig = git2::Signature::now("Remote", "remote@example.com").unwrap();
+        std::fs::write(dir.join("r.txt"), "v1\n").unwrap();
+        let mut index = repo.index().unwrap();
+        index.add_path(Path::new("r.txt")).unwrap();
+        index.write().unwrap();
+        let tree = repo.find_tree(index.write_tree().unwrap()).unwrap();
+        let oid = repo
+            .commit(Some("HEAD"), &sig, &sig, "remote-first", &tree, &[])
+            .unwrap();
+        let url = format!("file://{}", dir.canonicalize().unwrap().display());
+        (url, oid)
+    }
+
+    /// Add a second commit (`r2.txt` = "v2\n") to the repo at `dir` and return
+    /// the new HEAD oid. Used to advance a `file://` remote between fetches.
+    fn advance_remote(dir: &Path) -> git2::Oid {
+        let repo = git2::Repository::open(dir).unwrap();
+        let sig = git2::Signature::now("Remote", "remote@example.com").unwrap();
+        std::fs::write(dir.join("r2.txt"), "v2\n").unwrap();
+        let mut index = repo.index().unwrap();
+        index.add_path(Path::new("r2.txt")).unwrap();
+        index.write().unwrap();
+        let tree = repo.find_tree(index.write_tree().unwrap()).unwrap();
+        let parent = repo.head().unwrap().peel_to_commit().unwrap();
+        repo.commit(Some("HEAD"), &sig, &sig, "remote-second", &tree, &[&parent])
+            .unwrap()
+    }
+
+    #[test]
+    fn clone_from_file_remote_ok() {
+        let remote_dir = tempdir().unwrap();
+        let (url, head_oid) = init_remote(remote_dir.path());
+
+        let ws = tempdir().unwrap();
+        let net = GitNetConfig::default(); // no token / CA for file://
+        let res = clone(&net, ws.path(), &url, "cloned").expect("file:// clone should succeed");
+
+        assert_eq!(res.head, head_oid.to_string(), "cloned HEAD == remote HEAD");
+        // The cloned working tree exists under the workspace with the file.
+        let cloned = ws.path().join("cloned");
+        assert!(cloned.join("r.txt").exists(), "cloned working file present");
+        assert_eq!(
+            std::fs::read_to_string(cloned.join("r.txt")).unwrap(),
+            "v1\n"
+        );
+    }
+
+    #[test]
+    fn fetch_then_pull_ff_advances() {
+        let remote_dir = tempdir().unwrap();
+        let (url, _first) = init_remote(remote_dir.path());
+
+        let ws = tempdir().unwrap();
+        let net = GitNetConfig::default();
+        clone(&net, ws.path(), &url, "cloned").unwrap();
+
+        // Advance the remote with a new commit.
+        let second = advance_remote(remote_dir.path());
+
+        // Re-open the clone and fetch + pull (ff) -> local advances to `second`.
+        let repo = open_repo(ws.path(), "cloned").unwrap();
+        let f = fetch(&net, &repo, "origin").unwrap();
+        assert_eq!(f.remote, "origin");
+
+        let p = pull(&net, &repo, "origin", "").unwrap();
+        assert!(p.fast_forward, "pull should be a fast-forward");
+        assert_eq!(p.oid, second.to_string(), "local advanced to remote second");
+        // Worktree synced: r2.txt now exists locally.
+        assert!(
+            ws.path().join("cloned").join("r2.txt").exists(),
+            "ff pull synced the new file into the worktree"
+        );
+    }
+
+    #[test]
+    fn pull_non_ff_named_error() {
+        let remote_dir = tempdir().unwrap();
+        let (url, _first) = init_remote(remote_dir.path());
+
+        let ws = tempdir().unwrap();
+        let net = GitNetConfig::default();
+        clone(&net, ws.path(), &url, "cloned").unwrap();
+
+        // Advance the remote (so origin/<branch> is ahead) ...
+        advance_remote(remote_dir.path());
+
+        // ... and ALSO create a divergent local commit so the local branch is
+        // not an ancestor of the remote tip -> non-ff.
+        let repo = open_repo(ws.path(), "cloned").unwrap();
+        std::fs::write(ws.path().join("cloned").join("local.txt"), "local\n").unwrap();
+        add(&repo, &["local.txt".to_owned()]).unwrap();
+        commit(&repo, "local-divergent").unwrap();
+
+        let err = match pull(&net, &repo, "origin", "") {
+            Ok(_) => panic!("diverged pull must be non-ff error"),
+            Err(e) => e,
+        };
+        assert!(
+            matches!(err, GitOpError::NonFastForward(_)),
+            "diverged pull must produce GitOpError::NonFastForward, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn ssh_url_rejected() {
+        let ws = tempdir().unwrap();
+        let net = GitNetConfig::default();
+        let err = match clone(&net, ws.path(), "git@github.com:x/y.git", "dest") {
+            Ok(_) => panic!("ssh clone must be rejected"),
+            Err(e) => e,
+        };
+        match &err {
+            GitOpError::InvalidInput(msg) => {
+                assert!(
+                    msg.contains("ssh") && msg.contains("HTTPS"),
+                    "ssh rejection should name ssh + HTTPS, got: {msg}"
+                );
+            }
+            other => panic!("ssh clone must be InvalidInput, got: {other:?}"),
+        }
+
+        // ssh:// scheme is rejected too.
+        assert!(matches!(
+            clone(&net, ws.path(), "ssh://git@host/x.git", "dest"),
+            Err(GitOpError::InvalidInput(_))
+        ));
     }
 }

@@ -1846,6 +1846,7 @@ pub async fn build(
         computer_control: None,
         android_shell: None,
         android_git: None,
+        android_git_secret: None,
     };
     // (5.5) M10 (T12/T13): select the team-tool variant at BUILD time. A
     //        coordinator session passes `Some(CoordinatorWiring { team, mode,

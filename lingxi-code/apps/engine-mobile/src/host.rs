@@ -499,6 +499,9 @@ pub async fn build_mobile_inner(
         // P4: thread the Android Git gate + workspace carrier from MobileConfig.
         // `None` on iOS and desktop (cfg.android_git defaults to None).
         android_git: None,
+        // P4 (T8 seam): the in-memory Git network secret (token + CA dir).
+        // T10 populates this from `MobileConfig`; `None` until then.
+        android_git_secret: None,
     };
     let tools = Arc::new(mobile_tool_registry(tool_ctx));
 

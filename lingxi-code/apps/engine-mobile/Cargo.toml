@@ -141,6 +141,9 @@ tool-clipboard = { path = "../../tools/clipboard" }
 # Android-only Shell tool (P3). Self-gates on ctx.android_shell; registering
 # it here keeps it reachable while keeping iOS/desktop unaffected.
 tool-shell-mobile = { path = "../../tools/shell-mobile" }
+# Android-only Git tool (P4). Self-gates on ctx.android_git.enabled; registering
+# it here keeps it reachable while keeping iOS/desktop unaffected.
+tool-git-mobile = { path = "../../tools/git-mobile" }
 # Skill + command sets.
 skill-builtin = { path = "../../skills/builtin" }
 command-core = { path = "../../commands/core" }

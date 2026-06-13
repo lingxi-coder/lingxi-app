@@ -154,6 +154,17 @@ pub struct MobileConfig {
     /// capability cache + the `AndroidShellConfig` gate; consumed by
     /// `tool_shell_mobile::register_all` in the composition root.
     pub android_shell: Option<tool_api::AndroidShellToolCtx>,
+    /// Android-only Git tool gate + workspace carrier (spec §G5, P4). `None` on
+    /// iOS and desktop — the Git tool is absent on those platforms. Built by
+    /// `android-aar::build_android_engine` from the enable flag + workspace
+    /// readiness + CA-store reachability; consumed by
+    /// `tool_git_mobile::register_all` in the composition root.
+    pub android_git: Option<tool_api::AndroidGitToolCtx>,
+    /// Android-only Git network secret (HTTPS token + CA dir, spec §G3, P4).
+    /// Held separately from the public [`MobileConfig::android_git`] carrier so
+    /// the token never enters the broadly-cloned public ctx. `None` until Task 10
+    /// wires it from `android-aar`; `tool-git-mobile` reads it at call time.
+    pub android_git_secret: Option<tool_api::AndroidGitSecret>,
 }
 
 impl Default for MobileConfig {
@@ -167,6 +178,8 @@ impl Default for MobileConfig {
             provider_profiles: None,
             routing: None,
             android_shell: None,
+            android_git: None,
+            android_git_secret: None,
         }
     }
 }
@@ -371,7 +384,10 @@ pub async fn build_mobile_inner(
         (client, routing_overrides, pricing_overrides)
     };
     // No live subscription slot on mobile (no OAuth profile fetch) — static state stands.
-    let subscriber_state = SubscriberState { is_subscriber: false, is_enterprise: false };
+    let subscriber_state = SubscriberState {
+        is_subscriber: false,
+        is_enterprise: false,
+    };
 
     // 3c-T3: build the cost estimator from the builtin reference catalog.
     // T2: apply per-profile pricing overrides from settings.
@@ -496,6 +512,12 @@ pub async fn build_mobile_inner(
         // P3: thread the Android Shell gate + prompt carrier from MobileConfig.
         // `None` on iOS and desktop (cfg.android_shell defaults to None).
         android_shell: cfg.android_shell.clone(),
+        // P4: thread the Android Git gate + workspace carrier from MobileConfig.
+        // `None` on iOS and desktop (cfg.android_git defaults to None).
+        android_git: cfg.android_git.clone(),
+        // P4: thread the Android Git network secret (token + CA dir) from
+        // MobileConfig. `None` on iOS and desktop; T10 populates from android-aar.
+        android_git_secret: cfg.android_git_secret.clone(),
     };
     let tools = Arc::new(mobile_tool_registry(tool_ctx));
 

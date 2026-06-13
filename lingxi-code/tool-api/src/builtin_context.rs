@@ -167,6 +167,22 @@ pub struct BuiltinToolContext {
     /// the `AndroidShellConfig` gate; consumed by `tool-shell-mobile::register_all`
     /// (registration gate) and the tool's prompt.
     pub android_shell: Option<AndroidShellToolCtx>,
+
+    // ===== Android-git P4 seam =====
+    /// Android-only `Git` tool wiring (spec §G5 gate). `None` on desktop /
+    /// iOS. Built by `android-aar` from the enable flag, workspace readiness,
+    /// and CA-store reachability; consumed by `tool-git-mobile::register_all`
+    /// (registration gate) and the tool's prompt.
+    pub android_git: Option<AndroidGitToolCtx>,
+
+    /// Android-only Git **secret** seam (spec §G3 auth). Carries the HTTPS
+    /// token + CA directory used by the network ops (clone/fetch/pull). Held
+    /// SEPARATELY from the public [`AndroidGitToolCtx`] so the token never
+    /// enters the broadly-cloned public carrier (which only exposes
+    /// `has_token: bool`). `None` on desktop / iOS and whenever no token /
+    /// CA dir is configured. Populated by `android-aar` (T10) and consumed by
+    /// `tool-git-mobile`'s network ops. Never logged or persisted.
+    pub android_git_secret: Option<AndroidGitSecret>,
 }
 
 /// Android-only `Shell` tool wiring (spec r3 §Shell tool). `None` on desktop /
@@ -186,6 +202,57 @@ pub struct AndroidShellToolCtx {
     pub sh_version: Option<String>,
 }
 
+/// Android-only `Git` tool wiring (spec §G5 gate). `None` on desktop / iOS.
+/// Built by `android-aar` from the enable flag + workspace readiness +
+/// CA-store reachability; consumed by `tool-git-mobile::register_all`
+/// (registration gate) and the tool's prompt.
+#[derive(Debug, Clone)]
+pub struct AndroidGitToolCtx {
+    /// The full registration gate result: `enable_git` + workspace-ready +
+    /// CA-store-reachable all satisfied.
+    ///
+    /// When `false`, the Git tool is NOT registered (absent, not erroring).
+    pub enabled: bool,
+    /// Whether a HTTPS token was supplied by the host. When `false`, network
+    /// operations (clone/fetch/pull) are unavailable; the tool prompt notes
+    /// that credential configuration is required for network ops.
+    pub has_token: bool,
+    /// App-private repository root (absolute path). All git operations are
+    /// anchored to this directory; paths escaping it are rejected.
+    pub workspace_root: String,
+}
+
+/// Android-only Git **secret** seam (spec §G3 auth). Carries the in-memory
+/// HTTPS token + CA-certificate directory used by the network git ops
+/// (clone/fetch/pull). Deliberately held outside the public
+/// [`AndroidGitToolCtx`] — which only exposes `has_token: bool` — so the token
+/// never enters the broadly-cloned public tool carrier. `tool-git-mobile`
+/// converts this into its own `GitNetConfig` at call time.
+///
+/// The token is never written to disk, an env var, or a child-process argv
+/// (libgit2 is in-process), and is never logged. `android-aar` (T10) builds
+/// this from the Keystore-backed host token + the system cacerts dir.
+#[derive(Clone, Default)]
+pub struct AndroidGitSecret {
+    /// HTTPS token (PAT) used as the credential password, or `None` for
+    /// anonymous / public remotes. Never logged or persisted.
+    pub token: Option<String>,
+    /// CA-certificate directory for TLS verification (Android system cacerts),
+    /// or `None` to use the libgit2/OpenSSL defaults.
+    pub ca_dir: Option<String>,
+}
+
+// A manual `Debug` that redacts the token so it can never leak via a debug
+// print of the context.
+impl std::fmt::Debug for AndroidGitSecret {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AndroidGitSecret")
+            .field("token", &self.token.as_ref().map(|_| "<redacted>"))
+            .field("ca_dir", &self.ca_dir)
+            .finish()
+    }
+}
+
 // =============================================================================
 // Tests
 // =============================================================================
@@ -195,6 +262,45 @@ mod tests {
     use crate::test_support::{ctx_for_file_tools, make_dummy_fs};
     use std::sync::Arc;
     use telemetry::AnalyticsBus;
+
+    /// TDD anchor for Task 7 (P4).
+    ///
+    /// Asserts:
+    /// 1. `AndroidGitToolCtx` constructs with all three fields.
+    /// 2. The test-builder `ctx_for_file_tools` defaults `android_git` to
+    ///    `None` (i.e. the field exists on `BuiltinToolContext`).
+    #[test]
+    fn android_git_tool_ctx_constructs_and_defaults_to_none() {
+        // Construct the carrier type — enabled with token.
+        let carrier = AndroidGitToolCtx {
+            enabled: true,
+            has_token: true,
+            workspace_root: "/x".into(),
+        };
+        assert!(carrier.enabled);
+        assert!(carrier.has_token);
+        assert_eq!(carrier.workspace_root, "/x");
+
+        // Disabled variant without token.
+        let disabled = AndroidGitToolCtx {
+            enabled: false,
+            has_token: false,
+            workspace_root: String::new(),
+        };
+        assert!(!disabled.enabled);
+        assert!(!disabled.has_token);
+
+        // The test-support builder must produce a ctx with `android_git: None`.
+        let ctx = ctx_for_file_tools(
+            make_dummy_fs(),
+            Arc::new(AnalyticsBus::new()),
+            vec![std::path::PathBuf::from("/tmp")],
+        );
+        assert!(
+            ctx.android_git.is_none(),
+            "android_git must default to None in test builder"
+        );
+    }
 
     /// TDD anchor for Task 1 (P3).
     ///

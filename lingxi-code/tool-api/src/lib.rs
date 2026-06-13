@@ -33,7 +33,9 @@ pub mod wire;
 pub mod test_support;
 
 pub use anthropic_request::AnthropicRequestBuilder;
-pub use builtin_context::{AndroidShellToolCtx, BuiltinToolContext};
+pub use builtin_context::{
+    AndroidGitSecret, AndroidGitToolCtx, AndroidShellToolCtx, BuiltinToolContext,
+};
 pub use content_replacement::ContentReplacementState;
 pub use context::{ToolUseContext, ToolUseOptions};
 pub use progress::{progress_channel, ToolProgress, ToolProgressReceiver, ToolProgressSender};

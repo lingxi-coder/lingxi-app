@@ -84,6 +84,7 @@ members = [
     "platforms/android",
     "platforms/android-libcap",
     "platforms/android-minijail",
+    "platforms/android-shellbin",
     "platforms/posix/tests/fixtures/mock_stdio_mcp",
 ]
 

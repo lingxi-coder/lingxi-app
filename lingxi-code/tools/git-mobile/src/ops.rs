@@ -710,6 +710,20 @@ pub struct GitPullResult {
     pub oid: String,
 }
 
+/// Result of a [`push`] call.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct GitPushResult {
+    /// The remote pushed to.
+    pub remote: String,
+    /// The branch short name pushed.
+    pub branch: String,
+    /// OID the local branch tip points at (now also on the remote).
+    pub pushed_oid: String,
+    /// Whether this push set the branch's upstream (true only on first push of
+    /// a branch that had none).
+    pub set_upstream: bool,
+}
+
 /// Reject `git@…` / `ssh://…` remote URLs (G7 — HTTPS-only in v1).
 ///
 /// # Errors
@@ -884,6 +898,135 @@ pub fn pull(
     Ok(GitPullResult {
         fast_forward: merge_result.fast_forward,
         oid: merge_result.oid,
+    })
+}
+
+/// Push the current (or explicit) local branch to `remote_name` (default
+/// `origin`) over the in-process token, **fast-forward-only**. On first push of
+/// a branch with no upstream, write `branch.<b>.remote`/`.merge` (`git push -u`).
+/// No force, no ref deletion, no tags.
+///
+/// libgit2 has TWO routes for a non-fast-forward rejection depending on the
+/// transport: a per-ref status via the `push_update_reference` callback (HTTP
+/// smart protocol), OR a top-level `remote.push` error whose message names the
+/// "not present locally" / non-fast-forward condition (the local `file://`
+/// transport). We install the callback AND inspect the top-level error message,
+/// mapping either to [`GitOpError::NonFastForward`].
+///
+/// # Errors
+///
+/// - [`GitOpError::InvalidInput`] — SSH remote URL, or HEAD is detached and no
+///   `branch` was supplied.
+/// - [`GitOpError::NonFastForward`] — the remote rejected the ref (remote ahead).
+/// - [`GitOpError::Libgit2`] — unknown remote / network / TLS / auth failure.
+pub fn push(
+    net: &GitNetConfig,
+    repo: &git2::Repository,
+    remote_name: &str,
+    branch: &str,
+) -> Result<GitPushResult, GitOpError> {
+    let remote_name = if remote_name.is_empty() {
+        "origin"
+    } else {
+        remote_name
+    };
+
+    let branch_name = if branch.is_empty() {
+        let head = repo.head().map_err(|e| GitOpError::from_git2(&e))?;
+        if !head.is_branch() {
+            return Err(GitOpError::InvalidInput(
+                "push on a detached HEAD requires an explicit `branch`".into(),
+            ));
+        }
+        head.shorthand()
+            .map_err(|e| GitOpError::from_git2(&e))?
+            .to_owned()
+    } else {
+        branch.to_owned()
+    };
+
+    let mut remote = repo
+        .find_remote(remote_name)
+        .map_err(|e| GitOpError::from_git2(&e))?;
+    if let Ok(url) = remote.url() {
+        reject_ssh_url(url)?;
+    }
+
+    crate::auth::set_ca_location(net.ca_dir.as_deref())?;
+
+    let rejection: std::rc::Rc<std::cell::RefCell<Option<String>>> =
+        std::rc::Rc::new(std::cell::RefCell::new(None));
+    let mut callbacks = git2::RemoteCallbacks::new();
+    crate::auth::install_token_credentials(&mut callbacks, net.token.as_deref());
+    {
+        let rejection = std::rc::Rc::clone(&rejection);
+        callbacks.push_update_reference(move |refname, status| {
+            if let Some(msg) = status {
+                *rejection.borrow_mut() = Some(format!("{refname}: {msg}"));
+            }
+            Ok(())
+        });
+    }
+    let mut push_opts = git2::PushOptions::new();
+    push_opts.remote_callbacks(callbacks);
+
+    let refspec = format!("refs/heads/{branch_name}:refs/heads/{branch_name}");
+    // libgit2 has TWO routes for a non-fast-forward rejection depending on the
+    // transport: a per-ref status via `push_update_reference` (HTTP smart
+    // protocol), OR a top-level `remote.push` error whose message names the
+    // "not present locally" / non-fast-forward condition (the `file://` local
+    // transport this test uses). Map BOTH to `NonFastForward`.
+    remote
+        .push(&[refspec.as_str()], Some(&mut push_opts))
+        .map_err(|e| {
+            let lower = e.message().to_ascii_lowercase();
+            if lower.contains("not present locally")
+                || lower.contains("fast-forward")
+                || lower.contains("fast forward")
+                || lower.contains("non-fast")
+            {
+                GitOpError::NonFastForward(format!(
+                    "remote rejected push of {branch_name}: {}; pull/rebase first",
+                    e.message()
+                ))
+            } else {
+                GitOpError::from_git2(&e)
+            }
+        })?;
+
+    if let Some(msg) = rejection.borrow().clone() {
+        return Err(GitOpError::NonFastForward(format!(
+            "remote rejected {msg}; pull/rebase first"
+        )));
+    }
+
+    let pushed_oid = repo
+        .refname_to_id(&format!("refs/heads/{branch_name}"))
+        .map_err(|e| GitOpError::from_git2(&e))?
+        .to_string();
+
+    let mut config = repo.config().map_err(|e| GitOpError::from_git2(&e))?;
+    let remote_key = format!("branch.{branch_name}.remote");
+    let set_upstream = if config.get_string(&remote_key).is_err() {
+        config
+            .set_str(&remote_key, remote_name)
+            .map_err(|e| GitOpError::from_git2(&e))?;
+        config
+            .set_str(
+                &format!("branch.{branch_name}.merge"),
+                &format!("refs/heads/{branch_name}"),
+            )
+            .map_err(|e| GitOpError::from_git2(&e))?;
+        true
+    } else {
+        false
+    };
+
+    Ok(GitPushResult {
+        remote: remote_name.to_owned(),
+        branch: branch_name,
+        pushed_oid,
+        set_upstream,
     })
 }
 
@@ -1460,5 +1603,136 @@ mod tests {
             clone(&net, ws.path(), "ssh://git@host/x.git", "dest"),
             Err(GitOpError::InvalidInput(_))
         ));
+    }
+
+    // ===== Push (G2) — file:// bare remotes, no real network =====
+
+    /// Init a bare repo at `dir` to act as a `file://` "remote".
+    fn init_bare_remote(dir: &Path) -> git2::Repository {
+        git2::Repository::init_bare(dir).unwrap()
+    }
+
+    /// Short name of the repo's current HEAD branch (e.g. "master").
+    fn current_branch(repo: &git2::Repository) -> String {
+        repo.head().unwrap().shorthand().unwrap().to_owned()
+    }
+
+    #[test]
+    fn push_advances_remote_ref_and_sets_upstream() {
+        let work = tempdir().unwrap();
+        let (repo, _f, second) = init_history(work.path());
+        let bare = tempdir().unwrap();
+        let remote_repo = init_bare_remote(bare.path());
+        repo.remote("origin", &format!("file://{}", bare.path().display()))
+            .unwrap();
+
+        let branch = current_branch(&repo);
+        let net = GitNetConfig::default(); // file:// needs no token
+        let res = push(&net, &repo, "origin", "").expect("push ok");
+
+        assert_eq!(res.remote, "origin");
+        assert_eq!(res.branch, branch);
+        assert_eq!(res.pushed_oid, second.to_string());
+        assert!(res.set_upstream, "first push sets upstream");
+        let remote_ref = remote_repo
+            .find_reference(&format!("refs/heads/{branch}"))
+            .unwrap();
+        assert_eq!(remote_ref.target().unwrap(), second);
+        let cfg = repo.config().unwrap();
+        assert_eq!(cfg.get_string(&format!("branch.{branch}.remote")).unwrap(), "origin");
+        assert_eq!(
+            cfg.get_string(&format!("branch.{branch}.merge")).unwrap(),
+            format!("refs/heads/{branch}")
+        );
+    }
+
+    #[test]
+    fn push_is_idempotent_when_nothing_new() {
+        let work = tempdir().unwrap();
+        let (repo, _f, _second) = init_history(work.path());
+        let bare = tempdir().unwrap();
+        init_bare_remote(bare.path());
+        repo.remote("origin", &format!("file://{}", bare.path().display()))
+            .unwrap();
+        let net = GitNetConfig::default();
+        push(&net, &repo, "origin", "").expect("first push");
+        let res = push(&net, &repo, "origin", "").expect("re-push ok");
+        assert!(!res.set_upstream, "upstream already configured");
+    }
+
+    #[test]
+    fn push_detached_head_without_branch_errors() {
+        let work = tempdir().unwrap();
+        let (repo, _f, second) = init_history(work.path());
+        let bare = tempdir().unwrap();
+        init_bare_remote(bare.path());
+        repo.remote("origin", &format!("file://{}", bare.path().display()))
+            .unwrap();
+        repo.set_head_detached(second).unwrap();
+        let net = GitNetConfig::default();
+        let err = push(&net, &repo, "origin", "").unwrap_err();
+        assert!(matches!(err, GitOpError::InvalidInput(ref m) if m.contains("detached")));
+    }
+
+    #[test]
+    fn push_non_fast_forward_is_rejected() {
+        let work = tempdir().unwrap();
+        let (repo_a, _f, _second) = init_history(work.path());
+        let bare = tempdir().unwrap();
+        init_bare_remote(bare.path());
+        repo_a
+            .remote("origin", &format!("file://{}", bare.path().display()))
+            .unwrap();
+        let net = GitNetConfig::default();
+        let branch = current_branch(&repo_a);
+        push(&net, &repo_a, "origin", "").expect("A initial push");
+
+        let clone_b = tempdir().unwrap();
+        let repo_b = git2::Repository::clone(
+            &format!("file://{}", bare.path().display()),
+            clone_b.path(),
+        )
+        .unwrap();
+        {
+            let sig = git2::Signature::now("B", "b@example.com").unwrap();
+            std::fs::write(clone_b.path().join("c.txt"), "gamma\n").unwrap();
+            let mut idx = repo_b.index().unwrap();
+            idx.add_path(Path::new("c.txt")).unwrap();
+            idx.write().unwrap();
+            let tree = repo_b.find_tree(idx.write_tree().unwrap()).unwrap();
+            let head = repo_b.head().unwrap().peel_to_commit().unwrap();
+            repo_b
+                .commit(Some("HEAD"), &sig, &sig, "B commit", &tree, &[&head])
+                .unwrap();
+        }
+        push(&net, &repo_b, "origin", &branch).expect("B ff push");
+
+        {
+            let sig = git2::Signature::now("A", "a@example.com").unwrap();
+            std::fs::write(work.path().join("d.txt"), "delta\n").unwrap();
+            let mut idx = repo_a.index().unwrap();
+            idx.add_path(Path::new("d.txt")).unwrap();
+            idx.write().unwrap();
+            let tree = repo_a.find_tree(idx.write_tree().unwrap()).unwrap();
+            let head = repo_a.head().unwrap().peel_to_commit().unwrap();
+            repo_a
+                .commit(Some("HEAD"), &sig, &sig, "A commit", &tree, &[&head])
+                .unwrap();
+        }
+        let err = push(&net, &repo_a, "origin", &branch).unwrap_err();
+        assert!(
+            matches!(err, GitOpError::NonFastForward(_)),
+            "stale push must be non-fast-forward, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn push_rejects_ssh_remote() {
+        let work = tempdir().unwrap();
+        let (repo, _f, _s) = init_history(work.path());
+        repo.remote("origin", "git@github.com:owner/repo.git").unwrap();
+        let net = GitNetConfig::default();
+        let err = push(&net, &repo, "origin", "").unwrap_err();
+        assert!(matches!(err, GitOpError::InvalidInput(ref m) if m.contains("ssh")));
     }
 }

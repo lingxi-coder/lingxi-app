@@ -4,9 +4,9 @@
 //! `git2` crate) running **in-process** — there is no `git` binary, no exec, no
 //! sandbox/minijail involvement. Operations are a fixed enum (clone / fetch /
 //! pull / status / diff / log / show / `branch_list` / checkout / add / commit
-//! / `branch_create` / merge),
-//! NOT a free-form shell string. v1 is read + local-write only: there is **no
-//! push**, merge/pull are **fast-forward-only**, and remotes are **HTTPS-only**
+//! / `branch_create` / merge / push),
+//! NOT a free-form shell string. v1 is read + local-write + **push**;
+//! merge/pull/push are **fast-forward-only**, and remotes are **HTTPS-only**
 //! (token supplied in-memory by the Kotlin host via the libgit2 credential
 //! callback — never to disk or a child-process env).
 //!
@@ -64,6 +64,7 @@ const OPERATIONS: &[&str] = &[
     "commit",
     "branch_create",
     "merge",
+    "push",
 ];
 
 /// `GitTool` — run a structured, in-process git operation via libgit2.
@@ -89,7 +90,7 @@ static INPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
             "max":         { "type": "integer", "description": "Max number of commits to walk (log); defaults to a built-in cap." },
             "repo_url":    { "type": "string", "description": "Remote HTTPS URL (clone)." },
             "remote":      { "type": "string", "description": "Remote name (fetch/pull); defaults to origin." },
-            "branch":      { "type": "string", "description": "Branch name (checkout/branch_create/merge target)." },
+            "branch":      { "type": "string", "description": "Branch name (checkout/branch_create/merge target; push source — defaults to the current branch)." },
             "refspec":     { "type": "string", "description": "Refspec for fetch." },
             "paths":       { "type": "array", "items": { "type": "string" }, "description": "Paths to stage (add) or limit diff/status to." },
             "message":     { "type": "string", "description": "Commit message (commit)." },
@@ -172,20 +173,20 @@ impl Tool for GitTool {
             OPERATIONS.join(", ")
         ));
         prompt.push_str(
-            "v1 is READ + LOCAL-WRITE only: there is NO push. merge and pull are \
-             FAST-FORWARD-ONLY (a non-fast-forward is reported as a named error, \
-             never left as conflict markers). Remotes are HTTPS-ONLY (git@/ssh \
-             URLs are rejected).\n\n",
+            "v1 is READ + LOCAL-WRITE + PUSH. merge and pull are FAST-FORWARD-ONLY \
+             and push is fast-forward-only too (a non-fast-forward is reported as \
+             a named error — pull/rebase first — never forced). Remotes are \
+             HTTPS-ONLY (git@/ssh URLs are rejected).\n\n",
         );
         if has_token {
             prompt.push_str(
-                "Network operations (clone/fetch/pull) use the host-supplied HTTPS \
+                "Network operations (clone/fetch/pull/push) use the host-supplied HTTPS \
                  credentials.\n",
             );
         } else {
             prompt.push_str(
                 "No git credentials are configured: network operations \
-                 (clone/fetch/pull) are unavailable until HTTPS credentials are \
+                 (clone/fetch/pull/push) are unavailable until HTTPS credentials are \
                  provided by the host. Local operations (status/diff/log/show/\
                  branch_list/checkout/add/commit/branch_create/merge) still work.\n",
             );
@@ -236,10 +237,10 @@ impl Tool for GitTool {
         let repo_rel = input.get("repo").and_then(Value::as_str).unwrap_or(".");
         let workspace_path = std::path::Path::new(&workspace_root);
 
-        // Network ops (clone/fetch/pull) read the in-memory secret (token + CA
-        // dir) from the SEPARATE `android_git_secret` seam — never the public
+        // Network ops (clone/fetch/pull/push) read the in-memory secret (token +
+        // CA dir) from the SEPARATE `android_git_secret` seam — never the public
         // `android_git` carrier — and never touch disk/env.
-        let dispatch_result = if matches!(operation, "clone" | "fetch" | "pull") {
+        let dispatch_result = if matches!(operation, "clone" | "fetch" | "pull" | "push") {
             let net = self.git_net_config();
             dispatch_network(&net, workspace_path, repo_rel, operation, &input)
         } else {
@@ -276,9 +277,9 @@ impl GitTool {
     }
 }
 
-/// Dispatch a network op (clone/fetch/pull) to `ops::`. clone targets the
-/// workspace-relative `dest` (`repo` param, default `cloned`); fetch/pull open
-/// the existing repo at `repo` first.
+/// Dispatch a network op (clone/fetch/pull/push) to `ops::`. clone targets the
+/// workspace-relative `dest` (`repo` param, default `cloned`); fetch/pull/push
+/// open the existing repo at `repo` first.
 fn dispatch_network(
     net: &ops::GitNetConfig,
     workspace_root: &std::path::Path,
@@ -309,6 +310,12 @@ fn dispatch_network(
             let remote = str_param("remote").unwrap_or("origin");
             let branch = str_param("branch").unwrap_or("");
             Ok(serde_json::to_value(ops::pull(net, &repo, remote, branch)?).unwrap_or(Value::Null))
+        }
+        "push" => {
+            let repo = ops::open_repo(workspace_root, repo_rel)?;
+            let remote = str_param("remote").unwrap_or("origin");
+            let branch = str_param("branch").unwrap_or("");
+            Ok(serde_json::to_value(ops::push(net, &repo, remote, branch)?).unwrap_or(Value::Null))
         }
         other => Err(ops::GitOpError::InvalidInput(format!(
             "unknown network git operation '{other}'"
@@ -505,7 +512,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn prompt_declares_structured_git_no_push() {
+    async fn prompt_declares_structured_git_with_push() {
         let opts = PromptOptions {
             include_examples: false,
         };
@@ -516,9 +523,14 @@ mod tests {
             prompt.contains("git"),
             "prompt should mention git: {prompt}"
         );
+        assert!(prompt.contains("push"), "push now listed: {prompt}");
         assert!(
-            prompt.contains("push"),
-            "prompt should state the no-push rule: {prompt}"
+            !prompt.to_lowercase().contains("no push"),
+            "must not say 'no push': {prompt}"
+        );
+        assert!(
+            prompt.contains("FAST-FORWARD-ONLY"),
+            "ff-only still stated: {prompt}"
         );
         assert!(
             prompt.contains("status"),
@@ -638,6 +650,58 @@ mod tests {
         assert!(
             ws.path().join("cloned").join("f.txt").exists(),
             "cloned working file present"
+        );
+    }
+
+    /// `push` of a `file://` bare remote through `GitTool::call` advances the
+    /// remote ref — exercises the full call -> dispatch_network -> ops::push
+    /// path (no real network/token).
+    #[tokio::test]
+    async fn call_dispatches_push_to_file_remote() {
+        use tool_api::test_support::{fresh_ctx, fresh_tx};
+
+        let work = tempfile::tempdir().unwrap();
+        let bare = tempfile::tempdir().unwrap();
+        let remote_repo = git2::Repository::init_bare(bare.path()).unwrap();
+        let repo = git2::Repository::init(work.path()).unwrap();
+        let sig = git2::Signature::now("T", "t@example.com").unwrap();
+        std::fs::write(work.path().join("a.txt"), "x\n").unwrap();
+        let oid = {
+            let mut idx = repo.index().unwrap();
+            idx.add_path(std::path::Path::new("a.txt")).unwrap();
+            idx.write().unwrap();
+            let tree = repo.find_tree(idx.write_tree().unwrap()).unwrap();
+            repo.commit(Some("HEAD"), &sig, &sig, "c1", &tree, &[]).unwrap()
+        };
+        let branch = repo.head().unwrap().shorthand().unwrap().to_owned();
+        repo.remote("origin", &format!("file://{}", bare.path().display()))
+            .unwrap();
+
+        // ctx anchored at the working repo root (SAME helper wiring the clone
+        // dispatch test uses: set `android_git.workspace_root` on a shell_test_ctx).
+        let mut ctx = shell_test_ctx(ok_output());
+        ctx.android_git = Some(AndroidGitToolCtx {
+            enabled: true,
+            has_token: false,
+            workspace_root: work.path().to_string_lossy().into_owned(),
+        });
+        let tool = GitTool::new(ctx);
+
+        let input = json!({ "operation": "push", "repo": ".", "remote": "origin" });
+        let res = tool
+            .call(input, fresh_ctx(), fresh_tx())
+            .await
+            .expect("push call ok");
+        let data = res.data;
+        assert_eq!(data["branch"], branch);
+        assert_eq!(data["pushed_oid"], oid.to_string());
+        assert_eq!(
+            remote_repo
+                .find_reference(&format!("refs/heads/{branch}"))
+                .unwrap()
+                .target()
+                .unwrap(),
+            oid
         );
     }
 

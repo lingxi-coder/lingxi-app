@@ -28,8 +28,28 @@ use crate::ops::GitOpError;
 /// matches the documented `x-access-token` / PAT-as-password convention.
 const TOKEN_USERNAME: &str = "x-access-token";
 
+/// Install the HTTPS-token credentials callback on `callbacks`.
+///
+/// When `token` is `Some`, a `credentials` callback yields
+/// `Cred::userpass_plaintext(TOKEN_USERNAME, token)` — the token is borrowed for
+/// the callbacks' lifetime (`'a`), never copied into a longer-lived store. When
+/// `None`, nothing is installed (public/anonymous HTTPS + `file://` still work).
+/// The token is never logged or written anywhere; it only flows into libgit2's
+/// in-process credential callback. Shared by `make_fetch_options` (clone/fetch/
+/// pull) and `ops::push`.
+pub fn install_token_credentials<'a>(
+    callbacks: &mut git2::RemoteCallbacks<'a>,
+    token: Option<&'a str>,
+) {
+    if let Some(token) = token {
+        callbacks.credentials(move |_url, _username_from_url, _allowed| {
+            git2::Cred::userpass_plaintext(TOKEN_USERNAME, token)
+        });
+    }
+}
+
 /// Build the [`git2::FetchOptions`] used by every network op (clone / fetch /
-/// pull).
+/// pull), with the in-process token credentials callback installed.
 ///
 /// When `token` is `Some`, a `credentials` callback is installed that yields
 /// `Cred::userpass_plaintext(TOKEN_USERNAME, token)` — the token is borrowed
@@ -38,15 +58,12 @@ const TOKEN_USERNAME: &str = "x-access-token";
 /// installed, so public (anonymous) HTTPS / `file://` remotes still work.
 ///
 /// The token is never logged or written anywhere; it only flows into the
-/// libgit2 credential callback in-process.
+/// libgit2 credential callback in-process. See [`install_token_credentials`],
+/// which holds the token convention shared with `ops::push`.
 #[must_use]
 pub fn make_fetch_options(token: Option<&str>) -> git2::FetchOptions<'_> {
     let mut callbacks = git2::RemoteCallbacks::new();
-    if let Some(token) = token {
-        callbacks.credentials(move |_url, _username_from_url, _allowed| {
-            git2::Cred::userpass_plaintext(TOKEN_USERNAME, token)
-        });
-    }
+    install_token_credentials(&mut callbacks, token);
     let mut opts = git2::FetchOptions::new();
     opts.remote_callbacks(callbacks);
     opts
@@ -104,6 +121,19 @@ mod tests {
         // exactly the value the installed `credentials` callback yields.
         git2::Cred::userpass_plaintext(TOKEN_USERNAME, "tok-123")
             .expect("userpass_plaintext should build a Cred from the token");
+    }
+
+    #[test]
+    fn install_token_credentials_is_noop_without_token() {
+        // No token => no credentials callback installed; building options/callbacks
+        // must not panic. (We cannot invoke libgit2's private dispatch in isolation.)
+        let mut cb = git2::RemoteCallbacks::new();
+        install_token_credentials(&mut cb, None);
+        let mut cb2 = git2::RemoteCallbacks::new();
+        install_token_credentials(&mut cb2, Some("tok-xyz"));
+        // The token convention is still the userpass_plaintext sentinel:
+        git2::Cred::userpass_plaintext(TOKEN_USERNAME, "tok-xyz")
+            .expect("userpass_plaintext should build a Cred");
     }
 
     /// `set_ca_location(None)` is a no-op and never errors.

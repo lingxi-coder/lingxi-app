@@ -181,9 +181,9 @@ impl Tool for ShellMobileTool {
     }
 
     async fn prompt(&self, _opts: &PromptOptions) -> String {
-        let (applets, sh_version) = match self.ctx.android_shell.as_ref() {
-            Some(a) => (a.applets.clone(), a.sh_version.clone()),
-            None => (Vec::new(), None),
+        let (applets, sh_version, bundled) = match self.ctx.android_shell.as_ref() {
+            Some(a) => (a.applets.clone(), a.sh_version.clone(), a.bundled),
+            None => (Vec::new(), None, false),
         };
         let applet_line = if applets.is_empty() {
             "system toybox".to_string()
@@ -191,12 +191,21 @@ impl Tool for ShellMobileTool {
             applets.join(", ")
         };
         let mut prompt = String::new();
-        prompt.push_str(
-            "Run a shell command on this Android device. The shell is the system \
-             **mksh** (MirBSD Korn shell) via /system/bin/sh — NOT bash. Avoid bash-only \
-             syntax: no process substitution `<(...)`, no `${var,,}` case-folding, no \
-             `mapfile`/`readarray`.\n\n",
-        );
+        if bundled {
+            prompt.push_str(
+                "Run a shell command on this Android device. The shell is a \
+                 **bundled, version-locked mksh** (MirBSD Korn shell) — NOT bash. \
+                 Avoid bash-only syntax: no process substitution `<(...)`, no \
+                 `${var,,}` case-folding, no `mapfile`/`readarray`.\n\n",
+            );
+        } else {
+            prompt.push_str(
+                "Run a shell command on this Android device. The shell is the system \
+                 **mksh** (MirBSD Korn shell) via /system/bin/sh — NOT bash. Avoid bash-only \
+                 syntax: no process substitution `<(...)`, no `${var,,}` case-folding, no \
+                 `mapfile`/`readarray`.\n\n",
+            );
+        }
         prompt.push_str(
             "This shell is DENY-NET: it has no network access. Network commands \
              (curl/wget/ssh/git clone/fetch/pull/push) are refused — use the Git tool \
@@ -206,7 +215,13 @@ impl Tool for ShellMobileTool {
             "Commands run rooted at the workspace directory. Output is captured and \
              truncated if very large.\n\n",
         );
-        prompt.push_str(&format!("Available applets: {applet_line}.\n"));
+        if bundled {
+            prompt.push_str(&format!(
+                "Available bundled toybox applets (locked inventory): {applet_line}.\n"
+            ));
+        } else {
+            prompt.push_str(&format!("Available applets: {applet_line}.\n"));
+        }
         if let Some(v) = sh_version {
             prompt.push_str(&format!("Shell version: {v}.\n"));
         }
@@ -446,6 +461,7 @@ mod tests {
             enabled: true,
             applets: vec!["grep".into(), "sed".into()],
             sh_version: Some("@(#)MIRBSD KSH".into()),
+            bundled: false,
         });
         (ctx, sandbox, calls)
     }
@@ -513,6 +529,39 @@ mod tests {
         assert!(
             prompt.contains("grep"),
             "prompt should list applets: {prompt}"
+        );
+        // Non-bundled prompt points at the device's system sh.
+        assert!(
+            prompt.contains("system"),
+            "non-bundled prompt should say system mksh: {prompt}"
+        );
+    }
+
+    #[tokio::test]
+    async fn prompt_reflects_bundled_locked_inventory_when_bundled() {
+        let mut ctx = shell_test_ctx(ok_output(""));
+        ctx.android_shell = Some(AndroidShellToolCtx {
+            enabled: true,
+            applets: vec!["grep".into(), "sed".into(), "find".into()],
+            sh_version: Some("@(#)MIRBSD KSH R59".into()),
+            bundled: true,
+        });
+        let tool = ShellMobileTool::new(ctx);
+        let prompt = tool
+            .prompt(&PromptOptions {
+                include_examples: false,
+            })
+            .await;
+        assert!(prompt.contains("mksh"), "still mksh dialect: {prompt}");
+        assert!(prompt.contains("grep"), "lists a bundled applet: {prompt}");
+        // Signals the inventory/interpreter is bundled+locked, not the device's system sh:
+        assert!(
+            prompt.to_lowercase().contains("bundled") || prompt.to_lowercase().contains("locked"),
+            "prompt should signal bundled/locked when bundled: {prompt}"
+        );
+        assert!(
+            !prompt.contains("/system/bin/sh"),
+            "bundled prompt must not point at system sh: {prompt}"
         );
     }
 }

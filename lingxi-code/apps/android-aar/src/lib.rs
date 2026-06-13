@@ -1199,6 +1199,8 @@ pub fn build_android_engine(
                     ),
                     applets: caps.toybox_applets.clone(),
                     sh_version: caps.system_sh_version.clone(),
+                    // P5-T7 will wire the real bundled value; default false here.
+                    bundled: false,
                 });
             }
         }

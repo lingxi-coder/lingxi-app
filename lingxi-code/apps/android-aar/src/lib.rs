@@ -1081,7 +1081,8 @@ fn android_git_gate(enable_git: bool, workspace_ready: bool, ca_store_reachable:
 /// (the `AndroidPlatform` is only linked under `cfg(target_os = "android")`).
 #[cfg(feature = "uniffi")]
 #[cfg_attr(feature = "uniffi", uniffi::export)]
-#[allow(clippy::too_many_arguments)] // FFI constructor: one flat arg per Kotlin callback.
+#[allow(clippy::too_many_arguments)]
+// FFI constructor: one flat arg per Kotlin callback.
 // Single linear constructor body: probe → shell gate → git gate → delegate. The
 // per-tool gate blocks (spec r3 §Registration gates + P4 §G5) read most clearly
 // inline at the one call site, so the length is intrinsic, not decomposable.

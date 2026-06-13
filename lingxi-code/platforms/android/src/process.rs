@@ -45,6 +45,29 @@ fn rlimit_resource_int(r: RlimitResource) -> i32 {
     }
 }
 
+/// Verify a bundled helper on disk matches its recorded content hash before
+/// we hand its path to execve — defense against a swapped/tampered binary.
+fn verify_bundled_identity(
+    name: &str,
+    path: &std::path::Path,
+    expected_hex: &str,
+) -> Result<(), ProcessError> {
+    use sha2::{Digest, Sha256};
+    let bytes = std::fs::read(path).map_err(|e| {
+        ProcessError::SandboxEnforcementFailed(format!(
+            "bundled helper {name} unreadable for identity check ({}): {e}",
+            path.display()
+        ))
+    })?;
+    let actual = hex::encode(Sha256::digest(&bytes));
+    if !actual.eq_ignore_ascii_case(expected_hex) {
+        return Err(ProcessError::SandboxEnforcementFailed(format!(
+            "bundled helper {name} hash mismatch (identity check failed)"
+        )));
+    }
+    Ok(())
+}
+
 impl AndroidMinijailProcessRunner {
     /// Construct over the shared capability cache.
     #[must_use]
@@ -82,8 +105,15 @@ impl AndroidMinijailProcessRunner {
         let timeout_ms = inner.timeout.map_or(DEFAULT_TIMEOUT_MS, |d| {
             u64::try_from(d.as_millis()).unwrap_or(u64::MAX)
         });
+        // The runner execs the plan's target: a BundledHelper runs its packaged
+        // path (P2's ExecTarget seam — P5's mksh is the first real consumer); a
+        // SystemShell runs the inner audit-mirror command (/system/bin/sh).
+        let filename = match &plan.target {
+            crate::policy::ExecTarget::BundledHelper { path, .. } => path.display().to_string(),
+            crate::policy::ExecTarget::SystemShell => inner.command.clone(),
+        };
         JailSpec {
-            filename: inner.command.clone(),
+            filename,
             argv: plan.argv.clone(),
             envp: plan.env.clone(),
             cwd,
@@ -155,6 +185,14 @@ impl ProcessRunner for AndroidMinijailProcessRunner {
             return Err(ProcessError::PolicyUnsupported(
                 "net-deny seccomp filter unavailable; cannot honor deny-net".into(),
             ));
+        }
+
+        // (1b) Identity-check a bundled helper before its path reaches execve:
+        // canonical-path bytes must match the recorded content hash, else a
+        // swapped/tampered binary could be run. Fail-closed (read error OR
+        // mismatch → error, never exec). SystemShell carries no hash.
+        if let crate::policy::ExecTarget::BundledHelper { path, hash, name } = &plan.target {
+            verify_bundled_identity(name, path, hash)?;
         }
 
         // (2) Translate the plan + inner command into the FFI boundary spec, run
@@ -419,5 +457,90 @@ mod tests {
         );
         let err = runner().run(&sc).await.unwrap_err();
         assert!(matches!(err, ProcessError::MalformedSandboxPlan(ref m) if m.contains("backend")));
+    }
+
+    /// Build a `BundledHelper` plan otherwise identical to the deny-net shell
+    /// plan, but execing the given bundled path/hash instead of `/system/bin/sh`.
+    fn bundled_helper_plan(
+        name: &str,
+        path: std::path::PathBuf,
+        hash: &str,
+    ) -> crate::policy::AndroidSandboxPlan {
+        crate::policy::AndroidSandboxPlan {
+            target: crate::policy::ExecTarget::BundledHelper {
+                name: name.into(),
+                path,
+                hash: hash.into(),
+            },
+            ..deny_net_plan_with_seccomp()
+        }
+    }
+
+    #[test]
+    fn build_spec_uses_bundled_path_as_filename() {
+        // A BundledHelper plan must exec the bundled path, not /system/bin/sh.
+        let plan = bundled_helper_plan("mksh", "/nl/libmksh.so".into(), "deadbeef");
+        let spec = AndroidMinijailProcessRunner::build_spec(
+            &plan,
+            &sandboxed_with_plan(plan.clone()),
+        );
+        assert_eq!(spec.filename, "/nl/libmksh.so");
+        assert_eq!(spec.argv[0], "sh");
+
+        // A SystemShell plan still execs the inner command (/system/bin/sh).
+        let sys = deny_net_plan_with_seccomp();
+        let sys_spec =
+            AndroidMinijailProcessRunner::build_spec(&sys, &sandboxed_with_plan(sys.clone()));
+        assert_eq!(sys_spec.filename, "/system/bin/sh");
+    }
+
+    #[tokio::test]
+    async fn bundled_helper_hash_mismatch_fails_closed() {
+        use std::io::Write as _;
+
+        // Known bytes on disk; compute their real sha256 for the control case.
+        let bytes = b"#!/system/bin/sh\nexit 0\n";
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!("p5b-bundled-{}.bin", std::process::id()));
+        {
+            let mut f = std::fs::File::create(&path).expect("create temp helper");
+            f.write_all(bytes).expect("write temp helper");
+        }
+        let correct_hex = {
+            use sha2::{Digest, Sha256};
+            hex::encode(Sha256::digest(bytes))
+        };
+
+        // WRONG hash → identity check fires before run_jailed, naming hash/identity.
+        let wrong = bundled_helper_plan("mksh", path.clone(), "00deadbeef00");
+        let err = runner()
+            .run(&sandboxed_with_plan(wrong))
+            .await
+            .unwrap_err();
+        match err {
+            ProcessError::SandboxEnforcementFailed(ref m) => {
+                assert!(
+                    m.contains("hash") || m.contains("identity"),
+                    "wrong-hash error must name hash/identity, got {m:?}"
+                );
+            }
+            other => panic!("expected SandboxEnforcementFailed for hash mismatch, got {other:?}"),
+        }
+
+        // CORRECT hash → passes the identity check, then hits the host run_jailed
+        // enforcement stub. Still SandboxEnforcementFailed, but NOT the hash text.
+        let good = bundled_helper_plan("mksh", path.clone(), &correct_hex);
+        let err = runner().run(&sandboxed_with_plan(good)).await.unwrap_err();
+        match err {
+            ProcessError::SandboxEnforcementFailed(ref m) => {
+                assert!(
+                    !m.contains("hash mismatch") && !m.contains("identity check failed"),
+                    "correct-hash run must pass identity check, got {m:?}"
+                );
+            }
+            other => panic!("expected SandboxEnforcementFailed from run_jailed, got {other:?}"),
+        }
+
+        let _ = std::fs::remove_file(&path);
     }
 }

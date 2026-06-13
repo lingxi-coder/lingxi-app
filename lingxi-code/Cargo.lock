@@ -2991,9 +2991,11 @@ name = "platform-android"
 version = "0.12.0"
 dependencies = [
  "async-trait",
+ "hex",
  "platform-android-minijail",
  "platform-common",
  "platform-posix-minimal",
+ "sha2",
  "tempfile",
  "tokio",
  "tracing",

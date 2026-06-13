@@ -109,7 +109,7 @@ third_party/
 └── git2-rs/       ◀ P4: vendored git2 + libgit2-sys Rust crate sources
 
 lingxi-code/
-├── tools/git-mobile/                 new crate `tool-git-mobile` (forbid-unsafe)
+├── tools/git-mobile/                 new crate `tool-git-mobile` (deny-unsafe + 1 carve-out)
 │   └── src/
 │       ├── lib.rs    GitTool (Tool impl) + register_all (gated) + schema
 │       ├── ops.rs    operation enum → git2 calls (no argv)
@@ -124,8 +124,12 @@ lingxi-code/
   P0a's libcap). libgit2 links into the engine `.so`; it is a library, so W^X
   does not apply, there is no `nativeLibraryDir` exec path, and **no P0b
   packaging proof is needed**.
-- **forbid-unsafe.** `git2` is a safe API → `tool-git-mobile` keeps
-  `#![forbid(unsafe_code)]`. The only C is libgit2-sys at build time.
+- **deny-unsafe (one audited carve-out).** `git2` is a safe API, so
+  `tool-git-mobile` is `#![deny(unsafe_code)]` with exactly ONE documented
+  `#[allow(unsafe_code)]` on `git2::opts::set_ssl_cert_dir` — that global CA
+  setter is `unsafe` in the pinned git2 0.21 (the spec-assumed safe
+  `set_ssl_cert_locations` does not exist there) and has no safe alternative.
+  `deny` still rejects any other unsafe. The only C is libgit2-sys at build time.
 - **In-process, sandbox-decoupled.** libgit2 runs in the engine process: no
   fork, no exec, no minijail. The Git tool works even where the minijail
   sandbox is unavailable.
@@ -205,7 +209,7 @@ GitTool / auth.rs  — token held only in memory, function scope
   ▼  only for clone/fetch/pull: installed into RemoteCallbacks::credentials
 libgit2 cred callback: Cred::userpass_plaintext(user, token)
   │   GitHub/GitLab: user = "x-access-token" or the PAT as username
-  ▼   TLS (mbedtls + system cacerts) → remote
+  ▼   TLS (OpenSSL + system cacerts) → remote
 returns; token drops with scope. Never disk, never child-process env.
 ```
 
@@ -268,7 +272,7 @@ operations need no extra network authorization.
   git2/libgit2-sys (Rust) into `third_party/`; convert `third_party/minijail`
   from symlink to a properly vendored, committed subset (CORE sources + `rust/`
   + pre-generated tables; drop `.git`/tests/graphify-out). Prove
-  `libgit2-sys` NDK cross-compiles (arm64 + x86_64) with mbedtls + system
+  `libgit2-sys` NDK cross-compiles (arm64 + x86_64) with vendored-OpenSSL + system
   cacerts. Verify the P0a–P2 minijail cross-compile still passes on a clean
   checkout (no symlink).
 - **P4b — local operations (host-testable, no network).** `tool-git-mobile`
@@ -280,7 +284,7 @@ operations need no extra network authorization.
   registration wiring (android-aar). Host-tested against `file://` bare remotes
   (no real network/token/device).
 - **P4d — device acceptance + P4 gate.** Real-device clone of a public HTTPS
-  repo (proves mbedtls + system cacerts + real TLS) + local-write round trip +
+  repo (proves OpenSSL + system cacerts + real TLS) + local-write round trip +
   commit; workspace anchoring. Workspace fmt/clippy/test + both-ABI cross-build.
 
 ## Testing strategy
@@ -301,7 +305,7 @@ real HTTPS clone" layer.
   present; `has_token=false` → tool present but network ops return "credentials
   not configured".
 - **Device acceptance (API-34 arm64 emulator):** real clone of a public HTTPS
-  repo (mbedtls + system cacerts + real TLS); post-clone local add/commit/log
+  repo (OpenSSL + system cacerts + real TLS); post-clone local add/commit/log
   round trip; workspace anchoring.
 - **Build:** `libgit2-sys` per-ABI NDK cross-compile; linked into the
   android-aar cdylib; symbol check.
@@ -310,10 +314,10 @@ real HTTPS clone" layer.
 
 | Risk | Mitigation |
 |---|---|
-| libgit2-sys NDK cross-compile (cmake / TLS backend) | P4a front-loaded proof; mbedtls (lightest pure-C, cross-compiles cleanly); openssl fallback |
+| libgit2-sys NDK cross-compile (cmake / TLS backend) | P4a proof PASSED with vendored-OpenSSL (Path V); libgit2-sys 0.18.5 is cc-based, hardcodes GIT_OPENSSL, no mbedtls path — mbedtls deferred as a size optimization (see G6 note) |
 | system cacerts path/format varies by device | gate probes ca_store reachability; unreachable → bundled PEM fallback |
 | token resident in ctx memory | same UID, same tier as other in-memory creds; "per-operation pull from host" is a documented later hardening |
-| APK size (libgit2 + mbedtls) | budget ~2–3 MB/ABI (« bundled git ~8 MB); per-ABI CI tracking |
+| APK size (libgit2 + OpenSSL, Path V) | OpenSSL is heavier than the mbedtls budget; unstripped .so ~27 MB/ABI, true stripped/GC'd contribution measured at the cdylib link; mbedtls revisitable if too large; per-ABI CI tracking |
 | gix-style local-write maturity gaps | N/A — libgit2 chosen precisely because local-write/checkout/merge are battle-tested |
 | minijail re-vendoring breaks the P0a–P2 build | P4a verifies the cross-compile on a clean checkout before anything depends on it |
 

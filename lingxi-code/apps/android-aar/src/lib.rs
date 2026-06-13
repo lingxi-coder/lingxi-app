@@ -127,6 +127,19 @@ pub struct AndroidGitConfigFfi {
     pub ca_cert_dir: String,
     /// In-memory HTTPS token (PAT) for network ops, or `None` for public remotes.
     pub https_token: Option<String>,
+    /// Filesystem path to the SSH private key (spec §G7), or empty for
+    /// HTTPS-only. Host-supplied; validated to stay inside `app_files_root`
+    /// before reaching the engine secret seam (defense-in-depth — see
+    /// [`build_android_engine`]'s git mapping).
+    pub ssh_private_key_path: String,
+    /// Path to the matching SSH public key, or empty (libssh2 derives it from
+    /// the private key).
+    pub ssh_public_key_path: String,
+    /// Passphrase decrypting the SSH private key, or `None`. In-memory only.
+    pub ssh_passphrase: Option<String>,
+    /// Pinned SSH host-key fingerprints (lowercase-hex SHA-256). An empty list
+    /// rejects every host key (fail-closed).
+    pub ssh_known_hosts_sha256_hex: Vec<String>,
 }
 
 /// Top-level `UniFFI` constructor: build the mobile engine from the Kotlin-supplied
@@ -1381,6 +1394,34 @@ pub fn build_android_engine(
                 has_token: c.https_token.is_some(),
                 workspace_root: c.workspace_root.clone(),
             });
+            // Defense-in-depth: the SSH private-key path is HOST-supplied (not
+            // model-supplied), but still validate it stays inside the app
+            // sandbox (`app_files_root`) before handing it to libgit2. An empty
+            // path = no SSH. If validation fails (escapes the sandbox / missing),
+            // drop ALL ssh fields so an SSH op reports "not configured" rather
+            // than passing an out-of-sandbox key.
+            let ssh_root = std::path::Path::new(&app_files_root_str);
+            let ssh_key_ok = !c.ssh_private_key_path.is_empty()
+                && tool_git_mobile::auth::validate_ssh_key_path(
+                    &c.ssh_private_key_path,
+                    ssh_root,
+                )
+                .is_ok();
+            let (ssh_private_key_path, ssh_public_key_path, ssh_passphrase, ssh_known_hosts) =
+                if ssh_key_ok {
+                    (
+                        Some(c.ssh_private_key_path),
+                        if c.ssh_public_key_path.is_empty() {
+                            None
+                        } else {
+                            Some(c.ssh_public_key_path)
+                        },
+                        c.ssh_passphrase,
+                        c.ssh_known_hosts_sha256_hex,
+                    )
+                } else {
+                    (None, None, None, Vec::new())
+                };
             cfg.android_git_secret = Some(tool_api::AndroidGitSecret {
                 token: c.https_token,
                 ca_dir: if c.ca_cert_dir.is_empty() {
@@ -1388,6 +1429,10 @@ pub fn build_android_engine(
                 } else {
                     Some(c.ca_cert_dir)
                 },
+                ssh_private_key_path,
+                ssh_public_key_path,
+                ssh_passphrase,
+                ssh_known_hosts_sha256_hex: ssh_known_hosts,
             });
         }
 
@@ -1812,6 +1857,10 @@ pub fn android_git_probe(operation_json: String, workspace: String, ca_cert_dir:
             } else {
                 Some(ca_cert_dir)
             },
+            ssh_private_key_path: None,
+            ssh_public_key_path: None,
+            ssh_passphrase: None,
+            ssh_known_hosts_sha256_hex: Vec::new(),
         });
 
         let tool = tool_git_mobile::GitTool::new(ctx);
@@ -2225,6 +2274,10 @@ mod tests {
             // Empty CA dir is treated as reachable (libgit2/OpenSSL defaults).
             ca_cert_dir: String::new(),
             https_token: Some("pat-token".to_string()),
+            ssh_private_key_path: String::new(),
+            ssh_public_key_path: String::new(),
+            ssh_passphrase: None,
+            ssh_known_hosts_sha256_hex: Vec::new(),
         };
 
         let workspace_ready = std::path::Path::new(&cfg.workspace_root).is_dir();

@@ -55,7 +55,7 @@ path = "lib.rs"
 version = "0.2"
 
 [dependencies.libssh2-sys]
-version = "0.3.0"
+path = "../../libssh2-sys"
 optional = true
 
 [dependencies.libz-sys]

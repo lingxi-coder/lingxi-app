@@ -31,7 +31,7 @@ pub struct AndroidShellConfig {
     /// P5b: absolute path to the bundled mksh executable under
     /// `nativeLibraryDir` (e.g. `libmksh.so`). `None` = not bundled.
     pub bundled_mksh_path: Option<PathBuf>,
-    /// P5b: content hash of the bundled mksh, for the P2 BundledHelper
+    /// P5b: content hash of the bundled mksh, for the P2 `BundledHelper`
     /// identity check. `None` = not bundled.
     pub bundled_mksh_hash: Option<String>,
     /// P5b: app-private directory holding the toybox applet symlink farm;

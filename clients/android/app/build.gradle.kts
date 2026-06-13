@@ -51,6 +51,16 @@ android {
         resources {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"
         }
+        // P5a (Android bundled shell): mksh/toybox ship as lib*.so under
+        // jniLibs/<abi> and MUST be EXTRACTED to nativeLibraryDir so they exist
+        // as real, executable files on disk — Android 10+ W^X only permits
+        // `execve` of files there. Uncompressed-in-APK (the AGP default since
+        // 4.2) leaves them mmap'd inside the APK with no on-disk path to exec,
+        // so force legacy (extracting) packaging. The Play "uncompressed native
+        // libs" size note is the accepted cost (see plan Risks).
+        jniLibs {
+            useLegacyPackaging = true
+        }
     }
 
     testOptions {

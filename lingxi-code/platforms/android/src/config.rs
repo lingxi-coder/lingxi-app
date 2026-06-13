@@ -28,6 +28,15 @@ pub struct AndroidShellConfig {
     pub secrets_in_keystore: bool,
     /// D11: explicit user acceptance of the data-exposure reality.
     pub shell_data_exposure_accepted: bool,
+    /// P5b: absolute path to the bundled mksh executable under
+    /// `nativeLibraryDir` (e.g. `libmksh.so`). `None` = not bundled.
+    pub bundled_mksh_path: Option<PathBuf>,
+    /// P5b: content hash of the bundled mksh, for the P2 `BundledHelper`
+    /// identity check. `None` = not bundled.
+    pub bundled_mksh_hash: Option<String>,
+    /// P5b: app-private directory holding the toybox applet symlink farm;
+    /// goes first on `PATH`. `None` = not bundled.
+    pub bundled_applet_dir: Option<PathBuf>,
 }
 
 impl AndroidShellConfig {
@@ -36,6 +45,14 @@ impl AndroidShellConfig {
     #[must_use]
     pub fn secrets_gate_satisfied(&self) -> bool {
         self.secrets_in_keystore || self.shell_data_exposure_accepted
+    }
+
+    /// True only when all three bundled inputs are present (mksh path + hash + applet dir).
+    #[must_use]
+    pub fn bundled_ready(&self) -> bool {
+        self.bundled_mksh_path.is_some()
+            && self.bundled_applet_dir.is_some()
+            && self.bundled_mksh_hash.is_some()
     }
 }
 
@@ -54,6 +71,9 @@ mod tests {
             enable_shell: true,
             secrets_in_keystore: keystore,
             shell_data_exposure_accepted: accepted,
+            bundled_mksh_path: None,
+            bundled_mksh_hash: None,
+            bundled_applet_dir: None,
         }
     }
 
@@ -62,5 +82,15 @@ mod tests {
         assert!(!cfg(false, false).secrets_gate_satisfied());
         assert!(cfg(true, false).secrets_gate_satisfied());
         assert!(cfg(false, true).secrets_gate_satisfied());
+    }
+
+    #[test]
+    fn bundled_fields_and_readiness() {
+        let mut c = cfg(true, true); // existing test helper — reuse it
+        assert!(!c.bundled_ready(), "no bundled paths -> not ready");
+        c.bundled_mksh_path = Some("/nl/libmksh.so".into());
+        c.bundled_applet_dir = Some("/app/applet-bin".into());
+        c.bundled_mksh_hash = Some("abc".into());
+        assert!(c.bundled_ready());
     }
 }

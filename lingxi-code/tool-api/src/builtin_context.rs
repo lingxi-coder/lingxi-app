@@ -200,6 +200,11 @@ pub struct AndroidShellToolCtx {
     pub applets: Vec<String>,
     /// System sh version string (`KSH_VERSION`) when probed, for the prompt.
     pub sh_version: Option<String>,
+    /// When true, the Shell runs the BUNDLED version-locked mksh + a fixed
+    /// locked toybox applet inventory (not the device's system sh). Drives the
+    /// tool prompt wording; the actual exec switch is in
+    /// `AndroidMinijailSandbox::prepare`.
+    pub bundled: bool,
 }
 
 /// Android-only `Git` tool wiring (spec §G5 gate). `None` on desktop / iOS.
@@ -315,6 +320,7 @@ mod tests {
             enabled: true,
             applets: vec!["grep".into(), "ls".into()],
             sh_version: Some("@(#)MIRBSD KSH R59 2020/01/19".into()),
+            bundled: false,
         };
         assert!(carrier.enabled);
         assert_eq!(carrier.applets, vec!["grep", "ls"]);
@@ -325,6 +331,7 @@ mod tests {
             enabled: false,
             applets: vec![],
             sh_version: None,
+            bundled: false,
         };
         assert!(!disabled.enabled);
         assert!(disabled.applets.is_empty());

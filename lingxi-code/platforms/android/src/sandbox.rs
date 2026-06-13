@@ -88,16 +88,43 @@ impl Sandbox for AndroidMinijailSandbox {
 
         let (canonical_root, canonical_cwd) = self.resolve_cwd(cmd.cwd.as_ref())?;
 
+        // P5b: when the host bundled mksh+toybox (path + hash + applet dir all
+        // present), exec the bundled mksh and lead PATH with the applet dir so
+        // toybox shadows /system/bin. Otherwise fall back to /system/bin/sh.
+        // Shell is always DenyNet (spec D10) regardless of target.
+        let (target, bundled_helper_dir) = if self.cfg.bundled_ready() {
+            let path = self
+                .cfg
+                .bundled_mksh_path
+                .clone()
+                .expect("bundled_ready() guarantees mksh path");
+            let hash = self
+                .cfg
+                .bundled_mksh_hash
+                .clone()
+                .expect("bundled_ready() guarantees mksh hash");
+            (
+                ExecTarget::BundledHelper {
+                    name: "mksh".into(),
+                    path,
+                    hash,
+                },
+                self.cfg.bundled_applet_dir.as_deref(),
+            )
+        } else {
+            (ExecTarget::SystemShell, None)
+        };
+
         // HOME must be the workspace root, not the per-command cwd (spec env
         // table: "HOME = configured shell workspace root").
         let env = build_shell_env(
             &canonical_root,
             &self.cfg.app_cache_root,
-            None, // bundled helper dir joins the PATH in P4
+            bundled_helper_dir,
             &cmd.env,
         );
 
-        let mut plan = plan_from_policy(ExecTarget::SystemShell, policy, env.clone())?;
+        let mut plan = plan_from_policy(target, policy, env.clone())?;
         // argv[0] convention: "sh"; the runner execs /system/bin/sh.
         plan.argv = std::iter::once("sh".to_string())
             .chain(cmd.args.iter().cloned())
@@ -167,6 +194,9 @@ mod tests {
             enable_shell: true,
             secrets_in_keystore: true,
             shell_data_exposure_accepted: false,
+            bundled_mksh_path: None,
+            bundled_mksh_hash: None,
+            bundled_applet_dir: None,
         }
     }
 
@@ -177,6 +207,29 @@ mod tests {
         let cache = std::sync::Arc::new(CapabilityCache::new());
         cache.set(caps);
         AndroidMinijailSandbox::new(shell_cfg(ws), cache)
+    }
+
+    fn sandbox_with_cfg(
+        cfg: AndroidShellConfig,
+        caps: AndroidSandboxCapabilities,
+    ) -> AndroidMinijailSandbox {
+        let cache = std::sync::Arc::new(CapabilityCache::new());
+        cache.set(caps);
+        AndroidMinijailSandbox::new(cfg, cache)
+    }
+
+    /// `shell_cfg(ws)` with the three bundled fields populated → `bundled_ready()`.
+    fn config_with_bundled(
+        ws: &std::path::Path,
+        mksh_path: &str,
+        applet_dir: &str,
+        hash: &str,
+    ) -> AndroidShellConfig {
+        let mut cfg = shell_cfg(ws);
+        cfg.bundled_mksh_path = Some(std::path::PathBuf::from(mksh_path));
+        cfg.bundled_applet_dir = Some(std::path::PathBuf::from(applet_dir));
+        cfg.bundled_mksh_hash = Some(hash.to_string());
+        cfg
     }
 
     fn cmd(cwd: Option<std::path::PathBuf>) -> ProcessCommand {
@@ -227,6 +280,45 @@ mod tests {
             env.get("HOME").map(String::as_str),
             Some(tmp.path().canonicalize().unwrap().to_str().unwrap())
         );
+    }
+
+    #[test]
+    fn prepare_targets_bundled_mksh_when_ready() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let cfg = config_with_bundled(tmp.path(), "/nl/libmksh.so", "/app/applet-bin", "deadbeef");
+        let sb = sandbox_with_cfg(cfg, ready_caps());
+        let sc = sb.prepare(cmd(None), &deny_net_policy()).expect("prepare");
+        let plan = sc
+            .backend_plan()
+            .unwrap()
+            .downcast::<AndroidSandboxPlan>()
+            .unwrap();
+        match &plan.target {
+            ExecTarget::BundledHelper { name, path, hash } => {
+                assert_eq!(name, "mksh");
+                assert_eq!(path, std::path::Path::new("/nl/libmksh.so"));
+                assert_eq!(hash, "deadbeef");
+            }
+            other @ ExecTarget::SystemShell => panic!("expected BundledHelper, got {other:?}"),
+        }
+        let env: std::collections::HashMap<_, _> = plan.env.iter().cloned().collect();
+        assert!(
+            env["PATH"].starts_with("/app/applet-bin:"),
+            "applet dir leads PATH"
+        );
+    }
+
+    #[test]
+    fn prepare_targets_system_shell_when_not_bundled() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let sb = sandbox_with(tmp.path(), ready_caps());
+        let sc = sb.prepare(cmd(None), &deny_net_policy()).expect("prepare");
+        let plan = sc
+            .backend_plan()
+            .unwrap()
+            .downcast::<AndroidSandboxPlan>()
+            .unwrap();
+        assert!(matches!(plan.target, ExecTarget::SystemShell));
     }
 
     #[test]

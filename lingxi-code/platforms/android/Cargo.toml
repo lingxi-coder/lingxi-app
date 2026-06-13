@@ -30,6 +30,10 @@ tokio = { workspace = true, features = ["rt"] }
 # `cfg(target_os = "android")`, so its host build compiles a pure stub (P0a) —
 # `platform-android` stays `forbid(unsafe_code)` either way.
 platform-android-minijail = { path = "../android-minijail" }
+# Content-hash identity check for bundled helpers before execve (P5). Pure-safe
+# Rust — no unsafe needed; pinned to match sibling crates (android-minijail, etc.).
+sha2 = "0.10"
+hex = "0.4"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt"] }

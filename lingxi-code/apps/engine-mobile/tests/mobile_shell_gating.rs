@@ -40,6 +40,7 @@ fn shell_present_when_android_shell_enabled() {
         enabled: true,
         applets: vec!["ls".to_string(), "cat".to_string()],
         sh_version: Some("mksh R59".to_string()),
+        bundled: false,
     });
     assert!(
         has_shell(ctx),
@@ -54,6 +55,7 @@ fn shell_absent_when_android_shell_disabled() {
         enabled: false,
         applets: vec![],
         sh_version: None,
+        bundled: false,
     });
     assert!(
         !has_shell(ctx),

@@ -258,6 +258,9 @@ mod tests {
             enable_shell: true,
             secrets_in_keystore: true,
             shell_data_exposure_accepted: false,
+            bundled_mksh_path: None,
+            bundled_mksh_hash: None,
+            bundled_applet_dir: None,
         }
     }
 

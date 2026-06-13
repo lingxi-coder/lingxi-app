@@ -1301,6 +1301,7 @@ dependencies = [
  "tool-clipboard",
  "tool-cron",
  "tool-file",
+ "tool-git-mobile",
  "tool-meta",
  "tool-notification",
  "tool-plan",

@@ -117,7 +117,10 @@ pub fn register_mobile_tools(reg: &mut ToolRegistry, ctx: BuiltinToolContext) {
     tool_share::register_all(reg, ctx.clone());
     // P3: Android-only Shell tool. Self-gates on ctx.android_shell.enabled;
     // iOS and desktop are unaffected (their ctx.android_shell is None).
-    tool_shell_mobile::register_all(reg, ctx);
+    tool_shell_mobile::register_all(reg, ctx.clone());
+    // P4: Android-only Git tool. Self-gates on ctx.android_git.as_ref().is_some_and(|g| g.enabled);
+    // iOS and desktop are unaffected (their ctx.android_git is None).
+    tool_git_mobile::register_all(reg, ctx);
 }
 
 /// Assemble the mobile builtin **skill** registry.

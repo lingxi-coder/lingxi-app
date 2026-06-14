@@ -194,3 +194,30 @@ Then build the baseline from `main` in a scratch worktree (or `git stash`/checko
 - **mbedTLS Android-cacerts verification (M-b, the real blocker):** dedicated phase; patch `streams/mbedtls.c` to `mbedtls_x509_crt_parse_path` the cacerts dir if no opts hook exists; device-verify good-vs-bad cert; BLOCKED+keep-OpenSSL if impossible.
 - **Size win modest/negative:** measured explicitly (Task 4); a non-win is reported (and may justify abandoning the branch).
 - **Device-only TLS verification:** host covers build + non-TLS + the set_ca_location contract; live cert-verify is PENDING-DEVICE (mandatory good-vs-bad pair).
+
+---
+
+## M-c gate results (2026-06-14, branch `android-git-mbedtls`)
+
+**Stripped per-ABI size delta (MD4 — the success metric).** Release-built (`cargo ndk -t <abi> build --release -p android-aar`) and `llvm-strip -s`, mbedTLS branch vs OpenSSL baseline (a temp worktree on `main` @ `1dab7228`):
+
+| ABI | OpenSSL (`main`) | mbedTLS (this branch) | delta | delta % |
+|---|---|---|---|---|
+| arm64-v8a (aarch64) | 20,634,608 B (19.68 MiB) | 16,274,128 B (15.52 MiB) | −4,360,480 B (−4.16 MiB) | **−21.13 %** |
+| x86_64 | 23,089,616 B (22.02 MiB) | 18,248,728 B (17.40 MiB) | −4,840,888 B (−4.62 MiB) | **−20.96 %** |
+
+Verdict: **meaningful win** — ~21 % smaller stripped cdylib per ABI (~4–4.6 MiB each). The swap is justified on size grounds.
+
+**Workspace gate.** `cargo test --workspace`: PASS (211 test binaries `ok`; the only `FAILED` block was the known `platform-posix mcp_client_stdio_test` build-ordering flake — passes after `cargo build -p mock_stdio_mcp`, re-verified green; no `tool-git-mobile`/`android-aar` regression — `mobile_git_gating`, `prompt_git_status_test`, `fs_watch_git_filter_test` all passed). `cargo clippy --workspace --all-targets -- -D warnings`: PASS. `cargo ndk -t arm64-v8a clippy -p tool-git-mobile -p android-aar -- -D warnings`: PASS. Both-ABI debug build (`cargo ndk -t {arm64-v8a,x86_64} build -p android-aar`): PASS.
+
+## Device acceptance (PENDING-DEVICE)
+
+The host build covers compile + link + the `set_ca_location` source contract, but live TLS cert-verification under mbedTLS can only be proven on-device against the Android cacerts store. Extend P4/G7's `android_git_probe` with the cases below (run on a real device/emulator with `target/<abi>/release/libandroid_aar.so`):
+
+**1. mbedTLS HTTPS TLS-verification — the mandatory good-vs-bad pair** (this pair is the *only* proof verification is ON, not silently skipped):
+- **GOOD cert → SUCCEEDS:** HTTPS `clone`/`fetch` of a public repo on a real host with a normal CA-issued cert (e.g. `https://github.com/<small-public-repo>.git`). Expect success — the server cert chains to a root in the Android cacerts dir loaded via `mbedtls_x509_crt_parse_path`.
+- **UNTRUSTED/self-signed cert → REJECTED with a named cert error:** HTTPS `clone`/`fetch` against a host serving a self-signed / untrusted-CA cert (a local TLS endpoint, or `https://self-signed.badssl.com/`-style host). Expect a hard failure surfaced as a **certificate error** (libgit2 `GIT_ECERTIFICATE` → "SSL error … invalid peer certificate" / `mbedtls_ssl_get_verify_result` nonzero). A *success* here = verification is disabled = BLOCKING regression.
+
+**2. SSH clone (host-key verification + mbedTLS crypto):** `clone` over `ssh://git@…` (or `git@host:…`) with a known-good host key — exercises libssh2's strict host-key verification (unchanged, crypto-backend-independent) running on mbedTLS crypto. Expect success with a correct `known_hosts` entry; expect rejection on host-key mismatch.
+
+**Host-side evidence backing the device test (M-b, source-level fail-closed).** In the vendored `third_party/git2-rs/libgit2-sys/libgit2/src/libgit2/streams/mbedtls.c`, `verify_server_cert()` (≈L212) returns `GIT_ECERTIFICATE` whenever `mbedtls_ssl_get_verify_result(ssl) != 0` (≈L216–221), and the TLS handshake path maps a failed verify to `GIT_ECERTIFICATE` (≈L189–190). The cacerts dir is loaded with `mbedtls_x509_crt_parse_path` in `set_ca_location` (≈L450). There is **no HTTPS verification-override / `certificate_check`-bypass callback** that could short-circuit this — a nonzero verify result is fail-closed by construction. This is why the device good-vs-bad pair is the remaining gap: it confirms at runtime what the source already guarantees structurally.

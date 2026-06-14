@@ -218,9 +218,10 @@ pub struct AndroidGitToolCtx {
     ///
     /// When `false`, the Git tool is NOT registered (absent, not erroring).
     pub enabled: bool,
-    /// Whether a HTTPS token was supplied by the host. When `false`, network
-    /// operations (clone/fetch/pull) are unavailable; the tool prompt notes
-    /// that credential configuration is required for network ops.
+    /// Whether a credential provider is configured for the host. When `false`,
+    /// network operations (clone/fetch/pull) are unavailable; the tool prompt
+    /// notes that credential configuration is required for network ops. This
+    /// drives the prompt only — the registration gate does not use it.
     pub has_token: bool,
     /// App-private repository root (absolute path). All git operations are
     /// anchored to this directory; paths escaping it are rejected.
@@ -239,9 +240,10 @@ pub struct AndroidGitToolCtx {
 /// this from the Keystore-backed host token + the system cacerts dir.
 #[derive(Clone, Default)]
 pub struct AndroidGitSecret {
-    /// HTTPS token (PAT) used as the credential password, or `None` for
-    /// anonymous / public remotes. Never logged or persisted.
-    pub token: Option<String>,
+    /// Per-op secret provider (HTTPS token + SSH passphrase). `None` → no secrets
+    /// available (anonymous/public remotes only). Replaces the former resident
+    /// `token`/`ssh_passphrase` fields — secrets are no longer held resident.
+    pub credential_provider: Option<std::sync::Arc<dyn GitCredentialProvider>>,
     /// CA-certificate directory for TLS verification (Android system cacerts),
     /// or `None` to use the libgit2/OpenSSL defaults.
     pub ca_dir: Option<String>,
@@ -252,26 +254,35 @@ pub struct AndroidGitSecret {
     /// Optional path to the matching SSH public key (libssh2 can derive it from
     /// the private key when `None`). A non-secret path.
     pub ssh_public_key_path: Option<String>,
-    /// Optional passphrase decrypting the SSH private key. In-memory only;
-    /// never logged (masked by this struct's `Debug`) or persisted.
-    pub ssh_passphrase: Option<String>,
     /// Pinned SSH host-key fingerprints (lowercase-hex SHA-256). The remote's
     /// host key is accepted only if its SHA-256 is a member; an empty list
     /// rejects every host key (fail-closed). Non-secret hashes.
     pub ssh_known_hosts_sha256_hex: Vec<String>,
 }
 
-// A manual `Debug` that redacts the token + SSH passphrase so neither can leak
-// via a debug print of the context. The key/public-key paths and pinned host
-// hashes are non-secret and shown normally.
+/// Per-operation Git credential provider (spec: per-op credential FFI). Supplies
+/// the two true Git secrets — the HTTPS token and the SSH key passphrase —
+/// fetched lazily by `tool-git-mobile` inside libgit2's credentials callback,
+/// once per network op. Implemented by the host (android-aar bridges a UniFFI
+/// `AndroidGitCredentialProvider` onto this); the secrets are never held resident
+/// between ops. Sync (libgit2's cred callback is synchronous).
+pub trait GitCredentialProvider: Send + Sync {
+    /// The HTTPS token (PAT) for `userpass_plaintext`, or `None` for anonymous.
+    fn https_token(&self) -> Option<String>;
+    /// The SSH private-key passphrase, or `None` if the key is unencrypted.
+    fn ssh_passphrase(&self) -> Option<String>;
+}
+
+// A manual `Debug` that omits the secret-bearing credential provider so secrets
+// can never leak via a debug print of the context. The key/public-key paths and
+// pinned host hashes are non-secret and shown normally.
 impl std::fmt::Debug for AndroidGitSecret {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("AndroidGitSecret")
-            .field("token", &self.token.as_ref().map(|_| "<redacted>"))
+            .field("credential_provider", &self.credential_provider.as_ref().map(|_| "<provider>"))
             .field("ca_dir", &self.ca_dir)
             .field("ssh_private_key_path", &self.ssh_private_key_path)
             .field("ssh_public_key_path", &self.ssh_public_key_path)
-            .field("ssh_passphrase", &self.ssh_passphrase.as_ref().map(|_| "<redacted>"))
             .field("ssh_known_hosts_sha256_hex", &self.ssh_known_hosts_sha256_hex)
             .finish()
     }
@@ -287,11 +298,43 @@ mod tests {
     use std::sync::Arc;
     use telemetry::AnalyticsBus;
 
+    /// A mock provider for tests — counts calls and returns fixed secrets.
+    struct MockProvider {
+        token: Option<String>,
+        passphrase: Option<String>,
+        token_calls: std::sync::atomic::AtomicUsize,
+        pass_calls: std::sync::atomic::AtomicUsize,
+    }
+    impl GitCredentialProvider for MockProvider {
+        fn https_token(&self) -> Option<String> {
+            self.token_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.token.clone()
+        }
+        fn ssh_passphrase(&self) -> Option<String> {
+            self.pass_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.passphrase.clone()
+        }
+    }
+
     #[test]
-    fn android_git_secret_debug_redacts_ssh_passphrase() {
-        let s = AndroidGitSecret { ssh_passphrase: Some("hunter2".into()), ..Default::default() };
+    #[allow(clippy::default_trait_access)] // prescribed test body uses Default::default()
+    fn android_git_secret_carries_provider_and_debug_has_no_secret() {
+        let provider: std::sync::Arc<dyn GitCredentialProvider> = std::sync::Arc::new(MockProvider {
+            token: Some("tok".into()), passphrase: Some("pp".into()),
+            token_calls: Default::default(), pass_calls: Default::default(),
+        });
+        let s = AndroidGitSecret {
+            credential_provider: Some(provider.clone()),
+            ca_dir: Some("/system/etc/security/cacerts".into()),
+            ssh_private_key_path: Some("/data/k".into()),
+            ..Default::default()
+        };
+        // The provider is reachable and returns the secret on demand.
+        assert_eq!(s.credential_provider.as_ref().unwrap().https_token().as_deref(), Some("tok"));
+        // Debug shows NO secret value and an opaque provider marker.
         let dbg = format!("{s:?}");
-        assert!(!dbg.contains("hunter2"), "ssh passphrase must be redacted: {dbg}");
+        assert!(!dbg.contains("tok") && !dbg.contains("pp"), "no secret in Debug: {dbg}");
+        assert!(dbg.contains("ca_dir"), "non-secrets still shown: {dbg}");
     }
 
     /// TDD anchor for Task 7 (P4).

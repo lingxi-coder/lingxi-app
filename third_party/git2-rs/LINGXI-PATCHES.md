@@ -137,3 +137,37 @@ references go undefined. The Android `.so` link tolerates undefined symbols so
 **Windows note:** the win32 `LIBSSH2_OPENSSL`/WinHTTP paths still reference
 OpenSSL in build.rs, but those features are now no-op aliases with no
 openssl-sys dep; Windows is not a target for this mobile stack.
+
+## mbedTLS CA verification (M-b) — NO libgit2 patch required
+
+GATE #2 discovery: this libgit2 version already wires the runtime CA-location
+hook for the **mbedTLS** backend, not only OpenSSL. **No `streams/mbedtls.c`
+patch was needed** (outcome (a)).
+
+- `src/libgit2/settings.c` `GIT_OPT_SET_SSL_CERT_LOCATIONS` has an `#elif
+  defined(GIT_MBEDTLS)` arm that calls `git_mbedtls__set_cert_location(file,
+  path)`. So `git2::opts::set_ssl_cert_dir(dir)` (used by
+  `tool-git-mobile auth::set_ca_location`) loads the trust store under mbedTLS.
+- `streams/mbedtls.c::git_mbedtls__set_cert_location` loads a directory of certs
+  with `mbedtls_x509_crt_parse_path(&ca, path)` and installs it via
+  `mbedtls_ssl_conf_ca_chain(&config, &ca, NULL)`. The Android system store
+  `/system/etc/security/cacerts` (hashed `<hash>.0` PEM files) is exactly this
+  directory layout. `GIT_DEFAULT_CERT_LOCATION` stays `NULL` (no build-time
+  default) — the host supplies the dir at runtime.
+- **Verify mode is fail-closed (verify-required equivalent), UNMODIFIED.** The
+  config uses `MBEDTLS_SSL_VERIFY_OPTIONAL` *only* so libgit2 can read the peer
+  cert after the handshake (REQUIRED frees it on failure — see the line-104
+  comment). `mbedtls_connect` then calls `verify_server_cert`, which checks
+  `mbedtls_ssl_get_verify_result` and returns `GIT_ECERTIFICATE` on ANY failure.
+  For HTTPS `tool-git-mobile` installs **no** `certificate_check` callback
+  (`make_network_callbacks` adds one only for SSH host-key pinning), so
+  `transports/httpclient.c::server_connect_stream` returns that
+  `GIT_ECERTIFICATE` as a hard connection failure (cert_cb == NULL path), and
+  even the PASSTHROUGH branch of `check_certificate` maps `!is_valid` → `-1`.
+  There is NO code path that accepts an unverified server cert. This matches the
+  OpenSSL backend's contract. We did NOT set VERIFY_NONE/OPTIONAL ourselves and
+  did NOT add any accept-any override.
+
+Live good-vs-bad-cert verification against the on-device store is device-only
+(PENDING-DEVICE, recorded in M-c). The mechanism is present + verify-required at
+the source level here.

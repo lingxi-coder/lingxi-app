@@ -44,10 +44,11 @@ features = [
 [features]
 cred = ["dep:url"]
 default = []
+# LingXi (M-a): TLS backend is mbedTLS, so `https` no longer pulls openssl-sys
+# or openssl-probe. CA-cert env probing (openssl_probe) is an OpenSSL-ism; the
+# mbedTLS CA path is handled separately (M-b).
 https = [
     "libgit2-sys/https",
-    "openssl-sys",
-    "openssl-probe",
     "cred",
 ]
 ssh = [
@@ -57,10 +58,8 @@ ssh = [
 unstable = []
 unstable-sha256 = ["libgit2-sys/unstable-sha256"]
 vendored-libgit2 = ["libgit2-sys/vendored"]
-vendored-openssl = [
-    "openssl-sys/vendored",
-    "libgit2-sys/vendored-openssl",
-]
+# LingXi (M-a): no-op alias (openssl removed); kept for transitive activation.
+vendored-openssl = ["libgit2-sys/vendored-openssl"]
 zlib-ng-compat = ["libgit2-sys/zlib-ng-compat"]
 
 [lib]
@@ -98,10 +97,4 @@ features = ["formatting"]
 [dev-dependencies.url]
 version = "2.5.4"
 
-[target.'cfg(all(unix, not(target_os = "macos")))'.dependencies.openssl-probe]
-version = "0.1"
-optional = true
-
-[target.'cfg(all(unix, not(target_os = "macos")))'.dependencies.openssl-sys]
-version = "0.9.45"
-optional = true
+# LingXi (M-a): openssl-probe / openssl-sys removed — TLS backend is mbedTLS.

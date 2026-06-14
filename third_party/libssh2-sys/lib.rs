@@ -5,8 +5,7 @@
 extern crate libc;
 
 extern crate libz_sys;
-#[cfg(unix)]
-extern crate openssl_sys;
+// LingXi (M-a): crypto backend is mbedTLS (not OpenSSL) — no openssl_sys.
 
 use libc::ssize_t;
 use libc::{c_char, c_int, c_long, c_uchar, c_uint, c_ulong, c_void, size_t};
@@ -768,11 +767,10 @@ pub fn init() {
 
     #[cfg(unix)]
     unsafe fn platform_init() {
-        // On Unix we want to funnel through openssl_sys to initialize OpenSSL,
-        // so be sure to tell libssh2 to not do its own thing as we've already
-        // taken care of it.
-        openssl_sys::init();
-        assert_eq!(libssh2_init(LIBSSH2_INIT_NO_CRYPTO), 0);
+        // LingXi (M-a): mbedTLS backend. There is no external OpenSSL to
+        // initialize, so let libssh2 initialize its own (mbedTLS) crypto by
+        // passing 0 (NOT LIBSSH2_INIT_NO_CRYPTO).
+        assert_eq!(libssh2_init(0), 0);
     }
 
     #[cfg(windows)]

@@ -36,12 +36,16 @@ readme = false
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/rust-lang/git2-rs"
 
+# LingXi (M-a): TLS backend is mbedTLS (size-opt), not OpenSSL. `https` now
+# pulls the vendored `mbedtls-sys` seam (exports DEP_MBEDTLS_INCLUDE + links
+# mbedtls/mbedx509/mbedcrypto). `vendored-openssl` is kept as a no-op alias so
+# any transitive activation doesn't fail resolution, but it pulls nothing.
 [features]
-https = ["openssl-sys"]
+https = ["mbedtls-sys"]
 ssh = ["libssh2-sys"]
 unstable-sha256 = []
 vendored = []
-vendored-openssl = ["openssl-sys/vendored"]
+vendored-openssl = []
 zlib-ng-compat = [
     "libz-sys/zlib-ng",
     "libssh2-sys?/zlib-ng-compat",
@@ -58,6 +62,13 @@ version = "0.2"
 path = "../../libssh2-sys"
 optional = true
 
+# LingXi (M-a): mbedTLS C seam — a DIRECT dep so DEP_MBEDTLS_INCLUDE reaches
+# this crate's build.rs (links="mbedtls" exports are visible to direct
+# dependents only). Gated by `https`.
+[dependencies.mbedtls-sys]
+path = "../../mbedtls-sys"
+optional = true
+
 [dependencies.libz-sys]
 version = "1.1.0"
 features = ["libc"]
@@ -70,6 +81,4 @@ features = ["parallel"]
 [build-dependencies.pkg-config]
 version = "0.3.15"
 
-[target."cfg(unix)".dependencies.openssl-sys]
-version = "0.9.45"
-optional = true
+# LingXi (M-a): openssl-sys removed — TLS/SHA256 backend is mbedTLS.

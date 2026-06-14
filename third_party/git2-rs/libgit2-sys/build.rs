@@ -258,10 +258,17 @@ The build is now aborting. To disable, unset the variable or use `LIBGIT2_NO_VEN
         } else if target.contains("apple") {
             features.push_str("#define GIT_SECURE_TRANSPORT 1\n");
         } else {
-            features.push_str("#define GIT_OPENSSL 1\n");
-            if let Some(path) = env::var_os("DEP_OPENSSL_INCLUDE") {
+            // LingXi (M-a): mbedTLS backend (size-opt) instead of OpenSSL.
+            features.push_str("#define GIT_MBEDTLS 1\n");
+            if let Some(path) = env::var_os("DEP_MBEDTLS_INCLUDE") {
                 cfg.include(path);
             }
+            // No explicit cfg.file for streams/mbedtls.c: add_c_files(streams)
+            // above already compiles every streams/*.c (openssl.c, mbedtls.c,
+            // stransport.c, ...). Each body is #ifdef-guarded on its backend
+            // macro, so only streams/mbedtls.c's body is live once GIT_MBEDTLS
+            // is defined and GIT_OPENSSL is not. tls.c then dispatches to
+            // git_mbedtls_stream_new (verified: streams/tls.c #elif GIT_MBEDTLS).
         }
     }
 
@@ -282,8 +289,9 @@ The build is now aborting. To disable, unset the variable or use `LIBGIT2_NO_VEN
             features.push_str("#define GIT_SHA256_COMMON_CRYPTO 1\n");
             cfg.file("libgit2/src/util/hash/common_crypto.c");
         } else {
-            features.push_str("#define GIT_SHA256_OPENSSL 1\n");
-            cfg.file("libgit2/src/util/hash/openssl.c");
+            // LingXi (M-a): mbedTLS SHA-256 (util/hash/mbedtls.c) not OpenSSL.
+            features.push_str("#define GIT_SHA256_MBEDTLS 1\n");
+            cfg.file("libgit2/src/util/hash/mbedtls.c");
         }
     } else {
         features.push_str("#define GIT_SHA256_BUILTIN 1\n");

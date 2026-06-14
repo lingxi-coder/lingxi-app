@@ -4734,13 +4734,9 @@ pub fn init() {
     });
 }
 
-#[cfg(all(unix, feature = "https"))]
-#[doc(hidden)]
-pub fn openssl_init() {
-    openssl_sys::init();
-}
-
-#[cfg(any(windows, not(feature = "https")))]
+// LingXi (M-a): TLS backend is mbedTLS — no OpenSSL to pre-initialize. The
+// libgit2 mbedTLS stream sets up its own entropy/RNG/config on first use.
+// Kept as a no-op so the `init()` call site is unchanged.
 #[doc(hidden)]
 pub fn openssl_init() {}
 

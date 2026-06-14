@@ -42,23 +42,28 @@ version = "1.1.0"
 features = ["libc"]
 default-features = false
 
+# LingXi (M-a): mbedTLS C seam — DIRECT dep so DEP_MBEDTLS_INCLUDE reaches this
+# crate's build.rs. The unix branch builds libssh2 with LIBSSH2_MBEDTLS, so the
+# mbedTLS include is always needed here.
+[dependencies.mbedtls-sys]
+path = "../mbedtls-sys"
+
 [build-dependencies.cc]
 version = "1.0.25"
 
 [build-dependencies.pkg-config]
 version = "0.3.11"
 
+# LingXi (M-a): crypto backend is mbedTLS on unix. openssl features are no-op
+# aliases (kept so transitive feature activation never fails resolution).
 [features]
-openssl-on-win32 = ["openssl-sys"]
-vendored-openssl = ["openssl-sys/vendored"]
+openssl-on-win32 = []
+vendored-openssl = []
 zlib-ng-compat = ["libz-sys/zlib-ng"]
 
 [target.'cfg(target_env = "msvc")'.build-dependencies.vcpkg]
 version = "0.2"
 
-[target."cfg(unix)".dependencies.openssl-sys]
-version = "0.9.35"
-
-[target."cfg(windows)".dependencies.openssl-sys]
-version = "0.9.35"
-optional = true
+# LingXi (M-a): openssl-sys removed (unix crypto = mbedTLS). The win32 path
+# still references LIBSSH2_OPENSSL behind openssl-on-win32, but that feature is
+# now a no-op alias and Windows is not a target for this mobile stack.

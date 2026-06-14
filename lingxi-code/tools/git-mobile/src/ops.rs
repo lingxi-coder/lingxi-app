@@ -656,18 +656,20 @@ pub fn merge(repo: &git2::Repository, source: &str) -> Result<GitMergeResult, Gi
 // =============================================================================
 
 /// Per-operation network configuration carried by `GitTool::call` into the
-/// network ops. The HTTPS `token` is supplied in-memory by the Kotlin host and
-/// is never written to disk or a child-process env; `ca_dir` points libgit2's
-/// TLS backend at a CA-certificate directory (Android system cacerts).
+/// network ops. The `provider` yields the HTTPS token / SSH passphrase in-memory
+/// on demand (never written to disk or a child-process env); `ca_dir` points
+/// libgit2's TLS backend at a CA-certificate directory (Android system cacerts).
 ///
 /// This rides a SEPARATE secret seam from the public `AndroidGitToolCtx` so the
-/// token never enters the broadly-cloned public tool context — see
+/// secrets never enter the broadly-cloned public tool context — see
 /// `tool-api`'s `BuiltinToolContext.android_git_secret`.
 #[derive(Clone, Default)]
 pub struct GitNetConfig {
-    /// HTTPS token (PAT) used as the password in the credential callback, or
-    /// `None` for anonymous / public remotes. Never logged or persisted.
-    pub token: Option<String>,
+    /// Per-op credential provider supplying the HTTPS token (used as the password
+    /// in the credential callback) and SSH passphrase on demand, or `None` for
+    /// anonymous / public remotes. Secrets are fetched lazily, never held
+    /// resident; never logged or persisted.
+    pub provider: Option<std::sync::Arc<dyn tool_api::GitCredentialProvider>>,
     /// CA-certificate directory for TLS verification, or `None` to use the
     /// libgit2/OpenSSL defaults (the host `file://` tests need none).
     pub ca_dir: Option<String>,
@@ -680,16 +682,17 @@ pub struct GitNetConfig {
     pub ssh: Option<crate::auth::SshConfig>,
 }
 
-// Manual redacting Debug — `token` must never reach a log line, mirroring
-// `tool_api::AndroidGitSecret`. (The struct derives only `Clone`, not `Debug`,
-// so this is the sole Debug path.)
+// Manual redacting Debug — the `provider` (and the secrets it can yield) must
+// never reach a log line, mirroring `tool_api::AndroidGitSecret`. (`Arc<dyn T>`
+// is not `Debug` anyway; the struct derives only `Clone`, not `Debug`, so this
+// is the sole Debug path.)
 impl std::fmt::Debug for GitNetConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("GitNetConfig")
-            .field("token", &self.token.as_ref().map(|_| "<redacted>"))
+            .field("provider", &self.provider.as_ref().map(|_| "<provider>"))
             .field("ca_dir", &self.ca_dir)
-            // `SshConfig` carries a (masked) passphrase + key material; never
-            // print its contents — only whether SSH is configured.
+            // `SshConfig` carries key material; never print its contents — only
+            // whether SSH is configured.
             .field("ssh", &self.ssh.as_ref().map(|_| "<configured>"))
             .finish()
     }
@@ -827,7 +830,7 @@ pub fn clone(
     // token and/or SSH key + strict host-key check).
     crate::auth::set_ca_location(net.ca_dir.as_deref())?;
     let fetch_opts = crate::auth::make_fetch_options_net(&crate::auth::NetCallbacks {
-        token: net.token.as_deref(),
+        provider: net.provider.as_deref(),
         ssh: net.ssh.as_ref(),
     });
     let mut builder = git2::build::RepoBuilder::new();
@@ -871,7 +874,7 @@ pub fn fetch(
     }
     crate::auth::set_ca_location(net.ca_dir.as_deref())?;
     let mut fetch_opts = crate::auth::make_fetch_options_net(&crate::auth::NetCallbacks {
-        token: net.token.as_deref(),
+        provider: net.provider.as_deref(),
         ssh: net.ssh.as_ref(),
     });
     // Empty refspec slice -> libgit2 uses the remote's configured default
@@ -994,7 +997,7 @@ pub fn push(
     // check), with the existing non-ff `push_update_reference` capture ADDED on
     // top so push works over SSH while preserving the rejection detection.
     let mut callbacks = crate::auth::make_network_callbacks(&crate::auth::NetCallbacks {
-        token: net.token.as_deref(),
+        provider: net.provider.as_deref(),
         ssh: net.ssh.as_ref(),
     });
     {

@@ -102,9 +102,10 @@ pub fn make_fetch_options(token: Option<&str>) -> git2::FetchOptions<'_> {
 /// SSH-key authentication material for a network git op, supplied in-memory by
 /// the Kotlin host (spec §G7). The private key is a **file path** (validated to
 /// stay inside the app sandbox by [`validate_ssh_key_path`] before use); the
-/// passphrase, when present, is held in memory and flows only into libgit2's
-/// in-process credential callback (never logged, never written, never exec'd).
-/// The host key is verified strictly: only fingerprints in
+/// passphrase, when needed, is fetched per-op from the
+/// [`tool_api::GitCredentialProvider`] (it flows only into libgit2's in-process
+/// credential callback — never logged, never written, never exec'd, never held
+/// resident). The host key is verified strictly: only fingerprints in
 /// `known_hosts_sha256_hex` (lowercase-hex SHA-256) are accepted.
 #[derive(Clone, Default)]
 pub struct SshConfig {
@@ -114,8 +115,6 @@ pub struct SshConfig {
     /// Optional path to the matching public key. libgit2/libssh2 can derive it
     /// from the private key when `None`.
     pub public_key_path: Option<String>,
-    /// Optional passphrase decrypting the private key. In-memory only.
-    pub passphrase: Option<String>,
     /// Pinned host-key fingerprints (lowercase-hex SHA-256). The remote's host
     /// key is accepted only if its SHA-256 is a member (compared
     /// case-insensitively); an empty list rejects every host key.
@@ -182,14 +181,76 @@ pub fn validate_ssh_key_path(
     Ok(canonical_key)
 }
 
-/// Borrowed credential/host-key inputs for a single network op. Exactly one of
-/// `token` (HTTPS) / `ssh` is expected in practice, but both being present is
-/// handled (the credentials closure picks per the libgit2-requested type).
+/// Borrowed credential/host-key inputs for a single network op. The per-op
+/// [`tool_api::GitCredentialProvider`] supplies the HTTPS token / SSH passphrase
+/// lazily (never held resident); `ssh` carries the key path + pinned host keys.
+/// Both being present is handled (the credentials closure picks per the
+/// libgit2-requested type).
 pub struct NetCallbacks<'a> {
-    /// HTTPS token (PAT), presented as the password with the sentinel username.
-    pub token: Option<&'a str>,
+    /// Per-op credential provider: yields the HTTPS token (presented as the
+    /// password with the sentinel username) and the SSH passphrase on demand.
+    pub provider: Option<&'a dyn tool_api::GitCredentialProvider>,
     /// SSH-key material + pinned host keys.
     pub ssh: Option<&'a SshConfig>,
+}
+
+/// The credential `select_credential` resolved for a libgit2 request — owned so
+/// it's testable independent of libgit2's `Cred` (which the closure builds from it).
+#[derive(Debug, PartialEq, Eq)]
+pub enum CredentialChoice {
+    /// libgit2 asked only for a username (libssh2's first request) — supply it.
+    Username(String),
+    /// HTTPS token (PAT): the sentinel `user` with the `token` as the password.
+    UserPass {
+        /// Sentinel username sent alongside the token (`x-access-token`).
+        user: String,
+        /// HTTPS token (PAT) used as the password.
+        token: String,
+    },
+    /// SSH key auth: validated private-key path + optional public key/passphrase.
+    SshKey {
+        /// SSH username (from the URL, else `git`).
+        user: String,
+        /// Filesystem path to the private key.
+        key_path: String,
+        /// Optional matching public-key path (libssh2 can derive it when absent).
+        pubkey: Option<String>,
+        /// Optional passphrase decrypting the private key (per-op, lazily fetched).
+        passphrase: Option<String>,
+    },
+    /// No usable credential for the requested type — the closure errors out.
+    None,
+}
+
+/// Resolve the credential for a libgit2 `allowed` request, fetching secrets from
+/// the per-op `provider` (HTTPS token / SSH passphrase) lazily. Pure: returns
+/// owned data, so a mock provider unit-tests the per-op fetch.
+#[must_use]
+pub fn select_credential(
+    allowed: git2::CredentialType,
+    provider: Option<&dyn tool_api::GitCredentialProvider>,
+    ssh: Option<&SshConfig>,
+    username: &str,
+) -> CredentialChoice {
+    if allowed.contains(git2::CredentialType::USERNAME) {
+        return CredentialChoice::Username(username.to_owned());
+    }
+    if let Some(ssh) = ssh {
+        if allowed.contains(git2::CredentialType::SSH_KEY) {
+            return CredentialChoice::SshKey {
+                user: username.to_owned(),
+                key_path: ssh.private_key_path.clone(),
+                pubkey: ssh.public_key_path.clone(),
+                passphrase: provider.and_then(tool_api::GitCredentialProvider::ssh_passphrase),
+            };
+        }
+    }
+    if allowed.contains(git2::CredentialType::USER_PASS_PLAINTEXT) {
+        if let Some(token) = provider.and_then(tool_api::GitCredentialProvider::https_token) {
+            return CredentialChoice::UserPass { user: TOKEN_USERNAME.to_owned(), token };
+        }
+    }
+    CredentialChoice::None
 }
 
 /// Build the [`git2::RemoteCallbacks`] for a network op, installing a unified
@@ -222,32 +283,23 @@ pub struct NetCallbacks<'a> {
 pub fn make_network_callbacks<'a>(p: &NetCallbacks<'a>) -> git2::RemoteCallbacks<'a> {
     let mut callbacks = git2::RemoteCallbacks::new();
 
-    let token = p.token;
+    let provider = p.provider;
     let ssh = p.ssh;
     callbacks.credentials(move |_url, username_from_url, allowed| {
         let user = username_from_url.unwrap_or("git");
-        if allowed.contains(git2::CredentialType::USERNAME) {
-            return git2::Cred::username(user);
+        match select_credential(allowed, provider, ssh, user) {
+            CredentialChoice::Username(u) => git2::Cred::username(&u),
+            CredentialChoice::UserPass { user, token } => git2::Cred::userpass_plaintext(&user, &token),
+            CredentialChoice::SshKey { user, key_path, pubkey, passphrase } => git2::Cred::ssh_key(
+                &user,
+                pubkey.as_deref().map(Path::new),
+                Path::new(&key_path),
+                passphrase.as_deref(),
+            ),
+            CredentialChoice::None => Err(git2::Error::from_str(
+                "no usable git credential for the requested authentication type",
+            )),
         }
-        if let Some(ssh) = ssh {
-            if allowed.contains(git2::CredentialType::SSH_KEY) {
-                let public = ssh.public_key_path.as_deref().map(Path::new);
-                return git2::Cred::ssh_key(
-                    user,
-                    public,
-                    Path::new(&ssh.private_key_path),
-                    ssh.passphrase.as_deref(),
-                );
-            }
-        }
-        if let Some(token) = token {
-            if allowed.contains(git2::CredentialType::USER_PASS_PLAINTEXT) {
-                return git2::Cred::userpass_plaintext(TOKEN_USERNAME, token);
-            }
-        }
-        Err(git2::Error::from_str(
-            "no usable git credential for the requested authentication type",
-        ))
     });
 
     if let Some(ssh) = ssh {
@@ -402,13 +454,53 @@ mod tests {
 
     #[test]
     fn make_network_callbacks_assembles_for_https_and_ssh() {
-        let _cb = make_network_callbacks(&NetCallbacks { token: Some("tok"), ssh: None });
+        let p = mock(Some("tok"), None);
+        let _cb = make_network_callbacks(&NetCallbacks { provider: Some(&p), ssh: None });
         let ssh = SshConfig {
             private_key_path: "/sandbox/id".into(),
             known_hosts_sha256_hex: vec!["abc".into()],
             ..Default::default()
         };
-        let _cb2 = make_network_callbacks(&NetCallbacks { token: None, ssh: Some(&ssh) });
+        let _cb2 = make_network_callbacks(&NetCallbacks { provider: None, ssh: Some(&ssh) });
+    }
+
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    struct MockProvider { token: Option<String>, pass: Option<String>, tc: AtomicUsize, pc: AtomicUsize }
+    impl tool_api::GitCredentialProvider for MockProvider {
+        fn https_token(&self) -> Option<String> { self.tc.fetch_add(1, Ordering::SeqCst); self.token.clone() }
+        fn ssh_passphrase(&self) -> Option<String> { self.pc.fetch_add(1, Ordering::SeqCst); self.pass.clone() }
+    }
+    fn mock(token: Option<&str>, pass: Option<&str>) -> MockProvider {
+        MockProvider { token: token.map(Into::into), pass: pass.map(Into::into), tc: AtomicUsize::new(0), pc: AtomicUsize::new(0) }
+    }
+
+    #[test]
+    fn select_credential_userpass_calls_https_token() {
+        let p = mock(Some("tok"), None);
+        let c = select_credential(git2::CredentialType::USER_PASS_PLAINTEXT, Some(&p), None, "git");
+        assert_eq!(c, CredentialChoice::UserPass { user: TOKEN_USERNAME.to_owned(), token: "tok".to_owned() });
+        assert_eq!(p.tc.load(Ordering::SeqCst), 1, "https_token fetched once, per-op");
+    }
+    #[test]
+    fn select_credential_sshkey_calls_passphrase() {
+        let p = mock(None, Some("pp"));
+        let ssh = SshConfig { private_key_path: "/k".into(), public_key_path: Some("/k.pub".into()), known_hosts_sha256_hex: vec![] };
+        let c = select_credential(git2::CredentialType::SSH_KEY, Some(&p), Some(&ssh), "git");
+        assert_eq!(c, CredentialChoice::SshKey { user: "git".into(), key_path: "/k".into(), pubkey: Some("/k.pub".into()), passphrase: Some("pp".into()) });
+        assert_eq!(p.pc.load(Ordering::SeqCst), 1, "ssh_passphrase fetched once, per-op");
+    }
+    #[test]
+    fn select_credential_username_first() {
+        let c = select_credential(git2::CredentialType::USERNAME, None, None, "git");
+        assert_eq!(c, CredentialChoice::Username("git".to_owned()));
+    }
+    #[test]
+    fn select_credential_none_without_provider_or_token() {
+        // USER_PASS requested but no provider → None.
+        assert_eq!(select_credential(git2::CredentialType::USER_PASS_PLAINTEXT, None, None, "git"), CredentialChoice::None);
+        // provider present but returns no token → None.
+        let p = mock(None, None);
+        assert_eq!(select_credential(git2::CredentialType::USER_PASS_PLAINTEXT, Some(&p), None, "git"), CredentialChoice::None);
     }
 
     /// `set_ca_location(Some(dir))` exercises the `GIT_OPT_SET_SSL_CERT_LOCATIONS`

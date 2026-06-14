@@ -269,7 +269,7 @@ impl GitTool {
     fn git_net_config(&self) -> ops::GitNetConfig {
         match self.ctx.android_git_secret.as_ref() {
             Some(secret) => ops::GitNetConfig {
-                token: secret.token.clone(),
+                provider: secret.credential_provider.clone(),
                 ca_dir: secret.ca_dir.clone(),
                 // SSH is configured only when a (non-empty) private-key path is
                 // present; otherwise leave `None` so an SSH-URL op surfaces the
@@ -284,7 +284,6 @@ impl GitTool {
                             .ssh_public_key_path
                             .clone()
                             .filter(|p| !p.is_empty()),
-                        passphrase: secret.ssh_passphrase.clone(),
                         known_hosts_sha256_hex: secret.ssh_known_hosts_sha256_hex.clone(),
                     }),
             },

@@ -150,6 +150,9 @@ fun buildVoiceEngine(
             // P4: Git-tool config not surfaced in the app UI yet — null keeps
             // Git support fully absent (spec P4 §G5 registration gate).
             git = null,
+            // Per-op credential provider not surfaced in the app UI yet — null
+            // means no Git secrets are available (anonymous/public remotes only).
+            gitCredentialProvider = null,
         )
     } catch (t: Throwable) {
         // PlatformUnavailable on a host build, or UnsatisfiedLinkError when the

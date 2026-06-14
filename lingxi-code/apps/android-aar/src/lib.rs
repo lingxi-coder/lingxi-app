@@ -109,11 +109,10 @@ pub struct AndroidShellConfigFfi {
 /// §G3 auth). `None`/`null` anywhere upstream keeps Git support fully absent.
 ///
 /// Mirrors [`AndroidShellConfigFfi`]: the Kotlin host supplies the enable flag,
-/// the repository workspace root, the system CA-certificate directory, and the
-/// in-memory HTTPS token. The token rides this FFI record only long enough to be
-/// copied into the engine's `AndroidGitSecret` (held outside the broadly-cloned
-/// public [`tool_api::AndroidGitToolCtx`]); it is never written to disk or a
-/// child-process env (libgit2 is in-process).
+/// the repository workspace root, and the system CA-certificate directory. The
+/// secrets themselves (HTTPS token, SSH passphrase) NO LONGER ride this record —
+/// they are fetched per-op through the [`AndroidGitCredentialProvider`] callback
+/// so no plaintext secret is held resident in the engine between ops.
 #[cfg(feature = "uniffi")]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 #[derive(Debug, Clone)]
@@ -125,8 +124,6 @@ pub struct AndroidGitConfigFfi {
     /// System CA-certificate directory for TLS verification. Empty = use the
     /// libgit2/OpenSSL defaults.
     pub ca_cert_dir: String,
-    /// In-memory HTTPS token (PAT) for network ops, or `None` for public remotes.
-    pub https_token: Option<String>,
     /// Filesystem path to the SSH private key (spec §G7), or empty for
     /// HTTPS-only. Host-supplied; validated to stay inside `app_files_root`
     /// before reaching the engine secret seam (defense-in-depth — see
@@ -135,8 +132,6 @@ pub struct AndroidGitConfigFfi {
     /// Path to the matching SSH public key, or empty (libssh2 derives it from
     /// the private key).
     pub ssh_public_key_path: String,
-    /// Passphrase decrypting the SSH private key, or `None`. In-memory only.
-    pub ssh_passphrase: Option<String>,
     /// Pinned SSH host-key fingerprints (lowercase-hex SHA-256). An empty list
     /// rejects every host key (fail-closed).
     pub ssh_known_hosts_sha256_hex: Vec<String>,
@@ -790,6 +785,38 @@ fn voice_error_from_ffi(e: VoiceFfiError) -> traits::VoiceError {
     }
 }
 
+/// Host-implemented per-op Git credential provider (spec: per-op credential FFI).
+/// Called synchronously inside libgit2's credentials callback, once per network
+/// op — the host fetches the secret (e.g. from the Android Keystore) on demand so
+/// no plaintext secret is held resident in the engine between ops.
+#[cfg(feature = "uniffi")]
+#[cfg_attr(feature = "uniffi", uniffi::export(callback_interface))]
+pub trait AndroidGitCredentialProvider: Send + Sync {
+    /// HTTPS token (PAT), or `None` for anonymous/public remotes.
+    fn https_token(&self) -> Option<String>;
+    /// SSH private-key passphrase, or `None` if the key is unencrypted.
+    fn ssh_passphrase(&self) -> Option<String>;
+}
+
+/// Adapts the crate-local [`AndroidGitCredentialProvider`] callback interface to
+/// the shared [`tool_api::GitCredentialProvider`] seam the engine consumes. One
+/// forwarding hop per call; both methods are synchronous (libgit2's credentials
+/// callback is sync), so no async runtime is involved.
+#[cfg(feature = "uniffi")]
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+struct AndroidGitCredentialProviderBridge {
+    inner: Box<dyn AndroidGitCredentialProvider>,
+}
+#[cfg(feature = "uniffi")]
+impl tool_api::GitCredentialProvider for AndroidGitCredentialProviderBridge {
+    fn https_token(&self) -> Option<String> {
+        self.inner.https_token()
+    }
+    fn ssh_passphrase(&self) -> Option<String> {
+        self.inner.ssh_passphrase()
+    }
+}
+
 /// Adapts the crate-local [`AndroidStt`] callback interface to the shared
 /// [`traits::SpeechToText`] seam the engine consumes. One forwarding hop per
 /// call; maps [`SpeechFfiError`] onto [`traits::SttError`].
@@ -1231,6 +1258,7 @@ pub fn build_android_engine(
     permissions: Box<dyn AndroidPermissionSink>,
     shell: Option<AndroidShellConfigFfi>,
     git: Option<AndroidGitConfigFfi>,
+    git_credential_provider: Option<Box<dyn AndroidGitCredentialProvider>>,
 ) -> Result<Arc<MobileEngineHandle>, MobileEngineError> {
     let listener: Arc<dyn ClientEventListener> =
         Arc::new(AndroidListenerBridge { inner: listener });
@@ -1386,12 +1414,21 @@ pub fn build_android_engine(
         // `AndroidGitToolCtx`, which only exposes `has_token`), so it never
         // enters the public tool carrier.
         if let Some(c) = git {
+            // Wrap the host-implemented per-op credential provider (if any) in the
+            // bridge onto the shared `tool_api::GitCredentialProvider` seam. The
+            // secret is fetched on demand inside libgit2's sync callback, so it is
+            // never held resident in the engine between ops.
+            let credential_provider: Option<std::sync::Arc<dyn tool_api::GitCredentialProvider>> =
+                git_credential_provider.map(|p| {
+                    std::sync::Arc::new(AndroidGitCredentialProviderBridge { inner: p })
+                        as std::sync::Arc<dyn tool_api::GitCredentialProvider>
+                });
             let workspace_ready = std::path::Path::new(&c.workspace_root).is_dir();
             let ca_store_reachable =
                 c.ca_cert_dir.is_empty() || std::path::Path::new(&c.ca_cert_dir).exists();
             cfg.android_git = Some(tool_api::AndroidGitToolCtx {
                 enabled: android_git_gate(c.enable_git, workspace_ready, ca_store_reachable),
-                has_token: c.https_token.is_some(),
+                has_token: credential_provider.is_some(),
                 workspace_root: c.workspace_root.clone(),
             });
             // Defense-in-depth: the SSH private-key path is HOST-supplied (not
@@ -1407,23 +1444,21 @@ pub fn build_android_engine(
                     ssh_root,
                 )
                 .is_ok();
-            let (ssh_private_key_path, ssh_public_key_path, ssh_passphrase, ssh_known_hosts) =
-                if ssh_key_ok {
-                    (
-                        Some(c.ssh_private_key_path),
-                        if c.ssh_public_key_path.is_empty() {
-                            None
-                        } else {
-                            Some(c.ssh_public_key_path)
-                        },
-                        c.ssh_passphrase,
-                        c.ssh_known_hosts_sha256_hex,
-                    )
-                } else {
-                    (None, None, None, Vec::new())
-                };
+            let (ssh_private_key_path, ssh_public_key_path, ssh_known_hosts) = if ssh_key_ok {
+                (
+                    Some(c.ssh_private_key_path),
+                    if c.ssh_public_key_path.is_empty() {
+                        None
+                    } else {
+                        Some(c.ssh_public_key_path)
+                    },
+                    c.ssh_known_hosts_sha256_hex,
+                )
+            } else {
+                (None, None, Vec::new())
+            };
             cfg.android_git_secret = Some(tool_api::AndroidGitSecret {
-                token: c.https_token,
+                credential_provider,
                 ca_dir: if c.ca_cert_dir.is_empty() {
                     None
                 } else {
@@ -1431,7 +1466,6 @@ pub fn build_android_engine(
                 },
                 ssh_private_key_path,
                 ssh_public_key_path,
-                ssh_passphrase,
                 ssh_known_hosts_sha256_hex: ssh_known_hosts,
             });
         }
@@ -1459,6 +1493,7 @@ pub fn build_android_engine(
             permissions,
             shell,
             git,
+            git_credential_provider,
         );
         Err(MobileEngineError::PlatformUnavailable)
     }
@@ -1790,8 +1825,9 @@ pub fn android_sandbox_capabilities() -> String {
 ///
 /// It is NOT a bypass: it builds a [`tool_api::BuiltinToolContext`] with
 /// `android_git = Some(AndroidGitToolCtx { enabled: true, has_token: false,
-/// workspace_root })` + `android_git_secret = Some(AndroidGitSecret { token:
-/// None, ca_dir: Some(ca_cert_dir) })`, constructs the `GitTool`, parses
+/// workspace_root })` + `android_git_secret = Some(AndroidGitSecret {
+/// credential_provider: None, ca_dir: Some(ca_cert_dir), .. })`, constructs the
+/// `GitTool`, parses
 /// `operation_json` into the tool input `Value`, and runs `GitTool::call(..)` on
 /// a transient current-thread runtime — exactly the engine's path. No token is
 /// needed: the acceptance clone targets a PUBLIC repo.
@@ -1851,7 +1887,7 @@ pub fn android_git_probe(operation_json: String, workspace: String, ca_cert_dir:
             workspace_root: workspace,
         });
         ctx.android_git_secret = Some(AndroidGitSecret {
-            token: None,
+            credential_provider: None,
             ca_dir: if ca_cert_dir.is_empty() {
                 None
             } else {
@@ -1859,8 +1895,8 @@ pub fn android_git_probe(operation_json: String, workspace: String, ca_cert_dir:
             },
             ssh_private_key_path: None,
             ssh_public_key_path: None,
-            ssh_passphrase: None,
             ssh_known_hosts_sha256_hex: Vec::new(),
+            ..Default::default()
         });
 
         let tool = tool_git_mobile::GitTool::new(ctx);
@@ -2261,8 +2297,8 @@ mod tests {
 
     /// P4-T10: the FFI → `AndroidGitToolCtx` mapping yields `enabled = false`
     /// when `enable_git` is false even if the other gate inputs (workspace +
-    /// CA store) are satisfied, and regardless of a present token. Pure-fn level
-    /// (mirrors the body of [`build_android_engine`]'s git mapping).
+    /// CA store) are satisfied, and regardless of a present credential provider.
+    /// Pure-fn level (mirrors the body of [`build_android_engine`]'s git mapping).
     #[test]
     fn ffi_mapping_disabled_when_enable_git_false() {
         use super::android_git_gate;
@@ -2273,10 +2309,8 @@ mod tests {
             workspace_root: env!("CARGO_MANIFEST_DIR").to_string(),
             // Empty CA dir is treated as reachable (libgit2/OpenSSL defaults).
             ca_cert_dir: String::new(),
-            https_token: Some("pat-token".to_string()),
             ssh_private_key_path: String::new(),
             ssh_public_key_path: String::new(),
-            ssh_passphrase: None,
             ssh_known_hosts_sha256_hex: Vec::new(),
         };
 
@@ -2286,19 +2320,39 @@ mod tests {
         assert!(workspace_ready, "fixture workspace_root must be a real dir");
         assert!(ca_store_reachable, "empty CA dir must count as reachable");
 
+        // Secrets now ride the per-op `AndroidGitCredentialProvider` callback
+        // rather than the FFI config; `has_token` reflects whether that provider
+        // is present (mirrors `build_android_engine`'s `credential_provider.is_some()`).
+        let credential_provider: Option<std::sync::Arc<dyn tool_api::GitCredentialProvider>> =
+            Some(std::sync::Arc::new(super::AndroidGitCredentialProviderBridge {
+                inner: Box::new(TestCredProvider),
+            }));
+
         let ctx = tool_api::AndroidGitToolCtx {
             enabled: android_git_gate(cfg.enable_git, workspace_ready, ca_store_reachable),
-            has_token: cfg.https_token.is_some(),
+            has_token: credential_provider.is_some(),
             workspace_root: cfg.workspace_root.clone(),
         };
 
         assert!(
             !ctx.enabled,
-            "Git must be disabled when enable_git is false, even with workspace + CA + token set"
+            "Git must be disabled when enable_git is false, even with workspace + CA + provider set"
         );
         assert!(
             ctx.has_token,
-            "has_token must still reflect a supplied token"
+            "has_token must still reflect a supplied credential provider"
         );
+    }
+
+    /// Minimal host-side [`super::AndroidGitCredentialProvider`] impl for tests:
+    /// exercises the bridge onto `tool_api::GitCredentialProvider`.
+    struct TestCredProvider;
+    impl super::AndroidGitCredentialProvider for TestCredProvider {
+        fn https_token(&self) -> Option<String> {
+            Some("pat-token".to_string())
+        }
+        fn ssh_passphrase(&self) -> Option<String> {
+            None
+        }
     }
 }

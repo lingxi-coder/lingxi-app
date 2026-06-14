@@ -6,6 +6,17 @@ extern crate libc;
 
 extern crate libz_sys;
 // LingXi (M-a): crypto backend is mbedTLS (not OpenSSL) — no openssl_sys.
+//
+// This crate's compiled C (crypto.c -> mbedtls.c) references ~96 `mbedtls_*`
+// symbols defined in the vendored `mbedtls-sys` archives. `mbedtls-sys` has an
+// empty Rust API, so without a Rust-level reference rustc prunes its
+// (unreferenced) rlib from the final link and the mbedTLS objects vanish ->
+// undefined symbols. The `#[used]` re-export of its link anchor below marks
+// `mbedtls-sys` as reachable, keeping its `#[link]`-declared archives in the
+// link. (Equivalent anchor lives in libgit2-sys.)
+extern crate mbedtls_sys;
+#[used]
+static _MBEDTLS_LINK_ANCHOR: unsafe extern "C" fn() -> u32 = mbedtls_sys::mbedtls_link_anchor;
 
 use libc::ssize_t;
 use libc::{c_char, c_int, c_long, c_uchar, c_uint, c_ulong, c_void, size_t};

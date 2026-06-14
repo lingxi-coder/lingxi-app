@@ -5,9 +5,21 @@
 //! stock `include/mbedtls/mbedtls_config.h`, then exports the include dir as
 //! `DEP_MBEDTLS_INCLUDE` for the direct dependents (libgit2-sys / libssh2-sys).
 //!
-//! Link order matters: `mbedtls` -> `mbedx509` -> `mbedcrypto` (a TLS symbol
-//! resolves against x509, which resolves against crypto). The three
-//! `rustc-link-lib` lines below are emitted in that order.
+//! Two things matter for this seam to actually link:
+//!
+//! 1. **No bundling.** This crate's `lib.rs` is an empty doc-only stub, so
+//!    nothing in Rust references it. `cc::Build::compile(name)` would emit
+//!    `cargo:rustc-link-lib=static=<name>` (i.e. `+bundle`), which stuffs the
+//!    `.a` *inside* `libmbedtls_sys.rlib`. rustc then prunes that unreferenced
+//!    rlib from the final link and the bundled mbedTLS objects vanish with it
+//!    -> ~96 undefined `mbedtls_*` symbols in the consumers (libgit2-sys /
+//!    libssh2-sys). We therefore suppress cc's auto-emit
+//!    (`cargo_metadata(false)`) and emit `static:-bundle=<name>` ourselves so
+//!    the archives are passed straight to the final binary link, not bundled.
+//!
+//! 2. **Order: crypto LAST.** Under single-pass static-archive resolution a
+//!    definition must follow the references to it. tls/x509 and the consumer
+//!    archives all use crypto, so the emitted order is tls -> x509 -> crypto.
 
 use std::env;
 use std::path::PathBuf;
@@ -87,7 +99,12 @@ fn main() {
             // The library *.c use `#include "common.h"` etc. from library/.
             .include(&library)
             .define("MBEDTLS_CONFIG_FILE", "\"mbedtls/mbedtls_config.h\"")
-            .warnings(false);
+            .warnings(false)
+            // Suppress cc's own `cargo:` emission: its auto `rustc-link-lib=
+            // static=<name>` is `+bundle`, which buries the `.a` in this crate's
+            // (empty, prunable) rlib. We emit `-bundle` directives ourselves
+            // below so the archives reach the final binary link instead.
+            .cargo_metadata(false);
         // NDK API floor: ensure --target uses API 29 (the P0a/G7 lesson).
         bump_android_api(&mut cfg);
         for f in files {
@@ -96,17 +113,20 @@ fn main() {
         cfg
     };
 
-    base(&crypto_files).compile("mbedcrypto");
-    base(&x509_files).compile("mbedx509");
+    // Build the three archives. Order is irrelevant to compilation; what matters
+    // is the order of the link-lib directives emitted below.
     base(&tls_files).compile("mbedtls");
+    base(&x509_files).compile("mbedx509");
+    base(&crypto_files).compile("mbedcrypto");
 
     let out = PathBuf::from(env::var_os("OUT_DIR").unwrap());
     println!("cargo:include={}", include.display());
+    // Only the search path is emitted here. The `name`/`kind`/`modifiers` of the
+    // three archives are declared via `#[link(..)]` in `lib.rs` (with a
+    // referenced anchor symbol) so rustc keeps this crate and its archives in
+    // the final link instead of pruning the empty rlib. cc's own auto-emit is
+    // suppressed above (`cargo_metadata(false)`) so it cannot fight that.
     println!("cargo:rustc-link-search=native={}", out.display());
-    // Link order: tls -> x509 -> crypto.
-    println!("cargo:rustc-link-lib=static=mbedtls");
-    println!("cargo:rustc-link-lib=static=mbedx509");
-    println!("cargo:rustc-link-lib=static=mbedcrypto");
 }
 
 /// When cross-compiling for Android, `cc` defaults the `--target=<triple>NN`

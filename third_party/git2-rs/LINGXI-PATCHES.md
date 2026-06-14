@@ -49,6 +49,27 @@ dropped — off in stock config) and cc-built by `third_party/mbedtls-sys/` (a
 `links="mbedtls"` seam compiling the 3 standard libs mbedcrypto/mbedx509/mbedtls,
 exporting `DEP_MBEDTLS_INCLUDE`, link order tls→x509→crypto, NDK API floor 29).
 
+**Linkage — the subtle part (was broken; fixed M-a follow-up).** `mbedtls-sys`
+has an empty (doc-only) `lib.rs`, so no Rust code references it. If the archives
+are linked the ordinary way (`cc::Build::compile` auto-emitting
+`cargo:rustc-link-lib=static=…`, i.e. `+bundle`), rustc bundles each `.a` into
+`mbedtls-sys`'s rlib and then **prunes that unreferenced rlib from the final
+link** — the mbedTLS objects vanish and the consumers' ~96 `mbedtls_*` C
+references go undefined. The Android `.so` link tolerates undefined symbols so
+`cargo ndk` *appeared* to pass; the host `cargo test -p tool-git-mobile` (a real
+`--no-undefined` link) is the honest signal and failed. Fix:
+- `mbedtls-sys/build.rs` suppresses cc's auto-emit (`cargo_metadata(false)`) and
+  emits only the link-search path; the archive `name`/`kind=static`/
+  `modifiers="-bundle"` are declared via `#[link(..)]` in `mbedtls-sys/lib.rs`
+  (order tls→x509→crypto so crypto's defs sit last under single-pass
+  resolution), with a `pub static mbedtls_link_anchor` pointing at a real crypto
+  symbol.
+- Each consumer (`libgit2-sys/lib.rs` gated by `https`, `libssh2-sys/lib.rs`)
+  holds a `#[used] static … = mbedtls_sys::mbedtls_link_anchor;`. This Rust-level
+  reference keeps `mbedtls-sys` (and its `-bundle` archives) reachable, so rustc
+  passes them to the final binary link. `+whole-archive` was deliberately NOT
+  used (it defeats dead-stripping / bloats the binary).
+
 **Patches (re-apply ALL on any re-vendor / version bump):**
 
 1. `libgit2-sys/build.rs` — `if https` non-Win/non-Apple arm:
@@ -81,14 +102,37 @@ exporting `DEP_MBEDTLS_INCLUDE`, link order tls→x509→crypto, NDK API floor 2
    `openssl-sys` deps; `openssl-on-win32`/`vendored-openssl` no-op aliases.
 9. `tools/git-mobile/Cargo.toml` — removed `"vendored-openssl"` from git2
    features (keep `vendored-libgit2`, `https`, `ssh`).
+10. `mbedtls-sys/build.rs` — `cargo_metadata(false)` on each `cc::Build` (suppress
+    the `+bundle` auto link-lib); emits only `rustc-link-search`. (See "Linkage"
+    above.)
+11. `mbedtls-sys/lib.rs` — `#[link(name=…, kind="static", modifiers="-bundle")]`
+    for mbedtls/mbedx509/mbedcrypto (order: crypto last) + `pub static
+    mbedtls_link_anchor` over a real crypto symbol.
+12. `libssh2-sys/lib.rs` + `libgit2-sys/lib.rs` (gated `https`) — `extern crate
+    mbedtls_sys;` and `#[used] static _MBEDTLS_LINK_ANCHOR = …mbedtls_link_anchor;`
+    to keep the seam (and its archives) in the final link.
 
-**Gate evidence (M-a):** `cargo ndk` for android-aar links on BOTH arm64-v8a +
-x86_64. `cargo tree -p android-aar | grep openssl` → empty (openssl-sys gone).
-`llvm-nm` on each `libandroid_aar.so`: 24 `mbedtls_ssl_*`/`mbedtls_x509_*`
-symbols PRESENT; `EVP_*` / `SSL_CTX_new` / `ssl3_*` ABSENT (0). The only
-`OPENSSL_`-prefixed symbols are `OPENSSL_memcpy`/`OPENSSL_memset` — local (`t`)
-inline helpers from the unrelated `ring` crate (a BoringSSL fork already in the
-tree), NOT OpenSSL and NOT on the git TLS path.
+**Gate evidence (M-a, re-verified after the linkage fix):**
+- Host `cargo test -p tool-git-mobile` (a real `--no-undefined` link) — **links +
+  passes, 41/41 tests** (previously: link FAILED with undefined
+  `_mbedtls_cipher_finish`, `_mbedtls_ctr_drbg_seed`, `_mbedtls_rsa_pkcs1_*`,
+  `_mbedtls_strerror`, … from `libssh2_sys` crypto.o — the bug). `cargo build -p
+  tool-git-mobile` builds.
+- `cargo ndk` for android-aar links on BOTH arm64-v8a + x86_64.
+- `llvm-nm` on each `libandroid_aar.so`: **0** undefined (`U`) `mbedtls_` symbols
+  (was ~96 before the fix); ~1031–1032 `mbedtls_*` now DEFINED (`t`), e.g.
+  `mbedtls_ssl_handshake`, `mbedtls_x509_crt_parse`, `mbedtls_cipher_finish`,
+  `mbedtls_ctr_drbg_seed`. `EVP_*` / `SSL_CTX_new` / `ssl3_*` ABSENT (0).
+- `cargo tree -p android-aar | grep -i openssl` → empty (no openssl-sys). NOTE:
+  `openssl-probe` v0.1.6 remains in `Cargo.lock` — it is NOT OpenSSL and NOT an
+  orphan: it is a pure-Rust CA-path locator pulled transitively by
+  `rustls-native-certs` ← `sandbox-runtime` (desktop only; cfg-gated off on the
+  macOS host, which is why a host-only `cargo tree -i openssl-probe` prints
+  nothing). It has no OpenSSL linkage and is not on the git TLS path; correctly
+  left in place.
+- The only `OPENSSL_`-prefixed symbols are `OPENSSL_memcpy`/`OPENSSL_memset` —
+  local (`t`) inline helpers from the unrelated `ring` crate (a BoringSSL fork
+  already in the tree), NOT OpenSSL and NOT on the git TLS path.
 
 **Windows note:** the win32 `LIBSSH2_OPENSSL`/WinHTTP paths still reference
 OpenSSL in build.rs, but those features are now no-op aliases with no

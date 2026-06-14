@@ -4,6 +4,19 @@
 // This is required to link libz when libssh2-sys is not included.
 extern crate libz_sys as libz;
 
+// LingXi (M-a): keep the vendored `mbedtls-sys` archives in the final link.
+// libgit2's compiled C (streams/mbedtls.c, util/hash/mbedtls.c) references
+// `mbedtls_*` symbols, but `mbedtls-sys` has an empty Rust API so rustc would
+// prune its unreferenced rlib (dropping the mbedTLS objects -> undefined
+// symbols). A `#[used]` reference to its link anchor keeps it reachable. Gated
+// by `https`, which is the feature that pulls `mbedtls-sys`. (Equivalent anchor
+// lives in libssh2-sys for the `ssh` path.)
+#[cfg(feature = "https")]
+extern crate mbedtls_sys;
+#[cfg(feature = "https")]
+#[used]
+static _MBEDTLS_LINK_ANCHOR: unsafe extern "C" fn() -> u32 = mbedtls_sys::mbedtls_link_anchor;
+
 use libc::{c_char, c_int, c_uchar, c_uint, c_ushort, c_void, size_t};
 #[cfg(feature = "ssh")]
 use libssh2_sys as libssh2;

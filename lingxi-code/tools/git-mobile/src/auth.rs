@@ -7,6 +7,30 @@
 //! child process, argv, or an environment variable: libgit2 is in-process, so
 //! there is no exec boundary to cross. The token is also never logged.
 //!
+//! ## TLS backend: mbedTLS (Android), CA store wiring
+//!
+//! libgit2 is built against **mbedTLS** for the Android target (the OpenSSL
+//! Rust glue was removed in M-a). CA trust is configured at runtime by pointing
+//! libgit2's mbedTLS stream at Android's system CA directory
+//! (`/system/etc/security/cacerts`) via [`set_ca_location`]. This works because
+//! this libgit2 version wires `GIT_OPT_SET_SSL_CERT_LOCATIONS` for the mbedTLS
+//! backend too (not only OpenSSL): the option routes to
+//! `git_mbedtls__set_cert_location(file, path)` in
+//! `streams/mbedtls.c`, which loads a whole directory of hashed PEM certs with
+//! `mbedtls_x509_crt_parse_path(path)` and installs them as the trust chain via
+//! `mbedtls_ssl_conf_ca_chain`. No `streams/mbedtls.c` patch is required.
+//!
+//! Verification is **fail-closed (verify-required equivalent)**. The mbedTLS
+//! config uses `MBEDTLS_SSL_VERIFY_OPTIONAL` *only* so libgit2 can still read
+//! the peer certificate after the handshake (REQUIRED frees it on failure); the
+//! stream's `verify_server_cert` then re-checks `mbedtls_ssl_get_verify_result`
+//! and returns `GIT_ECERTIFICATE` on any failure. For HTTPS we install **no**
+//! `certificate_check` callback (see [`make_network_callbacks`], which only adds
+//! one for SSH host-key pinning), so libgit2's `httpclient.c` propagates that
+//! `GIT_ECERTIFICATE` as a hard connection failure — there is no path that
+//! accepts an unverified cert. This is identical to libgit2's OpenSSL backend
+//! contract; we do NOT weaken the verify mode.
+//!
 //! ## `forbid(unsafe_code)` carve-out
 //!
 //! The crate is `#![deny(unsafe_code)]` (NOT `forbid`) for exactly one reason:
@@ -17,7 +41,8 @@
 //! `unsafe` setters over `GIT_OPT_SET_SSL_CERT_LOCATIONS`. The single audited
 //! `unsafe` block lives in [`set_ca_location`] under a localized
 //! `#[allow(unsafe_code)]`; the rest of the crate keeps the deny lint, so no
-//! other unsafe can slip in. See the Task 8 report for the deviation note.
+//! other unsafe can slip in. (Still required under mbedTLS — the setter remains
+//! `unsafe` regardless of TLS backend.)
 
 use std::path::{Path, PathBuf};
 
@@ -262,21 +287,29 @@ pub fn make_fetch_options_net<'a>(p: &NetCallbacks<'a>) -> git2::FetchOptions<'a
     opts
 }
 
-/// Point libgit2's TLS backend at a CA-certificate location for verification.
+/// Point libgit2's **mbedTLS** backend at a CA-certificate directory for
+/// server-certificate verification.
 ///
 /// `ca_dir`, when `Some`, is treated as a **directory** of one-cert-per-file CA
-/// certificates (the Android `/system/etc/security/cacerts` layout) and passed
-/// as the `path` argument of `GIT_OPT_SET_SSL_CERT_LOCATIONS` via
-/// [`git2::opts::set_ssl_cert_dir`]; the `file` argument is left unset. When
-/// `None`, this is a no-op (libgit2 / OpenSSL keep their built-in defaults —
-/// the host file:// tests need no CA).
+/// certificates (the Android `/system/etc/security/cacerts` layout: hashed
+/// `<hash>.0` PEM files) and passed as the `path` argument of
+/// `GIT_OPT_SET_SSL_CERT_LOCATIONS` via [`git2::opts::set_ssl_cert_dir`]; the
+/// `file` argument is left unset. Under mbedTLS this option routes to
+/// `git_mbedtls__set_cert_location(NULL, path)`, which loads the whole
+/// directory with `mbedtls_x509_crt_parse_path` and installs it as the trust
+/// chain (`mbedtls_ssl_conf_ca_chain`). Verification then fails closed against
+/// that chain (see the module-level doc: `verify_server_cert` →
+/// `GIT_ECERTIFICATE`, no HTTPS `certificate_check` override). When `None`, this
+/// is a no-op — libgit2 keeps its built-in default (none), which is fine for the
+/// host `file://` tests that perform no TLS.
 ///
 /// This is a **global** libgit2 option (set once for the process). It is
 /// idempotent to call again with the same value.
 ///
 /// # Errors
 ///
-/// [`GitOpError::Libgit2`] if libgit2 rejects the location.
+/// [`GitOpError::Libgit2`] if libgit2/mbedTLS rejects the location (e.g. the
+/// directory cannot be parsed into any valid cert).
 pub fn set_ca_location(ca_dir: Option<&str>) -> Result<(), GitOpError> {
     let Some(dir) = ca_dir else {
         return Ok(());
@@ -285,8 +318,10 @@ pub fn set_ca_location(ca_dir: Option<&str>) -> Result<(), GitOpError> {
     // a libgit2 process global without internal synchronization. We call it
     // from a single deterministic point (the start of each network op, before
     // any concurrent git work — Git ops are not concurrency-safe, see
-    // `GitTool::is_concurrency_safe == false`), passing a validated dir path. No
-    // other unsafe is permitted in this crate (`#![deny(unsafe_code)]`).
+    // `GitTool::is_concurrency_safe == false`), passing a validated dir path. It
+    // drives the mbedTLS backend's `git_mbedtls__set_cert_location` in this
+    // libgit2 version. No other unsafe is permitted in this crate
+    // (`#![deny(unsafe_code)]`).
     #[allow(unsafe_code)]
     unsafe {
         git2::opts::set_ssl_cert_dir(Path::new(dir)).map_err(|e| GitOpError::from_git2(&e))
@@ -377,28 +412,30 @@ mod tests {
     }
 
     /// `set_ca_location(Some(dir))` exercises the `GIT_OPT_SET_SSL_CERT_LOCATIONS`
-    /// path. On a device build (libgit2 + OpenSSL HTTPS transport) the option is
-    /// accepted; some HOST builds compile libgit2 without an HTTPS transport that
-    /// honours cert locations and return a named "TLS backend doesn't support
-    /// certificate locations" error. Both are acceptable here — the real CA wiring
-    /// is verified on-device (P4d). We only assert the call does not panic and any
-    /// error is the named, mapped libgit2 error (never a silent success on a bad
-    /// path or an unmapped error kind).
+    /// path, which under the mbedTLS backend routes to
+    /// `git_mbedtls__set_cert_location` (loads the dir via
+    /// `mbedtls_x509_crt_parse_path`). The host can't exercise the Android trust
+    /// store, but the reworked contract must be sane: calling it never panics and
+    /// returns either `Ok(())` or a NAMED [`GitOpError::Libgit2`] — never a silent
+    /// wrong-success of some other error kind, and never a weakened/skipped verify
+    /// (the verify-required-equivalent contract is enforced inside libgit2, see the
+    /// module doc; the live good-vs-bad-cert check is device-only, M-c). Whether an
+    /// empty tempdir yields Ok or a named error depends on how mbedTLS/libgit2 is
+    /// built on this host — both are acceptable; we only pin the contract shape.
     #[test]
-    fn set_ca_location_some_dir_ok_or_named_backend_error() {
+    fn set_ca_location_contract_under_mbedtls() {
         let dir = tempfile::tempdir().expect("tempdir");
-        match set_ca_location(Some(dir.path().to_str().unwrap())) {
-            Ok(()) => {}
-            Err(GitOpError::Libgit2(msg)) => {
-                assert!(
-                    msg.to_lowercase().contains("tls")
-                        || msg.to_lowercase().contains("backend")
-                        || msg.to_lowercase().contains("certificate"),
-                    "CA-location failure on this host build should be the named \
-                     TLS-backend error, got: {msg}"
-                );
-            }
-            Err(other) => panic!("unexpected CA-location error kind: {other:?}"),
-        }
+        // Calling must not panic, and the only acceptable outcomes are Ok(()) or
+        // a NAMED `GitOpError::Libgit2(_)` — never a silent wrong-success of some
+        // other error kind.
+        let acceptable = matches!(
+            set_ca_location(Some(dir.path().to_str().unwrap())),
+            Ok(()) | Err(GitOpError::Libgit2(_))
+        );
+        assert!(
+            acceptable,
+            "set_ca_location must return Ok or the named GitOpError::Libgit2, \
+             never an unexpected error kind"
+        );
     }
 }

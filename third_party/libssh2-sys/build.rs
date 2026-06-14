@@ -124,9 +124,13 @@ fn main() {
         cfg.define("HAVE_SYS_TIME_H", None);
         cfg.define("HAVE_SYS_UN_H", None);
         cfg.define("HAVE_O_NONBLOCK", None);
-        cfg.define("LIBSSH2_OPENSSL", None);
+        // LingXi (M-a): mbedTLS crypto backend instead of OpenSSL. crypto.c
+        // does `#elif defined(LIBSSH2_MBEDTLS) #include "mbedtls.c"`, so the
+        // mbedTLS backend body is pulled in via the existing crypto.c entry in
+        // the compiled file set (no file-list change). HAVE_EVP_AES_128_CTR is
+        // OpenSSL-specific and dropped.
+        cfg.define("LIBSSH2_MBEDTLS", None);
         cfg.define("HAVE_LIBCRYPT32", None);
-        cfg.define("HAVE_EVP_AES_128_CTR", None);
         cfg.define("HAVE_POLL", None);
         cfg.define("HAVE_GETTIMEOFDAY", None);
 
@@ -155,8 +159,9 @@ fn main() {
         cfg.include(path);
     }
 
-    println!("cargo:rerun-if-env-changed=DEP_OPENSSL_INCLUDE");
-    if let Some(path) = env::var_os("DEP_OPENSSL_INCLUDE") {
+    // LingXi (M-a): mbedTLS include (from the links="mbedtls" seam) not OpenSSL.
+    println!("cargo:rerun-if-env-changed=DEP_MBEDTLS_INCLUDE");
+    if let Some(path) = env::var_os("DEP_MBEDTLS_INCLUDE") {
         if let Some(path) = env::split_paths(&path).next() {
             if let Some(path) = path.to_str() {
                 if path.len() > 0 {

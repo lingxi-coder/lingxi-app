@@ -773,7 +773,11 @@ fn init() {
     raw::init();
 }
 
+// LingXi (M-a): mbedTLS backend — the OpenSSL cert-env probing below is dead.
+// Disabled via an always-false cfg so the original body is retained for
+// reference / easy revert, but never compiled.
 #[cfg(all(
+    any(),
     unix,
     not(target_os = "macos"),
     not(target_os = "ios"),
@@ -895,12 +899,15 @@ fn openssl_env_init() {
     openssl_probe::init_ssl_cert_env_vars();
 }
 
-#[cfg(any(
-    windows,
-    target_os = "macos",
-    target_os = "ios",
-    not(feature = "https")
-))]
+// LingXi (M-a): catch-all no-op (the openssl-probe arm above is cfg(any())
+// disabled). mbedTLS does not consume SSL_CERT_* env vars; CA loading is M-b.
+#[cfg(not(all(
+    any(),
+    unix,
+    not(target_os = "macos"),
+    not(target_os = "ios"),
+    feature = "https"
+)))]
 fn openssl_env_init() {}
 
 unsafe fn opt_bytes<'a, T>(_anchor: &'a T, c: *const libc::c_char) -> Option<&'a [u8]> {

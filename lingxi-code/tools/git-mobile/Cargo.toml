@@ -17,14 +17,14 @@ tool-api = { path = "../../tool-api" }
 traits = { path = "../../traits" }
 permission = { path = "../../permission" }
 thiserror.workspace = true
-# Vendored git2 (T1). The `https` feature is REQUIRED — it enables the OpenSSL
-# TLS backend; without it clone/fetch fail. `ssh` enables the libssh2 SSH
-# transport built over the same vendored OpenSSL crypto backend (G7a).
-# `vendored-libgit2`+`vendored-openssl` build their bundled C under the NDK
-# (and on the host, which keeps the local ops host-testable).
+# Vendored git2 (T1). The `https` feature is REQUIRED — it enables the mbedTLS
+# TLS backend (M-a: swapped from OpenSSL); without it clone/fetch fail. `ssh`
+# enables the libssh2 SSH transport built over the same vendored mbedTLS crypto
+# backend. `vendored-libgit2` builds the bundled libgit2 C under the NDK (and on
+# the host, keeping local ops host-testable); the mbedTLS C is built by the
+# vendored `mbedtls-sys` seam pulled in transitively via `https`/`ssh`.
 git2 = { path = "../../../third_party/git2-rs/git2", default-features = false, features = [
     "vendored-libgit2",
-    "vendored-openssl",
     "https",
     "ssh",
 ] }

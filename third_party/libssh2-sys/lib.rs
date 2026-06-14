@@ -5,8 +5,18 @@
 extern crate libc;
 
 extern crate libz_sys;
-#[cfg(unix)]
-extern crate openssl_sys;
+// LingXi (M-a): crypto backend is mbedTLS (not OpenSSL) — no openssl_sys.
+//
+// This crate's compiled C (crypto.c -> mbedtls.c) references ~96 `mbedtls_*`
+// symbols defined in the vendored `mbedtls-sys` archives. `mbedtls-sys` has an
+// empty Rust API, so without a Rust-level reference rustc prunes its
+// (unreferenced) rlib from the final link and the mbedTLS objects vanish ->
+// undefined symbols. The `#[used]` re-export of its link anchor below marks
+// `mbedtls-sys` as reachable, keeping its `#[link]`-declared archives in the
+// link. (Equivalent anchor lives in libgit2-sys.)
+extern crate mbedtls_sys;
+#[used]
+static _MBEDTLS_LINK_ANCHOR: unsafe extern "C" fn() -> u32 = mbedtls_sys::mbedtls_link_anchor;
 
 use libc::ssize_t;
 use libc::{c_char, c_int, c_long, c_uchar, c_uint, c_ulong, c_void, size_t};
@@ -768,11 +778,10 @@ pub fn init() {
 
     #[cfg(unix)]
     unsafe fn platform_init() {
-        // On Unix we want to funnel through openssl_sys to initialize OpenSSL,
-        // so be sure to tell libssh2 to not do its own thing as we've already
-        // taken care of it.
-        openssl_sys::init();
-        assert_eq!(libssh2_init(LIBSSH2_INIT_NO_CRYPTO), 0);
+        // LingXi (M-a): mbedTLS backend. There is no external OpenSSL to
+        // initialize, so let libssh2 initialize its own (mbedTLS) crypto by
+        // passing 0 (NOT LIBSSH2_INIT_NO_CRYPTO).
+        assert_eq!(libssh2_init(0), 0);
     }
 
     #[cfg(windows)]

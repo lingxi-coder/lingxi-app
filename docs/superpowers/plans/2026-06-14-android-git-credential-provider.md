@@ -353,3 +353,44 @@ All clean (the UniFFI scaffolding compiles the new callback_interface for the an
 - **`Option<Arc<dyn T>>::as_deref()`** → `Option<&dyn T>`: relies on `Arc<dyn T>: Deref<Target=dyn T>` (it is). If a borrow/lifetime issue arises in the closure capture, capture the `&'a dyn T` from `NetCallbacks` (already `'a`-bound) — same pattern as the prior borrowed token.
 - **UniFFI sync callback_interface:** the other callbacks are async (tokio); this one is sync. Confirm UniFFI renders a sync `callback_interface` method (it does). The git op runs on `spawn_blocking`, so a sync host call is fine.
 - **Live Keystore fetch device-only:** host covers `select_credential` + bridge via the mock; the real per-op Keystore round-trip is PENDING-DEVICE.
+
+---
+
+## Device acceptance (PENDING-DEVICE)
+
+The host gates (workspace tests, host + NDK clippy, both-ABI `android-aar`
+build) all pass; the live Android Keystore round-trip is device-only and is
+deferred to an on-device run. When a device/emulator is available, extend
+P4/G7's `android_git_probe` with a credential-provider acceptance case:
+
+- **Provider wiring.** Stand up a Kotlin `AndroidGitCredentialProvider`
+  implementation backed by the Android Keystore that vends secrets per op
+  (the HTTPS token via `https_token()` and the SSH passphrase via
+  `ssh_passphrase()`), and pass it through the UniFFI bridge into
+  `AndroidGitSecret.credential_provider` for the probe.
+- **HTTPS clone/fetch.** Run an HTTPS clone (or fetch) against a private
+  remote. Assert that the provider's `https_token()` is invoked (e.g. via a
+  call counter on the Kotlin provider) and that the authenticated op
+  succeeds — proving the per-op fetch reaches the Keystore and the returned
+  token authenticates against the real remote.
+- **SSH op.** Run an SSH op against a key protected by a passphrase. Assert
+  that `ssh_passphrase()` is invoked and the op authenticates, exercising the
+  per-op passphrase path (host-key pinning / `certificate_check` from G7 is
+  unchanged and continues to apply).
+
+### Host-side evidence already in place
+
+The per-op provider dispatch is already proven on the host and does **not**
+need a device to validate:
+
+- The `select_credential` unit tests (`tool-git-mobile`) drive a mock
+  `GitCredentialProvider` and assert the per-op fetch invokes the correct
+  provider method (token for HTTPS, passphrase for SSH) **exactly once per
+  op** — covering the dispatch logic, the "no provider → anonymous" path, and
+  the fail-closed behaviour.
+- The `android-aar` UniFFI bridge + `AndroidGitSecret` construction is covered
+  by the host clippy/build gates and the mock-driven probe path.
+
+Only the live Keystore round-trip (real secret material fetched from the
+hardware-backed keystore and authenticated against a real remote) is
+device-only; that is the sole content of this PENDING-DEVICE section.

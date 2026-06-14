@@ -1896,7 +1896,6 @@ pub fn android_git_probe(operation_json: String, workspace: String, ca_cert_dir:
             ssh_private_key_path: None,
             ssh_public_key_path: None,
             ssh_known_hosts_sha256_hex: Vec::new(),
-            ..Default::default()
         });
 
         let tool = tool_git_mobile::GitTool::new(ctx);

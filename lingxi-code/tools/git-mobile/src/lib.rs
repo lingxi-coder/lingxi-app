@@ -17,13 +17,14 @@
 //! `android_git` carrier is `None`, so the tool is absent (not erroring).
 //!
 //! `git2` is a safe wrapper; the only C is `libgit2-sys` at build time. The
-//! crate is `#![deny(unsafe_code)]` (NOT `forbid`) for a SINGLE audited
-//! carve-out: the vendored `git2` exposes the CA-location option as the
-//! **`unsafe`** `git2::opts::set_ssl_cert_dir` (it mutates a libgit2 global
-//! without synchronization — the spec G6 assumed a safe `set_ssl_cert_locations`
-//! that does not exist in the pinned `git2 0.21`). That one `unsafe` block is
-//! isolated in [`auth::set_ca_location`] under a localized
-//! `#[allow(unsafe_code)]`; `deny` keeps every other line unsafe-free.
+//! crate is `#![deny(unsafe_code)]` (NOT `forbid`) for TWO audited carve-outs,
+//! both `unsafe` libgit2 process-global setters the vendored `git2` exposes:
+//! [`auth::set_ca_location`] (`set_ssl_cert_dir` over the CA-location option —
+//! spec G6 assumed a safe `set_ssl_cert_locations` absent in `git2 0.21`) and
+//! [`auth::ensure_ssh_homedir`] (`set_homedir` so libssh2 can expand
+//! `~/.ssh/known_hosts` on Android, which has no `HOME`). Each `unsafe` block is
+//! isolated under a localized `#[allow(unsafe_code)]`; `deny` keeps every other
+//! line unsafe-free. See `auth.rs` for the full carve-out rationale.
 
 #![deny(unsafe_code)]
 

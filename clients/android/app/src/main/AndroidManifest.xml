@@ -31,6 +31,11 @@
          observes whether a validated network is available; it never hard-blocks. -->
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
 
+    <!-- INTERNET: the engine reaches the LLM API and the in-process Git tool
+         (libgit2) clones/fetches/pushes over HTTPS/SSH. Without it, native
+         getaddrinfo is denied by netd ("No address associated with hostname"). -->
+    <uses-permission android:name="android.permission.INTERNET" />
+
     <uses-feature
         android:name="android.hardware.camera"
         android:required="false" />

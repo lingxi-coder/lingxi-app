@@ -14,3 +14,7 @@ local.properties
 .kotlin/
 captures/
 *.apk
+
+# Device-acceptance secret: the write-scoped PAT for the Git auth tests is
+# written here locally and read by the test runner — never committed.
+.gittoken

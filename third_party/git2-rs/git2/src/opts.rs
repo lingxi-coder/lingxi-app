@@ -290,6 +290,32 @@ where
     Ok(())
 }
 
+/// Set libgit2's home directory to `path`, overriding the value it otherwise
+/// derives from the `HOME` environment variable.
+///
+/// libgit2 resolves and caches the home directory at initialization (from
+/// `HOME` on non-Windows). On platforms where the process has no usable `HOME`
+/// (e.g. an Android app process), that cached value is empty and any feature
+/// that expands `~` fails — notably the libssh2 SSH transport, which expands
+/// `~/.ssh/known_hosts` before host-key verification and otherwise errors with
+/// "error loading known_hosts". Setting this overwrites the cached home
+/// directory regardless of when initialization happened.
+pub unsafe fn set_homedir<P>(path: P) -> Result<(), Error>
+where
+    P: IntoCString,
+{
+    crate::init();
+
+    unsafe {
+        try_call!(raw::git_libgit2_opts(
+            raw::GIT_OPT_SET_HOMEDIR as libc::c_int,
+            path.into_c_string()?.as_ptr()
+        ));
+    }
+
+    Ok(())
+}
+
 /// Get the maximum mmap window size
 ///
 /// # Safety

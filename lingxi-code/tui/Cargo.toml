@@ -28,6 +28,12 @@ skill-api = { path = "../skill-api" }
 # (M7-14) CLAUDE.md hierarchy walker + loader — the M3 store the Memory editor
 # reads through and writes back to (§4 R7: no new persistence layer).
 memory = { path = "../memory" }
+# (Plan 3c C1) Credential store for the `/connect` screen's provider-key write
+# (`pump_store_provider_key` → `CredentialManager::set_provider_key`). `secret`
+# is a leaf crate (depends only on protocol/traits), so this is acyclic — the
+# host threads its shared `Arc<CredentialManager>` onto the App, mirroring the
+# `provider_availability` seam.
+secret = { path = "../secret" }
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 
 iocraft = "=0.8.3"

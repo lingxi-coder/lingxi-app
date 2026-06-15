@@ -21,6 +21,11 @@ path = "src/lib.rs"
 # agent, cost, anthropic-oauth, secret, tool-api, permission, sandbox) moved
 # with it and is no longer a direct CLI dependency.
 engine-desktop = { path = "../engine-desktop" }
+# (Plan 3c C1) The CLI `Runtime` re-projects `DesktopRuntime.credentials`
+# (`Arc<secret::CredentialManager>`) and threads it into the TUI session so the
+# `/connect` screen persists provider keys. Naming the leaf `secret` type re-adds
+# it as a direct dep.
+secret = { path = "../../secret" }
 # F2-01: `engine_desktop::build` takes an `Arc<dyn client_adapter::PermissionRequestSink>`
 # whose method carries a `client_protocol::permission::PermissionRequest`. The CLI
 # defines a no-op sink (it opts into `NoOpPermissionGate`), so it names both

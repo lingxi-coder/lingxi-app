@@ -266,6 +266,26 @@ pub fn dispatch(action: KeyAction, st: &mut AppState) -> bool {
                 st.pending_open_model = true;
                 return false;
             }
+            // (Plan 3c §6.4) `/connect <provider>` opens the interactive
+            // credential screen. Like `/model`, opening needs an async step (the
+            // device-flow / keychain), so we RAISE `pending_connect`;
+            // `root::pump_open_connect` opens the screen on the next tick. A bare
+            // `/connect` (no arg) falls through to the engine `ConnectHandler`,
+            // which renders the usage line.
+            {
+                let provider = st
+                    .prompt_text
+                    .trim()
+                    .strip_prefix("/connect ")
+                    .map(|rest| rest.trim().to_string())
+                    .filter(|p| !p.is_empty());
+                if let Some(provider) = provider {
+                    st.prompt_text.clear();
+                    st.prompt_cursor = 0;
+                    st.pending_connect = Some(provider);
+                    return false;
+                }
+            }
             // `/vim` toggles the editor's vim keybindings (claude-code
             // `commands/vim/vim.ts`). An IMMEDIATE command (not a screen): flip
             // the existing `vim_enabled` — mirroring the Ctrl-Alt-V `ToggleVim`
@@ -892,6 +912,23 @@ pub fn render_screen(
                 // tested) line-by-line in a column View. Mirrors the Hooks/Mcp arm.
                 use crate::screens::permissions::render_permissions_to_string;
                 let body = render_permissions_to_string(p);
+                let lines: Vec<String> = body.lines().map(str::to_string).collect();
+                element! {
+                    View(flex_direction: FlexDirection::Column, padding: 1) {
+                        #(lines.into_iter().map(|line| element! {
+                            Text(content: line)
+                        }))
+                    }
+                }
+                .into_any()
+            }
+            Screen::Connect(c) => {
+                // (Plan 3c §6.3) The `/connect` credential screen renders the pure
+                // `render_connect_to_string` body (masked key field or Copilot
+                // device-flow, snapshot-tested) line-by-line in a column View.
+                // Mirrors the Model/Permissions arm.
+                use crate::screens::connect::render_connect_to_string;
+                let body = render_connect_to_string(c);
                 let lines: Vec<String> = body.lines().map(str::to_string).collect();
                 element! {
                     View(flex_direction: FlexDirection::Column, padding: 1) {

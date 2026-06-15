@@ -6,6 +6,7 @@
 
 pub mod agents;
 pub mod background_tasks;
+pub mod connect;
 pub mod doctor;
 pub mod help;
 pub mod hooks;
@@ -164,4 +165,13 @@ pub enum Screen {
     /// claude-code's full `/permissions` is deferred (the 3c persist mechanism
     /// exists; wiring an add/remove UI onto it is a follow-up).
     Permissions(permissions::PermissionsScreenState),
+    /// The `/connect <provider>` interactive credential screen (Plan 3c §6.3).
+    /// Opened by the picker's `ModelOutcome::Connect` (via `pump_open_connect`)
+    /// or a `/connect <provider>` prompt intercept. Two flows over one pure
+    /// reducer (`connect::handle_connect_key`): a masked API-key field (Enter
+    /// raises `AppState.pending_store_key` → `root::pump_store_provider_key`
+    /// persists it through `CredentialManager::set_provider_key`), and the
+    /// GitHub Copilot device-flow (the host drives `CopilotLogin`; this screen
+    /// renders the code + spinner). Esc cancels either flow.
+    Connect(connect::ConnectScreenState),
 }

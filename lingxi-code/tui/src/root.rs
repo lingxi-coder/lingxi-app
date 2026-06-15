@@ -484,15 +484,32 @@ fn handle_screen_key(st: &mut AppState, k: &KeyEvent) {
                     st.pending_switch_model = Some(request_model);
                     st.close_screen();
                 }
-                ModelOutcome::Connect { provider_id: _ } => {
-                    // Unconfigured provider: `/connect <provider>` lands in 2d.
-                    // For now mirror parity's close-and-defer placeholder — the
-                    // picker closes without switching (no credential, so routing
-                    // would 401). The `provider_id` is the future `/connect` arg.
+                ModelOutcome::Connect { provider_id } => {
+                    // (Plan 3c §6.4) Unconfigured provider: close the picker +
+                    // raise the `/connect` flow. The SYNC key path can't `.await`
+                    // the device-flow / keychain, so it raises `pending_connect`;
+                    // `pump_open_connect` opens the `/connect` screen next tick.
+                    st.pending_connect = Some(provider_id);
                     st.close_screen();
                 }
                 ModelOutcome::Cancel => st.close_screen(),
                 ModelOutcome::Stay => {}
+            }
+        }
+        Some(Screen::Connect(state)) => {
+            // (Plan 3c §6.3) `/connect` credential screen. Esc → cancel + close;
+            // Enter on a non-empty key field → raise the host-side keychain store
+            // (`pending_store_key`, drained by `pump_store_provider_key`) + close;
+            // Copilot-flow typing is inert (the host drives the poll).
+            use crate::screens::connect::{handle_connect_key, ConnectAction};
+            let ct_key = iocraft_to_crossterm028_key(k);
+            match handle_connect_key(state, ct_key.code) {
+                ConnectAction::SubmitKey { provider_id, key } => {
+                    st.pending_store_key = Some((provider_id, key));
+                    st.close_screen();
+                }
+                ConnectAction::Cancel => st.close_screen(),
+                ConnectAction::None => {}
             }
         }
         Some(Screen::Skills(state)) => {
@@ -1225,6 +1242,77 @@ pub async fn pump_switch_model(
         }
     }
     true
+}
+
+/// (Plan 3c §6.3) Async `/connect` open pump. Consumes `AppState.pending_connect`
+/// (set by the picker's `Connect` outcome or a `/connect <provider>` intercept)
+/// under the priority guard and opens the credential screen: `github-copilot`
+/// opens the device-flow phase, every other provider opens a masked API-key
+/// field. Re-raises `pending_connect` and returns `false` if a higher-priority
+/// surface (permission prompt / another screen) is up. Returns `true` iff a
+/// screen was opened (redraw needed).
+pub async fn pump_open_connect(state: &Arc<Mutex<AppState>>) -> bool {
+    let provider = {
+        let mut st = state.lock().await;
+        if st.pending_permission.is_some() || st.active_screen.is_some() {
+            return false;
+        }
+        match st.pending_connect.take() {
+            Some(p) => p,
+            None => return false,
+        }
+    };
+    let screen = if provider == "github-copilot" {
+        crate::screens::connect::ConnectScreenState::copilot_pending()
+    } else {
+        // The picker carried the human label, but the flag only holds the id; the
+        // header reads "Connect <id>" (the engine `/connect` group resolves the
+        // canonical label on the registry path).
+        crate::screens::connect::ConnectScreenState::api_key(&provider, &provider)
+    };
+    let mut st = state.lock().await;
+    if st.pending_permission.is_some() || st.active_screen.is_some() {
+        st.pending_connect = Some(provider);
+        return false;
+    }
+    st.open_connect(screen);
+    true
+}
+
+/// (Plan 3c C1) Async provider-key persistence pump. Drains
+/// `AppState.pending_store_key` (`(provider_id, key)`, set by the `/connect`
+/// screen's `SubmitKey`) and **actually persists** it through the bound
+/// `provider_key_store.set_provider_key` keychain write. When NO store is bound
+/// (headless / tests) it logs a no-op and stores nothing (byte-identical to the
+/// pre-seam behavior). Returns `true` iff a key was successfully stored.
+pub async fn pump_store_provider_key(state: &Arc<Mutex<AppState>>) -> bool {
+    let (pending, store) = {
+        let mut st = state.lock().await;
+        (st.pending_store_key.take(), st.provider_key_store.clone())
+    };
+    let Some((provider_id, key)) = pending else {
+        return false;
+    };
+    let Some(store) = store else {
+        // No credential store bound (headless / tests): preserve the historical
+        // no-op log; the key is not persisted and the user re-runs `/connect`.
+        tracing::info!(
+            provider = %provider_id,
+            "no credential store bound; /connect provider key not persisted (len {})",
+            key.len()
+        );
+        return false;
+    };
+    match store.set_provider_key(&provider_id, &key).await {
+        Ok(()) => {
+            tracing::info!(provider = %provider_id, "stored /connect provider key (len {})", key.len());
+            true
+        }
+        Err(e) => {
+            tracing::warn!(provider = %provider_id, error = %e, "failed to store /connect provider key");
+            false
+        }
+    }
 }
 
 /// (`/compact`) Async forced-compaction pump.
@@ -2100,6 +2188,20 @@ pub fn TuiRoot(mut hooks: Hooks, props: &TuiRootProps) -> impl Into<AnyElement<'
                 if pump_open_permissions(&state).await {
                     needs_redraw = true;
                 }
+                // (Plan 3c §6.3) `/connect` open pump — opens the credential
+                // screen when the picker's `Connect` outcome or a `/connect
+                // <provider>` intercept raised `pending_connect`. Handle-free
+                // (the screen reducer + keychain store carry the work).
+                if pump_open_connect(&state).await {
+                    needs_redraw = true;
+                }
+                // (Plan 3c C1) `/connect` provider-key persistence pump — drains
+                // `pending_store_key` and writes the key through the bound
+                // `CredentialManager::set_provider_key`. Handle-free; no-op when
+                // nothing is pending or no store is bound.
+                if pump_store_provider_key(&state).await {
+                    needs_redraw = true;
+                }
                 // (`/color`) Agent-color persistence pump. Runs UNCONDITIONALLY
                 // (no handle, no priority guard): a pending `/color` choice is
                 // appended to the session transcript. No-op when nothing is
@@ -2603,5 +2705,189 @@ mod tests {
         let third = aggregate_once(&projects, &cache);
         assert_ne!(third, first, "a changed transcript must re-walk, not serve stale data");
         assert_eq!(third.total_tokens(), 165 + 10, "new tokens reflected after invalidation");
+    }
+
+    // ── Plan 3c `/connect` provider-key persistence pump (C1) ────────────────
+
+    /// (Plan 3c C1) In-memory `SecureStorage` so the `/connect`-key store pump can
+    /// be exercised against a real `CredentialManager` without touching a keychain.
+    /// Mirrors the `MemStorage` double in `secret/src/credential.rs` tests.
+    #[derive(Default)]
+    struct MemStorage {
+        map: std::sync::Mutex<
+            std::collections::HashMap<(String, String), protocol::SecureStorageData>,
+        >,
+    }
+
+    #[async_trait::async_trait]
+    impl traits::SecureStorage for MemStorage {
+        async fn store(
+            &self,
+            service: &str,
+            account: &str,
+            data: protocol::SecureStorageData,
+        ) -> Result<(), traits::SecureStorageError> {
+            self.map
+                .lock()
+                .unwrap()
+                .insert((service.into(), account.into()), data);
+            Ok(())
+        }
+        async fn retrieve(
+            &self,
+            service: &str,
+            account: &str,
+        ) -> Result<Option<protocol::SecureStorageData>, traits::SecureStorageError> {
+            Ok(self
+                .map
+                .lock()
+                .unwrap()
+                .get(&(service.into(), account.into()))
+                .cloned())
+        }
+        async fn delete(
+            &self,
+            service: &str,
+            account: &str,
+        ) -> Result<(), traits::SecureStorageError> {
+            self.map
+                .lock()
+                .unwrap()
+                .remove(&(service.into(), account.into()));
+            Ok(())
+        }
+        async fn list(&self, service: &str) -> Result<Vec<String>, traits::SecureStorageError> {
+            Ok(self
+                .map
+                .lock()
+                .unwrap()
+                .keys()
+                .filter(|(s, _)| s == service)
+                .map(|(_, a)| a.clone())
+                .collect())
+        }
+        fn is_encrypted(&self) -> bool {
+            false
+        }
+        fn backend(&self) -> traits::SecureStorageBackend {
+            traits::SecureStorageBackend::PlainText
+        }
+    }
+
+    struct FixedClock;
+    impl traits::Clock for FixedClock {
+        fn now(&self) -> std::time::SystemTime {
+            std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_000)
+        }
+    }
+
+    /// HTTP transport that panics — the key-store pump never makes HTTP calls.
+    struct NoHttp;
+    #[async_trait::async_trait]
+    impl traits::HttpTransport for NoHttp {
+        async fn request(
+            &self,
+            _req: protocol::HttpRequest,
+        ) -> Result<protocol::HttpResponse, traits::HttpError> {
+            panic!("key-store pump must not perform HTTP");
+        }
+        async fn stream_sse(
+            &self,
+            _req: protocol::HttpRequest,
+        ) -> Result<traits::http::SseStream, traits::HttpError> {
+            panic!("key-store pump must not perform HTTP");
+        }
+    }
+
+    /// (Plan 3c C1, regression) The `/connect` screen collects a key and raises
+    /// `pending_store_key`; the pump MUST persist it via the bound credential
+    /// store (`set_provider_key`), not drop it. Wires an in-memory
+    /// `CredentialManager`, sets a pending key, runs the pump, and asserts the key
+    /// round-trips through `get_provider_key` — proving picker → Connect →
+    /// type-key → Enter actually authenticates the provider.
+    #[tokio::test]
+    async fn pump_store_provider_key_persists_collected_key() {
+        use secret::CredentialManager;
+
+        let storage = Arc::new(MemStorage::default());
+        let cm = Arc::new(CredentialManager::new(
+            storage.clone() as Arc<dyn traits::SecureStorage>,
+            Arc::new(FixedClock),
+            Arc::new(NoHttp),
+        ));
+
+        let mut st = AppState::new(crate::state::StatusSnapshot::default());
+        st.set_provider_key_store(Some(cm.clone()));
+        st.pending_store_key = Some(("openrouter".to_string(), "sk-x".to_string()));
+        let state = Arc::new(Mutex::new(st));
+
+        let stored = pump_store_provider_key(&state).await;
+        assert!(stored, "pump must report a successful store when bound");
+
+        // The pending slot is drained.
+        assert!(state.lock().await.pending_store_key.is_none());
+
+        // The key actually round-trips through the credential store.
+        let got = cm
+            .get_provider_key("openrouter")
+            .await
+            .expect("get_provider_key ok")
+            .expect("key present");
+        assert_eq!(got.expose_secret(), "sk-x");
+    }
+
+    /// (Plan 3c C1) On a headless / no-store build (the default), the pump still
+    /// drains the pending key but persists nothing and reports `false` — preserving
+    /// the historical no-op behavior for smoke gates / tests.
+    #[tokio::test]
+    async fn pump_store_provider_key_noop_when_no_store_bound() {
+        let mut st = AppState::new(crate::state::StatusSnapshot::default());
+        st.pending_store_key = Some(("deepseek".to_string(), "sk-y".to_string()));
+        let state = Arc::new(Mutex::new(st));
+
+        let stored = pump_store_provider_key(&state).await;
+        assert!(!stored, "no store bound ⇒ pump stores nothing and returns false");
+        assert!(state.lock().await.pending_store_key.is_none());
+    }
+
+    /// (Plan 3c §6.3) `pump_open_connect` opens the masked API-key screen for an
+    /// api-key provider, and the Copilot device-flow screen for `github-copilot`.
+    #[tokio::test]
+    async fn pump_open_connect_opens_the_right_flow() {
+        use crate::screens::connect::{ConnectFlow, ConnectScreenState};
+        use crate::screens::Screen;
+
+        // api-key provider → masked key field.
+        let mut st = AppState::new(crate::state::StatusSnapshot::default());
+        st.pending_connect = Some("openrouter".to_string());
+        let state = Arc::new(Mutex::new(st));
+        assert!(pump_open_connect(&state).await);
+        {
+            let st = state.lock().await;
+            match &st.active_screen {
+                Some(Screen::Connect(ConnectScreenState {
+                    flow: ConnectFlow::ApiKey { provider_id, .. },
+                    ..
+                })) => assert_eq!(provider_id, "openrouter"),
+                other => panic!("expected api-key connect screen, got {other:?}"),
+            }
+            assert!(st.pending_connect.is_none(), "pending_connect drained");
+        }
+
+        // github-copilot → device-flow.
+        let mut st2 = AppState::new(crate::state::StatusSnapshot::default());
+        st2.pending_connect = Some("github-copilot".to_string());
+        let state2 = Arc::new(Mutex::new(st2));
+        assert!(pump_open_connect(&state2).await);
+        {
+            let st2 = state2.lock().await;
+            assert!(matches!(
+                &st2.active_screen,
+                Some(Screen::Connect(ConnectScreenState {
+                    flow: ConnectFlow::Copilot,
+                    ..
+                }))
+            ));
+        }
     }
 }

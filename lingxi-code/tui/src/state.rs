@@ -795,6 +795,23 @@ pub struct AppState {
     /// and let an unconfigured provider's row route directly). Empty (the default,
     /// before the engine populates it) keeps the historical Built-in fallback.
     pub model_providers: std::collections::BTreeMap<String, (String, String)>,
+    /// (Plan 3c §8) Set by the `/model` picker's `ModelOutcome::Connect` on an
+    /// unconfigured row, or by a `/connect <provider>` prompt intercept: the
+    /// provider id to connect. `root::pump_open_connect` consumes it (opening the
+    /// `/connect` screen). `None` = no pending connect.
+    pub pending_connect: Option<String>,
+    /// (Plan 3c §8) Set by the `/connect` screen's `SubmitKey`:
+    /// `(provider_id, key)` for the host to persist. `root::pump_store_provider_key`
+    /// performs the keychain write through [`Self::provider_key_store`]. `None` =
+    /// no pending key write.
+    pub pending_store_key: Option<(String, String)>,
+    /// (Plan 3c C1) Engine credential store, threaded from the shared
+    /// `DesktopRuntime.credentials` `CredentialManager` so
+    /// `root::pump_store_provider_key` can actually persist a key collected by the
+    /// `/connect` screen (`set_provider_key(id, key)`). `None` on a headless /
+    /// no-store build (smoke gates / tests) — the pump then keeps its no-op log
+    /// and stores nothing, byte-identical to before the seam was wired.
+    pub provider_key_store: Option<std::sync::Arc<secret::CredentialManager>>,
     /// (`/color`) Session agent-color name set by the `/color <name>` command
     /// (claude-code `standaloneAgentContext.color`). `Some("cyan")` after
     /// `/color cyan`; `None` after `/color default` (reset). Maps to a render
@@ -932,6 +949,9 @@ impl AppState {
             pending_switch_model: None,
             provider_availability: std::collections::BTreeMap::new(),
             model_providers: std::collections::BTreeMap::new(),
+            pending_connect: None,
+            pending_store_key: None,
+            provider_key_store: None,
             session_agent_color: None,
             pending_save_color: None,
             pending_copy_clipboard: None,
@@ -1101,6 +1121,26 @@ impl AppState {
         map: std::collections::BTreeMap<String, (String, String)>,
     ) {
         self.model_providers = map;
+    }
+
+    /// (Plan 3c C1) Bind the shared engine credential store
+    /// (`DesktopRuntime.credentials`) so `root::pump_store_provider_key` persists
+    /// a key the `/connect` screen collected. `None` keeps the store unbound (the
+    /// pump stays a no-op). Threaded at TUI init, mirroring
+    /// [`Self::set_provider_availability`].
+    pub fn set_provider_key_store(
+        &mut self,
+        store: Option<std::sync::Arc<secret::CredentialManager>>,
+    ) {
+        self.provider_key_store = store;
+    }
+
+    /// (Plan 3c §6.3) Open the `/connect` credential screen with the given flow
+    /// state. Called by `root::pump_open_connect` after a picker `Connect` outcome
+    /// or a `/connect <provider>` intercept raised `pending_connect`.
+    pub fn open_connect(&mut self, state: crate::screens::connect::ConnectScreenState) {
+        self.active_screen = Some(crate::screens::Screen::Connect(state));
+        crate::telemetry::screen_opened("connect");
     }
 
     /// Open the grouped `/model` picker with the merged rows + recent keys + the

@@ -215,6 +215,8 @@ pub fn resolve_desktop_config(args: &BridgeArgs) -> DesktopConfig {
         memory_provider: Some(orchestrator::prompt::real_provider()),
         // The Electron bridge has no permission-mode CLI flag; default mode.
         permission_mode: permission::PermissionMode::Default,
+        // Plan 3c: bridge has no interactive secure prompt; headless no-op.
+        connect_prompt: None,
     }
 }
 
@@ -485,6 +487,7 @@ mod tests {
             // Deterministic test: empty memory, never the real FS.
             memory_provider: None,
             permission_mode: permission::PermissionMode::Default,
+            connect_prompt: None,
         };
         let bound = assemble(cfg).await.expect("assemble must succeed");
         // The gate handle is reachable only when bind() ran with a real gate.

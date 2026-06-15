@@ -97,6 +97,11 @@ pub struct Runtime {
     /// resolve a bare USER-provider model id to its own group + availability gate.
     /// Empty (the default) keeps the historical Built-in fallback.
     model_providers: std::collections::BTreeMap<String, (String, String)>,
+    /// (Plan 3c C1) Shared engine credential store (`DesktopRuntime.credentials`)
+    /// threaded into the App (`AppState::set_provider_key_store`) at mount so the
+    /// `/connect` screen's `pump_store_provider_key` persists a collected key.
+    /// `None` (the default) leaves the pump a no-op (smoke gates / resume picker).
+    provider_key_store: Option<Arc<secret::CredentialManager>>,
 }
 
 impl Runtime {
@@ -116,6 +121,7 @@ impl Runtime {
             status_line_config: None,
             provider_availability: std::collections::BTreeMap::new(),
             model_providers: std::collections::BTreeMap::new(),
+            provider_key_store: None,
         }
     }
 
@@ -139,6 +145,7 @@ impl Runtime {
             status_line_config: None,
             provider_availability: std::collections::BTreeMap::new(),
             model_providers: std::collections::BTreeMap::new(),
+            provider_key_store: None,
         }
     }
 
@@ -242,6 +249,20 @@ impl Runtime {
         self
     }
 
+    /// (Plan 3c C1) Attach the shared engine credential store
+    /// (`DesktopRuntime.credentials`). Threaded onto the App at init
+    /// (`AppState::set_provider_key_store`) so `root::pump_store_provider_key`
+    /// persists a key the `/connect` screen collected. Without it the store stays
+    /// `None` and the pump is a no-op (smoke gates / resume picker).
+    #[must_use]
+    pub fn with_provider_key_store(
+        mut self,
+        provider_key_store: Arc<secret::CredentialManager>,
+    ) -> Self {
+        self.provider_key_store = Some(provider_key_store);
+        self
+    }
+
     /// Seed the prior conversation a RESUMED session should replay into the
     /// TUI scrollback before the first frame. The CLI's resume branch loads the
     /// persisted transcript (`session::SessionStorage::load` /
@@ -314,6 +335,11 @@ pub async fn run_tui_session(
     // grouped under its static label — byte-identical to the historical behavior.
     initial_state.set_provider_availability(std::mem::take(&mut runtime.provider_availability));
     initial_state.set_model_providers(std::mem::take(&mut runtime.model_providers));
+    // (Plan 3c C1) Thread the shared engine credential store onto the state so
+    // the `/connect` screen's `pump_store_provider_key` can persist a collected
+    // key via `CredentialManager::set_provider_key`. `None` (smoke gates / resume
+    // picker) leaves the pump a no-op — byte-identical to the pre-seam behavior.
+    initial_state.set_provider_key_store(runtime.provider_key_store.take());
     // (M7-15) Apply the stored theme preference from ~/.claude/settings.json
     // (best-effort; absent/unreadable → session-default `auto`). Read once at
     // startup, before the first render, so the very first frame uses the saved

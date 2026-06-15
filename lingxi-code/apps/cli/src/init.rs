@@ -76,6 +76,12 @@ pub struct Runtime {
     /// picker can resolve a bare USER-provider model id to its own group +
     /// availability gate. Empty keeps the historical Built-in fallback.
     pub model_providers: std::collections::BTreeMap<String, (String, String)>,
+    /// (Plan 3c C1) Shared engine credential store, projected straight from
+    /// [`engine_desktop::DesktopRuntime::credentials`]. The TUI mount threads a
+    /// clone into `tui::session::Runtime::with_provider_key_store` so the
+    /// `/connect` screen's `pump_store_provider_key` persists a collected
+    /// provider key via `CredentialManager::set_provider_key`.
+    pub provider_key_store: std::sync::Arc<secret::CredentialManager>,
 }
 
 /// Build-result for the TUI startup path. (M6-03)
@@ -274,6 +280,10 @@ fn resolve_desktop_config(
         // CLI-resolved session permission mode (`initialPermissionModeFromCLI`),
         // threaded in by `run_cli`.
         permission_mode,
+        // Plan 3c: the tui supplies the masked-key prompt via the credential
+        // store + `pump_store_provider_key`, not this engine port — so the
+        // engine `/connect` text-command path uses the headless no-op default.
+        connect_prompt: None,
     }
 }
 
@@ -310,6 +320,7 @@ pub async fn build_runtime(
         subscription: rt.subscription,
         provider_availability: rt.provider_availability,
         model_providers: rt.model_providers,
+        provider_key_store: rt.credentials,
     })
 }
 

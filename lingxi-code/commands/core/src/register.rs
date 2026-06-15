@@ -248,6 +248,18 @@ pub fn register_core_batch_6(reg: &mut CommandRegistry, enabled: bool) {
     reg.register_builtin_handler(Arc::new(KeybindingsHandler::with_enabled(enabled)));
 }
 
+/// Register the additive `/connect` command (Plan 3c). Not a locked builtin name,
+/// so this is a pure addition; idempotent. Composition roots call this after the
+/// core batch registrars, threading the engine-built seams.
+pub fn register_core_connect(
+    reg: &mut CommandRegistry,
+    writer: Arc<dyn crate::ConnectCredentialWriter>,
+    copilot: Arc<dyn crate::CopilotConnectDriver>,
+) {
+    use crate::ConnectHandler;
+    reg.register_builtin_handler(Arc::new(ConnectHandler::new(writer, copilot)));
+}
+
 #[cfg(test)]
 mod registry_tests {
     use super::*;
@@ -733,5 +745,44 @@ mod batch_4_tests {
             }
             other => panic!("expected Done, got {other:?}"),
         }
+    }
+}
+
+#[cfg(test)]
+mod connect_tests {
+    use super::*;
+    use crate::connect::{
+        ConnectCredentialWriter, ConnectError, CopilotConnectDriver, CopilotConnectStep,
+    };
+    use async_trait::async_trait;
+
+    struct NoopWriter;
+    #[async_trait]
+    impl ConnectCredentialWriter for NoopWriter {
+        async fn prompt_and_store_key(&self, _id: &str) -> Result<(), ConnectError> {
+            Ok(())
+        }
+    }
+    struct NoopCopilot;
+    #[async_trait]
+    impl CopilotConnectDriver for NoopCopilot {
+        async fn begin(&self) -> Result<CopilotConnectStep, ConnectError> {
+            Ok(CopilotConnectStep {
+                user_code: "X".into(),
+                verification_uri: "https://github.com/login/device".into(),
+            })
+        }
+        async fn poll_to_completion(&self, _s: &CopilotConnectStep) -> Result<(), ConnectError> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn connect_resolves_after_registration() {
+        let mut reg = CommandRegistry::new();
+        register_all_builtin_commands(&mut reg);
+        register_core_connect(&mut reg, Arc::new(NoopWriter), Arc::new(NoopCopilot));
+        assert!(reg.resolve("connect").is_some(), "/connect missing");
+        assert!(reg.get_handler("connect").is_some(), "/connect handler missing");
     }
 }

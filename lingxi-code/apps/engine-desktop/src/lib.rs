@@ -26,6 +26,7 @@
 
 #![forbid(unsafe_code)]
 
+mod connect;
 pub mod file_changed_watch;
 pub mod settings_watch;
 mod skill_loader;
@@ -604,6 +605,7 @@ pub fn desktop_skill_registry() -> SkillRegistry {
 ///     // `Some(orchestrator::prompt::real_provider())` to load real CLAUDE.md.
 ///     memory_provider: None,
 ///     permission_mode: permission::PermissionMode::Default,
+///     connect_prompt: None,
 /// };
 ///
 /// assert_eq!(cfg.cwd, PathBuf::from("/tmp/project"));
@@ -680,6 +682,10 @@ pub struct DesktopConfig {
     /// all-allow — but it still drives `BuiltinToolContext.permission_mode`
     /// state. The CLI flag deliberately does NOT switch enforcement on.
     pub permission_mode: permission::PermissionMode,
+    /// Plan 3c: host secure-input port for `/connect <api-key-provider>`. The tui
+    /// supplies its masked-input widget; `None` → a headless no-op prompt
+    /// (`crate::connect::NoopKeyPrompt`) that cancels.
+    pub connect_prompt: Option<Arc<dyn crate::connect::SecureKeyPrompt>>,
 }
 
 impl std::fmt::Debug for DesktopConfig {
@@ -711,6 +717,14 @@ impl std::fmt::Debug for DesktopConfig {
                 },
             )
             .field("permission_mode", &self.permission_mode)
+            .field(
+                "connect_prompt",
+                if self.connect_prompt.is_some() {
+                    &"Some(<prompt>)"
+                } else {
+                    &"None"
+                },
+            )
             .finish()
     }
 }
@@ -731,6 +745,7 @@ impl Default for DesktopConfig {
             session_started_as_coordinator: false,
             memory_provider: None,
             permission_mode: permission::PermissionMode::Default,
+            connect_prompt: None,
         }
     }
 }
@@ -747,6 +762,8 @@ pub async fn desktop_command_registry(
     auth: Arc<dyn AuthHandle>,
     cwd: &std::path::Path,
     claude_home: &std::path::Path,
+    connect_writer: Arc<dyn command_core::ConnectCredentialWriter>,
+    connect_copilot: Arc<dyn command_core::CopilotConnectDriver>,
 ) -> CommandRegistry {
     let mut reg = CommandRegistry::new();
     register_all_builtin_commands(&mut reg);
@@ -754,6 +771,9 @@ pub async fn desktop_command_registry(
     register_core_batch_2(&mut reg, handle.clone(), auth);
     register_core_batch_4(&mut reg, handle.clone());
     register_core_batch_5(&mut reg, handle);
+    // Plan 3c: wire `/connect` over the engine-supplied credential-writer +
+    // Copilot device-flow seams.
+    command_core::register::register_core_connect(&mut reg, connect_writer, connect_copilot);
     // Desktop-only command handlers (no-op in M8 — the names remain
     // command-core unimplemented stubs until future milestones fill them).
     command_desktop::register(&mut reg);
@@ -2150,7 +2170,26 @@ pub async fn build(
 
     // (6) Command registry through the desktop composition root.
     let handle: Arc<dyn OrchestratorHandle> = orch.clone();
-    let reg = desktop_command_registry(handle, auth.clone(), &cfg.cwd, &cfg.claude_home).await;
+    // Plan 3c: `/connect` seams — Copilot device-flow over `PosixHttp`, and the
+    // API-key writer over the host secure prompt (tui-supplied; headless no-op).
+    let connect_copilot: Arc<dyn command_core::CopilotConnectDriver> =
+        Arc::new(crate::connect::EngineCopilotConnect::new(credentials.clone()));
+    let connect_writer: Arc<dyn command_core::ConnectCredentialWriter> =
+        Arc::new(crate::connect::EngineCredentialWriter::new(
+            credentials.clone(),
+            cfg.connect_prompt.clone().unwrap_or_else(|| {
+                Arc::new(crate::connect::NoopKeyPrompt) as Arc<dyn crate::connect::SecureKeyPrompt>
+            }),
+        ));
+    let reg = desktop_command_registry(
+        handle,
+        auth.clone(),
+        &cfg.cwd,
+        &cfg.claude_home,
+        connect_writer,
+        connect_copilot,
+    )
+    .await;
     // SKILLEXEC.2: fill the shared command-registry slot the `Skill` tool's
     // loader holds, then hand the SAME `Arc` to the slash dispatcher so the tool
     // and the dispatcher observe one command set (plugin lifecycle mutations via
@@ -2324,6 +2363,172 @@ pub async fn build(
 mod tests {
     use super::{build, desktop_tool_registry, model_deprecation_warning, CoordinatorWiring, DesktopConfig};
     use std::sync::Arc;
+
+    // ── Plan 3c `/connect` wiring tests ──────────────────────────────────────
+
+    /// `/connect` is wired into the desktop registry through
+    /// [`super::desktop_command_registry`] (additive, not a locked builtin name).
+    #[tokio::test]
+    async fn desktop_registry_exposes_connect() {
+        use async_trait::async_trait;
+        use command_core::{
+            ConnectCredentialWriter, ConnectError, CopilotConnectDriver, CopilotConnectStep,
+        };
+        use traits::{AuthError, AuthHandle, LoginInfo, OrchestratorHandle};
+
+        // Minimal `AuthHandle` double — no sibling registry test exists in this
+        // module, so we construct the lightest object-safe stand-in here.
+        struct MockAuth;
+        #[async_trait]
+        impl AuthHandle for MockAuth {
+            async fn login(&self) -> Result<LoginInfo, AuthError> {
+                Err(AuthError::Cancelled)
+            }
+            async fn logout(&self) -> Result<(), AuthError> {
+                Ok(())
+            }
+            async fn current_user(&self) -> Option<LoginInfo> {
+                None
+            }
+        }
+
+        struct W;
+        #[async_trait]
+        impl ConnectCredentialWriter for W {
+            async fn prompt_and_store_key(&self, _id: &str) -> Result<(), ConnectError> {
+                Ok(())
+            }
+        }
+        struct C;
+        #[async_trait]
+        impl CopilotConnectDriver for C {
+            async fn begin(&self) -> Result<CopilotConnectStep, ConnectError> {
+                Ok(CopilotConnectStep {
+                    user_code: "X".into(),
+                    verification_uri: "u".into(),
+                })
+            }
+            async fn poll_to_completion(&self, _s: &CopilotConnectStep) -> Result<(), ConnectError> {
+                Ok(())
+            }
+        }
+
+        let handle: Arc<dyn OrchestratorHandle> =
+            Arc::new(orchestrator::test_support::MockOrchestratorHandle::new());
+        let auth: Arc<dyn AuthHandle> = Arc::new(MockAuth);
+        let tmp = std::env::temp_dir();
+        let reg = super::desktop_command_registry(
+            handle,
+            auth,
+            &tmp,
+            &tmp,
+            Arc::new(W),
+            Arc::new(C),
+        )
+        .await;
+        assert!(
+            reg.get_handler("connect").is_some(),
+            "/connect not wired into desktop registry"
+        );
+    }
+
+    /// (Plan 3c C1) The [`super::connect::EngineCredentialWriter`] persists the
+    /// prompted key through `CredentialManager::set_provider_key`; a later
+    /// `get_provider_key` returns the exact secret — proving the keychain bridge
+    /// roundtrips (no log-and-drop).
+    #[tokio::test]
+    async fn engine_credential_writer_roundtrips_through_keychain() {
+        use super::connect::{EngineCredentialWriter, SecureKeyPrompt};
+        use async_trait::async_trait;
+        use command_core::ConnectCredentialWriter;
+        use std::collections::HashMap;
+        use std::sync::Mutex as StdMutex;
+        use traits::{
+            Clock, HttpTransport, SecureStorage, SecureStorageBackend, SecureStorageError,
+        };
+
+        // In-memory secure store (the posix-minimal stub does not persist).
+        #[derive(Default)]
+        struct MemStorage {
+            map: StdMutex<HashMap<(String, String), protocol::SecureStorageData>>,
+        }
+        #[async_trait]
+        impl SecureStorage for MemStorage {
+            async fn store(
+                &self,
+                service: &str,
+                account: &str,
+                data: protocol::SecureStorageData,
+            ) -> Result<(), SecureStorageError> {
+                self.map
+                    .lock()
+                    .unwrap()
+                    .insert((service.into(), account.into()), data);
+                Ok(())
+            }
+            async fn retrieve(
+                &self,
+                service: &str,
+                account: &str,
+            ) -> Result<Option<protocol::SecureStorageData>, SecureStorageError> {
+                Ok(self
+                    .map
+                    .lock()
+                    .unwrap()
+                    .get(&(service.into(), account.into()))
+                    .cloned())
+            }
+            async fn delete(&self, service: &str, account: &str) -> Result<(), SecureStorageError> {
+                self.map
+                    .lock()
+                    .unwrap()
+                    .remove(&(service.into(), account.into()));
+                Ok(())
+            }
+            async fn list(&self, service: &str) -> Result<Vec<String>, SecureStorageError> {
+                Ok(self
+                    .map
+                    .lock()
+                    .unwrap()
+                    .keys()
+                    .filter(|(s, _)| s == service)
+                    .map(|(_, a)| a.clone())
+                    .collect())
+            }
+            fn is_encrypted(&self) -> bool {
+                false
+            }
+            fn backend(&self) -> SecureStorageBackend {
+                SecureStorageBackend::PlainText
+            }
+        }
+
+        struct CannedPrompt(Option<String>);
+        #[async_trait]
+        impl SecureKeyPrompt for CannedPrompt {
+            async fn prompt(&self, _label: &str) -> Option<String> {
+                self.0.clone()
+            }
+        }
+
+        let storage: Arc<dyn SecureStorage> = Arc::new(MemStorage::default());
+        let clock: Arc<dyn Clock> = Arc::new(platform_posix::PosixClock::new());
+        let http: Arc<dyn HttpTransport> = Arc::new(platform_posix::PosixHttp::new());
+        let cm = Arc::new(secret::CredentialManager::new(storage, clock, http));
+
+        let writer =
+            EngineCredentialWriter::new(cm.clone(), Arc::new(CannedPrompt(Some("sk-test-123".into()))));
+        writer
+            .prompt_and_store_key("openrouter")
+            .await
+            .expect("store ok");
+        let got = cm
+            .get_provider_key("openrouter")
+            .await
+            .expect("read ok")
+            .expect("present");
+        assert_eq!(got.expose_secret(), "sk-test-123");
+    }
 
     // ── deprecation tests ────────────────────────────────────────────────────
     // Ported from the deleted `providers/src/deprecation.rs` unit tests
@@ -2559,6 +2764,7 @@ mod tests {
             // Boot tests stay deterministic: empty memory, never the real FS.
             memory_provider: None,
             permission_mode: permission::PermissionMode::Default,
+            connect_prompt: None,
         };
         (tmp, cfg)
     }

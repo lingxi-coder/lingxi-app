@@ -15,6 +15,7 @@ pub mod commit;
 pub mod commit_push_pr;
 pub mod compact;
 pub mod config;
+pub mod connect;
 pub mod context;
 pub mod cost;
 pub mod custom_commands;
@@ -56,6 +57,9 @@ pub use commit::CommitHandler;
 pub use commit_push_pr::CommitPushPrHandler;
 pub use compact::CompactHandler;
 pub use config::ConfigHandler;
+pub use connect::{
+    ConnectCredentialWriter, ConnectError, ConnectHandler, CopilotConnectDriver, CopilotConnectStep,
+};
 pub use context::ContextHandler;
 pub use cost::CostHandler;
 pub use doctor::DoctorHandler;
@@ -91,4 +95,5 @@ pub use custom_commands::load_and_register_custom_commands;
 pub use register::{
     register_all_builtin_commands, register_core_batch_1, register_core_batch_2,
     register_core_batch_3, register_core_batch_4, register_core_batch_5, register_core_batch_6,
+    register_core_connect,
 };

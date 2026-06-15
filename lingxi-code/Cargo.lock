@@ -1290,6 +1290,7 @@ dependencies = [
  "platform-ios",
  "platform-posix-minimal",
  "protocol",
+ "provider-config",
  "sandbox",
  "secret",
  "serde_json",

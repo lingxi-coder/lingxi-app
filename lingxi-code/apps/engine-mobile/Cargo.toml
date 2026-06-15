@@ -61,6 +61,11 @@ uniffi = [
     "dep:async-trait",
     # 3c-T3: populate LlmResponse.cost from the builtin pricing catalog.
     "dep:cost",
+    # Phase 2a-mobile: multi-provider assembly (catalog presets + settings
+    # `providers`/`routing` → one ClientConfig + chains + credential sources +
+    # pricing) shared with engine-desktop. Engine-tier (no `apps/*` edge),
+    # optional + uniffi-gated like its runtime-wiring siblings above.
+    "dep:provider-config",
 ]
 
 [dependencies]
@@ -105,6 +110,10 @@ platform-posix-minimal = { path = "../../platforms/posix-minimal", optional = tr
 # 3c-T3: builtin pricing catalog for LlmResponse.cost population. Optional +
 # uniffi-gated (the cost estimator is constructed inside build_mobile_inner).
 cost = { path = "../../cost", optional = true }
+# Phase 2a-mobile: the shared multi-provider assembly (`assemble` +
+# `MultiCredentialProvider`) the desktop build path already uses. Engine-tier
+# (no `apps/*` edge), optional + uniffi-gated like its siblings above.
+provider-config = { path = "../../provider-config", optional = true }
 # SESSIONS/HISTORY: enumerates the on-disk `<claude_home>/projects/<cwd>/*.jsonl`
 # session catalog for the `ListSessions` command. Engine-tier, optional +
 # uniffi-gated like its siblings above.

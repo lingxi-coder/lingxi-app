@@ -231,6 +231,55 @@ pub enum MobileBuildError {
     Orchestrator(String),
 }
 
+/// First-party Anthropic models the mobile engine routes by default, plus the
+/// configured `default_model` and any env-configured small-fast / haiku model a
+/// `prompt` hook may resolve to. The `llm_client` registry resolves a request
+/// model by exact id, so every model the host may request must appear here
+/// (Phase 2a-mobile: this becomes the Anthropic profile `assemble` declares).
+///
+/// The mobile sibling of `engine_desktop::anthropic_models_for`, minus the
+/// `fallback_model` (mobile has no fallback-model config knob). The env small-
+/// fast / haiku ids are read inline because main has no public
+/// `small_fast_model_env_ids` helper.
+fn anthropic_models(default_model: &str) -> Vec<llm_client::ModelProfile> {
+    let caps = llm_client::Capabilities {
+        streaming: true,
+        tools: true,
+        vision: true,
+        documents: true,
+        reasoning: true,
+        structured_output: true,
+    };
+    let mut ids: Vec<String> = vec![
+        "claude-opus-4-6".to_string(),
+        "claude-sonnet-4-6".to_string(),
+        "claude-haiku-4-5".to_string(),
+    ];
+    ids.push(default_model.to_string());
+    // Env-configured small-fast / haiku model a `prompt` hook may resolve to
+    // (matching `hook_prompt_runner::resolve_model`'s precedence:
+    // `ANTHROPIC_SMALL_FAST_MODEL` > `ANTHROPIC_DEFAULT_HAIKU_MODEL` > default
+    // Haiku), so such a request resolves instead of failing `ModelUnavailable`.
+    for var in ["ANTHROPIC_SMALL_FAST_MODEL", "ANTHROPIC_DEFAULT_HAIKU_MODEL"] {
+        if let Ok(m) = std::env::var(var) {
+            if !m.is_empty() {
+                ids.push(m);
+            }
+        }
+    }
+    ids.sort();
+    ids.dedup();
+    ids.into_iter()
+        .map(|id| llm_client::ModelProfile {
+            display_model: id.clone(),
+            request_model: id.clone(),
+            billing_model: id,
+            aliases: Vec::new(),
+            capabilities: caps,
+        })
+        .collect()
+}
+
 /// A [`PermissionRequestSink`] that records `request_id → tool_name` and then
 /// forwards each request verbatim to the foreign sink (plan F3-05).
 ///
@@ -261,12 +310,15 @@ impl PermissionRequestSink for RecordingPermissionSink {
     }
 }
 
-// `builtin_anthropic_config` + `apply_settings_providers` live in
-// `platform_common::llm_config` so both composition roots share the same
-// model table and settings-wiring logic.
-use platform_common::{
-    apply_settings_providers, builtin_anthropic_config, parse_routing_overrides,
-};
+// Phase 2a-mobile: the multi-provider client config / chains / credential
+// sources / pricing catalog are now assembled by `provider_config::assemble`
+// (which owns the byte-equivalent Anthropic profile + the builtin catalog
+// presets + the settings-`providers` merge). The old single-Anthropic
+// `builtin_anthropic_config` / `apply_settings_providers` /
+// `parse_routing_overrides` helpers from `platform_common::llm_config` are no
+// longer wired here; they remain in `platform_common` (the desktop e2e tests
+// still reach them via fully-qualified paths). `LlmTransportBridge` is still
+// imported at the top of the module.
 
 /// Build a fully-wired mobile [`MobileRuntime`] from a deterministic
 /// [`MobileConfig`] + an `Arc<dyn Platform>` (plan F3-03 — the mobile sibling of
@@ -334,78 +386,101 @@ pub async fn build_mobile_inner(
     // (2a) Task 10: DefaultLlmClient over LlmTransportBridge.
     //      Mobile uses the platform's `Arc<dyn HttpTransport>` wrapped in `DynHttp`
     //      so the device backend is preserved; no desktop-only deps are pulled.
-    //      OAuth is not yet wired on mobile (no credential-manager path exists here);
-    //      the API-key path via ANTHROPIC_API_KEY covers the mobile use case.
     //
-    //      3c-T2: apply settings `providers` / `routing` on top of the
-    //      built-in Anthropic profile (same pattern as engine-desktop).
+    //      Phase 2a-mobile: assemble the FULL multi-provider client config
+    //      (Anthropic + builtin catalog presets + settings `providers`) + chains
+    //      + credential sources + pricing catalog via `provider_config::assemble`,
+    //      mirroring `engine_desktop::build`. Mobile is api-key + env only (no
+    //      OAuth, no availability map, no CostTracker / picker), so
+    //      `anthropic_has_oauth = false` and there is no OAuth credential delegate
+    //      — the interactive `/connect` / picker is a §11 follow-up. A bad
+    //      settings entry only emits a warning; the engine still boots with every
+    //      well-formed profile (incl. the built-in Anthropic one).
     let llm_transport: Arc<dyn Transport> =
         Arc::new(LlmTransportBridge::new(DynHttp(http.clone())));
-    let (llm_client, routing_overrides, pricing_overrides) = {
-        let mut cfg_obj = builtin_anthropic_config(&cfg.api_base, false);
-        // Run whenever EITHER key is present: a routing-only settings file
-        // (aliases onto builtin models, no custom providers) must still apply.
-        if cfg.provider_profiles.is_some() || cfg.routing.is_some() {
-            let empty = std::collections::BTreeMap::new();
-            let providers = cfg.provider_profiles.as_ref().unwrap_or(&empty);
-            if let Err(e) = apply_settings_providers(&mut cfg_obj, providers, cfg.routing.as_ref())
-            {
-                tracing::warn!(error = %e, "settings providers/routing entry rejected; earlier entries and the built-in profile remain active");
-            }
-        }
-        // Parse routing overrides after providers are applied.
-        let routing_overrides = cfg.routing.as_ref().and_then(|r| {
-            match parse_routing_overrides(r, &cfg_obj) {
-                Ok(o) => Some(o),
-                Err(e) => {
-                    tracing::warn!(error = %e, "routing.fallback/retry overrides rejected; using defaults");
-                    None
-                }
-            }
-        }).unwrap_or_default();
-        // Extract per-profile pricing overrides before cfg_obj is consumed.
-        let pricing_overrides: Vec<(llm_client::ProviderId, String, llm_client::TokenPricing)> =
-            cfg_obj
-                .providers
-                .iter()
-                .flat_map(|p| {
-                    p.pricing.overrides.iter().filter_map(|(model_id, tp)| {
-                        p.models
-                            .iter()
-                            .find(|m| m.display_model == *model_id)
-                            .map(|m| (p.provider_id.clone(), m.billing_model.clone(), *tp))
-                    })
-                })
-                .collect();
-        let client = Arc::new(
-            DefaultLlmClient::from_config(cfg_obj)
-                .map_err(|e| MobileBuildError::ApiBase(e.to_string()))?,
-        );
-        (client, routing_overrides, pricing_overrides)
-    };
+    let has_api_key = !cfg.api_key.is_empty();
+    let assembled = provider_config::assemble(provider_config::AssembleInputs {
+        anthropic_api_base: cfg.api_base.clone(),
+        anthropic_models: anthropic_models(&cfg.default_model),
+        anthropic_has_api_key: has_api_key,
+        anthropic_has_oauth: false, // mobile inference is api-key-only (no OAuth)
+        user_providers: cfg.provider_profiles.clone().unwrap_or_default(),
+        routing: cfg.routing.clone(),
+    });
+    for w in &assembled.warnings {
+        tracing::warn!(warning = %w, "provider-config assembly (mobile)");
+    }
+
+    // (3) Credential manager — built BEFORE the client so the same `Arc` serves
+    //     BOTH the composite credential provider (below) and the OAuth client
+    //     (used by /login, /logout, step (3b)). One store, no second keychain.
+    let credentials = Arc::new(CredentialManager::new(
+        storage,
+        clock.clone(),
+        http.clone(),
+    ));
+
+    let mut client = DefaultLlmClient::from_config(assembled.client_config)
+        .map_err(|e| MobileBuildError::ApiBase(format!("llm-client config: {e}")))?;
+    // §6.1: ONE composite credential slot for ALL providers — the Anthropic api
+    // key is served directly; every other provider resolves keychain → env. The
+    // composite preserves the env fallback, so api-key-via-`ANTHROPIC_API_KEY`
+    // still works exactly as before. Mobile has no OAuth delegate.
+    let composite = provider_config::MultiCredentialProvider::new(
+        credentials.clone(),
+        assembled.credential_sources.clone(),
+        if has_api_key { Some(cfg.api_key.clone()) } else { None },
+        None,
+    );
+    client = client.with_credential_provider(Arc::new(composite));
+    let llm_client = Arc::new(client);
+
     // No live subscription slot on mobile (no OAuth profile fetch) — static state stands.
     let subscriber_state = SubscriberState {
         is_subscriber: false,
         is_enterprise: false,
     };
 
-    // 3c-T3: build the cost estimator from the builtin reference catalog.
-    // T2: apply per-profile pricing overrides from settings.
+    // 3c-T3: build the cost estimator from the assembled pricing catalog so
+    // LlmResponse.cost is populated on every successful decode. The catalog
+    // already carries the built-in reference tiers + non-Anthropic preset rows +
+    // any settings per-profile pricing overrides folded in by `assemble`. Unpriced
+    // / unknown models leave cost = None (never an error).
     let cost_estimator = {
         use llm_client::{CostEstimator, PricingPolicy};
         use orchestrator::cost_wiring::llm_catalog_from_cost;
-        let cost_cat = cost::pricing::PricingCatalog::builtin_reference();
-        let mut llm_cat = llm_catalog_from_cost(&cost_cat);
-        for (provider_id, billing_model, tp) in &pricing_overrides {
-            llm_cat.add_override(provider_id.clone(), billing_model.clone(), *tp);
-        }
+        let llm_cat = llm_catalog_from_cost(&assembled.pricing);
         Arc::new(CostEstimator::new(llm_cat, PricingPolicy::MarkUnestimated))
     };
+
+    // Phase 2a-mobile CHAINS BRIDGE: translate the assembled `ChainConfig` into
+    // main's richer adapter's `fallback_overrides` shape (same as engine-desktop —
+    // we reuse main's `ProviderApiAdapter::new_with_routing`, NOT parity's leaner
+    // `new`). `assemble` keys each chain by the request/display model id with an
+    // ordered list of `ChainEntry`; main's adapter routes by model-id through the
+    // multi-provider registry, so the informational `ChainEntry.provider_id` is
+    // dropped here — the per-entry `model` ids are the fallback chain. Cross-
+    // provider routing still resolves because every provider's models are
+    // registered in the assembled `ClientConfig`. The adapter's own alias map is
+    // rebuilt from the client's `available_models()` (whose aliases `assemble`
+    // already populated from `chains.aliases`), so no separate alias pass here.
+    let fallback_overrides: std::collections::BTreeMap<String, Vec<String>> = assembled
+        .chains
+        .chains
+        .iter()
+        .map(|(key, entries)| (key.clone(), entries.iter().map(|e| e.model.clone()).collect()))
+        .collect();
+    // Retry override → main's scalar settings_max_retries / settings_backoff_ms.
+    let settings_max_retries = assembled.chains.retry.as_ref().map(|r| r.max_attempts);
+    let settings_backoff_ms = assembled.chains.retry.as_ref().map(|r| r.backoff_ms);
 
     // ONE adapter implements BOTH `OrchestratorApiClient` (batched) and
     // `StreamingApiClient` (the streaming turn path the mobile transport always
     // drives). Production wires it for both paths; a test may substitute the
-    // streaming side via `streaming_override` (plan F3-06).
+    // streaming side via `streaming_override` (plan F3-06). Mobile is NOT a
+    // subscriber (`SubscriberState::default()` — api-key-only inference), and
+    // binds no live subscription slot / availability map / CostTracker (out of
+    // scope; mobile parity did not).
     let provider_adapter = Arc::new(ProviderApiAdapter::new_with_routing(
         llm_client,
         llm_transport,
@@ -415,9 +490,9 @@ pub async fn build_mobile_inner(
         None,
         None,
         Some(cost_estimator),
-        routing_overrides.fallback,
-        routing_overrides.max_retries,
-        routing_overrides.backoff_ms,
+        fallback_overrides,
+        settings_max_retries,
+        settings_backoff_ms,
     ));
     let api_client: Arc<dyn OrchestratorApiClient> = provider_adapter.clone();
     let streaming_api: Arc<dyn StreamingApiClient> =
@@ -429,8 +504,9 @@ pub async fn build_mobile_inner(
         Some(cfg.api_base.clone()),
     ));
 
-    // (3) Credential manager + OAuth client (used by /login, /logout).
-    let credentials = Arc::new(CredentialManager::new(storage, clock.clone(), http.clone()));
+    // (3b) OAuth client (used by /login, /logout). Reuses the SAME `credentials`
+    //      manager built above for the composite credential provider — one
+    //      keychain-backed store, not a second one.
     let oauth_cfg = ClaudeAiOAuthConfig::default_with_port(0);
     let oauth_client = Arc::new(ClaudeAiOAuthClient::new(
         oauth_cfg,

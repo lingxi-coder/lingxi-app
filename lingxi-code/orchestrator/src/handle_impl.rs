@@ -239,6 +239,13 @@ impl OrchestratorHandle for ConversationOrchestrator {
         ]
     }
 
+    /// Richer catalog listing for the grouped `/model` picker. Delegates to the
+    /// api client's [`OrchestratorApiClient::list_model_listings`], which the
+    /// production `ProviderApiAdapter` sources from the llm-client catalog.
+    async fn list_model_listings(&self) -> Vec<traits::orchestrator::ModelListing> {
+        self.api.list_model_listings()
+    }
+
     /// Return the most recently observed provider rate-limit header snapshot.
     ///
     /// Delegates to [`OrchestratorApiClient::last_rate_limit_info`] on the

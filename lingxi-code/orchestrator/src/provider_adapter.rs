@@ -1376,6 +1376,10 @@ impl OrchestratorApiClient for ProviderApiAdapter {
         self.available_model_ids.clone()
     }
 
+    fn list_model_listings(&self) -> Vec<traits::orchestrator::ModelListing> {
+        catalog_model_listings()
+    }
+
     /// Return the most recently observed rate-limit header snapshot.
     ///
     /// Delegates to [`Self::last_rate_limit_info`] and maps the internal
@@ -1412,6 +1416,37 @@ impl OrchestratorApiClient for ProviderApiAdapter {
     /// terminal-429 re-map (claude-code `errors.ts:480-524`).
     fn last_rate_limit_error_message(&self) -> Option<String> {
         self.last_429_message.lock().unwrap().clone()
+    }
+}
+
+/// Build the grouped-picker listing from the static llm-client catalog.
+fn catalog_model_listings() -> Vec<traits::orchestrator::ModelListing> {
+    let catalog = llm_client::builtin_presets();
+    let Ok(registry) = llm_client::ModelRegistry::from_config(llm_client::ClientConfig {
+        providers: catalog.providers,
+    }) else {
+        return Vec::new();
+    };
+    registry
+        .available_models()
+        .into_iter()
+        .map(|m| traits::orchestrator::ModelListing {
+            display_model: m.display_model,
+            request_model: m.request_model,
+            provider_label: provider_label(&m.profile_name).to_string(),
+            provider_id: m.profile_name,
+        })
+        .collect()
+}
+
+/// Human provider header for a catalog profile name.
+fn provider_label(profile_name: &str) -> &str {
+    match profile_name {
+        "openrouter" => "OpenRouter",
+        "deepseek" => "DeepSeek",
+        "glm-coding" => "GLM (coding)",
+        "github-copilot" => "GitHub Copilot",
+        other => other,
     }
 }
 
@@ -1810,6 +1845,31 @@ mod tests {
         let adapter = make_adapter(transport);
         let models = OrchestratorApiClient::available_models(&adapter);
         assert!(!models.is_empty(), "available_models must return at least one entry");
+    }
+
+    #[test]
+    fn list_model_listings_exposes_catalog() {
+        let transport = FakeTransport::always(ProviderResponse::json(200, ok_response_json()));
+        let adapter = make_adapter(transport);
+        let listings = OrchestratorApiClient::list_model_listings(&adapter);
+        // The static llm-client catalog (openrouter + deepseek + glm-coding +
+        // github-copilot) yields well over 100 model rows.
+        assert!(
+            listings.len() >= 100,
+            "expected >=100 catalog listings, got {}",
+            listings.len()
+        );
+        // The four catalog providers appear with their hand-authored labels.
+        let label_for = |id: &str| -> Option<String> {
+            listings
+                .iter()
+                .find(|l| l.provider_id == id)
+                .map(|l| l.provider_label.clone())
+        };
+        assert_eq!(label_for("openrouter").as_deref(), Some("OpenRouter"));
+        assert_eq!(label_for("deepseek").as_deref(), Some("DeepSeek"));
+        assert_eq!(label_for("glm-coding").as_deref(), Some("GLM (coding)"));
+        assert_eq!(label_for("github-copilot").as_deref(), Some("GitHub Copilot"));
     }
 
     #[tokio::test]

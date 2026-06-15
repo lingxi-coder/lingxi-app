@@ -29,6 +29,7 @@ use telemetry::tengu::orchestrator as orch_events;
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 use tool_api::registry::ToolRegistry;
+use traits::orchestrator::ModelListing;
 use traits::OutputStream;
 
 /// Minimal contract the orchestrator needs from the API client.
@@ -141,6 +142,12 @@ pub trait OrchestratorApiClient: Send + Sync {
     /// no-streaming stub) need no override; `ProviderApiAdapter` overrides it
     /// to delegate to the router.
     fn available_models(&self) -> Vec<String> {
+        Vec::new()
+    }
+
+    /// Richer catalog listing for the grouped `/model` picker. Default returns
+    /// empty (mocks / non-routing impls); `ProviderApiAdapter` overrides it.
+    fn list_model_listings(&self) -> Vec<ModelListing> {
         Vec::new()
     }
 

@@ -265,6 +265,22 @@ pub struct StatusSnapshot {
     pub active_workers: u32,
 }
 
+/// One model entry for the grouped `/model` picker. Sourced from the llm-client
+/// provider catalog: `display_model` is the human label, `request_model` is the
+/// wire id passed to `switch_model`, `provider_id` is the stable grouping key,
+/// and `provider_label` is the human provider header (e.g. "`GitHub` Copilot").
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelListing {
+    /// Human-facing model label (e.g. "`DeepSeek` Chat").
+    pub display_model: String,
+    /// Provider-local wire model id (what `switch_model` accepts).
+    pub request_model: String,
+    /// Stable provider key for grouping + recents (the catalog profile name).
+    pub provider_id: String,
+    /// Human provider header (e.g. "`DeepSeek`", "`GitHub` Copilot").
+    pub provider_label: String,
+}
+
 /// Public handle to the orchestrator that slash commands operate against.
 ///
 /// Wired in M5-09 (slash-command surface). M5-02 only defines the trait —
@@ -347,6 +363,14 @@ pub trait OrchestratorHandle: Send + Sync {
     /// Enumerate model names the orchestrator will accept via
     /// [`Self::switch_model`]. Used by `/model` (no-arg list mode).
     async fn list_available_models(&self) -> Vec<String>;
+
+    /// Richer model listing for the grouped `/model` picker (display name +
+    /// provider label + wire id), sourced from the llm-client catalog. The
+    /// DEFAULT returns empty so existing impls/mocks compile unchanged; only the
+    /// live `ConversationOrchestrator` overrides it.
+    async fn list_model_listings(&self) -> Vec<ModelListing> {
+        Vec::new()
+    }
 
     /// Return the most recently observed provider rate-limit header snapshot.
     ///

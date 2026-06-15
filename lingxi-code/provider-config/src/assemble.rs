@@ -50,6 +50,8 @@ fn anthropic_profile(inputs: &AssembleInputs) -> (ProviderProfile, Option<Creden
         credential,
         models: inputs.anthropic_models.clone(),
         pricing: PricingConfig::default(),
+        signing: None,
+        azure: None,
     };
     (profile, cred_source)
 }

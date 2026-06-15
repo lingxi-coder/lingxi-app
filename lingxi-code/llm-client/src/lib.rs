@@ -8,11 +8,13 @@
 
 pub mod auth;
 pub mod anthropic;
+pub mod catalog;
 pub mod cost;
 #[allow(missing_docs)]
 pub mod client;
 pub mod error;
 pub mod config;
+pub mod copilot;
 pub mod credentials;
 pub mod eventstream;
 pub mod protocol;
@@ -29,7 +31,11 @@ pub mod transport;
 pub mod types;
 
 pub use auth::{ApiKeyAuthenticator, Authenticator, BearerAuthenticator};
+pub use copilot::{
+    CopilotAuthenticator, CopilotHttp, CopilotLogin, CopilotSecret, DeviceCodeResponse, PollOutcome,
+};
 pub use anthropic::normalize_anthropic_usage;
+pub use catalog::{builtin_presets, BuiltinCatalog};
 pub use client::{DefaultLlmClient, FileActivationPoll, LlmEventStream, PreparedLlmCall};
 pub use providers::{AnthropicMessagesCodec, AzureOpenAiCodec, BedrockClaudeCodec, GeminiCodec, GeminiFile, OpenAiChatCodec, OpenAiResponsesCodec, VertexClaudeCodec, VertexGeminiCodec};
 pub use config::{

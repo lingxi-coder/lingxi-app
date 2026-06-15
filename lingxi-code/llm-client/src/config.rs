@@ -125,6 +125,9 @@ pub enum AuthStrategy {
     Bearer,
     /// OAuth bearer-token auth.
     OAuthBearer,
+    /// GitHub Copilot: GitHub OAuth token used directly as the bearer, plus the
+    /// Copilot header set (see [`crate::CopilotAuthenticator`]).
+    CopilotBearer,
     /// AWS `SigV4` request signing.
     AwsSigV4,
     /// GCP bearer token auth.

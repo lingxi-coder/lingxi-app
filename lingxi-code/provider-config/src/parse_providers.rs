@@ -96,6 +96,8 @@ pub fn parse_user_providers(
                 credential: CredentialConfig::None,
                 models,
                 pricing: PricingConfig::default(),
+                signing: None,
+                azure: None,
             },
             env_var,
         });

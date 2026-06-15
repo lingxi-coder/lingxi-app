@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use crate::{
     validate_capabilities, ApiKeyAuthenticator, AuthStrategy, Authenticator, BearerAuthenticator,
-    ClientConfig, Credential, CredentialConfig, CredentialProvider, CredentialScope,
+    ClientConfig, CopilotAuthenticator, Credential, CredentialConfig, CredentialProvider, CredentialScope,
     EnvCredentialProvider, FrameStream, LlmError, LlmEvent, LlmRequest, LlmResponse,
     ModelListing, ModelRegistry, ProtocolFamily, ProviderId, ProviderRequest, ProviderResponse,
     Route, StreamDecoder, StreamingResponse, Transport, WireCodec,
@@ -488,13 +488,21 @@ impl DefaultLlmClient {
             }
 
             // ── Standard key / bearer auth ───────────────────────────────────
-            AuthStrategy::ApiKey | AuthStrategy::Bearer | AuthStrategy::OAuthBearer => {
+            AuthStrategy::ApiKey
+            | AuthStrategy::Bearer
+            | AuthStrategy::OAuthBearer
+            | AuthStrategy::CopilotBearer => {
                 let Some(secret) = self.load_secret(entry, profile_name).await? else {
                     // CredentialConfig::None: the host opted out of
                     // client-applied authentication for this profile.
                     return Ok(request);
                 };
                 let authenticator: Box<dyn Authenticator> = match (&entry.auth, &entry.protocol) {
+                    // GitHub Copilot: GitHub OAuth token used directly as the
+                    // bearer plus the Copilot header set (also strips x-api-key).
+                    (AuthStrategy::CopilotBearer, _) => {
+                        Box::new(CopilotAuthenticator::new(secret))
+                    }
                     (AuthStrategy::ApiKey, ProtocolFamily::AnthropicMessages) => {
                         Box::new(ApiKeyAuthenticator::new(secret))
                     }

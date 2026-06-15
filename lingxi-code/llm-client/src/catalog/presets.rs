@@ -115,6 +115,10 @@ pub fn builtin_presets() -> BuiltinCatalog {
             credential: CredentialConfig::Env { var: preset.credential_env.to_string() },
             models,
             pricing: crate::config::PricingConfig::default(),
+            // main-only fields: catalog presets are all OpenAI/Anthropic-style
+            // (no AwsSigV4 / AzureOpenAi), so both default to None.
+            signing: None,
+            azure: None,
         });
     }
 

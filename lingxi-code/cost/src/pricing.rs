@@ -426,6 +426,16 @@ impl PricingCatalog {
         c
     }
 
+    /// Add (or overwrite) one exact `(provider, model)` pricing entry, returning
+    /// `self` for chaining. Used by `provider-config` to price non-Anthropic
+    /// catalog / user-provider models on top of [`Self::builtin_reference`]
+    /// (Plan 3c §8).
+    #[must_use]
+    pub fn with_entry(mut self, pricing: ModelPricing) -> Self {
+        self.entries.insert(pricing.model_ref.clone(), pricing);
+        self
+    }
+
     fn insert_anthropic(
         &mut self,
         model: &str,
@@ -750,6 +760,31 @@ mod tests {
         let (p, res) = c.resolve(&mr).unwrap();
         assert!(matches!(res, PricingResolution::ExactModel { .. }));
         assert_eq!(p.token_rates[&TokenClass::Input].nano_usd_per_token, 5_000);
+    }
+
+    #[test]
+    fn with_entry_adds_a_resolvable_model() {
+        // A non-Anthropic provider model can be added and resolves exactly.
+        let mut rates: HashMap<TokenClass, MoneyPerToken> = HashMap::new();
+        rates.insert(TokenClass::Input, MoneyPerToken { nano_usd_per_token: 270 });
+        rates.insert(TokenClass::Output, MoneyPerToken { nano_usd_per_token: 1_100 });
+        let mr = ModelRef {
+            provider: ProviderId::OpenAICompatible { name: "deepseek".to_string() },
+            model: "deepseek-chat".to_string(),
+        };
+        let cat = PricingCatalog::builtin_reference().with_entry(ModelPricing {
+            model_ref: mr.clone(),
+            token_rates: rates,
+            non_token_rates_nano_usd: HashMap::new(),
+            effective_from: None,
+            source: PricingSource::RemoteManagedSettings,
+        });
+        let (p, res) = cat.resolve(&mr).unwrap();
+        assert!(matches!(res, PricingResolution::ExactModel { .. }));
+        assert_eq!(p.token_rates[&TokenClass::Input].nano_usd_per_token, 270);
+        // Anthropic builtins survive.
+        let opus = ModelRef { provider: ProviderId::Anthropic, model: "claude-opus-4-6".to_string() };
+        assert!(cat.resolve(&opus).is_ok());
     }
 
     #[test]

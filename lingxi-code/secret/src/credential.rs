@@ -25,6 +25,11 @@ const OAUTH_ACCESS_ACCOUNT: &str = "anthropic-oauth-access";
 const OAUTH_REFRESH_ACCOUNT: &str = "anthropic-oauth-refresh";
 const OAUTH_META_ACCOUNT: &str = "anthropic-oauth-meta";
 
+/// Keychain account name for a per-provider key, namespaced by credential `id`.
+fn provider_key_account(id: &str) -> String {
+    format!("provider-key-{id}")
+}
+
 /// A full Anthropic OAuth credential set as returned by [`CredentialManager::get_oauth_tokens`].
 ///
 /// `access_token` / `refresh_token` are wrapped in [`Secret`] so they redact in
@@ -146,6 +151,48 @@ impl CredentialManager {
         // invalidate cache
         *self.api_key_cache.write().await = None;
         Ok(())
+    }
+
+    /// Persist a per-provider API key (or bearer token) in [`SecureStorage`],
+    /// keyed by credential `id`. Stored under the shared `service = "lingxi"`
+    /// keychain at an account namespaced by `id` (`provider-key-<id>`), labelled
+    /// with [`SecretKind::GenericApiKey`]. Overwrites any existing entry for `id`
+    /// so re-running `/connect` rotates the key. Not cached: the composite reads
+    /// the keychain live so a freshly connected key takes effect on the next
+    /// request without a restart.
+    pub async fn set_provider_key(&self, id: &str, secret: &str) -> Result<(), CredentialError> {
+        let metadata = SecureStorageMetadata {
+            created_at: self.clock.now(),
+            last_accessed: None,
+            kind: SecretKind::GenericApiKey {
+                provider: id.to_string(),
+            }
+            .as_dto(),
+        };
+        let data = SecureStorageData::new(secret.as_bytes().to_vec(), metadata);
+        self.storage
+            .store("lingxi", &provider_key_account(id), data)
+            .await?;
+        Ok(())
+    }
+
+    /// Load the per-provider key stored under credential `id`. Returns `Ok(None)`
+    /// when no key has been stored (the composite then falls through to env, then
+    /// `Authentication`).
+    pub async fn get_provider_key(
+        &self,
+        id: &str,
+    ) -> Result<Option<Secret<String>>, CredentialError> {
+        let Some(raw) = self
+            .storage
+            .retrieve("lingxi", &provider_key_account(id))
+            .await?
+        else {
+            return Ok(None);
+        };
+        let s = String::from_utf8(raw.expose_secret_bytes().to_vec())
+            .map_err(|_| CredentialError::Unavailable)?;
+        Ok(Some(Secret::new(s)))
     }
 
     /// Persist a full Anthropic OAuth credential set.
@@ -454,5 +501,62 @@ mod oauth_tests {
         assert!(cm.get_oauth_tokens().await.expect("get").is_none());
         // Second delete on an empty store is not an error.
         cm.delete_oauth_tokens().await.expect("idempotent delete");
+    }
+
+    // ── Per-provider key round-trips (catalog/provider-config support) ──────
+
+    #[tokio::test]
+    async fn provider_key_round_trips() {
+        let (_storage, cm) = manager();
+        cm.set_provider_key("openrouter", "sk-or-secret").await.expect("set");
+        let got = cm.get_provider_key("openrouter").await.expect("get").expect("present");
+        assert_eq!(got.expose_secret(), "sk-or-secret");
+    }
+
+    #[tokio::test]
+    async fn get_provider_key_returns_none_when_absent() {
+        let (_storage, cm) = manager();
+        assert!(cm.get_provider_key("deepseek").await.expect("get").is_none());
+    }
+
+    #[tokio::test]
+    async fn set_provider_key_overwrites_previous() {
+        let (_storage, cm) = manager();
+        cm.set_provider_key("glm-coding", "old-key").await.expect("first set");
+        cm.set_provider_key("glm-coding", "new-key").await.expect("second set");
+        let got = cm.get_provider_key("glm-coding").await.expect("get").expect("present");
+        assert_eq!(got.expose_secret(), "new-key");
+    }
+
+    #[tokio::test]
+    async fn provider_keys_are_isolated_by_id() {
+        let (_storage, cm) = manager();
+        cm.set_provider_key("openrouter", "key-a").await.expect("set a");
+        cm.set_provider_key("deepseek", "key-b").await.expect("set b");
+        assert_eq!(
+            cm.get_provider_key("openrouter").await.expect("get a").expect("present a").expose_secret(),
+            "key-a"
+        );
+        assert_eq!(
+            cm.get_provider_key("deepseek").await.expect("get b").expect("present b").expose_secret(),
+            "key-b"
+        );
+    }
+
+    #[tokio::test]
+    async fn provider_key_persisted_under_lingxi_service_with_generic_kind() {
+        let (storage, cm) = manager();
+        cm.set_provider_key("github-copilot", "ghu_token").await.expect("set");
+        let raw = storage
+            .retrieve("lingxi", "provider-key-github-copilot")
+            .await
+            .expect("retrieve")
+            .expect("present");
+        assert_eq!(raw.expose_secret_bytes(), b"ghu_token");
+        let expected_kind = SecretKind::GenericApiKey {
+            provider: "github-copilot".to_string(),
+        }
+        .as_dto();
+        assert_eq!(raw.metadata.kind, expected_kind);
     }
 }

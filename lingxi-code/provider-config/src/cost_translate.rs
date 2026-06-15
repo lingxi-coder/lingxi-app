@@ -83,6 +83,8 @@ mod tests {
                 capabilities: Capabilities::default(),
             }],
             pricing: PricingConfig::default(),
+            signing: None,
+            azure: None,
         }
     }
 

@@ -1,0 +1,377 @@
+//! Assemble the merged `ClientConfig` + pricing + chains + credential sources
+//! from Anthropic state + `settings.providers` + `settings.routing` (spec §5.3).
+
+use llm_client::{
+    AuthStrategy, ClientConfig, CredentialConfig, PricingConfig, ProtocolFamily, ProviderId,
+    ProviderProfile,
+};
+
+use crate::parse_providers::parse_user_providers;
+use crate::parse_routing::parse_routing;
+use crate::types::{AssembleInputs, Assembled, ChainEntry, CredentialKind, CredentialSource};
+
+/// Build the Anthropic provider profile from the 3-way auth state. Mirrors the
+/// engine `anthropic_profile` (`apps/engine-desktop/src/lib.rs:795`).
+fn anthropic_profile(inputs: &AssembleInputs) -> (ProviderProfile, Option<CredentialSource>) {
+    let (auth, credential, cred_source) = if inputs.anthropic_has_api_key {
+        (
+            AuthStrategy::ApiKey,
+            CredentialConfig::Static { id: "anthropic-api-key".to_string() },
+            Some(CredentialSource {
+                provider_id: ProviderId::AnthropicFirstParty,
+                profile_name: "anthropic".to_string(),
+                credential_id: "anthropic-api-key".to_string(),
+                env_var: Some("ANTHROPIC_API_KEY".to_string()),
+                kind: CredentialKind::ApiKey,
+            }),
+        )
+    } else if inputs.anthropic_has_oauth {
+        (
+            AuthStrategy::OAuthBearer,
+            CredentialConfig::Static { id: "anthropic-oauth".to_string() },
+            Some(CredentialSource {
+                provider_id: ProviderId::AnthropicFirstParty,
+                profile_name: "anthropic".to_string(),
+                credential_id: "anthropic-oauth".to_string(),
+                env_var: None,
+                kind: CredentialKind::OAuth,
+            }),
+        )
+    } else {
+        (AuthStrategy::None, CredentialConfig::None, None)
+    };
+
+    let profile = ProviderProfile {
+        provider_id: ProviderId::AnthropicFirstParty,
+        profile_name: "anthropic".to_string(),
+        base_url: inputs.anthropic_api_base.clone(),
+        protocol: ProtocolFamily::AnthropicMessages,
+        auth,
+        credential,
+        models: inputs.anthropic_models.clone(),
+        pricing: PricingConfig::default(),
+    };
+    (profile, cred_source)
+}
+
+/// Locate `(provider_idx, model_idx)` for a `"profile_name/model"` target.
+fn locate(providers: &[ProviderProfile], target: &str) -> Option<(usize, usize)> {
+    let (prof, model) = target.split_once('/')?;
+    for (pi, p) in providers.iter().enumerate() {
+        if p.profile_name != prof {
+            continue;
+        }
+        for (mi, m) in p.models.iter().enumerate() {
+            if m.request_model == model || m.display_model == model || m.billing_model == model {
+                return Some((pi, mi));
+            }
+        }
+    }
+    None
+}
+
+/// Assemble the full multi-provider config (spec §5.3).
+//
+// Spec §5.3 fixes this entry point's signature as `assemble(AssembleInputs)`
+// (consumed by value; the engine hands over an owned bundle). Borrowing/cloning
+// the fields rather than moving them trips `needless_pass_by_value`, so allow it
+// here to keep the spec-mandated owned API.
+#[must_use]
+#[allow(clippy::needless_pass_by_value)]
+pub fn assemble(inputs: AssembleInputs) -> Assembled {
+    let mut warnings = Vec::new();
+    let mut providers: Vec<ProviderProfile> = Vec::new();
+    let mut credential_sources: Vec<CredentialSource> = Vec::new();
+
+    // 1. Anthropic profile.
+    let (anthropic, anthropic_cred) = anthropic_profile(&inputs);
+    providers.push(anthropic);
+    if let Some(cs) = anthropic_cred {
+        credential_sources.push(cs);
+    }
+
+    // 2. Built-in presets: rewrite Env -> Static{id = profile_name}.
+    let catalog = llm_client::builtin_presets();
+    for mut preset in catalog.providers {
+        let env_var = match &preset.credential {
+            CredentialConfig::Env { var } => Some(var.clone()),
+            _ => None,
+        };
+        let id = preset.profile_name.clone();
+        preset.credential = CredentialConfig::Static { id: id.clone() };
+        credential_sources.push(CredentialSource {
+            provider_id: preset.provider_id.clone(),
+            profile_name: preset.profile_name.clone(),
+            credential_id: id,
+            env_var,
+            kind: CredentialKind::ApiKey,
+        });
+        providers.push(preset);
+    }
+
+    // 3. User providers (only routable ones — must declare >= 1 model).
+    let (parsed_users, user_warns) = parse_user_providers(&inputs.user_providers);
+    warnings.extend(user_warns);
+    for pu in parsed_users {
+        if pu.profile.models.is_empty() {
+            warnings.push(format!(
+                "provider {:?}: declares no models; dropped (not routable — declare \"models\" or a routing alias)",
+                pu.profile.profile_name
+            ));
+            continue;
+        }
+        let id = pu.profile.profile_name.clone();
+        let mut profile = pu.profile;
+        profile.credential = CredentialConfig::Static { id: id.clone() };
+        credential_sources.push(CredentialSource {
+            provider_id: profile.provider_id.clone(),
+            profile_name: profile.profile_name.clone(),
+            credential_id: id,
+            env_var: pu.env_var,
+            kind: CredentialKind::ApiKey,
+        });
+        providers.push(profile);
+    }
+
+    // 4. Routing: aliases (fold) + fallback (validate).
+    let (mut chains, raw_fallback, routing_warns) = parse_routing(inputs.routing.as_ref());
+    warnings.extend(routing_warns);
+
+    for (alias, target) in &chains.aliases {
+        match locate(&providers, target) {
+            Some((pi, mi)) => {
+                let aliases = &mut providers[pi].models[mi].aliases;
+                if !aliases.iter().any(|a| a == alias) {
+                    aliases.push(alias.clone());
+                }
+            }
+            None => warnings.push(format!(
+                "routing.aliases[{alias:?}]: target {target:?} matches no registered provider/model; skipped"
+            )),
+        }
+    }
+
+    // 5. Validate fallback chains into ChainEntry lists.
+    for (key, targets) in raw_fallback {
+        let mut entries: Vec<ChainEntry> = Vec::new();
+        for target in &targets {
+            match locate(&providers, target) {
+                Some((pi, mi)) => entries.push(ChainEntry {
+                    provider_id: providers[pi].provider_id.clone(),
+                    model: providers[pi].models[mi].request_model.clone(),
+                }),
+                None => warnings.push(format!(
+                    "routing.fallback[{key:?}]: entry {target:?} matches no registered provider/model; skipped"
+                )),
+            }
+        }
+        if entries.is_empty() {
+            warnings.push(format!("routing.fallback[{key:?}]: no valid entries; chain dropped"));
+        } else {
+            chains.chains.insert(key, entries);
+        }
+    }
+
+    // 6. Pricing: reference tiers + a default-unknown row for every non-Anthropic
+    //    profile model the reference catalog does not already price.
+    let pricing = crate::cost_translate::pricing_for(&providers);
+
+    Assembled {
+        client_config: ClientConfig { providers },
+        pricing,
+        chains,
+        credential_sources,
+        warnings,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use llm_client::ModelProfile;
+    use serde_json::json;
+    use std::collections::BTreeMap;
+
+    fn anthropic_only_inputs() -> AssembleInputs {
+        AssembleInputs {
+            anthropic_api_base: "https://api.anthropic.com".to_string(),
+            anthropic_models: vec![ModelProfile {
+                display_model: "claude-opus-4-6".to_string(),
+                request_model: "claude-opus-4-6".to_string(),
+                billing_model: "claude-opus-4-6".to_string(),
+                aliases: Vec::new(),
+                capabilities: llm_client::Capabilities::default(),
+            }],
+            anthropic_has_api_key: true,
+            anthropic_has_oauth: false,
+            user_providers: BTreeMap::new(),
+            routing: None,
+        }
+    }
+
+    #[test]
+    fn merges_anthropic_and_presets() {
+        let out = assemble(anthropic_only_inputs());
+        assert_eq!(out.client_config.providers.len(), 5);
+        let names: Vec<&str> = out
+            .client_config
+            .providers
+            .iter()
+            .map(|p| p.profile_name.as_str())
+            .collect();
+        assert!(names.contains(&"anthropic"));
+        assert!(names.contains(&"openrouter"));
+        assert!(names.contains(&"deepseek"));
+        assert!(names.contains(&"glm-coding"));
+        assert!(names.contains(&"github-copilot"));
+    }
+
+    #[test]
+    fn presets_env_rewritten_to_static_with_profile_name() {
+        let out = assemble(anthropic_only_inputs());
+        let openrouter = out
+            .client_config
+            .providers
+            .iter()
+            .find(|p| p.profile_name == "openrouter")
+            .unwrap();
+        assert_eq!(openrouter.credential, CredentialConfig::Static { id: "openrouter".to_string() });
+        let cs = out.credential_sources.iter().find(|c| c.credential_id == "openrouter").unwrap();
+        assert_eq!(cs.profile_name, "openrouter");
+        assert_eq!(cs.env_var.as_deref(), Some("OPENROUTER_API_KEY"));
+        assert_eq!(cs.kind, CredentialKind::ApiKey);
+    }
+
+    #[test]
+    fn anthropic_api_key_credential_source() {
+        let out = assemble(anthropic_only_inputs());
+        let cs = out.credential_sources.iter().find(|c| c.credential_id == "anthropic-api-key").unwrap();
+        assert_eq!(cs.profile_name, "anthropic");
+        assert_eq!(cs.env_var.as_deref(), Some("ANTHROPIC_API_KEY"));
+        assert_eq!(cs.kind, CredentialKind::ApiKey);
+        let anthropic = &out.client_config.providers[0];
+        assert_eq!(anthropic.auth, AuthStrategy::ApiKey);
+        assert_eq!(anthropic.credential, CredentialConfig::Static { id: "anthropic-api-key".to_string() });
+    }
+
+    #[test]
+    fn anthropic_oauth_path() {
+        let mut inp = anthropic_only_inputs();
+        inp.anthropic_has_api_key = false;
+        inp.anthropic_has_oauth = true;
+        let out = assemble(inp);
+        let anthropic = &out.client_config.providers[0];
+        assert_eq!(anthropic.auth, AuthStrategy::OAuthBearer);
+        assert_eq!(anthropic.credential, CredentialConfig::Static { id: "anthropic-oauth".to_string() });
+        let cs = out.credential_sources.iter().find(|c| c.credential_id == "anthropic-oauth").unwrap();
+        assert_eq!(cs.kind, CredentialKind::OAuth);
+        assert!(cs.env_var.is_none());
+    }
+
+    #[test]
+    fn anthropic_none_path_has_no_credential() {
+        let mut inp = anthropic_only_inputs();
+        inp.anthropic_has_api_key = false;
+        inp.anthropic_has_oauth = false;
+        let out = assemble(inp);
+        let anthropic = &out.client_config.providers[0];
+        assert_eq!(anthropic.auth, AuthStrategy::None);
+        assert_eq!(anthropic.credential, CredentialConfig::None);
+        assert!(out
+            .credential_sources
+            .iter()
+            .all(|c| c.credential_id != "anthropic-api-key" && c.credential_id != "anthropic-oauth"));
+    }
+
+    #[test]
+    fn user_provider_added_with_static_credential() {
+        let mut inp = anthropic_only_inputs();
+        inp.user_providers.insert(
+            "groq".to_string(),
+            json!({ "type": "openai", "baseUrl": "https://api.groq.com/openai/v1", "apiKeyEnv": "GROQ_API_KEY", "models": ["llama-3.3-70b"] }),
+        );
+        let out = assemble(inp);
+        let groq = out.client_config.providers.iter().find(|p| p.profile_name == "groq").unwrap();
+        assert_eq!(groq.credential, CredentialConfig::Static { id: "groq".to_string() });
+        let cs = out.credential_sources.iter().find(|c| c.credential_id == "groq").unwrap();
+        assert_eq!(cs.env_var.as_deref(), Some("GROQ_API_KEY"));
+    }
+
+    #[test]
+    fn model_less_user_provider_dropped_with_warning() {
+        let mut inp = anthropic_only_inputs();
+        inp.user_providers.insert(
+            "listingonly".to_string(),
+            json!({ "type": "openai", "baseUrl": "https://x" }),
+        );
+        let out = assemble(inp);
+        assert!(out.client_config.providers.iter().all(|p| p.profile_name != "listingonly"));
+        assert!(out.warnings.iter().any(|w| w.contains("listingonly") && w.contains("no models")));
+    }
+
+    #[test]
+    fn alias_folded_into_target_model() {
+        let mut inp = anthropic_only_inputs();
+        inp.routing = Some(json!({ "aliases": { "boss": "anthropic/claude-opus-4-6" } }));
+        let out = assemble(inp);
+        let anthropic = &out.client_config.providers[0];
+        assert!(anthropic.models[0].aliases.iter().any(|a| a == "boss"));
+    }
+
+    #[test]
+    fn unknown_alias_target_warns() {
+        let mut inp = anthropic_only_inputs();
+        inp.routing = Some(json!({ "aliases": { "x": "nope/missing" } }));
+        let out = assemble(inp);
+        assert!(out.warnings.iter().any(|w| w.contains('x') && w.contains("nope/missing")));
+    }
+
+    #[test]
+    fn fallback_validated_into_chain() {
+        let mut inp = anthropic_only_inputs();
+        inp.user_providers.insert(
+            "deepseek-user".to_string(),
+            json!({ "type": "openai", "baseUrl": "https://api.deepseek.com", "models": ["deepseek-chat"] }),
+        );
+        inp.routing = Some(json!({
+            "fallback": { "primary": ["anthropic/claude-opus-4-6", "deepseek-user/deepseek-chat"] }
+        }));
+        let out = assemble(inp);
+        let chain = out.chains.chains.get("primary").unwrap();
+        assert_eq!(chain.len(), 2);
+        assert_eq!(chain[0].provider_id, ProviderId::AnthropicFirstParty);
+        assert_eq!(chain[0].model, "claude-opus-4-6");
+        assert_eq!(chain[1].provider_id, ProviderId::OpenAICompatible { name: "deepseek-user".to_string() });
+        assert_eq!(chain[1].model, "deepseek-chat");
+    }
+
+    #[test]
+    fn fallback_unknown_entry_skipped_chain_kept() {
+        let mut inp = anthropic_only_inputs();
+        inp.routing = Some(json!({ "fallback": { "primary": ["anthropic/claude-opus-4-6", "ghost/none"] } }));
+        let out = assemble(inp);
+        let chain = out.chains.chains.get("primary").unwrap();
+        assert_eq!(chain.len(), 1);
+        assert!(out.warnings.iter().any(|w| w.contains("ghost/none")));
+    }
+
+    #[test]
+    fn fallback_all_unknown_chain_dropped() {
+        let mut inp = anthropic_only_inputs();
+        inp.routing = Some(json!({ "fallback": { "primary": ["ghost/a", "ghost/b"] } }));
+        let out = assemble(inp);
+        assert!(!out.chains.chains.contains_key("primary"));
+        assert!(out.warnings.iter().any(|w| w.contains("chain dropped")));
+    }
+
+    #[test]
+    fn anthropic_builtins_priced_through_assembled_catalog() {
+        // The assembled pricing is a cost::PricingCatalog with Anthropic tiers.
+        let out = assemble(anthropic_only_inputs());
+        let mr = cost::ModelRef {
+            provider: cost::pricing::ProviderId::Anthropic,
+            model: "claude-opus-4-6".to_string(),
+        };
+        assert!(out.pricing.resolve(&mr).is_ok());
+    }
+}

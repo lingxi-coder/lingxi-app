@@ -1,0 +1,23 @@
+[package]
+name = "provider-config"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+llm-client = { path = "../llm-client" }
+secret = { path = "../secret" }
+protocol = { path = "../protocol" }
+cost = { path = "../cost" }
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true }
+async-trait.workspace = true
+traits = { path = "../traits" }
+
+[lints]
+workspace = true

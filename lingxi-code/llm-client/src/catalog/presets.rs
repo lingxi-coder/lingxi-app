@@ -1,0 +1,145 @@
+//! Built-in provider presets: vendored models.dev metadata + hand-authored
+//! routing (base URL, protocol, auth, credential). The routing table is the
+//! source of truth for wire/auth and overrides the snapshot's advisory `api`.
+
+use crate::catalog::map::{to_model_profile, to_pricing};
+use crate::catalog::models_dev::ProviderSlice;
+use crate::{
+    AuthStrategy, CredentialConfig, PricingCatalog, ProtocolFamily, ProviderId, ProviderProfile,
+};
+
+/// Built-in catalog: provider profiles plus a matching pricing catalog.
+#[derive(Debug, Clone)]
+pub struct BuiltinCatalog {
+    /// Provider profiles ready to merge into [`crate::ClientConfig`].
+    pub providers: Vec<ProviderProfile>,
+    /// Pricing entries ready to merge into a [`PricingCatalog`].
+    pub pricing: PricingCatalog,
+}
+
+/// One hand-authored routing entry bound to a vendored slice.
+struct Preset {
+    /// Profile + registry name (stable, user-facing).
+    profile_name: &'static str,
+    /// Routing base URL (overrides the snapshot's `api`).
+    base_url: &'static str,
+    /// Wire protocol family.
+    protocol: ProtocolFamily,
+    /// Auth application strategy.
+    auth: AuthStrategy,
+    /// Provider identity used for pricing + serialization.
+    provider_id: ProviderId,
+    /// Credential lookup (env var name).
+    credential_env: &'static str,
+    /// Embedded models.dev slice JSON.
+    slice_json: &'static str,
+}
+
+const OPENROUTER: &str = include_str!("../../data/models-dev/openrouter.json");
+const DEEPSEEK: &str = include_str!("../../data/models-dev/deepseek.json");
+const GLM_CODING: &str = include_str!("../../data/models-dev/zhipuai-coding-plan.json");
+const GITHUB_COPILOT: &str = include_str!("../../data/models-dev/github-copilot.json");
+
+fn presets() -> Vec<Preset> {
+    vec![
+        Preset {
+            profile_name: "openrouter",
+            base_url: "https://openrouter.ai/api/v1",
+            protocol: ProtocolFamily::OpenAiChat,
+            auth: AuthStrategy::ApiKey,
+            provider_id: ProviderId::OpenAICompatible { name: "openrouter".to_string() },
+            credential_env: "OPENROUTER_API_KEY",
+            slice_json: OPENROUTER,
+        },
+        Preset {
+            profile_name: "deepseek",
+            base_url: "https://api.deepseek.com",
+            protocol: ProtocolFamily::OpenAiChat,
+            auth: AuthStrategy::ApiKey,
+            provider_id: ProviderId::OpenAICompatible { name: "deepseek".to_string() },
+            credential_env: "DEEPSEEK_API_KEY",
+            slice_json: DEEPSEEK,
+        },
+        // GLM coding plan: Anthropic-compatible endpoint (reuses AnthropicMessagesCodec).
+        // The snapshot's api points at /api/coding/paas/v4 (OpenAI-style); we override.
+        Preset {
+            profile_name: "glm-coding",
+            base_url: "https://open.bigmodel.cn/api/anthropic",
+            protocol: ProtocolFamily::AnthropicMessages,
+            auth: AuthStrategy::ApiKey,
+            provider_id: ProviderId::Custom { name: "glm-coding".to_string() },
+            credential_env: "ZHIPU_API_KEY",
+            slice_json: GLM_CODING,
+        },
+        // GitHub Copilot: OpenAI-compatible wire; GitHub OAuth token used
+        // directly as the bearer via AuthStrategy::CopilotBearer (no exchange).
+        Preset {
+            profile_name: "github-copilot",
+            base_url: "https://api.githubcopilot.com",
+            protocol: ProtocolFamily::OpenAiChat,
+            auth: AuthStrategy::CopilotBearer,
+            provider_id: ProviderId::OpenAICompatible { name: "github-copilot".to_string() },
+            credential_env: "GITHUB_TOKEN",
+            slice_json: GITHUB_COPILOT,
+        },
+    ]
+}
+
+/// Assemble the built-in provider catalog from the vendored snapshots.
+///
+/// # Panics
+/// Panics only if a vendored slice fails to parse — that is a build-time data
+/// defect (the JSON is embedded and tested), never a runtime/host condition.
+#[must_use]
+pub fn builtin_presets() -> BuiltinCatalog {
+    let mut providers = Vec::new();
+    let mut pricing = PricingCatalog::empty();
+
+    for preset in presets() {
+        let slice: ProviderSlice = serde_json::from_str(preset.slice_json)
+            .unwrap_or_else(|e| panic!("vendored slice {} parse: {e}", preset.profile_name));
+
+        let mut models = Vec::with_capacity(slice.models.len());
+        for model in slice.models.values() {
+            models.push(to_model_profile(model));
+            if let Some(price) = to_pricing(model) {
+                pricing = pricing.with_price(preset.provider_id.clone(), model.id.clone(), price);
+            }
+        }
+        providers.push(ProviderProfile {
+            provider_id: preset.provider_id.clone(),
+            profile_name: preset.profile_name.to_string(),
+            base_url: preset.base_url.to_string(),
+            protocol: preset.protocol.clone(),
+            auth: preset.auth.clone(),
+            credential: CredentialConfig::Env { var: preset.credential_env.to_string() },
+            models,
+            pricing: crate::config::PricingConfig::default(),
+        });
+    }
+
+    BuiltinCatalog { providers, pricing }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_preset_yields_expected_model_counts() {
+        let catalog = builtin_presets();
+        assert_eq!(catalog.providers.len(), 4);
+        let count = |name: &str| {
+            catalog
+                .providers
+                .iter()
+                .find(|p| p.profile_name == name)
+                .map_or(0, |p| p.models.len())
+        };
+        // Exact counts guard against a truncated/partial re-vendor of a slice.
+        assert_eq!(count("openrouter"), 337);
+        assert_eq!(count("deepseek"), 4);
+        assert_eq!(count("glm-coding"), 6);
+        assert_eq!(count("github-copilot"), 23);
+    }
+}

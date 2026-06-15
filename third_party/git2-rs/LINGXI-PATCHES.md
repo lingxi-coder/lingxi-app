@@ -171,3 +171,31 @@ patch was needed** (outcome (a)).
 Live good-vs-bad-cert verification against the on-device store is device-only
 (PENDING-DEVICE, recorded in M-c). The mechanism is present + verify-required at
 the source level here.
+
+## git2-rs: add `opts::set_homedir` (G7 SSH on Android, device-acceptance)
+
+`git2/src/opts.rs` adds a `pub unsafe fn set_homedir<P: IntoCString>(path)` over
+`GIT_OPT_SET_HOMEDIR` (mirroring `set_ssl_cert_dir`). Upstream git2 0.21 exposes
+`GIT_OPT_SET_HOMEDIR` in `libgit2-sys` but provides no safe wrapper.
+
+**Why:** libgit2 resolves+caches its home directory at init (from `HOME` on
+non-Windows). An Android app process has no usable `HOME`, so libssh2`s SSH
+transport — which expands `~/.ssh/known_hosts` before host-key verification —
+fails with `error loading known_hosts` *before* our pinned `certificate_check`
+runs (a MISSING known_hosts file is fine; an UNRESOLVABLE `~` is fatal). Setting
+the homedir override fixes it. Consumed by `tool-git-mobile auth::ensure_ssh_homedir`
+under its `#[allow(unsafe_code)]` carve-out. Caught by on-device G7 acceptance.
+
+Re-apply after any re-vendor: re-add `set_homedir` to `git2/src/opts.rs` (grep
+`fn set_homedir`; if absent, copy the `set_ssl_cert_dir` shape with
+`GIT_OPT_SET_HOMEDIR` + a single path arg).
+
+## libssh2 mbedTLS backend: NO ed25519 (device-acceptance finding, not a patch)
+
+`third_party/libssh2-sys/libssh2/src/mbedtls.h` has `#define LIBSSH2_ED25519 0`
+— the mbedTLS crypto backend (adopted in the size-opt swap) supports **RSA and
+ECDSA only**, not ed25519. SSH key auth on Android therefore requires an
+RSA/ECDSA key; ed25519 keys (the modern OpenSSH default) fail at the publickey
+signature phase ("remote rejected authentication"). Device-proven: host OpenSSH
+(ed25519) authenticates, our libssh2-mbedTLS does not; an RSA key works.
+Tradeoff of the OpenSSL→mbedTLS size optimization — documented, not fixed here.

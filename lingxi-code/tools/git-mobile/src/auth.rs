@@ -33,16 +33,20 @@
 //!
 //! ## `forbid(unsafe_code)` carve-out
 //!
-//! The crate is `#![deny(unsafe_code)]` (NOT `forbid`) for exactly one reason:
-//! the vendored `git2` exposes the CA-location option as the **`unsafe`**
-//! functions `git2::opts::set_ssl_cert_file` / `set_ssl_cert_dir` (they mutate
-//! a libgit2 global without synchronization). The spec (G6) assumed a safe
-//! `set_ssl_cert_locations`; the pinned `git2 0.21` instead splits it into two
-//! `unsafe` setters over `GIT_OPT_SET_SSL_CERT_LOCATIONS`. The single audited
-//! `unsafe` block lives in [`set_ca_location`] under a localized
-//! `#[allow(unsafe_code)]`; the rest of the crate keeps the deny lint, so no
-//! other unsafe can slip in. (Still required under mbedTLS — the setter remains
-//! `unsafe` regardless of TLS backend.)
+//! The crate is `#![deny(unsafe_code)]` (NOT `forbid`) for two audited reasons,
+//! both libgit2 process-global setters that the vendored `git2` exposes as
+//! **`unsafe`** (they mutate a libgit2 global without synchronization):
+//!
+//! 1. [`set_ca_location`] — `git2::opts::set_ssl_cert_dir` over
+//!    `GIT_OPT_SET_SSL_CERT_LOCATIONS`. The spec (G6) assumed a safe
+//!    `set_ssl_cert_locations`; the pinned `git2 0.21` instead splits it into
+//!    `unsafe` setters (still required under mbedTLS).
+//! 2. [`ensure_ssh_homedir`] — `git2::opts::set_homedir` over
+//!    `GIT_OPT_SET_HOMEDIR`, so libssh2 can expand `~/.ssh/known_hosts` on
+//!    Android (no `HOME`); without it SSH fails closed before host-key pinning.
+//!
+//! Each `unsafe` block is localized under `#[allow(unsafe_code)]`; the rest of
+//! the crate keeps the deny lint, so no other unsafe can slip in.
 
 use std::path::{Path, PathBuf};
 
@@ -377,6 +381,61 @@ pub fn set_ca_location(ca_dir: Option<&str>) -> Result<(), GitOpError> {
     #[allow(unsafe_code)]
     unsafe {
         git2::opts::set_ssl_cert_dir(Path::new(dir)).map_err(|e| GitOpError::from_git2(&e))
+    }
+}
+
+/// Ensure libgit2 can resolve `~` for the SSH `known_hosts` lookup.
+///
+/// libgit2's libssh2 transport unconditionally expands `~/.ssh/known_hosts`
+/// before host-key verification. A **missing** file is fine (treated as "host
+/// not previously known", which our pinned [`make_network_callbacks`]
+/// `certificate_check` then adjudicates), but an **unresolvable `~`** is a hard
+/// `error loading known_hosts` that fails the connection *before* our callback
+/// runs. An Android app process has no `HOME`, so `~` cannot be resolved and
+/// every SSH op fails closed for the wrong reason.
+///
+/// This sets `HOME` (only when unset/empty, so a real desktop `HOME` is never
+/// clobbered) to the SSH key's parent directory — an app-private, writable path
+/// that already exists. `known_hosts` stays absent there, so the pinned
+/// `certificate_check` remains the sole trust decision (G7 is unchanged). No-op
+/// when SSH is not configured.
+///
+/// libgit2 resolves and **caches** the home directory at initialization (from
+/// `HOME`), so simply setting the `HOME` env var inside the op is too late — the
+/// empty value is already cached. We instead override the cached home directory
+/// directly via `GIT_OPT_SET_HOMEDIR`. We only do so when the process has no
+/// usable `HOME` (the Android case); a real desktop `HOME` is left alone so
+/// libgit2 keeps using the user's actual `~/.ssh`.
+///
+/// # Errors
+///
+/// [`GitOpError::Libgit2`] if libgit2 rejects the home-directory path.
+pub fn ensure_ssh_homedir(ssh: Option<&SshConfig>) -> Result<(), GitOpError> {
+    let Some(ssh) = ssh else {
+        return Ok(());
+    };
+    // Desktop/host already has a usable HOME — keep libgit2's real `~/.ssh`.
+    if std::env::var_os("HOME").is_some_and(|v| !v.is_empty()) {
+        return Ok(());
+    }
+    let Some(parent) = Path::new(&ssh.private_key_path).parent() else {
+        return Ok(());
+    };
+    if parent.as_os_str().is_empty() {
+        return Ok(());
+    }
+    // SAFETY: `git2::opts::set_homedir` is `unsafe` only because it mutates a
+    // libgit2 process global without internal synchronization. We call it from
+    // the single deterministic per-op setup point (before any concurrent git
+    // work — Git ops are not concurrency-safe, see
+    // `GitTool::is_concurrency_safe == false`), passing an app-private, existing
+    // directory. It overwrites libgit2's cached home dir so the libssh2
+    // transport can expand `~/.ssh/known_hosts` (a missing file there is fine;
+    // the pinned `certificate_check` remains the trust decision). This is the
+    // second of two audited carve-outs in this `#![deny(unsafe_code)]` crate.
+    #[allow(unsafe_code)]
+    unsafe {
+        git2::opts::set_homedir(parent).map_err(|e| GitOpError::from_git2(&e))
     }
 }
 

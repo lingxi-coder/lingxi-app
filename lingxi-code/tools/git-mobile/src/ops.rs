@@ -829,6 +829,7 @@ pub fn clone(
     // CA wiring first, then clone with the unified network callbacks (HTTPS
     // token and/or SSH key + strict host-key check).
     crate::auth::set_ca_location(net.ca_dir.as_deref())?;
+    crate::auth::ensure_ssh_homedir(net.ssh.as_ref())?;
     let fetch_opts = crate::auth::make_fetch_options_net(&crate::auth::NetCallbacks {
         provider: net.provider.as_deref(),
         ssh: net.ssh.as_ref(),
@@ -873,6 +874,7 @@ pub fn fetch(
         ssh_allowed(url, net.ssh.as_ref())?;
     }
     crate::auth::set_ca_location(net.ca_dir.as_deref())?;
+    crate::auth::ensure_ssh_homedir(net.ssh.as_ref())?;
     let mut fetch_opts = crate::auth::make_fetch_options_net(&crate::auth::NetCallbacks {
         provider: net.provider.as_deref(),
         ssh: net.ssh.as_ref(),
@@ -990,6 +992,7 @@ pub fn push(
     }
 
     crate::auth::set_ca_location(net.ca_dir.as_deref())?;
+    crate::auth::ensure_ssh_homedir(net.ssh.as_ref())?;
 
     let rejection: std::rc::Rc<std::cell::RefCell<Option<String>>> =
         std::rc::Rc::new(std::cell::RefCell::new(None));

@@ -63,6 +63,19 @@ pub struct Runtime {
     /// clone into `tui::session::Runtime::with_subscription` so the rate-limit
     /// composer reads the live snapshot.
     pub subscription: traits::subscription::SharedSubscription,
+    /// (Plan 3c §8) Per-provider availability map, projected straight from
+    /// [`engine_desktop::DesktopRuntime::provider_availability`] (computed at
+    /// `build()` from the LIVE multi-provider config). The TUI mount threads it
+    /// into `tui::session::Runtime::with_provider_availability` so the `/model`
+    /// picker can badge unconfigured providers. Empty keeps every row available.
+    pub provider_availability: std::collections::BTreeMap<String, bool>,
+    /// (Plan 3c I1/I2) Authoritative `request_model -> (profile_name,
+    /// provider_label)` map, projected from
+    /// [`engine_desktop::DesktopRuntime::model_providers`]. The TUI mount threads
+    /// it into `tui::session::Runtime::with_model_providers` so the `/model`
+    /// picker can resolve a bare USER-provider model id to its own group +
+    /// availability gate. Empty keeps the historical Built-in fallback.
+    pub model_providers: std::collections::BTreeMap<String, (String, String)>,
 }
 
 /// Build-result for the TUI startup path. (M6-03)
@@ -295,6 +308,8 @@ pub async fn build_runtime(
         settings_watcher: rt.settings_watcher,
         file_changed_watcher: rt.file_changed_watcher,
         subscription: rt.subscription,
+        provider_availability: rt.provider_availability,
+        model_providers: rt.model_providers,
     })
 }
 

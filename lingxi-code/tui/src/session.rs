@@ -84,6 +84,19 @@ pub struct Runtime {
     /// pump (root.rs) can run the configured command. `None` (smoke gates /
     /// resume picker / no settings) leaves the built-in status row in place.
     status_line_config: Option<crate::components::status_line_command::StatusLineConfig>,
+    /// (Plan 3c §8) Per-provider availability map computed engine-side at
+    /// `build()` (`DesktopRuntime.provider_availability`); threaded into the App
+    /// (`AppState::set_provider_availability`) at mount so the `/model` picker can
+    /// badge unconfigured providers. Empty (the default) keeps every row
+    /// available — byte-identical to the historical behavior.
+    provider_availability: std::collections::BTreeMap<String, bool>,
+    /// (Plan 3c I1/I2) Authoritative `request_model -> (profile_name,
+    /// provider_label)` map computed engine-side at `build()`
+    /// (`DesktopRuntime.model_providers`); threaded into the App
+    /// (`AppState::set_model_providers`) at mount so the `/model` picker can
+    /// resolve a bare USER-provider model id to its own group + availability gate.
+    /// Empty (the default) keeps the historical Built-in fallback.
+    model_providers: std::collections::BTreeMap<String, (String, String)>,
 }
 
 impl Runtime {
@@ -101,6 +114,8 @@ impl Runtime {
             resumed_messages: Vec::new(),
             subscription: None,
             status_line_config: None,
+            provider_availability: std::collections::BTreeMap::new(),
+            model_providers: std::collections::BTreeMap::new(),
         }
     }
 
@@ -122,6 +137,8 @@ impl Runtime {
             resumed_messages: Vec::new(),
             subscription: None,
             status_line_config: None,
+            provider_availability: std::collections::BTreeMap::new(),
+            model_providers: std::collections::BTreeMap::new(),
         }
     }
 
@@ -198,6 +215,33 @@ impl Runtime {
         self
     }
 
+    /// (Plan 3c §8) Attach the engine-computed per-provider availability map
+    /// (`DesktopRuntime.provider_availability`). Threaded into the App at init
+    /// (`AppState::set_provider_availability`) so the `/model` picker can badge
+    /// unconfigured providers. The default (empty) keeps every row available.
+    #[must_use]
+    pub fn with_provider_availability(
+        mut self,
+        provider_availability: std::collections::BTreeMap<String, bool>,
+    ) -> Self {
+        self.provider_availability = provider_availability;
+        self
+    }
+
+    /// (Plan 3c I1/I2) Attach the engine-computed `request_model -> (profile_name,
+    /// provider_label)` map (`DesktopRuntime.model_providers`). Threaded into the
+    /// App at init (`AppState::set_model_providers`) so the `/model` picker can
+    /// resolve a bare USER-provider model id to its own group + availability gate.
+    /// The default (empty) keeps the historical Built-in fallback.
+    #[must_use]
+    pub fn with_model_providers(
+        mut self,
+        model_providers: std::collections::BTreeMap<String, (String, String)>,
+    ) -> Self {
+        self.model_providers = model_providers;
+        self
+    }
+
     /// Seed the prior conversation a RESUMED session should replay into the
     /// TUI scrollback before the first frame. The CLI's resume branch loads the
     /// persisted transcript (`session::SessionStorage::load` /
@@ -263,6 +307,13 @@ pub async fn run_tui_session(
     // `None` (smoke gates / resume picker / no settings) leaves the built-in
     // status row in place — same route as `subscription`.
     initial_state.status_line_config = runtime.status_line_config.take();
+    // (Plan 3c §8 / I1/I2) Thread the engine-computed provider maps onto the
+    // state so the `/model` picker can badge unconfigured providers and resolve a
+    // bare USER-provider model id to its own group + availability gate. Empty (the
+    // default, before the engine populates them) keeps every row available +
+    // grouped under its static label — byte-identical to the historical behavior.
+    initial_state.set_provider_availability(std::mem::take(&mut runtime.provider_availability));
+    initial_state.set_model_providers(std::mem::take(&mut runtime.model_providers));
     // (M7-15) Apply the stored theme preference from ~/.claude/settings.json
     // (best-effort; absent/unreadable → session-default `auto`). Read once at
     // startup, before the first render, so the very first frame uses the saved

@@ -774,6 +774,27 @@ pub struct AppState {
     /// write OUTSIDE the lock, then updates [`StatusSnapshot::model`] (success) or
     /// pushes an error `SystemText` (failure). `None` = no pending switch.
     pub pending_switch_model: Option<String>,
+    /// (Plan 3c §8) Per-provider availability map, threaded engine→TUI from
+    /// `DesktopRuntime.provider_availability` at mount (via
+    /// [`Self::set_provider_availability`]). `true` = the provider has a usable
+    /// credential and is routable; `false` = unconfigured (the `/model` picker
+    /// badges the row and offers `/connect`). A MISSING key is treated as
+    /// available (`true`) by [`crate::screens::model::build_model_entries`], so an
+    /// empty map (the default, before the engine populates it) keeps every row
+    /// available — byte-identical to the historical behavior.
+    pub provider_availability: std::collections::BTreeMap<String, bool>,
+    /// (Plan 3c I1/I2) Authoritative `request_model -> (profile_name,
+    /// provider_label)` map, assembled engine-side from the LIVE multi-provider
+    /// `ClientConfig.providers` and threaded onto the App from
+    /// `DesktopRuntime.model_providers` at mount (via
+    /// [`Self::set_model_providers`]). Joined by
+    /// [`crate::screens::model::build_model_entries`] so a bare available-model id
+    /// from a USER-defined provider (no `/`, no catalog listing) resolves to its
+    /// OWN provider group + gates on `provider_availability` — instead of
+    /// mis-falling into `"builtin"`/`true` (which suppressed the `[Connect]` badge
+    /// and let an unconfigured provider's row route directly). Empty (the default,
+    /// before the engine populates it) keeps the historical Built-in fallback.
+    pub model_providers: std::collections::BTreeMap<String, (String, String)>,
     /// (`/color`) Session agent-color name set by the `/color <name>` command
     /// (claude-code `standaloneAgentContext.color`). `Some("cyan")` after
     /// `/color cyan`; `None` after `/color default` (reset). Maps to a render
@@ -909,6 +930,8 @@ impl AppState {
             pending_open_permissions: false,
             pending_open_model: false,
             pending_switch_model: None,
+            provider_availability: std::collections::BTreeMap::new(),
+            model_providers: std::collections::BTreeMap::new(),
             session_agent_color: None,
             pending_save_color: None,
             pending_copy_clipboard: None,
@@ -1059,12 +1082,41 @@ impl AppState {
         crate::telemetry::screen_opened("permissions");
     }
 
-    /// Open the `/model` picker with the given model ids + the active model
-    /// (pre-highlighted). Called by `root::pump_open_model` after the async
-    /// `list_available_models` fetch.
-    pub fn open_model(&mut self, models: Vec<String>, current: String) {
+    /// (Plan 3c §8) Install the engine-computed per-provider availability map.
+    /// Threaded from `DesktopRuntime.provider_availability` at TUI init so the
+    /// `/model` picker can badge unconfigured providers and offer `/connect`.
+    /// Idempotent (replaces the map); an empty map keeps every row available.
+    pub fn set_provider_availability(&mut self, map: std::collections::BTreeMap<String, bool>) {
+        self.provider_availability = map;
+    }
+
+    /// (Plan 3c I1/I2) Install the engine-computed `request_model ->
+    /// (profile_name, provider_label)` map (`DesktopRuntime.model_providers`) so
+    /// the `/model` picker can resolve a bare USER-provider model id to its own
+    /// group + availability gate. Threaded at TUI init, mirroring
+    /// [`Self::set_provider_availability`]; idempotent (replaces the map). An empty
+    /// map keeps the historical Built-in fallback for unmapped bare ids.
+    pub fn set_model_providers(
+        &mut self,
+        map: std::collections::BTreeMap<String, (String, String)>,
+    ) {
+        self.model_providers = map;
+    }
+
+    /// Open the grouped `/model` picker with the merged rows + recent keys + the
+    /// active model. Called by `root::pump_open_model` after the async
+    /// `list_available_models` / `list_model_listings` fetch (rows are built by
+    /// [`crate::screens::model::build_model_entries`], joining the App's
+    /// `provider_availability` + `model_providers` maps). `recent` is empty until
+    /// recents persistence lands.
+    pub fn open_model(
+        &mut self,
+        rows: Vec<crate::screens::model::ModelRow>,
+        recent: Vec<(String, String)>,
+        current: String,
+    ) {
         self.active_screen = Some(crate::screens::Screen::Model(
-            crate::screens::model::ModelScreenState::new(models, current),
+            crate::screens::model::ModelScreenState::new(rows, recent, current),
         ));
         crate::telemetry::screen_opened("model");
     }

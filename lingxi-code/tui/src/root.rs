@@ -478,8 +478,17 @@ fn handle_screen_key(st: &mut AppState, k: &KeyEvent) {
             use crate::screens::model::{handle_model_key, ModelOutcome};
             let ct_key = iocraft_to_crossterm028_key(k);
             match handle_model_key(state, ct_key.code) {
-                ModelOutcome::Commit(model) => {
-                    st.pending_switch_model = Some(model);
+                ModelOutcome::Commit { request_model, .. } => {
+                    // Available row: raise the async switch (pump_switch_model
+                    // performs the write + refreshes the status line) and close.
+                    st.pending_switch_model = Some(request_model);
+                    st.close_screen();
+                }
+                ModelOutcome::Connect { provider_id: _ } => {
+                    // Unconfigured provider: `/connect <provider>` lands in 2d.
+                    // For now mirror parity's close-and-defer placeholder — the
+                    // picker closes without switching (no credential, so routing
+                    // would 401). The `provider_id` is the future `/connect` arg.
                     st.close_screen();
                 }
                 ModelOutcome::Cancel => st.close_screen(),
@@ -1149,7 +1158,12 @@ pub async fn pump_open_model(
         st.pending_open_model = false;
     }
 
+    // Fetch BOTH the routable model ids and the llm-client provider catalog
+    // OUTSIDE the lock; `build_model_entries` merges + de-dups them, then joins
+    // the App's engine-threaded availability + provider maps to group rows and
+    // badge unconfigured providers.
     let models = handle.list_available_models().await;
+    let catalog = handle.list_model_listings().await;
 
     let mut st = state.lock().await;
     if st.pending_permission.is_some() || st.active_screen.is_some() {
@@ -1157,7 +1171,16 @@ pub async fn pump_open_model(
         return false;
     }
     let current = st.status.model.clone();
-    st.open_model(models, current);
+    let rows = crate::screens::model::build_model_entries(
+        models,
+        catalog,
+        &st.provider_availability,
+        &st.model_providers,
+    );
+    // Recents persistence is not yet threaded — pass an empty recent list (the
+    // Recent group simply won't appear), back-compatible with the historical
+    // picker.
+    st.open_model(rows, Vec::new(), current);
     true
 }
 

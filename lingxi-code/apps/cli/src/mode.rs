@@ -203,6 +203,13 @@ pub(crate) async fn build_tui_runtime(
     // dispatcher in place on `tui_build.runtime` (read before `turn_tx`,
     // a disjoint field, is moved out below — no borrow/move conflict).
     let command_registry = tui_build.runtime.dispatcher.registry();
+    // (Plan 3c §8 / I1/I2) Project the engine-computed provider maps off the
+    // runtime (disjoint fields, read before `turn_tx` is moved out below) so the
+    // `/model` picker can badge unconfigured providers + resolve a bare
+    // USER-provider model id to its own group + availability gate. Empty (the
+    // default) keeps every row available — byte-identical to the historical path.
+    let provider_availability = tui_build.runtime.provider_availability.clone();
+    let model_providers = tui_build.runtime.model_providers.clone();
     // (M5-13) Seed the prior conversation last so a resumed session paints its
     // existing history on the first frame. For a fresh launch this is `[]`.
     tui::session::Runtime::with_bridge(session_id, bridge, status)
@@ -210,6 +217,8 @@ pub(crate) async fn build_tui_runtime(
         .with_multiagent_feed(task_feed)
         .with_turn_tx(tui_build.turn_tx)
         .with_command_registry(command_registry)
+        .with_provider_availability(provider_availability)
+        .with_model_providers(model_providers)
         // (B4 Task 5) Thread the composition root's shared subscription slot so
         // the TUI rate-limit composer reads the live snapshot at compose time.
         .with_subscription(tui_build.runtime.subscription.clone())

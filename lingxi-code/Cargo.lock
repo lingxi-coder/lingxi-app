@@ -1234,6 +1234,7 @@ dependencies = [
  "platform-posix",
  "platform-posix-minimal",
  "protocol",
+ "provider-config",
  "sandbox",
  "sandbox-runtime-runner",
  "secret",

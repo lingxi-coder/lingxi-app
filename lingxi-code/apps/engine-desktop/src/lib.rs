@@ -835,6 +835,27 @@ pub struct DesktopRuntime {
     /// it at compose time and treat `None` / a poisoned lock as the
     /// conservative default snapshot.
     pub subscription: traits::subscription::SharedSubscription,
+    /// Phase 2a §6.2: per-`profile_name` availability flag driving the `/model`
+    /// picker's Connect badge (a sibling map, NOT a field on the frozen
+    /// `ModelListing`). The tui joins it by provider/profile name.
+    pub provider_availability: std::collections::BTreeMap<String, bool>,
+    /// Phase 2a I1/I2: authoritative `request_model -> (profile_name,
+    /// provider_label)` map assembled from the LIVE multi-provider
+    /// `ClientConfig.providers` (every profile's `models[].request_model`). The
+    /// tui joins it in the `/model` picker so a bare available-model id from a
+    /// USER-defined provider resolves to its OWN provider group and gates on
+    /// `provider_availability` — instead of mis-falling into `"builtin"`/`true`.
+    /// Built-in CATALOG rows are unaffected (they group via the orchestrator's
+    /// `list_model_listings`).
+    pub model_providers: std::collections::BTreeMap<String, (String, String)>,
+    /// Phase 2a: the concrete routing adapter, surfaced read-only so host/tests
+    /// can inspect the wired fallback chains.
+    pub provider_adapter: Arc<ProviderApiAdapter>,
+    /// Phase 2a C1: the shared credential manager (keychain-backed). Surfaced so
+    /// the host can thread it onto the TUI App, where the `/connect` screen
+    /// persists a collected key (`CredentialManager::set_provider_key`). Same
+    /// `Arc` the orchestrator already holds — no second store is constructed.
+    pub credentials: Arc<secret::CredentialManager>,
 }
 
 /// Errors surfaced while building a [`DesktopRuntime`].
@@ -931,11 +952,99 @@ fn subscription_snapshot_from(
     }
 }
 
-// `builtin_anthropic_config` + `apply_settings_providers` live in
-// `platform_common::llm_config` so both composition roots share the same
-// model table and settings-wiring logic.  The re-exports make the names
-// available locally without changing any call site.
-use platform_common::{apply_settings_providers, builtin_anthropic_config, parse_routing_overrides};
+// Phase 2a: the multi-provider client config / chains / credential sources /
+// pricing catalog are now assembled by `provider_config::assemble` (which owns
+// the byte-equivalent Anthropic profile + the builtin catalog presets + the
+// settings-`providers` merge). The old single-Anthropic `builtin_anthropic_config`
+// / `apply_settings_providers` / `parse_routing_overrides` helpers from
+// `platform_common::llm_config` are no longer wired into `build()`; they remain
+// in `platform_common` and are still exercised by the e2e tests below via their
+// fully-qualified `platform_common::` paths.
+
+/// (Phase 2a I1/I2) Human provider header for an assembled profile name, used to
+/// label the engine's `model_providers` map the `/model` picker joins. Mirrors
+/// the orchestrator catalog's `provider_label` for the built-in profiles
+/// (`list_model_listings` parity) and Title-Cases an unknown USER profile name
+/// (e.g. `groq` -> `Groq`, `my-provider` -> `My Provider`) so a user-defined
+/// provider reads cleanly in its own group.
+fn provider_profile_label(profile_name: &str) -> String {
+    match profile_name {
+        "anthropic" => "Anthropic".to_string(),
+        "openrouter" => "OpenRouter".to_string(),
+        "deepseek" => "DeepSeek".to_string(),
+        "glm-coding" => "GLM (coding)".to_string(),
+        "github-copilot" => "GitHub Copilot".to_string(),
+        other => other
+            .split(['-', '_', ' '])
+            .filter(|w| !w.is_empty())
+            .map(|w| {
+                let mut chars = w.chars();
+                match chars.next() {
+                    Some(first) => {
+                        first.to_uppercase().collect::<String>() + &chars.as_str().to_lowercase()
+                    }
+                    None => String::new(),
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(" "),
+    }
+}
+
+/// First-party Anthropic models the engine routes by default, plus the
+/// configured `default_model` / `fallback_model` and any env-configured
+/// small-fast / haiku model a `prompt` hook may resolve to. The `llm_client`
+/// registry resolves a request model by exact id, so every model the host may
+/// request must appear here.
+fn anthropic_models_for(
+    default_model: &str,
+    fallback_model: Option<&str>,
+) -> Vec<llm_client::ModelProfile> {
+    let caps = llm_client::Capabilities {
+        streaming: true,
+        tools: true,
+        vision: true,
+        documents: true,
+        reasoning: true,
+        structured_output: true,
+    };
+    let mut ids: Vec<String> = vec![
+        "claude-opus-4-6".to_string(),
+        "claude-opus-4-5-20251101".to_string(),
+        "claude-opus-4-1-20250805".to_string(),
+        "claude-opus-4-20250514".to_string(),
+        "claude-sonnet-4-6".to_string(),
+        "claude-sonnet-4-5-20250929".to_string(),
+        "claude-haiku-4-5".to_string(),
+    ];
+    ids.push(default_model.to_string());
+    if let Some(fb) = fallback_model {
+        ids.push(fb.to_string());
+    }
+    // Env-configured small-fast / haiku model a `prompt` hook may resolve to
+    // (matching `hook_prompt_runner::resolve_model`'s precedence:
+    // `ANTHROPIC_SMALL_FAST_MODEL` > `ANTHROPIC_DEFAULT_HAIKU_MODEL` > default
+    // Haiku), so such a request resolves instead of failing `ModelUnavailable`.
+    // The default Haiku id (`claude-haiku-4-5`) is already in the list above.
+    for var in ["ANTHROPIC_SMALL_FAST_MODEL", "ANTHROPIC_DEFAULT_HAIKU_MODEL"] {
+        if let Ok(m) = std::env::var(var) {
+            if !m.is_empty() {
+                ids.push(m);
+            }
+        }
+    }
+    ids.sort();
+    ids.dedup();
+    ids.into_iter()
+        .map(|id| llm_client::ModelProfile {
+            display_model: id.clone(),
+            request_model: id.clone(),
+            billing_model: id,
+            aliases: Vec::new(),
+            capabilities: caps,
+        })
+        .collect()
+}
 
 /// Load the merged `settings.outputStyle` (project + user + env layers) for the
 /// given project dir. Mirrors the CLI's `load_routing`/`load_provider_profiles`
@@ -978,9 +1087,11 @@ pub async fn build(
     let llm_transport: Arc<dyn Transport> =
         Arc::new(LlmTransportBridge::new(PosixHttp::new()));
     // Defer client construction to step 3.1 where we know whether OAuth is
-    // active (determines auth strategy + credential config). Placeholders:
-    let mut llm_oauth_path = false;
-    let mut llm_oauth_state: Option<Arc<anthropic_oauth::refresh::AuthState>> = None;
+    // active (determines auth strategy + credential config). Placeholder: the
+    // resolved OAuth `AuthState` (`Some` only for an OAuth-effective subscriber
+    // session) that step (2) bridges into the assembled client's credential
+    // seam as an `oauth_delegate`.
+    let mut oauth_auth_state: Option<Arc<anthropic_oauth::refresh::AuthState>> = None;
     // WebSearch builds Anthropic `POST /v1/messages` requests via its own
     // provider (server-side web search is Anthropic-only in v1).
     let tool_provider = Arc::new(AnthropicRequestBuilder::new(
@@ -1053,13 +1164,12 @@ pub async fn build(
             .await
             {
                 Ok(auth_state) => {
-                    // Task 10: mark as OAuth path so DefaultLlmClient uses
-                    // OAuthBearer auth + the credential provider below.
-                    // Only active when the subscriber flag confirms OAuth
-                    // is the effective auth source (API-key overrides it).
+                    // Task 10: capture the OAuth `AuthState` so the assembled
+                    // client gets an `OAuthBearer` credential delegate below.
+                    // Only active when the subscriber flag confirms OAuth is the
+                    // effective auth source (API-key overrides it).
                     if is_subscriber {
-                        llm_oauth_path = true;
-                        llm_oauth_state = Some(auth_state);
+                        oauth_auth_state = Some(auth_state);
 
                         // Task 4: background OAuth profile + roles fetch. This
                         // closes the RENDERING half of the profile-fetch
@@ -1118,93 +1228,109 @@ pub async fn build(
         }
     }
 
-    // (3.3) Task 10: build `DefaultLlmClient` with the chosen auth strategy and
-    //       wire the adapter over the llm-client + transport.
-    //
-    //       OAuth path: `OAuthBearer` + `HostManaged` credential, backed by
-    //       `OAuthCredentialProvider` over the refresh driver.
-    //       API-key path: `ApiKey` + `Env { ANTHROPIC_API_KEY }`.
-    //
-    //       3c-T2: apply settings `providers` / `routing` on top of the
-    //       built-in Anthropic profile so custom provider profiles (e.g. groq,
-    //       gemini, other openai-compat endpoints) and routing aliases are
-    //       available to the orchestrator.  Errors are logged and silently
-    //       dropped (a bad `providers` entry must NOT prevent the engine from
-    //       starting with the built-in profile still functional).
-    let (llm_client, routing_overrides, pricing_overrides) = {
-        let mut cfg_obj = builtin_anthropic_config(&cfg.api_base, llm_oauth_path);
-        // Run whenever EITHER key is present: a routing-only settings file
-        // (aliases onto builtin models, no custom providers) must still apply.
-        if cfg.provider_profiles.is_some() || cfg.routing.is_some() {
-            let empty = std::collections::BTreeMap::new();
-            let providers = cfg.provider_profiles.as_ref().unwrap_or(&empty);
-            if let Err(e) = apply_settings_providers(
-                &mut cfg_obj,
-                providers,
-                cfg.routing.as_ref(),
-            ) {
-                tracing::warn!(error = %e, "settings providers/routing entry rejected; earlier entries and the built-in profile remain active");
-            }
-        }
-        // Parse routing overrides (fallback/retry) AFTER providers are applied so
-        // cross-profile fallback targets can be resolved against the full config.
-        let routing_overrides = cfg.routing.as_ref().and_then(|r| {
-            match parse_routing_overrides(r, &cfg_obj) {
-                Ok(o) => Some(o),
-                Err(e) => {
-                    tracing::warn!(error = %e, "routing.fallback/retry overrides rejected; using defaults");
-                    None
-                }
-            }
-        }).unwrap_or_default();
-        // Extract per-profile pricing overrides before cfg_obj is consumed by
-        // DefaultLlmClient::from_config.  Each entry carries (provider_id,
-        // billing_model, TokenPricing) so the cost estimator block can apply them
-        // onto the llm_client catalog after the cost-crate bridge populates it.
-        let pricing_overrides: Vec<(llm_client::ProviderId, String, llm_client::TokenPricing)> = {
-            cfg_obj.providers.iter().flat_map(|p| {
-                p.pricing.overrides.iter().filter_map(|(model_id, tp)| {
-                    // Resolve display_model → billing_model for the estimator key.
-                    p.models.iter()
-                        .find(|m| m.display_model == *model_id)
-                        .map(|m| (p.provider_id.clone(), m.billing_model.clone(), *tp))
-                })
-            }).collect()
-        };
-        let mut client = DefaultLlmClient::from_config(cfg_obj)
-            .map_err(|e| BuildError::ApiBase(e.to_string()))?;
-        if let Some(auth_state) = llm_oauth_state {
-            let driver = Arc::new(RefreshDriver::new(auth_state));
-            client = client.with_credential_provider(Arc::new(OAuthCredentialProvider::new(driver)));
-        }
-        (Arc::new(client), routing_overrides, pricing_overrides)
-    };
-    let subscriber_state = SubscriberState { is_subscriber, is_enterprise: false };
+    // (3.3) Phase 2a §8: assemble the FULL multi-provider client config
+    //       (Anthropic + builtin catalog presets + settings `providers`) + chains
+    //       + credential sources + pricing catalog, instead of the single-Anthropic
+    //       config. `provider_config::assemble` owns the byte-equivalent Anthropic
+    //       profile + the catalog merge; the engine bridges OAuth in via a
+    //       pre-built delegate so provider-config stays free of an anthropic-oauth
+    //       dep. A bad settings entry only emits a warning — the engine still boots
+    //       with every well-formed profile (incl. the built-in Anthropic one).
+    let has_api_key = !cfg.api_key.is_empty();
+    // OAuth bridges into the client ONLY when there is no API key (api-key wins;
+    // the single credential slot + `oauth_subscriber_flag` enforce the
+    // exclusion). `has_oauth` selects `AuthStrategy::OAuthBearer`, which is what
+    // injects the required `oauth-2025-04-20` beta on Anthropic routes.
+    let has_oauth = !has_api_key && oauth_auth_state.is_some();
+    let oauth_delegate: Option<Arc<dyn llm_client::CredentialProvider>> =
+        oauth_auth_state.clone().map(|state| {
+            let driver = Arc::new(RefreshDriver::new(state));
+            Arc::new(OAuthCredentialProvider::new(driver)) as Arc<dyn llm_client::CredentialProvider>
+        });
 
-    // 3c-T3: build the cost estimator from the builtin reference catalog so
-    // LlmResponse.cost is populated on every successful decode.  Unpriced /
-    // unknown models leave cost = None (never an error; CostTracker path unchanged).
-    // T2: apply per-profile pricing overrides from settings onto the catalog so
-    // custom profiles get user-declared rates.
+    let assembled = provider_config::assemble(provider_config::AssembleInputs {
+        anthropic_api_base: cfg.api_base.clone(),
+        anthropic_models: anthropic_models_for(&cfg.default_model, cfg.fallback_model.as_deref()),
+        anthropic_has_api_key: has_api_key,
+        anthropic_has_oauth: has_oauth,
+        user_providers: cfg.provider_profiles.clone().unwrap_or_default(),
+        routing: cfg.routing.clone(),
+    });
+    for w in &assembled.warnings {
+        tracing::warn!(warning = %w, "provider-config assembly");
+    }
+
+    // (Phase 2a I1/I2) Authoritative `request_model -> (profile_name,
+    // provider_label)` map for the `/model` picker, built from the assembled
+    // multi-provider config BEFORE `client_config` is consumed by `from_config`.
+    // Every profile (anthropic + presets + USER providers) contributes its
+    // `models[].request_model`. First-profile-wins on a duplicate request_model
+    // (anthropic + presets come before user profiles in `assemble`).
+    let mut model_providers: std::collections::BTreeMap<String, (String, String)> =
+        std::collections::BTreeMap::new();
+    for profile in &assembled.client_config.providers {
+        let label = provider_profile_label(&profile.profile_name);
+        for model in &profile.models {
+            model_providers
+                .entry(model.request_model.clone())
+                .or_insert_with(|| (profile.profile_name.clone(), label.clone()));
+        }
+    }
+
+    let mut client = DefaultLlmClient::from_config(assembled.client_config)
+        .map_err(|e| BuildError::ApiBase(format!("llm-client config: {e}")))?;
+    // §6.1: ONE composite credential slot for ALL providers (anthropic api-key /
+    // oauth-delegate + every per-profile credential source).
+    let composite = provider_config::MultiCredentialProvider::new(
+        credentials.clone(),
+        assembled.credential_sources.clone(),
+        if has_api_key { Some(cfg.api_key.clone()) } else { None },
+        oauth_delegate,
+    );
+    client = client.with_credential_provider(Arc::new(composite));
+    let llm_client = Arc::new(client);
+
+    // 3c-T3: build the cost estimator from the assembled pricing catalog so
+    // LlmResponse.cost is populated on every successful decode. The catalog
+    // already carries the built-in reference tiers + non-Anthropic preset rows +
+    // any settings per-profile pricing overrides folded in by `assemble`. Unpriced
+    // / unknown models leave cost = None (never an error).
     let cost_estimator = {
         use llm_client::{CostEstimator, PricingPolicy};
         use orchestrator::cost_wiring::llm_catalog_from_cost;
-        let cost_cat = cost::pricing::PricingCatalog::builtin_reference();
-        let mut llm_cat = llm_catalog_from_cost(&cost_cat);
-        for (provider_id, billing_model, tp) in &pricing_overrides {
-            llm_cat.add_override(provider_id.clone(), billing_model.clone(), *tp);
-        }
+        let llm_cat = llm_catalog_from_cost(&assembled.pricing);
         Arc::new(CostEstimator::new(llm_cat, PricingPolicy::MarkUnestimated))
     };
+    let subscriber_state = SubscriberState { is_subscriber, is_enterprise: false };
 
-    // Build the CONCRETE adapter so it can be coerced to BOTH the
-    // orchestrator seam (`OrchestratorApiClient`) and the agent seam
-    // (`agent::SubagentApiClient`). `ProviderApiAdapter` impls both.
+    // Phase 2a CHAINS BRIDGE: translate the assembled `ChainConfig` into main's
+    // richer adapter's `fallback_overrides` shape. `assemble` keys each chain by
+    // the request/display model id and carries an ordered list of `ChainEntry`;
+    // main's adapter routes by model-id through the multi-provider registry, so the
+    // `ChainEntry.provider_id` is informational and is dropped here — the per-entry
+    // `model` ids are the fallback chain. Cross-provider routing still works
+    // because every provider's models are registered in the assembled
+    // `ClientConfig`, so a fallback target on another provider resolves by id.
+    let fallback_overrides: std::collections::BTreeMap<String, Vec<String>> = assembled
+        .chains
+        .chains
+        .iter()
+        .map(|(key, entries)| (key.clone(), entries.iter().map(|e| e.model.clone()).collect()))
+        .collect();
+    // Retry override → main's scalar settings_max_retries / settings_backoff_ms.
+    let settings_max_retries = assembled.chains.retry.as_ref().map(|r| r.max_attempts);
+    let settings_backoff_ms = assembled.chains.retry.as_ref().map(|r| r.backoff_ms);
+
+    // Build the CONCRETE adapter so it can be coerced to BOTH the orchestrator
+    // seam (`OrchestratorApiClient`) and the agent seam (`agent::SubagentApiClient`).
+    // `ProviderApiAdapter` impls both. The adapter's own `alias_to_display` map is
+    // rebuilt from the client's `available_models()` (whose aliases `assemble`
+    // already populated from `chains.aliases`), so the alias map needs no separate
+    // pass here.
     //
-    // Batch-5 Task 3: attach the live subscription slot (created in step 3.2,
-    // filled by the background profile/roles fetch) so the drive loops read
-    // subscriber/enterprise state at call time — `subscriber_state` above
-    // remains the build-time seed/fallback.
+    // Batch-5 Task 3: attach the live subscription slot (filled by the background
+    // profile/roles fetch) so the drive loops read subscriber/enterprise state at
+    // call time — `subscriber_state` remains the build-time seed/fallback.
     let provider_adapter = Arc::new(
         ProviderApiAdapter::new_with_routing(
             llm_client,
@@ -1215,12 +1341,13 @@ pub async fn build(
             Some(Arc::new(telemetry::AnalyticsBus::new())),
             cfg.fallback_model.clone(),
             Some(cost_estimator),
-            routing_overrides.fallback,
-            routing_overrides.max_retries,
-            routing_overrides.backoff_ms,
+            fallback_overrides,
+            settings_max_retries,
+            settings_backoff_ms,
         )
         .with_subscription(subscription.clone()),
     );
+    let provider_adapter_handle = provider_adapter.clone();
     let api_client: Arc<dyn OrchestratorApiClient> = provider_adapter.clone();
     let subagent_api: Arc<dyn agent::SubagentApiClient> = provider_adapter;
 
@@ -1251,9 +1378,13 @@ pub async fn build(
     tokio::spawn(async move {
         while cost_persist_rx.recv().await.is_some() {}
     });
+    // Phase 2a T7: the CostTracker uses the SAME assembled pricing catalog the
+    // estimator was built from (built-in reference tiers + non-Anthropic preset
+    // rows + settings overrides), not a fresh `builtin_reference()`, so session
+    // cost accounting matches per-response cost estimation.
     let cost_tracker = Arc::new(cost::CostTracker::new(
         protocol::SessionId::new(),
-        Arc::new(cost::PricingCatalog::builtin_reference()),
+        Arc::new(assembled.pricing),
         cost_persist_tx,
     ));
 
@@ -2149,6 +2280,28 @@ pub async fn build(
         }
     };
 
+    // Phase 2a §6.2: per-profile availability from the assembled credential
+    // sources (each profile is "available" iff its keychain entry / env var
+    // resolves). Drives the `/model` picker's Connect badge.
+    let mut provider_availability: std::collections::BTreeMap<String, bool> =
+        provider_config::compute_availability(
+            &credentials,
+            &assembled.credential_sources,
+            has_api_key,
+            has_oauth,
+        )
+        .await
+        .into_iter()
+        .map(|a| (a.profile_name, a.available))
+        .collect();
+    // `assemble` emits NO anthropic credential source in the unauthenticated
+    // (no key / no oauth) path, so `compute_availability` yields no "anthropic"
+    // entry there. The picker's Connect badge still needs anthropic represented,
+    // so surface it unconditionally from the engine's resolved auth state.
+    provider_availability
+        .entry("anthropic".to_string())
+        .or_insert(has_api_key || has_oauth);
+
     Ok(DesktopRuntime {
         orchestrator: orch,
         dispatcher,
@@ -2160,6 +2313,10 @@ pub async fn build(
         settings_watcher,
         file_changed_watcher,
         subscription,
+        provider_availability,
+        model_providers,
+        provider_adapter: provider_adapter_handle,
+        credentials,
     })
 }
 
@@ -2427,6 +2584,187 @@ mod tests {
         assert!(rt.orchestrator.has_hook_registry(), "no HookRegistry");
         assert!(rt.orchestrator.has_agent_catalog(), "no agent catalog");
         assert!(rt.orchestrator.has_compaction(), "no CompactionOrchestrator");
+    }
+
+    // ── Phase 2a: helper unit tests (T2) ─────────────────────────────────────
+
+    /// `provider_profile_label` returns the hand-curated header for known
+    /// profiles and Title-Cases an unknown USER profile name on `-`/`_`/space.
+    #[test]
+    fn provider_profile_label_known_and_titlecased() {
+        assert_eq!(super::provider_profile_label("anthropic"), "Anthropic");
+        assert_eq!(super::provider_profile_label("openrouter"), "OpenRouter");
+        assert_eq!(super::provider_profile_label("deepseek"), "DeepSeek");
+        assert_eq!(super::provider_profile_label("glm-coding"), "GLM (coding)");
+        assert_eq!(super::provider_profile_label("github-copilot"), "GitHub Copilot");
+        // Unknown user profiles are Title-Cased across separators.
+        assert_eq!(super::provider_profile_label("groq"), "Groq");
+        assert_eq!(super::provider_profile_label("my-provider"), "My Provider");
+        assert_eq!(super::provider_profile_label("ACME_corp"), "Acme Corp");
+    }
+
+    /// `anthropic_models_for` always includes the first-party defaults plus the
+    /// configured default + fallback model, deduped, with a `ModelProfile` per id.
+    #[test]
+    fn anthropic_models_for_includes_defaults_and_configured() {
+        let models = super::anthropic_models_for("claude-sonnet-4-6", Some("claude-opus-4-6"));
+        let ids: Vec<&str> = models.iter().map(|m| m.display_model.as_str()).collect();
+        // First-party defaults are present.
+        assert!(ids.contains(&"claude-opus-4-6"), "missing default opus: {ids:?}");
+        assert!(ids.contains(&"claude-sonnet-4-6"), "missing default sonnet: {ids:?}");
+        assert!(ids.contains(&"claude-haiku-4-5"), "missing default haiku: {ids:?}");
+        // A configured default/fallback already in the list does not duplicate.
+        assert_eq!(
+            ids.iter().filter(|id| **id == "claude-sonnet-4-6").count(),
+            1,
+            "configured default must be deduped, ids: {ids:?}"
+        );
+        // request_model / billing_model mirror display_model for these profiles.
+        for m in &models {
+            assert_eq!(m.request_model, m.display_model);
+            assert_eq!(m.billing_model, m.display_model);
+        }
+        // A NEW configured default id is added.
+        let custom = super::anthropic_models_for("my-custom-model", None);
+        assert!(
+            custom.iter().any(|m| m.display_model == "my-custom-model"),
+            "configured default must be registered"
+        );
+    }
+
+    // ── Phase 2a: build() provider-routing wiring tests (T10) ─────────────────
+
+    /// Phase 2a: a default `build()` (no api key, no oauth, no settings
+    /// providers) still surfaces the multi-provider `provider_availability` map
+    /// (anthropic unavailable + every built-in catalog preset) and the concrete
+    /// routing adapter handle. Ported from parity's
+    /// `build_surfaces_provider_availability_and_adapter`.
+    #[tokio::test]
+    async fn build_surfaces_provider_availability_and_adapter() {
+        let (_tmp, cfg) = test_config(true);
+        let output: Arc<dyn traits::OutputStream> =
+            Arc::new(orchestrator::test_support::MockOutputStream::new());
+        let perm_sink: Arc<dyn client_adapter::PermissionRequestSink> =
+            Arc::new(RecordingPermissionSink::default());
+        let rt = build(cfg, output, perm_sink).await.expect("build() failed");
+        // Anthropic always represented; with no key/oauth it is unavailable.
+        assert_eq!(rt.provider_availability.get("anthropic"), Some(&false));
+        // Built-in catalog presets are merged into the availability map.
+        assert!(
+            rt.provider_availability.contains_key("deepseek"),
+            "availability map missing builtin preset: {:?}",
+            rt.provider_availability
+        );
+        // The concrete routing adapter is surfaced.
+        assert!(Arc::strong_count(&rt.provider_adapter) >= 1);
+        // The default `model_providers` map groups a built-in Anthropic model
+        // under the anthropic profile.
+        assert_eq!(
+            rt.model_providers.get("claude-sonnet-4-6"),
+            Some(&("anthropic".to_string(), "Anthropic".to_string())),
+        );
+    }
+
+    /// Phase 2a (T10 integration): a `build()` with BOTH a user-defined provider
+    /// profile AND a routing fallback chain must merge into the assembled
+    /// `ClientConfig` (a user-provider model + a built-in catalog model), surface
+    /// the user profile in `model_providers` + `provider_availability`, and the
+    /// routing chain must translate into main's `fallback_overrides` shape (the
+    /// translation `build()` performs is re-derived here from `assemble`, since
+    /// the adapter's overrides field is private).
+    #[tokio::test]
+    async fn build_with_providers_and_routing_merges_config_chains_availability() {
+        let (_tmp, mut cfg) = test_config(true);
+        cfg.provider_profiles = Some({
+            let mut m = std::collections::BTreeMap::new();
+            // NB: `provider-config`'s `parse_user_providers` (the dialect `build()`
+            // now routes through via `assemble`) takes `models` as a STRING ARRAY
+            // of model ids — distinct from the legacy `apply_settings_providers`
+            // dialect (`[{ "id": ... }]`) the surviving e2e tests below still use.
+            m.insert(
+                "groq".to_string(),
+                serde_json::json!({
+                    "type": "openai",
+                    "baseUrl": "https://api.groq.com/openai/v1",
+                    "apiKeyEnv": "GROQ_API_KEY",
+                    "models": ["llama-3.3-70b-versatile"]
+                }),
+            );
+            m
+        });
+        // A fallback chain keyed on a builtin Anthropic model, falling back to the
+        // user-defined groq model (cross-provider routing by model id).
+        cfg.routing = Some(serde_json::json!({
+            "fallback": {
+                "claude-sonnet-4-6": ["groq/llama-3.3-70b-versatile"]
+            }
+        }));
+
+        let output: Arc<dyn traits::OutputStream> =
+            Arc::new(orchestrator::test_support::MockOutputStream::new());
+        let perm_sink: Arc<dyn client_adapter::PermissionRequestSink> =
+            Arc::new(RecordingPermissionSink::default());
+        let rt = build(cfg.clone(), output, perm_sink)
+            .await
+            .expect("build() failed with providers + routing");
+
+        // (1) The merged config exposes BOTH a user-provider model and a built-in
+        //     catalog model via `model_providers` (built from
+        //     `assembled.client_config.providers`).
+        assert_eq!(
+            rt.model_providers.get("llama-3.3-70b-versatile"),
+            Some(&("groq".to_string(), "Groq".to_string())),
+            "user provider model must group under its own profile; got: {:?}",
+            rt.model_providers
+        );
+        assert_eq!(
+            rt.model_providers.get("claude-sonnet-4-6"),
+            Some(&("anthropic".to_string(), "Anthropic".to_string())),
+            "built-in anthropic model must group under anthropic"
+        );
+        // A built-in CATALOG preset model is also present (e.g. a deepseek model).
+        assert!(
+            rt.model_providers
+                .values()
+                .any(|(profile, _)| profile == "deepseek"),
+            "a built-in catalog preset model must appear in model_providers"
+        );
+
+        // (2) The availability map carries the user profile (no GROQ_API_KEY in
+        //     the test env ⇒ unavailable) alongside anthropic + presets.
+        assert_eq!(
+            rt.provider_availability.get("groq"),
+            Some(&false),
+            "user provider must be present + unavailable without its key"
+        );
+        assert_eq!(rt.provider_availability.get("anthropic"), Some(&false));
+        assert!(rt.provider_availability.contains_key("deepseek"));
+
+        // (3) The routing chain translates into main's `fallback_overrides` shape.
+        //     Re-derive the same translation `build()` performs from `assemble`
+        //     (the adapter's private `fallback_overrides` field is not inspectable).
+        let assembled = provider_config::assemble(provider_config::AssembleInputs {
+            anthropic_api_base: cfg.api_base.clone(),
+            anthropic_models: super::anthropic_models_for(
+                &cfg.default_model,
+                cfg.fallback_model.as_deref(),
+            ),
+            anthropic_has_api_key: false,
+            anthropic_has_oauth: false,
+            user_providers: cfg.provider_profiles.clone().unwrap_or_default(),
+            routing: cfg.routing.clone(),
+        });
+        let fallback_overrides: std::collections::BTreeMap<String, Vec<String>> = assembled
+            .chains
+            .chains
+            .iter()
+            .map(|(k, entries)| (k.clone(), entries.iter().map(|e| e.model.clone()).collect()))
+            .collect();
+        assert_eq!(
+            fallback_overrides.get("claude-sonnet-4-6").map(Vec::as_slice),
+            Some(&["llama-3.3-70b-versatile".to_string()][..]),
+            "fallback chain must translate to the bare model-id list (provider_id dropped); got: {fallback_overrides:?}"
+        );
     }
 
     /// F2-01: `use_noop_permission_gate: true` binds the `NoOpPermissionGate`,

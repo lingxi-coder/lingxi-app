@@ -1664,6 +1664,95 @@ gen_publickey_from_ed25519_openssh_priv_data(LIBSSH2_SESSION *session,
     return 0;
 }
 
+/*
+ * sk-ed25519 (FIDO) variant. The sk private blob carries:
+ *   pubkey-string(32) || application-string || flags(1) ||
+ *   key_handle-string || ...
+ * Signing happens on the FIDO authenticator, so only the public key is
+ * retained here (has_private = 0); flags / application / key_handle are
+ * returned to the caller. application and key_handle are LIBSSH2_ALLOC'd
+ * (libssh2 frees them).
+ */
+
+static int
+gen_publickey_from_sk_ed25519_openssh_priv_data(LIBSSH2_SESSION *session,
+                                                struct string_buf *decrypted,
+                                                unsigned char *flags,
+                                                const char **application,
+                                              const unsigned char **key_handle,
+                                                size_t *handle_len,
+                                                libssh2_ed25519_ctx **out_ctx)
+{
+    libssh2_ed25519_ctx *ctx = NULL;
+    unsigned char *pub_key, *app;
+    size_t app_len = 0, tmp_len = 0;
+
+    if(_libssh2_get_string(decrypted, &pub_key, &tmp_len) ||
+       tmp_len != LIBSSH2_ED25519_KEY_LEN)
+        return _libssh2_error(session, LIBSSH2_ERROR_PROTO,
+                              "Wrong ed25519 public key length");
+
+    if(_libssh2_get_string(decrypted, &app, &app_len))
+        return _libssh2_error(session, LIBSSH2_ERROR_PROTO,
+                              "No SK application.");
+
+    if(flags && _libssh2_get_byte(decrypted, flags))
+        return _libssh2_error(session, LIBSSH2_ERROR_PROTO,
+                              "No SK flags.");
+
+    if(key_handle && handle_len) {
+        unsigned char *handle = NULL;
+        if(_libssh2_get_string(decrypted, &handle, handle_len))
+            return _libssh2_error(session, LIBSSH2_ERROR_PROTO,
+                                  "No SK key_handle.");
+
+        if(*handle_len > 0) {
+            *key_handle = LIBSSH2_ALLOC(session, *handle_len);
+            if(!*key_handle)
+                return _libssh2_error(session, LIBSSH2_ERROR_ALLOC,
+                                      "Unable to allocate SK key_handle");
+            memcpy((void *)*key_handle, handle, *handle_len);
+        }
+    }
+
+    ctx = calloc(1, sizeof(*ctx));  /* libc — freed by _libssh2_ed25519_free */
+    if(!ctx) {
+        if(key_handle && *key_handle) {
+            LIBSSH2_FREE(session, (void *)*key_handle);
+            *key_handle = NULL;
+        }
+        return _libssh2_error(session, LIBSSH2_ERROR_ALLOC,
+                              "Unable to allocate memory for ed25519 key");
+    }
+
+    /* signing is on the FIDO authenticator — public key only. */
+    memcpy(ctx->pub, pub_key, LIBSSH2_ED25519_KEY_LEN);
+    ctx->has_private = 0;
+
+    if(application && app_len > 0) {
+        char *app_buf = LIBSSH2_ALLOC(session, app_len + 1);
+        if(!app_buf) {
+            if(key_handle && *key_handle) {
+                LIBSSH2_FREE(session, (void *)*key_handle);
+                *key_handle = NULL;
+            }
+            _libssh2_ed25519_free(ctx);
+            return _libssh2_error(session, LIBSSH2_ERROR_ALLOC,
+                                  "Unable to allocate SK application");
+        }
+        memcpy(app_buf, app, app_len);
+        app_buf[app_len] = '\0';
+        *application = app_buf;
+    }
+
+    if(out_ctx)
+        *out_ctx = ctx;
+    else
+        _libssh2_ed25519_free(ctx);
+
+    return 0;
+}
+
 int
 _libssh2_ed25519_new_private(libssh2_ed25519_ctx **ed_ctx,
                              LIBSSH2_SESSION *session,
@@ -1749,6 +1838,121 @@ _libssh2_ed25519_new_private_frommemory(libssh2_ed25519_ctx **ed_ctx,
     if(strcmp("ssh-ed25519", (const char *)buf) == 0)
         rc = gen_publickey_from_ed25519_openssh_priv_data(session, decrypted,
                                                           &ctx);
+    else
+        rc = -1;
+
+    _libssh2_string_buf_free(session, decrypted);
+
+    if(rc == 0) {
+        if(ed_ctx)
+            *ed_ctx = ctx;
+        else if(ctx)
+            _libssh2_ed25519_free(ctx);
+    }
+
+    return rc;
+}
+
+int
+_libssh2_ed25519_new_private_sk(libssh2_ed25519_ctx **ed_ctx,
+                                unsigned char *flags,
+                                const char **application,
+                                const unsigned char **key_handle,
+                                size_t *handle_len,
+                                LIBSSH2_SESSION *session,
+                                const char *filename,
+                                const uint8_t *passphrase)
+{
+    int rc;
+    FILE *fp;
+    unsigned char *buf;
+    struct string_buf *decrypted = NULL;
+    libssh2_ed25519_ctx *ctx = NULL;
+
+    if(!session)
+        return -1;
+
+    _libssh2_init_if_needed();
+
+    fp = fopen(filename, "r");
+    if(!fp)
+        return _libssh2_error(session, LIBSSH2_ERROR_FILE,
+                              "Unable to open ed25519 SK private key file");
+
+    rc = _libssh2_openssh_pem_parse(session, passphrase, fp, &decrypted);
+    fclose(fp);
+    if(rc)
+        return rc;
+
+    /* leading type string */
+    rc = _libssh2_get_string(decrypted, &buf, NULL);
+    if(rc || !buf) {
+        _libssh2_string_buf_free(session, decrypted);
+        return _libssh2_error(session, LIBSSH2_ERROR_PROTO,
+                              "Public key type in decrypted key data not found");
+    }
+
+    if(strcmp("sk-ssh-ed25519@openssh.com", (const char *)buf) == 0)
+        rc = gen_publickey_from_sk_ed25519_openssh_priv_data(session, decrypted,
+                                                             flags, application,
+                                                             key_handle,
+                                                             handle_len,
+                                                             &ctx);
+    else
+        rc = -1;
+
+    _libssh2_string_buf_free(session, decrypted);
+
+    if(rc == 0) {
+        if(ed_ctx)
+            *ed_ctx = ctx;
+        else if(ctx)
+            _libssh2_ed25519_free(ctx);
+    }
+
+    return rc;
+}
+
+int
+_libssh2_ed25519_new_private_frommemory_sk(libssh2_ed25519_ctx **ed_ctx,
+                                           unsigned char *flags,
+                                           const char **application,
+                                           const unsigned char **key_handle,
+                                           size_t *handle_len,
+                                           LIBSSH2_SESSION *session,
+                                           const char *filedata,
+                                           size_t filedata_len,
+                                           unsigned const char *passphrase)
+{
+    int rc;
+    unsigned char *buf;
+    struct string_buf *decrypted = NULL;
+    libssh2_ed25519_ctx *ctx = NULL;
+
+    if(!session)
+        return -1;
+
+    _libssh2_init_if_needed();
+
+    if(_libssh2_openssh_pem_parse_memory(session, passphrase,
+                                         filedata, filedata_len,
+                                         &decrypted))
+        return -1;
+
+    /* leading type string */
+    rc = _libssh2_get_string(decrypted, &buf, NULL);
+    if(rc || !buf) {
+        _libssh2_string_buf_free(session, decrypted);
+        return _libssh2_error(session, LIBSSH2_ERROR_PROTO,
+                              "Public key type in decrypted key data not found");
+    }
+
+    if(strcmp("sk-ssh-ed25519@openssh.com", (const char *)buf) == 0)
+        rc = gen_publickey_from_sk_ed25519_openssh_priv_data(session, decrypted,
+                                                             flags, application,
+                                                             key_handle,
+                                                             handle_len,
+                                                             &ctx);
     else
         rc = -1;
 

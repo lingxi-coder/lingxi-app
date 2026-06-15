@@ -190,12 +190,46 @@ Re-apply after any re-vendor: re-add `set_homedir` to `git2/src/opts.rs` (grep
 `fn set_homedir`; if absent, copy the `set_ssl_cert_dir` shape with
 `GIT_OPT_SET_HOMEDIR` + a single path arg).
 
-## libssh2 mbedTLS backend: NO ed25519 (device-acceptance finding, not a patch)
+## libssh2 mbedTLS backend: ed25519 — RESOLVED (see "ref10 Ed25519" patch below)
 
-`third_party/libssh2-sys/libssh2/src/mbedtls.h` has `#define LIBSSH2_ED25519 0`
-— the mbedTLS crypto backend (adopted in the size-opt swap) supports **RSA and
-ECDSA only**, not ed25519. SSH key auth on Android therefore requires an
-RSA/ECDSA key; ed25519 keys (the modern OpenSSH default) fail at the publickey
-signature phase ("remote rejected authentication"). Device-proven: host OpenSSH
-(ed25519) authenticates, our libssh2-mbedTLS does not; an RSA key works.
-Tradeoff of the OpenSSL→mbedTLS size optimization — documented, not fixed here.
+ORIGINAL FINDING (device-acceptance): the mbedTLS backend shipped
+`#define LIBSSH2_ED25519 0` — RSA/ECDSA only; ed25519 keys (the modern OpenSSH
+default) failed at the publickey signature phase, while host OpenSSH authenticated
+fine. mbedTLS itself has no Ed25519 implementation (only X25519/Curve25519 for ECDH).
+
+**RESOLVED** by vendoring ref10 Ed25519 + implementing the mbedTLS-backend
+contract — see the "**libssh2: ref10 Ed25519**" patch section below. The flag is
+now `LIBSSH2_ED25519 1`; ed25519 userauth + host keys + `curve25519-sha256` KEX
+work. Device-proven: the same ed25519 key that failed now clones+pushes over SSH.
+
+## libssh2: ref10 Ed25519 for the mbedTLS backend (restore ssh-ed25519 + curve25519-sha256)
+
+mbedTLS has no Ed25519 (only X25519/Curve25519 for ECDH), so the size-opt swap
+dropped `ssh-ed25519`. Fix = vendor the public-domain **ref10** Ed25519 (the
+implementation OpenSSH ships) + implement libssh2's mbedTLS-backend crypto
+contract on it; X25519 KEX reuses mbedTLS's existing Curve25519.
+
+**Vendored source (provenance):** OpenSSH **9.9p1** consolidated ed25519, under
+`third_party/libssh2-sys/libssh2/src/ed25519/`:
+- `ed25519.c` — sha256 `445c5c9a1ca83e518eca26ec1874bacce29af63474a8c18490f21b1e86a1e18e` (self-contained ref10: fe/ge/sc/verify inlined; `crypto_sign_ed25519`/`_open`/`_keypair`).
+- `crypto_api.h` — sha256 `6e56b26e4689f82a0ed218344de67c55aba55849b78b0a994a94cd49a5f757e3` (types + decls; `randombytes` is a `#define`→`arc4random_buf` macro).
+- From `openssh-9.9p1.tar.gz` sha256 `b343fbcdbff87f15b1986e6e15d6d4fc9a7d36066be6b7fb507087ba8f966c02` (OpenBSD/OpenSSH mirrors; github blocked on the dev network).
+
+**Added (LingXi-local, NOT upstream):**
+- `ed25519/includes.h` — shim: `#define HAVE_STDINT_H 1` + `<stdint.h>` (both vendored files `#include "includes.h"`; that's the only OpenSSH-build coupling).
+- `ed25519/ed25519_glue.c` — defines `int crypto_hash_sha512(...)` via `mbedtls_sha512`. NO `randombytes` (it's the upstream macro; keygen is never called — keys are loaded, not generated).
+- `mbedtls.h` — `#define LIBSSH2_ED25519 1`; `libssh2_mbedtls_ed25519_ctx { unsigned char pub[32]; priv[64]; int has_private; }` + `#define libssh2_ed25519_ctx …`; `void _libssh2_ed25519_free(libssh2_ed25519_ctx *)` prototype.
+- `mbedtls.c` — `#include "ed25519/crypto_api.h"` + an `#if LIBSSH2_ED25519` section (after the static `_libssh2_mbedtls_ctr_drbg`) implementing all 10 contract functions: `_ed25519_free/_new_public/_sign/_verify/_new_private/_new_private_frommemory` + the two `_sk` parse variants (over ref10), and `_curve25519_new/_gen_k` (over mbedTLS `MBEDTLS_ECP_DP_CURVE25519`).
+- `libssh2-sys/build.rs` — `.file("libssh2/src/ed25519/ed25519.c")` + `.file("libssh2/src/ed25519/ed25519_glue.c")`.
+
+**Critical correctness points (for re-apply / review):**
+- **ctx alloc:** the ctx is freed by `_libssh2_ed25519_free(ctx)` with NO session → it MUST be libc `calloc`/`free`, NOT session-routed `LIBSSH2_CALLOC`. Buffers RETURNED to libssh2 (signature, pub/priv key bytes, sk `application`/`key_handle`) use `LIBSSH2_ALLOC` (libssh2 frees them).
+- **ed25519 sk format:** the OpenSSH 64-byte private field IS ref10's `sk` (seed‖pub) — copy verbatim into `ctx->priv`.
+- **sign/verify:** ref10's `crypto_sign_ed25519` emits `sig(64)‖msg`; take the first 64 (detached). Verify builds `sig‖msg` → `crypto_sign_ed25519_open`.
+- **curve25519 byte order (the trap):** X25519 is little-endian; libssh2 forms `K` via a big-endian read of the raw output → `mbedtls_mpi_write_binary_le(&R.X,…)` then `mbedtls_mpi_read_binary(*k,…)`. Validated by the RFC 7748 §5.2 KAT.
+
+**Verification done:** RFC 8032 §7.1 + RFC 7748 §5.2 host KATs both pass; `nm -u` on both ABIs shows zero undefined ed25519/curve25519/mbedtls symbols + `libssh2.a` defines the ref10 + `hostkey_method_ssh_ed25519`; stripped `.so` +~170 KB/ABI; host `tool-git-mobile` 45/45; device-proven ed25519 SSH clone+push on a physical arm64 device.
+
+**Re-apply on re-vendor:** re-extract `ed25519.c`+`crypto_api.h` from openssh-9.9p1 (verify the sha256s above); re-add the `includes.h` shim + `ed25519_glue.c`; re-add the two `build.rs` `.file(...)`; re-set `LIBSSH2_ED25519 1` + the ctx/proto in `mbedtls.h`; re-add the `#if LIBSSH2_ED25519` section in `mbedtls.c`. `_sk` is parse-only backend parity (no live FIDO transport).
+
+**Known limit:** the FIDO `sk-ssh-ed25519` `_sk` functions parse the key + metadata for contract parity but live FIDO signing is not wired (needs an authenticator + sk-signing path above libssh2). Not in scope.

@@ -1263,6 +1263,22 @@ impl OrchestratorApiClient for ProviderApiAdapter {
         self.drive_non_stream(req, ctl).await
     }
 
+    async fn count_tokens(
+        &self,
+        model: &str,
+        system: Option<&str>,
+        msgs: Vec<ConversationMessage>,
+        tools: Vec<serde_json::Value>,
+    ) -> Result<u64, LlmError> {
+        // Build the same non-streaming request shape `messages_create` sends,
+        // then delegate to the count_tokens facade: the real
+        // `/v1/messages/count_tokens` endpoint (with the `count_tokens` beta) on
+        // Anthropic routes, byte-length/4 approximation elsewhere.
+        let req = self.build_request(model, system, msgs, tools, false, None)?;
+        crate::model::count_tokens::count_tokens(self.client.as_ref(), self.transport.as_ref(), &req)
+            .await
+    }
+
     async fn messages_create_with_opts(
         &self,
         model: &str,
@@ -3831,6 +3847,74 @@ mod tests {
             adapter.last_rate_limit_info().is_none(),
             "last_rate_limit_info must be None when no unified headers are present"
         );
+    }
+
+    // ── OrchestratorApiClient::count_tokens ─────────────────────────────────────
+
+    /// The adapter override drives the real `/v1/messages/count_tokens` endpoint
+    /// on an Anthropic route: it sends one request to the count_tokens URL
+    /// carrying the `count_tokens` beta header and returns the decoded
+    /// `input_tokens` from the response.
+    #[tokio::test]
+    async fn count_tokens_through_adapter_hits_anthropic_endpoint_with_beta() {
+        let transport = FakeTransport::always(ProviderResponse {
+            status: 200,
+            headers: BTreeMap::new(),
+            body_json: serde_json::json!({ "input_tokens": 2095 }),
+            request_id: None,
+        });
+        let adapter = make_adapter(transport.clone());
+
+        let count = OrchestratorApiClient::count_tokens(
+            &adapter,
+            "claude-sonnet-4-20250514",
+            Some("you are helpful"),
+            Vec::new(),
+            Vec::new(),
+        )
+        .await
+        .expect("count_tokens ok");
+
+        assert_eq!(count, 2095, "decoded input_tokens from the count_tokens response");
+        assert_eq!(transport.seen_count(), 1, "exactly one count_tokens request sent");
+
+        let url = transport.seen.lock().unwrap()[0].url.clone();
+        assert!(
+            url.ends_with("/v1/messages/count_tokens"),
+            "must route to the count_tokens endpoint; url={url}"
+        );
+        let expected_beta = crate::model::betas::assemble_beta_header(
+            crate::model::betas::Provider::Anthropic,
+            crate::model::betas::Endpoint::CountTokens,
+        );
+        assert_eq!(
+            transport.seen_headers(0).get("anthropic-beta").map(String::as_str),
+            Some(expected_beta.as_str()),
+            "anthropic-beta header must equal assemble_beta_header(Anthropic, CountTokens)"
+        );
+    }
+
+    /// The trait default (used by mocks / non-routing impls) is the byte/4
+    /// approximation over the conversation text: `(system + msg text) / 4`,
+    /// floored at 1.
+    #[tokio::test]
+    async fn count_tokens_default_impl_is_byte_over_four_approximation() {
+        let mock = crate::test_support::MockApiClient::new(vec![]);
+        // system = 8 bytes; one user message of 40 bytes → (8 + 40) / 4 = 12.
+        let msgs = vec![protocol::ConversationMessage::user(
+            protocol::MessageId::new(),
+            "1234567890123456789012345678901234567890".to_string(),
+        )];
+        let count = OrchestratorApiClient::count_tokens(
+            &mock,
+            "any-model",
+            Some("12345678"),
+            msgs,
+            Vec::new(),
+        )
+        .await
+        .expect("default count_tokens ok");
+        assert_eq!(count, 12, "(8 system + 40 user) / 4 = 12 tokens");
     }
 
     // ── Task 5 Part B: OrchestratorApiClient::last_rate_limit_info ──────────────

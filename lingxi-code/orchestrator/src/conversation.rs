@@ -137,6 +137,28 @@ pub trait OrchestratorApiClient: Send + Sync {
         self.messages_create(model, system, msgs, tools).await
     }
 
+    /// Count the input tokens a `messages.create` for `(model, system, msgs,
+    /// tools)` would consume on its resolved route.
+    ///
+    /// [`ProviderApiAdapter`](crate::provider_adapter::ProviderApiAdapter)
+    /// overrides this to call the real `/v1/messages/count_tokens` endpoint on
+    /// Anthropic routes (with the `count_tokens` beta) and a byte-length/4
+    /// approximation elsewhere (see [`crate::model::count_tokens`]). The default
+    /// here is that same byte/4 approximation computed directly from the
+    /// conversation text, so mocks and non-routing impls return a sane estimate
+    /// without a network call.
+    async fn count_tokens(
+        &self,
+        _model: &str,
+        system: Option<&str>,
+        msgs: Vec<ConversationMessage>,
+        _tools: Vec<serde_json::Value>,
+    ) -> Result<u64, LlmError> {
+        let mut bytes = system.map_or(0u64, |s| s.len() as u64);
+        bytes += msgs.iter().map(protocol::text_byte_size).sum::<u64>();
+        Ok((bytes / crate::model::count_tokens::APPROX_CHARS_PER_TOKEN).max(1))
+    }
+
     /// Enumerate available `provider/model` ids + `@aliases` for `/model`'s
     /// list mode. Default returns empty so non-routing impls (mocks / the
     /// no-streaming stub) need no override; `ProviderApiAdapter` overrides it

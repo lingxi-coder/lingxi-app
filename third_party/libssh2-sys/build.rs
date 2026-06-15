@@ -89,6 +89,8 @@ fn main() {
         .file("libssh2/src/transport.c")
         .file("libssh2/src/userauth.c")
         .file("libssh2/src/userauth_kbd_packet.c")
+        .file("libssh2/src/ed25519/ed25519.c")
+        .file("libssh2/src/ed25519/ed25519_glue.c")
         .include(&include)
         .include("libssh2/src");
 

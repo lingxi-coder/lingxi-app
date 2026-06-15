@@ -19,12 +19,11 @@ import java.io.File
  * [KeystoreGitCredentialProvider] — so each network op fetches the
  * token/passphrase via a genuine per-op Android Keystore round-trip.
  *
- * **SSH key type:** the engine's libssh2 uses the **mbedTLS** crypto backend
- * (size-opt swap), which supports **RSA and ECDSA only — NOT ed25519**
- * (`LIBSSH2_ED25519 0`). The `-e sshKeyB64` key MUST therefore be RSA or ECDSA;
- * an ed25519 key fails at the publickey signature phase ("remote rejected
- * authentication"), even though it authenticates fine with a stock OpenSSH
- * client. Generate e.g. `ssh-keygen -t rsa -b 3072 -m PEM`.
+ * **SSH key type:** the engine's libssh2 (mbedTLS backend) now supports
+ * **ed25519** (vendored ref10), RSA, and ECDSA — `LIBSSH2_ED25519 1` enables
+ * `ssh-ed25519` userauth + host keys + the `curve25519-sha256` KEX. So
+ * `-e sshKeyB64` may be any of those key types. (Historically the mbedTLS
+ * size-opt swap had dropped ed25519; restored here.)
  *
  * These need live credentials + a writable remote, so each test is **guarded by
  * instrumentation args** and SKIPS (not fails) when they are absent. Run with:

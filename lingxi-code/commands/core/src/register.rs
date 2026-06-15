@@ -271,7 +271,7 @@ pub fn register_core_connect(
 
 /// Overwrite the handle-free `/skills` entry with its non-TUI real handler.
 ///
-/// Claude Code implements `/skills` as an interactive `local-jsx` menu. LingXi's
+/// Claude Code implements `/skills` as an interactive `local-jsx` menu. `LingXi`'s
 /// TUI opens the full-screen viewer before the slash dispatcher runs; this
 /// command handler exists for non-TUI dispatcher paths and renders the same
 /// project/user skill list as plain text.

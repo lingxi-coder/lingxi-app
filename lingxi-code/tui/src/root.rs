@@ -478,9 +478,13 @@ fn handle_screen_key(st: &mut AppState, k: &KeyEvent) {
             use crate::screens::model::{handle_model_key, ModelOutcome};
             let ct_key = iocraft_to_crossterm028_key(k);
             match handle_model_key(state, ct_key.code) {
-                ModelOutcome::Commit { request_model, .. } => {
-                    // Available row: raise the async switch (pump_switch_model
-                    // performs the write + refreshes the status line) and close.
+                ModelOutcome::Commit { provider_id, request_model } => {
+                    // Record the selection in the persisted recents (catalog
+                    // Phase 3-B) so it surfaces in the picker's Recent group on
+                    // the next open; best-effort, never load-bearing. Then raise
+                    // the async switch (pump_switch_model performs the write +
+                    // refreshes the status line) and close.
+                    crate::recent_models::record_recent_model(&provider_id, &request_model);
                     st.pending_switch_model = Some(request_model);
                     st.close_screen();
                 }
@@ -1181,6 +1185,13 @@ pub async fn pump_open_model(
     // badge unconfigured providers.
     let models = handle.list_available_models().await;
     let catalog = handle.list_model_listings().await;
+    // Recents (catalog Phase 3-B): load the persisted `recentModels` list OUTSIDE
+    // the lock (best-effort file read), mapped to the picker's
+    // `(provider_id, request_model)` keys. Empty on any error.
+    let recent: Vec<(String, String)> = crate::recent_models::load_recent_models()
+        .into_iter()
+        .map(|r| (r.provider_id, r.request_model))
+        .collect();
 
     let mut st = state.lock().await;
     if st.pending_permission.is_some() || st.active_screen.is_some() {
@@ -1194,10 +1205,7 @@ pub async fn pump_open_model(
         &st.provider_availability,
         &st.model_providers,
     );
-    // Recents persistence is not yet threaded — pass an empty recent list (the
-    // Recent group simply won't appear), back-compatible with the historical
-    // picker.
-    st.open_model(rows, Vec::new(), current);
+    st.open_model(rows, recent, current);
     true
 }
 

@@ -1,7 +1,7 @@
 //! `/skills` — list available file-based skills in non-TUI command paths.
 //!
 //! Claude Code's `/skills` command is a `local-jsx` command that opens
-//! `SkillsMenu`. The LingXi TUI already intercepts `/skills` and opens the
+//! `SkillsMenu`. The `LingXi` TUI already intercepts `/skills` and opens the
 //! full-screen viewer from `tui::screens::skills`; this handler covers the
 //! registry/bridge/headless path where no interactive screen can be opened.
 //!

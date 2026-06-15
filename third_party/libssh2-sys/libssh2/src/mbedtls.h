@@ -109,7 +109,22 @@
 #else
 # define LIBSSH2_ECDSA          0
 #endif
-#define LIBSSH2_ED25519         0
+#define LIBSSH2_ED25519         1
+
+/* mbedTLS backend Ed25519 key context (ref10-backed). For a private key,
+   `priv` holds ref10's 64-byte secret = seed(32) || public(32); for a
+   public-only key, only `pub` is valid. */
+typedef struct {
+    unsigned char pub[32];
+    unsigned char priv[64];
+    int has_private;
+} libssh2_mbedtls_ed25519_ctx;
+#define libssh2_ed25519_ctx libssh2_mbedtls_ed25519_ctx
+
+/* Frees a ctx with NO session (called as `_libssh2_ed25519_free(ctx)` from
+   hostkey.c) — so the ctx MUST be libc-allocated (calloc), NOT session-routed
+   LIBSSH2_CALLOC. Declared here, defined in mbedtls.c. */
+void _libssh2_ed25519_free(libssh2_ed25519_ctx *ctx);
 
 #include "crypto_config.h"
 

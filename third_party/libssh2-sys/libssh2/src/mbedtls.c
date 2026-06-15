@@ -1550,22 +1550,32 @@ _libssh2_ed25519_sign(libssh2_ed25519_ctx *ctx, LIBSSH2_SESSION *session,
 {
     unsigned char *sm = NULL, *sig = NULL;
     unsigned long long smlen = 0;
-    if(!ctx || !ctx->has_private)
+    if(!ctx || !ctx->has_private) {
+        *out_sig = NULL;
+        *out_sig_len = 0;
         return -1;
+    }
     sm = LIBSSH2_CALLOC(session, message_len + LIBSSH2_ED25519_SIG_LEN);
-    if(!sm)
+    if(!sm) {
+        *out_sig = NULL;
+        *out_sig_len = 0;
         return -1;
+    }
     if(crypto_sign_ed25519(sm, &smlen, message, (unsigned long long)message_len,
                            ctx->priv) != 0 ||
        smlen != message_len + LIBSSH2_ED25519_SIG_LEN) {
         _libssh2_explicit_zero(sm, message_len + LIBSSH2_ED25519_SIG_LEN);
         LIBSSH2_FREE(session, sm);
+        *out_sig = NULL;
+        *out_sig_len = 0;
         return -1;
     }
     sig = LIBSSH2_CALLOC(session, LIBSSH2_ED25519_SIG_LEN);
     if(!sig) {
         _libssh2_explicit_zero(sm, message_len + LIBSSH2_ED25519_SIG_LEN);
         LIBSSH2_FREE(session, sm);
+        *out_sig = NULL;
+        *out_sig_len = 0;
         return -1;
     }
     memcpy(sig, sm, LIBSSH2_ED25519_SIG_LEN);
@@ -1594,8 +1604,164 @@ _libssh2_ed25519_verify(libssh2_ed25519_ctx *ctx, const uint8_t *s,
         memcpy(sm + s_len, m, m_len);
     rc = crypto_sign_ed25519_open(out, &outlen, sm, smlen, ctx->pub);
     free(sm);
+    _libssh2_explicit_zero(out, (size_t)smlen);
     free(out);
     return (rc == 0) ? 0 : -1;
+}
+
+
+/*******************************************************************/
+/*
+ * mbedTLS backend: Ed25519 OpenSSH private-key extraction
+ *
+ * The OpenSSH private-key blob carries, for an "ssh-ed25519" key:
+ *   pubkey-string(32) || privkey-string(64) || comment-string
+ * where the 64-byte private field is ref10's sk = seed(32)||pub(32).
+ * Copy it verbatim into ctx->priv; the 32-byte public field -> ctx->pub.
+ *
+ * ctx is libc-calloc'd to match _libssh2_ed25519_free (no session).
+ */
+
+static int
+gen_publickey_from_ed25519_openssh_priv_data(LIBSSH2_SESSION *session,
+                                             struct string_buf *decrypted,
+                                             libssh2_ed25519_ctx **out_ctx)
+{
+    libssh2_ed25519_ctx *ctx = NULL;
+    unsigned char *pub_key, *priv_key, *buf;
+    size_t tmp_len = 0;
+
+    if(_libssh2_get_string(decrypted, &pub_key, &tmp_len) ||
+       tmp_len != LIBSSH2_ED25519_KEY_LEN)
+        return _libssh2_error(session, LIBSSH2_ERROR_PROTO,
+                              "Wrong ed25519 public key length");
+
+    if(_libssh2_get_string(decrypted, &priv_key, &tmp_len) ||
+       tmp_len != LIBSSH2_ED25519_PRIVATE_KEY_LEN)
+        return _libssh2_error(session, LIBSSH2_ERROR_PROTO,
+                              "Wrong ed25519 private key length");
+
+    ctx = calloc(1, sizeof(*ctx));  /* libc — freed by _libssh2_ed25519_free */
+    if(!ctx)
+        return _libssh2_error(session, LIBSSH2_ERROR_ALLOC,
+                              "Unable to allocate memory for ed25519 key");
+
+    /* The 64-byte private field IS ref10's sk = seed(32)||pub(32). */
+    memcpy(ctx->priv, priv_key, LIBSSH2_ED25519_PRIVATE_KEY_LEN);
+    memcpy(ctx->pub, pub_key, LIBSSH2_ED25519_KEY_LEN);
+    ctx->has_private = 1;
+
+    /* Trailing comment string, if present — read and ignore. */
+    if(_libssh2_get_string(decrypted, &buf, &tmp_len) == 0) {
+        /* comment, ignored */
+    }
+
+    if(out_ctx)
+        *out_ctx = ctx;
+    else
+        _libssh2_ed25519_free(ctx);
+
+    return 0;
+}
+
+int
+_libssh2_ed25519_new_private(libssh2_ed25519_ctx **ed_ctx,
+                             LIBSSH2_SESSION *session,
+                             const char *filename, const uint8_t *passphrase)
+{
+    int rc;
+    FILE *fp;
+    unsigned char *buf;
+    struct string_buf *decrypted = NULL;
+    libssh2_ed25519_ctx *ctx = NULL;
+
+    if(!session)
+        return -1;
+
+    _libssh2_init_if_needed();
+
+    fp = fopen(filename, "r");
+    if(!fp)
+        return _libssh2_error(session, LIBSSH2_ERROR_FILE,
+                              "Unable to open ed25519 private key file");
+
+    rc = _libssh2_openssh_pem_parse(session, passphrase, fp, &decrypted);
+    fclose(fp);
+    if(rc)
+        return rc;
+
+    /* leading type string */
+    rc = _libssh2_get_string(decrypted, &buf, NULL);
+    if(rc || !buf) {
+        _libssh2_string_buf_free(session, decrypted);
+        return _libssh2_error(session, LIBSSH2_ERROR_PROTO,
+                              "Public key type in decrypted key data not found");
+    }
+
+    if(strcmp("ssh-ed25519", (const char *)buf) == 0)
+        rc = gen_publickey_from_ed25519_openssh_priv_data(session, decrypted,
+                                                          &ctx);
+    else
+        rc = -1;
+
+    _libssh2_string_buf_free(session, decrypted);
+
+    if(rc == 0) {
+        if(ed_ctx)
+            *ed_ctx = ctx;
+        else if(ctx)
+            _libssh2_ed25519_free(ctx);
+    }
+
+    return rc;
+}
+
+int
+_libssh2_ed25519_new_private_frommemory(libssh2_ed25519_ctx **ed_ctx,
+                                        LIBSSH2_SESSION *session,
+                                        const char *filedata,
+                                        size_t filedata_len,
+                                        unsigned const char *passphrase)
+{
+    int rc;
+    unsigned char *buf;
+    struct string_buf *decrypted = NULL;
+    libssh2_ed25519_ctx *ctx = NULL;
+
+    if(!session)
+        return -1;
+
+    _libssh2_init_if_needed();
+
+    if(_libssh2_openssh_pem_parse_memory(session, passphrase,
+                                         filedata, filedata_len,
+                                         &decrypted))
+        return -1;
+
+    /* leading type string */
+    rc = _libssh2_get_string(decrypted, &buf, NULL);
+    if(rc || !buf) {
+        _libssh2_string_buf_free(session, decrypted);
+        return _libssh2_error(session, LIBSSH2_ERROR_PROTO,
+                              "Public key type in decrypted key data not found");
+    }
+
+    if(strcmp("ssh-ed25519", (const char *)buf) == 0)
+        rc = gen_publickey_from_ed25519_openssh_priv_data(session, decrypted,
+                                                          &ctx);
+    else
+        rc = -1;
+
+    _libssh2_string_buf_free(session, decrypted);
+
+    if(rc == 0) {
+        if(ed_ctx)
+            *ed_ctx = ctx;
+        else if(ctx)
+            _libssh2_ed25519_free(ctx);
+    }
+
+    return rc;
 }
 
 

@@ -41,6 +41,10 @@
 
 #include <stdlib.h>
 
+#if LIBSSH2_ED25519
+#include "ed25519/crypto_api.h"
+#endif
+
 #if MBEDTLS_VERSION_NUMBER < 0x03000000
 #define mbedtls_cipher_info_get_key_bitlen(c) (c->key_bitlen)
 #define mbedtls_cipher_info_get_iv_size(c)    (c->iv_size)
@@ -1501,6 +1505,196 @@ _libssh2_mbedtls_ecdsa_free(libssh2_ecdsa_ctx *ctx)
     mbedtls_free(ctx);
 }
 #endif /* LIBSSH2_ECDSA */
+
+
+/*******************************************************************/
+/*
+ * mbedTLS backend: Ed25519 functions (ref10-backed)
+ */
+
+#if LIBSSH2_ED25519
+
+void
+_libssh2_ed25519_free(libssh2_ed25519_ctx *ctx)
+{
+    if(ctx) {
+        /* ctx is libc-calloc'd (the new_* functions) — no session here. */
+        _libssh2_explicit_zero(ctx, sizeof(*ctx));
+        free(ctx);
+    }
+}
+
+int
+_libssh2_ed25519_new_public(libssh2_ed25519_ctx **ed_ctx,
+                            LIBSSH2_SESSION *session,
+                            const unsigned char *raw_pub_key,
+                            const size_t key_len)
+{
+    libssh2_ed25519_ctx *ctx;
+    (void)session;
+    if(!ed_ctx || key_len != LIBSSH2_ED25519_KEY_LEN)
+        return -1;
+    ctx = calloc(1, sizeof(*ctx));  /* libc — freed by _libssh2_ed25519_free */
+    if(!ctx)
+        return -1;
+    memcpy(ctx->pub, raw_pub_key, LIBSSH2_ED25519_KEY_LEN);
+    ctx->has_private = 0;
+    *ed_ctx = ctx;
+    return 0;
+}
+
+int
+_libssh2_ed25519_sign(libssh2_ed25519_ctx *ctx, LIBSSH2_SESSION *session,
+                      uint8_t **out_sig, size_t *out_sig_len,
+                      const uint8_t *message, size_t message_len)
+{
+    unsigned char *sm = NULL, *sig = NULL;
+    unsigned long long smlen = 0;
+    if(!ctx || !ctx->has_private)
+        return -1;
+    sm = LIBSSH2_CALLOC(session, message_len + LIBSSH2_ED25519_SIG_LEN);
+    if(!sm)
+        return -1;
+    if(crypto_sign_ed25519(sm, &smlen, message, (unsigned long long)message_len,
+                           ctx->priv) != 0 ||
+       smlen != message_len + LIBSSH2_ED25519_SIG_LEN) {
+        _libssh2_explicit_zero(sm, message_len + LIBSSH2_ED25519_SIG_LEN);
+        LIBSSH2_FREE(session, sm);
+        return -1;
+    }
+    sig = LIBSSH2_CALLOC(session, LIBSSH2_ED25519_SIG_LEN);
+    if(!sig) {
+        _libssh2_explicit_zero(sm, message_len + LIBSSH2_ED25519_SIG_LEN);
+        LIBSSH2_FREE(session, sm);
+        return -1;
+    }
+    memcpy(sig, sm, LIBSSH2_ED25519_SIG_LEN);
+    _libssh2_explicit_zero(sm, message_len + LIBSSH2_ED25519_SIG_LEN);
+    LIBSSH2_FREE(session, sm);
+    *out_sig = sig;
+    *out_sig_len = LIBSSH2_ED25519_SIG_LEN;
+    return 0;
+}
+
+int
+_libssh2_ed25519_verify(libssh2_ed25519_ctx *ctx, const uint8_t *s,
+                        size_t s_len, const uint8_t *m, size_t m_len)
+{
+    unsigned char *sm, *out;
+    unsigned long long smlen, outlen;
+    int rc;
+    if(!ctx || s_len != LIBSSH2_ED25519_SIG_LEN)
+        return -1;
+    smlen = (unsigned long long)s_len + m_len;
+    sm = malloc((size_t)smlen);
+    out = malloc((size_t)smlen);
+    if(!sm || !out) { free(sm); free(out); return -1; }
+    memcpy(sm, s, s_len);
+    if(m_len)
+        memcpy(sm + s_len, m, m_len);
+    rc = crypto_sign_ed25519_open(out, &outlen, sm, smlen, ctx->pub);
+    free(sm);
+    free(out);
+    return (rc == 0) ? 0 : -1;
+}
+
+
+/*******************************************************************/
+/*
+ * mbedTLS backend: curve25519-sha256 KEX
+ *
+ * BYTE ORDER: X25519 values are little-endian; libssh2 forms the KEX
+ * integer K via a big-endian read of the raw X25519 output. So the
+ * shared X coordinate is written little-endian, then read big-endian
+ * into the mbedtls_mpi k (write_binary_le then read_binary).
+ */
+
+int
+_libssh2_curve25519_new(LIBSSH2_SESSION *session, uint8_t **out_public_key,
+                        uint8_t **out_private_key)
+{
+    mbedtls_ecp_group grp;
+    mbedtls_mpi d;
+    mbedtls_ecp_point Q;
+    unsigned char *pub = NULL, *priv = NULL;
+    int rc = -1;
+    mbedtls_ecp_group_init(&grp);
+    mbedtls_mpi_init(&d);
+    mbedtls_ecp_point_init(&Q);
+    if(mbedtls_ecp_group_load(&grp, MBEDTLS_ECP_DP_CURVE25519) != 0)
+        goto clean;
+    if(mbedtls_ecp_gen_keypair(&grp, &d, &Q, mbedtls_ctr_drbg_random,
+                               &_libssh2_mbedtls_ctr_drbg) != 0)
+        goto clean;
+    if(out_private_key) {
+        priv = LIBSSH2_ALLOC(session, LIBSSH2_ED25519_KEY_LEN);
+        if(!priv || mbedtls_mpi_write_binary_le(&d, priv,
+                                                LIBSSH2_ED25519_KEY_LEN) != 0)
+            goto clean;
+    }
+    if(out_public_key) {
+        pub = LIBSSH2_ALLOC(session, LIBSSH2_ED25519_KEY_LEN);
+        if(!pub || mbedtls_mpi_write_binary_le(&Q.MBEDTLS_PRIVATE(X), pub,
+                                               LIBSSH2_ED25519_KEY_LEN) != 0)
+            goto clean;
+    }
+    if(out_private_key) { *out_private_key = priv; priv = NULL; }
+    if(out_public_key)  { *out_public_key  = pub;  pub  = NULL; }
+    rc = 0;
+clean:
+    if(priv) { _libssh2_explicit_zero(priv, LIBSSH2_ED25519_KEY_LEN);
+               LIBSSH2_FREE(session, priv); }
+    if(pub)  LIBSSH2_FREE(session, pub);
+    mbedtls_ecp_point_free(&Q);
+    mbedtls_mpi_free(&d);
+    mbedtls_ecp_group_free(&grp);
+    return rc;
+}
+
+int
+_libssh2_curve25519_gen_k(_libssh2_bn **k,
+                          uint8_t private_key[LIBSSH2_ED25519_KEY_LEN],
+                          uint8_t server_public_key[LIBSSH2_ED25519_KEY_LEN])
+{
+    mbedtls_ecp_group grp;
+    mbedtls_mpi d;
+    mbedtls_ecp_point P, R;
+    unsigned char shared_le[LIBSSH2_ED25519_KEY_LEN];
+    int rc = -1;
+    if(!k || !*k)
+        return -1;
+    mbedtls_ecp_group_init(&grp);
+    mbedtls_mpi_init(&d);
+    mbedtls_ecp_point_init(&P);
+    mbedtls_ecp_point_init(&R);
+    if(mbedtls_ecp_group_load(&grp, MBEDTLS_ECP_DP_CURVE25519) != 0)
+        goto clean;
+    if(mbedtls_mpi_read_binary_le(&d, private_key, LIBSSH2_ED25519_KEY_LEN) != 0)
+        goto clean;
+    if(mbedtls_mpi_read_binary_le(&P.MBEDTLS_PRIVATE(X), server_public_key,
+                                  LIBSSH2_ED25519_KEY_LEN) != 0 ||
+       mbedtls_mpi_lset(&P.MBEDTLS_PRIVATE(Z), 1) != 0)
+        goto clean;
+    if(mbedtls_ecp_mul(&grp, &R, &d, &P, mbedtls_ctr_drbg_random,
+                       &_libssh2_mbedtls_ctr_drbg) != 0)
+        goto clean;
+    if(mbedtls_mpi_write_binary_le(&R.MBEDTLS_PRIVATE(X), shared_le,
+                                   LIBSSH2_ED25519_KEY_LEN) != 0)
+        goto clean;
+    /* libssh2 K convention: read the LE X25519 output BIG-endian into k. */
+    if(mbedtls_mpi_read_binary(*k, shared_le, LIBSSH2_ED25519_KEY_LEN) != 0)
+        goto clean;
+    rc = 0;
+clean:
+    _libssh2_explicit_zero(shared_le, sizeof(shared_le));
+    mbedtls_ecp_point_free(&R);
+    mbedtls_ecp_point_free(&P);
+    mbedtls_mpi_free(&d);
+    mbedtls_ecp_group_free(&grp);
+    return rc;
+}
+
+#endif /* LIBSSH2_ED25519 */
 
 
 /* _libssh2_supported_key_sign_algorithms

@@ -20,21 +20,38 @@
 
 ---
 
-## Ref10 source (pinned — E1)
+## Ref10 source (pinned — E1) — OpenSSH 9.9p1 CONSOLIDATED layout
 
-Vendor the Ed25519 **ref10** files from **OpenSSH-portable, tag `V_9_9_P1`** (the SUPERCOP ref10 as adapted by OpenSSH; public domain). Exact files (all under OpenSSH's root):
+> **Layout note (verified at execution):** modern OpenSSH (9.9p1) ships the
+> Ed25519 ref10 as a **single consolidated `ed25519.c`** (the field/group/scalar
+> math `fe`/`ge`/`sc` + `crypto_verify_32` are all inlined) plus `crypto_api.h`.
+> The old split files (`fe25519.c`, `ge25519.c`, `sc25519.c`, `verify.c`,
+> `ge25519_base.data`) **no longer exist** — do NOT look for them.
 
-| File | Role |
-|------|------|
-| `crypto_api.h` | declares `crypto_sign_ed25519*`, `crypto_hash_sha512`, `randombytes`, `crypto_verify_32` |
-| `ed25519.c` | `crypto_sign_ed25519_keypair/`/`crypto_sign_ed25519`/`crypto_sign_ed25519_open` |
-| `fe25519.h` / `fe25519.c` | field arithmetic |
-| `ge25519.h` / `ge25519.c` | group arithmetic (`#include`s `ge25519_base.data`) |
-| `ge25519_base.data` | precomputed base-point table (included by `ge25519.c`) |
-| `sc25519.h` / `sc25519.c` | scalar arithmetic |
-| `verify.c` | `crypto_verify_32` |
+Vendor from **OpenSSH-portable release `openssh-9.9p1`** (public domain). Source
+tarball already fetched + staged at `/tmp/lingxi-device-acceptance/ref10-stage/`
+(tarball `openssh-9.9p1.tar.gz` sha256 `b343fbcdbff87f15b1986e6e15d6d4fc9a7d36066be6b7fb507087ba8f966c02`, from `https://mirrors.tuna.tsinghua.edu.cn/OpenBSD/OpenSSH/portable/`).
 
-These ref10 files have been byte-stable in OpenSSH for years. **Obtaining (network note):** github.com is blocked on this network; fetch from a reachable mirror of openssh-portable (e.g. `https://gitee.com/mirrors/openssh-portable` at tag `V_9_9_P1`, or an openssh release tarball via a reachable CDN). The executor MUST record the exact upstream commit SHA + each file's SHA-256 in `LINGXI-PATCHES.md` (Task 12).
+| File | sha256 | Role |
+|------|--------|------|
+| `ed25519.c` | `445c5c9a1ca83e518eca26ec1874bacce29af63474a8c18490f21b1e86a1e18e` | consolidated ref10: `crypto_sign_ed25519`/`_open`/`_keypair` + inlined fe/ge/sc/verify |
+| `crypto_api.h` | `6e56b26e4689f82a0ed218344de67c55aba55849b78b0a994a94cd49a5f757e3` | `crypto_intN` typedefs, `crypto_sign_ed25519*` + `crypto_hash_sha512` decls, `randombytes`→`arc4random_buf` macro |
+
+**Two coupling facts (verified):**
+1. Both files `#include "includes.h"` (an OpenSSH autoconf header absent from our
+   tree). It is needed ONLY to set `HAVE_STDINT_H` so `crypto_api.h` includes
+   `<stdint.h>` for its `int8_t…` typedefs. We provide a **tiny `includes.h`
+   shim** (Task 1) — no other coupling (`ed25519.c` otherwise includes only
+   `<string.h>` + `crypto_api.h`).
+2. `randombytes` is a **macro → `arc4random_buf`** (declared via `<stdlib.h>`,
+   provided by bionic on Android ≥ API 28 / by libc on the host). So we provide
+   **NO `randombytes` function** (a definition would clash with the macro) — and
+   it is never called at runtime anyway (we load keys, never generate; E4). Only
+   `crypto_hash_sha512` needs a glue definition (Task 2).
+
+github.com is blocked on this network; the OpenBSD/OpenSSH mirrors (incl.
+Tsinghua/SJTU) are reachable and were used. Record the provenance above in
+`LINGXI-PATCHES.md` (Task 12).
 
 ---
 
@@ -45,11 +62,11 @@ third_party/
 ├── libssh2-sys/
 │   ├── build.rs                                  MODIFY: compile the ref10 .c files + ed25519_glue.c
 │   └── libssh2/src/
-│       ├── ed25519/                              CREATE (vendored ref10):
-│       │   ├── crypto_api.h  ed25519.c  fe25519.{h,c}
-│       │   ├── ge25519.{h,c}  ge25519_base.data
-│       │   ├── sc25519.{h,c}  verify.c
-│       │   └── ed25519_glue.c                    CREATE: crypto_hash_sha512→mbedTLS, randombytes→abort
+│       ├── ed25519/                              CREATE (vendored ref10, 9.9p1):
+│       │   ├── ed25519.c                         VENDOR: consolidated ref10 (fe/ge/sc/verify inlined)
+│       │   ├── crypto_api.h                      VENDOR: types + decls + randombytes macro
+│       │   ├── includes.h                        CREATE: shim — `#define HAVE_STDINT_H 1` + <stdint.h>
+│       │   └── ed25519_glue.c                    CREATE: crypto_hash_sha512 → mbedTLS (no randombytes)
 │       ├── mbedtls.h                             MODIFY: LIBSSH2_ED25519 1 + libssh2_ed25519_ctx
 │       └── mbedtls.c                             MODIFY: ed25519 + curve25519 backend functions
 └── git2-rs/LINGXI-PATCHES.md                     MODIFY: record the patch + ref10 provenance
@@ -63,93 +80,102 @@ Reference (mirror, do not modify): `third_party/libssh2-sys/libssh2/src/openssl.
 
 # Phase P1 — Vendor ref10 + build wiring
 
-### Task 1: Vendor the ref10 sources
+### Task 1: Vendor the ref10 sources (consolidated 9.9p1 layout)
 
-**Files:** Create `third_party/libssh2-sys/libssh2/src/ed25519/{crypto_api.h,ed25519.c,fe25519.h,fe25519.c,ge25519.h,ge25519.c,ge25519_base.data,sc25519.h,sc25519.c,verify.c}`.
+**Files:** Create `third_party/libssh2-sys/libssh2/src/ed25519/{ed25519.c,crypto_api.h,includes.h}`.
 
-- [ ] **Step 1: Fetch + place the pinned files.** From the openssh-portable mirror at tag `V_9_9_P1`, copy the 10 files listed above into `third_party/libssh2-sys/libssh2/src/ed25519/` unmodified. Record each file's SHA-256:
+The pinned source is already staged at `/tmp/lingxi-device-acceptance/ref10-stage/` (`ed25519.c`, `crypto_api.h`). No network needed.
 
+- [ ] **Step 1: Place the two vendored files + verify their pinned hashes.**
 ```bash
+cd /Users/luolingfeng/Projects/LingXi-Next/.claude/worktrees/android-git-ssh-ed25519
+mkdir -p third_party/libssh2-sys/libssh2/src/ed25519
+cp /tmp/lingxi-device-acceptance/ref10-stage/ed25519.c \
+   /tmp/lingxi-device-acceptance/ref10-stage/crypto_api.h \
+   third_party/libssh2-sys/libssh2/src/ed25519/
 cd third_party/libssh2-sys/libssh2/src/ed25519
-shasum -a 256 *.c *.h *.data
+shasum -a 256 ed25519.c crypto_api.h
 ```
-Expected: 10 files present; note the hashes for Task 12.
+Expected EXACTLY:
+```
+445c5c9a1ca83e518eca26ec1874bacce29af63474a8c18490f21b1e86a1e18e  ed25519.c
+6e56b26e4689f82a0ed218344de67c55aba55849b78b0a994a94cd49a5f757e3  crypto_api.h
+```
+If a hash differs, STOP — the source is not the pinned openssh-9.9p1 (re-fetch the tarball, sha256 `b343fbcd…`, and re-extract).
 
-- [ ] **Step 2: Confirm the public API.** Verify `crypto_api.h` declares these (used by our glue + backend):
-
+- [ ] **Step 2: Create the `includes.h` shim.** Both vendored files `#include "includes.h"`; we only need it to enable `<stdint.h>` for `crypto_api.h`'s `int8_t…` typedefs.
 ```c
-int crypto_sign_ed25519(unsigned char *sm, unsigned long long *smlen,
-    const unsigned char *m, unsigned long long mlen, const unsigned char *sk);
-int crypto_sign_ed25519_open(unsigned char *m, unsigned long long *mlen,
-    const unsigned char *sm, unsigned long long smlen, const unsigned char *pk);
-int crypto_sign_ed25519_keypair(unsigned char *pk, unsigned char *sk);
-extern void crypto_hash_sha512(unsigned char *out, const unsigned char *in, unsigned long long inlen);
-extern int crypto_verify_32(const unsigned char *x, const unsigned char *y);
+/* includes.h — minimal shim for the vendored OpenSSH ref10 ed25519.c /
+   crypto_api.h. Upstream this is an autoconf-generated header; the ref10 code
+   only needs HAVE_STDINT_H so crypto_api.h pulls <stdint.h> for its
+   int8_t..uint64_t typedefs. Nothing else from OpenSSH's includes.h is used. */
+#ifndef LIBSSH2_ED25519_INCLUDES_H
+#define LIBSSH2_ED25519_INCLUDES_H
+#define HAVE_STDINT_H 1
+#include <stdint.h>
+#endif
 ```
-Run: `grep -E "crypto_sign_ed25519|crypto_hash_sha512|crypto_verify_32" crypto_api.h`
-Expected: the declarations are present. If `crypto_sign_ed25519` is named differently (e.g. `crypto_sign`), note the actual names — Task 5/6/7 use whatever this header declares.
+Write this to `third_party/libssh2-sys/libssh2/src/ed25519/includes.h`.
 
-- [ ] **Step 3: Commit.**
+- [ ] **Step 3: Confirm the public API (names the backend + glue rely on).**
 ```bash
+grep -E "crypto_sign_ed25519|crypto_hash_sha512" crypto_api.h
+```
+Expected: `crypto_sign_ed25519`, `crypto_sign_ed25519_open`, `crypto_sign_ed25519_keypair`, `crypto_hash_sha512` are all declared, plus `#define randombytes(buf, buf_len) arc4random_buf((buf), (buf_len))`. (Tasks 5/7 call `crypto_sign_ed25519` / `_open` by these exact names.)
+
+- [ ] **Step 4: Commit.**
+```bash
+cd /Users/luolingfeng/Projects/LingXi-Next/.claude/worktrees/android-git-ssh-ed25519
 git add third_party/libssh2-sys/libssh2/src/ed25519
-git commit -m "vendor(libssh2): ref10 Ed25519 from openssh-portable V_9_9_P1 (P1/T1)"
+git commit -m "vendor(libssh2): ref10 Ed25519 from openssh-9.9p1 (consolidated ed25519.c + includes.h shim) (P1/T1)"
 ```
 
-### Task 2: ref10 glue — SHA-512 via mbedTLS, randombytes abort
+### Task 2: ref10 glue — SHA-512 via mbedTLS
 
 **Files:** Create `third_party/libssh2-sys/libssh2/src/ed25519/ed25519_glue.c`.
 
-ref10 needs `crypto_hash_sha512` and `randombytes`. We provide both: SHA-512 from mbedTLS (already a dependency), and a `randombytes` that aborts (we never generate ed25519 keys — E4).
+ref10's only undefined external is `crypto_hash_sha512` (decl in `crypto_api.h`); we define it over mbedTLS SHA-512. **Do NOT define `randombytes`** — `crypto_api.h` `#define`s it to `arc4random_buf` (a macro), so a function of that name would clash; and we never call keypair anyway (E4).
 
-- [ ] **Step 1: Write the glue.**
+- [ ] **Step 1: Write the glue (SHA-512 only).**
 ```c
-/* ed25519_glue.c — satisfy ref10's external deps using mbedTLS.
+/* ed25519_glue.c — satisfy the vendored ref10's one external dep using mbedTLS.
    crypto_hash_sha512: ref10's required hash, mapped to mbedTLS SHA-512.
-   randombytes: ref10 only calls this from crypto_sign_ed25519_keypair, which
-   this project never invokes (keys are loaded, never generated). Abort if ever
-   reached so a future misuse fails loudly rather than producing a weak key. */
+   (randombytes is a macro→arc4random_buf in crypto_api.h — not defined here;
+    ed25519 keygen is never invoked in this build, E4.) */
 #include "crypto_api.h"
 #include <mbedtls/sha512.h>
 #include <stdlib.h>
 
-void crypto_hash_sha512(unsigned char *out, const unsigned char *in,
-                        unsigned long long inlen)
+int crypto_hash_sha512(unsigned char *out, const unsigned char *in,
+                       unsigned long long inlen)
 {
-    /* mbedtls_sha512(input, ilen, output, is384=0). Returns 0 on success;
-       on the (impossible here) failure path, zero the digest + abort so we
-       never sign/verify against uninitialized memory. */
+    /* crypto_api.h declares: int crypto_hash_sha512(unsigned char *,
+       const unsigned char *, unsigned long long). mbedtls_sha512(in, ilen,
+       out, is384=0) returns 0 on success. On the (impossible here) failure
+       path, abort so we never sign/verify against an uninitialized digest. */
     if(mbedtls_sha512(in, (size_t)inlen, out, 0) != 0)
         abort();
-}
-
-void randombytes(unsigned char *buf, unsigned long long len)
-{
-    (void)buf; (void)len;
-    abort();  /* ed25519 keygen is never used in this build (E4) */
+    return 0;
 }
 ```
-Note: confirm the `randombytes` signature matches `crypto_api.h` (some ref10 variants use `void randombytes(unsigned char *, unsigned long long)`). Match the header exactly.
+Note: the return type is `int` to match `crypto_api.h`'s declaration exactly (verified: `int crypto_hash_sha512(unsigned char *, const unsigned char *, unsigned long long)`).
 
 - [ ] **Step 2: Commit.**
 ```bash
 git add third_party/libssh2-sys/libssh2/src/ed25519/ed25519_glue.c
-git commit -m "feat(libssh2): ref10 glue — crypto_hash_sha512 via mbedTLS, randombytes abort (P1/T2)"
+git commit -m "feat(libssh2): ref10 glue — crypto_hash_sha512 via mbedTLS (P1/T2)"
 ```
 
 ### Task 3: Compile ref10 standalone for both ABIs (build wiring)
 
 **Files:** Modify `third_party/libssh2-sys/build.rs`.
 
-- [ ] **Step 1: Add the ref10 + glue sources to the build.** After the existing `cfg.file(...)` chain (the block ending `.file("libssh2/src/userauth.c")`), add:
+- [ ] **Step 1: Add the two ref10 sources to the build.** After the existing `cfg.file(...)` chain (the block ending `.file("libssh2/src/userauth.c")`), add:
 ```rust
         .file("libssh2/src/ed25519/ed25519.c")
-        .file("libssh2/src/ed25519/fe25519.c")
-        .file("libssh2/src/ed25519/ge25519.c")
-        .file("libssh2/src/ed25519/sc25519.c")
-        .file("libssh2/src/ed25519/verify.c")
         .file("libssh2/src/ed25519/ed25519_glue.c")
 ```
-Also add the ed25519 dir to the include path so `mbedtls.c` can `#include "ed25519/crypto_api.h"` and the glue can find mbedTLS headers (mbedTLS include dir is already wired via `DEP_MBEDTLS_INCLUDE` — confirm `crypto_api.h` is reachable; if the existing `.include("libssh2/src")` is present, `ed25519/crypto_api.h` resolves relative to it).
+Include-path notes (verify, no change usually needed): `ed25519.c` does `#include "includes.h"` + `#include "crypto_api.h"` — cc resolves `""` includes relative to the source dir first, so our shim + `crypto_api.h` in `ed25519/` are found automatically. `ed25519_glue.c` does `#include <mbedtls/sha512.h>` — the mbedTLS include dir is already wired (`DEP_MBEDTLS_INCLUDE`). `mbedtls.c` will `#include "ed25519/crypto_api.h"` (Task 4) — resolves relative to `libssh2/src/`. If the build can't find `mbedtls/sha512.h` from the glue, confirm the existing `cfg.include(...)` for the mbedTLS headers covers it.
 
 - [ ] **Step 2: Build both ABIs (ref10 compiles, lib still links).** mbedtls.h still has `LIBSSH2_ED25519 0` at this point, so the new files compile but aren't called yet.
 ```bash
@@ -195,7 +221,7 @@ int main(void){
 Compile + run on the host (macOS), linking mbedTLS for the SHA-512 glue:
 ```bash
 cd third_party/libssh2-sys/libssh2/src/ed25519
-cc -I. kat_ed25519.c ed25519.c fe25519.c ge25519.c sc25519.c verify.c ed25519_glue.c \
+cc -I. kat_ed25519.c ed25519.c ed25519_glue.c \
    $(pkg-config --cflags --libs mbedcrypto 2>/dev/null || echo "-lmbedcrypto") -o /tmp/kat_ed25519 && /tmp/kat_ed25519
 ```
 Expected: `KAT OK`. If mbedcrypto isn't pkg-config-visible, point `-I`/`-L` at `third_party/mbedtls/include` + a host-built `libmbedcrypto.a` (or compile mbedTLS's `sha512.c` directly into the harness). This proves the vendored ref10 signs/verifies to the RFC 8032 vector before we wire it in.
@@ -932,7 +958,7 @@ git commit -m "test(android): ed25519 SSH device acceptance — clone+push+KEX+h
 
 **Files:** Modify `third_party/git2-rs/LINGXI-PATCHES.md`.
 
-- [ ] **Step 1: Append the ed25519 patch entry.** Document: the vendored ref10 source (openssh-portable `V_9_9_P1`, the upstream commit SHA, the 10 files + their SHA-256 from Task 1), the glue (`ed25519_glue.c`: SHA-512→mbedTLS, randombytes→abort), the mbedtls.c/mbedtls.h changes (`LIBSSH2_ED25519 1`, the ctx, the 9 backend functions + curve25519), the `build.rs` source additions, and the device-acceptance result (ed25519 clone+push + curve25519 KEX + ed25519 host-key pin). Include the re-apply-on-revendor steps (re-copy the ref10 files; re-add `.file(...)`; re-flip the flag; re-add the backend section).
+- [ ] **Step 1: Append the ed25519 patch entry.** Document: the vendored ref10 source (openssh **9.9p1** consolidated layout; tarball sha256 `b343fbcd…`; `ed25519.c` sha256 `445c5c9a…`, `crypto_api.h` sha256 `6e56b26e…`), the `includes.h` shim (HAVE_STDINT_H), the glue (`ed25519_glue.c`: `crypto_hash_sha512`→mbedTLS; randombytes is upstream's `arc4random_buf` macro, not redefined), the mbedtls.c/mbedtls.h changes (`LIBSSH2_ED25519 1`, the ctx + `_libssh2_ed25519_free` prototype, the 9 backend functions + curve25519), the `build.rs` additions (`ed25519.c` + `ed25519_glue.c`), and the device-acceptance result (ed25519 clone+push + curve25519 KEX + ed25519 host-key pin). Include re-apply-on-revendor steps (re-extract `ed25519.c`+`crypto_api.h` from the openssh tarball; re-add the `includes.h` shim + glue; re-add the two `.file(...)`; re-flip the flag; re-add the backend section).
 
 - [ ] **Step 2: Commit.**
 ```bash

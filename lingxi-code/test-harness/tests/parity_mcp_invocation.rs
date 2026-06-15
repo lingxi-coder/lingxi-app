@@ -78,9 +78,7 @@ async fn seed(tools: &[&str]) -> (Arc<ToolRegistry>, Arc<McpRegistry>, Arc<MockM
 
     let ctx = ctx_with_registry(mcp_registry.clone());
     let mut reg = ToolRegistry::new();
-    for (conn_id, mcp_tools) in
-        tool_mcp::build_registered_mcp_tools(&mcp_registry, ctx).await
-    {
+    for (conn_id, mcp_tools) in tool_mcp::build_registered_mcp_tools(&mcp_registry, ctx).await {
         reg.register_mcp_tools(conn_id, mcp_tools);
     }
     (Arc::new(reg), mcp_registry, mock)

@@ -337,8 +337,7 @@ mod tests {
 
     #[tokio::test]
     async fn handle_event_fires_only_for_watched_paths_with_mapped_kind() {
-        let watch: BTreeSet<PathBuf> =
-            [PathBuf::from("/work/.env")].into_iter().collect();
+        let watch: BTreeSet<PathBuf> = [PathBuf::from("/work/.env")].into_iter().collect();
         let firer = RecordingFirer::default();
 
         // Watched path, Modified → fires "change".
@@ -348,7 +347,12 @@ mod tests {
         // Watched path, Deleted → fires "unlink".
         handle_event(&ev("/work/.env", FileEventKind::Deleted), &watch, &firer).await;
         // Sibling un-watched path in the same dir → no fire.
-        handle_event(&ev("/work/other.txt", FileEventKind::Modified), &watch, &firer).await;
+        handle_event(
+            &ev("/work/other.txt", FileEventKind::Modified),
+            &watch,
+            &firer,
+        )
+        .await;
 
         let recorded = firer.fired.lock().unwrap();
         assert_eq!(recorded.len(), 3, "only the three watched-path events fire");

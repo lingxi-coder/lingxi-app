@@ -46,10 +46,13 @@
 //! kind `Markdown`, so the dispatcher routes it through the markdown-expansion
 //! path by kind rather than through the shadowed builtin handler.
 
-use command_api::markdown_loader::{build_markdown_command, load_command_markdown_files};
+use command_api::markdown_loader::{
+    build_markdown_command, build_skill_command, load_command_markdown_files,
+    load_skill_markdown_files_with_roots,
+};
 use command_api::CommandRegistry;
 use std::collections::HashSet;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Discover every `.claude/commands/**.md` custom command reachable from `cwd`
 /// (project dirs up to the git root / `home`, plus the user and managed layers)
@@ -101,6 +104,48 @@ pub async fn load_and_register_custom_commands(
     let mut registered = 0usize;
     for file in &files {
         let command = build_markdown_command(file, file.source);
+        if seen.insert(command.name.clone()) {
+            reg.register_command(command);
+            registered += 1;
+        }
+    }
+    registered
+}
+
+/// Discover every directory-format `.claude/skills/<name>/SKILL.md` command and
+/// register it into `reg`.
+pub async fn load_and_register_skill_commands(
+    reg: &mut CommandRegistry,
+    cwd: &Path,
+    claude_home: &Path,
+    home: &Path,
+) -> usize {
+    load_and_register_skill_commands_with_roots(reg, cwd, claude_home, None, home, &[]).await
+}
+
+/// Discover every directory-format `.claude/skills/<name>/SKILL.md` command
+/// from managed, user, project, and additional skill directories and register it
+/// into `reg`.
+pub async fn load_and_register_skill_commands_with_roots(
+    reg: &mut CommandRegistry,
+    cwd: &Path,
+    claude_home: &Path,
+    managed_dir: Option<&Path>,
+    home: &Path,
+    additional_skill_dirs: &[PathBuf],
+) -> usize {
+    let files = load_skill_markdown_files_with_roots(
+        cwd,
+        claude_home,
+        managed_dir,
+        home,
+        additional_skill_dirs,
+    )
+    .await;
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut registered = 0usize;
+    for file in &files {
+        let command = build_skill_command(file, file.source);
         if seen.insert(command.name.clone()) {
             reg.register_command(command);
             registered += 1;
@@ -175,6 +220,128 @@ mod tests {
             reg.resolve("sub:bar").is_some(),
             "namespaced /sub:bar should resolve"
         );
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[tokio::test]
+    async fn registers_project_skill_so_it_resolves_with_skill_metadata() {
+        let root = temp_dir("skill-resolve");
+        let home = root.join("home");
+        fs::create_dir_all(&home).unwrap();
+        let claude_home = home.join(".claude");
+        let project = root.join("proj");
+        fs::create_dir_all(project.join(".git")).unwrap();
+        let skill_dir = project.join(".claude").join("skills").join("demo");
+        write(
+            &skill_dir.join("SKILL.md"),
+            "---\ndescription: Demo skill\n---\nUse this skill\n",
+        );
+
+        let mut reg = CommandRegistry::new();
+        let n = load_and_register_skill_commands(&mut reg, &project, &claude_home, &home).await;
+        assert_eq!(n, 1);
+
+        let cmd = reg.resolve("demo").expect("/demo should resolve");
+        assert_eq!(cmd.loaded_from.as_deref(), Some("skills"));
+        assert_eq!(cmd.skill_root.as_deref(), Some(skill_dir.as_path()));
+        assert_eq!(cmd.description, "Demo skill");
+        assert!(matches!(cmd.kind, SlashCommandKind::Markdown { .. }));
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[tokio::test]
+    async fn user_skill_overrides_same_named_project_skill() {
+        let root = temp_dir("skill-collide");
+        let home = root.join("home");
+        fs::create_dir_all(&home).unwrap();
+        let claude_home = home.join(".claude");
+        let project = root.join("proj");
+        fs::create_dir_all(project.join(".git")).unwrap();
+        let user_skill_dir = claude_home.join("skills").join("dup");
+        let project_skill_dir = project.join(".claude").join("skills").join("dup");
+        write(
+            &user_skill_dir.join("SKILL.md"),
+            "---\ndescription: User skill\n---\nUSER body\n",
+        );
+        write(
+            &project_skill_dir.join("SKILL.md"),
+            "---\ndescription: Project skill\n---\nPROJECT body\n",
+        );
+
+        let mut reg = CommandRegistry::new();
+        let n = load_and_register_skill_commands(&mut reg, &project, &claude_home, &home).await;
+        assert_eq!(n, 1);
+
+        let cmd = reg.resolve("dup").expect("/dup should resolve");
+        assert_eq!(cmd.description, "User skill");
+        assert_eq!(cmd.skill_root.as_deref(), Some(user_skill_dir.as_path()));
+        match &cmd.kind {
+            SlashCommandKind::Markdown {
+                prompt_template, ..
+            } => assert_eq!(prompt_template, "USER body\n"),
+            other => panic!("expected Markdown kind, got {other:?}"),
+        }
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[tokio::test]
+    async fn managed_skill_overrides_same_named_user_project_and_additional_skill() {
+        let root = temp_dir("skill-managed-collide");
+        let home = root.join("home");
+        fs::create_dir_all(&home).unwrap();
+        let claude_home = home.join(".claude");
+        let managed = root.join("managed");
+        let additional = root.join("additional-skills");
+        let project = root.join("proj");
+        fs::create_dir_all(project.join(".git")).unwrap();
+
+        let managed_skill_dir = managed.join(".claude").join("skills").join("dup");
+        write(
+            &managed_skill_dir.join("SKILL.md"),
+            "---\ndescription: Managed skill\n---\nMANAGED body\n",
+        );
+        write(
+            &claude_home.join("skills").join("dup").join("SKILL.md"),
+            "---\ndescription: User skill\n---\nUSER body\n",
+        );
+        write(
+            &project
+                .join(".claude")
+                .join("skills")
+                .join("dup")
+                .join("SKILL.md"),
+            "---\ndescription: Project skill\n---\nPROJECT body\n",
+        );
+        write(
+            &additional.join("dup").join("SKILL.md"),
+            "---\ndescription: Additional skill\n---\nADDITIONAL body\n",
+        );
+
+        let mut reg = CommandRegistry::new();
+        let n = load_and_register_skill_commands_with_roots(
+            &mut reg,
+            &project,
+            &claude_home,
+            Some(&managed),
+            &home,
+            std::slice::from_ref(&additional),
+        )
+        .await;
+        assert_eq!(n, 1);
+
+        let cmd = reg.resolve("dup").expect("/dup should resolve");
+        assert_eq!(cmd.source, command_api::CommandSource::Managed);
+        assert_eq!(cmd.description, "Managed skill");
+        assert_eq!(cmd.skill_root.as_deref(), Some(managed_skill_dir.as_path()));
+        match &cmd.kind {
+            SlashCommandKind::Markdown {
+                prompt_template, ..
+            } => assert_eq!(prompt_template, "MANAGED body\n"),
+            other => panic!("expected Markdown kind, got {other:?}"),
+        }
 
         fs::remove_dir_all(&root).ok();
     }

@@ -87,10 +87,15 @@ async fn seed(tools: &[&str]) -> (Arc<ToolRegistry>, Arc<McpRegistry>, Arc<MockM
 /// Build a `PolicyPermissionGate` over the `permissions` JSON, with `inner` as
 /// the Ask-delegation transport (a `NoOpPermissionGate` allows by default, so a
 /// non-rule-denied tool is never blocked here).
-fn policy_gate(permissions_json: &str, inner: Arc<dyn PermissionGate>) -> Arc<PolicyPermissionGate> {
-    let rules =
-        permission_rules_from_settings_json(permissions_json, PermissionRuleSource::ProjectSettings)
-            .unwrap();
+fn policy_gate(
+    permissions_json: &str,
+    inner: Arc<dyn PermissionGate>,
+) -> Arc<PolicyPermissionGate> {
+    let rules = permission_rules_from_settings_json(
+        permissions_json,
+        PermissionRuleSource::ProjectSettings,
+    )
+    .unwrap();
     let policy = Arc::new(PermissionPolicy::from_rules(PermissionMode::Default, rules));
     Arc::new(PolicyPermissionGate::new(policy, inner))
 }
@@ -156,10 +161,7 @@ fn deny_rule_on_fqn_does_not_collide_with_builtin_short_name() {
 #[tokio::test]
 async fn gate_denies_fqn_but_not_builtin_short_name() {
     let inner = Arc::new(NoOpPermissionGate); // allow-by-default for delegated asks
-    let gate = policy_gate(
-        r#"{ "permissions": { "deny": ["mcp__mock__a"] } }"#,
-        inner,
-    );
+    let gate = policy_gate(r#"{ "permissions": { "deny": ["mcp__mock__a"] } }"#, inner);
 
     // FQN → Deny (rule), with a rendered reason.
     match gate.check("mcp__mock__a", &serde_json::json!({})).await {
@@ -187,10 +189,7 @@ async fn gate_denies_fqn_but_not_builtin_short_name() {
 async fn allow_rule_on_fqn_permits_it() {
     // Inner denies so we prove the ALLOW came from the rule, not delegation.
     let inner = Arc::new(NoOpPermissionGate);
-    let gate = policy_gate(
-        r#"{ "permissions": { "allow": ["mcp__mock__b"] } }"#,
-        inner,
-    );
+    let gate = policy_gate(r#"{ "permissions": { "allow": ["mcp__mock__b"] } }"#, inner);
     assert_eq!(
         gate.check("mcp__mock__b", &serde_json::json!({})).await,
         PermissionDecision::Allow,
@@ -232,7 +231,9 @@ async fn denied_fqn_tool_use_yields_permission_denied_result_and_skips_server() 
     ]));
     let output = Arc::new(MockOutputStream::new());
     let orch = build_orchestrator(api, tools, output.clone(), mcp_registry, perms);
-    orch.run_turn("call the denied mcp tool").await.expect("turn ok");
+    orch.run_turn("call the denied mcp tool")
+        .await
+        .expect("turn ok");
 
     // The server was never reached — the deny short-circuits before dispatch.
     assert!(
@@ -290,7 +291,9 @@ async fn allowed_fqn_tool_use_reaches_server() {
     ]));
     let output = Arc::new(MockOutputStream::new());
     let orch = build_orchestrator(api, tools, output.clone(), mcp_registry, perms);
-    orch.run_turn("call the allowed mcp tool").await.expect("turn ok");
+    orch.run_turn("call the allowed mcp tool")
+        .await
+        .expect("turn ok");
 
     assert_eq!(
         mock.called_tools(),

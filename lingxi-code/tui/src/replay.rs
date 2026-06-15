@@ -455,7 +455,9 @@ mod tests {
         ];
         let out = rebuild_from_jsonl(&msgs);
         assert_eq!(out.len(), 3);
-        assert!(matches!(&out[0], RenderedMessage::AssistantText { body, .. } if body == "reading"));
+        assert!(
+            matches!(&out[0], RenderedMessage::AssistantText { body, .. } if body == "reading")
+        );
         assert!(
             matches!(&out[1], RenderedMessage::AssistantToolUse { id: gid, tool, .. } if *gid == id && tool == "Read")
         );
@@ -505,7 +507,11 @@ mod tests {
         }];
         let out = rebuild_messages(&h);
         assert_eq!(out.len(), 2);
-        assert!(matches!(&out[0], RenderedMessage::AssistantText { body, .. } if body == "let me read it"));
-        assert!(matches!(&out[1], RenderedMessage::AssistantToolUse { tool, .. } if tool == "Read"));
+        assert!(
+            matches!(&out[0], RenderedMessage::AssistantText { body, .. } if body == "let me read it")
+        );
+        assert!(
+            matches!(&out[1], RenderedMessage::AssistantToolUse { tool, .. } if tool == "Read")
+        );
     }
 }

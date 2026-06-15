@@ -65,7 +65,10 @@ fn server_uri_pairs(data: &serde_json::Value) -> Vec<(String, String)> {
         .iter()
         .map(|r| {
             (
-                r.get("server").and_then(|s| s.as_str()).unwrap_or("").into(),
+                r.get("server")
+                    .and_then(|s| s.as_str())
+                    .unwrap_or("")
+                    .into(),
                 r.get("uri").and_then(|s| s.as_str()).unwrap_or("").into(),
             )
         })

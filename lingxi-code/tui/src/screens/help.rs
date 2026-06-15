@@ -233,7 +233,10 @@ mod tests {
         // the bottom so both sections are exercised across the two windows.
         let top = render_help_to_string(&HelpState::new());
         // First-window shortcuts (claude-code `PromptInputHelpMenu`).
-        assert!(top.contains("for bash mode"), "bash-mode shortcut, got: {top}");
+        assert!(
+            top.contains("for bash mode"),
+            "bash-mode shortcut, got: {top}"
+        );
         assert!(top.contains("for commands"), "slash shortcut");
         assert!(top.contains("for file paths"), "@ shortcut");
         assert!(top.contains("ctrl + o"), "verbose-output chord");
@@ -252,12 +255,21 @@ mod tests {
             .expect("Slash commands header is a body line");
         s.scroll.set_offset(header_idx);
         let out = render_help_to_string(&s);
-        assert!(out.contains(COMMANDS_HEADER), "Slash commands header, got: {out}");
-        assert!(out.contains("/skills"), "a known command is listed, got: {out}");
+        assert!(
+            out.contains(COMMANDS_HEADER),
+            "Slash commands header, got: {out}"
+        );
+        assert!(
+            out.contains("/skills"),
+            "a known command is listed, got: {out}"
+        );
         // The very last command is reachable by jumping to the bottom.
         assert_eq!(handle_help_key(&mut s, k(KeyCode::End)), HelpOutcome::Stay);
         let bottom = render_help_to_string(&s);
-        assert!(bottom.contains("/color"), "last command at the bottom, got: {bottom}");
+        assert!(
+            bottom.contains("/color"),
+            "last command at the bottom, got: {bottom}"
+        );
     }
 
     #[test]
@@ -306,7 +318,10 @@ mod tests {
         assert!(line.starts_with('/'), "key first");
         assert!(line.ends_with("for commands"), "label trails: {line}");
         // The key is padded to KEY_WIDTH chars + 1 space before the label.
-        assert_eq!(line.chars().count(), KEY_WIDTH + 1 + "for commands".chars().count());
+        assert_eq!(
+            line.chars().count(),
+            KEY_WIDTH + 1 + "for commands".chars().count()
+        );
     }
 
     #[test]

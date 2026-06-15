@@ -101,7 +101,11 @@ impl StatusLineConfig {
     #[must_use]
     pub fn from_settings_value(value: &Value) -> Option<Self> {
         let obj = value.as_object()?;
-        let kind = obj.get("type").and_then(Value::as_str).unwrap_or("").to_string();
+        let kind = obj
+            .get("type")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
         let command = obj.get("command").and_then(Value::as_str)?.to_string();
         // `padding` is a non-negative integer in claude-code. Read it as a u64
         // (negatives / non-integers fall through to the default `0`), then
@@ -208,7 +212,10 @@ pub fn build_status_line_input(
 /// for the JSON payload's `cost.total_cost_usd`.
 #[must_use]
 pub fn parse_cost_usd(cost: &str) -> f64 {
-    cost.trim_start_matches('$').trim().parse::<f64>().unwrap_or(0.0)
+    cost.trim_start_matches('$')
+        .trim()
+        .parse::<f64>()
+        .unwrap_or(0.0)
 }
 
 /// Spawn `command` via the platform shell, feed `stdin_json` on stdin, and wait
@@ -222,7 +229,11 @@ pub fn parse_cost_usd(cost: &str) -> f64 {
 /// (Windows), the same single-string-command convention as claude-code's
 /// `execCommandHook`.
 #[must_use]
-pub fn run_status_line_command(command: &str, stdin_json: &str, timeout: Duration) -> Option<String> {
+pub fn run_status_line_command(
+    command: &str,
+    stdin_json: &str,
+    timeout: Duration,
+) -> Option<String> {
     use std::io::Write;
 
     let mut cmd = build_shell_command(command);
@@ -320,7 +331,12 @@ mod tests {
         // loose enough to absorb the `0.42_f32 → f64` rounding.
         assert!((v["context_window"]["used_percentage"].as_f64().unwrap() - 42.0).abs() < 1e-3);
         assert!(
-            (v["context_window"]["remaining_percentage"].as_f64().unwrap() - 58.0).abs() < 1e-3
+            (v["context_window"]["remaining_percentage"]
+                .as_f64()
+                .unwrap()
+                - 58.0)
+                .abs()
+                < 1e-3
         );
     }
 

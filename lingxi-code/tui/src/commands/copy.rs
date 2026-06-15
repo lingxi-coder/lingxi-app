@@ -127,12 +127,13 @@ pub fn parse_copy_command(messages: &[RenderedMessage], args: &str) -> CopyComma
         match arg.parse::<usize>() {
             Ok(n) if n >= 1 => {
                 if n > texts.len() {
-                    let noun = if texts.len() == 1 { "message" } else { "messages" };
+                    let noun = if texts.len() == 1 {
+                        "message"
+                    } else {
+                        "messages"
+                    };
                     return CopyCommand::Error {
-                        display: format!(
-                            "Only {} assistant {noun} available to copy",
-                            texts.len()
-                        ),
+                        display: format!("Only {} assistant {noun} available to copy", texts.len()),
                     };
                 }
                 age = n - 1;
@@ -300,7 +301,8 @@ mod tests {
         assert_eq!(
             parse_copy_command(&msgs, "0"),
             CopyCommand::Error {
-                display: "Usage: /copy [N] where N is 1 (latest), 2, 3, \u{2026} Got: 0".to_string()
+                display: "Usage: /copy [N] where N is 1 (latest), 2, 3, \u{2026} Got: 0"
+                    .to_string()
             }
         );
         assert_eq!(

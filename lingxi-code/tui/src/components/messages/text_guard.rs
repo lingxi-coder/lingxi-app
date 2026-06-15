@@ -42,7 +42,12 @@ pub const NO_CONTENT_MESSAGE: &str = "(no content)";
 /// for the leftmost-match scan below (claude-code's regex alternation tries
 /// them in this order at each position, but since they all start with a
 /// distinct second character the order is immaterial — kept identical anyway).
-const STRIPPED_TAGS: [&str; 4] = ["commit_analysis", "context", "function_analysis", "pr_analysis"];
+const STRIPPED_TAGS: [&str; 4] = [
+    "commit_analysis",
+    "context",
+    "function_analysis",
+    "pr_analysis",
+];
 
 /// Port of claude-code `stripPromptXMLTags` (`src/utils/messages.ts:2761-2763`):
 /// remove every `<tag>…</tag>` block (plus one optional trailing `\n`) for the
@@ -131,7 +136,12 @@ mod tests {
 
     #[test]
     fn strips_each_of_four_tags() {
-        for name in ["commit_analysis", "context", "function_analysis", "pr_analysis"] {
+        for name in [
+            "commit_analysis",
+            "context",
+            "function_analysis",
+            "pr_analysis",
+        ] {
             let body = format!("<{name}>scaffolding body</{name}>");
             assert_eq!(strip_prompt_xml_tags(&body), "", "tag {name} not stripped");
             assert!(is_empty_message_text(&body), "tag {name} not empty");

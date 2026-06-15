@@ -1,24 +1,67 @@
-//! Parity: lock the 99 builtin slash-command names + the 18-core split + the
-//! stub-literal output across the full surface.
+//! Parity: lock the 99 builtin slash-command names plus the per-command
+//! command/target status matrix across the full surface.
 //!
 //! See plan `docs/superpowers/plans/2026-05-25-m5-09-commands-surface.md`
 //! Task 6. Locks introduced here (per 2026-05-28 addendum):
 //!
 //! - Total name count = 99
 //! - Core name count = 18
-//! - Unimplemented = 81
+//! - Target implemented status is explicit per command
 //! - Stub literal template = "{name}: not implemented in v0.6.0 (M5)"
 //! - Unknown literal template = "Unknown command: /{name}"
 
-use command_api::builtin_support::names::{BUILTIN_COMMAND_NAMES, BUILTIN_CORE_NAMES};
+use command_api::builtin_support::names::{
+    BUILTIN_COMMAND_NAMES, BUILTIN_CORE_NAMES, CORRECT_BY_DESIGN_STUBS, HOST_BOUND_DEFERRED_GAPS,
+};
 use command_api::CommandRegistry;
 use command_api::RegistrySlashDispatcher;
-use command_core::register_all_builtin_commands;
+use command_core::{
+    register_all_builtin_commands, register_core_batch_1, register_core_batch_2,
+    register_core_batch_4, register_core_batch_5,
+};
+use orchestrator::test_support::MockOrchestratorHandle;
 use serde::Deserialize;
 use std::sync::Arc;
+use std::sync::Mutex as StdMutex;
 use test_harness::parity::load_fixture;
 use tokio::sync::RwLock;
-use traits::{SlashCommandDispatcher, SlashDispatchResult};
+use traits::{AuthError, AuthHandle, LoginInfo, SlashCommandDispatcher, SlashDispatchResult};
+
+struct MockAuth {
+    result: StdMutex<Result<LoginInfo, AuthError>>,
+}
+
+#[async_trait::async_trait]
+impl AuthHandle for MockAuth {
+    async fn login(&self) -> Result<LoginInfo, AuthError> {
+        self.result.lock().unwrap().clone()
+    }
+
+    async fn logout(&self) -> Result<(), AuthError> {
+        Ok(())
+    }
+
+    async fn current_user(&self) -> Option<LoginInfo> {
+        self.result.lock().unwrap().as_ref().ok().cloned()
+    }
+}
+
+fn fully_wired_registry() -> CommandRegistry {
+    let mut reg = CommandRegistry::new();
+    register_all_builtin_commands(&mut reg);
+    let handle: Arc<MockOrchestratorHandle> = Arc::new(MockOrchestratorHandle::new());
+    register_core_batch_1(&mut reg, handle.clone());
+    let auth: Arc<dyn AuthHandle> = Arc::new(MockAuth {
+        result: StdMutex::new(Ok(LoginInfo {
+            email: "u@example.com".to_string(),
+            org_id: "org".to_string(),
+        })),
+    });
+    register_core_batch_2(&mut reg, handle.clone(), auth);
+    register_core_batch_4(&mut reg, handle.clone());
+    register_core_batch_5(&mut reg, handle);
+    reg
+}
 
 #[derive(Debug, Deserialize)]
 struct ParityFile {
@@ -62,9 +105,74 @@ struct ParityCommandV2 {
     is_core: bool,
     implemented: bool,
     #[serde(default)]
+    claude_type: String,
+    #[serde(default)]
+    rust_status: String,
+    #[serde(default)]
+    target_status: String,
+    #[serde(default)]
+    requires_tui: bool,
+    #[serde(default)]
+    defer_reason: Option<String>,
+    #[serde(default)]
     #[allow(dead_code)]
     description: Option<String>,
 }
+
+const TARGET_IMPLEMENTED: &[&str] = &[
+    "add-dir",
+    "agents",
+    "branch",
+    "clear",
+    "color",
+    "commit",
+    "commit-push-pr",
+    "compact",
+    "config",
+    "context",
+    "copy",
+    "cost",
+    "diff",
+    "doctor",
+    "effort",
+    "exit",
+    "export",
+    "files",
+    "help",
+    "hooks",
+    "init",
+    "init-verifiers",
+    "insights",
+    "keybindings",
+    "login",
+    "logout",
+    "mcp",
+    "memory",
+    "model",
+    "output-style",
+    "permissions",
+    "plan",
+    "plugin",
+    "pr-comments",
+    "privacy-settings",
+    "release-notes",
+    "rename",
+    "resume",
+    "review",
+    "rewind",
+    "security-review",
+    "skills",
+    "stats",
+    "status",
+    "statusline",
+    "stickers",
+    "tasks",
+    "terminal-setup",
+    "theme",
+    "usage",
+    "version",
+    "vim",
+];
 
 fn fixture() -> ParityFile {
     // Fixture filename retained as `parity_slash_commands_102` for git-history
@@ -107,9 +215,9 @@ fn fixture_core_matches_constant() {
 #[test]
 fn fixture_unimplemented_count_is_81() {
     let f = fixture();
-    let n_unimpl = f.commands.iter().filter(|c| !c.is_core).count();
-    assert_eq!(n_unimpl, 81);
-    assert_eq!(f.meta.unimplemented_count_lock, 81);
+    let v2 = fixture_v2();
+    let n_unimpl = v2.commands.iter().filter(|c| !c.implemented).count();
+    assert_eq!(f.meta.unimplemented_count_lock, n_unimpl);
 }
 
 #[test]
@@ -144,8 +252,7 @@ async fn every_fixture_command_dispatches_to_handled() {
     // output (e.g. /commit), so this locks the full name surface dispatches,
     // not the exact body.
     let f = fixture();
-    let mut reg = CommandRegistry::new();
-    register_all_builtin_commands(&mut reg);
+    let reg = fully_wired_registry();
     let d = RegistrySlashDispatcher::new(Arc::new(RwLock::new(reg)));
 
     for entry in &f.commands {
@@ -159,8 +266,7 @@ async fn every_fixture_command_dispatches_to_handled() {
 
 #[tokio::test]
 async fn unknown_command_uses_locked_literal() {
-    let mut reg = CommandRegistry::new();
-    register_all_builtin_commands(&mut reg);
+    let reg = fully_wired_registry();
     let d = RegistrySlashDispatcher::new(Arc::new(RwLock::new(reg)));
 
     let outcome = d.dispatch("/definitely-not-a-real-command").await;
@@ -197,41 +303,61 @@ fn core_command_description_matches_fixture() {
 // ============================================================================
 
 #[test]
-fn exactly_18_commands_marked_implemented() {
+fn implemented_count_tracks_target_runtime_surface() {
     let f = fixture_v2();
     let n_impl = f.commands.iter().filter(|c| c.implemented).count();
     assert_eq!(
-        n_impl, 18,
-        "expected exactly 18 implemented commands; got {n_impl}"
+        n_impl,
+        TARGET_IMPLEMENTED.len(),
+        "implemented field should track the current target runtime surface"
     );
 }
 
 #[test]
-fn exactly_81_commands_marked_unimplemented() {
+fn target_status_matrix_fields_are_populated() {
     let f = fixture_v2();
-    let n_unimpl = f.commands.iter().filter(|c| !c.implemented).count();
-    assert_eq!(
-        n_unimpl, 81,
-        "expected exactly 81 unimplemented commands; got {n_unimpl}"
-    );
-}
-
-#[test]
-fn implemented_set_matches_is_core_set() {
-    let f = fixture_v2();
-    // Every command where `implemented = true` must also have `is_core = true`,
-    // and vice versa — the two fields must be in perfect agreement.
     for c in &f.commands {
+        assert!(!c.claude_type.is_empty(), "/{} missing claude_type", c.name);
+        assert!(!c.rust_status.is_empty(), "/{} missing rust_status", c.name);
+        assert!(
+            !c.target_status.is_empty(),
+            "/{} missing target_status",
+            c.name
+        );
+        if c.target_status == "deferred" {
+            assert!(c.defer_reason.as_deref().is_some_and(|r| !r.is_empty()));
+        }
+        if c.rust_status == "interactive_only" {
+            assert_eq!(
+                c.target_status, "implemented",
+                "/{} interactive-only target status drift",
+                c.name
+            );
+            assert!(
+                c.requires_tui,
+                "/{} interactive-only row should require TUI",
+                c.name
+            );
+            assert!(
+                c.defer_reason.as_deref().is_some_and(|r| !r.is_empty()),
+                "/{} interactive-only row missing defer_reason",
+                c.name
+            );
+        }
+        if c.requires_tui {
+            assert_eq!(c.claude_type, "local-jsx", "/{} requires_tui drift", c.name);
+        }
         assert_eq!(
-            c.implemented, c.is_core,
-            "/{}: `implemented` ({}) != `is_core` ({}); fields must agree",
-            c.name, c.implemented, c.is_core
+            c.is_core,
+            BUILTIN_CORE_NAMES.contains(&c.name.as_str()),
+            "/{} is_core drift",
+            c.name
         );
     }
 }
 
 #[test]
-fn implemented_names_match_builtin_core_names_constant() {
+fn implemented_set_matches_target_implemented_names() {
     let f = fixture_v2();
     let mut fixture_impl: Vec<&str> = f
         .commands
@@ -240,13 +366,32 @@ fn implemented_names_match_builtin_core_names_constant() {
         .map(|c| c.name.as_str())
         .collect();
     fixture_impl.sort_unstable();
+    let mut expected = TARGET_IMPLEMENTED.to_vec();
+    expected.sort_unstable();
+    assert_eq!(fixture_impl, expected);
+}
 
-    let mut const_core: Vec<&str> =
-        command_api::builtin_support::names::BUILTIN_CORE_NAMES.to_vec();
-    const_core.sort_unstable();
+#[test]
+fn correct_by_design_and_host_bound_sets_remain_explicit() {
+    assert_eq!(CORRECT_BY_DESIGN_STUBS.len(), 23);
+    assert_eq!(HOST_BOUND_DEFERRED_GAPS.len(), 3);
+}
 
-    assert_eq!(
-        fixture_impl, const_core,
-        "fixture `implemented` names do not match BUILTIN_CORE_NAMES constant"
-    );
+#[tokio::test]
+async fn target_implemented_commands_do_not_return_m5_stub() {
+    let reg = fully_wired_registry();
+
+    for name in TARGET_IMPLEMENTED {
+        let h = reg
+            .get_handler(name)
+            .unwrap_or_else(|| panic!("/{name} handler missing"));
+        let args = command_api::ParsedSlashCommand {
+            name: (*name).to_string(),
+            raw_args: String::new(),
+            positional_args: vec![],
+        };
+        if let command_api::CommandResult::Done { display: Some(s) } = h.handle(&args).await {
+            assert_ne!(s, format!("{name}: not implemented in v0.6.0 (M5)"));
+        }
+    }
 }

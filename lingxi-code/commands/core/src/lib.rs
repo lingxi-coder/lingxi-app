@@ -29,6 +29,7 @@ pub mod hooks;
 pub mod init;
 pub mod init_verifiers;
 pub mod insights;
+pub mod interactive_only;
 pub mod keybindings;
 pub mod login;
 pub mod logout;
@@ -43,10 +44,12 @@ pub mod release_notes;
 pub mod resume;
 pub mod review;
 pub mod security_review;
+pub mod skills;
 pub mod status;
 pub mod statusline;
 pub mod stickers;
 pub mod templates;
+pub mod usage;
 pub mod version;
 
 mod core_placeholders;
@@ -72,6 +75,7 @@ pub use hooks::HooksHandler;
 pub use init::InitHandler;
 pub use init_verifiers::InitVerifiersHandler;
 pub use insights::InsightsHandler;
+pub use interactive_only::InteractiveOnlyHandler;
 pub use keybindings::KeybindingsHandler;
 pub use login::LoginHandler;
 pub use logout::LogoutHandler;
@@ -85,15 +89,20 @@ pub use release_notes::ReleaseNotesHandler;
 pub use resume::ResumeHandler;
 pub use review::ReviewHandler;
 pub use security_review::SecurityReviewHandler;
+pub use skills::SkillsHandler;
 pub use status::StatusHandler;
 pub use statusline::StatuslineHandler;
 pub use stickers::StickersHandler;
 pub use templates::OLD_INIT_PROMPT;
+pub use usage::UsageHandler;
 pub use version::VersionHandler;
 
-pub use custom_commands::load_and_register_custom_commands;
+pub use custom_commands::{
+    load_and_register_custom_commands, load_and_register_skill_commands,
+    load_and_register_skill_commands_with_roots,
+};
 pub use register::{
     register_all_builtin_commands, register_core_batch_1, register_core_batch_2,
     register_core_batch_3, register_core_batch_4, register_core_batch_5, register_core_batch_6,
-    register_core_connect,
+    register_core_batch_7, register_core_connect,
 };

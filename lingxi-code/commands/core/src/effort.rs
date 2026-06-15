@@ -153,9 +153,8 @@ fn persist_effort_level(level: Option<EffortLevel>) -> Result<(), String> {
     // without overwriting (TS L459).
     let mut map: serde_json::Map<String, Value> = match std::fs::read_to_string(&path) {
         Ok(content) if content.trim().is_empty() => serde_json::Map::new(),
-        Ok(content) => serde_json::from_str(&content).map_err(|_| {
-            format!("Invalid JSON syntax in settings file at {}", path.display())
-        })?,
+        Ok(content) => serde_json::from_str(&content)
+            .map_err(|_| format!("Invalid JSON syntax in settings file at {}", path.display()))?,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => serde_json::Map::new(),
         Err(e) => {
             return Err(format!(
@@ -403,9 +402,7 @@ impl BuiltinCommandHandler for EffortHandler {
         }
 
         let normalized = trimmed.to_lowercase();
-        let display = if normalized.is_empty()
-            || normalized == "current"
-            || normalized == "status"
+        let display = if normalized.is_empty() || normalized == "current" || normalized == "status"
         {
             self.show_current().await
         } else if normalized == "auto" || normalized == "unset" {
@@ -474,10 +471,8 @@ mod tests {
             let nanos = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map_or(0, |d| d.as_nanos());
-            let home = std::env::temp_dir().join(format!(
-                "lingxi-effort-test-{}-{nanos}",
-                std::process::id()
-            ));
+            let home = std::env::temp_dir()
+                .join(format!("lingxi-effort-test-{}-{nanos}", std::process::id()));
             std::fs::create_dir_all(&home).unwrap();
             std::env::set_var("HOME", &home);
             std::env::remove_var(EFFORT_ENV_VAR);

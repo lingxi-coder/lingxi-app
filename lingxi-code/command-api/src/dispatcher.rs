@@ -3,13 +3,50 @@
 //!
 //! See plan `docs/superpowers/plans/2026-05-25-m5-09-commands-surface.md` Task 5.
 
-use crate::model::CommandResult;
+use crate::expand::{expand_markdown_command, ExpandCtx};
+use crate::model::{CommandResult, SlashCommandKind};
 use crate::parser::parse_slash_command;
 use crate::registry::CommandRegistry;
+use crate::shell_expansion::{
+    ShellExpansionCtx, ShellOut, ShellPermissionDecision, ShellPermissionGate, ShellRunError,
+    ShellRunner,
+};
 use async_trait::async_trait;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use traits::{SlashCommandDispatcher, SlashDispatchResult};
+
+struct UnavailableShellRunner;
+
+#[async_trait]
+impl ShellRunner for UnavailableShellRunner {
+    async fn run(
+        &self,
+        _command: &str,
+        _shell: Option<crate::FrontmatterShell>,
+    ) -> Result<ShellOut, ShellRunError> {
+        Err(ShellRunError {
+            stdout: String::new(),
+            stderr: String::new(),
+            interrupted: false,
+            generic_message: Some("shell expansion is unavailable in slash dispatcher".into()),
+        })
+    }
+}
+
+struct DenyShellPermissionGate;
+
+impl ShellPermissionGate for DenyShellPermissionGate {
+    fn check(
+        &self,
+        _command: &str,
+        _shell: Option<crate::FrontmatterShell>,
+    ) -> ShellPermissionDecision {
+        ShellPermissionDecision::Deny {
+            message: Some("shell expansion is unavailable in slash dispatcher".into()),
+        }
+    }
+}
 
 /// Concrete `SlashCommandDispatcher` backed by an `Arc<RwLock<CommandRegistry>>`.
 ///
@@ -92,8 +129,36 @@ impl SlashCommandDispatcher for RegistrySlashDispatcher {
             return SlashDispatchResult::NotASlashCommand;
         };
 
-        // 4. Look up the handler.
+        // 4. Look up the command.
         let reg = self.registry.read().await;
+        let Some(command) = reg.resolve(&parsed.name).cloned() else {
+            return SlashDispatchResult::Unknown {
+                name: parsed.name.clone(),
+                display: Self::unknown_command_literal(&parsed.name),
+            };
+        };
+
+        if matches!(
+            command.kind,
+            SlashCommandKind::Markdown { .. } | SlashCommandKind::Plugin { .. }
+        ) {
+            drop(reg);
+            let shell_ctx = ShellExpansionCtx {
+                runner: Arc::new(UnavailableShellRunner),
+                permission_gate: Arc::new(DenyShellPermissionGate),
+            };
+            let expand_ctx = ExpandCtx {
+                session_id: "",
+                shell: &shell_ctx,
+            };
+            return match expand_markdown_command(&command, &parsed, &expand_ctx).await {
+                Ok(content) => SlashDispatchResult::Handled { display: content },
+                Err(e) => SlashDispatchResult::Handled {
+                    display: format!("{} expansion failed: {e}", command.name),
+                },
+            };
+        }
+
         let Some(handler) = reg.get_handler(&parsed.name) else {
             return SlashDispatchResult::Unknown {
                 name: parsed.name.clone(),
@@ -129,7 +194,9 @@ mod tests {
     use super::*;
     use crate::builtin_support::names::{core_description, BUILTIN_COMMAND_NAMES};
     use crate::builtin_support::unimplemented::UnimplementedCommandHandler;
+    use crate::model::{CommandFrontmatter, CommandSource, SlashCommand, SlashCommandKind};
     use crate::registry::CommandRegistry;
+    use std::path::PathBuf;
 
     // M8-P9: seed directly from the api-side scaffolding (the real
     // `register_all_builtin_commands` lives in `command-core`, which depends on
@@ -184,6 +251,52 @@ mod tests {
                 assert_eq!(display, "clear: not implemented in v0.6.0 (M5)");
             }
             other => panic!("expected Handled, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn dispatches_markdown_command_via_registry_resolve() {
+        let mut reg = CommandRegistry::new();
+        reg.register_command(SlashCommand {
+            name: "demo".to_string(),
+            description: "Demo".to_string(),
+            source: CommandSource::Project,
+            kind: SlashCommandKind::Markdown {
+                file_path: PathBuf::from("/tmp/demo.md"),
+                frontmatter: CommandFrontmatter::default(),
+                prompt_template: "Use $ARGUMENTS".to_string(),
+            },
+            ..SlashCommand::default()
+        });
+        let d = RegistrySlashDispatcher::new(Arc::new(RwLock::new(reg)));
+        match d.dispatch("/demo this").await {
+            SlashDispatchResult::Handled { display } => assert_eq!(display, "Use this"),
+            other => panic!("expected markdown command to dispatch, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn markdown_command_shadows_same_named_builtin_in_dispatch() {
+        let mut reg = CommandRegistry::new();
+        reg.register_builtin_handler(Arc::new(UnimplementedCommandHandler::new(
+            "commit",
+            core_description("commit"),
+        )));
+        reg.register_command(SlashCommand {
+            name: "commit".to_string(),
+            description: "Custom commit".to_string(),
+            source: CommandSource::Project,
+            kind: SlashCommandKind::Markdown {
+                file_path: PathBuf::from("/tmp/commit.md"),
+                frontmatter: CommandFrontmatter::default(),
+                prompt_template: "Custom $ARGUMENTS".to_string(),
+            },
+            ..SlashCommand::default()
+        });
+        let d = RegistrySlashDispatcher::new(Arc::new(RwLock::new(reg)));
+        match d.dispatch("/commit now").await {
+            SlashDispatchResult::Handled { display } => assert_eq!(display, "Custom now"),
+            other => panic!("expected custom markdown dispatch, got {other:?}"),
         }
     }
 

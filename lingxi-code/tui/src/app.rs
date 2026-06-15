@@ -435,8 +435,8 @@ pub fn dispatch(action: KeyAction, st: &mut AppState) -> bool {
             // (claude-code `saveAgentColor`) OUTSIDE the lock. No echo, no turn.
             {
                 let trimmed = st.prompt_text.trim();
-                let is_color = trimmed == "/color"
-                    || trimmed.split_whitespace().next() == Some("/color");
+                let is_color =
+                    trimmed == "/color" || trimmed.split_whitespace().next() == Some("/color");
                 if is_color {
                     // Own the args before the `&mut st` borrow in
                     // `apply_color_command` (which clears `prompt_text`).
@@ -1727,7 +1727,10 @@ mod dispatch_tests {
         assert_eq!(st.pending_save_color.as_deref(), Some("default"));
         assert!(matches!(
             st.messages.last(),
-            Some(RenderedMessage::SystemText { is_error: false, .. })
+            Some(RenderedMessage::SystemText {
+                is_error: false,
+                ..
+            })
         ));
     }
 

@@ -46,9 +46,7 @@ pub(crate) fn tokenize_args(s: &str) -> Vec<String> {
     match shell_quote_parse(s) {
         Ok(tokens) => tokens,
         // TS: `tryParseShellCommand` failed -> `args.split(/\s+/).filter(Boolean)`.
-        Err(ShellParseError::BadSubstitution) => {
-            s.split_whitespace().map(str::to_string).collect()
-        }
+        Err(ShellParseError::BadSubstitution) => s.split_whitespace().map(str::to_string).collect(),
     }
 }
 

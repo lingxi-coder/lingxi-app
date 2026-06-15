@@ -241,9 +241,8 @@ fn render_custom(
         } else {
             Weight::Normal
         };
-        span_elements.push(
-            element! { Text(content: text, color: color, weight: weight) }.into_any(),
-        );
+        span_elements
+            .push(element! { Text(content: text, color: color, weight: weight) }.into_any());
     }
 
     let pad = " ".repeat(padding_x);
@@ -360,7 +359,10 @@ mod tests {
             "built-in line leaked into custom path: {rendered:?}"
         );
         // 2 cells of left padding before the text.
-        assert!(rendered.contains("  custom!"), "padding missing: {rendered:?}");
+        assert!(
+            rendered.contains("  custom!"),
+            "padding missing: {rendered:?}"
+        );
     }
 
     #[test]

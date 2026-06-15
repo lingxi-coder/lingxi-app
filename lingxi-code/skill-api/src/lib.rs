@@ -12,12 +12,16 @@
 #![forbid(unsafe_code)]
 
 pub mod frontmatter;
+pub mod listing;
 pub mod mcp_builders;
 pub mod model;
 pub mod prefetch;
 pub mod registry;
 
 pub use frontmatter::{parse_skill_markdown, SkillLoadError};
+pub use listing::{
+    load_file_skill_sections, load_file_skill_sections_with_roots, FileSkillRow, FileSkillSection,
+};
 pub use mcp_builders::skill_from_mcp_tool;
 pub use model::{LoadedFrom, Skill, SkillFrontmatter, SkillSource};
 pub use prefetch::SkillDiscoveryPrefetch;

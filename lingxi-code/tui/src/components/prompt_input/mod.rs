@@ -276,7 +276,10 @@ pub fn apply_move_vertical(text: &str, cursor: usize, delta: i32) -> usize {
 /// (callers style per-chunk), but the cursor chunk is always exactly one
 /// grapheme (or the synthetic space).
 #[must_use]
-pub fn render_line_with_cursor(line: &str, cursor_col_in_line: Option<usize>) -> Vec<(String, bool)> {
+pub fn render_line_with_cursor(
+    line: &str,
+    cursor_col_in_line: Option<usize>,
+) -> Vec<(String, bool)> {
     let Some(column) = cursor_col_in_line else {
         // Caret is not on this line: one plain chunk (skip empty so the line
         // contributes nothing rather than an empty Text).
@@ -531,7 +534,10 @@ mod tests {
     fn hint_none_without_trailing_space() {
         let args = vec!["a".to_string()];
         // Still typing the command name (palette state, not commandWithoutArgs).
-        assert_eq!(progressive_argument_hint("/deploy", lookup("deploy", &args)), None);
+        assert_eq!(
+            progressive_argument_hint("/deploy", lookup("deploy", &args)),
+            None
+        );
         // Mid-typing an argument (no trailing space) → no progressive hint.
         assert_eq!(
             progressive_argument_hint("/deploy pro", lookup("deploy", &args)),
@@ -559,9 +565,15 @@ mod tests {
     fn hint_none_for_non_slash_or_bare_slash() {
         let args = vec!["a".to_string()];
         // Not a slash command.
-        assert_eq!(progressive_argument_hint("deploy ", lookup("deploy", &args)), None);
+        assert_eq!(
+            progressive_argument_hint("deploy ", lookup("deploy", &args)),
+            None
+        );
         // Bare "/" + space → empty command name → no hint.
-        assert_eq!(progressive_argument_hint("/ ", lookup("deploy", &args)), None);
+        assert_eq!(
+            progressive_argument_hint("/ ", lookup("deploy", &args)),
+            None
+        );
     }
 
     #[test]
@@ -785,7 +797,10 @@ mod tests {
     #[test]
     fn cursor_none_empty_line_yields_nothing() {
         // A non-cursor empty line contributes no chunk (no empty Text).
-        assert_eq!(render_line_with_cursor("", None), Vec::<(String, bool)>::new());
+        assert_eq!(
+            render_line_with_cursor("", None),
+            Vec::<(String, bool)>::new()
+        );
     }
 
     #[test]

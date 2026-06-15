@@ -105,8 +105,9 @@ mod tests {
                 ));
                 assert!(content.contains("Now output the following message exactly:"));
                 assert!(content.contains("Your shareable insights report is ready:"));
-                assert!(content
-                    .contains("Want to dig into any section or try one of the suggestions?"));
+                assert!(
+                    content.contains("Want to dig into any section or try one of the suggestions?")
+                );
                 // No args => no "Additional user input:" line.
                 assert!(!content.contains("Additional user input:"));
             }

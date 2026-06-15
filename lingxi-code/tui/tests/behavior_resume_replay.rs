@@ -66,8 +66,12 @@ fn resumed_session_seeds_messages_in_order_with_tool_grouping() {
     state.seed_resumed_messages(rows);
 
     assert_eq!(state.messages.len(), 5);
-    assert!(matches!(&state.messages[0], RenderedMessage::UserText { body, .. } if body == "first prompt"));
-    assert!(matches!(&state.messages[1], RenderedMessage::AssistantText { body, .. } if body == "let me check"));
+    assert!(
+        matches!(&state.messages[0], RenderedMessage::UserText { body, .. } if body == "first prompt")
+    );
+    assert!(
+        matches!(&state.messages[1], RenderedMessage::AssistantText { body, .. } if body == "let me check")
+    );
     assert!(
         matches!(&state.messages[2], RenderedMessage::AssistantToolUse { id: gid, tool, .. } if *gid == id && tool == "Read")
     );
@@ -79,7 +83,9 @@ fn resumed_session_seeds_messages_in_order_with_tool_grouping() {
         }
         other => panic!("expected UserToolResult, got {other:?}"),
     }
-    assert!(matches!(&state.messages[4], RenderedMessage::AssistantText { body, .. } if body == "done"));
+    assert!(
+        matches!(&state.messages[4], RenderedMessage::AssistantText { body, .. } if body == "done")
+    );
 }
 
 /// A FRESH session seeds no messages: `with_resumed_messages` is never called,
@@ -111,8 +117,7 @@ fn fresh_session_seeds_no_messages_byte_identical() {
 #[test]
 fn with_resumed_messages_threads_seed_onto_runtime() {
     let rows = rebuild_messages(&[user("hi"), assistant("hello")]);
-    let runtime =
-        Runtime::new(protocol::SessionId::new()).with_resumed_messages(rows);
+    let runtime = Runtime::new(protocol::SessionId::new()).with_resumed_messages(rows);
     assert_eq!(runtime.resumed_messages.len(), 2);
 }
 

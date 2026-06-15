@@ -129,7 +129,10 @@ mod tests {
             }
         );
         // Whitespace-only is also "empty".
-        assert!(matches!(parse_color_command("   "), ColorCommand::List { .. }));
+        assert!(matches!(
+            parse_color_command("   "),
+            ColorCommand::List { .. }
+        ));
     }
 
     #[test]

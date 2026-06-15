@@ -621,7 +621,7 @@ mod tests {
         assert_eq!(resolved_verb_at_index(&verbs, 0), "A");
         assert_eq!(resolved_verb_at_index(&verbs, 2), "C");
         assert_eq!(resolved_verb_at_index(&verbs, 3), "A"); // wraps
-        // Empty pool is defensively the empty string.
+                                                            // Empty pool is defensively the empty string.
         assert_eq!(resolved_verb_at_index(&[], 0), "");
     }
 }

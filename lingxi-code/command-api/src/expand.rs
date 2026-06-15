@@ -166,10 +166,7 @@ mod tests {
         }
     }
 
-    fn make_ctx<'a>(
-        session_id: &'a str,
-        shell: &'a ShellExpansionCtx,
-    ) -> ExpandCtx<'a> {
+    fn make_ctx<'a>(session_id: &'a str, shell: &'a ShellExpansionCtx) -> ExpandCtx<'a> {
         ExpandCtx { session_id, shell }
     }
 

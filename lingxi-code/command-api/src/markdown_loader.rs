@@ -33,21 +33,12 @@
 //! * Frontmatter parsing reuses the existing `serde_yaml` dependency and the
 //!   `---`/`\n---\n` splitter pattern from `skill-api::frontmatter`
 //!   (`parse_skill_markdown`) without depending on `skill-api`.
-//! * **`disable-model-invocation` and `when_to_use` are not yet carried.** TS
-//!   `parseSkillFrontmatterFields` reads these two keys and `createSkillCommand`
-//!   places them on the top-level command (`disableModelInvocation`, `whenToUse`).
-//!   The matching `SlashCommand` fields exist, but the only path from the parse
-//!   step to [`build_markdown_command`] is [`MarkdownCommandFile`], whose
-//!   `frontmatter` is a [`CommandFrontmatter`] (defined in `crate::model`) with no
-//!   slot for either value. Carrying them needs a field added in another file
-//!   (`CommandFrontmatter`, or a new [`MarkdownCommandFile`] field that breaks the
-//!   exhaustive struct literal in `crate::expand`'s tests), so they are
-//!   intentionally left unported here.
+//! * Directory-format `.claude/skills/<name>/SKILL.md` files use a separate
+//!   loader path because their command name comes from the skill directory, not
+//!   the `SKILL.md` file stem.
 
 use crate::argument_substitution::{parse_argument_names, FrontmatterArgs};
-use crate::model::{
-    CommandFrontmatter, CommandSource, SlashCommand, SlashCommandKind,
-};
+use crate::model::{CommandFrontmatter, CommandSource, SlashCommand, SlashCommandKind};
 use serde::Deserialize;
 use std::collections::HashSet;
 use std::path::{Component, Path, PathBuf};
@@ -71,6 +62,23 @@ pub struct MarkdownCommandFile {
     /// Markdown body after the frontmatter block.
     pub content: String,
     /// Which configuration layer the file came from.
+    pub source: CommandSource,
+}
+
+/// A loaded directory-format skill markdown file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SkillMarkdownCommandFile {
+    /// Absolute path to `<skill>/SKILL.md`.
+    pub file_path: PathBuf,
+    /// Absolute path to the skill directory.
+    pub skill_root: PathBuf,
+    /// Parsed YAML frontmatter.
+    pub frontmatter: CommandFrontmatter,
+    /// Markdown body after the frontmatter block.
+    pub content: String,
+    /// Raw file byte length.
+    pub content_length: usize,
+    /// Which configuration layer the skill came from.
     pub source: CommandSource,
 }
 
@@ -361,13 +369,106 @@ pub async fn load_command_markdown_files(
     // Load each layer. Order: managed, user, then project dirs (most- to
     // least-specific). Combined priority: managed > user > project.
     let mut all_files: Vec<MarkdownCommandFile> = Vec::new();
-    all_files.extend(load_markdown_dir(&managed_commands_dir, CommandSource::Managed));
+    all_files.extend(load_markdown_dir(
+        &managed_commands_dir,
+        CommandSource::Managed,
+    ));
     all_files.extend(load_markdown_dir(&user_dir, CommandSource::User));
     for project_dir in &project_dirs {
         all_files.extend(load_markdown_dir(project_dir, CommandSource::Project));
     }
 
     deduplicate_by_inode(all_files)
+}
+
+/// Load directory-format `.claude/skills/<name>/SKILL.md` files from user and
+/// project skill directories.
+#[must_use]
+pub async fn load_skill_markdown_files(
+    cwd: &Path,
+    claude_home: &Path,
+    home: &Path,
+) -> Vec<SkillMarkdownCommandFile> {
+    load_skill_markdown_files_with_roots(cwd, claude_home, None, home, &[]).await
+}
+
+/// Load directory-format `.claude/skills/<name>/SKILL.md` files from managed,
+/// user, project, and additional skill directories.
+///
+/// The returned order is the command-resolution priority order:
+/// managed > user > project > additional.
+#[must_use]
+pub async fn load_skill_markdown_files_with_roots(
+    cwd: &Path,
+    claude_home: &Path,
+    managed_dir: Option<&Path>,
+    home: &Path,
+    additional_skill_dirs: &[PathBuf],
+) -> Vec<SkillMarkdownCommandFile> {
+    let mut all_files = Vec::new();
+    if let Some(managed_dir) = managed_dir {
+        all_files.extend(load_skill_dir(
+            &managed_dir.join(".claude").join("skills"),
+            CommandSource::Managed,
+        ));
+    }
+    all_files.extend(load_skill_dir(
+        &claude_home.join("skills"),
+        CommandSource::User,
+    ));
+    for project_dir in project_dirs_up_to_home("skills", cwd, home) {
+        all_files.extend(load_skill_dir(&project_dir, CommandSource::Project));
+    }
+    for dir in additional_skill_dirs {
+        all_files.extend(load_skill_dir(dir, CommandSource::Project));
+    }
+    deduplicate_skill_files_by_inode(all_files)
+}
+
+fn load_skill_dir(dir: &Path, source: CommandSource) -> Vec<SkillMarkdownCommandFile> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for entry in entries.flatten() {
+        let skill_root = entry.path();
+        if !std::fs::metadata(&skill_root).is_ok_and(|m| m.is_dir()) {
+            continue;
+        }
+        let file_path = skill_root.join("SKILL.md");
+        let Ok(raw) = std::fs::read_to_string(&file_path) else {
+            continue;
+        };
+        let (frontmatter, content) = parse_frontmatter(&raw);
+        out.push(SkillMarkdownCommandFile {
+            file_path,
+            skill_root,
+            frontmatter,
+            content,
+            content_length: raw.len(),
+            source,
+        });
+    }
+    out
+}
+
+fn deduplicate_skill_files_by_inode(
+    all_files: Vec<SkillMarkdownCommandFile>,
+) -> Vec<SkillMarkdownCommandFile> {
+    let mut seen: HashSet<(u64, u64)> = HashSet::new();
+    let mut out = Vec::with_capacity(all_files.len());
+    for file in all_files {
+        match file_identity(&file.file_path) {
+            Some(id) => {
+                if !seen.insert(id) {
+                    continue;
+                }
+                out.push(file);
+            }
+            None => out.push(file),
+        }
+    }
+    out
 }
 
 /// Deduplicate files that resolve to the same physical file (same `(dev, ino)`),
@@ -699,6 +800,41 @@ pub fn build_markdown_command(file: &MarkdownCommandFile, source: CommandSource)
     }
 }
 
+/// Build a [`SlashCommand`] from a directory-format skill file.
+#[must_use]
+pub fn build_skill_command(file: &SkillMarkdownCommandFile, source: CommandSource) -> SlashCommand {
+    let name = file
+        .skill_root
+        .file_name()
+        .map_or_else(String::new, |s| s.to_string_lossy().into_owned());
+    let has_user_specified_description = !file.frontmatter.description.is_empty();
+    let description = if file.frontmatter.description.is_empty() {
+        extract_description_from_markdown(&file.content, "Custom command")
+    } else {
+        file.frontmatter.description.clone()
+    };
+    SlashCommand {
+        name,
+        description,
+        source,
+        kind: SlashCommandKind::Markdown {
+            file_path: file.file_path.clone(),
+            frontmatter: file.frontmatter.clone(),
+            prompt_template: file.content.clone(),
+        },
+        has_user_specified_description,
+        argument_hint: file.frontmatter.argument_hints.first().cloned(),
+        argument_names: file.frontmatter.argument_names.clone(),
+        loaded_from: Some("skills".to_string()),
+        disable_model_invocation: file.frontmatter.disable_model_invocation,
+        when_to_use: file.frontmatter.when_to_use.clone(),
+        skill_root: Some(file.skill_root.clone()),
+        user_invocable: Some(true),
+        content_length: Some(file.content_length),
+        ..SlashCommand::default()
+    }
+}
+
 /// Normalize a path for case/separator-insensitive comparison. Approximates TS
 /// `normalizePathForComparison`: resolves the path lexically and lowercases it
 /// on case-insensitive platforms. On unix we keep case (case-sensitive FS) but
@@ -856,8 +992,7 @@ mod tests {
     #[test]
     fn frontmatter_allowed_tools_list_entries_are_each_split() {
         // Each YAML list entry is itself run through the splitter.
-        let (fm, _) =
-            parse_frontmatter("---\nallowed-tools:\n  - Bash, Edit\n  - Read\n---\nx");
+        let (fm, _) = parse_frontmatter("---\nallowed-tools:\n  - Bash, Edit\n  - Read\n---\nx");
         assert_eq!(
             fm.allowed_tools,
             Some(vec![
@@ -986,7 +1121,10 @@ mod tests {
             source: CommandSource::Project,
         };
         let cmd = build_markdown_command(&file, CommandSource::Project);
-        assert_eq!(cmd.argument_names, vec!["first".to_string(), "second".to_string()]);
+        assert_eq!(
+            cmd.argument_names,
+            vec!["first".to_string(), "second".to_string()]
+        );
     }
 
     #[test]
@@ -1025,7 +1163,10 @@ mod tests {
             ..crate::model::SlashCommand::default()
         };
         let json2 = serde_json::to_string(&cmd2).expect("serialize");
-        assert!(json2.contains("\"argument_names\":[\"env\"]"), "got: {json2}");
+        assert!(
+            json2.contains("\"argument_names\":[\"env\"]"),
+            "got: {json2}"
+        );
     }
 
     #[test]
@@ -1163,8 +1304,10 @@ mod tests {
 
         let claude_home = root.join("home").join(".claude");
         let files = load_command_markdown_files(&project, &claude_home, &managed, &home).await;
-        let shared: Vec<&MarkdownCommandFile> =
-            files.iter().filter(|f| f.content == "shared body").collect();
+        let shared: Vec<&MarkdownCommandFile> = files
+            .iter()
+            .filter(|f| f.content == "shared body")
+            .collect();
         assert_eq!(shared.len(), 1, "inode dedup should keep exactly one");
         assert_eq!(
             shared[0].source,
@@ -1219,6 +1362,158 @@ mod tests {
         let files =
             load_command_markdown_files(&root.join("noproj"), &claude_home, &managed, &home).await;
         assert!(files.is_empty());
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[tokio::test]
+    async fn loads_directory_format_skills_as_skill_commands_with_metadata() {
+        let root = temp_dir("skills");
+        let home = root.join("home");
+        fs::create_dir_all(&home).unwrap();
+
+        let repo = root.join("repo");
+        fs::create_dir_all(repo.join(".git")).unwrap();
+        let skill_dir = repo.join(".claude").join("skills").join("demo");
+        let skill_markdown = "---\ndescription: Demo skill\nwhen_to_use: when demo is useful\n---\nUse $ARGUMENTS well\n";
+        write(&skill_dir.join("SKILL.md"), skill_markdown);
+
+        write(
+            &repo.join(".claude").join("commands").join("demo.md"),
+            "# Legacy demo\n",
+        );
+
+        let claude_home = home.join(".claude");
+        let skill_files = load_skill_markdown_files(&repo, &claude_home, &home).await;
+        assert_eq!(skill_files.len(), 1);
+
+        let cmd = build_skill_command(&skill_files[0], CommandSource::Project);
+        assert_eq!(cmd.name, "demo");
+        assert_eq!(cmd.description, "Demo skill");
+        assert_eq!(cmd.loaded_from.as_deref(), Some("skills"));
+        assert_eq!(cmd.skill_root.as_deref(), Some(skill_dir.as_path()));
+        assert_eq!(cmd.content_length, Some(skill_markdown.len()));
+        assert_eq!(cmd.when_to_use.as_deref(), Some("when demo is useful"));
+        match &cmd.kind {
+            SlashCommandKind::Markdown {
+                file_path,
+                prompt_template,
+                ..
+            } => {
+                assert_eq!(file_path.as_path(), skill_dir.join("SKILL.md").as_path());
+                assert_eq!(prompt_template, "Use $ARGUMENTS well\n");
+            }
+            other => panic!("expected Markdown kind, got {other:?}"),
+        }
+
+        let command_files = load_command_markdown_files(&repo, &claude_home, &root, &home).await;
+        let legacy = command_files
+            .iter()
+            .find(|f| f.file_path.ends_with("demo.md"))
+            .expect("legacy command should load");
+        let legacy_cmd = build_markdown_command(legacy, legacy.source);
+        assert_eq!(
+            legacy_cmd.loaded_from.as_deref(),
+            Some("commands_DEPRECATED")
+        );
+        assert!(legacy_cmd.skill_root.is_none());
+        assert_eq!(legacy_cmd.content_length, None);
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[tokio::test]
+    async fn user_skill_precedes_same_named_project_skill() {
+        let root = temp_dir("skill-collision");
+        let home = root.join("home");
+        fs::create_dir_all(&home).unwrap();
+        let claude_home = home.join(".claude");
+
+        let repo = root.join("repo");
+        fs::create_dir_all(repo.join(".git")).unwrap();
+        write(
+            &claude_home.join("skills").join("dup").join("SKILL.md"),
+            "---\ndescription: User skill\n---\nUSER body\n",
+        );
+        write(
+            &repo
+                .join(".claude")
+                .join("skills")
+                .join("dup")
+                .join("SKILL.md"),
+            "---\ndescription: Project skill\n---\nPROJECT body\n",
+        );
+
+        let skill_files = load_skill_markdown_files(&repo, &claude_home, &home).await;
+        let first_dup = skill_files
+            .iter()
+            .find(|f| f.skill_root.file_name().is_some_and(|n| n == "dup"))
+            .expect("dup skill should load");
+        assert_eq!(first_dup.source, CommandSource::User);
+        assert_eq!(first_dup.frontmatter.description, "User skill");
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[tokio::test]
+    async fn managed_user_project_additional_skill_order_is_preserved() {
+        let root = temp_dir("skill-layering");
+        let home = root.join("home");
+        fs::create_dir_all(&home).unwrap();
+        let claude_home = home.join(".claude");
+        let managed = root.join("managed");
+        let additional = root.join("extra-skills");
+
+        let repo = root.join("repo");
+        fs::create_dir_all(repo.join(".git")).unwrap();
+        write(
+            &managed
+                .join(".claude")
+                .join("skills")
+                .join("dup")
+                .join("SKILL.md"),
+            "---\ndescription: Managed skill\n---\nMANAGED body\n",
+        );
+        write(
+            &claude_home.join("skills").join("dup").join("SKILL.md"),
+            "---\ndescription: User skill\n---\nUSER body\n",
+        );
+        write(
+            &repo
+                .join(".claude")
+                .join("skills")
+                .join("dup")
+                .join("SKILL.md"),
+            "---\ndescription: Project skill\n---\nPROJECT body\n",
+        );
+        write(
+            &additional.join("extra").join("SKILL.md"),
+            "---\ndescription: Extra skill\n---\nEXTRA body\n",
+        );
+
+        let skill_files = load_skill_markdown_files_with_roots(
+            &repo,
+            &claude_home,
+            Some(&managed),
+            &home,
+            std::slice::from_ref(&additional),
+        )
+        .await;
+        let names: Vec<String> = skill_files
+            .iter()
+            .map(|f| {
+                f.skill_root
+                    .file_name()
+                    .expect("skill dir")
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+        assert_eq!(names, vec!["dup", "dup", "dup", "extra"]);
+        assert_eq!(skill_files[0].source, CommandSource::Managed);
+        assert_eq!(skill_files[1].source, CommandSource::User);
+        assert_eq!(skill_files[2].source, CommandSource::Project);
+        assert_eq!(skill_files[3].source, CommandSource::Project);
+
         fs::remove_dir_all(&root).ok();
     }
 

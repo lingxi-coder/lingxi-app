@@ -82,6 +82,9 @@ mod tests {
     fn name_and_description() {
         let h = OutputStyleHandler::new();
         assert_eq!(h.name(), "output-style");
-        assert_eq!(h.description(), "Deprecated: use /config to change output style");
+        assert_eq!(
+            h.description(),
+            "Deprecated: use /config to change output style"
+        );
     }
 }

@@ -32,8 +32,7 @@
 //! omits empty groups anyway). Dedup is by canonical path within the walk.
 #![forbid(unsafe_code)]
 
-use std::collections::HashSet;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use crossterm::event::{KeyCode, KeyEvent};
 
@@ -170,146 +169,22 @@ impl SkillsState {
 /// 1:1 approximation, locked by a test).
 #[must_use]
 pub fn load_skill_sections(cwd: &Path, claude_home: &Path) -> Vec<SkillSection> {
-    // First-wins canonical-path dedup across all sources (`getFileIdentity`).
-    let mut seen: HashSet<PathBuf> = HashSet::new();
-
-    let project_rows = load_skills_from_dirs(
-        &project_skills_dirs(cwd, claude_home),
-        skill_api::SkillSource::Project,
-        &mut seen,
-    );
-    let user_rows = load_skills_from_dirs(
-        &[claude_home.join("skills")],
-        skill_api::SkillSource::User,
-        &mut seen,
-    );
-
-    // Render order: project, then user (claude-code `SkillsMenu` renders
-    // `projectSettings` before `userSettings`). Empty sections are pushed but
-    // `content_lines` skips them; we also skip here to keep `SkillsState`'s
-    // section list tight (and `total_skills`/`is_empty` unaffected either way).
-    let mut sections = Vec::with_capacity(2);
-    if !project_rows.is_empty() {
-        sections.push(SkillSection {
-            title: "Project skills".to_string(),
-            rows: project_rows,
-        });
-    }
-    if !user_rows.is_empty() {
-        sections.push(SkillSection {
-            title: "User skills".to_string(),
-            rows: user_rows,
-        });
-    }
-    sections
-}
-
-/// Port of `getProjectDirsUpToHome('skills', cwd)`: every existing
-/// `<ancestor>/.claude/skills` from `cwd` up to (and including) the git root,
-/// stopping before `claude_home`'s parent (the user home, loaded separately as
-/// the User section). Most-specific (`cwd`) first.
-fn project_skills_dirs(cwd: &Path, claude_home: &Path) -> Vec<PathBuf> {
-    // Stop boundary: the user home (`claude_home`'s parent, e.g. `~/.claude` →
-    // `~`). claude-code breaks BEFORE the home dir; we mirror that by not
-    // descending into / past it.
-    let home = claude_home.parent();
-    let git_root = nearest_git_root(cwd);
-
-    let mut dirs = Vec::new();
-    let mut current = Some(cwd);
-    while let Some(dir) = current {
-        if Some(dir) == home {
-            break;
-        }
-        let candidate = dir.join(".claude").join("skills");
-        if candidate.is_dir() {
-            dirs.push(candidate);
-        }
-        // Stop AFTER processing the git root (claude-code's post-process break).
-        if git_root.as_deref() == Some(dir) {
-            break;
-        }
-        current = dir.parent();
-    }
-    dirs
-}
-
-/// Nearest ancestor of `cwd` (inclusive) containing a `.git` entry — the git
-/// root that bounds the project-dir walk. `None` when `cwd` is not inside a git
-/// repo (then `project_skills_dirs` walks up to the home boundary, like
-/// `getProjectDirsUpToHome` with a `null` git root). FORCED simplification: no
-/// submodule/worktree handling (`resolveStopBoundary`); the nearest `.git`
-/// wins.
-fn nearest_git_root(cwd: &Path) -> Option<PathBuf> {
-    let mut current = Some(cwd);
-    while let Some(dir) = current {
-        if dir.join(".git").exists() {
-            return Some(dir.to_path_buf());
-        }
-        current = dir.parent();
-    }
-    None
-}
-
-/// Read every `<dir>/<entry>/SKILL.md` directory-format skill from each of
-/// `dirs`, deduping by canonical path via `seen` (first-wins across calls), and
-/// return the rows SORTED by name. Ports `loadSkillsFromSkillsDir`: only
-/// directory entries (or symlinks to dirs) are considered; the skill name is the
-/// entry (dir) name, not the frontmatter name; a missing/unreadable `SKILL.md`
-/// skips the entry; a plain `.md` file directly under `skills/` is ignored.
-fn load_skills_from_dirs(
-    dirs: &[PathBuf],
-    source: skill_api::SkillSource,
-    seen: &mut HashSet<PathBuf>,
-) -> Vec<SkillRow> {
-    let mut rows = Vec::new();
-    for base in dirs {
-        let Ok(entries) = std::fs::read_dir(base) else {
-            // Missing/inaccessible skills dir — skip (claude-code returns []).
-            continue;
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            // Directory format only: the entry must be a directory (symlinks to
-            // dirs included — `std::fs::metadata` follows symlinks).
-            if !std::fs::metadata(&path).is_ok_and(|m| m.is_dir()) {
-                continue;
-            }
-            let skill_file = path.join("SKILL.md");
-            let Ok(raw) = std::fs::read_to_string(&skill_file) else {
-                // No readable `SKILL.md` — skip this entry.
-                continue;
-            };
-            // Dedup by canonical path (`getFileIdentity`'s `realpath`); fall back
-            // to the literal path when canonicalize fails (fail-open, like the
-            // TS `null` identity → always include).
-            let identity = std::fs::canonicalize(&skill_file).unwrap_or(skill_file);
-            if !seen.insert(identity) {
-                continue;
-            }
-            // The skill NAME is the directory (entry) name, NOT the frontmatter
-            // name (claude-code `const skillName = entry.name`).
-            let dir_name = entry.file_name().to_string_lossy().into_owned();
-            let Ok(skill) = skill_api::parse_skill_markdown(
-                &raw,
-                path,
-                source,
-                skill_api::LoadedFrom::Skills,
-            ) else {
-                continue;
-            };
-            rows.push(SkillRow {
-                name: dir_name,
-                description: skill.description,
-                when_to_use: skill.frontmatter.when_to_use,
-                plugin: None,
-            });
-        }
-    }
-    // Sort by name within the section (claude-code sorts by `localeCompare`; str
-    // `Ord` is the codebase's accepted 1:1 approximation, locked by a test).
-    rows.sort_by(|a, b| a.name.cmp(&b.name));
-    rows
+    skill_api::load_file_skill_sections(cwd, claude_home)
+        .into_iter()
+        .map(|section| SkillSection {
+            title: section.title,
+            rows: section
+                .rows
+                .into_iter()
+                .map(|row| SkillRow {
+                    name: row.name,
+                    description: row.description,
+                    when_to_use: row.when_to_use,
+                    plugin: None,
+                })
+                .collect(),
+        })
+        .collect()
 }
 
 /// Controller outcome after a key (mirrors `AgentsOutcome`).
@@ -357,7 +232,10 @@ fn render_skill_row(row: &SkillRow) -> String {
     let token_display = format!("~{}", format_tokens(row.estimated_tokens()));
     match &row.plugin {
         Some(p) if !p.is_empty() => {
-            format!("{} \u{00B7} {p} \u{00B7} {token_display} description tokens", row.name)
+            format!(
+                "{} \u{00B7} {p} \u{00B7} {token_display} description tokens",
+                row.name
+            )
         }
         _ => format!("{} \u{00B7} {token_display} description tokens", row.name),
     }
@@ -452,6 +330,7 @@ fn format_tokens(count: usize) -> String {
 mod tests {
     use super::*;
     use crossterm::event::KeyModifiers;
+    use std::path::PathBuf;
 
     fn k(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
@@ -557,7 +436,10 @@ mod tests {
     #[test]
     fn esc_and_q_close_other_keys_stay() {
         let mut s = SkillsState::new(vec![section("User skills", vec![row("a", "x")])]);
-        assert_eq!(handle_skills_key(&mut s, k(KeyCode::Esc)), SkillsOutcome::Close);
+        assert_eq!(
+            handle_skills_key(&mut s, k(KeyCode::Esc)),
+            SkillsOutcome::Close
+        );
         assert_eq!(
             handle_skills_key(&mut s, k(KeyCode::Char('q'))),
             SkillsOutcome::Close
@@ -575,13 +457,22 @@ mod tests {
         let mut s = SkillsState::new(vec![section("Project skills", rows)]);
         assert!(s.scroll.is_scrollable());
         assert_eq!(s.scroll.offset(), 0);
-        assert_eq!(handle_skills_key(&mut s, k(KeyCode::Down)), SkillsOutcome::Stay);
+        assert_eq!(
+            handle_skills_key(&mut s, k(KeyCode::Down)),
+            SkillsOutcome::Stay
+        );
         assert_eq!(s.scroll.offset(), 1);
         // End jumps to max_offset; clamp holds.
-        assert_eq!(handle_skills_key(&mut s, k(KeyCode::End)), SkillsOutcome::Stay);
+        assert_eq!(
+            handle_skills_key(&mut s, k(KeyCode::End)),
+            SkillsOutcome::Stay
+        );
         assert_eq!(s.scroll.offset(), s.scroll.max_offset());
         // Further Down clamps (still Stay).
-        assert_eq!(handle_skills_key(&mut s, k(KeyCode::Down)), SkillsOutcome::Stay);
+        assert_eq!(
+            handle_skills_key(&mut s, k(KeyCode::Down)),
+            SkillsOutcome::Stay
+        );
         assert_eq!(s.scroll.offset(), s.scroll.max_offset());
     }
 

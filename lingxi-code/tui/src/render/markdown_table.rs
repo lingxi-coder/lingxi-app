@@ -62,7 +62,12 @@ pub enum ColumnAlign {
 /// visible display width of `content` (the caller computes it so styling never
 /// affects padding). Faithful port of `utils/markdown.ts:366` `padAligned`.
 #[must_use]
-pub fn pad_aligned(content: &str, text_w: usize, target_width: usize, align: ColumnAlign) -> String {
+pub fn pad_aligned(
+    content: &str,
+    text_w: usize,
+    target_width: usize,
+    align: ColumnAlign,
+) -> String {
     let padding = target_width.saturating_sub(text_w);
     match align {
         ColumnAlign::Center => {
@@ -603,33 +608,37 @@ fn render_vertical_format(
             // Wrap widths accounting for the label on the first line.
             // (MarkdownTable.tsx:259-260)
             let first_line_width = term_width.saturating_sub(label_w).saturating_sub(3);
-            let subsequent_line_width = term_width.saturating_sub(WRAP_INDENT.len()).saturating_sub(1);
+            let subsequent_line_width = term_width
+                .saturating_sub(WRAP_INDENT.len())
+                .saturating_sub(1);
 
             // Two-pass wrap: first line narrower, continuation lines wider.
             // (MarkdownTable.tsx:264-274)
             let first_pass = wrap_text(&value, first_line_width.max(10), false);
             let first_line = first_pass.first().cloned().unwrap_or_default();
-            let wrapped_value: Vec<String> = if first_pass.len() <= 1
-                || subsequent_line_width <= first_line_width
-            {
-                first_pass
-            } else {
-                let remaining: String = first_pass[1..]
-                    .iter()
-                    .map(|l| l.trim())
-                    .collect::<Vec<_>>()
-                    .join(" ");
-                let rewrapped = wrap_text(&remaining, subsequent_line_width, false);
-                let mut v = vec![first_line.clone()];
-                v.extend(rewrapped);
-                v
-            };
+            let wrapped_value: Vec<String> =
+                if first_pass.len() <= 1 || subsequent_line_width <= first_line_width {
+                    first_pass
+                } else {
+                    let remaining: String = first_pass[1..]
+                        .iter()
+                        .map(|l| l.trim())
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    let rewrapped = wrap_text(&remaining, subsequent_line_width, false);
+                    let mut v = vec![first_line.clone()];
+                    v.extend(rewrapped);
+                    v
+                };
 
             // First line: bold label + value. (MarkdownTable.tsx:277)
             lines.push(StyledLine {
                 spans: vec![
                     StyledSpan::styled(format!("{label}:"), bold_style()),
-                    StyledSpan::plain(format!(" {}", wrapped_value.first().cloned().unwrap_or_default())),
+                    StyledSpan::plain(format!(
+                        " {}",
+                        wrapped_value.first().cloned().unwrap_or_default()
+                    )),
                 ],
             });
             // Subsequent lines with small indent (skip empty). (MarkdownTable.tsx:280-285)
@@ -757,7 +766,10 @@ mod tests {
         let plain = plain_lines(&lines);
         // No line may exceed the terminal width.
         for l in &plain {
-            assert!(UnicodeWidthStr::width(l.as_str()) <= 40, "line too wide: {l:?}");
+            assert!(
+                UnicodeWidthStr::width(l.as_str()) <= 40,
+                "line too wide: {l:?}"
+            );
         }
         // Still a bordered grid (not vertical fallback).
         assert!(plain[0].starts_with('┌'));
@@ -834,13 +846,7 @@ mod tests {
         let bold = vec![StyledSpan::styled("bold", bold_style())];
         let headers = vec![cell("H")];
         let rows = vec![vec![bold]];
-        let lines = render_table(
-            &headers,
-            &rows,
-            &[ColumnAlign::Left],
-            80,
-            &theme(),
-        );
+        let lines = render_table(&headers, &rows, &[ColumnAlign::Left], 80, &theme());
         // Find the span carrying "bold" and assert it is bold.
         let span = lines
             .iter()

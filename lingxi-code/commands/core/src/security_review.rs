@@ -280,9 +280,9 @@ mod tests {
                     "MINIMIZE FALSE POSITIVES: Only flag issues where you're >80% confident"
                 ));
                 // Closing line — verbatim from the TS markdown body.
-                assert!(content
-                    .trim_end()
-                    .ends_with("Your final reply must contain the markdown report and nothing else."));
+                assert!(content.trim_end().ends_with(
+                    "Your final reply must contain the markdown report and nothing else."
+                ));
             }
             other => panic!("expected InjectMessage, got {other:?}"),
         }

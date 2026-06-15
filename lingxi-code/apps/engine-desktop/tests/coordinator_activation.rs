@@ -147,8 +147,9 @@ fn make_coordinator_fixture(api: &Arc<ScriptedApiClient>) -> CoordinatorFixture 
     // The PUSH wiring: the status sink feeds a real `AdapterOutputStream` behind
     // a `MockSink` — exactly the T08/T09 production lowering path.
     let mock_sink = MockSink::arc();
-    let output: Arc<dyn OutputStream> =
-        Arc::new(AdapterOutputStream::new(mock_sink.clone() as Arc<dyn client_adapter::sink::ClientEventSink>));
+    let output: Arc<dyn OutputStream> = Arc::new(AdapterOutputStream::new(
+        mock_sink.clone() as Arc<dyn client_adapter::sink::ClientEventSink>
+    ));
     let status_sink = Arc::new(coordinator::CoordinatorStatusSink::new(
         team.clone(),
         output.clone(),
@@ -331,10 +332,7 @@ async fn coordinator_activation_team_create_flows_active_workers_to_client_event
     // Final, authoritative assertions.
     let workers = fixture.team.list().await;
     assert!(
-        matches!(
-            workers[0].status,
-            coordinator::WorkerStatus::Working { .. }
-        ),
+        matches!(workers[0].status, coordinator::WorkerStatus::Working { .. }),
         "worker is Working after the Running transition; got {:?}",
         workers[0].status
     );
@@ -389,8 +387,7 @@ async fn anti_hollow_create_path_emits_nothing() {
         let tmp = tempfile::tempdir().unwrap();
         let fs: Arc<dyn FileSystem> = Arc::new(PosixFileSystem::new(tmp.path().to_path_buf()));
         let runtime: Arc<dyn RuntimeSpawner> = Arc::new(PosixRuntime::new());
-        let output_manager =
-            Arc::new(TaskOutputManager::new(tmp.path().to_path_buf(), fs.clone()));
+        let output_manager = Arc::new(TaskOutputManager::new(tmp.path().to_path_buf(), fs.clone()));
         let registry = TaskRegistry::new(runtime, fs, output_manager);
         registry
             .create(
@@ -470,7 +467,9 @@ fn default_session_registers_tool_team_pair_not_coordinator() {
 
     // Behavior marker: tool_team's TeamCreate caps results at MAX_TOOL_OUTPUT_LENGTH
     // (30_000); the coordinator's caps at 100_000.
-    let create = reg.find_by_name("TeamCreate").expect("TeamCreate registered");
+    let create = reg
+        .find_by_name("TeamCreate")
+        .expect("TeamCreate registered");
     assert_eq!(
         create.max_result_size_chars(),
         tool_api::util::output_truncation::MAX_TOOL_OUTPUT_LENGTH,

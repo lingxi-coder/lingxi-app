@@ -327,8 +327,7 @@ pub fn aggregate(contribs: &[SessionContribution]) -> StatsData {
             if let Some(date) = &c.date {
                 data.total_sessions += 1;
                 data.total_messages += c.message_count;
-                *data.daily_messages.entry(date.clone()).or_default() +=
-                    c.message_count as u64;
+                *data.daily_messages.entry(date.clone()).or_default() += c.message_count as u64;
                 track_date(&mut data, date);
             }
         }
@@ -632,7 +631,10 @@ fn format_pct(model_tokens: u64, total: u64) -> String {
 /// characters `▁▂▃▄▅▆▇█`.
 #[must_use]
 pub fn sparkline(values: &[u64]) -> String {
-    const BARS: [char; 8] = ['\u{2581}', '\u{2582}', '\u{2583}', '\u{2584}', '\u{2585}', '\u{2586}', '\u{2587}', '\u{2588}'];
+    const BARS: [char; 8] = [
+        '\u{2581}', '\u{2582}', '\u{2583}', '\u{2584}', '\u{2585}', '\u{2586}', '\u{2587}',
+        '\u{2588}',
+    ];
     if values.is_empty() {
         return String::new();
     }
@@ -694,7 +696,11 @@ fn percentiles(counts: &[u64]) -> Option<(u64, u64, u64)> {
     let mut sorted = counts.to_vec();
     sorted.sort_unstable();
     let at = |q: f64| -> u64 {
-        #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        #[allow(
+            clippy::cast_precision_loss,
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss
+        )]
         let idx = ((sorted.len() as f64) * q) as usize;
         sorted[idx.min(sorted.len() - 1)]
     };
@@ -761,7 +767,10 @@ fn overview_lines(data: &StatsData) -> Vec<String> {
     if let Some(fav) = data.favorite_model() {
         out.push(format!("Favorite model: {fav}"));
     }
-    out.push(format!("Total tokens: {}", format_number(data.total_tokens())));
+    out.push(format!(
+        "Total tokens: {}",
+        format_number(data.total_tokens())
+    ));
     out.push(format!(
         "Sessions: {}",
         format_number(data.total_sessions as u64)
@@ -879,7 +888,9 @@ mod tests {
     }
 
     fn user_line(date: &str) -> String {
-        format!(r#"{{"type":"user","isSidechain":false,"timestamp":"{date}T09:00:00.000Z","message":{{"role":"user","content":"hi"}}}}"#)
+        format!(
+            r#"{{"type":"user","isSidechain":false,"timestamp":"{date}T09:00:00.000Z","message":{{"role":"user","content":"hi"}}}}"#
+        )
     }
 
     #[test]
@@ -893,7 +904,11 @@ mod tests {
         assert!(c.is_session);
         assert_eq!(c.message_count, 2);
         assert_eq!(c.date.as_deref(), Some("2026-05-01"));
-        let u = c.model_usage.get("claude-opus").copied().unwrap_or_default();
+        let u = c
+            .model_usage
+            .get("claude-opus")
+            .copied()
+            .unwrap_or_default();
         assert_eq!(u.input_tokens, 100);
         assert_eq!(u.output_tokens, 50);
         assert_eq!(c.day_model_tokens.get("claude-opus").copied(), Some(150));
@@ -910,7 +925,11 @@ mod tests {
         // Synthetic model excluded; only the real one tallied.
         assert!(!c.model_usage.contains_key(SYNTHETIC_MODEL));
         assert_eq!(
-            c.model_usage.get("claude-sonnet").copied().unwrap_or_default().total(),
+            c.model_usage
+                .get("claude-sonnet")
+                .copied()
+                .unwrap_or_default()
+                .total(),
             15
         );
     }
@@ -922,7 +941,11 @@ mod tests {
         assert!(!c.is_session);
         // Tokens still tallied.
         assert_eq!(
-            c.model_usage.get("claude-opus").copied().unwrap_or_default().total(),
+            c.model_usage
+                .get("claude-opus")
+                .copied()
+                .unwrap_or_default()
+                .total(),
             50
         );
     }
@@ -954,7 +977,11 @@ mod tests {
         assert_eq!(data.last_date.as_deref(), Some("2026-05-02"));
         // Per-model merged.
         assert_eq!(
-            data.model_usage.get("claude-opus").copied().unwrap_or_default().total(),
+            data.model_usage
+                .get("claude-opus")
+                .copied()
+                .unwrap_or_default()
+                .total(),
             165
         );
     }
@@ -973,13 +1000,25 @@ mod tests {
         let mut data = StatsData::default();
         data.model_usage.insert(
             "small".into(),
-            ModelUsage { input_tokens: 1, output_tokens: 1, cache_read_tokens: 0 },
+            ModelUsage {
+                input_tokens: 1,
+                output_tokens: 1,
+                cache_read_tokens: 0,
+            },
         );
         data.model_usage.insert(
             "big".into(),
-            ModelUsage { input_tokens: 100, output_tokens: 100, cache_read_tokens: 0 },
+            ModelUsage {
+                input_tokens: 100,
+                output_tokens: 100,
+                cache_read_tokens: 0,
+            },
         );
-        let order: Vec<&str> = data.models_by_tokens().into_iter().map(|(m, _)| m).collect();
+        let order: Vec<&str> = data
+            .models_by_tokens()
+            .into_iter()
+            .map(|(m, _)| m)
+            .collect();
         assert_eq!(order, vec!["big", "small"]);
         assert_eq!(data.favorite_model(), Some("big"));
     }
@@ -1001,7 +1040,10 @@ mod tests {
         // the user gets instant feedback while the off-thread walk runs.
         let mut s = StatsState::loading();
         assert!(s.loading);
-        assert_eq!(render_stats_to_string(&s), format!("{LOADING_LINE}\n{FOOTER}"));
+        assert_eq!(
+            render_stats_to_string(&s),
+            format!("{LOADING_LINE}\n{FOOTER}")
+        );
 
         // Filling data clears the loading flag and switches to the real render.
         let data = StatsData {
@@ -1047,7 +1089,10 @@ mod tests {
         let mut st = StatsState::new(aggregate(&[s]));
         assert_eq!(st.tab, StatsTab::Overview);
         // Tab -> Models.
-        assert_eq!(handle_stats_key(&mut st, k(KeyCode::Tab)), StatsOutcome::Stay);
+        assert_eq!(
+            handle_stats_key(&mut st, k(KeyCode::Tab)),
+            StatsOutcome::Stay
+        );
         assert_eq!(st.tab, StatsTab::Models);
         let out = render_stats_to_string(&st);
         assert!(out.starts_with("Overview [Models]\n"), "got: {out}");
@@ -1055,7 +1100,10 @@ mod tests {
         assert!(out.contains("claude-opus (100.0%)"), "got: {out}");
         assert!(out.contains("  In: 1.2k \u{00B7} Out: 300"), "got: {out}");
         // BackTab cycles back to Overview.
-        assert_eq!(handle_stats_key(&mut st, k(KeyCode::BackTab)), StatsOutcome::Stay);
+        assert_eq!(
+            handle_stats_key(&mut st, k(KeyCode::BackTab)),
+            StatsOutcome::Stay
+        );
         assert_eq!(st.tab, StatsTab::Overview);
     }
 
@@ -1076,9 +1124,18 @@ mod tests {
             false,
         );
         let mut st = StatsState::new(aggregate(&[s]));
-        assert_eq!(handle_stats_key(&mut st, k(KeyCode::Esc)), StatsOutcome::Close);
-        assert_eq!(handle_stats_key(&mut st, k(KeyCode::Char('q'))), StatsOutcome::Close);
-        assert_eq!(handle_stats_key(&mut st, k(KeyCode::Enter)), StatsOutcome::Stay);
+        assert_eq!(
+            handle_stats_key(&mut st, k(KeyCode::Esc)),
+            StatsOutcome::Close
+        );
+        assert_eq!(
+            handle_stats_key(&mut st, k(KeyCode::Char('q'))),
+            StatsOutcome::Close
+        );
+        assert_eq!(
+            handle_stats_key(&mut st, k(KeyCode::Enter)),
+            StatsOutcome::Stay
+        );
     }
 
     #[test]
@@ -1087,7 +1144,10 @@ mod tests {
         let lines: Vec<SessionContribution> = (0..40)
             .map(|i| {
                 parse_session(
-                    &format!("{}\n", assistant_line("2026-05-01", &format!("model-{i:02}"), i + 1, 1)),
+                    &format!(
+                        "{}\n",
+                        assistant_line("2026-05-01", &format!("model-{i:02}"), i + 1, 1)
+                    ),
                     false,
                 )
             })
@@ -1096,22 +1156,31 @@ mod tests {
         st.set_tab(StatsTab::Models);
         assert!(st.scroll.is_scrollable());
         assert_eq!(st.scroll.offset(), 0);
-        assert_eq!(handle_stats_key(&mut st, k(KeyCode::Down)), StatsOutcome::Stay);
+        assert_eq!(
+            handle_stats_key(&mut st, k(KeyCode::Down)),
+            StatsOutcome::Stay
+        );
         assert_eq!(st.scroll.offset(), 1);
-        assert_eq!(handle_stats_key(&mut st, k(KeyCode::End)), StatsOutcome::Stay);
+        assert_eq!(
+            handle_stats_key(&mut st, k(KeyCode::End)),
+            StatsOutcome::Stay
+        );
         assert_eq!(st.scroll.offset(), st.scroll.max_offset());
     }
 
     #[test]
     fn sparkline_has_one_bar_per_value_and_valid_glyphs() {
-        let bars: &[char] = &['\u{2581}', '\u{2582}', '\u{2583}', '\u{2584}', '\u{2585}', '\u{2586}', '\u{2587}', '\u{2588}'];
+        let bars: &[char] = &[
+            '\u{2581}', '\u{2582}', '\u{2583}', '\u{2584}', '\u{2585}', '\u{2586}', '\u{2587}',
+            '\u{2588}',
+        ];
         let s = sparkline(&[1, 5, 3, 8, 2]);
         assert_eq!(s.chars().count(), 5);
         assert!(s.chars().all(|c| bars.contains(&c)), "got: {s}");
         // Max value -> tallest bar.
         assert!(s.ends_with('\u{2582}')); // last value 2 of max 8 -> idx (2*7)/8=1
         assert_eq!(s.chars().nth(3), Some('\u{2588}')); // value 8 == max -> idx 7
-        // Empty / all-zero -> empty string.
+                                                        // Empty / all-zero -> empty string.
         assert_eq!(sparkline(&[]), "");
         assert_eq!(sparkline(&[0, 0, 0]), "");
     }
@@ -1126,7 +1195,11 @@ mod tests {
         let rows = heatmap(&daily);
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0].chars().count(), 3);
-        assert!(rows[0].chars().all(|c| valid.contains(&c)), "got: {}", rows[0]);
+        assert!(
+            rows[0].chars().all(|c| valid.contains(&c)),
+            "got: {}",
+            rows[0]
+        );
         assert!(rows[1].starts_with("Less "));
         assert!(rows[1].ends_with(" More"));
         // Empty -> no rows.
@@ -1211,8 +1284,16 @@ mod tests {
         assert_eq!(decode_stats_cache(&json, &fp_size), None);
         // Extra file → MISS (a new transcript invalidates the cache).
         let fp_extra = HistoryFingerprint::from_entries(vec![
-            FileFingerprint { path: "a.jsonl".into(), mtime_ns: 1, size: 10 },
-            FileFingerprint { path: "b.jsonl".into(), mtime_ns: 1, size: 10 },
+            FileFingerprint {
+                path: "a.jsonl".into(),
+                mtime_ns: 1,
+                size: 10,
+            },
+            FileFingerprint {
+                path: "b.jsonl".into(),
+                mtime_ns: 1,
+                size: 10,
+            },
         ]);
         assert_eq!(decode_stats_cache(&json, &fp_extra), None);
     }
@@ -1223,9 +1304,14 @@ mod tests {
         let fp = fp_one();
         // Serialize at the current version, then string-replace it with a future
         // one the decoder must reject (claude-code version gate).
-        let json = encode_stats_cache(&fp, &data)
-            .replace(&format!("\"version\":{STATS_CACHE_VERSION}"), "\"version\":999");
-        assert!(json.contains("\"version\":999"), "version bump applied: {json}");
+        let json = encode_stats_cache(&fp, &data).replace(
+            &format!("\"version\":{STATS_CACHE_VERSION}"),
+            "\"version\":999",
+        );
+        assert!(
+            json.contains("\"version\":999"),
+            "version bump applied: {json}"
+        );
         assert_eq!(decode_stats_cache(&json, &fp), None);
     }
 
@@ -1241,8 +1327,16 @@ mod tests {
     fn fingerprint_is_order_independent() {
         // A reordered directory walk must produce an EQUAL fingerprint (→ HIT),
         // so equality survives a parallel / differently-ordered readdir.
-        let a = FileFingerprint { path: "a.jsonl".into(), mtime_ns: 1, size: 10 };
-        let b = FileFingerprint { path: "b.jsonl".into(), mtime_ns: 2, size: 20 };
+        let a = FileFingerprint {
+            path: "a.jsonl".into(),
+            mtime_ns: 1,
+            size: 10,
+        };
+        let b = FileFingerprint {
+            path: "b.jsonl".into(),
+            mtime_ns: 2,
+            size: 20,
+        };
         let from_ab = HistoryFingerprint::from_entries(vec![a.clone(), b.clone()]);
         let from_ba = HistoryFingerprint::from_entries(vec![b, a]);
         assert_eq!(from_ab, from_ba);

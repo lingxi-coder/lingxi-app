@@ -12,6 +12,7 @@ license.workspace = true
 [dependencies]
 command-api = { path = "../../command-api" }
 protocol = { path = "../../protocol" }
+skill-api = { path = "../../skill-api" }
 traits = { path = "../../traits" }
 telemetry = { path = "../../telemetry" }
 serde.workspace = true

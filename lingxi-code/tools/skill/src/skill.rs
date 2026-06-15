@@ -236,7 +236,9 @@ fn resolve_skill_shell_path() -> &'static str {
 /// BASH.1 extglob-disable guard, 1:1 with `bash.rs::disable_extglob_command`.
 fn skill_disable_extglob(shell_path: &str) -> Option<String> {
     if std::env::var("CLAUDE_CODE_SHELL_PREFIX").is_ok_and(|v| !v.is_empty()) {
-        return Some("{ shopt -u extglob || setopt NO_EXTENDED_GLOB; } >/dev/null 2>&1 || true".into());
+        return Some(
+            "{ shopt -u extglob || setopt NO_EXTENDED_GLOB; } >/dev/null 2>&1 || true".into(),
+        );
     }
     if shell_path.contains("bash") {
         Some("shopt -u extglob 2>/dev/null || true".into())
@@ -309,8 +311,10 @@ impl command_api::ShellRunner for SkillShellRunner {
                     .await
                 {
                     Ok(wrapped) => wrapped,
-                    Err(sandbox::wrap::SandboxWrapError::Unsupported(s)
-                    | sandbox::wrap::SandboxWrapError::SbplWrite(s)) => {
+                    Err(
+                        sandbox::wrap::SandboxWrapError::Unsupported(s)
+                        | sandbox::wrap::SandboxWrapError::SbplWrite(s),
+                    ) => {
                         return Err(command_api::ShellRunError {
                             stdout: String::new(),
                             stderr: String::new(),
@@ -778,7 +782,7 @@ impl Tool for SkillTool {
         // scan finds nothing; the inline scan is gated behind a `"!`"` substring
         // fast-path), so the common case is byte-identical to today. MCP-sourced
         // skills (`skip_shell_expansion = true`) skip the call entirely.
-        let expanded_prompt = if desc.skip_shell_expansion {
+        let mut expanded_prompt = if desc.skip_shell_expansion {
             expanded_prompt
         } else {
             let shell_ctx = command_api::ShellExpansionCtx {
@@ -822,6 +826,16 @@ impl Tool for SkillTool {
                 }
             }
         };
+        if let Some(skill_root) = desc.skill_root.as_ref() {
+            let skill_dir = skill_root.to_string_lossy();
+            let skill_dir = if cfg!(windows) {
+                skill_dir.replace('\\', "/")
+            } else {
+                skill_dir.into_owned()
+            };
+            expanded_prompt =
+                format!("Base directory for this skill: {skill_dir}\n\n{expanded_prompt}");
+        }
 
         let new_messages = vec![protocol::ConversationMessage::user(
             protocol::MessageId::new(),
@@ -1038,8 +1052,10 @@ mod tests {
             disable_model_invocation: true,
             ..prompt_desc("locked")
         };
-        let tool =
-            SkillTool::with_loader(shell_test_ctx(dummy_out()), Arc::new(FixedLoader(Some(desc))));
+        let tool = SkillTool::with_loader(
+            shell_test_ctx(dummy_out()),
+            Arc::new(FixedLoader(Some(desc))),
+        );
         let err = tool
             .call(json!({"skill": "locked"}), fresh_ctx(), fresh_tx())
             .await
@@ -1055,8 +1071,10 @@ mod tests {
             command_type: SkillCommandType::Other,
             ..prompt_desc("local-cmd")
         };
-        let tool =
-            SkillTool::with_loader(shell_test_ctx(dummy_out()), Arc::new(FixedLoader(Some(desc))));
+        let tool = SkillTool::with_loader(
+            shell_test_ctx(dummy_out()),
+            Arc::new(FixedLoader(Some(desc))),
+        );
         let err = tool
             .call(json!({"skill": "local-cmd"}), fresh_ctx(), fresh_tx())
             .await
@@ -1071,8 +1089,10 @@ mod tests {
             allowed_tools: vec!["Bash".into(), "Read".into()],
             ..prompt_desc("rich")
         };
-        let tool =
-            SkillTool::with_loader(shell_test_ctx(dummy_out()), Arc::new(FixedLoader(Some(desc))));
+        let tool = SkillTool::with_loader(
+            shell_test_ctx(dummy_out()),
+            Arc::new(FixedLoader(Some(desc))),
+        );
         let out = tool
             .call(json!({"skill": "rich"}), fresh_ctx(), fresh_tx())
             .await
@@ -1109,8 +1129,10 @@ mod tests {
             model: Some("claude-opus-4-6".into()),
             ..prompt_desc("switcher")
         };
-        let tool =
-            SkillTool::with_loader(shell_test_ctx(dummy_out()), Arc::new(FixedLoader(Some(desc))));
+        let tool = SkillTool::with_loader(
+            shell_test_ctx(dummy_out()),
+            Arc::new(FixedLoader(Some(desc))),
+        );
         let out = tool
             .call(json!({"skill": "switcher"}), fresh_ctx(), fresh_tx())
             .await
@@ -1130,8 +1152,10 @@ mod tests {
             model: Some("claude-sonnet-4-6".into()),
             ..prompt_desc("switcher")
         };
-        let tool =
-            SkillTool::with_loader(shell_test_ctx(dummy_out()), Arc::new(FixedLoader(Some(desc))));
+        let tool = SkillTool::with_loader(
+            shell_test_ctx(dummy_out()),
+            Arc::new(FixedLoader(Some(desc))),
+        );
         let out = tool
             .call(json!({"skill": "switcher"}), fresh_ctx(), fresh_tx())
             .await
@@ -1171,8 +1195,10 @@ mod tests {
             body: "SECRET FULL SKILL BODY that must not reach the model".into(),
             ..prompt_desc("commit")
         };
-        let tool =
-            SkillTool::with_loader(shell_test_ctx(dummy_out()), Arc::new(FixedLoader(Some(desc))));
+        let tool = SkillTool::with_loader(
+            shell_test_ctx(dummy_out()),
+            Arc::new(FixedLoader(Some(desc))),
+        );
         // Slash-prefixed input: model_content uses the normalized name.
         let out = tool
             .call(json!({"skill": "/commit"}), fresh_ctx(), fresh_tx())
@@ -1224,8 +1250,10 @@ mod tests {
             body: "Review PR $ARGUMENTS now".into(),
             ..prompt_desc("review-pr")
         };
-        let tool =
-            SkillTool::with_loader(shell_test_ctx(dummy_out()), Arc::new(FixedLoader(Some(desc))));
+        let tool = SkillTool::with_loader(
+            shell_test_ctx(dummy_out()),
+            Arc::new(FixedLoader(Some(desc))),
+        );
         let out = tool
             .call(
                 json!({"skill": "review-pr", "args": "123"}),
@@ -1262,8 +1290,10 @@ mod tests {
             argument_names: vec!["name".into()],
             ..prompt_desc("greet")
         };
-        let tool =
-            SkillTool::with_loader(shell_test_ctx(dummy_out()), Arc::new(FixedLoader(Some(desc))));
+        let tool = SkillTool::with_loader(
+            shell_test_ctx(dummy_out()),
+            Arc::new(FixedLoader(Some(desc))),
+        );
         let out = tool
             .call(
                 json!({"skill": "greet", "args": "world"}),
@@ -1364,7 +1394,11 @@ mod tests {
             Arc::new(FixedLoader(Some(desc))),
         );
         let out = tool
-            .call(json!({"skill": "nb", "args": "123"}), fresh_ctx(), fresh_tx())
+            .call(
+                json!({"skill": "nb", "args": "123"}),
+                fresh_ctx(),
+                fresh_tx(),
+            )
             .await
             .expect("ok");
         match &out.new_messages[0] {
@@ -1418,8 +1452,10 @@ mod tests {
             description: "x".repeat(MAX_SKILL_DESCRIPTOR_LEN + 100),
             ..prompt_desc("huge")
         };
-        let tool =
-            SkillTool::with_loader(shell_test_ctx(dummy_out()), Arc::new(FixedLoader(Some(desc))));
+        let tool = SkillTool::with_loader(
+            shell_test_ctx(dummy_out()),
+            Arc::new(FixedLoader(Some(desc))),
+        );
         let out = tool
             .call(json!({"skill": "huge"}), fresh_ctx(), fresh_tx())
             .await
@@ -1463,8 +1499,10 @@ mod tests {
             disable_model_invocation: true,
             ..prompt_desc("x")
         };
-        let tool =
-            SkillTool::with_loader(shell_test_ctx(dummy_out()), Arc::new(FixedLoader(Some(desc))));
+        let tool = SkillTool::with_loader(
+            shell_test_ctx(dummy_out()),
+            Arc::new(FixedLoader(Some(desc))),
+        );
         let err = tool
             .validate_input(&json!({"skill": "x"}), &fresh_ctx())
             .await
@@ -1499,13 +1537,39 @@ mod tests {
             skill_root: Some(std::path::PathBuf::from("/skills/foo")),
             ..prompt_desc("dir")
         };
-        let tool =
-            SkillTool::with_loader(shell_test_ctx(dummy_out()), Arc::new(FixedLoader(Some(desc))));
+        let tool = SkillTool::with_loader(
+            shell_test_ctx(dummy_out()),
+            Arc::new(FixedLoader(Some(desc))),
+        );
         let out = tool
             .call(json!({"skill": "dir"}), fresh_ctx(), fresh_tx())
             .await
             .expect("ok");
-        assert_eq!(injected_text(&out), "scripts live in /skills/foo/bin");
+        assert_eq!(
+            injected_text(&out),
+            "Base directory for this skill: /skills/foo\n\nscripts live in /skills/foo/bin"
+        );
+    }
+
+    #[tokio::test]
+    async fn file_backed_skill_prompt_includes_base_directory_prefix() {
+        let desc = SkillDescriptor {
+            body: "Use the local scripts".into(),
+            skill_root: Some(std::path::PathBuf::from("/skills/foo")),
+            ..prompt_desc("dir")
+        };
+        let tool = SkillTool::with_loader(
+            shell_test_ctx(dummy_out()),
+            Arc::new(FixedLoader(Some(desc))),
+        );
+        let out = tool
+            .call(json!({"skill": "dir"}), fresh_ctx(), fresh_tx())
+            .await
+            .expect("ok");
+        assert_eq!(
+            injected_text(&out),
+            "Base directory for this skill: /skills/foo\n\nUse the local scripts"
+        );
     }
 
     /// Step 2 (gate): with NO `skill_root` (e.g. MCP / non-file skills), the
@@ -1517,13 +1581,18 @@ mod tests {
             skill_root: None,
             ..prompt_desc("dir")
         };
-        let tool =
-            SkillTool::with_loader(shell_test_ctx(dummy_out()), Arc::new(FixedLoader(Some(desc))));
+        let tool = SkillTool::with_loader(
+            shell_test_ctx(dummy_out()),
+            Arc::new(FixedLoader(Some(desc))),
+        );
         let out = tool
             .call(json!({"skill": "dir"}), fresh_ctx(), fresh_tx())
             .await
             .expect("ok");
-        assert_eq!(injected_text(&out), "scripts live in ${CLAUDE_SKILL_DIR}/bin");
+        assert_eq!(
+            injected_text(&out),
+            "scripts live in ${CLAUDE_SKILL_DIR}/bin"
+        );
     }
 
     /// Step 2: ALL occurrences of `${CLAUDE_SKILL_DIR}` are replaced (global,
@@ -1535,13 +1604,18 @@ mod tests {
             skill_root: Some(std::path::PathBuf::from("/r")),
             ..prompt_desc("dir")
         };
-        let tool =
-            SkillTool::with_loader(shell_test_ctx(dummy_out()), Arc::new(FixedLoader(Some(desc))));
+        let tool = SkillTool::with_loader(
+            shell_test_ctx(dummy_out()),
+            Arc::new(FixedLoader(Some(desc))),
+        );
         let out = tool
             .call(json!({"skill": "dir"}), fresh_ctx(), fresh_tx())
             .await
             .expect("ok");
-        assert_eq!(injected_text(&out), "/r/a and /r/b");
+        assert_eq!(
+            injected_text(&out),
+            "Base directory for this skill: /r\n\n/r/a and /r/b"
+        );
     }
 
     /// Step 3: `${CLAUDE_SESSION_ID}` is replaced with the session id (always,
@@ -1553,8 +1627,10 @@ mod tests {
             session_id: Some("sess:abc-123".into()),
             ..prompt_desc("sid")
         };
-        let tool =
-            SkillTool::with_loader(shell_test_ctx(dummy_out()), Arc::new(FixedLoader(Some(desc))));
+        let tool = SkillTool::with_loader(
+            shell_test_ctx(dummy_out()),
+            Arc::new(FixedLoader(Some(desc))),
+        );
         let out = tool
             .call(json!({"skill": "sid"}), fresh_ctx(), fresh_tx())
             .await
@@ -1571,8 +1647,10 @@ mod tests {
             session_id: None,
             ..prompt_desc("sid")
         };
-        let tool =
-            SkillTool::with_loader(shell_test_ctx(dummy_out()), Arc::new(FixedLoader(Some(desc))));
+        let tool = SkillTool::with_loader(
+            shell_test_ctx(dummy_out()),
+            Arc::new(FixedLoader(Some(desc))),
+        );
         let out = tool
             .call(json!({"skill": "sid"}), fresh_ctx(), fresh_tx())
             .await
@@ -1755,29 +1833,33 @@ mod tests {
         );
     }
 
-    /// SAFETY INVARIANT: a body containing NEITHER token is byte-identical to the
-    /// arg-substituted text — both `replace` calls are no-ops (and with no
-    /// `!command`, the shell runner is never invoked).
     #[tokio::test]
-    async fn neither_token_present_is_byte_identical() {
+    async fn file_backed_body_without_tokens_still_gets_base_directory_prefix() {
         let body = "Plain body $ARGUMENTS, no tokens here at all.";
         let desc = SkillDescriptor {
             body: body.into(),
-            // Both wired, but the body references neither token.
             skill_root: Some(std::path::PathBuf::from("/r")),
             session_id: Some("sess:abc".into()),
             ..prompt_desc("plain")
         };
         let expected =
             command_api::substitute_arguments_faithful(body, Some("X"), true, &[]).unwrap();
-        let tool =
-            SkillTool::with_loader(shell_test_ctx(dummy_out()), Arc::new(FixedLoader(Some(desc))));
+        let tool = SkillTool::with_loader(
+            shell_test_ctx(dummy_out()),
+            Arc::new(FixedLoader(Some(desc))),
+        );
         let out = tool
-            .call(json!({"skill": "plain", "args": "X"}), fresh_ctx(), fresh_tx())
+            .call(
+                json!({"skill": "plain", "args": "X"}),
+                fresh_ctx(),
+                fresh_tx(),
+            )
             .await
             .expect("ok");
-        assert_eq!(injected_text(&out), expected);
-        assert_eq!(injected_text(&out), "Plain body X, no tokens here at all.");
+        assert_eq!(
+            injected_text(&out),
+            format!("Base directory for this skill: /r\n\n{expected}")
+        );
     }
 
     // ========================================================================

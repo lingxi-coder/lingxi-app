@@ -26,11 +26,11 @@ fn exempt_tools() -> HashSet<&'static str> {
         "sleep",          // returns { slept_ms: u64 }
         "schedule_cron",  // returns { id, humanSchedule, recurring, durable }
         "cron_delete",    // returns { id } (fixed shape)
-        "cron_list",      // returns a bounded jobs array (<= MAX_JOBS=50); max_result_size_chars caps it
-        "task_stop",      // returns { stopped: bool, task_id }
-        "task_update",    // returns { task_id, status }
-        "team_delete",    // returns { deleted: bool }
-        "mcp_auth",       // returns { authenticated: bool }
+        "cron_list", // returns a bounded jobs array (<= MAX_JOBS=50); max_result_size_chars caps it
+        "task_stop", // returns { stopped: bool, task_id }
+        "task_update", // returns { task_id, status }
+        "team_delete", // returns { deleted: bool }
+        "mcp_auth",  // returns { authenticated: bool }
         "remote_trigger", // returns { stub: true, ... }
     ]
     .into_iter()

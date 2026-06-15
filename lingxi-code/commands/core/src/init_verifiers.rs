@@ -315,7 +315,9 @@ mod tests {
                     "Create one or more verifier skills that can be used by the Verify agent"
                 ));
                 assert!(content.contains("## Phase 1: Auto-Detection"));
-                assert!(content.contains("Write the skill file to `.claude/skills/<verifier-name>/SKILL.md`."));
+                assert!(content.contains(
+                    "Write the skill file to `.claude/skills/<verifier-name>/SKILL.md`."
+                ));
             }
             other => panic!("expected InjectMessage, got {other:?}"),
         }

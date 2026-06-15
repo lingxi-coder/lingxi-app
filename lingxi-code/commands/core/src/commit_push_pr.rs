@@ -168,7 +168,9 @@ mod tests {
             CommandResult::InjectMessage { content } => {
                 // Stable substrings from the TS getPromptContent template.
                 assert!(content.contains("## Git Safety Protocol"));
-                assert!(content.contains("Return the PR URL when you're done, so the user can see it."));
+                assert!(
+                    content.contains("Return the PR URL when you're done, so the user can see it.")
+                );
                 assert!(content.contains("- NEVER update the git config"));
                 assert!(content.contains("gh pr create --title"));
                 // No trailing user-instructions section when no args.
@@ -183,9 +185,7 @@ mod tests {
         let h = CommitPushPrHandler::new();
         match h.handle(&args("  use a draft PR  ")).await {
             CommandResult::InjectMessage { content } => {
-                assert!(content.contains(
-                    "## Additional instructions from user\n\nuse a draft PR"
-                ));
+                assert!(content.contains("## Additional instructions from user\n\nuse a draft PR"));
                 // Args are trimmed before interpolation.
                 assert!(!content.contains("  use a draft PR  "));
             }

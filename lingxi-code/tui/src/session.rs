@@ -271,10 +271,7 @@ impl Runtime {
     /// through here. A FRESH session never calls this — its `resumed_messages`
     /// stays empty and the first render is byte-identical to today (no replay).
     #[must_use]
-    pub fn with_resumed_messages(
-        mut self,
-        messages: Vec<crate::state::RenderedMessage>,
-    ) -> Self {
+    pub fn with_resumed_messages(mut self, messages: Vec<crate::state::RenderedMessage>) -> Self {
         self.resumed_messages = messages;
         self
     }
@@ -520,7 +517,9 @@ mod tests {
     /// `set_command_argument_names`) and surfaces the inline progressive hint.
     #[tokio::test]
     async fn with_command_registry_populates_argument_hint() {
-        use command_api::model::{CommandFrontmatter, CommandSource, SlashCommand, SlashCommandKind};
+        use command_api::model::{
+            CommandFrontmatter, CommandSource, SlashCommand, SlashCommandKind,
+        };
         use command_api::CommandRegistry;
 
         // Build a registry holding a custom markdown command with argNames.

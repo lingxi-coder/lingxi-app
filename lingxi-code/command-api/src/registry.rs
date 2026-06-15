@@ -78,7 +78,10 @@ impl CommandRegistry {
     /// route to the target's handler.
     #[must_use]
     pub fn get_handler(&self, handler_id: &str) -> Option<Arc<dyn BuiltinCommandHandler>> {
-        let canon = self.aliases.get(handler_id).map_or(handler_id, String::as_str);
+        let canon = self
+            .aliases
+            .get(handler_id)
+            .map_or(handler_id, String::as_str);
         self.builtin_handlers.get(canon).cloned()
     }
 
@@ -158,7 +161,10 @@ mod tests {
             vec!["continue".to_string(), "unpause".to_string()],
         ));
 
-        assert_eq!(reg.resolve("resume").map(|c| c.name.as_str()), Some("resume"));
+        assert_eq!(
+            reg.resolve("resume").map(|c| c.name.as_str()),
+            Some("resume")
+        );
         assert_eq!(
             reg.resolve("continue").map(|c| c.name.as_str()),
             Some("resume"),
@@ -205,6 +211,9 @@ mod tests {
         assert!(c.when_to_use.is_none());
         assert!(c.aliases.is_empty());
         assert!(c.argument_hint.is_none());
+        assert!(c.skill_root.is_none());
+        assert!(c.user_invocable.is_none());
+        assert!(c.content_length.is_none());
     }
 
     /// `get_handler` canonicalizes through the aliases map (mirroring `resolve`),

@@ -436,7 +436,10 @@ mod tests {
         let mut s = ScrollState::new(10, 3);
         s.set_offset(4);
         let win = visible_slice(&r, &s);
-        assert_eq!(win, &["row4".to_string(), "row5".to_string(), "row6".to_string()]);
+        assert_eq!(
+            win,
+            &["row4".to_string(), "row5".to_string(), "row6".to_string()]
+        );
     }
 
     #[test]
@@ -456,7 +459,10 @@ mod tests {
         s.set_offset(4); // 4 hidden above, 10-(4+3)=3 hidden below
         let (win, ind) = visible_window(&r, &s);
         assert_eq!(win.len(), 3);
-        assert_eq!(ind, Some("\u{2191} 4 more \u{00B7} \u{2193} 3 more".to_string()));
+        assert_eq!(
+            ind,
+            Some("\u{2191} 4 more \u{00B7} \u{2193} 3 more".to_string())
+        );
     }
 
     #[test]

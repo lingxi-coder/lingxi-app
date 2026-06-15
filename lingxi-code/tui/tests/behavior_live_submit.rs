@@ -95,7 +95,9 @@ async fn pump_turn_spawns_turn_clears_flag_and_emits_turn_started() {
 
     // `spawn_streaming_turn` emits TurnStarted SYNCHRONOUSLY before spawning,
     // so the spinner shows immediately — it is already on the channel.
-    let ev = rx.try_recv().expect("TurnStarted must be emitted on the tx");
+    let ev = rx
+        .try_recv()
+        .expect("TurnStarted must be emitted on the tx");
     assert!(matches!(ev, TurnEvent::TurnStarted));
 }
 

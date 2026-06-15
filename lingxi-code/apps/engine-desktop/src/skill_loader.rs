@@ -35,13 +35,11 @@ fn to_descriptor(cmd: &SlashCommand, session_id: Option<&str>) -> SkillDescripto
         SlashCommandKind::Markdown {
             frontmatter,
             prompt_template,
-            file_path,
             ..
         }
         | SlashCommandKind::Plugin {
             frontmatter,
             prompt_template,
-            file_path,
             ..
         } => SkillDescriptor {
             name: cmd.name.clone(),
@@ -58,10 +56,7 @@ fn to_descriptor(cmd: &SlashCommand, session_id: Option<&str>) -> SkillDescripto
             // On-disk / plugin markdown is NOT MCP-sourced (TS `loadedFrom !==
             // 'mcp'`), so shell expansion runs for these commands.
             skip_shell_expansion: false,
-            // SKILLEXEC: file-based skills carry a base directory (TS `baseDir`)
-            // — the markdown file's parent dir — so `${CLAUDE_SKILL_DIR}` in the
-            // body resolves to it. `None` if the path has no parent (defensive).
-            skill_root: file_path.parent().map(std::path::Path::to_path_buf),
+            skill_root: cmd.skill_root.clone(),
             session_id,
         },
         // Builtin handlers are not prompt-based skills.
@@ -204,15 +199,18 @@ mod tests {
             ..SlashCommand::default()
         });
         let loader = CommandRegistrySkillLoader::new(Arc::new(RwLock::new(reg)));
-        let desc = loader.load("help").await.expect("load ok").expect("present");
+        let desc = loader
+            .load("help")
+            .await
+            .expect("load ok")
+            .expect("present");
         // → rejected by the tool with the locked "is not a prompt-based skill".
         assert_eq!(desc.command_type, SkillCommandType::Other);
     }
 
     #[tokio::test]
-    async fn markdown_descriptor_carries_skill_root_and_session_id() {
+    async fn ordinary_markdown_command_does_not_carry_skill_root() {
         let mut reg = CommandRegistry::new();
-        // markdown_cmd uses file_path = /x/<name>.md, so skill_root = /x.
         reg.register_command(markdown_cmd("dir-skill", "uses ${CLAUDE_SKILL_DIR}"));
         let loader = CommandRegistrySkillLoader::with_session_id(
             Arc::new(RwLock::new(reg)),
@@ -223,8 +221,28 @@ mod tests {
             .await
             .expect("load ok")
             .expect("present");
-        assert_eq!(desc.skill_root.as_deref(), Some(std::path::Path::new("/x")));
+        assert!(desc.skill_root.is_none());
         assert_eq!(desc.session_id.as_deref(), Some("sess:test-1"));
+    }
+
+    #[tokio::test]
+    async fn skills_loaded_command_carries_declared_skill_root() {
+        let mut cmd = markdown_cmd("dir-skill", "uses ${CLAUDE_SKILL_DIR}");
+        cmd.loaded_from = Some("skills".to_string());
+        cmd.skill_root = Some(PathBuf::from("/x/dir-skill"));
+        let mut reg = CommandRegistry::new();
+        reg.register_command(cmd);
+        let loader = CommandRegistrySkillLoader::new(Arc::new(RwLock::new(reg)));
+        let desc = loader
+            .load("dir-skill")
+            .await
+            .expect("load ok")
+            .expect("present");
+        assert_eq!(
+            desc.skill_root.as_deref(),
+            Some(std::path::Path::new("/x/dir-skill"))
+        );
+        assert!(!desc.skip_shell_expansion);
     }
 
     #[tokio::test]
@@ -233,10 +251,13 @@ mod tests {
         reg.register_command(markdown_cmd("plain", "body"));
         // `new` wires no session id.
         let loader = CommandRegistrySkillLoader::new(Arc::new(RwLock::new(reg)));
-        let desc = loader.load("plain").await.expect("load ok").expect("present");
+        let desc = loader
+            .load("plain")
+            .await
+            .expect("load ok")
+            .expect("present");
         assert!(desc.session_id.is_none());
-        // file-based skill still carries its base directory.
-        assert_eq!(desc.skill_root.as_deref(), Some(std::path::Path::new("/x")));
+        assert!(desc.skill_root.is_none());
     }
 
     #[tokio::test]

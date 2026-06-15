@@ -770,6 +770,7 @@ dependencies = [
  "serde_json",
  "serde_yaml",
  "sha2",
+ "skill-api",
  "telemetry",
  "thiserror 2.0.18",
  "tokio",

@@ -173,9 +173,8 @@ mod tests {
             mode: HooksDialogMode::List,
         };
         let out = render_hooks_to_string(&s);
-        assert!(out.starts_with(
-            "Hooks\n  fmt \u{00B7} PreToolUse\n\u{276F} lint \u{00B7} PostToolUse\n"
-        ));
+        assert!(out
+            .starts_with("Hooks\n  fmt \u{00B7} PreToolUse\n\u{276F} lint \u{00B7} PostToolUse\n"));
         assert!(out.ends_with(
             "Press \u{2191}\u{2193} to navigate \u{00B7} Enter to select \u{00B7} Esc to go back"
         ));

@@ -102,7 +102,9 @@ mod tests {
                 assert!(content.contains(
                     "1. If no PR number is provided in the args, run `gh pr list` to show open PRs"
                 ));
-                assert!(content.contains("Format your review with clear sections and bullet points."));
+                assert!(
+                    content.contains("Format your review with clear sections and bullet points.")
+                );
                 // Unconditional `${args}` interpolation: empty args => trailing
                 // "PR number: " with nothing after it.
                 assert!(content.contains("PR number: "));

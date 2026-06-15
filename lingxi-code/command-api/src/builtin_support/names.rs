@@ -170,29 +170,53 @@ pub const BUILTIN_CORE_NAMES: &[&str; 18] = &[
 /// behavior and does **not** alter the locked 99-name surface.
 pub const INTENTIONALLY_DISABLED_COMMANDS: &[(&str, &str)] = &[
     ("ant-trace", "USER_TYPE==='ant' (Anthropic-internal only)"),
-    ("advisor", "compiled stub in claude-code (gated advisor surface)"),
+    (
+        "advisor",
+        "compiled stub in claude-code (gated advisor surface)",
+    ),
     ("autofix-pr", "compiled stub in claude-code"),
-    ("backfill-sessions", "compiled stub in claude-code (internal maintenance)"),
+    (
+        "backfill-sessions",
+        "compiled stub in claude-code (internal maintenance)",
+    ),
     ("brief", "entitlement-gated in claude-code"),
     ("btw", "entitlement-gated in claude-code"),
     ("bughunter", "compiled stub in claude-code"),
     ("ctx-viz", "compiled stub in claude-code (internal debug)"),
-    ("debug-tool-call", "compiled stub in claude-code (internal debug)"),
+    (
+        "debug-tool-call",
+        "compiled stub in claude-code (internal debug)",
+    ),
     ("env", "compiled stub in claude-code"),
     ("good-claude", "compiled stub in claude-code (internal)"),
     ("issue", "compiled stub in claude-code"),
-    ("mock-limits", "compiled stub in claude-code (internal rate-limit testing)"),
-    ("oauth-refresh", "compiled stub in claude-code (internal auth maintenance)"),
+    (
+        "mock-limits",
+        "compiled stub in claude-code (internal rate-limit testing)",
+    ),
+    (
+        "oauth-refresh",
+        "compiled stub in claude-code (internal auth maintenance)",
+    ),
     ("onboarding", "compiled stub in claude-code (internal)"),
     ("perf-issue", "compiled stub in claude-code"),
-    ("reset-limits", "compiled stub in claude-code (internal rate-limit testing)"),
+    (
+        "reset-limits",
+        "compiled stub in claude-code (internal rate-limit testing)",
+    ),
     ("summary", "compiled stub in claude-code"),
     ("tag", "USER_TYPE==='ant' (Anthropic-internal only)"),
     ("teleport", "compiled stub in claude-code (internal)"),
     ("thinkback", "statsig-gated in claude-code"),
     ("thinkback-play", "statsig-gated in claude-code"),
-    ("x402", "entitlement-gated in claude-code (crypto micropayments)"),
-    ("break-cache", "compiled stub in claude-code (internal cache control)"),
+    (
+        "x402",
+        "entitlement-gated in claude-code (crypto micropayments)",
+    ),
+    (
+        "break-cache",
+        "compiled stub in claude-code (internal cache control)",
+    ),
     ("share", "compiled stub in claude-code"),
     ("reload-plugins", "local/internal stub in claude-code"),
 ];
@@ -237,32 +261,101 @@ pub const INTENTIONALLY_DISABLED_COMMANDS: &[(&str, &str)] = &[
 /// (see [`HOST_BOUND_DEFERRED_GAPS`]).
 pub const CORRECT_BY_DESIGN_STUBS: &[(&str, &str)] = &[
     // --- 18 compiled `{ isEnabled:()=>false, isHidden:true, name:'stub' }` ---
-    ("ant-trace", "compiled `name:'stub'` (isEnabled:()=>false, isHidden) in claude-code"),
-    ("autofix-pr", "compiled `name:'stub'` (isEnabled:()=>false, isHidden) in claude-code"),
-    ("backfill-sessions", "compiled `name:'stub'` (isEnabled:()=>false, isHidden) in claude-code"),
-    ("break-cache", "compiled `name:'stub'` (isEnabled:()=>false, isHidden) in claude-code"),
-    ("bughunter", "compiled `name:'stub'` (isEnabled:()=>false, isHidden) in claude-code"),
-    ("ctx-viz", "compiled `name:'stub'` (isEnabled:()=>false, isHidden) in claude-code"),
-    ("debug-tool-call", "compiled `name:'stub'` (isEnabled:()=>false, isHidden) in claude-code"),
-    ("env", "compiled `name:'stub'` (isEnabled:()=>false, isHidden) in claude-code"),
-    ("good-claude", "compiled `name:'stub'` (isEnabled:()=>false, isHidden) in claude-code"),
-    ("issue", "compiled `name:'stub'` (isEnabled:()=>false, isHidden) in claude-code"),
-    ("mock-limits", "compiled `name:'stub'` (isEnabled:()=>false, isHidden) in claude-code"),
-    ("oauth-refresh", "compiled `name:'stub'` (isEnabled:()=>false, isHidden) in claude-code"),
-    ("onboarding", "compiled `name:'stub'` (isEnabled:()=>false, isHidden) in claude-code"),
-    ("perf-issue", "compiled `name:'stub'` (isEnabled:()=>false, isHidden) in claude-code"),
-    ("reset-limits", "compiled `name:'stub'` (isEnabled:()=>false, isHidden) in claude-code"),
-    ("share", "compiled `name:'stub'` (isEnabled:()=>false, isHidden) in claude-code"),
-    ("summary", "compiled `name:'stub'` (isEnabled:()=>false, isHidden) in claude-code"),
-    ("teleport", "compiled `name:'stub'` (isEnabled:()=>false, isHidden) in claude-code"),
+    (
+        "ant-trace",
+        "compiled `name:'stub'` (isEnabled:()=>false, isHidden) in claude-code",
+    ),
+    (
+        "autofix-pr",
+        "compiled `name:'stub'` (isEnabled:()=>false, isHidden) in claude-code",
+    ),
+    (
+        "backfill-sessions",
+        "compiled `name:'stub'` (isEnabled:()=>false, isHidden) in claude-code",
+    ),
+    (
+        "break-cache",
+        "compiled `name:'stub'` (isEnabled:()=>false, isHidden) in claude-code",
+    ),
+    (
+        "bughunter",
+        "compiled `name:'stub'` (isEnabled:()=>false, isHidden) in claude-code",
+    ),
+    (
+        "ctx-viz",
+        "compiled `name:'stub'` (isEnabled:()=>false, isHidden) in claude-code",
+    ),
+    (
+        "debug-tool-call",
+        "compiled `name:'stub'` (isEnabled:()=>false, isHidden) in claude-code",
+    ),
+    (
+        "env",
+        "compiled `name:'stub'` (isEnabled:()=>false, isHidden) in claude-code",
+    ),
+    (
+        "good-claude",
+        "compiled `name:'stub'` (isEnabled:()=>false, isHidden) in claude-code",
+    ),
+    (
+        "issue",
+        "compiled `name:'stub'` (isEnabled:()=>false, isHidden) in claude-code",
+    ),
+    (
+        "mock-limits",
+        "compiled `name:'stub'` (isEnabled:()=>false, isHidden) in claude-code",
+    ),
+    (
+        "oauth-refresh",
+        "compiled `name:'stub'` (isEnabled:()=>false, isHidden) in claude-code",
+    ),
+    (
+        "onboarding",
+        "compiled `name:'stub'` (isEnabled:()=>false, isHidden) in claude-code",
+    ),
+    (
+        "perf-issue",
+        "compiled `name:'stub'` (isEnabled:()=>false, isHidden) in claude-code",
+    ),
+    (
+        "reset-limits",
+        "compiled `name:'stub'` (isEnabled:()=>false, isHidden) in claude-code",
+    ),
+    (
+        "share",
+        "compiled `name:'stub'` (isEnabled:()=>false, isHidden) in claude-code",
+    ),
+    (
+        "summary",
+        "compiled `name:'stub'` (isEnabled:()=>false, isHidden) in claude-code",
+    ),
+    (
+        "teleport",
+        "compiled `name:'stub'` (isEnabled:()=>false, isHidden) in claude-code",
+    ),
     // --- USER_TYPE==='ant' (Anthropic-internal only) ---
-    ("tag", "isEnabled:()=>process.env.USER_TYPE==='ant' (Anthropic-internal only)"),
+    (
+        "tag",
+        "isEnabled:()=>process.env.USER_TYPE==='ant' (Anthropic-internal only)",
+    ),
     // --- statsig / feature-gated OFF in the external build ---
-    ("thinkback", "isEnabled gated by statsig `tengu_thinkback` (off externally)"),
-    ("thinkback-play", "statsig `tengu_thinkback` + isHidden:true (off externally)"),
-    ("brief", "isEnabled:()=>feature('KAIROS')&&config — feature gate OFF externally"),
+    (
+        "thinkback",
+        "isEnabled gated by statsig `tengu_thinkback` (off externally)",
+    ),
+    (
+        "thinkback-play",
+        "statsig `tengu_thinkback` + isHidden:true (off externally)",
+    ),
+    (
+        "brief",
+        "isEnabled:()=>feature('KAIROS')&&config — feature gate OFF externally",
+    ),
     // --- entitlement-gated OFF + hidden by default ---
-    ("advisor", "isEnabled:()=>canUserConfigureAdvisor() (false by default) + isHidden"),
+    (
+        "advisor",
+        "isEnabled:()=>canUserConfigureAdvisor() (false by default) + isHidden",
+    ),
 ];
 
 /// **Partition B — HOST-BOUND-DEFERRED gaps (NOT correct-by-design).**
@@ -424,8 +517,7 @@ mod tests {
 
     #[test]
     fn every_intentionally_disabled_name_is_a_real_builtin() {
-        let full: std::collections::HashSet<&str> =
-            BUILTIN_COMMAND_NAMES.iter().copied().collect();
+        let full: std::collections::HashSet<&str> = BUILTIN_COMMAND_NAMES.iter().copied().collect();
         for (name, _reason) in INTENTIONALLY_DISABLED_COMMANDS {
             assert!(
                 full.contains(name),
@@ -545,14 +637,23 @@ mod tests {
     #[test]
     fn every_partitioned_name_is_a_real_builtin() {
         let full: std::collections::HashSet<&str> = BUILTIN_COMMAND_NAMES.iter().copied().collect();
-        for (name, _) in CORRECT_BY_DESIGN_STUBS.iter().chain(HOST_BOUND_DEFERRED_GAPS) {
-            assert!(full.contains(name), "partitioned name '{name}' is not a real builtin");
+        for (name, _) in CORRECT_BY_DESIGN_STUBS
+            .iter()
+            .chain(HOST_BOUND_DEFERRED_GAPS)
+        {
+            assert!(
+                full.contains(name),
+                "partitioned name '{name}' is not a real builtin"
+            );
         }
     }
 
     #[test]
     fn every_partitioned_reason_is_documented() {
-        for (name, reason) in CORRECT_BY_DESIGN_STUBS.iter().chain(HOST_BOUND_DEFERRED_GAPS) {
+        for (name, reason) in CORRECT_BY_DESIGN_STUBS
+            .iter()
+            .chain(HOST_BOUND_DEFERRED_GAPS)
+        {
             assert!(!reason.trim().is_empty(), "'{name}' must document a reason");
         }
     }
@@ -560,7 +661,10 @@ mod tests {
     #[test]
     fn no_duplicate_names_within_each_partition() {
         let mut seen = std::collections::HashSet::new();
-        for (name, _) in CORRECT_BY_DESIGN_STUBS.iter().chain(HOST_BOUND_DEFERRED_GAPS) {
+        for (name, _) in CORRECT_BY_DESIGN_STUBS
+            .iter()
+            .chain(HOST_BOUND_DEFERRED_GAPS)
+        {
             assert!(seen.insert(*name), "duplicate partitioned name '{name}'");
         }
     }
@@ -571,7 +675,10 @@ mod tests {
         // correct-by-design stub AND a genuine deferred gap.
         let cbd = name_set(CORRECT_BY_DESIGN_STUBS);
         let gaps = name_set(HOST_BOUND_DEFERRED_GAPS);
-        assert!(cbd.is_disjoint(&gaps), "correct-by-design and host-bound-deferred overlap");
+        assert!(
+            cbd.is_disjoint(&gaps),
+            "correct-by-design and host-bound-deferred overlap"
+        );
     }
 
     #[test]
@@ -579,8 +686,14 @@ mod tests {
         // Neither a faithful stub nor a deferred gap may also be a wired core
         // command — that would be a contradiction.
         let core: std::collections::HashSet<&str> = BUILTIN_CORE_NAMES.iter().copied().collect();
-        for (name, _) in CORRECT_BY_DESIGN_STUBS.iter().chain(HOST_BOUND_DEFERRED_GAPS) {
-            assert!(!core.contains(name), "'{name}' is both core (implemented) and stubbed");
+        for (name, _) in CORRECT_BY_DESIGN_STUBS
+            .iter()
+            .chain(HOST_BOUND_DEFERRED_GAPS)
+        {
+            assert!(
+                !core.contains(name),
+                "'{name}' is both core (implemented) and stubbed"
+            );
         }
     }
 
@@ -593,7 +706,10 @@ mod tests {
         let legacy = name_set(INTENTIONALLY_DISABLED_COMMANDS);
         let mut union = name_set(CORRECT_BY_DESIGN_STUBS);
         union.extend(name_set(HOST_BOUND_DEFERRED_GAPS));
-        assert_eq!(union, legacy, "partition union must equal the legacy disabled set");
+        assert_eq!(
+            union, legacy,
+            "partition union must equal the legacy disabled set"
+        );
         assert_eq!(
             CORRECT_BY_DESIGN_STUBS.len() + HOST_BOUND_DEFERRED_GAPS.len(),
             INTENTIONALLY_DISABLED_COMMANDS.len(),

@@ -82,9 +82,7 @@ fn render_messages_to_plain_text(messages: &[ConversationMessage]) -> String {
     for msg in messages {
         let (label, body) = match msg {
             ConversationMessage::User { content, .. } => ("User", render_blocks(content)),
-            ConversationMessage::Assistant { content, .. } => {
-                ("Assistant", render_blocks(content))
-            }
+            ConversationMessage::Assistant { content, .. } => ("Assistant", render_blocks(content)),
             ConversationMessage::System { content, .. } => ("System", content.clone()),
         };
         parts.push(format!("{label}: {body}"));
@@ -105,7 +103,11 @@ fn render_blocks(content: &[ContentBlock]) -> String {
             ContentBlock::ToolResult {
                 content, is_error, ..
             } => {
-                let tag = if *is_error { "tool error" } else { "tool result" };
+                let tag = if *is_error {
+                    "tool error"
+                } else {
+                    "tool result"
+                };
                 lines.push(format!("[{tag}] {content}"));
             }
             ContentBlock::Thinking { thinking, .. } => {
@@ -342,7 +344,10 @@ mod tests {
         let msgs = vec![assistant("no user prompt")];
         let f = default_filename(&msgs);
         assert!(f.starts_with("conversation-"), "got {f}");
-        assert_eq!(Path::new(&f).extension().and_then(|e| e.to_str()), Some("txt"));
+        assert_eq!(
+            Path::new(&f).extension().and_then(|e| e.to_str()),
+            Some("txt")
+        );
     }
 
     #[test]

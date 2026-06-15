@@ -49,13 +49,20 @@ pub fn register_all_builtin_commands(reg: &mut CommandRegistry) {
     // stub entry in-place.
     register_core_batch_3(reg);
 
-    // Pass 4: overwrite the batch-6 handle-free `/keybindings` handler. Like
+    // Pass 4: overwrite the handle-free `/skills` handler. The TUI intercepts
+    // `/skills` and opens the full-screen viewer; this handler covers registry
+    // / bridge / headless paths with the same text rendering.
+    register_core_batch_7(reg);
+
+    // Pass 5: overwrite the batch-6 handle-free `/keybindings` handler. Like
     // batch-3 it carries no orchestrator/auth handle, so it is wired here
     // unconditionally with the external-user default gate (disabled → preview
     // branch). Composition roots that resolve the customization flag at boot may
     // re-call `register_core_batch_6` with `enabled = true` to overwrite this
     // entry in-place.
     register_core_batch_6(reg, false);
+
+    register_interactive_only_commands(reg);
 }
 
 /// Overwrite the 6 batch-1 entries (`clear`, `compact`, `exit`, `help`,
@@ -202,7 +209,8 @@ pub fn register_core_batch_3(reg: &mut CommandRegistry) {
     reg.register_builtin_handler(Arc::new(StickersHandler::new()));
 }
 
-/// Overwrite the batch-5 entry (`effort`) with its handle-bound real handler.
+/// Overwrite the batch-5 entries (`effort`, `usage`) with handle-bound real
+/// handlers.
 ///
 /// Call **after** [`register_all_builtin_commands`] and (optionally) after
 /// [`register_core_batch_4`]. The function is idempotent — calling it twice
@@ -221,9 +229,10 @@ pub fn register_core_batch_5(
     reg: &mut CommandRegistry,
     handle: Arc<dyn traits::OrchestratorHandle>,
 ) {
-    use crate::EffortHandler;
+    use crate::{EffortHandler, UsageHandler};
 
-    reg.register_builtin_handler(Arc::new(EffortHandler::new(handle)));
+    reg.register_builtin_handler(Arc::new(EffortHandler::new(handle.clone())));
+    reg.register_builtin_handler(Arc::new(UsageHandler::new(handle)));
 }
 
 /// Overwrite the batch-6 entry (`keybindings`) with its handle-free real
@@ -258,6 +267,49 @@ pub fn register_core_connect(
 ) {
     use crate::ConnectHandler;
     reg.register_builtin_handler(Arc::new(ConnectHandler::new(writer, copilot)));
+}
+
+/// Overwrite the handle-free `/skills` entry with its non-TUI real handler.
+///
+/// Claude Code implements `/skills` as an interactive `local-jsx` menu. LingXi's
+/// TUI opens the full-screen viewer before the slash dispatcher runs; this
+/// command handler exists for non-TUI dispatcher paths and renders the same
+/// project/user skill list as plain text.
+pub fn register_core_batch_7(reg: &mut CommandRegistry) {
+    use crate::SkillsHandler;
+
+    reg.register_builtin_handler(Arc::new(SkillsHandler::new()));
+}
+
+/// Register headless fallback handlers for commands whose local implementation
+/// requires the interactive TUI surface.
+pub fn register_interactive_only_commands(reg: &mut CommandRegistry) {
+    use crate::InteractiveOnlyHandler;
+    use command_api::builtin_support::core_description;
+
+    for name in [
+        "add-dir",
+        "branch",
+        "color",
+        "copy",
+        "diff",
+        "plan",
+        "plugin",
+        "privacy-settings",
+        "rename",
+        "rewind",
+        "stats",
+        "tasks",
+        "terminal-setup",
+        "theme",
+        "usage",
+        "vim",
+    ] {
+        reg.register_builtin_handler(Arc::new(InteractiveOnlyHandler::new(
+            name,
+            core_description(name),
+        )));
+    }
 }
 
 #[cfg(test)]
@@ -444,7 +496,9 @@ mod batch_3_tests {
         let mut reg = CommandRegistry::new();
         register_all_builtin_commands(&mut reg);
 
-        let h = reg.get_handler("stickers").expect("stickers handler missing");
+        let h = reg
+            .get_handler("stickers")
+            .expect("stickers handler missing");
         match h.handle(&args("stickers")).await {
             CommandResult::Done { display: Some(s) } => {
                 assert_ne!(
@@ -548,6 +602,8 @@ mod batch_5_tests {
             reg.get_handler("effort").is_some(),
             "/effort handler missing"
         );
+        assert!(reg.resolve("usage").is_some(), "/usage missing");
+        assert!(reg.get_handler("usage").is_some(), "/usage handler missing");
     }
 
     /// After batch-5 wiring `/effort` must NOT return the locked M5 stub
@@ -568,6 +624,26 @@ mod batch_5_tests {
                 );
             }
             other => panic!("/effort expected Done with display, got {other:?}"),
+        }
+    }
+
+    /// After batch-5 wiring `/usage` must render a real usage snapshot rather
+    /// than the interactive-only fallback.
+    #[tokio::test]
+    async fn usage_returns_real_display_not_interactive_only() {
+        let mut reg = CommandRegistry::new();
+        register_all_builtin_commands(&mut reg);
+        let handle = Arc::new(MockOrchestratorHandle::new());
+        register_core_batch_5(&mut reg, handle);
+
+        let h = reg.get_handler("usage").expect("usage handler missing");
+        match h.handle(&args("usage")).await {
+            CommandResult::Done { display: Some(s) } => {
+                assert!(s.starts_with("Usage\nTotal cost: $"));
+                assert!(!s.contains("interactive TUI mode"));
+                assert_ne!(s, "usage: not implemented in v0.6.0 (M5)");
+            }
+            other => panic!("/usage expected Done with display, got {other:?}"),
         }
     }
 }
@@ -784,5 +860,56 @@ mod connect_tests {
         register_core_connect(&mut reg, Arc::new(NoopWriter), Arc::new(NoopCopilot));
         assert!(reg.resolve("connect").is_some(), "/connect missing");
         assert!(reg.get_handler("connect").is_some(), "/connect handler missing");
+    }
+}
+
+#[cfg(test)]
+mod interactive_only_tests {
+    use super::*;
+    use command_api::model::CommandResult;
+    use command_api::parser::ParsedSlashCommand;
+
+    fn args(name: &str) -> ParsedSlashCommand {
+        ParsedSlashCommand {
+            name: name.to_string(),
+            raw_args: String::new(),
+            positional_args: vec![],
+        }
+    }
+
+    #[tokio::test]
+    async fn local_tui_commands_return_interactive_only_not_m5_stub() {
+        let mut reg = CommandRegistry::new();
+        register_all_builtin_commands(&mut reg);
+
+        for name in [
+            "add-dir",
+            "branch",
+            "color",
+            "copy",
+            "diff",
+            "plan",
+            "plugin",
+            "privacy-settings",
+            "rename",
+            "rewind",
+            "stats",
+            "tasks",
+            "terminal-setup",
+            "theme",
+            "usage",
+            "vim",
+        ] {
+            let h = reg
+                .get_handler(name)
+                .unwrap_or_else(|| panic!("/{name} handler missing"));
+            match h.handle(&args(name)).await {
+                CommandResult::Done { display: Some(s) } => {
+                    assert_ne!(s, format!("{name}: not implemented in v0.6.0 (M5)"));
+                    assert!(s.contains("interactive TUI mode"), "/{name}: {s}");
+                }
+                other => panic!("/{name} expected Done with display, got {other:?}"),
+            }
+        }
     }
 }

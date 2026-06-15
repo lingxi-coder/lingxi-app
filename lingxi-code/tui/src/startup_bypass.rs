@@ -48,7 +48,11 @@ pub enum BypassDialogOutcome {
 #[must_use]
 pub fn handle_key(state: &mut BypassDialogState, key: KeyEvent) -> Option<BypassDialogOutcome> {
     match key.code {
-        KeyCode::Up | KeyCode::Down | KeyCode::Char('k' | 'j') | KeyCode::Tab | KeyCode::BackTab => {
+        KeyCode::Up
+        | KeyCode::Down
+        | KeyCode::Char('k' | 'j')
+        | KeyCode::Tab
+        | KeyCode::BackTab => {
             state.selected = match state.selected {
                 BypassChoice::Decline => BypassChoice::Accept,
                 BypassChoice::Accept => BypassChoice::Decline,

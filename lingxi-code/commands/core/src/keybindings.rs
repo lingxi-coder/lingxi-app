@@ -278,12 +278,8 @@ fn write_exclusive(path: &Path, content: &str) -> Result<(), WriteError> {
         .create_new(true)
         .open(path)
     {
-        Ok(mut f) => f
-            .write_all(content.as_bytes())
-            .map_err(WriteError::Other),
-        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-            Err(WriteError::AlreadyExists)
-        }
+        Ok(mut f) => f.write_all(content.as_bytes()).map_err(WriteError::Other),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Err(WriteError::AlreadyExists),
         Err(e) => Err(WriteError::Other(e)),
     }
 }
@@ -347,16 +343,24 @@ mod tests {
         // verbatim TS `JSON.stringify(config, null, 2) + '\n'`.
         assert!(KEYBINDINGS_TEMPLATE.starts_with("{\n"));
         assert!(KEYBINDINGS_TEMPLATE.ends_with("}\n"));
-        assert!(KEYBINDINGS_TEMPLATE.contains(
-            "\"$schema\": \"https://www.schemastore.org/claude-code-keybindings.json\""
-        ));
+        assert!(KEYBINDINGS_TEMPLATE
+            .contains("\"$schema\": \"https://www.schemastore.org/claude-code-keybindings.json\""));
         assert!(KEYBINDINGS_TEMPLATE
             .contains("\"$docs\": \"https://code.claude.com/docs/en/keybindings\""));
         assert!(KEYBINDINGS_TEMPLATE.contains("\"context\": \"Global\""));
         // Reserved (non-rebindable) shortcuts are filtered out of the template.
-        assert!(!KEYBINDINGS_TEMPLATE.contains("app:interrupt"), "ctrl+c not filtered");
-        assert!(!KEYBINDINGS_TEMPLATE.contains("app:exit"), "ctrl+d not filtered");
-        assert!(!KEYBINDINGS_TEMPLATE.contains("permission:toggleDebug"), "ctrl+d not filtered");
+        assert!(
+            !KEYBINDINGS_TEMPLATE.contains("app:interrupt"),
+            "ctrl+c not filtered"
+        );
+        assert!(
+            !KEYBINDINGS_TEMPLATE.contains("app:exit"),
+            "ctrl+d not filtered"
+        );
+        assert!(
+            !KEYBINDINGS_TEMPLATE.contains("permission:toggleDebug"),
+            "ctrl+d not filtered"
+        );
         // Non-Windows / features-off canonical keys present.
         assert!(KEYBINDINGS_TEMPLATE.contains("\"ctrl+v\": \"chat:imagePaste\""));
         assert!(KEYBINDINGS_TEMPLATE.contains("\"shift+tab\": \"chat:cycleMode\""));
@@ -403,7 +407,10 @@ mod tests {
         let out2 = h.run_at(&path);
         assert_eq!(out2, format!("Opened {} in your editor.", path.display()));
         // File content unchanged by the exclusive-create no-op.
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), KEYBINDINGS_TEMPLATE);
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            KEYBINDINGS_TEMPLATE
+        );
         assert_eq!(counter.load(Ordering::SeqCst), 2);
 
         let _ = std::fs::remove_dir_all(&dir);

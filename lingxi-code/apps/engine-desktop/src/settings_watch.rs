@@ -135,7 +135,10 @@ impl SettingsPaths {
         if path.starts_with(&self.policy_drop_in_dir) {
             // Only `.json` fragments are policy settings (TS watches the
             // dir's `.json` children); ignore editor temp files etc.
-            if path.extension().is_some_and(|e| e.eq_ignore_ascii_case("json")) {
+            if path
+                .extension()
+                .is_some_and(|e| e.eq_ignore_ascii_case("json"))
+            {
                 return Some(ConfigChangeSource::PolicySettings);
             }
             return None;
@@ -310,11 +313,7 @@ mod tests {
 
     #[async_trait]
     impl ConfigChangeFirer for RecordingFirer {
-        async fn fire_config_change(
-            &self,
-            source: ConfigChangeSource,
-            file_path: Option<PathBuf>,
-        ) {
+        async fn fire_config_change(&self, source: ConfigChangeSource, file_path: Option<PathBuf>) {
             self.fired.lock().unwrap().push((source, file_path));
         }
     }
@@ -372,7 +371,10 @@ mod tests {
     #[test]
     fn classify_unrelated_path_is_none() {
         let p = paths();
-        assert_eq!(p.classify(Path::new("/work/proj/.claude/agents/x.md")), None);
+        assert_eq!(
+            p.classify(Path::new("/work/proj/.claude/agents/x.md")),
+            None
+        );
         assert_eq!(p.classify(Path::new("/work/proj/src/main.rs")), None);
         // A sibling json in the project .claude dir that is NOT a watched
         // settings file maps to nothing.

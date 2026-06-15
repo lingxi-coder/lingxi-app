@@ -97,11 +97,9 @@ pub fn parse_argument_names(argument_names: Option<&FrontmatterArgs>) -> Vec<Str
 
     match argument_names {
         None => Vec::new(),
-        Some(FrontmatterArgs::List(list)) => list
-            .iter()
-            .filter(|n| is_valid_name(n))
-            .cloned()
-            .collect(),
+        Some(FrontmatterArgs::List(list)) => {
+            list.iter().filter(|n| is_valid_name(n)).cloned().collect()
+        }
         Some(FrontmatterArgs::Str(s)) => s
             .split_whitespace()
             .filter(|n| is_valid_name(n))
@@ -377,8 +375,9 @@ fn replace_shorthand_indexed(content: &str, parsed_args: &[String]) -> String {
                     k -= 1;
                 }
                 if let Some(match_end) = matched {
-                    let index: usize =
-                        content[digits_start..match_end].parse().unwrap_or(usize::MAX);
+                    let index: usize = content[digits_start..match_end]
+                        .parse()
+                        .unwrap_or(usize::MAX);
                     let replacement = parsed_args.get(index).map_or("", String::as_str);
                     out.push_str(replacement);
                     i = match_end;
@@ -466,7 +465,10 @@ mod tests {
         // Glob word dropped, plain word kept.
         assert_eq!(parse_arguments("*.ts foo"), vec!["foo"]);
         // Redirect/pipe operators dropped.
-        assert_eq!(parse_arguments("report > out.txt"), vec!["report", "out.txt"]);
+        assert_eq!(
+            parse_arguments("report > out.txt"),
+            vec!["report", "out.txt"]
+        );
         assert_eq!(parse_arguments("a | b"), vec!["a", "b"]);
         // Comment truncates the remainder.
         assert_eq!(parse_arguments("a # b"), vec!["a"]);
@@ -527,7 +529,10 @@ mod tests {
             None
         );
         // no declared names → None regardless of typed args.
-        assert_eq!(generate_progressive_argument_hint(&[], &names(&["x"])), None);
+        assert_eq!(
+            generate_progressive_argument_hint(&[], &names(&["x"])),
+            None
+        );
     }
 
     // ----- indexed / shorthand substitution -----
@@ -600,8 +605,8 @@ mod tests {
         // arguments: ["a[b"] -> `new RegExp("\\$a[b(?![\\[\\w])")` throws in JS;
         // we surface an InvalidArgumentName error instead of literal-replacing.
         let argnames = names(&["a[b"]);
-        let err = substitute_arguments_faithful("see $a[b here", Some("V"), true, &argnames)
-            .unwrap_err();
+        let err =
+            substitute_arguments_faithful("see $a[b here", Some("V"), true, &argnames).unwrap_err();
         match err {
             SubstitutionError::InvalidArgumentName { name, .. } => assert_eq!(name, "a[b"),
         }
@@ -630,7 +635,10 @@ mod tests {
         // it LITERALLY (`$a.b`), so `$aXb` is left untouched (TS would replace
         // it too). The literal occurrence IS replaced.
         let argnames = names(&["a.b"]);
-        assert_eq!(sub("$a.b and $aXb", Some("V"), true, &argnames), "V and $aXb");
+        assert_eq!(
+            sub("$a.b and $aXb", Some("V"), true, &argnames),
+            "V and $aXb"
+        );
     }
 
     #[test]

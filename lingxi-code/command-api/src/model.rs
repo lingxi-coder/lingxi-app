@@ -64,6 +64,17 @@ pub struct SlashCommand {
     /// kind, …}` shape when no names are declared.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub argument_names: Vec<String>,
+    /// Directory root for a directory-format skill command. Unset for ordinary
+    /// `.claude/commands/*.md` markdown commands.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skill_root: Option<PathBuf>,
+    /// Whether a skill command is user-invocable. Kept optional so legacy command
+    /// JSON stays unchanged when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_invocable: Option<bool>,
+    /// Raw markdown byte length for file-backed skills.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_length: Option<usize>,
 }
 
 /// Serde `skip_serializing_if` predicate for `bool` fields that default to

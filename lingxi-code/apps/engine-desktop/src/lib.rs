@@ -782,15 +782,35 @@ pub async fn desktop_command_registry(
     // layering claude-code's getCommands uses. Registered AFTER builtins so a
     // same-named custom command shadows a builtin (TS findCommand order).
     let home = dirs::home_dir().unwrap_or_else(|| claude_home.to_path_buf());
+    let managed_dir = crate::settings_watch::managed_settings_dir();
     let registered = command_core::load_and_register_custom_commands(
         &mut reg,
         cwd,
         claude_home,
-        &crate::settings_watch::managed_settings_dir(),
+        &managed_dir,
         &home,
     )
     .await;
-    tracing::debug!(custom_commands = registered, "registered custom slash commands");
+    let registered_skills = command_core::load_and_register_skill_commands_with_roots(
+        &mut reg,
+        cwd,
+        claude_home,
+        Some(&managed_dir),
+        &home,
+        &[],
+    )
+    .await;
+    reg.register_builtin_handler(Arc::new(command_core::SkillsHandler::with_all_roots(
+        cwd.to_path_buf(),
+        claude_home.to_path_buf(),
+        Some(managed_dir),
+        Vec::new(),
+    )));
+    tracing::debug!(
+        custom_commands = registered,
+        skill_commands = registered_skills,
+        "registered custom slash commands"
+    );
     reg
 }
 
@@ -934,10 +954,12 @@ pub enum BuildError {
 ///
 /// PARITY-GAP: FD-inherited keys + managed-context OAuth forcing are not surfaced
 /// into [`DesktopConfig`]; the common desktop API-key-vs-OAuth split is covered.
-fn oauth_subscriber_flag(api_key_present: bool, auth_token_present: bool, scopes: &[String]) -> bool {
-    !api_key_present
-        && !auth_token_present
-        && anthropic_oauth::subscription_from_scopes(scopes)
+fn oauth_subscriber_flag(
+    api_key_present: bool,
+    auth_token_present: bool,
+    scopes: &[String],
+) -> bool {
+    !api_key_present && !auth_token_present && anthropic_oauth::subscription_from_scopes(scopes)
 }
 
 /// Fold the profile + roles responses into the shared snapshot. Pure —
@@ -1418,7 +1440,10 @@ pub async fn build(
     //       real model seam so spawned subagents drive the multi-turn
     //       `run_subagent_loop` (gated on `ctx.api_client.is_some()`) instead of
     //       the legacy stub completion.
-    let subagent_pool = Arc::new(agent::StateMachinePool::new(Arc::new(PosixRuntime::new()), 4));
+    let subagent_pool = Arc::new(agent::StateMachinePool::new(
+        Arc::new(PosixRuntime::new()),
+        4,
+    ));
     // Clone the subagent model seam BEFORE it is moved into the spawner — the
     // M10 coordinator teammate handler (T13) hands the SAME seam to every
     // spawned `InProcessTeammate` so it drives the real multi-turn loop.
@@ -1741,11 +1766,9 @@ pub async fn build(
     //         or DENY it; with no hook it falls through to `{"action":"cancel"}`.
     //         `with_hook_dispatcher(Some(..))` is the only behavioral delta from
     //         the previous `with_raw_conn` wiring.
-    let elicitation_dispatcher: Arc<dyn mcp::HookDispatcher> =
-        Arc::new(orchestrator::OrchestratorHookDispatcher::new(
-            hooks.clone(),
-            cwd.clone(),
-        ));
+    let elicitation_dispatcher: Arc<dyn mcp::HookDispatcher> = Arc::new(
+        orchestrator::OrchestratorHookDispatcher::new(hooks.clone(), cwd.clone()),
+    );
     let mcp_registry = Arc::new(
         mcp::McpRegistry::with_raw_conn(
             posix.clone() as Arc<dyn McpTransport>,
@@ -1811,16 +1834,18 @@ pub async fn build(
     // when a task reaches a terminal status. The firer wraps the SAME
     // `Arc<HookExecutorImpl>` the orchestrator fires its other hooks through, so
     // the `tasks` leaf reaches `orch.hooks` without a dependency cycle.
-    .with_task_completed_firer(Arc::new(
-        orchestrator::OrchestratorTaskCompletedFirer::new(hooks.clone(), cwd.clone()),
-    ))
+    .with_task_completed_firer(Arc::new(orchestrator::OrchestratorTaskCompletedFirer::new(
+        hooks.clone(),
+        cwd.clone(),
+    )))
     // Fire the `TaskCreated` hook (claude-code `executeTaskCreatedHooks`) when a
     // task is created. Counterpart to the `TaskCompleted` firer above — wraps
     // the SAME `Arc<HookExecutorImpl>` so the `tasks` leaf reaches `orch.hooks`
     // without a dependency cycle.
-    .with_task_created_firer(Arc::new(
-        orchestrator::OrchestratorTaskCreatedFirer::new(hooks.clone(), cwd.clone()),
-    ));
+    .with_task_created_firer(Arc::new(orchestrator::OrchestratorTaskCreatedFirer::new(
+        hooks.clone(),
+        cwd.clone(),
+    )));
     // Register the M2 self-contained per-type handlers (LocalBash + MonitorMcp)
     // before the registry is shared. Both depend only on platform traits we
     // already build here; agent/teammate/workflow/remote/dream handlers register
@@ -1887,9 +1912,7 @@ pub async fn build(
         task_registry_inner.output_manager.clone(),
         teammate_api,
     )
-    .with_tool_invoker(
-        teammate_invoker.clone() as Arc<dyn traits::tool_invoker::ToolInvoker>
-    )
+    .with_tool_invoker(teammate_invoker.clone() as Arc<dyn traits::tool_invoker::ToolInvoker>)
     // Anchor the teammate's `AgentModel::Inherit` / family aliases to the parent
     // model — the same seam the `PoolSubagentSpawner` gets above — so a spawned
     // teammate runs against a concrete wire id instead of passing `"inherit"` raw.
@@ -1901,11 +1924,14 @@ pub async fn build(
     // `Arc<HookExecutorImpl>` the orchestrator fires its other hooks through, so
     // the `tasks` leaf reaches `orch.hooks` without a dependency cycle —
     // mirroring the `TaskCompleted` / `TaskCreated` firers above.
-    .with_teammate_idle_firer(Arc::new(
-        orchestrator::OrchestratorTeammateIdleFirer::new(hooks.clone(), cwd.clone()),
-    ));
-    task_registry_inner
-        .register_handler(tasks::TaskType::InProcessTeammate, Arc::new(teammate_handler));
+    .with_teammate_idle_firer(Arc::new(orchestrator::OrchestratorTeammateIdleFirer::new(
+        hooks.clone(),
+        cwd.clone(),
+    )));
+    task_registry_inner.register_handler(
+        tasks::TaskType::InProcessTeammate,
+        Arc::new(teammate_handler),
+    );
 
     let task_registry = Arc::new(task_registry_inner);
 
@@ -1921,12 +1947,13 @@ pub async fn build(
     //       builtin `SendMessage` tool by casting it onto `tool_ctx.mailbox_router`
     //       (the trait impl lives on `MailboxRouter`); a default session leaves it
     //       `None` — byte-identical to the pre-M10 build.
-    let coordinator_mailbox: Option<Arc<dyn traits::mailbox::MailboxRouterHandle>> =
-        if cfg.session_started_as_coordinator {
-            Some(coordinator.mailbox_router.clone() as Arc<dyn traits::mailbox::MailboxRouterHandle>)
-        } else {
-            None
-        };
+    let coordinator_mailbox: Option<Arc<dyn traits::mailbox::MailboxRouterHandle>> = if cfg
+        .session_started_as_coordinator
+    {
+        Some(coordinator.mailbox_router.clone() as Arc<dyn traits::mailbox::MailboxRouterHandle>)
+    } else {
+        None
+    };
     let tool_ctx = BuiltinToolContext {
         // FILE.B: file tools share one read-state map for the (future) staleness
         // guard / Read-dedup; the composition-root Arc-share with the orchestrator
@@ -1960,9 +1987,7 @@ pub async fn build(
         // temp-file cleanup, not a leaked process. When a host teardown seam is
         // added (the future-batch note on `fire_session_end`), call
         // `sandbox_runner.reset().await` there for the tidy socket/CA cleanup.
-        sandbox_runner: std::sync::Arc::new(
-            sandbox_runtime_runner::SandboxRuntimeRunner::new(),
-        ),
+        sandbox_runner: std::sync::Arc::new(sandbox_runtime_runner::SandboxRuntimeRunner::new()),
         permission_mode: cfg.permission_mode,
         project_trust: ProjectTrustLevel::Trusted,
         sandbox_available: false,
@@ -2128,9 +2153,10 @@ pub async fn build(
     let (has_config_change_hook, file_changed_matchers): (bool, Vec<String>) = {
         let reg = hook_registry.read().await;
         let all = reg.all_hooks();
-        let has_config_change = all
-            .iter()
-            .any(|h| h.events.contains(&hooks::events::HookEventType::ConfigChange));
+        let has_config_change = all.iter().any(|h| {
+            h.events
+                .contains(&hooks::events::HookEventType::ConfigChange)
+        });
         let matchers = all
             .iter()
             .filter(|h| {
@@ -2301,11 +2327,8 @@ pub async fn build(
         Some(firer) => {
             let matcher_refs: Vec<&str> =
                 file_changed_matchers.iter().map(String::as_str).collect();
-            let watcher = file_changed_watch::FileChangedWatcher::new(
-                &matcher_refs,
-                &watch_cwd,
-                firer,
-            );
+            let watcher =
+                file_changed_watch::FileChangedWatcher::new(&matcher_refs, &watch_cwd, firer);
             // Empty resolved-path set (matcher-less hooks only) ⇒ spawn returns
             // an empty handle, so this stays a no-op even when a `FileChanged`
             // hook is present but specifies no watch target.
@@ -2735,12 +2758,8 @@ mod tests {
 
     #[async_trait::async_trait]
     impl client_adapter::PermissionRequestSink for RecordingPermissionSink {
-        async fn emit_request(
-            &self,
-            _request: client_protocol::permission::PermissionRequest,
-        ) {
-            self.count
-                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        async fn emit_request(&self, _request: client_protocol::permission::PermissionRequest) {
+            self.count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         }
     }
 
@@ -2781,15 +2800,16 @@ mod tests {
         let perm_sink: Arc<dyn client_adapter::PermissionRequestSink> =
             Arc::new(RecordingPermissionSink::default());
 
-        let rt = build(cfg, output, perm_sink)
-            .await
-            .expect("build() failed");
+        let rt = build(cfg, output, perm_sink).await.expect("build() failed");
 
         assert!(rt.orchestrator.has_cost_tracker(), "no CostTracker");
         assert!(rt.orchestrator.has_mcp_registry(), "no McpRegistry");
         assert!(rt.orchestrator.has_hook_registry(), "no HookRegistry");
         assert!(rt.orchestrator.has_agent_catalog(), "no agent catalog");
-        assert!(rt.orchestrator.has_compaction(), "no CompactionOrchestrator");
+        assert!(
+            rt.orchestrator.has_compaction(),
+            "no CompactionOrchestrator"
+        );
     }
 
     // ── Phase 2a: helper unit tests (T2) ─────────────────────────────────────
@@ -2984,9 +3004,7 @@ mod tests {
         let perm_sink: Arc<dyn client_adapter::PermissionRequestSink> =
             Arc::new(RecordingPermissionSink::default());
 
-        let rt = build(cfg, output, perm_sink)
-            .await
-            .expect("build() failed");
+        let rt = build(cfg, output, perm_sink).await.expect("build() failed");
 
         assert!(
             rt.permission_gate.is_none(),
@@ -3006,9 +3024,7 @@ mod tests {
         let sink = Arc::new(RecordingPermissionSink::default());
         let perm_sink: Arc<dyn client_adapter::PermissionRequestSink> = sink.clone();
 
-        let rt = build(cfg, output, perm_sink)
-            .await
-            .expect("build() failed");
+        let rt = build(cfg, output, perm_sink).await.expect("build() failed");
 
         let gate = rt
             .permission_gate
@@ -3039,8 +3055,12 @@ mod tests {
 
         // Resolve so the parked future returns.
         assert!(
-            gate.resolve(1, client_protocol::permission::PermissionResponseDto::Deny, "Bash")
-                .await
+            gate.resolve(
+                1,
+                client_protocol::permission::PermissionResponseDto::Deny,
+                "Bash"
+            )
+            .await
         );
         let _ = task.await.unwrap();
     }
@@ -3077,9 +3097,7 @@ mod tests {
         let perm_sink: Arc<dyn client_adapter::PermissionRequestSink> =
             Arc::new(RecordingPermissionSink::default());
 
-        let rt = build(cfg, output, perm_sink)
-            .await
-            .expect("build() failed");
+        let rt = build(cfg, output, perm_sink).await.expect("build() failed");
 
         // The handles exist on the runtime …
         assert!(
@@ -3188,9 +3206,9 @@ mod tests {
 
         // The wired `fire_instructions_loaded()` runs INSIDE build(): a
         // failing/unsupported hook command must NOT break boot (best-effort).
-        let rt = build(cfg, output, perm_sink)
-            .await
-            .expect("build() must succeed even with a (failing) InstructionsLoaded hook registered");
+        let rt = build(cfg, output, perm_sink).await.expect(
+            "build() must succeed even with a (failing) InstructionsLoaded hook registered",
+        );
 
         // The boot path loaded the InstructionsLoaded hook into the wired
         // registry — exactly the hook the in-build `fire_instructions_loaded()`
@@ -3315,9 +3333,7 @@ mod tests {
         let perm_sink: Arc<dyn client_adapter::PermissionRequestSink> =
             Arc::new(RecordingPermissionSink::default());
 
-        let rt = build(cfg, output, perm_sink)
-            .await
-            .expect("build() failed");
+        let rt = build(cfg, output, perm_sink).await.expect("build() failed");
 
         let sys = rt.orchestrator.assemble_system_prompt_preview().await;
         assert!(
@@ -3342,10 +3358,7 @@ mod tests {
         ) -> Result<String, traits::team_spawn::TeamSpawnError> {
             Ok(String::new())
         }
-        async fn kill(
-            &self,
-            _task_id: &str,
-        ) -> Result<(), traits::team_spawn::TeamSpawnError> {
+        async fn kill(&self, _task_id: &str) -> Result<(), traits::team_spawn::TeamSpawnError> {
             Ok(())
         }
     }
@@ -3460,9 +3473,7 @@ mod tests {
         let perm_sink: Arc<dyn client_adapter::PermissionRequestSink> =
             Arc::new(RecordingPermissionSink::default());
 
-        let rt = build(cfg, output, perm_sink)
-            .await
-            .expect("build() failed");
+        let rt = build(cfg, output, perm_sink).await.expect("build() failed");
 
         assert!(
             rt.coordinator_mode.is_enabled(),
@@ -3503,8 +3514,8 @@ mod tests {
         // the team's `MailboxRouter` cast to `dyn MailboxRouterHandle` on the
         // context (the load-bearing wiring — `None` here is the pre-M10 default).
         let mut ctx = stub_tool_ctx();
-        ctx.mailbox_router = Some(team.mailbox_router.clone()
-            as Arc<dyn traits::mailbox::MailboxRouterHandle>);
+        ctx.mailbox_router =
+            Some(team.mailbox_router.clone() as Arc<dyn traits::mailbox::MailboxRouterHandle>);
         let wiring = CoordinatorWiring {
             team: team.clone(),
             mode: Arc::new(coordinator::CoordinatorMode::new()),
@@ -3572,7 +3583,8 @@ mod tests {
         // (1) Sandbox enabled, no explicit autoAllow override → TS default TRUE,
         //     no excluded commands → every command would be sandboxed +
         //     auto-allowed.
-        let enabled = sandbox_auto_allow_from_settings_tiers(&[r#"{ "sandbox": { "enabled": true } }"#]);
+        let enabled =
+            sandbox_auto_allow_from_settings_tiers(&[r#"{ "sandbox": { "enabled": true } }"#]);
         assert!(enabled.enabled, "settings enabled → config enabled");
         assert!(
             enabled.auto_allow_bash_if_sandboxed,
@@ -3608,25 +3620,31 @@ mod tests {
 
         // (4) Sandbox DISABLED → never auto-allows even though autoAllow defaults
         //     true.
-        let disabled = sandbox_auto_allow_from_settings_tiers(&[r#"{ "sandbox": { "enabled": false } }"#]);
+        let disabled =
+            sandbox_auto_allow_from_settings_tiers(&[r#"{ "sandbox": { "enabled": false } }"#]);
         assert!(!disabled.enabled);
         assert!(!disabled.auto_allows("echo hi"));
 
         // (5) No `sandbox` subsection at all (the common case) → disabled, inert.
-        let none = sandbox_auto_allow_from_settings_tiers(&[r#"{ "permissions": { "allow": [] } }"#]);
+        let none =
+            sandbox_auto_allow_from_settings_tiers(&[r#"{ "permissions": { "allow": [] } }"#]);
         assert!(!none.enabled);
         assert!(!none.auto_allows("echo hi"));
 
         // (6) Tier precedence: a later tier's sandbox subsection overrides an
         //     earlier one (ascending priority, last write wins).
         let layered = sandbox_auto_allow_from_settings_tiers(&[
-            r#"{ "sandbox": { "enabled": false } }"#,            // user
-            r#"{ "sandbox": { "enabled": true } }"#,             // project (wins)
+            r#"{ "sandbox": { "enabled": false } }"#, // user
+            r#"{ "sandbox": { "enabled": true } }"#,  // project (wins)
         ]);
         assert!(layered.enabled, "later tier's sandbox.enabled wins");
 
         // (7) Empty / malformed tiers are skipped without panicking.
-        let robust = sandbox_auto_allow_from_settings_tiers(&["", "not json", r#"{ "sandbox": { "enabled": true } }"#]);
+        let robust = sandbox_auto_allow_from_settings_tiers(&[
+            "",
+            "not json",
+            r#"{ "sandbox": { "enabled": true } }"#,
+        ]);
         assert!(robust.enabled);
     }
 

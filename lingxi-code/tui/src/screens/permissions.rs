@@ -122,8 +122,14 @@ pub fn load_permission_sections(
     let mut mode = "default".to_string();
 
     for (path, source) in [
-        (claude_home.join("settings.json"), PermissionRuleSource::UserSettings),
-        (cwd.join(".claude").join("settings.json"), PermissionRuleSource::ProjectSettings),
+        (
+            claude_home.join("settings.json"),
+            PermissionRuleSource::UserSettings,
+        ),
+        (
+            cwd.join(".claude").join("settings.json"),
+            PermissionRuleSource::ProjectSettings,
+        ),
         (
             cwd.join(".claude").join("settings.local.json"),
             PermissionRuleSource::LocalSettings,
@@ -249,23 +255,41 @@ mod tests {
     #[test]
     fn nav_enter_and_esc() {
         let mut s = PermissionsScreenState {
-            rows: vec![row("Allow", "Bash", "User"), row("Deny", "Read(./s/**)", "Project")],
+            rows: vec![
+                row("Allow", "Bash", "User"),
+                row("Deny", "Read(./s/**)", "Project"),
+            ],
             ..PermissionsScreenState::default()
         };
-        assert_eq!(handle_permissions_key(&mut s, KeyCode::Down), PermissionsOutcome::Stay);
+        assert_eq!(
+            handle_permissions_key(&mut s, KeyCode::Down),
+            PermissionsOutcome::Stay
+        );
         assert_eq!(s.selected, 1);
-        assert_eq!(handle_permissions_key(&mut s, KeyCode::Enter), PermissionsOutcome::Stay);
+        assert_eq!(
+            handle_permissions_key(&mut s, KeyCode::Enter),
+            PermissionsOutcome::Stay
+        );
         assert_eq!(s.dialog_mode, PermissionsDialogMode::Detail);
-        assert_eq!(handle_permissions_key(&mut s, KeyCode::Esc), PermissionsOutcome::Stay);
+        assert_eq!(
+            handle_permissions_key(&mut s, KeyCode::Esc),
+            PermissionsOutcome::Stay
+        );
         assert_eq!(s.dialog_mode, PermissionsDialogMode::List);
-        assert_eq!(handle_permissions_key(&mut s, KeyCode::Esc), PermissionsOutcome::Close);
+        assert_eq!(
+            handle_permissions_key(&mut s, KeyCode::Esc),
+            PermissionsOutcome::Close
+        );
     }
 
     #[test]
     fn list_render_marks_selection_mode_and_behavior() {
         let s = PermissionsScreenState {
             mode: "acceptEdits".into(),
-            rows: vec![row("Allow", "Bash", "User"), row("Deny", "Read(./s/**)", "Local")],
+            rows: vec![
+                row("Allow", "Bash", "User"),
+                row("Deny", "Read(./s/**)", "Local"),
+            ],
             selected: 1,
             dialog_mode: PermissionsDialogMode::List,
         };
@@ -284,7 +308,10 @@ mod tests {
             mode: "default".into(),
             ..PermissionsScreenState::default()
         });
-        assert_eq!(out, "Permissions\nMode: default\nNo permission rules configured.");
+        assert_eq!(
+            out,
+            "Permissions\nMode: default\nNo permission rules configured."
+        );
     }
 
     #[test]
@@ -318,11 +345,13 @@ mod tests {
         let st = load_permission_sections(&cwd, &claude_home);
         assert_eq!(st.mode, "acceptEdits", "local defaultMode wins");
         // user Bash allow + local Read deny.
-        assert!(st.rows.iter().any(|r| r.rule == "Bash" && r.behavior == "Allow" && r.source == "User"));
         assert!(st
             .rows
             .iter()
-            .any(|r| r.rule == "Read(./secrets/**)" && r.behavior == "Deny" && r.source == "Local"));
+            .any(|r| r.rule == "Bash" && r.behavior == "Allow" && r.source == "User"));
+        assert!(st.rows.iter().any(|r| r.rule == "Read(./secrets/**)"
+            && r.behavior == "Deny"
+            && r.source == "Local"));
 
         let _ = std::fs::remove_dir_all(&tmp);
     }

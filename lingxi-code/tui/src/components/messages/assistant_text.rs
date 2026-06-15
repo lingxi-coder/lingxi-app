@@ -251,7 +251,8 @@ mod tests {
     fn inline_code_uses_permission_color() {
         // The STYLED renderer (not the plain oracle) colors inline code with
         // the dark `permission` palette rgb(177,185,249) per markdown.ts:88-91.
-        let lines = render_markdown_width("run `cargo test`", &markdown_theme(), DEFAULT_BODY_WIDTH);
+        let lines =
+            render_markdown_width("run `cargo test`", &markdown_theme(), DEFAULT_BODY_WIDTH);
         let code = lines
             .iter()
             .flat_map(|l| &l.spans)

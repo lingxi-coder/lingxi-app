@@ -694,21 +694,27 @@ Usage notes:\n\
 
         // Manual permitted-redirect loop — 1:1 with claude-code
         // `getWithPermittedRedirects` (`utils.ts:262-366`). Each iteration issues
-        // a GET against `fetch_url` (auto-redirect is NOT requested — the M1
-        // transport surfaces a 3xx as `Ok(status=3xx)`). On a 301/302/307/308 with
-        // a `Location`: resolve it against the current URL; if
-        // `is_permitted_redirect` (same scheme+port, no creds, host equal after
-        // stripping a leading `www.`) → follow it (loop); else → return the
-        // "REDIRECT DETECTED" notice. Capped at `WEBFETCH_MAX_REDIRECTS` (10) hops.
+        // a GET against `fetch_url` via `request_no_follow` (auto-redirect is NOT
+        // requested — the transport surfaces a 3xx as `Ok(status=3xx)` with its
+        // `Location` header intact). On a 301/302/307/308 with a `Location`:
+        // resolve it against the current URL; if `is_permitted_redirect` (same
+        // scheme+port, no creds, host equal after stripping a leading `www.`) →
+        // follow it (loop); else → return the "REDIRECT DETECTED" notice. Capped
+        // at `WEBFETCH_MAX_REDIRECTS` (10) hops.
         //
-        // NOTE (transport limitation): the frozen `HttpRequest` has no
-        // `follow_redirects` flag, so a production transport that auto-follows
-        // (e.g. reqwest's default) would transparently follow a cross-host
-        // redirect before this loop sees the 3xx — the cross-host notice then only
-        // triggers for transports that surface 3xx (the test `MockHttpTransport`,
-        // and any non-auto-following transport). The proper fix is a transport-level
-        // opt-out, which lives in the frozen `protocol`/`traits` crates (out of
-        // this batch's `tools/web`-only scope) — recorded as a follow-up.
+        // NOTE (transport no-follow): the loop drives the additive
+        // `HttpTransport::request_no_follow` (the allowed frozen-trait exception,
+        // same defaulted-method pattern as `stream_sse_with_meta`). Production
+        // reqwest transports (`platform-common`'s `ReqwestHttp`,
+        // `platform-windows`'s `WindowsHttp`) OVERRIDE it with a
+        // `redirect::Policy::none()` client — mirroring claude-code's axios
+        // `maxRedirects: 0` — so a cross-host 3xx now reaches this loop and the
+        // "REDIRECT DETECTED" notice fires in production (previously only the test
+        // `MockHttpTransport` surfaced 3xx; reqwest's default client transparently
+        // followed the redirect before the loop could see it). Transports that do
+        // NOT override `request_no_follow` (e.g. `MockHttpTransport`, posix-minimal
+        // `PosixHttp`) inherit the default, which delegates to `request` —
+        // preserving their existing behavior.
         let mut fetch_url = parsed_url.clone();
         let mut hops: u32 = 0;
         let resp_result = loop {
@@ -723,7 +729,7 @@ Usage notes:\n\
                 body_bytes: None,
                 timeout: Some(WEBFETCH_TIMEOUT),
             };
-            let result = self.ctx.http.request(req).await;
+            let result = self.ctx.http.request_no_follow(req).await;
 
             // Redirect handling only on a 3xx `Ok` carrying a Location header.
             if let Ok(resp) = &result {
@@ -1762,6 +1768,183 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
         assert_eq!(reqs.len(), 1);
         assert!(!reqs[0].url.contains("/api/web/domain_info"));
         assert_eq!(reqs[0].url, "https://skip-preflight.example/page");
+    }
+
+    // ---- redirect loop drives request_no_follow (transport no-follow) -------
+
+    /// A transport that distinguishes [`HttpTransport::request`] from
+    /// [`HttpTransport::request_no_follow`]: it counts calls to each and only
+    /// the `request_no_follow` path returns the scripted redirect/body. If the
+    /// WebFetch loop regressed to calling plain `request`, the redirect response
+    /// would NOT be served (the `request` arm returns a 200 sentinel and bumps a
+    /// separate counter the assertions catch).
+    ///
+    /// Responses are FIFO from a single queue, consumed by `request_no_follow`.
+    /// The blocklist preflight is skipped via `LINGXI_SKIP_WEBFETCH_PREFLIGHT`
+    /// (held under `SKIP_ENV_LOCK`) so the only transport traffic is the fetch
+    /// loop itself — keeping the call counts unambiguous.
+    struct NoFollowMock {
+        queue: std::sync::Mutex<std::collections::VecDeque<protocol::HttpResponse>>,
+        request_calls: std::sync::atomic::AtomicUsize,
+        no_follow_calls: std::sync::atomic::AtomicUsize,
+    }
+
+    impl NoFollowMock {
+        fn new(responses: Vec<protocol::HttpResponse>) -> Arc<Self> {
+            Arc::new(Self {
+                queue: std::sync::Mutex::new(responses.into()),
+                request_calls: std::sync::atomic::AtomicUsize::new(0),
+                no_follow_calls: std::sync::atomic::AtomicUsize::new(0),
+            })
+        }
+    }
+
+    #[async_trait]
+    impl HttpTransport for NoFollowMock {
+        async fn request(
+            &self,
+            _req: HttpRequest,
+        ) -> Result<protocol::HttpResponse, HttpError> {
+            // The WebFetch redirect loop must NOT reach this path. Count it and
+            // return a harmless 200 so a regression is visible via the counter
+            // (and the redirect/body the test scripted goes unconsumed).
+            self.request_calls
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(protocol::HttpResponse {
+                status: 200,
+                headers: vec![],
+                body: "WRONG-PATH: plain request was called".into(),
+            })
+        }
+        async fn request_no_follow(
+            &self,
+            _req: HttpRequest,
+        ) -> Result<protocol::HttpResponse, HttpError> {
+            self.no_follow_calls
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            match self.queue.lock().unwrap().pop_front() {
+                Some(resp) => Ok(resp),
+                None => Err(HttpError::InvalidResponse("no scripted response".into())),
+            }
+        }
+        async fn stream_sse(
+            &self,
+            _req: HttpRequest,
+        ) -> Result<traits::http::SseStream, HttpError> {
+            Err(HttpError::InvalidRequest("sse not used in this mock".into()))
+        }
+    }
+
+    fn redirect_resp(status: u16, location: &str) -> protocol::HttpResponse {
+        protocol::HttpResponse {
+            status,
+            headers: vec![("location".into(), location.to_string())],
+            body: String::new(),
+        }
+    }
+
+    fn ctx_with_transport(http: Arc<dyn HttpTransport>) -> BuiltinToolContext {
+        let bus = Arc::new(AnalyticsBus::new());
+        let mut ctx = tool_api::test_support::ctx_for_file_tools(
+            tool_api::test_support::make_dummy_fs(),
+            bus,
+            vec![std::path::PathBuf::from("/tmp")],
+        );
+        ctx.http = http;
+        ctx
+    }
+
+    /// A cross-host 3xx surfaced by `request_no_follow` must drive the loop to
+    /// return the byte-exact "REDIRECT DETECTED" notice — and the loop must use
+    /// `request_no_follow`, NOT plain `request`. This is the production-path
+    /// regression guard the whole change exists for.
+    #[tokio::test]
+    async fn cross_host_redirect_via_request_no_follow_returns_notice() {
+        let _env = SKIP_ENV_LOCK.lock().await;
+        crate::cache::clear_web_fetch_cache();
+        crate::blocklist::clear_domain_check_cache();
+        std::env::set_var("LINGXI_SKIP_WEBFETCH_PREFLIGHT", "1");
+
+        let http = NoFollowMock::new(vec![redirect_resp(301, "https://other.example/landing")]);
+        let ctx = ctx_with_transport(http.clone() as Arc<dyn HttpTransport>);
+        let tool = WebFetchTool::new(ctx);
+        let res = tool
+            .call(
+                json!({ "url": "https://orig.example/page", "prompt": "summarize this" }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await;
+        std::env::remove_var("LINGXI_SKIP_WEBFETCH_PREFLIGHT");
+        let res = res.expect("cross-host redirect must return Ok with the notice");
+
+        assert_eq!(res.data["status"], 301);
+        assert_eq!(res.data["code_text"], "Moved Permanently");
+        let content = res.data["content"].as_str().unwrap();
+        assert!(
+            content.starts_with("REDIRECT DETECTED: The URL redirects to a different host."),
+            "unexpected content: {content}"
+        );
+        assert!(content.contains("Redirect URL: https://other.example/landing"));
+        assert!(content.contains("- prompt: \"summarize this\""));
+
+        // The loop drove `request_no_follow`, never plain `request`.
+        assert_eq!(
+            http.no_follow_calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "must fetch via request_no_follow"
+        );
+        assert_eq!(
+            http.request_calls.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "must NOT use plain request (would auto-follow in production)"
+        );
+    }
+
+    /// A same-host (permitted) 3xx from `request_no_follow` must be FOLLOWED:
+    /// the loop re-issues `request_no_follow` against the redirect target and
+    /// returns the final body — again never touching plain `request`.
+    #[tokio::test]
+    async fn same_host_redirect_via_request_no_follow_is_followed() {
+        let _env = SKIP_ENV_LOCK.lock().await;
+        crate::cache::clear_web_fetch_cache();
+        crate::blocklist::clear_domain_check_cache();
+        std::env::set_var("LINGXI_SKIP_WEBFETCH_PREFLIGHT", "1");
+
+        // First hop: same-host redirect (only the path changes). Second hop: 200.
+        let http = NoFollowMock::new(vec![
+            redirect_resp(301, "https://follow.example/final"),
+            protocol::HttpResponse {
+                status: 200,
+                headers: vec![],
+                body: "final body".into(),
+            },
+        ]);
+        let ctx = ctx_with_transport(http.clone() as Arc<dyn HttpTransport>);
+        let tool = WebFetchTool::new(ctx);
+        let res = tool
+            .call(
+                json!({ "url": "https://follow.example/start" }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await;
+        std::env::remove_var("LINGXI_SKIP_WEBFETCH_PREFLIGHT");
+        let res = res.expect("permitted redirect must be followed to the final body");
+
+        assert_eq!(res.data["status"], 200);
+        assert_eq!(res.data["content"], "final body");
+        // Two `request_no_follow` calls (start + final), zero plain `request`.
+        assert_eq!(
+            http.no_follow_calls.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "must follow the permitted redirect via a second request_no_follow"
+        );
+        assert_eq!(
+            http.request_calls.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "must NOT use plain request"
+        );
     }
 
     #[cfg(feature = "web-markdown")]

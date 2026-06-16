@@ -95,6 +95,17 @@ pub trait HttpTransport: Send + Sync {
     /// Send a request and await the full response.
     async fn request(&self, req: HttpRequest) -> Result<HttpResponse, HttpError>;
 
+    /// Send a request WITHOUT following redirects: a 3xx is surfaced to the caller as
+    /// `Ok(status=3xx)` with its `Location` header intact (so callers like WebFetch can
+    /// apply their own permitted-redirect policy — mirrors claude-code's maxRedirects:0).
+    ///
+    /// The default delegates to [`Self::request`] (which MAY auto-follow, transport-dependent),
+    /// preserving existing behavior for mocks/tests. Production reqwest transports OVERRIDE
+    /// this with a no-redirect client.
+    async fn request_no_follow(&self, req: HttpRequest) -> Result<HttpResponse, HttpError> {
+        self.request(req).await
+    }
+
     /// Open an SSE stream. Caller drives the stream to completion.
     async fn stream_sse(&self, req: HttpRequest) -> Result<SseStream, HttpError>;
 
@@ -291,6 +302,48 @@ mod tests {
         assert!(
             meta.headers.is_empty(),
             "default headers must be empty"
+        );
+    }
+
+    /// The default `request_no_follow` delegates to `request`: a transport that
+    /// returns a 3xx from `request` (and does NOT override `request_no_follow`)
+    /// must surface the SAME 3xx response — status and `Location` header intact —
+    /// from `request_no_follow`. This pins the "mocks/tests keep existing
+    /// behavior" half of the contract (only production reqwest transports
+    /// override with a no-redirect client).
+    #[tokio::test]
+    async fn default_request_no_follow_delegates_to_request() {
+        struct Redirector;
+
+        #[async_trait]
+        impl HttpTransport for Redirector {
+            async fn request(&self, _req: HttpRequest) -> Result<HttpResponse, HttpError> {
+                Ok(HttpResponse {
+                    status: 301,
+                    headers: vec![("location".to_string(), "https://other.example/".to_string())],
+                    body: String::new(),
+                })
+            }
+            async fn stream_sse(&self, _req: HttpRequest) -> Result<SseStream, HttpError> {
+                Err(HttpError::InvalidRequest("not used".to_string()))
+            }
+        }
+
+        let t = Redirector;
+        let resp = t
+            .request_no_follow(get_req())
+            .await
+            .expect("default request_no_follow must succeed");
+        assert_eq!(resp.status, 301, "default must surface the 3xx from request");
+        let location = resp
+            .headers
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case("location"))
+            .map(|(_, v)| v.as_str());
+        assert_eq!(
+            location,
+            Some("https://other.example/"),
+            "Location header must be preserved"
         );
     }
 

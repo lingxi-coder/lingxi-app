@@ -16,7 +16,13 @@ use traits::{HttpError, HttpTransport};
 
 /// Production HTTP transport using `reqwest::Client`.
 pub struct WindowsHttp {
+    /// Default client — follows redirects (reqwest's default policy).
     client: reqwest::Client,
+    /// No-redirect client built with `reqwest::redirect::Policy::none()`. Backs
+    /// [`HttpTransport::request_no_follow`] so a 3xx is surfaced verbatim
+    /// (status + `Location`) — mirrors claude-code's `maxRedirects: 0`. Same
+    /// override as `platform-common`'s `ReqwestHttp`.
+    no_redirect_client: reqwest::Client,
 }
 
 impl WindowsHttp {
@@ -31,6 +37,10 @@ impl WindowsHttp {
             client: reqwest::Client::builder()
                 .build()
                 .expect("reqwest client init"),
+            no_redirect_client: reqwest::Client::builder()
+                .redirect(reqwest::redirect::Policy::none())
+                .build()
+                .expect("reqwest no-redirect client init"),
         }
     }
 }
@@ -54,6 +64,56 @@ impl HttpTransport for WindowsHttp {
             protocol::HttpMethod::Options => reqwest::Method::OPTIONS,
         };
         let mut rb = self.client.request(method, &req.url);
+        for (k, v) in &req.headers {
+            rb = rb.header(k, v);
+        }
+        // Raw bytes take precedence over the string body (see `HttpRequest::body_bytes`).
+        if let Some(bytes) = req.body_bytes {
+            rb = rb.body(bytes);
+        } else if let Some(body) = req.body {
+            rb = rb.body(body);
+        }
+        if let Some(timeout) = req.timeout {
+            rb = rb.timeout(timeout);
+        }
+        let resp = rb
+            .send()
+            .await
+            .map_err(|e| HttpError::Connection(e.to_string()))?;
+        let status = resp.status().as_u16();
+        let headers = resp
+            .headers()
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("").to_string()))
+            .collect();
+        let body = resp
+            .text()
+            .await
+            .map_err(|e| HttpError::InvalidResponse(e.to_string()))?;
+        Ok(HttpResponse {
+            status,
+            headers,
+            body,
+        })
+    }
+
+    /// Override that sends via the [`Self::no_redirect_client`]
+    /// (`redirect::Policy::none()`) so a 3xx is surfaced as `Ok(status=3xx)`
+    /// with its `Location` header intact — mirrors claude-code's
+    /// `maxRedirects: 0` and `platform-common`'s `ReqwestHttp` override. The
+    /// request-build + response-map is identical to [`Self::request`]; only the
+    /// client (and thus the redirect policy) differs.
+    async fn request_no_follow(&self, req: HttpRequest) -> Result<HttpResponse, HttpError> {
+        let method = match req.method {
+            protocol::HttpMethod::Get => reqwest::Method::GET,
+            protocol::HttpMethod::Post => reqwest::Method::POST,
+            protocol::HttpMethod::Put => reqwest::Method::PUT,
+            protocol::HttpMethod::Patch => reqwest::Method::PATCH,
+            protocol::HttpMethod::Delete => reqwest::Method::DELETE,
+            protocol::HttpMethod::Head => reqwest::Method::HEAD,
+            protocol::HttpMethod::Options => reqwest::Method::OPTIONS,
+        };
+        let mut rb = self.no_redirect_client.request(method, &req.url);
         for (k, v) in &req.headers {
             rb = rb.header(k, v);
         }

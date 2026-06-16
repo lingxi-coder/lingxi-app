@@ -24,7 +24,13 @@ use traits::{HttpError, HttpTransport};
 /// cross-compiles to `aarch64-apple-ios` and Android targets. Shared by all
 /// native platforms.
 pub struct ReqwestHttp {
+    /// Default client — follows redirects (reqwest's default policy). Backs
+    /// [`HttpTransport::request`] / `stream_sse` / `stream_raw_bytes`.
     client: reqwest::Client,
+    /// No-redirect client built with `reqwest::redirect::Policy::none()`. Backs
+    /// [`HttpTransport::request_no_follow`] so a 3xx is surfaced to the caller
+    /// verbatim (status + `Location`) — mirrors claude-code's `maxRedirects: 0`.
+    no_redirect_client: reqwest::Client,
 }
 
 impl ReqwestHttp {
@@ -39,6 +45,10 @@ impl ReqwestHttp {
             client: reqwest::Client::builder()
                 .build()
                 .expect("reqwest client init"),
+            no_redirect_client: reqwest::Client::builder()
+                .redirect(reqwest::redirect::Policy::none())
+                .build()
+                .expect("reqwest no-redirect client init"),
         }
     }
 }
@@ -92,6 +102,37 @@ fn build_reqwest(
 impl HttpTransport for ReqwestHttp {
     async fn request(&self, req: HttpRequest) -> Result<HttpResponse, HttpError> {
         let resp = build_reqwest(&self.client, req)
+            .send()
+            .await
+            .map_err(|e| HttpError::Connection(e.to_string()))?;
+        let status = resp.status().as_u16();
+        let headers = resp
+            .headers()
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("").to_string()))
+            .collect();
+        let body = resp
+            .text()
+            .await
+            .map_err(|e| HttpError::InvalidResponse(e.to_string()))?;
+        Ok(HttpResponse {
+            status,
+            headers,
+            body,
+        })
+    }
+
+    /// Override that sends via the [`Self::no_redirect_client`]
+    /// (`redirect::Policy::none()`) so a 3xx response is surfaced to the caller
+    /// as `Ok(status=3xx)` with its `Location` header intact — instead of being
+    /// transparently followed by reqwest's default client.
+    ///
+    /// Mirrors claude-code's `axios.get(..., { maxRedirects: 0 })`: callers such
+    /// as `WebFetchTool` apply their own permitted-redirect policy on the 3xx.
+    /// Response mapping is identical to [`Self::request`]; only the client (and
+    /// thus the redirect policy) differs.
+    async fn request_no_follow(&self, req: HttpRequest) -> Result<HttpResponse, HttpError> {
+        let resp = build_reqwest(&self.no_redirect_client, req)
             .send()
             .await
             .map_err(|e| HttpError::Connection(e.to_string()))?;
@@ -420,6 +461,98 @@ pub(crate) fn find_event_boundary(buf: &BytesMut) -> Option<(usize, usize)> {
 mod tests {
     use super::*;
     use traits::http::SseStreamWithMeta;
+
+    /// `ReqwestHttp::new()` must build BOTH clients — the default (follow) and
+    /// the no-redirect override — so `request_no_follow` has its own
+    /// `redirect::Policy::none()` client. A smoke test that construction
+    /// succeeds and both `request` / `request_no_follow` are callable.
+    #[tokio::test]
+    async fn new_builds_both_clients_and_no_follow_is_callable() {
+        use protocol::HttpMethod;
+        let transport = ReqwestHttp::new();
+        // A connection failure (unroutable host) is fine — we only need the
+        // no-follow client to exist and the method to dispatch through it. The
+        // point of this test is construction + dispatch, not network behaviour.
+        let req = HttpRequest {
+            method: HttpMethod::Get,
+            // RFC 5737 TEST-NET-1, reserved for documentation — never routable.
+            url: "http://192.0.2.1:9/no-follow-smoke".to_string(),
+            headers: vec![],
+            body: None,
+            body_bytes: None,
+            timeout: Some(std::time::Duration::from_millis(200)),
+        };
+        let result = transport.request_no_follow(req).await;
+        // Must be a transport error (connection/timeout), NOT a panic and NOT a
+        // success — proving the no-redirect client was built and used.
+        assert!(result.is_err(), "unroutable host must error, got: {result:?}");
+    }
+
+    /// True no-follow behaviour: against an in-process axum server that returns a
+    /// 301 with a `Location`, `request_no_follow` must surface the 3xx verbatim
+    /// (status 301 + `Location` header intact) instead of following it. The
+    /// default `request` (follow policy) would instead chase the redirect.
+    ///
+    /// Uses the same in-process axum harness pattern as the SSE tests, so no
+    /// external server is needed.
+    #[tokio::test]
+    async fn request_no_follow_surfaces_3xx_without_following() {
+        use axum::response::{IntoResponse, Response};
+        use axum::routing::get;
+        use axum::Router;
+        use protocol::HttpMethod;
+        use tokio::net::TcpListener;
+
+        async fn redirector() -> Response {
+            (
+                axum::http::StatusCode::MOVED_PERMANENTLY,
+                [("location", "https://other.example/landing")],
+                "",
+            )
+                .into_response()
+        }
+        // A target the FOLLOW client would land on (200), to prove no-follow did
+        // NOT chase the redirect.
+        async fn target() -> &'static str {
+            "FOLLOWED"
+        }
+
+        let app = Router::new()
+            .route("/redir", get(redirector))
+            .route("/landing", get(target));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let transport = ReqwestHttp::new();
+        let req = HttpRequest {
+            method: HttpMethod::Get,
+            url: format!("http://{addr}/redir"),
+            headers: vec![],
+            body: None,
+            body_bytes: None,
+            timeout: None,
+        };
+
+        let resp = transport
+            .request_no_follow(req)
+            .await
+            .expect("no-follow request must succeed (3xx is Ok, not Err)");
+        assert_eq!(resp.status, 301, "3xx must be surfaced, not followed");
+        let location = resp
+            .headers
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case("location"))
+            .map(|(_, v)| v.as_str());
+        assert_eq!(
+            location,
+            Some("https://other.example/landing"),
+            "Location header must be preserved for the caller's redirect policy"
+        );
+        assert_ne!(resp.body, "FOLLOWED", "must NOT have followed to /landing");
+    }
 
     /// `ReqwestHttp::stream_sse_with_meta` must capture the real status and headers
     /// (including `retry-after`) before the SSE event stream begins, and still

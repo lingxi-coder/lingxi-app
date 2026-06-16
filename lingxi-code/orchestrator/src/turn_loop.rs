@@ -1189,82 +1189,79 @@ pub(crate) async fn dispatch_tool_uses_tracked(
         // `HookDecision::Block`); "ask" / no-decision leave `pre_agg.decision`
         // unset and fall through to the normal gate.
         //
-        // DOCUMENTED bounded divergence: TS still applies rule-based deny/ask
-        // (`checkRuleBasedPermissions`) on top of a hook 'allow'; this port's
-        // permission seam ([`orch.perms`]) is a single allow/deny gate with no
-        // rule/prompt split to layer underneath, so a hook 'allow' bypasses it
-        // wholesale.
+        // HOOK.3 resolution: a hook 'allow' skips the interactive PROMPT but
+        // STILL applies rule-based deny/ask (claude-code
+        // `resolveHookPermissionDecision` + `checkRuleBasedPermissions`) — a hook
+        // CANNOT override an explicit deny rule or the active mode's mutation
+        // backstop. So we ALWAYS consult the gate: `check_after_hook_allow`
+        // (deny rules + mode bind, the prompt is skipped) when a hook approved,
+        // else the normal `check` (which may delegate an `Ask` to the prompt
+        // transport). Uses the post-hook `effective_input` so a Pre hook can
+        // rewrite a tool argument before the permission check sees it.
         let hook_allowed = matches!(
             pre_agg.decision,
             Some(HookDecision::Approve | HookDecision::Allow)
         );
-        // Permission gate. Use the post-hook effective_input so a Pre
-        // hook can rewrite a tool argument before the permission check
-        // sees it.
-        if !hook_allowed {
+        let decision = if hook_allowed {
+            orch.perms
+                .check_after_hook_allow(name, &effective_input)
+                .await
+        } else {
             // PermissionRequest hook (parity with claude-code
             // `executePermissionRequestHooks`, `utils/hooks.ts:4157-4192`, fired
             // from the permission seam `permissions.ts:409`). claude-code fires
             // it when a tool call needs its permission RESOLVED (the engine is
-            // "about to ask the user / auto-policy for permission"). The LingXi
-            // permission seam ([`orch.perms`]) IS that single allow/deny
-            // resolution step — it has no separate interactive "ask" branch — so
-            // we fire `PermissionRequest` immediately BEFORE consulting the gate,
-            // the faithful chokepoint where permission is about to be asked.
-            // Best-effort / observe-only here: the gate's allow/deny verdict
-            // governs the outcome (the LingXi `perms` seam carries no hook-return
-            // override path), exactly as the gate did before this fire. Strict
-            // no-op when no `PermissionRequest` hook is registered, like the
-            // PostToolUse / SubagentStop arms. `reason` mirrors the engine-
-            // supplied prompt rationale; the LingXi gate does not expose a
-            // pre-decision rationale, so we carry the canonical "tool requires
-            // permission" string.
+            // "about to ask the user / auto-policy for permission"). Fired only
+            // on the non-hook-allowed path — the chokepoint where permission is
+            // about to be ASKED. Best-effort / observe-only: the gate's verdict
+            // governs (the LingXi `perms` seam carries no hook-return override
+            // path). Strict no-op when no `PermissionRequest` hook is registered.
             let req_event = HookEvent::PermissionRequest {
                 tool_name: name.clone(),
                 tool_input: effective_input.clone(),
                 reason: format!("Tool {name} requires permission"),
             };
             let _req_agg = orch.hooks.execute(req_event, hook_ctx.clone()).await;
+            orch.perms.check(name, &effective_input).await
+        };
+        match decision {
+            PermissionDecision::Allow => {}
+            PermissionDecision::Deny { reason } => {
+                // PermissionDenied hook (parity with claude-code
+                // `executePermissionDeniedHooks`, `utils/hooks.ts:3529-3559`,
+                // fired from `toolExecution.ts:1081` when a permission decision
+                // denies a tool call). Fires at the deny chokepoint — including a
+                // deny RULE that overrode a hook 'allow' (HOOK.3) — BEFORE the
+                // error `tool_result` is pushed, so a registered hook observes
+                // every denial. Best-effort / observe-only: the LingXi `perms`
+                // seam has no hook-driven `retry` re-resolution path, so the
+                // denial stands regardless of the hook's reply (the TS
+                // `{retry:true}` re-prompt rides on its interactive permission
+                // loop, which this single allow/deny seam does not have). Strict
+                // no-op when no `PermissionDenied` hook is registered.
+                let denied_event = HookEvent::PermissionDenied {
+                    tool_name: name.clone(),
+                    tool_input: effective_input.clone(),
+                    tool_use_id: *tool_use_id,
+                    reason: reason.clone(),
+                };
+                let _denied_agg = orch.hooks.execute(denied_event, hook_ctx.clone()).await;
 
-            match orch.perms.check(name, &effective_input).await {
-                PermissionDecision::Allow => {}
-                PermissionDecision::Deny { reason } => {
-                    // PermissionDenied hook (parity with claude-code
-                    // `executePermissionDeniedHooks`, `utils/hooks.ts:3529-3559`,
-                    // fired from `toolExecution.ts:1081` when a permission
-                    // decision denies a tool call). Fires at the gate's deny
-                    // chokepoint, BEFORE the error `tool_result` is pushed, so a
-                    // registered hook observes every denial. Best-effort /
-                    // observe-only: the LingXi `perms` seam has no
-                    // hook-driven `retry` re-resolution path, so the denial
-                    // stands regardless of the hook's reply (the TS `{retry:true}`
-                    // re-prompt rides on its interactive permission loop, which
-                    // this single allow/deny seam does not have). Strict no-op
-                    // when no `PermissionDenied` hook is registered.
-                    let denied_event = HookEvent::PermissionDenied {
-                        tool_name: name.clone(),
-                        tool_input: effective_input.clone(),
-                        tool_use_id: *tool_use_id,
-                        reason: reason.clone(),
-                    };
-                    let _denied_agg = orch.hooks.execute(denied_event, hook_ctx.clone()).await;
-
-                    let result_block = ContentBlock::ToolResult {
-                        tool_use_id: *tool_use_id,
-                        content: fold_pre_context(format!("Permission denied: {reason}")),
-                        is_error: true,
-                        provider_tool_use_id: provider_id.clone(),
-                    };
-                    orch.output
-                        .emit_tool_result(
-                            tool_use_id,
-                            name,
-                            &serde_json::json!({ "error": format!("Permission denied: {reason}") }),
-                        )
-                        .await;
-                    results.push(result_block);
-                    continue;
-                }
+                let result_block = ContentBlock::ToolResult {
+                    tool_use_id: *tool_use_id,
+                    content: fold_pre_context(format!("Permission denied: {reason}")),
+                    is_error: true,
+                    provider_tool_use_id: provider_id.clone(),
+                };
+                orch.output
+                    .emit_tool_result(
+                        tool_use_id,
+                        name,
+                        &serde_json::json!({ "error": format!("Permission denied: {reason}") }),
+                    )
+                    .await;
+                results.push(result_block);
+                continue;
             }
         }
 
@@ -2569,13 +2566,38 @@ mod pre_tool_hook_tests {
         Arc::new(exec)
     }
 
-    /// Permission gate that denies every tool call.
+    /// Permission gate that denies every tool call AT THE PROMPT (`check`), but
+    /// leaves `check_after_hook_allow` at the default (Allow) — modeling a gate
+    /// with NO deny RULE, only a would-be prompt. A hook 'allow' therefore skips
+    /// the prompt and the tool runs (HOOK.3 issue 1: hook-allow skips the prompt).
     struct DenyAllGate;
     #[async_trait]
     impl PermissionGate for DenyAllGate {
         async fn check(&self, _tool: &str, _input: &serde_json::Value) -> PermissionDecision {
             PermissionDecision::Deny {
                 reason: "denied-by-gate".into(),
+            }
+        }
+    }
+
+    /// Permission gate modeling an explicit DENY RULE: it denies on BOTH `check`
+    /// and `check_after_hook_allow`, so even a hook 'allow' cannot override it
+    /// (HOOK.3 issue 1 / claude-code `checkRuleBasedPermissions`).
+    struct DenyRuleGate;
+    #[async_trait]
+    impl PermissionGate for DenyRuleGate {
+        async fn check(&self, _tool: &str, _input: &serde_json::Value) -> PermissionDecision {
+            PermissionDecision::Deny {
+                reason: "denied-by-rule".into(),
+            }
+        }
+        async fn check_after_hook_allow(
+            &self,
+            _tool: &str,
+            _input: &serde_json::Value,
+        ) -> PermissionDecision {
+            PermissionDecision::Deny {
+                reason: "denied-by-rule".into(),
             }
         }
     }
@@ -3061,9 +3083,12 @@ mod pre_tool_hook_tests {
     // ----- HOOK.3: allow bypasses / deny denies / ask falls through ---------
 
     #[tokio::test]
-    async fn hook3_allow_bypasses_permission_gate() {
-        // permissionDecision "allow"/legacy "approve" parses to Approve and must
-        // bypass the (here deny-everything) permission gate.
+    async fn hook3_allow_skips_the_prompt_when_no_deny_rule() {
+        // permissionDecision "allow"/legacy "approve" parses to Approve and SKIPS
+        // the interactive prompt (claude-code `resolveHookPermissionDecision`).
+        // `DenyAllGate` would deny at the PROMPT (`check`) but has no deny RULE
+        // (`check_after_hook_allow` defaults to Allow), so the hook-allow skips
+        // the prompt and the tool runs.
         let resp = HookResponse {
             decision: Some(HookDecision::Approve),
             ..HookResponse::default()
@@ -3071,9 +3096,27 @@ mod pre_tool_hook_tests {
         let orch = orch_with(pre_hook_executor(resp), Arc::new(DenyAllGate), vec![]);
         let (results, _, _, _) = dispatch_tool_uses_tracked(&orch, &uses()).await.unwrap();
         let (content, is_error) = tool_result(&results[0]);
-        assert!(!is_error, "hook allow bypassed the deny gate; tool ran");
+        assert!(!is_error, "hook allow skipped the prompt; tool ran");
         assert!(content.contains("ECHOED-OUTPUT"));
         assert!(!content.contains("Permission denied"));
+    }
+
+    #[tokio::test]
+    async fn hook3_allow_cannot_override_a_deny_rule() {
+        // (HOOK.3 issue 1) A hook 'allow' skips the prompt but must NOT override
+        // an explicit deny RULE (claude-code `checkRuleBasedPermissions`).
+        // `DenyRuleGate.check_after_hook_allow` denies, so the tool is DENIED even
+        // though the hook approved.
+        let resp = HookResponse {
+            decision: Some(HookDecision::Approve),
+            ..HookResponse::default()
+        };
+        let orch = orch_with(pre_hook_executor(resp), Arc::new(DenyRuleGate), vec![]);
+        let (results, _, _, _) = dispatch_tool_uses_tracked(&orch, &uses()).await.unwrap();
+        let (content, is_error) = tool_result(&results[0]);
+        assert!(is_error, "a deny rule must override a hook 'allow'");
+        assert!(content.contains("Permission denied: denied-by-rule"));
+        assert!(!content.contains("ECHOED-OUTPUT"), "tool never ran");
     }
 
     #[tokio::test]

@@ -88,6 +88,29 @@ impl PermissionGate for PolicyPermissionGate {
             }
         }
     }
+
+    /// A PreToolUse / PermissionRequest hook `allow` skips the PROMPT but still
+    /// applies rule-based deny/ask (claude-code `resolveHookPermissionDecision` +
+    /// `checkRuleBasedPermissions`): a hook cannot override an explicit deny
+    /// rule or the active mode's mutation backstop. So run `authorize` and map
+    /// `Deny → Deny` (deny rules + mode still bind) but `Ask → Allow` (the hook
+    /// approved, so the would-be prompt is skipped) and `Allow → Allow`. Unlike
+    /// `check`, an `Ask` NEVER delegates to the inner prompt transport here — the
+    /// hook already resolved the prompt.
+    async fn check_after_hook_allow(&self, name: &str, input: &Value) -> PermissionDecision {
+        match self.policy.authorize(name, input) {
+            PermissionResult::Allow { .. } | PermissionResult::Ask { .. } => {
+                PermissionDecision::Allow
+            }
+            PermissionResult::Deny {
+                reason,
+                explanation,
+                ..
+            } => PermissionDecision::Deny {
+                reason: explanation.unwrap_or_else(|| deny_reason_string(&reason)),
+            },
+        }
+    }
 }
 
 /// Render a [`PermissionDecisionReason`] to the human/model-facing deny string
@@ -285,5 +308,66 @@ mod tests {
             PermissionDecision::Allow,
             "headless: an explicit allow rule still wins"
         );
+    }
+
+    #[tokio::test]
+    async fn check_after_hook_allow_enforces_deny_rules_but_skips_prompt() {
+        // (Hooks unit 3, issue 1) A PreToolUse/PermissionRequest hook 'allow'
+        // skips the PROMPT but must NOT override rule-based deny/ask
+        // (claude-code `resolveHookPermissionDecision` +
+        // `checkRuleBasedPermissions`).
+
+        // A deny RULE must still deny even after a hook approved the call.
+        let policy = policy_with(r#"{ "permissions": { "deny": ["Bash"] } }"#, PermissionMode::Default);
+        let gate = PolicyPermissionGate::new(
+            policy,
+            RecordingInner::new(PermissionDecision::Allow),
+        );
+        assert!(
+            matches!(
+                gate.check_after_hook_allow("Bash", &serde_json::json!({})).await,
+                PermissionDecision::Deny { .. }
+            ),
+            "a deny rule must override a hook 'allow'"
+        );
+
+        // A mutating tool with NO rule would normally Ask→prompt; under a hook
+        // 'allow' the prompt is SKIPPED → Allow, and the inner transport is
+        // NEVER consulted.
+        let inner = RecordingInner::new(PermissionDecision::Deny {
+            reason: "must not prompt under hook-allow".into(),
+        });
+        let policy2 = policy_with(r#"{ "permissions": {} }"#, PermissionMode::Default);
+        let gate2 = PolicyPermissionGate::new(policy2, inner.clone());
+        assert_eq!(
+            gate2.check_after_hook_allow("Bash", &serde_json::json!({})).await,
+            PermissionDecision::Allow,
+            "hook 'allow' skips the prompt for an un-ruled mutating tool"
+        );
+        assert_eq!(inner.calls(), 0, "hook 'allow' must NOT delegate to the prompt");
+
+        // An explicit allow rule → Allow.
+        let policy3 =
+            policy_with(r#"{ "permissions": { "allow": ["Bash"] } }"#, PermissionMode::Default);
+        let gate3 = PolicyPermissionGate::new(policy3, RecordingInner::new(PermissionDecision::Allow));
+        assert_eq!(
+            gate3.check_after_hook_allow("Bash", &serde_json::json!({})).await,
+            PermissionDecision::Allow
+        );
+    }
+
+    /// Default-impl gates (no rule layer) keep the prior wholesale-bypass: a hook
+    /// 'allow' → Allow.
+    #[tokio::test]
+    async fn default_check_after_hook_allow_is_wholesale_allow() {
+        let gate = RecordingInner::new(PermissionDecision::Deny {
+            reason: "default must not be consulted".into(),
+        });
+        assert_eq!(
+            gate.check_after_hook_allow("Bash", &serde_json::json!({})).await,
+            PermissionDecision::Allow,
+            "a rule-less gate treats a hook 'allow' as a wholesale allow"
+        );
+        assert_eq!(gate.calls(), 0, "default impl must not call check()");
     }
 }

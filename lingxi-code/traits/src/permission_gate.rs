@@ -43,4 +43,23 @@ pub trait PermissionGate: Send + Sync {
     /// [`PermissionDecision::Deny`] — the caller never has to handle an
     /// error tier.
     async fn check(&self, name: &str, input: &Value) -> PermissionDecision;
+
+    /// Resolve permission when a `PreToolUse` / `PermissionRequest` hook has
+    /// already returned `allow` (`HookDecision::Approve`).
+    ///
+    /// claude-code's `resolveHookPermissionDecision`: a hook `allow` skips the
+    /// interactive PROMPT but still applies rule-based deny/ask
+    /// (`checkRuleBasedPermissions`) — a hook cannot override an explicit deny
+    /// rule. The default impl treats a hook `allow` as a wholesale bypass
+    /// ([`PermissionDecision::Allow`]), which is correct for gates that carry no
+    /// rule layer (the interactive / no-op / adapter prompt transports — they
+    /// have nothing to deny). A rule-evaluating gate (the `PolicyPermissionGate`)
+    /// OVERRIDES this to keep enforcing deny rules while skipping the prompt.
+    ///
+    /// Additive DEFAULTED method (frozen-trait safe): every existing impl keeps
+    /// the prior wholesale-bypass behavior unless it opts in.
+    async fn check_after_hook_allow(&self, name: &str, input: &Value) -> PermissionDecision {
+        let _ = (name, input);
+        PermissionDecision::Allow
+    }
 }

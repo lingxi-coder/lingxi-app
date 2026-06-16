@@ -7,9 +7,9 @@
 //! spliced into context (`utils/claudemd.ts:1054-1071`, `utils/hooks.ts:4335-4369`),
 //! each carrying that file's `file_path` / `memory_type` / `load_reason`. Every
 //! top-level (parent-less) file reports `load_reason: 'session_start'`. The
-//! orchestrator loads exactly that top-level User/Project/Local hierarchy (no
-//! `@include` parents, no enterprise-`Managed` tier), so each file fired here is
-//! `session_start`, with `memory_type` derived from the loaded file.
+//! orchestrator loads the full Managed/User/Project/Local hierarchy, tagging
+//! each file with its tier, so each file fired here is `session_start` with
+//! `memory_type` taken directly from that tier.
 //!
 //! Scenarios:
 //! 1. One fire per loaded instruction file, carrying the correct
@@ -19,6 +19,7 @@
 //!    (best-effort) fire helper.
 //! 3. No `InstructionsLoaded` hook registered ⇒ firing is a strict no-op.
 //! 4. No instruction files present ⇒ firing is a strict no-op (nothing fires).
+//! 5. A `Managed`-tier file is reported with `memory_type: Managed`.
 
 use async_trait::async_trait;
 use hooks::definition::{HookDefinition, HookExecutor as DefHookExecutor, HookSource};
@@ -180,18 +181,22 @@ async fn fire_instructions_loaded_dispatches_one_event_per_file() {
         Arc::new(RecordingHandler { log: log.clone() }),
     );
 
-    // A repo CLAUDE.md (Project) and a repo CLAUDE.local.md (Local). Neither
-    // lives under `~/.claude`, so the canonical one maps to Project.
+    // A repo CLAUDE.md (Project) and a repo CLAUDE.local.md (Local). The
+    // `memory_type` is now taken straight from each file's tier.
     let cwd = PathBuf::from("/work/repo");
     let project = MemoryFile {
         path: cwd.join("CLAUDE.md"),
         body: "project rules".into(),
         is_local_override: false,
+        tier: memory::claude_md::ClaudeMdTier::Project,
+        globs: None,
     };
     let local = MemoryFile {
         path: cwd.join("CLAUDE.local.md"),
         body: "local override".into(),
         is_local_override: true,
+        tier: memory::claude_md::ClaudeMdTier::Local,
+        globs: None,
     };
     let orch = orch_with(exec, vec![project.clone(), local.clone()], cwd);
 
@@ -218,6 +223,45 @@ async fn fire_instructions_loaded_dispatches_one_event_per_file() {
 }
 
 #[tokio::test]
+async fn managed_tier_file_reports_memory_type_managed() {
+    // GAP 1: an enterprise-`Managed` file fires with `memory_type: Managed`
+    // (taken from the file's tier, not a path heuristic).
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let registry = Arc::new(RwLock::new(HookRegistry::new()));
+    registry.write().await.register(builtin_hook(
+        "record-instructions-loaded",
+        HookEventType::InstructionsLoaded,
+    ));
+    let exec = exec_with_recorder(
+        registry,
+        Arc::new(RecordingHandler { log: log.clone() }),
+    );
+
+    let cwd = PathBuf::from("/work/repo");
+    let managed = MemoryFile {
+        path: PathBuf::from("/Library/Application Support/ClaudeCode/CLAUDE.md"),
+        body: "enterprise policy".into(),
+        is_local_override: false,
+        tier: memory::claude_md::ClaudeMdTier::Managed,
+        globs: None,
+    };
+    let orch = orch_with(exec, vec![managed.clone()], cwd);
+
+    orch.fire_instructions_loaded().await;
+
+    let seen = log.lock().unwrap().clone();
+    assert_eq!(
+        seen,
+        vec![(
+            managed.path,
+            InstructionsMemoryType::Managed,
+            InstructionsLoadReason::SessionStart,
+        )],
+        "a Managed-tier file must fire memory_type=Managed: {seen:?}"
+    );
+}
+
+#[tokio::test]
 async fn failing_instructions_loaded_hook_does_not_break_fire() {
     // The registered hook itself returns a non-success outcome.
     // `fire_instructions_loaded` discards each aggregate, so the call must STILL
@@ -234,6 +278,8 @@ async fn failing_instructions_loaded_hook_does_not_break_fire() {
         path: cwd.join("CLAUDE.md"),
         body: "x".into(),
         is_local_override: false,
+        tier: memory::claude_md::ClaudeMdTier::Project,
+        globs: None,
     };
     let orch = orch_with(Arc::new(exec), vec![file], cwd);
 
@@ -257,6 +303,8 @@ async fn fire_instructions_loaded_is_noop_without_a_registered_hook() {
         path: cwd.join("CLAUDE.md"),
         body: "x".into(),
         is_local_override: false,
+        tier: memory::claude_md::ClaudeMdTier::Project,
+        globs: None,
     };
     let orch = orch_with(exec, vec![file], cwd);
 

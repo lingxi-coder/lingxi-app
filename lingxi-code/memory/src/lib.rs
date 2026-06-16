@@ -28,7 +28,37 @@ pub use tier::MemoryTier;
 
 /// Per-file cap (10 MB). Files larger than this are skipped with
 /// `tengu_memory_file_too_large`.
+///
+/// NB: this is the **memdir** scanner cap, NOT the CLAUDE.md hierarchy loader,
+/// which reads every file whole (no size drop — parity with claude-code
+/// `safelyReadMemoryFileAsync`). See [`get_large_memory_files`] for the
+/// non-blocking 40k-char *warning* the CLAUDE.md path surfaces instead.
 pub const MAX_MEMORY_FILE_SIZE: usize = 10 * 1024 * 1024;
+
+/// Recommended maximum character count for a single memory file
+/// (claude-code `MAX_MEMORY_CHARACTER_COUNT`, claudemd.ts:91-92).
+///
+/// This is a soft, non-blocking recommendation: files over this size are still
+/// loaded in full. [`get_large_memory_files`] flags them so a caller can warn
+/// the user, exactly as claude-code does — it never drops the file.
+pub const MAX_MEMORY_CHARACTER_COUNT: usize = 40_000;
+
+/// Return the subset of `files` whose body exceeds
+/// [`MAX_MEMORY_CHARACTER_COUNT`] characters.
+///
+/// 1:1 with claude-code `getLargeMemoryFiles` (claudemd.ts:1132-1134):
+/// `files.filter(f => f.content.length > MAX_MEMORY_CHARACTER_COUNT)`. This is
+/// a **warning** list — the returned files are NOT removed from the memory set;
+/// every file is still loaded whole. The character count uses Unicode scalar
+/// values (`chars().count()`), matching the JS `String.length`-style intent of
+/// "characters" closely enough for the human-facing warning.
+#[must_use]
+pub fn get_large_memory_files(files: &[MemoryFile]) -> Vec<&MemoryFile> {
+    files
+        .iter()
+        .filter(|f| f.content.chars().count() > MAX_MEMORY_CHARACTER_COUNT)
+        .collect()
+}
 
 /// Age penalty unit in days. `age_blocks = age_days / 30`.
 pub const MEMORY_AGE_PENALTY_DAYS: u64 = 30;

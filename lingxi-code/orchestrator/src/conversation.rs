@@ -1734,19 +1734,19 @@ impl ConversationOrchestrator {
     /// `memory_type` (`User` / `Project` / `Local` / `Managed`), and `load_reason`.
     /// The eager session-start pass reports `load_reason: 'session_start'` for every
     /// top-level (parent-less) file (`eagerLoadReason`). The orchestrator's
-    /// [`crate::prompt::MemoryHierarchyProvider`] loads exactly that top-level
-    /// User/Project/Local hierarchy (no `@include` parents, no enterprise-`Managed`
-    /// tier), so every file fired here is top-level ⇒ `load_reason = session_start`,
-    /// with `memory_type` derived from the loaded file:
+    /// [`crate::prompt::MemoryHierarchyProvider`] loads the full Managed/User/
+    /// Project/Local hierarchy and tags each file with its
+    /// [`memory::claude_md::ClaudeMdTier`]; `memory_type` is taken directly from
+    /// that tier (so an enterprise-`Managed` file is reported as `Managed`).
     ///
-    /// - `is_local_override` ⇒ `Local` (a `CLAUDE.local.md`),
-    /// - path under `~/.claude` ⇒ `User` (user-global `CLAUDE.md`),
-    /// - otherwise ⇒ `Project` (a repo `CLAUDE.md`).
+    /// Conditional (`paths:`-gated) rules are filtered out of the eager set by
+    /// the provider, so every file fired here is unconditional and top-level ⇒
+    /// `load_reason = session_start` with `globs = None`.
     ///
-    /// `globs` / `trigger_file_path` / `parent_file_path` are omitted — the
-    /// hierarchy provider carries no `paths:`-frontmatter, lazy-trigger, or
-    /// `@include`-parent metadata (those wire fields are `.optional()` and elided
-    /// when absent, matching the TS session-start fire).
+    /// `trigger_file_path` / `parent_file_path` are omitted — the eager pass
+    /// carries no lazy-trigger or `@include`-parent metadata (those wire fields
+    /// are `.optional()` and elided when absent, matching the TS session-start
+    /// fire).
     ///
     /// The orchestrator already owns the memory provider AND the hook registry, so
     /// it loads memory ONCE here (the same `memory.load(&cwd)` the system-prompt
@@ -1762,17 +1762,23 @@ impl ConversationOrchestrator {
         if memory_files.is_empty() {
             return;
         }
-        let home = dirs::home_dir();
         for file in memory_files {
-            let memory_type = if file.is_local_override {
-                hooks::events::InstructionsMemoryType::Local
-            } else if home
-                .as_ref()
-                .is_some_and(|h| file.path.starts_with(h.join(".claude")))
-            {
-                hooks::events::InstructionsMemoryType::User
-            } else {
-                hooks::events::InstructionsMemoryType::Project
+            // `memory_type` is taken straight from the file's tier (claude-code
+            // fires `file.type`, claudemd.ts:1058-1062), so the Managed tier is
+            // reported faithfully rather than misclassified as Project.
+            let memory_type = match file.tier {
+                memory::claude_md::ClaudeMdTier::Managed => {
+                    hooks::events::InstructionsMemoryType::Managed
+                }
+                memory::claude_md::ClaudeMdTier::User => {
+                    hooks::events::InstructionsMemoryType::User
+                }
+                memory::claude_md::ClaudeMdTier::Project => {
+                    hooks::events::InstructionsMemoryType::Project
+                }
+                memory::claude_md::ClaudeMdTier::Local => {
+                    hooks::events::InstructionsMemoryType::Local
+                }
             };
             // A fresh per-file `HookContext` (the executor reads `session_id` /
             // `cwd` from it); `lifecycle_hook_ctx` re-locks the session each call,
@@ -1786,7 +1792,9 @@ impl ConversationOrchestrator {
                         memory_type,
                         // Top-level eager session-start load (no `@include` parent).
                         load_reason: hooks::events::InstructionsLoadReason::SessionStart,
-                        globs: None,
+                        // Always `None` — conditional rules are filtered out of
+                        // the eager set by the provider.
+                        globs: file.globs,
                         trigger_file_path: None,
                         parent_file_path: None,
                     },

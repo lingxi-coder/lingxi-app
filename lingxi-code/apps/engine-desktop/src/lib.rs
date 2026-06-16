@@ -3467,11 +3467,11 @@ mod tests {
     /// `Some(StaticMemoryProvider::with_files([..one CLAUDE.md..]))` — the SAME
     /// `cfg.memory_provider` seam the real provider flows through — and proves
     /// that the injected memory flows through `build()` into the orchestrator
-    /// and lands in the assembled SYSTEM PROMPT (the `<memory>` block with the
-    /// file's path + body). The default-empty sibling
-    /// ([`build_constructs_runtime_deterministically`] etc.) elides the
-    /// `<memory>` section entirely, so the block's presence is the load-bearing
-    /// difference the injected provider makes.
+    /// and lands in the assembled SYSTEM PROMPT (the GAP-3 memory section —
+    /// preamble + `Contents of …:` with the file's path + tier + body). The
+    /// default-empty sibling ([`build_constructs_runtime_deterministically`]
+    /// etc.) elides the memory section entirely, so the section's presence is
+    /// the load-bearing difference the injected provider makes.
     ///
     /// The end-to-end "`fire_instructions_loaded()` fires the registered
     /// `InstructionsLoaded` hook over the controlled memory" half is proven at
@@ -3510,6 +3510,8 @@ mod tests {
             path: memory_path.clone(),
             body: memory_body.to_string(),
             is_local_override: false,
+            tier: orchestrator::prompt::ClaudeMdTier::Project,
+            globs: None,
         };
         cfg.memory_provider = Some(Arc::new(
             orchestrator::test_support::StaticMemoryProvider::with_files(vec![memory_file]),
@@ -3528,21 +3530,28 @@ mod tests {
             .expect("build() with an injected memory provider must succeed");
 
         // The injected CLAUDE.md must reach the assembled system prompt: the
-        // `<memory>` block carries the file's path + body. This proves the
-        // controlled provider flowed through build() into the orchestrator's
-        // prompt assembly — the gap (desktop loads NO memory) is closed.
+        // memory section (GAP 3 — preamble + `Contents of …:` per file, 1:1 with
+        // claude-code getClaudeMds) carries the file's path + tier description +
+        // body. This proves the controlled provider flowed through build() into
+        // the orchestrator's prompt assembly — the gap (desktop loads NO memory)
+        // is closed.
         let sys = rt.orchestrator.assemble_system_prompt_preview().await;
         assert!(
-            sys.contains("<memory>"),
-            "injected memory must emit a <memory> block in the system prompt: {sys}"
+            sys.contains(
+                "Codebase and user instructions are shown below. Be sure to adhere to these instructions."
+            ),
+            "injected memory must emit the memory preamble in the system prompt: {sys}"
+        );
+        assert!(
+            sys.contains(&format!(
+                "Contents of {} (project instructions, checked into the codebase):",
+                memory_path.display()
+            )),
+            "the injected CLAUDE.md must emit a tier-tagged `Contents of …:` marker: {sys}"
         );
         assert!(
             sys.contains(memory_body),
             "the injected CLAUDE.md body must appear in the system prompt: {sys}"
-        );
-        assert!(
-            sys.contains(&memory_path.display().to_string()),
-            "the injected CLAUDE.md path must appear in the <memory> block: {sys}"
         );
 
         // Sanity: the InstructionsLoaded hook the in-build fire dispatched
@@ -3556,9 +3565,9 @@ mod tests {
 
     /// Determinism guard for the default seam: a default-config build
     /// (`cfg.memory_provider == None` ⟶ `StaticMemoryProvider::empty()`) loads
-    /// NO memory, so the system prompt has NO `<memory>` block. This pins that
-    /// the existing boot tests stay deterministic (they never read the real
-    /// `~/.claude/CLAUDE.md`).
+    /// NO memory, so the system prompt emits NO memory section (no preamble, no
+    /// `Contents of …:` markers). This pins that the existing boot tests stay
+    /// deterministic (they never read the real `~/.claude/CLAUDE.md`).
     #[tokio::test]
     async fn build_default_loads_no_memory() {
         let (_tmp, cfg) = test_config(true);
@@ -3575,8 +3584,12 @@ mod tests {
 
         let sys = rt.orchestrator.assemble_system_prompt_preview().await;
         assert!(
-            !sys.contains("<memory>"),
-            "default (empty) memory provider must elide the <memory> block: {sys}"
+            !sys.contains("Codebase and user instructions are shown below."),
+            "default (empty) memory provider must elide the memory section: {sys}"
+        );
+        assert!(
+            !sys.contains("Contents of "),
+            "default (empty) memory provider must emit no `Contents of …:` marker: {sys}"
         );
     }
 

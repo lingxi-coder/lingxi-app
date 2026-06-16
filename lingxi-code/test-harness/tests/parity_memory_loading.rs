@@ -1,12 +1,14 @@
-//! Parity fixture: CLAUDE.md hierarchy walk + 10 MB cap.
+//! Parity fixture: CLAUDE.md hierarchy walk (no size drop).
 //!
 //! Locks the shape of `claude_md::hierarchy::walk` + `claude_md::loader::load_file`
 //! against claude-code's reference (`src/memory/hierarchy.ts:22-71`,
 //! `src/memory/loader.ts:14-38`). Each scenario builds a tempdir layout
-//! and asserts the walk order + skipped-due-to-size set match.
+//! and asserts the walk order. GAP 4: claude-code reads every file whole (no
+//! size drop), so no file is ever skipped for size — `expected_skipped` is
+//! always empty and an oversized file appears in `expected_order`.
 
 use memory::claude_md::hierarchy::walk;
-use memory::claude_md::loader::{load_file, LoaderError};
+use memory::claude_md::loader::load_file;
 use memory::MAX_MEMORY_FILE_SIZE;
 use serde::Deserialize;
 use std::collections::BTreeMap;
@@ -62,13 +64,16 @@ fn memory_loading_matches_claude_code() {
         let home = root.path().join(&sc.home);
         fs::create_dir_all(&home).unwrap();
 
-        let h = walk(&cwd, &home);
+        // Managed tier intentionally not exercised here (it lives at an absolute
+        // system path); pass `None` for a hermetic walk.
+        let h = walk(&cwd, &home, None);
         let mut loaded: Vec<PathBuf> = Vec::new();
-        let mut skipped: Vec<PathBuf> = Vec::new();
+        // No file is ever skipped for size (GAP 4) — kept for the fixture's
+        // `expected_skipped: []` assertion.
+        let skipped: Vec<PathBuf> = Vec::new();
         for entry in &h.entries {
             match load_file(&entry.path, None) {
                 Ok(_) => loaded.push(entry.path.clone()),
-                Err(LoaderError::FileTooLarge { path, .. }) => skipped.push(path),
                 Err(other) => panic!("scenario {}: unexpected error {other:?}", sc.name),
             }
         }

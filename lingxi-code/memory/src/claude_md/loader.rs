@@ -1,12 +1,19 @@
-//! File reader with 10 MB cap.
+//! CLAUDE.md file reader (no size cap — parity with claude-code `readFile`).
 //!
 //! Beyond the raw [`load_file`] reader this module also ports the
 //! claude-code `@import` / `@include` expansion and the per-file body
 //! sanitisation (frontmatter + block HTML-comment stripping) so the
-//! orchestrator can splice referenced files into the `<memory>` block
-//! exactly the way the TS reference does. See [`expand_memory_file`].
+//! orchestrator can splice referenced files into the memory block exactly
+//! the way the TS reference does. See [`expand_memory_file`].
+//!
+//! claude-code reads every memory file whole (claudemd.ts:424-437 — plain
+//! `readFile`, no size check). It does NOT drop oversized files; it only
+//! surfaces a non-blocking warning list for files over
+//! [`crate::MAX_MEMORY_CHARACTER_COUNT`] (40k chars) via
+//! [`crate::get_large_memory_files`]. The 10 MB drop this loader used to
+//! enforce was a `LingXi`-invented behaviour with no TS analogue and has been
+//! removed.
 
-use crate::MAX_MEMORY_FILE_SIZE;
 use regex::Regex;
 use std::collections::HashSet;
 use std::path::{Component, Path, PathBuf};
@@ -30,7 +37,13 @@ pub enum LoaderError {
     /// I/O error reading the file.
     #[error("io: {0}")]
     Io(String),
-    /// File exceeded `MAX_MEMORY_FILE_SIZE`; skipped (event emitted).
+    /// Retained for the `memdir`/TUI consumers that still pattern-match it.
+    ///
+    /// [`load_file`] NO LONGER produces this variant — CLAUDE.md files are
+    /// read whole (parity with claude-code, which has no size drop). The
+    /// memdir scanner keeps its own [`crate::MAX_MEMORY_FILE_SIZE`] cap, and
+    /// the `/memory` TUI dialog still carries a match arm for it; the variant
+    /// stays so those out-of-subsystem callers compile unchanged.
     #[error("file too large: {bytes} bytes at {path}")]
     FileTooLarge {
         /// Path of the oversized file.
@@ -40,48 +53,40 @@ pub enum LoaderError {
     },
 }
 
-/// Telemetry event name emitted when a file exceeds `MAX_MEMORY_FILE_SIZE`.
+/// Telemetry event name for the memdir oversize-skip path.
+///
+/// Not fired by the CLAUDE.md hierarchy loader anymore (it has no size drop);
+/// retained for the memdir subsystem, which documents this event name as the
+/// mechanism it reports oversize files through.
 pub const TENGU_MEMORY_FILE_TOO_LARGE: &str = "tengu_memory_file_too_large";
 
-/// Load one CLAUDE.md (or local override) with the 10 MB cap.
+/// Load one CLAUDE.md (or local override) file — whole, no size cap.
 ///
-/// Returns `Err(FileTooLarge)` when the file exceeds the cap. The caller
-/// is expected to log the event via [`emit_file_too_large`] and continue
-/// processing the remaining files — oversized files are skipped, never
-/// fatal.
+/// Parity with claude-code `safelyReadMemoryFileAsync` (claudemd.ts:424-437):
+/// a plain `readFile` with no size check. Oversized files are NEVER dropped;
+/// the 40k-char recommendation is a non-blocking warning surfaced separately
+/// by [`crate::get_large_memory_files`].
 ///
 /// # Errors
 ///
-/// - [`LoaderError::Io`] for filesystem errors (file unreadable, perms).
-/// - [`LoaderError::FileTooLarge`] when the size exceeds the cap.
+/// - [`LoaderError::Io`] for filesystem errors (file missing, unreadable,
+///   permissions). `load_file` never returns [`LoaderError::FileTooLarge`].
 pub fn load_file(
     path: &Path,
     _bus: Option<&Arc<telemetry::AnalyticsBus>>,
 ) -> Result<LoadedFile, LoaderError> {
-    let meta = std::fs::metadata(path).map_err(|e| LoaderError::Io(e.to_string()))?;
-    let size = meta.len();
-    // On 32-bit targets a >4 GB file overflows `usize`; in that case it
-    // is by definition over the 10 MB cap, so treat the conversion failure
-    // as "too large" rather than rejecting it as an I/O error.
-    let over_cap = match usize::try_from(size) {
-        Ok(n) => n > MAX_MEMORY_FILE_SIZE,
-        Err(_) => true,
-    };
-    if over_cap {
-        return Err(LoaderError::FileTooLarge {
-            path: path.to_path_buf(),
-            bytes: size,
-        });
-    }
     let body = std::fs::read_to_string(path).map_err(|e| LoaderError::Io(e.to_string()))?;
+    // `len()` of the UTF-8 string is the byte size we just read; avoids a
+    // second `metadata` syscall and is exact for the bytes loaded.
+    let size_bytes = body.len() as u64;
     Ok(LoadedFile {
         path: path.to_path_buf(),
         body,
-        size_bytes: size,
+        size_bytes,
     })
 }
 
-/// Emit `tengu_memory_file_too_large` when a file was skipped.
+/// Emit `tengu_memory_file_too_large` (memdir oversize-skip path).
 ///
 /// No-op when `bus` is `None`. Payload keys (locked):
 /// `_PROTO_path: PiiTagged(<path>)`, `size_bytes: Int(N)`.
@@ -148,6 +153,11 @@ pub struct MemoryEntry {
     pub path: PathBuf,
     /// Sanitised body (frontmatter + block HTML comments removed).
     pub body: String,
+    /// Glob patterns from the `paths:` frontmatter key (claudemd.ts:254-279
+    /// `parseFrontmatterPaths`): comma/brace-split, trailing `/**` stripped,
+    /// match-all `**` dropped. `None` means the rule applies unconditionally;
+    /// `Some(_)` marks a CONDITIONAL rule that must NOT be eagerly injected.
+    pub globs: Option<Vec<String>>,
 }
 
 /// Result of parsing one memory file's raw bytes.
@@ -159,6 +169,8 @@ pub struct ParsedMemory {
     /// Resolved absolute paths of every `@import` directive found in leaf
     /// text (deduped, in first-seen order).
     pub include_paths: Vec<PathBuf>,
+    /// `paths:` frontmatter globs (see [`MemoryEntry::globs`]).
+    pub globs: Option<Vec<String>>,
 }
 
 /// Recursively load `path` and every file it `@import`s, returning a flat
@@ -176,8 +188,9 @@ pub struct ParsedMemory {
 ///   nothing and be skipped.
 /// - `depth`: 0 for a top-level CLAUDE.md.
 ///
-/// Missing / unreadable / oversized files are silently ignored (the ENOENT
-/// branch of `safelyReadMemoryFileAsync`, claudemd.ts:433-436).
+/// Missing / unreadable files are silently ignored (the ENOENT branch of
+/// `safelyReadMemoryFileAsync`, claudemd.ts:433-436). There is no size cap —
+/// files are read whole.
 #[must_use]
 pub fn expand_memory_file<S: std::hash::BuildHasher>(
     path: &Path,
@@ -196,7 +209,7 @@ pub fn expand_memory_file<S: std::hash::BuildHasher>(
     // (claudemd.ts:645).
     processed.insert(key);
 
-    // Read with the 10 MB cap; any error (ENOENT, oversized, perms) => skip.
+    // Read whole; any error (ENOENT, perms) => skip. No size cap.
     let Ok(loaded) = load_file(path, None) else {
         return Vec::new();
     };
@@ -211,6 +224,7 @@ pub fn expand_memory_file<S: std::hash::BuildHasher>(
     let mut result = vec![MemoryEntry {
         path: path.to_path_buf(),
         body: parsed.body,
+        globs: parsed.globs,
     }];
 
     for inc in parsed.include_paths {
@@ -239,12 +253,14 @@ pub fn expand_memory_file<S: std::hash::BuildHasher>(
 #[must_use]
 pub fn parse_memory_content(raw: &str, file_path: &Path, home: Option<&Path>) -> ParsedMemory {
     let without_fm = strip_frontmatter(raw);
+    let globs = parse_frontmatter_paths(raw);
     let base_dir = file_path.parent().unwrap_or_else(|| Path::new("."));
     let include_paths = extract_include_paths(without_fm, base_dir, home);
     let body = strip_html_comments(without_fm);
     ParsedMemory {
         body,
         include_paths,
+        globs,
     }
 }
 
@@ -266,6 +282,186 @@ pub fn strip_frontmatter(raw: &str) -> &str {
         }
     }
     raw
+}
+
+/// Parse the `paths:` frontmatter key into glob patterns, or `None` when the
+/// rule is unconditional. Ports `parseFrontmatterPaths` (claudemd.ts:254-279):
+///
+/// 1. Read the `paths` value from the leading frontmatter block.
+/// 2. Split it with `split_path_in_frontmatter` (comma-split respecting
+///    braces, then brace-expansion — `splitPathInFrontmatter`).
+/// 3. Drop a trailing `/**` from each pattern (the `ignore` crate treats
+///    `path` as matching the dir and everything under it).
+/// 4. Filter out empty patterns; if nothing remains, or every pattern is the
+///    match-all `**`, return `None` (applies to all paths).
+///
+/// FIDELITY BOUNDARY: the TS reference runs a full YAML parse. To avoid a YAML
+/// dependency this scanner handles the three shapes that occur in practice — a
+/// scalar (`paths: src/**`, optionally quoted), an inline flow list
+/// (`paths: [a, b]`), and a block list (`paths:` then `  - a` lines). Other
+/// YAML exotica are not supported and yield `None`.
+#[must_use]
+pub fn parse_frontmatter_paths(raw: &str) -> Option<Vec<String>> {
+    let value = frontmatter_paths_value(raw)?;
+    let patterns: Vec<String> = split_path_in_frontmatter(&value)
+        .into_iter()
+        .map(|p| {
+            // Remove a trailing `/**` (claudemd.ts:266-269).
+            p.strip_suffix("/**").map_or(p.clone(), str::to_string)
+        })
+        .filter(|p| !p.is_empty())
+        .collect();
+    // All `**` (or empty) ⇒ unconditional (claudemd.ts:272-276).
+    if patterns.is_empty() || patterns.iter().all(|p| p == "**") {
+        return None;
+    }
+    Some(patterns)
+}
+
+/// Extract the raw `paths:` value text from the leading frontmatter block.
+/// Returns the comma-joinable string form: a scalar is returned as-is
+/// (unquoted), a flow `[a, b]` is returned as `a, b`, and a block list of
+/// `- item` lines is returned comma-joined. `None` when there is no
+/// frontmatter or no `paths` key.
+fn frontmatter_paths_value(raw: &str) -> Option<String> {
+    // Isolate the frontmatter inner text (between the `---` fences).
+    let m = frontmatter_re().find(raw)?;
+    if m.start() != 0 {
+        return None;
+    }
+    let block = &raw[m.start()..m.end()];
+    // Strip the opening `---\n` and the closing `---\n?` to get the inner YAML.
+    let inner = block
+        .trim_start_matches('-')
+        .trim_start_matches(|c| c == '\r' || c == '\n')
+        .trim_end_matches(|c: char| c == '-' || c == '\r' || c == '\n' || c.is_whitespace());
+
+    let lines: Vec<&str> = inner.lines().collect();
+    for (i, line) in lines.iter().enumerate() {
+        // Only top-level (non-indented) `paths:` keys.
+        if line.starts_with(char::is_whitespace) {
+            continue;
+        }
+        let rest = match line.strip_prefix("paths:") {
+            Some(r) => r,
+            None => continue,
+        };
+        let scalar = rest.trim();
+        if scalar.is_empty() {
+            // Block list form: collect subsequent `  - item` lines.
+            let mut items: Vec<String> = Vec::new();
+            for next in &lines[i + 1..] {
+                let t = next.trim_start();
+                if let Some(item) = t.strip_prefix('-') {
+                    items.push(unquote_yaml_scalar(item.trim()));
+                } else if next.starts_with(char::is_whitespace) {
+                    // Indented non-list continuation — not a shape we model.
+                    break;
+                } else {
+                    break;
+                }
+            }
+            if items.is_empty() {
+                return None;
+            }
+            return Some(items.join(","));
+        }
+        // Inline flow list `[a, b]`.
+        if let Some(body) = scalar.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
+            return Some(
+                body.split(',')
+                    .map(|p| unquote_yaml_scalar(p.trim()))
+                    .collect::<Vec<_>>()
+                    .join(","),
+            );
+        }
+        // Plain scalar (optionally quoted).
+        return Some(unquote_yaml_scalar(scalar));
+    }
+    None
+}
+
+/// Strip a single matching pair of surrounding single/double quotes from a
+/// YAML scalar (best-effort; no escape processing).
+fn unquote_yaml_scalar(s: &str) -> String {
+    let s = s.trim();
+    if s.len() >= 2 {
+        let b = s.as_bytes();
+        if (b[0] == b'"' && b[s.len() - 1] == b'"') || (b[0] == b'\'' && b[s.len() - 1] == b'\'') {
+            return s[1..s.len() - 1].to_string();
+        }
+    }
+    s.to_string()
+}
+
+/// Comma-split a frontmatter path value while respecting `{...}` braces, then
+/// brace-expand each part. 1:1 with `splitPathInFrontmatter` +
+/// `expandBraces` (frontmatterParser.ts:189-266).
+fn split_path_in_frontmatter(input: &str) -> Vec<String> {
+    let mut parts: Vec<String> = Vec::new();
+    let mut current = String::new();
+    let mut brace_depth: i32 = 0;
+    for ch in input.chars() {
+        match ch {
+            '{' => {
+                brace_depth += 1;
+                current.push(ch);
+            }
+            '}' => {
+                brace_depth -= 1;
+                current.push(ch);
+            }
+            ',' if brace_depth == 0 => {
+                let trimmed = current.trim();
+                if !trimmed.is_empty() {
+                    parts.push(trimmed.to_string());
+                }
+                current.clear();
+            }
+            _ => current.push(ch),
+        }
+    }
+    let trimmed = current.trim();
+    if !trimmed.is_empty() {
+        parts.push(trimmed.to_string());
+    }
+
+    parts
+        .into_iter()
+        .filter(|p| !p.is_empty())
+        .flat_map(|p| expand_braces(&p))
+        .collect()
+}
+
+/// Expand the first `{a,b}` brace group in `pattern`, recursing on the rest.
+/// 1:1 with `expandBraces` (frontmatterParser.ts:240-266).
+fn expand_braces(pattern: &str) -> Vec<String> {
+    let Some((prefix, alternatives, suffix)) = split_first_brace_group(pattern) else {
+        return vec![pattern.to_string()];
+    };
+    let mut expanded = Vec::new();
+    for alt in alternatives.split(',') {
+        let combined = format!("{}{}{}", prefix, alt.trim(), suffix);
+        expanded.extend(expand_braces(&combined));
+    }
+    expanded
+}
+
+/// Match `^([^{]*)\{([^}]+)\}(.*)$` — prefix, first non-empty `{...}` group,
+/// and the remainder.
+fn split_first_brace_group(pattern: &str) -> Option<(&str, &str, &str)> {
+    let open = pattern.find('{')?;
+    // No `{` may appear in the prefix (regex `[^{]*`); `find` guarantees that.
+    let after_open = &pattern[open + 1..];
+    let close_rel = after_open.find('}')?;
+    if close_rel == 0 {
+        // `{}` — `[^}]+` requires at least one char inside.
+        return None;
+    }
+    let prefix = &pattern[..open];
+    let alternatives = &after_open[..close_rel];
+    let suffix = &after_open[close_rel + 1..];
+    Some((prefix, alternatives, suffix))
 }
 
 fn comment_span_re() -> &'static Regex {
@@ -616,7 +812,6 @@ fn path_in_working_path(path: &Path, working: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::MAX_MEMORY_FILE_SIZE;
     use std::fs;
     use tempfile::TempDir;
 
@@ -632,27 +827,44 @@ mod tests {
     }
 
     #[test]
-    fn skips_oversized_file_returns_file_too_large() {
+    fn oversized_file_is_loaded_not_dropped() {
+        // GAP 4: claude-code has no size drop (claudemd.ts:424-437 reads whole).
+        // A file far over the old 10 MB cap must now LOAD successfully.
         let tmp = TempDir::new().unwrap();
         let p = tmp.path().join("CLAUDE.md");
-        let bytes = vec![b'a'; MAX_MEMORY_FILE_SIZE + 1];
+        let bytes = vec![b'a'; 11 * 1024 * 1024];
         fs::write(&p, &bytes).unwrap();
-        match load_file(&p, None) {
-            Err(LoaderError::FileTooLarge { path, bytes }) => {
-                assert_eq!(path, p);
-                assert_eq!(bytes, u64::try_from(MAX_MEMORY_FILE_SIZE + 1).unwrap());
-            }
-            other => panic!("expected FileTooLarge, got {other:?}"),
-        }
+        let out = load_file(&p, None).expect("oversized file must load, not error");
+        assert_eq!(out.size_bytes, 11 * 1024 * 1024);
+        assert_eq!(out.body.len(), 11 * 1024 * 1024);
     }
 
     #[test]
-    fn file_at_exact_cap_is_loaded() {
-        let tmp = TempDir::new().unwrap();
-        let p = tmp.path().join("CLAUDE.md");
-        fs::write(&p, vec![b'a'; MAX_MEMORY_FILE_SIZE]).unwrap();
-        let out = load_file(&p, None).unwrap();
-        assert_eq!(out.size_bytes, u64::try_from(MAX_MEMORY_FILE_SIZE).unwrap());
+    fn get_large_memory_files_flags_but_does_not_drop_40k_body() {
+        use crate::{get_large_memory_files, MemoryFile, MemoryFrontmatter};
+        use std::time::SystemTime;
+        // A >40k-char body is flagged by the warning helper but still fully
+        // present (mirror claudemd.ts:1132-1134 getLargeMemoryFiles).
+        let mk = |path: &str, content: String| MemoryFile {
+            path: PathBuf::from(path),
+            mtime: SystemTime::UNIX_EPOCH,
+            frontmatter: MemoryFrontmatter::default(),
+            content,
+        };
+        let big = mk(
+            "/x/CLAUDE.md",
+            "x".repeat(crate::MAX_MEMORY_CHARACTER_COUNT + 1),
+        );
+        let small = mk("/y/CLAUDE.md", "small".to_string());
+        let files = vec![big.clone(), small];
+        let large = get_large_memory_files(&files);
+        assert_eq!(large.len(), 1, "only the >40k file is flagged");
+        assert_eq!(large[0].path, big.path);
+        // Body is NOT truncated — still fully loaded.
+        assert_eq!(
+            large[0].content.chars().count(),
+            crate::MAX_MEMORY_CHARACTER_COUNT + 1
+        );
     }
 
     #[tokio::test]
@@ -830,6 +1042,23 @@ mod import_tests {
         let parsed = parse_memory_content(raw, Path::new("/x/CLAUDE.md"), None);
         assert_eq!(parsed.body, "VISIBLE BODY\n");
         assert!(!parsed.body.contains("title"));
+        // GAP 2 part-1: the `paths:` glob is captured (trailing `/**` stripped),
+        // marking this a CONDITIONAL rule.
+        assert_eq!(parsed.globs, Some(vec!["src".to_string()]));
+    }
+
+    #[test]
+    fn frontmatter_without_paths_yields_no_globs() {
+        // An unconditional file (no `paths:`) has `globs == None`.
+        let raw = "---\ntitle: t\n---\nBODY\n";
+        let parsed = parse_memory_content(raw, Path::new("/x/CLAUDE.md"), None);
+        assert_eq!(parsed.globs, None);
+        // And a match-all `paths: **` is also treated as unconditional.
+        let all = "---\npaths: '**'\n---\nBODY\n";
+        assert_eq!(
+            parse_memory_content(all, Path::new("/x/CLAUDE.md"), None).globs,
+            None
+        );
     }
 
     #[test]

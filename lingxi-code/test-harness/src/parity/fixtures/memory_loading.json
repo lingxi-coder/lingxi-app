@@ -1,6 +1,6 @@
 {
   "_source": "claude-code/src/memory/hierarchy.ts: walkClaudeMdHierarchy (lines 22-71); claude-code/src/memory/loader.ts: loadOneFile (lines 14-38)",
-  "_note": "Hierarchy walk is cwd → each parent → ~/.claude/. Within a directory, CLAUDE.local.md (when present) precedes CLAUDE.md so local overrides shadow canonical entries. The 10 MB per-file cap drops oversized files with a tengu_memory_file_too_large event but does NOT abort the walk. Case-insensitive matching is OS-layer best-effort; mismatches emit tengu_memory_case_mismatch but do not block load.",
+  "_note": "Hierarchy walk is cwd → each parent → ~/.claude/. Within a directory, CLAUDE.local.md (when present) precedes CLAUDE.md so local overrides shadow canonical entries. GAP 4: there is NO per-file size drop — claude-code reads every memory file whole (safelyReadMemoryFileAsync), so an oversized file LOADS rather than being skipped (the 40k-char limit is a non-blocking warning only). Case-insensitive matching is OS-layer best-effort; mismatches emit tengu_memory_case_mismatch but do not block load. (Managed tier is exercised separately in hierarchy unit tests.)",
   "scenarios": [
     {
       "name": "cwd_then_parent_then_home",
@@ -33,7 +33,7 @@
       ]
     },
     {
-      "name": "oversized_file_skipped_others_load",
+      "name": "oversized_file_loads_whole_no_size_drop",
       "layout": {
         "home/.claude/CLAUDE.md": "# small home\n",
         "repo/CLAUDE.md": "OVERSIZED:11mb"
@@ -41,11 +41,10 @@
       "cwd": "repo",
       "home": "home",
       "expected_order": [
+        "repo/CLAUDE.md",
         "home/.claude/CLAUDE.md"
       ],
-      "expected_skipped": [
-        "repo/CLAUDE.md"
-      ]
+      "expected_skipped": []
     },
     {
       "name": "empty_tree_no_files",

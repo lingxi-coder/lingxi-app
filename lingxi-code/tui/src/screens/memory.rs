@@ -59,8 +59,10 @@ pub fn memory_tiers(cwd: &Path, home: &Path) -> Vec<MemoryTierEntry> {
     ];
 
     // Append any other discovered CLAUDE.md (project parents) not already
-    // covered by the project/user rows, in walk order.
-    let h = walk(cwd, home);
+    // covered by the project/user rows, in walk order. The Managed tier is not
+    // surfaced in this editor (read-only enterprise policy, not user-editable),
+    // so pass `None`.
+    let h = walk(cwd, home, None);
     for entry in h.entries {
         if entry.path == project_path || entry.path == user_path {
             continue;

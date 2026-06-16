@@ -16,6 +16,11 @@ pub mod tools_block;
 
 pub use memory_block::{real_provider, MemoryHierarchyProvider, RealMemoryHierarchyProvider};
 
+/// Re-export of the CLAUDE.md tier enum so consumers that depend on
+/// `orchestrator` (but not the `memory` crate directly) can name
+/// [`MemoryFile::tier`] without an extra dependency.
+pub use memory::claude_md::ClaudeMdTier;
+
 use crate::prompt::locked_templates::{FOOTER, HEADER, SECTION_SEP};
 use std::path::PathBuf;
 
@@ -56,7 +61,8 @@ pub fn assemble_system_prompt(ctx: &SystemPromptContext) -> String {
 ///
 /// 1. `HEADER`
 /// 2. `<env>...</env>` + model description + cutoff
-/// 3. `<memory>...</memory>` (elided when no files)
+/// 3. memory section — preamble + `Contents of …:` blocks (elided when no
+///    files); see [`memory_block::format`]. NO enclosing tag.
 /// 4. `<tools>...</tools>` (elided when no names)
 /// 5. `# Output Style: <name>` + body (elided when `output_style` is `None`)
 /// 6. `FOOTER`
@@ -112,9 +118,10 @@ fn output_style_section(style: ActiveOutputStyle<'_>) -> String {
 
 /// Append a section separator that produces exactly one blank line
 /// between two adjacent sections, regardless of whether the previous
-/// section already ended with a single `\n` (`memory_block` / `tools_block`)
-/// or not (`HEADER`, `env_block`). One blank line = two LFs total at the
-/// boundary.
+/// section already ended with a single `\n` (`tools_block`, `env_block`'s
+/// cutoff line) or not (`HEADER`, and `memory_block`, which after the GAP-3
+/// rewrite ends with the last file's trimmed body — no trailing `\n`). One
+/// blank line = two LFs total at the boundary.
 fn push_section_separator(s: &mut String) {
     if s.ends_with('\n') {
         s.push('\n');
@@ -155,8 +162,9 @@ pub struct SystemPromptContext {
     pub git_status: Option<GitStatus>,
     /// Direct + once-recursive children of cwd (depth ≤ 2).
     pub file_tree: FileTree,
-    /// CLAUDE.md hierarchy — already in spec splice order
-    /// (home → repo → repo-local override). `LingXi` M3-02 lock.
+    /// CLAUDE.md hierarchy — already in claude-code splice order
+    /// (managed → home → repo → repo-local override), each tagged with its
+    /// [`MemoryFile::tier`].
     pub memory_files: Vec<MemoryFile>,
     /// Available tool names — alphabetic order. Sorting happens here,
     /// NOT in `tools_block::format`.
@@ -214,7 +222,21 @@ pub struct MemoryFile {
     /// (whitespace-only files are filtered upstream).
     pub body: String,
     /// `true` when this is a `CLAUDE.local.md`; `false` for `CLAUDE.md`.
+    ///
+    /// Retained for backward compatibility; the injection description is now
+    /// driven by [`MemoryFile::tier`] (a `Local` tier implies this is `true`).
     pub is_local_override: bool,
+    /// Which CLAUDE.md tier the file came from. Selects the injection
+    /// description (`getClaudeMds`, claudemd.ts:1168-1186): Managed and User
+    /// share the global-instructions wording; Project and Local each have
+    /// their own.
+    pub tier: memory::claude_md::ClaudeMdTier,
+    /// `paths:` frontmatter globs, when the file is a CONDITIONAL rule
+    /// (`parseFrontmatterPaths`, claudemd.ts:254-279). `None` for an
+    /// unconditional file. Conditional rules are NOT eagerly injected into the
+    /// system prompt (claudemd.ts:773 `conditionalRule:false` filter); they are
+    /// reserved for per-edited-file lazy activation (Gap 2 part-2, deferred).
+    pub globs: Option<Vec<String>>,
 }
 
 #[cfg(test)]
@@ -263,6 +285,8 @@ mod tests {
             path: PathBuf::from("/proj/CLAUDE.md"),
             body: "# title\nbody\n".into(),
             is_local_override: false,
+            tier: memory::claude_md::ClaudeMdTier::Project,
+            globs: None,
         };
         assert!(!f.is_local_override);
         assert!(f.body.contains("title"));
@@ -333,7 +357,8 @@ mod tests {
             prompt: "P",
         };
         let out = assemble_system_prompt_with_style(&ctx, Some(style));
-        assert!(!out.contains("<memory>"));
+        // No memory section (empty files) and no tools section.
+        assert!(!out.contains("Codebase and user instructions are shown below."));
         assert!(!out.contains("<tools>"));
         // Section still lands before the footer with a blank-line boundary.
         assert!(out.contains("# Output Style: Learning\nP\n\nNotes:"));

@@ -1,4 +1,4 @@
-//! Dir-up walker: cwd → parents → user-home.
+//! Dir-up walker: managed → user-home → parents → cwd.
 
 use std::path::{Path, PathBuf};
 
@@ -6,6 +6,42 @@ use std::path::{Path, PathBuf};
 pub const FILE_NAME: &str = "CLAUDE.md";
 /// Filename of the local-override memory file.
 pub const LOCAL_OVERRIDE_NAME: &str = "CLAUDE.local.md";
+
+/// Env var that overrides the managed-settings directory for tests/demos so
+/// hermetic hierarchy tests stay machine-independent. When set, its value is
+/// used verbatim as the managed dir; otherwise [`managed_path`] returns the
+/// platform default. Loosely mirrors claude-code's
+/// `CLAUDE_CODE_MANAGED_SETTINGS_PATH` override (managedPath.ts:11-15).
+pub const MANAGED_DIR_ENV: &str = "LINGXI_MANAGED_DIR";
+
+/// Resolve the managed-settings directory.
+///
+/// Ports claude-code `getManagedFilePath` (settings/managedPath.ts:8-25): a
+/// per-platform absolute system path holding enterprise/managed policy. The
+/// `<managed>/CLAUDE.md` + `<managed>/.claude/rules/**` discovered under it form
+/// the always-on Managed tier.
+///
+/// - **macOS**:   `/Library/Application Support/ClaudeCode`
+/// - **Windows**: `C:\Program Files\ClaudeCode`
+/// - **other**:   `/etc/claude-code`
+///
+/// The [`MANAGED_DIR_ENV`] environment variable overrides the platform default
+/// (used by hermetic tests so they don't depend on a real system path).
+#[must_use]
+pub fn managed_path() -> PathBuf {
+    if let Some(over) = std::env::var_os(MANAGED_DIR_ENV) {
+        if !over.is_empty() {
+            return PathBuf::from(over);
+        }
+    }
+    if cfg!(target_os = "macos") {
+        PathBuf::from("/Library/Application Support/ClaudeCode")
+    } else if cfg!(target_os = "windows") {
+        PathBuf::from(r"C:\Program Files\ClaudeCode")
+    } else {
+        PathBuf::from("/etc/claude-code")
+    }
+}
 
 /// One discovered CLAUDE.md (or local override) location, post-walk.
 #[derive(Debug, Clone)]
@@ -17,6 +53,11 @@ pub struct HierarchyEntry {
     /// Whether the actual filename's bytes matched `FILE_NAME` exactly
     /// (false on case-insensitive filesystems that lowercased it).
     pub exact_case: bool,
+    /// Which CLAUDE.md tier this file was discovered in. Drives the injection
+    /// description (`getClaudeMds`, claudemd.ts:1168-1186) and the `@import`
+    /// external-include policy (only [`super::ClaudeMdTier::User`] gets
+    /// unconditional external includes).
+    pub tier: super::ClaudeMdTier,
 }
 
 /// Snapshot of discovered memory-file locations, innermost-first
@@ -35,33 +76,68 @@ const RULES_DIR: &str = "rules";
 
 /// Discover the claude-code memory-file set, in `getMemoryFiles`
 /// tier order (`utils/claudemd.ts:790-934`):
-///   1. **User**:    `<home>/.claude/CLAUDE.md`, then `<home>/.claude/rules/**.md`.
-///   2. **Project + Local**, from the filesystem root DOWN to `cwd`; per dir:
+///   1. **Managed**: `<managed>/CLAUDE.md`, then `<managed>/.claude/rules/**.md`
+///      (always loaded, lowest priority — spliced first).
+///   2. **User**:    `<home>/.claude/CLAUDE.md`, then `<home>/.claude/rules/**.md`.
+///   3. **Project + Local**, from the filesystem root DOWN to `cwd`; per dir:
 ///      `CLAUDE.md`, `.claude/CLAUDE.md`, `.claude/rules/**.md`, `CLAUDE.local.md`.
 ///
-/// claude-code splices files in exactly that order (User first, the innermost
+/// claude-code splices files in exactly that order (Managed first, the innermost
 /// `cwd` last). The orchestrator (`prompt::memory_block`) **reverses** this
 /// primitive's output to reach that splice order, so `walk` upholds an
 /// innermost-first contract: it builds the list in claude-code splice order and
-/// reverses it once at the end, yielding `cwd` … parents … User.
+/// reverses it once at the end, yielding `cwd` … parents … User … Managed.
 ///
-/// NB: claude-code's MANAGED tier (`getManagedFilePath` → `/etc/claude-code` etc.)
-/// is intentionally NOT probed — this port has no managed-settings concept
-/// (the settings loader models only user + project layers), and probing an
-/// absolute system path would make the hermetic discovery machine-dependent.
-/// Deferred until the port grows a managed-settings tier.
+/// `managed_dir` is the managed-settings directory (typically
+/// [`managed_path`]); pass `None` to skip the Managed tier entirely (hermetic
+/// tests that don't exercise it). claude-code always probes Managed and never
+/// settings-gates it (claudemd.ts:803-823); the `Option` here is purely a
+/// test seam so unit tests need not touch an absolute system path.
 ///
 /// Every file is emitted at most once, mirroring claude-code's shared
 /// `processedPaths` set. Missing dirs/files are silently skipped (NOT an error).
 #[must_use]
-pub fn walk(cwd: &Path, home: &Path) -> Hierarchy {
+pub fn walk(cwd: &Path, home: &Path, managed_dir: Option<&Path>) -> Hierarchy {
+    use super::ClaudeMdTier;
     let mut out = Vec::new();
     let mut processed = std::collections::HashSet::new();
 
-    // (1) User tier — `<home>/.claude/CLAUDE.md` + `<home>/.claude/rules/**`.
+    // (1) Managed tier — `<managed>/CLAUDE.md` + `<managed>/.claude/rules/**`.
+    //     Always loaded, never settings-gated (claudemd.ts:803-823). Probed
+    //     FIRST so that after the final reverse it sorts first in splice order.
+    if let Some(managed) = managed_dir {
+        emit_probe(
+            managed,
+            FILE_NAME,
+            false,
+            ClaudeMdTier::Managed,
+            &mut out,
+            &mut processed,
+        );
+        collect_rules(
+            &managed.join(DOT_CLAUDE).join(RULES_DIR),
+            ClaudeMdTier::Managed,
+            &mut out,
+            &mut processed,
+        );
+    }
+
+    // (2) User tier — `<home>/.claude/CLAUDE.md` + `<home>/.claude/rules/**`.
     let user_dir = home.join(DOT_CLAUDE);
-    emit_probe(&user_dir, FILE_NAME, false, &mut out, &mut processed);
-    collect_rules(&user_dir.join(RULES_DIR), &mut out, &mut processed);
+    emit_probe(
+        &user_dir,
+        FILE_NAME,
+        false,
+        ClaudeMdTier::User,
+        &mut out,
+        &mut processed,
+    );
+    collect_rules(
+        &user_dir.join(RULES_DIR),
+        ClaudeMdTier::User,
+        &mut out,
+        &mut processed,
+    );
 
     // (3) Project + Local tier — filesystem root DOWN to cwd.
     let mut dirs: Vec<PathBuf> = Vec::new();
@@ -73,25 +149,41 @@ pub fn walk(cwd: &Path, home: &Path) -> Hierarchy {
     dirs.reverse(); // root → cwd
     for dir in &dirs {
         // Project: `CLAUDE.md`, then `.claude/CLAUDE.md`, then `.claude/rules/**`.
-        emit_probe(dir, FILE_NAME, false, &mut out, &mut processed);
+        emit_probe(
+            dir,
+            FILE_NAME,
+            false,
+            ClaudeMdTier::Project,
+            &mut out,
+            &mut processed,
+        );
         emit_probe(
             &dir.join(DOT_CLAUDE),
             FILE_NAME,
             false,
+            ClaudeMdTier::Project,
             &mut out,
             &mut processed,
         );
         collect_rules(
             &dir.join(DOT_CLAUDE).join(RULES_DIR),
+            ClaudeMdTier::Project,
             &mut out,
             &mut processed,
         );
         // Local override LAST within the directory (claude-code emits Local
         // after Project so it wins the model's recency attention).
-        emit_probe(dir, LOCAL_OVERRIDE_NAME, true, &mut out, &mut processed);
+        emit_probe(
+            dir,
+            LOCAL_OVERRIDE_NAME,
+            true,
+            ClaudeMdTier::Local,
+            &mut out,
+            &mut processed,
+        );
     }
 
-    // `out` is now in claude-code splice order (User → root … → cwd).
+    // `out` is now in claude-code splice order (Managed → User → root … → cwd).
     // Reverse to the innermost-first contract this primitive promises; the
     // orchestrator reverses again to restore the splice order.
     out.reverse();
@@ -105,10 +197,11 @@ fn emit_probe(
     dir: &Path,
     want: &str,
     is_local: bool,
+    tier: super::ClaudeMdTier,
     out: &mut Vec<HierarchyEntry>,
     processed: &mut std::collections::HashSet<PathBuf>,
 ) {
-    if let Some(entry) = probe(dir, want, is_local) {
+    if let Some(entry) = probe(dir, want, is_local, tier) {
         if processed.insert(entry.path.clone()) {
             out.push(entry);
         }
@@ -127,15 +220,17 @@ fn emit_probe(
 /// via the shared `processed` set.
 fn collect_rules(
     rules_dir: &Path,
+    tier: super::ClaudeMdTier,
     out: &mut Vec<HierarchyEntry>,
     processed: &mut std::collections::HashSet<PathBuf>,
 ) {
     let mut visited = std::collections::HashSet::new();
-    collect_rules_inner(rules_dir, out, processed, &mut visited);
+    collect_rules_inner(rules_dir, tier, out, processed, &mut visited);
 }
 
 fn collect_rules_inner(
     rules_dir: &Path,
+    tier: super::ClaudeMdTier,
     out: &mut Vec<HierarchyEntry>,
     processed: &mut std::collections::HashSet<PathBuf>,
     visited: &mut std::collections::HashSet<PathBuf>,
@@ -172,7 +267,7 @@ fn collect_rules_inner(
         };
 
         if is_dir {
-            collect_rules_inner(&path, out, processed, visited);
+            collect_rules_inner(&path, tier, out, processed, visited);
         } else if is_file
             && ent.file_name().to_string_lossy().ends_with(".md")
             && processed.insert(path.clone())
@@ -181,12 +276,18 @@ fn collect_rules_inner(
                 path,
                 is_local_override: false,
                 exact_case: true,
+                tier,
             });
         }
     }
 }
 
-fn probe(dir: &Path, want: &str, is_local: bool) -> Option<HierarchyEntry> {
+fn probe(
+    dir: &Path,
+    want: &str,
+    is_local: bool,
+    tier: super::ClaudeMdTier,
+) -> Option<HierarchyEntry> {
     // Scan the directory and compare names case-insensitively. We rely on
     // the dirent listing (NOT `Path::is_file`) so that case-insensitive
     // filesystems (macOS APFS-default, Windows NTFS) still produce a
@@ -202,6 +303,7 @@ fn probe(dir: &Path, want: &str, is_local: bool) -> Option<HierarchyEntry> {
                 path: ent.path(),
                 is_local_override: is_local,
                 exact_case: s == want,
+                tier,
             });
         }
     }
@@ -265,7 +367,7 @@ mod tests {
         touch(&outer, "CLAUDE.md");
         touch(&inner, "CLAUDE.md");
 
-        let h = walk(&inner, &home);
+        let h = walk(&inner, &home, None);
         let paths: Vec<_> = h.entries.iter().map(|e| e.path.clone()).collect();
         assert_eq!(
             paths,
@@ -289,7 +391,7 @@ mod tests {
         touch(&cwd, "CLAUDE.md");
         touch(&cwd, "CLAUDE.local.md");
 
-        let h = walk(&cwd, &home);
+        let h = walk(&cwd, &home, None);
         let kinds: Vec<_> = h.entries.iter().map(|e| e.is_local_override).collect();
         // CLAUDE.local.md MUST come before CLAUDE.md at the same level
         // so it can shadow the canonical entry.
@@ -302,7 +404,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let home = tmp.path().join("home");
         fs::create_dir_all(home.join(".claude")).unwrap();
-        let _h = walk(std::path::Path::new("/"), &home);
+        let _h = walk(std::path::Path::new("/"), &home, None);
     }
 
     #[test]
@@ -312,7 +414,7 @@ mod tests {
         fs::create_dir_all(&cwd).unwrap();
         let home = tmp.path().join("home");
         fs::create_dir_all(&home).unwrap(); // .claude does NOT exist
-        let h = walk(&cwd, &home);
+        let h = walk(&cwd, &home, None);
         assert!(h.entries.is_empty());
     }
 
@@ -345,7 +447,7 @@ mod tests {
         touch(&repo, "CLAUDE.md");
         touch(&repo.join(".claude"), "CLAUDE.md");
 
-        let h = walk(&repo, &home);
+        let h = walk(&repo, &home, None);
         assert_eq!(
             splice_order(&h, tmp.path()),
             vec!["repo/CLAUDE.md", "repo/.claude/CLAUDE.md"],
@@ -368,7 +470,7 @@ mod tests {
         touch(&rules, "ignored.txt"); // non-.md skipped
         touch(&rules.join("sub"), "z.md");
 
-        let h = walk(&repo, &home);
+        let h = walk(&repo, &home, None);
         // Sorted readdir: `a.md`, `b.md`, then the `sub/` directory (recursed).
         assert_eq!(
             splice_order(&h, tmp.path()),
@@ -396,7 +498,7 @@ mod tests {
         fs::create_dir_all(&cwd).unwrap();
         touch(&cwd, "CLAUDE.md");
 
-        let h = walk(&cwd, &home);
+        let h = walk(&cwd, &home, None);
         assert_eq!(
             splice_order(&h, tmp.path()),
             vec![
@@ -410,11 +512,20 @@ mod tests {
     }
 
     #[test]
-    fn full_tier_order_user_project_local() {
-        // The MANAGED tier is intentionally not probed (no Rust managed-settings
-        // concept). Assert the User → Project → Local ordering with
-        // `.claude/CLAUDE.md`, rules, and the local override.
+    fn full_tier_order_managed_user_project_local() {
+        // GAP 1: the MANAGED tier loads FIRST (lowest priority, spliced first).
+        // The managed dir is injected explicitly (hermetic — no real system
+        // path, no env-var races). Assert Managed → User → Project → Local with
+        // `.claude/CLAUDE.md`, rules, and the local override, AND that each
+        // entry carries the right `ClaudeMdTier`.
+        use super::super::ClaudeMdTier;
         let tmp = TempDir::new().unwrap();
+
+        let managed = tmp.path().join("managed");
+        fs::create_dir_all(managed.join(".claude").join("rules")).unwrap();
+        touch(&managed, "CLAUDE.md");
+        touch(&managed.join(".claude").join("rules"), "mr.md");
+
         let home = tmp.path().join("home");
         let user = home.join(".claude");
         fs::create_dir_all(user.join("rules")).unwrap();
@@ -430,10 +541,12 @@ mod tests {
         touch(&pkg.join(".claude").join("rules"), "pr.md");
         touch(&pkg, "CLAUDE.local.md");
 
-        let h = walk(&pkg, &home);
+        let h = walk(&pkg, &home, Some(&managed));
         assert_eq!(
             splice_order(&h, tmp.path()),
             vec![
+                "managed/CLAUDE.md",
+                "managed/.claude/rules/mr.md",
                 "home/.claude/CLAUDE.md",
                 "home/.claude/rules/ur.md",
                 "repo/CLAUDE.md",
@@ -442,8 +555,57 @@ mod tests {
                 "repo/pkg/.claude/rules/pr.md",
                 "repo/pkg/CLAUDE.local.md",
             ],
-            "tier order: User → Project(root→cwd: CLAUDE, .claude/CLAUDE, rules) → Local"
+            "tier order: Managed → User → Project(root→cwd) → Local"
         );
+
+        // Tier tagging: build a path→tier map and spot-check each tier.
+        let tier_of = |suffix: &str| -> ClaudeMdTier {
+            h.entries
+                .iter()
+                .find(|e| e.path.to_string_lossy().ends_with(suffix))
+                .unwrap_or_else(|| panic!("entry ending {suffix} not found"))
+                .tier
+        };
+        assert_eq!(tier_of("managed/CLAUDE.md"), ClaudeMdTier::Managed);
+        assert_eq!(tier_of("managed/.claude/rules/mr.md"), ClaudeMdTier::Managed);
+        assert_eq!(tier_of("home/.claude/CLAUDE.md"), ClaudeMdTier::User);
+        assert_eq!(tier_of("home/.claude/rules/ur.md"), ClaudeMdTier::User);
+        assert_eq!(tier_of("repo/CLAUDE.md"), ClaudeMdTier::Project);
+        assert_eq!(tier_of("pkg/.claude/rules/pr.md"), ClaudeMdTier::Project);
+        assert_eq!(tier_of("CLAUDE.local.md"), ClaudeMdTier::Local);
+    }
+
+    #[test]
+    fn managed_path_honours_env_override_else_platform_default() {
+        // `managed_path()` reads MANAGED_DIR_ENV first; otherwise the OS default.
+        // (Single-threaded by default in cargo's test runner; this is the only
+        // test touching MANAGED_DIR_ENV.)
+        let prev = std::env::var_os(MANAGED_DIR_ENV);
+        std::env::set_var(MANAGED_DIR_ENV, "/tmp/lingxi-managed-override");
+        assert_eq!(
+            managed_path(),
+            PathBuf::from("/tmp/lingxi-managed-override"),
+            "env override must win"
+        );
+
+        std::env::remove_var(MANAGED_DIR_ENV);
+        let def = managed_path();
+        // The platform default is an absolute path under one of the three
+        // documented roots.
+        assert!(def.is_absolute());
+        if cfg!(target_os = "macos") {
+            assert_eq!(def, PathBuf::from("/Library/Application Support/ClaudeCode"));
+        } else if cfg!(target_os = "windows") {
+            assert_eq!(def, PathBuf::from(r"C:\Program Files\ClaudeCode"));
+        } else {
+            assert_eq!(def, PathBuf::from("/etc/claude-code"));
+        }
+
+        // Restore prior env state for other tests.
+        match prev {
+            Some(v) => std::env::set_var(MANAGED_DIR_ENV, v),
+            None => std::env::remove_var(MANAGED_DIR_ENV),
+        }
     }
 
     #[test]
@@ -456,7 +618,7 @@ mod tests {
         fs::create_dir_all(&repo).unwrap();
         touch(&repo, "CLAUDE.md");
 
-        let h = walk(&repo, &home);
+        let h = walk(&repo, &home, None);
         assert_eq!(splice_order(&h, tmp.path()), vec!["repo/CLAUDE.md"]);
     }
 
@@ -478,7 +640,7 @@ mod tests {
         #[cfg(not(unix))]
         let made = false;
 
-        let h = walk(&repo, &home);
+        let h = walk(&repo, &home, None);
         let order = splice_order(&h, tmp.path());
         // Must terminate and still surface r.md (exactly once).
         assert!(order.contains(&"repo/.claude/rules/r.md".to_string()));
@@ -500,7 +662,7 @@ mod tests {
         let home = tmp.path().join("home");
         fs::create_dir_all(home.join(".claude")).unwrap();
 
-        let h = walk(&cwd, &home);
+        let h = walk(&cwd, &home, None);
         assert_eq!(h.entries.len(), 1, "lowercased file must still be found");
         assert!(!h.entries[0].exact_case, "exact_case must be false");
     }

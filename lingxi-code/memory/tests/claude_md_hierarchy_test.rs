@@ -2,11 +2,12 @@
 //!
 //! Exercises `claude_md::hierarchy::walk` + `claude_md::loader::load_file`
 //! together. The hierarchy must surface entries in cwd-first order with
-//! `CLAUDE.local.md` shadowing `CLAUDE.md` at the same depth, and the
-//! 10 MB cap must skip oversized files without aborting the load.
+//! `CLAUDE.local.md` shadowing `CLAUDE.md` at the same depth. GAP 4: the
+//! CLAUDE.md loader has NO size drop (parity with claude-code `readFile`), so
+//! an oversized file loads in full rather than being skipped.
 
 use memory::claude_md::hierarchy::walk;
-use memory::claude_md::loader::{load_file, LoaderError};
+use memory::claude_md::loader::load_file;
 use memory::MAX_MEMORY_FILE_SIZE;
 use std::fs;
 use tempfile::TempDir;
@@ -30,7 +31,7 @@ fn full_hierarchy_walk_then_load_returns_innermost_first() {
     touch(&pkg.join("CLAUDE.md"), "# pkg notes\n");
     touch(&pkg.join("CLAUDE.local.md"), "# pkg local override\n");
 
-    let h = walk(&pkg, &home);
+    let h = walk(&pkg, &home, None);
     let loaded: Vec<_> = h
         .entries
         .iter()
@@ -53,7 +54,9 @@ fn full_hierarchy_walk_then_load_returns_innermost_first() {
 }
 
 #[test]
-fn oversized_file_skipped_via_file_too_large_error_other_files_load() {
+fn oversized_file_loads_whole_no_size_drop_other_files_also_load() {
+    // GAP 4: claude-code reads every memory file whole (no size drop). A file
+    // larger than the legacy 10 MB cap must now LOAD in full alongside the rest.
     let tmp = TempDir::new().unwrap();
     let home = tmp.path().join("home");
     let user_claude = home.join(".claude");
@@ -65,20 +68,22 @@ fn oversized_file_skipped_via_file_too_large_error_other_files_load() {
     let big = vec![b'x'; MAX_MEMORY_FILE_SIZE + 1];
     fs::write(repo.join("CLAUDE.md"), &big).unwrap();
 
-    let h = walk(&repo, &home);
-    let mut loaded = Vec::new();
-    let mut skipped = Vec::new();
-    for entry in &h.entries {
-        match load_file(&entry.path, None) {
-            Ok(f) => loaded.push(f),
-            Err(LoaderError::FileTooLarge { path, .. }) => skipped.push(path),
-            Err(other) => panic!("unexpected error: {other:?}"),
-        }
-    }
-    assert_eq!(loaded.len(), 1, "small home file must still load");
-    assert_eq!(loaded[0].path, user_claude.join("CLAUDE.md"));
-    assert_eq!(skipped.len(), 1);
-    assert_eq!(skipped[0], repo.join("CLAUDE.md"));
+    let h = walk(&repo, &home, None);
+    let loaded: Vec<_> = h
+        .entries
+        .iter()
+        .map(|e| load_file(&e.path, None).expect("no file is dropped for size"))
+        .collect();
+    assert_eq!(loaded.len(), 2, "both the small and oversized files load");
+
+    let by_path = |p: &std::path::Path| loaded.iter().find(|f| f.path == p).unwrap();
+    let big_loaded = by_path(&repo.join("CLAUDE.md"));
+    assert_eq!(
+        big_loaded.size_bytes,
+        (MAX_MEMORY_FILE_SIZE + 1) as u64,
+        "oversized file is read whole, not truncated"
+    );
+    assert_eq!(by_path(&user_claude.join("CLAUDE.md")).body, "# small\n");
 }
 
 #[test]
@@ -88,6 +93,6 @@ fn empty_dir_tree_yields_empty_hierarchy_no_error() {
     let cwd = tmp.path().join("empty");
     fs::create_dir_all(&cwd).unwrap();
     fs::create_dir_all(&home).unwrap();
-    let h = walk(&cwd, &home);
+    let h = walk(&cwd, &home, None);
     assert!(h.entries.is_empty());
 }

@@ -18,13 +18,48 @@ use agent::convert::{to_llm_messages, to_tool_declarations};
 use async_trait::async_trait;
 use futures::stream::BoxStream;
 use llm_client::{
-    CostEstimator, DefaultLlmClient, LlmError, LlmEvent, LlmRequest, LlmResponse,
+    CacheControl, CostEstimator, DefaultLlmClient, LlmError, LlmEvent, LlmRequest, LlmResponse,
     ProviderRequest, SystemBlock, Transport,
 };
 use protocol::{ContentBlock, ConversationMessage};
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
+
+/// Mirror claude-code `getPromptCachingEnabled` (services/api/claude.ts:333).
+///
+/// Prompt caching is on by default; `DISABLE_PROMPT_CACHING` turns it off
+/// globally, and the per-family `DISABLE_PROMPT_CACHING_{HAIKU,SONNET,OPUS}`
+/// vars turn it off for a matching model. Truthiness follows TS `isEnvTruthy`
+/// (utils/envUtils.ts): only `1`/`true`/`yes`/`on` (case-insensitive) count.
+///
+/// PARITY-NOTE: TS compares `model` for exact equality with the *configured*
+/// small-fast / default-sonnet / default-opus IDs; here we match the family by
+/// substring, a close (slightly more lenient) approximation.
+fn prompt_caching_enabled(model: &str) -> bool {
+    fn env_truthy(name: &str) -> bool {
+        std::env::var(name).ok().is_some_and(|v| {
+            matches!(
+                v.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+    }
+    if env_truthy("DISABLE_PROMPT_CACHING") {
+        return false;
+    }
+    let m = model.to_ascii_lowercase();
+    if m.contains("haiku") && env_truthy("DISABLE_PROMPT_CACHING_HAIKU") {
+        return false;
+    }
+    if m.contains("sonnet") && env_truthy("DISABLE_PROMPT_CACHING_SONNET") {
+        return false;
+    }
+    if m.contains("opus") && env_truthy("DISABLE_PROMPT_CACHING_OPUS") {
+        return false;
+    }
+    true
+}
 
 // ── Subscriber state ─────────────────────────────────────────────────────────
 
@@ -364,11 +399,50 @@ impl ProviderApiAdapter {
         let tool_decls = to_tool_declarations(tools)?;
 
         let mut req = LlmRequest::new(model);
+
+        // Prompt-cache breakpoints (parity: claude-code getPromptCachingEnabled +
+        // buildSystemPromptBlocks + addCacheBreakpoints). Anthropic permits at most
+        // 4 ephemeral breakpoints per request; we place at most 2 — one on the
+        // (single) system block and one on the last content block of the last
+        // message — matching the TS baseline (the tools array gets none on the
+        // non-global-cache path). The Anthropic codec serializes
+        // Some(CacheControl::Ephemeral) as {"type":"ephemeral"}; non-Anthropic
+        // codecs ignore the field, so this is a no-op for them.
+        let enable_caching = prompt_caching_enabled(model);
+
         if let Some(s) = system {
-            req.system = vec![SystemBlock::text(s)];
+            req.system = vec![SystemBlock {
+                text: s.to_string(),
+                cache_control: enable_caching.then_some(CacheControl::Ephemeral),
+            }];
         }
         req.messages = messages;
-        req.tools = tool_decls;
+
+        // Exactly one message-level breakpoint, on the last cache-eligible content
+        // block of the last message (claude.ts addCacheBreakpoints markerIndex =
+        // len-1). Skip reasoning/redacted blocks (assistantMessageToMessageParam).
+        if enable_caching {
+            use llm_client::ContentBlock as LlmContentBlock;
+            if let Some(last) = req.messages.last_mut() {
+                if let Some(block) = last.content.iter_mut().rev().find(|b| {
+                    !matches!(
+                        b,
+                        LlmContentBlock::Reasoning { .. } | LlmContentBlock::RedactedThinking { .. }
+                    )
+                }) {
+                    match block {
+                        LlmContentBlock::Text { cache_control, .. }
+                        | LlmContentBlock::ToolResult { cache_control, .. } => {
+                            *cache_control = Some(CacheControl::Ephemeral);
+                        }
+                        // Image / ToolCall / etc.: no cache_control slot — skip.
+                        _ => {}
+                    }
+                }
+            }
+        }
+
+        req.tools = tool_decls; // No tool-array breakpoint (matches TS baseline).
         req.stream = stream;
         req.max_tokens = max_tokens;
         Ok(req)
@@ -1783,6 +1857,76 @@ mod tests {
             None,
             None,
         )
+    }
+
+    // ── Prompt-cache breakpoints (CACHE.1) ──────────────────────────────────
+
+    // Serializes the two prompt-cache tests: one mutates DISABLE_PROMPT_CACHING
+    // (process-global), so the default-on assertion in the other must not run
+    // concurrently. Lock poison is benign here — recover the guard.
+    static CACHE_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    fn text_user_msg(s: &str) -> ConversationMessage {
+        ConversationMessage::User {
+            id: protocol::MessageId::new(),
+            content: vec![ContentBlock::Text { text: s.to_string() }],
+        }
+    }
+
+    #[test]
+    fn build_request_sets_two_cache_breakpoints_by_default() {
+        use llm_client::ContentBlock as LlmContentBlock;
+        let _guard = CACHE_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var("DISABLE_PROMPT_CACHING");
+        let transport = FakeTransport::always(ProviderResponse::json(200, ok_response_json()));
+        let adapter = make_adapter(transport);
+        let req = adapter
+            .build_request(
+                "claude-sonnet-4-20250514",
+                Some("system prompt"),
+                vec![text_user_msg("hello")],
+                vec![],
+                false,
+                Some(1024),
+            )
+            .expect("build_request");
+        // (a) the single system block carries an ephemeral breakpoint.
+        assert_eq!(req.system.len(), 1);
+        assert_eq!(req.system[0].cache_control, Some(CacheControl::Ephemeral));
+        // (c) the last message's last block carries the one message breakpoint.
+        let last = req.messages.last().expect("a message");
+        match last.content.last().expect("a content block") {
+            LlmContentBlock::Text { cache_control, .. } => {
+                assert_eq!(*cache_control, Some(CacheControl::Ephemeral));
+            }
+            other => panic!("expected trailing text block, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn build_request_omits_cache_breakpoints_when_disabled() {
+        use llm_client::ContentBlock as LlmContentBlock;
+        let _guard = CACHE_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var("DISABLE_PROMPT_CACHING", "1");
+        let transport = FakeTransport::always(ProviderResponse::json(200, ok_response_json()));
+        let adapter = make_adapter(transport);
+        let req = adapter
+            .build_request(
+                "claude-sonnet-4-20250514",
+                Some("system prompt"),
+                vec![text_user_msg("hello")],
+                vec![],
+                false,
+                Some(1024),
+            )
+            .expect("build_request");
+        std::env::remove_var("DISABLE_PROMPT_CACHING");
+        assert_eq!(req.system[0].cache_control, None);
+        let last = req.messages.last().expect("a message");
+        match last.content.last().expect("a content block") {
+            LlmContentBlock::Text { cache_control, .. } => assert_eq!(*cache_control, None),
+            other => panic!("expected trailing text block, got {other:?}"),
+        }
     }
 
     // ── effective_subscriber (batch-5 Task 3: live SharedSubscription) ───────

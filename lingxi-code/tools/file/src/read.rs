@@ -373,6 +373,102 @@ fn find_similar_file(file_path: &std::path::Path) -> Option<String> {
     None
 }
 
+/// Marker included in file-not-found error messages that carry a cwd note —
+/// byte-locked to claude-code `FILE_NOT_FOUND_CWD_NOTE` (`utils/file.ts:213`).
+/// claude-code's UI renderers check for this prefix to show a short
+/// "File not found" message; the port keeps it verbatim so the model-facing
+/// string matches.
+const FILE_NOT_FOUND_CWD_NOTE: &str = "Note: your current working directory is";
+
+/// `suggestPathUnderCwd(requestedPath)` — 1:1 with `utils/file.ts:228-267`.
+/// Detects the "dropped repo folder" pattern: the model builds an absolute path
+/// that is missing the repo-directory component (e.g. `/Users/x/src/foo` when
+/// cwd is `/Users/x/src/currentRepo`), and the SAME relative path exists under
+/// cwd (`/Users/x/src/currentRepo/foo`). When so, returns that corrected path so
+/// the not-found message can suggest it; otherwise `None`.
+///
+/// The port mirrors TS exactly:
+///   1. `cwdParent = dirname(cwd)` (the caller passes the realpath-resolved cwd,
+///      mirroring TS `getCwd()` which is already realpath-resolved).
+///   2. `resolvedPath = realpath(dirname(requestedPath))` joined with
+///      `basename(requestedPath)`; on a realpath error, the original
+///      `requestedPath` is used as-is (TS `try/catch`). Resolving the requested
+///      path's PARENT (`std::fs::canonicalize`, the `realpath` analog) makes the
+///      symlink-resolved prefix comparison line up with the already-resolved cwd
+///      (e.g. `/tmp` → `/private/tmp` on macOS).
+///   3. `cwdParentPrefix = (cwdParent === sep) ? sep : cwdParent + sep` — the
+///      root-directory case avoids a never-matching `//` double separator.
+///   4. Suggest ONLY when `resolvedPath` starts with `cwdParentPrefix` AND is
+///      neither under `cwd + sep` nor equal to `cwd` (i.e. under cwd's PARENT but
+///      not under cwd itself).
+///   5. `relFromParent = relative(cwdParent, resolvedPath)`,
+///      `correctedPath = join(cwd, relFromParent)`.
+///   6. Return `Some(correctedPath)` iff `stat(correctedPath)` succeeds
+///      (`std::fs::metadata(...).is_ok()`), else `None`.
+///
+/// The `startsWith` / equality checks mirror TS's string comparisons over the
+/// path strings (using [`std::path::MAIN_SEPARATOR`] for `sep`); the `relative` /
+/// `join` use `Path` operations. Because step 4 already proved `resolvedPath` is
+/// strictly under `cwdParent`, the `relative` is exactly the suffix after
+/// `cwdParent`, which [`std::path::Path::strip_prefix`] yields.
+#[must_use]
+fn suggest_path_under_cwd(requested: &std::path::Path, cwd: &std::path::Path) -> Option<String> {
+    use std::path::MAIN_SEPARATOR;
+
+    // `cwdParent = dirname(cwd)`. A cwd with no parent (the filesystem root) has
+    // no enclosing parent to look under → no suggestion.
+    let cwd_parent = cwd.parent()?;
+
+    // `resolvedPath = realpath(dirname(requestedPath))` joined with the basename,
+    // falling back to the raw requested path when the parent can't be resolved
+    // (TS `try { realpath } catch {}`).
+    let file_name = requested.file_name()?;
+    let resolved_path: PathBuf = match requested.parent() {
+        Some(parent) => match std::fs::canonicalize(parent) {
+            Ok(resolved_dir) => resolved_dir.join(file_name),
+            // Parent directory doesn't exist — use the original path.
+            Err(_) => requested.to_path_buf(),
+        },
+        None => requested.to_path_buf(),
+    };
+
+    // String forms for the TS `startsWith` / equality semantics.
+    let resolved_str = resolved_path.to_string_lossy();
+    let cwd_str = cwd.to_string_lossy();
+    let cwd_parent_str = cwd_parent.to_string_lossy();
+
+    // `cwdParentPrefix = cwdParent === sep ? sep : cwdParent + sep`.
+    let cwd_parent_prefix = if cwd_parent_str.as_ref() == MAIN_SEPARATOR.to_string() {
+        MAIN_SEPARATOR.to_string()
+    } else {
+        format!("{cwd_parent_str}{MAIN_SEPARATOR}")
+    };
+    let cwd_prefix = format!("{cwd_str}{MAIN_SEPARATOR}");
+
+    // Only suggest when the requested path is under cwd's PARENT but not under
+    // cwd itself (TS: `!startsWith(cwdParentPrefix) || startsWith(cwd+sep) ||
+    // === cwd` ⇒ undefined).
+    if !resolved_str.starts_with(&cwd_parent_prefix)
+        || resolved_str.starts_with(&cwd_prefix)
+        || resolved_str == cwd_str
+    {
+        return None;
+    }
+
+    // `relFromParent = relative(cwdParent, resolvedPath)` — the suffix after
+    // `cwdParent` (guaranteed strict-prefix by the check above);
+    // `correctedPath = join(cwd, relFromParent)`.
+    let rel_from_parent = resolved_path.strip_prefix(cwd_parent).ok()?;
+    let corrected_path = cwd.join(rel_from_parent);
+
+    // `try { await stat(correctedPath); return correctedPath } catch { undefined }`.
+    if std::fs::metadata(&corrected_path).is_ok() {
+        Some(corrected_path.to_string_lossy().into_owned())
+    } else {
+        None
+    }
+}
+
 /// `MAX_FILE_EXTENSION_LENGTH` — byte-locked to claude-code
 /// (`services/analytics/metadata.ts:311`). Extensions longer than this bucket to
 /// `"other"` so analytics never leaks a long, potentially-identifying suffix.
@@ -665,29 +761,60 @@ impl FileReadTool {
     }
 
     /// Build + return the friendly file-not-found error — the ENOENT arm of
-    /// `FileReadTool.ts:638-647`. TS computes `findSimilarFile(fullFilePath)` and
-    /// (the cwd-suggestion branch aside) appends `" Did you mean ${similarFilename}?"`
-    /// to the not-found message. This port keeps the underlying IO not-found
-    /// string as the base message (preserving the raw errno the existing arm
-    /// surfaced) and appends the VERBATIM TS suggestion `" Did you mean {name}?"`
-    /// when a same-stem sibling exists in the parent directory; with no sibling
-    /// the plain not-found error is returned unchanged. The `suggestPathUnderCwd`
-    /// "dropped repo folder" cwd heuristic + the `Note: your current working
-    /// directory is …` cwd note are a separate, larger feature (they need a
-    /// `getCwd` analog + parent-realpath/relative logic) and are intentionally
-    /// NOT ported here — so the cwd-suggestion branch that would TAKE PRIORITY
-    /// over `similarFilename` in TS is absent, and the `find_similar_file`
-    /// suggestion is always the one shown when present.
+    /// `FileReadTool.ts:638-647`. TS builds the base message
+    /// `File does not exist. ${FILE_NOT_FOUND_CWD_NOTE} ${getCwd()}.` and then
+    /// appends a `" Did you mean ${x}?"` suffix, preferring the
+    /// [`suggest_path_under_cwd`] "dropped repo folder" correction over the
+    /// [`find_similar_file`] same-stem sibling:
+    ///
+    /// ```text
+    /// let message = `File does not exist. ${FILE_NOT_FOUND_CWD_NOTE} ${getCwd()}.`
+    /// if (cwdSuggestion)        message += ` Did you mean ${cwdSuggestion}?`
+    /// else if (similarFilename) message += ` Did you mean ${similarFilename}?`
+    /// ```
+    ///
+    /// The cwd is sourced from the tool's `BuiltinToolContext` (`self.ctx.
+    /// workspace`, the project workspace path — the established `getCwd()` analog
+    /// used by `grep`/`glob`), canonicalized (`std::fs::canonicalize`, mirroring
+    /// TS `getCwd()` returning a realpath-resolved cwd) with a fallback to the
+    /// unresolved workspace so the message + the `suggest_path_under_cwd` prefix
+    /// comparison both use the symlink-resolved form. The suffix is the
+    /// byte-exact TS `" Did you mean {x}?"`.
+    ///
+    /// NotFound gate: this method is only ever invoked on the ENOENT branch of
+    /// `call` (every call site is inside `if e.kind() == ErrorKind::NotFound`),
+    /// so the cwd-note message applies to not-found errors only. A defensive
+    /// guard keeps that explicit — a non-NotFound `err` (no current caller) is
+    /// surfaced verbatim, mirroring TS's `throw error` for non-ENOENT.
     async fn file_not_found(
         &self,
         invocation_id: &str,
         canon: &std::path::Path,
         err: &std::io::Error,
     ) -> Result<ToolCallResult, ToolError> {
+        // Faithful NotFound gate: only ENOENT gets the cwd-note message (TS
+        // rethrows every other errno). Structurally every caller is already on
+        // the NotFound branch; this makes the contract explicit + bulletproof.
+        if err.kind() != std::io::ErrorKind::NotFound {
+            self.emit_failed(invocation_id, "io_metadata").await;
+            return Err(ToolError::Io(err.to_string()));
+        }
         self.emit_failed(invocation_id, "io_metadata").await;
-        let mut message = err.to_string();
-        if let Some(similar) = find_similar_file(canon) {
-            // VERBATIM TS suffix (`FileReadTool.ts:645`): `" Did you mean ${x}?"`.
+        // `getCwd()` analog: the project workspace, realpath-resolved (matching
+        // TS's already-resolved cwd) with a fallback to the unresolved path.
+        let cwd = std::fs::canonicalize(&self.ctx.workspace)
+            .unwrap_or_else(|_| self.ctx.workspace.clone());
+        // Base message: `File does not exist. ${FILE_NOT_FOUND_CWD_NOTE} ${cwd}.`.
+        let mut message = format!(
+            "File does not exist. {FILE_NOT_FOUND_CWD_NOTE} {}.",
+            cwd.display()
+        );
+        // The cwd "dropped repo folder" suggestion takes PRECEDENCE over the
+        // same-stem sibling (`FileReadTool.ts:642-645`). Both suffixes are the
+        // VERBATIM TS `" Did you mean {x}?"`.
+        if let Some(cwd_suggestion) = suggest_path_under_cwd(canon, &cwd) {
+            message.push_str(&format!(" Did you mean {cwd_suggestion}?"));
+        } else if let Some(similar) = find_similar_file(canon) {
             message.push_str(&format!(" Did you mean {similar}?"));
         }
         Err(ToolError::Io(message))
@@ -3070,8 +3197,10 @@ mod tests {
 
     #[tokio::test]
     async fn missing_file_with_near_match_suggests_did_you_mean() {
-        // A Read of a missing path whose parent has a same-stem sibling returns
-        // the byte-locked `" Did you mean {name}?"` suffix (`FileReadTool.ts:645`).
+        // (c) A missing path with a same-stem sibling but no cwd-correction
+        // (the file is directly under cwd, so `suggest_path_under_cwd` declines)
+        // falls back to the sibling: the base cwd-note message + the byte-locked
+        // `" Did you mean {name}?"` sibling suffix (`FileReadTool.ts:644-645`).
         let tmp = TempDir::new().unwrap();
         std::fs::write(tmp.path().join("config.json"), "{}").unwrap();
         let missing = tmp.path().join("config.yaml");
@@ -3087,9 +3216,18 @@ mod tests {
             .await
             .unwrap_err();
         let msg = err.to_string();
+        // Full message: base cwd-note + the sibling suggestion suffix.
+        let cwd = std::fs::canonicalize(tmp.path()).unwrap();
+        assert!(
+            msg.contains(&format!(
+                "File does not exist. {FILE_NOT_FOUND_CWD_NOTE} {}.",
+                cwd.display()
+            )),
+            "expected the base cwd-note message, got: {msg}"
+        );
         assert!(
             msg.ends_with(" Did you mean config.json?"),
-            "expected the verbatim TS suggestion suffix, got: {msg}"
+            "expected the verbatim TS sibling-suggestion suffix, got: {msg}"
         );
         let events = sink.events().await;
         let names: Vec<&str> = events.iter().map(|e| e.name.as_str()).collect();
@@ -3097,9 +3235,86 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn missing_file_without_near_match_returns_plain_not_found() {
-        // No same-stem sibling ⇒ the plain not-found error, with NO suggestion
-        // suffix appended.
+    async fn missing_file_under_cwd_parent_suggests_corrected_path_with_precedence() {
+        // (a) The "dropped repo folder" pattern (`suggestPathUnderCwd`,
+        // `utils/file.ts:228-267`): cwd = base/repo, a missing path under base
+        // (cwd's PARENT) but NOT under cwd, whose SAME relative path exists under
+        // cwd, yields the corrected-path `" Did you mean {correctedPath}?"`
+        // suffix — and that cwd suggestion WINS over a same-stem sibling that
+        // also exists in the requested directory (`FileReadTool.ts:642-645`).
+        //
+        // The requested path must validate under the trusted dirs (the read
+        // path canonicalize-validates BEFORE the not-found arm), so `base` is a
+        // trusted dir while the cwd/workspace is `base/repo`.
+        let base = TempDir::new().unwrap();
+        let repo = base.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+
+        // The corrected path that SHOULD be suggested: base/repo/sub/app.config.
+        let corrected_dir = repo.join("sub");
+        std::fs::create_dir(&corrected_dir).unwrap();
+        let corrected = corrected_dir.join("app.config");
+        std::fs::write(&corrected, "ok").unwrap();
+
+        // The requested (missing) path, under base (cwd's parent) but not cwd:
+        // base/sub/app.config. Its parent dir must exist for canonicalize to
+        // resolve it; add a same-stem sibling there too (app.json) to prove the
+        // cwd suggestion takes PRECEDENCE over `find_similar_file`.
+        let requested_dir = base.path().join("sub");
+        std::fs::create_dir(&requested_dir).unwrap();
+        std::fs::write(requested_dir.join("app.json"), "{}").unwrap();
+        let missing = requested_dir.join("app.config");
+
+        // Build the ctx with BOTH base and base/repo trusted (so the request
+        // under base validates), then point the workspace (the `getCwd` analog)
+        // at base/repo.
+        let fs = make_dummy_fs();
+        let bus = Arc::new(AnalyticsBus::new());
+        let mut ctx = tool_api::test_support::ctx_for_file_tools(
+            fs,
+            bus,
+            vec![base.path().to_path_buf(), repo.clone()],
+        );
+        ctx.workspace = repo.clone();
+        let tool = FileReadTool::new(ctx);
+
+        let err = tool
+            .call(
+                json!({ "file_path": missing.to_str().unwrap() }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .unwrap_err();
+        let msg = err.to_string();
+
+        // Base cwd-note message: cwd = canonicalized base/repo.
+        let cwd = std::fs::canonicalize(&repo).unwrap();
+        assert!(
+            msg.contains(&format!(
+                "File does not exist. {FILE_NOT_FOUND_CWD_NOTE} {}.",
+                cwd.display()
+            )),
+            "expected the base cwd-note message, got: {msg}"
+        );
+        // The cwd suggestion (corrected path) WINS — not the same-stem sibling.
+        let corrected_canon = std::fs::canonicalize(&corrected).unwrap();
+        assert!(
+            msg.ends_with(&format!(" Did you mean {}?", corrected_canon.display())),
+            "expected the cwd-corrected-path suggestion to take precedence, got: {msg}"
+        );
+        // And specifically NOT the sibling.
+        assert!(
+            !msg.contains("Did you mean app.json?"),
+            "the cwd suggestion must win over the same-stem sibling, got: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn missing_file_without_near_match_returns_base_cwd_note() {
+        // (b) No same-stem sibling AND no cwd-correction ⇒ just the base
+        // `File does not exist. ${FILE_NOT_FOUND_CWD_NOTE} ${cwd}.` message
+        // (`FileReadTool.ts:641`), with NO " Did you mean" suffix appended.
         let tmp = TempDir::new().unwrap();
         std::fs::write(tmp.path().join("unrelated.txt"), "x").unwrap();
         let missing = tmp.path().join("nope.md");
@@ -3114,11 +3329,20 @@ mod tests {
             .await
             .unwrap_err();
         let msg = err.to_string();
+        // Base cwd-note message — the cwd is the (canonicalized) workspace = tmp.
+        let cwd = std::fs::canonicalize(tmp.path()).unwrap();
+        assert!(
+            msg.contains(&format!(
+                "File does not exist. {FILE_NOT_FOUND_CWD_NOTE} {}.",
+                cwd.display()
+            )),
+            "expected the base cwd-note message, got: {msg}"
+        );
         assert!(
             !msg.contains("Did you mean"),
-            "no sibling ⇒ no suggestion, got: {msg}"
+            "no sibling + no cwd-correction ⇒ no suggestion, got: {msg}"
         );
-        // Still the underlying not-found IO error.
+        // Still an Io error variant.
         assert!(matches!(err, ToolError::Io(_)), "got: {err:?}");
     }
 

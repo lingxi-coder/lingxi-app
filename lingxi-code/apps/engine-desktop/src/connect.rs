@@ -58,7 +58,8 @@ impl ConnectCredentialWriter for EngineCredentialWriter {
     }
 }
 
-use command_core::{CopilotConnectDriver, CopilotConnectStep};
+use command_core::{ChatGptConnectDriver, CopilotConnectDriver, CopilotConnectStep};
+use openai_oauth;
 use llm_client::copilot::{CopilotHttp, CopilotLogin, DeviceCodeResponse, PollOutcome};
 use llm_client::transport::BoxFuture;
 use llm_client::LlmError;
@@ -205,6 +206,40 @@ impl<H: CopilotHttp> CopilotConnectDriver for EngineCopilotConnect<H> {
                 PollOutcome::Failed { error } => return Err(ConnectError::DeviceFailed(error)),
             }
         }
+    }
+}
+
+/// Engine implementation of [`ChatGptConnectDriver`]: drives the OpenAI
+/// ChatGPT-account OAuth login (browser PKCE, device-code fallback) and
+/// persists the tokens. Returns a human-facing success message including the
+/// minted account id.
+pub struct EngineChatGptConnect {
+    handle: Arc<openai_oauth::handle::OpenAiOAuthHandle>,
+}
+
+impl EngineChatGptConnect {
+    /// Production constructor: uses a real browser opener.
+    #[must_use]
+    pub fn new(
+        client: Arc<openai_oauth::client::OpenAiOAuthClient>,
+        credentials: Arc<CredentialManager>,
+    ) -> Self {
+        Self {
+            handle: Arc::new(openai_oauth::handle::OpenAiOAuthHandle::new(client, credentials)),
+        }
+    }
+}
+
+#[async_trait]
+impl ChatGptConnectDriver for EngineChatGptConnect {
+    async fn connect(&self) -> Result<String, ConnectError> {
+        let info = self
+            .handle
+            .login()
+            .await
+            .map_err(|e| ConnectError::Network(e.to_string()))?;
+        let account = info.account_id.unwrap_or_else(|| "?".into());
+        Ok(format!("Connected chatgpt (account {account})."))
     }
 }
 

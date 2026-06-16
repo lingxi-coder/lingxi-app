@@ -29,6 +29,7 @@ protocol = { path = "../../protocol" }
 engine = { path = "../../engine" }
 orchestrator = { path = "../../orchestrator" }
 anthropic-oauth = { path = "../../anthropic-oauth" }
+openai-oauth = { path = "../../openai-oauth" }
 # Task 10: DefaultLlmClient construction + LlmTransportBridge.
 llm-client = { path = "../../llm-client" }
 # Phase 2a: assemble the multi-provider ClientConfig (anthropic + builtin

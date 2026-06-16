@@ -839,6 +839,7 @@ pub async fn desktop_command_registry(
     claude_home: &std::path::Path,
     connect_writer: Arc<dyn command_core::ConnectCredentialWriter>,
     connect_copilot: Arc<dyn command_core::CopilotConnectDriver>,
+    connect_chatgpt: Arc<dyn command_core::ChatGptConnectDriver>,
 ) -> CommandRegistry {
     let mut reg = CommandRegistry::new();
     register_all_builtin_commands(&mut reg);
@@ -847,8 +848,8 @@ pub async fn desktop_command_registry(
     register_core_batch_4(&mut reg, handle.clone());
     register_core_batch_5(&mut reg, handle);
     // Plan 3c: wire `/connect` over the engine-supplied credential-writer +
-    // Copilot device-flow seams.
-    command_core::register::register_core_connect(&mut reg, connect_writer, connect_copilot);
+    // Copilot device-flow + ChatGPT OAuth seams.
+    command_core::register::register_core_connect(&mut reg, connect_writer, connect_copilot, connect_chatgpt);
     // Desktop-only command handlers (no-op in M8 — the names remain
     // command-core unimplemented stubs until future milestones fill them).
     command_desktop::register(&mut reg);
@@ -1259,6 +1260,7 @@ pub async fn build(
     // session) that step (2) bridges into the assembled client's credential
     // seam as an `oauth_delegate`.
     let mut oauth_auth_state: Option<Arc<anthropic_oauth::refresh::AuthState>> = None;
+    let mut openai_oauth_state: Option<Arc<openai_oauth::AuthState>> = None;
     // WebSearch builds Anthropic `POST /v1/messages` requests via its own
     // provider (server-side web search is Anthropic-only in v1).
     let tool_provider = Arc::new(AnthropicRequestBuilder::new(
@@ -1395,6 +1397,49 @@ pub async fn build(
         }
     }
 
+    // (3.2a) Wire the OpenAI ChatGPT OAuth refresh driver when the keychain
+    //        already holds a ChatGPT session. Mirrors the anthropic block above.
+    //        Returns `Arc<openai_oauth::AuthState>` for the credential delegate;
+    //        on Ok(None) / Err we leave `openai_oauth_state = None` (warn on Err).
+    //        No subscriber-flag / profile-fetch needed for OpenAI — minimal path.
+    let openai_oauth_cfg = openai_oauth::OpenAiOAuthConfig::default();
+    let openai_oauth_client = Arc::new(openai_oauth::OpenAiOAuthClient::new(
+        openai_oauth_cfg.clone(),
+        http.clone(),
+    ));
+    match credentials.get_openai_oauth_tokens().await {
+        Ok(Some(tokens)) => {
+            match openai_oauth::client::init_refresh_driver(
+                openai_oauth_cfg,
+                tokens.access_token,
+                tokens.refresh_token,
+                tokens.expires_at,
+                tokens.account_id,
+                tokens.fedramp,
+                http.clone(),
+                clock.clone(),
+                Some(Arc::new(telemetry::AnalyticsBus::new())),
+                Some(credentials.clone()),
+                Arc::new(PosixRuntime::new()),
+            )
+            .await
+            {
+                Ok(state) => {
+                    openai_oauth_state = Some(state);
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "failed to attach OpenAI OAuth refresh driver; ChatGPT routing disabled");
+                }
+            }
+        }
+        Ok(None) => {
+            // No stored ChatGPT OAuth session.
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "could not read OpenAI OAuth tokens from keychain; skipping chatgpt refresh-driver wiring");
+        }
+    }
+
     // (3.3) Phase 2a §8: assemble the FULL multi-provider client config
     //       (Anthropic + builtin catalog presets + settings `providers`) + chains
     //       + credential sources + pricing catalog, instead of the single-Anthropic
@@ -1451,6 +1496,14 @@ pub async fn build(
     let mut oauth_delegates: std::collections::BTreeMap<String, std::sync::Arc<dyn llm_client::CredentialProvider>> = std::collections::BTreeMap::new();
     if let Some(d) = oauth_delegate {
         oauth_delegates.insert("anthropic-oauth".to_string(), d);
+    }
+    if let Some(state) = openai_oauth_state {
+        let driver = std::sync::Arc::new(openai_oauth::RefreshDriver::new(state));
+        oauth_delegates.insert(
+            "openai-chatgpt".to_string(),
+            std::sync::Arc::new(openai_oauth::OpenAiOAuthCredentialProvider::new(driver))
+                as std::sync::Arc<dyn llm_client::CredentialProvider>,
+        );
     }
     let composite = provider_config::MultiCredentialProvider::new(
         credentials.clone(),
@@ -2502,6 +2555,7 @@ pub async fn build(
     let handle: Arc<dyn OrchestratorHandle> = orch.clone();
     // Plan 3c: `/connect` seams — Copilot device-flow over `PosixHttp`, and the
     // API-key writer over the host secure prompt (tui-supplied; headless no-op).
+    // M8: also wire the ChatGPT OAuth seam (`/connect chatgpt`).
     let connect_copilot: Arc<dyn command_core::CopilotConnectDriver> =
         Arc::new(crate::connect::EngineCopilotConnect::new(credentials.clone()));
     let connect_writer: Arc<dyn command_core::ConnectCredentialWriter> =
@@ -2511,6 +2565,11 @@ pub async fn build(
                 Arc::new(crate::connect::NoopKeyPrompt) as Arc<dyn crate::connect::SecureKeyPrompt>
             }),
         ));
+    let connect_chatgpt: Arc<dyn command_core::ChatGptConnectDriver> =
+        Arc::new(crate::connect::EngineChatGptConnect::new(
+            openai_oauth_client,
+            credentials.clone(),
+        ));
     let reg = desktop_command_registry(
         handle,
         auth.clone(),
@@ -2518,6 +2577,7 @@ pub async fn build(
         &cfg.claude_home,
         connect_writer,
         connect_copilot,
+        connect_chatgpt,
     )
     .await;
     // SKILLEXEC.2: fill the shared command-registry slot the `Skill` tool's
@@ -2699,7 +2759,8 @@ mod tests {
     async fn desktop_registry_exposes_connect() {
         use async_trait::async_trait;
         use command_core::{
-            ConnectCredentialWriter, ConnectError, CopilotConnectDriver, CopilotConnectStep,
+            ChatGptConnectDriver, ConnectCredentialWriter, ConnectError, CopilotConnectDriver,
+            CopilotConnectStep,
         };
         use traits::{AuthError, AuthHandle, LoginInfo, OrchestratorHandle};
 
@@ -2739,6 +2800,13 @@ mod tests {
                 Ok(())
             }
         }
+        struct G;
+        #[async_trait]
+        impl ChatGptConnectDriver for G {
+            async fn connect(&self) -> Result<String, ConnectError> {
+                Ok("Connected chatgpt.".into())
+            }
+        }
 
         let handle: Arc<dyn OrchestratorHandle> =
             Arc::new(orchestrator::test_support::MockOrchestratorHandle::new());
@@ -2751,6 +2819,7 @@ mod tests {
             &tmp,
             Arc::new(W),
             Arc::new(C),
+            Arc::new(G),
         )
         .await;
         assert!(

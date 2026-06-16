@@ -2282,6 +2282,7 @@ mod tests {
                     tool_use_id: protocol::ToolUseId::new(),
                     content: "lots of text, no media".to_string(),
                     is_error: false,
+                    provider_tool_use_id: None,
                 },
                 img(0),
             ],

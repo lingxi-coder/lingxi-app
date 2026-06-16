@@ -33,6 +33,8 @@ pub enum BlockKind {
         id: ToolUseId,
         /// Tool name (e.g. `"Read"`).
         name: String,
+        /// Verbatim provider-issued tool-call id, preserved for egress replay.
+        provider_id: Option<String>,
     },
     /// A `thinking` block — accumulates `thinking_delta` chunks.
     /// Signature (if any) is set via [`BlockAccumulator::set_signature`].
@@ -71,6 +73,8 @@ pub enum CompletedBlock {
         name: String,
         /// Reassembled tool input.
         input: Value,
+        /// Verbatim provider-issued tool-call id, preserved for egress replay.
+        provider_id: Option<String>,
     },
     /// Extended thinking.
     Thinking {
@@ -222,7 +226,11 @@ impl BlockAccumulator {
                 thinking: state.text_buf,
                 signature: state.signature,
             },
-            BlockKind::ToolUse { id, name } => {
+            BlockKind::ToolUse {
+                id,
+                name,
+                provider_id,
+            } => {
                 let input = if state.json_buf.is_empty() {
                     Value::Object(serde_json::Map::new())
                 } else {
@@ -234,7 +242,12 @@ impl BlockAccumulator {
                         }
                     })?
                 };
-                CompletedBlock::ToolUse { id, name, input }
+                CompletedBlock::ToolUse {
+                    id,
+                    name,
+                    input,
+                    provider_id,
+                }
             }
             BlockKind::Other => CompletedBlock::Skipped,
         };

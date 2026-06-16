@@ -83,6 +83,7 @@ mod tests {
                 id: ToolUseId::new(),
                 name: "Read".into(),
                 input: serde_json::json!({"path": "/a"}),
+                provider_id: None,
             }],
             stop_reason: Some("tool_use".into()),
         };

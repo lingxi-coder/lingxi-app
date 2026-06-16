@@ -339,19 +339,24 @@ fn convert_content_block(
             text,
             cache_control: None,
         }),
-        protocol::ContentBlock::ToolUse { id, name, input } => {
-            Ok(llm_client::ContentBlock::ToolCall {
-                id: id.to_string(),
-                name,
-                input,
-            })
-        }
+        protocol::ContentBlock::ToolUse {
+            id,
+            name,
+            input,
+            provider_id,
+        } => Ok(llm_client::ContentBlock::ToolCall {
+            // Replay the verbatim provider id when preserved (see agent::convert).
+            id: provider_id.unwrap_or_else(|| id.to_string()),
+            name,
+            input,
+        }),
         protocol::ContentBlock::ToolResult {
             tool_use_id,
             content,
             is_error,
+            provider_tool_use_id,
         } => Ok(llm_client::ContentBlock::ToolResult {
-            tool_call_id: tool_use_id.to_string(),
+            tool_call_id: provider_tool_use_id.unwrap_or_else(|| tool_use_id.to_string()),
             output: serde_json::Value::String(content),
             is_error,
             cache_control: None,

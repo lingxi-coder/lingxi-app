@@ -2615,6 +2615,7 @@ impl ConversationOrchestrator {
                     id: t.id,
                     name: t.name.clone(),
                     input: t.input.clone(),
+                    provider_id: t.provider_id.clone(),
                 });
             }
             let assistant_msg = ConversationMessage::Assistant {
@@ -3463,11 +3464,17 @@ fn llm_response_to_pumped_turn(resp: &LlmResponse) -> crate::streaming_loop::Pum
 
     for blk in translate_response_blocks(&resp.content) {
         match blk {
-            ContentBlock::ToolUse { id, ref name, ref input } => {
+            ContentBlock::ToolUse {
+                id,
+                ref name,
+                ref input,
+                ref provider_id,
+            } => {
                 tool_uses.push(ObservedToolUse {
                     id,
                     name: name.clone(),
                     input: input.clone(),
+                    provider_id: provider_id.clone(),
                 });
                 // Not pushed to assistant_blocks — step 4 appends ToolUse from tool_uses.
             }

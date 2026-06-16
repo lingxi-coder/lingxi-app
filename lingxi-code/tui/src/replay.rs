@@ -160,6 +160,7 @@ fn push_user_block(
             tool_use_id,
             content,
             is_error,
+            ..
         } => {
             // Recover the tool name + the originating call input (for the diff
             // fields) from the side-table populated by the earlier ToolUse. If
@@ -211,7 +212,7 @@ fn push_assistant_block(
                 timestamp: 0,
             });
         }
-        ContentBlock::ToolUse { id, name, input } => {
+        ContentBlock::ToolUse { id, name, input, .. } => {
             tool_inputs.insert(*id, input.clone());
             tool_names.insert(*id, name.clone());
             out.push(RenderedMessage::AssistantToolUse {
@@ -290,6 +291,7 @@ mod tests {
                         "old_string": "a",
                         "new_string": "b",
                     }),
+                    provider_id: None,
                 }],
                 stop_reason: None,
             },
@@ -299,6 +301,7 @@ mod tests {
                     tool_use_id: id,
                     content: "edited".into(),
                     is_error: false,
+                    provider_tool_use_id: None,
                 }],
             },
         ];
@@ -344,6 +347,7 @@ mod tests {
                 tool_use_id: id,
                 content: "stdout".into(),
                 is_error: false,
+                provider_tool_use_id: None,
             }],
         }];
         let out = rebuild_messages(&h);
@@ -501,6 +505,7 @@ mod tests {
                     id,
                     name: "Read".into(),
                     input: serde_json::json!({"file_path": "/a"}),
+                    provider_id: None,
                 },
             ],
             stop_reason: None,

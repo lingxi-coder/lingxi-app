@@ -723,6 +723,7 @@ mod tests {
                         id: tu,
                         name: "Read".to_string(),
                         input: serde_json::json!({"file_path": "/tmp/x"}),
+                        provider_id: None,
                     },
                 ],
                 stop_reason: Some("tool_use".to_string()),

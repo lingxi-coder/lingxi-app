@@ -289,6 +289,7 @@ mod tests {
                     id: protocol::ToolUseId::new(),
                     name: "Read".to_string(),
                     input: serde_json::json!({"file_path": "/x"}),
+                    provider_id: None,
                 },
             ],
             stop_reason: None,

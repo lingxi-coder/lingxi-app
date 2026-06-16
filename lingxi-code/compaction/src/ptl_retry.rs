@@ -137,6 +137,7 @@ mod tests {
                 id: ToolUseId::new(),
                 name: tool.into(),
                 input: json!({}),
+                provider_id: None,
             }],
             stop_reason: None,
         }
@@ -149,6 +150,7 @@ mod tests {
                 tool_use_id: ToolUseId::new(),
                 content: "ok".into(),
                 is_error: false,
+                provider_tool_use_id: None,
             }],
         }
     }

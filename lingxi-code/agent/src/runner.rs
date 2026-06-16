@@ -153,6 +153,9 @@ fn translate_response_blocks(content: &[llm_client::ContentBlock]) -> Vec<protoc
                     id: parse_tool_use_id(id),
                     name: name.clone(),
                     input: input.clone(),
+                    // Preserve the verbatim provider id for egress replay; the
+                    // parsed `ToolUseId` is internal identity only.
+                    provider_id: Some(id.clone()),
                 })
             }
             llm_client::ContentBlock::Reasoning { text, signature } => {
@@ -366,15 +369,19 @@ async fn run_subagent_loop(
         emit_message(&out_tx, agent_id, &assistant_msg).await;
 
         // Extract tool_use blocks.
-        let tool_uses: Vec<(protocol::ToolUseId, String, serde_json::Value)> = assistant_blocks
-            .iter()
-            .filter_map(|b| match b {
-                ContentBlock::ToolUse { id, name, input } => {
-                    Some((*id, name.clone(), input.clone()))
-                }
-                _ => None,
-            })
-            .collect();
+        let tool_uses: Vec<(protocol::ToolUseId, String, serde_json::Value, Option<String>)> =
+            assistant_blocks
+                .iter()
+                .filter_map(|b| match b {
+                    ContentBlock::ToolUse {
+                        id,
+                        name,
+                        input,
+                        provider_id,
+                    } => Some((*id, name.clone(), input.clone(), provider_id.clone())),
+                    _ => None,
+                })
+                .collect();
 
         // Dispatch any tool_use blocks FIRST, then decide loop disposition by
         // stop_reason — mirroring the orchestrator references. `execute_one_turn`
@@ -400,7 +407,7 @@ async fn run_subagent_loop(
             };
 
             let mut tool_results: Vec<ContentBlock> = Vec::with_capacity(tool_uses.len());
-            for (tool_use_id, name, input) in &tool_uses {
+            for (tool_use_id, name, input, provider_id) in &tool_uses {
                 // Allow-list guard: when `allowed_tools` is non-empty, a model
                 // request for a tool outside it is refused WITHOUT dispatching
                 // (the inherited `RegistryToolInvoker` would otherwise run any
@@ -414,6 +421,7 @@ async fn run_subagent_loop(
                             "tool {name:?} is not in this agent's allowed tools"
                         ),
                         is_error: true,
+                        provider_tool_use_id: provider_id.clone(),
                     });
                     continue;
                 }
@@ -430,6 +438,7 @@ async fn run_subagent_loop(
                             tool_use_id: *tool_use_id,
                             content,
                             is_error: false,
+                            provider_tool_use_id: provider_id.clone(),
                         });
                     }
                     Err(e) => {
@@ -437,6 +446,7 @@ async fn run_subagent_loop(
                             tool_use_id: *tool_use_id,
                             content: format!("tool error: {e}"),
                             is_error: true,
+                            provider_tool_use_id: provider_id.clone(),
                         });
                     }
                 }

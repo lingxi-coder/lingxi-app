@@ -36,6 +36,14 @@ pub enum ContentBlock {
         name: String,
         /// Tool-specific structured input.
         input: Value,
+        /// Verbatim provider-issued tool-call id (e.g. Anthropic `"toolu_01…"`,
+        /// OpenAI `"call_…"`). `ToolUseId` is a UUID newtype and cannot hold a
+        /// provider string, so the original is preserved here and replayed
+        /// verbatim on egress — Anthropic pairs `tool_result.tool_use_id` to the
+        /// `tool_use.id` it issued, and claude-code never rewrites the id.
+        /// `None` for blocks minted internally (no provider round-trip).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider_id: Option<String>,
     },
     /// The result of a previously-requested tool call.
     ToolResult {
@@ -45,6 +53,12 @@ pub enum ContentBlock {
         content: String,
         /// Whether the tool reported failure.
         is_error: bool,
+        /// Verbatim provider id of the `ToolUse` this answers — copied from the
+        /// paired [`ContentBlock::ToolUse::provider_id`] so the egress
+        /// `tool_result.tool_use_id` matches the provider-issued `tool_use.id`.
+        /// `None` when the paired call had no provider id (internally minted).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider_tool_use_id: Option<String>,
     },
     /// Extended-thinking reasoning trace.
     Thinking {
@@ -401,11 +415,85 @@ mod tests {
                     id: ToolUseId::new(),
                     name: "Read".into(),
                     input: serde_json::json!({"path": "/tmp/x"}),
+                    provider_id: None,
                 },
             ],
             stop_reason: None,
         };
         assert!(m.has_tool_use());
         assert_eq!(m.tool_calls().len(), 1);
+    }
+
+    #[test]
+    fn tool_use_provider_id_skipped_when_none() {
+        // Backward compat: a `None` provider_id MUST NOT appear on the wire, so
+        // existing locked JSONL fixtures stay byte-identical.
+        let block = ContentBlock::ToolUse {
+            id: ToolUseId::from_uuid(uuid::Uuid::nil()),
+            name: "Read".into(),
+            input: serde_json::json!({"path": "/tmp/x"}),
+            provider_id: None,
+        };
+        let v = serde_json::to_value(&block).unwrap();
+        assert!(
+            v.get("provider_id").is_none(),
+            "provider_id must be skipped when None, got: {v}"
+        );
+    }
+
+    #[test]
+    fn tool_use_provider_id_preserved_when_some() {
+        let block = ContentBlock::ToolUse {
+            id: ToolUseId::new(),
+            name: "Read".into(),
+            input: serde_json::json!({}),
+            provider_id: Some("toolu_01ABC".into()),
+        };
+        let v = serde_json::to_value(&block).unwrap();
+        assert_eq!(v.get("provider_id").and_then(|x| x.as_str()), Some("toolu_01ABC"));
+        // Round-trips back identically.
+        let back: ContentBlock = serde_json::from_value(v).unwrap();
+        assert_eq!(back, block);
+    }
+
+    #[test]
+    fn tool_use_legacy_json_without_provider_id_deserializes_to_none() {
+        // A historical JSONL line written before this field existed must still
+        // load — `#[serde(default)]` fills `provider_id: None`.
+        let legacy = serde_json::json!({
+            "type": "tool_use",
+            "id": "00000000-0000-0000-0000-000000000000",
+            "name": "Read",
+            "input": {"path": "/tmp/x"}
+        });
+        let block: ContentBlock = serde_json::from_value(legacy).unwrap();
+        match block {
+            ContentBlock::ToolUse { provider_id, .. } => assert_eq!(provider_id, None),
+            other => panic!("expected ToolUse, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn tool_result_provider_tool_use_id_skipped_when_none_preserved_when_some() {
+        let none_block = ContentBlock::ToolResult {
+            tool_use_id: ToolUseId::from_uuid(uuid::Uuid::nil()),
+            content: "ok".into(),
+            is_error: false,
+            provider_tool_use_id: None,
+        };
+        let v = serde_json::to_value(&none_block).unwrap();
+        assert!(v.get("provider_tool_use_id").is_none());
+
+        let some_block = ContentBlock::ToolResult {
+            tool_use_id: ToolUseId::new(),
+            content: "ok".into(),
+            is_error: false,
+            provider_tool_use_id: Some("toolu_01ABC".into()),
+        };
+        let v = serde_json::to_value(&some_block).unwrap();
+        assert_eq!(
+            v.get("provider_tool_use_id").and_then(|x| x.as_str()),
+            Some("toolu_01ABC")
+        );
     }
 }

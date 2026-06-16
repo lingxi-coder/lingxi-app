@@ -85,7 +85,7 @@ pub fn lower_content_block(block: &ContentBlock) -> Option<MessageBlockDto> {
             thinking: thinking.clone(),
             signature: signature.clone(),
         }),
-        ContentBlock::ToolUse { id, name, input } => Some(MessageBlockDto::ToolUse {
+        ContentBlock::ToolUse { id, name, input, .. } => Some(MessageBlockDto::ToolUse {
             id: id.to_string(),
             tool: name.clone(),
             input_json: value_to_json_string(input),
@@ -94,6 +94,7 @@ pub fn lower_content_block(block: &ContentBlock) -> Option<MessageBlockDto> {
             tool_use_id,
             content,
             is_error,
+            ..
         } => Some(MessageBlockDto::ToolResult {
             id: tool_use_id.to_string(),
             // The engine `ToolResult` does not echo the tool name; the client
@@ -420,6 +421,7 @@ mod tests {
             id,
             name: "Read".into(),
             input: serde_json::json!({"file_path": "/tmp/x"}),
+            provider_id: None,
         };
         match lower_content_block(&block).expect("lowered") {
             MessageBlockDto::ToolUse {

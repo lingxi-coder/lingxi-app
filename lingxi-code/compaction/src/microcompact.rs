@@ -228,6 +228,7 @@ impl Microcompactor {
                                 tool_use_id,
                                 content,
                                 is_error,
+                                provider_tool_use_id,
                             } = &b
                             {
                                 if clear_set.contains(tool_use_id)
@@ -240,6 +241,8 @@ impl Microcompactor {
                                         tool_use_id: *tool_use_id,
                                         content: TIME_BASED_MC_CLEARED_MESSAGE.into(),
                                         is_error: *is_error,
+                                        // Preserve the provider id through content clearing.
+                                        provider_tool_use_id: provider_tool_use_id.clone(),
                                     };
                                 }
                             }
@@ -292,6 +295,7 @@ mod tests {
                 id,
                 name: name.into(),
                 input: json!({}),
+                provider_id: None,
             }],
             stop_reason: None,
         }
@@ -304,6 +308,7 @@ mod tests {
                 tool_use_id,
                 content: content.into(),
                 is_error: false,
+                provider_tool_use_id: None,
             }],
         }
     }

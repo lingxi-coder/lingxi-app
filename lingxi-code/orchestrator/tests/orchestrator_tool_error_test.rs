@@ -153,6 +153,7 @@ async fn tool_error_becomes_tool_result_with_is_error_true_and_loop_continues() 
                     tool_use_id: id,
                     content: text,
                     is_error,
+                    ..
                 } => {
                     assert_eq!(*id, tool_use_id);
                     assert!(text.starts_with("Error: "), "byte-locked prefix: {text}");

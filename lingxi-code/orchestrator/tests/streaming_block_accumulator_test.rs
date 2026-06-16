@@ -29,6 +29,7 @@ fn tool_use_partial_json_reassembles() {
         BlockKind::ToolUse {
             id: tu_id,
             name: "Read".into(),
+            provider_id: Some("toolu_01ACC".into()),
         },
     )
     .expect("start");
@@ -36,10 +37,17 @@ fn tool_use_partial_json_reassembles() {
     acc.append_json(1, "_path\":\"foo.rs\"}").expect("append2");
     let completed = acc.stop_block(1).expect("stop");
     match completed {
-        CompletedBlock::ToolUse { id, name, input } => {
+        CompletedBlock::ToolUse {
+            id,
+            name,
+            input,
+            provider_id,
+        } => {
             assert_eq!(id, tu_id);
             assert_eq!(name, "Read");
             assert_eq!(input, json!({"file_path": "foo.rs"}));
+            // P0: the verbatim provider id survives accumulation.
+            assert_eq!(provider_id.as_deref(), Some("toolu_01ACC"));
         }
         other => panic!("expected ToolUse, got {other:?}"),
     }
@@ -56,6 +64,7 @@ fn empty_tool_use_input_parses_as_empty_object() {
         BlockKind::ToolUse {
             id: ToolUseId::new(),
             name: "NoArgs".into(),
+            provider_id: None,
         },
     )
     .expect("start");
@@ -105,6 +114,7 @@ fn malformed_tool_use_json_errors_at_stop() {
         BlockKind::ToolUse {
             id: ToolUseId::new(),
             name: "Bad".into(),
+            provider_id: None,
         },
     )
     .expect("start");

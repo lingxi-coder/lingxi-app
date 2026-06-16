@@ -40,15 +40,29 @@ fn content_blocks_to_api(blocks: &[protocol::ContentBlock]) -> Value {
         .iter()
         .map(|b| match b {
             ContentBlock::Text { text } => json!({"type": "text", "text": text}),
-            ContentBlock::ToolUse { id, name, input } => {
-                json!({"type": "tool_use", "id": id, "name": name, "input": input})
+            ContentBlock::ToolUse {
+                id,
+                name,
+                input,
+                provider_id,
+            } => {
+                // Replay the verbatim provider id when preserved; else the
+                // serde form of the minted `ToolUseId` (bare uuid).
+                let wire_id = provider_id
+                    .clone()
+                    .map_or_else(|| json!(id), Value::String);
+                json!({"type": "tool_use", "id": wire_id, "name": name, "input": input})
             }
             ContentBlock::ToolResult {
                 tool_use_id,
                 content,
                 is_error,
+                provider_tool_use_id,
             } => {
-                json!({"type": "tool_result", "tool_use_id": tool_use_id,
+                let wire_id = provider_tool_use_id
+                    .clone()
+                    .map_or_else(|| json!(tool_use_id), Value::String);
+                json!({"type": "tool_result", "tool_use_id": wire_id,
                        "content": content, "is_error": is_error})
             }
             ContentBlock::Thinking {

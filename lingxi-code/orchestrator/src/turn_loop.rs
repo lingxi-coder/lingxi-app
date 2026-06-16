@@ -461,10 +461,15 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
     }
 
     // 5. If there are tool_use blocks, dispatch them and feed results back.
-    let tool_uses: Vec<(ToolUseId, String, serde_json::Value)> = assistant_blocks
+    let tool_uses: Vec<(ToolUseId, String, serde_json::Value, Option<String>)> = assistant_blocks
         .iter()
         .filter_map(|b| match b {
-            ContentBlock::ToolUse { id, name, input } => Some((*id, name.clone(), input.clone())),
+            ContentBlock::ToolUse {
+                id,
+                name,
+                input,
+                provider_id,
+            } => Some((*id, name.clone(), input.clone(), provider_id.clone())),
             _ => None,
         })
         .collect();
@@ -970,10 +975,15 @@ pub(crate) fn translate_response_blocks(content: &[LlmContentBlock]) -> Vec<Cont
                     serde_json::Value::String(id.clone()),
                 )
                 .unwrap_or_else(|_| ToolUseId::new());
+                // Preserve the verbatim provider id (e.g. Anthropic `toolu_…`)
+                // so the egress `tool_use.id` / `tool_result.tool_use_id` replay
+                // exactly what the provider issued. The minted `ToolUseId` above
+                // is for internal identity only.
                 Some(ContentBlock::ToolUse {
                     id: tool_use_id,
                     name: name.clone(),
                     input: input.clone(),
+                    provider_id: Some(id.clone()),
                 })
             }
             LlmContentBlock::Reasoning { text, signature } => Some(ContentBlock::Thinking {
@@ -1009,7 +1019,7 @@ pub(crate) fn translate_response_blocks(content: &[LlmContentBlock]) -> Vec<Cont
 #[cfg(test)]
 pub(crate) async fn dispatch_tool_uses(
     orch: &ConversationOrchestrator,
-    tool_uses: &[(ToolUseId, String, serde_json::Value)],
+    tool_uses: &[(ToolUseId, String, serde_json::Value, Option<String>)],
 ) -> Result<Vec<ContentBlock>, OrchestratorError> {
     Ok(dispatch_tool_uses_tracked(orch, tool_uses).await?.0)
 }
@@ -1023,7 +1033,7 @@ pub(crate) async fn dispatch_tool_uses(
 #[allow(clippy::too_many_lines)]
 pub(crate) async fn dispatch_tool_uses_tracked(
     orch: &ConversationOrchestrator,
-    tool_uses: &[(ToolUseId, String, serde_json::Value)],
+    tool_uses: &[(ToolUseId, String, serde_json::Value, Option<String>)],
 ) -> Result<
     (
         Vec<ContentBlock>,
@@ -1058,7 +1068,7 @@ pub(crate) async fn dispatch_tool_uses_tracked(
     // `context_modifier: None` (every existing tool + skills WITHOUT a `model:`
     // frontmatter) → the caller does NOTHING → byte-identical.
     let mut context_modifiers: Vec<ContextModifier> = Vec::new();
-    for (tool_use_id, name, input) in tool_uses {
+    for (tool_use_id, name, input, provider_id) in tool_uses {
         orch.output.emit_tool_call(tool_use_id, name, input).await;
 
         // M5-06 Task 14: PreToolUse hook chain. Build the event + context,
@@ -1131,6 +1141,7 @@ pub(crate) async fn dispatch_tool_uses_tracked(
                 tool_use_id: *tool_use_id,
                 content: fold_pre_context(format!("Hook blocked: {reason}")),
                 is_error: true,
+                provider_tool_use_id: provider_id.clone(),
             };
             orch.output
                 .emit_tool_result(
@@ -1233,6 +1244,7 @@ pub(crate) async fn dispatch_tool_uses_tracked(
                         tool_use_id: *tool_use_id,
                         content: fold_pre_context(format!("Permission denied: {reason}")),
                         is_error: true,
+                        provider_tool_use_id: provider_id.clone(),
                     };
                     orch.output
                         .emit_tool_result(
@@ -1253,6 +1265,7 @@ pub(crate) async fn dispatch_tool_uses_tracked(
                 tool_use_id: *tool_use_id,
                 content: fold_pre_context(format!("Error: tool not found: {name}")),
                 is_error: true,
+                provider_tool_use_id: provider_id.clone(),
             };
             orch.output
                 .emit_tool_result(
@@ -1603,6 +1616,7 @@ pub(crate) async fn dispatch_tool_uses_tracked(
             tool_use_id: *tool_use_id,
             content: final_content,
             is_error,
+            provider_tool_use_id: provider_id.clone(),
         });
     }
     Ok((
@@ -1843,7 +1857,7 @@ mod read_file_state_tests {
 
     /// Drive one `(name, input)` `tool_use` through the dispatch chokepoint.
     async fn dispatch_one(orch: &ConversationOrchestrator, name: &str, input: serde_json::Value) {
-        let uses = vec![(ToolUseId::new(), name.to_string(), input)];
+        let uses = vec![(ToolUseId::new(), name.to_string(), input, None)];
         dispatch_tool_uses(orch, &uses).await.expect("dispatch");
     }
 
@@ -2727,8 +2741,8 @@ mod pre_tool_hook_tests {
         )
     }
 
-    fn uses() -> Vec<(ToolUseId, String, serde_json::Value)> {
-        vec![(ToolUseId::new(), "Echo".into(), json!({}))]
+    fn uses() -> Vec<(ToolUseId, String, serde_json::Value, Option<String>)> {
+        vec![(ToolUseId::new(), "Echo".into(), json!({}), None)]
     }
 
     fn tool_result(block: &ContentBlock) -> (&str, bool) {
@@ -2760,7 +2774,7 @@ mod pre_tool_hook_tests {
             PathBuf::from("/tmp"),
         );
         let skill_tu = ToolUseId::new();
-        let uses = vec![(skill_tu, "Inject".to_string(), json!({}))];
+        let uses = vec![(skill_tu, "Inject".to_string(), json!({}), None)];
         let (results, _prevent, injected, _mods) =
             dispatch_tool_uses_tracked(&orch, &uses).await.unwrap();
         // The tool_result block still rides the first tuple element.

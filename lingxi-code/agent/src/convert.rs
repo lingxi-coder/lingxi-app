@@ -83,8 +83,16 @@ fn convert_block(block: ProtoBlock) -> Result<LlmBlock, LlmError> {
             text,
             cache_control: None,
         }),
-        ProtoBlock::ToolUse { id, name, input } => Ok(LlmBlock::ToolCall {
-            id: id.to_string(),
+        ProtoBlock::ToolUse {
+            id,
+            name,
+            input,
+            provider_id,
+        } => Ok(LlmBlock::ToolCall {
+            // Replay the verbatim provider-issued id when preserved (Anthropic
+            // `toolu_…`, OpenAI `call_…`); fall back to the `tu:<uuid>` Display
+            // form only for internally-minted blocks with no provider round-trip.
+            id: provider_id.unwrap_or_else(|| id.to_string()),
             name,
             input,
         }),
@@ -92,8 +100,11 @@ fn convert_block(block: ProtoBlock) -> Result<LlmBlock, LlmError> {
             tool_use_id,
             content,
             is_error,
+            provider_tool_use_id,
         } => Ok(LlmBlock::ToolResult {
-            tool_call_id: tool_use_id.to_string(),
+            // Must echo the same id the paired `tool_use` carried so Anthropic
+            // pairs them; prefer the preserved provider id over the synthetic one.
+            tool_call_id: provider_tool_use_id.unwrap_or_else(|| tool_use_id.to_string()),
             output: Value::String(content),
             is_error,
             cache_control: None,
@@ -201,6 +212,7 @@ mod tests {
                 id,
                 name: "Read".to_string(),
                 input: serde_json::json!({"path": "/tmp/x"}),
+                provider_id: None,
             }],
             stop_reason: None,
         };
@@ -214,6 +226,46 @@ mod tests {
     }
 
     #[test]
+    fn tool_use_provider_id_replayed_verbatim_on_egress() {
+        // P0: a preserved provider id (Anthropic `toolu_…`) MUST be replayed
+        // verbatim as the egress `tool_call` id — NOT the synthetic `tu:<uuid>`.
+        let msg = ConversationMessage::Assistant {
+            id: MessageId::new(),
+            content: vec![ProtoBlock::ToolUse {
+                id: ToolUseId::new(),
+                name: "Read".to_string(),
+                input: serde_json::json!({"path": "/tmp/x"}),
+                provider_id: Some("toolu_01ABCDEF".to_string()),
+            }],
+            stop_reason: None,
+        };
+        let result = to_llm_messages(vec![msg]).unwrap();
+        assert!(matches!(
+            &result[0].content[0],
+            LlmBlock::ToolCall { id, .. } if id == "toolu_01ABCDEF"
+        ));
+    }
+
+    #[test]
+    fn tool_result_provider_id_replayed_verbatim_on_egress() {
+        // P0: the paired `tool_result` must echo the SAME verbatim provider id.
+        let msg = ConversationMessage::User {
+            id: MessageId::new(),
+            content: vec![ProtoBlock::ToolResult {
+                tool_use_id: ToolUseId::new(),
+                content: "file content".to_string(),
+                is_error: false,
+                provider_tool_use_id: Some("toolu_01ABCDEF".to_string()),
+            }],
+        };
+        let result = to_llm_messages(vec![msg]).unwrap();
+        assert!(matches!(
+            &result[0].content[0],
+            LlmBlock::ToolResult { tool_call_id, .. } if tool_call_id == "toolu_01ABCDEF"
+        ));
+    }
+
+    #[test]
     fn tool_result_block_wraps_content_as_string_value() {
         let tool_use_id = ToolUseId::new();
         let tool_call_id_str = tool_use_id.to_string();
@@ -223,6 +275,7 @@ mod tests {
                 tool_use_id,
                 content: "file content".to_string(),
                 is_error: false,
+                provider_tool_use_id: None,
             }],
         };
         let result = to_llm_messages(vec![msg]).unwrap();
@@ -241,6 +294,7 @@ mod tests {
                 tool_use_id: ToolUseId::new(),
                 content: "boom".to_string(),
                 is_error: true,
+                provider_tool_use_id: None,
             }],
         };
         let result = to_llm_messages(vec![msg]).unwrap();
@@ -317,6 +371,7 @@ mod tests {
                     id,
                     name: "Read".to_string(),
                     input: serde_json::json!({"path": "/x"}),
+                    provider_id: None,
                 },
             ],
             stop_reason: Some("tool_use".to_string()),

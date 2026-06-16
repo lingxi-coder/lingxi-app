@@ -32,6 +32,8 @@ pub struct ObservedToolUse {
     pub name: String,
     /// Reassembled tool input.
     pub input: Value,
+    /// Verbatim provider-issued tool-call id, preserved for egress replay.
+    pub provider_id: Option<String>,
 }
 
 /// Outcome of consuming one stream.
@@ -144,8 +146,18 @@ pub async fn pump_stream(
             RouterAction::AppendAssistantBlock(block) => {
                 turn.assistant_blocks.push(block);
             }
-            RouterAction::DispatchToolUse { id, name, input } => {
-                turn.tool_uses.push(ObservedToolUse { id, name, input });
+            RouterAction::DispatchToolUse {
+                id,
+                name,
+                input,
+                provider_id,
+            } => {
+                turn.tool_uses.push(ObservedToolUse {
+                    id,
+                    name,
+                    input,
+                    provider_id,
+                });
             }
             RouterAction::RecordStopReason {
                 stop_reason,
@@ -241,7 +253,12 @@ pub async fn dispatch_tool_uses_concurrent(
         .iter()
         .enumerate()
         .map(|(idx, tu)| {
-            let single = vec![(tu.id, tu.name.clone(), tu.input.clone())];
+            let single = vec![(
+                tu.id,
+                tu.name.clone(),
+                tu.input.clone(),
+                tu.provider_id.clone(),
+            )];
             async move {
                 // SKILLEXEC.3 (streaming): use the TRACKED dispatch so a tool's
                 // injected `new_messages` (the Skill tool's expanded prompt) are

@@ -33,6 +33,8 @@ pub enum RouterAction {
         name: String,
         /// Reassembled tool input.
         input: serde_json::Value,
+        /// Verbatim provider-issued tool-call id, preserved for egress replay.
+        provider_id: Option<String>,
     },
     /// A text or thinking block completed — append to the in-flight
     /// assistant message and continue.
@@ -98,6 +100,9 @@ pub async fn dispatch_event(
                     )
                     .unwrap_or_else(|_| ToolUseId::new()),
                     name: name.clone(),
+                    // Preserve the verbatim provider id (e.g. Anthropic `toolu_…`)
+                    // for egress replay; the minted `ToolUseId` is internal-only.
+                    provider_id: Some(id.clone()),
                 },
                 LlmContentBlock::Reasoning { .. } => BlockKind::Thinking,
                 LlmContentBlock::ServerToolUse { .. }
@@ -158,9 +163,17 @@ pub async fn dispatch_event(
                     thinking,
                     signature,
                 })),
-                CompletedBlock::ToolUse { id, name, input } => {
-                    Ok(RouterAction::DispatchToolUse { id, name, input })
-                }
+                CompletedBlock::ToolUse {
+                    id,
+                    name,
+                    input,
+                    provider_id,
+                } => Ok(RouterAction::DispatchToolUse {
+                    id,
+                    name,
+                    input,
+                    provider_id,
+                }),
                 CompletedBlock::Skipped => Ok(RouterAction::Continue),
             }
         }

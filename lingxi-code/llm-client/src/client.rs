@@ -118,7 +118,7 @@ impl DefaultLlmClient {
         request: &LlmRequest,
         now: std::time::SystemTime,
     ) -> Result<PreparedLlmCall, LlmError> {
-        let resolved_route = self.registry.resolve(&request.model)?;
+        let resolved_route = self.registry.resolve_in(&request.model, request.profile.as_deref())?;
         validate_capabilities(request, resolved_route.capabilities)?;
 
         let entry = self

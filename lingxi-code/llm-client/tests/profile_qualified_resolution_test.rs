@@ -33,3 +33,86 @@ fn unique_unqualified_still_resolves() {
     assert_eq!(registry().resolve_in("gpt-4.1-mini", None).expect("unique").profile_name, "openai");
     assert_eq!(registry().resolve("gpt-4.1-mini").expect("unique").profile_name, "openai");
 }
+
+#[derive(Debug)]
+struct ApiKeyStub;
+impl llm_client::CredentialProvider for ApiKeyStub {
+    fn load<'a>(&'a self, _s: &'a llm_client::CredentialScope)
+        -> llm_client::BoxFuture<'a, Result<llm_client::Credential, LlmError>> {
+        Box::pin(async { Ok(llm_client::Credential::ApiKey("k".into())) })
+    }
+}
+
+/// Build a minimal two-profile config for gpt-5.2:
+///   - "openai"          → https://api.openai.com/v1   (OpenAiResponses)
+///   - "github-copilot"  → https://api.githubcopilot.com (OpenAiChat)
+/// Both use HostManaged credentials so ApiKeyStub is consulted.
+fn two_profile_client() -> llm_client::client::DefaultLlmClient {
+    use llm_client::{
+        AuthStrategy, Capabilities, ClientConfig, CredentialConfig, ModelProfile, ProtocolFamily,
+        ProviderId, ProviderProfile, PricingConfig,
+    };
+    use std::sync::Arc;
+
+    let shared_model = ModelProfile {
+        display_model: "gpt-5.2".to_string(),
+        request_model: "gpt-5.2".to_string(),
+        billing_model: "gpt-5.2".to_string(),
+        aliases: vec![],
+        capabilities: Capabilities { streaming: true, tools: true, ..Default::default() },
+    };
+
+    let config = ClientConfig {
+        providers: vec![
+            ProviderProfile {
+                provider_id: ProviderId::OpenAI,
+                profile_name: "openai".to_string(),
+                base_url: "https://api.openai.com/v1".to_string(),
+                protocol: ProtocolFamily::OpenAiResponses,
+                auth: AuthStrategy::Bearer,
+                credential: CredentialConfig::HostManaged { id: "openai".to_string() },
+                models: vec![shared_model.clone()],
+                pricing: PricingConfig::default(),
+                signing: None,
+                azure: None,
+            },
+            ProviderProfile {
+                provider_id: ProviderId::OpenAICompatible { name: "github-copilot".to_string() },
+                profile_name: "github-copilot".to_string(),
+                base_url: "https://api.githubcopilot.com".to_string(),
+                protocol: ProtocolFamily::OpenAiChat,
+                auth: AuthStrategy::CopilotBearer,
+                credential: CredentialConfig::HostManaged { id: "github-copilot".to_string() },
+                models: vec![shared_model],
+                pricing: PricingConfig::default(),
+                signing: None,
+                azure: None,
+            },
+        ],
+    };
+
+    llm_client::client::DefaultLlmClient::from_config(config)
+        .expect("client")
+        .with_credential_provider(Arc::new(ApiKeyStub))
+}
+
+#[tokio::test]
+async fn prepare_routes_shared_id_by_profile() {
+    use llm_client::LlmRequest;
+
+    let client = two_profile_client();
+
+    let p = client.prepare(&LlmRequest::new("gpt-5.2").with_profile("openai")).await.expect("openai");
+    assert!(
+        p.provider_request.url.starts_with("https://api.openai.com/"),
+        "got {}",
+        p.provider_request.url
+    );
+
+    let p = client.prepare(&LlmRequest::new("gpt-5.2").with_profile("github-copilot")).await.expect("copilot");
+    assert!(
+        p.provider_request.url.starts_with("https://api.githubcopilot.com"),
+        "got {}",
+        p.provider_request.url
+    );
+}

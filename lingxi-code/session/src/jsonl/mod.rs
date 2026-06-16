@@ -34,13 +34,17 @@ pub use path::{project_dir_name, session_path};
 // `session::JsonlSessionMetadata` (crate-root alias) or the
 // fully-qualified `session::jsonl::reader::SessionMetadata`.
 pub use reader::JsonlReader;
+// Tolerant-reader surface (real-transcript gap fix): the two-phase routed
+// loader output + its line-router + the transcript-message type predicate.
+pub use reader::{is_transcript_message_type, route_lines, LoadedTranscript};
 pub use schema::JsonlMessage;
 pub use uuid::validate_uuid;
 pub use writer::JsonlWriter;
 
 // New M5-08 public surface.
 pub use loader::{
-    list_recent_sessions, load_session, select_session_interactive, LoaderError, SessionMetadata,
+    build_conversation_chain, list_recent_sessions, load_session, select_session_interactive,
+    LoaderError, SessionMetadata,
 };
 pub use title::extract_title;
 

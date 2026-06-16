@@ -4,11 +4,30 @@
 //! with the Ink TUI replaced by a stdio line-based picker (OQ-6 fallback).
 //!
 //! See plan `docs/superpowers/plans/2026-05-25-m5-08-resume.md` Task 0 for byte-locks.
+//!
+//! TRANSCRIPT TOLERANCE: [`load_session`] no longer enforces a strict
+//! file-order linear chain. It routes the file tolerantly
+//! ([`crate::jsonl::reader::JsonlReader::read_routed`]) and reconstructs the
+//! main thread with a branch-aware DAG walk ([`build_conversation_chain`]),
+//! faithful to `claude-code`'s `loadMessagesFromJsonlPath`
+//! (`conversationRecovery.ts:416`). This lets the loader ingest a REAL
+//! `claude-code` transcript (leading `summary`, interleaved
+//! `attachment`/`system`, forked roots, sidechain branches).
+//!
+//! DEFERRED FOLLOW-UP — `recoverOrphanedParallelToolResults`
+//! (`sessionStorage.ts:2096`): the post-walk DAG recovery pass that re-attaches
+//! sibling assistant blocks + orphaned `tool_result`s produced by PARALLEL tool
+//! calls (N `tool_use`s → N one-block assistant messages sharing `message.id`).
+//! [`build_conversation_chain`] is a single-parent walk and keeps one branch,
+//! which is correct for any transcript without parallel tool calls. Recovering
+//! the orphaned siblings is purely additive and can be layered on later without
+//! changing [`build_conversation_chain`]'s signature.
 
 use crate::jsonl::path::{project_dir_name, session_path};
-use crate::jsonl::reader::JsonlReader;
+use crate::jsonl::reader::{JsonlReader, LoadedTranscript};
 use crate::jsonl::schema::JsonlMessage;
 use crate::jsonl::title::extract_title;
+use std::collections::HashSet;
 use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -418,19 +437,39 @@ async fn list_recent_sessions_inner(
     Ok(rows)
 }
 
-/// Load a session by UUID, validate its `parentUuid` chain + `sessionId` consistency,
-/// and return the deserialized `Vec<JsonlMessage>` in file order.
+/// Load a session by UUID and return the MAIN-THREAD conversation chain
+/// (root → tip, in walk order) reconstructed by a tolerant, branch-aware DAG
+/// walk over the transcript's `parentUuid` graph.
 ///
-/// Validation rules (spec §4.x):
-/// 1. The first message's `parent_uuid` is `None` (root of the chain).
-/// 2. Every subsequent message's `parent_uuid` MUST equal the previous message's `uuid`.
-/// 3. All messages MUST share the same `session_id` (matching the requested `session_id` arg).
+/// REAL-TRANSCRIPT TOLERANCE (replaces the old strict linear-chain check): a
+/// genuine `claude-code` `.jsonl` is a DAG, not a file-ordered linked list —
+/// it interleaves metadata lines, may carry a LEADING `summary` line, splices
+/// `attachment`/`system` entries between turns, and can contain forked /
+/// sidechain branches with their own leaves and (for forks) a different root
+/// `sessionId`. The old `validate_chain` (msg[0].parent==None; strict
+/// file-order parent links; all `session_id` equal) rejected all of these. We
+/// now mirror `claude-code`'s `loadMessagesFromJsonlPath`
+/// (`conversationRecovery.ts:416`): route the file
+/// ([`JsonlReader::read_routed`]), pick the newest non-sidechain
+/// user/assistant leaf as the tip, and walk `tip → root` via `parentUuid`
+/// ([`build_conversation_chain`]). The leaf supplies the session id, so forked
+/// sessions (whose root row keeps the SOURCE session's id) load cleanly.
+///
+/// Returns the main thread only; sidechain branches are ignored. The
+/// `parentUuid` walk is cycle-guarded (breaks, never loops) and stops at a
+/// missing parent (returns the partial chain) — it does NOT error on either.
 ///
 /// Errors:
 /// - [`LoaderError::SessionNotFound`] if the file doesn't exist.
-/// - [`LoaderError::ChainBroken`] if rule 1 or 2 fails.
-/// - [`LoaderError::SessionIdMismatch`] if rule 3 fails.
-/// - [`LoaderError::Io`] on disk-or-format issues.
+/// - [`LoaderError::EmptyDirectory`] if the file has NO chain-participant
+///   lines at all (nothing resumable) — surfaced via the same "nothing to
+///   resume" channel callers already handle.
+/// - [`LoaderError::Io`] on disk read failure.
+///
+/// The strict `ChainBroken` / `SessionIdMismatch` variants are RETAINED on
+/// [`LoaderError`] (other code matches their `Display`) but are no longer
+/// produced from this load path; structural anomalies are downgraded to a
+/// `tracing::warn` + a best-effort partial chain.
 pub async fn load_session(
     claude_home: &Path,
     cwd: &str,
@@ -443,12 +482,19 @@ pub async fn load_session(
         return Err(LoaderError::SessionNotFound { arg });
     }
     let reader = JsonlReader::new(path, fs);
-    let messages = reader.read_all().await.map_err(|e| LoaderError::Io {
+    let loaded = reader.read_routed().await.map_err(|e| LoaderError::Io {
         arg: arg.clone(),
         source: std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()),
     })?;
-    validate_chain(&messages, session_id, &arg)?;
-    Ok(messages)
+
+    let (chain, _tip_session_id) = build_conversation_chain(&loaded, &arg);
+    if chain.is_empty() {
+        // No chain-participant lines at all → nothing to resume. (A file that is
+        // pure metadata, or whose only messages are sidechains.) Surface the
+        // same "nothing to resume" signal callers already expect.
+        return Err(LoaderError::EmptyDirectory);
+    }
+    Ok(chain)
 }
 
 /// Interactive line-based session picker (OQ-6 stdio fallback for the Ink TUI).
@@ -583,60 +629,140 @@ pub fn format_rfc3339_seconds(t: SystemTime) -> String {
     )
 }
 
-fn validate_chain(
-    messages: &[JsonlMessage],
-    expected_session_id: Uuid,
+/// Parse an RFC 3339 transcript timestamp to a comparable millisecond epoch.
+/// Unparsable / empty timestamps sort OLDEST (`i64::MIN`) so a metadata-poor or
+/// malformed leaf can never win the newest-leaf race — mirrors TS
+/// `new Date(m.timestamp).getTime()` where an invalid date yields `NaN` and the
+/// `ts > tipTs` comparison is always false.
+fn timestamp_millis(ts: &str) -> i64 {
+    chrono::DateTime::parse_from_rfc3339(ts)
+        .map(|dt| dt.timestamp_millis())
+        .unwrap_or(i64::MIN)
+}
+
+/// Tolerant, branch-aware reconstruction of a transcript's MAIN conversation
+/// thread — the structural equivalent of `claude-code`'s leaf computation
+/// (`sessionStorage.ts:3716`, original/non-pebble branch) + newest-non-sidechain
+/// leaf selection + `buildConversationChain` (`sessionStorage.ts:2069`), as
+/// composed by `loadMessagesFromJsonlPath` (`conversationRecovery.ts:416`).
+///
+/// Algorithm:
+///  1. `parent_uuids` = every `parentUuid` present among the chain participants.
+///  2. `terminals` = participants whose `uuid` is NOT in `parent_uuids` (no
+///     children) — these are the graph tips, including sidechain/orphan tips.
+///  3. For each terminal, walk parents (cycle-guarded) to the nearest
+///     `user`/`assistant` ancestor → that ancestor's uuid joins `leaf_uuids`.
+///  4. `tip` = the `leaf_uuids` member that is a NON-sidechain `user`/`assistant`
+///     message with the MAX timestamp. (Forked sessions copy `chain[0]` from the
+///     source transcript, so the tip — not the file's first row — supplies the
+///     session id.)
+///  5. Walk `tip → root` via `parentUuid` + `by_uuid.get`, STOP on a missing
+///     parent (partial chain, no error), BREAK on a cycle (no loop), then
+///     reverse to root → tip order.
+///
+/// Returns `(main_thread, tip_session_id)`. When no non-sidechain
+/// user/assistant leaf exists the chain is empty and the session id is the
+/// requested `arg` (the caller maps the empty chain to "nothing to resume").
+///
+/// `recoverOrphanedParallelToolResults` (the parallel-tool-result DAG recovery
+/// post-pass, `sessionStorage.ts:2096`) is DEFERRED — see the module follow-up
+/// note. The single-parent walk keeps one branch, which is correct for every
+/// transcript that does not use parallel tool calls; recovering orphaned sibling
+/// `tool_result` blocks is additive and can land later without changing this
+/// signature.
+#[must_use]
+pub fn build_conversation_chain(
+    loaded: &LoadedTranscript,
     arg: &str,
-) -> Result<(), LoaderError> {
-    let mut prev_uuid: Option<Uuid> = None;
-    for (i, m) in messages.iter().enumerate() {
-        // (Rule 3) session_id consistency.
-        let msg_session =
-            Uuid::parse_str(&m.session_id).map_err(|_| LoaderError::SessionIdMismatch {
-                arg: arg.to_string(),
-                expected: expected_session_id,
-                got: Uuid::nil(),
-            })?;
-        if msg_session != expected_session_id {
-            return Err(LoaderError::SessionIdMismatch {
-                arg: arg.to_string(),
-                expected: expected_session_id,
-                got: msg_session,
-            });
-        }
-        let msg_uuid = Uuid::parse_str(&m.uuid).map_err(|_| LoaderError::ChainBroken {
-            arg: arg.to_string(),
-            at_uuid: Uuid::nil(),
-        })?;
-        let msg_parent = m
-            .parent_uuid
-            .as_deref()
-            .map(Uuid::parse_str)
-            .transpose()
-            .map_err(|_| LoaderError::ChainBroken {
-                arg: arg.to_string(),
-                at_uuid: msg_uuid,
-            })?;
-        if i == 0 {
-            // (Rule 1) first message must have parent_uuid == None.
-            if msg_parent.is_some() {
-                return Err(LoaderError::ChainBroken {
-                    arg: arg.to_string(),
-                    at_uuid: msg_uuid,
-                });
-            }
-        } else {
-            // (Rule 2) parent_uuid must equal previous message's uuid.
-            if msg_parent != prev_uuid {
-                return Err(LoaderError::ChainBroken {
-                    arg: arg.to_string(),
-                    at_uuid: msg_uuid,
-                });
-            }
-        }
-        prev_uuid = Some(msg_uuid);
+) -> (Vec<JsonlMessage>, String) {
+    let by_uuid = &loaded.by_uuid;
+    if by_uuid.is_empty() {
+        return (Vec::new(), arg.to_string());
     }
-    Ok(())
+
+    // (1) Every parentUuid that is actually referenced.
+    let parent_uuids: HashSet<&str> = by_uuid
+        .values()
+        .filter_map(|m| m.parent_uuid.as_deref())
+        .collect();
+
+    // (2) Terminals = messages no other message points at.
+    // (3) From each terminal, walk up to the nearest user/assistant leaf.
+    let mut leaf_uuids: HashSet<String> = HashSet::new();
+    for m in by_uuid.values() {
+        if parent_uuids.contains(m.uuid.as_str()) {
+            continue; // not a terminal
+        }
+        let mut seen: HashSet<&str> = HashSet::new();
+        let mut current: Option<&JsonlMessage> = Some(m);
+        while let Some(node) = current {
+            if !seen.insert(node.uuid.as_str()) {
+                // Cycle in the parentUuid graph — abandon this terminal's walk.
+                tracing::warn!(
+                    session = arg,
+                    at = %node.uuid,
+                    "cycle detected walking transcript leaves; skipping terminal",
+                );
+                break;
+            }
+            if node.message_type == "user" || node.message_type == "assistant" {
+                leaf_uuids.insert(node.uuid.clone());
+                break;
+            }
+            current = node
+                .parent_uuid
+                .as_deref()
+                .and_then(|p| by_uuid.get(p));
+        }
+    }
+
+    // (4) tip = newest non-sidechain user/assistant leaf.
+    let mut tip: Option<&JsonlMessage> = None;
+    let mut tip_ts: i64 = i64::MIN;
+    for uuid in &leaf_uuids {
+        let Some(m) = by_uuid.get(uuid) else { continue };
+        if m.is_sidechain {
+            continue;
+        }
+        if m.message_type != "user" && m.message_type != "assistant" {
+            continue;
+        }
+        let ts = timestamp_millis(&m.timestamp);
+        // `>` (not `>=`) so the FIRST-seen leaf wins an exact-timestamp tie,
+        // matching TS `loadMessagesFromJsonlPath`'s `if (ts > tipTs)`.
+        if tip.is_none() || ts > tip_ts {
+            tip_ts = ts;
+            tip = Some(m);
+        }
+    }
+
+    let Some(tip) = tip else {
+        // No resumable leaf — caller surfaces "nothing to resume".
+        return (Vec::new(), arg.to_string());
+    };
+    let tip_session_id = tip.session_id.clone();
+
+    // (5) Walk tip → root, cycle-guarded, stop on missing parent; reverse.
+    let mut chain: Vec<JsonlMessage> = Vec::new();
+    let mut seen: HashSet<&str> = HashSet::new();
+    let mut current: Option<&JsonlMessage> = Some(tip);
+    while let Some(node) = current {
+        if !seen.insert(node.uuid.as_str()) {
+            tracing::warn!(
+                session = arg,
+                at = %node.uuid,
+                "cycle detected in parentUuid chain; returning partial transcript",
+            );
+            break;
+        }
+        chain.push(node.clone());
+        current = match node.parent_uuid.as_deref() {
+            Some(p) => by_uuid.get(p), // None here ⇒ missing parent ⇒ loop ends
+            None => None,              // reached the root
+        };
+    }
+    chain.reverse();
+    (chain, tip_session_id)
 }
 
 #[cfg(test)]

@@ -32,16 +32,39 @@ pub struct JsonlMessage {
 
     /// ISO-8601 UTC timestamp with millisecond precision
     /// (`new Date().toISOString()`), e.g. `"2026-05-25T14:30:00.000Z"`.
+    ///
+    /// TOLERANT: `user`/`assistant` lines always carry it, but `attachment` /
+    /// `system` chain-participant lines (and some legacy rows) may omit it —
+    /// `claude-code`'s `isTranscriptMessage` admits those into the chain without
+    /// requiring a timestamp, so we default to the empty string on read rather
+    /// than rejecting the line. The branch-aware DAG walk
+    /// ([`crate::jsonl::loader::build_conversation_chain`]) parses this via
+    /// `chrono` and treats an unparsable / empty value as epoch (oldest), so a
+    /// missing timestamp simply can't win the newest-leaf race.
+    #[serde(default)]
     pub timestamp: String,
 
     /// Canonical absolute cwd at the time this entry was written.
+    /// TOLERANT (`#[serde(default)]`): present on `user`/`assistant`, may be
+    /// absent on `attachment`/`system`.
+    #[serde(default)]
     pub cwd: String,
 
     /// Engine version string. claude-code: `MACRO.VERSION`; lingxi-core: `CARGO_PKG_VERSION`.
+    /// TOLERANT (`#[serde(default)]`) for the same reason as `cwd`.
+    #[serde(default)]
     pub version: String,
 
     /// Inner message object — Anthropic Messages API shape for `user`/`assistant`,
     /// other shapes for system entries. Preserved verbatim.
+    ///
+    /// TOLERANT: `attachment` and `system` chain-participant lines frequently
+    /// lack a `message` field entirely (their payload lives in sibling outer
+    /// fields captured by [`Self::extra`]). `#[serde(default)]` yields
+    /// `Value::Null` when absent so the line still parses and joins the chain,
+    /// matching `claude-code`'s `isTranscriptMessage` (it gates on `type` only,
+    /// never on the presence of `message`).
+    #[serde(default)]
     pub message: Value,
 
     /// `false` for the main agent loop; `true` for sub-agent transcripts.

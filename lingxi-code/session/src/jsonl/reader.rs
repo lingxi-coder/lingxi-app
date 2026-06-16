@@ -5,10 +5,51 @@
 //! we extract (`sessionId`, `cwd`, `type`) live on line 1.
 
 use crate::jsonl::schema::JsonlMessage;
+use serde_json::Value;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use thiserror::Error;
 use traits::{FileSystem, FsError};
+
+/// A line whose outer `type` admits it into the conversation chain — 1:1 with
+/// `claude-code/src/utils/sessionStorage.ts:139` `isTranscriptMessage`. These
+/// are the ONLY line types fully parsed into [`JsonlMessage`] and joined to the
+/// parent-uuid graph; every other `type` is metadata (Tier-1 side-map) or
+/// ignored (Tier-2 / unknown).
+#[must_use]
+pub fn is_transcript_message_type(ty: &str) -> bool {
+    matches!(ty, "user" | "assistant" | "attachment" | "system")
+}
+
+/// Two-phase tolerant load of a session JSONL — the structural equivalent of
+/// `claude-code`'s `loadTranscriptFile` (`sessionStorage.ts:3472`): chain
+/// participants are parsed into [`JsonlMessage`] and indexed by uuid; Tier-1
+/// metadata (summary / custom-title / ai-title) is stashed into side-maps keyed
+/// by the uuid the reader cares about; everything else (Tier-2 + unknown +
+/// malformed) is skipped without error.
+#[derive(Debug, Clone, Default)]
+pub struct LoadedTranscript {
+    /// Chain-participant lines (`user`/`assistant`/`attachment`/`system`) in
+    /// FILE ORDER. This is what [`JsonlReader::read_all`] returns and what the
+    /// golden round-trip / append-chain tests rely on.
+    pub messages_in_order: Vec<JsonlMessage>,
+    /// The same chain participants indexed by their `uuid` — the input to the
+    /// branch-aware DAG walk ([`crate::jsonl::loader::build_conversation_chain`]).
+    /// Last-write-wins on a duplicate uuid, mirroring TS `messages.set(uuid, …)`.
+    pub by_uuid: HashMap<String, JsonlMessage>,
+    /// `summary` entries keyed by their `leafUuid` (`sessionStorage.ts` routing
+    /// loop: `summaries.set(entry.leafUuid, entry.summary)`). Lets the picker
+    /// link a session's stored summary to its chain tip.
+    pub summaries: HashMap<String, String>,
+    /// `custom-title` entries keyed by `sessionId`
+    /// (`customTitles.set(entry.sessionId, entry.customTitle)`).
+    pub custom_titles: HashMap<String, String>,
+    /// `ai-title` entries keyed by `sessionId` (`saveAiGeneratedTitle` writes
+    /// `{type:"ai-title", sessionId, aiTitle}`; readers prefer `custom-title`
+    /// over `ai-title`, `sessionStorage.ts:2644-2646`).
+    pub ai_titles: HashMap<String, String>,
+}
 
 /// Failure modes for [`JsonlReader`].
 #[derive(Debug, Error)]
@@ -17,6 +58,12 @@ pub enum ReaderError {
     #[error(transparent)]
     Fs(#[from] FsError),
     /// Line `n` (0-indexed) failed to parse as `JsonlMessage`.
+    ///
+    /// RETAINED for API/back-compat only. As of the tolerant-reader gap fix the
+    /// load path NEVER produces this — malformed and non-message lines are
+    /// skipped (see [`route_lines`] / `JsonlReader::read_all`), matching
+    /// `claude-code`'s `parseJSONL` (`json.ts:155`). Kept so any external match
+    /// on `ReaderError` stays exhaustive.
     #[error("parse failure at line {0}: {1}")]
     Parse(usize, String),
     /// First line didn't contain a required metadata field.
@@ -54,20 +101,36 @@ impl JsonlReader {
         &self.path
     }
 
-    /// Read every line, parse each as `JsonlMessage`, return in file order.
+    /// Read every line and return the chain-participant lines
+    /// (`user`/`assistant`/`attachment`/`system`) in FILE ORDER.
+    ///
+    /// TOLERANT (BLOCKING gap fix): a real `claude-code` transcript interleaves
+    /// non-message line `type`s (`summary`, `file-history-snapshot`, `mode`,
+    /// `permission-mode`, `last-prompt`, `queue-operation`, `ai-title`, …) and
+    /// can contain truncated / malformed lines from a crash mid-write. The old
+    /// `read_all` hard-errored on the FIRST such line. We now mirror
+    /// `claude-code`'s two-phase load (`parseJSONL` skips malformed lines,
+    /// `json.ts:155`; `isTranscriptMessage` selects chain participants,
+    /// `sessionStorage.ts:139`): parse each line as a `Value`, skip on parse
+    /// error, and keep only lines whose outer `type` is a transcript message.
+    /// Metadata + unknown + malformed lines are dropped here — use
+    /// [`Self::read_routed`] when the side-maps (summaries / titles) are needed.
+    ///
+    /// The function is now infallible-on-content (no `ReaderError::Parse`); the
+    /// only error path left is the underlying [`FsError`] from the read itself.
     pub async fn read_all(&self) -> Result<Vec<JsonlMessage>, ReaderError> {
+        Ok(self.read_routed().await?.messages_in_order)
+    }
+
+    /// Full two-phase tolerant load — see [`LoadedTranscript`]. Returns the
+    /// chain participants (file-order + by-uuid index) AND the Tier-1 metadata
+    /// side-maps (`summary` → `leafUuid`, `custom-title`/`ai-title` →
+    /// `sessionId`). Tier-2 / unknown line types and malformed lines are
+    /// silently skipped, NEVER errored — faithful to `loadTranscriptFile`.
+    pub async fn read_routed(&self) -> Result<LoadedTranscript, ReaderError> {
         let path_str = self.path.to_str().expect("UTF-8 path");
         let content = self.fs.read_file(path_str, None, None).await?.content;
-        let mut out = Vec::new();
-        for (idx, line) in content.lines().enumerate() {
-            if line.is_empty() {
-                continue;
-            }
-            let msg: JsonlMessage =
-                serde_json::from_str(line).map_err(|e| ReaderError::Parse(idx, e.to_string()))?;
-            out.push(msg);
-        }
-        Ok(out)
+        Ok(route_lines(&content))
     }
 
     /// Read up to `LITE_READ_BUF_SIZE` bytes from the file head and extract
@@ -101,6 +164,76 @@ impl JsonlReader {
             first_type,
         })
     }
+}
+
+/// Route every non-empty line of a JSONL transcript into a [`LoadedTranscript`]
+/// — the pure core of [`JsonlReader::read_routed`] (kept free-standing so it can
+/// be unit-tested without a `FileSystem`). Two-phase, byte-for-byte faithful to
+/// `claude-code`'s `loadTranscriptFile` routing loop (`sessionStorage.ts:3472`):
+///
+/// 1. Parse the line as `serde_json::Value`. On parse error → `continue` (skip
+///    malformed; mirrors `parseJSONL`'s `try/catch`, `json.ts:155`). NEVER error.
+/// 2. Branch on `value["type"]`:
+///    - transcript message (`user`/`assistant`/`attachment`/`system`,
+///      [`is_transcript_message_type`]) → `from_value::<JsonlMessage>` into
+///      `messages_in_order` + `by_uuid`. A `JsonlMessage` that fails to
+///      deserialize (e.g. a non-string `uuid`) is skipped, not errored — pure
+///      metadata lines are routed out FIRST by `type`, so a transcript-typed
+///      line that still won't parse is genuinely corrupt and dropped.
+///    - Tier-1 metadata (`summary`/`custom-title`/`ai-title`) → side-maps.
+///    - Tier-2 + unknown (`file-history-snapshot`, `queue-operation`,
+///      `permission-mode`, `mode`, `last-prompt`, …) → ignored.
+#[must_use]
+pub fn route_lines(content: &str) -> LoadedTranscript {
+    let mut out = LoadedTranscript::default();
+    for line in content.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        // Phase 1 — tolerant JSON parse; skip malformed lines (no error).
+        let Ok(value) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        let ty = value.get("type").and_then(Value::as_str).unwrap_or("");
+        if is_transcript_message_type(ty) {
+            // Phase 2a — chain participant. Route by `type` first, so we only
+            // attempt the strict `JsonlMessage` parse on lines that are SUPPOSED
+            // to be messages; a failure here means a corrupt transcript line, so
+            // skip it (still no hard error, matching the tolerant contract).
+            let Ok(msg) = serde_json::from_value::<JsonlMessage>(value) else {
+                continue;
+            };
+            out.by_uuid.insert(msg.uuid.clone(), msg.clone());
+            out.messages_in_order.push(msg);
+        } else if ty == "summary" {
+            // `summaries.set(entry.leafUuid, entry.summary)` — keyed by leafUuid.
+            if let (Some(leaf), Some(summary)) = (
+                value.get("leafUuid").and_then(Value::as_str),
+                value.get("summary").and_then(Value::as_str),
+            ) {
+                out.summaries.insert(leaf.to_string(), summary.to_string());
+            }
+        } else if ty == "custom-title" {
+            // `customTitles.set(entry.sessionId, entry.customTitle)`.
+            if let (Some(sid), Some(title)) = (
+                value.get("sessionId").and_then(Value::as_str),
+                value.get("customTitle").and_then(Value::as_str),
+            ) {
+                out.custom_titles.insert(sid.to_string(), title.to_string());
+            }
+        } else if ty == "ai-title" {
+            // `saveAiGeneratedTitle` writes `{sessionId, aiTitle}`.
+            if let (Some(sid), Some(title)) = (
+                value.get("sessionId").and_then(Value::as_str),
+                value.get("aiTitle").and_then(Value::as_str),
+            ) {
+                out.ai_titles.insert(sid.to_string(), title.to_string());
+            }
+        }
+        // else: Tier-2 / unknown → ignored (no error).
+    }
+    out
 }
 
 /// 1:1 port of `claude-code/src/utils/sessionStoragePortable.ts:53-76`.

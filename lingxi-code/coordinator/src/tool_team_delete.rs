@@ -519,6 +519,7 @@ mod tests {
                     content: "ping".into(),
                     message_id: "m1".into(),
                     timestamp: std::time::SystemTime::now(),
+                    request_id: None,
                 },
             )
             .await;

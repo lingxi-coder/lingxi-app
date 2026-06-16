@@ -44,6 +44,7 @@ impl MailboxRouterHandle for MailboxRouter {
             content: message.content,
             message_id: message.message_id,
             timestamp: message.timestamp,
+            request_id: None,
         };
 
         // Adapt the concrete error space onto the trait's error type.

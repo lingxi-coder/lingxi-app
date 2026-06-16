@@ -499,3 +499,65 @@ fn default_session_tool_list_has_no_duplicate_names() {
         "no tool name may appear twice in a default-session registry"
     );
 }
+
+/// A coordinator session registers the coordinator `SendMessage` IN PLACE OF the
+/// `tool_ui` builtin: exactly ONE `SendMessage`, and it is the coordinator one
+/// (distinguished by its `to` schema description, which advertises the `uds:` /
+/// `bridge:` peer schemes the leaner `tool_ui` builtin does not). Guards against
+/// the builtin silently shadowing the coordinator tool (`find_by_name` is
+/// builtin-first).
+#[test]
+fn coordinator_session_registers_coordinator_send_message_not_builtin() {
+    let api = ScriptedApiClient::new();
+    let fx = make_coordinator_fixture(&api);
+    let wiring = engine_desktop::CoordinatorWiring {
+        team: fx.team.clone(),
+        mode: Arc::new(coordinator::CoordinatorMode::new()),
+        spawn_seam: fx.spawn_seam.clone(),
+        output: fx.output.clone(),
+        bus: None,
+    };
+    let reg = engine_desktop::desktop_tool_registry(stub_ctx(), Some(wiring), None);
+
+    let names = reg.all_names();
+    assert_eq!(
+        names.iter().filter(|n| *n == "SendMessage").count(),
+        1,
+        "exactly one SendMessage in a coordinator session (no builtin shadow)"
+    );
+
+    // Behavior marker: the coordinator `SendMessage`'s `to` description names the
+    // `uds:` / `bridge:` peer schemes; the `tool_ui` builtin's does not.
+    let send = reg.find_by_name("SendMessage").expect("SendMessage registered");
+    let to_desc = send.input_schema()["properties"]["to"]["description"]
+        .as_str()
+        .unwrap_or_default();
+    assert!(
+        to_desc.contains("uds:") && to_desc.contains("bridge:"),
+        "a coordinator session must register the coordinator SendMessage (its `to` schema names uds:/bridge:), got: {to_desc:?}"
+    );
+}
+
+/// A coordinator-session registry also upholds the no-duplicate-names invariant
+/// (the no-silent-shadow guardrail across ALL the spliced coordinator tools).
+#[test]
+fn coordinator_session_tool_list_has_no_duplicate_names() {
+    let api = ScriptedApiClient::new();
+    let fx = make_coordinator_fixture(&api);
+    let wiring = engine_desktop::CoordinatorWiring {
+        team: fx.team.clone(),
+        mode: Arc::new(coordinator::CoordinatorMode::new()),
+        spawn_seam: fx.spawn_seam.clone(),
+        output: fx.output.clone(),
+        bus: None,
+    };
+    let reg = engine_desktop::desktop_tool_registry(stub_ctx(), Some(wiring), None);
+    let mut names = reg.all_names();
+    names.sort();
+    let mut deduped = names.clone();
+    deduped.dedup();
+    assert_eq!(
+        names, deduped,
+        "no tool name may appear twice in a coordinator-session registry"
+    );
+}

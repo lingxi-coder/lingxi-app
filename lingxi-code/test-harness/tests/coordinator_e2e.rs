@@ -19,6 +19,7 @@ async fn coordinator_routes_message_to_worker() {
         content: "go".into(),
         message_id: "m1".into(),
         timestamp: std::time::SystemTime::now(),
+        request_id: None,
     };
     team.mailbox_router
         .route(&worker, msg.clone())
@@ -42,6 +43,7 @@ async fn route_to_unknown_worker_errors() {
                 content: String::new(),
                 message_id: String::new(),
                 timestamp: std::time::SystemTime::now(),
+                request_id: None,
             },
         )
         .await;

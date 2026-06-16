@@ -220,6 +220,7 @@ impl Tool for SyntheticOutputTool {
                 content,
                 message_id: tool_api::util::ids::ulid_or_uuid(),
                 timestamp: SystemTime::now(),
+                request_id: None,
             };
 
             self.team

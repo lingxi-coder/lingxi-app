@@ -28,6 +28,13 @@ pub struct TeammateMessage {
     pub message_id: String,
     /// Wall-clock send time.
     pub timestamp: std::time::SystemTime,
+    /// Optional swarm-protocol request id for messages that participate in a
+    /// request/response handshake (shutdown / plan-approval). Minted by
+    /// `SendMessage` for a `shutdown_request` (`generateRequestId`,
+    /// `SendMessageTool.ts:276`) and echoed by the corresponding response.
+    /// `None` for ordinary teammate messages.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<String>,
 }
 
 /// Originator of a [`TeammateMessage`].

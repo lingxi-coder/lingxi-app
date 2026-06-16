@@ -527,12 +527,14 @@ pub fn desktop_tool_registry(
 /// takes ownership to avoid a redundant clone.
 ///
 /// When `coordinator` is `Some(..)` (a coordinator-capable session), the
-/// coordinator `TeamCreate` / `TeamDelete` tools are registered IN PLACE OF
-/// `tool_team`'s pair: `tool_team::register_all` is SKIPPED entirely (it
-/// registers exactly those two and no others — see `tools/team/src/lib.rs`), and
-/// the coordinator pair is pushed instead. This keeps exactly ONE `TeamCreate`
-/// and ONE `TeamDelete` in the registry (no silent shadow, no duplicate name in
-/// the system prompt). When `None`, `tool_team::register_all` runs as before and
+/// coordinator `TeamCreate` / `TeamDelete` / `SendMessage` tools are registered
+/// IN PLACE OF their builtin namesakes: `tool_team::register_all` is SKIPPED
+/// entirely (it registers exactly `TeamCreate` + `TeamDelete`), and
+/// `tool_ui::register_all_except_send_message` drops the builtin `SendMessage`,
+/// so the richer coordinator versions are the ONLY ones with those names. This
+/// keeps exactly ONE of each in the registry (no silent shadow — `find_by_name`
+/// is builtin-first — and no duplicate name in the system prompt). When `None`,
+/// `tool_team::register_all` + the full `tool_ui::register_all` run as before and
 /// the coordinator tools are absent — byte-identical to the pre-M10 build.
 pub fn register_desktop_tools(
     reg: &mut ToolRegistry,
@@ -560,7 +562,17 @@ pub fn register_desktop_tools(
     // can drive the claude.ai CCR API in-process. `register_all_with_auth`
     // registers `ScheduleCron` + `RemoteTrigger` (the latter with `cron_auth`).
     tool_cron::register_all_with_auth(reg, ctx.clone(), cron_auth);
-    tool_ui::register_all(reg, ctx.clone());
+    // In coordinator mode the richer `coordinator` `SendMessage` (registered
+    // below, IN PLACE OF this builtin) carries the swarm routing surface, so we
+    // skip the leaner `tool_ui` `SendMessage` here — otherwise, because the
+    // registry's `find_by_name` is builtin-first, the earlier `tool_ui` copy
+    // would silently shadow the coordinator one. Mirrors the `tool_team`-skip
+    // for `TeamCreate` / `TeamDelete`.
+    if coordinator.is_some() {
+        tool_ui::register_all_except_send_message(reg, ctx.clone());
+    } else {
+        tool_ui::register_all(reg, ctx.clone());
+    }
     // SKILLEXEC.2: when a `SkillLoader` is supplied (real sessions wire the
     // `CommandRegistry`-backed loader), register the `Skill` tool with it so a
     // model-invoked skill resolves to a real slash command and expands. The
@@ -3850,16 +3862,19 @@ mod tests {
         );
     }
 
-    /// T13: a coordinator session wires the shared `MailboxRouter` (the one the
-    /// `TeamRegistry` owns) into `BuiltinToolContext.mailbox_router`, so the
-    /// builtin `SendMessage` tool and coordinator routing share the SAME
-    /// mailboxes. This exercises the exact `tool_ctx.mailbox_router = Some(..)`
-    /// wiring decision T13 introduces in `build()`: we assemble the desktop tool
-    /// registry the way the coordinator branch does (the team's router cast to
-    /// `dyn MailboxRouterHandle` placed on the context), then drive the builtin
-    /// `SendMessage` tool. Because the router IS wired, a route to a registered
-    /// worker mailbox SUCCEEDS — the tool no longer takes the "router not wired"
-    /// `Internal` error path it returns when `mailbox_router` is `None`.
+    /// A coordinator session can route a `SendMessage` to a registered worker
+    /// mailbox. Since batch D2b the coordinator session registers the richer
+    /// `coordinator` `SendMessage` IN PLACE OF the `tool_ui` builtin (it routes
+    /// through the `TeamRegistry`'s OWN `MailboxRouter` directly, resolving the
+    /// recipient by teammate name / agent id). A route to a registered worker
+    /// therefore SUCCEEDS. The shared router is also still wired onto
+    /// `ctx.mailbox_router` (the load-bearing T13 decision for the OTHER tools
+    /// that read it, e.g. `TaskUpdate`'s owner-change notification).
+    ///
+    /// The negative side: a DEFAULT (non-coordinator) session registers the
+    /// leaner `tool_ui` builtin, which reads `ctx.mailbox_router`; with `None`
+    /// (the default-session default) its route takes the "router not wired"
+    /// `Internal` error path. This locks both sides of the wiring decision.
     #[tokio::test]
     async fn mailbox_router_is_wired_when_coordinator() {
         // The shared coordinator router — exactly what `build()` clones into
@@ -3872,7 +3887,8 @@ mod tests {
 
         // Assemble the tool registry the way `build()`'s coordinator branch does:
         // the team's `MailboxRouter` cast to `dyn MailboxRouterHandle` on the
-        // context (the load-bearing wiring — `None` here is the pre-M10 default).
+        // context (still wired for the tools that read it), plus the coordinator
+        // wiring that splices the coordinator `SendMessage` in.
         let mut ctx = stub_tool_ctx();
         ctx.mailbox_router =
             Some(team.mailbox_router.clone() as Arc<dyn traits::mailbox::MailboxRouterHandle>);
@@ -3885,32 +3901,32 @@ mod tests {
         };
         let reg = desktop_tool_registry(ctx, Some(wiring), None);
 
-        // The builtin SendMessage tool (from `tool_ui`) reads
-        // `ctx.mailbox_router`. With the router wired, routing to the registered
-        // worker succeeds. With `None` it would return the
-        // "MailboxRouterHandle not wired" `Internal` error instead.
+        // The coordinator `SendMessage` resolves the recipient by name and routes
+        // through `team.mailbox_router` directly — a route to the registered
+        // worker "alpha" succeeds.
         let send = reg
             .find_by_name("SendMessage")
-            .expect("SendMessage builtin must be registered");
+            .expect("SendMessage must be registered");
         let result = send
             .call(
                 serde_json::json!({
-                    "to_agent_id": worker.as_uuid().to_string(),
+                    "to": "alpha",
+                    "summary": "kick off",
                     "message": "hello teammate",
                 }),
                 tool_api::test_support::fresh_ctx(),
                 tool_api::test_support::fresh_tx(),
             )
             .await
-            .expect("SendMessage must route through the wired router (not the unwired error path)");
-        // A successful route returns a result the tool surfaces (non-error path).
-        let _ = result;
+            .expect("coordinator SendMessage must route to the registered worker mailbox");
+        assert_eq!(
+            result.data["success"], true,
+            "a route to a registered worker returns success"
+        );
 
-        // Negative side of the conditional: the DEFAULT branch leaves
-        // `mailbox_router` `None` (exactly what `build()` does for a non-
-        // coordinator session), so the SAME SendMessage call takes the
-        // "router not wired" `Internal` error path. This locks both sides of
-        // the T13 wiring decision so a regression in either is caught.
+        // Negative side: the DEFAULT branch registers the `tool_ui` builtin and
+        // leaves `mailbox_router` `None`, so its route takes the "router not
+        // wired" `Internal` error path.
         let default_reg = desktop_tool_registry(stub_tool_ctx(), None, None);
         let default_send = default_reg
             .find_by_name("SendMessage")

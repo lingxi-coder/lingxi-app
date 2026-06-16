@@ -134,6 +134,39 @@ fn fresh_invocation_id() -> String {
     tool_api::util::ids::ulid_or_uuid()
 }
 
+/// Civil date `(year, month, day)` from days since the Unix epoch — port of
+/// Howard Hinnant's `civil_from_days`. Valid for the proleptic Gregorian
+/// calendar; we only ever feed it non-negative (post-1970) day counts.
+fn civil_from_days(z: i64) -> (i64, u32, u32) {
+    let z = z + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097; // [0, 146096]
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365; // [0, 399]
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // [0, 365]
+    let mp = (5 * doy + 2) / 153; // [0, 11]
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u32; // [1, 31]
+    let m = (if mp < 10 { mp + 3 } else { mp - 9 }) as u32; // [1, 12]
+    (if m <= 2 { y + 1 } else { y }, m, d)
+}
+
+/// ISO-8601 UTC timestamp with millisecond precision
+/// (e.g. `2026-06-07T12:34:56.789Z`) — port of TS `new Date().toISOString()`.
+/// Std-only; deterministic for a fixed `SystemTime`. Mirrors the proven
+/// `tools/ui/src/brief.rs` impl (kept local to avoid a cross-crate dep).
+fn iso8601_utc(t: std::time::SystemTime) -> String {
+    let dur = t
+        .duration_since(std::time::SystemTime::UNIX_EPOCH)
+        .unwrap_or(std::time::Duration::ZERO);
+    let secs = dur.as_secs() as i64;
+    let millis = dur.subsec_millis();
+    let days = secs.div_euclid(86_400);
+    let tod = secs.rem_euclid(86_400);
+    let (hh, mm, ss) = (tod / 3600, (tod % 3600) / 60, tod % 60);
+    let (y, m, d) = civil_from_days(days);
+    format!("{y:04}-{m:02}-{d:02}T{hh:02}:{mm:02}:{ss:02}.{millis:03}Z")
+}
+
 // ==== Product-A V2 gating (sub-batch [2]) ===================================
 
 /// Feature-flag key carrying the host's non-interactive-session bit into
@@ -168,6 +201,35 @@ pub fn is_todo_v2_enabled(ctx: &ToolStaticContext) -> bool {
         .copied()
         .unwrap_or(false);
     todo_v2_enabled_inner(env_truthy("CLAUDE_CODE_ENABLE_TASKS"), non_interactive)
+}
+
+/// Pure core of [`is_agent_swarms_enabled`] (`isAgentSwarmsEnabled`,
+/// `utils/agentSwarmsEnabled.ts:24-44`): ant builds are always on; external
+/// builds require opt-in via the experimental env var (or the `--agent-teams`
+/// CLI flag). The GrowthBook `tengu_amber_flint` killswitch and the
+/// `process.argv` flag are host-runtime signals not threaded into the tool
+/// crate, so the env-driven core is ported here (the killswitch is `true` by
+/// default upstream, and the flag is an alternate opt-in to the same env bit).
+fn agent_swarms_enabled_inner(user_type_ant: bool, experimental_env: bool) -> bool {
+    user_type_ant || experimental_env
+}
+
+/// Whether the agent-swarms/teammate surface is live at call time
+/// (`isAgentSwarmsEnabled()`). Gates the `TaskUpdate` auto-owner + owner-change
+/// mailbox notification side-effects (`TaskUpdateTool.ts:188-199,277-298`).
+///
+/// `isEnabled()` for the swarm *tools* reads the `agent_swarms_enabled`
+/// [`ToolStaticContext`] feature flag (see `tool_team_create.rs`); the
+/// side-effect path runs inside `call()` where only env signals are available,
+/// so it mirrors the env-driven core of `agentSwarmsEnabled.ts` directly
+/// (`USER_TYPE === 'ant'` OR a truthy `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS`).
+#[must_use]
+pub fn is_agent_swarms_enabled() -> bool {
+    let user_type_ant = std::env::var("USER_TYPE").is_ok_and(|v| v == "ant");
+    agent_swarms_enabled_inner(
+        user_type_ant,
+        env_truthy("CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS"),
+    )
 }
 
 // ==== Verification nudge (sub-batch [5]) ====================================
@@ -270,6 +332,7 @@ fn metadata_internal_truthy(metadata: &Map<String, Value>) -> bool {
 
 /// Parsed `status` input for `TaskUpdate`: absent / the special `deleted`
 /// action / a real `TodoState`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum StatusInput {
     None,
     Deleted,
@@ -1279,8 +1342,23 @@ impl Tool for TaskUpdateTool {
                 updated_fields.push("owner".into());
             }
         }
-        // PARITY-GAP: the isAgentSwarmsEnabled() auto-owner branch
-        // (TaskUpdateTool.ts:730-741) is omitted.
+        // Auto-set owner when a teammate marks a task as in_progress without
+        // explicitly providing an owner. This ensures the task list can match
+        // todo items to teammates for showing activity status
+        // (TaskUpdateTool.ts:188-199). claude-code uses `getAgentName()`; the
+        // Rust acting-agent identifier is `ctx.agent_id` (no name is plumbed —
+        // the id string is the "else the id" fallback). Skipped (like TS when
+        // `getAgentName()` is undefined) when no agent id is bound to the call.
+        if is_agent_swarms_enabled()
+            && status_input == StatusInput::State(TodoState::InProgress)
+            && in_owner.is_none()
+            && existing.owner.as_deref().is_none_or(str::is_empty)
+        {
+            if let Some(agent) = ctx.agent_id {
+                new_owner = Some(agent.to_string());
+                updated_fields.push("owner".into());
+            }
+        }
         if let Some(meta) = in_metadata {
             let mut merged = existing.metadata.clone();
             for (key, value) in meta {
@@ -1334,7 +1412,39 @@ impl Tool for TaskUpdateTool {
                 })
                 .await;
         }
-        // PARITY-GAP: teammate-mailbox owner notification (TaskUpdateTool.ts:818-840) omitted.
+
+        // Notify new owner via mailbox when ownership changes
+        // (TaskUpdateTool.ts:277-298). Best-effort, like the TS `writeToMailbox`
+        // (which swallows its own errors): a routing failure (e.g. an unknown /
+        // non-id owner string the id-based router can't resolve) never fails the
+        // TaskUpdate itself. `assignedBy` mirrors `getAgentName() || 'team-lead'`
+        // — the acting `ctx.agent_id` string, else the `team-lead` label. The
+        // `from` route address is that same identifier.
+        if is_agent_swarms_enabled() {
+            if let (Some(owner), Some(router)) = (new_owner.clone(), self.ctx.mailbox_router.clone())
+            {
+                let sender_name = ctx
+                    .agent_id
+                    .map_or_else(|| "team-lead".to_string(), |a| a.to_string());
+                let timestamp = iso8601_utc(std::time::SystemTime::now());
+                let assignment_message = serde_json::to_string(&json!({
+                    "type": "task_assignment",
+                    "taskId": task_id,
+                    "subject": existing.subject,
+                    "description": existing.description,
+                    "assignedBy": sender_name,
+                    "timestamp": timestamp,
+                }))
+                .unwrap_or_default();
+                let msg = traits::mailbox::MailboxMessage {
+                    message_id: fresh_invocation_id(),
+                    content: assignment_message,
+                    timestamp: std::time::SystemTime::now(),
+                };
+                // Ignore the routing result — notification is best-effort.
+                let _ = router.route(&sender_name, &owner, msg).await;
+            }
+        }
 
         // addBlocks: this task blocks each listed id.
         if let Some(add_blocks) = input.get("addBlocks").and_then(Value::as_array) {
@@ -2129,6 +2239,14 @@ impl Tool for TaskOutputTool {
 mod tests {
     use super::*;
 
+    /// Process-global lock shared by every test that mutates the env vars the
+    /// file-backed [`TodoStore`] resolves at call time (`CLAUDE_CONFIG_DIR`,
+    /// `CLAUDE_CODE_TASK_LIST_ID`) or the swarm gate
+    /// (`CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS`). Without serialization these
+    /// tests race on the shared env and a store read can land in another test's
+    /// throwaway config dir (→ spurious "Task not found").
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn six_tool_name_constants_locked() {
         assert_eq!(TASK_CREATE_TOOL_NAME, "TaskCreate");
@@ -2419,11 +2537,13 @@ mod tests {
 
         /// Restore-on-drop guard for the two process-global env vars this test
         /// flips, plus cleanup of the throwaway store dir — runs even if an
-        /// assertion panics.
+        /// assertion panics. Holds the shared [`super::ENV_LOCK`] so it does not
+        /// race other env-mutating tests on `CLAUDE_CONFIG_DIR`.
         struct EnvGuard {
             prev_config: Option<std::ffi::OsString>,
             prev_list: Option<std::ffi::OsString>,
             dir: std::path::PathBuf,
+            _lock: std::sync::MutexGuard<'static, ()>,
         }
         impl Drop for EnvGuard {
             fn drop(&mut self) {
@@ -2466,6 +2586,9 @@ mod tests {
                 prev_config: std::env::var_os("CLAUDE_CONFIG_DIR"),
                 prev_list: std::env::var_os("CLAUDE_CODE_TASK_LIST_ID"),
                 dir: dir.clone(),
+                _lock: super::ENV_LOCK
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner),
             };
             std::env::set_var("CLAUDE_CONFIG_DIR", &dir);
             std::env::set_var("CLAUDE_CODE_TASK_LIST_ID", &unique);
@@ -2521,6 +2644,305 @@ mod tests {
                 "a real ->completed transition that closes a 3+ list fires the nudge"
             );
             assert_eq!(res.data["statusChange"]["to"], "completed");
+        }
+    }
+
+    // ── Swarm-conditional TaskUpdate side-effects (batch D2b ITEM 5) ──────
+    //   5a auto-owner (TaskUpdateTool.ts:188-199) + 5b owner-change mailbox
+    //   notification (TaskUpdateTool.ts:277-298).
+    mod swarm_side_effects {
+        use super::*;
+        use protocol::AgentId;
+        use std::sync::{Arc, Mutex};
+        use telemetry::AnalyticsBus;
+        use tool_api::test_support::{ctx_for_file_tools, fresh_ctx, fresh_tx, make_dummy_fs};
+        use traits::mailbox::{
+            MailboxError, MailboxMessage, MailboxRouterHandle, RouteAck,
+        };
+
+        /// Restore-on-drop guard for the swarm + store env vars; also removes the
+        /// throwaway store dir. Runs even on assertion panic.
+        struct Guard {
+            prev_swarm: Option<std::ffi::OsString>,
+            prev_config: Option<std::ffi::OsString>,
+            prev_list: Option<std::ffi::OsString>,
+            dir: std::path::PathBuf,
+            _lock: std::sync::MutexGuard<'static, ()>,
+        }
+        impl Drop for Guard {
+            fn drop(&mut self) {
+                restore("CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS", &self.prev_swarm);
+                restore("CLAUDE_CONFIG_DIR", &self.prev_config);
+                restore("CLAUDE_CODE_TASK_LIST_ID", &self.prev_list);
+                let _ = std::fs::remove_dir_all(&self.dir);
+            }
+        }
+        fn restore(key: &str, prev: &Option<std::ffi::OsString>) {
+            match prev {
+                Some(v) => std::env::set_var(key, v),
+                None => std::env::remove_var(key),
+            }
+        }
+
+        /// Recording `MailboxRouterHandle` — captures every `route` call.
+        #[derive(Default)]
+        struct RecordingRouter {
+            sent: Mutex<Vec<(String, String, MailboxMessage)>>,
+        }
+        #[async_trait]
+        impl MailboxRouterHandle for RecordingRouter {
+            async fn route(
+                &self,
+                from_agent: &str,
+                to_agent: &str,
+                message: MailboxMessage,
+            ) -> Result<RouteAck, MailboxError> {
+                self.sent
+                    .lock()
+                    .unwrap()
+                    .push((from_agent.into(), to_agent.into(), message));
+                Ok(RouteAck {
+                    claimed_at: std::time::SystemTime::now(),
+                    claim_window_secs: 30,
+                })
+            }
+        }
+
+        /// Isolate the file-backed store + set the swarm flag; returns the guard,
+        /// the unique list id, and the recording router.
+        fn setup(swarm_on: bool) -> (Guard, String, Arc<RecordingRouter>) {
+            let lock = super::ENV_LOCK
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let unique = format!(
+                "lingxi-task-swarm-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_nanos())
+                    .unwrap_or(0)
+            );
+            let dir = std::env::temp_dir().join(&unique);
+            let guard = Guard {
+                prev_swarm: std::env::var_os("CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS"),
+                prev_config: std::env::var_os("CLAUDE_CONFIG_DIR"),
+                prev_list: std::env::var_os("CLAUDE_CODE_TASK_LIST_ID"),
+                dir: dir.clone(),
+                _lock: lock,
+            };
+            if swarm_on {
+                std::env::set_var("CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS", "1");
+            } else {
+                std::env::remove_var("CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS");
+            }
+            std::env::set_var("CLAUDE_CONFIG_DIR", &dir);
+            std::env::set_var("CLAUDE_CODE_TASK_LIST_ID", &unique);
+            (guard, unique, Arc::new(RecordingRouter::default()))
+        }
+
+        fn bctx(router: Arc<RecordingRouter>) -> BuiltinToolContext {
+            let mut c = ctx_for_file_tools(
+                make_dummy_fs(),
+                Arc::new(AnalyticsBus::new()),
+                vec![std::env::temp_dir()],
+            );
+            c.mailbox_router = Some(router as Arc<dyn MailboxRouterHandle>);
+            c
+        }
+
+        fn ctx_with_agent(agent: Option<AgentId>) -> ToolUseContext {
+            let mut c = fresh_ctx();
+            c.agent_id = agent;
+            c
+        }
+
+        fn task(subject: &str, status: TodoState) -> TodoTask {
+            let mut t = TodoTask::new(subject.into(), "the description".into(), None, Map::new());
+            t.status = status;
+            t
+        }
+
+        // ── 5a auto-owner ────────────────────────────────────────────────
+        #[tokio::test]
+        async fn auto_owner_sets_owner_when_swarm_in_progress_unowned() {
+            let (_g, list, router) = setup(true);
+            let store = TodoStore::for_list(&list);
+            let id = store.create(task("Build it", TodoState::Pending)).await.unwrap();
+
+            let agent = AgentId::new();
+            let tool = TaskUpdateTool::new(bctx(router));
+            let res = tool
+                .call(
+                    json!({ "taskId": &id, "status": "in_progress" }),
+                    ctx_with_agent(Some(agent)),
+                    fresh_tx(),
+                )
+                .await
+                .expect("update ok");
+
+            assert_eq!(res.data["success"], true);
+            let fields = res.data["updatedFields"].as_array().unwrap();
+            assert!(
+                fields.iter().any(|f| f == "owner"),
+                "owner should be in updatedFields: {fields:?}"
+            );
+            // Persisted owner == the acting agent id string (no name plumbed).
+            let after = store.get(&id).await.unwrap();
+            assert_eq!(after.owner.as_deref(), Some(agent.to_string().as_str()));
+        }
+
+        #[tokio::test]
+        async fn auto_owner_skipped_when_swarm_off() {
+            let (_g, list, router) = setup(false);
+            let store = TodoStore::for_list(&list);
+            let id = store.create(task("Build it", TodoState::Pending)).await.unwrap();
+
+            let tool = TaskUpdateTool::new(bctx(router));
+            tool.call(
+                json!({ "taskId": &id, "status": "in_progress" }),
+                ctx_with_agent(Some(AgentId::new())),
+                fresh_tx(),
+            )
+            .await
+            .expect("update ok");
+
+            assert!(store.get(&id).await.unwrap().owner.is_none(), "no auto-owner when swarms off");
+        }
+
+        #[tokio::test]
+        async fn auto_owner_skipped_when_not_in_progress() {
+            let (_g, list, router) = setup(true);
+            let store = TodoStore::for_list(&list);
+            let id = store.create(task("Build it", TodoState::Pending)).await.unwrap();
+
+            let tool = TaskUpdateTool::new(bctx(router));
+            // completed (not in_progress) ⇒ no auto-owner.
+            tool.call(
+                json!({ "taskId": &id, "status": "completed" }),
+                ctx_with_agent(Some(AgentId::new())),
+                fresh_tx(),
+            )
+            .await
+            .expect("update ok");
+
+            assert!(store.get(&id).await.unwrap().owner.is_none(), "auto-owner only on in_progress");
+        }
+
+        #[tokio::test]
+        async fn auto_owner_skipped_when_already_owned() {
+            let (_g, list, router) = setup(true);
+            let store = TodoStore::for_list(&list);
+            let mut seed = task("Build it", TodoState::Pending);
+            seed.owner = Some("existing-owner".into());
+            let id = store.create(seed).await.unwrap();
+
+            let tool = TaskUpdateTool::new(bctx(router));
+            tool.call(
+                json!({ "taskId": &id, "status": "in_progress" }),
+                ctx_with_agent(Some(AgentId::new())),
+                fresh_tx(),
+            )
+            .await
+            .expect("update ok");
+
+            // The pre-existing owner is preserved, not overwritten by auto-owner.
+            assert_eq!(store.get(&id).await.unwrap().owner.as_deref(), Some("existing-owner"));
+        }
+
+        #[tokio::test]
+        async fn auto_owner_skipped_when_no_agent_id() {
+            let (_g, list, router) = setup(true);
+            let store = TodoStore::for_list(&list);
+            let id = store.create(task("Build it", TodoState::Pending)).await.unwrap();
+
+            let tool = TaskUpdateTool::new(bctx(router));
+            // agent_id None (main thread / getAgentName() undefined) ⇒ no auto-owner.
+            tool.call(
+                json!({ "taskId": &id, "status": "in_progress" }),
+                ctx_with_agent(None),
+                fresh_tx(),
+            )
+            .await
+            .expect("update ok");
+
+            assert!(store.get(&id).await.unwrap().owner.is_none(), "no auto-owner without an agent id");
+        }
+
+        // ── 5b owner-change mailbox notification ─────────────────────────
+        #[tokio::test]
+        async fn owner_change_emits_task_assignment_to_new_owner() {
+            let (_g, list, router) = setup(true);
+            let store = TodoStore::for_list(&list);
+            let id = store
+                .create(task("Ship the feature", TodoState::Pending))
+                .await
+                .unwrap();
+
+            // Explicit owner change to a resolvable agent-id string (the id-based
+            // router parses it). The sender is the acting agent id.
+            let new_owner = AgentId::new();
+            let sender = AgentId::new();
+            let tool = TaskUpdateTool::new(bctx(router.clone()));
+            tool.call(
+                json!({ "taskId": &id, "owner": new_owner.to_string() }),
+                ctx_with_agent(Some(sender)),
+                fresh_tx(),
+            )
+            .await
+            .expect("update ok");
+
+            let sent = router.sent.lock().unwrap();
+            assert_eq!(sent.len(), 1, "exactly one task_assignment routed");
+            let (from, to, msg) = &sent[0];
+            assert_eq!(to, &new_owner.to_string(), "routed to the new owner");
+            assert_eq!(from, &sender.to_string(), "from = acting agent id");
+
+            let body: Value = serde_json::from_str(&msg.content).unwrap();
+            assert_eq!(body["type"], "task_assignment");
+            assert_eq!(body["taskId"], id);
+            assert_eq!(body["subject"], "Ship the feature");
+            assert_eq!(body["description"], "the description");
+            assert_eq!(body["assignedBy"], sender.to_string());
+            assert!(body["timestamp"].as_str().unwrap().ends_with('Z'), "ISO-8601 Z timestamp");
+        }
+
+        #[tokio::test]
+        async fn no_notification_when_owner_unchanged() {
+            let (_g, list, router) = setup(true);
+            let store = TodoStore::for_list(&list);
+            let mut seed = task("Ship it", TodoState::Pending);
+            seed.owner = Some("same-owner".into());
+            let id = store.create(seed).await.unwrap();
+
+            let tool = TaskUpdateTool::new(bctx(router.clone()));
+            // Re-send the SAME owner ⇒ no diff ⇒ no notification.
+            tool.call(
+                json!({ "taskId": &id, "owner": "same-owner" }),
+                ctx_with_agent(Some(AgentId::new())),
+                fresh_tx(),
+            )
+            .await
+            .expect("update ok");
+
+            assert!(router.sent.lock().unwrap().is_empty(), "no route on a no-op owner write");
+        }
+
+        #[tokio::test]
+        async fn no_notification_when_swarm_off() {
+            let (_g, list, router) = setup(false);
+            let store = TodoStore::for_list(&list);
+            let id = store.create(task("Ship it", TodoState::Pending)).await.unwrap();
+
+            let tool = TaskUpdateTool::new(bctx(router.clone()));
+            tool.call(
+                json!({ "taskId": &id, "owner": AgentId::new().to_string() }),
+                ctx_with_agent(Some(AgentId::new())),
+                fresh_tx(),
+            )
+            .await
+            .expect("update ok");
+
+            assert!(router.sent.lock().unwrap().is_empty(), "no route when swarms off");
         }
     }
 

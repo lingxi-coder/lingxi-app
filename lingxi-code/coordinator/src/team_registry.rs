@@ -159,6 +159,25 @@ impl TeamRegistry {
             .cloned()
     }
 
+    /// Resolve a worker by its display `name` (case-insensitive).
+    ///
+    /// Coordinator-side `SendMessage` accepts a bare teammate name as the
+    /// recipient (TS `to`), which it resolves to the worker's [`AgentId`] before
+    /// routing. Linear scan over the workers map — acceptable at per-session team
+    /// scale (a handful of workers), mirroring [`Self::find_by_task_id`]. An
+    /// empty `name` never matches.
+    pub async fn find_by_name(&self, name: &str) -> Option<WorkerAgent> {
+        if name.is_empty() {
+            return None;
+        }
+        self.workers
+            .read()
+            .await
+            .values()
+            .find(|w| w.name.eq_ignore_ascii_case(name))
+            .cloned()
+    }
+
     /// Set (or clear) the team name for this coordinator session.
     pub async fn set_team_name(&self, name: Option<String>) {
         *self.team_name.write().await = name;

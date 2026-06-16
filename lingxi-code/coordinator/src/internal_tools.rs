@@ -1,26 +1,27 @@
 //! Coordinator-only tool assembly.
 //!
-//! Builds the coordinator-only tools that carry net-new behavior — `TeamCreate`
-//! and `TeamDelete` — each wired to the shared [`TeamRegistry`], the
-//! [`CoordinatorMode`] gate, and the [`TeamSpawnSeam`] used to start / stop the
-//! real backing teammate task.
+//! Builds the coordinator-only tools that carry net-new behavior — `TeamCreate`,
+//! `TeamDelete`, and `SendMessage` — each wired to the shared [`TeamRegistry`],
+//! the [`CoordinatorMode`] gate, and (where relevant) the [`TeamSpawnSeam`] used
+//! to start / stop / cancel the real backing teammate task.
 //!
-//! `SendMessage` / `StructuredOutput` are DELIBERATELY NOT assembled here. Their
-//! tool names collide byte-for-byte with already-registered builtins
-//! (`tool_ui`'s `SendMessage` / `StructuredOutput`), and the tool registry is
-//! push-no-dedup with first-match-wins — so registering coordinator copies would
-//! silently shadow nothing useful. Once the shared `MailboxRouter` is wired into
-//! `BuiltinToolContext` (engine-desktop `build()`), the in-tree builtins already
-//! satisfy those two roles. The source files
-//! ([`crate::tool_send_message`] / [`crate::tool_synthetic_output`]) are kept in
-//! place but no longer returned from this factory.
+//! Each of these tool names collides byte-for-byte with an already-registered
+//! builtin (`tool_ui`'s `SendMessage`, `tool_team`'s `TeamCreate` /
+//! `TeamDelete`). The host wires the returned tools into `ToolRegistry` IN PLACE
+//! OF those builtins, decided at BUILD time, only when [`crate::CoordinatorMode`]
+//! is coordinator-capable (§15 Plugin, §22 cli-demo). The coordinator
+//! `SendMessage` carries the full swarm routing surface — broadcast fan-out,
+//! teammate-name resolution, and the shutdown / plan-approval structured-message
+//! handshake — over the registry's `MailboxRouter`, which the leaner `tool_ui`
+//! builtin does not.
 //!
-//! In §15 (Plugin) and §22 (cli-demo) the host wires the returned tools into
-//! `ToolRegistry` IN PLACE OF `tool_team`'s `TeamCreate` / `TeamDelete`, decided
-//! at BUILD time, only when [`crate::CoordinatorMode`] is coordinator-capable.
+//! `StructuredOutput` ([`crate::tool_synthetic_output`]) is still NOT assembled
+//! here: the in-tree builtin already satisfies that role once the shared
+//! `MailboxRouter` is wired into `BuiltinToolContext`.
 
 use crate::mode::CoordinatorMode;
 use crate::team_registry::TeamRegistry;
+use crate::tool_send_message::SendMessageTool;
 use crate::tool_team_create::TeamCreateTool;
 use crate::tool_team_delete::TeamDeleteTool;
 use std::sync::Arc;
@@ -31,14 +32,16 @@ use traits::OutputStream;
 
 /// Build the coordinator-only tools carrying net-new behavior.
 ///
-/// Returns EXACTLY `TeamCreate` + `TeamDelete` as `Arc<dyn Tool>` trait objects.
-/// Each constructor clones the shared [`TeamRegistry`], the [`CoordinatorMode`]
-/// gate, and the [`TeamSpawnSeam`] into its handler state. `TeamCreate`
-/// additionally takes the orchestrator-facing [`OutputStream`] so it can PUSH
-/// the live active-worker count the moment a spawn is reconciled (deterministic
+/// Returns `TeamCreate` + `TeamDelete` + `SendMessage` as `Arc<dyn Tool>` trait
+/// objects. Each constructor clones the shared [`TeamRegistry`] into its handler
+/// state; the team tools also take the [`CoordinatorMode`] gate, and `SendMessage`
+/// / the team tools take the [`TeamSpawnSeam`] (`SendMessage` uses it to cancel
+/// an approved in-process shutdown's backing task). `TeamCreate` additionally
+/// takes the orchestrator-facing [`OutputStream`] so it can PUSH the live
+/// active-worker count the moment a spawn is reconciled (deterministic
 /// activation, independent of the teammate's racy startup status emit).
 ///
-/// `bus` is the (optional) analytics bus both tools fire their coordinator
+/// `bus` is the (optional) analytics bus the team tools fire their coordinator
 /// telemetry through (`tengu_team_created` / `tengu_team_deleted`). `None` ⇒
 /// telemetry falls back to `tracing` (hermetic tests pass `None`).
 #[must_use]
@@ -55,8 +58,9 @@ pub fn coordinator_internal_tools(
                 .with_analytics_bus(bus.clone()),
         ) as Arc<dyn Tool>,
         Arc::new(
-            TeamDeleteTool::new(team, mode, spawn_seam).with_analytics_bus(bus),
+            TeamDeleteTool::new(team.clone(), mode, spawn_seam.clone()).with_analytics_bus(bus),
         ) as Arc<dyn Tool>,
+        Arc::new(SendMessageTool::new(team).with_spawn_seam(spawn_seam)) as Arc<dyn Tool>,
     ]
 }
 
@@ -111,7 +115,7 @@ mod tests {
     }
 
     #[test]
-    fn factory_returns_exactly_team_create_and_delete() {
+    fn factory_returns_team_tools_plus_send_message() {
         let team = Arc::new(TeamRegistry::new(AgentId::new()));
         let mode = Arc::new(CoordinatorMode::new());
         let seam: Arc<dyn TeamSpawnSeam> = Arc::new(NoopSeam);
@@ -119,21 +123,11 @@ mod tests {
 
         let tools = coordinator_internal_tools(team, mode, seam, output, None);
 
-        // EXACTLY two tools — SendMessage / StructuredOutput are dropped.
-        assert_eq!(
-            tools.len(),
-            2,
-            "factory must return exactly TeamCreate + TeamDelete (not the 4-tool set)"
-        );
-
+        // TeamCreate + TeamDelete + SendMessage (the coordinator SendMessage now
+        // carries the full swarm routing surface). StructuredOutput stays dropped.
         let names: Vec<&str> = tools.iter().map(|t| t.name()).collect();
-        assert_eq!(names, vec!["TeamCreate", "TeamDelete"]);
+        assert_eq!(names, vec!["TeamCreate", "TeamDelete", "SendMessage"]);
 
-        // SendMessage / StructuredOutput must NOT be present (builtins satisfy them).
-        assert!(
-            !names.contains(&"SendMessage"),
-            "SendMessage must be dropped from the coordinator factory"
-        );
         assert!(
             !names.contains(&"StructuredOutput"),
             "StructuredOutput must be dropped from the coordinator factory"

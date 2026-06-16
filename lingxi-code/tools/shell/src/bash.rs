@@ -4,6 +4,15 @@
 //! See `docs/superpowers/plans/2026-05-24-m4-02-shell.md` for the task list
 //! and `docs/superpowers/specs/2026-05-24-m4-tools-implementation-design.md`
 //! §4 Flow C and §7 wire identifiers for the locked literals.
+//!
+//! DEFERRED (tool-fidelity batch A follow-ups):
+//! - (1d) Image-output handling: claude-code `formatOutput` flags
+//!   base64 `data:image/...` stdout as an image and re-encodes it into an
+//!   image content block (`BashTool/utils.ts` `isImageOutput` /
+//!   `resizeShellImageOutput`). Needs an image content-block path the Rust
+//!   `ToolCallResult` does not yet model — deferred.
+//! - (1e) `MONITOR_TOOL` `sleep N>=2` auto-background block is feature-gated
+//!   in claude-code and is currently a correct no-op here — deferred.
 
 use crate::shared::strip_ansi_count;
 use async_trait::async_trait;
@@ -22,7 +31,7 @@ use tool_api::tool_trait::{
     DescriptionOptions, PromptOptions, Tool, ToolCallResult, ToolError, ToolStaticContext,
     ValidationError,
 };
-use tool_api::util::output_truncation::{truncate, MAX_TOOL_OUTPUT_LENGTH};
+use tool_api::util::output_truncation::MAX_TOOL_OUTPUT_LENGTH;
 use tool_api::BuiltinToolContext;
 
 // ===== Locked constants =====================================================
@@ -120,6 +129,28 @@ pub fn resolve_max_output_length(raw: Option<&str>) -> usize {
 #[must_use]
 pub fn bash_max_output_length() -> usize {
     resolve_max_output_length(std::env::var("BASH_MAX_OUTPUT_LENGTH").ok().as_deref())
+}
+
+/// Truncate Bash output the way claude-code `BashTool/utils.ts` `formatOutput`
+/// does (`:156-158`): keep the first `max` chars, then append
+/// `\n\n... [N lines truncated] ...` where `N` is the number of `\n` characters
+/// in the truncated tail (`countCharInString(content, '\n', max)`) plus one.
+///
+/// Returns `(out, did_truncate)`. When `content` fits within `max`, it is
+/// returned verbatim with `did_truncate == false`. Char-based slicing keeps
+/// multibyte UTF-8 codepoints intact; newlines are ASCII so the tail line count
+/// is identical to the TS UTF-16 `indexOf` walk.
+#[must_use]
+fn truncate_bash_output(content: String, max: usize) -> (String, bool) {
+    if content.chars().count() <= max {
+        return (content, false);
+    }
+    let head: String = content.chars().take(max).collect();
+    // `remainingLines = countCharInString(content, '\n', max) + 1`: count the
+    // newlines in everything after the kept head (the truncated tail).
+    let remaining_lines = content.chars().skip(max).filter(|&c| c == '\n').count() + 1;
+    let truncated = format!("{head}\n\n... [{remaining_lines} lines truncated] ...");
+    (truncated, true)
 }
 
 // ===== BASH.1 — extended-glob disable prefix (SECURITY) =====================
@@ -362,7 +393,14 @@ static INPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
         "type": "object",
         "properties": {
             "command":           { "type": "string" },
-            "timeout_ms":        { "type": "integer", "minimum": 1, "maximum": 600_000 },
+            // claude-code `BashTool.tsx:229` names this param `timeout`
+            // (milliseconds). A model sending `timeout` must be honored.
+            "timeout":           {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 600_000,
+                "description": "Optional timeout in milliseconds (max 600000)"
+            },
             "run_in_background": { "type": "boolean" },
             "description":       { "type": "string" },
             // BASH.5: 1:1 with claude-code `BashTool.tsx` schema —
@@ -454,10 +492,10 @@ impl Tool for BashTool {
         if cmd.is_empty() {
             return Err(ValidationError("`command` must not be empty".into()));
         }
-        if let Some(t) = input.get("timeout_ms").and_then(Value::as_u64) {
+        if let Some(t) = input.get("timeout").and_then(Value::as_u64) {
             if t > BASH_MAX_TIMEOUT_MS {
                 return Err(ValidationError(format!(
-                    "timeout_ms {t} exceeds limit {BASH_MAX_TIMEOUT_MS}"
+                    "timeout {t} exceeds limit {BASH_MAX_TIMEOUT_MS}"
                 )));
             }
         }
@@ -478,8 +516,11 @@ impl Tool for BashTool {
             .and_then(Value::as_str)
             .ok_or_else(|| ToolError::InvalidInput("missing command".into()))?
             .to_string();
+        // claude-code `BashTool.tsx:229` sends the timeout as `timeout`
+        // (milliseconds). Lenient numeric coercion: `as_u64` accepts a JSON
+        // integer; a fractional/string value falls through to the default.
         let timeout_ms = input
-            .get("timeout_ms")
+            .get("timeout")
             .and_then(Value::as_u64)
             .unwrap_or(BASH_DEFAULT_TIMEOUT_MS);
         let run_bg = input
@@ -493,7 +534,7 @@ impl Tool for BashTool {
             .unwrap_or(false);
         if timeout_ms > BASH_MAX_TIMEOUT_MS {
             return Err(ToolError::InvalidInput(format!(
-                "timeout_ms {timeout_ms} exceeds limit {BASH_MAX_TIMEOUT_MS}"
+                "timeout {timeout_ms} exceeds limit {BASH_MAX_TIMEOUT_MS}"
             )));
         }
         if cfg!(target_os = "windows") {
@@ -702,6 +743,14 @@ impl Tool for BashTool {
         // state (e.g. bwrap mount points). No-op for the default
         // `LegacyWrapRunner`; only the live runner has anything to clean up.
         self.ctx.sandbox_runner.cleanup_after_command().await;
+        // PARTIAL (follow-up): claude-code surfaces a timed-out command as a
+        // result with `interrupted: true` plus whatever partial output it
+        // produced. Here a timeout is modeled as a hard `ToolError::Internal`
+        // (the orchestrator + the `foreground_timed_out_*` test depend on that
+        // error contract), so the timeout arms below stay errors rather than an
+        // `Ok { interrupted: true, stdout: <partial>, .. }`. Only the success
+        // arm emits the `interrupted` field (always `false`). Reworking the
+        // timeout arm into an interrupted-result is deferred.
         match run_result {
             Ok(out) if out.timed_out => {
                 let mut meta: LogEventMetadata = HashMap::new();
@@ -767,8 +816,11 @@ impl Tool for BashTool {
                 ));
                 // BASH.3: honor the `BASH_MAX_OUTPUT_LENGTH` env override
                 // (claude-code `outputLimits.ts` `getMaxOutputLength`); falls
-                // back to the 30_000-char default when unset/invalid.
-                let (stdout_final, truncated_out) = truncate(normalized, bash_max_output_length());
+                // back to the 30_000-char default when unset/invalid. The
+                // truncation message matches claude-code `formatOutput`
+                // (`BashTool/utils.ts:156-158`): `... [N lines truncated] ...`.
+                let (stdout_final, truncated_out) =
+                    truncate_bash_output(normalized, bash_max_output_length());
                 // Exit-code reinterpretation (claude-code interpretCommandResult):
                 // e.g. `grep` no-match (exit 1) is NOT an error.
                 let interp =
@@ -805,6 +857,11 @@ impl Tool for BashTool {
                         "is_error":  is_error,
                         "return_code_interpretation": interp.message,
                         "timed_out": false,
+                        // claude-code `BashTool.tsx:283` outputSchema field
+                        // `interrupted`: a successfully-completed command was
+                        // not interrupted. (Timeout is surfaced as a hard
+                        // `Err` below — see the follow-up note on that arm.)
+                        "interrupted": false,
                         "truncated": truncated_out,
                         "no_output_expected": crate::silent::is_silent_bash_command(&cmd_str),
                     }),
@@ -937,7 +994,7 @@ mod tests {
         let tool = BashTool::new(shell_test_ctx(out));
         let err = tool
             .call(
-                json!({"command": "sleep 9", "timeout_ms": 200}),
+                json!({"command": "sleep 9", "timeout": 200}),
                 use_ctx(),
                 fresh_tx(),
             )
@@ -1016,11 +1073,55 @@ mod tests {
         assert_eq!(res.data["no_output_expected"], false);
     }
 
+    #[test]
+    fn input_schema_uses_timeout_not_timeout_ms() {
+        // claude-code `BashTool.tsx:229` names the param `timeout` (ms).
+        let tool = BashTool::new(tool_api::test_support::shell_test_ctx(ProcessOutput {
+            stdout: String::new(),
+            stderr: String::new(),
+            exit_code: 0,
+            timed_out: false,
+        }));
+        let props = &tool.input_schema()["properties"];
+        assert!(props.get("timeout").is_some(), "schema must expose `timeout`");
+        assert!(
+            props.get("timeout_ms").is_none(),
+            "schema must NOT expose the old `timeout_ms`"
+        );
+        assert_eq!(
+            props["timeout"]["description"],
+            "Optional timeout in milliseconds (max 600000)"
+        );
+    }
+
     #[tokio::test]
-    async fn foreground_truncates_at_30k_chars_with_suffix() {
-        let big = "a".repeat(40_000);
+    async fn foreground_success_sets_interrupted_false() {
+        // claude-code `BashTool.tsx:283` outputSchema field `interrupted`: a
+        // command that completes (does not time out) is not interrupted.
         let out = ProcessOutput {
-            stdout: big,
+            stdout: "done\n".into(),
+            stderr: String::new(),
+            exit_code: 0,
+            timed_out: false,
+        };
+        let tool = BashTool::new(shell_test_ctx(out));
+        let res = tool
+            .call(json!({"command": "echo done"}), use_ctx(), fresh_tx())
+            .await
+            .expect("ok");
+        assert_eq!(res.data["interrupted"], false);
+    }
+
+    #[tokio::test]
+    async fn foreground_truncates_at_30k_chars_with_lines_truncated_suffix() {
+        // Head of 30_000 `a`s (no newlines) then a 5-newline tail: the kept head
+        // is the first 30_000 chars; the truncated tail holds 5 `\n`, so the TS
+        // `formatOutput` count is `5 + 1 = 6` lines truncated
+        // (`BashTool/utils.ts:156-158`).
+        let head = "a".repeat(30_000);
+        let tail = format!("{}tail", "\n".repeat(5));
+        let out = ProcessOutput {
+            stdout: format!("{head}{tail}"),
             stderr: String::new(),
             exit_code: 0,
             timed_out: false,
@@ -1031,9 +1132,20 @@ mod tests {
             .await
             .expect("ok");
         let s = res.data["stdout"].as_str().unwrap();
-        assert!(s.ends_with("[Output truncated due to length]"));
+        // New TS-form truncation message with a correct N (6).
         assert_eq!(res.data["truncated"], true);
-        assert!(s.chars().count() <= 30_000);
+        assert!(
+            s.ends_with("... [6 lines truncated] ..."),
+            "expected TS lines-truncated suffix with N=6, got tail: {:?}",
+            &s[s.len().saturating_sub(40)..]
+        );
+        // Head preserved verbatim, joined by the literal `\n\n` separator.
+        assert!(
+            s.starts_with(&format!("{head}\n\n... [")),
+            "head must be the kept prefix followed by the separator",
+        );
+        // The old generic suffix is gone.
+        assert!(!s.contains("[Output truncated due to length]"));
     }
 
     // ----- Background path: bespoke stub that returns a fake ProcessHandle. -----

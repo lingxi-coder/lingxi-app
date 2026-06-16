@@ -162,11 +162,13 @@ impl Tool for NotebookEditTool {
     }
 
     async fn description(&self, _input: &Value, _opts: &DescriptionOptions) -> String {
-        "Replace / insert / delete a cell in a Jupyter notebook.".to_string()
+        // Verbatim claude-code `NotebookEditTool/prompt.ts:1-2`.
+        "Replace the contents of a specific cell in a Jupyter notebook.".to_string()
     }
 
     async fn prompt(&self, _opts: &PromptOptions) -> String {
-        "Edit a Jupyter cell by id. edit_mode in {replace, insert, delete}.".to_string()
+        // Verbatim claude-code `NotebookEditTool/prompt.ts:3` (PROMPT).
+        "Completely replaces the contents of a specific cell in a Jupyter notebook (.ipynb file) with new source. Jupyter notebooks are interactive documents that combine code, text, and visualizations, commonly used for data analysis and scientific computing. The notebook_path parameter must be an absolute path, not a relative path. The cell_number is 0-indexed. Use edit_mode=insert to add a new cell at the index specified by cell_number. Use edit_mode=delete to delete the cell at the index specified by cell_number.".to_string()
     }
 
     fn get_path(&self, input: &Value) -> Option<PathBuf> {
@@ -227,6 +229,18 @@ impl Tool for NotebookEditTool {
                 "Cell type is required when using edit_mode=insert.".into(),
             ));
         }
+        // The path must be a Jupyter notebook (`NotebookEditTool.ts:189-196`,
+        // `extname(fullPath) !== '.ipynb'`). Case-insensitive on the extension.
+        if path
+            .extension()
+            .and_then(std::ffi::OsStr::to_str)
+            .is_none_or(|ext| !ext.eq_ignore_ascii_case("ipynb"))
+        {
+            self.emit_failed(&invocation_id, "not_a_notebook").await;
+            return Err(ToolError::InvalidInput(
+                "File must be a Jupyter notebook (.ipynb file). For editing other file types, use the FileEdit tool.".into(),
+            ));
+        }
 
         let canon = match canonicalize_and_validate(&path, &self.ctx.trusted_dirs) {
             Ok(p) => p,
@@ -281,9 +295,28 @@ impl Tool for NotebookEditTool {
 
         let mut nb: Value = match serde_json::from_str(&raw) {
             Ok(v) => v,
-            Err(e) => {
+            Err(_) => {
+                // SOFT return (not an error): claude-code returns a result whose
+                // `data` carries `error: 'Notebook is not valid JSON.'` rather
+                // than throwing (`NotebookEditTool.ts:331-348`). Mirror that
+                // data shape so the model sees the soft error.
                 self.emit_failed(&invocation_id, "json_parse").await;
-                return Err(ToolError::Io(format!("notebook JSON parse: {e}")));
+                return Ok(ToolCallResult {
+                    data: json!({
+                        "new_source": new_source,
+                        "cell_type": cell_type.clone().unwrap_or_else(|| "code".to_string()),
+                        "language": "python",
+                        "edit_mode": "replace",
+                        "error": "Notebook is not valid JSON.",
+                        "cell_id": cell_id,
+                        "notebook_path": canon.display().to_string(),
+                        "original_file": "",
+                        "updated_file": "",
+                    }),
+                    new_messages: vec![],
+                    context_modifier: None,
+                    mcp_meta: None,
+                });
             }
         };
 
@@ -983,14 +1016,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rejects_invalid_json() {
+    async fn invalid_json_returns_soft_error_not_err() {
+        // claude-code returns a SOFT result with `error: 'Notebook is not valid
+        // JSON.'` (NotebookEditTool.ts:331-348), NOT a thrown error.
         let tmp = TempDir::new().unwrap();
         let target = tmp.path().join("bad.ipynb");
         std::fs::write(&target, "this is not json").unwrap();
         let (ctx, _sink) = make_ctx(&tmp);
         seed_full_read(&ctx, &target);
         let tool = NotebookEditTool::new(ctx);
-        let err = tool
+        let result = tool
             .call(
                 json!({
                     "notebook_path": target.to_str().unwrap(),
@@ -1001,8 +1036,44 @@ mod tests {
                 fresh_tx(),
             )
             .await
+            .expect("malformed JSON is a soft Ok result, not an Err");
+        assert_eq!(result.data["error"], "Notebook is not valid JSON.");
+        // The soft data shape mirrors TS: edit_mode normalized to "replace",
+        // cell_type defaulted to "code", the original cell_id echoed.
+        assert_eq!(result.data["edit_mode"], "replace");
+        assert_eq!(result.data["cell_type"], "code");
+        assert_eq!(result.data["cell_id"], "c1");
+        assert_eq!(result.data["language"], "python");
+    }
+
+    #[tokio::test]
+    async fn rejects_non_ipynb_path() {
+        // A non-`.ipynb` path is rejected up front (NotebookEditTool.ts:189-196).
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("script.py");
+        std::fs::write(&target, "print('hi')").unwrap();
+        let (ctx, _sink) = make_ctx(&tmp);
+        let tool = NotebookEditTool::new(ctx);
+        let err = tool
+            .call(
+                json!({
+                    "notebook_path": target.to_str().unwrap(),
+                    "cell_id": "c1",
+                    "edit_mode": "replace",
+                    "new_source": "x"
+                }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
             .unwrap_err();
-        assert!(err.to_string().contains("notebook JSON parse"));
+        match err {
+            ToolError::InvalidInput(m) => assert_eq!(
+                m,
+                "File must be a Jupyter notebook (.ipynb file). For editing other file types, use the FileEdit tool."
+            ),
+            other => panic!("expected InvalidInput, got {other:?}"),
+        }
     }
 
     // ───────────────────────── Batch F: staleness guard ─────────────────────

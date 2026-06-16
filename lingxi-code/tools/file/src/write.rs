@@ -1,10 +1,10 @@
 //! `FileWriteTool` — write a UTF-8 file inside the trusted-dirs whitelist.
 //!
-//! Behaviour:
-//! - If parent directory does not exist AND `mkdir != true` → reject.
-//! - If parent directory does not exist AND `mkdir == true` → create parents
-//!   recursively, then write.
-//! - Overwrite is allowed unconditionally (claude-code matches this).
+//! Behaviour (1:1 with claude-code `FileWriteTool.ts`):
+//! - The schema is `{file_path, content}` only — there is NO `mkdir` flag.
+//! - Parent directories are created UNCONDITIONALLY before the write
+//!   (`FileWriteTool.ts:254` `mkdir(dir, recursive)`).
+//! - Overwrite is allowed unconditionally.
 //! - Content is UTF-8; no BOM is written.
 
 use async_trait::async_trait;
@@ -110,8 +110,7 @@ static INPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
         "required": ["file_path", "content"],
         "properties": {
             "file_path": { "type": "string" },
-            "content":   { "type": "string" },
-            "mkdir":     { "type": "boolean", "default": false }
+            "content":   { "type": "string" }
         }
     })
 });
@@ -152,11 +151,22 @@ impl Tool for FileWriteTool {
     }
 
     async fn description(&self, _input: &Value, _opts: &DescriptionOptions) -> String {
-        "Write a UTF-8 file to the workspace.".to_string()
+        // claude-code `FileWriteTool.ts:100`.
+        "Write a file to the local filesystem.".to_string()
     }
 
     async fn prompt(&self, _opts: &PromptOptions) -> String {
-        "Write a file. Pass `mkdir: true` to create missing parents.".to_string()
+        // Verbatim claude-code `getWriteToolDescription()`
+        // (`FileWriteTool/prompt.ts:10-18`) with `getPreReadInstruction()`
+        // resolved (FILE_READ_TOOL_NAME = "Read") and the `—` em-dash
+        // rendered. No 3P/OSS-conditional fragments exist in this builder.
+        "Writes a file to the local filesystem.\n\nUsage:\n\
+- This tool will overwrite the existing file if there is one at the provided path.\n\
+- If this is an existing file, you MUST use the Read tool first to read the file's contents. This tool will fail if you did not read the file first.\n\
+- Prefer the Edit tool for modifying existing files — it only sends the diff. Only use this tool to create new files or for complete rewrites.\n\
+- NEVER create documentation files (*.md) or README files unless explicitly requested by the User.\n\
+- Only use emojis if the user explicitly requests it. Avoid writing emojis to files unless asked."
+            .to_string()
     }
 
     fn get_path(&self, input: &Value) -> Option<PathBuf> {
@@ -181,37 +191,36 @@ impl Tool for FileWriteTool {
             .get("content")
             .and_then(Value::as_str)
             .ok_or_else(|| ToolError::InvalidInput("content is required".into()))?;
-        let mkdir = input.get("mkdir").and_then(Value::as_bool).unwrap_or(false);
 
         let path = PathBuf::from(file_path);
         let started = Instant::now();
         self.emit_started(&invocation_id, &path).await;
 
-        // Parent existence gate (BEFORE canonicalize, because canonicalize
-        // requires either the file or its parent to exist).
+        // Parents are created UNCONDITIONALLY before the write — 1:1 with
+        // claude-code `FileWriteTool.ts:254` (`mkdir(dir, recursive)`), which
+        // runs for every write regardless of a flag. There is no `mkdir` input.
+        //
+        // The trusted-dir containment probe is KEPT: when the parent does not
+        // yet exist we cannot canonicalize the full target, so we canonicalize
+        // the nearest existing ancestor and gate on THAT before materializing
+        // any directories. This stops a write from creating a directory tree
+        // outside the trusted dirs (the post-mkdir `canonicalize_and_validate`
+        // below would otherwise validate too late, after the dirs exist).
         if let Some(parent) = path.parent() {
-            if !parent.as_os_str().is_empty() && !parent.exists() {
-                if !mkdir {
-                    self.emit_failed(&invocation_id, "missing_parent").await;
-                    return Err(ToolError::InvalidInput(format!(
-                        "parent directory {} does not exist; pass mkdir=true to create",
-                        parent.display()
-                    )));
-                }
-                // We don't yet know if the parent is *inside* trusted_dirs,
-                // so canonicalize the nearest existing ancestor first and
-                // gate on that.
-                let mut probe = parent.to_path_buf();
-                while !probe.exists() {
-                    match probe.parent() {
-                        Some(p) => probe = p.to_path_buf(),
-                        None => break,
+            if !parent.as_os_str().is_empty() {
+                if !parent.exists() {
+                    let mut probe = parent.to_path_buf();
+                    while !probe.exists() {
+                        match probe.parent() {
+                            Some(p) => probe = p.to_path_buf(),
+                            None => break,
+                        }
                     }
-                }
-                if canonicalize_and_validate(&probe, &self.ctx.trusted_dirs).is_err() {
-                    emit_blocked_event(&self.ctx.bus, TOOL_NAME, &path).await;
-                    self.emit_failed(&invocation_id, "path_blocked").await;
-                    return Err(ToolError::PathBlocked { path });
+                    if canonicalize_and_validate(&probe, &self.ctx.trusted_dirs).is_err() {
+                        emit_blocked_event(&self.ctx.bus, TOOL_NAME, &path).await;
+                        self.emit_failed(&invocation_id, "path_blocked").await;
+                        return Err(ToolError::PathBlocked { path });
+                    }
                 }
                 if let Err(e) = tokio::fs::create_dir_all(parent).await {
                     self.emit_failed(&invocation_id, "mkdir_failed").await;
@@ -510,29 +519,29 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rejects_missing_parent_without_mkdir() {
+    async fn creates_missing_parent_unconditionally() {
+        // claude-code creates parents unconditionally (`FileWriteTool.ts:254`):
+        // a missing parent inside the trusted dirs is created, not rejected.
         let tmp = TempDir::new().unwrap();
         let target = tmp.path().join("sub").join("deep").join("out.txt");
         let (ctx, _sink) = make_ctx(&tmp);
         let tool = FileWriteTool::new(ctx);
-        let err = tool
+        let result = tool
             .call(
                 json!({ "file_path": target.to_str().unwrap(), "content": "hi" }),
                 fresh_ctx(),
                 fresh_tx(),
             )
             .await
-            .unwrap_err();
-        let msg = err.to_string();
-        assert!(
-            msg.contains("does not exist") && msg.contains("mkdir=true"),
-            "got: {msg}"
-        );
-        assert!(!target.exists());
+            .unwrap();
+        assert_eq!(result.data["type"], "create");
+        assert_eq!(result.data["bytes_written"], 2);
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "hi");
     }
 
     #[tokio::test]
-    async fn creates_parent_with_mkdir() {
+    async fn creates_parent_no_flag_needed() {
+        // Same as above but a deeper tree and longer content — no `mkdir` flag.
         let tmp = TempDir::new().unwrap();
         let target = tmp.path().join("sub").join("deep").join("out.txt");
         let (ctx, _sink) = make_ctx(&tmp);
@@ -541,8 +550,7 @@ mod tests {
             .call(
                 json!({
                     "file_path": target.to_str().unwrap(),
-                    "content": "deep content",
-                    "mkdir": true
+                    "content": "deep content"
                 }),
                 fresh_ctx(),
                 fresh_tx(),
@@ -551,6 +559,27 @@ mod tests {
             .unwrap();
         assert_eq!(result.data["bytes_written"], 12);
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "deep content");
+    }
+
+    #[tokio::test]
+    async fn writes_nested_path_with_no_flags() {
+        // `a/b/c.txt` under the trusted dir succeeds with only {file_path,
+        // content} and no flags — all intermediate dirs are created.
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("a").join("b").join("c.txt");
+        let (ctx, _sink) = make_ctx(&tmp);
+        let tool = FileWriteTool::new(ctx);
+        let result = tool
+            .call(
+                json!({ "file_path": target.to_str().unwrap(), "content": "nested" }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(result.data["type"], "create");
+        assert!(target.exists());
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "nested");
     }
 
     #[tokio::test]
@@ -610,7 +639,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn mkdir_new_file_is_create() {
+    async fn new_file_in_created_parent_is_create() {
         let tmp = TempDir::new().unwrap();
         let target = tmp.path().join("sub").join("deep").join("out.txt");
         let (ctx, _sink) = make_ctx(&tmp);
@@ -619,8 +648,7 @@ mod tests {
             .call(
                 json!({
                     "file_path": target.to_str().unwrap(),
-                    "content": "deep content",
-                    "mkdir": true
+                    "content": "deep content"
                 }),
                 fresh_ctx(),
                 fresh_tx(),
@@ -829,5 +857,10 @@ mod tests {
         let names: Vec<&str> = required.iter().map(|v| v.as_str().unwrap()).collect();
         assert!(names.contains(&"file_path"));
         assert!(names.contains(&"content"));
+        // claude-code schema is {file_path, content} ONLY — no `mkdir`.
+        assert!(
+            schema["properties"].get("mkdir").is_none(),
+            "schema must NOT expose `mkdir`"
+        );
     }
 }

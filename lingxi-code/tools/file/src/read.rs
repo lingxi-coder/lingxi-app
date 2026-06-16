@@ -291,6 +291,88 @@ pub fn format_binary(path: &std::path::Path) -> String {
     )
 }
 
+/// Narrow no-break space (U+202F) used by some macOS versions in screenshot
+/// filenames before AM/PM — byte-locked to claude-code `THIN_SPACE`
+/// (`FileReadTool.ts:131`, `String.fromCharCode(8239)`).
+const THIN_SPACE: char = '\u{202F}';
+
+/// `getAlternateScreenshotPath(filePath)` — 1:1 with `FileReadTool.ts:147-159`.
+/// macOS screenshot filenames put either a regular space (`' '`) or a thin space
+/// (U+202F) before `AM`/`PM` depending on the OS version; a model often passes
+/// the wrong one. When the basename matches `^(.+)([  ])(AM|PM)(\.png)$`,
+/// returns the path with the alternate space character so the caller can retry
+/// the read before giving up. Returns `None` when the basename does not match.
+///
+/// The TS uses a regex on `path.basename`; this mirrors it with a manual scan
+/// (no regex dep): require a `.png` suffix, then an `AM`/`PM` immediately before
+/// it, then a single space-or-thin-space immediately before that, with at least
+/// one char ahead of the space (TS `(.+)`). The space is swapped only in the
+/// trailing `"{space}{AM|PM}.png"` occurrence (TS `String.replace` replaces the
+/// FIRST match — but the constructed needle is the unique tail, so first == the
+/// tail in practice; we replace that exact tail).
+#[must_use]
+fn get_alternate_screenshot_path(file_path: &std::path::Path) -> Option<PathBuf> {
+    let filename = file_path.file_name()?.to_str()?;
+    // (.+)([  ])(AM|PM)(\.png)$
+    let stem = filename.strip_suffix(".png")?;
+    let (head, am_pm) = if let Some(h) = stem.strip_suffix("AM") {
+        (h, "AM")
+    } else if let Some(h) = stem.strip_suffix("PM") {
+        (h, "PM")
+    } else {
+        return None;
+    };
+    let mut chars = head.chars();
+    let current_space = chars.next_back()?;
+    if current_space != ' ' && current_space != THIN_SPACE {
+        return None;
+    }
+    // TS `(.+)` requires at least one character before the space.
+    if chars.as_str().is_empty() {
+        return None;
+    }
+    let alternate_space = if current_space == ' ' { THIN_SPACE } else { ' ' };
+    // TS replaces `${currentSpace}${AM|PM}${.png}` with the alternate-space
+    // form in the FULL path string. Build the same needle/replacement and apply
+    // it to the path's string form.
+    let needle = format!("{current_space}{am_pm}.png");
+    let replacement = format!("{alternate_space}{am_pm}.png");
+    let path_str = file_path.to_str()?;
+    Some(PathBuf::from(path_str.replacen(&needle, &replacement, 1)))
+}
+
+/// `findSimilarFile(filePath)` — 1:1 with `utils/file.ts:178-207`. When a read
+/// targets a missing path, scan the target's PARENT directory for the FIRST
+/// file whose base name WITHOUT its extension equals the target's base name
+/// without its extension, excluding the target itself, and return that file's
+/// name (with extension). The heuristic is purely "same stem, different
+/// extension" (e.g. `App.tsx` ⇒ `App.ts`) — NOT edit-distance or prefix
+/// matching. Returns `None` when the directory is unreadable (TS catches
+/// ENOENT/other and returns `undefined`) or no sibling shares the stem.
+///
+/// `file_stem`/`extension` here mirror TS `basename(p, extname(p))` /
+/// `extname(file.name)`: the part before the LAST dot. (Rust `Path::file_stem`
+/// matches `basename(p, extname(p))` for the common cases; for dotfiles like
+/// `.env` Rust's stem is `.env` while TS `basename('.env', extname('.env'))`
+/// is also `.env` since `extname('.env') === ''` — they agree.)
+#[must_use]
+fn find_similar_file(file_path: &std::path::Path) -> Option<String> {
+    let dir = file_path.parent()?;
+    let target_stem = file_path.file_stem()?;
+    let entries = std::fs::read_dir(dir).ok()?;
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let entry_path = dir.join(&name);
+        // Same base name without extension, and not the target file itself.
+        if std::path::Path::new(&name).file_stem() == Some(target_stem)
+            && entry_path != file_path
+        {
+            return Some(name.to_string_lossy().into_owned());
+        }
+    }
+    None
+}
+
 /// `MAX_FILE_EXTENSION_LENGTH` — byte-locked to claude-code
 /// (`services/analytics/metadata.ts:311`). Extensions longer than this bucket to
 /// `"other"` so analytics never leaks a long, potentially-identifying suffix.
@@ -580,6 +662,35 @@ impl FileReadTool {
             AnalyticsValue::Bool(has_max_size_bytes),
         );
         self.ctx.bus.log_event(FILE_READ_LIMITS_OVERRIDE, md).await;
+    }
+
+    /// Build + return the friendly file-not-found error — the ENOENT arm of
+    /// `FileReadTool.ts:638-647`. TS computes `findSimilarFile(fullFilePath)` and
+    /// (the cwd-suggestion branch aside) appends `" Did you mean ${similarFilename}?"`
+    /// to the not-found message. This port keeps the underlying IO not-found
+    /// string as the base message (preserving the raw errno the existing arm
+    /// surfaced) and appends the VERBATIM TS suggestion `" Did you mean {name}?"`
+    /// when a same-stem sibling exists in the parent directory; with no sibling
+    /// the plain not-found error is returned unchanged. The `suggestPathUnderCwd`
+    /// "dropped repo folder" cwd heuristic + the `Note: your current working
+    /// directory is …` cwd note are a separate, larger feature (they need a
+    /// `getCwd` analog + parent-realpath/relative logic) and are intentionally
+    /// NOT ported here — so the cwd-suggestion branch that would TAKE PRIORITY
+    /// over `similarFilename` in TS is absent, and the `find_similar_file`
+    /// suggestion is always the one shown when present.
+    async fn file_not_found(
+        &self,
+        invocation_id: &str,
+        canon: &std::path::Path,
+        err: &std::io::Error,
+    ) -> Result<ToolCallResult, ToolError> {
+        self.emit_failed(invocation_id, "io_metadata").await;
+        let mut message = err.to_string();
+        if let Some(similar) = find_similar_file(canon) {
+            // VERBATIM TS suffix (`FileReadTool.ts:645`): `" Did you mean ${x}?"`.
+            message.push_str(&format!(" Did you mean {similar}?"));
+        }
+        Err(ToolError::Io(message))
     }
 
     /// Process an image file and return it as multimodal content. The pixels ride
@@ -966,7 +1077,7 @@ Usage:\n\
         // branch; the event NAME is still registered). `None` => never fires.
         self.emit_file_read_limits_override(None).await;
 
-        let canon = match canonicalize_and_validate(&path, &self.ctx.trusted_dirs) {
+        let mut canon = match canonicalize_and_validate(&path, &self.ctx.trusted_dirs) {
             Ok(p) => p,
             Err(_) => {
                 emit_blocked_event(&self.ctx.bus, TOOL_NAME, &path).await;
@@ -978,8 +1089,42 @@ Usage:\n\
         let metadata = match tokio::fs::metadata(&canon).await {
             Ok(m) => m,
             Err(e) => {
-                self.emit_failed(&invocation_id, "io_metadata").await;
-                return Err(ToolError::Io(e.to_string()));
+                // Missing-file UX (`FileReadTool.ts:608-649`). On ENOENT TS first
+                // tries the macOS-screenshot AM/PM space variant (regular space ⇄
+                // thin space, U+202F) and re-runs the read against it; only if that
+                // alternate is ALSO missing does it surface the friendly message.
+                // A non-ENOENT error (e.g. EACCES) is rethrown verbatim.
+                if e.kind() == std::io::ErrorKind::NotFound {
+                    // (a) macOS screenshot space-swap retry (`getAlternateScreenshotPath`
+                    // + the `altPath` `callInner` retry, FileReadTool.ts:612-636). The
+                    // alternate must still validate under the trusted dirs (TS has no
+                    // sandbox, but the LingXi read path always re-validates). If the
+                    // alternate exists, swap `canon` to it and fall through to the
+                    // normal read — equivalent to TS retrying `callInner(altPath)`,
+                    // since existence was the only thing that failed.
+                    if let Some(alt) = get_alternate_screenshot_path(&canon) {
+                        if let Ok(alt_canon) =
+                            canonicalize_and_validate(&alt, &self.ctx.trusted_dirs)
+                        {
+                            if let Ok(m) = tokio::fs::metadata(&alt_canon).await {
+                                canon = alt_canon;
+                                m
+                            } else {
+                                // Alt also missing — fall through to the friendly error.
+                                return self
+                                    .file_not_found(&invocation_id, &canon, &e)
+                                    .await;
+                            }
+                        } else {
+                            return self.file_not_found(&invocation_id, &canon, &e).await;
+                        }
+                    } else {
+                        return self.file_not_found(&invocation_id, &canon, &e).await;
+                    }
+                } else {
+                    self.emit_failed(&invocation_id, "io_metadata").await;
+                    return Err(ToolError::Io(e.to_string()));
+                }
             }
         };
         let size = metadata.len();
@@ -2871,5 +3016,148 @@ mod tests {
         assert_eq!(format_file_size(20 * 1024 * 1024), "20MB");
         assert_eq!(format_file_size(100 * 1024 * 1024), "100MB");
         assert_eq!(format_file_size(2 * 1024 * 1024 * 1024), "2GB");
+    }
+
+    // ── Missing-file UX (`FileReadTool.ts:608-649`) ──────────────────────────
+
+    #[test]
+    fn find_similar_file_matches_same_stem_sibling() {
+        // `findSimilarFile` (`utils/file.ts:178-207`): same base name, different
+        // extension, in the same directory. `App.tsx` is missing; `App.ts` exists.
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("App.ts"), "x").unwrap();
+        let missing = tmp.path().join("App.tsx");
+        assert_eq!(
+            find_similar_file(&missing).as_deref(),
+            Some("App.ts"),
+            "should suggest the same-stem sibling"
+        );
+    }
+
+    #[test]
+    fn find_similar_file_none_when_no_sibling_shares_stem() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("Other.ts"), "x").unwrap();
+        let missing = tmp.path().join("App.tsx");
+        assert_eq!(find_similar_file(&missing), None);
+    }
+
+    #[test]
+    fn get_alternate_screenshot_path_swaps_space_for_thin_space() {
+        // `getAlternateScreenshotPath` (`FileReadTool.ts:147-159`): a regular
+        // space before AM/PM swaps to U+202F (and vice-versa).
+        let regular = std::path::Path::new("/tmp/Screenshot 2024-01-01 at 3.04.05 PM.png");
+        let alt = get_alternate_screenshot_path(regular).unwrap();
+        assert_eq!(
+            alt.to_str().unwrap(),
+            "/tmp/Screenshot 2024-01-01 at 3.04.05\u{202F}PM.png"
+        );
+        // Round-trips back to a regular space.
+        let back = get_alternate_screenshot_path(&alt).unwrap();
+        assert_eq!(back, regular);
+        // AM works too.
+        let am = std::path::Path::new("/tmp/Screenshot 9.00.00 AM.png");
+        assert_eq!(
+            get_alternate_screenshot_path(am).unwrap().to_str().unwrap(),
+            "/tmp/Screenshot 9.00.00\u{202F}AM.png"
+        );
+        // Non-screenshot names (no AM/PM, no .png, or nothing before the space)
+        // return None.
+        assert!(get_alternate_screenshot_path(std::path::Path::new("/tmp/notes.txt")).is_none());
+        assert!(get_alternate_screenshot_path(std::path::Path::new("/tmp/file PM.txt")).is_none());
+        assert!(get_alternate_screenshot_path(std::path::Path::new("/tmp/ PM.png")).is_none());
+    }
+
+    #[tokio::test]
+    async fn missing_file_with_near_match_suggests_did_you_mean() {
+        // A Read of a missing path whose parent has a same-stem sibling returns
+        // the byte-locked `" Did you mean {name}?"` suffix (`FileReadTool.ts:645`).
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("config.json"), "{}").unwrap();
+        let missing = tmp.path().join("config.yaml");
+        let (ctx, sink) = make_ctx(&tmp);
+        ctx.bus.attach_sink(sink.clone()).await;
+        let tool = FileReadTool::new(ctx);
+        let err = tool
+            .call(
+                json!({ "file_path": missing.to_str().unwrap() }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.ends_with(" Did you mean config.json?"),
+            "expected the verbatim TS suggestion suffix, got: {msg}"
+        );
+        let events = sink.events().await;
+        let names: Vec<&str> = events.iter().map(|e| e.name.as_str()).collect();
+        assert!(names.contains(&"tengu_tool_read_failed"));
+    }
+
+    #[tokio::test]
+    async fn missing_file_without_near_match_returns_plain_not_found() {
+        // No same-stem sibling ⇒ the plain not-found error, with NO suggestion
+        // suffix appended.
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("unrelated.txt"), "x").unwrap();
+        let missing = tmp.path().join("nope.md");
+        let (ctx, _sink) = make_ctx(&tmp);
+        let tool = FileReadTool::new(ctx);
+        let err = tool
+            .call(
+                json!({ "file_path": missing.to_str().unwrap() }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            !msg.contains("Did you mean"),
+            "no sibling ⇒ no suggestion, got: {msg}"
+        );
+        // Still the underlying not-found IO error.
+        assert!(matches!(err, ToolError::Io(_)), "got: {err:?}");
+    }
+
+    #[tokio::test]
+    async fn screenshot_regular_space_resolves_to_thin_space_file() {
+        // macOS screenshot AM/PM fallback (`FileReadTool.ts:612-636`): the model
+        // passes a regular space, the real file on disk uses U+202F. The read
+        // succeeds by retrying the alternate-space path.
+        let tmp = TempDir::new().unwrap();
+        // Real file uses the thin space (U+202F) before PM.
+        let real = tmp.path().join("Screenshot 2024-01-01 at 3.04.05\u{202F}PM.png");
+        std::fs::write(&real, "PNG-BYTES-NOT-REALLY").unwrap();
+        // Requested path uses a regular space.
+        let requested = tmp.path().join("Screenshot 2024-01-01 at 3.04.05 PM.png");
+        let (ctx, _sink) = make_ctx(&tmp);
+        let tool = FileReadTool::new(ctx);
+        let result = tool
+            .call(
+                json!({ "file_path": requested.to_str().unwrap() }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await;
+        // With `image-read` on, a `.png` routes to the image path and the
+        // (fake) bytes fail to decode — but the point under test is that the
+        // space-swap retry RESOLVED the file (we got past the not-found arm), so
+        // the error must NOT be a file-not-found / "Did you mean". With
+        // `image-read` off, a `.png` is a binary-extension reject — again past
+        // the not-found arm. Either way: no not-found error.
+        match result {
+            Ok(_) => {}
+            Err(e) => {
+                let msg = e.to_string();
+                assert!(
+                    !msg.contains("Did you mean") && !msg.contains("No such file"),
+                    "screenshot space-swap should have resolved the file (got past \
+                     the not-found arm), but error was: {msg}"
+                );
+            }
+        }
     }
 }

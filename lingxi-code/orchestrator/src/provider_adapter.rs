@@ -1537,6 +1537,7 @@ fn provider_label(profile_name: &str) -> &str {
         "glm-coding" => "GLM (coding)",
         "zai" => "Z.AI",
         "openai" => "OpenAI",
+        "openai-chatgpt" => "OpenAI (ChatGPT login)",
         "github-copilot" => "GitHub Copilot",
         other => other,
     }

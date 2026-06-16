@@ -214,7 +214,7 @@ mod tests {
     #[test]
     fn merges_anthropic_and_presets() {
         let out = assemble(anthropic_only_inputs());
-        assert_eq!(out.client_config.providers.len(), 7);
+        assert_eq!(out.client_config.providers.len(), 8);
         let names: Vec<&str> = out
             .client_config
             .providers
@@ -227,6 +227,7 @@ mod tests {
         assert!(names.contains(&"glm-coding"));
         assert!(names.contains(&"zai"));
         assert!(names.contains(&"openai"));
+        assert!(names.contains(&"openai-chatgpt"));
         assert!(names.contains(&"github-copilot"));
     }
 

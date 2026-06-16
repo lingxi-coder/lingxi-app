@@ -1092,6 +1092,7 @@ fn provider_profile_label(profile_name: &str) -> String {
         "glm-coding" => "GLM (coding)".to_string(),
         "zai" => "Z.AI".to_string(),
         "openai" => "OpenAI".to_string(),
+        "openai-chatgpt" => "OpenAI (ChatGPT login)".to_string(),
         "github-copilot" => "GitHub Copilot".to_string(),
         other => other
             .split(['-', '_', ' '])

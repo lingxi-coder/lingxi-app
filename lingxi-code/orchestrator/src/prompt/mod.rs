@@ -11,6 +11,7 @@ pub mod file_tree;
 pub mod git_status;
 pub mod locked_templates;
 pub mod memory_block;
+pub mod skill_listing;
 pub mod tools_block;
 
 pub use memory_block::{real_provider, MemoryHierarchyProvider, RealMemoryHierarchyProvider};

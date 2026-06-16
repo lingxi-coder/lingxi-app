@@ -318,6 +318,16 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
         history_snapshot.push(reminder);
     }
 
+    // SKILLLIST.1: per-turn, transient `skill_listing` reminder so the model can
+    // discover the available skills. Appended to THIS call's OUTGOING snapshot
+    // only (never to `session.history` / JSONL), after the output-style reminder
+    // so the locked output-style fixtures stay byte-identical. `None` when no
+    // provider is wired / no skills / the Skill tool is absent. See
+    // [`ConversationOrchestrator::skill_listing_reminder_message`].
+    if let Some(reminder) = orch.skill_listing_reminder_message().await {
+        history_snapshot.push(reminder);
+    }
+
     // 1. Call the API. Advertise the registry's wire tool definitions
     //    (same set + serialization as the streaming path). Batch 5: the call is
     //    wrapped in the blocking-limit preempt + 413/prompt-too-long reactive

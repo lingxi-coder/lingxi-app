@@ -516,6 +516,14 @@ pub struct ConversationOrchestrator {
     /// dedup spans turns. `None` until the first emission.
     pub(crate) last_emitted_raw_utilization:
         Mutex<Option<crate::model::rate_limit::RawUtilization>>,
+    /// SKILLLIST.1: supplies the model-invocable skill entries for the per-turn
+    /// `skill_listing` reminder (TS `getSkillToolCommands` →
+    /// `getSkillListingAttachments`). `None` when not wired (every test + any
+    /// binary without a `CommandRegistry`) — then
+    /// [`Self::skill_listing_reminder_message`] is a strict no-op, keeping the
+    /// locked turn-loop/streaming fixtures byte-identical. The desktop binary
+    /// wires a `CommandRegistry`-backed provider at the composition root.
+    pub(crate) skill_listing: Option<Arc<dyn crate::prompt::skill_listing::SkillListingProvider>>,
 }
 
 impl ConversationOrchestrator {
@@ -568,6 +576,7 @@ impl ConversationOrchestrator {
             read_state_map: tool_api::read_file_state::new_read_file_state_map(),
             last_emitted_rate_limit: Mutex::new(None),
             last_emitted_raw_utilization: Mutex::new(None),
+            skill_listing: None,
         }
     }
 
@@ -626,6 +635,27 @@ impl ConversationOrchestrator {
     ) -> Self {
         self.agent_catalog = Some(agents);
         self
+    }
+
+    /// Attach a skill-listing provider so the per-turn `skill_listing`
+    /// system-reminder enumerates the model-invocable skills (SKILLLIST.1).
+    /// Without this the reminder is never injected (the model cannot discover
+    /// skills autonomously). The desktop binary wires a `CommandRegistry`-backed
+    /// provider at the composition root.
+    #[must_use]
+    pub fn with_skill_listing(
+        mut self,
+        provider: Arc<dyn crate::prompt::skill_listing::SkillListingProvider>,
+    ) -> Self {
+        self.skill_listing = Some(provider);
+        self
+    }
+
+    /// Whether a skill-listing provider has been wired via
+    /// [`Self::with_skill_listing`]. (SKILLLIST.1)
+    #[must_use]
+    pub fn has_skill_listing(&self) -> bool {
+        self.skill_listing.is_some()
     }
 
     /// Whether an MCP registry has been wired via
@@ -2137,6 +2167,17 @@ impl ConversationOrchestrator {
                 snapshot.push(reminder);
             }
 
+            // SKILLLIST.1 (streaming twin): per-turn, transient `skill_listing`
+            // reminder so the model can discover skills. Appended to THIS turn's
+            // OUTGOING snapshot only (never to `session.history` / JSONL), after
+            // the output-style reminder and BEFORE the blocking-limit estimate
+            // below so its tokens are counted in the prompt size. `None` when no
+            // provider is wired / no skills / the Skill tool is absent. See
+            // [`Self::skill_listing_reminder_message`].
+            if let Some(reminder) = self.skill_listing_reminder_message().await {
+                snapshot.push(reminder);
+            }
+
             // RECOV.1: blocking-limit preempt — the streaming twin of the batched
             // `call_api_with_ptl_recovery` step (1) (TS `query.ts:592-648`). If the
             // pre-call prompt is already at the hard blocking limit
@@ -2877,6 +2918,43 @@ impl ConversationOrchestrator {
              Remember to follow the specific guidelines for this style.\n</system-reminder>",
             builtin.name
         );
+        Some(ConversationMessage::user(MessageId::new(), content))
+    }
+
+    /// SKILLLIST.1: the per-turn, transient `skill_listing` reminder, or `None`
+    /// when no provider is wired, the `Skill` tool is absent this turn, or there
+    /// are no model-invocable skills.
+    ///
+    /// 1:1 with claude-code's `skill_listing` attachment: `getSkillToolCommands`
+    /// (`commands.ts:565`) selects the eligible skills, `formatCommandsWithinBudget`
+    /// (`SkillTool/prompt.ts`) renders them within a ~1%-of-context char budget,
+    /// and `normalizeAttachmentForAPI`'s `'skill_listing'` case
+    /// (`messages.ts:3728-3738`) wraps the body in a `<system-reminder>` meta
+    /// user message: `"The following skills are available for use with the Skill
+    /// tool:\n\n{listing}"`. The Skill-tool gate mirrors `attachments.ts:2668`.
+    ///
+    /// Like the OUTSTYLE.3 reminder, the message is appended ONLY to the per-turn
+    /// outgoing snapshot (never to `session.history` / JSONL), so it is recomputed
+    /// each turn and never accumulates. `None` keeps the styleless/skilless path
+    /// byte-identical and the locked fixtures green.
+    ///
+    /// MVP NOTE: emits the FULL listing every turn. TS sends the full listing on
+    /// turn 0 then only NEW skills thereafter (the per-`agentId` `sentSkillNames`
+    /// dedup + `--resume` suppression, `attachments.ts:2607,2699`). That per-turn
+    /// token optimization is a documented follow-up — the *content* is faithful.
+    pub(crate) async fn skill_listing_reminder_message(&self) -> Option<ConversationMessage> {
+        let provider = self.skill_listing.as_ref()?;
+        // Gate on the Skill tool being available this turn (attachments.ts:2668).
+        if self.tools.find_by_name("Skill").is_none() {
+            return None;
+        }
+        let entries = provider.skill_entries().await;
+        // ~1% of the active model's context window (TS getCharBudget). Resolved
+        // with no betas — the small 200k↔1M budget delta only matters past ~30
+        // skills, where the budgeter degrades gracefully.
+        let window =
+            compaction::context_window::context_window_for_model(&self.config.model, &[]) as usize;
+        let content = crate::prompt::skill_listing::render_reminder(&entries, Some(window))?;
         Some(ConversationMessage::user(MessageId::new(), content))
     }
 
@@ -4342,5 +4420,172 @@ mod enrich_rate_limited_error_tests {
             Some("You've hit your weekly limit".to_string()),
         );
         assert!(matches!(err, OrchestratorError::StreamEndedWithoutStop));
+    }
+}
+
+// ============================================================================
+// SKILLLIST.1: per-turn, transient `skill_listing` reminder.
+//
+// Proves the orchestrator method: returns the rendered `<system-reminder>` when
+// a provider is wired AND the `Skill` tool is present this turn; returns `None`
+// when no provider is wired, or when the `Skill` tool is absent (so we never
+// advertise skills the model can't invoke). The byte-level formatting is covered
+// in `prompt::skill_listing::tests`.
+// ============================================================================
+#[cfg(test)]
+mod skill_listing_reminder_tests {
+    use super::*;
+    use crate::prompt::skill_listing::{SkillListingEntry, SkillListingProvider};
+    use crate::test_support::{
+        noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate,
+        StaticMemoryProvider,
+    };
+    use crate::OrchestratorConfig;
+    use std::sync::Arc;
+    use tool_api::context::ToolUseContext;
+    use tool_api::progress::ToolProgressSender;
+    use tool_api::registry::ToolRegistry;
+    use tool_api::tool_trait::{
+        DescriptionOptions, PromptOptions, Tool, ToolCallResult, ToolError, ToolStaticContext,
+        ValidationError,
+    };
+
+    /// Static skill-listing fixture.
+    struct FixtureSkills(Vec<SkillListingEntry>);
+    #[async_trait]
+    impl SkillListingProvider for FixtureSkills {
+        async fn skill_entries(&self) -> Vec<SkillListingEntry> {
+            self.0.clone()
+        }
+    }
+
+    /// Minimal tool whose only meaningful behavior is its name — used to put a
+    /// `Skill`-named tool (or not) into the registry for the gate test.
+    struct NamedTool(&'static str);
+    #[async_trait]
+    impl Tool for NamedTool {
+        fn name(&self) -> &str {
+            self.0
+        }
+        fn input_schema(&self) -> &serde_json::Value {
+            static SCHEMA: once_cell::sync::Lazy<serde_json::Value> = once_cell::sync::Lazy::new(
+                || serde_json::json!({ "type": "object", "properties": {} }),
+            );
+            &SCHEMA
+        }
+        fn is_enabled(&self, _ctx: &ToolStaticContext) -> bool {
+            true
+        }
+        fn max_result_size_chars(&self) -> usize {
+            1024
+        }
+        fn is_concurrency_safe(&self, _input: &serde_json::Value) -> bool {
+            true
+        }
+        fn is_read_only(&self, _input: &serde_json::Value) -> bool {
+            true
+        }
+        async fn validate_input(
+            &self,
+            _input: &serde_json::Value,
+            _ctx: &ToolUseContext,
+        ) -> Result<(), ValidationError> {
+            Ok(())
+        }
+        async fn check_permissions(
+            &self,
+            _input: &serde_json::Value,
+            _ctx: &ToolUseContext,
+        ) -> permission::PermissionResult {
+            permission::PermissionResult::Allow {
+                reason: permission::PermissionDecisionReason::Other { reason: "t".into() },
+                updated_input: None,
+                update_destination: None,
+                metadata: permission::result::PermissionMetadata::default(),
+            }
+        }
+        async fn description(
+            &self,
+            _input: &serde_json::Value,
+            _opts: &DescriptionOptions,
+        ) -> String {
+            String::new()
+        }
+        async fn prompt(&self, _opts: &PromptOptions) -> String {
+            String::new()
+        }
+        async fn call(
+            &self,
+            _input: serde_json::Value,
+            _ctx: ToolUseContext,
+            _tx: ToolProgressSender,
+        ) -> Result<ToolCallResult, ToolError> {
+            Ok(ToolCallResult {
+                data: serde_json::json!({}),
+                new_messages: vec![],
+                context_modifier: None,
+                mcp_meta: None,
+            })
+        }
+    }
+
+    fn orch_with(
+        tools: ToolRegistry,
+        provider: Option<Arc<dyn SkillListingProvider>>,
+    ) -> ConversationOrchestrator {
+        let api = Arc::new(MockApiClient::new(vec![]));
+        let mut orch = ConversationOrchestrator::new(
+            OrchestratorConfig::default(),
+            api,
+            Arc::new(tools),
+            noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            std::env::temp_dir(),
+        );
+        if let Some(p) = provider {
+            orch = orch.with_skill_listing(p);
+        }
+        orch
+    }
+
+    fn fixture() -> Arc<dyn SkillListingProvider> {
+        Arc::new(FixtureSkills(vec![SkillListingEntry {
+            name: "debug".into(),
+            description: "Debug a failing test".into(),
+            when_to_use: None,
+            is_bundled: false,
+        }]))
+    }
+
+    #[tokio::test]
+    async fn reminder_present_when_provider_and_skill_tool_wired() {
+        let mut reg = ToolRegistry::new();
+        reg.register_builtin(Arc::new(NamedTool("Skill")));
+        let orch = orch_with(reg, Some(fixture()));
+        let msg = orch
+            .skill_listing_reminder_message()
+            .await
+            .expect("reminder present");
+        let text = msg.text_content();
+        assert!(text.starts_with("<system-reminder>"), "got: {text}");
+        assert!(text.contains("The following skills are available for use with the Skill tool:"));
+        assert!(text.contains("- debug: Debug a failing test"));
+    }
+
+    #[tokio::test]
+    async fn no_reminder_when_skill_tool_absent() {
+        // Provider wired, but the Skill tool is not in the registry this turn.
+        let orch = orch_with(ToolRegistry::new(), Some(fixture()));
+        assert!(orch.skill_listing_reminder_message().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn no_reminder_when_provider_absent() {
+        let mut reg = ToolRegistry::new();
+        reg.register_builtin(Arc::new(NamedTool("Skill")));
+        let orch = orch_with(reg, None);
+        assert!(orch.skill_listing_reminder_message().await.is_none());
     }
 }

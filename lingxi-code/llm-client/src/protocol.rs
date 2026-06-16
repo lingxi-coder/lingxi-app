@@ -29,6 +29,11 @@ pub enum StreamFraming {
 pub struct LlmRequest {
     /// Requested model id or alias.
     pub model: String,
+    /// Optional provider profile that disambiguates `model` when the same id is
+    /// offered by multiple providers. `None` = resolve across all providers
+    /// (ambiguous ids error).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<String>,
     /// Conversation messages, oldest first.
     pub messages: Vec<Message>,
     /// System prompt blocks, in order (empty = no system prompt).
@@ -67,6 +72,13 @@ impl LlmRequest {
             model: model.into(),
             ..Self::default()
         }
+    }
+
+    /// Pin the provider profile used to resolve `model`.
+    #[must_use]
+    pub fn with_profile(mut self, profile: impl Into<String>) -> Self {
+        self.profile = Some(profile.into());
+        self
     }
 
     /// Add one user text message.
@@ -605,4 +617,15 @@ pub fn validate_capabilities(request: &LlmRequest, capabilities: Capabilities) -
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn with_profile_sets_field_and_new_defaults_none() {
+        assert_eq!(LlmRequest::new("m").profile, None);
+        assert_eq!(LlmRequest::new("m").with_profile("openai").profile.as_deref(), Some("openai"));
+    }
 }

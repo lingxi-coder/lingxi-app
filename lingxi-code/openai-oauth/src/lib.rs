@@ -6,3 +6,4 @@
 //! codex's ChatGPT auth (see docs/superpowers/specs/2026-06-16-p2-chatgpt-oauth-login-design.md).
 
 pub mod config;
+pub mod pkce;

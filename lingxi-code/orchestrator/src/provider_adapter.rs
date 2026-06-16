@@ -385,7 +385,9 @@ impl ProviderApiAdapter {
     // ── Shared request build ─────────────────────────────────────────────────
 
     /// Convert orchestrator-layer inputs into an `LlmRequest`.
-    #[allow(clippy::unused_self)]
+    // An internal request-assembler: model + profile + system + msgs + tools +
+    // stream + max_tokens are all genuinely distinct inputs (8/7).
+    #[allow(clippy::unused_self, clippy::too_many_arguments)]
     fn build_request(
         &self,
         model: &str,

@@ -366,55 +366,77 @@ impl PoolSubagentSpawner {
         }
     }
 
-    /// Render an [`AgentDefinition`]'s tool policy into the human description
-    /// claude-code shows in the dynamic Agent tool prompt
-    /// (`AgentTool/prompt.ts:15-37` `getToolsDescription`). The Rust
-    /// [`AgentToolPolicy`] folds TS's `tools` (allowlist) + `disallowedTools`
-    /// (denylist) into one enum, so the mapping is:
-    /// - `All { .. }` → `"All tools"` (no restrictions)
-    /// - `Explicit(names)` → `names.join(", ")` (allowlist), `"None"` if empty
-    /// - `Except(names)` → `"All tools except {names.join(", ")}"` (denylist)
-    fn tools_description(def: &AgentDefinition) -> String {
-        match &def.tools {
-            AgentToolPolicy::All { .. } => "All tools".to_string(),
-            AgentToolPolicy::Explicit(names) => {
-                if names.is_empty() {
-                    "None".to_string()
-                } else {
-                    names.join(", ")
-                }
-            }
-            AgentToolPolicy::Except(names) => {
-                format!("All tools except {}", names.join(", "))
-            }
-        }
-    }
-
     /// Resolve the full subagent catalog (built-ins overlaid by the file
     /// catalog, claude-code later-wins precedence) into listing entries for
-    /// the dynamic Agent tool prompt. Each entry's model is left unresolved
-    /// (the prompt only needs type / when-to-use / tools).
+    /// the dynamic Agent tool prompt. Delegates to the crate-level
+    /// [`crate::agent_listing_entries`] free fn (shared with the
+    /// `agent_listing_delta` attachment path) after snapshotting the catalog.
     async fn listing_entries(&self) -> Vec<SubagentListingEntry> {
-        // Start from built-ins keyed by type, then overlay the file catalog so
-        // a user/project agent with the same `agent_type` wins on collision.
-        let mut by_type: HashMap<String, AgentDefinition> = (*self.builtins).clone();
+        // Snapshot built-ins + any wired catalog into one slice, then run the
+        // shared merge. Built-ins are listed first; the shared fn applies
+        // later-wins precedence so a same-named catalog entry overrides them.
+        let mut defs: Vec<AgentDefinition> = self.builtins.values().cloned().collect();
         if let Some(catalog) = self.agent_catalog.get() {
-            for def in catalog.read().await.iter() {
-                by_type.insert(def.agent_type.clone(), def.clone());
+            defs.extend(catalog.read().await.iter().cloned());
+        }
+        crate::agent_listing_entries(&defs)
+    }
+}
+
+/// Render an [`AgentDefinition`]'s tool policy into the human "tools
+/// description" claude-code shows for an agent type (`AgentTool/prompt.ts:15-37`
+/// `getToolsDescription`). The Rust [`AgentToolPolicy`] folds TS's `tools`
+/// (allowlist) + `disallowedTools` (denylist) into one enum, so the mapping is:
+/// - `All { .. }` → `"All tools"` (no restrictions)
+/// - `Explicit(names)` → `names.join(", ")` (allowlist), `"None"` if empty
+/// - `Except(names)` → `"All tools except {names.join(", ")}"` (denylist)
+#[must_use]
+pub fn tools_description(def: &AgentDefinition) -> String {
+    match &def.tools {
+        AgentToolPolicy::All { .. } => "All tools".to_string(),
+        AgentToolPolicy::Explicit(names) => {
+            if names.is_empty() {
+                "None".to_string()
+            } else {
+                names.join(", ")
             }
         }
-        let mut entries: Vec<SubagentListingEntry> = by_type
-            .into_values()
-            .map(|def| SubagentListingEntry {
-                tools_description: Self::tools_description(&def),
-                agent_type: def.agent_type,
-                when_to_use: def.when_to_use,
-            })
-            .collect();
-        // Deterministic order (HashMap iteration is unordered).
-        entries.sort_by(|a, b| a.agent_type.cmp(&b.agent_type));
-        entries
+        AgentToolPolicy::Except(names) => {
+            format!("All tools except {}", names.join(", "))
+        }
     }
+}
+
+/// Merge a flat slice of [`AgentDefinition`]s into the deduplicated
+/// [`SubagentListingEntry`] set the dynamic Agent listing renders — the single
+/// source of truth shared by the inline tool-prompt path
+/// (`PoolSubagentSpawner::listing_entries`) and the `agent_listing_delta`
+/// attachment path (the orchestrator's per-turn reminder).
+///
+/// Precedence is claude-code's later-wins: when two definitions share an
+/// `agent_type`, the LAST one in `defs` wins. Callers therefore pass built-ins
+/// FIRST and the user/project catalog AFTER (built-in < user < project). Each
+/// entry's model is left unresolved (the listing only needs type / when-to-use
+/// / tools). Output is sorted by `agent_type` for deterministic bytes (agent
+/// load order is nondeterministic — plugin load races, MCP async connect —
+/// matching TS `getAgentListingDeltaAttachment`'s sort, attachments.ts:1543).
+#[must_use]
+pub fn agent_listing_entries(defs: &[AgentDefinition]) -> Vec<SubagentListingEntry> {
+    let mut by_type: HashMap<String, &AgentDefinition> = HashMap::new();
+    for def in defs {
+        // Later-wins: a same-typed definition later in the slice overrides.
+        by_type.insert(def.agent_type.clone(), def);
+    }
+    let mut entries: Vec<SubagentListingEntry> = by_type
+        .into_values()
+        .map(|def| SubagentListingEntry {
+            tools_description: tools_description(def),
+            agent_type: def.agent_type.clone(),
+            when_to_use: def.when_to_use.clone(),
+        })
+        .collect();
+    entries.sort_by(|a, b| a.agent_type.cmp(&b.agent_type));
+    entries
 }
 
 #[async_trait]
@@ -1048,7 +1070,41 @@ mod tests {
     #[test]
     fn tools_description_maps_empty_explicit_to_none() {
         let def = agent_def(AgentToolPolicy::Explicit(vec![]));
-        assert_eq!(PoolSubagentSpawner::tools_description(&def), "None");
+        assert_eq!(crate::tools_description(&def), "None");
+    }
+
+    #[test]
+    fn agent_listing_entries_merges_builtins_and_catalog_later_wins() {
+        // built-ins FIRST, then a catalog override for a same-named type.
+        let mut defs = builtin_agent_definitions();
+        let n_builtins = defs.len();
+        defs.push(AgentDefinition {
+            agent_type: "Explore".to_string(),
+            when_to_use: "CATALOG OVERRIDE".to_string(),
+            ..agent_def(AgentToolPolicy::Explicit(vec!["Read".to_string()]))
+        });
+        // …and a brand-new type only the catalog defines.
+        defs.push(AgentDefinition {
+            agent_type: "custom-agent".to_string(),
+            when_to_use: "a project agent".to_string(),
+            ..agent_def(AgentToolPolicy::All { use_exact_tools: false })
+        });
+
+        let entries = crate::agent_listing_entries(&defs);
+        // Override replaces (not adds); the brand-new type is +1.
+        assert_eq!(entries.len(), n_builtins + 1);
+
+        let by: std::collections::HashMap<&str, &SubagentListingEntry> =
+            entries.iter().map(|e| (e.agent_type.as_str(), e)).collect();
+        // Later-wins: the catalog Explore overrides the built-in.
+        assert_eq!(by["Explore"].when_to_use, "CATALOG OVERRIDE");
+        assert_eq!(by["Explore"].tools_description, "Read");
+        // The catalog-only agent is present.
+        assert_eq!(by["custom-agent"].tools_description, "All tools");
+        // Deterministic sort by agent_type.
+        let mut sorted = entries.clone();
+        sorted.sort_by(|a, b| a.agent_type.cmp(&b.agent_type));
+        assert_eq!(entries, sorted);
     }
 
     #[tokio::test]

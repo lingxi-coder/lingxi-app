@@ -37,7 +37,12 @@ pub use color_manager::AgentColorManager;
 pub use context::SubagentContext;
 pub use definition::*;
 pub use display::AgentDisplay;
-pub use handle::PoolSubagentSpawner;
+pub use handle::{agent_listing_entries, tools_description, PoolSubagentSpawner};
+// `agent_listing_delta` shared surface: the ONE `formatAgentLine` and the
+// `shouldInjectAgentListInMessages` gate live in the leaf `traits` crate (so
+// `tool-agent` can reach them without depending on this engine crate); re-export
+// them here under the `agent::` path the orchestrator + callers use.
+pub use traits::subagent_spawn::{format_agent_line, should_inject_agent_list_in_messages};
 pub use model_resolution::resolve_agent_model;
 pub use multi_dispatch::{MultiAgentDispatcher, MultiAgentSpawnSpec};
 pub use pool::{StateMachinePool, StateMachineSlot};

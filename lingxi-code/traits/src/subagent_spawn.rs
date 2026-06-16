@@ -140,6 +140,47 @@ pub struct SubagentListingEntry {
     pub tools_description: String,
 }
 
+/// Format one agent catalog line, the single source of truth for claude-code's
+/// `formatAgentLine` (`AgentTool/prompt.ts:43-46`):
+/// `- {agentType}: {whenToUse} (Tools: {toolsDescription})`.
+///
+/// Lives here (a leaf crate) so BOTH the inline tool-prompt path (`tool-agent`)
+/// and the `agent_listing_delta` attachment path (`agent` crate → orchestrator)
+/// render identical lines without `tool-agent` taking a dep on the heavier
+/// `agent` engine crate. The `tools_description` is pre-rendered by the
+/// spawner / catalog (TS `getToolsDescription`).
+#[must_use]
+pub fn format_agent_line(entry: &SubagentListingEntry) -> String {
+    format!(
+        "- {}: {} (Tools: {})",
+        entry.agent_type, entry.when_to_use, entry.tools_description
+    )
+}
+
+/// Whether the Agent catalog should be conveyed as a per-turn
+/// `<system-reminder>` attachment (the `agent_listing_delta` path) instead of
+/// embedded inline in the `AgentTool` description.
+///
+/// Port of claude-code `shouldInjectAgentListInMessages`
+/// (`AgentTool/prompt.ts:59-64`): honor the `CLAUDE_CODE_AGENT_LIST_IN_MESSAGES`
+/// override (`isEnvTruthy` ⇒ true, `isEnvDefinedFalsy` ⇒ false), else fall back
+/// to the `tengu_agent_list_attach` GrowthBook flag — which has no Rust analog,
+/// so the fallback is `false`. Net: **OFF by default**, so the default build
+/// keeps the inline catalog byte-for-byte; flipping the env var moves the
+/// listing into the per-turn reminder.
+#[must_use]
+pub fn should_inject_agent_list_in_messages() -> bool {
+    let v = std::env::var("CLAUDE_CODE_AGENT_LIST_IN_MESSAGES").ok();
+    if crate::env::is_env_truthy(v.as_deref()) {
+        return true;
+    }
+    if crate::env::is_env_defined_falsy(v.as_deref()) {
+        return false;
+    }
+    // No GrowthBook in Rust → `getFeatureValue(..., false)` ⇒ false.
+    false
+}
+
 /// Spawn-a-subagent seam used by `AgentTool`.
 #[async_trait]
 pub trait SubagentSpawner: Send + Sync {
@@ -174,5 +215,41 @@ mod tests {
     #[test]
     fn trait_is_object_safe() {
         let _: Option<Arc<dyn SubagentSpawner>> = None;
+    }
+
+    #[test]
+    fn format_agent_line_matches_ts_shape() {
+        let entry = SubagentListingEntry {
+            agent_type: "Explore".into(),
+            when_to_use: "Read-only search agent".into(),
+            tools_description: "All tools except Edit, Write".into(),
+        };
+        assert_eq!(
+            format_agent_line(&entry),
+            "- Explore: Read-only search agent (Tools: All tools except Edit, Write)"
+        );
+    }
+
+    /// The gate defaults OFF (no GrowthBook in Rust). Guarded by a process-wide
+    /// lock because it mutates a shared env var.
+    #[test]
+    fn agent_list_gate_default_off_and_env_override() {
+        use std::sync::Mutex;
+        static ENV_LOCK: Mutex<()> = Mutex::new(());
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        std::env::remove_var("CLAUDE_CODE_AGENT_LIST_IN_MESSAGES");
+        assert!(!should_inject_agent_list_in_messages(), "default must be OFF");
+
+        std::env::set_var("CLAUDE_CODE_AGENT_LIST_IN_MESSAGES", "1");
+        assert!(should_inject_agent_list_in_messages(), "truthy ⇒ ON");
+
+        std::env::set_var("CLAUDE_CODE_AGENT_LIST_IN_MESSAGES", "false");
+        assert!(
+            !should_inject_agent_list_in_messages(),
+            "defined-falsy ⇒ OFF"
+        );
+
+        std::env::remove_var("CLAUDE_CODE_AGENT_LIST_IN_MESSAGES");
     }
 }

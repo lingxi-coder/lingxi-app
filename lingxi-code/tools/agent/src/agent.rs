@@ -210,30 +210,32 @@ impl AgentTool {
 
     /// Format one agent catalog line for the tool prompt, matching claude-code's
     /// `formatAgentLine` (AgentTool/prompt.ts:43-46):
-    /// `- {agentType}: {whenToUse} (Tools: {toolsDescription})`. The
-    /// `toolsDescription` is pre-rendered by the spawner (TS
+    /// `- {agentType}: {whenToUse} (Tools: {toolsDescription})`. Delegates to the
+    /// single source of truth in `traits` so the inline prompt path here and the
+    /// `agent_listing_delta` attachment path (orchestrator) render identical
+    /// lines. The `toolsDescription` is pre-rendered by the spawner (TS
     /// `getToolsDescription`).
     fn format_agent_line(agent: &traits::subagent_spawn::SubagentListingEntry) -> String {
-        format!(
-            "- {}: {} (Tools: {})",
-            agent.agent_type, agent.when_to_use, agent.tools_description
-        )
+        traits::subagent_spawn::format_agent_line(agent)
     }
 
     /// Build the dynamic Agent tool prompt, porting claude-code's `getPrompt`
-    /// (AgentTool/prompt.ts:66-287) for the non-fork, inline-list path (the
-    /// `tengu_agent_list_attach` GrowthBook gate defaults off, so the catalog is
-    /// embedded inline rather than via an `agent_listing_delta` attachment).
+    /// (AgentTool/prompt.ts:66-287) for the non-fork path. The catalog is
+    /// embedded INLINE by default; when
+    /// `traits::subagent_spawn::should_inject_agent_list_in_messages()` is ON
+    /// (the `CLAUDE_CODE_AGENT_LIST_IN_MESSAGES` override, default OFF), the
+    /// catalog instead moves to a per-turn `agent_listing_delta`
+    /// `<system-reminder>` attachment built by the orchestrator and this prompt
+    /// carries only the static pointer line (AgentTool/prompt.ts:194-199).
     ///
     /// `is_coordinator` selects the slim coordinator prompt (the coordinator
     /// system prompt already covers usage notes / examples). Not yet wired from
     /// host state — see [`Tool::prompt`].
     ///
     /// Deferred vs TS (no behavioral surface in this port): the fork-subagent
-    /// branch (item 1g), the `agent_listing_delta` attachment variant, the
-    /// embedded-search-tools (`bfs`/`ugrep`) hint swap, the subscription /
-    /// teammate gating on the concurrency + name/team/mode notes, and the
-    /// `USER_TYPE === 'ant'` remote-isolation note.
+    /// branch (item 1g), the embedded-search-tools (`bfs`/`ugrep`) hint swap,
+    /// the subscription / teammate gating on the concurrency + name/team/mode
+    /// notes, and the `USER_TYPE === 'ant'` remote-isolation note.
     fn format_mcp_servers_note(mcp_server_names: &[String]) -> String {
         if mcp_server_names.is_empty() {
             String::new()
@@ -254,14 +256,23 @@ impl AgentTool {
         mcp_server_names: &[String],
         is_coordinator: bool,
     ) -> String {
-        let agent_lines = agents
-            .iter()
-            .map(Self::format_agent_line)
-            .collect::<Vec<_>>()
-            .join("\n");
-        let agent_list_section = format!(
-            "Available agent types and the tools they have access to:\n{agent_lines}"
-        );
+        // `agent_listing_delta` gate (AgentTool/prompt.ts:194-199): when ON, the
+        // catalog moves to a per-turn `<system-reminder>` attachment (built by
+        // the orchestrator) and this description carries only a STATIC pointer
+        // line — so the tool-schema prompt cache no longer busts every time an
+        // agent loads. OFF by default (no GrowthBook in Rust), so the inline
+        // catalog below is byte-identical to the pre-gate behavior.
+        let agent_list_section = if traits::subagent_spawn::should_inject_agent_list_in_messages() {
+            "Available agent types are listed in <system-reminder> messages in the conversation."
+                .to_string()
+        } else {
+            let agent_lines = agents
+                .iter()
+                .map(Self::format_agent_line)
+                .collect::<Vec<_>>()
+                .join("\n");
+            format!("Available agent types and the tools they have access to:\n{agent_lines}")
+        };
         let mcp_note = Self::format_mcp_servers_note(mcp_server_names);
 
         // Shared core (TS `shared`): intro + agent list + when-to-use note.
@@ -656,6 +667,13 @@ mod tests {
     use traits::budget::BudgetEnforcerHandle;
     use traits::subagent_spawn::SubagentSpawner;
 
+    /// `CLAUDE_CODE_AGENT_LIST_IN_MESSAGES` is process-global; serialize the
+    /// tests whose `build_prompt`/`prompt` output depends on the
+    /// `should_inject_agent_list_in_messages()` gate so a gate-ON test never
+    /// races a default-OFF test. Every such test acquires this AND removes the
+    /// var first, neutralizing ordering (mirrors `tools/shell/src/prompt.rs`).
+    static AGENT_LIST_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     /// Build a `BuiltinToolContext` wired with all four M4-05 mocks.
     fn wired_ctx(
         spawner: Arc<MockSubagentSpawner>,
@@ -1037,7 +1055,12 @@ mod tests {
     // Dynamic prompt: catalog lines (formatAgentLine) appear, sourced from the
     // spawner's `agent_listing`. The mock spawner surfaces two entries.
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // brief; serializes the gate env var
     async fn prompt_injects_dynamic_agent_catalog_lines() {
+        let _g = AGENT_LIST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var("CLAUDE_CODE_AGENT_LIST_IN_MESSAGES");
         let spawner = arc_mock_spawner();
         let bctx = wired_ctx(
             spawner.clone(),
@@ -1067,6 +1090,10 @@ mod tests {
     // (no "Usage notes:" / examples), matching TS `if (isCoordinator) return shared`.
     #[test]
     fn build_prompt_coordinator_branch_is_slim() {
+        let _g = AGENT_LIST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var("CLAUDE_CODE_AGENT_LIST_IN_MESSAGES");
         let agents = vec![traits::subagent_spawn::SubagentListingEntry {
             agent_type: "general-purpose".into(),
             when_to_use: "anything".into(),
@@ -1083,6 +1110,10 @@ mod tests {
     // MCP server names surface in the prompt when the registry exposes them.
     #[test]
     fn build_prompt_lists_mcp_servers_when_present() {
+        let _g = AGENT_LIST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var("CLAUDE_CODE_AGENT_LIST_IN_MESSAGES");
         let agents = vec![traits::subagent_spawn::SubagentListingEntry {
             agent_type: "general-purpose".into(),
             when_to_use: "anything".into(),
@@ -1092,5 +1123,45 @@ mod tests {
         assert!(p.contains("# MCP Servers"));
         assert!(p.contains("- github"));
         assert!(p.contains("- linear"));
+    }
+
+    // `agent_listing_delta` gate ON (AgentTool/prompt.ts:194-199): the inline
+    // catalog is replaced by the static pointer line, and the per-agent
+    // `formatAgentLine` lines are NOT in the description (they move to the
+    // orchestrator's per-turn `<system-reminder>` attachment).
+    #[test]
+    fn build_prompt_gate_on_emits_static_pointer_line_not_inline_catalog() {
+        let _g = AGENT_LIST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        std::env::set_var("CLAUDE_CODE_AGENT_LIST_IN_MESSAGES", "1");
+
+        let agents = vec![traits::subagent_spawn::SubagentListingEntry {
+            agent_type: "general-purpose".into(),
+            when_to_use: "anything".into(),
+            tools_description: "All tools".into(),
+        }];
+        let p = AgentTool::build_prompt(&agents, &[], false);
+
+        std::env::remove_var("CLAUDE_CODE_AGENT_LIST_IN_MESSAGES");
+
+        assert!(
+            p.contains(
+                "Available agent types are listed in <system-reminder> messages in the conversation."
+            ),
+            "gate-ON prompt must carry the static pointer line; was:\n{p}"
+        );
+        // The inline catalog header + the per-agent line must be ABSENT.
+        assert!(
+            !p.contains("Available agent types and the tools they have access to:"),
+            "gate-ON prompt must NOT carry the inline catalog header"
+        );
+        assert!(
+            !p.contains("- general-purpose: anything (Tools: All tools)"),
+            "gate-ON prompt must NOT carry inline formatAgentLine lines"
+        );
+        // The rest of the prompt scaffold is unchanged.
+        assert!(p.contains("Launch a new agent to handle complex, multi-step tasks"));
+        assert!(p.contains("Usage notes:"));
     }
 }

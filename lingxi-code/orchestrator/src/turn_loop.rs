@@ -338,6 +338,16 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
         history_snapshot.push(reminder);
     }
 
+    // `agent_listing_delta`: per-turn, transient agent catalog reminder, emitted
+    // ONLY when the `CLAUDE_CODE_AGENT_LIST_IN_MESSAGES` gate is ON (default OFF
+    // ⇒ `None`, keeping the locked turn-loop fixtures byte-identical and the
+    // inline `AgentTool` catalog in place). Appended to THIS call's OUTGOING
+    // snapshot only (never `session.history` / JSONL), after the conditional-
+    // rules reminder. See [`ConversationOrchestrator::agent_listing_reminder_message`].
+    if let Some(reminder) = orch.agent_listing_reminder_message().await {
+        history_snapshot.push(reminder);
+    }
+
     // 1. Call the API. Advertise the registry's wire tool definitions
     //    (same set + serialization as the streaming path). Batch 5: the call is
     //    wrapped in the blocking-limit preempt + 413/prompt-too-long reactive

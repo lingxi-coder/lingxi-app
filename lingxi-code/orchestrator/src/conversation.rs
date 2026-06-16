@@ -606,6 +606,17 @@ pub struct ConversationOrchestrator {
     /// [`Self::skill_listing_reminder_message`] returns `None` (no reminder that
     /// turn). Process-/session-local, exactly like the TS module-scope map.
     pub(crate) sent_skill_names: Mutex<std::collections::HashSet<String>>,
+    /// `agent_listing_delta` delta: agent TYPES already announced in a prior
+    /// turn's `agent_listing` reminder. Turn-0 (empty set) emits the FULL
+    /// listing with the "Available agent types for the Agent tool:" header;
+    /// later turns emit ONLY newly-added types with the "New agent types are now
+    /// available…" header. 1:1 with TS's transcript-reconstructed `announced`
+    /// set (attachments.ts:1524-1530) — kept in memory here (like
+    /// [`Self::sent_skill_names`]) rather than rebuilt from prior deltas. When no
+    /// new type appears, [`Self::agent_listing_reminder_message`] returns `None`.
+    /// Only consulted when the gate (`CLAUDE_CODE_AGENT_LIST_IN_MESSAGES`) is ON;
+    /// inert (never read) in the default OFF build.
+    pub(crate) sent_agent_names: Mutex<std::collections::HashSet<String>>,
 }
 
 impl ConversationOrchestrator {
@@ -664,6 +675,7 @@ impl ConversationOrchestrator {
             conditional_rules_cache: tokio::sync::OnceCell::new(),
             sent_conditional_rules: Mutex::new(std::collections::HashSet::new()),
             sent_skill_names: Mutex::new(std::collections::HashSet::new()),
+            sent_agent_names: Mutex::new(std::collections::HashSet::new()),
         }
     }
 
@@ -2392,6 +2404,17 @@ impl ConversationOrchestrator {
                 snapshot.push(reminder);
             }
 
+            // `agent_listing_delta` (streaming twin): per-turn, transient agent
+            // catalog reminder, emitted ONLY when the
+            // `CLAUDE_CODE_AGENT_LIST_IN_MESSAGES` gate is ON (default OFF ⇒
+            // `None`, keeping the locked streaming fixtures byte-identical and
+            // the inline catalog in place). Appended to THIS turn's OUTGOING
+            // snapshot only (never `session.history` / JSONL). See
+            // [`Self::agent_listing_reminder_message`].
+            if let Some(reminder) = self.agent_listing_reminder_message().await {
+                snapshot.push(reminder);
+            }
+
             // RECOV.1: blocking-limit preempt — the streaming twin of the batched
             // `call_api_with_ptl_recovery` step (1) (TS `query.ts:592-648`). If the
             // pre-call prompt is already at the hard blocking limit
@@ -3190,6 +3213,102 @@ impl ConversationOrchestrator {
         let window =
             compaction::context_window::context_window_for_model(&self.config.model, &[]) as usize;
         let content = crate::prompt::skill_listing::render_reminder(&new_entries, Some(window))?;
+        Some(ConversationMessage::user(MessageId::new(), content))
+    }
+
+    /// The per-turn, transient `agent_listing_delta` reminder, or `None` when
+    /// the gate is OFF (the default — keeps the inline-catalog build
+    /// byte-identical), no agent catalog is wired, the `Agent` tool is absent
+    /// this turn, or no NEW agent type has appeared since the last reminder.
+    ///
+    /// 1:1 with claude-code's `agent_listing_delta` attachment
+    /// (`getAgentListingDeltaAttachment`, attachments.ts:1490-1554 →
+    /// `normalizeAttachmentForAPI`'s `'agent_listing_delta'` case,
+    /// messages.ts:4194-4215):
+    /// - GATE: `shouldInjectAgentListInMessages()` (env
+    ///   `CLAUDE_CODE_AGENT_LIST_IN_MESSAGES`, default OFF — see
+    ///   [`agent::should_inject_agent_list_in_messages`]). When ON, `AgentTool`'s
+    ///   description drops the inline catalog for a static pointer line and the
+    ///   catalog is conveyed here instead, so the tool-schema prompt cache stops
+    ///   busting on every MCP/plugin/permission-driven catalog change.
+    /// - TOOL GATE: skip when the `Agent` tool is not in the registry this turn
+    ///   (attachments.ts:1497-1501) — the listing would be unactionable.
+    /// - ENTRIES: the merged built-ins + catalog listing via
+    ///   [`agent::agent_listing_entries`] (later-wins precedence, sorted), the
+    ///   same source of truth the inline prompt uses.
+    /// - DELTA: emit lines only for types NOT yet announced
+    ///   ([`Self::sent_agent_names`]); `is_initial` = the set was empty BEFORE
+    ///   this turn (TS `announced.size === 0`). An empty delta ⇒ `None`.
+    /// - RENDER: `<system-reminder>\n{header}\n{lines}\n</system-reminder>` with
+    ///   the `is_initial`-conditional header (messages.ts:4197-4199), wrapped as
+    ///   a meta user message.
+    ///
+    /// Like the skill-listing + conditional-rules reminders, the message is
+    /// appended ONLY to the per-turn OUTGOING snapshot (never `session.history` /
+    /// JSONL), so it is recomputed each turn and never accumulates.
+    ///
+    /// DOCUMENTED DEFERRAL vs TS: the `removedTypes` branch (an agent type that
+    /// DISAPPEARS, messages.ts:4202-4206) and the subscription-conditioned
+    /// "launch multiple agents concurrently" note (`showConcurrencyNote`,
+    /// messages.ts:4207-4211) are omitted. The Rust catalog is wired once at boot
+    /// and does not shrink mid-session (no live `/reload-plugins` removal path),
+    /// and the concurrency note is subscription-gated (no subscription signal
+    /// here) and secondary; the inline path keeps its own existing note.
+    pub(crate) async fn agent_listing_reminder_message(&self) -> Option<ConversationMessage> {
+        // GATE: off by default (no GrowthBook in Rust) ⇒ no reminder, inline
+        // catalog stays byte-identical.
+        if !agent::should_inject_agent_list_in_messages() {
+            return None;
+        }
+        // Require a wired catalog (DISK agents; built-ins are merged below).
+        let catalog = self.agent_catalog.as_ref()?;
+        // Gate on the Agent tool being available this turn (attachments.ts:1497).
+        // `find_by_name` also matches the legacy `Task` alias.
+        if self.tools.find_by_name("Agent").is_none() {
+            return None;
+        }
+
+        // Merge BUILT-INS first, then the wired catalog (DISK agents only) on
+        // top — `agent_catalog` does NOT include built-ins, so we prepend them
+        // here. Later-wins precedence means a same-named catalog agent overrides
+        // a built-in, matching the inline `AgentTool` prompt's
+        // `PoolSubagentSpawner::listing_entries` (built-in < user/project) and TS
+        // (`activeAgents` already includes built-ins via `getAgents`).
+        let mut defs = agent::builtin_agent_definitions();
+        defs.extend(catalog.read().await.iter().cloned());
+        let entries = agent::agent_listing_entries(&defs);
+
+        // DELTA: keep only types not yet announced, then record them as sent.
+        // `is_initial` is captured BEFORE inserting (TS `announced.size === 0`).
+        let (is_initial, new_entries): (bool, Vec<traits::subagent_spawn::SubagentListingEntry>) = {
+            let mut sent = self.sent_agent_names.lock().await;
+            let is_initial = sent.is_empty();
+            let delta: Vec<_> = entries
+                .into_iter()
+                .filter(|e| !sent.contains(&e.agent_type))
+                .collect();
+            for e in &delta {
+                sent.insert(e.agent_type.clone());
+            }
+            (is_initial, delta)
+        };
+        if new_entries.is_empty() {
+            return None;
+        }
+
+        // RENDER: header (is_initial-conditional) + one formatAgentLine per new
+        // type, wrapped in a single `<system-reminder>` (messages.ts:4194-4214).
+        let header = if is_initial {
+            "Available agent types for the Agent tool:"
+        } else {
+            "New agent types are now available for the Agent tool:"
+        };
+        let lines = new_entries
+            .iter()
+            .map(agent::format_agent_line)
+            .collect::<Vec<_>>()
+            .join("\n");
+        let content = format!("<system-reminder>\n{header}\n{lines}\n</system-reminder>");
         Some(ConversationMessage::user(MessageId::new(), content))
     }
 
@@ -4986,6 +5105,322 @@ mod skill_listing_reminder_tests {
         assert!(
             !t1.contains("- alpha:"),
             "turn-1 must NOT re-emit the already-sent skill: {t1}"
+        );
+    }
+}
+
+// ── `agent_listing_delta`: per-turn, transient agent catalog reminder ─────────
+//
+// Proves [`ConversationOrchestrator::agent_listing_reminder_message`]:
+// - GATE OFF (default): always `None`, and the inline `AgentTool` prompt is
+//   unchanged (asserted in `tool-agent` — here we just confirm the orchestrator
+//   side stays silent).
+// - GATE ON (`CLAUDE_CODE_AGENT_LIST_IN_MESSAGES=1`, guarded by a process-wide
+//   lock): turn-0 full listing + "Available agent types for the Agent tool:"
+//   header; a later turn with no new types ⇒ `None`; a newly-added type ⇒ a
+//   delta with the "New agent types are now available…" header and ONLY the new
+//   line. Also gated on the `Agent` tool's presence + a wired catalog.
+#[cfg(test)]
+mod agent_listing_reminder_tests {
+    use super::*;
+    use crate::test_support::{
+        noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate,
+        StaticMemoryProvider,
+    };
+    use crate::OrchestratorConfig;
+    use agent::{
+        AgentDefinition, AgentModel, AgentPermissionMode, AgentSource, AgentToolPolicy,
+    };
+    use std::sync::Arc;
+    use tool_api::context::ToolUseContext;
+    use tool_api::progress::ToolProgressSender;
+    use tool_api::registry::ToolRegistry;
+    use tool_api::tool_trait::{
+        DescriptionOptions, PromptOptions, Tool, ToolCallResult, ToolError, ToolStaticContext,
+        ValidationError,
+    };
+
+    /// `CLAUDE_CODE_AGENT_LIST_IN_MESSAGES` is process-global; serialize the
+    /// gate-sensitive tests (every one removes/sets the var under this lock).
+    static AGENT_LIST_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Minimal tool whose only meaningful behavior is its name — used to put an
+    /// `Agent`-named tool (or not) into the registry for the gate test.
+    struct NamedTool(&'static str);
+    #[async_trait]
+    impl Tool for NamedTool {
+        fn name(&self) -> &str {
+            self.0
+        }
+        fn input_schema(&self) -> &serde_json::Value {
+            static SCHEMA: once_cell::sync::Lazy<serde_json::Value> = once_cell::sync::Lazy::new(
+                || serde_json::json!({ "type": "object", "properties": {} }),
+            );
+            &SCHEMA
+        }
+        fn is_enabled(&self, _ctx: &ToolStaticContext) -> bool {
+            true
+        }
+        fn max_result_size_chars(&self) -> usize {
+            1024
+        }
+        fn is_concurrency_safe(&self, _input: &serde_json::Value) -> bool {
+            true
+        }
+        fn is_read_only(&self, _input: &serde_json::Value) -> bool {
+            true
+        }
+        async fn validate_input(
+            &self,
+            _input: &serde_json::Value,
+            _ctx: &ToolUseContext,
+        ) -> Result<(), ValidationError> {
+            Ok(())
+        }
+        async fn check_permissions(
+            &self,
+            _input: &serde_json::Value,
+            _ctx: &ToolUseContext,
+        ) -> permission::PermissionResult {
+            permission::PermissionResult::Allow {
+                reason: permission::PermissionDecisionReason::Other { reason: "t".into() },
+                updated_input: None,
+                update_destination: None,
+                metadata: permission::result::PermissionMetadata::default(),
+            }
+        }
+        async fn description(
+            &self,
+            _input: &serde_json::Value,
+            _opts: &DescriptionOptions,
+        ) -> String {
+            String::new()
+        }
+        async fn prompt(&self, _opts: &PromptOptions) -> String {
+            String::new()
+        }
+        async fn call(
+            &self,
+            _input: serde_json::Value,
+            _ctx: ToolUseContext,
+            _tx: ToolProgressSender,
+        ) -> Result<ToolCallResult, ToolError> {
+            Ok(ToolCallResult {
+                data: serde_json::json!({}),
+                new_messages: vec![],
+                context_modifier: None,
+                mcp_meta: None,
+            })
+        }
+    }
+
+    fn agent_def(agent_type: &str, when_to_use: &str, tools: AgentToolPolicy) -> AgentDefinition {
+        AgentDefinition {
+            agent_type: agent_type.into(),
+            when_to_use: when_to_use.into(),
+            tools,
+            max_turns: 1,
+            model: AgentModel::Inherit,
+            permission_mode: AgentPermissionMode::Bubble,
+            source: AgentSource::BuiltIn,
+            base_dir: "/tmp".into(),
+            system_prompt: None,
+            mcp_servers: vec![],
+            frontmatter_hooks: vec![],
+            icon: None,
+            allowed_tools: vec![],
+            worktree_requirement: None,
+        }
+    }
+
+    /// Build an orchestrator with the given tools + optional agent catalog.
+    fn orch_with(
+        tools: ToolRegistry,
+        catalog: Option<Arc<tokio::sync::RwLock<Vec<AgentDefinition>>>>,
+    ) -> ConversationOrchestrator {
+        let api = Arc::new(MockApiClient::new(vec![]));
+        let mut orch = ConversationOrchestrator::new(
+            OrchestratorConfig::default(),
+            api,
+            Arc::new(tools),
+            noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            std::env::temp_dir(),
+        );
+        if let Some(c) = catalog {
+            orch = orch.with_agent_catalog(c);
+        }
+        orch
+    }
+
+    fn reg_with_agent_tool() -> ToolRegistry {
+        let mut reg = ToolRegistry::new();
+        reg.register_builtin(Arc::new(NamedTool("Agent")));
+        reg
+    }
+
+    #[tokio::test]
+    async fn gate_off_default_is_none() {
+        let _g = AGENT_LIST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var("CLAUDE_CODE_AGENT_LIST_IN_MESSAGES");
+
+        // Even with the Agent tool + a catalog wired, the default gate is OFF.
+        let catalog = Arc::new(tokio::sync::RwLock::new(vec![agent_def(
+            "general-purpose",
+            "anything",
+            AgentToolPolicy::All { use_exact_tools: false },
+        )]));
+        let orch = orch_with(reg_with_agent_tool(), Some(catalog));
+        assert!(
+            orch.agent_listing_reminder_message().await.is_none(),
+            "gate OFF (default) must yield no reminder"
+        );
+    }
+
+    #[tokio::test]
+    async fn gate_on_but_no_catalog_is_none() {
+        let _g = AGENT_LIST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        std::env::set_var("CLAUDE_CODE_AGENT_LIST_IN_MESSAGES", "1");
+        let orch = orch_with(reg_with_agent_tool(), None);
+        let got = orch.agent_listing_reminder_message().await;
+        std::env::remove_var("CLAUDE_CODE_AGENT_LIST_IN_MESSAGES");
+        assert!(got.is_none(), "no catalog ⇒ no reminder even when gate ON");
+    }
+
+    #[tokio::test]
+    async fn gate_on_but_agent_tool_absent_is_none() {
+        let _g = AGENT_LIST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        std::env::set_var("CLAUDE_CODE_AGENT_LIST_IN_MESSAGES", "1");
+        let catalog = Arc::new(tokio::sync::RwLock::new(vec![agent_def(
+            "general-purpose",
+            "anything",
+            AgentToolPolicy::All { use_exact_tools: false },
+        )]));
+        // Empty registry — the Agent tool is not present this turn.
+        let orch = orch_with(ToolRegistry::new(), Some(catalog));
+        let got = orch.agent_listing_reminder_message().await;
+        std::env::remove_var("CLAUDE_CODE_AGENT_LIST_IN_MESSAGES");
+        assert!(got.is_none(), "Agent tool absent ⇒ no reminder");
+    }
+
+    #[tokio::test]
+    async fn gate_on_turn0_full_listing_with_initial_header() {
+        let _g = AGENT_LIST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        std::env::set_var("CLAUDE_CODE_AGENT_LIST_IN_MESSAGES", "1");
+        // Catalog supplies a custom type; built-ins are merged in too.
+        let catalog = Arc::new(tokio::sync::RwLock::new(vec![agent_def(
+            "custom-agent",
+            "a project agent",
+            AgentToolPolicy::Explicit(vec!["Read".into()]),
+        )]));
+        let orch = orch_with(reg_with_agent_tool(), Some(catalog));
+
+        let msg = orch.agent_listing_reminder_message().await;
+        std::env::remove_var("CLAUDE_CODE_AGENT_LIST_IN_MESSAGES");
+        let text = msg.expect("turn-0 reminder present").text_content();
+
+        assert!(text.starts_with("<system-reminder>"), "got: {text}");
+        assert!(text.ends_with("</system-reminder>"), "got: {text}");
+        assert!(
+            text.contains("Available agent types for the Agent tool:"),
+            "turn-0 must use the is_initial header; got: {text}"
+        );
+        // formatAgentLine for the catalog entry.
+        assert!(
+            text.contains("- custom-agent: a project agent (Tools: Read)"),
+            "missing catalog line; got: {text}"
+        );
+        // Built-ins are merged in (e.g. general-purpose).
+        assert!(
+            text.contains("- general-purpose:"),
+            "built-ins must be merged into the listing; got: {text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn gate_on_later_turn_no_new_types_is_none() {
+        let _g = AGENT_LIST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        std::env::set_var("CLAUDE_CODE_AGENT_LIST_IN_MESSAGES", "1");
+        let catalog = Arc::new(tokio::sync::RwLock::new(vec![agent_def(
+            "custom-agent",
+            "a project agent",
+            AgentToolPolicy::All { use_exact_tools: false },
+        )]));
+        let orch = orch_with(reg_with_agent_tool(), Some(catalog));
+
+        // Turn 0 emits the full listing.
+        let t0 = orch.agent_listing_reminder_message().await;
+        assert!(t0.is_some(), "turn-0 must emit");
+        // Turn 1 with the same catalog ⇒ nothing new ⇒ None.
+        let t1 = orch.agent_listing_reminder_message().await;
+        std::env::remove_var("CLAUDE_CODE_AGENT_LIST_IN_MESSAGES");
+        assert!(t1.is_none(), "no new types ⇒ no reminder");
+    }
+
+    #[tokio::test]
+    async fn gate_on_newly_added_type_emits_delta_with_new_header_only() {
+        let _g = AGENT_LIST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        std::env::set_var("CLAUDE_CODE_AGENT_LIST_IN_MESSAGES", "1");
+        let catalog = Arc::new(tokio::sync::RwLock::new(vec![agent_def(
+            "alpha-agent",
+            "the alpha agent",
+            AgentToolPolicy::All { use_exact_tools: false },
+        )]));
+        let orch = orch_with(reg_with_agent_tool(), Some(catalog.clone()));
+
+        // Turn 0: full listing (contains alpha-agent + built-ins).
+        let t0 = orch
+            .agent_listing_reminder_message()
+            .await
+            .expect("turn-0")
+            .text_content();
+        assert!(t0.contains("- alpha-agent:"));
+        assert!(!t0.contains("- gamma-agent:"));
+
+        // A brand-new agent type appears in the catalog.
+        catalog.write().await.push(agent_def(
+            "gamma-agent",
+            "the gamma agent",
+            AgentToolPolicy::Explicit(vec!["Read".into(), "Edit".into()]),
+        ));
+
+        // Turn 1: ONLY the new type, with the "New agent types…" header.
+        let t1 = orch
+            .agent_listing_reminder_message()
+            .await
+            .expect("turn-1 delta")
+            .text_content();
+        std::env::remove_var("CLAUDE_CODE_AGENT_LIST_IN_MESSAGES");
+
+        assert!(
+            t1.contains("New agent types are now available for the Agent tool:"),
+            "delta must use the non-initial header; got: {t1}"
+        );
+        assert!(
+            !t1.contains("Available agent types for the Agent tool:"),
+            "delta must NOT use the is_initial header; got: {t1}"
+        );
+        assert!(
+            t1.contains("- gamma-agent: the gamma agent (Tools: Read, Edit)"),
+            "delta must contain the new agent line; got: {t1}"
+        );
+        assert!(
+            !t1.contains("- alpha-agent:"),
+            "delta must NOT re-emit an already-announced type; got: {t1}"
         );
     }
 }

@@ -36,9 +36,9 @@
     "value": 100,
     "note": "MAX_GLOB_MATCHES. Excess returns truncated=true."
   },
-  "grep_per_file_cap": {
-    "value": 100,
-    "note": "GREP_PER_FILE_CAP. Per-file matches above 100 trigger truncated=true."
+  "grep_records_cap": {
+    "value": 10000,
+    "note": "GREP_RECORDS_CAP. Memory valve on RECORDED content-mode lines per file; never caps the count (claude-code/rg have no per-file cap). head_limit (default 250) is the real truncation; count mode reports the true total."
   },
   "line_indexing_base": {
     "value": 1,

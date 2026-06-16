@@ -1,14 +1,39 @@
 //! `GlobTool` — expand a `**/*.rs`-style pattern against a base directory.
 //!
-//! Wire locks (spec §7):
-//! - `MAX_GLOB_MATCHES = 100`
-//! - Excess truncated → returns `truncated: true` field on output.
+//! 1:1 port of claude-code's `GlobTool.ts` + `utils/glob.ts`. claude-code shells
+//! out to the bundled `rg --files --glob <pattern> --sort=modified`; this Rust
+//! port keeps an **in-process** engine built on the `ignore` +
+//! `ignore::overrides` crates (the same crates ripgrep itself is built on), so
+//! flag parity is *behavioral*, not process-identical — exactly the seam GrepTool
+//! already uses.
+//!
+//! Engine semantics (`utils/glob.ts:91-119`):
+//! - `OverrideBuilder::add(pattern)` registers a whitelist override; in
+//!   gitignore/ripgrep `--glob` semantics a bare glob (`*.rs`) matches the
+//!   BASENAME at ANY depth — so `*.rs` matches `sub/x.rs`, not just the root.
+//!   (This fixes the headline bug where the old `globset` matcher was tested
+//!   against the base-relative path, making a bare `*.rs` root-only.)
+//! - `CLAUDE_CODE_GLOB_NO_IGNORE` (DEFAULT **true** → `--no-ignore`): when truthy,
+//!   `.gitignore`/global/exclude files are NOT respected.
+//! - `CLAUDE_CODE_GLOB_HIDDEN` (DEFAULT **true** → `--hidden`): when truthy,
+//!   hidden (dot) files ARE included.
+//!   NB (verified against ripgrep 14.1.1): a whitelist `--glob` force-includes a
+//!   gitignored/hidden top-level *file* regardless of these toggles — the
+//!   toggles govern whether gitignored/hidden *directories* are descended into.
+//!   The `ignore` crate matches `rg` here exactly.
+//! - `CLAUDE_CODE_GLOB_TIMEOUT_SECONDS` (default 20; 60 on WSL): wall-clock budget
+//!   on the walk (`utils/ripgrep.ts:130-133`).
+//!
+//! Wire locks:
+//! - `MAX_GLOB_MATCHES = 100` (`GlobTool.ts:157`).
+//! - Excess truncated → returns `truncated: true` field on output + appends the
+//!   `(Results are truncated…)` advisory (`GlobTool.ts:190-194`).
 //! - Results sorted OLDEST-first by mtime, capped to the first 100 (claude-code
-//!   `--sort=modified` is oldest-first + `slice(0, limit)`, `utils/glob.ts:94,124`).
-//!   (GLOB.3: the prior "newest-first" was a Spec §7 divergence from TS, corrected.)
+//!   `--sort=modified` is oldest-first + `slice(0, limit)`, `utils/glob.ts:94,127`).
 
 use async_trait::async_trait;
-use globset::Glob;
+use ignore::overrides::OverrideBuilder;
+use ignore::WalkBuilder;
 use once_cell::sync::Lazy;
 use permission::result::PermissionMetadata;
 use permission::{PermissionDecisionReason, PermissionResult};
@@ -26,14 +51,13 @@ use tool_api::tool_trait::{
 };
 use tool_api::util::path_validation::{canonicalize_and_validate, emit_blocked_event};
 use tool_api::BuiltinToolContext;
-use walkdir::WalkDir;
 
-use crate::grep::to_relative_path;
+use crate::grep::{is_env_truthy, ripgrep_timeout, to_relative_path, RIPGREP_TIMEOUT_MSG};
 
 /// Tool name byte-lock.
 pub const TOOL_NAME: &str = "Glob";
 
-/// Maximum match count returned. Spec §7 lock.
+/// Maximum match count returned (`GlobTool.ts:157`: `globLimits?.maxResults ?? 100`).
 pub const MAX_GLOB_MATCHES: usize = 100;
 
 /// Advisory appended to the model-facing result when matches were capped at
@@ -44,12 +68,21 @@ const TRUNCATION_ADVISORY: &str =
 /// Model-facing string when no files matched (`GlobTool.ts:178-183`, byte-exact).
 const NO_FILES_FOUND: &str = "No files found";
 
+/// Model-facing description / prompt — VERBATIM from `GlobTool/prompt.ts:3-7`
+/// (`DESCRIPTION`). TS `GlobTool` exposes only `description`; `prompt()` returns
+/// the same `DESCRIPTION` (`GlobTool.ts:143-145`), so both methods return this.
+const GLOB_DESCRIPTION: &str = r#"- Fast file pattern matching tool that works with any codebase size
+- Supports glob patterns like "**/*.js" or "src/**/*.ts"
+- Returns matching file paths sorted by modification time
+- Use this tool when you need to find files by name patterns
+- When you are doing an open ended search that may require multiple rounds of globbing and grepping, use the Agent tool instead"#;
+
 /// `extractGlobBaseDirectory` (`utils/glob.ts:17-64`): peel the static base
 /// directory (everything before the first glob metachar `* ? [ {`) off a
 /// pattern, returning `(base_dir, relative_pattern)`. Used to re-root absolute
-/// patterns — `Glob::new` matches against paths stripped of the canonical base,
-/// so an absolute pattern can never match unless its static prefix becomes the
-/// search root and the remainder is compiled instead (`utils/glob.ts:78-84`).
+/// patterns — ripgrep's `--glob` flag only works with relative patterns
+/// (`utils/glob.ts:76-84`), so an absolute pattern is split into a search root +
+/// relative remainder.
 ///
 /// Returns an empty `base_dir` when there is no static directory prefix to peel
 /// off (the caller then keeps the original base + pattern).
@@ -178,11 +211,11 @@ impl Tool for GlobTool {
     }
 
     async fn description(&self, _input: &Value, _opts: &DescriptionOptions) -> String {
-        "Expand a glob pattern; returns up to 100 matches sorted by modification time.".to_string()
+        GLOB_DESCRIPTION.to_string()
     }
 
     async fn prompt(&self, _opts: &PromptOptions) -> String {
-        "Glob a pattern (e.g. **/*.rs). Sorted by mtime ascending (oldest first), capped at 100.".to_string()
+        GLOB_DESCRIPTION.to_string()
     }
 
     async fn call(
@@ -209,10 +242,10 @@ impl Tool for GlobTool {
         let started = Instant::now();
         self.emit_started(&invocation_id, pattern).await;
 
-        // GLOB.2: an absolute pattern (e.g. `/abs/proj/**/*.rs`) can never match,
-        // because the matcher is tested against paths stripped of `canon_base`.
-        // Mirror `glob.ts:78-84`: split the static base dir out and re-root the
-        // search there, compiling from the relative remainder.
+        // An absolute pattern (e.g. `/abs/proj/**/*.rs`) is split into a static
+        // base dir + relative remainder — ripgrep's `--glob` only works with
+        // relative patterns (`utils/glob.ts:76-84`). The OverrideBuilder is
+        // anchored at the (re-rooted) base, so the remainder is what we register.
         let (base, pattern): (PathBuf, String) = if Path::new(pattern).is_absolute() {
             let (base_dir, relative_pattern) = extract_glob_base_directory(pattern);
             if base_dir.is_empty() {
@@ -234,8 +267,19 @@ impl Tool for GlobTool {
             }
         };
 
-        let glob = match Glob::new(pattern) {
-            Ok(g) => g,
+        // --- Build the `--glob <pattern>` whitelist override (`utils/glob.ts:100-107`) ---
+        // In OverrideBuilder, a bare glob is a whitelist and (gitignore/ripgrep
+        // `--glob` semantics) matches the basename at ANY depth — so `*.rs`
+        // matches `sub/x.rs`, fixing the old root-only behavior.
+        let mut ob = OverrideBuilder::new(&canon_base);
+        if let Err(e) = ob.add(pattern) {
+            self.emit_failed(&invocation_id, "bad_pattern").await;
+            return Err(ToolError::InvalidInput(format!(
+                "invalid glob pattern {pattern:?}: {e}"
+            )));
+        }
+        let overrides = match ob.build() {
+            Ok(o) => o,
             Err(e) => {
                 self.emit_failed(&invocation_id, "bad_pattern").await;
                 return Err(ToolError::InvalidInput(format!(
@@ -243,33 +287,69 @@ impl Tool for GlobTool {
                 )));
             }
         };
-        let matcher = glob.compile_matcher();
+
+        // --- Env toggles (`utils/glob.ts:98-99`, `isEnvTruthy(... || 'true')`) ---
+        // DEFAULT TRUE for both: NO_IGNORE → don't respect .gitignore;
+        // HIDDEN → include dotfiles.
+        let no_ignore = is_env_truthy("CLAUDE_CODE_GLOB_NO_IGNORE", true);
+        let hidden = is_env_truthy("CLAUDE_CODE_GLOB_HIDDEN", true);
+
+        let mut wb = WalkBuilder::new(&canon_base);
+        wb.overrides(overrides);
+        if no_ignore {
+            // `--no-ignore`: ignore every ignore source.
+            wb.git_ignore(false)
+                .ignore(false)
+                .git_global(false)
+                .git_exclude(false);
+        }
+        if hidden {
+            // `--hidden`: INCLUDE hidden files (WalkBuilder hides them by default).
+            wb.hidden(false);
+        }
+
+        // --- Wall-clock budget on the walk (`utils/ripgrep.ts:130-133`) ---
+        // `CLAUDE_CODE_GLOB_TIMEOUT_SECONDS` overrides; else 20s (60s on WSL).
+        // (The TS path shells `rg` with an execFile timeout + SIGKILL; the
+        // in-process equivalent is a deadline checked each walk step. No tokio
+        // timer / new dep needed — the walk is synchronous CPU/IO work.)
+        let is_wsl = self.ctx.platform.as_str() == "wsl";
+        let timeout = ripgrep_timeout(is_wsl);
+        let deadline = started + timeout;
+        let mut timed_out = false;
 
         let mut hits: Vec<(PathBuf, SystemTime)> = Vec::new();
-        for entry in WalkDir::new(&canon_base).follow_links(false) {
+        for entry in wb.build() {
+            if Instant::now() >= deadline {
+                timed_out = true;
+                break;
+            }
             let entry = match entry {
                 Ok(e) => e,
                 Err(_) => continue,
             };
-            if !entry.file_type().is_file() {
+            // Skip the search root itself + any non-file entries.
+            if !entry.file_type().is_some_and(|t| t.is_file()) {
                 continue;
             }
-            let rel = entry
-                .path()
-                .strip_prefix(&canon_base)
-                .unwrap_or(entry.path());
-            if matcher.is_match(rel) {
-                let mtime = entry
-                    .metadata()
-                    .ok()
-                    .and_then(|m| m.modified().ok())
-                    .unwrap_or(SystemTime::UNIX_EPOCH);
-                hits.push((entry.path().to_path_buf(), mtime));
-            }
+            let mtime = entry
+                .metadata()
+                .ok()
+                .and_then(|m| m.modified().ok())
+                .unwrap_or(SystemTime::UNIX_EPOCH);
+            hits.push((entry.path().to_path_buf(), mtime));
+        }
+
+        // Mirror `utils/ripgrep.ts:444-454`: a timeout with NO results is a hard
+        // error (so the model knows the search didn't complete); a timeout WITH
+        // partial results returns them.
+        if timed_out && hits.is_empty() {
+            self.emit_failed(&invocation_id, "timeout").await;
+            return Err(ToolError::Io(RIPGREP_TIMEOUT_MSG(is_wsl)));
         }
 
         let total = hits.len();
-        // GLOB.3: oldest-first by mtime, matching claude-code `--sort=modified`
+        // Oldest-first by mtime, matching claude-code `--sort=modified`
         // (`utils/glob.ts:94`) + `slice(0, limit)` keeping the OLDEST 100.
         hits.sort_by(|a, b| a.1.cmp(&b.1)); // oldest first
         let truncated = total > MAX_GLOB_MATCHES;
@@ -278,7 +358,7 @@ impl Tool for GlobTool {
         }
 
         // Relativize each hit against the canonicalized workspace (TS
-        // `files.map(toRelativePath)`, GlobTool.ts:166). The walk yields
+        // `files.map(toRelativePath)`, `GlobTool.ts:166`). The walk yields
         // canonicalized paths, so the cwd must be canonicalized too for
         // `strip_prefix` to match — same rule GrepTool uses.
         let cwd_for_rel = std::fs::canonicalize(&self.ctx.workspace)
@@ -289,7 +369,7 @@ impl Tool for GlobTool {
             .collect();
 
         // Model-facing string (`mapToolResultToToolResultBlockParam`,
-        // GlobTool.ts:177-197): "No files found" when empty, else the joined
+        // `GlobTool.ts:177-197`): "No files found" when empty, else the joined
         // paths plus the truncation advisory when capped.
         let content = if matches.is_empty() {
             NO_FILES_FOUND.to_string()
@@ -336,6 +416,25 @@ mod tests {
         )
     }
 
+    /// The glob env toggles (`CLAUDE_CODE_GLOB_*`) are process-global; cargo runs
+    /// tests in this module concurrently. Serialize every env-sensitive test on
+    /// this mutex so a toggle test can't leak `NO_IGNORE=false`/`HIDDEN=false`
+    /// into a default-path test mid-walk. A `tokio::sync::Mutex` is used (not
+    /// `std::sync::Mutex`) so the guard can be held across the `.call().await`
+    /// without tripping `clippy::await_holding_lock`; it also never poisons.
+    static ENV_MUTEX: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    /// Acquire the env lock and clear the glob toggles so a hostile ambient env
+    /// can't perturb the default-path tests (defaults are NO_IGNORE=true,
+    /// HIDDEN=true). The returned guard is held for the whole test body.
+    async fn lock_and_clear_glob_env() -> tokio::sync::MutexGuard<'static, ()> {
+        let g = ENV_MUTEX.lock().await;
+        std::env::remove_var("CLAUDE_CODE_GLOB_NO_IGNORE");
+        std::env::remove_var("CLAUDE_CODE_GLOB_HIDDEN");
+        std::env::remove_var("CLAUDE_CODE_GLOB_TIMEOUT_SECONDS");
+        g
+    }
+
     #[test]
     fn tool_name_is_glob() {
         assert_eq!(TOOL_NAME, "Glob");
@@ -348,6 +447,7 @@ mod tests {
 
     #[tokio::test]
     async fn matches_rs_files() {
+        let _env = lock_and_clear_glob_env().await;
         let tmp = TempDir::new().unwrap();
         std::fs::write(tmp.path().join("a.rs"), "x").unwrap();
         std::fs::write(tmp.path().join("b.rs"), "x").unwrap();
@@ -363,8 +463,64 @@ mod tests {
         assert_eq!(result.data["truncated"], false);
     }
 
+    /// The headline recursion fix: a BARE `*.rs` must match files at ANY depth
+    /// (basename match), not just the search root. Under the old `globset`
+    /// matcher tested against the base-relative path, `sub/x.rs` was missed.
+    #[tokio::test]
+    async fn bare_glob_matches_nested_dirs() {
+        let _env = lock_and_clear_glob_env().await;
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("root.rs"), "x").unwrap();
+        let sub = tmp.path().join("sub");
+        std::fs::create_dir(&sub).unwrap();
+        std::fs::write(sub.join("x.rs"), "x").unwrap();
+        let deep = sub.join("deeper");
+        std::fs::create_dir(&deep).unwrap();
+        std::fs::write(deep.join("y.rs"), "x").unwrap();
+        std::fs::write(sub.join("note.txt"), "x").unwrap();
+        let (ctx, _sink) = make_ctx(&tmp);
+        let tool = GlobTool::new(ctx);
+        let result = tool
+            .call(json!({ "pattern": "*.rs" }), fresh_ctx(), fresh_tx())
+            .await
+            .unwrap();
+        let matches: Vec<String> = result.data["matches"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap().to_string())
+            .collect();
+        // All three .rs (root + nested + deeper-nested), no .txt.
+        assert_eq!(matches.len(), 3, "bare *.rs must recurse: {matches:?}");
+        assert!(matches.iter().any(|m| m.ends_with("root.rs")));
+        assert!(matches.iter().any(|m| m.replace('\\', "/").ends_with("sub/x.rs")));
+        assert!(matches
+            .iter()
+            .any(|m| m.replace('\\', "/").ends_with("sub/deeper/y.rs")));
+    }
+
+    /// `**/*.rs` (the documented recursive form) still works.
+    #[tokio::test]
+    async fn double_star_glob_matches_nested() {
+        let _env = lock_and_clear_glob_env().await;
+        let tmp = TempDir::new().unwrap();
+        let sub = tmp.path().join("sub");
+        std::fs::create_dir(&sub).unwrap();
+        std::fs::write(sub.join("x.rs"), "x").unwrap();
+        std::fs::write(tmp.path().join("root.rs"), "x").unwrap();
+        let (ctx, _sink) = make_ctx(&tmp);
+        let tool = GlobTool::new(ctx);
+        let result = tool
+            .call(json!({ "pattern": "**/*.rs" }), fresh_ctx(), fresh_tx())
+            .await
+            .unwrap();
+        let matches = result.data["matches"].as_array().unwrap();
+        assert_eq!(matches.len(), 2, "**/*.rs should match both: {matches:?}");
+    }
+
     #[tokio::test]
     async fn caps_at_100_with_truncated_flag() {
+        let _env = lock_and_clear_glob_env().await;
         let tmp = TempDir::new().unwrap();
         for i in 0..150 {
             std::fs::write(tmp.path().join(format!("f{i}.rs")), "x").unwrap();
@@ -383,6 +539,7 @@ mod tests {
     #[tokio::test]
     async fn results_sorted_oldest_first() {
         use filetime::{set_file_mtime, FileTime};
+        let _env = lock_and_clear_glob_env().await;
         let tmp = TempDir::new().unwrap();
         let old = tmp.path().join("old.rs");
         let mid = tmp.path().join("mid.rs");
@@ -405,7 +562,7 @@ mod tests {
             .iter()
             .map(|v| v.as_str().unwrap())
             .collect();
-        // GLOB.3: oldest-first (claude-code `--sort=modified`).
+        // oldest-first (claude-code `--sort=modified`).
         assert!(matches[0].ends_with("old.rs"));
         assert!(matches[1].ends_with("mid.rs"));
         assert!(matches[2].ends_with("new.rs"));
@@ -413,6 +570,7 @@ mod tests {
 
     #[tokio::test]
     async fn rejects_invalid_pattern() {
+        let _env = lock_and_clear_glob_env().await;
         let tmp = TempDir::new().unwrap();
         let (ctx, _sink) = make_ctx(&tmp);
         let tool = GlobTool::new(ctx);
@@ -423,10 +581,135 @@ mod tests {
         assert!(err.to_string().contains("invalid glob pattern"));
     }
 
-    // --- GLOB.1: model-facing `content` + cwd-relative paths ---
+    // --- ignore toggle (CLAUDE_CODE_GLOB_NO_IGNORE) ---
+
+    /// `--no-ignore` controls whether ignored *directories* are descended into.
+    /// A `.ignore` file (honored standalone by `rg` / the `ignore` crate — no
+    /// `.git` repo needed, verified against ripgrep 14.1.1) is the test vehicle:
+    /// `.gitignore` is inert outside a git repo in BOTH rg and this engine, so a
+    /// `.ignore` file is what reliably exercises the toggle. (A whitelist
+    /// `--glob` still force-includes an ignored top-level *file*, matching rg —
+    /// so the toggle is exercised via an ignored DIRECTORY.)
+    ///
+    /// NB: env mutation is process-global; the `_env` guard serializes + owns it.
+    #[tokio::test]
+    async fn ignore_dir_respected_only_when_no_ignore_false() {
+        let _env = lock_and_clear_glob_env().await;
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join(".ignore"), "vendor/\n").unwrap();
+        let vendor = tmp.path().join("vendor");
+        std::fs::create_dir(&vendor).unwrap();
+        std::fs::write(vendor.join("dep.rs"), "x").unwrap();
+        std::fs::write(tmp.path().join("top.rs"), "x").unwrap();
+
+        // Default (NO_IGNORE=true → --no-ignore): vendor/ IS descended.
+        {
+            let (ctx, _s) = make_ctx(&tmp);
+            let tool = GlobTool::new(ctx);
+            let result = tool
+                .call(json!({ "pattern": "**/*.rs" }), fresh_ctx(), fresh_tx())
+                .await
+                .unwrap();
+            let matches: Vec<String> = result.data["matches"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|v| v.as_str().unwrap().replace('\\', "/"))
+                .collect();
+            assert!(
+                matches.iter().any(|m| m.ends_with("vendor/dep.rs")),
+                "default no_ignore=true should descend ignored dir: {matches:?}"
+            );
+        }
+
+        // NO_IGNORE=false → respect .gitignore: vendor/ is pruned.
+        std::env::set_var("CLAUDE_CODE_GLOB_NO_IGNORE", "false");
+        {
+            let (ctx, _s) = make_ctx(&tmp);
+            let tool = GlobTool::new(ctx);
+            let result = tool
+                .call(json!({ "pattern": "**/*.rs" }), fresh_ctx(), fresh_tx())
+                .await
+                .unwrap();
+            let matches: Vec<String> = result.data["matches"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|v| v.as_str().unwrap().replace('\\', "/"))
+                .collect();
+            assert!(
+                !matches.iter().any(|m| m.ends_with("vendor/dep.rs")),
+                "no_ignore=false should prune ignored dir: {matches:?}"
+            );
+            assert!(matches.iter().any(|m| m.ends_with("top.rs")));
+        }
+        // `_env` guard clears the toggles + releases the lock at scope end.
+    }
+
+    // --- hidden toggle (CLAUDE_CODE_GLOB_HIDDEN) ---
+
+    /// `--hidden` controls whether hidden (dot) *directories* are descended into.
+    /// (Like gitignore, a whitelist `--glob` force-includes a hidden top-level
+    /// *file*, matching real `rg`, so the toggle is exercised via a hidden
+    /// DIRECTORY.)
+    #[tokio::test]
+    async fn hidden_dir_included_by_default_excluded_when_off() {
+        let _env = lock_and_clear_glob_env().await;
+        let tmp = TempDir::new().unwrap();
+        let hidden_dir = tmp.path().join(".hiddendir");
+        std::fs::create_dir(&hidden_dir).unwrap();
+        std::fs::write(hidden_dir.join("h.rs"), "x").unwrap();
+        std::fs::write(tmp.path().join("visible.rs"), "x").unwrap();
+
+        // Default (HIDDEN=true → --hidden): .hiddendir/ IS descended.
+        {
+            let (ctx, _s) = make_ctx(&tmp);
+            let tool = GlobTool::new(ctx);
+            let result = tool
+                .call(json!({ "pattern": "**/*.rs" }), fresh_ctx(), fresh_tx())
+                .await
+                .unwrap();
+            let matches: Vec<String> = result.data["matches"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|v| v.as_str().unwrap().replace('\\', "/"))
+                .collect();
+            assert!(
+                matches.iter().any(|m| m.ends_with(".hiddendir/h.rs")),
+                "default hidden=true should descend hidden dir: {matches:?}"
+            );
+        }
+
+        // HIDDEN=false: .hiddendir/ is pruned.
+        std::env::set_var("CLAUDE_CODE_GLOB_HIDDEN", "false");
+        {
+            let (ctx, _s) = make_ctx(&tmp);
+            let tool = GlobTool::new(ctx);
+            let result = tool
+                .call(json!({ "pattern": "**/*.rs" }), fresh_ctx(), fresh_tx())
+                .await
+                .unwrap();
+            let matches: Vec<String> = result.data["matches"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|v| v.as_str().unwrap().replace('\\', "/"))
+                .collect();
+            assert!(
+                !matches.iter().any(|m| m.ends_with(".hiddendir/h.rs")),
+                "hidden=false should prune hidden dir: {matches:?}"
+            );
+            assert!(matches.iter().any(|m| m.ends_with("visible.rs")));
+        }
+        // `_env` guard clears the toggles + releases the lock at scope end.
+    }
+
+    // --- model-facing `content` + cwd-relative paths ---
 
     #[tokio::test]
     async fn content_and_matches_are_cwd_relative() {
+        let _env = lock_and_clear_glob_env().await;
         let tmp = TempDir::new().unwrap();
         std::fs::write(tmp.path().join("a.rs"), "x").unwrap();
         let (ctx, _sink) = make_ctx(&tmp);
@@ -449,6 +732,7 @@ mod tests {
 
     #[tokio::test]
     async fn content_no_files_found_when_empty() {
+        let _env = lock_and_clear_glob_env().await;
         let tmp = TempDir::new().unwrap();
         std::fs::write(tmp.path().join("a.txt"), "x").unwrap();
         let (ctx, _sink) = make_ctx(&tmp);
@@ -464,6 +748,7 @@ mod tests {
 
     #[tokio::test]
     async fn content_appends_truncation_advisory_when_capped() {
+        let _env = lock_and_clear_glob_env().await;
         let tmp = TempDir::new().unwrap();
         for i in 0..150 {
             std::fs::write(tmp.path().join(format!("f{i}.rs")), "x").unwrap();
@@ -484,7 +769,7 @@ mod tests {
         assert_eq!(result.data["truncated"], true);
     }
 
-    // --- GLOB.2: absolute patterns re-rooted via extractGlobBaseDirectory ---
+    // --- absolute patterns re-rooted via extractGlobBaseDirectory ---
 
     #[test]
     fn extract_glob_base_directory_splits_static_prefix() {
@@ -515,14 +800,15 @@ mod tests {
 
     #[tokio::test]
     async fn absolute_pattern_matches() {
+        let _env = lock_and_clear_glob_env().await;
         let tmp = TempDir::new().unwrap();
         std::fs::write(tmp.path().join("a.rs"), "x").unwrap();
         std::fs::write(tmp.path().join("b.rs"), "x").unwrap();
         std::fs::write(tmp.path().join("c.txt"), "x").unwrap();
         let (ctx, _sink) = make_ctx(&tmp);
         let tool = GlobTool::new(ctx);
-        // An absolute pattern would yield zero matches before GLOB.2 (the matcher
-        // was tested against base-stripped paths). Re-rooting fixes it.
+        // An absolute pattern is re-rooted (static base dir split out) so the
+        // remaining `*.rs` is registered as a relative whitelist override.
         let pattern = format!("{}/*.rs", tmp.path().display());
         let result = tool
             .call(json!({ "pattern": pattern }), fresh_ctx(), fresh_tx())
@@ -531,5 +817,32 @@ mod tests {
         let matches = result.data["matches"].as_array().unwrap();
         assert_eq!(matches.len(), 2, "absolute pattern should match: {matches:?}");
         assert_eq!(result.data["truncated"], false);
+    }
+
+    #[tokio::test]
+    async fn description_is_verbatim_ts() {
+        let _env = lock_and_clear_glob_env().await;
+        let tmp = TempDir::new().unwrap();
+        let (ctx, _sink) = make_ctx(&tmp);
+        let tool = GlobTool::new(ctx);
+        let d = tool
+            .description(
+                &json!({}),
+                &DescriptionOptions {
+                    is_non_interactive_session: false,
+                },
+            )
+            .await;
+        // Verbatim GlobTool/prompt.ts DESCRIPTION (5 bullets).
+        assert!(d.starts_with("- Fast file pattern matching tool that works with any codebase size\n"));
+        assert!(d.contains("- Supports glob patterns like \"**/*.js\" or \"src/**/*.ts\""));
+        assert!(d.ends_with("use the Agent tool instead"));
+        // prompt() equals DESCRIPTION for Glob.
+        let p = tool
+            .prompt(&PromptOptions {
+                include_examples: false,
+            })
+            .await;
+        assert_eq!(p, d);
     }
 }

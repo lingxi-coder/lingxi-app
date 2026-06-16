@@ -21,8 +21,17 @@
 //!   approximated via `ignore::overrides::OverrideBuilder`.
 //! - mtime-desc file sort falls back to a pure filename sort under `cfg!(test)`
 //!   (mirrors TS `NODE_ENV === 'test'`).
-//! - `GREP_PER_FILE_CAP` (100) is a Rust-specific safety bound; `head_limit`
-//!   (default 250) is the primary truncation, matching TS.
+//! - There is NO per-file match cap (matching TS / the `rg` CLI): count mode
+//!   reports the TRUE per-file + total counts, and content mode is bounded only
+//!   by `head_limit` (default 250). A large `RECORDS_CAP` (10_000) bounds the
+//!   *recorded* lines per file as a memory safety valve, but never limits the
+//!   *count* — so totals stay accurate even when recording stops.
+//! - A wall-clock walk budget honors `CLAUDE_CODE_GLOB_TIMEOUT_SECONDS`
+//!   (default 20s, 60s on WSL); a timeout with zero results is surfaced as an
+//!   error (`utils/ripgrep.ts:130-133,444-454`), partial results are returned.
+//! - File-read ignore-patterns (`GrepTool.ts:411-427`) are DEFERRED: no
+//!   permission-context accessor for them exists in this workspace yet, so the
+//!   cross-crate plumbing is not invented here (only the VCS excludes apply).
 
 use async_trait::async_trait;
 use grep_regex::RegexMatcherBuilder;
@@ -36,7 +45,7 @@ use permission::{PermissionDecisionReason, PermissionResult};
 use serde_json::{json, Map, Value};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::time::{Instant, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 use telemetry::pii::{PiiTagged, Verified};
 use telemetry::sink::{AnalyticsValue, LogEventMetadata};
 use telemetry::tengu::tool::{GREP_COMPLETED, GREP_FAILED, GREP_STARTED};
@@ -51,9 +60,13 @@ use tool_api::BuiltinToolContext;
 /// Tool name byte-lock.
 pub const TOOL_NAME: &str = "Grep";
 
-/// Maximum matches per file. Spec §7 lock. Rust-specific safety bound layered
-/// under `head_limit` (the primary, TS-faithful truncation).
-pub const GREP_PER_FILE_CAP: usize = 100;
+/// Memory safety valve: cap on the number of *recorded* (content-mode) lines
+/// per file. This bounds peak memory for a pathological single-file match storm
+/// WITHOUT capping the *count* — `head_limit` (default 250) is the real,
+/// TS-faithful truncation, and count mode always reports the true total. Set
+/// generously so it never trips for realistic inputs (TS / the `rg` CLI have no
+/// per-file cap at all).
+pub const GREP_RECORDS_CAP: usize = 10_000;
 
 /// Default cap on grep results when `head_limit` is unspecified
 /// (`GrepTool.ts:108`). Pass `head_limit=0` for unlimited.
@@ -130,6 +143,55 @@ pub(crate) fn to_relative_path(abs: &Path, cwd: &Path) -> String {
     }
 }
 
+/// `isEnvTruthy(process.env[name] || default_str)` (`envUtils.ts:32-37` +
+/// `glob.ts:97-99` call form). The env var is read; if unset OR empty, the
+/// `default` is used as the value; the result is truthy iff (lower+trim) is one
+/// of `1`/`true`/`yes`/`on`. Mirrors TS's `||` (not `??`) so an *empty* env
+/// string also falls back to the default.
+///
+/// `pub(crate)` so the sibling `glob` module reuses the exact same toggle rule.
+pub(crate) fn is_env_truthy(name: &str, default: bool) -> bool {
+    let raw = std::env::var(name).unwrap_or_default();
+    let effective = if raw.is_empty() {
+        // `... || 'true'`: empty/unset falls back to the default's string form.
+        if default {
+            "true".to_string()
+        } else {
+            "false".to_string()
+        }
+    } else {
+        raw
+    };
+    matches!(
+        effective.trim().to_ascii_lowercase().as_str(),
+        "1" | "true" | "yes" | "on"
+    )
+}
+
+/// Walk wall-clock budget (`utils/ripgrep.ts:130-133`):
+/// `CLAUDE_CODE_GLOB_TIMEOUT_SECONDS` (parsed as integer seconds, >0) overrides;
+/// otherwise the platform default of 20s (60s on WSL, which has a 3-5x file-read
+/// penalty). `pub(crate)` so `glob` shares the identical budget.
+pub(crate) fn ripgrep_timeout(is_wsl: bool) -> Duration {
+    let default_secs = if is_wsl { 60 } else { 20 };
+    let secs = std::env::var("CLAUDE_CODE_GLOB_TIMEOUT_SECONDS")
+        .ok()
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or(default_secs);
+    Duration::from_secs(secs)
+}
+
+/// Verbatim `RipgrepTimeoutError` message (`utils/ripgrep.ts:447-450`). The
+/// `{20|60}` second figure follows the platform default. `pub(crate)` for reuse.
+#[allow(non_snake_case)]
+pub(crate) fn RIPGREP_TIMEOUT_MSG(is_wsl: bool) -> String {
+    let secs = if is_wsl { 60 } else { 20 };
+    format!(
+        "Ripgrep search timed out after {secs} seconds. The search may have matched files but did not complete in time. Try searching a more specific path or pattern."
+    )
+}
+
 /// Split the `glob` parameter the way `GrepTool.ts:391-409` does: split on
 /// whitespace, keep brace-groups intact, otherwise split on commas.
 fn split_glob_patterns(glob: &str) -> Vec<String> {
@@ -198,13 +260,18 @@ fn value_as_bool(v: &Value) -> Option<bool> {
 }
 
 /// Custom `grep_searcher` sink collecting match (and, for content mode, context)
-/// lines, capped per file at `GREP_PER_FILE_CAP`.
+/// lines. Counting is DECOUPLED from recording: `match_count` always counts
+/// every match (so count mode reports the true total and content mode is bounded
+/// only by `head_limit`, matching TS / `rg`); recording stops past
+/// `GREP_RECORDS_CAP` as a pure memory valve, but the search keeps running so the
+/// count stays accurate.
 struct GrepSink {
     /// `(line_number, text)` records in encounter order (content mode only).
     records: Vec<(Option<u64>, String)>,
-    /// Number of *matched* (not context) lines seen, capped at the per-file cap.
+    /// True count of *matched* (not context) lines seen — never capped.
     match_count: usize,
-    /// Set when the per-file cap stopped collection.
+    /// Set when the records valve (`GREP_RECORDS_CAP`) stopped *recording*
+    /// lines for this file (counting continued). Surfaces `truncated: true`.
     overflow: bool,
     /// Push match + context lines into `records` (content mode).
     record_lines: bool,
@@ -216,28 +283,31 @@ impl Sink for GrepSink {
     type Error = std::io::Error;
 
     fn matched(&mut self, _s: &Searcher, mat: &SinkMatch<'_>) -> Result<bool, Self::Error> {
+        // Always count first — counting is never limited (TS / `rg` have no
+        // per-file cap; count mode must report the true total).
+        self.match_count += 1;
+
+        // `files_with_matches`: one match is enough; stop early like `rg -l`.
         if self.first_match_only {
-            self.match_count += 1;
             return Ok(false);
         }
-        if self.match_count >= GREP_PER_FILE_CAP {
-            self.overflow = true;
-            return Ok(false);
-        }
-        if self.record_lines {
+
+        // Record lines only while under the memory valve. Past the valve we KEEP
+        // SEARCHING (return Ok(true)) so the count keeps climbing — we just stop
+        // appending to `records`.
+        if self.record_lines && self.records.len() < GREP_RECORDS_CAP {
             self.records
                 .push((mat.line_number(), decode_line(mat.bytes())));
-        }
-        self.match_count += 1;
-        if self.match_count >= GREP_PER_FILE_CAP {
-            self.overflow = true;
-            return Ok(false);
+            if self.records.len() >= GREP_RECORDS_CAP {
+                self.overflow = true;
+            }
         }
         Ok(true)
     }
 
     fn context(&mut self, _s: &Searcher, ctx: &SinkContext<'_>) -> Result<bool, Self::Error> {
-        if self.record_lines {
+        // Context lines also respect the records valve (they share the buffer).
+        if self.record_lines && self.records.len() < GREP_RECORDS_CAP {
             self.records
                 .push((ctx.line_number(), decode_line(ctx.bytes())));
         }
@@ -524,7 +594,21 @@ impl Tool for GrepTool {
         let mut files_scanned: u64 = 0;
         let mut overflow_any = false;
 
+        // --- Wall-clock budget on the walk (`utils/ripgrep.ts:130-133`) ---
+        // `CLAUDE_CODE_GLOB_TIMEOUT_SECONDS` overrides; else 20s (60s on WSL).
+        // The in-process equivalent of `rg`'s execFile timeout is a deadline
+        // checked each walk step (the walk is synchronous CPU/IO work — no tokio
+        // timer / extra dep needed). `Platform::as_str()` returns `getPlatform()`
+        // spelling ("wsl") — compared by value so this file needs no `sandbox` dep.
+        let is_wsl = self.ctx.platform.as_str() == "wsl";
+        let deadline = started + ripgrep_timeout(is_wsl);
+        let mut timed_out = false;
+
         for entry in wb.build() {
+            if Instant::now() >= deadline {
+                timed_out = true;
+                break;
+            }
             let entry = match entry {
                 Ok(e) => e,
                 Err(_) => continue,
@@ -584,6 +668,16 @@ impl Tool for GrepTool {
                     .unwrap_or(SystemTime::UNIX_EPOCH);
                 files_matched.push((path.to_path_buf(), mtime));
             }
+        }
+
+        // Mirror `utils/ripgrep.ts:444-454`: a timeout with NO results is a hard
+        // error (so the model knows the search didn't complete rather than
+        // assuming "no matches"); a timeout WITH partial results returns them.
+        let had_results =
+            total_matches > 0 || !files_matched.is_empty() || !content_lines.is_empty();
+        if timed_out && !had_results {
+            self.emit_failed(&invocation_id, "timeout").await;
+            return Err(ToolError::Io(RIPGREP_TIMEOUT_MSG(is_wsl)));
         }
 
         let duration_ms = started.elapsed().as_millis() as u64;
@@ -753,9 +847,55 @@ mod tests {
         assert_eq!(TOOL_NAME, "Grep");
     }
 
-    #[test]
-    fn per_file_cap_byte_locked() {
-        assert_eq!(GREP_PER_FILE_CAP, 100);
+    /// Count mode must report the TRUE per-file + total count, with NO per-file
+    /// cap (matching TS / `rg`). A file with 150 matches reports 150, not 100.
+    #[tokio::test]
+    async fn count_mode_reports_true_count_no_cap() {
+        let tmp = TempDir::new().unwrap();
+        let content: String = (0..150).map(|i| format!("fn f{i}() {{}}\n")).collect();
+        std::fs::write(tmp.path().join("big.rs"), content).unwrap();
+        let (ctx, _sink) = make_ctx(&tmp);
+        let tool = GrepTool::new(ctx);
+        let result = tool
+            .call(
+                json!({ "pattern": "fn", "output_mode": "count" }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .unwrap();
+        // True count (150), not the old GREP_PER_FILE_CAP (100).
+        assert_eq!(result.data["num_matches"], 150);
+        assert_eq!(result.data["num_files"], 1);
+        let c = content_str(&result);
+        assert!(c.contains("big.rs:150"), "per-file count should be 150: {c}");
+        assert!(
+            c.ends_with("\n\nFound 150 total occurrences across 1 file."),
+            "summary should report 150: {c}"
+        );
+    }
+
+    /// Content mode is bounded only by `head_limit` (default 250), not a per-file
+    /// cap: a 150-match file under unlimited `head_limit` records ALL 150 lines.
+    #[tokio::test]
+    async fn content_mode_no_per_file_cap_under_unlimited() {
+        let tmp = TempDir::new().unwrap();
+        let content: String = (0..150).map(|i| format!("fn f{i}() {{}}\n")).collect();
+        std::fs::write(tmp.path().join("big.rs"), content).unwrap();
+        let (ctx, _sink) = make_ctx(&tmp);
+        let tool = GrepTool::new(ctx);
+        let result = tool
+            .call(
+                json!({ "pattern": "fn", "output_mode": "content", "head_limit": 0 }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .unwrap();
+        // All 150 lines recorded (old cap would have stopped at 100).
+        assert_eq!(result.data["num_lines"], 150);
+        // Not truncated — well under the 10k records valve.
+        assert_eq!(result.data["truncated"], false);
     }
 
     #[test]
@@ -784,6 +924,55 @@ mod tests {
         assert_eq!(format_limit_info(Some(3), 0), "limit: 3");
         assert_eq!(format_limit_info(None, 5), "offset: 5");
         assert_eq!(format_limit_info(Some(3), 5), "limit: 3, offset: 5");
+    }
+
+    #[test]
+    fn is_env_truthy_mirrors_ts() {
+        // Unset/empty → falls back to the default's string (|| 'true').
+        std::env::remove_var("LX_TEST_TOGGLE");
+        assert!(is_env_truthy("LX_TEST_TOGGLE", true));
+        assert!(!is_env_truthy("LX_TEST_TOGGLE", false));
+        std::env::set_var("LX_TEST_TOGGLE", "");
+        assert!(is_env_truthy("LX_TEST_TOGGLE", true));
+        // Explicit truthy tokens (lower+trim).
+        for v in ["1", "true", "YES", " on "] {
+            std::env::set_var("LX_TEST_TOGGLE", v);
+            assert!(is_env_truthy("LX_TEST_TOGGLE", false), "{v} should be truthy");
+        }
+        // Anything else is falsy (even with default=true, an explicit value wins).
+        for v in ["0", "false", "no", "off", "garbage"] {
+            std::env::set_var("LX_TEST_TOGGLE", v);
+            assert!(!is_env_truthy("LX_TEST_TOGGLE", true), "{v} should be falsy");
+        }
+        std::env::remove_var("LX_TEST_TOGGLE");
+    }
+
+    #[test]
+    fn ripgrep_timeout_defaults_and_override() {
+        std::env::remove_var("CLAUDE_CODE_GLOB_TIMEOUT_SECONDS");
+        assert_eq!(ripgrep_timeout(false), Duration::from_secs(20));
+        assert_eq!(ripgrep_timeout(true), Duration::from_secs(60)); // WSL
+        std::env::set_var("CLAUDE_CODE_GLOB_TIMEOUT_SECONDS", "5");
+        assert_eq!(ripgrep_timeout(false), Duration::from_secs(5));
+        assert_eq!(ripgrep_timeout(true), Duration::from_secs(5)); // override wins over WSL
+        // Non-positive / garbage → default.
+        std::env::set_var("CLAUDE_CODE_GLOB_TIMEOUT_SECONDS", "0");
+        assert_eq!(ripgrep_timeout(false), Duration::from_secs(20));
+        std::env::set_var("CLAUDE_CODE_GLOB_TIMEOUT_SECONDS", "nope");
+        assert_eq!(ripgrep_timeout(false), Duration::from_secs(20));
+        std::env::remove_var("CLAUDE_CODE_GLOB_TIMEOUT_SECONDS");
+    }
+
+    #[test]
+    fn ripgrep_timeout_msg_verbatim() {
+        assert_eq!(
+            RIPGREP_TIMEOUT_MSG(false),
+            "Ripgrep search timed out after 20 seconds. The search may have matched files but did not complete in time. Try searching a more specific path or pattern."
+        );
+        assert_eq!(
+            RIPGREP_TIMEOUT_MSG(true),
+            "Ripgrep search timed out after 60 seconds. The search may have matched files but did not complete in time. Try searching a more specific path or pattern."
+        );
     }
 
     #[test]
@@ -1085,14 +1274,20 @@ mod tests {
         assert_eq!(content_str(&result), "Found 1 file\na.rs");
     }
 
+    /// The records valve (`GREP_RECORDS_CAP`) is a pure memory bound that trips
+    /// `truncated` once recording stops — but it NEVER caps the count. A file
+    /// with one match over the valve records exactly `GREP_RECORDS_CAP` content
+    /// lines yet still reports the true total in count mode.
     #[tokio::test]
-    async fn per_file_cap_sets_truncated_flag() {
+    async fn records_valve_sets_truncated_but_not_count() {
         let tmp = TempDir::new().unwrap();
-        let content: String = (0..150).map(|i| format!("fn f{i}() {{}}\n")).collect();
+        let n = GREP_RECORDS_CAP + 5;
+        let content: String = (0..n).map(|i| format!("fn f{i}() {{}}\n")).collect();
         std::fs::write(tmp.path().join("big.rs"), content).unwrap();
         let (ctx, _sink) = make_ctx(&tmp);
         let tool = GrepTool::new(ctx);
-        // Content mode with unlimited head_limit so only the per-file cap bounds it.
+
+        // Content mode, unlimited head_limit → records valve is the only bound.
         let result = tool
             .call(
                 json!({ "pattern": "fn", "output_mode": "content", "head_limit": 0 }),
@@ -1101,8 +1296,19 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(result.data["truncated"], true);
-        assert_eq!(result.data["num_lines"], GREP_PER_FILE_CAP as i64);
+        assert_eq!(result.data["truncated"], true, "valve should trip truncated");
+        assert_eq!(result.data["num_lines"], GREP_RECORDS_CAP as i64);
+
+        // Count mode still reports the TRUE total (valve doesn't cap counting).
+        let count = tool
+            .call(
+                json!({ "pattern": "fn", "output_mode": "count" }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(count.data["num_matches"], n as i64);
     }
 
     #[tokio::test]

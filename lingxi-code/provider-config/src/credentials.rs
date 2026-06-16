@@ -2,7 +2,8 @@
 //! slot backing every routable profile.
 //!
 //! Dispatch (on `scope.credential_id`):
-//! - `"anthropic-oauth"` → delegate to the engine-built OAuth provider.
+//! - any registered OAuth delegate id (e.g. `"anthropic-oauth"`, `"openai-chatgpt"`)
+//!   → delegate to the corresponding per-id provider.
 //! - `"anthropic-api-key"` → the configured Anthropic key.
 //! - any other id → keychain[id] → env[recorded var] → `Err(Authentication)`
 //!   (matching `EnvCredentialProvider`; spec §6.1/§6.6).
@@ -23,7 +24,7 @@ pub struct MultiCredentialProvider {
     credentials: Arc<secret::CredentialManager>,
     sources: BTreeMap<String, CredentialSource>,
     anthropic_api_key: Option<String>,
-    oauth_delegate: Option<Arc<dyn CredentialProvider>>,
+    oauth_delegates: BTreeMap<String, Arc<dyn CredentialProvider>>,
 }
 
 // `credentials` (an `Arc<secret::CredentialManager>`) is intentionally omitted —
@@ -35,23 +36,24 @@ impl std::fmt::Debug for MultiCredentialProvider {
         f.debug_struct("MultiCredentialProvider")
             .field("source_ids", &self.sources.keys().collect::<Vec<_>>())
             .field("has_anthropic_api_key", &self.anthropic_api_key.is_some())
-            .field("has_oauth_delegate", &self.oauth_delegate.is_some())
+            .field("oauth_delegate_ids", &self.oauth_delegates.keys().collect::<Vec<_>>())
             .finish()
     }
 }
 
 impl MultiCredentialProvider {
     /// Build the composite from the assembled `credential_sources`, an optional
-    /// Anthropic API key, and an optional OAuth delegate.
+    /// Anthropic API key, and a map of OAuth delegates keyed by `credential_id`
+    /// (e.g. `"anthropic-oauth"`, `"openai-chatgpt"`).
     #[must_use]
     pub fn new(
         credentials: Arc<secret::CredentialManager>,
         sources: Vec<CredentialSource>,
         anthropic_api_key: Option<String>,
-        oauth_delegate: Option<Arc<dyn CredentialProvider>>,
+        oauth_delegates: BTreeMap<String, Arc<dyn CredentialProvider>>,
     ) -> Self {
         let sources = sources.into_iter().map(|s| (s.credential_id.clone(), s)).collect();
-        Self { credentials, sources, anthropic_api_key, oauth_delegate }
+        Self { credentials, sources, anthropic_api_key, oauth_delegates }
     }
 
     /// Resolve a non-Anthropic provider key: keychain[id] → env[var] → Authentication.
@@ -85,11 +87,12 @@ impl CredentialProvider for MultiCredentialProvider {
             let Some(credential_id) = scope.credential_id.as_deref() else {
                 return Err(LlmError::Authentication);
             };
+            // Any registered OAuth delegate wins for its credential_id
+            // (anthropic-oauth, openai-chatgpt, …).
+            if let Some(delegate) = self.oauth_delegates.get(credential_id) {
+                return delegate.load(scope).await;
+            }
             match credential_id {
-                "anthropic-oauth" => match &self.oauth_delegate {
-                    Some(delegate) => delegate.load(scope).await,
-                    None => Err(LlmError::Authentication),
-                },
                 "anthropic-api-key" => self
                     .anthropic_api_key
                     .clone()
@@ -179,7 +182,7 @@ mod tests {
 
     #[tokio::test]
     async fn anthropic_api_key_dispatch_returns_configured_key() {
-        let provider = MultiCredentialProvider::new(manager(), Vec::new(), Some("sk-ant-test".to_string()), None);
+        let provider = MultiCredentialProvider::new(manager(), Vec::new(), Some("sk-ant-test".to_string()), Default::default());
         let got = provider
             .load(&scope(ProviderId::AnthropicFirstParty, "anthropic", "anthropic-api-key"))
             .await
@@ -189,7 +192,7 @@ mod tests {
 
     #[tokio::test]
     async fn anthropic_api_key_dispatch_missing_key_is_authentication_error() {
-        let provider = MultiCredentialProvider::new(manager(), Vec::new(), None, None);
+        let provider = MultiCredentialProvider::new(manager(), Vec::new(), None, Default::default());
         let err = provider
             .load(&scope(ProviderId::AnthropicFirstParty, "anthropic", "anthropic-api-key"))
             .await
@@ -199,7 +202,7 @@ mod tests {
 
     #[tokio::test]
     async fn missing_credential_id_is_authentication_error() {
-        let provider = MultiCredentialProvider::new(manager(), Vec::new(), None, None);
+        let provider = MultiCredentialProvider::new(manager(), Vec::new(), None, Default::default());
         let err = provider
             .load(&CredentialScope::new(ProviderId::AnthropicFirstParty, "anthropic"))
             .await
@@ -217,7 +220,7 @@ mod tests {
         let provider = MultiCredentialProvider::new(
             cm,
             vec![source(ProviderId::OpenAICompatible { name: "openrouter".to_string() }, "openrouter", Some("OPENROUTER_API_KEY"), crate::CredentialKind::Keychain)],
-            None, None,
+            None, Default::default(),
         );
         let got = provider
             .load(&scope(ProviderId::OpenAICompatible { name: "openrouter".to_string() }, "openrouter", "openrouter"))
@@ -235,7 +238,7 @@ mod tests {
         let provider = MultiCredentialProvider::new(
             manager(),
             vec![source(ProviderId::OpenAICompatible { name: "deepseek".to_string() }, "deepseek", Some("DEEPSEEK_API_KEY"), crate::CredentialKind::ApiKey)],
-            None, None,
+            None, Default::default(),
         );
         let got = provider
             .load(&scope(ProviderId::OpenAICompatible { name: "deepseek".to_string() }, "deepseek", "deepseek"))
@@ -253,7 +256,7 @@ mod tests {
         let provider = MultiCredentialProvider::new(
             manager(),
             vec![source(ProviderId::Custom { name: "glm-coding".to_string() }, "glm-coding", Some("GLM_NO_SUCH_VAR"), crate::CredentialKind::ApiKey)],
-            None, None,
+            None, Default::default(),
         );
         let err = provider
             .load(&scope(ProviderId::Custom { name: "glm-coding".to_string() }, "glm-coding", "glm-coding"))
@@ -270,7 +273,7 @@ mod tests {
         let provider = MultiCredentialProvider::new(
             manager(),
             vec![source(ProviderId::OpenAICompatible { name: "github-copilot".to_string() }, "github-copilot", Some("GITHUB_TOKEN"), crate::CredentialKind::Keychain)],
-            None, None,
+            None, Default::default(),
         );
         let got = provider
             .load(&scope(ProviderId::OpenAICompatible { name: "github-copilot".to_string() }, "github-copilot", "github-copilot"))
@@ -293,7 +296,9 @@ mod tests {
     #[tokio::test]
     async fn oauth_id_delegates_to_delegate() {
         let delegate: Arc<dyn CredentialProvider> = Arc::new(StubOAuth { token: "oauth-access".to_string() });
-        let provider = MultiCredentialProvider::new(manager(), Vec::new(), None, Some(delegate));
+        let mut delegates: BTreeMap<String, Arc<dyn CredentialProvider>> = BTreeMap::new();
+        delegates.insert("anthropic-oauth".into(), delegate);
+        let provider = MultiCredentialProvider::new(manager(), Vec::new(), None, delegates);
         let got = provider
             .load(&scope(ProviderId::AnthropicFirstParty, "anthropic", "anthropic-oauth"))
             .await
@@ -303,11 +308,46 @@ mod tests {
 
     #[tokio::test]
     async fn oauth_id_without_delegate_is_authentication_error() {
-        let provider = MultiCredentialProvider::new(manager(), Vec::new(), None, None);
+        let provider = MultiCredentialProvider::new(manager(), Vec::new(), None, Default::default());
         let err = provider
             .load(&scope(ProviderId::AnthropicFirstParty, "anthropic", "anthropic-oauth"))
             .await
             .expect_err("no delegate");
         assert_eq!(err, LlmError::Authentication);
+    }
+
+    /// A stub that always returns the fixed `Credential` it was constructed with.
+    #[derive(Debug)]
+    struct StubProvider(Credential);
+    impl CredentialProvider for StubProvider {
+        fn load<'a>(&'a self, _scope: &'a CredentialScope)
+            -> llm_client::BoxFuture<'a, Result<Credential, LlmError>> {
+            let c = self.0.clone();
+            Box::pin(async move { Ok(c) })
+        }
+    }
+
+    #[tokio::test]
+    async fn routes_oauth_delegate_by_credential_id() {
+        let anthropic = Arc::new(StubProvider(Credential::BearerToken("ANT".into())));
+        let openai = Arc::new(StubProvider(Credential::ChatGptOAuth {
+            access_token: "OAI".into(),
+            account_id: Some("a".into()),
+            fedramp: false,
+        }));
+        let mut delegates: BTreeMap<String, Arc<dyn CredentialProvider>> = BTreeMap::new();
+        delegates.insert("anthropic-oauth".into(), anthropic);
+        delegates.insert("openai-chatgpt".into(), openai);
+        let mcp = MultiCredentialProvider::new(manager(), vec![], None, delegates);
+        let got = mcp
+            .load(&scope(ProviderId::OpenAICompatible { name: "openai-chatgpt".into() }, "openai-chatgpt", "openai-chatgpt"))
+            .await
+            .unwrap();
+        assert!(matches!(got, Credential::ChatGptOAuth { .. }));
+        let got_ant = mcp
+            .load(&scope(ProviderId::AnthropicFirstParty, "anthropic", "anthropic-oauth"))
+            .await
+            .unwrap();
+        assert!(matches!(got_ant, Credential::BearerToken(_)));
     }
 }

@@ -1448,11 +1448,15 @@ pub async fn build(
         .map_err(|e| BuildError::ApiBase(format!("llm-client config: {e}")))?;
     // §6.1: ONE composite credential slot for ALL providers (anthropic api-key /
     // oauth-delegate + every per-profile credential source).
+    let mut oauth_delegates: std::collections::BTreeMap<String, std::sync::Arc<dyn llm_client::CredentialProvider>> = std::collections::BTreeMap::new();
+    if let Some(d) = oauth_delegate {
+        oauth_delegates.insert("anthropic-oauth".to_string(), d);
+    }
     let composite = provider_config::MultiCredentialProvider::new(
         credentials.clone(),
         assembled.credential_sources.clone(),
         if has_api_key { Some(cfg.api_key.clone()) } else { None },
-        oauth_delegate,
+        oauth_delegates,
     );
     client = client.with_credential_provider(Arc::new(composite));
     let llm_client = Arc::new(client);

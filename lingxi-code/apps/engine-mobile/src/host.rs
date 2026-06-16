@@ -430,7 +430,7 @@ pub async fn build_mobile_inner(
         credentials.clone(),
         assembled.credential_sources.clone(),
         if has_api_key { Some(cfg.api_key.clone()) } else { None },
-        None,
+        std::collections::BTreeMap::new(),
     );
     client = client.with_credential_provider(Arc::new(composite));
     let llm_client = Arc::new(client);

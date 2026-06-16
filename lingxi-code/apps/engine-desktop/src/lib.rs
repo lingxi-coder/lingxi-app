@@ -56,7 +56,7 @@ use platform_posix_minimal::{
     PosixRuntime, PosixSandbox, PosixWorktree,
 };
 use sandbox::decision::ProjectTrustLevel;
-use sandbox::runtime_config::{Platform as SandboxPlatform, SandboxRuntimeConfig};
+use sandbox::runtime_config::Platform as SandboxPlatform;
 use secret::CredentialManager;
 use skill_api::SkillRegistry;
 use std::sync::Arc;
@@ -263,6 +263,63 @@ fn sandbox_auto_allow_from_settings_tiers(
         explicit_auto_allow.unwrap_or(true),
         runtime.excluded_commands,
     )
+}
+
+/// (SANDBOX.1) Fold the `sandbox` subsection of the settings tiers (ascending
+/// priority, last write wins) into a full [`sandbox::runtime_config::SandboxRuntimeConfig`].
+///
+/// Sibling of [`sandbox_auto_allow_from_settings_tiers`], but returns the whole
+/// runtime config so the composition root can (a) decide `sandbox_available` from
+/// `cfg.enabled` and (b) hand the live network/filesystem policy to the bash
+/// sandbox path. Matches claude-code: the sandbox is opt-in via `sandbox.enabled`
+/// (default OFF — an empty/absent subsection yields `enabled = false`).
+/// (PERM.1) Decide whether `build()` wraps the base gate with
+/// [`permission::PolicyPermissionGate`] (i.e. enforces deny/allow rules + mode +
+/// sandbox-auto-allow). Pure so it is unit-testable; see the call site in
+/// [`build`] for the full rationale.
+///
+/// - `BypassPermissions` mode (`--dangerously-skip-permissions`) ⇒ never enforce
+///   (allow-all), matching claude-code's bypass.
+/// - An explicit `LINGXI_ENFORCE_PERMISSIONS` value wins: falsey
+///   (`""|0|off|false|no`) ⇒ off, anything else ⇒ on.
+/// - Unset ⇒ default-on ONLY for the CLI/desktop `NoOpPermissionGate` inner
+///   (`use_noop_inner == true`); transport hosts (`AdapterPermissionGate`) keep
+///   their prior env-opt-in behavior so their remote-driven gate is unchanged.
+fn should_enforce_permissions(
+    env_value: Option<&str>,
+    use_noop_inner: bool,
+    mode: permission::PermissionMode,
+) -> bool {
+    if mode == permission::PermissionMode::BypassPermissions {
+        return false;
+    }
+    match env_value {
+        Some(v) => !matches!(
+            v.trim().to_ascii_lowercase().as_str(),
+            "" | "0" | "off" | "false" | "no"
+        ),
+        None => use_noop_inner,
+    }
+}
+
+fn sandbox_runtime_config_from_settings_tiers(
+    raw_tiers: &[&str],
+) -> sandbox::runtime_config::SandboxRuntimeConfig {
+    use sandbox::runtime_config::{SandboxSettingsJson, SettingsJson};
+
+    let mut merged_sandbox: Option<SandboxSettingsJson> = None;
+    for raw in raw_tiers {
+        let Ok(parsed) = serde_json::from_str::<SettingsJson>(raw) else {
+            continue;
+        };
+        if let Some(s) = parsed.sandbox {
+            merged_sandbox = Some(s);
+        }
+    }
+    sandbox::policy_convert::convert_settings_to_runtime_config(&SettingsJson {
+        sandbox: merged_sandbox,
+        ..Default::default()
+    })
 }
 
 /// M10 (T13): a late-bound [`traits::tool_invoker::ToolInvoker`] resolving the
@@ -1640,8 +1697,31 @@ pub async fn build(
     //        (project read last → its `defaultMode` wins). File-glob content
     //        matching (3a) + subagent/teammate-path enforcement (3b) now land
     //        too; only Bash/WebFetch content matching (3a-bash) stays tool-wide.
-    let perms: Arc<dyn PermissionGate> =
-        if std::env::var_os("LINGXI_ENFORCE_PERMISSIONS").is_some_and(|v| !v.is_empty()) {
+    // (PERM.1) Enforce permissions BY DEFAULT on the CLI/desktop path (parity
+    // §0.1 / §B). claude-code's default mode enforces deny/allow rules + the active
+    // permission mode + sandbox-auto-allow; only the explicit
+    // `--dangerously-skip-permissions` (BypassPermissions) opts out into allow-all.
+    // We mirror that: wrap the base gate with `PolicyPermissionGate` unless either
+    // (a) the env escape hatch `LINGXI_ENFORCE_PERMISSIONS` is explicitly set falsey
+    // (`0|off|false|no|""`), or (b) the session is in BypassPermissions mode
+    // (already root/Docker-guarded upstream by `enforce_bypass_safety`).
+    //
+    // Scope: when the env var is UNSET, default-on applies only to the
+    // `NoOpPermissionGate` (CLI/desktop) inner — the path finding §0.1 is about
+    // (allow-all). Transport hosts (the bridge-server, `use_noop=false`) bind the
+    // connection-scoped `AdapterPermissionGate`, whose remote client IS the
+    // enforcement; they keep the prior env-opt-in behavior so their transport-driven
+    // semantics are unchanged. An explicit env value still overrides either way.
+    //
+    // The CLI inner gate stays `NoOpPermissionGate`, so an `Ask` on a tool with no
+    // matching rule still resolves to allow — interactive prompting needs a TUI
+    // permission sink (a documented follow-up); deny rules + modes are now enforced.
+    let enforce_permissions = should_enforce_permissions(
+        std::env::var("LINGXI_ENFORCE_PERMISSIONS").ok().as_deref(),
+        cfg.use_noop_permission_gate,
+        cfg.permission_mode,
+    );
+    let perms: Arc<dyn PermissionGate> = if enforce_permissions {
             let mut rules = Vec::new();
             let mut mode = permission::PermissionMode::Default;
             // Retain each tier's raw text (in ascending priority) so the
@@ -1725,7 +1805,7 @@ pub async fn build(
             tracing::info!(
                 rules = rule_count,
                 mode = ?mode,
-                "permission enforcement enabled (LINGXI_ENFORCE_PERMISSIONS)"
+                "permission enforcement enabled (default on; disable with LINGXI_ENFORCE_PERMISSIONS=0)"
             );
             Arc::new(permission::PolicyPermissionGate::new(policy, perms))
         } else {
@@ -2064,6 +2144,46 @@ pub async fn build(
     } else {
         None
     };
+    // (SANDBOX.1) Make the bash sandbox path LIVE (parity §0.2 / §B). Previously
+    // `sandbox_available` was hardcoded `false`, so bash NEVER sandboxed — even
+    // when the user enabled it in settings — leaving the macOS SBPL / Linux bwrap /
+    // sandbox-runtime stack as dead code. Resolve the runtime config from the
+    // `sandbox` settings subsection (claude-code: opt-in via `sandbox.enabled`,
+    // default OFF) and probe host deps (sandbox-exec on macOS / bwrap on Linux).
+    // `should_use_sandbox` keys on `sandbox_available`, so it is
+    // `settings-enabled AND deps-present`. Unset settings ⇒ off ⇒ byte-identical
+    // to today; opt-in now actually sandboxes on a capable host.
+    let sandbox_platform = if cfg!(target_os = "macos") {
+        SandboxPlatform::Mac
+    } else {
+        SandboxPlatform::Linux
+    };
+    let sandbox_runtime_cfg = {
+        let mut tiers: Vec<String> = Vec::new();
+        for p in [
+            cfg.claude_home.join("settings.json"),
+            cwd.join(".claude").join("settings.json"),
+            cwd.join(".claude").join("settings.local.json"),
+        ] {
+            if let Ok(raw) = tokio::fs::read_to_string(&p).await {
+                tiers.push(raw);
+            }
+        }
+        let refs: Vec<&str> = tiers.iter().map(String::as_str).collect();
+        sandbox_runtime_config_from_settings_tiers(&refs)
+    };
+    let sandbox_available = sandbox_runtime_cfg.enabled
+        && sandbox::dependency_check::check_dependencies(
+            Some(if cfg!(target_os = "macos") {
+                sandbox::runtime_config::Platform::Mac
+            } else {
+                sandbox::runtime_config::Platform::Linux
+            }),
+            true, // no enabledPlatforms restriction here; the config already gated us
+        )
+        .errors
+        .is_empty();
+
     let tool_ctx = BuiltinToolContext {
         // FILE.B: file tools share one read-state map for the (future) staleness
         // guard / Read-dedup; the composition-root Arc-share with the orchestrator
@@ -2075,7 +2195,7 @@ pub async fn build(
         process: Arc::new(PosixProcess::new()),
         sandbox: Arc::new(PosixSandbox::new()),
         clock: clock.clone(),
-        sandbox_runtime: SandboxRuntimeConfig::default(),
+        sandbox_runtime: sandbox_runtime_cfg,
         // Inject the LIVE runner: the desktop session routes its sandboxed
         // bash/powershell/skill commands through `sandbox-runtime`'s
         // `SandboxManager` (forward proxies + Linux socat bridge + MITM/seccomp),
@@ -2100,13 +2220,9 @@ pub async fn build(
         sandbox_runner: std::sync::Arc::new(sandbox_runtime_runner::SandboxRuntimeRunner::new()),
         permission_mode: cfg.permission_mode,
         project_trust: ProjectTrustLevel::Trusted,
-        sandbox_available: false,
+        sandbox_available,
         workspace: cwd.clone(),
-        platform: if cfg!(target_os = "macos") {
-            SandboxPlatform::Mac
-        } else {
-            SandboxPlatform::Linux
-        },
+        platform: sandbox_platform,
         http: http.clone(),
         provider: tool_provider,
         default_model: orch_cfg.model.clone(),
@@ -3767,6 +3883,63 @@ mod tests {
             r#"{ "sandbox": { "enabled": true } }"#,
         ]);
         assert!(robust.enabled);
+    }
+
+    #[test]
+    fn should_enforce_permissions_default_on_for_cli_off_for_transport() {
+        use super::should_enforce_permissions;
+        use permission::PermissionMode;
+
+        // Unset env: default-ON for the CLI/desktop NoOp inner; OFF for transport
+        // (AdapterPermissionGate) so the bridge-server's remote-driven gate is
+        // unchanged.
+        assert!(should_enforce_permissions(None, true, PermissionMode::Default));
+        assert!(!should_enforce_permissions(None, false, PermissionMode::Default));
+
+        // An explicit env value wins for BOTH inners.
+        assert!(should_enforce_permissions(Some("1"), false, PermissionMode::Default));
+        assert!(should_enforce_permissions(Some("on"), false, PermissionMode::Default));
+        for falsey in ["", "0", "off", "false", "no", "  OFF  "] {
+            assert!(
+                !should_enforce_permissions(Some(falsey), true, PermissionMode::Default),
+                "{falsey:?} must disable enforcement"
+            );
+        }
+
+        // BypassPermissions (--dangerously-skip-permissions) ⇒ never enforce.
+        assert!(!should_enforce_permissions(None, true, PermissionMode::BypassPermissions));
+        assert!(!should_enforce_permissions(
+            Some("1"),
+            true,
+            PermissionMode::BypassPermissions
+        ));
+    }
+
+    #[test]
+    fn sandbox_runtime_config_from_settings_tiers_is_opt_in() {
+        use super::sandbox_runtime_config_from_settings_tiers;
+
+        // Default (no `sandbox` subsection) → disabled (claude-code opt-in posture).
+        assert!(!sandbox_runtime_config_from_settings_tiers(&[]).enabled);
+        assert!(!sandbox_runtime_config_from_settings_tiers(&[r#"{ "permissions": {} }"#]).enabled);
+        // Explicit enable.
+        assert!(
+            sandbox_runtime_config_from_settings_tiers(&[r#"{ "sandbox": { "enabled": true } }"#])
+                .enabled
+        );
+        // Tier precedence: a later tier overrides an earlier one (last write wins).
+        assert!(!sandbox_runtime_config_from_settings_tiers(&[
+            r#"{ "sandbox": { "enabled": true } }"#,
+            r#"{ "sandbox": { "enabled": false } }"#,
+        ])
+        .enabled);
+        // Malformed / empty tiers are skipped without panicking.
+        assert!(sandbox_runtime_config_from_settings_tiers(&[
+            "",
+            "not json",
+            r#"{ "sandbox": { "enabled": true } }"#,
+        ])
+        .enabled);
     }
 
     // ── 3c-T2: providers/routing settings → ClientConfig (e2e-flavored) ───

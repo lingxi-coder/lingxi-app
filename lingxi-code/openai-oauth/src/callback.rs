@@ -210,9 +210,10 @@ mod tests {
     use tokio::net::TcpStream;
 
     /// Serialize tests that compete for the fixed ports 1455/1457.
+    /// Delegates to the shared guard in `testsupport` so handle tests and
+    /// callback tests can't collide with each other.
     async fn port_guard() -> tokio::sync::MutexGuard<'static, ()> {
-        static LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-        LOCK.lock().await
+        crate::testsupport::port_guard().await
     }
 
     async fn send_get(port: u16, path_and_query: &str) -> String {

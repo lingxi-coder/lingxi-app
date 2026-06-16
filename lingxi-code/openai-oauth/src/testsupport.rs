@@ -215,6 +215,16 @@ impl RuntimeSpawner for InstantSpawner {
     }
 }
 
+/// Serialize tests that compete for the fixed loopback ports 1455/1457.
+///
+/// Import this from any test module in this crate rather than defining a
+/// local `port_guard` — all callers share the same `static LOCK` so tests in
+/// different modules cannot accidentally collide.
+pub async fn port_guard() -> tokio::sync::MutexGuard<'static, ()> {
+    static LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    LOCK.lock().await
+}
+
 /// Build a `CredentialManager` over an in-memory store + fixed clock.
 pub fn mem_credential_manager(
     storage: Arc<MemStorage>,

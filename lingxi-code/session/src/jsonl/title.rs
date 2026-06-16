@@ -153,6 +153,24 @@ fn post_process(text: &str) -> String {
     truncate_with_ellipsis(collapsed.trim())
 }
 
+/// Normalize a SIDE-MAP title (`custom-title` / `ai-title` / `summary`) with the
+/// exact same rule [`extract_title`] applies to a first-user-message prompt:
+/// newline → space, `trim`, then the [`TITLE_MAX_CHARS`]-char cap +
+/// [`TITLE_ELLIPSIS`]. The resume picker resolves
+/// custom-title > ai-title > summary > first-prompt
+/// ([`crate::jsonl::loader::collect_dir`]) and runs the winning side-map title
+/// through this so every `SessionMetadata::title`, regardless of source, shares
+/// one truncation/ellipsis contract (the display surfaces then re-truncate by
+/// terminal width). Mirrors claude-code's `getLogDisplayTitle`
+/// (`utils/log.ts:30`), which renders `customTitle || summary || firstPrompt`
+/// through one `.trim()`-and-cap pipeline; the stored side-map titles are NOT
+/// run through the `<command-name>`/`bash-input`/skip-XML transforms (those are
+/// first-prompt-only, `getFirstMeaningfulUserMessageTextContent`).
+#[must_use]
+pub(crate) fn truncate_title(text: &str) -> String {
+    post_process(text)
+}
+
 /// Collect text from message content. String → one element; array → the `text`
 /// of every `type: "text"` block (1761-1770); anything else → empty.
 fn collect_texts(content: &Value) -> Vec<String> {
@@ -407,5 +425,27 @@ mod tests {
     fn skip_pattern_drops_interrupt_marker() {
         let m = user(json!("[Request interrupted by user for tool use]"));
         assert_eq!(extract_title(&[m]), "(session)");
+    }
+
+    // ---- truncate_title: side-map titles share extract_title's cap rule -----
+
+    #[test]
+    fn truncate_title_short_is_verbatim() {
+        assert_eq!(truncate_title("Refactor the parser"), "Refactor the parser");
+    }
+
+    #[test]
+    fn truncate_title_collapses_newlines_and_trims() {
+        // Same `extractFirstPrompt` post-processing extract_title applies.
+        assert_eq!(truncate_title("  line1\nline2  "), "line1 line2");
+    }
+
+    #[test]
+    fn truncate_title_caps_at_200_chars_with_ellipsis() {
+        let title = truncate_title(&"a".repeat(250));
+        assert_eq!(title.chars().count(), 201); // 200 + '…'
+        assert!(title.ends_with('…'));
+        // Identical contract to extract_title's first-prompt truncation.
+        assert_eq!(title, extract_title(&[user(json!("a".repeat(250)))]));
     }
 }

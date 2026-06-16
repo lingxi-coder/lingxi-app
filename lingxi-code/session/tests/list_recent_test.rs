@@ -106,3 +106,214 @@ async fn skips_non_uuid_filenames() {
         .expect("list");
     assert_eq!(rows.len(), 2); // the 2 from setup_project, not the bogus one
 }
+
+// ---- Resume-picker title precedence: custom-title > ai-title > summary > -----
+// ---- first-user-message. 1:1 with claude-code's `getLogDisplayTitle`     -----
+// ---- (`customTitle || summary || firstPrompt`, `utils/log.ts:30`) composed --
+// ---- with `readLiteMetadata`'s custom-over-ai rule (custom-title field wins --
+// ---- over ai-title field, `sessionStorage.ts:4771-4775`). The side maps are --
+// ---- produced by the tolerant reader's `read_routed`: `summaries` keyed by  --
+// ---- the chain tip's `leafUuid`, `custom_titles`/`ai_titles` by sessionId.  --
+
+/// Set up a single-session project dir whose ONE `.jsonl` file is built from the
+/// supplied raw JSONL `lines` (already-serialized, one per element). The filename
+/// stem is `sid` (== the picker's `sid` key for custom/ai titles). Returns the
+/// `claude_home` + `cwd` so the caller can run `list_recent_sessions`.
+async fn setup_one(lines: &[String], sid: Uuid) -> (TempDir, std::path::PathBuf, String) {
+    let temp = TempDir::new().expect("tempdir");
+    let cwd_path = temp.path().join("workproj");
+    tokio::fs::create_dir(&cwd_path).await.unwrap();
+    let cwd = cwd_path.to_string_lossy().into_owned();
+    let claude_home = temp.path().join("home");
+    let subdir = claude_home.join("projects").join(project_dir_name(&cwd));
+    tokio::fs::create_dir_all(&subdir).await.unwrap();
+
+    let mut body = String::new();
+    for l in lines {
+        body.push_str(l);
+        body.push('\n');
+    }
+    tokio::fs::write(subdir.join(format!("{sid}.jsonl")), body)
+        .await
+        .unwrap();
+    (temp, claude_home, cwd)
+}
+
+/// A `user` first-prompt line whose `uuid` is also the chain tip (single-message
+/// session — the tip leafUuid == this uuid, so a `summary` keyed by it links).
+fn user_line(uuid: Uuid, sid: Uuid, cwd: &str, prompt: &str) -> String {
+    serde_json::to_string(&serde_json::json!({
+        "type": "user",
+        "uuid": uuid.to_string(),
+        "parentUuid": null,
+        "sessionId": sid.to_string(),
+        "timestamp": "2026-05-25T12:00:00.000Z",
+        "cwd": cwd,
+        "version": "0.12.0",
+        "isSidechain": false,
+        "userType": "external",
+        "message": {"role": "user", "content": prompt},
+    }))
+    .unwrap()
+}
+
+fn summary_line(leaf_uuid: Uuid, summary: &str) -> String {
+    serde_json::to_string(&serde_json::json!({
+        "type": "summary",
+        "summary": summary,
+        "leafUuid": leaf_uuid.to_string(),
+    }))
+    .unwrap()
+}
+
+fn custom_title_line(sid: Uuid, custom_title: &str) -> String {
+    serde_json::to_string(&serde_json::json!({
+        "type": "custom-title",
+        "sessionId": sid.to_string(),
+        "customTitle": custom_title,
+    }))
+    .unwrap()
+}
+
+fn ai_title_line(sid: Uuid, ai_title: &str) -> String {
+    serde_json::to_string(&serde_json::json!({
+        "type": "ai-title",
+        "sessionId": sid.to_string(),
+        "aiTitle": ai_title,
+    }))
+    .unwrap()
+}
+
+#[tokio::test]
+async fn summary_for_tip_leaf_becomes_picker_title() {
+    // A session whose transcript carries a `summary` line for its tip leaf → the
+    // picker shows that summary, NOT the first user prompt.
+    let sid = Uuid::new_v4();
+    let tip = sid; // single-message session: the lone user line is the tip leaf
+    let lines = vec![
+        summary_line(tip, "Refactor the JSONL parser"),
+        user_line(tip, sid, "/cwd-ignored", "please look at the parser"),
+    ];
+    let (temp, claude_home, cwd) = setup_one(&lines, sid).await;
+    let fs = make_fs(temp.path());
+
+    let rows = list_recent_sessions(&claude_home, &cwd, 5, fs)
+        .await
+        .expect("list");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].title, "Refactor the JSONL parser");
+}
+
+#[tokio::test]
+async fn custom_title_wins_over_ai_title_and_summary() {
+    // custom-title is the highest-precedence source: it beats BOTH an ai-title
+    // AND a summary present in the same transcript (logs.ts:69 "user renames
+    // always win over AI titles"; getLogDisplayTitle puts customTitle first).
+    let sid = Uuid::new_v4();
+    let tip = sid;
+    let lines = vec![
+        summary_line(tip, "AUTO summary should lose"),
+        ai_title_line(sid, "AI title should lose"),
+        custom_title_line(sid, "My Renamed Session"),
+        user_line(tip, sid, "/cwd", "the original first prompt"),
+    ];
+    let (temp, claude_home, cwd) = setup_one(&lines, sid).await;
+    let fs = make_fs(temp.path());
+
+    let rows = list_recent_sessions(&claude_home, &cwd, 5, fs)
+        .await
+        .expect("list");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].title, "My Renamed Session");
+}
+
+#[tokio::test]
+async fn ai_title_wins_over_summary() {
+    // No custom-title → the ai-title is used, in preference to the summary.
+    let sid = Uuid::new_v4();
+    let tip = sid;
+    let lines = vec![
+        summary_line(tip, "summary should lose to ai-title"),
+        ai_title_line(sid, "Generated Title"),
+        user_line(tip, sid, "/cwd", "the first prompt"),
+    ];
+    let (temp, claude_home, cwd) = setup_one(&lines, sid).await;
+    let fs = make_fs(temp.path());
+
+    let rows = list_recent_sessions(&claude_home, &cwd, 5, fs)
+        .await
+        .expect("list");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].title, "Generated Title");
+}
+
+#[tokio::test]
+async fn plain_session_falls_back_to_first_user_message() {
+    // Neither custom-title, ai-title, nor summary → the first-user-message title
+    // (UNCHANGED from the pre-summary behavior).
+    let sid = Uuid::new_v4();
+    let tip = sid;
+    let lines = vec![user_line(tip, sid, "/cwd", "what does this function do?")];
+    let (temp, claude_home, cwd) = setup_one(&lines, sid).await;
+    let fs = make_fs(temp.path());
+
+    let rows = list_recent_sessions(&claude_home, &cwd, 5, fs)
+        .await
+        .expect("list");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].title, "what does this function do?");
+}
+
+#[tokio::test]
+async fn summary_for_a_non_tip_leaf_is_not_used() {
+    // A `summary` keyed by a leafUuid that is NOT the chain tip must NOT surface
+    // (TS keys `summaries.get(leafMessage.uuid)` off the TIP only). With no
+    // custom/ai title, the picker falls back to the first user message.
+    let sid = Uuid::new_v4();
+    let tip = sid;
+    let other_leaf = Uuid::new_v4(); // not present as a message → never the tip
+    let lines = vec![
+        summary_line(other_leaf, "summary for some other leaf"),
+        user_line(tip, sid, "/cwd", "the real first prompt"),
+    ];
+    let (temp, claude_home, cwd) = setup_one(&lines, sid).await;
+    let fs = make_fs(temp.path());
+
+    let rows = list_recent_sessions(&claude_home, &cwd, 5, fs)
+        .await
+        .expect("list");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0].title, "the real first prompt",
+        "a summary keyed by a non-tip leaf must not be used"
+    );
+}
+
+#[tokio::test]
+async fn branched_fixture_surfaces_ai_title() {
+    // The committed `real_transcript_branched.jsonl` carries BOTH a `summary`
+    // (leafUuid = the tip a2) and an `ai-title` ("Parser work"). With no
+    // custom-title, the ai-title wins over the summary, exercising the precedence
+    // end-to-end on a faithful multi-line transcript (leading summary, interleaved
+    // attachment/system/metadata, a sidechain branch).
+    let sid: Uuid = "11111111-1111-4111-8111-111111111111".parse().unwrap();
+    let fixture = include_str!("fixtures/real_transcript_branched.jsonl");
+
+    let temp = TempDir::new().expect("tempdir");
+    let cwd_path = temp.path().join("workproj");
+    tokio::fs::create_dir(&cwd_path).await.unwrap();
+    let cwd = cwd_path.to_string_lossy().into_owned();
+    let claude_home = temp.path().join("home");
+    let subdir = claude_home.join("projects").join(project_dir_name(&cwd));
+    tokio::fs::create_dir_all(&subdir).await.unwrap();
+    tokio::fs::write(subdir.join(format!("{sid}.jsonl")), fixture)
+        .await
+        .unwrap();
+
+    let fs = make_fs(temp.path());
+    let rows = list_recent_sessions(&claude_home, &cwd, 5, fs)
+        .await
+        .expect("list");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].title, "Parser work", "ai-title wins over the summary");
+}

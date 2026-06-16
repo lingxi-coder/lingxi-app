@@ -1576,7 +1576,9 @@ impl agent::SubagentApiClient for ProviderApiAdapter {
         messages: Vec<ConversationMessage>,
         tools: Vec<serde_json::Value>,
     ) -> Result<BoxStream<'static, Result<LlmEvent, LlmError>>, LlmError> {
-        StreamingApiClient::stream(self, model, system, messages, tools).await
+        // Subagent calls don't carry a provider profile; pass None so
+        // llm-client resolves unscoped (default behaviour).
+        StreamingApiClient::stream(self, model, None, system, messages, tools).await
     }
 }
 
@@ -1585,13 +1587,12 @@ impl StreamingApiClient for ProviderApiAdapter {
     async fn stream(
         &self,
         model: &str,
+        profile: Option<&str>,
         system: Option<&str>,
         messages: Vec<ConversationMessage>,
         tools: Vec<serde_json::Value>,
     ) -> Result<BoxStream<'static, Result<LlmEvent, LlmError>>, LlmError> {
-        // Streaming calls don't carry a profile yet (profile is session-level;
-        // streaming loop reads it separately in conversation.rs when needed).
-        let req = self.build_request(model, None, system, messages, tools, true, None)?;
+        let req = self.build_request(model, profile, system, messages, tools, true, None)?;
         self.drive_stream(req).await
     }
 }
@@ -3339,6 +3340,7 @@ mod tests {
             &adapter,
             "claude-sonnet-4-20250514",
             None,
+            None,
             Vec::new(),
             Vec::new(),
         )
@@ -4382,6 +4384,7 @@ mod tests {
             &adapter,
             "claude-sonnet-4-20250514",
             None,
+            None,
             Vec::new(),
             Vec::new(),
         )
@@ -4437,6 +4440,7 @@ mod tests {
         let stream_result = StreamingApiClient::stream(
             &adapter,
             "claude-sonnet-4-20250514",
+            None,
             None,
             Vec::new(),
             Vec::new(),

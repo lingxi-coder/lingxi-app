@@ -32,6 +32,9 @@ use tokio::sync::Mutex;
 pub struct CapturedStreamCall {
     /// Model name as requested by the orchestrator.
     pub model: String,
+    /// Provider profile name threaded from `SessionState::model_profile`
+    /// (`None` when no profile is active on the session).
+    pub profile: Option<String>,
     /// Assembled system prompt (`None` if omitted).
     pub system: Option<String>,
     /// Conversation history snapshot at the time of the call.
@@ -90,12 +93,14 @@ impl StreamingApiClient for MockStreamingApiClient {
     async fn stream(
         &self,
         model: &str,
+        profile: Option<&str>,
         system: Option<&str>,
         messages: Vec<ConversationMessage>,
         tools: Vec<Value>,
     ) -> Result<BoxStream<'static, Result<LlmEvent, LlmError>>, LlmError> {
         self.captured.lock().await.push(CapturedStreamCall {
             model: model.to_string(),
+            profile: profile.map(str::to_string),
             system: system.map(str::to_string),
             messages,
             tools,
@@ -330,7 +335,7 @@ mod tests {
             message_stop(),
         ]]);
         let s = mock
-            .stream("claude-opus-4-7", None, Vec::new(), Vec::new())
+            .stream("claude-opus-4-7", None, None, Vec::new(), Vec::new())
             .await
             .expect("first turn");
         let collected: Vec<_> = s.collect().await;
@@ -339,7 +344,7 @@ mod tests {
         assert!(matches!(collected[1], Ok(LlmEvent::MessageStop)));
 
         let result = mock
-            .stream("claude-opus-4-7", None, Vec::new(), Vec::new())
+            .stream("claude-opus-4-7", None, None, Vec::new(), Vec::new())
             .await;
         // `Result::expect_err` requires `Ok` to be `Debug`; `BoxStream`
         // is not. Match on the result instead.
@@ -353,7 +358,7 @@ mod tests {
     async fn captured_calls_record_model_and_system() {
         let mock = MockStreamingApiClient::with_turns(vec![scripted![message_stop()]]);
         let result = mock
-            .stream("claude-opus-4-7", Some("sys"), Vec::new(), Vec::new())
+            .stream("claude-opus-4-7", None, Some("sys"), Vec::new(), Vec::new())
             .await;
         // `Result::expect` requires Ok = `BoxStream` to be Debug;
         // it is not. Discriminate via `is_ok` instead.

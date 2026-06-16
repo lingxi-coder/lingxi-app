@@ -28,7 +28,7 @@ use tool_api::tool_trait::{
     ToolStaticContext, ValidationError,
 };
 use traits::team_spawn::TeamSpawnSeam;
-use traits::OutputStream;
+use traits::{OutputStream, RuntimeSpawner};
 
 use crate::mode::CoordinatorMode;
 use crate::team_file::{self, TeamFile, TeamMember};
@@ -104,6 +104,14 @@ pub struct TeamCreateTool {
     /// on-disk team file is written under a scratch path (hermetic, no real
     /// `~/.claude/teams/` pollution, no cross-test interference).
     home_override: Option<std::path::PathBuf>,
+    /// Optional background-task spawner (D17 — no direct `tokio::spawn`) used to
+    /// start the per-teammate mailbox→runner PUMP right after a spawn is
+    /// reconciled. `None` (the default for tests / the offline factory) ⇒ no
+    /// pump is started: routed messages still queue in the teammate's mailbox,
+    /// they just are not auto-drained into the runner. The desktop composition
+    /// root injects a real `PosixRuntime` via [`Self::with_runtime`] so a
+    /// coordinator `SendMessage` actually reaches the teammate's turn loop.
+    runtime: Option<Arc<dyn RuntimeSpawner>>,
 }
 
 impl TeamCreateTool {
@@ -126,6 +134,7 @@ impl TeamCreateTool {
             output,
             bus: None,
             home_override: None,
+            runtime: None,
         }
     }
 
@@ -133,6 +142,17 @@ impl TeamCreateTool {
     #[must_use]
     pub fn with_analytics_bus(mut self, bus: Option<Arc<AnalyticsBus>>) -> Self {
         self.bus = bus;
+        self
+    }
+
+    /// Attach the background-task spawner used to start the per-teammate
+    /// mailbox→runner PUMP after a spawn is reconciled. Production (desktop)
+    /// wires the session `RuntimeSpawner` here; without it, routed messages
+    /// still queue in the teammate mailbox but are not auto-drained into the
+    /// runner.
+    #[must_use]
+    pub fn with_runtime(mut self, runtime: Arc<dyn RuntimeSpawner>) -> Self {
+        self.runtime = Some(runtime);
         self
     }
 
@@ -397,6 +417,51 @@ impl Tool for TeamCreateTool {
         //    TeamDelete (kill) can resolve back to this worker.
         self.team.set_task_id(&agent_id, task_id.clone()).await;
 
+        // 4a. Start the per-teammate mailbox→runner PUMP. The teammate's mailbox
+        //     was registered by `spawn_worker` (step 2); now that the worker↔
+        //     task_id link is written and the real task is started (step 3), the
+        //     pump can park on that mailbox and inject each delivered message
+        //     into the teammate's turn loop via the spawn seam's `send_message`
+        //     (the `injectUserMessageToTeammate` analogue). WITHOUT this, a
+        //     coordinator `SendMessage` lands in a mailbox no runner reads.
+        //
+        //     The pump runs through the injected `RuntimeSpawner` (D17 — never a
+        //     direct `tokio::spawn`). When no runtime is wired (tests / the
+        //     offline factory) the pump is skipped: messages still queue in the
+        //     mailbox, they are just not auto-drained. The mailbox lookup is
+        //     resolved here (not inside the pump) so a missing mailbox — which
+        //     should never happen right after `spawn_worker` — is a no-op rather
+        //     than a parked pump on a phantom inbox. The pump exits on its own
+        //     when the teammate's task is gone (`send_message` → Terminated), so
+        //     its lifetime is tied to the teammate; no stop handle is retained.
+        if let Some(runtime) = &self.runtime {
+            if let Some(mailbox) = self.team.mailbox_router.get(&agent_id).await {
+                let seam = self.spawn_seam.clone();
+                let pump_task_id = task_id.clone();
+                let pump = Box::pin(async move {
+                    crate::teammate_pump::run_teammate_pump(mailbox, pump_task_id, seam).await;
+                });
+                // A spawn failure (runtime shutting down) is non-fatal to the
+                // TeamCreate itself — the teammate is already started; only its
+                // auto-drain pump failed to launch. Log and continue.
+                if let Err(e) = runtime
+                    .spawn(&format!("teammate-pump:{task_id}"), pump)
+                    .await
+                {
+                    tracing::warn!(
+                        task_id = %task_id,
+                        error = %e,
+                        "TeamCreate: failed to start teammate mailbox→runner pump"
+                    );
+                }
+            } else {
+                tracing::warn!(
+                    agent_id = %agent_id.as_uuid(),
+                    "TeamCreate: no mailbox registered for freshly-spawned worker; pump not started"
+                );
+            }
+        }
+
         // 5. Record the team name (source of the CoordinatorStatus { team } DTO).
         self.team.set_team_name(Some(team_name.clone())).await;
 
@@ -546,11 +611,14 @@ mod tests {
 
     /// Recording spawn seam: returns a fixed handler-generated `task_id`,
     /// counts `spawn_teammate` invocations, and captures the args of the last
-    /// spawn so tests can assert what the tool threaded through.
+    /// spawn so tests can assert what the tool threaded through. Also records
+    /// every `send_message` (as the injected text) so the pump-integration test
+    /// can assert a routed message reached the seam's runner inject.
     struct RecordingSeam {
         task_id: String,
         spawns: AtomicUsize,
         last_args: Mutex<Option<(AgentId, String, String)>>,
+        injected: Mutex<Vec<String>>,
     }
 
     impl RecordingSeam {
@@ -559,7 +627,11 @@ mod tests {
                 task_id: task_id.into(),
                 spawns: AtomicUsize::new(0),
                 last_args: Mutex::new(None),
+                injected: Mutex::new(Vec::new()),
             }
+        }
+        fn injected(&self) -> Vec<String> {
+            self.injected.lock().unwrap().clone()
         }
     }
 
@@ -576,6 +648,53 @@ mod tests {
             Ok(self.task_id.clone())
         }
         async fn kill(&self, _task_id: &str) -> Result<(), traits::team_spawn::TeamSpawnError> {
+            Ok(())
+        }
+        async fn send_message(
+            &self,
+            _task_id: &str,
+            message: String,
+        ) -> Result<(), traits::team_spawn::TeamSpawnError> {
+            self.injected.lock().unwrap().push(message);
+            Ok(())
+        }
+    }
+
+    /// A tiny tokio-backed [`RuntimeSpawner`] for the pump-integration test. The
+    /// coordinator crate does not depend on `test-harness`, so we inline the
+    /// minimal spawner here (tests may use tokio directly; the D17 no-direct-
+    /// `tokio::spawn` rule is for production engine code).
+    struct TestSpawner {
+        handles: Mutex<Vec<tokio::task::JoinHandle<()>>>,
+    }
+    impl TestSpawner {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                handles: Mutex::new(Vec::new()),
+            })
+        }
+    }
+    #[async_trait]
+    impl traits::RuntimeSpawner for TestSpawner {
+        async fn spawn(
+            &self,
+            name: &str,
+            task: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'static>>,
+        ) -> Result<traits::BackgroundTaskHandle, traits::RuntimeError> {
+            let h = tokio::spawn(task);
+            self.handles.lock().unwrap().push(h);
+            Ok(traits::BackgroundTaskHandle {
+                task_name: name.into(),
+                task_id: 1,
+            })
+        }
+        async fn sleep(&self, duration: std::time::Duration) {
+            tokio::time::sleep(duration).await;
+        }
+        async fn cancel(
+            &self,
+            _handle: &traits::BackgroundTaskHandle,
+        ) -> Result<(), traits::RuntimeError> {
             Ok(())
         }
     }
@@ -1073,5 +1192,112 @@ mod tests {
             Some(AnalyticsValue::String(s)) if s == "researcher"
         ));
         assert!(ev.metadata.contains_key("_PROTO_team_name"));
+    }
+
+    // ---- mailbox→runner PUMP integration -----------------------------------
+
+    /// End-to-end: `TeamCreate` with a `RuntimeSpawner` wired starts the
+    /// per-teammate pump; a message routed to that teammate's mailbox (the same
+    /// thing a coordinator `SendMessage` does) is drained by the pump and
+    /// reaches the spawn seam's `send_message` — i.e. it would reach the
+    /// teammate's turn loop (`injectUserMessageToTeammate`). Without the pump
+    /// (the other tests pass no runtime) such a message would just sit unread.
+    #[tokio::test]
+    async fn teamcreate_starts_pump_that_drains_to_runner() {
+        let seam = Arc::new(RecordingSeam::new("handler-task-pump"));
+        let (tool, registry, _mode, _tmp) = make_tool_with_seam(seam.clone());
+        let spawner = TestSpawner::new();
+        let tool = tool.with_runtime(spawner as Arc<dyn traits::RuntimeSpawner>);
+
+        // Create the team → spawns the worker (registers its mailbox), starts
+        // the real teammate (recording seam), and launches the pump.
+        tool.call(
+            json!({ "team_name": "alpha", "agent_type": "researcher" }),
+            fresh_ctx(),
+            fresh_tx(),
+        )
+        .await
+        .expect("TeamCreate must succeed");
+
+        // Resolve the freshly-spawned worker + its mailbox (the same router the
+        // coordinator `SendMessage` routes through).
+        let worker = registry.list().await.into_iter().next().expect("one worker");
+        let mailbox = registry
+            .mailbox_router
+            .get(&worker.agent_id)
+            .await
+            .expect("the worker's mailbox is registered");
+
+        // Deliver a message exactly like SendMessage's `route` would.
+        mailbox
+            .deliver(crate::mailbox::TeammateMessage {
+                from: crate::mailbox::MessageSender::Coordinator,
+                content: "pick up the new task".into(),
+                message_id: "m-1".into(),
+                timestamp: std::time::SystemTime::now(),
+                request_id: None,
+            })
+            .expect("deliver to the registered mailbox");
+
+        // The pump (running on the TestSpawner) drains it into the seam's
+        // send_message. Bounded retry to avoid a scheduling flake.
+        for _ in 0..200 {
+            if !seam.injected().is_empty() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        assert_eq!(
+            seam.injected(),
+            vec!["pick up the new task".to_string()],
+            "the pump drained the routed message into the runner via the seam"
+        );
+    }
+
+    /// Control: WITHOUT a wired runtime, `TeamCreate` starts NO pump, so a
+    /// routed message stays queued in the mailbox (the seam's `send_message` is
+    /// never called). Locks the opt-in behavior.
+    #[tokio::test]
+    async fn teamcreate_without_runtime_starts_no_pump() {
+        let seam = Arc::new(RecordingSeam::new("handler-task-nopump"));
+        let (tool, registry, _mode, _tmp) = make_tool_with_seam(seam.clone());
+        // Note: no `.with_runtime(..)`.
+
+        tool.call(
+            json!({ "team_name": "alpha" }),
+            fresh_ctx(),
+            fresh_tx(),
+        )
+        .await
+        .expect("TeamCreate must succeed without a runtime");
+
+        let worker = registry.list().await.into_iter().next().expect("one worker");
+        let mailbox = registry
+            .mailbox_router
+            .get(&worker.agent_id)
+            .await
+            .expect("mailbox registered");
+        mailbox
+            .deliver(crate::mailbox::TeammateMessage {
+                from: crate::mailbox::MessageSender::Coordinator,
+                content: "unread".into(),
+                message_id: "m-1".into(),
+                timestamp: std::time::SystemTime::now(),
+                request_id: None,
+            })
+            .unwrap();
+
+        // Give any (erroneously-started) pump a chance to run; assert nothing
+        // was injected and the message is still queued.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert!(
+            seam.injected().is_empty(),
+            "no pump ⇒ the routed message is never injected into the runner"
+        );
+        assert_eq!(
+            mailbox.drain().len(),
+            1,
+            "the message stays queued in the mailbox (the pending-queue)"
+        );
     }
 }

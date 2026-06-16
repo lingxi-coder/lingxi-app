@@ -27,6 +27,14 @@ pub enum TeamSpawnError {
     /// The backing task could not be found (e.g. on kill of an unknown id).
     #[error("TeamSpawn: not found: {0}")]
     NotFound(String),
+    /// The teammate task has reached a terminal status and can no longer accept
+    /// messages — the persistent runner dropped its receiver (killed / exited).
+    /// The mailbox→runner pump treats this as a definitive "stop" signal and
+    /// exits its loop, since the teammate will never come back (Rust teammates
+    /// are persistent and only leave the loop on kill — there is no
+    /// stopped-but-resumable state, so no auto-resume; see the pump docs).
+    #[error("TeamSpawn: teammate terminated — cannot accept messages")]
+    Terminated,
     /// Any other internal failure surfaced from the task registry.
     #[error("TeamSpawn: internal error: {0}")]
     Internal(String),
@@ -49,6 +57,25 @@ pub trait TeamSpawnSeam: Send + Sync {
 
     /// Kill the teammate task identified by its handler-generated `task_id`.
     async fn kill(&self, task_id: &str) -> Result<(), TeamSpawnError>;
+
+    /// Inject a message into a running teammate's turn loop — the Rust analogue
+    /// of claude-code's `injectUserMessageToTeammate` (the in-process teammate
+    /// receives it as a `UserMessage` and runs the next turn-set).
+    ///
+    /// Default: unsupported (returns [`TeamSpawnError::Unsupported`]) so existing
+    /// fakes/impls that don't drive a live teammate stay correct. The production
+    /// `TaskRegistry` overrides this to route to the task's
+    /// [`TaskHandler::send_message`], so a coordinator `SendMessage` actually
+    /// reaches the teammate's runner.
+    ///
+    /// A gone/terminated teammate maps to [`TeamSpawnError::Terminated`] — the
+    /// mailbox→runner pump recognises that as its "stop" signal.
+    async fn send_message(&self, task_id: &str, message: String) -> Result<(), TeamSpawnError> {
+        let _ = (task_id, message);
+        Err(TeamSpawnError::Unsupported(
+            "TeamSpawnSeam::send_message not supported by this implementation".to_string(),
+        ))
+    }
 }
 
 #[cfg(test)]
@@ -59,5 +86,38 @@ mod tests {
     #[test]
     fn trait_is_object_safe() {
         let _: Option<Arc<dyn TeamSpawnSeam>> = None;
+    }
+
+    /// A minimal seam that implements ONLY the two required methods and inherits
+    /// the defaulted `send_message`, proving the default body is reachable and
+    /// returns the unsupported error.
+    struct DefaultOnlySeam;
+
+    #[async_trait]
+    impl TeamSpawnSeam for DefaultOnlySeam {
+        async fn spawn_teammate(
+            &self,
+            _agent_id: AgentId,
+            _name: String,
+            _description: String,
+        ) -> Result<String, TeamSpawnError> {
+            Ok(String::new())
+        }
+        async fn kill(&self, _task_id: &str) -> Result<(), TeamSpawnError> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn send_message_default_is_unsupported() {
+        let seam = DefaultOnlySeam;
+        let err = seam
+            .send_message("t-1", "hello".to_string())
+            .await
+            .expect_err("the defaulted send_message must return an error");
+        assert!(
+            matches!(err, TeamSpawnError::Unsupported(_)),
+            "default send_message returns Unsupported; got {err:?}"
+        );
     }
 }

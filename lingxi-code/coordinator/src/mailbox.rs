@@ -135,6 +135,16 @@ impl MailboxRouter {
         self.mailboxes.write().await.insert(agent_id, mailbox);
     }
 
+    /// Look up the mailbox registered for `agent_id`, if any.
+    ///
+    /// Returns a clone of the `Arc<TeammateMailbox>` so the caller (the
+    /// mailbox→runner pump) can park on it independently of the router lock.
+    /// `None` when no mailbox is registered (the worker was never spawned or was
+    /// already unregistered).
+    pub async fn get(&self, agent_id: &AgentId) -> Option<Arc<TeammateMailbox>> {
+        self.mailboxes.read().await.get(agent_id).cloned()
+    }
+
     /// Route `msg` to `to`.
     pub async fn route(&self, to: &AgentId, msg: TeammateMessage) -> Result<(), MailboxError> {
         let mailboxes = self.mailboxes.read().await;
@@ -151,5 +161,28 @@ impl MailboxRouter {
 impl Default for MailboxRouter {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn get_returns_registered_mailbox() {
+        let router = MailboxRouter::new();
+        let agent = AgentId::new();
+        // Unknown id before registration.
+        assert!(router.get(&agent).await.is_none());
+
+        let mailbox = Arc::new(TeammateMailbox::new(agent));
+        router.register(agent, mailbox.clone()).await;
+
+        let got = router.get(&agent).await.expect("registered mailbox resolves");
+        assert!(Arc::ptr_eq(&got, &mailbox), "get returns the same Arc");
+
+        // After unregister it is gone again.
+        router.unregister(&agent).await;
+        assert!(router.get(&agent).await.is_none());
     }
 }

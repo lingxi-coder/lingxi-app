@@ -28,7 +28,7 @@ use std::sync::Arc;
 use telemetry::AnalyticsBus;
 use tool_api::Tool;
 use traits::team_spawn::TeamSpawnSeam;
-use traits::OutputStream;
+use traits::{OutputStream, RuntimeSpawner};
 
 /// Build the coordinator-only tools carrying net-new behavior.
 ///
@@ -44,6 +44,13 @@ use traits::OutputStream;
 /// `bus` is the (optional) analytics bus the team tools fire their coordinator
 /// telemetry through (`tengu_team_created` / `tengu_team_deleted`). `None` ⇒
 /// telemetry falls back to `tracing` (hermetic tests pass `None`).
+///
+/// `runtime` is the (optional) background-task spawner the `TeamCreate` tool
+/// uses to start each teammate's mailbox→runner PUMP after a spawn — the bridge
+/// that delivers a coordinator `SendMessage` into the teammate's turn loop.
+/// `None` ⇒ no pump is started (routed messages still queue in the mailbox but
+/// are not auto-drained); the desktop composition root passes the session
+/// `RuntimeSpawner`.
 #[must_use]
 pub fn coordinator_internal_tools(
     team: Arc<TeamRegistry>,
@@ -51,12 +58,16 @@ pub fn coordinator_internal_tools(
     spawn_seam: Arc<dyn TeamSpawnSeam>,
     output: Arc<dyn OutputStream>,
     bus: Option<Arc<AnalyticsBus>>,
+    runtime: Option<Arc<dyn RuntimeSpawner>>,
 ) -> Vec<Arc<dyn Tool>> {
+    let mut team_create =
+        TeamCreateTool::new(team.clone(), mode.clone(), spawn_seam.clone(), output)
+            .with_analytics_bus(bus.clone());
+    if let Some(runtime) = runtime {
+        team_create = team_create.with_runtime(runtime);
+    }
     vec![
-        Arc::new(
-            TeamCreateTool::new(team.clone(), mode.clone(), spawn_seam.clone(), output)
-                .with_analytics_bus(bus.clone()),
-        ) as Arc<dyn Tool>,
+        Arc::new(team_create) as Arc<dyn Tool>,
         Arc::new(
             TeamDeleteTool::new(team.clone(), mode, spawn_seam.clone()).with_analytics_bus(bus),
         ) as Arc<dyn Tool>,
@@ -121,7 +132,7 @@ mod tests {
         let seam: Arc<dyn TeamSpawnSeam> = Arc::new(NoopSeam);
         let output: Arc<dyn OutputStream> = Arc::new(NoopOutput);
 
-        let tools = coordinator_internal_tools(team, mode, seam, output, None);
+        let tools = coordinator_internal_tools(team, mode, seam, output, None, None);
 
         // TeamCreate + TeamDelete + SendMessage (the coordinator SendMessage now
         // carries the full swarm routing surface). StructuredOutput stays dropped.

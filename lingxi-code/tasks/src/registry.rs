@@ -459,6 +459,57 @@ impl TeamSpawnSeam for TaskRegistry {
             .await
             .map_err(task_err_to_team_spawn_err)
     }
+
+    /// Inject a message into a running teammate's turn loop. This is the
+    /// production override of the defaulted seam method — the load-bearing
+    /// bridge that lets a coordinator `SendMessage` reach a teammate's runner.
+    ///
+    /// Resolves the task's owning handler the SAME way [`kill`](Self::kill)
+    /// does — via the handler-spawned-id index (`spawned`), so it routes to the
+    /// exact handler that started the worker — then dispatches to
+    /// [`Task::send_message`] when the handler
+    /// [`supports_messages`](Task::supports_messages). For the
+    /// `InProcessTeammate` handler that lands the text on the running agent's
+    /// persist-mode `recv()` (the `injectUserMessageToTeammate` analogue).
+    ///
+    /// Error mapping (so the mailbox→runner pump can act): a task whose handler
+    /// reports `TerminatedTask` (its runner dropped the receiver) OR an
+    /// unknown/gone task (`NotFound`) maps to [`TeamSpawnError::Terminated`] —
+    /// the pump's "stop" signal. A handler that does not support messages maps
+    /// to [`TeamSpawnError::Unsupported`]; anything else is `Internal`.
+    async fn send_message(&self, task_id: &str, message: String) -> Result<(), TeamSpawnError> {
+        // Resolve the owning handler via the spawned-id index (mirrors `kill`'s
+        // dispatch). An unknown id ⇒ the teammate is gone ⇒ `Terminated`.
+        let task_type = self
+            .spawned
+            .read()
+            .await
+            .get(task_id)
+            .copied()
+            .ok_or(TeamSpawnError::Terminated)?;
+        let handler = self
+            .handlers
+            .get(&task_type)
+            .ok_or_else(|| TeamSpawnError::Unsupported(format!("{task_type:?}")))?
+            .clone();
+        if !handler.supports_messages() {
+            return Err(TeamSpawnError::Unsupported(format!("{task_type:?}")));
+        }
+        let ctx = TaskContext {
+            fs: self.fs.clone(),
+            runtime: self.runtime.clone(),
+        };
+        handler
+            .send_message(task_id, message, ctx)
+            .await
+            .map_err(|e| match e {
+                // The runner dropped its receiver / the task is gone ⇒ the pump
+                // must stop: both collapse onto the seam's `Terminated`.
+                TaskError::TerminatedTask | TaskError::NotFound(_) => TeamSpawnError::Terminated,
+                TaskError::Unsupported => TeamSpawnError::Unsupported(format!("{task_type:?}")),
+                other => TeamSpawnError::Internal(other.to_string()),
+            })
+    }
 }
 
 /// Map a [`TaskError`] from the inherent spawn/kill path onto the narrow
@@ -957,6 +1008,180 @@ mod spawn_tests {
         assert!(
             matches!(err, TeamSpawnError::Unsupported(_)),
             "missing teammate handler maps to TeamSpawnError::Unsupported; got {err:?}"
+        );
+    }
+
+    // ---- TeamSpawnSeam::send_message override (the mailbox→runner bridge) ----
+
+    /// A fake [`Task`] handler that supports messages and records every
+    /// `send_message` it receives (as `(task_id, message)`), so a test can
+    /// assert the registry override routed the inject to the owning handler.
+    /// `kill_terminates` makes its `send_message` return [`TaskError::TerminatedTask`]
+    /// so the terminal→stop mapping can be exercised.
+    struct MsgRecordingHandler {
+        task_type: TaskType,
+        task_id: String,
+        msgs: StdMutex<Vec<(String, String)>>,
+        supports: bool,
+        terminate: bool,
+    }
+    impl MsgRecordingHandler {
+        fn new(task_type: TaskType, task_id: &str) -> Arc<Self> {
+            Arc::new(Self {
+                task_type,
+                task_id: task_id.to_string(),
+                msgs: StdMutex::new(Vec::new()),
+                supports: true,
+                terminate: false,
+            })
+        }
+        fn no_messages(task_type: TaskType, task_id: &str) -> Arc<Self> {
+            Arc::new(Self {
+                task_type,
+                task_id: task_id.to_string(),
+                msgs: StdMutex::new(Vec::new()),
+                supports: false,
+                terminate: false,
+            })
+        }
+        fn terminating(task_type: TaskType, task_id: &str) -> Arc<Self> {
+            Arc::new(Self {
+                task_type,
+                task_id: task_id.to_string(),
+                msgs: StdMutex::new(Vec::new()),
+                supports: true,
+                terminate: true,
+            })
+        }
+        fn received(&self) -> Vec<(String, String)> {
+            self.msgs.lock().unwrap().clone()
+        }
+    }
+    #[async_trait]
+    impl Task for MsgRecordingHandler {
+        fn name(&self) -> &str {
+            "msg-recording"
+        }
+        fn task_type(&self) -> TaskType {
+            self.task_type
+        }
+        async fn spawn(
+            &self,
+            _input: TaskSpawnInput,
+            _ctx: TaskContext,
+        ) -> Result<TaskHandle, TaskError> {
+            Ok(TaskHandle {
+                task_id: self.task_id.clone(),
+                cleanup: None,
+            })
+        }
+        async fn kill(&self, _task_id: &str, _ctx: TaskContext) -> Result<(), TaskError> {
+            Ok(())
+        }
+        fn supports_messages(&self) -> bool {
+            self.supports
+        }
+        async fn send_message(
+            &self,
+            task_id: &str,
+            message: String,
+            _ctx: TaskContext,
+        ) -> Result<(), TaskError> {
+            if self.terminate {
+                return Err(TaskError::TerminatedTask);
+            }
+            self.msgs
+                .lock()
+                .unwrap()
+                .push((task_id.to_string(), message));
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn seam_send_message_routes_to_recording_handler() {
+        use traits::team_spawn::TeamSpawnSeam;
+
+        let (_d, mut registry) = make_registry();
+        let handler = MsgRecordingHandler::new(TaskType::InProcessTeammate, "tmsgid");
+        registry.register_handler(TaskType::InProcessTeammate, handler.clone());
+
+        // Spawn so the task is recorded in the spawned-id index (the same index
+        // `send_message` resolves the handler through).
+        let seam: &dyn TeamSpawnSeam = &registry;
+        let task_id = seam
+            .spawn_teammate(protocol::AgentId::new(), "buddy".into(), "a teammate".into())
+            .await
+            .unwrap();
+        assert_eq!(task_id, "tmsgid");
+
+        seam.send_message(&task_id, "do the thing".into())
+            .await
+            .expect("send_message routes to the supporting handler");
+
+        assert_eq!(
+            handler.received(),
+            vec![("tmsgid".to_string(), "do the thing".to_string())],
+            "the registry override dispatched to the handler's send_message"
+        );
+    }
+
+    #[tokio::test]
+    async fn seam_send_message_unknown_task_is_terminated() {
+        use traits::team_spawn::{TeamSpawnError, TeamSpawnSeam};
+
+        let (_d, registry) = make_registry();
+        let seam: &dyn TeamSpawnSeam = &registry;
+        // Nothing spawned ⇒ the id is not in the spawned-id index.
+        let err = seam
+            .send_message("nope", "hi".into())
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, TeamSpawnError::Terminated),
+            "a non-existent task maps to Terminated; got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn seam_send_message_terminated_handler_maps_to_terminated() {
+        use traits::team_spawn::{TeamSpawnError, TeamSpawnSeam};
+
+        let (_d, mut registry) = make_registry();
+        let handler = MsgRecordingHandler::terminating(TaskType::InProcessTeammate, "tgone");
+        registry.register_handler(TaskType::InProcessTeammate, handler);
+
+        let seam: &dyn TeamSpawnSeam = &registry;
+        let task_id = seam
+            .spawn_teammate(protocol::AgentId::new(), "buddy".into(), "x".into())
+            .await
+            .unwrap();
+
+        let err = seam.send_message(&task_id, "hi".into()).await.unwrap_err();
+        assert!(
+            matches!(err, TeamSpawnError::Terminated),
+            "a handler that reports TerminatedTask maps to Terminated; got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn seam_send_message_unsupporting_handler_is_unsupported() {
+        use traits::team_spawn::{TeamSpawnError, TeamSpawnSeam};
+
+        let (_d, mut registry) = make_registry();
+        let handler = MsgRecordingHandler::no_messages(TaskType::InProcessTeammate, "tnomsg");
+        registry.register_handler(TaskType::InProcessTeammate, handler);
+
+        let seam: &dyn TeamSpawnSeam = &registry;
+        let task_id = seam
+            .spawn_teammate(protocol::AgentId::new(), "buddy".into(), "x".into())
+            .await
+            .unwrap();
+
+        let err = seam.send_message(&task_id, "hi".into()).await.unwrap_err();
+        assert!(
+            matches!(err, TeamSpawnError::Unsupported(_)),
+            "a handler that does not support messages maps to Unsupported; got {err:?}"
         );
     }
 

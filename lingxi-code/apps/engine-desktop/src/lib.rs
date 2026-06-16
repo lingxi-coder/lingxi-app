@@ -437,6 +437,14 @@ pub struct CoordinatorWiring {
     /// `tengu_team_deleted`). `build()` passes the orchestrator bus; the offline
     /// snapshot factory passes `None` (telemetry → `tracing`).
     pub bus: Option<Arc<telemetry::AnalyticsBus>>,
+    /// The (optional) background-task spawner the coordinator `TeamCreate` tool
+    /// uses to start each teammate's mailbox→runner PUMP — the bridge that
+    /// delivers a coordinator `SendMessage` into the teammate's turn loop. `None`
+    /// ⇒ no pump (routed messages queue in the mailbox but are not auto-drained;
+    /// the offline registry-snapshot factory passes `None`). `build()` passes the
+    /// session `PosixRuntime` so the pump runs (D17 — never a direct
+    /// `tokio::spawn`).
+    pub runtime: Option<Arc<dyn traits::RuntimeSpawner>>,
 }
 
 /// Desktop [`ClaudeAiAuthProvider`](tool_cron::ClaudeAiAuthProvider) backed by
@@ -601,9 +609,10 @@ pub fn register_desktop_tools(
             spawn_seam,
             output,
             bus,
+            runtime,
         }) => {
             for tool in coordinator::internal_tools::coordinator_internal_tools(
-                team, mode, spawn_seam, output, bus,
+                team, mode, spawn_seam, output, bus, runtime,
             ) {
                 reg.register_builtin(tool);
             }
@@ -2397,6 +2406,18 @@ pub async fn build(
             // tengu_team_created / tengu_team_deleted through the same bus the
             // rest of the builtin tools use.
             bus: Some(tool_ctx.bus.clone()),
+            // (5.47a) The background-task spawner for each teammate's mailbox→
+            //         runner PUMP. A fresh `PosixRuntime` (the canonical desktop
+            //         `RuntimeSpawner`, as used for the task registry / hooks /
+            //         cron throughout `build`); D17-compliant (no direct
+            //         `tokio::spawn`). With this wired, a coordinator
+            //         `SendMessage` to a teammate is drained from its mailbox
+            //         into the teammate's turn loop (via the `TaskRegistry`
+            //         `TeamSpawnSeam::send_message` override) — the
+            //         `injectUserMessageToTeammate` path. The pump exits on its
+            //         own when the teammate is killed (send → Terminated), so it
+            //         needs no separate teardown hook.
+            runtime: Some(Arc::new(PosixRuntime::new()) as Arc<dyn traits::RuntimeSpawner>),
         })
     } else {
         // Drop the spawn-seam clone path; it is unused in a default session.
@@ -3839,6 +3860,8 @@ mod tests {
             spawn_seam: Arc::new(NoopSeam),
             output: Arc::new(orchestrator::test_support::MockOutputStream::new()),
             bus: None,
+            // Tool-selection tests don't exercise the pump; no spawner needed.
+            runtime: None,
         }
     }
 
@@ -3985,6 +4008,9 @@ mod tests {
             spawn_seam: Arc::new(NoopSeam),
             output: Arc::new(orchestrator::test_support::MockOutputStream::new()),
             bus: None,
+            // This test exercises SendMessage→mailbox routing only, not the
+            // teammate pump; no spawner needed.
+            runtime: None,
         };
         let reg = desktop_tool_registry(ctx, Some(wiring), None);
 

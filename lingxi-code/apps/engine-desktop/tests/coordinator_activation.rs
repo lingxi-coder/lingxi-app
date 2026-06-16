@@ -204,6 +204,8 @@ fn team_create_tool(fixture: &CoordinatorFixture) -> Arc<dyn tool_api::Tool> {
         fixture.spawn_seam.clone(),
         fixture.output.clone(),
         None,
+        // Activation tests don't drive the mailbox→runner pump; no spawner.
+        None,
     );
     tools
         .into_iter()
@@ -516,6 +518,7 @@ fn coordinator_session_registers_coordinator_send_message_not_builtin() {
         spawn_seam: fx.spawn_seam.clone(),
         output: fx.output.clone(),
         bus: None,
+        runtime: None,
     };
     let reg = engine_desktop::desktop_tool_registry(stub_ctx(), Some(wiring), None);
 
@@ -550,6 +553,7 @@ fn coordinator_session_tool_list_has_no_duplicate_names() {
         spawn_seam: fx.spawn_seam.clone(),
         output: fx.output.clone(),
         bus: None,
+        runtime: None,
     };
     let reg = engine_desktop::desktop_tool_registry(stub_ctx(), Some(wiring), None);
     let mut names = reg.all_names();

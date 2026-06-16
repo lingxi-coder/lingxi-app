@@ -39,6 +39,7 @@ const OPENROUTER: &str = include_str!("../../data/models-dev/openrouter.json");
 const DEEPSEEK: &str = include_str!("../../data/models-dev/deepseek.json");
 const GLM_CODING: &str = include_str!("../../data/models-dev/zhipuai-coding-plan.json");
 const ZAI: &str = include_str!("../../data/models-dev/zai.json");
+const OPENAI: &str = include_str!("../../data/models-dev/openai.json");
 const GITHUB_COPILOT: &str = include_str!("../../data/models-dev/github-copilot.json");
 
 fn presets() -> Vec<Preset> {
@@ -84,6 +85,18 @@ fn presets() -> Vec<Preset> {
             provider_id: ProviderId::OpenAICompatible { name: "zai".to_string() },
             credential_env: "ZAI_API_KEY",
             slice_json: ZAI,
+        },
+        // OpenAI first-party: Responses API (codex removed the chat wire, so all
+        // OpenAI traffic is Responses-only). API-key auth as a Bearer token.
+        // ChatGPT account/OAuth login is a separate phase (see the design doc).
+        Preset {
+            profile_name: "openai",
+            base_url: "https://api.openai.com/v1",
+            protocol: ProtocolFamily::OpenAiResponses,
+            auth: AuthStrategy::Bearer,
+            provider_id: ProviderId::OpenAI,
+            credential_env: "OPENAI_API_KEY",
+            slice_json: OPENAI,
         },
         // GitHub Copilot: OpenAI-compatible wire; GitHub OAuth token used
         // directly as the bearer via AuthStrategy::CopilotBearer (no exchange).
@@ -146,7 +159,7 @@ mod tests {
     #[test]
     fn every_preset_yields_expected_model_counts() {
         let catalog = builtin_presets();
-        assert_eq!(catalog.providers.len(), 5);
+        assert_eq!(catalog.providers.len(), 6);
         let count = |name: &str| {
             catalog
                 .providers
@@ -159,6 +172,15 @@ mod tests {
         assert_eq!(count("deepseek"), 4);
         assert_eq!(count("glm-coding"), 6);
         assert_eq!(count("zai"), 13);
+        assert_eq!(count("openai"), 50);
         assert_eq!(count("github-copilot"), 23);
+        let openai = catalog
+            .providers
+            .iter()
+            .find(|p| p.profile_name == "openai")
+            .expect("openai preset present");
+        assert_eq!(openai.protocol, ProtocolFamily::OpenAiResponses);
+        assert_eq!(openai.provider_id, ProviderId::OpenAI);
+        assert_eq!(openai.base_url, "https://api.openai.com/v1");
     }
 }

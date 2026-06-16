@@ -485,7 +485,11 @@ fn handle_screen_key(st: &mut AppState, k: &KeyEvent) {
                     // the async switch (pump_switch_model performs the write +
                     // refreshes the status line) and close.
                     crate::recent_models::record_recent_model(&provider_id, &request_model);
-                    st.pending_switch_model = Some((request_model, Some(provider_id)));
+                    // "builtin" / "alias" are picker-internal placeholders, not real
+                    // provider profiles — pass None so resolution stays unscoped
+                    // (a real profile_name scopes resolution; a sentinel would error).
+                    let profile = switch_profile_for(provider_id);
+                    st.pending_switch_model = Some((request_model, profile));
                     st.close_screen();
                 }
                 ModelOutcome::Connect { provider_id } => {
@@ -565,6 +569,26 @@ fn handle_screen_key(st: &mut AppState, k: &KeyEvent) {
             }
         }
         None => {}
+    }
+}
+
+/// Map a picker `provider_id` to the routing profile for `switch_model`.
+///
+/// The `/model` picker synthesises two sentinel `provider_id` values that are
+/// NOT real provider profile names:
+///   - `"builtin"` — an unmapped bare model-id (e.g. `claude-opus-4-5`) whose
+///     provider could not be determined from the catalog.
+///   - `"alias"` — an `@`-prefixed alias row (e.g. `@claude`).
+///
+/// Passing either sentinel as a profile to `switch_model` would scope
+/// resolution to a non-existent profile and produce a `ModelUnavailable`
+/// error. Map them to `None` (unscoped resolution, the correct pre-change
+/// behaviour). Real profile names (e.g. `"anthropic"`, `"openai"`,
+/// `"openrouter"`) are returned as `Some(provider_id)` unchanged.
+pub(crate) fn switch_profile_for(provider_id: String) -> Option<String> {
+    match provider_id.as_str() {
+        "builtin" | "alias" => None,
+        _ => Some(provider_id),
     }
 }
 
@@ -2897,5 +2921,40 @@ mod tests {
                 }))
             ));
         }
+    }
+
+    /// `switch_profile_for` maps the picker-internal sentinel `provider_id`
+    /// values to `None` (unscoped resolution) so they don't reach the
+    /// orchestrator as fake profile names and trigger `ModelUnavailable`.
+    /// Real provider names pass through as `Some(name)` unchanged.
+    #[test]
+    fn switch_profile_for_maps_sentinels_to_none() {
+        // Picker sentinels → None (unscoped, pre-change behaviour preserved).
+        assert_eq!(
+            switch_profile_for("builtin".to_string()),
+            None,
+            "\"builtin\" sentinel must yield no profile"
+        );
+        assert_eq!(
+            switch_profile_for("alias".to_string()),
+            None,
+            "\"alias\" sentinel must yield no profile"
+        );
+        // Real provider profile names → Some(name) (profile-scoped resolution).
+        assert_eq!(
+            switch_profile_for("anthropic".to_string()),
+            Some("anthropic".to_string()),
+            "real profile \"anthropic\" must pass through"
+        );
+        assert_eq!(
+            switch_profile_for("openai".to_string()),
+            Some("openai".to_string()),
+            "real profile \"openai\" must pass through"
+        );
+        assert_eq!(
+            switch_profile_for("openrouter".to_string()),
+            Some("openrouter".to_string()),
+            "real profile \"openrouter\" must pass through"
+        );
     }
 }

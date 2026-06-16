@@ -1416,36 +1416,72 @@ pub async fn build(
         openai_oauth_cfg.clone(),
         http.clone(),
     ));
-    match credentials.get_openai_oauth_tokens().await {
-        Ok(Some(tokens)) => {
-            match openai_oauth::client::init_refresh_driver(
-                openai_oauth_cfg,
-                tokens.access_token,
-                tokens.refresh_token,
-                tokens.expires_at,
-                tokens.account_id,
-                tokens.fedramp,
-                http.clone(),
-                clock.clone(),
-                Some(Arc::new(telemetry::AnalyticsBus::new())),
-                Some(credentials.clone()),
-                Arc::new(PosixRuntime::new()),
-            )
-            .await
-            {
-                Ok(state) => {
-                    openai_oauth_state = Some(state);
+
+    // (3.2a-pre) P3 enterprise precedence for the openai-chatgpt credential:
+    // PAT env  >  external-tokens env  >  OAuth login session. First hit wins.
+    let mut openai_chatgpt_delegate: Option<Arc<dyn llm_client::CredentialProvider>> = None;
+    if let Ok(pat) = std::env::var("OPENAI_PERSONAL_ACCESS_TOKEN") {
+        if !pat.trim().is_empty() {
+            let http_dyn: Arc<dyn traits::HttpTransport> = http.clone() as Arc<dyn traits::HttpTransport>;
+            match openai_oauth::whoami(&openai_oauth_cfg, &http_dyn, &pat).await {
+                Ok(md) => {
+                    openai_chatgpt_delegate = Some(Arc::new(
+                        openai_oauth::PatCredentialProvider::new(pat, md),
+                    ) as Arc<dyn llm_client::CredentialProvider>);
                 }
-                Err(e) => {
-                    tracing::warn!(error = %e, "failed to attach OpenAI OAuth refresh driver; ChatGPT routing disabled");
-                }
+                Err(e) => tracing::warn!(error = %e, "OPENAI_PERSONAL_ACCESS_TOKEN whoami failed; ignoring PAT"),
             }
         }
-        Ok(None) => {
-            // No stored ChatGPT OAuth session.
+    }
+    if openai_chatgpt_delegate.is_none() {
+        match (
+            std::env::var("OPENAI_CHATGPT_ACCESS_TOKEN").ok().filter(|s| !s.trim().is_empty()),
+            std::env::var("OPENAI_CHATGPT_ACCOUNT_ID").ok().filter(|s| !s.trim().is_empty()),
+        ) {
+            (Some(tok), Some(acc)) => {
+                openai_chatgpt_delegate = Some(Arc::new(
+                    openai_oauth::ExternalTokensCredentialProvider::from_supplied(tok, Some(acc)),
+                ) as Arc<dyn llm_client::CredentialProvider>);
+            }
+            (Some(_), None) | (None, Some(_)) => tracing::warn!(
+                "incomplete external ChatGPT tokens: set BOTH OPENAI_CHATGPT_ACCESS_TOKEN and OPENAI_CHATGPT_ACCOUNT_ID"
+            ),
+            (None, None) => {}
         }
-        Err(e) => {
-            tracing::warn!(error = %e, "could not read OpenAI OAuth tokens from keychain; skipping chatgpt refresh-driver wiring");
+    }
+
+    if openai_chatgpt_delegate.is_none() {
+        match credentials.get_openai_oauth_tokens().await {
+            Ok(Some(tokens)) => {
+                match openai_oauth::client::init_refresh_driver(
+                    openai_oauth_cfg.clone(),
+                    tokens.access_token,
+                    tokens.refresh_token,
+                    tokens.expires_at,
+                    tokens.account_id,
+                    tokens.fedramp,
+                    http.clone(),
+                    clock.clone(),
+                    Some(Arc::new(telemetry::AnalyticsBus::new())),
+                    Some(credentials.clone()),
+                    Arc::new(PosixRuntime::new()),
+                )
+                .await
+                {
+                    Ok(state) => {
+                        openai_oauth_state = Some(state);
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "failed to attach OpenAI OAuth refresh driver; ChatGPT routing disabled");
+                    }
+                }
+            }
+            Ok(None) => {
+                // No stored ChatGPT OAuth session.
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "could not read OpenAI OAuth tokens from keychain; skipping chatgpt refresh-driver wiring");
+            }
         }
     }
 
@@ -1506,14 +1542,18 @@ pub async fn build(
     if let Some(d) = oauth_delegate {
         oauth_delegates.insert("anthropic-oauth".to_string(), d);
     }
-    let has_openai_oauth = openai_oauth_state.is_some();
-    if let Some(state) = openai_oauth_state {
-        let driver = std::sync::Arc::new(openai_oauth::RefreshDriver::new(state));
-        oauth_delegates.insert(
-            "openai-chatgpt".to_string(),
-            std::sync::Arc::new(openai_oauth::OpenAiOAuthCredentialProvider::new(driver))
-                as std::sync::Arc<dyn llm_client::CredentialProvider>,
-        );
+    // OAuth login fills the slot only if PAT/external didn't.
+    if openai_chatgpt_delegate.is_none() {
+        if let Some(state) = openai_oauth_state {
+            let driver = std::sync::Arc::new(openai_oauth::RefreshDriver::new(state));
+            openai_chatgpt_delegate = Some(std::sync::Arc::new(
+                openai_oauth::OpenAiOAuthCredentialProvider::new(driver),
+            ) as Arc<dyn llm_client::CredentialProvider>);
+        }
+    }
+    let has_openai_chatgpt = openai_chatgpt_delegate.is_some();
+    if let Some(d) = openai_chatgpt_delegate {
+        oauth_delegates.insert("openai-chatgpt".to_string(), d);
     }
     let composite = provider_config::MultiCredentialProvider::new(
         credentials.clone(),
@@ -2747,7 +2787,7 @@ pub async fn build(
             &assembled.credential_sources,
             has_api_key,
             has_oauth,
-            has_openai_oauth,
+            has_openai_chatgpt,
         )
         .await
         .into_iter()

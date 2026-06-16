@@ -53,6 +53,7 @@ pub trait OrchestratorApiClient: Send + Sync {
     async fn messages_create(
         &self,
         model: &str,
+        profile: Option<&str>,
         system: Option<&str>,
         msgs: Vec<ConversationMessage>,
         tools: Vec<serde_json::Value>,
@@ -71,12 +72,13 @@ pub trait OrchestratorApiClient: Send + Sync {
     async fn messages_create_with_opts(
         &self,
         model: &str,
+        profile: Option<&str>,
         system: Option<&str>,
         msgs: Vec<ConversationMessage>,
         tools: Vec<serde_json::Value>,
         _max_tokens: u32,
     ) -> Result<LlmResponse, LlmError> {
-        self.messages_create(model, system, msgs, tools).await
+        self.messages_create(model, profile, system, msgs, tools).await
     }
 
     /// Non-streaming `messages.create` with the **Opus-fallback** policy wired
@@ -98,6 +100,7 @@ pub trait OrchestratorApiClient: Send + Sync {
     async fn messages_create_with_fallback(
         &self,
         model: &str,
+        profile: Option<&str>,
         system: Option<&str>,
         msgs: Vec<ConversationMessage>,
         tools: Vec<serde_json::Value>,
@@ -107,7 +110,7 @@ pub trait OrchestratorApiClient: Send + Sync {
     ) -> Result<LlmResponse, LlmError> {
         // Default: ignore the fallback args and use the plain seam. Keeps all
         // non-Anthropic impls (and mocks) byte-identical.
-        self.messages_create(model, system, msgs, tools).await
+        self.messages_create(model, profile, system, msgs, tools).await
     }
 
     /// Non-streaming `messages.create` with a pre-seeded consecutive-529 counter.
@@ -127,6 +130,7 @@ pub trait OrchestratorApiClient: Send + Sync {
     async fn messages_create_seeded(
         &self,
         model: &str,
+        profile: Option<&str>,
         system: Option<&str>,
         msgs: Vec<ConversationMessage>,
         tools: Vec<serde_json::Value>,
@@ -134,7 +138,7 @@ pub trait OrchestratorApiClient: Send + Sync {
     ) -> Result<LlmResponse, LlmError> {
         // Default: ignore the seed and use the plain seam. Keeps all
         // non-Anthropic impls (and mocks) byte-identical.
-        self.messages_create(model, system, msgs, tools).await
+        self.messages_create(model, profile, system, msgs, tools).await
     }
 
     /// Count the input tokens a `messages.create` for `(model, system, msgs,
@@ -150,6 +154,7 @@ pub trait OrchestratorApiClient: Send + Sync {
     async fn count_tokens(
         &self,
         _model: &str,
+        _profile: Option<&str>,
         system: Option<&str>,
         msgs: Vec<ConversationMessage>,
         _tools: Vec<serde_json::Value>,
@@ -2550,9 +2555,9 @@ impl ConversationOrchestrator {
                     // Re-snapshot history for the non-streaming call (the partial
                     // stream never touched session.history, so it is still the same
                     // snapshot we used for the stream — no reset needed).
-                    let (non_stream_snapshot, non_stream_model) = {
+                    let (non_stream_snapshot, non_stream_model, non_stream_profile) = {
                         let s = self.session.lock().await;
-                        (s.history.clone(), s.model.clone())
+                        (s.history.clone(), s.model.clone(), s.model_profile.clone())
                     };
                     let tools_for_fallback = wire_tools.clone();
 
@@ -2560,6 +2565,7 @@ impl ConversationOrchestrator {
                         .api
                         .messages_create_seeded(
                             &non_stream_model,
+                            non_stream_profile.as_deref(),
                             system_prompt.as_deref(),
                             non_stream_snapshot,
                             tools_for_fallback,

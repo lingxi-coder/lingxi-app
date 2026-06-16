@@ -389,6 +389,7 @@ impl ProviderApiAdapter {
     fn build_request(
         &self,
         model: &str,
+        profile: Option<&str>,
         system: Option<&str>,
         msgs: Vec<ConversationMessage>,
         tools: Vec<serde_json::Value>,
@@ -399,6 +400,9 @@ impl ProviderApiAdapter {
         let tool_decls = to_tool_declarations(tools)?;
 
         let mut req = LlmRequest::new(model);
+        if let Some(p) = profile {
+            req = req.with_profile(p);
+        }
 
         // Prompt-cache breakpoints (parity: claude-code getPromptCachingEnabled +
         // buildSystemPromptBlocks + addCacheBreakpoints). Anthropic permits at most
@@ -1322,11 +1326,12 @@ impl OrchestratorApiClient for ProviderApiAdapter {
     async fn messages_create(
         &self,
         model: &str,
+        profile: Option<&str>,
         system: Option<&str>,
         msgs: Vec<ConversationMessage>,
         tools: Vec<serde_json::Value>,
     ) -> Result<LlmResponse, LlmError> {
-        let req = self.build_request(model, system, msgs, tools, false, None)?;
+        let req = self.build_request(model, profile, system, msgs, tools, false, None)?;
         let ctl = resolve_retry_control_with_settings(
             model,
             None,
@@ -1340,6 +1345,7 @@ impl OrchestratorApiClient for ProviderApiAdapter {
     async fn count_tokens(
         &self,
         model: &str,
+        profile: Option<&str>,
         system: Option<&str>,
         msgs: Vec<ConversationMessage>,
         tools: Vec<serde_json::Value>,
@@ -1348,7 +1354,7 @@ impl OrchestratorApiClient for ProviderApiAdapter {
         // then delegate to the count_tokens facade: the real
         // `/v1/messages/count_tokens` endpoint (with the `count_tokens` beta) on
         // Anthropic routes, byte-length/4 approximation elsewhere.
-        let req = self.build_request(model, system, msgs, tools, false, None)?;
+        let req = self.build_request(model, profile, system, msgs, tools, false, None)?;
         crate::model::count_tokens::count_tokens(self.client.as_ref(), self.transport.as_ref(), &req)
             .await
     }
@@ -1356,12 +1362,13 @@ impl OrchestratorApiClient for ProviderApiAdapter {
     async fn messages_create_with_opts(
         &self,
         model: &str,
+        profile: Option<&str>,
         system: Option<&str>,
         msgs: Vec<ConversationMessage>,
         tools: Vec<serde_json::Value>,
         max_tokens: u32,
     ) -> Result<LlmResponse, LlmError> {
-        let req = self.build_request(model, system, msgs, tools, false, Some(max_tokens))?;
+        let req = self.build_request(model, profile, system, msgs, tools, false, Some(max_tokens))?;
         let ctl = resolve_retry_control_with_settings(
             model,
             None,
@@ -1385,6 +1392,7 @@ impl OrchestratorApiClient for ProviderApiAdapter {
     async fn messages_create_with_fallback(
         &self,
         model: &str,
+        profile: Option<&str>,
         system: Option<&str>,
         msgs: Vec<ConversationMessage>,
         tools: Vec<serde_json::Value>,
@@ -1417,7 +1425,9 @@ impl OrchestratorApiClient for ProviderApiAdapter {
             vec![]
         };
 
-        let req = self.build_request(model, system, msgs, tools, false, None)?;
+        // Primary request uses the passed profile; fallback requests use None
+        // (the fallback config string has no associated profile).
+        let req = self.build_request(model, profile, system, msgs, tools, false, None)?;
         // Initial ctl: chain[0] as fallback_model (None when chain is empty).
         let mut ctl = resolve_retry_control_with_settings(
             model,
@@ -1445,12 +1455,13 @@ impl OrchestratorApiClient for ProviderApiAdapter {
     async fn messages_create_seeded(
         &self,
         model: &str,
+        profile: Option<&str>,
         system: Option<&str>,
         msgs: Vec<ConversationMessage>,
         tools: Vec<serde_json::Value>,
         initial_consecutive_overloaded: u8,
     ) -> Result<LlmResponse, LlmError> {
-        let req = self.build_request(model, system, msgs, tools, false, None)?;
+        let req = self.build_request(model, profile, system, msgs, tools, false, None)?;
         let ctl = resolve_retry_control_with_settings(
             model,
             None,
@@ -1553,7 +1564,9 @@ impl agent::SubagentApiClient for ProviderApiAdapter {
         messages: Vec<ConversationMessage>,
         tools: Vec<serde_json::Value>,
     ) -> Result<LlmResponse, LlmError> {
-        OrchestratorApiClient::messages_create(self, model, system, messages, tools).await
+        // Subagent calls don't carry a provider profile; pass None so
+        // llm-client resolves unscoped (default behaviour).
+        OrchestratorApiClient::messages_create(self, model, None, system, messages, tools).await
     }
 
     async fn messages_create_stream(
@@ -1576,7 +1589,9 @@ impl StreamingApiClient for ProviderApiAdapter {
         messages: Vec<ConversationMessage>,
         tools: Vec<serde_json::Value>,
     ) -> Result<BoxStream<'static, Result<LlmEvent, LlmError>>, LlmError> {
-        let req = self.build_request(model, system, messages, tools, true, None)?;
+        // Streaming calls don't carry a profile yet (profile is session-level;
+        // streaming loop reads it separately in conversation.rs when needed).
+        let req = self.build_request(model, None, system, messages, tools, true, None)?;
         self.drive_stream(req).await
     }
 }
@@ -1886,6 +1901,7 @@ mod tests {
         let req = adapter
             .build_request(
                 "claude-sonnet-4-20250514",
+                None,
                 Some("system prompt"),
                 vec![text_user_msg("hello")],
                 vec![],
@@ -1916,6 +1932,7 @@ mod tests {
         let req = adapter
             .build_request(
                 "claude-sonnet-4-20250514",
+                None,
                 Some("system prompt"),
                 vec![text_user_msg("hello")],
                 vec![],
@@ -1930,6 +1947,50 @@ mod tests {
             LlmContentBlock::Text { cache_control, .. } => assert_eq!(*cache_control, None),
             other => panic!("expected trailing text block, got {other:?}"),
         }
+    }
+
+    // ── build_request profile threading (Unit B Task 5) ──────────────────────
+
+    #[test]
+    fn build_request_sets_profile_when_provided() {
+        let transport = FakeTransport::always(ProviderResponse::json(200, ok_response_json()));
+        let adapter = make_adapter(transport);
+        let req = adapter
+            .build_request(
+                "gpt-5.2",
+                Some("github-copilot"),
+                None,
+                vec![],
+                vec![],
+                false,
+                None,
+            )
+            .expect("build_request with profile");
+        assert_eq!(req.model, "gpt-5.2", "model must be preserved verbatim");
+        assert_eq!(
+            req.profile.as_deref(),
+            Some("github-copilot"),
+            "profile must be threaded into LlmRequest"
+        );
+    }
+
+    #[test]
+    fn build_request_leaves_profile_none_when_not_provided() {
+        let transport = FakeTransport::always(ProviderResponse::json(200, ok_response_json()));
+        let adapter = make_adapter(transport);
+        let req = adapter
+            .build_request(
+                "claude-opus-4-7",
+                None,
+                None,
+                vec![],
+                vec![],
+                false,
+                None,
+            )
+            .expect("build_request without profile");
+        assert_eq!(req.model, "claude-opus-4-7", "model must be preserved verbatim");
+        assert!(req.profile.is_none(), "profile must be None when not passed");
     }
 
     // ── effective_subscriber (batch-5 Task 3: live SharedSubscription) ───────
@@ -1995,7 +2056,7 @@ mod tests {
         let transport = FakeTransport::always(ProviderResponse::json(200, ok_response_json()));
         let adapter = make_adapter(transport.clone());
         let resp = adapter
-            .messages_create("claude-sonnet-4-20250514", Some("sys"), Vec::new(), Vec::new())
+            .messages_create("claude-sonnet-4-20250514", None, Some("sys"), Vec::new(), Vec::new())
             .await
             .expect("ok");
         assert_eq!(resp.model, "claude-sonnet-4-20250514");
@@ -2045,7 +2106,7 @@ mod tests {
             "input_schema": {"type": "object"}
         })];
         let _ = adapter
-            .messages_create("claude-sonnet-4-20250514", Some("sys"), Vec::new(), tools)
+            .messages_create("claude-sonnet-4-20250514", None, Some("sys"), Vec::new(), tools)
             .await
             .expect("ok");
         assert_eq!(transport.seen_count(), 1);
@@ -2061,7 +2122,7 @@ mod tests {
             "input_schema": {"type": "object"}
         })];
         let result = adapter
-            .messages_create("claude-sonnet-4-20250514", None, Vec::new(), tools)
+            .messages_create("claude-sonnet-4-20250514", None, None, Vec::new(), tools)
             .await;
         assert!(result.is_ok(), "tool-capable model should accept tools");
     }
@@ -2095,7 +2156,7 @@ mod tests {
         // The capability check is in DefaultLlmClient.validate_capabilities; since
         // FakeTransport doesn't inspect the body, this exercises the whole path.
         let _ = adapter
-            .messages_create("claude-sonnet-4-20250514", None, msgs, Vec::new())
+            .messages_create("claude-sonnet-4-20250514", None, None, msgs, Vec::new())
             .await;
     }
 
@@ -2121,7 +2182,7 @@ mod tests {
         ]);
         let adapter = make_adapter(transport.clone());
         let resp = adapter
-            .messages_create("claude-sonnet-4-20250514", None, Vec::new(), Vec::new())
+            .messages_create("claude-sonnet-4-20250514", None, None, Vec::new(), Vec::new())
             .await
             .expect("ok after retry");
         assert_eq!(resp.stop_reason.as_deref(), Some("end_turn"));
@@ -2135,7 +2196,7 @@ mod tests {
         let transport = FakeTransport::always(ProviderResponse::json(200, ok_response_json()));
         let adapter = make_adapter(transport.clone());
         let _ = adapter
-            .messages_create("claude-sonnet-4-20250514", None, Vec::new(), Vec::new())
+            .messages_create("claude-sonnet-4-20250514", None, None, Vec::new(), Vec::new())
             .await
             .expect("ok");
         let headers = transport.seen_headers(0);
@@ -2160,7 +2221,7 @@ mod tests {
         ))]);
         let adapter = make_adapter(transport.clone());
         let result = adapter
-            .messages_create("claude-sonnet-4-20250514", None, Vec::new(), Vec::new())
+            .messages_create("claude-sonnet-4-20250514", None, None, Vec::new(), Vec::new())
             .await;
         assert!(result.is_err(), "must fail after exhausting budget");
         // Should have tried DEFAULT_MAX_RETRIES + 1 = 11 times.
@@ -2190,7 +2251,7 @@ mod tests {
         });
         let adapter = make_adapter(transport.clone());
         let result = adapter
-            .messages_create("claude-sonnet-4-20250514", None, Vec::new(), Vec::new())
+            .messages_create("claude-sonnet-4-20250514", None, None, Vec::new(), Vec::new())
             .await;
         assert!(result.is_err(), "x-should-retry:false must be terminal");
         // Only ONE execution — no retries.
@@ -2214,7 +2275,7 @@ mod tests {
         let transport = FakeTransport::always(ProviderResponse::json(200, response_json));
         let adapter = make_adapter(transport);
         let resp = adapter
-            .messages_create("claude-sonnet-4-20250514", None, Vec::new(), Vec::new())
+            .messages_create("claude-sonnet-4-20250514", None, None, Vec::new(), Vec::new())
             .await
             .expect("ok");
         match resp.content.as_slice() {
@@ -2392,7 +2453,7 @@ mod tests {
             SubscriberState { is_subscriber: true, is_enterprise: false },
         );
         let result = adapter
-            .messages_create("claude-sonnet-4-20250514", None, Vec::new(), Vec::new())
+            .messages_create("claude-sonnet-4-20250514", None, None, Vec::new(), Vec::new())
             .await;
         assert!(result.is_err(), "subscriber 429 must be terminal");
         // Only ONE execution — no retries.
@@ -2479,7 +2540,7 @@ mod tests {
             SubscriberState { is_subscriber: true, is_enterprise: false },
         );
         let result = adapter
-            .messages_create("claude-sonnet-4-20250514", None, Vec::new(), Vec::new())
+            .messages_create("claude-sonnet-4-20250514", None, None, Vec::new(), Vec::new())
             .await;
         assert!(matches!(result, Err(LlmError::RateLimited { .. })), "got {result:?}");
 
@@ -2554,7 +2615,7 @@ mod tests {
             SubscriberState { is_subscriber: true, is_enterprise: false },
         );
         let result = adapter
-            .messages_create("claude-sonnet-4-20250514", None, Vec::new(), Vec::new())
+            .messages_create("claude-sonnet-4-20250514", None, None, Vec::new(), Vec::new())
             .await;
         assert!(matches!(result, Err(LlmError::RateLimited { .. })), "got {result:?}");
 
@@ -2614,7 +2675,7 @@ mod tests {
             SubscriberState { is_subscriber: true, is_enterprise: true },
         );
         let result = adapter
-            .messages_create("claude-sonnet-4-20250514", None, Vec::new(), Vec::new())
+            .messages_create("claude-sonnet-4-20250514", None, None, Vec::new(), Vec::new())
             .await;
         assert!(result.is_ok(), "429 then 200 must recover: {result:?}");
 
@@ -2725,7 +2786,7 @@ mod tests {
         // Drive A: 429(seven_day) (retried, pending set) → 400 (terminal,
         // non-RateLimited → no promotion). Pending lingers with A's snapshot.
         let a = adapter
-            .messages_create("claude-haiku-4-20250307", None, Vec::new(), Vec::new())
+            .messages_create("claude-haiku-4-20250307", None, None, Vec::new(), Vec::new())
             .await;
         assert!(
             matches!(a, Err(LlmError::InvalidRequest { .. })),
@@ -2735,7 +2796,7 @@ mod tests {
         // Drive B: 429(five_hour) (retried, pending OVERWRITTEN with B's
         // snapshot) → 429(five_hour) terminal → promotes B's snapshot.
         let b = adapter
-            .messages_create("claude-haiku-4-20250307", None, Vec::new(), Vec::new())
+            .messages_create("claude-haiku-4-20250307", None, None, Vec::new(), Vec::new())
             .await;
         assert!(
             matches!(b, Err(LlmError::RateLimited { .. })),
@@ -2774,7 +2835,7 @@ mod tests {
             SubscriberState { is_subscriber: true, is_enterprise: false },
         );
         let result = adapter
-            .messages_create("claude-sonnet-4-20250514", None, Vec::new(), Vec::new())
+            .messages_create("claude-sonnet-4-20250514", None, None, Vec::new(), Vec::new())
             .await;
         assert!(result.is_err());
         assert_eq!(
@@ -2812,7 +2873,7 @@ mod tests {
             SubscriberState { is_subscriber: true, is_enterprise: false },
         );
         let _ = adapter
-            .messages_create("claude-sonnet-4-20250514", None, Vec::new(), Vec::new())
+            .messages_create("claude-sonnet-4-20250514", None, None, Vec::new(), Vec::new())
             .await;
         assert_eq!(
             OrchestratorApiClient::last_rate_limit_error_message(&adapter).as_deref(),
@@ -2830,7 +2891,7 @@ mod tests {
             ..Default::default()
         })));
         let _ = pro
-            .messages_create("claude-sonnet-4-20250514", None, Vec::new(), Vec::new())
+            .messages_create("claude-sonnet-4-20250514", None, None, Vec::new(), Vec::new())
             .await;
         assert_eq!(
             OrchestratorApiClient::last_rate_limit_error_message(&pro).as_deref(),
@@ -2865,7 +2926,7 @@ mod tests {
             SubscriberState { is_subscriber: true, is_enterprise: true },
         );
         let result = adapter
-            .messages_create("claude-sonnet-4-20250514", None, Vec::new(), Vec::new())
+            .messages_create("claude-sonnet-4-20250514", None, None, Vec::new(), Vec::new())
             .await;
         assert!(result.is_ok(), "enterprise subscriber 429 must retry and succeed");
         assert_eq!(transport.seen_count(), 2, "should have made 2 requests (429 then 200)");
@@ -2892,7 +2953,7 @@ mod tests {
         let adapter = make_adapter(transport);
 
         let result = adapter
-            .messages_create("claude-sonnet-4-20250514", None, Vec::new(), Vec::new())
+            .messages_create("claude-sonnet-4-20250514", None, None, Vec::new(), Vec::new())
             .await;
 
         match result {
@@ -2938,7 +2999,7 @@ mod tests {
 
         let adapter = make_adapter(transport);
         let llm_result = adapter
-            .messages_create("claude-sonnet-4-20250514", None, Vec::new(), Vec::new())
+            .messages_create("claude-sonnet-4-20250514", None, None, Vec::new(), Vec::new())
             .await;
 
         // Clean up before any assert that might panic.
@@ -3041,7 +3102,7 @@ mod tests {
         let transport = FakeTransport::always(ProviderResponse::json(200, response_json));
         let adapter = make_adapter_with_estimator(transport);
         let resp = adapter
-            .messages_create("claude-sonnet-4-20250514", None, Vec::new(), Vec::new())
+            .messages_create("claude-sonnet-4-20250514", None, None, Vec::new(), Vec::new())
             .await
             .expect("ok");
         let cost = resp.cost.expect("cost must be Some for a priced model");
@@ -3119,7 +3180,7 @@ mod tests {
             Some(estimator),
         );
         let resp = adapter
-            .messages_create("claude-future-9999", None, Vec::new(), Vec::new())
+            .messages_create("claude-future-9999", None, None, Vec::new(), Vec::new())
             .await
             .expect("ok");
         assert!(
@@ -3145,7 +3206,7 @@ mod tests {
         // make_adapter wires None estimator (ProviderApiAdapter::new default path)
         let adapter = make_adapter(transport);
         let resp = adapter
-            .messages_create("claude-sonnet-4-20250514", None, Vec::new(), Vec::new())
+            .messages_create("claude-sonnet-4-20250514", None, None, Vec::new(), Vec::new())
             .await
             .expect("ok");
         assert!(resp.cost.is_none(), "no estimator → cost must be None");
@@ -3442,6 +3503,7 @@ mod tests {
             &adapter,
             "claude-opus-4-6",
             None,
+            None,
             Vec::new(),
             Vec::new(),
             None, // no explicit call-site fallback
@@ -3493,6 +3555,7 @@ mod tests {
         let result = OrchestratorApiClient::messages_create_with_fallback(
             &adapter,
             "claude-opus-4-6",
+            None,
             None,
             Vec::new(),
             Vec::new(),
@@ -3549,6 +3612,7 @@ mod tests {
         let result = OrchestratorApiClient::messages_create_with_fallback(
             &adapter,
             "claude",      // alias of "claude-sonnet-4-20250514"
+            None,
             Some("sys"),
             Vec::new(),
             Vec::new(),
@@ -3618,6 +3682,7 @@ mod tests {
             &adapter,
             "claude-opus-4-6",
             None,
+            None,
             Vec::new(),
             Vec::new(),
             None,
@@ -3680,6 +3745,7 @@ mod tests {
             &adapter,
             "claude-opus-4-6",
             None,
+            None,
             Vec::new(),
             Vec::new(),
             None,
@@ -3731,6 +3797,7 @@ mod tests {
         let result = OrchestratorApiClient::messages_create_with_fallback(
             &adapter,
             "claude-opus-4-6",
+            None,
             None,
             Vec::new(),
             Vec::new(),
@@ -3791,6 +3858,7 @@ mod tests {
             &adapter,
             "claude-opus-4-6",
             None,
+            None,
             Vec::new(),
             Vec::new(),
             None,
@@ -3842,7 +3910,7 @@ mod tests {
         std::env::remove_var("CLAUDE_CODE_MAX_RETRIES");
 
         let result = adapter
-            .messages_create("claude-sonnet-4-20250514", None, Vec::new(), Vec::new())
+            .messages_create("claude-sonnet-4-20250514", None, None, Vec::new(), Vec::new())
             .await;
 
         // Restore.
@@ -3915,7 +3983,7 @@ mod tests {
 
         let before = tokio::time::Instant::now();
         let result = adapter
-            .messages_create("claude-sonnet-4-20250514", None, Vec::new(), Vec::new())
+            .messages_create("claude-sonnet-4-20250514", None, None, Vec::new(), Vec::new())
             .await;
         let elapsed = before.elapsed();
 
@@ -3961,7 +4029,7 @@ mod tests {
         });
         let adapter = make_adapter(transport);
         let _ = adapter
-            .messages_create("claude-sonnet-4-20250514", None, Vec::new(), Vec::new())
+            .messages_create("claude-sonnet-4-20250514", None, None, Vec::new(), Vec::new())
             .await
             .expect("ok");
 
@@ -3986,7 +4054,7 @@ mod tests {
         let transport = FakeTransport::always(ProviderResponse::json(200, ok_response_json()));
         let adapter = make_adapter(transport);
         let _ = adapter
-            .messages_create("claude-sonnet-4-20250514", None, Vec::new(), Vec::new())
+            .messages_create("claude-sonnet-4-20250514", None, None, Vec::new(), Vec::new())
             .await
             .expect("ok");
 
@@ -4016,6 +4084,7 @@ mod tests {
         let count = OrchestratorApiClient::count_tokens(
             &adapter,
             "claude-sonnet-4-20250514",
+            None,
             Some("you are helpful"),
             Vec::new(),
             Vec::new(),
@@ -4056,6 +4125,7 @@ mod tests {
         let count = OrchestratorApiClient::count_tokens(
             &mock,
             "any-model",
+            None,
             Some("12345678"),
             msgs,
             Vec::new(),
@@ -4097,7 +4167,7 @@ mod tests {
         });
         let adapter = make_adapter(transport);
         let _ = adapter
-            .messages_create("claude-sonnet-4-20250514", None, Vec::new(), Vec::new())
+            .messages_create("claude-sonnet-4-20250514", None, None, Vec::new(), Vec::new())
             .await
             .expect("ok");
 
@@ -4128,7 +4198,7 @@ mod tests {
         let transport = FakeTransport::always(ProviderResponse::json(200, ok_response_json()));
         let adapter = make_adapter(transport);
         let _ = adapter
-            .messages_create("claude-sonnet-4-20250514", None, Vec::new(), Vec::new())
+            .messages_create("claude-sonnet-4-20250514", None, None, Vec::new(), Vec::new())
             .await
             .expect("ok");
 

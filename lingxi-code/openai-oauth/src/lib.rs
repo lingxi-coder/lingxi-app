@@ -1,9 +1,9 @@
-//! OpenAI / ChatGPT-account OAuth login for llm-client.
+//! `OpenAI` / ChatGPT-account OAuth login for llm-client.
 //!
 //! Mirrors the `anthropic-oauth` crate: PKCE + device-code login, token
 //! refresh, and an `llm_client::CredentialProvider` that serves a
 //! `Credential::ChatGptOAuth` (bearer + ChatGPT-Account-ID). Byte-aligned with
-//! codex's ChatGPT auth (see docs/superpowers/specs/2026-06-16-p2-chatgpt-oauth-login-design.md).
+//! codex's `ChatGPT` auth (see docs/superpowers/specs/2026-06-16-p2-chatgpt-oauth-login-design.md).
 
 #![forbid(unsafe_code)]
 
@@ -17,8 +17,8 @@ pub mod pkce;
 pub mod refresh;
 pub mod token_data;
 
-#[cfg(any(test, feature = "testsupport"))]
-pub mod testsupport;
+#[cfg(test)]
+mod testsupport;
 
 pub use client::{init_refresh_driver, OAuthError, OpenAiOAuthClient};
 pub use config::OpenAiOAuthConfig;

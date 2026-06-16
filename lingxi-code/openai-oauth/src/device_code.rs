@@ -1,11 +1,11 @@
-//! Device-code flow for OpenAI / ChatGPT OAuth login.
+//! Device-code flow for `OpenAI` / `ChatGPT` OAuth login.
 //!
 //! Port of codex `login/src/device_code_auth.rs` onto the `traits::HttpTransport`
 //! + `traits::Clock` seams so the flow is testable offline.
 //!
 //! Flow:
-//! 1. `request_device_code` → POST device_usercode_url → `DeviceUserCode`
-//! 2. Show user_code + device_verify_url to the user.
+//! 1. `request_device_code` → POST `device_usercode_url` → `DeviceUserCode`
+//! 2. Show `user_code` + `device_verify_url` to the user.
 //! 3. `poll_for_token` in a loop until Ready or timeout.
 //! 4. `run_device_code_login` orchestrates steps 1-3, then hands off to
 //!    `OpenAiOAuthClient::exchange_code_with_redirect` and returns tokens.
@@ -15,7 +15,7 @@ use crate::config::OpenAiOAuthConfig;
 use protocol::{HttpMethod, HttpRequest};
 use serde::{de, Deserialize, Deserializer, Serialize};
 use std::sync::Arc;
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 use traits::{Clock, HttpTransport};
 
 /// Maximum time to wait for the user to complete device-code login.
@@ -29,7 +29,7 @@ const DEFAULT_INTERVAL_SECS: u64 = 5;
 pub struct DeviceUserCode {
     /// Opaque device auth session id. Passed back to the poll endpoint.
     pub device_auth_id: String,
-    /// Human-readable code the user enters at device_verify_url.
+    /// Human-readable code the user enters at `device_verify_url`.
     pub user_code: String,
     /// Recommended poll interval in seconds.
     pub interval: u64,
@@ -40,7 +40,9 @@ pub struct DeviceUserCode {
 pub enum PollOutcome {
     /// Authorization complete — contains the code + verifier for exchange.
     Ready {
+        /// Authorization code returned by the device token endpoint.
         authorization_code: String,
+        /// PKCE code verifier to accompany the authorization code exchange.
         code_verifier: String,
     },
     /// User hasn't approved yet; caller should wait `interval` and retry.

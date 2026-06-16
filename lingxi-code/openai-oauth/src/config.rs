@@ -1,17 +1,26 @@
-//! Static OpenAI OAuth endpoints + client_id + scopes + Codex backend URL.
+//! Static `OpenAI` OAuth endpoints + `client_id` + scopes + Codex backend URL.
 //! Constants verified against codex `login/src/server.rs` and `model-provider-info`.
 
-/// OpenAI OAuth configuration (issuer, client_id, endpoints, scopes, backend).
+/// `OpenAI` OAuth configuration (issuer, `client_id`, endpoints, scopes, backend).
 #[derive(Debug, Clone)]
 pub struct OpenAiOAuthConfig {
+    /// Base issuer URL (e.g. `https://auth.openai.com`).
     pub issuer: String,
+    /// OAuth `client_id` registered with the issuer.
     pub client_id: String,
+    /// Browser-facing authorization endpoint.
     pub authorize_url: String,
+    /// Backchannel token-exchange / refresh endpoint.
     pub token_url: String,
+    /// Device-code usercode issuance endpoint.
     pub device_usercode_url: String,
+    /// Device-code token polling endpoint.
     pub device_token_url: String,
+    /// User-visible device verification URL shown alongside the user code.
     pub device_verify_url: String,
+    /// Space-separated OAuth scopes requested in the authorize URL.
     pub scopes: String,
+    /// `ChatGPT` Codex backend base URL.
     pub codex_backend: String,
     /// Loopback redirect ports, in preference order (codex allowlist: 1455, then 1457).
     pub loopback_ports: [u16; 2],

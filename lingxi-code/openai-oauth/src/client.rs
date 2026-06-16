@@ -1,4 +1,4 @@
-//! OpenAI OAuth client: authorize URL builder, authorization-code exchange,
+//! `OpenAI` OAuth client: authorize URL builder, authorization-code exchange,
 //! API-key mint (RFC-8693 token exchange), and proactive-refresh wiring.
 //!
 //! See plan spec §P2-M4. Wire shape verified against codex `login/src/server.rs`.
@@ -26,7 +26,7 @@ pub enum OAuthError {
     /// Loopback callback failed (bind, parse, or state mismatch).
     #[error("callback failed: {0}")]
     Callback(String),
-    /// Token exchange against the IdP failed.
+    /// Token exchange against the `IdP` failed.
     #[error("token exchange failed: {0}")]
     TokenExchange(String),
     /// Stored `refresh_token` has expired or was revoked.
@@ -35,12 +35,15 @@ pub enum OAuthError {
     /// Scope upgrade attempt was denied by the provider.
     #[error("Scope upgrade denied by provider")]
     ScopeRejected {
+        /// Scopes the provider required.
         required: Vec<String>,
+        /// Scopes the token currently holds.
         granted: Vec<String>,
     },
     /// Proactive refresh task failed and is shutting down.
     #[error("proactive refresh failed: {source}")]
     ProactiveFailed {
+        /// The underlying error that caused the proactive task to fail.
         source: Box<OAuthError>,
     },
     /// Device-code flow timeout or poll failure.
@@ -65,7 +68,7 @@ pub struct ExchangedTokens {
     pub access_token: Secret<String>,
     /// Refresh token, if the provider issued one.
     pub refresh_token: Option<Secret<String>>,
-    /// id_token JWT (carries ChatGPT account_id / FedRAMP claims).
+    /// `id_token` JWT (carries `ChatGPT` `account_id` / `FedRAMP` claims).
     pub id_token: Option<String>,
     /// Wall-clock expiry instant.
     pub expires_at: SystemTime,
@@ -79,7 +82,7 @@ impl Clock for SystemClock {
     }
 }
 
-/// Stateful client for the OpenAI Authorization Code flow.
+/// Stateful client for the `OpenAI` Authorization Code flow.
 pub struct OpenAiOAuthClient {
     pub(crate) config: OpenAiOAuthConfig,
     http: Arc<dyn HttpTransport>,
@@ -130,9 +133,9 @@ impl OpenAiOAuthClient {
     /// Build the authorize URL with an explicit `redirect_uri`.
     ///
     /// Query params match codex `server.rs::build_authorize_url`:
-    /// - response_type=code, client_id, redirect_uri, scope, code_challenge,
-    ///   code_challenge_method=S256, id_token_add_organizations=true,
-    ///   codex_cli_simplified_flow=true, state, originator=codex_cli_rs
+    /// - `response_type=code`, `client_id`, `redirect_uri`, scope, `code_challenge`,
+    ///   `code_challenge_method=S256`, `id_token_add_organizations=true`,
+    ///   `codex_cli_simplified_flow=true`, state, `originator=codex_cli_rs`
     #[must_use]
     pub fn build_authorize_url_with_redirect(
         &self,
@@ -180,7 +183,7 @@ impl OpenAiOAuthClient {
         self.exchange_code_with_redirect(code, verifier, &redirect_uri).await
     }
 
-    /// Exchange a code with an explicit redirect_uri.
+    /// Exchange a code with an explicit `redirect_uri`.
     pub async fn exchange_code_with_redirect(
         &self,
         code: &str,
@@ -247,9 +250,9 @@ impl OpenAiOAuthClient {
     ///
     /// POSTs to `config.token_url` form-urlencoded with:
     /// - grant_type=urn:ietf:params:oauth:grant-type:token-exchange
-    /// - client_id
+    /// - `client_id`
     /// - requested_token=openai-api-key
-    /// - subject_token=<id_token>
+    /// - `subject_token`=<`id_token`>
     /// - subject_token_type=urn:ietf:params:oauth:token-type:id_token
     ///
     /// Returns the `access_token` field from the response.

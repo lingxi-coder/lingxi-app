@@ -61,7 +61,8 @@ pub use commit_push_pr::CommitPushPrHandler;
 pub use compact::CompactHandler;
 pub use config::ConfigHandler;
 pub use connect::{
-    ConnectCredentialWriter, ConnectError, ConnectHandler, CopilotConnectDriver, CopilotConnectStep,
+    ChatGptConnectDriver, ConnectCredentialWriter, ConnectError, ConnectHandler,
+    CopilotConnectDriver, CopilotConnectStep,
 };
 pub use context::ContextHandler;
 pub use cost::CostHandler;

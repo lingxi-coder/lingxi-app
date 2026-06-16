@@ -5,12 +5,17 @@
 //! and `docs/superpowers/specs/2026-05-24-m4-tools-implementation-design.md`
 //! §4 Flow C and §7 wire identifiers for the locked literals.
 //!
+//! Image-output handling (claude-code `formatOutput` / `isImageOutput`,
+//! `BashTool/utils.ts`): a base64 `data:image/...;base64,...` stdout is
+//! returned as an IMAGE content block (riding on `new_messages` per the Rust
+//! image contract, mirroring FileRead) rather than truncated as text — see the
+//! short-circuit in `call`. PARTIALLY DEFERRED: claude-code
+//! `resizeShellImageOutput` (CC-304 image dimension/byte cap) is a follow-up —
+//! it needs an image-decode dep tool-shell doesn't pull in. The model still
+//! receives the image (the URI payload is already valid base64, emitted as-is);
+//! only the optional resize/re-encode is deferred.
+//!
 //! DEFERRED (tool-fidelity batch A follow-ups):
-//! - (1d) Image-output handling: claude-code `formatOutput` flags
-//!   base64 `data:image/...` stdout as an image and re-encodes it into an
-//!   image content block (`BashTool/utils.ts` `isImageOutput` /
-//!   `resizeShellImageOutput`). Needs an image content-block path the Rust
-//!   `ToolCallResult` does not yet model — deferred.
 //! - (1e) `MONITOR_TOOL` `sleep N>=2` auto-background block is feature-gated
 //!   in claude-code and is currently a correct no-op here — deferred.
 
@@ -151,6 +156,69 @@ fn truncate_bash_output(content: String, max: usize) -> (String, bool) {
     let remaining_lines = content.chars().skip(max).filter(|&c| c == '\n').count() + 1;
     let truncated = format!("{head}\n\n... [{remaining_lines} lines truncated] ...");
     (truncated, true)
+}
+
+// ===== Image-output handling (claude-code `BashTool/utils.ts`) ==============
+
+/// True when `content` is a base64 image data URI. 1:1 port of claude-code
+/// `isImageOutput` (`BashTool/utils.ts:49-50`):
+/// `/^data:image\/[a-z0-9.+_-]+;base64,/i`. Callers pass the trimmed,
+/// model-facing stdout (matching TS, which tests `stripEmptyLines(stdout)`).
+#[must_use]
+fn is_image_output(content: &str) -> bool {
+    // ASCII, case-insensitive — mirror the `i` flag. Manual scan avoids a regex
+    // dep tool-shell doesn't pull in.
+    let prefix = b"data:image/";
+    let b = content.as_bytes();
+    if b.len() < prefix.len() {
+        return false;
+    }
+    if !b[..prefix.len()].eq_ignore_ascii_case(prefix) {
+        return false;
+    }
+    // `[a-z0-9.+_-]+` (the image subtype) — at least one char.
+    let mut i = prefix.len();
+    let start = i;
+    while i < b.len() {
+        let c = b[i];
+        // The TS class is case-insensitive via the `i` flag, so accept A-Z too.
+        if c.is_ascii_alphanumeric() || matches!(c, b'.' | b'+' | b'_' | b'-') {
+            i += 1;
+        } else {
+            break;
+        }
+    }
+    if i == start {
+        return false; // empty subtype
+    }
+    // Followed by the literal `;base64,`.
+    const SEP: &[u8] = b";base64,";
+    b.len() >= i + SEP.len() && &b[i..i + SEP.len()] == SEP
+}
+
+/// Parse a `data:<media_type>;base64,<payload>` URI into `(media_type, payload)`.
+/// 1:1 port of claude-code `parseDataUri` (`BashTool/utils.ts:53-65`):
+/// `/^data:([^;]+);base64,(.+)$/`. Input is trimmed before matching. Returns
+/// `None` when it doesn't match (so callers fall through to text handling).
+/// The returned payload is already valid base64 of the image bytes, so it can
+/// be handed straight to [`protocol::ImageSource::Base64`] with no re-encode.
+#[must_use]
+fn parse_data_uri(s: &str) -> Option<(String, String)> {
+    let s = s.trim();
+    let rest = s.strip_prefix("data:")?;
+    // media_type = `[^;]+` up to the first `;`.
+    let semi = rest.find(';')?;
+    if semi == 0 {
+        return None; // empty media type
+    }
+    let media_type = &rest[..semi];
+    // Must be exactly `;base64,` after the media type, then a non-empty payload
+    // (`(.+)$`).
+    let payload = rest[semi..].strip_prefix(";base64,")?;
+    if payload.is_empty() {
+        return None;
+    }
+    Some((media_type.to_string(), payload.to_string()))
 }
 
 // ===== BASH.1 — extended-glob disable prefix (SECURITY) =====================
@@ -814,6 +882,86 @@ impl Tool for BashTool {
                 let normalized = crate::shared::strip_empty_lines(&crate::shared::normalize_stdout(
                     &stdout_clean,
                 ));
+
+                // Image-output short-circuit (claude-code `BashTool/utils.ts`
+                // `formatOutput`:138-144 + `BashTool.tsx`:785-802): when the
+                // model-facing stdout is a base64 `data:image/…;base64,…` URI
+                // (matplotlib/screenshot helpers), return it as an IMAGE rather
+                // than truncating it as text. Detection runs on `normalized`
+                // (= TS `stripEmptyLines(stdout)`), BEFORE `truncate_bash_output`
+                // — truncated base64 would decode to a corrupt image. The image
+                // rides on `new_messages` via the Rust image contract (mirrors
+                // FileRead `read.rs:718-759`); `data` carries `isImage: true` +
+                // the `model_content` placeholder. NOTE: claude-code
+                // `resizeShellImageOutput` (CC-304 dimension/size cap) is a
+                // follow-up — it needs an image-decode dep tool-shell doesn't
+                // have. We emit the URI payload as-is (it is already valid
+                // base64), so the model still receives the image — the
+                // parity-critical behavior. Only the optional re-encode/resize
+                // is deferred.
+                if is_image_output(&normalized) {
+                    if let Some((media_type, payload)) = parse_data_uri(&normalized) {
+                        let mut meta: LogEventMetadata = HashMap::new();
+                        meta.insert("request_id".into(), AnalyticsValue::String(request_id));
+                        meta.insert(
+                            "exit_code".into(),
+                            AnalyticsValue::Int(i64::from(out.exit_code)),
+                        );
+                        meta.insert(
+                            "output_bytes".into(),
+                            AnalyticsValue::Int(payload.len() as i64),
+                        );
+                        let elapsed_ms = SystemTime::now()
+                            .duration_since(started_at)
+                            .unwrap_or_default()
+                            .as_millis() as u64;
+                        meta.insert("duration_ms".into(), AnalyticsValue::Int(elapsed_ms as i64));
+                        meta.insert(
+                            "ansi_chars_stripped".into(),
+                            AnalyticsValue::Int((ansi_dropped_out + ansi_dropped_err) as i64),
+                        );
+                        meta.insert("truncated".into(), AnalyticsValue::Bool(false));
+                        self.ctx.bus.log_event(BASH_COMPLETED, meta).await;
+
+                        // The data-URI payload is ALREADY valid base64 of the
+                        // image bytes — emit it directly, no decode/re-encode.
+                        let source = protocol::ImageSource::Base64 {
+                            media_type: media_type.clone(),
+                            data: payload,
+                        };
+                        // Pure image: no leading text block (TS attaches none),
+                        // matching FileRead's empty-text case (`read.rs:729`).
+                        let msg = protocol::ConversationMessage::user_with_images(
+                            protocol::MessageId::new(),
+                            String::new(),
+                            vec![source],
+                        );
+                        let interp = crate::command_semantics::interpret_command_result(
+                            &cmd_str,
+                            out.exit_code,
+                        );
+                        return Ok(ToolCallResult {
+                            data: json!({
+                                "type": "image",
+                                "isImage": true,
+                                "media_type": media_type,
+                                "model_content": "[Image content provided in the following message.]",
+                                "exit_code": out.exit_code,
+                                "stderr": stderr_clean,
+                                "is_error": interp.is_error,
+                                "return_code_interpretation": interp.message,
+                                "timed_out": false,
+                                "interrupted": false,
+                                "truncated": false,
+                                "no_output_expected": crate::silent::is_silent_bash_command(&cmd_str),
+                            }),
+                            new_messages: vec![msg],
+                            context_modifier: None,
+                            mcp_meta: None,
+                        });
+                    }
+                }
+
                 // BASH.3: honor the `BASH_MAX_OUTPUT_LENGTH` env override
                 // (claude-code `outputLimits.ts` `getMaxOutputLength`); falls
                 // back to the 30_000-char default when unset/invalid. The
@@ -855,6 +1003,10 @@ impl Tool for BashTool {
                         "stdout":    stdout_final,
                         "stderr":    stderr_clean,
                         "is_error":  is_error,
+                        // claude-code `BashTool.tsx:284` outputSchema field
+                        // `isImage`: false on a normal text command. The image
+                        // short-circuit above is the only path that sets it true.
+                        "isImage":   false,
                         "return_code_interpretation": interp.message,
                         "timed_out": false,
                         // claude-code `BashTool.tsx:283` outputSchema field
@@ -1488,5 +1640,144 @@ mod tests {
             spawned.contains("sandbox-exec") || spawned.contains("bwrap"),
             "flag must be ignored when policy disallows unsandboxed cmds, got: {spawned}"
         );
+    }
+
+    // ===== Image-output handling (claude-code `BashTool/utils.ts`) ==========
+
+    /// A minimal valid 1x1 transparent PNG, base64-encoded (the payload portion
+    /// of a `data:image/png;base64,…` URI).
+    const TINY_PNG_B64: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
+
+    #[test]
+    fn is_image_output_mirrors_ts_regex() {
+        // Matches `^data:image/[a-z0-9.+_-]+;base64,` (case-insensitive).
+        assert!(is_image_output("data:image/png;base64,AAAA"));
+        assert!(is_image_output("data:image/jpeg;base64,AAAA"));
+        assert!(is_image_output("data:image/svg+xml;base64,AAAA"));
+        assert!(is_image_output("data:image/x-icon;base64,AAAA"));
+        // `i` flag: uppercase scheme/subtype still matches.
+        assert!(is_image_output("DATA:IMAGE/PNG;base64,AAAA"));
+        // Non-matches.
+        assert!(!is_image_output("hello world"));
+        assert!(!is_image_output("data:text/plain;base64,AAAA")); // not image/*
+        assert!(!is_image_output("data:image/;base64,AAAA")); // empty subtype
+        assert!(!is_image_output("data:image/png;,AAAA")); // missing base64 token
+        assert!(!is_image_output("data:image/png")); // no `;base64,`
+        assert!(!is_image_output(" data:image/png;base64,AAAA")); // leading space (TS `^`)
+    }
+
+    #[test]
+    fn parse_data_uri_extracts_media_type_and_payload() {
+        let (mt, data) = parse_data_uri("data:image/png;base64,iVBORw0KGgo=").unwrap();
+        assert_eq!(mt, "image/png");
+        assert_eq!(data, "iVBORw0KGgo=");
+        // Trimmed before matching.
+        let (mt, data) = parse_data_uri("  data:image/jpeg;base64,QQ==  ").unwrap();
+        assert_eq!(mt, "image/jpeg");
+        assert_eq!(data, "QQ==");
+        // Malformed: missing `;base64,` → None.
+        assert!(parse_data_uri("data:image/png;base64").is_none());
+        assert!(parse_data_uri("data:image/png,QQ==").is_none());
+        // Empty payload → None (TS `(.+)$`).
+        assert!(parse_data_uri("data:image/png;base64,").is_none());
+        // Not a data URI → None.
+        assert!(parse_data_uri("just text").is_none());
+    }
+
+    #[tokio::test]
+    async fn image_stdout_emits_image_message_not_text() {
+        // A command whose stdout is a valid `data:image/png;base64,…` URI is
+        // returned as an IMAGE: the payload rides on `new_messages` via
+        // `ImageSource::Base64`; `data.isImage == true`; the URI is NOT echoed
+        // back as `stdout` text.
+        let uri = format!("data:image/png;base64,{TINY_PNG_B64}");
+        let out = ProcessOutput {
+            stdout: format!("{uri}\n"),
+            stderr: String::new(),
+            exit_code: 0,
+            timed_out: false,
+        };
+        let tool = BashTool::new(shell_test_ctx(out));
+        let res = tool
+            .call(json!({"command": "python plot.py"}), use_ctx(), fresh_tx())
+            .await
+            .expect("ok");
+
+        // `data` flags an image + carries the placeholder, NOT the raw stdout.
+        assert_eq!(res.data["isImage"], true);
+        assert_eq!(res.data["type"], "image");
+        assert_eq!(res.data["media_type"], "image/png");
+        assert_eq!(
+            res.data["model_content"],
+            "[Image content provided in the following message.]"
+        );
+        assert_eq!(res.data["truncated"], false);
+        assert_eq!(res.data["interrupted"], false);
+        // The base64 image data is NOT present in any `stdout` text field.
+        assert!(
+            res.data.get("stdout").is_none(),
+            "image result must not echo stdout text, got {:?}",
+            res.data.get("stdout")
+        );
+
+        // Exactly one follow-up message carrying the image as base64.
+        assert_eq!(res.new_messages.len(), 1);
+        match &res.new_messages[0] {
+            protocol::ConversationMessage::User { content, .. } => {
+                // Pure image: no leading text block, exactly one Image block.
+                assert_eq!(content.len(), 1, "expected only the image block");
+                match &content[0] {
+                    protocol::ContentBlock::Image {
+                        source: protocol::ImageSource::Base64 { media_type, data },
+                    } => {
+                        assert_eq!(media_type, "image/png");
+                        assert_eq!(data, TINY_PNG_B64, "payload must be the URI's base64 verbatim");
+                    }
+                    other => panic!("expected Image/Base64 block, got {other:?}"),
+                }
+            }
+            other => panic!("expected a User message with the image, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn normal_text_command_is_not_an_image() {
+        // A normal text command: `isImage == false`, stdout flows as text, and
+        // no image is attached to `new_messages`.
+        let out = ProcessOutput {
+            stdout: "hello\n".into(),
+            stderr: String::new(),
+            exit_code: 0,
+            timed_out: false,
+        };
+        let tool = BashTool::new(shell_test_ctx(out));
+        let res = tool
+            .call(json!({"command": "echo hello"}), use_ctx(), fresh_tx())
+            .await
+            .expect("ok");
+        assert_eq!(res.data["isImage"], false);
+        assert_eq!(res.data["stdout"], "hello");
+        assert!(res.new_messages.is_empty(), "no image message for plain text");
+    }
+
+    #[tokio::test]
+    async fn malformed_image_uri_is_treated_as_text() {
+        // Image-like but malformed (no `;base64,`): NOT an image — flows as
+        // normal text and is NOT attached as an image message.
+        let bad = "data:image/png;not-base64-here";
+        let out = ProcessOutput {
+            stdout: format!("{bad}\n"),
+            stderr: String::new(),
+            exit_code: 0,
+            timed_out: false,
+        };
+        let tool = BashTool::new(shell_test_ctx(out));
+        let res = tool
+            .call(json!({"command": "cat weird.txt"}), use_ctx(), fresh_tx())
+            .await
+            .expect("ok");
+        assert_eq!(res.data["isImage"], false);
+        assert_eq!(res.data["stdout"], bad);
+        assert!(res.new_messages.is_empty());
     }
 }

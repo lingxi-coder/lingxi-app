@@ -71,11 +71,23 @@ impl Authenticator for BearerAuthenticator {
 /// Authenticator for ChatGPT-account OAuth: `Authorization: Bearer` plus the
 /// `ChatGPT-Account-ID` header (and `X-OpenAI-Fedramp` when set). Mirrors codex
 /// `model-provider/src/bearer_auth_provider.rs`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct ChatGptAuthenticator {
     token: String,
     account_id: Option<String>,
     fedramp: bool,
+}
+
+// Hand-written so the bearer token never lands in `{:?}` output (e.g. a tracing
+// span or error chain). Mirrors `CopilotSecret`'s redacting Debug.
+impl std::fmt::Debug for ChatGptAuthenticator {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ChatGptAuthenticator")
+            .field("token", &"[REDACTED]")
+            .field("account_id", &self.account_id)
+            .field("fedramp", &self.fedramp)
+            .finish()
+    }
 }
 
 impl ChatGptAuthenticator {
@@ -106,12 +118,23 @@ mod tests {
     use super::*;
 
     #[test]
-    fn chatgpt_authenticator_sets_bearer_and_account_header() {
+    fn chatgpt_authenticator_sets_bearer_and_account_header_and_strips_x_api_key() {
         let auth = ChatGptAuthenticator::new("tok-123", Some("acc_9".to_string()), false);
-        let req = auth.apply(ProviderRequest::post_json("https://x/responses", serde_json::json!({}))).unwrap();
+        let mut req = ProviderRequest::post_json("https://x/responses", serde_json::json!({}));
+        req.headers.insert("x-api-key".to_string(), "leftover".to_string());
+        let req = auth.apply(req).unwrap();
         assert_eq!(req.headers.get("Authorization").map(String::as_str), Some("Bearer tok-123"));
         assert_eq!(req.headers.get("ChatGPT-Account-ID").map(String::as_str), Some("acc_9"));
         assert!(!req.headers.contains_key("X-OpenAI-Fedramp"));
+        assert!(!req.headers.contains_key("x-api-key"));
+    }
+
+    #[test]
+    fn chatgpt_authenticator_debug_redacts_token() {
+        let auth = ChatGptAuthenticator::new("tok-secret", Some("acc".to_string()), false);
+        let dbg = format!("{auth:?}");
+        assert!(!dbg.contains("tok-secret"));
+        assert!(dbg.contains("[REDACTED]"));
     }
 
     #[test]

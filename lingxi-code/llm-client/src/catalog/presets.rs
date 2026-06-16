@@ -88,7 +88,8 @@ fn presets() -> Vec<Preset> {
         },
         // OpenAI first-party: Responses API (codex removed the chat wire, so all
         // OpenAI traffic is Responses-only). API-key auth as a Bearer token.
-        // ChatGPT account/OAuth login is a separate phase (see the design doc).
+        // ChatGPT account/OAuth login is a separate phase (P2; see
+        // docs/superpowers/specs/2026-06-16-openai-auth-codex-parity-design.md).
         Preset {
             profile_name: "openai",
             base_url: "https://api.openai.com/v1",

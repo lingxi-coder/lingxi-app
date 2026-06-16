@@ -1227,7 +1227,7 @@ pub async fn pump_switch_model(
         }
     };
 
-    let result = handle.switch_model(&model).await;
+    let result = handle.switch_model(&model, None).await;
 
     let mut st = state.lock().await;
     match result {

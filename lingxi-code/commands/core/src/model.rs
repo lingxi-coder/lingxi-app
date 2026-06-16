@@ -50,7 +50,7 @@ impl BuiltinCommandHandler for ModelHandler {
             };
         }
         // Switch mode.
-        match self.handle.switch_model(trimmed).await {
+        match self.handle.switch_model(trimmed, None).await {
             Ok(()) => {
                 telemetry::emit_command_completed(cmd_evt::MODEL_COMPLETED, "switch");
                 CommandResult::Done {

@@ -789,7 +789,7 @@ impl OrchestratorHandle for MockOrchestratorHandle {
         }
     }
 
-    async fn switch_model(&self, model: &str) -> Result<(), HandleError> {
+    async fn switch_model(&self, model: &str, _profile: Option<&str>) -> Result<(), HandleError> {
         self.switch_model_calls.fetch_add(1, Ordering::SeqCst);
         *self.switch_model_last.lock().unwrap() = Some(model.to_string());
         if let Some(reason) = self.switch_model_error.lock().unwrap().take() {

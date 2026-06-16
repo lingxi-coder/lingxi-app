@@ -95,9 +95,10 @@ impl OrchestratorHandle for ConversationOrchestrator {
         self.snapshot_cost_real().await
     }
 
-    async fn switch_model(&self, model: &str) -> Result<(), HandleError> {
+    async fn switch_model(&self, model: &str, profile: Option<&str>) -> Result<(), HandleError> {
         let mut s = self.session.lock().await;
         s.model = model.to_string();
+        s.model_profile = profile.map(str::to_string);
         Ok(())
     }
 

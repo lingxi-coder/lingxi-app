@@ -68,6 +68,10 @@ pub struct SessionState {
     pub usage: CumulativeUsage,
     /// Model identifier (e.g. `"claude-opus-4-7"`).
     pub model: String,
+    /// Provider profile pinned alongside `model` (disambiguates shared ids
+    /// across providers). `None` = resolve unscoped. Set by `switch_model`.
+    #[serde(default)]
+    pub model_profile: Option<String>,
     /// Active todo list (M4-04). Mutated by `TodoWriteTool`. Defaults to empty
     /// on deserialize so pre-M4-04 persisted sessions still load.
     #[serde(default)]
@@ -100,6 +104,7 @@ impl SessionState {
             history: Vec::new(),
             usage: CumulativeUsage::default(),
             model,
+            model_profile: None,
             todos: Vec::new(),
             plan_mode: false,
             injected_message_sources: HashMap::new(),

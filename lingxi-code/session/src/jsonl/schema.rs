@@ -78,12 +78,45 @@ pub struct JsonlMessage {
     pub user_type: Option<String>,
 
     /// Git branch at write time, when available.
+    /// `getBranch()` once per chain (`sessionStorage.ts:1012-1019`); on a
+    /// non-repo / git failure the writer leaves it `None` → omitted.
     #[serde(rename = "gitBranch", skip_serializing_if = "Option::is_none")]
     pub git_branch: Option<String>,
 
-    /// All other outer fields (`agentId`, `logicalParentUuid`, `slug`,
-    /// `entrypoint`, `agentName`, `agentColor`, `teamName`, `promptId`,
-    /// `isMeta`, `toolUseResult`, ...) preserved verbatim across
+    /// CLI entrypoint string — `getEntrypoint()` (`sessionStorage.ts:1058`),
+    /// e.g. `"cli"`. Stamped on EVERY line by claude-code's writer. Optional on
+    /// read (legacy rows omit it); `skip_serializing_if = "Option::is_none"`
+    /// so an unset value is omitted, matching TS `undefined`.
+    #[serde(rename = "entrypoint", default, skip_serializing_if = "Option::is_none")]
+    pub entrypoint: Option<String>,
+
+    /// Per-session plan slug — `getPlanSlugCache().get(sessionId)`
+    /// (`sessionStorage.ts:1023, 1063`). `undefined` when the session has no
+    /// plan slug; omitted on write when `None`.
+    #[serde(rename = "slug", default, skip_serializing_if = "Option::is_none")]
+    pub slug: Option<String>,
+
+    /// Stable per-prompt id — `getPromptId()` (`sessionStorage.ts:1045-1046`),
+    /// set ONLY on `user` lines (TS: `type === 'user' ? getPromptId() : undefined`).
+    /// `None` (omitted) on every non-`user` line and on `user` lines when no
+    /// prompt id is available.
+    #[serde(rename = "promptId", default, skip_serializing_if = "Option::is_none")]
+    pub prompt_id: Option<String>,
+
+    /// Compact-boundary back-link — `logicalParentUuid`
+    /// (`sessionStorage.ts:1041`). On a compaction boundary TS sets
+    /// `parentUuid: null` and stashes the real parent here
+    /// (`isCompactBoundary ? parentUuid : undefined`); on every other line it is
+    /// `undefined`. Omitted on write when `None`.
+    #[serde(
+        rename = "logicalParentUuid",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub logical_parent_uuid: Option<String>,
+
+    /// All other outer fields (`agentId`, `agentName`, `agentColor`,
+    /// `teamName`, `isMeta`, `toolUseResult`, ...) preserved verbatim across
     /// read->write so round-trips are byte-equivalent.
     #[serde(flatten)]
     pub extra: Map<String, Value>,

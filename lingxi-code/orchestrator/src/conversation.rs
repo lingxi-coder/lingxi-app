@@ -374,6 +374,44 @@ enum StopHookFlow {
     FallThrough,
 }
 
+/// `getEntrypoint()` (`sessionStorage.ts:1058`) — the CLI entrypoint stamped on
+/// every JSONL line. claude-code reads `process.env.CLAUDE_CODE_ENTRYPOINT`
+/// (defaulting to `"cli"`); we mirror that (same env the UA builder reads,
+/// `model/user_agent.rs:73`) so an embedder can override it, but the parity
+/// default is the hardcoded `"cli"`.
+fn entrypoint_value() -> String {
+    std::env::var("CLAUDE_CODE_ENTRYPOINT")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "cli".to_string())
+}
+
+/// `getBranch()` (`sessionStorage.ts:1012-1019`) — resolve the cwd's current git
+/// branch via `git rev-parse --abbrev-ref HEAD`, or `None` on ANY failure (git
+/// missing / not a repo / non-zero exit / empty output). A detached HEAD prints
+/// the literal `"HEAD"`; we surface that verbatim (claude-code's `getBranch`
+/// returns it too — it does not special-case detached HEAD).
+///
+/// Uses [`std::process::Command`] (no new dependency), the same shell-git pattern
+/// the loader already uses for worktree enumeration. One-shot + cached by the
+/// caller, so the synchronous `output()` runs at most once per session.
+fn git_branch_for_cwd(cwd: &std::path::Path) -> Option<String> {
+    let output = std::process::Command::new("git")
+        .args(["rev-parse", "--abbrev-ref", "HEAD"])
+        .current_dir(cwd)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let branch = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if branch.is_empty() {
+        None
+    } else {
+        Some(branch)
+    }
+}
+
 /// The orchestrator. Owns the session, dispatches tools, drives the loop.
 ///
 /// Construction is via `new(...)` (batched-only) or `new_with_streaming(...)`
@@ -406,6 +444,30 @@ pub struct ConversationOrchestrator {
     /// Cached UUID of the last persisted JSONL entry — used to populate
     /// `parentUuid` on the next append. Reset to `None` for fresh sessions.
     pub(crate) last_jsonl_uuid: Mutex<Option<String>>,
+    /// Lazily-resolved git branch for the cwd — the parity analog of TS
+    /// `getBranch()`, which claude-code calls once per `insertMessageChain`
+    /// (`sessionStorage.ts:1012-1019`) and stamps onto every line of that chain.
+    /// We resolve it ONCE on first append (`git rev-parse --abbrev-ref HEAD` in
+    /// `self.cwd`, reusing the loader's shell-git pattern) and cache the result so
+    /// it is not recomputed per-append. `Some(None)` means "resolved, not a repo /
+    /// git failed" (→ `gitBranch` omitted, matching TS `undefined`); the outer
+    /// `None` means "not yet resolved".
+    ///
+    /// `Option<Option<_>>` is deliberate (the three-state case clippy's
+    /// `option_option` lint explicitly allows): outer `None` = unresolved, inner
+    /// `None` = resolved-to-no-branch, inner `Some` = resolved branch. A bare
+    /// `Option<String>` could not distinguish "unresolved" from "resolved, no
+    /// branch", which would re-shell git on every append for a non-repo cwd.
+    #[allow(clippy::option_option)]
+    pub(crate) git_branch_cache: Mutex<Option<Option<String>>>,
+    /// Stable per-prompt id for the IN-FLIGHT turn — the parity analog of TS
+    /// `getPromptId()` (`sessionStorage.ts:1045-1046`), which stamps the same id
+    /// on the user prompt line AND every `tool_result` `user` line of that turn.
+    /// [`Self::persist_message_to_jsonl`] mints a fresh UUID when it persists a
+    /// genuine new user prompt (a `user` message that is NOT a `tool_result`
+    /// carrier) and reuses it for the turn's `tool_result` `user` lines; non-`user`
+    /// lines never read it. `None` until the first user prompt is persisted.
+    pub(crate) current_prompt_id: Mutex<Option<String>>,
     /// Set by [`traits::OrchestratorHandle::request_exit`] (M5-10).
     /// The REPL (M5-13) checks this flag at the start of each iteration
     /// and breaks the loop. Wraps `AtomicBool` so reads are lock-free.
@@ -562,6 +624,8 @@ impl ConversationOrchestrator {
             cwd,
             jsonl_writer: None,
             last_jsonl_uuid: Mutex::new(None),
+            git_branch_cache: Mutex::new(None),
+            current_prompt_id: Mutex::new(None),
             should_exit: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             cost_tracker: None,
             session_started_at: std::time::Instant::now(),
@@ -1302,11 +1366,26 @@ impl ConversationOrchestrator {
     /// is the Anthropic-shaped inner object: for user/assistant we splat
     /// the content blocks via `serde_json::to_value` of the
     /// `ConversationMessage` and pull out the `content` array.
+    ///
+    /// Writer-field fidelity (§G gap 4) — mirrors `insertMessageChain`
+    /// (`sessionStorage.ts:1039-1064`):
+    /// - `git_branch`: the once-per-chain `getBranch()` value (`None` on a
+    ///   non-repo), resolved by the caller and threaded in.
+    /// - `entrypoint`: `getEntrypoint()` — `"cli"` for this engine (caller-supplied).
+    /// - `prompt_id`: `getPromptId()` on `user` lines ONLY; `None` elsewhere. The
+    ///   caller passes the in-flight turn's id and we apply it only to `user`.
+    /// - `logical_parent_uuid`: compact-boundary back-link. The orchestrator's
+    ///   append path is NOT a compaction boundary (compaction replays through a
+    ///   separate engine), so this is always `None` here. See the
+    ///   `persist_message_to_jsonl` note.
     pub(crate) fn to_jsonl_message(
         &self,
         msg: &ConversationMessage,
         session_id: &str,
         parent_uuid: Option<String>,
+        git_branch: Option<String>,
+        entrypoint: Option<String>,
+        prompt_id: Option<String>,
     ) -> session::JsonlMessage {
         let (kind, inner_message) = match msg {
             ConversationMessage::User { content, .. } => (
@@ -1322,6 +1401,10 @@ impl ConversationOrchestrator {
                 serde_json::json!({ "role": "system", "content": content }),
             ),
         };
+        // `promptId` is a USER-line-only field (TS: `type === 'user' ?
+        // getPromptId() : undefined`). Drop it on assistant/system lines even
+        // when the caller passes one.
+        let prompt_id = if kind == "user" { prompt_id } else { None };
         // Use the raw UUID (8-4-4-4-12 lowercase), NOT the `msg.id().to_string()`
         // form which carries the `"msg:"` prefix — that prefix would break the
         // byte-equivalent JSONL schema (see `JsonlMessage::uuid` doc) and the
@@ -1339,9 +1422,75 @@ impl ConversationOrchestrator {
             message: inner_message,
             is_sidechain: false,
             user_type: Some("external".to_string()),
-            git_branch: None,
+            git_branch,
+            entrypoint,
+            // Plan-slug cache is not wired in this engine — TS reads
+            // `getPlanSlugCache().get(sessionId)`, which is `undefined` for any
+            // session without a stored plan slug. We have no such cache, so this
+            // is always omitted (matches the common TS path).
+            slug: None,
+            prompt_id,
+            // Always `None` from this append path — see the doc comment above and
+            // the `persist_message_to_jsonl` note.
+            logical_parent_uuid: None,
             extra: serde_json::Map::new(),
         }
+    }
+
+    /// Resolve the cwd's git branch ONCE and cache it — the parity analog of TS
+    /// `getBranch()` (`sessionStorage.ts:1012-1019`), which is called per
+    /// `insertMessageChain` and stamped on every line. We resolve lazily on the
+    /// first append and memoize, so subsequent appends pay nothing.
+    ///
+    /// Reuses the loader's shell-git pattern (`std::process::Command`, no new
+    /// dependency): `git rev-parse --abbrev-ref HEAD` in `self.cwd`. Returns
+    /// `None` on ANY failure (git missing, not a repo, non-zero exit, detached
+    /// HEAD reporting `"HEAD"`), matching TS's `try { getBranch() } catch {
+    /// undefined }` — a `None` is then omitted from the JSONL line.
+    async fn resolve_git_branch(&self) -> Option<String> {
+        {
+            let cache = self.git_branch_cache.lock().await;
+            if let Some(resolved) = cache.as_ref() {
+                return resolved.clone();
+            }
+        }
+        let resolved = git_branch_for_cwd(&self.cwd);
+        *self.git_branch_cache.lock().await = Some(resolved.clone());
+        resolved
+    }
+
+    /// The stable per-turn `promptId` for `msg` — the parity analog of
+    /// `getPromptId()` (`sessionStorage.ts:1045`).
+    ///
+    /// TS stamps the SAME prompt id on the user prompt line AND every
+    /// `tool_result` `user` line of the turn. We reproduce that through the
+    /// single append chokepoint: a genuine new user prompt (a `user` message
+    /// that is NOT a `tool_result` carrier) MINTS a fresh UUID into
+    /// `current_prompt_id`; a `tool_result` `user` line REUSES the cached id; any
+    /// non-`user` message returns `None` (the caller / `to_jsonl_message` also
+    /// guards this, so the field never lands on assistant/system lines).
+    async fn prompt_id_for_message(&self, msg: &ConversationMessage) -> Option<String> {
+        let ConversationMessage::User { content, .. } = msg else {
+            // Non-user line — no promptId (mirrors `type === 'user' ? … :
+            // undefined`). Leave the cached turn id untouched.
+            return None;
+        };
+        let is_tool_result_carrier = content
+            .iter()
+            .any(|b| matches!(b, protocol::ContentBlock::ToolResult { .. }));
+        let mut slot = self.current_prompt_id.lock().await;
+        if is_tool_result_carrier {
+            // Continuation of the in-flight turn — reuse the current id. If none
+            // exists yet (defensive: a tool_result persisted before any prompt),
+            // mint one so the field is still populated.
+            if slot.is_none() {
+                *slot = Some(uuid::Uuid::new_v4().to_string());
+            }
+        } else {
+            // Genuine new user prompt — start a fresh prompt id for this turn.
+            *slot = Some(uuid::Uuid::new_v4().to_string());
+        }
+        slot.clone()
     }
 
     /// Persist a single message to the optional JSONL writer.
@@ -1359,7 +1508,19 @@ impl ConversationOrchestrator {
             let parent = self.last_jsonl_uuid.lock().await.clone();
             (session_id.to_string(), parent)
         };
-        let jmsg = self.to_jsonl_message(msg, &session_id_str, parent_uuid);
+        // Writer-field fidelity (§G gap 4):
+        // - gitBranch: once-per-session `getBranch()` (cached).
+        // - entrypoint: `getEntrypoint()` → `CLAUDE_CODE_ENTRYPOINT` env or "cli"
+        //   (mirrors the UA builder, `model/user_agent.rs:73`).
+        // - promptId: `getPromptId()` on USER lines. We mint a fresh id when this
+        //   is a genuine new user prompt and reuse it for the turn's tool_result
+        //   `user` lines, matching TS where `getPromptId()` is stable across a
+        //   turn. `to_jsonl_message` drops it on non-user lines.
+        let git_branch = self.resolve_git_branch().await;
+        let entrypoint = Some(entrypoint_value());
+        let prompt_id = self.prompt_id_for_message(msg).await;
+        let jmsg =
+            self.to_jsonl_message(msg, &session_id_str, parent_uuid, git_branch, entrypoint, prompt_id);
         let uuid_for_chain = jmsg.uuid.clone();
         match writer.append(&jmsg).await {
             Ok(()) => {

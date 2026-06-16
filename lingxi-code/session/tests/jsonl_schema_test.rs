@@ -22,24 +22,30 @@ fn assistant_message_with_tool_use_round_trips() {
 
 #[test]
 fn unknown_outer_fields_preserved_in_extra() {
-    // `agentId`, `promptId`, `slug` are claude-code optional fields — we don't
-    // surface them as named fields but must round-trip them via `extra`.
+    // `agentId` is still an UNKNOWN optional field → round-trips via `extra`.
+    // `promptId` and `slug` are now NAMED fidelity fields (§G gap 4): they are
+    // parsed into the struct (not `extra`) and re-emitted in struct-declaration
+    // order, so byte position shifts — assert by VALUE on a parse→re-parse
+    // round-trip rather than raw-byte equality.
     let original = r#"{"type":"user","uuid":"33333333-4444-5555-6666-777777777777","parentUuid":null,"sessionId":"11111111-2222-3333-4444-555555555555","timestamp":"2026-05-25T14:30:02.000Z","cwd":"/x","version":"0.6.0","message":{"role":"user","content":"hi"},"isSidechain":false,"agentId":"agent-42","promptId":"prompt-7","slug":"plan-abc"}"#;
     let parsed: JsonlMessage = serde_json::from_str(original).expect("parse");
+    // agentId — unknown field, lands in extra.
     assert_eq!(
         parsed.extra.get("agentId"),
         Some(&Value::String("agent-42".into()))
     );
-    assert_eq!(
-        parsed.extra.get("promptId"),
-        Some(&Value::String("prompt-7".into()))
-    );
-    assert_eq!(
-        parsed.extra.get("slug"),
-        Some(&Value::String("plan-abc".into()))
-    );
+    // promptId / slug — promoted to named fields (NOT in extra anymore).
+    assert_eq!(parsed.prompt_id.as_deref(), Some("prompt-7"));
+    assert_eq!(parsed.slug.as_deref(), Some("plan-abc"));
+    assert!(!parsed.extra.contains_key("promptId"));
+    assert!(!parsed.extra.contains_key("slug"));
+
+    // Value-level round-trip: re-serialize, re-parse as a free `Value`, and
+    // confirm every key/value survives (order-independent).
     let reemitted = serde_json::to_string(&parsed).expect("serialize");
-    assert_eq!(reemitted, original);
+    let before: Value = serde_json::from_str(original).unwrap();
+    let after: Value = serde_json::from_str(&reemitted).unwrap();
+    assert_eq!(after, before, "round-trip preserves all keys + values");
 }
 
 #[test]
@@ -56,6 +62,10 @@ fn parent_uuid_null_serializes_as_null_not_missing() {
         is_sidechain: false,
         user_type: None,
         git_branch: None,
+        entrypoint: None,
+        slug: None,
+        prompt_id: None,
+        logical_parent_uuid: None,
         extra: Map::default(),
     };
     let s = serde_json::to_string(&msg).expect("ser");

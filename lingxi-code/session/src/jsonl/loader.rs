@@ -14,18 +14,20 @@
 //! `claude-code` transcript (leading `summary`, interleaved
 //! `attachment`/`system`, forked roots, sidechain branches).
 //!
-//! DEFERRED FOLLOW-UP — `recoverOrphanedParallelToolResults`
+//! PARALLEL-TOOL-CALL RECOVERY — `recoverOrphanedParallelToolResults`
 //! (`sessionStorage.ts:2096`): the post-walk DAG recovery pass that re-attaches
 //! sibling assistant blocks + orphaned `tool_result`s produced by PARALLEL tool
-//! calls (N `tool_use`s → N one-block assistant messages sharing `message.id`).
-//! [`build_conversation_chain`] is a single-parent walk and keeps one branch,
-//! which is correct for any transcript without parallel tool calls. Recovering
-//! the orphaned siblings is purely additive and can be layered on later without
-//! changing [`build_conversation_chain`]'s signature.
+//! calls (N `tool_use`s → N one-block assistant messages sharing `message.id`)
+//! now runs as an additive post-pass
+//! ([`recover_orphaned_parallel_tool_results`]) at the tail of
+//! [`build_conversation_chain`]. The single-parent walk still keeps one branch;
+//! the post-pass then splices each group's off-chain siblings + `tool_results` in
+//! right after their on-chain anchor, never reordering the main chain.
 
 use crate::jsonl::path::{project_dir_name, session_path};
 use crate::jsonl::reader::{JsonlReader, LoadedTranscript};
 use crate::jsonl::schema::JsonlMessage;
+use serde_json::Value;
 use crate::jsonl::title::extract_title;
 use std::collections::HashSet;
 use std::cmp::Ordering;
@@ -664,12 +666,14 @@ fn timestamp_millis(ts: &str) -> i64 {
 /// user/assistant leaf exists the chain is empty and the session id is the
 /// requested `arg` (the caller maps the empty chain to "nothing to resume").
 ///
-/// `recoverOrphanedParallelToolResults` (the parallel-tool-result DAG recovery
-/// post-pass, `sessionStorage.ts:2096`) is DEFERRED — see the module follow-up
-/// note. The single-parent walk keeps one branch, which is correct for every
-/// transcript that does not use parallel tool calls; recovering orphaned sibling
-/// `tool_result` blocks is additive and can land later without changing this
-/// signature.
+///  6. Run [`recover_orphaned_parallel_tool_results`]
+///     (`recoverOrphanedParallelToolResults`, `sessionStorage.ts:2096`): the
+///     single-parent walk keeps one branch, so PARALLEL tool calls (N
+///     `tool_use`s → N one-block assistant siblings sharing `message.id`) leave
+///     off-chain siblings + their `tool_result`s orphaned. The post-pass splices
+///     each group's genuine orphans back in right after their on-chain anchor,
+///     never reordering the main chain. A transcript with no parallel tool calls
+///     is returned unchanged.
 #[must_use]
 pub fn build_conversation_chain(
     loaded: &LoadedTranscript,
@@ -744,10 +748,10 @@ pub fn build_conversation_chain(
 
     // (5) Walk tip → root, cycle-guarded, stop on missing parent; reverse.
     let mut chain: Vec<JsonlMessage> = Vec::new();
-    let mut seen: HashSet<&str> = HashSet::new();
+    let mut seen: HashSet<String> = HashSet::new();
     let mut current: Option<&JsonlMessage> = Some(tip);
     while let Some(node) = current {
-        if !seen.insert(node.uuid.as_str()) {
+        if !seen.insert(node.uuid.clone()) {
             tracing::warn!(
                 session = arg,
                 at = %node.uuid,
@@ -762,7 +766,182 @@ pub fn build_conversation_chain(
         };
     }
     chain.reverse();
+
+    // (6) Recover sibling assistant blocks + tool_results the single-parent walk
+    // orphaned (parallel-tool-call DAG). Additive post-pass; never reorders the
+    // main chain. `seen` is exactly the set of on-chain uuids (the cycle guard
+    // breaks BEFORE pushing, so no extra entries).
+    let chain = recover_orphaned_parallel_tool_results(by_uuid, chain, &mut seen, arg);
+
     (chain, tip_session_id)
+}
+
+/// Read a chain-participant line's `message.id` (the Anthropic message id shared
+/// by all sibling blocks of one streamed assistant turn). `None` when absent or
+/// non-string — mirrors TS's `m.message.id` truthiness gate.
+fn message_id(m: &JsonlMessage) -> Option<&str> {
+    m.message.get("id").and_then(Value::as_str)
+}
+
+/// True when `m` is a `user` line whose inner `message.content` is an array
+/// containing at least one `tool_result` block — 1:1 with the TS predicate
+/// `m.type === 'user' && Array.isArray(m.message.content) &&
+/// m.message.content.some(b => b.type === 'tool_result')`
+/// (`sessionStorage.ts:2147-2151`).
+fn carries_tool_result(m: &JsonlMessage) -> bool {
+    if m.message_type != "user" {
+        return false;
+    }
+    m.message
+        .get("content")
+        .and_then(Value::as_array)
+        .is_some_and(|blocks| {
+            blocks.iter().any(|b| {
+                b.get("type").and_then(Value::as_str) == Some("tool_result")
+            })
+        })
+}
+
+/// Post-pass for [`build_conversation_chain`] — recover sibling assistant blocks
+/// and `tool_result`s that the single-parent walk orphaned. 1:1 port of
+/// `claude-code`'s `recoverOrphanedParallelToolResults`
+/// (`sessionStorage.ts:2096-2206`).
+///
+/// Streaming emits one assistant message per `content_block_stop` — N parallel
+/// `tool_use`s → N assistant messages with DISTINCT `uuid` but the SAME
+/// `message.id`. Each `tool_result`'s `parentUuid` points at its OWN one-block
+/// assistant (the write-time `sourceToolAssistantUUID` override), so the topology
+/// is a DAG; the tip→root walk is a linked-list traversal that keeps only one
+/// branch and drops the off-chain siblings + their `tool_results`. This pass
+/// re-attaches them.
+///
+/// Conservative by construction: it only ever ADDS genuine orphans (members not
+/// already in `seen`), splices each group's recovered entries immediately AFTER
+/// the group's last on-chain anchor, and never moves an existing chain member —
+/// so a transcript without parallel tool calls is returned byte-identical.
+fn recover_orphaned_parallel_tool_results(
+    by_uuid: &HashMap<String, JsonlMessage>,
+    chain: Vec<JsonlMessage>,
+    seen: &mut HashSet<String>,
+    arg: &str,
+) -> Vec<JsonlMessage> {
+    // chainAssistants — on-chain `assistant` lines, in chain order.
+    let chain_assistants: Vec<&JsonlMessage> = chain
+        .iter()
+        .filter(|m| m.message_type == "assistant")
+        .collect();
+    if chain_assistants.is_empty() {
+        return chain;
+    }
+
+    // anchorByMsgId — last on-chain member of each sibling group (chain order →
+    // later iterations overwrite, last wins). Stores the anchor's uuid.
+    let mut anchor_by_msg_id: HashMap<&str, String> = HashMap::new();
+    for a in &chain_assistants {
+        if let Some(id) = message_id(a) {
+            anchor_by_msg_id.insert(id, a.uuid.clone());
+        }
+    }
+
+    // O(n) precompute over ALL messages:
+    //  - siblingsByMsgId: assistant lines grouped by `message.id`.
+    //  - toolResultsByAsst: `user` tool_result carriers indexed by `parentUuid`
+    //    (the write-time srcUUID; --fork-session strips srcUUID but keeps it).
+    let mut siblings_by_msg_id: HashMap<&str, Vec<&JsonlMessage>> = HashMap::new();
+    let mut tool_results_by_asst: HashMap<&str, Vec<&JsonlMessage>> = HashMap::new();
+    for m in by_uuid.values() {
+        if m.message_type == "assistant" {
+            if let Some(id) = message_id(m) {
+                siblings_by_msg_id.entry(id).or_default().push(m);
+            }
+        } else if carries_tool_result(m) {
+            if let Some(parent) = m.parent_uuid.as_deref() {
+                tool_results_by_asst.entry(parent).or_default().push(m);
+            }
+        }
+    }
+
+    // For each message.id group touching the chain: collect off-chain siblings +
+    // off-chain TRs for ALL members, splice right after the group's anchor.
+    let mut processed_groups: HashSet<&str> = HashSet::new();
+    let mut inserts: HashMap<String, Vec<JsonlMessage>> = HashMap::new();
+    let mut recovered_count: usize = 0;
+    for asst in &chain_assistants {
+        let Some(msg_id) = message_id(asst) else {
+            continue;
+        };
+        if !processed_groups.insert(msg_id) {
+            continue; // already handled this group
+        }
+
+        // group = siblingsByMsgId.get(msgId) ?? [asst]
+        let group: Vec<&JsonlMessage> = siblings_by_msg_id
+            .get(msg_id)
+            .cloned()
+            .unwrap_or_else(|| vec![*asst]);
+
+        let mut orphaned_siblings: Vec<&JsonlMessage> =
+            group.iter().filter(|s| !seen.contains(&s.uuid)).copied().collect();
+        let mut orphaned_trs: Vec<&JsonlMessage> = Vec::new();
+        for member in &group {
+            if let Some(trs) = tool_results_by_asst.get(member.uuid.as_str()) {
+                for tr in trs {
+                    if !seen.contains(&tr.uuid) {
+                        orphaned_trs.push(tr);
+                    }
+                }
+            }
+        }
+        if orphaned_siblings.is_empty() && orphaned_trs.is_empty() {
+            continue;
+        }
+
+        // Timestamp sort keeps content-block / completion order; the sort is
+        // STABLE (`sort_by`) so JSONL read order survives ties — matching TS's
+        // `localeCompare` stable sort.
+        orphaned_siblings.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
+        orphaned_trs.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
+
+        // anchor = anchorByMsgId.get(msgId)!  — guaranteed present: this group is
+        // anchored by `asst`, an on-chain assistant whose id we inserted above.
+        let Some(anchor_uuid) = anchor_by_msg_id.get(msg_id) else {
+            continue;
+        };
+
+        let mut recovered: Vec<JsonlMessage> =
+            Vec::with_capacity(orphaned_siblings.len() + orphaned_trs.len());
+        for s in orphaned_siblings {
+            seen.insert(s.uuid.clone());
+            recovered.push(s.clone());
+        }
+        for tr in orphaned_trs {
+            seen.insert(tr.uuid.clone());
+            recovered.push(tr.clone());
+        }
+        recovered_count += recovered.len();
+        inserts.insert(anchor_uuid.clone(), recovered);
+    }
+
+    if recovered_count == 0 {
+        return chain;
+    }
+    tracing::debug!(
+        session = arg,
+        recovered = recovered_count,
+        "recovered orphaned parallel tool_result blocks",
+    );
+
+    // Splice: walk the chain, append each anchor's recovered entries right after
+    // it so the group stays contiguous (every TR lands after its tool_use).
+    let mut result: Vec<JsonlMessage> = Vec::with_capacity(chain.len() + recovered_count);
+    for m in chain {
+        let recovered = inserts.remove(&m.uuid);
+        result.push(m);
+        if let Some(recovered) = recovered {
+            result.extend(recovered);
+        }
+    }
+    result
 }
 
 #[cfg(test)]

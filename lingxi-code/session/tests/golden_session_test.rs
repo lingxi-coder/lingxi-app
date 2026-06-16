@@ -63,6 +63,10 @@ async fn writer_output_equals_single_turn_fixture() {
         is_sidechain: false,
         user_type: Some("external".into()),
         git_branch: None,
+        entrypoint: None,
+        slug: None,
+        prompt_id: None,
+        logical_parent_uuid: None,
         extra: Map::new(),
     };
     let assistant = JsonlMessage {
@@ -86,6 +90,10 @@ async fn writer_output_equals_single_turn_fixture() {
         is_sidechain: false,
         user_type: None,
         git_branch: None,
+        entrypoint: None,
+        slug: None,
+        prompt_id: None,
+        logical_parent_uuid: None,
         extra: Map::new(),
     };
 
@@ -146,6 +154,10 @@ async fn writer_output_equals_multi_turn_fixture() {
             is_sidechain: false,
             user_type: Some("external".into()),
             git_branch: None,
+            entrypoint: None,
+            slug: None,
+            prompt_id: None,
+            logical_parent_uuid: None,
             extra: Map::new(),
         },
         JsonlMessage {
@@ -166,6 +178,10 @@ async fn writer_output_equals_multi_turn_fixture() {
             is_sidechain: false,
             user_type: None,
             git_branch: None,
+            entrypoint: None,
+            slug: None,
+            prompt_id: None,
+            logical_parent_uuid: None,
             extra: Map::new(),
         },
         JsonlMessage {
@@ -180,6 +196,10 @@ async fn writer_output_equals_multi_turn_fixture() {
             is_sidechain: false,
             user_type: Some("external".into()),
             git_branch: None,
+            entrypoint: None,
+            slug: None,
+            prompt_id: None,
+            logical_parent_uuid: None,
             extra: Map::new(),
         },
         JsonlMessage {
@@ -200,6 +220,10 @@ async fn writer_output_equals_multi_turn_fixture() {
             is_sidechain: false,
             user_type: None,
             git_branch: None,
+            entrypoint: None,
+            slug: None,
+            prompt_id: None,
+            logical_parent_uuid: None,
             extra: Map::new(),
         },
         JsonlMessage {
@@ -214,6 +238,10 @@ async fn writer_output_equals_multi_turn_fixture() {
             is_sidechain: false,
             user_type: Some("external".into()),
             git_branch: None,
+            entrypoint: None,
+            slug: None,
+            prompt_id: None,
+            logical_parent_uuid: None,
             extra: Map::new(),
         },
     ];
@@ -273,6 +301,10 @@ async fn writer_output_equals_compacted_fixture() {
             is_sidechain: false,
             user_type: Some("external".into()),
             git_branch: None,
+            entrypoint: None,
+            slug: None,
+            prompt_id: None,
+            logical_parent_uuid: None,
             extra: Map::new(),
         },
         JsonlMessage {
@@ -293,6 +325,10 @@ async fn writer_output_equals_compacted_fixture() {
             is_sidechain: false,
             user_type: None,
             git_branch: None,
+            entrypoint: None,
+            slug: None,
+            prompt_id: None,
+            logical_parent_uuid: None,
             extra: Map::new(),
         },
         JsonlMessage {
@@ -307,6 +343,10 @@ async fn writer_output_equals_compacted_fixture() {
             is_sidechain: false,
             user_type: None,
             git_branch: None,
+            entrypoint: None,
+            slug: None,
+            prompt_id: None,
+            logical_parent_uuid: None,
             extra: boundary_extra,
         },
         JsonlMessage {
@@ -321,6 +361,10 @@ async fn writer_output_equals_compacted_fixture() {
             is_sidechain: false,
             user_type: Some("external".into()),
             git_branch: None,
+            entrypoint: None,
+            slug: None,
+            prompt_id: None,
+            logical_parent_uuid: None,
             extra: Map::new(),
         },
     ];

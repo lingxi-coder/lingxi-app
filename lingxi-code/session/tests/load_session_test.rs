@@ -303,6 +303,198 @@ async fn forked_session_loads_and_uses_leaf_session_id() {
     assert_eq!(messages[1].uuid, m_tip.to_string());
 }
 
+// ---- recoverOrphanedParallelToolResults (sessionStorage.ts:2096) --------
+// PARALLEL tool calls stream as N one-block assistant messages with DISTINCT
+// uuid but the SAME `message.id`; each tool_result's parentUuid points at its
+// OWN sibling assistant. The tip→root walk keeps only ONE branch, orphaning the
+// off-chain siblings + their tool_results. The post-pass re-attaches them right
+// after the group's on-chain anchor without reordering the main chain.
+
+/// An `assistant` line carrying an inner `message.id` (the shared parallel-group
+/// id) and a single `tool_use` block — the shape a streamed parallel turn writes.
+fn assistant_tooluse_line(
+    uuid: &str,
+    parent: Option<&str>,
+    session: &str,
+    ts: &str,
+    message_id: &str,
+    tool_use_id: &str,
+) -> String {
+    let v = json!({
+        "type": "assistant",
+        "uuid": uuid,
+        "parentUuid": parent,
+        "sessionId": session,
+        "timestamp": ts,
+        "cwd": "/proj",
+        "version": "0.6.0",
+        "isSidechain": false,
+        "message": {
+            "id": message_id,
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "tool_use", "id": tool_use_id, "name": "Bash", "input": {}}],
+            "model": "claude-3-5-sonnet-latest",
+            "stop_reason": "tool_use",
+        },
+    });
+    format!("{}\n", serde_json::to_string(&v).unwrap())
+}
+
+/// A plain `assistant` text line with an inner `message.id` (the final answer).
+fn assistant_text_line(
+    uuid: &str,
+    parent: Option<&str>,
+    session: &str,
+    ts: &str,
+    message_id: &str,
+) -> String {
+    let v = json!({
+        "type": "assistant",
+        "uuid": uuid,
+        "parentUuid": parent,
+        "sessionId": session,
+        "timestamp": ts,
+        "cwd": "/proj",
+        "version": "0.6.0",
+        "isSidechain": false,
+        "message": {
+            "id": message_id,
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "text", "text": "done"}],
+            "model": "claude-3-5-sonnet-latest",
+            "stop_reason": "end_turn",
+        },
+    });
+    format!("{}\n", serde_json::to_string(&v).unwrap())
+}
+
+/// A `user` line whose inner `message.content` is a `tool_result` array, with
+/// `parentUuid` pointing at the assistant whose `tool_use` it answers (the
+/// write-time `sourceToolAssistantUUID` override).
+fn tool_result_line(
+    uuid: &str,
+    parent: &str,
+    session: &str,
+    ts: &str,
+    tool_use_id: &str,
+) -> String {
+    let v = json!({
+        "type": "user",
+        "uuid": uuid,
+        "parentUuid": parent,
+        "sessionId": session,
+        "timestamp": ts,
+        "cwd": "/proj",
+        "version": "0.6.0",
+        "isSidechain": false,
+        "userType": "external",
+        "message": {
+            "role": "user",
+            "content": [{"type": "tool_result", "tool_use_id": tool_use_id, "content": "ok"}],
+        },
+    });
+    format!("{}\n", serde_json::to_string(&v).unwrap())
+}
+
+#[tokio::test]
+async fn recovers_orphaned_parallel_tool_result_from_sibling_branch() {
+    let (_temp, claude_home, cwd, subdir, fs) = setup_cwd().await;
+    let sid = Uuid::new_v4().to_string();
+
+    // u0 → a1(tool_use#1, id=msg_par) → tr1(parent=a1)  [walk's branch]
+    //        a2(tool_use#2, id=msg_par, parent=a1)        [orphan sibling]
+    //          tr2(parent=a2)                              [orphan tool_result]
+    //      a3(text, id=msg_final, parent=tr1)              [tip — newest]
+    let u0 = "00000000-0000-4000-8000-000000000000";
+    let a1 = "a1000000-0000-4000-8000-000000000001";
+    let a2 = "a2000000-0000-4000-8000-000000000002";
+    let tr1 = "71000000-0000-4000-8000-000000000071";
+    let tr2 = "72000000-0000-4000-8000-000000000072";
+    let a3 = "a3000000-0000-4000-8000-000000000003";
+
+    let mut body = String::new();
+    body.push_str(&msg_line("user", u0, None, &sid, "2026-05-25T12:00:00.000Z"));
+    body.push_str(&assistant_tooluse_line(
+        a1, Some(u0), &sid, "2026-05-25T12:00:01.000Z", "msg_par", "tool_1",
+    ));
+    // Sibling assistant: SAME message.id (msg_par), chained off a1, OFF the walk.
+    body.push_str(&assistant_tooluse_line(
+        a2, Some(a1), &sid, "2026-05-25T12:00:02.000Z", "msg_par", "tool_2",
+    ));
+    // tr1 answers a1 → ON the walk (a3's parent chain runs a3→tr1→a1→u0).
+    body.push_str(&tool_result_line(
+        tr1, a1, &sid, "2026-05-25T12:00:03.000Z", "tool_1",
+    ));
+    // tr2 answers a2 → ORPHAN (its carrier a2 is off-chain).
+    body.push_str(&tool_result_line(
+        tr2, a2, &sid, "2026-05-25T12:00:04.000Z", "tool_2",
+    ));
+    // Final answer is the newest leaf → the tip.
+    body.push_str(&assistant_text_line(
+        a3, Some(tr1), &sid, "2026-05-25T12:00:05.000Z", "msg_final",
+    ));
+
+    let sid_uuid = Uuid::parse_str(&sid).unwrap();
+    tokio::fs::write(subdir.join(format!("{sid}.jsonl")), body)
+        .await
+        .unwrap();
+
+    let chain = load_session(&claude_home, &cwd, sid_uuid, fs)
+        .await
+        .expect("loads");
+
+    let uuids: Vec<&str> = chain.iter().map(|m| m.uuid.as_str()).collect();
+
+    // The orphaned sibling a2 AND its orphaned tool_result tr2 are recovered.
+    assert!(uuids.contains(&a2), "orphaned sibling assistant a2 recovered: {uuids:?}");
+    assert!(uuids.contains(&tr2), "orphaned tool_result tr2 recovered: {uuids:?}");
+
+    // Main chain is NOT reordered: u0, a1, tr1, a3 keep their relative order,
+    // and the recovered group [a2, tr2] is spliced right after the anchor a1.
+    assert_eq!(
+        uuids,
+        vec![u0, a1, a2, tr2, tr1, a3],
+        "recovered group inserted after anchor a1; main chain order preserved",
+    );
+}
+
+#[tokio::test]
+async fn no_parallel_calls_chain_is_unchanged_by_recovery() {
+    // A linear transcript (no shared message.id, no sibling branches) must be
+    // returned byte-identical — the recovery pass is a strict no-op.
+    let (_temp, claude_home, cwd, subdir, fs) = setup_cwd().await;
+    let sid = Uuid::new_v4().to_string();
+    let u0 = "00000000-0000-4000-8000-0000000000a0";
+    let a1 = "a1000000-0000-4000-8000-0000000000a1";
+    let tr1 = "71000000-0000-4000-8000-0000000000b1";
+    let a2 = "a2000000-0000-4000-8000-0000000000a2";
+
+    let mut body = String::new();
+    body.push_str(&msg_line("user", u0, None, &sid, "2026-05-25T12:00:00.000Z"));
+    body.push_str(&assistant_tooluse_line(
+        a1, Some(u0), &sid, "2026-05-25T12:00:01.000Z", "msg_one", "tool_x",
+    ));
+    body.push_str(&tool_result_line(
+        tr1, a1, &sid, "2026-05-25T12:00:02.000Z", "tool_x",
+    ));
+    body.push_str(&assistant_text_line(
+        a2, Some(tr1), &sid, "2026-05-25T12:00:03.000Z", "msg_two",
+    ));
+
+    let sid_uuid = Uuid::parse_str(&sid).unwrap();
+    tokio::fs::write(subdir.join(format!("{sid}.jsonl")), body)
+        .await
+        .unwrap();
+
+    let chain = load_session(&claude_home, &cwd, sid_uuid, fs)
+        .await
+        .expect("loads");
+    let uuids: Vec<&str> = chain.iter().map(|m| m.uuid.as_str()).collect();
+    assert_eq!(uuids, vec![u0, a1, tr1, a2], "linear chain unchanged");
+}
+
 // Keep the legacy single-message happy path (still valid, exercises the
 // `json_line` default-timestamp shape used elsewhere in the suite).
 #[tokio::test]

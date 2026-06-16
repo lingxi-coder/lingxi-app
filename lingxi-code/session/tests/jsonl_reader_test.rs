@@ -22,6 +22,10 @@ fn user_msg(n: u8) -> JsonlMessage {
         is_sidechain: false,
         user_type: Some("external".into()),
         git_branch: None,
+        entrypoint: None,
+        slug: None,
+        prompt_id: None,
+        logical_parent_uuid: None,
         extra: Map::default(),
     }
 }

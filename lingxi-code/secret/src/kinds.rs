@@ -41,11 +41,11 @@ pub enum SecretKind {
         /// Stable identifier for the third-party provider.
         provider: String,
     },
-    /// Short-lived OpenAI / ChatGPT OAuth access token.
+    /// Short-lived `OpenAI` / `ChatGPT` OAuth access token.
     OpenAiOAuthAccessToken,
-    /// Long-lived OpenAI / ChatGPT OAuth refresh token.
+    /// Long-lived `OpenAI` / `ChatGPT` OAuth refresh token.
     OpenAiOAuthRefreshToken,
-    /// Non-secret OpenAI OAuth session metadata (account_id / fedramp / expiry /
+    /// Non-secret `OpenAI` OAuth session metadata (`account_id` / fedramp / expiry /
     /// scopes). Distinct from the access/refresh tokens so a keychain audit or
     /// redaction-by-kind pass does not miscount it as token material.
     OpenAiOAuthSessionMeta,

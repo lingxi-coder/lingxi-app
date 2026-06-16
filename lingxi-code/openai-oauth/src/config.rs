@@ -24,6 +24,8 @@ pub struct OpenAiOAuthConfig {
     pub codex_backend: String,
     /// Loopback redirect ports, in preference order (codex allowlist: 1455, then 1457).
     pub loopback_ports: [u16; 2],
+    /// `AuthAPI` base URL for PAT whoami + account endpoints.
+    pub authapi_base_url: String,
 }
 
 impl Default for OpenAiOAuthConfig {
@@ -40,6 +42,7 @@ impl Default for OpenAiOAuthConfig {
                 .to_string(),
             codex_backend: "https://chatgpt.com/backend-api/codex".to_string(),
             loopback_ports: [1455, 1457],
+            authapi_base_url: format!("{issuer}/api/accounts"),
             issuer,
         }
     }
@@ -51,11 +54,23 @@ impl OpenAiOAuthConfig {
     pub fn redirect_uri(&self, port: u16) -> String {
         format!("http://localhost:{port}/auth/callback")
     }
+
+    /// The PAT `whoami` endpoint (resolves `account_id` / fedramp for a PAT).
+    #[must_use]
+    pub fn whoami_url(&self) -> String {
+        format!("{}/v1/user-auth-credential/whoami", self.authapi_base_url.trim_end_matches('/'))
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn config_has_authapi_and_whoami() {
+        let c = OpenAiOAuthConfig::default();
+        assert_eq!(c.authapi_base_url, "https://auth.openai.com/api/accounts");
+        assert_eq!(c.whoami_url(), "https://auth.openai.com/api/accounts/v1/user-auth-credential/whoami");
+    }
     #[test]
     fn config_has_codex_constants() {
         let c = OpenAiOAuthConfig::default();

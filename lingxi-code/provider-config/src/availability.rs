@@ -27,23 +27,24 @@ pub struct ProviderAvailability {
 ///
 /// `anthropic_has_api_key` / `anthropic_has_oauth` reflect the engine's resolved
 /// Anthropic auth state (the composite serves those without a keychain/env id).
-/// `openai_chatgpt_has_oauth` mirrors that pattern for the ChatGPT OAuth session
-/// (OpenAI OAuth tokens are stored under `openai-oauth-*` keychain accounts, not
-/// under a `get_provider_key("openai-chatgpt")` slot, so the generic arm cannot
-/// detect them).
+/// `openai_chatgpt_available` mirrors that pattern for the ChatGPT credential —
+/// the engine ORs PAT-env / external-tokens-env / OAuth-session and passes the
+/// combined result here (OpenAI OAuth tokens are stored under `openai-oauth-*`
+/// keychain accounts, not under a `get_provider_key("openai-chatgpt")` slot, so
+/// the generic arm cannot detect any of the three sources).
 pub async fn compute_availability(
     credentials: &Arc<secret::CredentialManager>,
     sources: &[CredentialSource],
     anthropic_has_api_key: bool,
     anthropic_has_oauth: bool,
-    openai_chatgpt_has_oauth: bool,
+    openai_chatgpt_available: bool,
 ) -> Vec<ProviderAvailability> {
     let mut out = Vec::with_capacity(sources.len());
     for source in sources {
         let available = match source.credential_id.as_str() {
             "anthropic-api-key" => anthropic_has_api_key,
             "anthropic-oauth" => anthropic_has_oauth,
-            "openai-chatgpt" => openai_chatgpt_has_oauth,
+            "openai-chatgpt" => openai_chatgpt_available,
             id => {
                 let keychain_has = matches!(credentials.get_provider_key(id).await, Ok(Some(_)));
                 let env_set = source

@@ -25,7 +25,7 @@ const OAUTH_ACCESS_ACCOUNT: &str = "anthropic-oauth-access";
 const OAUTH_REFRESH_ACCOUNT: &str = "anthropic-oauth-refresh";
 const OAUTH_META_ACCOUNT: &str = "anthropic-oauth-meta";
 
-/// `(service, account)` keys under which the OpenAI / ChatGPT OAuth credentials
+/// `(service, account)` keys under which the `OpenAI` / `ChatGPT` OAuth credentials
 /// are stored. Reuses `OAUTH_SERVICE = "lingxi"`.
 const OPENAI_OAUTH_ACCESS_ACCOUNT: &str = "openai-oauth-access";
 const OPENAI_OAUTH_REFRESH_ACCOUNT: &str = "openai-oauth-refresh";
@@ -66,7 +66,7 @@ struct OAuthSessionMeta {
     org_id: String,
 }
 
-/// A full OpenAI / ChatGPT OAuth credential set as returned by
+/// A full `OpenAI` / `ChatGPT` OAuth credential set as returned by
 /// [`CredentialManager::get_openai_oauth_tokens`].
 ///
 /// `access_token` / `refresh_token` are wrapped in [`Secret`] so they redact in
@@ -81,13 +81,13 @@ pub struct OpenAiOAuthTokens {
     pub expires_at: SystemTime,
     /// Scopes granted on the access token.
     pub scopes: Vec<String>,
-    /// ChatGPT account id (from `chatgpt_account_id` JWT claim).
+    /// `ChatGPT` account id (from `chatgpt_account_id` JWT claim).
     pub account_id: Option<String>,
-    /// FedRAMP account flag (from `chatgpt_account_is_fedramp` JWT claim).
+    /// `FedRAMP` account flag (from `chatgpt_account_is_fedramp` JWT claim).
     pub fedramp: bool,
 }
 
-/// Non-secret session metadata persisted alongside the OpenAI OAuth tokens.
+/// Non-secret session metadata persisted alongside the `OpenAI` OAuth tokens.
 /// Serialized to JSON and stored in the `openai-oauth-meta` entry.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct OpenAiOAuthSessionMeta {
@@ -378,13 +378,13 @@ impl CredentialManager {
 
     // ── OpenAI / ChatGPT OAuth ─────────────────────────────────────────────
 
-    /// Persist a full OpenAI OAuth credential set.
+    /// Persist a full `OpenAI` OAuth credential set.
     ///
     /// Writes three secure-storage entries under `service = "lingxi"`:
     /// - `openai-oauth-access`  — the access token (`OpenAiOAuthAccessToken`)
     /// - `openai-oauth-refresh` — the refresh token (`OpenAiOAuthRefreshToken`),
     ///   deleted if `refresh` is `None`
-    /// - `openai-oauth-meta`    — JSON session metadata (account_id / fedramp /
+    /// - `openai-oauth-meta`    — JSON session metadata (`account_id` / fedramp /
     ///   expiry / scopes)
     ///
     /// Each `store` overwrites any existing entry, so this is also the rotation
@@ -461,7 +461,7 @@ impl CredentialManager {
         Ok(())
     }
 
-    /// Load the persisted OpenAI OAuth credential set.
+    /// Load the persisted `OpenAI` OAuth credential set.
     ///
     /// Returns `Ok(None)` if no access token or no session metadata is present
     /// (a partially-written state is treated as "not logged in").
@@ -511,7 +511,7 @@ impl CredentialManager {
         }))
     }
 
-    /// Delete every persisted OpenAI OAuth entry. Idempotent — deleting a
+    /// Delete every persisted `OpenAI` OAuth entry. Idempotent — deleting a
     /// missing entry is not an error.
     pub async fn delete_openai_oauth_tokens(&self) -> Result<(), CredentialError> {
         self.storage

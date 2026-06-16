@@ -1199,6 +1199,35 @@ fn load_merged_output_style(project_dir: &std::path::Path) -> Option<String> {
 /// (`commands.ts:565-583`): model-invocable prompt skills, excluding builtins,
 /// keeping bundled/skills/deprecated-dir entries plus any with a user-specified
 /// description or `whenToUse`.
+/// Collects the `system_message` of each completed background (`async`) hook so
+/// the orchestrator's per-turn `async_hook_response` reminder can fold them into
+/// the next turn (claude-code `getAsyncHookResponseAttachments`). CONSUME-ONCE:
+/// [`AsyncHookResponseProvider::take_pending_responses`] drains the buffer
+/// (mirrors TS `removeDeliveredAsyncHooks`). A plain `std::sync::Mutex` — every
+/// critical section is a brief push / `mem::take`, never held across an `await`.
+#[derive(Clone, Default)]
+struct AsyncHookResponseBuffer(Arc<std::sync::Mutex<Vec<String>>>);
+
+impl AsyncHookResponseBuffer {
+    fn push(&self, text: String) {
+        if let Ok(mut v) = self.0.lock() {
+            v.push(text);
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl orchestrator::prompt::async_hook_response::AsyncHookResponseProvider
+    for AsyncHookResponseBuffer
+{
+    async fn take_pending_responses(&self) -> Vec<String> {
+        self.0
+            .lock()
+            .map(|mut v| std::mem::take(&mut *v))
+            .unwrap_or_default()
+    }
+}
+
 struct RegistrySkillListing(Arc<RwLock<CommandRegistry>>);
 
 #[async_trait::async_trait]
@@ -1949,13 +1978,13 @@ pub async fn build(
     //        - `with_process_runner(PosixProcess, PosixSandbox)` makes the
     //          Command arm spawn real child processes (the runner only accepts a
     //          `SandboxedCommand`, which the sandbox mints).
-    //        The hooks Agent arm stays "not wired" (no `.with_agent_spawner(..)`
-    //        builder on `HookExecutorImpl` yet — M9+). NOTE: this is a *separate*
-    //        seam from the tool-context `subagent_spawner`, which IS now wired
-    //        below (4.6) — the hooks Agent arm and the `AgentTool` spawner are
-    //        distinct injection points. The orchestrator's `hooks` param is the
-    //        concrete `Arc<hooks::HookExecutorImpl>`, so no trait-object coercion
-    //        is needed.
+    //        The hooks Agent arm IS now wired via `.with_agent_spawner(..)`
+    //        (see the builder chain below): an `agent`-type hook action spawns a
+    //        subagent through the SAME pool spawner the tool-context
+    //        `subagent_spawner` uses (4.6). They remain distinct injection points
+    //        on `HookExecutorImpl` but share one spawner. The orchestrator's
+    //        `hooks` param is the concrete `Arc<hooks::HookExecutorImpl>`, so no
+    //        trait-object coercion is needed.
     //        The Prompt arm is wired via `with_prompt_runner`: the
     //        `ApiClientHookPromptRunner` reuses the SAME `api_client`
     //        (`OrchestratorApiClient::messages_create`) the orchestrator uses
@@ -1992,11 +2021,23 @@ pub async fn build(
         hook_runtime.clone() as Arc<dyn traits::RuntimeSpawner>,
         async_hook_completion_tx,
     ));
-    // Best-effort drain so a completed background hook never back-pressures the
-    // channel (mirrors the cost-persist drain idiom above). Fire-and-forget:
-    // the result is observed only for in-flight bookkeeping, which the registry
-    // already cleared before publishing.
-    tokio::spawn(async move { while async_hook_completion_rx.recv().await.is_some() {} });
+    // B5 fold-back (claude-code `getAsyncHookResponseAttachments`): drain the
+    // completion channel and stash each completed background hook's
+    // `system_message` (which already folds in any `additionalContext`) into the
+    // buffer, for the orchestrator to re-inject as an `async_hook_response`
+    // reminder on the NEXT turn. Hooks that returned no `system_message`
+    // contribute nothing. Draining still keeps the bounded channel from
+    // back-pressuring a fire-and-forget hook; when no hooks are configured
+    // nothing is ever published, so this stays a no-op for the common case.
+    let async_hook_response_buffer = AsyncHookResponseBuffer::default();
+    let async_hook_drain_buffer = async_hook_response_buffer.clone();
+    tokio::spawn(async move {
+        while let Some((_id, result)) = async_hook_completion_rx.recv().await {
+            if let Some(text) = result.response.as_ref().and_then(|r| r.system_message.clone()) {
+                async_hook_drain_buffer.push(text);
+            }
+        }
+    });
     let hooks = Arc::new(
         hooks::HookExecutorImpl::new(
             hook_registry.clone(),
@@ -2010,7 +2051,15 @@ pub async fn build(
         .with_prompt_runner(Arc::new(orchestrator::ApiClientHookPromptRunner::new(
             api_client.clone(),
         )))
-        .with_async_registry(async_hook_registry),
+        .with_async_registry(async_hook_registry)
+        // Wire the Agent hook arm: an `agent`-type hook action spawns a subagent
+        // through the SAME pool spawner the `AgentTool` uses (4.6 below). The arm
+        // + `with_agent_spawner` builder already exist in the hooks crate; only
+        // this production wiring was missing, so an `agent` hook now runs instead
+        // of degrading to a no-op. Opt-in: byte-identical when no `agent` hook is
+        // configured. (`subagent_spawner` is an `Arc`; cloned here, still moved
+        // into the tool context below.)
+        .with_agent_spawner(subagent_spawner.clone()),
     );
 
     // (5.26) Build the MCP registry NOW (deferred from (5.1)) so it can carry
@@ -2620,7 +2669,10 @@ pub async fn build(
         // SKILLLIST.1: enumerate model-invocable skills each turn so the model
         // can discover them. Reads `shared_command_registry` lazily at turn time
         // (populated below at (6), before any turn fires).
-        .with_skill_listing(Arc::new(RegistrySkillListing(shared_command_registry.clone()))),
+        .with_skill_listing(Arc::new(RegistrySkillListing(shared_command_registry.clone())))
+        // B5: fold completed background (`async`) hook responses back into the
+        // next turn. Backed by the completion-channel drain buffer above.
+        .with_async_hook_responses(Arc::new(async_hook_response_buffer)),
     );
 
     // (6) Command registry through the desktop composition root.

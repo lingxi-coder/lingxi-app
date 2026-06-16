@@ -5,6 +5,7 @@
 //! Entry point: [`assemble_system_prompt`].
 #![forbid(unsafe_code)]
 
+pub mod async_hook_response;
 pub mod conditional_rules;
 pub mod env_block;
 pub mod env_meta;

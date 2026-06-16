@@ -348,6 +348,15 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
         history_snapshot.push(reminder);
     }
 
+    // async_hook_response (batched twin): fold completed background (`async`)
+    // hook responses into THIS call's OUTGOING snapshot only (never
+    // `session.history` / JSONL), drained consume-once. `None` when no source is
+    // wired / nothing completed since the last turn. See
+    // [`ConversationOrchestrator::async_hook_response_reminder_message`].
+    if let Some(reminder) = orch.async_hook_response_reminder_message().await {
+        history_snapshot.push(reminder);
+    }
+
     // 1. Call the API. Advertise the registry's wire tool definitions
     //    (same set + serialization as the streaming path). Batch 5: the call is
     //    wrapped in the blocking-limit preempt + 413/prompt-too-long reactive

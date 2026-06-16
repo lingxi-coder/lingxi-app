@@ -586,6 +586,13 @@ pub struct ConversationOrchestrator {
     /// locked turn-loop/streaming fixtures byte-identical. The desktop binary
     /// wires a `CommandRegistry`-backed provider at the composition root.
     pub(crate) skill_listing: Option<Arc<dyn crate::prompt::skill_listing::SkillListingProvider>>,
+    /// Source of completed background (`async`) hook responses to fold back into
+    /// the next turn (claude-code `getAsyncHookResponseAttachments`). `None` ⇒
+    /// [`Self::async_hook_response_reminder_message`] is a strict no-op (the
+    /// default — keeps fixtures byte-identical). Wired at the desktop
+    /// composition root from the `AsyncHookRegistry` completion channel.
+    pub(crate) async_hook_responses:
+        Option<Arc<dyn crate::prompt::async_hook_response::AsyncHookResponseProvider>>,
     /// §F: cache of the CONDITIONAL (`paths:`-gated) memory rules, populated the
     /// first time [`Self::conditional_rules_reminder_message`] runs (a `OnceCell`
     /// fill via the same `memory.load(&cwd)` the system prompt uses, then
@@ -672,6 +679,7 @@ impl ConversationOrchestrator {
             last_emitted_rate_limit: Mutex::new(None),
             last_emitted_raw_utilization: Mutex::new(None),
             skill_listing: None,
+            async_hook_responses: None,
             conditional_rules_cache: tokio::sync::OnceCell::new(),
             sent_conditional_rules: Mutex::new(std::collections::HashSet::new()),
             sent_skill_names: Mutex::new(std::collections::HashSet::new()),
@@ -755,6 +763,19 @@ impl ConversationOrchestrator {
     #[must_use]
     pub fn has_skill_listing(&self) -> bool {
         self.skill_listing.is_some()
+    }
+
+    /// Wire the source of completed background (`async`) hook responses, folded
+    /// back into the next turn by [`Self::async_hook_response_reminder_message`]
+    /// (claude-code `getAsyncHookResponseAttachments`). Without it that method
+    /// is a strict no-op.
+    #[must_use]
+    pub fn with_async_hook_responses(
+        mut self,
+        provider: Arc<dyn crate::prompt::async_hook_response::AsyncHookResponseProvider>,
+    ) -> Self {
+        self.async_hook_responses = Some(provider);
+        self
     }
 
     /// Whether an MCP registry has been wired via
@@ -2415,6 +2436,15 @@ impl ConversationOrchestrator {
                 snapshot.push(reminder);
             }
 
+            // async_hook_response (streaming twin): fold completed background
+            // (`async`) hook responses into THIS turn's OUTGOING snapshot only
+            // (never `session.history` / JSONL), drained consume-once. `None`
+            // when no source is wired / nothing completed since the last turn.
+            // See [`Self::async_hook_response_reminder_message`].
+            if let Some(reminder) = self.async_hook_response_reminder_message().await {
+                snapshot.push(reminder);
+            }
+
             // RECOV.1: blocking-limit preempt — the streaming twin of the batched
             // `call_api_with_ptl_recovery` step (1) (TS `query.ts:592-648`). If the
             // pre-call prompt is already at the hard blocking limit
@@ -3214,6 +3244,26 @@ impl ConversationOrchestrator {
         let window =
             compaction::context_window::context_window_for_model(&self.config.model, &[]) as usize;
         let content = crate::prompt::skill_listing::render_reminder(&new_entries, Some(window))?;
+        Some(ConversationMessage::user(MessageId::new(), content))
+    }
+
+    /// The per-turn, transient `async_hook_response` reminder, or `None` when no
+    /// source is wired or no background (`async`) hook has completed since the
+    /// last turn.
+    ///
+    /// 1:1 with claude-code's `async_hook_response` attachment
+    /// (`getAsyncHookResponseAttachments`, attachments.ts:3464 →
+    /// `normalizeAttachmentForAPI`, messages.ts:4026): drains the completed
+    /// background-hook responses (CONSUME-ONCE — TS `removeDeliveredAsyncHooks`)
+    /// and wraps their `system_message` text (which already folds in any
+    /// `additionalContext`) in one `<system-reminder>` meta user message. Like
+    /// the skill-/agent-listing reminders it is appended ONLY to the per-turn
+    /// OUTGOING snapshot, never `session.history` / JSONL, so it never
+    /// accumulates. No delta set is needed — draining the source IS the dedup.
+    pub(crate) async fn async_hook_response_reminder_message(&self) -> Option<ConversationMessage> {
+        let provider = self.async_hook_responses.as_ref()?;
+        let responses = provider.take_pending_responses().await;
+        let content = crate::prompt::async_hook_response::render_reminder(&responses)?;
         Some(ConversationMessage::user(MessageId::new(), content))
     }
 
@@ -5112,6 +5162,48 @@ mod skill_listing_reminder_tests {
         assert!(
             !t1.contains("- alpha:"),
             "turn-1 must NOT re-emit the already-sent skill: {t1}"
+        );
+    }
+
+    struct OnceAsyncResponses(std::sync::Mutex<Vec<String>>);
+    #[async_trait::async_trait]
+    impl crate::prompt::async_hook_response::AsyncHookResponseProvider for OnceAsyncResponses {
+        async fn take_pending_responses(&self) -> Vec<String> {
+            std::mem::take(&mut *self.0.lock().unwrap())
+        }
+    }
+
+    #[tokio::test]
+    async fn async_hook_response_reminder_folds_in_then_drains_once() {
+        let reg = ToolRegistry::new();
+        let orch = orch_with(reg, None).with_async_hook_responses(Arc::new(OnceAsyncResponses(
+            std::sync::Mutex::new(vec!["ran background lints: clean".to_string()]),
+        )));
+        // Turn 0: the completed background-hook response is folded in, wrapped.
+        let t0 = orch
+            .async_hook_response_reminder_message()
+            .await
+            .expect("turn-0 async hook response")
+            .text_content();
+        assert!(t0.contains("<system-reminder>"), "must be wrapped: {t0}");
+        assert!(
+            t0.contains("ran background lints: clean"),
+            "must carry the hook's system_message: {t0}"
+        );
+        // Turn 1: consume-once — the delivered response must NOT re-appear.
+        assert!(
+            orch.async_hook_response_reminder_message().await.is_none(),
+            "a delivered async-hook response must be drained, not repeated"
+        );
+    }
+
+    #[tokio::test]
+    async fn async_hook_response_reminder_none_without_provider() {
+        let reg = ToolRegistry::new();
+        let orch = orch_with(reg, None);
+        assert!(
+            orch.async_hook_response_reminder_message().await.is_none(),
+            "no provider wired ⇒ strict no-op"
         );
     }
 }

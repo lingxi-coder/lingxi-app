@@ -29,8 +29,8 @@ struct Preset {
     auth: AuthStrategy,
     /// Provider identity used for pricing + serialization.
     provider_id: ProviderId,
-    /// Credential lookup (env var name).
-    credential_env: &'static str,
+    /// Credential lookup (env var name, or `None` for OAuth-based presets).
+    credential_env: Option<&'static str>,
     /// Embedded models.dev slice JSON.
     slice_json: &'static str,
 }
@@ -40,6 +40,7 @@ const DEEPSEEK: &str = include_str!("../../data/models-dev/deepseek.json");
 const GLM_CODING: &str = include_str!("../../data/models-dev/zhipuai-coding-plan.json");
 const ZAI: &str = include_str!("../../data/models-dev/zai.json");
 const OPENAI: &str = include_str!("../../data/models-dev/openai.json");
+const OPENAI_CHATGPT: &str = include_str!("../../data/models-dev/openai-chatgpt.json");
 const GITHUB_COPILOT: &str = include_str!("../../data/models-dev/github-copilot.json");
 
 fn presets() -> Vec<Preset> {
@@ -50,7 +51,7 @@ fn presets() -> Vec<Preset> {
             protocol: ProtocolFamily::OpenAiChat,
             auth: AuthStrategy::ApiKey,
             provider_id: ProviderId::OpenAICompatible { name: "openrouter".to_string() },
-            credential_env: "OPENROUTER_API_KEY",
+            credential_env: Some("OPENROUTER_API_KEY"),
             slice_json: OPENROUTER,
         },
         Preset {
@@ -59,7 +60,7 @@ fn presets() -> Vec<Preset> {
             protocol: ProtocolFamily::OpenAiChat,
             auth: AuthStrategy::ApiKey,
             provider_id: ProviderId::OpenAICompatible { name: "deepseek".to_string() },
-            credential_env: "DEEPSEEK_API_KEY",
+            credential_env: Some("DEEPSEEK_API_KEY"),
             slice_json: DEEPSEEK,
         },
         // GLM coding plan: Anthropic-compatible endpoint (reuses AnthropicMessagesCodec).
@@ -70,7 +71,7 @@ fn presets() -> Vec<Preset> {
             protocol: ProtocolFamily::AnthropicMessages,
             auth: AuthStrategy::ApiKey,
             provider_id: ProviderId::Custom { name: "glm-coding".to_string() },
-            credential_env: "ZHIPU_API_KEY",
+            credential_env: Some("ZHIPU_API_KEY"),
             slice_json: GLM_CODING,
         },
         // Z.AI: international GLM API (the global counterpart to the China-only
@@ -83,7 +84,7 @@ fn presets() -> Vec<Preset> {
             protocol: ProtocolFamily::OpenAiChat,
             auth: AuthStrategy::ApiKey,
             provider_id: ProviderId::OpenAICompatible { name: "zai".to_string() },
-            credential_env: "ZAI_API_KEY",
+            credential_env: Some("ZAI_API_KEY"),
             slice_json: ZAI,
         },
         // OpenAI first-party: Responses API (codex removed the chat wire, so all
@@ -96,8 +97,21 @@ fn presets() -> Vec<Preset> {
             protocol: ProtocolFamily::OpenAiResponses,
             auth: AuthStrategy::Bearer,
             provider_id: ProviderId::OpenAI,
-            credential_env: "OPENAI_API_KEY",
+            credential_env: Some("OPENAI_API_KEY"),
             slice_json: OPENAI,
+        },
+        // OpenAI via ChatGPT-account OAuth login: routes to the Codex backend
+        // (Responses API). Credential is OAuth (no env var) → resolved by the
+        // openai-oauth credential provider via MultiCredentialProvider, keyed by
+        // credential_id "openai-chatgpt". See P2 design doc.
+        Preset {
+            profile_name: "openai-chatgpt",
+            base_url: "https://chatgpt.com/backend-api/codex",
+            protocol: ProtocolFamily::OpenAiResponses,
+            auth: AuthStrategy::ChatGptOAuth,
+            provider_id: ProviderId::OpenAICompatible { name: "openai-chatgpt".to_string() },
+            credential_env: None,
+            slice_json: OPENAI_CHATGPT,
         },
         // GitHub Copilot: OpenAI-compatible wire; GitHub OAuth token used
         // directly as the bearer via AuthStrategy::CopilotBearer (no exchange).
@@ -107,7 +121,7 @@ fn presets() -> Vec<Preset> {
             protocol: ProtocolFamily::OpenAiChat,
             auth: AuthStrategy::CopilotBearer,
             provider_id: ProviderId::OpenAICompatible { name: "github-copilot".to_string() },
-            credential_env: "GITHUB_TOKEN",
+            credential_env: Some("GITHUB_TOKEN"),
             slice_json: GITHUB_COPILOT,
         },
     ]
@@ -140,7 +154,10 @@ pub fn builtin_presets() -> BuiltinCatalog {
             base_url: preset.base_url.to_string(),
             protocol: preset.protocol.clone(),
             auth: preset.auth.clone(),
-            credential: CredentialConfig::Env { var: preset.credential_env.to_string() },
+            credential: match preset.credential_env {
+                Some(var) => CredentialConfig::Env { var: var.to_string() },
+                None => CredentialConfig::Static { id: preset.profile_name.to_string() },
+            },
             models,
             pricing: crate::config::PricingConfig::default(),
             // main-only fields: catalog presets are all OpenAI/Anthropic-style
@@ -160,7 +177,7 @@ mod tests {
     #[test]
     fn every_preset_yields_expected_model_counts() {
         let catalog = builtin_presets();
-        assert_eq!(catalog.providers.len(), 6);
+        assert_eq!(catalog.providers.len(), 7);
         let count = |name: &str| {
             catalog
                 .providers
@@ -174,6 +191,7 @@ mod tests {
         assert_eq!(count("glm-coding"), 6);
         assert_eq!(count("zai"), 13);
         assert_eq!(count("openai"), 50);
+        assert_eq!(count("openai-chatgpt"), 3);
         assert_eq!(count("github-copilot"), 23);
         let openai = catalog
             .providers
@@ -183,5 +201,9 @@ mod tests {
         assert_eq!(openai.protocol, ProtocolFamily::OpenAiResponses);
         assert_eq!(openai.provider_id, ProviderId::OpenAI);
         assert_eq!(openai.base_url, "https://api.openai.com/v1");
+        let chatgpt = catalog.providers.iter().find(|p| p.profile_name == "openai-chatgpt").expect("present");
+        assert_eq!(chatgpt.protocol, ProtocolFamily::OpenAiResponses);
+        assert_eq!(chatgpt.auth, AuthStrategy::ChatGptOAuth);
+        assert_eq!(chatgpt.base_url, "https://chatgpt.com/backend-api/codex");
     }
 }

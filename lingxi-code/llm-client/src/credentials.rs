@@ -42,6 +42,16 @@ pub enum Credential {
     ApiKey(String),
     /// Bearer or OAuth access token.
     BearerToken(String),
+    /// ChatGPT-account OAuth: bearer access token plus the `ChatGPT-Account-ID`
+    /// header (and `FedRAMP` flag). Served by the openai-oauth credential provider.
+    ChatGptOAuth {
+        /// OAuth access token (bearer).
+        access_token: String,
+        /// `ChatGPT` workspace/account id (the `ChatGPT-Account-ID` header).
+        account_id: Option<String>,
+        /// Whether the account is `FedRAMP` (sets `X-OpenAI-Fedramp: true`).
+        fedramp: bool,
+    },
     /// AWS `SigV4` signing credentials.
     ///
     /// For `EnvCredentialProvider`, `SigV4` is not supported — use a
@@ -65,6 +75,12 @@ impl fmt::Debug for Credential {
             Self::BearerToken(_) => formatter
                 .debug_tuple("BearerToken")
                 .field(&"[REDACTED]")
+                .finish(),
+            Self::ChatGptOAuth { account_id, fedramp, .. } => formatter
+                .debug_struct("ChatGptOAuth")
+                .field("access_token", &"[REDACTED]")
+                .field("account_id", account_id)
+                .field("fedramp", fedramp)
                 .finish(),
             Self::AwsSigV4 { .. } => formatter
                 .debug_struct("AwsSigV4")
@@ -137,5 +153,22 @@ impl CredentialProvider for EnvCredentialProvider {
             .map(Credential::ApiKey)
             .map_err(|_| LlmError::Authentication);
         Box::pin(async move { result })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn chatgpt_oauth_credential_redacts_token_in_debug() {
+        let c = Credential::ChatGptOAuth {
+            access_token: "sk-secret".to_string(),
+            account_id: Some("acc_1".to_string()),
+            fedramp: false,
+        };
+        let dbg = format!("{c:?}");
+        assert!(!dbg.contains("sk-secret"));
+        assert!(dbg.contains("ChatGptOAuth"));
     }
 }

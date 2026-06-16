@@ -30,7 +30,7 @@ pub mod sse;
 pub mod transport;
 pub mod types;
 
-pub use auth::{ApiKeyAuthenticator, Authenticator, BearerAuthenticator};
+pub use auth::{ApiKeyAuthenticator, Authenticator, BearerAuthenticator, ChatGptAuthenticator};
 pub use copilot::{
     CopilotAuthenticator, CopilotHttp, CopilotLogin, CopilotSecret, DeviceCodeResponse, PollOutcome,
 };

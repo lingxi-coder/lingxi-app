@@ -27,17 +27,23 @@ pub struct ProviderAvailability {
 ///
 /// `anthropic_has_api_key` / `anthropic_has_oauth` reflect the engine's resolved
 /// Anthropic auth state (the composite serves those without a keychain/env id).
+/// `openai_chatgpt_has_oauth` mirrors that pattern for the ChatGPT OAuth session
+/// (OpenAI OAuth tokens are stored under `openai-oauth-*` keychain accounts, not
+/// under a `get_provider_key("openai-chatgpt")` slot, so the generic arm cannot
+/// detect them).
 pub async fn compute_availability(
     credentials: &Arc<secret::CredentialManager>,
     sources: &[CredentialSource],
     anthropic_has_api_key: bool,
     anthropic_has_oauth: bool,
+    openai_chatgpt_has_oauth: bool,
 ) -> Vec<ProviderAvailability> {
     let mut out = Vec::with_capacity(sources.len());
     for source in sources {
         let available = match source.credential_id.as_str() {
             "anthropic-api-key" => anthropic_has_api_key,
             "anthropic-oauth" => anthropic_has_oauth,
+            "openai-chatgpt" => openai_chatgpt_has_oauth,
             id => {
                 let keychain_has = matches!(credentials.get_provider_key(id).await, Ok(Some(_)));
                 let env_set = source
@@ -133,7 +139,7 @@ mod tests {
         let _g = ENV_LOCK.lock().unwrap();
         let cm = manager();
         cm.set_provider_key("openrouter", "k").await.expect("store");
-        let map = compute_availability(&cm, &[src("openrouter", Some("NOPE_VAR"))], false, false).await;
+        let map = compute_availability(&cm, &[src("openrouter", Some("NOPE_VAR"))], false, false, false).await;
         let entry = map.iter().find(|a| a.profile_name == "openrouter").expect("entry");
         assert!(entry.available);
     }
@@ -143,7 +149,7 @@ mod tests {
     async fn env_makes_available() {
         let _g = ENV_LOCK.lock().unwrap();
         std::env::set_var("DEEPSEEK_AVAIL_VAR", "k");
-        let map = compute_availability(&manager(), &[src("deepseek", Some("DEEPSEEK_AVAIL_VAR"))], false, false).await;
+        let map = compute_availability(&manager(), &[src("deepseek", Some("DEEPSEEK_AVAIL_VAR"))], false, false, false).await;
         std::env::remove_var("DEEPSEEK_AVAIL_VAR");
         assert!(map.iter().find(|a| a.profile_name == "deepseek").unwrap().available);
     }
@@ -153,7 +159,7 @@ mod tests {
     async fn neither_is_unavailable() {
         let _g = ENV_LOCK.lock().unwrap();
         std::env::remove_var("GLM_AVAIL_VAR");
-        let map = compute_availability(&manager(), &[src("glm", Some("GLM_AVAIL_VAR"))], false, false).await;
+        let map = compute_availability(&manager(), &[src("glm", Some("GLM_AVAIL_VAR"))], false, false, false).await;
         assert!(!map.iter().find(|a| a.profile_name == "glm").unwrap().available);
     }
 
@@ -168,7 +174,7 @@ mod tests {
             env_var: None,
             kind: crate::CredentialKind::ApiKey,
         };
-        let map = compute_availability(&manager(), &[anthropic], true, false).await;
+        let map = compute_availability(&manager(), &[anthropic], true, false, false).await;
         assert!(map.iter().find(|a| a.profile_name == "anthropic").unwrap().available);
     }
 
@@ -183,7 +189,26 @@ mod tests {
             env_var: None,
             kind: crate::CredentialKind::OAuth,
         };
-        let map = compute_availability(&manager(), &[anthropic], false, true).await;
+        let map = compute_availability(&manager(), &[anthropic], false, true, false).await;
         assert!(map.iter().find(|a| a.profile_name == "anthropic").unwrap().available);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // serialize env-var mutation across async tests
+    async fn openai_chatgpt_available_when_oauth_session_present() {
+        let _g = ENV_LOCK.lock().unwrap();
+        let chatgpt = crate::CredentialSource {
+            provider_id: ProviderId::OpenAICompatible { name: "openai-chatgpt".to_string() },
+            profile_name: "openai-chatgpt".to_string(),
+            credential_id: "openai-chatgpt".to_string(),
+            env_var: None,
+            kind: crate::CredentialKind::ApiKey,
+        };
+        // not available with the flag false …
+        let map = compute_availability(&manager(), &[chatgpt.clone()], false, false, false).await;
+        assert!(!map.iter().find(|a| a.profile_name == "openai-chatgpt").unwrap().available);
+        // … available with the flag true (OAuth session present)
+        let map = compute_availability(&manager(), &[chatgpt], false, false, true).await;
+        assert!(map.iter().find(|a| a.profile_name == "openai-chatgpt").unwrap().available);
     }
 }

@@ -128,6 +128,8 @@ pub enum AuthStrategy {
     /// GitHub Copilot: GitHub OAuth token used directly as the bearer, plus the
     /// Copilot header set (see [`crate::CopilotAuthenticator`]).
     CopilotBearer,
+    /// ChatGPT-account OAuth: bearer access token + `ChatGPT-Account-ID` header.
+    ChatGptOAuth,
     /// AWS `SigV4` request signing.
     AwsSigV4,
     /// GCP bearer token auth.

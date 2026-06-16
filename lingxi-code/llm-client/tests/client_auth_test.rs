@@ -8,6 +8,73 @@ use llm_client::{
 };
 use llm_client::BoxFuture;
 
+// ── Fix 3.3: ChatGptOAuth dispatch integration ───────────────────────────────
+
+/// ChatGptOAuth sets Authorization: Bearer and ChatGPT-Account-ID headers.
+#[tokio::test]
+async fn chatgpt_oauth_injects_bearer_and_account_id_headers() {
+    #[derive(Debug)]
+    struct ChatGptStore;
+    impl CredentialProvider for ChatGptStore {
+        fn load<'a>(
+            &'a self,
+            _scope: &'a CredentialScope,
+        ) -> BoxFuture<'a, Result<Credential, LlmError>> {
+            Box::pin(async {
+                Ok(Credential::ChatGptOAuth {
+                    access_token: "t".to_string(),
+                    account_id: Some("a".to_string()),
+                    fedramp: false,
+                })
+            })
+        }
+    }
+
+    let client = DefaultLlmClient::from_config(ClientConfig {
+        providers: vec![ProviderProfile {
+            provider_id: ProviderId::OpenAI,
+            profile_name: "p".to_string(),
+            base_url: "https://chatgpt.com/backend-api".to_string(),
+            protocol: ProtocolFamily::OpenAiResponses,
+            auth: AuthStrategy::ChatGptOAuth,
+            credential: CredentialConfig::HostManaged { id: "chatgpt-oauth".to_string() },
+            models: vec![ModelProfile {
+                display_model: "p-model".to_string(),
+                request_model: "p-model".to_string(),
+                billing_model: "p-model".to_string(),
+                aliases: vec![],
+                capabilities: Capabilities {
+                    streaming: true,
+                    tools: true,
+                    ..Default::default()
+                },
+            }],
+            pricing: PricingConfig::default(),
+            signing: None,
+            azure: None,
+        }],
+    })
+    .expect("client")
+    .with_credential_provider(Arc::new(ChatGptStore));
+
+    let prepared = client.prepare(&LlmRequest::new("p-model")).await.expect("prepare");
+
+    assert_eq!(
+        prepared.provider_request.headers.get("Authorization").map(String::as_str),
+        Some("Bearer t"),
+        "ChatGptOAuth must inject Authorization: Bearer header"
+    );
+    assert_eq!(
+        prepared.provider_request.headers.get("ChatGPT-Account-ID").map(String::as_str),
+        Some("a"),
+        "ChatGptOAuth must inject ChatGPT-Account-ID header"
+    );
+    assert!(
+        !prepared.provider_request.headers.contains_key("X-OpenAI-Fedramp"),
+        "ChatGptOAuth must NOT inject X-OpenAI-Fedramp when fedramp=false"
+    );
+}
+
 fn profile(
     provider_id: ProviderId,
     protocol: ProtocolFamily,

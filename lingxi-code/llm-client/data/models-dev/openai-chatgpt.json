@@ -1,0 +1,11 @@
+{
+  "_comment": "Hand-authored (not from models.dev): codex's Codex-backend model list is dynamic (filter_by_auth) and not published on models.dev. Models reachable via ChatGPT-account login against https://chatgpt.com/backend-api/codex.",
+  "id": "openai-chatgpt",
+  "name": "OpenAI (ChatGPT login)",
+  "env": [],
+  "models": {
+    "gpt-5.3-codex": { "id": "gpt-5.3-codex", "name": "GPT-5.3 Codex", "tool_call": true, "reasoning": true, "modalities": { "input": ["text"], "output": ["text"] } },
+    "gpt-5-codex":   { "id": "gpt-5-codex",   "name": "GPT-5 Codex",   "tool_call": true, "reasoning": true, "modalities": { "input": ["text"], "output": ["text"] } },
+    "gpt-5.2":       { "id": "gpt-5.2",       "name": "GPT-5.2",       "tool_call": true, "reasoning": true, "modalities": { "input": ["text"], "output": ["text"] } }
+  }
+}

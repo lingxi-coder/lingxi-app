@@ -264,9 +264,10 @@ pub fn register_core_connect(
     reg: &mut CommandRegistry,
     writer: Arc<dyn crate::ConnectCredentialWriter>,
     copilot: Arc<dyn crate::CopilotConnectDriver>,
+    chatgpt: Arc<dyn crate::ChatGptConnectDriver>,
 ) {
     use crate::ConnectHandler;
-    reg.register_builtin_handler(Arc::new(ConnectHandler::new(writer, copilot)));
+    reg.register_builtin_handler(Arc::new(ConnectHandler::new(writer, copilot, chatgpt)));
 }
 
 /// Overwrite the handle-free `/skills` entry with its non-TUI real handler.
@@ -828,7 +829,8 @@ mod batch_4_tests {
 mod connect_tests {
     use super::*;
     use crate::connect::{
-        ConnectCredentialWriter, ConnectError, CopilotConnectDriver, CopilotConnectStep,
+        ChatGptConnectDriver, ConnectCredentialWriter, ConnectError, CopilotConnectDriver,
+        CopilotConnectStep,
     };
     use async_trait::async_trait;
 
@@ -852,12 +854,19 @@ mod connect_tests {
             Ok(())
         }
     }
+    struct NoopChatGpt;
+    #[async_trait]
+    impl ChatGptConnectDriver for NoopChatGpt {
+        async fn connect(&self) -> Result<String, ConnectError> {
+            Ok("Connected chatgpt.".into())
+        }
+    }
 
     #[test]
     fn connect_resolves_after_registration() {
         let mut reg = CommandRegistry::new();
         register_all_builtin_commands(&mut reg);
-        register_core_connect(&mut reg, Arc::new(NoopWriter), Arc::new(NoopCopilot));
+        register_core_connect(&mut reg, Arc::new(NoopWriter), Arc::new(NoopCopilot), Arc::new(NoopChatGpt));
         assert!(reg.resolve("connect").is_some(), "/connect missing");
         assert!(reg.get_handler("connect").is_some(), "/connect handler missing");
     }

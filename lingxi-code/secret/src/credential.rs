@@ -25,6 +25,12 @@ const OAUTH_ACCESS_ACCOUNT: &str = "anthropic-oauth-access";
 const OAUTH_REFRESH_ACCOUNT: &str = "anthropic-oauth-refresh";
 const OAUTH_META_ACCOUNT: &str = "anthropic-oauth-meta";
 
+/// `(service, account)` keys under which the OpenAI / ChatGPT OAuth credentials
+/// are stored. Reuses `OAUTH_SERVICE = "lingxi"`.
+const OPENAI_OAUTH_ACCESS_ACCOUNT: &str = "openai-oauth-access";
+const OPENAI_OAUTH_REFRESH_ACCOUNT: &str = "openai-oauth-refresh";
+const OPENAI_OAUTH_META_ACCOUNT: &str = "openai-oauth-meta";
+
 /// Keychain account name for a per-provider key, namespaced by credential `id`.
 fn provider_key_account(id: &str) -> String {
     format!("provider-key-{id}")
@@ -58,6 +64,37 @@ struct OAuthSessionMeta {
     scopes: Vec<String>,
     email: String,
     org_id: String,
+}
+
+/// A full OpenAI / ChatGPT OAuth credential set as returned by
+/// [`CredentialManager::get_openai_oauth_tokens`].
+///
+/// `access_token` / `refresh_token` are wrapped in [`Secret`] so they redact in
+/// logs; the remaining fields are non-secret session metadata persisted in the
+/// `openai-oauth-meta` entry.
+pub struct OpenAiOAuthTokens {
+    /// Bearer access token.
+    pub access_token: Secret<String>,
+    /// Long-lived refresh token (absent if the provider never issued one).
+    pub refresh_token: Option<Secret<String>>,
+    /// Wall-clock expiry instant of the access token.
+    pub expires_at: SystemTime,
+    /// Scopes granted on the access token.
+    pub scopes: Vec<String>,
+    /// ChatGPT account id (from `chatgpt_account_id` JWT claim).
+    pub account_id: Option<String>,
+    /// FedRAMP account flag (from `chatgpt_account_is_fedramp` JWT claim).
+    pub fedramp: bool,
+}
+
+/// Non-secret session metadata persisted alongside the OpenAI OAuth tokens.
+/// Serialized to JSON and stored in the `openai-oauth-meta` entry.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct OpenAiOAuthSessionMeta {
+    expires_at: SystemTime,
+    scopes: Vec<String>,
+    account_id: Option<String>,
+    fedramp: bool,
 }
 
 /// Failure modes for [`CredentialManager`] operations.
@@ -338,6 +375,156 @@ impl CredentialManager {
             .await?;
         Ok(())
     }
+
+    // ── OpenAI / ChatGPT OAuth ─────────────────────────────────────────────
+
+    /// Persist a full OpenAI OAuth credential set.
+    ///
+    /// Writes three secure-storage entries under `service = "lingxi"`:
+    /// - `openai-oauth-access`  — the access token (`OpenAiOAuthAccessToken`)
+    /// - `openai-oauth-refresh` — the refresh token (`OpenAiOAuthRefreshToken`),
+    ///   deleted if `refresh` is `None`
+    /// - `openai-oauth-meta`    — JSON session metadata (account_id / fedramp /
+    ///   expiry / scopes)
+    ///
+    /// Each `store` overwrites any existing entry, so this is also the rotation
+    /// path used by the reactive / proactive refresh driver.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn store_openai_oauth_tokens(
+        &self,
+        access: &str,
+        refresh: Option<&str>,
+        expires_at: SystemTime,
+        scopes: Vec<String>,
+        account_id: Option<&str>,
+        fedramp: bool,
+    ) -> Result<(), CredentialError> {
+        let now = self.clock.now();
+
+        let access_meta = SecureStorageMetadata {
+            created_at: now,
+            last_accessed: None,
+            kind: SecretKind::OpenAiOAuthAccessToken.as_dto(),
+        };
+        self.storage
+            .store(
+                OAUTH_SERVICE,
+                OPENAI_OAUTH_ACCESS_ACCOUNT,
+                SecureStorageData::new(access.as_bytes().to_vec(), access_meta),
+            )
+            .await?;
+
+        match refresh {
+            Some(refresh) => {
+                let refresh_meta = SecureStorageMetadata {
+                    created_at: now,
+                    last_accessed: None,
+                    kind: SecretKind::OpenAiOAuthRefreshToken.as_dto(),
+                };
+                self.storage
+                    .store(
+                        OAUTH_SERVICE,
+                        OPENAI_OAUTH_REFRESH_ACCOUNT,
+                        SecureStorageData::new(refresh.as_bytes().to_vec(), refresh_meta),
+                    )
+                    .await?;
+            }
+            None => {
+                // No refresh token this rotation — clear any stale entry.
+                self.storage
+                    .delete(OAUTH_SERVICE, OPENAI_OAUTH_REFRESH_ACCOUNT)
+                    .await?;
+            }
+        }
+
+        let meta = OpenAiOAuthSessionMeta {
+            expires_at,
+            scopes,
+            account_id: account_id.map(str::to_string),
+            fedramp,
+        };
+        // Serialization of this fixed-shape struct cannot fail; fall back to an
+        // empty object rather than panicking.
+        let meta_json = serde_json::to_vec(&meta).unwrap_or_else(|_| b"{}".to_vec());
+        let meta_meta = SecureStorageMetadata {
+            created_at: now,
+            last_accessed: None,
+            kind: SecretKind::OpenAiOAuthSessionMeta.as_dto(),
+        };
+        self.storage
+            .store(
+                OAUTH_SERVICE,
+                OPENAI_OAUTH_META_ACCOUNT,
+                SecureStorageData::new(meta_json, meta_meta),
+            )
+            .await?;
+        Ok(())
+    }
+
+    /// Load the persisted OpenAI OAuth credential set.
+    ///
+    /// Returns `Ok(None)` if no access token or no session metadata is present
+    /// (a partially-written state is treated as "not logged in").
+    pub async fn get_openai_oauth_tokens(
+        &self,
+    ) -> Result<Option<OpenAiOAuthTokens>, CredentialError> {
+        let Some(access_raw) = self
+            .storage
+            .retrieve(OAUTH_SERVICE, OPENAI_OAUTH_ACCESS_ACCOUNT)
+            .await?
+        else {
+            return Ok(None);
+        };
+        let Some(meta_raw) = self
+            .storage
+            .retrieve(OAUTH_SERVICE, OPENAI_OAUTH_META_ACCOUNT)
+            .await?
+        else {
+            return Ok(None);
+        };
+
+        let access = String::from_utf8(access_raw.expose_secret_bytes().to_vec())
+            .map_err(|_| CredentialError::Unavailable)?;
+        let meta: OpenAiOAuthSessionMeta =
+            serde_json::from_slice(meta_raw.expose_secret_bytes())
+                .map_err(|_| CredentialError::Unavailable)?;
+
+        let refresh = match self
+            .storage
+            .retrieve(OAUTH_SERVICE, OPENAI_OAUTH_REFRESH_ACCOUNT)
+            .await?
+        {
+            Some(raw) => Some(Secret::new(
+                String::from_utf8(raw.expose_secret_bytes().to_vec())
+                    .map_err(|_| CredentialError::Unavailable)?,
+            )),
+            None => None,
+        };
+
+        Ok(Some(OpenAiOAuthTokens {
+            access_token: Secret::new(access),
+            refresh_token: refresh,
+            expires_at: meta.expires_at,
+            scopes: meta.scopes,
+            account_id: meta.account_id,
+            fedramp: meta.fedramp,
+        }))
+    }
+
+    /// Delete every persisted OpenAI OAuth entry. Idempotent — deleting a
+    /// missing entry is not an error.
+    pub async fn delete_openai_oauth_tokens(&self) -> Result<(), CredentialError> {
+        self.storage
+            .delete(OAUTH_SERVICE, OPENAI_OAUTH_ACCESS_ACCOUNT)
+            .await?;
+        self.storage
+            .delete(OAUTH_SERVICE, OPENAI_OAUTH_REFRESH_ACCOUNT)
+            .await?;
+        self.storage
+            .delete(OAUTH_SERVICE, OPENAI_OAUTH_META_ACCOUNT)
+            .await?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -558,5 +745,131 @@ mod oauth_tests {
         }
         .as_dto();
         assert_eq!(raw.metadata.kind, expected_kind);
+    }
+
+    // ── OpenAI OAuth storage tests ───────────────────────────────────────────
+
+    #[tokio::test]
+    async fn openai_oauth_tokens_round_trip() {
+        let (_storage, cm) = manager();
+        let expires = SystemTime::UNIX_EPOCH + Duration::from_secs(5_000);
+        cm.store_openai_oauth_tokens(
+            "acc",
+            Some("ref"),
+            expires,
+            vec!["openid".to_string()],
+            Some("acc_1"),
+            false,
+        )
+        .await
+        .expect("store");
+        let got = cm
+            .get_openai_oauth_tokens()
+            .await
+            .expect("get")
+            .expect("present");
+        assert_eq!(got.access_token.expose_secret(), "acc");
+        assert_eq!(
+            got.refresh_token
+                .as_ref()
+                .map(|s| s.expose_secret().clone()),
+            Some("ref".to_string())
+        );
+        assert_eq!(got.expires_at, expires);
+        assert_eq!(got.scopes, vec!["openid"]);
+        assert_eq!(got.account_id.as_deref(), Some("acc_1"));
+        assert!(!got.fedramp);
+    }
+
+    #[tokio::test]
+    async fn openai_oauth_tokens_round_trip_fedramp() {
+        let (_storage, cm) = manager();
+        let expires = SystemTime::UNIX_EPOCH + Duration::from_secs(5_000);
+        cm.store_openai_oauth_tokens("acc2", None, expires, vec![], None, true)
+            .await
+            .expect("store");
+        let got = cm
+            .get_openai_oauth_tokens()
+            .await
+            .expect("get")
+            .expect("present");
+        assert_eq!(got.access_token.expose_secret(), "acc2");
+        assert!(got.refresh_token.is_none());
+        assert!(got.account_id.is_none());
+        assert!(got.fedramp);
+    }
+
+    #[tokio::test]
+    async fn openai_oauth_tokens_delete() {
+        let (_storage, cm) = manager();
+        let expires = SystemTime::UNIX_EPOCH + Duration::from_secs(5_000);
+        cm.store_openai_oauth_tokens("a", Some("r"), expires, vec![], Some("x"), false)
+            .await
+            .expect("store");
+        cm.delete_openai_oauth_tokens().await.expect("delete");
+        assert!(cm
+            .get_openai_oauth_tokens()
+            .await
+            .expect("get")
+            .is_none());
+        // Second delete on an empty store is not an error.
+        cm.delete_openai_oauth_tokens()
+            .await
+            .expect("idempotent delete");
+    }
+
+    #[tokio::test]
+    async fn openai_oauth_get_returns_none_when_absent() {
+        let (_storage, cm) = manager();
+        assert!(cm.get_openai_oauth_tokens().await.expect("get").is_none());
+    }
+
+    #[tokio::test]
+    async fn openai_oauth_store_without_refresh_clears_stale_refresh() {
+        let (_storage, cm) = manager();
+        let expires = SystemTime::UNIX_EPOCH + Duration::from_secs(5_000);
+        // First write a refresh token.
+        cm.store_openai_oauth_tokens("a1", Some("r1"), expires, vec![], Some("id1"), false)
+            .await
+            .expect("store with refresh");
+        // Rotate to a token set with no refresh token.
+        cm.store_openai_oauth_tokens("a2", None, expires, vec![], Some("id1"), false)
+            .await
+            .expect("store without refresh");
+        let got = cm
+            .get_openai_oauth_tokens()
+            .await
+            .expect("get")
+            .expect("present");
+        assert_eq!(got.access_token.expose_secret(), "a2");
+        assert!(got.refresh_token.is_none(), "stale refresh must be cleared");
+    }
+
+    #[tokio::test]
+    async fn anthropic_and_openai_oauth_are_isolated() {
+        // Storing OpenAI tokens must not affect Anthropic slots and vice-versa.
+        let (_storage, cm) = manager();
+        let expires = SystemTime::UNIX_EPOCH + Duration::from_secs(5_000);
+        cm.store_oauth_tokens("ant-acc", Some("ant-ref"), expires, vec![], "e@x", "o")
+            .await
+            .expect("store anthropic");
+        cm.store_openai_oauth_tokens("oai-acc", Some("oai-ref"), expires, vec![], None, false)
+            .await
+            .expect("store openai");
+
+        let ant = cm.get_oauth_tokens().await.expect("get ant").expect("present");
+        assert_eq!(ant.access_token.expose_secret(), "ant-acc");
+
+        let oai = cm
+            .get_openai_oauth_tokens()
+            .await
+            .expect("get oai")
+            .expect("present");
+        assert_eq!(oai.access_token.expose_secret(), "oai-acc");
+
+        // Delete OpenAI — Anthropic survives.
+        cm.delete_openai_oauth_tokens().await.expect("delete openai");
+        assert!(cm.get_openai_oauth_tokens().await.expect("get").is_none());
+        assert!(cm.get_oauth_tokens().await.expect("get").is_some());
     }
 }

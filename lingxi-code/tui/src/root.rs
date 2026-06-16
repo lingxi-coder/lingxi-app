@@ -485,7 +485,7 @@ fn handle_screen_key(st: &mut AppState, k: &KeyEvent) {
                     // the async switch (pump_switch_model performs the write +
                     // refreshes the status line) and close.
                     crate::recent_models::record_recent_model(&provider_id, &request_model);
-                    st.pending_switch_model = Some(request_model);
+                    st.pending_switch_model = Some((request_model, Some(provider_id)));
                     st.close_screen();
                 }
                 ModelOutcome::Connect { provider_id } => {
@@ -1219,15 +1219,15 @@ pub async fn pump_switch_model(
     state: &Arc<Mutex<AppState>>,
     handle: &Arc<dyn traits::OrchestratorHandle>,
 ) -> bool {
-    let model = {
+    let (model, profile) = {
         let mut st = state.lock().await;
         match st.pending_switch_model.take() {
-            Some(m) => m,
+            Some(pair) => pair,
             None => return false,
         }
     };
 
-    let result = handle.switch_model(&model, None).await;
+    let result = handle.switch_model(&model, profile.as_deref()).await;
 
     let mut st = state.lock().await;
     match result {

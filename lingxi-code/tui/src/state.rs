@@ -768,12 +768,15 @@ pub struct AppState {
     /// [`StatusSnapshot::model`] and opens via [`Self::open_model`]. Mirrors
     /// `pending_open_mcp` (handle-backed).
     pub pending_open_model: bool,
-    /// Set by the model picker's Enter (a committed selection): the model id to
-    /// switch to. The SYNC key path can't `.await` `OrchestratorHandle::switch_model`,
-    /// so the picker raises this and `root::pump_switch_model` performs the async
-    /// write OUTSIDE the lock, then updates [`StatusSnapshot::model`] (success) or
-    /// pushes an error `SystemText` (failure). `None` = no pending switch.
-    pub pending_switch_model: Option<String>,
+    /// Set by the model picker's Enter (a committed selection): the `(request_model,
+    /// provider_id_as_profile)` pair to switch to. The SYNC key path can't `.await`
+    /// `OrchestratorHandle::switch_model`, so the picker raises this and
+    /// `root::pump_switch_model` performs the async write OUTSIDE the lock, then
+    /// updates [`StatusSnapshot::model`] (success) or pushes an error `SystemText`
+    /// (failure). `None` = no pending switch. The second tuple element is
+    /// `Some(provider_id)` when the picker knows which provider owns the model (the
+    /// normal path), `None` only when there is genuinely no provider context.
+    pub pending_switch_model: Option<(String, Option<String>)>,
     /// (Plan 3c §8) Per-provider availability map, threaded engine→TUI from
     /// `DesktopRuntime.provider_availability` at mount (via
     /// [`Self::set_provider_availability`]). `true` = the provider has a usable

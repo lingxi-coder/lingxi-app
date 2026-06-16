@@ -43,8 +43,8 @@ pub use writer::JsonlWriter;
 
 // New M5-08 public surface.
 pub use loader::{
-    build_conversation_chain, list_recent_sessions, load_session, select_session_interactive,
-    LoaderError, SessionMetadata,
+    build_conversation_chain, find_tip, list_recent_sessions, load_session,
+    select_session_interactive, LoaderError, SessionMetadata,
 };
 pub use title::extract_title;
 

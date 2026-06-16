@@ -28,7 +28,7 @@ use crate::jsonl::path::{project_dir_name, session_path};
 use crate::jsonl::reader::{JsonlReader, LoadedTranscript};
 use crate::jsonl::schema::JsonlMessage;
 use serde_json::Value;
-use crate::jsonl::title::extract_title;
+use crate::jsonl::title::{extract_title, truncate_title};
 use std::collections::HashSet;
 use std::cmp::Ordering;
 use std::collections::HashMap;
@@ -46,7 +46,10 @@ use uuid::Uuid;
 pub struct SessionMetadata {
     /// The session UUID parsed from the filename stem.
     pub uuid: Uuid,
-    /// The session title (extracted via [`crate::jsonl::title::extract_title`]; ≤ 50 chars + ellipsis).
+    /// The session title shown in the resume picker. Resolved with claude-code's
+    /// precedence (custom-title > ai-title > summary > first-user-message; see
+    /// [`collect_dir`]) and normalized to [`crate::jsonl::title::TITLE_MAX_CHARS`]
+    /// chars + ellipsis; the display surfaces re-truncate by terminal width.
     pub title: String,
     /// File mtime (UTC `SystemTime`).
     pub modified: SystemTime,
@@ -226,9 +229,13 @@ fn deduplicate_by_session_id(rows: Vec<SessionMetadata>) -> Vec<SessionMetadata>
 
 /// Scan a single project dir, appending one [`SessionMetadata`] row per resumable
 /// `.jsonl` file to `rows`. Applies the SESSION.1 sidechain/`teamName` hide
-/// filter (first parsed line only). Returns `Ok(false)` when the dir does not
-/// exist (`NotFound`) and `Ok(true)` when it was read; I/O errors carry the
-/// offending path as `arg`, exactly as the original single-dir scan did.
+/// filter (first parsed line only). Each row's `title` follows claude-code's
+/// display precedence — `custom-title` > `ai-title` > `summary` (keyed by the
+/// chain tip's `leafUuid`) > first-user-message — composed from
+/// `readLiteMetadata`'s custom-over-ai rule (`sessionStorage.ts:4771-4775`) and
+/// `getLogDisplayTitle` (`utils/log.ts:30`). Returns `Ok(false)` when the dir
+/// does not exist (`NotFound`) and `Ok(true)` when it was read; I/O errors carry
+/// the offending path as `arg`, exactly as the original single-dir scan did.
 async fn collect_dir(
     dir: &Path,
     fs: &Arc<dyn FileSystem>,
@@ -281,8 +288,14 @@ async fn collect_dir(
             continue;
         };
 
+        // Route the file TOLERANTLY ([`read_routed`]) rather than `read_all`:
+        // besides the chain participants (`messages_in_order`, identical to what
+        // `read_all` returned) it yields the Tier-1 metadata side-maps the picker
+        // needs to surface a session's stored title — `summaries` (keyed by
+        // leafUuid), `custom_titles` + `ai_titles` (keyed by sessionId). See
+        // `LoadedTranscript`.
         let reader = JsonlReader::new(path.clone(), fs.clone());
-        let messages = reader.read_all().await.map_err(|e| LoaderError::Io {
+        let loaded = reader.read_routed().await.map_err(|e| LoaderError::Io {
             arg: path.display().to_string(),
             source: std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()),
         })?;
@@ -294,12 +307,13 @@ async fn collect_dir(
         //   - `enrichLog` returns null when the first entry `isSidechain` OR
         //     carries a truthy `teamName` (sessionStorage.ts:5055-5067);
         //   - `filterResumableSessions` drops `l.isSidechain` (resume picker).
-        // Mirror that: inspect only `messages.first()` (the first parsed line —
-        // we do NOT scan the whole file for the decision) and skip the session
-        // when it is a sidechain message or carries a truthy `teamName`. `teamName`
-        // is an outer field captured in `JsonlMessage::extra`; the truthiness test
-        // matches TS `if (enriched.teamName)` (an empty-string teamName is falsy).
-        if let Some(first) = messages.first() {
+        // Mirror that: inspect only the first chain-participant line (the first
+        // parsed transcript line — we do NOT scan the whole file for the decision)
+        // and skip the session when it is a sidechain message or carries a truthy
+        // `teamName`. `teamName` is an outer field captured in
+        // `JsonlMessage::extra`; the truthiness test matches TS
+        // `if (enriched.teamName)` (an empty-string teamName is falsy).
+        if let Some(first) = loaded.messages_in_order.first() {
             let has_team_name = first.extra.get("teamName").is_some_and(|v| match v {
                 serde_json::Value::Null => false,
                 serde_json::Value::String(s) => !s.is_empty(),
@@ -310,13 +324,42 @@ async fn collect_dir(
             }
         }
 
-        let title = extract_title(&messages);
+        // Title precedence — 1:1 with claude-code's resolution, which composes
+        // `readLiteMetadata` (custom-title field wins over ai-title field;
+        // `sessionStorage.ts:4771-4775`) with `getLogDisplayTitle`
+        // (`customTitle || summary || firstPrompt`; `utils/log.ts:30`). Folded:
+        //   custom-title > ai-title > summary(@ tip leafUuid) > first-user-message.
+        // Custom (user rename) ALWAYS wins over an AI title — `logs.ts:69`
+        // "User renames (custom-title) always win over AI titles in read
+        // preference". `custom_titles`/`ai_titles` are keyed by sessionId; for a
+        // resume-picker row that key is the filename stem (`sid`) — equal to the
+        // chain tip's sessionId for the normal, non-forked sessions the picker
+        // lists. The `summary` is keyed by the chain TIP's uuid (its `leafUuid`),
+        // matching TS `summaries.get(leafMessage.uuid)` (`sessionStorage.ts:3009`).
+        // The first-three sources are stored verbatim (only normalized via
+        // `truncate_title`); the first-message fallback runs the full
+        // `extract_title` transforms. `extract_title`'s `'(session)'` empty
+        // fallback still applies when none of the four yields text.
+        let sid = stem;
+        let title = loaded
+            .custom_titles
+            .get(sid)
+            .or_else(|| loaded.ai_titles.get(sid))
+            .or_else(|| find_tip(&loaded, sid).and_then(|tip| loaded.summaries.get(&tip.uuid)))
+            .map_or_else(
+                || extract_title(&loaded.messages_in_order),
+                |t| truncate_title(t),
+            );
+
         rows.push(SessionMetadata {
             uuid,
             title,
             modified,
             created,
-            message_count: messages.len(),
+            // `read_routed().messages_in_order` is exactly what `read_all`
+            // returned (chain-participant lines, file order), so this preserves
+            // the prior `message_count` semantics byte-for-byte.
+            message_count: loaded.messages_in_order.len(),
             path,
         });
     }
@@ -330,9 +373,12 @@ async fn collect_dir(
 /// - [`LoaderError::EmptyDirectory`] if the project dir doesn't exist OR contains no `.jsonl`.
 /// - [`LoaderError::Io`] on any other I/O failure.
 ///
-/// Each row's `title` is read via [`crate::jsonl::title::extract_title`] from the **full**
-/// JSONL content (we open + parse every candidate, then sort + truncate). This is O(N * lines)
-/// for N sessions; for the typical N ≤ 5 case (the picker limit) the cost is trivial.
+/// Each row's `title` is resolved by [`collect_dir`] with claude-code's display
+/// precedence — `custom-title` > `ai-title` > `summary` (at the chain tip's
+/// `leafUuid`) > first-user-message ([`crate::jsonl::title::extract_title`]) —
+/// from the **full** routed JSONL content (we open + parse every candidate, then
+/// sort + truncate). This is O(N * lines) for N sessions; for the typical N ≤ 5
+/// case (the picker limit) the cost is trivial.
 ///
 /// Sub-agent / sidechain transcripts are HIDDEN (SESSION.1): a session is dropped
 /// when its first parsed line is an `isSidechain` message or carries a truthy
@@ -642,11 +688,19 @@ fn timestamp_millis(ts: &str) -> i64 {
         .unwrap_or(i64::MIN)
 }
 
-/// Tolerant, branch-aware reconstruction of a transcript's MAIN conversation
-/// thread — the structural equivalent of `claude-code`'s leaf computation
+/// Select a transcript's chain TIP — the newest non-sidechain `user`/`assistant`
+/// leaf — by the structural equivalent of `claude-code`'s leaf computation
 /// (`sessionStorage.ts:3716`, original/non-pebble branch) + newest-non-sidechain
-/// leaf selection + `buildConversationChain` (`sessionStorage.ts:2069`), as
-/// composed by `loadMessagesFromJsonlPath` (`conversationRecovery.ts:416`).
+/// leaf selection, as composed by `loadMessagesFromJsonlPath`
+/// (`conversationRecovery.ts:416`).
+///
+/// This is steps (1)–(4) of [`build_conversation_chain`], factored out so the
+/// resume picker can resolve a session's stored `summary` (keyed by the tip's
+/// `leafUuid`, `sessionStorage.ts:3009`) WITHOUT re-walking the whole chain. The
+/// returned `tip.uuid` is the `leafUuid` to look up in
+/// [`LoadedTranscript::summaries`]; the tip also supplies the session id (forked
+/// sessions copy `chain[0]` from the source transcript, so the tip — not the
+/// file's first row — is authoritative).
 ///
 /// Algorithm:
 ///  1. `parent_uuids` = every `parentUuid` present among the chain participants.
@@ -655,33 +709,16 @@ fn timestamp_millis(ts: &str) -> i64 {
 ///  3. For each terminal, walk parents (cycle-guarded) to the nearest
 ///     `user`/`assistant` ancestor → that ancestor's uuid joins `leaf_uuids`.
 ///  4. `tip` = the `leaf_uuids` member that is a NON-sidechain `user`/`assistant`
-///     message with the MAX timestamp. (Forked sessions copy `chain[0]` from the
-///     source transcript, so the tip — not the file's first row — supplies the
-///     session id.)
-///  5. Walk `tip → root` via `parentUuid` + `by_uuid.get`, STOP on a missing
-///     parent (partial chain, no error), BREAK on a cycle (no loop), then
-///     reverse to root → tip order.
+///     message with the MAX timestamp (`>`, not `>=`, so the FIRST-seen leaf wins
+///     an exact-timestamp tie — TS `if (ts > tipTs)`).
 ///
-/// Returns `(main_thread, tip_session_id)`. When no non-sidechain
-/// user/assistant leaf exists the chain is empty and the session id is the
-/// requested `arg` (the caller maps the empty chain to "nothing to resume").
-///
-///  6. Run [`recover_orphaned_parallel_tool_results`]
-///     (`recoverOrphanedParallelToolResults`, `sessionStorage.ts:2096`): the
-///     single-parent walk keeps one branch, so PARALLEL tool calls (N
-///     `tool_use`s → N one-block assistant siblings sharing `message.id`) leave
-///     off-chain siblings + their `tool_result`s orphaned. The post-pass splices
-///     each group's genuine orphans back in right after their on-chain anchor,
-///     never reordering the main chain. A transcript with no parallel tool calls
-///     is returned unchanged.
+/// Returns `None` when there is no non-sidechain user/assistant leaf (an empty
+/// graph, or a file whose only messages are sidechains).
 #[must_use]
-pub fn build_conversation_chain(
-    loaded: &LoadedTranscript,
-    arg: &str,
-) -> (Vec<JsonlMessage>, String) {
+pub fn find_tip<'a>(loaded: &'a LoadedTranscript, arg: &str) -> Option<&'a JsonlMessage> {
     let by_uuid = &loaded.by_uuid;
     if by_uuid.is_empty() {
-        return (Vec::new(), arg.to_string());
+        return None;
     }
 
     // (1) Every parentUuid that is actually referenced.
@@ -739,8 +776,47 @@ pub fn build_conversation_chain(
             tip = Some(m);
         }
     }
+    tip
+}
 
-    let Some(tip) = tip else {
+/// Tolerant, branch-aware reconstruction of a transcript's MAIN conversation
+/// thread — the structural equivalent of `claude-code`'s leaf computation
+/// (`sessionStorage.ts:3716`, original/non-pebble branch) + newest-non-sidechain
+/// leaf selection + `buildConversationChain` (`sessionStorage.ts:2069`), as
+/// composed by `loadMessagesFromJsonlPath` (`conversationRecovery.ts:416`).
+///
+/// Algorithm:
+///  1.–4. Pick the chain TIP via [`find_tip`] (newest non-sidechain
+///     `user`/`assistant` leaf). The tip — not the file's first row — supplies
+///     the returned session id (forked sessions copy `chain[0]` from the source).
+///  5. Walk `tip → root` via `parentUuid` + `by_uuid.get`, STOP on a missing
+///     parent (partial chain, no error), BREAK on a cycle (no loop), then
+///     reverse to root → tip order.
+///
+/// Returns `(main_thread, tip_session_id)`. When no non-sidechain
+/// user/assistant leaf exists the chain is empty and the session id is the
+/// requested `arg` (the caller maps the empty chain to "nothing to resume").
+///
+///  6. Run [`recover_orphaned_parallel_tool_results`]
+///     (`recoverOrphanedParallelToolResults`, `sessionStorage.ts:2096`): the
+///     single-parent walk keeps one branch, so PARALLEL tool calls (N
+///     `tool_use`s → N one-block assistant siblings sharing `message.id`) leave
+///     off-chain siblings + their `tool_result`s orphaned. The post-pass splices
+///     each group's genuine orphans back in right after their on-chain anchor,
+///     never reordering the main chain. A transcript with no parallel tool calls
+///     is returned unchanged.
+#[must_use]
+pub fn build_conversation_chain(
+    loaded: &LoadedTranscript,
+    arg: &str,
+) -> (Vec<JsonlMessage>, String) {
+    let by_uuid = &loaded.by_uuid;
+    if by_uuid.is_empty() {
+        return (Vec::new(), arg.to_string());
+    }
+
+    // Steps (1)–(4): newest non-sidechain user/assistant leaf (the chain tip).
+    let Some(tip) = find_tip(loaded, arg) else {
         // No resumable leaf — caller surfaces "nothing to resume".
         return (Vec::new(), arg.to_string());
     };

@@ -224,9 +224,12 @@ pub async fn run_device_code_login(
 
         match poll_for_token(&cfg, http.clone(), &uc.device_auth_id, &uc.user_code).await? {
             PollOutcome::Ready { authorization_code, code_verifier } => {
-                // Redirect URI for device-code is the backend's deviceauth/callback.
+                // Device-code redirect URI is `{issuer}/deviceauth/callback` —
+                // note NO `/api/accounts/` prefix (that prefix is only on the
+                // usercode/token endpoints). Byte-aligned with codex
+                // `login/src/device_code_auth.rs:194`.
                 let redirect_uri = format!(
-                    "{}/api/accounts/deviceauth/callback",
+                    "{}/deviceauth/callback",
                     cfg.issuer.trim_end_matches('/')
                 );
                 let client = OpenAiOAuthClient::new(cfg, http.clone());

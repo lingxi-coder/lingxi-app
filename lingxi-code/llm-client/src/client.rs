@@ -4,10 +4,10 @@ use std::time::Duration;
 
 use crate::{
     validate_capabilities, ApiKeyAuthenticator, AuthStrategy, Authenticator, BearerAuthenticator,
-    ClientConfig, CopilotAuthenticator, Credential, CredentialConfig, CredentialProvider, CredentialScope,
-    EnvCredentialProvider, FrameStream, LlmError, LlmEvent, LlmRequest, LlmResponse,
-    ModelListing, ModelRegistry, ProtocolFamily, ProviderId, ProviderRequest, ProviderResponse,
-    Route, StreamDecoder, StreamingResponse, Transport, WireCodec,
+    ChatGptAuthenticator, ClientConfig, CopilotAuthenticator, Credential, CredentialConfig,
+    CredentialProvider, CredentialScope, EnvCredentialProvider, FrameStream, LlmError, LlmEvent,
+    LlmRequest, LlmResponse, ModelListing, ModelRegistry, ProtocolFamily, ProviderId,
+    ProviderRequest, ProviderResponse, Route, StreamDecoder, StreamingResponse, Transport, WireCodec,
 };
 use crate::sigv4;
 
@@ -485,6 +485,22 @@ impl DefaultLlmClient {
                 };
                 let authenticator = ApiKeyAuthenticator::with_header_name("api-key", secret);
                 return authenticator.apply(request);
+            }
+
+            // ── ChatGPT OAuth ────────────────────────────────────────────────
+            // Credential::ChatGptOAuth carries the bearer access token plus the
+            // ChatGPT-Account-ID header (and FedRAMP flag). Must be loaded via
+            // load_credential() — load_secret() rejects it.
+            AuthStrategy::ChatGptOAuth => {
+                let Some(secret) = self.load_credential(entry, profile_name).await? else {
+                    return Ok(request);
+                };
+                let Credential::ChatGptOAuth { access_token, account_id, fedramp } = secret
+                else {
+                    return Err(LlmError::Authentication);
+                };
+                let authenticator = ChatGptAuthenticator::new(access_token, account_id, fedramp);
+                request = authenticator.apply(request)?;
             }
 
             // ── Standard key / bearer auth ───────────────────────────────────

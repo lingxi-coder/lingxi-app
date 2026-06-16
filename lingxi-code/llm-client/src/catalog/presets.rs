@@ -38,6 +38,7 @@ struct Preset {
 const OPENROUTER: &str = include_str!("../../data/models-dev/openrouter.json");
 const DEEPSEEK: &str = include_str!("../../data/models-dev/deepseek.json");
 const GLM_CODING: &str = include_str!("../../data/models-dev/zhipuai-coding-plan.json");
+const ZAI: &str = include_str!("../../data/models-dev/zai.json");
 const GITHUB_COPILOT: &str = include_str!("../../data/models-dev/github-copilot.json");
 
 fn presets() -> Vec<Preset> {
@@ -70,6 +71,19 @@ fn presets() -> Vec<Preset> {
             provider_id: ProviderId::Custom { name: "glm-coding".to_string() },
             credential_env: "ZHIPU_API_KEY",
             slice_json: GLM_CODING,
+        },
+        // Z.AI: international GLM API (the global counterpart to the China-only
+        // open.bigmodel.cn). OpenAI-compatible wire, pay-per-token. A distinct
+        // env var (not ZHIPU_API_KEY, which glm-coding claims) keeps the z.ai
+        // and bigmodel keys from cross-wiring — they are separate accounts.
+        Preset {
+            profile_name: "zai",
+            base_url: "https://api.z.ai/api/paas/v4",
+            protocol: ProtocolFamily::OpenAiChat,
+            auth: AuthStrategy::ApiKey,
+            provider_id: ProviderId::OpenAICompatible { name: "zai".to_string() },
+            credential_env: "ZAI_API_KEY",
+            slice_json: ZAI,
         },
         // GitHub Copilot: OpenAI-compatible wire; GitHub OAuth token used
         // directly as the bearer via AuthStrategy::CopilotBearer (no exchange).
@@ -132,7 +146,7 @@ mod tests {
     #[test]
     fn every_preset_yields_expected_model_counts() {
         let catalog = builtin_presets();
-        assert_eq!(catalog.providers.len(), 4);
+        assert_eq!(catalog.providers.len(), 5);
         let count = |name: &str| {
             catalog
                 .providers
@@ -144,6 +158,7 @@ mod tests {
         assert_eq!(count("openrouter"), 337);
         assert_eq!(count("deepseek"), 4);
         assert_eq!(count("glm-coding"), 6);
+        assert_eq!(count("zai"), 13);
         assert_eq!(count("github-copilot"), 23);
     }
 }

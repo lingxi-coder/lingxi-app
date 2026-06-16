@@ -1535,6 +1535,7 @@ fn provider_label(profile_name: &str) -> &str {
         "openrouter" => "OpenRouter",
         "deepseek" => "DeepSeek",
         "glm-coding" => "GLM (coding)",
+        "zai" => "Z.AI",
         "github-copilot" => "GitHub Copilot",
         other => other,
     }
@@ -2013,7 +2014,7 @@ mod tests {
         let adapter = make_adapter(transport);
         let listings = OrchestratorApiClient::list_model_listings(&adapter);
         // The static llm-client catalog (openrouter + deepseek + glm-coding +
-        // github-copilot) yields well over 100 model rows.
+        // zai + github-copilot) yields well over 100 model rows.
         assert!(
             listings.len() >= 100,
             "expected >=100 catalog listings, got {}",

@@ -83,7 +83,7 @@ impl BuiltinCommandHandler for ConnectHandler {
         if provider.is_empty() {
             return CommandResult::Done {
                 display: Some(
-                    "Usage: /connect <provider>  (e.g. openrouter, deepseek, glm-coding, github-copilot)".to_string(),
+                    "Usage: /connect <provider>  (e.g. openrouter, deepseek, glm-coding, zai, github-copilot)".to_string(),
                 ),
             };
         }

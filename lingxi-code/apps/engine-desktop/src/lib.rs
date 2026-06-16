@@ -1072,6 +1072,7 @@ fn provider_profile_label(profile_name: &str) -> String {
         "openrouter" => "OpenRouter".to_string(),
         "deepseek" => "DeepSeek".to_string(),
         "glm-coding" => "GLM (coding)".to_string(),
+        "zai" => "Z.AI".to_string(),
         "github-copilot" => "GitHub Copilot".to_string(),
         other => other
             .split(['-', '_', ' '])

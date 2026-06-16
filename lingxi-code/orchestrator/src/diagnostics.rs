@@ -187,7 +187,9 @@ fn check_telemetry_schema() -> DoctorCheck {
     //        session_file_read/file_read_limits_override) → 339.
     // Config migrations: +9 (migration::NAMES, runMigrations port) → 348.
     // Permission flow: +1 (permission::NAMES, bypass dialog accept) → 349.
-    let expected = 349;
+    // Coordinator swarm: +3 (coordinator::NAMES — team_created/team_deleted/
+    //        coordinator_mode_switched) → 352.
+    let expected = 352;
     DoctorCheck {
         name: "telemetry-schema".to_string(),
         status: if actual == expected {
@@ -210,7 +212,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn check_telemetry_schema_passes_at_349() {
+    fn check_telemetry_schema_passes_at_expected_count() {
         let c = check_telemetry_schema();
         assert_eq!(c.name, "telemetry-schema");
         assert!(matches!(c.status, CheckStatus::Pass));

@@ -18,6 +18,9 @@ use permission::result::PermissionMetadata;
 use permission::{PermissionDecisionReason, PermissionResult};
 use serde_json::{json, Value};
 
+use telemetry::sink::{AnalyticsValue, LogEventMetadata};
+use telemetry::tengu::coordinator::TEAM_CREATED;
+use telemetry::AnalyticsBus;
 use tool_api::context::ToolUseContext;
 use tool_api::progress::ToolProgressSender;
 use tool_api::tool_trait::{
@@ -28,7 +31,12 @@ use traits::team_spawn::TeamSpawnSeam;
 use traits::OutputStream;
 
 use crate::mode::CoordinatorMode;
+use crate::team_file::{self, TeamFile, TeamMember};
 use crate::team_registry::{TeamRegistry, WorkerStatus};
+
+/// The lead member's name (TS `TEAM_LEAD_NAME = "team-lead"`,
+/// `utils/swarm/constants.ts:1`).
+const TEAM_LEAD_NAME: &str = "team-lead";
 
 /// Canonical tool name — mirrors the TS `TEAM_CREATE_TOOL_NAME` constant
 /// (`src/tools/TeamCreateTool/constants.ts`).
@@ -87,12 +95,23 @@ pub struct TeamCreateTool {
     /// concurrent task and can fire before the link is written, leaving a
     /// status sink keyed on the not-yet-written `task_id` unable to resolve it).
     output: Arc<dyn OutputStream>,
+    /// Optional analytics bus for `tengu_team_created`. `None` (the default for
+    /// tests) ⇒ the event is logged via `tracing` only. Threaded additively so
+    /// existing call sites that don't carry a bus keep compiling.
+    bus: Option<Arc<AnalyticsBus>>,
+    /// Optional `~/.claude` root override. `None` (production) ⇒ resolve from
+    /// `$HOME` via [`team_file::claude_home`]. Tests inject a tempdir so the
+    /// on-disk team file is written under a scratch path (hermetic, no real
+    /// `~/.claude/teams/` pollution, no cross-test interference).
+    home_override: Option<std::path::PathBuf>,
 }
 
 impl TeamCreateTool {
     /// Construct a `TeamCreate` tool wired to the shared coordinator registry,
     /// the mode gate, the teammate spawn seam, and the orchestrator-facing
     /// output stream used to PUSH the live active-worker count after a spawn.
+    /// No analytics bus is attached (telemetry falls back to `tracing`); use
+    /// [`Self::with_analytics_bus`] to wire one.
     #[must_use]
     pub fn new(
         team: Arc<TeamRegistry>,
@@ -105,8 +124,87 @@ impl TeamCreateTool {
             mode,
             spawn_seam,
             output,
+            bus: None,
+            home_override: None,
         }
     }
+
+    /// Attach an analytics bus so `call()` fires `tengu_team_created`.
+    #[must_use]
+    pub fn with_analytics_bus(mut self, bus: Option<Arc<AnalyticsBus>>) -> Self {
+        self.bus = bus;
+        self
+    }
+
+    /// Override the `~/.claude` root the team file is written under (tests use a
+    /// tempdir for hermeticity). Production leaves this unset → resolves `$HOME`.
+    #[must_use]
+    pub fn with_home(mut self, home: std::path::PathBuf) -> Self {
+        self.home_override = Some(home);
+        self
+    }
+
+    /// Fire `tengu_team_created { team_name, teammate_count: 1, lead_agent_type,
+    /// teammate_mode }` (TeamCreateTool.ts:214-222). Logs through the attached
+    /// bus when present, else falls back to `tracing`. `team_name` /
+    /// `lead_agent_type` are user-derived → routed through the PII-tagged /
+    /// verified columns like the in-tree `tool_team` emitters.
+    async fn emit_team_created(&self, team_name: &str, lead_agent_type: &str) {
+        if let Some(bus) = &self.bus {
+            let mut md: LogEventMetadata = LogEventMetadata::new();
+            md.insert(
+                "_PROTO_team_name".into(),
+                AnalyticsValue::String(
+                    telemetry::pii::PiiTagged::assert_pii_tagged_column(team_name.to_string())
+                        .into_inner(),
+                ),
+            );
+            md.insert("teammate_count".into(), AnalyticsValue::Int(1));
+            md.insert(
+                "lead_agent_type".into(),
+                AnalyticsValue::String(
+                    telemetry::pii::Verified::assert_safe(lead_agent_type.to_string()).into_inner(),
+                ),
+            );
+            // The lingxi coordinator runs InProcessTeammate exclusively
+            // (getResolvedTeammateMode analog → "in-process").
+            md.insert(
+                "teammate_mode".into(),
+                AnalyticsValue::String("in-process".to_string()),
+            );
+            bus.log_event(TEAM_CREATED, md).await;
+        } else {
+            tracing::info!(
+                event = TEAM_CREATED,
+                team_name,
+                teammate_count = 1,
+                lead_agent_type,
+                teammate_mode = "in-process",
+                "team created"
+            );
+        }
+    }
+}
+
+/// `generateUniqueTeamName` (TeamCreateTool.ts:60-72): if no team file exists for
+/// `requested`, use it as-is; otherwise auto-rename (NOT an error) by appending a
+/// short unique suffix until a free name is found. TS generates a fresh word
+/// slug; here a `{requested}-{suffix}` form keeps the user's name recognizable
+/// while guaranteeing uniqueness. Bounded retry loop with a final
+/// timestamp-suffixed fallback so it always terminates.
+fn generate_unique_team_name(home: &std::path::Path, requested: &str) -> String {
+    if !team_file::team_file_exists(home, requested) {
+        return requested.to_string();
+    }
+    for _ in 0..16 {
+        let suffix = &tool_api::util::ids::ulid_or_uuid()[..6];
+        let candidate = format!("{requested}-{suffix}");
+        if !team_file::team_file_exists(home, &candidate) {
+            return candidate;
+        }
+    }
+    // Exceedingly unlikely fallback: a full-id suffix is effectively unique.
+    format!("{requested}-{}", tool_api::util::ids::ulid_or_uuid())
 }
 
 #[async_trait]
@@ -208,6 +306,9 @@ impl Tool for TeamCreateTool {
             .into()
     }
 
+    // The spawn → reconcile → disk-file → telemetry → activation-push sequence is
+    // inherently linear; splitting it would obscure the ordered side effects.
+    #[allow(clippy::too_many_lines)]
     async fn call(
         &self,
         input: Value,
@@ -222,10 +323,21 @@ impl Tool for TeamCreateTool {
             return Err(ToolError::InvalidInput("coordinator mode not active".into()));
         }
 
+        // 1a. One-team-per-leader guard (TeamCreateTool.ts:132-140). If this
+        //     coordinator is already leading a team, refuse — a leader manages
+        //     exactly one team at a time. The registry's `team_name` is the
+        //     lingxi analog of TS `appState.teamContext?.teamName`.
+        if let Some(existing) = self.team.team_name().await {
+            return Err(ToolError::InvalidInput(format!(
+                "Already leading team \"{existing}\". A leader can only manage one team at a time. \
+                 Use TeamDelete to end the current team before creating a new one."
+            )));
+        }
+
         // Parse defensively (do not rely on schema validation alone), matching
         // the builtin pattern. `team_name` is required; `agent_type` optional
         // (TS lead agent type defaults to TEAM_LEAD_NAME = "team-lead").
-        let team_name = input
+        let requested_name = input
             .get("team_name")
             .and_then(Value::as_str)
             .map(str::trim)
@@ -237,7 +349,7 @@ impl Tool for TeamCreateTool {
             .get("agent_type")
             .and_then(Value::as_str)
             .filter(|s| !s.is_empty())
-            .unwrap_or("team-lead")
+            .unwrap_or(TEAM_LEAD_NAME)
             .to_string();
 
         // Optional free-form team description/purpose; threaded into the
@@ -247,6 +359,20 @@ impl Tool for TeamCreateTool {
             .and_then(Value::as_str)
             .unwrap_or("")
             .to_string();
+        // `description` is moved into `spawn_teammate` below; keep a copy for the
+        // on-disk team file's `description` field.
+        let description_for_file = description.clone();
+
+        // 1b. Unique-name-on-collision (TeamCreateTool.ts:60-72,143
+        //     generateUniqueTeamName). If a team file with this name already
+        //     exists on disk, AUTO-RENAME (NOT an error) by appending a short
+        //     unique suffix until a free name is found. When `$HOME` is unset we
+        //     cannot probe disk — fall through with the requested name.
+        let home = self.home_override.clone().or_else(team_file::claude_home);
+        let team_name = match &home {
+            Some(h) => generate_unique_team_name(h, &requested_name),
+            None => requested_name.clone(),
+        };
 
         // 2. Register/spawn the worker metadata. The registry mints the AgentId,
         //    registers a mailbox, and inserts a WorkerAgent (status Idle). The
@@ -254,7 +380,7 @@ impl Tool for TeamCreateTool {
         //    back below from the handler-generated id.
         let agent_id = self
             .team
-            .spawn_worker(agent_type, team_name.clone(), String::new())
+            .spawn_worker(agent_type.clone(), team_name.clone(), String::new())
             .await
             .map_err(|e| ToolError::Internal(format!("TeamCreate: {e}")))?;
 
@@ -273,6 +399,60 @@ impl Tool for TeamCreateTool {
 
         // 5. Record the team name (source of the CoordinatorStatus { team } DTO).
         self.team.set_team_name(Some(team_name.clone())).await;
+
+        // 5b. Write the on-disk team file `~/.claude/teams/{name}/config.json`
+        //     mirroring the TS `TeamFile` shape (TeamCreateTool.ts:157-177 →
+        //     teamHelpers.ts:175-182). Best-effort: a write failure is surfaced
+        //     as a `warning` on the result but does NOT abort the spawn (the
+        //     in-memory registry is the source of truth for live routing). The
+        //     lead member is the freshly-spawned worker; `leadSessionId` is the
+        //     coordinator session id when the host threads one through (we do not
+        //     have it here, so it is omitted — TS stores `getSessionId()`).
+        let agent_id_str = agent_id.as_uuid().to_string();
+        let lead_agent_id = format!("{TEAM_LEAD_NAME}@{team_name}");
+        let mut team_file_warning: Option<String> = None;
+        let team_file_path = if let Some(h) = &home {
+            let now = team_file::now_unix_millis();
+            let cwd = std::env::current_dir()
+                .map(|p| p.display().to_string())
+                .unwrap_or_default();
+            let file = TeamFile {
+                name: team_name.clone(),
+                description: if description_for_file.is_empty() {
+                    None
+                } else {
+                    Some(description_for_file.clone())
+                },
+                created_at: now,
+                lead_agent_id: lead_agent_id.clone(),
+                lead_session_id: None,
+                members: vec![TeamMember {
+                    agent_id: lead_agent_id.clone(),
+                    name: TEAM_LEAD_NAME.to_string(),
+                    agent_type: Some(agent_type.clone()),
+                    model: None,
+                    joined_at: now,
+                    tmux_pane_id: String::new(),
+                    cwd,
+                    subscriptions: vec![],
+                }],
+            };
+            let path = team_file::team_file_path(h, &team_name);
+            if let Err(e) = team_file::write_team_file(h, &team_name, &file) {
+                team_file_warning = Some(format!("failed to write team file: {e}"));
+                None
+            } else {
+                Some(path.display().to_string())
+            }
+        } else {
+            None
+        };
+
+        // 5c. Fire `tengu_team_created` (TeamCreateTool.ts:214-222):
+        //     { team_name, teammate_count: 1, lead_agent_type, teammate_mode }.
+        //     `teammate_mode` is "in-process" — the lingxi coordinator runs
+        //     `InProcessTeammate` exclusively (getResolvedTeammateMode analog).
+        self.emit_team_created(&team_name, &agent_type).await;
 
         // 5a. Mark the freshly-spawned, now-linked worker `Working` and PUSH the
         //     live active-worker count to every client. This is the deterministic
@@ -304,15 +484,21 @@ impl Tool for TeamCreateTool {
 
         // 6. Return the worker agent id (model-facing lead id) and the REAL
         //    handler-generated task_id (replaces the old task_id == agent_id
-        //    placeholder).
-        let agent_id_str = agent_id.as_uuid().to_string();
+        //    placeholder). `agent_id_str` was computed in 5b.
+        let mut data = json!({
+            "team_name": team_name,
+            "lead_agent_id": agent_id_str,
+            "task_id": task_id,
+            "spawned": true,
+        });
+        if let Some(path) = team_file_path {
+            data["team_file_path"] = Value::String(path);
+        }
+        if let Some(warning) = team_file_warning {
+            data["warning"] = Value::String(warning);
+        }
         Ok(ToolCallResult {
-            data: json!({
-                "team_name": team_name,
-                "lead_agent_id": agent_id_str,
-                "task_id": task_id,
-                "spawned": true,
-            }),
+            data,
             new_messages: Vec::new(),
             context_modifier: None,
             mcp_meta: None,
@@ -439,6 +625,11 @@ mod tests {
     /// Build a `TeamCreate` tool with coordinator mode ENABLED (the normal path),
     /// a recording seam returning the given handler `task_id`, and a spy output
     /// the test can inspect for the activation PUSH.
+    ///
+    /// The tool's `~/.claude` root is overridden to a fresh tempdir so the
+    /// on-disk team file is written under a scratch path (hermetic; no real
+    /// `~/.claude/teams/` pollution, no cross-test interference). The returned
+    /// `TempDir` MUST be held alive for the duration of the test.
     fn make_tool_with_seam_and_spy(
         seam: Arc<RecordingSeam>,
     ) -> (
@@ -446,45 +637,54 @@ mod tests {
         Arc<TeamRegistry>,
         Arc<CoordinatorMode>,
         Arc<SpyOutput>,
+        tempfile::TempDir,
     ) {
         let registry = Arc::new(TeamRegistry::new(AgentId::new()));
         let mode = Arc::new(CoordinatorMode::new());
         mode.enter();
         let spy = Arc::new(SpyOutput::default());
+        let tmp = tempfile::tempdir().expect("tempdir");
         let tool = TeamCreateTool::new(
             registry.clone(),
             mode.clone(),
             seam as Arc<dyn TeamSpawnSeam>,
             spy.clone() as Arc<dyn OutputStream>,
-        );
-        (tool, registry, mode, spy)
+        )
+        .with_home(tmp.path().join(".claude"));
+        (tool, registry, mode, spy, tmp)
     }
 
     /// Build a `TeamCreate` tool with coordinator mode ENABLED (the normal path)
-    /// and a recording seam returning the given handler `task_id`.
+    /// and a recording seam returning the given handler `task_id`. Returns the
+    /// hermetic-home `TempDir` (hold it alive for the test).
     fn make_tool_with_seam(
         seam: Arc<RecordingSeam>,
-    ) -> (TeamCreateTool, Arc<TeamRegistry>, Arc<CoordinatorMode>) {
-        let (tool, registry, mode, _spy) = make_tool_with_seam_and_spy(seam);
-        (tool, registry, mode)
+    ) -> (
+        TeamCreateTool,
+        Arc<TeamRegistry>,
+        Arc<CoordinatorMode>,
+        tempfile::TempDir,
+    ) {
+        let (tool, registry, mode, _spy, tmp) = make_tool_with_seam_and_spy(seam);
+        (tool, registry, mode, tmp)
     }
 
-    fn make_tool() -> (TeamCreateTool, Arc<TeamRegistry>) {
+    fn make_tool() -> (TeamCreateTool, Arc<TeamRegistry>, tempfile::TempDir) {
         let seam = Arc::new(RecordingSeam::new("task-handler-id"));
-        let (tool, registry, _mode) = make_tool_with_seam(seam);
-        (tool, registry)
+        let (tool, registry, _mode, tmp) = make_tool_with_seam(seam);
+        (tool, registry, tmp)
     }
 
     #[test]
     fn name_matches_ts_constant() {
-        let (tool, _registry) = make_tool();
+        let (tool, _registry, _tmp) = make_tool();
         assert_eq!(tool.name(), "TeamCreate");
         assert_eq!(tool.name(), TEAM_CREATE_TOOL_NAME);
     }
 
     #[test]
     fn schema_is_strict_object_with_required_team_name() {
-        let (tool, _registry) = make_tool();
+        let (tool, _registry, _tmp) = make_tool();
         let schema = tool.input_schema();
         assert_eq!(schema["type"], "object");
         assert_eq!(schema["additionalProperties"], false);
@@ -496,7 +696,7 @@ mod tests {
 
     #[test]
     fn flag_metadata_defaults() {
-        let (tool, _registry) = make_tool();
+        let (tool, _registry, _tmp) = make_tool();
         assert!(tool.is_enabled(&ToolStaticContext::default()));
         assert!(tool.should_defer());
         assert!(!tool.is_read_only(&json!({})));
@@ -506,7 +706,7 @@ mod tests {
 
     #[tokio::test]
     async fn enabled_respects_feature_flag_off() {
-        let (tool, _registry) = make_tool();
+        let (tool, _registry, _tmp) = make_tool();
         let mut ctx = ToolStaticContext::default();
         ctx.feature_flags
             .insert(AGENT_SWARMS_FLAG.to_string(), false);
@@ -515,7 +715,7 @@ mod tests {
 
     #[tokio::test]
     async fn call_spawns_worker_and_returns_agent_id() {
-        let (tool, registry) = make_tool();
+        let (tool, registry, _tmp) = make_tool();
         assert!(registry.list().await.is_empty(), "registry starts empty");
 
         let res = tool
@@ -547,7 +747,7 @@ mod tests {
 
     #[tokio::test]
     async fn call_defaults_agent_type_to_team_lead() {
-        let (tool, registry) = make_tool();
+        let (tool, registry, _tmp) = make_tool();
         tool.call(json!({ "team_name": "beta" }), fresh_ctx(), fresh_tx())
             .await
             .expect("valid call");
@@ -558,7 +758,7 @@ mod tests {
 
     #[tokio::test]
     async fn call_rejects_missing_team_name() {
-        let (tool, registry) = make_tool();
+        let (tool, registry, _tmp) = make_tool();
         let err = tool
             .call(json!({ "agent_type": "x" }), fresh_ctx(), fresh_tx())
             .await
@@ -576,7 +776,7 @@ mod tests {
 
     #[tokio::test]
     async fn call_rejects_blank_team_name() {
-        let (tool, registry) = make_tool();
+        let (tool, registry, _tmp) = make_tool();
         let err = tool
             .call(json!({ "team_name": "   " }), fresh_ctx(), fresh_tx())
             .await
@@ -587,7 +787,7 @@ mod tests {
 
     #[tokio::test]
     async fn validate_input_matches_ts_message() {
-        let (tool, _registry) = make_tool();
+        let (tool, _registry, _tmp) = make_tool();
         let ctx = fresh_ctx();
         assert!(tool
             .validate_input(&json!({ "team_name": "ok" }), &ctx)
@@ -641,7 +841,7 @@ mod tests {
     #[tokio::test]
     async fn call_spawns_worker_and_writes_back_task_id() {
         let seam = Arc::new(RecordingSeam::new("handler-task-42"));
-        let (tool, registry, _mode) = make_tool_with_seam(seam.clone());
+        let (tool, registry, _mode, _tmp) = make_tool_with_seam(seam.clone());
 
         let res = tool
             .call(
@@ -683,7 +883,7 @@ mod tests {
     #[tokio::test]
     async fn call_invokes_spawn_seam_once() {
         let seam = Arc::new(RecordingSeam::new("handler-task-1"));
-        let (tool, _registry, _mode) = make_tool_with_seam(seam.clone());
+        let (tool, _registry, _mode, _tmp) = make_tool_with_seam(seam.clone());
 
         tool.call(
             json!({ "team_name": "beta" }),
@@ -708,7 +908,7 @@ mod tests {
     #[tokio::test]
     async fn call_transitions_worker_to_working_and_pushes_active_count() {
         let seam = Arc::new(RecordingSeam::new("handler-task-7"));
-        let (tool, registry, _mode, spy) = make_tool_with_seam_and_spy(seam);
+        let (tool, registry, _mode, spy, _tmp) = make_tool_with_seam_and_spy(seam);
 
         tool.call(
             json!({ "team_name": "alpha", "agent_type": "researcher" }),
@@ -736,5 +936,142 @@ mod tests {
             Some((1, Some("alpha".to_string()))),
             "the push carries the live active-worker count and team name"
         );
+    }
+
+    // ---- D1 ITEM 3: one-team guard + unique-name + disk file + telemetry ----
+
+    /// One-team-per-leader guard (TeamCreateTool.ts:132-140): a second
+    /// `TeamCreate` while a team is already set on the registry → error, and no
+    /// second worker is spawned.
+    #[tokio::test]
+    async fn second_team_create_while_leading_errors() {
+        let (tool, registry, _tmp) = make_tool();
+        tool.call(json!({ "team_name": "alpha" }), fresh_ctx(), fresh_tx())
+            .await
+            .expect("first create succeeds");
+        assert_eq!(registry.list().await.len(), 1);
+        assert_eq!(registry.team_name().await, Some("alpha".to_string()));
+
+        let err = tool
+            .call(json!({ "team_name": "beta" }), fresh_ctx(), fresh_tx())
+            .await
+            .expect_err("second create while leading must fail");
+        assert!(matches!(err, ToolError::InvalidInput(_)));
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("Already leading team \"alpha\""),
+            "guard message must name the existing team; got: {msg}"
+        );
+        assert!(msg.contains("A leader can only manage one team at a time"));
+        // No second worker spawned, team name unchanged.
+        assert_eq!(registry.list().await.len(), 1, "no second worker on guard");
+        assert_eq!(registry.team_name().await, Some("alpha".to_string()));
+    }
+
+    /// Name-collision auto-rename (TeamCreateTool.ts:60-72,143
+    /// generateUniqueTeamName): when a team file with the requested name already
+    /// exists, the tool RENAMES (not errors) — the result carries a different,
+    /// derived team name and a fresh worker is spawned under it.
+    #[tokio::test]
+    async fn name_collision_auto_renames() {
+        let seam = Arc::new(RecordingSeam::new("task-x"));
+        let (tool, registry, _mode, _spy, tmp) = make_tool_with_seam_and_spy(seam);
+        let home = tmp.path().join(".claude");
+        // Pre-seed a colliding team file at `~/.claude/teams/alpha/config.json`.
+        std::fs::create_dir_all(team_file::team_dir(&home, "alpha")).unwrap();
+        std::fs::write(team_file::team_file_path(&home, "alpha"), "{}").unwrap();
+
+        let res = tool
+            .call(json!({ "team_name": "alpha" }), fresh_ctx(), fresh_tx())
+            .await
+            .expect("create with a colliding name must succeed (rename, not error)");
+
+        let final_name = res.data["team_name"].as_str().unwrap();
+        assert_ne!(final_name, "alpha", "must have been renamed off the collision");
+        assert!(
+            final_name.starts_with("alpha-"),
+            "rename keeps the requested name as a prefix; got: {final_name}"
+        );
+        // Exactly one worker, named with the renamed team.
+        let workers = registry.list().await;
+        assert_eq!(workers.len(), 1);
+        assert_eq!(workers[0].name, final_name);
+        assert_eq!(registry.team_name().await.as_deref(), Some(final_name));
+    }
+
+    /// The on-disk team file is written at `~/.claude/teams/{name}/config.json`
+    /// with the TS `TeamFile` shape (TeamCreateTool.ts:157-177).
+    #[tokio::test]
+    async fn writes_team_file_to_disk() {
+        let seam = Arc::new(RecordingSeam::new("task-y"));
+        let (tool, _registry, _mode, _spy, tmp) = make_tool_with_seam_and_spy(seam);
+        let home = tmp.path().join(".claude");
+
+        let res = tool
+            .call(
+                json!({ "team_name": "alpha-team", "agent_type": "researcher", "description": "do work" }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .expect("create succeeds");
+
+        // Result surfaces the written path.
+        let path = res.data["team_file_path"].as_str().expect("team_file_path present");
+        assert!(path.ends_with("teams/alpha-team/config.json"), "path: {path}");
+
+        // The file exists and has the TS shape.
+        let on_disk = team_file::team_file_path(&home, "alpha-team");
+        assert!(on_disk.is_file(), "team file written to disk");
+        let v: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&on_disk).unwrap()).unwrap();
+        assert_eq!(v["name"], "alpha-team");
+        assert_eq!(v["leadAgentId"], "team-lead@alpha-team");
+        assert_eq!(v["description"], "do work");
+        assert_eq!(v["members"][0]["name"], "team-lead");
+        assert_eq!(v["members"][0]["agentType"], "researcher");
+        assert_eq!(v["members"][0]["subscriptions"], json!([]));
+        assert!(v["createdAt"].is_number());
+    }
+
+    /// `tengu_team_created` is fired through the attached analytics bus with the
+    /// TS field set (TeamCreateTool.ts:214-222).
+    #[tokio::test]
+    async fn fires_team_created_telemetry() {
+        use telemetry::sinks::InMemorySink;
+        let bus = Arc::new(AnalyticsBus::new());
+        let sink = Arc::new(InMemorySink::new());
+        bus.attach_sink(sink.clone()).await;
+
+        let seam = Arc::new(RecordingSeam::new("task-z"));
+        let (tool, _registry, _mode, _spy, _tmp) = make_tool_with_seam_and_spy(seam);
+        let tool = tool.with_analytics_bus(Some(bus));
+
+        tool.call(
+            json!({ "team_name": "alpha", "agent_type": "researcher" }),
+            fresh_ctx(),
+            fresh_tx(),
+        )
+        .await
+        .expect("create succeeds");
+
+        let events = sink.events().await;
+        let ev = events
+            .iter()
+            .find(|e| e.name == TEAM_CREATED)
+            .expect("tengu_team_created must be emitted");
+        assert!(matches!(
+            ev.metadata.get("teammate_count"),
+            Some(AnalyticsValue::Int(1))
+        ));
+        assert!(matches!(
+            ev.metadata.get("teammate_mode"),
+            Some(AnalyticsValue::String(s)) if s == "in-process"
+        ));
+        assert!(matches!(
+            ev.metadata.get("lead_agent_type"),
+            Some(AnalyticsValue::String(s)) if s == "researcher"
+        ));
+        assert!(ev.metadata.contains_key("_PROTO_team_name"));
     }
 }

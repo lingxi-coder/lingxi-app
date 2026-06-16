@@ -51,7 +51,10 @@ fn registry_is_exactly_330_entries() {
     // runMigrations port): 339 + 9 = 348.
     // Permission flow added 1 as its own tail block (permission::NAMES,
     // bypass dialog accept): 348 + 1 = 349.
-    assert_eq!(ALL_EVENT_NAMES.len(), 349);
+    // Coordinator swarm added 3 as its own global-tail block
+    // (coordinator::NAMES — tengu_team_created, tengu_team_deleted,
+    // tengu_coordinator_mode_switched): 349 + 3 = 352.
+    assert_eq!(ALL_EVENT_NAMES.len(), 352);
 }
 
 #[test]
@@ -257,6 +260,13 @@ fn category_ordering_preserved() {
         &ALL_EVENT_NAMES[348..349],
         &telemetry::tengu::permission::NAMES,
         "permission-flow tail block",
+    );
+    // Coordinator swarm block (3 events) appended after the permission block —
+    // tengu_team_created/_deleted/coordinator_mode_switched. Positions 349..352.
+    assert_eq!(
+        &ALL_EVENT_NAMES[349..352],
+        &telemetry::tengu::coordinator::NAMES,
+        "coordinator swarm tail block",
     );
 }
 

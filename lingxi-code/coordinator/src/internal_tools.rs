@@ -24,6 +24,7 @@ use crate::team_registry::TeamRegistry;
 use crate::tool_team_create::TeamCreateTool;
 use crate::tool_team_delete::TeamDeleteTool;
 use std::sync::Arc;
+use telemetry::AnalyticsBus;
 use tool_api::Tool;
 use traits::team_spawn::TeamSpawnSeam;
 use traits::OutputStream;
@@ -36,21 +37,26 @@ use traits::OutputStream;
 /// additionally takes the orchestrator-facing [`OutputStream`] so it can PUSH
 /// the live active-worker count the moment a spawn is reconciled (deterministic
 /// activation, independent of the teammate's racy startup status emit).
+///
+/// `bus` is the (optional) analytics bus both tools fire their coordinator
+/// telemetry through (`tengu_team_created` / `tengu_team_deleted`). `None` ⇒
+/// telemetry falls back to `tracing` (hermetic tests pass `None`).
 #[must_use]
 pub fn coordinator_internal_tools(
     team: Arc<TeamRegistry>,
     mode: Arc<CoordinatorMode>,
     spawn_seam: Arc<dyn TeamSpawnSeam>,
     output: Arc<dyn OutputStream>,
+    bus: Option<Arc<AnalyticsBus>>,
 ) -> Vec<Arc<dyn Tool>> {
     vec![
-        Arc::new(TeamCreateTool::new(
-            team.clone(),
-            mode.clone(),
-            spawn_seam.clone(),
-            output,
-        )) as Arc<dyn Tool>,
-        Arc::new(TeamDeleteTool::new(team, mode, spawn_seam)) as Arc<dyn Tool>,
+        Arc::new(
+            TeamCreateTool::new(team.clone(), mode.clone(), spawn_seam.clone(), output)
+                .with_analytics_bus(bus.clone()),
+        ) as Arc<dyn Tool>,
+        Arc::new(
+            TeamDeleteTool::new(team, mode, spawn_seam).with_analytics_bus(bus),
+        ) as Arc<dyn Tool>,
     ]
 }
 
@@ -111,7 +117,7 @@ mod tests {
         let seam: Arc<dyn TeamSpawnSeam> = Arc::new(NoopSeam);
         let output: Arc<dyn OutputStream> = Arc::new(NoopOutput);
 
-        let tools = coordinator_internal_tools(team, mode, seam, output);
+        let tools = coordinator_internal_tools(team, mode, seam, output, None);
 
         // EXACTLY two tools — SendMessage / StructuredOutput are dropped.
         assert_eq!(

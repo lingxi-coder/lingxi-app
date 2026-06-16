@@ -853,6 +853,8 @@ dependencies = [
  "serde",
  "serde_json",
  "tasks",
+ "telemetry",
+ "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "tool-api",

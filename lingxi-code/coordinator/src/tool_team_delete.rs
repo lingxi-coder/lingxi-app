@@ -23,6 +23,9 @@ use serde_json::{json, Value};
 use uuid::Uuid;
 
 use protocol::AgentId;
+use telemetry::sink::{AnalyticsValue, LogEventMetadata};
+use telemetry::tengu::coordinator::TEAM_DELETED;
+use telemetry::AnalyticsBus;
 use tool_api::context::ToolUseContext;
 use tool_api::progress::ToolProgressSender;
 use tool_api::tool_trait::{
@@ -32,6 +35,7 @@ use tool_api::tool_trait::{
 use traits::team_spawn::TeamSpawnSeam;
 
 use crate::mode::CoordinatorMode;
+use crate::team_file;
 use crate::team_registry::TeamRegistry;
 
 /// Canonical tool name in the registry (matches TS `TEAM_DELETE_TOOL_NAME`).
@@ -77,11 +81,18 @@ pub struct TeamDeleteTool {
     mode: Arc<CoordinatorMode>,
     /// Seam used by `call()` to kill the backing teammate task on delete.
     spawn_seam: Arc<dyn TeamSpawnSeam>,
+    /// Optional analytics bus for `tengu_team_deleted`. `None` (test default) ⇒
+    /// the event is logged via `tracing` only.
+    bus: Option<Arc<AnalyticsBus>>,
+    /// Optional `~/.claude` root override (tests inject a tempdir for hermetic
+    /// directory cleanup). `None` (production) ⇒ resolve from `$HOME`.
+    home_override: Option<std::path::PathBuf>,
 }
 
 impl TeamDeleteTool {
     /// Construct a new tool wired to the shared coordinator registry, the mode
-    /// gate, and the teammate spawn seam.
+    /// gate, and the teammate spawn seam. No analytics bus is attached
+    /// (telemetry falls back to `tracing`); use [`Self::with_analytics_bus`].
     #[must_use]
     pub fn new(
         team: Arc<TeamRegistry>,
@@ -92,6 +103,39 @@ impl TeamDeleteTool {
             team,
             mode,
             spawn_seam,
+            bus: None,
+            home_override: None,
+        }
+    }
+
+    /// Attach an analytics bus so `call()` fires `tengu_team_deleted`.
+    #[must_use]
+    pub fn with_analytics_bus(mut self, bus: Option<Arc<AnalyticsBus>>) -> Self {
+        self.bus = bus;
+        self
+    }
+
+    /// Override the `~/.claude` root for directory cleanup (tests use a tempdir).
+    #[must_use]
+    pub fn with_home(mut self, home: std::path::PathBuf) -> Self {
+        self.home_override = Some(home);
+        self
+    }
+
+    /// Fire `tengu_team_deleted { team_name }` (TeamDeleteTool.ts:111-114).
+    async fn emit_team_deleted(&self, team_name: &str) {
+        if let Some(bus) = &self.bus {
+            let mut md: LogEventMetadata = LogEventMetadata::new();
+            md.insert(
+                "_PROTO_team_name".into(),
+                AnalyticsValue::String(
+                    telemetry::pii::PiiTagged::assert_pii_tagged_column(team_name.to_string())
+                        .into_inner(),
+                ),
+            );
+            bus.log_event(TEAM_DELETED, md).await;
+        } else {
+            tracing::info!(event = TEAM_DELETED, team_name, "team deleted");
         }
     }
 }
@@ -221,6 +265,38 @@ impl Tool for TeamDeleteTool {
             )));
         };
 
+        // 2a. Active-member guard (TeamDeleteTool.ts:76-98). Refuse to disband a
+        //     team that still has active members — the caller must gracefully
+        //     terminate teammates first. We count non-terminal workers OTHER than
+        //     the delete target (the TS guard filters out the lead and counts
+        //     only other `isActive !== false` members); the target itself is the
+        //     one being torn down, so it never blocks its own removal. On a
+        //     positive count we return a SUCCESSFUL ToolCallResult with
+        //     `success: false` (NOT a tool error), mirroring the TS data shape.
+        let total_active = self.team.active_worker_count().await;
+        let target_is_active = matches!(
+            worker.status,
+            crate::team_registry::WorkerStatus::Idle
+                | crate::team_registry::WorkerStatus::Working { .. }
+                | crate::team_registry::WorkerStatus::AwaitingMessage
+        );
+        let other_active = total_active.saturating_sub(u32::from(target_is_active));
+        if other_active > 0 {
+            return Ok(ToolCallResult {
+                data: json!({
+                    "success": false,
+                    "message": format!(
+                        "Cannot cleanup team with {other_active} active member(s). \
+                         Use requestShutdown to gracefully terminate teammates first."
+                    ),
+                    "agent_id": agent_id_str,
+                }),
+                new_messages: Vec::new(),
+                context_modifier: None,
+                mcp_meta: None,
+            });
+        }
+
         // 3. Kill the backing teammate task (best-effort). If the worker was
         //    never linked to a real task (empty task_id), there is nothing to
         //    kill. A kill error is surfaced as a warning on the result but does
@@ -235,11 +311,34 @@ impl Tool for TeamDeleteTool {
         // 4. Remove the worker and unregister its mailbox.
         self.team.delete_worker(&agent_id).await;
 
+        // 4a. Team-level cleanup (TeamDeleteTool.ts:101-124): once the last
+        //     worker is gone, remove the on-disk team + task directories
+        //     (`~/.claude/teams/{name}/` + `~/.claude/tasks/{name}/`), clear the
+        //     coordinator's team context (`set_team_name(None)`), and fire
+        //     `tengu_team_deleted`. Cleanup only runs when no live workers
+        //     remain, so deleting one worker of a (now otherwise-terminal) team
+        //     finishes the teardown.
+        let team_name = self.team.team_name().await;
+        let remaining = self.team.list().await.len();
+        if remaining == 0 {
+            let home = self.home_override.clone().or_else(team_file::claude_home);
+            if let (Some(name), Some(home)) = (&team_name, home) {
+                team_file::cleanup_team_directories(&home, name);
+            }
+            self.team.set_team_name(None).await;
+            if let Some(name) = &team_name {
+                self.emit_team_deleted(name).await;
+            }
+        }
+
         let mut data = json!({
             "success": true,
             "message": format!("Removed worker {agent_id_str} from the team"),
             "agent_id": agent_id_str,
         });
+        if let Some(name) = &team_name {
+            data["team_name"] = Value::String(name.clone());
+        }
         if let Some(warning) = kill_warning {
             data["warning"] = Value::String(warning);
         }
@@ -590,5 +689,119 @@ mod tests {
         assert_eq!(res.data["success"], true);
         assert_eq!(seam.kills.load(Ordering::SeqCst), 1, "kill was attempted");
         assert!(team.list().await.is_empty(), "worker removed despite kill error");
+    }
+
+    // ---- D1 ITEM 3: active-member guard + dir cleanup + telemetry ----
+
+    use crate::team_registry::WorkerStatus;
+
+    /// Active-member guard (TeamDeleteTool.ts:76-98): deleting one worker while
+    /// OTHER workers are still active returns `success: false` (NOT a tool
+    /// error), with the "Cannot cleanup team with N active member(s)…" message,
+    /// and removes nothing.
+    #[tokio::test]
+    async fn delete_blocked_by_active_members() {
+        let team = registry();
+        let target = team
+            .spawn_worker("explorer".into(), "alice".into(), "t-1".into())
+            .await
+            .unwrap();
+        // Two MORE active workers besides the target → guard must block.
+        let _other1 = team
+            .spawn_worker("explorer".into(), "bob".into(), "t-2".into())
+            .await
+            .unwrap();
+        let _other2 = team
+            .spawn_worker("explorer".into(), "carol".into(), "t-3".into())
+            .await
+            .unwrap();
+
+        let (tool, seam) = make_tool_with_seam(team.clone(), Arc::new(RecordingSeam::new()));
+        let res = tool
+            .call(
+                json!({ "agent_id": target.as_uuid().to_string() }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .expect("guard returns a successful ToolCallResult with success:false");
+
+        assert_eq!(res.data["success"], false, "blocked → success:false");
+        let msg = res.data["message"].as_str().unwrap();
+        assert!(
+            msg.contains("Cannot cleanup team with 2 active member(s)"),
+            "message must report the OTHER active count; got: {msg}"
+        );
+        assert!(msg.contains("requestShutdown"));
+        // Nothing removed, no kill issued.
+        assert_eq!(team.list().await.len(), 3, "no worker removed on guard");
+        assert_eq!(seam.kills.load(Ordering::SeqCst), 0, "no kill on guard");
+    }
+
+    /// Deleting the LAST worker (no other active members) succeeds, removes the
+    /// on-disk team + task directories, clears the team name, and fires
+    /// `tengu_team_deleted`.
+    #[tokio::test]
+    async fn delete_last_worker_cleans_up_and_fires_telemetry() {
+        use telemetry::sinks::InMemorySink;
+        let bus = Arc::new(AnalyticsBus::new());
+        let sink = Arc::new(InMemorySink::new());
+        bus.attach_sink(sink.clone()).await;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join(".claude");
+
+        let team = registry();
+        team.set_team_name(Some("alpha".into())).await;
+        let target = team
+            .spawn_worker("explorer".into(), "alice".into(), "t-1".into())
+            .await
+            .unwrap();
+        // Mark it terminal so it is NOT counted active (so the guard passes even
+        // before removal — proving the guard counts only the target here).
+        team.update_status(&target, WorkerStatus::Completed).await;
+
+        // Seed the on-disk team + task dirs that cleanup must remove.
+        std::fs::create_dir_all(team_file::team_dir(&home, "alpha")).unwrap();
+        std::fs::write(team_file::team_file_path(&home, "alpha"), "{}").unwrap();
+        std::fs::create_dir_all(team_file::task_dir(&home, "alpha")).unwrap();
+        assert!(team_file::team_file_exists(&home, "alpha"));
+
+        let mode = Arc::new(CoordinatorMode::new());
+        mode.enter();
+        let tool = TeamDeleteTool::new(
+            team.clone(),
+            mode,
+            Arc::new(RecordingSeam::new()) as Arc<dyn TeamSpawnSeam>,
+        )
+        .with_analytics_bus(Some(bus))
+        .with_home(home.clone());
+
+        let res = tool
+            .call(
+                json!({ "agent_id": target.as_uuid().to_string() }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .expect("delete of last worker succeeds");
+
+        assert_eq!(res.data["success"], true);
+        assert_eq!(res.data["team_name"], "alpha");
+        // Worker removed.
+        assert!(team.list().await.is_empty(), "last worker removed");
+        // Team name cleared (set_team_name(None)).
+        assert_eq!(team.team_name().await, None, "team context cleared");
+        // Directories removed.
+        assert!(!team_file::team_dir(&home, "alpha").exists(), "team dir removed");
+        assert!(!team_file::task_dir(&home, "alpha").exists(), "task dir removed");
+
+        // Telemetry fired.
+        let events = sink.events().await;
+        let ev = events
+            .iter()
+            .find(|e| e.name == TEAM_DELETED)
+            .expect("tengu_team_deleted must be emitted");
+        assert!(ev.metadata.contains_key("_PROTO_team_name"));
     }
 }

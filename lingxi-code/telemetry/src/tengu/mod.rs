@@ -11,6 +11,7 @@
 pub mod agent;
 pub mod api;
 pub mod command;
+pub mod coordinator;
 pub mod cost;
 pub mod memory;
 pub mod migration;
@@ -70,7 +71,10 @@ pub const ALL_EVENT_NAMES: &[&str] = {
     //        `+ 3` is `tool::FILE_READ_ANALYTICS_NAMES.len()`.
     // Config migrations: +9 (migration::NAMES, runMigrations port) → 348 total.
     // Bypass-permissions dialog: +1 (permission::NAMES) → 349 total.
-    const TOTAL: usize = 25 + 30 + 20 + 140 + 10 + 8 + 12 + 3 + 17 + 4 + 54 + 13 + 3 + 9 + 1;
+    // Coordinator swarm events: +3 (coordinator::NAMES — tengu_team_created,
+    //        tengu_team_deleted, tengu_coordinator_mode_switched) appended as
+    //        their own GLOBAL-TAIL block after the permission block → 352 total.
+    const TOTAL: usize = 25 + 30 + 20 + 140 + 10 + 8 + 12 + 3 + 17 + 4 + 54 + 13 + 3 + 9 + 1 + 3;
     const fn concat_all() -> [&'static str; TOTAL] {
         let mut out: [&'static str; TOTAL] = [""; TOTAL];
         let mut idx = 0;
@@ -170,6 +174,15 @@ pub const ALL_EVENT_NAMES: &[&str] = {
         let mut i = 0;
         while i < permission::NAMES.len() {
             out[idx] = permission::NAMES[i];
+            idx += 1;
+            i += 1;
+        }
+        // Coordinator swarm block (tengu_team_created/_deleted/
+        // coordinator_mode_switched) — appended after the permission block.
+        // Positions 349..352.
+        let mut i = 0;
+        while i < coordinator::NAMES.len() {
+            out[idx] = coordinator::NAMES[i];
             idx += 1;
             i += 1;
         }

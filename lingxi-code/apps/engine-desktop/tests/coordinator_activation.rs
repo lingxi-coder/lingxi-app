@@ -134,6 +134,12 @@ struct CoordinatorFixture {
 /// pre-Arc registration.
 fn make_coordinator_fixture(api: &Arc<ScriptedApiClient>) -> CoordinatorFixture {
     let tmp = tempfile::tempdir().unwrap();
+    // Redirect `$HOME` to the scratch dir so the coordinator `TeamCreate` tool
+    // writes its on-disk team file (`~/.claude/teams/{name}/config.json`,
+    // resolved from `$HOME`) under the tempdir instead of the developer's real
+    // home. The coordinator factory does not expose a home-override seam, so
+    // env-redirect is the hermeticity lever here.
+    std::env::set_var("HOME", tmp.path());
     let fs: Arc<dyn FileSystem> = Arc::new(PosixFileSystem::new(tmp.path().to_path_buf()));
     let runtime: Arc<dyn RuntimeSpawner> = Arc::new(PosixRuntime::new());
     let output_manager = Arc::new(TaskOutputManager::new(tmp.path().to_path_buf(), fs.clone()));
@@ -197,6 +203,7 @@ fn team_create_tool(fixture: &CoordinatorFixture) -> Arc<dyn tool_api::Tool> {
         mode,
         fixture.spawn_seam.clone(),
         fixture.output.clone(),
+        None,
     );
     tools
         .into_iter()

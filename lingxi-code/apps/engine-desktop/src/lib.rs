@@ -432,6 +432,11 @@ pub struct CoordinatorWiring {
     /// client deterministically, independent of the teammate's racy startup
     /// status emit.
     pub output: Arc<dyn traits::OutputStream>,
+    /// The (optional) analytics bus the coordinator `TeamCreate` / `TeamDelete`
+    /// tools fire their telemetry through (`tengu_team_created` /
+    /// `tengu_team_deleted`). `build()` passes the orchestrator bus; the offline
+    /// snapshot factory passes `None` (telemetry → `tracing`).
+    pub bus: Option<Arc<telemetry::AnalyticsBus>>,
 }
 
 /// Desktop [`ClaudeAiAuthProvider`](tool_cron::ClaudeAiAuthProvider) backed by
@@ -583,9 +588,10 @@ pub fn register_desktop_tools(
             mode,
             spawn_seam,
             output,
+            bus,
         }) => {
             for tool in coordinator::internal_tools::coordinator_internal_tools(
-                team, mode, spawn_seam, output,
+                team, mode, spawn_seam, output, bus,
             ) {
                 reg.register_builtin(tool);
             }
@@ -2004,6 +2010,44 @@ pub async fn build(
         Arc::new(mode)
     };
 
+    // (5.46-prompt) D1 ITEM 4: coordinator-mode system prompt + user context.
+    //        Mirrors TS `buildEffectiveSystemPrompt` (systemPrompt.ts:59-75):
+    //        when coordinator mode is active AND nothing has already overridden
+    //        the system prompt (the Rust analog of "no main-thread agent
+    //        definition" + "no explicit overrideSystemPrompt"), swap in the
+    //        coordinator system prompt. `system_prompt_override` being `None` is
+    //        precisely that condition here — the desktop host does not set it for
+    //        a normal session, and a CLI `--system-prompt` / agent override would
+    //        have populated it (TS: `overrideSystemPrompt` wins first). The
+    //        per-turn coordinator USER context (TS `getCoordinatorUserContext`,
+    //        injected at QueryEngine.ts:304) has no per-turn user-context seam in
+    //        this orchestrator yet, so it is appended to the coordinator system
+    //        prompt as a trailing `<system-reminder>` block (the worker-tools
+    //        allow-list + connected-MCP names; scratchpad is omitted — no
+    //        scratchpad gate/path is wired on desktop). A true per-turn
+    //        recomputation is DEFERRED until a per-turn user-context seam exists.
+    if coordinator_mode.is_enabled() && orch_cfg.system_prompt_override.is_none() {
+        let simple = coordinator::is_env_truthy(std::env::var("CLAUDE_CODE_SIMPLE").ok().as_deref());
+        let mut prompt = coordinator::coordinator_system_prompt(simple);
+        // Connected MCP server names for the worker-tools user context.
+        let mcp_names: Vec<String> = mcp_registry
+            .snapshot()
+            .await
+            .into_iter()
+            .map(|s| s.name)
+            .collect();
+        if let Some(user_ctx) =
+            coordinator::coordinator_user_context(&mcp_names, None, simple)
+        {
+            // Wrap as a system-reminder, mirroring how claude-code injects
+            // per-turn meta context (`wrapInSystemReminder`).
+            prompt.push_str("\n\n<system-reminder>\n");
+            prompt.push_str(&user_ctx);
+            prompt.push_str("\n</system-reminder>");
+        }
+        orch_cfg.system_prompt_override = Some(prompt);
+    }
+
     // (5.46a) M10 (T13): register the `InProcessTeammate` handler DIRECTLY (not
     //        via `register_agent_handlers`) so the coordinator's
     //        `CoordinatorStatusSink` is attached — that sink maps the teammate's
@@ -2267,6 +2311,10 @@ pub async fn build(
             // share one client feed. Cloned here because `output` is moved into
             // the `ConversationOrchestrator` below.
             output: output.clone(),
+            // The tool-context analytics bus, so TeamCreate/TeamDelete fire
+            // tengu_team_created / tengu_team_deleted through the same bus the
+            // rest of the builtin tools use.
+            bus: Some(tool_ctx.bus.clone()),
         })
     } else {
         // Drop the spawn-seam clone path; it is unused in a default session.
@@ -3593,6 +3641,66 @@ mod tests {
         );
     }
 
+    /// D1 ITEM 4: a coordinator session's assembled system prompt IS the
+    /// coordinator prompt (TS `buildEffectiveSystemPrompt` coordinator branch),
+    /// carrying the role header + tool names + the worker-tools USER context as a
+    /// trailing `<system-reminder>`. The default-session control proves the swap
+    /// is load-bearing (a normal session emits the standard prompt, NOT the
+    /// coordinator one).
+    #[tokio::test]
+    async fn coordinator_session_assembles_coordinator_system_prompt() {
+        let (_tmp, mut cfg) = test_config(true);
+        cfg.session_started_as_coordinator = true;
+
+        let output: Arc<dyn traits::OutputStream> =
+            Arc::new(orchestrator::test_support::MockOutputStream::new());
+        let perm_sink: Arc<dyn client_adapter::PermissionRequestSink> =
+            Arc::new(RecordingPermissionSink::default());
+
+        let rt = build(cfg, output, perm_sink)
+            .await
+            .expect("coordinator build must succeed");
+
+        let sys = rt.orchestrator.assemble_system_prompt_preview().await;
+        // Coordinator role header + interpolated tool names.
+        assert!(
+            sys.contains(
+                "You are Claude Code, an AI assistant that orchestrates software engineering tasks across multiple workers."
+            ),
+            "coordinator session must assemble the coordinator system prompt: {sys}"
+        );
+        assert!(sys.contains("You are a **coordinator**."));
+        assert!(sys.contains("**Agent** - Spawn a new worker"));
+        assert!(sys.contains("**SendMessage** - Continue an existing worker"));
+        assert!(sys.contains("**TaskStop** - Stop a running worker"));
+        // The per-turn worker-tools user context rides along as a system-reminder.
+        assert!(
+            sys.contains("<system-reminder>")
+                && sys.contains("Workers spawned via the Agent tool have access to these tools:"),
+            "coordinator user context must be injected as a system-reminder: {sys}"
+        );
+    }
+
+    /// Control for the above: a DEFAULT session must NOT assemble the coordinator
+    /// prompt — its system prompt is the standard LingXi header.
+    #[tokio::test]
+    async fn default_session_does_not_assemble_coordinator_prompt() {
+        let (_tmp, cfg) = test_config(true);
+        assert!(!cfg.session_started_as_coordinator);
+
+        let output: Arc<dyn traits::OutputStream> =
+            Arc::new(orchestrator::test_support::MockOutputStream::new());
+        let perm_sink: Arc<dyn client_adapter::PermissionRequestSink> =
+            Arc::new(RecordingPermissionSink::default());
+
+        let rt = build(cfg, output, perm_sink).await.expect("build failed");
+        let sys = rt.orchestrator.assemble_system_prompt_preview().await;
+        assert!(
+            !sys.contains("You are a **coordinator**."),
+            "a default session must NOT use the coordinator system prompt: {sys}"
+        );
+    }
+
     // ----- T12: mode-exclusive coordinator tool selection -------------------
 
     /// No-op spawn seam — the tool-selection tests never invoke it; they only
@@ -3631,6 +3739,7 @@ mod tests {
             mode: Arc::new(coordinator::CoordinatorMode::new()),
             spawn_seam: Arc::new(NoopSeam),
             output: Arc::new(orchestrator::test_support::MockOutputStream::new()),
+            bus: None,
         }
     }
 
@@ -3772,6 +3881,7 @@ mod tests {
             mode: Arc::new(coordinator::CoordinatorMode::new()),
             spawn_seam: Arc::new(NoopSeam),
             output: Arc::new(orchestrator::test_support::MockOutputStream::new()),
+            bus: None,
         };
         let reg = desktop_tool_registry(ctx, Some(wiring), None);
 

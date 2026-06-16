@@ -53,6 +53,7 @@ fn sandbox_config() -> (tempfile::TempDir, DesktopConfig) {
         mcp_paths: vec![cwd.join(".mcp.json")],
         use_noop_permission_gate: false,
         deny_unresolved_ask: false,
+        injected_permission_gate: None,
         session_started_as_coordinator: false,
         // Deterministic e2e: empty memory, never the real FS.
         memory_provider: None,

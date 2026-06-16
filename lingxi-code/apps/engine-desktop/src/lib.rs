@@ -685,6 +685,7 @@ pub fn desktop_skill_registry() -> SkillRegistry {
 ///     mcp_paths: vec![PathBuf::from("/tmp/project/.mcp.json")],
 ///     use_noop_permission_gate: false,
 ///     deny_unresolved_ask: false,
+///     injected_permission_gate: None,
 ///     session_started_as_coordinator: false,
 ///     // `None` ⟶ empty memory (deterministic). A production host injects
 ///     // `Some(orchestrator::prompt::real_provider())` to load real CLAUDE.md.
@@ -746,6 +747,17 @@ pub struct DesktopConfig {
     /// inner, so interactive/transport builds and every existing caller stay
     /// byte-identical. The CLI sets this from `argv.print`.
     pub deny_unresolved_ask: bool,
+    /// Host-injected base permission gate (the INTERACTIVE prompt transport).
+    /// When `Some`, `build()` uses it as the base gate instead of the
+    /// `NoOpPermissionGate`/`DenyOnAskGate`/`AdapterPermissionGate` it would
+    /// otherwise select — still wrapped by `PolicyPermissionGate` when
+    /// enforcement is on (the CLI default), so rules + the active mode +
+    /// read-only auto-allow resolve first and only an unresolved `Ask` reaches
+    /// the injected prompt. The interactive TUI injects a
+    /// `tui::TuiPermissionGate` here so an `Ask` surfaces as a dialog; `None`
+    /// (the default + every headless/transport caller) keeps the prior
+    /// selection, byte-identical.
+    pub injected_permission_gate: Option<Arc<dyn PermissionGate>>,
     /// M10 build-time coordinator-activation flag. When `true`, `build()`
     /// enters coordinator multi-agent mode and registers the coordinator
     /// `TeamCreate`/`TeamDelete` tools IN PLACE OF `tool_team`'s pair (decided
@@ -802,6 +814,14 @@ impl std::fmt::Debug for DesktopConfig {
             .field("use_noop_permission_gate", &self.use_noop_permission_gate)
             .field("deny_unresolved_ask", &self.deny_unresolved_ask)
             .field(
+                "injected_permission_gate",
+                if self.injected_permission_gate.is_some() {
+                    &"Some(<gate>)"
+                } else {
+                    &"None"
+                },
+            )
+            .field(
                 "session_started_as_coordinator",
                 &self.session_started_as_coordinator,
             )
@@ -840,6 +860,7 @@ impl Default for DesktopConfig {
             mcp_paths: Vec::new(),
             use_noop_permission_gate: true,
             deny_unresolved_ask: false,
+            injected_permission_gate: None,
             session_started_as_coordinator: false,
             memory_provider: None,
             permission_mode: permission::PermissionMode::Default,
@@ -1779,7 +1800,13 @@ pub async fn build(
         .unwrap_or_else(|| Arc::new(StaticMemoryProvider::empty()));
 
     let (perms, adapter_gate): (Arc<dyn PermissionGate>, Option<Arc<AdapterPermissionGate>>) =
-        if cfg.use_noop_permission_gate {
+        if let Some(injected) = cfg.injected_permission_gate.clone() {
+            // INTERACTIVE prompt transport (the TUI's `TuiPermissionGate`): used
+            // as the base gate, still wrapped by `PolicyPermissionGate` below when
+            // enforcement is on, so an unresolved `Ask` surfaces as a dialog. No
+            // `AdapterPermissionGate` handle (that is the bridge transport's gate).
+            (injected, None)
+        } else if cfg.use_noop_permission_gate {
             // HEADLESS deny-on-ask (`--print` parity): a non-interactive session
             // has no prompt to surface an unresolved `Ask`, so deny it instead of
             // allowing. `PolicyPermissionGate` (wrapped below when enforcement is
@@ -3302,6 +3329,7 @@ mod tests {
             mcp_paths: vec![cwd.join(".mcp.json")],
             use_noop_permission_gate: use_noop,
             deny_unresolved_ask: false,
+            injected_permission_gate: None,
             session_started_as_coordinator: false,
             // Boot tests stay deterministic: empty memory, never the real FS.
             memory_provider: None,
@@ -3532,6 +3560,33 @@ mod tests {
         assert!(
             rt.permission_gate.is_none(),
             "noop build must not surface an adapter gate handle"
+        );
+    }
+
+    /// Unit 2 seam: a host-injected base gate (the interactive TUI's
+    /// `TuiPermissionGate`) takes precedence over the `use_noop`/`deny`
+    /// selection and surfaces NO adapter handle (it is its own transport). Build
+    /// succeeds with the injected gate as the base perms; its WRAP behavior
+    /// (rules + read-only auto-allow resolved before the gate sees an `Ask`) is
+    /// covered by `permission::policy_gate`'s `PolicyPermissionGate` tests.
+    #[tokio::test]
+    async fn build_with_injected_gate_prefers_it_over_noop() {
+        // `test_config(true)` would normally bind `NoOpPermissionGate`; the
+        // injected gate must win.
+        let (_tmp, mut cfg) = test_config(true);
+        cfg.injected_permission_gate = Some(Arc::new(permission::DenyOnAskGate));
+        let output: Arc<dyn traits::OutputStream> =
+            Arc::new(orchestrator::test_support::MockOutputStream::new());
+        let perm_sink: Arc<dyn client_adapter::PermissionRequestSink> =
+            Arc::new(RecordingPermissionSink::default());
+
+        let rt = build(cfg, output, perm_sink)
+            .await
+            .expect("build() with an injected gate failed");
+
+        assert!(
+            rt.permission_gate.is_none(),
+            "an injected base gate is its own transport — no adapter handle"
         );
     }
 

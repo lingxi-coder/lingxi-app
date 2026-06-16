@@ -207,6 +207,8 @@ pub fn resolve_desktop_config(args: &BridgeArgs) -> DesktopConfig {
         // Transport host: the adapter gate IS the enforcement, so headless
         // deny-on-ask does not apply (only consulted when use_noop is true).
         deny_unresolved_ask: false,
+        // Transport host: no injected interactive gate (that is the TUI's path).
+        injected_permission_gate: None,
         // M10: the bridge-server does not start a coordinator session by
         // default (threading this from session metadata is a follow-up).
         session_started_as_coordinator: false,
@@ -487,6 +489,7 @@ mod tests {
             mcp_paths: vec![cwd.join(".mcp.json")],
             use_noop_permission_gate: false,
             deny_unresolved_ask: false,
+            injected_permission_gate: None,
             session_started_as_coordinator: false,
             // Deterministic test: empty memory, never the real FS.
             memory_provider: None,

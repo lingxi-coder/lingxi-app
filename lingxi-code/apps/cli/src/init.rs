@@ -273,6 +273,9 @@ fn resolve_desktop_config(
         // Interactive TUI/REPL runs (`print == false`) keep the prior behavior
         // until the TUI permission-prompt wiring lands.
         deny_unresolved_ask: argv.print,
+        // Interactive gate injected by `build_runtime_for_tui` (the TUI path),
+        // not here — the shared headless/REPL config has no interactive prompt.
+        injected_permission_gate: None,
         // M10: the CLI does not start a coordinator session (threading this
         // from session metadata is a follow-up; the default is byte-identical
         // to the pre-M10 build).

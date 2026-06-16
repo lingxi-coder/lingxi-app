@@ -204,6 +204,9 @@ pub fn resolve_desktop_config(args: &BridgeArgs) -> DesktopConfig {
         mcp_paths: vec![project_mcp_path, global_mcp_path],
         // A transport binds the connection-scoped AdapterPermissionGate (F2-06).
         use_noop_permission_gate: false,
+        // Transport host: the adapter gate IS the enforcement, so headless
+        // deny-on-ask does not apply (only consulted when use_noop is true).
+        deny_unresolved_ask: false,
         // M10: the bridge-server does not start a coordinator session by
         // default (threading this from session metadata is a follow-up).
         session_started_as_coordinator: false,
@@ -483,6 +486,7 @@ mod tests {
             routing: None,
             mcp_paths: vec![cwd.join(".mcp.json")],
             use_noop_permission_gate: false,
+            deny_unresolved_ask: false,
             session_started_as_coordinator: false,
             // Deterministic test: empty memory, never the real FS.
             memory_provider: None,

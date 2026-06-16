@@ -684,6 +684,7 @@ pub fn desktop_skill_registry() -> SkillRegistry {
 ///     routing: None,
 ///     mcp_paths: vec![PathBuf::from("/tmp/project/.mcp.json")],
 ///     use_noop_permission_gate: false,
+///     deny_unresolved_ask: false,
 ///     session_started_as_coordinator: false,
 ///     // `None` ⟶ empty memory (deterministic). A production host injects
 ///     // `Some(orchestrator::prompt::real_provider())` to load real CLAUDE.md.
@@ -734,6 +735,17 @@ pub struct DesktopConfig {
     /// When `true`, bind `NoOpPermissionGate` (the CLI default); when `false`,
     /// the host binds the connection-scoped `AdapterPermissionGate`.
     pub use_noop_permission_gate: bool,
+    /// HEADLESS deny-on-ask (claude-code `--print` parity). When `true` AND
+    /// `use_noop_permission_gate` is set, the inner gate becomes
+    /// [`permission::DenyOnAskGate`] instead of the always-allow
+    /// `NoOpPermissionGate`: a tool whose policy outcome is an unresolved `Ask`
+    /// (a mutating tool with no matching allow rule, in a session with no
+    /// interactive prompt) is DENIED rather than allowed. Allow/deny rules, the
+    /// active mode, and read-only auto-allow are still resolved by
+    /// `PolicyPermissionGate` first. Defaults to `false` → the prior always-allow
+    /// inner, so interactive/transport builds and every existing caller stay
+    /// byte-identical. The CLI sets this from `argv.print`.
+    pub deny_unresolved_ask: bool,
     /// M10 build-time coordinator-activation flag. When `true`, `build()`
     /// enters coordinator multi-agent mode and registers the coordinator
     /// `TeamCreate`/`TeamDelete` tools IN PLACE OF `tool_team`'s pair (decided
@@ -788,6 +800,7 @@ impl std::fmt::Debug for DesktopConfig {
             .field("routing", &self.routing)
             .field("mcp_paths", &self.mcp_paths)
             .field("use_noop_permission_gate", &self.use_noop_permission_gate)
+            .field("deny_unresolved_ask", &self.deny_unresolved_ask)
             .field(
                 "session_started_as_coordinator",
                 &self.session_started_as_coordinator,
@@ -826,6 +839,7 @@ impl Default for DesktopConfig {
             routing: None,
             mcp_paths: Vec::new(),
             use_noop_permission_gate: true,
+            deny_unresolved_ask: false,
             session_started_as_coordinator: false,
             memory_provider: None,
             permission_mode: permission::PermissionMode::Default,
@@ -1766,7 +1780,17 @@ pub async fn build(
 
     let (perms, adapter_gate): (Arc<dyn PermissionGate>, Option<Arc<AdapterPermissionGate>>) =
         if cfg.use_noop_permission_gate {
-            (Arc::new(NoOpPermissionGate), None)
+            // HEADLESS deny-on-ask (`--print` parity): a non-interactive session
+            // has no prompt to surface an unresolved `Ask`, so deny it instead of
+            // allowing. `PolicyPermissionGate` (wrapped below when enforcement is
+            // on — the CLI default) still resolves allow/deny rules + read-only
+            // auto-allow BEFORE delegating here, so only an otherwise-unresolved
+            // mutating ask is denied. Defaults off → the prior always-allow inner.
+            if cfg.deny_unresolved_ask {
+                (Arc::new(permission::DenyOnAskGate), None)
+            } else {
+                (Arc::new(NoOpPermissionGate), None)
+            }
         } else {
             // (3c) Persist an `AllowAlways` choice to `<cwd>/.claude/settings.local.json`.
             let gate = Arc::new(AdapterPermissionGate::new(permission_sink).with_persist(
@@ -3277,6 +3301,7 @@ mod tests {
             routing: None,
             mcp_paths: vec![cwd.join(".mcp.json")],
             use_noop_permission_gate: use_noop,
+            deny_unresolved_ask: false,
             session_started_as_coordinator: false,
             // Boot tests stay deterministic: empty memory, never the real FS.
             memory_provider: None,

@@ -19,6 +19,7 @@ pub mod defaults_per_tool;
 pub mod denial_tracking;
 pub mod filesystem;
 pub mod gate;
+pub mod headless_gate;
 pub mod loader;
 pub mod mode;
 pub mod mode_policy;
@@ -61,6 +62,7 @@ pub use gate::{
     PermissionDecision, PermissionGate, PermissionRequest, PermissionResponse, PromptDecision,
     PromptDefault, PromptError, PromptingGate,
 };
+pub use headless_gate::DenyOnAskGate;
 pub use loader::{
     bypass_permissions_disabled_from_settings_json, default_mode_from_settings_json,
     permission_rules_from_settings_json,

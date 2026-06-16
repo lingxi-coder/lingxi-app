@@ -248,4 +248,42 @@ mod tests {
         ));
         assert_eq!(inner.calls(), 0);
     }
+
+    #[tokio::test]
+    async fn headless_deny_gate_denies_unresolved_ask_but_spares_rules_and_read_only() {
+        // The HEADLESS composition: PolicyPermissionGate wrapping DenyOnAskGate
+        // (claude-code `--print` parity). The deny inner must ONLY turn an
+        // otherwise-unresolved ask into a denial — never override an allow rule
+        // or a read-only auto-allow.
+        use crate::headless_gate::DenyOnAskGate;
+
+        // No rules → Default mode asks. Bash (DenyByDefault) delegates to the
+        // inner DenyOnAskGate → Deny.
+        let policy = policy_with(r#"{ "permissions": {} }"#, PermissionMode::Default);
+        let gate = PolicyPermissionGate::new(policy, Arc::new(DenyOnAskGate));
+        assert!(
+            matches!(
+                gate.check("Bash", &serde_json::json!({})).await,
+                PermissionDecision::Deny { .. }
+            ),
+            "headless: a mutating tool with no rule must be denied, not allowed"
+        );
+        // Read (AllowByDefault) is auto-allowed BEFORE delegation → never denied.
+        assert_eq!(
+            gate.check("Read", &serde_json::json!({})).await,
+            PermissionDecision::Allow,
+            "headless: read-only tools stay frictionless"
+        );
+
+        // An explicit allow rule still short-circuits to Allow even with the
+        // deny inner (rules are resolved before delegation).
+        let policy2 =
+            policy_with(r#"{ "permissions": { "allow": ["Bash"] } }"#, PermissionMode::Default);
+        let gate2 = PolicyPermissionGate::new(policy2, Arc::new(DenyOnAskGate));
+        assert_eq!(
+            gate2.check("Bash", &serde_json::json!({})).await,
+            PermissionDecision::Allow,
+            "headless: an explicit allow rule still wins"
+        );
+    }
 }

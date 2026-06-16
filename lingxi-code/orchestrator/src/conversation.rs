@@ -586,6 +586,26 @@ pub struct ConversationOrchestrator {
     /// locked turn-loop/streaming fixtures byte-identical. The desktop binary
     /// wires a `CommandRegistry`-backed provider at the composition root.
     pub(crate) skill_listing: Option<Arc<dyn crate::prompt::skill_listing::SkillListingProvider>>,
+    /// §F: cache of the CONDITIONAL (`paths:`-gated) memory rules, populated the
+    /// first time [`Self::conditional_rules_reminder_message`] runs (a `OnceCell`
+    /// fill via the same `memory.load(&cwd)` the system prompt uses, then
+    /// re-filtered to `globs.is_some()`). Avoids re-walking disk every turn while
+    /// still letting lazy activation re-test the cached rules against the latest
+    /// `read_file_state`. Empty when the hierarchy has no conditional rules.
+    pub(crate) conditional_rules_cache:
+        tokio::sync::OnceCell<Vec<crate::prompt::MemoryFile>>,
+    /// §F sent-tracking ("delta"): the paths of conditional rules already
+    /// injected this session, so each rule is rendered ONCE when first activated
+    /// and never re-injected on later turns. 1:1 with TS `loadedNestedMemoryPaths`
+    /// (attachments.ts:1722-1732 — a non-evicting Set keyed by rule path).
+    pub(crate) sent_conditional_rules: Mutex<std::collections::HashSet<std::path::PathBuf>>,
+    /// SKILLLIST.1 delta: skill names already emitted in a prior turn's
+    /// `skill_listing` reminder. Turn-0 emits the FULL listing; later turns emit
+    /// ONLY newly-appeared skills (mirrors TS `sentSkillNames` per-agent delta,
+    /// attachments.ts:2607/2699). When no new skill appears,
+    /// [`Self::skill_listing_reminder_message`] returns `None` (no reminder that
+    /// turn). Process-/session-local, exactly like the TS module-scope map.
+    pub(crate) sent_skill_names: Mutex<std::collections::HashSet<String>>,
 }
 
 impl ConversationOrchestrator {
@@ -641,6 +661,9 @@ impl ConversationOrchestrator {
             last_emitted_rate_limit: Mutex::new(None),
             last_emitted_raw_utilization: Mutex::new(None),
             skill_listing: None,
+            conditional_rules_cache: tokio::sync::OnceCell::new(),
+            sent_conditional_rules: Mutex::new(std::collections::HashSet::new()),
+            sent_skill_names: Mutex::new(std::collections::HashSet::new()),
         }
     }
 
@@ -1924,6 +1947,15 @@ impl ConversationOrchestrator {
             return;
         }
         for file in memory_files {
+            // §F: `load()` now also returns conditional (`paths:`-gated) rules.
+            // Those are NOT eagerly loaded, so they must not fire a
+            // `session_start` `InstructionsLoaded` event here — claude-code fires
+            // them at lazy-activation time with `load_reason: 'path_glob_match'`
+            // (`memoryFilesToAttachments`, attachments.ts:1754-1769). Skip them
+            // so the eager fire stays unconditional-only.
+            if file.globs.is_some() {
+                continue;
+            }
             // `memory_type` is taken straight from the file's tier (claude-code
             // fires `file.type`, claudemd.ts:1058-1062), so the Managed tier is
             // reported faithfully rather than misclassified as Project.
@@ -1953,8 +1985,9 @@ impl ConversationOrchestrator {
                         memory_type,
                         // Top-level eager session-start load (no `@include` parent).
                         load_reason: hooks::events::InstructionsLoadReason::SessionStart,
-                        // Always `None` — conditional rules are filtered out of
-                        // the eager set by the provider.
+                        // Always `None` here — conditional (`globs.is_some()`)
+                        // rules were skipped above; only unconditional files reach
+                        // this fire.
                         globs: file.globs,
                         trigger_file_path: None,
                         parent_file_path: None,
@@ -2344,6 +2377,18 @@ impl ConversationOrchestrator {
             // provider is wired / no skills / the Skill tool is absent. See
             // [`Self::skill_listing_reminder_message`].
             if let Some(reminder) = self.skill_listing_reminder_message().await {
+                snapshot.push(reminder);
+            }
+
+            // §F (streaming twin): per-turn, transient `conditional_rules`
+            // reminder — path-gated CLAUDE.md rules that newly activate because a
+            // touched file matches their globs. Appended to THIS turn's OUTGOING
+            // snapshot only (never `session.history` / JSONL), after the
+            // skill-listing reminder and BEFORE the blocking-limit estimate below
+            // so its tokens are counted in the prompt size. `None` when no
+            // provider / no conditional rules / nothing newly active. See
+            // [`Self::conditional_rules_reminder_message`].
+            if let Some(reminder) = self.conditional_rules_reminder_message().await {
                 snapshot.push(reminder);
             }
 
@@ -3107,10 +3152,12 @@ impl ConversationOrchestrator {
     /// each turn and never accumulates. `None` keeps the styleless/skilless path
     /// byte-identical and the locked fixtures green.
     ///
-    /// MVP NOTE: emits the FULL listing every turn. TS sends the full listing on
-    /// turn 0 then only NEW skills thereafter (the per-`agentId` `sentSkillNames`
-    /// dedup + `--resume` suppression, `attachments.ts:2607,2699`). That per-turn
-    /// token optimization is a documented follow-up — the *content* is faithful.
+    /// DELTA (SKILLLIST.1): turn-0 emits the FULL listing; each later turn emits
+    /// ONLY skills that have NOT appeared in a prior turn's reminder, tracked via
+    /// [`Self::sent_skill_names`]. When no new skill appears, returns `None` (no
+    /// reminder that turn). 1:1 with TS `sentSkillNames` (attachments.ts:2607,
+    /// 2699): the budgeter still runs over the delta subset, so the rendered
+    /// bytes match what TS would send for that turn's new-skill set.
     pub(crate) async fn skill_listing_reminder_message(&self) -> Option<ConversationMessage> {
         let provider = self.skill_listing.as_ref()?;
         // Gate on the Skill tool being available this turn (attachments.ts:2668).
@@ -3118,12 +3165,116 @@ impl ConversationOrchestrator {
             return None;
         }
         let entries = provider.skill_entries().await;
+
+        // DELTA: keep only skills not yet sent this session, then record them as
+        // sent. Turn 0 keeps everything (the set is empty); subsequent turns keep
+        // only newly-appeared names. An empty delta ⇒ no reminder this turn.
+        let new_entries: Vec<crate::prompt::skill_listing::SkillListingEntry> = {
+            let mut sent = self.sent_skill_names.lock().await;
+            let delta: Vec<_> = entries
+                .into_iter()
+                .filter(|e| !sent.contains(&e.name))
+                .collect();
+            for e in &delta {
+                sent.insert(e.name.clone());
+            }
+            delta
+        };
+        if new_entries.is_empty() {
+            return None;
+        }
+
         // ~1% of the active model's context window (TS getCharBudget). Resolved
         // with no betas — the small 200k↔1M budget delta only matters past ~30
         // skills, where the budgeter degrades gracefully.
         let window =
             compaction::context_window::context_window_for_model(&self.config.model, &[]) as usize;
-        let content = crate::prompt::skill_listing::render_reminder(&entries, Some(window))?;
+        let content = crate::prompt::skill_listing::render_reminder(&new_entries, Some(window))?;
+        Some(ConversationMessage::user(MessageId::new(), content))
+    }
+
+    /// §F: the per-turn, transient `conditional_rules` reminder — path-gated
+    /// CLAUDE.md rules (`paths:`-globbed) that newly ACTIVATE because a file the
+    /// session has touched this run matches their globs. Returns `None` when no
+    /// memory provider is wired, the hierarchy has no conditional rules, or no
+    /// newly-activated rule exists this turn.
+    ///
+    /// 1:1 with claude-code `processConditionedMdRules` (claudemd.ts:1354-1397)
+    /// fed through the `nested_memory` render seam (messages.ts:3700-3707):
+    ///
+    /// 1. CACHE: the first call loads the full hierarchy (`memory.load(&cwd)` —
+    ///    the same call the system prompt uses) and caches the `globs.is_some()`
+    ///    subset in [`Self::conditional_rules_cache`]. Later turns reuse the cache
+    ///    — no disk re-walk — and only re-test it against the latest touched set.
+    /// 2. MATCH: for each cached rule and each touched file in
+    ///    [`Self::read_file_state`] (the absolutized Read/Edit/Write/… paths),
+    ///    [`crate::prompt::conditional_rules::rule_matches_touched_file`] derives
+    ///    the rule's base dir (Project → parent-of-`.claude`; else `cwd`),
+    ///    relativizes + guards the touched path, and gitignore-tests it against
+    ///    the rule's globs. A rule with ANY matching touched file is ACTIVE.
+    /// 3. DELTA: a rule already in [`Self::sent_conditional_rules`] is skipped
+    ///    (TS `loadedNestedMemoryPaths`), so each rule injects ONCE. Newly-active
+    ///    rules are recorded as sent and rendered.
+    /// 4. RENDER: each newly-active rule becomes a bare `Contents of {path}:` body
+    ///    wrapped in `<system-reminder>` (messages.ts `nested_memory`), joined by
+    ///    a blank line into one meta user message (TS pushes one wrapped message
+    ///    per rule; concatenation here is byte-equivalent for a single rule and a
+    ///    faithful grouping for several).
+    ///
+    /// Appended ONLY to the per-turn outgoing snapshot (never `session.history` /
+    /// JSONL), exactly like the skill-listing + output-style reminders.
+    pub(crate) async fn conditional_rules_reminder_message(&self) -> Option<ConversationMessage> {
+        // (1) CACHE — fill once from the same memory load the system prompt uses.
+        let cwd = self.cwd.clone();
+        let rules = self
+            .conditional_rules_cache
+            .get_or_init(|| async {
+                self.memory
+                    .load(&cwd)
+                    .await
+                    .into_iter()
+                    .filter(|f| f.globs.is_some())
+                    .collect::<Vec<_>>()
+            })
+            .await;
+        if rules.is_empty() {
+            return None;
+        }
+
+        // Snapshot the touched files (absolutized Read/Edit/Write/… paths).
+        let touched: Vec<std::path::PathBuf> = self.read_file_state.lock().await.clone();
+        if touched.is_empty() {
+            return None;
+        }
+
+        // (2)+(3) MATCH + DELTA — collect newly-active rules not yet sent.
+        let mut newly_active: Vec<&crate::prompt::MemoryFile> = Vec::new();
+        {
+            let mut sent = self.sent_conditional_rules.lock().await;
+            for rule in rules {
+                if sent.contains(&rule.path) {
+                    continue; // already injected this session
+                }
+                let active = touched.iter().any(|t| {
+                    crate::prompt::conditional_rules::rule_matches_touched_file(rule, t, &cwd)
+                });
+                if active {
+                    sent.insert(rule.path.clone());
+                    newly_active.push(rule);
+                }
+            }
+        }
+        if newly_active.is_empty() {
+            return None;
+        }
+
+        // (4) RENDER — one `<system-reminder>` block per rule, joined by a blank
+        // line into a single meta user message.
+        let content = newly_active
+            .iter()
+            .map(|r| crate::prompt::conditional_rules::render_reminder(r))
+            .collect::<Vec<_>>()
+            .join("\n\n");
         Some(ConversationMessage::user(MessageId::new(), content))
     }
 
@@ -4756,5 +4907,252 @@ mod skill_listing_reminder_tests {
         reg.register_builtin(Arc::new(NamedTool("Skill")));
         let orch = orch_with(reg, None);
         assert!(orch.skill_listing_reminder_message().await.is_none());
+    }
+
+    // ── SKILLLIST.1 delta (sent-tracking) ──────────────────────────────────
+
+    /// A skill provider whose entry set can change between turns (shared
+    /// `Arc<Mutex<…>>`), to exercise the "new skill appears later" delta path.
+    struct MutableSkills(std::sync::Arc<std::sync::Mutex<Vec<SkillListingEntry>>>);
+    #[async_trait]
+    impl SkillListingProvider for MutableSkills {
+        async fn skill_entries(&self) -> Vec<SkillListingEntry> {
+            self.0.lock().unwrap().clone()
+        }
+    }
+
+    fn skill(name: &str) -> SkillListingEntry {
+        SkillListingEntry {
+            name: name.into(),
+            description: format!("desc for {name}"),
+            when_to_use: None,
+            is_bundled: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn skill_listing_delta_turn0_full_then_none_when_no_new() {
+        // Turn 0 emits the FULL listing; a later turn with the SAME skills (no
+        // new names) emits nothing (None).
+        let mut reg = ToolRegistry::new();
+        reg.register_builtin(Arc::new(NamedTool("Skill")));
+        let orch = orch_with(
+            reg,
+            Some(Arc::new(FixtureSkills(vec![skill("alpha"), skill("beta")]))),
+        );
+
+        // Turn 0: both skills present.
+        let t0 = orch
+            .skill_listing_reminder_message()
+            .await
+            .expect("turn-0 full listing");
+        let t0 = t0.text_content();
+        assert!(t0.contains("- alpha:"), "turn-0 missing alpha: {t0}");
+        assert!(t0.contains("- beta:"), "turn-0 missing beta: {t0}");
+
+        // Turn 1: no NEW skills since both were already sent → None.
+        assert!(
+            orch.skill_listing_reminder_message().await.is_none(),
+            "turn-1 must emit nothing when no new skill appeared"
+        );
+    }
+
+    #[tokio::test]
+    async fn skill_listing_delta_emits_only_new_skill_on_later_turn() {
+        let mut reg = ToolRegistry::new();
+        reg.register_builtin(Arc::new(NamedTool("Skill")));
+        let shared = std::sync::Arc::new(std::sync::Mutex::new(vec![skill("alpha")]));
+        let orch = orch_with(reg, Some(Arc::new(MutableSkills(shared.clone()))));
+
+        // Turn 0: only `alpha`.
+        let t0 = orch
+            .skill_listing_reminder_message()
+            .await
+            .expect("turn-0")
+            .text_content();
+        assert!(t0.contains("- alpha:"));
+        assert!(!t0.contains("- gamma:"));
+
+        // A new skill `gamma` appears.
+        shared.lock().unwrap().push(skill("gamma"));
+
+        // Turn 1: ONLY the new `gamma` is emitted (alpha was already sent).
+        let t1 = orch
+            .skill_listing_reminder_message()
+            .await
+            .expect("turn-1 new-only")
+            .text_content();
+        assert!(t1.contains("- gamma:"), "turn-1 must contain the new skill: {t1}");
+        assert!(
+            !t1.contains("- alpha:"),
+            "turn-1 must NOT re-emit the already-sent skill: {t1}"
+        );
+    }
+}
+
+// ── §F: per-turn, transient `conditional_rules` reminder ──────────────────────
+//
+// Mirrors the `skill_listing_reminder_tests` template: a `StaticMemoryProvider`
+// fixture supplies conditional (`paths:`-gated) `MemoryFile`s, the touched-file
+// set is seeded directly into `read_file_state`, and
+// `conditional_rules_reminder_message` is asserted to inject the matching rule
+// once (with sent-tracking dedup) and skip non-matching / already-sent rules.
+#[cfg(test)]
+mod conditional_rules_reminder_tests {
+    use super::*;
+    use crate::prompt::MemoryFile;
+    use crate::test_support::{
+        noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate,
+        StaticMemoryProvider,
+    };
+    use crate::OrchestratorConfig;
+    use memory::claude_md::ClaudeMdTier;
+    use std::path::PathBuf;
+    use std::sync::Arc;
+    use tool_api::registry::ToolRegistry;
+
+    /// A Project-tier conditional rule living at `<cwd>/.claude/rules/{name}.md`
+    /// (so its derived base dir is `<cwd>`) carrying the given `paths:` globs.
+    fn project_rule(cwd: &std::path::Path, name: &str, globs: &[&str]) -> MemoryFile {
+        MemoryFile {
+            path: cwd.join(".claude").join("rules").join(format!("{name}.md")),
+            body: format!("BODY OF {name}"),
+            is_local_override: false,
+            tier: ClaudeMdTier::Project,
+            globs: Some(globs.iter().map(|s| (*s).to_string()).collect()),
+        }
+    }
+
+    /// Build an orchestrator whose memory provider returns `rules` and whose cwd
+    /// is `cwd`. Conditional rules need no Skill tool / skill provider.
+    fn orch_with_rules(cwd: PathBuf, rules: Vec<MemoryFile>) -> ConversationOrchestrator {
+        ConversationOrchestrator::new(
+            OrchestratorConfig::default(),
+            Arc::new(MockApiClient::new(vec![])),
+            Arc::new(ToolRegistry::new()),
+            noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::with_files(rules)),
+            cwd,
+        )
+    }
+
+    async fn push_touched(orch: &ConversationOrchestrator, path: &std::path::Path) {
+        orch.read_file_state.lock().await.push(path.to_path_buf());
+    }
+
+    #[tokio::test]
+    async fn matching_touched_file_injects_rule() {
+        let cwd = PathBuf::from("/work/repo");
+        let orch = orch_with_rules(cwd.clone(), vec![project_rule(&cwd, "scoped", &["src"])]);
+        // A touched file under `src/` matches `paths: src/**`.
+        push_touched(&orch, &cwd.join("src/x.rs")).await;
+
+        let msg = orch
+            .conditional_rules_reminder_message()
+            .await
+            .expect("matching rule must be injected");
+        let text = msg.text_content();
+        assert!(text.starts_with("<system-reminder>"), "got: {text}");
+        assert!(
+            text.contains("Contents of /work/repo/.claude/rules/scoped.md:"),
+            "got: {text}"
+        );
+        assert!(text.contains("BODY OF scoped"), "got: {text}");
+        // It is a BARE nested-memory render — no eager-block preamble.
+        assert!(!text.contains("Codebase and user instructions"));
+    }
+
+    #[tokio::test]
+    async fn non_matching_touched_file_does_not_inject() {
+        let cwd = PathBuf::from("/work/repo");
+        let orch = orch_with_rules(cwd.clone(), vec![project_rule(&cwd, "scoped", &["src"])]);
+        // `docs/y.md` does NOT match `paths: src/**`.
+        push_touched(&orch, &cwd.join("docs/y.md")).await;
+        assert!(
+            orch.conditional_rules_reminder_message().await.is_none(),
+            "a non-matching touched file must not activate the rule"
+        );
+    }
+
+    #[tokio::test]
+    async fn rule_injected_once_then_not_reinjected() {
+        let cwd = PathBuf::from("/work/repo");
+        let orch = orch_with_rules(cwd.clone(), vec![project_rule(&cwd, "scoped", &["src"])]);
+        push_touched(&orch, &cwd.join("src/x.rs")).await;
+
+        // Turn 0: injected.
+        assert!(
+            orch.conditional_rules_reminder_message().await.is_some(),
+            "first activation must inject"
+        );
+        // Turn 1: the same file is still touched, but the rule was already sent →
+        // not re-injected (sent-tracking dedup).
+        assert!(
+            orch.conditional_rules_reminder_message().await.is_none(),
+            "an already-sent rule must not be re-injected"
+        );
+    }
+
+    #[tokio::test]
+    async fn no_touched_file_yields_none() {
+        let cwd = PathBuf::from("/work/repo");
+        let orch = orch_with_rules(cwd.clone(), vec![project_rule(&cwd, "scoped", &["src"])]);
+        // read_file_state empty → no rule can match.
+        assert!(orch.conditional_rules_reminder_message().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn no_conditional_rules_yields_none() {
+        // Provider returns an unconditional file only (globs == None): the
+        // conditional cache is empty, so the reminder is a strict no-op even with
+        // a touched file present.
+        let cwd = PathBuf::from("/work/repo");
+        let unconditional = MemoryFile {
+            path: cwd.join("CLAUDE.md"),
+            body: "always".into(),
+            is_local_override: false,
+            tier: ClaudeMdTier::Project,
+            globs: None,
+        };
+        let orch = orch_with_rules(cwd.clone(), vec![unconditional]);
+        push_touched(&orch, &cwd.join("src/x.rs")).await;
+        assert!(orch.conditional_rules_reminder_message().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn newly_matching_rule_injected_on_later_turn() {
+        // Two rules; only one matches initially. After a second file is touched,
+        // the second rule activates and is injected (delta across turns).
+        let cwd = PathBuf::from("/work/repo");
+        let orch = orch_with_rules(
+            cwd.clone(),
+            vec![
+                project_rule(&cwd, "src-rule", &["src"]),
+                project_rule(&cwd, "docs-rule", &["docs"]),
+            ],
+        );
+        push_touched(&orch, &cwd.join("src/a.rs")).await;
+        let t0 = orch
+            .conditional_rules_reminder_message()
+            .await
+            .expect("src-rule active")
+            .text_content();
+        assert!(t0.contains("src-rule.md"));
+        assert!(!t0.contains("docs-rule.md"));
+
+        // Now touch a docs file → docs-rule newly activates; src-rule already sent.
+        push_touched(&orch, &cwd.join("docs/readme.md")).await;
+        let t1 = orch
+            .conditional_rules_reminder_message()
+            .await
+            .expect("docs-rule newly active")
+            .text_content();
+        assert!(t1.contains("docs-rule.md"), "got: {t1}");
+        assert!(
+            !t1.contains("src-rule.md"),
+            "already-sent src-rule must not re-inject: {t1}"
+        );
     }
 }

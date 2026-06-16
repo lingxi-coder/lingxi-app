@@ -328,6 +328,16 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
         history_snapshot.push(reminder);
     }
 
+    // §F: per-turn, transient `conditional_rules` reminder — path-gated CLAUDE.md
+    // rules that newly activate because a touched file matches their globs.
+    // Appended to THIS call's OUTGOING snapshot only (never `session.history` /
+    // JSONL), after the skill-listing reminder so the locked fixtures stay
+    // byte-identical. `None` when no provider / no conditional rules / nothing
+    // newly active. See [`ConversationOrchestrator::conditional_rules_reminder_message`].
+    if let Some(reminder) = orch.conditional_rules_reminder_message().await {
+        history_snapshot.push(reminder);
+    }
+
     // 1. Call the API. Advertise the registry's wire tool definitions
     //    (same set + serialization as the streaming path). Batch 5: the call is
     //    wrapped in the blocking-limit preempt + 413/prompt-too-long reactive

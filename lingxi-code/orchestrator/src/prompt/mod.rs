@@ -5,6 +5,7 @@
 //! Entry point: [`assemble_system_prompt`].
 #![forbid(unsafe_code)]
 
+pub mod conditional_rules;
 pub mod env_block;
 pub mod env_meta;
 pub mod file_tree;
@@ -234,8 +235,11 @@ pub struct MemoryFile {
     /// `paths:` frontmatter globs, when the file is a CONDITIONAL rule
     /// (`parseFrontmatterPaths`, claudemd.ts:254-279). `None` for an
     /// unconditional file. Conditional rules are NOT eagerly injected into the
-    /// system prompt (claudemd.ts:773 `conditionalRule:false` filter); they are
-    /// reserved for per-edited-file lazy activation (Gap 2 part-2, deferred).
+    /// system prompt (claudemd.ts:773 `conditionalRule:false` filter — enforced
+    /// by [`memory_block::format`]); instead they are lazily activated per
+    /// edited/opened file by the orchestrator's
+    /// `conditional_rules_reminder_message` (§F, claudemd.ts
+    /// `processConditionedMdRules`).
     pub globs: Option<Vec<String>>,
 }
 

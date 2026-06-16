@@ -20,8 +20,14 @@ use std::sync::Arc;
 /// the Managed tier first (`<managed>/CLAUDE.md` + rules), then User
 /// (`~/.claude/CLAUDE.md` + rules), then Project (`<repo>/CLAUDE.md`, …),
 /// then Local (`<repo>/CLAUDE.local.md`) — innermost last so it wins the
-/// model's recency attention. Conditional rules (those carrying `paths:`
-/// globs) are excluded from the eagerly-injected set.
+/// model's recency attention.
+///
+/// §F: the returned vec contains BOTH unconditional files (`globs == None`)
+/// AND conditional rules (`globs == Some(_)`, carrying `paths:` globs). The
+/// caller decides what to do with each: [`format`] filters to `globs.is_none()`
+/// for the eager system-prompt block, while the orchestrator routes the
+/// conditional rules to per-edited-file lazy activation (claudemd.ts
+/// `processConditionedMdRules`).
 #[async_trait]
 pub trait MemoryHierarchyProvider: Send + Sync {
     /// Load all CLAUDE.md files relevant to `cwd`. May be empty.
@@ -36,9 +42,11 @@ pub trait MemoryHierarchyProvider: Send + Sync {
 /// `expand_memory_file`. Reverses the walk order so the returned vec is in
 /// claude-code splice order (managed → home → repo → local-override),
 /// recursively splices each file's `@import` references directly after it
-/// (parity with claude-code `processMemoryFile`), tags each file with its
-/// [`memory::claude_md::ClaudeMdTier`], and drops conditional (`paths:`-gated)
-/// rules from the eager set.
+/// (parity with claude-code `processMemoryFile`), and tags each file with its
+/// [`memory::claude_md::ClaudeMdTier`]. Conditional (`paths:`-gated) rules are
+/// returned WITH their globs intact (§F) — the eager-vs-lazy split is the
+/// caller's responsibility (see [`format`] / the orchestrator's
+/// `conditional_rules_reminder_message`).
 pub struct RealMemoryHierarchyProvider;
 
 #[async_trait]
@@ -88,13 +96,13 @@ impl MemoryHierarchyProvider for RealMemoryHierarchyProvider {
                 if body.is_empty() {
                     continue;
                 }
-                // Gap 2 part-1: a CONDITIONAL rule (one with `paths:` globs) is
-                // NOT eagerly injected (claudemd.ts:773 `conditionalRule:false`
-                // keeps only files WITHOUT globs). Such rules are reserved for
-                // per-edited-file lazy activation (Gap 2 part-2, deferred).
-                if entry.globs.is_some() {
-                    continue;
-                }
+                // §F Gap-2 part-2: conditional (`paths:`-gated) rules are NO
+                // LONGER dropped here. They flow through with their `globs`
+                // intact so the orchestrator can lazily activate them when an
+                // edited/opened file matches (claudemd.ts `processConditionedMdRules`).
+                // The *eager* exclusion now lives in [`format`], which filters to
+                // `globs.is_none()` so the system-prompt block stays byte-identical
+                // (claudemd.ts:773 `conditionalRule:false`).
                 out.push(MemoryFile {
                     path: entry.path,
                     body,
@@ -104,8 +112,8 @@ impl MemoryHierarchyProvider for RealMemoryHierarchyProvider {
                     // `@import`'d children inherit the parent's tier (TS passes
                     // `type` down through processMemoryFile recursion).
                     tier: e.tier,
-                    // globs is always None here (conditional rules filtered
-                    // above); carry it through for forward-compat.
+                    // Carry the `paths:` globs through: `None` = unconditional
+                    // (eager); `Some(_)` = conditional (lazy activation only).
                     globs: entry.globs,
                 });
             }
@@ -159,10 +167,19 @@ fn tier_description(tier: memory::claude_md::ClaudeMdTier) -> &'static str {
 /// where `{descN}` is the tier description (project / local / global) and each
 /// body is `.trim()`med. Blocks are joined by `"\n\n"`. When `files` is empty,
 /// returns the EMPTY STRING and the caller MUST elide the section.
+///
+/// §F: CONDITIONAL rules (`globs.is_some()`) are filtered OUT here — only
+/// unconditional files (`CLAUDE.md` + non-`paths:` rules) are eagerly injected,
+/// mirroring claude-code's `conditionalRule:false` eager filter (claudemd.ts:773).
+/// Conditional rules are activated lazily per edited/opened file by the
+/// orchestrator. If `files` contains ONLY conditional rules, this returns the
+/// empty string (caller elides the section).
 #[must_use]
 pub fn format(files: &[MemoryFile]) -> String {
     let blocks: Vec<String> = files
         .iter()
+        // §F: eager block = unconditional files only.
+        .filter(|f| f.globs.is_none())
         .map(|f| {
             format!(
                 "Contents of {}{}:\n\n{}",

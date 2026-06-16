@@ -127,8 +127,10 @@ async fn real_provider_loads_in_spec_splice_order_via_temp_repo() {
     std::fs::create_dir_all(&rules).unwrap();
     std::fs::write(proj.join("CLAUDE.md"), "REPO").unwrap();
     std::fs::write(proj.join("CLAUDE.local.md"), "LOCAL").unwrap();
-    // GAP 2 part-1: an unconditional rule (no `paths:`) is eagerly injected;
-    // a conditional rule (with `paths:`) is filtered OUT by the provider.
+    // §F: an unconditional rule (no `paths:`) is eagerly injected; a conditional
+    // rule (with `paths:`) is now RETAINED by the provider (globs intact) so the
+    // orchestrator can lazily activate it — it is only EXCLUDED from the eager
+    // `format()` block, asserted below.
     std::fs::write(rules.join("a-always.md"), "ALWAYS").unwrap();
     std::fs::write(
         rules.join("b-scoped.md"),
@@ -154,15 +156,26 @@ async fn real_provider_loads_in_spec_splice_order_via_temp_repo() {
     let files = p.load(&proj).await;
     std::env::remove_var(memory::claude_md::hierarchy::MANAGED_DIR_ENV);
     let bodies: Vec<String> = files.iter().map(|f| f.body.clone()).collect();
-    // Splice order locked: HOME → REPO → unconditional rule → LOCAL (Managed
-    // dir empty). The conditional `b-scoped.md` rule is NOT present.
-    assert_eq!(bodies, vec!["HOME", "REPO", "ALWAYS", "LOCAL"]);
-    assert!(
-        !bodies.iter().any(|b| b == "SCOPED"),
-        "conditional (paths:-gated) rule must be filtered out of the eager set"
-    );
+    // §F: `load()` now RETAINS the conditional rule (with globs). Splice order:
+    // HOME → REPO → unconditional rule → conditional rule → LOCAL. (Within the
+    // `.claude/rules/` dir the walk emits `a-always.md` before `b-scoped.md`.)
+    assert_eq!(bodies, vec!["HOME", "REPO", "ALWAYS", "SCOPED", "LOCAL"]);
     // The included unconditional rule carries no globs; tiers are tagged.
     let always = files.iter().find(|f| f.body == "ALWAYS").unwrap();
     assert!(always.globs.is_none());
     assert_eq!(always.tier, ClaudeMdTier::Project);
+    // The conditional rule carries its `paths:` globs (trailing `/**` stripped).
+    let scoped = files.iter().find(|f| f.body == "SCOPED").unwrap();
+    assert_eq!(scoped.globs, Some(vec!["src".to_string()]));
+    assert_eq!(scoped.tier, ClaudeMdTier::Project);
+
+    // §F eager filter: the eager `format()` block EXCLUDES the conditional rule
+    // (mirrors claude-code `conditionalRule:false`), while keeping everything
+    // unconditional. Byte-locked shape stays intact (other tests cover that).
+    let eager = memory_block::format(&files);
+    assert!(eager.contains("ALWAYS"));
+    assert!(
+        !eager.contains("SCOPED"),
+        "conditional (paths:-gated) rule must NOT appear in the eager block"
+    );
 }

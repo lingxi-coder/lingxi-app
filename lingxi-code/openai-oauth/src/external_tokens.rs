@@ -1,6 +1,6 @@
-//! Externally-supplied ChatGPT tokens (codex `ChatgptAuthTokens` mode).
+//! Externally-supplied `ChatGPT` tokens (codex `ChatgptAuthTokens` mode).
 //!
-//! An enterprise auth server supplies a ready access token + account_id; we serve
+//! An enterprise auth server supplies a ready access token + `account_id`; we serve
 //! it statically as `Credential::ChatGptOAuth` (no refresh — the external system
 //! owns the lifecycle). Same header set as the OAuth-login path.
 
@@ -8,7 +8,7 @@ use std::fmt;
 
 use llm_client::{BoxFuture, Credential, CredentialProvider, CredentialScope, LlmError};
 
-/// Static credential provider over externally-supplied ChatGPT tokens.
+/// Static credential provider over externally-supplied `ChatGPT` tokens.
 pub struct ExternalTokensCredentialProvider {
     access_token: String,
     account_id: Option<String>,
@@ -16,14 +16,13 @@ pub struct ExternalTokensCredentialProvider {
 }
 
 impl ExternalTokensCredentialProvider {
-    /// Build from a supplied access token + account_id. `fedramp` is parsed from
+    /// Build from a supplied access token + `account_id`. `fedramp` is parsed from
     /// the token's `id_token` claims when the token is a JWT (best-effort; else false).
     #[must_use]
     pub fn from_supplied(access_token: impl Into<String>, account_id: Option<String>) -> Self {
         let access_token = access_token.into();
         let fedramp = crate::token_data::parse_id_token(&access_token)
-            .map(|c| c.fedramp)
-            .unwrap_or(false);
+            .is_some_and(|c| c.fedramp);
         Self { access_token, account_id, fedramp }
     }
 }

@@ -1,7 +1,7 @@
-//! Personal Access Token (PAT) auth for the OpenAI Codex backend.
+//! Personal Access Token (PAT) auth for the `OpenAI` Codex backend.
 //!
 //! A PAT (`at-…`) is a long-lived bearer token. On load the engine resolves the
-//! account_id / fedramp once via `whoami`, then a static credential provider
+//! `account_id` / fedramp once via `whoami`, then a static credential provider
 //! serves `Credential::ChatGptOAuth` per request (no refresh). Byte-aligned with
 //! codex `login/src/auth/personal_access_token.rs`.
 
@@ -20,9 +20,9 @@ use crate::config::OpenAiOAuthConfig;
 /// Account metadata resolved from the PAT `whoami` call.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PatMetadata {
-    /// ChatGPT workspace/account id → `ChatGPT-Account-ID` header.
+    /// `ChatGPT` workspace/account id → `ChatGPT-Account-ID` header.
     pub account_id: Option<String>,
-    /// FedRAMP account flag → `X-OpenAI-Fedramp` header.
+    /// `FedRAMP` account flag → `X-OpenAI-Fedramp` header.
     pub fedramp: bool,
     /// User email (best-effort).
     pub email: Option<String>,
@@ -83,7 +83,7 @@ pub async fn whoami(
 }
 
 /// Static credential provider for a PAT. Serves `Credential::ChatGptOAuth` with
-/// the PAT as the bearer + the resolved account_id/fedramp. No refresh.
+/// the PAT as the bearer + the resolved `account_id/fedramp`. No refresh.
 pub struct PatCredentialProvider {
     pat: String,
     account_id: Option<String>,

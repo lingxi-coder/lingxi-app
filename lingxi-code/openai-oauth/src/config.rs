@@ -24,7 +24,7 @@ pub struct OpenAiOAuthConfig {
     pub codex_backend: String,
     /// Loopback redirect ports, in preference order (codex allowlist: 1455, then 1457).
     pub loopback_ports: [u16; 2],
-    /// AuthAPI base URL for PAT whoami + account endpoints.
+    /// `AuthAPI` base URL for PAT whoami + account endpoints.
     pub authapi_base_url: String,
 }
 
@@ -55,7 +55,7 @@ impl OpenAiOAuthConfig {
         format!("http://localhost:{port}/auth/callback")
     }
 
-    /// The PAT `whoami` endpoint (resolves account_id / fedramp for a PAT).
+    /// The PAT `whoami` endpoint (resolves `account_id` / fedramp for a PAT).
     #[must_use]
     pub fn whoami_url(&self) -> String {
         format!("{}/v1/user-auth-credential/whoami", self.authapi_base_url.trim_end_matches('/'))

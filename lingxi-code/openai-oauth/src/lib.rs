@@ -5,5 +5,6 @@
 //! `Credential::ChatGptOAuth` (bearer + ChatGPT-Account-ID). Byte-aligned with
 //! codex's ChatGPT auth (see docs/superpowers/specs/2026-06-16-p2-chatgpt-oauth-login-design.md).
 
+pub mod callback;
 pub mod config;
 pub mod pkce;

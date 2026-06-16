@@ -1497,6 +1497,7 @@ pub async fn build(
     if let Some(d) = oauth_delegate {
         oauth_delegates.insert("anthropic-oauth".to_string(), d);
     }
+    let has_openai_oauth = openai_oauth_state.is_some();
     if let Some(state) = openai_oauth_state {
         let driver = std::sync::Arc::new(openai_oauth::RefreshDriver::new(state));
         oauth_delegates.insert(
@@ -2715,6 +2716,7 @@ pub async fn build(
             &assembled.credential_sources,
             has_api_key,
             has_oauth,
+            has_openai_oauth,
         )
         .await
         .into_iter()

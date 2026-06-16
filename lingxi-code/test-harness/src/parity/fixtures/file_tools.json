@@ -5,13 +5,13 @@
   "read_size_limit": {
     "value": 262144,
     "unit": "bytes",
-    "note": "256 KB. Locked at MAX_FILE_READ_SIZE in builtin/file_read.rs.",
-    "error_template": "File {path} ({size}B) exceeds 256KB read limit"
+    "note": "256 KB. Locked at MAX_FILE_READ_SIZE. Error message is now byte-VERBATIM to claude-code FileTooLargeError (readFileInRange.ts:62-64), formatting both sizes via formatFileSize.",
+    "error_template": "File content ({size}) exceeds maximum allowed size ({max}). Use offset and limit parameters to read specific portions of the file, or search for specific content instead of reading the whole file."
   },
   "binary_detection": {
     "scan_window_bytes": 8192,
-    "note": "First 8 KB scanned for NUL byte; NUL → reject as binary.",
-    "error_template": "File {path} appears to be binary (first 8KB contains NUL bytes)"
+    "note": "Primary detection is by extension (BINARY_EXTENSIONS, constants/files.ts) before any read; the 8 KB NUL scan is the fallback for extensionless/non-listed binaries. Message is byte-VERBATIM to FileReadTool.ts:479 with the lowercased extension interpolated.",
+    "error_template": "This tool cannot read binary files. The file appears to be a binary {ext} file. Please use appropriate tools for binary file analysis."
   },
   "path_blocked_error": {
     "template": "File path {path} is outside trusted directories",

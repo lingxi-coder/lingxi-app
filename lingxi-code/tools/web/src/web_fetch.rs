@@ -1,10 +1,15 @@
 //! `WebFetchTool` — fetches a URL via the M1 `HttpTransport` trait, with a
-//! 5 MB body cap, scheme allow-list (`https`/`http`), and the locked
+//! 10 MB transfer cap, a 100 000-char markdown cap, scheme allow-list
+//! (`https`/`http`), manual permitted-redirect handling, and the locked
 //! `claude-code-tool/<CARGO_PKG_VERSION>` User-Agent. Spec §4 Flow B + §7
 //! Web wire identifiers.
 //!
-//! Wire-locked constants (all byte-checked against `parity_web_tools.json`):
-//! - `WEBFETCH_MAX_BYTES = 5_242_880` (5 MB)
+//! Wire-locked constants (byte-checked against `parity_web_tools.json` + TS):
+//! - `WEBFETCH_MAX_TRANSFER_BYTES = 10 * 1024 * 1024` (10 MB; TS
+//!   `MAX_HTTP_CONTENT_LENGTH`, `utils.ts:112`)
+//! - `WEBFETCH_MAX_MARKDOWN_LEN = 100_000` chars (TS `MAX_MARKDOWN_LENGTH`,
+//!   `utils.ts:128`)
+//! - `WEBFETCH_MAX_REDIRECTS = 10` (TS `MAX_REDIRECTS`, `utils.ts:125`)
 //! - `WEBFETCH_TRUNCATION_SUFFIX = "\n\n[Content truncated due to length...]"`
 //! - `WEBFETCH_USER_AGENT_PREFIX = "claude-code-tool/"`
 //! - `WEBFETCH_ALLOWED_SCHEMES = ["https", "http"]`
@@ -32,11 +37,28 @@ use tool_api::tool_trait::{
 use tool_api::BuiltinToolContext;
 use traits::http::HttpError;
 
-/// Maximum response-body size before truncation (5 MB). Spec §7 lock.
-pub const WEBFETCH_MAX_BYTES: usize = 5 * 1024 * 1024;
+/// Maximum transfer size for the response body — byte-locked to claude-code
+/// `MAX_HTTP_CONTENT_LENGTH` (`WebFetchTool/utils.ts:112`, the axios
+/// `maxContentLength`). A response whose body exceeds this errors (TS: axios
+/// throws `maxContentLength exceeded`), it is NOT truncated. The markdown is
+/// separately capped at [`WEBFETCH_MAX_MARKDOWN_LEN`].
+pub const WEBFETCH_MAX_TRANSFER_BYTES: usize = 10 * 1024 * 1024;
 
-/// Suffix appended to the body when it overflows [`WEBFETCH_MAX_BYTES`].
-/// Spec §7 lock; matches `claude-code/src/tools/WebFetchTool/utils.ts:532`.
+/// Maximum length (in chars) of the converted markdown before it is truncated
+/// with [`WEBFETCH_TRUNCATION_SUFFIX`] — byte-locked to claude-code
+/// `MAX_MARKDOWN_LENGTH` (`WebFetchTool/utils.ts:128`). TS slices the markdown
+/// string by UTF-16 code units (`String.prototype.slice`); this port slices by
+/// Unicode scalar (`char`) — identical for the BMP text WebFetch returns.
+pub const WEBFETCH_MAX_MARKDOWN_LEN: usize = 100_000;
+
+/// Maximum same-host redirect hops before erroring — byte-locked to claude-code
+/// `MAX_REDIRECTS` (`WebFetchTool/utils.ts:125`). Caps redirect loops so a
+/// malicious server cannot hang the tool (each hop resets the per-request
+/// timeout).
+pub const WEBFETCH_MAX_REDIRECTS: u32 = 10;
+
+/// Suffix appended to the markdown when it overflows [`WEBFETCH_MAX_MARKDOWN_LEN`].
+/// Spec §7 lock; matches `claude-code/src/tools/WebFetchTool/utils.ts:531-532`.
 pub const WEBFETCH_TRUNCATION_SUFFIX: &str = "\n\n[Content truncated due to length...]";
 
 /// User-Agent prefix for the tool-side fetch (distinct from api-client UA).
@@ -128,11 +150,11 @@ pub fn redirect_status_text(code: u16) -> &'static str {
 /// `prompt` is interpolated verbatim into the `- prompt: "${prompt}"` line; pass
 /// the empty string when the caller supplied no prompt (TS interpolates
 /// `undefined` as the string `"undefined"`, but the Rust input models an absent
-/// prompt as `None`/`""` — Batch 4 wires the real per-hop value through, so this
-/// scaffold takes the already-resolved string).
+/// prompt as `None`/`""`; `call()` passes `prompt.unwrap_or("")`).
 ///
-/// The returned string is suitable for the tool's `content`/`result` field once
-/// Batch 4 adds real per-hop redirect detection.
+/// Wired into [`WebFetchTool::call`]'s redirect loop: returned as the tool result
+/// `content` when a redirect targets a different host (not an
+/// [`is_permitted_redirect`]).
 #[must_use]
 pub fn format_redirect_message(
     original_url: &str,
@@ -155,23 +177,59 @@ pub fn format_redirect_message(
     )
 }
 
-/// Truncate `body` so that its byte length is `<= WEBFETCH_MAX_BYTES`, falling
-/// back to the nearest UTF-8 char boundary so we never split a multi-byte
-/// codepoint. If truncated, [`WEBFETCH_TRUNCATION_SUFFIX`] is appended.
+/// Whether a redirect from `original_url` to `redirect_url` is safe to follow —
+/// 1:1 with claude-code `isPermittedRedirect` (`WebFetchTool/utils.ts:212-243`).
+/// Permits redirects that only add/remove a leading `www.` or change the
+/// path/query while keeping the SAME origin. Rejects (returns false) when:
+/// - either URL fails to parse;
+/// - the scheme changes;
+/// - the port changes;
+/// - the redirect target carries credentials (username/password);
+/// - the hosts differ after stripping a single leading `www.`.
 ///
-/// Returns `(possibly_truncated_body, truncated_flag)`.
+/// Port note: `url::Url::port()` returns `None` for the scheme's default port,
+/// so comparing `port_or_known_default` (which folds in the scheme default)
+/// matches TS's `URL.port` semantics for the http/https schemes WebFetch allows.
 #[must_use]
-pub fn truncate_body(body: String) -> (String, bool) {
-    if body.len() <= WEBFETCH_MAX_BYTES {
-        return (body, false);
+pub fn is_permitted_redirect(original_url: &str, redirect_url: &str) -> bool {
+    let (Ok(orig), Ok(redir)) = (url::Url::parse(original_url), url::Url::parse(redirect_url))
+    else {
+        return false;
+    };
+    if redir.scheme() != orig.scheme() {
+        return false;
     }
-    let mut cut = WEBFETCH_MAX_BYTES;
-    while cut > 0 && !body.is_char_boundary(cut) {
-        cut -= 1;
+    if redir.port_or_known_default() != orig.port_or_known_default() {
+        return false;
     }
-    let mut truncated = body[..cut].to_string();
-    truncated.push_str(WEBFETCH_TRUNCATION_SUFFIX);
-    (truncated, true)
+    if !redir.username().is_empty() || redir.password().is_some() {
+        return false;
+    }
+    let strip_www = |h: &str| h.strip_prefix("www.").unwrap_or(h).to_string();
+    let orig_host = orig.host_str().map(strip_www);
+    let redir_host = redir.host_str().map(strip_www);
+    // Both must have a host, and they must match after stripping `www.`. (TS
+    // compares `parsedOriginal.hostname` strings directly; two host-less URLs
+    // would compare equal in TS, but http/https URLs always have a host.)
+    orig_host.is_some() && orig_host == redir_host
+}
+
+/// Truncate the converted `markdown` to [`WEBFETCH_MAX_MARKDOWN_LEN`] chars,
+/// appending [`WEBFETCH_TRUNCATION_SUFFIX`] when truncated — mirrors the
+/// `markdownContent.length > MAX_MARKDOWN_LENGTH` slice in
+/// `applyPromptToMarkdown` (`utils.ts:529-533`), but applied to the returned
+/// content (per this batch's spec: cap the markdown before returning). Slices on
+/// a `char` boundary (Unicode scalar), matching TS's UTF-16 `.slice` for BMP
+/// text. Returns `(possibly_truncated, truncated_flag)`.
+#[must_use]
+pub fn truncate_markdown_for_return(markdown: String) -> (String, bool) {
+    if markdown.chars().count() <= WEBFETCH_MAX_MARKDOWN_LEN {
+        return (markdown, false);
+    }
+    let cut: String = markdown.chars().take(WEBFETCH_MAX_MARKDOWN_LEN).collect();
+    let mut out = cut;
+    out.push_str(WEBFETCH_TRUNCATION_SUFFIX);
+    (out, true)
 }
 
 /// Format the byte-locked HTTP-error string. Spec §5:
@@ -271,12 +329,14 @@ impl WebFetchTool {
     }
 
     /// Run the secondary-model apply step over `markdown` with `prompt`. Returns
-    /// the model's text (or the fallback "No response from model").
+    /// the model's text (or the fallback "No response from model"). `is_preapproved`
+    /// is the host+path allowlist result (TS `isPreapprovedUrl(url)`), selecting the
+    /// relaxed vs strict guideline block in the secondary-model prompt.
     #[cfg(feature = "web-markdown")]
     async fn apply_prompt(
         &self,
         client: &std::sync::Arc<dyn sidequery::SideQueryClient>,
-        host: &str,
+        is_preapproved: bool,
         markdown: &str,
         prompt: &str,
     ) -> String {
@@ -286,7 +346,7 @@ impl WebFetchTool {
         let model_prompt = crate::markdown::make_secondary_model_prompt(
             &truncated,
             prompt,
-            crate::markdown::is_preapproved_domain(host),
+            is_preapproved,
         );
         let req = SideQueryRequest {
             model: self.apply_model(),
@@ -312,15 +372,16 @@ impl WebFetchTool {
     }
 
     /// Returns `Some(model_output)` when the apply step ran, else `None`.
+    /// `is_preapproved` is the host+path allowlist result for the fetched URL.
     #[cfg(feature = "web-markdown")]
     async fn maybe_apply(
         &self,
-        host: &str,
+        is_preapproved: bool,
         content: &str,
         prompt: Option<&str>,
     ) -> Option<String> {
         if let (Some(client), Some(p)) = (self.side_query.as_ref(), prompt) {
-            return Some(self.apply_prompt(client, host, content, p).await);
+            return Some(self.apply_prompt(client, is_preapproved, content, p).await);
         }
         None
     }
@@ -330,7 +391,7 @@ impl WebFetchTool {
     #[allow(clippy::unused_async)]
     async fn maybe_apply(
         &self,
-        _host: &str,
+        _is_preapproved: bool,
         _content: &str,
         _prompt: Option<&str>,
     ) -> Option<String> {
@@ -448,7 +509,29 @@ impl Tool for WebFetchTool {
         InterruptBehavior::Cancel
     }
 
-    async fn check_permissions(&self, _input: &Value, _ctx: &ToolUseContext) -> PermissionResult {
+    async fn check_permissions(&self, input: &Value, _ctx: &ToolUseContext) -> PermissionResult {
+        // Preapproved-host short-circuit (`WebFetchTool.ts:108-121`): if the URL's
+        // host+path is on the preapproved allowlist, allow with the "Preapproved
+        // host" reason BEFORE any rule lookup. A parse failure falls through to the
+        // default gate (TS catches and continues). The downstream rule-based
+        // deny/ask machinery is not ported in this batch, so a non-preapproved host
+        // continues to the M4-03 allow-all default.
+        if let Some(url_str) = input.get("url").and_then(Value::as_str) {
+            if let Ok(parsed) = url::Url::parse(url_str) {
+                if let Some(host) = parsed.host_str() {
+                    if crate::markdown::is_preapproved_host(host, parsed.path()) {
+                        return PermissionResult::Allow {
+                            reason: PermissionDecisionReason::Other {
+                                reason: "Preapproved host".into(),
+                            },
+                            updated_input: None,
+                            update_destination: None,
+                            metadata: PermissionMetadata::default(),
+                        };
+                    }
+                }
+            }
+        }
         PermissionResult::Allow {
             reason: PermissionDecisionReason::Other {
                 reason: "allow-all-gate (M4-03 default)".into(),
@@ -460,12 +543,37 @@ impl Tool for WebFetchTool {
     }
 
     async fn description(&self, _input: &Value, _opts: &DescriptionOptions) -> String {
-        "Fetches a URL and returns its content (HTTPS/HTTP only, 5 MB cap).".into()
+        // Byte-locked VERBATIM to claude-code `DESCRIPTION`
+        // (`WebFetchTool/prompt.ts:3-21`). The TS constant is a template literal
+        // that begins and ends with a newline; reproduced exactly.
+        "\n\
+- Fetches content from a specified URL and processes it using an AI model\n\
+- Takes a URL and a prompt as input\n\
+- Fetches the URL content, converts HTML to markdown\n\
+- Processes the content with the prompt using a small, fast model\n\
+- Returns the model's response about the content\n\
+- Use this tool when you need to retrieve and analyze web content\n\
+\n\
+Usage notes:\n\
+  - IMPORTANT: If an MCP-provided web fetch tool is available, prefer using that tool instead of this one, as it may have fewer restrictions.\n\
+  - The URL must be a fully-formed valid URL\n\
+  - HTTP URLs will be automatically upgraded to HTTPS\n\
+  - The prompt should describe what information you want to extract from the page\n\
+  - This tool is read-only and does not modify any files\n\
+  - Results may be summarized if the content is very large\n\
+  - Includes a self-cleaning 15-minute cache for faster responses when repeatedly accessing the same URL\n\
+  - When a URL redirects to a different host, the tool will inform you and provide the redirect URL in a special format. You should then make a new WebFetch request with the redirect URL to fetch the content.\n\
+  - For GitHub URLs, prefer using the gh CLI via Bash instead (e.g., gh pr view, gh issue view, gh api).\n"
+            .into()
     }
     async fn prompt(&self, _opts: &PromptOptions) -> String {
-        "WebFetch fetches a single URL via GET. Use https:// or http:// only. \
-         Bodies > 5 MB are truncated with a marker."
-            .into()
+        // claude-code's WebFetch has no separate `prompt()` — the `DESCRIPTION`
+        // constant is the full model-facing prompt. Mirror it here so both
+        // surfaces carry the verbatim TS text.
+        self.description(&Value::Null, &DescriptionOptions {
+            is_non_interactive_session: false,
+        })
+        .await
     }
 
     /// Reject an unparseable URL early with the byte-exact upstream message.
@@ -501,6 +609,15 @@ impl Tool for WebFetchTool {
         let mut parsed_url = validate_url(&parsed_input.url).map_err(ToolError::InvalidInput)?;
         let invocation_id = tool_api::util::ids::ulid_or_uuid();
 
+        // Preapproved-URL flag (TS `isPreapprovedUrl(url)`, `utils.ts:130-137`):
+        // host+path allowlist on the ORIGINAL URL, selecting the relaxed vs strict
+        // guideline block in the apply step. Computed once, used on both the
+        // cache-hit and live-fetch apply paths.
+        let is_preapproved = crate::markdown::is_preapproved_host(
+            parsed_url.host_str().unwrap_or(""),
+            parsed_url.path(),
+        );
+
         self.emit_started(
             &invocation_id,
             &parsed_input.url,
@@ -513,17 +630,17 @@ impl Tool for WebFetchTool {
         // ahead of the upgrade block at `utils.ts:406-416`. Repeat fetches of
         // the same URL return instantly without a second network round-trip.
         if let Some(hit) = crate::cache::cache_get(&parsed_input.url) {
-            // A fetch was truncated iff the raw body exceeded the cap; reproduce
-            // the same `truncated` flag the live path would have set.
-            let truncated = hit.bytes > WEBFETCH_MAX_BYTES;
+            // The cached `content` is the already-capped markdown; it was
+            // truncated iff it carries the truncation suffix (the live path
+            // appends [`WEBFETCH_TRUNCATION_SUFFIX`] when the 100k char cap hit).
+            let truncated = hit.content.ends_with(WEBFETCH_TRUNCATION_SUFFIX);
             // Cache hits do no network work, so the reported duration is 0 ms.
             self.emit_completed(&invocation_id, hit.status, hit.bytes as u64, truncated, 0)
                 .await;
             // claude-code caches only the markdown; the prompt is applied on EVERY
             // call (cache hit or miss). Run the apply step on the cached content.
-            let host = parsed_url.host_str().unwrap_or("<unknown>").to_string();
             let out_content = match self
-                .maybe_apply(&host, &hit.content, parsed_input.prompt.as_deref())
+                .maybe_apply(is_preapproved, &hit.content, parsed_input.prompt.as_deref())
                 .await
             {
                 Some(applied) => applied,
@@ -574,18 +691,115 @@ impl Tool for WebFetchTool {
         }
 
         let started = Instant::now();
-        let req = HttpRequest {
-            method: HttpMethod::Get,
-            url: parsed_url.to_string(),
-            headers: vec![
-                ("user-agent".into(), Self::user_agent()),
-                ("accept".into(), "text/markdown, text/html, */*".into()),
-            ],
-            body: None,
-            body_bytes: None,
-            timeout: Some(WEBFETCH_TIMEOUT),
+
+        // Manual permitted-redirect loop — 1:1 with claude-code
+        // `getWithPermittedRedirects` (`utils.ts:262-366`). Each iteration issues
+        // a GET against `fetch_url` (auto-redirect is NOT requested — the M1
+        // transport surfaces a 3xx as `Ok(status=3xx)`). On a 301/302/307/308 with
+        // a `Location`: resolve it against the current URL; if
+        // `is_permitted_redirect` (same scheme+port, no creds, host equal after
+        // stripping a leading `www.`) → follow it (loop); else → return the
+        // "REDIRECT DETECTED" notice. Capped at `WEBFETCH_MAX_REDIRECTS` (10) hops.
+        //
+        // NOTE (transport limitation): the frozen `HttpRequest` has no
+        // `follow_redirects` flag, so a production transport that auto-follows
+        // (e.g. reqwest's default) would transparently follow a cross-host
+        // redirect before this loop sees the 3xx — the cross-host notice then only
+        // triggers for transports that surface 3xx (the test `MockHttpTransport`,
+        // and any non-auto-following transport). The proper fix is a transport-level
+        // opt-out, which lives in the frozen `protocol`/`traits` crates (out of
+        // this batch's `tools/web`-only scope) — recorded as a follow-up.
+        let mut fetch_url = parsed_url.clone();
+        let mut hops: u32 = 0;
+        let resp_result = loop {
+            let req = HttpRequest {
+                method: HttpMethod::Get,
+                url: fetch_url.to_string(),
+                headers: vec![
+                    ("user-agent".into(), Self::user_agent()),
+                    ("accept".into(), "text/markdown, text/html, */*".into()),
+                ],
+                body: None,
+                body_bytes: None,
+                timeout: Some(WEBFETCH_TIMEOUT),
+            };
+            let result = self.ctx.http.request(req).await;
+
+            // Redirect handling only on a 3xx `Ok` carrying a Location header.
+            if let Ok(resp) = &result {
+                if matches!(resp.status, 301 | 302 | 307 | 308) {
+                    let location = resp
+                        .headers
+                        .iter()
+                        .find(|(k, _)| k.eq_ignore_ascii_case("location"))
+                        .map(|(_, v)| v.clone());
+                    let Some(location) = location else {
+                        // Redirect without a Location header — TS throws
+                        // "Redirect missing Location header".
+                        let elapsed_ms = started.elapsed().as_millis() as u64;
+                        self.emit_failed(&invocation_id, "redirect_no_location", Some(resp.status), elapsed_ms)
+                            .await;
+                        return Err(ToolError::Transport(
+                            "WebFetch: redirect missing Location header".to_string(),
+                        ));
+                    };
+                    // Resolve a possibly-relative Location against the current URL.
+                    let redirect_url = match fetch_url.join(&location) {
+                        Ok(u) => u.to_string(),
+                        Err(_) => location.clone(),
+                    };
+                    let current = fetch_url.to_string();
+                    if is_permitted_redirect(&current, &redirect_url) {
+                        hops += 1;
+                        if hops > WEBFETCH_MAX_REDIRECTS {
+                            let elapsed_ms = started.elapsed().as_millis() as u64;
+                            self.emit_failed(&invocation_id, "too_many_redirects", None, elapsed_ms)
+                                .await;
+                            return Err(ToolError::Transport(format!(
+                                "WebFetch: too many redirects (exceeded {WEBFETCH_MAX_REDIRECTS})"
+                            )));
+                        }
+                        // Follow the permitted redirect (parse failure => fall
+                        // through to the redirect notice rather than loop forever).
+                        if let Ok(u) = url::Url::parse(&redirect_url) {
+                            fetch_url = u;
+                            continue;
+                        }
+                    }
+                    // Not permitted (different host) — return the redirect notice.
+                    let elapsed_ms = started.elapsed().as_millis() as u64;
+                    let status_text = redirect_status_text(resp.status);
+                    let message = format_redirect_message(
+                        &current,
+                        &redirect_url,
+                        resp.status,
+                        parsed_input.prompt.as_deref().unwrap_or(""),
+                    );
+                    self.emit_completed(
+                        &invocation_id,
+                        resp.status,
+                        message.len() as u64,
+                        false,
+                        elapsed_ms,
+                    )
+                    .await;
+                    return Ok(ToolCallResult {
+                        data: json!({
+                            "url": parsed_input.url,
+                            "status": resp.status,
+                            "code_text": status_text,
+                            "content": message,
+                            "truncated": false,
+                            "bytes": message.len(),
+                        }),
+                        new_messages: vec![],
+                        context_modifier: None,
+                        mcp_meta: None,
+                    });
+                }
+            }
+            break result;
         };
-        let resp_result = self.ctx.http.request(req).await;
         let elapsed_ms = started.elapsed().as_millis() as u64;
 
         match resp_result {
@@ -598,23 +812,39 @@ impl Tool for WebFetchTool {
             Ok(resp) => {
                 let status = resp.status;
                 let body_bytes = resp.body.len();
+
+                // Transfer cap (`utils.ts:112` `maxContentLength`): a body larger
+                // than 10 MB is rejected, NOT truncated (TS: axios throws). The M1
+                // transport already buffered the body, so we check its length here.
+                if body_bytes > WEBFETCH_MAX_TRANSFER_BYTES {
+                    self.emit_failed(&invocation_id, "content_too_large", Some(status), elapsed_ms)
+                        .await;
+                    return Err(ToolError::Transport(format!(
+                        "WebFetch: response body ({body_bytes} bytes) exceeds maximum allowed size ({WEBFETCH_MAX_TRANSFER_BYTES} bytes)"
+                    )));
+                }
+
                 let content_type = resp
                     .headers
                     .iter()
                     .find(|(k, _)| k.eq_ignore_ascii_case("content-type"))
                     .map_or_else(String::new, |(_, v)| v.clone());
-                let (raw_body, truncated) = truncate_body(resp.body);
 
                 // HTML->markdown (claude-code converts HTML; non-HTML is used as-is).
                 // Behind `web-markdown`; feature off => content is the raw body.
                 #[cfg(feature = "web-markdown")]
-                let content = if crate::markdown::is_html_content_type(&content_type) {
-                    crate::markdown::html_to_markdown(&raw_body)
+                let converted = if crate::markdown::is_html_content_type(&content_type) {
+                    crate::markdown::html_to_markdown(&resp.body)
                 } else {
-                    raw_body
+                    resp.body
                 };
                 #[cfg(not(feature = "web-markdown"))]
-                let content = raw_body;
+                let converted = resp.body;
+
+                // Markdown cap (`utils.ts:128`/`529-533`): truncate the converted
+                // markdown to 100k chars, appending the suffix, BEFORE caching /
+                // returning. `truncated` reflects whether this cut fired.
+                let (content, truncated) = truncate_markdown_for_return(converted);
 
                 crate::cache::cache_set(
                     parsed_input.url.clone(),
@@ -630,7 +860,7 @@ impl Tool for WebFetchTool {
                     .await;
 
                 let out_content = self
-                    .maybe_apply(&host, &content, parsed_input.prompt.as_deref())
+                    .maybe_apply(is_preapproved, &content, parsed_input.prompt.as_deref())
                     .await
                     .unwrap_or(content);
 
@@ -724,7 +954,10 @@ mod tests {
 
     #[test]
     fn locked_constants_match_spec() {
-        assert_eq!(WEBFETCH_MAX_BYTES, 5_242_880);
+        // TS-faithful caps (utils.ts:112/125/128).
+        assert_eq!(WEBFETCH_MAX_TRANSFER_BYTES, 10 * 1024 * 1024);
+        assert_eq!(WEBFETCH_MAX_MARKDOWN_LEN, 100_000);
+        assert_eq!(WEBFETCH_MAX_REDIRECTS, 10);
         assert_eq!(
             WEBFETCH_TRUNCATION_SUFFIX,
             "\n\n[Content truncated due to length...]"
@@ -739,43 +972,93 @@ mod tests {
     }
 
     #[test]
-    fn does_not_truncate_small_body() {
+    fn does_not_truncate_short_markdown() {
         let small = "hello world".to_string();
-        let (out, flag) = truncate_body(small.clone());
+        let (out, flag) = truncate_markdown_for_return(small.clone());
         assert_eq!(out, small);
         assert!(!flag);
     }
 
     #[test]
-    fn does_not_truncate_exactly_at_cap() {
-        let exact = "a".repeat(WEBFETCH_MAX_BYTES);
-        let (out, flag) = truncate_body(exact.clone());
+    fn does_not_truncate_markdown_exactly_at_cap() {
+        let exact = "a".repeat(WEBFETCH_MAX_MARKDOWN_LEN);
+        let (out, flag) = truncate_markdown_for_return(exact.clone());
         assert_eq!(out, exact);
         assert!(!flag);
     }
 
     #[test]
-    fn truncates_oversized_body() {
-        let big = "a".repeat(WEBFETCH_MAX_BYTES + 1024);
-        let (out, flag) = truncate_body(big);
+    fn truncates_oversized_markdown_to_char_cap() {
+        let big = "a".repeat(WEBFETCH_MAX_MARKDOWN_LEN + 1024);
+        let (out, flag) = truncate_markdown_for_return(big);
         assert!(flag);
         assert!(out.ends_with(WEBFETCH_TRUNCATION_SUFFIX));
-        let suffix_len = WEBFETCH_TRUNCATION_SUFFIX.len();
-        assert_eq!(out.len(), WEBFETCH_MAX_BYTES + suffix_len);
+        // Char count of the body (excluding the suffix) is exactly the cap.
+        let body_only = &out[..out.len() - WEBFETCH_TRUNCATION_SUFFIX.len()];
+        assert_eq!(body_only.chars().count(), WEBFETCH_MAX_MARKDOWN_LEN);
     }
 
     #[test]
-    fn truncates_multibyte_at_char_boundary() {
-        let mut s = "a".repeat(WEBFETCH_MAX_BYTES - 1);
-        s.push('日');
-        s.push('日');
-        let (out, flag) = truncate_body(s);
+    fn truncates_markdown_on_char_boundary_multibyte() {
+        // A run of multibyte chars; the cap is by CHAR (not byte), so no scalar
+        // is split and the body holds exactly WEBFETCH_MAX_MARKDOWN_LEN chars.
+        let s = "あ".repeat(WEBFETCH_MAX_MARKDOWN_LEN + 50);
+        let (out, flag) = truncate_markdown_for_return(s);
         assert!(flag);
         let body_only = &out[..out.len() - WEBFETCH_TRUNCATION_SUFFIX.len()];
         assert!(body_only.is_char_boundary(body_only.len()));
-        // Walk-back from MAX_BYTES (which lands inside the first "日") must end
-        // at MAX_BYTES - 1 (the byte just before "日").
-        assert_eq!(body_only.len(), WEBFETCH_MAX_BYTES - 1);
+        assert_eq!(body_only.chars().count(), WEBFETCH_MAX_MARKDOWN_LEN);
+    }
+
+    // ---- is_permitted_redirect (utils.ts:212-243) --------------------------
+
+    #[test]
+    fn permitted_redirect_same_host_path_change() {
+        assert!(is_permitted_redirect(
+            "https://example.com/a",
+            "https://example.com/b?q=1"
+        ));
+    }
+
+    #[test]
+    fn permitted_redirect_adds_or_removes_www() {
+        assert!(is_permitted_redirect(
+            "https://example.com/a",
+            "https://www.example.com/a"
+        ));
+        assert!(is_permitted_redirect(
+            "https://www.example.com/a",
+            "https://example.com/a"
+        ));
+    }
+
+    #[test]
+    fn rejected_redirect_different_host() {
+        assert!(!is_permitted_redirect(
+            "https://example.com/a",
+            "https://evil.example.org/a"
+        ));
+    }
+
+    #[test]
+    fn rejected_redirect_scheme_or_port_or_creds_change() {
+        // Scheme change.
+        assert!(!is_permitted_redirect(
+            "https://example.com/a",
+            "http://example.com/a"
+        ));
+        // Port change.
+        assert!(!is_permitted_redirect(
+            "https://example.com/a",
+            "https://example.com:8443/a"
+        ));
+        // Credentials on the redirect target.
+        assert!(!is_permitted_redirect(
+            "https://example.com/a",
+            "https://user:pass@example.com/a"
+        ));
+        // Unparseable.
+        assert!(!is_permitted_redirect("not-a-url", "https://example.com/a"));
     }
 
     #[test]

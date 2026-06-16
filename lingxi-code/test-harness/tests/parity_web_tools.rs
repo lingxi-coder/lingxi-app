@@ -16,8 +16,9 @@ use telemetry::tengu::tool::{
 };
 use test_harness::parity::load_fixture;
 use tool_web::web_fetch::{
-    fmt_dns_error, fmt_http_error, WEBFETCH_ALLOWED_SCHEMES, WEBFETCH_MAX_BYTES, WEBFETCH_TIMEOUT,
-    WEBFETCH_TRUNCATION_SUFFIX, WEBFETCH_USER_AGENT_PREFIX,
+    fmt_dns_error, fmt_http_error, WEBFETCH_ALLOWED_SCHEMES, WEBFETCH_MAX_MARKDOWN_LEN,
+    WEBFETCH_MAX_REDIRECTS, WEBFETCH_MAX_TRANSFER_BYTES, WEBFETCH_TIMEOUT, WEBFETCH_TRUNCATION_SUFFIX,
+    WEBFETCH_USER_AGENT_PREFIX,
 };
 use tool_web::web_search::{
     WEB_SEARCH_DEFAULT_MAX_TOKENS, WEB_SEARCH_MAX_USES, WEB_SEARCH_TOOL_BLOCK_NAME,
@@ -35,7 +36,9 @@ struct ErrorTemplates {
 struct WebToolsFixture {
     _source: String,
     _note: String,
-    webfetch_max_bytes: usize,
+    webfetch_max_transfer_bytes: usize,
+    webfetch_max_markdown_len: usize,
+    webfetch_max_redirects: u32,
     webfetch_truncation_suffix: String,
     webfetch_user_agent_prefix: String,
     webfetch_allowed_schemes: Vec<String>,
@@ -54,8 +57,14 @@ fn webfetch_constants_match_fixture() {
     let fix: WebToolsFixture = load_fixture("web_tools");
     assert!(!fix._source.is_empty());
     assert!(!fix._note.is_empty());
-    assert_eq!(fix.webfetch_max_bytes, WEBFETCH_MAX_BYTES);
-    assert_eq!(fix.webfetch_max_bytes, 5_242_880);
+    // TS-faithful caps (utils.ts:112/125/128). The prior single 5 MB body cap
+    // (WEBFETCH_MAX_BYTES) was a divergence and is gone.
+    assert_eq!(fix.webfetch_max_transfer_bytes, WEBFETCH_MAX_TRANSFER_BYTES);
+    assert_eq!(fix.webfetch_max_transfer_bytes, 10 * 1024 * 1024);
+    assert_eq!(fix.webfetch_max_markdown_len, WEBFETCH_MAX_MARKDOWN_LEN);
+    assert_eq!(fix.webfetch_max_markdown_len, 100_000);
+    assert_eq!(fix.webfetch_max_redirects, WEBFETCH_MAX_REDIRECTS);
+    assert_eq!(fix.webfetch_max_redirects, 10);
     assert_eq!(fix.webfetch_truncation_suffix, WEBFETCH_TRUNCATION_SUFFIX);
     assert_eq!(fix.webfetch_user_agent_prefix, WEBFETCH_USER_AGENT_PREFIX);
     let allowed: Vec<&str> = fix

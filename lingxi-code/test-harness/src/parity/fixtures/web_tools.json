@@ -1,7 +1,9 @@
 {
   "_source": "claude-code/src/tools/WebFetchTool/utils.ts + WebSearchTool/WebSearchTool.ts",
-  "_note": "Byte-aligned locks for M4-03 web tools. LingXi caps WebFetch at 5 MB (spec §7 lock); upstream uses 10 MB. All other literals match upstream verbatim. Event names follow M3-06 lock (_completed suffix, not _succeeded).",
-  "webfetch_max_bytes": 5242880,
+  "_note": "Byte-aligned locks for the web tools, now TS-faithful: WebFetch caps the TRANSFER at 10 MB (MAX_HTTP_CONTENT_LENGTH, utils.ts:112) and the converted MARKDOWN at 100k chars (MAX_MARKDOWN_LENGTH, utils.ts:128) — the prior single 5 MB body cap was a divergence and has been removed. Event names follow the M3-06 lock (_completed suffix, not _succeeded).",
+  "webfetch_max_transfer_bytes": 10485760,
+  "webfetch_max_markdown_len": 100000,
+  "webfetch_max_redirects": 10,
   "webfetch_truncation_suffix": "\n\n[Content truncated due to length...]",
   "webfetch_user_agent_prefix": "claude-code-tool/",
   "webfetch_allowed_schemes": ["https", "http"],

@@ -87,18 +87,37 @@ fn file_tools_fixture_matches_production_constants() {
         fx.read_size_limit.value,
         tool_file::read::MAX_FILE_READ_SIZE
     );
+    // Byte-VERBATIM to claude-code FileTooLargeError (readFileInRange.ts:62-64).
+    // The runtime formatter `format_too_large` substitutes both sizes via
+    // formatFileSize; cross-check the template against a concrete instance.
     assert_eq!(
         fx.read_size_limit.error_template,
-        "File {path} ({size}B) exceeds 256KB read limit"
+        "File content ({size}) exceeds maximum allowed size ({max}). Use offset and limit parameters to read specific portions of the file, or search for specific content instead of reading the whole file."
+    );
+    let concrete_too_large = fx
+        .read_size_limit
+        .error_template
+        .replace("{size}", "293KB")
+        .replace("{max}", "256KB");
+    assert_eq!(
+        concrete_too_large,
+        tool_file::read::format_too_large(std::path::Path::new("/tmp/x"), 300_000)
     );
 
     assert_eq!(
         fx.binary_detection.scan_window_bytes,
         tool_file::shared::NUL_SCAN_WINDOW
     );
+    // Byte-VERBATIM to FileReadTool.ts:479; the lowercased extension is
+    // interpolated by `format_binary`.
     assert_eq!(
         fx.binary_detection.error_template,
-        "File {path} appears to be binary (first 8KB contains NUL bytes)"
+        "This tool cannot read binary files. The file appears to be a binary {ext} file. Please use appropriate tools for binary file analysis."
+    );
+    let concrete_binary = fx.binary_detection.error_template.replace("{ext}", ".bin");
+    assert_eq!(
+        concrete_binary,
+        tool_file::read::format_binary(std::path::Path::new("/tmp/x.bin"))
     );
 
     assert_eq!(

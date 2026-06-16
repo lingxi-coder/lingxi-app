@@ -35,6 +35,13 @@ use tool_api::BuiltinToolContext;
 /// Maximum file size FileReadTool will load. Spec §7 lock (256 KB).
 pub const MAX_FILE_READ_SIZE: u64 = 262_144;
 
+/// Default line cap for a no-`limit` text read — byte-locked to claude-code
+/// `MAX_LINES_TO_READ` (`FileReadTool/prompt.ts:10`). When the caller supplies no
+/// `limit`, the read returns at most this many lines starting from `offset`, and
+/// the model-facing output surfaces the truncation (mirroring TS, whose
+/// `readFileInRange` is called with `maxLines = limit ?? MAX_LINES_TO_READ`).
+pub const MAX_LINES_TO_READ: u64 = 2000;
+
 /// Default per-read output token budget — byte-locked to claude-code
 /// `DEFAULT_MAX_OUTPUT_TOKENS` (`FileReadTool/limits.ts:18`). A full text read
 /// whose estimated token count exceeds this errors with
@@ -132,16 +139,15 @@ fn validate_content_tokens(content: &str, ext: Option<&str>, max_tokens: u64) ->
 }
 
 /// Human-readable file size, byte-faithful to claude-code `formatFileSize`
-/// (`src/utils/format.ts`): `< 1KB` ⇒ `"{n} bytes"`; otherwise one decimal with a
-/// trailing `.0` trimmed, suffixed `KB`/`MB`/`GB` (no space). Used by the PDF
-/// routing/extraction messages.
+/// (`src/utils/format.ts:9-23`): `< 1KB` ⇒ `"{n} bytes"`; otherwise one decimal
+/// with a trailing `.0` trimmed, suffixed `KB`/`MB`/`GB` (no space). Used by the
+/// too-large read message ([`format_too_large`]) and the PDF routing/extraction
+/// messages.
 // The u64 → f64 cast loses precision for values > 2^53 (> 9 PB). File sizes
-// of that magnitude are not realistic for PDF extraction, and claude-code uses
-// JavaScript number (f64) for the same computation. The cast is intentional.
-// Gated on pdf-read: callers exist in both the no-pages routing (pdf-read, Edit A)
-// and the page-extraction payload (pdf-render). Since pdf-render implies pdf-read,
-// gating on pdf-read covers ALL reachable callers in every feature combination.
-#[cfg(feature = "pdf-read")]
+// of that magnitude are not realistic, and claude-code uses JavaScript number
+// (f64) for the same computation. The cast is intentional. Always compiled (no
+// feature gate) — `format_too_large` is a core text-read message reachable in
+// every feature combination.
 #[allow(clippy::cast_precision_loss)]
 pub(crate) fn format_file_size(size_in_bytes: u64) -> String {
     fn trim(x: f64) -> String {
@@ -200,22 +206,88 @@ pub(crate) fn build_pages_payload(
     Ok((sources, data))
 }
 
-/// Build the byte-locked too-large error message per spec §5.
+/// Build the too-large error message — byte-locked VERBATIM to claude-code
+/// `FileTooLargeError` (`utils/readFileInRange.ts:62-64`). Both sizes are
+/// rendered with [`format_file_size`] (TS `formatFileSize`). The `path` argument
+/// is unused by the TS message (it interpolates only the two sizes); kept in the
+/// signature so existing call sites need no change.
 #[must_use]
-pub fn format_too_large(path: &std::path::Path, size: u64) -> String {
+pub fn format_too_large(_path: &std::path::Path, size: u64) -> String {
     format!(
-        "File {} ({}B) exceeds 256KB read limit",
-        path.display(),
-        size
+        "File content ({}) exceeds maximum allowed size ({}). Use offset and limit parameters to read specific portions of the file, or search for specific content instead of reading the whole file.",
+        format_file_size(size),
+        format_file_size(MAX_FILE_READ_SIZE),
     )
 }
 
-/// Build the byte-locked binary-file error message per spec §5.
+/// Binary file extensions (with leading dot, lowercase) — 1:1 port of
+/// claude-code `BINARY_EXTENSIONS` (`constants/files.ts:5-112`). A file whose
+/// extension is in this set is rejected as binary *before* any read, EXCEPT the
+/// extensions the tool renders natively (the 5 image exts + `.pdf`), which route
+/// to the image / PDF paths earlier (`FileReadTool.ts:472-476`: `hasBinaryExtension
+/// && !isPDFExtension && !IMAGE_EXTENSIONS.has(...)`).
+static BINARY_EXTENSIONS: Lazy<std::collections::HashSet<&'static str>> = Lazy::new(|| {
+    [
+        // Images
+        ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".ico", ".webp", ".tiff", ".tif",
+        // Videos
+        ".mp4", ".mov", ".avi", ".mkv", ".webm", ".wmv", ".flv", ".m4v", ".mpeg", ".mpg",
+        // Audio
+        ".mp3", ".wav", ".ogg", ".flac", ".aac", ".m4a", ".wma", ".aiff", ".opus",
+        // Archives
+        ".zip", ".tar", ".gz", ".bz2", ".7z", ".rar", ".xz", ".z", ".tgz", ".iso",
+        // Executables/binaries
+        ".exe", ".dll", ".so", ".dylib", ".bin", ".o", ".a", ".obj", ".lib", ".app", ".msi",
+        ".deb", ".rpm",
+        // Documents (PDF is here; the call site excludes it — rendered natively)
+        ".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx", ".odt", ".ods", ".odp",
+        // Fonts
+        ".ttf", ".otf", ".woff", ".woff2", ".eot",
+        // Bytecode / VM artifacts
+        ".pyc", ".pyo", ".class", ".jar", ".war", ".ear", ".node", ".wasm", ".rlib",
+        // Database files
+        ".sqlite", ".sqlite3", ".db", ".mdb", ".idx",
+        // Design / 3D
+        ".psd", ".ai", ".eps", ".sketch", ".fig", ".xd", ".blend", ".3ds", ".max",
+        // Flash
+        ".swf", ".fla",
+        // Lock/profiling data
+        ".lockb", ".dat", ".data",
+    ]
+    .into_iter()
+    .collect()
+});
+
+/// `hasBinaryExtension(filePath)` — 1:1 with `constants/files.ts:117-120`. Takes
+/// the substring from the last `.` (inclusive), lowercases it, and checks
+/// membership in [`BINARY_EXTENSIONS`]. A path with no `.` yields the whole path
+/// lowercased (TS `slice(lastIndexOf('.'))` returns the full string when there is
+/// no dot), which will not be in the set.
+#[must_use]
+fn has_binary_extension(path: &std::path::Path) -> bool {
+    let name = path.to_string_lossy();
+    let ext = match name.rfind('.') {
+        Some(i) => name[i..].to_ascii_lowercase(),
+        None => name.to_ascii_lowercase(),
+    };
+    BINARY_EXTENSIONS.contains(ext.as_str())
+}
+
+/// Build the binary-file error message — byte-locked VERBATIM to claude-code
+/// `FileReadTool.ts:479`. TS renders the file's lowercased extension (e.g.
+/// `.bin`) into the message; [`format_binary`] derives it from `path` the same
+/// way (`path.extname(...).toLowerCase()`), falling back to an empty extension
+/// for extensionless files (matching TS `path.extname` returning `""`). Used by
+/// BOTH the extension gate (`has_binary_extension`) and the NUL-scan fallback (an
+/// extensionless or non-listed binary file whose first 8 KB contain a NUL byte).
 #[must_use]
 pub fn format_binary(path: &std::path::Path) -> String {
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map_or_else(String::new, |e| format!(".{}", e.to_ascii_lowercase()));
     format!(
-        "File {} appears to be binary (first 8KB contains NUL bytes)",
-        path.display()
+        "This tool cannot read binary files. The file appears to be a binary {ext} file. Please use appropriate tools for binary file analysis."
     )
 }
 
@@ -817,11 +889,42 @@ impl Tool for FileReadTool {
     }
 
     async fn description(&self, _input: &Value, _opts: &DescriptionOptions) -> String {
-        "Read a file from the workspace.".to_string()
+        // Byte-locked VERBATIM to claude-code `DESCRIPTION`
+        // (`FileReadTool/prompt.ts:12`).
+        "Read a file from the local filesystem.".to_string()
     }
 
     async fn prompt(&self, _opts: &PromptOptions) -> String {
-        "Read a UTF-8 text file. Returns content, line range, total lines.".to_string()
+        // Byte-locked VERBATIM to claude-code `renderPromptTemplate`
+        // (`FileReadTool/prompt.ts:27-49`), resolved for the 3P/default build:
+        //   * `${MAX_LINES_TO_READ}` => 2000;
+        //   * `${maxSizeInstruction}` => "" (`includeMaxSizeInPrompt` defaults
+        //     undefined/false — no GrowthBook `tengu_amber_wren` override);
+        //   * `${offsetInstruction}` => `OFFSET_INSTRUCTION_DEFAULT`
+        //     (`targetedRangeNudge` defaults undefined/false);
+        //   * `${lineFormat}` => `LINE_FORMAT_INSTRUCTION`;
+        //   * `${BASH_TOOL_NAME}` => "Bash";
+        //   * the `isPDFSupported() ? ... : ''` fragment => INCLUDED (the default
+        //     model is not `claude-3-haiku`, so `isPDFSupported()` is true).
+        // The USER_TYPE/ant analytics branch has no analog and is not part of this
+        // template. Constructed from `MAX_LINES_TO_READ` so the "up to 2000 lines"
+        // line can never drift from the cap constant.
+        format!(
+            "Reads a file from the local filesystem. You can access any file directly by using this tool.\n\
+Assume this tool is able to read all files on the machine. If the User provides a path to a file assume that path is valid. It is okay to read a file that does not exist; an error will be returned.\n\
+\n\
+Usage:\n\
+- The file_path parameter must be an absolute path, not a relative path\n\
+- By default, it reads up to {MAX_LINES_TO_READ} lines starting from the beginning of the file\n\
+- You can optionally specify a line offset and limit (especially handy for long files), but it's recommended to read the whole file by not providing these parameters\n\
+- Results are returned using cat -n format, with line numbers starting at 1\n\
+- This tool allows Claude Code to read images (eg PNG, JPG, etc). When reading an image file the contents are presented visually as Claude Code is a multimodal LLM.\n\
+- This tool can read PDF files (.pdf). For large PDFs (more than 10 pages), you MUST provide the pages parameter to read specific page ranges (e.g., pages: \"1-5\"). Reading a large PDF without the pages parameter will fail. Maximum 20 pages per request.\n\
+- This tool can read Jupyter notebooks (.ipynb files) and returns all cells with their outputs, combining code, text, and visualizations.\n\
+- This tool can only read files, not directories. To read a directory, use an ls command via the Bash tool.\n\
+- You will regularly be asked to read screenshots. If the user provides a path to a screenshot, ALWAYS use this tool to view the file at the path. This tool will work with all temporary file paths.\n\
+- If you read a file that exists but has empty contents you will receive a system reminder warning in place of file contents."
+        )
     }
 
     fn get_path(&self, input: &Value) -> Option<PathBuf> {
@@ -950,6 +1053,23 @@ impl Tool for FileReadTool {
         // `pdf-read` is off.
         let is_pdf = cfg!(feature = "pdf-read") && is_pdf_path(&canon);
 
+        // Binary-extension gate (`FileReadTool.ts:469-482`). A file whose
+        // extension is in `BINARY_EXTENSIONS` is rejected as binary *before* any
+        // read — EXCEPT the extensions the tool renders natively (the 5 image
+        // exts + `.pdf`), which TS excludes via `!isPDFExtension && !IMAGE_EXTENSIONS
+        // .has(...)`. The exclusion uses the raw, feature-INDEPENDENT extension
+        // predicates (`is_image_path`/`is_pdf_path`) so a `.png`/`.pdf` is excluded
+        // even when its render feature is off — exactly like TS, which has no
+        // feature flags (an excluded image/PDF with the feature off then falls
+        // through to the NUL-scan, which still catches its binary bytes). This is
+        // the PRIMARY binary detection (by extension); the NUL-scan below is the
+        // fallback for extensionless / non-listed binaries (`FileReadTool.ts` reads
+        // the bytes then scans — here `looks_binary`).
+        if has_binary_extension(&canon) && !is_image_path(&canon) && !is_pdf_path(&canon) {
+            self.emit_failed(&invocation_id, "binary_file").await;
+            return Err(ToolError::Io(format_binary(&canon)));
+        }
+
         // TS applies the byte cap ONLY when no `limit` is supplied
         // (`readFileInRange(..., limit === undefined ? maxSizeBytes : undefined)`
         // — FileReadTool.ts:1026). A ranged read (offset+limit) of a >256KB file
@@ -1038,17 +1158,32 @@ impl Tool for FileReadTool {
             let model_content = crate::notebook_read::render_cells_model_text(&cells);
 
             // Serialized cells JSON — TS's `cellsJson = jsonStringify(cells)`
-            // (`FileReadTool.ts:824`). One serialization, reused for both the
-            // token gate and the registry entry (matches TS's single `cellsJson`).
+            // (`FileReadTool.ts:824`). One serialization, reused for the byte cap,
+            // the token gate, and the registry entry (matches TS's single
+            // `cellsJson`).
             let cells_json = serde_json::to_string(&cells).unwrap_or_default();
+
+            // Notebook byte-size cap (`FileReadTool.ts:826-836`): if the serialized
+            // cells JSON exceeds `maxSizeBytes` (the 256 KB default — LingXi has no
+            // `fileReadingLimits` override), error with the jq-suggestion message
+            // VERBATIM from TS, before the token gate / state record. `file_path`
+            // is the ORIGINAL input path (TS uses the un-expanded `file_path` in the
+            // `cat "..."` snippets), and both sizes use `format_file_size`.
+            let cells_json_bytes = cells_json.len() as u64;
+            if cells_json_bytes > MAX_FILE_READ_SIZE {
+                self.emit_failed(&invocation_id, "notebook_too_large").await;
+                return Err(ToolError::Io(format!(
+                    "Notebook content ({}) exceeds maximum allowed size ({}). Use Bash with jq to read specific portions:\n  cat \"{file_path}\" | jq '.cells[:20]' # First 20 cells\n  cat \"{file_path}\" | jq '.cells[100:120]' # Cells 100-120\n  cat \"{file_path}\" | jq '.cells | length' # Count total cells\n  cat \"{file_path}\" | jq '.cells[] | select(.cell_type==\"code\") | .source' # All code sources",
+                    format_file_size(cells_json_bytes),
+                    format_file_size(MAX_FILE_READ_SIZE),
+                )));
+            }
 
             // Token-budget gate on the cells JSON — TS runs
             // `validateContentTokens(cellsJson, ext, maxTokens)`
             // (`FileReadTool.ts:838`) on the notebook path too, after the
             // byte-size check and before recording state. `ext` is `"ipynb"`
-            // (bytesPerToken 4). The Notebook byte-size cap (`cellsJsonBytes >
-            // maxSizeBytes`, FileReadTool.ts:827) is a separate pre-existing
-            // gap not in scope here.
+            // (bytesPerToken 4).
             if let Err(msg) =
                 validate_content_tokens(&cells_json, Some("ipynb"), DEFAULT_MAX_OUTPUT_TOKENS)
             {
@@ -1111,10 +1246,18 @@ impl Tool for FileReadTool {
             content.bytes().filter(|&b| b == b'\n').count() as u64 + 1
         };
         let start_idx = (offset.saturating_sub(1) as usize).min(all_lines.len());
-        let end_idx = match limit {
-            Some(l) => (start_idx + l as usize).min(all_lines.len()),
-            None => all_lines.len(),
-        };
+        // Default line cap (`FileReadTool/prompt.ts:10`, `MAX_LINES_TO_READ`):
+        // when no explicit `limit` is given, read at most 2000 lines from
+        // `offset`. claude-code advertises this default in the Read prompt ("it
+        // reads up to 2000 lines"); the cap keeps that promise and bounds a
+        // no-limit read of a long (but <256 KB) file. A `limit` supplied by the
+        // caller is honored verbatim (the explicit count, even if > 2000).
+        let effective_limit = limit.unwrap_or(MAX_LINES_TO_READ);
+        let end_idx = (start_idx + effective_limit as usize).min(all_lines.len());
+        // True when the default cap actually elided trailing lines (no explicit
+        // `limit`, and the file had more than `offset + MAX_LINES_TO_READ` lines).
+        // Surfaced to the model below so it knows to re-read with offset/limit.
+        let default_capped = limit.is_none() && end_idx < all_lines.len();
         let slice: String = all_lines[start_idx..end_idx].concat();
         let line_range_start = offset;
         let line_range_end = end_idx as u64;
@@ -1196,6 +1339,17 @@ impl Tool for FileReadTool {
             }
         } else {
             let mut mc = add_line_numbers(&slice, offset);
+            // Surface a default-cap truncation to the model — mirrors claude-code's
+            // attachment-path note (`utils/messages.ts:3565`) for a file truncated
+            // to the first `MAX_LINES_TO_READ` lines. Only when the implicit 2000-
+            // line default actually elided trailing lines (an explicit `limit` is
+            // the caller's choice and gets no note). Appended BEFORE the cyber-risk
+            // reminder so the reminder stays the trailing block.
+            if default_capped {
+                mc.push_str(&format!(
+                    "\n\n[File truncated to the first {MAX_LINES_TO_READ} lines. The file has {total_lines} lines total. Use the offset and limit parameters to read more of the file.]"
+                ));
+            }
             if should_include_file_read_mitigation(&ctx.options.main_loop_model) {
                 mc.push_str(CYBER_RISK_MITIGATION_REMINDER);
             }
@@ -1246,17 +1400,59 @@ mod tests {
 
     #[test]
     fn too_large_message_byte_locked() {
+        // VERBATIM claude-code `FileTooLargeError` (`readFileInRange.ts:62-64`):
+        // both sizes via `formatFileSize`; `path` is unused by the TS message.
+        // 300_000 bytes => 292.969KB rounds to "293.0KB" => ".0" trimmed => "293KB".
         let msg = format_too_large(std::path::Path::new("/tmp/x"), 300_000);
-        assert_eq!(msg, "File /tmp/x (300000B) exceeds 256KB read limit");
+        assert_eq!(
+            msg,
+            "File content (293KB) exceeds maximum allowed size (256KB). Use offset and limit parameters to read specific portions of the file, or search for specific content instead of reading the whole file."
+        );
+        assert!(msg.contains("Use offset and limit"));
     }
 
     #[test]
     fn binary_message_byte_locked() {
-        let msg = format_binary(std::path::Path::new("/tmp/x"));
+        // VERBATIM claude-code `FileReadTool.ts:479` — the file's lowercased
+        // extension is interpolated (`.bin` here).
+        let msg = format_binary(std::path::Path::new("/tmp/x.bin"));
         assert_eq!(
             msg,
-            "File /tmp/x appears to be binary (first 8KB contains NUL bytes)"
+            "This tool cannot read binary files. The file appears to be a binary .bin file. Please use appropriate tools for binary file analysis."
         );
+        // Extensionless file => empty extension (TS `path.extname` => "").
+        let msg2 = format_binary(std::path::Path::new("/tmp/x"));
+        assert_eq!(
+            msg2,
+            "This tool cannot read binary files. The file appears to be a binary  file. Please use appropriate tools for binary file analysis."
+        );
+    }
+
+    #[test]
+    fn max_lines_to_read_byte_locked() {
+        assert_eq!(MAX_LINES_TO_READ, 2000);
+    }
+
+    #[test]
+    fn has_binary_extension_matches_ts_set() {
+        use std::path::Path;
+        // A representative spread across the BINARY_EXTENSIONS categories.
+        assert!(has_binary_extension(Path::new("/a/b.bin")));
+        assert!(has_binary_extension(Path::new("/a/b.EXE"))); // case-insensitive
+        assert!(has_binary_extension(Path::new("/a/archive.tar.gz")));
+        assert!(has_binary_extension(Path::new("/a/font.woff2")));
+        assert!(has_binary_extension(Path::new("/a/lib.rlib")));
+        assert!(has_binary_extension(Path::new("/a/db.sqlite3")));
+        // Image + PDF extensions ARE in the set (excluded at the call site, not
+        // here — `has_binary_extension` mirrors TS `hasBinaryExtension` exactly).
+        assert!(has_binary_extension(Path::new("/a/i.png")));
+        assert!(has_binary_extension(Path::new("/a/d.pdf")));
+        // Text / source extensions are NOT binary.
+        assert!(!has_binary_extension(Path::new("/a/main.rs")));
+        assert!(!has_binary_extension(Path::new("/a/readme.md")));
+        assert!(!has_binary_extension(Path::new("/a/data.json")));
+        // No extension => whole name lowercased, never in the set.
+        assert!(!has_binary_extension(Path::new("/a/Makefile")));
     }
 
     #[tokio::test]
@@ -1307,7 +1503,8 @@ mod tests {
             .await
             .unwrap_err();
         let msg = err.to_string();
-        assert!(msg.contains("exceeds 256KB read limit"), "got: {msg}");
+        assert!(msg.contains("exceeds maximum allowed size"), "got: {msg}");
+        assert!(msg.contains("Use offset and limit"), "got: {msg}");
     }
 
     #[tokio::test]
@@ -1361,11 +1558,15 @@ mod tests {
             .await
             .unwrap_err();
         let msg = err.to_string();
-        assert!(msg.contains("exceeds 256KB read limit"), "got: {msg}");
+        assert!(msg.contains("exceeds maximum allowed size"), "got: {msg}");
+        assert!(msg.contains("Use offset and limit"), "got: {msg}");
     }
 
     #[tokio::test]
     async fn rejects_binary_file() {
+        // Extensionless file with a NUL byte in the first 8 KB => NUL-scan
+        // fallback path (no binary extension to short-circuit on). The TS message
+        // renders the (empty) extension.
         let tmp = TempDir::new().unwrap();
         let target = tmp.path().join("bin");
         let mut data = vec![b'A'; 100];
@@ -1383,7 +1584,145 @@ mod tests {
             .unwrap_err();
         assert!(err
             .to_string()
-            .contains("appears to be binary (first 8KB contains NUL bytes)"));
+            .contains("This tool cannot read binary files."));
+    }
+
+    #[tokio::test]
+    async fn rejects_binary_extension_file_before_read() {
+        // A `.bin` file routes to the binary-extension gate (`FileReadTool.ts:
+        // 469-482`) BEFORE any byte read — even when its bytes are pure ASCII
+        // (no NUL). The TS message interpolates the `.bin` extension.
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("payload.bin");
+        std::fs::write(&target, b"this is plain ascii, no NUL bytes").unwrap();
+        let (ctx, sink) = make_ctx(&tmp);
+        ctx.bus.attach_sink(sink.clone()).await;
+        let tool = FileReadTool::new(ctx);
+        let err = tool
+            .call(
+                json!({ "file_path": target.to_str().unwrap() }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .unwrap_err();
+        // `ToolError::Io`'s Display prepends "io: "; assert the message tail.
+        assert!(
+            err.to_string().ends_with(
+                "This tool cannot read binary files. The file appears to be a binary .bin file. Please use appropriate tools for binary file analysis."
+            ),
+            "got: {err}"
+        );
+        let events = sink.events().await;
+        let names: Vec<&str> = events.iter().map(|e| e.name.as_str()).collect();
+        assert!(names.contains(&"tengu_tool_read_failed"));
+    }
+
+    #[tokio::test]
+    async fn default_caps_at_2000_lines_and_notes_truncation() {
+        // A no-`limit` read of a file with > 2000 (but small) lines returns
+        // exactly the first MAX_LINES_TO_READ lines and surfaces the truncation
+        // in `model_content`. The file stays well under the 256 KB byte cap so
+        // the line cap (not the byte cap) is what bounds the read.
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("long.txt");
+        let mut body = String::new();
+        for i in 1..=2500u32 {
+            body.push_str(&format!("L{i}\n"));
+        }
+        assert!((body.len() as u64) < MAX_FILE_READ_SIZE, "must stay under byte cap");
+        std::fs::write(&target, &body).unwrap();
+        let (ctx, _sink) = make_ctx(&tmp);
+        let tool = FileReadTool::new(ctx);
+        let result = tool
+            .call(
+                json!({ "file_path": target.to_str().unwrap() }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .expect("default-capped read must succeed");
+        // Exactly 2000 lines returned (the raw slice the TUI renders).
+        assert_eq!(result.data["content"].as_str().unwrap().lines().count(), 2000);
+        // The slice ends at line 2000.
+        assert!(result.data["content"].as_str().unwrap().ends_with("L2000\n"));
+        assert!(!result.data["content"].as_str().unwrap().contains("L2001"));
+        // line_range = [1, 2000]; total_lines reflects the whole file (2501 with
+        // the trailing-newline phantom line).
+        assert_eq!(result.data["line_range"][0], 1);
+        assert_eq!(result.data["line_range"][1], 2000);
+        assert_eq!(result.data["total_lines"], 2501);
+        // The model is told about the truncation.
+        let mc = result.data["model_content"].as_str().unwrap();
+        assert!(
+            mc.contains("File truncated to the first 2000 lines"),
+            "model_content must surface the default-cap truncation, got tail: {}",
+            &mc[mc.len().saturating_sub(200)..]
+        );
+    }
+
+    #[tokio::test]
+    async fn explicit_limit_over_2000_is_honored_without_note() {
+        // An explicit `limit` is the caller's choice and is NOT clamped to 2000,
+        // and gets no truncation note even when it elides trailing lines.
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("long2.txt");
+        let mut body = String::new();
+        for i in 1..=2500u32 {
+            body.push_str(&format!("L{i}\n"));
+        }
+        std::fs::write(&target, &body).unwrap();
+        let (ctx, _sink) = make_ctx(&tmp);
+        let tool = FileReadTool::new(ctx);
+        let result = tool
+            .call(
+                json!({ "file_path": target.to_str().unwrap(), "limit": 2200 }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .expect("explicit-limit read must succeed");
+        // 2200 lines returned (> 2000 — not clamped).
+        assert_eq!(result.data["content"].as_str().unwrap().lines().count(), 2200);
+        let mc = result.data["model_content"].as_str().unwrap();
+        assert!(
+            !mc.contains("File truncated to the first"),
+            "explicit limit must not emit the default-cap note"
+        );
+    }
+
+    #[tokio::test]
+    async fn verbatim_description_and_prompt() {
+        let tmp = TempDir::new().unwrap();
+        let (ctx, _sink) = make_ctx(&tmp);
+        let tool = FileReadTool::new(ctx);
+        let desc = tool
+            .description(
+                &json!({}),
+                &DescriptionOptions {
+                    is_non_interactive_session: false,
+                },
+            )
+            .await;
+        assert_eq!(desc, "Read a file from the local filesystem.");
+        let prompt = tool
+            .prompt(&PromptOptions {
+                include_examples: false,
+            })
+            .await;
+        // Spot-check the VERBATIM TS template fragments (prompt.ts:27-49).
+        assert!(prompt.starts_with(
+            "Reads a file from the local filesystem. You can access any file directly by using this tool."
+        ));
+        assert!(prompt.contains("By default, it reads up to 2000 lines starting from the beginning of the file\n"));
+        assert!(prompt.contains("- Results are returned using cat -n format, with line numbers starting at 1"));
+        assert!(prompt.contains("it's recommended to read the whole file by not providing these parameters"));
+        // PDF fragment is INCLUDED in the default (PDF-supported) build.
+        assert!(prompt.contains("This tool can read PDF files (.pdf)."));
+        assert!(prompt.contains("To read a directory, use an ls command via the Bash tool."));
+        assert!(prompt.ends_with(
+            "If you read a file that exists but has empty contents you will receive a system reminder warning in place of file contents."
+        ));
     }
 
     #[tokio::test]

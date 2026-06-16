@@ -5,6 +5,7 @@
 #![allow(dead_code)]
 
 use crate::web_fetch::WEBFETCH_TRUNCATION_SUFFIX;
+use once_cell::sync::Lazy;
 
 /// Markdown is truncated to this many bytes before the secondary model, to avoid
 /// "Prompt is too long" errors. claude-code `utils.ts` `MAX_MARKDOWN_LENGTH`.
@@ -72,11 +73,180 @@ pub fn make_secondary_model_prompt(
     format!("\nWeb page content:\n---\n{markdown_content}\n---\n\n{prompt}\n\n{guidelines}\n")
 }
 
-/// Whether `host` is on the WebFetch preapproved-domain allowlist. Conservative
-/// default (`false` => strict guidelines); porting `preapproved.ts` is a follow-up.
+// ---------------------------------------------------------------------------
+// Preapproved domains (`WebFetchTool/preapproved.ts`)
+// ---------------------------------------------------------------------------
+//
+// For legal and security concerns, WebFetch normally only accesses domains the
+// user provided. The exception is a curated allowlist of code-related docs.
+//
+// SECURITY WARNING (verbatim from preapproved.ts): these preapproved domains are
+// ONLY for WebFetch (GET requests). The sandbox network layer deliberately does
+// NOT inherit this list — arbitrary network access (POST/uploads) to these hosts
+// could enable data exfiltration. This port is consumed solely by WebFetch.
+//
+// `PREAPPROVED_HOSTS` is the FULL 1:1 data from preapproved.ts:14-131. Entries
+// containing a "/" are path-scoped (e.g. "github.com/anthropics"); all others are
+// hostname-only. The split mirrors the module-load IIFE (preapproved.ts:136-152):
+// hostname-only entries go into a `HashSet` (O(1) lookup), and path-scoped entries
+// become a per-host list of path prefixes.
+
+/// Hostname-only preapproved entries — every `PREAPPROVED_HOST` with no "/".
+/// 1:1 with `HOSTNAME_ONLY` (`preapproved.ts:136-152`). NOTE: `learn.microsoft.com`
+/// appears twice in the TS source (Azure + C#/.NET); a Set dedups it — the Rust
+/// `HashSet` does the same.
+static HOSTNAME_ONLY: Lazy<std::collections::HashSet<&'static str>> = Lazy::new(|| {
+    [
+        // Anthropic
+        "platform.claude.com",
+        "code.claude.com",
+        "modelcontextprotocol.io",
+        "agentskills.io",
+        // Top Programming Languages
+        "docs.python.org",
+        "en.cppreference.com",
+        "docs.oracle.com",
+        "learn.microsoft.com",
+        "developer.mozilla.org",
+        "go.dev",
+        "pkg.go.dev",
+        "www.php.net",
+        "docs.swift.org",
+        "kotlinlang.org",
+        "ruby-doc.org",
+        "doc.rust-lang.org",
+        "www.typescriptlang.org",
+        // Web & JavaScript Frameworks/Libraries
+        "react.dev",
+        "angular.io",
+        "vuejs.org",
+        "nextjs.org",
+        "expressjs.com",
+        "nodejs.org",
+        "bun.sh",
+        "jquery.com",
+        "getbootstrap.com",
+        "tailwindcss.com",
+        "d3js.org",
+        "threejs.org",
+        "redux.js.org",
+        "webpack.js.org",
+        "jestjs.io",
+        "reactrouter.com",
+        // Python Frameworks & Libraries
+        "docs.djangoproject.com",
+        "flask.palletsprojects.com",
+        "fastapi.tiangolo.com",
+        "pandas.pydata.org",
+        "numpy.org",
+        "www.tensorflow.org",
+        "pytorch.org",
+        "scikit-learn.org",
+        "matplotlib.org",
+        "requests.readthedocs.io",
+        "jupyter.org",
+        // PHP Frameworks
+        "laravel.com",
+        "symfony.com",
+        "wordpress.org",
+        // Java Frameworks & Libraries
+        "docs.spring.io",
+        "hibernate.org",
+        "tomcat.apache.org",
+        "gradle.org",
+        "maven.apache.org",
+        // .NET & C# Frameworks
+        "asp.net",
+        "dotnet.microsoft.com",
+        "nuget.org",
+        "blazor.net",
+        // Mobile Development
+        "reactnative.dev",
+        "docs.flutter.dev",
+        "developer.apple.com",
+        "developer.android.com",
+        // Data Science & Machine Learning
+        "keras.io",
+        "spark.apache.org",
+        "huggingface.co",
+        "www.kaggle.com",
+        // Databases
+        "www.mongodb.com",
+        "redis.io",
+        "www.postgresql.org",
+        "dev.mysql.com",
+        "www.sqlite.org",
+        "graphql.org",
+        "prisma.io",
+        // Cloud & DevOps
+        "docs.aws.amazon.com",
+        "cloud.google.com",
+        "kubernetes.io",
+        "www.docker.com",
+        "www.terraform.io",
+        "www.ansible.com",
+        "docs.netlify.com",
+        "devcenter.heroku.com",
+        // Testing & Monitoring
+        "cypress.io",
+        "selenium.dev",
+        // Game Development
+        "docs.unity.com",
+        "docs.unrealengine.com",
+        // Other Essential Tools
+        "git-scm.com",
+        "nginx.org",
+        "httpd.apache.org",
+    ]
+    .into_iter()
+    .collect()
+});
+
+/// Path-scoped preapproved entries: host → list of allowed path prefixes. 1:1
+/// with `PATH_PREFIXES` (`preapproved.ts:136-152`). Only the two TS entries with
+/// a "/" land here: `github.com/anthropics` and `vercel.com/docs`.
+static PATH_PREFIXES: Lazy<std::collections::HashMap<&'static str, &'static [&'static str]>> =
+    Lazy::new(|| {
+        let mut m = std::collections::HashMap::new();
+        m.insert("github.com", &["/anthropics"][..]);
+        m.insert("vercel.com", &["/docs"][..]);
+        m
+    });
+
+/// `isPreapprovedHost(hostname, pathname)` — 1:1 with `preapproved.ts:154-166`.
+/// Returns true when `host` is a hostname-only entry, or when `host` has a
+/// path-prefix entry and `path` matches a prefix at a SEGMENT BOUNDARY (exact
+/// match or the prefix followed by `/`) — so `/anthropics` matches but
+/// `/anthropics-evil/malware` does not.
 #[must_use]
-pub fn is_preapproved_domain(_host: &str) -> bool {
+pub fn is_preapproved_host(host: &str, path: &str) -> bool {
+    if HOSTNAME_ONLY.contains(host) {
+        return true;
+    }
+    if let Some(prefixes) = PATH_PREFIXES.get(host) {
+        for p in *prefixes {
+            // Enforce path-segment boundaries: "/anthropics" must not match
+            // "/anthropics-evil/malware". Only an exact match, or a "/" right
+            // after the prefix, is allowed (TS: `pathname === p ||
+            // pathname.startsWith(p + '/')`).
+            if path == *p || path.starts_with(&format!("{p}/")) {
+                return true;
+            }
+        }
+    }
     false
+}
+
+/// Whether `host` (ignoring path) is preapproved — used for the apply-step
+/// guideline selection (`makeSecondaryModelPrompt`'s `isPreapprovedDomain`).
+/// claude-code passes `isPreapprovedUrl(url)` (host+path) as that flag; this
+/// host-only helper is the conservative analog used where only the host is in
+/// hand. A host with ONLY a path-scoped entry (e.g. `github.com`, `vercel.com`)
+/// returns false here — the full URL check in `is_preapproved_host` is the
+/// authoritative gate for those.
+#[must_use]
+pub fn is_preapproved_domain(host: &str) -> bool {
+    HOSTNAME_ONLY.contains(host)
 }
 
 #[cfg(test)]
@@ -129,5 +299,41 @@ responses.\n - Never produce or reproduce exact song lyrics.\n";
 details, code examples, and documentation excerpts as needed."
         ));
         assert!(got.starts_with("\nWeb page content:\n---\nMD\n---\n\nq\n\n"));
+    }
+
+    // ---- preapproved hosts (preapproved.ts) --------------------------------
+
+    #[test]
+    fn hostname_only_hosts_are_preapproved() {
+        // Path is irrelevant for hostname-only entries.
+        assert!(is_preapproved_host("doc.rust-lang.org", "/std/vec/index.html"));
+        assert!(is_preapproved_host("developer.mozilla.org", "/en-US/"));
+        assert!(is_preapproved_host("react.dev", "/"));
+        assert!(is_preapproved_host("learn.microsoft.com", "/anything")); // dedup'd dup entry
+        assert!(is_preapproved_domain("doc.rust-lang.org"));
+        assert!(is_preapproved_domain("developer.mozilla.org"));
+    }
+
+    #[test]
+    fn unknown_host_is_not_preapproved() {
+        assert!(!is_preapproved_host("evil.example.com", "/anthropics"));
+        assert!(!is_preapproved_domain("evil.example.com"));
+    }
+
+    #[test]
+    fn path_scoped_host_enforces_segment_boundaries() {
+        // Exact prefix match and prefix-followed-by-"/" are allowed.
+        assert!(is_preapproved_host("github.com", "/anthropics"));
+        assert!(is_preapproved_host("github.com", "/anthropics/claude-code"));
+        assert!(is_preapproved_host("vercel.com", "/docs"));
+        assert!(is_preapproved_host("vercel.com", "/docs/functions"));
+        // The exfil case from preapproved.ts:159-161 MUST be rejected.
+        assert!(!is_preapproved_host("github.com", "/anthropics-evil/malware"));
+        assert!(!is_preapproved_host("github.com", "/anthropicsevil"));
+        assert!(!is_preapproved_host("github.com", "/someoneelse"));
+        assert!(!is_preapproved_host("vercel.com", "/docsource"));
+        // A path-scoped host is NOT a blanket preapproved DOMAIN (host-only check).
+        assert!(!is_preapproved_domain("github.com"));
+        assert!(!is_preapproved_domain("vercel.com"));
     }
 }

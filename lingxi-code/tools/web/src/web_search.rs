@@ -76,6 +76,73 @@ struct WebSearchUsage {
     output_tokens: u64,
 }
 
+/// API provider family — the subset of claude-code's `getAPIProvider()` values
+/// that `WebSearchTool.isEnabled` branches on (`WebSearchTool.ts:168-193`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ApiProvider {
+    /// Anthropic first-party API (`api.anthropic.com`).
+    FirstParty,
+    /// Google Vertex AI.
+    Vertex,
+    /// Azure AI Foundry.
+    Foundry,
+    /// Anything else (Bedrock, custom gateways, OpenAI-compatible, …).
+    Other,
+}
+
+/// Infer the [`ApiProvider`] from a request `base_url`. WebSearch routes through
+/// `BuiltinToolContext.provider` (an `AnthropicRequestBuilder`) whose `base_url`
+/// is the only provider signal reachable from `tools/web` — the typed
+/// `getAPIProvider()` value lives in host config, which is out of this crate's
+/// scope (a `BuiltinToolContext::api_provider` field would be the faithful source
+/// but touches the frozen `tool-api`). Mapping: `api.anthropic.com` ⇒ first-party;
+/// a `*.aiplatform.googleapis.com` / `…-aiplatform.…` host ⇒ Vertex; an Azure /
+/// Foundry host (`.azure.com`, `cognitiveservices`, `models.ai.azure.com`) ⇒
+/// Foundry; everything else ⇒ Other. LingXi's default base_url is
+/// `https://api.anthropic.com`, so the default is `FirstParty`.
+#[must_use]
+pub fn infer_api_provider(base_url: &str) -> ApiProvider {
+    let host = url::Url::parse(base_url)
+        .ok()
+        .and_then(|u| u.host_str().map(str::to_ascii_lowercase))
+        .unwrap_or_default();
+    if host == "api.anthropic.com" {
+        ApiProvider::FirstParty
+    } else if host.contains("aiplatform.googleapis.com") || host.contains("-aiplatform.") {
+        ApiProvider::Vertex
+    } else if host.ends_with(".azure.com")
+        || host.contains("cognitiveservices")
+        || host.contains("ai.azure.com")
+    {
+        ApiProvider::Foundry
+    } else {
+        ApiProvider::Other
+    }
+}
+
+/// Whether WebSearch is enabled for `provider` + `model` — 1:1 with claude-code
+/// `WebSearchTool.isEnabled` (`WebSearchTool.ts:168-193`):
+/// - `firstParty` ⇒ always enabled;
+/// - `vertex` ⇒ enabled only for Claude 4.x (`claude-opus-4` / `claude-sonnet-4`
+///   / `claude-haiku-4` substring);
+/// - `foundry` ⇒ always enabled (Foundry only ships web-search-capable models);
+/// - anything else ⇒ disabled.
+#[must_use]
+pub fn web_search_is_enabled(provider: ApiProvider, model: &str) -> bool {
+    match provider {
+        // firstParty: any model. foundry: only ships web-search-capable models,
+        // so it is likewise unconditionally enabled (TS treats them as separate
+        // `if` branches both returning `true` — merged here, same behavior).
+        ApiProvider::FirstParty | ApiProvider::Foundry => true,
+        ApiProvider::Vertex => {
+            model.contains("claude-opus-4")
+                || model.contains("claude-sonnet-4")
+                || model.contains("claude-haiku-4")
+        }
+        ApiProvider::Other => false,
+    }
+}
+
 /// Input schema for `WebSearchTool`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WebSearchInput {
@@ -406,7 +473,16 @@ impl Tool for WebSearchTool {
         &INPUT_SCHEMA
     }
     fn is_enabled(&self, _ctx: &ToolStaticContext) -> bool {
-        true
+        // Provider gating — 1:1 with `WebSearchTool.isEnabled`
+        // (`WebSearchTool.ts:168-193`). The provider is inferred from the request
+        // builder's `base_url` (see [`infer_api_provider`]) since the typed
+        // `getAPIProvider()` value is not reachable from `tools/web`; the model is
+        // the session's default model. LingXi's default (`api.anthropic.com`) maps
+        // to first-party, so WebSearch stays enabled by default.
+        web_search_is_enabled(
+            infer_api_provider(&self.ctx.provider.base_url),
+            &self.ctx.default_model,
+        )
     }
     fn max_result_size_chars(&self) -> usize {
         tool_api::util::output_truncation::MAX_TOOL_OUTPUT_LENGTH
@@ -605,6 +681,62 @@ mod tests {
     #[test]
     fn anthropic_beta_lock() {
         assert_eq!(WEB_SEARCH_BETA, "web-search-2025-03-05");
+    }
+
+    // ---- isEnabled provider gating (WebSearchTool.ts:168-193) ---------------
+
+    #[test]
+    fn is_enabled_first_party_any_model() {
+        assert!(web_search_is_enabled(ApiProvider::FirstParty, "claude-sonnet-4-20250514"));
+        assert!(web_search_is_enabled(ApiProvider::FirstParty, "claude-3-5-haiku"));
+        assert!(web_search_is_enabled(ApiProvider::FirstParty, "literally-anything"));
+    }
+
+    #[test]
+    fn is_enabled_vertex_only_claude_4x() {
+        assert!(web_search_is_enabled(ApiProvider::Vertex, "claude-opus-4-20250514"));
+        assert!(web_search_is_enabled(ApiProvider::Vertex, "claude-sonnet-4-5"));
+        assert!(web_search_is_enabled(ApiProvider::Vertex, "claude-haiku-4-5"));
+        // Pre-4.x and non-Claude models on Vertex are disabled.
+        assert!(!web_search_is_enabled(ApiProvider::Vertex, "claude-3-5-sonnet"));
+        assert!(!web_search_is_enabled(ApiProvider::Vertex, "gemini-2.5-pro"));
+    }
+
+    #[test]
+    fn is_enabled_foundry_any_model() {
+        assert!(web_search_is_enabled(ApiProvider::Foundry, "anything"));
+    }
+
+    #[test]
+    fn is_enabled_other_provider_disabled() {
+        assert!(!web_search_is_enabled(ApiProvider::Other, "claude-opus-4-20250514"));
+        assert!(!web_search_is_enabled(ApiProvider::Other, "anything"));
+    }
+
+    #[test]
+    fn infer_api_provider_from_base_url() {
+        assert_eq!(
+            infer_api_provider("https://api.anthropic.com"),
+            ApiProvider::FirstParty
+        );
+        assert_eq!(
+            infer_api_provider("https://us-central1-aiplatform.googleapis.com"),
+            ApiProvider::Vertex
+        );
+        assert_eq!(
+            infer_api_provider("https://aiplatform.googleapis.com/v1"),
+            ApiProvider::Vertex
+        );
+        assert_eq!(
+            infer_api_provider("https://my-resource.openai.azure.com"),
+            ApiProvider::Foundry
+        );
+        assert_eq!(
+            infer_api_provider("https://bedrock-runtime.us-east-1.amazonaws.com"),
+            ApiProvider::Other
+        );
+        // Unparseable base_url => Other (disabled).
+        assert_eq!(infer_api_provider("not a url"), ApiProvider::Other);
     }
 
     #[test]

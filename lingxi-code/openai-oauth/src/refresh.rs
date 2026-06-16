@@ -1,10 +1,10 @@
 //! OAuth token refresh: reactive (401-driven) + proactive (timer-driven).
 //!
-//! Ported from `anthropic-oauth/src/refresh.rs` and adapted for OpenAI:
-//! - No `scope` param in the refresh POST (OpenAI doesn't accept it).
+//! Ported from `anthropic-oauth/src/refresh.rs` and adapted for `OpenAI`:
+//! - No `scope` param in the refresh POST (`OpenAI` doesn't accept it).
 //! - Response carries `id_token?` — when present we update `account_id`/`fedramp`.
 //! - Proactive refresh: refresh when `expires_at - now <= 5 minutes` OR
-//!   last_refresh older than 8 days.
+//!   `last_refresh` older than 8 days.
 //! - `TokenInfo` additionally holds `account_id: Option<String>` and `fedramp: bool`.
 
 #![allow(dead_code)]
@@ -34,14 +34,14 @@ pub struct TokenHash(pub [u8; 32]);
 /// Errors returned by [`RefreshDriver::refresh`].
 #[derive(Debug, Clone, Error)]
 pub enum OAuthHookError {
-    /// Refresh attempted but the IdP rejected the `refresh_token`.
+    /// Refresh attempted but the `IdP` rejected the `refresh_token`.
     #[error("refresh failed: {0}")]
     RefreshFailed(String),
     /// The token hash passed to `refresh` is older than what the driver has
     /// stored; another caller already rotated. Caller should retry.
     #[error("token stale; reload from store")]
     TokenStale,
-    /// Network or transport failure reaching the IdP.
+    /// Network or transport failure reaching the `IdP`.
     #[error("provider unreachable: {0}")]
     ProviderUnreachable(String),
 }
@@ -54,7 +54,7 @@ pub const PROACTIVE_LEAD_CAP: Duration = Duration::from_secs(5 * 60);
 
 /// Proactive refresh also triggers when the last successful refresh was more
 /// than 8 days ago (even if the access token is still technically valid, the
-/// refresh_token may have rotated).
+/// `refresh_token` may have rotated).
 const LAST_REFRESH_MAX_AGE: Duration = Duration::from_secs(8 * 24 * 60 * 60);
 
 /// In-memory token state.
@@ -65,9 +65,9 @@ pub struct TokenInfo {
     pub refresh_token: Option<Secret<String>>,
     /// Expiry instant.
     pub expires_at: SystemTime,
-    /// ChatGPT workspace/account id (from id_token claims).
+    /// `ChatGPT` workspace/account id (from `id_token` claims).
     pub account_id: Option<String>,
-    /// FedRAMP account flag (from id_token claims).
+    /// `FedRAMP` account flag (from `id_token` claims).
     pub fedramp: bool,
     /// Wall-clock time of the last successful refresh (for 8-day check).
     pub last_refresh: Option<SystemTime>,
@@ -183,8 +183,8 @@ impl AuthState {
         emit_proactive_canceled(&self.bus, "engine_shutdown").await;
     }
 
-    /// Perform the actual HTTP refresh POST. OpenAI token endpoint:
-    /// POST config.token_url, JSON body: { client_id, grant_type: "refresh_token", refresh_token }.
+    /// Perform the actual HTTP refresh POST. `OpenAI` token endpoint:
+    /// POST `config.token_url`, JSON body: { `client_id`, `grant_type`: "`refresh_token`", `refresh_token` }.
     async fn do_refresh_http(
         &self,
         refresh_token: &Secret<String>,
@@ -223,7 +223,7 @@ impl AuthState {
         }
     }
 
-    /// Persist the rotated token to the keychain via CredentialManager.
+    /// Persist the rotated token to the keychain via `CredentialManager`.
     /// No-op when no manager is configured (test path).
     async fn persist_to_keychain(&self, info: &TokenInfo) -> Result<(), OAuthError> {
         let Some(cm) = &self.credentials else {
@@ -289,7 +289,7 @@ impl RefreshDriver {
 }
 
 /// JSON request body for the `refresh_token` grant.
-/// OpenAI doesn't accept a `scope` param (unlike anthropic-oauth).
+/// `OpenAI` doesn't accept a `scope` param (unlike anthropic-oauth).
 #[derive(Debug, serde::Serialize)]
 struct RefreshRequest<'a> {
     grant_type: &'a str,
@@ -304,7 +304,7 @@ struct TokenEndpointResponse {
     refresh_token: Option<String>,
     #[serde(default)]
     expires_in: u64,
-    /// Optional id_token — when present, carries updated account_id/fedramp claims.
+    /// Optional `id_token` — when present, carries updated `account_id/fedramp` claims.
     id_token: Option<String>,
 }
 
@@ -546,7 +546,7 @@ impl RefreshDriver {
 }
 
 /// The proactive task loop. Wakes at `min(remaining/2, 5min)` before expiry.
-/// Also fires early if last_refresh is older than 8 days.
+/// Also fires early if `last_refresh` is older than 8 days.
 async fn proactive_loop(state: Arc<AuthState>, spawner: Arc<dyn traits::RuntimeSpawner>) {
     let driver = RefreshDriver::new(state.clone());
     loop {

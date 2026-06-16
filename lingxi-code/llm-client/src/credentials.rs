@@ -43,13 +43,13 @@ pub enum Credential {
     /// Bearer or OAuth access token.
     BearerToken(String),
     /// ChatGPT-account OAuth: bearer access token plus the `ChatGPT-Account-ID`
-    /// header (and FedRAMP flag). Served by the openai-oauth credential provider.
+    /// header (and `FedRAMP` flag). Served by the openai-oauth credential provider.
     ChatGptOAuth {
         /// OAuth access token (bearer).
         access_token: String,
-        /// ChatGPT workspace/account id (the `ChatGPT-Account-ID` header).
+        /// `ChatGPT` workspace/account id (the `ChatGPT-Account-ID` header).
         account_id: Option<String>,
-        /// Whether the account is FedRAMP (sets `X-OpenAI-Fedramp: true`).
+        /// Whether the account is `FedRAMP` (sets `X-OpenAI-Fedramp: true`).
         fedramp: bool,
     },
     /// AWS `SigV4` signing credentials.

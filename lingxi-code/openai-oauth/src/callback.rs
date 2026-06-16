@@ -1,4 +1,4 @@
-//! Loopback HTTP listener for the OpenAI / ChatGPT OAuth redirect.
+//! Loopback HTTP listener for the `OpenAI` / `ChatGPT` OAuth redirect.
 //!
 //! Binds a TCP listener on `127.0.0.1:1455` (falling back to `127.0.0.1:1457`
 //! on `AddrInUse`), accepts connections until a
@@ -7,7 +7,7 @@
 //! against the locally-generated CSRF token, writes a small HTML success page
 //! to the browser, and returns the parsed params.
 //!
-//! Fixed ports mirror the codex ChatGPT OAuth implementation (ports 1455 and
+//! Fixed ports mirror the codex `ChatGPT` OAuth implementation (ports 1455 and
 //! 1457). The caller reads the chosen port back via [`CallbackListener::port`]
 //! and bakes it into the `redirect_uri` before opening the browser.
 

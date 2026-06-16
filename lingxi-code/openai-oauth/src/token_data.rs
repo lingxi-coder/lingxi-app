@@ -1,16 +1,16 @@
-//! Parse OpenAI id_token JWT claims (no signature verification — the token came
-//! straight from our own token exchange over TLS). Mirrors codex token_data.rs
+//! Parse `OpenAI` `id_token` JWT claims (no signature verification — the token came
+//! straight from our own token exchange over TLS). Mirrors codex `token_data.rs`
 //! claim names.
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use serde_json::Value;
 
-/// Claims we care about from the OpenAI id_token.
+/// Claims we care about from the `OpenAI` `id_token`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct IdTokenClaims {
-    /// ChatGPT workspace/account id → `ChatGPT-Account-ID` header.
+    /// `ChatGPT` workspace/account id → `ChatGPT-Account-ID` header.
     pub account_id: Option<String>,
-    /// FedRAMP account flag → `X-OpenAI-Fedramp` header.
+    /// `FedRAMP` account flag → `X-OpenAI-Fedramp` header.
     pub fedramp: bool,
     /// User email (best-effort, for display).
     pub email: Option<String>,

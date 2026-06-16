@@ -1,5 +1,5 @@
 //! PKCE (RFC 7636) verifier + S256 challenge generation for the
-//! Authorization Code flow used by the OpenAI / ChatGPT OAuth client.
+//! Authorization Code flow used by the `OpenAI` / `ChatGPT` OAuth client.
 //!
 //! The verifier is a 32-byte random string base64url-encoded (no padding);
 //! the challenge is `SHA-256(verifier)` similarly encoded.

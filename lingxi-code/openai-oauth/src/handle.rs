@@ -1,5 +1,5 @@
 //! [`OpenAiOAuthHandle`] — browser-PKCE and device-code login for the
-//! OpenAI / ChatGPT OAuth flow.
+//! `OpenAI` / `ChatGPT` OAuth flow.
 //!
 //! Drives either:
 //!   A. PKCE Authorization-Code flow (`login`):
@@ -8,7 +8,7 @@
 //!      3. Open browser (injectable — no-op in tests)
 //!      4. [`CallbackListener::accept`] — validate state
 //!      5. [`OpenAiOAuthClient::exchange_code_with_redirect`]
-//!      6. [`parse_id_token`] for account_id / fedramp
+//!      6. [`parse_id_token`] for `account_id` / fedramp
 //!      7. [`OpenAiOAuthClient::obtain_api_key`] — mint an `sk-...` key
 //!      8. Persist via [`secret::CredentialManager::store_openai_oauth_tokens`]
 //!      9. Persist the minted API key via
@@ -19,7 +19,7 @@
 //!
 //! **Trait note:** we expose INHERENT async methods rather than implementing
 //! `traits::AuthHandle`, because that trait's `LoginInfo` type carries
-//! `email`+`org_id` (Anthropic-shaped) whereas ChatGPT carries `account_id`+
+//! `email`+`org_id` (Anthropic-shaped) whereas `ChatGPT` carries `account_id`+
 //! `fedramp`. The engine M8 wrapper (`ChatGptConnectDriver`) will call these
 //! inherent methods directly.
 
@@ -47,7 +47,7 @@ const LOGIN_TIMEOUT: Duration = Duration::from_secs(60);
 /// tests pass a no-op (optionally recording the URL).
 pub type BrowserOpener = Arc<dyn Fn(&str) -> Result<(), OpenAiAuthError> + Send + Sync>;
 
-/// Error surface for the OpenAI handle.
+/// Error surface for the `OpenAI` handle.
 #[derive(Debug, Error)]
 pub enum OpenAiAuthError {
     /// Network or server-side failure.
@@ -64,18 +64,18 @@ pub enum OpenAiAuthError {
     BrowserOpen(String),
 }
 
-/// What we know about the signed-in ChatGPT account after a successful login.
+/// What we know about the signed-in `ChatGPT` account after a successful login.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OpenAiLoginInfo {
-    /// `chatgpt_account_id` from the id_token JWT (may be absent on older tokens).
+    /// `chatgpt_account_id` from the `id_token` JWT (may be absent on older tokens).
     pub account_id: Option<String>,
-    /// FedRAMP account flag from the id_token JWT.
+    /// `FedRAMP` account flag from the `id_token` JWT.
     pub fedramp: bool,
     /// Minted `sk-...` API key from the RFC-8693 exchange.
     pub api_key: String,
 }
 
-/// Handle that drives either the browser-PKCE or device-code OpenAI OAuth flow
+/// Handle that drives either the browser-PKCE or device-code `OpenAI` OAuth flow
 /// and persists the resulting tokens in the `secret` keychain.
 pub struct OpenAiOAuthHandle {
     client: Arc<OpenAiOAuthClient>,
@@ -204,7 +204,7 @@ impl OpenAiOAuthHandle {
 
     /// Run the device-code login flow.
     ///
-    /// Calls `device_code::run_device_code_login`, parses the id_token claims,
+    /// Calls `device_code::run_device_code_login`, parses the `id_token` claims,
     /// mints an API key, and persists everything — same storage as `login()`.
     pub async fn login_device_code(&self) -> Result<OpenAiLoginInfo, OpenAiAuthError> {
         let tokens = device_code::run_device_code_login(
@@ -293,7 +293,7 @@ impl OpenAiOAuthHandle {
         })
     }
 
-    /// Clear all persisted OpenAI OAuth credentials. Idempotent.
+    /// Clear all persisted `OpenAI` OAuth credentials. Idempotent.
     pub async fn logout(&self) -> Result<(), OpenAiAuthError> {
         self.credentials
             .delete_openai_oauth_tokens()

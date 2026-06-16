@@ -1,4 +1,4 @@
-//! `llm_client::CredentialProvider` over the OpenAI OAuth refresh machinery.
+//! `llm_client::CredentialProvider` over the `OpenAI` OAuth refresh machinery.
 //!
 //! [`OpenAiOAuthCredentialProvider`] serves the current OAuth access token,
 //! refreshing in place (single-flight via the underlying `refresh_lock`)
@@ -6,7 +6,7 @@
 //!
 //! Returns `Credential::ChatGptOAuth { access_token, account_id, fedramp }`
 //! (not `Credential::BearerToken`), carrying the ChatGPT-Account-ID and
-//! FedRAMP flag alongside the access token so the HTTP adapter can set the
+//! `FedRAMP` flag alongside the access token so the HTTP adapter can set the
 //! correct request headers.
 
 use std::fmt;
@@ -16,7 +16,7 @@ use llm_client::{BoxFuture, Credential, CredentialProvider, CredentialScope, Llm
 
 use crate::refresh::RefreshDriver;
 
-/// Serves the current OpenAI OAuth access token, refreshing in place when expired
+/// Serves the current `OpenAI` OAuth access token, refreshing in place when expired
 /// (single-flight via the underlying refresh lock).
 ///
 /// Wraps an `Arc<RefreshDriver>` and calls [`RefreshDriver::refresh`] when the

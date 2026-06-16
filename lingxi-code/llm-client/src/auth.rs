@@ -91,7 +91,7 @@ impl std::fmt::Debug for ChatGptAuthenticator {
 }
 
 impl ChatGptAuthenticator {
-    /// Create a ChatGPT OAuth authenticator.
+    /// Create a `ChatGPT` OAuth authenticator.
     #[must_use]
     pub fn new(token: impl Into<String>, account_id: Option<String>, fedramp: bool) -> Self {
         Self { token: token.into(), account_id, fedramp }

@@ -29,8 +29,8 @@ struct Preset {
     auth: AuthStrategy,
     /// Provider identity used for pricing + serialization.
     provider_id: ProviderId,
-    /// Credential lookup (env var name).
-    credential_env: &'static str,
+    /// Credential lookup (env var name, or `None` for OAuth-based presets).
+    credential_env: Option<&'static str>,
     /// Embedded models.dev slice JSON.
     slice_json: &'static str,
 }
@@ -50,7 +50,7 @@ fn presets() -> Vec<Preset> {
             protocol: ProtocolFamily::OpenAiChat,
             auth: AuthStrategy::ApiKey,
             provider_id: ProviderId::OpenAICompatible { name: "openrouter".to_string() },
-            credential_env: "OPENROUTER_API_KEY",
+            credential_env: Some("OPENROUTER_API_KEY"),
             slice_json: OPENROUTER,
         },
         Preset {
@@ -59,7 +59,7 @@ fn presets() -> Vec<Preset> {
             protocol: ProtocolFamily::OpenAiChat,
             auth: AuthStrategy::ApiKey,
             provider_id: ProviderId::OpenAICompatible { name: "deepseek".to_string() },
-            credential_env: "DEEPSEEK_API_KEY",
+            credential_env: Some("DEEPSEEK_API_KEY"),
             slice_json: DEEPSEEK,
         },
         // GLM coding plan: Anthropic-compatible endpoint (reuses AnthropicMessagesCodec).
@@ -70,7 +70,7 @@ fn presets() -> Vec<Preset> {
             protocol: ProtocolFamily::AnthropicMessages,
             auth: AuthStrategy::ApiKey,
             provider_id: ProviderId::Custom { name: "glm-coding".to_string() },
-            credential_env: "ZHIPU_API_KEY",
+            credential_env: Some("ZHIPU_API_KEY"),
             slice_json: GLM_CODING,
         },
         // Z.AI: international GLM API (the global counterpart to the China-only
@@ -83,7 +83,7 @@ fn presets() -> Vec<Preset> {
             protocol: ProtocolFamily::OpenAiChat,
             auth: AuthStrategy::ApiKey,
             provider_id: ProviderId::OpenAICompatible { name: "zai".to_string() },
-            credential_env: "ZAI_API_KEY",
+            credential_env: Some("ZAI_API_KEY"),
             slice_json: ZAI,
         },
         // OpenAI first-party: Responses API (codex removed the chat wire, so all
@@ -96,7 +96,7 @@ fn presets() -> Vec<Preset> {
             protocol: ProtocolFamily::OpenAiResponses,
             auth: AuthStrategy::Bearer,
             provider_id: ProviderId::OpenAI,
-            credential_env: "OPENAI_API_KEY",
+            credential_env: Some("OPENAI_API_KEY"),
             slice_json: OPENAI,
         },
         // GitHub Copilot: OpenAI-compatible wire; GitHub OAuth token used
@@ -107,7 +107,7 @@ fn presets() -> Vec<Preset> {
             protocol: ProtocolFamily::OpenAiChat,
             auth: AuthStrategy::CopilotBearer,
             provider_id: ProviderId::OpenAICompatible { name: "github-copilot".to_string() },
-            credential_env: "GITHUB_TOKEN",
+            credential_env: Some("GITHUB_TOKEN"),
             slice_json: GITHUB_COPILOT,
         },
     ]
@@ -140,7 +140,10 @@ pub fn builtin_presets() -> BuiltinCatalog {
             base_url: preset.base_url.to_string(),
             protocol: preset.protocol.clone(),
             auth: preset.auth.clone(),
-            credential: CredentialConfig::Env { var: preset.credential_env.to_string() },
+            credential: match preset.credential_env {
+                Some(var) => CredentialConfig::Env { var: var.to_string() },
+                None => CredentialConfig::Static { id: preset.profile_name.to_string() },
+            },
             models,
             pricing: crate::config::PricingConfig::default(),
             // main-only fields: catalog presets are all OpenAI/Anthropic-style

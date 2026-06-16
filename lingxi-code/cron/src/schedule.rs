@@ -108,12 +108,39 @@ impl CronExpression {
             .map(|d| d.as_secs())
             .unwrap_or(0);
         let (year, month, day, hour, minute, _, dow) = decompose(secs);
+        // Standard cron day rule: when BOTH day-of-month and day-of-week are
+        // restricted, the day matches if EITHER matches (OR); when one is `*`
+        // (wild), only the other constrains. Mirrors claude-code `cron.ts`
+        // (dom/dow length===31 / ===7 wild detection + `domSet || dowSet`).
+        let dom_wild = Self::field_is_wild(&self.dom, 1, 31);
+        let dow_wild = Self::field_is_wild(&self.dow, 0, 6);
+        let day_matches = match (dom_wild, dow_wild) {
+            (true, true) => true,
+            (false, true) => Self::field_match(&self.dom, day),
+            (true, false) => Self::field_match(&self.dow, dow),
+            (false, false) => {
+                Self::field_match(&self.dom, day) || Self::field_match(&self.dow, dow)
+            }
+        };
         Self::field_match(&self.minute, minute)
             && Self::field_match(&self.hour, hour)
-            && Self::field_match(&self.dom, day)
             && Self::field_match(&self.month, month)
-            && Self::field_match(&self.dow, dow)
+            && day_matches
             && year > 1970
+    }
+
+    /// Whether `field` matches EVERY value in the inclusive domain `[lo, hi]` —
+    /// the "wild" test for the cron OR rule. `*` is wild; so is a range/step/list
+    /// that covers the whole domain (TS detects this via expanded-set length
+    /// === 31 (dom) / === 7 (dow)).
+    fn field_is_wild(field: &CronField, lo: u32, hi: u32) -> bool {
+        match field {
+            CronField::Any => true,
+            CronField::Step(n) => *n == 1,
+            CronField::Range(a, b) => *a <= lo && *b >= hi,
+            CronField::Exact(_) => lo == hi,
+            CronField::List(list) => (lo..=hi).all(|v| list.contains(&v)),
+        }
     }
 
     fn field_match(field: &CronField, value: u32) -> bool {
@@ -128,19 +155,39 @@ impl CronExpression {
 }
 
 /// Decompose unix seconds into (year, month 1-12, day 1-31, hour, minute,
-/// second, dow 0-6). Simplified UTC-only decomposition for M1.17; production
-/// wires the `time` crate.
-#[allow(clippy::cast_possible_truncation)]
+/// second, dow 0-6 Sun=0), UTC, on the real proleptic Gregorian calendar.
+///
+/// Real month lengths (incl. leap-year Feb 29 and the 31-day months) come from
+/// Howard Hinnant's public-domain `civil_from_days` algorithm — integer-only, no
+/// new dependency. This fixes the old fixed-30-day approximation under which
+/// day-of-month 31 could NEVER match and the month drifted off the calendar.
+///
+/// PARITY-NOTE: still UTC; claude-code's `cron.ts` evaluates in the process's
+/// local timezone. Local-time evaluation would need a tz database (a larger
+/// change); UTC matches the previous behavior of this scheduler.
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss
+)]
 fn decompose(secs: u64) -> (u32, u32, u32, u32, u32, u32, u32) {
-    // Each `as u32` truncation is bounded by the preceding modulo or division
-    // (years since 1970 will not overflow u32 for centuries), so truncation
-    // is safe and intentional.
     let minute = (secs / 60 % 60) as u32;
     let hour = (secs / 3600 % 24) as u32;
-    let day = (secs / 86_400 % 30 + 1) as u32; // crude — fine for matches() gate
-    let month = ((secs / 2_628_000) % 12 + 1) as u32;
-    let year = 1970 + (secs / 31_536_000) as u32;
-    let dow = ((secs / 86_400 + 4) % 7) as u32; // 1970-01-01 was Thursday (4)
+    let days = (secs / 86_400) as i64; // days since 1970-01-01 (a Thursday)
+    let dow = ((days % 7 + 4) % 7) as u32; // 1970-01-01 = Thursday (4)
+
+    // civil_from_days: days-since-epoch -> (year, month[1..=12], day[1..=31]).
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097; // [0, 146096]
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365; // [0, 399]
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // [0, 365]
+    let mp = (5 * doy + 2) / 153; // [0, 11]
+    let day = (doy - (153 * mp + 2) / 5 + 1) as u32; // [1, 31]
+    let month = if mp < 10 { mp + 3 } else { mp - 9 } as u32; // [1, 12]
+    let year = (y + i64::from(month <= 2)) as u32;
+
     (year, month, day, hour, minute, 0, dow)
 }
 
@@ -162,5 +209,61 @@ mod tests {
             parse_cron("* * *"),
             Err(CronParseError::FieldCount(3))
         ));
+    }
+
+    /// `secs` for a known UTC instant: 2023-11-14 22:13:20 UTC, a Tuesday.
+    const TUE_2023_11_14: u64 = 1_700_000_000;
+
+    fn at(secs: u64) -> SystemTime {
+        SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(secs)
+    }
+
+    #[test]
+    fn decompose_uses_real_calendar() {
+        let (y, m, d, h, min, _, dow) = decompose(TUE_2023_11_14);
+        assert_eq!((y, m, d, h, min, dow), (2023, 11, 14, 22, 13, 2));
+    }
+
+    #[test]
+    fn day_of_month_31_can_match() {
+        // 2023-12-31 00:00:00 UTC = 1703980800. DOM 31 must match (the old
+        // fixed-30-day decompose made this impossible).
+        let dec31 = 1_703_980_800;
+        let (_, m, d, ..) = decompose(dec31);
+        assert_eq!((m, d), (12, 31));
+        assert!(parse_cron("0 0 31 * *").unwrap().matches(at(dec31)));
+    }
+
+    #[test]
+    fn leap_day_feb_29() {
+        // 2024-02-29 00:00:00 UTC = 1709164800.
+        let feb29 = 1_709_164_800;
+        let (y, m, d, ..) = decompose(feb29);
+        assert_eq!((y, m, d), (2024, 2, 29));
+    }
+
+    #[test]
+    fn dom_and_dow_are_ored_when_both_restricted() {
+        // `0 0 1 * 2` = midnight on the 1st OR on any Tuesday. 2023-11-14 is a
+        // Tuesday (not the 1st) → must still match via the DOW branch.
+        let expr = parse_cron("0 0 1 * 2").unwrap();
+        // Force minute/hour to match: 2023-11-14 00:00:00 UTC = 1699920000 (Tue).
+        let tue_midnight = 1_699_920_000;
+        assert_eq!(decompose(tue_midnight).6, 2); // dow == Tue
+        assert!(expr.matches(at(tue_midnight)));
+        // And the 1st of a month that is NOT a Tuesday also matches (DOM branch):
+        // 2023-11-01 00:00:00 UTC = 1698796800 (a Wednesday, dow==3).
+        let nov1 = 1_698_796_800;
+        assert_eq!(decompose(nov1).2, 1); // day == 1
+        assert!(expr.matches(at(nov1)));
+    }
+
+    #[test]
+    fn restricted_dom_with_wild_dow_does_not_or() {
+        // `0 0 15 * *` = only the 15th (dow is `*` → wild, no OR). 2023-11-14 is
+        // the 14th → must NOT match.
+        let expr = parse_cron("0 0 15 * *").unwrap();
+        let nov14_midnight = 1_699_920_000;
+        assert!(!expr.matches(at(nov14_midnight)));
     }
 }

@@ -208,15 +208,34 @@ fn field_match(field: &CronField, value: u32) -> bool {
     field.0.contains(&value)
 }
 
-#[allow(clippy::cast_possible_truncation)]
+/// Decompose unix seconds into (year, month 1-12, day 1-31, hour, minute,
+/// dow 0-6 Sun=0), UTC, on the real proleptic Gregorian calendar. Mirrors
+/// `cron::schedule::decompose` — Howard Hinnant's integer-only `civil_from_days`,
+/// so real month lengths (incl. leap-year Feb 29 and 31-day months) are honored.
+/// This fixes the old fixed-30-day approximation under which day-of-month 31
+/// could never match. PARITY-NOTE: still UTC (claude-code `cron.ts` is local).
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss
+)]
 fn decompose(secs: u64) -> (u32, u32, u32, u32, u32, u32) {
-    // Mirrors cron::schedule::decompose (crude UTC; sufficient for matches()).
     let minute = (secs / 60 % 60) as u32;
     let hour = (secs / 3600 % 24) as u32;
-    let day = (secs / 86_400 % 30 + 1) as u32;
-    let month = ((secs / 2_628_000) % 12 + 1) as u32;
-    let year = 1970 + (secs / 31_536_000) as u32;
-    let dow = ((secs / 86_400 + 4) % 7) as u32;
+    let days = (secs / 86_400) as i64; // days since 1970-01-01 (a Thursday)
+    let dow = ((days % 7 + 4) % 7) as u32; // 1970-01-01 = Thursday (4)
+
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097; // [0, 146096]
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365; // [0, 399]
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // [0, 365]
+    let mp = (5 * doy + 2) / 153; // [0, 11]
+    let day = (doy - (153 * mp + 2) / 5 + 1) as u32; // [1, 31]
+    let month = if mp < 10 { mp + 3 } else { mp - 9 } as u32; // [1, 12]
+    let year = (y + i64::from(month <= 2)) as u32;
+
     (year, month, day, hour, minute, dow)
 }
 
@@ -227,11 +246,22 @@ impl CronExpression {
             .map(|d| d.as_secs())
             .unwrap_or(0);
         let (year, month, day, hour, minute, dow) = decompose(secs);
+        // Standard cron day rule (claude-code `cron.ts`): when BOTH day-of-month
+        // and day-of-week are restricted, the day matches if EITHER matches; when
+        // one is `*` (its expanded set covers the whole domain — len 31 / 7), only
+        // the other constrains.
+        let dom_wild = self.dom.0.len() == 31;
+        let dow_wild = self.dow.0.len() == 7;
+        let day_matches = match (dom_wild, dow_wild) {
+            (true, true) => true,
+            (false, true) => field_match(&self.dom, day),
+            (true, false) => field_match(&self.dow, dow),
+            (false, false) => field_match(&self.dom, day) || field_match(&self.dow, dow),
+        };
         field_match(&self.minute, minute)
             && field_match(&self.hour, hour)
-            && field_match(&self.dom, day)
             && field_match(&self.month, month)
-            && field_match(&self.dow, dow)
+            && day_matches
             && year > 1970
     }
 }
@@ -1083,14 +1113,22 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         std::env::set_var("HOME", tmp.path());
         let tool = CronCreateTool::new(shell_test_ctx(dummy_out()));
-        // Day-of-month 31 never occurs under the crude decompose (day maxes at
-        // 30), so no calendar date in the horizon matches.
+        // February 30 is a real impossible date (Feb has at most 29 days), so no
+        // calendar date in the horizon matches. (DOM 31 — which the old crude
+        // 30-day decompose wrongly rejected — is now correctly satisfiable; see
+        // `day_of_month_31_is_satisfiable`.)
         let err = tool
-            .validate_input(&json!({"cron": "0 0 31 * *", "prompt": "x"}), &fresh_ctx())
+            .validate_input(&json!({"cron": "0 0 30 2 *", "prompt": "x"}), &fresh_ctx())
             .await
             .expect_err("unsatisfiable");
         assert!(err
             .0
             .contains("does not match any calendar date in the next year"));
+        // NOTE: DOM 31 (which the old crude 30-day decompose wrongly rejected) is
+        // now correctly satisfiable on the real calendar — proven directly against
+        // the matcher in `cron::schedule::tests::day_of_month_31_can_match`. It
+        // can't be asserted *here* because the test `StubClock` is anchored at the
+        // Unix epoch and the matcher's `year > 1970` sentinel keeps the 366-day
+        // horizon (all in 1970) from matching any narrow date.
     }
 }

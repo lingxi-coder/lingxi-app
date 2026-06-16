@@ -1980,7 +1980,70 @@ pub async fn build(
         Arc::new(teammate_handler),
     );
 
+    // (5.46c) Cron: register the `Dream` handler so cron-spawned `TaskType::Dream`
+    //        tasks actually run. The `CronScheduler` (constructed + started below,
+    //        after the registry is shared) creates `Dream` tasks; without a handler
+    //        each fire would be an inert task-state row. Same deferred-invoker
+    //        pattern as the teammate handler above: the real `RegistryToolInvoker`
+    //        needs `tools` (built after this point), so a `DeferredToolInvoker` is
+    //        injected now and bound to the real invoker at (5.5a) below.
+    let dream_invoker = Arc::new(DeferredToolInvoker::new());
+    tasks::registry::register_dream_handler(
+        &mut task_registry_inner,
+        subagent_spawner.clone(),
+        dream_invoker.clone() as Arc<dyn traits::tool_invoker::ToolInvoker>,
+        budget_enforcer.clone(),
+    );
+
     let task_registry = Arc::new(task_registry_inner);
+
+    // (5.48) Cron: construct, load persisted descriptors, and start the live cron
+    //        scheduler so jobs created by CronCreate actually fire — closing parity
+    //        gap §0.3 / §B (the scheduler was never constructed, so descriptors on
+    //        disk never ran). Resolve the descriptor dir exactly as CronCreate does
+    //        (`$HOME/.claude/cron`, via `home_dir_or_internal` + `cron_path`), not
+    //        via `cfg.claude_home`, so the load dir always matches the write dir.
+    //        Ticks every 60s on a posix RuntimeSpawner (D17). The detached tick
+    //        task holds a self-clone of the scheduler, so it runs for the process
+    //        lifetime without being stored on `DesktopRuntime`.
+    {
+        let cron_dir = std::env::var_os("HOME")
+            .map(std::path::PathBuf::from)
+            .map_or_else(|| cfg.claude_home.join("cron"), |h| h.join(".claude").join("cron"));
+        let scheduler = Arc::new(cron::CronScheduler::new(
+            task_registry.clone(),
+            Arc::new(PosixFileSystem::new(cwd.clone())),
+            clock.clone(),
+            Arc::new(PosixRuntime::new()),
+            cron_dir.clone(),
+        ));
+        if let Ok(mut rd) = tokio::fs::read_dir(&cron_dir).await {
+            while let Ok(Some(entry)) = rd.next_entry().await {
+                let path = entry.path();
+                if path.extension().and_then(|x| x.to_str()) != Some("json") {
+                    continue;
+                }
+                let Ok(body) = tokio::fs::read_to_string(&path).await else {
+                    continue;
+                };
+                let Ok(desc) = serde_json::from_str::<serde_json::Value>(&body) else {
+                    continue;
+                };
+                if let (Some(id), Some(cron_str), Some(prompt)) = (
+                    desc.get("id").and_then(serde_json::Value::as_str),
+                    desc.get("cron").and_then(serde_json::Value::as_str),
+                    desc.get("prompt").and_then(serde_json::Value::as_str),
+                ) {
+                    if let Err(e) = scheduler.register(id, cron_str, prompt, None).await {
+                        tracing::warn!("cron: skipping job {id} with invalid schedule: {e}");
+                    }
+                }
+            }
+        }
+        if let Err(e) = scheduler.clone().start().await {
+            tracing::error!("cron: failed to start scheduler: {e}");
+        }
+    }
 
     // (5.47) M10 (T13): the typed spawn/kill seam the coordinator's `TeamCreate` /
     //        `TeamDelete` use to start / stop the real backing `InProcessTeammate`
@@ -2173,6 +2236,13 @@ pub async fn build(
             // main loop + subagents. Default-off `perms` is the no-op gate, so
             // this is behavior-neutral unless LINGXI_ENFORCE_PERMISSIONS is set.
             .with_gate(perms.clone()),
+    ));
+
+    // (5.5a-cron) Bind the cron `Dream` handler's `DeferredToolInvoker` to the
+    //        real `RegistryToolInvoker` now that `tools` exists — same recursion-
+    //        lock invariant and boot gate as the teammate invoker above.
+    dream_invoker.set(Arc::new(
+        tool_api::tool_invoker_impl::RegistryToolInvoker::new(tools.clone()).with_gate(perms.clone()),
     ));
 
     // Break the subagent construction cycle now that `tools` + `agent_catalog`

@@ -1223,6 +1223,7 @@ dependencies = [
  "compaction",
  "coordinator",
  "cost",
+ "cron",
  "dirs",
  "engine",
  "futures-core",

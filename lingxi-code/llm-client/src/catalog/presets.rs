@@ -190,9 +190,14 @@ mod tests {
         assert_eq!(count("deepseek"), 4);
         assert_eq!(count("glm-coding"), 6);
         assert_eq!(count("zai"), 13);
-        assert_eq!(count("openai"), 50);
-        assert_eq!(count("openai-chatgpt"), 3);
-        assert_eq!(count("github-copilot"), 23);
+        // openai sheds the two codex-exclusive ids (gpt-5-codex, gpt-5.3-codex)
+        // so they resolve unambiguously to the openai-chatgpt Codex-backend
+        // profile; gpt-5.2 stays here (a real api-key model).
+        assert_eq!(count("openai"), 48);
+        assert_eq!(count("openai-chatgpt"), 2);
+        // -1: gpt-5.3-codex dropped (codex-backend-exclusive → owned by
+        // openai-chatgpt so it resolves there unambiguously).
+        assert_eq!(count("github-copilot"), 22);
         let openai = catalog
             .providers
             .iter()

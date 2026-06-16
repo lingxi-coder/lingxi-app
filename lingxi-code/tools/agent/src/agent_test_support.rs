@@ -14,8 +14,8 @@ use std::time::SystemTime;
 use traits::budget::{BudgetEnforcerHandle, BudgetError};
 use traits::mailbox::{MailboxError, MailboxMessage, MailboxRouterHandle, RouteAck};
 use traits::subagent_spawn::{
-    SubagentInheritance, SubagentResult, SubagentSpawnError, SubagentSpawnRequest, SubagentSpawner,
-    SubagentUsage,
+    SubagentInheritance, SubagentListingEntry, SubagentResult, SubagentSpawnError,
+    SubagentSpawnRequest, SubagentSpawner, SubagentUsage,
 };
 use traits::task_registry::{
     TaskCreateInput, TaskListFilter, TaskOutputChunk, TaskRecord, TaskRegistryError,
@@ -103,6 +103,23 @@ impl SubagentSpawner for MockSubagentSpawner {
             MockSpawnResponse::Failed(reason) => SubagentResult::Failed { reason },
             MockSpawnResponse::Killed => SubagentResult::Killed,
         })
+    }
+
+    /// Fixed catalog so the dynamic-prompt test can assert `formatAgentLine`
+    /// output. Mirrors the shape the production spawner surfaces (built-ins).
+    async fn agent_listing(&self) -> Vec<SubagentListingEntry> {
+        vec![
+            SubagentListingEntry {
+                agent_type: "general-purpose".into(),
+                when_to_use: "use for anything".into(),
+                tools_description: "All tools".into(),
+            },
+            SubagentListingEntry {
+                agent_type: "Explore".into(),
+                when_to_use: "search".into(),
+                tools_description: "All tools except Edit".into(),
+            },
+        ]
     }
 }
 

@@ -103,6 +103,15 @@ impl AgentExecutor {
             subagent_type: agent_type.to_string(),
             prompt: format!("{prompt_template}\n\n{payload_json}"),
             context_paths: Vec::new(),
+            // AgentTool spawn-surface parity params — the hook executor path
+            // sets no model/teammate/isolation/cwd override.
+            description: None,
+            model: None,
+            name: None,
+            team_name: None,
+            mode: None,
+            isolation: None,
+            cwd: None,
         };
 
         let fut = spawner.spawn(req, inherit);

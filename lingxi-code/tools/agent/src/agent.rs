@@ -49,6 +49,14 @@ pub const LEGACY_AGENT_TOOL_NAME: &str = "Task";
 
 /// Six built-in subagent types — byte-aligned with upstream
 /// `claude-code/src/tools/AgentTool/built-in/*.ts`.
+///
+/// ADVISORY ONLY. `AgentTool` no longer rejects a `subagent_type` outside this
+/// list: the catalog-aware [`traits::subagent_spawn::SubagentSpawner`] resolves
+/// any type (user/project catalog overrides built-ins; an unknown type →
+/// `general-purpose`, matching claude-code's `effectiveType ?? GENERAL_PURPOSE`).
+/// `tool-agent` cannot depend on the `agent` crate (cycle — see the module
+/// header), so the canonical definitions live there; this literal is kept for
+/// tests and documentation of the built-in set, not as a gate.
 pub const BUILTIN_SUBAGENT_TYPES: &[&str] = &[
     "general-purpose",
     "Plan",
@@ -73,16 +81,50 @@ fn default_subagent_type() -> String {
 }
 
 /// Input shape accepted by `AgentTool`.
+///
+/// Mirrors claude-code's `AgentTool` Zod schema (`AgentTool.tsx:82-101` +
+/// type alias `:132-138`): `description` + `prompt` required; the rest
+/// optional. The `.describe()` strings are lifted verbatim.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AgentToolInput {
-    /// One of [`BUILTIN_SUBAGENT_TYPES`]. Optional in TS
-    /// (`z.string().optional()`, `AgentTool.tsx:85`); when omitted it defaults
-    /// to `"general-purpose"` (see [`default_subagent_type`]).
+    /// `description` — REQUIRED in TS (`z.string().describe('A short (3-5
+    /// word) description of the task')`, AgentTool.tsx:83).
+    pub description: String,
+    /// `prompt` — REQUIRED (`z.string().describe('The task for the agent to
+    /// perform')`, AgentTool.tsx:84).
+    pub prompt: String,
+    /// `subagent_type?` — optional (`z.string().optional()`, AgentTool.tsx:85).
+    /// When omitted it defaults to `"general-purpose"` (TS `subagent_type ??
+    /// GENERAL_PURPOSE_AGENT.agentType`, AgentTool.tsx:322). The spawner
+    /// resolves any value (no hard-reject anymore).
     #[serde(default = "default_subagent_type")]
     pub subagent_type: String,
-    /// Initial prompt seeded into the subagent's first turn.
-    pub prompt: String,
-    /// Optional context files (paths) injected as `system`-tagged messages.
+    /// `model?` — optional model-family override `'sonnet' | 'opus' |
+    /// 'haiku'` (AgentTool.tsx:86).
+    #[serde(default)]
+    pub model: Option<String>,
+    /// `run_in_background?` — optional (AgentTool.tsx:87). Carried; background
+    /// dispatch is handled by the host runtime / coordinator.
+    #[serde(default)]
+    pub run_in_background: Option<bool>,
+    /// `name?` — optional teammate name (AgentTool.tsx:94).
+    #[serde(default)]
+    pub name: Option<String>,
+    /// `team_name?` — optional team name (AgentTool.tsx:95).
+    #[serde(default)]
+    pub team_name: Option<String>,
+    /// `mode?` — optional permission mode (AgentTool.tsx:96).
+    #[serde(default)]
+    pub mode: Option<String>,
+    /// `isolation?` — optional `'worktree' | 'remote'` (AgentTool.tsx:99).
+    #[serde(default)]
+    pub isolation: Option<String>,
+    /// `cwd?` — optional absolute path to run the agent in (AgentTool.tsx:100).
+    #[serde(default)]
+    pub cwd: Option<String>,
+    /// INTERNAL plumbing only — NOT part of the model-facing schema (claude-code
+    /// has no `context_paths` field). Kept so internal callers/tests that seed
+    /// context files keep working; defaults to empty so the model never sees it.
     #[serde(default)]
     pub context_paths: Vec<PathBuf>,
 }
@@ -91,13 +133,50 @@ static AGENT_INPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
     json!({
         "type": "object",
         "properties": {
-            // Optional in TS (`z.string().optional()`); defaults to
-            // "general-purpose" when omitted (AgentTool.tsx:85 + :322).
-            "subagent_type": { "type": "string", "minLength": 1, "default": "general-purpose" },
-            "prompt":        { "type": "string", "minLength": 1 },
-            "context_paths": { "type": "array", "items": { "type": "string" }, "default": [] }
+            "description": {
+                "type": "string",
+                "description": "A short (3-5 word) description of the task"
+            },
+            "prompt": {
+                "type": "string",
+                "description": "The task for the agent to perform"
+            },
+            "subagent_type": {
+                "type": "string",
+                "description": "The type of specialized agent to use for this task"
+            },
+            "model": {
+                "type": "string",
+                "enum": ["sonnet", "opus", "haiku"],
+                "description": "Optional model override for this agent. Takes precedence over the agent definition's model frontmatter. If omitted, uses the agent definition's model, or inherits from the parent."
+            },
+            "run_in_background": {
+                "type": "boolean",
+                "description": "Set to true to run this agent in the background. You will be notified when it completes."
+            },
+            "name": {
+                "type": "string",
+                "description": "Name for the spawned agent. Makes it addressable via SendMessage({to: name}) while running."
+            },
+            "team_name": {
+                "type": "string",
+                "description": "Team name for spawning. Uses current team context if omitted."
+            },
+            "mode": {
+                "type": "string",
+                "description": "Permission mode for spawned teammate (e.g., \"plan\" to require plan approval)."
+            },
+            "isolation": {
+                "type": "string",
+                "enum": ["worktree", "remote"],
+                "description": "Isolation mode. \"worktree\" creates a temporary git worktree so the agent works on an isolated copy of the repo. \"remote\" launches the agent in a remote CCR environment (always runs in background)."
+            },
+            "cwd": {
+                "type": "string",
+                "description": "Absolute path to run the agent in. Overrides the working directory for all filesystem and shell operations within this agent. Mutually exclusive with isolation: \"worktree\"."
+            }
         },
-        "required": ["prompt"]
+        "required": ["description", "prompt"]
     })
 });
 
@@ -127,6 +206,137 @@ impl AgentTool {
 
     fn fresh_invocation_id() -> String {
         tool_api::util::ids::ulid_or_uuid()
+    }
+
+    /// Format one agent catalog line for the tool prompt, matching claude-code's
+    /// `formatAgentLine` (AgentTool/prompt.ts:43-46):
+    /// `- {agentType}: {whenToUse} (Tools: {toolsDescription})`. The
+    /// `toolsDescription` is pre-rendered by the spawner (TS
+    /// `getToolsDescription`).
+    fn format_agent_line(agent: &traits::subagent_spawn::SubagentListingEntry) -> String {
+        format!(
+            "- {}: {} (Tools: {})",
+            agent.agent_type, agent.when_to_use, agent.tools_description
+        )
+    }
+
+    /// Build the dynamic Agent tool prompt, porting claude-code's `getPrompt`
+    /// (AgentTool/prompt.ts:66-287) for the non-fork, inline-list path (the
+    /// `tengu_agent_list_attach` GrowthBook gate defaults off, so the catalog is
+    /// embedded inline rather than via an `agent_listing_delta` attachment).
+    ///
+    /// `is_coordinator` selects the slim coordinator prompt (the coordinator
+    /// system prompt already covers usage notes / examples). Not yet wired from
+    /// host state — see [`Tool::prompt`].
+    ///
+    /// Deferred vs TS (no behavioral surface in this port): the fork-subagent
+    /// branch (item 1g), the `agent_listing_delta` attachment variant, the
+    /// embedded-search-tools (`bfs`/`ugrep`) hint swap, the subscription /
+    /// teammate gating on the concurrency + name/team/mode notes, and the
+    /// `USER_TYPE === 'ant'` remote-isolation note.
+    fn format_mcp_servers_note(mcp_server_names: &[String]) -> String {
+        if mcp_server_names.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "\n\n# MCP Servers\n\nThe following MCP servers are available; spawned agents may have access to their tools:\n{}",
+                mcp_server_names
+                    .iter()
+                    .map(|n| format!("- {n}"))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            )
+        }
+    }
+
+    fn build_prompt(
+        agents: &[traits::subagent_spawn::SubagentListingEntry],
+        mcp_server_names: &[String],
+        is_coordinator: bool,
+    ) -> String {
+        let agent_lines = agents
+            .iter()
+            .map(Self::format_agent_line)
+            .collect::<Vec<_>>()
+            .join("\n");
+        let agent_list_section = format!(
+            "Available agent types and the tools they have access to:\n{agent_lines}"
+        );
+        let mcp_note = Self::format_mcp_servers_note(mcp_server_names);
+
+        // Shared core (TS `shared`): intro + agent list + when-to-use note.
+        let shared = format!(
+            "Launch a new agent to handle complex, multi-step tasks autonomously.\n\n\
+The {AGENT_TOOL_NAME} tool launches specialized agents (subprocesses) that autonomously handle complex tasks. Each agent type has specific capabilities and tools available to it.\n\n\
+{agent_list_section}{mcp_note}\n\n\
+When using the {AGENT_TOOL_NAME} tool, specify a subagent_type parameter to select which agent type to use. If omitted, the general-purpose agent is used."
+        );
+
+        // Coordinator mode gets the slim prompt (TS: `if (isCoordinator) return shared`).
+        if is_coordinator {
+            return shared;
+        }
+
+        // Non-coordinator: full prompt with when-not-to-use + usage notes +
+        // examples (TS non-coordinator return, AgentTool/prompt.ts:252-286,
+        // non-embedded-search-tools branch).
+        let when_not_to_use = format!(
+            "\nWhen NOT to use the {AGENT_TOOL_NAME} tool:\n\
+- If you want to read a specific file path, use the Read tool or the Glob tool instead of the {AGENT_TOOL_NAME} tool, to find the match more quickly\n\
+- If you are searching for a specific class definition like \"class Foo\", use the Glob tool instead, to find the match more quickly\n\
+- If you are searching for code within a specific file or set of 2-3 files, use the Read tool instead of the {AGENT_TOOL_NAME} tool, to find the match more quickly\n\
+- Other tasks that are not related to the agent descriptions above\n"
+        );
+
+        let examples = format!(
+            "Example usage:\n\n\
+<example_agent_descriptions>\n\
+\"test-runner\": use this agent after you are done writing code to run tests\n\
+\"greeting-responder\": use this agent to respond to user greetings with a friendly joke\n\
+</example_agent_descriptions>\n\n\
+<example>\n\
+user: \"Please write a function that checks if a number is prime\"\n\
+assistant: I'm going to use the Write tool to write the following code:\n\
+<code>\n\
+function isPrime(n) {{\n\
+  if (n <= 1) return false\n\
+  for (let i = 2; i * i <= n; i++) {{\n\
+    if (n % i === 0) return false\n\
+  }}\n\
+  return true\n\
+}}\n\
+</code>\n\
+<commentary>\n\
+Since a significant piece of code was written and the task was completed, now use the test-runner agent to run the tests\n\
+</commentary>\n\
+assistant: Uses the {AGENT_TOOL_NAME} tool to launch the test-runner agent\n\
+</example>\n\n\
+<example>\n\
+user: \"Hello\"\n\
+<commentary>\n\
+Since the user is greeting, use the greeting-responder agent to respond with a friendly joke\n\
+</commentary>\n\
+assistant: \"I'm going to use the {AGENT_TOOL_NAME} tool to launch the greeting-responder agent\"\n\
+</example>\n"
+        );
+
+        format!(
+            "{shared}\n\
+{when_not_to_use}\n\n\
+Usage notes:\n\
+- Always include a short description (3-5 words) summarizing what the agent will do\n\
+- Launch multiple agents concurrently whenever possible, to maximize performance; to do that, use a single message with multiple tool uses\n\
+- When the agent is done, it will return a single message back to you. The result returned by the agent is not visible to the user. To show the user the result, you should send a text message back to the user with a concise summary of the result.\n\
+- You can optionally run agents in the background using the run_in_background parameter. When an agent runs in the background, you will be automatically notified when it completes — do NOT sleep, poll, or proactively check on its progress. Continue with other work or respond to the user instead.\n\
+- **Foreground vs background**: Use foreground (default) when you need the agent's results before you can proceed — e.g., research agents whose findings inform your next steps. Use background when you have genuinely independent work to do in parallel.\n\
+- To continue a previously spawned agent, use SendMessage with the agent's ID or name as the `to` field. The agent resumes with its full context preserved. Each Agent invocation starts fresh — provide a complete task description.\n\
+- The agent's outputs should generally be trusted\n\
+- Clearly tell the agent whether you expect it to write code or just to do research (search, file reads, web fetches, etc.), since it is not aware of the user's intent\n\
+- If the agent description mentions that it should be used proactively, then you should try your best to use it without the user having to ask for it first. Use your judgement.\n\
+- If the user specifies that they want you to run agents \"in parallel\", you MUST send a single message with multiple {AGENT_TOOL_NAME} tool use content blocks. For example, if you need to launch both a build-validator agent and a test-runner agent in parallel, send a single message with both tool calls.\n\
+- You can optionally set `isolation: \"worktree\"` to run the agent in a temporary git worktree, giving it an isolated copy of the repository. The worktree is automatically cleaned up if the agent makes no changes; if changes are made, the worktree path and branch are returned in the result.\n\n\
+{examples}"
+        )
     }
 
     async fn emit_started(
@@ -250,11 +460,29 @@ impl Tool for AgentTool {
     }
 
     async fn prompt(&self, _: &PromptOptions) -> String {
-        "Use Agent to dispatch a focused subagent (general-purpose / Plan / \
-         Explore / verification / claude-code-guide / statusline-setup) with \
-         a seeded prompt. The subagent runs in its own state-machine slot \
-         and inherits the parent's BudgetEnforcer."
-            .into()
+        // claude-code builds the Agent tool prompt dynamically (getPrompt,
+        // AgentTool/prompt.ts:66-287): it injects the live agent catalog (one
+        // `formatAgentLine` per resolved AgentDefinition) and the available MCP
+        // server names. Pull the catalog from the spawner (defaulted-empty when
+        // unwired) and the MCP server names from the registry.
+        let agents = match &self.ctx.subagent_spawner {
+            Some(s) => s.agent_listing().await,
+            None => Vec::new(),
+        };
+        let mcp_server_names: Vec<String> = match &self.ctx.mcp_registry {
+            Some(reg) => reg
+                .snapshot()
+                .await
+                .into_iter()
+                .map(|info| info.name)
+                .collect(),
+            None => Vec::new(),
+        };
+        // The coordinator-mode signal (TS `isCoordinatorMode()`) is not yet
+        // threaded onto `BuiltinToolContext` / `PromptOptions`, so the slim
+        // coordinator branch is structurally ported but driven by `false`
+        // (the full prompt) for now — see `build_prompt`.
+        Self::build_prompt(&agents, &mcp_server_names, false)
     }
 
     async fn call(
@@ -284,21 +512,14 @@ impl Tool for AgentTool {
             }
         };
 
-        // 2. Validate subagent_type.
-        if !BUILTIN_SUBAGENT_TYPES.contains(&parsed.subagent_type.as_str()) {
-            Self::emit_failed(
-                &bus,
-                &invocation_id,
-                "unknown_subagent_type",
-                started.elapsed().as_millis() as u64,
-            )
-            .await;
-            return Err(ToolError::InvalidInput(format!(
-                "Agent: unknown subagent_type '{}' (known: {})",
-                parsed.subagent_type,
-                BUILTIN_SUBAGENT_TYPES.join(", ")
-            )));
-        }
+        // 2. Resolve the subagent type via the catalog-aware spawner — do NOT
+        // hard-reject unknown types. claude-code accepts any `subagent_type`:
+        // the catalog (user/project agents) overrides built-ins, and an unknown
+        // type falls back to `general-purpose` (`effectiveType ?? GENERAL_
+        // PURPOSE_AGENT`, AgentTool.tsx:322). That resolution lives in
+        // `PoolSubagentSpawner::lookup_definition`; the former static 6-type
+        // gate here made user/project agents + the unknown→general-purpose
+        // fallback unreachable through the tool, so it is removed.
 
         // 3. Validate prompt.
         if parsed.prompt.trim().is_empty() {
@@ -374,6 +595,17 @@ impl Tool for AgentTool {
             subagent_type: parsed.subagent_type.clone(),
             prompt: parsed.prompt.clone(),
             context_paths: parsed.context_paths.clone(),
+            // AgentTool spawn-surface parity: thread the new params through.
+            // `model` is mapped to the agent model override by the spawner; the
+            // rest are carried with their behavior deferred (teammate routing /
+            // worktree-remote isolation / cwd override land with later batches).
+            description: Some(parsed.description.clone()),
+            model: parsed.model.clone(),
+            name: parsed.name.clone(),
+            team_name: parsed.team_name.clone(),
+            mode: parsed.mode.clone(),
+            isolation: parsed.isolation.clone(),
+            cwd: parsed.cwd.clone(),
         };
 
         let outcome = spawner.spawn(request, inherit).await;
@@ -485,6 +717,7 @@ mod tests {
         let tool = AgentTool::new(bctx);
         let ctx = fresh_ctx_with_registry(parent_registry.clone());
         let input = serde_json::json!({
+            "description": "say hi",
             "subagent_type": "general-purpose",
             "prompt": "hi"
         });
@@ -544,6 +777,7 @@ mod tests {
         let tool = AgentTool::new(bctx);
         let ctx = fresh_ctx_with_registry(Arc::new(ToolRegistry::new()));
         let input = serde_json::json!({
+            "description": "say hi",
             "subagent_type": "general-purpose",
             "prompt": "hi"
         });
@@ -582,6 +816,7 @@ mod tests {
         let tool = AgentTool::new(bctx);
         let ctx = fresh_ctx_with_registry(Arc::new(ToolRegistry::new()));
         let input = serde_json::json!({
+            "description": "do work",
             "subagent_type": "Plan",
             "prompt": "do work"
         });
@@ -646,21 +881,47 @@ mod tests {
 
     #[test]
     fn agent_input_serde_roundtrip() {
+        // `description` + `prompt` are the required fields (TS schema). The
+        // optional params round-trip; `context_paths` is internal-only.
         let v = json!({
+            "description": "explore repo",
             "subagent_type": "general-purpose",
             "prompt": "Explore the repo structure.",
-            "context_paths": []
+            "model": "haiku",
+            "run_in_background": true,
+            "isolation": "worktree"
         });
         let parsed: AgentToolInput = serde_json::from_value(v).unwrap();
+        assert_eq!(parsed.description, "explore repo");
         assert_eq!(parsed.subagent_type, "general-purpose");
         assert_eq!(parsed.prompt, "Explore the repo structure.");
+        assert_eq!(parsed.model.as_deref(), Some("haiku"));
+        assert_eq!(parsed.run_in_background, Some(true));
+        assert_eq!(parsed.isolation.as_deref(), Some("worktree"));
+        // Internal-only plumbing defaults to empty when omitted.
         assert!(parsed.context_paths.is_empty());
     }
 
+    // `description` is REQUIRED (TS `z.string()`, not `.optional()`); omitting
+    // it is a parse error surfaced as InvalidInput by the call path.
     #[test]
-    fn agent_input_defaults_context_paths_to_empty() {
-        let v = json!({"subagent_type": "Plan", "prompt": "Design."});
+    fn agent_input_missing_description_is_rejected() {
+        let v = json!({ "prompt": "Design." });
+        let parsed: Result<AgentToolInput, _> = serde_json::from_value(v);
+        assert!(parsed.is_err(), "description is required");
+    }
+
+    #[test]
+    fn agent_input_optional_fields_default_to_none_and_empty() {
+        let v = json!({"description": "d", "subagent_type": "Plan", "prompt": "Design."});
         let parsed: AgentToolInput = serde_json::from_value(v).unwrap();
+        assert!(parsed.model.is_none());
+        assert!(parsed.run_in_background.is_none());
+        assert!(parsed.name.is_none());
+        assert!(parsed.team_name.is_none());
+        assert!(parsed.mode.is_none());
+        assert!(parsed.isolation.is_none());
+        assert!(parsed.cwd.is_none());
         assert!(parsed.context_paths.is_empty());
     }
 
@@ -669,20 +930,167 @@ mod tests {
     // (AgentTool.tsx:85 optional + :322 default).
     #[test]
     fn agent_input_defaults_subagent_type_to_general_purpose() {
-        let v = json!({ "prompt": "Explore the repo." });
+        let v = json!({ "description": "d", "prompt": "Explore the repo." });
         let parsed: AgentToolInput = serde_json::from_value(v).unwrap();
         assert_eq!(parsed.subagent_type, "general-purpose");
-        // The default is one of the six known built-in types, so the
-        // call-path validation accepts it.
+        // The default is one of the six known built-in types.
         assert!(BUILTIN_SUBAGENT_TYPES.contains(&parsed.subagent_type.as_str()));
     }
 
-    // The advertised schema no longer requires `subagent_type` (TS optional).
+    // The advertised schema requires `description` + `prompt` (TS schema), and
+    // exposes NO `context_paths` field to the model.
     #[test]
-    fn agent_schema_requires_only_prompt() {
+    fn agent_schema_requires_description_and_prompt() {
         let required = AGENT_INPUT_SCHEMA["required"]
             .as_array()
             .expect("required is an array");
-        assert_eq!(required, &[json!("prompt")]);
+        assert_eq!(required, &[json!("description"), json!("prompt")]);
+        let props = AGENT_INPUT_SCHEMA["properties"]
+            .as_object()
+            .expect("properties is an object");
+        assert!(props.contains_key("description"));
+        assert!(props.contains_key("prompt"));
+        // model-facing schema must NOT expose context_paths (removed; TS has no
+        // such field) but must expose the new optional params.
+        assert!(!props.contains_key("context_paths"));
+        for k in ["model", "run_in_background", "name", "team_name", "mode", "isolation", "cwd"] {
+            assert!(props.contains_key(k), "schema exposes {k}");
+        }
+        // `model` + `isolation` carry the TS enum constraint.
+        assert_eq!(
+            AGENT_INPUT_SCHEMA["properties"]["model"]["enum"],
+            json!(["sonnet", "opus", "haiku"])
+        );
+        assert_eq!(
+            AGENT_INPUT_SCHEMA["properties"]["isolation"]["enum"],
+            json!(["worktree", "remote"])
+        );
+        // Verbatim `.describe()` text on a representative field.
+        assert_eq!(
+            AGENT_INPUT_SCHEMA["properties"]["description"]["description"],
+            json!("A short (3-5 word) description of the task")
+        );
+    }
+
+    // Headline-bug fix: an unknown `subagent_type` is ACCEPTED (no hard-reject)
+    // and resolves through the catalog-aware spawner (unknown → general-purpose
+    // happens inside the spawner). The tool surface must not error on it.
+    #[tokio::test]
+    async fn unknown_subagent_type_is_accepted_and_dispatched() {
+        let spawner = arc_mock_spawner();
+        let bctx = wired_ctx(
+            spawner.clone(),
+            arc_mock_task_registry(),
+            arc_mock_mailbox(),
+            arc_mock_budget(u64::MAX),
+        );
+        let tool = AgentTool::new(bctx);
+        let ctx = fresh_ctx_with_registry(Arc::new(ToolRegistry::new()));
+        let input = serde_json::json!({
+            "description": "custom agent",
+            "subagent_type": "my-custom-project-agent",
+            "prompt": "do it"
+        });
+        // No InvalidInput error — the former static 6-type gate is gone.
+        tool.call(input, ctx, fresh_tx())
+            .await
+            .expect("unknown subagent_type must be accepted, not rejected");
+        let invocations = spawner.invocations();
+        assert_eq!(invocations.len(), 1, "spawner is invoked for unknown type");
+        assert_eq!(invocations[0].request.subagent_type, "my-custom-project-agent");
+    }
+
+    // The new params thread into the spawn request.
+    #[tokio::test]
+    async fn spawn_request_carries_new_parity_params() {
+        let spawner = arc_mock_spawner();
+        let bctx = wired_ctx(
+            spawner.clone(),
+            arc_mock_task_registry(),
+            arc_mock_mailbox(),
+            arc_mock_budget(u64::MAX),
+        );
+        let tool = AgentTool::new(bctx);
+        let ctx = fresh_ctx_with_registry(Arc::new(ToolRegistry::new()));
+        let input = serde_json::json!({
+            "description": "desc here",
+            "subagent_type": "general-purpose",
+            "prompt": "go",
+            "model": "opus",
+            "name": "scout",
+            "team_name": "alpha",
+            "mode": "plan",
+            "isolation": "worktree",
+            "cwd": "/work"
+        });
+        tool.call(input, ctx, fresh_tx()).await.unwrap();
+        let req = &spawner.invocations()[0].request;
+        assert_eq!(req.description.as_deref(), Some("desc here"));
+        assert_eq!(req.model.as_deref(), Some("opus"));
+        assert_eq!(req.name.as_deref(), Some("scout"));
+        assert_eq!(req.team_name.as_deref(), Some("alpha"));
+        assert_eq!(req.mode.as_deref(), Some("plan"));
+        assert_eq!(req.isolation.as_deref(), Some("worktree"));
+        assert_eq!(req.cwd.as_deref(), Some("/work"));
+    }
+
+    // Dynamic prompt: catalog lines (formatAgentLine) appear, sourced from the
+    // spawner's `agent_listing`. The mock spawner surfaces two entries.
+    #[tokio::test]
+    async fn prompt_injects_dynamic_agent_catalog_lines() {
+        let spawner = arc_mock_spawner();
+        let bctx = wired_ctx(
+            spawner.clone(),
+            arc_mock_task_registry(),
+            arc_mock_mailbox(),
+            arc_mock_budget(u64::MAX),
+        );
+        let tool = AgentTool::new(bctx);
+        let prompt = tool
+            .prompt(&PromptOptions {
+                include_examples: true,
+            })
+            .await;
+        assert!(prompt.contains("Available agent types and the tools they have access to:"));
+        // formatAgentLine: `- {type}: {whenToUse} (Tools: {tools})`.
+        assert!(
+            prompt.contains("- general-purpose: use for anything (Tools: All tools)"),
+            "catalog line missing; prompt was:\n{prompt}"
+        );
+        assert!(prompt.contains("- Explore: search (Tools: All tools except Edit)"));
+        // Core structural anchors from getPrompt.
+        assert!(prompt.contains("Launch a new agent to handle complex, multi-step tasks"));
+        assert!(prompt.contains("If omitted, the general-purpose agent is used."));
+    }
+
+    // build_prompt's coordinator branch returns the slim shared prompt only
+    // (no "Usage notes:" / examples), matching TS `if (isCoordinator) return shared`.
+    #[test]
+    fn build_prompt_coordinator_branch_is_slim() {
+        let agents = vec![traits::subagent_spawn::SubagentListingEntry {
+            agent_type: "general-purpose".into(),
+            when_to_use: "anything".into(),
+            tools_description: "All tools".into(),
+        }];
+        let full = AgentTool::build_prompt(&agents, &[], false);
+        let slim = AgentTool::build_prompt(&agents, &[], true);
+        assert!(full.contains("Usage notes:"));
+        assert!(!slim.contains("Usage notes:"));
+        // Both carry the agent catalog.
+        assert!(slim.contains("- general-purpose: anything (Tools: All tools)"));
+    }
+
+    // MCP server names surface in the prompt when the registry exposes them.
+    #[test]
+    fn build_prompt_lists_mcp_servers_when_present() {
+        let agents = vec![traits::subagent_spawn::SubagentListingEntry {
+            agent_type: "general-purpose".into(),
+            when_to_use: "anything".into(),
+            tools_description: "All tools".into(),
+        }];
+        let p = AgentTool::build_prompt(&agents, &["github".into(), "linear".into()], false);
+        assert!(p.contains("# MCP Servers"));
+        assert!(p.contains("- github"));
+        assert!(p.contains("- linear"));
     }
 }

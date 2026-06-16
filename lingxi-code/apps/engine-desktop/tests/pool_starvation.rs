@@ -188,6 +188,14 @@ fn agent_tool_request() -> SubagentSpawnRequest {
         subagent_type: "general-purpose".into(),
         prompt: "do one thing".into(),
         context_paths: vec![],
+        // AgentTool spawn-surface parity params (additive optional).
+        description: None,
+        model: None,
+        name: None,
+        team_name: None,
+        mode: None,
+        isolation: None,
+        cwd: None,
     }
 }
 

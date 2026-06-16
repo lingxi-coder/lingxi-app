@@ -297,6 +297,15 @@ impl Task for DreamHandler {
             subagent_type: DREAM_SUBAGENT_TYPE.to_string(),
             prompt: build_consolidation_prompt(&prompt),
             context_paths: Vec::new(),
+            // AgentTool spawn-surface parity params — the dream consolidation
+            // path sets no model/teammate/isolation/cwd override.
+            description: None,
+            model: None,
+            name: None,
+            team_name: None,
+            mode: None,
+            isolation: None,
+            cwd: None,
         };
 
         // 4. Bundle the inheritance. Cloning the Arcs preserves pointer

@@ -23,13 +23,48 @@ use thiserror::Error;
 /// so the trait surface stays insulated from `lingxi-tools`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SubagentSpawnRequest {
-    /// One of the 6 built-in subagent types.
+    /// The subagent type to resolve (built-in or user/project catalog). NOT
+    /// validated here — the spawner resolves it with claude-code precedence
+    /// (catalog overrides built-ins; unknown → `general-purpose`).
     pub subagent_type: String,
     /// Initial prompt seeded into the subagent's first turn.
     pub prompt: String,
     /// Optional context-path files injected as system-tagged messages.
     #[serde(default)]
     pub context_paths: Vec<PathBuf>,
+    // ===== AgentTool spawn-surface parity (coordinator batch D2a) =====
+    // Additive optional fields mirroring claude-code's `AgentTool` schema
+    // (`AgentTool.tsx:82-101`). All `#[serde(default)]`/`Option` so existing
+    // call sites and serialized payloads remain valid (frozen-crate rule).
+    /// Short (3-5 word) human description of the task (TS `description`,
+    /// required in the model-facing schema). Carried for telemetry / display.
+    #[serde(default)]
+    pub description: Option<String>,
+    /// Model-family override (`"sonnet"` | `"opus"` | `"haiku"`). Takes
+    /// precedence over the resolved [`crate::…`] agent definition's model
+    /// (TS `model`). The spawner maps this onto the agent model override.
+    #[serde(default)]
+    pub model: Option<String>,
+    /// Name for the spawned agent, making it addressable via `SendMessage`
+    /// (TS `name`). Carried through; teammate routing is deferred.
+    #[serde(default)]
+    pub name: Option<String>,
+    /// Team name for spawning (TS `team_name`). Carried through; teammate
+    /// routing is deferred.
+    #[serde(default)]
+    pub team_name: Option<String>,
+    /// Permission mode for a spawned teammate (TS `mode`, e.g. `"plan"`).
+    /// Carried through; permission-mode application is deferred.
+    #[serde(default)]
+    pub mode: Option<String>,
+    /// Isolation mode (`"worktree"` | `"remote"`, TS `isolation`). Carried
+    /// through; worktree/remote isolation behavior is deferred.
+    #[serde(default)]
+    pub isolation: Option<String>,
+    /// Absolute path to run the agent in (TS `cwd`). Carried through; the
+    /// cwd-override behavior is deferred.
+    #[serde(default)]
+    pub cwd: Option<String>,
 }
 
 /// Token-usage rollup returned at the end of a successful spawn.
@@ -86,6 +121,25 @@ pub struct SubagentInheritance {
     pub budget: Arc<dyn BudgetEnforcerHandle>,
 }
 
+/// One resolved subagent type, surfaced to `AgentTool` so it can build the
+/// dynamic tool prompt (claude-code's `formatAgentLine`,
+/// `AgentTool/prompt.ts:43-46`: `- {agentType}: {whenToUse} (Tools: …)`).
+///
+/// Lives in `traits` (a leaf crate) so `tool-agent` — which must NOT depend on
+/// the `agent` engine crate — can render the catalog without a cyclic dep. The
+/// concrete [`SubagentSpawner`] impl in `agent` populates it from the resolved
+/// built-in + user/project [`AgentDefinition`]s.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SubagentListingEntry {
+    /// Agent type label (TS `agentType`).
+    pub agent_type: String,
+    /// "When to use" guidance (TS `whenToUse`).
+    pub when_to_use: String,
+    /// Pre-rendered tools description (TS `getToolsDescription`): `All tools`,
+    /// `All tools except X, Y`, an explicit `A, B, C`, or `None`.
+    pub tools_description: String,
+}
+
 /// Spawn-a-subagent seam used by `AgentTool`.
 #[async_trait]
 pub trait SubagentSpawner: Send + Sync {
@@ -100,6 +154,16 @@ pub trait SubagentSpawner: Send + Sync {
         request: SubagentSpawnRequest,
         inherit: SubagentInheritance,
     ) -> Result<SubagentResult, SubagentSpawnError>;
+
+    /// The resolved subagent catalog (built-ins + any wired user/project
+    /// agents), used by `AgentTool` to render its dynamic tool prompt.
+    ///
+    /// Defaulted to empty so existing impls/tests need no change (frozen-crate
+    /// rule). The production [`SubagentSpawner`] overrides this to surface the
+    /// real catalog with claude-code's later-wins precedence.
+    async fn agent_listing(&self) -> Vec<SubagentListingEntry> {
+        Vec::new()
+    }
 }
 
 #[cfg(test)]

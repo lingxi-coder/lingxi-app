@@ -220,6 +220,16 @@ impl Task for LocalAgentHandler {
             subagent_type,
             prompt,
             context_paths: Vec::new(),
+            // AgentTool spawn-surface parity params — the LocalAgent variant
+            // carries none of these overrides (its only inputs are agent_id /
+            // subagent_type / prompt / is_backgrounded), so all default to None.
+            description: None,
+            model: None,
+            name: None,
+            team_name: None,
+            mode: None,
+            isolation: None,
+            cwd: None,
         };
 
         // 4. Bundle the inheritance. Cloning the Arcs preserves pointer

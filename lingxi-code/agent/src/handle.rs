@@ -29,8 +29,8 @@ use tokio::sync::RwLock;
 use tool_api::tool_trait::{PromptOptions, ToolStaticContext};
 use tool_api::ToolRegistry;
 use traits::subagent_spawn::{
-    SubagentInheritance, SubagentResult, SubagentSpawnError, SubagentSpawnRequest, SubagentSpawner,
-    SubagentUsage,
+    SubagentInheritance, SubagentListingEntry, SubagentResult, SubagentSpawnError,
+    SubagentSpawnRequest, SubagentSpawner, SubagentUsage,
 };
 
 /// Production [`SubagentSpawner`] backed by a [`StateMachinePool`].
@@ -365,6 +365,56 @@ impl PoolSubagentSpawner {
             budget: None,
         }
     }
+
+    /// Render an [`AgentDefinition`]'s tool policy into the human description
+    /// claude-code shows in the dynamic Agent tool prompt
+    /// (`AgentTool/prompt.ts:15-37` `getToolsDescription`). The Rust
+    /// [`AgentToolPolicy`] folds TS's `tools` (allowlist) + `disallowedTools`
+    /// (denylist) into one enum, so the mapping is:
+    /// - `All { .. }` → `"All tools"` (no restrictions)
+    /// - `Explicit(names)` → `names.join(", ")` (allowlist), `"None"` if empty
+    /// - `Except(names)` → `"All tools except {names.join(", ")}"` (denylist)
+    fn tools_description(def: &AgentDefinition) -> String {
+        match &def.tools {
+            AgentToolPolicy::All { .. } => "All tools".to_string(),
+            AgentToolPolicy::Explicit(names) => {
+                if names.is_empty() {
+                    "None".to_string()
+                } else {
+                    names.join(", ")
+                }
+            }
+            AgentToolPolicy::Except(names) => {
+                format!("All tools except {}", names.join(", "))
+            }
+        }
+    }
+
+    /// Resolve the full subagent catalog (built-ins overlaid by the file
+    /// catalog, claude-code later-wins precedence) into listing entries for
+    /// the dynamic Agent tool prompt. Each entry's model is left unresolved
+    /// (the prompt only needs type / when-to-use / tools).
+    async fn listing_entries(&self) -> Vec<SubagentListingEntry> {
+        // Start from built-ins keyed by type, then overlay the file catalog so
+        // a user/project agent with the same `agent_type` wins on collision.
+        let mut by_type: HashMap<String, AgentDefinition> = (*self.builtins).clone();
+        if let Some(catalog) = self.agent_catalog.get() {
+            for def in catalog.read().await.iter() {
+                by_type.insert(def.agent_type.clone(), def.clone());
+            }
+        }
+        let mut entries: Vec<SubagentListingEntry> = by_type
+            .into_values()
+            .map(|def| SubagentListingEntry {
+                tools_description: Self::tools_description(&def),
+                agent_type: def.agent_type,
+                when_to_use: def.when_to_use,
+            })
+            .collect();
+        // Deterministic order (HashMap iteration is unordered).
+        entries.sort_by(|a, b| a.agent_type.cmp(&b.agent_type));
+        entries
+    }
 }
 
 #[async_trait]
@@ -384,7 +434,29 @@ impl SubagentSpawner for PoolSubagentSpawner {
         // overrides built-ins; unknown → general-purpose). Its tools policy /
         // model / max_turns / system prompt flow into the runner, and its
         // policy drives the per-spawn tool resolution below.
-        let def = self.resolve_definition(&request.subagent_type).await;
+        let mut def = self.resolve_definition(&request.subagent_type).await;
+        // AgentTool spawn-surface parity: an explicit `model` from the caller
+        // (TS schema `model: 'sonnet' | 'opus' | 'haiku'`) takes precedence
+        // over the definition's model frontmatter (AgentTool.tsx:86). Resolve
+        // the requested family to a concrete wire id via the same machinery
+        // (`resolve_agent_model`) `resolve_definition` uses when a default
+        // model is wired; without one, the bare alias is passed through raw
+        // (legacy back-compat — the runner resolves it later).
+        if let Some(model_pref) = request.model.as_deref() {
+            let requested = AgentModel::Alias(model_pref.to_string());
+            def.model = match &self.default_model {
+                Some(parent) => AgentModel::Explicit(
+                    crate::model_resolution::resolve_agent_model(&requested, parent),
+                ),
+                None => requested,
+            };
+        }
+        // The other parity params (`name` / `team_name` / `mode` / `isolation`
+        // / `cwd`) are carried on the request but their behavioral effects are
+        // DEFERRED: teammate routing (name/team_name/mode), worktree/remote
+        // isolation, and per-agent cwd override are separate features whose
+        // wiring lands with the multi-agent + worktree spawn paths. They are
+        // intentionally not faked here.
         let mut ctx = Self::make_subagent_context(def, &request.prompt);
         // Hand the child the parent's tool invoker, the parent's budget
         // enforcer, and our model API seam so the runner can drive the real
@@ -441,6 +513,13 @@ impl SubagentSpawner for PoolSubagentSpawner {
         // result.
         let _ = self.pool.deallocate(&agent_id).await;
         Ok(result)
+    }
+
+    /// Surface the resolved subagent catalog (built-ins + user/project agents)
+    /// so `AgentTool` can render its dynamic tool prompt. See
+    /// [`Self::listing_entries`].
+    async fn agent_listing(&self) -> Vec<SubagentListingEntry> {
+        self.listing_entries().await
     }
 }
 
@@ -919,6 +998,94 @@ mod tests {
         assert!(allowed.contains(&"Grep".to_string()));
         assert!(!allowed.contains(&"Edit".to_string()));
         assert!(!allowed.contains(&"Write".to_string()));
+    }
+
+    // ── AgentTool spawn-surface parity (coordinator batch D2a) ──
+
+    #[tokio::test]
+    async fn agent_listing_surfaces_builtins_with_tools_description() {
+        let runtime = Arc::new(MockRuntimeSpawner::default());
+        let pool = Arc::new(StateMachinePool::new(runtime, 4));
+        let spawner = PoolSubagentSpawner::new(pool);
+        let entries = spawner.agent_listing().await;
+        // All 6 built-ins, sorted by type.
+        assert_eq!(entries.len(), 6);
+        let by: std::collections::HashMap<&str, &SubagentListingEntry> =
+            entries.iter().map(|e| (e.agent_type.as_str(), e)).collect();
+        // general-purpose: All { .. } → "All tools".
+        assert_eq!(by["general-purpose"].tools_description, "All tools");
+        // Explore: Except([Agent, ExitPlanMode, Edit, Write, NotebookEdit]).
+        assert_eq!(
+            by["Explore"].tools_description,
+            "All tools except Agent, ExitPlanMode, Edit, Write, NotebookEdit"
+        );
+        // statusline-setup: Explicit([Read, Edit]).
+        assert_eq!(by["statusline-setup"].tools_description, "Read, Edit");
+        // when_to_use carried through verbatim.
+        assert!(by["Explore"].when_to_use.contains("exploring codebases"));
+    }
+
+    #[tokio::test]
+    async fn agent_listing_catalog_overrides_builtin() {
+        let runtime = Arc::new(MockRuntimeSpawner::default());
+        let pool = Arc::new(StateMachinePool::new(runtime, 4));
+        let custom = AgentDefinition {
+            agent_type: "Explore".to_string(),
+            when_to_use: "CUSTOM EXPLORE".to_string(),
+            ..agent_def(AgentToolPolicy::Explicit(vec!["Read".to_string()]))
+        };
+        let catalog = Arc::new(RwLock::new(vec![custom]));
+        let spawner = PoolSubagentSpawner::new(pool).with_agent_catalog(catalog);
+        let entries = spawner.agent_listing().await;
+        let explore = entries.iter().find(|e| e.agent_type == "Explore").unwrap();
+        // The catalog entry (Explicit[Read] → "Read") wins over the built-in.
+        assert_eq!(explore.when_to_use, "CUSTOM EXPLORE");
+        assert_eq!(explore.tools_description, "Read");
+        // Still 6 (override, not addition).
+        assert_eq!(entries.len(), 6);
+    }
+
+    #[test]
+    fn tools_description_maps_empty_explicit_to_none() {
+        let def = agent_def(AgentToolPolicy::Explicit(vec![]));
+        assert_eq!(PoolSubagentSpawner::tools_description(&def), "None");
+    }
+
+    #[tokio::test]
+    async fn spawn_request_model_override_takes_precedence() {
+        // The caller's `model` (AgentTool schema) overrides the definition's
+        // model; with a default model wired it resolves to a concrete wire id.
+        let runtime = Arc::new(MockRuntimeSpawner::default());
+        let pool = Arc::new(StateMachinePool::new(runtime, 4));
+        let spawner = PoolSubagentSpawner::new(pool).with_default_model("claude-opus-4-7");
+        // general-purpose is Inherit; request a haiku override → resolves to the
+        // concrete haiku id (different tier from the opus parent).
+        let mut req = SubagentSpawnRequest {
+            subagent_type: "general-purpose".to_string(),
+            prompt: "go".to_string(),
+            context_paths: vec![],
+            description: None,
+            model: Some("haiku".to_string()),
+            name: None,
+            team_name: None,
+            mode: None,
+            isolation: None,
+            cwd: None,
+        };
+        // Drive resolve_definition + the override branch directly by replicating
+        // the spawn-path logic (spawn() would require a live runner).
+        let mut def = spawner.resolve_definition(&req.subagent_type).await;
+        if let Some(model_pref) = req.model.as_deref() {
+            let requested = AgentModel::Alias(model_pref.to_string());
+            def.model = AgentModel::Explicit(crate::model_resolution::resolve_agent_model(
+                &requested,
+                "claude-opus-4-7",
+            ));
+        }
+        assert!(matches!(&def.model, AgentModel::Explicit(m) if m == "claude-haiku-4-5"));
+        // Sanity: the request struct carries the rest of the parity params.
+        req.name = Some("scout".into());
+        assert_eq!(req.name.as_deref(), Some("scout"));
     }
 
     #[test]

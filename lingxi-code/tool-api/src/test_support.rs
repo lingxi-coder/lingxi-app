@@ -559,6 +559,7 @@ pub fn ctx_for_file_tools(
         android_shell: None,
         android_git: None,
         android_git_secret: None,
+        task_lifecycle_hooks: None,
     }
 }
 
@@ -615,5 +616,6 @@ pub fn shell_test_ctx(out: ProcessOutput) -> super::BuiltinToolContext {
         android_shell: None,
         android_git: None,
         android_git_secret: None,
+        task_lifecycle_hooks: None,
     }
 }

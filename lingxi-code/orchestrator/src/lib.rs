@@ -32,6 +32,7 @@ pub mod sse;
 pub mod streaming_loop;
 pub mod task_completed_firer;
 pub mod task_created_firer;
+pub mod task_lifecycle_hook_firer;
 pub mod teammate_idle_firer;
 pub mod token_budget;
 pub mod turn_loop;
@@ -62,6 +63,7 @@ pub use cwd_changed_firer::OrchestratorCwdChangedFirer;
 pub use file_changed_firer::OrchestratorFileChangedFirer;
 pub use task_completed_firer::OrchestratorTaskCompletedFirer;
 pub use task_created_firer::OrchestratorTaskCreatedFirer;
+pub use task_lifecycle_hook_firer::OrchestratorTaskLifecycleHookFirer;
 pub use teammate_idle_firer::OrchestratorTeammateIdleFirer;
 pub use prompt::{
     assemble_system_prompt, FileTree, FileTreeEntry, GitStatus, MemoryFile, SystemPromptContext,

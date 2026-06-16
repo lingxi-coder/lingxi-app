@@ -594,6 +594,10 @@ pub async fn build_mobile_inner(
         // P4: thread the Android Git network secret (token + CA dir) from
         // MobileConfig. `None` on iOS and desktop; T10 populates from android-aar.
         android_git_secret: cfg.android_git_secret.clone(),
+        // The V2 task tools' BLOCKING TaskCreated/TaskCompleted hooks are a
+        // desktop composition-root wiring; mobile leaves them unwired (the tool
+        // path is then non-blocking, matching the registry firer behavior).
+        task_lifecycle_hooks: None,
     };
     let tools = Arc::new(mobile_tool_registry(tool_ctx));
 

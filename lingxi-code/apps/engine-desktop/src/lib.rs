@@ -2307,6 +2307,16 @@ pub async fn build(
         android_shell: None,
         android_git: None,
         android_git_secret: None,
+        // BLOCKING TaskCreated/TaskCompleted hooks for the V2 Task* tool path
+        // (claude-code `executeTaskCreatedHooks` / `executeTaskCompletedHooks`).
+        // Wraps the SAME `Arc<HookExecutorImpl>` + cwd the registry firers use
+        // (the fire-and-forget `OrchestratorTaskCreated/CompletedFirer` injected
+        // into the `TaskRegistry` above), but REPORTS a Block decision so the
+        // tool can roll back creation / refuse a completion. Separate seam — the
+        // registry firers' observe-only contract is unchanged.
+        task_lifecycle_hooks: Some(Arc::new(
+            orchestrator::OrchestratorTaskLifecycleHookFirer::new(hooks.clone(), cwd.clone()),
+        )),
     };
     // (5.5) M10 (T12/T13): select the team-tool variant at BUILD time. A
     //        coordinator session passes `Some(CoordinatorWiring { team, mode,

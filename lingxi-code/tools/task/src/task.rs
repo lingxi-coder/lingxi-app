@@ -787,7 +787,7 @@ impl Tool for TaskCreateTool {
 
         let list_id = resolve_task_list_id(&ctx).await;
         let store = TodoStore::for_list(&list_id);
-        let task = TodoTask::new(subject.clone(), description, active_form, metadata);
+        let task = TodoTask::new(subject.clone(), description.clone(), active_form, metadata);
         let task_id = match store.create(task).await {
             Ok(id) => id,
             Err(e) => {
@@ -802,8 +802,36 @@ impl Tool for TaskCreateTool {
                 return Err(ToolError::Internal(format!("TaskCreate: {e}")));
             }
         };
-        // PARITY-GAP: TaskCreated hooks + context.setAppState(expandedView)
-        // (TaskCreateTool.ts:93-120) are omitted — no hook/app-state seam here.
+
+        // BLOCKING TaskCreated hooks (TaskCreateTool.ts:93-113). After the task
+        // is persisted, fire the `TaskCreated` hook through the tool-path firer
+        // (when one is wired). On a blocking error claude-code deletes the
+        // just-created task and throws — so we roll the store entry back and
+        // surface the block as a tool error. NOT swarm-gated: TS fires
+        // `executeTaskCreatedHooks` unconditionally (the hook runs whenever a
+        // `TaskCreated` hook is registered), so we do too. With no firer wired
+        // (`None`) this is a no-op and creation proceeds — matching the
+        // fire-and-forget registry path.
+        if let Some(firer) = self.ctx.task_lifecycle_hooks.as_ref() {
+            if let Err(reason) = firer
+                .fire_task_created(&task_id, &subject, Some(description.as_str()))
+                .await
+            {
+                // TS `await deleteTask(getTaskListId(), taskId)` then `throw`.
+                store.delete(&task_id).await;
+                emit_failed(
+                    &bus,
+                    TASK_CREATE_FAILED,
+                    &invocation_id,
+                    "blocked_by_hook",
+                    started.elapsed().as_millis() as u64,
+                )
+                .await;
+                return Err(ToolError::Internal(reason));
+            }
+        }
+        // PARITY-GAP: context.setAppState(expandedView) (TaskCreateTool.ts:115-119)
+        // is omitted — no app-state seam here.
 
         emit_completed(
             &bus,
@@ -1375,7 +1403,52 @@ impl Tool for TaskUpdateTool {
         let mut status_change: Option<(TodoState, TodoState)> = None;
         if let StatusInput::State(st) = status_input {
             if st != existing.status {
-                // PARITY-GAP: TaskCompleted hooks (TaskUpdateTool.ts:773-807) omitted.
+                // BLOCKING TaskCompleted hooks (TaskUpdateTool.ts:230-265).
+                // TS runs `executeTaskCompletedHooks` ONLY when a real
+                // transition sets `status === 'completed'` (the V2 todo store's
+                // sole terminal state — `failed` lives in the Product-B
+                // registry, not here). Fire BEFORE applying the status: on a
+                // blocking error claude-code returns `success:false` carrying
+                // the reason and does NOT apply the status, so we return early
+                // with that shape and leave `new_status` unset. NOT swarm-gated
+                // (TS fires whenever a `TaskCompleted` hook is registered). With
+                // no firer wired (`None`) this is a no-op — matching the
+                // fire-and-forget registry path. Subject/description come from
+                // the EXISTING task (TS `existingTask.subject` / `.description`).
+                if st == TodoState::Completed {
+                    if let Some(firer) = self.ctx.task_lifecycle_hooks.as_ref() {
+                        if let Err(reason) = firer
+                            .fire_task_completed(
+                                &task_id,
+                                status_wire(st),
+                                &existing.subject,
+                                Some(existing.description.as_str()),
+                            )
+                            .await
+                        {
+                            emit_completed(
+                                &bus,
+                                TASK_UPDATE_COMPLETED,
+                                &invocation_id,
+                                duration(),
+                                &[],
+                            )
+                            .await;
+                            return Ok(ToolCallResult {
+                                data: json!({
+                                    "content": render_task_update_fail(&task_id, Some(&reason)),
+                                    "success": false,
+                                    "taskId": task_id,
+                                    "updatedFields": Vec::<String>::new(),
+                                    "error": reason,
+                                }),
+                                new_messages: vec![],
+                                context_modifier: None,
+                                mcp_meta: None,
+                            });
+                        }
+                    }
+                }
                 new_status = Some(st);
                 updated_fields.push("status".into());
                 status_change = Some((existing.status, st));
@@ -2943,6 +3016,302 @@ mod tests {
             .expect("update ok");
 
             assert!(router.sent.lock().unwrap().is_empty(), "no route when swarms off");
+        }
+    }
+
+    // ── BLOCKING TaskCreated / TaskCompleted lifecycle hooks (tool path) ──────
+    //   Exercises the `BuiltinToolContext::task_lifecycle_hooks` seam with a
+    //   FAKE `TaskLifecycleHookFirer` (no real hook executor needed):
+    //     • a blocking TaskCreated hook → TaskCreate errors + the task is NOT
+    //       persisted (rolled back from the store).
+    //     • a blocking TaskCompleted hook → TaskUpdate→completed returns
+    //       success:false + the status is unchanged.
+    //     • no firer / a non-blocking firer → normal create/complete.
+    mod lifecycle_hooks {
+        use super::*;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use telemetry::AnalyticsBus;
+        use tool_api::test_support::{ctx_for_file_tools, fresh_ctx, fresh_tx, make_dummy_fs};
+        use tool_api::TaskLifecycleHookFirer;
+
+        /// Restore-on-drop guard for the store env vars; removes the throwaway
+        /// dir. Runs even on assertion panic. Holds `ENV_LOCK` so it does not
+        /// race other env-mutating tests on `CLAUDE_CONFIG_DIR`.
+        struct Guard {
+            prev_config: Option<std::ffi::OsString>,
+            prev_list: Option<std::ffi::OsString>,
+            dir: std::path::PathBuf,
+            _lock: std::sync::MutexGuard<'static, ()>,
+        }
+        impl Drop for Guard {
+            fn drop(&mut self) {
+                match &self.prev_config {
+                    Some(v) => std::env::set_var("CLAUDE_CONFIG_DIR", v),
+                    None => std::env::remove_var("CLAUDE_CONFIG_DIR"),
+                }
+                match &self.prev_list {
+                    Some(v) => std::env::set_var("CLAUDE_CODE_TASK_LIST_ID", v),
+                    None => std::env::remove_var("CLAUDE_CODE_TASK_LIST_ID"),
+                }
+                let _ = std::fs::remove_dir_all(&self.dir);
+            }
+        }
+
+        /// Isolate the file-backed store to a unique throwaway dir + list id.
+        fn setup() -> (Guard, String) {
+            let lock = super::ENV_LOCK
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let unique = format!(
+                "lingxi-task-lifecycle-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_nanos())
+                    .unwrap_or(0)
+            );
+            let dir = std::env::temp_dir().join(&unique);
+            let guard = Guard {
+                prev_config: std::env::var_os("CLAUDE_CONFIG_DIR"),
+                prev_list: std::env::var_os("CLAUDE_CODE_TASK_LIST_ID"),
+                dir: dir.clone(),
+                _lock: lock,
+            };
+            std::env::set_var("CLAUDE_CONFIG_DIR", &dir);
+            std::env::set_var("CLAUDE_CODE_TASK_LIST_ID", &unique);
+            (guard, unique)
+        }
+
+        /// Fake firer: blocks (`Err`) or allows (`Ok`) on demand, and records the
+        /// exact `(task_id, subject, description)` it was fired with so tests can
+        /// assert the payload mapping. No real hook executor involved.
+        #[derive(Default)]
+        struct FakeFirer {
+            block_created: Option<String>,
+            block_completed: Option<String>,
+            created_calls: AtomicUsize,
+            completed_calls: AtomicUsize,
+            last_created: std::sync::Mutex<Option<(String, String, Option<String>)>>,
+            last_completed: std::sync::Mutex<Option<(String, String, String, Option<String>)>>,
+        }
+        #[async_trait]
+        impl TaskLifecycleHookFirer for FakeFirer {
+            async fn fire_task_created(
+                &self,
+                task_id: &str,
+                subject: &str,
+                description: Option<&str>,
+            ) -> Result<(), String> {
+                self.created_calls.fetch_add(1, Ordering::SeqCst);
+                *self.last_created.lock().unwrap() =
+                    Some((task_id.into(), subject.into(), description.map(str::to_string)));
+                match &self.block_created {
+                    Some(reason) => Err(reason.clone()),
+                    None => Ok(()),
+                }
+            }
+            async fn fire_task_completed(
+                &self,
+                task_id: &str,
+                status: &str,
+                subject: &str,
+                description: Option<&str>,
+            ) -> Result<(), String> {
+                self.completed_calls.fetch_add(1, Ordering::SeqCst);
+                *self.last_completed.lock().unwrap() = Some((
+                    task_id.into(),
+                    status.into(),
+                    subject.into(),
+                    description.map(str::to_string),
+                ));
+                match &self.block_completed {
+                    Some(reason) => Err(reason.clone()),
+                    None => Ok(()),
+                }
+            }
+        }
+
+        /// Build a tool ctx whose `task_lifecycle_hooks` is the given firer (or
+        /// `None`).
+        fn bctx(firer: Option<Arc<FakeFirer>>) -> BuiltinToolContext {
+            let mut c = ctx_for_file_tools(
+                make_dummy_fs(),
+                Arc::new(AnalyticsBus::new()),
+                vec![std::env::temp_dir()],
+            );
+            c.task_lifecycle_hooks =
+                firer.map(|f| f as Arc<dyn TaskLifecycleHookFirer>);
+            c
+        }
+
+        #[tokio::test]
+        async fn blocking_task_created_hook_errors_and_does_not_persist() {
+            let (_g, list) = setup();
+            let firer = Arc::new(FakeFirer {
+                block_created: Some("creation blocked by policy".into()),
+                ..Default::default()
+            });
+            let tool = TaskCreateTool::new(bctx(Some(firer.clone())));
+            let err = tool
+                .call(
+                    json!({ "subject": "Ship it", "description": "do the work" }),
+                    fresh_ctx(),
+                    fresh_tx(),
+                )
+                .await
+                .expect_err("a blocking TaskCreated hook must error the create");
+            match err {
+                ToolError::Internal(s) => {
+                    assert_eq!(s, "creation blocked by policy", "the hook reason surfaces")
+                }
+                other => panic!("expected Internal(reason), got {other:?}"),
+            }
+            // The fire saw the (task_id, subject, description) payload.
+            let (_id, subj, desc) = firer.last_created.lock().unwrap().clone().unwrap();
+            assert_eq!(subj, "Ship it");
+            assert_eq!(desc.as_deref(), Some("do the work"));
+            // CRITICAL: the just-created task was rolled back — the store is empty.
+            let store = TodoStore::for_list(&list);
+            assert!(
+                store.list().await.is_empty(),
+                "a blocked TaskCreate must NOT leave the task persisted (TS deleteTask)"
+            );
+        }
+
+        #[tokio::test]
+        async fn non_blocking_task_created_hook_persists_normally() {
+            let (_g, list) = setup();
+            let firer = Arc::new(FakeFirer::default()); // allow
+            let tool = TaskCreateTool::new(bctx(Some(firer.clone())));
+            let res = tool
+                .call(
+                    json!({ "subject": "Ship it", "description": "do the work" }),
+                    fresh_ctx(),
+                    fresh_tx(),
+                )
+                .await
+                .expect("a non-blocking TaskCreated hook allows the create");
+            assert_eq!(res.data["task"]["subject"], "Ship it");
+            assert_eq!(firer.created_calls.load(Ordering::SeqCst), 1, "the hook fired once");
+            let store = TodoStore::for_list(&list);
+            assert_eq!(store.list().await.len(), 1, "the task is persisted");
+        }
+
+        #[tokio::test]
+        async fn no_firer_creates_without_firing() {
+            let (_g, list) = setup();
+            let tool = TaskCreateTool::new(bctx(None));
+            tool.call(
+                json!({ "subject": "Ship it", "description": "do the work" }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .expect("no firer → normal create");
+            let store = TodoStore::for_list(&list);
+            assert_eq!(store.list().await.len(), 1, "the task is persisted with no firer");
+        }
+
+        #[tokio::test]
+        async fn blocking_task_completed_hook_returns_failure_and_status_unchanged() {
+            let (_g, list) = setup();
+            let store = TodoStore::for_list(&list);
+            let id = store
+                .create(TodoTask::new(
+                    "Ship it".into(),
+                    "the description".into(),
+                    None,
+                    Map::new(),
+                ))
+                .await
+                .unwrap();
+
+            let firer = Arc::new(FakeFirer {
+                block_completed: Some("not verified".into()),
+                ..Default::default()
+            });
+            let tool = TaskUpdateTool::new(bctx(Some(firer.clone())));
+            let res = tool
+                .call(
+                    json!({ "taskId": &id, "status": "completed" }),
+                    fresh_ctx(),
+                    fresh_tx(),
+                )
+                .await
+                .expect("a blocked completion is a benign success:false result, not an error");
+            // TS shape: { success:false, taskId, updatedFields:[], error }.
+            assert_eq!(res.data["success"], json!(false));
+            assert_eq!(res.data["error"], "not verified");
+            assert_eq!(res.data["updatedFields"], json!(Vec::<String>::new()));
+            assert!(res.data.get("statusChange").is_none(), "no statusChange on a block");
+            // The fire saw the EXISTING subject/description + the terminal status.
+            let (_id, status, subj, desc) = firer.last_completed.lock().unwrap().clone().unwrap();
+            assert_eq!(status, "completed");
+            assert_eq!(subj, "Ship it");
+            assert_eq!(desc.as_deref(), Some("the description"));
+            // CRITICAL: the status was NOT applied — still pending.
+            let after = store.get(&id).await.unwrap();
+            assert_eq!(after.status, TodoState::Pending, "a blocked completion must NOT apply the status");
+        }
+
+        #[tokio::test]
+        async fn non_blocking_task_completed_hook_applies_status() {
+            let (_g, list) = setup();
+            let store = TodoStore::for_list(&list);
+            let id = store
+                .create(TodoTask::new("Ship it".into(), "desc".into(), None, Map::new()))
+                .await
+                .unwrap();
+
+            let firer = Arc::new(FakeFirer::default()); // allow
+            let tool = TaskUpdateTool::new(bctx(Some(firer.clone())));
+            let res = tool
+                .call(
+                    json!({ "taskId": &id, "status": "completed" }),
+                    fresh_ctx(),
+                    fresh_tx(),
+                )
+                .await
+                .expect("a non-blocking completion succeeds");
+            assert_eq!(res.data["success"], json!(true));
+            assert_eq!(res.data["statusChange"]["to"], "completed");
+            assert_eq!(firer.completed_calls.load(Ordering::SeqCst), 1, "the hook fired once");
+            let after = store.get(&id).await.unwrap();
+            assert_eq!(after.status, TodoState::Completed, "the status is applied");
+        }
+
+        #[tokio::test]
+        async fn non_terminal_update_does_not_fire_completed_hook() {
+            let (_g, list) = setup();
+            let store = TodoStore::for_list(&list);
+            let id = store
+                .create(TodoTask::new("Ship it".into(), "desc".into(), None, Map::new()))
+                .await
+                .unwrap();
+
+            // Even a BLOCKING firer must be IGNORED for a non-terminal (in_progress)
+            // transition — TS only fires on `status === 'completed'`.
+            let firer = Arc::new(FakeFirer {
+                block_completed: Some("should never fire".into()),
+                ..Default::default()
+            });
+            let tool = TaskUpdateTool::new(bctx(Some(firer.clone())));
+            let res = tool
+                .call(
+                    json!({ "taskId": &id, "status": "in_progress" }),
+                    fresh_ctx(),
+                    fresh_tx(),
+                )
+                .await
+                .expect("a non-terminal update is unaffected by a TaskCompleted hook");
+            assert_eq!(res.data["success"], json!(true));
+            assert_eq!(
+                firer.completed_calls.load(Ordering::SeqCst),
+                0,
+                "a non-terminal transition must NOT fire the TaskCompleted hook"
+            );
+            let after = store.get(&id).await.unwrap();
+            assert_eq!(after.status, TodoState::InProgress, "the in_progress status is applied");
         }
     }
 

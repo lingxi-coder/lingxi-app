@@ -183,6 +183,74 @@ pub struct BuiltinToolContext {
     /// CA dir is configured. Populated by `android-aar` (T10) and consumed by
     /// `tool-git-mobile`'s network ops. Never logged or persisted.
     pub android_git_secret: Option<AndroidGitSecret>,
+
+    // ===== V2 task lifecycle BLOCKING hooks (TaskCreate/TaskUpdate tool path) =====
+    /// BLOCKING `TaskCreated` / `TaskCompleted` lifecycle-hook firer for the V2
+    /// `Task*` tool path. `None` (the default) → the tool never fires these
+    /// hooks (non-blocking); the desktop composition root wires
+    /// `Some(orchestrator::OrchestratorTaskLifecycleHookFirer)` over the shared
+    /// `Arc<hooks::HookExecutorImpl>`.
+    ///
+    /// This is a SEPARATE seam from the fire-and-forget
+    /// `hooks::TaskCreatedFirer` / `hooks::TaskCompletedFirer` the `TaskRegistry`
+    /// holds (which "MUST NOT propagate hook failures"). It reproduces
+    /// claude-code's BLOCKING paths — `executeTaskCreatedHooks`
+    /// (`TaskCreateTool.ts:93-113`, on a blocking error `deleteTask` + throw) and
+    /// `executeTaskCompletedHooks` (`TaskUpdateTool.ts:232-265`, on a blocking
+    /// error return `success:false` and DO NOT apply the status). `tool-api`
+    /// deliberately does NOT depend on `hooks`, so the trait is defined here and
+    /// the orchestrator implements it.
+    pub task_lifecycle_hooks: Option<Arc<dyn TaskLifecycleHookFirer>>,
+}
+
+/// BLOCKING `TaskCreated` / `TaskCompleted` lifecycle-hook firer for the V2
+/// `Task*` TOOL path.
+///
+/// Distinct from the fire-and-forget `hooks::TaskCreatedFirer` /
+/// `hooks::TaskCompletedFirer` the `TaskRegistry` holds (whose contract is "MUST
+/// NOT propagate hook failures"). This seam REPORTS a blocking decision so the
+/// tool can roll back / refuse, reproducing claude-code's blocking paths:
+///
+/// - [`fire_task_created`](Self::fire_task_created) mirrors `executeTaskCreatedHooks`
+///   (`TaskCreateTool.ts:93-113`): on a blocking error claude-code `deleteTask`s
+///   the just-created task and throws.
+/// - [`fire_task_completed`](Self::fire_task_completed) mirrors
+///   `executeTaskCompletedHooks` (`TaskUpdateTool.ts:232-265`): on a blocking
+///   error claude-code returns `success:false` and does NOT apply the status.
+///
+/// Both methods default to a no-op `Ok(())` (allow) so unwired contexts never
+/// block — an absent firer (`None`) and a wired-but-defaulted impl behave
+/// identically: creation/completion proceeds. `tool-api` must NOT depend on
+/// `hooks`, so the trait lives here and the orchestrator (which depends on both
+/// `tool-api` and `hooks`) provides the real impl over its
+/// `Arc<hooks::HookExecutorImpl>`.
+#[async_trait::async_trait]
+pub trait TaskLifecycleHookFirer: Send + Sync {
+    /// claude-code `executeTaskCreatedHooks` BLOCKING path. `Ok(())` = allow
+    /// creation; `Err(reason)` = a hook BLOCKED creation (the tool rolls the
+    /// just-created task back and surfaces `reason`).
+    async fn fire_task_created(
+        &self,
+        task_id: &str,
+        subject: &str,
+        description: Option<&str>,
+    ) -> Result<(), String> {
+        let _ = (task_id, subject, description);
+        Ok(())
+    }
+    /// claude-code `executeTaskCompletedHooks` BLOCKING path. `Ok(())` = allow
+    /// completion; `Err(reason)` = a hook BLOCKED completion (the tool returns
+    /// `success:false` carrying `reason` and does NOT apply the status).
+    async fn fire_task_completed(
+        &self,
+        task_id: &str,
+        status: &str,
+        subject: &str,
+        description: Option<&str>,
+    ) -> Result<(), String> {
+        let _ = (task_id, status, subject, description);
+        Ok(())
+    }
 }
 
 /// Android-only `Shell` tool wiring (spec r3 §Shell tool). `None` on desktop /

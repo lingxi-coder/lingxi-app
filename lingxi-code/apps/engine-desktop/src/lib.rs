@@ -1091,6 +1091,7 @@ fn provider_profile_label(profile_name: &str) -> String {
         "deepseek" => "DeepSeek".to_string(),
         "glm-coding" => "GLM (coding)".to_string(),
         "zai" => "Z.AI".to_string(),
+        "openai" => "OpenAI".to_string(),
         "github-copilot" => "GitHub Copilot".to_string(),
         other => other
             .split(['-', '_', ' '])

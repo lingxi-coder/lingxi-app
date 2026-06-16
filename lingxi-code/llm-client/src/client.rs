@@ -584,6 +584,14 @@ impl DefaultLlmClient {
                      via load_credential(), not load_secret()"
                 ),
             }),
+            // ChatGptOAuth creds are multi-field structs; callers that need them
+            // must use load_credential() directly.
+            Credential::ChatGptOAuth { .. } => Err(LlmError::InvalidRequest {
+                message: format!(
+                    "provider profile '{profile_name}': ChatGptOAuth credentials must be loaded \
+                     via load_credential(), not load_secret()"
+                ),
+            }),
         }
     }
 }

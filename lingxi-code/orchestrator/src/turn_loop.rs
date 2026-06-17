@@ -460,7 +460,16 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
     }
     // M5-07 T13: mirror the in-memory append to the optional JSONL writer.
     // Best-effort — write failures never fail the turn.
-    orch.persist_message_to_jsonl(&assistant_msg).await;
+    //
+    // WRITE-side per-block split (claude.ts:2171-2211): persist the assistant
+    // turn as ONE single-block JSONL line per content block (shared inner
+    // `message.id`, distinct top-level uuids) to match the streaming writer and
+    // the per-block transcript shape. The in-memory `s.history` push above keeps
+    // the single merged assistant message for request-building. The batched path
+    // persists its tool_results as ONE user message below; it chains off the LAST
+    // assistant block's uuid (advanced by the split), so its single parentUuid is
+    // the final tool_use line — consistent with the pre-split linear chain.
+    let _tool_use_parent_uuids = orch.persist_assistant_per_block(&assistant_msg).await;
 
     // 4. Emit each Text block to the output stream (whole-body in M5-02;
     //    M5-04 will switch to per-delta).
@@ -898,7 +907,10 @@ pub(crate) async fn surface_prompt_too_long(orch: &ConversationOrchestrator) -> 
         let mut s = orch.session.lock().await;
         s.history.push(assistant_msg.clone());
     }
-    orch.persist_message_to_jsonl(&assistant_msg).await;
+    // Per-block split (claude.ts:2171): a single text block → exactly one
+    // assistant line (now carrying the shared inner `message.id`), matching the
+    // rest of the assistant-persist path.
+    let _ = orch.persist_assistant_per_block(&assistant_msg).await;
     orch.output.emit_text(PROMPT_TOO_LONG_ERROR_MESSAGE).await;
     assistant_id
 }

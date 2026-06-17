@@ -1490,7 +1490,35 @@ impl ConversationOrchestrator {
         entrypoint: Option<String>,
         prompt_id: Option<String>,
     ) -> session::JsonlMessage {
-        let (kind, inner_message) = match msg {
+        self.to_jsonl_message_with_inner_id(
+            msg, session_id, parent_uuid, git_branch, entrypoint, prompt_id, None,
+        )
+    }
+
+    /// As [`Self::to_jsonl_message`], but allows stamping a shared inner
+    /// `message.id` on the persisted line.
+    ///
+    /// claude-code's streaming writer emits one JSONL line per
+    /// `content_block_stop`, each carrying a DISTINCT top-level `uuid` but the
+    /// SAME inner Anthropic `message.id` (the `message_start` message id shared
+    /// across all blocks of the turn — `claude.ts:1981, 2192-2203`). That shared
+    /// inner id is what the loader's parallel-tool-result recovery groups
+    /// siblings by (`loader::message_id` → `loader::recover_orphaned_parallel_tool_results`).
+    /// When `inner_message_id` is `Some`, it is injected into the assistant
+    /// line's inner `message` object as `"id"`. `None` reproduces the prior
+    /// (no inner id) shape exactly.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn to_jsonl_message_with_inner_id(
+        &self,
+        msg: &ConversationMessage,
+        session_id: &str,
+        parent_uuid: Option<String>,
+        git_branch: Option<String>,
+        entrypoint: Option<String>,
+        prompt_id: Option<String>,
+        inner_message_id: Option<&str>,
+    ) -> session::JsonlMessage {
+        let (kind, mut inner_message) = match msg {
             ConversationMessage::User { content, .. } => (
                 "user",
                 serde_json::json!({ "role": "user", "content": content }),
@@ -1504,6 +1532,11 @@ impl ConversationOrchestrator {
                 serde_json::json!({ "role": "system", "content": content }),
             ),
         };
+        // Stamp the shared inner Anthropic `message.id` on assistant lines so the
+        // loader's sibling-grouping (by inner `message.id`) reconstructs the DAG.
+        if let (Some(id), Some(obj)) = (inner_message_id, inner_message.as_object_mut()) {
+            obj.insert("id".to_string(), serde_json::Value::String(id.to_string()));
+        }
         // `promptId` is a USER-line-only field (TS: `type === 'user' ?
         // getPromptId() : undefined`). Drop it on assistant/system lines even
         // when the caller passes one.
@@ -1655,6 +1688,101 @@ impl ConversationOrchestrator {
                 telemetry::emit_session_corrupted(&session_id_str, &e.to_string());
             }
         }
+    }
+
+    /// Persist an assistant turn as ONE single-block JSONL line PER content block
+    /// (claude-code's per-`content_block_stop` writer — `claude.ts:2171-2211`).
+    ///
+    /// claude-code builds an `AssistantMessage` at each `content_block_stop` from
+    /// a SINGLE content block (`content: normalizeContentFromAPI([contentBlock])`)
+    /// with a FRESH top-level `uuid: randomUUID()` but the SAME inner
+    /// `message.id` shared across all blocks of the turn. So an assistant turn
+    /// `[text, tool_use A, tool_use B]` becomes THREE assistant JSONL lines: one
+    /// shared inner `message.id`, three distinct top-level `uuid`s, one block each.
+    ///
+    /// This is a WRITE-side (transcript) split ONLY — the caller keeps the single
+    /// merged `ConversationMessage::Assistant` in `session.history` for
+    /// request-building (the Anthropic request needs one assistant turn carrying
+    /// all blocks). We mint a fresh [`MessageId`] per block so each line gets a
+    /// distinct top-level `uuid` (via [`Self::to_jsonl_message`], whose `uuid`
+    /// derives from `msg.id().as_uuid()`), and inject the originating turn's id
+    /// (`msg.id().as_uuid()`) as the shared inner `message.id` so the loader's
+    /// sibling-grouping reconstructs the DAG.
+    ///
+    /// Returns a `tool_use_id -> that block's line uuid` map so the caller can
+    /// parent EACH `tool_result` to ITS specific `tool_use` line (TS
+    /// `sourceToolAssistantUUID`), not one shared per-turn parent. On an
+    /// assistant with no `tool_use` blocks the map is empty. The lines chain off
+    /// `last_jsonl_uuid` (advancing it per line), so the LAST block's uuid ends
+    /// up as `last_jsonl_uuid` and any subsequent non-tool message chains
+    /// correctly. An empty-content assistant persists nothing (no line, empty
+    /// map) — faithful to streaming, which never emits a zero-block turn.
+    pub(crate) async fn persist_assistant_per_block(
+        &self,
+        msg: &ConversationMessage,
+    ) -> std::collections::HashMap<protocol::ToolUseId, String> {
+        let mut map: std::collections::HashMap<protocol::ToolUseId, String> =
+            std::collections::HashMap::new();
+        let ConversationMessage::Assistant {
+            id: turn_id,
+            content,
+            stop_reason,
+        } = msg
+        else {
+            // Defensive: non-assistant messages fall back to the normal single
+            // line (no split applies). Should not happen in practice.
+            self.persist_message_to_jsonl(msg).await;
+            return map;
+        };
+        let Some(writer) = self.jsonl_writer.as_ref() else {
+            return map;
+        };
+        // Shared inner Anthropic `message.id` for every block of this turn.
+        let inner_id = turn_id.as_uuid().to_string();
+
+        let session_id_str = self.session.lock().await.session_id.to_string();
+        let git_branch = self.resolve_git_branch().await;
+        let entrypoint = Some(entrypoint_value());
+
+        for block in content {
+            // Build a synthetic SINGLE-block assistant message with a FRESH id so
+            // its top-level JSONL `uuid` is distinct per line.
+            let single = ConversationMessage::Assistant {
+                id: MessageId::new(),
+                content: vec![block.clone()],
+                stop_reason: stop_reason.clone(),
+            };
+            let parent_uuid = self.last_jsonl_uuid.lock().await.clone();
+            // Assistant lines never carry a promptId (it is a user-only field).
+            let jmsg = self.to_jsonl_message_with_inner_id(
+                &single,
+                &session_id_str,
+                parent_uuid,
+                git_branch.clone(),
+                entrypoint.clone(),
+                None,
+                Some(&inner_id),
+            );
+            let line_uuid = jmsg.uuid.clone();
+            match writer.append(&jmsg).await {
+                Ok(()) => {
+                    *self.last_jsonl_uuid.lock().await = Some(line_uuid.clone());
+                    telemetry::emit_session_appended(&session_id_str, &line_uuid);
+                }
+                Err(e) => {
+                    tracing::error!(error = %e, "jsonl writer append failed");
+                    telemetry::emit_session_corrupted(&session_id_str, &e.to_string());
+                    // Skip recording this block's uuid in the map — the caller's
+                    // fallback (prior single-parent) will be used for any
+                    // tool_result that can't find its parent.
+                    continue;
+                }
+            }
+            if let protocol::ContentBlock::ToolUse { id, .. } = block {
+                map.insert(id.clone(), line_uuid);
+            }
+        }
+        map
     }
 
     /// Construct a new orchestrator with a fresh in-memory session and
@@ -2774,10 +2902,18 @@ impl ConversationOrchestrator {
             // DEFERRED-3: advance the interrupt-guard's reported final id to this
             // turn's assistant message.
             last_message_id = assistant_id;
-            self.persist_message_to_jsonl(&assistant_msg).await;
-            // Capture the assistant line's JSONL uuid — each tool result below
-            // parents to it (TS `sourceToolAssistantUUID`). `persist_*` advanced
-            // `last_jsonl_uuid` to this assistant line.
+            // WRITE-side per-block split (claude.ts:2171-2211): persist the turn
+            // as one single-block assistant JSONL line per content block, sharing
+            // the turn's inner `message.id` with distinct top-level uuids, and
+            // capture each `tool_use`'s line uuid so its `tool_result` parents to
+            // ITS line (TS `sourceToolAssistantUUID`) — NOT one shared per-turn
+            // parent. The in-memory `s.history` above stays the single merged
+            // assistant message (the Anthropic request needs all blocks in one
+            // assistant turn).
+            let tool_use_parent_uuids =
+                self.persist_assistant_per_block(&assistant_msg).await;
+            // Fallback parent (the LAST persisted block's uuid) for any
+            // tool_result whose tool_use id is missing from the map (defensive).
             let assistant_uuid = self.last_jsonl_uuid.lock().await.clone();
 
             // 5. Drive tools through the StreamingToolExecutor (faithful port of
@@ -2821,6 +2957,18 @@ impl ConversationOrchestrator {
                     exec.process_queue();
                     // persist whatever just completed, in order
                     for drained in exec.take_newly_completed() {
+                        // Parent this tool_result to ITS tool_use's per-block
+                        // assistant line uuid (TS `sourceToolAssistantUUID`),
+                        // falling back to the turn's last assistant block uuid if
+                        // the id isn't in the map (defensive — e.g. an append that
+                        // failed and was skipped above).
+                        let parent_uuid = match &drained.block {
+                            ContentBlock::ToolResult { tool_use_id, .. } => tool_use_parent_uuids
+                                .get(tool_use_id)
+                                .cloned()
+                                .or_else(|| assistant_uuid.clone()),
+                            _ => assistant_uuid.clone(),
+                        };
                         let user_msg = ConversationMessage::User {
                             id: MessageId::new(),
                             content: vec![drained.block],
@@ -2829,7 +2977,7 @@ impl ConversationOrchestrator {
                             let mut s = self.session.lock().await;
                             s.history.push(user_msg.clone());
                         }
-                        self.persist_message_to_jsonl_with_parent(&user_msg, assistant_uuid.clone())
+                        self.persist_message_to_jsonl_with_parent(&user_msg, parent_uuid)
                             .await;
                         // SKILLEXEC.3 (streaming): replay tool-injected
                         // `new_messages` (the Skill tool's expanded prompt) right
@@ -6187,6 +6335,156 @@ mod persist_with_parent_tests {
             lines[2].parent_uuid.as_deref(),
             Some(overridden_uuid.as_str()),
             "subsequent non-overridden line must chain off the overridden line"
+        );
+    }
+
+    // ── test 5: per-content_block_stop single-block assistant lines ───────────
+    //
+    // claude.ts:2171-2211: a streaming assistant turn emits ONE JSONL line per
+    // content block — same inner `message.id`, distinct top-level `uuid`, one
+    // block each. sessionStorage.ts:1028: each tool_result parents to ITS
+    // tool_use's line uuid (`sourceToolAssistantUUID`), NOT a shared per-turn
+    // parent.
+    //
+    // This drives `persist_assistant_per_block` directly: an assistant turn with
+    // content [text, tool_use A, tool_use B] must persist THREE single-block
+    // assistant lines that (a) share one inner `message.id`, (b) have three
+    // DISTINCT top-level uuids, (c) carry exactly one block each; then a
+    // tool_result for A parents to A's line uuid and a tool_result for B parents
+    // to B's line uuid.
+    #[tokio::test]
+    async fn assistant_turn_persists_one_line_per_content_block_with_per_tool_reparenting() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let session_path = dir.path().join("session.jsonl");
+        let orch = orch_with_writer(dir.path(), session_path.clone());
+
+        let id_a = protocol::ToolUseId::from("toolu_A");
+        let id_b = protocol::ToolUseId::from("toolu_B");
+
+        let assistant_id = protocol::MessageId::new();
+        let assistant_msg = ConversationMessage::Assistant {
+            id: assistant_id,
+            content: vec![
+                protocol::ContentBlock::Text {
+                    text: "let me call two tools".into(),
+                },
+                protocol::ContentBlock::ToolUse {
+                    id: id_a.clone(),
+                    name: "Alpha".into(),
+                    input: serde_json::json!({}),
+                    provider_id: None,
+                },
+                protocol::ContentBlock::ToolUse {
+                    id: id_b.clone(),
+                    name: "Bravo".into(),
+                    input: serde_json::json!({}),
+                    provider_id: None,
+                },
+            ],
+            stop_reason: Some("tool_use".into()),
+        };
+
+        let map = orch.persist_assistant_per_block(&assistant_msg).await;
+
+        let lines = read_jsonl(&session_path);
+        // (c) THREE single-block assistant lines.
+        let asst_lines: Vec<&JsonlMessage> =
+            lines.iter().filter(|l| l.message_type == "assistant").collect();
+        assert_eq!(
+            asst_lines.len(),
+            3,
+            "expected 3 single-block assistant lines (one per content block), got {}",
+            asst_lines.len()
+        );
+        for (i, l) in asst_lines.iter().enumerate() {
+            let blocks = l
+                .message
+                .get("content")
+                .and_then(|c| c.as_array())
+                .unwrap_or_else(|| panic!("line {i} content must be an array"));
+            assert_eq!(blocks.len(), 1, "line {i} must carry exactly one block");
+        }
+
+        // (a) all three share ONE inner `message.id`.
+        let inner_ids: Vec<&str> = asst_lines
+            .iter()
+            .map(|l| {
+                l.message
+                    .get("id")
+                    .and_then(|v| v.as_str())
+                    .expect("inner message.id present")
+            })
+            .collect();
+        assert_eq!(
+            inner_ids[0], inner_ids[1],
+            "all blocks must share the same inner message.id"
+        );
+        assert_eq!(inner_ids[1], inner_ids[2]);
+        assert_eq!(
+            inner_ids[0],
+            assistant_id.as_uuid().to_string(),
+            "shared inner message.id must be the turn's logical id"
+        );
+
+        // (b) three DISTINCT top-level uuids.
+        let uuids: std::collections::HashSet<&str> =
+            asst_lines.iter().map(|l| l.uuid.as_str()).collect();
+        assert_eq!(uuids.len(), 3, "the three lines must have distinct top-level uuids");
+
+        // map must hold A and B -> their respective line uuids (text block none).
+        let a_uuid = map.get(&id_a).expect("A in map").clone();
+        let b_uuid = map.get(&id_b).expect("B in map").clone();
+        assert_ne!(a_uuid, b_uuid, "A and B must map to different line uuids");
+
+        // Persist a tool_result for A and for B; each must parent to ITS line.
+        let tr_a = ConversationMessage::User {
+            id: protocol::MessageId::new(),
+            content: vec![protocol::ContentBlock::ToolResult {
+                tool_use_id: id_a.clone(),
+                content: "result-A".into(),
+                is_error: false,
+                provider_tool_use_id: None,
+            }],
+        };
+        orch.persist_message_to_jsonl_with_parent(&tr_a, Some(a_uuid.clone()))
+            .await;
+        let tr_b = ConversationMessage::User {
+            id: protocol::MessageId::new(),
+            content: vec![protocol::ContentBlock::ToolResult {
+                tool_use_id: id_b.clone(),
+                content: "result-B".into(),
+                is_error: false,
+                provider_tool_use_id: None,
+            }],
+        };
+        orch.persist_message_to_jsonl_with_parent(&tr_b, Some(b_uuid.clone()))
+            .await;
+
+        let lines = read_jsonl(&session_path);
+        let tr_lines: Vec<&JsonlMessage> = lines
+            .iter()
+            .filter(|l| {
+                l.message_type == "user"
+                    && serde_json::to_string(&l.message)
+                        .map(|s| s.contains("tool_result"))
+                        .unwrap_or(false)
+            })
+            .collect();
+        assert_eq!(tr_lines.len(), 2, "expected 2 tool_result user lines");
+        // tr_a parents to A's line; tr_b parents to B's line — NOT one shared parent.
+        assert_eq!(
+            tr_lines[0].parent_uuid.as_deref(),
+            Some(a_uuid.as_str()),
+            "tool_result A must parent to A's tool_use line uuid"
+        );
+        assert_eq!(
+            tr_lines[1].parent_uuid.as_deref(),
+            Some(b_uuid.as_str()),
+            "tool_result B must parent to B's tool_use line uuid"
+        );
+        assert_ne!(
+            tr_lines[0].parent_uuid, tr_lines[1].parent_uuid,
+            "the two tool_results must NOT share one parent (per-tool reparenting)"
         );
     }
 }

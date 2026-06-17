@@ -217,19 +217,62 @@ async fn streaming_tool_results_are_per_result_assistant_parented() {
     );
     drop(s);
 
-    // ── (2): each result's JSONL parentUuid == the assistant line's uuid
+    // ── (2): each result's JSONL parentUuid == ITS tool_use's per-block line uuid
+    //
+    // WRITE-side per-block split (claude.ts:2171-2211): the streaming turn now
+    // emits ONE single-block assistant JSONL line per content block — three
+    // tool_use blocks → THREE assistant lines, each carrying ONE tool_use, all
+    // sharing the same inner `message.id` but with DISTINCT top-level uuids. Each
+    // tool_result parents to ITS OWN tool_use line's uuid (sessionStorage.ts:1028
+    // `sourceToolAssistantUUID`), NOT one shared per-turn assistant parent.
     let reader = JsonlReader::new(session_path, fs);
     let msgs = reader.read_all().await.expect("read_all");
 
-    // Locate the assistant line that carries the tool_use blocks (turn 1).
-    let assistant_line = msgs
+    // The three per-block assistant lines (one tool_use each), all sharing the
+    // same inner message.id.
+    let assistant_lines: Vec<_> = msgs
         .iter()
-        .find(|m| m.message_type == "assistant")
-        .expect("assistant line present");
-    let assistant_uuid = assistant_line.uuid.clone();
+        .filter(|m| m.message_type == "assistant")
+        .collect();
+    assert_eq!(
+        assistant_lines.len(),
+        3,
+        "expected 3 single-block assistant lines (one per tool_use), got {}",
+        assistant_lines.len()
+    );
+    // All share one inner message.id (distinct top-level uuids).
+    let inner_ids: std::collections::HashSet<&str> = assistant_lines
+        .iter()
+        .map(|m| m.message.get("id").and_then(|v| v.as_str()).expect("inner id"))
+        .collect();
+    assert_eq!(inner_ids.len(), 1, "all blocks share one inner message.id");
+    let top_uuids: std::collections::HashSet<&str> =
+        assistant_lines.iter().map(|m| m.uuid.as_str()).collect();
+    assert_eq!(top_uuids.len(), 3, "three distinct top-level uuids");
 
-    // Every tool_result user line (user lines whose single content block is a
-    // tool_result) must parent to that assistant uuid.
+    // Map each per-block assistant line's contained tool_use_id -> its line uuid.
+    let mut line_uuid_by_tool_use_id: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
+    for m in &assistant_lines {
+        let blocks = m
+            .message
+            .get("content")
+            .and_then(|c| c.as_array())
+            .expect("assistant content array");
+        for b in blocks {
+            if b.get("type").and_then(|t| t.as_str()) == Some("tool_use") {
+                let tid = b.get("id").and_then(|i| i.as_str()).expect("tool_use id");
+                line_uuid_by_tool_use_id.insert(tid.to_string(), m.uuid.clone());
+            }
+        }
+    }
+    assert_eq!(
+        line_uuid_by_tool_use_id.len(),
+        3,
+        "each assistant line must carry exactly one tool_use"
+    );
+
+    // Each tool_result user line must parent to ITS tool_use's line uuid.
     let tool_result_lines: Vec<_> = msgs
         .iter()
         .filter(|m| {
@@ -247,11 +290,36 @@ async fn streaming_tool_results_are_per_result_assistant_parented() {
         tool_result_lines.len()
     );
     for line in &tool_result_lines {
+        // Extract the result's tool_use_id and confirm it parents to that
+        // tool_use's per-block assistant line.
+        let blocks = line
+            .message
+            .get("content")
+            .and_then(|c| c.as_array())
+            .expect("tool_result content array");
+        let tid = blocks
+            .iter()
+            .find(|b| b.get("type").and_then(|t| t.as_str()) == Some("tool_result"))
+            .and_then(|b| b.get("tool_use_id").and_then(|i| i.as_str()))
+            .expect("tool_result tool_use_id");
+        let expected = line_uuid_by_tool_use_id
+            .get(tid)
+            .unwrap_or_else(|| panic!("no per-block line for tool_use_id {tid}"));
         assert_eq!(
             line.parent_uuid.as_deref(),
-            Some(assistant_uuid.as_str()),
-            "each tool_result line must parent to the requesting assistant uuid \
-             (TS sourceToolAssistantUUID)"
+            Some(expected.as_str()),
+            "tool_result for {tid} must parent to ITS tool_use line uuid \
+             (sourceToolAssistantUUID per-tool reparenting)"
         );
     }
+    // And the three parents must be DISTINCT (no shared per-turn parent).
+    let parents: std::collections::HashSet<_> = tool_result_lines
+        .iter()
+        .map(|m| m.parent_uuid.clone())
+        .collect();
+    assert_eq!(
+        parents.len(),
+        3,
+        "the three tool_results must NOT share one parent (per-tool reparenting)"
+    );
 }

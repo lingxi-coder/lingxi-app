@@ -42,23 +42,64 @@ pub fn to_llm_messages(
 }
 
 /// Merge consecutive `User` messages into a single user turn (claude-code
-/// `normalizeMessagesForAPI` consecutive-user merge + `mergeUserMessages`).
+/// `normalizeMessagesForAPI` consecutive-user merge + `mergeUserMessages`,
+/// `utils/messages.ts:2411`).
 ///
 /// `Assistant`/`System` messages pass through unchanged and act as separators.
-/// The merged message keeps the FIRST message's id; content blocks are
-/// concatenated in order (a.content ++ b.content). Single or non-adjacent user
-/// messages are unaffected (identity), so this is a no-op for today's history
-/// shape and load-bearing only after per-result `tool_result` splitting (11b).
+/// The merged message keeps the FIRST message's id. The two operands' content
+/// blocks are merged via the faithful claude-code merge pipeline
+/// `hoistToolResults(joinTextAtSeam(a, b))`:
+///
+/// * [`join_text_at_seam`] — when `a`'s last block and `b`'s first block are
+///   both `Text`, append `'\n'` to `a`'s last text before concatenating, so two
+///   queued text prompts `"2 + 2"` + `"3 + 3"` don't reach the model glued as
+///   `"2 + 23 + 3"` (the API concatenates adjacent text blocks with no
+///   separator). The `\n` goes on `a`'s side so no block's `startsWith`
+///   classification changes (`joinTextAtSeam`, `messages.ts:2505`).
+/// * [`hoist_tool_results`] — stable-partition `ToolResult` blocks to the front
+///   so they lead the merged user turn, avoiding "tool result must follow tool
+///   use" API errors (`hoistToolResults`, `messages.ts:2470`).
+///
+/// Single or non-adjacent user messages are unaffected (identity).
 ///
 /// claude-code rationale: "Bedrock doesn't support multiple user messages in a
 /// row; 1P API merges them into a single user turn."
+///
+/// # Remainder of `normalizeMessagesForAPI` that is N/A to LingXi
+///
+/// claude-code's full `normalizeMessagesForAPI` (`messages.ts:1989-2370`) runs
+/// several other transforms ahead of the merge. They have no substrate in
+/// LingXi's message model and are therefore deliberately NOT ported (porting a
+/// stub would be an unfaithful divergence):
+///
+/// * `reorderAttachmentsForAPI` / `isVirtual` filtering — N/A: there is no
+///   attachment-typed or virtual `ConversationMessage`; the protocol has only
+///   `User`/`Assistant`/`System` (`protocol/src/messages.rs:168`). Attachments
+///   are already plain `User` content blocks inserted in position by the caller.
+/// * `progress` / `system(non-local-command)` / synthetic-api-error filtering —
+///   N/A: no `progress`, `synthetic_api_error`, or `local_command` message
+///   types exist; `System` is *rejected* at [`convert_message`], never
+///   filtered-to-user.
+/// * `stripTargets` error-block stripping (PDF/image/request-too-large → strip
+///   `document`/`image` from the preceding `isMeta` user) — N/A: requires an
+///   `isMeta` flag and `isSyntheticApiErrorMessage` markers; the protocol has
+///   no `isMeta` flag (see `conversation.rs:1389`, `turn_loop.rs:940`) and no
+///   `RequestTooLarge`/`PdfTooLarge` markers.
+/// * `stripToolReferenceBlocksFromUserMessage` / `TOOL_REFERENCE_TURN_BOUNDARY`
+///   injection — N/A: no `tool_reference` content block exists; tool search
+///   returns a plain name list (`tools/meta/src/tool_search.rs:20`).
+/// * assistant tool-input normalization (`normalizeToolInputForAPI` stripping
+///   `plan`/`caller`/synthetic-edit fields) — N/A: LingXi has no
+///   `normalizeToolInput` *producer* to reverse; tool inputs are model-authored
+///   and pass through unmodified (`tools/plan/src/plan_mode.rs:150,466`).
+///   Stripping a model-authored field would corrupt faithful round-trips.
 #[must_use]
 pub fn normalize_messages_for_api(
     messages: Vec<ConversationMessage>,
 ) -> Vec<ConversationMessage> {
     let mut out: Vec<ConversationMessage> = Vec::with_capacity(messages.len());
     for msg in messages {
-        match (out.last_mut(), &msg) {
+        match (out.last_mut(), msg) {
             (
                 Some(ConversationMessage::User {
                     content: prev_content,
@@ -69,12 +110,40 @@ pub fn normalize_messages_for_api(
                     ..
                 },
             ) => {
-                prev_content.extend(new_content.iter().cloned());
+                join_text_at_seam(prev_content, new_content);
+                hoist_tool_results(prev_content);
             }
-            _ => out.push(msg),
+            (_, msg) => out.push(msg),
         }
     }
     out
+}
+
+/// Append `b` onto `a`, first joining a text|text seam with a `'\n'`.
+///
+/// Faithful port of claude-code `joinTextAtSeam` (`utils/messages.ts:2505`):
+/// when `a`'s last block and `b`'s first block are both `Text`, the `'\n'` is
+/// appended to `a`'s last text so no block's leading bytes change.
+fn join_text_at_seam(a: &mut Vec<ProtoBlock>, mut b: Vec<ProtoBlock>) {
+    if let (Some(ProtoBlock::Text { text: last }), Some(ProtoBlock::Text { .. })) =
+        (a.last_mut(), b.first())
+    {
+        last.push('\n');
+    }
+    a.append(&mut b);
+}
+
+/// Stable-partition `ToolResult` blocks to the front, preserving relative order
+/// within each group.
+///
+/// Faithful port of claude-code `hoistToolResults` (`utils/messages.ts:2470`):
+/// tool_result blocks must lead the user turn to avoid "tool result must follow
+/// tool use" API errors.
+fn hoist_tool_results(content: &mut [ProtoBlock]) {
+    // Stable sort on a boolean key = stable partition: `false` (tool_result)
+    // sorts before `true` (everything else), and `sort_by_key` preserves the
+    // relative order of equal-keyed elements within each group.
+    content.sort_by_key(|b| !matches!(b, ProtoBlock::ToolResult { .. }));
 }
 
 /// Convert a `Vec<serde_json::Value>` (tool declarations in wire JSON shape)
@@ -675,7 +744,8 @@ mod tests {
         match &out[0] {
             ConversationMessage::User { id, content } => {
                 assert_eq!(id, &first_id, "merged message keeps the first message's id");
-                assert_eq!(text_of(content), vec!["a", "b"]);
+                // joinTextAtSeam inserts a `\n` on a's last text at a text|text seam.
+                assert_eq!(text_of(content), vec!["a\n", "b"]);
             }
             other => panic!("expected User, got {other:?}"),
         }
@@ -720,7 +790,8 @@ mod tests {
         match &out[0] {
             ConversationMessage::User { id, content } => {
                 assert_eq!(id, &first_id);
-                assert_eq!(text_of(content), vec!["a", "b", "c"]);
+                // Each text|text seam (a|b then b|c) gets its own `\n`.
+                assert_eq!(text_of(content), vec!["a\n", "b\n", "c"]);
             }
             other => panic!("expected User, got {other:?}"),
         }
@@ -740,10 +811,155 @@ mod tests {
         match &out[1] {
             ConversationMessage::User { id, content } => {
                 assert_eq!(id, &mid_id);
-                assert_eq!(text_of(content), vec!["a", "b"]);
+                assert_eq!(text_of(content), vec!["a\n", "b"]);
             }
             other => panic!("expected merged User, got {other:?}"),
         }
         assert!(matches!(out[2], ConversationMessage::Assistant { .. }));
+    }
+
+    // ── hoistToolResults + joinTextAtSeam (mergeUserMessages pipeline) ────────
+
+    fn user_blocks(id: MessageId, content: Vec<ProtoBlock>) -> ConversationMessage {
+        ConversationMessage::User { id, content }
+    }
+
+    fn tool_result(content: &str) -> ProtoBlock {
+        ProtoBlock::ToolResult {
+            tool_use_id: ToolUseId::new(),
+            content: content.to_string(),
+            is_error: false,
+            provider_tool_use_id: None,
+        }
+    }
+
+    fn image() -> ProtoBlock {
+        ProtoBlock::Image {
+            source: ImageSource::Url { url: "https://example.com/i.png".to_string() },
+        }
+    }
+
+    /// Classify a block as one of a few coarse kinds for order assertions.
+    fn kinds(blocks: &[ProtoBlock]) -> Vec<&'static str> {
+        blocks
+            .iter()
+            .map(|b| match b {
+                ProtoBlock::Text { .. } => "text",
+                ProtoBlock::ToolResult { .. } => "tool_result",
+                ProtoBlock::Image { .. } => "image",
+                _ => "other",
+            })
+            .collect()
+    }
+
+    #[test]
+    fn merge_two_text_users_inserts_newline_at_seam() {
+        let id = MessageId::new();
+        let out = normalize_messages_for_api(vec![user(id, "a"), user(MessageId::new(), "b")]);
+        assert_eq!(out.len(), 1);
+        match &out[0] {
+            ConversationMessage::User { content, .. } => {
+                assert_eq!(text_of(content), vec!["a\n", "b"]);
+            }
+            other => panic!("expected User, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn merge_hoists_tool_result_before_text() {
+        // [User[Text"hi"], User[ToolResult, Text"after"]] → tool_result leads.
+        let id = MessageId::new();
+        let out = normalize_messages_for_api(vec![
+            user_blocks(id, vec![ProtoBlock::Text { text: "hi".to_string() }]),
+            user_blocks(
+                MessageId::new(),
+                vec![tool_result("r"), ProtoBlock::Text { text: "after".to_string() }],
+            ),
+        ]);
+        assert_eq!(out.len(), 1);
+        match &out[0] {
+            ConversationMessage::User { content, .. } => {
+                // hoist: tool_result first, then the two text blocks in order.
+                // No seam `\n` is added because b leads with a non-text block,
+                // so the text|text adjacency never occurs at the seam.
+                assert_eq!(kinds(content), vec!["tool_result", "text", "text"]);
+                assert_eq!(text_of(&content[1..]), vec!["hi", "after"]);
+            }
+            other => panic!("expected User, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn merge_toolresult_user_then_image_user_keeps_toolresult_leading() {
+        // The real Read-image shape: [User[ToolResult], User[Image]] → [ToolResult, Image].
+        let id = MessageId::new();
+        let out = normalize_messages_for_api(vec![
+            user_blocks(id, vec![tool_result("file bytes")]),
+            user_blocks(MessageId::new(), vec![image()]),
+        ]);
+        assert_eq!(out.len(), 1);
+        match &out[0] {
+            ConversationMessage::User { content, .. } => {
+                assert_eq!(kinds(content), vec!["tool_result", "image"]);
+            }
+            other => panic!("expected User, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn hoist_preserves_relative_order_within_groups() {
+        // [tr1, txtX, tr2, txtY] across two users → [tr1, tr2, txtX, txtY].
+        let id = MessageId::new();
+        let out = normalize_messages_for_api(vec![
+            user_blocks(
+                id,
+                vec![tool_result("tr1"), ProtoBlock::Text { text: "X".to_string() }],
+            ),
+            user_blocks(
+                MessageId::new(),
+                vec![tool_result("tr2"), ProtoBlock::Text { text: "Y".to_string() }],
+            ),
+        ]);
+        assert_eq!(out.len(), 1);
+        match &out[0] {
+            ConversationMessage::User { content, .. } => {
+                assert_eq!(
+                    kinds(content),
+                    vec!["tool_result", "tool_result", "text", "text"]
+                );
+                // intra-group order preserved: tr1 before tr2, X before Y.
+                match (&content[0], &content[1]) {
+                    (
+                        ProtoBlock::ToolResult { content: c0, .. },
+                        ProtoBlock::ToolResult { content: c1, .. },
+                    ) => {
+                        assert_eq!(c0, "tr1");
+                        assert_eq!(c1, "tr2");
+                    }
+                    _ => panic!("expected two leading tool_results"),
+                }
+                assert_eq!(text_of(&content[2..]), vec!["X", "Y"]);
+            }
+            other => panic!("expected User, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn seam_no_newline_when_b_leads_with_non_text() {
+        // [User[Text"a"], User[ToolResult]] → hoist runs, no seam `\n`.
+        let id = MessageId::new();
+        let out = normalize_messages_for_api(vec![
+            user_blocks(id, vec![ProtoBlock::Text { text: "a".to_string() }]),
+            user_blocks(MessageId::new(), vec![tool_result("r")]),
+        ]);
+        assert_eq!(out.len(), 1);
+        match &out[0] {
+            ConversationMessage::User { content, .. } => {
+                assert_eq!(kinds(content), vec!["tool_result", "text"]);
+                // text block kept its exact bytes — no trailing `\n`.
+                assert_eq!(text_of(&content[1..]), vec!["a"]);
+            }
+            other => panic!("expected User, got {other:?}"),
+        }
     }
 }

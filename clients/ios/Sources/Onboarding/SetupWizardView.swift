@@ -10,11 +10,44 @@ import SwiftUI
 
 struct SetupWizardView: View {
     @EnvironmentObject private var app: AppState
+    /// The shared conversation model — its `availableModels` / `activeModelId`
+    /// carry the engine's REAL model catalog (out-of-band). The model step renders
+    /// these when present and falls back to the mock catalog only when the engine
+    /// is unavailable (empty until the first `ModelList` lands).
+    @ObservedObject var convo: ConversationModel
+    /// Commit the chosen model to the engine (`SetModel`) when it is a real id.
+    var onSetModel: (String) -> Void = { _ in }
     /// Called once the wizard commits (or is finished) — RootView dismisses it
     /// by reading `app.setupDone`; this is the hook for any extra teardown.
     var onDone: () -> Void = {}
 
     private static let total = 5
+
+    /// One model row, abstracting over a real engine id and a mock catalog entry
+    /// so the picker renders identically in both modes.
+    private struct WizModel: Identifiable { let id: String; let name: String; let sub: String; let color: Color }
+
+    /// The rows to render: the engine's real catalog when present, else the mock
+    /// catalog (engine unavailable / not yet listed).
+    private var wizardModels: [WizModel] {
+        if !convo.availableModels.isEmpty {
+            return convo.availableModels.map {
+                WizModel(id: $0, name: ModelDisplay.name(for: $0), sub: $0, color: ModelDisplay.color(for: $0))
+            }
+        }
+        return MockData.models.map {
+            WizModel(id: $0.id, name: $0.name, sub: "\($0.desc) · \($0.tag)", color: $0.color)
+        }
+    }
+
+    /// The effective selection: the user's pick when it's in the catalog, else the
+    /// engine's active id, else the first row (keeps a valid default as the real
+    /// catalog arrives async during first-run).
+    private var selectedModelId: String {
+        if wizardModels.contains(where: { $0.id == modelId }) { return modelId }
+        if !convo.activeModelId.isEmpty { return convo.activeModelId }
+        return wizardModels.first?.id ?? modelId
+    }
 
     @State private var step = 0
     @State private var seeded = false
@@ -175,7 +208,7 @@ struct SetupWizardView: View {
                 wizH("选择默认模型")
                 wizSub("随时可在对话中切换。不确定就先用推荐的主力模型。")
                 VStack(spacing: 10) {
-                    ForEach(MockData.models) { m in modelRow(m) }
+                    ForEach(wizardModels) { m in modelRow(m) }
                 }
             }
         }
@@ -232,14 +265,14 @@ struct SetupWizardView: View {
         }
     }
 
-    private func modelRow(_ m: ModelOption) -> some View {
-        let on = modelId == m.id
+    private func modelRow(_ m: WizModel) -> some View {
+        let on = selectedModelId == m.id
         return Button { modelId = m.id } label: {
             HStack(spacing: 13) {
                 Circle().fill(m.color).frame(width: 10, height: 10).shadow(color: m.color, radius: 4)
                 VStack(alignment: .leading, spacing: 2) {
                     Text(m.name).font(.system(size: 15.5, weight: .semibold)).foregroundColor(Color(okl: 0.95, 0.02, 285))
-                    Text("\(m.desc) · \(m.tag)").font(.system(size: 12.5)).foregroundColor(Color(okl: 0.66, 0.03, 280))
+                    Text(m.sub).font(.system(size: 12.5)).foregroundColor(Color(okl: 0.66, 0.03, 280)).lineLimit(1)
                 }
                 Spacer(minLength: 0)
                 ZStack {
@@ -316,11 +349,14 @@ struct SetupWizardView: View {
         }
     }
     private func finish() {
+        let chosen = selectedModelId
         app.assistantName = assistantName.trimmingCharacters(in: .whitespaces)
         app.userName = userName.trimmingCharacters(in: .whitespaces)
-        app.defaultModelId = modelId
+        app.defaultModelId = chosen
         app.voiceprint = (vp == .done)
         app.setupDone = true
+        // When the engine's real catalog is present, commit the pick to it.
+        if !convo.availableModels.isEmpty { onSetModel(chosen) }
         onDone()
     }
 

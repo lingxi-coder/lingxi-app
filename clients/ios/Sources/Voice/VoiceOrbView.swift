@@ -1,3 +1,4 @@
+import AVFoundation
 import SwiftUI
 
 // MARK: - FlowMode voice orb ("心流" — living LLM presence)
@@ -141,36 +142,47 @@ struct OrbCanvas: View {
         // ── blob body: clipped core gradient + inner glow blobs + specular ──
         ctx.blendMode = .normal
         let clipPath = blob(cx, cy, R * 0.94, wob, 0, 1)
-        ctx.drawLayer { layer in
-            layer.clip(to: clipPath)
-            let coreH = 282 + 30 * sin(sim.tm * 0.5) + (phase == .thinking ? sim.hueShift * 0.3 : 0)
-            let coreGrad = Gradient(stops: [
-                .init(color: Color(okl: 0.97, 0.04, coreH, 0.95),       location: 0),
-                .init(color: Color(okl: 0.80, 0.18, coreH, 0.92),       location: 0.32),
-                .init(color: Color(okl: 0.58, 0.21, coreH + 20, 0.7),   location: 0.7),
-                .init(color: Color(okl: 0.40, 0.18, coreH + 30, 0.15),  location: 1),
-            ])
-            layer.fill(Path(CGRect(x: cx - R * 2, y: cy - R * 2, width: R * 4, height: R * 4)),
-                       with: .radialGradient(coreGrad,
-                                             center: CGPoint(x: cx, y: cy - R * 0.28),
-                                             startRadius: R * 0.05, endRadius: R * 1.15))
-            layer.blendMode = .plusLighter
-            let glowHues = [260.0, 320.0, 195.0]
-            for k in 0..<3 {
-                let ya = cy + sin(sim.tm * (1.1 + Double(k) * 0.5) + Double(k)) * R * 0.4 * (0.4 + A)
-                let g = Gradient(stops: [
-                    .init(color: Color(okl: 0.92, 0.14, glowHues[k] + sim.hueShift, 0.18 + A * 0.22), location: 0),
-                    .init(color: Color(okl: 0.90, 0.10, 270, 0), location: 1),
-                ])
-                layer.fill(Path(ellipseIn: CGRect(x: cx - R * 0.9, y: ya - R * 0.9, width: R * 1.8, height: R * 1.8)),
-                           with: .radialGradient(g, center: CGPoint(x: cx, y: ya), startRadius: 0, endRadius: R * 0.9))
-            }
-            let spec = Color(okl: 0.99, 0.02, 270, 0.5 + A * 0.3)
-            let sr = R * 0.14
-            layer.fill(Path(ellipseIn: CGRect(x: cx - R * 0.28 - sr, y: cy - R * 0.34 - sr, width: sr * 2, height: sr * 2)), with: .color(spec))
-        }
+        ctx.drawLayer { layer in paintCore(&layer, clip: clipPath, cx: cx, cy: cy, R: R, A: A) }
 
-        // ── wobbling membrane rings ──
+        paintRings(&ctx, cx: cx, cy: cy, R: R, A: A, wob: wob)
+        paintThinkingArc(&ctx, cx: cx, cy: cy, R: R)
+        ctx.blendMode = .normal
+    }
+
+    /// Clipped blob body: radial core gradient + inner glow blobs + specular.
+    private func paintCore(_ layer: inout GraphicsContext, clip: Path, cx: Double, cy: Double, R: Double, A: Double) {
+        layer.clip(to: clip)
+        let coreH: Double = 282 + 30 * sin(sim.tm * 0.5) + (phase == .thinking ? sim.hueShift * 0.3 : 0)
+        let cs0 = Color(okl: 0.97, 0.04, coreH, 0.95)
+        let cs1 = Color(okl: 0.80, 0.18, coreH, 0.92)
+        let cs2 = Color(okl: 0.58, 0.21, coreH + 20, 0.7)
+        let cs3 = Color(okl: 0.40, 0.18, coreH + 30, 0.15)
+        let coreGrad = Gradient(stops: [
+            .init(color: cs0, location: 0),
+            .init(color: cs1, location: 0.32),
+            .init(color: cs2, location: 0.7),
+            .init(color: cs3, location: 1),
+        ])
+        let coreRect = CGRect(x: cx - R * 2, y: cy - R * 2, width: R * 4, height: R * 4)
+        layer.fill(Path(coreRect), with: .radialGradient(coreGrad, center: CGPoint(x: cx, y: cy - R * 0.28), startRadius: R * 0.05, endRadius: R * 1.15))
+        layer.blendMode = .plusLighter
+        let glowHues = [260.0, 320.0, 195.0]
+        for k in 0..<3 {
+            let ya = cy + sin(sim.tm * (1.1 + Double(k) * 0.5) + Double(k)) * R * 0.4 * (0.4 + A)
+            let g0 = Color(okl: 0.92, 0.14, glowHues[k] + sim.hueShift, 0.18 + A * 0.22)
+            let g1 = Color(okl: 0.90, 0.10, 270, 0)
+            let g = Gradient(stops: [.init(color: g0, location: 0), .init(color: g1, location: 1)])
+            let rect = CGRect(x: cx - R * 0.9, y: ya - R * 0.9, width: R * 1.8, height: R * 1.8)
+            layer.fill(Path(ellipseIn: rect), with: .radialGradient(g, center: CGPoint(x: cx, y: ya), startRadius: 0, endRadius: R * 0.9))
+        }
+        let spec = Color(okl: 0.99, 0.02, 270, 0.5 + A * 0.3)
+        let sr = R * 0.14
+        let specRect = CGRect(x: cx - R * 0.28 - sr, y: cy - R * 0.34 - sr, width: sr * 2, height: sr * 2)
+        layer.fill(Path(ellipseIn: specRect), with: .color(spec))
+    }
+
+    /// Three wobbling membrane rings around the body.
+    private func paintRings(_ ctx: inout GraphicsContext, cx: Double, cy: Double, R: Double, A: Double, wob: Double) {
         ctx.blendMode = .plusLighter
         let ringH = [268.0, 322.0, 196.0]
         for k in 0..<3 {
@@ -178,94 +190,42 @@ struct OrbCanvas: View {
             let c = Color(okl: 0.85, 0.17, ringH[k] + sim.hueShift * 0.3, 0.55 - Double(k) * 0.14 + A * 0.2)
             ctx.stroke(path, with: .color(c), lineWidth: 1.6 - Double(k) * 0.45)
         }
-
-        // ── thinking arc ──
-        if phase == .thinking {
-            let st = sim.tm * 3.2
-            var arc = Path()
-            arc.addArc(center: CGPoint(x: cx, y: cy), radius: R * 1.32,
-                       startAngle: .radians(st), endAngle: .radians(st + .pi * 1.1), clockwise: false)
-            ctx.stroke(arc, with: .color(Color(okl: 0.88, 0.16, 260 + sim.hueShift, 0.85)),
-                       style: StrokeStyle(lineWidth: 2, lineCap: .round))
-        }
-        ctx.blendMode = .normal
-    }
-}
-
-// MARK: - VoiceOrb conversation driver (scripted flow)
-
-private enum OrbScript {
-    static let user = "灵犀，把我今天剩下的安排理一理"
-    static let ai = "下午两点是设计评审，四点和增长团队对齐目标。我已经把评审要点整理好放进备忘——要现在念给你听吗？"
-}
-
-private final class OrbConversation: ObservableObject {
-    @Published var phase: OrbPhase = .idle
-    @Published var caption = ""
-    @Published var role: OrbRole = .user
-
-    private var run = 0
-    private var work: [DispatchWorkItem] = []
-
-    private func after(_ ms: Int, _ fn: @escaping () -> Void) {
-        let w = DispatchWorkItem(block: fn)
-        work.append(w)
-        DispatchQueue.main.asyncAfter(deadline: .now() + Double(ms) / 1000, execute: w)
-    }
-    func clearTimers() { work.forEach { $0.cancel() }; work.removeAll() }
-
-    private func typeText(_ str: String, _ myRun: Int, done: (() -> Void)?) {
-        let chars = Array(str)
-        var i = 0
-        func step() {
-            if run != myRun { return }
-            i += 1
-            caption = String(chars.prefix(i))
-            if i < chars.count { after(34 + Int.random(in: 0...36), step) }
-            else if let done { after(420, done) }
-        }
-        step()
     }
 
-    func startListen() {
-        clearTimers()
-        run += 1; let myRun = run
-        role = .user; caption = ""; phase = .listening
-        after(700) { [weak self] in
-            guard let self, self.run == myRun else { return }
-            self.typeText(OrbScript.user, myRun) { self.goThink(myRun) }
-        }
+    /// A single rotating arc shown while thinking.
+    private func paintThinkingArc(_ ctx: inout GraphicsContext, cx: Double, cy: Double, R: Double) {
+        guard phase == .thinking else { return }
+        let st = sim.tm * 3.2
+        var arc = Path()
+        arc.addArc(center: CGPoint(x: cx, y: cy), radius: R * 1.32,
+                   startAngle: .radians(st), endAngle: .radians(st + .pi * 1.1), clockwise: false)
+        ctx.stroke(arc, with: .color(Color(okl: 0.88, 0.16, 260 + sim.hueShift, 0.85)),
+                   style: StrokeStyle(lineWidth: 2, lineCap: .round))
     }
-    private func goThink(_ myRun: Int) {
-        if run != myRun { return }
-        phase = .thinking
-        after(1500) { [weak self] in self?.goSpeak(myRun) }
-    }
-    private func goSpeak(_ myRun: Int) {
-        if run != myRun { return }
-        role = .ai; caption = ""; phase = .speaking
-        typeText(OrbScript.ai, myRun) { [weak self] in
-            guard let self, self.run == myRun else { return }
-            self.after(900) { if self.run == myRun { self.phase = .idle; self.caption = "" } }
-        }
-    }
-    /// A typed message from the pop-up → jump straight to thinking → speaking.
-    func submitText(_ text: String) {
-        clearTimers()
-        run += 1; let myRun = run
-        role = .user; caption = text; phase = .listening
-        after(600) { [weak self] in self?.goThink(myRun) }
-    }
-    func reset() { clearTimers(); run += 1; phase = .idle; caption = "" }
 }
 
 // MARK: - VoiceOrb overlay
 
 struct VoiceOrbView: View {
     @EnvironmentObject private var app: AppState
+    /// The REAL conversation model — its `messages` / `streaming` drive the orb's
+    /// thinking→speaking captions exactly as they drive ChatView (the orb is just
+    /// another view of the same live session).
+    @ObservedObject var convo: ConversationModel
+    /// Submit a user turn to the engine (`source.send`).
+    var onSend: (String) -> Void = { _ in }
+    /// Interrupt the in-flight turn (`source.cancel`).
+    var onCancel: () -> Void = {}
     let onClose: () -> Void
 
-    @StateObject private var convo = OrbConversation()
+    @State private var phase: OrbPhase = .idle
+    @State private var userCaption = ""
+    @State private var didSend = false
+    @State private var listenTask: Task<Void, Never>? = nil
+    @State private var spokenForText = ""
+    @State private var speaker = AVSpeechSynthesizer()
+    private let voiceCapture = VoiceCapture()
+
     @State private var typing = false
     @State private var draft = ""
     @FocusState private var inputFocused: Bool
@@ -273,15 +233,30 @@ struct VoiceOrbView: View {
     private var assistantName: String {
         app.assistantName.isEmpty ? "灵犀" : app.assistantName
     }
+    /// The assistant reply for the in-flight/just-finished turn — the last message
+    /// when it is the AI's (grows live as `TextDelta`s land into `convo.messages`).
+    private var assistantText: String {
+        if let last = convo.messages.last, last.role == .ai { return last.text }
+        return ""
+    }
+    private var captionIsAI: Bool { phase == .speaking || (phase == .idle && didSend) }
+    private var displayCaption: String {
+        switch phase {
+        case .listening: return ""
+        case .thinking:  return userCaption
+        case .speaking:  return assistantText
+        case .idle:      return didSend ? assistantText : ""
+        }
+    }
     private var label: String {
-        switch convo.phase {
+        switch phase {
         case .idle, .listening: return "聆听中"
         case .thinking: return "思考中"
         case .speaking: return assistantName
         }
     }
     private var sub: String {
-        switch convo.phase {
+        switch phase {
         case .idle: return ""
         case .listening: return "说完轻点收音 · 或继续"
         case .thinking: return "正在组织语言…"
@@ -290,8 +265,49 @@ struct VoiceOrbView: View {
     }
 
     var body: some View {
+        content
+            .transition(.opacity)
+            .onAppear { listen() }
+            .onDisappear { teardown() }
+            // First assistant delta of the turn flips thinking → speaking.
+            .onChange(of: assistantText) { _, text in onAssistantText(text) }
+            // Turn end (streaming → false) settles the orb and speaks the reply.
+            .onChange(of: convo.streaming) { _, streaming in onStreamingChanged(streaming) }
+    }
+
+    private var content: some View {
         ZStack {
-            // Fixed sci-fi backdrop (independent of light/dark theme).
+            backdrop
+            orbLayer
+            VStack(spacing: 0) {
+                topBar
+                Spacer()
+                statusAndCaption
+            }
+            if typing { textInputOverlay }
+        }
+    }
+
+    private func teardown() {
+        listenTask?.cancel()
+        onCancel()
+        speaker.stopSpeaking(at: .immediate)
+    }
+    private func onAssistantText(_ text: String) {
+        if phase == .thinking && !text.isEmpty { phase = .speaking }
+    }
+    private func onStreamingChanged(_ streaming: Bool) {
+        if streaming {
+            if phase == .thinking && !assistantText.isEmpty { phase = .speaking }
+        } else if phase == .thinking || phase == .speaking {
+            phase = .idle
+            speak(assistantText)
+        }
+    }
+
+    // Fixed sci-fi backdrop (independent of light/dark theme).
+    private var backdrop: some View {
+        ZStack {
             RadialGradient(colors: [Color(okl: 0.20, 0.07, 270), Color(srgb: 0.020, 0.020, 0.039)],
                            center: UnitPoint(x: 0.5, y: 0.32), startRadius: 0, endRadius: 520)
                 .ignoresSafeArea()
@@ -299,24 +315,49 @@ struct VoiceOrbView: View {
                            center: UnitPoint(x: 0.5, y: 0.40), startRadius: 120, endRadius: 460)
                 .ignoresSafeArea()
                 .allowsHitTesting(false)
-
-            // The orb — tap to interrupt / re-listen.
-            OrbCanvas(phase: convo.phase, cyFrac: 0.40)
-                .ignoresSafeArea()
-                .contentShape(Rectangle())
-                .onTapGesture { convo.startListen() }
-
-            VStack(spacing: 0) {
-                topBar
-                Spacer()
-                statusAndCaption
-            }
-
-            if typing { textInputOverlay }
         }
-        .transition(.opacity)
-        .onAppear { convo.startListen() }
-        .onDisappear { convo.reset() }
+    }
+
+    // The orb — tap to interrupt / re-listen.
+    private var orbLayer: some View {
+        OrbCanvas(phase: phase, cyFrac: 0.40)
+            .ignoresSafeArea()
+            .contentShape(Rectangle())
+            .onTapGesture { listen() }
+    }
+
+    // MARK: real-voice driver
+    /// Start a one-shot listen → send → (engine streams the reply) cycle.
+    private func listen() {
+        onCancel()
+        speaker.stopSpeaking(at: .immediate)
+        listenTask?.cancel()
+        userCaption = ""; didSend = false; phase = .listening
+        listenTask = Task {
+            let result = await voiceCapture.transcribe()
+            await MainActor.run {
+                switch result {
+                case .transcript(let text): submitTurn(text)
+                default: if phase == .listening { phase = .idle }
+                }
+            }
+        }
+    }
+    /// Send recognized/typed text as a real engine turn.
+    private func submitTurn(_ text: String) {
+        let t = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !t.isEmpty else { phase = .idle; return }
+        userCaption = t; didSend = true; phase = .thinking
+        onSend(t)
+    }
+    /// Speak the assistant reply aloud (best-effort device TTS, once per reply).
+    private func speak(_ text: String) {
+        let t = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !t.isEmpty, t != spokenForText else { return }
+        spokenForText = t
+        let u = AVSpeechUtterance(string: t)
+        u.voice = AVSpeechSynthesisVoice(language: "zh-CN")
+        speaker.speak(u)
     }
 
     private var topBar: some View {
@@ -352,7 +393,7 @@ struct VoiceOrbView: View {
                     .fill(dotColor)
                     .frame(width: 7, height: 7)
                     .shadow(color: dotColor, radius: 5)
-                    .opacity(convo.phase == .idle ? 1 : 0.85)
+                    .opacity(phase == .idle ? 1 : 0.85)
                 Text(label)
                     .font(.system(size: 14, weight: .semibold))
                     .foregroundColor(Color(okl: 0.92, 0.02, 270))
@@ -361,7 +402,7 @@ struct VoiceOrbView: View {
             captionBlock
                 .frame(minHeight: 84)
                 .frame(maxWidth: 320)
-                .id("\(label)\(convo.role == .ai ? "ai" : "user")")
+                .id("\(label)\(captionIsAI ? "ai" : "user")")
                 .transition(.opacity)
         }
         .padding(.horizontal, 28)
@@ -370,16 +411,16 @@ struct VoiceOrbView: View {
     }
 
     @ViewBuilder private var captionBlock: some View {
-        if convo.caption.isEmpty {
+        if displayCaption.isEmpty {
             Text(sub)
                 .font(.system(size: 14))
                 .foregroundColor(Color(okl: 0.60, 0.03, 270))
                 .multilineTextAlignment(.center)
         } else {
-            let isAI = convo.role == .ai
-            (Text(convo.role == .user ? "“" : "").foregroundColor(Color(okl: 0.62, 0.04, 270))
-                + Text(convo.caption)
-                + Text(convo.role == .user ? "”" : "").foregroundColor(Color(okl: 0.62, 0.04, 270)))
+            let isAI = captionIsAI
+            (Text(isAI ? "" : "“").foregroundColor(Color(okl: 0.62, 0.04, 270))
+                + Text(displayCaption)
+                + Text(isAI ? "" : "”").foregroundColor(Color(okl: 0.62, 0.04, 270)))
                 .font(.system(size: isAI ? 18 : 17, weight: isAI ? .medium : .regular))
                 .foregroundColor(isAI ? Color(okl: 0.96, 0.02, 290) : Color(okl: 0.80, 0.03, 270))
                 .lineSpacing(5)
@@ -388,7 +429,7 @@ struct VoiceOrbView: View {
     }
 
     private var dotColor: Color {
-        switch convo.phase {
+        switch phase {
         case .listening: return Color(okl: 0.72, 0.18, 150)
         case .speaking:  return Color(okl: 0.75, 0.19, 300)
         default:         return Color(okl: 0.70, 0.16, 260)
@@ -453,6 +494,6 @@ struct VoiceOrbView: View {
         let txt = draft.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !txt.isEmpty else { return }
         typing = false; draft = ""
-        convo.submitText(txt)
+        submitTurn(txt)
     }
 }

@@ -17,7 +17,10 @@ fn shared_id_resolves_by_profile() {
 #[test]
 fn unqualified_shared_id_still_ambiguous() {
     match registry().resolve_in("gpt-5.2", None) {
-        Err(LlmError::InvalidRequest { message }) => assert!(message.contains("ambiguous")),
+        Err(LlmError::InvalidRequest { message }) => {
+            assert!(message.contains("ambiguous"), "got {message}");
+            assert!(message.contains("openai/gpt-5.2"), "error should suggest the qualified form, got {message}");
+        }
         other => panic!("expected ambiguous error, got {other:?}"),
     }
 }

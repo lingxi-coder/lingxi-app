@@ -111,6 +111,12 @@ pub struct ProviderApiAdapter {
     /// `None` when the host has no OAuth profile fetch (mobile) or predates
     /// the wiring. Read via [`Self::effective_subscriber`].
     subscription: Option<traits::subscription::SharedSubscription>,
+    /// Forced `tool_choice` for every request this adapter drives, set by
+    /// [`Self::with_forced_tool_choice`]. Used by `--json-schema` structured
+    /// output to COMPEL the `StructuredOutput` tool (1:1 with claude-code forcing
+    /// `tool_choice` to that tool). `None` (the default for every normal turn)
+    /// leaves the request's `tool_choice` unset so the model chooses freely.
+    forced_tool_choice: Option<llm_client::ToolChoice>,
     /// User-agent environment snapshot (Task 3).
     ua: UserAgentEnv,
     /// Build version string for the User-Agent header.
@@ -335,6 +341,7 @@ impl ProviderApiAdapter {
             transport,
             subscriber,
             subscription: None,
+            forced_tool_choice: None,
             ua,
             version: version.into(),
             analytics,
@@ -358,6 +365,15 @@ impl ProviderApiAdapter {
     #[must_use]
     pub fn with_subscription(mut self, slot: traits::subscription::SharedSubscription) -> Self {
         self.subscription = Some(slot);
+        self
+    }
+
+    /// Force a specific `tool_choice` on every request this adapter drives — used
+    /// by `--json-schema` structured output to compel the `StructuredOutput`
+    /// tool. Builder-style; `None` (the default) leaves tool choice to the model.
+    #[must_use]
+    pub fn with_forced_tool_choice(mut self, choice: llm_client::ToolChoice) -> Self {
+        self.forced_tool_choice = Some(choice);
         self
     }
 
@@ -452,6 +468,12 @@ impl ProviderApiAdapter {
         }
 
         req.tools = tool_decls; // No tool-array breakpoint (matches TS baseline).
+        // Forced tool choice (e.g. `--json-schema` → `StructuredOutput`). Unset
+        // for every normal turn, so the request carries no `tool_choice` and the
+        // model chooses freely — byte-identical to the pre-feature request.
+        if let Some(choice) = &self.forced_tool_choice {
+            req.tool_choice = Some(choice.clone());
+        }
         req.stream = stream;
         req.max_tokens = max_tokens;
         Ok(req)

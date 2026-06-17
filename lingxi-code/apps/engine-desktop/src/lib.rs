@@ -1881,12 +1881,13 @@ pub async fn build(
         .cloned()
         .unwrap_or_else(|| std::path::PathBuf::from("/dev/null"));
     let mcp_configs = mcp::load_mcp_json_with_precedence(&project_mcp_path, &global_mcp_path);
-    // Build one concrete `PosixMcp` and hand it to the registry as BOTH the
-    // `McpTransport` (discovery) and the `RawConnectionProvider` (live-client
-    // bridge), so a connected server yields a working `McpClient` via
-    // `get_client`. The minimal stub owns no live connections, so the bridge
-    // hands back `None` here today; the real `PosixMcpTransport` returns a live
-    // `Arc<jsonrpc::Connection>` under the same wiring.
+    // Build one concrete `PosixMcpTransport` and hand it to the registry as
+    // BOTH the `McpTransport` (discovery) and the `RawConnectionProvider`
+    // (live-client bridge), so a connected server yields a working `McpClient`
+    // via `get_client`. The real transport is now wired: for a connected
+    // server its `RawConnectionProvider::connection_for` returns the live
+    // `Arc<jsonrpc::Connection>` (Stdio/Sse/Http), so the bridge hands back a
+    // working client; only an unknown connection id yields `None`.
     let posix = Arc::new(PosixMcpTransport::new());
     // The registry is BUILT here but `connect_all` is deferred to (5.26),
     // after the real `hooks` executor exists: the elicitation hook dispatcher
@@ -3858,11 +3859,13 @@ mod tests {
     /// `InstructionsLoaded` hook over the controlled memory" half is proven at
     /// the orchestrator layer in `orchestrator/tests/instructions_loaded_hook_test.rs`
     /// (a `RecordingHandler` observes the per-file fire). It is NOT re-asserted
-    /// here because `build()` wires the minimal-platform STUB process runner
-    /// (`platform_posix_minimal::PosixProcess::run` always returns
-    /// `ProcessError::Unsupported`), so a `command` hook produces no side effect
-    /// to observe from outside `build()`. We register the hook anyway, so the
-    /// fire still runs over the injected file (best-effort) inside `build()`.
+    /// here because `build()` exposes no outside-observable channel for an
+    /// in-build hook fire's side effect: the `command` hook runs on the real
+    /// `platform_posix::PosixProcess` runner now, but its `"true"` command is a
+    /// side-effect-free no-op whose output `build()` does not surface. This test
+    /// therefore asserts hook *registration* (via `list_hooks()` below), not the
+    /// hook's execution effect. We register the hook anyway, so the fire still
+    /// runs over the injected file (best-effort) inside `build()`.
     #[tokio::test]
     async fn build_with_injected_memory_reaches_system_prompt() {
         use traits::OrchestratorHandle as _;

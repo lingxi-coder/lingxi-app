@@ -87,6 +87,7 @@ pub(crate) struct TrackedTool {
 ///
 /// `executing_safe_flags` is a slice of the `is_concurrency_safe` flags for
 /// every tool currently in the `Executing` state.
+#[allow(dead_code)] // wired into the live streaming loop in Task 11
 pub(crate) fn can_execute(executing_safe_flags: &[bool], candidate_safe: bool) -> bool {
     executing_safe_flags.is_empty()
         || (candidate_safe && executing_safe_flags.iter().all(|&s| s))
@@ -117,6 +118,9 @@ pub(crate) struct StreamingToolExecutor<'a> {
     discarded: bool,
 }
 
+// The whole executor surface is unused until Task 11 wires it into the live
+// streaming loop; suppress dead-code here rather than per-method.
+#[allow(dead_code)]
 impl<'a> StreamingToolExecutor<'a> {
     /// Construct a fresh executor borrowing the given orchestrator for the
     /// duration of the streaming turn.
@@ -189,6 +193,10 @@ impl<'a> StreamingToolExecutor<'a> {
     /// queued non-concurrency-safe tool that cannot start yet (preserves
     /// exclusive-tool ordering). After each start the executing set changes, so
     /// we re-evaluate from scratch.
+    // Index loop + per-pass rebuild are forced by the borrow checker: `start_tool`
+    // takes `&mut self`, so we can't hold an iterator borrow over `self.tools`
+    // across a start. N is small (tools per turn), so the rebuild is negligible.
+    #[allow(clippy::needless_range_loop)]
     pub(crate) fn process_queue(&mut self) {
         loop {
             let executing_flags: Vec<bool> = self
@@ -223,7 +231,6 @@ impl<'a> StreamingToolExecutor<'a> {
 
     /// STUB (Task 7): real future-dispatch lands in Task 8. For now just marks
     /// the tool Executing so `process_queue`'s ordering/gating is testable.
-    #[allow(dead_code)] // real dispatch wired in Task 8
     fn start_tool(&mut self, i: usize) {
         self.tools[i].status = ToolStatus::Executing;
     }
@@ -568,6 +575,29 @@ mod tests {
         assert_eq!(exec.tools[1].status, ToolStatus::Executing);
         assert_eq!(exec.tools[2].status, ToolStatus::Queued);
         assert_eq!(exec.tools[3].status, ToolStatus::Queued);
+    }
+
+    /// A SAFE queued tool blocked by an already-Executing UNSAFE tool does NOT
+    /// barrier (only an unsafe queued tool barriers) — process_queue scans past
+    /// it and starts nothing. Exercises the "keep scanning" continuation branch
+    /// that requires pre-existing Executing state.
+    #[tokio::test]
+    async fn process_queue_safe_blocked_by_executing_unsafe_keeps_scanning() {
+        let orch = orch_with_both_tools();
+        let a = MessageId::new();
+        let mut exec = StreamingToolExecutor::new(&orch);
+        exec.add_tool(ToolUseId::new(), "UnsafeTool".into(), json!({}), None, a);
+        exec.add_tool(ToolUseId::new(), "SafeTool".into(), json!({}), None, a);
+        exec.add_tool(ToolUseId::new(), "SafeTool".into(), json!({}), None, a);
+        // Simulate the unsafe tool already running (as if a prior process_queue
+        // started it and it has not completed yet).
+        exec.tools[0].status = ToolStatus::Executing;
+        exec.process_queue();
+        // Both safe tools are blocked by the executing unsafe tool; neither
+        // starts, and the safe ones do NOT barrier (scan continues past them).
+        assert_eq!(exec.tools[0].status, ToolStatus::Executing);
+        assert_eq!(exec.tools[1].status, ToolStatus::Queued);
+        assert_eq!(exec.tools[2].status, ToolStatus::Queued);
     }
 
     #[tokio::test]

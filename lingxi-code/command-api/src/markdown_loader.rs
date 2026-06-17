@@ -609,6 +609,31 @@ fn dir_identity(path: &Path) -> Option<(u64, u64)> {
     Some((h.finish(), 0))
 }
 
+/// Parse a single command markdown `raw` string (already read from
+/// `file_path`, namespaced under `base_dir`) into a [`MarkdownCommandFile`].
+///
+/// This is the per-file primitive behind [`load_command_markdown_files`],
+/// exposed so out-of-tree loaders (e.g. the plugin materialiser, which reads a
+/// plugin's own `commands/` dir) can build a faithful command — body +
+/// frontmatter — instead of stamping empty strings. Combine with
+/// [`build_markdown_command`] to obtain the full [`SlashCommand`].
+#[must_use]
+pub fn parse_command_markdown(
+    raw: &str,
+    file_path: PathBuf,
+    base_dir: PathBuf,
+    source: CommandSource,
+) -> MarkdownCommandFile {
+    let (frontmatter, content) = parse_frontmatter(raw);
+    MarkdownCommandFile {
+        file_path,
+        base_dir,
+        frontmatter,
+        content,
+        source,
+    }
+}
+
 /// Split a raw markdown string into frontmatter + body. Mirrors the
 /// `skill-api::frontmatter::parse_skill_markdown` `---`/`\n---\n` splitter (the
 /// shape the spec asks to reuse without depending on `skill-api`). Malformed or

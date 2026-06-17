@@ -10,17 +10,34 @@
 //! `pluginLoader.ts:1373-1385`), plus the standard `hooks/hooks.json`
 //! (`pluginLoader.ts:1618`).
 //!
-//! This module ports the minimal faithful subset: a directory-walk of the
-//! plugins directory (`getPluginsDirectory()` =
-//! `~/.claude/plugins`, `pluginDirectories.ts:53`), reading each plugin's
-//! manifest + auto-detected component subdirectories into a
-//! [`PluginManifest`]. Marketplace-catalog resolution, version cache layout,
-//! and the `settings.enabledPlugins` allowlist are NOT ported here (residual
-//! — see the GAP E note); this pass discovers every plugin directory present
-//! under the plugins root.
+//! Two entry points:
+//!
+//! * [`discover_enabled_plugins`] is the BOOTSTRAP-faithful one: it reads the
+//!   `settings.enabledPlugins` allowlist and resolves each enabled
+//!   `name@marketplace` entry to its versioned cache path
+//!   `cache/{marketplace}/{plugin}/{version}/` — the real layout
+//!   `loadAllPluginsCacheOnly` consumes. Against a real `~/.claude/plugins`
+//!   (which holds `cache/`, `npm-cache/`, `installed_plugins.json` — none with
+//!   a direct `.claude-plugin/plugin.json`) this is what discovers the
+//!   actually-installed plugins.
+//!
+//! * [`discover_installed_plugins`] is a flat directory-walk that loads any
+//!   directory holding a direct `.claude-plugin/plugin.json` child. It is the
+//!   primitive used by the local-path install arm (a pre-fetched plugin dir
+//!   passed by path, as with `--add-dir`) — NOT the real cache layout. Against
+//!   a real claude-code plugins dir it finds nothing, by design.
+//!
+//! Both share [`load_plugin_from_path`], which mirrors `createPluginFromPath`
+//! (`pluginLoader.ts:1348`): read the manifest (Step 1) and auto-detect the
+//! optional component directories (Step 3).
 //!
 //! [`crate::manager::PluginManager::enable`] then materializes the discovered
 //! manifests' commands + hooks into the live registries.
+//!
+//! Residual (still NOT ported in either path): marketplace-catalog source
+//! resolution, enterprise allow/blocklist policy, seed-dir precedence, and
+//! reading the exact installed version out of `installed_plugins.json`
+//! (`discover_enabled_plugins` probes the single-version case instead).
 
 use crate::manifest::{ComponentPath, PluginComponents, PluginManifest};
 use crate::source::PluginSource;
@@ -30,7 +47,7 @@ use hooks::loader::parse_hooks_from_settings_json;
 use hooks::HookSource;
 use protocol::PluginId;
 use serde::Deserialize;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
 /// Raw shape of `.claude-plugin/plugin.json`.
@@ -72,6 +89,126 @@ impl RawAuthor {
             RawAuthor::Name(s) => Some(s),
             RawAuthor::Object { name } => name,
         }
+    }
+}
+
+/// Parse a `plugin@marketplace` identifier into `(name, Option<marketplace>)`.
+///
+/// Faithful to claude-code's `parsePluginIdentifier`
+/// (`pluginIdentifier.ts:51`): only the FIRST `@` separates name from
+/// marketplace; anything after a second `@` is ignored. A bare `name` (no
+/// `@`) yields `marketplace = None`.
+fn parse_plugin_identifier(id: &str) -> (&str, Option<&str>) {
+    match id.split_once('@') {
+        Some((name, rest)) => {
+            // `rest` may itself contain another `@`; keep only up to the next.
+            let marketplace = rest.split('@').next().unwrap_or(rest);
+            (name, Some(marketplace))
+        }
+        None => (id, None),
+    }
+}
+
+/// Sanitize one path segment exactly as claude-code's `getVersionedCachePathIn`
+/// (`pluginLoader.ts:139`) does: marketplace/plugin replace any char outside
+/// `[A-Za-z0-9\-_]` with `-`; version additionally keeps `.`.
+fn sanitize_segment(s: &str, allow_dot: bool) -> String {
+    s.chars()
+        .map(|c| {
+            let keep = c.is_ascii_alphanumeric()
+                || c == '-'
+                || c == '_'
+                || (allow_dot && c == '.');
+            if keep {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect()
+}
+
+/// Discover the plugins enabled by the `enabledPlugins` allowlist against the
+/// REAL claude-code on-disk layout.
+///
+/// claude-code never flat-walks the plugins directory for manifests. Its
+/// cache-only loader `loadAllPluginsCacheOnly()` (`main.tsx:282`) delegates to
+/// `loadPluginsFromMarketplaces({cacheOnly})` (`pluginLoader.ts:1888`), which
+/// is driven by `settings.enabledPlugins` — a map of `plugin@marketplace` →
+/// enabled (`pluginLoader.ts:1898-1906`). Each enabled `name@marketplace`
+/// entry resolves through `getVersionedCachePath` (`pluginLoader.ts:139`) to
+/// the versioned cache directory
+/// `<plugins>/cache/{marketplace}/{plugin}/{version}/`
+/// whose `.claude-plugin/plugin.json` is then read by `createPluginFromPath`
+/// (`pluginLoader.ts:1348`).
+///
+/// This port reads the `enabled` allowlist, skips disabled entries, resolves
+/// each remaining `name@marketplace` to `cache/{marketplace}/{plugin}/`, and
+/// probes that directory for an installed version dir (the version normally
+/// comes from `installed_plugins.json`; with a single installed version we
+/// pick it, mirroring `probeSeedCacheAnyVersion`,
+/// `pluginLoader.ts:217`). Bare `name` entries (no marketplace) and
+/// uninstalled/missing entries are skipped — never a flat walk.
+///
+/// What is still NOT ported (residual): marketplace-catalog source resolution,
+/// enterprise allow/blocklist policy (`getStrictKnownMarketplaces` /
+/// `getBlockedMarketplaces`), seed-dir precedence, and reading the exact
+/// version out of `installed_plugins.json` (we probe instead).
+pub async fn discover_enabled_plugins(
+    plugins_dir: &Path,
+    enabled: &BTreeMap<String, bool>,
+) -> Vec<(PluginId, PluginManifest, PathBuf)> {
+    let cache_root = plugins_dir.join("cache");
+    let mut out = Vec::new();
+    for (entry_id, is_enabled) in enabled {
+        if !is_enabled {
+            continue;
+        }
+        let (name, marketplace) = parse_plugin_identifier(entry_id);
+        // Marketplace-qualified entries only — a bare name has no resolvable
+        // cache path (claude-code skips non-`plugin@marketplace` keys via the
+        // `PluginIdSchema` filter, `pluginLoader.ts:1909`).
+        let Some(marketplace) = marketplace else {
+            continue;
+        };
+        if name.is_empty() {
+            continue;
+        }
+        let plugin_cache_dir = cache_root
+            .join(sanitize_segment(marketplace, false))
+            .join(sanitize_segment(name, false));
+        let Some(versioned) = resolve_installed_version_dir(&plugin_cache_dir).await else {
+            continue;
+        };
+        if let Some((id, manifest)) = load_plugin_from_path(&versioned).await {
+            out.push((id, manifest, versioned));
+        }
+    }
+    // Stable ordering by plugin name for deterministic bootstrap.
+    out.sort_by(|a, b| a.1.name.cmp(&b.1.name));
+    out
+}
+
+/// Probe `cache/{marketplace}/{plugin}/` for an installed version directory.
+///
+/// claude-code knows the exact version from `installed_plugins.json` /
+/// marketplace catalog and joins it directly (`getVersionedCachePath`). We
+/// don't carry that metadata here, so we probe: if the plugin dir holds
+/// exactly one version subdirectory with content, use it (mirroring
+/// `probeSeedCacheAnyVersion`'s single-version rule, `pluginLoader.ts:217`).
+/// Zero or multiple versions → ambiguous → skip (returns `None`).
+async fn resolve_installed_version_dir(plugin_dir: &Path) -> Option<PathBuf> {
+    let mut entries = tokio::fs::read_dir(plugin_dir).await.ok()?;
+    let mut version_dirs = Vec::new();
+    while let Ok(Some(entry)) = entries.next_entry().await {
+        if entry.file_type().await.map(|t| t.is_dir()).unwrap_or(false) {
+            version_dirs.push(entry.path());
+        }
+    }
+    if version_dirs.len() == 1 {
+        Some(version_dirs.into_iter().next().unwrap())
+    } else {
+        None
     }
 }
 

@@ -1267,6 +1267,40 @@ fn load_merged_output_style(project_dir: &std::path::Path) -> Option<String> {
         .and_then(|eff| eff.settings.output_style)
 }
 
+/// Read the merged `settings.enabledPlugins` allowlist (`plugin@marketplace` →
+/// enabled) from the user then project `settings.json`, project last so it wins
+/// on conflict. Mirrors `loadPluginsFromMarketplaces`'s
+/// `{...getAddDirEnabledPlugins(), ...settings.enabledPlugins}` merge
+/// (`pluginLoader.ts:1898`) at the priority that matters for the cache-only
+/// boot. Malformed files / a missing key degrade to an empty map (no plugins),
+/// matching claude-code's resilient read-only boot.
+async fn load_enabled_plugins(
+    claude_home: &std::path::Path,
+    cwd: &std::path::Path,
+) -> std::collections::BTreeMap<String, bool> {
+    let mut merged: std::collections::BTreeMap<String, bool> = std::collections::BTreeMap::new();
+    let user = claude_home.join("settings.json");
+    let project = cwd.join(".claude").join("settings.json");
+    // User first, project second → project overrides on identical keys.
+    for path in [user, project] {
+        let Ok(raw) = tokio::fs::read_to_string(&path).await else {
+            continue;
+        };
+        let Ok(json) = serde_json::from_str::<serde_json::Value>(&raw) else {
+            tracing::warn!(path = %path.display(), "skipping malformed settings.json for enabledPlugins");
+            continue;
+        };
+        if let Some(map) = json.get("enabledPlugins").and_then(|v| v.as_object()) {
+            for (k, v) in map {
+                if let Some(b) = v.as_bool() {
+                    merged.insert(k.clone(), b);
+                }
+            }
+        }
+    }
+    merged
+}
+
 /// SKILLLIST.1: `CommandRegistry`-backed skill-listing provider for the per-turn
 /// `skill_listing` system-reminder. Reads the shared registry lazily at turn time
 /// and applies the TS `getSkillToolCommands` eligibility filter
@@ -2967,13 +3001,22 @@ pub async fn build(
     //       `loadPluginsFromMarketplaces({cacheOnly})`; `setup.ts:318`
     //       `loadPluginHooks`). Plugins live under `getPluginsDirectory()` =
     //       `~/.claude/plugins` (`pluginDirectories.ts:53`), honoring the
-    //       `CLAUDE_CODE_PLUGIN_CACHE_DIR` override. Best-effort: a malformed
-    //       plugin logs a warning and is skipped — discovery never breaks boot
-    //       (a fresh install with no `plugins/` dir yields zero plugins, an
-    //       exact no-op). MCP / LSP / skills / output-styles materialisation
-    //       into LIVE registries and the `settings.enabledPlugins` allowlist
-    //       are residual (the root holds no `Arc<RwLock>` for those and
-    //       `lsp_registry: None` upstream); the manager is given a real but
+    //       `CLAUDE_CODE_PLUGIN_CACHE_DIR` override. Discovery is allowlist-
+    //       driven (faithful): the `settings.enabledPlugins`
+    //       (`plugin@marketplace` → enabled) entries resolve to versioned cache
+    //       dirs `cache/{marketplace}/{plugin}/{version}/`, the layout
+    //       `loadAllPluginsCacheOnly` consumes; a flat-walk fallback covers
+    //       pre-fetched local plugin dirs. Each plugin command's BODY +
+    //       frontmatter are loaded from its markdown file (not empty), and a
+    //       plugin loads all-or-nothing (agent frontmatter is validated before
+    //       any registry mutation). Best-effort: a malformed plugin logs a
+    //       warning and is skipped — discovery never breaks boot (a fresh
+    //       install with no `plugins/` dir yields zero plugins, an exact
+    //       no-op). RESIDUAL: MCP / LSP / skills / output-styles
+    //       materialisation into LIVE registries, marketplace-catalog source
+    //       resolution + enterprise allow/blocklist policy, and reading the
+    //       exact installed version from `installed_plugins.json` (we probe the
+    //       single-version cache dir instead). The manager is given a real but
     //       isolated LSP/skill/output-style/tool registry so `enable()` is
     //       non-panicking while only commands + hooks reach the engine's live
     //       registries.
@@ -2982,7 +3025,21 @@ pub async fn build(
             || cfg.claude_home.join("plugins"),
             std::path::PathBuf::from,
         );
-        let discovered = plugin::discover_installed_plugins(&plugins_dir).await;
+        // Primary (faithful) path: resolve the `settings.enabledPlugins`
+        // allowlist (`plugin@marketplace` → enabled) to versioned cache dirs
+        // `cache/{marketplace}/{plugin}/{version}/`, exactly as
+        // `loadAllPluginsCacheOnly` (`pluginLoader.ts:1888`) consumes a real
+        // `~/.claude/plugins`. Read `enabledPlugins` from the user then project
+        // settings (project wins), mirroring `getSettings_DEPRECATED()`.
+        let enabled = load_enabled_plugins(&cfg.claude_home, &cwd_for_plugins).await;
+        let mut discovered = plugin::discover_enabled_plugins(&plugins_dir, &enabled).await;
+        // Fallback: when no allowlist resolves anything (e.g. a flat directory
+        // of pre-fetched plugin dirs supplied directly, as with `--add-dir`),
+        // flat-walk for direct `.claude-plugin/plugin.json` children. This is
+        // NOT the real cache layout but keeps local/dev plugin dirs loadable.
+        if discovered.is_empty() {
+            discovered = plugin::discover_installed_plugins(&plugins_dir).await;
+        }
         if !discovered.is_empty() {
             // Real LSP registry (its plugin-server registration path is the
             // only supported one); empty skill/output-style/tool registries
@@ -3668,7 +3725,7 @@ mod tests {
         std::fs::create_dir_all(plugin_dir.join("commands")).unwrap();
         std::fs::write(
             plugin_dir.join("commands").join("hello.md"),
-            "Hello from the plugin.\n",
+            "---\ndescription: greets\n---\nHello from the plugin.\n",
         )
         .unwrap();
 
@@ -3686,6 +3743,73 @@ mod tests {
             .resolve("hello")
             .expect("plugin command `hello` should be discovered at bootstrap");
         assert_eq!(cmd.source, command_api::CommandSource::Plugin);
+        // Verification fix #2: the command body must be loaded — an empty
+        // prompt_template would expand to an inert prompt.
+        assert_eq!(cmd.description, "greets");
+        match &cmd.kind {
+            command_api::SlashCommandKind::Plugin {
+                prompt_template, ..
+            } => assert!(
+                prompt_template.contains("Hello from the plugin."),
+                "plugin command body must reach the live registry"
+            ),
+            other => panic!("expected Plugin kind, got {other:?}"),
+        }
+    }
+
+    /// GAP E (verification fix #1): a plugin laid out under the REAL claude-code
+    /// cache layout `plugins/cache/{marketplace}/{plugin}/{version}/` and named
+    /// in `settings.enabledPlugins` is discovered + materialised at bootstrap.
+    /// The flat walk would find nothing here — only the allowlist-driven
+    /// resolution does.
+    #[tokio::test]
+    async fn build_discovers_a_plugin_via_enabledplugins_cache_layout() {
+        let (_tmp, cfg) = test_config(true);
+        // Versioned cache dir, exactly as getVersionedCachePath lays it out.
+        let versioned = cfg
+            .claude_home
+            .join("plugins")
+            .join("cache")
+            .join("acme")
+            .join("weather")
+            .join("1.0.0");
+        std::fs::create_dir_all(versioned.join(".claude-plugin")).unwrap();
+        std::fs::write(
+            versioned.join(".claude-plugin").join("plugin.json"),
+            r#"{"name":"weather","version":"1.0.0"}"#,
+        )
+        .unwrap();
+        std::fs::create_dir_all(versioned.join("commands")).unwrap();
+        std::fs::write(
+            versioned.join("commands").join("forecast.md"),
+            "---\ndescription: forecast\n---\nThe forecast is sunny.\n",
+        )
+        .unwrap();
+        // Enable it via user settings.json `enabledPlugins`.
+        std::fs::write(
+            cfg.claude_home.join("settings.json"),
+            r#"{"enabledPlugins":{"weather@acme":true}}"#,
+        )
+        .unwrap();
+
+        let output: Arc<dyn traits::OutputStream> =
+            Arc::new(orchestrator::test_support::MockOutputStream::new());
+        let perm_sink: Arc<dyn client_adapter::PermissionRequestSink> =
+            Arc::new(RecordingPermissionSink::default());
+        let rt = build(cfg, output, perm_sink).await.expect("build() failed");
+
+        let reg = rt.dispatcher.registry();
+        let reg = reg.read().await;
+        let cmd = reg
+            .resolve("forecast")
+            .expect("plugin command discovered via enabledPlugins cache layout");
+        assert_eq!(cmd.source, command_api::CommandSource::Plugin);
+        match &cmd.kind {
+            command_api::SlashCommandKind::Plugin {
+                prompt_template, ..
+            } => assert!(prompt_template.contains("The forecast is sunny.")),
+            other => panic!("expected Plugin kind, got {other:?}"),
+        }
     }
 
     /// GAP E: a fresh install with no `<claude_home>/plugins` directory boots

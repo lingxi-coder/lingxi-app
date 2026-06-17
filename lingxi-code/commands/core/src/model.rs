@@ -49,12 +49,15 @@ impl BuiltinCommandHandler for ModelHandler {
                 )),
             };
         }
-        // Switch mode.
-        match self.handle.switch_model(trimmed, None).await {
+        // Switch mode. Resolve an optional `profile/model` qualifier so a shared
+        // id (offered by multiple providers) routes deterministically.
+        let listings = self.handle.list_model_listings().await;
+        let (model, profile) = traits::parse_model_ref(trimmed, &listings);
+        match self.handle.switch_model(&model, profile.as_deref()).await {
             Ok(()) => {
                 telemetry::emit_command_completed(cmd_evt::MODEL_COMPLETED, "switch");
                 CommandResult::Done {
-                    display: Some(format!("Switched to model: {trimmed}")),
+                    display: Some(format!("Switched to model: {model}")),
                 }
             }
             Err(e) => {
@@ -153,5 +156,44 @@ mod tests {
         let h = ModelHandler::new(mock);
         assert_eq!(h.name(), "model");
         assert_eq!(h.description(), "Set the model for Claude Code to use");
+    }
+
+    /// `/model openai/gpt-5.2` with a fixture that has both openai and
+    /// github-copilot offering `gpt-5.2` must pass `("gpt-5.2", Some("openai"))`
+    /// to `switch_model`. A model unique to one provider (`gpt-4.1`) must pass
+    /// `("gpt-4.1", None)`.
+    #[tokio::test]
+    async fn model_switch_parses_profile_qualified_ref() {
+        use traits::ModelListing;
+        fn listing(provider_id: &str, request_model: &str) -> ModelListing {
+            ModelListing {
+                display_model: request_model.to_string(),
+                request_model: request_model.to_string(),
+                provider_id: provider_id.to_string(),
+                provider_label: provider_id.to_string(),
+            }
+        }
+
+        let mock = Arc::new(MockOrchestratorHandle::new());
+        mock.set_model_listings(vec![
+            listing("openai", "gpt-5.2"),
+            listing("github-copilot", "gpt-5.2"),
+            listing("openai", "gpt-4.1"),
+        ]);
+        let h = ModelHandler::new(mock.clone());
+
+        // Qualified ref resolves to (bare model, profile).
+        let _ = h.handle(&args("openai/gpt-5.2")).await;
+        assert_eq!(
+            mock.last_switch(),
+            Some(("gpt-5.2".to_string(), Some("openai".to_string())))
+        );
+
+        // Unique bare model → no profile.
+        let _ = h.handle(&args("gpt-4.1")).await;
+        assert_eq!(
+            mock.last_switch(),
+            Some(("gpt-4.1".to_string(), None))
+        );
     }
 }

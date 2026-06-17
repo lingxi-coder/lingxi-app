@@ -66,7 +66,8 @@ pub use notification::{NotificationError, NotificationRequest, NotificationServi
 pub use orchestrator::{
     AgentInfo, CheckStatus, CompactionSummary, CostSnapshot, DoctorCheck, DoctorReport,
     DoctorSummary, HandleError, HookInfo, McpServerInfo, McpStatus, MemoryEditorOutcome,
-    OrchestratorHandle, OutputEvent, OutputStream, RateLimitSnapshot, StatusSnapshot, TurnOutcome,
+    ModelListing, OrchestratorHandle, OutputEvent, OutputStream, RateLimitSnapshot,
+    StatusSnapshot, TurnOutcome, parse_model_ref,
 };
 pub use permission_gate::{PermissionDecision, PermissionGate};
 pub use platform::Platform;

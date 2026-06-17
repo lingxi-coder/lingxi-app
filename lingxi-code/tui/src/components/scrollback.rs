@@ -93,7 +93,7 @@ pub fn render_message(
         // components, threading per-id expanded + focused state.
         RenderedMessage::AssistantToolUse { id, tool, input } => {
             let is_expanded = expanded.get(&id).copied().unwrap_or(false);
-            let is_focused = focused_tool_id == Some(id);
+            let is_focused = focused_tool_id.as_ref() == Some(&id);
             element! {
                 AssistantToolUseMessage(
                     id: id,
@@ -114,7 +114,7 @@ pub fn render_message(
             file_path,
         } => {
             let is_expanded = expanded.get(&id).copied().unwrap_or(false);
-            let is_focused = focused_tool_id == Some(id);
+            let is_focused = focused_tool_id.as_ref() == Some(&id);
             element! {
                 UserToolResultMessage(
                     id: id,

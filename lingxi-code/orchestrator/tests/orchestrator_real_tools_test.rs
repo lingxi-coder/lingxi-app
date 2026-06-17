@@ -119,7 +119,7 @@ async fn orchestrator_drives_real_file_read_tool_on_a_tempfile() {
     let tool_use_id = ToolUseId::new();
     let r1 = mock_message_response(
         vec![LlmContentBlock::ToolCall {
-            id: tool_use_id.as_uuid().to_string(),
+            id: tool_use_id.to_string(),
             name: "Read".into(),
             input: json!({ "file_path": path.to_string_lossy() }),
         }],

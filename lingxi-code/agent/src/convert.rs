@@ -125,9 +125,9 @@ fn convert_block(block: ProtoBlock) -> Result<LlmBlock, LlmError> {
             input,
             provider_id,
         } => Ok(LlmBlock::ToolCall {
-            // Replay the verbatim provider-issued id when preserved (Anthropic
-            // `toolu_…`, OpenAI `call_…`); fall back to the `tu:<uuid>` Display
-            // form only for internally-minted blocks with no provider round-trip.
+            // `id` IS the canonical provider-issued id (Anthropic `toolu_…`,
+            // OpenAI `call_…`). `provider_id` is now vestigial/always None, so
+            // this resolves to `id.to_string()` = the canonical id (byte parity).
             id: provider_id.unwrap_or_else(|| id.to_string()),
             name,
             input,
@@ -138,8 +138,8 @@ fn convert_block(block: ProtoBlock) -> Result<LlmBlock, LlmError> {
             is_error,
             provider_tool_use_id,
         } => Ok(LlmBlock::ToolResult {
-            // Must echo the same id the paired `tool_use` carried so Anthropic
-            // pairs them; prefer the preserved provider id over the synthetic one.
+            // Must echo the same canonical id the paired `tool_use` carried so the
+            // provider pairs them; `provider_tool_use_id` is vestigial/always None.
             tool_call_id: provider_tool_use_id.unwrap_or_else(|| tool_use_id.to_string()),
             output: Value::String(content),
             is_error,
@@ -263,15 +263,15 @@ mod tests {
 
     #[test]
     fn tool_use_provider_id_replayed_verbatim_on_egress() {
-        // P0: a preserved provider id (Anthropic `toolu_…`) MUST be replayed
-        // verbatim as the egress `tool_call` id — NOT the synthetic `tu:<uuid>`.
+        // P0: the canonical provider id (Anthropic `toolu_…`) carried in the
+        // `ToolUseId` MUST be replayed verbatim as the egress `tool_call` id.
         let msg = ConversationMessage::Assistant {
             id: MessageId::new(),
             content: vec![ProtoBlock::ToolUse {
-                id: ToolUseId::new(),
+                id: ToolUseId::from("toolu_01ABCDEF"),
                 name: "Read".to_string(),
                 input: serde_json::json!({"path": "/tmp/x"}),
-                provider_id: Some("toolu_01ABCDEF".to_string()),
+                provider_id: None,
             }],
             stop_reason: None,
         };
@@ -284,14 +284,14 @@ mod tests {
 
     #[test]
     fn tool_result_provider_id_replayed_verbatim_on_egress() {
-        // P0: the paired `tool_result` must echo the SAME verbatim provider id.
+        // P0: the paired `tool_result` must echo the SAME verbatim canonical id.
         let msg = ConversationMessage::User {
             id: MessageId::new(),
             content: vec![ProtoBlock::ToolResult {
-                tool_use_id: ToolUseId::new(),
+                tool_use_id: ToolUseId::from("toolu_01ABCDEF"),
                 content: "file content".to_string(),
                 is_error: false,
-                provider_tool_use_id: Some("toolu_01ABCDEF".to_string()),
+                provider_tool_use_id: None,
             }],
         };
         let result = to_llm_messages(vec![msg]).unwrap();

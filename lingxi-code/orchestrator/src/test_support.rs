@@ -278,7 +278,7 @@ impl OutputStream for MockOutputStream {
         input: &serde_json::Value,
     ) {
         self.events.lock().await.push(OutputEvent::ToolCall {
-            id: *id,
+            id: id.clone(),
             tool: tool.to_string(),
             input: input.clone(),
         });
@@ -290,7 +290,7 @@ impl OutputStream for MockOutputStream {
         result: &serde_json::Value,
     ) {
         self.events.lock().await.push(OutputEvent::ToolResult {
-            id: *id,
+            id: id.clone(),
             tool: tool.to_string(),
             result: result.clone(),
         });
@@ -979,8 +979,8 @@ mod tests {
         m.emit_tool_result(&id, "Read", &result).await;
         let snap = m.snapshot().await;
         assert_eq!(snap.len(), 2);
-        assert!(matches!(snap[0], OutputEvent::ToolCall { id: gid, .. } if gid == id));
-        assert!(matches!(snap[1], OutputEvent::ToolResult { id: gid, .. } if gid == id));
+        assert!(matches!(&snap[0], OutputEvent::ToolCall { id: gid, .. } if *gid == id));
+        assert!(matches!(&snap[1], OutputEvent::ToolResult { id: gid, .. } if *gid == id));
     }
 
     #[tokio::test]

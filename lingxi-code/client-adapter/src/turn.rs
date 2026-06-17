@@ -418,7 +418,7 @@ mod tests {
     fn tool_use_block_lowers_input_to_json_string() {
         let id = ToolUseId::new();
         let block = ContentBlock::ToolUse {
-            id,
+            id: id.clone(),
             name: "Read".into(),
             input: serde_json::json!({"file_path": "/tmp/x"}),
             provider_id: None,

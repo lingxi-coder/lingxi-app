@@ -2675,7 +2675,7 @@ impl ConversationOrchestrator {
             let mut blocks: Vec<ContentBlock> = pumped.assistant_blocks.clone();
             for t in &pumped.tool_uses {
                 blocks.push(ContentBlock::ToolUse {
-                    id: t.id,
+                    id: t.id.clone(),
                     name: t.name.clone(),
                     input: t.input.clone(),
                     provider_id: t.provider_id.clone(),
@@ -2709,7 +2709,7 @@ impl ConversationOrchestrator {
                 let mut exec = crate::streaming_executor::StreamingToolExecutor::new(self);
                 for tu in &pumped.tool_uses {
                     exec.add_tool(
-                        tu.id,
+                        tu.id.clone(),
                         tu.name.clone(),
                         tu.input.clone(),
                         tu.provider_id.clone(),
@@ -4530,7 +4530,7 @@ mod skill_model_override_tests {
         let tu = ToolUseId::new();
         let resp1 = mock_message_response(
             vec![LlmContentBlock::ToolCall {
-                id: tu.as_uuid().to_string(),
+                id: tu.to_string(),
                 name: "ModelSwitch".into(),
                 input: serde_json::json!({}),
             }],
@@ -4572,7 +4572,7 @@ mod skill_model_override_tests {
         let tu = ToolUseId::new();
         let resp1 = mock_message_response(
             vec![LlmContentBlock::ToolCall {
-                id: tu.as_uuid().to_string(),
+                id: tu.to_string(),
                 name: "Plain".into(),
                 input: serde_json::json!({}),
             }],
@@ -4610,7 +4610,7 @@ mod skill_model_override_tests {
         let tu = ToolUseId::new();
         let turn1 = vec![
             message_start("m1", crate::config::DEFAULT_MODEL),
-            content_block_start_tool_use(0, tu, "ModelSwitch"),
+            content_block_start_tool_use(0, tu.clone(), "ModelSwitch"),
             input_json_delta(0, "{}"),
             content_block_stop(0),
             message_delta_stop("tool_use"),
@@ -4660,7 +4660,7 @@ mod skill_model_override_tests {
         let tu = ToolUseId::new();
         let turn1 = vec![
             message_start("m1", crate::config::DEFAULT_MODEL),
-            content_block_start_tool_use(0, tu, "Plain"),
+            content_block_start_tool_use(0, tu.clone(), "Plain"),
             input_json_delta(0, "{}"),
             content_block_stop(0),
             message_delta_stop("tool_use"),

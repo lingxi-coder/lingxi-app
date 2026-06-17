@@ -709,7 +709,7 @@ pub fn VirtualMessageList(props: &VirtualMessageListProps) -> impl Into<AnyEleme
     let win = render_window(&props.messages, &props.cache, props.scroll_offset, vh);
 
     let expanded = props.expanded.clone();
-    let focused_tool_id = props.focused_tool_id;
+    let focused_tool_id = props.focused_tool_id.clone();
     let theme = props.theme;
     let theme_name = props.theme_name;
     // (A2) Thread the cache's render width into each message so markdown TABLES
@@ -721,7 +721,7 @@ pub fn VirtualMessageList(props: &VirtualMessageListProps) -> impl Into<AnyEleme
     } else {
         win.indices()
             .filter_map(|i| props.messages.get(i).cloned())
-            .map(|m| render_message(m, &expanded, focused_tool_id, theme, theme_name, width))
+            .map(|m| render_message(m, &expanded, focused_tool_id.clone(), theme, theme_name, width))
             .collect()
     };
     element! {

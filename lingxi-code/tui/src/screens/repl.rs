@@ -183,7 +183,7 @@ pub fn ReplScreen(props: &ReplScreenProps) -> impl Into<AnyElement<'static>> {
     let viewport_height = props.viewport_height;
     let show_spinner = props.show_spinner;
     let expanded = props.expanded.clone();
-    let focused_tool_id = props.focused_tool_id;
+    let focused_tool_id = props.focused_tool_id.clone();
     let palette = props.palette.clone();
     let completion = props.completion.clone();
     let vim_enabled = props.vim_enabled;

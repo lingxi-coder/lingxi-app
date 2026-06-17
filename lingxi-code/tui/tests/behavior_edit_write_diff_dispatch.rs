@@ -43,7 +43,7 @@ fn render_last_result(st: &AppState) -> String {
     // into the rendered iocraft component.
     let mut element = element! {
         UserToolResultMessage(
-            id: *id,
+            id: id.clone(),
             tool: tool.clone(),
             result: result.clone(),
             expanded: false,
@@ -64,7 +64,7 @@ fn edit_tool_flow_renders_diff_with_old_and_new() {
     apply_event(
         &mut st,
         TurnEvent::ToolUseStart {
-            id,
+            id: id.clone(),
             tool: "Edit".into(),
             input: serde_json::json!({
                 "file_path": "/tmp/a.rs",
@@ -101,7 +101,7 @@ fn write_tool_flow_renders_pure_add_diff() {
     apply_event(
         &mut st,
         TurnEvent::ToolUseStart {
-            id,
+            id: id.clone(),
             tool: "Write".into(),
             input: serde_json::json!({
                 "file_path": "/tmp/b.rs",
@@ -141,7 +141,7 @@ fn bash_tool_flow_does_not_render_diff() {
     apply_event(
         &mut st,
         TurnEvent::ToolUseStart {
-            id,
+            id: id.clone(),
             tool: "Bash".into(),
             input: serde_json::json!({"command": "ls"}),
         },

@@ -331,7 +331,7 @@ fn two_turn_api(tool_use_id: ToolUseId, tool_name: &str) -> Arc<MockApiClient> {
     Arc::new(MockApiClient::new(vec![
         mock_message_response(
             vec![LlmContentBlock::ToolCall {
-                id: tool_use_id.as_uuid().to_string(),
+                id: tool_use_id.to_string(),
                 name: tool_name.into(),
                 input: json!({}),
             }],
@@ -350,7 +350,7 @@ fn two_turn_api(tool_use_id: ToolUseId, tool_name: &str) -> Arc<MockApiClient> {
 #[tokio::test]
 async fn errored_tool_fires_post_tool_use_failure_not_post_tool_use() {
     let tool_use_id = ToolUseId::new();
-    let api = two_turn_api(tool_use_id, "AlwaysFail");
+    let api = two_turn_api(tool_use_id.clone(), "AlwaysFail");
     let log = Arc::new(Mutex::new(Vec::<Seen>::new()));
     let hooks = exec_recording(log.clone()).await;
     let mut registry = ToolRegistry::new();
@@ -399,7 +399,7 @@ async fn errored_tool_fires_post_tool_use_failure_not_post_tool_use() {
 #[tokio::test]
 async fn succeeded_tool_fires_post_tool_use_not_failure() {
     let tool_use_id = ToolUseId::new();
-    let api = two_turn_api(tool_use_id, "AlwaysOk");
+    let api = two_turn_api(tool_use_id.clone(), "AlwaysOk");
     let log = Arc::new(Mutex::new(Vec::<Seen>::new()));
     let hooks = exec_recording(log.clone()).await;
     let mut registry = ToolRegistry::new();
@@ -435,7 +435,7 @@ async fn failing_post_tool_use_failure_hook_does_not_break_turn() {
     // itself returns a non-success outcome. The turn must STILL complete
     // (best-effort, identical to the PostToolUse arm).
     let tool_use_id = ToolUseId::new();
-    let api = two_turn_api(tool_use_id, "AlwaysFail");
+    let api = two_turn_api(tool_use_id.clone(), "AlwaysFail");
 
     let registry = Arc::new(RwLock::new(HookRegistry::new()));
     registry

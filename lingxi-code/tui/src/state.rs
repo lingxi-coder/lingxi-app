@@ -1219,7 +1219,7 @@ impl AppState {
         self.messages
             .iter()
             .filter_map(|m| match m {
-                RenderedMessage::AssistantToolUse { id, .. } => Some(*id),
+                RenderedMessage::AssistantToolUse { id, .. } => Some(id.clone()),
                 _ => None,
             })
             .collect()
@@ -1233,12 +1233,12 @@ impl AppState {
         if ids.is_empty() {
             return;
         }
-        self.focused_tool_id = match self.focused_tool_id {
-            None => Some(ids[0]),
+        self.focused_tool_id = match &self.focused_tool_id {
+            None => Some(ids[0].clone()),
             Some(cur) => {
-                let pos = ids.iter().position(|i| *i == cur).unwrap_or(0);
+                let pos = ids.iter().position(|i| i == cur).unwrap_or(0);
                 let next = (pos + 1).min(ids.len() - 1);
-                Some(ids[next])
+                Some(ids[next].clone())
             }
         };
     }
@@ -1250,12 +1250,12 @@ impl AppState {
         if ids.is_empty() {
             return;
         }
-        self.focused_tool_id = match self.focused_tool_id {
-            None => Some(ids[0]),
+        self.focused_tool_id = match &self.focused_tool_id {
+            None => Some(ids[0].clone()),
             Some(cur) => {
-                let pos = ids.iter().position(|i| *i == cur).unwrap_or(0);
+                let pos = ids.iter().position(|i| i == cur).unwrap_or(0);
                 let prev = pos.saturating_sub(1);
-                Some(ids[prev])
+                Some(ids[prev].clone())
             }
         };
     }
@@ -1263,7 +1263,7 @@ impl AppState {
     /// (M6-04) Flip the expanded state for the given tool id. Inserts the
     /// flipped value (default starts at `false`, first toggle → `true`).
     pub fn toggle_expanded(&mut self, id: &ToolUseId) {
-        let entry = self.expanded.entry(*id).or_insert(false);
+        let entry = self.expanded.entry(id.clone()).or_insert(false);
         *entry = !*entry;
     }
 
@@ -1668,7 +1668,7 @@ mod tests {
         use protocol::ToolUseId;
         let id = ToolUseId::new();
         let call = RenderedMessage::AssistantToolUse {
-            id,
+            id: id.clone(),
             tool: "Read".into(),
             input: serde_json::json!({"file_path": "/tmp/x.rs"}),
         };
@@ -1697,7 +1697,7 @@ mod tests {
             timestamp: 0,
         });
         st.push_message(RenderedMessage::AssistantToolUse {
-            id: a,
+            id: a.clone(),
             tool: "Read".into(),
             input: serde_json::json!({}),
         });
@@ -1706,21 +1706,21 @@ mod tests {
             timestamp: 0,
         });
         st.push_message(RenderedMessage::AssistantToolUse {
-            id: b,
+            id: b.clone(),
             tool: "Bash".into(),
             input: serde_json::json!({}),
         });
         assert_eq!(st.focused_tool_id, None);
         st.focus_next_tool();
-        assert_eq!(st.focused_tool_id, Some(a));
+        assert_eq!(st.focused_tool_id, Some(a.clone()));
         st.focus_next_tool();
-        assert_eq!(st.focused_tool_id, Some(b));
+        assert_eq!(st.focused_tool_id, Some(b.clone()));
         st.focus_next_tool(); // past end — stays on last
-        assert_eq!(st.focused_tool_id, Some(b));
+        assert_eq!(st.focused_tool_id, Some(b.clone()));
         st.focus_prev_tool();
-        assert_eq!(st.focused_tool_id, Some(a));
+        assert_eq!(st.focused_tool_id, Some(a.clone()));
         st.focus_prev_tool(); // past start — stays on first
-        assert_eq!(st.focused_tool_id, Some(a));
+        assert_eq!(st.focused_tool_id, Some(a.clone()));
     }
 
     /// M7-04 Task 1: `RenderedMessage` carries the 10 batch-1 variants.

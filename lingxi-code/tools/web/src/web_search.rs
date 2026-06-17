@@ -912,7 +912,7 @@ impl WebSearchTool {
     fn emit_progress(ctx: &ToolUseContext, tx: &ToolProgressSender, query: &str, counter: u64) {
         // `Default for ToolUseId` generates a fresh random id (same as `new()`),
         // so the channel key is the model's tool-use id when present, else fresh.
-        let tool_use_id = ctx.tool_use_id.unwrap_or_default();
+        let tool_use_id = ctx.tool_use_id.clone().unwrap_or_default();
         let _ = tx.try_send(tool_api::progress::ToolProgress {
             tool_use_id,
             data: json!({

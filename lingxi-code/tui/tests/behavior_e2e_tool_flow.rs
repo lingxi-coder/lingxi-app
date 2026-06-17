@@ -21,7 +21,7 @@ fn full_flow_call_then_result_renders_both_blocks() {
     apply_event(
         &mut st,
         TurnEvent::ToolUseStart {
-            id,
+            id: id.clone(),
             tool: "Read".into(),
             input: serde_json::json!({"file_path": "/tmp/x.rs"}),
         },
@@ -30,7 +30,7 @@ fn full_flow_call_then_result_renders_both_blocks() {
     apply_event(
         &mut st,
         TurnEvent::ToolUseResult {
-            id,
+            id: id.clone(),
             tool: "Read".into(),
             result: serde_json::json!({"content": "fn main() {}"}),
         },
@@ -51,7 +51,7 @@ fn expanded_state_flips_with_toggle() {
     apply_event(
         &mut st,
         TurnEvent::ToolUseStart {
-            id,
+            id: id.clone(),
             tool: "Read".into(),
             input: serde_json::json!({"file_path": "/tmp/x.rs"}),
         },

@@ -94,15 +94,12 @@ pub async fn dispatch_event(
             let kind = match &content_block {
                 LlmContentBlock::Text { .. } => BlockKind::Text,
                 LlmContentBlock::ToolCall { id, name, .. } => BlockKind::ToolUse {
-                    // LlmContentBlock::ToolCall uses String ids; parse to ToolUseId.
-                    id: serde_json::from_value::<ToolUseId>(
-                        serde_json::Value::String(id.clone()),
-                    )
-                    .unwrap_or_else(|_| ToolUseId::new()),
+                    // The provider-issued id IS the canonical ToolUseId (byte
+                    // parity with claude-code). The provider_id sidecar is left
+                    // None — the id already carries the canonical value.
+                    id: ToolUseId::from(id.clone()),
                     name: name.clone(),
-                    // Preserve the verbatim provider id (e.g. Anthropic `toolu_…`)
-                    // for egress replay; the minted `ToolUseId` is internal-only.
-                    provider_id: Some(id.clone()),
+                    provider_id: None,
                 },
                 LlmContentBlock::Reasoning { .. } => BlockKind::Thinking,
                 LlmContentBlock::ServerToolUse { .. }

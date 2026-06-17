@@ -720,7 +720,7 @@ mod tests {
                         text: "on it".to_string(),
                     },
                     ContentBlock::ToolUse {
-                        id: tu,
+                        id: tu.clone(),
                         name: "Read".to_string(),
                         input: serde_json::json!({"file_path": "/tmp/x"}),
                         provider_id: None,

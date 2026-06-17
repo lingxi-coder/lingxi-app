@@ -103,7 +103,7 @@ async fn test_terminate_handled<H: EffectHandler>(h: &H) {
 async fn test_evaluate_permission_handled<H: EffectHandler>(h: &H) {
     let _ = h
         .handle(Effect::EvaluatePermission {
-            tool_use_id: ToolUseId::nil(),
+            tool_use_id: ToolUseId::from("toolu_contract"),
             tool_name: "Read".to_string(),
             input: serde_json::json!({ "path": "/tmp/contract" }),
         })

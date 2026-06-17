@@ -61,13 +61,63 @@ macro_rules! id_newtype {
 id_newtype!(AgentId, "agent");
 id_newtype!(SessionId, "sess");
 id_newtype!(MessageId, "msg");
-id_newtype!(ToolUseId, "tu");
 id_newtype!(RequestId, "req");
 id_newtype!(HookId, "hook");
 id_newtype!(PluginId, "plg");
 id_newtype!(McpConnectionId, "mcp");
 id_newtype!(SnapshotId, "snap");
 id_newtype!(PrefetchId, "pf");
+
+/// Identifier for a tool-use / tool-call.
+///
+/// Unlike the other id types, `ToolUseId` is a **String-backed** newtype that
+/// holds the *canonical* provider-issued id (e.g. `toolu_01ABC…`, `call_…`)
+/// verbatim, so resume/JSONL bytes match upstream `claude-code`. It serializes
+/// transparently as a bare JSON string. Internally-minted ids (when no provider
+/// string is available) are synthesized as `toolu_<uuid>` so they stay unique
+/// and look plausible. It is intentionally NOT `Copy` (it owns a `String`).
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Ord, PartialOrd, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct ToolUseId(String);
+
+impl ToolUseId {
+    /// Generate a fresh synthetic id. Used when no provider id is available;
+    /// looks like a provider `toolu_…` id and is globally unique.
+    #[must_use]
+    pub fn new() -> Self {
+        Self(format!("toolu_{}", Uuid::new_v4().simple()))
+    }
+
+    /// Borrow the inner canonical id string.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl Default for ToolUseId {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl From<String> for ToolUseId {
+    fn from(s: String) -> Self {
+        Self(s)
+    }
+}
+
+impl From<&str> for ToolUseId {
+    fn from(s: &str) -> Self {
+        Self(s.to_string())
+    }
+}
+
+impl fmt::Display for ToolUseId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
 
 #[cfg(test)]
 mod tests {

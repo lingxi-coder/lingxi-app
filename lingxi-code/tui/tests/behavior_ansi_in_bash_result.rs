@@ -11,7 +11,7 @@ use tui::render::{NamedColor, StyleColor};
 fn bash_result_with_red_err_yields_red_span() {
     let body = "ok\n\x1b[31mERR\x1b[0m\nrest";
     let spans = render_user_tool_result_body_spans(&UserToolResultProps {
-        id: ToolUseId::nil(),
+        id: ToolUseId::from("toolu_test"),
         tool: "Bash".into(),
         result: serde_json::json!({"content": body}),
         expanded: true,
@@ -32,7 +32,7 @@ fn read_result_is_not_ansi_parsed() {
     // ansi-parser over Bash output.
     let body = "\x1b[31mERR\x1b[0m";
     let spans = render_user_tool_result_body_spans(&UserToolResultProps {
-        id: ToolUseId::nil(),
+        id: ToolUseId::from("toolu_test"),
         tool: "Read".into(),
         result: serde_json::json!({"content": body}),
         expanded: true,

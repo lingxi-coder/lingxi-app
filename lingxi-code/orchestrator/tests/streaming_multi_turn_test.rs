@@ -97,7 +97,7 @@ async fn two_streaming_turns_with_tool_in_between() {
     let tu = ToolUseId::new();
     let turn1 = scripted![
         message_start("m1", "claude-opus-4-7"),
-        content_block_start_tool_use(0, tu, "AlwaysOk"),
+        content_block_start_tool_use(0, tu.clone(), "AlwaysOk"),
         input_json_delta(0, "{}"),
         content_block_stop(0),
         message_delta_stop("tool_use"),

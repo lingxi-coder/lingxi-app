@@ -242,7 +242,7 @@ mod tests {
         let tu = ToolUseId::new();
         let evs = vec![
             message_start("m1", "claude-opus-4-7"),
-            content_block_start_tool_use(1, tu, "Read"),
+            content_block_start_tool_use(1, tu.clone(), "Read"),
             input_json_delta(1, "{\"file"),
             input_json_delta(1, "_path\":\"foo.rs\"}"),
             content_block_stop(1),

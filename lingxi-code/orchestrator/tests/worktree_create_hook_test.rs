@@ -325,7 +325,7 @@ fn two_turn_api(
     Arc::new(MockApiClient::new(vec![
         mock_message_response(
             vec![LlmContentBlock::ToolCall {
-                id: tool_use_id.as_uuid().to_string(),
+                id: tool_use_id.to_string(),
                 name: tool_name.into(),
                 input,
             }],
@@ -381,7 +381,7 @@ async fn successful_enter_worktree_fires_worktree_create_with_name_and_path() {
 #[tokio::test]
 async fn failed_enter_worktree_does_not_fire_worktree_create() {
     let tool_use_id = ToolUseId::new();
-    let api = two_turn_api(tool_use_id, "EnterWorktree", json!({ "slug": "user/feature" }));
+    let api = two_turn_api(tool_use_id.clone(), "EnterWorktree", json!({ "slug": "user/feature" }));
     let log = Arc::new(Mutex::new(Vec::<SeenWorktree>::new()));
     let hooks = exec_recording(log.clone()).await;
     let mut registry = ToolRegistry::new();
@@ -405,7 +405,7 @@ async fn failed_enter_worktree_does_not_fire_worktree_create() {
 #[tokio::test]
 async fn non_worktree_tool_does_not_fire_worktree_create() {
     let tool_use_id = ToolUseId::new();
-    let api = two_turn_api(tool_use_id, "AlwaysOk", json!({}));
+    let api = two_turn_api(tool_use_id.clone(), "AlwaysOk", json!({}));
     let log = Arc::new(Mutex::new(Vec::<SeenWorktree>::new()));
     let hooks = exec_recording(log.clone()).await;
     let mut registry = ToolRegistry::new();

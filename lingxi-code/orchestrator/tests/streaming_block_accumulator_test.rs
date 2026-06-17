@@ -27,7 +27,7 @@ fn tool_use_partial_json_reassembles() {
     acc.start_block(
         1,
         BlockKind::ToolUse {
-            id: tu_id,
+            id: tu_id.clone(),
             name: "Read".into(),
             provider_id: Some("toolu_01ACC".into()),
         },

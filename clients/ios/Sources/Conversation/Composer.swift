@@ -35,6 +35,11 @@ struct Composer: View {
     var onMicHoldStart: () -> Void = {}
     var onMicHoldRelease: () -> Void = {}
 
+    // A single TAP on the mic enters FlowMode (心流 voice orb) — mirrors the
+    // prototype's `mic → openOrb`. The press-and-hold STT path is kept: a quick
+    // tap fires this, a 0.6s hold fires the gesture instead.
+    var onMicTap: () -> Void = {}
+
     @State private var modelOpen = false
     @State private var holding = false
 
@@ -77,14 +82,14 @@ struct Composer: View {
                         }
                         .accessibilityLabel("停止")
                     } else if draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                        // Mic: press-and-hold to enter voice flow; release runs STT.
-                        Button(action: {}) {
+                        // Mic: TAP enters the FlowMode orb; press-and-hold runs STT.
+                        Button(action: onMicTap) {
                             LXIcon(name: .mic, size: 18, color: holding ? t.accent : t.text2, stroke: 1.8)
                                 .frame(width: 34, height: 34)
                         }
                         .simultaneousGesture(micHoldGesture)
-                        .accessibilityLabel("按住说话")
-                        .accessibilityHint("按住进入语音心流，松开转写为文本")
+                        .accessibilityLabel("语音心流")
+                        .accessibilityHint("轻点进入语音心流；按住转写为文本")
                     } else {
                         Button(action: send) {
                             LXIcon(name: .arrowUp, size: 16, color: .white)

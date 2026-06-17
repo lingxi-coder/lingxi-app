@@ -3,6 +3,7 @@ package com.lingxi.code.theme
 import android.content.Context
 import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.Preferences
+import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.doublePreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.stringPreferencesKey
@@ -48,6 +49,16 @@ data class AppearancePrefs(
     val accentId: String = Accents.DEFAULT_ID,
     val density: Density = Density.Comfortable,
     val fontSize: Float = 15f,
+    // First-run profile + onboarding (the prototype's `lx_settings` blob +
+    // `lx_setup_done` flag). The SetupWizard writes these once; the FlowMode orb
+    // + drawer + settings read them back.
+    val assistantName: String = "灵犀", // wake-word name
+    val userName: String = "",          // how the assistant addresses the user
+    val voiceprint: Boolean = false,    // voiceprint enrolled in onboarding
+    val defaultModelId: String = "lx-72b",
+    val flowDefault: Boolean = true,    // open FlowMode by default for voice
+    val inputDialog: Boolean = true,    // show the FlowMode pop-up text input
+    val setupDone: Boolean = false,     // first-run setup complete
 )
 
 private object PrefKeys {
@@ -55,6 +66,13 @@ private object PrefKeys {
     val ACCENT = stringPreferencesKey("accent")
     val DENSITY = stringPreferencesKey("density")
     val FONT_SIZE = doublePreferencesKey("fontSize")
+    val ASSISTANT_NAME = stringPreferencesKey("assistantName")
+    val USER_NAME = stringPreferencesKey("userName")
+    val VOICEPRINT = booleanPreferencesKey("voiceprint")
+    val DEFAULT_MODEL = stringPreferencesKey("defaultModelId")
+    val FLOW_DEFAULT = booleanPreferencesKey("flowDefault")
+    val INPUT_DIALOG = booleanPreferencesKey("inputDialog")
+    val SETUP_DONE = booleanPreferencesKey("setupDone")
 }
 
 /**
@@ -72,6 +90,13 @@ class AppearanceStore(private val context: Context) {
             accentId = p[PrefKeys.ACCENT] ?: Accents.DEFAULT_ID,
             density = Density.from(p[PrefKeys.DENSITY]),
             fontSize = (p[PrefKeys.FONT_SIZE] ?: 15.0).toFloat(),
+            assistantName = p[PrefKeys.ASSISTANT_NAME] ?: "灵犀",
+            userName = p[PrefKeys.USER_NAME] ?: "",
+            voiceprint = p[PrefKeys.VOICEPRINT] ?: false,
+            defaultModelId = p[PrefKeys.DEFAULT_MODEL] ?: "lx-72b",
+            flowDefault = p[PrefKeys.FLOW_DEFAULT] ?: true,
+            inputDialog = p[PrefKeys.INPUT_DIALOG] ?: true,
+            setupDone = p[PrefKeys.SETUP_DONE] ?: false,
         )
     }
 
@@ -89,5 +114,25 @@ class AppearanceStore(private val context: Context) {
 
     suspend fun setFontSize(size: Float) {
         context.appearanceDataStore.edit { it[PrefKeys.FONT_SIZE] = size.toDouble() }
+    }
+
+    // First-run profile / onboarding setters.
+    suspend fun setAssistantName(name: String) {
+        context.appearanceDataStore.edit { it[PrefKeys.ASSISTANT_NAME] = name }
+    }
+    suspend fun setUserName(name: String) {
+        context.appearanceDataStore.edit { it[PrefKeys.USER_NAME] = name }
+    }
+    suspend fun setVoiceprint(enrolled: Boolean) {
+        context.appearanceDataStore.edit { it[PrefKeys.VOICEPRINT] = enrolled }
+    }
+    suspend fun setDefaultModel(id: String) {
+        context.appearanceDataStore.edit { it[PrefKeys.DEFAULT_MODEL] = id }
+    }
+    suspend fun setInputDialog(on: Boolean) {
+        context.appearanceDataStore.edit { it[PrefKeys.INPUT_DIALOG] = on }
+    }
+    suspend fun setSetupDone(done: Boolean) {
+        context.appearanceDataStore.edit { it[PrefKeys.SETUP_DONE] = done }
     }
 }

@@ -10,7 +10,7 @@ enum LXIconName: String {
     case menu, edit, search, sparkle, book, workflow, cog, plus, mic, paperclip
     case chevron, sun, moon, check, pin, brain, arrowUp, folder, clock, message
     case chevronR, play, pause, x, skill, plug, dream, link, copy, share
-    case warning, stop
+    case warning, stop, arrowRight
 }
 
 struct LXIcon: View {
@@ -93,6 +93,8 @@ extension LXIcon {
             return [PathSpec { line([(6,9),(12,15),(18,9)]) }]
         case .chevronR:
             return [PathSpec { line([(9,18),(15,12),(9,6)]) }]
+        case .arrowRight:
+            return [PathSpec { line([(5,12),(19,12)]) }, PathSpec { line([(12,5),(19,12),(12,19)]) }]
         case .x:
             return [PathSpec { line([(18,6),(6,18)]) }, PathSpec { line([(6,6),(18,18)]) }]
         case .sun:

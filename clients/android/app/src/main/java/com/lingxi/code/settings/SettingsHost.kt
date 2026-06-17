@@ -71,6 +71,7 @@ fun SettingsHost(
     navController: NavHostController = rememberNavController(),
     store: SettingsStore = viewModel(),
     onClose: () -> Unit = {},
+    onReplayOnboarding: () -> Unit = {},
 ) {
     val t = LingXiTheme.palette
     val state by store.state.collectAsState()
@@ -104,7 +105,8 @@ fun SettingsHost(
                 modifier = Modifier.fillMaxSize(),
             ) {
                 page(SettingsRoutes.MAIN) {
-                    MainSettingsPage(state = state, isDark = isDark, navController = navController)
+                    MainSettingsPage(state = state, isDark = isDark, navController = navController,
+                        onReplayOnboarding = onReplayOnboarding)
                 }
                 page(SettingsRoutes.ACCOUNT) { AccountPage() }
 

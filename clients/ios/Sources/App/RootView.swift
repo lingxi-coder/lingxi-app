@@ -23,6 +23,9 @@ struct RootView: View {
     @State private var drawerOpen = false
     @State private var settingsOpen = false
     @State private var voiceActive = false
+    /// FlowMode (心流) voice-orb overlay — opened by a TAP on the composer mic
+    /// (the press-and-hold STT path still drives `voiceActive`).
+    @State private var flowActive = false
     /// When the drawer itself drove the session change (engine resume / new
     /// chat), it has ALREADY called `source.resumeSession` / `startNewConversation`.
     /// This one-shot flag tells the `activeSession` `onChange` below to skip the
@@ -51,6 +54,7 @@ struct RootView: View {
             ChatView(session: session,
                      openDrawer: { withAnimation(.spring(response: 0.32, dampingFraction: 0.86)) { drawerOpen = true } },
                      voiceActive: $voiceActive,
+                     onEnterFlow: { withAnimation(.easeOut(duration: 0.4)) { flowActive = true } },
                      draft: $draft,
                      source: source)
 
@@ -94,6 +98,23 @@ struct RootView: View {
                 VoiceFlowView(onRelease: { withAnimation(.easeOut(duration: 0.25)) { voiceActive = false } })
                     .zIndex(70)
                     .allowsHitTesting(false)
+            }
+
+            // FlowMode (心流) voice-orb overlay — a tap on the composer mic opens
+            // this full-screen living-orb experience. Interactive (tap to re-listen,
+            // pop-up text input); dismissed by its own close button.
+            if flowActive {
+                VoiceOrbView(onClose: { withAnimation(.easeOut(duration: 0.3)) { flowActive = false } })
+                    .zIndex(72)
+                    .transition(.opacity)
+            }
+
+            // First-run setup wizard — shown until onboarding is complete; the
+            // Settings → 关于 → 重新观看引导 row clears `setupDone` to replay it.
+            if !app.setupDone {
+                SetupWizardView()
+                    .zIndex(100)
+                    .transition(.opacity)
             }
         }
         // Mid-stream session switch (iOS analog of the Android `openSession` fix):

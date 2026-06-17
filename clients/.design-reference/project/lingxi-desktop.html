@@ -26,6 +26,9 @@ body {
 @keyframes pulse-ring { 0% { box-shadow: 0 0 0 0 var(--ring); } 100% { box-shadow: 0 0 0 8px transparent; } }
 @keyframes cursor-blink { 0%, 50% { opacity: 1; } 51%, 100% { opacity: 0; } }
 @keyframes scan { 0% { transform: translateY(-100%); } 100% { transform: translateY(100%); } }
+@keyframes orb-in { from { opacity: 0; transform: scale(1.04); } to { opacity: 1; transform: scale(1); } }
+@keyframes orb-cap { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: translateY(0); } }
+@keyframes caret-blink { 0%, 100% { opacity: 1; } 50% { opacity: 0; } }
 .mono { font-family: 'JetBrains Mono', 'SF Mono', ui-monospace, monospace; }
 </style>
 <script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
@@ -239,6 +242,7 @@ const Icon = ({ name, size = 16, color = 'currentColor', stroke = 1.6 }) => {
     case 'box':    return <svg {...p}><path d="M21 8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16Z"/><path d="m3.3 7 8.7 5 8.7-5M12 22V12"/></svg>;
     case 'more':   return <svg {...p}><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/><circle cx="5"  cy="12" r="1"/></svg>;
     case 'mic':    return <svg {...p}><rect x="9" y="2" width="6" height="11" rx="3"/><path d="M19 10v2a7 7 0 0 1-14 0v-2M12 19v3"/></svg>;
+    case 'flow':   return <svg {...p}><circle cx="12" cy="12" r="6.2"/><path d="M8.8 12c1-1.5 2.2-1.5 3.2 0s2.2 1.5 3.2 0"/><path d="M12 2.5v1.8M12 19.7v1.8M2.5 12h1.8M19.7 12h1.8"/></svg>;
     case 'send':   return <svg {...p}><path d="M22 2 11 13"/><path d="M22 2 15 22 11 13 2 9z"/></svg>;
     case 'stop':   return <svg {...p}><rect x="6" y="6" width="12" height="12" rx="1.5"/></svg>;
     case 'sun':    return <svg {...p}><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"/></svg>;
@@ -1329,7 +1333,7 @@ function Stage({ extraMessages = [] }) {
 }
 
 // ─── COMPOSER (slash command input + diff bar + controls) ────
-function Composer({ repo, model, setModel, panelOpen, setPanelOpen, appendMessage }) {
+function Composer({ repo, model, setModel, panelOpen, setPanelOpen, appendMessage, openFlow }) {
   const t = useT();
   const [text, setText] = useState('');
   const [slashOpen, setSlashOpen] = useState(false);
@@ -1610,6 +1614,11 @@ function Composer({ repo, model, setModel, panelOpen, setPanelOpen, appendMessag
               onMouseEnter={e => e.currentTarget.style.background = t.surfaceHover}
               onMouseLeave={e => e.currentTarget.style.background = 'transparent'}>
               <Icon name="chevron" size={11} color={t.text3} stroke={2} />
+            </button>
+            <button title="心流模式 · 实时语音对话" onClick={openFlow} style={iconBtn(t)}
+              onMouseEnter={e => e.currentTarget.style.background = t.surfaceHover}
+              onMouseLeave={e => e.currentTarget.style.background = 'transparent'}>
+              <Icon name="flow" size={14} color={t.text3} stroke={1.6} />
             </button>
 
             <div style={{ flex: 1 }} />
@@ -3295,6 +3304,272 @@ function SettingsPage({ open, onClose, theme, setTheme }) {
   );
 }
 
+// ─── ORB CANVAS (living-orb renderer, shared with mobile 心流) ─
+function OrbCanvas({ phaseRef, active = true, cyFrac = 0.42 }) {
+  const canvasRef = useRef(null);
+  useEffect(() => {
+    if (!active) return;
+    const cv = canvasRef.current; if (!cv) return;
+    const ctx = cv.getContext('2d');
+    const TAU = Math.PI * 2;
+    let raf, last = performance.now(), tm = 0, amp = 0.12, hueShift = 0, baseScale = 1, breathT = 0;
+    const parts = Array.from({ length: 76 }, () => ({
+      a: Math.random() * TAU,
+      rad: 0.55 + Math.random() * 1.5,
+      sp: (0.1 + Math.random() * 0.5) * (Math.random() < 0.5 ? 1 : -1),
+      sz: 0.6 + Math.random() * 1.8,
+      tw: Math.random() * TAU,
+    }));
+    // ── sci-fi layers ──
+    const stars = Array.from({ length: 110 }, () => ({
+      x: Math.random(), y: Math.random(),
+      z: 0.25 + Math.random() * 0.75,
+      tw: Math.random() * TAU,
+    }));
+    const fit = () => {
+      const dpr = Math.min(window.devicePixelRatio || 1, 2.5);
+      const r = cv.getBoundingClientRect();
+      cv.width = r.width * dpr; cv.height = r.height * dpr;
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      return { w: r.width, h: r.height };
+    };
+    let dim = fit();
+    const onResize = () => { dim = fit(); };
+    window.addEventListener('resize', onResize);
+
+    const blob = (cx, cy, base, wob, seed, harm) => {
+      const steps = 132;
+      for (let i = 0; i <= steps; i++) {
+        const a = (i / steps) * TAU;
+        let r = base
+          + Math.sin(a * 3 + tm * 1.3 + seed) * wob * 0.5
+          + Math.sin(a * 5 - tm * 1.9 + seed * 1.7) * wob * 0.32
+          + Math.sin(a * 2 + tm * 0.9 + seed * 0.4) * wob * 0.42
+          + Math.sin(a * 7 + tm * 2.4) * wob * 0.16 * harm;
+        const x = cx + Math.cos(a) * r, y = cy + Math.sin(a) * r;
+        i ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
+      }
+      ctx.closePath();
+    };
+
+    const frame = (now) => {
+      const dt = Math.min(0.05, (now - last) / 1000); last = now; tm += dt;
+      const p = (phaseRef && phaseRef.current) || 'idle';
+      const W = dim.w, H = dim.h, cx = W / 2, cy = H * cyFrac;
+      const baseR = Math.min(W, H) * 0.165;
+
+      // ease toward a sustained per-phase size; energy lives in the wobble
+      let baseTarget, breathDepth, breathSpeed, wobTarget;
+      if (p === 'idle') {
+        baseTarget = 1.0;  breathDepth = 0.03;  breathSpeed = 0.9; wobTarget = 0.10;
+      } else if (p === 'listening') {
+        baseTarget = 1.07; breathDepth = 0.04;  breathSpeed = 1.5; wobTarget = 0.16;
+      } else if (p === 'thinking') {
+        baseTarget = 1.04; breathDepth = 0.03;  breathSpeed = 1.2; wobTarget = 0.13; hueShift += dt * 40;
+      } else { // speaking
+        baseTarget = 1.26; breathDepth = 0.035; breathSpeed = 1.8; wobTarget = 0.22;
+      }
+      baseScale += (baseTarget - baseScale) * Math.min(1, dt * 4.0);
+      breathT += dt * breathSpeed;
+      const scale = baseScale + Math.sin(breathT) * breathDepth;
+      const R = baseR * scale;
+      amp += (wobTarget - amp) * Math.min(1, dt * 3);
+      const A = Math.max(0, amp);
+
+      ctx.clearRect(0, 0, W, H);
+
+      // ── deep-space starfield ──
+      for (const s of stars) {
+        const sx = ((s.x + tm * 0.004 * s.z) % 1) * W;
+        const sy = s.y * H;
+        const twk = 0.35 + 0.65 * (0.5 + 0.5 * Math.sin(tm * (1 + s.z * 2) + s.tw));
+        const ss = s.z > 0.8 ? 1.6 : 1;
+        ctx.fillStyle = `oklch(${78 + s.z * 18}% 0.03 ${250 + s.z * 60} / ${twk * (0.12 + s.z * 0.38)})`;
+        ctx.fillRect(sx, sy, ss, ss);
+      }
+
+      ctx.globalCompositeOperation = 'lighter';
+      const conv = p === 'thinking' ? 0.6 : 1;
+      for (const pt of parts) {
+        pt.a += pt.sp * dt * (p === 'idle' ? 0.4 : 1);
+        const rr = R * pt.rad * conv * (1 + A * 0.25);
+        const x = cx + Math.cos(pt.a) * rr * 1.15;
+        const y = cy + Math.sin(pt.a) * rr;
+        const tw = 0.4 + 0.6 * (Math.sin(tm * 2 + pt.tw) * 0.5 + 0.5);
+        const hue = 250 + 80 * (pt.rad - 0.55) / 1.5 + hueShift;
+        ctx.fillStyle = `oklch(85% 0.16 ${hue} / ${tw * (0.5 + A * 0.4)})`;
+        ctx.beginPath(); ctx.arc(x, y, pt.sz * (0.7 + A * 0.5), 0, TAU); ctx.fill();
+      }
+
+      const wob = R * (0.05 + A * 0.24);
+      ctx.globalCompositeOperation = 'source-over';
+      ctx.save();
+      blob(cx, cy, R * 0.94, wob, 0, 1); ctx.clip();
+      const coreH = 282 + 30 * Math.sin(tm * 0.5) + (p === 'thinking' ? hueShift * 0.3 : 0);
+      const cg = ctx.createRadialGradient(cx, cy - R * 0.28, R * 0.05, cx, cy, R * 1.15);
+      cg.addColorStop(0, `oklch(97% 0.04 ${coreH} / 0.95)`);
+      cg.addColorStop(0.32, `oklch(80% 0.18 ${coreH} / 0.92)`);
+      cg.addColorStop(0.7, `oklch(58% 0.21 ${coreH + 20} / 0.7)`);
+      cg.addColorStop(1, `oklch(40% 0.18 ${coreH + 30} / 0.15)`);
+      ctx.fillStyle = cg; ctx.fillRect(cx - R * 2, cy - R * 2, R * 4, R * 4);
+      ctx.globalCompositeOperation = 'lighter';
+      for (let k = 0; k < 3; k++) {
+        const ya = cy + Math.sin(tm * (1.1 + k * 0.5) + k) * R * 0.4 * (0.4 + A);
+        const bg = ctx.createRadialGradient(cx, ya, 0, cx, ya, R * 0.9);
+        bg.addColorStop(0, `oklch(92% 0.14 ${[260, 320, 195][k] + hueShift} / ${0.18 + A * 0.22})`);
+        bg.addColorStop(1, 'oklch(90% 0.1 270 / 0)');
+        ctx.fillStyle = bg; ctx.beginPath(); ctx.arc(cx, ya, R * 0.9, 0, TAU); ctx.fill();
+      }
+      ctx.fillStyle = `oklch(99% 0.02 270 / ${0.5 + A * 0.3})`;
+      ctx.beginPath(); ctx.arc(cx - R * 0.28, cy - R * 0.34, R * 0.14, 0, TAU); ctx.fill();
+      ctx.restore();
+
+      ctx.globalCompositeOperation = 'lighter';
+      const ringH = [268, 322, 196];
+      for (let k = 0; k < 3; k++) {
+        ctx.beginPath();
+        blob(cx, cy, R * (1.0 + k * 0.07), wob * (1 + k * 0.35), k * 2.3, 1);
+        ctx.lineWidth = 1.6 - k * 0.45;
+        ctx.strokeStyle = `oklch(85% 0.17 ${ringH[k] + hueShift * 0.3} / ${0.55 - k * 0.14 + A * 0.2})`;
+        ctx.stroke();
+      }
+
+      // ── electric filaments in the core (fractal arcs w/ glow + forks) ──
+      if (p === 'thinking') {
+        ctx.beginPath();
+        const st = tm * 3.2;
+        ctx.arc(cx, cy, R * 1.32, st, st + Math.PI * 1.1);
+        ctx.lineWidth = 2; ctx.lineCap = 'round';
+        ctx.strokeStyle = `oklch(88% 0.16 ${260 + hueShift} / 0.85)`; ctx.stroke();
+      }
+
+      ctx.globalCompositeOperation = 'source-over';
+      raf = requestAnimationFrame(frame);
+    };
+    raf = requestAnimationFrame(frame);
+    return () => { cancelAnimationFrame(raf); window.removeEventListener('resize', onResize); };
+  }, [active]);
+  return <canvas ref={canvasRef} style={{ width: '100%', height: '100%', display: 'block' }} />;
+}
+
+// ─── 心流 MODE (real-time voice overlay) ─────────────────────
+const FLOW_SCRIPT = {
+  user: '灵犀，lingxi-core 的 rust engine review 进行到哪一步了？',
+  ai: '已完成 protocol 层的 spec review，两条修改建议待确认。引擎主循环这边测试全部通过——需要我把建议摘要发到当前会话吗？',
+};
+
+function FlowMode({ open, onClose }) {
+  const phaseRef = useRef('idle');           // idle | listening | thinking | speaking
+  const [phase, setPhase] = useState('idle');
+  const [caption, setCaption] = useState('');
+  const [role, setRole] = useState('user');
+  const timersRef = useRef([]);
+  const runRef = useRef(0);
+
+  useEffect(() => { phaseRef.current = phase; }, [phase]);
+
+  const clearTimers = () => { timersRef.current.forEach(clearTimeout); timersRef.current = []; };
+  const after = (ms, fn) => { const id = setTimeout(fn, ms); timersRef.current.push(id); return id; };
+
+  const typeText = (str, myRun, doneFn) => {
+    let i = 0;
+    const step = () => {
+      if (runRef.current !== myRun) return;
+      i++;
+      setCaption(str.slice(0, i));
+      if (i < str.length) after(30 + Math.random() * 34, step);
+      else if (doneFn) after(420, doneFn);
+    };
+    step();
+  };
+
+  const startListen = () => {
+    clearTimers();
+    const myRun = ++runRef.current;
+    setRole('user'); setCaption(''); setPhase('listening');
+    after(700, () => {
+      if (runRef.current !== myRun) return;
+      typeText(FLOW_SCRIPT.user, myRun, () => {
+        if (runRef.current !== myRun) return;
+        setPhase('thinking');
+        after(1500, () => {
+          if (runRef.current !== myRun) return;
+          setRole('ai'); setCaption(''); setPhase('speaking');
+          typeText(FLOW_SCRIPT.ai, myRun, () => {
+            if (runRef.current !== myRun) return;
+            after(900, () => { if (runRef.current === myRun) { setPhase('idle'); setCaption(''); } });
+          });
+        });
+      });
+    });
+  };
+
+  // real-time voice: live the moment it opens; reset on close
+  useEffect(() => {
+    if (open) { startListen(); }
+    else { clearTimers(); runRef.current++; setPhase('idle'); setCaption(''); }
+  }, [open]);
+
+  // Esc closes
+  useEffect(() => {
+    if (!open) return;
+    const onKey = (e) => { if (e.key === 'Escape') onClose(); };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [open]);
+
+  if (!open) return null;
+
+  const labels = { idle: '聆听中', listening: '聆听中', thinking: '思考中', speaking: '灵犀' };
+  const sub = { idle: '', listening: '说完轻点收音 · 或继续', thinking: '正在组织语言…', speaking: '轻点光球可打断' };
+
+  return (
+    <div data-screen-label="心流模式" style={{
+      position: 'absolute', inset: 0, zIndex: 95,
+      background: 'radial-gradient(ellipse 70% 75% at 50% 36%, oklch(20% 0.07 270), #05050a 75%)',
+      animation: 'orb-in 0.45s ease both', overflow: 'hidden',
+    }}>
+      <div style={{ position: 'absolute', inset: 0, background: 'radial-gradient(circle at 50% 42%, transparent 42%, rgba(0,0,0,0.5) 100%)', pointerEvents: 'none' }} />
+
+      {/* close */}
+      <button onClick={onClose} title="退出心流 (Esc)" style={{
+        position: 'absolute', top: 16, right: 16, zIndex: 3,
+        width: 36, height: 36, borderRadius: 99, cursor: 'pointer',
+        background: 'rgba(255,255,255,0.06)', border: '0.5px solid rgba(255,255,255,0.12)',
+        color: 'oklch(90% 0.01 270)', display: 'flex', alignItems: 'center', justifyContent: 'center',
+        backdropFilter: 'blur(8px)',
+      }}>
+        <Icon name="x" size={15} stroke={2} />
+      </button>
+
+      {/* the orb — tap to interrupt / re-listen */}
+      <div onClick={startListen} style={{ position: 'absolute', inset: 0, cursor: 'pointer', zIndex: 1 }}>
+        <OrbCanvas phaseRef={phaseRef} active={open} cyFrac={0.42} />
+      </div>
+
+      {/* status + caption */}
+      <div style={{ position: 'absolute', left: 0, right: 0, bottom: 0, padding: '0 48px 44px', display: 'flex', flexDirection: 'column', alignItems: 'center', zIndex: 2, pointerEvents: 'none' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 14 }}>
+          <span style={{ width: 7, height: 7, borderRadius: 99, background: phase === 'listening' ? 'oklch(72% 0.18 150)' : phase === 'speaking' ? 'oklch(75% 0.19 300)' : 'oklch(70% 0.16 260)', boxShadow: `0 0 10px ${phase === 'listening' ? 'oklch(72% 0.18 150)' : 'oklch(75% 0.18 290)'}`, animation: phase === 'idle' ? 'none' : 'shimmer 1.4s ease-in-out infinite' }} />
+          <span style={{ fontSize: 14, fontWeight: 600, color: 'oklch(92% 0.02 270)', letterSpacing: 0.5, whiteSpace: 'nowrap' }}>{labels[phase]}</span>
+        </div>
+        <div key={phase + role} style={{ minHeight: 76, maxWidth: 560, textAlign: 'center', animation: 'orb-cap 0.4s ease both' }}>
+          {caption ? (
+            <div style={{ fontSize: role === 'ai' ? 17.5 : 16.5, lineHeight: 1.55, fontWeight: role === 'ai' ? 500 : 400, color: role === 'ai' ? 'oklch(96% 0.02 290)' : 'oklch(80% 0.03 270)' }}>
+              {role === 'user' && <span style={{ color: 'oklch(62% 0.04 270)' }}>“</span>}
+              {caption}
+              {(phase === 'listening' || phase === 'speaking') && <span style={{ display: 'inline-block', width: 2, height: '1em', marginLeft: 2, verticalAlign: '-2px', background: 'oklch(85% 0.15 290)', animation: 'caret-blink 0.9s step-end infinite' }} />}
+              {role === 'user' && <span style={{ color: 'oklch(62% 0.04 270)' }}>”</span>}
+            </div>
+          ) : (
+            <div style={{ fontSize: 13.5, color: 'oklch(60% 0.03 270)' }}>{sub[phase]}</div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ─── ROOT APP ────────────────────────────────────────────────
 function App() {
   const [theme, setTheme] = useState('dark');
@@ -3305,23 +3580,36 @@ function App() {
   const [panelOpen, setPanelOpen] = useState(true);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [flowOpen, setFlowOpen] = useState(false);
   const [model, setModel] = useState(MODELS[0]);
   const [extraMessages, setExtraMessages] = useState([]);
   const appendMessage = (msg) => setExtraMessages(m => [...m, msg]);
 
   const repo = PROJECTS.find(r => r.id === activeRepo) || PROJECTS[0];
 
+  // Fit the fixed-size desktop canvas into any viewport
+  const DW = 1440, DH = 900;
+  const [scale, setScale] = useState(1);
+  useEffect(() => {
+    const fit = () => setScale(Math.min(window.innerWidth / DW, window.innerHeight / DH));
+    fit();
+    window.addEventListener('resize', fit);
+    return () => window.removeEventListener('resize', fit);
+  }, []);
+
   return (
     <Theme.Provider value={t}>
       <div style={{
-        width: '100vw', height: '100vh', background: t.appBg,
+        position: 'fixed', inset: 0, background: t.appBg,
         display: 'flex', alignItems: 'center', justifyContent: 'center',
         overflow: 'hidden', transition: 'background 0.3s ease',
       }} data-screen-label="灵犀 Code Desktop">
+       <div style={{ width: DW * scale, height: DH * scale, flexShrink: 0, position: 'relative' }}>
         <div style={{
-          width: '100%', height: '100%',
+          width: DW, height: DH, position: 'relative',
+          transform: `scale(${scale})`, transformOrigin: 'top left',
           background: t.windowBg, overflow: 'hidden',
-          display: 'flex', position: 'relative',
+          display: 'flex', borderRadius: 12,
           boxShadow: t.windowShadow,
         }}>
           {/* Traffic lights */}
@@ -3351,13 +3639,17 @@ function App() {
             <Stage extraMessages={extraMessages} />
             <Composer repo={repo} model={model} setModel={setModel}
               panelOpen={panelOpen} setPanelOpen={setPanelOpen}
-              appendMessage={appendMessage} />
+              appendMessage={appendMessage}
+              openFlow={() => setFlowOpen(true)} />
           </div>
 
           {panelOpen && <RightPanel onClose={() => setPanelOpen(false)} />}
-        </div>
 
-        <SettingsPage open={settingsOpen} onClose={() => setSettingsOpen(false)} theme={theme} setTheme={setTheme} />
+          <SettingsPage open={settingsOpen} onClose={() => setSettingsOpen(false)} theme={theme} setTheme={setTheme} />
+
+          <FlowMode open={flowOpen} onClose={() => setFlowOpen(false)} />
+        </div>
+       </div>
       </div>
     </Theme.Provider>
   );

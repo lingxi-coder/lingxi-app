@@ -47,6 +47,7 @@ fun MainSettingsPage(
     state: SettingsUiState,
     isDark: Boolean,
     navController: NavHostController,
+    onReplayOnboarding: () -> Unit = {},
 ) {
     val t = LingXiTheme.palette
     val langMap = mapOf("zh-CN" to "简体中文", "zh-TW" to "繁體中文", "en-US" to "English", "ja-JP" to "日本語")
@@ -170,6 +171,7 @@ fun MainSettingsPage(
         // 关于 ----------------------------------------------------------------
         SettingsSection(label = "关于") {
             SettingsRow(icon = LXIconName.Sparkle, label = "灵犀", value = "2.4.1 (build 8721)", chevron = false)
+            SettingsRow(icon = LXIconName.Play, label = "重新观看引导", sub = "再过一遍首次设置向导", onTap = onReplayOnboarding)
             SettingsRow(icon = LXIconName.Book, label = "帮助中心", onTap = {})
             SettingsRow(icon = LXIconName.Message, label = "反馈与建议", onTap = {})
             SettingsRow(icon = LXIconName.Link, label = "开源许可", isLast = true, onTap = {})

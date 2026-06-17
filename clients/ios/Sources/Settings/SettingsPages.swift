@@ -106,6 +106,10 @@ struct MainSettingsPage: View {
 
             SettingsSection(label: "关于") {
                 SettingsRow(icon: .sparkle, label: "灵犀", value: "2.4.1 (build 8721)", chevron: false)
+                SettingsRow(icon: .play, label: "重新观看引导", sub: "再过一遍首次设置向导", onTap: {
+                    app.setupDone = false
+                    host.onClose()
+                })
                 SettingsRow(icon: .book, label: "帮助中心", onTap: {})
                 SettingsRow(icon: .message, label: "反馈与建议", onTap: {})
                 SettingsRow(icon: .link, label: "开源许可", isLast: true, onTap: {})

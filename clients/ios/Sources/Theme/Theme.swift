@@ -34,6 +34,38 @@ final class AppState: ObservableObject {
         willSet { objectWillChange.send() }
     }
 
+    // MARK: First-run profile + onboarding (the prototype's `lx_settings` blob +
+    // `lx_setup_done` flag). Persisted so the SetupWizard runs once and the
+    // VoiceOrb / drawer / settings can read the chosen names.
+    /// The assistant's wake-word name (prototype `assistantName`, default 灵犀).
+    @AppStorage("assistantName") var assistantName: String = "灵犀" {
+        willSet { objectWillChange.send() }
+    }
+    /// How the assistant addresses the user (prototype `userName`).
+    @AppStorage("userName") var userName: String = "" {
+        willSet { objectWillChange.send() }
+    }
+    /// Whether a voiceprint was enrolled in onboarding (prototype `voiceprint`).
+    @AppStorage("voiceprint") var voiceprint: Bool = false {
+        willSet { objectWillChange.send() }
+    }
+    /// The default model id picked in onboarding (prototype `modelId`, mock id).
+    @AppStorage("defaultModelId") var defaultModelId: String = "lx-72b" {
+        willSet { objectWillChange.send() }
+    }
+    /// Open FlowMode by default when entering voice (prototype `flowDefault`).
+    @AppStorage("flowDefault") var flowDefault: Bool = true {
+        willSet { objectWillChange.send() }
+    }
+    /// Show the pop-up text input inside FlowMode (prototype `inputDialog`).
+    @AppStorage("inputDialog") var inputDialog: Bool = true {
+        willSet { objectWillChange.send() }
+    }
+    /// Whether first-run setup is complete (prototype `lx_setup_done`).
+    @AppStorage("setupDone") var setupDone: Bool = false {
+        willSet { objectWillChange.send() }
+    }
+
     var isDark: Bool { themeRaw == "dark" }
 
     func setTheme(_ value: String) { themeRaw = value }

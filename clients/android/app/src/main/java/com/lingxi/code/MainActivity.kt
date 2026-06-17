@@ -23,6 +23,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import com.lingxi.code.onboarding.SetupWizardOverlay
 import com.lingxi.code.settings.SettingsHost
 import com.lingxi.code.theme.AppearancePrefs
 import com.lingxi.code.theme.AppearanceStore
@@ -111,6 +112,8 @@ class MainActivity : ComponentActivity() {
                             }
                         },
                         onOpenSettings = { settingsOpen = true },
+                        assistantName = prefs.assistantName,
+                        inputDialog = prefs.inputDialog,
                     )
                     AnimatedVisibility(
                         visible = settingsOpen,
@@ -122,8 +125,34 @@ class MainActivity : ComponentActivity() {
                             isDark = darkTheme,
                             accentId = prefs.accentId,
                             onClose = { settingsOpen = false },
+                            // 关于 → 重新观看引导: clear setupDone (replays the wizard)
+                            // and drop back to the conversation behind it.
+                            onReplayOnboarding = {
+                                scope.launch { store.setSetupDone(false) }
+                                settingsOpen = false
+                            },
                         )
                     }
+
+                    // First-run setup wizard — shown until onboarding completes;
+                    // sits above settings so the replay path covers it too. On
+                    // finish it persists the chosen profile + flips setupDone.
+                    SetupWizardOverlay(
+                        visible = !prefs.setupDone,
+                        initialAssistantName = prefs.assistantName,
+                        initialUserName = prefs.userName,
+                        initialVoiceprint = prefs.voiceprint,
+                        initialModelId = prefs.defaultModelId,
+                        onFinish = { assistantName, userName, voiceprint, modelId ->
+                            scope.launch {
+                                store.setAssistantName(assistantName)
+                                store.setUserName(userName)
+                                store.setVoiceprint(voiceprint)
+                                store.setDefaultModel(modelId)
+                                store.setSetupDone(true)
+                            }
+                        },
+                    )
                 }
             }
         }

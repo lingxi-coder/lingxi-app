@@ -13,6 +13,29 @@ extension Color {
     init(srgb r: Double, _ g: Double, _ b: Double, _ a: Double = 1) {
         self.init(.sRGB, red: r, green: g, blue: b, opacity: a)
     }
+
+    /// Runtime `oklch(L C H / a)` → sRGB. Unlike the pre-converted tokens above,
+    /// the voice orb (OrbCanvas) computes colors on the fly — hue shifts, per-
+    /// particle hues, gradient stops — so it needs a live OKLCH→sRGB conversion.
+    /// `l` is 0…1 lightness (pass 0.85 for the prototype's `85%`), `c` chroma,
+    /// `h` hue in degrees. Implements OKLab→linear-sRGB + the sRGB transfer fn.
+    init(okl l: Double, _ c: Double, _ h: Double, _ alpha: Double = 1) {
+        let hr = h * .pi / 180
+        let a = c * cos(hr)
+        let b = c * sin(hr)
+        let l_ = l + 0.3963377774 * a + 0.2158037573 * b
+        let m_ = l - 0.1055613458 * a - 0.0638541728 * b
+        let s_ = l - 0.0894841775 * a - 1.2914855480 * b
+        let lc = l_ * l_ * l_, mc = m_ * m_ * m_, sc = s_ * s_ * s_
+        let rl =  4.0767416621 * lc - 3.3077115913 * mc + 0.2309699292 * sc
+        let gl = -1.2684380046 * lc + 2.6097574011 * mc - 0.3413193965 * sc
+        let bl = -0.0041960863 * lc - 0.7034186147 * mc + 1.7076147010 * sc
+        func enc(_ x: Double) -> Double {
+            let v = max(0, min(1, x))
+            return v <= 0.0031308 ? 12.92 * v : 1.055 * pow(v, 1 / 2.4) - 0.055
+        }
+        self.init(.sRGB, red: enc(rl), green: enc(gl), blue: enc(bl), opacity: alpha)
+    }
 }
 
 /// A resolved palette for one appearance (dark or light).

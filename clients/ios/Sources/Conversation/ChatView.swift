@@ -10,6 +10,8 @@ struct ChatView: View {
     /// Drives the voice "flow" overlay. ChatView owns the press lifecycle:
     /// hold 0.6s to set true; release sets false.
     @Binding var voiceActive: Bool
+    /// A TAP on the mic opens the FlowMode orb (心流) — RootView owns that overlay.
+    var onEnterFlow: () -> Void = {}
 
     /// The conversation source (mock or engine-over-UniFFI). ChatView renders its
     /// published `model` and forwards user input to it — it no longer owns the
@@ -42,11 +44,13 @@ struct ChatView: View {
     init(session: SessionRef,
          openDrawer: @escaping () -> Void,
          voiceActive: Binding<Bool>,
+         onEnterFlow: @escaping () -> Void = {},
          draft: Binding<String>,
          source: any ConversationSource) {
         self.session = session
         self.openDrawer = openDrawer
         self._voiceActive = voiceActive
+        self.onEnterFlow = onEnterFlow
         self._draft = draft
         self.source = source
         self.convo = source.model
@@ -89,7 +93,8 @@ struct ChatView: View {
                          attachment: attachment,
                          onRemoveAttachment: { attachment = nil },
                          onMicHoldStart: startVoiceHold,
-                         onMicHoldRelease: endVoiceHold)
+                         onMicHoldRelease: endVoiceHold,
+                         onMicTap: onEnterFlow)
             }
 
             // SHIP-BLOCKER #3: the engine-parked permission prompt. Sits above the

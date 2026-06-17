@@ -34,6 +34,7 @@ enum class LXIconName {
     Menu, Edit, Search, Sparkle, Book, Workflow, Cog, Plus, Mic, Paperclip,
     Chevron, Sun, Moon, Check, Pin, Brain, ArrowUp, Folder, Clock, Message,
     ChevronR, Play, Pause, X, Skill, Plug, Dream, Link, Copy, Share,
+    ArrowRight,
 }
 
 @Composable
@@ -248,6 +249,10 @@ private fun strokePaths(name: LXIconName): List<() -> Path> = when (name) {
     )
     LXIconName.Chevron -> listOf({ line(listOf(6f to 9f, 12f to 15f, 18f to 9f)) })
     LXIconName.ChevronR -> listOf({ line(listOf(9f to 18f, 15f to 12f, 9f to 6f)) })
+    LXIconName.ArrowRight -> listOf(
+        { line(listOf(5f to 12f, 19f to 12f)) },
+        { line(listOf(12f to 5f, 19f to 12f, 12f to 19f)) },
+    )
     LXIconName.X -> listOf(
         { line(listOf(18f to 6f, 6f to 18f)) },
         { line(listOf(6f to 6f, 18f to 18f)) },

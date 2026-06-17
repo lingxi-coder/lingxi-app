@@ -41,6 +41,7 @@ import com.lingxi.code.model.MockData
 import com.lingxi.code.theme.LingXiTheme
 import com.lingxi.code.share.rememberShare
 import com.lingxi.code.vision.rememberCameraCapture
+import com.lingxi.code.voice.FlowModeOverlay
 import com.lingxi.code.voice.VoiceFlowOverlay
 import com.lingxi.code.voice.rememberVoiceCapture
 import android.graphics.BitmapFactory
@@ -68,6 +69,10 @@ fun RootScreen(
     onToggleTheme: () -> Unit,
     modifier: Modifier = Modifier,
     onOpenSettings: () -> Unit = {},
+    // FlowMode (心流) profile bits, read from the persisted AppearancePrefs and
+    // passed down so the voice-orb overlay can label itself + gate its text input.
+    assistantName: String = "灵犀",
+    inputDialog: Boolean = true,
     viewModel: ChatViewModel? = null,
 ) {
     val context = LocalContext.current
@@ -117,6 +122,11 @@ fun RootScreen(
     // releasing the held finger flips it off. The overlay renders above the
     // drawer + conversation.
     var voiceActive by remember { mutableStateOf(false) }
+
+    // FlowMode (心流) voice-orb overlay visibility — a TAP on the composer mic
+    // flips it on (the long-press STT path still drives `voiceActive`). The
+    // overlay renders above the drawer + conversation + voice-flow overlay.
+    var flowActive by remember { mutableStateOf(false) }
 
     // The composer draft is hoisted here so a voice transcription (the
     // hold-to-talk release) can route its recognized text straight into the
@@ -226,6 +236,8 @@ fun RootScreen(
                     isDark = isDark,
                     onToggleTheme = onToggleTheme,
                     onOpenDrawer = { scope.launch { drawerState.open() } },
+                    // TAP the mic → FlowMode orb; press-and-hold → STT (below).
+                    onMicClick = { flowActive = true },
                     onMicHoldStart = {
                         voiceActive = true
                         onVoiceHoldStart()
@@ -258,6 +270,15 @@ fun RootScreen(
 
         // Immersive voice overlay (full-screen, above everything else).
         VoiceFlowOverlay(visible = voiceActive)
+
+        // FlowMode (心流) voice-orb overlay — interactive living-orb experience
+        // opened by a mic tap; dismissed by its own close button.
+        FlowModeOverlay(
+            visible = flowActive,
+            assistantName = assistantName,
+            inputDialog = inputDialog,
+            onClose = { flowActive = false },
+        )
 
         // Permission prompt (above everything): renders the head parked request
         // and resolves it by submitting Approve/DenyPermission through the source,

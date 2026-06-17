@@ -3750,15 +3750,17 @@ fn llm_response_to_pumped_turn(resp: &LlmResponse) -> crate::streaming_loop::Pum
     }
 }
 
-/// Mirror TS `isEnvTruthy` (utils/env.ts): a value is truthy when it is present,
-/// non-empty, and not equal to `"false"` or `"0"`.
+/// Mirror TS `isEnvTruthy` (`utils/envUtils.ts:32`): a value is truthy ONLY
+/// when, lowercased and trimmed, it is one of the whitelist members
+/// `"1"`, `"true"`, `"yes"`, `"on"`. Absent, empty, and every other value
+/// (including `"no"`, `"off"`, `"2"`, `"enabled"`, …) are falsy.
 ///
 /// Locked against the TS helper used at `claude.ts:2470`:
 /// `isEnvTruthy(process.env.CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK)`.
 fn is_env_truthy(val: Option<&str>) -> bool {
     match val {
-        None | Some("" | "false" | "0") => false,
-        Some(_) => true,
+        None => false,
+        Some(v) => matches!(v.to_lowercase().trim(), "1" | "true" | "yes" | "on"),
     }
 }
 
@@ -5098,8 +5100,11 @@ mod task7_midstream_fallback_tests {
         );
     }
 
-    /// `is_env_truthy` covers the exact semantics of TS `isEnvTruthy`:
-    /// absent / empty / "false" / "0" → not truthy; anything else → truthy.
+    /// `is_env_truthy` covers the exact semantics of TS `isEnvTruthy`
+    /// (`utils/envUtils.ts:32`): truthy ONLY for the whitelist
+    /// `1`/`true`/`yes`/`on`, case-insensitive and trimmed; everything
+    /// else (including `no`/`off`/`2`/`enabled`/arbitrary strings) is
+    /// falsy.
     #[test]
     fn is_env_truthy_matches_ts_semantics() {
         // Not set → not truthy.
@@ -5110,10 +5115,22 @@ mod task7_midstream_fallback_tests {
         assert!(!is_env_truthy(Some("false")));
         // "0" → not truthy.
         assert!(!is_env_truthy(Some("0")));
-        // Non-empty, non-false, non-zero → truthy.
+        // Whitelist members → truthy.
         assert!(is_env_truthy(Some("1")));
         assert!(is_env_truthy(Some("true")));
         assert!(is_env_truthy(Some("yes")));
+        assert!(is_env_truthy(Some("on")));
+        // Case-insensitive + trimmed.
+        assert!(is_env_truthy(Some("ON")));
+        assert!(is_env_truthy(Some(" TRUE ")));
+        assert!(is_env_truthy(Some("Yes")));
+        // Non-whitelist values → NOT truthy (strict whitelist).
+        assert!(!is_env_truthy(Some("no")));
+        assert!(!is_env_truthy(Some("off")));
+        assert!(!is_env_truthy(Some("2")));
+        assert!(!is_env_truthy(Some("enabled")));
+        assert!(!is_env_truthy(Some("disable")));
+        assert!(!is_env_truthy(Some("random")));
     }
 }
 

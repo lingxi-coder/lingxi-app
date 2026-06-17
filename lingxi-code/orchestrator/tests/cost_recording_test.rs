@@ -78,6 +78,56 @@ async fn turn_with_known_tokens_records_real_cost() {
     assert_eq!(snap.total_nano_usd, 17_500_000);
 }
 
+/// M7: with an `AnalyticsBus` wired (as the desktop composition root does), a
+/// live turn fires `tengu_cost_recorded` per recorded API response — 1:1 with
+/// claude-code's `logEvent('tengu_cost_recorded', …)`. Without a bus (every
+/// other test here), the tracker accrues totals but emits no analytics event.
+#[tokio::test]
+async fn run_turn_emits_tengu_cost_recorded_when_bus_attached() {
+    use telemetry::{AnalyticsBus, InMemorySink};
+
+    let response = end_turn_response_with_usage(1_000, 500);
+    let api = Arc::new(MockApiClient::new(vec![response]));
+
+    let (tx, _rx) = mpsc::channel(8); // _rx held → persist channel stays open
+    let tracker = Arc::new(CostTracker::new(
+        SessionId::new(),
+        Arc::new(PricingCatalog::builtin_reference()),
+        tx,
+    ));
+
+    let bus = Arc::new(AnalyticsBus::new());
+    let sink = Arc::new(InMemorySink::new());
+    bus.attach_sink(sink.clone()).await;
+
+    let mut cfg = OrchestratorConfig::default();
+    cfg.model = "claude-opus-4-6".into(); // priced in builtin_reference
+
+    let orch = Arc::new(
+        ConversationOrchestrator::new(
+            cfg,
+            api,
+            Arc::new(ToolRegistry::new()),
+            noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            std::env::temp_dir(),
+        )
+        .with_cost_tracker(tracker)
+        .with_analytics_bus(bus),
+    );
+
+    orch.run_turn("hi").await.expect("run_turn ok");
+
+    let events = sink.events().await;
+    let names: Vec<&str> = events.iter().map(|e| e.name.as_str()).collect();
+    assert!(
+        names.contains(&"tengu_cost_recorded"),
+        "a live turn with a wired bus must fire tengu_cost_recorded; got {names:?}"
+    );
+}
+
 /// A non-`end_turn` (looping) reply that records the same $0.0175 (17.5M nano)
 /// cost per turn.
 fn looping_response_with_usage(input: u64, output: u64) -> LlmResponse {

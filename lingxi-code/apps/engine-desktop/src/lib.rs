@@ -1712,6 +1712,10 @@ pub async fn build(
     // Batch-5 Task 3: attach the live subscription slot (filled by the background
     // profile/roles fetch) so the drive loops read subscriber/enterprise state at
     // call time — `subscriber_state` remains the build-time seed/fallback.
+    // M7: one analytics bus shared by the provider adapter (`tengu_api_*`) and the
+    // orchestrator (`tengu_cost_recorded`) so all live telemetry lands on the same
+    // sink set — 1:1 with claude-code, where `logEvent` is a single global pipeline.
+    let analytics_bus = Arc::new(telemetry::AnalyticsBus::new());
     let provider_adapter = Arc::new(
         ProviderApiAdapter::new_with_routing(
             llm_client,
@@ -1719,7 +1723,7 @@ pub async fn build(
             subscriber_state,
             UserAgentEnv::from_process_env(),
             env!("CARGO_PKG_VERSION"),
-            Some(Arc::new(telemetry::AnalyticsBus::new())),
+            Some(analytics_bus.clone()),
             cfg.fallback_model.clone(),
             Some(cost_estimator),
             fallback_overrides,
@@ -2814,6 +2818,7 @@ pub async fn build(
             orch_cfg, api_client, tools, hooks, perms, output, memory, cwd,
         )
         .with_cost_tracker(cost_tracker)
+        .with_analytics_bus(analytics_bus)
         .with_mcp_registry(mcp_registry)
         .with_hook_registry(hook_registry)
         .with_agent_catalog(agent_catalog)

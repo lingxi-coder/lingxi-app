@@ -436,7 +436,7 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
                 cache_read,
                 cache_create,
                 false, // is_batch_request — M6 always false
-                None,  // bus — orchestrator does not yet carry an AnalyticsBus (M7 work)
+                orch.analytics_bus.as_ref(), // M7: fire tengu_cost_recorded on the live path
             )
             .await;
         orch.api_calls_recorded

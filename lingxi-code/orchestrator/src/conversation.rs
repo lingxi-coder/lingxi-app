@@ -490,6 +490,12 @@ pub struct ConversationOrchestrator {
     /// this so production `lingxi-cli` reports real cost; library callers
     /// (e.g. unit tests) may leave it `None`.
     pub(crate) cost_tracker: Option<Arc<cost::CostTracker>>,
+    /// Optional analytics bus wired by [`Self::with_analytics_bus`] (M7). When
+    /// present (desktop composition root), the live turn loop fires
+    /// `tengu_cost_recorded` per recorded API response — 1:1 with claude-code's
+    /// `logEvent('tengu_cost_recorded', …)`. `None` for library/test callers,
+    /// which then silently skip the emission (the tracker still accrues totals).
+    pub(crate) analytics_bus: Option<Arc<telemetry::AnalyticsBus>>,
     /// Monotonic timestamp captured at orchestrator construction. Used by
     /// `snapshot_cost` to compute the `session_duration` field of the
     /// returned [`traits::CostSnapshot`]. Stored as `std::time::Instant`
@@ -677,6 +683,7 @@ impl ConversationOrchestrator {
             current_prompt_id: Mutex::new(None),
             should_exit: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             cost_tracker: None,
+            analytics_bus: None,
             session_started_at: std::time::Instant::now(),
             api_calls_recorded: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
             mcp_registry: None,
@@ -720,6 +727,18 @@ impl ConversationOrchestrator {
     #[must_use]
     pub fn has_cost_tracker(&self) -> bool {
         self.cost_tracker.is_some()
+    }
+
+    /// Attach an analytics bus so the live turn loop fires
+    /// `tengu_cost_recorded` per recorded API response (M7). Without this the
+    /// cost tracker still accrues totals but emits no analytics event — matching
+    /// the pre-M7 behavior (and library/test callers that don't want telemetry).
+    /// The desktop composition root passes the SAME bus it gives the provider
+    /// adapter (which fires `tengu_api_*`), so all telemetry shares one sink set.
+    #[must_use]
+    pub fn with_analytics_bus(mut self, bus: Arc<telemetry::AnalyticsBus>) -> Self {
+        self.analytics_bus = Some(bus);
+        self
     }
 
     /// Attach an MCP registry so `list_mcp_servers` reports real data.
@@ -2671,7 +2690,7 @@ impl ConversationOrchestrator {
                             cache_read,
                             cache_create,
                             false, // is_batch_request — streaming is never batch
-                            None,  // bus — orchestrator does not yet carry an AnalyticsBus
+                            self.analytics_bus.as_ref(), // M7: fire tengu_cost_recorded
                         )
                         .await;
                     self.api_calls_recorded

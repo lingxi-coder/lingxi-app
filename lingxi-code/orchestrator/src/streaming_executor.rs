@@ -304,16 +304,18 @@ impl<'a> StreamingToolExecutor<'a> {
                 self.tools[i].status = ToolStatus::Completed;
             }
             Err(e) => {
-                // A hard orchestrator error → surface as an errored result
-                // (analogous to claude-code's outer plumbing catch,
-                // toolExecution.ts:480).
-                self.tools[i].status = ToolStatus::Completed;
+                // A hard orchestrator error → surface as an errored result,
+                // matching claude-code's outer plumbing catch
+                // (toolExecution.ts:471-480): `Error calling tool (<name>): <msg>`
+                // wrapped in `<tool_use_error>`.
+                let name = &self.tools[i].name;
                 self.tools[i].result = Some(ContentBlock::ToolResult {
                     tool_use_id: self.tools[i].id,
-                    content: format!("<tool_use_error>Error: {e}</tool_use_error>"),
+                    content: format!("<tool_use_error>Error calling tool ({name}): {e}</tool_use_error>"),
                     is_error: true,
                     provider_tool_use_id: self.tools[i].provider_id.clone(),
                 });
+                self.tools[i].status = ToolStatus::Completed;
             }
         }
         Some(i)

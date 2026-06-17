@@ -6,7 +6,7 @@
 //! `'static`/spawn is required.
 
 use crate::conversation::ConversationOrchestrator;
-use futures::stream::FuturesUnordered;
+use futures::{stream::FuturesUnordered, StreamExt};
 use protocol::{ContentBlock, ConversationMessage, MessageId, ToolUseId};
 use tool_api::ContextModifier;
 
@@ -262,6 +262,7 @@ impl<'a> StreamingToolExecutor<'a> {
             let single = vec![(id, name, input, provider_id)];
             let outcome: DispatchOutcome =
                 match crate::turn_loop::dispatch_tool_uses_tracked(orch, &single).await {
+                    // `single` has one element, so `pop()` == the only result.
                     Ok((mut blocks, _prevent, injected, modifiers)) => blocks
                         .pop()
                         .map(|b| (b, injected, modifiers))
@@ -281,7 +282,6 @@ impl<'a> StreamingToolExecutor<'a> {
     /// sibling-error cascade. Returns the completed tool index, or `None` if no
     /// futures are in flight. (TS `executeTool`/`collectResults` completion path.)
     async fn drain_one(&mut self) -> Option<usize> {
-        use futures::StreamExt;
         let (i, outcome) = self.inflight.next().await?;
         match outcome {
             Ok((mut block, injected, modifiers)) => {
@@ -292,9 +292,7 @@ impl<'a> StreamingToolExecutor<'a> {
                     self.errored_desc = Some(tool_description(&self.tools[i]));
                 }
                 // Copy the provider id onto the result for egress replay.
-                if let ContentBlock::ToolResult { provider_tool_use_id, .. } = &mut block {
-                    *provider_tool_use_id = self.tools[i].provider_id.clone();
-                }
+                set_provider_id(&mut block, self.tools[i].provider_id.clone());
                 self.tools[i].result = Some(block);
                 self.tools[i].injected = injected;
                 self.tools[i].modifiers = modifiers;
@@ -336,9 +334,7 @@ impl<'a> StreamingToolExecutor<'a> {
         for t in &mut self.tools {
             if matches!(t.status, ToolStatus::Queued) && t.result.is_none() {
                 let mut block = synthetic_error_block(t.id, reason, desc.as_deref());
-                if let ContentBlock::ToolResult { provider_tool_use_id, .. } = &mut block {
-                    *provider_tool_use_id = t.provider_id.clone();
-                }
+                set_provider_id(&mut block, t.provider_id.clone());
                 t.result = Some(block);
                 t.status = ToolStatus::Completed;
             }
@@ -387,9 +383,17 @@ fn tool_description(t: &TrackedTool) -> String {
         let truncated = if summary.chars().count() > 40 {
             format!("{}\u{2026}", summary.chars().take(40).collect::<String>())
         } else {
-            summary.to_string()
+            summary.to_owned()
         };
         format!("{}({})", t.name, truncated)
+    }
+}
+
+/// Copy a provider-issued tool-call id onto a `ToolResult` block's
+/// `provider_tool_use_id` for egress replay; no-op for non-`ToolResult` blocks.
+fn set_provider_id(block: &mut ContentBlock, provider_id: Option<String>) {
+    if let ContentBlock::ToolResult { provider_tool_use_id, .. } = block {
+        *provider_tool_use_id = provider_id;
     }
 }
 

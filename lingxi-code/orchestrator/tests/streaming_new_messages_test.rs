@@ -14,24 +14,111 @@
 //! Rust streaming driver must append identically to the batched one.
 
 use async_trait::async_trait;
+use hooks::definition::{HookDefinition, HookExecutor as DefHookExecutor, HookSource};
+use hooks::events::{HookEvent, HookEventType};
+use hooks::executor::BuiltinHookHandler;
+use hooks::registry::{HookContext, HookRegistry};
+use hooks::response::{HookOutcome, HookResponse, HookResult};
+use hooks::HookExecutorImpl;
 use orchestrator::test_support::{
     content_block_start_text, content_block_start_tool_use, content_block_stop, input_json_delta,
-    message_delta_stop, message_start, message_stop, text_delta, MockApiClient, MockOutputStream,
-    MockStreamingApiClient, NoOpPermissionGate, StaticMemoryProvider,
+    message_delta_stop, message_start, message_stop, noop_hook_executor, text_delta, MockApiClient,
+    MockOutputStream, MockStreamingApiClient, NoOpPermissionGate, StaticMemoryProvider,
 };
 use orchestrator::{scripted, ConversationOrchestrator, ConversationOutcome, OrchestratorConfig};
 use permission::result::PermissionMetadata;
 use permission::{PermissionDecisionReason, PermissionResult};
-use protocol::{ContentBlock, ConversationMessage, MessageId, ToolUseId};
+use protocol::{HookId, HttpRequest, HttpResponse, ContentBlock, ConversationMessage, MessageId, ToolUseId};
 use serde_json::json;
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::sync::Arc;
+use std::time::Duration;
+use tokio::sync::RwLock;
 use tool_api::progress::ToolProgressSender;
 use tool_api::registry::ToolRegistry;
 use tool_api::tool_trait::{
     DescriptionOptions, PromptOptions, Tool, ToolCallResult, ToolError, ToolStaticContext,
     ValidationError,
 };
+use traits::{HttpError, HttpTransport, RuntimeError, RuntimeSpawner};
+
+// ---- unused HTTP / Runtime stubs (Builtin hooks never touch them) ----
+struct UnusedHttp;
+#[async_trait]
+impl HttpTransport for UnusedHttp {
+    async fn request(&self, _req: HttpRequest) -> Result<HttpResponse, HttpError> {
+        Err(HttpError::InvalidRequest("unused".into()))
+    }
+    async fn stream_sse(&self, _req: HttpRequest) -> Result<traits::http::SseStream, HttpError> {
+        Err(HttpError::InvalidRequest("unused".into()))
+    }
+}
+struct UnusedRuntime;
+#[async_trait]
+impl RuntimeSpawner for UnusedRuntime {
+    async fn spawn(
+        &self,
+        _name: &str,
+        _task: Pin<Box<dyn std::future::Future<Output = ()> + Send + 'static>>,
+    ) -> Result<traits::BackgroundTaskHandle, RuntimeError> {
+        Err(RuntimeError::Internal("unused".into()))
+    }
+    async fn sleep(&self, _d: Duration) {}
+    async fn cancel(&self, _h: &traits::BackgroundTaskHandle) -> Result<(), RuntimeError> {
+        Ok(())
+    }
+}
+
+/// A `PreToolUse` builtin hook that returns a `systemMessage` (the LingXi parser
+/// merges `systemMessage` + `additionalContext` into the same field), which the
+/// turn loop surfaces as a standalone meta user message (HOOK.1 / claude-code
+/// `toolExecution.ts:845`).
+struct ContextHook;
+#[async_trait]
+impl BuiltinHookHandler for ContextHook {
+    async fn handle(&self, _event: &HookEvent, _ctx: &HookContext) -> HookResult {
+        HookResult {
+            outcome: HookOutcome::Success,
+            stdout: String::new(),
+            stderr: String::new(),
+            exit_code: Some(0),
+            response: Some(HookResponse {
+                system_message: Some("STREAM-CTX".into()),
+                ..HookResponse::default()
+            }),
+        }
+    }
+    fn id(&self) -> &str {
+        "context-pre"
+    }
+}
+
+/// Build a `HookExecutorImpl` with a single unconditional `PreToolUse` hook that
+/// emits the `STREAM-CTX` context.
+fn context_pre_hook_executor() -> Arc<HookExecutorImpl> {
+    let hook = HookDefinition {
+        id: HookId::new(),
+        name: "context-pre".into(),
+        events: vec![HookEventType::PreToolUse],
+        if_condition: None,
+        executor: DefHookExecutor::Builtin {
+            handler_id: "context-pre".into(),
+        },
+        source: HookSource::Session,
+        blocking: true,
+        timeout: None,
+        priority: 0,
+        once: false,
+        status_message: None,
+    };
+    let mut registry = HookRegistry::new();
+    registry.register(hook);
+    let reg = Arc::new(RwLock::new(registry));
+    let mut exec = HookExecutorImpl::new(reg, Arc::new(UnusedHttp), Arc::new(UnusedRuntime));
+    exec.register_builtin(Arc::new(ContextHook));
+    Arc::new(exec)
+}
 
 /// A tool whose success result carries an extra conversation message in
 /// `new_messages` (the Skill-tool shape). The text `"EXPANDED-SKILL-PROMPT"`
@@ -187,13 +274,21 @@ fn streaming_orch(
     registry: Arc<ToolRegistry>,
     api: Arc<MockStreamingApiClient>,
 ) -> ConversationOrchestrator {
+    streaming_orch_with_hooks(registry, api, noop_hook_executor())
+}
+
+fn streaming_orch_with_hooks(
+    registry: Arc<ToolRegistry>,
+    api: Arc<MockStreamingApiClient>,
+    hooks: Arc<HookExecutorImpl>,
+) -> ConversationOrchestrator {
     let batched = Arc::new(MockApiClient::new(Vec::new()));
     ConversationOrchestrator::new_with_streaming(
         OrchestratorConfig::default(),
         batched,
         api,
         registry,
-        orchestrator::test_support::noop_hook_executor(),
+        hooks,
         Arc::new(NoOpPermissionGate),
         Arc::new(MockOutputStream::new()),
         Arc::new(StaticMemoryProvider::empty()),
@@ -339,5 +434,78 @@ async fn streaming_tool_without_new_messages_leaves_history_unchanged() {
         4,
         "expected [user, assistant, tool_result, assistant]: {:?}",
         s.history
+    );
+}
+
+/// HOOK.1 (streaming): a tool whose PreToolUse hook returns `additionalContext`
+/// has that context replayed into streaming history as a SEPARATE meta user
+/// message DIRECTLY AFTER the `tool_result` (NOT folded into the result
+/// content) — the streaming counterpart of the batched
+/// `hook1_additional_context_is_a_separate_message_not_folded` test. Confirms
+/// the streaming driver (which drains the same `injected` channel) emits it
+/// identically to the batched path (claude-code `toolExecution.ts:845`).
+#[tokio::test]
+async fn streaming_pre_tool_additional_context_is_a_separate_message_after_tool_result() {
+    let tu = ToolUseId::new();
+    let api = two_turns(tu.clone(), "Plain");
+    // The `Plain` tool returns NO new_messages, so the ONLY injected message is
+    // the PreToolUse additionalContext reminder.
+    let orch = streaming_orch_with_hooks(
+        registry_with(Arc::new(PlainTool)),
+        api,
+        context_pre_hook_executor(),
+    );
+
+    let outcome = orch.run_turn_streaming("go").await.expect("streaming turn");
+    assert!(
+        matches!(outcome, ConversationOutcome::EndTurn { .. }),
+        "expected EndTurn, got {outcome:?}"
+    );
+
+    let session = orch.session();
+    let s = session.lock().await;
+
+    // The tool_result content must NOT carry the context (no folding).
+    for m in &s.history {
+        if let ConversationMessage::User { content, .. } = m {
+            for b in content {
+                if let ContentBlock::ToolResult { content, .. } = b {
+                    assert!(
+                        !content.contains("STREAM-CTX"),
+                        "additionalContext must NOT be folded into the streaming tool_result: {content:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    // The standalone reminder message sits DIRECTLY after the tool_result.
+    let ctx_text = "<system-reminder>\nPreToolUse:Plain hook additional context: STREAM-CTX\n</system-reminder>";
+    let ctx_pos = s
+        .history
+        .iter()
+        .position(|m| {
+            matches!(m, ConversationMessage::User { content, .. }
+                if content.iter().any(|b| matches!(b, ContentBlock::Text { text } if text == ctx_text)))
+        })
+        .expect("standalone additionalContext message present in streaming history");
+
+    let before = &s.history[ctx_pos - 1];
+    match before {
+        ConversationMessage::User { content, .. } => assert!(
+            content
+                .iter()
+                .any(|b| matches!(b, ContentBlock::ToolResult { tool_use_id, .. } if *tool_use_id == tu)),
+            "the context message must sit directly after the tool_result user message"
+        ),
+        other => panic!("expected a tool_result User message before the context one, got {other:?}"),
+    }
+
+    // Tagged with the dispatching tool's tool_use_id (TS toolUseID).
+    let ctx_id = s.history[ctx_pos].id();
+    assert_eq!(
+        s.injected_message_sources.get(&ctx_id),
+        Some(&tu),
+        "context message id maps to the dispatching tool's tool_use_id"
     );
 }

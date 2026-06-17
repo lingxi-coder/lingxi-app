@@ -161,6 +161,17 @@ pub struct OrchestratorConfig {
     /// composition root from merged settings.
     #[serde(default)]
     pub output_style: Option<String>,
+
+    /// OUTSTYLE.3: directories searched for CUSTOM output styles (`*.md` files
+    /// with `name`/`description`/`keepCodingInstructions` frontmatter + a body),
+    /// in INCREASING priority — e.g.
+    /// `[~/.claude/output-styles, <cwd>/.claude/output-styles]` so a project
+    /// style overrides a user one, and both override the builtins
+    /// ([`outputstyles::resolve_output_style`]). EMPTY (the default) means
+    /// builtin-only resolution — byte-identical to before, so non-desktop hosts
+    /// and tests are unaffected; the desktop composition root populates it.
+    #[serde(default)]
+    pub output_style_dirs: Vec<std::path::PathBuf>,
 }
 
 impl Default for OrchestratorConfig {
@@ -178,6 +189,7 @@ impl Default for OrchestratorConfig {
             is_subscriber: false,
             is_enterprise: false,
             output_style: None,
+            output_style_dirs: Vec::new(),
         }
     }
 }
@@ -221,6 +233,7 @@ mod tests {
             is_subscriber: true,
             is_enterprise: true,
             output_style: Some("Explanatory".into()),
+            output_style_dirs: vec![std::path::PathBuf::from("/home/u/.claude/output-styles")],
         };
         let s = serde_json::to_string(&cfg).unwrap();
         let back: OrchestratorConfig = serde_json::from_str(&s).unwrap();
@@ -236,6 +249,10 @@ mod tests {
         assert!(back.is_subscriber);
         assert!(back.is_enterprise);
         assert_eq!(back.output_style.as_deref(), Some("Explanatory"));
+        assert_eq!(
+            back.output_style_dirs,
+            vec![std::path::PathBuf::from("/home/u/.claude/output-styles")]
+        );
     }
 
     #[test]

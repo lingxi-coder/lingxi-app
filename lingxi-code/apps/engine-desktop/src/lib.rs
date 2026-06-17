@@ -1741,6 +1741,15 @@ pub async fn build(
     // `# Output Style: <name>` section (Explanatory / Learning builtins). `None`
     // / "default" / unknown ⇒ no section (prompt byte-identical to before).
     orch_cfg.output_style = load_merged_output_style(&cfg.cwd);
+    // OUTSTYLE.3: custom output-style search dirs — user (`~/.claude/output-styles`)
+    // then project (`<cwd>/.claude/output-styles`), in increasing priority so a
+    // project style overrides a user one and both override the builtins. A
+    // `settings.outputStyle` naming a disk style now activates it
+    // (`outputstyles::resolve_output_style`); absent dirs ⇒ builtin-only.
+    orch_cfg.output_style_dirs = vec![
+        cfg.claude_home.join("output-styles"),
+        cfg.cwd.join(".claude").join("output-styles"),
+    ];
 
     // (4.5) One CostTracker per process. The persist channel drains into a
     //       fire-and-forget task that discards snapshots (on-disk persistence is

@@ -3200,14 +3200,19 @@ impl ConversationOrchestrator {
             memory_files,
             tool_names,
         };
-        // OUTSTYLE.2: when a non-default output style is active, inject its
-        // `# Output Style: <name>` section (TS getOutputStyleSection). A
-        // `None`/`"default"`/unknown style resolves to `None`, leaving the
-        // prompt byte-identical to the styleless path.
-        let builtin = outputstyles::resolve_builtin_output_style(self.config.output_style.as_deref());
-        let style = builtin.map(|b| ActiveOutputStyle {
-            name: b.name,
-            prompt: b.prompt,
+        // OUTSTYLE.2/.3: when a non-default output style is active — a builtin
+        // OR a custom disk style discovered under `output_style_dirs` — inject
+        // its `# Output Style: <name>` section (TS getOutputStyleSection). A
+        // `None`/`"default"`/unknown style resolves to `None`, leaving the prompt
+        // byte-identical to the styleless path (empty `output_style_dirs` ⇒
+        // builtin-only, as before).
+        let resolved = outputstyles::resolve_output_style(
+            self.config.output_style.as_deref(),
+            &self.config.output_style_dirs,
+        );
+        let style = resolved.as_ref().map(|r| ActiveOutputStyle {
+            name: r.name.as_str(),
+            prompt: r.prompt.as_str(),
         });
         assemble_system_prompt_with_style(&ctx, style)
     }
@@ -3243,12 +3248,14 @@ impl ConversationOrchestrator {
     /// (`processTextPrompt` returns `[userMessage, ...attachmentMessages]`;
     /// `query.ts:1580-1590` pushes the attachment after `toolResults`).
     pub(crate) fn output_style_reminder_message(&self) -> Option<ConversationMessage> {
-        let builtin =
-            outputstyles::resolve_builtin_output_style(self.config.output_style.as_deref())?;
+        let resolved = outputstyles::resolve_output_style(
+            self.config.output_style.as_deref(),
+            &self.config.output_style_dirs,
+        )?;
         let content = format!(
             "<system-reminder>\n{} output style is active. \
              Remember to follow the specific guidelines for this style.\n</system-reminder>",
-            builtin.name
+            resolved.name
         );
         Some(ConversationMessage::user(MessageId::new(), content))
     }

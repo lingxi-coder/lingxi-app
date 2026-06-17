@@ -38,6 +38,7 @@ import com.lingxi.code.connectivity.shouldShowOfflineBanner
 import com.lingxi.code.drawer.DrawerContent
 import com.lingxi.code.drawer.rememberDrawerUiState
 import com.lingxi.code.model.MockData
+import com.lingxi.code.settings.SettingsStore
 import com.lingxi.code.theme.LingXiTheme
 import com.lingxi.code.share.rememberShare
 import com.lingxi.code.vision.rememberCameraCapture
@@ -136,6 +137,15 @@ fun RootScreen(
     val orbListen = rememberOrbVoiceListen()
     val orbAssistantText = state.messages.lastOrNull()
         ?.let { if (it.role == Role.Ai) it.text else "" } ?: ""
+
+    // Mirror the engine's REAL MCP listing into the activity-scoped SettingsStore
+    // (the same instance SettingsHost renders), so the MCP settings page shows
+    // real servers. RefreshListings is fired once; the StateFlow updates the store
+    // when the reply lands. Empty list ⇒ the page keeps its mock servers.
+    val settingsStore: SettingsStore = viewModel()
+    val engineMcp by source.mcpServers.collectAsState()
+    LaunchedEffect(Unit) { source.refreshMcpServers() }
+    LaunchedEffect(engineMcp) { if (engineMcp.isNotEmpty()) settingsStore.setMcpServers(engineMcp) }
 
     // The composer draft is hoisted here so a voice transcription (the
     // hold-to-talk release) can route its recognized text straight into the

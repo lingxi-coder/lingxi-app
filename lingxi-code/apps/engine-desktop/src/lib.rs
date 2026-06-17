@@ -698,6 +698,7 @@ pub fn desktop_skill_registry() -> SkillRegistry {
 ///     deny_unresolved_ask: false,
 ///     max_turns: None,
 ///     max_budget_usd: None,
+///     json_schema: None,
 ///     injected_permission_gate: None,
 ///     session_started_as_coordinator: false,
 ///     // `None` ⟶ empty memory (deterministic). A production host injects
@@ -768,6 +769,12 @@ pub struct DesktopConfig {
     /// [`orchestrator::OrchestratorConfig::max_budget_nano_usd`] (× 1e9) in
     /// `build()`. `None` (the default) = no cap.
     pub max_budget_usd: Option<f64>,
+    /// CLI `--json-schema <schema>`: when set, `build()` forces structured
+    /// output — it registers a `StructuredOutput` tool whose `input_schema` is
+    /// this schema, forces `tool_choice` to it, and surfaces a capture slot on
+    /// [`DesktopRuntime`] for the print path to validate + retry. `None` (the
+    /// default) leaves every turn unconstrained (byte-identical to before).
+    pub json_schema: Option<serde_json::Value>,
     /// Host-injected base permission gate (the INTERACTIVE prompt transport).
     /// When `Some`, `build()` uses it as the base gate instead of the
     /// `NoOpPermissionGate`/`DenyOnAskGate`/`AdapterPermissionGate` it would
@@ -883,6 +890,7 @@ impl Default for DesktopConfig {
             deny_unresolved_ask: false,
             max_turns: None,
             max_budget_usd: None,
+            json_schema: None,
             injected_permission_gate: None,
             session_started_as_coordinator: false,
             memory_provider: None,
@@ -3460,6 +3468,7 @@ mod tests {
             deny_unresolved_ask: false,
             max_turns: None,
             max_budget_usd: None,
+            json_schema: None,
             injected_permission_gate: None,
             session_started_as_coordinator: false,
             // Boot tests stay deterministic: empty memory, never the real FS.

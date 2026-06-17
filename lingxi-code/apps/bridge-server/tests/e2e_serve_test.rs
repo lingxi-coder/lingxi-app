@@ -61,6 +61,7 @@ fn sandbox_config() -> (tempfile::TempDir, DesktopConfig) {
         connect_prompt: None,
         max_turns: None,
         max_budget_usd: None,
+        json_schema: None,
     };
     (tmp, cfg)
 }

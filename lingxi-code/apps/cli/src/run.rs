@@ -332,14 +332,14 @@ async fn load_resume_rows() -> Result<Vec<SessionMetadata>, LoaderError> {
 
 /// Production disk→[`SessionMetadata`] path with the inputs passed in (no env /
 /// process-cwd reads), so it is directly testable. Builds the same disk-backed
-/// [`platform_posix_minimal::PosixFileSystem`] the live branches use and
+/// [`platform_posix::PosixFileSystem`] the live branches use and
 /// asks the M5-08 loader for up to 5 most-recent rows.
 async fn load_resume_rows_from(
     claude_home: &std::path::Path,
     cwd: &std::path::Path,
 ) -> Result<Vec<SessionMetadata>, LoaderError> {
     let cwd_str = cwd.to_string_lossy().into_owned();
-    let fs: Arc<dyn FileSystem> = Arc::new(platform_posix_minimal::PosixFileSystem::new(
+    let fs: Arc<dyn FileSystem> = Arc::new(platform_posix::PosixFileSystem::new(
         cwd.to_path_buf(),
     ));
     list_recent_sessions(claude_home, &cwd_str, 5, fs).await
@@ -358,7 +358,7 @@ async fn load_resume_session(session_id: uuid::Uuid) -> Result<Vec<JsonlMessage>
 
 /// Production disk→`Vec<JsonlMessage>` load with the inputs passed in (no env /
 /// process-cwd reads) so it is directly testable. Builds the same disk-backed
-/// [`platform_posix_minimal::PosixFileSystem`] the row loader uses and asks the
+/// [`platform_posix::PosixFileSystem`] the row loader uses and asks the
 /// M5-07/M5-08 [`load_session`] loader for the session, which returns
 /// [`LoaderError::SessionNotFound`] when no `<uuid>.jsonl` exists under the
 /// cwd's project dir.
@@ -368,7 +368,7 @@ async fn load_resume_session_from(
     session_id: uuid::Uuid,
 ) -> Result<Vec<JsonlMessage>, LoaderError> {
     let cwd_str = cwd.to_string_lossy().into_owned();
-    let fs: Arc<dyn FileSystem> = Arc::new(platform_posix_minimal::PosixFileSystem::new(
+    let fs: Arc<dyn FileSystem> = Arc::new(platform_posix::PosixFileSystem::new(
         cwd.to_path_buf(),
     ));
     load_session(claude_home, &cwd_str, session_id, fs).await

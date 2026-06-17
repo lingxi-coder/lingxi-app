@@ -49,6 +49,9 @@ telemetry = { path = "../../telemetry" }
 migrations = { path = "../../migrations" }
 # Session resume loader (`run.rs`) constructs a `PosixFileSystem` directly.
 platform-posix-minimal = { path = "../../platforms/posix-minimal" }
+# Real posix primitives: `has_internet` HTTP probe (bypass_env.rs) + session-row
+# FileSystem (run.rs) bind the live `PosixHttp` / `PosixFileSystem`.
+platform-posix = { path = "../../platforms/posix" }
 # CLI-resolved permission mode + bypass-safety guard substrate (cli_mode /
 # bypass_guard). The real `BypassEnv` impl (`bypass_env.rs`) names this directly.
 permission = { path = "../../permission" }

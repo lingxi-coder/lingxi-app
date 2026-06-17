@@ -2884,6 +2884,18 @@ pub async fn build(
                 watch_cwd.clone(),
             )))
         };
+    // (6.5-pre) Clone the registry Arcs the plugin bootstrap (below, after the
+    //           command registry is filled at (6)) writes through, BEFORE they
+    //           are moved into the orchestrator constructor. `Arc<RwLock<…>>`
+    //           shares state, so plugin hooks/agents registered after the move
+    //           are still observed by the orchestrator's clone.
+    let plugin_hook_registry = hook_registry.clone();
+    let plugin_agent_catalog = agent_catalog.clone();
+    let plugin_mcp_registry = mcp_registry.clone();
+    // `cwd` is moved into the orchestrator below; the plugin bootstrap's
+    // sandboxed `PosixFileSystem` (a Plan-16 dead-code field on `PluginManager`)
+    // needs a workspace root, so snapshot it here.
+    let cwd_for_plugins = watch_cwd.clone();
     let orch = Arc::new(
         ConversationOrchestrator::new(
             orch_cfg, api_client, tools, hooks, perms, output, memory, cwd,
@@ -2946,6 +2958,92 @@ pub async fn build(
     // and the dispatcher observe one command set (plugin lifecycle mutations via
     // the dispatcher's write lock are visible to the loader too).
     *shared_command_registry.write().await = reg;
+
+    // (6.5) Plugin bootstrap — discover installed plugins on disk and
+    //       materialise their COMMANDS + HOOKS into the live registries, plus
+    //       their AGENTS into the agent catalog. Mirrors claude-code's
+    //       cache-only plugin load at startup (`main.tsx:282`
+    //       `loadAllPluginsCacheOnly()` → `pluginLoader.ts:1887`
+    //       `loadPluginsFromMarketplaces({cacheOnly})`; `setup.ts:318`
+    //       `loadPluginHooks`). Plugins live under `getPluginsDirectory()` =
+    //       `~/.claude/plugins` (`pluginDirectories.ts:53`), honoring the
+    //       `CLAUDE_CODE_PLUGIN_CACHE_DIR` override. Best-effort: a malformed
+    //       plugin logs a warning and is skipped — discovery never breaks boot
+    //       (a fresh install with no `plugins/` dir yields zero plugins, an
+    //       exact no-op). MCP / LSP / skills / output-styles materialisation
+    //       into LIVE registries and the `settings.enabledPlugins` allowlist
+    //       are residual (the root holds no `Arc<RwLock>` for those and
+    //       `lsp_registry: None` upstream); the manager is given a real but
+    //       isolated LSP/skill/output-style/tool registry so `enable()` is
+    //       non-panicking while only commands + hooks reach the engine's live
+    //       registries.
+    {
+        let plugins_dir = std::env::var_os("CLAUDE_CODE_PLUGIN_CACHE_DIR").map_or_else(
+            || cfg.claude_home.join("plugins"),
+            std::path::PathBuf::from,
+        );
+        let discovered = plugin::discover_installed_plugins(&plugins_dir).await;
+        if !discovered.is_empty() {
+            // Real LSP registry (its plugin-server registration path is the
+            // only supported one); empty skill/output-style/tool registries
+            // for the component types not materialised this pass.
+            let pm = plugin::PluginManager::new(
+                plugins_dir.clone(),
+                Arc::new(PosixFileSystem::new(cwd_for_plugins.clone())),
+                http.clone(),
+                Arc::new(PosixRuntime::new()),
+                credentials.clone(),
+                Arc::new(plugin::PluginBlocklist::new(String::new())),
+                Arc::new(plugin::StrictPluginOnlyPolicy::empty()),
+                shared_command_registry.clone(),
+                Arc::new(RwLock::new(SkillRegistry::new())),
+                plugin_hook_registry.clone(),
+                Arc::new(RwLock::new(outputstyles::OutputStyleRegistry::new())),
+                plugin_mcp_registry.clone(),
+                Arc::new(lsp::LspRegistry::new(Arc::new(
+                    platform_posix::PosixLspTransport::new(),
+                ))),
+                Arc::new(RwLock::new(ToolRegistry::new())),
+            );
+            for (id, manifest, dir) in discovered {
+                let plugin_name = manifest.name.clone();
+                // Materialise the plugin's AGENTS into the live catalog via the
+                // dir-scan loader (the manager validates agent frontmatter but
+                // does not own the catalog). Plugin agents win on collision
+                // (passed as a later contribution).
+                let agents_dir = dir.join("agents");
+                if agents_dir.is_dir() {
+                    let plugin_agents = agent::load_agents_from_dirs(&[(
+                        agents_dir,
+                        agent::definition::AgentSource::Plugin,
+                    )])
+                    .await;
+                    if !plugin_agents.is_empty() {
+                        let mut cat = plugin_agent_catalog.write().await;
+                        for a in plugin_agents {
+                            // Replace any same-named agent; otherwise append.
+                            if let Some(slot) =
+                                cat.iter_mut().find(|e| e.agent_type == a.agent_type)
+                            {
+                                *slot = a;
+                            } else {
+                                cat.push(a);
+                            }
+                        }
+                    }
+                }
+                // Materialise COMMANDS + HOOKS (and validate agent frontmatter).
+                if let Err(e) = pm.enable(&id, manifest, dir).await {
+                    tracing::warn!(
+                        plugin = %plugin_name,
+                        error = %e,
+                        "skipping plugin that failed to load"
+                    );
+                }
+            }
+        }
+    }
+
     let dispatcher = RegistrySlashDispatcher::new(shared_command_registry.clone());
 
     // (7) Session lifecycle: fire the `SessionStart` hooks now that the
@@ -3551,6 +3649,59 @@ mod tests {
             rt.orchestrator.has_compaction(),
             "no CompactionOrchestrator"
         );
+    }
+
+    /// GAP E: a plugin installed on disk under `<claude_home>/plugins` is
+    /// discovered + materialised at bootstrap — its command lands in the live
+    /// command registry the slash dispatcher reads.
+    #[tokio::test]
+    async fn build_discovers_and_materialises_an_installed_plugin() {
+        let (_tmp, cfg) = test_config(true);
+        // Lay down a fixture plugin under `<claude_home>/plugins/myplugin`.
+        let plugin_dir = cfg.claude_home.join("plugins").join("myplugin");
+        std::fs::create_dir_all(plugin_dir.join(".claude-plugin")).unwrap();
+        std::fs::write(
+            plugin_dir.join(".claude-plugin").join("plugin.json"),
+            r#"{"name":"myplugin","version":"1.0.0"}"#,
+        )
+        .unwrap();
+        std::fs::create_dir_all(plugin_dir.join("commands")).unwrap();
+        std::fs::write(
+            plugin_dir.join("commands").join("hello.md"),
+            "Hello from the plugin.\n",
+        )
+        .unwrap();
+
+        let output: Arc<dyn traits::OutputStream> =
+            Arc::new(orchestrator::test_support::MockOutputStream::new());
+        let perm_sink: Arc<dyn client_adapter::PermissionRequestSink> =
+            Arc::new(RecordingPermissionSink::default());
+
+        let rt = build(cfg, output, perm_sink).await.expect("build() failed");
+
+        // The plugin command is reachable through the dispatcher's registry.
+        let reg = rt.dispatcher.registry();
+        let reg = reg.read().await;
+        let cmd = reg
+            .resolve("hello")
+            .expect("plugin command `hello` should be discovered at bootstrap");
+        assert_eq!(cmd.source, command_api::CommandSource::Plugin);
+    }
+
+    /// GAP E: a fresh install with no `<claude_home>/plugins` directory boots
+    /// with zero plugins — discovery is a strict no-op (non-breaking).
+    #[tokio::test]
+    async fn build_with_no_plugins_dir_is_a_noop() {
+        let (_tmp, cfg) = test_config(true);
+        let output: Arc<dyn traits::OutputStream> =
+            Arc::new(orchestrator::test_support::MockOutputStream::new());
+        let perm_sink: Arc<dyn client_adapter::PermissionRequestSink> =
+            Arc::new(RecordingPermissionSink::default());
+        // Must not panic / error; no plugin commands present.
+        let rt = build(cfg, output, perm_sink).await.expect("build() failed");
+        let reg = rt.dispatcher.registry();
+        let reg = reg.read().await;
+        assert!(reg.resolve("hello").is_none());
     }
 
     #[tokio::test]

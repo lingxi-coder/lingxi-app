@@ -52,6 +52,9 @@ cost = { path = "../../cost" }
 mcp = { path = "../../mcp" }
 hooks = { path = "../../hooks" }
 agent = { path = "../../agent" }
+plugin = { path = "../../plugin" }
+outputstyles = { path = "../../outputstyles" }
+lsp = { path = "../../lsp" }
 compaction = { path = "../../compaction" }
 sidequery = { path = "../../sidequery" }
 tasks = { path = "../../tasks" }

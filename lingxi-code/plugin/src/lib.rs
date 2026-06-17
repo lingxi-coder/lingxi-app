@@ -14,6 +14,7 @@
 
 pub mod agent_validation;
 pub mod blocklist;
+pub mod discovery;
 pub mod lifecycle;
 pub mod loader;
 pub mod manager;
@@ -25,6 +26,7 @@ pub mod trust;
 
 pub use agent_validation::{validate_plugin_agent_frontmatter, AgentValidationError};
 pub use blocklist::PluginBlocklist;
+pub use discovery::discover_installed_plugins;
 pub use lifecycle::PluginState;
 pub use loader::{resolve_user_config, LoaderError};
 pub use manager::{PluginManager, PluginManagerError};

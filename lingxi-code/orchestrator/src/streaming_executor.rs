@@ -141,6 +141,15 @@ pub(crate) struct StreamingToolExecutor<'a> {
     inflight: FuturesUnordered<
         std::pin::Pin<Box<dyn std::future::Future<Output = (usize, DispatchOutcome)> + Send + 'a>>,
     >,
+    /// PHASE-2: parent cancellation token for in-flight siblings. Each dispatched
+    /// tool receives a `child_token()` of this, threaded into its
+    /// `ToolUseContext::cancel`. When a Bash tool errors (sibling-error cascade)
+    /// or the turn is discarded (streaming fallback), `cancel()` fires every
+    /// child — an in-flight Bash observing the token SIGKILLs its subprocess
+    /// (`kill_on_drop`) and returns `Aborted`, whose real outcome `drain_one`
+    /// then substitutes with the synthetic sibling-cancel block.
+    /// Mirrors claude-code's `siblingAbortController` / `createChildAbortController`.
+    sibling_cancel: tokio_util::sync::CancellationToken,
 }
 
 impl<'a> StreamingToolExecutor<'a> {
@@ -154,6 +163,7 @@ impl<'a> StreamingToolExecutor<'a> {
             errored_desc: None,
             discarded: false,
             inflight: FuturesUnordered::new(),
+            sibling_cancel: tokio_util::sync::CancellationToken::new(),
         }
     }
 
@@ -264,10 +274,14 @@ impl<'a> StreamingToolExecutor<'a> {
         let input = self.tools[i].input.clone();
         let provider_id = self.tools[i].provider_id.clone();
         let orch = self.orch;
+        // PHASE-2: hand this tool a child of the executor's sibling token. If a
+        // sibling Bash later errors (or the turn is discarded), `sibling_cancel`
+        // fires and this child fires too — an in-flight Bash kills its subprocess.
+        let child = self.sibling_cancel.child_token();
         let fut = async move {
             let single = vec![(id, name, input, provider_id)];
             let outcome: DispatchOutcome =
-                match crate::turn_loop::dispatch_tool_uses_tracked(orch, &single).await {
+                match crate::turn_loop::dispatch_tool_uses_tracked(orch, &single, Some(child)).await {
                     // `single` has one element, so `pop()` == the only result.
                     Ok((mut blocks, _prevent, injected, modifiers)) => blocks
                         .pop()
@@ -297,19 +311,25 @@ impl<'a> StreamingToolExecutor<'a> {
     pub(crate) async fn drain_one(&mut self) -> Option<usize> {
         let (i, outcome) = self.inflight.next().await?;
         // Did THIS tool itself produce an error (its own result is_error, or a hard Err)?
-        // claude-code's `!thisToolErrored` guard: a tool that errored keeps its own
-        // result and is never given a sibling-cancel.
         let this_tool_errored = match &outcome {
             Ok((block, ..)) => matches!(block, ContentBlock::ToolResult { is_error: true, .. }),
             Err(_) => true,
         };
-        // Compute the abort reason from PRIOR state (a sibling Bash error / discard set
-        // by an earlier drain). Mirrors getAbortReason: discarded → StreamingFallback
-        // takes precedence over has_errored → SiblingError. Only applies to a tool that
-        // did NOT itself error.
-        let abort_reason = if this_tool_errored {
-            None
-        } else if self.discarded {
+        // Compute the abort reason from PRIOR state — a sibling Bash error / discard set
+        // by an EARLIER drain. Mirrors getAbortReason: discarded → StreamingFallback
+        // takes precedence over has_errored → SiblingError.
+        //
+        // PHASE-2 note on the guard: this is computed from PRIOR state, so the tool
+        // whose error TRIGGERS the cascade (the Bash erroring on THIS drain) always
+        // sees `abort_reason == None` (prior state was still clean) and keeps its own
+        // error — that is claude-code's `!thisToolErrored` distinction. Every OTHER
+        // in-flight sibling drains while the prior state is already dirty and is a
+        // cascade VICTIM: it gets the synthetic sibling-cancel REGARDLESS of its own
+        // outcome. This is required for the subprocess-kill path, where the cancelled
+        // in-flight Bash returns `Err(Aborted)` (an error block) yet must still be
+        // substituted with the synthetic — keying off the tool's own error here would
+        // wrongly let it keep "Error: aborted" instead.
+        let abort_reason = if self.discarded {
             Some(AbortReason::StreamingFallback)
         } else if self.has_errored {
             Some(AbortReason::SiblingError)
@@ -325,6 +345,10 @@ impl<'a> StreamingToolExecutor<'a> {
                 {
                     self.has_errored = true;
                     self.errored_desc = Some(tool_description(&self.tools[i]));
+                    // PHASE-2: fire the sibling token so in-flight siblings' child
+                    // tokens cancel — an in-flight Bash kills its subprocess and
+                    // returns early; `drain_one` then substitutes the synthetic.
+                    self.sibling_cancel.cancel();
                 }
             }
         }
@@ -399,6 +423,9 @@ impl<'a> StreamingToolExecutor<'a> {
     #[allow(dead_code)]
     fn discard(&mut self) {
         self.discarded = true;
+        // PHASE-2: streaming-fallback also aborts in-flight work — fire the
+        // sibling token so any in-flight Bash kills its subprocess.
+        self.sibling_cancel.cancel();
     }
 
     #[cfg(test)]
@@ -1248,6 +1275,128 @@ mod tests {
             "in-flight sibling must get the synthetic sibling-cancel, got: {r1}"
         );
         assert!(!r1.contains("slow-ok"), "in-flight sibling's real result must be discarded: {r1}");
+    }
+
+    /// PHASE-2 plumbing+fire: a concurrency-SAFE tool ("Watcher") that races a
+    /// 200ms sleep against its `ctx.cancel` token, recording (via an
+    /// `Arc<AtomicBool>`) whether it OBSERVED cancellation. Proves the
+    /// executor's `sibling_cancel` child token actually reaches `ctx.cancel`
+    /// AND fires when a sibling Bash errors — the end-to-end plumbing test with
+    /// NO real subprocess.
+    struct CancelAwareSlowTool {
+        observed_cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    #[async_trait]
+    impl Tool for CancelAwareSlowTool {
+        fn name(&self) -> &str { "Watcher" }
+        fn input_schema(&self) -> &serde_json::Value {
+            static SCHEMA: once_cell::sync::Lazy<serde_json::Value> =
+                once_cell::sync::Lazy::new(|| json!({ "type": "object", "properties": {} }));
+            &SCHEMA
+        }
+        fn is_enabled(&self, _ctx: &ToolStaticContext) -> bool { true }
+        fn max_result_size_chars(&self) -> usize { 1024 * 1024 }
+        fn is_concurrency_safe(&self, _input: &serde_json::Value) -> bool { true }
+        fn is_read_only(&self, _input: &serde_json::Value) -> bool { true }
+        async fn validate_input(
+            &self,
+            _input: &serde_json::Value,
+            _ctx: &ToolUseContext,
+        ) -> Result<(), ValidationError> {
+            Ok(())
+        }
+        async fn check_permissions(
+            &self,
+            _input: &serde_json::Value,
+            _ctx: &ToolUseContext,
+        ) -> permission::PermissionResult {
+            permission::PermissionResult::Allow {
+                reason: permission::PermissionDecisionReason::Other { reason: "test".into() },
+                updated_input: None,
+                update_destination: None,
+                metadata: permission::result::PermissionMetadata::default(),
+            }
+        }
+        async fn description(
+            &self,
+            _input: &serde_json::Value,
+            _opts: &DescriptionOptions,
+        ) -> String {
+            "watcher".into()
+        }
+        async fn prompt(&self, _opts: &PromptOptions) -> String { String::new() }
+        async fn call(
+            &self,
+            _input: serde_json::Value,
+            ctx: ToolUseContext,
+            _tx: ToolProgressSender,
+        ) -> Result<ToolCallResult, ToolError> {
+            let token = ctx.cancel.clone().expect("PHASE-2: ctx.cancel must be threaded in");
+            tokio::select! {
+                () = tokio::time::sleep(std::time::Duration::from_millis(200)) => {
+                    Ok(ToolCallResult {
+                        data: json!({ "content": "watcher-ran-to-end" }),
+                        new_messages: vec![],
+                        context_modifier: None,
+                        mcp_meta: None,
+                    })
+                }
+                () = token.cancelled() => {
+                    self.observed_cancel.store(true, std::sync::atomic::Ordering::SeqCst);
+                    Err(ToolError::Aborted)
+                }
+            }
+        }
+    }
+
+    /// PHASE-2 end-to-end plumbing+fire test. A concurrency-SAFE Bash that errors
+    /// immediately runs alongside the in-flight `Watcher`. Bash drains first,
+    /// sets `has_errored`, and fires `sibling_cancel`; the Watcher's child token
+    /// (delivered into its `ctx.cancel`) fires, it returns `Aborted`, and
+    /// `drain_one` substitutes the synthetic sibling-cancel. We assert BOTH that
+    /// the Watcher observed cancellation (the token reached `ctx.cancel` AND
+    /// fired) and that its result is the synthetic Cancelled (2a substitution).
+    #[tokio::test]
+    async fn sibling_cancel_token_reaches_ctx_and_fires_on_bash_error() {
+        let observed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let mut registry = ToolRegistry::new();
+        registry.register_builtin(Arc::new(SafeBashErrorTool) as Arc<dyn Tool>);
+        registry.register_builtin(
+            Arc::new(CancelAwareSlowTool { observed_cancel: observed.clone() }) as Arc<dyn Tool>,
+        );
+        let orch = ConversationOrchestrator::new(
+            OrchestratorConfig::default(),
+            Arc::new(MockApiClient::new(vec![])),
+            Arc::new(registry),
+            noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            PathBuf::from("/tmp"),
+        );
+        let a = MessageId::new();
+        let mut exec = StreamingToolExecutor::new(&orch);
+        exec.add_tool(ToolUseId::new(), "Bash".into(), json!({"command":"false"}), None, a);
+        exec.add_tool(ToolUseId::new(), "Watcher".into(), json!({}), None, a);
+        let results = exec.run_to_completion().await.unwrap();
+        // The token reached ctx.cancel AND fired: the Watcher observed it.
+        assert!(
+            observed.load(std::sync::atomic::Ordering::SeqCst),
+            "Watcher must observe its ctx.cancel firing when the sibling Bash errors"
+        );
+        // tools[1] = Watcher gets the synthetic sibling-cancel (2a substitution),
+        // NOT its real Ok ("watcher-ran-to-end").
+        let ContentBlock::ToolResult { content: r1, is_error: e1, .. } = &results[1] else { panic!() };
+        assert!(*e1, "in-flight sibling must be marked errored (synthetic)");
+        assert!(
+            r1.contains("Cancelled: parallel tool call Bash"),
+            "in-flight sibling must get the synthetic sibling-cancel, got: {r1}"
+        );
+        assert!(
+            !r1.contains("watcher-ran-to-end"),
+            "in-flight sibling's real result must be discarded: {r1}"
+        );
     }
 
     /// Non-cascade control: two slow safe tools, neither named Bash, both

@@ -53,9 +53,8 @@ use orchestrator::{
 use permission::gate::PermissionGate;
 use platform_posix::{
     secure_storage_for_platform, PosixClock, PosixFileSystem, PosixHttp, PosixMcpTransport,
-    PosixProcess, PosixRuntime, PosixSandbox,
+    PosixProcess, PosixRuntime, PosixSandbox, PosixWorktreeManager,
 };
-use platform_posix_minimal::PosixWorktree;
 use sandbox::decision::ProjectTrustLevel;
 use sandbox::runtime_config::Platform as SandboxPlatform;
 use secret::CredentialManager;
@@ -2526,7 +2525,7 @@ pub async fn build(
         http: http.clone(),
         provider: tool_provider,
         default_model: orch_cfg.model.clone(),
-        worktree: Arc::new(PosixWorktree::new()),
+        worktree: Arc::new(PosixWorktreeManager::new(cwd.clone())),
         subagent_spawner: Some(subagent_spawner),
         task_registry: Some(
             task_registry.clone() as Arc<dyn traits::task_registry::TaskRegistryHandle>

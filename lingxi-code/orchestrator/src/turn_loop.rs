@@ -493,7 +493,7 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
     let mut hook_prevent_continuation = false;
     if !tool_uses.is_empty() {
         let (tool_results, prevent, injected_messages, context_modifiers) =
-            dispatch_tool_uses_tracked(orch, &tool_uses).await?;
+            dispatch_tool_uses_tracked(orch, &tool_uses, None).await?;
         hook_prevent_continuation = prevent;
         // Append a fresh user message carrying the tool results.
         let user_id = MessageId::new();
@@ -1034,7 +1034,7 @@ pub(crate) async fn dispatch_tool_uses(
     orch: &ConversationOrchestrator,
     tool_uses: &[(ToolUseId, String, serde_json::Value, Option<String>)],
 ) -> Result<Vec<ContentBlock>, OrchestratorError> {
-    Ok(dispatch_tool_uses_tracked(orch, tool_uses).await?.0)
+    Ok(dispatch_tool_uses_tracked(orch, tool_uses, None).await?.0)
 }
 
 /// HOOK.2 twin of [`dispatch_tool_uses`] that ALSO returns whether any
@@ -1047,6 +1047,12 @@ pub(crate) async fn dispatch_tool_uses(
 pub(crate) async fn dispatch_tool_uses_tracked(
     orch: &ConversationOrchestrator,
     tool_uses: &[(ToolUseId, String, serde_json::Value, Option<String>)],
+    // PHASE-2: sibling `CancellationToken` (a child of the streaming executor's
+    // `sibling_cancel`) threaded into each tool's `ToolUseContext::cancel`. The
+    // Bash tool observes it to SIGKILL an in-flight subprocess when a sibling
+    // Bash errors (or the turn is discarded). `None` for every non-streaming
+    // caller (batched turn loop + tests) → no cancellation ever fires.
+    cancel: Option<tokio_util::sync::CancellationToken>,
 ) -> Result<
     (
         Vec<ContentBlock>,
@@ -1167,7 +1173,11 @@ pub(crate) async fn dispatch_tool_uses_tracked(
             content_replacement_state: None,
             session: Some(orch.session.clone()),
             subagent_registry: Some(orch.tools.clone()),
-            cancel: None,
+            // PHASE-2: hand each tool a clone of the sibling cancel token (the
+            // streaming executor passes a per-tool child; every other caller
+            // passes `None`). Clone per-tool since this loop may dispatch a
+            // batch (the streaming executor calls one-tool-at-a-time).
+            cancel: cancel.clone(),
         };
 
         // validate_input gate (claude-code `toolExecution.ts:683-723`): a
@@ -3247,7 +3257,7 @@ mod pre_tool_hook_tests {
         let skill_tu = ToolUseId::new();
         let uses = vec![(skill_tu, "Inject".to_string(), json!({}), None)];
         let (results, _prevent, injected, _mods) =
-            dispatch_tool_uses_tracked(&orch, &uses).await.unwrap();
+            dispatch_tool_uses_tracked(&orch, &uses, None).await.unwrap();
         // The tool_result block still rides the first tuple element.
         let (content, is_error) = tool_result(&results[0]);
         assert!(!is_error);
@@ -3415,7 +3425,7 @@ mod pre_tool_hook_tests {
             vec![],
         );
         let (_results, _prevent, injected, _mods) =
-            dispatch_tool_uses_tracked(&orch, &uses()).await.unwrap();
+            dispatch_tool_uses_tracked(&orch, &uses(), None).await.unwrap();
         assert!(
             injected.is_empty(),
             "Echo injects no messages → history is byte-identical to before"
@@ -3438,7 +3448,7 @@ mod pre_tool_hook_tests {
             vec![],
         );
         let (results, prevent, _injected, _mods) =
-            dispatch_tool_uses_tracked(&orch, &uses()).await.unwrap();
+            dispatch_tool_uses_tracked(&orch, &uses(), None).await.unwrap();
         assert!(!prevent);
         let (content, is_error) = tool_result(&results[0]);
         assert!(!is_error, "tool ran successfully");
@@ -3463,7 +3473,7 @@ mod pre_tool_hook_tests {
             vec![],
         );
         let (_results, prevent, _injected, _mods) =
-            dispatch_tool_uses_tracked(&orch, &uses()).await.unwrap();
+            dispatch_tool_uses_tracked(&orch, &uses(), None).await.unwrap();
         assert!(prevent, "continue:false must surface as prevent_continuation");
     }
 
@@ -3534,7 +3544,7 @@ mod pre_tool_hook_tests {
             ..HookResponse::default()
         };
         let orch = orch_with(pre_hook_executor(resp), Arc::new(DenyAllGate), vec![]);
-        let (results, _, _, _) = dispatch_tool_uses_tracked(&orch, &uses()).await.unwrap();
+        let (results, _, _, _) = dispatch_tool_uses_tracked(&orch, &uses(), None).await.unwrap();
         let (content, is_error) = tool_result(&results[0]);
         assert!(!is_error, "hook allow skipped the prompt; tool ran");
         assert!(content.contains("ECHOED-OUTPUT"));
@@ -3552,7 +3562,7 @@ mod pre_tool_hook_tests {
             ..HookResponse::default()
         };
         let orch = orch_with(pre_hook_executor(resp), Arc::new(DenyRuleGate), vec![]);
-        let (results, _, _, _) = dispatch_tool_uses_tracked(&orch, &uses()).await.unwrap();
+        let (results, _, _, _) = dispatch_tool_uses_tracked(&orch, &uses(), None).await.unwrap();
         let (content, is_error) = tool_result(&results[0]);
         assert!(is_error, "a deny rule must override a hook 'allow'");
         assert!(content.contains("Permission denied: denied-by-rule"));
@@ -3573,7 +3583,7 @@ mod pre_tool_hook_tests {
             Arc::new(crate::test_support::NoOpPermissionGate),
             vec![],
         );
-        let (results, _, _, _) = dispatch_tool_uses_tracked(&orch, &uses()).await.unwrap();
+        let (results, _, _, _) = dispatch_tool_uses_tracked(&orch, &uses(), None).await.unwrap();
         let (content, is_error) = tool_result(&results[0]);
         assert!(is_error);
         assert!(content.contains("Hook blocked: nope"));
@@ -3588,7 +3598,7 @@ mod pre_tool_hook_tests {
             Arc::new(DenyAllGate),
             vec![],
         );
-        let (results, _, _, _) = dispatch_tool_uses_tracked(&orch, &uses()).await.unwrap();
+        let (results, _, _, _) = dispatch_tool_uses_tracked(&orch, &uses(), None).await.unwrap();
         let (content, is_error) = tool_result(&results[0]);
         assert!(is_error, "gate denial applies when the hook makes no decision");
         assert!(content.contains("Permission denied: denied-by-gate"));
@@ -3608,7 +3618,7 @@ mod pre_tool_hook_tests {
             vec![],
         );
         let uses = vec![(ToolUseId::new(), "NoSuchTool".to_string(), json!({}), None)];
-        let (results, _, _, _) = dispatch_tool_uses_tracked(&orch, &uses).await.unwrap();
+        let (results, _, _, _) = dispatch_tool_uses_tracked(&orch, &uses, None).await.unwrap();
         assert_eq!(results.len(), 1);
         let (content, is_error) = tool_result(&results[0]);
         assert!(is_error, "unknown tool must set is_error=true");
@@ -3718,7 +3728,7 @@ mod pre_tool_hook_tests {
             PathBuf::from("/tmp"),
         );
         let uses = vec![(ToolUseId::new(), "AlwaysFail".to_string(), json!({}), None)];
-        let (results, _, _, _) = dispatch_tool_uses_tracked(&orch, &uses).await.unwrap();
+        let (results, _, _, _) = dispatch_tool_uses_tracked(&orch, &uses, None).await.unwrap();
         assert_eq!(results.len(), 1);
         let (content, is_error) = tool_result(&results[0]);
         assert!(is_error, "a failing tool must set is_error=true");
@@ -3875,7 +3885,7 @@ mod pre_tool_hook_tests {
             PathBuf::from("/tmp"),
         );
         let uses = vec![(ToolUseId::new(), "ValidatingFail".to_string(), json!({}), None)];
-        let (results, _, _, _) = dispatch_tool_uses_tracked(&orch, &uses).await.unwrap();
+        let (results, _, _, _) = dispatch_tool_uses_tracked(&orch, &uses, None).await.unwrap();
         assert_eq!(results.len(), 1);
         let (content, is_error) = tool_result(&results[0]);
         assert!(is_error, "validate_input failure must set is_error=true");
@@ -3905,7 +3915,7 @@ mod pre_tool_hook_tests {
             PathBuf::from("/tmp"),
         );
         let uses = vec![(ToolUseId::new(), "ValidatingFail".to_string(), json!({}), None)];
-        let (results, _, _, _) = dispatch_tool_uses_tracked(&orch, &uses).await.unwrap();
+        let (results, _, _, _) = dispatch_tool_uses_tracked(&orch, &uses, None).await.unwrap();
         let (content, is_error) = tool_result(&results[0]);
         assert!(is_error);
         assert_eq!(content, "<tool_use_error>bad path</tool_use_error>");
@@ -3928,7 +3938,7 @@ mod pre_tool_hook_tests {
             vec![],
         );
         orch.session.lock().await.plan_mode = true;
-        let (results, _, _, _) = dispatch_tool_uses_tracked(&orch, &uses()).await.unwrap();
+        let (results, _, _, _) = dispatch_tool_uses_tracked(&orch, &uses(), None).await.unwrap();
         let (content, is_error) = tool_result(&results[0]);
         assert!(is_error);
         assert!(
@@ -3949,7 +3959,7 @@ mod pre_tool_hook_tests {
         };
         let orch = orch_with(pre_hook_executor(resp), Arc::new(RouteProbeGate), vec![]);
         orch.session.lock().await.plan_mode = true;
-        let (results, _, _, _) = dispatch_tool_uses_tracked(&orch, &uses()).await.unwrap();
+        let (results, _, _, _) = dispatch_tool_uses_tracked(&orch, &uses(), None).await.unwrap();
         let (content, is_error) = tool_result(&results[0]);
         assert!(is_error, "plan mode binds over the hook 'allow'");
         assert!(
@@ -3967,7 +3977,7 @@ mod pre_tool_hook_tests {
             vec![],
         );
         // plan_mode defaults to false.
-        let (results, _, _, _) = dispatch_tool_uses_tracked(&orch, &uses()).await.unwrap();
+        let (results, _, _, _) = dispatch_tool_uses_tracked(&orch, &uses(), None).await.unwrap();
         let (content, is_error) = tool_result(&results[0]);
         assert!(is_error);
         assert!(
@@ -3992,7 +4002,7 @@ mod pre_tool_hook_tests {
             Arc::new(AskGate),
             vec![],
         );
-        let (results, _, _, _) = dispatch_tool_uses_tracked(&orch, &uses()).await.unwrap();
+        let (results, _, _, _) = dispatch_tool_uses_tracked(&orch, &uses(), None).await.unwrap();
         let (content, is_error) = tool_result(&results[0]);
         assert!(
             !is_error,
@@ -4014,7 +4024,7 @@ mod pre_tool_hook_tests {
             Arc::new(AskGate),
             vec![],
         );
-        let (results, _, _, _) = dispatch_tool_uses_tracked(&orch, &uses()).await.unwrap();
+        let (results, _, _, _) = dispatch_tool_uses_tracked(&orch, &uses(), None).await.unwrap();
         let (content, is_error) = tool_result(&results[0]);
         assert!(is_error);
         assert!(
@@ -4032,7 +4042,7 @@ mod pre_tool_hook_tests {
             Arc::new(AskGate),
             vec![],
         );
-        let (results, _, _, _) = dispatch_tool_uses_tracked(&orch, &uses()).await.unwrap();
+        let (results, _, _, _) = dispatch_tool_uses_tracked(&orch, &uses(), None).await.unwrap();
         let (content, is_error) = tool_result(&results[0]);
         assert!(is_error);
         assert!(
@@ -4055,7 +4065,7 @@ mod pre_tool_hook_tests {
             Arc::new(SourcedDenyGate(PermissionDecisionSource::Rule)),
             vec![],
         );
-        let (results, _, _, _) = dispatch_tool_uses_tracked(&orch, &uses()).await.unwrap();
+        let (results, _, _, _) = dispatch_tool_uses_tracked(&orch, &uses(), None).await.unwrap();
         assert!(tool_result(&results[0]).1, "rule deny still denies the tool");
         assert_eq!(
             fired_rule.load(Ordering::SeqCst),
@@ -4070,7 +4080,7 @@ mod pre_tool_hook_tests {
             Arc::new(SourcedDenyGate(PermissionDecisionSource::Classifier)),
             vec![],
         );
-        let (results2, _, _, _) = dispatch_tool_uses_tracked(&orch2, &uses()).await.unwrap();
+        let (results2, _, _, _) = dispatch_tool_uses_tracked(&orch2, &uses(), None).await.unwrap();
         assert!(tool_result(&results2[0]).1, "classifier deny denies the tool");
         assert_eq!(
             fired_cls.load(Ordering::SeqCst),

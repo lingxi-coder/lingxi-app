@@ -579,6 +579,15 @@ impl Tool for BashTool {
         use sandbox::decision::{should_use_sandbox, SandboxDecision};
         use traits::sandbox::ProcessCommand as SbxCommand;
 
+        // PHASE-2: sibling `CancellationToken` threaded in by the streaming
+        // executor (a child of `sibling_cancel`). When an in-flight sibling Bash
+        // errors the executor fires it; the foreground run below races against
+        // it and, on cancel, drops the `run` future — `kill_on_drop` SIGKILLs
+        // the subprocess — returning `Aborted` so the executor substitutes the
+        // synthetic sibling-cancel. `None` for every non-streaming caller, in
+        // which case the run is awaited directly (no behavior change).
+        let cancel = ctx.cancel.clone();
+
         let cmd_str = input
             .get("command")
             .and_then(Value::as_str)
@@ -806,7 +815,24 @@ impl Tool for BashTool {
         let sandboxed = self.ctx.sandbox.bypass_with_audit(pcmd, "bash_tool_call");
 
         // ===== Foreground spawn =====
-        let run_result = self.ctx.process.run(&sandboxed).await;
+        // PHASE-2: race the run against the sibling cancel token. On cancel the
+        // `run` future is dropped — the posix `ProcessRunner` set
+        // `kill_on_drop(true)`, so the child is SIGKILLed — and we return
+        // `Aborted`; the streaming executor substitutes the synthetic
+        // sibling-cancel result. With no token, await the run directly.
+        let run_fut = self.ctx.process.run(&sandboxed);
+        let run_result = match &cancel {
+            Some(token) => {
+                tokio::select! {
+                    biased;
+                    () = token.cancelled() => {
+                        return Err(ToolError::Aborted);
+                    }
+                    res = run_fut => res,
+                }
+            }
+            None => run_fut.await,
+        };
         // The wrapped command has finished: tear down any per-command sandbox
         // state (e.g. bwrap mount points). No-op for the default
         // `LegacyWrapRunner`; only the live runner has anything to clean up.
@@ -1116,6 +1142,59 @@ mod tests {
         assert_eq!(res.data["stdout"], "hello");
         assert_eq!(res.data["is_error"], false);
         assert_eq!(res.data["timed_out"], false);
+    }
+
+    /// PHASE-2: when `ctx.cancel` is a token that is already fired, the
+    /// foreground run's `tokio::select!` takes the (biased) cancel arm and the
+    /// call returns `ToolError::Aborted` — the seam the streaming executor uses
+    /// to substitute the synthetic sibling-cancel.
+    ///
+    /// Determinism: the stub `ProcessRunner::run` returns Ready immediately
+    /// (no yield), so BOTH select arms are Ready. We pre-cancel the token AND
+    /// use `biased;` with the cancel arm FIRST, so the cancel branch is chosen
+    /// deterministically — mirroring real cancellation where the executor fires
+    /// the token before/while the subprocess is in flight.
+    #[tokio::test]
+    async fn foreground_returns_aborted_when_cancel_token_fired() {
+        let out = ProcessOutput {
+            stdout: "should-not-be-seen\n".into(),
+            stderr: String::new(),
+            exit_code: 0,
+            timed_out: false,
+        };
+        let tool = BashTool::new(shell_test_ctx(out));
+        let token = tokio_util::sync::CancellationToken::new();
+        token.cancel(); // pre-fire so `cancelled()` is Ready
+        let mut ctx = use_ctx();
+        ctx.cancel = Some(token);
+        let err = tool
+            .call(json!({"command": "sleep 100"}), ctx, fresh_tx())
+            .await
+            .expect_err("a fired cancel token must abort the run");
+        assert!(
+            matches!(err, ToolError::Aborted),
+            "expected ToolError::Aborted, got {err:?}"
+        );
+    }
+
+    /// Control: with NO cancel token (`ctx.cancel == None`) the run is awaited
+    /// directly and completes normally — proving the select wrap is inert for
+    /// every non-streaming caller (byte-for-byte unchanged behavior).
+    #[tokio::test]
+    async fn foreground_no_cancel_token_runs_normally() {
+        let out = ProcessOutput {
+            stdout: "hello\n".into(),
+            stderr: String::new(),
+            exit_code: 0,
+            timed_out: false,
+        };
+        let tool = BashTool::new(shell_test_ctx(out));
+        let res = tool
+            .call(json!({"command": "echo hello"}), use_ctx(), fresh_tx())
+            .await
+            .expect("no token → normal completion");
+        assert_eq!(res.data["stdout"], "hello");
+        assert_eq!(res.data["is_error"], false);
     }
 
     #[tokio::test]

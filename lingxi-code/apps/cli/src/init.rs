@@ -122,6 +122,9 @@ pub enum InitError {
     /// Orchestrator construction failed (currently infallible).
     #[error("orchestrator construction failed: {0}")]
     Orchestrator(String),
+    /// Secure-storage backend initialization failed.
+    #[error("secure storage init failed: {0}")]
+    SecureStorage(String),
 }
 
 impl From<engine_desktop::BuildError> for InitError {
@@ -129,6 +132,7 @@ impl From<engine_desktop::BuildError> for InitError {
         match e {
             engine_desktop::BuildError::ApiBase(m) => Self::ApiBase(m),
             engine_desktop::BuildError::Orchestrator(m) => Self::Orchestrator(m),
+            engine_desktop::BuildError::SecureStorage(m) => Self::SecureStorage(m),
         }
     }
 }

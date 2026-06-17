@@ -102,6 +102,11 @@ pub struct Runtime {
     /// `/connect` screen's `pump_store_provider_key` persists a collected key.
     /// `None` (the default) leaves the pump a no-op (smoke gates / resume picker).
     provider_key_store: Option<Arc<secret::CredentialManager>>,
+    /// (TUI-PERM) Receiver for `TuiPermissionGate` exchanges, handed in by the
+    /// CLI (`build_runtime_for_tui`). `None` (smoke gates / resume picker) keeps
+    /// the permission pump inert. Moved into a take-once slot at mount.
+    pub permission_rx:
+        Option<tokio::sync::mpsc::Receiver<crate::permission_bridge::PermissionExchange>>,
 }
 
 impl Runtime {
@@ -122,6 +127,7 @@ impl Runtime {
             provider_availability: std::collections::BTreeMap::new(),
             model_providers: std::collections::BTreeMap::new(),
             provider_key_store: None,
+            permission_rx: None,
         }
     }
 
@@ -146,6 +152,7 @@ impl Runtime {
             provider_availability: std::collections::BTreeMap::new(),
             model_providers: std::collections::BTreeMap::new(),
             provider_key_store: None,
+            permission_rx: None,
         }
     }
 
@@ -179,6 +186,18 @@ impl Runtime {
         turn_tx: mpsc::UnboundedSender<crate::events::orchestrator_bridge::TurnEvent>,
     ) -> Self {
         self.turn_tx = Some(turn_tx);
+        self
+    }
+
+    /// (TUI-PERM) Attach the `TuiPermissionGate` receiver so the root's
+    /// permission pump can drain it. Without it the interactive prompt never
+    /// appears (the engine still auto-allows / denies per its gate selection).
+    #[must_use]
+    pub fn with_permission_rx(
+        mut self,
+        permission_rx: tokio::sync::mpsc::Receiver<crate::permission_bridge::PermissionExchange>,
+    ) -> Self {
+        self.permission_rx = Some(permission_rx);
         self
     }
 
@@ -373,10 +392,18 @@ pub async fn run_tui_session(
         None => (None, None),
     };
 
+    // (TUI-PERM) Move the permission receiver into a take-once slot for the
+    // root's permission pump, mirroring `rx_slot`.
+    let permission_rx_slot: Option<crate::root::PermissionRxSlot> = runtime
+        .permission_rx
+        .take()
+        .map(|rx| Arc::new(std::sync::Mutex::new(Some(rx))));
+
     let result = element! {
         TuiRoot(
             state: Some(state.clone()),
             bridge_rx: Some(rx_slot),
+            permission_rx: permission_rx_slot,
             cancel: Some(cancel.clone()),
             session_id: Some(runtime.session_id),
             started_at: Some(started),

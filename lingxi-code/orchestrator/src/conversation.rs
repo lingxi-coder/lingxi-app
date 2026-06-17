@@ -53,6 +53,7 @@ pub trait OrchestratorApiClient: Send + Sync {
     async fn messages_create(
         &self,
         model: &str,
+        profile: Option<&str>,
         system: Option<&str>,
         msgs: Vec<ConversationMessage>,
         tools: Vec<serde_json::Value>,
@@ -71,12 +72,13 @@ pub trait OrchestratorApiClient: Send + Sync {
     async fn messages_create_with_opts(
         &self,
         model: &str,
+        profile: Option<&str>,
         system: Option<&str>,
         msgs: Vec<ConversationMessage>,
         tools: Vec<serde_json::Value>,
         _max_tokens: u32,
     ) -> Result<LlmResponse, LlmError> {
-        self.messages_create(model, system, msgs, tools).await
+        self.messages_create(model, profile, system, msgs, tools).await
     }
 
     /// Non-streaming `messages.create` with the **Opus-fallback** policy wired
@@ -98,6 +100,7 @@ pub trait OrchestratorApiClient: Send + Sync {
     async fn messages_create_with_fallback(
         &self,
         model: &str,
+        profile: Option<&str>,
         system: Option<&str>,
         msgs: Vec<ConversationMessage>,
         tools: Vec<serde_json::Value>,
@@ -107,7 +110,7 @@ pub trait OrchestratorApiClient: Send + Sync {
     ) -> Result<LlmResponse, LlmError> {
         // Default: ignore the fallback args and use the plain seam. Keeps all
         // non-Anthropic impls (and mocks) byte-identical.
-        self.messages_create(model, system, msgs, tools).await
+        self.messages_create(model, profile, system, msgs, tools).await
     }
 
     /// Non-streaming `messages.create` with a pre-seeded consecutive-529 counter.
@@ -127,6 +130,7 @@ pub trait OrchestratorApiClient: Send + Sync {
     async fn messages_create_seeded(
         &self,
         model: &str,
+        profile: Option<&str>,
         system: Option<&str>,
         msgs: Vec<ConversationMessage>,
         tools: Vec<serde_json::Value>,
@@ -134,7 +138,7 @@ pub trait OrchestratorApiClient: Send + Sync {
     ) -> Result<LlmResponse, LlmError> {
         // Default: ignore the seed and use the plain seam. Keeps all
         // non-Anthropic impls (and mocks) byte-identical.
-        self.messages_create(model, system, msgs, tools).await
+        self.messages_create(model, profile, system, msgs, tools).await
     }
 
     /// Count the input tokens a `messages.create` for `(model, system, msgs,
@@ -150,6 +154,7 @@ pub trait OrchestratorApiClient: Send + Sync {
     async fn count_tokens(
         &self,
         _model: &str,
+        _profile: Option<&str>,
         system: Option<&str>,
         msgs: Vec<ConversationMessage>,
         _tools: Vec<serde_json::Value>,
@@ -281,9 +286,15 @@ pub trait StreamingApiClient: Send + Sync {
     /// `message_stop` or a `Completed` event. The implementation is
     /// responsible for HTTP, SSE chunk buffering, and JSON-decoding the
     /// `data:` lines into typed `LlmEvent` values.
+    ///
+    /// `profile` — optional provider profile name (e.g. `"github-copilot"`).
+    /// Mirrors the `profile` parameter on the batched `messages_create*`
+    /// methods so the streaming path can thread `SessionState::model_profile`
+    /// through to `build_request` / `DefaultLlmClient::prepare`.
     async fn stream(
         &self,
         model: &str,
+        profile: Option<&str>,
         system: Option<&str>,
         messages: Vec<ConversationMessage>,
         tools: Vec<serde_json::Value>,
@@ -2384,9 +2395,9 @@ impl ConversationOrchestrator {
             self.maybe_compact_before_call().await;
 
             // 2. Open the stream for this turn.
-            let (mut snapshot, model) = {
+            let (mut snapshot, model, model_profile) = {
                 let s = self.session.lock().await;
-                (s.history.clone(), s.model.clone())
+                (s.history.clone(), s.model.clone(), s.model_profile.clone())
             };
 
             // OUTSTYLE.3 (streaming twin): per-turn, transient output-style
@@ -2502,6 +2513,7 @@ impl ConversationOrchestrator {
                 .streaming_api
                 .stream(
                     &model,
+                    model_profile.as_deref(),
                     system_prompt.as_deref(),
                     snapshot,
                     wire_tools.clone(),
@@ -2550,9 +2562,9 @@ impl ConversationOrchestrator {
                     // Re-snapshot history for the non-streaming call (the partial
                     // stream never touched session.history, so it is still the same
                     // snapshot we used for the stream — no reset needed).
-                    let (non_stream_snapshot, non_stream_model) = {
+                    let (non_stream_snapshot, non_stream_model, non_stream_profile) = {
                         let s = self.session.lock().await;
-                        (s.history.clone(), s.model.clone())
+                        (s.history.clone(), s.model.clone(), s.model_profile.clone())
                     };
                     let tools_for_fallback = wire_tools.clone();
 
@@ -2560,6 +2572,7 @@ impl ConversationOrchestrator {
                         .api
                         .messages_create_seeded(
                             &non_stream_model,
+                            non_stream_profile.as_deref(),
                             system_prompt.as_deref(),
                             non_stream_snapshot,
                             tools_for_fallback,
@@ -3573,6 +3586,7 @@ impl StreamingApiClient for NoStreamingApiClient {
     async fn stream(
         &self,
         _model: &str,
+        _profile: Option<&str>,
         _system: Option<&str>,
         _messages: Vec<ConversationMessage>,
         _tools: Vec<serde_json::Value>,
@@ -4633,6 +4647,51 @@ mod skill_model_override_tests {
         assert!(
             calls.iter().all(|c| c.model == crate::config::DEFAULT_MODEL),
             "every streaming call used the unchanged default model"
+        );
+    }
+
+    /// Regression guard for the streaming-profile gap: when `session.model_profile`
+    /// is set (e.g. `"github-copilot"`) the INITIAL streaming `.stream()` call
+    /// must carry the profile, not `None`.  Mirrors the batched
+    /// `build_request_sets_profile_when_provided` test in `provider_adapter.rs`.
+    #[tokio::test]
+    async fn streaming_threads_model_profile_to_stream_call() {
+        let turn = vec![
+            message_start("m1", crate::config::DEFAULT_MODEL),
+            content_block_start_text(0),
+            text_delta(0, "hello"),
+            content_block_stop(0),
+            message_delta_stop("end_turn"),
+            message_stop(),
+        ];
+        let streaming = Arc::new(MockStreamingApiClient::with_turns(vec![turn]));
+        let orch = ConversationOrchestrator::new_with_streaming(
+            OrchestratorConfig::default(),
+            Arc::new(MockApiClient::new(vec![])),
+            streaming.clone(),
+            registry_with(Arc::new(PlainTool)),
+            noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            std::env::temp_dir(),
+        );
+        // Set model_profile on the session directly (mirrors what switch_model does).
+        {
+            let mut s = orch.session.lock().await;
+            s.model_profile = Some("github-copilot".to_string());
+        }
+
+        orch.run_turn_streaming("hello")
+            .await
+            .expect("streaming turn");
+
+        let calls = streaming.captured_calls().await;
+        assert_eq!(calls.len(), 1, "one streaming call");
+        assert_eq!(
+            calls[0].profile.as_deref(),
+            Some("github-copilot"),
+            "streaming path must thread session.model_profile through to the stream() call"
         );
     }
 }

@@ -113,7 +113,7 @@ impl HookPromptRunner for ApiClientHookPromptRunner {
         let messages = vec![ConversationMessage::user(MessageId::new(), req.prompt)];
         let response = self
             .api
-            .messages_create(&model, Some(req.system_prompt.as_str()), messages, Vec::new())
+            .messages_create(&model, None, Some(req.system_prompt.as_str()), messages, Vec::new())
             .await
             .map_err(Self::map_error)?;
         Ok(Self::extract_text(&response))
@@ -160,6 +160,7 @@ mod tests {
         async fn messages_create(
             &self,
             model: &str,
+            _profile: Option<&str>,
             system: Option<&str>,
             msgs: Vec<ConversationMessage>,
             _tools: Vec<serde_json::Value>,

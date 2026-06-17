@@ -76,13 +76,22 @@ impl ModelRegistry {
             .collect()
     }
 
-    /// Resolve a requested model id or alias without guessing provider from model text.
-    ///
-    /// A reference matching more than one configured model is rejected as
-    /// ambiguous instead of silently resolving by configuration order.
-    pub fn resolve(&self, requested: &str) -> Result<ResolvedRoute, LlmError> {
+    /// Resolve a model id, optionally scoped to one provider profile.
+    /// `profile = Some(p)` matches only within profile `p` (absent model or
+    /// unknown profile → `ModelUnavailable`); `None` matches across all
+    /// providers (ambiguous → error).
+    pub fn resolve_in(
+        &self,
+        requested: &str,
+        profile: Option<&str>,
+    ) -> Result<ResolvedRoute, LlmError> {
         let mut matches = Vec::new();
         for provider in &self.config.providers {
+            if let Some(p) = profile {
+                if provider.profile_name != p {
+                    continue;
+                }
+            }
             for model in &provider.models {
                 let is_match = model.display_model == requested
                     || model.request_model == requested
@@ -120,5 +129,10 @@ impl ModelRegistry {
                 ),
             }),
         }
+    }
+
+    /// Resolve across all providers (unscoped). Ambiguous ids error.
+    pub fn resolve(&self, requested: &str) -> Result<ResolvedRoute, LlmError> {
+        self.resolve_in(requested, None)
     }
 }

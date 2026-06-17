@@ -299,8 +299,11 @@ pub trait OrchestratorHandle: Send + Sync {
     /// Snapshot the cumulative cost.
     async fn snapshot_cost(&self) -> CostSnapshot;
 
-    /// Switch the active model. Subsequent turns use the new model.
-    async fn switch_model(&self, model: &str) -> Result<(), HandleError>;
+    /// Switch the active model (and optional provider profile). Subsequent
+    /// turns use the new model; the profile disambiguates shared model ids
+    /// across providers (e.g. `"gpt-5.2"` on `"github-copilot"` vs `"openai"`).
+    /// `None` profile = resolve unscoped (default / legacy behaviour).
+    async fn switch_model(&self, model: &str, profile: Option<&str>) -> Result<(), HandleError>;
 
     // M5-10 additions:
 
@@ -1033,7 +1036,7 @@ mod tests {
             async fn clear_session(&self) -> Result<(), HandleError> { Ok(()) }
             async fn force_compact(&self) -> Result<CompactionSummary, HandleError> { Ok(CompactionSummary::default()) }
             async fn snapshot_cost(&self) -> CostSnapshot { CostSnapshot::default() }
-            async fn switch_model(&self, _: &str) -> Result<(), HandleError> { Ok(()) }
+            async fn switch_model(&self, _: &str, _: Option<&str>) -> Result<(), HandleError> { Ok(()) }
             async fn request_exit(&self) {}
             async fn current_should_exit(&self) -> bool { false }
             async fn open_memory_editor(&self) -> Result<MemoryEditorOutcome, HandleError> {

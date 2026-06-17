@@ -50,6 +50,7 @@ impl OrchestratorApiClient for PtlMockApi {
     async fn messages_create(
         &self,
         _model: &str,
+        _profile: Option<&str>,
         _system: Option<&str>,
         msgs: Vec<ConversationMessage>,
         _tools: Vec<serde_json::Value>,

@@ -951,7 +951,7 @@ impl MobileEngineHandle {
             ClientCommand::SetModel { model } => {
                 let handle: Arc<dyn OrchestratorHandle> = self.inner.orchestrator.clone();
                 handle
-                    .switch_model(&model)
+                    .switch_model(&model, None)
                     .await
                     .map_err(|e| ClientError::Internal {
                         message: format!("switch_model failed: {e}"),
@@ -1121,7 +1121,7 @@ impl MobileEngineHandle {
                     })?;
                 if let Some(model) = model {
                     handle
-                        .switch_model(&model)
+                        .switch_model(&model, None)
                         .await
                         .map_err(|e| ClientError::Internal {
                             message: format!("new session model switch failed: {e}"),

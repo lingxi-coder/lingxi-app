@@ -300,9 +300,9 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
     orch.maybe_compact_before_call().await;
 
     // Snapshot the current session history for the API call.
-    let (mut history_snapshot, model) = {
+    let (mut history_snapshot, model, model_profile) = {
         let s = orch.session.lock().await;
-        (s.history.clone(), s.model.clone())
+        (s.history.clone(), s.model.clone(), s.model_profile.clone())
     };
 
     // OUTSTYLE.3: per-turn, transient output-style reminder. When a non-default
@@ -375,6 +375,7 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
         orch,
         system,
         &model,
+        model_profile.as_deref(),
         history_snapshot,
         tools,
         max_tokens_override,
@@ -619,6 +620,7 @@ async fn call_api_with_ptl_recovery(
     orch: &ConversationOrchestrator,
     system: Option<&str>,
     model: &str,
+    profile: Option<&str>,
     history_snapshot: Vec<ConversationMessage>,
     tools: Vec<serde_json::Value>,
     max_tokens_override: Option<u32>,
@@ -653,12 +655,13 @@ async fn call_api_with_ptl_recovery(
         // to before, so the locked turn-loop fixtures (which never arm an
         // override) are unaffected.
         orch.api
-            .messages_create_with_opts(model, system, history_snapshot, tools.clone(), max_tokens)
+            .messages_create_with_opts(model, profile, system, history_snapshot, tools.clone(), max_tokens)
             .await
     } else if orch.config.fallback_model.is_some() {
         orch.api
             .messages_create_with_fallback(
                 model,
+                profile,
                 system,
                 history_snapshot,
                 tools.clone(),
@@ -669,7 +672,7 @@ async fn call_api_with_ptl_recovery(
             .await
     } else {
         orch.api
-            .messages_create(model, system, history_snapshot, tools.clone())
+            .messages_create(model, profile, system, history_snapshot, tools.clone())
             .await
     };
     // NOTE: `ApiError::FallbackTriggered` interception is REMOVED — `LlmError`
@@ -706,7 +709,7 @@ async fn call_api_with_ptl_recovery(
         }
         match orch
             .api
-            .messages_create(model, system, truncated, tools.clone())
+            .messages_create(model, profile, system, truncated, tools.clone())
             .await
         {
             Ok(resp) => return Ok(PtlCallOutcome::Response(Box::new(resp))),
@@ -759,7 +762,7 @@ async fn call_api_with_ptl_recovery(
                 };
                 match orch
                     .api
-                    .messages_create(model, system, history, tools)
+                    .messages_create(model, profile, system, history, tools)
                     .await
                 {
                     Ok(resp) => return Ok(PtlCallOutcome::Response(Box::new(resp))),
@@ -863,6 +866,7 @@ async fn reissue_after_model_fallback(
     orch.api
         .messages_create_with_fallback(
             &fallback_model,
+            None, // fallback model has no associated profile
             system,
             history,
             tools,

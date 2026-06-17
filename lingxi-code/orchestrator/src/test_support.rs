@@ -132,6 +132,7 @@ impl OrchestratorApiClient for MockApiClient {
     async fn messages_create(
         &self,
         _model: &str,
+        _profile: Option<&str>,
         system: Option<&str>,
         msgs: Vec<ConversationMessage>,
         tools: Vec<serde_json::Value>,
@@ -156,6 +157,7 @@ impl OrchestratorApiClient for MockApiClient {
     async fn messages_create_seeded(
         &self,
         model: &str,
+        profile: Option<&str>,
         system: Option<&str>,
         msgs: Vec<ConversationMessage>,
         tools: Vec<serde_json::Value>,
@@ -166,7 +168,7 @@ impl OrchestratorApiClient for MockApiClient {
             .await
             .push(initial_consecutive_overloaded);
         // Delegate to the plain seam so the queue logic is reused.
-        self.messages_create(model, system, msgs, tools).await
+        self.messages_create(model, profile, system, msgs, tools).await
     }
 
     /// Task 8: return the snapshot pre-loaded via [`Self::set_rate_limit_full`].
@@ -789,7 +791,7 @@ impl OrchestratorHandle for MockOrchestratorHandle {
         }
     }
 
-    async fn switch_model(&self, model: &str) -> Result<(), HandleError> {
+    async fn switch_model(&self, model: &str, _profile: Option<&str>) -> Result<(), HandleError> {
         self.switch_model_calls.fetch_add(1, Ordering::SeqCst);
         *self.switch_model_last.lock().unwrap() = Some(model.to_string());
         if let Some(reason) = self.switch_model_error.lock().unwrap().take() {
@@ -894,11 +896,11 @@ mod tests {
         );
         let mock = MockApiClient::new(vec![r1, r2]);
         let resp1 = mock
-            .messages_create("m", None, vec![], vec![])
+            .messages_create("m", None, None, vec![], vec![])
             .await
             .expect("first");
         let resp2 = mock
-            .messages_create("m", None, vec![], vec![])
+            .messages_create("m", None, None, vec![], vec![])
             .await
             .expect("second");
         let LlmContentBlock::Text { text: first_text, .. } = &resp1.content[0] else {
@@ -917,7 +919,7 @@ mod tests {
         let r = mock_message_response(vec![], Some("end_turn"));
         let mock = MockApiClient::new(vec![r]);
         let msgs = vec![];
-        mock.messages_create("m", None, msgs, vec![]).await.expect("call");
+        mock.messages_create("m", None, None, msgs, vec![]).await.expect("call");
         assert_eq!(mock.captured_msgs().await.len(), 1);
     }
 
@@ -925,7 +927,7 @@ mod tests {
     async fn mock_exhaustion_returns_server_error() {
         let mock = MockApiClient::new(vec![]);
         let err = mock
-            .messages_create("m", None, vec![], vec![])
+            .messages_create("m", None, None, vec![], vec![])
             .await
             .expect_err("exhausted");
         assert!(format!("{err}").contains("mock script exhausted"));

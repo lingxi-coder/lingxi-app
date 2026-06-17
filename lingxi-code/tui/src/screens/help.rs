@@ -22,11 +22,16 @@
 //!   `custom-commands` + `[ant-only]` tabs (no frozen-safe TUI seam to the
 //!   per-project custom-command catalog).
 //! - The displayed key chords are claude-code's DEFAULT bindings, baked into a
-//!   static table. The TUI has no `useShortcutDisplay` / user-keybinding seam
-//!   yet, so a user's `keybindings.json` overrides are NOT reflected, and a few
-//!   chords differ from the TUI's current live bindings (e.g. `ctrl + g` opens
-//!   Settings here rather than `$EDITOR`; `undo` / `stash` / `fast mode` /
-//!   `model picker` are listed for parity but are not yet wired as live keys).
+//!   static table. As of GAP D the runtime keymap seam EXISTS
+//!   (`command_core::keybindings::Keymap` + `get_binding_display_text`, the
+//!   analogue of `useShortcutDisplay`) and the live PRIMARY dispatch (root.rs
+//!   Global/Chat chords) consults it — but THIS help screen still renders the
+//!   static default chords (rewiring the display to read the live keymap is
+//!   tracked as keybindings residual), so a user's `keybindings.json` overrides
+//!   are not yet reflected HERE, and a few chords differ from the TUI's current
+//!   live bindings (e.g. `ctrl + g` opens Settings here rather than `$EDITOR`;
+//!   `undo` / `stash` / `fast mode` / `model picker` are listed for parity but
+//!   are not yet wired as live keys).
 //! - The slash-command descriptions are concise in-tree summaries, not the
 //!   byte-locked `core_description` metadata (kept self-contained, mirroring
 //!   `skills.rs`'s locked-constant style).

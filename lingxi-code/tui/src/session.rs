@@ -363,6 +363,22 @@ pub async fn run_tui_session(
     if let Some(setting) = crate::theme_persist::load_theme_setting() {
         initial_state.set_theme(setting);
     }
+    // (GAP D) Install the runtime keybindings keymap (merged default + user
+    // `~/.claude/keybindings.json`), which the live PRIMARY dispatch consults
+    // before the hardcoded `map_iocraft_key` table. The customization gate is
+    // OFF by default — same as the `/keybindings` command's
+    // `isKeybindingCustomizationEnabled` (the `tengu_keybinding_customization_release`
+    // GrowthBook flag, which external users never have) — so `load_keybindings`
+    // returns the canonical defaults and this is byte-identical to the hardcoded
+    // chords. When a build flips the gate on, the user's overrides flow through
+    // here unchanged. `Keymap::defaults()` already seeded `AppState::new`, so a
+    // gate-off load is a behavioral no-op; we still call it so the single load
+    // path is exercised. `false` = the customization gate off (external default).
+    initial_state.set_keymap(command_core::keybindings::Keymap::load(
+        false,
+        &command_core::keybindings::keybindings_path(),
+        cfg!(target_os = "macos"),
+    ));
     // Transcript replay on resume: seed the prior conversation into scrollback
     // BEFORE the first render so a resumed session shows its existing history
     // on the very first frame (claude-code REPL `initialMessages`). EMPTY for a

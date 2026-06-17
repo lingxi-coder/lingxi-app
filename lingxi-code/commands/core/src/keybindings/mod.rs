@@ -53,6 +53,30 @@ use command_api::parser::ParsedSlashCommand;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+// ── Runtime keybindings machinery (GAP D) ────────────────────────────────────
+//
+// `keybindings.rs` historically held ONLY the `/keybindings` command (write the
+// template, open `$EDITOR`). GAP D adds the loader/parser/resolver/runtime-keymap
+// that actually consults `~/.claude/keybindings.json`, a 1:1 port of
+// `claude-code/src/keybindings/{schema,parser,match,resolver,reservedShortcuts,
+// validate,defaultBindings,loadUserBindings}.ts`. The `/keybindings` handler
+// below is unchanged.
+pub mod default_bindings;
+pub mod keymap;
+pub mod loader;
+pub mod matcher;
+pub mod parser;
+pub mod reserved;
+pub mod resolver;
+pub mod schema;
+pub mod types;
+pub mod validate;
+
+pub use keymap::{InputKey, Keymap};
+pub use loader::{load_keybindings, KeybindingsLoadResult};
+pub use types::{Chord, KeybindingBlock, ParsedBinding, ParsedKeystroke};
+pub use validate::{KeybindingWarning, KeybindingWarningType};
+
 /// The byte-faithful keybindings template, identical to the TS
 /// `generateKeybindingsTemplate()` output (features off, non-Windows platform,
 /// reserved shortcuts filtered). Embedded verbatim to preserve key order.

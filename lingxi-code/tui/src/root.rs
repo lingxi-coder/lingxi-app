@@ -241,6 +241,122 @@ fn iocraft_to_crossterm028_key(k: &KeyEvent) -> crossterm::event::KeyEvent {
     CtEvent::new(code, mods)
 }
 
+/// (GAP D) Lower an iocraft `KeyEvent` into a `command_core` [`InputKey`] — the
+/// crossterm-agnostic shape the keybindings resolver consumes (the analogue of
+/// claude-code's `getKeyName(input, key)` over Ink's `Key`). The base key name
+/// is normalized into the same vocabulary as `ParsedKeystroke.key`
+/// (`"escape"`, `"enter"`, `"up"`, `"k"`, `" "`, …). Returns `None` for codes
+/// the keymap can never bind (so the caller skips the consult and falls straight
+/// through to the legacy table).
+///
+/// Note iocraft/crossterm reports terminal Alt as the `ALT` modifier; the
+/// resolver collapses alt/meta (terminals can't distinguish them), so ALT maps
+/// to `InputKey.meta` — byte-faithful with `match.ts`'s `getInkModifiers`.
+fn iocraft_to_input_key(k: &KeyEvent) -> Option<command_core::keybindings::InputKey> {
+    let key: String = match &k.code {
+        KeyCode::Esc => "escape".to_string(),
+        KeyCode::Enter => "enter".to_string(),
+        KeyCode::Tab => "tab".to_string(),
+        KeyCode::Backspace => "backspace".to_string(),
+        KeyCode::Delete => "delete".to_string(),
+        KeyCode::Up => "up".to_string(),
+        KeyCode::Down => "down".to_string(),
+        KeyCode::Left => "left".to_string(),
+        KeyCode::Right => "right".to_string(),
+        KeyCode::PageUp => "pageup".to_string(),
+        KeyCode::PageDown => "pagedown".to_string(),
+        KeyCode::Home => "home".to_string(),
+        KeyCode::End => "end".to_string(),
+        // Single printable char → lowercased name (getKeyName: input.toLowerCase()).
+        KeyCode::Char(c) => c.to_lowercase().to_string(),
+        // Anything else has no ParsedKeystroke vocabulary → skip the consult.
+        _ => return None,
+    };
+    Some(command_core::keybindings::InputKey {
+        key,
+        ctrl: k.modifiers.contains(KeyModifiers::CONTROL),
+        shift: k.modifiers.contains(KeyModifiers::SHIFT),
+        // Terminal Alt arrives as ALT; collapsed into the resolver's meta.
+        meta: k.modifiers.contains(KeyModifiers::ALT),
+        super_: false,
+        escape: matches!(k.code, KeyCode::Esc),
+    })
+}
+
+/// (GAP D) Map a resolved claude-code action id (e.g. `"app:redraw"`) to the
+/// TUI's `KeyAction` enum, for the Global/Chat chords the live primary dispatch
+/// currently owns.
+///
+/// Only the actions the live `map_iocraft_key` table already produces are
+/// covered — so the consult path can REPLACE that table for those chords
+/// without changing behavior. Every other action returns `None`, and the caller
+/// then falls through to the legacy table (which still owns scroll/edit/vim and
+/// the per-screen overlays). This is what keeps the defaults byte-identical: a
+/// default keymap resolves these exact chords to these exact `KeyAction`s.
+///
+/// `prompt_empty` / `focus_active` reproduce the existing context-sensitivity:
+/// Enter toggles a focused tool block (focus mode) vs. submits; arrows walk tool
+/// focus vs. step history.
+// The explicit `"chat:cancel" => None` arm documents that Esc is owned by the
+// overlay/teammate traps + editor (NOT this adapter), even though its body
+// matches the wildcard — keep it for clarity over the lint's preference.
+#[allow(clippy::match_same_arms)]
+fn action_to_keyaction(
+    action: &str,
+    prompt_empty: bool,
+    focus_active: bool,
+    multiline: bool,
+) -> Option<KeyAction> {
+    use KeyAction::{Cancel, FocusToolStep, HistoryStep, Submit, ToggleExpanded};
+    match action {
+        // Global.
+        "app:interrupt" => Some(Cancel), // ctrl+c (default chord)
+        // app:redraw / app:toggleTodos / app:toggleTranscript have no existing
+        // live KeyAction in the primary table — fall through (legacy table is a
+        // no-op for them too, so behavior is unchanged).
+        // Chat.
+        "chat:submit" => {
+            if focus_active && prompt_empty {
+                Some(ToggleExpanded)
+            } else {
+                Some(Submit)
+            }
+        }
+        "chat:cancel" => None, // Esc: owned by overlay/teammate traps + editor.
+        // Up/Down → history, EXCEPT in a multi-line buffer where the legacy
+        // table routes them to vertical cursor motion. Returning `None` for the
+        // multiline case lets `map_iocraft_key` own it (byte-identical to before
+        // the keymap consult existed). Focus mode walks tool blocks instead.
+        "history:previous" if !multiline => {
+            if focus_active {
+                Some(FocusToolStep(-1))
+            } else {
+                Some(HistoryStep(-1))
+            }
+        }
+        "history:next" if !multiline => {
+            if focus_active {
+                Some(FocusToolStep(1))
+            } else {
+                Some(HistoryStep(1))
+            }
+        }
+        _ => None,
+    }
+}
+
+/// (GAP D) The keybinding contexts the live PRIMARY dispatch is active in.
+///
+/// The primary `handle_live_key` path runs only AFTER the permission (1),
+/// screen (2), and overlay (3) traps have returned — i.e. the prompt is the
+/// focused element — so the active contexts are `Chat` (the focused input) plus
+/// `Global` (everywhere). The per-screen/overlay contexts (`Help`, `Select`,
+/// `ModelPicker`, …) are owned by their own reducers and are the documented
+/// residual (still on the hardcoded `KeyCode` matches).
+fn primary_active_contexts() -> Vec<String> {
+    vec!["Chat".to_string(), "Global".to_string()]
+}
+
 /// Route a single LIVE key event into the `AppState`.
 ///
 /// This is THE function the live `use_terminal_events` closure invokes, and
@@ -862,6 +978,61 @@ pub fn handle_live_key(st: &mut AppState, k: &KeyEvent, viewport: usize) {
             .messages
             .iter()
             .any(|m| matches!(m, crate::state::RenderedMessage::AssistantToolUse { .. }));
+
+    // === (GAP D) Consult the user keymap FIRST for the Global/Chat command
+    // chords. With the default keymap (gate off / no `keybindings.json`) this
+    // resolves the same chords to the same `KeyAction`s the legacy
+    // `map_iocraft_key` table below produces — so default behavior is identical.
+    // A user override in `~/.claude/keybindings.json` is honored here.
+    //
+    // Fall-through discipline (so nothing existing regresses):
+    //   - `Action` with a mapped `KeyAction`  → dispatch it, done.
+    //   - `ChordPending`                       → consume the key (await the rest
+    //                                             of the chord), done.
+    //   - `Action` with NO adapter mapping / `Unbound` / `None` → fall through to
+    //                                             the legacy `map_iocraft_key`
+    //                                             table (which still owns editing,
+    //                                             scroll, cursor moves, and any
+    //                                             action the adapter doesn't cover).
+    //
+    // The legacy table is intentionally NOT deleted: it remains the source of
+    // truth for every action `action_to_keyaction` doesn't yet map, so existing
+    // keys can't break. ===
+    if let Some(input_key) = iocraft_to_input_key(k) {
+        use command_core::keybindings::keymap::Resolution;
+        let contexts = primary_active_contexts();
+        match st
+            .keymap
+            .resolve(&input_key, &contexts, &mut st.pending_chord)
+        {
+            Resolution::Action(act) => {
+                if let Some(mut action) =
+                    action_to_keyaction(&act, prompt_empty, focus_active, multiline)
+                {
+                    // Preserve the backslash-return fallback for a resolved Submit.
+                    if matches!(action, KeyAction::Submit)
+                        && st.prompt_cursor > 0
+                        && st.prompt_text[..st.prompt_cursor].ends_with('\\')
+                    {
+                        action = KeyAction::InsertNewline;
+                    }
+                    let _ = dispatch(action, st);
+                    resync_overlays(st);
+                    return;
+                }
+                // Resolved to an action with no live KeyAction mapping (e.g.
+                // app:redraw, chat:killAgents): fall through to the legacy table.
+            }
+            Resolution::ChordPending => {
+                // Mid-chord prefix (e.g. ctrl+x of `ctrl+x ctrl+k`). Consume the
+                // key — never let it reach the editor. ctrl-modified keys never
+                // InsertChar anyway, so this is behavior-neutral on defaults.
+                return;
+            }
+            Resolution::Unbound | Resolution::None => { /* fall through */ }
+        }
+    }
+
     if let Some(mut action) = map_iocraft_key(k, prompt_empty, focus_active, multiline) {
         // Backslash-return fallback: a plain-Enter Submit becomes InsertNewline
         // when the char before the cursor is a lone '\' (terminals that can't
@@ -2591,6 +2762,111 @@ mod tests {
     /// (M7-08) Build an iocraft `KeyEvent` for a printable char (Press).
     fn iocraft_char_key(c: char) -> KeyEvent {
         KeyEvent::new(KeyEventKind::Press, KeyCode::Char(c))
+    }
+
+    /// (GAP D) On the DEFAULT keymap (no user `keybindings.json`), the
+    /// consult-first path must resolve the Global/Chat command chords to the
+    /// SAME `KeyAction` the bare legacy `map_iocraft_key` table produces — proving
+    /// zero behavior change when no override exists. Covers a representative set:
+    /// `ctrl+c` (Cancel), `enter` (Submit), `up` (`HistoryStep`). A printable char and a
+    /// scroll key (which the keymap does NOT bind) must still fall through to the
+    /// legacy table unchanged.
+    #[test]
+    fn default_keymap_consult_matches_legacy_for_global_chat_chords() {
+        let km = command_core::keybindings::Keymap::defaults();
+        let contexts = primary_active_contexts();
+
+        // Helper: resolve a key via the keymap → adapter, mirroring the live
+        // consult (single-line, no focus).
+        let consult = |k: &KeyEvent| -> Option<KeyAction> {
+            use command_core::keybindings::keymap::Resolution;
+            let mut pending = None;
+            let input = iocraft_to_input_key(k)?;
+            match km.resolve(&input, &contexts, &mut pending) {
+                Resolution::Action(act) => action_to_keyaction(&act, false, false, false),
+                _ => None,
+            }
+        };
+
+        // ctrl+c → both produce Cancel.
+        let mut ctrl_c = KeyEvent::new(KeyEventKind::Press, KeyCode::Char('c'));
+        ctrl_c.modifiers = KeyModifiers::CONTROL;
+        assert_eq!(consult(&ctrl_c), Some(KeyAction::Cancel));
+        assert_eq!(
+            map_iocraft_key(&ctrl_c, false, false, false),
+            Some(KeyAction::Cancel)
+        );
+
+        // enter → both produce Submit.
+        let enter = KeyEvent::new(KeyEventKind::Press, KeyCode::Enter);
+        assert_eq!(consult(&enter), Some(KeyAction::Submit));
+        assert_eq!(
+            map_iocraft_key(&enter, false, false, false),
+            Some(KeyAction::Submit)
+        );
+
+        // up → both produce HistoryStep(-1) (single-line).
+        let up = KeyEvent::new(KeyEventKind::Press, KeyCode::Up);
+        assert_eq!(consult(&up), Some(KeyAction::HistoryStep(-1)));
+        assert_eq!(
+            map_iocraft_key(&up, false, false, false),
+            Some(KeyAction::HistoryStep(-1))
+        );
+
+        // A printable 'h' is NOT a keymap chord → consult yields None → the
+        // legacy table owns it (InsertChar).
+        let h = iocraft_char_key('h');
+        assert_eq!(consult(&h), None);
+        assert_eq!(
+            map_iocraft_key(&h, false, false, false),
+            Some(KeyAction::InsertChar('h'))
+        );
+    }
+
+    /// (GAP D) A user override of a Global chord (ctrl+l → app:interrupt) is
+    /// honored by the live consult, while an unspecified chord still resolves to
+    /// its default. Loads the override through the real `load_keybindings` path
+    /// (gate on, temp `keybindings.json`), then drives the keymap exactly as
+    /// `handle_live_key` does — so the end-to-end loader→resolver→adapter seam is
+    /// exercised without a direct `indexmap` dependency in the TUI crate.
+    #[test]
+    fn user_override_changes_live_dispatch_unspecified_falls_back() {
+        use command_core::keybindings::{load_keybindings, Keymap};
+        use std::io::Write;
+
+        let json = r#"{ "bindings": [ { "context": "Global", "bindings": { "ctrl+l": "app:interrupt" } } ] }"#;
+        let path = std::env::temp_dir().join(format!(
+            "lingxi-tui-kb-override-{}.json",
+            std::process::id()
+        ));
+        std::fs::File::create(&path)
+            .unwrap()
+            .write_all(json.as_bytes())
+            .unwrap();
+        let km = Keymap::from_load_result(load_keybindings(true, &path, false));
+        let _ = std::fs::remove_file(&path);
+
+        let contexts = primary_active_contexts();
+        let resolve = |km: &Keymap, k: &KeyEvent| -> Option<KeyAction> {
+            use command_core::keybindings::keymap::Resolution;
+            let mut pending = None;
+            let input = iocraft_to_input_key(k)?;
+            match km.resolve(&input, &contexts, &mut pending) {
+                Resolution::Action(act) => action_to_keyaction(&act, false, false, false),
+                _ => None,
+            }
+        };
+
+        // ctrl+l (no live KeyAction by default → None) now → Cancel via override.
+        let mut ctrl_l = KeyEvent::new(KeyEventKind::Press, KeyCode::Char('l'));
+        ctrl_l.modifiers = KeyModifiers::CONTROL;
+        assert_eq!(resolve(&km, &ctrl_l), Some(KeyAction::Cancel));
+
+        // ctrl+c (unspecified by the override) still resolves to its default
+        // app:interrupt → Cancel (last-wins merge kept the default).
+        let mut ctrl_c = KeyEvent::new(KeyEventKind::Press, KeyCode::Char('c'));
+        ctrl_c.modifiers = KeyModifiers::CONTROL;
+        assert_eq!(resolve(&km, &ctrl_c), Some(KeyAction::Cancel));
     }
 
     #[test]

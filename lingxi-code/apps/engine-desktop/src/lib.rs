@@ -52,10 +52,10 @@ use orchestrator::{
 };
 use permission::gate::PermissionGate;
 use platform_posix::{
-    secure_storage_for_platform, PosixClock, PosixFileSystem, PosixHttp, PosixProcess,
-    PosixRuntime, PosixSandbox,
+    secure_storage_for_platform, PosixClock, PosixFileSystem, PosixHttp, PosixMcpTransport,
+    PosixProcess, PosixRuntime, PosixSandbox,
 };
-use platform_posix_minimal::{PosixMcp, PosixWorktree};
+use platform_posix_minimal::PosixWorktree;
 use sandbox::decision::ProjectTrustLevel;
 use sandbox::runtime_config::Platform as SandboxPlatform;
 use secret::CredentialManager;
@@ -1888,7 +1888,7 @@ pub async fn build(
     // `get_client`. The minimal stub owns no live connections, so the bridge
     // hands back `None` here today; the real `PosixMcpTransport` returns a live
     // `Arc<jsonrpc::Connection>` under the same wiring.
-    let posix = Arc::new(PosixMcp::new());
+    let posix = Arc::new(PosixMcpTransport::new());
     // The registry is BUILT here but `connect_all` is deferred to (5.26),
     // after the real `hooks` executor exists: the elicitation hook dispatcher
     // (`OrchestratorHookDispatcher`) must be wired via `with_hook_dispatcher`

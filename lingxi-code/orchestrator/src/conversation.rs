@@ -2754,12 +2754,17 @@ impl ConversationOrchestrator {
                         }
                         all_modifiers.extend(drained.modifiers);
                     }
-                    if !exec.has_unfinished() {
+                    // Guaranteed-progress shape (mirrors the test-only
+                    // `run_to_completion`): an empty in-flight set after
+                    // `process_queue` means no Queued tool remains startable
+                    // (process_queue starts any runnable one) and nothing is
+                    // executing — so every tool is done + drained above. Break
+                    // here, else drain one future below. Never spins: each
+                    // iteration either breaks or `.await`s a completion.
+                    if exec.inflight_is_empty() {
                         break;
                     }
-                    if !exec.inflight_is_empty() {
-                        exec.drain_one().await;
-                    }
+                    exec.drain_one().await;
                 }
                 // SKILLEXEC.3 (model scope, streaming twin): fold this turn's
                 // `context_modifier`s and switch `session.model` if a skill

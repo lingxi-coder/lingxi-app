@@ -100,7 +100,6 @@ pub(crate) struct TrackedTool {
 ///
 /// `executing_safe_flags` is a slice of the `is_concurrency_safe` flags for
 /// every tool currently in the `Executing` state.
-#[allow(dead_code)] // wired into the live streaming loop in Task 11
 pub(crate) fn can_execute(executing_safe_flags: &[bool], candidate_safe: bool) -> bool {
     executing_safe_flags.is_empty()
         || (candidate_safe && executing_safe_flags.iter().all(|&s| s))
@@ -411,15 +410,12 @@ fn set_provider_id(block: &mut ContentBlock, provider_id: Option<String>) {
 // ============================================================================
 
 /// One drained result ready for the live loop to persist, carrying everything
-/// needed to build + assistant-parent the user message (TS getCompletedResults
-/// yields one message per result; `assistant_id` is TS `sourceToolAssistantUUID`).
+/// needed to build the per-result user message (TS `getCompletedResults` yields
+/// one message per result). The live loop parents every result to the single
+/// per-turn assistant via that assistant's captured JSONL uuid (TS
+/// `sourceToolAssistantUUID`), so no per-result assistant id is carried here.
 pub(crate) struct DrainedResult {
     pub(crate) block: ContentBlock,
-    /// TS `sourceToolAssistantUUID`. The live loop parents results to the
-    /// single per-turn assistant via its captured JSONL uuid, so this id is
-    /// carried for fidelity / future per-result parenting but not read there.
-    #[allow(dead_code)]
-    pub(crate) assistant_id: MessageId,
     pub(crate) injected: Vec<(ConversationMessage, ToolUseId)>,
     pub(crate) modifiers: Vec<ContextModifier>,
 }
@@ -437,7 +433,6 @@ impl<'a> StreamingToolExecutor<'a> {
                     t.status = ToolStatus::Yielded;
                     out.push(DrainedResult {
                         block: t.result.clone().expect("completed tool has result"),
-                        assistant_id: t.assistant_id,
                         injected: std::mem::take(&mut t.injected),
                         modifiers: std::mem::take(&mut t.modifiers),
                     });
@@ -450,7 +445,10 @@ impl<'a> StreamingToolExecutor<'a> {
         out
     }
 
-    /// TS `hasUnfinishedTools`: any tool not yet `Yielded`.
+    /// TS `hasUnfinishedTools`: any tool not yet `Yielded`. The live loop drives
+    /// on `inflight_is_empty` instead (guaranteed-progress shape), so this is
+    /// exercised by the executor's tests; kept as the faithful API twin.
+    #[allow(dead_code)]
     pub(crate) fn has_unfinished(&self) -> bool {
         self.tools.iter().any(|t| t.status != ToolStatus::Yielded)
     }

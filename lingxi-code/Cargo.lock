@@ -5078,6 +5078,7 @@ name = "tool-cron"
 version = "0.12.0"
 dependencies = [
  "async-trait",
+ "cron",
  "engine",
  "once_cell",
  "permission",

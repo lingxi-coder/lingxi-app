@@ -213,7 +213,10 @@ fn field_match(field: &CronField, value: u32) -> bool {
 /// `cron::schedule::decompose` — Howard Hinnant's integer-only `civil_from_days`,
 /// so real month lengths (incl. leap-year Feb 29 and 31-day months) are honored.
 /// This fixes the old fixed-30-day approximation under which day-of-month 31
-/// could never match. PARITY-NOTE: still UTC (claude-code `cron.ts` is local).
+/// could never match. Pure UTC core — [`CronExpression::matches`] shifts the
+/// instant by [`local_offset_seconds`] first, so the `next_fire_unix_secs`
+/// preview is evaluated in LOCAL time, consistent with the live `cron`
+/// scheduler's local firing (claude-code `cron.ts` is local).
 #[allow(
     clippy::cast_possible_truncation,
     clippy::cast_possible_wrap,
@@ -245,7 +248,13 @@ impl CronExpression {
             .duration_since(SystemTime::UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
-        let (year, month, day, hour, minute, dow) = decompose(secs);
+        // LOCAL-time evaluation (claude-code parity + consistency with the live
+        // `cron` scheduler): shift by the system UTC offset, then decompose.
+        #[allow(clippy::cast_possible_wrap, clippy::cast_sign_loss)]
+        let local = (secs as i64)
+            .saturating_add(cron::schedule::local_offset_seconds(secs as i64))
+            .max(0) as u64;
+        let (year, month, day, hour, minute, dow) = decompose(local);
         // Standard cron day rule (claude-code `cron.ts`): when BOTH day-of-month
         // and day-of-week are restricted, the day matches if EITHER matches; when
         // one is `*` (its expanded set covers the whole domain — len 31 / 7), only

@@ -131,6 +131,22 @@ fn is_job_due(task: &CronTaskDef, now: SystemTime) -> bool {
         .is_some_and(|next| next <= now)
 }
 
+/// Offset-parameterized twin of [`is_job_due`] for deterministic, host-timezone
+/// independent tests: `offset_for` supplies each candidate's UTC offset (use
+/// `|_| 0` for UTC). The live [`is_job_due`] resolves the offset per-instant via
+/// the system timezone, so its 09:00-LOCAL behavior can't be asserted against
+/// fixed UTC timestamps directly.
+#[cfg(test)]
+fn is_job_due_with<F: Fn(u64) -> i64>(task: &CronTaskDef, now: SystemTime, offset_for: F) -> bool {
+    if !task.enabled {
+        return false;
+    }
+    let anchor = task.last_run.unwrap_or(task.created_at);
+    task.schedule
+        .next_match_after_with(anchor, offset_for)
+        .is_some_and(|next| next <= now)
+}
+
 /// Owner of the cron tick loop. Constructed with platform trait objects and
 /// the shared [`TaskRegistry`].
 pub struct CronScheduler {
@@ -527,7 +543,7 @@ mod expiry_tests {
 
     #[test]
     fn is_job_due_fires_live_catches_up_and_never_double_fires() {
-        use super::{is_job_due, CronTaskDef};
+        use super::{is_job_due_with, CronTaskDef};
         use crate::schedule::parse_cron;
 
         let sec = |s: u64| SystemTime::UNIX_EPOCH + Duration::from_secs(s);
@@ -547,15 +563,18 @@ mod expiry_tests {
             recurring: true,
         };
 
+        // UTC (offset 0) for deterministic assertions; the live `is_job_due`
+        // resolves the offset per-instant via the system timezone.
+        let utc = |_: u64| 0_i64;
         // LIVE: last fired yesterday 09:00, now today 09:00 → due.
-        assert!(is_job_due(&mk(Some(yest_nine), eight_am, true), nine_am));
+        assert!(is_job_due_with(&mk(Some(yest_nine), eight_am, true), nine_am, utc));
         // Before the scheduled minute (now 08:00) → not due.
-        assert!(!is_job_due(&mk(Some(yest_nine), eight_am, true), eight_am));
+        assert!(!is_job_due_with(&mk(Some(yest_nine), eight_am, true), eight_am, utc));
         // CATCH-UP: never fired, created 08:00, now 10:00 (missed 09:00) → due.
-        assert!(is_job_due(&mk(None, eight_am, true), ten_am));
+        assert!(is_job_due_with(&mk(None, eight_am, true), ten_am, utc));
         // NO DOUBLE-FIRE: just fired at 09:00, still 09:00 → next run tomorrow → not due.
-        assert!(!is_job_due(&mk(Some(nine_am), eight_am, true), nine_am));
+        assert!(!is_job_due_with(&mk(Some(nine_am), eight_am, true), nine_am, utc));
         // Per-task disabled → never due.
-        assert!(!is_job_due(&mk(Some(yest_nine), eight_am, false), nine_am));
+        assert!(!is_job_due_with(&mk(Some(yest_nine), eight_am, false), nine_am, utc));
     }
 }

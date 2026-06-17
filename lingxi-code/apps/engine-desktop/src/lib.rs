@@ -1598,6 +1598,28 @@ pub async fn build(
         }
     }
 
+    // Task-5 (TPM-C): resolve an optional `profile/model` qualifier in the
+    // configured default_model so a shared id routes deterministically on the
+    // first turn.  Must run while `assembled.client_config.providers` is still
+    // owned (before `from_config` moves it).
+    let default_listings: Vec<traits::ModelListing> = assembled
+        .client_config
+        .providers
+        .iter()
+        .flat_map(|p| {
+            let profile = p.profile_name.clone();
+            let label = provider_profile_label(&p.profile_name);
+            p.models.iter().map(move |m| traits::ModelListing {
+                display_model: m.display_model.clone(),
+                request_model: m.request_model.clone(),
+                provider_id: profile.clone(),
+                provider_label: label.clone(),
+            })
+        })
+        .collect();
+    let (default_model_id, default_model_profile) =
+        traits::parse_model_ref(&cfg.default_model, &default_listings);
+
     let mut client = DefaultLlmClient::from_config(assembled.client_config)
         .map_err(|e| BuildError::ApiBase(format!("llm-client config: {e}")))?;
     // §6.1: ONE composite credential slot for ALL providers (anthropic api-key /
@@ -1691,7 +1713,9 @@ pub async fn build(
 
     // (4) Orchestrator config from `cfg` (was `argv.model`).
     let mut orch_cfg = OrchestratorConfig::default();
-    orch_cfg.model.clone_from(&cfg.default_model);
+    // TPM-C: use the bare id produced by parse_model_ref (strips a profile/ prefix
+    // so a qualified default_model like "openai/gpt-4o" never reaches the wire).
+    orch_cfg.model = default_model_id.clone();
     // Opus-fallback hop: thread the (already print-mode-gated) fallback model
     // into `OrchestratorConfig.fallback_model`. `None` keeps the turn_loop's
     // 529-overload interception a strict no-op (`turn_loop.rs:496`).
@@ -2728,6 +2752,14 @@ pub async fn build(
 
     // (6) Command registry through the desktop composition root.
     let handle: Arc<dyn OrchestratorHandle> = orch.clone();
+    // TPM-C (Task 5 step 2): seed the initial model_profile from a
+    // profile-qualified default_model.  SessionState::empty starts model_profile
+    // at None; this is a no-op when default_model is a bare id.
+    if let Some(profile) = default_model_profile.as_deref() {
+        if let Err(e) = handle.switch_model(&default_model_id, Some(profile)).await {
+            tracing::warn!(error = %e, "failed to seed default model profile");
+        }
+    }
     // Plan 3c: `/connect` seams — Copilot device-flow over `PosixHttp`, and the
     // API-key writer over the host secure prompt (tui-supplied; headless no-op).
     // M8: also wire the ChatGPT OAuth seam (`/connect chatgpt`).
@@ -4673,5 +4705,57 @@ mod tests {
         };
         let snap = super::subscription_snapshot_from(true, Some(&profile), None);
         assert!(!snap.has_extra_usage_enabled);
+    }
+
+    // ── TPM-C (Task 5): default_model profile/model parsing ──────────────────
+
+    /// Verifies the listings-building + `parse_model_ref` logic used at
+    /// composition-root time: a qualified `profile/model` default_model splits
+    /// into the bare id (written to `orch_cfg.model`) and `Some(profile)` (used
+    /// to seed `switch_model`), while a bare id passes through unchanged with
+    /// `None` profile (no-op seed path).
+    #[test]
+    fn default_model_parse_qualified_and_bare() {
+        // Construct the same listing shape the composition root builds from
+        // `assembled.client_config.providers`.
+        let listings = vec![
+            traits::ModelListing {
+                display_model: "gpt-4o".to_string(),
+                request_model: "gpt-4o".to_string(),
+                provider_id: "openai".to_string(),
+                provider_label: "OpenAI".to_string(),
+            },
+            traits::ModelListing {
+                display_model: "gpt-4o".to_string(),
+                request_model: "gpt-4o".to_string(),
+                provider_id: "github-copilot".to_string(),
+                provider_label: "GitHub Copilot".to_string(),
+            },
+            traits::ModelListing {
+                display_model: "claude-sonnet-4-6".to_string(),
+                request_model: "claude-sonnet-4-6".to_string(),
+                provider_id: "anthropic".to_string(),
+                provider_label: "Anthropic".to_string(),
+            },
+        ];
+
+        // Qualified: "openai/gpt-4o" → bare id "gpt-4o" + profile "openai"
+        let (id, profile) = traits::parse_model_ref("openai/gpt-4o", &listings);
+        assert_eq!(id, "gpt-4o", "qualified ref must strip the profile prefix");
+        assert_eq!(
+            profile.as_deref(),
+            Some("openai"),
+            "qualified ref must extract the profile"
+        );
+
+        // Bare: "claude-sonnet-4-6" → same id, no profile (no-op seed path)
+        let (id2, profile2) = traits::parse_model_ref("claude-sonnet-4-6", &listings);
+        assert_eq!(id2, "claude-sonnet-4-6", "bare model id must pass through");
+        assert!(profile2.is_none(), "bare model must yield None profile");
+
+        // Shared id with two providers and explicit profile qualifier
+        let (id3, profile3) = traits::parse_model_ref("github-copilot/gpt-4o", &listings);
+        assert_eq!(id3, "gpt-4o");
+        assert_eq!(profile3.as_deref(), Some("github-copilot"));
     }
 }

@@ -6,7 +6,7 @@
 //! received from the bridge channel.
 
 use crate::events::orchestrator_bridge::TurnEvent;
-use crate::state::{AppState, PendingPermission, RenderedMessage, StreamingState};
+use crate::state::{AppState, RenderedMessage, StreamingState};
 use tokio::sync::Notify;
 
 /// Apply one `TurnEvent` to `state` and signal the renderer.
@@ -70,25 +70,19 @@ pub fn apply_event(state: &mut AppState, ev: TurnEvent, notify: &Notify) {
             });
         }
         TurnEvent::PermissionRequest { tool, input } => {
-            // M6-03 bridge variant still carries the legacy {tool, input}
-            // shape — translate to the M6-05 enum's `ToolUseConfirm`
-            // arm. The richer bridge variant that ships the full
-            // `PermissionRequest` enum lives on the dedicated
-            // `mpsc<PermissionExchange>` channel owned by
-            // `TuiPermissionGate` (see `permission_bridge.rs`).
+            // M6-03 bridge variant carries the legacy {tool, input} shape and
+            // resolves over a separate channel, so NO resp_tx is attached here.
+            // The richer in-process variant rides `TuiPermissionGate`'s
+            // `mpsc<PermissionExchange>` (see `permission_bridge.rs` + the
+            // root.rs permission pump). Shared helper keeps `started_at` + the
+            // dialog-reset + telemetry identical across both paths.
             let default_decision = permission::tool_default(&tool);
-            state.pending_permission = Some(PendingPermission {
-                request: permission::gate::PermissionRequest::ToolUseConfirm {
-                    tool_name: tool,
-                    tool_input: input,
-                    default_decision,
-                },
-                worker: None,
-            });
-            state.pending_permission_started_at = Some(std::time::Instant::now());
-            state.tool_use_dialog_state =
-                crate::components::permissions::tool_use_confirm::ToolUseConfirmState::default();
-            crate::telemetry::permission_dialog_shown("tool_use");
+            let request = permission::gate::PermissionRequest::ToolUseConfirm {
+                tool_name: tool,
+                tool_input: input,
+                default_decision,
+            };
+            crate::state::open_permission_dialog(state, request, None);
         }
         TurnEvent::TurnEnded(_outcome) => {
             state.streaming = None;

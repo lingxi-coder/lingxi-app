@@ -47,8 +47,15 @@ object VoiceModelDownloader {
 
     fun modelDir(id: String): File = File(appContext!!.filesDir, "voice_models/$id")
 
-    fun isReady(entry: OfflineModelEntry): Boolean =
-        appContext != null && entry.files.all { File(modelDir(entry.id), it).exists() }
+    fun isReady(entry: OfflineModelEntry): Boolean {
+        if (appContext == null) return false
+        // The PRIMARY model file (first in the list) + tokens are the load-bearing
+        // ones; some catalog `files` entries (e.g. a separately-shipped vocoder)
+        // aren't present in every archive, so don't require all of them.
+        val dir = modelDir(entry.id)
+        val primary = entry.files.firstOrNull() ?: return false
+        return File(dir, primary).exists() && File(dir, "tokens.txt").exists()
+    }
 
     /** Mark already-on-disk models Ready so re-entering the wizard reflects reality. */
     private fun reconcileFromDisk() {
@@ -122,18 +129,25 @@ object VoiceModelDownloader {
         }
     }
 
-    /** Extract the entry's declared files (flattened — archives nest under a top dir). */
-    private fun extract(archive: File, entry: OfflineModelEntry, destDir: File) {
+    /**
+     * Extract the ENTIRE archive into [destDir], stripping only the single
+     * top-level wrapper directory the sherpa tarballs nest everything under.
+     * Copying the whole tree (not just the declared model files) is required so
+     * TTS data directories like `espeak-ng-data/` come along.
+     */
+    private fun extract(archive: File, @Suppress("UNUSED_PARAMETER") entry: OfflineModelEntry, destDir: File) {
         destDir.mkdirs()
-        val want = entry.files.toSet()
         BZip2CompressorInputStream(BufferedInputStream(archive.inputStream())).use { bz ->
             TarArchiveInputStream(bz).use { tar ->
                 var e = tar.nextEntry
                 while (e != null) {
                     if (!e.isDirectory) {
-                        val base = File(e.name).name
-                        if (base in want) {
-                            File(destDir, base).outputStream().use { tar.copyTo(it) }
+                        // Drop the first path segment (the wrapper dir), keep the rest.
+                        val rel = e.name.substringAfter('/', e.name)
+                        if (rel.isNotBlank() && !rel.contains("..")) {
+                            val out = File(destDir, rel)
+                            out.parentFile?.mkdirs()
+                            out.outputStream().use { tar.copyTo(it) }
                         }
                     }
                     e = tar.nextEntry

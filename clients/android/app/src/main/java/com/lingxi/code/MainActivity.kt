@@ -122,6 +122,7 @@ class MainActivity : ComponentActivity() {
                         onOpenSettings = { settingsOpen = true },
                         assistantName = prefs.assistantName,
                         inputDialog = prefs.inputDialog,
+                        voiceLang = prefs.voiceLang,
                         reconnectToken = engineReconnect,
                     )
                     AnimatedVisibility(

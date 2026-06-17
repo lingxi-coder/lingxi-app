@@ -116,6 +116,11 @@ dependencies {
     // setup wizard downloads (pure-Java bzip2 + tar; no native dependency).
     implementation("org.apache.commons:commons-compress:1.27.1")
 
+    // sherpa-onnx offline voice runtime (vendored AAR in app/libs/, via the
+    // flatDir repo in settings.gradle.kts). Carries the com.k2fsa.sherpa.onnx
+    // Kotlin API + the static-linked onnxruntime JNI .so for on-device STT/TTS.
+    implementation(group = "", name = "sherpa-onnx-static-link-onnxruntime-1.13.2", ext = "aar")
+
     // Secure key store — the Anthropic API key + base URL are encrypted at rest
     // via EncryptedSharedPreferences (AES-256 GCM, key wrapped by the Android
     // Keystore). SHIP-BLOCKER #1: a shipped app has no process env, so the key

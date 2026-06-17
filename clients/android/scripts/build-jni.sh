@@ -99,6 +99,23 @@ if [[ -n "${ACTIVE_TOOLCHAIN}" ]]; then
 fi
 
 # ---------------------------------------------------------------------------
+# 0b. Vendored sherpa-onnx AAR (offline voice runtime) — gitignored, fetched
+#     from GitHub Releases v1.13.2 into app/libs/ (consumed via the flatDir repo
+#     in settings.gradle.kts). ~38 MB; skipped if already present.
+# ---------------------------------------------------------------------------
+SHERPA_AAR_VER="1.13.2"
+SHERPA_AAR="${ANDROID_DIR}/app/libs/sherpa-onnx-static-link-onnxruntime-${SHERPA_AAR_VER}.aar"
+if [[ ! -f "${SHERPA_AAR}" ]]; then
+  log "Downloading sherpa-onnx AAR v${SHERPA_AAR_VER} → ${SHERPA_AAR}"
+  mkdir -p "$(dirname "${SHERPA_AAR}")"
+  curl -fsSL "https://github.com/k2-fsa/sherpa-onnx/releases/download/v${SHERPA_AAR_VER}/sherpa-onnx-static-link-onnxruntime-${SHERPA_AAR_VER}.aar" -o "${SHERPA_AAR}" \
+    || { echo "ERROR: failed to fetch sherpa-onnx AAR" >&2; exit 1; }
+  log "  $(du -h "${SHERPA_AAR}" | awk '{print $1}')"
+else
+  log "sherpa-onnx AAR present: ${SHERPA_AAR}"
+fi
+
+# ---------------------------------------------------------------------------
 # 1. cargo-ndk cross-compile the cdylib into jniLibs/<abi>/
 # ---------------------------------------------------------------------------
 # `cargo ndk -t <abi> -o <jniLibs>` places each built `.so` under

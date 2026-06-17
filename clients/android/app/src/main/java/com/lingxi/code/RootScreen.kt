@@ -40,6 +40,10 @@ import com.lingxi.code.drawer.rememberDrawerUiState
 import com.lingxi.code.model.MockData
 import com.lingxi.code.settings.SettingsStore
 import com.lingxi.code.theme.LingXiTheme
+import com.lingxi.code.voice.offline.SherpaVoice
+import android.Manifest
+import android.content.pm.PackageManager
+import androidx.core.content.ContextCompat
 import com.lingxi.code.share.rememberShare
 import com.lingxi.code.vision.rememberCameraCapture
 import com.lingxi.code.model.Role
@@ -76,6 +80,9 @@ fun RootScreen(
     // passed down so the voice-orb overlay can label itself + gate its text input.
     assistantName: String = "灵犀",
     inputDialog: Boolean = true,
+    // The chosen offline voice-pack language ("zh"/"en"/""). When its sherpa pack
+    // is downloaded, the orb uses on-device STT/TTS instead of the system voice.
+    voiceLang: String = "",
     // Bumped (from Settings → 重新连接引擎) to REBUILD the engine source + chat VM
     // after the user writes a new API key — so a key entered live takes effect
     // without an app restart. Re-keys the `remember`/`viewModel` below.
@@ -143,7 +150,16 @@ fun RootScreen(
     // FlowMode orb voice driver: a one-shot tap-to-talk listener, plus the live
     // assistant reply text derived from the same conversation state ChatScreen
     // renders (the orb is just another view of the real session).
-    val orbListen = rememberOrbVoiceListen()
+    // The orb's listen path: prefer the OFFLINE sherpa STT when a language pack
+    // is downloaded AND mic permission is already granted; otherwise fall back to
+    // the system SpeechRecognizer (which also drives the permission request).
+    val orbSystemListen = rememberOrbVoiceListen()
+    val orbListen: (onResult: (String?) -> Unit) -> Unit = { cb ->
+        val canSherpa = voiceLang.isNotBlank() && SherpaVoice.sttReady(voiceLang) &&
+            ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) ==
+            PackageManager.PERMISSION_GRANTED
+        if (canSherpa) scope.launch { cb(SherpaVoice.transcribe(voiceLang)) } else orbSystemListen(cb)
+    }
     val orbAssistantText = state.messages.lastOrNull()
         ?.let { if (it.role == Role.Ai) it.text else "" } ?: ""
 
@@ -305,6 +321,7 @@ fun RootScreen(
             visible = flowActive,
             assistantName = assistantName,
             inputDialog = inputDialog,
+            voiceLang = voiceLang,
             streaming = state.streaming,
             assistantText = orbAssistantText,
             onSend = { chatViewModel.send(it) },

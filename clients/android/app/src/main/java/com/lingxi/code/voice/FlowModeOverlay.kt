@@ -41,6 +41,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -68,6 +69,7 @@ import com.lingxi.code.components.LXIcon
 import com.lingxi.code.components.LXIconName
 import com.lingxi.code.components.oklch
 import java.util.Locale
+import kotlinx.coroutines.launch
 import kotlin.math.PI
 import kotlin.math.cos
 import kotlin.math.min
@@ -288,6 +290,7 @@ fun FlowModeOverlay(
     visible: Boolean,
     assistantName: String,
     inputDialog: Boolean,
+    voiceLang: String,
     streaming: Boolean,
     assistantText: String,
     onSend: (String) -> Unit,
@@ -302,7 +305,7 @@ fun FlowModeOverlay(
         exit = fadeOut(tween(300)),
         modifier = modifier,
     ) {
-        FlowModeContent(assistantName, inputDialog, streaming, assistantText, onSend, onCancel, onListen, onClose)
+        FlowModeContent(assistantName, inputDialog, voiceLang, streaming, assistantText, onSend, onCancel, onListen, onClose)
     }
 }
 
@@ -310,6 +313,7 @@ fun FlowModeOverlay(
 private fun FlowModeContent(
     assistantName: String,
     inputDialog: Boolean,
+    voiceLang: String,
     streaming: Boolean,
     assistantText: String,
     onSend: (String) -> Unit,
@@ -323,7 +327,16 @@ private fun FlowModeContent(
     var typing by remember { mutableStateOf(false) }
     var draft by remember { mutableStateOf("") }
     val name = assistantName.ifBlank { "灵犀" }
-    val (speak, stopSpeak) = rememberTts()
+    // Speak the reply with the OFFLINE sherpa TTS when its pack is downloaded,
+    // else the system TextToSpeech.
+    val (sysSpeak, sysStop) = rememberTts()
+    val ttsScope = rememberCoroutineScope()
+    val speak: (String) -> Unit = { text ->
+        if (voiceLang.isNotBlank() && com.lingxi.code.voice.offline.SherpaVoice.ttsReady(voiceLang)) {
+            ttsScope.launch { com.lingxi.code.voice.offline.SherpaVoice.speak(voiceLang, text) }
+        } else sysSpeak(text)
+    }
+    val stopSpeak: () -> Unit = { com.lingxi.code.voice.offline.SherpaVoice.stopSpeak(); sysStop() }
 
     // Start a one-shot listen → send → (engine streams the reply) cycle.
     fun listen() {

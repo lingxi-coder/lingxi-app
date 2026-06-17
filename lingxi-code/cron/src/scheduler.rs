@@ -15,6 +15,14 @@ use tasks::{TaskSpawnInput, TaskType};
 use tokio::sync::{Mutex, RwLock};
 use traits::{Clock, FileSystem, RuntimeSpawner};
 
+/// Default auto-expiry age for a RECURRING cron job — 30 days, 1:1 with
+/// claude-code `DEFAULT_CRON_JITTER_CONFIG.recurringMaxAgeMs`
+/// (`cronJitterConfig.ts`, `30 * 24 * 60 * 60 * 1000` ms) and the Rust
+/// `CronCreate` `DEFAULT_MAX_AGE_DAYS = 30`. After this long since `created_at`,
+/// a recurring job is auto-expired on the next tick — honoring the `CronCreate`
+/// promise "Auto-expires after 30 days. Use CronDelete to cancel sooner."
+pub const DEFAULT_RECURRING_MAX_AGE: Duration = Duration::from_secs(30 * 24 * 60 * 60);
+
 /// One registered cron job: its schedule, prompt, and last-fire bookkeeping.
 pub struct CronTaskDef {
     /// Stable job identifier (used for lock filenames and logs).
@@ -29,6 +37,98 @@ pub struct CronTaskDef {
     pub last_run: Option<SystemTime>,
     /// When `false`, the scheduler skips this job entirely.
     pub enabled: bool,
+    /// When the job was created (the persisted `created_at_unix_secs`). The
+    /// anchor for recurring auto-expiry ([`is_recurring_task_aged`]).
+    pub created_at: SystemTime,
+    /// `true` = fire on every schedule match until deleted or auto-expired;
+    /// `false` = one-shot. Only recurring jobs are subject to max-age expiry.
+    pub recurring: bool,
+}
+
+/// Is a RECURRING cron job past its auto-expiry age? 1:1 with claude-code
+/// `isRecurringTaskAged` (`cronScheduler.ts:59`,
+/// `recurring && nowMs - createdAt >= maxAgeMs`). A one-shot (`!recurring`) job
+/// is never aged-out here (it auto-deletes after firing instead);
+/// `max_age == None` disables expiry entirely (unlimited); and a `created_at` in
+/// the future (clock skew) is treated as not-yet-aged.
+///
+/// (claude-code also exempts `permanent` tasks; the Rust `CronCreate` schema has
+/// no permanent/exempt flag — its `durable` flag is a persistence toggle, not an
+/// expiry exemption — so every recurring job is subject to the max age, matching
+/// the unconditional "Auto-expires after 30 days" the tool reports.)
+#[must_use]
+fn is_recurring_task_aged(
+    now: SystemTime,
+    created_at: SystemTime,
+    recurring: bool,
+    max_age: Option<Duration>,
+) -> bool {
+    let Some(max_age) = max_age else {
+        return false;
+    };
+    recurring
+        && now
+            .duration_since(created_at)
+            .is_ok_and(|age| age >= max_age)
+}
+
+/// Post-fire bookkeeping for a job that JUST fired. A ONE-SHOT (`!recurring`)
+/// job is REMOVED from `tasks` and `true` is returned so the caller also deletes
+/// its persisted descriptor — 1:1 with claude-code `recurring: false` ("fire
+/// once at the next match, then auto-delete", `schedule_cron.rs` schema). A
+/// recurring job records `last_run` in place and returns `false`. A missing id
+/// is a no-op (`false`).
+fn finalize_fired_job(
+    tasks: &mut HashMap<String, CronTaskDef>,
+    id: &str,
+    now: SystemTime,
+) -> bool {
+    let recurring = match tasks.get(id) {
+        Some(t) => t.recurring,
+        None => return false,
+    };
+    if recurring {
+        if let Some(t) = tasks.get_mut(id) {
+            t.last_run = Some(now);
+        }
+        false
+    } else {
+        tasks.remove(id);
+        true
+    }
+}
+
+/// Merge a `last_fired_unix_secs` field into a persisted cron descriptor JSON,
+/// preserving every other field. Returns the re-serialized JSON, or `None` if
+/// the input is not a JSON object (so the caller leaves the file untouched).
+/// Recording the last-fire time is what makes missed-run CATCH-UP safe ACROSS
+/// RESTARTS — without it a reloaded job would re-fire a run it already fired in
+/// a prior session (claude-code persists `lastFiredAt` for the same reason).
+fn descriptor_with_last_fired(json: &str, last_fired_unix_secs: u64) -> Option<String> {
+    let mut value: serde_json::Value = serde_json::from_str(json).ok()?;
+    value
+        .as_object_mut()?
+        .insert("last_fired_unix_secs".into(), last_fired_unix_secs.into());
+    serde_json::to_string_pretty(&value).ok()
+}
+
+/// Is a job DUE to fire at `now`? Enabled AND its next scheduled run after the
+/// anchor (the last fire, or creation if never fired) has arrived
+/// (`next_match_after(anchor) <= now`). This fires live on the exact scheduled
+/// minute AND CATCHES UP a run missed while the scheduler was down — firing it
+/// ONCE. The post-fire `last_run = now` (persisted as `last_fired_unix_secs`)
+/// advances the anchor, and `next_match_after` is strictly-after, so the same
+/// run is never re-fired — including across restarts, once the loader restores
+/// `last_run` from the descriptor. 1:1 with claude-code's
+/// `nextCronRunMs(lastFiredAt ?? createdAt) <= now` due-detection.
+fn is_job_due(task: &CronTaskDef, now: SystemTime) -> bool {
+    if !task.enabled {
+        return false;
+    }
+    let anchor = task.last_run.unwrap_or(task.created_at);
+    task.schedule
+        .next_match_after(anchor)
+        .is_some_and(|next| next <= now)
 }
 
 /// Owner of the cron tick loop. Constructed with platform trait objects and
@@ -42,6 +142,9 @@ pub struct CronScheduler {
     lock_dir: PathBuf,
     /// Maximum random delay (seconds) applied before launching each due job.
     pub jitter_seconds: u32,
+    /// Auto-expiry age for RECURRING jobs; `None` disables expiry (unlimited).
+    /// Defaults to [`DEFAULT_RECURRING_MAX_AGE`].
+    recurring_max_age: Option<Duration>,
     tick_handle: Mutex<Option<traits::BackgroundTaskHandle>>,
 }
 
@@ -64,8 +167,17 @@ impl CronScheduler {
             runtime,
             lock_dir,
             jitter_seconds: 30,
+            recurring_max_age: Some(DEFAULT_RECURRING_MAX_AGE),
             tick_handle: Mutex::new(None),
         }
+    }
+
+    /// Override the recurring auto-expiry age (`None` = unlimited / never
+    /// expire). Defaults to [`DEFAULT_RECURRING_MAX_AGE`] (30 days).
+    #[must_use]
+    pub fn with_recurring_max_age(mut self, age: Option<Duration>) -> Self {
+        self.recurring_max_age = age;
+        self
     }
 
     /// Register a new cron job. The schedule string is parsed eagerly; an
@@ -77,6 +189,34 @@ impl CronScheduler {
         prompt: &str,
         agent_type: Option<String>,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        self.register_with_meta(
+            id,
+            schedule_str,
+            prompt,
+            agent_type,
+            self.clock.now(),
+            true,
+            None,
+        )
+        .await
+    }
+
+    /// Like [`Self::register`] but with the persisted `created_at` (the expiry
+    /// anchor), `recurring` flag, and `last_run` (the restored last-fire time, or
+    /// `None` if never fired) — used by the on-disk job loader so a job created
+    /// days ago is aged correctly AND its catch-up anchor survives a restart
+    /// (preventing a re-fire of an already-fired run). `register` is the
+    /// convenience form (created now, recurring, never fired).
+    pub async fn register_with_meta(
+        &self,
+        id: &str,
+        schedule_str: &str,
+        prompt: &str,
+        agent_type: Option<String>,
+        created_at: SystemTime,
+        recurring: bool,
+        last_run: Option<SystemTime>,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let schedule = parse_cron(schedule_str)?;
         self.tasks.write().await.insert(
             id.to_string(),
@@ -85,8 +225,10 @@ impl CronScheduler {
                 schedule,
                 prompt: prompt.into(),
                 agent_type,
-                last_run: None,
+                last_run,
                 enabled: true,
+                created_at,
+                recurring,
             },
         );
         Ok(())
@@ -114,12 +256,49 @@ impl CronScheduler {
 
     async fn tick(&self) {
         let now = self.clock.now();
+
+        // Auto-expire aged RECURRING jobs (claude-code `isRecurringTaskAged` →
+        // remove + `tengu_scheduled_task_expired`). Runs BEFORE the due-job scan,
+        // so an expired job never fires again; its persisted descriptor is
+        // deleted too, so it does not reload and re-expire every tick.
+        let expired_ids: Vec<String> = {
+            let tasks = self.tasks.read().await;
+            tasks
+                .values()
+                .filter(|t| {
+                    is_recurring_task_aged(now, t.created_at, t.recurring, self.recurring_max_age)
+                })
+                .map(|t| t.id.clone())
+                .collect()
+        };
+        if !expired_ids.is_empty() {
+            {
+                let mut tasks = self.tasks.write().await;
+                for id in &expired_ids {
+                    tasks.remove(id);
+                }
+            }
+            for id in &expired_ids {
+                let job_path = self.lock_dir.join(format!("{id}.json"));
+                let _ = self.fs.delete_file(&job_path.to_string_lossy()).await;
+                tracing::info!(
+                    event = "tengu_scheduled_task_expired",
+                    cron_id = %id,
+                    "cron job auto-expired after exceeding the recurring max age"
+                );
+            }
+        }
+
+        // Due-detection with missed-run CATCH-UP (`is_job_due`): fires live on
+        // the exact scheduled minute AND catches up a run missed while the
+        // scheduler was down (once). The strictly-after anchor advance — and the
+        // persisted `last_fired_unix_secs` restored on load — subsume the old
+        // same-minute dedup and prevent cross-restart re-fires.
         let due_ids: Vec<String> = {
             let tasks = self.tasks.read().await;
             tasks
                 .values()
-                .filter(|t| t.enabled && t.schedule.matches(now))
-                .filter(|t| t.last_run.map_or(true, |lr| !same_minute(lr, now)))
+                .filter(|t| is_job_due(t, now))
                 .map(|t| t.id.clone())
                 .collect()
         };
@@ -161,9 +340,35 @@ impl CronScheduler {
                 tracing::error!("cron task {id} create failed: {e}");
             }
 
-            // Update last_run.
-            if let Some(t) = self.tasks.write().await.get_mut(&id) {
-                t.last_run = Some(now);
+            // Post-fire bookkeeping: a ONE-SHOT job auto-deletes (it has now
+            // fired once); a RECURRING job records `last_run` AND persists it
+            // (`last_fired_unix_secs`) so missed-run catch-up does not re-fire
+            // this run after a restart.
+            let one_shot = {
+                let mut tasks = self.tasks.write().await;
+                finalize_fired_job(&mut tasks, &id, now)
+            };
+            let job_path = self.lock_dir.join(format!("{id}.json"));
+            let path_str = job_path.to_string_lossy();
+            if one_shot {
+                let _ = self.fs.delete_file(&path_str).await;
+                tracing::info!(cron_id = %id, "one-shot cron job fired and auto-deleted");
+            } else {
+                // Read-modify-write the descriptor. A missing descriptor (a
+                // non-durable, in-memory-only job) is skipped — its in-memory
+                // `last_run` suffices since it never reloads; and a delete that
+                // races the fire makes the read fail, so we never resurrect it.
+                let now_secs = now
+                    .duration_since(SystemTime::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+                if let Ok(content) =
+                    self.fs.read_file(&path_str, None, None).await.map(|c| c.content)
+                {
+                    if let Some(updated) = descriptor_with_last_fired(&content, now_secs) {
+                        let _ = self.fs.write_file(&path_str, &updated).await;
+                    }
+                }
             }
 
             // Release the lock so other peers see "stale" if we crash mid-task.
@@ -178,18 +383,6 @@ impl CronScheduler {
         }
         Ok(())
     }
-}
-
-fn same_minute(a: SystemTime, b: SystemTime) -> bool {
-    let secs_a = a
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .map(|d| d.as_secs() / 60)
-        .unwrap_or(0);
-    let secs_b = b
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .map(|d| d.as_secs() / 60)
-        .unwrap_or(0);
-    secs_a == secs_b
 }
 
 /// Detect whether `pid` corresponds to a live process. Used by
@@ -227,5 +420,142 @@ pub fn pid_alive_check(pid: u32) -> bool {
             CloseHandle(handle);
             true
         }
+    }
+}
+
+#[cfg(test)]
+mod expiry_tests {
+    use super::{is_recurring_task_aged, DEFAULT_RECURRING_MAX_AGE};
+    use std::time::{Duration, SystemTime};
+
+    const DAY: Duration = Duration::from_secs(24 * 60 * 60);
+
+    /// `n` days after the UNIX epoch.
+    fn at(days: u64) -> SystemTime {
+        SystemTime::UNIX_EPOCH + Duration::from_secs(days * 24 * 60 * 60)
+    }
+
+    #[test]
+    fn default_max_age_is_30_days() {
+        assert_eq!(DEFAULT_RECURRING_MAX_AGE, DAY * 30);
+    }
+
+    #[test]
+    fn recurring_job_past_max_age_is_aged() {
+        // created day 0, now day 31, max 30d → aged.
+        assert!(is_recurring_task_aged(at(31), at(0), true, Some(DAY * 30)));
+    }
+
+    #[test]
+    fn recurring_job_at_exact_boundary_is_aged() {
+        // age == max_age → aged (`>=`, matching claude-code's `nowMs - createdAt >= maxAgeMs`).
+        assert!(is_recurring_task_aged(at(30), at(0), true, Some(DAY * 30)));
+    }
+
+    #[test]
+    fn fresh_recurring_job_is_not_aged() {
+        assert!(!is_recurring_task_aged(at(5), at(0), true, Some(DAY * 30)));
+    }
+
+    #[test]
+    fn one_shot_job_is_never_aged_by_max_age() {
+        // !recurring → never aged out here (one-shot auto-deletes after firing).
+        assert!(!is_recurring_task_aged(at(100), at(0), false, Some(DAY * 30)));
+    }
+
+    #[test]
+    fn none_max_age_disables_expiry() {
+        assert!(!is_recurring_task_aged(at(10_000), at(0), true, None));
+    }
+
+    #[test]
+    fn future_created_at_is_not_aged() {
+        // Clock skew: created_at after now → duration_since errs → treated as not aged.
+        assert!(!is_recurring_task_aged(at(0), at(5), true, Some(DAY * 30)));
+    }
+
+    #[test]
+    fn finalize_one_shot_removes_recurring_keeps() {
+        use super::{finalize_fired_job, CronTaskDef};
+        use crate::schedule::parse_cron;
+        use std::collections::HashMap;
+
+        let mk = |id: &str, recurring: bool| CronTaskDef {
+            id: id.into(),
+            schedule: parse_cron("* * * * *").unwrap(),
+            prompt: "p".into(),
+            agent_type: None,
+            last_run: None,
+            enabled: true,
+            created_at: at(0),
+            recurring,
+        };
+        let mut tasks = HashMap::new();
+        tasks.insert("rec".to_string(), mk("rec", true));
+        tasks.insert("once".to_string(), mk("once", false));
+
+        // One-shot: removed, returns true (caller deletes the descriptor).
+        assert!(finalize_fired_job(&mut tasks, "once", at(1)));
+        assert!(!tasks.contains_key("once"));
+
+        // Recurring: kept, last_run recorded, returns false.
+        assert!(!finalize_fired_job(&mut tasks, "rec", at(1)));
+        assert_eq!(tasks.get("rec").unwrap().last_run, Some(at(1)));
+
+        // Missing id: no-op false.
+        assert!(!finalize_fired_job(&mut tasks, "ghost", at(1)));
+    }
+
+    #[test]
+    fn descriptor_with_last_fired_merges_and_preserves_fields() {
+        use super::descriptor_with_last_fired;
+        let orig = r#"{"id":"j","cron":"0 9 * * *","prompt":"p","recurring":true,"durable":true,"created_at_unix_secs":100}"#;
+        let updated = descriptor_with_last_fired(orig, 555).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&updated).unwrap();
+        assert_eq!(v["last_fired_unix_secs"], 555);
+        // Every original field is preserved.
+        assert_eq!(v["id"], "j");
+        assert_eq!(v["cron"], "0 9 * * *");
+        assert_eq!(v["prompt"], "p");
+        assert_eq!(v["recurring"], true);
+        assert_eq!(v["durable"], true);
+        assert_eq!(v["created_at_unix_secs"], 100);
+        // Non-object input → None (caller leaves the file untouched).
+        assert!(descriptor_with_last_fired("not json", 1).is_none());
+        assert!(descriptor_with_last_fired("[1,2,3]", 1).is_none());
+    }
+
+    #[test]
+    fn is_job_due_fires_live_catches_up_and_never_double_fires() {
+        use super::{is_job_due, CronTaskDef};
+        use crate::schedule::parse_cron;
+
+        let sec = |s: u64| SystemTime::UNIX_EPOCH + Duration::from_secs(s);
+        let nine_am = sec(1_700_038_800); // 2023-11-15 09:00 UTC
+        let eight_am = sec(1_700_035_200); // same day 08:00
+        let ten_am = sec(1_700_042_400); // same day 10:00
+        let yest_nine = sec(1_700_038_800 - 86_400); // 2023-11-14 09:00
+
+        let mk = |last_run: Option<SystemTime>, created_at: SystemTime, enabled: bool| CronTaskDef {
+            id: "j".into(),
+            schedule: parse_cron("0 9 * * *").unwrap(),
+            prompt: "p".into(),
+            agent_type: None,
+            last_run,
+            enabled,
+            created_at,
+            recurring: true,
+        };
+
+        // LIVE: last fired yesterday 09:00, now today 09:00 → due.
+        assert!(is_job_due(&mk(Some(yest_nine), eight_am, true), nine_am));
+        // Before the scheduled minute (now 08:00) → not due.
+        assert!(!is_job_due(&mk(Some(yest_nine), eight_am, true), eight_am));
+        // CATCH-UP: never fired, created 08:00, now 10:00 (missed 09:00) → due.
+        assert!(is_job_due(&mk(None, eight_am, true), ten_am));
+        // NO DOUBLE-FIRE: just fired at 09:00, still 09:00 → next run tomorrow → not due.
+        assert!(!is_job_due(&mk(Some(nine_am), eight_am, true), nine_am));
+        // Per-task disabled → never due.
+        assert!(!is_job_due(&mk(Some(yest_nine), eight_am, false), nine_am));
     }
 }

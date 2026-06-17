@@ -5,7 +5,7 @@
 //! the `time` crate. See plan 11.
 
 use serde::{Deserialize, Serialize};
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 use thiserror::Error;
 
 /// Parsed 5-field cron expression: minute hour day-of-month month day-of-week.
@@ -127,6 +127,34 @@ impl CronExpression {
             && Self::field_match(&self.month, month)
             && day_matches
             && year > 1970
+    }
+
+    /// The smallest minute boundary STRICTLY after `from` at which this
+    /// expression matches, searching up to ~366 days ahead. `None` if no match
+    /// is found within that horizon (e.g. an impossible expression like
+    /// `0 0 30 2 *`).
+    ///
+    /// The missed-run CATCH-UP primitive: a recurring job is due when the next
+    /// run after its anchor (last-fire, or creation if never fired) has already
+    /// passed (`next_match_after(anchor) <= now`), so a run missed while the
+    /// scheduler was down fires once on the next tick. The strictly-after
+    /// property is what prevents a double-fire: once a run fires and the anchor
+    /// advances to it, that same run is never matched again. Cost is bounded by
+    /// the schedule's PERIOD for any real schedule (the first match after the
+    /// anchor is within one period), not by how old the anchor is.
+    #[must_use]
+    pub fn next_match_after(&self, from: SystemTime) -> Option<SystemTime> {
+        let from_secs = from
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .ok()?;
+        // Start at the next whole minute strictly after `from`.
+        let start_minute = from_secs / 60 + 1;
+        const HORIZON_MINUTES: u64 = 366 * 24 * 60;
+        (0..HORIZON_MINUTES).find_map(|m| {
+            let candidate = SystemTime::UNIX_EPOCH + Duration::from_secs((start_minute + m) * 60);
+            self.matches(candidate).then_some(candidate)
+        })
     }
 
     /// Whether `field` matches EVERY value in the inclusive domain `[lo, hi]` —
@@ -265,5 +293,42 @@ mod tests {
         let expr = parse_cron("0 0 15 * *").unwrap();
         let nov14_midnight = 1_699_920_000;
         assert!(!expr.matches(at(nov14_midnight)));
+    }
+
+    // ── next_match_after (missed-run catch-up primitive) ──────────────────
+
+    #[test]
+    fn next_match_after_every_minute() {
+        let expr = parse_cron("* * * * *").unwrap();
+        let next = expr.next_match_after(at(TUE_2023_11_14)).unwrap();
+        assert_eq!(next, at((TUE_2023_11_14 / 60 + 1) * 60));
+    }
+
+    #[test]
+    fn next_match_after_is_strictly_after() {
+        // Even when `from` is exactly ON a matching minute, the result is the
+        // NEXT one — this strictly-after property prevents catch-up double-fires.
+        let expr = parse_cron("* * * * *").unwrap();
+        assert_eq!(
+            expr.next_match_after(at(1_700_000_040)).unwrap(),
+            at(1_700_000_100)
+        );
+    }
+
+    #[test]
+    fn next_match_after_daily_rolls_to_next_day() {
+        // `0 9 * * *` (09:00 UTC). From 2023-11-14 22:13 → 2023-11-15 09:00.
+        let expr = parse_cron("0 9 * * *").unwrap();
+        let next = expr.next_match_after(at(TUE_2023_11_14)).unwrap();
+        let (y, m, d, h, min, ..) =
+            decompose(next.duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs());
+        assert_eq!((y, m, d, h, min), (2023, 11, 15, 9, 0));
+    }
+
+    #[test]
+    fn next_match_after_impossible_expression_is_none() {
+        // Feb 30 never occurs → no match within the ~366-day horizon.
+        let expr = parse_cron("0 0 30 2 *").unwrap();
+        assert_eq!(expr.next_match_after(at(TUE_2023_11_14)), None);
     }
 }

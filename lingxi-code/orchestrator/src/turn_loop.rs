@@ -1062,11 +1062,15 @@ pub(crate) async fn dispatch_tool_uses(
 pub(crate) async fn dispatch_tool_uses_tracked(
     orch: &ConversationOrchestrator,
     tool_uses: &[(ToolUseId, String, serde_json::Value, Option<String>)],
-    // PHASE-2: sibling `CancellationToken` (a child of the streaming executor's
-    // `sibling_cancel`) threaded into each tool's `ToolUseContext::cancel`. The
-    // Bash tool observes it to SIGKILL an in-flight subprocess when a sibling
-    // Bash errors (or the turn is discarded). `None` for every non-streaming
-    // caller (batched turn loop + tests) → no cancellation ever fires.
+    // PHASE-2 + DEFERRED-3: per-tool `CancellationToken` (a child of the streaming
+    // executor's `sibling_cancel`) threaded into each tool's
+    // `ToolUseContext::cancel`. It fires when a sibling Bash errors / the turn is
+    // discarded (Phase 2) OR — because `sibling_cancel` is parented to the turn's
+    // user-interrupt token in `new_with_user_cancel` — when the USER interrupts
+    // (DEFERRED-3, ESC / new message). A Cancel-behavior tool (e.g. an in-flight
+    // Bash) observes it to return early / SIGKILL its subprocess; the executor
+    // then substitutes the synthetic result. `None` for every non-streaming caller
+    // (batched turn loop + tests) → no cancellation ever fires.
     cancel: Option<tokio_util::sync::CancellationToken>,
 ) -> Result<
     (

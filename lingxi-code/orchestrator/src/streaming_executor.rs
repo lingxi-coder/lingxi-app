@@ -31,9 +31,9 @@ type DispatchOutcome = Result<
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum AbortReason {
     SiblingError,
-    /// PHASE-2: emitted when the user interrupts an in-flight tool; constructed
-    /// once the per-tool `CancellationToken` path lands.
-    #[allow(dead_code)]
+    /// Emitted when the user interrupts (ESC / new message) an in-flight or
+    /// queued tool whose `interrupt_behavior()==Cancel` (TS `getAbortReason`
+    /// 'user_interrupted'). The synthetic result is the bare `REJECT_MESSAGE`.
     UserInterrupted,
     StreamingFallback,
 }
@@ -150,6 +150,17 @@ pub(crate) struct StreamingToolExecutor<'a> {
     /// then substitutes with the synthetic sibling-cancel block.
     /// Mirrors claude-code's `siblingAbortController` / `createChildAbortController`.
     sibling_cancel: tokio_util::sync::CancellationToken,
+    /// DEFERRED-3: the turn's USER-interrupt token (ESC / new message), mirroring
+    /// claude-code's `toolUseContext.abortController` with reason 'interrupt'.
+    /// `None` outside the live streaming turn (executor unit tests + the test-only
+    /// `run_to_completion` path), so those are byte-identical to before. When
+    /// `Some` and fired, `abort_reason_for` substitutes `UserInterrupted` for
+    /// every tool whose `interrupt_behavior()==Cancel` (queued via
+    /// `apply_abort_to_pending`, in-flight via `drain_one`). To also deliver the
+    /// token into each in-flight tool's `ctx.cancel` (so a Cancel-behavior tool
+    /// observes it and returns early), `sibling_cancel` is parented to this token
+    /// in `new_with_user_cancel` — a child token fires when its parent fires.
+    user_cancel: Option<tokio_util::sync::CancellationToken>,
 }
 
 impl<'a> StreamingToolExecutor<'a> {
@@ -164,6 +175,31 @@ impl<'a> StreamingToolExecutor<'a> {
             discarded: false,
             inflight: FuturesUnordered::new(),
             sibling_cancel: tokio_util::sync::CancellationToken::new(),
+            user_cancel: None,
+        }
+    }
+
+    /// DEFERRED-3: construct with the turn's USER-interrupt token (ESC / new
+    /// message). `sibling_cancel` is made a CHILD of `user_cancel`, so firing the
+    /// user token also cancels every per-tool child (an in-flight Cancel-behavior
+    /// tool observes its `ctx.cancel` and returns early); `abort_reason_for` then
+    /// substitutes the bare `REJECT_MESSAGE` for Cancel-behavior tools.
+    /// Mirrors claude-code's `createChildAbortController(siblingAbortController)`
+    /// where the user abort lives on the parent `toolUseContext.abortController`.
+    pub(crate) fn new_with_user_cancel(
+        orch: &'a ConversationOrchestrator,
+        user_cancel: tokio_util::sync::CancellationToken,
+    ) -> Self {
+        let sibling_cancel = user_cancel.child_token();
+        Self {
+            orch,
+            tools: Vec::new(),
+            has_errored: false,
+            errored_desc: None,
+            discarded: false,
+            inflight: FuturesUnordered::new(),
+            sibling_cancel,
+            user_cancel: Some(user_cancel),
         }
     }
 
@@ -305,6 +341,40 @@ impl<'a> StreamingToolExecutor<'a> {
         self.inflight.is_empty()
     }
 
+    /// TS `getAbortReason` (StreamingToolExecutor.ts:210-231): why tool `i` should
+    /// be cancelled, computed from PRIOR state. Precedence is faithful:
+    /// `discarded` → `StreamingFallback`, then `has_errored` → `SiblingError`,
+    /// then a fired USER-interrupt token → `UserInterrupted` ONLY when this tool's
+    /// `interrupt_behavior()==Cancel` (Block-behavior tools are NOT interrupted;
+    /// TS returns `null` for them). Unlike the first two reasons — which apply to
+    /// the whole batch — the user-interrupt branch is PER-TOOL, so it must be
+    /// evaluated by index here rather than precomputed once.
+    fn abort_reason_for(&self, i: usize) -> Option<AbortReason> {
+        if self.discarded {
+            return Some(AbortReason::StreamingFallback);
+        }
+        if self.has_errored {
+            return Some(AbortReason::SiblingError);
+        }
+        if let Some(token) = &self.user_cancel {
+            if token.is_cancelled() {
+                // TS `getToolInterruptBehavior`: default Block when the tool is not
+                // in the registry; only `Cancel` tools are user-interrupted.
+                let is_cancel = matches!(
+                    self.orch
+                        .tools
+                        .find_by_name(&self.tools[i].name)
+                        .map(|t| t.interrupt_behavior(&self.tools[i].input)),
+                    Some(tool_api::tool_trait::InterruptBehavior::Cancel)
+                );
+                if is_cancel {
+                    return Some(AbortReason::UserInterrupted);
+                }
+            }
+        }
+        None
+    }
+
     /// Await one in-flight tool future, record its result, and trigger the Bash
     /// sibling-error cascade. Returns the completed tool index, or `None` if no
     /// futures are in flight. (TS `executeTool`/`collectResults` completion path.)
@@ -329,13 +399,7 @@ impl<'a> StreamingToolExecutor<'a> {
         // in-flight Bash returns `Err(Aborted)` (an error block) yet must still be
         // substituted with the synthetic — keying off the tool's own error here would
         // wrongly let it keep "Error: aborted" instead.
-        let abort_reason = if self.discarded {
-            Some(AbortReason::StreamingFallback)
-        } else if self.has_errored {
-            Some(AbortReason::SiblingError)
-        } else {
-            None
-        };
+        let abort_reason = self.abort_reason_for(i);
         // If THIS tool is the Bash whose error triggers the cascade, set has_errored
         // NOW so it affects FUTURE drains (not this one — abort_reason already computed).
         if this_tool_errored {
@@ -397,22 +461,24 @@ impl<'a> StreamingToolExecutor<'a> {
     /// two are complementary: queued tools never enter `inflight`, so `drain_one`
     /// never sees them, and an executing tool is never `Queued` here.
     pub(crate) fn apply_abort_to_pending(&mut self) {
-        let reason = if self.discarded {
-            Some(AbortReason::StreamingFallback)
-        } else if self.has_errored {
-            Some(AbortReason::SiblingError)
-        } else {
-            None
-        };
-        let Some(reason) = reason else { return };
         let desc = self.errored_desc.clone();
-        for t in &mut self.tools {
-            if matches!(t.status, ToolStatus::Queued) && t.result.is_none() {
-                let mut block = synthetic_error_block(t.id.clone(), reason, desc.as_deref());
-                set_provider_id(&mut block, t.provider_id.clone());
-                t.result = Some(block);
-                t.status = ToolStatus::Completed;
+        for i in 0..self.tools.len() {
+            if !matches!(self.tools[i].status, ToolStatus::Queued) || self.tools[i].result.is_some()
+            {
+                continue;
             }
+            // Per-tool: the user-interrupt branch in `abort_reason_for` gates on
+            // `interrupt_behavior()`, so a Queued Block-behavior tool under a pure
+            // user-interrupt gets `None` here and still runs (faithful: Block tools
+            // are not interrupted). `discarded`/`has_errored` apply to all.
+            let Some(reason) = self.abort_reason_for(i) else {
+                continue;
+            };
+            let mut block =
+                synthetic_error_block(self.tools[i].id.clone(), reason, desc.as_deref());
+            set_provider_id(&mut block, self.tools[i].provider_id.clone());
+            self.tools[i].result = Some(block);
+            self.tools[i].status = ToolStatus::Completed;
         }
     }
 
@@ -1670,6 +1736,162 @@ mod tests {
         assert_eq!(results.len(), 1);
         assert_eq!(exec.tools[0].status, ToolStatus::Executing); // untouched
         assert_eq!(exec.tools[1].status, ToolStatus::Yielded);
+    }
+
+    // ============================================================================
+    // DEFERRED-3: user-ESC granular interrupt (abort_reason_for + per-tool gating)
+    // ============================================================================
+
+    /// A concurrency-SAFE tool whose `interrupt_behavior()==Cancel`. Sleeps,
+    /// racing its `ctx.cancel`; on cancel returns `Aborted` so the executor
+    /// substitutes the synthetic. Mirrors a WebFetch/Agent-style Cancel tool.
+    struct CancelBehaviorTool;
+
+    #[async_trait]
+    impl Tool for CancelBehaviorTool {
+        fn name(&self) -> &str { "CancelTool" }
+        fn input_schema(&self) -> &serde_json::Value {
+            static SCHEMA: once_cell::sync::Lazy<serde_json::Value> =
+                once_cell::sync::Lazy::new(|| json!({ "type": "object", "properties": {} }));
+            &SCHEMA
+        }
+        fn is_enabled(&self, _ctx: &ToolStaticContext) -> bool { true }
+        fn max_result_size_chars(&self) -> usize { 1024 * 1024 }
+        fn is_concurrency_safe(&self, _input: &serde_json::Value) -> bool { true }
+        fn is_read_only(&self, _input: &serde_json::Value) -> bool { true }
+        fn interrupt_behavior(
+            &self,
+            _input: &serde_json::Value,
+        ) -> tool_api::tool_trait::InterruptBehavior {
+            tool_api::tool_trait::InterruptBehavior::Cancel
+        }
+        async fn validate_input(
+            &self,
+            _input: &serde_json::Value,
+            _ctx: &ToolUseContext,
+        ) -> Result<(), ValidationError> {
+            Ok(())
+        }
+        async fn check_permissions(
+            &self,
+            _input: &serde_json::Value,
+            _ctx: &ToolUseContext,
+        ) -> permission::PermissionResult {
+            permission::PermissionResult::Allow {
+                reason: permission::PermissionDecisionReason::Other { reason: "test".into() },
+                updated_input: None,
+                update_destination: None,
+                metadata: permission::result::PermissionMetadata::default(),
+            }
+        }
+        async fn description(
+            &self,
+            _input: &serde_json::Value,
+            _opts: &DescriptionOptions,
+        ) -> String {
+            "cancel-tool".into()
+        }
+        async fn prompt(&self, _opts: &PromptOptions) -> String { String::new() }
+        async fn call(
+            &self,
+            _input: serde_json::Value,
+            ctx: ToolUseContext,
+            _tx: ToolProgressSender,
+        ) -> Result<ToolCallResult, ToolError> {
+            let token = ctx.cancel.clone();
+            tokio::select! {
+                () = tokio::time::sleep(std::time::Duration::from_millis(200)) => {
+                    Ok(ToolCallResult {
+                        data: json!({ "content": "cancel-tool-ran-to-end" }),
+                        new_messages: vec![],
+                        context_modifier: None,
+                        mcp_meta: None,
+                    })
+                }
+                () = async { match token { Some(t) => t.cancelled().await, None => std::future::pending().await } } => {
+                    Err(ToolError::Aborted)
+                }
+            }
+        }
+    }
+
+    fn orch_with_cancel_and_block_tools() -> ConversationOrchestrator {
+        let mut registry = ToolRegistry::new();
+        registry.register_builtin(Arc::new(CancelBehaviorTool) as Arc<dyn Tool>);
+        // SafeTool defaults to Block (no interrupt_behavior override).
+        registry.register_builtin(Arc::new(SafeTool) as Arc<dyn Tool>);
+        ConversationOrchestrator::new(
+            OrchestratorConfig::default(),
+            Arc::new(MockApiClient::new(vec![])),
+            Arc::new(registry),
+            noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            PathBuf::from("/tmp"),
+        )
+    }
+
+    /// `abort_reason_for`: a fired user-cancel token yields `UserInterrupted` for
+    /// a Cancel-behavior tool and `None` for a Block-behavior tool (gating).
+    #[tokio::test]
+    async fn abort_reason_for_gates_on_interrupt_behavior() {
+        let orch = orch_with_cancel_and_block_tools();
+        let user_cancel = tokio_util::sync::CancellationToken::new();
+        let a = MessageId::new();
+        let mut exec = StreamingToolExecutor::new_with_user_cancel(&orch, user_cancel.clone());
+        exec.add_tool(ToolUseId::new(), "CancelTool".into(), json!({}), None, a);
+        exec.add_tool(ToolUseId::new(), "SafeTool".into(), json!({}), None, a);
+        // Not fired yet → no abort for either.
+        assert_eq!(exec.abort_reason_for(0), None);
+        assert_eq!(exec.abort_reason_for(1), None);
+        user_cancel.cancel();
+        assert_eq!(exec.abort_reason_for(0), Some(AbortReason::UserInterrupted));
+        assert_eq!(exec.abort_reason_for(1), None, "Block tool is NOT interrupted");
+    }
+
+    /// Queued Cancel-behavior tool under a fired user-cancel gets the bare
+    /// REJECT_MESSAGE via `apply_abort_to_pending`; a queued Block tool runs.
+    #[tokio::test]
+    async fn apply_abort_to_pending_user_interrupt_rejects_cancel_tool_only() {
+        let orch = orch_with_cancel_and_block_tools();
+        let user_cancel = tokio_util::sync::CancellationToken::new();
+        let a = MessageId::new();
+        let mut exec = StreamingToolExecutor::new_with_user_cancel(&orch, user_cancel.clone());
+        exec.add_tool(ToolUseId::new(), "CancelTool".into(), json!({}), None, a);
+        user_cancel.cancel();
+        exec.apply_abort_to_pending();
+        let ContentBlock::ToolResult { content, is_error, .. } =
+            exec.tools[0].result.as_ref().unwrap()
+        else {
+            panic!()
+        };
+        assert!(*is_error);
+        assert_eq!(content, REJECT_MESSAGE);
+    }
+
+    /// End-to-end through `run_to_completion`: an in-flight Cancel-behavior tool
+    /// observes its `ctx.cancel` (parented to the user token) firing mid-flight,
+    /// returns early, and `drain_one` substitutes the bare REJECT_MESSAGE.
+    #[tokio::test]
+    async fn in_flight_cancel_tool_user_interrupted_gets_reject_message() {
+        let orch = orch_with_cancel_and_block_tools();
+        let user_cancel = tokio_util::sync::CancellationToken::new();
+        let a = MessageId::new();
+        let mut exec = StreamingToolExecutor::new_with_user_cancel(&orch, user_cancel.clone());
+        exec.add_tool(ToolUseId::new(), "CancelTool".into(), json!({}), None, a);
+        // Start it, then fire the user cancel while it is in flight.
+        exec.process_queue();
+        assert_eq!(exec.tools[0].status, ToolStatus::Executing);
+        user_cancel.cancel();
+        let results = exec.run_to_completion().await.unwrap();
+        let ContentBlock::ToolResult { content, is_error, .. } = &results[0] else { panic!() };
+        assert!(*is_error);
+        assert_eq!(
+            content, REJECT_MESSAGE,
+            "in-flight Cancel tool must get the bare REJECT_MESSAGE on user interrupt"
+        );
+        assert!(!content.contains("cancel-tool-ran-to-end"));
     }
 
     /// Test 4: has_unfinished returns true when there are Queued/Executing tools,

@@ -2336,7 +2336,9 @@ impl ConversationOrchestrator {
             event = orch_events::TURN_STREAMING_STARTED,
             prompt_len = prompt.len()
         );
-        let result = self.try_run_turn_streaming(prompt, Vec::new()).await;
+        // DEFERRED-3: the plain (non-cancelable) streaming entry has no granular
+        // user-interrupt token → `None` (behaviour byte-identical to before).
+        let result = self.try_run_turn_streaming(prompt, Vec::new(), None).await;
         self.emit_terminal_rate_limit_if_changed(&result).await;
         let result = result.map_err(|e| self.enrich_api_error(e));
         match &result {
@@ -2364,6 +2366,14 @@ impl ConversationOrchestrator {
         &self,
         prompt: &str,
         images: Vec<protocol::ImageSource>,
+        // DEFERRED-3: the turn's USER-interrupt token (ESC / new message). `Some`
+        // only on the cancelable streaming entry; `None` for the plain
+        // `run_turn_streaming` (no granular interrupt). When fired mid-tools, the
+        // `StreamingToolExecutor` rejects in-flight/queued Cancel-behavior tools
+        // with the bare REJECT_MESSAGE, PERSISTS those results, and ends the turn
+        // gracefully (no whole-turn drop) — mirroring claude-code's
+        // `StreamingToolExecutor` user_interrupted path.
+        user_cancel: Option<CancellationToken>,
     ) -> Result<ConversationOutcome, OrchestratorError> {
         use crate::streaming_loop::pump_stream;
         use protocol::ContentBlock;
@@ -2733,7 +2743,19 @@ impl ConversationOrchestrator {
             //    the old single-batched-user-message shape and matching the TS
             //    `sessionStorage` `sourceToolAssistantUUID → parentUuid` mapping.
             if !pumped.tool_uses.is_empty() {
-                let mut exec = crate::streaming_executor::StreamingToolExecutor::new(self);
+                // DEFERRED-3: hand the executor the turn's user-interrupt token (if
+                // any) so it can reject in-flight/queued Cancel-behavior tools with
+                // the REJECT_MESSAGE when the user interrupts; `None` → identical to
+                // before (no user-interrupt machinery engaged).
+                let mut exec = match &user_cancel {
+                    Some(token) => {
+                        crate::streaming_executor::StreamingToolExecutor::new_with_user_cancel(
+                            self,
+                            token.clone(),
+                        )
+                    }
+                    None => crate::streaming_executor::StreamingToolExecutor::new(self),
+                };
                 for tu in &pumped.tool_uses {
                     exec.add_tool(
                         tu.id.clone(),
@@ -3045,11 +3067,15 @@ impl ConversationOrchestrator {
 
     /// Streaming twin of [`Self::run_turn_with_cancel`] (M6-03).
     ///
-    /// Race [`Self::try_run_turn_streaming`] against the `cancel` token:
-    /// - natural completion (`ConversationOutcome::EndTurn`) → `TurnOutcome::EndTurn`.
-    /// - `cancel.cancelled()` fires → `TurnOutcome::Cancelled` (the SSE
-    ///   stream is dropped, which closes the HTTP request and flushes any
-    ///   already-buffered `emit_text` calls to the output sink).
+    /// DEFERRED-3: the `cancel` token is a GRANULAR user-interrupt (ESC / new
+    /// message), threaded INTO [`Self::try_run_turn_streaming`] rather than raced
+    /// against it. When it fires mid-tools the `StreamingToolExecutor` rejects
+    /// in-flight/queued Cancel-behavior tools with the bare REJECT_MESSAGE,
+    /// PERSISTS those `tool_result`s, and the turn ends gracefully:
+    /// - natural completion, token never fired → `TurnOutcome::EndTurn`.
+    /// - token fired (the turn finished gracefully with the interrupted results
+    ///   recorded in history) → `TurnOutcome::Cancelled`.
+    /// - a pre-cancelled token → `TurnOutcome::Cancelled` immediately (no API call).
     /// - `OrchestratorError::MaxTurnsReached` → `TurnOutcome::MaxTurns`.
     /// - any other API/streaming error → propagated as `Err`.
     ///
@@ -3108,39 +3134,50 @@ impl ConversationOrchestrator {
         if cancel.is_cancelled() {
             return Ok(TurnOutcome::Cancelled);
         }
-        tokio::select! {
-            biased;
-            () = cancel.cancelled() => Ok(TurnOutcome::Cancelled),
-            r = self.try_run_turn_streaming(prompt, images) => match r {
-                Ok(ConversationOutcome::EndTurn { turn_count, .. }
-                | ConversationOutcome::StopHookPrevented { turn_count, .. }) => {
-                    tracing::info!(
-                        event = orch_events::TURN_STREAMING_COMPLETED,
-                        turn_count
-                    );
+        // DEFERRED-3: GRANULAR user-ESC interrupt — do NOT race-drop the turn.
+        // Previously this `select!`'d `try_run_turn_streaming` against
+        // `cancel.cancelled()` and on cancel DROPPED the whole turn future, so
+        // in-flight tools vanished and no result reached the model. Now the token
+        // is threaded INTO the turn core: the `StreamingToolExecutor` substitutes
+        // the bare REJECT_MESSAGE for in-flight/queued Cancel-behavior tools,
+        // PERSISTS those `tool_result`s (model-visible), and the streaming loop
+        // FINISHES gracefully — mirroring claude-code's `StreamingToolExecutor`
+        // user_interrupted path where the interrupted results become part of the
+        // transcript. We then map the outcome to `Cancelled` for the TUI when the
+        // token fired (so it still renders "interrupted"), else `EndTurn`. A turn
+        // running only Block-behavior tools (or no tools) runs to its natural end
+        // and is still reported `Cancelled` here — faithful: claude-code only
+        // aborts Cancel-behavior tools; Block tools / the stream finish.
+        let r = self
+            .try_run_turn_streaming(prompt, images, Some(cancel.clone()))
+            .await;
+        match r {
+            Ok(ConversationOutcome::EndTurn { turn_count, .. }
+            | ConversationOutcome::StopHookPrevented { turn_count, .. }) => {
+                tracing::info!(event = orch_events::TURN_STREAMING_COMPLETED, turn_count);
+                if cancel.is_cancelled() {
+                    Ok(TurnOutcome::Cancelled)
+                } else {
                     Ok(TurnOutcome::EndTurn)
                 }
-                Err(OrchestratorError::MaxTurnsReached { .. }) => {
-                    Ok(TurnOutcome::MaxTurns)
+            }
+            Err(OrchestratorError::MaxTurnsReached { .. }) => Ok(TurnOutcome::MaxTurns),
+            Err(e) => {
+                // B6-T1: status-change emit parity — fire the emit-on-change
+                // helpers for a terminal rate-limited error (the drive fn
+                // already promoted the staged 429), BEFORE enrichment. Same
+                // discriminant + B1 divergence as
+                // `emit_terminal_rate_limit_if_changed`.
+                if matches!(
+                    e,
+                    OrchestratorError::ApiCall(LlmError::RateLimited { .. })
+                        | OrchestratorError::Streaming(LlmError::RateLimited { .. })
+                ) {
+                    self.emit_rate_limit_if_changed().await;
+                    self.emit_raw_utilization_if_changed().await;
                 }
-                Err(e) => {
-                    // B6-T1: status-change emit parity — fire the emit-on-change
-                    // helpers for a terminal rate-limited error (the drive fn
-                    // already promoted the staged 429), BEFORE enrichment. Same
-                    // discriminant + B1 divergence as
-                    // `emit_terminal_rate_limit_if_changed` (de-sugared here
-                    // because the `select!` arm already owns `e` by value).
-                    if matches!(
-                        e,
-                        OrchestratorError::ApiCall(LlmError::RateLimited { .. })
-                            | OrchestratorError::Streaming(LlmError::RateLimited { .. })
-                    ) {
-                        self.emit_rate_limit_if_changed().await;
-                        self.emit_raw_utilization_if_changed().await;
-                    }
-                    Err(self.enrich_api_error(e))
-                }
-            },
+                Err(self.enrich_api_error(e))
+            }
         }
     }
 

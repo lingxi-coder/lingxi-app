@@ -132,10 +132,7 @@ impl<'a> StreamingToolExecutor<'a> {
     ) {
         match self.orch.tools.find_by_name(&name) {
             None => {
-                let mut block = synthetic_unknown_tool(id, &name);
-                if let ContentBlock::ToolResult { provider_tool_use_id, .. } = &mut block {
-                    *provider_tool_use_id = provider_id.clone();
-                }
+                let block = synthetic_unknown_tool(id, &name, provider_id.clone());
                 self.tools.push(TrackedTool {
                     id,
                     name,
@@ -173,17 +170,22 @@ impl<'a> StreamingToolExecutor<'a> {
     }
 }
 
-/// Build the synthetic `tool_result` for an unknown tool (TS `addTool` line
-/// 78-84). `provider_tool_use_id` is left `None` — the caller copies the
-/// tracked tool's `provider_id` in before persisting.
-fn synthetic_unknown_tool(id: ToolUseId, name: &str) -> ContentBlock {
+/// Build the synthetic `tool_result` for an unknown tool (claude-code `addTool`
+/// line 78-84 / `toolExecution.ts:401`). Shared by the streaming executor and
+/// the batched dispatch (`turn_loop`) so this parity-critical string lives in
+/// exactly one place.
+pub(crate) fn synthetic_unknown_tool(
+    id: ToolUseId,
+    name: &str,
+    provider_id: Option<String>,
+) -> ContentBlock {
     ContentBlock::ToolResult {
         tool_use_id: id,
         content: format!(
             "<tool_use_error>Error: No such tool available: {name}</tool_use_error>"
         ),
         is_error: true,
-        provider_tool_use_id: None,
+        provider_tool_use_id: provider_id,
     }
 }
 

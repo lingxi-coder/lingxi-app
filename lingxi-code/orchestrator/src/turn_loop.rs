@@ -1097,14 +1097,13 @@ pub(crate) async fn dispatch_tool_uses_tracked(
         // wrapped literal verbatim (claude-code's unknown-tool has no hook
         // context).
         let Some(tool_handle) = orch.tools.find_by_name(name) else {
-            let result_block = ContentBlock::ToolResult {
-                tool_use_id: *tool_use_id,
-                content: format!(
-                    "<tool_use_error>Error: No such tool available: {name}</tool_use_error>"
-                ),
-                is_error: true,
-                provider_tool_use_id: provider_id.clone(),
-            };
+            // Shared builder so this parity-critical string lives in one place
+            // (also used by the streaming executor's add_tool).
+            let result_block = crate::streaming_executor::synthetic_unknown_tool(
+                *tool_use_id,
+                name,
+                provider_id.clone(),
+            );
             orch.output
                 .emit_tool_result(
                     tool_use_id,

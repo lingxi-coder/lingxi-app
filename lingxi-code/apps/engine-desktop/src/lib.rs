@@ -51,9 +51,9 @@ use orchestrator::{
     ConversationOrchestrator, OrchestratorApiClient, OrchestratorConfig, ProviderApiAdapter,
 };
 use permission::gate::PermissionGate;
-use platform_posix::{PosixClock, PosixHttp, PosixRuntime};
+use platform_posix::{PosixClock, PosixFileSystem, PosixHttp, PosixRuntime};
 use platform_posix_minimal::{
-    PlainTextSecureStorage, PosixFileSystem, PosixMcp, PosixProcess, PosixSandbox, PosixWorktree,
+    PlainTextSecureStorage, PosixMcp, PosixProcess, PosixSandbox, PosixWorktree,
 };
 use sandbox::decision::ProjectTrustLevel;
 use sandbox::runtime_config::Platform as SandboxPlatform;
@@ -2858,7 +2858,7 @@ pub async fn build(
     //       consumes.
     let settings_watcher = if has_config_change_hook {
         let watch_fs: Arc<dyn traits::FileSystem> =
-            Arc::new(platform_posix::PosixFileSystem::new(watch_cwd.clone()));
+            Arc::new(PosixFileSystem::new(watch_cwd.clone()));
         let firer: Arc<dyn settings_watch::ConfigChangeFirer> = orch.clone();
         settings_watch::SettingsWatcher::new(&cfg.claude_home, &watch_cwd, firer)
             .spawn(watch_fs)
@@ -2907,7 +2907,7 @@ pub async fn build(
                 file_changed_watch::FileChangedWatcherHandle::empty()
             } else {
                 let watch_fs: Arc<dyn traits::FileSystem> =
-                    Arc::new(platform_posix::PosixFileSystem::new(watch_cwd.clone()));
+                    Arc::new(PosixFileSystem::new(watch_cwd.clone()));
                 watcher.spawn(watch_fs).await
             }
         }

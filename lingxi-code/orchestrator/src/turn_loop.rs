@@ -1037,21 +1037,6 @@ pub(crate) async fn dispatch_tool_uses(
     Ok(dispatch_tool_uses_tracked(orch, tool_uses).await?.0)
 }
 
-/// Wrap a tool-failure message in claude-code's `<tool_use_error>` envelope.
-///
-/// Applied to genuine tool-execution errors (`Err(ToolError)` from
-/// `tool_handle.call()`). Mirrors claude-code's input-validation and unknown-tool
-/// paths which all use the same XML tag:
-/// `<tool_use_error>Error: …</tool_use_error>`
-///
-/// Fold/wrap ORDER: the envelope wraps just the error message; any pre-hook
-/// `additionalContext` is appended OUTSIDE (after) the closing tag by
-/// `fold_pre_context(tool_use_error("…"))`. This matches claude-code's other
-/// `<tool_use_error>` sites where the tag contains only the error text.
-fn tool_use_error(msg: &str) -> String {
-    format!("<tool_use_error>{msg}</tool_use_error>")
-}
-
 /// HOOK.2 twin of [`dispatch_tool_uses`] that ALSO returns whether any
 /// `PreToolUse` hook in this batch requested `continue:false`
 /// (preventContinuation). The batched turn loop
@@ -1397,7 +1382,12 @@ pub(crate) async fn dispatch_tool_uses_tracked(
                 (text, false, result.data)
             }
             Err(err) => {
-                let text = tool_use_error(&format!("Error: {err}"));
+                // Bare error string — no <tool_use_error> wrapper.
+                // claude-code/src/services/tools/toolExecution.ts:1691 does:
+                //   const content = formatError(error)   // bare, from utils/toolErrors.ts
+                // and feeds it raw into tool_result.content (line 1721).
+                // Only pre-execution paths (unknown-tool, schema validation) wrap.
+                let text = format!("Error: {err}");
                 (text, true, serde_json::json!({ "error": format!("{err}") }))
             }
         };
@@ -3264,20 +3254,26 @@ mod pre_tool_hook_tests {
         }
     }
 
-    /// TOOL-EXEC-ERROR: when a registered tool's `call()` returns `Err(ToolError)`,
-    /// `dispatch_tool_uses_tracked` must wrap the error message in
-    /// `<tool_use_error>…</tool_use_error>` (claude-code parity — the tool-execution
-    /// error envelope mirrors `toolExecution.ts`'s `<tool_use_error>` wrapping).
-    /// The content must start with `<tool_use_error>`, end with `</tool_use_error>`,
-    /// contain the raw error text, and have `is_error == true`.
+    /// TOOL-EXEC-ERROR (parity): when a registered tool's `call()` returns
+    /// `Err(ToolError)`, `dispatch_tool_uses_tracked` must pass the error text
+    /// BARE — NOT wrapped in `<tool_use_error>` — matching claude-code's
+    /// `toolExecution.ts:1691`:
     ///
-    /// Fold/wrap ORDER (claude-code reference): in the unknown-tool and validation-
-    /// error paths, claude-code wraps the message in `<tool_use_error>` FIRST and
-    /// then any pre-hook `additionalContext` is appended OUTSIDE the envelope.
-    /// LingXi mirrors this: `fold_pre_context(tool_use_error("Error: …"))` so
-    /// pre-hook messages are appended after `</tool_use_error>`, not inside it.
+    ///   ```js
+    ///   const content = formatError(error)   // bare string, e.g. "Error: …"
+    ///   ```
+    ///
+    /// followed by `tool_result.content = content` (line 1721), and every
+    /// per-tool `mapToolResultToToolResultBlockParam` (e.g. `NotebookEditTool.ts:137`,
+    /// `BashTool.tsx:617`, `ConfigTool.ts:427`) returns raw error content.
+    ///
+    /// Only PRE-execution paths wrap: unknown-tool (inlined literal) and
+    /// input-schema validation — NOT tool execution errors.
+    ///
+    /// Reference: claude-code/src/services/tools/toolExecution.ts:1691 +
+    ///            claude-code/src/utils/toolErrors.ts (formatError returns bare)
     #[tokio::test]
-    async fn tool_execution_error_returns_tool_use_error_wrapper() {
+    async fn tool_execution_error_is_bare_not_wrapped() {
         let mut registry = ToolRegistry::new();
         registry.register_builtin(Arc::new(AlwaysFailTool) as Arc<dyn Tool>);
         let orch = ConversationOrchestrator::new(
@@ -3295,24 +3291,17 @@ mod pre_tool_hook_tests {
         assert_eq!(results.len(), 1);
         let (content, is_error) = tool_result(&results[0]);
         assert!(is_error, "a failing tool must set is_error=true");
-        assert!(
-            content.starts_with("<tool_use_error>"),
-            "content must start with <tool_use_error>, got: {content:?}"
-        );
-        assert!(
-            content.ends_with("</tool_use_error>"),
-            "content must end with </tool_use_error>, got: {content:?}"
-        );
-        assert!(
-            content.contains("kaboom"),
-            "content must contain the error text, got: {content:?}"
-        );
-        // Verify the exact format matches claude-code byte-for-byte:
-        // `<tool_use_error>Error: internal: kaboom</tool_use_error>`
+        // Exact content: bare "Error: internal: kaboom" — no XML envelope.
+        // claude-code/src/services/tools/toolExecution.ts:1691 passes formatError(error)
+        // RAW into tool_result.content; only unknown-tool and schema-validation paths wrap.
         assert_eq!(
             content,
-            "<tool_use_error>Error: internal: kaboom</tool_use_error>",
-            "content must match claude-code tool_use_error format"
+            "Error: internal: kaboom",
+            "tool-execution errors must be BARE (no <tool_use_error> wrapper)"
+        );
+        assert!(
+            !content.contains("<tool_use_error>"),
+            "tool-execution error must NOT be wrapped in <tool_use_error>, got: {content:?}"
         );
     }
 }

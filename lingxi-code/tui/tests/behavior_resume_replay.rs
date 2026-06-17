@@ -20,6 +20,7 @@ fn user(text: &str) -> ConversationMessage {
     ConversationMessage::User {
         id: MessageId::new(),
         content: vec![ContentBlock::Text { text: text.into() }],
+        is_meta: false,
     }
 }
 
@@ -57,6 +58,7 @@ fn resumed_session_seeds_messages_in_order_with_tool_grouping() {
                 is_error: false,
                 provider_tool_use_id: None,
             }],
+            is_meta: false,
         },
         assistant("done"),
     ];

@@ -13,6 +13,7 @@ async fn over_threshold_triggers_autocompact() {
                     "turn-{i} a very long padding string to inflate tokens beyond the threshold"
                 ),
             }],
+            is_meta: false,
         });
     }
     let r = orch.process_iteration(messages, 0).await.unwrap();

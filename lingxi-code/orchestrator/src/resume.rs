@@ -116,9 +116,18 @@ fn build_state_from_jsonl(
         match m.message_type.as_str() {
             "user" => {
                 let content_blocks = extract_content_blocks(&m.message);
+                // Restore the `isMeta` outer-envelope flag (claude-code persists
+                // it as a top-level field; we read it back from `extra`) so a
+                // resumed Stop-hook-feedback message stays meta/hidden.
+                let is_meta = m
+                    .extra
+                    .get("isMeta")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false);
                 state.history.push(ConversationMessage::User {
                     id: MessageId::from_uuid(msg_uuid),
                     content: content_blocks,
+                    is_meta,
                 });
                 last_uuid = Some(msg_uuid);
             }

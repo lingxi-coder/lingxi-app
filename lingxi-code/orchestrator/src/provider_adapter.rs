@@ -1916,6 +1916,7 @@ mod tests {
         ConversationMessage::User {
             id: protocol::MessageId::new(),
             content: vec![ContentBlock::Text { text: s.to_string() }],
+            is_meta: false,
         }
     }
 
@@ -2180,6 +2181,7 @@ mod tests {
                     url: "https://x/y.png".to_string(),
                 },
             }],
+            is_meta: false,
         }];
         // The capability check is in DefaultLlmClient.validate_capabilities; since
         // FakeTransport doesn't inspect the body, this exercises the whole path.
@@ -2334,6 +2336,7 @@ mod tests {
         ConversationMessage::User {
             id: protocol::MessageId::new(),
             content,
+            is_meta: false,
         }
     }
 
@@ -2375,6 +2378,7 @@ mod tests {
                 },
                 img(0),
             ],
+            is_meta: false,
         }];
         assert_eq!(count_media(&msgs), 1);
     }
@@ -2415,6 +2419,7 @@ mod tests {
             content: vec![ContentBlock::Text {
                 text: "no media here".to_string(),
             }],
+            is_meta: false,
         }];
         let before = msgs.clone();
         let out = strip_excess_media(msgs, MAX_MEDIA_PER_REQUEST);

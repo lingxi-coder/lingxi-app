@@ -220,7 +220,7 @@ impl Microcompactor {
         let out: Vec<ConversationMessage> = messages
             .into_iter()
             .map(|m| {
-                if let ConversationMessage::User { id, content } = m {
+                if let ConversationMessage::User { id, content, is_meta } = m {
                     let new_content: Vec<ContentBlock> = content
                         .into_iter()
                         .map(|b| {
@@ -252,6 +252,7 @@ impl Microcompactor {
                     ConversationMessage::User {
                         id,
                         content: new_content,
+                        is_meta,
                     }
                 } else {
                     m
@@ -310,6 +311,7 @@ mod tests {
                 is_error: false,
                 provider_tool_use_id: None,
             }],
+            is_meta: false,
         }
     }
 

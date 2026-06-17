@@ -18,6 +18,14 @@ telemetry = { path = "../../telemetry" }
 serde.workspace = true
 serde_json.workspace = true
 serde_yaml = "0.9"
+# GAP D (keybindings runtime): insertion-order map for keybinding blocks so the
+# default→user merge preserves last-wins order, matching claude-code's
+# `Record<key, action>` / `Object.entries` iteration semantics.
+indexmap = "2"
+# GAP D (keybindings validation): faithful port of the raw-JSON duplicate-key
+# scan (`checkDuplicateKeysInJson`) and the `^command:[a-zA-Z0-9:\-_]+$` command
+# regex from `validate.ts`. Already in the workspace tree.
+regex = "1"
 thiserror.workspace = true
 async-trait.workspace = true
 tracing.workspace = true

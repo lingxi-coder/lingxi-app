@@ -934,6 +934,20 @@ pub struct AppState {
     /// print mode). Read at rate-limit compose time via
     /// [`Self::subscription_snapshot`].
     pub subscription: Option<traits::subscription::SharedSubscription>,
+    /// (GAP D) Runtime keybindings keymap — the merged default + user
+    /// `~/.claude/keybindings.json` bindings the live dispatch consults BEFORE
+    /// the hardcoded `map_iocraft_key` table. Defaults to
+    /// [`command_core::keybindings::Keymap::defaults`] (byte-identical to the
+    /// hardcoded chords); the composition root replaces it via
+    /// [`Self::set_keymap`] once the customization gate + path are resolved at
+    /// boot. When `resolve` returns nothing the dispatch falls through to the
+    /// legacy table, so an action with no adapter mapping — or a user with no
+    /// config — sees zero behavior change.
+    pub keymap: command_core::keybindings::Keymap,
+    /// (GAP D) Pending multi-keystroke chord state, threaded across keystrokes
+    /// by the live dispatcher (the analogue of claude-code's `pendingChord`
+    /// React ref). `None` = not mid-chord.
+    pub pending_chord: command_core::keybindings::keymap::PendingChord,
 }
 
 impl AppState {
@@ -1010,7 +1024,21 @@ impl AppState {
             status_line_dirty: false,
             raw_utilization: None,
             subscription: None,
+            // (GAP D) Defaults keymap — byte-identical to the hardcoded chords.
+            // The composition root swaps in the user-config-merged keymap via
+            // `set_keymap` once the gate + path are resolved at boot.
+            keymap: command_core::keybindings::Keymap::defaults(),
+            pending_chord: None,
         }
+    }
+
+    /// (GAP D) Install the runtime keymap (merged default + user keybindings).
+    /// Called by the composition root after [`command_core::keybindings::load_keybindings`]
+    /// resolves the customization gate + `~/.claude/keybindings.json`. Replacing
+    /// the default keymap is a no-op behaviorally when the gate is off (the load
+    /// returns the same defaults), so this never regresses the hardcoded chords.
+    pub fn set_keymap(&mut self, keymap: command_core::keybindings::Keymap) {
+        self.keymap = keymap;
     }
 
     /// Current resolved subscription snapshot, if the composition root provided

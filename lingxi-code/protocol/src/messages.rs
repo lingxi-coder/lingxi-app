@@ -172,6 +172,15 @@ pub enum ConversationMessage {
         id: MessageId,
         /// Ordered content blocks (typically text and/or tool results).
         content: Vec<ContentBlock>,
+        /// `true` for synthetic/meta user messages — content the engine injects
+        /// into the conversation (e.g. Stop-hook feedback) that is hidden from
+        /// the user-facing UI and skipped when locating the last *real* user
+        /// prompt, mirroring claude-code's `isMeta:true` (`createUserMessage`).
+        /// Still part of the API stream. Defaults to `false`; with
+        /// `skip_serializing_if` the wire/JSONL shape is unchanged for normal
+        /// user messages.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        is_meta: bool,
     },
     /// Assistant-authored message — may include tool-use blocks.
     Assistant {
@@ -198,6 +207,20 @@ impl ConversationMessage {
         Self::User {
             id,
             content: vec![ContentBlock::Text { text }],
+            is_meta: false,
+        }
+    }
+
+    /// Construct a synthetic/meta user message with a single text block —
+    /// engine-injected content hidden from the user-facing UI but still part of
+    /// the API stream (claude-code `createUserMessage({ …, isMeta: true })`).
+    /// Used for Stop-hook feedback (`getStopHookMessage`, `utils/hooks.ts:1895`).
+    #[must_use]
+    pub fn user_meta(id: MessageId, text: String) -> Self {
+        Self::User {
+            id,
+            content: vec![ContentBlock::Text { text }],
+            is_meta: true,
         }
     }
 
@@ -214,7 +237,7 @@ impl ConversationMessage {
         for source in images {
             content.push(ContentBlock::Image { source });
         }
-        Self::User { id, content }
+        Self::User { id, content, is_meta: false }
     }
 
     /// Like [`Self::user_with_images`] but for document sources (P4a).
@@ -227,7 +250,7 @@ impl ConversationMessage {
         for source in documents {
             content.push(ContentBlock::Document { source });
         }
-        Self::User { id, content }
+        Self::User { id, content, is_meta: false }
     }
 
     /// Return the role of this message.
@@ -238,6 +261,13 @@ impl ConversationMessage {
             Self::Assistant { .. } => MessageRole::Assistant,
             Self::System { .. } => MessageRole::System,
         }
+    }
+
+    /// Return `true` for a synthetic/meta user message (claude-code
+    /// `isMeta:true`). Always `false` for assistant/system messages.
+    #[must_use]
+    pub fn is_meta(&self) -> bool {
+        matches!(self, Self::User { is_meta: true, .. })
     }
 
     /// Return the stable identifier of this message.
@@ -445,10 +475,29 @@ mod tests {
                     data: "Zm9v".to_string(),
                 },
             }],
+            is_meta: false,
         };
         let line = serde_json::to_string(&m).unwrap();
+        // A non-meta user message must NOT serialize an `is_meta` field
+        // (`skip_serializing_if`), keeping the wire/JSONL shape byte-unchanged.
+        assert!(!line.contains("is_meta"), "non-meta user must omit is_meta: {line}");
         let back: ConversationMessage = serde_json::from_str(&line).unwrap();
         assert_eq!(back, m);
+    }
+
+    #[test]
+    fn user_meta_constructor_sets_flag_and_roundtrips() {
+        let m = ConversationMessage::user_meta(MessageId::new(), "feedback".to_string());
+        assert!(m.is_meta(), "user_meta must set is_meta");
+        assert_eq!(m.text_content(), "feedback");
+        // A plain `user` is NOT meta.
+        assert!(!ConversationMessage::user(MessageId::new(), "hi".to_string()).is_meta());
+        // Meta messages serialize the flag and round-trip it back.
+        let line = serde_json::to_string(&m).unwrap();
+        assert!(line.contains("\"is_meta\":true"), "meta user must emit is_meta: {line}");
+        let back: ConversationMessage = serde_json::from_str(&line).unwrap();
+        assert_eq!(back, m);
+        assert!(back.is_meta());
     }
 
     #[test]

@@ -126,12 +126,39 @@ impl PluginManager {
 
     /// Install a plugin from `source`.
     ///
-    /// Plan 16 implements actual fetch (git clone / marketplace download /
-    /// `.mcpb` unzip). M1.21 ships the contract.
-    #[allow(clippy::unused_async)] // Plan 16 wires the real async fetch.
+    /// The **local-path** arm is wired: the plugin directory is discovered in
+    /// place (no copy — claude-code's `--add-dir` local plugins are loaded
+    /// from their source location), its manifest + components are read via
+    /// [`crate::discovery::discover_installed_plugins`]'s per-directory loader,
+    /// and a fresh [`PluginId`] is minted and returned. The remaining
+    /// network-backed arms (git clone / marketplace download / `.mcpb` unzip)
+    /// require the marketplace + fetch machinery that is not yet ported and so
+    /// return a typed error rather than panicking.
     pub async fn install(&self, source: PluginSource) -> Result<PluginId, PluginManagerError> {
-        let _ = source;
-        Err(PluginManagerError::Io("install impl in Plan 16".into()))
+        match source {
+            PluginSource::LocalPath { path } => {
+                let discovered = crate::discovery::discover_installed_plugins(
+                    path.parent().unwrap_or(&path),
+                )
+                .await;
+                // Match by directory: the discovery walk returns siblings of
+                // `path`'s parent; pick the one whose install dir is `path`.
+                let found = discovered.into_iter().find(|(_, _, dir)| dir == &path);
+                if let Some((id, manifest, dir)) = found {
+                    self.enable(&id, manifest, dir).await?;
+                    Ok(id)
+                } else {
+                    Err(PluginManagerError::Io(format!(
+                        "no plugin manifest found at {}",
+                        path.display()
+                    )))
+                }
+            }
+            other => Err(PluginManagerError::Io(format!(
+                "install from {other:?} requires marketplace/git fetch (not yet wired); \
+                 install a pre-fetched plugin directory via PluginSource::LocalPath"
+            ))),
+        }
     }
 
     /// Mark `id` as `Loaded` and inject its components into the engine
@@ -188,47 +215,108 @@ impl PluginManager {
     async fn load_plugin(
         &self,
         manifest: &PluginManifest,
-        _install_dir: &Path,
+        install_dir: &Path,
     ) -> Result<(), PluginManagerError> {
         let _user_config = resolve_user_config(manifest, &self.credentials)
             .await
             .map_err(|e| PluginManagerError::Loader(e.to_string()))?;
 
-        // 1. Commands.
+        // All-or-nothing ordering: VALIDATE every fallible input BEFORE
+        // mutating any live registry, so a rejected plugin never leaves an
+        // orphaned command / hook behind. claude-code loads a plugin as a
+        // single unit; a privilege-escalating agent rejects the whole plugin,
+        // not just the agent.
+
+        // (a) Agents — frontmatter validated against D2 (the privilege gate)
+        //     FIRST. The agent *catalog* materialisation happens at the
+        //     composition root via `agent::load_agents_from_dirs([(…/agents,
+        //     AgentSource::Plugin)])` (the manager holds no agent-catalog ref,
+        //     faithful to the dir-scan catalog design). Here we gate each
+        //     plugin agent file's YAML frontmatter so a plugin cannot smuggle
+        //     `permission_mode` / `hooks:` / `mcpServers` escalations
+        //     (`validate_plugin_agent_frontmatter`, agent_validation.rs:29).
+        for ap in &manifest.components.agents {
+            let abs = if ap.path.is_absolute() {
+                ap.path.clone()
+            } else {
+                install_dir.join(&ap.path)
+            };
+            if let Ok(raw) = tokio::fs::read_to_string(&abs).await {
+                if let Some(yaml) = extract_frontmatter(&raw) {
+                    if let Err(e) = crate::validate_plugin_agent_frontmatter(yaml) {
+                        return Err(PluginManagerError::Validation(format!(
+                            "agent {}: {e}",
+                            abs.display()
+                        )));
+                    }
+                }
+            }
+        }
+
+        // (b) Commands — read each command markdown file's BODY + frontmatter
+        //     (NOT empty strings). `createPluginFromPath` (`pluginLoader.ts`)
+        //     loads each command file's content as the prompt; an empty
+        //     prompt_template would expand to an inert prompt
+        //     (`command-api/expand.rs:74` substitutes over prompt_template).
+        //     Build a faithful `MarkdownCommandFile` via the command-api
+        //     primitive, then re-stamp it as a `Plugin`-kind command carrying
+        //     the plugin id (so unload can target it). A file that cannot be
+        //     read is skipped (TS returns null + filters).
+        let mut cmds: Vec<command_api::SlashCommand> = Vec::new();
         if !self.strict.is_locked(PluginComponent::Commands) {
-            let cmds: Vec<command_api::SlashCommand> = manifest
-                .components
-                .commands
-                .iter()
-                .map(|cp| command_api::SlashCommand {
-                    name: cp
-                        .path
-                        .file_stem()
-                        .and_then(|s| s.to_str())
-                        .unwrap_or("")
-                        .to_string(),
-                    description: String::new(),
+            let commands_dir = install_dir.join("commands");
+            for cp in &manifest.components.commands {
+                let abs = if cp.path.is_absolute() {
+                    cp.path.clone()
+                } else {
+                    install_dir.join(&cp.path)
+                };
+                let Ok(raw) = tokio::fs::read_to_string(&abs).await else {
+                    continue;
+                };
+                let file = command_api::parse_command_markdown(
+                    &raw,
+                    abs.clone(),
+                    commands_dir.clone(),
+                    command_api::CommandSource::Plugin,
+                );
+                // Build the faithful Markdown command (name/description/body/
+                // frontmatter/argument metadata), then convert to Plugin kind.
+                let base =
+                    command_api::build_markdown_command(&file, command_api::CommandSource::Plugin);
+                let (frontmatter, prompt_template) = match base.kind {
+                    command_api::SlashCommandKind::Markdown {
+                        frontmatter,
+                        prompt_template,
+                        ..
+                    } => (frontmatter, prompt_template),
+                    _ => (
+                        command_api::CommandFrontmatter::default(),
+                        file.content.clone(),
+                    ),
+                };
+                cmds.push(command_api::SlashCommand {
                     source: command_api::CommandSource::Plugin,
                     kind: command_api::SlashCommandKind::Plugin {
                         plugin_id: manifest.id,
-                        file_path: cp.path.clone(),
-                        frontmatter: command_api::CommandFrontmatter::default(),
-                        prompt_template: String::new(),
+                        file_path: abs,
+                        frontmatter,
+                        prompt_template,
                     },
                     loaded_from: Some("plugin".to_string()),
-                    ..command_api::SlashCommand::default()
-                })
-                .collect();
+                    ..base
+                });
+            }
+        }
+
+        // ---- All inputs validated; mutate the live registries now. ----
+
+        // 1. Commands.
+        if !cmds.is_empty() {
             self.command_registry
                 .write()
                 .await
                 .register_plugin_commands(manifest.id, cmds);
-        }
-
-        // 2. Agents — frontmatter validated against D2.
-        for ap in &manifest.components.agents {
-            // (read file, validate via validate_plugin_agent_frontmatter)
-            let _ = ap; // M1.21 ships the validation gate; full agent registry in M2.
         }
 
         // 3. Skills.
@@ -277,4 +365,17 @@ impl PluginManager {
         // mcp_registry cleanup: per-agent scope cleanup happens at agent exit.
         Ok(())
     }
+}
+
+/// Extract the YAML frontmatter block (between leading `---` fences) of a
+/// markdown agent file, if present. Returns `None` when the file has no
+/// frontmatter. Mirrors the `---\n…\n---` convention claude-code's agent
+/// loader uses (and the engine's `parse_agent_markdown`).
+fn extract_frontmatter(raw: &str) -> Option<&str> {
+    let rest = raw.strip_prefix("---\n").or_else(|| raw.strip_prefix("---\r\n"))?;
+    // Find the closing fence at the start of a line.
+    let end = rest
+        .find("\n---")
+        .or_else(|| rest.find("\r\n---"))?;
+    Some(&rest[..end])
 }

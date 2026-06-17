@@ -37,6 +37,11 @@ impl BuiltinHookHandler for BlockingBuiltin {
                 // here — this PreToolUse Block mock returns no PostToolUse
                 // output replacement).
                 updated_mcp_tool_output: None,
+                // additionalContext split (082d8283): None — this Block mock
+                // emits no model-facing additionalContext.
+                additional_context: None,
+                // PermissionDenied retry (cb796fad): None — not a retry responder.
+                retry: None,
             }),
         }
     }

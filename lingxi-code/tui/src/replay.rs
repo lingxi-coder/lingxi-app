@@ -258,6 +258,7 @@ mod tests {
         ConversationMessage::User {
             id: MessageId::new(),
             content: vec![ContentBlock::Text { text: text.into() }],
+            is_meta: false,
         }
     }
 
@@ -315,6 +316,7 @@ mod tests {
                     is_error: false,
                     provider_tool_use_id: None,
                 }],
+                is_meta: false,
             },
         ];
         let out = rebuild_messages(&h);
@@ -361,6 +363,7 @@ mod tests {
                 is_error: false,
                 provider_tool_use_id: None,
             }],
+            is_meta: false,
         }];
         let out = rebuild_messages(&h);
         assert_eq!(out.len(), 1);
@@ -412,6 +415,7 @@ mod tests {
                         url: "https://example/x.png".into(),
                     },
                 }],
+                is_meta: false,
             },
         ];
         assert!(rebuild_messages(&h).is_empty());

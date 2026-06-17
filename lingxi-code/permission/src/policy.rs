@@ -226,14 +226,39 @@ impl PermissionPolicy {
     /// auto-allowed by `PolicyPermissionGate` (read-only default).
     #[must_use]
     pub fn authorize(&self, tool_name: &str, input: &serde_json::Value) -> PermissionResult {
-        let result = self.authorize_inner(tool_name, input);
+        self.authorize_with_mode(tool_name, input, self.mode)
+    }
+
+    /// Like [`Self::authorize`], but evaluates the mode-driven layers (the
+    /// `DontAsk` ask→deny transform, the `AcceptEdits` auto-allows, the `Plan`
+    /// mutation backstop / bypass, and the generic mode fallback) against an
+    /// EXPLICIT `mode` instead of the policy's boot [`Self::mode`].
+    ///
+    /// This is the seam the gate uses to apply a DYNAMIC mode — e.g. authorize
+    /// under [`PermissionMode::Plan`] once the session has run `EnterPlanMode`.
+    /// claude-code reads `toolPermissionContext.mode` live on every check; LingXi
+    /// builds [`PermissionPolicy`] once at boot with a fixed mode and the gate
+    /// holds it behind a shared `Arc` (so it can neither rebuild it nor call the
+    /// `&mut` [`Self::set_mode`]). Threading the mode here lets the gate honor the
+    /// live session mode without touching the rule buckets, roots, sandbox config,
+    /// or working dirs — only the mode-driven layers see `mode`. `authorize` is
+    /// exactly `authorize_with_mode(.., self.mode)`, so the rule-only behavior is
+    /// unchanged.
+    #[must_use]
+    pub fn authorize_with_mode(
+        &self,
+        tool_name: &str,
+        input: &serde_json::Value,
+        mode: PermissionMode,
+    ) -> PermissionResult {
+        let result = self.authorize_inner(tool_name, input, mode);
         // PERM.1 — DontAsk transform (claude-code `permissions.ts:503-517`):
         // applied LAST so no early-return ask escapes it. A remaining `ask`
         // becomes `deny`, EXCEPT for read-only / `AllowByDefault` tools — in TS
         // their own `checkPermissions` returns `allow` BEFORE this transform, so
         // they are never over-denied. Here the surviving `ask` is left for the
         // gate's read-only default ([`crate::policy_gate`]) to auto-allow.
-        if self.mode == PermissionMode::DontAsk
+        if mode == PermissionMode::DontAsk
             && matches!(result, PermissionResult::Ask { .. })
             && !matches!(tool_default(tool_name), PromptDefault::AllowByDefault)
         {
@@ -243,15 +268,26 @@ impl PermissionPolicy {
     }
 
     /// Rule + mode evaluation producing the pre-`DontAsk`-transform result.
-    /// See [`Self::authorize`] for the public contract and the evaluation order;
-    /// [`Self::authorize`] wraps this with the `DontAsk` ask→deny transform.
+    /// See [`Self::authorize_with_mode`] for the public contract and the
+    /// evaluation order; that wrapper applies the `DontAsk` ask→deny transform.
+    ///
+    /// `mode` is the EFFECTIVE mode to evaluate against — the policy's boot
+    /// [`Self::mode`] for [`Self::authorize`], or a caller-supplied mode (e.g.
+    /// [`PermissionMode::Plan`] for the gate's live plan-mode path). Every
+    /// mode-driven layer below reads this parameter, NOT `self.mode`, so the
+    /// whole mode-fallback chain honors the effective mode.
     // This is the central precedence dispatcher; it grows by one short branch
     // per faithfully-ported claude-code gate layer (the 2c bash-safety branch
     // tipped it one line past the pedantic 100-line cap). Each layer is already
     // a thin call into a dedicated helper; further splitting the ordered walk
     // would obscure the 1:1 TS precedence it documents.
     #[allow(clippy::too_many_lines)]
-    fn authorize_inner(&self, tool_name: &str, input: &serde_json::Value) -> PermissionResult {
+    fn authorize_inner(
+        &self,
+        tool_name: &str,
+        input: &serde_json::Value,
+        mode: PermissionMode,
+    ) -> PermissionResult {
         let sources = SOURCES_BY_PRIORITY;
 
         // Precedence mirrors claude-code `hasPermissionsToUseToolInner`:
@@ -422,7 +458,7 @@ impl PermissionPolicy {
         //     like a TS `passthrough`). Requires [`Self::roots`] for the in-place
         //     containment check; without roots the sed layer is skipped
         //     (consistent with the other shell guards).
-        if let Some(ask) = self.shell_sed_constraint_ask(tool_name, input) {
+        if let Some(ask) = self.shell_sed_constraint_ask(tool_name, input, mode) {
             return ask;
         }
         // 3a. AcceptEdits working-dir auto-allow (claude-code `checkWritePermissionForTool`
@@ -438,7 +474,7 @@ impl PermissionPolicy {
         //     simply not taken and control falls through to the `AcceptEdits`-mode
         //     ask below. Requires [`Self::roots`] (the working-dir set is derived
         //     from `roots.cwd`).
-        if self.mode == PermissionMode::AcceptEdits
+        if mode == PermissionMode::AcceptEdits
             && file_tool_kind(tool_name) == FileToolKind::Editor
         {
             if let Some(roots) = self.roots.as_ref() {
@@ -472,7 +508,7 @@ impl PermissionPolicy {
         //     for `rm -rf /` / out-of-workdir redirects+cd — so it NEVER bypasses
         //     them. Requires [`Self::roots`] for the sed containment check (the
         //     working-dir set is derived from `roots.cwd` + additional dirs).
-        if self.mode == PermissionMode::AcceptEdits && shell_command::is_shell_tool(tool_name) {
+        if mode == PermissionMode::AcceptEdits && shell_command::is_shell_tool(tool_name) {
             if let Some(roots) = self.roots.as_ref() {
                 if let Some(command) = shell_command::command_from_input(input) {
                     if let Some(result) = self.accept_edits_bash_auto_allow(command, roots) {
@@ -524,23 +560,23 @@ impl PermissionPolicy {
         //     sed asks stay bypass-immune — matching the TS step order (1a deny,
         //     1d ask, 1g safety all precede the 2a bypass). Subject to the same
         //     killswitch override as `BypassPermissions`.
-        if self.mode == PermissionMode::Plan
+        if mode == PermissionMode::Plan
             && self.bypass_permissions_available
             && !self.bypass_killswitch_active
         {
             return allow_with_mode(PermissionMode::Plan);
         }
-        if self.mode == PermissionMode::Plan && !crate::mode_policy::is_plan_safe_tool(tool_name) {
+        if mode == PermissionMode::Plan && !crate::mode_policy::is_plan_safe_tool(tool_name) {
             return ask_plan_mutation(tool_name);
         }
         // 4. Mode fallback. `DontAsk` falls through to the generic mode ask here;
         //    the `ask`→`deny` conversion (PERM.1) is applied last in
         //    [`Self::authorize`], so read-only tools are not over-denied.
-        match self.mode {
+        match mode {
             PermissionMode::BypassPermissions if !self.bypass_killswitch_active => {
                 allow_with_mode(PermissionMode::BypassPermissions)
             }
-            _ => ask_with_mode(self.mode, tool_name),
+            _ => ask_with_mode(mode, tool_name),
         }
     }
 
@@ -876,8 +912,13 @@ impl PermissionPolicy {
     /// `Safe` verdict contributes nothing (returns `None`, falling through to the
     /// mode / read-only layers — 1:1 with the TS `passthrough`). Returns the
     /// FIRST unsafe sed in subcommand order, matching TS.
-    fn sed_constraint_ask(&self, command: &str, roots: &FsRoots) -> Option<PermissionResult> {
-        let allow_file_writes = self.mode == PermissionMode::AcceptEdits;
+    fn sed_constraint_ask(
+        &self,
+        command: &str,
+        roots: &FsRoots,
+        mode: PermissionMode,
+    ) -> Option<PermissionResult> {
+        let allow_file_writes = mode == PermissionMode::AcceptEdits;
         for sub in shell_command::split_command(command) {
             if base_command(&sub) != Some("sed") {
                 continue;
@@ -917,13 +958,14 @@ impl PermissionPolicy {
         &self,
         tool_name: &str,
         input: &serde_json::Value,
+        mode: PermissionMode,
     ) -> Option<PermissionResult> {
         if !shell_command::is_shell_tool(tool_name) {
             return None;
         }
         let roots = self.roots.as_ref()?;
         let command = shell_command::command_from_input(input)?;
-        self.sed_constraint_ask(command, roots)
+        self.sed_constraint_ask(command, roots, mode)
     }
 
     /// Shell-only bash command-injection safety ASK (the 2c layer). Splits the
@@ -1334,6 +1376,103 @@ mod tests {
             p.authorize("Bash", &serde_json::json!({})),
             PermissionResult::Allow { .. }
         ));
+    }
+
+    // ── Plan-mode dynamic gate: authorize_with_mode ──────────────────────────
+
+    #[test]
+    fn authorize_with_mode_self_mode_matches_authorize() {
+        // authorize() is exactly authorize_with_mode(.., self.mode): threading the
+        // boot mode through the refactor must not change any decision (identity).
+        for mode in [
+            PermissionMode::Default,
+            PermissionMode::AcceptEdits,
+            PermissionMode::DontAsk,
+            PermissionMode::BypassPermissions,
+            PermissionMode::Plan,
+        ] {
+            let p = PermissionPolicy::new(mode);
+            for tool in ["Bash", "Read", "Edit", "WebFetch"] {
+                let input = serde_json::json!({});
+                // PermissionResult is not PartialEq; the variant discriminant is
+                // enough here (authorize literally delegates to
+                // authorize_with_mode(self.mode), so the decision class must match).
+                assert_eq!(
+                    std::mem::discriminant(&p.authorize(tool, &input)),
+                    std::mem::discriminant(&p.authorize_with_mode(tool, &input, mode)),
+                    "identity must hold for {tool} in {mode:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn plan_mode_overrides_accept_edits_auto_allow() {
+        // THE security property of the dynamic gate: a session booted in
+        // AcceptEdits auto-allows an in-workdir Edit, but once EnterPlanMode has
+        // fired the gate authorizes under Plan — and Plan's mutation backstop must
+        // OVERRIDE the AcceptEdits auto-allow (entering plan mode cannot leak the
+        // boot mode's edit auto-allow). Proven via authorize_with_mode(Plan).
+        let p = policy_with_roots(r#"{ "permissions": {} }"#, PermissionMode::AcceptEdits);
+        // Boot mode (AcceptEdits): an in-workdir edit auto-allows.
+        assert!(
+            matches!(
+                p.authorize("Edit", &edit("/proj/src/main.rs")),
+                PermissionResult::Allow { .. }
+            ),
+            "AcceptEdits boot mode auto-allows an in-workdir edit"
+        );
+        // Under Plan: the backstop fires → Ask (NOT auto-allowed).
+        assert!(
+            matches!(
+                p.authorize_with_mode("Edit", &edit("/proj/src/main.rs"), PermissionMode::Plan),
+                PermissionResult::Ask { .. }
+            ),
+            "plan mode overrides the AcceptEdits auto-allow with the mutation backstop"
+        );
+    }
+
+    #[test]
+    fn plan_mode_keeps_deny_and_allow_rules() {
+        // Plan mode is applied AFTER the rule walks, so explicit rules still bind:
+        // a deny rule denies and an allow rule wins (no backstop) even under Plan.
+        let denied = policy_with_roots(
+            r#"{ "permissions": { "deny": ["Edit"] } }"#,
+            PermissionMode::Default,
+        );
+        assert!(
+            matches!(
+                denied.authorize_with_mode("Edit", &edit("/proj/src/x.rs"), PermissionMode::Plan),
+                PermissionResult::Deny { .. }
+            ),
+            "a deny rule still binds under plan mode"
+        );
+        let allowed = policy_with_roots(
+            r#"{ "permissions": { "allow": ["Edit(src/**)"] } }"#,
+            PermissionMode::Default,
+        );
+        assert!(
+            matches!(
+                allowed.authorize_with_mode("Edit", &edit("/proj/src/x.rs"), PermissionMode::Plan),
+                PermissionResult::Allow { .. }
+            ),
+            "an explicit allow rule wins over the plan backstop"
+        );
+    }
+
+    #[test]
+    fn plan_mode_does_not_backstop_plan_safe_read() {
+        // A plan-safe read-only tool is NOT caught by the mutation backstop; it
+        // falls to the mode-fallback ask (which the gate auto-allows as read-only).
+        // It must NOT be denied.
+        let p = PermissionPolicy::new(PermissionMode::Default);
+        assert!(
+            matches!(
+                p.authorize_with_mode("Read", &serde_json::json!({}), PermissionMode::Plan),
+                PermissionResult::Ask { .. }
+            ),
+            "plan-safe Read falls through the backstop to an (auto-allowable) ask"
+        );
     }
 
     #[test]

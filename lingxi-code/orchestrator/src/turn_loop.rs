@@ -1317,7 +1317,20 @@ pub(crate) async fn dispatch_tool_uses_tracked(
             pre_agg.decision,
             Some(HookDecision::Approve | HookDecision::Allow)
         );
-        let decision = if hook_allowed {
+        // HOOK.4 — Plan-mode dynamic gate (parity with claude-code's live
+        // `toolPermissionContext.mode = 'plan'`). When the session is in plan mode
+        // (the model ran `EnterPlanMode` and has not yet exited), authorize under
+        // `PermissionMode::Plan` so the mutation backstop activates IMMEDIATELY —
+        // LingXi's policy mode is otherwise fixed at boot and the gate would miss a
+        // runtime `EnterPlanMode` (see `PermissionGate::check_in_plan_mode`). Plan
+        // mode binds OVER a hook 'allow': a `PreToolUse` hook must not silently push
+        // a mutation through while the user is planning — the same principle as a
+        // deny rule binding over a hook 'allow' (HOOK.3, issue 1). The session lock
+        // is read-and-dropped on this line, so the gate `await` never holds it.
+        let plan_mode = orch.session.lock().await.plan_mode;
+        let decision = if plan_mode {
+            orch.perms.check_in_plan_mode(name, &effective_input).await
+        } else if hook_allowed {
             orch.perms
                 .check_after_hook_allow(name, &effective_input)
                 .await
@@ -2833,6 +2846,38 @@ mod pre_tool_hook_tests {
         }
     }
 
+    /// Permission gate that returns a DISTINGUISHABLE denial from each entry
+    /// point, so a test can assert WHICH method the turn loop routed to:
+    /// `check` → "via-check", `check_after_hook_allow` → "via-hook-allow",
+    /// `check_in_plan_mode` → "via-plan-mode".
+    struct RouteProbeGate;
+    #[async_trait]
+    impl PermissionGate for RouteProbeGate {
+        async fn check(&self, _t: &str, _i: &serde_json::Value) -> PermissionDecision {
+            PermissionDecision::Deny {
+                reason: "via-check".into(),
+            }
+        }
+        async fn check_after_hook_allow(
+            &self,
+            _t: &str,
+            _i: &serde_json::Value,
+        ) -> PermissionDecision {
+            PermissionDecision::Deny {
+                reason: "via-hook-allow".into(),
+            }
+        }
+        async fn check_in_plan_mode(
+            &self,
+            _t: &str,
+            _i: &serde_json::Value,
+        ) -> PermissionDecision {
+            PermissionDecision::Deny {
+                reason: "via-plan-mode".into(),
+            }
+        }
+    }
+
     /// A tool that always succeeds with the fixed string `ECHOED-OUTPUT`.
     struct EchoTool;
     #[async_trait]
@@ -3703,6 +3748,67 @@ mod pre_tool_hook_tests {
         assert!(
             !fired.load(std::sync::atomic::Ordering::SeqCst),
             "validate_input gate must run BEFORE the PreToolUse hook; the hook must not fire"
+        );
+    }
+
+    // ----- HOOK.4: plan-mode dynamic gate routing --------------------------
+
+    #[tokio::test]
+    async fn hook4_plan_mode_routes_to_check_in_plan_mode() {
+        // With the session in plan mode, the gate is consulted via
+        // check_in_plan_mode (the dynamic Plan-mode path) — NOT the boot-mode
+        // check — so a runtime EnterPlanMode activates the mutation backstop.
+        let orch = orch_with(
+            pre_hook_executor(HookResponse::default()),
+            Arc::new(RouteProbeGate),
+            vec![],
+        );
+        orch.session.lock().await.plan_mode = true;
+        let (results, _, _, _) = dispatch_tool_uses_tracked(&orch, &uses()).await.unwrap();
+        let (content, is_error) = tool_result(&results[0]);
+        assert!(is_error);
+        assert!(
+            content.contains("via-plan-mode"),
+            "plan mode must route to check_in_plan_mode, got: {content}"
+        );
+    }
+
+    #[tokio::test]
+    async fn hook4_plan_mode_binds_over_a_hook_allow() {
+        // Plan mode binds OVER a PreToolUse hook 'allow': even when a hook
+        // approved the call, an active plan mode still routes through
+        // check_in_plan_mode (a hook cannot push a mutation through during
+        // planning — same principle as HOOK.3 issue 1's deny-rule binding).
+        let resp = HookResponse {
+            decision: Some(HookDecision::Approve),
+            ..HookResponse::default()
+        };
+        let orch = orch_with(pre_hook_executor(resp), Arc::new(RouteProbeGate), vec![]);
+        orch.session.lock().await.plan_mode = true;
+        let (results, _, _, _) = dispatch_tool_uses_tracked(&orch, &uses()).await.unwrap();
+        let (content, is_error) = tool_result(&results[0]);
+        assert!(is_error, "plan mode binds over the hook 'allow'");
+        assert!(
+            content.contains("via-plan-mode"),
+            "plan mode must override the hook-allow path, got: {content}"
+        );
+    }
+
+    #[tokio::test]
+    async fn hook4_non_plan_mode_still_routes_to_check() {
+        // The default (non-plan, no-hook) path is unchanged: route to `check`.
+        let orch = orch_with(
+            pre_hook_executor(HookResponse::default()),
+            Arc::new(RouteProbeGate),
+            vec![],
+        );
+        // plan_mode defaults to false.
+        let (results, _, _, _) = dispatch_tool_uses_tracked(&orch, &uses()).await.unwrap();
+        let (content, is_error) = tool_result(&results[0]);
+        assert!(is_error);
+        assert!(
+            content.contains("via-check"),
+            "non-plan mode must route to check, got: {content}"
         );
     }
 }

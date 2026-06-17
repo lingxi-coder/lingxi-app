@@ -40,6 +40,7 @@
 
 use crate::defaults_per_tool::tool_default;
 use crate::gate::{PermissionDecision, PermissionGate, PromptDefault};
+use crate::mode::PermissionMode;
 use crate::policy::PermissionPolicy;
 use crate::result::{PermissionDecisionReason, PermissionResult};
 use async_trait::async_trait;
@@ -62,12 +63,21 @@ impl PolicyPermissionGate {
     pub fn new(policy: Arc<PermissionPolicy>, inner: Arc<dyn PermissionGate>) -> Self {
         Self { policy, inner }
     }
-}
 
-#[async_trait]
-impl PermissionGate for PolicyPermissionGate {
-    async fn check(&self, name: &str, input: &Value) -> PermissionDecision {
-        match self.policy.authorize(name, input) {
+    /// Map a 3-valued [`PermissionResult`] onto the 2-valued
+    /// [`PermissionDecision`] the orchestrator consumes: `Allow`/`Deny` pass
+    /// through (the deny reason rendered), and an `Ask` either AUTO-ALLOWS a
+    /// read-only / agent-local tool ([`PromptDefault::AllowByDefault`]) or
+    /// DELEGATES to the inner prompt transport. Shared by [`Self::check`] (boot
+    /// mode) and [`PermissionGate::check_in_plan_mode`] (live Plan mode) so an
+    /// `Ask` is mapped identically regardless of which mode produced it.
+    async fn decide(
+        &self,
+        result: PermissionResult,
+        name: &str,
+        input: &Value,
+    ) -> PermissionDecision {
+        match result {
             PermissionResult::Allow { .. } => PermissionDecision::Allow,
             PermissionResult::Deny {
                 reason,
@@ -87,6 +97,16 @@ impl PermissionGate for PolicyPermissionGate {
                 }
             }
         }
+    }
+}
+
+#[async_trait]
+impl PermissionGate for PolicyPermissionGate {
+    async fn check(&self, name: &str, input: &Value) -> PermissionDecision {
+        // Authorize under the policy's boot mode, then map the 3-valued result
+        // (an `Ask` auto-allows read-only tools or delegates to the prompt).
+        self.decide(self.policy.authorize(name, input), name, input)
+            .await
     }
 
     /// A PreToolUse / PermissionRequest hook `allow` skips the PROMPT but still
@@ -110,6 +130,25 @@ impl PermissionGate for PolicyPermissionGate {
                 reason: explanation.unwrap_or_else(|| deny_reason_string(&reason)),
             },
         }
+    }
+
+    /// In PLAN mode the gate authorizes under [`PermissionMode::Plan`] regardless
+    /// of the policy's boot mode, so a runtime `EnterPlanMode` dynamically
+    /// activates the mutation backstop: a plan-safe READ-ONLY tool falls through
+    /// to the read-only auto-allow (no prompt), while a mutating tool that matched
+    /// no allow rule trips the backstop → `Ask` → DELEGATES to the inner prompt
+    /// transport (an interactive prompt, or a headless deny). Deny rules and
+    /// explicit allow rules still bind — they are resolved before the mode layer
+    /// inside `authorize_with_mode`. The `Ask` mapping is shared with
+    /// [`Self::check`] via [`Self::decide`].
+    async fn check_in_plan_mode(&self, name: &str, input: &Value) -> PermissionDecision {
+        self.decide(
+            self.policy
+                .authorize_with_mode(name, input, PermissionMode::Plan),
+            name,
+            input,
+        )
+        .await
     }
 }
 
@@ -369,5 +408,92 @@ mod tests {
             "a rule-less gate treats a hook 'allow' as a wholesale allow"
         );
         assert_eq!(gate.calls(), 0, "default impl must not call check()");
+    }
+
+    // ── Plan-mode dynamic gate: check_in_plan_mode ───────────────────────────
+
+    #[tokio::test]
+    async fn plan_mode_gate_auto_allows_plan_safe_read_without_prompting() {
+        // Live plan mode (boot mode Default): Read is plan-safe AND AllowByDefault
+        // → auto-allowed, the inner prompt is never consulted.
+        let policy = policy_with(r#"{ "permissions": {} }"#, PermissionMode::Default);
+        let inner = RecordingInner::new(PermissionDecision::Deny {
+            reason: "should not prompt for read in plan mode".into(),
+        });
+        let gate = PolicyPermissionGate::new(policy, inner.clone());
+        assert_eq!(
+            gate.check_in_plan_mode("Read", &serde_json::json!({})).await,
+            PermissionDecision::Allow
+        );
+        assert_eq!(inner.calls(), 0, "plan-safe read auto-allows, no prompt");
+    }
+
+    #[tokio::test]
+    async fn plan_mode_gate_delegates_mutating_tool_to_inner() {
+        // Live plan mode: Edit is NOT plan-safe → the backstop fires → Ask →
+        // Edit is DenyByDefault → delegate to the inner prompt transport.
+        let policy = policy_with(r#"{ "permissions": {} }"#, PermissionMode::Default);
+        let inner = RecordingInner::new(PermissionDecision::Allow);
+        let gate = PolicyPermissionGate::new(policy, inner.clone());
+        assert_eq!(
+            gate.check_in_plan_mode("Edit", &serde_json::json!({ "file_path": "/x.rs" }))
+                .await,
+            PermissionDecision::Allow // whatever the prompt returned
+        );
+        assert_eq!(
+            inner.calls(),
+            1,
+            "plan-mode mutating tool delegates to the inner prompt"
+        );
+    }
+
+    #[tokio::test]
+    async fn plan_mode_gate_keeps_deny_rule_without_prompting() {
+        // A deny rule binds even under live plan mode (rules resolve before mode).
+        let policy = policy_with(
+            r#"{ "permissions": { "deny": ["Edit"] } }"#,
+            PermissionMode::Default,
+        );
+        let inner = RecordingInner::new(PermissionDecision::Allow);
+        let gate = PolicyPermissionGate::new(policy, inner.clone());
+        assert!(matches!(
+            gate.check_in_plan_mode("Edit", &serde_json::json!({})).await,
+            PermissionDecision::Deny { .. }
+        ));
+        assert_eq!(inner.calls(), 0, "deny rule binds under plan mode, no prompt");
+    }
+
+    #[tokio::test]
+    async fn plan_mode_gate_keeps_allow_rule_without_prompting() {
+        // An explicit allow rule wins over the plan backstop, no prompt.
+        let policy = policy_with(
+            r#"{ "permissions": { "allow": ["Edit"] } }"#,
+            PermissionMode::Default,
+        );
+        let inner = RecordingInner::new(PermissionDecision::Deny {
+            reason: "should not prompt under an allow rule".into(),
+        });
+        let gate = PolicyPermissionGate::new(policy, inner.clone());
+        assert_eq!(
+            gate.check_in_plan_mode("Edit", &serde_json::json!({})).await,
+            PermissionDecision::Allow
+        );
+        assert_eq!(inner.calls(), 0, "allow rule wins under plan mode, no prompt");
+    }
+
+    #[tokio::test]
+    async fn default_check_in_plan_mode_delegates_to_check() {
+        // A rule-less gate (no mode layer) has nothing extra to enforce under plan
+        // mode, so the default impl just delegates to check().
+        let gate = RecordingInner::new(PermissionDecision::Allow);
+        assert_eq!(
+            gate.check_in_plan_mode("Edit", &serde_json::json!({})).await,
+            PermissionDecision::Allow
+        );
+        assert_eq!(
+            gate.calls(),
+            1,
+            "default check_in_plan_mode delegates to check()"
+        );
     }
 }

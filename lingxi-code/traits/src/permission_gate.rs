@@ -62,4 +62,29 @@ pub trait PermissionGate: Send + Sync {
         let _ = (name, input);
         PermissionDecision::Allow
     }
+
+    /// Resolve permission when the session is in PLAN mode — i.e. the model has
+    /// run `EnterPlanMode` and not yet exited.
+    ///
+    /// claude-code reads `toolPermissionContext.mode = 'plan'` LIVE on every
+    /// permission check, so entering plan mode immediately activates the
+    /// mutation backstop (plan-safe reads stay frictionless; un-ruled mutations
+    /// are asked/denied). LingXi instead builds its `PermissionPolicy` once at
+    /// boot with a fixed mode and holds it behind a shared `Arc`, so the boot
+    /// mode would otherwise ignore a runtime `EnterPlanMode`. This method is the
+    /// seam the turn loop calls (instead of [`Self::check`]) whenever the live
+    /// `SessionState.plan_mode` flag is set.
+    ///
+    /// The default impl delegates to [`Self::check`]: a gate with no rule/mode
+    /// layer (the interactive / no-op / adapter prompt transports) has nothing
+    /// extra to enforce under plan mode, so it behaves identically. The
+    /// rule-evaluating `PolicyPermissionGate` OVERRIDES this to authorize under
+    /// [`crate`]'s `PermissionMode::Plan` via `authorize_with_mode`.
+    ///
+    /// Additive DEFAULTED method (frozen-trait safe): every existing impl keeps
+    /// the prior behavior unless it opts in. Mirrors
+    /// [`Self::check_after_hook_allow`].
+    async fn check_in_plan_mode(&self, name: &str, input: &Value) -> PermissionDecision {
+        self.check(name, input).await
+    }
 }

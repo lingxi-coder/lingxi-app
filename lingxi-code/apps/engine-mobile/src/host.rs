@@ -950,14 +950,16 @@ impl MobileEngineHandle {
             // ── Model ──────────────────────────────────────────────────────
             ClientCommand::SetModel { model } => {
                 let handle: Arc<dyn OrchestratorHandle> = self.inner.orchestrator.clone();
+                let listings = handle.list_model_listings().await;
+                let (model_id, profile) = traits::parse_model_ref(&model, &listings);
                 handle
-                    .switch_model(&model, None)
+                    .switch_model(&model_id, profile.as_deref())
                     .await
                     .map_err(|e| ClientError::Internal {
                         message: format!("switch_model failed: {e}"),
                     })?;
                 self.event_sink
-                    .emit(ClientEvent::ModelChanged { model })
+                    .emit(ClientEvent::ModelChanged { model: model_id })
                     .await;
                 Ok(())
             }
@@ -1120,8 +1122,10 @@ impl MobileEngineHandle {
                         message: format!("new session (clear_session) failed: {e}"),
                     })?;
                 if let Some(model) = model {
+                    let listings = handle.list_model_listings().await;
+                    let (model_id, profile) = traits::parse_model_ref(&model, &listings);
                     handle
-                        .switch_model(&model, None)
+                        .switch_model(&model_id, profile.as_deref())
                         .await
                         .map_err(|e| ClientError::Internal {
                             message: format!("new session model switch failed: {e}"),

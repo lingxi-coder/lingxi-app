@@ -279,12 +279,15 @@ fn resolve_desktop_config(
         // HEADLESS deny-on-ask (claude-code `--print` parity): in `-p`/`--print`
         // mode there is no interactive prompt, so an unresolved `Ask` (a mutating
         // tool with no matching allow rule) is DENIED rather than silently allowed.
-        // Interactive TUI/REPL runs (`print == false`) now PROMPT for an
-        // unresolved ask via the injected `TuiPermissionGate` (see
-        // `build_runtime_for_tui`), so they leave this `false`.
+        // The interactive TUI (`build_runtime_for_tui`) now PROMPTS for an
+        // unresolved ask via the injected `TuiPermissionGate`, so it leaves this
+        // `false`. The `--no-tui` stdio REPL still routes through `build_runtime`
+        // (no injected gate), so an unresolved ask there resolves via the
+        // `NoOpPermissionGate` (allow) — a known limitation of the v0.6.0
+        // fallback REPL, not the primary interactive surface.
         deny_unresolved_ask: argv.print,
-        // Interactive gate injected by `build_runtime_for_tui` (the TUI path),
-        // not here — the shared headless/REPL config has no interactive prompt.
+        // Interactive gate injected ONLY by `build_runtime_for_tui` (the TUI
+        // path); this shared headless/REPL config has no interactive prompt.
         injected_permission_gate: None,
         // M10: the CLI does not start a coordinator session (threading this
         // from session metadata is a follow-up; the default is byte-identical

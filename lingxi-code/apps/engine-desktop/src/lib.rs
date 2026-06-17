@@ -302,6 +302,17 @@ fn should_enforce_permissions(
     }
 }
 
+/// Whether the live cron scheduler should run. Faithful to claude-code's
+/// `isKairosCronEnabled` LOCAL kill-switch (`ScheduleCronTool/prompt.ts:34/38`):
+/// the `CLAUDE_CODE_DISABLE_CRON` env override (truthy ⇒ cron OFF) "wins over"
+/// the GrowthBook fleet flag. That flag defaults to `true`, so this wired-on
+/// scheduler already matches the default-enabled fleet state — only the local
+/// disable override was missing. (The remote GB gate itself is not portable —
+/// LingXi has no GrowthBook substrate — but its default-true state is.)
+fn cron_scheduler_enabled(disable_cron_env: Option<&str>) -> bool {
+    !traits::env::is_env_truthy(disable_cron_env)
+}
+
 fn sandbox_runtime_config_from_settings_tiers(
     raw_tiers: &[&str],
 ) -> sandbox::runtime_config::SandboxRuntimeConfig {
@@ -2428,7 +2439,10 @@ pub async fn build(
     //        Ticks every 60s on a posix RuntimeSpawner (D17). The detached tick
     //        task holds a self-clone of the scheduler, so it runs for the process
     //        lifetime without being stored on `DesktopRuntime`.
-    {
+    //        Gated by the `CLAUDE_CODE_DISABLE_CRON` local kill-switch
+    //        (claude-code `prompt.ts:34/38` — the env override that wins over the
+    //        GrowthBook fleet flag, which itself defaults on).
+    if cron_scheduler_enabled(std::env::var("CLAUDE_CODE_DISABLE_CRON").ok().as_deref()) {
         let cron_dir = std::env::var_os("HOME")
             .map(std::path::PathBuf::from)
             .map_or_else(|| cfg.claude_home.join("cron"), |h| h.join(".claude").join("cron"));
@@ -4427,6 +4441,21 @@ mod tests {
             r#"{ "sandbox": { "enabled": true } }"#,
         ]);
         assert!(robust.enabled);
+    }
+
+    #[test]
+    fn cron_scheduler_enabled_honors_disable_cron_env() {
+        use super::cron_scheduler_enabled;
+        // Unset ⇒ enabled (matches the GrowthBook fleet flag's `true` default).
+        assert!(cron_scheduler_enabled(None));
+        // Truthy CLAUDE_CODE_DISABLE_CRON ⇒ disabled (the local kill-switch).
+        assert!(!cron_scheduler_enabled(Some("1")));
+        assert!(!cron_scheduler_enabled(Some("true")));
+        assert!(!cron_scheduler_enabled(Some("on")));
+        // Falsy / empty / other ⇒ still enabled (isEnvTruthy semantics).
+        assert!(cron_scheduler_enabled(Some("0")));
+        assert!(cron_scheduler_enabled(Some("false")));
+        assert!(cron_scheduler_enabled(Some("")));
     }
 
     #[test]

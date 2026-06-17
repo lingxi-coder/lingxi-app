@@ -59,6 +59,7 @@ data class AppearancePrefs(
     val flowDefault: Boolean = true,    // open FlowMode by default for voice
     val inputDialog: Boolean = true,    // show the FlowMode pop-up text input
     val setupDone: Boolean = false,     // first-run setup complete
+    val voiceLang: String = "",         // chosen offline voice-pack language ("zh"/"en"/"")
 )
 
 private object PrefKeys {
@@ -73,6 +74,7 @@ private object PrefKeys {
     val FLOW_DEFAULT = booleanPreferencesKey("flowDefault")
     val INPUT_DIALOG = booleanPreferencesKey("inputDialog")
     val SETUP_DONE = booleanPreferencesKey("setupDone")
+    val VOICE_LANG = stringPreferencesKey("voiceLang")
 }
 
 /**
@@ -97,6 +99,7 @@ class AppearanceStore(private val context: Context) {
             flowDefault = p[PrefKeys.FLOW_DEFAULT] ?: true,
             inputDialog = p[PrefKeys.INPUT_DIALOG] ?: true,
             setupDone = p[PrefKeys.SETUP_DONE] ?: false,
+            voiceLang = p[PrefKeys.VOICE_LANG] ?: "",
         )
     }
 
@@ -114,6 +117,10 @@ class AppearanceStore(private val context: Context) {
 
     suspend fun setFontSize(size: Float) {
         context.appearanceDataStore.edit { it[PrefKeys.FONT_SIZE] = size.toDouble() }
+    }
+
+    suspend fun setVoiceLang(lang: String) {
+        context.appearanceDataStore.edit { it[PrefKeys.VOICE_LANG] = lang }
     }
 
     // First-run profile / onboarding setters.

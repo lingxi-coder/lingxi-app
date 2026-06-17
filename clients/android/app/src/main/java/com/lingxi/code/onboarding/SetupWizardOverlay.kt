@@ -1,6 +1,8 @@
 package com.lingxi.code.onboarding
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.core.tween
@@ -32,7 +34,13 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.ui.draw.clip
+import com.lingxi.code.voice.offline.ModelState
+import com.lingxi.code.voice.offline.VOICE_PACKS
+import com.lingxi.code.voice.offline.VoicePack
+import com.lingxi.code.voice.offline.VoiceModelDownloader
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -70,7 +78,7 @@ import kotlin.math.min
 // → pick a default model. On finish it hands the chosen values back via
 // [onFinish] (MainActivity persists them + flips setupDone).
 
-private const val TOTAL = 5
+private const val TOTAL = 6
 private enum class VpState { Idle, Rec, Done }
 
 @Composable
@@ -80,7 +88,8 @@ fun SetupWizardOverlay(
     initialUserName: String,
     initialVoiceprint: Boolean,
     initialModelId: String,
-    onFinish: (assistantName: String, userName: String, voiceprint: Boolean, modelId: String) -> Unit,
+    initialVoiceLang: String,
+    onFinish: (assistantName: String, userName: String, voiceprint: Boolean, modelId: String, voiceLang: String) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     AnimatedVisibility(
@@ -90,7 +99,7 @@ fun SetupWizardOverlay(
         modifier = modifier,
     ) {
         SetupWizardContent(
-            initialAssistantName, initialUserName, initialVoiceprint, initialModelId, onFinish,
+            initialAssistantName, initialUserName, initialVoiceprint, initialModelId, initialVoiceLang, onFinish,
         )
     }
 }
@@ -101,12 +110,19 @@ private fun SetupWizardContent(
     initialUserName: String,
     initialVoiceprint: Boolean,
     initialModelId: String,
-    onFinish: (String, String, Boolean, String) -> Unit,
+    initialVoiceLang: String,
+    onFinish: (String, String, Boolean, String, String) -> Unit,
 ) {
     var step by remember { mutableIntStateOf(0) }
     var assistantName by remember { mutableStateOf(initialAssistantName) }
     var userName by remember { mutableStateOf(initialUserName) }
     var modelId by remember { mutableStateOf(initialModelId) }
+    var voiceLang by remember { mutableStateOf(initialVoiceLang) }
+    val modelStates by VoiceModelDownloader.states.collectAsState()
+
+    // System back goes to the previous step instead of dismissing the whole
+    // wizard (only step 0 lets back fall through to exit).
+    BackHandler(enabled = step > 0) { step = (step - 1).coerceAtLeast(0) }
 
     var vpState by remember { mutableStateOf(if (initialVoiceprint) VpState.Done else VpState.Idle) }
     var vpPct by remember { mutableFloatStateOf(if (initialVoiceprint) 100f else 0f) }
@@ -133,7 +149,7 @@ private fun SetupWizardContent(
 
     fun next() {
         if (step < TOTAL - 1) step += 1
-        else onFinish(assistantName.trim(), userName.trim(), vpState == VpState.Done, modelId)
+        else onFinish(assistantName.trim(), userName.trim(), vpState == VpState.Done, modelId, voiceLang)
     }
 
     Box(
@@ -141,7 +157,7 @@ private fun SetupWizardContent(
             .fillMaxSize()
             .background(Brush.radialGradient(listOf(oklch(0.19f, 0.07f, 275f), Color(0xFF050509)))),
     ) {
-        Column(Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.systemBars)) {
+        Column(Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.systemBars).imePadding()) {
             // header — back chevron + segmented progress
             Row(
                 modifier = Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 8.dp).heightIn(min = 40.dp),
@@ -224,6 +240,12 @@ private fun SetupWizardContent(
                         WizField(userName, "你的名字") { userName = it.take(16) }
                     }
                     3 -> VoiceprintStep(vpState, vpPct, userName) { if (vpState != VpState.Rec) vpState = VpState.Rec }
+                    4 -> VoicePackStep(
+                        states = modelStates,
+                        selected = voiceLang,
+                        onSelect = { voiceLang = it },
+                        onDownload = { lang -> voiceLang = lang; VoiceModelDownloader.startPack(lang) },
+                    )
                     else -> {
                         Badge(LXIconName.Brain)
                         WizH("选择默认模型")
@@ -393,4 +415,139 @@ private fun WizField(value: String, placeholder: String, onChange: (String) -> U
             }
         },
     )
+}
+
+// MARK: - Offline voice language-pack step ------------------------------------
+
+@Composable
+private fun VoicePackStep(
+    states: Map<String, ModelState>,
+    selected: String,
+    onSelect: (String) -> Unit,
+    onDownload: (String) -> Unit,
+) {
+    Badge(LXIconName.Mic)
+    WizH("选择语音包")
+    WizSub("下载离线语音模型后，听写与朗读完全在本机进行、不依赖网络。可稍后在设置里更换或删除。")
+    Column(verticalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
+        VOICE_PACKS.forEach { pack ->
+            VoicePackRow(
+                pack = pack,
+                agg = aggregatePackState(states, pack),
+                selected = selected == pack.language,
+                onSelect = { onSelect(pack.language) },
+                onDownload = { onDownload(pack.language) },
+            )
+        }
+        // "暂不下载" — keep the system voice; download later from settings.
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(if (selected == "") oklch(0.70f, 0.18f, 285f, 0.16f) else Color.White.copy(alpha = 0.04f), RoundedCornerShape(15.dp))
+                .border(1.dp, if (selected == "") oklch(0.70f, 0.18f, 285f, 0.55f) else Color.White.copy(alpha = 0.1f), RoundedCornerShape(15.dp))
+                .clickable { onSelect("") }
+                .padding(horizontal = 16.dp, vertical = 14.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Column(Modifier.weight(1f)) {
+                Text("暂不下载", color = oklch(0.95f, 0.02f, 285f), fontSize = 15.5.sp, fontWeight = FontWeight.SemiBold)
+                Text("使用系统语音 · 可稍后在设置下载", color = oklch(0.66f, 0.03f, 280f), fontSize = 12.5.sp)
+            }
+            RadioDot(selected == "")
+        }
+    }
+}
+
+/** Combine the pack's STT+TTS model states into one aggregate for the row. */
+private fun aggregatePackState(states: Map<String, ModelState>, pack: VoicePack): ModelState {
+    val ms = pack.models.map { states[it.id] ?: ModelState.NotInstalled }
+    ms.firstOrNull { it is ModelState.Failed }?.let { return it }
+    if (ms.all { it is ModelState.Ready }) return ModelState.Ready
+    if (ms.any { it is ModelState.Verifying }) return ModelState.Verifying
+    if (ms.any { it is ModelState.Extracting }) return ModelState.Extracting
+    if (ms.any { it is ModelState.Downloading }) {
+        val total = pack.models.sumOf { it.approxSizeBytes }
+        val bytes = pack.models.sumOf { m ->
+            when (val s = states[m.id]) {
+                is ModelState.Downloading -> s.bytes
+                is ModelState.Ready -> m.approxSizeBytes
+                else -> 0L
+            }
+        }
+        return ModelState.Downloading(bytes, total)
+    }
+    return ModelState.NotInstalled
+}
+
+@Composable
+private fun VoicePackRow(
+    pack: VoicePack,
+    agg: ModelState,
+    selected: Boolean,
+    onSelect: () -> Unit,
+    onDownload: () -> Unit,
+) {
+    val sizeMb = pack.totalBytes / (1024 * 1024)
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(if (selected) oklch(0.70f, 0.18f, 285f, 0.16f) else Color.White.copy(alpha = 0.04f), RoundedCornerShape(15.dp))
+            .border(1.dp, if (selected) oklch(0.70f, 0.18f, 285f, 0.55f) else Color.White.copy(alpha = 0.1f), RoundedCornerShape(15.dp))
+            .clickable { onSelect() }
+            .padding(16.dp),
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f)) {
+                Text(pack.title, color = oklch(0.95f, 0.02f, 285f), fontSize = 15.5.sp, fontWeight = FontWeight.SemiBold)
+                Text("${pack.subtitle} · ≈ $sizeMb MB", color = oklch(0.66f, 0.03f, 280f), fontSize = 12.5.sp)
+            }
+            RadioDot(selected)
+        }
+        Spacer(Modifier.height(10.dp))
+        when (agg) {
+            is ModelState.Ready -> Text("✓ 已下载到本机", color = oklch(0.74f, 0.15f, 155f), fontSize = 13.sp, fontWeight = FontWeight.Medium)
+            is ModelState.Verifying -> Text("校验中…", color = oklch(0.78f, 0.04f, 280f), fontSize = 13.sp)
+            is ModelState.Extracting -> Text("解压中…", color = oklch(0.78f, 0.04f, 280f), fontSize = 13.sp)
+            is ModelState.Downloading -> {
+                val pct = if (agg.total > 0) (agg.bytes.toFloat() / agg.total).coerceIn(0f, 1f) else 0f
+                Box(
+                    Modifier.fillMaxWidth().height(6.dp).clip(RoundedCornerShape(99.dp)).background(Color.White.copy(alpha = 0.1f)),
+                ) {
+                    Box(Modifier.fillMaxWidth(pct).height(6.dp).clip(RoundedCornerShape(99.dp)).background(oklch(0.66f, 0.2f, 288f)))
+                }
+                Spacer(Modifier.height(6.dp))
+                Text("下载中… ${(pct * 100).toInt()}%（可继续，下载在后台进行）", color = oklch(0.78f, 0.04f, 280f), fontSize = 12.sp)
+            }
+            is ModelState.Failed -> DownloadBtn("下载失败：${agg.message} · 点此重试", oklch(0.65f, 0.2f, 25f), onDownload)
+            ModelState.NotInstalled -> DownloadBtn("下载 (≈ $sizeMb MB)", oklch(0.66f, 0.2f, 288f), onDownload)
+        }
+    }
+}
+
+@Composable
+private fun RadioDot(on: Boolean) {
+    Box(
+        modifier = Modifier
+            .size(22.dp)
+            .background(if (on) oklch(0.66f, 0.2f, 288f) else Color.Transparent, CircleShape)
+            .border(1.5.dp, if (on) oklch(0.70f, 0.18f, 285f) else Color.White.copy(alpha = 0.25f), CircleShape),
+        contentAlignment = Alignment.Center,
+    ) {
+        if (on) LXIcon(LXIconName.Check, size = 13.dp, color = Color.White, stroke = 3f)
+    }
+}
+
+@Composable
+private fun DownloadBtn(text: String, color: Color, onClick: () -> Unit) {
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(11.dp))
+            .background(color)
+            .clickable { onClick() }
+            .padding(vertical = 10.dp),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(text, color = Color.White, fontSize = 13.5.sp, fontWeight = FontWeight.SemiBold)
+    }
 }

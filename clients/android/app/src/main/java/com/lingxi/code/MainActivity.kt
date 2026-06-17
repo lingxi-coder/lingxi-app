@@ -86,6 +86,9 @@ class MainActivity : ComponentActivity() {
         // (engine-driven through tool-clipboard; no UI affordance). No manifest
         // permission is required for clipboard access.
         ClipboardController.attach(applicationContext)
+        // Offline voice-model downloader — process-global so a language-pack
+        // download started in the setup wizard survives leaving that step.
+        com.lingxi.code.voice.offline.VoiceModelDownloader.attach(applicationContext)
 
         enableEdgeToEdge()
         super.onCreate(savedInstanceState)
@@ -155,12 +158,14 @@ class MainActivity : ComponentActivity() {
                         initialUserName = prefs.userName,
                         initialVoiceprint = prefs.voiceprint,
                         initialModelId = prefs.defaultModelId,
-                        onFinish = { assistantName, userName, voiceprint, modelId ->
+                        initialVoiceLang = prefs.voiceLang,
+                        onFinish = { assistantName, userName, voiceprint, modelId, voiceLang ->
                             scope.launch {
                                 store.setAssistantName(assistantName)
                                 store.setUserName(userName)
                                 store.setVoiceprint(voiceprint)
                                 store.setDefaultModel(modelId)
+                                store.setVoiceLang(voiceLang)
                                 store.setSetupDone(true)
                             }
                         },

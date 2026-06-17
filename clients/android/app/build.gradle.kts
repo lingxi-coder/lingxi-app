@@ -112,6 +112,10 @@ dependencies {
     // DataStore (preferences) for persisted theme / accent
     implementation("androidx.datastore:datastore-preferences:1.2.1")
 
+    // Offline voice models: tar.bz2 extraction for the sherpa-onnx packs the
+    // setup wizard downloads (pure-Java bzip2 + tar; no native dependency).
+    implementation("org.apache.commons:commons-compress:1.27.1")
+
     // Secure key store — the Anthropic API key + base URL are encrypted at rest
     // via EncryptedSharedPreferences (AES-256 GCM, key wrapped by the Android
     // Keystore). SHIP-BLOCKER #1: a shipped app has no process env, so the key

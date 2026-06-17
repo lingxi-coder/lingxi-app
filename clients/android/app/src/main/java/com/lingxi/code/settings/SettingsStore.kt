@@ -123,6 +123,8 @@ class SettingsStore : ViewModel() {
         _state.update { s -> s.copy(mcpServers = s.mcpServers.map { if (it.id == id) mutate(it) else it }) }
 
     fun setMcpStatus(id: String, status: ConnStatus) = updateMcp(id) { it.copy(status = status) }
+    /** Replace the whole MCP list — used to mirror the engine's REAL listing in. */
+    fun setMcpServers(servers: List<MCPServer>) = _state.update { it.copy(mcpServers = servers) }
 
     fun removeMcp(id: String) =
         _state.update { s -> s.copy(mcpServers = s.mcpServers.filter { it.id != id }) }

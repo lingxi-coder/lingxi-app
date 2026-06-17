@@ -3,6 +3,11 @@ package com.lingxi.code.conversation
 import android.content.Context
 import com.lingxi.code.bindings.ClientCommand
 import com.lingxi.code.bindings.ClientEvent
+import com.lingxi.code.bindings.ListingKindDto
+import com.lingxi.code.bindings.McpServerDto
+import com.lingxi.code.bindings.McpStatusDto
+import com.lingxi.code.model.ConnStatus
+import com.lingxi.code.model.MCPServer
 import com.lingxi.code.bindings.ErrorKindDto
 import com.lingxi.code.bindings.MessageBlockDto
 import com.lingxi.code.bindings.MessageDto
@@ -144,6 +149,17 @@ interface ConversationSource {
     suspend fun resumeSession(uuid: String) {}
 
     /**
+     * The engine's REAL MCP server listing (out-of-band, sibling of [modelState]).
+     * The listener folds `McpServers` into this StateFlow; the settings layer
+     * mirrors it into the store when populated. Empty default ⇒ mock list.
+     */
+    val mcpServers: StateFlow<List<MCPServer>>
+        get() = MutableStateFlow(emptyList<MCPServer>()).asStateFlow()
+
+    /** Pull the real MCP listing (`RefreshListings(Mcp)` → `McpServers`). No-op on mock. */
+    suspend fun refreshMcpServers() {}
+
+    /**
      * The engine's most recent live-resume result — the SEPARATE, out-of-band
      * session-RESTORE path, the sibling of [sessionState]. `SessionResumed` (the
      * confirmation of a `ResumeSession`) is NOT part of a text turn, so its
@@ -249,6 +265,24 @@ data class RestoredSession(
  * emits — so the scrollback renders in conversation order. A free function with
  * NO engine / Android dependency so it is exhaustively unit-testable on the JVM.
  */
+/**
+ * Lower one [McpServerDto] to the UI [MCPServer] model. The DTO is thinner than
+ * the mock (no url / tool-count), so those default; status maps Connected→Connected,
+ * Disconnected→Idle, Error→Error.
+ */
+fun McpServerDto.toMcpServer(): MCPServer {
+    val s = when (status) {
+        is McpStatusDto.Connected -> ConnStatus.Connected
+        is McpStatusDto.Disconnected -> ConnStatus.Idle
+        is McpStatusDto.Error -> ConnStatus.Error
+        else -> ConnStatus.Idle
+    }
+    return MCPServer(
+        id = name, name = name, url = "", tools = 0,
+        status = s, enabled = s == ConnStatus.Connected, transport = transport,
+    )
+}
+
 fun restoredSessionFrom(event: ClientEvent): RestoredSession? = when (event) {
     is ClientEvent.SessionResumed -> RestoredSession(
         sessionId = event.sessionId,
@@ -423,6 +457,7 @@ class EngineConversationSource private constructor(
     private val models: MutableStateFlow<EngineModelState>,
     private val sessions: MutableStateFlow<EngineSessionState>,
     private val resumed: MutableStateFlow<RestoredSession?>,
+    private val mcp: MutableStateFlow<List<MCPServer>>,
 ) : ConversationSource {
 
     /** A fresh engine session starts empty (the engine streams the transcript). */
@@ -452,6 +487,17 @@ class EngineConversationSource private constructor(
      * per-turn stream.
      */
     override val resumedSession: StateFlow<RestoredSession?> = resumed.asStateFlow()
+
+    override val mcpServers: StateFlow<List<MCPServer>> = mcp.asStateFlow()
+
+    override suspend fun refreshMcpServers() {
+        try {
+            handle.submit(ClientCommand.RefreshListings(which = listOf(ListingKindDto.Mcp)))
+        } catch (_: Throwable) {
+            // A RefreshListings that can't be delivered leaves the MCP list as-is;
+            // the settings page keeps whatever it last rendered (mock if empty).
+        }
+    }
 
     override suspend fun refreshSessions() {
         try {
@@ -624,6 +670,10 @@ class EngineConversationSource private constructor(
             // stream. Starts null → no resume has landed (the drawer's optimistic
             // local select stands until a real `SessionResumed` arrives).
             val resumed = MutableStateFlow<RestoredSession?>(null)
+            // The engine's REAL MCP listing (sibling of `models`). The listener
+            // folds every inbound `McpServers` into this StateFlow; empty until a
+            // `RefreshListings(Mcp)` reply lands (settings shows the mock list).
+            val mcp = MutableStateFlow(emptyList<MCPServer>())
             // Credentials: the encrypted-at-rest SecureKeyStore FIRST (the shipped
             // app's source of truth — SHIP-BLOCKER #1), falling back to the process
             // environment as a dev override. A shipped mobile app has no process
@@ -662,6 +712,8 @@ class EngineConversationSource private constructor(
                     // it so the ViewModel swaps the active session + restored
                     // scrollback. `null` for every other event leaves it untouched.
                     restoredSessionFrom(event)?.let { resumed.value = it }
+                    // Out-of-band MCP listing: fold `McpServers` into its StateFlow.
+                    if (event is ClientEvent.McpServers) mcp.value = event.servers.map { it.toMcpServer() }
                     events.emit(event)
                 },
                 onPermission = { request -> permissions.value = permissionRequestToPrompt(request) },
@@ -688,7 +740,7 @@ class EngineConversationSource private constructor(
                     // benign: no catalog → drawer keeps MockData session list
                 }
             }
-            return EngineConversationSource(handle, events, permissions, models, sessions, resumed)
+            return EngineConversationSource(handle, events, permissions, models, sessions, resumed, mcp)
         }
     }
 }

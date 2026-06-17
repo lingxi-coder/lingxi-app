@@ -1715,7 +1715,7 @@ pub async fn build(
     let mut orch_cfg = OrchestratorConfig::default();
     // TPM-C: use the bare id produced by parse_model_ref (strips a profile/ prefix
     // so a qualified default_model like "openai/gpt-4o" never reaches the wire).
-    orch_cfg.model = default_model_id.clone();
+    orch_cfg.model.clone_from(&default_model_id);
     // Opus-fallback hop: thread the (already print-mode-gated) fallback model
     // into `OrchestratorConfig.fallback_model`. `None` keeps the turn_loop's
     // 529-overload interception a strict no-op (`turn_loop.rs:496`).

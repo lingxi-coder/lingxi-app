@@ -1273,7 +1273,7 @@ pub(crate) async fn dispatch_tool_uses_tracked(
         let Some(tool_handle) = orch.tools.find_by_name(name) else {
             let result_block = ContentBlock::ToolResult {
                 tool_use_id: *tool_use_id,
-                content: fold_pre_context(format!("Error: tool not found: {name}")),
+                content: fold_pre_context(format!("<tool_use_error>Error: No such tool available: {name}</tool_use_error>")),
                 is_error: true,
                 provider_tool_use_id: provider_id.clone(),
             };
@@ -3156,6 +3156,31 @@ mod pre_tool_hook_tests {
         let (content, is_error) = tool_result(&results[0]);
         assert!(is_error, "gate denial applies when the hook makes no decision");
         assert!(content.contains("Permission denied: denied-by-gate"));
+    }
+
+    /// UNKNOWN-TOOL: when the model calls a tool name that is not in the
+    /// registry, `dispatch_tool_uses_tracked` must return a `ToolResult` whose
+    /// content is wrapped in `<tool_use_error>…</tool_use_error>` and whose
+    /// `is_error` flag is `true` — matching claude-code byte-for-byte
+    /// (`toolExecution.ts`: `"<tool_use_error>Error: No such tool available: …</tool_use_error>"`).
+    #[tokio::test]
+    async fn unknown_tool_returns_tool_use_error_wrapper() {
+        // `orch_with` registers only `EchoTool`, so "NoSuchTool" is not in the registry.
+        let orch = orch_with(
+            pre_hook_executor(HookResponse::default()),
+            Arc::new(crate::test_support::NoOpPermissionGate),
+            vec![],
+        );
+        let uses = vec![(ToolUseId::new(), "NoSuchTool".to_string(), json!({}), None)];
+        let (results, _, _, _) = dispatch_tool_uses_tracked(&orch, &uses).await.unwrap();
+        assert_eq!(results.len(), 1);
+        let (content, is_error) = tool_result(&results[0]);
+        assert!(is_error, "unknown tool must set is_error=true");
+        assert_eq!(
+            content,
+            "<tool_use_error>Error: No such tool available: NoSuchTool</tool_use_error>",
+            "content must match claude-code format byte-for-byte"
+        );
     }
 }
 

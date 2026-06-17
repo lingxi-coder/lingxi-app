@@ -41,8 +41,10 @@ import com.lingxi.code.model.MockData
 import com.lingxi.code.theme.LingXiTheme
 import com.lingxi.code.share.rememberShare
 import com.lingxi.code.vision.rememberCameraCapture
+import com.lingxi.code.model.Role
 import com.lingxi.code.voice.FlowModeOverlay
 import com.lingxi.code.voice.VoiceFlowOverlay
+import com.lingxi.code.voice.rememberOrbVoiceListen
 import com.lingxi.code.voice.rememberVoiceCapture
 import android.graphics.BitmapFactory
 import androidx.compose.ui.graphics.asImageBitmap
@@ -127,6 +129,13 @@ fun RootScreen(
     // flips it on (the long-press STT path still drives `voiceActive`). The
     // overlay renders above the drawer + conversation + voice-flow overlay.
     var flowActive by remember { mutableStateOf(false) }
+
+    // FlowMode orb voice driver: a one-shot tap-to-talk listener, plus the live
+    // assistant reply text derived from the same conversation state ChatScreen
+    // renders (the orb is just another view of the real session).
+    val orbListen = rememberOrbVoiceListen()
+    val orbAssistantText = state.messages.lastOrNull()
+        ?.let { if (it.role == Role.Ai) it.text else "" } ?: ""
 
     // The composer draft is hoisted here so a voice transcription (the
     // hold-to-talk release) can route its recognized text straight into the
@@ -277,6 +286,11 @@ fun RootScreen(
             visible = flowActive,
             assistantName = assistantName,
             inputDialog = inputDialog,
+            streaming = state.streaming,
+            assistantText = orbAssistantText,
+            onSend = { chatViewModel.send(it) },
+            onCancel = { chatViewModel.cancel() },
+            onListen = orbListen,
             onClose = { flowActive = false },
         )
 

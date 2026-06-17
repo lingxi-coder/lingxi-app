@@ -255,3 +255,38 @@ fun rememberVoiceCapture(
 
     return onHoldStart to onHoldRelease
 }
+
+/**
+ * Compose entry point for the FlowMode orb's one-shot listen: returns a launcher
+ * `(onResult) -> Unit` that captures a single utterance and calls back with the
+ * transcript (or `null` on empty / denied / error). Mirrors [rememberVoiceCapture]
+ * but drives a tap-to-talk cycle instead of hold-to-talk.
+ */
+@Composable
+fun rememberOrbVoiceListen(): (onResult: (String?) -> Unit) -> Unit {
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val scope = rememberCoroutineScope()
+    val permLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) { /* observed on the next listen via hasPermission() */ }
+    val capture = remember(context) {
+        VoiceCapture(
+            context = context,
+            requestPermission = { permLauncher.launch(Manifest.permission.RECORD_AUDIO) },
+            hasPermission = {
+                ContextCompat.checkSelfPermission(
+                    context, Manifest.permission.RECORD_AUDIO,
+                ) == PackageManager.PERMISSION_GRANTED
+            },
+        )
+    }
+    return { onResult ->
+        capture.ensurePermission()
+        scope.launch {
+            when (val r = capture.transcribe()) {
+                is VoiceCaptureResult.Transcript -> onResult(r.text)
+                else -> onResult(null)
+            }
+        }
+    }
+}

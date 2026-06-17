@@ -151,6 +151,30 @@ fn convert_block(block: ProtoBlock) -> Result<LlmBlock, LlmError> {
         }),
         ProtoBlock::Image { source } => convert_image_source(source),
         ProtoBlock::Document { source } => convert_document_source(source),
+        // Low-frequency server-side blocks: replayed verbatim into the next API
+        // request so the provider round-trips them (protected-thinking/advisor/
+        // connector betas). The Anthropic encoder round-trips RedactedThinking +
+        // ServerToolUse and rejects ConnectorText/AdvisorToolResult on egress.
+        ProtoBlock::RedactedThinking { data } => Ok(LlmBlock::RedactedThinking { data }),
+        ProtoBlock::ServerToolUse { id, name, input } => {
+            Ok(LlmBlock::ServerToolUse { id, name, input })
+        }
+        ProtoBlock::ConnectorText {
+            connector_text,
+            signature,
+        } => Ok(LlmBlock::ConnectorText {
+            connector_text,
+            signature,
+        }),
+        ProtoBlock::AdvisorToolResult {
+            tool_use_id,
+            content,
+            is_error,
+        } => Ok(LlmBlock::AdvisorToolResult {
+            tool_use_id,
+            content,
+            is_error,
+        }),
     }
 }
 
@@ -392,6 +416,71 @@ mod tests {
         assert!(matches!(
             &result[0].content[0],
             LlmBlock::ImageUrl { url } if url == "https://example.com/img.png"
+        ));
+    }
+
+    #[test]
+    fn redacted_thinking_replayed_verbatim() {
+        let msg = ConversationMessage::Assistant {
+            id: MessageId::new(),
+            content: vec![ProtoBlock::RedactedThinking {
+                data: "enc==".to_string(),
+            }],
+            stop_reason: None,
+        };
+        let result = to_llm_messages(vec![msg]).unwrap();
+        assert!(matches!(
+            &result[0].content[0],
+            LlmBlock::RedactedThinking { data } if data == "enc=="
+        ));
+    }
+
+    #[test]
+    fn server_tool_use_replayed_verbatim() {
+        let msg = ConversationMessage::Assistant {
+            id: MessageId::new(),
+            content: vec![ProtoBlock::ServerToolUse {
+                id: "srvtoolu_01".to_string(),
+                name: "web_search".to_string(),
+                input: serde_json::json!({"query": "rust"}),
+            }],
+            stop_reason: None,
+        };
+        let result = to_llm_messages(vec![msg]).unwrap();
+        assert!(matches!(
+            &result[0].content[0],
+            LlmBlock::ServerToolUse { id, name, input }
+                if id == "srvtoolu_01" && name == "web_search" && input["query"] == "rust"
+        ));
+    }
+
+    #[test]
+    fn connector_text_and_advisor_result_replayed_verbatim() {
+        let msg = ConversationMessage::Assistant {
+            id: MessageId::new(),
+            content: vec![
+                ProtoBlock::ConnectorText {
+                    connector_text: "hi".to_string(),
+                    signature: Some("sig".to_string()),
+                },
+                ProtoBlock::AdvisorToolResult {
+                    tool_use_id: "srvtoolu_01".to_string(),
+                    content: serde_json::json!("ok"),
+                    is_error: true,
+                },
+            ],
+            stop_reason: None,
+        };
+        let result = to_llm_messages(vec![msg]).unwrap();
+        assert!(matches!(
+            &result[0].content[0],
+            LlmBlock::ConnectorText { connector_text, signature }
+                if connector_text == "hi" && signature.as_deref() == Some("sig")
+        ));
+        assert!(matches!(
+            &result[0].content[1],
+            LlmBlock::AdvisorToolResult { tool_use_id, content, is_error }
+                if tool_use_id == "srvtoolu_01" && content == "ok" && *is_error
         ));
     }
 

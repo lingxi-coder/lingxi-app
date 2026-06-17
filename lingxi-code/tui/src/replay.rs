@@ -193,7 +193,13 @@ fn push_user_block(
         ContentBlock::Image { .. }
         | ContentBlock::Document { .. }
         | ContentBlock::ToolUse { .. }
-        | ContentBlock::Thinking { .. } => {}
+        | ContentBlock::Thinking { .. }
+        // Low-frequency server-side blocks are preserved in the JSONL for
+        // resume/replay byte parity but have no scrollback renderer.
+        | ContentBlock::RedactedThinking { .. }
+        | ContentBlock::ServerToolUse { .. }
+        | ContentBlock::ConnectorText { .. }
+        | ContentBlock::AdvisorToolResult { .. } => {}
     }
 }
 
@@ -233,7 +239,13 @@ fn push_assistant_block(
         // images and documents aren't replayed (see module docs).
         ContentBlock::ToolResult { .. }
         | ContentBlock::Image { .. }
-        | ContentBlock::Document { .. } => {}
+        | ContentBlock::Document { .. }
+        // Low-frequency server-side blocks are preserved in the JSONL for
+        // resume/replay byte parity but have no scrollback renderer.
+        | ContentBlock::RedactedThinking { .. }
+        | ContentBlock::ServerToolUse { .. }
+        | ContentBlock::ConnectorText { .. }
+        | ContentBlock::AdvisorToolResult { .. } => {}
     }
 }
 

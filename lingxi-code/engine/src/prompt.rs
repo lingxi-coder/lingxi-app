@@ -77,6 +77,25 @@ fn content_blocks_to_api(blocks: &[protocol::ContentBlock]) -> Value {
             ContentBlock::Document { source } => {
                 json!({"type": "document", "source": source})
             }
+            ContentBlock::RedactedThinking { data } => {
+                json!({"type": "redacted_thinking", "data": data})
+            }
+            ContentBlock::ServerToolUse { id, name, input } => {
+                json!({"type": "server_tool_use", "id": id, "name": name, "input": input})
+            }
+            ContentBlock::ConnectorText {
+                connector_text,
+                signature,
+            } => {
+                json!({"type": "connector_text", "connector_text": connector_text, "signature": signature})
+            }
+            ContentBlock::AdvisorToolResult {
+                tool_use_id,
+                content,
+                is_error,
+            } => {
+                json!({"type": "advisor_tool_result", "tool_use_id": tool_use_id, "content": content, "is_error": is_error})
+            }
         })
         .collect();
     Value::Array(arr)

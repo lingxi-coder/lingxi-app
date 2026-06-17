@@ -111,8 +111,17 @@ pub fn lower_content_block(block: &ContentBlock) -> Option<MessageBlockDto> {
         }),
         // No `MessageBlockDto::Image`/`Document` — image and document input are
         // uniform inline wire DTOs elsewhere (decision §0.8), not scrollback
-        // blocks. Drop them.
-        ContentBlock::Image { .. } | ContentBlock::Document { .. } => None,
+        // blocks. Drop them. The low-frequency server-side blocks
+        // (`redacted_thinking`/`server_tool_use`/`connector_text`/
+        // `advisor_tool_result`) likewise have no scrollback DTO analog — they
+        // are preserved through the engine/JSONL for resume/replay byte parity
+        // but render-skipped here.
+        ContentBlock::Image { .. }
+        | ContentBlock::Document { .. }
+        | ContentBlock::RedactedThinking { .. }
+        | ContentBlock::ServerToolUse { .. }
+        | ContentBlock::ConnectorText { .. }
+        | ContentBlock::AdvisorToolResult { .. } => None,
     }
 }
 

@@ -46,9 +46,14 @@ enum BlockKind {
     },
     /// A `thinking` / `reasoning` block — accumulates `thinking_delta` chunks.
     Reasoning,
-    /// Any other variant (`server_tool_use`, `connector_text`,
-    /// `advisor_tool_result`). Accumulator stores nothing; `stop_block`
-    /// returns [`CompletedBlock::Skipped`].
+    /// A low-frequency server-side block (`redacted_thinking`,
+    /// `server_tool_use`, `connector_text`, `advisor_tool_result`) captured in
+    /// full from the `ContentBlockStart` event and preserved verbatim for
+    /// resume/replay byte parity. (`server_tool_use` may also stream its input
+    /// via `input_json_delta`; that is merged on `stop_block`.)
+    Preserved(ContentBlock),
+    /// Any other variant the accumulator cannot represent. Stores nothing;
+    /// `stop_block` returns [`CompletedBlock::Skipped`].
     Other,
 }
 
@@ -58,6 +63,7 @@ impl BlockKind {
             BlockKind::Text => "text",
             BlockKind::ToolCall { .. } => "tool_call",
             BlockKind::Reasoning => "reasoning",
+            BlockKind::Preserved(_) => "preserved",
             BlockKind::Other => "other",
         }
     }
@@ -87,6 +93,9 @@ enum CompletedBlock {
         /// Optional cryptographic signature.
         signature: Option<String>,
     },
+    /// A low-frequency server-side block captured verbatim from
+    /// `ContentBlockStart` (see [`BlockKind::Preserved`]). Replayed unchanged.
+    Preserved(ContentBlock),
     /// A [`BlockKind::Other`] variant — caller drops it.
     Skipped,
 }
@@ -108,6 +117,7 @@ impl CompletedBlock {
             CompletedBlock::Reasoning { text, signature } => {
                 Some(ContentBlock::Reasoning { text, signature })
             }
+            CompletedBlock::Preserved(block) => Some(block),
             CompletedBlock::Skipped => None,
         }
     }
@@ -176,7 +186,9 @@ impl BlockAccumulator {
             .get_mut(&index)
             .ok_or_else(|| block_not_found(index))?;
         match &state.kind {
-            BlockKind::ToolCall { .. } => {
+            // `server_tool_use` (Preserved) may stream its input via
+            // `input_json_delta`; buffer it and merge on stop.
+            BlockKind::ToolCall { .. } | BlockKind::Preserved(_) => {
                 state.json_buf.push_str(partial);
                 Ok(())
             }
@@ -222,6 +234,18 @@ impl BlockAccumulator {
                         .map_err(|e| tool_use_json_parse(index, &e.to_string(), &state.json_buf))?
                 };
                 CompletedBlock::ToolCall { id, name, input }
+            }
+            BlockKind::Preserved(mut block) => {
+                // Merge any `input_json_delta`-streamed input into a
+                // `server_tool_use` block (the start event seeds an empty input).
+                if !state.json_buf.is_empty() {
+                    if let ContentBlock::ServerToolUse { input, .. } = &mut block {
+                        if let Ok(parsed) = serde_json::from_str::<Value>(&state.json_buf) {
+                            *input = parsed;
+                        }
+                    }
+                }
+                CompletedBlock::Preserved(block)
             }
             BlockKind::Other => CompletedBlock::Skipped,
         };
@@ -271,14 +295,16 @@ fn block_kind_of(content_block: &ContentBlock) -> BlockKind {
             name: name.clone(),
         },
         ContentBlock::Reasoning { .. } => BlockKind::Reasoning,
-        ContentBlock::ServerToolUse { .. }
+        // Low-frequency server-side blocks: captured verbatim from the start
+        // event and preserved for resume/replay byte parity.
+        ContentBlock::RedactedThinking { .. }
+        | ContentBlock::ServerToolUse { .. }
         | ContentBlock::ConnectorText { .. }
-        | ContentBlock::AdvisorToolResult { .. }
-        | ContentBlock::Image { .. }
+        | ContentBlock::AdvisorToolResult { .. } => BlockKind::Preserved(content_block.clone()),
+        ContentBlock::Image { .. }
         | ContentBlock::ImageUrl { .. }
         | ContentBlock::Document { .. }
-        | ContentBlock::ToolResult { .. }
-        | ContentBlock::RedactedThinking { .. } => BlockKind::Other,
+        | ContentBlock::ToolResult { .. } => BlockKind::Other,
     }
 }
 
@@ -524,10 +550,10 @@ pub(crate) fn response_to_stream_events(resp: LlmResponse) -> Vec<LlmEvent> {
                     },
                 });
             }
-            // Server-side variants the subagent drops anyway: emit only a start
-            // so the index is consumed; the accumulator yields `Skipped` on
-            // stop and the block is dropped (round-trips to nothing, matching
-            // `translate_response_blocks`).
+            // Low-frequency server-side variants: emit only a start so the index
+            // is consumed. The accumulator captures the full block from this
+            // start event and yields `Preserved` on stop, so it round-trips
+            // verbatim (matching `translate_response_blocks` preservation).
             other => {
                 events.push(LlmEvent::ContentBlockStart {
                     index,
@@ -889,9 +915,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn skipped_blocks_round_trip_to_nothing() {
-        // A `server_tool_use` block is dropped, exactly like the non-streaming
-        // `translate_response_blocks` path.
+    async fn server_side_blocks_preserved_through_round_trip() {
+        // A `server_tool_use` block is now PRESERVED verbatim through the
+        // streaming accumulator (captured from the `ContentBlockStart` event) so
+        // resume/replay JSONL bytes stay intact — matching the non-streaming
+        // `translate_response_blocks` preservation.
         let resp = LlmResponse {
             id: "m1".into(),
             model: "claude-mock".into(),
@@ -914,9 +942,13 @@ mod tests {
         let round = accumulate_stream(boxed(response_to_stream_events(resp)))
             .await
             .expect("round-trip");
-        // Only the text block survives the round-trip.
-        assert_eq!(round.content.len(), 1);
-        assert!(matches!(round.content[0], ContentBlock::Text { .. }));
+        // Both the server_tool_use block and the text block survive.
+        assert_eq!(round.content.len(), 2);
+        assert!(matches!(
+            &round.content[0],
+            ContentBlock::ServerToolUse { id, name, .. } if id == "srv-1" && name == "advisor"
+        ));
+        assert!(matches!(round.content[1], ContentBlock::Text { .. }));
     }
 
     async fn assert_round_trips(resp: LlmResponse) {

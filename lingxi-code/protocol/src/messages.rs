@@ -79,6 +79,54 @@ pub enum ContentBlock {
         /// Where the document bytes come from.
         source: DocumentSource,
     },
+    /// Opaque redacted-reasoning block that must round-trip unmodified.
+    ///
+    /// Wire tag `redacted_thinking` (Anthropic protected-thinking beta). The
+    /// `data` payload is provider-opaque and is preserved verbatim through
+    /// resume/replay so JSONL bytes stay intact.
+    RedactedThinking {
+        /// Provider-opaque payload (base64-ish encrypted thinking).
+        data: String,
+    },
+    /// Anthropic server-side tool invocation (advisor / `web_search`).
+    ///
+    /// Wire tag `server_tool_use`. Mirrors `llm_client::ContentBlock::ServerToolUse`
+    /// exactly so it round-trips back to the API on the next request.
+    ServerToolUse {
+        /// Server-issued tool-use identifier.
+        id: String,
+        /// Name of the server tool being invoked.
+        name: String,
+        /// Tool input arguments (provider-specific JSON shape).
+        #[serde(default)]
+        input: Value,
+    },
+    /// Anthropic Connector-Text block.
+    ///
+    /// Wire tag `connector_text`. Field name `connector_text` mirrors
+    /// `llm_client::ContentBlock::ConnectorText` exactly (NOT `text`).
+    ConnectorText {
+        /// Connector-emitted text payload.
+        #[serde(default)]
+        connector_text: String,
+        /// Optional provider integrity signature.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        signature: Option<String>,
+    },
+    /// Advisor tool result mirrored from the server.
+    ///
+    /// Wire tag `advisor_tool_result`. Mirrors
+    /// `llm_client::ContentBlock::AdvisorToolResult` exactly.
+    AdvisorToolResult {
+        /// Identifier of the originating `server_tool_use` block.
+        tool_use_id: String,
+        /// Tool result content (provider-specific JSON shape).
+        #[serde(default)]
+        content: Value,
+        /// Whether the tool reported an error.
+        #[serde(default)]
+        is_error: bool,
+    },
 }
 
 /// Source of a [`ContentBlock::Image`]. Serializes to Anthropic's
@@ -528,5 +576,74 @@ mod tests {
             Some("toolu_01ABC")
         );
         assert!(v.get("provider_tool_use_id").is_none());
+    }
+
+    // ── Low-frequency server-side blocks (resume/replay byte parity) ──────────
+
+    #[test]
+    fn redacted_thinking_round_trips_with_wire_tag() {
+        let block = ContentBlock::RedactedThinking {
+            data: "enc==".into(),
+        };
+        let json = serde_json::to_string(&block).unwrap();
+        assert_eq!(json, r#"{"type":"redacted_thinking","data":"enc=="}"#);
+        let back: ContentBlock = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, block);
+    }
+
+    #[test]
+    fn server_tool_use_round_trips_with_wire_tag() {
+        let block = ContentBlock::ServerToolUse {
+            id: "srvtoolu_01".into(),
+            name: "web_search".into(),
+            input: serde_json::json!({"query": "rust"}),
+        };
+        let json = serde_json::to_string(&block).unwrap();
+        assert_eq!(
+            json,
+            r#"{"type":"server_tool_use","id":"srvtoolu_01","name":"web_search","input":{"query":"rust"}}"#
+        );
+        let back: ContentBlock = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, block);
+    }
+
+    #[test]
+    fn connector_text_round_trips_with_wire_tag() {
+        let block = ContentBlock::ConnectorText {
+            connector_text: "hi".into(),
+            signature: Some("sig".into()),
+        };
+        let json = serde_json::to_string(&block).unwrap();
+        assert_eq!(
+            json,
+            r#"{"type":"connector_text","connector_text":"hi","signature":"sig"}"#
+        );
+        let back: ContentBlock = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, block);
+        // signature omitted when None
+        let no_sig = ContentBlock::ConnectorText {
+            connector_text: "hi".into(),
+            signature: None,
+        };
+        assert_eq!(
+            serde_json::to_string(&no_sig).unwrap(),
+            r#"{"type":"connector_text","connector_text":"hi"}"#
+        );
+    }
+
+    #[test]
+    fn advisor_tool_result_round_trips_with_wire_tag() {
+        let block = ContentBlock::AdvisorToolResult {
+            tool_use_id: "srvtoolu_01".into(),
+            content: serde_json::json!([{"type": "text", "text": "ok"}]),
+            is_error: false,
+        };
+        let json = serde_json::to_string(&block).unwrap();
+        assert_eq!(
+            json,
+            r#"{"type":"advisor_tool_result","tool_use_id":"srvtoolu_01","content":[{"type":"text","text":"ok"}],"is_error":false}"#
+        );
+        let back: ContentBlock = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, block);
     }
 }

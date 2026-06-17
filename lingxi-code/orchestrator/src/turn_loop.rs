@@ -1025,8 +1025,8 @@ pub(crate) fn translate_response_blocks(content: &[LlmContentBlock]) -> Vec<Cont
 /// `new_messages` tuple elements) for the in-file tests' convenience.
 ///
 /// The production streaming path
-/// ([`crate::streaming_loop::dispatch_tool_uses_concurrent`]) now calls
-/// `dispatch_tool_uses_tracked` directly, so it DOES replay tool-injected
+/// ([`crate::streaming_executor::StreamingToolExecutor`]) calls
+/// `dispatch_tool_uses_tracked` per tool, so it DOES replay tool-injected
 /// `new_messages` (the Skill tool's expanded prompt) into history after the
 /// `tool_result` — mirroring the batched [`execute_one_turn`] path (SKILLEXEC.3).
 #[cfg(test)]

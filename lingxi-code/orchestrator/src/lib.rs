@@ -32,6 +32,7 @@ pub(crate) mod schema_validation;
 pub mod sse;
 pub mod streaming_loop;
 pub(crate) mod streaming_executor;
+pub mod structured_output;
 pub mod task_completed_firer;
 pub mod task_created_firer;
 pub mod task_lifecycle_hook_firer;

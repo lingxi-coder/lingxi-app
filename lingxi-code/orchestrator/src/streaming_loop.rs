@@ -8,11 +8,9 @@
 //! the public-facing reason carried in the orchestrator error.
 #![forbid(unsafe_code)]
 
-use crate::conversation::ConversationOrchestrator;
 use crate::error::OrchestratorError;
 use crate::sse::accumulator::BlockAccumulator;
 use crate::sse::event_router::{dispatch_event, RouterAction};
-use crate::turn_loop::dispatch_tool_uses_tracked;
 use futures::stream::{BoxStream, StreamExt};
 use llm_client::{LlmError, LlmEvent, TokenUsage, Usage as LlmUsage};
 use protocol::{ContentBlock, ToolUseId};
@@ -196,108 +194,6 @@ pub async fn pump_stream(
     }
     // Stream ended without a MessageStop.
     Err(OrchestratorError::StreamEndedWithoutStop)
-}
-
-/// One concurrently-dispatched tool's result, tagged with its original stream
-/// index so the caller can restore stream order after `join_all`. Carries the
-/// tool's `tool_result` block, its injected `new_messages` (each paired with the
-/// injecting tool's `tool_use_id` — TS `sourceToolUseID`), and any
-/// `context_modifier`s. Aliased to keep the type below clippy's
-/// `type_complexity` threshold.
-type IndexedDispatchResult = (
-    usize,
-    ContentBlock,
-    Vec<(protocol::ConversationMessage, ToolUseId)>,
-    Vec<tool_api::ContextModifier>,
-);
-
-/// Dispatch N `tool_use` blocks concurrently. Each dispatch goes through
-/// the same pre-tool-hook → permission → tool-call → post-tool-hook
-/// pipeline as the batched path ([`crate::turn_loop::dispatch_tool_uses_tracked`]
-/// is reused per-tool to keep the byte-locked hook + permission
-/// ordering for each individual dispatch, AND to thread out each tool's
-/// injected `new_messages`).
-///
-/// Returns `(blocks, injected_messages)`: the [`ContentBlock::ToolResult`]
-/// blocks IN ORIGINAL ORDER (matching the `tool_use` block order in the
-/// stream), plus any tool-injected `new_messages` (SKILLEXEC.3 — the Skill
-/// tool's expanded prompt) flattened in the same tool order so the caller
-/// replays them into history after the `tool_result`. The
-/// `OutputStream::emit_tool_call` / `emit_tool_result` events fire in
-/// COMPLETION order (not dispatch order) — that's the visible
-/// streaming behavior.
-///
-/// Concurrency model: `futures::future::join_all` polls all futures
-/// on the current task. For dispatches with `.await` points (hooks,
-/// permission checks, registry lookups, tool bodies), this yields
-/// true cooperative concurrency without `'static` requirements.
-///
-/// # Errors
-/// Returns the first [`OrchestratorError`] surfaced by any underlying
-/// dispatch; the remaining results are dropped (consistent with the
-/// batched path's fail-fast semantics).
-pub async fn dispatch_tool_uses_concurrent(
-    orch: &ConversationOrchestrator,
-    observed: &[ObservedToolUse],
-) -> Result<
-    (
-        Vec<ContentBlock>,
-        Vec<(protocol::ConversationMessage, ToolUseId)>,
-        Vec<tool_api::ContextModifier>,
-    ),
-    OrchestratorError,
-> {
-    use futures::future::join_all;
-
-    let futures: Vec<_> = observed
-        .iter()
-        .enumerate()
-        .map(|(idx, tu)| {
-            let single = vec![(
-                tu.id,
-                tu.name.clone(),
-                tu.input.clone(),
-                tu.provider_id.clone(),
-            )];
-            async move {
-                // SKILLEXEC.3 (streaming): use the TRACKED dispatch so a tool's
-                // injected `new_messages` (the Skill tool's expanded prompt) are
-                // threaded out and replayed into history, mirroring the batched
-                // path. `prevent_continuation` (.1) is dropped here — the streaming
-                // loop sources that signal separately. The `context_modifier`s
-                // (.3, e.g. a skill's `model:` override) ARE threaded out, in tool
-                // order, for the caller to fold POST-BATCH.
-                let (mut blocks, _prevent, injected, modifiers) =
-                    dispatch_tool_uses_tracked(orch, &single).await?;
-                let block = blocks.pop().ok_or_else(|| {
-                    OrchestratorError::StreamingProtocol(format!(
-                        "dispatch returned empty for tool index {idx}"
-                    ))
-                })?;
-                Ok::<IndexedDispatchResult, OrchestratorError>((
-                    idx, block, injected, modifiers,
-                ))
-            }
-        })
-        .collect();
-
-    let mut indexed: Vec<IndexedDispatchResult> = Vec::with_capacity(observed.len());
-    for r in join_all(futures).await {
-        indexed.push(r?);
-    }
-    indexed.sort_by_key(|(idx, _, _, _)| *idx);
-    // Blocks IN ORIGINAL ORDER; injected messages + context_modifiers flattened
-    // in the same tool order so the Skill prompt + model override land
-    // deterministically after the tool_result.
-    let mut blocks = Vec::with_capacity(indexed.len());
-    let mut injected_all: Vec<(protocol::ConversationMessage, ToolUseId)> = Vec::new();
-    let mut modifiers_all: Vec<tool_api::ContextModifier> = Vec::new();
-    for (_, b, inj, mods) in indexed {
-        blocks.push(b);
-        injected_all.extend(inj);
-        modifiers_all.extend(mods);
-    }
-    Ok((blocks, injected_all, modifiers_all))
 }
 
 #[cfg(test)]

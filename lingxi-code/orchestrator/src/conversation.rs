@@ -2343,7 +2343,7 @@ impl ConversationOrchestrator {
         prompt: &str,
         images: Vec<protocol::ImageSource>,
     ) -> Result<ConversationOutcome, OrchestratorError> {
-        use crate::streaming_loop::{dispatch_tool_uses_concurrent, pump_stream};
+        use crate::streaming_loop::pump_stream;
         use protocol::ContentBlock;
 
         // 0. Build the system prompt for THIS turn. Override always wins.
@@ -2691,56 +2691,82 @@ impl ConversationOrchestrator {
                 s.history.push(assistant_msg.clone());
             }
             self.persist_message_to_jsonl(&assistant_msg).await;
+            // Capture the assistant line's JSONL uuid — each tool result below
+            // parents to it (TS `sourceToolAssistantUUID`). `persist_*` advanced
+            // `last_jsonl_uuid` to this assistant line.
+            let assistant_uuid = self.last_jsonl_uuid.lock().await.clone();
 
-            // 5. Dispatch tools concurrently (M5-04 Task 13). Each
-            //    tool runs the same hook + permission + registry +
-            //    hook pipeline as the batched path; futures::join_all
-            //    polls them on the current task so I/O overlaps.
-            //    ToolResult blocks come back in ORIGINAL stream order
-            //    (sorted by the dispatch helper) so the assistant ↔
-            //    user message correlation stays deterministic; the
-            //    OutputStream events still fire in completion order.
+            // 5. Drive tools through the StreamingToolExecutor (faithful port of
+            //    claude-code's `StreamingToolExecutor` + `query.ts:826-862`).
+            //    Each tool runs the same hook + permission + registry pipeline
+            //    (via `dispatch_tool_uses_tracked` per tool) under concurrency
+            //    control, and EACH result is persisted as its OWN `user` message
+            //    parented to the originating assistant (per-result,
+            //    assistant-parented topology), in RECEIVED order — diverging from
+            //    the old single-batched-user-message shape and matching the TS
+            //    `sessionStorage` `sourceToolAssistantUUID → parentUuid` mapping.
             if !pumped.tool_uses.is_empty() {
-                let (results, injected_messages, context_modifiers) =
-                    dispatch_tool_uses_concurrent(self, &pumped.tool_uses).await?;
-                let user_id = MessageId::new();
-                let tool_results_msg = ConversationMessage::User {
-                    id: user_id,
-                    content: results,
-                };
-                {
-                    let mut s = self.session.lock().await;
-                    s.history.push(tool_results_msg.clone());
+                let mut exec = crate::streaming_executor::StreamingToolExecutor::new(self);
+                for tu in &pumped.tool_uses {
+                    exec.add_tool(
+                        tu.id,
+                        tu.name.clone(),
+                        tu.input.clone(),
+                        tu.provider_id.clone(),
+                        assistant_id,
+                    );
                 }
-                self.persist_message_to_jsonl(&tool_results_msg).await;
-                // SKILLEXEC.3 (streaming): replay any tool-injected `new_messages`
-                // (the Skill tool's expanded prompt) into history right after the
-                // tool_result, mirroring the batched turn loop. Empty for every
-                // non-skill tool → a strict no-op (history/JSONL byte-identical).
-                //
-                // Also record each injected message's id → originating
-                // tool_use_id into the in-memory `injected_message_sources`
-                // side-table (faithful port of TS `sourceToolUseID`;
-                // `#[serde(skip)]` so it never reaches the JSONL wire). The
-                // tool_use_id is deliberately NOT passed to
-                // `persist_message_to_jsonl` — TS does not persist
-                // `sourceToolUseID`, so the JSONL bytes stay byte-identical.
-                for (m, tool_use_id) in &injected_messages {
-                    {
-                        let mut s = self.session.lock().await;
-                        s.history.push(m.clone());
-                        s.injected_message_sources.insert(m.id(), *tool_use_id);
+                // Drive to completion, persisting each result IN RECEIVED ORDER
+                // as its own user message parented to the originating assistant.
+                let mut all_modifiers: Vec<tool_api::ContextModifier> = Vec::new();
+                loop {
+                    // (no-op unless a Bash sibling errored / the turn discarded)
+                    exec.apply_abort_to_pending();
+                    exec.process_queue();
+                    // persist whatever just completed, in order
+                    for drained in exec.take_newly_completed() {
+                        let user_msg = ConversationMessage::User {
+                            id: MessageId::new(),
+                            content: vec![drained.block],
+                        };
+                        {
+                            let mut s = self.session.lock().await;
+                            s.history.push(user_msg.clone());
+                        }
+                        self.persist_message_to_jsonl_with_parent(&user_msg, assistant_uuid.clone())
+                            .await;
+                        // SKILLEXEC.3 (streaming): replay tool-injected
+                        // `new_messages` (the Skill tool's expanded prompt) right
+                        // after the tool_result, recording each injected message's
+                        // id → originating tool_use_id into the in-memory
+                        // `injected_message_sources` side-table (faithful port of
+                        // TS `sourceToolUseID`). These chain normally (NOT a parent
+                        // override) — matching the batched path — so the JSONL
+                        // bytes stay byte-identical. Empty for every non-skill tool
+                        // → strict no-op.
+                        for (m, tool_use_id) in drained.injected {
+                            {
+                                let mut s = self.session.lock().await;
+                                s.history.push(m.clone());
+                                s.injected_message_sources.insert(m.id(), tool_use_id);
+                            }
+                            self.persist_message_to_jsonl(&m).await;
+                        }
+                        all_modifiers.extend(drained.modifiers);
                     }
-                    self.persist_message_to_jsonl(m).await;
+                    if !exec.has_unfinished() {
+                        break;
+                    }
+                    if !exec.inflight_is_empty() {
+                        exec.drain_one().await;
+                    }
                 }
-                // SKILLEXEC.3 (model scope, streaming twin): fold this batch's
+                // SKILLEXEC.3 (model scope, streaming twin): fold this turn's
                 // `context_modifier`s and switch `session.model` if a skill
-                // declared a `model:` override. Applied AFTER `injected_messages`
-                // and POST-BATCH (the concurrent dispatch already joined), so
-                // there is no race on `session.model` between concurrent tools.
-                // Empty for every non-`model:` tool → strict no-op (session.model
-                // untouched → byte-identical streaming fixtures).
-                crate::turn_loop::apply_model_context_modifiers(self, context_modifiers).await;
+                // declared a `model:` override. Applied AFTER all results +
+                // injected messages, so there is no race on `session.model`.
+                // Empty for every non-`model:` tool → strict no-op.
+                crate::turn_loop::apply_model_context_modifiers(self, all_modifiers).await;
             }
 
             // 6. Decide loop disposition.

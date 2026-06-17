@@ -128,15 +128,14 @@ pub(crate) struct StreamingToolExecutor<'a> {
     /// are cancelled with `AbortReason::StreamingFallback` (Task 8).
     discarded: bool,
     /// In-flight tool futures keyed by their index in `tools`. Polled on the
-    /// current task (no spawn); each borrows `&'a orch`.
+    /// current task (no spawn); each borrows `&'a orch`. `+ Send` so the whole
+    /// executor (held across `.await` in the live streaming turn) stays `Send`,
+    /// matching the `Send` turn future required by the handle traits.
     inflight: FuturesUnordered<
-        std::pin::Pin<Box<dyn std::future::Future<Output = (usize, DispatchOutcome)> + 'a>>,
+        std::pin::Pin<Box<dyn std::future::Future<Output = (usize, DispatchOutcome)> + Send + 'a>>,
     >,
 }
 
-// The whole executor surface is unused until Task 11 wires it into the live
-// streaming loop; suppress dead-code here rather than per-method.
-#[allow(dead_code)]
 impl<'a> StreamingToolExecutor<'a> {
     /// Construct a fresh executor borrowing the given orchestrator for the
     /// duration of the streaming turn.
@@ -278,10 +277,17 @@ impl<'a> StreamingToolExecutor<'a> {
         self.inflight.push(Box::pin(fut));
     }
 
+    /// `true` when no tool futures are currently in flight. Accessor for the
+    /// live loop (which cannot reach the private `inflight` field across module
+    /// boundaries).
+    pub(crate) fn inflight_is_empty(&self) -> bool {
+        self.inflight.is_empty()
+    }
+
     /// Await one in-flight tool future, record its result, and trigger the Bash
     /// sibling-error cascade. Returns the completed tool index, or `None` if no
     /// futures are in flight. (TS `executeTool`/`collectResults` completion path.)
-    async fn drain_one(&mut self) -> Option<usize> {
+    pub(crate) async fn drain_one(&mut self) -> Option<usize> {
         let (i, outcome) = self.inflight.next().await?;
         match outcome {
             Ok((mut block, injected, modifiers)) => {
@@ -321,7 +327,7 @@ impl<'a> StreamingToolExecutor<'a> {
     /// cancelled. claude-code interrupts in-flight siblings via the sibling
     /// controller — that arrives with the per-tool `CancellationToken` in
     /// Phase 2.
-    fn apply_abort_to_pending(&mut self) {
+    pub(crate) fn apply_abort_to_pending(&mut self) {
         let reason = if self.discarded {
             Some(AbortReason::StreamingFallback)
         } else if self.has_errored {
@@ -343,6 +349,9 @@ impl<'a> StreamingToolExecutor<'a> {
 
     /// Mark the turn discarded (streaming fallback). Pending tools get a
     /// `StreamingFallback` synthetic result on the next `apply_abort_to_pending`.
+    // Still only exercised by the Task-11 fallback test path / Phase 2; the live
+    // loop does not yet discard.
+    #[allow(dead_code)]
     fn discard(&mut self) {
         self.discarded = true;
     }
@@ -404,15 +413,17 @@ fn set_provider_id(block: &mut ContentBlock, provider_id: Option<String>) {
 /// One drained result ready for the live loop to persist, carrying everything
 /// needed to build + assistant-parent the user message (TS getCompletedResults
 /// yields one message per result; `assistant_id` is TS `sourceToolAssistantUUID`).
-#[allow(dead_code)] // wired in Task 11
 pub(crate) struct DrainedResult {
     pub(crate) block: ContentBlock,
+    /// TS `sourceToolAssistantUUID`. The live loop parents results to the
+    /// single per-turn assistant via its captured JSONL uuid, so this id is
+    /// carried for fidelity / future per-result parenting but not read there.
+    #[allow(dead_code)]
     pub(crate) assistant_id: MessageId,
     pub(crate) injected: Vec<(ConversationMessage, ToolUseId)>,
     pub(crate) modifiers: Vec<ContextModifier>,
 }
 
-#[allow(dead_code)] // wired in Task 11
 impl<'a> StreamingToolExecutor<'a> {
     /// TS `getCompletedResults`: walk tools in order, yield each newly-`Completed`
     /// tool's result (marking it `Yielded`), and STOP at an `Executing`

@@ -11,6 +11,20 @@
 use clap::Parser;
 use std::path::PathBuf;
 
+/// clap value-parser for `--max-budget-usd`. Mirrors claude-code's arg parser
+/// (`main.tsx`): `Number(value)` then reject `isNaN(amount) || amount <= 0`
+/// with the byte-identical error message. A non-numeric argument (which JS would
+/// coerce to `NaN`) and a non-positive number both fail the same way here.
+fn parse_positive_budget_usd(value: &str) -> Result<f64, String> {
+    let amount: f64 = value.parse().map_err(|_| {
+        "--max-budget-usd must be a positive number greater than 0".to_string()
+    })?;
+    if amount.is_nan() || amount <= 0.0 {
+        return Err("--max-budget-usd must be a positive number greater than 0".to_string());
+    }
+    Ok(amount)
+}
+
 /// AI coding assistant — runs a single turn or REPL
 #[derive(Debug, Parser, Clone)]
 #[command(name = "lingxi-cli", version, about, long_about = None)]
@@ -67,6 +81,19 @@ pub struct Argv {
     /// (`query.ts:894-948`).
     #[arg(long = "fallback-model", value_name = "MODEL")]
     pub fallback_model: Option<String>,
+
+    /// Maximum number of agentic turns before the loop early-exits (claude-code
+    /// `--max-turns <turns>`, "only works with --print"). Maps to
+    /// `OrchestratorConfig::max_turns`; unset (or `0`) = unbounded.
+    #[arg(long = "max-turns", value_name = "turns")]
+    pub max_turns: Option<u32>,
+
+    /// Maximum dollar amount to spend on API calls (claude-code
+    /// `--max-budget-usd <amount>`, "only works with --print"). Maps to
+    /// `OrchestratorConfig::max_budget_nano_usd` (× 1e9); unset = no cap. Must be
+    /// a positive number greater than 0 (parity with claude-code's arg parser).
+    #[arg(long = "max-budget-usd", value_name = "amount", value_parser = parse_positive_budget_usd)]
+    pub max_budget_usd: Option<f64>,
 
     /// Change to this directory before initialising
     #[arg(long = "cwd", value_name = "DIR")]
@@ -278,6 +305,38 @@ mod tests {
         let a = Argv::from_iter(["lingxi-cli", "--fallback-model", "claude-sonnet-4-6", "hi"])
             .unwrap();
         assert_eq!(a.fallback_model.as_deref(), Some("claude-sonnet-4-6"));
+    }
+
+    #[test]
+    fn max_turns_flag_parses() {
+        let a = Argv::from_iter(["lingxi-cli", "--print", "--max-turns", "5", "hi"]).unwrap();
+        assert_eq!(a.max_turns, Some(5));
+    }
+
+    #[test]
+    fn max_turns_default_none() {
+        let a = Argv::from_iter(["lingxi-cli", "hi"]).unwrap();
+        assert!(a.max_turns.is_none());
+    }
+
+    #[test]
+    fn max_budget_usd_flag_parses() {
+        let a =
+            Argv::from_iter(["lingxi-cli", "--print", "--max-budget-usd", "2.5", "hi"]).unwrap();
+        assert_eq!(a.max_budget_usd, Some(2.5));
+    }
+
+    #[test]
+    fn max_budget_usd_rejects_zero_and_negative() {
+        // Parity with claude-code: the arg parser rejects `amount <= 0`.
+        assert!(Argv::from_iter(["lingxi-cli", "--max-budget-usd", "0", "hi"]).is_err());
+        assert!(Argv::from_iter(["lingxi-cli", "--max-budget-usd", "-1", "hi"]).is_err());
+    }
+
+    #[test]
+    fn max_budget_usd_rejects_non_numeric() {
+        // A non-numeric value (JS `Number(...)` → `NaN`) is rejected too.
+        assert!(Argv::from_iter(["lingxi-cli", "--max-budget-usd", "abc", "hi"]).is_err());
     }
 
     #[test]

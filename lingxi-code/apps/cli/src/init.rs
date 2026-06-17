@@ -260,6 +260,12 @@ fn resolve_desktop_config(
     } else {
         None
     };
+    // `--max-turns` / `--max-budget-usd` are documented "only works with --print"
+    // (`main.tsx`). Mirror that SOFT restriction: the interactive TUI/REPL path
+    // leaves both unset, so the orchestrator's turn / cost caps stay inert outside
+    // `--print` (the flags still PARSE regardless — honoring is the consumer's job).
+    let max_turns = if argv.print { argv.max_turns } else { None };
+    let max_budget_usd = if argv.print { argv.max_budget_usd } else { None };
     // `--no-stream` is always honoured in the baseline pipeline (only the
     // batched constructor is wired). Read the flag to silence the unused-field
     // warning and preserve the pre-lift behavior.
@@ -286,6 +292,10 @@ fn resolve_desktop_config(
         // `NoOpPermissionGate` (allow) — a known limitation of the v0.6.0
         // fallback REPL, not the primary interactive surface.
         deny_unresolved_ask: argv.print,
+        // CLI `--max-turns` / `--max-budget-usd` → orchestrator caps in `build()`
+        // (print-gated above; interactive sessions leave both unset).
+        max_turns,
+        max_budget_usd,
         // Interactive gate injected ONLY by `build_runtime_for_tui` (the TUI
         // path); this shared headless/REPL config has no interactive prompt.
         injected_permission_gate: None,
@@ -424,6 +434,8 @@ mod tests {
             resume: None,
             model: None,
             fallback_model: None,
+            max_turns: None,
+            max_budget_usd: None,
             cwd: None,
             no_stream: false,
             json: false,
@@ -454,6 +466,8 @@ mod tests {
             resume: None,
             model: None,
             fallback_model: None,
+            max_turns: None,
+            max_budget_usd: None,
             cwd: None,
             no_stream: true,
             json: false,
@@ -505,6 +519,8 @@ mod tests {
             resume: None,
             model: None,
             fallback_model: Some("claude-opus-4-20250514".into()),
+            max_turns: None,
+            max_budget_usd: None,
             cwd: None,
             no_stream: true,
             json: false,
@@ -538,6 +554,34 @@ mod tests {
         };
         let cfg = resolve_desktop_config(&absent, permission::PermissionMode::Default);
         assert!(cfg.fallback_model.is_none());
+    }
+
+    /// `--max-turns` / `--max-budget-usd` are "only works with --print" in
+    /// claude-code: they thread into the config in print mode and are dropped to
+    /// `None` (caps inert) in interactive mode — same soft restriction as
+    /// `--fallback-model`.
+    #[test]
+    fn max_turns_and_budget_are_print_gated() {
+        let printed = Argv::from_iter([
+            "lingxi-cli",
+            "--print",
+            "--max-turns",
+            "3",
+            "--max-budget-usd",
+            "1.5",
+            "hi",
+        ])
+        .unwrap();
+        let cfg = resolve_desktop_config(&printed, permission::PermissionMode::Default);
+        assert_eq!(cfg.max_turns, Some(3));
+        assert_eq!(cfg.max_budget_usd, Some(1.5));
+
+        // Interactive (no `--print`) ⟶ both dropped to `None`.
+        let interactive =
+            Argv::from_iter(["lingxi-cli", "--max-turns", "3", "--max-budget-usd", "1.5"]).unwrap();
+        let cfg = resolve_desktop_config(&interactive, permission::PermissionMode::Default);
+        assert!(cfg.max_turns.is_none());
+        assert!(cfg.max_budget_usd.is_none());
     }
 
     #[test]

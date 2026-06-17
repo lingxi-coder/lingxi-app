@@ -222,6 +222,10 @@ pub fn resolve_desktop_config(args: &BridgeArgs) -> DesktopConfig {
         permission_mode: permission::PermissionMode::Default,
         // Plan 3c: bridge has no interactive secure prompt; headless no-op.
         connect_prompt: None,
+        // The Electron bridge exposes no --max-turns / --max-budget flags;
+        // both stay unset (unbounded), matching the CLI defaults.
+        max_turns: None,
+        max_budget_usd: None,
     }
 }
 
@@ -495,6 +499,8 @@ mod tests {
             memory_provider: None,
             permission_mode: permission::PermissionMode::Default,
             connect_prompt: None,
+            max_turns: None,
+            max_budget_usd: None,
         };
         let bound = assemble(cfg).await.expect("assemble must succeed");
         // The gate handle is reachable only when bind() ran with a real gate.

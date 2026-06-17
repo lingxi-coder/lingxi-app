@@ -685,6 +685,8 @@ pub fn desktop_skill_registry() -> SkillRegistry {
 ///     mcp_paths: vec![PathBuf::from("/tmp/project/.mcp.json")],
 ///     use_noop_permission_gate: false,
 ///     deny_unresolved_ask: false,
+///     max_turns: None,
+///     max_budget_usd: None,
 ///     injected_permission_gate: None,
 ///     session_started_as_coordinator: false,
 ///     // `None` ⟶ empty memory (deterministic). A production host injects
@@ -747,6 +749,14 @@ pub struct DesktopConfig {
     /// inner, so interactive/transport builds and every existing caller stay
     /// byte-identical. The CLI sets this from `argv.print`.
     pub deny_unresolved_ask: bool,
+    /// CLI `--max-turns N`: cap on agent turns, mapped to
+    /// [`orchestrator::OrchestratorConfig::max_turns`] in `build()`. `None` (the
+    /// default) = unbounded.
+    pub max_turns: Option<u32>,
+    /// CLI `--max-budget USD`: cost ceiling in USD, mapped to
+    /// [`orchestrator::OrchestratorConfig::max_budget_nano_usd`] (× 1e9) in
+    /// `build()`. `None` (the default) = no cap.
+    pub max_budget_usd: Option<f64>,
     /// Host-injected base permission gate (the INTERACTIVE prompt transport).
     /// When `Some`, `build()` uses it as the base gate instead of the
     /// `NoOpPermissionGate`/`DenyOnAskGate`/`AdapterPermissionGate` it would
@@ -860,6 +870,8 @@ impl Default for DesktopConfig {
             mcp_paths: Vec::new(),
             use_noop_permission_gate: true,
             deny_unresolved_ask: false,
+            max_turns: None,
+            max_budget_usd: None,
             injected_permission_gate: None,
             session_started_as_coordinator: false,
             memory_provider: None,
@@ -1729,6 +1741,16 @@ pub async fn build(
     // into `OrchestratorConfig.fallback_model`. `None` keeps the turn_loop's
     // 529-overload interception a strict no-op (`turn_loop.rs:496`).
     orch_cfg.fallback_model.clone_from(&cfg.fallback_model);
+    // CLI `--max-turns` / `--max-budget` caps. Unset leaves the OrchestratorConfig
+    // defaults (unbounded turns / no cost cap). USD → nano-USD for the cost cap.
+    if let Some(max_turns) = cfg.max_turns {
+        orch_cfg.max_turns = max_turns;
+    }
+    orch_cfg.max_budget_nano_usd = cfg.max_budget_usd.map(|usd| {
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let nano = (usd.max(0.0) * 1_000_000_000.0) as u64;
+        nano
+    });
     // Subscription-flag hop (API.6): thread the resolved Claude.ai-subscriber flag
     // (computed in step 3.2 from the OAuth token scopes) into the orchestrator
     // config so the fallback-aware api-client seam resolves the consecutive-529
@@ -3417,6 +3439,8 @@ mod tests {
             mcp_paths: vec![cwd.join(".mcp.json")],
             use_noop_permission_gate: use_noop,
             deny_unresolved_ask: false,
+            max_turns: None,
+            max_budget_usd: None,
             injected_permission_gate: None,
             session_started_as_coordinator: false,
             // Boot tests stay deterministic: empty memory, never the real FS.

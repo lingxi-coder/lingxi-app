@@ -616,6 +616,8 @@ mod tests {
             resume: None,
             model: None,
             fallback_model: None,
+            max_turns: None,
+            max_budget_usd: None,
             cwd: None,
             no_stream: false,
             json: false,

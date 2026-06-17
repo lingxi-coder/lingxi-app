@@ -59,6 +59,8 @@ fn sandbox_config() -> (tempfile::TempDir, DesktopConfig) {
         memory_provider: None,
         permission_mode: permission::PermissionMode::Default,
         connect_prompt: None,
+        max_turns: None,
+        max_budget_usd: None,
     };
     (tmp, cfg)
 }

@@ -303,6 +303,9 @@ fn resolve_pending_permission(state: &mut AppState, resolution: DialogResolution
     state.tool_use_dialog_state = ToolUseConfirmState::default();
     state.exit_plan_dialog_state = ExitPlanModeState::default();
     state.bypass_dialog_state = BypassPermissionsState::default();
+    // (TUI-PERM) Open the next queued exchange, if any, now that the active
+    // slot is free. No-op when the queue is empty.
+    crate::state::promote_next_permission(state);
 }
 
 #[cfg(test)]
@@ -480,5 +483,47 @@ mod m6_02_tests {
             map_key_ml(k(KeyCode::Down), false, false, true),
             Some(KeyAction::MoveCursorVertical(1))
         ));
+    }
+
+    #[test]
+    fn resolving_a_dialog_promotes_the_next_queued_exchange() {
+        use crate::permission_bridge::PermissionExchange;
+        use crate::state::StatusSnapshot;
+        use tokio::sync::oneshot;
+
+        let mut st = AppState::new(StatusSnapshot::default());
+        // Active dialog for "Write" with a live oneshot.
+        let (tx0, mut rx0) = oneshot::channel();
+        crate::state::open_permission_dialog(
+            &mut st,
+            permission::gate::PermissionRequest::ToolUseConfirm {
+                tool_name: "Write".to_string(),
+                tool_input: serde_json::json!({}),
+                default_decision: permission::tool_default("Write"),
+            },
+            Some(tx0),
+        );
+        // A second exchange waiting in the FIFO.
+        let (tx1, _rx1) = oneshot::channel();
+        st.permission_queue.push_back(PermissionExchange {
+            request: permission::gate::PermissionRequest::ToolUseConfirm {
+                tool_name: "Edit".to_string(),
+                tool_input: serde_json::json!({}),
+                default_decision: permission::tool_default("Edit"),
+            },
+            resp_tx: tx1,
+        });
+
+        // Resolve the active "Write" dialog with Deny.
+        resolve_pending_permission(&mut st, DialogResolution::deny());
+
+        // The first oneshot received the decision...
+        assert_eq!(
+            rx0.try_recv().unwrap(),
+            permission::gate::PermissionResponse::Deny
+        );
+        // ...and the next queued exchange ("Edit") is now the active dialog.
+        assert_eq!(st.pending_permission.as_ref().unwrap().tool(), "Edit");
+        assert!(st.permission_queue.is_empty());
     }
 }

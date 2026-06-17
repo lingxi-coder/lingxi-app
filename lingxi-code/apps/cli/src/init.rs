@@ -107,6 +107,11 @@ pub struct TuiBuild {
     /// disturb the `BridgeOutputStream` that owns the original.
     pub turn_tx:
         tokio::sync::mpsc::UnboundedSender<tui::events::orchestrator_bridge::TurnEvent>,
+    /// (TUI-PERM) Receiver for the injected `TuiPermissionGate`'s exchanges.
+    /// Threaded into `session::Runtime::with_permission_rx` so the TUI's
+    /// permission pump drives the interactive dialog.
+    pub permission_rx:
+        tokio::sync::mpsc::Receiver<tui::permission_bridge::PermissionExchange>,
 }
 
 /// Errors surfaced while building a [`Runtime`].
@@ -274,11 +279,15 @@ fn resolve_desktop_config(
         // HEADLESS deny-on-ask (claude-code `--print` parity): in `-p`/`--print`
         // mode there is no interactive prompt, so an unresolved `Ask` (a mutating
         // tool with no matching allow rule) is DENIED rather than silently allowed.
-        // Interactive TUI/REPL runs (`print == false`) keep the prior behavior
-        // until the TUI permission-prompt wiring lands.
+        // The interactive TUI (`build_runtime_for_tui`) now PROMPTS for an
+        // unresolved ask via the injected `TuiPermissionGate`, so it leaves this
+        // `false`. The `--no-tui` stdio REPL still routes through `build_runtime`
+        // (no injected gate), so an unresolved ask there resolves via the
+        // `NoOpPermissionGate` (allow) — a known limitation of the v0.6.0
+        // fallback REPL, not the primary interactive surface.
         deny_unresolved_ask: argv.print,
-        // Interactive gate injected by `build_runtime_for_tui` (the TUI path),
-        // not here — the shared headless/REPL config has no interactive prompt.
+        // Interactive gate injected ONLY by `build_runtime_for_tui` (the TUI
+        // path); this shared headless/REPL config has no interactive prompt.
         injected_permission_gate: None,
         // M10: the CLI does not start a coordinator session (threading this
         // from session metadata is a follow-up; the default is byte-identical
@@ -320,6 +329,16 @@ pub async fn build_runtime(
     permission_mode: permission::PermissionMode,
 ) -> Result<Runtime, InitError> {
     let cfg = resolve_desktop_config(argv, permission_mode);
+    build_runtime_from_config(cfg, output).await
+}
+
+/// Shared engine assembly: build the runtime from an already-resolved
+/// [`DesktopConfig`] + output sink. Lets the TUI path inject a permission gate
+/// derived from the SAME `cfg` without resolving config twice.
+pub async fn build_runtime_from_config(
+    cfg: DesktopConfig,
+    output: Arc<dyn OutputStream>,
+) -> Result<Runtime, InitError> {
     let permission_sink: Arc<dyn client_adapter::PermissionRequestSink> =
         Arc::new(NoopPermissionRequestSink);
     let rt = build(cfg, output, permission_sink).await?;
@@ -361,17 +380,71 @@ pub async fn build_runtime_for_tui(argv: &Argv) -> Result<TuiBuild, InitError> {
     // The guard already ran in `run_cli` (notice already printed there too), so
     // this drops the notice and takes only the mode.
     let (permission_mode, _notice) = crate::resolve_permission_mode(argv);
-    let runtime = build_runtime(argv, bridge, permission_mode).await?;
+
+    // (TUI-PERM) Resolve config ONCE so the gate's persist paths come from the
+    // SAME cfg the engine builds with (no double resolve, no lost paths).
+    let mut cfg = resolve_desktop_config(argv, permission_mode);
+
+    // Interactive permission gate: an unresolved mutating `Ask` surfaces the
+    // TUI dialog over this channel instead of auto-allowing. AllowAlways
+    // persists to <cwd>/.claude/settings.local.json (via `.with_persist`).
+    let (perm_tx, perm_rx) =
+        tokio::sync::mpsc::channel::<tui::permission_bridge::PermissionExchange>(16);
+    let session_allow_rules = std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new()));
+    let gate = std::sync::Arc::new(
+        tui::permission_bridge::TuiPermissionGate::new(perm_tx, session_allow_rules).with_persist(
+            permission::PermissionPaths {
+                claude_home: cfg.claude_home.clone(),
+                cwd: cfg.cwd.clone(),
+            },
+        ),
+    );
+    cfg.injected_permission_gate =
+        Some(gate as std::sync::Arc<dyn permission::gate::PermissionGate>);
+
+    let runtime = build_runtime_from_config(cfg, bridge).await?;
     Ok(TuiBuild {
         runtime,
         bridge_rx,
         turn_tx,
+        permission_rx: perm_rx,
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn build_runtime_for_tui_wires_permission_channel() {
+        // Non-print (interactive) argv: the TUI path injects the gate + channel.
+        let argv = Argv {
+            prompt: None,
+            print: false,
+            resume: None,
+            model: None,
+            fallback_model: None,
+            cwd: None,
+            no_stream: false,
+            json: false,
+            debug: false,
+            no_tui: false,
+            dangerously_skip_permissions: false,
+            permission_mode: None,
+            continue_session: false,
+            fork_session: false,
+        };
+        let build = build_runtime_for_tui(&argv)
+            .await
+            .expect("build_runtime_for_tui");
+        // The receiver exists and is open (the gate holds the sender).
+        // try_recv on an empty-but-open channel returns Empty, not Disconnected.
+        let mut rx = build.permission_rx;
+        assert!(
+            matches!(rx.try_recv(), Err(tokio::sync::mpsc::error::TryRecvError::Empty)),
+            "permission_rx must be wired + open (gate holds the sender)"
+        );
+    }
 
     #[tokio::test]
     async fn build_runtime_with_defaults() {

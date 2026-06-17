@@ -49,6 +49,12 @@ pub type BridgeRxSlot = Arc<std::sync::Mutex<Option<UnboundedReceiver<TurnEvent>
 pub type MultiAgentRxSlot =
     Arc<std::sync::Mutex<Option<UnboundedReceiver<crate::multiagent::MultiAgentEvent>>>>;
 
+/// (TUI-PERM) Take-once slot for the `TuiPermissionGate` receiver, mirroring
+/// [`BridgeRxSlot`]. The permission pump `take()`s it once on first render.
+pub type PermissionRxSlot = Arc<
+    std::sync::Mutex<Option<tokio::sync::mpsc::Receiver<crate::permission_bridge::PermissionExchange>>>,
+>;
+
 /// Props for the iocraft root component.
 #[derive(Default, Props)]
 pub struct TuiRootProps {
@@ -91,6 +97,9 @@ pub struct TuiRootProps {
     /// bridge) makes the turn-spawn pump inert — the live loop echoes the user
     /// line but spawns no turn, correct for those mounts.
     pub turn_tx: Option<UnboundedSender<TurnEvent>>,
+    /// (TUI-PERM) Receiver for `TuiPermissionGate` exchanges. `None` for
+    /// bridge-less mounts (resume picker / smoke gates) — the pump stays inert.
+    pub permission_rx: Option<PermissionRxSlot>,
 }
 
 /// Map an iocraft `KeyEvent` into the workspace's `KeyAction` enum.
@@ -2037,6 +2046,32 @@ pub fn TuiRoot(mut hooks: Hooks, props: &TuiRootProps) -> impl Into<AnyElement<'
                 crate::multiagent::apply_multiagent_event(&mut st, ev, &notify);
                 drop(st);
                 tick_for_ma.set(tick_for_ma.get().wrapping_add(1));
+            }
+        });
+    }
+
+    // ---- Permission pump (TUI-PERM): drain PermissionExchange → FIFO --------
+    // Mirrors the bridge/multiagent pumps. Each exchange is queued and the
+    // front is promoted into the single active dialog when free, so concurrent
+    // gate.check()s never overwrite an active dialog's resp_tx. Inert when
+    // `permission_rx` is None (bridge-less mounts).
+    {
+        let state = state.clone();
+        let rx_slot = props.permission_rx.clone();
+        let mut tick_for_perm = tick;
+        hooks.use_future(async move {
+            let Some(slot) = rx_slot else {
+                return;
+            };
+            let Some(mut rx) = slot.lock().expect("permission rx slot poisoned").take() else {
+                return;
+            };
+            while let Some(exchange) = rx.recv().await {
+                let mut st = state.lock().await;
+                st.permission_queue.push_back(exchange);
+                crate::state::promote_next_permission(&mut st);
+                drop(st);
+                tick_for_perm.set(tick_for_perm.get().wrapping_add(1));
             }
         });
     }

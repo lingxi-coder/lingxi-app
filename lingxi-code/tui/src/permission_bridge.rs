@@ -248,4 +248,86 @@ mod tests {
         }
         tui_task.await.unwrap();
     }
+
+    /// [P2] The real seam: PolicyPermissionGate (default mode, no rules) wraps
+    /// the injected TuiPermissionGate. A mutating tool with no rule is an
+    /// unresolved `Ask` → delegated to the inner gate → one exchange on the
+    /// channel → the reply resolves the blocked check().
+    #[tokio::test]
+    async fn policy_gate_delegates_unresolved_ask_to_tui_gate() {
+        use permission::gate::{PermissionDecision, PermissionGate, PermissionResponse};
+        use permission::{PermissionMode, PermissionPolicy};
+        use std::sync::Arc;
+
+        let (event_tx, mut event_rx) = mpsc::channel::<PermissionExchange>(4);
+        let rules = Arc::new(Mutex::new(Vec::new()));
+        let inner: Arc<dyn PermissionGate> =
+            Arc::new(TuiPermissionGate::new(event_tx, rules));
+        let policy = Arc::new(PermissionPolicy::new(PermissionMode::Default));
+        let gate = permission::PolicyPermissionGate::new(policy, inner);
+
+        // A "TUI" that answers AllowOnce to the first exchange.
+        let responder = tokio::spawn(async move {
+            let ex = event_rx.recv().await.expect("one exchange expected");
+            // It must be the Write tool we asked for.
+            if let permission::gate::PermissionRequest::ToolUseConfirm { tool_name, .. } =
+                &ex.request
+            {
+                assert_eq!(tool_name, "Write");
+            } else {
+                panic!("expected ToolUseConfirm");
+            }
+            ex.resp_tx.send(PermissionResponse::AllowOnce).unwrap();
+        });
+
+        let decision = gate.check("Write", &json!({"file_path": "a.txt"})).await;
+        assert!(matches!(decision, PermissionDecision::Allow));
+        responder.await.unwrap();
+    }
+
+    /// [P2] A Deny reply resolves the blocked check() to Deny.
+    #[tokio::test]
+    async fn policy_gate_relays_deny_from_tui_gate() {
+        use permission::gate::{PermissionDecision, PermissionGate, PermissionResponse};
+        use permission::{PermissionMode, PermissionPolicy};
+        use std::sync::Arc;
+
+        let (event_tx, mut event_rx) = mpsc::channel::<PermissionExchange>(4);
+        let rules = Arc::new(Mutex::new(Vec::new()));
+        let inner: Arc<dyn PermissionGate> = Arc::new(TuiPermissionGate::new(event_tx, rules));
+        let policy = Arc::new(PermissionPolicy::new(PermissionMode::Default));
+        let gate = permission::PolicyPermissionGate::new(policy, inner);
+
+        let responder = tokio::spawn(async move {
+            let ex = event_rx.recv().await.expect("one exchange");
+            ex.resp_tx.send(PermissionResponse::Deny).unwrap();
+        });
+
+        let decision = gate.check("Write", &json!({})).await;
+        assert!(matches!(decision, PermissionDecision::Deny { .. }));
+        responder.await.unwrap();
+    }
+
+    /// [P2] A read-only tool (AllowByDefault) is resolved by the policy itself —
+    /// the inner TuiPermissionGate is NEVER consulted (no exchange emitted).
+    #[tokio::test]
+    async fn policy_gate_auto_allows_readonly_without_dialog() {
+        use permission::gate::{PermissionDecision, PermissionGate};
+        use permission::{PermissionMode, PermissionPolicy};
+        use std::sync::Arc;
+
+        let (event_tx, mut event_rx) = mpsc::channel::<PermissionExchange>(4);
+        let rules = Arc::new(Mutex::new(Vec::new()));
+        let inner: Arc<dyn PermissionGate> = Arc::new(TuiPermissionGate::new(event_tx, rules));
+        let policy = Arc::new(PermissionPolicy::new(PermissionMode::Default));
+        let gate = permission::PolicyPermissionGate::new(policy, inner);
+
+        let decision = gate.check("Read", &json!({"file_path": "a.txt"})).await;
+        assert!(matches!(decision, PermissionDecision::Allow));
+        // No exchange should have been emitted.
+        assert!(
+            matches!(event_rx.try_recv(), Err(mpsc::error::TryRecvError::Empty)),
+            "read-only tool must not consult the interactive gate"
+        );
+    }
 }

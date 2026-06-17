@@ -220,6 +220,7 @@ pub(crate) async fn build_tui_runtime(
         .with_orchestrator(orchestrator)
         .with_multiagent_feed(task_feed)
         .with_turn_tx(tui_build.turn_tx)
+        .with_permission_rx(tui_build.permission_rx)
         .with_command_registry(command_registry)
         .with_provider_availability(provider_availability)
         .with_model_providers(model_providers)

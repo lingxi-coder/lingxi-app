@@ -853,12 +853,14 @@ pub fn parse_response(
                 }
             }
         }
+        // `hookSpecificOutput.additionalContext` (claude-code
+        // `result.additionalContext`, `utils/hooks.ts:622`). Kept DISTINCT from
+        // the top-level `systemMessage` — claude-code routes them to SEPARATE
+        // attachments (`hook_additional_context` vs `hook_system_message`) where
+        // only `additionalContext` reaches the model (`utils/messages.ts:4117`
+        // vs `:4258`). We must NOT merge them into one field.
         if let Some(addl) = hs.get("additionalContext").and_then(Value::as_str) {
-            let combined = match resp.system_message.take() {
-                Some(prev) => format!("{prev}\n{addl}"),
-                None => addl.to_string(),
-            };
-            resp.system_message = Some(combined);
+            resp.additional_context = Some(addl.to_string());
         }
         match hs.get("permissionDecision").and_then(Value::as_str) {
             Some("allow") => {
@@ -993,13 +995,27 @@ mod tests {
     }
 
     #[test]
-    fn parse_response_additional_context_appends_to_system_message() {
+    fn parse_response_keeps_system_message_and_additional_context_separate() {
+        // Parity with claude-code: `systemMessage` and
+        // `hookSpecificOutput.additionalContext` are DISTINCT fields routed to
+        // SEPARATE attachments — `hook_system_message` (NOT model-facing,
+        // `messages.ts:4258` → `[]`) vs `hook_additional_context` (model-facing,
+        // `messages.ts:4117`). They must NEVER be merged into one field.
         let r = parse_response(
             r#"{"systemMessage":"hello","hookSpecificOutput":{"hookEventName":"PreToolUse","additionalContext":"world"}}"#,
             "PreToolUse",
         )
         .unwrap();
-        assert_eq!(r.system_message.as_deref(), Some("hello\nworld"));
+        assert_eq!(
+            r.system_message.as_deref(),
+            Some("hello"),
+            "systemMessage stays on its own field (transcript-facing, not the model)"
+        );
+        assert_eq!(
+            r.additional_context.as_deref(),
+            Some("world"),
+            "additionalContext stays on its own field (model-facing)"
+        );
     }
 
     #[test]
@@ -1433,7 +1449,8 @@ mod tests {
             );
             let leaked: &'static str = Box::leak(name.to_string().into_boxed_str());
             let r = parse_response(&raw, leaked).unwrap();
-            assert_eq!(r.system_message.as_deref(), Some("x"));
+            // `additionalContext` now lands on its own field (NOT system_message).
+            assert_eq!(r.additional_context.as_deref(), Some("x"));
 
             // A mismatched name is rejected.
             let err = parse_response(

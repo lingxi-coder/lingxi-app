@@ -1272,28 +1272,37 @@ pub(crate) async fn dispatch_tool_uses_tracked(
         if pre_agg.prevent_continuation {
             prevent_continuation = true;
         }
-        // HOOK.1: a PreToolUse hook's `hookSpecificOutput.additionalContext` and
-        // `systemMessage` (both folded into `system_messages` by the response
-        // parser + executor merge, mirroring TS `result.{additionalContext,
-        // systemMessage}`). claude-code pushes this context as its OWN message
-        // into `resultingMessages`, INDEPENDENT of the tool_result
-        // (`toolExecution.ts:845` — `case 'additionalContext':
-        // resultingMessages.push(result.message)`). We surface it the same way:
-        // a SEPARATE meta user message that rides the existing per-tool
-        // `injected` channel (the SKILLEXEC.3 `new_messages` mechanism), so both
-        // drivers append it AFTER this tool's tool_result — never concatenated
-        // into the tool_result content. The shape mirrors TS
+        // HOOK.1: a PreToolUse hook's `hookSpecificOutput.additionalContext`
+        // ONLY (the executor merge folds `additionalContext` into
+        // `additional_contexts`, distinct from `system_messages`). claude-code
+        // pushes this context as its OWN message into `resultingMessages`,
+        // INDEPENDENT of the tool_result (`toolExecution.ts:845` — `case
+        // 'additionalContext': resultingMessages.push(result.message)`). We
+        // surface it the same way: a SEPARATE meta user message that rides the
+        // existing per-tool `injected` channel (the SKILLEXEC.3 `new_messages`
+        // mechanism), so both drivers append it AFTER this tool's tool_result —
+        // never concatenated into the tool_result content. The shape mirrors TS
         // `messages.ts:4117-4128` (`hook_additional_context` attachment): a
         // `<system-reminder>`-wrapped meta user message,
         // `"PreToolUse:{tool} hook additional context: {content}"`, with the
-        // merged `system_messages` joined by `\n` (the parser already joined
-        // `systemMessage` + `additionalContext` with `\n`). claude-code pushes
-        // this context in the PRE-hook phase (`toolExecution.ts:846`), BEFORE the
-        // permission/block check, so it surfaces even when the tool is later
-        // BLOCKED or DENIED. We build it once below and emit it (as its own
-        // message, never folded into the error result) on the success, block, AND
-        // deny arms — in each case ordered AFTER that arm's tool_result.
-        let pre_hook_messages = pre_agg.system_messages.clone();
+        // collected `additional_contexts` joined by `\n`.
+        //
+        // CRITICAL (messages.ts:4117 vs :4258 parity): `systemMessage` is
+        // DELIBERATELY excluded — claude-code routes it to a `hook_system_message`
+        // attachment whose `normalizeAttachmentForAPI` returns `[]`, so it never
+        // reaches the model (it is transcript/user-facing only). We therefore
+        // build this message from `additional_contexts` ONLY, never from
+        // `system_messages`. LingXi has no separate user-display sink for a hook's
+        // `systemMessage`, so it simply does NOT reach the model — the faithful
+        // API behavior.
+        //
+        // claude-code pushes this context in the PRE-hook phase
+        // (`toolExecution.ts:846`), BEFORE the permission/block check, so it
+        // surfaces even when the tool is later BLOCKED or DENIED. We build it once
+        // below and emit it (as its own message, never folded into the error
+        // result) on the success, block, AND deny arms — in each case ordered
+        // AFTER that arm's tool_result.
+        let pre_hook_messages = pre_agg.additional_contexts.clone();
         // Build the standalone additionalContext message (HOOK.1) and queue it
         // on the `injected` channel, tagged with THIS tool's `tool_use_id` (TS
         // stamps `toolUseID` on the attachment). A strict no-op when the hook
@@ -1676,15 +1685,19 @@ pub(crate) async fn dispatch_tool_uses_tracked(
         // just below this tool's tool_result) — it is NO LONGER folded into the
         // tool-result content (claude-code `toolExecution.ts:845` pushes it as a
         // standalone `resultingMessages` entry). The PostToolUse hooks'
-        // `system_messages` ARE still folded onto the tool-result content here —
-        // a separate concern (TS appends `updatedMCPToolOutput`/PostToolUse
-        // context to the result text), each on its own line. A strict no-op when
-        // empty, so the result text is byte-identical to before for the locked
-        // turn-loop fixtures (noop hooks).
-        let mutated = !post_agg.system_messages.is_empty() || mcp_output_mutated;
+        // model-facing context (`additional_contexts`) IS folded onto the
+        // tool-result content here — a separate concern (TS surfaces PostToolUse
+        // `additionalContext` to the model), each on its own line. We use
+        // `additional_contexts` ONLY, never `system_messages`: a PostToolUse
+        // `systemMessage` is transcript/user-facing only and must NOT reach the
+        // model (claude-code `hook_system_message` → `normalizeAttachmentForAPI`
+        // returns `[]`, `messages.ts:4258`). A strict no-op when empty, so the
+        // result text is byte-identical to before for the locked turn-loop
+        // fixtures (noop hooks).
+        let mutated = !post_agg.additional_contexts.is_empty() || mcp_output_mutated;
         let final_content = if mutated {
             let mut out = content;
-            for msg in &post_agg.system_messages {
+            for msg in &post_agg.additional_contexts {
                 out.push('\n');
                 out.push_str(msg);
             }
@@ -3521,15 +3534,15 @@ mod pre_tool_hook_tests {
     #[tokio::test]
     async fn hook1_additional_context_is_a_separate_message_not_folded() {
         // Parity with claude-code `toolExecution.ts:845` — a PreToolUse hook's
-        // `additionalContext` (which the LingXi parser folds together with
-        // `systemMessage` into `system_messages`) is pushed as its OWN message
-        // into `resultingMessages`, INDEPENDENT of the tool_result. It must NOT
-        // be concatenated onto the tool_result content. The faithful message
-        // shape (`messages.ts:4117-4128`) is a meta user message:
+        // `additionalContext` is pushed as its OWN message into
+        // `resultingMessages`, INDEPENDENT of the tool_result. It must NOT be
+        // concatenated onto the tool_result content. The faithful message shape
+        // (`messages.ts:4117-4128`) is a meta user message:
         // `<system-reminder>\nPreToolUse:{tool} hook additional context:
-        // {content}\n</system-reminder>`.
+        // {content}\n</system-reminder>`. The hook supplies `additionalContext`
+        // (the model-facing channel) — NOT `systemMessage`.
         let resp = HookResponse {
-            system_message: Some("INJECTED-CTX".into()),
+            additional_context: Some("INJECTED-CTX".into()),
             ..HookResponse::default()
         };
         let orch = orch_with(
@@ -3573,6 +3586,45 @@ mod pre_tool_hook_tests {
             },
             other => panic!("expected injected User message, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn hook1_system_message_does_not_reach_the_model() {
+        // Parity with claude-code `messages.ts:4258` — a PreToolUse hook's
+        // `systemMessage` is routed to a `hook_system_message` attachment whose
+        // `normalizeAttachmentForAPI` returns `[]`: it is transcript/user-facing
+        // only and NEVER reaches the model. So a hook returning ONLY
+        // `systemMessage` (no `additionalContext`) must produce NO model-facing
+        // additionalContext message — the `injected` channel stays empty and the
+        // tool_result content is untouched.
+        let resp = HookResponse {
+            system_message: Some("USER-ONLY-NOTE".into()),
+            ..HookResponse::default()
+        };
+        let orch = orch_with(
+            pre_hook_executor(resp),
+            Arc::new(crate::test_support::NoOpPermissionGate),
+            vec![],
+        );
+        let uses = uses();
+        let (results, prevent, injected, _mods) =
+            dispatch_tool_uses_tracked(&orch, &uses, None).await.unwrap();
+        assert!(!prevent);
+
+        // (a) the tool_result is the tool's ORIGINAL output, untouched.
+        let (content, is_error) = tool_result(&results[0]);
+        assert!(!is_error, "tool ran successfully");
+        assert!(content.contains("ECHOED-OUTPUT"), "tool output preserved");
+        assert!(
+            !content.contains("USER-ONLY-NOTE"),
+            "systemMessage must NOT leak into the tool_result content: {content:?}"
+        );
+
+        // (b) NO model-facing additionalContext message is emitted.
+        assert!(
+            injected.is_empty(),
+            "systemMessage must NOT reach the model — no injected message expected, got {injected:?}"
+        );
     }
 
     // ----- HOOK.2: continue:false stops the loop ----------------------------

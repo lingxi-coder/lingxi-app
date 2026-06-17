@@ -545,6 +545,13 @@ impl HookExecutorImpl {
             if let Some(msg) = &resp.system_message {
                 agg.system_messages.push(msg.clone());
             }
+            // `additionalContext` is kept on its OWN aggregate channel, distinct
+            // from `system_messages`: only `additional_contexts` reaches the
+            // model (claude-code `hook_additional_context`, `messages.ts:4117`),
+            // whereas `system_messages` is transcript-facing only (`:4258`).
+            if let Some(ctx) = &resp.additional_context {
+                agg.additional_contexts.push(ctx.clone());
+            }
             // B4: OR-fold the preventContinuation (`continue:false`) signal so
             // a single lifecycle hook can terminate the agent loop even when
             // earlier hooks did not. Independent of `decision`.

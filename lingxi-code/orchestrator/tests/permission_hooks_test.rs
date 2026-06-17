@@ -247,11 +247,11 @@ impl BuiltinHookHandler for PermRecorder {
     }
 }
 
-/// A `PreToolUse` hook that emits `additionalContext` (`systemMessage`) but
-/// makes NO permission decision — so the tool proceeds to the permission gate.
-/// claude-code pushes this context to `resultingMessages` in the pre-hook phase
-/// (`toolExecution.ts:846`) BEFORE the gate, so it must surface even when the
-/// gate later DENIES the tool.
+/// A `PreToolUse` hook that emits `additionalContext` (the model-facing channel)
+/// but makes NO permission decision — so the tool proceeds to the permission
+/// gate. claude-code pushes this context to `resultingMessages` in the pre-hook
+/// phase (`toolExecution.ts:846`) BEFORE the gate, so it must surface even when
+/// the gate later DENIES the tool.
 struct PreContextHook;
 #[async_trait]
 impl BuiltinHookHandler for PreContextHook {
@@ -265,7 +265,7 @@ impl BuiltinHookHandler for PreContextHook {
             stderr: String::new(),
             exit_code: Some(0),
             response: Some(HookResponse {
-                system_message: Some("DENY-CTX".into()),
+                additional_context: Some("DENY-CTX".into()),
                 ..Default::default()
             }),
         }

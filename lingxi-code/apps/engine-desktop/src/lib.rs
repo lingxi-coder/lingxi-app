@@ -2190,20 +2190,30 @@ pub async fn build(
         hook_runtime.clone() as Arc<dyn traits::RuntimeSpawner>,
         async_hook_completion_tx,
     ));
-    // B5 fold-back (claude-code `getAsyncHookResponseAttachments`): drain the
-    // completion channel and stash each completed background hook's
-    // `system_message` (which already folds in any `additionalContext`) into the
-    // buffer, for the orchestrator to re-inject as an `async_hook_response`
-    // reminder on the NEXT turn. Hooks that returned no `system_message`
-    // contribute nothing. Draining still keeps the bounded channel from
+    // B5 fold-back (claude-code `getAsyncHookResponseAttachments` +
+    // `normalizeAttachmentForAPI` case `async_hook_response`, `messages.ts:4026`):
+    // drain the completion channel and stash each completed background hook's
+    // `systemMessage` AND `additionalContext` into the buffer, for the
+    // orchestrator to re-inject as an `async_hook_response` reminder on the NEXT
+    // turn. UNLIKE the synchronous PreToolUse/PostToolUse path (where ONLY
+    // `additionalContext` is model-facing and `systemMessage` is suppressed,
+    // `messages.ts:4258`), the `async_hook_response` attachment surfaces BOTH as
+    // separate meta user messages that reach the model (`messages.ts:4030-4055`).
+    // So we push both fields here, each on its own line. Hooks that returned
+    // neither contribute nothing. Draining still keeps the bounded channel from
     // back-pressuring a fire-and-forget hook; when no hooks are configured
     // nothing is ever published, so this stays a no-op for the common case.
     let async_hook_response_buffer = AsyncHookResponseBuffer::default();
     let async_hook_drain_buffer = async_hook_response_buffer.clone();
     tokio::spawn(async move {
         while let Some((_id, result)) = async_hook_completion_rx.recv().await {
-            if let Some(text) = result.response.as_ref().and_then(|r| r.system_message.clone()) {
-                async_hook_drain_buffer.push(text);
+            if let Some(resp) = result.response.as_ref() {
+                if let Some(text) = resp.system_message.clone() {
+                    async_hook_drain_buffer.push(text);
+                }
+                if let Some(text) = resp.additional_context.clone() {
+                    async_hook_drain_buffer.push(text);
+                }
             }
         }
     });

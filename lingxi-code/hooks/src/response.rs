@@ -23,8 +23,19 @@ pub struct HookResponse {
     pub reason: Option<String>,
     /// Replacement input for the in-flight action (e.g. mutated tool input).
     pub updated_input: Option<Value>,
-    /// Free-form system message to splice into the agent's context.
+    /// Free-form `systemMessage` the hook returned (claude-code
+    /// `result.systemMessage`). This is **user/transcript-facing only** — it is
+    /// NOT sent to the model: claude-code routes it to a `hook_system_message`
+    /// attachment whose `normalizeAttachmentForAPI` returns `[]`
+    /// (`utils/messages.ts:4258`). Kept DISTINCT from [`Self::additional_context`]
+    /// (which IS model-facing); the two must never be merged.
     pub system_message: Option<String>,
+    /// `hookSpecificOutput.additionalContext` the hook returned (claude-code
+    /// `result.additionalContext`). This IS model-facing: claude-code yields it
+    /// as a `hook_additional_context` attachment whose `normalizeAttachmentForAPI`
+    /// returns a `<system-reminder>` user message that reaches the model
+    /// (`utils/messages.ts:4117`). DISTINCT from [`Self::system_message`].
+    pub additional_context: Option<String>,
     /// Additional content blocks (images, files, etc.) to attach.
     pub attachments: Vec<Value>,
     /// If `true` the engine should suppress the default user-visible output
@@ -134,8 +145,17 @@ pub struct AggregateHookResult {
     pub reason: Option<String>,
     /// Most recent `updated_input` if any hook mutated the action's input.
     pub modified_input: Option<Value>,
-    /// All system messages emitted by hooks, in execution order.
+    /// All `systemMessage`s emitted by hooks, in execution order. These are
+    /// **user/transcript-facing only** and must NOT reach the model (claude-code
+    /// `hook_system_message` → `normalizeAttachmentForAPI` returns `[]`,
+    /// `utils/messages.ts:4258`). Kept DISTINCT from [`Self::additional_contexts`].
     pub system_messages: Vec<String>,
+    /// All `additionalContext`s emitted by hooks, in execution order. These ARE
+    /// model-facing: claude-code surfaces them via `hook_additional_context` as a
+    /// `<system-reminder>` user message (`utils/messages.ts:4117`). The turn loop
+    /// builds the PreToolUse model-facing context message from THIS field only —
+    /// never from [`Self::system_messages`].
+    pub additional_contexts: Vec<String>,
     /// `true` when ANY folded hook requested *preventContinuation*
     /// (`continue: false`). For lifecycle (`Stop`) hooks this signals the
     /// turn loop to TERMINATE the agent rather than continue working — it

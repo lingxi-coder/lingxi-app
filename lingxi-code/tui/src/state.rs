@@ -502,6 +502,12 @@ impl PendingPermission {
 /// legacy bridge variant which resolves elsewhere). Sets `started_at` so the
 /// resolved-telemetry `elapsed_ms` is non-zero, and resets the per-dialog
 /// `ToolUseConfirm` state. Fires the `permission_dialog_shown` event.
+///
+/// NOTE: this helper currently assumes the `ToolUseConfirm` request variant —
+/// it resets only `tool_use_dialog_state` and tags telemetry `"tool_use"`. Every
+/// `PermissionExchange` today (gate + legacy bridge) is a `ToolUseConfirm`. If a
+/// future caller pushes `ExitPlanMode`/`BypassPermissionsMode` requests through
+/// this path, generalize the dialog-state reset + the telemetry kind here.
 pub fn open_permission_dialog(
     st: &mut AppState,
     request: PermissionRequest,

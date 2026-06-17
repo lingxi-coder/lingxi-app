@@ -1168,6 +1168,7 @@ pub(crate) async fn dispatch_tool_uses_tracked(
             content_replacement_state: None,
             session: Some(orch.session.clone()),
             subagent_registry: Some(orch.tools.clone()),
+            cancel: None,
         };
 
         // validate_input gate (claude-code `toolExecution.ts:683-723`): a

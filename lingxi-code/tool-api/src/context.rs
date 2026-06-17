@@ -39,6 +39,11 @@ pub struct ToolUseContext {
     /// M4-05 wiring tests. `None` for top-level invocations that have no
     /// parent agent yet.
     pub subagent_registry: Option<Arc<ToolRegistry>>,
+    /// Per-call cancellation token. Fired by the streaming executor when a
+    /// sibling Bash tool errors (or the user interrupts). Phase 1 carries it;
+    /// the Bash/subprocess tools observe it in Phase 2 to kill in-flight work.
+    /// `None` for batched/legacy call sites.
+    pub cancel: Option<tokio_util::sync::CancellationToken>,
     // File state cache wired in Plan 10.
 }
 
@@ -70,7 +75,21 @@ impl ToolUseContext {
             content_replacement_state: None,
             session: None,
             subagent_registry: None,
+            cancel: None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tool_use_context_carries_optional_cancel_token() {
+        let mut ctx = ToolUseContext::model_seed("opus".into());
+        assert!(ctx.cancel.is_none());
+        ctx.cancel = Some(tokio_util::sync::CancellationToken::new());
+        assert!(ctx.cancel.is_some());
     }
 }
 

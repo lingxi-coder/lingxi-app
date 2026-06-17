@@ -101,6 +101,7 @@ impl ToolInvoker for RegistryToolInvoker {
             content_replacement_state: None,
             session: None,
             subagent_registry: Some(self.registry.clone()),
+            cancel: None,
         };
 
         // Drop the progress receiver immediately — production tools tolerate

@@ -274,6 +274,7 @@ mod tests {
             content_replacement_state: None,
             session: None,
             subagent_registry: None,
+            cancel: None,
         }
     }
 

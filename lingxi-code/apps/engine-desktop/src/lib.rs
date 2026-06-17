@@ -52,9 +52,10 @@ use orchestrator::{
 };
 use permission::gate::PermissionGate;
 use platform_posix::{
-    PosixClock, PosixFileSystem, PosixHttp, PosixProcess, PosixRuntime, PosixSandbox,
+    secure_storage_for_platform, PosixClock, PosixFileSystem, PosixHttp, PosixProcess,
+    PosixRuntime, PosixSandbox,
 };
-use platform_posix_minimal::{PlainTextSecureStorage, PosixMcp, PosixWorktree};
+use platform_posix_minimal::{PosixMcp, PosixWorktree};
 use sandbox::decision::ProjectTrustLevel;
 use sandbox::runtime_config::Platform as SandboxPlatform;
 use secret::CredentialManager;
@@ -1032,6 +1033,9 @@ pub enum BuildError {
     /// Orchestrator construction failed.
     #[error("orchestrator construction failed: {0}")]
     Orchestrator(String),
+    /// Secure-storage backend initialization failed.
+    #[error("secure storage init failed: {0}")]
+    SecureStorage(String),
 }
 
 /// Build a fully-wired desktop [`DesktopRuntime`] from a deterministic
@@ -1319,7 +1323,13 @@ pub async fn build(
     // (1) Platform-minimal façade (http + clock + storage).
     let http = Arc::new(PosixHttp::new());
     let clock = Arc::new(PosixClock::new());
-    let storage = Arc::new(PlainTextSecureStorage::new());
+    let storage = secure_storage_for_platform(
+        std::env::var("USER").unwrap_or_else(|_| "default".to_string()),
+        cfg.claude_home.clone(),
+        cfg.claude_home.join(".credentials.json"),
+    )
+    .await
+    .map_err(|e| BuildError::SecureStorage(e.to_string()))?;
 
     // (2a) Task 10: LlmTransportBridge wraps the PosixHttp transport for
     //      `DefaultLlmClient`. A second `PosixHttp` instance is used so the

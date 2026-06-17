@@ -1159,7 +1159,7 @@ pub(crate) async fn dispatch_tool_uses_tracked(
                 .emit_tool_result(
                     tool_use_id,
                     name,
-                    &serde_json::json!({ "error": msg.clone() }),
+                    &serde_json::json!({ "error": msg }),
                 )
                 .await;
             results.push(result_block);

@@ -104,7 +104,10 @@ struct RootView: View {
             // this full-screen living-orb experience. Interactive (tap to re-listen,
             // pop-up text input); dismissed by its own close button.
             if flowActive {
-                VoiceOrbView(onClose: { withAnimation(.easeOut(duration: 0.3)) { flowActive = false } })
+                VoiceOrbView(convo: source.model,
+                             onSend: { source.send($0) },
+                             onCancel: { source.cancel() },
+                             onClose: { withAnimation(.easeOut(duration: 0.3)) { flowActive = false } })
                     .zIndex(72)
                     .transition(.opacity)
             }
@@ -112,7 +115,7 @@ struct RootView: View {
             // First-run setup wizard — shown until onboarding is complete; the
             // Settings → 关于 → 重新观看引导 row clears `setupDone` to replay it.
             if !app.setupDone {
-                SetupWizardView()
+                SetupWizardView(convo: source.model, onSetModel: { source.setModel($0) })
                     .zIndex(100)
                     .transition(.opacity)
             }

@@ -95,16 +95,14 @@ fn prepend_bullets(items: &[Bullet]) -> Vec<String> {
 }
 
 /// Port of `isEnvTruthy` for the one env var this module gates on. claude-code's
-/// `isEnvTruthy` treats `"1"`/`"true"` (and any non-empty value other than
-/// `"0"`/`"false"`) as truthy; we mirror that for `CLAUDE_CODE_*` toggles.
-/// Deliberately divergent from `traits::env::is_env_truthy` (the
-/// `envUtils.ts:32-37` allowlist) — denylist semantics, so it stays local.
+/// `isEnvTruthy` (`envUtils.ts:32-37`) is a strict allowlist: truthy ONLY when
+/// the value normalizes (lowercase + trim) to `"1"`/`"true"`/`"yes"`/`"on"`.
+/// claude-code gates `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS` with `isEnvTruthy`
+/// (`BashTool/prompt.ts getBackgroundUsageNote`), so this mirrors that allowlist
+/// — it is NOT a denylist.
 fn is_env_truthy(name: &str) -> bool {
     match std::env::var(name) {
-        Ok(v) => {
-            let v = v.trim();
-            !v.is_empty() && v != "0" && !v.eq_ignore_ascii_case("false")
-        }
+        Ok(v) => matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"),
         Err(_) => false,
     }
 }

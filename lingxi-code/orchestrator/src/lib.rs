@@ -28,7 +28,7 @@ pub mod mcp_hook_dispatcher;
 pub mod prompt;
 pub mod provider_adapter;
 pub mod resume;
-pub mod schema_validation;
+pub(crate) mod schema_validation;
 pub mod sse;
 pub mod streaming_loop;
 pub mod task_completed_firer;

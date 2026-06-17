@@ -74,6 +74,8 @@ pub(crate) fn validate_tool_input_schema(
     if let Err(err) = schemas.validate(input, sch) {
         let mut out = Vec::new();
         flatten(&err, &mut out);
+        // Defensive: a root error with no causes and an empty-rendering `kind`
+        // would otherwise yield an empty message; fall back to the kind string.
         if out.is_empty() {
             out.push(err.kind.to_string());
         }
@@ -121,13 +123,19 @@ mod tests {
 
     #[test]
     fn malformed_schema_passes_through() {
-        // A schema boon cannot compile (a non-schema scalar) must NOT block the
-        // call — it is a LingXi bug, not a model-input error.
-        let schema = json!("not a schema object at all, type should be string/array");
-        // `"..."` is actually a valid boolean-ish? No — a string is not a valid
-        // schema; boon should reject it at compile. Either way the contract is
-        // PASS.
+        // A JSON scalar is not a valid Draft-07 schema (a schema must be an
+        // object or boolean), so boon fails to compile it and we take the
+        // warn-and-PASS branch. A schema bug must never block the model's call.
+        let schema = json!("not a schema object at all");
         assert!(validate_tool_input_schema(&schema, &json!({ "anything": true })).is_ok());
+    }
+
+    #[test]
+    fn invalid_type_keyword_schema_passes_through() {
+        // `type` must be a string or array of strings; `123` makes the schema
+        // itself invalid, forcing boon's compile-error branch → warn + PASS.
+        let schema = json!({ "type": 123 });
+        assert!(validate_tool_input_schema(&schema, &json!({ "x": 1 })).is_ok());
     }
 
     #[test]

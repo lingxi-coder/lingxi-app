@@ -78,6 +78,21 @@ pub(crate) struct TrackedTool {
 }
 
 // ============================================================================
+// Task 7: concurrency gate + ordered process_queue
+// ============================================================================
+
+/// TS `canExecuteTool` (line 129-135): a tool may start if nothing is
+/// executing, OR if both the candidate and every executing tool are
+/// concurrency-safe.
+///
+/// `executing_safe_flags` is a slice of the `is_concurrency_safe` flags for
+/// every tool currently in the `Executing` state.
+pub(crate) fn can_execute(executing_safe_flags: &[bool], candidate_safe: bool) -> bool {
+    executing_safe_flags.is_empty()
+        || (candidate_safe && executing_safe_flags.iter().all(|&s| s))
+}
+
+// ============================================================================
 // StreamingToolExecutor — Task 6: struct + new() + add_tool()
 // ============================================================================
 
@@ -167,6 +182,50 @@ impl<'a> StreamingToolExecutor<'a> {
                 });
             }
         }
+    }
+
+    /// TS `processQueue` (line 140-151): walk the queue IN ORDER; start each
+    /// queued tool whose concurrency conditions are met; STOP at the first
+    /// queued non-concurrency-safe tool that cannot start yet (preserves
+    /// exclusive-tool ordering). After each start the executing set changes, so
+    /// we re-evaluate from scratch.
+    pub(crate) fn process_queue(&mut self) {
+        loop {
+            let executing_flags: Vec<bool> = self
+                .tools
+                .iter()
+                .filter(|t| t.status == ToolStatus::Executing)
+                .map(|t| t.is_concurrency_safe)
+                .collect();
+
+            let mut started_any = false;
+            for i in 0..self.tools.len() {
+                if self.tools[i].status != ToolStatus::Queued {
+                    continue;
+                }
+                let safe = self.tools[i].is_concurrency_safe;
+                if can_execute(&executing_flags, safe) {
+                    self.start_tool(i);
+                    started_any = true;
+                    break; // re-evaluate the executing set after each start
+                } else if !safe {
+                    // An exclusive (non-safe) tool can't start yet → barrier.
+                    return;
+                }
+                // A safe tool that can't start (unsafe tool executing) —
+                // keep scanning; TS continues the loop in this case.
+            }
+            if !started_any {
+                return;
+            }
+        }
+    }
+
+    /// STUB (Task 7): real future-dispatch lands in Task 8. For now just marks
+    /// the tool Executing so `process_queue`'s ordering/gating is testable.
+    #[allow(dead_code)] // real dispatch wired in Task 8
+    fn start_tool(&mut self, i: usize) {
+        self.tools[i].status = ToolStatus::Executing;
     }
 }
 
@@ -356,6 +415,140 @@ mod tests {
         assert_eq!(t.status, ToolStatus::Queued);
         assert!(t.is_concurrency_safe);
         assert!(t.result.is_none());
+    }
+
+    // ============================================================================
+    // Task 7: can_execute + process_queue tests
+    // ============================================================================
+
+    use super::can_execute;
+
+    #[test]
+    fn can_execute_respects_concurrency_safety() {
+        assert!(can_execute(&[], true));
+        assert!(can_execute(&[], false));         // nothing running → ok
+        assert!(can_execute(&[true, true], true)); // all safe + candidate safe → ok
+        assert!(!can_execute(&[true], false));    // candidate unsafe, something running → no
+        assert!(!can_execute(&[false], true));    // an unsafe tool running → no
+    }
+
+    /// A minimal concurrency-UNSAFE tool for ordering/barrier tests.
+    struct UnsafeTool;
+
+    #[async_trait]
+    impl Tool for UnsafeTool {
+        fn name(&self) -> &str { "UnsafeTool" }
+        fn input_schema(&self) -> &serde_json::Value {
+            static SCHEMA: once_cell::sync::Lazy<serde_json::Value> =
+                once_cell::sync::Lazy::new(|| json!({ "type": "object", "properties": {} }));
+            &SCHEMA
+        }
+        fn is_enabled(&self, _ctx: &ToolStaticContext) -> bool { true }
+        fn max_result_size_chars(&self) -> usize { 1024 * 1024 }
+        fn is_concurrency_safe(&self, _input: &serde_json::Value) -> bool { false }
+        fn is_read_only(&self, _input: &serde_json::Value) -> bool { false }
+        async fn validate_input(
+            &self,
+            _input: &serde_json::Value,
+            _ctx: &ToolUseContext,
+        ) -> Result<(), ValidationError> {
+            Ok(())
+        }
+        async fn check_permissions(
+            &self,
+            _input: &serde_json::Value,
+            _ctx: &ToolUseContext,
+        ) -> permission::PermissionResult {
+            permission::PermissionResult::Allow {
+                reason: permission::PermissionDecisionReason::Other { reason: "test".into() },
+                updated_input: None,
+                update_destination: None,
+                metadata: permission::result::PermissionMetadata::default(),
+            }
+        }
+        async fn description(
+            &self,
+            _input: &serde_json::Value,
+            _opts: &DescriptionOptions,
+        ) -> String {
+            "unsafe-tool".into()
+        }
+        async fn prompt(&self, _opts: &PromptOptions) -> String { String::new() }
+        async fn call(
+            &self,
+            _input: serde_json::Value,
+            _ctx: ToolUseContext,
+            _tx: ToolProgressSender,
+        ) -> Result<ToolCallResult, ToolError> {
+            Ok(ToolCallResult {
+                data: json!({ "content": "ok" }),
+                new_messages: vec![],
+                context_modifier: None,
+                mcp_meta: None,
+            })
+        }
+    }
+
+    /// Build an orchestrator with both SafeTool and UnsafeTool.
+    fn orch_with_both_tools() -> ConversationOrchestrator {
+        let mut registry = ToolRegistry::new();
+        registry.register_builtin(Arc::new(SafeTool) as Arc<dyn Tool>);
+        registry.register_builtin(Arc::new(UnsafeTool) as Arc<dyn Tool>);
+        ConversationOrchestrator::new(
+            OrchestratorConfig::default(),
+            Arc::new(MockApiClient::new(vec![])),
+            Arc::new(registry),
+            noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            PathBuf::from("/tmp"),
+        )
+    }
+
+    /// [safe, unsafe, safe]: first safe tool starts; the unsafe is a barrier;
+    /// the third safe tool must NOT start out of order.
+    #[tokio::test]
+    async fn process_queue_starts_safe_tool_and_barriers_on_unsafe() {
+        let orch = orch_with_both_tools();
+        let a = MessageId::new();
+        let mut exec = StreamingToolExecutor::new(&orch);
+        exec.add_tool(ToolUseId::new(), "SafeTool".into(), json!({}), None, a);
+        exec.add_tool(ToolUseId::new(), "UnsafeTool".into(), json!({}), None, a);
+        exec.add_tool(ToolUseId::new(), "SafeTool".into(), json!({}), None, a);
+        exec.process_queue();
+        // First safe starts; unsafe is a barrier (can't run while safe executes);
+        // the third safe sits behind the barrier and must NOT start out of order.
+        assert_eq!(exec.tools[0].status, ToolStatus::Executing);
+        assert_eq!(exec.tools[1].status, ToolStatus::Queued);
+        assert_eq!(exec.tools[2].status, ToolStatus::Queued);
+    }
+
+    /// [safe, safe]: both concurrent-safe tools start.
+    #[tokio::test]
+    async fn process_queue_starts_all_safe_tools_concurrently() {
+        let orch = orch_with_safe_tool();
+        let a = MessageId::new();
+        let mut exec = StreamingToolExecutor::new(&orch);
+        exec.add_tool(ToolUseId::new(), "SafeTool".into(), json!({}), None, a);
+        exec.add_tool(ToolUseId::new(), "SafeTool".into(), json!({}), None, a);
+        exec.process_queue();
+        assert_eq!(exec.tools[0].status, ToolStatus::Executing);
+        assert_eq!(exec.tools[1].status, ToolStatus::Executing);
+    }
+
+    /// [unsafe, safe]: the unsafe tool starts first (nothing executing), then
+    /// the following safe tool stays Queued (exclusive holds the barrier).
+    #[tokio::test]
+    async fn process_queue_unsafe_first_blocks_following_safe() {
+        let orch = orch_with_both_tools();
+        let a = MessageId::new();
+        let mut exec = StreamingToolExecutor::new(&orch);
+        exec.add_tool(ToolUseId::new(), "UnsafeTool".into(), json!({}), None, a);
+        exec.add_tool(ToolUseId::new(), "SafeTool".into(), json!({}), None, a);
+        exec.process_queue();
+        assert_eq!(exec.tools[0].status, ToolStatus::Executing);
+        assert_eq!(exec.tools[1].status, ToolStatus::Queued);
     }
 
     #[tokio::test]

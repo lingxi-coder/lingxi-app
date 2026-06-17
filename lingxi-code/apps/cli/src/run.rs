@@ -34,6 +34,20 @@ pub async fn run_oneshot(argv: &Argv, runtime: &Runtime, sink: &dyn OutputSink) 
         return run_slash_command(&prompt, runtime, sink).await;
     }
 
+    // Structured-output branch (`--json-schema`): the model is forced through the
+    // `StructuredOutput` tool (forced tool_choice wired in `engine_desktop::build`);
+    // we validate its captured result against the schema and retry. Only active
+    // when `build()` surfaced a capture slot (i.e. `--json-schema` + `--print`).
+    if let Some(slot) = runtime.structured_output_slot.clone() {
+        if let Some(schema) = argv
+            .json_schema
+            .as_ref()
+            .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
+        {
+            return run_structured_output(runtime, &prompt, &slot, &schema, sink).await;
+        }
+    }
+
     // Non-slash branch — drive the orchestrator turn loop. Without a real
     // ANTHROPIC_API_KEY this returns 401; we surface the error verbatim.
     sink.turn_start().await;
@@ -44,6 +58,59 @@ pub async fn run_oneshot(argv: &Argv, runtime: &Runtime, sink: &dyn OutputSink) 
             exit_codes::RUNTIME_ERROR
         }
     }
+}
+
+/// `--json-schema` structured-output loop: run the turn (the model is forced to
+/// call `StructuredOutput`), then validate the captured arguments against
+/// `schema` and retry up to `MAX_STRUCTURED_OUTPUT_RETRIES` — 1:1 with
+/// claude-code. Emits the validated JSON to stdout on success; on exhausted
+/// retries surfaces `error_max_structured_output_retries`.
+async fn run_structured_output(
+    runtime: &Runtime,
+    prompt: &str,
+    slot: &orchestrator::structured_output::StructuredOutputSlot,
+    schema: &serde_json::Value,
+    sink: &dyn OutputSink,
+) -> i32 {
+    use crate::structured_output::{
+        resolve_max_retries, structured_output_decision, StructuredDecision,
+    };
+    let max_retries =
+        resolve_max_retries(std::env::var("MAX_STRUCTURED_OUTPUT_RETRIES").ok().as_deref());
+    let mut turn_prompt = prompt.to_string();
+    for _ in 0..max_retries {
+        // Clear the slot before each attempt (no await while the lock is held).
+        if let Ok(mut s) = slot.lock() {
+            *s = None;
+        }
+        sink.turn_start().await;
+        let turn_result = runtime.orchestrator.run_turn(&turn_prompt).await;
+        let captured = slot.lock().ok().and_then(|mut s| s.take());
+        // The forced StructuredOutput call trips the 1-turn cap AFTER capturing the
+        // result, so a turn error WITH a captured value is success, not failure —
+        // only surface the error when nothing was captured.
+        if captured.is_none() {
+            if let Err(e) = turn_result {
+                sink.error("runtime", &e.to_string()).await;
+                return exit_codes::RUNTIME_ERROR;
+            }
+        }
+        match structured_output_decision(captured, schema) {
+            StructuredDecision::Emit(value) => {
+                let json =
+                    serde_json::to_string_pretty(&value).unwrap_or_else(|_| value.to_string());
+                println!("{json}");
+                return exit_codes::SUCCESS;
+            }
+            StructuredDecision::Retry(corrective) => turn_prompt = corrective,
+        }
+    }
+    sink.error(
+        "structured_output",
+        &format!("Failed to provide valid structured output after {max_retries} attempts"),
+    )
+    .await;
+    exit_codes::RUNTIME_ERROR
 }
 
 /// Dispatch a `/command [args]` line through the registry.
@@ -621,6 +688,7 @@ mod tests {
             cwd: None,
             no_stream: false,
             json: false,
+            json_schema: None,
             debug: false,
             no_tui: false,
             dangerously_skip_permissions: false,

@@ -372,6 +372,7 @@ mod tests {
             cwd: None,
             no_stream: false,
             json: false,
+            json_schema: None,
             debug: false,
             no_tui,
             dangerously_skip_permissions: false,

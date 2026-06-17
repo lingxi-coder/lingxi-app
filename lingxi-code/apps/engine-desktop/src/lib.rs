@@ -1783,6 +1783,15 @@ pub async fn build(
     if let Some(max_turns) = cfg.max_turns {
         orch_cfg.max_turns = max_turns;
     }
+    // Structured output forces `tool_choice` to `StructuredOutput`, which compels
+    // the model to call it on EVERY assistant turn — so cap the turn at a SINGLE
+    // model call: the model calls the tool once (capturing the result), then the
+    // cap ends the turn. The print path reads the captured slot regardless of the
+    // resulting MaxTurns stop and drives its own validate/retry loop. (Overrides
+    // any `--max-turns` here; structured output is inherently one-shot per turn.)
+    if cfg.json_schema.is_some() {
+        orch_cfg.max_turns = 1;
+    }
     orch_cfg.max_budget_nano_usd = cfg.max_budget_usd.map(|usd| {
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
         let nano = (usd.max(0.0) * 1_000_000_000.0) as u64;

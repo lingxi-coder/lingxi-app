@@ -34,6 +34,41 @@ pub fn resolve_max_retries(env_value: Option<&str>) -> u32 {
     }
 }
 
+/// One iteration's outcome in the structured-output retry loop.
+#[derive(Debug, Clone, PartialEq)]
+pub enum StructuredDecision {
+    /// The captured result conforms — emit this JSON and finish.
+    Emit(Value),
+    /// Not yet valid — re-run the turn with this corrective prompt.
+    Retry(String),
+}
+
+/// Decide what to do after a structured-output turn from the model's captured
+/// `StructuredOutput` arguments (`captured`) and the user `schema`. Pure — the
+/// retry loop in the print path drives `run_turn` around this. `None` (the model
+/// failed to call the tool) and a schema-invalid value both yield a corrective
+/// [`StructuredDecision::Retry`] prompt; a conforming value yields `Emit`.
+#[must_use]
+pub fn structured_output_decision(captured: Option<Value>, schema: &Value) -> StructuredDecision {
+    match captured {
+        Some(value) => {
+            let errors = validate(&value, schema);
+            if errors.is_empty() {
+                StructuredDecision::Emit(value)
+            } else {
+                StructuredDecision::Retry(format!(
+                    "Your previous output did not conform to the JSON schema: {}. \
+                     Call the StructuredOutput tool again with corrected output.",
+                    errors.join("; ")
+                ))
+            }
+        }
+        None => StructuredDecision::Retry(
+            "You must call the StructuredOutput tool with the final result.".to_string(),
+        ),
+    }
+}
+
 /// Validate `value` against the JSON-Schema `schema`. Returns the list of
 /// human-readable error paths; an empty vec means the value conforms.
 #[must_use]
@@ -251,5 +286,33 @@ mod tests {
             "properties": { "n": { "type": "number", "minimum": 10, "pattern": "x" } }
         });
         assert!(validate(&json!({"n": 1}), &schema).is_empty());
+    }
+
+    #[test]
+    fn decision_emits_on_conforming_value() {
+        let schema = json!({ "type": "object", "required": ["x"] });
+        assert_eq!(
+            structured_output_decision(Some(json!({"x": 1})), &schema),
+            StructuredDecision::Emit(json!({"x": 1}))
+        );
+    }
+
+    #[test]
+    fn decision_retries_with_errors_on_invalid_value() {
+        let schema = json!({ "type": "object", "required": ["x"] });
+        match structured_output_decision(Some(json!({})), &schema) {
+            StructuredDecision::Retry(msg) => assert!(msg.contains("did not conform"), "{msg}"),
+            other => panic!("expected Retry, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn decision_retries_when_tool_was_not_called() {
+        match structured_output_decision(None, &json!({"type": "object"})) {
+            StructuredDecision::Retry(msg) => {
+                assert!(msg.contains("must call the StructuredOutput"), "{msg}");
+            }
+            other => panic!("expected Retry, got {other:?}"),
+        }
     }
 }

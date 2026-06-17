@@ -107,6 +107,14 @@ pub struct Argv {
     #[arg(long = "json")]
     pub json: bool,
 
+    /// Validate the final result against this JSON Schema, forcing structured
+    /// output (claude-code `--json-schema <schema>`; only works with `--print`).
+    /// The model is compelled to call a `StructuredOutput` tool whose schema is
+    /// this; the result is validated and retried up to
+    /// `MAX_STRUCTURED_OUTPUT_RETRIES` times. Pass a JSON Schema as a string.
+    #[arg(long = "json-schema", value_name = "schema")]
+    pub json_schema: Option<String>,
+
     /// Enable verbose logging to stderr
     #[arg(long = "debug")]
     pub debug: bool,
@@ -337,6 +345,25 @@ mod tests {
     fn max_budget_usd_rejects_non_numeric() {
         // A non-numeric value (JS `Number(...)` → `NaN`) is rejected too.
         assert!(Argv::from_iter(["lingxi-cli", "--max-budget-usd", "abc", "hi"]).is_err());
+    }
+
+    #[test]
+    fn json_schema_flag_parses() {
+        let a = Argv::from_iter([
+            "lingxi-cli",
+            "--print",
+            "--json-schema",
+            r#"{"type":"object"}"#,
+            "hi",
+        ])
+        .unwrap();
+        assert_eq!(a.json_schema.as_deref(), Some(r#"{"type":"object"}"#));
+    }
+
+    #[test]
+    fn json_schema_default_none() {
+        let a = Argv::from_iter(["lingxi-cli", "hi"]).unwrap();
+        assert!(a.json_schema.is_none());
     }
 
     #[test]

@@ -82,6 +82,11 @@ pub struct Runtime {
     /// `/connect` screen's `pump_store_provider_key` persists a collected
     /// provider key via `CredentialManager::set_provider_key`.
     pub provider_key_store: std::sync::Arc<secret::CredentialManager>,
+    /// Structured-output capture slot, projected from
+    /// [`engine_desktop::DesktopRuntime::structured_output_slot`]. `Some` only
+    /// under `--json-schema`; the print path reads it after each turn to validate
+    /// the model's `StructuredOutput` result against the schema and retry.
+    pub structured_output_slot: Option<orchestrator::structured_output::StructuredOutputSlot>,
 }
 
 /// Build-result for the TUI startup path. (M6-03)
@@ -266,6 +271,16 @@ fn resolve_desktop_config(
     // `--print` (the flags still PARSE regardless — honoring is the consumer's job).
     let max_turns = if argv.print { argv.max_turns } else { None };
     let max_budget_usd = if argv.print { argv.max_budget_usd } else { None };
+    // `--json-schema` is structured-output, "only works with --print". Parse the
+    // schema string to a JSON value (print-gated). An unparseable schema is
+    // dropped → structured output simply does not activate (the turn runs normally).
+    let json_schema = if argv.print {
+        argv.json_schema
+            .as_ref()
+            .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
+    } else {
+        None
+    };
     // `--no-stream` is always honoured in the baseline pipeline (only the
     // batched constructor is wired). Read the flag to silence the unused-field
     // warning and preserve the pre-lift behavior.
@@ -296,6 +311,9 @@ fn resolve_desktop_config(
         // (print-gated above; interactive sessions leave both unset).
         max_turns,
         max_budget_usd,
+        // `--json-schema` structured output (print-gated above): `build()` forces
+        // the StructuredOutput tool + surfaces a capture slot when this is `Some`.
+        json_schema,
         // Interactive gate injected ONLY by `build_runtime_for_tui` (the TUI
         // path); this shared headless/REPL config has no interactive prompt.
         injected_permission_gate: None,
@@ -363,6 +381,7 @@ pub async fn build_runtime_from_config(
         provider_availability: rt.provider_availability,
         model_providers: rt.model_providers,
         provider_key_store: rt.credentials,
+        structured_output_slot: rt.structured_output_slot,
     })
 }
 
@@ -439,6 +458,7 @@ mod tests {
             cwd: None,
             no_stream: false,
             json: false,
+            json_schema: None,
             debug: false,
             no_tui: false,
             dangerously_skip_permissions: false,
@@ -471,6 +491,7 @@ mod tests {
             cwd: None,
             no_stream: true,
             json: false,
+            json_schema: None,
             debug: false,
             no_tui: false,
             dangerously_skip_permissions: false,
@@ -524,6 +545,7 @@ mod tests {
             cwd: None,
             no_stream: true,
             json: false,
+            json_schema: None,
             debug: false,
             no_tui: false,
             dangerously_skip_permissions: false,

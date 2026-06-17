@@ -2522,7 +2522,7 @@ impl ConversationOrchestrator {
         // `StreamingToolExecutor` user_interrupted path.
         user_cancel: Option<CancellationToken>,
     ) -> Result<ConversationOutcome, OrchestratorError> {
-        use crate::streaming_loop::pump_stream;
+        use crate::streaming_loop::{pump_stream_with_executor, ExecutorPump};
         use protocol::ContentBlock;
 
         // 0. Build the system prompt for THIS turn. Override always wins.
@@ -2738,6 +2738,27 @@ impl ConversationOrchestrator {
                 break;
             }
 
+            // Mid-stream tool dispatch (claude-code `query.ts:562` + `837-844`):
+            // create the executor + pre-allocate this turn's assistant id BEFORE
+            // opening the stream, so each `tool_use` block can be `add_tool`'d and
+            // dispatched the moment it streams in (instead of collecting all
+            // tool_uses and only starting them after the stream ends). This is
+            // BYTE-EQUIVALENT: only WHEN tools start changes. The per-block
+            // assistant JSONL persistence + per-result drain/persist still run
+            // post-stream below (see `pump_stream_with_executor`'s contract).
+            //
+            // DEFERRED-3: hand the executor the turn's user-interrupt token (if
+            // any) so it can reject in-flight/queued Cancel-behavior tools with the
+            // REJECT_MESSAGE; `None` → identical to before.
+            let assistant_id = MessageId::new();
+            let mut exec = match &user_cancel {
+                Some(token) => crate::streaming_executor::StreamingToolExecutor::new_with_user_cancel(
+                    self,
+                    token.clone(),
+                ),
+                None => crate::streaming_executor::StreamingToolExecutor::new(self),
+            };
+
             let stream = self
                 .streaming_api
                 .stream(
@@ -2773,7 +2794,17 @@ impl ConversationOrchestrator {
             // `pumped_from_fallback.assistant_blocks` — not the discarded partial stream
             // fragments, which is correct: the partial stream never reached `content_block_stop`
             // for its text block, so no completed block was accumulated.
-            let pumped = match pump_stream(stream, &self.output).await {
+            let pumped = match pump_stream_with_executor(
+                stream,
+                &self.output,
+                ExecutorPump {
+                    executor: &mut exec,
+                    assistant_id,
+                    user_cancel: user_cancel.as_ref(),
+                },
+            )
+            .await
+            {
                 Ok(p) => p,
                 Err(OrchestratorError::Streaming(ref e @ (LlmError::Overloaded { .. } | LlmError::ProviderInternal)))
                     if !is_env_truthy(
@@ -2824,6 +2855,34 @@ impl ConversationOrchestrator {
                         if let ContentBlock::Text { text } = blk {
                             self.output.emit_text(text).await;
                         }
+                    }
+
+                    // claude-code `query.ts:733-740`: discard the partial
+                    // streaming attempt's executor (its tool_uses have stale ids
+                    // and would orphan against the fallback response) and replace
+                    // it with a fresh one. Dropping the old executor cancels any
+                    // in-flight tool futures it had started mid-stream. The fresh
+                    // executor's tools are registered from the FALLBACK response's
+                    // tool_uses by the post-stream drive loop below (this is the
+                    // ONLY path that still `add_tool`s after the stream — the
+                    // normal path registers mid-stream).
+                    exec = match &user_cancel {
+                        Some(token) => {
+                            crate::streaming_executor::StreamingToolExecutor::new_with_user_cancel(
+                                self,
+                                token.clone(),
+                            )
+                        }
+                        None => crate::streaming_executor::StreamingToolExecutor::new(self),
+                    };
+                    for tu in &pumped_from_fallback.tool_uses {
+                        exec.add_tool(
+                            tu.id.clone(),
+                            tu.name.clone(),
+                            tu.input.clone(),
+                            tu.provider_id.clone(),
+                            assistant_id,
+                        );
                     }
 
                     pumped_from_fallback
@@ -2880,7 +2939,8 @@ impl ConversationOrchestrator {
             self.emit_raw_utilization_if_changed().await;
 
             // 4. Assemble + append the assistant message.
-            let assistant_id = MessageId::new();
+            // `assistant_id` was pre-allocated before the stream (mid-stream
+            // dispatch hands it to the executor as each tool registers).
             let mut blocks: Vec<ContentBlock> = pumped.assistant_blocks.clone();
             for t in &pumped.tool_uses {
                 blocks.push(ContentBlock::ToolUse {
@@ -2926,28 +2986,14 @@ impl ConversationOrchestrator {
             //    the old single-batched-user-message shape and matching the TS
             //    `sessionStorage` `sourceToolAssistantUUID → parentUuid` mapping.
             if !pumped.tool_uses.is_empty() {
-                // DEFERRED-3: hand the executor the turn's user-interrupt token (if
-                // any) so it can reject in-flight/queued Cancel-behavior tools with
-                // the REJECT_MESSAGE when the user interrupts; `None` → identical to
-                // before (no user-interrupt machinery engaged).
-                let mut exec = match &user_cancel {
-                    Some(token) => {
-                        crate::streaming_executor::StreamingToolExecutor::new_with_user_cancel(
-                            self,
-                            token.clone(),
-                        )
-                    }
-                    None => crate::streaming_executor::StreamingToolExecutor::new(self),
-                };
-                for tu in &pumped.tool_uses {
-                    exec.add_tool(
-                        tu.id.clone(),
-                        tu.name.clone(),
-                        tu.input.clone(),
-                        tu.provider_id.clone(),
-                        assistant_id,
-                    );
-                }
+                // The executor (`exec`) was created BEFORE the stream and its
+                // tools were registered + dispatched MID-STREAM by
+                // `pump_stream_with_executor` (claude-code `query.ts:837-844`);
+                // on the non-streaming 529-fallback path it was rebuilt above and
+                // its tools added from the fallback response. Here we only DRIVE
+                // it to completion + persist — `add_tool` no longer happens
+                // post-stream on the normal path.
+                //
                 // Drive to completion, persisting each result IN RECEIVED ORDER
                 // as its own user message parented to the originating assistant.
                 let mut all_modifiers: Vec<tool_api::ContextModifier> = Vec::new();

@@ -1084,6 +1084,88 @@ pub(crate) async fn dispatch_tool_uses_tracked(
     for (tool_use_id, name, input, provider_id) in tool_uses {
         orch.output.emit_tool_call(tool_use_id, name, input).await;
 
+        // claude-code order (`toolExecution.ts` runToolUse ~401 +
+        // checkPermissionsAndCallTool ~683): the unknown-tool check and the
+        // `validateInput` gate run at the TOP of `runToolUse` — BEFORE the
+        // PreToolUse hooks (~800) and the permission gate. We mirror that here,
+        // resolving the tool handle + synthesizing the per-call context first,
+        // then running `validate_input`, and only after both clear do the
+        // PreToolUse hook + permission gate run below.
+
+        // Unknown-tool arm (claude-code `toolExecution.ts:401`). Runs BEFORE
+        // any hook, so there is no pre-hook context to fold — emit the raw
+        // wrapped literal verbatim (claude-code's unknown-tool has no hook
+        // context).
+        let Some(tool_handle) = orch.tools.find_by_name(name) else {
+            let result_block = ContentBlock::ToolResult {
+                tool_use_id: *tool_use_id,
+                content: format!(
+                    "<tool_use_error>Error: No such tool available: {name}</tool_use_error>"
+                ),
+                is_error: true,
+                provider_tool_use_id: provider_id.clone(),
+            };
+            orch.output
+                .emit_tool_result(
+                    tool_use_id,
+                    name,
+                    &serde_json::json!({ "error": format!("tool not found: {name}") }),
+                )
+                .await;
+            results.push(result_block);
+            continue;
+        };
+
+        // Synthesize a minimal ToolUseContext — needed by the validate_input
+        // gate below and reused by the eventual `tool_handle.call()`.
+        let messages = {
+            let s = orch.session.lock().await;
+            s.history.clone()
+        };
+        let ctx = ToolUseContext {
+            options: ToolUseOptions {
+                debug: false,
+                verbose: false,
+                main_loop_model: orch.config.model.clone(),
+                max_budget_nano_usd: None,
+                mcp_clients: Vec::new(),
+                is_non_interactive_session: true,
+                custom_system_prompt: orch.config.system_prompt_override.clone(),
+                append_system_prompt: None,
+            },
+            messages,
+            tool_use_id: Some(*tool_use_id),
+            agent_id: None,
+            content_replacement_state: None,
+            session: Some(orch.session.clone()),
+            subagent_registry: Some(orch.tools.clone()),
+        };
+
+        // validate_input gate (claude-code `toolExecution.ts:683-723`): a
+        // `validateInput` failure wraps the message in `<tool_use_error>` and
+        // short-circuits. Runs on the RAW `input` (pre-hook), BEFORE the
+        // PreToolUse hooks/permission (claude-code order), so there is no
+        // pre-hook context to fold.
+        if let Err(tool_api::ValidationError(msg)) =
+            tool_handle.validate_input(input, &ctx).await
+        {
+            let result_block = ContentBlock::ToolResult {
+                tool_use_id: *tool_use_id,
+                content: format!("<tool_use_error>{msg}</tool_use_error>"),
+                is_error: true,
+                provider_tool_use_id: provider_id.clone(),
+            };
+            orch.output
+                .emit_tool_result(
+                    tool_use_id,
+                    name,
+                    &serde_json::json!({ "error": msg.clone() }),
+                )
+                .await;
+            results.push(result_block);
+            continue;
+        }
+
         // M5-06 Task 14: PreToolUse hook chain. Build the event + context,
         // call the executor, and either Block (turn the response into an
         // error ToolResult), apply modified_input, or continue.
@@ -1268,49 +1350,6 @@ pub(crate) async fn dispatch_tool_uses_tracked(
                 continue;
             }
         }
-
-        // Dispatch through ToolRegistry.
-        let Some(tool_handle) = orch.tools.find_by_name(name) else {
-            let result_block = ContentBlock::ToolResult {
-                tool_use_id: *tool_use_id,
-                content: fold_pre_context(format!("<tool_use_error>Error: No such tool available: {name}</tool_use_error>")),
-                is_error: true,
-                provider_tool_use_id: provider_id.clone(),
-            };
-            orch.output
-                .emit_tool_result(
-                    tool_use_id,
-                    name,
-                    &serde_json::json!({ "error": format!("tool not found: {name}") }),
-                )
-                .await;
-            results.push(result_block);
-            continue;
-        };
-
-        // Synthesize a minimal ToolUseContext.
-        let messages = {
-            let s = orch.session.lock().await;
-            s.history.clone()
-        };
-        let ctx = ToolUseContext {
-            options: ToolUseOptions {
-                debug: false,
-                verbose: false,
-                main_loop_model: orch.config.model.clone(),
-                max_budget_nano_usd: None,
-                mcp_clients: Vec::new(),
-                is_non_interactive_session: true,
-                custom_system_prompt: orch.config.system_prompt_override.clone(),
-                append_system_prompt: None,
-            },
-            messages,
-            tool_use_id: Some(*tool_use_id),
-            agent_id: None,
-            content_replacement_state: None,
-            session: Some(orch.session.clone()),
-            subagent_registry: Some(orch.tools.clone()),
-        };
 
         // SubagentStart hook (parity with claude-code `executeSubagentStartHooks`,
         // `utils/hooks.ts:3932-3952`, fired from `runAgent.ts:532` just before a
@@ -3302,6 +3341,185 @@ mod pre_tool_hook_tests {
         assert!(
             !content.contains("<tool_use_error>"),
             "tool-execution error must NOT be wrapped in <tool_use_error>, got: {content:?}"
+        );
+    }
+
+    /// A registered tool whose `validate_input` ALWAYS fails with a fixed
+    /// message. Drives the new pre-execution `validate_input` gate
+    /// (claude-code `toolExecution.ts:683-723`, which wraps a `validateInput`
+    /// failure in `<tool_use_error>${message}</tool_use_error>`). Its `call`
+    /// panics: a passing validate gate would (incorrectly) reach `call`, so the
+    /// panic surfaces any regression that lets a validation failure through.
+    struct ValidatingFailTool;
+    #[async_trait]
+    impl Tool for ValidatingFailTool {
+        fn name(&self) -> &str {
+            "ValidatingFail"
+        }
+        fn input_schema(&self) -> &serde_json::Value {
+            static SCHEMA: once_cell::sync::Lazy<serde_json::Value> =
+                once_cell::sync::Lazy::new(|| json!({ "type": "object", "properties": {} }));
+            &SCHEMA
+        }
+        fn is_enabled(&self, _ctx: &ToolStaticContext) -> bool {
+            true
+        }
+        fn max_result_size_chars(&self) -> usize {
+            1024 * 1024
+        }
+        fn is_concurrency_safe(&self, _input: &serde_json::Value) -> bool {
+            true
+        }
+        fn is_read_only(&self, _input: &serde_json::Value) -> bool {
+            true
+        }
+        async fn validate_input(
+            &self,
+            _input: &serde_json::Value,
+            _ctx: &ToolUseContext,
+        ) -> Result<(), ValidationError> {
+            Err(ValidationError("bad path".into()))
+        }
+        async fn check_permissions(
+            &self,
+            _input: &serde_json::Value,
+            _ctx: &ToolUseContext,
+        ) -> permission::PermissionResult {
+            permission::PermissionResult::Allow {
+                reason: permission::PermissionDecisionReason::Other {
+                    reason: "test".into(),
+                },
+                updated_input: None,
+                update_destination: None,
+                metadata: permission::result::PermissionMetadata::default(),
+            }
+        }
+        async fn description(
+            &self,
+            _input: &serde_json::Value,
+            _opts: &DescriptionOptions,
+        ) -> String {
+            "always-invalid".into()
+        }
+        async fn prompt(&self, _opts: &PromptOptions) -> String {
+            String::new()
+        }
+        async fn call(
+            &self,
+            _input: serde_json::Value,
+            _ctx: ToolUseContext,
+            _tx: ToolProgressSender,
+        ) -> Result<ToolCallResult, ToolError> {
+            panic!("validate_input gate must short-circuit before call()");
+        }
+    }
+
+    /// `PreToolUse` handler that flips a shared flag the instant it fires, so a
+    /// test can assert whether the hook ran. Returns the default (no-op)
+    /// response otherwise.
+    struct SpyPreHook {
+        fired: Arc<std::sync::atomic::AtomicBool>,
+    }
+    #[async_trait]
+    impl BuiltinHookHandler for SpyPreHook {
+        async fn handle(&self, _event: &HookEvent, _ctx: &HookContext) -> HookResult {
+            self.fired.store(true, std::sync::atomic::Ordering::SeqCst);
+            HookResult {
+                outcome: HookOutcome::Success,
+                stdout: String::new(),
+                stderr: String::new(),
+                exit_code: Some(0),
+                response: Some(HookResponse::default()),
+            }
+        }
+        fn id(&self) -> &str {
+            "spy-pre"
+        }
+    }
+
+    /// Build a `HookExecutorImpl` with a single `PreToolUse` hook that sets
+    /// `fired` when invoked.
+    fn spy_pre_hook_executor(fired: Arc<std::sync::atomic::AtomicBool>) -> Arc<HookExecutorImpl> {
+        let hook = HookDefinition {
+            id: HookId::new(),
+            name: "spy-pre".into(),
+            events: vec![HookEventType::PreToolUse],
+            if_condition: None,
+            executor: DefHookExecutor::Builtin {
+                handler_id: "spy-pre".into(),
+            },
+            source: HookSource::Session,
+            blocking: true,
+            timeout: None,
+            priority: 0,
+            once: false,
+            status_message: None,
+        };
+        let mut registry = HookRegistry::new();
+        registry.register(hook);
+        let reg = Arc::new(tokio::sync::RwLock::new(registry));
+        let mut exec = HookExecutorImpl::new(reg, Arc::new(UnusedHttp), Arc::new(UnusedRuntime));
+        exec.register_builtin(Arc::new(SpyPreHook { fired }));
+        Arc::new(exec)
+    }
+
+    /// VALIDATE-INPUT GATE (parity): when a registered tool's `validate_input`
+    /// returns `Err(ValidationError(msg))`, `dispatch_tool_uses_tracked` must
+    /// return a `ToolResult` whose content is `<tool_use_error>${msg}</tool_use_error>`
+    /// with `is_error = true`, and the tool's `call` must NOT run — matching
+    /// claude-code `toolExecution.ts:683-723`.
+    #[tokio::test]
+    async fn validate_input_failure_returns_tool_use_error_wrapper() {
+        let mut registry = ToolRegistry::new();
+        registry.register_builtin(Arc::new(ValidatingFailTool) as Arc<dyn Tool>);
+        let orch = ConversationOrchestrator::new(
+            OrchestratorConfig::default(),
+            Arc::new(MockApiClient::new(vec![])),
+            Arc::new(registry),
+            pre_hook_executor(HookResponse::default()),
+            Arc::new(crate::test_support::NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            PathBuf::from("/tmp"),
+        );
+        let uses = vec![(ToolUseId::new(), "ValidatingFail".to_string(), json!({}), None)];
+        let (results, _, _, _) = dispatch_tool_uses_tracked(&orch, &uses).await.unwrap();
+        assert_eq!(results.len(), 1);
+        let (content, is_error) = tool_result(&results[0]);
+        assert!(is_error, "validate_input failure must set is_error=true");
+        assert_eq!(
+            content, "<tool_use_error>bad path</tool_use_error>",
+            "content must match claude-code <tool_use_error>${{message}}</tool_use_error>"
+        );
+    }
+
+    /// VALIDATE-INPUT runs BEFORE the PreToolUse hook (claude-code validates at
+    /// `toolExecution.ts:683` BEFORE `runPreToolUseHooks` at ~800). A tool whose
+    /// `validate_input` fails must short-circuit so the registered PreToolUse
+    /// hook NEVER fires.
+    #[tokio::test]
+    async fn validate_input_gate_runs_before_pre_tool_use_hook() {
+        let fired = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let mut registry = ToolRegistry::new();
+        registry.register_builtin(Arc::new(ValidatingFailTool) as Arc<dyn Tool>);
+        let orch = ConversationOrchestrator::new(
+            OrchestratorConfig::default(),
+            Arc::new(MockApiClient::new(vec![])),
+            Arc::new(registry),
+            spy_pre_hook_executor(fired.clone()),
+            Arc::new(crate::test_support::NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            PathBuf::from("/tmp"),
+        );
+        let uses = vec![(ToolUseId::new(), "ValidatingFail".to_string(), json!({}), None)];
+        let (results, _, _, _) = dispatch_tool_uses_tracked(&orch, &uses).await.unwrap();
+        let (content, is_error) = tool_result(&results[0]);
+        assert!(is_error);
+        assert_eq!(content, "<tool_use_error>bad path</tool_use_error>");
+        assert!(
+            !fired.load(std::sync::atomic::Ordering::SeqCst),
+            "validate_input gate must run BEFORE the PreToolUse hook; the hook must not fire"
         );
     }
 }

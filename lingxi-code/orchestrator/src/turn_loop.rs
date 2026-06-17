@@ -1037,6 +1037,21 @@ pub(crate) async fn dispatch_tool_uses(
     Ok(dispatch_tool_uses_tracked(orch, tool_uses).await?.0)
 }
 
+/// Wrap a tool-failure message in claude-code's `<tool_use_error>` envelope.
+///
+/// Applied to genuine tool-execution errors (`Err(ToolError)` from
+/// `tool_handle.call()`). Mirrors claude-code's input-validation and unknown-tool
+/// paths which all use the same XML tag:
+/// `<tool_use_error>Error: …</tool_use_error>`
+///
+/// Fold/wrap ORDER: the envelope wraps just the error message; any pre-hook
+/// `additionalContext` is appended OUTSIDE (after) the closing tag by
+/// `fold_pre_context(tool_use_error("…"))`. This matches claude-code's other
+/// `<tool_use_error>` sites where the tag contains only the error text.
+fn tool_use_error(msg: &str) -> String {
+    format!("<tool_use_error>{msg}</tool_use_error>")
+}
+
 /// HOOK.2 twin of [`dispatch_tool_uses`] that ALSO returns whether any
 /// `PreToolUse` hook in this batch requested `continue:false`
 /// (preventContinuation). The batched turn loop
@@ -1382,7 +1397,7 @@ pub(crate) async fn dispatch_tool_uses_tracked(
                 (text, false, result.data)
             }
             Err(err) => {
-                let text = format!("Error: {err}");
+                let text = tool_use_error(&format!("Error: {err}"));
                 (text, true, serde_json::json!({ "error": format!("{err}") }))
             }
         };
@@ -3180,6 +3195,124 @@ mod pre_tool_hook_tests {
             content,
             "<tool_use_error>Error: No such tool available: NoSuchTool</tool_use_error>",
             "content must match claude-code format byte-for-byte"
+        );
+    }
+
+    /// A tool whose `call()` always returns `Err(ToolError::Internal("kaboom"))`.
+    /// Used to drive the tool-execution-error path in `dispatch_tool_uses_tracked`.
+    struct AlwaysFailTool;
+    #[async_trait]
+    impl Tool for AlwaysFailTool {
+        fn name(&self) -> &str {
+            "AlwaysFail"
+        }
+        fn input_schema(&self) -> &serde_json::Value {
+            static SCHEMA: once_cell::sync::Lazy<serde_json::Value> =
+                once_cell::sync::Lazy::new(|| json!({ "type": "object", "properties": {} }));
+            &SCHEMA
+        }
+        fn is_enabled(&self, _ctx: &ToolStaticContext) -> bool {
+            true
+        }
+        fn max_result_size_chars(&self) -> usize {
+            1024 * 1024
+        }
+        fn is_concurrency_safe(&self, _input: &serde_json::Value) -> bool {
+            true
+        }
+        fn is_read_only(&self, _input: &serde_json::Value) -> bool {
+            true
+        }
+        async fn validate_input(
+            &self,
+            _input: &serde_json::Value,
+            _ctx: &ToolUseContext,
+        ) -> Result<(), ValidationError> {
+            Ok(())
+        }
+        async fn check_permissions(
+            &self,
+            _input: &serde_json::Value,
+            _ctx: &ToolUseContext,
+        ) -> permission::PermissionResult {
+            permission::PermissionResult::Allow {
+                reason: permission::PermissionDecisionReason::Other {
+                    reason: "test".into(),
+                },
+                updated_input: None,
+                update_destination: None,
+                metadata: permission::result::PermissionMetadata::default(),
+            }
+        }
+        async fn description(
+            &self,
+            _input: &serde_json::Value,
+            _opts: &DescriptionOptions,
+        ) -> String {
+            "always fails".into()
+        }
+        async fn prompt(&self, _opts: &PromptOptions) -> String {
+            String::new()
+        }
+        async fn call(
+            &self,
+            _input: serde_json::Value,
+            _ctx: ToolUseContext,
+            _tx: ToolProgressSender,
+        ) -> Result<ToolCallResult, ToolError> {
+            Err(ToolError::Internal("kaboom".into()))
+        }
+    }
+
+    /// TOOL-EXEC-ERROR: when a registered tool's `call()` returns `Err(ToolError)`,
+    /// `dispatch_tool_uses_tracked` must wrap the error message in
+    /// `<tool_use_error>…</tool_use_error>` (claude-code parity — the tool-execution
+    /// error envelope mirrors `toolExecution.ts`'s `<tool_use_error>` wrapping).
+    /// The content must start with `<tool_use_error>`, end with `</tool_use_error>`,
+    /// contain the raw error text, and have `is_error == true`.
+    ///
+    /// Fold/wrap ORDER (claude-code reference): in the unknown-tool and validation-
+    /// error paths, claude-code wraps the message in `<tool_use_error>` FIRST and
+    /// then any pre-hook `additionalContext` is appended OUTSIDE the envelope.
+    /// LingXi mirrors this: `fold_pre_context(tool_use_error("Error: …"))` so
+    /// pre-hook messages are appended after `</tool_use_error>`, not inside it.
+    #[tokio::test]
+    async fn tool_execution_error_returns_tool_use_error_wrapper() {
+        let mut registry = ToolRegistry::new();
+        registry.register_builtin(Arc::new(AlwaysFailTool) as Arc<dyn Tool>);
+        let orch = ConversationOrchestrator::new(
+            OrchestratorConfig::default(),
+            Arc::new(MockApiClient::new(vec![])),
+            Arc::new(registry),
+            pre_hook_executor(HookResponse::default()),
+            Arc::new(crate::test_support::NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            PathBuf::from("/tmp"),
+        );
+        let uses = vec![(ToolUseId::new(), "AlwaysFail".to_string(), json!({}), None)];
+        let (results, _, _, _) = dispatch_tool_uses_tracked(&orch, &uses).await.unwrap();
+        assert_eq!(results.len(), 1);
+        let (content, is_error) = tool_result(&results[0]);
+        assert!(is_error, "a failing tool must set is_error=true");
+        assert!(
+            content.starts_with("<tool_use_error>"),
+            "content must start with <tool_use_error>, got: {content:?}"
+        );
+        assert!(
+            content.ends_with("</tool_use_error>"),
+            "content must end with </tool_use_error>, got: {content:?}"
+        );
+        assert!(
+            content.contains("kaboom"),
+            "content must contain the error text, got: {content:?}"
+        );
+        // Verify the exact format matches claude-code byte-for-byte:
+        // `<tool_use_error>Error: internal: kaboom</tool_use_error>`
+        assert_eq!(
+            content,
+            "<tool_use_error>Error: internal: kaboom</tool_use_error>",
+            "content must match claude-code tool_use_error format"
         );
     }
 }

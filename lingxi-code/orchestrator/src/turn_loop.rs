@@ -1116,6 +1116,35 @@ pub(crate) async fn dispatch_tool_uses_tracked(
             continue;
         };
 
+        // JSON-schema input gate (claude-code `toolExecution.ts:615`
+        // `inputSchema.safeParse`): runs on the RAW `input` (pre-hook), AFTER the
+        // unknown-tool arm and BEFORE the `validate_input` gate — the exact order
+        // of `checkPermissionsAndCallTool` (safeParse ~615 precedes validateInput
+        // ~683). BEHAVIORAL parity only: the `<tool_use_error>InputValidationError:
+        // …>` wrapper matches, but the detail bytes intentionally differ from
+        // claude-code's Zod `formatZodValidationError` output (unportable). A
+        // malformed tool schema is treated as PASS (logged) — see
+        // [`crate::schema_validation::validate_tool_input_schema`].
+        if let Err(detail) =
+            crate::schema_validation::validate_tool_input_schema(tool_handle.input_schema(), input)
+        {
+            let result_block = ContentBlock::ToolResult {
+                tool_use_id: *tool_use_id,
+                content: format!("<tool_use_error>InputValidationError: {detail}</tool_use_error>"),
+                is_error: true,
+                provider_tool_use_id: provider_id.clone(),
+            };
+            orch.output
+                .emit_tool_result(
+                    tool_use_id,
+                    name,
+                    &serde_json::json!({ "error": format!("InputValidationError: {detail}") }),
+                )
+                .await;
+            results.push(result_block);
+            continue;
+        }
+
         // Synthesize a minimal ToolUseContext — needed by the validate_input
         // gate below and reused by the eventual `tool_handle.call()`.
         let messages = {
@@ -1913,6 +1942,160 @@ mod read_file_state_tests {
     async fn dispatch_one(orch: &ConversationOrchestrator, name: &str, input: serde_json::Value) {
         let uses = vec![(ToolUseId::new(), name.to_string(), input, None)];
         dispatch_tool_uses(orch, &uses).await.expect("dispatch");
+    }
+
+    // ----- JSON-schema input-validation gate -------------------------------
+    // (claude-code `toolExecution.ts:615` `inputSchema.safeParse`). BEHAVIORAL
+    // parity only — the message bytes intentionally differ from claude-code's
+    // Zod `formatZodValidationError` output (unportable).
+
+    fn schema_gate_tool_result(block: &protocol::ContentBlock) -> (&str, bool) {
+        match block {
+            protocol::ContentBlock::ToolResult {
+                content, is_error, ..
+            } => (content.as_str(), *is_error),
+            other => panic!("expected ToolResult, got {other:?}"),
+        }
+    }
+
+    /// A tool whose `input_schema()` requires a string `path`, with a `call()`
+    /// that records (via an `AtomicBool`) whether it was reached. Lets the
+    /// pass-through test assert the gate did NOT short-circuit a valid input.
+    struct SchemaCallTrackerTool {
+        called: Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    #[async_trait]
+    impl Tool for SchemaCallTrackerTool {
+        fn name(&self) -> &str {
+            "Schemic"
+        }
+        fn input_schema(&self) -> &serde_json::Value {
+            static SCHEMA: once_cell::sync::Lazy<serde_json::Value> =
+                once_cell::sync::Lazy::new(|| {
+                    json!({
+                        "type": "object",
+                        "properties": { "path": { "type": "string" } },
+                        "required": ["path"],
+                    })
+                });
+            &SCHEMA
+        }
+        fn is_enabled(&self, _ctx: &ToolStaticContext) -> bool {
+            true
+        }
+        fn max_result_size_chars(&self) -> usize {
+            1024 * 1024
+        }
+        fn is_concurrency_safe(&self, _input: &serde_json::Value) -> bool {
+            true
+        }
+        fn is_read_only(&self, _input: &serde_json::Value) -> bool {
+            true
+        }
+        async fn validate_input(
+            &self,
+            _input: &serde_json::Value,
+            _ctx: &ToolUseContext,
+        ) -> Result<(), ValidationError> {
+            Ok(())
+        }
+        async fn check_permissions(
+            &self,
+            _input: &serde_json::Value,
+            _ctx: &ToolUseContext,
+        ) -> permission::PermissionResult {
+            permission::PermissionResult::Allow {
+                reason: permission::PermissionDecisionReason::Other {
+                    reason: "test".into(),
+                },
+                updated_input: None,
+                update_destination: None,
+                metadata: permission::result::PermissionMetadata::default(),
+            }
+        }
+        async fn description(
+            &self,
+            _input: &serde_json::Value,
+            _opts: &DescriptionOptions,
+        ) -> String {
+            "schema tracker".into()
+        }
+        async fn prompt(&self, _opts: &PromptOptions) -> String {
+            String::new()
+        }
+        async fn call(
+            &self,
+            _input: serde_json::Value,
+            _ctx: ToolUseContext,
+            _tx: ToolProgressSender,
+        ) -> Result<ToolCallResult, ToolError> {
+            self.called
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            Ok(ToolCallResult {
+                data: json!({ "ok": true }),
+                new_messages: vec![],
+                context_modifier: None,
+                mcp_meta: None,
+            })
+        }
+    }
+
+    /// Missing a required field → the schema gate short-circuits with an
+    /// `InputValidationError` `<tool_use_error>` block, and `call()` is never
+    /// reached.
+    #[tokio::test]
+    async fn schema_gate_rejects_missing_required_field() {
+        let called = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let orch = orch_with_tools(
+            PathBuf::from("/tmp"),
+            vec![Arc::new(SchemaCallTrackerTool {
+                called: called.clone(),
+            })],
+        );
+        let uses = vec![(ToolUseId::new(), "Schemic".to_string(), json!({}), None)];
+        let results = dispatch_tool_uses(&orch, &uses).await.expect("dispatch");
+        assert_eq!(results.len(), 1);
+        let (content, is_error) = schema_gate_tool_result(&results[0]);
+        assert!(is_error, "missing-required input must be an error");
+        assert!(
+            content.starts_with("<tool_use_error>InputValidationError:"),
+            "expected InputValidationError wrapper, got: {content}"
+        );
+        assert!(
+            !called.load(std::sync::atomic::Ordering::SeqCst),
+            "call() must NOT run when the schema gate rejects the input"
+        );
+    }
+
+    /// A schema-valid input passes the gate and reaches `call()` without
+    /// producing an `InputValidationError`.
+    #[tokio::test]
+    async fn schema_gate_passes_valid_input_through_to_call() {
+        let called = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let orch = orch_with_tools(
+            PathBuf::from("/tmp"),
+            vec![Arc::new(SchemaCallTrackerTool {
+                called: called.clone(),
+            })],
+        );
+        let uses = vec![(
+            ToolUseId::new(),
+            "Schemic".to_string(),
+            json!({ "path": "/x" }),
+            None,
+        )];
+        let results = dispatch_tool_uses(&orch, &uses).await.expect("dispatch");
+        assert_eq!(results.len(), 1);
+        let (content, _is_error) = schema_gate_tool_result(&results[0]);
+        assert!(
+            !content.contains("InputValidationError"),
+            "valid input must not trip the schema gate, got: {content}"
+        );
+        assert!(
+            called.load(std::sync::atomic::Ordering::SeqCst),
+            "call() must run for schema-valid input"
+        );
     }
 
     // ----- build_wire_tools (registry -> wire `tools` array) -----

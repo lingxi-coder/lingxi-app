@@ -76,6 +76,10 @@ fun RootScreen(
     // passed down so the voice-orb overlay can label itself + gate its text input.
     assistantName: String = "灵犀",
     inputDialog: Boolean = true,
+    // Bumped (from Settings → 重新连接引擎) to REBUILD the engine source + chat VM
+    // after the user writes a new API key — so a key entered live takes effect
+    // without an app restart. Re-keys the `remember`/`viewModel` below.
+    reconnectToken: Int = 0,
     viewModel: ChatViewModel? = null,
 ) {
     val context = LocalContext.current
@@ -86,10 +90,15 @@ fun RootScreen(
     // unavailable (JVM host / missing cdylib / PlatformUnavailable). This mirrors
     // the iOS ConversationSourceFactory.make() guard. The previous build-then-drop
     // `buildVoiceEngine` val is gone — the source is now the sole handle owner.
-    val source: ConversationSource = remember(context) {
+    // Keyed on `reconnectToken` so writing a new API key in settings rebuilds the
+    // engine (re-reads SecureKeyStore) instead of stranding the mock until restart.
+    val source: ConversationSource = remember(context, reconnectToken) {
         EngineConversationSource.create(context) ?: MockConversationSource()
     }
     val chatViewModel: ChatViewModel = viewModel ?: viewModel(
+        // Re-key the VM on reconnect so it rebinds to the freshly-built source
+        // (a new engine handle) rather than the stale one it was created against.
+        key = "chat-$reconnectToken",
         // Pass a SavedStateHandle so the transcript / draft / active session
         // survive process death (low-memory kill while backgrounded). The handle
         // is created from the CreationExtras the factory receives, scoped to this

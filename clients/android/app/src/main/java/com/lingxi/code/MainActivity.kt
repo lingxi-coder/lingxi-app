@@ -18,6 +18,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -101,6 +102,10 @@ class MainActivity : ComponentActivity() {
             // conversation (the Android analog of the iOS settings sheet); the
             // drawer's account row opens it, system-back / close dismisses it.
             var settingsOpen by remember { mutableStateOf(false) }
+            // Bumped when the user taps 重新连接引擎 after entering an API key — re-keys
+            // RootScreen's engine source + chat VM so the new key takes effect with
+            // no app restart.
+            var engineReconnect by remember { mutableIntStateOf(0) }
 
             LingXiTheme(darkTheme = darkTheme, accentId = prefs.accentId) {
                 Box(Modifier.fillMaxSize()) {
@@ -114,6 +119,7 @@ class MainActivity : ComponentActivity() {
                         onOpenSettings = { settingsOpen = true },
                         assistantName = prefs.assistantName,
                         inputDialog = prefs.inputDialog,
+                        reconnectToken = engineReconnect,
                     )
                     AnimatedVisibility(
                         visible = settingsOpen,
@@ -129,6 +135,12 @@ class MainActivity : ComponentActivity() {
                             // and drop back to the conversation behind it.
                             onReplayOnboarding = {
                                 scope.launch { store.setSetupDone(false) }
+                                settingsOpen = false
+                            },
+                            // 重新连接引擎: rebuild the engine against the just-saved key
+                            // and drop back to the (now-real) conversation.
+                            onReconnectEngine = {
+                                engineReconnect += 1
                                 settingsOpen = false
                             },
                         )

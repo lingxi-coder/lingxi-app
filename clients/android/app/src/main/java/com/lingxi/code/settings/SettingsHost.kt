@@ -72,6 +72,7 @@ fun SettingsHost(
     store: SettingsStore = viewModel(),
     onClose: () -> Unit = {},
     onReplayOnboarding: () -> Unit = {},
+    onReconnectEngine: () -> Unit = {},
 ) {
     val t = LingXiTheme.palette
     val state by store.state.collectAsState()
@@ -142,6 +143,7 @@ fun SettingsHost(
                         store = store,
                         onEdit = { id -> navController.navigate(SettingsRoutes.providerEdit(kind.name, id)) },
                         onAdd = { navController.navigate(SettingsRoutes.providerPicker(kind.name)) },
+                        onReconnectEngine = onReconnectEngine,
                     )
                 }
                 page(SettingsRoutes.PROVIDER_PICKER) {

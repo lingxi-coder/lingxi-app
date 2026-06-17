@@ -88,6 +88,7 @@ fun ProviderListPage(
     store: SettingsStore,
     onEdit: (id: String) -> Unit,
     onAdd: () -> Unit,
+    onReconnectEngine: () -> Unit = {},
 ) {
     val t = LingXiTheme.palette
     val arr = state.providers(kind)
@@ -100,7 +101,7 @@ fun ProviderListPage(
         // key the in-process engine authenticates with, distinct from the mock
         // per-provider rows below.
         if (kind == ProviderKind.Llm) {
-            EngineKeySection()
+            EngineKeySection(onReconnectEngine = onReconnectEngine)
         }
 
         SettingsSection(label = "已添加 · ${arr.size}") {
@@ -397,7 +398,7 @@ fun ProviderEditPage(
  * env / mock path.
  */
 @Composable
-fun EngineKeySection() {
+fun EngineKeySection(onReconnectEngine: () -> Unit = {}) {
     val context = LocalContext.current
     val store = remember(context) { SecureKeyStore.create(context) }
 
@@ -429,6 +430,28 @@ fun EngineKeySection() {
             placeholder = "https://api.anthropic.com",
         )
         FieldHint("留空使用官方地址 · 可填代理 / 镜像 / 兼容网关")
+
+        // The engine is built once at launch; writing a key here takes effect only
+        // after a rebuild. This reconnects the in-process engine against the
+        // just-saved key — no app restart — and drops back to the (now real)
+        // conversation. A no-op when no key is set (the source stays mock).
+        val t = LingXiTheme.palette
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(top = 14.dp)
+                .clip(RoundedCornerShape(12.dp))
+                .background(t.accent)
+                .clickable { onReconnectEngine() }
+                .padding(vertical = 12.dp),
+            contentAlignment = Alignment.Center,
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                LXIcon(LXIconName.Plug, size = 16.dp, color = Color.White, stroke = 2f)
+                Text("重新连接引擎", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+            }
+        }
+        FieldHint("保存密钥后点此重新连接 · 无需重启应用")
     }
 }
 

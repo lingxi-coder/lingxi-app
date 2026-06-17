@@ -421,7 +421,7 @@ fn resume_by_id_error(
 mod tests {
     //! Loader-fixture coverage for the `--resume` disk→[`SessionMetadata`]→
     //! row production path (`load_resume_rows_from`). Drives the *real* CLI
-    //! wiring — `platform_posix_minimal::PosixFileSystem` + the M5-08
+    //! wiring — `platform_posix::PosixFileSystem` + the M5-08
     //! `list_recent_sessions` — over a `tempfile` fixture, with no env or
     //! process-cwd reads so the test stays deterministic and parallel-safe.
 

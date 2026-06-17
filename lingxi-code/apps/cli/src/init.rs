@@ -9,7 +9,7 @@
 //!
 //! The wiring that now lives in `engine-desktop` (`apps/engine-desktop/src/lib.rs`):
 //!
-//! 1. `platform-posix-minimal` provides `HttpTransport` + `Clock` +
+//! 1. `platform-posix` provides `HttpTransport` + `Clock` +
 //!    `SecureStorage`.
 //! 2. The llm-client transport bridge is built from `cfg.api_base`
 //!    (default `https://api.anthropic.com`) + `cfg.api_key`.

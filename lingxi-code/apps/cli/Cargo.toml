@@ -47,8 +47,6 @@ tasks = { path = "../../tasks" }
 telemetry = { path = "../../telemetry" }
 # config migrations at startup (runMigrations port)
 migrations = { path = "../../migrations" }
-# Session resume loader (`run.rs`) constructs a `PosixFileSystem` directly.
-platform-posix-minimal = { path = "../../platforms/posix-minimal" }
 # Real posix primitives: `has_internet` HTTP probe (bypass_env.rs) + session-row
 # FileSystem (run.rs) bind the live `PosixHttp` / `PosixFileSystem`.
 platform-posix = { path = "../../platforms/posix" }

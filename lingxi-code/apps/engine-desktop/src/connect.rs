@@ -254,10 +254,11 @@ mod tests {
         Clock, HttpTransport, SecureStorage, SecureStorageBackend, SecureStorageError,
     };
 
-    /// In-memory `(service, account) -> data` store. The `platform-posix-minimal`
-    /// `PlainTextSecureStorage` is a non-persisting stub (returns
-    /// `BackendUnavailable`), so the roundtrip test needs a real store; this
-    /// mirrors the `MemStorage` double used by `secret`'s own credential tests.
+    /// In-memory `(service, account) -> data` store. The real
+    /// `platform_posix` secure storage backend is keychain/OS-backed and not
+    /// available in the test harness, so the roundtrip test needs a real
+    /// in-memory store; this mirrors the `MemStorage` double used by `secret`'s
+    /// own credential tests.
     #[derive(Default)]
     struct MemStorage {
         map: StdMutex<HashMap<(String, String), SecureStorageData>>,

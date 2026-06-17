@@ -47,7 +47,7 @@ use async_trait::async_trait;
 use client_adapter::test_support::MockSink;
 use client_adapter::AdapterOutputStream;
 use client_protocol::events::ClientEvent;
-use platform_posix_minimal::{PosixFileSystem, PosixRuntime};
+use platform_posix::{PosixFileSystem, PosixRuntime};
 use protocol::AgentId;
 use tasks::handlers::InProcessTeammateHandler;
 use tasks::output_manager::TaskOutputManager;

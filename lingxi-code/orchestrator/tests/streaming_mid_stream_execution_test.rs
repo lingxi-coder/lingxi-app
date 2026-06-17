@@ -6,13 +6,20 @@
 //! `query.ts:659/837-844`) instead of collecting all tool_uses and only
 //! starting them after `EndOfStream`.
 //!
-//! ## Why this is byte-equivalent
-//! The new behavior changes only WHEN a tool starts. To guard the bytes, the
-//! sibling `streaming_vs_batched_equivalence_test` and
-//! `streaming_tool_result_topology_test` assert the persisted history / JSONL
-//! ordering is unchanged. This test ONLY asserts the *timing* ordering, via a
-//! shared event log that interleaves a "tool-started" marker (pushed from the
-//! tool's `call`) against the stream's own text emits.
+//! ## Why this is byte-equivalent (scope: transcript / JSONL / API-request bytes)
+//! The new behavior changes only WHEN a tool starts executing; all PERSISTENCE
+//! stays post-stream (the mid-stream `drain_one` only RECORDS completions, never
+//! persists). The load-bearing byte guard for the tool path is
+//! `streaming_tool_result_topology_test` (it pins per-result user messages in
+//! received order, each parented to its tool_use line);
+//! `streaming_vs_batched_equivalence_test` is text-only (no tools) and does NOT
+//! exercise tool-result bytes. NOTE: the live display/SDK `OutputStream` event
+//! order DOES change — a fast tool's ToolCall/ToolResult now interleaves between
+//! stream text events — which is FAITHFUL to claude-code's mid-stream
+//! `yield result.message` (`query.ts:851-853`), not a regression; it is separate
+//! from the JSONL/history/request bytes. This test asserts exactly that *timing*
+//! interleave via a shared event log (a "tool-started" marker pushed from the
+//! tool's `call` against the stream's own text emits).
 
 use async_trait::async_trait;
 use orchestrator::test_support::{

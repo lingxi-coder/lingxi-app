@@ -68,6 +68,7 @@ pub mod repl;
 pub mod repl_loop;
 pub mod run;
 pub mod sigint;
+pub mod structured_output;
 
 use crate::argv::Argv;
 use clap::error::ErrorKind;

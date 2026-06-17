@@ -497,6 +497,39 @@ impl PendingPermission {
     }
 }
 
+/// (TUI-PERM) Open the permission dialog for `request`, attaching `resp_tx`
+/// (the oneshot back to the orchestrator's `TuiPermissionGate`; `None` for the
+/// legacy bridge variant which resolves elsewhere). Sets `started_at` so the
+/// resolved-telemetry `elapsed_ms` is non-zero, and resets the per-dialog
+/// `ToolUseConfirm` state. Fires the `permission_dialog_shown` event.
+pub fn open_permission_dialog(
+    st: &mut AppState,
+    request: PermissionRequest,
+    resp_tx: Option<oneshot::Sender<PermissionResponse>>,
+) {
+    st.pending_permission = Some(PendingPermission {
+        request,
+        worker: None,
+    });
+    st.pending_permission_resp_tx = resp_tx;
+    st.pending_permission_started_at = Some(Instant::now());
+    st.tool_use_dialog_state =
+        crate::components::permissions::tool_use_confirm::ToolUseConfirmState::default();
+    crate::telemetry::permission_dialog_shown("tool_use");
+}
+
+/// (TUI-PERM) If no dialog is active and the FIFO queue is non-empty, pop the
+/// front exchange and open it. No-op when a dialog is already active (one
+/// active dialog at a time) or the queue is empty.
+pub fn promote_next_permission(st: &mut AppState) {
+    if st.pending_permission.is_some() {
+        return;
+    }
+    if let Some(exchange) = st.permission_queue.pop_front() {
+        open_permission_dialog(st, exchange.request, Some(exchange.resp_tx));
+    }
+}
+
 /// Per-turn streaming state. Created on `TurnStarted`, dropped on
 /// `TurnEnded`. Currently carries only the start instant for debugging;
 /// M6-04 may add a tool-use map.
@@ -652,6 +685,13 @@ pub struct AppState {
     /// (M6-05) Instant the active dialog opened — used to compute
     /// `elapsed_ms` in the resolved-telemetry event.
     pub pending_permission_started_at: Option<Instant>,
+    /// (TUI-PERM) FIFO of permission exchanges received from the
+    /// `TuiPermissionGate` that have NOT yet been promoted into the single
+    /// active dialog slot. The pump pushes here; `promote_next_permission`
+    /// pops the front when `pending_permission` is free. Guarantees a second
+    /// concurrent `gate.check()` never overwrites the active dialog's
+    /// `resp_tx` (streaming dispatches tools concurrently).
+    pub permission_queue: std::collections::VecDeque<crate::permission_bridge::PermissionExchange>,
     /// (M6-05) Per-dialog state for the `ToolUseConfirm` dialog.
     pub tool_use_dialog_state:
         crate::components::permissions::tool_use_confirm::ToolUseConfirmState,
@@ -924,6 +964,7 @@ impl AppState {
             has_shown_overage_notification: false,
             pending_permission_resp_tx: None,
             pending_permission_started_at: None,
+            permission_queue: std::collections::VecDeque::new(),
             tool_use_dialog_state:
                 crate::components::permissions::tool_use_confirm::ToolUseConfirmState::default(),
             exit_plan_dialog_state:
@@ -1794,5 +1835,58 @@ mod tests {
         let s = AppState::default_for_tests();
         assert!(s.multiagent.tasks.is_empty());
         assert!(s.multiagent.workers.is_empty());
+    }
+
+    #[test]
+    fn open_permission_dialog_sets_started_at_and_active_slot() {
+        let mut st = AppState::new(StatusSnapshot::default());
+        let (tx, _rx) = oneshot::channel();
+        let req = permission::gate::PermissionRequest::ToolUseConfirm {
+            tool_name: "Write".to_string(),
+            tool_input: serde_json::json!({"file_path": "a.txt"}),
+            default_decision: permission::tool_default("Write"),
+        };
+        open_permission_dialog(&mut st, req, Some(tx));
+        assert!(st.pending_permission.is_some());
+        assert!(st.pending_permission_resp_tx.is_some());
+        assert!(
+            st.pending_permission_started_at.is_some(),
+            "started_at must be set for telemetry"
+        );
+    }
+
+    #[test]
+    fn promote_next_permission_is_fifo_and_respects_active_slot() {
+        use crate::permission_bridge::PermissionExchange;
+        let mut st = AppState::new(StatusSnapshot::default());
+        let mk = |tool: &str| {
+            let (tx, _rx) = oneshot::channel();
+            PermissionExchange {
+                request: permission::gate::PermissionRequest::ToolUseConfirm {
+                    tool_name: tool.to_string(),
+                    tool_input: serde_json::json!({}),
+                    default_decision: permission::tool_default(tool),
+                },
+                resp_tx: tx,
+            }
+        };
+        st.permission_queue.push_back(mk("Write"));
+        st.permission_queue.push_back(mk("Edit"));
+
+        // First promote opens "Write".
+        promote_next_permission(&mut st);
+        assert_eq!(st.pending_permission.as_ref().unwrap().tool(), "Write");
+        assert_eq!(st.permission_queue.len(), 1);
+
+        // A second promote is a NO-OP while a dialog is active.
+        promote_next_permission(&mut st);
+        assert_eq!(st.pending_permission.as_ref().unwrap().tool(), "Write");
+        assert_eq!(st.permission_queue.len(), 1);
+
+        // Clear the active slot, then promote opens "Edit".
+        st.pending_permission = None;
+        promote_next_permission(&mut st);
+        assert_eq!(st.pending_permission.as_ref().unwrap().tool(), "Edit");
+        assert!(st.permission_queue.is_empty());
     }
 }

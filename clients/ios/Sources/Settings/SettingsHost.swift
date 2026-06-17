@@ -28,6 +28,12 @@ struct SettingsHost: View {
     @EnvironmentObject private var app: AppState
     @Environment(\.theme) private var t
     @ObservedObject var store: SettingsStore
+    /// The conversation model — its `mcpServers` carry the engine's REAL MCP
+    /// listing (out-of-band). When populated we mirror it into the settings store
+    /// so the MCP page renders real servers; empty keeps the mock list.
+    @ObservedObject var convo: ConversationModel
+    /// Pull the real MCP listing from the engine (`RefreshListings(.mcp)`).
+    var onRefreshMcp: () -> Void = {}
     let onClose: () -> Void
 
     @State private var stack: [SettingsPage] = [.main]
@@ -47,6 +53,12 @@ struct SettingsHost: View {
             Color.black.opacity(0.5).ignoresSafeArea().onTapGesture { onClose() }
             sheet
                 .transition(.move(edge: .bottom))
+        }
+        // Pull the real MCP listing when the sheet opens; mirror it into the store
+        // (so the existing MCP page renders real servers) once it arrives.
+        .onAppear { onRefreshMcp() }
+        .onChange(of: convo.mcpServers) { _, servers in
+            if !servers.isEmpty { store.mcpServers = servers }
         }
     }
 

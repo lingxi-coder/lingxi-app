@@ -154,6 +154,10 @@ final class ConversationModel: ObservableObject {
     /// The engine session id currently driving the connection — set by
     /// `SessionStarted` / `SessionResumed`. Empty until the engine reports one.
     @Published var activeSessionId: String = ""
+    /// Real MCP servers from the engine (`McpServers` listing, lowered to the UI
+    /// `MCPServer` model). Empty ⇒ the settings page keeps its mock list. Refreshed
+    /// out-of-band via `refreshMcpServers()` when the MCP settings page opens.
+    @Published var mcpServers: [MCPServer] = []
     /// A transient, dim status line (tool activity / connection state). NOT used
     /// for errors anymore — those go to `error` (the persistent banner).
     @Published var statusLine: String? = nil
@@ -234,6 +238,10 @@ protocol ConversationSource: AnyObject {
     /// immediately even if engine-side resume is still a follow-up. A no-op on the
     /// mock.
     func resumeSession(_ uuid: String)
+    /// Ask the engine for its real MCP server listing (submit
+    /// `RefreshListings(.mcp)`). The reply (`McpServers`) lands out-of-band and
+    /// populates `model.mcpServers`. A no-op on the mock (keeps the canned list).
+    func refreshMcpServers()
     #if canImport(engine_mobileFFI)
         /// Resolve a parked permission request (SHIP-BLOCKER #3): submit
         /// `ApprovePermission{requestId, response}` and pop the head of the queue.
@@ -254,6 +262,7 @@ extension ConversationSource {
     /// so the mock keeps its canned drawer lists and ignores resume requests.
     func listSessions() {}
     func resumeSession(_ uuid: String) {}
+    func refreshMcpServers() {}
 }
 
 #if canImport(engine_mobileFFI)
@@ -649,6 +658,20 @@ final class MockConversationSource: ConversationSource {
             }
         }
 
+        /// Pull the engine's real MCP server listing (out-of-band, like
+        /// `listSessions`). The `McpServers` reply lands on `apply` → `model.mcpServers`.
+        func refreshMcpServers() {
+            Task { [weak self] in
+                guard let self else { return }
+                do {
+                    let handle = try await self.ensureHandle()
+                    try await handle.submit(command: .refreshListings(which: [.mcp]))
+                } catch {
+                    await self.fail(.host, "\(error)")
+                }
+            }
+        }
+
         // MARK: inbound-event application (called on the main actor)
 
         /// Map one inbound `ClientEvent` onto the published state.
@@ -756,9 +779,25 @@ final class MockConversationSource: ConversationSource {
                 // the next `SessionStarted`/`SessionResumed` re-establishes one.
                 model.activeSessionId = ""
 
+            case let .mcpServers(servers):
+                // Out-of-band MCP listing → the UI `MCPServer` model. The DTO is
+                // thinner than the mock (no url / tool-count), so those default;
+                // status maps Connected→connected, Disconnected→idle, Error→error.
+                model.mcpServers = servers.map { dto in
+                    let status: ConnStatus
+                    switch dto.status {
+                    case .connected: status = .connected
+                    case .disconnected: status = .idle
+                    case .error: status = .error
+                    @unknown default: status = .idle
+                    }
+                    return MCPServer(id: dto.name, name: dto.name, url: "", tools: 0,
+                                     status: status, enabled: status == .connected, transport: dto.transport)
+                }
+
             default:
-                // Cost / message-boundary / listing events are not rendered in the
-                // P3a conversation surface; ignored without breaking the stream.
+                // Cost / message-boundary / other listing events are not rendered
+                // in this surface; ignored without breaking the stream.
                 break
             }
         }

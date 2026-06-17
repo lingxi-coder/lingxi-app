@@ -461,15 +461,16 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
     // M5-07 T13: mirror the in-memory append to the optional JSONL writer.
     // Best-effort — write failures never fail the turn.
     //
-    // WRITE-side per-block split (claude.ts:2171-2211): persist the assistant
-    // turn as ONE single-block JSONL line per content block (shared inner
-    // `message.id`, distinct top-level uuids) to match the streaming writer and
-    // the per-block transcript shape. The in-memory `s.history` push above keeps
-    // the single merged assistant message for request-building. The batched path
-    // persists its tool_results as ONE user message below; it chains off the LAST
-    // assistant block's uuid (advanced by the split), so its single parentUuid is
-    // the final tool_use line — consistent with the pre-split linear chain.
-    let _tool_use_parent_uuids = orch.persist_assistant_per_block(&assistant_msg).await;
+    // NON-streaming (batched) parity: claude-code's non-streaming response
+    // handler (`claude.ts:2571`) emits exactly ONE merged `AssistantMessage`
+    // (single top-level uuid, ALL blocks via `...result` / full `content`) — it
+    // does NOT split per content block. Only the STREAMING `content_block_stop`
+    // writer (`claude.ts:2171-2211`) splits one line per block. So the batched
+    // path persists ONE merged assistant JSONL line; the tool_results below
+    // chain off that single line's uuid (shared parent), matching the
+    // non-streaming transcript shape. The per-block split lives ONLY on the
+    // streaming drain (`conversation.rs::persist_assistant_per_block`).
+    orch.persist_message_to_jsonl(&assistant_msg).await;
 
     // 4. Emit each Text block to the output stream (whole-body in M5-02;
     //    M5-04 will switch to per-delta).
@@ -907,10 +908,11 @@ pub(crate) async fn surface_prompt_too_long(orch: &ConversationOrchestrator) -> 
         let mut s = orch.session.lock().await;
         s.history.push(assistant_msg.clone());
     }
-    // Per-block split (claude.ts:2171): a single text block → exactly one
-    // assistant line (now carrying the shared inner `message.id`), matching the
-    // rest of the assistant-persist path.
-    let _ = orch.persist_assistant_per_block(&assistant_msg).await;
+    // Non-streaming (batched) parity (claude.ts:2571): this surfaces the
+    // prompt-too-long assistant turn on the BATCHED path, so persist ONE merged
+    // assistant line (here a single text block → one line either way) — the
+    // per-block split is streaming-only.
+    orch.persist_message_to_jsonl(&assistant_msg).await;
     orch.output.emit_text(PROMPT_TOO_LONG_ERROR_MESSAGE).await;
     assistant_id
 }
@@ -1285,21 +1287,23 @@ pub(crate) async fn dispatch_tool_uses_tracked(
         // `<system-reminder>`-wrapped meta user message,
         // `"PreToolUse:{tool} hook additional context: {content}"`, with the
         // merged `system_messages` joined by `\n` (the parser already joined
-        // `systemMessage` + `additionalContext` with `\n`). It is captured
-        // BELOW, BEFORE the success tool_result build, but is independent of the
-        // block / deny arms — claude-code does NOT fold context into those error
-        // results, so those arms emit only the bare error tool_result.
+        // `systemMessage` + `additionalContext` with `\n`). claude-code pushes
+        // this context in the PRE-hook phase (`toolExecution.ts:846`), BEFORE the
+        // permission/block check, so it surfaces even when the tool is later
+        // BLOCKED or DENIED. We build it once below and emit it (as its own
+        // message, never folded into the error result) on the success, block, AND
+        // deny arms — in each case ordered AFTER that arm's tool_result.
         let pre_hook_messages = pre_agg.system_messages.clone();
         // Build the standalone additionalContext message (HOOK.1) and queue it
         // on the `injected` channel, tagged with THIS tool's `tool_use_id` (TS
         // stamps `toolUseID` on the attachment). A strict no-op when the hook
         // emitted no context, so the locked turn-loop fixtures (noop hooks) are
-        // unaffected. Only emitted on the SUCCESS path below (after the gate
-        // clears) — claude-code's `additionalContext` push happens in the
-        // pre-hook phase that precedes the tool call, but a blocked/denied tool
-        // `continue`s before we reach the success build; emitting it there keeps
-        // the message ordered after the tool_result for the common (allowed)
-        // case while not attaching it to error results.
+        // unaffected. claude-code pushes `additionalContext` to
+        // `resultingMessages` in the PRE-hook phase (`toolExecution.ts:846`),
+        // BEFORE the permission/block check — so it surfaces even when the tool
+        // is later BLOCKED (preventContinuation) or DENIED. We therefore emit it
+        // on the SUCCESS, BLOCK, and DENY paths alike, in every case ordered
+        // AFTER that path's tool_result (matching claude-code post-hoist).
         let pre_context_message: Option<ConversationMessage> = if pre_hook_messages.is_empty() {
             None
         } else {
@@ -1337,6 +1341,13 @@ pub(crate) async fn dispatch_tool_uses_tracked(
                 )
                 .await;
             results.push(result_block);
+            // HOOK.1: even on a BLOCK, the PreToolUse `additionalContext` was
+            // pushed in claude-code's pre-hook phase (`toolExecution.ts:846`),
+            // before the block check — so surface it here, ordered AFTER this
+            // path's error tool_result. No-op when the hook emitted no context.
+            if let Some(msg) = pre_context_message {
+                injected_messages.push((msg, tool_use_id.clone()));
+            }
             continue;
         }
 
@@ -1485,6 +1496,14 @@ pub(crate) async fn dispatch_tool_uses_tracked(
                     )
                     .await;
                 results.push(result_block);
+                // HOOK.1: even on a permission DENY, claude-code's pre-hook
+                // phase already pushed the PreToolUse `additionalContext`
+                // (`toolExecution.ts:846`) before the gate ran — so surface it
+                // here, ordered AFTER this path's deny error tool_result. No-op
+                // when the hook emitted no context.
+                if let Some(msg) = pre_context_message {
+                    injected_messages.push((msg, tool_use_id.clone()));
+                }
                 continue;
             }
         }

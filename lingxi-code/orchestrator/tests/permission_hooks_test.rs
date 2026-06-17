@@ -33,7 +33,9 @@ use orchestrator::test_support::{
 use orchestrator::{ConversationOrchestrator, ConversationOutcome, OrchestratorConfig};
 use permission::result::PermissionMetadata;
 use permission::{PermissionDecisionReason, PermissionResult};
-use protocol::{HookId, HttpRequest, HttpResponse, ToolUseId};
+use protocol::{
+    ContentBlock, ConversationMessage, HookId, HttpRequest, HttpResponse, ToolUseId,
+};
 use serde_json::json;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
@@ -241,6 +243,31 @@ impl BuiltinHookHandler for PermRecorder {
             stderr: String::new(),
             exit_code: None,
             response: None,
+        }
+    }
+}
+
+/// A `PreToolUse` hook that emits `additionalContext` (`systemMessage`) but
+/// makes NO permission decision — so the tool proceeds to the permission gate.
+/// claude-code pushes this context to `resultingMessages` in the pre-hook phase
+/// (`toolExecution.ts:846`) BEFORE the gate, so it must surface even when the
+/// gate later DENIES the tool.
+struct PreContextHook;
+#[async_trait]
+impl BuiltinHookHandler for PreContextHook {
+    fn id(&self) -> &str {
+        "pre-context"
+    }
+    async fn handle(&self, _event: &HookEvent, _ctx: &HookContext) -> HookResult {
+        HookResult {
+            outcome: HookOutcome::Success,
+            stdout: String::new(),
+            stderr: String::new(),
+            exit_code: Some(0),
+            response: Some(HookResponse {
+                system_message: Some("DENY-CTX".into()),
+                ..Default::default()
+            }),
         }
     }
 }
@@ -485,6 +512,135 @@ async fn pre_hook_allow_bypasses_gate_and_fires_neither() {
     assert!(
         log.requests.is_empty() && log.denials.is_empty(),
         "a PreToolUse 'allow' bypasses the gate → no permission events: req={:?} denied={:?}",
+        log.requests,
+        log.denials
+    );
+}
+
+#[tokio::test]
+async fn pre_tool_additional_context_surfaces_even_when_denied() {
+    // HOOK.1 + Fix B (claude.ts `toolExecution.ts:846`): a PreToolUse hook's
+    // `additionalContext` is pushed to `resultingMessages` in the PRE-hook phase,
+    // BEFORE the permission gate runs. So even when the gate later DENIES the
+    // tool, that context must STILL surface — as its own `<system-reminder>`
+    // meta user message, NOT folded into the deny error tool_result. This locks
+    // the deny-arm emit in `dispatch_tool_uses_tracked`.
+    let tool_use_id = ToolUseId::new();
+    let api = two_turn_api(tool_use_id.clone(), "Echo", json!({ "x": 1 }));
+    let log = Arc::new(Mutex::new(PermLog::default()));
+
+    // Register the additionalContext-emitting PreToolUse hook PLUS the permission
+    // recorders (so we can also confirm a rule/mode deny fires no permission hook).
+    let registry = Arc::new(RwLock::new(HookRegistry::new()));
+    {
+        let mut r = registry.write().await;
+        r.register(builtin_hook(
+            "pre-ctx",
+            "pre-context",
+            HookEventType::PreToolUse,
+        ));
+        r.register(builtin_hook(
+            "req",
+            "record-permission",
+            HookEventType::PermissionRequest,
+        ));
+        r.register(builtin_hook(
+            "denied",
+            "record-permission",
+            HookEventType::PermissionDenied,
+        ));
+    }
+    let mut exec = HookExecutorImpl::new(registry, Arc::new(UnusedHttp), Arc::new(UnusedRuntime));
+    exec.register_builtin(Arc::new(PreContextHook));
+    exec.register_builtin(Arc::new(PermRecorder { log: log.clone() }));
+    let hooks = Arc::new(exec);
+
+    let mut tools = ToolRegistry::new();
+    tools.register_builtin(Arc::new(EchoTool));
+    // A rule/mode (Unspecified-source) deny — denies the tool but fires no
+    // PermissionDenied hook (so the additionalContext is the ONLY injected msg).
+    let gate = Arc::new(DenyGate {
+        reason: "policy forbids it",
+    });
+    let orch = orch_with_gate(api, hooks, tools, gate);
+
+    let outcome = orch.run_turn("run echo").await.expect("turn ok");
+    assert!(matches!(outcome, ConversationOutcome::EndTurn { .. }));
+
+    let session = orch.session();
+    let s = session.lock().await;
+
+    // (a) the deny error tool_result is present and carries the deny reason —
+    //     and the additionalContext is NOT folded into it.
+    let mut saw_deny_result = false;
+    for m in &s.history {
+        if let ConversationMessage::User { content, .. } = m {
+            for b in content {
+                if let ContentBlock::ToolResult {
+                    content,
+                    is_error,
+                    tool_use_id: tu,
+                    ..
+                } = b
+                {
+                    if *tu == tool_use_id {
+                        saw_deny_result = true;
+                        assert!(*is_error, "the deny tool_result must be is_error");
+                        assert!(
+                            content.contains("Permission denied")
+                                && content.contains("policy forbids it"),
+                            "deny tool_result carries the deny reason: {content:?}"
+                        );
+                        assert!(
+                            !content.contains("DENY-CTX"),
+                            "additionalContext must NOT be folded into the deny tool_result: {content:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+    assert!(saw_deny_result, "a deny error tool_result must be present");
+
+    // (b) the additionalContext surfaces as a SEPARATE meta user message, with
+    //     the exact `<system-reminder>` wrap used elsewhere, sitting DIRECTLY
+    //     after the tool_result user message (post-hoist order).
+    let ctx_text =
+        "<system-reminder>\nPreToolUse:Echo hook additional context: DENY-CTX\n</system-reminder>";
+    let ctx_pos = s
+        .history
+        .iter()
+        .position(|m| {
+            matches!(m, ConversationMessage::User { content, .. }
+                if content.iter().any(|b| matches!(b, ContentBlock::Text { text } if text == ctx_text)))
+        })
+        .expect("standalone additionalContext message present even though the tool was denied");
+
+    let before = &s.history[ctx_pos - 1];
+    match before {
+        ConversationMessage::User { content, .. } => assert!(
+            content.iter().any(
+                |b| matches!(b, ContentBlock::ToolResult { tool_use_id: tu, .. } if *tu == tool_use_id)
+            ),
+            "the context message must sit directly after the deny tool_result message"
+        ),
+        other => panic!("expected a tool_result User message before the context one, got {other:?}"),
+    }
+
+    // (c) the context message is tagged with the dispatching tool's tool_use_id.
+    let ctx_id = s.history[ctx_pos].id();
+    assert_eq!(
+        s.injected_message_sources.get(&ctx_id),
+        Some(&tool_use_id),
+        "context message id maps to the dispatching tool's tool_use_id"
+    );
+
+    // (d) a rule/mode deny fires NEITHER permission hook (sanity: the only
+    //     injected message is the additionalContext, not a hook side-effect).
+    let log = log.lock().unwrap();
+    assert!(
+        log.requests.is_empty() && log.denials.is_empty(),
+        "a rule/mode deny fires no permission hooks: req={:?} denied={:?}",
         log.requests,
         log.denials
     );

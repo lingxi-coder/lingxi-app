@@ -1567,12 +1567,32 @@ impl ConversationOrchestrator {
     /// success, emits `tengu_session_appended` and updates the
     /// `last_jsonl_uuid` cache.
     pub(crate) async fn persist_message_to_jsonl(&self, msg: &ConversationMessage) {
+        self.persist_message_to_jsonl_with_parent(msg, None).await;
+    }
+
+    /// Persist with an optional explicit `parentUuid` override.
+    ///
+    /// The streaming executor passes the originating assistant message's UUID so
+    /// each tool result parents to the assistant that requested it (TS
+    /// `sourceToolAssistantUUID`), rather than the linear `last_jsonl_uuid` chain.
+    ///
+    /// When `parent_override` is `None`, behaves exactly as before (chain off
+    /// `last_jsonl_uuid`). In BOTH cases the `last_jsonl_uuid` cache is advanced
+    /// to this line's UUID so any subsequent non-overridden line chains correctly.
+    pub(crate) async fn persist_message_to_jsonl_with_parent(
+        &self,
+        msg: &ConversationMessage,
+        parent_override: Option<String>,
+    ) {
         let Some(writer) = self.jsonl_writer.as_ref() else {
             return;
         };
         let (session_id_str, parent_uuid) = {
             let session_id = self.session.lock().await.session_id;
-            let parent = self.last_jsonl_uuid.lock().await.clone();
+            let parent = match parent_override {
+                Some(p) => Some(p),
+                None => self.last_jsonl_uuid.lock().await.clone(),
+            };
             (session_id.to_string(), parent)
         };
         // Writer-field fidelity (§G gap 4):
@@ -5746,6 +5766,236 @@ mod conditional_rules_reminder_tests {
         assert!(
             !t1.contains("src-rule.md"),
             "already-sent src-rule must not re-inject: {t1}"
+        );
+    }
+}
+
+// ── `persist_message_to_jsonl_with_parent`: explicit parentUuid override ──────
+//
+// Proves that the streaming executor can parent each tool-result user message to
+// the assistant message that REQUESTED the tool (TS `sourceToolAssistantUUID`),
+// rather than the linear `last_jsonl_uuid` chain, by calling
+// `persist_message_to_jsonl_with_parent(msg, Some(assistant_uuid))`.
+//
+// Also proves the `None` path (default chain) is byte-identical to the old
+// `persist_message_to_jsonl` behaviour.
+#[cfg(test)]
+mod persist_with_parent_tests {
+    use super::*;
+    use crate::test_support::{
+        noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate,
+        StaticMemoryProvider,
+    };
+    use crate::OrchestratorConfig;
+    use platform_posix::fs::PosixFileSystem;
+    use session::jsonl::schema::JsonlMessage;
+    use std::sync::Arc;
+    use tool_api::registry::ToolRegistry;
+
+    /// Build an orchestrator wired with a `JsonlWriter` backed by `path`.
+    fn orch_with_writer(
+        dir: &std::path::Path,
+        path: std::path::PathBuf,
+    ) -> ConversationOrchestrator {
+        let fs: Arc<dyn traits::FileSystem> =
+            Arc::new(PosixFileSystem::new(dir.to_path_buf()));
+        let writer = Arc::new(session::jsonl::writer::JsonlWriter::new(path, fs));
+        ConversationOrchestrator::new(
+            OrchestratorConfig::default(),
+            Arc::new(MockApiClient::new(vec![])),
+            Arc::new(ToolRegistry::new()),
+            noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            dir.to_path_buf(),
+        )
+        .with_jsonl_writer(writer)
+    }
+
+    /// Read all JSONL lines back from disk and deserialize.
+    fn read_jsonl(path: &std::path::Path) -> Vec<JsonlMessage> {
+        let raw = std::fs::read_to_string(path).expect("read jsonl");
+        raw.lines()
+            .filter(|l| !l.trim().is_empty())
+            .map(|l| serde_json::from_str::<JsonlMessage>(l).expect("deserialize jsonl line"))
+            .collect()
+    }
+
+    // ── test 1: explicit parent_override ─────────────────────────────────────
+
+    #[tokio::test]
+    async fn tool_result_parents_to_explicit_assistant_uuid() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let session_path = dir.path().join("session.jsonl");
+        let orch = orch_with_writer(dir.path(), session_path.clone());
+
+        // Persist an assistant message first (linear chain — no override).
+        let asst_msg = ConversationMessage::Assistant {
+            id: protocol::MessageId::new(),
+            content: vec![protocol::ContentBlock::Text {
+                text: "I will call a tool".into(),
+            }],
+            stop_reason: Some("tool_use".into()),
+        };
+        orch.persist_message_to_jsonl(&asst_msg).await;
+
+        // Capture the assistant line's uuid from disk.
+        let lines_after_asst = read_jsonl(&session_path);
+        assert_eq!(lines_after_asst.len(), 1, "expected 1 line (the assistant message)");
+        let assistant_uuid = lines_after_asst[0].uuid.clone();
+
+        // Persist a tool-result user message via the override variant, passing
+        // the assistant's uuid explicitly — simulates streaming executor parenting.
+        let tool_result_msg =
+            ConversationMessage::user(protocol::MessageId::new(), "tool result body".into());
+        orch.persist_message_to_jsonl_with_parent(&tool_result_msg, Some(assistant_uuid.clone()))
+            .await;
+
+        // Read back both lines.
+        let lines = read_jsonl(&session_path);
+        assert_eq!(lines.len(), 2, "expected 2 lines (assistant + tool_result)");
+        let tool_result_line = &lines[1];
+
+        // THE KEY ASSERTION: the tool-result line's parentUuid must equal the
+        // assistant's uuid, NOT the prior last_jsonl_uuid (which also happens to
+        // be the assistant uuid here, but the next test distinguishes them).
+        assert_eq!(
+            tool_result_line.parent_uuid.as_deref(),
+            Some(assistant_uuid.as_str()),
+            "tool_result parentUuid must equal the explicit assistant uuid override"
+        );
+    }
+
+    // ── test 2: override bypasses last_jsonl_uuid ─────────────────────────────
+    //
+    // Three messages: user → assistant → tool_result(override=user_uuid).
+    // Without the override, the tool_result would parent to the assistant.
+    // With the override it must parent to the user uuid instead, proving the
+    // override takes effect independent of what `last_jsonl_uuid` holds.
+
+    #[tokio::test]
+    async fn override_bypasses_last_jsonl_uuid_chain() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let session_path = dir.path().join("session.jsonl");
+        let orch = orch_with_writer(dir.path(), session_path.clone());
+
+        // 1. Persist a user message (no override).
+        let user_msg =
+            ConversationMessage::user(protocol::MessageId::new(), "user prompt".into());
+        orch.persist_message_to_jsonl(&user_msg).await;
+        let lines = read_jsonl(&session_path);
+        let user_uuid = lines[0].uuid.clone();
+
+        // 2. Persist an assistant message (no override → chains off user).
+        let asst_msg = ConversationMessage::Assistant {
+            id: protocol::MessageId::new(),
+            content: vec![protocol::ContentBlock::Text {
+                text: "ok calling tool".into(),
+            }],
+            stop_reason: Some("tool_use".into()),
+        };
+        orch.persist_message_to_jsonl(&asst_msg).await;
+        let lines = read_jsonl(&session_path);
+        assert_eq!(lines[1].parent_uuid.as_deref(), Some(user_uuid.as_str()));
+        let _asst_uuid = lines[1].uuid.clone();
+
+        // 3. Persist a tool-result user message with an EXPLICIT override pointing
+        //    back to the user_uuid (unusual, but proves the override wins over
+        //    last_jsonl_uuid which currently holds the assistant uuid).
+        let tool_result_msg =
+            ConversationMessage::user(protocol::MessageId::new(), "tool result".into());
+        orch.persist_message_to_jsonl_with_parent(
+            &tool_result_msg,
+            Some(user_uuid.clone()),
+        )
+        .await;
+
+        let lines = read_jsonl(&session_path);
+        assert_eq!(lines.len(), 3, "expected 3 lines");
+        assert_eq!(
+            lines[2].parent_uuid.as_deref(),
+            Some(user_uuid.as_str()),
+            "override must win over last_jsonl_uuid (which holds the assistant uuid)"
+        );
+    }
+
+    // ── test 3: None path advances last_jsonl_uuid (regression) ──────────────
+    //
+    // Proves `persist_message_to_jsonl_with_parent(msg, None)` is byte-identical
+    // to the old `persist_message_to_jsonl`: two messages with None form a
+    // monotonic chain where msg2.parentUuid == msg1.uuid.
+
+    #[tokio::test]
+    async fn none_override_chains_off_last_jsonl_uuid() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let session_path = dir.path().join("session.jsonl");
+        let orch = orch_with_writer(dir.path(), session_path.clone());
+
+        let msg1 =
+            ConversationMessage::user(protocol::MessageId::new(), "first message".into());
+        orch.persist_message_to_jsonl_with_parent(&msg1, None).await;
+
+        let msg2 =
+            ConversationMessage::user(protocol::MessageId::new(), "second message".into());
+        orch.persist_message_to_jsonl_with_parent(&msg2, None).await;
+
+        let lines = read_jsonl(&session_path);
+        assert_eq!(lines.len(), 2, "expected 2 JSONL lines");
+        // First entry: root of chain → parent_uuid is None.
+        assert_eq!(lines[0].parent_uuid, None, "first entry must have no parent");
+        // Second entry: must chain off the first.
+        assert_eq!(
+            lines[1].parent_uuid.as_deref(),
+            Some(lines[0].uuid.as_str()),
+            "second entry parentUuid must equal first entry uuid (linear chain)"
+        );
+    }
+
+    // ── test 4: last_jsonl_uuid advances after override ──────────────────────
+    //
+    // After an overridden persist, `last_jsonl_uuid` is still advanced to the
+    // newly-persisted line's uuid. A subsequent non-overridden line must chain
+    // off the overridden line (not off whatever the override pointed to).
+
+    #[tokio::test]
+    async fn last_jsonl_uuid_advances_after_override() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let session_path = dir.path().join("session.jsonl");
+        let orch = orch_with_writer(dir.path(), session_path.clone());
+
+        // 1. First message (no override) — root.
+        let msg1 =
+            ConversationMessage::user(protocol::MessageId::new(), "root".into());
+        orch.persist_message_to_jsonl(&msg1).await;
+        let lines = read_jsonl(&session_path);
+        let root_uuid = lines[0].uuid.clone();
+
+        // 2. Overridden message pointing back to root — simulates a tool result.
+        let msg2 =
+            ConversationMessage::user(protocol::MessageId::new(), "overridden".into());
+        orch.persist_message_to_jsonl_with_parent(&msg2, Some(root_uuid.clone()))
+            .await;
+        let lines = read_jsonl(&session_path);
+        let overridden_uuid = lines[1].uuid.clone();
+        // Verify the override took effect.
+        assert_eq!(
+            lines[1].parent_uuid.as_deref(),
+            Some(root_uuid.as_str()),
+            "overridden line must parent to root, not to itself"
+        );
+
+        // 3. Third message (no override) — must chain off msg2 (the overridden line),
+        //    not off msg1 (root). This confirms last_jsonl_uuid was advanced.
+        let msg3 =
+            ConversationMessage::user(protocol::MessageId::new(), "subsequent".into());
+        orch.persist_message_to_jsonl(&msg3).await;
+        let lines = read_jsonl(&session_path);
+        assert_eq!(lines.len(), 3, "expected 3 JSONL lines");
+        assert_eq!(
+            lines[2].parent_uuid.as_deref(),
+            Some(overridden_uuid.as_str()),
+            "subsequent non-overridden line must chain off the overridden line"
         );
     }
 }

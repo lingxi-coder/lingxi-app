@@ -1955,9 +1955,16 @@ pub async fn build(
     // enforcement; they keep the prior env-opt-in behavior so their transport-driven
     // semantics are unchanged. An explicit env value still overrides either way.
     //
-    // The CLI inner gate stays `NoOpPermissionGate`, so an `Ask` on a tool with no
-    // matching rule still resolves to allow — interactive prompting needs a TUI
-    // permission sink (a documented follow-up); deny rules + modes are now enforced.
+    // Inner-gate selection (the `(perms, adapter_gate)` match at :1836):
+    // - INTERACTIVE TUI sessions inject `tui::permission_bridge::TuiPermissionGate`
+    //   via `cfg.injected_permission_gate` (the `if let Some(injected)` arm), so an
+    //   unresolved mutating `Ask` (a `DenyByDefault` tool with no matching rule)
+    //   surfaces the permission dialog instead of silently resolving — wired by
+    //   `build_runtime_for_tui` → root permission pump.
+    // - The HEADLESS `-p`/`--print` and `--no-tui` stdio REPL paths have no dialog
+    //   to surface a prompt, so they keep the `NoOpPermissionGate` (always-allow) or
+    //   `DenyOnAskGate` (deny-on-ask) inner per `use_noop_permission_gate` /
+    //   `deny_unresolved_ask`. Either way deny rules + modes are enforced below.
     let enforce_permissions = should_enforce_permissions(
         std::env::var("LINGXI_ENFORCE_PERMISSIONS").ok().as_deref(),
         cfg.use_noop_permission_gate,

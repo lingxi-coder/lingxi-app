@@ -42,7 +42,7 @@ fn resumed_session_seeds_messages_in_order_with_tool_grouping() {
         ConversationMessage::Assistant {
             id: MessageId::new(),
             content: vec![ContentBlock::ToolUse {
-                id,
+                id: id.clone(),
                 name: "Read".into(),
                 input: serde_json::json!({ "file_path": "/a" }),
                 provider_id: None,
@@ -52,7 +52,7 @@ fn resumed_session_seeds_messages_in_order_with_tool_grouping() {
         ConversationMessage::User {
             id: MessageId::new(),
             content: vec![ContentBlock::ToolResult {
-                tool_use_id: id,
+                tool_use_id: id.clone(),
                 content: "contents".into(),
                 is_error: false,
                 provider_tool_use_id: None,
@@ -128,7 +128,7 @@ fn with_resumed_messages_threads_seed_onto_runtime() {
 #[test]
 fn jsonl_loader_path_seeds_and_groups() {
     let id = ToolUseId::new();
-    let id_wire = serde_json::to_value(id).unwrap();
+    let id_wire = serde_json::to_value(id.clone()).unwrap();
     let line = |ty: &str, content: serde_json::Value| -> session::jsonl::JsonlMessage {
         serde_json::from_value(serde_json::json!({
             "type": ty,

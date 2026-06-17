@@ -21,12 +21,12 @@ fn seed_state_with_two_tools() -> (AppState, ToolUseId, ToolUseId) {
     let a = ToolUseId::new();
     let b = ToolUseId::new();
     st.push_message(RenderedMessage::AssistantToolUse {
-        id: a,
+        id: a.clone(),
         tool: "Read".into(),
         input: serde_json::json!({"file_path": "/tmp/x"}),
     });
     st.push_message(RenderedMessage::AssistantToolUse {
-        id: b,
+        id: b.clone(),
         tool: "Bash".into(),
         input: serde_json::json!({"command": "ls"}),
     });
@@ -80,16 +80,16 @@ fn enter_keypress_toggles_expanded_for_focused_tool() {
 /// `render_entry_to_string`.
 #[test]
 fn dispatcher_routes_tool_call_and_result() {
-    let id = ToolUseId::nil();
+    let id = ToolUseId::from("toolu_test");
     let call = RenderedMessage::AssistantToolUse {
-        id,
+        id: id.clone(),
         tool: "Read".into(),
         input: serde_json::json!({"file_path": "/tmp/x"}),
     };
     let s = render_entry_to_string(&call, false, false);
     assert!(s.starts_with("● Read("), "got: {s}");
     let result = RenderedMessage::UserToolResult {
-        id,
+        id: id.clone(),
         tool: "Read".into(),
         result: serde_json::json!({"content": "hi"}),
         old_string: None,

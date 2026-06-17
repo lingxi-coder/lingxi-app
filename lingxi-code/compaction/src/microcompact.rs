@@ -147,7 +147,7 @@ pub fn collect_compactable_tool_ids(
             for block in content {
                 if let ContentBlock::ToolUse { id, name, .. } = block {
                     if compactable.contains(name.as_str()) {
-                        ids.push(*id);
+                        ids.push(id.clone());
                     }
                 }
             }
@@ -202,11 +202,11 @@ impl Microcompactor {
         let keep_set: HashSet<protocol::ToolUseId> = compactable_ids
             [compactable_ids.len() - keep_count..]
             .iter()
-            .copied()
+            .cloned()
             .collect();
         let clear_set: HashSet<protocol::ToolUseId> = compactable_ids
             .iter()
-            .copied()
+            .cloned()
             .filter(|id| !keep_set.contains(id))
             .collect();
 
@@ -238,7 +238,7 @@ impl Microcompactor {
                                     tokens_saved = tokens_saved
                                         .saturating_add(rough_token_count_estimation(content));
                                     return ContentBlock::ToolResult {
-                                        tool_use_id: *tool_use_id,
+                                        tool_use_id: tool_use_id.clone(),
                                         content: TIME_BASED_MC_CLEARED_MESSAGE.into(),
                                         is_error: *is_error,
                                         // Preserve the provider id through content clearing.
@@ -331,8 +331,8 @@ mod tests {
         let mut ids = Vec::new();
         for i in 0..8 {
             let id = ToolUseId::new();
-            ids.push(id);
-            msgs.push(assistant_tool_use("Read", id));
+            ids.push(id.clone());
+            msgs.push(assistant_tool_use("Read", id.clone()));
             // Non-trivial content so tokens_saved > 0 for cleared ones.
             msgs.push(user_tool_result(id, &format!("body-{i} {}", "x".repeat(40))));
         }
@@ -368,8 +368,8 @@ mod tests {
         let mut ids = Vec::new();
         for _ in 0..8 {
             let id = ToolUseId::new();
-            ids.push(id);
-            msgs.push(assistant_tool_use("Read", id));
+            ids.push(id.clone());
+            msgs.push(assistant_tool_use("Read", id.clone()));
         }
         // The 3 oldest results are ALREADY the cleared placeholder.
         for (i, id) in ids.iter().enumerate() {
@@ -378,7 +378,7 @@ mod tests {
             } else {
                 format!("fresh-{i} {}", "y".repeat(40))
             };
-            msgs.push(user_tool_result(*id, &content));
+            msgs.push(user_tool_result(id.clone(), &content));
         }
         let mc = Microcompactor {
             config: TimeBasedMCConfig {
@@ -401,8 +401,8 @@ mod tests {
         let mut ids = Vec::new();
         for i in 0..8 {
             let id = ToolUseId::new();
-            ids.push(id);
-            msgs.push(assistant_tool_use("TodoWrite", id));
+            ids.push(id.clone());
+            msgs.push(assistant_tool_use("TodoWrite", id.clone()));
             msgs.push(user_tool_result(id, &format!("todo-{i} {}", "z".repeat(40))));
         }
         let mc = Microcompactor {
@@ -431,13 +431,13 @@ mod tests {
         let mut ids = Vec::new();
         for _ in 0..8 {
             let id = ToolUseId::new();
-            ids.push(id);
-            msgs.push(assistant_tool_use("Read", id));
+            ids.push(id.clone());
+            msgs.push(assistant_tool_use("Read", id.clone()));
         }
         // All results empty → rough_token_count_estimation("") rounds to 0 only
         // for very short strings; use truly empty strings → tokens_saved stays 0.
         for id in &ids {
-            msgs.push(user_tool_result(*id, ""));
+            msgs.push(user_tool_result(id.clone(), ""));
         }
         let mc = Microcompactor {
             config: TimeBasedMCConfig {
@@ -460,8 +460,8 @@ mod tests {
         let mut ids = Vec::new();
         for i in 0..3 {
             let id = ToolUseId::new();
-            ids.push(id);
-            msgs.push(assistant_tool_use("Bash", id));
+            ids.push(id.clone());
+            msgs.push(assistant_tool_use("Bash", id.clone()));
             msgs.push(user_tool_result(id, &format!("out-{i} {}", "q".repeat(40))));
         }
         let mc = Microcompactor {

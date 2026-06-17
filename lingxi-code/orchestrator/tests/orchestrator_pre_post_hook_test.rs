@@ -239,7 +239,7 @@ async fn pre_hook_blocks_bash_tool() {
         // Turn 1: model emits tool_use Bash
         mock_message_response(
             vec![LlmContentBlock::ToolCall {
-                id: tool_use_id.as_uuid().to_string(),
+                id: tool_use_id.to_string(),
                 name: "Bash".into(),
                 input: json!({"command": "rm -rf /"}),
             }],

@@ -205,7 +205,7 @@ fn streaming_orch(
 fn two_turns(tu: ToolUseId, tool_name: &str) -> Arc<MockStreamingApiClient> {
     let turn1 = scripted![
         message_start("m1", "claude-opus-4-7"),
-        content_block_start_tool_use(0, tu, tool_name),
+        content_block_start_tool_use(0, tu.clone(), tool_name),
         input_json_delta(0, "{}"),
         content_block_stop(0),
         message_delta_stop("tool_use"),
@@ -229,7 +229,7 @@ fn two_turns(tu: ToolUseId, tool_name: &str) -> Arc<MockStreamingApiClient> {
 #[tokio::test]
 async fn streaming_replays_tool_injected_new_messages_into_history() {
     let tu = ToolUseId::new();
-    let api = two_turns(tu, "Inject");
+    let api = two_turns(tu.clone(), "Inject");
     let orch = streaming_orch(registry_with(Arc::new(InjectingTool)), api);
 
     let outcome = orch.run_turn_streaming("go").await.expect("streaming turn");

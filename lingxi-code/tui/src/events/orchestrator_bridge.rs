@@ -155,7 +155,7 @@ impl OutputStream for BridgeOutputStream {
         input: &serde_json::Value,
     ) {
         let _ = self.tx.send(TurnEvent::ToolUseStart {
-            id: *id,
+            id: id.clone(),
             tool: tool.to_string(),
             input: input.clone(),
         });
@@ -168,7 +168,7 @@ impl OutputStream for BridgeOutputStream {
         result: &serde_json::Value,
     ) {
         let _ = self.tx.send(TurnEvent::ToolUseResult {
-            id: *id,
+            id: id.clone(),
             tool: tool.to_string(),
             result: result.clone(),
         });

@@ -198,7 +198,7 @@ pub fn content_block_start_tool_use(index: u32, id: ToolUseId, name: &str) -> Ll
     LlmEvent::ContentBlockStart {
         index,
         content_block: LlmContentBlock::ToolCall {
-            id: id.as_uuid().to_string(),
+            id: id.to_string(),
             name: name.to_string(),
             input: Value::Object(serde_json::Map::new()),
         },

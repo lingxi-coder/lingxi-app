@@ -332,7 +332,7 @@ fn two_turn_api(
     Arc::new(MockApiClient::new(vec![
         mock_message_response(
             vec![LlmContentBlock::ToolCall {
-                id: tool_use_id.as_uuid().to_string(),
+                id: tool_use_id.to_string(),
                 name: tool_name.into(),
                 input,
             }],
@@ -354,7 +354,7 @@ async fn allow_gate_fires_neither_permission_hook() {
     // resolved: it is NOT an about-to-ask, so PermissionRequest does NOT fire,
     // and it is not a deny, so PermissionDenied does NOT fire. The tool runs.
     let tool_use_id = ToolUseId::new();
-    let api = two_turn_api(tool_use_id, "Echo", json!({ "x": 1 }));
+    let api = two_turn_api(tool_use_id.clone(), "Echo", json!({ "x": 1 }));
     let log = Arc::new(Mutex::new(PermLog::default()));
     let hooks = exec_permission_recorder(log.clone()).await;
     let mut tools = ToolRegistry::new();
@@ -384,7 +384,7 @@ async fn classifier_deny_fires_permission_denied_not_request() {
     // `toolExecution.ts:1075`), carrying the reason — and NOT PermissionRequest
     // (it is a resolved deny, not an about-to-ask).
     let tool_use_id = ToolUseId::new();
-    let api = two_turn_api(tool_use_id, "Echo", json!({ "cmd": "rm -rf /" }));
+    let api = two_turn_api(tool_use_id.clone(), "Echo", json!({ "cmd": "rm -rf /" }));
     let log = Arc::new(Mutex::new(PermLog::default()));
     let hooks = exec_permission_recorder(log.clone()).await;
     let mut tools = ToolRegistry::new();
@@ -420,7 +420,7 @@ async fn rule_mode_deny_fires_neither_permission_hook() {
     // claude-code does NOT fire PermissionDenied on a rule/mode deny. The tool is
     // still denied and the turn completes.
     let tool_use_id = ToolUseId::new();
-    let api = two_turn_api(tool_use_id, "Echo", json!({ "cmd": "rm -rf /" }));
+    let api = two_turn_api(tool_use_id.clone(), "Echo", json!({ "cmd": "rm -rf /" }));
     let log = Arc::new(Mutex::new(PermLog::default()));
     let hooks = exec_permission_recorder(log.clone()).await;
     let mut tools = ToolRegistry::new();
@@ -447,7 +447,7 @@ async fn pre_hook_allow_bypasses_gate_and_fires_neither() {
     // A PreToolUse hook 'allow' skips the permission gate entirely, so NEITHER
     // PermissionRequest nor PermissionDenied fires — even against a deny-gate.
     let tool_use_id = ToolUseId::new();
-    let api = two_turn_api(tool_use_id, "Echo", json!({}));
+    let api = two_turn_api(tool_use_id.clone(), "Echo", json!({}));
     let log = Arc::new(Mutex::new(PermLog::default()));
 
     let registry = Arc::new(RwLock::new(HookRegistry::new()));
@@ -495,7 +495,7 @@ async fn no_permission_hooks_registered_is_noop() {
     // No PermissionRequest/Denied hooks: a deny-gate still produces the error
     // result and the turn completes (byte-identical to before the fires).
     let tool_use_id = ToolUseId::new();
-    let api = two_turn_api(tool_use_id, "Echo", json!({}));
+    let api = two_turn_api(tool_use_id.clone(), "Echo", json!({}));
     let registry = Arc::new(RwLock::new(HookRegistry::new()));
     let hooks = Arc::new(HookExecutorImpl::new(
         registry,

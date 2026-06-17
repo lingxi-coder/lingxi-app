@@ -50,7 +50,7 @@ pub fn apply_event(state: &mut AppState, ev: TurnEvent, notify: &Notify) {
             // It must reach the LATER `UserToolResult` render site. We stash it
             // by id here — chosen over a backward scan of `messages` so it stays
             // correct once M7-03 windows the visible message slice.
-            state.tool_call_inputs.insert(id, input.clone());
+            state.tool_call_inputs.insert(id.clone(), input.clone());
             state
                 .messages
                 .push(RenderedMessage::AssistantToolUse { id, tool, input });

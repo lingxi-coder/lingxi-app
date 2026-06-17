@@ -552,11 +552,11 @@ impl Tool for MCPTool {
         // stamped into the tools/call request `_meta` as `claudecode/toolUseId`
         // (`client.ts:1840-1843`) and gates the `started`/`progress`/`completed`
         // progress events (`onProgress && toolUseId`,
-        // `client.ts:1846`/`:1871`/`:1884`). `ToolUseId` is `Copy`.
-        let tool_use_id = ctx.tool_use_id;
+        // `client.ts:1846`/`:1871`/`:1884`).
+        let tool_use_id = ctx.tool_use_id.clone();
 
         // `started` progress event (`client.ts:1845-1856`).
-        if let Some(tuid) = tool_use_id {
+        if let Some(tuid) = tool_use_id.clone() {
             let _ = progress.try_send(ToolProgress {
                 tool_use_id: tuid,
                 data: json!({
@@ -573,20 +573,20 @@ impl Tool for MCPTool {
         // Only wired when a toolUseId is present (the `onProgress && toolUseId`
         // gate). Sends are best-effort (`try_send`), like the synchronous TS
         // `onProgress`.
-        let on_progress: Option<mcp::client::McpProgressCallback> = tool_use_id.map(|tuid| {
+        let on_progress: Option<mcp::client::McpProgressCallback> = tool_use_id.clone().map(|tuid| {
             let sender = progress.clone();
             let server_name = server.clone();
             let tool_name = tool.clone();
             Arc::new(move |ev: mcp::client::McpProgressEvent| {
                 let _ = sender.try_send(ToolProgress {
-                    tool_use_id: tuid,
+                    tool_use_id: tuid.clone(),
                     data: mcp_progress_event_data(&server_name, &tool_name, &ev),
                 });
             }) as mcp::client::McpProgressCallback
         });
 
-        // The wire form of a `ToolUseId` is its bare (serde-transparent) UUID.
-        let tool_use_id_str = tool_use_id.map(|tuid| tuid.as_uuid().to_string());
+        // The wire form of a `ToolUseId` is its bare (serde-transparent) string.
+        let tool_use_id_str = tool_use_id.as_ref().map(|tuid| tuid.to_string());
 
         match client
             .call_tool_with_progress(

@@ -121,10 +121,10 @@ async fn two_tools_dispatched_concurrently_results_ordered() {
     let id_fast = ToolUseId::new();
     let turn1 = scripted![
         message_start("m1", "claude-opus-4-7"),
-        content_block_start_tool_use(0, id_slow, "Slow"),
+        content_block_start_tool_use(0, id_slow.clone(), "Slow"),
         input_json_delta(0, "{}"),
         content_block_stop(0),
-        content_block_start_tool_use(1, id_fast, "Fast"),
+        content_block_start_tool_use(1, id_fast.clone(), "Fast"),
         input_json_delta(1, "{}"),
         content_block_stop(1),
         message_delta_stop("tool_use"),

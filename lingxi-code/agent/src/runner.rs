@@ -116,26 +116,6 @@ fn aggregate_text(content: &[protocol::ContentBlock]) -> String {
     out
 }
 
-/// Parse a `tool_call` id string back into a [`protocol::ToolUseId`].
-///
-/// `convert.rs` serialises `ToolUseId` via `Display` (`"tu:<UUID>"`), so the
-/// round-trip strips the `"tu:"` prefix and parses the bare UUID via
-/// `serde_json`. Real Anthropic API ids (`"toolu_01..."`) will not parse as
-/// UUIDs; for those and any other non-UUID string we mint a fresh `ToolUseId`
-/// so the protocol invariant (non-nil id) is always upheld. The only contract
-/// the runner needs is stable identity within the turn (used to pair tool
-/// results); a fresh ID on a non-parseable string is safe because the model's
-/// reply referenced the same string, and the runner rebuilds history from its
-/// own accumulated `assistant_blocks`, not from the model's reply.
-fn parse_tool_use_id(id: &str) -> protocol::ToolUseId {
-    // Strip the `"tu:"` prefix produced by `ToolUseId::Display`, then try to
-    // deserialize the bare UUID string via serde_json (ToolUseId is
-    // `serde(transparent)` over Uuid, so it round-trips as a UUID string).
-    let bare = id.strip_prefix("tu:").unwrap_or(id);
-    serde_json::from_value::<protocol::ToolUseId>(serde_json::Value::String(bare.to_string()))
-        .unwrap_or_else(|_| protocol::ToolUseId::new())
-}
-
 /// Translate llm-client content blocks into protocol content blocks.
 ///
 /// Mirrors the orchestrator's `translate_response_blocks`: `Text` /
@@ -150,12 +130,12 @@ fn translate_response_blocks(content: &[llm_client::ContentBlock]) -> Vec<protoc
             }
             llm_client::ContentBlock::ToolCall { id, name, input } => {
                 Some(protocol::ContentBlock::ToolUse {
-                    id: parse_tool_use_id(id),
+                    // The provider-issued id IS the canonical ToolUseId (byte
+                    // parity with claude-code); the provider_id sidecar stays None.
+                    id: protocol::ToolUseId::from(id.clone()),
                     name: name.clone(),
                     input: input.clone(),
-                    // Preserve the verbatim provider id for egress replay; the
-                    // parsed `ToolUseId` is internal identity only.
-                    provider_id: Some(id.clone()),
+                    provider_id: None,
                 })
             }
             llm_client::ContentBlock::Reasoning { text, signature } => {
@@ -378,7 +358,7 @@ async fn run_subagent_loop(
                         name,
                         input,
                         provider_id,
-                    } => Some((*id, name.clone(), input.clone(), provider_id.clone())),
+                    } => Some((id.clone(), name.clone(), input.clone(), provider_id.clone())),
                     _ => None,
                 })
                 .collect();
@@ -416,7 +396,7 @@ async fn run_subagent_loop(
                 // tool error is fed back. Empty `allowed_tools` skips the guard.
                 if !allowed_tools.is_empty() && !allowed_tools.iter().any(|t| t == name) {
                     tool_results.push(ContentBlock::ToolResult {
-                        tool_use_id: *tool_use_id,
+                        tool_use_id: tool_use_id.clone(),
                         content: format!(
                             "tool {name:?} is not in this agent's allowed tools"
                         ),
@@ -435,7 +415,7 @@ async fn run_subagent_loop(
                             other => other.to_string(),
                         };
                         tool_results.push(ContentBlock::ToolResult {
-                            tool_use_id: *tool_use_id,
+                            tool_use_id: tool_use_id.clone(),
                             content,
                             is_error: false,
                             provider_tool_use_id: provider_id.clone(),
@@ -443,7 +423,7 @@ async fn run_subagent_loop(
                     }
                     Err(e) => {
                         tool_results.push(ContentBlock::ToolResult {
-                            tool_use_id: *tool_use_id,
+                            tool_use_id: tool_use_id.clone(),
                             content: format!("tool error: {e}"),
                             is_error: true,
                             provider_tool_use_id: provider_id.clone(),

@@ -96,7 +96,7 @@ async fn two_turns_with_one_tool_use_drives_loop_to_end_turn() {
                 cache_control: None,
             },
             LlmContentBlock::ToolCall {
-                id: tool_use_id.as_uuid().to_string(),
+                id: tool_use_id.to_string(),
                 name: "AlwaysOk".into(),
                 input: json!({"x": 1}),
             },

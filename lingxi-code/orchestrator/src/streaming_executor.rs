@@ -184,7 +184,7 @@ impl<'a> StreamingToolExecutor<'a> {
     ) {
         match self.orch.tools.find_by_name(&name) {
             None => {
-                let block = synthetic_unknown_tool(id, &name, provider_id.clone());
+                let block = synthetic_unknown_tool(id.clone(), &name, provider_id.clone());
                 self.tools.push(TrackedTool {
                     id,
                     name,
@@ -269,7 +269,7 @@ impl<'a> StreamingToolExecutor<'a> {
     /// the hook→permission→registry ordering stays byte-locked.
     fn start_tool(&mut self, i: usize) {
         self.tools[i].status = ToolStatus::Executing;
-        let id = self.tools[i].id;
+        let id = self.tools[i].id.clone();
         let name = self.tools[i].name.clone();
         let input = self.tools[i].input.clone();
         let provider_id = self.tools[i].provider_id.clone();
@@ -354,7 +354,7 @@ impl<'a> StreamingToolExecutor<'a> {
         }
         // Sibling-cancelled in-flight tool: discard its real outcome for the synthetic.
         if let Some(reason) = abort_reason {
-            let mut block = synthetic_error_block(self.tools[i].id, reason, self.errored_desc.as_deref());
+            let mut block = synthetic_error_block(self.tools[i].id.clone(), reason, self.errored_desc.as_deref());
             set_provider_id(&mut block, self.tools[i].provider_id.clone());
             self.tools[i].result = Some(block);
             // A cancelled tool yields ONLY the synthetic — its injected msgs/modifiers are dropped.
@@ -378,7 +378,7 @@ impl<'a> StreamingToolExecutor<'a> {
                 // wrapped in `<tool_use_error>`.
                 let name = &self.tools[i].name;
                 self.tools[i].result = Some(ContentBlock::ToolResult {
-                    tool_use_id: self.tools[i].id,
+                    tool_use_id: self.tools[i].id.clone(),
                     content: format!("<tool_use_error>Error calling tool ({name}): {e}</tool_use_error>"),
                     is_error: true,
                     provider_tool_use_id: self.tools[i].provider_id.clone(),
@@ -408,7 +408,7 @@ impl<'a> StreamingToolExecutor<'a> {
         let desc = self.errored_desc.clone();
         for t in &mut self.tools {
             if matches!(t.status, ToolStatus::Queued) && t.result.is_none() {
-                let mut block = synthetic_error_block(t.id, reason, desc.as_deref());
+                let mut block = synthetic_error_block(t.id.clone(), reason, desc.as_deref());
                 set_provider_id(&mut block, t.provider_id.clone());
                 t.result = Some(block);
                 t.status = ToolStatus::Completed;
@@ -1565,13 +1565,13 @@ mod tests {
         let id1 = ToolUseId::new();
         let id2 = ToolUseId::new();
         let result_block = ContentBlock::ToolResult {
-            tool_use_id: id0,
+            tool_use_id: id0.clone(),
             content: "done".into(),
             is_error: false,
             provider_tool_use_id: None,
         };
         let result_block2 = ContentBlock::ToolResult {
-            tool_use_id: id2,
+            tool_use_id: id2.clone(),
             content: "also done".into(),
             is_error: false,
             provider_tool_use_id: None,
@@ -1648,7 +1648,7 @@ mod tests {
             modifiers: Vec::new(),
         });
         exec.tools.push(TrackedTool {
-            id: id1,
+            id: id1.clone(),
             name: "SafeTool".into(),
             input: json!({}),
             provider_id: None,

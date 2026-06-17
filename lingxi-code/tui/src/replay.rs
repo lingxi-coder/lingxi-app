@@ -179,7 +179,7 @@ fn push_user_block(
             let result = serde_json::Value::String(content.clone());
             let _ = is_error; // is_error is not carried on RenderedMessage::UserToolResult
             out.push(RenderedMessage::UserToolResult {
-                id: *tool_use_id,
+                id: tool_use_id.clone(),
                 tool,
                 result,
                 old_string,
@@ -213,10 +213,10 @@ fn push_assistant_block(
             });
         }
         ContentBlock::ToolUse { id, name, input, .. } => {
-            tool_inputs.insert(*id, input.clone());
-            tool_names.insert(*id, name.clone());
+            tool_inputs.insert(id.clone(), input.clone());
+            tool_names.insert(id.clone(), name.clone());
             out.push(RenderedMessage::AssistantToolUse {
-                id: *id,
+                id: id.clone(),
                 tool: name.clone(),
                 input: input.clone(),
             });
@@ -284,7 +284,7 @@ mod tests {
             ConversationMessage::Assistant {
                 id: MessageId::new(),
                 content: vec![ContentBlock::ToolUse {
-                    id,
+                    id: id.clone(),
                     name: "Edit".into(),
                     input: serde_json::json!({
                         "file_path": "/tmp/x.rs",
@@ -298,7 +298,7 @@ mod tests {
             ConversationMessage::User {
                 id: MessageId::new(),
                 content: vec![ContentBlock::ToolResult {
-                    tool_use_id: id,
+                    tool_use_id: id.clone(),
                     content: "edited".into(),
                     is_error: false,
                     provider_tool_use_id: None,
@@ -439,7 +439,7 @@ mod tests {
         // The persisted transcript serializes a `ToolUseId` via its derived
         // `Serialize` (a bare UUID), NOT its `tu:`-prefixed `Display`. Build the
         // fixture id the same way the engine writes it so the decode round-trips.
-        let id_wire = serde_json::to_value(id).unwrap();
+        let id_wire = serde_json::to_value(id.clone()).unwrap();
         let msgs = vec![
             jsonl(
                 "assistant",

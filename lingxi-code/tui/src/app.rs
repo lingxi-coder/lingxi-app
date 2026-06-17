@@ -560,7 +560,7 @@ pub fn dispatch(action: KeyAction, st: &mut AppState) -> bool {
             false
         }
         KeyAction::ToggleExpanded => {
-            if let Some(id) = st.focused_tool_id {
+            if let Some(id) = st.focused_tool_id.clone() {
                 st.toggle_expanded(&id);
             }
             false
@@ -1021,7 +1021,7 @@ pub fn render_screen(
     let scroll_offset = state.scroll_offset;
     let show_spinner = should_render_spinner(state);
     let expanded = state.expanded.clone();
-    let focused_tool_id = state.focused_tool_id;
+    let focused_tool_id = state.focused_tool_id.clone();
     // (M7-07) Thread the overlay state so the REPL screen can draw the active
     // palette/completion dropdown above the prompt.
     let palette = Some(state.palette.clone());

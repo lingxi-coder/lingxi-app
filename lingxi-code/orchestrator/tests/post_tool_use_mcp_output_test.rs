@@ -230,7 +230,7 @@ fn two_turn_api(tool_use_id: ToolUseId, tool_name: &str) -> Arc<MockApiClient> {
     Arc::new(MockApiClient::new(vec![
         mock_message_response(
             vec![LlmContentBlock::ToolCall {
-                id: tool_use_id.as_uuid().to_string(),
+                id: tool_use_id.to_string(),
                 name: tool_name.into(),
                 input: json!({}),
             }],
@@ -260,7 +260,7 @@ async fn turn2_result_payload(api: &MockApiClient) -> String {
 #[tokio::test]
 async fn mcp_tool_output_is_rewritten_by_hook() {
     let tool_use_id = ToolUseId::new();
-    let api = two_turn_api(tool_use_id, "McpTool");
+    let api = two_turn_api(tool_use_id.clone(), "McpTool");
     let hooks = exec_with(Arc::new(RewriteOutputHook), "rewrite-mcp-output").await;
     let mut tools = ToolRegistry::new();
     tools.register_builtin(Arc::new(ConfigurableTool {
@@ -288,7 +288,7 @@ async fn non_mcp_tool_output_is_not_mutated() {
     // The SAME rewriting hook, but the tool is NOT an MCP tool → the
     // `isMcpTool` gate suppresses the mutation; the result is unchanged.
     let tool_use_id = ToolUseId::new();
-    let api = two_turn_api(tool_use_id, "PlainTool");
+    let api = two_turn_api(tool_use_id.clone(), "PlainTool");
     let hooks = exec_with(Arc::new(RewriteOutputHook), "rewrite-mcp-output").await;
     let mut tools = ToolRegistry::new();
     tools.register_builtin(Arc::new(ConfigurableTool {
@@ -316,7 +316,7 @@ async fn mcp_tool_with_no_mutating_hook_is_unchanged() {
     // An MCP tool + a PostToolUse hook that does NOT set updatedMCPToolOutput →
     // strict no-op: the model sees the tool's own output.
     let tool_use_id = ToolUseId::new();
-    let api = two_turn_api(tool_use_id, "McpTool");
+    let api = two_turn_api(tool_use_id.clone(), "McpTool");
     let hooks = exec_with(Arc::new(ObserverHook), "observe-only").await;
     let mut tools = ToolRegistry::new();
     tools.register_builtin(Arc::new(ConfigurableTool {

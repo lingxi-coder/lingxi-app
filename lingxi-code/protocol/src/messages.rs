@@ -429,7 +429,7 @@ mod tests {
         // Backward compat: a `None` provider_id MUST NOT appear on the wire, so
         // existing locked JSONL fixtures stay byte-identical.
         let block = ContentBlock::ToolUse {
-            id: ToolUseId::from_uuid(uuid::Uuid::nil()),
+            id: ToolUseId::from("toolu_01ABC"),
             name: "Read".into(),
             input: serde_json::json!({"path": "/tmp/x"}),
             provider_id: None,
@@ -476,7 +476,7 @@ mod tests {
     #[test]
     fn tool_result_provider_tool_use_id_skipped_when_none_preserved_when_some() {
         let none_block = ContentBlock::ToolResult {
-            tool_use_id: ToolUseId::from_uuid(uuid::Uuid::nil()),
+            tool_use_id: ToolUseId::from("toolu_01ABC"),
             content: "ok".into(),
             is_error: false,
             provider_tool_use_id: None,
@@ -495,5 +495,38 @@ mod tests {
             v.get("provider_tool_use_id").and_then(|x| x.as_str()),
             Some("toolu_01ABC")
         );
+    }
+
+    #[test]
+    fn tool_use_canonical_id_serializes_as_bare_provider_string() {
+        // Byte parity with claude-code: the tool_use `id` is the canonical
+        // provider string and NO `provider_id` sidecar appears on the wire.
+        let block = ContentBlock::ToolUse {
+            id: ToolUseId::from("toolu_01ABC"),
+            name: "Read".into(),
+            input: serde_json::json!({}),
+            provider_id: None,
+        };
+        let s = serde_json::to_string(&block).unwrap();
+        assert_eq!(
+            s,
+            r#"{"type":"tool_use","id":"toolu_01ABC","name":"Read","input":{}}"#
+        );
+    }
+
+    #[test]
+    fn tool_result_canonical_id_serializes_as_bare_provider_string() {
+        let block = ContentBlock::ToolResult {
+            tool_use_id: ToolUseId::from("toolu_01ABC"),
+            content: "ok".into(),
+            is_error: false,
+            provider_tool_use_id: None,
+        };
+        let v = serde_json::to_value(&block).unwrap();
+        assert_eq!(
+            v.get("tool_use_id").and_then(|x| x.as_str()),
+            Some("toolu_01ABC")
+        );
+        assert!(v.get("provider_tool_use_id").is_none());
     }
 }

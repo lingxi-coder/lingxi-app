@@ -479,7 +479,7 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
                 name,
                 input,
                 provider_id,
-            } => Some((*id, name.clone(), input.clone(), provider_id.clone())),
+            } => Some((id.clone(), name.clone(), input.clone(), provider_id.clone())),
             _ => None,
         })
         .collect();
@@ -518,7 +518,7 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
             // the JSONL wire). No-op when `injected_messages` is empty.
             for (m, tool_use_id) in &injected_messages {
                 s.history.push(m.clone());
-                s.injected_message_sources.insert(m.id(), *tool_use_id);
+                s.injected_message_sources.insert(m.id(), tool_use_id.clone());
             }
         }
         // M5-07 T13: persist the tool_result user message. Best-effort.
@@ -978,25 +978,15 @@ pub(crate) fn translate_response_blocks(content: &[LlmContentBlock]) -> Vec<Cont
         .filter_map(|b| match b {
             LlmContentBlock::Text { text, .. } => Some(ContentBlock::Text { text: text.clone() }),
             LlmContentBlock::ToolCall { id, name, input } => {
-                // `llm_client::ContentBlock::ToolCall.id` is a plain `String`;
-                // `protocol::ContentBlock::ToolUse.id` is a `ToolUseId` (newtype
-                // wrapping a UUID, serde transparent). Try to round-trip via JSON;
-                // if the string is not a UUID (e.g. Anthropic `toolu_...`) mint a fresh
-                // UUID so history stays coherent (Task 6 will preserve the Anthropic id
-                // separately in provider_metadata).
-                let tool_use_id = serde_json::from_value::<ToolUseId>(
-                    serde_json::Value::String(id.clone()),
-                )
-                .unwrap_or_else(|_| ToolUseId::new());
-                // Preserve the verbatim provider id (e.g. Anthropic `toolu_…`)
-                // so the egress `tool_use.id` / `tool_result.tool_use_id` replay
-                // exactly what the provider issued. The minted `ToolUseId` above
-                // is for internal identity only.
+                // The provider-issued id (e.g. Anthropic `toolu_…`, OpenAI
+                // `call_…`) IS the canonical `ToolUseId`, so JSONL/resume bytes
+                // match upstream claude-code. The `provider_id` sidecar is left
+                // `None` (vestigial) — the id already carries the canonical value.
                 Some(ContentBlock::ToolUse {
-                    id: tool_use_id,
+                    id: ToolUseId::from(id.clone()),
                     name: name.clone(),
                     input: input.clone(),
-                    provider_id: Some(id.clone()),
+                    provider_id: None,
                 })
             }
             LlmContentBlock::Reasoning { text, signature } => Some(ContentBlock::Thinking {
@@ -1106,7 +1096,7 @@ pub(crate) async fn dispatch_tool_uses_tracked(
             // Shared builder so this parity-critical string lives in one place
             // (also used by the streaming executor's add_tool).
             let result_block = crate::streaming_executor::synthetic_unknown_tool(
-                *tool_use_id,
+                tool_use_id.clone(),
                 name,
                 provider_id.clone(),
             );
@@ -1134,7 +1124,7 @@ pub(crate) async fn dispatch_tool_uses_tracked(
             crate::schema_validation::validate_tool_input_schema(tool_handle.input_schema(), input)
         {
             let result_block = ContentBlock::ToolResult {
-                tool_use_id: *tool_use_id,
+                tool_use_id: tool_use_id.clone(),
                 content: format!("<tool_use_error>InputValidationError: {detail}</tool_use_error>"),
                 is_error: true,
                 provider_tool_use_id: provider_id.clone(),
@@ -1168,7 +1158,7 @@ pub(crate) async fn dispatch_tool_uses_tracked(
                 append_system_prompt: None,
             },
             messages,
-            tool_use_id: Some(*tool_use_id),
+            tool_use_id: Some(tool_use_id.clone()),
             agent_id: None,
             content_replacement_state: None,
             session: Some(orch.session.clone()),
@@ -1189,7 +1179,7 @@ pub(crate) async fn dispatch_tool_uses_tracked(
             tool_handle.validate_input(input, &ctx).await
         {
             let result_block = ContentBlock::ToolResult {
-                tool_use_id: *tool_use_id,
+                tool_use_id: tool_use_id.clone(),
                 content: format!("<tool_use_error>{msg}</tool_use_error>"),
                 is_error: true,
                 provider_tool_use_id: provider_id.clone(),
@@ -1217,7 +1207,7 @@ pub(crate) async fn dispatch_tool_uses_tracked(
         let pre_event = HookEvent::PreToolUse {
             tool_name: name.clone(),
             tool_input: input.clone(),
-            tool_use_id: *tool_use_id,
+            tool_use_id: tool_use_id.clone(),
         };
         let pre_started = std::time::Instant::now();
         tracing::info!(
@@ -1272,7 +1262,7 @@ pub(crate) async fn dispatch_tool_uses_tracked(
                 duration_ms = pre_dur_ms,
             );
             let result_block = ContentBlock::ToolResult {
-                tool_use_id: *tool_use_id,
+                tool_use_id: tool_use_id.clone(),
                 content: fold_pre_context(format!("Hook blocked: {reason}")),
                 is_error: true,
                 provider_tool_use_id: provider_id.clone(),
@@ -1367,7 +1357,7 @@ pub(crate) async fn dispatch_tool_uses_tracked(
                         let denied_event = HookEvent::PermissionDenied {
                             tool_name: name.clone(),
                             tool_input: effective_input.clone(),
-                            tool_use_id: *tool_use_id,
+                            tool_use_id: tool_use_id.clone(),
                             reason: reason.clone(),
                         };
                         let _denied_agg =
@@ -1420,7 +1410,7 @@ pub(crate) async fn dispatch_tool_uses_tracked(
                 // above — claude-code fires it only for auto-mode classifier
                 // denials, not for the rule/mode/plan denials that also reach here.
                 let result_block = ContentBlock::ToolResult {
-                    tool_use_id: *tool_use_id,
+                    tool_use_id: tool_use_id.clone(),
                     content: fold_pre_context(format!("Permission denied: {reason}")),
                     is_error: true,
                     provider_tool_use_id: provider_id.clone(),
@@ -1493,7 +1483,7 @@ pub(crate) async fn dispatch_tool_uses_tracked(
                 // id as `sourceToolUseID`) for the caller's in-memory
                 // `injected_message_sources` side-table.
                 injected_messages
-                    .extend(result.new_messages.into_iter().map(|m| (m, *tool_use_id)));
+                    .extend(result.new_messages.into_iter().map(|m| (m, tool_use_id.clone())));
                 // SKILLEXEC.3 (model scope): stash any one-shot `context_modifier`
                 // for the caller to fold POST-BATCH. NOT applied to the per-tool
                 // `ctx` here (which is discarded at loop end) and NOT applied
@@ -1555,14 +1545,14 @@ pub(crate) async fn dispatch_tool_uses_tracked(
                 tool_name: name.clone(),
                 tool_input: effective_input.clone(),
                 error,
-                tool_use_id: *tool_use_id,
+                tool_use_id: tool_use_id.clone(),
             }
         } else {
             HookEvent::PostToolUse {
                 tool_name: name.clone(),
                 tool_input: effective_input.clone(),
                 tool_output: emit_payload.clone(),
-                tool_use_id: *tool_use_id,
+                tool_use_id: tool_use_id.clone(),
             }
         };
         let post_started = std::time::Instant::now();
@@ -1753,7 +1743,7 @@ pub(crate) async fn dispatch_tool_uses_tracked(
         }
 
         results.push(ContentBlock::ToolResult {
-            tool_use_id: *tool_use_id,
+            tool_use_id: tool_use_id.clone(),
             content: final_content,
             is_error,
             provider_tool_use_id: provider_id.clone(),
@@ -3255,7 +3245,7 @@ mod pre_tool_hook_tests {
             PathBuf::from("/tmp"),
         );
         let skill_tu = ToolUseId::new();
-        let uses = vec![(skill_tu, "Inject".to_string(), json!({}), None)];
+        let uses = vec![(skill_tu.clone(), "Inject".to_string(), json!({}), None)];
         let (results, _prevent, injected, _mods) =
             dispatch_tool_uses_tracked(&orch, &uses, None).await.unwrap();
         // The tool_result block still rides the first tuple element.
@@ -3288,7 +3278,7 @@ mod pre_tool_hook_tests {
         let tu = ToolUseId::new();
         let api_resp = mock_message_response(
             vec![llm_client::ContentBlock::ToolCall {
-                id: tu.as_uuid().to_string(),
+                id: tu.to_string(),
                 name: "Inject".into(),
                 input: json!({}),
             }],
@@ -3338,7 +3328,7 @@ mod pre_tool_hook_tests {
         let tu = ToolUseId::new();
         let api_resp = mock_message_response(
             vec![llm_client::ContentBlock::ToolCall {
-                id: tu.as_uuid().to_string(),
+                id: tu.to_string(),
                 name: "Echo".into(),
                 input: json!({}),
             }],
@@ -3376,7 +3366,7 @@ mod pre_tool_hook_tests {
         let tu = ToolUseId::new();
         let api_resp = mock_message_response(
             vec![llm_client::ContentBlock::ToolCall {
-                id: tu.as_uuid().to_string(),
+                id: tu.to_string(),
                 name: "Inject".into(),
                 input: json!({}),
             }],
@@ -3484,7 +3474,7 @@ mod pre_tool_hook_tests {
         let tu = ToolUseId::new();
         let api_resp = mock_message_response(
             vec![llm_client::ContentBlock::ToolCall {
-                id: tu.as_uuid().to_string(),
+                id: tu.to_string(),
                 name: "Echo".into(),
                 input: json!({}),
             }],
@@ -3513,7 +3503,7 @@ mod pre_tool_hook_tests {
         let tu = ToolUseId::new();
         let api_resp = mock_message_response(
             vec![llm_client::ContentBlock::ToolCall {
-                id: tu.as_uuid().to_string(),
+                id: tu.to_string(),
                 name: "Echo".into(),
                 input: json!({}),
             }],

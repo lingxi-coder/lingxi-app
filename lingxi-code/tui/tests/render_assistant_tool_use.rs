@@ -7,7 +7,7 @@ use tui::components::messages::assistant_tool_use::{
 };
 
 fn id() -> ToolUseId {
-    ToolUseId::nil()
+    ToolUseId::from("toolu_test")
 }
 
 #[test]

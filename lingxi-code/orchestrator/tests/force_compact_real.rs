@@ -266,7 +266,7 @@ fn history_is_valid(history: &[ConversationMessage]) -> bool {
             ConversationMessage::Assistant { content, .. } => {
                 for b in content {
                     if let ContentBlock::ToolUse { id, .. } = b {
-                        open_tool_uses.insert(*id);
+                        open_tool_uses.insert(id.clone());
                     }
                 }
             }
@@ -278,7 +278,7 @@ fn history_is_valid(history: &[ConversationMessage]) -> bool {
                         if !open_tool_uses.contains(tool_use_id) {
                             return false;
                         }
-                        satisfied.insert(*tool_use_id);
+                        satisfied.insert(tool_use_id.clone());
                     }
                 }
             }

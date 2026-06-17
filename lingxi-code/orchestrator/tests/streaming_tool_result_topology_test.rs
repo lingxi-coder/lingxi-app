@@ -128,13 +128,13 @@ async fn streaming_tool_results_are_per_result_assistant_parented() {
     let id_c = ToolUseId::new();
     let turn1 = scripted![
         message_start("m1", "claude-opus-4-7"),
-        content_block_start_tool_use(0, id_a, "Alpha"),
+        content_block_start_tool_use(0, id_a.clone(), "Alpha"),
         input_json_delta(0, "{}"),
         content_block_stop(0),
-        content_block_start_tool_use(1, id_b, "Bravo"),
+        content_block_start_tool_use(1, id_b.clone(), "Bravo"),
         input_json_delta(1, "{}"),
         content_block_stop(1),
-        content_block_start_tool_use(2, id_c, "Charlie"),
+        content_block_start_tool_use(2, id_c.clone(), "Charlie"),
         input_json_delta(2, "{}"),
         content_block_stop(2),
         message_delta_stop("tool_use"),
@@ -206,7 +206,7 @@ async fn streaming_tool_results_are_per_result_assistant_parented() {
     let result_ids: Vec<ToolUseId> = tool_result_msgs
         .iter()
         .map(|content| match &content[0] {
-            ContentBlock::ToolResult { tool_use_id, .. } => *tool_use_id,
+            ContentBlock::ToolResult { tool_use_id, .. } => tool_use_id.clone(),
             _ => unreachable!(),
         })
         .collect();

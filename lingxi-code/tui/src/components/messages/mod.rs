@@ -71,7 +71,7 @@ pub fn render_entry_to_string(entry: &RenderedMessage, focused: bool, expanded: 
         RenderedMessage::SystemText { body, .. } => body.clone(),
         RenderedMessage::AssistantToolUse { id, tool, input } => {
             render_assistant_tool_use_to_string(AssistantToolUseProps {
-                id: *id,
+                id: id.clone(),
                 tool: tool.clone(),
                 input: input.clone(),
                 expanded,
@@ -86,7 +86,7 @@ pub fn render_entry_to_string(entry: &RenderedMessage, focused: bool, expanded: 
             new_string,
             file_path,
         } => render_user_tool_result_to_string(UserToolResultProps {
-            id: *id,
+            id: id.clone(),
             tool: tool.clone(),
             result: result.clone(),
             expanded,

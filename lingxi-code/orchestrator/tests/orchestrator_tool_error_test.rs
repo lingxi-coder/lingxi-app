@@ -84,7 +84,7 @@ async fn tool_error_becomes_tool_result_with_is_error_true_and_loop_continues() 
     let tool_use_id = ToolUseId::new();
     let r1 = mock_message_response(
         vec![LlmContentBlock::ToolCall {
-            id: tool_use_id.as_uuid().to_string(),
+            id: tool_use_id.to_string(),
             name: "AlwaysFail".into(),
             input: json!({}),
         }],

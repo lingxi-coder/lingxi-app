@@ -492,7 +492,7 @@ class EngineConversationSource private constructor(
 
     override suspend fun refreshMcpServers() {
         try {
-            handle.submit(ClientCommand.RefreshListings(which = listOf(ListingKindDto.Mcp)))
+            handle.submit(ClientCommand.RefreshListings(which = listOf(ListingKindDto.MCP)))
         } catch (_: Throwable) {
             // A RefreshListings that can't be delivered leaves the MCP list as-is;
             // the settings page keeps whatever it last rendered (mock if empty).

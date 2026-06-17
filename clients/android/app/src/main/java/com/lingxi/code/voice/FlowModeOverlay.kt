@@ -35,8 +35,9 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -58,12 +59,14 @@ import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.runtime.withFrameNanos
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import android.speech.tts.TextToSpeech
 import com.lingxi.code.components.LXIcon
 import com.lingxi.code.components.LXIconName
 import com.lingxi.code.components.oklch
-import kotlinx.coroutines.delay
+import java.util.Locale
 import kotlin.math.PI
 import kotlin.math.cos
 import kotlin.math.min
@@ -81,8 +84,6 @@ import kotlin.math.sin
 // text input. Opened by a TAP on the composer mic.
 
 enum class OrbPhase { Idle, Listening, Thinking, Speaking }
-private enum class OrbRole { User, Ai }
-
 private class OrbParticle(var a: Float, val rad: Float, val sp: Float, val sz: Float, val tw: Float)
 private class OrbStar(val x: Float, val y: Float, val z: Float, val tw: Float)
 
@@ -276,9 +277,6 @@ private fun LaunchedFrameLoop(onFrame: (now: Long, dt: Float) -> Unit) {
 
 // MARK: - FlowMode overlay
 
-private const val SCRIPT_USER = "灵犀，把我今天剩下的安排理一理"
-private const val SCRIPT_AI = "下午两点是设计评审，四点和增长团队对齐目标。我已经把评审要点整理好放进备忘——要现在念给你听吗？"
-
 /**
  * The full-screen FlowMode overlay. [visible] is hoisted (composer mic tap flips
  * it on; the close button flips it off). [assistantName] labels the speaking
@@ -289,6 +287,11 @@ fun FlowModeOverlay(
     visible: Boolean,
     assistantName: String,
     inputDialog: Boolean,
+    streaming: Boolean,
+    assistantText: String,
+    onSend: (String) -> Unit,
+    onCancel: () -> Unit,
+    onListen: (onResult: (String?) -> Unit) -> Unit,
     onClose: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -298,46 +301,71 @@ fun FlowModeOverlay(
         exit = fadeOut(tween(300)),
         modifier = modifier,
     ) {
-        FlowModeContent(assistantName = assistantName, inputDialog = inputDialog, onClose = onClose)
+        FlowModeContent(assistantName, inputDialog, streaming, assistantText, onSend, onCancel, onListen, onClose)
     }
 }
 
 @Composable
-private fun FlowModeContent(assistantName: String, inputDialog: Boolean, onClose: () -> Unit) {
+private fun FlowModeContent(
+    assistantName: String,
+    inputDialog: Boolean,
+    streaming: Boolean,
+    assistantText: String,
+    onSend: (String) -> Unit,
+    onCancel: () -> Unit,
+    onListen: (onResult: (String?) -> Unit) -> Unit,
+    onClose: () -> Unit,
+) {
     var phase by remember { mutableStateOf(OrbPhase.Idle) }
-    var caption by remember { mutableStateOf("") }
-    var role by remember { mutableStateOf(OrbRole.User) }
-    var runId by remember { mutableIntStateOf(0) }
-    var pendingText by remember { mutableStateOf<String?>(null) }
+    var userCaption by remember { mutableStateOf("") }
+    var didSend by remember { mutableStateOf(false) }
     var typing by remember { mutableStateOf(false) }
     var draft by remember { mutableStateOf("") }
-
     val name = assistantName.ifBlank { "灵犀" }
+    val (speak, stopSpeak) = rememberTts()
 
-    // Scripted flow — restarts whenever runId changes (structured-concurrency
-    // cancellation handles interruption cleanly). pendingText != null ⇒ a typed
-    // message jumps straight to thinking → speaking.
-    androidx.compose.runtime.LaunchedEffect(runId) {
-        suspend fun typeInto(text: String, set: (String) -> Unit) {
-            for (i in 1..text.length) { set(text.substring(0, i)); delay((34..70).random().toLong()) }
+    // Start a one-shot listen → send → (engine streams the reply) cycle.
+    fun listen() {
+        onCancel(); stopSpeak(); userCaption = ""; didSend = false; phase = OrbPhase.Listening
+        onListen { text ->
+            if (!text.isNullOrBlank()) {
+                userCaption = text; didSend = true; phase = OrbPhase.Thinking; onSend(text)
+            } else if (phase == OrbPhase.Listening) {
+                phase = OrbPhase.Idle
+            }
         }
-        val submit = pendingText
-        if (submit == null) {
-            role = OrbRole.User; caption = ""; phase = OrbPhase.Listening
-            delay(700)
-            typeInto(SCRIPT_USER) { caption = it }
-            delay(420)
-            phase = OrbPhase.Thinking; delay(1500)
-        } else {
-            role = OrbRole.User; caption = submit; phase = OrbPhase.Listening
-            delay(600)
-            phase = OrbPhase.Thinking; delay(1500)
-        }
-        role = OrbRole.Ai; caption = ""; phase = OrbPhase.Speaking
-        typeInto(SCRIPT_AI) { caption = it }
-        delay(900)
-        phase = OrbPhase.Idle; caption = ""
     }
+    fun submitTyped(text: String) {
+        val t = text.trim()
+        if (t.isEmpty()) return
+        userCaption = t; didSend = true; phase = OrbPhase.Thinking; onSend(t)
+    }
+
+    // Auto-listen on open; cancel the turn + stop TTS on close.
+    LaunchedEffect(Unit) { listen() }
+    DisposableEffect(Unit) { onDispose { onCancel(); stopSpeak() } }
+    // First assistant delta flips thinking → speaking.
+    LaunchedEffect(assistantText) {
+        if (phase == OrbPhase.Thinking && assistantText.isNotEmpty()) phase = OrbPhase.Speaking
+    }
+    // Turn end (streaming → false) settles the orb and speaks the reply aloud.
+    LaunchedEffect(streaming) {
+        if (streaming) {
+            if (phase == OrbPhase.Thinking && assistantText.isNotEmpty()) phase = OrbPhase.Speaking
+        } else if (phase == OrbPhase.Thinking || phase == OrbPhase.Speaking) {
+            phase = OrbPhase.Idle; speak(assistantText)
+        }
+    }
+
+    // The live caption: the user's recognized text while thinking, the streaming
+    // assistant reply while speaking.
+    val caption = when (phase) {
+        OrbPhase.Listening -> ""
+        OrbPhase.Thinking -> userCaption
+        OrbPhase.Speaking -> assistantText
+        OrbPhase.Idle -> if (didSend) assistantText else ""
+    }
+    val isAi = phase == OrbPhase.Speaking || (phase == OrbPhase.Idle && didSend)
 
     val label = when (phase) {
         OrbPhase.Idle, OrbPhase.Listening -> "聆听中"
@@ -369,7 +397,7 @@ private fun FlowModeContent(assistantName: String, inputDialog: Boolean, onClose
                 .clickable(
                     interactionSource = remember { MutableInteractionSource() },
                     indication = null,
-                ) { pendingText = null; runId++ },
+                ) { listen() },
         )
 
         // top bar
@@ -414,7 +442,6 @@ private fun FlowModeContent(assistantName: String, inputDialog: Boolean, onClose
                 if (caption.isEmpty()) {
                     Text(sub, color = oklch(0.60f, 0.03f, 270f), fontSize = 14.sp, textAlign = TextAlign.Center)
                 } else {
-                    val isAi = role == OrbRole.Ai
                     val shown = if (isAi) caption else "“$caption”"
                     Text(
                         shown,
@@ -437,7 +464,7 @@ private fun FlowModeContent(assistantName: String, inputDialog: Boolean, onClose
                 onCancel = { typing = false; draft = "" },
                 onSend = {
                     val txt = draft.trim()
-                    if (txt.isNotEmpty()) { typing = false; draft = ""; pendingText = txt; runId++ }
+                    if (txt.isNotEmpty()) { typing = false; draft = ""; submitTyped(txt) }
                 },
             )
         }
@@ -540,4 +567,27 @@ private fun FlowTextInput(
             }
         }
     }
+}
+
+/**
+ * A best-effort device TTS handle for speaking the assistant reply aloud.
+ * Returns (speak, stop); the synthesizer is created/torn down with the caller.
+ */
+@Composable
+private fun rememberTts(): Pair<(String) -> Unit, () -> Unit> {
+    val context = LocalContext.current
+    val holder = remember { mutableStateOf<TextToSpeech?>(null) }
+    DisposableEffect(Unit) {
+        var engine: TextToSpeech? = null
+        engine = TextToSpeech(context.applicationContext) { status ->
+            if (status == TextToSpeech.SUCCESS) engine?.language = Locale.CHINESE
+        }
+        holder.value = engine
+        onDispose { engine?.stop(); engine?.shutdown(); holder.value = null }
+    }
+    val speak: (String) -> Unit = { text ->
+        if (text.isNotBlank()) holder.value?.speak(text, TextToSpeech.QUEUE_FLUSH, null, "orb")
+    }
+    val stop: () -> Unit = { holder.value?.stop() }
+    return speak to stop
 }

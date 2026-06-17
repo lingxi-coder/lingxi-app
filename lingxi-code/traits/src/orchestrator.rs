@@ -281,6 +281,70 @@ pub struct ModelListing {
     pub provider_label: String,
 }
 
+/// Parse a (possibly `profile/model`) text reference against the live model
+/// listings into `(request_model, profile)`.
+///
+/// Qualified only when the first `/`-segment is a known profile (`provider_id`)
+/// AND the remainder is a `request_model` under that profile; otherwise the
+/// whole string is returned as a bare id (so openrouter ids that contain `/`,
+/// e.g. `openai/gpt-4o`, route as bare ids). `profile = None` ⇒ unscoped.
+#[must_use]
+pub fn parse_model_ref(input: &str, listings: &[ModelListing]) -> (String, Option<String>) {
+    if let Some((prefix, rest)) = input.split_once('/') {
+        if listings.iter().any(|l| l.provider_id == prefix && l.request_model == rest) {
+            return (rest.to_string(), Some(prefix.to_string()));
+        }
+    }
+    (input.to_string(), None)
+}
+
+#[cfg(test)]
+mod parse_model_ref_tests {
+    use super::{parse_model_ref, ModelListing};
+    fn listing(provider_id: &str, request_model: &str) -> ModelListing {
+        ModelListing {
+            display_model: request_model.to_string(),
+            request_model: request_model.to_string(),
+            provider_id: provider_id.to_string(),
+            provider_label: provider_id.to_string(),
+        }
+    }
+    fn fixture() -> Vec<ModelListing> {
+        vec![
+            listing("openai", "gpt-5.2"),
+            listing("openai", "gpt-4o"),
+            listing("github-copilot", "gpt-5.2"),
+            listing("openrouter", "openai/gpt-4o"),
+        ]
+    }
+    #[test]
+    fn bare_id_no_slash() {
+        assert_eq!(parse_model_ref("gpt-5.2", &fixture()), ("gpt-5.2".into(), None));
+    }
+    #[test]
+    fn qualified_two_segments() {
+        assert_eq!(parse_model_ref("openai/gpt-5.2", &fixture()), ("gpt-5.2".into(), Some("openai".into())));
+        assert_eq!(parse_model_ref("github-copilot/gpt-5.2", &fixture()), ("gpt-5.2".into(), Some("github-copilot".into())));
+    }
+    #[test]
+    fn two_segment_prefers_qualified_when_model_in_profile() {
+        assert_eq!(parse_model_ref("openai/gpt-4o", &fixture()), ("gpt-4o".into(), Some("openai".into())));
+    }
+    #[test]
+    fn fully_qualified_openrouter_slash_id() {
+        assert_eq!(parse_model_ref("openrouter/openai/gpt-4o", &fixture()), ("openai/gpt-4o".into(), Some("openrouter".into())));
+    }
+    #[test]
+    fn unknown_prefix_is_bare() {
+        assert_eq!(parse_model_ref("foo/bar", &fixture()), ("foo/bar".into(), None));
+    }
+    #[test]
+    fn degenerate_inputs_safe() {
+        assert_eq!(parse_model_ref("", &fixture()), ("".into(), None));
+        assert_eq!(parse_model_ref("/", &fixture()), ("/".into(), None));
+    }
+}
+
 /// Public handle to the orchestrator that slash commands operate against.
 ///
 /// Wired in M5-09 (slash-command surface). M5-02 only defines the trait —

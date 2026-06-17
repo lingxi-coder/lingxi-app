@@ -229,10 +229,20 @@ fn build_orch_with_cancel_tool(api: Arc<MockStreamingApiClient>) -> Conversation
 /// tool is in flight. The executor must substitute the bare `REJECT_MESSAGE` for
 /// that tool, PERSIST it (model-visible), and the turn must END GRACEFULLY with
 /// outcome `Cancelled` — NOT drop the turn (so the result IS in history).
+///
+/// CRITICAL parity guard (claude-code `query.ts:1485` `aborted_tools` /
+/// `query.ts:1015` `aborted_streaming`): after the interrupted tool results are
+/// drained, the turn loop MUST STOP — it must NOT issue a fresh model round-trip
+/// with the REJECT_MESSAGE results. To prove this we script ONLY the single
+/// tool_use turn (NO second turn). If the loop incorrectly continued it would call
+/// `stream()` a second time → the mock script is exhausted → `Err(Transport)` →
+/// `.unwrap()` below panics. We additionally assert EXACTLY ONE model call was made.
 #[tokio::test]
-async fn user_interrupt_rejects_in_flight_tool_and_records_reject_message() {
+async fn user_interrupt_rejects_in_flight_tool_and_stops_turn_no_extra_model_call() {
     let id = ToolUseId::new();
     // turn 1: stream the tool_use for the blocking Cancel tool, stop_reason tool_use.
+    // NOTE: deliberately NO turn 2 — a faithful turn loop must NOT call the model
+    // again after a user interrupt drains the synthetic results.
     let turn1 = scripted![
         message_start("m1", "claude-opus-4-7"),
         content_block_start_tool_use(0, id.clone(), "CancelTool"),
@@ -240,18 +250,8 @@ async fn user_interrupt_rejects_in_flight_tool_and_records_reject_message() {
         message_delta_stop("tool_use"),
         message_stop(),
     ];
-    // turn 2: after the (rejected) tool result is appended, the loop continues and
-    // makes a second call — which naturally ends the turn.
-    let turn2 = scripted![
-        message_start("m2", "claude-opus-4-7"),
-        content_block_start_text(0),
-        text_delta(0, "done"),
-        content_block_stop(0),
-        message_delta_stop("end_turn"),
-        message_stop(),
-    ];
-    let api = Arc::new(MockStreamingApiClient::with_turns(vec![turn1, turn2]));
-    let orch = Arc::new(build_orch_with_cancel_tool(api));
+    let api = Arc::new(MockStreamingApiClient::with_turns(vec![turn1]));
+    let orch = Arc::new(build_orch_with_cancel_tool(api.clone()));
     let cancel = CancellationToken::new();
 
     // Fire the user-cancel shortly after the turn starts, so the blocking
@@ -265,12 +265,21 @@ async fn user_interrupt_rejects_in_flight_tool_and_records_reject_message() {
     let outcome = orch
         .run_turn_streaming_with_cancel("call the cancel tool", cancel.clone())
         .await
-        .unwrap();
+        .expect("turn must end gracefully (NOT loop into a 2nd, script-exhausting model call)");
     firer.await.unwrap();
 
     // The turn ended GRACEFULLY (not dropped). The TUI sees Cancelled because the
     // token fired.
     assert_eq!(outcome, TurnOutcome::Cancelled);
+
+    // Parity: EXACTLY ONE model call. A second call would mean the loop continued
+    // after the interrupt (claude-code returns `aborted_tools` with no further
+    // sampling — query.ts:1485).
+    assert_eq!(
+        api.captured_calls().await.len(),
+        1,
+        "user interrupt must STOP the turn: no fresh model call after the REJECT_MESSAGE results"
+    );
 
     // The interrupted tool's REJECT_MESSAGE result is recorded in history as its
     // own user message (model-visible transcript), NOT vanished by a turn drop.
@@ -296,5 +305,41 @@ async fn user_interrupt_rejects_in_flight_tool_and_records_reject_message() {
     assert_eq!(
         content, REJECT_MESSAGE,
         "in-flight Cancel tool must get the bare REJECT_MESSAGE on user interrupt"
+    );
+}
+
+/// Parity guard for Consequence 2 (semantic violation): if the loop incorrectly
+/// continued after a user interrupt, a Block-behavior tool emitted on the
+/// continuation would actually EXECUTE (abort_reason_for returns None for Block
+/// tools). claude-code never reaches that point — it returns `aborted_streaming`
+/// at the TOP of the loop (query.ts:1015) before any further sampling. This test
+/// fires the cancel BEFORE the (text-only) turn completes; with the top-of-loop
+/// guard the turn ends Cancelled and makes exactly one model call.
+#[tokio::test]
+async fn user_interrupt_before_tools_stops_turn_top_of_loop() {
+    // A plain text turn that ends naturally. We fire the cancel during the stream
+    // so the token is set by the time the loop would re-evaluate. Only one turn is
+    // scripted; the top-of-loop guard must prevent any second call.
+    let turn1 = scripted![
+        message_start("m1", "claude-opus-4-7"),
+        content_block_start_text(0),
+        text_delta(0, "thinking"),
+        content_block_stop(0),
+        message_delta_stop("end_turn"),
+        message_stop(),
+    ];
+    let api = Arc::new(MockStreamingApiClient::with_turns(vec![turn1]));
+    let orch = Arc::new(build_orch(api.clone()));
+    let cancel = CancellationToken::new();
+    cancel.cancel(); // already interrupted — loop must not start a fresh call.
+
+    let outcome = orch
+        .run_turn_streaming_with_cancel("hi", cancel.clone())
+        .await
+        .unwrap();
+    assert_eq!(outcome, TurnOutcome::Cancelled);
+    assert!(
+        api.captured_calls().await.is_empty(),
+        "a pre-cancelled turn must make NO model call"
     );
 }

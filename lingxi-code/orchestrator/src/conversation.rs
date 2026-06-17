@@ -2421,6 +2421,12 @@ impl ConversationOrchestrator {
         let mut global_turn_tokens: u64 = 0;
         let mut turn_count: u32 = 0;
         let final_message_id;
+        // DEFERRED-3 / esc-interrupt FIX: id of the most recent persisted message
+        // (the user prompt until the first assistant message lands, then each
+        // turn's assistant id). The top-of-loop user-interrupt guard reports it as
+        // the turn's `final_message_id` when it stops a turn before the next model
+        // call (claude-code `aborted_streaming` — query.ts:1015).
+        let mut last_message_id = user_msg.id();
         loop {
             if self.config.max_turns != 0 && turn_count >= self.config.max_turns {
                 return Err(OrchestratorError::MaxTurnsReached {
@@ -2433,6 +2439,25 @@ impl ConversationOrchestrator {
                 });
             }
             turn_count = turn_count.saturating_add(1);
+
+            // DEFERRED-3 / esc-interrupt FIX: top-of-loop user-interrupt guard
+            // (faithful port of claude-code `query.ts:1015` — the `aborted_streaming`
+            // return). If the user-interrupt token is already set when we reach the
+            // top of an iteration — a pre-cancel, or an abort that fired during the
+            // previous iteration's streaming BEFORE any tool ran — we must STOP
+            // BEFORE issuing the next `callModel`. claude-code consumes any
+            // remaining streaming results then returns `aborted_streaming` with no
+            // further sampling; here the previous iteration already drained its
+            // results into history (the post-tools guard) or there were none, so we
+            // simply break. This is the structural barrier that prevents a
+            // Block-behavior tool on a post-interrupt continuation from ever
+            // executing. `None` token → never fires → identical to before.
+            if user_cancel.as_ref().is_some_and(CancellationToken::is_cancelled) {
+                let cost = self.snapshot_cost_real().await;
+                self.output.emit_end_turn("aborted_streaming", &cost).await;
+                final_message_id = last_message_id;
+                break;
+            }
 
             // In-Loop Compaction Batch 4 (streaming twin): proactively
             // snip+micro+autocompact BEFORE snapshotting history for the
@@ -2727,6 +2752,9 @@ impl ConversationOrchestrator {
                 let mut s = self.session.lock().await;
                 s.history.push(assistant_msg.clone());
             }
+            // DEFERRED-3: advance the interrupt-guard's reported final id to this
+            // turn's assistant message.
+            last_message_id = assistant_id;
             self.persist_message_to_jsonl(&assistant_msg).await;
             // Capture the assistant line's JSONL uuid — each tool result below
             // parents to it (TS `sourceToolAssistantUUID`). `persist_*` advanced
@@ -2821,6 +2849,27 @@ impl ConversationOrchestrator {
                 // injected messages, so there is no race on `session.model`.
                 // Empty for every non-`model:` tool → strict no-op.
                 crate::turn_loop::apply_model_context_modifiers(self, all_modifiers).await;
+            }
+
+            // DEFERRED-3 / esc-interrupt FIX: "we were aborted during tool calls"
+            // (faithful port of claude-code `query.ts:1485` — the `aborted_tools`
+            // return). Once the user-interrupt token has fired, the executor above
+            // already drained the bare REJECT_MESSAGE `tool_result`s into history
+            // (model-visible). The turn MUST now STOP — claude-code returns
+            // `aborted_tools` with NO further `callModel`, honoring REJECT_MESSAGE's
+            // "STOP what you are doing and wait for the user". Looping into the
+            // `Some("tool_use") => continue` arm below would (1) issue a wasted
+            // extra round-trip after every ESC-during-tools and (2) let a
+            // Block-behavior tool emitted on that continuation actually EXECUTE
+            // (`abort_reason_for` returns `None` for Block tools) despite the
+            // interrupt — both of which claude-code structurally prevents by
+            // returning here first. `None` token (plain `run_turn_streaming`) →
+            // never fires → identical to before.
+            if user_cancel.as_ref().is_some_and(CancellationToken::is_cancelled) {
+                let cost = self.snapshot_cost_real().await;
+                self.output.emit_end_turn("aborted_tools", &cost).await;
+                final_message_id = assistant_id;
+                break;
             }
 
             // 6. Decide loop disposition.

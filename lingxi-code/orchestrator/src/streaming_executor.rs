@@ -430,6 +430,7 @@ mod tests {
         assert!(can_execute(&[true, true], true)); // all safe + candidate safe → ok
         assert!(!can_execute(&[true], false));    // candidate unsafe, something running → no
         assert!(!can_execute(&[false], true));    // an unsafe tool running → no
+        assert!(!can_execute(&[true, true], false)); // many safe running, unsafe candidate → no
     }
 
     /// A minimal concurrency-UNSAFE tool for ordering/barrier tests.
@@ -549,6 +550,24 @@ mod tests {
         exec.process_queue();
         assert_eq!(exec.tools[0].status, ToolStatus::Executing);
         assert_eq!(exec.tools[1].status, ToolStatus::Queued);
+    }
+
+    /// [safe, safe, unsafe, safe]: both leading safe tools start; the unsafe is
+    /// a barrier; the trailing safe stays Queued behind it.
+    #[tokio::test]
+    async fn process_queue_two_safe_then_unsafe_barrier() {
+        let orch = orch_with_both_tools();
+        let a = MessageId::new();
+        let mut exec = StreamingToolExecutor::new(&orch);
+        exec.add_tool(ToolUseId::new(), "SafeTool".into(), json!({}), None, a);
+        exec.add_tool(ToolUseId::new(), "SafeTool".into(), json!({}), None, a);
+        exec.add_tool(ToolUseId::new(), "UnsafeTool".into(), json!({}), None, a);
+        exec.add_tool(ToolUseId::new(), "SafeTool".into(), json!({}), None, a);
+        exec.process_queue();
+        assert_eq!(exec.tools[0].status, ToolStatus::Executing);
+        assert_eq!(exec.tools[1].status, ToolStatus::Executing);
+        assert_eq!(exec.tools[2].status, ToolStatus::Queued);
+        assert_eq!(exec.tools[3].status, ToolStatus::Queued);
     }
 
     #[tokio::test]

@@ -571,6 +571,13 @@ impl HookExecutorImpl {
             if let Some(out) = &resp.updated_mcp_tool_output {
                 agg.updated_mcp_tool_output = Some(out.clone());
             }
+            // PermissionDenied `retry`: OR-fold so a single hook saying
+            // `retry: true` flips the aggregate, mirroring TS's
+            // `if (result.retry) hookSaysRetry = true` (`toolExecution.ts:1090`).
+            // A `Some(false)` / `None` leaves it untouched.
+            if resp.retry == Some(true) {
+                agg.retry = true;
+            }
             agg.attachments.extend(resp.attachments.clone());
         }
         agg.all_results.push((hook.id, r));

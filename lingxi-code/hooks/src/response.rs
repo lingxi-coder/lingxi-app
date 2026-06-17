@@ -73,6 +73,18 @@ pub struct HookResponse {
     /// this to PROVIDE the elicitation response; a `decline` action also
     /// drives a `Block` decision. Additive default `None`.
     pub elicitation_response: Option<ElicitationHookResponse>,
+    /// `hookSpecificOutput.retry` a `PermissionDenied` hook returned (claude-code
+    /// `parseHookJSONOutput`, `case 'PermissionDenied': result.retry =
+    /// json.hookSpecificOutput.retry`, `utils/hooks.ts:654-655`). `Some(true)`
+    /// signals the auto-mode classifier deny is now approved and the model may
+    /// retry — the turn loop then pushes the verbatim `isMeta` retry message
+    /// (`toolExecution.ts:1092-1099`). `None` for every other hook (and every
+    /// `PermissionDenied` hook that omits it). DORMANT in the public build: the
+    /// retry message is gated behind the `TRANSCRIPT_CLASSIFIER` feature
+    /// (off externally) AND a classifier-source deny, so a hook setting this
+    /// has no effect unless both hold — faithful to claude-code.
+    #[serde(default)]
+    pub retry: Option<bool>,
 }
 
 /// Structured elicitation answer a hook can return, mirroring claude-code's
@@ -190,4 +202,12 @@ pub struct AggregateHookResult {
     /// dispatch with no mutating `PostToolUse` hook leaves the result unchanged
     /// (byte-identical).
     pub updated_mcp_tool_output: Option<Value>,
+    /// `true` when ANY folded `PermissionDenied` hook returned
+    /// `hookSpecificOutput.retry: true` (claude-code `toolExecution.ts:1090`,
+    /// `if (result.retry) hookSaysRetry = true`). The turn loop reads this — only
+    /// on the gated classifier-deny path — to push the verbatim `isMeta` retry
+    /// message. OR-folded across hooks; defaults to `false`, so a registry with
+    /// no retrying `PermissionDenied` hook leaves it untouched (behavior-neutral
+    /// for existing callers). DORMANT in the public build (see [`HookResponse::retry`]).
+    pub retry: bool,
 }

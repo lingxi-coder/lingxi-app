@@ -862,6 +862,16 @@ pub fn parse_response(
         if let Some(addl) = hs.get("additionalContext").and_then(Value::as_str) {
             resp.additional_context = Some(addl.to_string());
         }
+        // `hookSpecificOutput.retry` (claude-code `parseHookJSONOutput`,
+        // `case 'PermissionDenied': result.retry = json.hookSpecificOutput.retry`,
+        // `utils/hooks.ts:654-655`). The TS switch reads this ONLY for the
+        // `PermissionDenied` case, so we scope it to that event — a hook
+        // returning `retry` on any other event has it ignored, exactly as in TS.
+        if expected_event == "PermissionDenied" {
+            if let Some(retry) = hs.get("retry").and_then(Value::as_bool) {
+                resp.retry = Some(retry);
+            }
+        }
         match hs.get("permissionDecision").and_then(Value::as_str) {
             Some("allow") => {
                 if !matches!(resp.decision, Some(HookDecision::Block)) {

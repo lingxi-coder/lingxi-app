@@ -171,6 +171,17 @@ pub(crate) const MAX_OUTPUT_TOKENS_RECOVERY_NUDGE: &str = concat!(
     "Pick up mid-thought if that is where the cut happened. Break remaining work into smaller pieces.",
 );
 
+/// Byte-exact `isMeta` retry message pushed when a `PermissionDenied` hook
+/// returns `{retry: true}` on the gated auto-mode classifier-deny path. 1:1 with
+/// claude-code `toolExecution.ts:1096`. DORMANT in the external build — the
+/// retry path is double-gated (see [`PERMISSION_DENIED_RETRY_MESSAGE`]'s only
+/// emit site in the deny arm), so this string is never produced on the normal
+/// deny path. LingXi has no protocol `isMeta` flag (cf. the
+/// max-output-tokens nudge above), so the meta message is a plain user text
+/// message carrying these exact bytes.
+pub(crate) const PERMISSION_DENIED_RETRY_MESSAGE: &str =
+    "The PermissionDenied hook indicated this command is now approved. You may retry it if you would like.";
+
 /// Byte-exact user-facing message surfaced when the prompt is too long and the
 /// reactive 413 recovery (Batch 5) is exhausted. 1:1 with claude-code
 /// `errors.ts` `PROMPT_TOO_LONG_ERROR_MESSAGE = 'Prompt is too long'`.
@@ -1411,6 +1422,17 @@ pub(crate) async fn dispatch_tool_uses_tracked(
         // a mutation through while the user is planning — the same principle as a
         // deny rule binding over a hook 'allow' (HOOK.3, issue 1). The session lock
         // is read-and-dropped on this line, so the gate `await` never holds it.
+        // Deny-arm carry-overs from the SOURCED resolution (`toolExecution.ts:1040`).
+        // `PermissionDecision::Deny` (the 2-valued type the deny arm matches) carries
+        // only `reason`, so the richer `ask`-rejection shape rides these outer locals:
+        //   - `reject_content_blocks`: `permissionDecision.contentBlocks`, appended at
+        //     the TOP LEVEL of the deny user message ONLY when behavior is `ask`.
+        //   - `deny_hook_says_retry`: set on the gated classifier-deny path when a
+        //     `PermissionDenied` hook returned `{retry: true}` (`toolExecution.ts:1090`).
+        // Both stay empty/false on every normal deny path, so the common deny message
+        // is byte-identical to before.
+        let mut reject_content_blocks: Vec<ContentBlock> = Vec::new();
+        let mut deny_hook_says_retry = false;
         let plan_mode = orch.session.lock().await.plan_mode;
         let decision = if plan_mode {
             orch.perms.check_in_plan_mode(name, &effective_input).await
@@ -1424,7 +1446,21 @@ pub(crate) async fn dispatch_tool_uses_tracked(
             // hooks fire the way claude-code does.
             match orch.perms.resolve_detailed(name, &effective_input).await {
                 PermissionResolution::Allow => PermissionDecision::Allow,
-                PermissionResolution::Deny { reason, source } => {
+                PermissionResolution::Deny {
+                    reason,
+                    source,
+                    behavior_ask,
+                    content_blocks,
+                } => {
+                    // `ask`-behavior rejection contentBlocks (`toolExecution.ts:1040-1043`):
+                    // claude-code appends `permissionDecision.contentBlocks` to the deny
+                    // user message at top level ONLY when `behavior === 'ask'`. Carry them
+                    // to the deny arm via the outer local. DORMANT in the external build —
+                    // no gate produces an `ask`+contentBlocks rejection, so this stays empty
+                    // and the deny message is byte-identical to today.
+                    if behavior_ask {
+                        reject_content_blocks = content_blocks;
+                    }
                     // HOOK.3 issue 3 — the PermissionDenied hook (claude-code
                     // `executePermissionDeniedHooks`, fired from
                     // `toolExecution.ts:1075`) fires ONLY on an auto-mode CLASSIFIER
@@ -1432,9 +1468,7 @@ pub(crate) async fn dispatch_tool_uses_tracked(
                     // rule/mode/plan deny. The auto-mode classifier is unwired in
                     // the public build, so this is dormant there — matching
                     // claude-code's public build (the `TRANSCRIPT_CLASSIFIER`
-                    // feature gate is off). Faithful gap: the `{retry:true}` reply
-                    // is unmodeled (the LingXi hook result carries no retry flag),
-                    // so the denial stands; documented as a deferral.
+                    // feature gate is off).
                     if matches!(source, PermissionDecisionSource::Classifier) {
                         let denied_event = HookEvent::PermissionDenied {
                             tool_name: name.clone(),
@@ -1442,8 +1476,22 @@ pub(crate) async fn dispatch_tool_uses_tracked(
                             tool_use_id: tool_use_id.clone(),
                             reason: reason.clone(),
                         };
-                        let _denied_agg =
+                        let denied_agg =
                             orch.hooks.execute(denied_event, hook_ctx.clone()).await;
+                        // `{retry: true}` reply (`toolExecution.ts:1080-1091`): a
+                        // PermissionDenied hook can signal the auto-mode classifier
+                        // deny is now approved. We honour it ONLY behind the same gate
+                        // claude-code uses — `feature('TRANSCRIPT_CLASSIFIER')` (the
+                        // external build's `is_classifier_permissions_enabled()` const,
+                        // hardcoded `false`) AND the runtime config bit that lets a test
+                        // force the flag on. With BOTH off (the parity default) the
+                        // retry message NEVER fires on the normal deny path.
+                        let classifier_feature_on =
+                            permission::classifier::is_classifier_permissions_enabled()
+                                || orch.config.transcript_classifier_enabled;
+                        if classifier_feature_on && denied_agg.retry {
+                            deny_hook_says_retry = true;
+                        }
                     }
                     PermissionDecision::Deny { reason }
                 }
@@ -1505,6 +1553,27 @@ pub(crate) async fn dispatch_tool_uses_tracked(
                     )
                     .await;
                 results.push(result_block);
+                // `ask`-behavior rejection contentBlocks (`toolExecution.ts:1039-1046`):
+                // append the image/non-text blocks at the TOP LEVEL of the deny
+                // user message — alongside, NOT inside, the text-only tool_result
+                // (which rejects non-text when `is_error` is set). They join
+                // `results`, which IS this turn's tool_result user message content,
+                // so they land in the same message as the tool_result, exactly like
+                // claude-code's `messageContent.push(...rejectContentBlocks)`.
+                //
+                // imagePasteId residual: claude-code assigns sequential
+                // `imagePasteIds` via `getNextImagePasteId` (max prior id + 1, one
+                // per image) — a TUI RENDER LABEL on the user message
+                // (`messages.ts:801`). LingXi's `ConversationMessage::User` models no
+                // `imagePasteIds` field (the same gap as `isMeta`; both are
+                // display-only, never sent to the model and never written to JSONL),
+                // so there is no home to store the id. The image BLOCKS themselves
+                // are carried faithfully; the per-image label is the documented
+                // residual. DORMANT: empty on every normal deny, so this loop is a
+                // strict no-op and the common deny message is byte-identical.
+                for block in reject_content_blocks {
+                    results.push(block);
+                }
                 // HOOK.1: even on a permission DENY, claude-code's pre-hook
                 // phase already pushed the PreToolUse `additionalContext`
                 // (`toolExecution.ts:846`) before the gate ran — so surface it
@@ -1512,6 +1581,23 @@ pub(crate) async fn dispatch_tool_uses_tracked(
                 // when the hook emitted no context.
                 if let Some(msg) = pre_context_message {
                     injected_messages.push((msg, tool_use_id.clone()));
+                }
+                // PermissionDenied-hook `{retry: true}` (`toolExecution.ts:1092-1099`):
+                // after the deny user message, push a SECOND `isMeta` user message
+                // with the verbatim approval-to-retry string. DOUBLE-GATED upstream
+                // (the `deny_hook_says_retry` flag is set only when BOTH the
+                // `TRANSCRIPT_CLASSIFIER` feature is on AND a classifier-source deny
+                // ran a `PermissionDenied` hook that returned `{retry: true}`), so it
+                // is DORMANT on the normal deny path — `deny_hook_says_retry` is
+                // `false` there and this is a strict no-op. LingXi has no protocol
+                // `isMeta` flag, so the meta message is a plain user text message
+                // carrying the exact bytes (cf. the max-output-tokens nudge).
+                if deny_hook_says_retry {
+                    let retry_msg = ConversationMessage::user(
+                        MessageId::new(),
+                        PERMISSION_DENIED_RETRY_MESSAGE.to_string(),
+                    );
+                    injected_messages.push((retry_msg, tool_use_id.clone()));
                 }
                 continue;
             }
@@ -3145,6 +3231,8 @@ mod pre_tool_hook_tests {
             PermissionResolution::Deny {
                 reason: "sourced-deny".into(),
                 source: self.0,
+                behavior_ask: false,
+                content_blocks: Vec::new(),
             }
         }
     }

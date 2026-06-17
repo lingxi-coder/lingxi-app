@@ -40,18 +40,25 @@ fn no_tui_flag_takes_stdio_path() {
     cmd.assert().success();
 }
 
-/// `-p "hello"` always prints one-shot regardless of TTY state. We
-/// don't have a real API key in CI, so the orchestrator will error out
-/// with a 401 — but we only care that the binary exits without the
-/// TUI hijacking the terminal.
+/// `-p "hello"` always prints one-shot regardless of TTY state. The CLI's
+/// `posix-minimal` HTTP transport is a stub that fails every request with a
+/// (retryable) "connection failed" — so the single turn fails and the binary
+/// exits. We only care that it exits without the TUI hijacking the terminal.
+///
+/// `CLAUDE_CODE_MAX_RETRIES=0` is REQUIRED for determinism: with the default of
+/// 10 retries the retryable stub error is retried with exponential backoff,
+/// whose accumulated sleeps exceed any short test timeout (the binary would
+/// eventually exit, but only after the full backoff sequence). Capping retries
+/// makes the failure-then-exit immediate, independent of the retry-backoff
+/// schedule and of any network.
 #[test]
 fn print_mode_unaffected_by_tui_routing() {
     let mut cmd = Command::cargo_bin("lingxi-cli").unwrap();
     cmd.arg("-p").arg("hello");
-    cmd.timeout(Duration::from_secs(5));
-    // Exit code may be 0 or 1 depending on whether ANTHROPIC_API_KEY is
-    // set in the test env. We assert only that the process terminates
-    // within the timeout (no TUI takeover).
+    cmd.env("CLAUDE_CODE_MAX_RETRIES", "0");
+    cmd.timeout(Duration::from_secs(10));
+    // Exit code may be 0 or 1 depending on the env. We assert only that the
+    // process terminates within the timeout (no TUI takeover).
     let output = cmd.output().expect("binary ran");
     assert!(output.status.code().is_some(), "process did not terminate");
 }

@@ -15,6 +15,14 @@ use tasks::{TaskSpawnInput, TaskType};
 use tokio::sync::{Mutex, RwLock};
 use traits::{Clock, FileSystem, RuntimeSpawner};
 
+/// Default auto-expiry age for a RECURRING cron job — 30 days, 1:1 with
+/// claude-code `DEFAULT_CRON_JITTER_CONFIG.recurringMaxAgeMs`
+/// (`cronJitterConfig.ts`, `30 * 24 * 60 * 60 * 1000` ms) and the Rust
+/// `CronCreate` `DEFAULT_MAX_AGE_DAYS = 30`. After this long since `created_at`,
+/// a recurring job is auto-expired on the next tick — honoring the `CronCreate`
+/// promise "Auto-expires after 30 days. Use CronDelete to cancel sooner."
+pub const DEFAULT_RECURRING_MAX_AGE: Duration = Duration::from_secs(30 * 24 * 60 * 60);
+
 /// One registered cron job: its schedule, prompt, and last-fire bookkeeping.
 pub struct CronTaskDef {
     /// Stable job identifier (used for lock filenames and logs).
@@ -29,6 +37,39 @@ pub struct CronTaskDef {
     pub last_run: Option<SystemTime>,
     /// When `false`, the scheduler skips this job entirely.
     pub enabled: bool,
+    /// When the job was created (the persisted `created_at_unix_secs`). The
+    /// anchor for recurring auto-expiry ([`is_recurring_task_aged`]).
+    pub created_at: SystemTime,
+    /// `true` = fire on every schedule match until deleted or auto-expired;
+    /// `false` = one-shot. Only recurring jobs are subject to max-age expiry.
+    pub recurring: bool,
+}
+
+/// Is a RECURRING cron job past its auto-expiry age? 1:1 with claude-code
+/// `isRecurringTaskAged` (`cronScheduler.ts:59`,
+/// `recurring && nowMs - createdAt >= maxAgeMs`). A one-shot (`!recurring`) job
+/// is never aged-out here (it auto-deletes after firing instead);
+/// `max_age == None` disables expiry entirely (unlimited); and a `created_at` in
+/// the future (clock skew) is treated as not-yet-aged.
+///
+/// (claude-code also exempts `permanent` tasks; the Rust `CronCreate` schema has
+/// no permanent/exempt flag — its `durable` flag is a persistence toggle, not an
+/// expiry exemption — so every recurring job is subject to the max age, matching
+/// the unconditional "Auto-expires after 30 days" the tool reports.)
+#[must_use]
+fn is_recurring_task_aged(
+    now: SystemTime,
+    created_at: SystemTime,
+    recurring: bool,
+    max_age: Option<Duration>,
+) -> bool {
+    let Some(max_age) = max_age else {
+        return false;
+    };
+    recurring
+        && now
+            .duration_since(created_at)
+            .is_ok_and(|age| age >= max_age)
 }
 
 /// Owner of the cron tick loop. Constructed with platform trait objects and
@@ -42,6 +83,9 @@ pub struct CronScheduler {
     lock_dir: PathBuf,
     /// Maximum random delay (seconds) applied before launching each due job.
     pub jitter_seconds: u32,
+    /// Auto-expiry age for RECURRING jobs; `None` disables expiry (unlimited).
+    /// Defaults to [`DEFAULT_RECURRING_MAX_AGE`].
+    recurring_max_age: Option<Duration>,
     tick_handle: Mutex<Option<traits::BackgroundTaskHandle>>,
 }
 
@@ -64,8 +108,17 @@ impl CronScheduler {
             runtime,
             lock_dir,
             jitter_seconds: 30,
+            recurring_max_age: Some(DEFAULT_RECURRING_MAX_AGE),
             tick_handle: Mutex::new(None),
         }
+    }
+
+    /// Override the recurring auto-expiry age (`None` = unlimited / never
+    /// expire). Defaults to [`DEFAULT_RECURRING_MAX_AGE`] (30 days).
+    #[must_use]
+    pub fn with_recurring_max_age(mut self, age: Option<Duration>) -> Self {
+        self.recurring_max_age = age;
+        self
     }
 
     /// Register a new cron job. The schedule string is parsed eagerly; an
@@ -77,6 +130,24 @@ impl CronScheduler {
         prompt: &str,
         agent_type: Option<String>,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        self.register_with_meta(id, schedule_str, prompt, agent_type, self.clock.now(), true)
+            .await
+    }
+
+    /// Like [`Self::register`] but with the persisted `created_at` (the expiry
+    /// anchor) and `recurring` flag — used by the on-disk job loader so a job
+    /// created days ago is correctly aged-out on load instead of resetting its
+    /// clock to "now". `register` is the convenience form (created now,
+    /// recurring).
+    pub async fn register_with_meta(
+        &self,
+        id: &str,
+        schedule_str: &str,
+        prompt: &str,
+        agent_type: Option<String>,
+        created_at: SystemTime,
+        recurring: bool,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let schedule = parse_cron(schedule_str)?;
         self.tasks.write().await.insert(
             id.to_string(),
@@ -87,6 +158,8 @@ impl CronScheduler {
                 agent_type,
                 last_run: None,
                 enabled: true,
+                created_at,
+                recurring,
             },
         );
         Ok(())
@@ -114,6 +187,39 @@ impl CronScheduler {
 
     async fn tick(&self) {
         let now = self.clock.now();
+
+        // Auto-expire aged RECURRING jobs (claude-code `isRecurringTaskAged` →
+        // remove + `tengu_scheduled_task_expired`). Runs BEFORE the due-job scan,
+        // so an expired job never fires again; its persisted descriptor is
+        // deleted too, so it does not reload and re-expire every tick.
+        let expired_ids: Vec<String> = {
+            let tasks = self.tasks.read().await;
+            tasks
+                .values()
+                .filter(|t| {
+                    is_recurring_task_aged(now, t.created_at, t.recurring, self.recurring_max_age)
+                })
+                .map(|t| t.id.clone())
+                .collect()
+        };
+        if !expired_ids.is_empty() {
+            {
+                let mut tasks = self.tasks.write().await;
+                for id in &expired_ids {
+                    tasks.remove(id);
+                }
+            }
+            for id in &expired_ids {
+                let job_path = self.lock_dir.join(format!("{id}.json"));
+                let _ = self.fs.delete_file(&job_path.to_string_lossy()).await;
+                tracing::info!(
+                    event = "tengu_scheduled_task_expired",
+                    cron_id = %id,
+                    "cron job auto-expired after exceeding the recurring max age"
+                );
+            }
+        }
+
         let due_ids: Vec<String> = {
             let tasks = self.tasks.read().await;
             tasks
@@ -227,5 +333,57 @@ pub fn pid_alive_check(pid: u32) -> bool {
             CloseHandle(handle);
             true
         }
+    }
+}
+
+#[cfg(test)]
+mod expiry_tests {
+    use super::{is_recurring_task_aged, DEFAULT_RECURRING_MAX_AGE};
+    use std::time::{Duration, SystemTime};
+
+    const DAY: Duration = Duration::from_secs(24 * 60 * 60);
+
+    /// `n` days after the UNIX epoch.
+    fn at(days: u64) -> SystemTime {
+        SystemTime::UNIX_EPOCH + Duration::from_secs(days * 24 * 60 * 60)
+    }
+
+    #[test]
+    fn default_max_age_is_30_days() {
+        assert_eq!(DEFAULT_RECURRING_MAX_AGE, DAY * 30);
+    }
+
+    #[test]
+    fn recurring_job_past_max_age_is_aged() {
+        // created day 0, now day 31, max 30d → aged.
+        assert!(is_recurring_task_aged(at(31), at(0), true, Some(DAY * 30)));
+    }
+
+    #[test]
+    fn recurring_job_at_exact_boundary_is_aged() {
+        // age == max_age → aged (`>=`, matching claude-code's `nowMs - createdAt >= maxAgeMs`).
+        assert!(is_recurring_task_aged(at(30), at(0), true, Some(DAY * 30)));
+    }
+
+    #[test]
+    fn fresh_recurring_job_is_not_aged() {
+        assert!(!is_recurring_task_aged(at(5), at(0), true, Some(DAY * 30)));
+    }
+
+    #[test]
+    fn one_shot_job_is_never_aged_by_max_age() {
+        // !recurring → never aged out here (one-shot auto-deletes after firing).
+        assert!(!is_recurring_task_aged(at(100), at(0), false, Some(DAY * 30)));
+    }
+
+    #[test]
+    fn none_max_age_disables_expiry() {
+        assert!(!is_recurring_task_aged(at(10_000), at(0), true, None));
+    }
+
+    #[test]
+    fn future_created_at_is_not_aged() {
+        // Clock skew: created_at after now → duration_since errs → treated as not aged.
+        assert!(!is_recurring_task_aged(at(0), at(5), true, Some(DAY * 30)));
     }
 }

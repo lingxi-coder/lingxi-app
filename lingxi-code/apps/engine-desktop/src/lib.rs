@@ -2421,7 +2421,26 @@ pub async fn build(
                     desc.get("cron").and_then(serde_json::Value::as_str),
                     desc.get("prompt").and_then(serde_json::Value::as_str),
                 ) {
-                    if let Err(e) = scheduler.register(id, cron_str, prompt, None).await {
+                    // Carry the persisted `created_at_unix_secs` + `recurring` so a
+                    // recurring job created days ago is aged correctly on load
+                    // (auto-expires `DEFAULT_RECURRING_MAX_AGE` after creation). A
+                    // missing/zero timestamp falls back to "now" (a fresh window).
+                    let created_at = desc
+                        .get("created_at_unix_secs")
+                        .and_then(serde_json::Value::as_u64)
+                        .filter(|s| *s > 0)
+                        .map_or_else(
+                            std::time::SystemTime::now,
+                            |secs| std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(secs),
+                        );
+                    let recurring = desc
+                        .get("recurring")
+                        .and_then(serde_json::Value::as_bool)
+                        .unwrap_or(true);
+                    if let Err(e) = scheduler
+                        .register_with_meta(id, cron_str, prompt, None, created_at, recurring)
+                        .await
+                    {
                         tracing::warn!("cron: skipping job {id} with invalid schedule: {e}");
                     }
                 }

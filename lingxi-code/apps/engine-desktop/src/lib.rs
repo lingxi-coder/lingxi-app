@@ -51,9 +51,9 @@ use orchestrator::{
     ConversationOrchestrator, OrchestratorApiClient, OrchestratorConfig, ProviderApiAdapter,
 };
 use permission::gate::PermissionGate;
+use platform_posix::{PosixClock, PosixHttp, PosixRuntime};
 use platform_posix_minimal::{
-    PlainTextSecureStorage, PosixClock, PosixFileSystem, PosixHttp, PosixMcp, PosixProcess,
-    PosixRuntime, PosixSandbox, PosixWorktree,
+    PlainTextSecureStorage, PosixFileSystem, PosixMcp, PosixProcess, PosixSandbox, PosixWorktree,
 };
 use sandbox::decision::ProjectTrustLevel;
 use sandbox::runtime_config::Platform as SandboxPlatform;

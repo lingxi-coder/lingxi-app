@@ -89,6 +89,8 @@ struct RootView: View {
             // Settings sheet
             if settingsOpen {
                 SettingsHost(store: settingsStore,
+                             convo: source.model,
+                             onRefreshMcp: { source.refreshMcpServers() },
                              onClose: { withAnimation(.easeOut(duration: 0.28)) { settingsOpen = false } })
                 .zIndex(60)
             }

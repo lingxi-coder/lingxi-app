@@ -65,7 +65,9 @@ impl BuiltinHookHandler for StopBlockHandler {
     async fn handle(&self, event: &HookEvent, _ctx: &HookContext) -> HookResult {
         let response = matches!(event, HookEvent::Stop { .. }).then(|| HookResponse {
             decision: Some(HookDecision::Block),
-            reason: Some("keep going".to_string()),
+            reason: Some("do X first".to_string()),
+            // A transcript-only systemMessage that must NOT reach the model — the
+            // continuation must come from `reason` (blockingError), never this.
             system_message: Some("[stop-hook] please continue".to_string()),
             ..Default::default()
         });
@@ -199,13 +201,24 @@ async fn stop_block_continues_once_then_guard_stops() {
         2,
         "Stop-block must drive exactly ONE continuation (2 API calls)"
     );
-    // The blocking system message was appended as a meta user message.
+    // The blocking REASON (blockingError) is appended as a meta user message,
+    // wrapped exactly as claude-code's `getStopHookMessage`
+    // (`utils/hooks.ts:1895`): "Stop hook feedback:\n<reason>". The transcript-
+    // only systemMessage must NOT appear (it must never reach the model).
     let history = o.session().lock().await.history.clone();
+    let appended = history
+        .iter()
+        .find(|m| m.text_content() == "Stop hook feedback:\ndo X first")
+        .expect("the Stop hook feedback (from `reason`) must be appended to history verbatim");
     assert!(
-        history
+        appended.is_meta(),
+        "the appended Stop-hook-feedback user message must be marked meta (TS isMeta:true)"
+    );
+    assert!(
+        !history
             .iter()
             .any(|m| m.text_content().contains("[stop-hook] please continue")),
-        "the Stop hook's system message must be appended to history"
+        "the transcript-only systemMessage must NOT be appended (it must not reach the model)"
     );
 }
 

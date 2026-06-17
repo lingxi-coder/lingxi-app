@@ -152,6 +152,7 @@ mod tests {
                 is_error: false,
                 provider_tool_use_id: None,
             }],
+            is_meta: false,
         }
     }
 

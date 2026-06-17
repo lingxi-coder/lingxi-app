@@ -361,11 +361,14 @@ enum StopHookDisposition {
     /// end-of-turn (token-budget check then `emit_end_turn`).
     Pass,
     /// A Stop hook blocked the stop (wants the agent to keep working). The turn
-    /// loop appends the carried messages as a meta user message, sets
+    /// loop appends the carried blocking reason as a meta user message wrapped by
+    /// `getStopHookMessage` (TS `utils/hooks.ts:1895`), sets
     /// `stop_hook_active = true`, and runs one more turn step. The re-entry
     /// guard converts a *second* such block into [`Self::Pass`] so a hook that
-    /// always blocks cannot loop forever (TS `query.ts:1297`).
-    Continue(Vec<String>),
+    /// always blocks cannot loop forever (TS `query.ts:1297`). The carried
+    /// `String` is the hook's blocking reason (`blockingError.blockingError`,
+    /// TS `query/stopHooks.ts:257-262`), NOT the transcript-only systemMessage.
+    Continue(String),
     /// A Stop hook requested `continue: false` — terminate the agent loop
     /// (TS `query.ts:1278`); the turn ends as `StopHookPrevented`.
     Prevent,
@@ -1545,6 +1548,16 @@ impl ConversationOrchestrator {
         // form which carries the `"msg:"` prefix — that prefix would break the
         // byte-equivalent JSONL schema (see `JsonlMessage::uuid` doc) and the
         // `validate_uuid` regex.
+        //
+        // `isMeta` is a TOP-LEVEL envelope field in claude-code (a sibling of
+        // `message`/`uuid`, emitted at `utils/messages.ts:765,810` and read as an
+        // outer field at `session/src/jsonl/title.rs:101`). Emit it ONLY for a
+        // meta user message (default-`false` is omitted), so normal lines — and
+        // every existing golden fixture — keep their exact byte shape.
+        let mut extra = serde_json::Map::new();
+        if msg.is_meta() {
+            extra.insert("isMeta".to_string(), serde_json::Value::Bool(true));
+        }
         session::JsonlMessage {
             message_type: kind.to_string(),
             uuid: msg.id().as_uuid().to_string(),
@@ -1569,7 +1582,7 @@ impl ConversationOrchestrator {
             // Always `None` from this append path — see the doc comment above and
             // the `persist_message_to_jsonl` note.
             logical_parent_uuid: None,
-            extra: serde_json::Map::new(),
+            extra,
         }
     }
 
@@ -1952,7 +1965,16 @@ impl ConversationOrchestrator {
         } else if matches!(agg.decision, Some(hooks::response::HookDecision::Block))
             && !stop_hook_active
         {
-            StopHookDisposition::Continue(agg.system_messages)
+            // Source the continuation from the hook's blocking REASON
+            // (`blockingError.blockingError`), NOT the transcript-only
+            // `system_messages`. `agg.reason` is `None` when the hook omits a
+            // reason, so apply claude-code's default (`utils/hooks.ts:533`,
+            // `json.reason || 'Blocked by hook'`).
+            let reason = agg
+                .reason
+                .clone()
+                .unwrap_or_else(|| "Blocked by hook".to_string());
+            StopHookDisposition::Continue(reason)
         } else {
             StopHookDisposition::Pass
         };
@@ -2021,8 +2043,8 @@ impl ConversationOrchestrator {
                     final_message_id,
                 })
             }
-            StopHookDisposition::Continue(msgs) => {
-                self.append_stop_hook_messages(&msgs).await;
+            StopHookDisposition::Continue(reason) => {
+                self.append_stop_hook_feedback(&reason).await;
                 *stop_hook_active = true;
                 StopHookFlow::LoopAgain
             }
@@ -2333,15 +2355,17 @@ impl ConversationOrchestrator {
             .await;
     }
 
-    /// Append a Stop hook's blocking messages as a meta user message so the
-    /// model sees the hook feedback on the continued turn (TS appends the
-    /// blocking reason). Best-effort persist, like the other meta appends.
-    async fn append_stop_hook_messages(&self, messages: &[String]) {
-        if messages.is_empty() {
-            return;
-        }
-        let combined = messages.join("\n");
-        let msg = ConversationMessage::user(MessageId::new(), combined);
+    /// Append a Stop hook's blocking reason as a *meta* user message so the
+    /// model sees the hook feedback on the continued turn. Mirrors claude-code
+    /// `query/stopHooks.ts:257-262`: each blocking error becomes
+    /// `createUserMessage({ content: getStopHookMessage(blockingError), isMeta: true })`,
+    /// where `getStopHookMessage` = `Stop hook feedback:\n${blockingError}`
+    /// (`utils/hooks.ts:1895`). The `isMeta` flag hides it from the user-facing
+    /// UI while keeping it in the API stream. Best-effort persist, like the
+    /// other meta appends.
+    async fn append_stop_hook_feedback(&self, reason: &str) {
+        let content = format!("Stop hook feedback:\n{reason}");
+        let msg = ConversationMessage::user_meta(MessageId::new(), content);
         {
             let mut s = self.session.lock().await;
             s.history.push(msg.clone());
@@ -3018,6 +3042,7 @@ impl ConversationOrchestrator {
                         let user_msg = ConversationMessage::User {
                             id: MessageId::new(),
                             content: vec![drained.block],
+                            is_meta: false,
                         };
                         {
                             let mut s = self.session.lock().await;
@@ -6491,6 +6516,7 @@ mod persist_with_parent_tests {
                 is_error: false,
                 provider_tool_use_id: None,
             }],
+            is_meta: false,
         };
         orch.persist_message_to_jsonl_with_parent(&tr_a, Some(a_uuid.clone()))
             .await;
@@ -6502,6 +6528,7 @@ mod persist_with_parent_tests {
                 is_error: false,
                 provider_tool_use_id: None,
             }],
+            is_meta: false,
         };
         orch.persist_message_to_jsonl_with_parent(&tr_b, Some(b_uuid.clone()))
             .await;

@@ -324,6 +324,7 @@ mod tests {
         let msg = ConversationMessage::User {
             id: MessageId::new(),
             content: vec![ProtoBlock::Text { text: "hello".to_string() }],
+            is_meta: false,
         };
         let result = to_llm_messages(vec![msg]).unwrap();
         assert_eq!(result.len(), 1);
@@ -389,6 +390,7 @@ mod tests {
                 is_error: false,
                 provider_tool_use_id: None,
             }],
+            is_meta: false,
         };
         let result = to_llm_messages(vec![msg]).unwrap();
         assert!(matches!(
@@ -409,6 +411,7 @@ mod tests {
                 is_error: false,
                 provider_tool_use_id: None,
             }],
+            is_meta: false,
         };
         let result = to_llm_messages(vec![msg]).unwrap();
         assert!(matches!(
@@ -428,6 +431,7 @@ mod tests {
                 is_error: true,
                 provider_tool_use_id: None,
             }],
+            is_meta: false,
         };
         let result = to_llm_messages(vec![msg]).unwrap();
         assert!(matches!(
@@ -467,6 +471,7 @@ mod tests {
                     data: encoded,
                 },
             }],
+            is_meta: false,
         };
         let result = to_llm_messages(vec![msg]).unwrap();
         assert!(matches!(
@@ -483,6 +488,7 @@ mod tests {
             content: vec![ProtoBlock::Image {
                 source: ImageSource::Url { url: "https://example.com/img.png".to_string() },
             }],
+            is_meta: false,
         };
         let result = to_llm_messages(vec![msg]).unwrap();
         assert!(matches!(
@@ -602,6 +608,7 @@ mod tests {
                     data: encoded,
                 },
             }],
+            is_meta: false,
         };
         let result = to_llm_messages(vec![msg]).unwrap();
         assert!(matches!(
@@ -626,6 +633,7 @@ mod tests {
         let user = ConversationMessage::User {
             id: MessageId::new(),
             content: vec![ProtoBlock::Text { text: "hi".to_string() }],
+            is_meta: false,
         };
         let assistant = ConversationMessage::Assistant {
             id: MessageId::new(),
@@ -704,6 +712,7 @@ mod tests {
                     data: "not-valid-base64!!!".to_string(),
                 },
             }],
+            is_meta: false,
         };
         let err = to_llm_messages(vec![msg]).unwrap_err();
         assert!(matches!(err, LlmError::InvalidRequest { message } if message.contains("base64")));
@@ -715,6 +724,7 @@ mod tests {
         ConversationMessage::User {
             id,
             content: vec![ProtoBlock::Text { text: text.to_string() }],
+            is_meta: false,
         }
     }
 
@@ -745,7 +755,7 @@ mod tests {
         ]);
         assert_eq!(out.len(), 1);
         match &out[0] {
-            ConversationMessage::User { id, content } => {
+            ConversationMessage::User { id, content, .. } => {
                 assert_eq!(id, &first_id, "merged message keeps the first message's id");
                 // joinTextAtSeam inserts a `\n` on a's last text at a text|text seam.
                 assert_eq!(text_of(content), vec!["a\n", "b"]);
@@ -773,7 +783,7 @@ mod tests {
         let out = normalize_messages_for_api(vec![user(id, "solo")]);
         assert_eq!(out.len(), 1);
         match &out[0] {
-            ConversationMessage::User { id: got, content } => {
+            ConversationMessage::User { id: got, content, .. } => {
                 assert_eq!(got, &id);
                 assert_eq!(text_of(content), vec!["solo"]);
             }
@@ -791,7 +801,7 @@ mod tests {
         ]);
         assert_eq!(out.len(), 1);
         match &out[0] {
-            ConversationMessage::User { id, content } => {
+            ConversationMessage::User { id, content, .. } => {
                 assert_eq!(id, &first_id);
                 // Each text|text seam (a|b then b|c) gets its own `\n`.
                 assert_eq!(text_of(content), vec!["a\n", "b\n", "c"]);
@@ -812,7 +822,7 @@ mod tests {
         assert_eq!(out.len(), 3);
         assert!(matches!(out[0], ConversationMessage::Assistant { .. }));
         match &out[1] {
-            ConversationMessage::User { id, content } => {
+            ConversationMessage::User { id, content, .. } => {
                 assert_eq!(id, &mid_id);
                 assert_eq!(text_of(content), vec!["a\n", "b"]);
             }
@@ -824,7 +834,7 @@ mod tests {
     // ── hoistToolResults + joinTextAtSeam (mergeUserMessages pipeline) ────────
 
     fn user_blocks(id: MessageId, content: Vec<ProtoBlock>) -> ConversationMessage {
-        ConversationMessage::User { id, content }
+        ConversationMessage::User { id, content, is_meta: false }
     }
 
     fn tool_result(content: &str) -> ProtoBlock {

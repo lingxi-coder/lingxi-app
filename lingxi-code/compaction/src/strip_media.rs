@@ -29,7 +29,7 @@ pub fn strip_images_from_messages(messages: Vec<ConversationMessage>) -> Vec<Con
 
 fn strip_one(message: ConversationMessage) -> ConversationMessage {
     // TS strips only `user` messages (`compact.ts:147`); others pass through.
-    let ConversationMessage::User { id, content } = message else {
+    let ConversationMessage::User { id, content, is_meta } = message else {
         return message;
     };
     let new_content = content
@@ -47,6 +47,7 @@ fn strip_one(message: ConversationMessage) -> ConversationMessage {
     ConversationMessage::User {
         id,
         content: new_content,
+        is_meta,
     }
 }
 
@@ -76,6 +77,7 @@ mod tests {
                     text: "after".to_string(),
                 },
             ],
+            is_meta: false,
         };
         let out = strip_images_from_messages(vec![msg]);
         let ConversationMessage::User { content, .. } = &out[0] else {

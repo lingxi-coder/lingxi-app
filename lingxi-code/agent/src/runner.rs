@@ -460,6 +460,7 @@ async fn run_subagent_loop(
             let tool_results_msg = ConversationMessage::User {
                 id: MessageId::new(),
                 content: tool_results,
+                is_meta: false,
             };
             history.push(tool_results_msg.clone());
             emit_message(&out_tx, agent_id, &tool_results_msg).await;

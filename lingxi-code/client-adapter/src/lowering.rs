@@ -712,6 +712,7 @@ mod tests {
                 content: vec![ContentBlock::Text {
                     text: "resume me".to_string(),
                 }],
+                is_meta: false,
             },
             ConversationMessage::Assistant {
                 id: MessageId::new(),
@@ -801,6 +802,7 @@ mod tests {
                     },
                 },
             ],
+            is_meta: false,
         };
         let dto = lower_conversation_message(&msg);
         assert_eq!(

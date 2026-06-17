@@ -521,6 +521,7 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
         let tool_results_msg = ConversationMessage::User {
             id: user_id,
             content: tool_results,
+            is_meta: false,
         };
         {
             let mut s = orch.session.lock().await;

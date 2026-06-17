@@ -80,6 +80,7 @@ mod tests {
                     data: "YWJj".to_string(),
                 },
             }],
+            is_meta: false,
         };
         assert_eq!(text_byte_size(&m), 4); // "YWJj".len()
     }

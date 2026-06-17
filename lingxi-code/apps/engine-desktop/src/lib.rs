@@ -1047,6 +1047,11 @@ pub struct DesktopRuntime {
     /// persists a collected key (`CredentialManager::set_provider_key`). Same
     /// `Arc` the orchestrator already holds — no second store is constructed.
     pub credentials: Arc<secret::CredentialManager>,
+    /// Structured-output capture slot — `Some` only when `--json-schema` is set
+    /// (`DesktopConfig.json_schema`). The forced `StructuredOutput` tool writes
+    /// the model's result here; the print path reads it after each turn to
+    /// validate against the schema and retry. `None` for every normal run.
+    pub structured_output_slot: Option<orchestrator::structured_output::StructuredOutputSlot>,
 }
 
 /// Errors surfaced while building a [`DesktopRuntime`].
@@ -1735,22 +1740,31 @@ pub async fn build(
     // orchestrator (`tengu_cost_recorded`) so all live telemetry lands on the same
     // sink set — 1:1 with claude-code, where `logEvent` is a single global pipeline.
     let analytics_bus = Arc::new(telemetry::AnalyticsBus::new());
-    let provider_adapter = Arc::new(
-        ProviderApiAdapter::new_with_routing(
-            llm_client,
-            llm_transport,
-            subscriber_state,
-            UserAgentEnv::from_process_env(),
-            env!("CARGO_PKG_VERSION"),
-            Some(analytics_bus.clone()),
-            cfg.fallback_model.clone(),
-            Some(cost_estimator),
-            fallback_overrides,
-            settings_max_retries,
-            settings_backoff_ms,
-        )
-        .with_subscription(subscription.clone()),
-    );
+    let provider_adapter_built = ProviderApiAdapter::new_with_routing(
+        llm_client,
+        llm_transport,
+        subscriber_state,
+        UserAgentEnv::from_process_env(),
+        env!("CARGO_PKG_VERSION"),
+        Some(analytics_bus.clone()),
+        cfg.fallback_model.clone(),
+        Some(cost_estimator),
+        fallback_overrides,
+        settings_max_retries,
+        settings_backoff_ms,
+    )
+    .with_subscription(subscription.clone());
+    // `--json-schema` structured output: FORCE the `StructuredOutput` tool so the
+    // model returns its final result through it (1:1 with claude-code). Untouched
+    // for every normal turn (`json_schema` is `None`).
+    let provider_adapter_built = if cfg.json_schema.is_some() {
+        provider_adapter_built.with_forced_tool_choice(llm_client::ToolChoice::Tool {
+            name: orchestrator::structured_output::STRUCTURED_OUTPUT_TOOL_NAME.to_string(),
+        })
+    } else {
+        provider_adapter_built
+    };
+    let provider_adapter = Arc::new(provider_adapter_built);
     let provider_adapter_handle = provider_adapter.clone();
     let api_client: Arc<dyn OrchestratorApiClient> = provider_adapter.clone();
     let subagent_api: Arc<dyn agent::SubagentApiClient> = provider_adapter;
@@ -2758,6 +2772,22 @@ pub async fn build(
     {
         tools_inner.register_mcp_tools(conn_id, mcp_tools);
     }
+    // Structured output (`--json-schema`): register the forced `StructuredOutput`
+    // tool whose `input_schema` IS the user schema; its `call` captures the model's
+    // result into `structured_output_slot` for the print path to validate + retry.
+    // `None` (no `--json-schema`) leaves the registry + the slot untouched.
+    let structured_output_slot: Option<orchestrator::structured_output::StructuredOutputSlot> =
+        cfg.json_schema.as_ref().map(|schema| {
+            let slot: orchestrator::structured_output::StructuredOutputSlot =
+                Arc::new(std::sync::Mutex::new(None));
+            tools_inner.register_builtin(Arc::new(
+                orchestrator::structured_output::StructuredOutputTool::new(
+                    schema.clone(),
+                    slot.clone(),
+                ),
+            ));
+            slot
+        });
     let tools = Arc::new(tools_inner);
 
     // (5.5a) M10 (T13): bind the teammate handler's `DeferredToolInvoker` to the
@@ -3056,6 +3086,7 @@ pub async fn build(
         model_providers,
         provider_adapter: provider_adapter_handle,
         credentials,
+        structured_output_slot,
     })
 }
 
@@ -3500,6 +3531,37 @@ mod tests {
         assert!(
             rt.orchestrator.has_compaction(),
             "no CompactionOrchestrator"
+        );
+    }
+
+    #[tokio::test]
+    async fn build_with_json_schema_surfaces_structured_output_slot() {
+        // `--json-schema` ⇒ build() registers the forced `StructuredOutput` tool
+        // and surfaces its capture slot for the print path.
+        let (_tmp, mut cfg) = test_config(true);
+        cfg.json_schema = Some(serde_json::json!({ "type": "object" }));
+        let output: Arc<dyn traits::OutputStream> =
+            Arc::new(orchestrator::test_support::MockOutputStream::new());
+        let perm_sink: Arc<dyn client_adapter::PermissionRequestSink> =
+            Arc::new(RecordingPermissionSink::default());
+        let rt = build(cfg, output, perm_sink).await.expect("build() failed");
+        assert!(
+            rt.structured_output_slot.is_some(),
+            "--json-schema must surface a structured-output capture slot"
+        );
+    }
+
+    #[tokio::test]
+    async fn build_without_json_schema_has_no_structured_output_slot() {
+        let (_tmp, cfg) = test_config(true);
+        let output: Arc<dyn traits::OutputStream> =
+            Arc::new(orchestrator::test_support::MockOutputStream::new());
+        let perm_sink: Arc<dyn client_adapter::PermissionRequestSink> =
+            Arc::new(RecordingPermissionSink::default());
+        let rt = build(cfg, output, perm_sink).await.expect("build() failed");
+        assert!(
+            rt.structured_output_slot.is_none(),
+            "a default build (no --json-schema) must not surface a slot"
         );
     }
 

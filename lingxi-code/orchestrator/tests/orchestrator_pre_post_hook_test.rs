@@ -127,6 +127,79 @@ impl BuiltinHookHandler for AppendNoteOnReadHandler {
     }
 }
 
+/// Minimal `Bash`-named tool so the dispatch loop reaches the PreToolUse hook.
+/// Under the claude-code dispatch order the unknown-tool check runs at the TOP
+/// of `runToolUse` (`toolExecution.ts:401`) — BEFORE the PreToolUse hooks
+/// (~800) — so a hook can only gate a tool that is actually registered. Its
+/// `call` never runs here (the BlockBash hook short-circuits first), so it just
+/// returns a trivial ok result.
+struct BashStubTool;
+#[async_trait]
+impl tool_api::tool_trait::Tool for BashStubTool {
+    fn name(&self) -> &str {
+        "Bash"
+    }
+    fn input_schema(&self) -> &serde_json::Value {
+        static SCHEMA: once_cell::sync::Lazy<serde_json::Value> =
+            once_cell::sync::Lazy::new(|| {
+                json!({
+                    "type": "object",
+                    "properties": { "command": { "type": "string" } },
+                })
+            });
+        &SCHEMA
+    }
+    fn is_enabled(&self, _ctx: &tool_api::tool_trait::ToolStaticContext) -> bool {
+        true
+    }
+    fn max_result_size_chars(&self) -> usize {
+        1024 * 1024
+    }
+    fn is_concurrency_safe(&self, _input: &serde_json::Value) -> bool {
+        true
+    }
+    fn is_read_only(&self, _input: &serde_json::Value) -> bool {
+        false
+    }
+    async fn check_permissions(
+        &self,
+        _input: &serde_json::Value,
+        _ctx: &tool_api::context::ToolUseContext,
+    ) -> permission::PermissionResult {
+        permission::PermissionResult::Allow {
+            reason: permission::PermissionDecisionReason::Other {
+                reason: "test".into(),
+            },
+            updated_input: None,
+            update_destination: None,
+            metadata: permission::result::PermissionMetadata::default(),
+        }
+    }
+    async fn description(
+        &self,
+        _input: &serde_json::Value,
+        _opts: &tool_api::tool_trait::DescriptionOptions,
+    ) -> String {
+        "bash stub".into()
+    }
+    async fn prompt(&self, _opts: &tool_api::tool_trait::PromptOptions) -> String {
+        String::new()
+    }
+    async fn call(
+        &self,
+        _input: serde_json::Value,
+        _ctx: tool_api::context::ToolUseContext,
+        _tx: tool_api::progress::ToolProgressSender,
+    ) -> Result<tool_api::tool_trait::ToolCallResult, tool_api::tool_trait::ToolError> {
+        Ok(tool_api::tool_trait::ToolCallResult {
+            data: json!({ "content": "ok" }),
+            new_messages: vec![],
+            context_modifier: None,
+            mcp_meta: None,
+        })
+    }
+}
+
 fn make_builtin_hook(handler_id: &str, event_type: HookEventType) -> HookDefinition {
     HookDefinition {
         id: HookId::new(),
@@ -189,7 +262,13 @@ async fn pre_hook_blocks_bash_tool() {
     )
     .await;
     let perms = Arc::new(NoOpPermissionGate);
-    let tools = Arc::new(tool_api::registry::ToolRegistry::new());
+    // claude-code order: the unknown-tool check runs BEFORE the PreToolUse hook
+    // (`toolExecution.ts:401` vs ~800), so the Bash tool MUST be registered for
+    // the BlockBash hook to gate it (previously this test relied on the OLD
+    // order, where the hook fired even for an unregistered tool).
+    let mut registry = tool_api::registry::ToolRegistry::new();
+    registry.register_builtin(Arc::new(BashStubTool) as Arc<dyn tool_api::tool_trait::Tool>);
+    let tools = Arc::new(registry);
 
     let orch = ConversationOrchestrator::new(
         OrchestratorConfig::default(),

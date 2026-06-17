@@ -14,7 +14,7 @@ use crate::model::rate_limit::{
 use crate::model::retry::{next_step_with_backoff, resolve_retry_control_with_settings, DriveStep, ResolveRetryEnv, RetryControl, RetryState};
 use crate::model::telemetry;
 use crate::model::user_agent::{user_agent, UserAgentEnv};
-use agent::convert::{to_llm_messages, to_tool_declarations};
+use agent::convert::{normalize_messages_for_api, to_llm_messages, to_tool_declarations};
 use async_trait::async_trait;
 use futures::stream::BoxStream;
 use llm_client::{
@@ -398,7 +398,10 @@ impl ProviderApiAdapter {
         stream: bool,
         max_tokens: Option<u32>,
     ) -> Result<LlmRequest, LlmError> {
-        let messages = to_llm_messages(strip_excess_media(msgs, MAX_MEDIA_PER_REQUEST))?;
+        let messages = to_llm_messages(normalize_messages_for_api(strip_excess_media(
+            msgs,
+            MAX_MEDIA_PER_REQUEST,
+        )))?;
         let tool_decls = to_tool_declarations(tools)?;
 
         let mut req = LlmRequest::new(model);

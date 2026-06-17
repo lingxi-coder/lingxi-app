@@ -22,6 +22,10 @@ sidequery = { path = "../sidequery" }
 session = { path = "../session" }
 telemetry = { path = "../telemetry" }
 outputstyles = { path = "../outputstyles" }
+# JSON-Schema (Draft 7 / 2020-12) validator for the tool-input gate (the Rust
+# analogue of claude-code's `inputSchema.safeParse`). Lightest adequate
+# pure-Rust option (few transitive crates, most already in the workspace).
+boon = "0.6"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 iana-time-zone = "0.1"
 # §F conditional-rule glob matching: the Rust analogue of claude-code's `ignore`

@@ -27,6 +27,9 @@ thiserror.workspace = true
 async-trait.workspace = true
 tracing.workspace = true
 tokio = { workspace = true, features = ["sync"] }
+# `CancellationToken` (the per-call cancel seam for the streaming executor) is
+# available in the default surface of tokio-util 0.7 — no extra feature needed.
+tokio-util = { workspace = true }
 # Only used by the feature-gated test_support module (mock FileSystem stream).
 futures = { version = "0.3", optional = true }
 

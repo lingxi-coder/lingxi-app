@@ -2437,8 +2437,19 @@ pub async fn build(
                         .get("recurring")
                         .and_then(serde_json::Value::as_bool)
                         .unwrap_or(true);
+                    // Restore the persisted last-fire time so missed-run catch-up
+                    // does not re-fire a run already fired in a prior session.
+                    let last_run = desc
+                        .get("last_fired_unix_secs")
+                        .and_then(serde_json::Value::as_u64)
+                        .filter(|s| *s > 0)
+                        .map(|secs| {
+                            std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(secs)
+                        });
                     if let Err(e) = scheduler
-                        .register_with_meta(id, cron_str, prompt, None, created_at, recurring)
+                        .register_with_meta(
+                            id, cron_str, prompt, None, created_at, recurring, last_run,
+                        )
                         .await
                     {
                         tracing::warn!("cron: skipping job {id} with invalid schedule: {e}");

@@ -70,10 +70,9 @@ impl RuntimeSpawner for UnusedRuntime {
     }
 }
 
-/// A `PreToolUse` builtin hook that returns a `systemMessage` (the LingXi parser
-/// merges `systemMessage` + `additionalContext` into the same field), which the
-/// turn loop surfaces as a standalone meta user message (HOOK.1 / claude-code
-/// `toolExecution.ts:845`).
+/// A `PreToolUse` builtin hook that returns `additionalContext` (the model-facing
+/// channel), which the turn loop surfaces as a standalone meta user message
+/// (HOOK.1 / claude-code `toolExecution.ts:845`).
 struct ContextHook;
 #[async_trait]
 impl BuiltinHookHandler for ContextHook {
@@ -84,7 +83,7 @@ impl BuiltinHookHandler for ContextHook {
             stderr: String::new(),
             exit_code: Some(0),
             response: Some(HookResponse {
-                system_message: Some("STREAM-CTX".into()),
+                additional_context: Some("STREAM-CTX".into()),
                 ..HookResponse::default()
             }),
         }

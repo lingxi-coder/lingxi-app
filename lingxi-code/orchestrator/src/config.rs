@@ -183,6 +183,25 @@ pub struct OrchestratorConfig {
     /// `--max-budget` run is the primary consumer.
     #[serde(default)]
     pub max_budget_nano_usd: Option<u64>,
+
+    /// Dormant gate for the `TRANSCRIPT_CLASSIFIER` feature (claude-code
+    /// `feature('TRANSCRIPT_CLASSIFIER')`, an ant-internal GrowthBook/Statsig
+    /// flag that is OFF in every external build). It guards the auto-mode
+    /// classifier's `PermissionDenied`-hook retry path: only when this is `true`
+    /// AND the deny came from a [`traits::permission_gate::PermissionDecisionSource::Classifier`]
+    /// source does the turn loop honour a `PermissionDenied` hook's
+    /// `{retry: true}` by pushing the verbatim `isMeta` retry message
+    /// (`toolExecution.ts:1075-1101`).
+    ///
+    /// `false` (the parity default) is byte-identical to claude-code's external
+    /// build: there is no LLM classifier
+    /// ([`permission::classifier::is_classifier_permissions_enabled`] is also
+    /// hardcoded `false`), so the retry message NEVER fires on the normal deny
+    /// path. Exposed as a config bit (rather than the const) ONLY so the
+    /// plumbing is unit-testable with the gate forced on — production code never
+    /// sets it true.
+    #[serde(default)]
+    pub transcript_classifier_enabled: bool,
 }
 
 impl Default for OrchestratorConfig {
@@ -202,6 +221,7 @@ impl Default for OrchestratorConfig {
             output_style: None,
             output_style_dirs: Vec::new(),
             max_budget_nano_usd: None,
+            transcript_classifier_enabled: false,
         }
     }
 }
@@ -247,6 +267,7 @@ mod tests {
             output_style: Some("Explanatory".into()),
             output_style_dirs: vec![std::path::PathBuf::from("/home/u/.claude/output-styles")],
             max_budget_nano_usd: Some(5_000_000_000),
+            transcript_classifier_enabled: true,
         };
         let s = serde_json::to_string(&cfg).unwrap();
         let back: OrchestratorConfig = serde_json::from_str(&s).unwrap();
@@ -267,6 +288,7 @@ mod tests {
             vec![std::path::PathBuf::from("/home/u/.claude/output-styles")]
         );
         assert_eq!(back.max_budget_nano_usd, Some(5_000_000_000));
+        assert!(back.transcript_classifier_enabled);
     }
 
     #[test]

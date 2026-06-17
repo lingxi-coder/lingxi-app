@@ -34,7 +34,7 @@ use orchestrator::{ConversationOrchestrator, ConversationOutcome, OrchestratorCo
 use permission::result::PermissionMetadata;
 use permission::{PermissionDecisionReason, PermissionResult};
 use protocol::{
-    ContentBlock, ConversationMessage, HookId, HttpRequest, HttpResponse, ToolUseId,
+    ContentBlock, ConversationMessage, HookId, HttpRequest, HttpResponse, ImageSource, ToolUseId,
 };
 use serde_json::json;
 use std::pin::Pin;
@@ -113,6 +113,61 @@ impl PermissionGate for ClassifierDenyGate {
         PermissionResolution::Deny {
             reason: self.reason.into(),
             source: PermissionDecisionSource::Classifier,
+            behavior_ask: false,
+            content_blocks: Vec::new(),
+        }
+    }
+}
+
+// ---- Gate whose deny is an `ask`-behavior rejection that supplies image
+// contentBlocks (`toolExecution.ts:1040`). DORMANT in the real build — no real
+// gate produces this — so it exercises the top-level-image deny plumbing. ----
+struct AskRejectGate {
+    reason: &'static str,
+}
+#[async_trait]
+impl PermissionGate for AskRejectGate {
+    async fn check(&self, _name: &str, _input: &serde_json::Value) -> PermissionDecision {
+        PermissionDecision::Deny {
+            reason: self.reason.into(),
+        }
+    }
+    async fn resolve_detailed(
+        &self,
+        _name: &str,
+        _input: &serde_json::Value,
+    ) -> PermissionResolution {
+        PermissionResolution::Deny {
+            reason: self.reason.into(),
+            source: PermissionDecisionSource::Unspecified,
+            behavior_ask: true,
+            content_blocks: vec![ContentBlock::Image {
+                source: ImageSource::Base64 {
+                    media_type: "image/png".into(),
+                    data: "AQID".into(),
+                },
+            }],
+        }
+    }
+}
+
+// ---- A `PermissionDenied` hook that returns `{retry: true}` ----
+struct PermDeniedRetryHook;
+#[async_trait]
+impl BuiltinHookHandler for PermDeniedRetryHook {
+    fn id(&self) -> &str {
+        "perm-denied-retry"
+    }
+    async fn handle(&self, _event: &HookEvent, _ctx: &HookContext) -> HookResult {
+        HookResult {
+            outcome: HookOutcome::Success,
+            stdout: String::new(),
+            stderr: String::new(),
+            exit_code: Some(0),
+            response: Some(HookResponse {
+                retry: Some(true),
+                ..Default::default()
+            }),
         }
     }
 }
@@ -247,11 +302,11 @@ impl BuiltinHookHandler for PermRecorder {
     }
 }
 
-/// A `PreToolUse` hook that emits `additionalContext` (`systemMessage`) but
-/// makes NO permission decision — so the tool proceeds to the permission gate.
-/// claude-code pushes this context to `resultingMessages` in the pre-hook phase
-/// (`toolExecution.ts:846`) BEFORE the gate, so it must surface even when the
-/// gate later DENIES the tool.
+/// A `PreToolUse` hook that emits `additionalContext` (the model-facing channel)
+/// but makes NO permission decision — so the tool proceeds to the permission
+/// gate. claude-code pushes this context to `resultingMessages` in the pre-hook
+/// phase (`toolExecution.ts:846`) BEFORE the gate, so it must surface even when
+/// the gate later DENIES the tool.
 struct PreContextHook;
 #[async_trait]
 impl BuiltinHookHandler for PreContextHook {
@@ -265,7 +320,7 @@ impl BuiltinHookHandler for PreContextHook {
             stderr: String::new(),
             exit_code: Some(0),
             response: Some(HookResponse {
-                system_message: Some("DENY-CTX".into()),
+                additional_context: Some("DENY-CTX".into()),
                 ..Default::default()
             }),
         }
@@ -341,6 +396,25 @@ fn orch_with_gate(
 ) -> ConversationOrchestrator {
     ConversationOrchestrator::new(
         OrchestratorConfig::default(),
+        api,
+        Arc::new(tools),
+        hooks,
+        gate,
+        Arc::new(MockOutputStream::new()),
+        Arc::new(StaticMemoryProvider::empty()),
+        std::env::temp_dir(),
+    )
+}
+
+fn orch_with_gate_config(
+    api: Arc<MockApiClient>,
+    hooks: Arc<HookExecutorImpl>,
+    tools: ToolRegistry,
+    gate: Arc<dyn PermissionGate>,
+    config: OrchestratorConfig,
+) -> ConversationOrchestrator {
+    ConversationOrchestrator::new(
+        config,
         api,
         Arc::new(tools),
         hooks,
@@ -672,5 +746,221 @@ async fn no_permission_hooks_registered_is_noop() {
         api.captured_msgs().await.len(),
         2,
         "the loop still reaches the terminating turn (2 API calls)"
+    );
+}
+
+/// Helper: find the User message that carries the deny tool_result for `tu` and
+/// return its content blocks.
+fn deny_result_blocks<'a>(
+    history: &'a [ConversationMessage],
+    tu: &ToolUseId,
+) -> Option<&'a Vec<ContentBlock>> {
+    history.iter().find_map(|m| match m {
+        ConversationMessage::User { content, .. }
+            if content.iter().any(|b| matches!(
+                b,
+                ContentBlock::ToolResult { tool_use_id, is_error: true, .. } if tool_use_id == tu
+            )) =>
+        {
+            Some(content)
+        }
+        _ => None,
+    })
+}
+
+#[tokio::test]
+async fn ask_behavior_deny_appends_image_blocks_at_top_level() {
+    // An `ask`-behavior rejection that supplies contentBlocks
+    // (`toolExecution.ts:1039-1046`): the deny user message is
+    // [text tool_result(is_error), image] — the image rides at the TOP LEVEL of
+    // the user message, alongside (NOT inside) the tool_result.
+    let tool_use_id = ToolUseId::new();
+    let api = two_turn_api(tool_use_id.clone(), "Echo", json!({ "x": 1 }));
+    let registry = Arc::new(RwLock::new(HookRegistry::new()));
+    let hooks = Arc::new(HookExecutorImpl::new(
+        registry,
+        Arc::new(UnusedHttp),
+        Arc::new(UnusedRuntime),
+    ));
+    let mut tools = ToolRegistry::new();
+    tools.register_builtin(Arc::new(EchoTool));
+    let gate = Arc::new(AskRejectGate {
+        reason: "declined at prompt",
+    });
+    let orch = orch_with_gate(api, hooks, tools, gate);
+
+    let outcome = orch.run_turn("run echo").await.expect("turn ok");
+    assert!(matches!(outcome, ConversationOutcome::EndTurn { .. }));
+
+    let session = orch.session();
+    let s = session.lock().await;
+    let content = deny_result_blocks(&s.history, &tool_use_id)
+        .expect("a deny tool_result user message must be present");
+
+    // First block: the text-only tool_result carrying the deny reason.
+    match &content[0] {
+        ContentBlock::ToolResult {
+            content: c,
+            is_error,
+            tool_use_id: tu,
+            ..
+        } => {
+            assert!(*is_error);
+            assert_eq!(tu, &tool_use_id);
+            assert!(
+                c.contains("Permission denied") && c.contains("declined at prompt"),
+                "tool_result carries the deny reason: {c:?}"
+            );
+        }
+        other => panic!("expected tool_result first, got {other:?}"),
+    }
+    // Second block: the image, at the TOP LEVEL (not nested in the tool_result).
+    assert!(
+        matches!(
+            &content[1],
+            ContentBlock::Image { source: ImageSource::Base64 { media_type, data } }
+                if media_type == "image/png" && data == "AQID"
+        ),
+        "the ask-rejection image rides at top level: {:?}",
+        content.get(1)
+    );
+    assert_eq!(content.len(), 2, "exactly [tool_result, image]: {content:?}");
+}
+
+#[tokio::test]
+async fn normal_deny_is_plain_text_tool_result_only() {
+    // REGRESSION LOCK on the common path: a normal rule/mode deny (no
+    // contentBlocks) produces ONLY the plain text tool_result — no top-level
+    // image block, byte-identical to before this change.
+    let tool_use_id = ToolUseId::new();
+    let api = two_turn_api(tool_use_id.clone(), "Echo", json!({ "x": 1 }));
+    let registry = Arc::new(RwLock::new(HookRegistry::new()));
+    let hooks = Arc::new(HookExecutorImpl::new(
+        registry,
+        Arc::new(UnusedHttp),
+        Arc::new(UnusedRuntime),
+    ));
+    let mut tools = ToolRegistry::new();
+    tools.register_builtin(Arc::new(EchoTool));
+    let gate = Arc::new(DenyGate {
+        reason: "policy forbids it",
+    });
+    let orch = orch_with_gate(api, hooks, tools, gate);
+
+    let outcome = orch.run_turn("run echo").await.expect("turn ok");
+    assert!(matches!(outcome, ConversationOutcome::EndTurn { .. }));
+
+    let session = orch.session();
+    let s = session.lock().await;
+    let content = deny_result_blocks(&s.history, &tool_use_id)
+        .expect("a deny tool_result user message must be present");
+    assert_eq!(
+        content.len(),
+        1,
+        "a normal deny is the plain text tool_result ONLY (no image blocks): {content:?}"
+    );
+    assert!(
+        matches!(&content[0], ContentBlock::ToolResult { is_error: true, .. }),
+        "the sole block is the is_error tool_result: {content:?}"
+    );
+}
+
+/// Build an executor with the classifier-deny gate's `PermissionDenied` hook
+/// wired to the retrying builtin.
+async fn exec_with_retry_hook() -> Arc<HookExecutorImpl> {
+    let registry = Arc::new(RwLock::new(HookRegistry::new()));
+    {
+        let mut r = registry.write().await;
+        r.register(builtin_hook(
+            "denied-retry",
+            "perm-denied-retry",
+            HookEventType::PermissionDenied,
+        ));
+    }
+    let mut exec = HookExecutorImpl::new(registry, Arc::new(UnusedHttp), Arc::new(UnusedRuntime));
+    exec.register_builtin(Arc::new(PermDeniedRetryHook));
+    Arc::new(exec)
+}
+
+fn retry_meta_present(history: &[ConversationMessage]) -> bool {
+    let verbatim = "The PermissionDenied hook indicated this command is now approved. \
+You may retry it if you would like.";
+    history.iter().any(|m| {
+        matches!(m, ConversationMessage::User { content, .. }
+            if content.iter().any(|b| matches!(b, ContentBlock::Text { text } if text == verbatim)))
+    })
+}
+
+#[tokio::test]
+async fn permission_denied_retry_pushes_meta_when_classifier_gate_forced_on() {
+    // Double-gated retry path (`toolExecution.ts:1075-1101`): with the
+    // `TRANSCRIPT_CLASSIFIER` feature forced ON (config bit) AND a
+    // classifier-source deny whose PermissionDenied hook returns {retry:true},
+    // the verbatim isMeta retry message is pushed AFTER the deny result.
+    let tool_use_id = ToolUseId::new();
+    let api = two_turn_api(tool_use_id.clone(), "Echo", json!({ "cmd": "rm -rf /" }));
+    let hooks = exec_with_retry_hook().await;
+    let mut tools = ToolRegistry::new();
+    tools.register_builtin(Arc::new(EchoTool));
+    let gate = Arc::new(ClassifierDenyGate {
+        reason: "classifier blocked it",
+    });
+    let config = OrchestratorConfig {
+        transcript_classifier_enabled: true,
+        ..Default::default()
+    };
+    let orch = orch_with_gate_config(api, hooks, tools, gate, config);
+
+    let outcome = orch.run_turn("run echo").await.expect("turn ok");
+    assert!(matches!(outcome, ConversationOutcome::EndTurn { .. }));
+
+    let session = orch.session();
+    let s = session.lock().await;
+    assert!(
+        retry_meta_present(&s.history),
+        "the verbatim retry meta message must be pushed when the feature is forced on"
+    );
+    // Ordering: the retry meta sits AFTER the deny tool_result message.
+    let deny_pos = s
+        .history
+        .iter()
+        .position(|m| matches!(m, ConversationMessage::User { content, .. }
+            if content.iter().any(|b| matches!(b, ContentBlock::ToolResult { tool_use_id: tu, is_error: true, .. } if *tu == tool_use_id))))
+        .expect("deny tool_result present");
+    let verbatim = "The PermissionDenied hook indicated this command is now approved. \
+You may retry it if you would like.";
+    let retry_pos = s
+        .history
+        .iter()
+        .position(|m| matches!(m, ConversationMessage::User { content, .. }
+            if content.iter().any(|b| matches!(b, ContentBlock::Text { text } if text == verbatim))))
+        .expect("retry meta present");
+    assert!(retry_pos > deny_pos, "retry meta must follow the deny result");
+}
+
+#[tokio::test]
+async fn permission_denied_retry_no_meta_when_gate_off() {
+    // DORMANT default: with the `TRANSCRIPT_CLASSIFIER` feature OFF (the parity
+    // default config), a classifier-deny whose PermissionDenied hook returns
+    // {retry:true} does NOT push the retry message — the denial stands.
+    let tool_use_id = ToolUseId::new();
+    let api = two_turn_api(tool_use_id.clone(), "Echo", json!({ "cmd": "rm -rf /" }));
+    let hooks = exec_with_retry_hook().await;
+    let mut tools = ToolRegistry::new();
+    tools.register_builtin(Arc::new(EchoTool));
+    let gate = Arc::new(ClassifierDenyGate {
+        reason: "classifier blocked it",
+    });
+    // Default config → transcript_classifier_enabled = false.
+    let orch = orch_with_gate(api, hooks, tools, gate);
+
+    let outcome = orch.run_turn("run echo").await.expect("turn ok");
+    assert!(matches!(outcome, ConversationOutcome::EndTurn { .. }));
+
+    let session = orch.session();
+    let s = session.lock().await;
+    assert!(
+        !retry_meta_present(&s.history),
+        "no retry meta message on the dormant default path (gate off)"
     );
 }

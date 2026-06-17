@@ -11,11 +11,13 @@
 use crate::error::OrchestratorError;
 use crate::sse::accumulator::BlockAccumulator;
 use crate::sse::event_router::{dispatch_event, RouterAction};
+use crate::streaming_executor::StreamingToolExecutor;
 use futures::stream::{BoxStream, StreamExt};
 use llm_client::{LlmError, LlmEvent, TokenUsage, Usage as LlmUsage};
-use protocol::{ContentBlock, ToolUseId};
+use protocol::{ContentBlock, MessageId, ToolUseId};
 use serde_json::Value;
 use std::sync::Arc;
+use tokio_util::sync::CancellationToken;
 use traits::OutputStream;
 
 /// One tool dispatch request observed during the stream. Carries the
@@ -120,8 +122,66 @@ fn merge_usage(seed: &LlmUsage, delta: &LlmUsage) -> LlmUsage {
 /// - [`OrchestratorError::StreamEndedWithoutStop`] if the stream
 ///   produced no `MessageStop` event before terminating.
 pub async fn pump_stream(
+    stream: BoxStream<'static, Result<LlmEvent, LlmError>>,
+    output: &Arc<dyn OutputStream>,
+) -> Result<PumpedTurn, OrchestratorError> {
+    pump_stream_inner(stream, output, None).await
+}
+
+/// Context handed to [`pump_stream_with_executor`] so that, as each
+/// `tool_use` block's `content_block_stop` arrives mid-stream, its tool is
+/// registered with (and dispatched into) the [`StreamingToolExecutor`] —
+/// faithful to claude-code `query.ts:837-844`, where `addTool` runs INSIDE
+/// the live stream loop.
+///
+/// ## Byte-equivalence contract
+/// This struct only changes *when tools START* (during the stream vs. after
+/// it). It does NOT drain / persist / yield any `tool_result` mid-stream:
+/// `take_newly_completed` + per-result persistence stay in the post-stream
+/// caller loop (`conversation.rs`), preserving the exact JSONL / history /
+/// request byte ordering. The executor buffers each `Completed` tool until
+/// that post-stream drain.
+pub(crate) struct ExecutorPump<'a, 'e> {
+    /// The executor created BEFORE the stream (claude-code `query.ts:562`),
+    /// borrowing `&orch` for the whole turn.
+    pub(crate) executor: &'a mut StreamingToolExecutor<'e>,
+    /// The pre-allocated id of THIS turn's assistant message (claude-code
+    /// passes the already-yielded assistant `message` to `addTool`). It only
+    /// populates `TrackedTool.assistant_id`; the post-stream drain parents
+    /// results via the per-block JSONL uuid map, so this value does not affect
+    /// output bytes.
+    pub(crate) assistant_id: MessageId,
+    /// The turn's USER-interrupt token (ESC / new message), mirroring
+    /// claude-code's `!toolUseContext.abortController.signal.aborted` guard at
+    /// `query.ts:839`. When already fired, mid-stream tools are still
+    /// REGISTERED (so the post-stream drain can substitute their synthetic
+    /// cancel results) but NOT started — identical to the pre-change behavior
+    /// where the post-stream loop's `apply_abort_to_pending` produces the
+    /// synthetics. `None` ⇒ never aborted ⇒ always dispatch.
+    pub(crate) user_cancel: Option<&'a CancellationToken>,
+}
+
+/// Like [`pump_stream`], but drives a [`StreamingToolExecutor`] DURING the
+/// stream: each arriving `tool_use` block is `add_tool`'d and `process_queue`'d
+/// the moment its `content_block_stop` is observed, and in-flight tool futures
+/// are polled CONCURRENTLY with the stream so a tool genuinely begins executing
+/// before `EndOfStream`. Mirrors claude-code `query.ts:659/837-844`.
+///
+/// The drain of completed results into history is intentionally NOT performed
+/// here — see [`ExecutorPump`]'s byte-equivalence contract. The caller drains
+/// the (possibly already-`Completed`) tools post-stream in received order.
+pub(crate) async fn pump_stream_with_executor(
+    stream: BoxStream<'static, Result<LlmEvent, LlmError>>,
+    output: &Arc<dyn OutputStream>,
+    pump: ExecutorPump<'_, '_>,
+) -> Result<PumpedTurn, OrchestratorError> {
+    pump_stream_inner(stream, output, Some(pump)).await
+}
+
+async fn pump_stream_inner(
     mut stream: BoxStream<'static, Result<LlmEvent, LlmError>>,
     output: &Arc<dyn OutputStream>,
+    mut pump: Option<ExecutorPump<'_, '_>>,
 ) -> Result<PumpedTurn, OrchestratorError> {
     let mut acc = BlockAccumulator::new();
     let mut turn = PumpedTurn::default();
@@ -130,7 +190,28 @@ pub async fn pump_stream(
     // MessageDelta usage supersedes this when present.
     let mut message_start_usage: Option<LlmUsage> = None;
 
-    while let Some(item) = stream.next().await {
+    loop {
+        // Race the next stream event against the completion of any in-flight
+        // tool future. `drain_one` only RECORDS the completed tool's result
+        // into the executor (and runs the Bash sibling-error cascade) — it
+        // does NOT persist / emit / drain into history, so polling it
+        // mid-stream advances the tool's work without changing output bytes.
+        // The `if` guard keeps us off an empty `FuturesUnordered`, whose
+        // `next()` resolves to `None` immediately and would busy-loop.
+        let item = if let Some(p) = pump.as_mut() {
+            tokio::select! {
+                biased;
+                _ = p.executor.drain_one(), if !p.executor.inflight_is_empty() => {
+                    // A tool finished mid-stream; loop to keep reading the
+                    // stream / polling remaining in-flight tools.
+                    continue;
+                }
+                item = stream.next() => item,
+            }
+        } else {
+            stream.next().await
+        };
+        let Some(item) = item else { break };
         let event = item.map_err(OrchestratorError::Streaming)?;
         // Capture MessageStart usage before dispatching (dispatch consumes the event).
         if let LlmEvent::MessageStart { ref response } = event {
@@ -150,6 +231,26 @@ pub async fn pump_stream(
                 input,
                 provider_id,
             } => {
+                // claude-code `query.ts:837-844`: register THIS tool with the
+                // executor the moment its block completes. Registration always
+                // happens (so the post-stream drain has a TrackedTool to emit a
+                // result for); execution (`process_queue`) is gated on the
+                // user-interrupt token, mirroring the `!signal.aborted` guard.
+                if let Some(p) = pump.as_mut() {
+                    p.executor.add_tool(
+                        id.clone(),
+                        name.clone(),
+                        input.clone(),
+                        provider_id.clone(),
+                        p.assistant_id,
+                    );
+                    let aborted = p
+                        .user_cancel
+                        .is_some_and(CancellationToken::is_cancelled);
+                    if !aborted {
+                        p.executor.process_queue();
+                    }
+                }
                 turn.tool_uses.push(ObservedToolUse {
                     id,
                     name,

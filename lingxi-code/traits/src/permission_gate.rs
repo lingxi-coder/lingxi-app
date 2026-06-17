@@ -14,6 +14,7 @@
 #![forbid(unsafe_code)]
 
 use async_trait::async_trait;
+use protocol::ContentBlock;
 use serde_json::Value;
 
 /// Outcome of a [`PermissionGate::check`] call.
@@ -60,6 +61,25 @@ pub enum PermissionResolution {
         reason: String,
         /// Where the denial came from (gates the `PermissionDenied` hook).
         source: PermissionDecisionSource,
+        /// `true` when the underlying `permissionDecision.behavior === 'ask'`
+        /// (a rejection that came from an ASK prompt the user declined), vs a
+        /// rule/mode `deny`. claude-code only appends the rejection's
+        /// `contentBlocks` to the outgoing user message when the behavior is
+        /// `ask` (`toolExecution.ts:1040-1043`), so the turn loop branches on
+        /// this. `false` for every existing producer (rule/mode/classifier
+        /// denies and the default `resolve_detailed`), keeping the common deny
+        /// path byte-identical.
+        behavior_ask: bool,
+        /// Image (or other non-text) content blocks the `ask`-behavior
+        /// rejection supplied — `permissionDecision.contentBlocks`
+        /// (`toolExecution.ts:1040`). claude-code appends these at the TOP LEVEL
+        /// of the deny user message (alongside, NOT inside, the text-only
+        /// `tool_result`, which rejects non-text when `is_error` is set). EMPTY
+        /// for every existing producer; only consulted when
+        /// [`Self::Deny::behavior_ask`] is also `true`. Dormant in the public
+        /// build (no gate supplies them), faithful to claude-code where the
+        /// `ask`+contentBlocks rejection path is itself gated.
+        content_blocks: Vec<ContentBlock>,
     },
     /// The gate would PROMPT for this call — delegate to its inner transport in
     /// interactive mode, or auto-deny it in headless. The turn loop fires the
@@ -152,6 +172,8 @@ pub trait PermissionGate: Send + Sync {
             PermissionDecision::Deny { reason } => PermissionResolution::Deny {
                 reason,
                 source: PermissionDecisionSource::Unspecified,
+                behavior_ask: false,
+                content_blocks: Vec::new(),
             },
         }
     }

@@ -118,6 +118,12 @@ impl PolicyPermissionGate {
             } => PermissionResolution::Deny {
                 source: map_decision_source(&reason),
                 reason: explanation.unwrap_or_else(|| deny_reason_string(&reason)),
+                // The policy gate's rule/mode/classifier denials are never an
+                // `ask`-behavior rejection carrying contentBlocks (the external
+                // build has no classifier/contentBlocks producer), so the
+                // top-level-image path stays dormant — byte-identical to before.
+                behavior_ask: false,
+                content_blocks: Vec::new(),
             },
             PermissionResult::Ask { .. } => {
                 if matches!(tool_default(name), PromptDefault::AllowByDefault) {
@@ -577,7 +583,7 @@ mod tests {
         let gate =
             PolicyPermissionGate::new(policy, RecordingInner::new(PermissionDecision::Allow));
         match gate.resolve_detailed("Bash", &serde_json::json!({})).await {
-            PermissionResolution::Deny { source, reason } => {
+            PermissionResolution::Deny { source, reason, .. } => {
                 assert_eq!(source, PermissionDecisionSource::Rule);
                 assert!(reason.contains("Bash"), "reason names the rule: {reason}");
             }
@@ -642,7 +648,7 @@ mod tests {
             reason: "nope".into(),
         });
         match deny.resolve_detailed("Bash", &serde_json::json!({})).await {
-            PermissionResolution::Deny { source, reason } => {
+            PermissionResolution::Deny { source, reason, .. } => {
                 assert_eq!(source, PermissionDecisionSource::Unspecified);
                 assert_eq!(reason, "nope");
             }

@@ -1,26 +1,23 @@
-//! fired from the turn loop's tool-dispatch chokepoint (`turn_loop.rs`) around
-//! the permission gate.
+//! Permission hooks fired from the turn loop's tool-dispatch chokepoint
+//! (`turn_loop.rs`) around the permission gate.
 //!
-//! Parity with claude-code:
-//! - `executePermissionRequestHooks` (`utils/hooks.ts:4157-4192`) fires when a
-//!   tool call needs its permission RESOLVED (`permissions.ts:409`). The `LingXi`
-//!   permission seam ([`PermissionGate::check`]) IS that resolution step (a single
-//!   allow/deny gate, no separate interactive "ask" branch), so `PermissionRequest`
-//!   fires immediately BEFORE consulting the gate.
-//! - `executePermissionDeniedHooks` (`utils/hooks.ts:3529-3559`) fires when a
-//!   permission decision denies a tool call (`toolExecution.ts:1081`). It fires
-//!   at the gate's deny chokepoint, before the error `tool_result` is pushed.
+//! Parity with claude-code (HOOK.3 issues 2/3 — SOURCE-GATED):
+//! - `PermissionRequest` (`runPermissionRequestHooksForHeadlessAgent`) fires ONLY
+//!   when the gate is ABOUT TO ASK (`resolve_detailed` → `Ask`), BEFORE the prompt;
+//!   a hook 'allow' RESCUES the call (resolved via `check_after_hook_allow`), a
+//!   hook 'deny' denies. An outright ALLOW, or a rule/mode DENY, is already
+//!   resolved → `PermissionRequest` does NOT fire for it.
+//! - `PermissionDenied` (`executePermissionDeniedHooks`, `toolExecution.ts:1075`)
+//!   fires ONLY on an auto-mode CLASSIFIER deny — NOT on a rule/mode/plan deny.
+//!   The auto-mode classifier is unwired in the public build, so this is dormant
+//!   there, matching claude-code's public build (`TRANSCRIPT_CLASSIFIER` off).
 //!
 //! Scenarios:
-//! 1. A gate that ALLOWS fires `PermissionRequest` (with tool name + input) and
-//!    NOT `PermissionDenied`; the tool then runs.
-//! 2. A gate that DENIES fires both `PermissionRequest` AND `PermissionDenied`
-//!    (the request precedes the denial), with the gate's reason on the
-//!    `PermissionDenied` payload.
-//! 3. A `PreToolUse` hook 'allow' (which bypasses the gate) fires NEITHER event
-//!    — the gate is never consulted.
-//! 4. No permission hooks registered → both fires are strict no-ops; the turn is
-//!    byte-identical (allow → tool runs; deny → error result, turn completes).
+//! 1. A gate that ALLOWS fires NEITHER event; the tool runs.
+//! 2. A CLASSIFIER-source deny fires `PermissionDenied` (and NOT `PermissionRequest`).
+//! 3. A rule/mode (non-classifier) deny fires NEITHER event; the tool is denied.
+//! 4. A `PreToolUse` hook 'allow' (which bypasses the gate) fires NEITHER event.
+//! 5. No permission hooks registered → strict no-ops; the turn completes.
 use llm_client::ContentBlock as LlmContentBlock;
 
 use async_trait::async_trait;
@@ -48,7 +45,9 @@ use tool_api::tool_trait::{
     DescriptionOptions, PromptOptions, Tool, ToolCallResult, ToolError, ToolStaticContext,
     ValidationError,
 };
-use traits::permission_gate::{PermissionDecision, PermissionGate};
+use traits::permission_gate::{
+    PermissionDecision, PermissionDecisionSource, PermissionGate, PermissionResolution,
+};
 use traits::{HttpError, HttpTransport, RuntimeError, RuntimeSpawner};
 
 // ---- unused HTTP / Runtime stubs (Builtin hooks never touch them) ----
@@ -78,7 +77,8 @@ impl RuntimeSpawner for UnusedRuntime {
     }
 }
 
-// ---- Permission gate that always DENIES with a fixed reason ----
+// ---- Permission gate that always DENIES with a fixed reason (Unspecified
+// source — models a rule/mode deny, which must NOT fire PermissionDenied) ----
 struct DenyGate {
     reason: &'static str,
 }
@@ -87,6 +87,30 @@ impl PermissionGate for DenyGate {
     async fn check(&self, _name: &str, _input: &serde_json::Value) -> PermissionDecision {
         PermissionDecision::Deny {
             reason: self.reason.into(),
+        }
+    }
+}
+
+// ---- Permission gate whose deny is sourced to the auto-mode CLASSIFIER (the
+// only deny source that fires the PermissionDenied hook) ----
+struct ClassifierDenyGate {
+    reason: &'static str,
+}
+#[async_trait]
+impl PermissionGate for ClassifierDenyGate {
+    async fn check(&self, _name: &str, _input: &serde_json::Value) -> PermissionDecision {
+        PermissionDecision::Deny {
+            reason: self.reason.into(),
+        }
+    }
+    async fn resolve_detailed(
+        &self,
+        _name: &str,
+        _input: &serde_json::Value,
+    ) -> PermissionResolution {
+        PermissionResolution::Deny {
+            reason: self.reason.into(),
+            source: PermissionDecisionSource::Classifier,
         }
     }
 }
@@ -325,7 +349,10 @@ fn two_turn_api(
 }
 
 #[tokio::test]
-async fn allow_gate_fires_permission_request_only() {
+async fn allow_gate_fires_neither_permission_hook() {
+    // An outright ALLOW (NoOp gate → resolve_detailed = Allow) is already
+    // resolved: it is NOT an about-to-ask, so PermissionRequest does NOT fire,
+    // and it is not a deny, so PermissionDenied does NOT fire. The tool runs.
     let tool_use_id = ToolUseId::new();
     let api = two_turn_api(tool_use_id, "Echo", json!({ "x": 1 }));
     let log = Arc::new(Mutex::new(PermLog::default()));
@@ -339,18 +366,10 @@ async fn allow_gate_fires_permission_request_only() {
     assert!(matches!(outcome, ConversationOutcome::EndTurn { .. }));
 
     let log = log.lock().unwrap();
-    assert_eq!(
-        log.requests.len(),
-        1,
-        "PermissionRequest fires once before the gate: {:?}",
-        log.requests
-    );
-    assert_eq!(log.requests[0].tool_name, "Echo");
-    assert_eq!(log.requests[0].tool_input, json!({ "x": 1 }));
     assert!(
-        log.requests[0].reason.contains("Echo"),
-        "reason carries the tool name: {:?}",
-        log.requests[0].reason
+        log.requests.is_empty(),
+        "an allowed tool is not an about-to-ask → no PermissionRequest: {:?}",
+        log.requests
     );
     assert!(
         log.denials.is_empty(),
@@ -360,7 +379,46 @@ async fn allow_gate_fires_permission_request_only() {
 }
 
 #[tokio::test]
-async fn deny_gate_fires_request_then_denied() {
+async fn classifier_deny_fires_permission_denied_not_request() {
+    // An auto-mode CLASSIFIER deny fires PermissionDenied (claude-code
+    // `toolExecution.ts:1075`), carrying the reason — and NOT PermissionRequest
+    // (it is a resolved deny, not an about-to-ask).
+    let tool_use_id = ToolUseId::new();
+    let api = two_turn_api(tool_use_id, "Echo", json!({ "cmd": "rm -rf /" }));
+    let log = Arc::new(Mutex::new(PermLog::default()));
+    let hooks = exec_permission_recorder(log.clone()).await;
+    let mut tools = ToolRegistry::new();
+    tools.register_builtin(Arc::new(EchoTool));
+    let gate = Arc::new(ClassifierDenyGate {
+        reason: "classifier blocked it",
+    });
+    let orch = orch_with_gate(api, hooks, tools, gate);
+
+    let outcome = orch.run_turn("run echo").await.expect("turn ok");
+    assert!(matches!(outcome, ConversationOutcome::EndTurn { .. }));
+
+    let log = log.lock().unwrap();
+    assert!(
+        log.requests.is_empty(),
+        "a resolved deny does NOT fire PermissionRequest: {:?}",
+        log.requests
+    );
+    assert_eq!(
+        log.denials.len(),
+        1,
+        "a classifier deny fires PermissionDenied once: {:?}",
+        log.denials
+    );
+    assert_eq!(log.denials[0].tool_name, "Echo");
+    assert_eq!(log.denials[0].tool_input, json!({ "cmd": "rm -rf /" }));
+    assert_eq!(log.denials[0].reason, "classifier blocked it");
+}
+
+#[tokio::test]
+async fn rule_mode_deny_fires_neither_permission_hook() {
+    // A rule/mode (non-classifier, Unspecified-source) deny fires NEITHER hook —
+    // claude-code does NOT fire PermissionDenied on a rule/mode deny. The tool is
+    // still denied and the turn completes.
     let tool_use_id = ToolUseId::new();
     let api = two_turn_api(tool_use_id, "Echo", json!({ "cmd": "rm -rf /" }));
     let log = Arc::new(Mutex::new(PermLog::default()));
@@ -376,21 +434,12 @@ async fn deny_gate_fires_request_then_denied() {
     assert!(matches!(outcome, ConversationOutcome::EndTurn { .. }));
 
     let log = log.lock().unwrap();
-    assert_eq!(
-        log.requests.len(),
-        1,
-        "PermissionRequest fires before the deny: {:?}",
-        log.requests
-    );
-    assert_eq!(
-        log.denials.len(),
-        1,
-        "PermissionDenied fires once on the deny: {:?}",
+    assert!(
+        log.requests.is_empty() && log.denials.is_empty(),
+        "a rule/mode deny fires no permission hooks: req={:?} denied={:?}",
+        log.requests,
         log.denials
     );
-    assert_eq!(log.denials[0].tool_name, "Echo");
-    assert_eq!(log.denials[0].tool_input, json!({ "cmd": "rm -rf /" }));
-    assert_eq!(log.denials[0].reason, "policy forbids it");
 }
 
 #[tokio::test]

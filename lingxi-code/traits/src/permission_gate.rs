@@ -28,6 +28,45 @@ pub enum PermissionDecision {
     },
 }
 
+/// What produced a [`PermissionGate`] decision — lets the turn loop fire the
+/// source-gated permission hooks the way claude-code does: `PermissionRequest`
+/// on an about-to-ask, `PermissionDenied` ONLY on an auto-mode classifier deny
+/// (`toolExecution.ts:1075`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PermissionDecisionSource {
+    /// An explicit allow/deny/ask RULE matched (claude-code decisionReason 'rule').
+    Rule,
+    /// The active permission MODE produced the decision (no rule matched).
+    Mode,
+    /// An auto-mode CLASSIFIER produced the decision (claude-code 'classifier').
+    /// `PermissionDenied` hooks fire only on a deny from this source.
+    Classifier,
+    /// No richer source is available — a gate with no rule/mode layer, or a
+    /// decision class that carries no distinguishable source.
+    Unspecified,
+}
+
+/// A [`PermissionGate`] resolution that carries its [`PermissionDecisionSource`]
+/// and distinguishes an about-to-ASK (which the turn loop surfaces to a
+/// `PermissionRequest` hook BEFORE delegating to the prompt transport) from a
+/// resolved allow/deny. Returned by [`PermissionGate::resolve_detailed`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PermissionResolution {
+    /// Permitted outright (rule/mode allow, or a read-only auto-allow).
+    Allow,
+    /// Rejected, with the rendered deny reason and its source.
+    Deny {
+        /// Reason surfaced to the model as the `tool_result`.
+        reason: String,
+        /// Where the denial came from (gates the `PermissionDenied` hook).
+        source: PermissionDecisionSource,
+    },
+    /// The gate would PROMPT for this call — delegate to its inner transport in
+    /// interactive mode, or auto-deny it in headless. The turn loop fires the
+    /// `PermissionRequest` hook here before resolving via the transport.
+    Ask,
+}
+
 /// The workspace-wide authorization gate consulted before every tool dispatch.
 ///
 /// M5-02 introduced this trait as a `pub` item inside
@@ -86,5 +125,34 @@ pub trait PermissionGate: Send + Sync {
     /// [`Self::check_after_hook_allow`].
     async fn check_in_plan_mode(&self, name: &str, input: &Value) -> PermissionDecision {
         self.check(name, input).await
+    }
+
+    /// Resolve a tool call to a SOURCED [`PermissionResolution`] WITHOUT yet
+    /// consulting the inner prompt transport.
+    ///
+    /// This lets the turn loop fire the source-gated permission hooks the way
+    /// claude-code does: `PermissionRequest` on an [`PermissionResolution::Ask`]
+    /// (before the prompt), and `PermissionDenied` only on a
+    /// [`PermissionResolution::Deny`] whose source is
+    /// [`PermissionDecisionSource::Classifier`] (`toolExecution.ts:1075`).
+    ///
+    /// The default impl derives from [`Self::check`] — `Allow` → `Allow`, `Deny`
+    /// → `Deny { source: Unspecified }` — so a gate with NO rule/source layer
+    /// (the no-op / adapter transports that the turn loop uses directly when
+    /// enforcement is off) never yields an `Ask` here; it has already resolved.
+    /// The rule-evaluating `PolicyPermissionGate` OVERRIDES this to authorize
+    /// WITHOUT delegating, returning the rule/mode/classifier source and an `Ask`
+    /// for a would-be prompt. (Inner prompt transports — interactive / TUI — are
+    /// never the turn loop's gate directly; they sit behind the policy gate, so
+    /// the default's `check` call never triggers a prompt for the real gate
+    /// types.) Additive DEFAULTED (frozen-trait safe).
+    async fn resolve_detailed(&self, name: &str, input: &Value) -> PermissionResolution {
+        match self.check(name, input).await {
+            PermissionDecision::Allow => PermissionResolution::Allow,
+            PermissionDecision::Deny { reason } => PermissionResolution::Deny {
+                reason,
+                source: PermissionDecisionSource::Unspecified,
+            },
+        }
     }
 }

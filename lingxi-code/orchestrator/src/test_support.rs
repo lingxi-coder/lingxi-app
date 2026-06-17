@@ -470,7 +470,9 @@ pub fn noop_hook_executor() -> Arc<hooks::HookExecutorImpl> {
 // lingxi-traits::permission_gate. We re-export them here so existing
 // orchestrator imports (crate::test_support::PermissionGate, …) keep
 // working unchanged.
-pub use permission::gate::{PermissionDecision, PermissionGate};
+pub use permission::gate::{
+    PermissionDecision, PermissionDecisionSource, PermissionGate, PermissionResolution,
+};
 
 /// Allow-all permission gate. Always returns `Allow`.
 ///

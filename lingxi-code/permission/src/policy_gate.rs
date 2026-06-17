@@ -39,7 +39,10 @@
 //! always-allow `NoOpPermissionGate`.
 
 use crate::defaults_per_tool::tool_default;
-use crate::gate::{PermissionDecision, PermissionGate, PromptDefault};
+use crate::gate::{
+    PermissionDecision, PermissionDecisionSource, PermissionGate, PermissionResolution,
+    PromptDefault,
+};
 use crate::mode::PermissionMode;
 use crate::policy::PermissionPolicy;
 use crate::result::{PermissionDecisionReason, PermissionResult};
@@ -98,6 +101,36 @@ impl PolicyPermissionGate {
             }
         }
     }
+
+    /// Like [`Self::decide`] but WITHOUT consulting the inner prompt transport:
+    /// returns a [`PermissionResolution`] that carries the deny SOURCE and, for a
+    /// would-be prompt, an [`PermissionResolution::Ask`] instead of resolving it.
+    /// The turn loop uses this to fire the source-gated permission hooks
+    /// (`PermissionRequest` on `Ask`, `PermissionDenied` on a classifier `Deny`)
+    /// before delegating to the transport. See [`PermissionGate::resolve_detailed`].
+    fn resolve(&self, result: PermissionResult, name: &str) -> PermissionResolution {
+        match result {
+            PermissionResult::Allow { .. } => PermissionResolution::Allow,
+            PermissionResult::Deny {
+                reason,
+                explanation,
+                ..
+            } => PermissionResolution::Deny {
+                source: map_decision_source(&reason),
+                reason: explanation.unwrap_or_else(|| deny_reason_string(&reason)),
+            },
+            PermissionResult::Ask { .. } => {
+                if matches!(tool_default(name), PromptDefault::AllowByDefault) {
+                    // Read-only / agent-local tool — auto-allowed, no prompt.
+                    PermissionResolution::Allow
+                } else {
+                    // A would-be prompt: the turn loop fires PermissionRequest
+                    // before this is delegated to the inner transport.
+                    PermissionResolution::Ask
+                }
+            }
+        }
+    }
 }
 
 #[async_trait]
@@ -150,6 +183,13 @@ impl PermissionGate for PolicyPermissionGate {
         )
         .await
     }
+
+    async fn resolve_detailed(&self, name: &str, input: &Value) -> PermissionResolution {
+        // Authorize under the boot mode WITHOUT delegating to the inner prompt,
+        // so the turn loop can read the decision source (and an about-to-ask) and
+        // fire PermissionRequest / PermissionDenied before the prompt resolves.
+        self.resolve(self.policy.authorize(name, input), name)
+    }
 }
 
 /// Render a [`PermissionDecisionReason`] to the human/model-facing deny string
@@ -163,6 +203,18 @@ fn deny_reason_string(reason: &PermissionDecisionReason) -> String {
             format!("denied by permission mode {mode:?}")
         }
         _ => "permission denied".to_string(),
+    }
+}
+
+/// Map a [`PermissionDecisionReason`] to the coarse [`PermissionDecisionSource`]
+/// the turn loop gates its permission hooks on (claude-code `decisionReason.type`).
+/// Only the classifier source unblocks the `PermissionDenied` hook.
+fn map_decision_source(reason: &PermissionDecisionReason) -> PermissionDecisionSource {
+    match reason {
+        PermissionDecisionReason::MatchedRule { .. } => PermissionDecisionSource::Rule,
+        PermissionDecisionReason::PermissionMode { .. } => PermissionDecisionSource::Mode,
+        PermissionDecisionReason::ClassifierRejected { .. } => PermissionDecisionSource::Classifier,
+        _ => PermissionDecisionSource::Unspecified,
     }
 }
 
@@ -494,6 +546,122 @@ mod tests {
             gate.calls(),
             1,
             "default check_in_plan_mode delegates to check()"
+        );
+    }
+
+    // ── Deny-source substrate: resolve_detailed ──────────────────────────────
+
+    #[tokio::test]
+    async fn resolve_detailed_allow_rule_is_allow_without_inner() {
+        let policy = policy_with(
+            r#"{ "permissions": { "allow": ["Bash"] } }"#,
+            PermissionMode::Default,
+        );
+        let inner = RecordingInner::new(PermissionDecision::Deny {
+            reason: "should not prompt".into(),
+        });
+        let gate = PolicyPermissionGate::new(policy, inner.clone());
+        assert_eq!(
+            gate.resolve_detailed("Bash", &serde_json::json!({})).await,
+            PermissionResolution::Allow
+        );
+        assert_eq!(inner.calls(), 0, "resolve_detailed never consults the inner");
+    }
+
+    #[tokio::test]
+    async fn resolve_detailed_deny_rule_carries_rule_source() {
+        let policy = policy_with(
+            r#"{ "permissions": { "deny": ["Bash"] } }"#,
+            PermissionMode::Default,
+        );
+        let gate =
+            PolicyPermissionGate::new(policy, RecordingInner::new(PermissionDecision::Allow));
+        match gate.resolve_detailed("Bash", &serde_json::json!({})).await {
+            PermissionResolution::Deny { source, reason } => {
+                assert_eq!(source, PermissionDecisionSource::Rule);
+                assert!(reason.contains("Bash"), "reason names the rule: {reason}");
+            }
+            other => panic!("expected Deny{{Rule}}, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn resolve_detailed_mode_deny_carries_mode_source() {
+        // DontAsk mode denies an unmatched mutating tool by MODE (not a rule).
+        let policy = policy_with(r#"{ "permissions": {} }"#, PermissionMode::DontAsk);
+        let gate =
+            PolicyPermissionGate::new(policy, RecordingInner::new(PermissionDecision::Allow));
+        match gate.resolve_detailed("Bash", &serde_json::json!({})).await {
+            PermissionResolution::Deny { source, .. } => {
+                assert_eq!(source, PermissionDecisionSource::Mode);
+            }
+            other => panic!("expected Deny{{Mode}}, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn resolve_detailed_read_only_ask_is_allow_without_inner() {
+        let policy = policy_with(r#"{ "permissions": {} }"#, PermissionMode::Default);
+        let inner = RecordingInner::new(PermissionDecision::Deny {
+            reason: "should not prompt".into(),
+        });
+        let gate = PolicyPermissionGate::new(policy, inner.clone());
+        assert_eq!(
+            gate.resolve_detailed("Read", &serde_json::json!({})).await,
+            PermissionResolution::Allow
+        );
+        assert_eq!(inner.calls(), 0, "read-only auto-allow never prompts");
+    }
+
+    #[tokio::test]
+    async fn resolve_detailed_mutating_ask_is_ask_without_inner() {
+        let policy = policy_with(r#"{ "permissions": {} }"#, PermissionMode::Default);
+        let inner = RecordingInner::new(PermissionDecision::Allow);
+        let gate = PolicyPermissionGate::new(policy, inner.clone());
+        assert_eq!(
+            gate.resolve_detailed("Bash", &serde_json::json!({})).await,
+            PermissionResolution::Ask,
+            "a would-be prompt surfaces as Ask, not a delegated decision"
+        );
+        assert_eq!(
+            inner.calls(),
+            0,
+            "resolve_detailed returns Ask, it does not delegate"
+        );
+    }
+
+    #[tokio::test]
+    async fn default_resolve_detailed_maps_check() {
+        // A rule-less gate: Allow → Allow, Deny → Deny{Unspecified}, never Ask.
+        let allow = RecordingInner::new(PermissionDecision::Allow);
+        assert_eq!(
+            allow.resolve_detailed("Bash", &serde_json::json!({})).await,
+            PermissionResolution::Allow
+        );
+        let deny = RecordingInner::new(PermissionDecision::Deny {
+            reason: "nope".into(),
+        });
+        match deny.resolve_detailed("Bash", &serde_json::json!({})).await {
+            PermissionResolution::Deny { source, reason } => {
+                assert_eq!(source, PermissionDecisionSource::Unspecified);
+                assert_eq!(reason, "nope");
+            }
+            other => panic!("expected Deny{{Unspecified}}, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn map_decision_source_maps_classifier_rejected_to_classifier() {
+        // The classifier source is what unblocks the PermissionDenied hook; the
+        // auto-mode classifier path is unwired in the public build, so this is the
+        // only direct coverage of the mapping (it would otherwise be dormant).
+        use crate::result::ClassifierKind;
+        assert_eq!(
+            map_decision_source(&PermissionDecisionReason::ClassifierRejected {
+                classifier: ClassifierKind::Transcript,
+                score: 0.9,
+            }),
+            PermissionDecisionSource::Classifier
         );
     }
 }

@@ -2,7 +2,7 @@
 
 use crate::conversation::ConversationOrchestrator;
 use crate::error::OrchestratorError;
-use crate::test_support::PermissionDecision;
+use crate::test_support::{PermissionDecision, PermissionDecisionSource, PermissionResolution};
 use llm_client::{ContentBlock as LlmContentBlock, LlmError, LlmResponse};
 use hooks::events::HookEvent;
 use hooks::registry::HookContext;
@@ -1278,8 +1278,10 @@ pub(crate) async fn dispatch_tool_uses_tracked(
             continue;
         }
 
-        // Apply modified_input if any hook mutated the tool input.
-        let effective_input = pre_agg
+        // Apply modified_input if any hook mutated the tool input. Mutable so a
+        // PermissionRequest hook 'allow' can further rewrite the input before the
+        // tool runs (claude-code `updatedInput`).
+        let mut effective_input = pre_agg
             .modified_input
             .clone()
             .unwrap_or_else(|| input.clone());
@@ -1335,46 +1337,78 @@ pub(crate) async fn dispatch_tool_uses_tracked(
                 .check_after_hook_allow(name, &effective_input)
                 .await
         } else {
-            // PermissionRequest hook (parity with claude-code
-            // `executePermissionRequestHooks`, `utils/hooks.ts:4157-4192`, fired
-            // from the permission seam `permissions.ts:409`). claude-code fires
-            // it when a tool call needs its permission RESOLVED (the engine is
-            // "about to ask the user / auto-policy for permission"). Fired only
-            // on the non-hook-allowed path — the chokepoint where permission is
-            // about to be ASKED. Best-effort / observe-only: the gate's verdict
-            // governs (the LingXi `perms` seam carries no hook-return override
-            // path). Strict no-op when no `PermissionRequest` hook is registered.
-            let req_event = HookEvent::PermissionRequest {
-                tool_name: name.clone(),
-                tool_input: effective_input.clone(),
-                reason: format!("Tool {name} requires permission"),
-            };
-            let _req_agg = orch.hooks.execute(req_event, hook_ctx.clone()).await;
-            orch.perms.check(name, &effective_input).await
+            // NORMAL permission path. Resolve the decision SOURCE first (without
+            // delegating to the prompt transport) so the source-gated permission
+            // hooks fire the way claude-code does.
+            match orch.perms.resolve_detailed(name, &effective_input).await {
+                PermissionResolution::Allow => PermissionDecision::Allow,
+                PermissionResolution::Deny { reason, source } => {
+                    // HOOK.3 issue 3 — the PermissionDenied hook (claude-code
+                    // `executePermissionDeniedHooks`, fired from
+                    // `toolExecution.ts:1075`) fires ONLY on an auto-mode CLASSIFIER
+                    // deny (`decisionReason.type === 'classifier'`), NOT on a
+                    // rule/mode/plan deny. The auto-mode classifier is unwired in
+                    // the public build, so this is dormant there — matching
+                    // claude-code's public build (the `TRANSCRIPT_CLASSIFIER`
+                    // feature gate is off). Faithful gap: the `{retry:true}` reply
+                    // is unmodeled (the LingXi hook result carries no retry flag),
+                    // so the denial stands; documented as a deferral.
+                    if matches!(source, PermissionDecisionSource::Classifier) {
+                        let denied_event = HookEvent::PermissionDenied {
+                            tool_name: name.clone(),
+                            tool_input: effective_input.clone(),
+                            tool_use_id: *tool_use_id,
+                            reason: reason.clone(),
+                        };
+                        let _denied_agg =
+                            orch.hooks.execute(denied_event, hook_ctx.clone()).await;
+                    }
+                    PermissionDecision::Deny { reason }
+                }
+                PermissionResolution::Ask => {
+                    // HOOK.3 issue 2 — the gate is ABOUT TO ASK. Fire the
+                    // PermissionRequest hook FIRST (claude-code
+                    // `runPermissionRequestHooksForHeadlessAgent`, fired on the ask
+                    // path before the fallback resolution). A hook 'allow' RESCUES
+                    // the call — resolved via `check_after_hook_allow` so explicit
+                    // deny rules still bind (a PermissionRequest 'allow', like a
+                    // PreToolUse 'allow', skips only the PROMPT), applying any
+                    // `updatedInput`; a hook 'deny' denies; otherwise we delegate to
+                    // the inner transport (interactive prompt, or a headless
+                    // auto-deny). Strict no-op when no PermissionRequest hook is
+                    // registered → the inner transport resolves exactly as before.
+                    let req_event = HookEvent::PermissionRequest {
+                        tool_name: name.clone(),
+                        tool_input: effective_input.clone(),
+                        reason: format!("Tool {name} requires permission"),
+                    };
+                    let req_agg = orch.hooks.execute(req_event, hook_ctx.clone()).await;
+                    match req_agg.decision {
+                        Some(HookDecision::Approve | HookDecision::Allow) => {
+                            if let Some(updated) = req_agg.modified_input {
+                                effective_input = updated;
+                            }
+                            orch.perms
+                                .check_after_hook_allow(name, &effective_input)
+                                .await
+                        }
+                        Some(HookDecision::Block) => PermissionDecision::Deny {
+                            reason: req_agg
+                                .reason
+                                .unwrap_or_else(|| "permission denied by hook".into()),
+                        },
+                        _ => orch.perms.check(name, &effective_input).await,
+                    }
+                }
+            }
         };
         match decision {
             PermissionDecision::Allow => {}
             PermissionDecision::Deny { reason } => {
-                // PermissionDenied hook (parity with claude-code
-                // `executePermissionDeniedHooks`, `utils/hooks.ts:3529-3559`,
-                // fired from `toolExecution.ts:1081` when a permission decision
-                // denies a tool call). Fires at the deny chokepoint — including a
-                // deny RULE that overrode a hook 'allow' (HOOK.3) — BEFORE the
-                // error `tool_result` is pushed, so a registered hook observes
-                // every denial. Best-effort / observe-only: the LingXi `perms`
-                // seam has no hook-driven `retry` re-resolution path, so the
-                // denial stands regardless of the hook's reply (the TS
-                // `{retry:true}` re-prompt rides on its interactive permission
-                // loop, which this single allow/deny seam does not have). Strict
-                // no-op when no `PermissionDenied` hook is registered.
-                let denied_event = HookEvent::PermissionDenied {
-                    tool_name: name.clone(),
-                    tool_input: effective_input.clone(),
-                    tool_use_id: *tool_use_id,
-                    reason: reason.clone(),
-                };
-                let _denied_agg = orch.hooks.execute(denied_event, hook_ctx.clone()).await;
-
+                // Push the deny error `tool_result`. The PermissionDenied hook,
+                // when applicable, already fired on the classifier-deny branch
+                // above — claude-code fires it only for auto-mode classifier
+                // denials, not for the rule/mode/plan denials that also reach here.
                 let result_block = ContentBlock::ToolResult {
                     tool_use_id: *tool_use_id,
                     content: fold_pre_context(format!("Permission denied: {reason}")),
@@ -2705,8 +2739,8 @@ mod pre_tool_hook_tests {
     use super::{dispatch_tool_uses_tracked, execute_one_turn, TurnStepOutcome};
     use crate::conversation::ConversationOrchestrator;
     use crate::test_support::{
-        mock_message_response, MockApiClient, MockOutputStream, PermissionDecision, PermissionGate,
-        StaticMemoryProvider,
+        mock_message_response, MockApiClient, MockOutputStream, PermissionDecision,
+        PermissionDecisionSource, PermissionGate, PermissionResolution, StaticMemoryProvider,
     };
     use crate::OrchestratorConfig;
     use async_trait::async_trait;
@@ -2810,6 +2844,84 @@ mod pre_tool_hook_tests {
         Arc::new(exec)
     }
 
+    /// Build a `HookExecutorImpl` with a single hook registered for `event` that
+    /// yields `response` (reusing the `FixedPreHook` handler, which answers any
+    /// event it is invoked for). Used to register a `PermissionRequest` hook.
+    fn event_hook_executor(event: HookEventType, response: HookResponse) -> Arc<HookExecutorImpl> {
+        let hook = HookDefinition {
+            id: HookId::new(),
+            name: "fixed-evt".into(),
+            events: vec![event],
+            if_condition: None,
+            executor: DefHookExecutor::Builtin {
+                handler_id: "fixed-pre".into(),
+            },
+            source: HookSource::Session,
+            blocking: true,
+            timeout: None,
+            priority: 0,
+            once: false,
+            status_message: None,
+        };
+        let mut registry = HookRegistry::new();
+        registry.register(hook);
+        let reg = Arc::new(tokio::sync::RwLock::new(registry));
+        let mut exec = HookExecutorImpl::new(reg, Arc::new(UnusedHttp), Arc::new(UnusedRuntime));
+        exec.register_builtin(Arc::new(FixedPreHook { response }));
+        Arc::new(exec)
+    }
+
+    /// Builtin hook handler that COUNTS its invocations (so a test can assert a
+    /// hook event fired — or did NOT fire), returning a default success response.
+    struct RecordingHook {
+        fired: Arc<std::sync::atomic::AtomicUsize>,
+    }
+    #[async_trait]
+    impl BuiltinHookHandler for RecordingHook {
+        async fn handle(&self, _event: &HookEvent, _ctx: &HookContext) -> HookResult {
+            self.fired.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            HookResult {
+                outcome: HookOutcome::Success,
+                stdout: String::new(),
+                stderr: String::new(),
+                exit_code: Some(0),
+                response: Some(HookResponse::default()),
+            }
+        }
+        fn id(&self) -> &str {
+            "recording"
+        }
+    }
+
+    /// Build a `HookExecutorImpl` with a single counting hook registered for
+    /// `event`; `fired` is incremented each time the hook runs.
+    fn recording_executor(
+        event: HookEventType,
+        fired: Arc<std::sync::atomic::AtomicUsize>,
+    ) -> Arc<HookExecutorImpl> {
+        let hook = HookDefinition {
+            id: HookId::new(),
+            name: "recording".into(),
+            events: vec![event],
+            if_condition: None,
+            executor: DefHookExecutor::Builtin {
+                handler_id: "recording".into(),
+            },
+            source: HookSource::Session,
+            blocking: true,
+            timeout: None,
+            priority: 0,
+            once: false,
+            status_message: None,
+        };
+        let mut registry = HookRegistry::new();
+        registry.register(hook);
+        let reg = Arc::new(tokio::sync::RwLock::new(registry));
+        let mut exec = HookExecutorImpl::new(reg, Arc::new(UnusedHttp), Arc::new(UnusedRuntime));
+        exec.register_builtin(Arc::new(RecordingHook { fired }));
+        Arc::new(exec)
+    }
+
     /// Permission gate that denies every tool call AT THE PROMPT (`check`), but
     /// leaves `check_after_hook_allow` at the default (Allow) — modeling a gate
     /// with NO deny RULE, only a would-be prompt. A hook 'allow' therefore skips
@@ -2874,6 +2986,58 @@ mod pre_tool_hook_tests {
         ) -> PermissionDecision {
             PermissionDecision::Deny {
                 reason: "via-plan-mode".into(),
+            }
+        }
+    }
+
+    /// Gate that is ABOUT TO ASK (`resolve_detailed` → `Ask`). Its `check` denies
+    /// (models the prompt / headless auto-deny) and `check_after_hook_allow`
+    /// allows (no deny rule), so a `PermissionRequest` 'allow' rescues an
+    /// otherwise-denied ask, while no PermissionRequest decision delegates to the
+    /// (denying) inner.
+    struct AskGate;
+    #[async_trait]
+    impl PermissionGate for AskGate {
+        async fn check(&self, _t: &str, _i: &serde_json::Value) -> PermissionDecision {
+            PermissionDecision::Deny {
+                reason: "prompt-denied".into(),
+            }
+        }
+        async fn check_after_hook_allow(
+            &self,
+            _t: &str,
+            _i: &serde_json::Value,
+        ) -> PermissionDecision {
+            PermissionDecision::Allow
+        }
+        async fn resolve_detailed(
+            &self,
+            _t: &str,
+            _i: &serde_json::Value,
+        ) -> PermissionResolution {
+            PermissionResolution::Ask
+        }
+    }
+
+    /// Gate that denies with a configurable SOURCE from `resolve_detailed` (and
+    /// denies on `check`), to assert PermissionDenied fires only on a classifier
+    /// deny.
+    struct SourcedDenyGate(PermissionDecisionSource);
+    #[async_trait]
+    impl PermissionGate for SourcedDenyGate {
+        async fn check(&self, _t: &str, _i: &serde_json::Value) -> PermissionDecision {
+            PermissionDecision::Deny {
+                reason: "sourced-deny".into(),
+            }
+        }
+        async fn resolve_detailed(
+            &self,
+            _t: &str,
+            _i: &serde_json::Value,
+        ) -> PermissionResolution {
+            PermissionResolution::Deny {
+                reason: "sourced-deny".into(),
+                source: self.0,
             }
         }
     }
@@ -3809,6 +3973,109 @@ mod pre_tool_hook_tests {
         assert!(
             content.contains("via-check"),
             "non-plan mode must route to check, got: {content}"
+        );
+    }
+
+    // ----- HOOK.3 issue 2: PermissionRequest on the ask path ---------------
+
+    #[tokio::test]
+    async fn hook3_issue2_permission_request_allow_rescues_an_ask() {
+        // The gate is about to ASK (resolve_detailed → Ask). A PermissionRequest
+        // hook 'allow' RESCUES the call (resolved via check_after_hook_allow →
+        // Allow), so the tool runs — the headless rescue claude-code provides.
+        let resp = HookResponse {
+            decision: Some(HookDecision::Approve),
+            ..HookResponse::default()
+        };
+        let orch = orch_with(
+            event_hook_executor(HookEventType::PermissionRequest, resp),
+            Arc::new(AskGate),
+            vec![],
+        );
+        let (results, _, _, _) = dispatch_tool_uses_tracked(&orch, &uses()).await.unwrap();
+        let (content, is_error) = tool_result(&results[0]);
+        assert!(
+            !is_error,
+            "PermissionRequest 'allow' rescued the ask; tool ran: {content}"
+        );
+        assert!(content.contains("ECHOED-OUTPUT"));
+    }
+
+    #[tokio::test]
+    async fn hook3_issue2_permission_request_deny_denies_an_ask() {
+        // A PermissionRequest hook 'deny' denies the about-to-ask call.
+        let resp = HookResponse {
+            decision: Some(HookDecision::Block),
+            reason: Some("hook-said-no".into()),
+            ..HookResponse::default()
+        };
+        let orch = orch_with(
+            event_hook_executor(HookEventType::PermissionRequest, resp),
+            Arc::new(AskGate),
+            vec![],
+        );
+        let (results, _, _, _) = dispatch_tool_uses_tracked(&orch, &uses()).await.unwrap();
+        let (content, is_error) = tool_result(&results[0]);
+        assert!(is_error);
+        assert!(
+            content.contains("hook-said-no"),
+            "PermissionRequest 'deny' reason surfaces: {content}"
+        );
+    }
+
+    #[tokio::test]
+    async fn hook3_issue2_ask_without_request_hook_delegates_to_inner() {
+        // With no PermissionRequest hook the ask delegates to the inner transport
+        // (AskGate.check denies) — the prior behavior is preserved.
+        let orch = orch_with(
+            pre_hook_executor(HookResponse::default()),
+            Arc::new(AskGate),
+            vec![],
+        );
+        let (results, _, _, _) = dispatch_tool_uses_tracked(&orch, &uses()).await.unwrap();
+        let (content, is_error) = tool_result(&results[0]);
+        assert!(is_error);
+        assert!(
+            content.contains("prompt-denied"),
+            "ask delegated to the inner transport: {content}"
+        );
+    }
+
+    // ----- HOOK.3 issue 3: PermissionDenied only on a classifier deny ------
+
+    #[tokio::test]
+    async fn hook3_issue3_permission_denied_fires_only_on_classifier_deny() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        // A RULE deny must NOT fire PermissionDenied (claude-code fires it only on
+        // an auto-mode classifier deny, toolExecution.ts:1075).
+        let fired_rule = Arc::new(AtomicUsize::new(0));
+        let orch = orch_with(
+            recording_executor(HookEventType::PermissionDenied, fired_rule.clone()),
+            Arc::new(SourcedDenyGate(PermissionDecisionSource::Rule)),
+            vec![],
+        );
+        let (results, _, _, _) = dispatch_tool_uses_tracked(&orch, &uses()).await.unwrap();
+        assert!(tool_result(&results[0]).1, "rule deny still denies the tool");
+        assert_eq!(
+            fired_rule.load(Ordering::SeqCst),
+            0,
+            "rule deny must NOT fire the PermissionDenied hook"
+        );
+
+        // A CLASSIFIER deny DOES fire PermissionDenied.
+        let fired_cls = Arc::new(AtomicUsize::new(0));
+        let orch2 = orch_with(
+            recording_executor(HookEventType::PermissionDenied, fired_cls.clone()),
+            Arc::new(SourcedDenyGate(PermissionDecisionSource::Classifier)),
+            vec![],
+        );
+        let (results2, _, _, _) = dispatch_tool_uses_tracked(&orch2, &uses()).await.unwrap();
+        assert!(tool_result(&results2[0]).1, "classifier deny denies the tool");
+        assert_eq!(
+            fired_cls.load(Ordering::SeqCst),
+            1,
+            "classifier deny MUST fire the PermissionDenied hook"
         );
     }
 }

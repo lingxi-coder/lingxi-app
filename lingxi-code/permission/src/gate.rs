@@ -4,7 +4,9 @@
 //! `lingxi-permission`, not on the traits crate directly.
 #![forbid(unsafe_code)]
 
-pub use traits::permission_gate::{PermissionDecision, PermissionGate};
+pub use traits::permission_gate::{
+    PermissionDecision, PermissionDecisionSource, PermissionGate, PermissionResolution,
+};
 pub use traits::prompting_gate::{
     PermissionRequest, PermissionResponse, PromptDecision, PromptDefault, PromptError,
     PromptingGate,

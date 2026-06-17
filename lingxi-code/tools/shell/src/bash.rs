@@ -15,9 +15,12 @@
 //! receives the image (the URI payload is already valid base64, emitted as-is);
 //! only the optional resize/re-encode is deferred.
 //!
-//! DEFERRED (tool-fidelity batch A follow-ups):
-//! - (1e) `MONITOR_TOOL` `sleep N>=2` auto-background block is feature-gated
-//!   in claude-code and is currently a correct no-op here — deferred.
+//! Timeout/interrupt handling (claude-code `BashTool.tsx` ~602-605 / 720):
+//! a timed-out (or interrupted) command is surfaced as a SUCCESSFUL
+//! `tool_result` carrying `interrupted: true`, `timed_out: true`, and
+//! whatever partial stdout/stderr was captured — NOT a hard error. The
+//! `<error>Command was aborted before completion</error>` marker is appended
+//! to stderr and `is_error` follows `interrupted`. See `interrupted_result`.
 
 use crate::shared::strip_ansi_count;
 use async_trait::async_trait;
@@ -58,6 +61,54 @@ pub const TOOL_NAME: &str = "Bash";
 #[must_use]
 pub fn format_timeout_error(timeout_ms: u64) -> String {
     BASH_TIMEOUT_ERROR_TEMPLATE.replace("{N}", &timeout_ms.to_string())
+}
+
+/// Detect a standalone or leading `sleep N` (N>=2) pattern that should use the
+/// background path / Monitor tool instead of blocking the turn. Faithful port
+/// of claude-code `detectBlockedSleepPattern` (`BashTool.tsx:322-337`): splits
+/// on the shell list separators (the `splitCommand_DEPRECATED` analogue), then
+/// matches `^sleep\s+(\d+)\s*$` on the FIRST subcommand only. Float durations
+/// (`sleep 0.5`) are deliberately NOT matched (legit pacing). Returns the
+/// pattern description (`standalone sleep N` or `sleep N followed by: <rest>`)
+/// for blockable commands, `None` otherwise.
+#[must_use]
+pub fn detect_blocked_sleep_pattern(command: &str) -> Option<String> {
+    let parts = permission::shell_command::split_command(command);
+    let first = parts.first().map(|s| s.trim()).unwrap_or("");
+    // `^sleep\s+(\d+)\s*$` — manual match (no regex dep). `\s` is ASCII
+    // whitespace; the integer-only capture rejects `sleep 0.5` (the `.` is not
+    // consumed by the digit run, leaving a non-whitespace remainder → no match).
+    let rest_after_kw = first.strip_prefix("sleep")?;
+    // Require at least one whitespace char after the keyword.
+    let after_ws = rest_after_kw.trim_start_matches(|c: char| c.is_ascii_whitespace());
+    if after_ws.len() == rest_after_kw.len() {
+        return None; // no separating whitespace (e.g. "sleeper")
+    }
+    // Consume the digit run, then require only trailing whitespace.
+    let digits_end = after_ws
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(after_ws.len());
+    let (digits, tail) = after_ws.split_at(digits_end);
+    if digits.is_empty() || !tail.trim_end_matches(|c: char| c.is_ascii_whitespace()).is_empty() {
+        return None;
+    }
+    let secs: u64 = digits.parse().ok()?;
+    if secs < 2 {
+        return None; // sub-2s sleeps are fine (rate limiting, pacing)
+    }
+    let rest = parts
+        .iter()
+        .skip(1)
+        .map(|s| s.trim())
+        .collect::<Vec<_>>()
+        .join(" ")
+        .trim()
+        .to_string();
+    if rest.is_empty() {
+        Some(format!("standalone sleep {secs}"))
+    } else {
+        Some(format!("sleep {secs} followed by: {rest}"))
+    }
 }
 
 /// Resolve the shell binary to spawn under (per host OS).
@@ -156,6 +207,50 @@ fn truncate_bash_output(content: String, max: usize) -> (String, bool) {
     let remaining_lines = content.chars().skip(max).filter(|&c| c == '\n').count() + 1;
     let truncated = format!("{head}\n\n... [{remaining_lines} lines truncated] ...");
     (truncated, true)
+}
+
+/// Build the SUCCESSFUL `tool_result` for a timed-out / interrupted Bash run,
+/// mirroring claude-code's interrupted shape (`BashTool.tsx` ~602-605 / 720):
+/// `interrupted: true`, `timed_out: true`, partial stdout normalized + truncated
+/// through the same pipeline as the success arm, and the
+/// `<error>Command was aborted before completion</error>` marker appended to
+/// stderr (`BashTool.tsx:602-604`). `is_error` follows `interrupted` (TS
+/// `is_error: interrupted`) and is therefore `true`.
+fn build_interrupted_result(stdout_partial: &str, stderr_partial: &str, cmd_str: &str) -> ToolCallResult {
+    let (stdout_clean, _ansi_out) = strip_ansi_count(stdout_partial);
+    let (stderr_clean, _ansi_err) = strip_ansi_count(stderr_partial);
+    let normalized =
+        crate::shared::strip_empty_lines(&crate::shared::normalize_stdout(&stdout_clean));
+    let (stdout_final, truncated_out) = truncate_bash_output(normalized, bash_max_output_length());
+
+    // claude-code appends the abort marker to stderr, preceded by EOL when
+    // stderr is non-empty (`BashTool.tsx:602-604`).
+    let mut stderr_final = stderr_clean.trim_end().to_string();
+    if !stderr_final.is_empty() {
+        stderr_final.push('\n');
+    }
+    stderr_final.push_str("<error>Command was aborted before completion</error>");
+
+    ToolCallResult {
+        data: json!({
+            // No exit code on a killed process; claude-code carries the
+            // ShellError code (-1 when killed). Mirror that.
+            "exit_code": -1,
+            "stdout": stdout_final,
+            "stderr": stderr_final,
+            // `is_error: interrupted` (BashTool.tsx) → true.
+            "is_error": true,
+            "isImage": false,
+            "return_code_interpretation": serde_json::Value::Null,
+            "timed_out": true,
+            "interrupted": true,
+            "truncated": truncated_out,
+            "no_output_expected": crate::silent::is_silent_bash_command(cmd_str),
+        }),
+        new_messages: vec![],
+        context_modifier: None,
+        mcp_meta: None,
+    }
 }
 
 // ===== Image-output handling (claude-code `BashTool/utils.ts`) ==============
@@ -567,6 +662,25 @@ impl Tool for BashTool {
                 )));
             }
         }
+        // claude-code `BashTool.tsx:524-534` `validateInput`: block bare
+        // `sleep N` (N>=2) when NOT run in the background. TS additionally gates
+        // on `feature('MONITOR_TOOL') && !isBackgroundTasksDisabled` — the
+        // Monitor tool IS present in this repo and there is no Rust analog of
+        // `isBackgroundTasksDisabled` (defaults false), so the block is active
+        // whenever `run_in_background != true`. The error message is
+        // byte-identical to `BashTool.tsx:530`; `errorCode: 10` (TS:531) has no
+        // Rust surface and is dropped.
+        let run_bg = input
+            .get("run_in_background")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        if !run_bg {
+            if let Some(pattern) = detect_blocked_sleep_pattern(cmd) {
+                return Err(ValidationError(format!(
+                    "Blocked: {pattern}. Run blocking commands in the background with run_in_background: true — you'll get a completion notification when done. For streaming events (watching logs, polling APIs), use the Monitor tool. If you genuinely need a delay (rate limiting, deliberate pacing), keep it under 2 seconds."
+                )));
+            }
+        }
         Ok(())
     }
 
@@ -837,14 +951,12 @@ impl Tool for BashTool {
         // state (e.g. bwrap mount points). No-op for the default
         // `LegacyWrapRunner`; only the live runner has anything to clean up.
         self.ctx.sandbox_runner.cleanup_after_command().await;
-        // PARTIAL (follow-up): claude-code surfaces a timed-out command as a
+        // claude-code surfaces a timed-out/interrupted command as a SUCCESSFUL
         // result with `interrupted: true` plus whatever partial output it
-        // produced. Here a timeout is modeled as a hard `ToolError::Internal`
-        // (the orchestrator + the `foreground_timed_out_*` test depend on that
-        // error contract), so the timeout arms below stay errors rather than an
-        // `Ok { interrupted: true, stdout: <partial>, .. }`. Only the success
-        // arm emits the `interrupted` field (always `false`). Reworking the
-        // timeout arm into an interrupted-result is deferred.
+        // produced (`BashTool.tsx` ~602-605 / 720), NOT a hard error. Both
+        // timeout arms below build such a result via `build_interrupted_result`.
+        // `format_timeout_error` / `BASH_TIMEOUT_ERROR_TEMPLATE` are retained
+        // (still referenced by the locked-constant test) but no longer returned.
         match run_result {
             Ok(out) if out.timed_out => {
                 let mut meta: LogEventMetadata = HashMap::new();
@@ -854,7 +966,10 @@ impl Tool for BashTool {
                 );
                 meta.insert("timeout_ms".into(), AnalyticsValue::Int(timeout_ms as i64));
                 self.ctx.bus.log_event(BASH_TIMEOUT, meta).await;
-                Err(ToolError::Internal(format_timeout_error(timeout_ms)))
+                // The streaming/stub runner may carry partial stdout/stderr
+                // captured before the kill — surface it (claude-code attaches
+                // whatever the accumulator held).
+                Ok(build_interrupted_result(&out.stdout, &out.stderr, &cmd_str))
             }
             Ok(out) => {
                 // BASH.4 cwd readback (Shell.ts:395-419). Subagents must NOT
@@ -1056,7 +1171,12 @@ impl Tool for BashTool {
                 );
                 meta.insert("timeout_ms".into(), AnalyticsValue::Int(timeout_ms as i64));
                 self.ctx.bus.log_event(BASH_TIMEOUT, meta).await;
-                Err(ToolError::Internal(format_timeout_error(timeout_ms)))
+                // RESIDUAL: the non-streaming posix runner uses
+                // `timeout(..).wait_with_output()` and drops captured bytes on
+                // kill, so no partial output is available on this arm — emit the
+                // correct interrupted shape with empty partial. (The
+                // `Ok(timed_out)` arm above DOES carry partial bytes.)
+                Ok(build_interrupted_result("", "", &cmd_str))
             }
             Err(e) => {
                 emit_failed(&self.ctx.bus, &request_id, "spawn_failed", started_at).await;
@@ -1215,27 +1335,156 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn foreground_timed_out_returns_internal_err_with_locked_string() {
+    async fn foreground_timed_out_returns_ok_interrupted_with_partial() {
+        // claude-code parity: a timeout is a SUCCESSFUL result carrying the
+        // partial output + `interrupted: true`, NOT a hard error.
         let out = ProcessOutput {
-            stdout: String::new(),
+            stdout: "partial-out\n".into(),
             stderr: String::new(),
             exit_code: -1,
             timed_out: true,
         };
         let tool = BashTool::new(shell_test_ctx(out));
-        let err = tool
+        let res = tool
             .call(
-                json!({"command": "sleep 9", "timeout": 200}),
+                json!({"command": "do-work", "timeout": 200}),
                 use_ctx(),
                 fresh_tx(),
             )
             .await
-            .expect_err("timeout should be Err");
-        let msg = err.to_string();
+            .expect("timeout should be Ok(interrupted)");
+        assert_eq!(res.data["interrupted"], true);
+        assert_eq!(res.data["timed_out"], true);
+        assert_eq!(res.data["is_error"], true);
+        assert_eq!(res.data["stdout"], "partial-out");
         assert!(
-            msg.contains("Bash command timed out after 200ms"),
-            "expected locked literal in err, got: {msg}",
+            res.data["stderr"]
+                .as_str()
+                .unwrap()
+                .contains("<error>Command was aborted before completion</error>"),
+            "expected abort marker in stderr, got: {:?}",
+            res.data["stderr"]
         );
+    }
+
+    #[tokio::test]
+    async fn foreground_process_timeout_err_returns_ok_interrupted_empty_partial() {
+        // The non-streaming runner reports a kill as `Err(ProcessError::Timeout)`
+        // and drops captured bytes — still an Ok(interrupted) shape, empty stdout.
+        struct TimeoutStub;
+        #[async_trait]
+        impl traits::process::ProcessRunner for TimeoutStub {
+            async fn run(
+                &self,
+                _: &traits::sandbox::SandboxedCommand,
+            ) -> Result<ProcessOutput, traits::process::ProcessError> {
+                Err(traits::process::ProcessError::Timeout)
+            }
+            async fn spawn_background(
+                &self,
+                _: &traits::sandbox::SandboxedCommand,
+            ) -> Result<traits::process::ProcessHandle, traits::process::ProcessError> {
+                unreachable!()
+            }
+            async fn kill(
+                &self,
+                _: &traits::process::ProcessHandle,
+            ) -> Result<(), traits::process::ProcessError> {
+                Ok(())
+            }
+            fn is_available(&self) -> bool {
+                true
+            }
+        }
+        let mut ctx = shell_test_ctx(ProcessOutput {
+            stdout: String::new(),
+            stderr: String::new(),
+            exit_code: 0,
+            timed_out: false,
+        });
+        ctx.process = std::sync::Arc::new(TimeoutStub);
+        let tool = BashTool::new(ctx);
+        let res = tool
+            .call(
+                json!({"command": "do-work", "timeout": 200}),
+                use_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .expect("process-timeout should be Ok(interrupted)");
+        assert_eq!(res.data["interrupted"], true);
+        assert_eq!(res.data["timed_out"], true);
+        assert_eq!(res.data["is_error"], true);
+        assert_eq!(res.data["stdout"], "");
+    }
+
+    #[tokio::test]
+    async fn validate_input_blocks_standalone_sleep() {
+        let tool = BashTool::new(shell_test_ctx(ProcessOutput {
+            stdout: String::new(),
+            stderr: String::new(),
+            exit_code: 0,
+            timed_out: false,
+        }));
+        let err = tool
+            .validate_input(&json!({"command": "sleep 5"}), &use_ctx())
+            .await
+            .expect_err("sleep 5 must be blocked");
+        assert!(
+            err.0.starts_with("Blocked: standalone sleep 5."),
+            "got: {}",
+            err.0
+        );
+    }
+
+    #[tokio::test]
+    async fn validate_input_blocks_sleep_with_followup() {
+        let tool = BashTool::new(shell_test_ctx(ProcessOutput {
+            stdout: String::new(),
+            stderr: String::new(),
+            exit_code: 0,
+            timed_out: false,
+        }));
+        let err = tool
+            .validate_input(&json!({"command": "sleep 5 && echo done"}), &use_ctx())
+            .await
+            .expect_err("sleep 5 && ... must be blocked");
+        assert!(
+            err.0.contains("Blocked: sleep 5 followed by: echo done"),
+            "got: {}",
+            err.0
+        );
+    }
+
+    #[tokio::test]
+    async fn validate_input_allows_short_and_float_sleep_and_other_commands() {
+        let tool = BashTool::new(shell_test_ctx(ProcessOutput {
+            stdout: String::new(),
+            stderr: String::new(),
+            exit_code: 0,
+            timed_out: false,
+        }));
+        for ok in ["sleep 1", "sleep 0.5", "echo hi", "sleeper foo"] {
+            tool.validate_input(&json!({ "command": ok }), &use_ctx())
+                .await
+                .unwrap_or_else(|e| panic!("{ok:?} should be allowed, got: {}", e.0));
+        }
+    }
+
+    #[tokio::test]
+    async fn validate_input_allows_sleep_when_backgrounded() {
+        let tool = BashTool::new(shell_test_ctx(ProcessOutput {
+            stdout: String::new(),
+            stderr: String::new(),
+            exit_code: 0,
+            timed_out: false,
+        }));
+        tool.validate_input(
+            &json!({"command": "sleep 5", "run_in_background": true}),
+            &use_ctx(),
+        )
+        .await
+        .expect("sleep 5 backgrounded must be allowed");
     }
 
     #[tokio::test]

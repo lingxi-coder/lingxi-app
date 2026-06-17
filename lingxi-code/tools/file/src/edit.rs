@@ -29,6 +29,27 @@ use tool_api::BuiltinToolContext;
 /// Tool name byte-lock — matches claude-code tool registry.
 pub const TOOL_NAME: &str = "Edit";
 
+/// Verbatim port of claude-code `FileEditTool/prompt.ts` `getEditToolDescription()`
+/// (== the tool's DESCRIPTION). The TS builder has two runtime variations, both of
+/// which resolve deterministically for this 3P port:
+///   - `isCompactLinePrefixEnabled()` is `true` by default (killswitch off), and the
+///     Read-tool port already canonicalized the compact format → `prefixFormat` is
+///     `"line number + tab"` (the padded-arrow legacy form is intentionally not ported).
+///   - `process.env.USER_TYPE === 'ant'` is the Anthropic-internal build; this 3P port
+///     is never `ant` → `minimalUniquenessHint` is empty.
+///   - `getPreReadInstruction()` interpolates `FILE_READ_TOOL_NAME = 'Read'`, and begins
+///     with `\n-` (so `Usage:` is immediately followed by the first bullet) and ends with
+///     a trailing space after "before editing." — both preserved byte-for-byte below.
+const EDIT_DESCRIPTION: &str = r#"Performs exact string replacements in files.
+
+Usage:
+- You must use your `Read` tool at least once in the conversation before editing. This tool will error if you attempt an edit without reading the file. 
+- When editing text from Read tool output, ensure you preserve the exact indentation (tabs/spaces) as it appears AFTER the line number prefix. The line number prefix format is: line number + tab. Everything after that is the actual file content to match. Never include any part of the line number prefix in the old_string or new_string.
+- ALWAYS prefer editing existing files in the codebase. NEVER write new files unless explicitly required.
+- Only use emojis if the user explicitly requests it. Avoid adding emojis to files unless asked.
+- The edit will FAIL if `old_string` is not unique in the file. Either provide a larger string with more surrounding context to make it unique or use `replace_all` to change every instance of `old_string`.
+- Use `replace_all` for replacing and renaming strings across the file. This parameter is useful if you want to rename a variable for instance."#;
+
 /// Patch-preview truncation template — spec §7. `{N}` is a literal that the
 /// emitter substitutes with the elided-line count via `String::replace`.
 pub const PATCH_TRUNCATION_SUFFIX_TEMPLATE: &str = "\n\n... [{N} lines truncated] ...";
@@ -204,11 +225,11 @@ impl Tool for FileEditTool {
     }
 
     async fn description(&self, _input: &Value, _opts: &DescriptionOptions) -> String {
-        "Replace `old_string` with `new_string` in a file (literal, not regex).".to_string()
+        EDIT_DESCRIPTION.to_string()
     }
 
     async fn prompt(&self, _opts: &PromptOptions) -> String {
-        "Edit a file: literal find+replace. Default expects exactly one match.".to_string()
+        EDIT_DESCRIPTION.to_string()
     }
 
     fn get_path(&self, input: &Value) -> Option<PathBuf> {
@@ -1296,5 +1317,41 @@ mod tests {
         .unwrap();
         // ASSERT BYTES: still pure LF (no CR introduced).
         assert_eq!(std::fs::read(&target).unwrap(), b"alpha\nBETA\ngamma\n");
+    }
+
+    #[tokio::test]
+    async fn description_is_verbatim_ts() {
+        let tmp = TempDir::new().unwrap();
+        let (ctx, _sink) = make_ctx(&tmp);
+        let tool = FileEditTool::new(ctx);
+        let d = tool
+            .description(
+                &json!({}),
+                &DescriptionOptions {
+                    is_non_interactive_session: false,
+                },
+            )
+            .await;
+        // Header + the `\n-` pre-read seam (Usage: immediately followed by the
+        // first bullet, which carries a trailing space after "before editing.").
+        assert!(d.starts_with(
+            "Performs exact string replacements in files.\n\nUsage:\n- You must use your `Read` tool"
+        ));
+        assert!(d.contains("before editing. This tool will error"));
+        // Locks the compact-format decision (line number + tab, not padded-arrow).
+        assert!(d.contains("The line number prefix format is: line number + tab."));
+        // Final bullet, with NO trailing newline.
+        assert!(d.ends_with(
+            "This parameter is useful if you want to rename a variable for instance."
+        ));
+        // Locks `minimalUniquenessHint` empty (non-`ant` 3P build).
+        assert!(!d.contains("smallest old_string"));
+        // prompt() equals DESCRIPTION for Edit.
+        let p = tool
+            .prompt(&PromptOptions {
+                include_examples: false,
+            })
+            .await;
+        assert_eq!(p, d);
     }
 }

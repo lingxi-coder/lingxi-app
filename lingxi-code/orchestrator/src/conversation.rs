@@ -1323,6 +1323,23 @@ impl ConversationOrchestrator {
         }
     }
 
+    /// True when a `max_budget_nano_usd` cost ceiling is set AND the session's
+    /// cumulative cost has reached it — 1:1 with claude-code
+    /// `getTotalCost() >= maxBudgetUsd` (`QueryEngine.ts:972`). Always false when
+    /// no cap is set, OR when no [`cost::CostTracker`] is wired (the cap cannot
+    /// be enforced without cost tracking — a headless `--max-budget` run, which
+    /// wires the tracker, is the primary consumer). Checked at each turn-loop
+    /// iteration so a run stops once it crosses the ceiling.
+    async fn over_budget(&self) -> bool {
+        let Some(budget) = self.config.max_budget_nano_usd else {
+            return false;
+        };
+        let Some(tracker) = self.cost_tracker.as_ref() else {
+            return false;
+        };
+        tracker.snapshot().await.total_nano_usd >= budget
+    }
+
     /// A3: construct a fresh [`BudgetTracker`] for this turn IFF the
     /// token-budget feature is enabled AND a positive budget is configured.
     ///
@@ -2229,6 +2246,11 @@ impl ConversationOrchestrator {
                     max_turns: self.config.max_turns,
                 });
             }
+            if self.over_budget().await {
+                return Err(OrchestratorError::MaxBudgetReached {
+                    budget_nano_usd: self.config.max_budget_nano_usd.unwrap_or(0),
+                });
+            }
             turn_count = turn_count.saturating_add(1);
 
             let (step, output_tokens) = execute_one_turn_with_recovery_tracked(
@@ -2393,6 +2415,11 @@ impl ConversationOrchestrator {
             if self.config.max_turns != 0 && turn_count >= self.config.max_turns {
                 return Err(OrchestratorError::MaxTurnsReached {
                     max_turns: self.config.max_turns,
+                });
+            }
+            if self.over_budget().await {
+                return Err(OrchestratorError::MaxBudgetReached {
+                    budget_nano_usd: self.config.max_budget_nano_usd.unwrap_or(0),
                 });
             }
             turn_count = turn_count.saturating_add(1);

@@ -36,6 +36,15 @@ pub enum OrchestratorError {
         max_turns: u32,
     },
 
+    /// The configured `max_budget_nano_usd` cost ceiling was reached before the
+    /// model emitted `end_turn`. 1:1 with claude-code's `error_max_budget_usd`
+    /// (`QueryEngine.ts:983-999`, "Reached maximum budget ($X)").
+    #[error("Reached maximum budget (${:.2})", (*budget_nano_usd as f64) / 1_000_000_000.0)]
+    MaxBudgetReached {
+        /// The cost ceiling that was reached, in nano-USD.
+        budget_nano_usd: u64,
+    },
+
     /// The model API call failed (transport, rate-limit, context overflow,
     /// etc). Wraps `llm_client::LlmError` — the live path flows through
     /// `ProviderApiAdapter → DefaultLlmClient`.
@@ -189,6 +198,19 @@ mod tests {
     fn max_turns_reached_display_handles_large_number() {
         let err = OrchestratorError::MaxTurnsReached { max_turns: 9999 };
         assert_eq!(err.to_string(), "Reached maximum number of turns (9999)");
+    }
+
+    #[test]
+    fn max_budget_reached_display_formats_usd() {
+        // nano-USD → "$X.XX" (claude-code "Reached maximum budget ($X)").
+        let err = OrchestratorError::MaxBudgetReached {
+            budget_nano_usd: 5_000_000_000,
+        };
+        assert_eq!(err.to_string(), "Reached maximum budget ($5.00)");
+        let err2 = OrchestratorError::MaxBudgetReached {
+            budget_nano_usd: 1_500_000_000,
+        };
+        assert_eq!(err2.to_string(), "Reached maximum budget ($1.50)");
     }
 
     #[test]

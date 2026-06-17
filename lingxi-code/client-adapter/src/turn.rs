@@ -193,7 +193,12 @@ pub fn error_kind_for(err: &OrchestratorError) -> ErrorKindDto {
         // Task 7: all consecutive-overloaded retries exhausted with no fallback model.
         // Byte-locked message: "Repeated 529 Overloaded errors" (errors.ts:166).
         // Treated as a fatal API-side condition — same class as a hard API failure.
-        | OrchestratorError::RepeatedOverloaded => ErrorKindDto::Internal,
+        | OrchestratorError::RepeatedOverloaded
+        // MaxBudget is a terminal cost-ceiling stop (claude-code error_max_budget_usd);
+        // no dedicated DTO kind, so it maps to Internal — the "Reached maximum budget
+        // ($X)" Display is preserved in the event's message. (client-adapter is not the
+        // headless `--max-budget` path; this just keeps the match exhaustive.)
+        | OrchestratorError::MaxBudgetReached { .. } => ErrorKindDto::Internal,
     }
 }
 

@@ -77,3 +77,78 @@ async fn turn_with_known_tokens_records_real_cost() {
     // M3-05 tracker test).
     assert_eq!(snap.total_nano_usd, 17_500_000);
 }
+
+/// A non-`end_turn` (looping) reply that records the same $0.0175 (17.5M nano)
+/// cost per turn.
+fn looping_response_with_usage(input: u64, output: u64) -> LlmResponse {
+    let mut r = end_turn_response_with_usage(input, output);
+    r.stop_reason = Some("max_tokens".to_string()); // not end_turn → loop continues
+    r
+}
+
+fn budget_orch(
+    api: Arc<MockApiClient>,
+    tracker: Arc<CostTracker>,
+    max_budget_nano_usd: Option<u64>,
+) -> ConversationOrchestrator {
+    let mut cfg = OrchestratorConfig::default();
+    cfg.model = "claude-opus-4-6".into(); // priced in builtin_reference
+    cfg.max_budget_nano_usd = max_budget_nano_usd;
+    ConversationOrchestrator::new(
+        cfg,
+        api,
+        Arc::new(ToolRegistry::new()),
+        noop_hook_executor(),
+        Arc::new(NoOpPermissionGate),
+        Arc::new(MockOutputStream::new()),
+        Arc::new(StaticMemoryProvider::empty()),
+        std::env::temp_dir(),
+    )
+    .with_cost_tracker(tracker)
+}
+
+#[tokio::test]
+async fn run_turn_stops_at_max_budget() {
+    // Turn 1 records $0.0175 (17.5M nano); with a 1M-nano ($0.001) cap, the next
+    // iteration's over-budget check stops with MaxBudgetReached — 1:1 with
+    // claude-code `getTotalCost() >= maxBudgetUsd`.
+    let api = Arc::new(MockApiClient::new(vec![
+        looping_response_with_usage(1_000, 500),
+        looping_response_with_usage(1_000, 500),
+        looping_response_with_usage(1_000, 500),
+    ]));
+    let (tx, _rx) = mpsc::channel(8); // _rx held for the whole test → channel stays open
+    let tracker = Arc::new(CostTracker::new(
+        SessionId::new(),
+        Arc::new(PricingCatalog::builtin_reference()),
+        tx,
+    ));
+    let orch = budget_orch(api, tracker, Some(1_000_000));
+    let err = orch.run_turn("hi").await.expect_err("must stop on budget");
+    assert!(
+        matches!(err, orchestrator::OrchestratorError::MaxBudgetReached { .. }),
+        "expected MaxBudgetReached, got {err:?}"
+    );
+}
+
+#[tokio::test]
+async fn no_budget_cap_never_stops_on_budget() {
+    // max_budget_nano_usd = None (default) → the cap is inert; the loop runs to
+    // queue exhaustion, never MaxBudgetReached.
+    let api = Arc::new(MockApiClient::new(vec![
+        looping_response_with_usage(1_000, 500),
+        looping_response_with_usage(1_000, 500),
+    ]));
+    let (tx, _rx) = mpsc::channel(8);
+    let tracker = Arc::new(CostTracker::new(
+        SessionId::new(),
+        Arc::new(PricingCatalog::builtin_reference()),
+        tx,
+    ));
+    let orch = budget_orch(api, tracker, None);
+    let err = orch.run_turn("hi").await.expect_err("queue exhausts");
+    assert!(
+        !matches!(err, orchestrator::OrchestratorError::MaxBudgetReached { .. }),
+        "no cap must not stop on budget, got {err:?}"
+    );
+}

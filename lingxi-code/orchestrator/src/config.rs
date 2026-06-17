@@ -172,6 +172,17 @@ pub struct OrchestratorConfig {
     /// and tests are unaffected; the desktop composition root populates it.
     #[serde(default)]
     pub output_style_dirs: Vec<std::path::PathBuf>,
+
+    /// Optional cost ceiling in NANO-USD (claude-code `maxBudgetUsd`, in USD; the
+    /// nano-USD unit matches [`cost::CostTracker`]). `None` (the default) = no
+    /// cap. When set, the turn loop stops with
+    /// [`crate::OrchestratorError::MaxBudgetReached`] once the session's
+    /// cumulative cost reaches it — 1:1 with `QueryEngine.ts:972`
+    /// `getTotalCost() >= maxBudgetUsd`. Enforced only when a `CostTracker` is
+    /// wired (the cap cannot be enforced without cost tracking); a headless
+    /// `--max-budget` run is the primary consumer.
+    #[serde(default)]
+    pub max_budget_nano_usd: Option<u64>,
 }
 
 impl Default for OrchestratorConfig {
@@ -190,6 +201,7 @@ impl Default for OrchestratorConfig {
             is_enterprise: false,
             output_style: None,
             output_style_dirs: Vec::new(),
+            max_budget_nano_usd: None,
         }
     }
 }
@@ -234,6 +246,7 @@ mod tests {
             is_enterprise: true,
             output_style: Some("Explanatory".into()),
             output_style_dirs: vec![std::path::PathBuf::from("/home/u/.claude/output-styles")],
+            max_budget_nano_usd: Some(5_000_000_000),
         };
         let s = serde_json::to_string(&cfg).unwrap();
         let back: OrchestratorConfig = serde_json::from_str(&s).unwrap();
@@ -253,6 +266,7 @@ mod tests {
             back.output_style_dirs,
             vec![std::path::PathBuf::from("/home/u/.claude/output-styles")]
         );
+        assert_eq!(back.max_budget_nano_usd, Some(5_000_000_000));
     }
 
     #[test]

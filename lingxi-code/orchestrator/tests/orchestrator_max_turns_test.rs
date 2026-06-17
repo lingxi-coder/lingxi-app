@@ -60,7 +60,63 @@ async fn never_ending_loop_aborts_with_max_turns_reached() {
 }
 
 #[tokio::test]
-async fn max_turns_default_30_is_the_construction_default() {
+async fn max_turns_zero_means_unbounded() {
+    // Parity: `max_turns = 0` (the new default) means UNBOUNDED — the loop is
+    // NOT hard-capped, mirroring claude-code's optional `maxTurns`
+    // (`if (maxTurns && nextTurnCount > maxTurns)`). This is the contrast to
+    // `never_ending_loop_aborts_with_max_turns_reached` (which caps at 3): the
+    // same looping responses now run to queue-exhaustion, never MaxTurnsReached.
+    let make_resp = || {
+        mock_message_response(
+            vec![LlmContentBlock::Text {
+                text: "still thinking".into(),
+                cache_control: None,
+            }],
+            Some("max_tokens"),
+        )
+    };
+    let api = Arc::new(MockApiClient::new(vec![
+        make_resp(),
+        make_resp(),
+        make_resp(),
+    ]));
+    let output = Arc::new(MockOutputStream::new());
+    let hooks = orchestrator::test_support::noop_hook_executor();
+    let perms = Arc::new(NoOpPermissionGate);
+    let tools = Arc::new(ToolRegistry::new());
+
+    let config = OrchestratorConfig {
+        max_turns: 0, // == OrchestratorConfig::default().max_turns — unbounded
+        ..OrchestratorConfig::default()
+    };
+    let orch = ConversationOrchestrator::new(
+        config,
+        api.clone(),
+        tools,
+        hooks,
+        perms,
+        output,
+        Arc::new(StaticMemoryProvider::empty()),
+        std::env::temp_dir(),
+    );
+
+    let err = orch.run_turn("forever").await.expect_err("queue exhausts");
+    assert!(
+        !matches!(err, OrchestratorError::MaxTurnsReached { .. }),
+        "max_turns = 0 must be UNBOUNDED (never MaxTurnsReached), got: {err}"
+    );
+    // No turn cap stopped the loop early — it consumed every queued response
+    // (the queue is fully drained) before failing on exhaustion. (With the old
+    // hard cap, `0 >= 0` would have hit MaxTurnsReached on turn 0.)
+    assert_eq!(
+        api.remaining().await,
+        0,
+        "unbounded loop drains the whole response queue"
+    );
+}
+
+#[tokio::test]
+async fn default_config_single_end_turn_completes_cleanly() {
     let api = Arc::new(MockApiClient::new(vec![mock_message_response(
         vec![],
         Some("end_turn"),

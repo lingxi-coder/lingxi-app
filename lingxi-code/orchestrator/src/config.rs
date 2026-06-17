@@ -1,15 +1,22 @@
 //! Orchestrator runtime configuration.
 //!
-//! `MAX_TURNS_DEFAULT = 30` is the LingXi-locked default. Spec §7 OQ-1:
-//! claude-code has no global `maxTurns` default (only per-agent
-//! frontmatter), so we lock 30 as the main-loop ceiling. Override at
-//! construction via `OrchestratorConfig { max_turns, .. }`.
+//! `MAX_TURNS_DEFAULT = 0` means **UNBOUNDED**, matching claude-code: `maxTurns`
+//! is an optional CLI/SDK option (`--max-turns`) that is `undefined` by default,
+//! and the turn cap is enforced only when it is truthy
+//! (`query.ts:1705` `if (maxTurns && nextTurnCount > maxTurns)`). So a plain
+//! interactive REPL or a `claude -p` headless run is uncapped unless the user
+//! passes `--max-turns N`. Override at construction via
+//! `OrchestratorConfig { max_turns, .. }`; the model's own `end_turn` plus the
+//! token budget are the natural terminators.
 
 use serde::{Deserialize, Serialize};
 
-/// Default value for [`OrchestratorConfig::max_turns`]. **Locked at 30**
-/// per spec §4.2 OQ-1 resolution (2026-05-25).
-pub const MAX_TURNS_DEFAULT: u32 = 30;
+/// Default value for [`OrchestratorConfig::max_turns`]. **`0` = UNBOUNDED**
+/// (parity with claude-code's optional, default-unset `maxTurns`). A previous
+/// LingXi build locked this at 30; the parity audit flagged that as a divergence
+/// (a legitimate >30-turn interactive loop hard-errored), so it is now unbounded
+/// by default and capped only when a caller sets a non-zero `max_turns`.
+pub const MAX_TURNS_DEFAULT: u32 = 0;
 
 /// Default model identifier. The actual model lives in user settings or
 /// CLI flags (M3-01 + M5-12); this value is only used when the embedder
@@ -28,8 +35,10 @@ pub const DEFAULT_MODEL: &str = "claude-opus-4-7";
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OrchestratorConfig {
     /// Maximum number of turns before the loop aborts with
-    /// [`crate::OrchestratorError::MaxTurnsReached`]. Default
-    /// [`MAX_TURNS_DEFAULT`].
+    /// [`crate::OrchestratorError::MaxTurnsReached`]. **`0` = UNBOUNDED** (the
+    /// default, [`MAX_TURNS_DEFAULT`]) — the cap is enforced only when this is
+    /// non-zero, mirroring claude-code's truthy `if (maxTurns && …)` check. Set
+    /// a positive value (e.g. from `--max-turns N`) to impose a ceiling.
     pub max_turns: u32,
 
     /// Active model identifier (passed verbatim to
@@ -178,9 +187,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn default_max_turns_is_30() {
-        assert_eq!(OrchestratorConfig::default().max_turns, 30);
-        assert_eq!(MAX_TURNS_DEFAULT, 30);
+    fn default_max_turns_is_unbounded() {
+        // Parity: claude-code's `maxTurns` is unset by default (unbounded);
+        // `0` is the LingXi sentinel for "no cap".
+        assert_eq!(OrchestratorConfig::default().max_turns, 0);
+        assert_eq!(MAX_TURNS_DEFAULT, 0);
     }
 
     #[test]

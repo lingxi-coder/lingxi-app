@@ -185,9 +185,11 @@ async fn max_turns_cap_returns_max_turns_reached_error() {
 
     let max = s.max_turns_override.unwrap_or(2);
 
-    // Provide enough responses that the orchestrator keeps looping: each call
-    // returns a tool-use stop_reason so there's no natural end_turn. We
-    // provide more than max_turns to ensure the cap fires, not an empty queue.
+    // Provide more responses than `max` so the loop keeps going until the TURN
+    // CAP fires (not until the queue empties). Each response uses a non-
+    // `end_turn` stop_reason (`max_tokens`) so there is no natural end — the
+    // loop runs until `turn_count >= max`, exactly like the orchestrator's
+    // `never_ending_loop_aborts_with_max_turns_reached` unit test.
     let responses: Vec<_> = (0..max + 2)
         .map(|_| {
             mock_message_response(
@@ -195,35 +197,21 @@ async fn max_turns_cap_returns_max_turns_reached_error() {
                     text: "still going".into(),
                     cache_control: None,
                 }],
-                // "tool_use" stop_reason keeps the loop going — but the test
-                // below just needs the orchestrator to exhaust max_turns when
-                // the queue empties (ApiError::Server triggers the error path
-                // on the SECOND call since max_turns=2 and the loop runs until
-                // turn >= max_turns). Using end_turn for all queued items and
-                // relying on max_turns=2 with only 1 response causes script
-                // exhaustion on the second call → ApiError → OrchestratorError.
-                // A simpler approach: configure max_turns=1, provide no tool
-                // uses, and assert the first turn ends naturally. For the
-                // MaxTurnsReached scenario we need the api to fail BEFORE
-                // returning end_turn:
-                //   - max_turns = 2
-                //   - first response = text "still going", stop_reason = "end_turn"
-                //   — wait, that would end the loop at turn 1.
-                // The correct way: set max_turns = 0. Any call immediately hits
-                // the guard. We don't even need API responses.
-                Some("end_turn"),
+                Some("max_tokens"),
             )
         })
         .collect();
 
     let api = Arc::new(MockApiClient::new(responses));
-    // max_turns = 0 forces immediate MaxTurnsReached on the first iteration.
-    let orch = build_orchestrator_with_api(api, Some(0));
+    // A POSITIVE `max` imposes the cap. (`0` now means UNBOUNDED — parity with
+    // claude-code's optional `maxTurns` — so the cap must be a non-zero value;
+    // see `OrchestratorConfig::max_turns`.)
+    let orch = build_orchestrator_with_api(api, Some(max));
 
     let err = orch
         .run_turn(s.user_prompt.as_deref().unwrap())
         .await
-        .expect_err("should fail with MaxTurnsReached when max_turns=0");
+        .expect_err("should fail with MaxTurnsReached when the turn cap is hit");
 
     assert!(
         matches!(err, OrchestratorError::MaxTurnsReached { .. }),

@@ -2224,7 +2224,7 @@ impl ConversationOrchestrator {
         let mut turn_count: u32 = 0;
         let final_message_id;
         loop {
-            if turn_count >= self.config.max_turns {
+            if self.config.max_turns != 0 && turn_count >= self.config.max_turns {
                 return Err(OrchestratorError::MaxTurnsReached {
                     max_turns: self.config.max_turns,
                 });
@@ -2390,7 +2390,7 @@ impl ConversationOrchestrator {
         let mut turn_count: u32 = 0;
         let final_message_id;
         loop {
-            if turn_count >= self.config.max_turns {
+            if self.config.max_turns != 0 && turn_count >= self.config.max_turns {
                 return Err(OrchestratorError::MaxTurnsReached {
                     max_turns: self.config.max_turns,
                 });
@@ -2968,7 +2968,7 @@ impl ConversationOrchestrator {
             if cancel.is_cancelled() {
                 return Ok(TurnOutcome::Cancelled);
             }
-            if turn_count >= self.config.max_turns {
+            if self.config.max_turns != 0 && turn_count >= self.config.max_turns {
                 return Ok(TurnOutcome::MaxTurns);
             }
             turn_count = turn_count.saturating_add(1);

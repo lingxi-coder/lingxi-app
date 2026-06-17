@@ -72,6 +72,32 @@ fn is_recurring_task_aged(
             .is_ok_and(|age| age >= max_age)
 }
 
+/// Post-fire bookkeeping for a job that JUST fired. A ONE-SHOT (`!recurring`)
+/// job is REMOVED from `tasks` and `true` is returned so the caller also deletes
+/// its persisted descriptor — 1:1 with claude-code `recurring: false` ("fire
+/// once at the next match, then auto-delete", `schedule_cron.rs` schema). A
+/// recurring job records `last_run` in place and returns `false`. A missing id
+/// is a no-op (`false`).
+fn finalize_fired_job(
+    tasks: &mut HashMap<String, CronTaskDef>,
+    id: &str,
+    now: SystemTime,
+) -> bool {
+    let recurring = match tasks.get(id) {
+        Some(t) => t.recurring,
+        None => return false,
+    };
+    if recurring {
+        if let Some(t) = tasks.get_mut(id) {
+            t.last_run = Some(now);
+        }
+        false
+    } else {
+        tasks.remove(id);
+        true
+    }
+}
+
 /// Owner of the cron tick loop. Constructed with platform trait objects and
 /// the shared [`TaskRegistry`].
 pub struct CronScheduler {
@@ -267,9 +293,16 @@ impl CronScheduler {
                 tracing::error!("cron task {id} create failed: {e}");
             }
 
-            // Update last_run.
-            if let Some(t) = self.tasks.write().await.get_mut(&id) {
-                t.last_run = Some(now);
+            // Post-fire bookkeeping: a ONE-SHOT job auto-deletes (it has now
+            // fired once), a recurring job records `last_run`.
+            let one_shot = {
+                let mut tasks = self.tasks.write().await;
+                finalize_fired_job(&mut tasks, &id, now)
+            };
+            if one_shot {
+                let job_path = self.lock_dir.join(format!("{id}.json"));
+                let _ = self.fs.delete_file(&job_path.to_string_lossy()).await;
+                tracing::info!(cron_id = %id, "one-shot cron job fired and auto-deleted");
             }
 
             // Release the lock so other peers see "stale" if we crash mid-task.
@@ -385,5 +418,37 @@ mod expiry_tests {
     fn future_created_at_is_not_aged() {
         // Clock skew: created_at after now → duration_since errs → treated as not aged.
         assert!(!is_recurring_task_aged(at(0), at(5), true, Some(DAY * 30)));
+    }
+
+    #[test]
+    fn finalize_one_shot_removes_recurring_keeps() {
+        use super::{finalize_fired_job, CronTaskDef};
+        use crate::schedule::parse_cron;
+        use std::collections::HashMap;
+
+        let mk = |id: &str, recurring: bool| CronTaskDef {
+            id: id.into(),
+            schedule: parse_cron("* * * * *").unwrap(),
+            prompt: "p".into(),
+            agent_type: None,
+            last_run: None,
+            enabled: true,
+            created_at: at(0),
+            recurring,
+        };
+        let mut tasks = HashMap::new();
+        tasks.insert("rec".to_string(), mk("rec", true));
+        tasks.insert("once".to_string(), mk("once", false));
+
+        // One-shot: removed, returns true (caller deletes the descriptor).
+        assert!(finalize_fired_job(&mut tasks, "once", at(1)));
+        assert!(!tasks.contains_key("once"));
+
+        // Recurring: kept, last_run recorded, returns false.
+        assert!(!finalize_fired_job(&mut tasks, "rec", at(1)));
+        assert_eq!(tasks.get("rec").unwrap().last_run, Some(at(1)));
+
+        // Missing id: no-op false.
+        assert!(!finalize_fired_job(&mut tasks, "ghost", at(1)));
     }
 }

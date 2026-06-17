@@ -411,6 +411,29 @@ pub async fn build_mobile_inner(
         tracing::warn!(warning = %w, "provider-config assembly (mobile)");
     }
 
+    // TPM-C (mobile): resolve an optional `profile/model` qualifier in the
+    // configured default_model so a shared id routes deterministically on the
+    // first turn (mirror of engine-desktop). Must run while
+    // `assembled.client_config.providers` is still owned (before `from_config`
+    // moves it). `display_model`/`provider_label` are immaterial to parsing, so
+    // we reuse `request_model` / the profile name for both fields.
+    let default_listings: Vec<traits::ModelListing> = assembled
+        .client_config
+        .providers
+        .iter()
+        .flat_map(|p| {
+            let profile = p.profile_name.clone();
+            p.models.iter().map(move |m| traits::ModelListing {
+                display_model: m.request_model.clone(),
+                request_model: m.request_model.clone(),
+                provider_id: profile.clone(),
+                provider_label: profile.clone(),
+            })
+        })
+        .collect();
+    let (default_model_id, default_model_profile) =
+        traits::parse_model_ref(&cfg.default_model, &default_listings);
+
     // (3) Credential manager — built BEFORE the client so the same `Arc` serves
     //     BOTH the composite credential provider (below) and the OAuth client
     //     (used by /login, /logout, step (3b)). One store, no second keychain.
@@ -517,7 +540,9 @@ pub async fn build_mobile_inner(
 
     // (4) Orchestrator config from `cfg` (was a host env/arg read).
     let mut orch_cfg = OrchestratorConfig::default();
-    orch_cfg.model.clone_from(&cfg.default_model);
+    // TPM-C: use the bare id produced by parse_model_ref (strips a profile/
+    // prefix when present, passes through unchanged for bare ids).
+    orch_cfg.model.clone_from(&default_model_id);
 
     // (5) Connection-scoped sinks — the mobile transport's analog of the
     //     bridge-server's WS writer:
@@ -615,6 +640,14 @@ pub async fn build_mobile_inner(
 
     // (8) Command registry through the mobile composition root.
     let handle: Arc<dyn OrchestratorHandle> = orch.clone();
+    // TPM-C (mobile step 2): seed the initial model_profile from a
+    // profile-qualified default_model.  SessionState::empty starts model_profile
+    // at None; this is a no-op when default_model is a bare id.
+    if let Some(profile) = default_model_profile.as_deref() {
+        if let Err(e) = handle.switch_model(&default_model_id, Some(profile)).await {
+            tracing::warn!(error = %e, "failed to seed default model profile");
+        }
+    }
     let reg = mobile_command_registry(handle, auth.clone());
     let dispatcher = RegistrySlashDispatcher::new(Arc::new(RwLock::new(reg)));
 
@@ -950,14 +983,16 @@ impl MobileEngineHandle {
             // ── Model ──────────────────────────────────────────────────────
             ClientCommand::SetModel { model } => {
                 let handle: Arc<dyn OrchestratorHandle> = self.inner.orchestrator.clone();
+                let listings = handle.list_model_listings().await;
+                let (model_id, profile) = traits::parse_model_ref(&model, &listings);
                 handle
-                    .switch_model(&model, None)
+                    .switch_model(&model_id, profile.as_deref())
                     .await
                     .map_err(|e| ClientError::Internal {
                         message: format!("switch_model failed: {e}"),
                     })?;
                 self.event_sink
-                    .emit(ClientEvent::ModelChanged { model })
+                    .emit(ClientEvent::ModelChanged { model: model_id })
                     .await;
                 Ok(())
             }
@@ -1120,8 +1155,10 @@ impl MobileEngineHandle {
                         message: format!("new session (clear_session) failed: {e}"),
                     })?;
                 if let Some(model) = model {
+                    let listings = handle.list_model_listings().await;
+                    let (model_id, profile) = traits::parse_model_ref(&model, &listings);
                     handle
-                        .switch_model(&model, None)
+                        .switch_model(&model_id, profile.as_deref())
                         .await
                         .map_err(|e| ClientError::Internal {
                             message: format!("new session model switch failed: {e}"),
@@ -2170,5 +2207,64 @@ mod tests {
                 "resume must be Rejected while a turn is in flight, got {result:?}"
             );
         });
+    }
+
+    // ── TPM-C (mobile): default_model profile/model parsing ──────────────────
+
+    /// Verifies the listings-building + `parse_model_ref` logic the mobile
+    /// composition root uses at build time: a qualified `profile/model`
+    /// default_model splits into the bare id (written to `orch_cfg.model`) and
+    /// `Some(profile)` (used to seed `switch_model`), while a bare id passes
+    /// through unchanged with `None` profile (no-op seed path).
+    ///
+    /// This is a pure unit test of the parser + listing shape — no I/O, no
+    /// tokio runtime — mirroring `default_model_parse_qualified_and_bare` in
+    /// engine-desktop.
+    #[test]
+    fn mobile_default_model_parse_qualified_and_bare() {
+        // Construct the same listing shape the mobile composition root builds
+        // from `assembled.client_config.providers` (display_model == request_model
+        // on mobile; provider_label == profile_name).
+        let listings = vec![
+            traits::ModelListing {
+                display_model: "gpt-5.2".to_string(),
+                request_model: "gpt-5.2".to_string(),
+                provider_id: "openai".to_string(),
+                provider_label: "openai".to_string(),
+            },
+            traits::ModelListing {
+                display_model: "gpt-5.2".to_string(),
+                request_model: "gpt-5.2".to_string(),
+                provider_id: "github-copilot".to_string(),
+                provider_label: "github-copilot".to_string(),
+            },
+            traits::ModelListing {
+                display_model: "claude-sonnet-4-20250514".to_string(),
+                request_model: "claude-sonnet-4-20250514".to_string(),
+                provider_id: "anthropic".to_string(),
+                provider_label: "anthropic".to_string(),
+            },
+        ];
+
+        // Qualified: "openai/gpt-5.2" → bare id "gpt-5.2" + profile "openai"
+        let (id, profile) = traits::parse_model_ref("openai/gpt-5.2", &listings);
+        assert_eq!(id, "gpt-5.2", "qualified ref must strip the profile prefix");
+        assert_eq!(
+            profile.as_deref(),
+            Some("openai"),
+            "qualified ref must extract the profile"
+        );
+
+        // Bare: "claude-sonnet-4-20250514" → same id, no profile (no-op seed path)
+        let (id2, profile2) =
+            traits::parse_model_ref("claude-sonnet-4-20250514", &listings);
+        assert_eq!(id2, "claude-sonnet-4-20250514", "bare model id must pass through");
+        assert!(profile2.is_none(), "bare model must yield None profile");
+
+        // Shared id with two providers and explicit profile qualifier
+        let (id3, profile3) =
+            traits::parse_model_ref("github-copilot/gpt-5.2", &listings);
+        assert_eq!(id3, "gpt-5.2");
+        assert_eq!(profile3.as_deref(), Some("github-copilot"));
     }
 }

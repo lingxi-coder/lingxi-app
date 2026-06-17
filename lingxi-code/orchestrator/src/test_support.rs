@@ -580,6 +580,8 @@ pub struct MockOrchestratorHandle {
     /// Bumped each `switch_model` call. Records the most-recent value too.
     switch_model_calls: AtomicUsize,
     switch_model_last: StdMutex<Option<String>>,
+    /// Most-recent profile passed to `switch_model`, or `None`.
+    switch_model_last_profile: StdMutex<Option<Option<String>>>,
     /// If `Some`, `switch_model` returns `ActionFailed(_)`.
     switch_model_error: StdMutex<Option<String>>,
     /// Set by `request_exit`. Readable via `was_exit_requested`.
@@ -615,6 +617,8 @@ pub struct MockOrchestratorHandle {
     available_models: StdMutex<Vec<String>>,
     /// Pre-loaded read-file-state cache keys returned by `files_in_context`.
     files_in_context: StdMutex<Vec<PathBuf>>,
+    /// Pre-loaded model listings returned by `list_model_listings`.
+    model_listings: StdMutex<Vec<traits::ModelListing>>,
 }
 
 impl MockOrchestratorHandle {
@@ -629,6 +633,7 @@ impl MockOrchestratorHandle {
             compact_error: StdMutex::new(None),
             switch_model_calls: AtomicUsize::new(0),
             switch_model_last: StdMutex::new(None),
+            switch_model_last_profile: StdMutex::new(None),
             switch_model_error: StdMutex::new(None),
             exit_requested: AtomicBool::new(false),
             memory_path: StdMutex::new(None),
@@ -646,6 +651,7 @@ impl MockOrchestratorHandle {
             permissions_editor_error: StdMutex::new(None),
             available_models: StdMutex::new(Vec::new()),
             files_in_context: StdMutex::new(Vec::new()),
+            model_listings: StdMutex::new(Vec::new()),
         }
     }
 
@@ -693,6 +699,13 @@ impl MockOrchestratorHandle {
     pub fn last_switched_model(&self) -> Option<String> {
         self.switch_model_last.lock().unwrap().clone()
     }
+    /// Most-recent `(model, profile)` pair passed to `switch_model`, or `None`
+    /// if it has not been called yet.
+    pub fn last_switch(&self) -> Option<(String, Option<String>)> {
+        let model = self.switch_model_last.lock().unwrap().clone()?;
+        let profile = self.switch_model_last_profile.lock().unwrap().clone()?;
+        Some((model, profile))
+    }
     /// Make the next `switch_model` call return `ActionFailed(reason)`.
     pub fn set_switch_model_error(&self, reason: String) {
         *self.switch_model_error.lock().unwrap() = Some(reason);
@@ -739,6 +752,10 @@ impl MockOrchestratorHandle {
     /// Pre-load the read-file-state cache keys returned by `files_in_context`.
     pub fn set_files_in_context(&self, files: Vec<PathBuf>) {
         *self.files_in_context.lock().unwrap() = files;
+    }
+    /// Pre-load the model listings returned by `list_model_listings`.
+    pub fn set_model_listings(&self, listings: Vec<traits::ModelListing>) {
+        *self.model_listings.lock().unwrap() = listings;
     }
 }
 
@@ -791,9 +808,11 @@ impl OrchestratorHandle for MockOrchestratorHandle {
         }
     }
 
-    async fn switch_model(&self, model: &str, _profile: Option<&str>) -> Result<(), HandleError> {
+    async fn switch_model(&self, model: &str, profile: Option<&str>) -> Result<(), HandleError> {
         self.switch_model_calls.fetch_add(1, Ordering::SeqCst);
         *self.switch_model_last.lock().unwrap() = Some(model.to_string());
+        *self.switch_model_last_profile.lock().unwrap() =
+            Some(profile.map(str::to_string));
         if let Some(reason) = self.switch_model_error.lock().unwrap().take() {
             return Err(HandleError::ActionFailed(reason));
         }
@@ -867,6 +886,10 @@ impl OrchestratorHandle for MockOrchestratorHandle {
 
     async fn list_available_models(&self) -> Vec<String> {
         self.available_models.lock().unwrap().clone()
+    }
+
+    async fn list_model_listings(&self) -> Vec<traits::ModelListing> {
+        self.model_listings.lock().unwrap().clone()
     }
 
     async fn files_in_context(&self) -> Vec<PathBuf> {

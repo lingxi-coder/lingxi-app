@@ -321,16 +321,20 @@ impl CommandRouter for EngineCommandRouter {
     async fn route(&self, command: ClientCommand, sink: Arc<dyn ClientEventSink>) {
         match command {
             // ── Model ──────────────────────────────────────────────────────
-            ClientCommand::SetModel { model } => match self.handle.switch_model(&model, None).await {
-                Ok(()) => sink.emit(ClientEvent::ModelChanged { model }).await,
-                Err(e) => {
-                    sink.emit(ClientEvent::Error {
-                        kind: ErrorKindDto::Internal,
-                        message: format!("switch_model failed: {e}"),
-                    })
-                    .await;
+            ClientCommand::SetModel { model } => {
+                let listings = self.handle.list_model_listings().await;
+                let (model_id, profile) = traits::parse_model_ref(&model, &listings);
+                match self.handle.switch_model(&model_id, profile.as_deref()).await {
+                    Ok(()) => sink.emit(ClientEvent::ModelChanged { model: model_id }).await,
+                    Err(e) => {
+                        sink.emit(ClientEvent::Error {
+                            kind: ErrorKindDto::Internal,
+                            message: format!("switch_model failed: {e}"),
+                        })
+                        .await;
+                    }
                 }
-            },
+            }
             ClientCommand::ListModels => {
                 self.emit_listing(ListingKindDto::Models, &*sink).await;
             }

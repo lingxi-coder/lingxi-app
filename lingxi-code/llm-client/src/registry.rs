@@ -118,16 +118,23 @@ impl ModelRegistry {
                 },
                 capabilities: model.capabilities,
             }),
-            multiple => Err(LlmError::InvalidRequest {
-                message: format!(
-                    "model reference '{requested}' is ambiguous across profiles: {}",
-                    multiple
-                        .iter()
-                        .map(|(provider, _)| provider.profile_name.as_str())
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                ),
-            }),
+            multiple => {
+                let profiles: Vec<&str> =
+                    multiple.iter().map(|(p, _)| p.profile_name.as_str()).collect();
+                let suggestions = profiles
+                    .iter()
+                    .map(|p| format!("{p}/{requested}"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                Err(LlmError::InvalidRequest {
+                    message: format!(
+                        "model reference '{requested}' is ambiguous across profiles: {} \
+                         — qualify it, e.g. {}",
+                        profiles.join(", "),
+                        suggestions
+                    ),
+                })
+            }
         }
     }
 

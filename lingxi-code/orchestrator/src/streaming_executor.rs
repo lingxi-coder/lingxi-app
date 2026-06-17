@@ -397,6 +397,54 @@ fn set_provider_id(block: &mut ContentBlock, provider_id: Option<String>) {
     }
 }
 
+// ============================================================================
+// Task 9: ordered result drain (TS getCompletedResults / hasUnfinishedTools)
+// ============================================================================
+
+/// One drained result ready for the live loop to persist, carrying everything
+/// needed to build + assistant-parent the user message (TS getCompletedResults
+/// yields one message per result; `assistant_id` is TS `sourceToolAssistantUUID`).
+#[allow(dead_code)] // wired in Task 11
+pub(crate) struct DrainedResult {
+    pub(crate) block: ContentBlock,
+    pub(crate) assistant_id: MessageId,
+    pub(crate) injected: Vec<(ConversationMessage, ToolUseId)>,
+    pub(crate) modifiers: Vec<ContextModifier>,
+}
+
+#[allow(dead_code)] // wired in Task 11
+impl<'a> StreamingToolExecutor<'a> {
+    /// TS `getCompletedResults`: walk tools in order, yield each newly-`Completed`
+    /// tool's result (marking it `Yielded`), and STOP at an `Executing`
+    /// non-concurrency-safe tool (don't emit past an unfinished exclusive
+    /// barrier). Returns results in RECEIVED order.
+    pub(crate) fn take_newly_completed(&mut self) -> Vec<DrainedResult> {
+        let mut out = Vec::new();
+        for t in &mut self.tools {
+            match t.status {
+                ToolStatus::Completed => {
+                    t.status = ToolStatus::Yielded;
+                    out.push(DrainedResult {
+                        block: t.result.clone().expect("completed tool has result"),
+                        assistant_id: t.assistant_id,
+                        injected: std::mem::take(&mut t.injected),
+                        modifiers: std::mem::take(&mut t.modifiers),
+                    });
+                }
+                ToolStatus::Yielded => continue,
+                ToolStatus::Executing if !t.is_concurrency_safe => break,
+                _ => {}
+            }
+        }
+        out
+    }
+
+    /// TS `hasUnfinishedTools`: any tool not yet `Yielded`.
+    pub(crate) fn has_unfinished(&self) -> bool {
+        self.tools.iter().any(|t| t.status != ToolStatus::Yielded)
+    }
+}
+
 /// Build the synthetic `tool_result` for an unknown tool (claude-code `addTool`
 /// line 78-84 / `toolExecution.ts:401`). Shared by the streaming executor and
 /// the batched dispatch (`turn_loop`) so this parity-critical string lives in
@@ -1033,5 +1081,155 @@ mod tests {
             modifiers: Vec::new(),
         };
         assert_eq!(tool_description(&t), "SafeTool");
+    }
+
+    // ============================================================================
+    // Task 9: take_newly_completed + has_unfinished tests
+    // ============================================================================
+
+    /// Test 1: Two SafeTools driven to completion → take_newly_completed returns
+    /// both in received order; a second call returns empty; statuses become Yielded.
+    #[tokio::test]
+    async fn take_newly_completed_returns_results_in_received_order() {
+        let orch = orch_with_safe_tool();
+        let a = MessageId::new();
+        let mut exec = StreamingToolExecutor::new(&orch);
+        exec.add_tool(ToolUseId::new(), "SafeTool".into(), json!({}), None, a);
+        exec.add_tool(ToolUseId::new(), "SafeTool".into(), json!({}), None, a);
+        exec.process_queue();
+        while !exec.inflight.is_empty() {
+            exec.drain_one().await;
+        }
+        // Both should be Completed now.
+        assert_eq!(exec.tools[0].status, ToolStatus::Completed);
+        assert_eq!(exec.tools[1].status, ToolStatus::Completed);
+
+        let results = exec.take_newly_completed();
+        assert_eq!(results.len(), 2, "expected both tools drained");
+        // Statuses should now be Yielded.
+        assert_eq!(exec.tools[0].status, ToolStatus::Yielded);
+        assert_eq!(exec.tools[1].status, ToolStatus::Yielded);
+
+        // Second call returns empty (all already Yielded).
+        let results2 = exec.take_newly_completed();
+        assert!(results2.is_empty(), "second call must return empty");
+    }
+
+    /// Test 2: Unknown tool (already Completed at add_tool time) is immediately
+    /// yielded by take_newly_completed without calling process_queue.
+    #[tokio::test]
+    async fn take_newly_completed_yields_unknown_tool_immediately() {
+        let orch = orch_empty();
+        let mut exec = StreamingToolExecutor::new(&orch);
+        exec.add_tool(ToolUseId::new(), "NoSuchTool".into(), json!({}), None, MessageId::new());
+        // No process_queue, no drain_one — it's already Completed.
+        assert_eq!(exec.tools[0].status, ToolStatus::Completed);
+
+        let results = exec.take_newly_completed();
+        assert_eq!(results.len(), 1, "unknown tool result should be drained");
+        assert_eq!(exec.tools[0].status, ToolStatus::Yielded);
+
+        let ContentBlock::ToolResult { is_error, .. } = &results[0].block else {
+            panic!("expected ToolResult block")
+        };
+        assert!(*is_error, "unknown-tool block must be an error");
+    }
+
+    /// Test 3: Exclusive-barrier stop.
+    /// tool[0] = Completed (safe), tool[1] = Executing+unsafe, tool[2] = Completed (safe).
+    /// take_newly_completed must yield ONLY tool[0] and stop at tool[1].
+    #[tokio::test]
+    async fn take_newly_completed_stops_at_executing_exclusive_tool() {
+        let orch = orch_with_safe_tool();
+        let a = MessageId::new();
+        let mut exec = StreamingToolExecutor::new(&orch);
+
+        // We build a contrived state by directly constructing TrackedTools.
+        let id0 = ToolUseId::new();
+        let id1 = ToolUseId::new();
+        let id2 = ToolUseId::new();
+        let result_block = ContentBlock::ToolResult {
+            tool_use_id: id0,
+            content: "done".into(),
+            is_error: false,
+            provider_tool_use_id: None,
+        };
+        let result_block2 = ContentBlock::ToolResult {
+            tool_use_id: id2,
+            content: "also done".into(),
+            is_error: false,
+            provider_tool_use_id: None,
+        };
+
+        exec.tools.push(TrackedTool {
+            id: id0,
+            name: "SafeTool".into(),
+            input: json!({}),
+            provider_id: None,
+            assistant_id: a,
+            status: ToolStatus::Completed,
+            is_concurrency_safe: true,
+            result: Some(result_block),
+            injected: Vec::new(),
+            modifiers: Vec::new(),
+        });
+        exec.tools.push(TrackedTool {
+            id: id1,
+            name: "UnsafeTool".into(),
+            input: json!({}),
+            provider_id: None,
+            assistant_id: a,
+            status: ToolStatus::Executing,
+            is_concurrency_safe: false,  // exclusive barrier
+            result: None,
+            injected: Vec::new(),
+            modifiers: Vec::new(),
+        });
+        exec.tools.push(TrackedTool {
+            id: id2,
+            name: "SafeTool".into(),
+            input: json!({}),
+            provider_id: None,
+            assistant_id: a,
+            status: ToolStatus::Completed,
+            is_concurrency_safe: true,
+            result: Some(result_block2),
+            injected: Vec::new(),
+            modifiers: Vec::new(),
+        });
+
+        let results = exec.take_newly_completed();
+        // Only tool[0] should be emitted; tool[1] is the barrier; tool[2] is skipped.
+        assert_eq!(results.len(), 1, "only the pre-barrier completed tool should be drained");
+        assert_eq!(exec.tools[0].status, ToolStatus::Yielded);
+        // tool[1] still Executing (we don't touch it).
+        assert_eq!(exec.tools[1].status, ToolStatus::Executing);
+        // tool[2] still Completed (was NOT emitted past the barrier).
+        assert_eq!(exec.tools[2].status, ToolStatus::Completed);
+    }
+
+    /// Test 4: has_unfinished returns true when there are Queued/Executing tools,
+    /// and false once all tools are Yielded.
+    #[tokio::test]
+    async fn has_unfinished_tracks_non_yielded_tools() {
+        let orch = orch_with_safe_tool();
+        let a = MessageId::new();
+        let mut exec = StreamingToolExecutor::new(&orch);
+        // No tools at all → nothing unfinished.
+        assert!(!exec.has_unfinished(), "empty executor must have no unfinished tools");
+
+        exec.add_tool(ToolUseId::new(), "SafeTool".into(), json!({}), None, a);
+        assert!(exec.has_unfinished(), "Queued tool means unfinished");
+
+        exec.process_queue();
+        assert!(exec.has_unfinished(), "Executing tool still unfinished");
+
+        while !exec.inflight.is_empty() {
+            exec.drain_one().await;
+        }
+        assert!(exec.has_unfinished(), "Completed but not yet Yielded still unfinished");
+
+        exec.take_newly_completed();
+        assert!(!exec.has_unfinished(), "all Yielded → no unfinished tools");
     }
 }

@@ -14,6 +14,12 @@ use tool_api::ContextModifier;
 /// (TS `BASH_TOOL_NAME` guard in `collectResults`).
 const BASH_TOOL_NAME: &str = "Bash";
 
+/// claude-code `REJECT_MESSAGE` (utils/messages.ts:212). The user-interrupted
+/// synthetic result is this BARE text (NOT `<tool_use_error>`-wrapped, unlike
+/// sibling_error/streaming_fallback). The optional memoryCorrectionHint is gated
+/// off by default in claude-code, so it is not appended.
+const REJECT_MESSAGE: &str = "The user doesn't want to proceed with this tool use. The tool use was rejected (eg. if it was a file edit, the new_string was NOT written to the file). STOP what you are doing and wait for the user to tell you how to proceed.";
+
 /// Result of one `dispatch_tool_uses_tracked` call routed through the executor:
 /// the single result block + the tool's injected messages + context modifiers.
 type DispatchOutcome = Result<
@@ -43,9 +49,11 @@ pub(crate) fn synthetic_error_block(
     let content = match reason {
         AbortReason::StreamingFallback =>
             "<tool_use_error>Error: Streaming fallback - tool execution discarded</tool_use_error>".to_string(),
-        // PHASE-2: claude-code uses REJECT_MESSAGE + withMemoryCorrectionHint here.
-        AbortReason::UserInterrupted =>
-            "<tool_use_error>User rejected tool use</tool_use_error>".to_string(),
+        // claude-code (StreamingToolExecutor.ts:160-172) uses the BARE REJECT_MESSAGE
+        // here — NOT `<tool_use_error>`-wrapped — with is_error: true. This is the
+        // faithful text; the `UserInterrupted` reason itself is only produced once
+        // the user-ESC / per-tool cancellation path is wired in a later sub-task.
+        AbortReason::UserInterrupted => REJECT_MESSAGE.to_string(),
         AbortReason::SiblingError => match errored_desc {
             Some(desc) => format!("<tool_use_error>Cancelled: parallel tool call {desc} errored</tool_use_error>"),
             None => "<tool_use_error>Cancelled: parallel tool call errored</tool_use_error>".to_string(),
@@ -288,14 +296,50 @@ impl<'a> StreamingToolExecutor<'a> {
     /// futures are in flight. (TS `executeTool`/`collectResults` completion path.)
     pub(crate) async fn drain_one(&mut self) -> Option<usize> {
         let (i, outcome) = self.inflight.next().await?;
-        match outcome {
-            Ok((mut block, injected, modifiers)) => {
-                let is_err = matches!(&block, ContentBlock::ToolResult { is_error, .. } if *is_error);
-                // Only a Bash error cascades to siblings (TS: BASH_TOOL_NAME guard).
-                if is_err && self.tools[i].name == BASH_TOOL_NAME {
+        // Did THIS tool itself produce an error (its own result is_error, or a hard Err)?
+        // claude-code's `!thisToolErrored` guard: a tool that errored keeps its own
+        // result and is never given a sibling-cancel.
+        let this_tool_errored = match &outcome {
+            Ok((block, ..)) => matches!(block, ContentBlock::ToolResult { is_error: true, .. }),
+            Err(_) => true,
+        };
+        // Compute the abort reason from PRIOR state (a sibling Bash error / discard set
+        // by an earlier drain). Mirrors getAbortReason: discarded → StreamingFallback
+        // takes precedence over has_errored → SiblingError. Only applies to a tool that
+        // did NOT itself error.
+        let abort_reason = if this_tool_errored {
+            None
+        } else if self.discarded {
+            Some(AbortReason::StreamingFallback)
+        } else if self.has_errored {
+            Some(AbortReason::SiblingError)
+        } else {
+            None
+        };
+        // If THIS tool is the Bash whose error triggers the cascade, set has_errored
+        // NOW so it affects FUTURE drains (not this one — abort_reason already computed).
+        if this_tool_errored {
+            if let Ok((block, ..)) = &outcome {
+                if matches!(block, ContentBlock::ToolResult { is_error: true, .. })
+                    && self.tools[i].name == BASH_TOOL_NAME
+                {
                     self.has_errored = true;
                     self.errored_desc = Some(tool_description(&self.tools[i]));
                 }
+            }
+        }
+        // Sibling-cancelled in-flight tool: discard its real outcome for the synthetic.
+        if let Some(reason) = abort_reason {
+            let mut block = synthetic_error_block(self.tools[i].id, reason, self.errored_desc.as_deref());
+            set_provider_id(&mut block, self.tools[i].provider_id.clone());
+            self.tools[i].result = Some(block);
+            // A cancelled tool yields ONLY the synthetic — its injected msgs/modifiers are dropped.
+            self.tools[i].status = ToolStatus::Completed;
+            return Some(i);
+        }
+        // Otherwise record the real outcome (existing handling).
+        match outcome {
+            Ok((mut block, injected, modifiers)) => {
                 // Copy the provider id onto the result for egress replay.
                 set_provider_id(&mut block, self.tools[i].provider_id.clone());
                 self.tools[i].result = Some(block);
@@ -323,11 +367,11 @@ impl<'a> StreamingToolExecutor<'a> {
 
     /// Convert still-`Queued` tools to a synthetic-cancel result once
     /// `has_errored`/`discarded` is set (TS `getAbortReason` on next poll).
-    /// PHASE-2: an already-`Executing` sibling is NOT interrupted here (it runs
-    /// to completion and keeps its real result); only `Queued` siblings are
-    /// cancelled. claude-code interrupts in-flight siblings via the sibling
-    /// controller — that arrives with the per-tool `CancellationToken` in
-    /// Phase 2.
+    /// This handles ONLY the `Queued` siblings; in-flight (`Executing`) siblings
+    /// are substituted with the synthetic in [`Self::drain_one`] on their next
+    /// completion (the Phase-2 change, mirroring `collectResults` 335-345). The
+    /// two are complementary: queued tools never enter `inflight`, so `drain_one`
+    /// never sees them, and an executing tool is never `Queued` here.
     pub(crate) fn apply_abort_to_pending(&mut self) {
         let reason = if self.discarded {
             Some(AbortReason::StreamingFallback)
@@ -1026,6 +1070,218 @@ mod tests {
         assert!(
             !r1.contains("Cancelled: parallel tool call"),
             "SafeTool must NOT be sibling-cancelled: {r1}"
+        );
+    }
+
+    // ============================================================================
+    // Phase 2: in-flight sibling synthetic substitution + REJECT_MESSAGE text
+    // ============================================================================
+
+    /// A tool named "Bash" that is concurrency-SAFE (read-only) and errors from
+    /// `call` IMMEDIATELY — used to prove an in-flight (not queued) safe sibling
+    /// gets the synthetic-cancel when this Bash errors while it is still running.
+    struct SafeBashErrorTool;
+
+    #[async_trait]
+    impl Tool for SafeBashErrorTool {
+        fn name(&self) -> &str { "Bash" }
+        fn input_schema(&self) -> &serde_json::Value {
+            static SCHEMA: once_cell::sync::Lazy<serde_json::Value> =
+                once_cell::sync::Lazy::new(|| json!({ "type": "object", "properties": {} }));
+            &SCHEMA
+        }
+        fn is_enabled(&self, _ctx: &ToolStaticContext) -> bool { true }
+        fn max_result_size_chars(&self) -> usize { 1024 * 1024 }
+        fn is_concurrency_safe(&self, _input: &serde_json::Value) -> bool { true }
+        fn is_read_only(&self, _input: &serde_json::Value) -> bool { true }
+        async fn validate_input(
+            &self,
+            _input: &serde_json::Value,
+            _ctx: &ToolUseContext,
+        ) -> Result<(), ValidationError> {
+            Ok(())
+        }
+        async fn check_permissions(
+            &self,
+            _input: &serde_json::Value,
+            _ctx: &ToolUseContext,
+        ) -> permission::PermissionResult {
+            permission::PermissionResult::Allow {
+                reason: permission::PermissionDecisionReason::Other { reason: "test".into() },
+                updated_input: None,
+                update_destination: None,
+                metadata: permission::result::PermissionMetadata::default(),
+            }
+        }
+        async fn description(
+            &self,
+            _input: &serde_json::Value,
+            _opts: &DescriptionOptions,
+        ) -> String {
+            "safe-bash".into()
+        }
+        async fn prompt(&self, _opts: &PromptOptions) -> String { String::new() }
+        async fn call(
+            &self,
+            _input: serde_json::Value,
+            _ctx: ToolUseContext,
+            _tx: ToolProgressSender,
+        ) -> Result<ToolCallResult, ToolError> {
+            Err(ToolError::Internal("bash boom".into()))
+        }
+    }
+
+    /// A concurrency-SAFE tool that sleeps before returning Ok — the delay makes
+    /// the immediate-erroring SafeBash drain FIRST (deterministically setting
+    /// has_errored) while this slow tool is still in flight.
+    struct SlowSafeTool;
+
+    #[async_trait]
+    impl Tool for SlowSafeTool {
+        fn name(&self) -> &str { "SlowSafe" }
+        fn input_schema(&self) -> &serde_json::Value {
+            static SCHEMA: once_cell::sync::Lazy<serde_json::Value> =
+                once_cell::sync::Lazy::new(|| json!({ "type": "object", "properties": {} }));
+            &SCHEMA
+        }
+        fn is_enabled(&self, _ctx: &ToolStaticContext) -> bool { true }
+        fn max_result_size_chars(&self) -> usize { 1024 * 1024 }
+        fn is_concurrency_safe(&self, _input: &serde_json::Value) -> bool { true }
+        fn is_read_only(&self, _input: &serde_json::Value) -> bool { true }
+        async fn validate_input(
+            &self,
+            _input: &serde_json::Value,
+            _ctx: &ToolUseContext,
+        ) -> Result<(), ValidationError> {
+            Ok(())
+        }
+        async fn check_permissions(
+            &self,
+            _input: &serde_json::Value,
+            _ctx: &ToolUseContext,
+        ) -> permission::PermissionResult {
+            permission::PermissionResult::Allow {
+                reason: permission::PermissionDecisionReason::Other { reason: "test".into() },
+                updated_input: None,
+                update_destination: None,
+                metadata: permission::result::PermissionMetadata::default(),
+            }
+        }
+        async fn description(
+            &self,
+            _input: &serde_json::Value,
+            _opts: &DescriptionOptions,
+        ) -> String {
+            "slow-safe".into()
+        }
+        async fn prompt(&self, _opts: &PromptOptions) -> String { String::new() }
+        async fn call(
+            &self,
+            _input: serde_json::Value,
+            _ctx: ToolUseContext,
+            _tx: ToolProgressSender,
+        ) -> Result<ToolCallResult, ToolError> {
+            tokio::time::sleep(std::time::Duration::from_millis(60)).await;
+            Ok(ToolCallResult {
+                data: json!({ "content": "slow-ok" }),
+                new_messages: vec![],
+                context_modifier: None,
+                mcp_meta: None,
+            })
+        }
+    }
+
+    fn orch_with_safe_bash_error_and_slow_safe() -> ConversationOrchestrator {
+        let mut registry = ToolRegistry::new();
+        registry.register_builtin(Arc::new(SafeBashErrorTool) as Arc<dyn Tool>);
+        registry.register_builtin(Arc::new(SlowSafeTool) as Arc<dyn Tool>);
+        ConversationOrchestrator::new(
+            OrchestratorConfig::default(),
+            Arc::new(MockApiClient::new(vec![])),
+            Arc::new(registry),
+            noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            PathBuf::from("/tmp"),
+        )
+    }
+
+    fn orch_with_two_slow_safe() -> ConversationOrchestrator {
+        let mut registry = ToolRegistry::new();
+        registry.register_builtin(Arc::new(SlowSafeTool) as Arc<dyn Tool>);
+        ConversationOrchestrator::new(
+            OrchestratorConfig::default(),
+            Arc::new(MockApiClient::new(vec![])),
+            Arc::new(registry),
+            noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            PathBuf::from("/tmp"),
+        )
+    }
+
+    /// In-flight cascade: a concurrency-SAFE Bash that errors immediately runs in
+    /// parallel with a slow safe sibling. Because both are safe, the sibling is
+    /// already Executing (in-flight) — NOT Queued — when Bash errors. drain_one
+    /// must substitute the synthetic-cancel onto the in-flight sibling's outcome
+    /// (it never goes through apply_abort_to_pending, which only sees Queued).
+    #[tokio::test]
+    async fn safe_bash_error_cancels_an_in_flight_sibling() {
+        let orch = orch_with_safe_bash_error_and_slow_safe();
+        let a = MessageId::new();
+        let mut exec = StreamingToolExecutor::new(&orch);
+        exec.add_tool(ToolUseId::new(), "Bash".into(), json!({"command":"false"}), None, a);
+        exec.add_tool(ToolUseId::new(), "SlowSafe".into(), json!({}), None, a);
+        let results = exec.run_to_completion().await.unwrap();
+        // tools[0] = Bash keeps its REAL error ("bash boom").
+        let ContentBlock::ToolResult { content: r0, is_error: e0, .. } = &results[0] else { panic!() };
+        assert!(*e0, "Bash result should be an error");
+        assert!(r0.contains("bash boom"), "Bash keeps its real error: {r0}");
+        // tools[1] = SlowSafe was in-flight when Bash errored → synthetic cancel,
+        // NOT its real Ok ("slow-ok").
+        let ContentBlock::ToolResult { content: r1, is_error: e1, .. } = &results[1] else { panic!() };
+        assert!(*e1, "in-flight sibling must be marked errored (synthetic)");
+        assert!(
+            r1.contains("Cancelled: parallel tool call Bash"),
+            "in-flight sibling must get the synthetic sibling-cancel, got: {r1}"
+        );
+        assert!(!r1.contains("slow-ok"), "in-flight sibling's real result must be discarded: {r1}");
+    }
+
+    /// Non-cascade control: two slow safe tools, neither named Bash, both
+    /// error-free → both keep their REAL Ok results (no substitution at all).
+    #[tokio::test]
+    async fn two_safe_tools_no_error_keep_real_results() {
+        let orch = orch_with_two_slow_safe();
+        let a = MessageId::new();
+        let mut exec = StreamingToolExecutor::new(&orch);
+        exec.add_tool(ToolUseId::new(), "SlowSafe".into(), json!({}), None, a);
+        exec.add_tool(ToolUseId::new(), "SlowSafe".into(), json!({}), None, a);
+        let results = exec.run_to_completion().await.unwrap();
+        assert!(!exec.has_errored, "no error → has_errored stays false");
+        for (k, r) in results.iter().enumerate() {
+            let ContentBlock::ToolResult { content, is_error, .. } = r else { panic!() };
+            assert!(!*is_error, "tool {k} should succeed: {content}");
+            assert!(
+                !content.contains("Cancelled: parallel tool call"),
+                "tool {k} must NOT be sibling-cancelled: {content}"
+            );
+        }
+    }
+
+    /// Part B: the UserInterrupted synthetic uses the BARE REJECT_MESSAGE with
+    /// is_error: true, and is NOT `<tool_use_error>`-wrapped.
+    #[test]
+    fn user_interrupted_synthetic_is_bare_reject_message() {
+        let block = synthetic_error_block(ToolUseId::new(), AbortReason::UserInterrupted, None);
+        let ContentBlock::ToolResult { content, is_error, .. } = block else { panic!() };
+        assert!(is_error, "user-interrupted result must be an error");
+        assert_eq!(content, REJECT_MESSAGE);
+        assert!(
+            !content.contains("<tool_use_error>"),
+            "REJECT_MESSAGE must be bare (not tool_use_error-wrapped): {content}"
         );
     }
 

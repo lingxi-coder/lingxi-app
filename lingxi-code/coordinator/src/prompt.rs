@@ -86,8 +86,10 @@ fn worker_tools_list(simple: bool) -> String {
     names.join(", ")
 }
 
-/// `isEnvTruthy` semantics (`envUtils.ts:32-37`): unset/empty/`"0"`/`"false"`/
-/// `"no"`/`"off"` ⇒ false (case-insensitive, trimmed); any other value ⇒ true.
+/// `isEnvTruthy` semantics (`envUtils.ts:32-37`): a value is truthy ONLY when it
+/// normalizes (lowercase + trim) to one of `"1"`/`"true"`/`"yes"`/`"on"`. Unset,
+/// empty, or anything else (incl. `"0"`/`"false"`/`"no"`/`"off"`/`"2"`/arbitrary
+/// strings) ⇒ false. This is a strict whitelist, NOT "non-empty, non-false".
 ///
 /// Used by the composition root to compute the `simple` flag from
 /// `$CLAUDE_CODE_SIMPLE` before calling [`coordinator_system_prompt`] /
@@ -96,10 +98,7 @@ fn worker_tools_list(simple: bool) -> String {
 pub fn is_env_truthy(value: Option<&str>) -> bool {
     match value {
         None => false,
-        Some(v) => {
-            let v = v.trim().to_ascii_lowercase();
-            !matches!(v.as_str(), "" | "0" | "false" | "no" | "off")
-        }
+        Some(v) => matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"),
     }
 }
 
@@ -446,7 +445,11 @@ mod tests {
         assert!(is_env_truthy(Some("true")));
         assert!(is_env_truthy(Some(" YES ")));
         assert!(is_env_truthy(Some("on")));
-        assert!(is_env_truthy(Some("anything")));
+        assert!(is_env_truthy(Some("ON")));
+        // Strict whitelist: arbitrary non-empty values are NOT truthy.
+        assert!(!is_env_truthy(Some("anything")));
+        assert!(!is_env_truthy(Some("2")));
+        assert!(!is_env_truthy(Some("enabled")));
         assert!(!is_env_truthy(Some("0")));
         assert!(!is_env_truthy(Some("false")));
         assert!(!is_env_truthy(Some("no")));

@@ -460,6 +460,16 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
     }
     // M5-07 T13: mirror the in-memory append to the optional JSONL writer.
     // Best-effort — write failures never fail the turn.
+    //
+    // NON-streaming (batched) parity: claude-code's non-streaming response
+    // handler (`claude.ts:2571`) emits exactly ONE merged `AssistantMessage`
+    // (single top-level uuid, ALL blocks via `...result` / full `content`) — it
+    // does NOT split per content block. Only the STREAMING `content_block_stop`
+    // writer (`claude.ts:2171-2211`) splits one line per block. So the batched
+    // path persists ONE merged assistant JSONL line; the tool_results below
+    // chain off that single line's uuid (shared parent), matching the
+    // non-streaming transcript shape. The per-block split lives ONLY on the
+    // streaming drain (`conversation.rs::persist_assistant_per_block`).
     orch.persist_message_to_jsonl(&assistant_msg).await;
 
     // 4. Emit each Text block to the output stream (whole-body in M5-02;
@@ -898,6 +908,10 @@ pub(crate) async fn surface_prompt_too_long(orch: &ConversationOrchestrator) -> 
         let mut s = orch.session.lock().await;
         s.history.push(assistant_msg.clone());
     }
+    // Non-streaming (batched) parity (claude.ts:2571): this surfaces the
+    // prompt-too-long assistant turn on the BATCHED path, so persist ONE merged
+    // assistant line (here a single text block → one line either way) — the
+    // per-block split is streaming-only.
     orch.persist_message_to_jsonl(&assistant_msg).await;
     orch.output.emit_text(PROMPT_TOO_LONG_ERROR_MESSAGE).await;
     assistant_id
@@ -966,11 +980,13 @@ async fn handle_max_output_tokens(
 }
 
 /// Translate llm-client content blocks into protocol content blocks.
-/// Server-side variants (`ServerToolUse`, `ConnectorText`, `AdvisorToolResult`)
-/// are dropped. `ToolCall.id: String` is converted to `ToolUseId`: the string
-/// is interpreted as a JSON string and deserialized via `ToolUseId`'s
-/// `#[serde(transparent)]` UUID impl; if it fails a fresh UUID is minted to
-/// keep history coherent.
+/// Server-side variants (`RedactedThinking`, `ServerToolUse`, `ConnectorText`,
+/// `AdvisorToolResult`) are PRESERVED verbatim (not dropped) so resume/replay
+/// JSONL bytes stay intact when the protected-thinking/advisor/connector betas
+/// are active. `ToolCall.id: String` becomes the canonical String-backed
+/// `ToolUseId` directly (the provider id IS the id; no UUID round-trip), so
+/// JSONL/resume bytes match upstream claude-code. Input-only variants
+/// (`Image`/`ImageUrl`/`Document`/…) remain dropped on the response path.
 pub(crate) fn translate_response_blocks(content: &[LlmContentBlock]) -> Vec<ContentBlock> {
     use protocol::ToolUseId;
     content
@@ -1259,24 +1275,45 @@ pub(crate) async fn dispatch_tool_uses_tracked(
         // HOOK.1: a PreToolUse hook's `hookSpecificOutput.additionalContext` and
         // `systemMessage` (both folded into `system_messages` by the response
         // parser + executor merge, mirroring TS `result.{additionalContext,
-        // systemMessage}`). TS injects each as a message into the conversation
-        // the model sees; here they are folded into THIS tool's model-facing
-        // tool-result content — the same mechanism the PostToolUse arm uses
-        // below, which keeps the dispatch's one-block-per-tool contract intact
-        // for the streaming concurrent path. Captured before any early `continue`
-        // so the context surfaces even on a block / permission denial.
+        // systemMessage}`). claude-code pushes this context as its OWN message
+        // into `resultingMessages`, INDEPENDENT of the tool_result
+        // (`toolExecution.ts:845` — `case 'additionalContext':
+        // resultingMessages.push(result.message)`). We surface it the same way:
+        // a SEPARATE meta user message that rides the existing per-tool
+        // `injected` channel (the SKILLEXEC.3 `new_messages` mechanism), so both
+        // drivers append it AFTER this tool's tool_result — never concatenated
+        // into the tool_result content. The shape mirrors TS
+        // `messages.ts:4117-4128` (`hook_additional_context` attachment): a
+        // `<system-reminder>`-wrapped meta user message,
+        // `"PreToolUse:{tool} hook additional context: {content}"`, with the
+        // merged `system_messages` joined by `\n` (the parser already joined
+        // `systemMessage` + `additionalContext` with `\n`). claude-code pushes
+        // this context in the PRE-hook phase (`toolExecution.ts:846`), BEFORE the
+        // permission/block check, so it surfaces even when the tool is later
+        // BLOCKED or DENIED. We build it once below and emit it (as its own
+        // message, never folded into the error result) on the success, block, AND
+        // deny arms — in each case ordered AFTER that arm's tool_result.
         let pre_hook_messages = pre_agg.system_messages.clone();
-        // Fold the captured PreToolUse context into a tool-result content
-        // string (HOOK.1). Mirrors the PostToolUse fold: each message on its
-        // own line, appended after `base`. A strict no-op when empty, so the
-        // locked turn-loop fixtures (noop hooks) are unaffected.
-        let fold_pre_context = |base: String| -> String {
-            let mut out = base;
-            for msg in &pre_hook_messages {
-                out.push('\n');
-                out.push_str(msg);
-            }
-            out
+        // Build the standalone additionalContext message (HOOK.1) and queue it
+        // on the `injected` channel, tagged with THIS tool's `tool_use_id` (TS
+        // stamps `toolUseID` on the attachment). A strict no-op when the hook
+        // emitted no context, so the locked turn-loop fixtures (noop hooks) are
+        // unaffected. claude-code pushes `additionalContext` to
+        // `resultingMessages` in the PRE-hook phase (`toolExecution.ts:846`),
+        // BEFORE the permission/block check — so it surfaces even when the tool
+        // is later BLOCKED (preventContinuation) or DENIED. We therefore emit it
+        // on the SUCCESS, BLOCK, and DENY paths alike, in every case ordered
+        // AFTER that path's tool_result (matching claude-code post-hoist).
+        let pre_context_message: Option<ConversationMessage> = if pre_hook_messages.is_empty() {
+            None
+        } else {
+            let body = pre_hook_messages.join("\n");
+            Some(ConversationMessage::user(
+                MessageId::new(),
+                format!(
+                    "<system-reminder>\nPreToolUse:{name} hook additional context: {body}\n</system-reminder>"
+                ),
+            ))
         };
 
         if matches!(pre_agg.decision, Some(HookDecision::Block)) {
@@ -1292,7 +1329,7 @@ pub(crate) async fn dispatch_tool_uses_tracked(
             );
             let result_block = ContentBlock::ToolResult {
                 tool_use_id: tool_use_id.clone(),
-                content: fold_pre_context(format!("Hook blocked: {reason}")),
+                content: format!("Hook blocked: {reason}"),
                 is_error: true,
                 provider_tool_use_id: provider_id.clone(),
             };
@@ -1304,6 +1341,13 @@ pub(crate) async fn dispatch_tool_uses_tracked(
                 )
                 .await;
             results.push(result_block);
+            // HOOK.1: even on a BLOCK, the PreToolUse `additionalContext` was
+            // pushed in claude-code's pre-hook phase (`toolExecution.ts:846`),
+            // before the block check — so surface it here, ordered AFTER this
+            // path's error tool_result. No-op when the hook emitted no context.
+            if let Some(msg) = pre_context_message {
+                injected_messages.push((msg, tool_use_id.clone()));
+            }
             continue;
         }
 
@@ -1440,7 +1484,7 @@ pub(crate) async fn dispatch_tool_uses_tracked(
                 // denials, not for the rule/mode/plan denials that also reach here.
                 let result_block = ContentBlock::ToolResult {
                     tool_use_id: tool_use_id.clone(),
-                    content: fold_pre_context(format!("Permission denied: {reason}")),
+                    content: format!("Permission denied: {reason}"),
                     is_error: true,
                     provider_tool_use_id: provider_id.clone(),
                 };
@@ -1452,6 +1496,14 @@ pub(crate) async fn dispatch_tool_uses_tracked(
                     )
                     .await;
                 results.push(result_block);
+                // HOOK.1: even on a permission DENY, claude-code's pre-hook
+                // phase already pushed the PreToolUse `additionalContext`
+                // (`toolExecution.ts:846`) before the gate ran — so surface it
+                // here, ordered AFTER this path's deny error tool_result. No-op
+                // when the hook emitted no context.
+                if let Some(msg) = pre_context_message {
+                    injected_messages.push((msg, tool_use_id.clone()));
+                }
                 continue;
             }
         }
@@ -1619,17 +1671,19 @@ pub(crate) async fn dispatch_tool_uses_tracked(
             _ => (content, false),
         };
 
-        // HOOK.1 + PostToolUse fold: the model-facing tool-result content carries
-        // both this dispatch's PreToolUse `additionalContext`/`systemMessage`
-        // (`pre_hook_messages`, folded via `fold_pre_context`) and the PostToolUse
-        // hooks' `system_messages` — each on its own line. A strict no-op when
-        // both are empty, so the result text is byte-identical to before for the
-        // locked turn-loop fixtures (noop hooks).
-        let mutated = !pre_hook_messages.is_empty()
-            || !post_agg.system_messages.is_empty()
-            || mcp_output_mutated;
+        // HOOK.1: the PreToolUse `additionalContext`/`systemMessage` rides the
+        // `injected` channel as its OWN message (`pre_context_message`, queued
+        // just below this tool's tool_result) — it is NO LONGER folded into the
+        // tool-result content (claude-code `toolExecution.ts:845` pushes it as a
+        // standalone `resultingMessages` entry). The PostToolUse hooks'
+        // `system_messages` ARE still folded onto the tool-result content here —
+        // a separate concern (TS appends `updatedMCPToolOutput`/PostToolUse
+        // context to the result text), each on its own line. A strict no-op when
+        // empty, so the result text is byte-identical to before for the locked
+        // turn-loop fixtures (noop hooks).
+        let mutated = !post_agg.system_messages.is_empty() || mcp_output_mutated;
         let final_content = if mutated {
-            let mut out = fold_pre_context(content);
+            let mut out = content;
             for msg in &post_agg.system_messages {
                 out.push('\n');
                 out.push_str(msg);
@@ -1777,6 +1831,17 @@ pub(crate) async fn dispatch_tool_uses_tracked(
             is_error,
             provider_tool_use_id: provider_id.clone(),
         });
+
+        // HOOK.1: queue this tool's PreToolUse `additionalContext` as its OWN
+        // message on the `injected` channel, tagged with this tool's
+        // `tool_use_id` (TS `toolUseID`). Both drivers append `injected` AFTER
+        // the tool_result user message, so the context is ordered after the
+        // result — matching claude-code's `resultingMessages` push order
+        // (`toolExecution.ts:845`). `None` (the common no-context case) is a
+        // strict no-op.
+        if let Some(msg) = pre_context_message {
+            injected_messages.push((msg, tool_use_id.clone()));
+        }
     }
     Ok((
         results,
@@ -3454,9 +3519,15 @@ mod pre_tool_hook_tests {
     // ----- HOOK.1: additionalContext / systemMessage surfaced ---------------
 
     #[tokio::test]
-    async fn hook1_additional_context_is_surfaced_into_tool_result() {
-        // The parser folds `additionalContext` + `systemMessage` into
-        // `system_messages`; the turn loop must surface them to the model.
+    async fn hook1_additional_context_is_a_separate_message_not_folded() {
+        // Parity with claude-code `toolExecution.ts:845` — a PreToolUse hook's
+        // `additionalContext` (which the LingXi parser folds together with
+        // `systemMessage` into `system_messages`) is pushed as its OWN message
+        // into `resultingMessages`, INDEPENDENT of the tool_result. It must NOT
+        // be concatenated onto the tool_result content. The faithful message
+        // shape (`messages.ts:4117-4128`) is a meta user message:
+        // `<system-reminder>\nPreToolUse:{tool} hook additional context:
+        // {content}\n</system-reminder>`.
         let resp = HookResponse {
             system_message: Some("INJECTED-CTX".into()),
             ..HookResponse::default()
@@ -3466,16 +3537,42 @@ mod pre_tool_hook_tests {
             Arc::new(crate::test_support::NoOpPermissionGate),
             vec![],
         );
-        let (results, prevent, _injected, _mods) =
-            dispatch_tool_uses_tracked(&orch, &uses(), None).await.unwrap();
+        let uses = uses();
+        let tool_use_id = uses[0].0.clone();
+        let (results, prevent, injected, _mods) =
+            dispatch_tool_uses_tracked(&orch, &uses, None).await.unwrap();
         assert!(!prevent);
+
+        // (a) the tool_result is the tool's ORIGINAL output, NO appended context.
         let (content, is_error) = tool_result(&results[0]);
         assert!(!is_error, "tool ran successfully");
         assert!(content.contains("ECHOED-OUTPUT"), "tool output preserved");
         assert!(
-            content.contains("INJECTED-CTX"),
-            "PreToolUse additionalContext/systemMessage surfaced into the model-facing result: {content:?}"
+            !content.contains("INJECTED-CTX"),
+            "additionalContext must NOT be folded into the tool_result content: {content:?}"
         );
+
+        // (b) a SEPARATE message carries the additionalContext, tagged with this
+        //     tool's `tool_use_id` so it rides the existing `injected` channel
+        //     (appended AFTER the tool_result by both drivers, matching the TS
+        //     `resultingMessages` push order).
+        assert_eq!(
+            injected.len(),
+            1,
+            "additionalContext surfaces as one separate injected message"
+        );
+        let (msg, tagged_tu) = &injected[0];
+        assert_eq!(*tagged_tu, tool_use_id, "tagged with the dispatching tool");
+        match msg {
+            ConversationMessage::User { content, .. } => match content.first() {
+                Some(ContentBlock::Text { text }) => assert_eq!(
+                    text,
+                    "<system-reminder>\nPreToolUse:Echo hook additional context: INJECTED-CTX\n</system-reminder>"
+                ),
+                other => panic!("expected leading Text block, got {other:?}"),
+            },
+            other => panic!("expected injected User message, got {other:?}"),
+        }
     }
 
     // ----- HOOK.2: continue:false stops the loop ----------------------------

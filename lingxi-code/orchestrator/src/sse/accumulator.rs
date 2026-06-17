@@ -13,7 +13,7 @@
 #![forbid(unsafe_code)]
 
 use super::StreamingError;
-use protocol::ToolUseId;
+use protocol::{ContentBlock, ToolUseId};
 use serde_json::Value;
 use std::collections::HashMap;
 
@@ -39,9 +39,16 @@ pub enum BlockKind {
     /// A `thinking` block — accumulates `thinking_delta` chunks.
     /// Signature (if any) is set via [`BlockAccumulator::set_signature`].
     Thinking,
-    /// Any other variant (`server_tool_use`, `connector_text`,
-    /// `advisor_tool_result`). Accumulator stores nothing; `stop_block`
-    /// returns `CompletedBlock::Skipped`.
+    /// A low-frequency server-side block (`redacted_thinking`,
+    /// `server_tool_use`, `connector_text`, `advisor_tool_result`) captured
+    /// in full from the `ContentBlockStart` event. The complete
+    /// [`ContentBlock`] is stashed and replayed verbatim on `stop_block` so
+    /// resume/replay JSONL bytes stay intact. (`server_tool_use` may also
+    /// carry `input_json_delta` chunks; the start-event input is preserved
+    /// best-effort — see `append_json`.)
+    Preserved(ContentBlock),
+    /// Any other variant the accumulator cannot represent. Stores nothing;
+    /// `stop_block` returns `CompletedBlock::Skipped`.
     Other,
 }
 
@@ -51,6 +58,7 @@ impl BlockKind {
             BlockKind::Text => "text",
             BlockKind::ToolUse { .. } => "tool_use",
             BlockKind::Thinking => "thinking",
+            BlockKind::Preserved(_) => "preserved",
             BlockKind::Other => "other",
         }
     }
@@ -83,6 +91,10 @@ pub enum CompletedBlock {
         /// Optional cryptographic signature.
         signature: Option<String>,
     },
+    /// A low-frequency server-side block captured verbatim from
+    /// `ContentBlockStart` (see [`BlockKind::Preserved`]). Caller appends it
+    /// to the assistant message unchanged.
+    Preserved(ContentBlock),
     /// A [`BlockKind::Other`] variant — caller drops it.
     Skipped,
 }
@@ -171,7 +183,9 @@ impl BlockAccumulator {
             .get_mut(&index)
             .ok_or(StreamingError::BlockNotFound { index })?;
         match &state.kind {
-            BlockKind::ToolUse { .. } => {
+            // `server_tool_use` (and any future Preserved block) may stream its
+            // input via `input_json_delta`; buffer it and merge on stop.
+            BlockKind::ToolUse { .. } | BlockKind::Preserved(_) => {
                 state.json_buf.push_str(partial);
                 Ok(())
             }
@@ -248,6 +262,19 @@ impl BlockAccumulator {
                     input,
                     provider_id,
                 }
+            }
+            BlockKind::Preserved(mut block) => {
+                // Merge any `input_json_delta`-streamed input into a
+                // `server_tool_use` block (the start event carries an empty/seed
+                // input). Other Preserved blocks replay their start payload as-is.
+                if !state.json_buf.is_empty() {
+                    if let ContentBlock::ServerToolUse { input, .. } = &mut block {
+                        if let Ok(parsed) = serde_json::from_str::<Value>(&state.json_buf) {
+                            *input = parsed;
+                        }
+                    }
+                }
+                CompletedBlock::Preserved(block)
             }
             BlockKind::Other => CompletedBlock::Skipped,
         };

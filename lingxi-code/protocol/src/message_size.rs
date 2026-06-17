@@ -38,6 +38,15 @@ fn content_block_size(b: &ContentBlock) -> u64 {
         ContentBlock::Document { source } => match source {
             crate::DocumentSource::Base64 { data, .. } => data.len() as u64,
         },
+        // Low-frequency server-side blocks: opaque payloads sized best-effort.
+        ContentBlock::RedactedThinking { data } => data.len() as u64,
+        ContentBlock::ServerToolUse { input, .. } => serde_json::to_string(input)
+            .map(|s| s.len() as u64)
+            .unwrap_or(0),
+        ContentBlock::ConnectorText { connector_text, .. } => connector_text.len() as u64,
+        ContentBlock::AdvisorToolResult { content, .. } => serde_json::to_string(content)
+            .map(|s| s.len() as u64)
+            .unwrap_or(0),
     }
 }
 

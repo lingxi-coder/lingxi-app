@@ -993,15 +993,40 @@ pub(crate) fn translate_response_blocks(content: &[LlmContentBlock]) -> Vec<Cont
                 thinking: text.clone(),
                 signature: signature.clone(),
             }),
-            // Server-side variants are dropped (matches agent::runner::translate_response_blocks).
-            LlmContentBlock::ServerToolUse { .. }
-            | LlmContentBlock::ConnectorText { .. }
-            | LlmContentBlock::AdvisorToolResult { .. }
-            | LlmContentBlock::Image { .. }
+            // Low-frequency server-side blocks: PRESERVED verbatim so resume/replay
+            // JSONL bytes stay intact when protected-thinking/advisor/connector
+            // betas are active (matches agent::runner::translate_response_blocks).
+            LlmContentBlock::RedactedThinking { data } => {
+                Some(ContentBlock::RedactedThinking { data: data.clone() })
+            }
+            LlmContentBlock::ServerToolUse { id, name, input } => {
+                Some(ContentBlock::ServerToolUse {
+                    id: id.clone(),
+                    name: name.clone(),
+                    input: input.clone(),
+                })
+            }
+            LlmContentBlock::ConnectorText {
+                connector_text,
+                signature,
+            } => Some(ContentBlock::ConnectorText {
+                connector_text: connector_text.clone(),
+                signature: signature.clone(),
+            }),
+            LlmContentBlock::AdvisorToolResult {
+                tool_use_id,
+                content,
+                is_error,
+            } => Some(ContentBlock::AdvisorToolResult {
+                tool_use_id: tool_use_id.clone(),
+                content: content.clone(),
+                is_error: *is_error,
+            }),
+            // Input-only / non-output variants remain dropped on the response path.
+            LlmContentBlock::Image { .. }
             | LlmContentBlock::ImageUrl { .. }
             | LlmContentBlock::Document { .. }
-            | LlmContentBlock::ToolResult { .. }
-            | LlmContentBlock::RedactedThinking { .. } => None,
+            | LlmContentBlock::ToolResult { .. } => None,
         })
         .collect()
 }

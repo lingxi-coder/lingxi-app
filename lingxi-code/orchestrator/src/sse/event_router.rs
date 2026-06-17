@@ -102,14 +102,38 @@ pub async fn dispatch_event(
                     provider_id: None,
                 },
                 LlmContentBlock::Reasoning { .. } => BlockKind::Thinking,
-                LlmContentBlock::ServerToolUse { .. }
-                | LlmContentBlock::ConnectorText { .. }
-                | LlmContentBlock::AdvisorToolResult { .. }
-                | LlmContentBlock::Image { .. }
+                // Low-frequency server-side blocks: captured in full from the
+                // start event and preserved verbatim for resume/replay byte parity.
+                LlmContentBlock::RedactedThinking { data } => {
+                    BlockKind::Preserved(ContentBlock::RedactedThinking { data: data.clone() })
+                }
+                LlmContentBlock::ServerToolUse { id, name, input } => {
+                    BlockKind::Preserved(ContentBlock::ServerToolUse {
+                        id: id.clone(),
+                        name: name.clone(),
+                        input: input.clone(),
+                    })
+                }
+                LlmContentBlock::ConnectorText {
+                    connector_text,
+                    signature,
+                } => BlockKind::Preserved(ContentBlock::ConnectorText {
+                    connector_text: connector_text.clone(),
+                    signature: signature.clone(),
+                }),
+                LlmContentBlock::AdvisorToolResult {
+                    tool_use_id,
+                    content,
+                    is_error,
+                } => BlockKind::Preserved(ContentBlock::AdvisorToolResult {
+                    tool_use_id: tool_use_id.clone(),
+                    content: content.clone(),
+                    is_error: *is_error,
+                }),
+                LlmContentBlock::Image { .. }
                 | LlmContentBlock::ImageUrl { .. }
                 | LlmContentBlock::Document { .. }
-                | LlmContentBlock::ToolResult { .. }
-                | LlmContentBlock::RedactedThinking { .. } => BlockKind::Other,
+                | LlmContentBlock::ToolResult { .. } => BlockKind::Other,
             };
             acc.start_block(index, kind)?;
             Ok(RouterAction::Continue)
@@ -171,6 +195,12 @@ pub async fn dispatch_event(
                     input,
                     provider_id,
                 }),
+                // Low-frequency server-side block preserved verbatim from the
+                // start event — appended to the assistant message unchanged so
+                // resume/replay JSONL bytes stay intact.
+                CompletedBlock::Preserved(block) => {
+                    Ok(RouterAction::AppendAssistantBlock(block))
+                }
                 CompletedBlock::Skipped => Ok(RouterAction::Continue),
             }
         }

@@ -369,6 +369,30 @@ fn convert_content_block(
         }
         protocol::ContentBlock::Image { source } => convert_image(source),
         protocol::ContentBlock::Document { source } => convert_document(source),
+        // Low-frequency server-side blocks: replayed verbatim into the request
+        // so the provider round-trips them (see agent::convert::convert_block).
+        protocol::ContentBlock::RedactedThinking { data } => {
+            Ok(llm_client::ContentBlock::RedactedThinking { data })
+        }
+        protocol::ContentBlock::ServerToolUse { id, name, input } => {
+            Ok(llm_client::ContentBlock::ServerToolUse { id, name, input })
+        }
+        protocol::ContentBlock::ConnectorText {
+            connector_text,
+            signature,
+        } => Ok(llm_client::ContentBlock::ConnectorText {
+            connector_text,
+            signature,
+        }),
+        protocol::ContentBlock::AdvisorToolResult {
+            tool_use_id,
+            content,
+            is_error,
+        } => Ok(llm_client::ContentBlock::AdvisorToolResult {
+            tool_use_id,
+            content,
+            is_error,
+        }),
     }
 }
 

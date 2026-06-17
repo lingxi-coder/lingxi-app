@@ -115,6 +115,18 @@ fn render_blocks(content: &[ContentBlock]) -> String {
             }
             ContentBlock::Image { .. } => lines.push("[image]".to_string()),
             ContentBlock::Document { .. } => lines.push("[document]".to_string()),
+            ContentBlock::RedactedThinking { .. } => {
+                lines.push("[redacted thinking]".to_string());
+            }
+            ContentBlock::ServerToolUse { name, input, .. } => {
+                lines.push(format!("[server tool: {name}] {input}"));
+            }
+            ContentBlock::ConnectorText { connector_text, .. } => {
+                lines.push(format!("[connector] {connector_text}"));
+            }
+            ContentBlock::AdvisorToolResult { content, .. } => {
+                lines.push(format!("[advisor result] {content}"));
+            }
         }
     }
     lines.join("\n")

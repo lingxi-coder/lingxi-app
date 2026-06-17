@@ -978,11 +978,13 @@ async fn handle_max_output_tokens(
 }
 
 /// Translate llm-client content blocks into protocol content blocks.
-/// Server-side variants (`ServerToolUse`, `ConnectorText`, `AdvisorToolResult`)
-/// are dropped. `ToolCall.id: String` is converted to `ToolUseId`: the string
-/// is interpreted as a JSON string and deserialized via `ToolUseId`'s
-/// `#[serde(transparent)]` UUID impl; if it fails a fresh UUID is minted to
-/// keep history coherent.
+/// Server-side variants (`RedactedThinking`, `ServerToolUse`, `ConnectorText`,
+/// `AdvisorToolResult`) are PRESERVED verbatim (not dropped) so resume/replay
+/// JSONL bytes stay intact when the protected-thinking/advisor/connector betas
+/// are active. `ToolCall.id: String` becomes the canonical String-backed
+/// `ToolUseId` directly (the provider id IS the id; no UUID round-trip), so
+/// JSONL/resume bytes match upstream claude-code. Input-only variants
+/// (`Image`/`ImageUrl`/`Document`/…) remain dropped on the response path.
 pub(crate) fn translate_response_blocks(content: &[LlmContentBlock]) -> Vec<ContentBlock> {
     use protocol::ToolUseId;
     content

@@ -19,8 +19,11 @@
 //! | `ContentBlock::Image { source: ImageSource::Url { url } }` | `ContentBlock::ImageUrl { url }` |
 //! | `ContentBlock::Document { source: DocumentSource::Base64 { media_type, data } }` | `ContentBlock::Document { media_type, bytes: base64_decode(data) }` |
 //!
-//! Output-only `llm_client` variants not reachable from protocol inputs:
-//! `RedactedThinking`, `ServerToolUse`, `ConnectorText`, `AdvisorToolResult`, `ImageUrl`-decode.
+//! Low-frequency server-side variants ARE round-tripped (ingest preserves them
+//! into protocol blocks, and egress here replays them verbatim back to
+//! `llm_client`): `RedactedThinking`, `ServerToolUse`, `ConnectorText`,
+//! `AdvisorToolResult` — so resume/replay bytes stay intact when those betas are
+//! active. (`ImageUrl` is decode-only on the inbound side.)
 
 use base64::Engine as _;
 use llm_client::{ContentBlock as LlmBlock, LlmError, Message, ToolDeclaration};

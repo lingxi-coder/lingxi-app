@@ -27,12 +27,17 @@ Connect the existing `TuiPermissionGate` into the terminal TUI runtime so an oth
 
 ```
 build_runtime_for_tui (apps/cli/src/init.rs)
-  1. let (perm_tx, perm_rx) = mpsc::channel::<PermissionExchange>(8)  // small bounded; see Error handling
-  2. let gate = Arc::new(
+  1. let cfg = resolve_desktop_config(argv, mode)            // resolve ONCE
+  2. let (perm_tx, perm_rx) = mpsc::channel::<PermissionExchange>(16)
+  3. let gate = Arc::new(
          TuiPermissionGate::new(perm_tx, session_allow_rules)
-            .with_persist(PermissionPaths { claude_home, cwd }))
-  3. build_runtime(argv, output, mode, injected_permission_gate = Some(gate))
-  4. return TuiBuild { runtime, bridge_rx, turn_tx, permission_rx: perm_rx }
+            .with_persist(PermissionPaths {
+                claude_home: cfg.claude_home.clone(),
+                cwd: cfg.cwd.clone(),
+            }))
+  4. cfg.injected_permission_gate = Some(gate)
+  5. let runtime = build_runtime_from_config(cfg, output)    // shared helper (no re-resolve)
+  6. return TuiBuild { runtime, bridge_rx, turn_tx, permission_rx: perm_rx }
         │
 apps/cli/src/run.rs
   session::Runtime…with_permission_rx(tui_build.permission_rx)
@@ -41,45 +46,62 @@ tui/src/session.rs  (mount → RootProps)
   RootProps { …, permission_rx: Some(Arc<Mutex<Option<Receiver>>>) }
         │
 tui/src/root.rs  (new pump — third use_future drain loop)
-  while let Some(PermissionExchange{request, resp_tx}) = rx.recv().await {
+  while let Some(exchange) = rx.recv().await {           // PermissionExchange{request, resp_tx}
      let mut st = state.lock().await;
-     st.pending_permission         = Some(PendingPermission{ request, worker: None });
-     st.pending_permission_resp_tx = Some(resp_tx);
-     st.tool_use_dialog_state      = ToolUseConfirmState::default();
+     st.permission_queue.push_back(exchange);            // FIFO — NEVER overwrite an active dialog
+     if st.pending_permission.is_none() {
+         promote_next_permission(&mut st);               // shared helper, see below
+     }
      drop(st);
-     telemetry::permission_dialog_shown("tool_use");
      tick();
   }
         │
-existing dialog render + keymap resolution → fires resp_tx → gate.check() returns the decision
+existing dialog render + keymap resolution → fires resp_tx → clears pending_permission
+   → promote_next_permission(&mut st)  (drain the next queued exchange, if any)
+        │
+gate.check() returns the resolved decision
 ```
 
 The orchestrator side is unchanged: when a tool's `Ask` is not resolved by `PolicyPermissionGate` (no matching deny/allow rule, not read-only auto-allow, not sandbox-auto-allow), it delegates to the injected `TuiPermissionGate`, which blocks on the `oneshot` until the pump-fed dialog resolves.
+
+### Concurrency (one active dialog, FIFO queue)
+
+The streaming executor dispatches concurrency-safe tools on a `FuturesUnordered` (`orchestrator/src/streaming_executor.rs`), and `perms.check()` runs inside each tool's pipeline (`orchestrator/src/turn_loop.rs:1340`). So **two `check()` calls — hence two `PermissionExchange`s — can be in flight at once.** `AppState` has only ONE active permission slot (`pending_permission` + `pending_permission_resp_tx`). In practice mutating tools (Write/Edit/Bash) are exclusive (`is_concurrency_safe == false`) and `process_queue` serializes them, which usually prevents overlap — but the pump MUST NOT depend on that, or a second exchange could overwrite the first's `resp_tx` and silently drop a prompt (the dropped oneshot maps to `Deny` → an unintended denial).
+
+**Decision: a FIFO UI queue (least invasive — `AppState` keeps one active dialog).** The pump always `push_back`s the received exchange onto `AppState.permission_queue` and only promotes the front into the active slot when the slot is free. On resolution (Allow/Deny/AllowAlways, including a dropped/cancelled dialog), after the existing path clears `pending_permission`, it promotes the next queued exchange. This guarantees no `resp_tx` is ever overwritten or lost, regardless of how many checks the orchestrator issues concurrently.
 
 ## Components / file structure
 
 1. **`apps/engine-desktop/src/lib.rs`** — NO core change; `build()` already honors `cfg.injected_permission_gate`. Optional: refresh the now-outdated doc note at `:1958-1960` ("interactive prompting needs a TUI permission sink (a documented follow-up)") to reflect that the TUI now injects the gate.
 2. **`apps/cli/src/init.rs`** —
-   - `build_runtime` gains a parameter `injected_permission_gate: Option<Arc<dyn PermissionGate>>`. It sets `cfg.injected_permission_gate = injected_permission_gate` after `resolve_desktop_config`. All existing callers (one-shot path, tests) pass `None` → byte-identical behavior.
-   - `build_runtime_for_tui` builds the `mpsc::channel::<PermissionExchange>()`, constructs the `TuiPermissionGate` (fresh `session_allow_rules`, `.with_persist`), passes `Some(gate)` to `build_runtime`, and returns the receiver on `TuiBuild`.
+   - **Avoid double config resolution / lost persist paths.** Extract a shared `build_runtime_from_config(cfg: DesktopConfig, output) -> Result<Runtime, InitError>` that performs the `engine_desktop::build(cfg, output, sink)` call. The existing `build_runtime` becomes `resolve_desktop_config(argv, mode)` → `build_runtime_from_config(cfg, output)` (behavior-identical for the one-shot path). `build_runtime_for_tui` resolves `DesktopConfig` ONCE, reads `cfg.claude_home`/`cfg.cwd` to build the gate's `PermissionPaths`, sets `cfg.injected_permission_gate = Some(gate)`, then calls `build_runtime_from_config(cfg, output)` directly — no second `resolve_desktop_config`.
+   - `build_runtime_for_tui` creates the `mpsc::channel::<PermissionExchange>(16)`, constructs the `TuiPermissionGate` (fresh `session_allow_rules`, `.with_persist`), and returns the receiver on `TuiBuild`.
    - `TuiBuild` gains `permission_rx: tokio::sync::mpsc::Receiver<PermissionExchange>`.
    - Remove the stale `injected_permission_gate: None` "until wiring lands" comment in `resolve_desktop_config`.
-3. **`tui/src/session.rs`** — `Runtime` gains a `permission_rx` slot + `with_permission_rx(rx)` builder (mirroring `with_turn_tx`/`bridge_rx`), threaded into `RootProps` as `Some(Arc<Mutex<Option<Receiver>>>)`.
-4. **`tui/src/root.rs`** — add the permission pump: a third `use_future` drain loop in the same idiom as the bridge pump (`:2007`) and multiagent pump (`:2035`), draining `PermissionExchange` into the `AppState` slots above.
-5. **`apps/cli/src/run.rs`** — thread `tui_build.permission_rx` into `session::Runtime::with_permission_rx`.
+3. **`tui/src/state.rs`** —
+   - Add `AppState.permission_queue: std::collections::VecDeque<PermissionExchange>` (the FIFO of not-yet-shown exchanges; default empty).
+   - Add a shared helper `open_permission_dialog(st, request, resp_tx: Option<oneshot::Sender<PermissionResponse>>)` that sets `pending_permission`, `pending_permission_resp_tx`, `pending_permission_started_at = Some(Instant::now())`, `tool_use_dialog_state = Default::default()`, and fires `telemetry::permission_dialog_shown(...)`. **Refactor the existing legacy `TurnEvent::PermissionRequest` branch (`tui/src/streaming.rs:74`) to call this helper** (passing `resp_tx: None`, preserving its behavior) so BOTH paths set `pending_permission_started_at` — fixing the resolved-telemetry `elapsed_ms = 0` gap.
+   - Add `promote_next_permission(st)`: when `pending_permission.is_none()` and `permission_queue` is non-empty, `pop_front()` and `open_permission_dialog(st, ex.request, Some(ex.resp_tx))`.
+4. **`tui/src/root.rs`** — add the permission pump: a third `use_future` drain loop in the same idiom as the bridge pump (`:2007`) and multiagent pump (`:2035`). Each received exchange is `push_back`ed onto `permission_queue`, then `promote_next_permission` runs (no-op if a dialog is already active).
+5. **`tui/src/events/keymap.rs`** — `resolve_pending_permission` (`:279`) is the single site that fires `resp_tx` and clears `pending_permission`/`started_at`. Append a `promote_next_permission(state)` call at its END (after `pending_permission = None`) so the next queued exchange opens immediately. One site → no missed arm.
+6. **`tui/src/session.rs`** — `Runtime` gains a `permission_rx` slot + `with_permission_rx(rx)` builder (mirroring `with_turn_tx`/`bridge_rx`), threaded into `RootProps` as `Some(Arc<Mutex<Option<Receiver>>>)`.
+7. **`apps/cli/src/run.rs`** — thread `tui_build.permission_rx` into `session::Runtime::with_permission_rx`.
 
 ## Error handling
 
-- **Dropped `resp_tx`** (dialog closed / cancelled without a choice): the gate already maps the dropped oneshot to `Deny`. The pump's only obligation is to not leave stale `pending_permission` state — resolution (including cancel) clears it via the existing keymap path.
+- **Concurrent exchanges**: handled by the FIFO `permission_queue` (see Concurrency) — a second in-flight exchange is queued, never overwrites the active dialog's `resp_tx`.
+- **Dropped `resp_tx`** (dialog closed / cancelled without a choice): the gate already maps the dropped oneshot to `Deny`. Resolution (including cancel) clears `pending_permission` and then runs `promote_next_permission`, so a queued exchange is not stranded.
 - **`mpsc` send failure / full channel** inside the gate's `check`: handled by the gate (existing behavior); the pump only consumes.
 - **`AllowAlways`**: gate appends to `session_allow_rules` (future same-tool calls short-circuit) and persists to `settings.local.json` via `.with_persist` — already implemented.
-- **Headless one-shot (`-p`)**: `build_runtime` receives `None`, keeps the `NoOpPermissionGate` / `DenyOnAskGate` selection — no prompt path (no TTY). Unchanged.
-- **Channel capacity:** use a small bounded channel (e.g. 8). Permission checks are inherently serialized by the user (one dialog at a time), so a small buffer is sufficient; the gate awaits its reply before the next check anyway.
+- **Headless one-shot (`-p`)**: takes the `resolve_desktop_config` → `build_runtime_from_config` path with no injected gate, keeping the `NoOpPermissionGate` / `DenyOnAskGate` selection — no prompt path (no TTY). Unchanged.
+- **Channel capacity:** bounded at 16. Combined with the FIFO queue this comfortably absorbs the realistic concurrent-check count (exclusive mutating tools already serialize); the gate awaits its own reply before its next check, so back-pressure is benign.
 
 ## Testing (TDD)
 
-- **`init.rs`**: `build_runtime_for_tui` returns a `TuiBuild` whose injected gate is `Some` (assert via a build-path observable, e.g. that the channel is wired / `permission_rx` is present), while the one-shot `build_runtime(..., None)` leaves the base gate as `NoOp`/`Deny`. Existing `engine-desktop` boot tests stay green (one-shot path unchanged).
-- **`root.rs` pump**: feeding a `PermissionExchange` into the receiver sets `pending_permission` + `pending_permission_resp_tx` + resets `tool_use_dialog_state`; resolving the dialog (Allow/Deny/AllowAlways) fires the oneshot with the matching `PermissionResponse`.
+- **Build-seam integration test (the critical one — proves the gate is actually used, not `NoOp`)**: build the engine via `engine_desktop::build` with `injected_permission_gate = Some(TuiPermissionGate)` AND enforcement on, then trigger a mutating, otherwise-unresolved `Ask` (a tool with no matching deny/allow rule). Observe exactly ONE `PermissionExchange` arrive on the receiver; reply `AllowOnce` → the blocked `check()` resolves `Allow`; in a second run reply `Deny` → it resolves `Deny`. This exercises the real seam: injected gate wins at `lib.rs:1836`, `PolicyPermissionGate` delegates the unresolved `Ask` to the inner gate (`permission/src/policy_gate.rs:79`). Asserting only that `permission_rx` exists is NOT sufficient.
+- **`init.rs`**: `build_runtime_for_tui` returns a `TuiBuild` with a wired `permission_rx` and an injected gate; the one-shot path (`build_runtime` → `build_runtime_from_config` with no gate) leaves the base gate as `NoOp`/`Deny`. Existing `engine-desktop` boot tests stay green (one-shot path unchanged).
+- **`root.rs` pump + FIFO concurrency**: feeding ONE `PermissionExchange` opens the dialog (sets `pending_permission` + `pending_permission_resp_tx` + `pending_permission_started_at` + resets `tool_use_dialog_state`). Feeding a SECOND while the first is unresolved leaves the first active and the second queued (`permission_queue.len() == 1`, first `resp_tx` intact); resolving the first fires its oneshot, then `promote_next_permission` opens the second. Resolving each (Allow/Deny/AllowAlways) fires the matching `PermissionResponse`.
+- **Telemetry (`started_at`)**: after `open_permission_dialog`, `pending_permission_started_at` is `Some`, so the resolver's `elapsed_ms` is non-zero — covered for BOTH the new pump and the refactored legacy `streaming.rs` branch.
 - **Gate round-trip** (extend existing `permission_bridge.rs` tests): `check` on a tool with no session rule emits one `PermissionExchange` and blocks until the oneshot is filled; an `AllowAlways` reply appends a session rule so the next same-tool `check` short-circuits to `Allow` without emitting.
 - **Regression**: an explicit deny rule still denies BEFORE the gate emits (PolicyPermissionGate resolves first); a read-only tool auto-allows without a dialog.
 

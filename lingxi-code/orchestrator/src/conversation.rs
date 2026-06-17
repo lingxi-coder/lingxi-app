@@ -3555,9 +3555,13 @@ impl ConversationOrchestrator {
     /// `ToolStaticContext::default()` (no feature flags) mirrors the system
     /// prompt's enable-filter punt; `include_examples: true` requests the full
     /// tool prompt as the `description`. Recomputed per turn (no session-level
-    /// `toolSchemaCache` analog yet) — `tools_to_wire` sorts by name so the
-    /// bytes stay deterministic across turns despite the registry's `HashMap`
-    /// MCP/plugin partitions. A session-level cache is a recommended follow-up.
+    /// `toolSchemaCache` analog yet). The wire order is parity-fixed by
+    /// [`available_tools`](tool_api::ToolRegistry::available_tools): builtins
+    /// `locale_cmp`-sorted as a contiguous prefix, then MCP / LSP / plugin
+    /// tools `locale_cmp`-sorted — matching claude-code's `assembleToolPool` /
+    /// `mergeAndFilterTools` (`tools.ts:345-367`, `utils/toolPool.ts:65-70`),
+    /// which sort with `name.localeCompare`. `tools_to_wire` preserves that
+    /// order. A session-level cache is a recommended follow-up.
     ///
     /// [`execute_one_turn`]: crate::turn_loop::execute_one_turn
     pub(crate) async fn build_wire_tools(&self) -> Vec<serde_json::Value> {

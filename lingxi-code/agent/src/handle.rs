@@ -749,7 +749,9 @@ mod tests {
         // Full set (sorted by name), and allow-list = resolved names.
         let names: Vec<&str> = schemas.iter().map(|t| t["name"].as_str().unwrap()).collect();
         assert_eq!(names, vec!["Bash", "Read"]);
-        assert_eq!(allowed, vec!["Read".to_string(), "Bash".to_string()]);
+        // allow-list mirrors the resolved order, which now follows
+        // `available_tools()`'s locale-sorted order (Bash < Read).
+        assert_eq!(allowed, vec!["Bash".to_string(), "Read".to_string()]);
     }
 
     #[tokio::test]
@@ -812,14 +814,15 @@ mod tests {
             }))
             .await;
         let names: Vec<&str> = schemas.iter().map(|t| t["name"].as_str().unwrap()).collect();
-        // tools_to_wire sorts by name.
+        // available_tools() locale-sorts the builtin set (Grep < Read < WebFetch).
         assert_eq!(names, vec!["Grep", "Read", "WebFetch"]);
         assert!(!allowed.contains(&"Bash".to_string()));
+        // Resolved/allow-list order follows `available_tools()` locale sort.
         assert_eq!(
             allowed,
             vec![
-                "Read".to_string(),
                 "Grep".to_string(),
+                "Read".to_string(),
                 "WebFetch".to_string()
             ]
         );
@@ -839,7 +842,8 @@ mod tests {
             .await;
         let names: Vec<&str> = schemas.iter().map(|t| t["name"].as_str().unwrap()).collect();
         assert_eq!(names, vec!["Edit", "Read"]); // sorted by name
-        assert_eq!(allowed, vec!["Read".to_string(), "Edit".to_string()]); // resolved order
+        // resolved/allow-list order = available_tools() locale sort (Edit < Read)
+        assert_eq!(allowed, vec!["Edit".to_string(), "Read".to_string()]);
     }
 
     // ── batch 21: real AgentDefinition resolution + prompt placement ──

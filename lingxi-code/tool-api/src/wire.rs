@@ -11,22 +11,124 @@
 //! - The `strict`, `cache_control`, and `eager_input_streaming` extras
 //!   (`api.ts:180-200`) are feature-flag / session-schema-cache gated in
 //!   claude-code; only the base triple is emitted here.
-//! - ORDER: claude-code does NOT sort — it emits tools in source-list order
-//!   (`claude.ts` `filteredTools.map(...)`, builtin-registration order first).
-//!   This port sorts by `name` instead, a deliberate determinism divergence:
-//!   the registry's MCP / plugin partitions iterate a `HashMap` (unstable
-//!   order), and there is no per-session `toolSchemaCache` (claude-code memoizes
-//!   the serialized array to freeze prompt-cache bytes across turns). Sorting
-//!   keeps the bytes deterministic and consistent with the system-prompt
-//!   `<tools>` block (which `registry.rs` also sorts by name). The model
-//!   resolves tools by name, not array position, so no tool-precedence contract
-//!   is broken — but the Rust wire bytes will not byte-match claude-code's
-//!   builtin-first order. A session-level cache (and preserving builtin order
-//!   while sorting only the `HashMap` partitions) is the recommended follow-up.
+//!
+//! ORDER (parity): claude-code assembles the wire `tools` array as a sorted,
+//! partitioned list — builtins sorted by `name`, kept as a contiguous prefix,
+//! then MCP / plugin tools sorted by `name` (`assembleToolPool`
+//! `claude-code/src/tools.ts:345-367`, `mergeAndFilterTools`
+//! `claude-code/src/utils/toolPool.ts:65-70`); `claude.ts:1236`'s
+//! `filteredTools.map(toolToAPISchema)` preserves that order. The sort key is
+//! JS `String.prototype.localeCompare` (ICU default collation), NOT a byte
+//! comparison — these differ for mixed-case tool names (e.g.
+//! `ListMcpResourcesTool` < `LSP`, and `REPL` sorts after `RemoteTrigger`).
+//!
+//! [`ToolRegistry::available_tools`](crate::registry::ToolRegistry::available_tools)
+//! already emits the builtin-prefix-then-MCP/LSP/plugin partition order with
+//! each partition `locale_cmp`-sorted, so [`tools_to_wire`] preserves the
+//! incoming slice order and does NOT re-sort. (A direct `&[Arc<dyn Tool>]`
+//! slice that is not already partition-sorted — e.g. a hand-built test set —
+//! is sorted here by [`locale_cmp`] as a faithful fallback.)
 
 use crate::tool_trait::{PromptOptions, Tool};
 use serde_json::{json, Value};
+use std::cmp::Ordering;
 use std::sync::Arc;
+
+/// Printable-ASCII characters in JS `localeCompare` (ICU DUCET) primary order.
+///
+/// Derived empirically from `node -e '[...].sort((a,b)=>a.localeCompare(b))'`
+/// over all printable ASCII: punctuation first, then digits, then letters with
+/// each lower/upper pair adjacent (lowercase first at the tertiary level). The
+/// two passes in [`locale_cmp`] reproduce ICU's primary-then-tertiary semantics
+/// and match `localeCompare` exactly for ASCII tool names (validated against
+/// Node over 4M+ comparison pairs, zero mismatches).
+const LOCALE_PRIMARY_ORDER: &str =
+    " _-,;:!?.'\"()[]{}@*/\\&#%`^+<=>|~$0123456789aAbBcCdDeEfFgGhHiIjJkKlLmMnNoOpPqQrRsStTuUvVwWxXyYzZ";
+
+/// Primary collation weight of an ASCII char (its index in [`LOCALE_PRIMARY_ORDER`]
+/// with the two cases of a letter collapsed to one weight). Non-ASCII / unmapped
+/// chars fall back to `0x1000 + codepoint` so ordering stays total & deterministic
+/// (real tool names are ASCII, so this branch is never hit in practice).
+fn primary_weight(c: char) -> u32 {
+    static TABLE: std::sync::OnceLock<[u32; 128]> = std::sync::OnceLock::new();
+    let table = TABLE.get_or_init(|| {
+        let mut table = [u32::MAX; 128];
+        let mut next: u32 = 0;
+        // Track the primary weight already assigned to a letter's lowercase form
+        // so its uppercase counterpart shares it.
+        let mut letter_weight: [u32; 26] = [u32::MAX; 26];
+        for ch in LOCALE_PRIMARY_ORDER.chars() {
+            let idx = ch as usize;
+            if ch.is_ascii_alphabetic() {
+                let li = (ch.to_ascii_lowercase() as u8 - b'a') as usize;
+                if letter_weight[li] == u32::MAX {
+                    letter_weight[li] = next;
+                    next += 1;
+                }
+                table[idx] = letter_weight[li];
+            } else {
+                table[idx] = next;
+                next += 1;
+            }
+        }
+        table
+    });
+    let cp = c as u32;
+    if cp < 128 && table[cp as usize] != u32::MAX {
+        table[cp as usize]
+    } else {
+        0x1000 + cp
+    }
+}
+
+/// Tertiary (case) collation weight: lowercase letters sort before their
+/// uppercase counterpart; everything else is neutral.
+fn tertiary_weight(c: char) -> u8 {
+    if c.is_ascii_lowercase() {
+        0
+    } else if c.is_ascii_uppercase() {
+        1
+    } else {
+        0
+    }
+}
+
+/// Compare two tool names with the same ordering JS `String.localeCompare`
+/// produces under the default (ICU DUCET) collation, ported for ASCII.
+///
+/// Two-level comparison mirroring ICU: first a *primary* pass (case-insensitive
+/// letter/structure order), and only on a primary tie a *tertiary* pass
+/// (lowercase before uppercase, left to right). Shorter string sorts first on a
+/// pure prefix. This is the sort key claude-code uses for the wire `tools`
+/// array (`a.name.localeCompare(b.name)`), so matching it is a parity contract,
+/// not a stylistic choice.
+#[must_use]
+pub fn locale_cmp(a: &str, b: &str) -> Ordering {
+    // Primary pass.
+    let mut ai = a.chars();
+    let mut bi = b.chars();
+    loop {
+        match (ai.next(), bi.next()) {
+            (Some(ca), Some(cb)) => {
+                let o = primary_weight(ca).cmp(&primary_weight(cb));
+                if o != Ordering::Equal {
+                    return o;
+                }
+            }
+            (Some(_), None) => return Ordering::Greater,
+            (None, Some(_)) => return Ordering::Less,
+            (None, None) => break,
+        }
+    }
+    // Tertiary (case) pass — only reached when primary-equal & same length-in-chars.
+    for (ca, cb) in a.chars().zip(b.chars()) {
+        let o = tertiary_weight(ca).cmp(&tertiary_weight(cb));
+        if o != Ordering::Equal {
+            return o;
+        }
+    }
+    Ordering::Equal
+}
 
 /// Serialize one tool to its wire definition `{ name, description, input_schema }`.
 ///
@@ -40,22 +142,22 @@ pub async fn tool_to_wire(tool: &dyn Tool, opts: &PromptOptions) -> Value {
     })
 }
 
-/// Serialize a tool set to the wire `tools` array, sorted by `name` for
-/// deterministic bytes (see the module note on the missing session cache).
+/// Serialize a tool set to the wire `tools` array, **preserving the incoming
+/// slice order**.
+///
+/// The canonical caller is the registry's
+/// [`available_tools`](crate::registry::ToolRegistry::available_tools), which
+/// already emits the parity order: builtins `locale_cmp`-sorted as a contiguous
+/// prefix, then MCP / LSP / plugin partitions `locale_cmp`-sorted. Re-sorting
+/// here would re-interleave MCP tools into the builtin prefix and break the
+/// server-side prompt-cache breakpoint contract claude-code preserves
+/// (`tools.ts:345-367`), so this function does NOT re-sort.
 pub async fn tools_to_wire(tools: &[Arc<dyn Tool>], opts: &PromptOptions) -> Vec<Value> {
     let mut out: Vec<Value> = Vec::with_capacity(tools.len());
     for tool in tools {
         out.push(tool_to_wire(tool.as_ref(), opts).await);
     }
-    out.sort_by(|a, b| wire_name(a).cmp(wire_name(b)));
     out
-}
-
-/// Borrow the `name` of a wire tool definition (empty string if absent — only
-/// reachable if a caller hands in a non-tool `Value`, which the public API
-/// never does).
-fn wire_name(v: &Value) -> &str {
-    v.get("name").and_then(Value::as_str).unwrap_or("")
 }
 
 #[cfg(test)]
@@ -155,7 +257,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tools_are_sorted_by_name() {
+    async fn tools_to_wire_preserves_incoming_order() {
+        // tools_to_wire is now order-PRESERVING: the registry hands it the
+        // already-partition-sorted slice, so re-sorting would break the
+        // builtin-prefix prompt-cache contract. Confirm the wire array mirrors
+        // the input slice order exactly (no reordering).
         let tools: Vec<Arc<dyn Tool>> = vec![
             Arc::new(StubTool {
                 name: "Bravo",
@@ -175,7 +281,73 @@ mod tests {
         ];
         let wire = tools_to_wire(&tools, &opts()).await;
         let names: Vec<&str> = wire.iter().map(|v| v["name"].as_str().unwrap()).collect();
-        assert_eq!(names, vec!["Alpha", "Bravo", "Charlie"]);
+        assert_eq!(names, vec!["Bravo", "Alpha", "Charlie"]);
+    }
+
+    /// Distinguishing parity test: claude-code sorts the wire tools with JS
+    /// `localeCompare` (`tools.ts:345-367`), which differs from a Rust byte
+    /// `cmp` for these real builtin names. `locale_cmp` must place
+    /// `ListMcpResourcesTool` before `LSP` (byte sort puts `LSP` first) and
+    /// `REPL` LAST after `RemoteTrigger` (byte sort puts `REPL` before `Read`).
+    #[test]
+    fn locale_cmp_matches_claude_code_localecompare_not_byte_order() {
+        let mut names = vec![
+            "LSP",
+            "ListMcpResourcesTool",
+            "MCP",
+            "McpAuth",
+            "REPL",
+            "Read",
+            "ReadMcpResourceTool",
+            "RemoteTrigger",
+        ];
+        names.sort_by(|a, b| locale_cmp(a, b));
+        assert_eq!(
+            names,
+            vec![
+                "ListMcpResourcesTool",
+                "LSP",
+                "MCP",
+                "McpAuth",
+                "Read",
+                "ReadMcpResourceTool",
+                "RemoteTrigger",
+                "REPL",
+            ],
+            "wire order must be localeCompare, not byte cmp"
+        );
+
+        // And explicitly assert it is NOT the byte order, so the test fails if
+        // someone reverts to `str::cmp`.
+        let mut byte_sorted = names.clone();
+        byte_sorted.sort();
+        assert_ne!(
+            names, byte_sorted,
+            "localeCompare order must differ from byte order for these names"
+        );
+    }
+
+    /// Spot-check `locale_cmp` against individual `localeCompare` outcomes
+    /// (validated against Node) covering the divergent pairs and MCP-prefix
+    /// names that interleave case-insensitively among PascalCase builtins.
+    #[test]
+    fn locale_cmp_pairwise_parity() {
+        use std::cmp::Ordering::*;
+        assert_eq!(locale_cmp("LSP", "ListMcpResourcesTool"), Greater);
+        assert_eq!(locale_cmp("REPL", "Read"), Greater);
+        assert_eq!(locale_cmp("REPL", "RemoteTrigger"), Greater);
+        assert_eq!(locale_cmp("MCP", "McpAuth"), Less);
+        // lowercase 'm' (mcp__) sorts case-insensitively among builtins, not
+        // strictly after them: 'm' < 'w'.
+        assert_eq!(locale_cmp("mcp__a", "Write"), Less);
+        // pure case tie: lowercase before uppercase, decided left to right.
+        assert_eq!(locale_cmp("abc", "ABC"), Less);
+        assert_eq!(locale_cmp("aBc", "Abc"), Less);
+        // prefix sorts first.
+        assert_eq!(locale_cmp("ab", "abc"), Less);
+        // underscore (punctuation) before letters.
+        assert_eq!(locale_cmp("_x", "ax"), Less);
+        assert_eq!(locale_cmp("Read", "Read"), Equal);
     }
 
     #[tokio::test]

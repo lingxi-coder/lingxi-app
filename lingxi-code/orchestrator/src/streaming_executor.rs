@@ -1208,6 +1208,54 @@ mod tests {
         assert_eq!(exec.tools[2].status, ToolStatus::Completed);
     }
 
+    /// Complement of the barrier test: an Executing+SAFE tool does NOT stop the
+    /// drain — a `Completed` tool AFTER it is still emitted (TS: only
+    /// `executing && !isConcurrencySafe` breaks; a safe executing tool falls
+    /// through and scanning continues).
+    #[tokio::test]
+    async fn take_newly_completed_skips_executing_safe_and_emits_later_completed() {
+        let orch = orch_with_safe_tool();
+        let a = MessageId::new();
+        let mut exec = StreamingToolExecutor::new(&orch);
+        let id0 = ToolUseId::new();
+        let id1 = ToolUseId::new();
+        exec.tools.push(TrackedTool {
+            id: id0,
+            name: "SafeTool".into(),
+            input: json!({}),
+            provider_id: None,
+            assistant_id: a,
+            status: ToolStatus::Executing,
+            is_concurrency_safe: true, // safe → NOT a barrier
+            result: None,
+            injected: Vec::new(),
+            modifiers: Vec::new(),
+        });
+        exec.tools.push(TrackedTool {
+            id: id1,
+            name: "SafeTool".into(),
+            input: json!({}),
+            provider_id: None,
+            assistant_id: a,
+            status: ToolStatus::Completed,
+            is_concurrency_safe: true,
+            result: Some(ContentBlock::ToolResult {
+                tool_use_id: id1,
+                content: "done".into(),
+                is_error: false,
+                provider_tool_use_id: None,
+            }),
+            injected: Vec::new(),
+            modifiers: Vec::new(),
+        });
+
+        let results = exec.take_newly_completed();
+        // tool[0] (Executing+safe) is skipped but not a barrier; tool[1] emits.
+        assert_eq!(results.len(), 1);
+        assert_eq!(exec.tools[0].status, ToolStatus::Executing); // untouched
+        assert_eq!(exec.tools[1].status, ToolStatus::Yielded);
+    }
+
     /// Test 4: has_unfinished returns true when there are Queued/Executing tools,
     /// and false once all tools are Yielded.
     #[tokio::test]

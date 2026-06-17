@@ -41,6 +41,42 @@ pub fn to_llm_messages(
     messages.into_iter().map(convert_message).collect()
 }
 
+/// Merge consecutive `User` messages into a single user turn (claude-code
+/// `normalizeMessagesForAPI` consecutive-user merge + `mergeUserMessages`).
+///
+/// `Assistant`/`System` messages pass through unchanged and act as separators.
+/// The merged message keeps the FIRST message's id; content blocks are
+/// concatenated in order (a.content ++ b.content). Single or non-adjacent user
+/// messages are unaffected (identity), so this is a no-op for today's history
+/// shape and load-bearing only after per-result `tool_result` splitting (11b).
+///
+/// claude-code rationale: "Bedrock doesn't support multiple user messages in a
+/// row; 1P API merges them into a single user turn."
+#[must_use]
+pub fn normalize_messages_for_api(
+    messages: Vec<ConversationMessage>,
+) -> Vec<ConversationMessage> {
+    let mut out: Vec<ConversationMessage> = Vec::with_capacity(messages.len());
+    for msg in messages {
+        match (out.last_mut(), &msg) {
+            (
+                Some(ConversationMessage::User {
+                    content: prev_content,
+                    ..
+                }),
+                ConversationMessage::User {
+                    content: new_content,
+                    ..
+                },
+            ) => {
+                prev_content.extend(new_content.iter().cloned());
+            }
+            _ => out.push(msg),
+        }
+    }
+    out
+}
+
 /// Convert a `Vec<serde_json::Value>` (tool declarations in wire JSON shape)
 /// into `Vec<llm_client::ToolDeclaration>`.
 ///
@@ -510,5 +546,115 @@ mod tests {
         };
         let err = to_llm_messages(vec![msg]).unwrap_err();
         assert!(matches!(err, LlmError::InvalidRequest { message } if message.contains("base64")));
+    }
+
+    // ── normalize_messages_for_api ───────────────────────────────────────────
+
+    fn user(id: MessageId, text: &str) -> ConversationMessage {
+        ConversationMessage::User {
+            id,
+            content: vec![ProtoBlock::Text { text: text.to_string() }],
+        }
+    }
+
+    fn assistant(text: &str) -> ConversationMessage {
+        ConversationMessage::Assistant {
+            id: MessageId::new(),
+            content: vec![ProtoBlock::Text { text: text.to_string() }],
+            stop_reason: None,
+        }
+    }
+
+    fn text_of(blocks: &[ProtoBlock]) -> Vec<&str> {
+        blocks
+            .iter()
+            .map(|b| match b {
+                ProtoBlock::Text { text } => text.as_str(),
+                _ => panic!("expected text block"),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn two_consecutive_users_merge_into_one_keeping_first_id_and_order() {
+        let first_id = MessageId::new();
+        let out = normalize_messages_for_api(vec![
+            user(first_id, "a"),
+            user(MessageId::new(), "b"),
+        ]);
+        assert_eq!(out.len(), 1);
+        match &out[0] {
+            ConversationMessage::User { id, content } => {
+                assert_eq!(id, &first_id, "merged message keeps the first message's id");
+                assert_eq!(text_of(content), vec!["a", "b"]);
+            }
+            other => panic!("expected User, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn assistant_separates_users_no_merge() {
+        let out = normalize_messages_for_api(vec![
+            user(MessageId::new(), "a"),
+            assistant("mid"),
+            user(MessageId::new(), "b"),
+        ]);
+        assert_eq!(out.len(), 3);
+        assert!(matches!(out[0], ConversationMessage::User { .. }));
+        assert!(matches!(out[1], ConversationMessage::Assistant { .. }));
+        assert!(matches!(out[2], ConversationMessage::User { .. }));
+    }
+
+    #[test]
+    fn single_user_is_unchanged() {
+        let id = MessageId::new();
+        let out = normalize_messages_for_api(vec![user(id, "solo")]);
+        assert_eq!(out.len(), 1);
+        match &out[0] {
+            ConversationMessage::User { id: got, content } => {
+                assert_eq!(got, &id);
+                assert_eq!(text_of(content), vec!["solo"]);
+            }
+            other => panic!("expected User, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn three_consecutive_users_merge_into_one_in_order() {
+        let first_id = MessageId::new();
+        let out = normalize_messages_for_api(vec![
+            user(first_id, "a"),
+            user(MessageId::new(), "b"),
+            user(MessageId::new(), "c"),
+        ]);
+        assert_eq!(out.len(), 1);
+        match &out[0] {
+            ConversationMessage::User { id, content } => {
+                assert_eq!(id, &first_id);
+                assert_eq!(text_of(content), vec!["a", "b", "c"]);
+            }
+            other => panic!("expected User, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn assistant_user_user_assistant_merges_only_the_middle_pair() {
+        let mid_id = MessageId::new();
+        let out = normalize_messages_for_api(vec![
+            assistant("start"),
+            user(mid_id, "a"),
+            user(MessageId::new(), "b"),
+            assistant("end"),
+        ]);
+        assert_eq!(out.len(), 3);
+        assert!(matches!(out[0], ConversationMessage::Assistant { .. }));
+        match &out[1] {
+            ConversationMessage::User { id, content } => {
+                assert_eq!(id, &mid_id);
+                assert_eq!(text_of(content), vec!["a", "b"]);
+            }
+            other => panic!("expected merged User, got {other:?}"),
+        }
+        assert!(matches!(out[2], ConversationMessage::Assistant { .. }));
     }
 }

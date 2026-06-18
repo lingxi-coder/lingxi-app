@@ -195,6 +195,11 @@ serde = { version = "1", features = ["derive"] }
 # `{"roots":{},"elicitation":{}}`, not the alphabetized
 # `{"elicitation":{},"roots":{}}`).
 serde_json = { version = "1", features = ["preserve_order"] }
+# `indexmap` gives an insertion-order-preserving map. Used for MCP transport
+# `headers` so the `getServerKey` config hash byte-matches claude-code, whose
+# `JSON.stringify({type,url,headers})` serializes header keys in the config's
+# insertion order (not sorted). See `traits::McpHeaders` / `oauth::server_key`.
+indexmap = { version = "2", features = ["serde"] }
 thiserror = "2"
 tracing = "0.1"
 async-trait = "0.1"

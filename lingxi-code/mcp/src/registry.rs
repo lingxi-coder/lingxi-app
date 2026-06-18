@@ -409,8 +409,15 @@ impl McpRegistry {
                             oauth_cfg.auth_server_metadata_url.as_deref(),
                         )
                         .await?;
-                        let client_id =
-                            oauth_cfg.client_id.clone().unwrap_or_default();
+                        // Prefer the client_id the stored tokens were minted
+                        // with (DCR-issued OR configured) so silent refresh
+                        // re-sends it; fall back to the configured id, then ""
+                        // (auth.ts clientInformation(), 1482-1506).
+                        let client_id = stored
+                            .client_id
+                            .clone()
+                            .or_else(|| oauth_cfg.client_id.clone())
+                            .unwrap_or_default();
                         let refreshed = oauth::refresh_tokens(
                             &deps.http,
                             &deps.clock,
@@ -448,10 +455,8 @@ impl McpRegistry {
             .ok_or_else(|| McpError::OAuth("server has no oauth config".into()))?;
         let key = oauth::server_key(&config.name, &config.spec);
 
-        let token = match oauth::load_tokens(&deps.storage, &key)
-            .await?
-            .and_then(|t| t.refresh_token)
-        {
+        let stored = oauth::load_tokens(&deps.storage, &key).await?;
+        let token = match stored.as_ref().and_then(|t| t.refresh_token.clone()) {
             Some(refresh) => {
                 let meta = oauth::discover_auth_server_metadata(
                     &deps.http,
@@ -459,7 +464,13 @@ impl McpRegistry {
                     oauth_cfg.auth_server_metadata_url.as_deref(),
                 )
                 .await?;
-                let client_id = oauth_cfg.client_id.clone().unwrap_or_default();
+                // Prefer the persisted (DCR-issued or configured) client_id so
+                // refresh re-sends it (auth.ts clientInformation(), 1482-1506).
+                let client_id = stored
+                    .as_ref()
+                    .and_then(|t| t.client_id.clone())
+                    .or_else(|| oauth_cfg.client_id.clone())
+                    .unwrap_or_default();
                 match oauth::refresh_tokens(&deps.http, &deps.clock, &meta, &client_id, &refresh)
                     .await
                 {
@@ -501,6 +512,7 @@ impl McpRegistry {
             &deps.http,
             &deps.clock,
             oauth_cfg,
+            &config.name,
             spec_url(&config.spec),
             &deps.on_authorization_url,
         )

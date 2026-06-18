@@ -25,7 +25,6 @@ use axum::{
 };
 use futures::{stream, Stream, StreamExt};
 use serde_json::{json, Value};
-use std::collections::HashMap;
 use std::convert::Infallible;
 use std::time::Duration;
 use tokio::sync::broadcast;
@@ -132,7 +131,7 @@ async fn spawn_mock() -> String {
 fn sse_spec(url: String) -> McpTransportSpec {
     McpTransportSpec::Sse {
         url,
-        headers: HashMap::new(),
+        headers: traits::McpHeaders::new(),
         headers_helper: None,
         oauth: None,
     }

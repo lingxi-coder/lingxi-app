@@ -1415,7 +1415,7 @@ mod tests {
     fn auth_kind_sse_with_oauth() {
         let spec = McpTransportSpec::Sse {
             url: "https://x".into(),
-            headers: StdHashMap::new(),
+            headers: traits::McpHeaders::new(),
             headers_helper: None,
             oauth: Some(traits::McpOAuthConfigDto {
                 client_id: Some("cid".into()),
@@ -1431,7 +1431,7 @@ mod tests {
     fn auth_kind_sse_headers_helper() {
         let spec = McpTransportSpec::Sse {
             url: "https://x".into(),
-            headers: StdHashMap::new(),
+            headers: traits::McpHeaders::new(),
             headers_helper: Some("/usr/bin/h".into()),
             oauth: None,
         };
@@ -1440,7 +1440,7 @@ mod tests {
 
     #[test]
     fn auth_kind_sse_static_headers() {
-        let mut h = StdHashMap::new();
+        let mut h = traits::McpHeaders::new();
         h.insert("Authorization".into(), "Bearer x".into());
         let spec = McpTransportSpec::Sse {
             url: "https://x".into(),
@@ -1455,7 +1455,7 @@ mod tests {
     fn auth_kind_http_with_oauth() {
         let spec = McpTransportSpec::Http {
             url: "https://x".into(),
-            headers: StdHashMap::new(),
+            headers: traits::McpHeaders::new(),
             oauth: Some(traits::McpOAuthConfigDto {
                 client_id: None,
                 callback_port: None,

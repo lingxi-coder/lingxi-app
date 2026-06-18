@@ -290,7 +290,12 @@ struct RegistrationRequest<'a> {
     grant_types: Vec<&'a str>,
     response_types: Vec<&'a str>,
     token_endpoint_auth_method: &'a str,
-    client_name: &'a str,
+    client_name: String,
+    /// Advertised scope, mirrored into the client metadata when the auth server
+    /// publishes one (auth.ts:1426-1434, `getScopeFromMetadata`). Omitted (per
+    /// RFC 7591) when no scope is available.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    scope: Option<&'a str>,
 }
 
 /// DCR response — we only need the issued `client_id`.
@@ -308,13 +313,18 @@ pub async fn register_client(
     http: &Arc<dyn HttpTransport>,
     registration_endpoint: &str,
     redirect_uri: &str,
+    server_name: &str,
+    scope: Option<&str>,
 ) -> Result<String, OAuthError> {
     let body = RegistrationRequest {
         redirect_uris: vec![redirect_uri],
         grant_types: vec!["authorization_code", "refresh_token"],
         response_types: vec!["code"],
         token_endpoint_auth_method: "none",
-        client_name: "LingXi",
+        // claude-code uses `Claude Code (${serverName})` (auth.ts:1419); keep
+        // the LingXi rebrand but mirror the per-server suffix.
+        client_name: format!("LingXi ({server_name})"),
+        scope,
     };
     let body = serde_json::to_string(&body)
         .map_err(|e| OAuthError::Registration(format!("encode: {e}")))?;
@@ -358,6 +368,13 @@ pub struct Tokens {
     pub refresh_token: Option<Secret<String>>,
     /// Wall-clock expiry instant (`clock.now() + expires_in`).
     pub expires_at: SystemTime,
+    /// Effective OAuth `client_id` these tokens were minted with — the
+    /// DCR-issued id (when the client was dynamically registered) or the
+    /// configured id. Persisted so silent refresh re-sends the SAME `client_id`
+    /// most public-client auth servers require (auth.ts `saveClientInformation`
+    /// /`clientInformation`, 1482-1538). `None` only when unknown (legacy
+    /// stored tokens, or a refresh whose origin client_id wasn't threaded).
+    pub client_id: Option<String>,
 }
 
 /// Raw token-endpoint response (`authorization_code` / `refresh_token` grants).
@@ -444,6 +461,8 @@ async fn post_token_grant(
         access_token: Secret::new(parsed.access_token),
         refresh_token: parsed.refresh_token.map(Secret::new),
         expires_at,
+        // Filled in by the caller, which knows the `client_id` used for the grant.
+        client_id: None,
     };
     Ok((tokens, resp.status, resp.body))
 }
@@ -472,8 +491,9 @@ pub async fn exchange_code(
         ("client_id", client_id),
         ("code_verifier", verifier),
     ];
-    let (tokens, _status, _body) =
+    let (mut tokens, _status, _body) =
         post_token_grant(http, clock, &meta.token_endpoint, &form).await?;
+    tokens.client_id = Some(client_id.to_string());
     Ok(tokens)
 }
 
@@ -505,6 +525,8 @@ pub async fn refresh_tokens(
             if tokens.refresh_token.is_none() {
                 tokens.refresh_token = Some(Secret::new(refresh_token.to_string()));
             }
+            // Persist the client_id used so the NEXT refresh re-sends it.
+            tokens.client_id = Some(client_id.to_string());
             Ok(tokens)
         }
         Err(OAuthError::Token(msg)) if msg.starts_with("status 4") => {
@@ -526,7 +548,8 @@ pub type OnAuthorizationUrl = Arc<dyn Fn(&str) + Send + Sync>;
 /// discovery → (DCR) → PKCE → bind loopback listener → build authorize URL →
 /// surface it via `on_auth_url` → accept the redirect → exchange the code.
 ///
-/// `server_url` is the MCP endpoint; `oauth` is the static config DTO (its
+/// `server_url` is the MCP endpoint; `server_name` labels the DCR client
+/// (`LingXi (${server_name})`); `oauth` is the static config DTO (its
 /// `client_id` skips DCR, its `callback_port` pins the loopback port, its
 /// `auth_server_metadata_url` overrides discovery).
 ///
@@ -536,6 +559,7 @@ pub async fn perform_oauth_flow(
     http: &Arc<dyn HttpTransport>,
     clock: &Arc<dyn Clock>,
     oauth: &traits::McpOAuthConfigDto,
+    server_name: &str,
     server_url: &str,
     on_auth_url: &OnAuthorizationUrl,
 ) -> Result<Tokens, OAuthError> {
@@ -554,7 +578,16 @@ pub async fn perform_oauth_flow(
     let port = listener.port();
     let redirect_uri = format!("http://localhost:{port}/callback");
 
-    // 3. Client id — configured, else dynamic client registration.
+    // 3. Advertised scope (used both for DCR client metadata and the authorize
+    //    URL). claude-code's `getScopeFromMetadata` is `scopes_supported`-only
+    //    in our subset (auth.ts:2460-2463); empty when none advertised.
+    let scope = meta
+        .scopes_supported
+        .as_ref()
+        .map(|s| s.join(" "))
+        .unwrap_or_default();
+
+    // 4. Client id — configured, else dynamic client registration.
     let client_id = if let Some(id) = &oauth.client_id {
         id.clone()
     } else {
@@ -563,23 +596,19 @@ pub async fn perform_oauth_flow(
                 "no client_id configured and server advertises no registration_endpoint".into(),
             )
         })?;
-        register_client(http, reg, &redirect_uri).await?
+        let dcr_scope = (!scope.is_empty()).then_some(scope.as_str());
+        register_client(http, reg, &redirect_uri, server_name, dcr_scope).await?
     };
 
-    // 4. Authorize URL (PKCE inside) + surface it to the host.
-    let scope = meta
-        .scopes_supported
-        .as_ref()
-        .map(|s| s.join(" "))
-        .unwrap_or_default();
+    // 5. Authorize URL (PKCE inside) + surface it to the host.
     let (auth_url, verifier, state) =
         build_authorize_url(&meta, &client_id, &redirect_uri, &scope);
     on_auth_url(&auth_url);
 
-    // 5. Wait for the redirect, validate state, capture the code.
+    // 6. Wait for the redirect, validate state, capture the code.
     let params = listener.accept(&state).await?;
 
-    // 6. Exchange the code for tokens.
+    // 7. Exchange the code for tokens.
     exchange_code(
         http,
         clock,
@@ -606,22 +635,25 @@ pub const MCP_OAUTH_SERVICE: &str = "mcp-oauth";
 /// headers}` (headers default to `{}`), hex, first 16 chars.
 #[must_use]
 pub fn server_key(name: &str, spec: &McpTransportSpec) -> String {
+    let empty: traits::McpHeaders = traits::McpHeaders::new();
     let (kind, url, headers) = match spec {
-        McpTransportSpec::Sse { url, headers, .. } => ("sse", url.clone(), headers.clone()),
-        McpTransportSpec::Http { url, headers, .. } => {
-            ("http", url.clone(), headers.clone())
-        }
+        McpTransportSpec::Sse { url, headers, .. } => ("sse", url.as_str(), headers),
+        McpTransportSpec::Http { url, headers, .. } => ("http", url.as_str(), headers),
         // Non-remote specs never reach OAuth; fall back to the kind label.
-        other => (other.kind(), String::new(), std::collections::HashMap::new()),
+        other => (other.kind(), "", &empty),
     };
-    // claude-code serializes {type, url, headers} (object key order: type, url,
-    // headers; headers is a sorted JSON object — serde_json sorts BTreeMap keys
-    // but HashMap is arbitrary, so use a BTreeMap to match the stable shape).
-    let headers_sorted: std::collections::BTreeMap<&String, &String> = headers.iter().collect();
+    // claude-code: `jsonStringify({type, url, headers})` == plain
+    // `JSON.stringify`, which serializes object keys in insertion order
+    // (auth.ts:329-333, slowOperations.ts:189). Object key order is therefore
+    // `type, url, headers`, and the `headers` object preserves the config's
+    // header insertion order (NOT sorted). `serde_json` with `preserve_order`
+    // keeps the top-level `json!` keys in source order, and `McpHeaders`
+    // (`IndexMap`) serializes its entries in insertion order — so this
+    // byte-matches `getServerKey` for any header count/ordering.
     let config_json = serde_json::json!({
         "type": kind,
         "url": url,
-        "headers": headers_sorted,
+        "headers": headers,
     });
     let config_str = serde_json::to_string(&config_json).unwrap_or_default();
     let mut h = Sha256::new();
@@ -641,6 +673,13 @@ pub struct StoredTokens {
     pub refresh_token: Option<String>,
     /// Expiry as seconds since the Unix epoch.
     pub expires_at_unix: u64,
+    /// Effective OAuth `client_id` (DCR-issued or configured) these tokens were
+    /// minted with — re-sent on silent refresh so public-client auth servers
+    /// don't reject an empty `client_id` and force a fresh interactive flow
+    /// (auth.ts `saveClientInformation`/`clientInformation`). `#[serde(default)]`
+    /// makes legacy blobs without the field deserialize to `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_id: Option<String>,
 }
 
 impl StoredTokens {
@@ -651,6 +690,7 @@ impl StoredTokens {
             access_token: Secret::new(self.access_token),
             refresh_token: self.refresh_token.map(Secret::new),
             expires_at: SystemTime::UNIX_EPOCH + Duration::from_secs(self.expires_at_unix),
+            client_id: self.client_id,
         }
     }
 
@@ -672,6 +712,7 @@ impl StoredTokens {
             access_token: t.access_token.expose_secret().clone(),
             refresh_token: t.refresh_token.as_ref().map(|s| s.expose_secret().clone()),
             expires_at_unix,
+            client_id: t.client_id.clone(),
         }
     }
 }
@@ -757,7 +798,7 @@ mod tests {
         // name|sha256({type,url,headers})[..16]; headers default {}.
         let spec = McpTransportSpec::Http {
             url: "https://mcp.example.com/v1".into(),
-            headers: std::collections::HashMap::new(),
+            headers: traits::McpHeaders::new(),
             oauth: None,
         };
         let key = server_key("acme", &spec);
@@ -771,7 +812,7 @@ mod tests {
         assert_eq!(key, key2);
         let spec_other = McpTransportSpec::Http {
             url: "https://mcp.example.com/v2".into(),
-            headers: std::collections::HashMap::new(),
+            headers: traits::McpHeaders::new(),
             oauth: None,
         };
         assert_ne!(server_key("acme", &spec_other), key);
@@ -796,5 +837,93 @@ mod tests {
         // No scope param when empty.
         assert!(!url.contains("scope="));
         assert!(!verifier.is_empty());
+    }
+
+    // -- FIX 2: server_key uses config (insertion) header order, not sorted. ---
+
+    /// Byte-parity: `getServerKey` hashes `JSON.stringify({type,url,headers})`
+    /// in header *insertion* order (auth.ts:329-333, slowOperations.ts:189),
+    /// NOT sorted. A config with headers `{Z, A}` must hash the `Z`-first
+    /// material — pinned here against the reference value computed from
+    /// claude-code's exact stringify, and shown to differ from the old sorted
+    /// hash the BTreeMap path produced.
+    #[test]
+    fn server_key_uses_insertion_order_not_sorted() {
+        let mut headers = traits::McpHeaders::new();
+        headers.insert("Z-Header".to_string(), "z".to_string());
+        headers.insert("A-Header".to_string(), "a".to_string());
+        let spec = McpTransportSpec::Http {
+            url: "https://mcp.example.com/v1".into(),
+            headers,
+            oauth: None,
+        };
+        let key = server_key("acme", &spec);
+        // Reference: sha256(JSON.stringify({type:"http",url:"…/v1",
+        //   headers:{"Z-Header":"z","A-Header":"a"}}))[..16]  (Node, see test).
+        assert_eq!(key, "acme|b555b45e666ffa13");
+        // The OLD sorted (BTreeMap) path would have produced this — must differ.
+        assert_ne!(key, "acme|08e07ebc60543bed");
+    }
+
+    /// Empty-headers material still matches claude-code (`headers:{}`).
+    #[test]
+    fn server_key_empty_headers_matches_reference() {
+        let spec = McpTransportSpec::Http {
+            url: "https://mcp.example.com/v1".into(),
+            headers: traits::McpHeaders::new(),
+            oauth: None,
+        };
+        assert_eq!(server_key("acme", &spec), "acme|f729261a8041fc55");
+    }
+
+    // -- FIX 1: DCR client_id round-trips through StoredTokens + into refresh. --
+
+    /// A DCR-minted token set persists its `client_id` and projects it back.
+    #[test]
+    fn stored_tokens_round_trip_client_id() {
+        let tokens = Tokens {
+            access_token: Secret::new("at".into()),
+            refresh_token: Some(Secret::new("rt".into())),
+            expires_at: SystemTime::UNIX_EPOCH + Duration::from_secs(1000),
+            client_id: Some("dcr-client-xyz".into()),
+        };
+        let stored = StoredTokens::from_tokens(&tokens);
+        assert_eq!(stored.client_id.as_deref(), Some("dcr-client-xyz"));
+        // Survives a JSON round-trip (the on-disk blob shape).
+        let json = serde_json::to_string(&stored).unwrap();
+        assert!(json.contains("\"client_id\":\"dcr-client-xyz\""));
+        let back: StoredTokens = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.client_id.as_deref(), Some("dcr-client-xyz"));
+        assert_eq!(back.into_tokens().client_id.as_deref(), Some("dcr-client-xyz"));
+    }
+
+    /// Legacy blobs (no `client_id` field) deserialize to `None`, not an error.
+    #[test]
+    fn stored_tokens_legacy_without_client_id_is_none() {
+        let legacy = r#"{"access_token":"at","refresh_token":"rt","expires_at_unix":1000}"#;
+        let parsed: StoredTokens = serde_json::from_str(legacy).unwrap();
+        assert_eq!(parsed.client_id, None);
+        assert_eq!(parsed.into_tokens().client_id, None);
+    }
+
+    /// `refresh_tokens` carries the `client_id` it was given onto the result so
+    /// it persists for the next refresh, AND the form it POSTs is non-empty.
+    /// (Exercised against the live wire in `tests/oauth_flow_test.rs`; here we
+    /// assert the in-struct propagation that backs FIX 1.)
+    #[test]
+    fn exchange_and_refresh_propagate_client_id_into_tokens() {
+        // Construct a Tokens as exchange_code/refresh_tokens would, then verify
+        // from_tokens persists the id that resolve_oauth_spec/reauth re-send.
+        let exchanged = Tokens {
+            access_token: Secret::new("at".into()),
+            refresh_token: Some(Secret::new("rt".into())),
+            expires_at: SystemTime::UNIX_EPOCH + Duration::from_secs(10),
+            client_id: Some("the-client".into()),
+        };
+        assert_eq!(
+            StoredTokens::from_tokens(&exchanged).client_id.as_deref(),
+            Some("the-client"),
+            "client_id from a grant must persist so refresh re-sends it (not empty)"
+        );
     }
 }

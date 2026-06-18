@@ -322,7 +322,7 @@ fn http_cfg(name: &str, oauth: Option<McpOAuthConfigDto>) -> McpServerConfig {
         name: name.into(),
         spec: McpTransportSpec::Http {
             url: "https://mcp.example.com/v1".into(),
-            headers: HashMap::new(),
+            headers: traits::McpHeaders::new(),
             oauth,
         },
         scope: ConfigScope::Project,
@@ -429,6 +429,20 @@ async fn full_flow_attaches_bearer_and_persists_tokens() {
     assert!(reqs.iter().any(|r| r.url.contains("oauth-authorization-server")));
     let register = reqs.iter().find(|r| r.url.contains("/register")).unwrap();
     assert_eq!(register.method, HttpMethod::Post);
+    // FIX 3: the DCR client metadata carries the per-server client_name
+    // `LingXi (${serverName})` (auth.ts:1419) and the advertised scope
+    // (auth.ts:1428 / getScopeFromMetadata).
+    let reg_body = register.body.as_deref().unwrap();
+    assert!(
+        reg_body.contains("\"client_name\":\"LingXi (remote)\""),
+        "DCR client_name should be per-server; body={reg_body}"
+    );
+    assert!(
+        reg_body.contains("\"scope\":\"mcp:read\""),
+        "DCR metadata should include advertised scope; body={reg_body}"
+    );
+    // FIX 1: the persisted tokens carry the DCR-issued client_id so refresh
+    // re-sends it (asserted on storage below).
     let token = reqs.iter().find(|r| r.url.contains("/token")).unwrap();
     let body = token.body.as_deref().unwrap();
     assert!(body.contains("grant_type=authorization_code"));
@@ -444,6 +458,9 @@ async fn full_flow_attaches_bearer_and_persists_tokens() {
         .expect("tokens stored");
     assert_eq!(stored.access_token, "access-1");
     assert_eq!(stored.refresh_token.as_deref(), Some("refresh-1"));
+    // FIX 1: the DCR-issued client_id is persisted, so a later silent refresh
+    // re-sends it instead of an empty string.
+    assert_eq!(stored.client_id.as_deref(), Some("dyn-client-9"));
 }
 
 #[tokio::test]
@@ -464,7 +481,7 @@ async fn static_token_server_spec_is_unchanged() {
         },
     );
 
-    let mut headers = HashMap::new();
+    let mut headers = traits::McpHeaders::new();
     headers.insert("X-Static".to_string(), "preset".to_string());
     let config = McpServerConfig {
         name: "static".into(),
@@ -502,11 +519,14 @@ async fn expired_token_triggers_refresh_and_attaches_new_bearer() {
     let config = http_cfg("refreshing", Some(oauth_block(Some("preset-client"))));
     let key = oauth::server_key("refreshing", &config.spec);
 
-    // Seed an EXPIRED token (expires_at = 5_000 < now = 10_000) + refresh token.
+    // Seed an EXPIRED token (expires_at = 5_000 < now = 10_000) + refresh token
+    // + a DCR-issued client_id that DIFFERS from the configured one, so the
+    // refresh must prefer the persisted id (FIX 1).
     let stored = oauth::StoredTokens {
         access_token: "stale".into(),
         refresh_token: Some("refresh-1".into()),
         expires_at_unix: 5_000,
+        client_id: Some("dcr-issued-7".into()),
     };
     let bytes = serde_json::to_vec(&stored).unwrap();
     let data = SecureStorageData::new(
@@ -544,17 +564,23 @@ async fn expired_token_triggers_refresh_and_attaches_new_bearer() {
         .into_iter()
         .find(|r| r.url.contains("/token"))
         .unwrap();
-    assert!(token
-        .body
-        .as_deref()
-        .unwrap()
-        .contains("grant_type=refresh_token"));
-    // New tokens persisted.
+    let refresh_body = token.body.as_deref().unwrap();
+    assert!(refresh_body.contains("grant_type=refresh_token"));
+    // FIX 1: the refresh carries the PERSISTED (DCR-issued) client_id, not the
+    // configured one and NOT an empty string.
+    assert!(
+        refresh_body.contains("client_id=dcr-issued-7"),
+        "refresh must re-send the persisted DCR client_id; body={refresh_body}"
+    );
+    assert!(!refresh_body.contains("client_id=preset-client"));
+    assert!(!refresh_body.contains("client_id=&") && !refresh_body.ends_with("client_id="));
+    // New tokens persisted — including the client_id, so the NEXT refresh re-sends it.
     let reloaded = oauth::load_tokens(&(storage as Arc<dyn SecureStorage>), &key)
         .await
         .unwrap()
         .unwrap();
     assert_eq!(reloaded.access_token, "access-2");
+    assert_eq!(reloaded.client_id.as_deref(), Some("dcr-issued-7"));
 }
 
 #[tokio::test]
@@ -570,11 +596,13 @@ async fn connect_401_triggers_refresh_and_retry() {
     let config = http_cfg("flaky", Some(oauth_block(Some("preset-client"))));
     let key = oauth::server_key("flaky", &config.spec);
 
-    // Seed an UNEXPIRED token (so the first connect uses it and 401s) + refresh.
+    // Seed an UNEXPIRED token (so the first connect uses it and 401s) + refresh
+    // + a persisted DCR client_id (FIX 1: the 401-reauth path re-sends it too).
     let stored = oauth::StoredTokens {
         access_token: "access-old".into(),
         refresh_token: Some("refresh-1".into()),
         expires_at_unix: 99_999,
+        client_id: Some("dcr-issued-7".into()),
     };
     let bytes = serde_json::to_vec(&stored).unwrap();
     let data = SecureStorageData::new(
@@ -607,9 +635,15 @@ async fn connect_401_triggers_refresh_and_retry() {
         spec_auth_header(&transport.last_spec()).as_deref(),
         Some("Bearer access-3")
     );
-    assert!(mock_as
-        .requests()
-        .into_iter()
-        .any(|r| r.url.contains("/token")
-            && r.body.as_deref().unwrap_or("").contains("grant_type=refresh_token")));
+    assert!(mock_as.requests().into_iter().any(|r| {
+        r.url.contains("/token")
+            && r.body
+                .as_deref()
+                .map(|b| {
+                    b.contains("grant_type=refresh_token")
+                        // FIX 1: 401-reauth refresh re-sends the persisted client_id.
+                        && b.contains("client_id=dcr-issued-7")
+                })
+                .unwrap_or(false)
+    }));
 }

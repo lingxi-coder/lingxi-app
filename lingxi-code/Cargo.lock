@@ -2085,6 +2085,7 @@ checksum = "8c9c992b02b5b4c94ea26e32fe5bccb7aa7d9f390ab5c1221ff895bc7ea8b652"
 dependencies = [
  "equivalent",
  "hashbrown 0.15.5",
+ "serde",
 ]
 
 [[package]]
@@ -2515,6 +2516,7 @@ dependencies = [
  "async-trait",
  "base64",
  "bytes",
+ "indexmap",
  "jsonrpc",
  "protocol",
  "rand 0.9.4",
@@ -5567,6 +5569,7 @@ version = "0.12.0"
 dependencies = [
  "async-trait",
  "futures-core",
+ "indexmap",
  "protocol",
  "serde",
  "serde_json",

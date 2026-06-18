@@ -12,7 +12,6 @@
 
 use axum::{routing::post, Json, Router};
 use serde_json::{json, Value};
-use std::collections::HashMap;
 use std::time::Duration;
 
 use platform_posix::mcp::PosixMcpTransport;
@@ -76,7 +75,7 @@ async fn spawn_mock() -> String {
 fn http_spec(url: String) -> McpTransportSpec {
     McpTransportSpec::Http {
         url,
-        headers: HashMap::new(),
+        headers: traits::McpHeaders::new(),
         oauth: None,
     }
 }

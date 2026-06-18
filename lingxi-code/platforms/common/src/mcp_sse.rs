@@ -9,7 +9,6 @@
 //! - POST goes to the SAME URL as the GET. `Content-Type: application/json`.
 //! - Each SSE event is a single JSON-RPC `Message`: `data: {...}\n\n`.
 
-use std::collections::HashMap;
 
 use eventsource_stream::Eventsource;
 use futures::StreamExt;
@@ -49,11 +48,14 @@ impl From<SseConnectError> for McpError {
     }
 }
 
-fn build_headers(
+fn build_headers<H>(
     auth_token: Option<&str>,
-    extra_headers: &HashMap<String, String>,
+    extra_headers: &H,
     accept_value: &'static str,
-) -> Result<HeaderMap, SseConnectError> {
+) -> Result<HeaderMap, SseConnectError>
+where
+    for<'a> &'a H: IntoIterator<Item = (&'a String, &'a String)>,
+{
     let mut h = HeaderMap::new();
     h.insert(ACCEPT, HeaderValue::from_static(accept_value));
     h.insert(
@@ -84,7 +86,10 @@ fn build_headers(
 /// `url` is the URL to GET (for events) AND to POST (for outbound requests).
 /// `auth_token`, if `Some`, becomes the `X-Claude-Code-Ide-Authorization`
 /// header on BOTH the GET and the POST. `extra_headers` are applied to both
-/// directions verbatim.
+/// directions verbatim. It is generic over the map type so both an unordered
+/// `HashMap` and the insertion-ordered [`traits::McpHeaders`] (`IndexMap`)
+/// the MCP transport specs now carry are accepted (header order is irrelevant
+/// to the emitted HTTP request).
 ///
 /// # Errors
 ///
@@ -93,12 +98,15 @@ fn build_headers(
 ///   the event-stream GET.
 /// - [`SseConnectError::InvalidAuth`] if `auth_token` contains bytes that
 ///   cannot be expressed in an HTTP header value (non-ASCII, control chars).
-#[allow(clippy::implicit_hasher)] // public API: HashMap is the documented config shape
-pub async fn connect_sse(
+pub async fn connect_sse<H>(
     url: &str,
     auth_token: Option<&str>,
-    extra_headers: &HashMap<String, String>,
-) -> Result<Connection, SseConnectError> {
+    extra_headers: &H,
+) -> Result<Connection, SseConnectError>
+where
+    H: Clone + Send + 'static,
+    for<'a> &'a H: IntoIterator<Item = (&'a String, &'a String)>,
+{
     let client = reqwest::Client::builder()
         .build()
         .map_err(|e| SseConnectError::Transport(e.to_string()))?;

@@ -229,6 +229,20 @@ impl McpRegistry {
         self.oauth.is_some()
     }
 
+    /// Whether a Cross-App-Access ([`XaaConfigProvider`]) provider is wired into
+    /// the injected [`OAuthDeps`]. `false` (the default, and the state when no
+    /// `xaaIdp` settings tier is present) leaves an `oauth.xaa` server on its
+    /// actionable hard-fail; `true` means the host can supply the IdP `id_token`
+    /// + AS credentials and the XAA token-exchange chain can run. Used by the
+    /// desktop composition-root test to assert the XAA seam is reachable when
+    /// configured.
+    #[must_use]
+    pub fn has_xaa(&self) -> bool {
+        self.oauth
+            .as_ref()
+            .is_some_and(|d| d.xaa_config.is_some())
+    }
+
     /// Cache an `Arc<McpClient>` for `name` (M4-07).
     ///
     /// The platform host calls this after building the client (typically

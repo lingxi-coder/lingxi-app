@@ -2335,16 +2335,54 @@ pub async fn build(
     // OAuth 2.1 + PKCE seam for OAuth-configured remote (SSE/HTTP) MCP servers.
     // Reuses the platform `http` / `clock` / `storage` already built in step (1);
     // `on_authorization_url` surfaces the consent URL to the user (logs it
-    // prominently + best-effort detached OS browser open). `xaa_config: None`
-    // leaves XAA-flagged servers on their actionable hard-fail (no config seam
-    // for the IdP-login surface yet). When a server has no `oauth` config this is
-    // entirely inert — static-token / no-oauth servers take the unchanged path.
+    // prominently + best-effort detached OS browser open). When a server has no
+    // `oauth` config this is entirely inert — static-token / no-oauth servers
+    // take the unchanged path.
+    let mcp_on_auth_url = mcp_on_authorization_url();
+    // XAA IdP-login config layer. When an `xaaIdp` settings tier is present
+    // (`{issuer, clientId, callbackPort}` — mirror of claude-code
+    // `getXaaIdpSettings`), wire a concrete `XaaConfigProvider` so an
+    // `oauth.xaa==Some(true)` server resolves its token via the Cross-App-Access
+    // token-exchange chain. The provider supplies the IdP `id_token` (cached or a
+    // one-time OIDC browser pop), the AS `client_secret`
+    // (`mcpOAuthClientConfig[serverKey]`), and the IdP token endpoint
+    // (`discoverOidc`). Reuses the SAME http/clock/storage/on_authorization_url
+    // Arcs as OAuthDeps. Absent the settings, `xaa_config` stays `None` and an
+    // XAA-flagged server keeps its actionable hard-fail (XAA stays opt-in).
+    let xaa_config: Option<Arc<dyn mcp::registry::XaaConfigProvider>> = {
+        let mut tiers: Vec<String> = Vec::new();
+        for p in [
+            cfg.claude_home.join("settings.json"),
+            cwd.join(".claude").join("settings.json"),
+            cwd.join(".claude").join("settings.local.json"),
+        ] {
+            if let Ok(raw) = tokio::fs::read_to_string(&p).await {
+                tiers.push(raw);
+            }
+        }
+        let refs: Vec<&str> = tiers.iter().map(String::as_str).collect();
+        mcp::XaaIdpSettings::from_settings_tiers(&refs).map(|settings| {
+            // Build the server→(AS client_id, server_key) lookup from the known
+            // MCP configs so the provider can resolve the AS `client_secret`.
+            let lookup = mcp::MapServerOAuthLookup::from_specs(
+                mcp_configs.iter().map(|c| (c.name.as_str(), &c.spec)),
+            );
+            Arc::new(mcp::XaaIdpConfigProvider::new(
+                http.clone() as Arc<dyn traits::HttpTransport>,
+                clock.clone() as Arc<dyn traits::Clock>,
+                mcp_oauth_storage.clone(),
+                mcp_on_auth_url.clone(),
+                settings,
+                Arc::new(lookup) as Arc<dyn mcp::ServerOAuthLookup>,
+            )) as Arc<dyn mcp::registry::XaaConfigProvider>
+        })
+    };
     let mcp_oauth_deps = mcp::registry::OAuthDeps {
         http: http.clone() as Arc<dyn traits::HttpTransport>,
         clock: clock.clone() as Arc<dyn traits::Clock>,
         storage: mcp_oauth_storage,
-        on_authorization_url: mcp_on_authorization_url(),
-        xaa_config: None,
+        on_authorization_url: mcp_on_auth_url,
+        xaa_config,
     };
     let mcp_registry = Arc::new(
         mcp::McpRegistry::with_raw_conn(
@@ -3809,6 +3847,41 @@ mod tests {
         assert!(
             rt.orchestrator.has_mcp_oauth(),
             "OAuthDeps not wired into the production MCP registry"
+        );
+        // Without an `xaaIdp` settings tier, the XAA config layer stays opt-in:
+        // `xaa_config` is None, so an XAA-flagged server keeps its hard-fail.
+        assert!(
+            !rt.orchestrator.has_mcp_xaa(),
+            "XAA must stay opt-in when no `xaaIdp` settings tier is present"
+        );
+    }
+
+    /// With an `xaaIdp` settings tier present (`{issuer, clientId}`), `build()`
+    /// constructs a concrete [`mcp::registry::XaaConfigProvider`] and wires it
+    /// into the registry's `OAuthDeps`, so an `oauth.xaa` server can resolve a
+    /// token via the Cross-App-Access chain. Mirror of claude-code's
+    /// `getXaaIdpSettings` gating `performMCPXaaAuth`.
+    #[tokio::test]
+    async fn build_wires_xaa_config_when_xaaidp_settings_present() {
+        let (_tmp, cfg) = test_config(true);
+        // Lay down a settings.json with an `xaaIdp` block under claude_home.
+        std::fs::create_dir_all(&cfg.claude_home).unwrap();
+        std::fs::write(
+            cfg.claude_home.join("settings.json"),
+            r#"{"xaaIdp":{"issuer":"https://idp.example.com","clientId":"idp-client-id"}}"#,
+        )
+        .unwrap();
+
+        let output: Arc<dyn traits::OutputStream> =
+            Arc::new(orchestrator::test_support::MockOutputStream::new());
+        let perm_sink: Arc<dyn client_adapter::PermissionRequestSink> =
+            Arc::new(RecordingPermissionSink::default());
+
+        let rt = build(cfg, output, perm_sink).await.expect("build() failed");
+
+        assert!(
+            rt.orchestrator.has_mcp_xaa(),
+            "XaaConfigProvider not wired into OAuthDeps despite `xaaIdp` settings"
         );
     }
 

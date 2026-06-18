@@ -304,7 +304,10 @@ fn block_kind_of(content_block: &ContentBlock) -> BlockKind {
         ContentBlock::Image { .. }
         | ContentBlock::ImageUrl { .. }
         | ContentBlock::Document { .. }
-        | ContentBlock::ToolResult { .. } => BlockKind::Other,
+        | ContentBlock::ToolResult { .. }
+        // cache_edits is a request-only directive — never streamed back as a
+        // content_block_start, so it never reaches the accumulator.
+        | ContentBlock::CacheEdits { .. } => BlockKind::Other,
     }
 }
 

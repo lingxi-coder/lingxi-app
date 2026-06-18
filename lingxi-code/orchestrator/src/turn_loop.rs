@@ -1054,7 +1054,9 @@ pub(crate) fn translate_response_blocks(content: &[LlmContentBlock]) -> Vec<Cont
             LlmContentBlock::Image { .. }
             | LlmContentBlock::ImageUrl { .. }
             | LlmContentBlock::Document { .. }
-            | LlmContentBlock::ToolResult { .. } => None,
+            | LlmContentBlock::ToolResult { .. }
+            // cache_edits is a request-only directive — never in a response.
+            | LlmContentBlock::CacheEdits { .. } => None,
         })
         .collect()
 }

@@ -216,6 +216,7 @@ fn convert_block(block: ProtoBlock) -> Result<LlmBlock, LlmError> {
             output: Value::String(content),
             is_error,
             cache_control: None,
+            cache_reference: None,
         }),
         ProtoBlock::Thinking { thinking, signature } => Ok(LlmBlock::Reasoning {
             text: thinking,
@@ -416,7 +417,7 @@ mod tests {
         let result = to_llm_messages(vec![msg]).unwrap();
         assert!(matches!(
             &result[0].content[0],
-            LlmBlock::ToolResult { tool_call_id, output, is_error: false, cache_control: None }
+            LlmBlock::ToolResult { tool_call_id, output, is_error: false, cache_control: None, cache_reference: None }
                 if tool_call_id == &tool_call_id_str && output == &Value::String("file content".to_string())
         ));
     }

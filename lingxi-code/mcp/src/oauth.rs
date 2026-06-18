@@ -25,11 +25,31 @@
 //! The [`OAuthState`] enum models the handshake stages; [`perform_oauth_flow`]
 //! drives discovery → (DCR) → PKCE → listener → URL → exchange.
 //!
-//! **Residual (noted, not ported — see task scope):** XAA cross-app-access
-//! (`performMCPXaaAuth`), CIMD (`client_id_metadata_document`), step-up scope
-//! (403 `insufficient_scope`), token revocation (RFC 7009), Slack-style
-//! `200`-with-error-body normalization, cross-process lockfile refresh
-//! coordination, and analytics events.
+//! **Implemented since the initial port:**
+//! - **Token revocation (RFC 7009)** — [`revoke_token`] / [`revoke_server_tokens`]
+//!   (port of `revokeToken`/`revokeServerTokens`, auth.ts:365-577), wired into
+//!   `McpRegistry::disconnect` (best-effort, refresh-then-access, then always
+//!   clear locally). The `preserveStepUpState` re-auth variant (auth.ts:578-617)
+//!   is not the logout path and stays residual.
+//! - **Step-up scope (403 `insufficient_scope`)** — detection + cached-scope
+//!   re-auth + retry in `registry.rs` (port of `wrapFetchWithStepUpDetection` /
+//!   `cachedStepUpScope`, auth.ts:1354-1374, 906-935). A structured
+//!   403-with-headers path (vs the flattened error string) is a noted residual,
+//!   parallel to the existing 401 note.
+//! - **XAA cross-app-access (SEP-990)** — the exchange engine + orchestrator
+//!   ([`crate::xaa`]) and the `LINGXI_ENABLE_XAA` + `oauth.xaa` gate in
+//!   `registry.rs` (port of `xaa.ts` + `performMCPXaaAuth`, auth.ts:847-900).
+//!
+//! **Residual (noted, not ported):**
+//! - The XAA **IdP-login / secret config surface** — `getXaaIdpSettings`,
+//!   `acquireIdpIdToken` (the one OIDC browser pop), `discoverOidc`, the
+//!   keychain `id_token` cache, the `xaaRefresh` silent path, the AS
+//!   `client_secret`/`mcpOAuthClientConfig` config seam, and analytics
+//!   (auth.ts:664-744). Supplied via the [`crate::registry::XaaConfigProvider`]
+//!   seam; absent it, an XAA-flagged server hard-fails with actionable copy.
+//! - CIMD (`client_id_metadata_document`), Slack-style `200`-with-error-body
+//!   normalization, cross-process lockfile refresh coordination, and analytics
+//!   events.
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use protocol::{HttpMethod, HttpRequest, Secret};
@@ -184,6 +204,18 @@ pub struct AuthServerMetadata {
     /// Scopes the server advertises (`scopes_supported`), if any.
     #[serde(default)]
     pub scopes_supported: Option<Vec<String>>,
+    /// Token revocation endpoint (RFC 7009), if advertised (auth.ts:495-498).
+    #[serde(default)]
+    pub revocation_endpoint: Option<String>,
+    /// Client-auth methods the revocation endpoint accepts (RFC 7009,
+    /// auth.ts:503-508). Preferred over `token_endpoint_auth_methods_supported`
+    /// when present.
+    #[serde(default)]
+    pub revocation_endpoint_auth_methods_supported: Option<Vec<String>>,
+    /// Client-auth methods the token endpoint accepts (RFC 8414). Fallback for
+    /// revocation auth-method selection (auth.ts:509-511).
+    #[serde(default)]
+    pub token_endpoint_auth_methods_supported: Option<Vec<String>>,
 }
 
 /// Build a `.well-known` URL by inserting the well-known path between the
@@ -562,6 +594,7 @@ pub async fn perform_oauth_flow(
     server_name: &str,
     server_url: &str,
     on_auth_url: &OnAuthorizationUrl,
+    scope_override: Option<&str>,
 ) -> Result<Tokens, OAuthError> {
     // 1. Discovery.
     let meta = discover_auth_server_metadata(
@@ -581,11 +614,17 @@ pub async fn perform_oauth_flow(
     // 3. Advertised scope (used both for DCR client metadata and the authorize
     //    URL). claude-code's `getScopeFromMetadata` is `scopes_supported`-only
     //    in our subset (auth.ts:2460-2463); empty when none advertised.
-    let scope = meta
-        .scopes_supported
-        .as_ref()
-        .map(|s| s.join(" "))
-        .unwrap_or_default();
+    //    A `scope_override` (a cached step-up scope from a prior 403
+    //    `insufficient_scope`) takes precedence over the advertised scope so the
+    //    authorize URL requests the elevated scope (auth.ts:909-935 / 1625-1637).
+    let scope = match scope_override {
+        Some(s) if !s.is_empty() => s.to_string(),
+        _ => meta
+            .scopes_supported
+            .as_ref()
+            .map(|s| s.join(" "))
+            .unwrap_or_default(),
+    };
 
     // 4. Client id — configured, else dynamic client registration.
     let client_id = if let Some(id) = &oauth.client_id {
@@ -680,6 +719,18 @@ pub struct StoredTokens {
     /// makes legacy blobs without the field deserialize to `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub client_id: Option<String>,
+    /// Confidential-client secret these tokens were minted with. Only set for
+    /// XAA (cross-app-access) tokens, whose AS uses a confidential client —
+    /// strict ASes reject public-client revocation of confidential tokens
+    /// (auth.ts:408-410, `revokeToken` `clientSecret`). `None` for ordinary
+    /// public-client OAuth. `#[serde(default)]` keeps legacy blobs valid.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_secret: Option<String>,
+    /// Elevated scope cached when a 403 `insufficient_scope` step-up is pending
+    /// (auth.ts `stepUpScope`, 1896 / 909). The next interactive flow requests
+    /// this scope instead of (re-)probing; cleared once a fresh grant succeeds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub step_up_scope: Option<String>,
 }
 
 impl StoredTokens {
@@ -713,6 +764,10 @@ impl StoredTokens {
             refresh_token: t.refresh_token.as_ref().map(|s| s.expose_secret().clone()),
             expires_at_unix,
             client_id: t.client_id.clone(),
+            // Ordinary OAuth tokens are public-client and carry no step-up
+            // scope; XAA wiring sets these directly on the stored blob.
+            client_secret: None,
+            step_up_scope: None,
         }
     }
 }
@@ -733,6 +788,32 @@ pub async fn load_tokens(
     let parsed: StoredTokens = serde_json::from_slice(data.expose_secret_bytes())
         .map_err(|e| OAuthError::Token(format!("decode stored tokens: {e}")))?;
     Ok(Some(parsed))
+}
+
+/// Persist an already-built [`StoredTokens`] blob for `key` (used to update
+/// side fields like `step_up_scope` without minting fresh [`Tokens`]).
+///
+/// # Errors
+/// [`OAuthError::Token`] on encode or a storage backend error.
+pub async fn store_tokens(
+    storage: &Arc<dyn traits::SecureStorage>,
+    clock: &Arc<dyn Clock>,
+    key: &str,
+    stored: &StoredTokens,
+) -> Result<(), OAuthError> {
+    let bytes = serde_json::to_vec(stored)
+        .map_err(|e| OAuthError::Token(format!("encode tokens: {e}")))?;
+    let metadata = protocol::SecureStorageMetadata {
+        created_at: clock.now(),
+        last_accessed: None,
+        kind: protocol::SecretKindDto("mcp_oauth_tokens".into()),
+    };
+    let data = protocol::SecureStorageData::new(bytes, metadata);
+    storage
+        .store(MCP_OAUTH_SERVICE, key, data)
+        .await
+        .map_err(|e| OAuthError::Token(format!("storage store: {e}")))?;
+    Ok(())
 }
 
 /// Persist a token set for `key` (`mcp-oauth` service, account = server key).
@@ -758,6 +839,271 @@ pub async fn save_tokens(
         .store(MCP_OAUTH_SERVICE, key, data)
         .await
         .map_err(|e| OAuthError::Token(format!("storage store: {e}")))?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Token revocation (RFC 7009) — auth.ts:365-618.
+// ---------------------------------------------------------------------------
+
+/// Which credential a revocation request targets (RFC 7009 `token_type_hint`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TokenTypeHint {
+    /// The bearer access token.
+    AccessToken,
+    /// The long-lived refresh token.
+    RefreshToken,
+}
+
+impl TokenTypeHint {
+    fn as_str(self) -> &'static str {
+        match self {
+            TokenTypeHint::AccessToken => "access_token",
+            TokenTypeHint::RefreshToken => "refresh_token",
+        }
+    }
+}
+
+/// Revoke a single token at the AS revocation endpoint (RFC 7009).
+///
+/// Byte-for-byte port of `revokeToken` (auth.ts:381-459):
+/// 1. RFC-7009-compliant attempt — `token` + `token_type_hint`, client auth via
+///    `client_secret_basic` (base64 `Authorization: Basic`) or
+///    `client_secret_post` (creds in the form), else bare `client_id` in the
+///    body for a public client.
+/// 2. On a `401`, retry once with `Authorization: Bearer <access_token>` for
+///    non-compliant servers, having cleared the client creds from the body
+///    (RFC 6749 §2.3.1: at most one auth method).
+///
+/// Best-effort; returns `Err` only when both attempts fail (the caller logs and
+/// continues per auth.ts).
+#[allow(clippy::too_many_arguments)]
+pub async fn revoke_token(
+    http: &Arc<dyn HttpTransport>,
+    endpoint: &str,
+    token: &str,
+    token_type_hint: TokenTypeHint,
+    client_id: Option<&str>,
+    client_secret: Option<&str>,
+    access_token: Option<&str>,
+    auth_method: &str,
+) -> Result<(), OAuthError> {
+    // Base form (`token`, `token_type_hint`) + optional client_secret_post creds.
+    let hint = token_type_hint.as_str();
+    let mut form: Vec<(String, String)> = vec![
+        ("token".into(), token.into()),
+        ("token_type_hint".into(), hint.into()),
+    ];
+    let mut headers: Vec<(String, String)> = vec![(
+        "content-type".into(),
+        "application/x-www-form-urlencoded".into(),
+    )];
+
+    // auth.ts:411-428 client-auth precedence.
+    match (client_id, client_secret) {
+        (Some(id), Some(secret)) => {
+            if auth_method == "client_secret_post" {
+                form.push(("client_id".into(), id.into()));
+                form.push(("client_secret".into(), secret.into()));
+            } else {
+                // client_secret_basic: base64(urlencode(id):urlencode(secret)).
+                let basic = format!(
+                    "{}:{}",
+                    urlencoding::encode(id),
+                    urlencoding::encode(secret)
+                );
+                headers.push((
+                    "authorization".into(),
+                    format!("Basic {}", base64::engine::general_purpose::STANDARD.encode(basic)),
+                ));
+            }
+        }
+        (Some(id), None) => form.push(("client_id".into(), id.into())),
+        // No client_id — server may reject (auth.ts:424-427); attempt anyway.
+        (None, _) => {}
+    }
+
+    let encode_body = |form: &[(String, String)]| {
+        form.iter()
+            .map(|(k, v)| format!("{}={}", urlencoding::encode(k), urlencoding::encode(v)))
+            .collect::<Vec<_>>()
+            .join("&")
+    };
+
+    let req = HttpRequest {
+        method: HttpMethod::Post,
+        url: endpoint.to_string(),
+        headers: headers.clone(),
+        body: Some(encode_body(&form)),
+        body_bytes: None,
+        timeout: Some(OAUTH_HTTP_TIMEOUT),
+    };
+    let resp = http
+        .request(req)
+        .await
+        .map_err(|e| OAuthError::Token(format!("revoke transport: {e}")))?;
+    if (200..300).contains(&resp.status) {
+        return Ok(());
+    }
+
+    // auth.ts:434-457: 401 fallback → retry with Bearer, clearing client creds.
+    if resp.status == 401 {
+        if let Some(at) = access_token {
+            form.retain(|(k, _)| k != "client_id" && k != "client_secret");
+            let mut retry_headers: Vec<(String, String)> = headers
+                .into_iter()
+                .filter(|(k, _)| !k.eq_ignore_ascii_case("authorization"))
+                .collect();
+            retry_headers.push(("authorization".into(), format!("Bearer {at}")));
+            let req = HttpRequest {
+                method: HttpMethod::Post,
+                url: endpoint.to_string(),
+                headers: retry_headers,
+                body: Some(encode_body(&form)),
+                body_bytes: None,
+                timeout: Some(OAUTH_HTTP_TIMEOUT),
+            };
+            let resp = http
+                .request(req)
+                .await
+                .map_err(|e| OAuthError::Token(format!("revoke retry transport: {e}")))?;
+            if (200..300).contains(&resp.status) {
+                return Ok(());
+            }
+            return Err(OAuthError::Token(format!(
+                "revoke retry status {}: {}",
+                resp.status, resp.body
+            )));
+        }
+    }
+    Err(OAuthError::Token(format!(
+        "revoke status {}: {}",
+        resp.status, resp.body
+    )))
+}
+
+/// Revoke a server's tokens at the AS, then unconditionally clear them locally.
+///
+/// Faithful core of `revokeServerTokens` (auth.ts:467-577): load the stored
+/// tokens, discover AS metadata, read `revocation_endpoint` (skip on absent),
+/// pick the auth method per auth.ts:503-517 (prefer the revocation list, else
+/// the token-endpoint list; `client_secret_post` only when `basic` is absent
+/// and `post` present), then revoke **refresh first, then access** — each
+/// best-effort. The local token blob is ALWAYS deleted afterwards regardless of
+/// the server-side result (auth.ts:575-576).
+///
+/// `preserveStepUpState` (auth.ts:578-617) is a re-auth-only variant — not the
+/// logout/disconnect path wired here — and is a noted residual.
+pub async fn revoke_server_tokens(
+    storage: &Arc<dyn traits::SecureStorage>,
+    http: &Arc<dyn HttpTransport>,
+    key: &str,
+    server_url: &str,
+    oauth_cfg: &traits::McpOAuthConfigDto,
+) {
+    let stored = match load_tokens(storage, key).await {
+        Ok(Some(s)) => Some(s),
+        Ok(None) => None,
+        Err(e) => {
+            tracing::debug!(error = %e, "mcp oauth: failed to load tokens for revocation");
+            None
+        }
+    };
+
+    if let Some(stored) = &stored {
+        let has_access = !stored.access_token.is_empty();
+        let has_refresh = stored.refresh_token.as_deref().is_some_and(|s| !s.is_empty());
+        if has_access || has_refresh {
+            // Best-effort server-side revocation; never propagate failures.
+            if let Err(e) =
+                revoke_at_endpoint(http, server_url, oauth_cfg, stored).await
+            {
+                tracing::debug!(error = %e, "mcp oauth: token revocation failed (best-effort)");
+            }
+        } else {
+            tracing::debug!("mcp oauth: no tokens to revoke");
+        }
+    }
+
+    // Always clear local tokens, regardless of server-side result (auth.ts:575).
+    if let Err(e) = storage.delete(MCP_OAUTH_SERVICE, key).await {
+        tracing::debug!(error = %e, "mcp oauth: failed to clear local tokens after revocation");
+    }
+}
+
+/// Inner discovery + per-token revocation (the `try` block of auth.ts:481-570).
+async fn revoke_at_endpoint(
+    http: &Arc<dyn HttpTransport>,
+    server_url: &str,
+    oauth_cfg: &traits::McpOAuthConfigDto,
+    stored: &StoredTokens,
+) -> Result<(), OAuthError> {
+    let meta =
+        discover_auth_server_metadata(http, server_url, oauth_cfg.auth_server_metadata_url.as_deref())
+            .await?;
+
+    let Some(endpoint) = meta.revocation_endpoint.as_deref() else {
+        tracing::debug!("mcp oauth: server does not support token revocation");
+        return Ok(());
+    };
+
+    // auth.ts:503-517 auth-method selection.
+    let methods = meta
+        .revocation_endpoint_auth_methods_supported
+        .as_ref()
+        .or(meta.token_endpoint_auth_methods_supported.as_ref());
+    let auth_method = match methods {
+        Some(m)
+            if !m.iter().any(|s| s == "client_secret_basic")
+                && m.iter().any(|s| s == "client_secret_post") =>
+        {
+            "client_secret_post"
+        }
+        _ => "client_secret_basic",
+    };
+
+    let client_id = stored
+        .client_id
+        .as_deref()
+        .or(oauth_cfg.client_id.as_deref());
+    let client_secret = stored.client_secret.as_deref();
+    let access_token = (!stored.access_token.is_empty()).then_some(stored.access_token.as_str());
+
+    // Refresh token first (auth.ts:523-543), best-effort.
+    if let Some(refresh) = stored.refresh_token.as_deref().filter(|s| !s.is_empty()) {
+        if let Err(e) = revoke_token(
+            http,
+            endpoint,
+            refresh,
+            TokenTypeHint::RefreshToken,
+            client_id,
+            client_secret,
+            access_token,
+            auth_method,
+        )
+        .await
+        {
+            tracing::debug!(error = %e, "mcp oauth: failed to revoke refresh token");
+        }
+    }
+
+    // Then access token (auth.ts:545-564), best-effort.
+    if let Some(at) = access_token {
+        if let Err(e) = revoke_token(
+            http,
+            endpoint,
+            at,
+            TokenTypeHint::AccessToken,
+            client_id,
+            client_secret,
+            access_token,
+            auth_method,
+        )
+        .await
+        {
+            tracing::debug!(error = %e, "mcp oauth: failed to revoke access token");
+        }
+    }
     Ok(())
 }
 
@@ -825,6 +1171,9 @@ mod tests {
             token_endpoint: "https://as.example.com/token".into(),
             registration_endpoint: None,
             scopes_supported: None,
+            revocation_endpoint: None,
+            revocation_endpoint_auth_methods_supported: None,
+            token_endpoint_auth_methods_supported: None,
         };
         let (url, verifier, state) =
             build_authorize_url(&meta, "client-123", "http://localhost:5000/callback", "");

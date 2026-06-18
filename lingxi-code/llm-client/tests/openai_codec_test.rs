@@ -270,6 +270,7 @@ fn encode_tool_result_as_tool_message_not_tool_call() {
             output: serde_json::json!("done"),
             is_error: false,
             cache_control: None,
+            cache_reference: None,
         }],
     });
 
@@ -293,12 +294,14 @@ fn encode_multiple_tool_results_preserves_each_as_tool_message() {
                 output: serde_json::json!("first"),
                 is_error: false,
                 cache_control: None,
+                cache_reference: None,
             },
             ContentBlock::ToolResult {
                 tool_call_id: "call_2".to_string(),
                 output: serde_json::json!("second"),
                 is_error: false,
                 cache_control: None,
+                cache_reference: None,
             },
         ],
     });

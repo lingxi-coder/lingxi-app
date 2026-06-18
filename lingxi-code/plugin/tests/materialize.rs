@@ -480,17 +480,32 @@ async fn enable_materializes_skill_outputstyle_mcp_lsp_into_live_registries() {
             "plugin output-style should be registered as fullplugin:terse"
         );
     }
-    // MCP server config: seeded into the connection map under the scoped
-    // name. (`get_config` normalizes the colon-bearing key, so assert on the
-    // raw connection map — the registry-level observable used by `/mcp`.)
-    assert!(
-        mcp_registry
-            .connections
-            .read()
-            .await
-            .contains_key("plugin:fullplugin:echo"),
-        "plugin MCP server config should be seeded under plugin:fullplugin:echo"
-    );
+    // MCP server: routed through the SAME live-connect path (`connect_all`)
+    // as a normal configured server, so the entry is materialized under the
+    // scoped name AND has advanced past the inert `Disconnected{last_error:None}`
+    // seed. The fixture's `echo` command is not an MCP server, so the
+    // handshake fails and the connect path records a loop-eligible
+    // `Disconnected{last_error:Some(_)}` (or a non-`Disconnected` connecting/
+    // failed state) — either way it is NOT the bare seed. This proves the
+    // connect path was INVOKED for the plugin server, the same as for a
+    // configured server. (`get_config` normalizes the colon-bearing key, so
+    // assert on the raw connection map — the registry-level observable used
+    // by `/mcp`.)
+    {
+        let conns = mcp_registry.connections.read().await;
+        let state = conns
+            .get("plugin:fullplugin:echo")
+            .expect("plugin MCP server should be materialized under plugin:fullplugin:echo");
+        let is_inert_seed = matches!(
+            state,
+            mcp::McpConnectionState::Disconnected { last_error: None, .. }
+        );
+        assert!(
+            !is_inert_seed,
+            "plugin MCP server should have gone through the live connect_all path \
+             (not be left as the inert Disconnected{{last_error:None}} seed); state={state:?}"
+        );
+    }
     // LSP server config: registered (config name as key).
     assert!(
         lsp_registry.get_config("pyls").await.is_some(),

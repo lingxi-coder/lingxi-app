@@ -161,6 +161,7 @@ fn tool_result_block_encodes_function_call_output_item() {
             output: serde_json::json!("done"),
             is_error: false,
             cache_control: None,
+            cache_reference: None,
         }],
     });
 
@@ -186,6 +187,7 @@ fn tool_result_non_string_output_is_stringified() {
             output: serde_json::json!({"exit_code": 0}),
             is_error: false,
             cache_control: None,
+            cache_reference: None,
         }],
     });
 

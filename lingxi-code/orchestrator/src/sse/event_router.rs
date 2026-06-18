@@ -133,7 +133,9 @@ pub async fn dispatch_event(
                 LlmContentBlock::Image { .. }
                 | LlmContentBlock::ImageUrl { .. }
                 | LlmContentBlock::Document { .. }
-                | LlmContentBlock::ToolResult { .. } => BlockKind::Other,
+                | LlmContentBlock::ToolResult { .. }
+                // cache_edits is a request-only directive — never streamed back.
+                | LlmContentBlock::CacheEdits { .. } => BlockKind::Other,
             };
             acc.start_block(index, kind)?;
             Ok(RouterAction::Continue)

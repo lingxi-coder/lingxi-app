@@ -346,12 +346,14 @@ async fn glob_skill_dirs(skills_dir: &Path) -> Vec<ComponentPath> {
 /// Read the plugin-root `.mcp.json` into `{ server name → McpServerConfig }`.
 ///
 /// Mirrors `loadPluginMcpServers` (`mcpPluginIntegration.ts:137`): the file is
-/// the standard `.mcp.json` shape `{ "mcpServers": { … } }` (the bare-map
-/// fallback `parsed.mcpServers || parsed` is handled by the shared parser only
-/// for the wrapped form; we accept the wrapped form here, which matches the
-/// fixture and the common path). A missing / malformed file yields an empty
-/// map (non-fatal — claude-code logs and continues). Manifest-declared
-/// `mcpServers` is NOT read here (residual: `RawManifest` doesn't carry it).
+/// the standard `.mcp.json` shape `{ "mcpServers": { … } }`, but the shared
+/// parser also accepts a bare top-level map of `{name: serverConfig}` via the
+/// `parsed.mcpServers || parsed` fallback (`mcpPluginIntegration.ts:243`), so
+/// plugin `.mcp.json` files in either form resolve here. A missing / malformed
+/// file yields an empty map (non-fatal — claude-code logs and continues), and
+/// an individual invalid entry is skipped while valid siblings are kept.
+/// Manifest-declared `mcpServers` is NOT read here (residual: `RawManifest`
+/// doesn't carry it).
 async fn load_mcp_servers(plugin_dir: &Path) -> HashMap<String, mcp::McpServerConfig> {
     let path = plugin_dir.join(".mcp.json");
     let Ok(raw) = tokio::fs::read_to_string(&path).await else {

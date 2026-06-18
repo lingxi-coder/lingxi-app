@@ -65,11 +65,6 @@ pub enum McpJsonError {
     UnknownTransport(String),
 }
 
-#[derive(Debug, Deserialize)]
-struct McpJsonTop {
-    #[serde(default, rename = "mcpServers")]
-    mcp_servers: HashMap<String, McpJsonEntry>,
-}
 
 #[derive(Debug, Deserialize)]
 struct McpJsonEntry {
@@ -95,14 +90,55 @@ struct McpJsonEntry {
 /// `scope` propagates onto every returned config so the approval policy can
 /// distinguish project from user origins.
 ///
-/// Returns `Ok(vec![])` when the input has no `mcpServers` block.
+/// Returns `Ok(vec![])` when the input has no usable server map.
+///
+/// Mirrors claude-code `loadMcpServersFromFile`
+/// (`utils/plugins/mcpPluginIntegration.ts:240-259`): the server map is
+/// `parsed.mcpServers || parsed` — a top-level object WITHOUT an `mcpServers`
+/// wrapper is treated as a bare map of `{name: serverConfig}`. Each entry is
+/// validated independently; an invalid entry (neither `command` nor `url`, or
+/// a shape that fails to deserialize) is logged and SKIPPED — the valid
+/// siblings are kept and the file is never dropped.
 pub fn parse_mcp_json_string(
     raw: &str,
     scope: ConfigScope,
 ) -> Result<Vec<McpServerConfig>, McpJsonError> {
-    let top: McpJsonTop = serde_json::from_str(raw)?;
+    // Parse to a generic value first so we can apply the `parsed.mcpServers ||
+    // parsed` precedence before committing to the entry shape. Genuinely
+    // invalid JSON still fails here (the `Json` error path), matching the JS
+    // `try { jsonParse(content) }` outer guard.
+    let parsed: serde_json::Value = serde_json::from_str(raw)?;
+
+    // `parsed.mcpServers || parsed`: prefer an `mcpServers` object when present,
+    // otherwise treat the whole top-level object as the server map. A
+    // non-object top-level (array/string/number/bool/null) yields no servers,
+    // matching JS where `Object.entries` over a non-record produces nothing
+    // usable.
+    let server_map = match parsed.get("mcpServers") {
+        Some(v) => v,
+        None => &parsed,
+    };
+    let serde_json::Value::Object(entries) = server_map else {
+        return Ok(Vec::new());
+    };
+
     let mut out = Vec::new();
-    for (name, entry) in top.mcp_servers {
+    for (name, raw_entry) in entries {
+        // Per-entry validation: a shape that fails to deserialize is logged and
+        // skipped (TS `safeParse` failure → `logForDebugging` + `continue`),
+        // keeping the valid siblings rather than dropping the whole file.
+        let entry: McpJsonEntry = match McpJsonEntry::deserialize(raw_entry) {
+            Ok(e) => e,
+            Err(e) => {
+                tracing::warn!(
+                    server = %name,
+                    error = %e,
+                    "mcp.json: invalid server config; skipping entry"
+                );
+                continue;
+            }
+        };
+        let name = name.clone();
         // Expand `${VAR}` / `${VAR:-default}` references in the transport
         // fields, mirroring claude-code `expandEnvVars(config)`
         // (`services/mcp/config.ts:556-615`): stdio expands `command`/`args`/
@@ -139,7 +175,13 @@ pub fn parse_mcp_json_string(
                 },
             }
         } else {
-            return Err(McpJsonError::UnknownTransport(name));
+            // Entry has neither `command` nor `url`: invalid transport. TS
+            // `safeParse` rejects it → log + skip, keeping valid siblings.
+            tracing::warn!(
+                server = %name,
+                "mcp.json: entry missing both command and url; skipping"
+            );
+            continue;
         };
         if !missing.is_empty() {
             // Dedup preserving first-seen order (TS `[...new Set(missingVars)]`).
@@ -264,13 +306,55 @@ mod tests {
     }
 
     #[test]
-    fn missing_command_and_url_errors() {
+    fn missing_command_and_url_is_skipped_not_error() {
+        // claude-code `loadMcpServersFromFile` logs+skips an invalid entry
+        // (safeParse failure → continue) instead of dropping the file. A lone
+        // bad entry therefore yields an empty list, NOT an Err.
         let raw = r#"{"mcpServers":{"bogus":{}}}"#;
-        let err = parse_mcp_json_string(raw, ConfigScope::Project).unwrap_err();
-        match err {
-            McpJsonError::UnknownTransport(name) => assert_eq!(name, "bogus"),
-            McpJsonError::Json(e) => panic!("expected UnknownTransport, got Json({e})"),
+        let cfgs = parse_mcp_json_string(raw, ConfigScope::Project).unwrap();
+        assert!(cfgs.is_empty(), "bad entry skipped, no Err");
+    }
+
+    #[test]
+    fn bare_map_without_mcpservers_wrapper_parses() {
+        // claude-code: `const mcpServers = parsed.mcpServers || parsed` — a
+        // top-level map of {name: serverConfig} with NO `mcpServers` wrapper is
+        // accepted as the server map directly.
+        let raw = r#"{"x":{"command":"foo"}}"#;
+        let cfgs = parse_mcp_json_string(raw, ConfigScope::Project).unwrap();
+        assert_eq!(cfgs.len(), 1);
+        assert_eq!(cfgs[0].name, "x");
+        match &cfgs[0].spec {
+            McpTransportSpec::Stdio { command, .. } => assert_eq!(command, "foo"),
+            other => panic!("expected Stdio, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn invalid_entry_is_skipped_valid_kept() {
+        // One invalid entry (no command/url) and one valid: the valid one
+        // survives, the file is NOT dropped (per-entry skip, no Err).
+        let raw = r#"{"mcpServers":{"bad":{},"good":{"command":"g"}}}"#;
+        let cfgs = parse_mcp_json_string(raw, ConfigScope::Project).unwrap();
+        assert_eq!(cfgs.len(), 1);
+        assert_eq!(cfgs[0].name, "good");
+        match &cfgs[0].spec {
+            McpTransportSpec::Stdio { command, .. } => assert_eq!(command, "g"),
+            other => panic!("expected Stdio, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn mcpservers_wrapper_takes_precedence_over_sibling_keys() {
+        // `parsed.mcpServers || parsed`: when the wrapper exists, ONLY its
+        // contents are used — sibling top-level keys are ignored, not merged.
+        let raw = r#"{
+          "mcpServers": { "wrapped": { "command": "w" } },
+          "sibling": { "command": "s" }
+        }"#;
+        let cfgs = parse_mcp_json_string(raw, ConfigScope::Project).unwrap();
+        assert_eq!(cfgs.len(), 1);
+        assert_eq!(cfgs[0].name, "wrapped");
     }
 
     #[test]

@@ -223,7 +223,9 @@ fn decode_response(resp: llm_client::LlmResponse, want_structured: bool) -> Side
             | llm_client::ContentBlock::Image { .. }
             | llm_client::ContentBlock::ImageUrl { .. }
             | llm_client::ContentBlock::Document { .. }
-            | llm_client::ContentBlock::ToolResult { .. } => {}
+            | llm_client::ContentBlock::ToolResult { .. }
+            // cache_edits is a request-only directive — never in a response.
+            | llm_client::ContentBlock::CacheEdits { .. } => {}
         }
     }
 
@@ -360,6 +362,7 @@ fn convert_content_block(
             output: serde_json::Value::String(content),
             is_error,
             cache_control: None,
+            cache_reference: None,
         }),
         protocol::ContentBlock::Thinking { thinking, signature } => {
             Ok(llm_client::ContentBlock::Reasoning {

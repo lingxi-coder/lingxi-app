@@ -3021,8 +3021,10 @@ pub async fn build(
     //       any registry mutation). Best-effort: a malformed plugin logs a
     //       warning and is skipped — discovery never breaks boot (a fresh
     //       install with no `plugins/` dir yields zero plugins, an exact
-    //       no-op). RESIDUAL: MCP / LSP / skills / output-styles
-    //       materialisation into LIVE registries, marketplace-catalog source
+    //       no-op). Plugin MCP servers live-connect through the same
+    //       `connect_all` path as configured `.mcp.json` servers (the manager
+    //       owns the same `mcp_registry` Arc and dials them at `enable()`).
+    //       RESIDUAL: marketplace-catalog source
     //       resolution + enterprise allow/blocklist policy, and reading the
     //       exact installed version from `installed_plugins.json` (we probe the
     //       single-version cache dir instead). The manager is given a real but
@@ -3055,7 +3057,10 @@ pub async fn build(
             //   the per-turn skill listing).
             // - hooks    → `plugin_hook_registry` (the orchestrator's clone).
             // - MCP      → `plugin_mcp_registry` (== the orchestrator's
-            //   `mcp_registry`; seeded configs are discoverable in `/mcp`).
+            //   `mcp_registry`; scoped configs are live-connected via
+            //   `connect_all`, the same path as configured `.mcp.json`
+            //   servers, and the already-spawned reconnect loop covers any
+            //   that fail their initial dial).
             // - LSP      → `plugin_lsp_registry` (== the `LSPTool`'s registry).
             // The SKILL and OUTPUT-STYLE registries have no turn-loop consumer
             // yet (skills surface to the model via the command-registry listing,

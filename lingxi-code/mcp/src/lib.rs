@@ -26,6 +26,7 @@ pub mod normalization;
 pub mod oauth;
 pub mod raw_conn;
 pub mod registry;
+pub mod xaa;
 
 pub use client::{truncate_description, McpClient, McpClientError, MAX_MCP_DESCRIPTION_LENGTH};
 pub use connection::{ConfigScope, McpConnectionState, McpServerConfig};

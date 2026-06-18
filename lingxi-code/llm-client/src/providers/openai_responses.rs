@@ -763,7 +763,9 @@ fn encode_message(message: &crate::Message, input: &mut Vec<Value>) {
             | ContentBlock::RedactedThinking { .. }
             | ContentBlock::ServerToolUse { .. }
             | ContentBlock::ConnectorText { .. }
-            | ContentBlock::AdvisorToolResult { .. } => {}
+            | ContentBlock::AdvisorToolResult { .. }
+            // cache_edits is an Anthropic-1P request directive only; never OpenAI.
+            | ContentBlock::CacheEdits { .. } => {}
         }
     }
 

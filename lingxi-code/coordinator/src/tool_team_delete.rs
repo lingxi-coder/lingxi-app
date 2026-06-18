@@ -326,6 +326,11 @@ impl Tool for TeamDeleteTool {
                 team_file::cleanup_team_directories(&home, name);
             }
             self.team.set_team_name(None).await;
+            // Clear the process-global leader team name (claude-code
+            // `clearLeaderTeamName`, `utils/tasks.ts:43`) so the leader's
+            // `getTaskListId()` falls back to the session id once the team is
+            // gone.
+            traits::team_registry::clear_leader_team_name();
             if let Some(name) = &team_name {
                 self.emit_team_deleted(name).await;
             }
@@ -373,6 +378,8 @@ mod tests {
             messages: vec![],
             tool_use_id: None,
             agent_id: None,
+            agent_name: None,
+            team_name: None,
             content_replacement_state: None,
             session: None,
             subagent_registry: None,

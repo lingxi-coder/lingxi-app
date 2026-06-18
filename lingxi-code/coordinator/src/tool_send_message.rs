@@ -807,6 +807,8 @@ mod tests {
             messages: vec![],
             tool_use_id: None,
             agent_id: None,
+            agent_name: None,
+            team_name: None,
             content_replacement_state: None,
             session: None,
             subagent_registry: None,

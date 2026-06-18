@@ -93,6 +93,10 @@ impl TeamRegistry {
         let agent_id = AgentId::new();
         let mailbox = Arc::new(TeammateMailbox::new(agent_id));
         self.mailbox_router.register(agent_id, mailbox).await;
+        // Index the worker's display name so a teammate can be addressed by
+        // NAME (claude-code's mailbox is name-keyed; `TaskUpdate` owner-change
+        // notifications and `getAgentStatuses` address recipients by name).
+        self.mailbox_router.register_name(&name, agent_id).await;
         self.workers.write().await.insert(
             agent_id,
             WorkerAgent {

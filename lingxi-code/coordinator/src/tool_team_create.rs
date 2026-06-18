@@ -465,6 +465,14 @@ impl Tool for TeamCreateTool {
         // 5. Record the team name (source of the CoordinatorStatus { team } DTO).
         self.team.set_team_name(Some(team_name.clone())).await;
 
+        // 5-bis. Record the LEADER team name in the process-global slot
+        //        (claude-code `setLeaderTeamName`, TeamCreateTool.ts via
+        //        `utils/tasks.ts:31`). `getTaskListId()` consults this (priority
+        //        4) so the leader's V2 tasks land under the team name — the same
+        //        on-disk directory its in-process teammates resolve to — instead
+        //        of under the session id.
+        traits::team_registry::set_leader_team_name(&team_name);
+
         // 5b. Write the on-disk team file `~/.claude/teams/{name}/config.json`
         //     mirroring the TS `TeamFile` shape (TeamCreateTool.ts:157-177 →
         //     teamHelpers.ts:175-182). Best-effort: a write failure is surfaced
@@ -595,6 +603,8 @@ mod tests {
             messages: vec![],
             tool_use_id: None,
             agent_id: None,
+            agent_name: None,
+            team_name: None,
             content_replacement_state: None,
             session: None,
             subagent_registry: None,

@@ -1240,6 +1240,10 @@ pub(crate) async fn dispatch_tool_uses_tracked(
             messages,
             tool_use_id: Some(tool_use_id.clone()),
             agent_id: None,
+            // Main / leader thread: no teammate identity (TS getAgentName() /
+            // getTeammateContext() are undefined here).
+            agent_name: None,
+            team_name: None,
             content_replacement_state: None,
             session: Some(orch.session.clone()),
             subagent_registry: Some(orch.tools.clone()),

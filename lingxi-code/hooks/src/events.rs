@@ -280,6 +280,14 @@ pub enum HookEvent {
         task_type: String,
         /// Human-readable description for logs.
         description: String,
+        /// Name of the teammate that created the task (wire `teammate_name`,
+        /// optional). claude-code sources this from `getAgentName()`
+        /// (`TaskCreateTool.ts:97`). `None` for the main thread / leader.
+        teammate_name: Option<String>,
+        /// Team the creating teammate belongs to (wire `team_name`, optional).
+        /// claude-code sources this from `getTeamName()`
+        /// (`TaskCreateTool.ts:98`).
+        team_name: Option<String>,
     },
     /// A task transitioned to a terminal status.
     ///

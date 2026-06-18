@@ -1274,6 +1274,32 @@ mod tests {
         );
     }
 
+    /// T25: when the creating teammate's identity is bound, the `TaskCreated`
+    /// wire payload carries `teammate_name` / `team_name` (claude-code
+    /// `getAgentName()` / `getTeamName()`, `utils/hooks.ts:3756-3764`).
+    #[test]
+    fn task_created_payload_serializes_teammate_and_team() {
+        let p = TaskCreatedPayload {
+            hook_event_name: HookEventNameTaskCreated,
+            session_id: "s".into(),
+            transcript_path: "/t".into(),
+            cwd: "/w".into(),
+            permission_mode: None,
+            agent_id: None,
+            agent_type: None,
+            task_id: "t1".into(),
+            task_subject: "subj".into(),
+            task_description: Some("desc".into()),
+            teammate_name: Some("researcher".into()),
+            team_name: Some("alpha".into()),
+        };
+        let s = serde_json::to_string(&p).unwrap();
+        assert_eq!(
+            s,
+            r#"{"hook_event_name":"TaskCreated","session_id":"s","transcript_path":"/t","cwd":"/w","task_id":"t1","task_subject":"subj","task_description":"desc","teammate_name":"researcher","team_name":"alpha"}"#
+        );
+    }
+
     #[test]
     fn user_prompt_submit_payload_serializes_byte_lock() {
         let p = UserPromptSubmitPayload {

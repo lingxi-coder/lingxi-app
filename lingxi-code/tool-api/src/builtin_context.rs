@@ -229,13 +229,19 @@ pub trait TaskLifecycleHookFirer: Send + Sync {
     /// claude-code `executeTaskCreatedHooks` BLOCKING path. `Ok(())` = allow
     /// creation; `Err(reason)` = a hook BLOCKED creation (the tool rolls the
     /// just-created task back and surfaces `reason`).
+    ///
+    /// `teammate_name` / `team_name` carry the creating teammate's identity
+    /// (claude-code `getAgentName()` / `getTeamName()`, `TaskCreateTool.ts:97-98`)
+    /// into the `TaskCreated` hook payload; `None` for the main thread / leader.
     async fn fire_task_created(
         &self,
         task_id: &str,
         subject: &str,
         description: Option<&str>,
+        teammate_name: Option<&str>,
+        team_name: Option<&str>,
     ) -> Result<(), String> {
-        let _ = (task_id, subject, description);
+        let _ = (task_id, subject, description, teammate_name, team_name);
         Ok(())
     }
     /// claude-code `executeTaskCompletedHooks` BLOCKING path. `Ok(())` = allow

@@ -98,6 +98,12 @@ impl ToolInvoker for RegistryToolInvoker {
             messages: vec![],
             tool_use_id: None,
             agent_id: ctx.parent_agent_id,
+            // The subagent-invocation seam carries only the parent agent id; the
+            // teammate DISPLAY name / team name are not threaded through this
+            // narrow surface yet, so they stay `None` here (matching the leader /
+            // main-thread default).
+            agent_name: None,
+            team_name: None,
             content_replacement_state: None,
             session: None,
             subagent_registry: Some(self.registry.clone()),

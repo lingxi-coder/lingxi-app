@@ -119,6 +119,14 @@ impl TeammateMailbox {
 /// Routes a [`TeammateMessage`] to the mailbox registered for an [`AgentId`].
 pub struct MailboxRouter {
     mailboxes: tokio::sync::RwLock<std::collections::HashMap<AgentId, Arc<TeammateMailbox>>>,
+    /// Display-name → [`AgentId`] index (keys lower-cased) so a message can be
+    /// addressed by a teammate's NAME, not just its id. claude-code's mailbox is
+    /// keyed by agent name (`teammateMailbox.ts`); the `TaskUpdate` owner-change
+    /// notification and `getAgentStatuses` both address recipients by NAME. The
+    /// registry populates this on `spawn_worker` and clears it on
+    /// `delete_worker`. Separate from `mailboxes` so the id-keyed delivery path
+    /// stays unchanged.
+    names: tokio::sync::RwLock<std::collections::HashMap<String, AgentId>>,
 }
 
 impl MailboxRouter {
@@ -127,12 +135,35 @@ impl MailboxRouter {
     pub fn new() -> Self {
         Self {
             mailboxes: tokio::sync::RwLock::new(std::collections::HashMap::new()),
+            names: tokio::sync::RwLock::new(std::collections::HashMap::new()),
         }
     }
 
     /// Register `mailbox` for `agent_id`. Existing entries are overwritten.
     pub async fn register(&self, agent_id: AgentId, mailbox: Arc<TeammateMailbox>) {
         self.mailboxes.write().await.insert(agent_id, mailbox);
+    }
+
+    /// Index `name` → `agent_id` so the worker can later be addressed by its
+    /// display name (case-insensitively). Empty names are ignored.
+    pub async fn register_name(&self, name: &str, agent_id: AgentId) {
+        if name.is_empty() {
+            return;
+        }
+        self.names
+            .write()
+            .await
+            .insert(name.to_ascii_lowercase(), agent_id);
+    }
+
+    /// Resolve a teammate display `name` to its [`AgentId`] (case-insensitive),
+    /// if one is registered.
+    pub async fn resolve_name(&self, name: &str) -> Option<AgentId> {
+        self.names
+            .read()
+            .await
+            .get(&name.to_ascii_lowercase())
+            .copied()
     }
 
     /// Look up the mailbox registered for `agent_id`, if any.
@@ -152,9 +183,11 @@ impl MailboxRouter {
         mb.deliver(msg)
     }
 
-    /// Drop the mailbox registration for `agent`.
+    /// Drop the mailbox registration for `agent` (and any name index pointing at
+    /// it).
     pub async fn unregister(&self, agent: &AgentId) {
         self.mailboxes.write().await.remove(agent);
+        self.names.write().await.retain(|_, id| id != agent);
     }
 }
 

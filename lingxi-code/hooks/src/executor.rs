@@ -756,15 +756,17 @@ fn build_lifecycle_envelope_body(
             task_id,
             task_type,
             description,
+            teammate_name,
+            team_name,
         } => {
             // `executeTaskCreatedHooks` (`utils/hooks.ts:3756-3764`): the wire
             // payload carries `task_subject` (required) + optional
             // `task_description` / `teammate_name` / `team_name`. The Rust
             // `TaskCreated` variant sources the subject from the task's
             // `task_type` taxonomy bucket and the description from
-            // `description`; `teammate_name` / `team_name` are not stored on the
-            // task state, so they ride as `None` (same documented gap as the
-            // `TaskCompleted` arm).
+            // `description`; `teammate_name` / `team_name` ride from the
+            // creating teammate's identity (TS `getAgentName()` / `getTeamName()`)
+            // when bound, else `None`.
             let payload = TaskCreatedPayload {
                 hook_event_name: HookEventNameTaskCreated,
                 session_id: b.session_id,
@@ -776,8 +778,8 @@ fn build_lifecycle_envelope_body(
                 task_id: task_id.clone(),
                 task_subject: task_type.clone(),
                 task_description: Some(description.clone()),
-                teammate_name: None,
-                team_name: None,
+                teammate_name: teammate_name.clone(),
+                team_name: team_name.clone(),
             };
             Some(("TaskCreated", serde_json::to_string(&payload).ok()?))
         }
@@ -2289,6 +2291,8 @@ mod command_arm_tests {
                     task_id: "t".into(),
                     task_type: "LocalBash".into(),
                     description: "do the work".into(),
+                    teammate_name: None,
+                    team_name: None,
                 },
                 "TaskCreated",
             ),

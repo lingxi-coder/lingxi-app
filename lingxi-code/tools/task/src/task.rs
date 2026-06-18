@@ -350,15 +350,42 @@ enum StatusInput {
     State(TodoState),
 }
 
-/// Resolve the task-list id (`getTaskListId()`), collapsed to the session id in
-/// single-process. `CLAUDE_CODE_TASK_LIST_ID` overrides (TS priority 1); the
-/// teammate / team-name branches collapse to the session.
+/// Resolve the task-list id — 1:1 port of `getTaskListId()`
+/// (`utils/tasks.ts:199-210`). Five-level precedence:
+///
+/// 1. `CLAUDE_CODE_TASK_LIST_ID` env (explicit override).
+/// 2. In-process teammate `teamName` ([`ToolUseContext::team_name`], TS
+///    `getTeammateContext()?.teamName`) — so in-process teammates share the
+///    leader's task list.
+/// 3. `CLAUDE_CODE_TEAM_NAME` env (TS `getTeamName()`, set when running as a
+///    process-based teammate).
+/// 4. Leader team name ([`traits::team_registry::leader_team_name`], TS
+///    `leaderTeamName` set by `TeamCreate`).
+/// 5. Session id (fallback for standalone sessions).
+///
+/// The leader and its in-process teammates resolve to the SAME on-disk task dir.
 async fn resolve_task_list_id(ctx: &ToolUseContext) -> String {
+    // 1. Explicit env override.
     if let Some(explicit) = std::env::var_os("CLAUDE_CODE_TASK_LIST_ID") {
         if !explicit.is_empty() {
             return explicit.to_string_lossy().into_owned();
         }
     }
+    // 2. In-process teammate team name (threaded on the call context).
+    if let Some(team) = ctx.team_name.as_deref().filter(|t| !t.is_empty()) {
+        return team.to_string();
+    }
+    // 3. CLAUDE_CODE_TEAM_NAME env (process-based teammate; TS getTeamName()).
+    if let Some(team) = std::env::var_os("CLAUDE_CODE_TEAM_NAME") {
+        if !team.is_empty() {
+            return team.to_string_lossy().into_owned();
+        }
+    }
+    // 4. Leader team name (set by TeamCreate via setLeaderTeamName).
+    if let Some(team) = traits::team_registry::leader_team_name().filter(|t| !t.is_empty()) {
+        return team;
+    }
+    // 5. Session id fallback.
     match &ctx.session {
         Some(session) => session.lock().await.session_id.to_string(),
         None => "default".to_string(),
@@ -542,6 +569,54 @@ All tasks are created with status `pending`.
 - Check TaskList first to avoid creating duplicate tasks
 "#;
 
+/// `TaskCreate` prompt — swarms-ENABLED variant (`TaskCreateTool/prompt.ts`
+/// `getPrompt()` with `isAgentSwarmsEnabled() === true`). Splices
+/// `teammateContext` ( and potentially assigned to teammates) onto the
+/// "multiple operations" bullet and inserts the two `teammateTips` bullets
+/// before the final "Check TaskList first" tip. Byte-identical to the TS output.
+const TASK_CREATE_PROMPT_SWARM: &str = r#"Use this tool to create a structured task list for your current coding session. This helps you track progress, organize complex tasks, and demonstrate thoroughness to the user.
+It also helps the user understand the progress of the task and overall progress of their requests.
+
+## When to Use This Tool
+
+Use this tool proactively in these scenarios:
+
+- Complex multi-step tasks - When a task requires 3 or more distinct steps or actions
+- Non-trivial and complex tasks - Tasks that require careful planning or multiple operations and potentially assigned to teammates
+- Plan mode - When using plan mode, create a task list to track the work
+- User explicitly requests todo list - When the user directly asks you to use the todo list
+- User provides multiple tasks - When users provide a list of things to be done (numbered or comma-separated)
+- After receiving new instructions - Immediately capture user requirements as tasks
+- When you start working on a task - Mark it as in_progress BEFORE beginning work
+- After completing a task - Mark it as completed and add any new follow-up tasks discovered during implementation
+
+## When NOT to Use This Tool
+
+Skip using this tool when:
+- There is only a single, straightforward task
+- The task is trivial and tracking it provides no organizational benefit
+- The task can be completed in less than 3 trivial steps
+- The task is purely conversational or informational
+
+NOTE that you should not use this tool if there is only one trivial task to do. In this case you are better off just doing the task directly.
+
+## Task Fields
+
+- **subject**: A brief, actionable title in imperative form (e.g., "Fix authentication bug in login flow")
+- **description**: What needs to be done
+- **activeForm** (optional): Present continuous form shown in the spinner when the task is in_progress (e.g., "Fixing authentication bug"). If omitted, the spinner shows the subject instead.
+
+All tasks are created with status `pending`.
+
+## Tips
+
+- Create tasks with clear, specific subjects that describe the outcome
+- After creating tasks, use TaskUpdate to set up dependencies (blocks/blockedBy) if needed
+- Include enough detail in the description for another agent to understand and complete the task
+- New tasks are created with status 'pending' and no owner - use TaskUpdate with the `owner` parameter to assign them
+- Check TaskList first to avoid creating duplicate tasks
+"#;
+
 const TASK_GET_PROMPT: &str = r"Use this tool to retrieve a task by its ID from the task list.
 
 ## When to Use This Tool
@@ -585,6 +660,42 @@ Returns a summary of each task:
 - **blockedBy**: List of open task IDs that must be resolved first (tasks with blockedBy cannot be claimed until dependencies resolve)
 
 Use TaskGet with a specific task ID to view full details including description and comments.
+";
+
+/// `TaskList` prompt — swarms-ENABLED variant (`TaskListTool/prompt.ts`
+/// `getPrompt()` with `isAgentSwarmsEnabled() === true`). Adds the
+/// `teammateUseCase` bullet after the "need dependencies resolved" line and
+/// appends the `## Teammate Workflow` section. Byte-identical to the TS output.
+const TASK_LIST_PROMPT_SWARM: &str = r"Use this tool to list all tasks in the task list.
+
+## When to Use This Tool
+
+- To see what tasks are available to work on (status: 'pending', no owner, not blocked)
+- To check overall progress on the project
+- To find tasks that are blocked and need dependencies resolved
+- Before assigning tasks to teammates, to see what's available
+- After completing a task, to check for newly unblocked work or claim the next available task
+- **Prefer working on tasks in ID order** (lowest ID first) when multiple tasks are available, as earlier tasks often set up context for later ones
+
+## Output
+
+Returns a summary of each task:
+- **id**: Task identifier (use with TaskGet, TaskUpdate)
+- **subject**: Brief description of the task
+- **status**: 'pending', 'in_progress', or 'completed'
+- **owner**: Agent ID if assigned, empty if available
+- **blockedBy**: List of open task IDs that must be resolved first (tasks with blockedBy cannot be claimed until dependencies resolve)
+
+Use TaskGet with a specific task ID to view full details including description and comments.
+
+## Teammate Workflow
+
+When working as a teammate:
+1. After completing your current task, call TaskList to find available work
+2. Look for tasks with status 'pending', no owner, and empty blockedBy
+3. **Prefer tasks in ID order** (lowest ID first) when multiple tasks are available, as earlier tasks often set up context for later ones
+4. Claim an available task using TaskUpdate (set `owner` to your name), or wait for leader assignment
+5. If blocked, focus on unblocking tasks or notify the team lead
 ";
 
 const TASK_UPDATE_PROMPT: &str = r#"Use this tool to update a task in the task list.
@@ -737,9 +848,14 @@ impl Tool for TaskCreateTool {
         "Create a new task in the task list".into()
     }
     async fn prompt(&self, _: &PromptOptions) -> String {
-        // PARITY-GAP: the isAgentSwarmsEnabled() additions to getPrompt()
-        // (teammate context / owner tips) are omitted; this is the base variant.
-        TASK_CREATE_PROMPT.into()
+        // getPrompt() (TaskCreateTool/prompt.ts): the swarms-ENABLED variant
+        // splices the teammateContext / teammateTips inserts; the disabled
+        // variant is byte-identical to the base const.
+        if is_agent_swarms_enabled() {
+            TASK_CREATE_PROMPT_SWARM.into()
+        } else {
+            TASK_CREATE_PROMPT.into()
+        }
     }
 
     async fn call(
@@ -825,7 +941,16 @@ impl Tool for TaskCreateTool {
         // fire-and-forget registry path.
         if let Some(firer) = self.ctx.task_lifecycle_hooks.as_ref() {
             if let Err(reason) = firer
-                .fire_task_created(&task_id, &subject, Some(description.as_str()))
+                .fire_task_created(
+                    &task_id,
+                    &subject,
+                    Some(description.as_str()),
+                    // claude-code `getAgentName()` / `getTeamName()`
+                    // (`TaskCreateTool.ts:97-98`) — the creating teammate's
+                    // display name + team, threaded on the call context.
+                    ctx.agent_name.as_deref(),
+                    ctx.team_name.as_deref(),
+                )
                 .await
             {
                 // TS `await deleteTask(getTaskListId(), taskId)` then `throw`.
@@ -1071,7 +1196,14 @@ impl Tool for TaskListTool {
         "List all tasks in the task list".into()
     }
     async fn prompt(&self, _: &PromptOptions) -> String {
-        TASK_LIST_PROMPT.into()
+        // getPrompt() (TaskListTool/prompt.ts): the swarms-ENABLED variant adds
+        // the teammate use-case bullet + `## Teammate Workflow` section; the
+        // disabled variant is byte-identical to the base const.
+        if is_agent_swarms_enabled() {
+            TASK_LIST_PROMPT_SWARM.into()
+        } else {
+            TASK_LIST_PROMPT.into()
+        }
     }
 
     async fn call(
@@ -1384,17 +1516,20 @@ impl Tool for TaskUpdateTool {
         // Auto-set owner when a teammate marks a task as in_progress without
         // explicitly providing an owner. This ensures the task list can match
         // todo items to teammates for showing activity status
-        // (TaskUpdateTool.ts:188-199). claude-code uses `getAgentName()`; the
-        // Rust acting-agent identifier is `ctx.agent_id` (no name is plumbed —
-        // the id string is the "else the id" fallback). Skipped (like TS when
-        // `getAgentName()` is undefined) when no agent id is bound to the call.
+        // (TaskUpdateTool.ts:188-199). claude-code uses `getAgentName()` — the
+        // teammate's DISPLAY NAME ([`ToolUseContext::agent_name`]), NOT the
+        // `agent:<uuid>` id. `getAgentStatuses` matches owners against
+        // name / name@team, never against an id, so writing the uuid here would
+        // strand the owner. Skipped — exactly like TS when `getAgentName()`
+        // returns `undefined` — when no display name is bound (the main thread /
+        // leader); we must NOT write a uuid owner in that case.
         if is_agent_swarms_enabled()
             && status_input == StatusInput::State(TodoState::InProgress)
             && in_owner.is_none()
             && existing.owner.as_deref().is_none_or(str::is_empty)
         {
-            if let Some(agent) = ctx.agent_id {
-                new_owner = Some(agent.to_string());
+            if let Some(name) = ctx.agent_name.as_deref().filter(|n| !n.is_empty()) {
+                new_owner = Some(name.to_string());
                 updated_fields.push("owner".into());
             }
         }
@@ -1499,17 +1634,21 @@ impl Tool for TaskUpdateTool {
 
         // Notify new owner via mailbox when ownership changes
         // (TaskUpdateTool.ts:277-298). Best-effort, like the TS `writeToMailbox`
-        // (which swallows its own errors): a routing failure (e.g. an unknown /
-        // non-id owner string the id-based router can't resolve) never fails the
+        // (which swallows its own errors): a routing failure never fails the
         // TaskUpdate itself. `assignedBy` mirrors `getAgentName() || 'team-lead'`
-        // — the acting `ctx.agent_id` string, else the `team-lead` label. The
-        // `from` route address is that same identifier.
+        // — the acting teammate's DISPLAY NAME ([`ToolUseContext::agent_name`]),
+        // else the literal `"team-lead"` label (NOT the `agent:<uuid>` id; the
+        // recipient mailbox / `getAgentStatuses` key on names). The `from` route
+        // address is that same name/label, which the router resolves to an id
+        // (or accepts as the `team-lead` label).
         if is_agent_swarms_enabled() {
             if let (Some(owner), Some(router)) = (new_owner.clone(), self.ctx.mailbox_router.clone())
             {
                 let sender_name = ctx
-                    .agent_id
-                    .map_or_else(|| "team-lead".to_string(), |a| a.to_string());
+                    .agent_name
+                    .as_deref()
+                    .filter(|n| !n.is_empty())
+                    .map_or_else(|| "team-lead".to_string(), str::to_string);
                 let timestamp = iso8601_utc(std::time::SystemTime::now());
                 let assignment_message = serde_json::to_string(&json!({
                     "type": "task_assignment",
@@ -2951,6 +3090,16 @@ mod tests {
             c
         }
 
+        /// Build a teammate call context with both the agent id AND the display
+        /// NAME bound (claude-code `getAgentName()`), which the swarm-only
+        /// auto-owner / mailbox-sender paths key on (T6).
+        fn ctx_with_named_agent(agent: AgentId, name: &str) -> ToolUseContext {
+            let mut c = fresh_ctx();
+            c.agent_id = Some(agent);
+            c.agent_name = Some(name.to_string());
+            c
+        }
+
         fn task(subject: &str, status: TodoState) -> TodoTask {
             let mut t = TodoTask::new(subject.into(), "the description".into(), None, Map::new());
             t.status = status;
@@ -2964,12 +3113,14 @@ mod tests {
             let store = TodoStore::for_list(&list);
             let id = store.create(task("Build it", TodoState::Pending)).await.unwrap();
 
+            // T6: claude-code auto-owner = getAgentName() (the DISPLAY NAME),
+            // NOT the agent:<uuid> id. getAgentStatuses matches owners by name.
             let agent = AgentId::new();
             let tool = TaskUpdateTool::new(bctx(router));
             let res = tool
                 .call(
                     json!({ "taskId": &id, "status": "in_progress" }),
-                    ctx_with_agent(Some(agent)),
+                    ctx_with_named_agent(agent, "researcher"),
                     fresh_tx(),
                 )
                 .await
@@ -2981,9 +3132,39 @@ mod tests {
                 fields.iter().any(|f| f == "owner"),
                 "owner should be in updatedFields: {fields:?}"
             );
-            // Persisted owner == the acting agent id string (no name plumbed).
+            // Persisted owner == the teammate DISPLAY NAME (never the uuid).
             let after = store.get(&id).await.unwrap();
-            assert_eq!(after.owner.as_deref(), Some(agent.to_string().as_str()));
+            assert_eq!(after.owner.as_deref(), Some("researcher"));
+            assert_ne!(
+                after.owner.as_deref(),
+                Some(agent.to_string().as_str()),
+                "owner must NOT be the agent:<uuid> form"
+            );
+        }
+
+        /// T6: when only the agent id is bound but NOT the display name (e.g. a
+        /// teammate whose getAgentName() is undefined), the auto-owner is
+        /// SKIPPED — claude-code does not write a uuid owner in that case.
+        #[tokio::test]
+        async fn auto_owner_skipped_when_name_unbound() {
+            let (_g, list, router) = setup(true);
+            let store = TodoStore::for_list(&list);
+            let id = store.create(task("Build it", TodoState::Pending)).await.unwrap();
+
+            let tool = TaskUpdateTool::new(bctx(router));
+            // agent_id present but agent_name None ⇒ no auto-owner (no uuid owner).
+            tool.call(
+                json!({ "taskId": &id, "status": "in_progress" }),
+                ctx_with_agent(Some(AgentId::new())),
+                fresh_tx(),
+            )
+            .await
+            .expect("update ok");
+
+            assert!(
+                store.get(&id).await.unwrap().owner.is_none(),
+                "no auto-owner (and no uuid owner) when the display name is unbound"
+            );
         }
 
         #[tokio::test]
@@ -3073,14 +3254,14 @@ mod tests {
                 .await
                 .unwrap();
 
-            // Explicit owner change to a resolvable agent-id string (the id-based
-            // router parses it). The sender is the acting agent id.
-            let new_owner = AgentId::new();
+            // Explicit owner change addressed to a teammate by NAME (claude-code
+            // addresses mailboxes by name). The sender is the acting teammate's
+            // DISPLAY NAME (getAgentName()), NOT its agent:<uuid> id (T6).
             let sender = AgentId::new();
             let tool = TaskUpdateTool::new(bctx(router.clone()));
             tool.call(
-                json!({ "taskId": &id, "owner": new_owner.to_string() }),
-                ctx_with_agent(Some(sender)),
+                json!({ "taskId": &id, "owner": "scout" }),
+                ctx_with_named_agent(sender, "scribe"),
                 fresh_tx(),
             )
             .await
@@ -3089,16 +3270,48 @@ mod tests {
             let sent = router.sent.lock().unwrap();
             assert_eq!(sent.len(), 1, "exactly one task_assignment routed");
             let (from, to, msg) = &sent[0];
-            assert_eq!(to, &new_owner.to_string(), "routed to the new owner");
-            assert_eq!(from, &sender.to_string(), "from = acting agent id");
+            assert_eq!(to, "scout", "routed to the new owner by NAME");
+            assert_eq!(from, "scribe", "from = acting teammate display name");
+            assert_ne!(from, &sender.to_string(), "sender is NOT the agent:<uuid>");
 
             let body: Value = serde_json::from_str(&msg.content).unwrap();
             assert_eq!(body["type"], "task_assignment");
             assert_eq!(body["taskId"], id);
             assert_eq!(body["subject"], "Ship the feature");
             assert_eq!(body["description"], "the description");
-            assert_eq!(body["assignedBy"], sender.to_string());
+            assert_eq!(body["assignedBy"], "scribe");
             assert!(body["timestamp"].as_str().unwrap().ends_with('Z'), "ISO-8601 Z timestamp");
+        }
+
+        /// T6: when the acting agent has NO display name bound (the leader / main
+        /// thread), the mailbox sender falls back to the literal `"team-lead"`
+        /// (claude-code `getAgentName() || 'team-lead'`), NEVER a uuid.
+        #[tokio::test]
+        async fn owner_change_sender_falls_back_to_team_lead_when_unnamed() {
+            let (_g, list, router) = setup(true);
+            let store = TodoStore::for_list(&list);
+            let id = store
+                .create(task("Ship the feature", TodoState::Pending))
+                .await
+                .unwrap();
+
+            // Leader: agent_id may be set but agent_name is None.
+            let tool = TaskUpdateTool::new(bctx(router.clone()));
+            tool.call(
+                json!({ "taskId": &id, "owner": "scout" }),
+                ctx_with_agent(Some(AgentId::new())),
+                fresh_tx(),
+            )
+            .await
+            .expect("update ok");
+
+            let sent = router.sent.lock().unwrap();
+            assert_eq!(sent.len(), 1, "exactly one task_assignment routed");
+            let (from, to, msg) = &sent[0];
+            assert_eq!(to, "scout");
+            assert_eq!(from, "team-lead", "unnamed sender → literal team-lead label");
+            let body: Value = serde_json::from_str(&msg.content).unwrap();
+            assert_eq!(body["assignedBy"], "team-lead");
         }
 
         #[tokio::test]
@@ -3250,6 +3463,206 @@ mod tests {
         }
     }
 
+    // ── T1 getTaskListId() 5-level precedence (utils/tasks.ts:199-210) ───────
+    mod task_list_id_precedence {
+        use super::*;
+
+        /// Restore-on-drop guard for the env vars + leader-team-name global this
+        /// module flips. Holds the shared ENV_LOCK so it does not race other
+        /// env-mutating tests.
+        struct Guard {
+            prev_list: Option<std::ffi::OsString>,
+            prev_team: Option<std::ffi::OsString>,
+            _lock: std::sync::MutexGuard<'static, ()>,
+        }
+        impl Drop for Guard {
+            fn drop(&mut self) {
+                match &self.prev_list {
+                    Some(v) => std::env::set_var("CLAUDE_CODE_TASK_LIST_ID", v),
+                    None => std::env::remove_var("CLAUDE_CODE_TASK_LIST_ID"),
+                }
+                match &self.prev_team {
+                    Some(v) => std::env::set_var("CLAUDE_CODE_TEAM_NAME", v),
+                    None => std::env::remove_var("CLAUDE_CODE_TEAM_NAME"),
+                }
+                traits::team_registry::clear_leader_team_name();
+            }
+        }
+
+        fn guard() -> Guard {
+            let lock = super::ENV_LOCK
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let g = Guard {
+                prev_list: std::env::var_os("CLAUDE_CODE_TASK_LIST_ID"),
+                prev_team: std::env::var_os("CLAUDE_CODE_TEAM_NAME"),
+                _lock: lock,
+            };
+            // Start from a clean slate for every level.
+            std::env::remove_var("CLAUDE_CODE_TASK_LIST_ID");
+            std::env::remove_var("CLAUDE_CODE_TEAM_NAME");
+            traits::team_registry::clear_leader_team_name();
+            g
+        }
+
+        #[tokio::test]
+        async fn level1_env_task_list_id_wins() {
+            let _g = guard();
+            std::env::set_var("CLAUDE_CODE_TASK_LIST_ID", "explicit-list");
+            // Even with every lower level set, the explicit env wins.
+            std::env::set_var("CLAUDE_CODE_TEAM_NAME", "env-team");
+            traits::team_registry::set_leader_team_name("leader-team");
+            let mut ctx = tool_api::test_support::fresh_ctx();
+            ctx.team_name = Some("teammate-team".into());
+            assert_eq!(resolve_task_list_id(&ctx).await, "explicit-list");
+        }
+
+        #[tokio::test]
+        async fn level2_teammate_team_name() {
+            let _g = guard();
+            // No env override; teammate ctx team_name wins over env + leader.
+            std::env::set_var("CLAUDE_CODE_TEAM_NAME", "env-team");
+            traits::team_registry::set_leader_team_name("leader-team");
+            let mut ctx = tool_api::test_support::fresh_ctx();
+            ctx.team_name = Some("teammate-team".into());
+            assert_eq!(resolve_task_list_id(&ctx).await, "teammate-team");
+        }
+
+        #[tokio::test]
+        async fn level3_env_team_name() {
+            let _g = guard();
+            std::env::set_var("CLAUDE_CODE_TEAM_NAME", "env-team");
+            traits::team_registry::set_leader_team_name("leader-team");
+            // No teammate ctx team_name ⇒ CLAUDE_CODE_TEAM_NAME wins over leader.
+            let ctx = tool_api::test_support::fresh_ctx();
+            assert_eq!(resolve_task_list_id(&ctx).await, "env-team");
+        }
+
+        #[tokio::test]
+        async fn level4_leader_team_name() {
+            let _g = guard();
+            traits::team_registry::set_leader_team_name("leader-team");
+            // No env / teammate ctx ⇒ leader team name wins over the session.
+            let ctx = tool_api::test_support::fresh_ctx();
+            assert_eq!(resolve_task_list_id(&ctx).await, "leader-team");
+        }
+
+        #[tokio::test]
+        async fn level5_session_fallback() {
+            let _g = guard();
+            // Nothing set ⇒ session id (here "default" — no session wired).
+            let ctx = tool_api::test_support::fresh_ctx();
+            assert_eq!(resolve_task_list_id(&ctx).await, "default");
+        }
+
+        #[tokio::test]
+        async fn leader_and_teammate_resolve_same_dir() {
+            let _g = guard();
+            // Leader (no teammate ctx) resolves to the leader team name; an
+            // in-process teammate (ctx.team_name set to the SAME team) resolves
+            // to the same on-disk dir — the goal of T1.
+            traits::team_registry::set_leader_team_name("alpha-team");
+            let leader_ctx = tool_api::test_support::fresh_ctx();
+            let mut teammate_ctx = tool_api::test_support::fresh_ctx();
+            teammate_ctx.team_name = Some("alpha-team".into());
+            assert_eq!(
+                resolve_task_list_id(&leader_ctx).await,
+                resolve_task_list_id(&teammate_ctx).await
+            );
+            assert_eq!(resolve_task_list_id(&leader_ctx).await, "alpha-team");
+        }
+    }
+
+    // ── T12 swarm-enabled prompt fragments (TaskList/TaskCreate prompt.ts) ───
+    mod swarm_prompt_fragments {
+        use super::*;
+        use tool_api::tool_trait::PromptOptions;
+
+        /// Restore-on-drop guard for the swarm gate env var, holding ENV_LOCK.
+        struct Guard {
+            prev: Option<std::ffi::OsString>,
+            _lock: std::sync::MutexGuard<'static, ()>,
+        }
+        impl Drop for Guard {
+            fn drop(&mut self) {
+                match &self.prev {
+                    Some(v) => std::env::set_var("CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS", v),
+                    None => std::env::remove_var("CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS"),
+                }
+            }
+        }
+        fn guard(on: bool) -> Guard {
+            let lock = super::ENV_LOCK
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let g = Guard {
+                prev: std::env::var_os("CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS"),
+                _lock: lock,
+            };
+            if on {
+                std::env::set_var("CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS", "1");
+            } else {
+                std::env::remove_var("CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS");
+            }
+            g
+        }
+
+        fn bctx() -> BuiltinToolContext {
+            tool_api::test_support::ctx_for_file_tools(
+                tool_api::test_support::make_dummy_fs(),
+                std::sync::Arc::new(telemetry::AnalyticsBus::new()),
+                vec![std::env::temp_dir()],
+            )
+        }
+
+        #[tokio::test]
+        async fn task_list_prompt_disabled_is_base_text() {
+            let _g = guard(false);
+            let tool = TaskListTool::new(bctx());
+            let p = tool.prompt(&PromptOptions { include_examples: false }).await;
+            assert_eq!(p, TASK_LIST_PROMPT, "disabled variant is byte-identical to base");
+            assert!(!p.contains("## Teammate Workflow"));
+        }
+
+        #[tokio::test]
+        async fn task_list_prompt_enabled_has_teammate_workflow() {
+            let _g = guard(true);
+            let tool = TaskListTool::new(bctx());
+            let p = tool.prompt(&PromptOptions { include_examples: false }).await;
+            assert_eq!(p, TASK_LIST_PROMPT_SWARM);
+            assert!(p.contains("## Teammate Workflow"));
+            assert!(p.contains("- Before assigning tasks to teammates, to see what's available"));
+            // The base body is preserved verbatim up to the workflow section.
+            assert!(p.starts_with("Use this tool to list all tasks in the task list."));
+        }
+
+        #[tokio::test]
+        async fn task_create_prompt_disabled_is_base_text() {
+            let _g = guard(false);
+            let tool = TaskCreateTool::new(bctx());
+            let p = tool.prompt(&PromptOptions { include_examples: false }).await;
+            assert_eq!(p, TASK_CREATE_PROMPT, "disabled variant is byte-identical to base");
+            assert!(!p.contains("and potentially assigned to teammates"));
+        }
+
+        #[tokio::test]
+        async fn task_create_prompt_enabled_has_teammate_inserts() {
+            let _g = guard(true);
+            let tool = TaskCreateTool::new(bctx());
+            let p = tool.prompt(&PromptOptions { include_examples: false }).await;
+            assert_eq!(p, TASK_CREATE_PROMPT_SWARM);
+            assert!(p.contains(
+                "Tasks that require careful planning or multiple operations and potentially assigned to teammates"
+            ));
+            assert!(p.contains(
+                "- Include enough detail in the description for another agent to understand and complete the task"
+            ));
+            assert!(p.contains(
+                "- New tasks are created with status 'pending' and no owner - use TaskUpdate with the `owner` parameter to assign them"
+            ));
+        }
+    }
+
     // ── T8 / T19 Product-B TaskStop / TaskOutput tool-flag parity ────────────
     mod product_b_tool_flags {
         use super::*;
@@ -3366,7 +3779,10 @@ mod tests {
             block_completed: Option<String>,
             created_calls: AtomicUsize,
             completed_calls: AtomicUsize,
-            last_created: std::sync::Mutex<Option<(String, String, Option<String>)>>,
+            #[allow(clippy::type_complexity)]
+            last_created: std::sync::Mutex<
+                Option<(String, String, Option<String>, Option<String>, Option<String>)>,
+            >,
             last_completed: std::sync::Mutex<Option<(String, String, String, Option<String>)>>,
         }
         #[async_trait]
@@ -3376,10 +3792,17 @@ mod tests {
                 task_id: &str,
                 subject: &str,
                 description: Option<&str>,
+                teammate_name: Option<&str>,
+                team_name: Option<&str>,
             ) -> Result<(), String> {
                 self.created_calls.fetch_add(1, Ordering::SeqCst);
-                *self.last_created.lock().unwrap() =
-                    Some((task_id.into(), subject.into(), description.map(str::to_string)));
+                *self.last_created.lock().unwrap() = Some((
+                    task_id.into(),
+                    subject.into(),
+                    description.map(str::to_string),
+                    teammate_name.map(str::to_string),
+                    team_name.map(str::to_string),
+                ));
                 match &self.block_created {
                     Some(reason) => Err(reason.clone()),
                     None => Ok(()),
@@ -3442,7 +3865,8 @@ mod tests {
                 other => panic!("expected Internal(reason), got {other:?}"),
             }
             // The fire saw the (task_id, subject, description) payload.
-            let (_id, subj, desc) = firer.last_created.lock().unwrap().clone().unwrap();
+            let (_id, subj, desc, _tm, _team) =
+                firer.last_created.lock().unwrap().clone().unwrap();
             assert_eq!(subj, "Ship it");
             assert_eq!(desc.as_deref(), Some("do the work"));
             // CRITICAL: the just-created task was rolled back — the store is empty.
@@ -3485,6 +3909,52 @@ mod tests {
             .expect("no firer → normal create");
             let store = TodoStore::for_list(&list);
             assert_eq!(store.list().await.len(), 1, "the task is persisted with no firer");
+        }
+
+        /// T25: the `TaskCreated` hook fire carries the creating teammate's
+        /// `teammate_name` / `team_name` (claude-code `getAgentName()` /
+        /// `getTeamName()`), threaded from the call context.
+        #[tokio::test]
+        async fn task_created_hook_carries_teammate_and_team_name() {
+            let (_g, _list) = setup();
+            let firer = Arc::new(FakeFirer::default());
+            let tool = TaskCreateTool::new(bctx(Some(firer.clone())));
+            let mut ctx = fresh_ctx();
+            ctx.agent_name = Some("researcher".into());
+            ctx.team_name = Some("alpha-team".into());
+            tool.call(
+                json!({ "subject": "Ship it", "description": "do the work" }),
+                ctx,
+                fresh_tx(),
+            )
+            .await
+            .expect("create ok");
+
+            let (_id, _subj, _desc, teammate, team) =
+                firer.last_created.lock().unwrap().clone().unwrap();
+            assert_eq!(teammate.as_deref(), Some("researcher"), "teammate_name threaded");
+            assert_eq!(team.as_deref(), Some("alpha-team"), "team_name threaded");
+        }
+
+        /// T25: on the main thread / leader (no teammate identity), the
+        /// `TaskCreated` hook fire carries `None` for both names.
+        #[tokio::test]
+        async fn task_created_hook_omits_names_on_main_thread() {
+            let (_g, _list) = setup();
+            let firer = Arc::new(FakeFirer::default());
+            let tool = TaskCreateTool::new(bctx(Some(firer.clone())));
+            tool.call(
+                json!({ "subject": "Ship it", "description": "do the work" }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .expect("create ok");
+
+            let (_id, _subj, _desc, teammate, team) =
+                firer.last_created.lock().unwrap().clone().unwrap();
+            assert_eq!(teammate, None, "no teammate_name on the main thread");
+            assert_eq!(team, None, "no team_name on the main thread");
         }
 
         #[tokio::test]

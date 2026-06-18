@@ -26,6 +26,20 @@ pub struct ToolUseContext {
     pub tool_use_id: Option<ToolUseId>,
     /// The agent that issued this call, if known.
     pub agent_id: Option<AgentId>,
+    /// The DISPLAY NAME of the teammate that issued this call, if known
+    /// (claude-code `getAgentName()`). For an in-process teammate this is its
+    /// human name (e.g. `"researcher"`), NOT the `agent:<uuid>` form of
+    /// [`Self::agent_id`]. `None` for the main thread / leader (TS
+    /// `getAgentName()` returns `undefined`). The swarm-only `TaskUpdate`
+    /// side-effects (auto-owner, owner-change mailbox notification) key on this
+    /// NAME so on-disk owners / mailbox senders match what `getAgentStatuses`
+    /// looks up (name, never `agent:<uuid>`).
+    pub agent_name: Option<String>,
+    /// The TEAM NAME the issuing teammate belongs to, if known (claude-code
+    /// `getTeammateContext()?.teamName`). Consulted by `getTaskListId()`
+    /// (priority 2) so in-process teammates resolve to the leader's on-disk task
+    /// directory. `None` for the main thread / standalone sessions.
+    pub team_name: Option<String>,
     /// Shared content-replacement state. Populated in Task 3.
     pub content_replacement_state: Option<Arc<Mutex<ContentReplacementState>>>,
     /// Mutable session state (M4-04). Tools that mutate the conversation
@@ -72,6 +86,8 @@ impl ToolUseContext {
             messages: Vec::new(),
             tool_use_id: None,
             agent_id: None,
+            agent_name: None,
+            team_name: None,
             content_replacement_state: None,
             session: None,
             subagent_registry: None,

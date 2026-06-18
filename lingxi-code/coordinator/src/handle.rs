@@ -20,12 +20,16 @@ use uuid::Uuid;
 /// Byte-locked teammate claim window (spec §7 line 498).
 pub const CLAIM_WINDOW_SECS: u64 = 30;
 
-fn parse_agent_id(s: &str) -> Result<AgentId, MailboxError> {
-    // Accept either bare UUIDs or the display form `agent:<uuid>`.
+/// The lead member's name (TS `TEAM_LEAD_NAME = "team-lead"`,
+/// `utils/swarm/constants.ts:1`). The `TaskUpdate` owner-change notification
+/// uses this literal as the sender when no teammate name is bound (the leader /
+/// main thread), so `route()` must ACCEPT it rather than require an id.
+const TEAM_LEAD_NAME: &str = "team-lead";
+
+/// Parse a bare UUID or the display form `agent:<uuid>` into an [`AgentId`].
+fn try_parse_agent_id(s: &str) -> Option<AgentId> {
     let raw = s.strip_prefix("agent:").unwrap_or(s);
-    Uuid::parse_str(raw)
-        .map(AgentId::from_uuid)
-        .map_err(|e| MailboxError::Internal(format!("invalid agent id '{s}': {e}")))
+    Uuid::parse_str(raw).ok().map(AgentId::from_uuid)
 }
 
 #[async_trait]
@@ -36,11 +40,39 @@ impl MailboxRouterHandle for MailboxRouter {
         to_agent: &str,
         message: MailboxMessage,
     ) -> Result<RouteAck, MailboxError> {
-        let from_id = parse_agent_id(from_agent)?;
-        let to_id = parse_agent_id(to_agent)?;
+        // Resolve the SENDER label into a `MessageSender`. claude-code addresses
+        // mailboxes by NAME; the common `TaskUpdate` notification sender is the
+        // literal `"team-lead"` (→ the coordinator) when no teammate name is
+        // bound. A bare uuid / `agent:<uuid>` → `Teammate(id)`; a registered
+        // display name → `Teammate(id)`; anything else (incl. `team-lead`) →
+        // `Coordinator`, so a stray sender label never drops the message
+        // (parity with TS, where `from` is just a label).
+        let from = if from_agent.eq_ignore_ascii_case(TEAM_LEAD_NAME) {
+            MessageSender::Coordinator
+        } else if let Some(id) = try_parse_agent_id(from_agent) {
+            MessageSender::Teammate(id)
+        } else if let Some(id) = self.resolve_name(from_agent).await {
+            MessageSender::Teammate(id)
+        } else {
+            MessageSender::Coordinator
+        };
+
+        // Resolve the RECIPIENT into an [`AgentId`]: a bare uuid / `agent:<uuid>`
+        // first, then a registered display NAME (the common case — `TaskUpdate`
+        // assigns ownership by name). An unresolvable recipient is `NotFound`,
+        // so a genuinely unknown teammate still surfaces cleanly.
+        let to_id = if let Some(id) = try_parse_agent_id(to_agent) {
+            id
+        } else if let Some(id) = self.resolve_name(to_agent).await {
+            id
+        } else {
+            return Err(MailboxError::NotFound(format!(
+                "unknown recipient '{to_agent}'"
+            )));
+        };
 
         let teammate_msg = TeammateMessage {
-            from: MessageSender::Teammate(from_id),
+            from,
             content: message.content,
             message_id: message.message_id,
             timestamp: message.timestamp,
@@ -148,6 +180,97 @@ mod tests {
                 MailboxMessage {
                     message_id: "m1".into(),
                     content: "hi".into(),
+                    timestamp: SystemTime::now(),
+                },
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, MailboxError::NotFound(_)));
+    }
+
+    /// T7: a `team-lead` → named-teammate task-assignment notification delivers.
+    /// The sender is the literal `"team-lead"` (not a uuid) and the recipient is
+    /// addressed by NAME — exactly the shape `TaskUpdate` produces when the
+    /// leader claims a task for a teammate. Previously the id-only router dropped
+    /// both, so the message never reached the teammate.
+    #[tokio::test]
+    async fn route_team_lead_to_named_teammate_delivers() {
+        let reg = TeamRegistry::new(AgentId::new());
+        let teammate = reg
+            .spawn_worker("explorer".into(), "Researcher".into(), String::new())
+            .await
+            .unwrap();
+
+        // Route through the trait surface the tool actually uses.
+        let h: &dyn MailboxRouterHandle = reg.mailbox_router.as_ref();
+        let ack = h
+            .route(
+                "team-lead",
+                "researcher", // case-insensitive name resolution
+                MailboxMessage {
+                    message_id: "m1".into(),
+                    content: r#"{"type":"task_assignment"}"#.into(),
+                    timestamp: SystemTime::now(),
+                },
+            )
+            .await
+            .expect("team-lead → named teammate must deliver");
+        assert_eq!(ack.claim_window_secs, 30);
+
+        // The message landed in the named teammate's mailbox, sender = Coordinator.
+        let mailbox = reg
+            .mailbox_router
+            .get(&teammate)
+            .await
+            .expect("teammate mailbox registered");
+        let drained = mailbox.drain();
+        assert_eq!(drained.len(), 1, "exactly one message delivered");
+        assert!(matches!(drained[0].from, MessageSender::Coordinator));
+        assert_eq!(drained[0].content, r#"{"type":"task_assignment"}"#);
+    }
+
+    /// A teammate-name SENDER resolves to `Teammate(id)`, and an unknown
+    /// recipient NAME is `NotFound` (not silently dropped).
+    #[tokio::test]
+    async fn route_resolves_sender_name_and_rejects_unknown_recipient_name() {
+        let reg = TeamRegistry::new(AgentId::new());
+        let sender = reg
+            .spawn_worker("writer".into(), "scribe".into(), String::new())
+            .await
+            .unwrap();
+        let recipient = reg
+            .spawn_worker("explorer".into(), "scout".into(), String::new())
+            .await
+            .unwrap();
+
+        let h: &dyn MailboxRouterHandle = reg.mailbox_router.as_ref();
+        h.route(
+            "scribe",
+            "scout",
+            MailboxMessage {
+                message_id: "m2".into(),
+                content: "hi".into(),
+                timestamp: SystemTime::now(),
+            },
+        )
+        .await
+        .expect("named sender → named recipient delivers");
+
+        let drained = reg.mailbox_router.get(&recipient).await.unwrap().drain();
+        assert_eq!(drained.len(), 1);
+        assert!(
+            matches!(drained[0].from, MessageSender::Teammate(id) if id == sender),
+            "named sender resolves to Teammate(id)"
+        );
+
+        // Unknown recipient NAME → NotFound.
+        let err = h
+            .route(
+                "team-lead",
+                "ghost",
+                MailboxMessage {
+                    message_id: "m3".into(),
+                    content: "x".into(),
                     timestamp: SystemTime::now(),
                 },
             )

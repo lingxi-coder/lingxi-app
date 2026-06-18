@@ -67,13 +67,14 @@ impl TaskCreatedFirer for OrchestratorTaskCreatedFirer {
         // `task_type` (the taxonomy bucket the envelope builder serializes as
         // the wire `task_subject`) and its detail field `description` (wire
         // `task_description`). Map the fire's `task_subject` / `task_description`
-        // onto those. `teammate_name` / `team_name` are not carried on the
-        // `HookEvent` variant (the M-surface task state has no source for them),
-        // so they are dropped here — the same gap the firer payload documents.
+        // onto those, and propagate the fire's `teammate_name` / `team_name`
+        // (TS `getAgentName()` / `getTeamName()`, `TaskCreateTool.ts:97-98`).
         let event = HookEvent::TaskCreated {
             task_id: fire.task_id,
             task_type: fire.task_subject,
             description: fire.task_description.unwrap_or_default(),
+            teammate_name: fire.teammate_name,
+            team_name: fire.team_name,
         };
         // Context-light: a task-creation transition has no live per-turn session
         // here, so we thread only the engine cwd (also the CLAUDE_PROJECT_DIR

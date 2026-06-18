@@ -33,7 +33,9 @@
 //!
 //! - `TaskCreated`: the `HookEvent::TaskCreated` variant names its subject field
 //!   `task_type` (serialized as the wire `task_subject`) and its detail field
-//!   `description` (wire `task_description`) — matching
+//!   `description` (wire `task_description`); `teammate_name` / `team_name` ride
+//!   from the creating teammate's identity (TS `getAgentName()` / `getTeamName()`,
+//!   `TaskCreateTool.ts:97-98`) — matching
 //!   [`OrchestratorTaskCreatedFirer`](crate::OrchestratorTaskCreatedFirer).
 //! - `TaskCompleted`: a full `HookEvent::TaskCompleted` with
 //!   `teammate_name` / `team_name` = `None` (the M-surface task state has no
@@ -109,16 +111,19 @@ impl TaskLifecycleHookFirer for OrchestratorTaskLifecycleHookFirer {
         task_id: &str,
         subject: &str,
         description: Option<&str>,
+        teammate_name: Option<&str>,
+        team_name: Option<&str>,
     ) -> Result<(), String> {
         // The `HookEvent::TaskCreated` variant names its subject field
         // `task_type` (wire `task_subject`) and its detail field `description`
-        // (wire `task_description`). `teammate_name` / `team_name` are not
-        // carried on the variant — the same documented gap the registry firer
-        // has.
+        // (wire `task_description`); `teammate_name` / `team_name` ride from the
+        // creating teammate's identity (TS `getAgentName()` / `getTeamName()`).
         let event = HookEvent::TaskCreated {
             task_id: task_id.to_string(),
             task_type: subject.to_string(),
             description: description.unwrap_or_default().to_string(),
+            teammate_name: teammate_name.map(str::to_string),
+            team_name: team_name.map(str::to_string),
         };
         self.run(event).await
     }
@@ -161,7 +166,9 @@ mod tests {
         let firer =
             OrchestratorTaskLifecycleHookFirer::new(noop_hook_executor(), PathBuf::from("/work"));
         assert_eq!(
-            firer.fire_task_created("t1", "ship it", Some("do the work")).await,
+            firer
+                .fire_task_created("t1", "ship it", Some("do the work"), None, None)
+                .await,
             Ok(()),
             "no TaskCreated hook → allow"
         );
@@ -259,7 +266,9 @@ mod tests {
             blocking_executor_for(HookEventType::TaskCreated, "creation denied"),
             PathBuf::from("/work"),
         );
-        let res = firer.fire_task_created("t1", "ship it", Some("desc")).await;
+        let res = firer
+            .fire_task_created("t1", "ship it", Some("desc"), None, None)
+            .await;
         // The Prompt arm wraps the model `reason` in a fixed prefix.
         assert_eq!(
             res,

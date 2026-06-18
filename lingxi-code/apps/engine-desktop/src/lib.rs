@@ -2671,6 +2671,42 @@ pub async fn build(
         budget_enforcer.clone(),
     );
 
+    // (5.46d) T15: register the `LocalAgent` handler so `TaskType::LocalAgent`
+    //        tasks dispatch to a real one-shot subagent worker instead of failing
+    //        with `UnknownType`. This closes the gap where `register_agent_handlers`
+    //        was authored but never called from any composition root, leaving
+    //        `LocalAgent`/`LocalWorkflow` with state variants but no handler.
+    //
+    //        We register the LocalAgent handler DIRECTLY rather than calling
+    //        `register_agent_handlers` (which ALSO registers `InProcessTeammate`)
+    //        because the teammate handler was already registered above (5.46a)
+    //        with the coordinator `CoordinatorStatusSink` attached — calling the
+    //        combined helper here would clobber that sink-bearing handler with a
+    //        sink-less one.
+    //
+    //        Same deferred-invoker pattern as the teammate + dream handlers: the
+    //        real `RegistryToolInvoker` needs `tools` (assembled after this
+    //        point), so a `DeferredToolInvoker` is injected now and bound at
+    //        (5.5a) below once `tools` exists.
+    //
+    //        DEFERRED (out of scope here): routing the BACKGROUNDED `AgentTool`
+    //        spawn (claude-code `registerAsyncAgent`) through
+    //        `TaskRegistry::spawn(TaskType::LocalAgent)` so background agents
+    //        surface in TaskList/Get/Output. `AgentTool::call` always dispatches
+    //        synchronously through the spawner today and exposes no clean
+    //        backgrounded seam to re-route; that wiring lands with the async-agent
+    //        work. Registering the handler here is the prerequisite for it.
+    let local_agent_invoker = Arc::new(DeferredToolInvoker::new());
+    task_registry_inner.register_handler(
+        tasks::TaskType::LocalAgent,
+        Arc::new(tasks::handlers::LocalAgentHandler::new(
+            subagent_spawner.clone(),
+            local_agent_invoker.clone() as Arc<dyn traits::tool_invoker::ToolInvoker>,
+            budget_enforcer.clone(),
+            task_registry_inner.output_manager.clone(),
+        )),
+    );
+
     let task_registry = Arc::new(task_registry_inner);
 
     // (5.48) Cron: construct, load persisted descriptors, and start the live cron
@@ -3038,6 +3074,15 @@ pub async fn build(
     //        real `RegistryToolInvoker` now that `tools` exists — same recursion-
     //        lock invariant and boot gate as the teammate invoker above.
     dream_invoker.set(Arc::new(
+        tool_api::tool_invoker_impl::RegistryToolInvoker::new(tools.clone()).with_gate(perms.clone()),
+    ));
+
+    // (5.5a-local-agent) T15: bind the `LocalAgent` handler's `DeferredToolInvoker`
+    //        to the real `RegistryToolInvoker` now that `tools` exists — same
+    //        recursion-lock invariant and boot gate as the teammate + dream
+    //        invokers above. A `LocalAgent` task's child runner dispatches its
+    //        tools through the parent registry.
+    local_agent_invoker.set(Arc::new(
         tool_api::tool_invoker_impl::RegistryToolInvoker::new(tools.clone()).with_gate(perms.clone()),
     ));
 

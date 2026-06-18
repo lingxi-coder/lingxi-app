@@ -385,6 +385,65 @@ impl TaskRegistry {
         Ok(updated)
     }
 
+    /// Mark a task as having had its terminal output consumed by a reader
+    /// (claude-code `TaskOutputTool` `updateTaskState(task_id, t => ({ ...t,
+    /// notified: true }))`, fired from both the non-blocking terminal branch and
+    /// the blocking terminal branch). Setting `notified` suppresses a later
+    /// duplicate `<task-notification>` for a task the model has already seen.
+    ///
+    /// Eagerly evicts the task when it is BOTH terminal and now notified —
+    /// claude-code's `evictTerminalTask` eager-GC path
+    /// (`framework.ts:120-143`): a terminal + notified task has been consumed and
+    /// is dropped from the map so memory is freed without waiting for the next
+    /// poll-loop iteration. A non-terminal (still pending/running) task keeps the
+    /// flag and stays in the map.
+    ///
+    /// Returns [`TaskError::NotFound`] if the id is unknown.
+    pub async fn mark_notified(&self, task_id: &str) -> Result<(), TaskError> {
+        let mut map = self.tasks.write().await;
+        let entry = map
+            .get_mut(task_id)
+            .ok_or_else(|| TaskError::NotFound(task_id.to_string()))?;
+        match entry {
+            TaskState::LocalBash(b) => b.base.notified = true,
+            TaskState::LocalAgent(a) => a.base.notified = true,
+            TaskState::RemoteAgent(r) => r.base.notified = true,
+            TaskState::InProcessTeammate(t) => t.base.notified = true,
+            TaskState::LocalWorkflow(w) => w.base.notified = true,
+            TaskState::MonitorMcp(m) => m.base.notified = true,
+            TaskState::Dream(d) => d.base.notified = true,
+        }
+        // Eager eviction (claude-code `evictTerminalTask`): a terminal + notified
+        // task is consumed and can be GC'd immediately.
+        if entry.base().status.is_terminal() {
+            map.remove(task_id);
+        }
+        Ok(())
+    }
+
+    /// Drop every task that is BOTH terminal (completed / failed / killed) AND
+    /// `notified` — the lazy-GC safety net that mirrors claude-code's
+    /// `generateTaskAttachments` eviction sweep (`framework.ts:172-180`,
+    /// `applyTaskOffsetsAndEvictions:234-245`). The eager [`mark_notified`] path
+    /// already drops a task the moment it becomes terminal+notified; this sweep
+    /// catches any that became terminal AFTER they were notified (e.g. a notified
+    /// `pending`/`running` task that later finished). Returns the evicted ids.
+    pub async fn evict_terminal_tasks(&self) -> Vec<String> {
+        let mut map = self.tasks.write().await;
+        let evict: Vec<String> = map
+            .iter()
+            .filter(|(_, s)| {
+                let b = s.base();
+                b.notified && b.status.is_terminal()
+            })
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in &evict {
+            map.remove(id);
+        }
+        evict
+    }
+
     /// Kill a task, cancelling its background handle if any.
     ///
     /// Two paths, decided by how the task was started:
@@ -945,6 +1004,59 @@ mod spawn_tests {
             matches!(err, TaskError::UnknownType),
             "spawn with no registered handler errors; got {err:?}"
         );
+    }
+
+    // ---- T15: LocalAgent dispatches once its handler is registered ----------
+
+    fn local_agent_input() -> TaskSpawnInput {
+        TaskSpawnInput::LocalAgent {
+            agent_id: protocol::AgentId::new(),
+            subagent_type: "general-purpose".into(),
+            prompt: "do the work".into(),
+            is_backgrounded: true,
+        }
+    }
+
+    #[tokio::test]
+    async fn spawn_local_agent_unknown_without_handler() {
+        // Pre-T15 baseline: with no `LocalAgent` handler registered (the registry
+        // helper was never called from any composition root), a `LocalAgent`
+        // spawn fails with `UnknownType`.
+        let (_d, registry) = make_registry();
+        let err = registry
+            .spawn(TaskType::LocalAgent, local_agent_input(), "x".into())
+            .await
+            .unwrap_err();
+        assert!(matches!(err, TaskError::UnknownType), "got {err:?}");
+    }
+
+    #[tokio::test]
+    async fn spawn_local_agent_dispatches_once_registered() {
+        // T15: once the `LocalAgent` handler is registered (as the desktop
+        // composition root now does), a `LocalAgent` spawn dispatches to it and
+        // the task is tracked under the handler id — so background agents surface
+        // in TaskList/Get/Output instead of failing with `UnknownType`.
+        let (_d, mut registry) = make_registry();
+        let handler = RecordingHandler::new(TaskType::LocalAgent, "alocalagent");
+        registry.register_handler(TaskType::LocalAgent, handler.clone());
+
+        let id = registry
+            .spawn(TaskType::LocalAgent, local_agent_input(), "research".into())
+            .await
+            .expect("LocalAgent spawn dispatches to its handler");
+        assert_eq!(id, "alocalagent");
+        assert_eq!(handler.spawn_count(), 1);
+
+        // The spawned task is tracked under the handler id with the LocalAgent
+        // state variant carrying the real input fields.
+        let state = registry.get(&id).await.expect("LocalAgent task is tracked");
+        match state {
+            TaskState::LocalAgent(a) => {
+                assert!(a.is_backgrounded, "is_backgrounded threads through from input");
+                assert_eq!(a.prompt, "do the work");
+            }
+            other => panic!("expected a LocalAgent state, got {other:?}"),
+        }
     }
 
     #[tokio::test]
@@ -1676,5 +1788,95 @@ mod spawn_tests {
 
         // And the registry recorded the task under the handler id.
         assert!(registry.get(&id).await.is_some());
+    }
+
+    // ---- T9 / T35: mark_notified + terminal-task eviction ------------------
+
+    #[tokio::test]
+    async fn mark_notified_on_terminal_task_evicts_it() {
+        // claude-code `evictTerminalTask`: a terminal + notified task is
+        // eagerly dropped from the map.
+        let (_d, registry) = make_registry();
+        let id = registry
+            .create(TaskType::LocalBash, teammate_input(), "x".into())
+            .await
+            .unwrap();
+        // Drive it terminal first.
+        registry
+            .force_bash_terminal_for_test(&id, TaskStatus::Completed, Some(0))
+            .await;
+
+        registry.mark_notified(&id).await.unwrap();
+
+        // Terminal + notified ⇒ evicted.
+        assert!(
+            registry.get(&id).await.is_none(),
+            "a terminal task is evicted once marked notified"
+        );
+    }
+
+    #[tokio::test]
+    async fn mark_notified_on_running_task_keeps_it() {
+        // A non-terminal (running/pending) task keeps the flag and stays in the
+        // map — only terminal tasks are GC'd.
+        let (_d, registry) = make_registry();
+        let id = registry
+            .create(TaskType::LocalBash, teammate_input(), "x".into())
+            .await
+            .unwrap();
+        // Default created status is Pending (non-terminal).
+        registry.mark_notified(&id).await.unwrap();
+
+        let state = registry.get(&id).await.expect("non-terminal task survives");
+        assert!(state.base().notified, "the notified flag is set even when kept");
+    }
+
+    #[tokio::test]
+    async fn mark_notified_unknown_id_is_not_found() {
+        let (_d, registry) = make_registry();
+        let err = registry.mark_notified("nope").await.unwrap_err();
+        assert!(matches!(err, TaskError::NotFound(_)), "got {err:?}");
+    }
+
+    #[tokio::test]
+    async fn evict_terminal_tasks_sweeps_terminal_notified_only() {
+        // The lazy-GC safety net: a task that became terminal AFTER it was
+        // notified (the eager path in mark_notified ran while still pending) is
+        // swept here; a still-running notified task and a terminal un-notified
+        // task both survive.
+        let (_d, registry) = make_registry();
+
+        // Task A: notified while pending, THEN driven terminal — eager evict did
+        // not fire (still pending then), so the sweep must catch it.
+        let a = registry
+            .create(TaskType::LocalBash, teammate_input(), "a".into())
+            .await
+            .unwrap();
+        registry.mark_notified(&a).await.unwrap(); // pending ⇒ kept, flag set
+        registry
+            .force_bash_terminal_for_test(&a, TaskStatus::Completed, Some(0))
+            .await;
+
+        // Task B: terminal but NOT notified — must survive the sweep.
+        let b = registry
+            .create(TaskType::LocalBash, teammate_input(), "b".into())
+            .await
+            .unwrap();
+        registry
+            .force_bash_terminal_for_test(&b, TaskStatus::Failed, Some(1))
+            .await;
+
+        // Task C: notified but still pending (non-terminal) — must survive.
+        let c = registry
+            .create(TaskType::LocalBash, teammate_input(), "c".into())
+            .await
+            .unwrap();
+        registry.mark_notified(&c).await.unwrap();
+
+        let evicted = registry.evict_terminal_tasks().await;
+        assert_eq!(evicted, vec![a.clone()], "only the terminal+notified task is swept");
+        assert!(registry.get(&a).await.is_none());
+        assert!(registry.get(&b).await.is_some(), "terminal but un-notified survives");
+        assert!(registry.get(&c).await.is_some(), "notified but non-terminal survives");
     }
 }

@@ -2469,6 +2469,20 @@ impl Tool for TaskOutputTool {
         )
         .await;
 
+        // Mark the task notified once its terminal output has been consumed
+        // (claude-code `TaskOutputTool`: `updateTaskState(task_id, t => ({ ...t,
+        // notified: true }))` in BOTH the non-blocking terminal branch
+        // (`status !== 'running' && status !== 'pending'`) and the blocking
+        // terminal branch (after `waitForTaskCompletion`)). `chunk.done` is true
+        // for exactly those terminal statuses, so a single guarded call covers
+        // both. Suppresses a later duplicate `<task-notification>` for a task the
+        // model has already seen; the registry also eagerly evicts the now
+        // terminal+notified task. Best-effort: a failure here must not fail the
+        // read that already succeeded.
+        if chunk.done {
+            let _ = registry.mark_notified(&task_id).await;
+        }
+
         let retrieval_status = task_output_retrieval_status(chunk.done, block);
         // For agent tasks the registry resolves a CLEAN final answer
         // (`extractTextContent(agentTask.result.content, '\n')`); prefer it over
@@ -4140,6 +4154,8 @@ mod tests {
             chunks: StdMutex<VecDeque<TaskOutputChunk>>,
             kill_calls: StdMutex<u32>,
             output_calls: StdMutex<u32>,
+            /// Ids passed to `mark_notified`, in call order (T9).
+            notified_ids: StdMutex<Vec<String>>,
         }
 
         impl MockRegistry {
@@ -4151,6 +4167,9 @@ mod tests {
             }
             fn push_chunk(self: &Arc<Self>, c: TaskOutputChunk) {
                 self.chunks.lock().unwrap().push_back(c);
+            }
+            fn notified_ids(self: &Arc<Self>) -> Vec<String> {
+                self.notified_ids.lock().unwrap().clone()
             }
         }
 
@@ -4210,6 +4229,10 @@ mod tests {
                 } else {
                     Err(TaskRegistryError::NotFound(id.into()))
                 }
+            }
+            async fn mark_notified(&self, id: &str) -> Result<(), TaskRegistryError> {
+                self.notified_ids.lock().unwrap().push(id.to_string());
+                Ok(())
             }
         }
 
@@ -4470,6 +4493,78 @@ mod tests {
             assert!(!content.contains("<exit_code>"));
             // exit_code key omitted when the chunk carries none.
             assert!(res.data["task"].get("exit_code").is_none());
+        }
+
+        #[tokio::test]
+        async fn task_output_terminal_read_marks_notified() {
+            // T9: a terminal (done) read marks the task notified so a later
+            // duplicate `<task-notification>` is suppressed. Mirrors claude-code
+            // `TaskOutputTool`'s non-blocking terminal branch
+            // `updateTaskState(task_id, t => ({ ...t, notified: true }))`.
+            let reg = MockRegistry::with_record(Some(rec("completed")));
+            reg.push_chunk(chunk("completed", true, Some(0), "all done\n"));
+            let tool = TaskOutputTool::new(bctx(reg.clone()));
+            let res = tool
+                .call(
+                    json!({ "task_id": "b12345678", "block": false }),
+                    fresh_ctx(),
+                    fresh_tx(),
+                )
+                .await
+                .expect("ok");
+            assert_eq!(res.data["retrieval_status"], "success");
+            assert_eq!(
+                reg.notified_ids(),
+                vec!["b12345678".to_string()],
+                "a terminal read marks the task notified exactly once"
+            );
+        }
+
+        #[tokio::test]
+        async fn task_output_nonterminal_read_does_not_mark_notified() {
+            // T9: a still-running (not done) read must NOT mark notified — the
+            // task hasn't been consumed yet (TS only marks in the terminal
+            // branches, returning `not_ready` here).
+            let reg = MockRegistry::with_record(Some(rec("running")));
+            reg.push_chunk(chunk("running", false, None, "partial\n"));
+            let tool = TaskOutputTool::new(bctx(reg.clone()));
+            let res = tool
+                .call(
+                    json!({ "task_id": "b12345678", "block": false }),
+                    fresh_ctx(),
+                    fresh_tx(),
+                )
+                .await
+                .expect("ok");
+            assert_eq!(res.data["retrieval_status"], "not_ready");
+            assert!(
+                reg.notified_ids().is_empty(),
+                "a non-terminal read must not mark the task notified"
+            );
+        }
+
+        #[tokio::test]
+        async fn task_output_blocking_terminal_read_marks_notified() {
+            // T9: the BLOCKING terminal branch also marks notified after
+            // `waitForTaskCompletion` resolves to a terminal task.
+            let reg = MockRegistry::with_record(Some(rec("running")));
+            reg.push_chunk(chunk("running", false, None, ""));
+            reg.push_chunk(chunk("completed", true, Some(0), "final\n"));
+            let tool = TaskOutputTool::new(bctx(reg.clone()));
+            let res = tool
+                .call(
+                    json!({ "task_id": "b12345678", "block": true, "timeout": 600_000 }),
+                    fresh_ctx(),
+                    fresh_tx(),
+                )
+                .await
+                .expect("ok");
+            assert_eq!(res.data["retrieval_status"], "success");
+            assert_eq!(
+                reg.notified_ids(),
+                vec!["b12345678".to_string()],
+                "the blocking terminal branch marks the task notified"
+            );
         }
 
         #[tokio::test]

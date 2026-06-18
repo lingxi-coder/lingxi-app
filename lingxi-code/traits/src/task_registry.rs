@@ -136,6 +136,18 @@ pub trait TaskRegistryHandle: Send + Sync {
         id: &str,
         offset: Option<u64>,
     ) -> Result<TaskOutputChunk, TaskRegistryError>;
+
+    /// Mark a task as having had its terminal output consumed by a reader,
+    /// suppressing a later duplicate `<task-notification>`. Mirrors claude-code
+    /// `TaskOutputTool`'s `updateTaskState(task_id, t => ({ ...t, notified: true
+    /// }))` in both the non-blocking and blocking terminal branches. A terminal +
+    /// now-notified task is eagerly evicted from the registry (claude-code
+    /// `evictTerminalTask`). A `None`/unknown id is a no-op for callers that
+    /// cannot guarantee the task still exists; the default impl is a no-op so
+    /// existing mock handles compile unchanged.
+    async fn mark_notified(&self, _id: &str) -> Result<(), TaskRegistryError> {
+        Ok(())
+    }
 }
 
 #[cfg(test)]

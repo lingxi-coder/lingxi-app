@@ -5,7 +5,6 @@
 //! - The generic [`task_trait::Task`] handler interface.
 //! - [`registry::TaskRegistry`] for tracking running tasks.
 //! - [`output_manager::TaskOutputManager`] for sandboxed task spool files.
-//! - [`notification::TaskNotificationBuilder`] for XML completion notices.
 //! - Per-type handler stubs under [`handlers`] (full impls land in M2).
 
 #![forbid(unsafe_code)]
@@ -14,7 +13,6 @@ pub mod cron;
 pub mod handle;
 pub mod handlers;
 pub mod id;
-pub mod notification;
 pub mod output_manager;
 pub mod registry;
 pub mod state;

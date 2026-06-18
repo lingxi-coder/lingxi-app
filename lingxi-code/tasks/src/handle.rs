@@ -324,6 +324,14 @@ impl TaskRegistryHandle for TaskRegistry {
             output_path: output_file.to_str().map(str::to_string),
         })
     }
+
+    async fn mark_notified(&self, id: &str) -> Result<(), TaskRegistryError> {
+        // Dispatch to the inherent `TaskRegistry::mark_notified`, which sets the
+        // `notified` flag and eagerly evicts the task if it is now terminal.
+        TaskRegistry::mark_notified(self, id)
+            .await
+            .map_err(task_err_to_registry_err)
+    }
 }
 
 #[cfg(test)]

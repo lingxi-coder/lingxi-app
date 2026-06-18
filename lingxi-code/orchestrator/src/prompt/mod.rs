@@ -17,7 +17,8 @@ pub mod skill_listing;
 pub mod tools_block;
 
 pub use memory_block::{
-    build_memdir_prefetch, real_provider, MemoryHierarchyProvider, RealMemoryHierarchyProvider,
+    build_memdir_prefetch, build_memdir_prefetch_from_anthropic, real_provider,
+    MemoryHierarchyProvider, RealMemoryHierarchyProvider,
 };
 
 /// Re-export of the CLAUDE.md tier enum so consumers that depend on

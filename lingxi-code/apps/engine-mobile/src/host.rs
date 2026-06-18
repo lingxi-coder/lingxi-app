@@ -626,7 +626,38 @@ pub async fn build_mobile_inner(
     };
     let tools = Arc::new(mobile_tool_registry(tool_ctx));
 
-    let orch = Arc::new(ConversationOrchestrator::new_with_streaming(
+    // P0.1 ACTIVATION on mobile (gated, default OFF) — the same gate as desktop,
+    // `CLAUDE_CODE_MEMDIR_PREFETCH`. When truthy, wire the memdir-backed memory
+    // selector so relevant `<claude_home>/memdir` entries surface each turn via a
+    // Haiku-class side query (a `ProviderSideQueryClient` over the device HTTP
+    // transport + `cfg.api_key`, independent of the multi-provider turn client).
+    // Unset/false ⇒ no prefetch ⇒ surfacing inert ⇒ the locked mobile fixtures
+    // stay byte-identical. On a device the env var is typically unset, so this is
+    // off unless the host app explicitly sets it. A missing/unusable key makes the
+    // side query fail → empty surfaced set (never breaks a turn).
+    let memdir_prefetch = if traits::env::is_env_truthy(
+        std::env::var("CLAUDE_CODE_MEMDIR_PREFETCH").ok().as_deref(),
+    ) {
+        // `cfg.claude_home` is the device `.claude` dir; the helper re-appends
+        // `.claude/memdir`, so pass its PARENT as `home` ⇒ `<claude_home>/memdir`.
+        let home = cfg
+            .claude_home
+            .parent()
+            .map(std::path::Path::to_path_buf)
+            .unwrap_or_else(|| cwd.clone());
+        Some(orchestrator::prompt::build_memdir_prefetch_from_anthropic(
+            cfg.api_key.clone(),
+            Some(cfg.api_base.clone()),
+            http.clone(),
+            Arc::new(platform_posix_minimal::runtime::PosixRuntime::new())
+                as Arc<dyn traits::RuntimeSpawner>,
+            &home,
+        ))
+    } else {
+        None
+    };
+
+    let mut orch_inner = ConversationOrchestrator::new_with_streaming(
         orch_cfg,
         api_client,
         streaming_api,
@@ -636,7 +667,11 @@ pub async fn build_mobile_inner(
         output,
         memory,
         cwd,
-    ));
+    );
+    if let Some(prefetch) = memdir_prefetch {
+        orch_inner = orch_inner.with_memory_prefetch(prefetch);
+    }
+    let orch = Arc::new(orch_inner);
 
     // (8) Command registry through the mobile composition root.
     let handle: Arc<dyn OrchestratorHandle> = orch.clone();

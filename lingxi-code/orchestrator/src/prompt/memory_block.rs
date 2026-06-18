@@ -161,6 +161,32 @@ pub fn build_memdir_prefetch(
     Arc::new(memory::prefetch::MemoryPrefetch::new(selector, runtime, roots))
 }
 
+/// [`build_memdir_prefetch`] for a composition root that has raw Anthropic
+/// credentials + an HTTP transport but no pre-built [`sidequery::SideQueryClient`]
+/// (e.g. the mobile host, which assembles a multi-provider `llm_client` rather
+/// than the desktop's side-query client). Constructs a
+/// [`sidequery::ProviderSideQueryClient`] over `(api_key, api_base, http)` —
+/// the same Anthropic-first-party side-query path the desktop build uses — so
+/// the engine app needs no direct `sidequery` dependency.
+///
+/// NOTE: the side query routes through the Anthropic first-party path with the
+/// supplied `api_key`, independent of any multi-provider routing the host's main
+/// turn client uses. With no usable `api_key` the side query fails and the
+/// prefetch resolves to empty (inert) — never breaking a turn. Gating is the
+/// caller's (default OFF, per [`build_memdir_prefetch`]).
+#[must_use]
+pub fn build_memdir_prefetch_from_anthropic(
+    api_key: impl Into<String>,
+    api_base: Option<String>,
+    http: Arc<dyn traits::HttpTransport>,
+    runtime: Arc<dyn traits::RuntimeSpawner>,
+    home: &std::path::Path,
+) -> Arc<memory::prefetch::MemoryPrefetch> {
+    let client: Arc<dyn sidequery::SideQueryClient> =
+        Arc::new(sidequery::ProviderSideQueryClient::new(api_key, api_base, http));
+    build_memdir_prefetch(client, runtime, home)
+}
+
 /// Verbatim preamble that precedes the memory blocks.
 ///
 /// 1:1 with claude-code `MEMORY_INSTRUCTION_PROMPT` (claudemd.ts:89-90).

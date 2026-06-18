@@ -310,6 +310,16 @@ impl TaskRegistry {
         }
     }
 
+    /// Test-only: inject a fully-built [`TaskState`] into the task map under its
+    /// own id. Lets tests exercise per-variant `output()` projections (e.g. the
+    /// `local_agent` clean-result branch) without spinning up the variant's
+    /// real handler.
+    #[cfg(test)]
+    pub(crate) async fn insert_state_for_test(&self, state: TaskState) {
+        let id = state.base().id.clone();
+        self.tasks.write().await.insert(id, state);
+    }
+
     /// Force `task_id`'s status to `status`. Returns
     /// [`TaskError::NotFound`] if the id is unknown. Only Bash and Agent
     /// variants currently carry a writable `status` field in the M1 surface;

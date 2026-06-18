@@ -66,6 +66,19 @@ pub struct TaskOutputChunk {
     /// killed). Lets the tool compute `block`/`retrieval_status` without a
     /// second registry round-trip.
     pub done: bool,
+    /// Agent-task error message, if any. Mirrors the TS `TaskOutput.error`
+    /// (`agentTask.error`); only populated for `local_agent` tasks. Surfaced by
+    /// `TaskOutputTool` as a trailing `<error>…</error>` element.
+    pub error: Option<String>,
+    /// Agent-task initial prompt. Mirrors the TS `TaskOutput.prompt`
+    /// (`agentTask.prompt`); only populated for `local_agent` tasks.
+    pub prompt: Option<String>,
+    /// Clean final answer extracted from the agent's last assistant message
+    /// (the `text` content blocks joined by `\n`). Mirrors the TS
+    /// `cleanResult = extractTextContent(agentTask.result.content, '\n')`; only
+    /// populated for `local_agent` tasks. `TaskOutputTool` prefers this over the
+    /// raw on-disk transcript for the model-facing `<output>`.
+    pub result: Option<String>,
 }
 
 /// Failure modes for [`TaskRegistryHandle`] operations.

@@ -2030,6 +2030,13 @@ fn render_task_output(
             let formatted = format_task_output(&t.output, &t.task_id);
             parts.push(format!("<output>\n{}\n</output>", formatted.trim_end()));
         }
+        // `<error>` AFTER `<output>` (TS `mapToolResultToToolResultBlockParam`
+        // lines 299-301: `if (data.task.error) parts.push(\`<error>…</error>\`)`).
+        // Only emitted for a truthy (present, non-empty) error string — the
+        // agent task type's `error` field.
+        if let Some(error) = t.error.as_deref().filter(|e| !e.is_empty()) {
+            parts.push(format!("<error>{error}</error>"));
+        }
     }
     parts.join("\n\n")
 }
@@ -2043,6 +2050,10 @@ struct TaskOutputView {
     description: String,
     output: String,
     exit_code: Option<i32>,
+    /// Agent-task error string (TS `TaskOutput.error`), rendered as a trailing
+    /// `<error>…</error>` element after `<output>`. `None`/empty for non-agent
+    /// tasks (and successful agents).
+    error: Option<String>,
 }
 
 /// Byte-faithful port of `TaskOutputTool.tsx`'s `retrieval_status` decision.
@@ -2134,7 +2145,7 @@ impl Tool for TaskOutputTool {
     async fn call(
         &self,
         input: Value,
-        _ctx: ToolUseContext,
+        ctx: ToolUseContext,
         _progress: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
         let started = Instant::now();
@@ -2241,6 +2252,15 @@ impl Tool for TaskOutputTool {
                 if (wait_started.elapsed().as_millis() as u64) >= timeout_ms {
                     break;
                 }
+                // Honour user cancellation mid-wait (TS `waitForTaskCompletion`
+                // checks `abortController?.signal.aborted` at the top of each
+                // poll iteration). The per-call `cancel` token fires when the
+                // user interrupts (or a sibling tool errors); on cancellation we
+                // stop polling and return the current (still-`timeout`) state
+                // rather than blocking out the full timeout.
+                if ctx.cancel.as_ref().is_some_and(|c| c.is_cancelled()) {
+                    break;
+                }
                 tokio::time::sleep(std::time::Duration::from_millis(100)).await;
                 chunk = match registry.output(&task_id, None).await {
                     Ok(c) => c,
@@ -2269,6 +2289,17 @@ impl Tool for TaskOutputTool {
         .await;
 
         let retrieval_status = task_output_retrieval_status(chunk.done, block);
+        // For agent tasks the registry resolves a CLEAN final answer
+        // (`extractTextContent(agentTask.result.content, '\n')`); prefer it over
+        // the raw on-disk transcript for the model-facing `<output>` (TS
+        // `getTaskOutputData` `local_agent`: `output: cleanResult || output`).
+        // `result` is `None` for non-agent tasks / empty extractions, leaving
+        // the raw spool content in place.
+        let output = chunk
+            .result
+            .clone()
+            .filter(|r| !r.is_empty())
+            .unwrap_or_else(|| chunk.content.clone());
         let view = TaskOutputView {
             task_id: chunk.task_id.clone(),
             task_type: record.task_type.clone(),
@@ -2276,13 +2307,16 @@ impl Tool for TaskOutputTool {
             // registry could not resolve it at the chunk point.
             status: chunk.status.clone().unwrap_or_else(|| record.status.clone()),
             description: record.description.clone(),
-            output: chunk.content.clone(),
+            output,
             exit_code: chunk.exit_code,
+            error: chunk.error.clone(),
         };
         let content = render_task_output(retrieval_status, Some(&view));
 
         // `exit_code` is optional (TS attaches it only for `local_bash`); omit
-        // the key entirely when the chunk carries none.
+        // the key entirely when the chunk carries none. `prompt` / `result` /
+        // `error` ride only for agent tasks (TS `getTaskOutputData` adds them in
+        // the `local_agent` branch), so each is emitted only when present.
         let mut task_obj = Map::new();
         task_obj.insert("task_id".into(), json!(view.task_id));
         task_obj.insert("task_type".into(), json!(view.task_type));
@@ -2291,6 +2325,15 @@ impl Tool for TaskOutputTool {
         task_obj.insert("output".into(), json!(view.output));
         if let Some(code) = view.exit_code {
             task_obj.insert("exit_code".into(), json!(code));
+        }
+        if let Some(prompt) = &chunk.prompt {
+            task_obj.insert("prompt".into(), json!(prompt));
+        }
+        if let Some(result) = chunk.result.as_deref().filter(|r| !r.is_empty()) {
+            task_obj.insert("result".into(), json!(result));
+        }
+        if let Some(error) = view.error.as_deref().filter(|e| !e.is_empty()) {
+            task_obj.insert("error".into(), json!(error));
         }
 
         // Nested `{ retrieval_status, task: { … } }` plus the `content` render so
@@ -3379,7 +3422,9 @@ mod tests {
         use std::collections::VecDeque;
         use std::sync::Mutex as StdMutex;
         use telemetry::AnalyticsBus;
-        use tool_api::test_support::{ctx_for_file_tools, fresh_ctx, fresh_tx, make_dummy_fs};
+        use tool_api::test_support::{
+            ctx_for_file_tools, fresh_ctx, fresh_ctx_cancelled, fresh_tx, make_dummy_fs,
+        };
         use traits::task_registry::{
             TaskCreateInput, TaskListFilter, TaskOutputChunk, TaskRecord, TaskRegistryHandle,
             TaskUpdatePatch,
@@ -3475,6 +3520,15 @@ mod tests {
             }
         }
 
+        fn agent_rec(status: &str) -> TaskRecord {
+            TaskRecord {
+                task_id: "a12345678".into(),
+                task_type: "local_agent".into(),
+                status: status.into(),
+                description: "run the agent".into(),
+            }
+        }
+
         fn chunk(status: &str, done: bool, exit_code: Option<i32>, content: &str) -> TaskOutputChunk {
             TaskOutputChunk {
                 task_id: "b12345678".into(),
@@ -3484,6 +3538,30 @@ mod tests {
                 status: Some(status.into()),
                 exit_code,
                 done,
+                ..Default::default()
+            }
+        }
+
+        /// Like [`chunk`] but also stamps the agent-specific `error` + clean
+        /// `result` fields (TS `getTaskOutputData` `local_agent` branch).
+        fn agent_chunk(
+            status: &str,
+            done: bool,
+            content: &str,
+            error: Option<&str>,
+            result: Option<&str>,
+        ) -> TaskOutputChunk {
+            TaskOutputChunk {
+                task_id: "a12345678".into(),
+                content: content.into(),
+                total_lines: 1,
+                truncated: false,
+                status: Some(status.into()),
+                exit_code: None,
+                done,
+                error: error.map(str::to_string),
+                prompt: Some("do the thing".into()),
+                result: result.map(str::to_string),
             }
         }
 
@@ -3733,6 +3811,121 @@ mod tests {
             assert!(content.contains("<retrieval_status>timeout</retrieval_status>"));
         }
 
+        // ── TaskOutput agent-specific semantics (T3) ─────────────────────
+
+        #[tokio::test]
+        async fn task_output_agent_failed_renders_error_after_output() {
+            // A failed local_agent task: the chunk carries an `error` string and
+            // a clean `result`. The render must place `<error>` AFTER `<output>`
+            // (TS `mapToolResultToToolResultBlockParam` lines 297-301) and the
+            // model-facing `output` must be the clean result, not the raw blob.
+            let reg = MockRegistry::with_record(Some(agent_rec("failed")));
+            reg.push_chunk(agent_chunk(
+                "failed",
+                true,
+                "[{\"type\":\"text\",\"text\":\"partial work\"}]",
+                Some("model refused to continue"),
+                Some("partial work"),
+            ));
+            let tool = TaskOutputTool::new(bctx(reg));
+            let res = tool
+                .call(
+                    json!({ "task_id": "a12345678", "block": false }),
+                    fresh_ctx(),
+                    fresh_tx(),
+                )
+                .await
+                .expect("ok");
+            assert_eq!(res.data["task"]["task_type"], "local_agent");
+            // Clean result surfaces as the output (not the JSON blob).
+            assert_eq!(res.data["task"]["output"], "partial work");
+            assert_eq!(res.data["task"]["error"], "model refused to continue");
+            assert_eq!(res.data["task"]["prompt"], "do the thing");
+            assert_eq!(res.data["task"]["result"], "partial work");
+
+            let content = res.data["content"].as_str().unwrap();
+            assert!(
+                content.contains("<error>model refused to continue</error>"),
+                "rendered output carries an <error> element"
+            );
+            // <error> comes AFTER <output> (TS render order).
+            let out_idx = content.find("<output>").expect("has <output>");
+            let err_idx = content.find("<error>").expect("has <error>");
+            assert!(out_idx < err_idx, "<error> renders after <output>");
+        }
+
+        #[tokio::test]
+        async fn task_output_agent_success_returns_clean_text_not_json_blob() {
+            // A successful local_agent task whose on-disk spool is the raw
+            // pretty-JSON transcript blob, but whose chunk also carries the
+            // CLEAN extracted final text. The model must see the clean text.
+            let reg = MockRegistry::with_record(Some(agent_rec("completed")));
+            let json_blob = "{\n  \"answer\": \"42\",\n  \"ok\": true\n}\n\
+                             <usage><total_tokens>7</total_tokens></usage>\n";
+            reg.push_chunk(agent_chunk(
+                "completed",
+                true,
+                json_blob,
+                None,
+                Some("The answer is 42."),
+            ));
+            let tool = TaskOutputTool::new(bctx(reg));
+            let res = tool
+                .call(
+                    json!({ "task_id": "a12345678", "block": false }),
+                    fresh_ctx(),
+                    fresh_tx(),
+                )
+                .await
+                .expect("ok");
+            assert_eq!(res.data["retrieval_status"], "success");
+            assert_eq!(res.data["task"]["output"], "The answer is 42.");
+            assert_eq!(res.data["task"]["result"], "The answer is 42.");
+            // No error on a successful agent ⇒ no <error> element, no error key.
+            assert!(res.data["task"].get("error").is_none());
+
+            let content = res.data["content"].as_str().unwrap();
+            assert!(
+                content.contains("<output>\nThe answer is 42.\n</output>"),
+                "clean text renders in <output>, got: {content}"
+            );
+            assert!(
+                !content.contains("total_tokens") && !content.contains("\"answer\""),
+                "the raw JSON blob does NOT leak into the model-facing output"
+            );
+            assert!(!content.contains("<error>"), "no <error> on success");
+        }
+
+        #[tokio::test]
+        async fn task_output_block_returns_promptly_on_cancel() {
+            // A still-running task with a long timeout: a triggered cancel token
+            // must break the wait loop immediately (TS `waitForTaskCompletion`
+            // checks `abortController.signal.aborted` each iteration) rather than
+            // blocking out the full timeout.
+            let reg = MockRegistry::with_record(Some(rec("running")));
+            reg.push_chunk(chunk("running", false, None, "still going\n"));
+            let tool = TaskOutputTool::new(bctx(reg.clone()));
+            let started = std::time::Instant::now();
+            let res = tool
+                .call(
+                    json!({ "task_id": "b12345678", "block": true, "timeout": 600_000 }),
+                    fresh_ctx_cancelled(),
+                    fresh_tx(),
+                )
+                .await
+                .expect("ok");
+            // Returns well under the 600s timeout.
+            assert!(
+                started.elapsed().as_secs() < 5,
+                "cancelled wait returns promptly"
+            );
+            assert_eq!(res.data["retrieval_status"], "timeout");
+            assert_eq!(res.data["task"]["status"], "running");
+            // The cancel fires BEFORE the first 100ms sleep, so the loop body
+            // never issues a second poll: exactly the initial read.
+            assert_eq!(*reg.output_calls.lock().unwrap(), 1);
+        }
+
         #[tokio::test]
         async fn task_output_not_found() {
             let reg = MockRegistry::with_record(None);
@@ -3863,6 +4056,7 @@ mod tests {
                 description: "echo hi".into(),
                 output: out,
                 exit_code: Some(0),
+                error: None,
             };
             let rendered = render_task_output("success", Some(&view));
             assert!(rendered.contains("<output>\n[Truncated. Full output: b12345678.output]\n\n"));

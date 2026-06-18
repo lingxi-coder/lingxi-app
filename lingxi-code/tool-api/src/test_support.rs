@@ -115,6 +115,19 @@ pub fn fresh_ctx() -> ToolUseContext {
     }
 }
 
+/// Build a fresh, minimal [`ToolUseContext`] whose per-call `cancel` token has
+/// ALREADY been triggered. Lets a test exercise a tool's mid-flight
+/// cancellation path (e.g. `TaskOutput`'s blocking wait loop) without taking a
+/// direct `tokio-util` dependency in the tool crate.
+#[must_use]
+pub fn fresh_ctx_cancelled() -> ToolUseContext {
+    let mut ctx = fresh_ctx();
+    let token = tokio_util::sync::CancellationToken::new();
+    token.cancel();
+    ctx.cancel = Some(token);
+    ctx
+}
+
 /// Build a fresh progress sender wired to a dropped receiver.
 #[must_use]
 pub fn fresh_tx() -> ToolProgressSender {

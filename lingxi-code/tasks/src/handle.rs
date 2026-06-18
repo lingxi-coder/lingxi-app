@@ -83,6 +83,50 @@ fn state_to_record(s: &TaskState) -> TaskRecord {
     }
 }
 
+/// Port of `extractTextContent(blocks, '\n')` (claude-code
+/// `utils/messages.ts:2893-2901`): filter the content blocks whose `type` is
+/// `"text"` and join their `text` fields with `\n`.
+///
+/// The agent's final-message `content` arrives here as a `serde_json::Value`
+/// (the spooled `SubagentResult::Completed.content`). A non-array `content`
+/// (e.g. a bare string the spawner returned) yields no `text` blocks → `""`,
+/// exactly mirroring the TS `.filter(...).map(...).join(...)` over a typed
+/// block array.
+fn extract_text_content(content: &serde_json::Value) -> String {
+    let Some(blocks) = content.as_array() else {
+        return String::new();
+    };
+    blocks
+        .iter()
+        .filter(|b| b.get("type").and_then(serde_json::Value::as_str) == Some("text"))
+        .filter_map(|b| b.get("text").and_then(serde_json::Value::as_str))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Recover the agent's final-message content `Value` from a `local_agent`
+/// spool. The `local_agent` handler writes
+/// `to_string_pretty(content)` + `"\n<usage><total_tokens>N</total_tokens></usage>\n"`
+/// (`handlers/local_agent.rs`). Strip the trailing `<usage>…</usage>` footer
+/// (if present) and JSON-parse the remainder back into the original `content`
+/// `Value`, so `extract_text_content` can pull the clean answer out of it.
+/// Returns `None` when the spool is empty or does not parse (e.g. a `Failed`
+/// reason string), in which case the caller falls back to the raw output.
+fn agent_content_from_spool(spool: &str) -> Option<serde_json::Value> {
+    let trimmed = spool.trim_end();
+    // Drop the appended `<usage>…</usage>` footer if it is present, keeping the
+    // pretty-printed JSON body that precedes it.
+    let body = match trimmed.rfind("\n<usage>") {
+        Some(idx) => &trimmed[..idx],
+        None => trimmed,
+    };
+    let body = body.trim();
+    if body.is_empty() {
+        return None;
+    }
+    serde_json::from_str::<serde_json::Value>(body).ok()
+}
+
 fn task_err_to_registry_err(e: TaskError) -> TaskRegistryError {
     match e {
         TaskError::NotFound(id) => TaskRegistryError::NotFound(id),
@@ -248,6 +292,21 @@ impl TaskRegistryHandle for TaskRegistry {
                     TaskRegistryError::Internal(format!("spool already allocated: {p}"))
                 }
             })?;
+        // Agent-specific fields (TS `getTaskOutputData` `local_agent` branch,
+        // `TaskOutputTool.tsx:91-106`): carry the agent's `error` + `prompt`
+        // through, and extract the CLEAN final answer from the spooled
+        // transcript so the model sees the answer (not the raw JSON blob).
+        // `error`/`prompt`/`result` stay `None` for non-agent task types
+        // (matching the TS shape, where only `local_agent` adds these keys).
+        let (error, prompt, result) = match &state {
+            TaskState::LocalAgent(a) => {
+                let clean = agent_content_from_spool(&out.content)
+                    .map(|content| extract_text_content(&content))
+                    .filter(|s| !s.is_empty());
+                (a.error.clone(), Some(a.prompt.clone()), clean)
+            }
+            _ => (None, None, None),
+        };
         Ok(TaskOutputChunk {
             task_id: state.base().id.clone(),
             content: out.content,
@@ -256,6 +315,9 @@ impl TaskRegistryHandle for TaskRegistry {
             status: Some(status_to_wire(status).to_string()),
             exit_code,
             done,
+            error,
+            prompt,
+            result,
         })
     }
 }
@@ -384,6 +446,107 @@ mod tests {
         ));
         let registry = Arc::new(TaskRegistry::new(runtime, fs, out_mgr));
         (dir, registry)
+    }
+
+    // ── agent-specific output helpers (T3) ───────────────────────────────
+
+    #[test]
+    fn extract_text_content_joins_text_blocks_with_newline() {
+        // Port of `extractTextContent(blocks, '\n')`: only `type:"text"` blocks,
+        // joined by `\n`; non-text blocks (e.g. tool_use) are dropped.
+        let content = serde_json::json!([
+            { "type": "text", "text": "first" },
+            { "type": "tool_use", "name": "Bash", "input": {} },
+            { "type": "text", "text": "second" }
+        ]);
+        assert_eq!(extract_text_content(&content), "first\nsecond");
+    }
+
+    #[test]
+    fn extract_text_content_non_array_is_empty() {
+        // A non-array content (bare string / object) has no text blocks ⇒ "".
+        assert_eq!(extract_text_content(&serde_json::json!("hello")), "");
+        assert_eq!(extract_text_content(&serde_json::json!({ "x": 1 })), "");
+    }
+
+    #[test]
+    fn agent_content_from_spool_strips_usage_footer_and_parses() {
+        // The local_agent handler spools `to_string_pretty(content)` + a
+        // `<usage>…</usage>` footer; recover the original content Value.
+        let spool = "[\n  {\n    \"type\": \"text\",\n    \"text\": \"the answer\"\n  }\n]\n\
+                     <usage><total_tokens>9</total_tokens></usage>\n";
+        let content = agent_content_from_spool(spool).expect("parses");
+        assert_eq!(extract_text_content(&content), "the answer");
+    }
+
+    #[test]
+    fn agent_content_from_spool_unparseable_is_none() {
+        // A `Failed` reason string (not JSON) ⇒ None, so the caller keeps the
+        // raw output.
+        assert!(agent_content_from_spool("model refused to continue").is_none());
+        assert!(agent_content_from_spool("").is_none());
+    }
+
+    #[tokio::test]
+    async fn output_local_agent_surfaces_clean_result_prompt_and_error() {
+        // Drive a real local_agent task through the registry: insert a spawned
+        // LocalAgent state, write its spool (the pretty-JSON transcript blob),
+        // stamp an error, and verify `output()` returns the CLEAN extracted
+        // text in `result` plus the agent's `prompt` + `error`.
+        let (_d, registry) = make_registry();
+
+        // Build a LocalAgent state directly and inject it (the registry's task
+        // map is private, so use the spawn-state builder + the test setter).
+        let chunk = {
+            // Allocate a spool slot under a real LocalAgent id.
+            let task_id = crate::id::generate_task_id(crate::id::TaskType::LocalAgent);
+            let spool = registry
+                .output_manager
+                .allocate(&task_id)
+                .await
+                .unwrap();
+            let base = crate::state::TaskStateBase {
+                id: task_id.clone(),
+                task_type: crate::id::TaskType::LocalAgent,
+                status: TaskStatus::Failed,
+                description: "run the agent".into(),
+                tool_use_id: None,
+                start_time: std::time::SystemTime::UNIX_EPOCH,
+                end_time: None,
+                total_paused_ms: 0,
+                output_file: spool.clone(),
+                output_offset: 0,
+                notified: false,
+            };
+            let state = TaskState::LocalAgent(crate::state::LocalAgentTaskState {
+                base,
+                agent_id: protocol::AgentId::nil(),
+                prompt: "do the thing".into(),
+                error: Some("model refused".into()),
+                messages: vec![],
+                pending_messages: vec![],
+                is_backgrounded: true,
+            });
+            registry.insert_state_for_test(state).await;
+
+            // Spool the raw pretty-JSON transcript + usage footer.
+            let blob = "[\n  {\n    \"type\": \"text\",\n    \"text\": \"final answer\"\n  }\n]\n\
+                        <usage><total_tokens>3</total_tokens></usage>\n";
+            registry
+                .output_manager
+                .fs_for_test()
+                .write_file(spool.to_str().unwrap(), blob)
+                .await
+                .unwrap();
+
+            let h: &dyn TaskRegistryHandle = registry.as_ref();
+            h.output(&task_id, None).await.unwrap()
+        };
+
+        assert_eq!(chunk.result.as_deref(), Some("final answer"));
+        assert_eq!(chunk.prompt.as_deref(), Some("do the thing"));
+        assert_eq!(chunk.error.as_deref(), Some("model refused"));
+        assert!(chunk.done, "failed task is terminal");
     }
 
     #[tokio::test]

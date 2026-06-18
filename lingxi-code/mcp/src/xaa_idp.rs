@@ -97,6 +97,16 @@ impl XaaIdpSettings {
     /// Mirrors `getXaaIdpSettings` (xaaIdpLogin.ts:47-49) over the same tier
     /// precedence the engine uses for sandbox settings
     /// (`sandbox_runtime_config_from_settings_tiers`).
+    ///
+    /// NOTE on the managed/policy + flag tiers: claude-code `getXaaIdpSettings`
+    /// reads `getInitialSettings()` (settings.ts:674-726), which also merges a
+    /// managed/policy (MDM) tier and a flag tier at the HIGHEST priority. This
+    /// function takes whatever tiers the caller passes; the engine-desktop
+    /// composition root deliberately passes only the user/project/local tiers —
+    /// consistent with its permission and sandbox settings-VALUE readers, which
+    /// also omit managed/flag. Wiring a managed settings.json *value* tier is a
+    /// codebase-wide follow-up for all three consumers together, not specific to
+    /// xaaIdp. See the comment at the engine `xaa_config` tier read.
     #[must_use]
     pub fn from_settings_tiers(raw_tiers: &[&str]) -> Option<Self> {
         let mut merged: Option<XaaIdpSettings> = None;
@@ -646,6 +656,12 @@ impl XaaConfigProvider for XaaIdpConfigProvider {
             idp_token_endpoint: oidc.token_endpoint,
         }))
     }
+
+    /// Drop this IdP's cached id_token (`clearIdpIdToken(idp.issuer)`,
+    /// xaaIdpLogin.ts:143-150) so the next [`Self::xaa_inputs`] re-acquires.
+    async fn clear_id_token(&self) -> Result<(), McpError> {
+        clear_cached_id_token(&self.storage, &self.settings.issuer).await
+    }
 }
 
 /// Compute the `mcpOAuthClientConfig` storage key for a server (the account a
@@ -1129,6 +1145,125 @@ mod tests {
             XaaIdpConfigProvider::new(http, clock, storage, on_url, settings, lookup);
         let out = provider.xaa_inputs("unknown", "https://x").await.unwrap();
         assert!(out.is_none(), "unknown server → Ok(None)");
+    }
+
+    // ----- (e) 4xx token-exchange clears the cached id_token; 5xx keeps it ----
+    //
+    // Mirrors resolve_xaa_token's new arm (registry.rs) composed against the
+    // REAL provider: drive the IdP token-exchange leg (the only leg that carries
+    // `should_clear_id_token`), then — exactly as the registry does — if
+    // `err.should_clear_id_token()` is true, call `provider.clear_id_token()`.
+    // Parity: auth.ts:1840-1847 `if (e.shouldClearIdToken) clearIdpIdToken(...)`.
+
+    /// Build a provider over `http`/`storage` for `issuer` (no lookup/auth-url
+    /// needed: these tests only exercise `clear_id_token`).
+    fn provider_for(
+        http: Arc<dyn HttpTransport>,
+        storage: Arc<dyn SecureStorage>,
+        clock: Arc<dyn Clock>,
+        issuer: &str,
+    ) -> XaaIdpConfigProvider {
+        let on_url: OnAuthorizationUrl = Arc::new(|_: &str| {});
+        let settings = XaaIdpSettings {
+            issuer: issuer.into(),
+            client_id: "idp-client".into(),
+            callback_port: None,
+        };
+        let lookup: Arc<dyn ServerOAuthLookup> = Arc::new(StaticLookup(None));
+        XaaIdpConfigProvider::new(http, clock, storage, on_url, settings, lookup)
+    }
+
+    /// Replay the registry's exchange-error arm: run the IdP token-exchange leg;
+    /// on a `should_clear_id_token` error, clear the provider's cached id_token.
+    async fn exchange_then_maybe_clear(
+        provider: &XaaIdpConfigProvider,
+        http: &Arc<dyn HttpTransport>,
+        token_endpoint: &str,
+    ) {
+        let req = crate::xaa::JwtAuthGrantRequest {
+            token_endpoint,
+            audience: "https://as.example.com",
+            resource: "https://mcp.acme.com",
+            id_token: "the-id-token",
+            client_id: "idp-client",
+            client_secret: None,
+            scope: None,
+        };
+        let res = crate::xaa::request_jwt_authorization_grant(http, &req).await;
+        if let Err(e) = res {
+            if e.should_clear_id_token() {
+                provider.clear_id_token().await.expect("clear ok");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn token_exchange_4xx_clears_cached_id_token() {
+        let storage: Arc<dyn SecureStorage> = Arc::new(MemStorage::default());
+        let now = UNIX_EPOCH + Duration::from_secs(1_000_000);
+        let clock: Arc<dyn Clock> = Arc::new(TestClock(now));
+        let issuer = "https://idp.example.com";
+
+        // Seed a fresh (1h) cached id_token for this issuer.
+        set_cached_id_token(&storage, &clock, issuer, "tok-cached", now + Duration::from_secs(3600))
+            .await
+            .unwrap();
+        assert!(
+            get_cached_id_token(&storage, &clock, issuer).await.unwrap().is_some(),
+            "precondition: id_token is cached"
+        );
+
+        // Mock AS: the IdP token-exchange POST 4xx-rejects the id_token.
+        let http: Arc<dyn HttpTransport> = Arc::new(ScriptedHttp {
+            routes: vec![(
+                HttpMethod::Post,
+                "https://idp.example.com/token".into(),
+                400,
+                r#"{"error":"invalid_grant"}"#.into(),
+            )],
+        });
+        let provider = provider_for(http.clone(), storage.clone(), clock.clone(), issuer);
+
+        exchange_then_maybe_clear(&provider, &http, "https://idp.example.com/token").await;
+
+        // 4xx ⇒ cached id_token cleared, so the next resolve re-acquires.
+        assert_eq!(
+            get_cached_id_token(&storage, &clock, issuer).await.unwrap(),
+            None,
+            "4xx token-exchange must clear the cached id_token"
+        );
+    }
+
+    #[tokio::test]
+    async fn token_exchange_5xx_keeps_cached_id_token() {
+        let storage: Arc<dyn SecureStorage> = Arc::new(MemStorage::default());
+        let now = UNIX_EPOCH + Duration::from_secs(1_000_000);
+        let clock: Arc<dyn Clock> = Arc::new(TestClock(now));
+        let issuer = "https://idp.example.com";
+
+        set_cached_id_token(&storage, &clock, issuer, "tok-cached", now + Duration::from_secs(3600))
+            .await
+            .unwrap();
+
+        // Mock AS: the IdP token-exchange POST 5xx (IdP outage).
+        let http: Arc<dyn HttpTransport> = Arc::new(ScriptedHttp {
+            routes: vec![(
+                HttpMethod::Post,
+                "https://idp.example.com/token".into(),
+                503,
+                r#"{"error":"temporarily_unavailable"}"#.into(),
+            )],
+        });
+        let provider = provider_for(http.clone(), storage.clone(), clock.clone(), issuer);
+
+        exchange_then_maybe_clear(&provider, &http, "https://idp.example.com/token").await;
+
+        // 5xx (IdP outage) ⇒ the cached id_token is KEPT.
+        assert_eq!(
+            get_cached_id_token(&storage, &clock, issuer).await.unwrap().as_deref(),
+            Some("tok-cached"),
+            "5xx token-exchange must keep the cached id_token"
+        );
     }
 
     // ----- settings parse -----------------------------------------------------

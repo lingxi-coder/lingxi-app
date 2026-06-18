@@ -144,11 +144,10 @@ async fn trust_gate(
         return TrustOutcome::Decline;
     }
     if parse_trust_input(&line) {
-        // "Yes, I trust this folder" → persist (best-effort; a write failure
-        // must not crash startup — the session is still trusted-this-run).
-        if let Err(e) = migrations::global_config::mark_trust_dialog_accepted(cfg_path, cwd) {
-            tracing::warn!("failed to persist trust dialog acceptance: {e}");
-        }
+        // "Yes, I trust this folder" → record acceptance via the shared accept
+        // branch (`TrustDialog.tsx:162,174-177`): SESSION-ONLY in-memory when
+        // `cwd == $HOME`, else persisted to disk best-effort.
+        migrations::global_config::record_trust_accept(cfg_path, cwd);
         TrustOutcome::Proceed
     } else {
         TrustOutcome::Decline

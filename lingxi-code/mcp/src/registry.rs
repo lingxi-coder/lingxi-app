@@ -85,6 +85,17 @@ pub trait XaaConfigProvider: Send + Sync {
         server_name: &str,
         server_url: &str,
     ) -> Result<Option<XaaInputs>, McpError>;
+
+    /// Drop the cached IdP `id_token` so the next [`Self::xaa_inputs`] call
+    /// re-acquires a fresh one (auth.ts `clearIdpIdToken(idp.issuer)`, 1840-1847).
+    ///
+    /// Called by [`McpRegistry::resolve_xaa_token`] only when the cross-app
+    /// token exchange returns a 4xx (the cached `id_token` was rejected); a 5xx
+    /// (IdP outage) keeps it. The default is a no-op so providers that don't
+    /// cache an `id_token` need no change.
+    async fn clear_id_token(&self) -> Result<(), McpError> {
+        Ok(())
+    }
 }
 
 /// Initial reconnect backoff (claude-code `INITIAL_BACKOFF_MS = 1000`).
@@ -683,7 +694,7 @@ impl McpRegistry {
                 ))
             })?;
 
-        let result = crate::xaa::perform_cross_app_access(
+        let result = match crate::xaa::perform_cross_app_access(
             &deps.http,
             spec_url(&config.spec),
             &crate::xaa::XaaConfig {
@@ -695,7 +706,20 @@ impl McpRegistry {
                 idp_token_endpoint: &inputs.idp_token_endpoint,
             },
         )
-        .await?;
+        .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                // 4xx token-exchange ⇒ the cached id_token was rejected; drop it
+                // so the next resolve re-acquires (auth.ts:1840-1847
+                // `clearIdpIdToken(idp.issuer)`). 5xx (IdP outage) keeps it.
+                // Best-effort: a clear failure must not mask the exchange error.
+                if e.should_clear_id_token() {
+                    let _ = provider.clear_id_token().await;
+                }
+                return Err(e.into());
+            }
+        };
 
         // Persist: carry the AS confidential client_id/secret so refresh +
         // RFC-7009 revocation can authenticate the confidential client

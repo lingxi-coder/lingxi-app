@@ -750,29 +750,20 @@ impl Tool for BashTool {
         self.ctx.bus.log_event(BASH_STARTED, meta_start).await;
 
         // ===== Sandbox decision =====
-        // BASH.5: `dangerouslyDisableSandbox` bypasses the sandbox decision when
-        // the policy allows unsandboxed commands. 1:1 with claude-code
-        // `shouldUseSandbox.ts`: `if (input.dangerouslyDisableSandbox &&
-        // SandboxManager.areUnsandboxedCommandsAllowed()) return false`.
-        // `areUnsandboxedCommandsAllowed()` ⇔ a non-empty allow-list (same
-        // mapping used by the BASH.6 prompt section).
-        let unsandboxed_allowed = !self
-            .ctx
-            .sandbox_runtime
-            .allow_unsandboxed_commands
-            .is_empty();
-        let decision = if dangerously_disable_sandbox && unsandboxed_allowed {
-            SandboxDecision::NoSandbox
-        } else {
-            should_use_sandbox(
-                &cmd_str,
-                self.ctx.permission_mode,
-                self.ctx.project_trust,
-                None,
-                self.ctx.sandbox_available,
-                self.ctx.workspace.clone(),
-            )
-        };
+        // 1:1 with claude-code `shouldUseSandbox.ts`. The `dangerouslyDisableSandbox`
+        // override and the empty-command / excluded-command short-circuits all live
+        // INSIDE `should_use_sandbox` now; we just feed it the inputs.
+        // `unsandboxed_allowed` is `SandboxManager.areUnsandboxedCommandsAllowed()`,
+        // mapped to the canonical `are_unsandboxed_commands_allowed()` accessor (the
+        // same mapping used by the BASH.6 prompt section).
+        let decision = should_use_sandbox(
+            &cmd_str,
+            self.ctx.sandbox_available,
+            dangerously_disable_sandbox,
+            self.ctx.sandbox_runtime.are_unsandboxed_commands_allowed(),
+            &self.ctx.sandbox_runtime,
+            self.ctx.workspace.clone(),
+        );
 
         let shell = resolve_shell_path().to_string();
 
@@ -832,10 +823,6 @@ impl Tool for BashTool {
                         return Err(ToolError::Io(s));
                     }
                 }
-            }
-            SandboxDecision::RefuseBecauseSandboxUnavailable { reason } => {
-                emit_failed(&self.ctx.bus, &request_id, "sandbox_refused", started_at).await;
-                return Err(ToolError::PermissionDenied(reason));
             }
         };
 
@@ -1813,14 +1800,13 @@ mod tests {
 
     #[tokio::test]
     async fn dangerously_disable_sandbox_bypasses_when_unsandboxed_allowed() {
-        use sandbox::decision::ProjectTrustLevel;
         let last = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
         let mut ctx = shell_test_ctx(ok_output());
-        // Force the default decision to Sandbox: available sandbox + untrusted
-        // project + Default mode yields `Sandbox { .. }`.
+        // Force the default decision to Sandbox: available sandbox + no excluded
+        // commands yields `Sandbox { .. }`.
         ctx.sandbox_available = true;
-        ctx.project_trust = ProjectTrustLevel::Untrusted;
-        ctx.sandbox_runtime.allow_unsandboxed_commands = vec!["echo".into()];
+        ctx.sandbox_runtime.excluded_commands = vec![];
+        ctx.sandbox_runtime.allow_unsandboxed_commands = true;
         ctx.process = Arc::new(CapturingRunner {
             out: ok_output(),
             last_args: last.clone(),
@@ -1895,13 +1881,12 @@ mod tests {
 
     #[tokio::test]
     async fn sandbox_branch_routes_through_injected_runner_and_cleans_up() {
-        use sandbox::decision::ProjectTrustLevel;
         let last = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
         let runner = Arc::new(RecordingSandboxRunner::default());
         let mut ctx = shell_test_ctx(ok_output());
-        // Force the Sandbox branch: available sandbox + untrusted project.
+        // Force the Sandbox branch: available sandbox + no excluded commands.
         ctx.sandbox_available = true;
-        ctx.project_trust = ProjectTrustLevel::Untrusted;
+        ctx.sandbox_runtime.excluded_commands = vec![];
         ctx.workspace = std::path::PathBuf::from("/tmp");
         ctx.sandbox_runner = runner.clone();
         ctx.process = Arc::new(CapturingRunner {
@@ -1943,14 +1928,13 @@ mod tests {
 
     #[tokio::test]
     async fn dangerously_disable_sandbox_ignored_when_policy_disallows() {
-        use sandbox::decision::ProjectTrustLevel;
         let last = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
         let mut ctx = shell_test_ctx(ok_output());
         ctx.sandbox_available = true;
-        ctx.project_trust = ProjectTrustLevel::Untrusted;
-        // Empty allow-list ⇒ `areUnsandboxedCommandsAllowed()` is false, so the
-        // flag must be ignored and the command stays sandboxed.
-        ctx.sandbox_runtime.allow_unsandboxed_commands = vec![];
+        ctx.sandbox_runtime.excluded_commands = vec![];
+        // `allow_unsandboxed_commands = false` ⇒ `areUnsandboxedCommandsAllowed()`
+        // is false, so the flag must be ignored and the command stays sandboxed.
+        ctx.sandbox_runtime.allow_unsandboxed_commands = false;
         ctx.process = Arc::new(CapturingRunner {
             out: ok_output(),
             last_args: last.clone(),

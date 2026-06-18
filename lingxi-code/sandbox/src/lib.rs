@@ -5,12 +5,13 @@
 //!
 //! - [`policy::default_policy`] — the conservative policy used when callers
 //!   don't supply one explicitly.
-//! - [`decision::should_use_sandbox`] — the M1 decision matrix used by the
-//!   tool layer to pick between sandbox / no-sandbox / refusal.
-//! - [`decision::should_use_sandbox_for_command`] — the M2 decision that
-//!   consults `SandboxRuntimeConfig::excluded_commands` after
-//!   compound-command splitting and safe-wrapper / env-var fixed-point
-//!   stripping (port of claude-code's `shouldUseSandbox.ts`).
+//! - [`decision::should_use_sandbox`] — the faithful `shouldUseSandbox` port the
+//!   tool layer uses to pick between sandbox / no-sandbox (gates on host
+//!   availability, the `dangerouslyDisableSandbox` override, an empty command,
+//!   and the `excludedCommands` list — no permission-mode / trust / classifier).
+//! - [`decision::should_use_sandbox_for_command`] — the
+//!   `SandboxRuntimeConfig`-aware `enabled && !excluded` predicate sharing the
+//!   same excluded-command core (port of claude-code's `shouldUseSandbox.ts`).
 //! - [`dependency_check::check_dependencies`] — host probe for required
 //!   sandbox binaries (`sandbox-exec`, `bwrap`, `socat`).
 //! - [`dependency_check::sandbox_unavailable_reason`] — decoder for the
@@ -35,10 +36,9 @@ pub mod violation_store;
 pub mod wrap;
 
 pub use decision::{
-    is_obviously_dangerous, should_use_sandbox, should_use_sandbox_for_command,
-    split_compound_command, strip_env_and_wrappers_fixedpoint, ProjectTrustLevel, SandboxDecision,
-    BINARY_HIJACK_VARS,
+    is_binary_hijack_var, should_use_sandbox, should_use_sandbox_for_command, SandboxDecision,
 };
+pub use permission::shell_command::strip_env_and_wrappers_fixedpoint;
 pub use dependency_check::{
     check_dependencies, sandbox_unavailable_reason, MissingDeps, SandboxDependencyCheck,
 };

@@ -11,7 +11,6 @@ use crate::anthropic_request::AnthropicRequestBuilder;
 use crate::read_file_state::ReadFileStateMap;
 use crate::sandbox_runner::SandboxRunner;
 use permission::PermissionMode;
-use sandbox::decision::ProjectTrustLevel;
 use sandbox::runtime_config::{Platform, SandboxRuntimeConfig};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -63,8 +62,6 @@ pub struct BuiltinToolContext {
     pub sandbox_runner: Arc<dyn SandboxRunner>,
     /// Active permission mode (M4-02).
     pub permission_mode: PermissionMode,
-    /// Whether the project workspace has been explicitly trusted (M4-02).
-    pub project_trust: ProjectTrustLevel,
     /// Whether the host has a working sandbox backend right now (M4-02).
     pub sandbox_available: bool,
     /// Project workspace path (M4-02).

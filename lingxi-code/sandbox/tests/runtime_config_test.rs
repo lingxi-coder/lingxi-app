@@ -75,9 +75,9 @@ fn deserializes_realistic_claude_code_settings_fragment() {
     let json = serde_json::json!({
         "enabled": true,
         "failIfUnavailable": false,
-        "enabledPlatforms": ["mac", "linux"],
+        "enabledPlatforms": ["macos", "linux"],
         "autoAllowBashIfSandboxed": true,
-        "allowUnsandboxedCommands": ["docker"],
+        "allowUnsandboxedCommands": true,
         "network": {
             "allowedDomains": ["github.com", "*.anthropic.com"],
             "allowManagedDomainsOnly": false,
@@ -107,7 +107,7 @@ fn deserializes_realistic_claude_code_settings_fragment() {
         cfg.enabled_platforms.as_deref(),
         Some(&[Platform::Mac, Platform::Linux][..])
     );
-    assert_eq!(cfg.allow_unsandboxed_commands, vec!["docker".to_string()]);
+    assert!(cfg.allow_unsandboxed_commands);
     assert_eq!(
         cfg.network.allowed_domains,
         vec!["github.com".to_string(), "*.anthropic.com".to_string()]
@@ -121,10 +121,10 @@ fn deserializes_realistic_claude_code_settings_fragment() {
 }
 
 #[test]
-fn platform_enum_serializes_lowercase() {
+fn platform_enum_serializes_with_macos_spelling() {
     assert_eq!(
         serde_json::to_value(Platform::Mac).unwrap(),
-        serde_json::json!("mac")
+        serde_json::json!("macos")
     );
     assert_eq!(
         serde_json::to_value(Platform::Linux).unwrap(),
@@ -134,6 +134,42 @@ fn platform_enum_serializes_lowercase() {
         serde_json::to_value(Platform::Wsl).unwrap(),
         serde_json::json!("wsl")
     );
+    // back-compat: the older "mac" spelling still deserializes.
+    assert_eq!(
+        serde_json::from_value::<Platform>(serde_json::json!("mac")).unwrap(),
+        Platform::Mac
+    );
+    assert_eq!(
+        serde_json::from_value::<Platform>(serde_json::json!("macos")).unwrap(),
+        Platform::Mac
+    );
+}
+
+#[test]
+fn unknown_platform_in_enabled_list_is_dropped_not_fatal() {
+    // claude-code reads enabledPlatforms untyped (sandbox-adapter.ts:505) — an
+    // unknown entry must NOT abort the whole SettingsJson parse, else the
+    // desktop tier loader's `if let Ok(..) else continue` drops the entire tier.
+    let cfg: SandboxRuntimeConfig = serde_json::from_value(serde_json::json!({
+        "enabledPlatforms": ["macos", "windows", "linux"]
+    }))
+    .expect("unknown platform must not fail the parse");
+    assert_eq!(
+        cfg.enabled_platforms.as_deref(),
+        Some(&[Platform::Mac, Platform::Linux][..])
+    );
+}
+
+#[test]
+fn settings_json_with_unknown_platform_still_parses_other_fields() {
+    use sandbox::runtime_config::SettingsJson;
+    let s: SettingsJson = serde_json::from_value(serde_json::json!({
+        "permissions": { "allow": ["Edit(./src/**)"] },
+        "sandbox": { "enabled": true, "enabledPlatforms": ["windows"] }
+    }))
+    .expect("tier must not be dropped over an unknown platform");
+    assert!(s.permissions.is_some());
+    assert_eq!(s.sandbox.unwrap().enabled_platforms.as_deref(), Some(&[][..]));
 }
 
 #[test]
@@ -143,4 +179,67 @@ fn unused_helpers_are_referenced() {
     let _: NetworkRestrictionConfig = NetworkRestrictionConfig::default();
     let _: FilesystemRestrictionConfig = FilesystemRestrictionConfig::default();
     let _: RipgrepConfig = RipgrepConfig::default();
+}
+
+#[test]
+fn allow_unsandboxed_commands_defaults_true_when_absent() {
+    // claude-code: `allowUnsandboxedCommands` defaults to `true` (sandboxTypes.ts:119).
+    let cfg: SandboxRuntimeConfig =
+        serde_json::from_value(serde_json::json!({})).expect("parse empty");
+    assert!(cfg.allow_unsandboxed_commands);
+    assert!(SandboxRuntimeConfig::default().allow_unsandboxed_commands);
+    assert!(SandboxRuntimeConfig::default().are_unsandboxed_commands_allowed());
+}
+
+#[test]
+fn allow_unsandboxed_commands_roundtrips_bool() {
+    let off: SandboxRuntimeConfig =
+        serde_json::from_value(serde_json::json!({ "allowUnsandboxedCommands": false }))
+            .expect("parse false");
+    assert!(!off.allow_unsandboxed_commands);
+    assert!(!off.are_unsandboxed_commands_allowed());
+
+    let on: SandboxRuntimeConfig =
+        serde_json::from_value(serde_json::json!({ "allowUnsandboxedCommands": true }))
+            .expect("parse true");
+    assert!(on.allow_unsandboxed_commands);
+
+    // Serialized default is the boolean `true`, NOT an array.
+    let v = serde_json::to_value(SandboxRuntimeConfig::default()).unwrap();
+    assert_eq!(v["allowUnsandboxedCommands"], serde_json::json!(true));
+}
+
+#[test]
+fn network_emits_denied_domains_camelcase() {
+    let v = serde_json::to_value(SandboxRuntimeConfig::default()).unwrap();
+    assert!(
+        v["network"]
+            .as_object()
+            .unwrap()
+            .contains_key("deniedDomains"),
+        "network must serialize deniedDomains: {}",
+        v["network"]
+    );
+    assert!(v["network"]["deniedDomains"].is_array());
+
+    let cfg: SandboxRuntimeConfig =
+        serde_json::from_value(serde_json::json!({ "network": { "deniedDomains": ["evil.com"] } }))
+            .expect("parse deniedDomains");
+    assert_eq!(cfg.network.denied_domains, vec!["evil.com".to_string()]);
+}
+
+#[test]
+fn ripgrep_argv0_roundtrips() {
+    let cfg: SandboxRuntimeConfig =
+        serde_json::from_value(serde_json::json!({ "ripgrep": { "command": "rg", "argv0": "rg" } }))
+            .expect("parse ripgrep argv0");
+    assert_eq!(cfg.ripgrep.argv0, Some("rg".to_string()));
+
+    // `argv0: None` is skipped on serialize (skip_serializing_if).
+    let v = serde_json::to_value(SandboxRuntimeConfig::default()).unwrap();
+    assert!(
+        !v["ripgrep"].as_object().unwrap().contains_key("argv0"),
+        "argv0 None must be omitted: {}",
+        v["ripgrep"]
+    );
 }

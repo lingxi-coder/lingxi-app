@@ -56,7 +56,6 @@ use orchestrator::{
 use permission::gate::PermissionGate;
 use permission::PermissionMode;
 use platform_common::LlmTransportBridge;
-use sandbox::decision::ProjectTrustLevel;
 use sandbox::runtime_config::{Platform as SandboxPlatform, SandboxRuntimeConfig};
 use secret::CredentialManager;
 use tokio::sync::{Mutex, RwLock};
@@ -733,7 +732,6 @@ pub async fn build_mobile_inner(
         // invoker, so the dispatch gate is unused here. The main loop is still
         // gated via `perms` (passed to the orchestrator below).
         permission_gate: None,
-        project_trust: ProjectTrustLevel::Trusted,
         mcp_registry: None,
         lsp_registry: None,
         camera: platform.camera(),

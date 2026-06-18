@@ -1,6 +1,13 @@
-use sandbox::policy_convert::{convert_settings_to_runtime_config, linux_glob_pattern_warnings};
+use sandbox::policy_convert::{
+    convert_settings_to_runtime_config, linux_glob_pattern_warnings, SandboxConvertContext,
+};
 use sandbox::runtime_config::{SandboxSettingsJson, SettingsJson, SettingsPermissions};
 use std::path::PathBuf;
+
+/// Default (empty) conversion context — most tests don't exercise seeds.
+fn ctx() -> SandboxConvertContext {
+    SandboxConvertContext::default()
+}
 
 fn settings(allow: Vec<&str>, deny: Vec<&str>) -> SettingsJson {
     SettingsJson {
@@ -20,32 +27,35 @@ fn settings(allow: Vec<&str>, deny: Vec<&str>) -> SettingsJson {
 #[test]
 fn extracts_edit_allow_into_allow_write() {
     let s = settings(vec!["Edit(./src/**)"], vec![]);
-    let cfg = convert_settings_to_runtime_config(&s);
+    let cfg = convert_settings_to_runtime_config(&s, &ctx());
     assert!(cfg.filesystem.allow_write.contains(&"./src/**".to_string()));
 }
 
 #[test]
 fn extracts_edit_deny_into_deny_write() {
     let s = settings(vec![], vec!["Edit(//.git/**)"]);
-    let cfg = convert_settings_to_runtime_config(&s);
+    let cfg = convert_settings_to_runtime_config(&s, &ctx());
     // `//.git/**` resolves to `/.git/**` (one leading slash stripped).
     assert!(cfg.filesystem.deny_write.contains(&"/.git/**".to_string()));
 }
 
 #[test]
-fn extracts_read_allow_into_allow_read() {
+fn read_allow_does_not_populate_allow_read() {
+    // claude-code never maps Read(allow) → allowRead. allowRead comes only from
+    // sandbox.filesystem.allowRead (sandbox-adapter.ts:343-347).
     let s = settings(vec!["Read(~/.aws/credentials)"], vec![]);
-    let cfg = convert_settings_to_runtime_config(&s);
-    assert!(cfg
-        .filesystem
-        .allow_read
-        .contains(&"~/.aws/credentials".to_string()));
+    let cfg = convert_settings_to_runtime_config(&s, &ctx());
+    assert!(
+        cfg.filesystem.allow_read.is_empty(),
+        "Read(allow) must not seed allow_read, got {:?}",
+        cfg.filesystem.allow_read
+    );
 }
 
 #[test]
 fn extracts_read_deny_into_deny_read() {
     let s = settings(vec![], vec!["Read(/secret)"]);
-    let cfg = convert_settings_to_runtime_config(&s);
+    let cfg = convert_settings_to_runtime_config(&s, &ctx());
     // `/secret` resolves relative to settings_dir = /home/u/.claude.
     assert!(cfg
         .filesystem
@@ -56,7 +66,7 @@ fn extracts_read_deny_into_deny_read() {
 #[test]
 fn extracts_webfetch_domain_into_allowed_domains() {
     let s = settings(vec!["WebFetch(domain:anthropic.com)"], vec![]);
-    let cfg = convert_settings_to_runtime_config(&s);
+    let cfg = convert_settings_to_runtime_config(&s, &ctx());
     assert!(cfg
         .network
         .allowed_domains
@@ -66,8 +76,10 @@ fn extracts_webfetch_domain_into_allowed_domains() {
 #[test]
 fn bash_rules_are_ignored_in_this_layer() {
     let s = settings(vec!["Bash(curl:*)"], vec!["Bash(rm:*)"]);
-    let cfg = convert_settings_to_runtime_config(&s);
-    assert!(cfg.filesystem.allow_write.is_empty());
+    let cfg = convert_settings_to_runtime_config(&s, &ctx());
+    // Bash rules contribute no filesystem paths; only the `.` seed is present
+    // in allow_write (claude-code seeds cwd as writable), deny_write empty.
+    assert_eq!(cfg.filesystem.allow_write, vec![".".to_string()]);
     assert!(cfg.filesystem.deny_write.is_empty());
 }
 
@@ -80,7 +92,7 @@ fn passes_through_sandbox_subsection_values() {
         excluded_commands: Some(vec!["bazel".into(), "make".into()]),
         ..Default::default()
     });
-    let cfg = convert_settings_to_runtime_config(&s);
+    let cfg = convert_settings_to_runtime_config(&s, &ctx());
     assert!(cfg.enabled);
     assert!(cfg.fail_if_unavailable);
     assert_eq!(cfg.excluded_commands, vec!["bazel", "make"]);
@@ -118,4 +130,252 @@ fn linux_glob_warning_for_question_mark() {
     let s = settings(vec!["Edit(./foo?.txt)"], vec![]);
     let warnings = linux_glob_pattern_warnings(&s);
     assert!(warnings.iter().any(|w| w == "Edit(./foo?.txt)"));
+}
+
+#[test]
+fn deny_webfetch_domain_populates_denied_domains() {
+    let s = settings(
+        vec!["WebFetch(domain:good.com)"],
+        vec!["WebFetch(domain:evil.com)"],
+    );
+    let cfg = convert_settings_to_runtime_config(&s, &ctx());
+    assert_eq!(cfg.network.denied_domains, vec!["evil.com".to_string()]);
+    assert!(cfg.network.allowed_domains.contains(&"good.com".to_string()));
+    assert!(!cfg.network.allowed_domains.contains(&"evil.com".to_string()));
+}
+
+#[test]
+fn network_override_does_not_clobber_derived_denied_domains() {
+    use sandbox::runtime_config::NetworkRestrictionConfig;
+    let mut s = settings(vec![], vec!["WebFetch(domain:evil.com)"]);
+    s.sandbox = Some(SandboxSettingsJson {
+        enabled: Some(true),
+        network: Some(NetworkRestrictionConfig {
+            denied_domains: vec!["also-bad.com".into()],
+            ..Default::default()
+        }),
+        ..Default::default()
+    });
+    let cfg = convert_settings_to_runtime_config(&s, &ctx());
+    // Derived deny (evil.com) + override deny (also-bad.com) both present.
+    assert!(cfg.network.denied_domains.contains(&"evil.com".to_string()));
+    assert!(cfg
+        .network
+        .denied_domains
+        .contains(&"also-bad.com".to_string()));
+}
+
+#[test]
+fn seeds_allow_write_with_dot_and_claude_temp_dir() {
+    let s = settings(vec!["Edit(/proj)"], vec![]);
+    let c = SandboxConvertContext {
+        claude_temp_dir: Some("/tmp/claude-501".into()),
+        ..Default::default()
+    };
+    let cfg = convert_settings_to_runtime_config(&s, &c);
+    assert_eq!(cfg.filesystem.allow_write[0], ".");
+    assert_eq!(cfg.filesystem.allow_write[1], "/tmp/claude-501");
+    // Rule-derived path comes AFTER the seeds.
+    assert!(cfg
+        .filesystem
+        .allow_write
+        .iter()
+        .skip(2)
+        .any(|p| p.ends_with("/proj")));
+}
+
+#[test]
+fn default_ctx_seeds_only_dot_no_temp() {
+    let s = settings(vec![], vec![]);
+    let cfg = convert_settings_to_runtime_config(&s, &ctx());
+    assert_eq!(cfg.filesystem.allow_write, vec![".".to_string()]);
+    assert!(cfg.filesystem.deny_write.is_empty());
+}
+
+#[test]
+fn denies_settings_managed_and_skills_paths() {
+    let s = settings(vec![], vec![]);
+    let c = SandboxConvertContext {
+        settings_file_paths: vec!["/home/u/.claude/settings.json".into()],
+        managed_drop_in_dir: Some("/Library/managed-settings.d".into()),
+        skills_dirs: vec!["/proj/.claude/skills".into()],
+        ..Default::default()
+    };
+    let cfg = convert_settings_to_runtime_config(&s, &c);
+    assert!(cfg
+        .filesystem
+        .deny_write
+        .contains(&"/home/u/.claude/settings.json".to_string()));
+    assert!(cfg
+        .filesystem
+        .deny_write
+        .contains(&"/Library/managed-settings.d".to_string()));
+    assert!(cfg
+        .filesystem
+        .deny_write
+        .contains(&"/proj/.claude/skills".to_string()));
+}
+
+#[test]
+fn additional_dirs_union_session_and_settings_dedup() {
+    let mut s = settings(vec![], vec![]);
+    if let Some(p) = s.permissions.as_mut() {
+        p.additional_directories = vec!["a".into(), "b".into()];
+    }
+    let c = SandboxConvertContext {
+        additional_md_dirs: vec!["b".into(), "c".into()],
+        ..Default::default()
+    };
+    let cfg = convert_settings_to_runtime_config(&s, &c);
+    let aw = &cfg.filesystem.allow_write;
+    assert!(aw.contains(&"a".to_string()));
+    assert!(aw.contains(&"b".to_string()));
+    assert!(aw.contains(&"c".to_string()));
+    // `b` appears exactly once (Set dedup).
+    assert_eq!(aw.iter().filter(|p| p.as_str() == "b").count(), 1);
+}
+
+#[test]
+fn policy_convert_does_not_seed_bare_git_paths() {
+    // Regression guard: bare-git repo files are owned by the posix prepare
+    // layer, NOT this pure conversion (sandbox-adapter.ts:257-280).
+    let s = settings(vec![], vec![]);
+    let cfg = convert_settings_to_runtime_config(&s, &ctx());
+    for forbidden in ["HEAD", "objects", "refs", "hooks", "config"] {
+        assert!(
+            !cfg.filesystem
+                .deny_write
+                .iter()
+                .any(|p| p.ends_with(forbidden)),
+            "convert must not seed bare-git path {forbidden}: {:?}",
+            cfg.filesystem.deny_write
+        );
+    }
+}
+
+/// Locks the feed the desktop now exercises end-to-end: a `WebFetch(domain:...)`
+/// allow, an `Edit(/src/**)` allow, and a `Read(/secret)` deny — across the SAME
+/// `SettingsJson` the engine-desktop `*_from_settings_tiers` helpers assemble —
+/// reach the runtime config with paths resolved relative to `settings_dir`.
+#[test]
+fn webfetch_and_edit_rules_reach_runtime_config() {
+    let s = SettingsJson {
+        permissions: Some(SettingsPermissions {
+            allow: vec![
+                "WebFetch(domain:example.com)".to_string(),
+                "Edit(/src/**)".to_string(),
+            ],
+            deny: vec!["Read(/secret)".to_string()],
+            additional_directories: vec![],
+        }),
+        sandbox: Some(SandboxSettingsJson {
+            enabled: Some(true),
+            ..Default::default()
+        }),
+        settings_dir: Some(PathBuf::from("/proj")),
+    };
+    // The default ctx (only `.` seeded into allow_write) is what
+    // `sandbox_runtime_config_from_settings_tiers` passes (sans claude_temp_dir).
+    let cfg = convert_settings_to_runtime_config(&s, &SandboxConvertContext::default());
+
+    assert!(
+        cfg.network.allowed_domains.contains(&"example.com".to_string()),
+        "WebFetch domain allow must reach allowed_domains: {:?}",
+        cfg.network.allowed_domains
+    );
+    // `/src/**` resolves relative to settings_dir = /proj.
+    assert!(
+        cfg.filesystem.allow_write.contains(&"/proj/src/**".to_string()),
+        "Edit allow must reach allow_write resolved against settings_dir: {:?}",
+        cfg.filesystem.allow_write
+    );
+    // `/secret` resolves relative to settings_dir = /proj.
+    assert!(
+        cfg.filesystem.deny_read.contains(&"/proj/secret".to_string()),
+        "Read deny must reach deny_read resolved against settings_dir: {:?}",
+        cfg.filesystem.deny_read
+    );
+}
+
+#[test]
+fn sandbox_filesystem_absolute_path_kept_as_is_not_settings_relative() {
+    use sandbox::runtime_config::FilesystemRestrictionConfig;
+    // #30067: an absolute path in sandbox.filesystem.allowWrite stays absolute,
+    // unlike permission-rule `/path` which is settings-relative.
+    let mut s = settings(vec![], vec![]); // settings_dir = /home/u/.claude
+    s.sandbox = Some(SandboxSettingsJson {
+        enabled: Some(true),
+        filesystem: Some(FilesystemRestrictionConfig {
+            allow_write: vec!["/Users/foo/.cargo".into()],
+            ..Default::default()
+        }),
+        ..Default::default()
+    });
+    let cfg = convert_settings_to_runtime_config(&s, &ctx());
+    assert!(cfg
+        .filesystem
+        .allow_write
+        .contains(&"/Users/foo/.cargo".to_string()));
+    assert!(!cfg
+        .filesystem
+        .allow_write
+        .contains(&"/home/u/.claude/Users/foo/.cargo".to_string()));
+}
+
+#[test]
+fn sandbox_filesystem_relative_path_resolved_against_settings_dir() {
+    use sandbox::runtime_config::FilesystemRestrictionConfig;
+    let mut s = settings(vec![], vec![]); // settings_dir = /home/u/.claude
+    s.sandbox = Some(SandboxSettingsJson {
+        enabled: Some(true),
+        filesystem: Some(FilesystemRestrictionConfig {
+            deny_read: vec!["secret".into()],
+            ..Default::default()
+        }),
+        ..Default::default()
+    });
+    let cfg = convert_settings_to_runtime_config(&s, &ctx());
+    assert!(cfg
+        .filesystem
+        .deny_read
+        .contains(&"/home/u/.claude/secret".to_string()));
+}
+
+#[test]
+fn sandbox_filesystem_double_slash_legacy_escape() {
+    use sandbox::runtime_config::FilesystemRestrictionConfig;
+    let mut s = settings(vec![], vec![]);
+    s.sandbox = Some(SandboxSettingsJson {
+        enabled: Some(true),
+        filesystem: Some(FilesystemRestrictionConfig {
+            allow_write: vec!["//etc/hosts".into()],
+            ..Default::default()
+        }),
+        ..Default::default()
+    });
+    let cfg = convert_settings_to_runtime_config(&s, &ctx());
+    assert!(cfg
+        .filesystem
+        .allow_write
+        .contains(&"/etc/hosts".to_string()));
+}
+
+#[test]
+fn allowed_domains_order_subsection_before_webfetch() {
+    use sandbox::runtime_config::NetworkRestrictionConfig;
+    // claude-code order: sandbox.network.allowedDomains FIRST, then WebFetch allow.
+    let mut s = settings(vec!["WebFetch(domain:fetch.example)"], vec![]);
+    s.sandbox = Some(SandboxSettingsJson {
+        enabled: Some(true),
+        network: Some(NetworkRestrictionConfig {
+            allowed_domains: vec!["sub.example".into()],
+            ..Default::default()
+        }),
+        ..Default::default()
+    });
+    let cfg = convert_settings_to_runtime_config(&s, &ctx());
+    assert_eq!(
+        cfg.network.allowed_domains,
+        vec!["sub.example".to_string(), "fetch.example".to_string()]
+    );
 }

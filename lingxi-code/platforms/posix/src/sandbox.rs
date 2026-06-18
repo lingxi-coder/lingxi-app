@@ -50,7 +50,15 @@ impl PosixSandbox {
 
     /// Surface the human-readable unavailable reason for the current host
     /// (or `None` when the sandbox can actually run).
-    fn unavailable_reason() -> Option<String> {
+    ///
+    /// Faithful to claude-code `getSandboxUnavailableReason` (sandbox-adapter.ts:562):
+    /// `enabled` is `sandbox.enabled` (returns `None` when off, so missing deps on
+    /// a host where the user never opted in are silent), and `in_enabled_list` is
+    /// `isPlatformInEnabledList()` — whether the current platform is in
+    /// `sandbox.enabledPlatforms` (computed by the composition root, which holds
+    /// the merged settings; this crate stays OS-agnostic about that list).
+    #[must_use]
+    pub fn unavailable_reason_for(enabled: bool, in_enabled_list: bool) -> Option<String> {
         let wsl_one = matches!(detect_wsl(), WslKind::WslOne);
         let platform = detect_platform();
         let supported = platform.is_some() && !wsl_one;
@@ -59,9 +67,31 @@ impl PosixSandbox {
         } else {
             None
         };
-        let deps = Self::dep_check();
-        sandbox_unavailable_reason(true, supported, platform, wsl_one, label, &deps)
+        let mut deps = Self::dep_check();
+        deps.in_enabled_list = in_enabled_list;
+        sandbox_unavailable_reason(enabled, supported, platform, wsl_one, label, &deps)
     }
+
+    /// Surface the unavailable reason for an explicitly-enabled sandbox with no
+    /// `enabledPlatforms` restriction. Used by the capability probe, which always
+    /// wants a message regardless of the user's `sandbox.enabled` setting.
+    fn unavailable_reason() -> Option<String> {
+        Self::unavailable_reason_for(true, true)
+    }
+}
+
+/// WSL-aware host platform accessor for composition roots that need to gate
+/// `sandbox_available` on the REAL host (not a coarse `cfg!(target_os)` guess).
+///
+/// Returns the same `Option<Platform>` as the internal [`detect_platform`]:
+/// `Some(Mac)` / `Some(Linux)` / `Some(Wsl)` on a supported host, and `None`
+/// for WSL1 (refused, like claude-code) or a non-POSIX host. The desktop build
+/// must use THIS rather than `cfg!(target_os = "linux") ⇒ Linux`, otherwise on
+/// WSL1 it would wrongly report `Linux` and compute `sandbox_available == true`
+/// for a host claude-code explicitly refuses.
+#[must_use]
+pub fn host_platform() -> Option<Platform> {
+    detect_platform()
 }
 
 /// Detect the host platform per claude-code's `Platform` enum.

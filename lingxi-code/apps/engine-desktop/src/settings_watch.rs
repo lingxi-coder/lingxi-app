@@ -90,6 +90,41 @@ pub fn managed_settings_dir() -> PathBuf {
     }
 }
 
+/// Read the file-based managed (policy) settings raw JSON tiers, in ASCENDING
+/// merge priority, faithful to claude-code `loadManagedFileSettings`
+/// (settings.ts:75-122): `managed-settings.json` first (base), then every
+/// `*.json` under `managed-settings.d/` sorted alphabetically (drop-ins win,
+/// later files override). Skips dotfiles. Best-effort: unreadable/absent files
+/// and a missing drop-in dir are silently skipped (TS swallows ENOENT/ENOTDIR).
+/// Returned strings are appended by the caller AFTER the user/project/local
+/// (and flag, if any) tiers so policy wins.
+#[must_use]
+pub async fn managed_settings_raw_tiers() -> Vec<String> {
+    let managed = managed_settings_dir();
+    let mut out = Vec::new();
+    if let Ok(raw) = tokio::fs::read_to_string(managed.join("managed-settings.json")).await {
+        out.push(raw);
+    }
+    let drop_in = managed.join("managed-settings.d");
+    if let Ok(mut rd) = tokio::fs::read_dir(&drop_in).await {
+        let mut names: Vec<std::ffi::OsString> = Vec::new();
+        while let Ok(Some(entry)) = rd.next_entry().await {
+            let name = entry.file_name();
+            let n = name.to_string_lossy();
+            if n.ends_with(".json") && !n.starts_with('.') {
+                names.push(name);
+            }
+        }
+        names.sort(); // alphabetical, matching TS `.sort()`
+        for name in names {
+            if let Ok(raw) = tokio::fs::read_to_string(drop_in.join(name)).await {
+                out.push(raw);
+            }
+        }
+    }
+    out
+}
+
 /// The set of settings paths the watcher cares about, resolved from the
 /// composition root's `claude_home` + `cwd`. Carries both the absolute file
 /// paths and the parent directories to watch.

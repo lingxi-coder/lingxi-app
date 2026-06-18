@@ -25,13 +25,6 @@
 //! `python x.py > out`); full quote-aware redirection parsing lives with the
 //! deferred path-constraint check. None of the deferrals can WEAKEN a deny —
 //! they only make matching more conservative (fall through to ask).
-//!
-//! ## Intentional divergence (safe direction)
-//! `strip_all_leading_env_vars`' bare-value class admits `$`/backtick, whereas
-//! claude-code's `ENV_VAR_PATTERN` excludes them (a documented low-priority TS
-//! gap). The effect is the deny/ask path strips `FOO=$(x) denied` down to
-//! `denied` and still denies it — STRICTER than TS, never a bypass. Kept
-//! deliberately rather than replicating the TS weakness in a safety boundary.
 
 use crate::shell_rule_matching::{parse_shell_rule, ShellRule};
 use regex::Regex;
@@ -162,83 +155,190 @@ pub(crate) fn strip_output_redirections(cmd: &str) -> String {
     re.replace_all(cmd.trim(), "").trim().to_string()
 }
 
-/// One pass of safe-wrapper stripping (`timeout N`, `nice -n N`, `nohup`,
-/// `time`, `sudo --`, `sudo -E … --`, `env --`). Returns `Some(stripped)` if a
-/// wrapper was removed. Faithful subset of claude-code `stripSafeWrappers`
-/// (the parts that matter for rule matching; the full GNU-flag enumeration is
-/// not needed to keep deny safe).
-fn strip_safe_wrappers(cmd: &str) -> Option<String> {
-    let tokens: Vec<&str> = cmd.split_whitespace().collect();
-    if tokens.is_empty() {
-        return None;
+/// claude-code `BINARY_HIJACK_VARS = /^(LD_|DYLD_|PATH$)/` (bashPermissions.ts:708).
+/// Env vars that can make a *different binary* run (injection / resolution
+/// hijack). Matches ANY `LD_*`, ANY `DYLD_*`, and exactly `PATH`.
+#[must_use]
+pub fn is_binary_hijack_var(name: &str) -> bool {
+    name.starts_with("LD_") || name.starts_with("DYLD_") || name == "PATH"
+}
+
+/// claude-code `stripCommentLines` (bashPermissions.ts:508-522): drop lines whose
+/// `trim()` is empty or starts with `#`. If NOTHING survives, return the ORIGINAL
+/// command unchanged.
+#[must_use]
+fn strip_comment_lines(command: &str) -> String {
+    let kept: Vec<&str> = command
+        .split('\n')
+        .filter(|l| {
+            let t = l.trim();
+            !t.is_empty() && !t.starts_with('#')
+        })
+        .collect();
+    if kept.is_empty() {
+        command.to_string()
+    } else {
+        kept.join("\n")
     }
-    // sudo -E [KEY=val ...] -- REST  → "KEY=val ... REST" (env-vars retained so
-    // the env stripper can take a later pass).
-    if tokens.len() >= 4 && tokens[0] == "sudo" && tokens[1] == "-E" {
-        let mut i = 2;
-        while i < tokens.len() && tokens[i] != "--" {
-            if !tokens[i].contains('=') {
-                break;
+}
+
+/// claude-code `SAFE_ENV_VARS` (bashPermissions.ts:378-430) — env vars safe to
+/// strip before permission/exclusion matching. The ANT-only set (447-497) is
+/// intentionally NOT ported (internal-only).
+const SAFE_ENV_VARS: &[&str] = &[
+    // Go
+    "GOEXPERIMENT",
+    "GOOS",
+    "GOARCH",
+    "CGO_ENABLED",
+    "GO111MODULE",
+    // Rust
+    "RUST_BACKTRACE",
+    "RUST_LOG",
+    // Node
+    "NODE_ENV",
+    // Python
+    "PYTHONUNBUFFERED",
+    "PYTHONDONTWRITEBYTECODE",
+    // Pytest
+    "PYTEST_DISABLE_PLUGIN_AUTOLOAD",
+    "PYTEST_DEBUG",
+    // API keys
+    "ANTHROPIC_API_KEY",
+    // Locale / encoding
+    "LANG",
+    "LANGUAGE",
+    "LC_ALL",
+    "LC_CTYPE",
+    "LC_TIME",
+    "CHARSET",
+    // Terminal / display
+    "TERM",
+    "COLORTERM",
+    "NO_COLOR",
+    "FORCE_COLOR",
+    "TZ",
+    // Color config
+    "LS_COLORS",
+    "LSCOLORS",
+    "GREP_COLOR",
+    "GREP_COLORS",
+    "GCC_COLORS",
+    // Display formatting
+    "TIME_STYLE",
+    "BLOCK_SIZE",
+    "BLOCKSIZE",
+];
+
+/// claude-code `stripSafeWrappers` (bashPermissions.ts:524-615). Two-phase
+/// fixed-point: Phase 1 strips leading SAFE_ENV_VARS assignments + comment
+/// lines; Phase 2 strips wrapper commands (`timeout` with GNU flags, `time`,
+/// `nice` bare/`-N`/`-n N`, `stdbuf`, `nohup`) + comment lines, never env vars.
+///
+/// NOTE: `sudo`/`env`/`sudo -E` are deliberately NOT wrappers here — `env bash
+/// -c evil` must stay caught (see TS `BARE_SHELL_PREFIXES`).
+#[must_use]
+pub fn strip_safe_wrappers(command: &str) -> String {
+    static ENV_VAR_PATTERN: OnceLock<Regex> = OnceLock::new(); // TS:575
+    let env_re = ENV_VAR_PATTERN.get_or_init(|| {
+        Regex::new(r"^([A-Za-z_][A-Za-z0-9_]*)=([A-Za-z0-9_./:-]+)[ \t]+").unwrap()
+    });
+    static WRAPPERS: OnceLock<Vec<Regex>> = OnceLock::new(); // TS:532-560
+    let wrappers = WRAPPERS.get_or_init(|| {
+        vec![
+            Regex::new(r"^timeout[ \t]+(?:(?:--(?:foreground|preserve-status|verbose)|--(?:kill-after|signal)=[A-Za-z0-9_.+-]+|--(?:kill-after|signal)[ \t]+[A-Za-z0-9_.+-]+|-v|-[ks][ \t]+[A-Za-z0-9_.+-]+|-[ks][A-Za-z0-9_.+-]+)[ \t]+)*(?:--[ \t]+)?\d+(?:\.\d+)?[smhd]?[ \t]+").unwrap(),
+            Regex::new(r"^time[ \t]+(?:--[ \t]+)?").unwrap(),
+            Regex::new(r"^nice(?:[ \t]+-n[ \t]+-?\d+|[ \t]+-\d+)?[ \t]+(?:--[ \t]+)?").unwrap(),
+            Regex::new(r"^stdbuf(?:[ \t]+-[ioe][LN0-9]+)+[ \t]+(?:--[ \t]+)?").unwrap(),
+            Regex::new(r"^nohup[ \t]+(?:--[ \t]+)?").unwrap(),
+        ]
+    });
+
+    let mut stripped = command.to_string();
+    // Phase 1: leading SAFE env vars + comment lines.
+    let mut previous = String::new();
+    while stripped != previous {
+        previous = stripped.clone();
+        stripped = strip_comment_lines(&stripped);
+        if let Some(c) = env_re.captures(&stripped) {
+            let name = c.get(1).unwrap().as_str();
+            if SAFE_ENV_VARS.contains(&name) {
+                let end = c.get(0).unwrap().end();
+                stripped = stripped[end..].to_string();
             }
-            i += 1;
-        }
-        if i < tokens.len() && tokens[i] == "--" && i + 1 < tokens.len() {
-            let mut rest: Vec<&str> = Vec::new();
-            rest.extend_from_slice(&tokens[2..i]);
-            rest.extend_from_slice(&tokens[i + 1..]);
-            return Some(rest.join(" "));
         }
     }
-    // sudo -- REST  /  env -- REST
-    if tokens.len() >= 3 && (tokens[0] == "sudo" || tokens[0] == "env") && tokens[1] == "--" {
-        return Some(tokens[2..].join(" "));
+    // Phase 2: wrapper commands + comment lines. Do NOT strip env vars here.
+    previous = String::new();
+    while stripped != previous {
+        previous = stripped.clone();
+        stripped = strip_comment_lines(&stripped);
+        for w in wrappers.iter() {
+            stripped = w.replace(&stripped, "").into_owned();
+        }
     }
-    // nohup REST  /  time REST
-    if tokens.len() >= 2 && (tokens[0] == "nohup" || tokens[0] == "time") {
-        return Some(tokens[1..].join(" "));
-    }
-    // timeout N REST  (optionally `timeout --signal=… N REST` reduced to numeric)
-    if tokens.len() >= 3 && tokens[0] == "timeout" && is_numeric(tokens[1]) {
-        return Some(tokens[2..].join(" "));
-    }
-    // nice -n N REST
-    if tokens.len() >= 4 && tokens[0] == "nice" && tokens[1] == "-n" && is_numeric(tokens[2]) {
-        return Some(tokens[3..].join(" "));
-    }
-    // nice REST  (no explicit increment)
-    if tokens.len() >= 2 && tokens[0] == "nice" && tokens[1] != "-n" {
-        return Some(tokens[1..].join(" "));
-    }
-    None
+    stripped.trim().to_string()
 }
 
-fn is_numeric(s: &str) -> bool {
-    !s.is_empty() && s.chars().all(|c| c.is_ascii_digit())
-}
-
-/// Strip ALL leading `KEY=value` env-var assignments (`FOO=bar denied` →
-/// `denied`). Used only for deny/ask aggressive matching so a denied command
-/// cannot be hidden behind an arbitrary env prefix. Returns `Some` if anything
-/// was stripped.
-fn strip_all_leading_env_vars(cmd: &str) -> Option<String> {
+/// claude-code `stripAllLeadingEnvVars(command, blocklist?)` (bashPermissions.ts
+/// :733-776). Iteratively strips each leading `KEY=value` token; if
+/// `blocklist(KEY)` is true it BREAKS, leaving that var and the rest in place.
+///
+/// - `blocklist = None` => strip every leading env var (deny/ask path).
+/// - `blocklist = Some(is_binary_hijack_var)` => excludedCommands path: stop at
+///   the first `LD_*`/`DYLD_*`/`PATH` assignment.
+#[must_use]
+pub fn strip_all_leading_env_vars(command: &str, blocklist: Option<fn(&str) -> bool>) -> String {
     static RE: OnceLock<Regex> = OnceLock::new();
     // KEY or KEY[idx], optional `+=`/`=`, then a (quoted or bare) value, then
-    // mandatory whitespace. Mirrors the shape of claude-code's ENV_VAR_PATTERN.
+    // mandatory horizontal whitespace. Mirrors claude-code's ENV_VAR_PATTERN.
     let re = RE.get_or_init(|| {
-        Regex::new(r#"^([A-Za-z_][A-Za-z0-9_]*(?:\[[^\]]*\])?)\+?=(?:'[^'\n\r]*'|"(?:\\.|[^"\\\n\r])*"|[^ \t\n\r;|&()<>'"]*)[ \t]+"#).unwrap()
+        Regex::new(r#"^([A-Za-z_][A-Za-z0-9_]*(?:\[[^\]]*\])?)\+?=(?:'[^'\n\r]*'|"(?:\\.|[^"$`\\\n\r])*"|\\.|[^ \t\n\r$`;|&()<>\\'"])*[ \t]+"#).unwrap()
     });
-    let mut s = cmd.to_string();
-    let mut stripped_any = false;
-    while let Some(m) = re.find(&s) {
-        let end = m.end();
-        s = s[end..].to_string();
-        stripped_any = true;
+    let mut stripped = command.to_string();
+    let mut previous = String::new();
+    while stripped != previous {
+        previous = stripped.clone();
+        stripped = strip_comment_lines(&stripped);
+        if let Some(m) = re.captures(&stripped) {
+            let name = m.get(1).unwrap().as_str();
+            if let Some(bl) = blocklist {
+                if bl(name) {
+                    break;
+                }
+            }
+            let end = m.get(0).unwrap().end();
+            stripped = stripped[end..].to_string();
+        }
     }
-    if stripped_any {
-        Some(s.trim().to_string())
-    } else {
-        None
+    stripped.trim().to_string()
+}
+
+/// claude-code `containsExcludedCommand` candidate worklist
+/// (shouldUseSandbox.ts:82-101): fixed-point over
+/// `stripAllLeadingEnvVars(_, BINARY_HIJACK_VARS)` and `stripSafeWrappers`.
+/// Returns the deduped candidate list (the trimmed original is included).
+#[must_use]
+pub fn strip_env_and_wrappers_fixedpoint(cmd: &str) -> Vec<String> {
+    let mut out = vec![cmd.trim().to_string()];
+    let mut seen: BTreeSet<String> = out.iter().cloned().collect();
+    let mut start = 0;
+    while start < out.len() {
+        let end = out.len();
+        for i in start..end {
+            let c = out[i].clone();
+            let env_stripped = strip_all_leading_env_vars(&c, Some(is_binary_hijack_var));
+            if seen.insert(env_stripped.clone()) {
+                out.push(env_stripped);
+            }
+            let wrap_stripped = strip_safe_wrappers(&c);
+            if seen.insert(wrap_stripped.clone()) {
+                out.push(wrap_stripped);
+            }
+        }
+        start = end;
     }
+    out
 }
 
 /// Build the set of candidate strings a single subcommand should be matched
@@ -264,16 +364,15 @@ fn candidates(subcommand: &str, aggressive_env: bool) -> Vec<String> {
         let end = out.len();
         for idx in start..end {
             let c = out[idx].clone();
-            if let Some(w) = strip_safe_wrappers(&c) {
-                if seen.insert(w.clone()) {
-                    out.push(w);
-                }
+            let w = strip_safe_wrappers(&c);
+            if seen.insert(w.clone()) {
+                out.push(w);
             }
             if aggressive_env {
-                if let Some(e) = strip_all_leading_env_vars(&c) {
-                    if seen.insert(e.clone()) {
-                        out.push(e);
-                    }
+                // Deny/ask path: strip ALL leading env vars (no blocklist).
+                let e = strip_all_leading_env_vars(&c, None);
+                if seen.insert(e.clone()) {
+                    out.push(e);
                 }
             }
         }
@@ -319,6 +418,33 @@ fn prefix_matches(prefix: &str, candidate: &str) -> bool {
     }
     let xargs = format!("xargs {prefix}");
     candidate == xargs || candidate.starts_with(&format!("{xargs} "))
+}
+
+/// `excludedCommands` pattern match — the SHARED dispatch core used by BOTH
+/// `sandbox::decision::contains_excluded_command` and
+/// `permission::sandbox_auto_allow::would_sandbox`. Both callers split the
+/// command into subcommands and strip env/wrappers themselves, then ask this
+/// per-(pattern, candidate) predicate.
+///
+/// Dispatch on [`parse_shell_rule`]:
+/// - `Prefix(p)` matches `candidate == p || candidate.starts_with("{p} ")`
+///   (space boundary; intentionally does NOT also match `xargs {p}` — that is
+///   the richer `match_shell_rule`/`prefix_matches` behavior, NOT this simpler
+///   excludedCommands one);
+/// - `Exact(e)` matches `candidate == e` STRICTLY (NOT first-token);
+/// - `Wildcard(w)` via [`crate::shell_rule_matching::match_wildcard_pattern`]
+///   (case-sensitive).
+///
+/// Behavior is byte-identical to the two inline dispatches it replaces.
+#[must_use]
+pub fn matches_excluded_pattern(pattern: &str, candidate: &str) -> bool {
+    match parse_shell_rule(pattern) {
+        ShellRule::Prefix(p) => candidate == p || candidate.starts_with(&format!("{p} ")),
+        ShellRule::Exact(e) => candidate == e,
+        ShellRule::Wildcard(w) => {
+            crate::shell_rule_matching::match_wildcard_pattern(&w, candidate, false)
+        }
+    }
 }
 
 /// DENY/ASK aggregation: does `rule_content` match ANY subcommand of `command`
@@ -512,5 +638,110 @@ mod tests {
         assert!(command_fully_allowed(&["npm run *"], "npm run"));
         // but an unrelated command is not
         assert!(!command_fully_allowed(&["git *"], "npm run"));
+    }
+
+    // ----- ENV_VAR_PATTERN byte-faithfulness (R3-1) -----
+
+    /// Direct unit test of `strip_all_leading_env_vars` on BOTH paths. Round 2
+    /// had no direct test of this fn, which is why the regex bug false-passed.
+    /// Each row mirrors claude-code's `ENV_VAR_PATTERN`/`stripAllLeadingEnvVars`
+    /// run against node (see R3-1 spec decision table).
+    #[test]
+    fn strip_all_leading_env_vars_byte_faithful() {
+        let deny = |c: &str| strip_all_leading_env_vars(c, None);
+        let excl = |c: &str| strip_all_leading_env_vars(c, Some(is_binary_hijack_var));
+
+        // Standard / quoted values strip on both paths.
+        assert_eq!(deny("FOO=bar bazel build"), "bazel build");
+        assert_eq!(excl("FOO=bar bazel build"), "bazel build");
+        assert_eq!(deny("FOO=\"a b\" bazel build"), "bazel build");
+        assert_eq!(excl("FOO=\"a b\" bazel build"), "bazel build");
+        assert_eq!(deny("FOO='a b' bazel build"), "bazel build");
+        assert_eq!(excl("FOO='a b' bazel build"), "bazel build");
+
+        // Backslash-escape unit (`\\.`) — the bug under-stripped to `b bazel build`.
+        assert_eq!(deny("FOO=a\\ b bazel build"), "bazel build");
+        assert_eq!(excl("FOO=a\\ b bazel build"), "bazel build");
+
+        // Concatenated adjacent segments — the bug left these fully unstripped.
+        assert_eq!(deny("FOO='x'y\"z\" bazel build"), "bazel build");
+        assert_eq!(excl("FOO='x'y\"z\" bazel build"), "bazel build");
+        assert_eq!(deny("FOO=a\"b\" bazel build"), "bazel build");
+        assert_eq!(excl("FOO=a\"b\" bazel build"), "bazel build");
+
+        // `$` excluded from value classes — `$VAR`/`"$x"` are NOT stripped
+        // (matches TS; the bug over-stripped these).
+        assert_eq!(deny("FOO=$VAR bazel build"), "FOO=$VAR bazel build");
+        assert_eq!(excl("FOO=$VAR bazel build"), "FOO=$VAR bazel build");
+        assert_eq!(deny("FOO=\"$x\" bazel build"), "FOO=\"$x\" bazel build");
+        assert_eq!(excl("FOO=\"$x\" bazel build"), "FOO=\"$x\" bazel build");
+
+        // Multiple leading vars stripped in a loop.
+        assert_eq!(deny("A=1 B=2 cmd"), "cmd");
+        assert_eq!(excl("A=1 B=2 cmd"), "cmd");
+
+        // PATH: deny path strips like any var; excl path BREAKS on the KEY
+        // (blocklist) leaving the var + rest in place.
+        assert_eq!(deny("PATH=/evil bazel build"), "bazel build");
+        assert_eq!(excl("PATH=/evil bazel build"), "PATH=/evil bazel build");
+    }
+
+    /// Round-2 regression locks must still hold after the regex fix.
+    #[test]
+    fn strip_all_leading_env_vars_round2_locks() {
+        // FOO=bar stripped (deny path).
+        assert_eq!(strip_all_leading_env_vars("FOO=bar secret-tool dump", None), "secret-tool dump");
+        // GOOS= stripped (a SAFE_ENV_VAR key — still a plain assignment).
+        assert_eq!(strip_all_leading_env_vars("GOOS=linux go build", None), "go build");
+        // LD_AUDIT= breaks on the KEY in the excl path → stays in place.
+        assert_eq!(
+            strip_all_leading_env_vars("LD_AUDIT=/evil.so go build", Some(is_binary_hijack_var)),
+            "LD_AUDIT=/evil.so go build"
+        );
+        // DYLD_INSERT_LIBRARIES= likewise breaks on the KEY (excl path).
+        assert_eq!(
+            strip_all_leading_env_vars("DYLD_INSERT_LIBRARIES=x.dylib clang -c", Some(is_binary_hijack_var)),
+            "DYLD_INSERT_LIBRARIES=x.dylib clang -c"
+        );
+    }
+
+    /// deny/ask path: a `Bash(bazel:*)` deny rule must catch env-prefixed forms
+    /// the OLD regex failed on, and must NOT match the `$`-expansion forms.
+    #[test]
+    fn deny_catches_env_prefixed_bazel_faithfully() {
+        // \\.-escape: was under-stripped → deny failed.
+        assert!(rule_matches_any_subcommand("bazel:*", "FOO=a\\ b bazel build"));
+        // concatenated segments: was unstripped → deny failed.
+        assert!(rule_matches_any_subcommand("bazel:*", "FOO='x'y\"z\" bazel build"));
+        assert!(rule_matches_any_subcommand("bazel:*", "FOO=a\"b\" bazel build"));
+        // standard form still caught.
+        assert!(rule_matches_any_subcommand("bazel:*", "FOO=bar bazel build"));
+
+        // `$`/quoted-`$` forms are NOT stripped → the bazel deny does NOT match
+        // (faithful to TS: those stay sandboxed, not denied via env-strip).
+        assert!(!rule_matches_any_subcommand("bazel:*", "FOO=$VAR bazel build"));
+        assert!(!rule_matches_any_subcommand("bazel:*", "FOO=\"$x\" bazel build"));
+    }
+
+    /// excludedCommands path: env-prefixed forms decide identically to TS.
+    /// `strip_env_and_wrappers_fixedpoint` uses `is_binary_hijack_var`, so the
+    /// `bazel` candidate must surface (or not) exactly as the value regex allows.
+    #[test]
+    fn excluded_commands_env_prefixed_bazel_faithfully() {
+        let has_bare_bazel = |cmd: &str| {
+            strip_env_and_wrappers_fixedpoint(cmd)
+                .iter()
+                .any(|c| c == "bazel build")
+        };
+        // Strippable env prefixes surface the bare `bazel build` candidate.
+        assert!(has_bare_bazel("FOO=bar bazel build"));
+        assert!(has_bare_bazel("FOO=a\\ b bazel build"));
+        assert!(has_bare_bazel("FOO='x'y\"z\" bazel build"));
+        assert!(has_bare_bazel("FOO=a\"b\" bazel build"));
+        // `$`-forms are not stripped → no bare `bazel build` candidate.
+        assert!(!has_bare_bazel("FOO=$VAR bazel build"));
+        assert!(!has_bare_bazel("FOO=\"$x\" bazel build"));
+        // Binary-hijack KEY breaks the strip → no bare candidate (stays guarded).
+        assert!(!has_bare_bazel("PATH=/evil bazel build"));
     }
 }

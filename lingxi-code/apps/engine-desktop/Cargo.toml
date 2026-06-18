@@ -116,13 +116,12 @@ tool-lsp = { path = "../../tools/lsp" }
 tool-team = { path = "../../tools/team" }
 tool-worktree = { path = "../../tools/worktree" }
 
-# T16: the per-user uid for the session-scoped task-output temp dir name
-# (`claude-<uid>`, claude-code `getClaudeTempDirName`). `rustix` is already in the
-# workspace lockfile, so this adds no new download, and `getuid()` is a SAFE
-# wrapper — required because this crate is `#![forbid(unsafe_code)]`. Unix-only —
-# the helper falls back to uid 0 elsewhere.
+# `getClaudeTempDir` dir-name uses the REAL uid (1:1 TS `process.getuid?.()`).
+# `nix::unistd::getuid()` is a SAFE wrapper around `getuid(2)`, so this crate
+# needs no `unsafe` (a raw `libc::getuid()` would). Same pattern as `apps/cli`.
+# (Also used by T16's task-output temp-dir name via the shared `current_uid()`.)
 [target.'cfg(unix)'.dependencies]
-rustix = { version = "0.38", features = ["process"] }
+nix = { version = "0.27", default-features = false, features = ["user"] }
 
 [dev-dependencies]
 # Snapshot the assembled tool set (§14 criterion 8). `test-support` exposes the

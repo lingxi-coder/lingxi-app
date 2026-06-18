@@ -1,21 +1,24 @@
 //! Sandbox decision logic.
 //!
-//! [`should_use_sandbox`] is the single source of truth that decides
-//! whether a command should be wrapped, executed unsandboxed, or refused
-//! outright when the host has no sandbox available. It consults the
-//! permission mode, project trust, classifier verdict, and host capability.
+//! [`should_use_sandbox`] is the single source of truth (a faithful port of
+//! claude-code `src/tools/BashTool/shouldUseSandbox.ts`) that decides whether a
+//! command should be sandbox-wrapped or run directly: it gates on host sandbox
+//! availability, the `dangerouslyDisableSandbox` override, an empty command, and
+//! the user-configured `excludedCommands` list (after quote-aware compound-split
+//! and safe-wrapper / env-var fixed-point stripping). It does NOT consult
+//! permission mode, project trust, or any classifier — claude-code's
+//! `shouldUseSandbox` has no such inputs.
 //!
-//! [`should_use_sandbox_for_command`] is the M2 addition: a
-//! `SandboxRuntimeConfig`-aware function that consults the
-//! `excludedCommands` list after compound-command splitting and
-//! safe-wrapper / env-var fixed-point stripping. Ports the logic from
-//! claude-code `src/tools/BashTool/shouldUseSandbox.ts`.
+//! [`should_use_sandbox_for_command`] is the `SandboxRuntimeConfig`-aware
+//! `enabled && !excluded` predicate sharing the same
+//! [`contains_excluded_command`] core.
 //!
 //! See spec §24.3 (sandbox decision matrix).
 
 use crate::runtime_config::SandboxRuntimeConfig;
-use permission::PermissionMode;
-use std::collections::BTreeSet;
+use permission::shell_command::{
+    matches_excluded_pattern, split_command, strip_env_and_wrappers_fixedpoint,
+};
 use traits::SandboxPolicy;
 
 /// Outcome of [`should_use_sandbox`].
@@ -28,60 +31,48 @@ pub enum SandboxDecision {
         /// Policy to apply when calling [`traits::Sandbox::prepare`].
         policy: SandboxPolicy,
     },
-    /// Host cannot provide a sandbox but the command is dangerous — refuse.
-    RefuseBecauseSandboxUnavailable {
-        /// Human-readable explanation for the refusal.
-        reason: String,
-    },
 }
 
-/// Whether the current project has been explicitly trusted by the user.
+/// Decide whether to sandbox a command or run it directly — a faithful port of
+/// claude-code `shouldUseSandbox` (`src/tools/BashTool/shouldUseSandbox.ts`).
 ///
-/// Trusted projects skip the sandbox for classifier-safe commands; untrusted
-/// projects always go through the sandbox when available.
-#[derive(Debug, Clone, Copy)]
-pub enum ProjectTrustLevel {
-    /// User has marked this workspace as trusted.
-    Trusted,
-    /// Workspace is unfamiliar or explicitly untrusted.
-    Untrusted,
-}
-
-/// Decide whether to sandbox a command, run it directly, or refuse it.
+/// Order (1:1 with the TS):
+/// 1. `!sandbox_available` (`!SandboxManager.isSandboxingEnabled()`) ⇒ `NoSandbox`.
+/// 2. `dangerously_disable_sandbox && unsandboxed_allowed`
+///    (`input.dangerouslyDisableSandbox && SandboxManager.areUnsandboxedCommandsAllowed()`)
+///    ⇒ `NoSandbox`.
+/// 3. empty command (`!input.command`) ⇒ `NoSandbox`.
+/// 4. `contains_excluded_command(cmd, &config.excluded_commands)` ⇒ `NoSandbox`.
+/// 5. else ⇒ `Sandbox` with the default policy for `workspace`.
 ///
 /// Inputs:
-/// - `cmd`: full command line (used for dangerous-pattern checks).
-/// - `mode`: active permission mode.
-/// - `trust`: project trust level.
-/// - `classifier_safe`: optional verdict from the safety classifier
-///   (`Some(true)` = safe, `Some(false)` = unsafe, `None` = unknown).
+/// - `cmd`: full command line.
 /// - `sandbox_available`: whether the host actually has a working sandbox.
+/// - `dangerously_disable_sandbox`: the per-call `dangerouslyDisableSandbox` flag.
+/// - `unsandboxed_allowed`: `config.are_unsandboxed_commands_allowed()`.
+/// - `config`: the active `SandboxRuntimeConfig` (for `excluded_commands`).
 /// - `workspace`: project workspace path, used to build a default policy.
 #[must_use]
 pub fn should_use_sandbox(
     cmd: &str,
-    mode: PermissionMode,
-    trust: ProjectTrustLevel,
-    classifier_safe: Option<bool>,
     sandbox_available: bool,
+    dangerously_disable_sandbox: bool,
+    unsandboxed_allowed: bool,
+    config: &SandboxRuntimeConfig,
     workspace: std::path::PathBuf,
 ) -> SandboxDecision {
-    if matches!(mode, PermissionMode::BypassPermissions) {
-        return SandboxDecision::NoSandbox;
-    }
-    if matches!(mode, PermissionMode::Plan) {
-        return SandboxDecision::NoSandbox;
-    }
-    let dangerous = is_obviously_dangerous(cmd);
-    if dangerous && !sandbox_available {
-        return SandboxDecision::RefuseBecauseSandboxUnavailable {
-            reason: "command flagged dangerous and no sandbox backend available".into(),
-        };
-    }
-    if matches!(trust, ProjectTrustLevel::Trusted) && classifier_safe == Some(true) && !dangerous {
-        return SandboxDecision::NoSandbox;
-    }
     if !sandbox_available {
+        return SandboxDecision::NoSandbox;
+    }
+    if dangerously_disable_sandbox && unsandboxed_allowed {
+        return SandboxDecision::NoSandbox;
+    }
+    // claude-code shouldUseSandbox.ts:143 is `if (!input.command)` — falsey
+    // ONLY for the empty string, NOT whitespace-only (`"   "` is truthy in JS).
+    if cmd.is_empty() {
+        return SandboxDecision::NoSandbox;
+    }
+    if contains_excluded_command(cmd, &config.excluded_commands) {
         return SandboxDecision::NoSandbox;
     }
     SandboxDecision::Sandbox {
@@ -89,207 +80,263 @@ pub fn should_use_sandbox(
     }
 }
 
-/// Coarse pattern check for obviously destructive commands.
+/// Does `cmd` contain a subcommand matching any `excluded` pattern? — the shared
+/// core of [`should_use_sandbox`] and [`should_use_sandbox_for_command`], 1:1
+/// with claude-code `containsExcludedCommand`'s user-config branch.
 ///
-/// This is intentionally a deny-list and not a substitute for the
-/// classifier — it only catches the worst offenders (`rm -rf /`, `sudo`,
-/// `chmod 777`, naked `curl`, fork bombs) so the decision matrix can
-/// trip the "refuse" branch when no sandbox is available.
-#[must_use]
-pub fn is_obviously_dangerous(cmd: &str) -> bool {
-    let lower = cmd.to_lowercase();
-    ["rm -rf /", "sudo ", "chmod 777", "curl", "fork bomb"]
-        .iter()
-        .any(|p| lower.contains(p))
-}
-
-// =============================================================================
-// Compound-command splitting + env-var / safe-wrapper fixed-point stripping.
-//
-// Ports the logic from `claude-code/src/tools/BashTool/shouldUseSandbox.ts` and
-// `bashPermissions.ts` (`BINARY_HIJACK_VARS`, `stripAllLeadingEnvVars`,
-// `stripSafeWrappers`).
-// =============================================================================
-
-/// Env-vars an attacker could use to redirect binary lookup. Matches the
-/// claude-code constant `BINARY_HIJACK_VARS` exactly.
-pub const BINARY_HIJACK_VARS: &[&str] = &[
-    "PATH",
-    "LD_PRELOAD",
-    "LD_LIBRARY_PATH",
-    "DYLD_LIBRARY_PATH",
-    "DYLD_INSERT_LIBRARIES",
-];
-
-/// Wrappers safe to strip when matching against excludedCommands patterns.
-/// Each entry is a prefix + an arity hint:
-/// - `"sudo -E --"` exact: strip leading 3 tokens.
-/// - `"sudo --"` exact: strip leading 2 tokens.
-/// - `"env --"` exact: strip leading 2 tokens.
-/// - `"timeout <N>"`: 2 tokens (the wrapper + its single numeric arg).
-/// - `"nice -n <N>"`: 3 tokens.
-fn strip_safe_wrappers(cmd: &str) -> Option<String> {
-    let tokens: Vec<&str> = cmd.split_whitespace().collect();
-    if tokens.is_empty() {
-        return None;
+/// For each subcommand (quote-aware split), then each env/wrapper-stripped
+/// candidate, then each pattern, ask the SHARED
+/// [`permission::shell_command::matches_excluded_pattern`] predicate
+/// (`Prefix` = `c == p || c.starts_with("{p} ")`; `Exact` = STRICT `c == e`;
+/// `Wildcard` = case-sensitive `match_wildcard_pattern`). Any hit ⇒ `true`.
+fn contains_excluded_command(cmd: &str, excluded: &[String]) -> bool {
+    if excluded.is_empty() {
+        return false;
     }
-    // sudo -E [KEY=VAL ...] --
-    // Accepts env-var assignments between `-E` and `--` (claude-code's
-    // safe-wrapper stripper skips `KEY=val` tokens here so the fixed-point
-    // outer loop can then strip the env-vars separately).
-    if tokens.len() >= 4 && tokens[0] == "sudo" && tokens[1] == "-E" {
-        // Find the `--` separator after `-E`.
-        let mut i = 2;
-        while i < tokens.len() && tokens[i] != "--" {
-            // Stop at first non-KEY=val token (defensive: don't skip arbitrary args).
-            if !tokens[i].contains('=') {
-                break;
-            }
-            i += 1;
-        }
-        if i < tokens.len() && tokens[i] == "--" && i + 1 < tokens.len() {
-            // Emit `sudo -E` removed but env-vars retained so the env-var
-            // stripper can take a second pass on the result.
-            let mut rest: Vec<&str> = Vec::with_capacity(tokens.len() - (i + 1) + (i - 2));
-            rest.extend_from_slice(&tokens[2..i]);
-            rest.extend_from_slice(&tokens[i + 1..]);
-            return Some(rest.join(" "));
-        }
-    }
-    // sudo --
-    if tokens.len() >= 3 && tokens[0] == "sudo" && tokens[1] == "--" {
-        return Some(tokens[2..].join(" "));
-    }
-    // env --
-    if tokens.len() >= 3 && tokens[0] == "env" && tokens[1] == "--" {
-        return Some(tokens[2..].join(" "));
-    }
-    // timeout <N>
-    if tokens.len() >= 3 && tokens[0] == "timeout" && is_numeric(tokens[1]) {
-        return Some(tokens[2..].join(" "));
-    }
-    // nice -n <N>
-    if tokens.len() >= 4 && tokens[0] == "nice" && tokens[1] == "-n" && is_numeric(tokens[2]) {
-        return Some(tokens[3..].join(" "));
-    }
-    None
-}
-
-fn is_numeric(s: &str) -> bool {
-    !s.is_empty() && s.chars().all(|c| c.is_ascii_digit())
-}
-
-/// Strip leading `KEY=value` tokens where `KEY` is a `BINARY_HIJACK_VARS`
-/// entry. Non-binary-hijack env-vars (`FOO=bar`) are left in place.
-fn strip_binary_hijack_env_vars(cmd: &str) -> Option<String> {
-    let tokens: Vec<&str> = cmd.split_whitespace().collect();
-    let mut start = 0;
-    while start < tokens.len() {
-        let tok = tokens[start];
-        if let Some(eq) = tok.find('=') {
-            let key = &tok[..eq];
-            if BINARY_HIJACK_VARS.contains(&key) {
-                start += 1;
-                continue;
-            }
-        }
-        break;
-    }
-    if start == 0 {
-        None
-    } else {
-        Some(tokens[start..].join(" "))
-    }
-}
-
-/// Iteratively apply `strip_safe_wrappers` and `strip_binary_hijack_env_vars`
-/// until no new candidate is produced (fixed point).
-///
-/// Returns the deduped list of candidates (the original `cmd` is included).
-#[must_use]
-pub fn strip_env_and_wrappers_fixedpoint(cmd: &str) -> Vec<String> {
-    let mut candidates: Vec<String> = vec![cmd.trim().to_string()];
-    let mut seen: BTreeSet<String> = candidates.iter().cloned().collect();
-    let mut start = 0;
-    while start < candidates.len() {
-        let end = candidates.len();
-        for i in start..end {
-            let c = candidates[i].clone();
-            if let Some(env_stripped) = strip_binary_hijack_env_vars(&c) {
-                if seen.insert(env_stripped.clone()) {
-                    candidates.push(env_stripped);
-                }
-            }
-            if let Some(wrap_stripped) = strip_safe_wrappers(&c) {
-                if seen.insert(wrap_stripped.clone()) {
-                    candidates.push(wrap_stripped);
+    for subcommand in split_command(cmd) {
+        for cand in strip_env_and_wrappers_fixedpoint(&subcommand) {
+            for pattern in excluded {
+                if matches_excluded_pattern(pattern, &cand) {
+                    return true;
                 }
             }
         }
-        start = end;
     }
-    candidates
+    false
 }
 
-/// Split `command` on `&&`, `||`, and `;` into one entry per subcommand.
-///
-/// Pure delimiter-based split. Does NOT handle quoting (claude-code's
-/// `splitCommand_DEPRECATED` likewise is quote-naive; that's why it's marked
-/// `_DEPRECATED`). Sufficient for the excludedCommands match heuristic.
-#[must_use]
-pub fn split_compound_command(command: &str) -> Vec<String> {
-    // Replace operators with a single delimiter sentinel, then split.
-    // Order matters: `&&` and `||` are two-char ops; `;` is one-char.
-    let normalized = command
-        .replace("&&", "\x01")
-        .replace("||", "\x01")
-        .replace(';', "\x01");
-    normalized
-        .split('\x01')
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .collect()
-}
+// =============================================================================
+// Compound-command splitting + env-var / safe-wrapper fixed-point stripping now
+// live ENTIRELY in the `permission` crate
+// (`permission::shell_command::{strip_env_and_wrappers_fixedpoint,
+// strip_all_leading_env_vars, strip_safe_wrappers, is_binary_hijack_var}`), the
+// single shared home for the `excludedCommands` core (ports
+// `claude-code/src/tools/BashTool/shouldUseSandbox.ts` + `bashPermissions.ts`).
+// `sandbox` and `permission::sandbox_auto_allow` both call those shared fns so
+// the two layers cannot drift.
+// =============================================================================
+
+/// claude-code `BINARY_HIJACK_VARS = /^(LD_|DYLD_|PATH$)/` — re-export of the
+/// shared predicate now hosted in `permission::shell_command`.
+pub use permission::shell_command::is_binary_hijack_var;
 
 /// Decide whether `command` should be sandbox-wrapped according to `config`.
 ///
-/// Returns `true` iff:
-/// - `config.enabled` is true, AND
-/// - no subcommand (after compound split) — after iterative env-var +
-///   safe-wrapper fixed-point stripping — matches any entry in
-///   `config.excluded_commands`.
-///
-/// Pattern semantics for `excluded_commands` (claude-code):
-/// - `bazel` matches exact command (or any candidate first token = `bazel`).
-/// - `bazel:*` matches any command starting with `bazel ` (including `bazel`
-///   on its own).
+/// Returns `config.enabled && !contains_excluded_command(command,
+/// &config.excluded_commands)` — the `SandboxRuntimeConfig`-aware predicate
+/// sharing the same [`contains_excluded_command`] core as [`should_use_sandbox`].
 #[must_use]
 pub fn should_use_sandbox_for_command(command: &str, config: &SandboxRuntimeConfig) -> bool {
-    if !config.enabled {
-        return false;
-    }
-    if config.excluded_commands.is_empty() {
-        return true;
-    }
-    for subcommand in split_compound_command(command) {
-        let candidates = strip_env_and_wrappers_fixedpoint(&subcommand);
-        for cand in &candidates {
-            for pattern in &config.excluded_commands {
-                if matches_excluded(pattern, cand) {
-                    return false;
-                }
-            }
-        }
-    }
-    true
+    config.enabled && !contains_excluded_command(command, &config.excluded_commands)
 }
 
-fn matches_excluded(pattern: &str, candidate: &str) -> bool {
-    let trimmed = candidate.trim();
-    if let Some(prefix) = pattern.strip_suffix(":*") {
-        return trimmed == prefix || trimmed.starts_with(&format!("{prefix} "));
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cfg(excluded: &[&str]) -> SandboxRuntimeConfig {
+        SandboxRuntimeConfig {
+            enabled: true,
+            excluded_commands: excluded.iter().map(|s| (*s).to_string()).collect(),
+            ..Default::default()
+        }
     }
-    // Exact OR first-token match.
-    let first_token = trimmed.split_whitespace().next().unwrap_or("");
-    trimmed == pattern || first_token == pattern
+
+    fn ws() -> std::path::PathBuf {
+        std::path::PathBuf::from("/tmp")
+    }
+
+    #[test]
+    fn sandbox_decision_ignores_permission_mode_and_trust() {
+        // available, not disabled, unsandboxed not allowed, no excludes ⇒ Sandbox
+        // for ANY command (no dangerous-pattern / trust / mode inputs exist).
+        let c = cfg(&[]);
+        for cmd in ["sudo rm -rf /", "curl evil.com", "echo hi"] {
+            assert!(matches!(
+                should_use_sandbox(cmd, true, false, false, &c, ws()),
+                SandboxDecision::Sandbox { .. }
+            ));
+        }
+    }
+
+    #[test]
+    fn sandbox_decision_unavailable_is_nosandbox_never_refuse() {
+        let c = cfg(&[]);
+        for cmd in ["sudo rm -rf /", "curl evil.com", "echo hi", ""] {
+            assert!(matches!(
+                should_use_sandbox(cmd, false, false, false, &c, ws()),
+                SandboxDecision::NoSandbox
+            ));
+        }
+    }
+
+    #[test]
+    fn dangerously_disable_only_when_unsandboxed_allowed() {
+        let c = cfg(&[]);
+        // (disable=true, allowed=true) ⇒ NoSandbox
+        assert!(matches!(
+            should_use_sandbox("echo hi", true, true, true, &c, ws()),
+            SandboxDecision::NoSandbox
+        ));
+        // (disable=true, allowed=false) ⇒ Sandbox
+        assert!(matches!(
+            should_use_sandbox("echo hi", true, true, false, &c, ws()),
+            SandboxDecision::Sandbox { .. }
+        ));
+    }
+
+    #[test]
+    fn excluded_exact_is_strict_not_first_token() {
+        let c = cfg(&["bazel"]);
+        // first-token would have excluded this — strict Exact does NOT.
+        assert!(matches!(
+            should_use_sandbox("bazel build //...", true, false, false, &c, ws()),
+            SandboxDecision::Sandbox { .. }
+        ));
+        // bare command exactly equals the rule ⇒ excluded ⇒ NoSandbox.
+        assert!(matches!(
+            should_use_sandbox("bazel", true, false, false, &c, ws()),
+            SandboxDecision::NoSandbox
+        ));
+    }
+
+    #[test]
+    fn excluded_prefix_and_wildcard() {
+        // bazel:* ⇒ Prefix("bazel") ⇒ excludes "bazel build".
+        assert!(matches!(
+            should_use_sandbox("bazel build", true, false, false, &cfg(&["bazel:*"]), ws()),
+            SandboxDecision::NoSandbox
+        ));
+        // "make *" ⇒ Wildcard; trailing " *" optional ⇒ excludes "make all" and bare "make".
+        let mk = cfg(&["make *"]);
+        assert!(matches!(
+            should_use_sandbox("make all", true, false, false, &mk, ws()),
+            SandboxDecision::NoSandbox
+        ));
+        assert!(matches!(
+            should_use_sandbox("make", true, false, false, &mk, ws()),
+            SandboxDecision::NoSandbox
+        ));
+        // "docker * ps" ⇒ Wildcard ⇒ excludes "docker -H x ps".
+        assert!(matches!(
+            should_use_sandbox(
+                "docker -H x ps",
+                true,
+                false,
+                false,
+                &cfg(&["docker * ps"]),
+                ws()
+            ),
+            SandboxDecision::NoSandbox
+        ));
+    }
+
+    #[test]
+    fn excluded_env_prefix_non_hijack_is_stripped() {
+        // FOO not blocklisted -> stripped -> matches bazel:* -> excluded.
+        let c = cfg(&["bazel:*"]);
+        assert!(matches!(
+            should_use_sandbox("FOO=bar bazel build", true, false, false, &c, ws()),
+            SandboxDecision::NoSandbox
+        ));
+    }
+
+    #[test]
+    fn excluded_env_prefix_safe_env_var_is_stripped() {
+        // GOOS in SAFE_ENV_VARS -> stripped by stripSafeWrappers phase-1 -> excluded.
+        let c = cfg(&["bazel:*"]);
+        assert!(matches!(
+            should_use_sandbox("GOOS=linux bazel build", true, false, false, &c, ws()),
+            SandboxDecision::NoSandbox
+        ));
+    }
+
+    #[test]
+    fn path_hijack_prefix_stays_sandboxed() {
+        // PATH blocklisted -> stripAllLeadingEnvVars breaks immediately ->
+        // "PATH=/evil bazel build" never reduces to "bazel build" -> sandboxed.
+        let c = cfg(&["bazel:*"]);
+        assert!(matches!(
+            should_use_sandbox("PATH=/evil bazel build", true, false, false, &c, ws()),
+            SandboxDecision::Sandbox { .. }
+        ));
+    }
+
+    #[test]
+    fn ld_hijack_prefix_stays_sandboxed() {
+        // LD_AUDIT matches /^LD_/ (the old 5-name Vec MISSED this) -> stays sandboxed.
+        let c = cfg(&["bazel:*"]);
+        assert!(matches!(
+            should_use_sandbox("LD_AUDIT=x bazel build", true, false, false, &c, ws()),
+            SandboxDecision::Sandbox { .. }
+        ));
+    }
+
+    #[test]
+    fn excluded_through_each_safe_wrapper() {
+        let c = cfg(&["bazel:*"]);
+        for cmd in [
+            "nohup bazel build",
+            "time bazel build",
+            "timeout --signal=TERM 5 bazel build",
+            "timeout 5 bazel build",
+            "nice bazel build",
+            "nice -n 10 bazel build",
+            "nice -5 bazel build",
+            "stdbuf -o0 bazel build",
+        ] {
+            assert!(
+                matches!(
+                    should_use_sandbox(cmd, true, false, false, &c, ws()),
+                    SandboxDecision::NoSandbox
+                ),
+                "should exclude: {cmd}"
+            );
+        }
+    }
+
+    #[test]
+    fn invented_wrappers_removed_sudo_env_not_stripped() {
+        // sudo / env are NOT in SAFE_WRAPPER_PATTERNS; "sudo bazel build" must NOT
+        // reduce to "bazel build" via a wrapper strip. (env left intentionally so
+        // `env bash -c evil` stays caught.) With bazel:* it stays SANDBOXED.
+        let c = cfg(&["bazel:*"]);
+        assert!(matches!(
+            should_use_sandbox("sudo bazel build", true, false, false, &c, ws()),
+            SandboxDecision::Sandbox { .. }
+        ));
+        assert!(matches!(
+            should_use_sandbox("env bazel build", true, false, false, &c, ws()),
+            SandboxDecision::Sandbox { .. }
+        ));
+    }
+
+    #[test]
+    fn excluded_quote_aware_split() {
+        // Quoted "&&" is a single subcommand "echo \"a && bazel\"" — NOT a bazel
+        // invocation ⇒ NOT excluded ⇒ Sandbox.
+        assert!(matches!(
+            should_use_sandbox(
+                r#"echo "a && bazel""#,
+                true,
+                false,
+                false,
+                &cfg(&["bazel:*"]),
+                ws()
+            ),
+            SandboxDecision::Sandbox { .. }
+        ));
+        // A real pipe splits ⇒ second subcommand "bazel build" IS excluded.
+        assert!(matches!(
+            should_use_sandbox(
+                "echo ok | bazel build",
+                true,
+                false,
+                false,
+                &cfg(&["bazel:*"]),
+                ws()
+            ),
+            SandboxDecision::NoSandbox
+        ));
+    }
 }

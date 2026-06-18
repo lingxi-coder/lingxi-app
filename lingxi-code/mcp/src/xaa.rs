@@ -417,7 +417,13 @@ pub async fn request_jwt_authorization_grant(
 
     if !(200..300).contains(&resp.status) {
         let body = redact_tokens(&resp.body);
-        let body = &body[..body.len().min(200)];
+        // Truncate to <=200 bytes on a UTF-8 char boundary (JS `.slice(0,200)`
+        // is panic-free; a raw byte slice would panic mid-codepoint).
+        let cut = (0..=body.len().min(200))
+            .rev()
+            .find(|&i| body.is_char_boundary(i))
+            .unwrap_or(0);
+        let body = &body[..cut];
         // 4xx → id_token rejected, clear; 5xx → IdP outage, keep (xaa.ts:267-273).
         let should_clear = resp.status < 500;
         return Err(XaaError::TokenExchange {
@@ -567,7 +573,13 @@ pub async fn exchange_jwt_auth_grant(
         .map_err(|e| XaaError::JwtBearer(format!("transport: {e}")))?;
     if !(200..300).contains(&resp.status) {
         let body = redact_tokens(&resp.body);
-        let body = &body[..body.len().min(200)];
+        // Truncate to <=200 bytes on a UTF-8 char boundary (JS `.slice(0,200)`
+        // is panic-free; a raw byte slice would panic mid-codepoint).
+        let cut = (0..=body.len().min(200))
+            .rev()
+            .find(|&i| body.is_char_boundary(i))
+            .unwrap_or(0);
+        let body = &body[..cut];
         return Err(XaaError::JwtBearer(format!("HTTP {}: {body}", resp.status)));
     }
     let parsed: JwtBearerResponse = serde_json::from_str(&resp.body).map_err(|_| {

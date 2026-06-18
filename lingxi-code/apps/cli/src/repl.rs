@@ -12,11 +12,22 @@ use crate::sigint::SigintSource;
 use futures::future::BoxFuture;
 use orchestrator::{OrchestratorError, TurnOutcome};
 use protocol::SessionId;
+use std::io::IsTerminal;
 use std::sync::Arc;
 use std::time::Instant;
-use tokio::io::{stderr, stdin, BufReader};
+use tokio::io::{stderr, stdin, AsyncBufRead, BufReader, Stdin};
+use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 use traits::{OrchestratorHandle, OutputStream};
+
+/// Pure decision: should the REPL surface an interactive permission prompt?
+///
+/// `true` only when stdin is a TTY AND we are not in `--print` mode. The REPL
+/// is never `print` (that path is `Mode::Print`), but the rule is kept explicit
+/// + testable so the gate is never injected for a piped/CI session.
+fn should_prompt_interactively(is_tty: bool, print: bool) -> bool {
+    is_tty && !print
+}
 
 /// Map a REPL `ended_via` discriminator to the claude-code `SessionEnd`
 /// `reason` (`ExitReason`) string fired at teardown.
@@ -62,7 +73,32 @@ pub async fn run_repl(argv: &Argv) -> i32 {
     // notice already ran once in `run_cli` before dispatch (a refusal exits
     // before this fn is reached), so we take only the mode here.
     let (permission_mode, _notice) = crate::resolve_permission_mode(argv);
-    let runtime = match crate::init::build_runtime(argv, adapter, permission_mode).await {
+
+    // ONE shared `BufReader<Stdin>` over fd 0, used by BOTH the REPL prompt loop
+    // (`step`) and — on the interactive TTY path — the injected
+    // `InteractivePromptingGate`. A single buffer means type-ahead bytes are
+    // never stranded behind a second `BufReader`, and only one
+    // `tokio::io::stdin()` exists (no double blocking-reader-thread race).
+    let stdin_reader: Arc<Mutex<BufReader<Stdin>>> = Arc::new(Mutex::new(BufReader::new(stdin())));
+
+    // Interactive (TTY, non-print) REPL injects the y/n permission gate sharing
+    // the stdin reader; the piped/CI path stays byte-identical (no gate).
+    let runtime = if should_prompt_interactively(std::io::stdin().is_terminal(), argv.print) {
+        // Resolve config ONCE so the injected gate and the engine build from the
+        // SAME cfg (mirrors `build_runtime_for_tui`).
+        let mut cfg = crate::init::resolve_desktop_config(argv, permission_mode);
+        let shared: Arc<Mutex<dyn AsyncBufRead + Send + Unpin>> = stdin_reader.clone();
+        let gate = permission::InteractivePromptingGate::new(
+            shared,
+            Arc::new(Mutex::new(stderr())),
+        );
+        cfg.injected_permission_gate =
+            Some(Arc::new(gate) as Arc<dyn permission::gate::PermissionGate>);
+        crate::init::build_runtime_from_config(cfg, adapter).await
+    } else {
+        crate::init::build_runtime(argv, adapter, permission_mode).await
+    };
+    let runtime = match runtime {
         Ok(r) => r,
         Err(e) => {
             eprintln!("lingxi-cli: {e}");
@@ -83,7 +119,6 @@ pub async fn run_repl(argv: &Argv) -> i32 {
     );
 
     let sigint = SigintSource::spawn();
-    let mut reader = BufReader::new(stdin());
     let mut err_writer = stderr();
 
     let orch = runtime.orchestrator.clone();
@@ -112,7 +147,7 @@ pub async fn run_repl(argv: &Argv) -> i32 {
             };
 
         let outcome = step(
-            &mut reader,
+            stdin_reader.clone() as Arc<Mutex<dyn AsyncBufRead + Send + Unpin>>,
             &mut err_writer,
             &runtime.dispatcher,
             handle.clone(),
@@ -167,7 +202,25 @@ pub async fn run_repl(argv: &Argv) -> i32 {
 
 #[cfg(test)]
 mod tests {
-    use super::session_end_reason;
+    use super::{session_end_reason, should_prompt_interactively};
+
+    /// Interactive prompting is enabled ONLY for a TTY that is not in `--print`
+    /// mode. A non-TTY (piped/CI) or a print session never injects the gate.
+    #[test]
+    fn should_prompt_interactively_truth_table() {
+        assert!(
+            should_prompt_interactively(true, false),
+            "TTY + not print → prompt interactively"
+        );
+        assert!(
+            !should_prompt_interactively(false, false),
+            "non-TTY → never prompt (piped/CI auto-allow)"
+        );
+        assert!(
+            !should_prompt_interactively(true, true),
+            "print mode → never prompt"
+        );
+    }
 
     /// Every clean REPL `StepOutcome` exit path (`eof` = Ctrl+D,
     /// `exit_command` = `/exit`/`/quit`, `double_sigint` = double-Ctrl+C) maps

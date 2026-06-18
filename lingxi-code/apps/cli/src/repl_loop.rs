@@ -9,7 +9,8 @@ use crate::sigint::SigintSource;
 use futures::future::BoxFuture;
 use orchestrator::{OrchestratorError, TurnOutcome};
 use std::sync::Arc;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt};
+use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 use traits::{OrchestratorHandle, SlashCommandDispatcher, SlashDispatchResult};
 
@@ -48,8 +49,8 @@ pub enum StepOutcome {
 // run-turn). The idle notifier is the 8th injected arg; the list is cohesive
 // (one iteration's collaborators), so the count is intentional.
 #[allow(clippy::too_many_arguments)]
-pub async fn step<R, W>(
-    stdin: &mut BufReader<R>,
+pub async fn step<W>(
+    stdin: Arc<Mutex<dyn AsyncBufRead + Send + Unpin>>,
     stderr: &mut W,
     dispatcher: &dyn SlashCommandDispatcher,
     handle: Arc<dyn OrchestratorHandle>,
@@ -62,7 +63,6 @@ pub async fn step<R, W>(
     ) -> BoxFuture<'static, Result<TurnOutcome, OrchestratorError>>,
 ) -> StepOutcome
 where
-    R: tokio::io::AsyncRead + Unpin,
     W: tokio::io::AsyncWrite + Unpin,
 {
     // 1. Print the "> " prompt to stderr (L1 + L2 byte-lock from T0).
@@ -70,6 +70,14 @@ where
     let _ = stderr.flush().await;
 
     // 2. Read a line, racing against SIGINT and (additively) the idle timer.
+    //
+    // SHARED STDIN: `stdin` is the SINGLE `BufReader<Stdin>` shared with the
+    // injected `InteractivePromptingGate`. We lock it ONLY for the duration of
+    // the prompt read (between turns) and DROP the guard before invoking
+    // `run_turn_fn`, so the gate can lock the SAME reader to prompt `y/n`
+    // during the turn. The two phases are strictly sequential within one loop
+    // iteration, so the `tokio::sync::Mutex` is never contended and never
+    // deadlocks.
     //
     // CANCEL-SAFETY: `AsyncBufReadExt::read_line` is NOT cancel-safe — dropping
     // its future mid-read can lose buffered bytes. We therefore pin it ONCE and
@@ -82,70 +90,83 @@ where
     // and `idle_fired` makes it at-most-once per idle period.
     let mut line = String::new();
 
-    let read_fut = stdin.read_line(&mut line);
-    tokio::pin!(read_fut);
+    // Acquire the shared-stdin lock for the prompt read ONLY. The guard is
+    // dropped at the end of this block (`read_scope`) — BEFORE `run_turn_fn` —
+    // so the gate can lock the SAME reader during the turn.
+    let read_scope: Option<StepOutcome> = {
+        let mut guard = stdin.lock().await;
 
-    // Arm the idle timer only when a notifier is present AND not gated off
-    // (`arm_timer() == None` ⇒ no `Notification` hook registered). A
-    // `pending()` future is selected over only when no real timer exists, so
-    // the no-hook path is byte-identical to the prior two-arm `select!`.
-    let idle_timer = idle.and_then(IdleNotifier::arm_timer);
-    let mut idle_timer = match idle_timer {
-        Some(fut) => fut,
-        None => Box::pin(std::future::pending::<()>()),
-    };
-    let mut idle_fired = false;
+        let read_fut = guard.read_line(&mut line);
+        tokio::pin!(read_fut);
 
-    let n: usize = loop {
-        tokio::select! {
-            result = &mut read_fut => {
-                match result {
-                    Ok(0) => {
-                        // EOF (Ctrl+D) — L3 byte-lock: print "\n" to stdout.
-                        let _ = tokio::io::stdout().write_all(b"\n").await;
-                        return StepOutcome::Eof;
+        // Arm the idle timer only when a notifier is present AND not gated off
+        // (`arm_timer() == None` ⇒ no `Notification` hook registered). A
+        // `pending()` future is selected over only when no real timer exists, so
+        // the no-hook path is byte-identical to the prior two-arm `select!`.
+        let idle_timer = idle.and_then(IdleNotifier::arm_timer);
+        let mut idle_timer = match idle_timer {
+            Some(fut) => fut,
+            None => Box::pin(std::future::pending::<()>()),
+        };
+        let mut idle_fired = false;
+
+        loop {
+            tokio::select! {
+                result = &mut read_fut => {
+                    match result {
+                        Ok(0) => {
+                            // EOF (Ctrl+D) — L3 byte-lock: print "\n" to stdout.
+                            let _ = tokio::io::stdout().write_all(b"\n").await;
+                            break Some(StepOutcome::Eof);
+                        }
+                        Ok(_bytes) => break None,
+                        Err(_) => {
+                            // IO error — try again on next iteration.
+                            break Some(StepOutcome::Continue);
+                        }
                     }
-                    Ok(bytes) => break bytes,
-                    Err(_) => {
-                        // IO error — try again on next iteration.
-                        return StepOutcome::Continue;
+                }
+                () = sigint.wait() => {
+                    // SIGINT at the idle prompt.
+                    if sigint.take_idle_armed() {
+                        // Second Ctrl+C within the 2-second window → exit 130.
+                        break Some(StepOutcome::DoubleSigintExit);
                     }
+                    // First idle Ctrl+C: arm the flag, print "\n", start the
+                    // 2-second disarm timer.
+                    sigint.arm_idle();
+                    let _ = stderr.write_all(b"\n").await;
+                    let idle_armed = sigint.idle_armed.clone();
+                    tokio::spawn(async move {
+                        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                        idle_armed.store(false, std::sync::atomic::Ordering::SeqCst);
+                    });
+                    break Some(StepOutcome::Continue);
                 }
-            }
-            () = sigint.wait() => {
-                // SIGINT at the idle prompt.
-                if sigint.take_idle_armed() {
-                    // Second Ctrl+C within the 2-second window → exit 130.
-                    return StepOutcome::DoubleSigintExit;
+                () = &mut idle_timer, if !idle_fired => {
+                    // Idle threshold elapsed before input arrived. Fire the
+                    // `Notification {idle_prompt}` hook ONCE, best-effort — it can
+                    // never affect the input read, which is still in flight — then
+                    // loop back to keep awaiting the SAME pinned `read_line`.
+                    idle_fired = true;
+                    if let Some(notifier) = idle {
+                        notifier.fire().await;
+                    }
+                    // Re-arm with a never-resolving timer so the disabled idle arm
+                    // is cheap on subsequent loop turns (at-most-once per period).
+                    idle_timer = Box::pin(std::future::pending::<()>());
                 }
-                // First idle Ctrl+C: arm the flag, print "\n", start the
-                // 2-second disarm timer.
-                sigint.arm_idle();
-                let _ = stderr.write_all(b"\n").await;
-                let idle_armed = sigint.idle_armed.clone();
-                tokio::spawn(async move {
-                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-                    idle_armed.store(false, std::sync::atomic::Ordering::SeqCst);
-                });
-                return StepOutcome::Continue;
-            }
-            () = &mut idle_timer, if !idle_fired => {
-                // Idle threshold elapsed before input arrived. Fire the
-                // `Notification {idle_prompt}` hook ONCE, best-effort — it can
-                // never affect the input read, which is still in flight — then
-                // loop back to keep awaiting the SAME pinned `read_line`.
-                idle_fired = true;
-                if let Some(notifier) = idle {
-                    notifier.fire().await;
-                }
-                // Re-arm with a never-resolving timer so the disabled idle arm
-                // is cheap on subsequent loop turns (at-most-once per period).
-                idle_timer = Box::pin(std::future::pending::<()>());
             }
         }
+        // `guard` (and the pinned `read_fut` borrowing it) drop HERE — the
+        // shared reader is unlocked before any turn runs.
     };
 
-    let _ = n; // bytes read — used implicitly via `line`
+    // A terminal read outcome (Eof / DoubleSigintExit / first-idle-Ctrl+C /
+    // IO error) returns now; otherwise `line` holds the prompt input.
+    if let Some(outcome) = read_scope {
+        return outcome;
+    }
 
     // Strip trailing newline(s).
     let input = line.trim_end_matches('\n').trim_end_matches('\r');
@@ -239,8 +260,18 @@ mod tests {
     use futures::future::BoxFuture;
     use orchestrator::test_support::MockOrchestratorHandle;
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use tokio::io::{duplex, AsyncWriteExt, BufReader};
+    use tokio::io::{duplex, AsyncBufRead, AsyncWriteExt, BufReader};
+    use tokio::sync::Mutex;
     use traits::{SlashCommandDispatcher, SlashDispatchResult};
+
+    /// Wrap a duplex client end in the shared `Arc<Mutex<BufReader<_>>>` the
+    /// refactored `step` expects (upcast to the `dyn AsyncBufRead` trait object).
+    fn shared_stdin<R>(client: R) -> Arc<Mutex<dyn AsyncBufRead + Send + Unpin>>
+    where
+        R: tokio::io::AsyncRead + Send + Unpin + 'static,
+    {
+        Arc::new(Mutex::new(BufReader::new(client)))
+    }
 
     /// Dispatcher stub — `step` never calls it for plain (non-slash) input, and
     /// these tests feed only plain input, so this is unreachable in practice.
@@ -292,7 +323,7 @@ mod tests {
     async fn run_step_with(notifier: &TestNotifier, line: &str) -> StepOutcome {
         // 64-byte duplex: server end = our writer, client end = step's stdin.
         let (mut writer, client) = duplex(64);
-        let mut stdin = BufReader::new(client);
+        let stdin = shared_stdin(client);
         let mut sink_buf = Vec::new();
         // stderr sink for the "> " prompt — a Vec is fine (no real terminal).
         let stderr = &mut sink_buf;
@@ -317,7 +348,7 @@ mod tests {
         });
 
         let outcome = step(
-            &mut stdin,
+            stdin,
             stderr,
             &dispatcher,
             handle,
@@ -380,7 +411,7 @@ mod tests {
     async fn no_notifier_is_a_noop() {
         // `None` notifier — the pre-existing two-arm behaviour.
         let (mut writer, client) = duplex(64);
-        let mut stdin = BufReader::new(client);
+        let stdin = shared_stdin(client);
         let mut stderr = Vec::new();
         let dispatcher = NoopDispatcher;
         let handle: Arc<dyn OrchestratorHandle> = Arc::new(MockOrchestratorHandle::new());
@@ -392,7 +423,7 @@ mod tests {
             writer
         });
         let outcome = step(
-            &mut stdin,
+            stdin,
             &mut stderr,
             &dispatcher,
             handle,
@@ -423,6 +454,68 @@ mod tests {
             fires.load(Ordering::SeqCst),
             0,
             "a gated-off notifier (no Notification hook) must never fire"
+        );
+    }
+
+    /// LOCK-RELEASE: `step` must DROP the shared-stdin guard BEFORE invoking
+    /// `run_turn_fn`. A fake `run_turn_fn` locks the SAME shared reader and
+    /// reads a pre-queued `"y\n"` (simulating the gate prompting during the
+    /// turn). If `step` still held the guard, this would deadlock; success
+    /// proves the guard was released and the byte is available to the gate.
+    #[tokio::test]
+    async fn step_releases_stdin_lock_before_running_turn() {
+        use tokio::io::AsyncBufReadExt;
+
+        // Queue BOTH the prompt line `"go\n"` (consumed by step's read) and the
+        // gate's `"y\n"` answer (consumed by run_turn_fn) up front.
+        let (mut writer, client) = duplex(64);
+        writer.write_all(b"go\ny\n").await.unwrap();
+        let shared = shared_stdin(client);
+
+        let mut stderr = Vec::new();
+        let dispatcher = NoopDispatcher;
+        let handle: Arc<dyn OrchestratorHandle> = Arc::new(MockOrchestratorHandle::new());
+        let sink: Arc<dyn OutputSink> = Arc::new(PlainSink::new());
+        let sigint = SigintSource::spawn();
+
+        // `run_turn_fn` re-locks the SAME shared reader and reads the queued
+        // `"y\n"` — exactly what the injected gate does during a turn.
+        let answered = Arc::new(AtomicUsize::new(0));
+        let stdin_for_turn = shared.clone();
+        let answered_for_turn = answered.clone();
+        let run_turn_fn = move |_prompt: String, _token: CancellationToken| {
+            let r = stdin_for_turn.clone();
+            let a = answered_for_turn.clone();
+            Box::pin(async move {
+                let mut buf = String::new();
+                let mut guard = r.lock().await;
+                let n = guard.read_line(&mut buf).await.unwrap();
+                assert_eq!(n, "y\n".len());
+                assert_eq!(buf, "y\n");
+                a.fetch_add(1, Ordering::SeqCst);
+                Ok(TurnOutcome::EndTurn)
+            }) as BoxFuture<'static, Result<TurnOutcome, OrchestratorError>>
+        };
+
+        let outcome = step(
+            shared,
+            &mut stderr,
+            &dispatcher,
+            handle,
+            sink,
+            &sigint,
+            None,
+            run_turn_fn,
+        )
+        .await;
+
+        let _ = writer;
+        assert_eq!(outcome, StepOutcome::Continue);
+        assert_eq!(
+            answered.load(Ordering::SeqCst),
+            1,
+            "run_turn_fn must have locked the shared reader and read `y\\n` — \
+             proving step dropped the guard before the turn"
         );
     }
 }

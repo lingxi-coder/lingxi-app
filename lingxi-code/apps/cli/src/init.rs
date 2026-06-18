@@ -236,7 +236,7 @@ fn load_routing() -> Option<serde_json::Value> {
 ///   (`initialPermissionModeFromCLI`), replacing the previously hardwired
 ///   `Default`.
 #[must_use]
-fn resolve_desktop_config(
+pub(crate) fn resolve_desktop_config(
     argv: &Argv,
     permission_mode: permission::PermissionMode,
 ) -> DesktopConfig {

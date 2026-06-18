@@ -163,6 +163,10 @@ pub fn build_mobile_engine(
         let cfg = MobileConfig {
             cwd: std::path::PathBuf::from(&impls.app_files_root),
             claude_home: std::path::PathBuf::from(&impls.app_files_root).join(".claude"),
+            // P0.2: production injects the real CLAUDE.md hierarchy provider so the
+            // orchestrator loads `<cwd>/CLAUDE.md` + `<claude_home>/CLAUDE.md` into
+            // its system prompt and `fire_instructions_loaded()` fires over them.
+            memory_provider: Some(orchestrator::prompt::real_provider()),
             ..MobileConfig::default()
         };
         let platform: Arc<dyn Platform> = Arc::new(AndroidPlatform::new(AndroidPlatformInputs {
@@ -1273,6 +1277,10 @@ pub fn build_android_engine(
         let mut cfg = MobileConfig {
             cwd: std::path::PathBuf::from(&app_files_root),
             claude_home: std::path::PathBuf::from(&app_files_root).join(".claude"),
+            // P0.2: production injects the real CLAUDE.md hierarchy provider so the
+            // orchestrator loads `<cwd>/CLAUDE.md` + `<claude_home>/CLAUDE.md` into
+            // its system prompt and `fire_instructions_loaded()` fires over them.
+            memory_provider: Some(orchestrator::prompt::real_provider()),
             ..MobileConfig::default()
         };
         if !api_base.is_empty() {

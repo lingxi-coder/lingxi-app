@@ -48,7 +48,7 @@ use command_api::RegistrySlashDispatcher;
 use llm_client::{DefaultLlmClient, Transport};
 use orchestrator::model::user_agent::UserAgentEnv;
 use orchestrator::provider_adapter::SubscriberState;
-use orchestrator::test_support::{noop_hook_executor, StaticMemoryProvider};
+use orchestrator::test_support::StaticMemoryProvider;
 use orchestrator::{
     ConversationOrchestrator, OrchestratorApiClient, OrchestratorConfig, ProviderApiAdapter,
     StreamingApiClient,
@@ -126,7 +126,10 @@ impl HttpTransport for DynHttp {
 /// `use_noop_permission_gate` knobs: there is no `.mcp.json` discovery on a
 /// device, and a mobile client ALWAYS binds the connection-scoped
 /// [`AdapterPermissionGate`] (a phone has no always-allow CLI mode).
-#[derive(Clone, Debug)]
+// P0.2: `Clone` only — `Debug` is implemented manually below because the new
+// `memory_provider` field (`Arc<dyn MemoryHierarchyProvider>`) is not `Debug`.
+// Mirrors the `DesktopConfig` pattern (engine-desktop/src/lib.rs:799-846).
+#[derive(Clone)]
 pub struct MobileConfig {
     /// API base URL (default `https://api.anthropic.com`).
     pub api_base: String,
@@ -165,6 +168,48 @@ pub struct MobileConfig {
     /// the token never enters the broadly-cloned public ctx. `None` until Task 10
     /// wires it from `android-aar`; `tool-git-mobile` reads it at call time.
     pub android_git_secret: Option<tool_api::AndroidGitSecret>,
+    /// P0.2 (mobile CLAUDE.md hierarchy): the memory hierarchy provider the
+    /// orchestrator loads its instruction files from. The production FFI entry
+    /// points (`ios-framework` / `android-aar`) inject
+    /// `Some(orchestrator::prompt::real_provider())` so the orchestrator loads
+    /// the real `<cwd>/CLAUDE.md` + `<claude_home>/CLAUDE.md` hierarchy into the
+    /// system prompt (claude-code parity) and the session-start
+    /// `fire_instructions_loaded()` fires over those files. `None` (the default +
+    /// every off-device host test) falls back to the empty
+    /// [`StaticMemoryProvider`], so a default build loads NO memory and the host
+    /// tests stay deterministic (they never touch the real filesystem). Mirrors
+    /// `engine_desktop::DesktopConfig::memory_provider`.
+    pub memory_provider: Option<Arc<dyn orchestrator::prompt::MemoryHierarchyProvider>>,
+}
+
+impl std::fmt::Debug for MobileConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // `dyn MemoryHierarchyProvider` is not `Debug`, so render the
+        // `memory_provider` field as a Some(<provider>)/None presence marker.
+        // Every other field is printed verbatim so `{cfg:?}` stays useful for
+        // host logging (copies the `DesktopConfig` Debug pattern at
+        // engine-desktop/src/lib.rs:799-846).
+        f.debug_struct("MobileConfig")
+            .field("api_base", &self.api_base)
+            .field("api_key", &self.api_key)
+            .field("cwd", &self.cwd)
+            .field("claude_home", &self.claude_home)
+            .field("default_model", &self.default_model)
+            .field("provider_profiles", &self.provider_profiles)
+            .field("routing", &self.routing)
+            .field("android_shell", &self.android_shell)
+            .field("android_git", &self.android_git)
+            .field("android_git_secret", &self.android_git_secret)
+            .field(
+                "memory_provider",
+                if self.memory_provider.is_some() {
+                    &"Some(<provider>)"
+                } else {
+                    &"None"
+                },
+            )
+            .finish()
+    }
 }
 
 impl Default for MobileConfig {
@@ -180,6 +225,9 @@ impl Default for MobileConfig {
             android_shell: None,
             android_git: None,
             android_git_secret: None,
+            // P0.2: default to NO memory provider (empty, deterministic). The
+            // production FFI entry points inject `Some(real_provider())`.
+            memory_provider: None,
         }
     }
 }
@@ -559,10 +607,96 @@ pub async fn build_mobile_inner(
     let adapter_gate = Arc::new(AdapterPermissionGate::new(permission_sink));
     let perms: Arc<dyn PermissionGate> = adapter_gate.clone();
 
-    // (6) Hook / memory fillers (empty in the foundation, matching desktop).
-    let hooks = noop_hook_executor();
-    let memory: Arc<dyn orchestrator::prompt::MemoryHierarchyProvider> =
-        Arc::new(StaticMemoryProvider::empty());
+    // (6) Hook executor + memory provider.
+    //
+    // P0.2: the hook executor is no longer the `noop_hook_executor()` stub — it
+    // is the REAL `HookExecutorImpl` (mobile sibling of `engine_desktop::build`
+    // §5.2 / §5.25), built from the settings hooks below so the Command / Prompt
+    // hook arms run for real and the session-start `SessionStart` /
+    // `InstructionsLoaded` lifecycle fires (step (9) below) dispatch against the
+    // loaded hooks.
+    //
+    // (6a) HookRegistry — read settings.json hooks from project
+    //      (`<cwd>/.claude/settings.json`) then user
+    //      (`<claude_home>/settings.json`), project last so it wins on identical
+    //      command registration (same precedence as desktop). The files are read
+    //      via `tokio::fs` (NOT the workspace-constrained `FileSystem::read_file`)
+    //      because `claude_home` may sit outside the orchestrator's cwd, exactly
+    //      as desktop reads them. A missing or malformed file is skipped, never an
+    //      error — the common (no-hooks) case registers nothing and stays a no-op.
+    let mut hook_registry = hooks::HookRegistry::new();
+    let project_settings_path = cwd.join(".claude").join("settings.json");
+    let user_settings_path = cfg.claude_home.join("settings.json");
+    // On mobile `claude_home` is commonly `<cwd>/.claude`, so the user- and
+    // project-settings paths can resolve to the SAME file. Desktop never
+    // collides (claude_home = `~/.claude` ≠ cwd) and so has no dedup. Reading a
+    // colliding path twice would `register()` every declared hook twice, so it
+    // would fire twice per event — a parity divergence. De-dup to read each
+    // distinct path ONCE; when they collide keep the Project tag (project is
+    // read last so it wins precedence on differing paths, matching desktop).
+    let mut settings_sources: Vec<(std::path::PathBuf, hooks::definition::HookSource)> = Vec::new();
+    if user_settings_path != project_settings_path {
+        settings_sources.push((user_settings_path, hooks::definition::HookSource::User));
+    }
+    settings_sources.push((project_settings_path, hooks::definition::HookSource::Project));
+    for (path, source) in settings_sources {
+        if let Ok(raw) = tokio::fs::read_to_string(&path).await {
+            match hooks::parse_hooks_from_settings_json(&raw, source) {
+                Ok(hooks_vec) => {
+                    for h in hooks_vec {
+                        hook_registry.register(h);
+                    }
+                }
+                Err(e) => tracing::warn!(
+                    error = %e,
+                    path = %path.display(),
+                    "engine-mobile: skipping malformed settings hooks"
+                ),
+            }
+        }
+    }
+    let hook_registry = Arc::new(RwLock::new(hook_registry));
+
+    // (6b) Build the real executor. Per the mobile runner-sourcing decision:
+    //      - `with_process_runner(process, sandbox)` makes the Command arm run
+    //        child processes through the SAME platform-sourced runner + sandbox
+    //        the tools use (a device-jailed runner on Android, the host runner on
+    //        iOS/CI). Both are required — the runner only accepts a
+    //        `traits::SandboxedCommand`, which only the sandbox can mint.
+    //      - `with_prompt_runner(ApiClientHookPromptRunner)` evaluates inline
+    //        single-turn `prompt` hooks over the SAME `api_client` the
+    //        orchestrator drives (shared provider routing / auth / telemetry).
+    //      The `with_async_registry` + `with_agent_spawner` builders are
+    //      DELIBERATELY OMITTED: mobile has no subagent spawner, and with no
+    //      async/agent hook configured this is behavior-neutral (a non-blocking
+    //      hook falls back to running synchronously; an `agent` hook returns a
+    //      structured "not wired" error rather than spawning). The
+    //      `RuntimeSpawner` is the posix-minimal `PosixRuntime` (only the omitted
+    //      Agent/async arms consult it; the Command arm uses `process`).
+    let hooks: Arc<hooks::HookExecutorImpl> = Arc::new(
+        hooks::HookExecutorImpl::new(
+            hook_registry.clone(),
+            http.clone(),
+            Arc::new(platform_posix_minimal::PosixRuntime::new())
+                as Arc<dyn traits::RuntimeSpawner>,
+        )
+        .with_process_runner(process.clone(), sandbox.clone())
+        .with_prompt_runner(Arc::new(orchestrator::ApiClientHookPromptRunner::new(
+            api_client.clone(),
+        ))),
+    );
+
+    // P0.2: the production FFI entry points inject
+    // `cfg.memory_provider = Some(orchestrator::prompt::real_provider())` so the
+    // orchestrator loads the real `<cwd>/CLAUDE.md` + `<claude_home>/CLAUDE.md`
+    // hierarchy into its system prompt (claude-code parity) and step (9)'s
+    // `fire_instructions_loaded()` fires over those files. `None` (the default +
+    // every host test) falls back to the empty `StaticMemoryProvider`, so a
+    // default build loads NO memory and the host tests stay deterministic.
+    let memory: Arc<dyn orchestrator::prompt::MemoryHierarchyProvider> = cfg
+        .memory_provider
+        .clone()
+        .unwrap_or_else(|| Arc::new(StaticMemoryProvider::empty()));
 
     // (7) Assemble the mobile tool registry through the composition root. The
     //     device capabilities (camera / voice / share) come from `platform`;
@@ -580,7 +714,6 @@ pub async fn build_mobile_inner(
         sandbox_runtime: SandboxRuntimeConfig::default(),
         sandbox_runner: tool_api::default_sandbox_runner(),
         permission_mode: PermissionMode::Default,
-        project_trust: ProjectTrustLevel::Trusted,
         sandbox_available: false,
         workspace: cwd.clone(),
         platform: if cfg!(target_os = "macos") {
@@ -600,6 +733,7 @@ pub async fn build_mobile_inner(
         // invoker, so the dispatch gate is unused here. The main loop is still
         // gated via `perms` (passed to the orchestrator below).
         permission_gate: None,
+        project_trust: ProjectTrustLevel::Trusted,
         mcp_registry: None,
         lsp_registry: None,
         camera: platform.camera(),
@@ -667,7 +801,13 @@ pub async fn build_mobile_inner(
         output,
         memory,
         cwd,
-    );
+    )
+    // P0.2: attach the SAME `HookRegistry` the executor reads so `list_hooks`
+    // reports the loaded settings hooks (the executor fires against it; this
+    // exposes it for inspection — mobile sibling of desktop's
+    // `.with_hook_registry(hook_registry)`).
+    .with_hook_registry(hook_registry);
+    // P0.1 (gated): attach the memdir prefetch when enabled above.
     if let Some(prefetch) = memdir_prefetch {
         orch_inner = orch_inner.with_memory_prefetch(prefetch);
     }
@@ -685,6 +825,25 @@ pub async fn build_mobile_inner(
     }
     let reg = mobile_command_registry(handle, auth.clone());
     let dispatcher = RegistrySlashDispatcher::new(Arc::new(RwLock::new(reg)));
+
+    // (9) Session lifecycle fires (P0.2 — mobile sibling of `engine_desktop::build`
+    //     §7 / §7.1). Fire `SessionStart` then `InstructionsLoaded` now that the
+    //     orchestrator + the real hook registry are fully wired:
+    //     - `fire_session_start("startup")`: `build_mobile` assembles exactly one
+    //       fresh session per call, so the byte-faithful `source` is `"startup"`
+    //       (claude-code `utils/hooks.ts` SessionStart path).
+    //     - `fire_instructions_loaded()`: fires once per eager CLAUDE.md /
+    //       `CLAUDE.local.md` the memory provider yields (load_reason
+    //       `session_start`), exactly as desktop. With the default empty provider
+    //       this is a no-op over zero files; with the injected `real_provider()`
+    //       it fires over the real hierarchy.
+    //     Both are best-effort — each discards the hook aggregate, so a failing /
+    //     malformed lifecycle hook never breaks boot, and each is a strict no-op
+    //     when no matching hook is registered (the common case). No matching
+    //     `SessionEnd` is fired here: like desktop, `build_mobile` returns the
+    //     runtime and the FFI host drops it with no hook-capable teardown seam.
+    orch.fire_session_start("startup").await;
+    orch.fire_instructions_loaded().await;
 
     Ok(MobileRuntime {
         orchestrator: orch,
@@ -1608,7 +1767,12 @@ mod tests {
         assert_eq!(cfg.default_model, "claude-sonnet-4-20250514");
         assert!(cfg.provider_profiles.is_none());
         assert!(cfg.routing.is_none());
+        // P0.2: the injectable memory provider defaults to None (empty,
+        // deterministic — production injects `Some(real_provider())`).
+        assert!(cfg.memory_provider.is_none());
         let _clone = cfg.clone();
+        // Exercises the manual `Debug` impl that renders `memory_provider` as a
+        // presence marker (`Arc<dyn MemoryHierarchyProvider>` is not `Debug`).
         let _ = format!("{cfg:?}");
     }
 
@@ -1683,6 +1847,190 @@ mod tests {
             .await
         );
         let _ = task.await.unwrap();
+    }
+
+    // ── P0.2: mobile hook lifecycle (real HookExecutorImpl + lifecycle fires) ─
+    //
+    // The mobile composition root now builds the REAL `HookExecutorImpl` (loaded
+    // from `cwd/.claude/settings.json` + `claude_home/settings.json`) in place of
+    // the `noop_hook_executor()` stub, and fires `SessionStart` (source=startup)
+    // + `InstructionsLoaded` (once per loaded CLAUDE.md) at boot — exactly the
+    // desktop `build()` lifecycle (engine-desktop §7 / §7.1). These mirror the
+    // desktop `build_fires_session_start_against_a_registered_hook` /
+    // `build_fires_instructions_loaded_against_a_registered_hook` /
+    // `build_with_injected_memory_reaches_system_prompt` tests.
+
+    /// Write a single command hook for `event` into the project settings the
+    /// mobile hook loader reads at boot (`<cwd>/.claude/settings.json`). The
+    /// `"true"` command is a side-effect-free no-op (the in-build lifecycle fire
+    /// is best-effort), so this asserts hook *registration*, not the command's
+    /// effect.
+    fn write_project_hook(cwd: &std::path::Path, event: &str) {
+        let claude_dir = cwd.join(".claude");
+        std::fs::create_dir_all(&claude_dir).expect("mk .claude");
+        std::fs::write(
+            claude_dir.join("settings.json"),
+            format!(
+                r#"{{ "hooks": {{ "{event}": [ {{ "hooks": [
+                {{ "type": "command", "command": "true" }}
+            ] }} ] }} }}"#
+            ),
+        )
+        .expect("write settings.json");
+    }
+
+    /// P0.2: the boot path fires `SessionStart` (source=startup) once the
+    /// orchestrator + hook registry are wired, best-effort. We register a
+    /// `SessionStart` command hook in the project settings; `build_mobile` must
+    /// (a) succeed even though the wired `fire_session_start("startup")` ran a
+    /// (no-op) command hook, and (b) surface the loaded hook via `list_hooks` —
+    /// proving the boot path loaded the session-lifecycle hook the in-build fire
+    /// dispatched against (mobile sibling of the desktop test).
+    #[tokio::test]
+    async fn build_mobile_fires_session_start_against_a_registered_hook() {
+        use traits::OrchestratorHandle as _;
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        write_project_hook(tmp.path(), "SessionStart");
+
+        let platform: Arc<dyn traits::Platform> =
+            Arc::new(HostFakePlatform::new(tmp.path().to_path_buf()));
+        let listener: Arc<dyn ClientEventListener> = Arc::new(FakeListener::default());
+        let perm_sink: Arc<dyn PermissionRequestSink> =
+            Arc::new(RecordingPermissionSink::default());
+
+        let rt = build_mobile(test_config(tmp.path()), platform, listener, perm_sink)
+            .await
+            .expect("build_mobile must succeed even with a (no-op) SessionStart hook registered");
+
+        let hooks = rt.orchestrator.list_hooks().await;
+        // Exactly ONE registration. On mobile `claude_home` == `<cwd>/.claude`, so
+        // the user- and project-settings paths resolve to the SAME file; before the
+        // settings-path de-dup this hook registered (and therefore fired) TWICE. A
+        // plain `.any()` masked that — assert count == 1 to catch the regression.
+        let session_start_count = hooks.iter().filter(|h| h.event == "SessionStart").count();
+        assert_eq!(
+            session_start_count, 1,
+            "boot must load the SessionStart hook EXACTLY once (no settings-path double-registration): {hooks:?}"
+        );
+    }
+
+    /// P0.2: the boot path fires `InstructionsLoaded` (load_reason=session_start)
+    /// right after `SessionStart`, best-effort. We register an
+    /// `InstructionsLoaded` command hook in the project settings; `build_mobile`
+    /// must succeed and surface the loaded hook via `list_hooks`. (With the
+    /// default empty memory provider no instruction file actually fires, exactly
+    /// like the desktop sibling — the assertion pins the boot-fire seam + the
+    /// real registry wiring.)
+    #[tokio::test]
+    async fn build_mobile_fires_instructions_loaded_against_a_registered_hook() {
+        use traits::OrchestratorHandle as _;
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        write_project_hook(tmp.path(), "InstructionsLoaded");
+
+        let platform: Arc<dyn traits::Platform> =
+            Arc::new(HostFakePlatform::new(tmp.path().to_path_buf()));
+        let listener: Arc<dyn ClientEventListener> = Arc::new(FakeListener::default());
+        let perm_sink: Arc<dyn PermissionRequestSink> =
+            Arc::new(RecordingPermissionSink::default());
+
+        let rt = build_mobile(test_config(tmp.path()), platform, listener, perm_sink)
+            .await
+            .expect("build_mobile must succeed even with a (no-op) InstructionsLoaded hook");
+
+        let hooks = rt.orchestrator.list_hooks().await;
+        assert!(
+            hooks.iter().any(|h| h.event == "InstructionsLoaded"),
+            "boot must load the InstructionsLoaded hook the lifecycle fire dispatches against: {hooks:?}"
+        );
+    }
+
+    /// P0.2: the injectable `cfg.memory_provider` seam (production wires
+    /// `orchestrator::prompt::real_provider()`). We inject a CONTROLLED in-memory
+    /// provider (NOT the real FS) carrying one project CLAUDE.md and prove it
+    /// flows through `build_mobile` into the orchestrator's system prompt (the
+    /// GAP-3 memory section — preamble + tier-tagged `Contents of …:` + body).
+    /// The default-empty sibling elides the memory section, so its presence is
+    /// the load-bearing difference the injected provider makes.
+    #[tokio::test]
+    async fn build_mobile_with_injected_memory_reaches_system_prompt() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let mut cfg = test_config(tmp.path());
+
+        let memory_path = cfg.cwd.join("CLAUDE.md");
+        let memory_body = "PROJECT MEMORY: always be terse.";
+        let memory_file = orchestrator::prompt::MemoryFile {
+            path: memory_path.clone(),
+            body: memory_body.to_string(),
+            is_local_override: false,
+            tier: orchestrator::prompt::ClaudeMdTier::Project,
+            globs: None,
+        };
+        cfg.memory_provider = Some(Arc::new(
+            orchestrator::test_support::StaticMemoryProvider::with_files(vec![memory_file]),
+        ));
+
+        let platform: Arc<dyn traits::Platform> =
+            Arc::new(HostFakePlatform::new(tmp.path().to_path_buf()));
+        let listener: Arc<dyn ClientEventListener> = Arc::new(FakeListener::default());
+        let perm_sink: Arc<dyn PermissionRequestSink> =
+            Arc::new(RecordingPermissionSink::default());
+
+        let rt = build_mobile(cfg, platform, listener, perm_sink)
+            .await
+            .expect("build_mobile with an injected memory provider must succeed");
+
+        let sys = rt.orchestrator.assemble_system_prompt_preview().await;
+        assert!(
+            sys.contains(
+                "Codebase and user instructions are shown below. Be sure to adhere to these instructions."
+            ),
+            "injected memory must emit the memory preamble in the system prompt: {sys}"
+        );
+        assert!(
+            sys.contains(&format!(
+                "Contents of {} (project instructions, checked into the codebase):",
+                memory_path.display()
+            )),
+            "the injected CLAUDE.md must emit a tier-tagged `Contents of …:` marker: {sys}"
+        );
+        assert!(
+            sys.contains(memory_body),
+            "the injected CLAUDE.md body must appear in the system prompt: {sys}"
+        );
+    }
+
+    /// P0.2 determinism guard: a default-config `build_mobile`
+    /// (`cfg.memory_provider == None`) loads NO memory, so the system prompt
+    /// emits NO memory section — pinning that the existing boot tests stay
+    /// deterministic (they never read the real `~/.claude/CLAUDE.md`).
+    #[tokio::test]
+    async fn build_mobile_default_loads_no_memory() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let cfg = test_config(tmp.path());
+        assert!(
+            cfg.memory_provider.is_none(),
+            "default config must leave memory_provider None (empty, deterministic)"
+        );
+
+        let platform: Arc<dyn traits::Platform> =
+            Arc::new(HostFakePlatform::new(tmp.path().to_path_buf()));
+        let listener: Arc<dyn ClientEventListener> = Arc::new(FakeListener::default());
+        let perm_sink: Arc<dyn PermissionRequestSink> =
+            Arc::new(RecordingPermissionSink::default());
+
+        let rt = build_mobile(cfg, platform, listener, perm_sink)
+            .await
+            .expect("default build_mobile must succeed");
+
+        let sys = rt.orchestrator.assemble_system_prompt_preview().await;
+        assert!(
+            !sys.contains(
+                "Codebase and user instructions are shown below. Be sure to adhere to these instructions."
+            ),
+            "a default build must emit NO memory preamble: {sys}"
+        );
     }
 
     // ── F3-05: the async `submit` FFI entry point ───────────────────────────

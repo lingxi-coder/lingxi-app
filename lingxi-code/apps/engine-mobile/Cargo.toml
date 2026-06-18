@@ -39,6 +39,13 @@ uniffi = [
     "dep:sandbox",
     "dep:telemetry",
     "dep:platform-posix-minimal",
+    # P0.2 (mobile hook lifecycle): the real `HookExecutorImpl` + `HookRegistry`
+    # + settings hook loader the mobile composition root wires (replacing the
+    # `noop_hook_executor()` stub) so the Command / Prompt hook arms run and the
+    # session-start `SessionStart` / `InstructionsLoaded` lifecycle fires
+    # dispatch against the loaded settings hooks. Engine-tier (no `apps/*` edge),
+    # optional + uniffi-gated like its runtime-wiring siblings above.
+    "dep:hooks",
     # SESSIONS/HISTORY: the on-disk JSONL session enumerator
     # (`session::jsonl::list_recent_sessions`) the `ListSessions` command routes
     # to. Engine-tier (no `apps/*` edge), optional + uniffi-gated like the other
@@ -107,6 +114,11 @@ permission = { path = "../../permission", optional = true }
 sandbox = { path = "../../sandbox", optional = true }
 telemetry = { path = "../../telemetry", optional = true }
 platform-posix-minimal = { path = "../../platforms/posix-minimal", optional = true }
+# P0.2 (mobile hook lifecycle): the real `HookExecutorImpl` + `HookRegistry` +
+# `parse_hooks_from_settings_json` loader the mobile composition root wires in
+# place of `noop_hook_executor()`. Engine-tier (no `apps/*` edge), optional +
+# uniffi-gated like its runtime-wiring siblings above.
+hooks = { path = "../../hooks", optional = true }
 # 3c-T3: builtin pricing catalog for LlmResponse.cost population. Optional +
 # uniffi-gated (the cost estimator is constructed inside build_mobile_inner).
 cost = { path = "../../cost", optional = true }

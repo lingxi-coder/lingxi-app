@@ -1335,6 +1335,7 @@ dependencies = [
  "command-core",
  "command-mobile",
  "cost",
+ "hooks",
  "insta",
  "llm-client",
  "orchestrator",

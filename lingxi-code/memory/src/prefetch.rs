@@ -6,15 +6,30 @@
 //! P0.1: the pending handle resolves to a `Vec<`[`SurfacedMemory`]`>` — the
 //! exact shape [`crate::surfacing::render_surfacing_block`] renders — so the
 //! orchestrator's `relevant_memory_reminder_message` can await this handle and
-//! render the surfaced block with no further disk work. The default stub body
-//! resolves to an EMPTY vec (the selector is not yet wired to a real
-//! side-query client at the composition root), so the surfacing reminder is a
-//! strict no-op and the locked fixtures stay byte-identical — exactly matching
-//! claude-code's `tengu_moth_copse`-default-false gate (the LingXi equivalent
-//! gate is "is a prefetch wired at all", `memory_prefetch.is_some()`).
+//! render the surfaced block with no further disk work.
+//!
+//! Two construction modes:
+//! - [`MemoryPrefetch::new`] binds a real [`MemorySelector`] + memdir
+//!   [`MemdirRoots`]: [`MemoryPrefetch::start`] scans the memdir, asks the
+//!   selector (a Haiku-class side query) which entries are relevant to the turn
+//!   query, and maps the chosen entries to [`SurfacedMemory`]. This is the path
+//!   the composition root wires once the prefetch is enabled (claude-code
+//!   `tengu_moth_copse`, default off — here the gate is "is a prefetch wired at
+//!   all", `memory_prefetch.is_some()`).
+//! - [`MemoryPrefetch::with_fixed_result`] resolves to a PRE-SELECTED set,
+//!   bypassing the selector — the deterministic seam the orchestrator's
+//!   surfacing tests drive, and the injection seam a composition root uses when
+//!   it has already selected the relevant memories out of band.
+//!
+//! A prefetch with neither a selector+roots nor a fixed result resolves to an
+//! EMPTY set, so the surfacing reminder is a strict no-op and the locked
+//! fixtures stay byte-identical.
 
-use crate::selector::MemorySelector;
+use crate::file::MemoryFile;
+use crate::memdir::{scan_memdir, MemdirRoots};
+use crate::selector::{memory_entry_to_memory_file, MemorySelector};
 use crate::surfacing::SurfacedMemory;
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::oneshot;
@@ -23,17 +38,17 @@ use traits::RuntimeSpawner;
 /// Side-channel that fires the memory selector concurrently with the
 /// main turn.
 pub struct MemoryPrefetch {
-    /// Selector that scores and ranks the available memory set.
-    #[allow(dead_code)] // wired into the prefetch body when a real selector lands
+    /// Selector that ranks the available memory set via a side query. `Some` on
+    /// the real path ([`Self::new`]); `None` for the fixed-result seam.
     selector: Option<Arc<MemorySelector>>,
     /// Runtime adapter used to spawn the background task.
     runtime: Arc<dyn RuntimeSpawner>,
+    /// memdir roots to scan for candidate memories. `Some` on the real path
+    /// (paired with `selector`); `None` for the fixed-result seam.
+    roots: Option<MemdirRoots>,
     /// Pre-resolved surfaced set: when `Some`, [`Self::start`] short-circuits
-    /// to this set instead of running the (not-yet-wired) selector body. This is
-    /// the injection seam a composition root uses once it has already selected
-    /// the relevant memories out of band, and the deterministic seam the
-    /// orchestrator's surfacing tests drive. `None` ⇒ the default stub body
-    /// (empty result ⇒ inert surfacing reminder).
+    /// to this set instead of running the selector. `None` ⇒ the selector path
+    /// (or, with no selector/roots, an empty inert result).
     fixed_result: Option<Vec<SurfacedMemory>>,
 }
 
@@ -59,12 +74,18 @@ impl PendingMemoryPrefetch {
 }
 
 impl MemoryPrefetch {
-    /// Construct a prefetcher bound to a selector and the platform runtime.
+    /// Construct a prefetcher bound to a selector, the platform runtime, and the
+    /// memdir roots to scan. [`Self::start`] runs the real selection path.
     #[must_use]
-    pub fn new(selector: Arc<MemorySelector>, runtime: Arc<dyn RuntimeSpawner>) -> Self {
+    pub fn new(
+        selector: Arc<MemorySelector>,
+        runtime: Arc<dyn RuntimeSpawner>,
+        roots: MemdirRoots,
+    ) -> Self {
         Self {
             selector: Some(selector),
             runtime,
+            roots: Some(roots),
             fixed_result: None,
         }
     }
@@ -83,35 +104,223 @@ impl MemoryPrefetch {
         Self {
             selector: None,
             runtime,
+            roots: None,
             fixed_result: Some(result),
         }
     }
 
     /// Kick off a background selector call and return a pending handle.
     ///
-    /// When a [`Self::with_fixed_result`] set is present, the background task
-    /// ships that set; otherwise it ships the channel plumbing only and resolves
-    /// to an EMPTY surfaced-memory set (no real selector wired yet), so the
-    /// surfacing reminder is inert by default. The signature is the final one: a
-    /// real selector body fills `tx` with the loaded, ranked [`SurfacedMemory`]
-    /// set.
-    pub async fn start(&self, _query: String, _memory_dir: PathBuf) -> PendingMemoryPrefetch {
+    /// - A [`Self::with_fixed_result`] set is shipped verbatim.
+    /// - Otherwise, when a selector + memdir roots are wired ([`Self::new`]),
+    ///   the background task scans the memdir, runs the selector over the turn
+    ///   `query`, and ships the chosen entries as [`SurfacedMemory`].
+    /// - With neither, it ships an EMPTY set (inert surfacing reminder).
+    ///
+    /// `_memory_dir` (the orchestrator's cwd) is currently unused: the memdir
+    /// roots are home-based and bound at construction. It is retained for a
+    /// future project-scoped memdir root.
+    pub async fn start(&self, query: String, _memory_dir: PathBuf) -> PendingMemoryPrefetch {
         let (tx, rx) = oneshot::channel();
-        let result = self.fixed_result.clone().unwrap_or_default();
+
+        if let Some(fixed) = self.fixed_result.clone() {
+            let _ = self
+                .runtime
+                .spawn(
+                    "memory-prefetch",
+                    Box::pin(async move {
+                        let _ = tx.send(fixed);
+                    }),
+                )
+                .await;
+            return PendingMemoryPrefetch {
+                rx: tokio::sync::Mutex::new(Some(rx)),
+            };
+        }
+
+        // Real path requires BOTH a selector and memdir roots; otherwise inert.
+        let (Some(selector), Some(roots)) = (self.selector.clone(), self.roots.clone()) else {
+            let _ = self
+                .runtime
+                .spawn(
+                    "memory-prefetch",
+                    Box::pin(async move {
+                        let _ = tx.send(Vec::new());
+                    }),
+                )
+                .await;
+            return PendingMemoryPrefetch {
+                rx: tokio::sync::Mutex::new(Some(rx)),
+            };
+        };
+
         let _ = self
             .runtime
             .spawn(
                 "memory-prefetch",
                 Box::pin(async move {
-                    // A real selector wires here: select_relevant → load files →
-                    // map to SurfacedMemory. Until then, ship the fixed result
-                    // (or empty ⇒ inert surfacing reminder).
-                    let _ = tx.send(result);
+                    let surfaced = select_surfaced(&selector, &roots, &query).await;
+                    let _ = tx.send(surfaced);
                 }),
             )
             .await;
         PendingMemoryPrefetch {
             rx: tokio::sync::Mutex::new(Some(rx)),
         }
+    }
+}
+
+/// Scan the memdir, ask the selector which entries are relevant to `query`, and
+/// map the chosen entries to the renderable [`SurfacedMemory`] shape.
+///
+/// Any failure — a missing/unreadable memdir, or a side-query error — resolves
+/// to an EMPTY set: a failed prefetch must never break the turn. The orchestrator
+/// dedups the result against already-surfaced + already-read paths, so this path
+/// passes an empty `already` set (no double-select within one prefetch).
+async fn select_surfaced(
+    selector: &MemorySelector,
+    roots: &MemdirRoots,
+    query: &str,
+) -> Vec<SurfacedMemory> {
+    // `scan_memdir` is blocking fs I/O over a small directory; run inline.
+    let Ok(snapshot) = scan_memdir(roots) else {
+        return Vec::new();
+    };
+    if snapshot.entries.is_empty() {
+        return Vec::new();
+    }
+    let files: Vec<MemoryFile> = snapshot
+        .entries
+        .iter()
+        .map(memory_entry_to_memory_file)
+        .collect();
+    let already: HashSet<PathBuf> = HashSet::new();
+    let Ok(selected) = selector.select_relevant(query, &files, &[], &already).await else {
+        return Vec::new();
+    };
+    // Map each selected path back to its memdir entry → SurfacedMemory.
+    selected
+        .iter()
+        .filter_map(|p| {
+            snapshot.entries.iter().find(|e| &e.path == p).map(|e| {
+                let f = memory_entry_to_memory_file(e);
+                SurfacedMemory {
+                    path: e.path.clone(),
+                    content: f.content,
+                    age_days: e.age_days,
+                    mtime: f.mtime,
+                }
+            })
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::memdir::memdir_path;
+    use async_trait::async_trait;
+    use sidequery::{SideQueryClient, SideQueryError, SideQueryRequest, SideQueryResponse};
+
+    /// A runtime that actually RUNS the spawned future, so the prefetch's
+    /// one-shot resolves (the production posix runtime does this; the test needs
+    /// the task to execute inline on the current tokio runtime).
+    struct InlineRuntime;
+    #[async_trait]
+    impl RuntimeSpawner for InlineRuntime {
+        async fn spawn(
+            &self,
+            name: &str,
+            task: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'static>>,
+        ) -> Result<traits::BackgroundTaskHandle, traits::RuntimeError> {
+            tokio::spawn(task);
+            Ok(traits::BackgroundTaskHandle {
+                task_name: name.to_string(),
+                task_id: 0,
+            })
+        }
+        async fn sleep(&self, _d: std::time::Duration) {}
+        async fn cancel(
+            &self,
+            _h: &traits::BackgroundTaskHandle,
+        ) -> Result<(), traits::RuntimeError> {
+            Ok(())
+        }
+    }
+
+    /// A `SideQueryClient` that returns a canned `{"filenames": [...]}` selection
+    /// (the shape `MemorySelector` parses), ignoring the request — so the test
+    /// drives the scan → select → surface pipeline deterministically with no LLM.
+    struct PickClient {
+        names: Vec<String>,
+    }
+    #[async_trait]
+    impl SideQueryClient for PickClient {
+        async fn query(
+            &self,
+            _request: SideQueryRequest,
+        ) -> Result<SideQueryResponse, SideQueryError> {
+            Ok(SideQueryResponse {
+                text: None,
+                structured: Some(serde_json::json!({ "filenames": self.names })),
+                tool_calls: Vec::new(),
+                // Field type (`cost::Usage`) inferred — avoids a dev-dep on `cost`.
+                usage: Default::default(),
+                stop_reason: Some("end_turn".into()),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn real_path_scans_selects_and_surfaces() {
+        let home = tempfile::tempdir().expect("tmp home");
+        let memdir = home.path().join(".claude").join("memdir");
+        std::fs::create_dir_all(&memdir).expect("mk memdir");
+        std::fs::write(memdir.join("fd.md"), "USE FD NOT FIND").expect("write fd");
+        std::fs::write(memdir.join("rg.md"), "USE RG NOT GREP").expect("write rg");
+
+        let roots = memdir_path(home.path(), false);
+        // The selector "picks" fd.md only.
+        let selector = Arc::new(MemorySelector::new(Arc::new(PickClient {
+            names: vec!["fd.md".into()],
+        })));
+        let prefetch = MemoryPrefetch::new(selector, Arc::new(InlineRuntime), roots);
+
+        let surfaced = prefetch
+            .start("how do I search files".into(), PathBuf::from("/work"))
+            .await
+            .take()
+            .await;
+
+        assert_eq!(surfaced.len(), 1, "only the selected file surfaces: {surfaced:?}");
+        assert!(
+            surfaced[0].path.ends_with("fd.md"),
+            "surfaced path: {:?}",
+            surfaced[0].path
+        );
+        assert!(
+            surfaced[0].content.contains("USE FD NOT FIND"),
+            "content: {:?}",
+            surfaced[0].content
+        );
+    }
+
+    #[tokio::test]
+    async fn real_path_absent_memdir_is_inert() {
+        // No memdir directory on disk ⇒ scan finds nothing ⇒ empty (no surfacing),
+        // and the selector is never consulted.
+        let home = tempfile::tempdir().expect("tmp home");
+        let roots = memdir_path(home.path(), false);
+        let selector = Arc::new(MemorySelector::new(Arc::new(PickClient {
+            names: vec!["x.md".into()],
+        })));
+        let prefetch = MemoryPrefetch::new(selector, Arc::new(InlineRuntime), roots);
+
+        let surfaced = prefetch
+            .start("q".into(), PathBuf::from("/w"))
+            .await
+            .take()
+            .await;
+        assert!(surfaced.is_empty(), "absent memdir surfaces nothing: {surfaced:?}");
     }
 }

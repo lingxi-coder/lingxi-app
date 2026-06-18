@@ -3038,25 +3038,45 @@ pub async fn build(
     // sandboxed `PosixFileSystem` (a Plan-16 dead-code field on `PluginManager`)
     // needs a workspace root, so snapshot it here.
     let cwd_for_plugins = watch_cwd.clone();
-    let orch = Arc::new(
-        ConversationOrchestrator::new(
-            orch_cfg, api_client, tools, hooks, perms, output, memory, cwd,
-        )
-        .with_cost_tracker(cost_tracker)
-        .with_analytics_bus(analytics_bus)
-        .with_mcp_registry(mcp_registry)
-        .with_hook_registry(hook_registry)
-        .with_agent_catalog(agent_catalog)
-        .with_compaction(compactor)
-        .with_cache_safe_slot(cache_safe_slot)
-        // SKILLLIST.1: enumerate model-invocable skills each turn so the model
-        // can discover them. Reads `shared_command_registry` lazily at turn time
-        // (populated below at (6), before any turn fires).
-        .with_skill_listing(Arc::new(RegistrySkillListing(shared_command_registry.clone())))
-        // B5: fold completed background (`async`) hook responses back into the
-        // next turn. Backed by the completion-channel drain buffer above.
-        .with_async_hook_responses(Arc::new(async_hook_response_buffer)),
-    );
+    let orch_builder = ConversationOrchestrator::new(
+        orch_cfg, api_client, tools, hooks, perms, output, memory, cwd,
+    )
+    .with_cost_tracker(cost_tracker)
+    .with_analytics_bus(analytics_bus)
+    .with_mcp_registry(mcp_registry)
+    .with_hook_registry(hook_registry)
+    .with_agent_catalog(agent_catalog)
+    .with_compaction(compactor)
+    .with_cache_safe_slot(cache_safe_slot)
+    // SKILLLIST.1: enumerate model-invocable skills each turn so the model
+    // can discover them. Reads `shared_command_registry` lazily at turn time
+    // (populated below at (6), before any turn fires).
+    .with_skill_listing(Arc::new(RegistrySkillListing(shared_command_registry.clone())))
+    // B5: fold completed background (`async`) hook responses back into the
+    // next turn. Backed by the completion-channel drain buffer above.
+    .with_async_hook_responses(Arc::new(async_hook_response_buffer));
+
+    // P0.1 ACTIVATION (gated, default OFF). When `CLAUDE_CODE_MEMDIR_PREFETCH`
+    // is truthy, wire the memdir-backed memory selector so relevant
+    // `~/.claude/memdir` entries surface each turn (a Haiku-class side query per
+    // turn over `side_query_client`). The composition-root presence of the
+    // prefetch IS the gate — claude-code keeps this behind `tengu_moth_copse`
+    // (default false), so unset/false leaves the surfacing channel inert and the
+    // locked fixtures byte-identical (`memory_prefetch.is_some() == false`).
+    let orch_builder = match (
+        is_env_truthy("CLAUDE_CODE_MEMDIR_PREFETCH"),
+        dirs::home_dir(),
+    ) {
+        (true, Some(home)) => orch_builder.with_memory_prefetch(
+            orchestrator::prompt::build_memdir_prefetch(
+                side_query_client.clone(),
+                Arc::new(PosixRuntime::new()) as Arc<dyn traits::RuntimeSpawner>,
+                &home,
+            ),
+        ),
+        _ => orch_builder,
+    };
+    let orch = Arc::new(orch_builder);
 
     // (6) Command registry through the desktop composition root.
     let handle: Arc<dyn OrchestratorHandle> = orch.clone();

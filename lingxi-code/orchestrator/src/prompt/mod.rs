@@ -16,7 +16,9 @@ pub mod memory_block;
 pub mod skill_listing;
 pub mod tools_block;
 
-pub use memory_block::{real_provider, MemoryHierarchyProvider, RealMemoryHierarchyProvider};
+pub use memory_block::{
+    build_memdir_prefetch, real_provider, MemoryHierarchyProvider, RealMemoryHierarchyProvider,
+};
 
 /// Re-export of the CLAUDE.md tier enum so consumers that depend on
 /// `orchestrator` (but not the `memory` crate directly) can name

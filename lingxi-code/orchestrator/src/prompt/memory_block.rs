@@ -130,6 +130,37 @@ pub fn real_provider() -> Arc<dyn MemoryHierarchyProvider> {
     Arc::new(RealMemoryHierarchyProvider)
 }
 
+/// Build a memdir-backed memory prefetcher for the composition root — the P0.1
+/// activation of the `relevant_memories` surfacing channel.
+///
+/// Wires the LLM memory selector (`side_query_client`, Haiku-class) over the
+/// user memdir (`<home>/.claude/memdir`) so that, each turn,
+/// [`MemoryPrefetch::start`](memory::prefetch::MemoryPrefetch::start) scans the
+/// memdir, asks the selector which entries are relevant to the turn query, and
+/// surfaces them through
+/// [`ConversationOrchestrator::relevant_memory_reminder_message`](crate::ConversationOrchestrator).
+/// Hand the returned handle to
+/// [`ConversationOrchestrator::with_memory_prefetch`](crate::ConversationOrchestrator).
+///
+/// Centralised here (not inlined at each composition root) so desktop / bridge /
+/// mobile build the prefetch identically and the engine apps need no direct
+/// dependency on the `memory` crate's internals.
+///
+/// GATING: the composition root decides whether to call this — claude-code keeps
+/// the feature behind `tengu_moth_copse` (default OFF); the LingXi equivalent is
+/// "is a prefetch wired at all". `team_memory.enabled` is left `false` here (the
+/// user memdir only), matching the inert default until team memory is configured.
+#[must_use]
+pub fn build_memdir_prefetch(
+    side_query_client: Arc<dyn sidequery::SideQueryClient>,
+    runtime: Arc<dyn traits::RuntimeSpawner>,
+    home: &std::path::Path,
+) -> Arc<memory::prefetch::MemoryPrefetch> {
+    let roots = memory::memdir::memdir_path(home, false);
+    let selector = Arc::new(memory::selector::MemorySelector::new(side_query_client));
+    Arc::new(memory::prefetch::MemoryPrefetch::new(selector, runtime, roots))
+}
+
 /// Verbatim preamble that precedes the memory blocks.
 ///
 /// 1:1 with claude-code `MEMORY_INSTRUCTION_PROMPT` (claudemd.ts:89-90).

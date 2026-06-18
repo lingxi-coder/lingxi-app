@@ -16,7 +16,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::sync::Mutex;
 
 use crate::gate::{
@@ -59,18 +59,25 @@ pub(crate) fn format_prompt_tool_use(tool_name: &str, default_decision: PromptDe
 /// Production wiring (M5-12) constructs with `tokio::io::stdin()` +
 /// `tokio::io::stderr()`. Tests use `tokio::io::duplex` scripts.
 pub struct InteractivePromptingGate {
-    // Used by `PromptingGate::prompt_user` (lands in Task 8).
+    // A SHARED `AsyncBufRead` over fd 0. The REPL loop owns the single
+    // `BufReader<Stdin>` and clones the `Arc<Mutex<…>>` into the gate, so
+    // both sides read from the SAME buffer — no second `BufReader` is created
+    // here (that would double-buffer and strand the REPL's type-ahead bytes).
     #[allow(dead_code)]
-    pub(crate) stdin: Arc<Mutex<dyn AsyncRead + Send + Unpin>>,
+    pub(crate) stdin: Arc<Mutex<dyn AsyncBufRead + Send + Unpin>>,
     #[allow(dead_code)]
     pub(crate) stderr: Arc<Mutex<dyn AsyncWrite + Send + Unpin>>,
 }
 
 impl InteractivePromptingGate {
     /// Construct a new interactive gate over the given stdin / stderr endpoints.
+    ///
+    /// `stdin` is a SHARED `AsyncBufRead` — the caller (the REPL loop) owns the
+    /// single buffered reader over fd 0 and hands a clone here so the gate reads
+    /// from the same buffer rather than wrapping a fresh one.
     #[must_use]
     pub fn new(
-        stdin: Arc<Mutex<dyn AsyncRead + Send + Unpin>>,
+        stdin: Arc<Mutex<dyn AsyncBufRead + Send + Unpin>>,
         stderr: Arc<Mutex<dyn AsyncWrite + Send + Unpin>>,
     ) -> Self {
         Self { stdin, stderr }
@@ -87,7 +94,7 @@ impl InteractivePromptingGate {
     #[must_use]
     pub fn with_stdio() -> Self {
         Self::new(
-            Arc::new(Mutex::new(tokio::io::stdin())),
+            Arc::new(Mutex::new(BufReader::new(tokio::io::stdin()))),
             Arc::new(Mutex::new(tokio::io::stderr())),
         )
     }
@@ -185,14 +192,14 @@ impl PromptingGate for InteractivePromptingGate {
         let prompt = format_prompt_tool_use(tool_name, default_decision);
         let default_allow = matches!(default_decision, PromptDefault::AllowByDefault);
         let mut attempts: u32 = 0;
-        // Acquire stdin lock + wrap in BufReader ONCE for the full prompt
-        // round-trip. Creating a fresh BufReader per loop iteration would
-        // silently discard any bytes BufReader had pre-fetched past the
-        // first newline — on retry inputs (`foo\nbar\nbaz\n`) only the
-        // first `foo\n` would be consumed and subsequent iterations would
-        // see EOF.
+        // Acquire the SHARED stdin lock ONCE for the full prompt round-trip.
+        // The guard is already an `AsyncBufRead` (the REPL owns the single
+        // `BufReader<Stdin>`), so we read `read_line` directly off it — no
+        // second `BufReader`. Wrapping a fresh buffer here would silently
+        // strand bytes the shared reader had pre-fetched past the first
+        // newline: on retry inputs (`foo\nbar\nbaz\n`) only the first `foo\n`
+        // would be consumed, and any REPL type-ahead would be lost too.
         let mut in_guard = self.stdin.lock().await;
-        let mut reader = BufReader::new(&mut *in_guard);
         loop {
             // Telemetry: prompt about to be shown (once per attempt).
             tracing::info!(
@@ -214,7 +221,7 @@ impl PromptingGate for InteractivePromptingGate {
             // 2. Read one line from stdin.
             let line = {
                 let mut buf = String::new();
-                let n = reader
+                let n = (&mut *in_guard)
                     .read_line(&mut buf)
                     .await
                     .map_err(|e| PromptError::Io(e.to_string()))?;
@@ -317,7 +324,7 @@ mod tests {
         drop(script);
         let (out_end, _drain) = duplex(64);
         let gate = InteractivePromptingGate::new(
-            Arc::new(Mutex::new(in_end)),
+            Arc::new(Mutex::new(BufReader::new(in_end))),
             Arc::new(Mutex::new(out_end)),
         );
         let req = PermissionRequest::ExitPlanMode {
@@ -336,7 +343,7 @@ mod tests {
         let (_script, in_end) = duplex(64);
         let (out_end, _drain) = duplex(64);
         let gate = InteractivePromptingGate::new(
-            Arc::new(Mutex::new(in_end)),
+            Arc::new(Mutex::new(BufReader::new(in_end))),
             Arc::new(Mutex::new(out_end)),
         );
         let req = PermissionRequest::BypassPermissionsMode;
@@ -431,5 +438,45 @@ mod tests {
             resolve_outcome(ParseOutcome::Invalid, PromptDefault::AllowByDefault),
             None
         );
+    }
+
+    /// A SINGLE shared `BufReader` carrying `"y\n"` followed by a second line
+    /// is read by the gate without losing the follow-up: after `prompt_user`
+    /// consumes `"y\n"`, the SAME shared reader still yields the follow-up
+    /// line. This proves the gate no longer wraps its own inner `BufReader`
+    /// (which would strand the follow-up behind a dropped buffer).
+    #[tokio::test]
+    async fn shared_bufreader_does_not_lose_follow_up_line() {
+        use std::sync::Arc;
+        use tokio::io::{duplex, AsyncBufReadExt, AsyncWriteExt, BufReader};
+        use tokio::sync::Mutex;
+
+        let (mut writer, client) = duplex(1024);
+        // Queue BOTH the gate's answer and a follow-up line up front.
+        writer.write_all(b"y\nnext-line\n").await.unwrap();
+        drop(writer);
+
+        let shared: Arc<Mutex<dyn AsyncBufRead + Send + Unpin>> =
+            Arc::new(Mutex::new(BufReader::new(client)));
+        let (out_end, _drain) = duplex(1024);
+        let gate = InteractivePromptingGate::new(shared.clone(), Arc::new(Mutex::new(out_end)));
+
+        let decision = gate
+            .prompt_user(&PermissionRequest::ToolUseConfirm {
+                tool_name: "Bash".to_string(),
+                tool_input: serde_json::json!({}),
+                default_decision: PromptDefault::DenyByDefault,
+            })
+            .await
+            .expect("prompt_user should succeed on `y`");
+        assert!(decision.allow, "y should map to allow=true");
+
+        // The follow-up line is still readable from the SAME shared reader —
+        // the gate did not strand it behind a private buffer.
+        let mut follow = String::new();
+        let mut guard = shared.lock().await;
+        let n = guard.read_line(&mut follow).await.unwrap();
+        assert_eq!(n, "next-line\n".len(), "follow-up bytes must survive");
+        assert_eq!(follow, "next-line\n");
     }
 }

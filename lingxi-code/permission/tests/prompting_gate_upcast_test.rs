@@ -12,7 +12,7 @@ use std::sync::Arc;
 
 use permission::{InteractivePromptingGate, PermissionDecision, PermissionGate};
 use serde_json::json;
-use tokio::io::{duplex, AsyncReadExt, AsyncWriteExt};
+use tokio::io::{duplex, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::Mutex;
 
 #[tokio::test]
@@ -21,7 +21,7 @@ async fn check_typing_y_returns_allow() {
     let (stderr_writer, mut stderr_reader) = duplex(1024);
 
     let gate = InteractivePromptingGate::new(
-        Arc::new(Mutex::new(stdin_reader)),
+        Arc::new(Mutex::new(BufReader::new(stdin_reader))),
         Arc::new(Mutex::new(stderr_writer)),
     );
 
@@ -51,7 +51,7 @@ async fn check_typing_n_returns_deny() {
     let (stderr_writer, _stderr_reader) = duplex(1024);
 
     let gate = InteractivePromptingGate::new(
-        Arc::new(Mutex::new(stdin_reader)),
+        Arc::new(Mutex::new(BufReader::new(stdin_reader))),
         Arc::new(Mutex::new(stderr_writer)),
     );
 
@@ -81,7 +81,7 @@ async fn check_unknown_tool_falls_back_to_deny_default() {
     let (stderr_writer, mut stderr_reader) = duplex(1024);
 
     let gate = InteractivePromptingGate::new(
-        Arc::new(Mutex::new(stdin_reader)),
+        Arc::new(Mutex::new(BufReader::new(stdin_reader))),
         Arc::new(Mutex::new(stderr_writer)),
     );
 
@@ -113,7 +113,7 @@ async fn check_after_3_invalid_inputs_returns_deny() {
     let (stderr_writer, _stderr_reader) = duplex(2048);
 
     let gate = InteractivePromptingGate::new(
-        Arc::new(Mutex::new(stdin_reader)),
+        Arc::new(Mutex::new(BufReader::new(stdin_reader))),
         Arc::new(Mutex::new(stderr_writer)),
     );
 

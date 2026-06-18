@@ -14,7 +14,7 @@ use permission::{
     InteractivePromptingGate, PermissionRequest, PromptDefault, PromptError, PromptingGate,
 };
 use serde_json::json;
-use tokio::io::{duplex, AsyncReadExt, AsyncWriteExt};
+use tokio::io::{duplex, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::Mutex;
 
 fn make_request(tool_name: &str, default: PromptDefault) -> PermissionRequest {
@@ -31,7 +31,7 @@ async fn typing_y_returns_allow() {
     let (stderr_writer, mut stderr_reader) = duplex(1024);
 
     let gate = InteractivePromptingGate::new(
-        Arc::new(Mutex::new(stdin_reader)),
+        Arc::new(Mutex::new(BufReader::new(stdin_reader))),
         Arc::new(Mutex::new(stderr_writer)),
     );
 
@@ -66,7 +66,7 @@ async fn empty_input_with_allow_default_returns_allow() {
     let (stderr_writer, mut stderr_reader) = duplex(1024);
 
     let gate = InteractivePromptingGate::new(
-        Arc::new(Mutex::new(stdin_reader)),
+        Arc::new(Mutex::new(BufReader::new(stdin_reader))),
         Arc::new(Mutex::new(stderr_writer)),
     );
 
@@ -98,7 +98,7 @@ async fn empty_input_with_deny_default_returns_deny() {
     let (stderr_writer, mut stderr_reader) = duplex(1024);
 
     let gate = InteractivePromptingGate::new(
-        Arc::new(Mutex::new(stdin_reader)),
+        Arc::new(Mutex::new(BufReader::new(stdin_reader))),
         Arc::new(Mutex::new(stderr_writer)),
     );
 
@@ -130,7 +130,7 @@ async fn three_invalid_inputs_returns_invalid_input_error() {
     let (stderr_writer, mut stderr_reader) = duplex(2048);
 
     let gate = InteractivePromptingGate::new(
-        Arc::new(Mutex::new(stdin_reader)),
+        Arc::new(Mutex::new(BufReader::new(stdin_reader))),
         Arc::new(Mutex::new(stderr_writer)),
     );
 
@@ -171,7 +171,7 @@ async fn second_attempt_valid_recovers() {
     let (stderr_writer, mut stderr_reader) = duplex(2048);
 
     let gate = InteractivePromptingGate::new(
-        Arc::new(Mutex::new(stdin_reader)),
+        Arc::new(Mutex::new(BufReader::new(stdin_reader))),
         Arc::new(Mutex::new(stderr_writer)),
     );
 

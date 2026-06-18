@@ -717,6 +717,25 @@ impl McpRegistry {
             // a handle to the now-dead connection (registered under the raw
             // `config.name` in `connect`).
             self.clients.write().await.remove(name);
+            // Token revocation (RFC 7009) on the disconnect/logout path
+            // (auth.ts `revokeServerTokens`). Best-effort: discover the AS
+            // revocation_endpoint and POST a revoke for the refresh then access
+            // token, then unconditionally clear the local blob. Only fires for
+            // OAuth-configured servers when the OAuth seam is wired; static-token
+            // and oauth-unwired servers are untouched. Never fails the disconnect.
+            if let (Some(deps), Some(oauth_cfg)) =
+                (self.oauth.as_ref(), spec_oauth(&config.spec))
+            {
+                let key = oauth::server_key(&config.name, &config.spec);
+                oauth::revoke_server_tokens(
+                    &deps.storage,
+                    &deps.http,
+                    &key,
+                    spec_url(&config.spec),
+                    oauth_cfg,
+                )
+                .await;
+            }
             conns.insert(name.into(), McpConnectionState::Stopped { config });
         }
         Ok(())

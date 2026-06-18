@@ -80,9 +80,16 @@ impl MockAs {
                     "authorization_endpoint": "https://as.example.com/authorize",
                     "token_endpoint": "https://as.example.com/token",
                     "registration_endpoint": "https://as.example.com/register",
-                    "scopes_supported": ["mcp:read"]
+                    "scopes_supported": ["mcp:read"],
+                    "revocation_endpoint": "https://as.example.com/revoke"
                 }"#
                 .into(),
+            };
+        }
+        if url.contains("/revoke") {
+            return Canned {
+                status: 200,
+                body: String::new(),
             };
         }
         if url.contains("/register") {
@@ -527,6 +534,8 @@ async fn expired_token_triggers_refresh_and_attaches_new_bearer() {
         refresh_token: Some("refresh-1".into()),
         expires_at_unix: 5_000,
         client_id: Some("dcr-issued-7".into()),
+        client_secret: None,
+        step_up_scope: None,
     };
     let bytes = serde_json::to_vec(&stored).unwrap();
     let data = SecureStorageData::new(
@@ -603,6 +612,8 @@ async fn connect_401_triggers_refresh_and_retry() {
         refresh_token: Some("refresh-1".into()),
         expires_at_unix: 99_999,
         client_id: Some("dcr-issued-7".into()),
+        client_secret: None,
+        step_up_scope: None,
     };
     let bytes = serde_json::to_vec(&stored).unwrap();
     let data = SecureStorageData::new(
@@ -646,4 +657,176 @@ async fn connect_401_triggers_refresh_and_retry() {
                 })
                 .unwrap_or(false)
     }));
+}
+
+// ---------------------------------------------------------------------------
+// RESIDUAL 3 (A): token revocation (RFC 7009) on disconnect.
+// ---------------------------------------------------------------------------
+
+/// Seed a valid token, connect, then disconnect: the registry POSTs a revoke
+/// for the refresh token (first) and the access token (second) to the AS
+/// `revocation_endpoint`, then clears the local blob.
+#[tokio::test]
+async fn disconnect_revokes_tokens_and_clears_local() {
+    let mock_as = MockAs::new("{}", "{}");
+    let transport = RecordingTransport::new(0);
+    let storage = MemStorage::new();
+    let clock = TestClock::new(1_000);
+    let (on_url, _rx) = url_capture();
+
+    let config = http_cfg("revoker", Some(oauth_block(Some("preset-client"))));
+    let key = oauth::server_key("revoker", &config.spec);
+
+    // Seed an UNEXPIRED token so connect uses it directly (no flow / refresh).
+    let stored = oauth::StoredTokens {
+        access_token: "access-live".into(),
+        refresh_token: Some("refresh-live".into()),
+        expires_at_unix: 99_999,
+        client_id: Some("dcr-issued-7".into()),
+        client_secret: None,
+        step_up_scope: None,
+    };
+    let bytes = serde_json::to_vec(&stored).unwrap();
+    let data = SecureStorageData::new(
+        bytes,
+        SecureStorageMetadata {
+            created_at: SystemTime::UNIX_EPOCH,
+            last_accessed: None,
+            kind: SecretKindDto("mcp_oauth_tokens".into()),
+        },
+    );
+    storage
+        .store(oauth::MCP_OAUTH_SERVICE, &key, data)
+        .await
+        .unwrap();
+
+    let registry = McpRegistry::new(transport.clone() as Arc<dyn McpTransport>).with_oauth(
+        OAuthDeps {
+            http: mock_as.clone() as Arc<dyn HttpTransport>,
+            clock: clock as Arc<dyn Clock>,
+            storage: storage.clone() as Arc<dyn SecureStorage>,
+            on_authorization_url: on_url,
+        },
+    );
+
+    registry.connect(config.clone()).await.expect("connect ok");
+    registry.disconnect("revoker").await.expect("disconnect ok");
+
+    // Two revoke POSTs hit the revocation_endpoint: refresh first, then access.
+    let revokes: Vec<_> = mock_as
+        .requests()
+        .into_iter()
+        .filter(|r| r.url.contains("/revoke"))
+        .collect();
+    assert_eq!(revokes.len(), 2, "one revoke per token");
+    let b0 = revokes[0].body.as_deref().unwrap();
+    let b1 = revokes[1].body.as_deref().unwrap();
+    assert!(
+        b0.contains("token=refresh-live") && b0.contains("token_type_hint=refresh_token"),
+        "refresh token revoked first; body={b0}"
+    );
+    assert!(
+        b1.contains("token=access-live") && b1.contains("token_type_hint=access_token"),
+        "access token revoked second; body={b1}"
+    );
+    // Public client → client_id in the body (no Basic header).
+    assert!(b0.contains("client_id=dcr-issued-7"));
+
+    // Local blob is cleared regardless of server result.
+    let reloaded = oauth::load_tokens(&(storage as Arc<dyn SecureStorage>), &key)
+        .await
+        .unwrap();
+    assert!(reloaded.is_none(), "local tokens cleared after revocation");
+}
+
+/// When the AS advertises no `revocation_endpoint`, no revoke POST is sent but
+/// the local tokens are still cleared.
+#[tokio::test]
+async fn disconnect_without_revocation_endpoint_still_clears() {
+    // MockAsNoRevoke: same as MockAs but metadata omits revocation_endpoint.
+    struct NoRevoke {
+        requests: Mutex<Vec<HttpRequest>>,
+    }
+    #[async_trait]
+    impl HttpTransport for NoRevoke {
+        async fn request(&self, req: HttpRequest) -> Result<HttpResponse, HttpError> {
+            let url = req.url.clone();
+            self.requests.lock().unwrap().push(req);
+            let (status, body) = if url.contains("oauth-protected-resource") {
+                (404, String::new())
+            } else if url.contains("oauth-authorization-server") {
+                (
+                    200,
+                    r#"{"authorization_endpoint":"https://as.example.com/authorize","token_endpoint":"https://as.example.com/token"}"#
+                        .to_string(),
+                )
+            } else {
+                (404, String::new())
+            };
+            Ok(HttpResponse {
+                status,
+                headers: vec![],
+                body,
+            })
+        }
+        async fn stream_sse(&self, _req: HttpRequest) -> Result<SseStream, HttpError> {
+            Err(HttpError::InvalidRequest("unused".into()))
+        }
+    }
+
+    let http = Arc::new(NoRevoke {
+        requests: Mutex::new(Vec::new()),
+    });
+    let transport = RecordingTransport::new(0);
+    let storage = MemStorage::new();
+    let clock = TestClock::new(1_000);
+    let (on_url, _rx) = url_capture();
+
+    let config = http_cfg("norev", Some(oauth_block(Some("preset-client"))));
+    let key = oauth::server_key("norev", &config.spec);
+    let stored = oauth::StoredTokens {
+        access_token: "access-live".into(),
+        refresh_token: Some("refresh-live".into()),
+        expires_at_unix: 99_999,
+        client_id: Some("c".into()),
+        client_secret: None,
+        step_up_scope: None,
+    };
+    let bytes = serde_json::to_vec(&stored).unwrap();
+    storage
+        .store(
+            oauth::MCP_OAUTH_SERVICE,
+            &key,
+            SecureStorageData::new(
+                bytes,
+                SecureStorageMetadata {
+                    created_at: SystemTime::UNIX_EPOCH,
+                    last_accessed: None,
+                    kind: SecretKindDto("mcp_oauth_tokens".into()),
+                },
+            ),
+        )
+        .await
+        .unwrap();
+
+    let registry = McpRegistry::new(transport.clone() as Arc<dyn McpTransport>).with_oauth(
+        OAuthDeps {
+            http: http.clone() as Arc<dyn HttpTransport>,
+            clock: clock as Arc<dyn Clock>,
+            storage: storage.clone() as Arc<dyn SecureStorage>,
+            on_authorization_url: on_url,
+        },
+    );
+
+    registry.connect(config).await.expect("connect ok");
+    registry.disconnect("norev").await.expect("disconnect ok");
+
+    assert!(
+        !http.requests.lock().unwrap().iter().any(|r| r.url.contains("/revoke")),
+        "no revoke POST when endpoint absent"
+    );
+    let reloaded = oauth::load_tokens(&(storage as Arc<dyn SecureStorage>), &key)
+        .await
+        .unwrap();
+    assert!(reloaded.is_none(), "tokens cleared even without revocation endpoint");
 }

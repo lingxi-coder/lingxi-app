@@ -2000,14 +2000,16 @@ fn max_task_output_length() -> usize {
 /// The `[Truncated …]` header path. TS uses `getTaskOutputPath(taskId)`
 /// (`diskOutput.ts:72-74`) = `<projectTempDir>/<sessionId>/tasks/<taskId>.output`.
 ///
-/// BLOCKER: the absolute disk path is NOT reachable at this render site —
-/// `TaskRecord` / `TaskOutputChunk` (FROZEN `traits/`) carry no output path, and
-/// `getProjectTempDir()` is not a dependency of this crate. We emit the
-/// deterministic filename portion (`<taskId>.output`) as the closest faithful
-/// header so the truncation behaviour (tail-keep, header prefix) is otherwise
-/// byte-faithful. See the report for the path-threading blocker.
-fn task_output_path(task_id: &str) -> String {
-    format!("{task_id}.output")
+/// The registry now threads the resolved ABSOLUTE spool path through
+/// `TaskOutputChunk.output_path` (T11/T16), so when it is present this returns
+/// the real absolute path the model can read. When the registry could not
+/// resolve a path (`None`), it falls back to the deterministic filename portion
+/// (`<taskId>.output`) — the truncation behaviour stays byte-faithful either way.
+fn task_output_path(task_id: &str, output_path: Option<&str>) -> String {
+    match output_path {
+        Some(p) if !p.is_empty() => p.to_string(),
+        _ => format!("{task_id}.output"),
+    }
 }
 
 /// Port of `formatTaskOutput` (`outputFormatting.ts:22-38`). When the output
@@ -2019,13 +2021,16 @@ fn task_output_path(task_id: &str) -> String {
 /// TS measures `String.length`/`slice` in UTF-16 code units; this port measures
 /// Unicode scalar values (`chars()`), which differ only for astral-plane chars.
 /// For the ASCII/BMP output that task spools carry this is identical.
-fn format_task_output(output: &str, task_id: &str) -> String {
+fn format_task_output(output: &str, task_id: &str, output_path: Option<&str>) -> String {
     let max_len = max_task_output_length();
     let char_count = output.chars().count();
     if char_count <= max_len {
         return output.to_string();
     }
-    let header = format!("[Truncated. Full output: {}]\n\n", task_output_path(task_id));
+    let header = format!(
+        "[Truncated. Full output: {}]\n\n",
+        task_output_path(task_id, output_path)
+    );
     let available = max_len.saturating_sub(header.chars().count());
     // TS `output.slice(-availableSpace)` — keep the last `available` chars.
     let tail: String = output.chars().skip(char_count - available).collect();
@@ -2055,7 +2060,8 @@ fn render_task_output(
         // `output?.trim()`), then truncate-and-format and `.trimEnd()` the
         // result (TS: `formatTaskOutput(output, task_id)` → `content.trimEnd()`).
         if !t.output.trim().is_empty() {
-            let formatted = format_task_output(&t.output, &t.task_id);
+            let formatted =
+                format_task_output(&t.output, &t.task_id, t.output_path.as_deref());
             parts.push(format!("<output>\n{}\n</output>", formatted.trim_end()));
         }
         // `<error>` AFTER `<output>` (TS `mapToolResultToToolResultBlockParam`
@@ -2082,6 +2088,10 @@ struct TaskOutputView {
     /// `<error>…</error>` element after `<output>`. `None`/empty for non-agent
     /// tasks (and successful agents).
     error: Option<String>,
+    /// Absolute on-disk spool path, threaded from `TaskOutputChunk.output_path`
+    /// so the `[Truncated. Full output: <path>]` header shows the real path
+    /// (claude-code `getTaskOutputPath(taskId)`). `None` ⟶ bare-filename fallback.
+    output_path: Option<String>,
 }
 
 /// Byte-faithful port of `TaskOutputTool.tsx`'s `retrieval_status` decision.
@@ -2342,6 +2352,9 @@ impl Tool for TaskOutputTool {
             output,
             exit_code: chunk.exit_code,
             error: chunk.error.clone(),
+            // Absolute spool path threaded from the registry (T11/T16) for the
+            // `[Truncated. Full output: <path>]` header.
+            output_path: chunk.output_path.clone(),
         };
         let content = render_task_output(retrieval_status, Some(&view));
 
@@ -3781,6 +3794,7 @@ mod tests {
                 error: error.map(str::to_string),
                 prompt: Some("do the thing".into()),
                 result: result.map(str::to_string),
+                output_path: None,
             }
         }
 
@@ -4238,7 +4252,7 @@ mod tests {
         fn format_task_output_passthrough_under_limit() {
             // `output.length <= maxLen` ⇒ returned verbatim, no header.
             let out = "hello world\nsecond line\n";
-            assert_eq!(format_task_output(out, "b12345678"), out);
+            assert_eq!(format_task_output(out, "b12345678", None), out);
         }
 
         #[test]
@@ -4251,14 +4265,34 @@ mod tests {
             let out = format!("HEADMARKER{filler}TAILEND");
             assert_eq!(out.chars().count(), total);
 
-            let formatted = format_task_output(&out, "b12345678");
-            // Header prefix is byte-faithful to TS aside from the (unreachable)
-            // absolute path → deterministic `<taskId>.output` filename.
+            // With NO resolved path the header falls back to the bare filename.
+            let formatted = format_task_output(&out, "b12345678", None);
             assert!(formatted.starts_with("[Truncated. Full output: b12345678.output]\n\n"));
             // The leading marker was truncated away; the tail is preserved.
             assert!(!formatted.contains("HEADMARKER"));
             assert!(formatted.ends_with("TAILEND"));
             // header + tail exactly fills `maxLen` chars (TS slice arithmetic).
+            assert_eq!(formatted.chars().count(), max);
+        }
+
+        #[test]
+        fn format_task_output_header_uses_absolute_path_when_threaded() {
+            // T11: when the registry threads the resolved ABSOLUTE spool path
+            // (`TaskOutputChunk.output_path`), the header shows that path
+            // verbatim — byte-faithful with claude-code `getTaskOutputPath`.
+            let max = max_task_output_length();
+            let out = format!("{}TAILEND", "C".repeat(max + 200));
+            let abs = "/private/tmp/claude-501/-Users-me-proj/sess-abc/tasks/b12345678.output";
+            let formatted = format_task_output(&out, "b12345678", Some(abs));
+            assert!(
+                formatted.starts_with(&format!("[Truncated. Full output: {abs}]\n\n")),
+                "absolute path is used verbatim in the header; got {:?}",
+                &formatted[..formatted.char_indices().nth(120).map_or(formatted.len(), |(i, _)| i)]
+            );
+            // A bare filename must NOT leak when the absolute path is present.
+            assert!(!formatted.starts_with("[Truncated. Full output: b12345678.output]"));
+            assert!(formatted.ends_with("TAILEND"));
+            // The full byte length budget still holds with the longer header.
             assert_eq!(formatted.chars().count(), max);
         }
 
@@ -4276,9 +4310,35 @@ mod tests {
                 output: out,
                 exit_code: Some(0),
                 error: None,
+                output_path: None,
             };
             let rendered = render_task_output("success", Some(&view));
             assert!(rendered.contains("<output>\n[Truncated. Full output: b12345678.output]\n\n"));
+            assert!(rendered.trim_end().ends_with("TAILEND\n</output>"));
+        }
+
+        #[test]
+        fn render_task_output_header_shows_threaded_absolute_path() {
+            // T11 integration: the absolute spool path threaded onto the view
+            // reaches the `<output>` header.
+            let max = max_task_output_length();
+            let out = format!("{}TAILEND", "B".repeat(max + 500));
+            let abs = "/private/tmp/claude-501/-Users-me-proj/sess-xyz/tasks/b12345678.output";
+            let view = TaskOutputView {
+                task_id: "b12345678".into(),
+                task_type: "local_bash".into(),
+                status: "completed".into(),
+                description: "echo hi".into(),
+                output: out,
+                exit_code: Some(0),
+                error: None,
+                output_path: Some(abs.into()),
+            };
+            let rendered = render_task_output("success", Some(&view));
+            assert!(
+                rendered.contains(&format!("<output>\n[Truncated. Full output: {abs}]\n\n")),
+                "the threaded absolute path reaches the rendered header"
+            );
             assert!(rendered.trim_end().ends_with("TAILEND\n</output>"));
         }
     }

@@ -380,7 +380,8 @@ impl Task for InProcessTeammateHandler {
         //    per turn-set yet keeps running.
         let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let stop_loop = stop.clone();
-        let fs = ctx.fs.clone();
+        let output_manager = self.output.clone();
+        let worker_spool_path = spool_path.clone();
         let status_sink = self.status_sink.clone();
         // Best-effort `TeammateIdle` firer + the teammate name it carries. The
         // team_name is not reachable from this leaf scope (it lives on the
@@ -399,7 +400,13 @@ impl Task for InProcessTeammateHandler {
                     break;
                 }
                 let line = event_line(&ev);
-                if let Err(e) = fs.append_file(&spool, &format!("{line}\n")).await {
+                // Routed through the output manager's `append` so the per-file
+                // 5GB disk cap is enforced (T17) and the write uses O_NOFOLLOW
+                // (claude-code `diskOutput.ts`, T18).
+                if let Err(e) = output_manager
+                    .append(&worker_spool_path, &format!("{line}\n"))
+                    .await
+                {
                     tracing::warn!(
                         target: "lingxi_tasks::in_process_teammate",
                         spool, error = %e, "spool append failed"
@@ -910,7 +917,7 @@ mod tests {
         assert!(h.cleanup.is_some(), "cleanup hook present");
         assert_eq!(handler.entries.lock().await.len(), 1, "spawn registers slot");
 
-        let spool = dir.path().join(format!("{}.txt", h.task_id));
+        let spool = dir.path().join(format!("{}.output", h.task_id));
         let spool_str = spool.to_str().unwrap().to_string();
 
         // Turn-set 1 completes shortly after spawn.
@@ -973,7 +980,7 @@ mod tests {
             .await
             .unwrap();
 
-        let spool = dir.path().join(format!("{}.txt", h.task_id));
+        let spool = dir.path().join(format!("{}.output", h.task_id));
         let spool_str = spool.to_str().unwrap().to_string();
 
         let body = await_spool(&fs, &spool_str, |b| b.contains("failed:")).await;
@@ -1010,7 +1017,7 @@ mod tests {
             .unwrap();
 
         // Let turn-set 1 land so the runner is parked and reachable.
-        let spool = dir.path().join(format!("{}.txt", h.task_id));
+        let spool = dir.path().join(format!("{}.output", h.task_id));
         let spool_str = spool.to_str().unwrap().to_string();
         await_spool(&fs, &spool_str, |b| b.contains("answer one")).await;
 
@@ -1121,7 +1128,7 @@ mod tests {
             .await
             .unwrap();
 
-        let spool = dir.path().join(format!("{}.txt", h.task_id));
+        let spool = dir.path().join(format!("{}.output", h.task_id));
         let spool_str = spool.to_str().unwrap().to_string();
 
         // Turn-set 1 completes → exactly one idle fire so far.
@@ -1169,7 +1176,7 @@ mod tests {
 
         // The turn-set completes and parks exactly as before — no firer, no
         // panic, no behavioral change.
-        let spool = dir.path().join(format!("{}.txt", h.task_id));
+        let spool = dir.path().join(format!("{}.output", h.task_id));
         let spool_str = spool.to_str().unwrap().to_string();
         let body = await_spool(&fs, &spool_str, |b| b.contains("answer one")).await;
         assert!(body.contains("completed:"), "turn-set still completes: {body:?}");

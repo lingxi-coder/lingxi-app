@@ -207,10 +207,11 @@ impl Task for LocalAgentHandler {
             .allocate(&task_id)
             .await
             .map_err(|e| TaskError::Io(e.to_string()))?;
-        let spool_path_str = spool_path
-            .to_str()
-            .ok_or_else(|| TaskError::Internal("spool path is not valid UTF-8".into()))?
-            .to_owned();
+        // Validate UTF-8 once up front (the output manager's `append` assumes a
+        // UTF-8 spool path); spool paths under the manager's dir always are.
+        if spool_path.to_str().is_none() {
+            return Err(TaskError::Internal("spool path is not valid UTF-8".into()));
+        }
 
         // 3. Build the spawn request, forwarding the already-resolved
         //    `subagent_type` verbatim (parity with TS `agentType`).
@@ -247,7 +248,8 @@ impl Task for LocalAgentHandler {
         let spawner = self.spawner.clone();
         let status_sink = self.status_sink.clone();
         let workers = self.workers.clone();
-        let fs = ctx.fs.clone();
+        let output_manager = self.output_manager.clone();
+        let worker_spool_path = spool_path.clone();
         let worker_task_id = task_id.clone();
         let worker = Box::pin(async move {
             status_sink
@@ -280,11 +282,12 @@ impl Task for LocalAgentHandler {
                 Err(e) => (e.to_string(), TaskStatus::Failed),
             };
 
-            // Append with O_NOFOLLOW (claude-code `diskOutput.ts`) so a symlink
-            // planted at the spool path from inside the sandbox cannot redirect
-            // the write (T18).
+            // Routed through the output manager's `append` so the per-file 5GB
+            // disk cap is enforced (T17). The write uses O_NOFOLLOW (claude-code
+            // `diskOutput.ts`) so a symlink planted at the spool path from inside
+            // the sandbox cannot redirect the write (T18).
             if !payload.is_empty() {
-                let _ = fs.append_file_no_follow(&spool_path_str, &payload).await;
+                let _ = output_manager.append(&worker_spool_path, &payload).await;
             }
 
             status_sink.set_status(&worker_task_id, status).await;
@@ -672,7 +675,7 @@ mod tests {
 
         // The Completed content was spooled (pretty JSON ⇒ contains the keys)
         // along with the token-usage footer.
-        let spool_path = dir.path().join(format!("{}.txt", handle.task_id));
+        let spool_path = dir.path().join(format!("{}.output", handle.task_id));
         let read = mgr
             .read(&spool_path, crate::output_manager::OutputOptions::default())
             .await
@@ -702,7 +705,7 @@ mod tests {
 
         assert_eq!(await_terminal(&sink).await, TaskStatus::Failed);
 
-        let spool_path = dir.path().join(format!("{}.txt", handle.task_id));
+        let spool_path = dir.path().join(format!("{}.output", handle.task_id));
         let read = mgr
             .read(&spool_path, crate::output_manager::OutputOptions::default())
             .await
@@ -747,7 +750,7 @@ mod tests {
 
         assert_eq!(await_terminal(&sink).await, TaskStatus::Failed);
 
-        let spool_path = dir.path().join(format!("{}.txt", handle.task_id));
+        let spool_path = dir.path().join(format!("{}.output", handle.task_id));
         let read = mgr
             .read(&spool_path, crate::output_manager::OutputOptions::default())
             .await

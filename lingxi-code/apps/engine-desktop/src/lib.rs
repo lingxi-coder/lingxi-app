@@ -1419,6 +1419,59 @@ fn mcp_on_authorization_url() -> mcp::oauth::OnAuthorizationUrl {
     })
 }
 
+/// Per-user Claude temp-dir name — port of claude-code `getClaudeTempDirName`
+/// (`permissions/filesystem.ts:307-315`): `claude-<uid>` on Unix (the uid keeps
+/// per-user dirs apart in a shared `/tmp`).
+fn claude_temp_dir_name() -> String {
+    // `rustix::process::getuid` is a SAFE wrapper around the always-succeeds
+    // `getuid(2)` (this crate is `#![forbid(unsafe_code)]`).
+    #[cfg(unix)]
+    let uid = rustix::process::getuid().as_raw();
+    #[cfg(not(unix))]
+    let uid: u32 = 0;
+    format!("claude-{uid}")
+}
+
+/// Base Claude temp dir — port of `getClaudeTempDir`
+/// (`permissions/filesystem.ts:331-346`): `$CLAUDE_CODE_TMPDIR || /tmp`, joined
+/// with [`claude_temp_dir_name`]. (claude resolves symlinks; the spool path only
+/// needs to be writable + session-unique, so the realpath step is omitted.)
+fn claude_temp_dir() -> std::path::PathBuf {
+    let base = std::env::var_os("CLAUDE_CODE_TMPDIR").map_or_else(
+        || std::path::PathBuf::from("/tmp"),
+        std::path::PathBuf::from,
+    );
+    base.join(claude_temp_dir_name())
+}
+
+/// Sanitize a path string for use as a single dir component — port of
+/// `sanitizePath` (`sessionStoragePortable.ts:311-319`): every non-alphanumeric
+/// char becomes `-`. (The >255-char hash-suffix branch is omitted; project
+/// paths in practice stay well under it.)
+fn sanitize_path_component(name: &str) -> String {
+    name.chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect()
+}
+
+/// Session-scoped task-output dir — port of `getTaskOutputDir`
+/// (`diskOutput.ts:50-55`): `<projectTempDir>/<sessionId>/tasks`, where
+/// `projectTempDir = <claudeTempDir>/<sanitized-cwd>` (`getProjectTempDir`,
+/// `permissions/filesystem.ts:376-378`).
+///
+/// Session-scoping (vs the old in-repo `<cwd>/.claude/tasks-output`) keeps
+/// concurrent sessions in one project from clobbering each other's spools and
+/// stops task output from polluting the working tree / git status. Rooting under
+/// the project temp dir also makes reads auto-allowed by claude's
+/// `checkReadableInternalPath`.
+#[must_use]
+pub fn session_task_output_dir(cwd: &std::path::Path, session_id: &str) -> std::path::PathBuf {
+    claude_temp_dir()
+        .join(sanitize_path_component(&cwd.to_string_lossy()))
+        .join(session_id)
+        .join("tasks")
+}
+
 /// # Errors
 ///
 /// Returns [`BuildError`] if the api-client or orchestrator cannot be
@@ -2434,10 +2487,26 @@ pub async fn build(
     ));
 
     // (5.45) The real desktop `TaskRegistry`, wired into the tool context. Tasks
-    //        materialize stdout/stderr under `<cwd>/.claude/tasks-output`; the
-    //        spawner is the tokio-backed `PosixRuntime`. The same handle is
-    //        returned for a transport/TUI poller to read live state.
-    let task_output_dir = cwd.join(".claude").join("tasks-output");
+    //        materialize stdout/stderr under a SESSION-SCOPED project temp dir
+    //        `<projectTempDir>/<sessionId>/tasks` (claude-code `getTaskOutputDir`,
+    //        `diskOutput.ts:50-55`) instead of an in-repo `<cwd>/.claude/...`
+    //        path: the session id keeps concurrent sessions in one project from
+    //        clobbering each other's spools, and the temp root keeps task output
+    //        out of the working tree / git status (T16). The spawner is the
+    //        tokio-backed `PosixRuntime`. The same handle is returned for a
+    //        transport/TUI poller to read live state.
+    let task_session_id = protocol::SessionId::new().to_string();
+    let task_output_dir = session_task_output_dir(&cwd, &task_session_id);
+    // Eagerly create the dir (claude-code `ensureOutputDir`'s `mkdir(recursive)`)
+    // so the very first spool `allocate` (exclusive create) finds its parent.
+    if let Err(e) = std::fs::create_dir_all(&task_output_dir) {
+        tracing::warn!(
+            target: "engine_desktop::tasks",
+            dir = %task_output_dir.display(),
+            error = %e,
+            "could not create the session task-output dir; task spools may fail to allocate"
+        );
+    }
     let mut task_registry_inner = tasks::registry::TaskRegistry::new(
         Arc::new(PosixRuntime::new()),
         Arc::new(PosixFileSystem::new(cwd.clone())),
@@ -5435,5 +5504,56 @@ mod tests {
         let (id3, profile3) = traits::parse_model_ref("github-copilot/gpt-4o", &listings);
         assert_eq!(id3, "gpt-4o");
         assert_eq!(profile3.as_deref(), Some("github-copilot"));
+    }
+
+    // ── T16: session-scoped task-output dir ──────────────────────────────────
+
+    #[test]
+    fn sanitize_path_component_replaces_non_alphanumeric() {
+        // Port of claude-code `sanitizePath` — every non-alphanumeric char → '-'.
+        assert_eq!(
+            super::sanitize_path_component("/Users/me/my-project"),
+            "-Users-me-my-project"
+        );
+        assert_eq!(super::sanitize_path_component("ok09AZ"), "ok09AZ");
+        assert_eq!(super::sanitize_path_component("a b:c/d"), "a-b-c-d");
+    }
+
+    #[test]
+    fn session_task_output_dir_is_session_scoped_under_project_temp() {
+        // T16: the task-output dir must be `<projectTempDir>/<sessionId>/tasks`
+        // (claude-code `getTaskOutputDir`), NOT an in-repo `.claude/...` path.
+        // Pin CLAUDE_CODE_TMPDIR so the base is deterministic for the assert.
+        // (Single-threaded test sets + clears the env var around the call.)
+        let prev = std::env::var_os("CLAUDE_CODE_TMPDIR");
+        std::env::set_var("CLAUDE_CODE_TMPDIR", "/pin-tmp");
+
+        let cwd = std::path::Path::new("/Users/me/proj");
+        let dir = super::session_task_output_dir(cwd, "sess:abc-123");
+
+        // Restore the env var before asserting (so a failure doesn't leak it).
+        match prev {
+            Some(v) => std::env::set_var("CLAUDE_CODE_TMPDIR", v),
+            None => std::env::remove_var("CLAUDE_CODE_TMPDIR"),
+        }
+
+        // The cwd is sanitized (`-Users-me-proj`); the session id is used
+        // verbatim as its own path segment (matching claude `join(..., sessionId,
+        // 'tasks')`, where the session id is a fixed-shape token).
+        let expected = std::path::Path::new("/pin-tmp")
+            .join(super::claude_temp_dir_name()) // claude-<uid>
+            .join("-Users-me-proj")
+            .join("sess:abc-123")
+            .join("tasks");
+        assert_eq!(dir, expected);
+
+        // It must NOT live inside the working tree (no `.claude` segment, not a
+        // child of cwd) — the whole point of T16.
+        assert!(!dir.starts_with(cwd), "dir must not be under the repo cwd");
+        assert!(
+            !dir.to_string_lossy().contains("/.claude/"),
+            "dir must not be the old in-repo .claude/tasks-output path"
+        );
+        assert!(dir.ends_with("tasks"));
     }
 }

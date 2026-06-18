@@ -3,22 +3,41 @@
 //! See spec §6.6 / D8 — task output is materialized as files under a
 //! sandbox directory, with a per-file and total byte budget.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 use thiserror::Error;
+use tokio::sync::Mutex;
 use traits::FileSystem;
+
+/// Disk cap for a single task's output file. Mirrors claude-code's
+/// `MAX_TASK_OUTPUT_BYTES = 5 * 1024 * 1024 * 1024` (`diskOutput.ts:30`).
+/// Past this, [`TaskOutputManager::append`] drops further chunks and writes a
+/// single truncation marker, matching `DiskTaskOutput.append`.
+pub const MAX_TASK_OUTPUT_BYTES: u64 = 5 * 1024 * 1024 * 1024;
+
+/// Display string for [`MAX_TASK_OUTPUT_BYTES`] used in the truncation marker
+/// (claude-code `MAX_TASK_OUTPUT_BYTES_DISPLAY = '5GB'`, `diskOutput.ts:31`).
+pub const MAX_TASK_OUTPUT_BYTES_DISPLAY: &str = "5GB";
 
 /// Owner of the task-output sandbox directory.
 pub struct TaskOutputManager {
     output_dir: PathBuf,
     fs: Arc<dyn FileSystem>,
-    /// Maximum size of a single task's spool file.
-    pub max_file_size: u64,
-    /// Total byte budget across all task spool files.
-    pub total_budget: u64,
-    #[allow(dead_code)]
-    used: AtomicU64,
+    /// Per-spool bytes-written counter + capped flag, keyed by spool path.
+    /// Backs the write-side 5GB disk cap ([`MAX_TASK_OUTPUT_BYTES`]): once a
+    /// spool crosses the cap its entry is marked capped and further appends are
+    /// dropped (after a single truncation marker is written), mirroring
+    /// claude-code's `DiskTaskOutput.#bytesWritten` / `#capped`.
+    caps: Mutex<HashMap<PathBuf, CapState>>,
+}
+
+/// Per-spool write-side cap state (claude-code `DiskTaskOutput` `#bytesWritten`
+/// + `#capped`).
+#[derive(Debug, Default, Clone, Copy)]
+struct CapState {
+    bytes_written: u64,
+    capped: bool,
 }
 
 /// Errors produced by [`TaskOutputManager`].
@@ -65,10 +84,14 @@ impl TaskOutputManager {
         Self {
             output_dir,
             fs,
-            max_file_size: 10 * 1024 * 1024,
-            total_budget: 100 * 1024 * 1024,
-            used: AtomicU64::new(0),
+            caps: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// The absolute spool directory this manager owns.
+    #[must_use]
+    pub fn output_dir(&self) -> &Path {
+        &self.output_dir
     }
 
     /// Return the spool path for `task_id` WITHOUT creating the file. Refuses
@@ -79,7 +102,9 @@ impl TaskOutputManager {
     /// [`allocate`](Self::allocate) a second time for the same id — the
     /// double-allocate truncate race fix.
     pub fn path_for(&self, task_id: &str) -> Result<PathBuf, OutputError> {
-        let filename = format!("{task_id}.txt");
+        // Extension `.output` byte-aligns with claude-code's
+        // `getTaskOutputPath` (`diskOutput.ts:72-74` → `${taskId}.output`).
+        let filename = format!("{task_id}.output");
         let path = self.output_dir.join(&filename);
         if !path.starts_with(&self.output_dir) {
             return Err(OutputError::PathEscape(filename));
@@ -108,11 +133,63 @@ impl TaskOutputManager {
         Ok(path)
     }
 
+    /// Append a chunk to a task's spool, enforcing the per-file 5GB disk cap
+    /// ([`MAX_TASK_OUTPUT_BYTES`]) on the WRITE side.
+    ///
+    /// Byte-aligned with claude-code's `DiskTaskOutput.append`
+    /// (`diskOutput.ts:110-131`): the running byte count uses the chunk's UTF-8
+    /// byte length, and once it would cross the cap the spool is marked capped —
+    /// a single truncation marker
+    /// `\n[output truncated: exceeded 5GB disk cap]\n` is written and all
+    /// subsequent appends are dropped. The write itself uses
+    /// [`FileSystem::append_file_no_follow`] so a symlink planted at the spool
+    /// path from inside the sandbox cannot redirect it (T18).
+    pub async fn append(&self, output_file: &Path, content: &str) -> Result<(), OutputError> {
+        // Determine what to write under the cap, holding the per-path state lock
+        // only across the cheap bookkeeping (not the await on the fs write).
+        let to_write = {
+            let mut caps = self.caps.lock().await;
+            let state = caps.entry(output_file.to_path_buf()).or_default();
+            if state.capped {
+                // Already capped — drop further output (claude `if (capped) return`).
+                None
+            } else {
+                state.bytes_written = state
+                    .bytes_written
+                    .saturating_add(content.len() as u64);
+                if state.bytes_written > MAX_TASK_OUTPUT_BYTES {
+                    state.capped = true;
+                    Some(format!(
+                        "\n[output truncated: exceeded {MAX_TASK_OUTPUT_BYTES_DISPLAY} disk cap]\n"
+                    ))
+                } else {
+                    Some(content.to_string())
+                }
+            }
+        };
+        if let Some(body) = to_write {
+            let path_str = output_file.to_str().expect("utf-8 output path");
+            self.fs
+                .append_file_no_follow(path_str, &body)
+                .await
+                .map_err(|e| OutputError::Io(e.to_string()))?;
+        }
+        Ok(())
+    }
+
     /// Test-only accessor for the backing filesystem (so M5-01 tests can
     /// seed spool content directly without going through a handler).
     #[doc(hidden)]
     pub fn fs_for_test(&self) -> Arc<dyn FileSystem> {
         self.fs.clone()
+    }
+
+    /// Test-only: pre-seed the per-path write-side byte counter, so the 5GB cap
+    /// can be exercised without materializing 5GB of output.
+    #[cfg(test)]
+    async fn seed_bytes_for_test(&self, output_file: &Path, bytes: u64) {
+        let mut caps = self.caps.lock().await;
+        caps.entry(output_file.to_path_buf()).or_default().bytes_written = bytes;
     }
 
     /// Read a window of the task's spool file.
@@ -256,9 +333,13 @@ mod tests {
     async fn allocate_creates_an_empty_spool_file() {
         let (fs, mgr) = manager();
         let path = mgr.allocate("bdeadbeef").await.expect("first allocate");
-        assert_eq!(path, PathBuf::from("/spool/bdeadbeef.txt"));
+        assert_eq!(path, PathBuf::from("/spool/bdeadbeef.output"));
         // The file exists and is empty.
-        assert!(fs.files.lock().await.contains_key("/spool/bdeadbeef.txt"));
+        assert!(fs
+            .files
+            .lock()
+            .await
+            .contains_key("/spool/bdeadbeef.output"));
     }
 
     #[tokio::test]
@@ -299,11 +380,61 @@ mod tests {
         // worker's already-allocated spool is never re-created.
         let (fs, mgr) = manager();
         let path = mgr.path_for("bxyz").unwrap();
-        assert_eq!(path, PathBuf::from("/spool/bxyz.txt"));
+        assert_eq!(path, PathBuf::from("/spool/bxyz.output"));
         assert_eq!(fs.create_count(), 0, "path_for must not create a file");
         assert!(
-            !fs.files.lock().await.contains_key("/spool/bxyz.txt"),
+            !fs.files.lock().await.contains_key("/spool/bxyz.output"),
             "path_for must not materialize the spool"
         );
+    }
+
+    #[tokio::test]
+    async fn append_writes_through_and_under_the_cap_is_unmarked() {
+        // Below the 5GB cap, `append` writes the chunk verbatim — no marker.
+        let (_fs, mgr) = manager();
+        let path = mgr.allocate("bappend01").await.unwrap();
+        mgr.append(&path, "hello ").await.unwrap();
+        mgr.append(&path, "world\n").await.unwrap();
+        let read = mgr.read(&path, OutputOptions::default()).await.unwrap();
+        assert_eq!(read.content, "hello world\n");
+        assert!(
+            !read.content.contains("disk cap"),
+            "no truncation marker under the cap; got {:?}",
+            read.content
+        );
+    }
+
+    #[tokio::test]
+    async fn append_caps_at_5gb_and_writes_marker_then_drops() {
+        // T17: claude-code `DiskTaskOutput.append` caps a single spool at
+        // MAX_TASK_OUTPUT_BYTES (5GB). The byte counter uses chunk length, so
+        // we exercise the boundary with a pre-seeded counter instead of
+        // materializing 5GB. The first chunk that crosses the cap writes the
+        // EXACT marker `\n[output truncated: exceeded 5GB disk cap]\n`;
+        // subsequent appends are dropped entirely.
+        let (_fs, mgr) = manager();
+        let path = mgr.allocate("bcap00001").await.unwrap();
+
+        // Seed the counter one byte below the cap, then append two bytes — the
+        // running total crosses MAX_TASK_OUTPUT_BYTES in a single append.
+        mgr.seed_bytes_for_test(&path, MAX_TASK_OUTPUT_BYTES - 1)
+            .await;
+        mgr.append(&path, "ab").await.unwrap();
+
+        // A further write must be dropped (the spool is now capped).
+        mgr.append(&path, "this must be dropped\n").await.unwrap();
+
+        let read = mgr.read(&path, OutputOptions::default()).await.unwrap();
+        assert_eq!(
+            read.content, "\n[output truncated: exceeded 5GB disk cap]\n",
+            "the crossing append is REPLACED by the exact marker (the raw \"ab\" \
+             is not written), and post-cap appends drop"
+        );
+        assert_eq!(
+            MAX_TASK_OUTPUT_BYTES,
+            5 * 1024 * 1024 * 1024,
+            "cap constant is 5GB"
+        );
+        assert_eq!(MAX_TASK_OUTPUT_BYTES_DISPLAY, "5GB");
     }
 }

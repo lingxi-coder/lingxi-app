@@ -116,6 +116,14 @@ tool-lsp = { path = "../../tools/lsp" }
 tool-team = { path = "../../tools/team" }
 tool-worktree = { path = "../../tools/worktree" }
 
+# T16: the per-user uid for the session-scoped task-output temp dir name
+# (`claude-<uid>`, claude-code `getClaudeTempDirName`). `rustix` is already in the
+# workspace lockfile, so this adds no new download, and `getuid()` is a SAFE
+# wrapper — required because this crate is `#![forbid(unsafe_code)]`. Unix-only —
+# the helper falls back to uid 0 elsewhere.
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "0.38", features = ["process"] }
+
 [dev-dependencies]
 # Snapshot the assembled tool set (§14 criterion 8). `test-support` exposes the
 # stub `BuiltinToolContext` builder so the registry can be assembled offline.

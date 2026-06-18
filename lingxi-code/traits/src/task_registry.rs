@@ -79,6 +79,14 @@ pub struct TaskOutputChunk {
     /// populated for `local_agent` tasks. `TaskOutputTool` prefers this over the
     /// raw on-disk transcript for the model-facing `<output>`.
     pub result: Option<String>,
+    /// Absolute on-disk path of the task's spool file, when the registry can
+    /// resolve it. Mirrors the path `getTaskOutputPath(taskId)` returns in
+    /// claude-code (`<projectTempDir>/<sessionId>/tasks/<taskId>.output`).
+    /// `TaskOutputTool` uses it for the `[Truncated. Full output: <path>]`
+    /// header (`outputFormatting.ts:31-34`), so the model sees the real absolute
+    /// path it can read. `None` ⟶ the tool falls back to the bare
+    /// `<taskId>.output` filename.
+    pub output_path: Option<String>,
 }
 
 /// Failure modes for [`TaskRegistryHandle`] operations.

@@ -1290,6 +1290,7 @@ dependencies = [
  "plugin",
  "protocol",
  "provider-config",
+ "rustix 0.38.44",
  "sandbox",
  "sandbox-runtime-runner",
  "secret",

@@ -318,6 +318,10 @@ impl TaskRegistryHandle for TaskRegistry {
             error,
             prompt,
             result,
+            // The absolute on-disk spool path (claude-code
+            // `getTaskOutputPath(taskId)`), surfaced so `TaskOutputTool` can show
+            // the real path in its `[Truncated. Full output: <path>]` header.
+            output_path: output_file.to_str().map(str::to_string),
         })
     }
 }

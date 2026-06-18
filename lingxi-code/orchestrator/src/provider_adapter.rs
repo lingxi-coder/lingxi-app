@@ -123,6 +123,14 @@ pub struct ProviderApiAdapter {
     /// `tool_choice` to that tool). `None` (the default for every normal turn)
     /// leaves the request's `tool_choice` unset so the model chooses freely.
     forced_tool_choice: Option<llm_client::ToolChoice>,
+    /// 1P experimental cache-editing inputs (claude.ts `addCacheBreakpoints`
+    /// `newCacheEdits`/`pinnedEdits`, claude.ts:3068-3069). LingXi has no
+    /// cached-microcompact scheduler to produce these, so the default is
+    /// `None`/empty — the gate-armed `cache_reference`-on-tool_results pass
+    /// (the directly-exercised behavior) still runs from `req.messages`. Set
+    /// only by [`Self::with_cache_editing_inputs`] (test-only today); wiring a
+    /// real producer is residual. See module note.
+    cache_editing_inputs: CacheEditingInputs,
     /// User-agent environment snapshot (Task 3).
     ua: UserAgentEnv,
     /// Build version string for the User-Agent header.
@@ -242,6 +250,28 @@ struct Pending429 {
     raw: RawUtilization,
 }
 
+/// A previously-pinned cache_edits block plus the user-message index it must be
+/// re-inserted at. Mirrors claude-code's `CachedMCPinnedEdits`
+/// (`services/api/claude.ts:3057-3060`).
+#[derive(Debug, Clone, Default)]
+struct PinnedCacheEdits {
+    /// Index into the request `messages` (the user message to splice into).
+    user_message_index: usize,
+    /// The cache_edits delete operations to re-insert at that position.
+    edits: Vec<llm_client::CacheEdit>,
+}
+
+/// Cache-editing builder inputs — the `newCacheEdits` + `pinnedEdits` args of
+/// claude-code's `addCacheBreakpoints`. Default is empty (no producer wired):
+/// only the gate-armed `cache_reference`-on-tool_results pass runs by default.
+#[derive(Debug, Clone, Default)]
+struct CacheEditingInputs {
+    /// New cache_edits delete ops to insert into the last user message and pin.
+    new_edits: Vec<llm_client::CacheEdit>,
+    /// Previously-pinned cache_edits to re-insert at their original positions.
+    pinned: Vec<PinnedCacheEdits>,
+}
+
 impl ProviderApiAdapter {
     /// Construct the adapter.  Called by Task 10 host constructors.
     ///
@@ -348,6 +378,7 @@ impl ProviderApiAdapter {
             subscriber,
             subscription: None,
             forced_tool_choice: None,
+            cache_editing_inputs: CacheEditingInputs::default(),
             ua,
             version: version.into(),
             analytics,
@@ -380,6 +411,16 @@ impl ProviderApiAdapter {
     #[must_use]
     pub fn with_forced_tool_choice(mut self, choice: llm_client::ToolChoice) -> Self {
         self.forced_tool_choice = Some(choice);
+        self
+    }
+
+    /// Inject 1P cache-editing inputs (`newCacheEdits` / `pinnedEdits`). Test-only
+    /// today — no production producer (cached-microcompact scheduler) is wired, so
+    /// the default is empty. Builder-style.
+    #[cfg(test)]
+    #[must_use]
+    fn with_cache_editing_inputs(mut self, inputs: CacheEditingInputs) -> Self {
+        self.cache_editing_inputs = inputs;
         self
     }
 
@@ -433,6 +474,31 @@ impl ProviderApiAdapter {
     /// querySource allowlist to consult. Folded into the emitted cache_control.
     fn should_1h_cache_ttl(&self) -> bool {
         cache_env_truthy("ENABLE_PROMPT_CACHING_1H")
+    }
+
+    /// 1P experimental cache-EDITING gate — parity `useCachedMC`
+    /// (`services/api/claude.ts:3067`, passed down from the caller at
+    /// claude.ts:1531-1709, where it additionally requires
+    /// `getAPIProvider()==='firstParty' && querySource==='repl_main_thread'`).
+    ///
+    /// LingXi resolves the concrete provider downstream of this provider-agnostic
+    /// request builder and has no querySource allowlist, so — exactly like
+    /// [`Self::should_use_global_cache_scope`] — the feature is kept **dormant**:
+    /// it requires an explicit opt-in env (`CLAUDE_CODE_CACHE_EDITING`), the
+    /// shared experimental-betas kill switch must not be set, AND the subscriber
+    /// (firstParty) signal must be present. Default: off → no `cache_edits` /
+    /// `cache_reference` ever emitted, so 3P traffic is byte-unchanged.
+    ///
+    /// PARITY-NOTE: the TS `useCachedMC` body also pushes the
+    /// `CACHE_EDITING_BETA_HEADER` once-per-session via the `cacheEditingHeaderLatched`
+    /// latch (claude.ts:1673) — session-latch machinery LingXi lacks; the
+    /// request-builder emission is ported, the beta-header latch is residual.
+    fn should_use_cache_editing(&self) -> bool {
+        if cache_env_truthy("CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS") {
+            return false;
+        }
+        cache_env_truthy("CLAUDE_CODE_CACHE_EDITING")
+            && self.effective_subscriber().is_subscriber
     }
 
     // ── Shared request build ─────────────────────────────────────────────────
@@ -516,6 +582,23 @@ impl ProviderApiAdapter {
                     }
                 }
             }
+        }
+
+        // 1P experimental cache-editing pass (claude.ts addCacheBreakpoints,
+        // 3108-3208). Gated behind `useCachedMC` (`should_use_cache_editing`):
+        // when OFF (the default), this is a no-op and the request is
+        // byte-identical to the pre-feature path. When ARMED it (a) re-inserts
+        // previously-pinned cache_edits at their original positions, (b) inserts
+        // the new cache_edits into the last user message, and (c) stamps
+        // `cache_reference` onto every tool_result strictly before the last
+        // cache_control marker — all with cross-block delete-ref dedup.
+        if self.should_use_cache_editing() {
+            apply_cache_editing(
+                &mut req.messages,
+                enable_caching,
+                &self.cache_editing_inputs.new_edits,
+                &self.cache_editing_inputs.pinned,
+            );
         }
 
         req.tools = tool_decls; // No tool-array breakpoint (matches TS baseline).
@@ -1734,6 +1817,153 @@ fn strip_excess_media(
     msgs
 }
 
+/// Insert `block` into a content array relative to its `tool_result` blocks.
+/// 1:1 port of claude-code `insertBlockAfterToolResults`
+/// (`utils/contentArray.ts:21-51`):
+///   - if any `tool_result` exists, insert after the LAST one; if that lands the
+///     inserted block last, append a `{type:'text', text:'.'}` continuation
+///     (some APIs reject a prompt ending in non-text content);
+///   - otherwise insert before the last block (`max(0, len-1)`).
+/// Mutates `content` in place.
+fn insert_block_after_tool_results(
+    content: &mut Vec<llm_client::ContentBlock>,
+    block: llm_client::ContentBlock,
+) {
+    use llm_client::ContentBlock as Cb;
+    let mut last_tool_result_index: isize = -1;
+    for (i, item) in content.iter().enumerate() {
+        if matches!(item, Cb::ToolResult { .. }) {
+            last_tool_result_index = i as isize;
+        }
+    }
+    if last_tool_result_index >= 0 {
+        let insert_pos = (last_tool_result_index as usize) + 1;
+        content.insert(insert_pos, block);
+        // Append a text continuation if the inserted block is now last.
+        if insert_pos == content.len() - 1 {
+            content.push(Cb::Text {
+                text: ".".to_string(),
+                cache_control: None,
+            });
+        }
+    } else {
+        // No tool_result blocks — insert before the last block.
+        let insert_index = content.len().saturating_sub(1);
+        content.insert(insert_index, block);
+    }
+}
+
+/// 1P experimental cache-editing pass — the `useCachedMC` tail of claude-code
+/// `addCacheBreakpoints` (`services/api/claude.ts:3108-3208`). The caller gates
+/// this behind `should_use_cache_editing`; here we assume it's armed.
+///
+/// `enable_caching` mirrors the TS `enablePromptCaching` flag (the
+/// `cache_reference`-on-tool_results pass at 3164 is additionally gated on it).
+/// `new_edits` = `newCacheEdits.edits`; `pinned` = `pinnedEdits`.
+fn apply_cache_editing(
+    messages: &mut [llm_client::Message],
+    enable_caching: bool,
+    new_edits: &[llm_client::CacheEdit],
+    pinned: &[PinnedCacheEdits],
+) {
+    use llm_client::ContentBlock as Cb;
+
+    // Track all cache_references being deleted to prevent duplicates across
+    // blocks (claude.ts:3112-3125 seenDeleteRefs + deduplicateEdits).
+    let mut seen_delete_refs: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let dedup = |edits: &[llm_client::CacheEdit],
+                 seen: &mut std::collections::HashSet<String>|
+     -> Vec<llm_client::CacheEdit> {
+        edits
+            .iter()
+            .filter(|e| {
+                let llm_client::CacheEdit::Delete { cache_reference } = e;
+                if seen.contains(cache_reference) {
+                    false
+                } else {
+                    seen.insert(cache_reference.clone());
+                    true
+                }
+            })
+            .cloned()
+            .collect()
+    };
+
+    // Re-insert all previously-pinned cache_edits at their original positions
+    // (claude.ts:3127-3139). Only when that message is a `user` message.
+    for p in pinned {
+        if let Some(msg) = messages.get_mut(p.user_message_index) {
+            if msg.role == "user" {
+                let deduped = dedup(&p.edits, &mut seen_delete_refs);
+                if !deduped.is_empty() {
+                    insert_block_after_tool_results(
+                        &mut msg.content,
+                        Cb::CacheEdits { edits: deduped },
+                    );
+                }
+            }
+        }
+    }
+
+    // Insert new cache_edits into the LAST user message and (in TS) pin them
+    // (claude.ts:3141-3162). LingXi has no cross-call pin store, so the pinning
+    // side-effect is a residual — the in-request insertion is faithful.
+    if !messages.is_empty() {
+        let deduped_new = dedup(new_edits, &mut seen_delete_refs);
+        if !deduped_new.is_empty() {
+            for i in (0..messages.len()).rev() {
+                if messages[i].role == "user" {
+                    insert_block_after_tool_results(
+                        &mut messages[i].content,
+                        Cb::CacheEdits { edits: deduped_new },
+                    );
+                    break;
+                }
+            }
+        }
+    }
+
+    // Add cache_reference to tool_result blocks within the cached prefix
+    // (claude.ts:3164-3207). Must run AFTER cache_edits insertion since that
+    // modifies content arrays.
+    if enable_caching {
+        // Find the last message containing a cache_control marker.
+        let mut last_cc_msg: isize = -1;
+        for (i, msg) in messages.iter().enumerate() {
+            for block in &msg.content {
+                let has_cc = match block {
+                    Cb::Text { cache_control, .. } | Cb::ToolResult { cache_control, .. } => {
+                        cache_control.is_some()
+                    }
+                    _ => false,
+                };
+                if has_cc {
+                    last_cc_msg = i as isize;
+                }
+            }
+        }
+
+        // Stamp `cache_reference = tool_use_id` on tool_results in `user`
+        // messages STRICTLY before the last cache_control marker. (TS uses strict
+        // "before" to avoid edge cases where cache_edits splicing shifts indices;
+        // it also clones rather than mutating in place to avoid contaminating
+        // blocks reused by non-cache-editing secondary queries — here each
+        // request owns its `messages`, so an in-place set is equivalent.)
+        if last_cc_msg >= 0 {
+            for i in 0..(last_cc_msg as usize) {
+                if messages[i].role != "user" {
+                    continue;
+                }
+                for block in &mut messages[i].content {
+                    if let Cb::ToolResult { tool_call_id, cache_reference, .. } = block {
+                        *cache_reference = Some(tool_call_id.clone());
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// Generate a short client-side request id (same alphabet as api-client).
 ///
 /// **Header name**: `x-request-id` — sourced from `api-client/src/anthropic.rs:868`.
@@ -2117,6 +2347,175 @@ mod tests {
         );
         assert_eq!(req.system[2].text, "dynamic");
         assert_eq!(req.system[2].cache_control, None); // dynamic uncached
+    }
+
+    // ── 1P cache-EDITING (cache_edits / cache_reference, RESIDUAL 4) ───────────
+
+    /// A multi-message conversation: an assistant tool_use, a user tool_result,
+    /// an assistant text, then a trailing user text. Only the trailing message
+    /// carries the cache_control marker, so the tool_result (in an earlier user
+    /// message) is strictly within the cached prefix.
+    fn tool_result_conversation() -> Vec<ConversationMessage> {
+        use protocol::{ContentBlock as PB, ConversationMessage as CM, MessageId, ToolUseId};
+        let tool_id = ToolUseId::new();
+        vec![
+            CM::Assistant {
+                id: MessageId::new(),
+                content: vec![PB::ToolUse {
+                    id: tool_id.clone(),
+                    name: "Read".to_string(),
+                    input: serde_json::json!({"path": "/x"}),
+                    provider_id: Some("toolu_abc".to_string()),
+                }],
+                stop_reason: None,
+            },
+            CM::User {
+                id: MessageId::new(),
+                content: vec![PB::ToolResult {
+                    tool_use_id: tool_id,
+                    content: "file body".to_string(),
+                    is_error: false,
+                    provider_tool_use_id: Some("toolu_abc".to_string()),
+                }],
+                is_meta: false,
+            },
+            CM::Assistant {
+                id: MessageId::new(),
+                content: vec![PB::Text { text: "ok".to_string() }],
+                stop_reason: None,
+            },
+            text_user_msg("continue"),
+        ]
+    }
+
+    #[test]
+    fn build_request_cache_editing_dormant_by_default() {
+        // Gate OFF (default): no cache_reference on tool_results, no cache_edits
+        // block — byte-identical to the pre-feature request.
+        use llm_client::ContentBlock as LlmContentBlock;
+        let _guard = CACHE_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var("DISABLE_PROMPT_CACHING");
+        std::env::remove_var("CLAUDE_CODE_CACHE_EDITING");
+        let transport = FakeTransport::always(ProviderResponse::json(200, ok_response_json()));
+        // Even a subscriber + injected edits must stay inert without the env.
+        let adapter = make_adapter_with_subscriber(
+            transport,
+            SubscriberState { is_subscriber: true, is_enterprise: false },
+        )
+        .with_cache_editing_inputs(CacheEditingInputs {
+            new_edits: vec![llm_client::CacheEdit::Delete {
+                cache_reference: "toolu_zzz".to_string(),
+            }],
+            pinned: vec![],
+        });
+        let req = adapter
+            .build_request(
+                "claude-sonnet-4-20250514",
+                None,
+                Some("sys"),
+                tool_result_conversation(),
+                vec![],
+                false,
+                Some(1024),
+            )
+            .expect("build_request");
+        // No cache_edits block anywhere.
+        for m in &req.messages {
+            for b in &m.content {
+                assert!(
+                    !matches!(b, LlmContentBlock::CacheEdits { .. }),
+                    "no cache_edits block on the default path"
+                );
+                if let LlmContentBlock::ToolResult { cache_reference, .. } = b {
+                    assert_eq!(*cache_reference, None, "no cache_reference by default");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn build_request_cache_editing_armed_stamps_refs_and_inserts_block() {
+        // Gate ARMED (subscriber + opt-in env): tool_results before the marker
+        // get cache_reference=tool_use_id, and injected new+pinned cache_edits
+        // are inserted with cross-block delete-ref dedup.
+        use llm_client::{CacheEdit, ContentBlock as LlmContentBlock};
+        let _guard = CACHE_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var("DISABLE_PROMPT_CACHING");
+        std::env::remove_var("CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS");
+        std::env::set_var("CLAUDE_CODE_CACHE_EDITING", "1");
+        let transport = FakeTransport::always(ProviderResponse::json(200, ok_response_json()));
+        // pinned (pos 1, the tool_result user msg) deletes ref "dup" + "p1";
+        // new (last user msg) deletes "dup" (collapsed by dedup) + "n1".
+        let adapter = make_adapter_with_subscriber(
+            transport,
+            SubscriberState { is_subscriber: true, is_enterprise: false },
+        )
+        .with_cache_editing_inputs(CacheEditingInputs {
+            new_edits: vec![
+                CacheEdit::Delete { cache_reference: "dup".to_string() },
+                CacheEdit::Delete { cache_reference: "n1".to_string() },
+            ],
+            pinned: vec![PinnedCacheEdits {
+                user_message_index: 1,
+                edits: vec![
+                    CacheEdit::Delete { cache_reference: "dup".to_string() },
+                    CacheEdit::Delete { cache_reference: "p1".to_string() },
+                ],
+            }],
+        });
+        let req = adapter
+            .build_request(
+                "claude-sonnet-4-20250514",
+                None,
+                Some("sys"),
+                tool_result_conversation(),
+                vec![],
+                false,
+                Some(1024),
+            )
+            .expect("build_request");
+        std::env::remove_var("CLAUDE_CODE_CACHE_EDITING");
+
+        // (a) cache_reference stamped on the tool_result (it precedes the marker).
+        let mut stamped = 0;
+        for m in &req.messages {
+            for b in &m.content {
+                if let LlmContentBlock::ToolResult { tool_call_id, cache_reference, .. } = b {
+                    assert_eq!(cache_reference.as_deref(), Some(tool_call_id.as_str()));
+                    stamped += 1;
+                }
+            }
+        }
+        assert_eq!(stamped, 1, "exactly one tool_result stamped");
+
+        // (b) collect every cache_edits delete ref across the whole request.
+        let mut refs: Vec<String> = vec![];
+        for m in &req.messages {
+            for b in &m.content {
+                if let LlmContentBlock::CacheEdits { edits } = b {
+                    for e in edits {
+                        let CacheEdit::Delete { cache_reference } = e;
+                        refs.push(cache_reference.clone());
+                    }
+                }
+            }
+        }
+        refs.sort();
+        // dedup: "dup" appears once (pinned wins, new collapses), plus p1 + n1.
+        assert_eq!(refs, vec!["dup".to_string(), "n1".to_string(), "p1".to_string()]);
+
+        // (c) the pinned block landed in the tool_result user message, spliced
+        // immediately AFTER the tool_result block.
+        let pinned_msg = &req.messages[1];
+        let tr_pos = pinned_msg
+            .content
+            .iter()
+            .position(|b| matches!(b, LlmContentBlock::ToolResult { .. }))
+            .expect("tool_result present");
+        assert!(matches!(
+            pinned_msg.content[tr_pos + 1],
+            LlmContentBlock::CacheEdits { .. }
+        ));
     }
 
     // ── build_request profile threading (Unit B Task 5) ──────────────────────

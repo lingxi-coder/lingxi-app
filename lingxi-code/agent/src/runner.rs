@@ -176,7 +176,9 @@ fn translate_response_blocks(content: &[llm_client::ContentBlock]) -> Vec<protoc
             llm_client::ContentBlock::Image { .. }
             | llm_client::ContentBlock::ImageUrl { .. }
             | llm_client::ContentBlock::Document { .. }
-            | llm_client::ContentBlock::ToolResult { .. } => None,
+            | llm_client::ContentBlock::ToolResult { .. }
+            // cache_edits is a request-only directive — never in a response.
+            | llm_client::ContentBlock::CacheEdits { .. } => None,
         })
         .collect()
 }

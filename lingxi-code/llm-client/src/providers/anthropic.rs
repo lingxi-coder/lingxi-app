@@ -266,7 +266,7 @@ fn encode_content_block(block: &ContentBlock) -> Result<Value, LlmError> {
             "name": name,
             "input": input,
         })),
-        ContentBlock::ToolResult { tool_call_id, output, is_error, cache_control } => {
+        ContentBlock::ToolResult { tool_call_id, output, is_error, cache_control, cache_reference } => {
             let mut block = serde_json::json!({
                 "type": "tool_result",
                 "tool_use_id": tool_call_id,
@@ -275,7 +275,30 @@ fn encode_content_block(block: &ContentBlock) -> Result<Value, LlmError> {
             if *is_error {
                 block["is_error"] = Value::Bool(true);
             }
+            // 1P experimental cache-editing tag (claude.ts:3201-3203). Emitted
+            // only when the gate-armed request builder set it; `None` (the
+            // default 3P path) leaves the key absent → byte-identical.
+            if let Some(reference) = cache_reference {
+                block["cache_reference"] = Value::String(reference.clone());
+            }
             Ok(with_cache_control(block, *cache_control))
+        }
+        // 1P experimental cache-editing directive (claude.ts:3052-3055).
+        // `{"type":"cache_edits","edits":[{"type":"delete","cache_reference":...}]}`.
+        ContentBlock::CacheEdits { edits } => {
+            let edits_json: Vec<Value> = edits
+                .iter()
+                .map(|e| match e {
+                    crate::CacheEdit::Delete { cache_reference } => serde_json::json!({
+                        "type": "delete",
+                        "cache_reference": cache_reference,
+                    }),
+                })
+                .collect();
+            Ok(serde_json::json!({
+                "type": "cache_edits",
+                "edits": edits_json,
+            }))
         }
         ContentBlock::Reasoning { text, signature } => {
             let Some(signature) = signature else {

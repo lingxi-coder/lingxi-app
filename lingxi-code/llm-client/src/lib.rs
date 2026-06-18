@@ -46,7 +46,8 @@ pub use credentials::{Credential, CredentialProvider, CredentialScope, EnvCreden
 pub use cost::{CostEstimator, PricingCatalog, PricingPolicy, TokenPricing};
 pub use error::LlmError;
 pub use protocol::{
-    validate_capabilities, CacheControl, CacheScope, ContentBlock, ContentDelta, LlmEvent, LlmRequest,
+    validate_capabilities, CacheControl, CacheEdit, CacheScope, ContentBlock, ContentDelta, LlmEvent,
+    LlmRequest,
     LlmResponse, Message, MessageDeltaPayload, NoopStreamDecoder, ProviderRequest, ProviderResponse,
     RawStreamFrame, ReasoningConfig, ResponseFormat, StreamDecoder, StreamFraming, SystemBlock,
     ToolChoice, ToolDeclaration, WireCodec,

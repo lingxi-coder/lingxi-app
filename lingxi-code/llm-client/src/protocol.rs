@@ -241,6 +241,13 @@ pub enum ContentBlock {
         /// Optional prompt-cache breakpoint.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cache_control: Option<CacheControl>,
+        /// 1P experimental cache-editing tag — the `cache_reference` set on a
+        /// tool_result that falls within the cached prefix when the cache-editing
+        /// gate is armed (claude-code `addCacheBreakpoints`, claude.ts:3164-3207).
+        /// `None` (the default 3P/Anthropic path) omits the key entirely, so wire
+        /// bytes are unchanged. Set to the answered `tool_use_id`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cache_reference: Option<String>,
     },
     /// Reasoning block.
     Reasoning {
@@ -297,6 +304,32 @@ pub enum ContentBlock {
         /// Whether the tool reported an error.
         #[serde(default)]
         is_error: bool,
+    },
+    /// 1P experimental cache-editing directive block.
+    ///
+    /// Wire tag: `cache_edits`. Mirrors claude-code's `CachedMCEditsBlock`
+    /// (`services/api/claude.ts:3052-3055`):
+    /// `{"type":"cache_edits","edits":[{"type":"delete","cache_reference":...}]}`.
+    /// Inserted into a user message's content (after the last `tool_result`) only
+    /// when the Anthropic-1P cache-editing gate is armed; it never appears on the
+    /// default 3P path. Anthropic-only — other codecs drop it.
+    CacheEdits {
+        /// Ordered cache-editing operations (currently `delete` only).
+        edits: Vec<CacheEdit>,
+    },
+}
+
+/// A single cache-editing operation inside a [`ContentBlock::CacheEdits`] block.
+///
+/// Mirrors claude-code's `{type:'delete', cache_reference: string}` edit
+/// (`services/api/claude.ts:3054`). Only the `delete` op exists today.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum CacheEdit {
+    /// Delete a previously-cached `tool_result` by its `cache_reference`.
+    Delete {
+        /// The `cache_reference` (the answered `tool_use_id`) to evict.
+        cache_reference: String,
     },
 }
 

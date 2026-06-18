@@ -196,6 +196,7 @@ fn encode_tool_result_error_uses_error_response_shape() {
             output: serde_json::json!("command failed"),
             is_error: true,
             cache_control: None,
+            cache_reference: None,
         }],
     });
 
@@ -225,6 +226,7 @@ fn encode_tool_result_uses_prior_tool_call_name() {
             output: serde_json::json!("done"),
             is_error: false,
             cache_control: None,
+            cache_reference: None,
         }],
     });
 
@@ -374,6 +376,7 @@ fn encode_tool_result_with_unknown_call_id_is_rejected() {
             output: serde_json::json!("done"),
             is_error: false,
             cache_control: None,
+            cache_reference: None,
         }],
     });
 

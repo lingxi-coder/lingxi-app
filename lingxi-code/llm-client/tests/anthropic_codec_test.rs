@@ -213,6 +213,7 @@ fn encode_request_maps_image_and_tool_result_blocks() {
                 output: serde_json::json!({"ok": true}),
                 is_error: false,
                 cache_control: None,
+                cache_reference: None,
             },
         ],
     });
@@ -226,6 +227,68 @@ fn encode_request_maps_image_and_tool_result_blocks() {
     assert_eq!(provider_request.body_json["messages"][0]["content"][1]["type"], "tool_result");
     assert_eq!(provider_request.body_json["messages"][0]["content"][1]["tool_use_id"], "tool-1");
     assert_eq!(provider_request.body_json["messages"][0]["content"][1]["content"], "{\"ok\":true}");
+}
+
+#[test]
+fn encode_request_emits_cache_edits_and_cache_reference() {
+    // 1P experimental cache-editing wire shape (claude.ts:3052-3055, 3201-3203):
+    // a tool_result carrying cache_reference + a cache_edits delete block.
+    let codec = AnthropicMessagesCodec::new("https://api.anthropic.com", "2023-06-01");
+    let mut request = LlmRequest::new("claude-sonnet-4-20250514");
+    request.messages.push(Message {
+        role: "user".to_string(),
+        content: vec![
+            ContentBlock::ToolResult {
+                tool_call_id: "toolu_abc".to_string(),
+                output: serde_json::json!("body"),
+                is_error: false,
+                cache_control: None,
+                cache_reference: Some("toolu_abc".to_string()),
+            },
+            ContentBlock::CacheEdits {
+                edits: vec![llm_client::CacheEdit::Delete {
+                    cache_reference: "toolu_xyz".to_string(),
+                }],
+            },
+        ],
+    });
+
+    let provider_request = codec.encode_request(&request).unwrap();
+    let content = &provider_request.body_json["messages"][0]["content"];
+
+    // tool_result carries cache_reference.
+    assert_eq!(content[0]["type"], "tool_result");
+    assert_eq!(content[0]["cache_reference"], "toolu_abc");
+
+    // cache_edits block: {type:'cache_edits', edits:[{type:'delete', cache_reference}]}.
+    assert_eq!(
+        content[1],
+        serde_json::json!({
+            "type": "cache_edits",
+            "edits": [{"type": "delete", "cache_reference": "toolu_xyz"}],
+        })
+    );
+}
+
+#[test]
+fn encode_request_omits_cache_reference_when_absent() {
+    // Default path: cache_reference None → the key is absent (byte-unchanged).
+    let codec = AnthropicMessagesCodec::new("https://api.anthropic.com", "2023-06-01");
+    let mut request = LlmRequest::new("claude-sonnet-4-20250514");
+    request.messages.push(Message {
+        role: "user".to_string(),
+        content: vec![ContentBlock::ToolResult {
+            tool_call_id: "toolu_abc".to_string(),
+            output: serde_json::json!("body"),
+            is_error: false,
+            cache_control: None,
+            cache_reference: None,
+        }],
+    });
+    let provider_request = codec.encode_request(&request).unwrap();
+    let tr = &provider_request.body_json["messages"][0]["content"][0];
+    assert_eq!(tr["type"], "tool_result");
+    assert!(tr.get("cache_reference").is_none(), "no cache_reference key by default");
 }
 
 #[test]
@@ -398,12 +461,14 @@ fn encode_tool_result_error_flag() {
                 output: serde_json::json!("boom"),
                 is_error: true,
                 cache_control: None,
+                cache_reference: None,
             },
             ContentBlock::ToolResult {
                 tool_call_id: "tool-2".to_string(),
                 output: serde_json::json!("fine"),
                 is_error: false,
                 cache_control: None,
+                cache_reference: None,
             },
         ],
     });
@@ -629,6 +694,7 @@ fn encode_system_blocks_and_cache_control() {
                 output: serde_json::json!("ok"),
                 is_error: false,
                 cache_control: Some(llm_client::CacheControl::Ephemeral),
+                cache_reference: None,
             },
         ],
     });

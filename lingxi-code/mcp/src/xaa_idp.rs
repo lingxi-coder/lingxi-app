@@ -448,7 +448,7 @@ pub async fn acquire_idp_id_token(
     //    authorization_code grant oauth::exchange_code does, but parse our own
     //    OIDC shape (oauth::Tokens drops id_token). `client_secret` is sent via
     //    client_secret_post when the IdP client is confidential.
-    let id_token = exchange_code_for_id_token(
+    let (id_token, expires_in) = exchange_code_for_id_token(
         http,
         &oidc.token_endpoint,
         &settings.client_id,
@@ -459,10 +459,12 @@ pub async fn acquire_idp_id_token(
     )
     .await?;
 
-    // 6. Cache it — prefer the id_token's own exp claim, else +1h default.
+    // 6. Cache it — prefer the id_token's own `exp` claim, else the AS-provided
+    //    `expires_in`, else +1h (xaaIdpLogin.ts:475-478:
+    //    `expFromJwt ? expFromJwt : now + (expires_in ?? 3600)`).
     let expires_at = match jwt_exp(&id_token) {
         Some(exp) => UNIX_EPOCH + Duration::from_secs(exp),
-        None => clock.now() + Duration::from_secs(3600),
+        None => clock.now() + Duration::from_secs(expires_in.unwrap_or(3600)),
     };
     set_cached_id_token(storage, clock, &settings.issuer, &id_token, expires_at).await?;
 
@@ -480,7 +482,7 @@ async fn exchange_code_for_id_token(
     code: &str,
     verifier: &str,
     redirect_uri: &str,
-) -> Result<String, McpError> {
+) -> Result<(String, Option<u64>), McpError> {
     let mut form: Vec<(&str, &str)> = vec![
         ("grant_type", "authorization_code"),
         ("code", code),
@@ -522,10 +524,12 @@ async fn exchange_code_for_id_token(
     }
     let parsed: OidcTokenResponse = serde_json::from_str(&resp.body)
         .map_err(|e| McpError::OAuth(format!("XAA IdP: decode token response: {e}")))?;
-    let _ = parsed.expires_in; // id_token exp drives cache TTL; access expiry unused here.
-    parsed.id_token.ok_or_else(|| {
+    let id_token = parsed.id_token.ok_or_else(|| {
         McpError::OAuth("XAA IdP: token response missing id_token (check scope=openid)".into())
-    })
+    })?;
+    // Return `expires_in` so the caller can use it as the cache-TTL fallback when
+    // the id_token carries no `exp` claim (xaaIdpLogin.ts:475-478).
+    Ok((id_token, parsed.expires_in))
 }
 
 // ---------------------------------------------------------------------------

@@ -55,7 +55,6 @@ use platform_posix::{
     secure_storage_for_platform, PosixClock, PosixFileSystem, PosixHttp, PosixMcpTransport,
     PosixProcess, PosixRuntime, PosixSandbox, PosixWorktreeManager,
 };
-use sandbox::decision::ProjectTrustLevel;
 use sandbox::runtime_config::Platform as SandboxPlatform;
 use secret::CredentialManager;
 use skill_api::SkillRegistry;
@@ -231,12 +230,19 @@ pub const TEAMMATE_POOL_CAP: usize = 4;
 #[must_use]
 fn sandbox_auto_allow_from_settings_tiers(
     raw_tiers: &[&str],
+    settings_dir: &std::path::Path,
 ) -> permission::sandbox_auto_allow::SandboxAutoAllowConfig {
-    use sandbox::runtime_config::{SandboxSettingsJson, SettingsJson};
+    use sandbox::runtime_config::{SandboxSettingsJson, SettingsJson, SettingsPermissions};
 
     // Fold each tier's `sandbox` subsection, last write wins per the whole
     // subsection (matching how the converter consumes a single `SettingsJson`).
     let mut merged_sandbox: Option<SandboxSettingsJson> = None;
+    // Accumulate the merged `permissions` across tiers so the converter sees the
+    // full allow/deny/additionalDirectories feed (extend, not last-write-wins, for
+    // the rule lists). The auto-allow config only reads `enabled` /
+    // `excluded_commands`, but threading permissions keeps both folds symmetric.
+    let mut merged_perms = SettingsPermissions::default();
+    let mut saw_perms = false;
     // Track the explicit auto-allow override separately so the TS default (true)
     // can be applied only when NO tier set it.
     let mut explicit_auto_allow: Option<bool> = None;
@@ -244,6 +250,14 @@ fn sandbox_auto_allow_from_settings_tiers(
         let Ok(parsed) = serde_json::from_str::<SettingsJson>(raw) else {
             continue;
         };
+        if let Some(p) = parsed.permissions {
+            saw_perms = true;
+            merged_perms.allow.extend(p.allow);
+            merged_perms.deny.extend(p.deny);
+            merged_perms
+                .additional_directories
+                .extend(p.additional_directories);
+        }
         if let Some(s) = parsed.sandbox {
             if let Some(v) = s.auto_allow_bash_if_sandboxed {
                 explicit_auto_allow = Some(v);
@@ -252,10 +266,17 @@ fn sandbox_auto_allow_from_settings_tiers(
         }
     }
 
-    let runtime = sandbox::policy_convert::convert_settings_to_runtime_config(&SettingsJson {
-        sandbox: merged_sandbox,
-        ..Default::default()
-    });
+    let runtime = sandbox::policy_convert::convert_settings_to_runtime_config(
+        &SettingsJson {
+            permissions: saw_perms.then_some(merged_perms),
+            sandbox: merged_sandbox,
+            settings_dir: Some(settings_dir.to_path_buf()),
+        },
+        // The auto-allow config reads only `enabled` / `excluded_commands`, so no
+        // session seed context is needed (claude temp dir / settings-file /
+        // worktree paths are owned by the posix `prepare` layer here).
+        &sandbox::policy_convert::SandboxConvertContext::default(),
+    );
 
     permission::sandbox_auto_allow::SandboxAutoAllowConfig::new(
         runtime.enabled,
@@ -313,24 +334,110 @@ fn cron_scheduler_enabled(disable_cron_env: Option<&str>) -> bool {
     !traits::env::is_env_truthy(disable_cron_env)
 }
 
+/// Fold the `sandbox` subsection of the settings tiers (ascending priority, last
+/// write wins) into a full [`sandbox::runtime_config::SandboxRuntimeConfig`].
+///
+/// `ctx` carries the session/host seeds (`getClaudeTempDir()`, the settings-file
+/// `deny_write` paths, the managed drop-in dir, `.claude/skills`, …). It is built
+/// by the caller (the composition root has `claude_home`/`cwd`/`managed` in scope,
+/// so the helper stays pure and unit-testable; tests pass a minimal seed). See
+/// the `build()` call site and spec §5 for which seeds have a boot-time analog.
+#[must_use]
 fn sandbox_runtime_config_from_settings_tiers(
     raw_tiers: &[&str],
+    settings_dir: &std::path::Path,
+    ctx: &sandbox::policy_convert::SandboxConvertContext,
 ) -> sandbox::runtime_config::SandboxRuntimeConfig {
-    use sandbox::runtime_config::{SandboxSettingsJson, SettingsJson};
+    use sandbox::runtime_config::{SandboxSettingsJson, SettingsJson, SettingsPermissions};
 
     let mut merged_sandbox: Option<SandboxSettingsJson> = None;
+    // Accumulate the merged `permissions` across tiers (extend allow/deny/
+    // additionalDirectories — these feed the filesystem allow_write / deny_read /
+    // network allowed_domains derivation in `convert_settings_to_runtime_config`).
+    let mut merged_perms = SettingsPermissions::default();
+    let mut saw_perms = false;
     for raw in raw_tiers {
         let Ok(parsed) = serde_json::from_str::<SettingsJson>(raw) else {
             continue;
         };
+        if let Some(p) = parsed.permissions {
+            saw_perms = true;
+            merged_perms.allow.extend(p.allow);
+            merged_perms.deny.extend(p.deny);
+            merged_perms
+                .additional_directories
+                .extend(p.additional_directories);
+        }
         if let Some(s) = parsed.sandbox {
             merged_sandbox = Some(s);
         }
     }
-    sandbox::policy_convert::convert_settings_to_runtime_config(&SettingsJson {
-        sandbox: merged_sandbox,
-        ..Default::default()
-    })
+    sandbox::policy_convert::convert_settings_to_runtime_config(
+        &SettingsJson {
+            permissions: saw_perms.then_some(merged_perms),
+            sandbox: merged_sandbox,
+            settings_dir: Some(settings_dir.to_path_buf()),
+        },
+        ctx,
+    )
+}
+
+/// claude-code `getClaudeTempDir()` + `getClaudeTempDirName()` analog (Shell.ts:307),
+/// identical to the canonical private `claude_temp_dir()` in `tool-shell`'s
+/// `prompt.rs`: `baseTmpDir = CLAUDE_CODE_TMPDIR || (windows ? tmpdir() : "/tmp")`,
+/// realpath-resolved, name `claude` on Windows else `claude-{uid}`, joined with a
+/// trailing separator. Seeded into the sandbox `allow_write` so the shell's
+/// cwd-tracking file stays writable.
+fn claude_temp_dir() -> String {
+    let base: std::path::PathBuf = std::env::var_os("CLAUDE_CODE_TMPDIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| {
+            if cfg!(target_os = "windows") {
+                std::env::temp_dir()
+            } else {
+                std::path::PathBuf::from("/tmp")
+            }
+        });
+    let resolved_base = std::fs::canonicalize(&base).unwrap_or(base);
+    let name = if cfg!(target_os = "windows") {
+        "claude".to_string()
+    } else {
+        format!("claude-{}", current_uid())
+    };
+    let joined = resolved_base.join(name);
+    let mut s = joined.to_string_lossy().into_owned();
+    s.push(std::path::MAIN_SEPARATOR);
+    s
+}
+
+/// The real (not effective) UID, mirroring TS `process.getuid?.() ?? 0`.
+/// `nix::unistd::getuid()` is a SAFE wrapper, so this crate keeps its
+/// `#![forbid(unsafe_code)]` (same pattern as `apps/cli/src/bypass_env.rs`).
+#[cfg(unix)]
+fn current_uid() -> u32 {
+    nix::unistd::getuid().as_raw()
+}
+
+#[cfg(not(unix))]
+fn current_uid() -> u32 {
+    0
+}
+
+/// Port of claude-code `isPlatformInEnabledList()` (sandbox-adapter.ts:505): is
+/// the current platform in `sandbox.enabledPlatforms`? `None` (unset) ⇒ all
+/// supported platforms allowed (`true`); empty list ⇒ none allowed (`false`,
+/// which is how an operator turns the sandbox off everywhere); otherwise the list
+/// must contain the current platform.
+#[must_use]
+pub fn platform_in_enabled_list(
+    enabled: Option<&[sandbox::runtime_config::Platform]>,
+    current: sandbox::runtime_config::Platform,
+) -> bool {
+    match enabled {
+        None => true,
+        Some([]) => false,
+        Some(list) => list.contains(&current),
+    }
 }
 
 /// M10 (T13): a late-bound [`traits::tool_invoker::ToolInvoker`] resolving the
@@ -1071,6 +1178,12 @@ pub enum BuildError {
     /// Secure-storage backend initialization failed.
     #[error("secure storage init failed: {0}")]
     SecureStorage(String),
+    /// `sandbox.enabled` and `sandbox.failIfUnavailable` are both set, but the
+    /// sandbox cannot run on this host (unsupported platform / WSL1 / missing
+    /// deps). Faithful to claude-code `isSandboxRequired()` — refusing rather
+    /// than silently ignoring the operator's security posture (issue #34044).
+    #[error("sandbox required but unavailable: {0}")]
+    SandboxUnavailable(String),
 }
 
 /// Build a fully-wired desktop [`DesktopRuntime`] from a deterministic
@@ -2194,8 +2307,25 @@ pub async fn build(
             // `bashToolHasPermission` sandbox branch; a no-op when sandboxing is
             // disabled in settings (`enabled = false`). OUTSIDE enforce mode this
             // whole block is skipped, so the layer stays a permanent no-op there.
-            let raw_tier_refs: Vec<&str> = raw_tiers.iter().map(String::as_str).collect();
-            let sandbox_auto_allow = sandbox_auto_allow_from_settings_tiers(&raw_tier_refs);
+            //
+            // Managed (policySettings) tier — HIGHEST priority, appended LAST so
+            // the sandbox-auto-allow fold (last write wins) lets a managed
+            // `sandbox.*` override user/project/local (SETTING_SOURCES:
+            // …→localSettings→flagSettings→policySettings). This is for the
+            // SANDBOX-AUTO-ALLOW derivation ONLY: it is built on a clone, so the
+            // managed raw text is NOT injected into `raw_tiers` (which feeds no
+            // rule parsing here — rules use `rules`/`mode`/`bypass_disabled`
+            // accumulated above). Managed permission RULES are a separate concern
+            // (spec §6) and are deliberately NOT loaded here.
+            let sandbox_raw_tiers: Vec<String> = {
+                let mut v = raw_tiers.clone();
+                v.extend(crate::settings_watch::managed_settings_raw_tiers().await);
+                v
+            };
+            let raw_tier_refs: Vec<&str> =
+                sandbox_raw_tiers.iter().map(String::as_str).collect();
+            let sandbox_auto_allow =
+                sandbox_auto_allow_from_settings_tiers(&raw_tier_refs, &cwd);
             // CLI-resolved mode is the highest-priority source (TS orderedModes:
             // the CLI flag / --permission-mode outranks the settings defaultMode).
             // Apply it only when the CLI actually requested a non-default mode, so
@@ -2729,20 +2859,76 @@ pub async fn build(
                 tiers.push(raw);
             }
         }
+        // Managed (policySettings) tier — HIGHEST priority (SETTING_SOURCES:
+        // …→localSettings→flagSettings→policySettings). Appended LAST so the
+        // ascending-priority fold lets a managed `sandbox.*` win over user/
+        // project/local (faithful to getInitialSettings()/loadSettingsFromDisk).
+        // flagSettings is omitted: the engine has no boot-time `--settings`
+        // analog (see spec §4e); if one is added, push its raw text BEFORE the
+        // managed tier to honor `localSettings→flagSettings→policySettings`.
+        tiers.extend(crate::settings_watch::managed_settings_raw_tiers().await);
         let refs: Vec<&str> = tiers.iter().map(String::as_str).collect();
-        sandbox_runtime_config_from_settings_tiers(&refs)
+        // Seed the `SandboxConvertContext` with the boot-resolvable hardening
+        // paths so the settings/skills denyWrite defense actually fires
+        // (sandbox-adapter.ts:225-299). Seeds with no boot analog
+        // (cwd_settings_paths / worktree_main_repo_path / additional_md_dirs)
+        // stay empty — see spec §5.
+        let managed = crate::settings_watch::managed_settings_dir();
+        let to_s = |p: std::path::PathBuf| p.to_string_lossy().into_owned();
+        let ctx = sandbox::policy_convert::SandboxConvertContext {
+            claude_temp_dir: Some(claude_temp_dir()),
+            settings_file_paths: vec![
+                to_s(cfg.claude_home.join("settings.json")),
+                to_s(cwd.join(".claude").join("settings.json")),
+                to_s(cwd.join(".claude").join("settings.local.json")),
+                to_s(managed.join("managed-settings.json")),
+            ],
+            managed_drop_in_dir: Some(to_s(managed.join("managed-settings.d"))),
+            skills_dirs: vec![to_s(cwd.join(".claude").join("skills"))],
+            ..Default::default()
+        };
+        sandbox_runtime_config_from_settings_tiers(&refs, &cwd, &ctx)
     };
-    let sandbox_available = sandbox_runtime_cfg.enabled
-        && sandbox::dependency_check::check_dependencies(
-            Some(if cfg!(target_os = "macos") {
-                sandbox::runtime_config::Platform::Mac
-            } else {
-                sandbox::runtime_config::Platform::Linux
-            }),
-            true, // no enabledPlatforms restriction here; the config already gated us
-        )
-        .errors
-        .is_empty();
+    // Faithful to claude-code `isSandboxingEnabled()` (sandbox-adapter.ts:532):
+    // supported-platform AND deps present AND in the `enabledPlatforms` list AND
+    // the user opted in via `sandbox.enabled`. We fold the `enabledPlatforms`
+    // gate (`isPlatformInEnabledList`) into BOTH `check_dependencies` (so a
+    // missing dep is reported alongside an out-of-list platform) and
+    // `sandbox_available`, replacing the old hardcoded `true`.
+    // WSL-aware host detection: `platform_posix::sandbox::host_platform()` mirrors
+    // claude-code's `getPlatform()` (returns `None`/refused on WSL1), so on WSL1
+    // we do NOT report `Linux` and wrongly compute `sandbox_available == true`.
+    // A coarse `cfg!(target_os = "linux") ⇒ Linux` would miss the WSL1 refusal.
+    let current_platform = platform_posix::sandbox::host_platform();
+    // `isPlatformInEnabledList` only makes sense for a supported platform; on an
+    // unsupported host (WSL1 / non-POSIX) the platform can never be in the list.
+    let in_enabled_list = current_platform.is_some_and(|p| {
+        platform_in_enabled_list(sandbox_runtime_cfg.enabled_platforms.as_deref(), p)
+    });
+    // `check_dependencies(None, …)` yields the "platform not supported" error,
+    // so `sandbox_available` correctly drops to false on WSL1 / non-POSIX.
+    let sandbox_deps =
+        sandbox::dependency_check::check_dependencies(current_platform, in_enabled_list);
+    let sandbox_available =
+        sandbox_runtime_cfg.enabled && in_enabled_list && sandbox_deps.errors.is_empty();
+
+    // Startup reject/degrade, faithful to claude-code `isSandboxRequired()`
+    // (sandbox-adapter.ts:479) + `getSandboxUnavailableReason()` (:562). When the
+    // user explicitly enabled the sandbox but it cannot run here:
+    //   - `failIfUnavailable: true`  ⇒ this is a HARD failure (their security
+    //     posture is being silently ignored otherwise — issue #34044), so we
+    //     refuse the build with `BuildError::SandboxUnavailable`;
+    //   - otherwise ⇒ degrade to no-sandbox execution but WARN, so the operator
+    //     knows commands run unsandboxed.
+    let sandbox_required = sandbox_runtime_cfg.enabled && sandbox_runtime_cfg.fail_if_unavailable;
+    if let Some(reason) =
+        PosixSandbox::unavailable_reason_for(sandbox_runtime_cfg.enabled, in_enabled_list)
+    {
+        if sandbox_required {
+            return Err(BuildError::SandboxUnavailable(reason));
+        }
+        tracing::warn!(%reason, "Sandbox disabled: commands will run WITHOUT sandboxing");
+    }
 
     // Shared LSP registry: the SAME `Arc<LspRegistry>` is handed to the LSP
     // tool (via `tool_ctx.lsp_registry`) AND to the plugin manager below, so
@@ -2788,7 +2974,6 @@ pub async fn build(
         // `sandbox_runner.reset().await` there for the tidy socket/CA cleanup.
         sandbox_runner: std::sync::Arc::new(sandbox_runtime_runner::SandboxRuntimeRunner::new()),
         permission_mode: cfg.permission_mode,
-        project_trust: ProjectTrustLevel::Trusted,
         sandbox_available,
         workspace: cwd.clone(),
         platform: sandbox_platform,
@@ -4940,8 +5125,10 @@ mod tests {
         // (1) Sandbox enabled, no explicit autoAllow override → TS default TRUE,
         //     no excluded commands → every command would be sandboxed +
         //     auto-allowed.
-        let enabled =
-            sandbox_auto_allow_from_settings_tiers(&[r#"{ "sandbox": { "enabled": true } }"#]);
+        let enabled = sandbox_auto_allow_from_settings_tiers(
+            &[r#"{ "sandbox": { "enabled": true } }"#],
+            std::path::Path::new("/tmp"),
+        );
         assert!(enabled.enabled, "settings enabled → config enabled");
         assert!(
             enabled.auto_allow_bash_if_sandboxed,
@@ -4955,9 +5142,10 @@ mod tests {
 
         // (2) Explicit excludedCommands flow through; an excluded command is NOT
         //     auto-allowed, a normal one still is.
-        let with_excludes = sandbox_auto_allow_from_settings_tiers(&[
-            r#"{ "sandbox": { "enabled": true, "excludedCommands": ["bazel:*", "make"] } }"#,
-        ]);
+        let with_excludes = sandbox_auto_allow_from_settings_tiers(
+            &[r#"{ "sandbox": { "enabled": true, "excludedCommands": ["bazel:*", "make"] } }"#],
+            std::path::Path::new("/tmp"),
+        );
         assert!(with_excludes.enabled);
         assert_eq!(
             with_excludes.excluded_commands,
@@ -4968,40 +5156,47 @@ mod tests {
 
         // (3) Explicit autoAllowBashIfSandboxed:false overrides the TS default;
         //     the command would still be sandboxed but is NOT auto-allowed.
-        let auto_off = sandbox_auto_allow_from_settings_tiers(&[
-            r#"{ "sandbox": { "enabled": true, "autoAllowBashIfSandboxed": false } }"#,
-        ]);
+        let auto_off = sandbox_auto_allow_from_settings_tiers(
+            &[r#"{ "sandbox": { "enabled": true, "autoAllowBashIfSandboxed": false } }"#],
+            std::path::Path::new("/tmp"),
+        );
         assert!(auto_off.enabled);
         assert!(!auto_off.auto_allow_bash_if_sandboxed);
         assert!(!auto_off.auto_allows("echo hi"));
 
         // (4) Sandbox DISABLED → never auto-allows even though autoAllow defaults
         //     true.
-        let disabled =
-            sandbox_auto_allow_from_settings_tiers(&[r#"{ "sandbox": { "enabled": false } }"#]);
+        let disabled = sandbox_auto_allow_from_settings_tiers(
+            &[r#"{ "sandbox": { "enabled": false } }"#],
+            std::path::Path::new("/tmp"),
+        );
         assert!(!disabled.enabled);
         assert!(!disabled.auto_allows("echo hi"));
 
         // (5) No `sandbox` subsection at all (the common case) → disabled, inert.
-        let none =
-            sandbox_auto_allow_from_settings_tiers(&[r#"{ "permissions": { "allow": [] } }"#]);
+        let none = sandbox_auto_allow_from_settings_tiers(
+            &[r#"{ "permissions": { "allow": [] } }"#],
+            std::path::Path::new("/tmp"),
+        );
         assert!(!none.enabled);
         assert!(!none.auto_allows("echo hi"));
 
         // (6) Tier precedence: a later tier's sandbox subsection overrides an
         //     earlier one (ascending priority, last write wins).
-        let layered = sandbox_auto_allow_from_settings_tiers(&[
-            r#"{ "sandbox": { "enabled": false } }"#, // user
-            r#"{ "sandbox": { "enabled": true } }"#,  // project (wins)
-        ]);
+        let layered = sandbox_auto_allow_from_settings_tiers(
+            &[
+                r#"{ "sandbox": { "enabled": false } }"#, // user
+                r#"{ "sandbox": { "enabled": true } }"#,  // project (wins)
+            ],
+            std::path::Path::new("/tmp"),
+        );
         assert!(layered.enabled, "later tier's sandbox.enabled wins");
 
         // (7) Empty / malformed tiers are skipped without panicking.
-        let robust = sandbox_auto_allow_from_settings_tiers(&[
-            "",
-            "not json",
-            r#"{ "sandbox": { "enabled": true } }"#,
-        ]);
+        let robust = sandbox_auto_allow_from_settings_tiers(
+            &["", "not json", r#"{ "sandbox": { "enabled": true } }"#],
+            std::path::Path::new("/tmp"),
+        );
         assert!(robust.enabled);
     }
 
@@ -5053,28 +5248,45 @@ mod tests {
     #[test]
     fn sandbox_runtime_config_from_settings_tiers_is_opt_in() {
         use super::sandbox_runtime_config_from_settings_tiers;
+        let ctx = sandbox::policy_convert::SandboxConvertContext::default();
+        let dir = std::path::Path::new("/tmp");
 
         // Default (no `sandbox` subsection) → disabled (claude-code opt-in posture).
-        assert!(!sandbox_runtime_config_from_settings_tiers(&[]).enabled);
-        assert!(!sandbox_runtime_config_from_settings_tiers(&[r#"{ "permissions": {} }"#]).enabled);
-        // Explicit enable.
+        assert!(!sandbox_runtime_config_from_settings_tiers(&[], dir, &ctx).enabled);
         assert!(
-            sandbox_runtime_config_from_settings_tiers(&[r#"{ "sandbox": { "enabled": true } }"#])
+            !sandbox_runtime_config_from_settings_tiers(&[r#"{ "permissions": {} }"#], dir, &ctx)
                 .enabled
         );
+        // Explicit enable.
+        assert!(
+            sandbox_runtime_config_from_settings_tiers(
+                &[r#"{ "sandbox": { "enabled": true } }"#],
+                dir,
+                &ctx
+            )
+            .enabled
+        );
         // Tier precedence: a later tier overrides an earlier one (last write wins).
-        assert!(!sandbox_runtime_config_from_settings_tiers(&[
-            r#"{ "sandbox": { "enabled": true } }"#,
-            r#"{ "sandbox": { "enabled": false } }"#,
-        ])
-        .enabled);
+        assert!(
+            !sandbox_runtime_config_from_settings_tiers(
+                &[
+                    r#"{ "sandbox": { "enabled": true } }"#,
+                    r#"{ "sandbox": { "enabled": false } }"#,
+                ],
+                dir,
+                &ctx
+            )
+            .enabled
+        );
         // Malformed / empty tiers are skipped without panicking.
-        assert!(sandbox_runtime_config_from_settings_tiers(&[
-            "",
-            "not json",
-            r#"{ "sandbox": { "enabled": true } }"#,
-        ])
-        .enabled);
+        assert!(
+            sandbox_runtime_config_from_settings_tiers(
+                &["", "not json", r#"{ "sandbox": { "enabled": true } }"#],
+                dir,
+                &ctx
+            )
+            .enabled
+        );
     }
 
     // ── 3c-T2: providers/routing settings → ClientConfig (e2e-flavored) ───

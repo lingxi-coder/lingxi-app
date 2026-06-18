@@ -504,7 +504,6 @@ pub fn ctx_for_file_tools(
     trusted_dirs: Vec<std::path::PathBuf>,
 ) -> super::BuiltinToolContext {
     use permission::PermissionMode;
-    use sandbox::decision::ProjectTrustLevel;
     use sandbox::runtime_config::{Platform, SandboxRuntimeConfig};
 
     let workspace = trusted_dirs
@@ -527,7 +526,6 @@ pub fn ctx_for_file_tools(
         sandbox_runtime: SandboxRuntimeConfig::default(),
         sandbox_runner: crate::sandbox_runner::default_sandbox_runner(),
         permission_mode: PermissionMode::Default,
-        project_trust: ProjectTrustLevel::Trusted,
         sandbox_available: false,
         workspace,
         platform: if cfg!(target_os = "macos") {
@@ -569,7 +567,6 @@ pub fn ctx_for_file_tools(
 #[allow(dead_code)] // used by M4-02 shell-tool tests (bash/powershell/repl/sleep)
 pub fn shell_test_ctx(out: ProcessOutput) -> super::BuiltinToolContext {
     use permission::PermissionMode;
-    use sandbox::decision::ProjectTrustLevel;
     use sandbox::runtime_config::{Platform, SandboxRuntimeConfig};
     use std::path::PathBuf;
     use telemetry::AnalyticsBus;
@@ -584,7 +581,6 @@ pub fn shell_test_ctx(out: ProcessOutput) -> super::BuiltinToolContext {
         sandbox_runtime: SandboxRuntimeConfig::default(),
         sandbox_runner: crate::sandbox_runner::default_sandbox_runner(),
         permission_mode: PermissionMode::Default,
-        project_trust: ProjectTrustLevel::Trusted,
         sandbox_available: false,
         workspace: PathBuf::from("/tmp"),
         platform: if cfg!(target_os = "macos") {

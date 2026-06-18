@@ -10,11 +10,10 @@
 //!
 //! ## Mapping notes (engine fields that don't line up 1:1)
 //!
-//! - **`network.denied_domains`** — the engine's `NetworkRestrictionConfig` has
-//!   NO `denied_domains` field (it only carries an allow-list plus the
-//!   `allow_managed_domains_only` flag). The runtime's `NetworkConfig` does, so
-//!   it is mapped to `vec![]` (deny nothing extra; the allow-list is the
-//!   boundary).
+//! - **`network.denied_domains`** — engine `Vec<String>` → runtime
+//!   `Vec<String>`, forwarded verbatim. The engine populates this computed
+//!   denylist from `WebFetch(domain:...)` DENY rules; the runtime checks it
+//!   before the allow-list.
 //! - **`network.allow_unix_sockets`** — engine `Vec<String>` → runtime
 //!   `Option<Vec<String>>`: `Some` when non-empty, `None` when empty (the
 //!   runtime treats `None` and `Some(vec![])` identically, but `None` keeps the
@@ -25,8 +24,10 @@
 //! - **`filesystem.allow_read`** — engine `Vec<String>` → runtime
 //!   `Option<Vec<String>>`: `Some` when non-empty, else `None` (same rationale
 //!   as `allow_unix_sockets`).
-//! - **`ripgrep`** — engine `RipgrepConfig{command, args}` → runtime
-//!   `Some(RipgrepConfig{command, args: Some(..) when non-empty, argv0: None})`.
+//! - **`ripgrep`** — engine `RipgrepConfig{command, args, argv0}` → runtime
+//!   `Some(RipgrepConfig{command, args: Some(..) when non-empty, argv0})`. The
+//!   engine carries `argv0` (embedded `argv0='rg'` dispatch); it is forwarded
+//!   verbatim.
 //! - **`enable_weaker_nested_sandbox` / `enable_weaker_network_isolation`** —
 //!   engine `bool` → runtime `Option<bool>` as `Some(bool)`.
 //! - **`bwrap_path` / `socat_path`** — the engine config has NO such fields, so
@@ -62,8 +63,8 @@ pub fn to_runtime_config(engine: &EngineConfig) -> RuntimeConfig {
 
     let network = NetworkConfig {
         allowed_domains: net.allowed_domains.clone(),
-        // Engine has no denied_domains list — the allow-list is the boundary.
-        denied_domains: Vec::new(),
+        // Computed denylist (from WebFetch deny rules) — forwarded verbatim.
+        denied_domains: net.denied_domains.clone(),
         allow_unix_sockets: some_if_nonempty(net.allow_unix_sockets.clone()),
         allow_all_unix_sockets: Some(net.allow_all_unix_sockets),
         allow_local_binding: Some(net.allow_local_binding),
@@ -86,13 +87,22 @@ pub fn to_runtime_config(engine: &EngineConfig) -> RuntimeConfig {
     let ripgrep = RipgrepConfig {
         command: engine.ripgrep.command.clone(),
         args: some_if_nonempty(engine.ripgrep.args.clone()),
-        argv0: None,
+        argv0: engine.ripgrep.argv0.clone(),
     };
 
     RuntimeConfig {
         network,
         filesystem,
-        ignore_violations: None,
+        // Forward the engine's computed ignore-violations map
+        // (sandbox-adapter.ts:375 — `ignoreViolations: settings.sandbox?.ignoreViolations`).
+        // `Some` when non-empty, else `None` (the runtime treats `None` and
+        // `Some(empty)` identically; `None` keeps the serialized shape minimal,
+        // matching the allow_read / allow_unix_sockets convention above).
+        ignore_violations: if engine.ignore_violations.is_empty() {
+            None
+        } else {
+            Some(engine.ignore_violations.clone())
+        },
         enable_weaker_nested_sandbox: Some(engine.enable_weaker_nested_sandbox),
         enable_weaker_network_isolation: Some(engine.enable_weaker_network_isolation),
         allow_apple_events: None,
@@ -119,6 +129,7 @@ mod tests {
         EngineConfig {
             network: NetworkRestrictionConfig {
                 allowed_domains: vec!["github.com".into(), "*.npmjs.org".into()],
+                denied_domains: vec![],
                 allow_managed_domains_only: true,
                 allow_unix_sockets: vec!["/tmp/sock".into()],
                 allow_all_unix_sockets: true,
@@ -136,6 +147,7 @@ mod tests {
             ripgrep: EngineRipgrep {
                 command: "rg".into(),
                 args: vec!["--hidden".into()],
+                argv0: None,
             },
             enable_weaker_nested_sandbox: true,
             enable_weaker_network_isolation: true,
@@ -147,10 +159,21 @@ mod tests {
     fn maps_domains_and_ports() {
         let rt = to_runtime_config(&engine_full());
         assert_eq!(rt.network.allowed_domains, vec!["github.com", "*.npmjs.org"]);
-        // Engine has no denied_domains — defaults to empty.
-        assert!(rt.network.denied_domains.is_empty());
+        // denied_domains forwarded verbatim (engine_full carries none).
+        assert_eq!(rt.network.denied_domains, engine_full().network.denied_domains);
         assert_eq!(rt.network.http_proxy_port, Some(8080));
         assert_eq!(rt.network.socks_proxy_port, Some(1080));
+    }
+
+    #[test]
+    fn denied_domains_and_argv0_carry_through() {
+        let mut engine = engine_full();
+        engine.network.denied_domains = vec!["evil.com".into()];
+        engine.ripgrep.argv0 = Some("rg".into());
+        let rt = to_runtime_config(&engine);
+        assert_eq!(rt.network.denied_domains, vec!["evil.com".to_string()]);
+        let rg = rt.ripgrep.expect("ripgrep is always Some");
+        assert_eq!(rg.argv0, Some("rg".to_string()));
     }
 
     #[test]
@@ -206,6 +229,23 @@ mod tests {
         // No path overrides ever come from the engine config.
         assert!(rt.bwrap_path.is_none());
         assert!(rt.socat_path.is_none());
+    }
+
+    #[test]
+    fn ignore_violations_forwarded_when_nonempty() {
+        let mut engine = EngineConfig::default();
+        engine
+            .ignore_violations
+            .insert("fs.read".to_string(), vec!["~/.cache".to_string()]);
+        let rt = to_runtime_config(&engine);
+        let iv = rt.ignore_violations.expect("ignore_violations forwarded");
+        assert_eq!(iv.get("fs.read"), Some(&vec!["~/.cache".to_string()]));
+    }
+
+    #[test]
+    fn ignore_violations_none_when_empty() {
+        let rt = to_runtime_config(&EngineConfig::default());
+        assert!(rt.ignore_violations.is_none());
     }
 
     #[test]

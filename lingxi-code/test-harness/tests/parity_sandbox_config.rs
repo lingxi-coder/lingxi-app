@@ -9,7 +9,7 @@
 //! `Bash(...)` rules are intentionally ignored here — their decision lives
 //! in `should_use_sandbox` (see `crates/sandbox/src/decision.rs`).
 
-use sandbox::policy_convert::convert_settings_to_runtime_config;
+use sandbox::policy_convert::{convert_settings_to_runtime_config, SandboxConvertContext};
 use sandbox::runtime_config::SettingsJson;
 use serde::Deserialize;
 use serde_json::Value;
@@ -27,7 +27,8 @@ fn sandbox_config_conversion_matches_claude_code() {
 
     let settings: SettingsJson =
         serde_json::from_value(fx.input_settings).expect("input settings parse");
-    let runtime = convert_settings_to_runtime_config(&settings);
+    let runtime =
+        convert_settings_to_runtime_config(&settings, &SandboxConvertContext::default());
     let got = serde_json::to_value(&runtime).expect("runtime serializes");
     let want = fx.expected_runtime_config;
 

@@ -116,6 +116,12 @@ tool-lsp = { path = "../../tools/lsp" }
 tool-team = { path = "../../tools/team" }
 tool-worktree = { path = "../../tools/worktree" }
 
+# `getClaudeTempDir` dir-name uses the REAL uid (1:1 TS `process.getuid?.()`).
+# `nix::unistd::getuid()` is a SAFE wrapper around `getuid(2)`, so this crate
+# needs no `unsafe` (a raw `libc::getuid()` would). Same pattern as `apps/cli`.
+[target.'cfg(unix)'.dependencies]
+nix = { version = "0.27", default-features = false, features = ["user"] }
+
 [dev-dependencies]
 # Snapshot the assembled tool set (§14 criterion 8). `test-support` exposes the
 # stub `BuiltinToolContext` builder so the registry can be assembled offline.

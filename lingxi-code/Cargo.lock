@@ -1281,6 +1281,7 @@ dependencies = [
  "llm-client",
  "lsp",
  "mcp",
+ "nix",
  "openai-oauth",
  "orchestrator",
  "outputstyles",
@@ -5278,6 +5279,7 @@ version = "0.12.0"
 dependencies = [
  "async-trait",
  "hooks",
+ "nix",
  "once_cell",
  "permission",
  "protocol",

@@ -135,6 +135,11 @@ pub enum InitError {
     /// Secure-storage backend initialization failed.
     #[error("secure storage init failed: {0}")]
     SecureStorage(String),
+    /// `sandbox.enabled` + `sandbox.failIfUnavailable` are both set but the
+    /// sandbox cannot run on this host — faithful to claude-code's
+    /// `isSandboxRequired()` startup refusal (sandbox-adapter.ts:479).
+    #[error("sandbox required but unavailable: {0}")]
+    SandboxUnavailable(String),
 }
 
 impl From<engine_desktop::BuildError> for InitError {
@@ -143,6 +148,7 @@ impl From<engine_desktop::BuildError> for InitError {
             engine_desktop::BuildError::ApiBase(m) => Self::ApiBase(m),
             engine_desktop::BuildError::Orchestrator(m) => Self::Orchestrator(m),
             engine_desktop::BuildError::SecureStorage(m) => Self::SecureStorage(m),
+            engine_desktop::BuildError::SandboxUnavailable(m) => Self::SandboxUnavailable(m),
         }
     }
 }

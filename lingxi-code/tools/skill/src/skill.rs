@@ -178,16 +178,16 @@ impl SkillLoader for EmptySkillLoader {
 ///
 /// Sandbox parity: before finalizing, this runner performs the SAME
 /// `should_use_sandbox` + `wrap_with_sandbox` decision as `BashTool::call`
-/// (`bash.rs:484-556`). The sandbox-decision inputs (`permission_mode`,
-/// `project_trust`, `sandbox_available`, `workspace`, `sandbox_runtime`,
-/// `platform`) are captured from the `SkillTool`'s [`BuiltinToolContext`] at
-/// construction (the `command_api::ShellRunner::run` signature stays
-/// `(&self, command, shell)` — the inputs ride on the adapter, not the call).
-/// A skill `!command` has no per-command `dangerouslyDisableSandbox` flag (it is
-/// a Bash-tool *input* field; skill bodies have no such surface), so we go
-/// straight to `should_use_sandbox` — omitting only bash's BASH.5 disable branch.
-/// The classifier arg is `None`, exactly as bash passes (external build
-/// classifier off). The `Sandbox::bypass_with_audit` envelope still finalizes
+/// (`bash.rs`). The sandbox-decision inputs (`sandbox_available`, `workspace`,
+/// `sandbox_runtime`, `platform`) are captured from the `SkillTool`'s
+/// [`BuiltinToolContext`] at construction (the `command_api::ShellRunner::run`
+/// signature stays `(&self, command, shell)` — the inputs ride on the adapter,
+/// not the call). A skill `!command` has no per-command `dangerouslyDisableSandbox`
+/// flag (it is a Bash-tool *input* field; skill bodies have no such surface), so
+/// we pass `false` for that override — 1:1 with claude-code `shouldUseSandbox.ts`,
+/// which has NO permission-mode, project-trust, or classifier inputs (only host
+/// availability, the `dangerouslyDisableSandbox` override, and the
+/// `excludedCommands` config). The `Sandbox::bypass_with_audit` envelope still finalizes
 /// the (possibly wrapped) command string for `ProcessRunner::run`, matching the
 /// constructor bash uses at its final foreground spawn — the sandboxing is baked
 /// into the wrapped command STRING, not the envelope.
@@ -206,13 +206,13 @@ struct SkillShellRunner {
     workspace: std::path::PathBuf,
     // ===== Sandbox-decision inputs, captured from the SkillTool's
     // `BuiltinToolContext` (mirrors what `BashTool::call` reads off `self.ctx`).
-    /// Active permission mode (`bash.rs:501`).
-    permission_mode: permission::PermissionMode,
-    /// Project trust level (`bash.rs:502`).
-    project_trust: sandbox::decision::ProjectTrustLevel,
-    /// Whether the host has a working sandbox backend (`bash.rs:504`).
+    // 1:1 with claude-code `shouldUseSandbox.ts`, which has NO permission-mode,
+    // project-trust, or classifier inputs — only host availability, the
+    // `dangerouslyDisableSandbox` override, and the `excludedCommands` config.
+    /// Whether the host has a working sandbox backend (`bash.rs`).
     sandbox_available: bool,
-    /// Sandbox policy runtime config — drives the wrap (`bash.rs:533`).
+    /// Sandbox policy runtime config — supplies `excludedCommands` to the
+    /// decision and drives the wrap (`bash.rs`).
     sandbox_runtime: sandbox::runtime_config::SandboxRuntimeConfig,
     /// Detected platform — selects the wrap branch (`bash.rs:533`).
     platform: sandbox::runtime_config::Platform,
@@ -268,18 +268,18 @@ impl command_api::ShellRunner for SkillShellRunner {
             None => command.to_string(),
         };
 
-        // ===== Sandbox decision (mirror of `BashTool::call`, bash.rs:484-556) =====
+        // ===== Sandbox decision (mirror of `BashTool::call`) =====
         // A skill `!command` has NO per-command `dangerouslyDisableSandbox` flag
         // (that is a Bash-tool *input* field; skill bodies have no such surface),
-        // so we go straight to `should_use_sandbox` — omitting only bash's BASH.5
-        // disable branch. Argument order + the `None` classifier (external build
-        // classifier off) are 1:1 with bash (`bash.rs:499-506`).
+        // so we pass `false` for that override and otherwise feed the same inputs
+        // bash does — 1:1 with claude-code `shouldUseSandbox.ts`. `unsandboxed_allowed`
+        // is the canonical `are_unsandboxed_commands_allowed()` accessor.
         let decision = should_use_sandbox(
             command,
-            self.permission_mode,
-            self.project_trust,
-            None,
             self.sandbox_available,
+            /* dangerously_disable_sandbox */ false,
+            self.sandbox_runtime.are_unsandboxed_commands_allowed(),
+            &self.sandbox_runtime,
             self.workspace.clone(),
         );
         let inner = match decision {
@@ -323,17 +323,6 @@ impl command_api::ShellRunner for SkillShellRunner {
                         });
                     }
                 }
-            }
-            // Dangerous command + no sandbox backend → refuse (bash returns a
-            // `PermissionDenied` error here; for skills the refusal surfaces as a
-            // `ShellRunError` so the command does NOT run).
-            SandboxDecision::RefuseBecauseSandboxUnavailable { reason } => {
-                return Err(command_api::ShellRunError {
-                    stdout: String::new(),
-                    stderr: String::new(),
-                    interrupted: false,
-                    generic_message: Some(reason),
-                });
             }
         };
 
@@ -793,8 +782,6 @@ impl Tool for SkillTool {
                     // Sandbox-decision inputs, captured at construction so the
                     // `ShellRunner::run` signature stays unchanged — mirror of
                     // the fields `BashTool::call` reads off `self.ctx`.
-                    permission_mode: self.ctx.permission_mode,
-                    project_trust: self.ctx.project_trust,
                     sandbox_available: self.ctx.sandbox_available,
                     sandbox_runtime: self.ctx.sandbox_runtime.clone(),
                     platform: self.ctx.platform,
@@ -1781,8 +1768,6 @@ mod tests {
     /// `cleanup_after_command` runs after the command finishes.
     #[tokio::test]
     async fn shell_expansion_routes_through_injected_runner_and_cleans_up() {
-        use sandbox::decision::ProjectTrustLevel;
-
         let capture = Arc::new(CapturingProcess {
             seen: std::sync::Mutex::new(Vec::new()),
             stdout: "OUT\n".into(),
@@ -1790,9 +1775,9 @@ mod tests {
         let runner = Arc::new(RecordingSandboxRunner::default());
         let mut ctx = shell_test_ctx(dummy_out());
         ctx.process = capture.clone();
-        // Force the Sandbox branch: available sandbox + untrusted project.
+        // Force the Sandbox branch: a non-empty, non-excluded command runs
+        // through the wrap whenever the host has a working sandbox backend.
         ctx.sandbox_available = true;
-        ctx.project_trust = ProjectTrustLevel::Untrusted;
         ctx.workspace = std::path::PathBuf::from("/tmp");
         ctx.sandbox_runner = runner.clone();
 

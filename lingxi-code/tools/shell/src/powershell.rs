@@ -36,6 +36,25 @@ pub const POWERSHELL_MAX_TIMEOUT_MS: u64 = 600_000;
 /// Tool name byte-lock.
 pub const TOOL_NAME: &str = "PowerShell";
 
+/// Refusal surfaced on Windows when the sandbox is enabled but the policy
+/// disallows unsandboxed commands. Windows has no sandbox backend (PowerShell
+/// cannot be wrapped), so a sandbox-required policy means the command MUST NOT
+/// run — we refuse rather than silently running it unsandboxed.
+pub const WINDOWS_SANDBOX_POLICY_REFUSAL: &str =
+    "Sandbox is required by policy but is not available on Windows; PowerShell commands \
+     cannot be run. Use the `/sandbox` command to adjust restrictions, or allow \
+     unsandboxed commands.";
+
+/// Does the Windows sandbox policy forbid running this command at all? — the
+/// testable core of the `call`/`validate_input` refusal guards. On Windows the
+/// sandbox cannot wrap PowerShell, so when the sandbox is `enabled` AND the
+/// policy does NOT allow unsandboxed commands, the command must be refused.
+/// Factored out so the matrix is testable on non-Windows hosts.
+#[must_use]
+fn windows_sandbox_policy_refuses(enabled: bool, allow_unsandboxed: bool) -> bool {
+    enabled && !allow_unsandboxed
+}
+
 /// Locate the PowerShell binary appropriate for the host.
 ///
 /// - On Windows: returns `Some("powershell.exe")` unconditionally; the OS resolves it.
@@ -149,6 +168,16 @@ impl Tool for PowerShellTool {
                 )));
             }
         }
+        // Windows sandbox-policy refusal: PowerShell cannot be sandbox-wrapped on
+        // Windows, so a sandbox-required policy means the command must not run.
+        if cfg!(target_os = "windows")
+            && windows_sandbox_policy_refuses(
+                self.ctx.sandbox_runtime.enabled,
+                self.ctx.sandbox_runtime.are_unsandboxed_commands_allowed(),
+            )
+        {
+            return Err(ValidationError(WINDOWS_SANDBOX_POLICY_REFUSAL.into()));
+        }
         Ok(())
     }
 
@@ -174,6 +203,21 @@ impl Tool for PowerShellTool {
             return Err(ToolError::InvalidInput(format!(
                 "timeout_ms {timeout_ms} exceeds limit {POWERSHELL_MAX_TIMEOUT_MS}"
             )));
+        }
+
+        // Windows sandbox-policy refusal — checked BEFORE `resolve_powershell_path`
+        // so a missing-pwsh diagnostic cannot mask the policy refusal. PowerShell
+        // cannot be sandbox-wrapped on Windows, so a sandbox-required policy means
+        // the command must not run.
+        if cfg!(target_os = "windows")
+            && windows_sandbox_policy_refuses(
+                self.ctx.sandbox_runtime.enabled,
+                self.ctx.sandbox_runtime.are_unsandboxed_commands_allowed(),
+            )
+        {
+            return Err(ToolError::PermissionDenied(
+                WINDOWS_SANDBOX_POLICY_REFUSAL.into(),
+            ));
         }
 
         let bin = match resolve_powershell_path() {
@@ -203,13 +247,19 @@ impl Tool for PowerShellTool {
         meta_start.insert("timeout_ms".into(), AnalyticsValue::Int(timeout_ms as i64));
         self.ctx.bus.log_event(POWERSHELL_STARTED, meta_start).await;
 
-        // Sandbox decision — disabled on Windows (where wrap_with_sandbox bails).
+        // Sandbox decision — disabled on Windows (where wrap_with_sandbox bails);
+        // the Windows exclusion is folded into the `sandbox_available` arg so the
+        // decision falls to `NoSandbox` (branch 1 of `should_use_sandbox`).
+        let dangerously_disable_sandbox = input
+            .get("dangerouslyDisableSandbox")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
         let decision = should_use_sandbox(
             &cmd_str,
-            self.ctx.permission_mode,
-            self.ctx.project_trust,
-            None,
             self.ctx.sandbox_available && cfg!(not(target_os = "windows")),
+            dangerously_disable_sandbox,
+            self.ctx.sandbox_runtime.are_unsandboxed_commands_allowed(),
+            &self.ctx.sandbox_runtime,
             self.ctx.workspace.clone(),
         );
         let final_cmd = match decision {
@@ -240,9 +290,6 @@ impl Tool for PowerShellTool {
                         return Err(ToolError::Io(s));
                     }
                 }
-            }
-            SandboxDecision::RefuseBecauseSandboxUnavailable { reason } => {
-                return Err(ToolError::PermissionDenied(reason));
             }
         };
 
@@ -330,6 +377,20 @@ mod tests {
     fn resolve_path_smoke() {
         // On non-Windows hosts this may legitimately return None.
         let _ = resolve_powershell_path();
+    }
+
+    /// The Windows sandbox-policy refusal predicate: enabled + disallowed ⇒
+    /// refuse; allowed OR disabled ⇒ no refusal. Tested via the factored
+    /// `windows_sandbox_policy_refuses` so it runs on every host.
+    #[test]
+    fn windows_sandbox_policy_refusal_blocks_call() {
+        // enabled && !allow_unsandboxed ⇒ refuse.
+        assert!(windows_sandbox_policy_refuses(true, false));
+        // allow_unsandboxed=true ⇒ no refusal.
+        assert!(!windows_sandbox_policy_refuses(true, true));
+        // enabled=false ⇒ no refusal.
+        assert!(!windows_sandbox_policy_refuses(false, false));
+        assert!(!windows_sandbox_policy_refuses(false, true));
     }
 
     #[cfg(not(target_os = "windows"))]
@@ -484,7 +545,6 @@ mod tests {
     #[cfg(not(target_os = "windows"))]
     #[tokio::test]
     async fn sandbox_branch_routes_through_injected_runner_and_cleans_up() {
-        use sandbox::decision::ProjectTrustLevel;
         use std::os::unix::fs::PermissionsExt;
         use std::sync::Arc;
 
@@ -495,9 +555,9 @@ mod tests {
             exit_code: 0,
             timed_out: false,
         });
-        // Force the Sandbox branch: available sandbox + untrusted project.
+        // Force the Sandbox branch: available sandbox + no excluded commands.
         ctx.sandbox_available = true;
-        ctx.project_trust = ProjectTrustLevel::Untrusted;
+        ctx.sandbox_runtime.excluded_commands = vec![];
         ctx.workspace = std::path::PathBuf::from("/tmp");
         ctx.sandbox_runner = runner.clone();
         let tool = PowerShellTool::new(ctx);

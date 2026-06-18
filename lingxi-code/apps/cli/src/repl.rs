@@ -212,9 +212,9 @@ pub async fn run_repl(argv: &Argv) -> i32 {
     // one-time trust dialog for an un-trusted directory. Decline ⇒ exit with
     // claude-code's "No, exit" code (`gracefulShutdownSync(1)`,
     // `TrustDialog.tsx:158-160`) WITHOUT building the runtime. Accept persists
-    // `hasTrustDialogAccepted` and proceeds (the running session is trusted, so
-    // the hardcoded `project_trust: Trusted` downstream is now reached only
-    // after this gate clears). Non-TTY / `--print` / already-accepted ⇒ no
+    // `hasTrustDialogAccepted` and proceeds (so the runtime is built — and any
+    // tool/hook/plugin reached — only after this gate clears). Non-TTY /
+    // `--print` / already-accepted ⇒ no
     // prompt, byte-identical to today. The read shares the SAME `stdin_reader`
     // the loop uses below — sequential, before the loop, so no contention.
     let trust_stderr: Arc<Mutex<dyn AsyncWrite + Send + Unpin>> = Arc::new(Mutex::new(stderr()));

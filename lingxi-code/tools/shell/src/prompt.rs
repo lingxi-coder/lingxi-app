@@ -22,13 +22,12 @@
 //!   branch adds Monitor-specific bullets; `Monitor` is a deferred tool here, so
 //!   we take the non-Monitor branch verbatim.
 //! - **Sandbox section reflects the Rust [`SandboxRuntimeConfig`].** claude-code
-//!   drives `getSimpleSandboxSection` off `SandboxManager` getters whose shapes
-//!   (`fsReadConfig.allowWithinDeny`, `networkRestrictionConfig.deniedHosts`)
-//!   have no analogue on our `SandboxRuntimeConfig`. Those lines are omitted;
-//!   see [`sandbox_section`] for the field-by-field mapping. The `$TMPDIR`
-//!   cross-user temp-dir normalization (which needs `getClaudeTempDir()`) is not
-//!   reproduced — we have no per-UID temp-dir source on the config — so writable
-//!   paths are emitted verbatim.
+//!   drives `getSimpleSandboxSection` off `SandboxManager` getters; we drive the
+//!   same shape off the Rust `SandboxRuntimeConfig`. `read.allowWithinDeny`
+//!   (from `filesystem.allow_read`), `network.deniedHosts` (from
+//!   `network.denied_domains`), and the `$TMPDIR` cross-user temp-dir
+//!   normalization (via [`claude_temp_dir`] / [`normalize_allow_only`]) are all
+//!   reproduced. See [`sandbox_section`] for the field-by-field mapping.
 //! - **Tool-name literals are STRING LITERALS** (`"Glob"`, `"Grep"`, `"Read"`,
 //!   `"Edit"`, `"Write"`, `"Bash"`) matching the claude-code wire names, rather
 //!   than imported constants from other crates (avoids a cross-crate dep).
@@ -95,16 +94,12 @@ fn prepend_bullets(items: &[Bullet]) -> Vec<String> {
 }
 
 /// Port of `isEnvTruthy` for the one env var this module gates on. claude-code's
-/// `isEnvTruthy` (`envUtils.ts:32-37`) is a strict allowlist: truthy ONLY when
-/// the value normalizes (lowercase + trim) to `"1"`/`"true"`/`"yes"`/`"on"`.
-/// claude-code gates `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS` with `isEnvTruthy`
-/// (`BashTool/prompt.ts getBackgroundUsageNote`), so this mirrors that allowlist
-/// — it is NOT a denylist.
+/// `isEnvTruthy` (`envUtils.ts:32-37`) is a strict allowlist: unset/empty ⇒
+/// false; otherwise the lowercased, trimmed value must be one of
+/// `1`/`true`/`yes`/`on`. Delegates to the canonical [`traits::env::is_env_truthy`]
+/// so the gating cannot drift from the single shared allowlist.
 fn is_env_truthy(name: &str) -> bool {
-    match std::env::var(name) {
-        Ok(v) => matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"),
-        Err(_) => false,
-    }
+    traits::env::is_env_truthy(std::env::var(name).ok().as_deref())
 }
 
 /// Port of `getBackgroundUsageNote` (`prompt.ts:35`). Returns `None` when
@@ -153,45 +148,127 @@ fn dedup(items: &[String]) -> Vec<String> {
     out
 }
 
+/// Port of claude-code `getClaudeTempDir` (`utils/permissions/filesystem.ts:331`)
+/// + `getClaudeTempDirName` (`:307`).
+///
+/// `baseTmpDir = CLAUDE_CODE_TMPDIR || (windows ? tmpdir() : "/tmp")`, then the
+/// base is realpath-resolved (`/tmp` → `/private/tmp` on macOS) falling back to
+/// the unresolved base on failure. The directory NAME is `claude` on Windows
+/// (tmpdir is already per-user) or `claude-{uid}` elsewhere. The result is
+/// `join(resolvedBase, name) + sep` (trailing separator included).
+fn claude_temp_dir() -> String {
+    let base: std::path::PathBuf = std::env::var_os("CLAUDE_CODE_TMPDIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| {
+            if cfg!(target_os = "windows") {
+                std::env::temp_dir()
+            } else {
+                std::path::PathBuf::from("/tmp")
+            }
+        });
+    // Resolve symlinks; fall back to the unresolved base on failure.
+    let resolved_base = std::fs::canonicalize(&base).unwrap_or(base);
+
+    let name = if cfg!(target_os = "windows") {
+        "claude".to_string()
+    } else {
+        format!("claude-{}", current_uid())
+    };
+
+    let joined = resolved_base.join(name);
+    let mut s = joined.to_string_lossy().into_owned();
+    // Append the trailing platform separator (TS `+ sep`).
+    s.push(std::path::MAIN_SEPARATOR);
+    s
+}
+
+/// The real (not effective) UID, mirroring TS `process.getuid?.() ?? 0`. On
+/// non-unix hosts (where this never feeds the dir name anyway) we return 0.
+#[cfg(unix)]
+fn current_uid() -> u32 {
+    // `nix::unistd::getuid()` is a SAFE wrapper around `getuid(2)` (always-succeeds,
+    // no preconditions), so this crate keeps its `#![forbid(unsafe_code)]`. Same
+    // pattern as `apps/cli/src/bypass_env.rs::real_uid`.
+    nix::unistd::getuid().as_raw()
+}
+
+#[cfg(not(unix))]
+fn current_uid() -> u32 {
+    0
+}
+
+/// Port of the TS `normalizeAllowOnly` (`prompt.ts:189`): dedup then map the
+/// per-UID Claude temp dir literal to `"$TMPDIR"` so the prompt is identical
+/// across users (avoids busting the cross-user global prompt cache; the sandbox
+/// already sets `$TMPDIR` at runtime). Applied ONLY to `write.allowOnly` — never
+/// to deny/read lists.
+fn normalize_allow_only(paths: &[String]) -> Vec<String> {
+    let tmp = claude_temp_dir();
+    dedup(paths)
+        .into_iter()
+        .map(|p| if p == tmp { "$TMPDIR".to_string() } else { p })
+        .collect()
+}
+
 /// Port of `getSimpleSandboxSection` (`prompt.ts:172`), driven by the Rust
 /// [`SandboxRuntimeConfig`] instead of the TS `SandboxManager` getters.
 ///
-/// Field mapping (TS → Rust; lines with no analogue are OMITTED — see
-/// module-doc divergences):
+/// Field mapping (TS → Rust):
 /// - read `denyOnly`           → `filesystem.deny_read`
-/// - read `allowWithinDeny`    → (no analogue — omitted)
-/// - write `allowOnly`         → `filesystem.allow_write`
+/// - read `allowWithinDeny`    → `filesystem.allow_read` (only when non-empty)
+/// - write `allowOnly`         → `filesystem.allow_write` (via [`normalize_allow_only`])
 /// - write `denyWithinAllow`   → `filesystem.deny_write`
-/// - network `allowedHosts`    → `network.allowed_domains`
-/// - network `deniedHosts`     → (no analogue — omitted)
-/// - `allowUnixSockets`        → `network.allow_unix_sockets`
+/// - network `allowedHosts`    → `network.allowed_domains` (only when non-empty)
+/// - network `deniedHosts`     → `network.denied_domains` (only when non-empty)
+/// - `allowUnixSockets`        → `network.allow_unix_sockets` (only when non-empty)
 /// - `ignoreViolations`        → `ignore_violations`
-/// - unsandboxed cmds allowed  → `!allow_unsandboxed_commands.is_empty()`
+/// - unsandboxed cmds allowed  → `are_unsandboxed_commands_allowed()`
 fn sandbox_section(cfg: &SandboxRuntimeConfig) -> String {
     if !cfg.enabled {
         return String::new();
     }
 
-    let allow_unsandboxed_commands = !cfg.allow_unsandboxed_commands.is_empty();
+    let allow_unsandboxed_commands = cfg.are_unsandboxed_commands_allowed();
 
-    // Filesystem config object (read.denyOnly + write.allowOnly/denyWithinAllow).
+    // read object: denyOnly always; allowWithinDeny only when non-empty (TS
+    // conditional-spread `...(x && { x })`). Insertion order: denyOnly first.
+    let mut read = serde_json::Map::new();
+    read.insert(
+        "denyOnly".into(),
+        serde_json::json!(dedup(&cfg.filesystem.deny_read)),
+    );
+    if !cfg.filesystem.allow_read.is_empty() {
+        read.insert(
+            "allowWithinDeny".into(),
+            serde_json::json!(dedup(&cfg.filesystem.allow_read)),
+        );
+    }
+
+    // Filesystem config object (read + write.allowOnly/denyWithinAllow). The
+    // write.allowOnly list is run through `normalize_allow_only` so the per-UID
+    // Claude temp dir collapses to the `$TMPDIR` literal.
     let filesystem = serde_json::json!({
-        "read": {
-            "denyOnly": dedup(&cfg.filesystem.deny_read),
-        },
+        "read": serde_json::Value::Object(read),
         "write": {
-            "allowOnly": dedup(&cfg.filesystem.allow_write),
+            "allowOnly": normalize_allow_only(&cfg.filesystem.allow_write),
             "denyWithinAllow": dedup(&cfg.filesystem.deny_write),
         },
     });
 
     // Network config object — only emit keys that have values, mirroring the
-    // TS conditional-spread shape (`...(x && { x })`).
+    // TS conditional-spread shape (`...(x && { x })`). Key order: allowedHosts,
+    // then deniedHosts, then allowUnixSockets (prompt.ts:205-213).
     let mut network = serde_json::Map::new();
     if !cfg.network.allowed_domains.is_empty() {
         network.insert(
             "allowedHosts".into(),
             serde_json::json!(dedup(&cfg.network.allowed_domains)),
+        );
+    }
+    if !cfg.network.denied_domains.is_empty() {
+        network.insert(
+            "deniedHosts".into(),
+            serde_json::json!(dedup(&cfg.network.denied_domains)),
         );
     }
     if !cfg.network.allow_unix_sockets.is_empty() {
@@ -558,6 +635,9 @@ mod tests {
         let _g = ENV_LOCK.lock().unwrap();
         let cfg = SandboxRuntimeConfig {
             enabled: true,
+            // Default is now `true` (allow unsandboxed) — set `false` explicitly so
+            // the "All commands MUST run in sandbox mode" assertion still holds.
+            allow_unsandboxed_commands: false,
             filesystem: sandbox::runtime_config::FilesystemRestrictionConfig {
                 allow_write: vec!["/work".into()],
                 ..Default::default()
@@ -584,7 +664,7 @@ mod tests {
             p.contains("Network: ") && p.contains("\"allowedHosts\":[\"example.com\"]"),
             "network line missing; got:\n{p}"
         );
-        // disabled-by-policy branch (allow_unsandboxed_commands empty).
+        // disabled-by-policy branch (allow_unsandboxed_commands=false).
         assert!(
             p.contains("All commands MUST run in sandbox mode"),
             "policy-disabled override branch missing"
@@ -598,7 +678,7 @@ mod tests {
         let _g = ENV_LOCK.lock().unwrap();
         let cfg = SandboxRuntimeConfig {
             enabled: true,
-            allow_unsandboxed_commands: vec!["bazel".into()],
+            allow_unsandboxed_commands: true,
             ..Default::default()
         };
         let p = simple_prompt(&cfg);
@@ -609,6 +689,142 @@ mod tests {
         assert!(
             !p.contains("All commands MUST run in sandbox mode"),
             "policy-disabled branch should not appear when unsandboxed cmds allowed"
+        );
+    }
+
+    #[test]
+    fn sandbox_section_emits_allow_within_deny_when_allow_read_set() {
+        let _g = ENV_LOCK.lock().unwrap();
+        // allow_read non-empty ⇒ read object carries denyOnly THEN allowWithinDeny.
+        let cfg = SandboxRuntimeConfig {
+            enabled: true,
+            filesystem: sandbox::runtime_config::FilesystemRestrictionConfig {
+                deny_read: vec!["/etc".into()],
+                allow_read: vec!["/etc/hosts".into()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let p = simple_prompt(&cfg);
+        assert!(
+            p.contains("\"read\":{\"denyOnly\":[\"/etc\"],\"allowWithinDeny\":[\"/etc/hosts\"]}"),
+            "read object should carry denyOnly then allowWithinDeny in order; got:\n{p}"
+        );
+
+        // Empty allow_read ⇒ allowWithinDeny ABSENT.
+        let cfg2 = SandboxRuntimeConfig {
+            enabled: true,
+            filesystem: sandbox::runtime_config::FilesystemRestrictionConfig {
+                deny_read: vec!["/etc".into()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let p2 = simple_prompt(&cfg2);
+        assert!(
+            !p2.contains("allowWithinDeny"),
+            "allowWithinDeny must be absent when allow_read empty; got:\n{p2}"
+        );
+    }
+
+    #[test]
+    fn sandbox_section_emits_denied_hosts_in_order() {
+        let _g = ENV_LOCK.lock().unwrap();
+        // allowedHosts THEN deniedHosts THEN allowUnixSockets.
+        let cfg = SandboxRuntimeConfig {
+            enabled: true,
+            network: sandbox::runtime_config::NetworkRestrictionConfig {
+                allowed_domains: vec!["a.com".into()],
+                denied_domains: vec!["b.com".into()],
+                allow_unix_sockets: vec!["/s".into()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let p = simple_prompt(&cfg);
+        assert!(
+            p.contains("\"allowedHosts\":[\"a.com\"],\"deniedHosts\":[\"b.com\"],\"allowUnixSockets\":[\"/s\"]"),
+            "network keys must be allowedHosts,deniedHosts,allowUnixSockets in order; got:\n{p}"
+        );
+
+        // Empty denied_domains ⇒ deniedHosts ABSENT.
+        let cfg2 = SandboxRuntimeConfig {
+            enabled: true,
+            network: sandbox::runtime_config::NetworkRestrictionConfig {
+                allowed_domains: vec!["a.com".into()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let p2 = simple_prompt(&cfg2);
+        assert!(
+            !p2.contains("deniedHosts"),
+            "deniedHosts must be absent when denied_domains empty; got:\n{p2}"
+        );
+    }
+
+    #[test]
+    fn sandbox_section_normalizes_claude_temp_dir_to_tmpdir_literal() {
+        let _g = ENV_LOCK.lock().unwrap();
+        // Pin the temp-dir base via CLAUDE_CODE_TMPDIR so claude_temp_dir() is
+        // deterministic across hosts/users.
+        let tmp_base = tempfile::tempdir().unwrap();
+        let prior = std::env::var_os("CLAUDE_CODE_TMPDIR");
+        std::env::set_var("CLAUDE_CODE_TMPDIR", tmp_base.path());
+
+        let claude_dir = claude_temp_dir();
+        let cfg = SandboxRuntimeConfig {
+            enabled: true,
+            filesystem: sandbox::runtime_config::FilesystemRestrictionConfig {
+                // The Claude temp dir collapses to $TMPDIR; an unrelated path is
+                // emitted verbatim.
+                allow_write: vec![claude_dir.clone(), "/work/project".into()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let p = simple_prompt(&cfg);
+
+        match prior {
+            Some(v) => std::env::set_var("CLAUDE_CODE_TMPDIR", v),
+            None => std::env::remove_var("CLAUDE_CODE_TMPDIR"),
+        }
+
+        assert!(
+            p.contains("\"allowOnly\":[\"$TMPDIR\",\"/work/project\"]"),
+            "claude temp dir must normalize to $TMPDIR (not the literal); got:\n{p}"
+        );
+        assert!(
+            !p.contains(&claude_dir),
+            "the per-UID temp dir literal must NOT appear; got:\n{p}"
+        );
+    }
+
+    #[test]
+    fn sandbox_section_policy_disabled_branch_when_bool_false() {
+        let _g = ENV_LOCK.lock().unwrap();
+        // false ⇒ the policy-disabled override branch.
+        let disabled = SandboxRuntimeConfig {
+            enabled: true,
+            allow_unsandboxed_commands: false,
+            ..Default::default()
+        };
+        let p = simple_prompt(&disabled);
+        assert!(
+            p.contains("All commands MUST run in sandbox mode"),
+            "policy-disabled branch missing when allow_unsandboxed_commands=false; got:\n{p}"
+        );
+
+        // true ⇒ the default-to-sandbox override branch.
+        let allowed = SandboxRuntimeConfig {
+            enabled: true,
+            allow_unsandboxed_commands: true,
+            ..Default::default()
+        };
+        let p2 = simple_prompt(&allowed);
+        assert!(
+            p2.contains("You should always default to running commands within the sandbox."),
+            "default-to-sandbox branch missing when allow_unsandboxed_commands=true; got:\n{p2}"
         );
     }
 

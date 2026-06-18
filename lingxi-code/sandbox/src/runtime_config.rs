@@ -5,23 +5,66 @@
 //! name byte-for-byte. Renaming any field is a managed-policy-breaking change
 //! and must be coordinated with claude-code's settings schema.
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::HashMap;
 
 /// Platforms the sandbox runtime recognizes.
 ///
-/// Mirrors claude-code's `Platform` literal union (`mac` | `linux` | `wsl`).
+/// Mirrors claude-code's `Platform` literal union (`macos` | `linux` | `wsl`).
 /// `windows` is intentionally absent — claude-code refuses sandbox on Windows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
 pub enum Platform {
     /// macOS host (Darwin) — sandbox via `sandbox-exec`.
+    /// Wire spelling is `"macos"` to match claude-code `getPlatform()`
+    /// (platform.ts:14) and the `enabledPlatforms: ["macos"]` example
+    /// (sandbox-adapter.ts:503). `alias = "mac"` accepts the older spelling
+    /// on deserialize for back-compat.
+    #[serde(rename = "macos", alias = "mac")]
     Mac,
     /// Native Linux host — sandbox via `bwrap`.
+    #[serde(rename = "linux")]
     Linux,
     /// WSL2 host — same `bwrap` path as native Linux, distinguished for
     /// claude-code parity (WSL1 is refused before sandbox dispatch).
+    #[serde(rename = "wsl")]
     Wsl,
+}
+
+/// Deserialize `Option<Vec<Platform>>` LENIENTLY: a list element that is not a
+/// recognized platform (`"macos"`/`"mac"`, `"linux"`, `"wsl"`) is DROPPED rather
+/// than aborting the whole settings parse. This includes NON-STRING elements
+/// (e.g. `[123]`): claude-code reads `enabledPlatforms` UNTYPED and only
+/// `.includes()`-checks it (sandbox-adapter.ts:505-526), so a non-string entry
+/// (a number, object, …) never matches any platform but never errors either.
+/// We mirror that: a non-string element is treated exactly like an unknown
+/// string — dropped and skipped. Without this leniency, the desktop tier
+/// loader's `if let Ok(parsed)=from_str(..) else continue`
+/// (engine-desktop/src/lib.rs:250,339) would silently DROP the ENTIRE tier (and
+/// its `sandbox.enabled` / `failIfUnavailable`) on a single malformed element.
+fn deserialize_enabled_platforms<'de, D>(
+    deserializer: D,
+) -> Result<Option<Vec<Platform>>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    // Accept absent → None, null → None, or an array (any element that is not a
+    // recognized platform string is dropped — including non-string elements).
+    // The top-level non-array shape still errors, matching zod's array shape
+    // check, but individual element validation is lenient like claude-code's
+    // untyped `.includes()`.
+    let opt: Option<Vec<serde_json::Value>> = Option::deserialize(deserializer)?;
+    let Some(raw) = opt else { return Ok(None) };
+    let mut out = Vec::with_capacity(raw.len());
+    for v in raw {
+        // Reuse the enum's own deserialize for the spelling/alias rules. A
+        // non-string element (or unknown string) fails this and is dropped,
+        // never aborting the tier.
+        if let Ok(p) = serde_json::from_value::<Platform>(v) {
+            out.push(p);
+        }
+        // else: unknown platform string OR non-string element — drop it (lenient).
+    }
+    Ok(Some(out))
 }
 
 impl Platform {
@@ -49,6 +92,14 @@ pub struct NetworkRestrictionConfig {
     /// Domains the sandboxed process may reach outbound (egress allowlist).
     #[serde(default)]
     pub allowed_domains: Vec<String>,
+    /// Computed DENYLIST of domains the sandboxed process is refused outbound,
+    /// checked BEFORE `allowed_domains` (sandbox-adapter.ts:179/212-220/362).
+    /// Populated from `WebFetch(domain:...)` DENY rules. Honored from all
+    /// sources even under `allow_managed_domains_only` — the comment on
+    /// `allowManagedDomainsOnly` in sandboxTypes.ts:22-23 explicitly states
+    /// "Denied domains are still respected from all sources."
+    #[serde(default)]
+    pub denied_domains: Vec<String>,
     /// When `true`, only `allowed_domains` from managed (enterprise) settings
     /// are honored; user-level rules are ignored. Mirrors zod
     /// `allowManagedDomainsOnly`.
@@ -109,6 +160,21 @@ pub struct RipgrepConfig {
     /// Extra args appended after the user query (e.g. `--no-config`).
     #[serde(default)]
     pub args: Vec<String>,
+    /// Optional `argv0` override. In embedded mode (`argv0='rg'` dispatch),
+    /// sandbox-runtime spawns the ripgrep process with this `argv0`
+    /// (sandbox-adapter.ts:352-357). `RipgrepConfig` has NO `rename_all`;
+    /// `argv0` is already lowercase so the wire key is `argv0`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub argv0: Option<String>,
+}
+
+/// serde default for [`SandboxRuntimeConfig::allow_unsandboxed_commands`].
+///
+/// claude-code's zod schema documents `allowUnsandboxedCommands` as
+/// `Default: true` (sandboxTypes.ts:113-120). An absent JSON key therefore
+/// deserializes to `true`, NOT `false`.
+fn default_true() -> bool {
+    true
 }
 
 /// Full `SandboxRuntimeConfig` — direct port of zod `SandboxSettingsSchema`
@@ -121,7 +187,7 @@ pub struct RipgrepConfig {
 /// `serde` without an extra `HashMap<String, Value>` catch-all; we accept that
 /// trade-off — managed settings always lay down only known fields).
 #[allow(clippy::struct_excessive_bools)] // wire-shape mirror; the bool count comes from claude-code's zod schema.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SandboxRuntimeConfig {
     /// Master toggle. When `false`, the sandbox runtime is bypassed.
@@ -133,16 +199,20 @@ pub struct SandboxRuntimeConfig {
     pub fail_if_unavailable: bool,
     /// Optional restriction of the platforms on which the sandbox runs. `None`
     /// means "run on every supported platform".
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_enabled_platforms")]
     pub enabled_platforms: Option<Vec<Platform>>,
     /// When `true`, sandboxed bash invocations auto-approve permission
     /// prompts (the sandbox is the safety boundary, not the prompt).
     #[serde(default)]
     pub auto_allow_bash_if_sandboxed: bool,
-    /// Commands the sandbox refuses to wrap (i.e., these always run outside
-    /// the sandbox even when `enabled = true`).
-    #[serde(default)]
-    pub allow_unsandboxed_commands: Vec<String>,
+    /// Allow commands to run outside the sandbox via the
+    /// `dangerouslyDisableSandbox` parameter. When `false`, that parameter is
+    /// completely ignored and all commands must run sandboxed. Mirrors zod
+    /// `allowUnsandboxedCommands` (sandboxTypes.ts:113-120 /
+    /// sandbox-adapter.ts:476). Default: `true` — an absent JSON key
+    /// deserializes to `true`.
+    #[serde(default = "default_true")]
+    pub allow_unsandboxed_commands: bool,
     /// Network egress configuration.
     #[serde(default)]
     pub network: NetworkRestrictionConfig,
@@ -180,6 +250,42 @@ pub struct SandboxRuntimeConfig {
     /// `#[serde(skip)]` for the same reason as [`Self::ro_bind_in_place`].
     #[serde(skip)]
     pub scrub_paths: Vec<String>,
+}
+
+impl Default for SandboxRuntimeConfig {
+    /// Hand-written so the default is byte-equivalent to deserializing empty
+    /// JSON (`{}`): every `#[serde(default)]` field gets its natural default,
+    /// and `allow_unsandboxed_commands` gets `true` (the `default_true` serde
+    /// helper). `SandboxRuntimeConfig::default() == from_value(json!({}))`.
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            fail_if_unavailable: false,
+            enabled_platforms: None,
+            auto_allow_bash_if_sandboxed: false,
+            allow_unsandboxed_commands: true,
+            network: NetworkRestrictionConfig::default(),
+            filesystem: FilesystemRestrictionConfig::default(),
+            ignore_violations: HashMap::new(),
+            enable_weaker_nested_sandbox: false,
+            enable_weaker_network_isolation: false,
+            excluded_commands: Vec::new(),
+            ripgrep: RipgrepConfig::default(),
+            ro_bind_in_place: Vec::new(),
+            scrub_paths: Vec::new(),
+        }
+    }
+}
+
+impl SandboxRuntimeConfig {
+    /// THE canonical mapping for "may commands run unsandboxed via
+    /// `dangerouslyDisableSandbox`?" — returns `allow_unsandboxed_commands`
+    /// directly (sandbox-adapter.ts:476). Replaces the prior fabricated
+    /// `!allow_unsandboxed_commands.is_empty()` reader.
+    #[must_use]
+    pub fn are_unsandboxed_commands_allowed(&self) -> bool {
+        self.allow_unsandboxed_commands
+    }
 }
 
 // ============================================================================
@@ -238,11 +344,12 @@ pub struct SandboxSettingsJson {
     /// Override `SandboxRuntimeConfig::fail_if_unavailable`.
     pub fail_if_unavailable: Option<bool>,
     /// Override `SandboxRuntimeConfig::enabled_platforms`.
+    #[serde(default, deserialize_with = "deserialize_enabled_platforms")]
     pub enabled_platforms: Option<Vec<Platform>>,
     /// Override `SandboxRuntimeConfig::auto_allow_bash_if_sandboxed`.
     pub auto_allow_bash_if_sandboxed: Option<bool>,
     /// Override `SandboxRuntimeConfig::allow_unsandboxed_commands`.
-    pub allow_unsandboxed_commands: Option<Vec<String>>,
+    pub allow_unsandboxed_commands: Option<bool>,
     /// Override `SandboxRuntimeConfig::network` (merged with extracted
     /// `allowed_domains`).
     pub network: Option<NetworkRestrictionConfig>,
@@ -259,4 +366,40 @@ pub struct SandboxSettingsJson {
     pub excluded_commands: Option<Vec<String>>,
     /// Override `SandboxRuntimeConfig::ripgrep`.
     pub ripgrep: Option<RipgrepConfig>,
+}
+
+#[cfg(test)]
+mod enabled_platforms_tests {
+    use super::{Platform, SandboxRuntimeConfig};
+
+    /// A NON-STRING element (`123`) in `enabledPlatforms` must be dropped
+    /// leniently — NOT abort the whole settings tier. claude-code reads
+    /// `enabledPlatforms` untyped and only `.includes()`-checks it, so a number
+    /// never matches a platform but never errors. The recognized `"macos"`
+    /// string survives, the tier parses, and `sandbox.enabled` is preserved.
+    #[test]
+    fn non_string_element_dropped_tier_survives() {
+        let json = r#"{
+            "enabled": true,
+            "failIfUnavailable": true,
+            "enabledPlatforms": [123, "macos"]
+        }"#;
+        let cfg: SandboxRuntimeConfig =
+            serde_json::from_str(json).expect("malformed element must NOT abort the tier");
+        assert!(cfg.enabled, "sandbox.enabled must survive a bad element");
+        assert!(cfg.fail_if_unavailable);
+        assert_eq!(
+            cfg.enabled_platforms.as_deref(),
+            Some(&[Platform::Mac][..]),
+            "123 dropped, \"macos\" kept"
+        );
+    }
+
+    /// Unknown platform STRINGS keep dropping leniently (regression guard).
+    #[test]
+    fn unknown_string_dropped() {
+        let json = r#"{"enabledPlatforms": ["windows", "linux"]}"#;
+        let cfg: SandboxRuntimeConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(cfg.enabled_platforms.as_deref(), Some(&[Platform::Linux][..]));
+    }
 }

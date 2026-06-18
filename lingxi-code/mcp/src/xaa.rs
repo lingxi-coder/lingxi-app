@@ -76,6 +76,26 @@ pub enum XaaError {
     NoAuthServer(String),
 }
 
+impl XaaError {
+    /// Whether the cached IdP `id_token` should be dropped in response to this
+    /// failure (xaa.ts `XaaTokenExchangeError.shouldClearIdToken`, 267-273).
+    ///
+    /// Only a [`TokenExchange`](XaaError::TokenExchange) failure carries the
+    /// signal: a 4xx (or structurally-invalid 200 body) means the `id_token`
+    /// itself was rejected and must be re-acquired; a 5xx / transport failure
+    /// is an IdP outage and the token is kept. Every other variant is `false`.
+    #[must_use]
+    pub fn should_clear_id_token(&self) -> bool {
+        matches!(
+            self,
+            XaaError::TokenExchange {
+                should_clear_id_token: true,
+                ..
+            }
+        )
+    }
+}
+
 impl From<XaaError> for traits::McpError {
     fn from(e: XaaError) -> Self {
         traits::McpError::OAuth(e.to_string())

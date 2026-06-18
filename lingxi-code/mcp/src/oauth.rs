@@ -574,6 +574,7 @@ pub async fn perform_oauth_flow(
     server_name: &str,
     server_url: &str,
     on_auth_url: &OnAuthorizationUrl,
+    scope_override: Option<&str>,
 ) -> Result<Tokens, OAuthError> {
     // 1. Discovery.
     let meta = discover_auth_server_metadata(
@@ -593,11 +594,17 @@ pub async fn perform_oauth_flow(
     // 3. Advertised scope (used both for DCR client metadata and the authorize
     //    URL). claude-code's `getScopeFromMetadata` is `scopes_supported`-only
     //    in our subset (auth.ts:2460-2463); empty when none advertised.
-    let scope = meta
-        .scopes_supported
-        .as_ref()
-        .map(|s| s.join(" "))
-        .unwrap_or_default();
+    //    A `scope_override` (a cached step-up scope from a prior 403
+    //    `insufficient_scope`) takes precedence over the advertised scope so the
+    //    authorize URL requests the elevated scope (auth.ts:909-935 / 1625-1637).
+    let scope = match scope_override {
+        Some(s) if !s.is_empty() => s.to_string(),
+        _ => meta
+            .scopes_supported
+            .as_ref()
+            .map(|s| s.join(" "))
+            .unwrap_or_default(),
+    };
 
     // 4. Client id — configured, else dynamic client registration.
     let client_id = if let Some(id) = &oauth.client_id {
@@ -761,6 +768,32 @@ pub async fn load_tokens(
     let parsed: StoredTokens = serde_json::from_slice(data.expose_secret_bytes())
         .map_err(|e| OAuthError::Token(format!("decode stored tokens: {e}")))?;
     Ok(Some(parsed))
+}
+
+/// Persist an already-built [`StoredTokens`] blob for `key` (used to update
+/// side fields like `step_up_scope` without minting fresh [`Tokens`]).
+///
+/// # Errors
+/// [`OAuthError::Token`] on encode or a storage backend error.
+pub async fn store_tokens(
+    storage: &Arc<dyn traits::SecureStorage>,
+    clock: &Arc<dyn Clock>,
+    key: &str,
+    stored: &StoredTokens,
+) -> Result<(), OAuthError> {
+    let bytes = serde_json::to_vec(stored)
+        .map_err(|e| OAuthError::Token(format!("encode tokens: {e}")))?;
+    let metadata = protocol::SecureStorageMetadata {
+        created_at: clock.now(),
+        last_accessed: None,
+        kind: protocol::SecretKindDto("mcp_oauth_tokens".into()),
+    };
+    let data = protocol::SecureStorageData::new(bytes, metadata);
+    storage
+        .store(MCP_OAUTH_SERVICE, key, data)
+        .await
+        .map_err(|e| OAuthError::Token(format!("storage store: {e}")))?;
+    Ok(())
 }
 
 /// Persist a token set for `key` (`mcp-oauth` service, account = server key).

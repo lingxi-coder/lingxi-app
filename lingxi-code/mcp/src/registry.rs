@@ -290,21 +290,41 @@ impl McpRegistry {
                 ))
             })? {
             Ok(pair) => pair,
-            // 401 on a connect/initialize for an OAuth server → the access token
-            // is stale: force a refresh (or a fresh interactive flow), re-inject
-            // the Bearer, and retry ONCE. Faithful-core 401 detection: the
-            // transport flattens errors to strings, so we substring-match "401"
-            // (structured status is a noted residual).
-            Err(e) if oauth_key.is_some() && error_is_401(&e) => {
-                let refreshed = self.reauth_oauth_spec(&config).await?;
-                tokio::time::timeout(connect_timeout, attempt(refreshed))
-                    .await
-                    .map_err(|_elapsed| {
-                        McpError::Connection(format!(
-                            "MCP connection timed out after {}s",
-                            connect_timeout.as_secs()
-                        ))
-                    })??
+            // 403 `insufficient_scope` for an OAuth server → step-up: the AS
+            // requires an elevated scope (RFC 6750). Re-run the interactive flow
+            // requesting that scope (RFC 6749 §6 forbids scope elevation via
+            // refresh, so we MUST do a fresh PKCE flow), re-inject the Bearer,
+            // and retry ONCE. Mirrors auth.ts `wrapFetchWithStepUpDetection`
+            // (1354-1374) + `markStepUpPending`/`cachedStepUpScope` persistence.
+            // Checked BEFORE the 401 branch so a 403 never falls into refresh.
+            Err(e) if oauth_key.is_some() => {
+                if let Some(scope) = error_is_403_insufficient_scope(&e) {
+                    let stepped = self.step_up_oauth_spec(&config, &scope).await?;
+                    tokio::time::timeout(connect_timeout, attempt(stepped))
+                        .await
+                        .map_err(|_elapsed| {
+                            McpError::Connection(format!(
+                                "MCP connection timed out after {}s",
+                                connect_timeout.as_secs()
+                            ))
+                        })??
+                } else if error_is_401(&e) {
+                    // 401 → the access token is stale: force a refresh (or a
+                    // fresh interactive flow), re-inject the Bearer, retry ONCE.
+                    // Faithful-core 401 detection: the transport flattens errors
+                    // to strings (structured status is a noted residual).
+                    let refreshed = self.reauth_oauth_spec(&config).await?;
+                    tokio::time::timeout(connect_timeout, attempt(refreshed))
+                        .await
+                        .map_err(|_elapsed| {
+                            McpError::Connection(format!(
+                                "MCP connection timed out after {}s",
+                                connect_timeout.as_secs()
+                            ))
+                        })??
+                } else {
+                    return Err(e);
+                }
             }
             Err(e) => return Err(e),
         };
@@ -429,10 +449,10 @@ impl McpRegistry {
                         oauth::save_tokens(&deps.storage, &deps.clock, &key, &refreshed).await?;
                         refreshed
                     }
-                    None => self.run_interactive_oauth(config, oauth_cfg, &key, deps).await?,
+                    None => self.run_interactive_oauth(config, oauth_cfg, &key, deps, None).await?,
                 }
             }
-            None => self.run_interactive_oauth(config, oauth_cfg, &key, deps).await?,
+            None => self.run_interactive_oauth(config, oauth_cfg, &key, deps, None).await?,
         };
 
         Ok((
@@ -480,25 +500,77 @@ impl McpRegistry {
                     }
                     // Refresh token rejected → fall back to a fresh flow.
                     Err(oauth::OAuthError::RefreshRejected(_)) => {
-                        self.run_interactive_oauth(config, oauth_cfg, &key, deps).await?
+                        self.run_interactive_oauth(config, oauth_cfg, &key, deps, None).await?
                     }
                     Err(e) => return Err(e.into()),
                 }
             }
-            None => self.run_interactive_oauth(config, oauth_cfg, &key, deps).await?,
+            None => self.run_interactive_oauth(config, oauth_cfg, &key, deps, None).await?,
         };
 
         Ok(inject_bearer(&config.spec, token.access_token.expose_secret()))
     }
 
+    /// Step-up re-auth after a 403 `insufficient_scope`: persist the required
+    /// `scope` onto the stored entry (auth.ts `markStepUpPending`/`stepUpScope`,
+    /// 1896), then run a fresh interactive flow requesting that elevated scope
+    /// and return the spec with the new Bearer. A refresh CANNOT elevate scope
+    /// (RFC 6749 §6), so this always drives the PKCE flow.
+    async fn step_up_oauth_spec(
+        &self,
+        config: &McpServerConfig,
+        scope: &str,
+    ) -> Result<McpTransportSpec, McpError> {
+        let deps = self
+            .oauth
+            .as_ref()
+            .ok_or_else(|| McpError::OAuth("oauth seam not wired".into()))?;
+        let oauth_cfg = spec_oauth(&config.spec)
+            .ok_or_else(|| McpError::OAuth("server has no oauth config".into()))?;
+        let key = oauth::server_key(&config.name, &config.spec);
+
+        // Persist the elevated scope so it survives even if the interactive flow
+        // is interrupted and resumed later (auth.ts caches it on the stored
+        // entry). Best-effort: a storage failure must not block the step-up.
+        if let Ok(Some(mut stored)) = oauth::load_tokens(&deps.storage, &key).await {
+            stored.step_up_scope = Some(scope.to_string());
+            let _ = oauth::store_tokens(&deps.storage, &deps.clock, &key, &stored).await;
+        }
+
+        let token = self
+            .run_interactive_oauth(config, oauth_cfg, &key, deps, Some(scope))
+            .await?;
+        Ok(inject_bearer(&config.spec, token.access_token.expose_secret()))
+    }
+
     /// Drive the full interactive OAuth flow and persist the resulting tokens.
+    ///
+    /// `scope_override` carries an elevated scope cached from a prior 403
+    /// `insufficient_scope` step-up (auth.ts `cachedStepUpScope`); when set the
+    /// authorize URL requests it instead of the advertised scope. On a
+    /// successful grant the persisted `step_up_scope` is cleared (auth.ts:1705).
     async fn run_interactive_oauth(
         &self,
         config: &McpServerConfig,
         oauth_cfg: &traits::McpOAuthConfigDto,
         key: &str,
         deps: &OAuthDeps,
+        scope_override: Option<&str>,
     ) -> Result<oauth::Tokens, McpError> {
+        // Effective elevated scope: an explicit override (the 403 step-up path)
+        // wins; otherwise honor any `step_up_scope` cached on the stored entry
+        // from a previous 403 `insufficient_scope` (auth.ts:906-909
+        // `cachedStepUpScope`). The stored blob is about to be overwritten by the
+        // fresh grant, so we read it before driving the flow.
+        let cached_scope = match scope_override {
+            Some(s) => Some(s.to_string()),
+            None => oauth::load_tokens(&deps.storage, key)
+                .await
+                .ok()
+                .flatten()
+                .and_then(|t| t.step_up_scope),
+        };
+
         // Surface `AwaitingOAuth` while the user completes the browser flow.
         let callback_port = oauth_cfg.callback_port.unwrap_or(0);
         self.connections.write().await.insert(
@@ -515,8 +587,11 @@ impl McpRegistry {
             &config.name,
             spec_url(&config.spec),
             &deps.on_authorization_url,
+            cached_scope.as_deref(),
         )
         .await?;
+        // A fresh grant clears any pending step-up scope (auth.ts:1705): the new
+        // tokens carry the elevated scope, so the cache must not linger.
         oauth::save_tokens(&deps.storage, &deps.clock, key, &tokens).await?;
         Ok(tokens)
     }
@@ -984,6 +1059,62 @@ fn error_is_401(e: &McpError) -> bool {
         e,
         McpError::Connection(m) | McpError::Handshake(m) if m.contains("401")
     )
+}
+
+/// Faithful-core 403 `insufficient_scope` step-up detection (auth.ts
+/// `wrapFetchWithStepUpDetection`, 1354-1374). The transport flattens HTTP
+/// failures to a `Connection`/`Handshake` error string carrying the status and
+/// the `WWW-Authenticate` text, so we substring-match `"403"` +
+/// `"insufficient_scope"` and extract the required scope from a
+/// `scope="…"`/`scope=…` token (RFC 6750 §3 — the same shape as the SDK's
+/// `extractFieldFromWwwAuth`). Returns the elevated scope when present.
+///
+/// A structured 403-with-headers path (the WWW-Authenticate header reaching the
+/// registry on a tool-call 403) is a noted residual, parallel to the 401 note —
+/// the live HTTP writer currently swallows non-2xx tool-call responses.
+fn error_is_403_insufficient_scope(e: &McpError) -> Option<String> {
+    let (McpError::Connection(msg) | McpError::Handshake(msg)) = e else {
+        return None;
+    };
+    if !(msg.contains("403") && msg.contains("insufficient_scope")) {
+        return None;
+    }
+    extract_scope_from_www_auth(msg)
+}
+
+/// Hand-rolled equivalent of `wwwAuth.match(/scope=(?:"([^"]+)"|([^\s,]+))/)`
+/// (auth.ts:1365). Finds the first `scope=` and returns its value, honoring an
+/// optional double-quoted form; an unquoted value runs to the first whitespace
+/// or comma. Avoids a `regex` dependency.
+fn extract_scope_from_www_auth(s: &str) -> Option<String> {
+    let idx = s.find("scope=")?;
+    let rest = &s[idx + "scope=".len()..];
+    if let Some(after_quote) = rest.strip_prefix('"') {
+        // Quoted: up to the next `"`.
+        let end = after_quote.find('"')?;
+        let scope = &after_quote[..end];
+        return (!scope.is_empty()).then(|| scope.to_string());
+    }
+    // Unquoted: up to the first whitespace or comma.
+    let end = rest
+        .find(|c: char| c.is_whitespace() || c == ',')
+        .unwrap_or(rest.len());
+    let scope = &rest[..end];
+    (!scope.is_empty()).then(|| scope.to_string())
+}
+
+/// Test-only re-exports of internal OAuth-error classifiers, so integration
+/// tests (`tests/oauth_flow_test.rs`) can unit-check the step-up detection
+/// without making the helpers part of the public API.
+#[doc(hidden)]
+pub mod test_support {
+    use traits::McpError;
+
+    /// See [`super::error_is_403_insufficient_scope`].
+    #[must_use]
+    pub fn error_is_403_insufficient_scope(e: &McpError) -> Option<String> {
+        super::error_is_403_insufficient_scope(e)
+    }
 }
 
 /// Whether a state's config is flagged `disabled` (mid-reconnect guard).

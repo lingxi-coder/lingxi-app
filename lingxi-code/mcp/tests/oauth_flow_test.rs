@@ -225,12 +225,28 @@ impl SecureStorage for MemStorage {
 struct RecordingTransport {
     seen_specs: Mutex<Vec<McpTransportSpec>>,
     fail_401_first: AtomicUsize,
+    /// When >0, the first N connects return a 403 `insufficient_scope` error
+    /// carrying the configured required scope (step-up path).
+    fail_403_first: AtomicUsize,
+    fail_403_scope: Mutex<String>,
 }
 impl RecordingTransport {
     fn new(fail_401_first: usize) -> Arc<Self> {
         Arc::new(Self {
             seen_specs: Mutex::new(Vec::new()),
             fail_401_first: AtomicUsize::new(fail_401_first),
+            fail_403_first: AtomicUsize::new(0),
+            fail_403_scope: Mutex::new(String::new()),
+        })
+    }
+    /// Build a transport whose first connect returns a 403 `insufficient_scope`
+    /// requiring `scope`, then succeeds.
+    fn with_403_first(scope: &str) -> Arc<Self> {
+        Arc::new(Self {
+            seen_specs: Mutex::new(Vec::new()),
+            fail_401_first: AtomicUsize::new(0),
+            fail_403_first: AtomicUsize::new(1),
+            fail_403_scope: Mutex::new(scope.into()),
         })
     }
     fn last_spec(&self) -> McpTransportSpec {
@@ -255,6 +271,14 @@ fn spec_auth_header(spec: &McpTransportSpec) -> Option<String> {
 impl McpTransport for RecordingTransport {
     async fn connect(&self, spec: &McpTransportSpec) -> Result<McpRawConnection, McpError> {
         self.seen_specs.lock().unwrap().push(spec.clone());
+        if self.fail_403_first.load(Ordering::SeqCst) > 0 {
+            self.fail_403_first.fetch_sub(1, Ordering::SeqCst);
+            let scope = self.fail_403_scope.lock().unwrap().clone();
+            // Flattened transport error mirroring a 403 WWW-Authenticate body.
+            return Err(McpError::Connection(format!(
+                "HTTP 403 Forbidden: Bearer error=\"insufficient_scope\", scope=\"{scope}\""
+            )));
+        }
         if self.fail_401_first.load(Ordering::SeqCst) > 0 {
             self.fail_401_first.fetch_sub(1, Ordering::SeqCst);
             return Err(McpError::Connection("HTTP 401 Unauthorized".into()));
@@ -829,4 +853,127 @@ async fn disconnect_without_revocation_endpoint_still_clears() {
         .await
         .unwrap();
     assert!(reloaded.is_none(), "tokens cleared even without revocation endpoint");
+}
+
+// ---------------------------------------------------------------------------
+// RESIDUAL 3 (B): step-up scope (403 insufficient_scope) → re-auth + retry.
+// ---------------------------------------------------------------------------
+
+/// A seeded valid token connects and 403s with `insufficient_scope` requiring
+/// `read:elevated`. The registry runs a fresh interactive flow whose authorize
+/// URL carries the elevated scope, persists `step_up_scope`, then retries and
+/// attaches the freshly minted Bearer. The cache is cleared on the new grant.
+#[tokio::test]
+async fn connect_403_insufficient_scope_triggers_step_up_reauth() {
+    let exchange = r#"{"access_token":"elevated-access","refresh_token":"r","expires_in":3600}"#;
+    let mock_as = MockAs::new(exchange, "{}");
+    // First connect 403s requiring read:elevated; the post-reauth connect succeeds.
+    let transport = RecordingTransport::with_403_first("read:elevated");
+    let storage = MemStorage::new();
+    let clock = TestClock::new(1_000);
+    let (on_url, mut url_rx) = url_capture();
+
+    // client_id configured → no DCR; the authorize URL is the step-up signal.
+    let config = http_cfg("stepup", Some(oauth_block(Some("preset-client"))));
+    let key = oauth::server_key("stepup", &config.spec);
+
+    // Seed an UNEXPIRED token so the first connect uses it and 403s.
+    let stored = oauth::StoredTokens {
+        access_token: "narrow-access".into(),
+        refresh_token: Some("narrow-refresh".into()),
+        expires_at_unix: 99_999,
+        client_id: Some("preset-client".into()),
+        client_secret: None,
+        step_up_scope: None,
+    };
+    let bytes = serde_json::to_vec(&stored).unwrap();
+    storage
+        .store(
+            oauth::MCP_OAUTH_SERVICE,
+            &key,
+            SecureStorageData::new(
+                bytes,
+                SecureStorageMetadata {
+                    created_at: SystemTime::UNIX_EPOCH,
+                    last_accessed: None,
+                    kind: SecretKindDto("mcp_oauth_tokens".into()),
+                },
+            ),
+        )
+        .await
+        .unwrap();
+
+    let registry = McpRegistry::new(transport.clone() as Arc<dyn McpTransport>).with_oauth(
+        OAuthDeps {
+            http: mock_as.clone() as Arc<dyn HttpTransport>,
+            clock: clock as Arc<dyn Clock>,
+            storage: storage.clone() as Arc<dyn SecureStorage>,
+            on_authorization_url: on_url,
+        },
+    );
+
+    // Drive the fake browser once the (step-up) authorize URL is surfaced, and
+    // capture that URL so we can assert it carries the elevated scope.
+    let captured: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+    let captured2 = captured.clone();
+    let browser = tokio::spawn(async move {
+        let url = url_rx.recv().await.expect("auth url surfaced");
+        *captured2.lock().unwrap() = Some(url.clone());
+        drive_browser(&url).await;
+    });
+
+    let registry2 = Arc::new(registry);
+    registry2.connect(config.clone()).await.expect("connect ok after step-up");
+    browser.await.unwrap();
+
+    // Two connect attempts: narrow token (403), then step-up token.
+    assert_eq!(transport.connect_count(), 2);
+    assert_eq!(
+        spec_auth_header(&transport.last_spec()).as_deref(),
+        Some("Bearer elevated-access")
+    );
+
+    // The step-up authorize URL requested the elevated scope (urlencoded).
+    let auth_url = captured.lock().unwrap().clone().expect("authorize url captured");
+    assert!(
+        auth_url.contains("scope=read%3Aelevated"),
+        "step-up authorize URL must request the elevated scope; url={auth_url}"
+    );
+
+    // The new grant cleared the cached step-up scope (fresh tokens carry it).
+    let reloaded = oauth::load_tokens(&(storage as Arc<dyn SecureStorage>), &key)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(reloaded.access_token, "elevated-access");
+    assert_eq!(reloaded.step_up_scope, None, "step_up_scope cleared on fresh grant");
+}
+
+/// Unit: the 403 detector extracts a quoted scope, an unquoted scope, ignores
+/// non-403 / non-insufficient_scope errors.
+#[test]
+fn step_up_scope_extraction() {
+    use mcp::registry::test_support::{error_is_403_insufficient_scope as detect};
+    assert_eq!(
+        detect(&McpError::Connection(
+            "HTTP 403: error=\"insufficient_scope\", scope=\"a b\"".into()
+        )),
+        Some("a b".to_string())
+    );
+    assert_eq!(
+        detect(&McpError::Handshake(
+            "403 insufficient_scope scope=read:x, realm=foo".into()
+        )),
+        Some("read:x".to_string())
+    );
+    // 403 without insufficient_scope → not step-up.
+    assert_eq!(
+        detect(&McpError::Connection("HTTP 403 Forbidden".into())),
+        None
+    );
+    // 401 → not step-up.
+    assert_eq!(
+        detect(&McpError::Connection("HTTP 401 insufficient_scope scope=x".into())),
+        None
+    );
 }

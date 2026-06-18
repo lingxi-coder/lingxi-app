@@ -3,9 +3,9 @@
 //! agent, skill, command, output-style, LSP).
 //!
 //! `enable` materialises commands, hooks, agents (frontmatter-gated),
-//! skills, output-styles, LSP servers, and MCP server CONFIGS (seeded
-//! `Disconnected` — live connect is residual). `disable` symmetrically
-//! removes them. `install`'s local-path arm discovers + enables a
+//! skills, output-styles, LSP servers, and MCP servers (live-connected
+//! through the same `McpRegistry::connect_all` path as normal configured
+//! `.mcp.json` servers). `disable` symmetrically removes them. `install`'s local-path arm discovers + enables a
 //! pre-fetched plugin dir; the network arms (git clone, marketplace
 //! download, `.mcpb` unpack) return a typed, capability-named error until
 //! the fetch + marketplace-policy machinery is ported.
@@ -22,7 +22,7 @@ use crate::strict_policy::{PluginComponent, StrictPluginOnlyPolicy};
 use command_api::CommandRegistry;
 use hooks::HookRegistry;
 use lsp::LspRegistry;
-use mcp::{McpConnectionState, McpRegistry, McpServerConfig};
+use mcp::{McpRegistry, McpServerConfig};
 use outputstyles::{OutputStyle, OutputStyleFrontmatter, OutputStyleRegistry, OutputStyleSource};
 use protocol::PluginId;
 use secret::CredentialManager;
@@ -413,11 +413,15 @@ impl PluginManager {
         }
 
         // (e) MCP servers — scope each `.mcp.json` entry as
-        //     `plugin:{plugin}:{server}` and seed it `Disconnected` so it is
-        //     discoverable (e.g. in `/mcp`) WITHOUT forcing a live connect
-        //     (`addPluginScopeToServers`, `mcpPluginIntegration.ts:341-359`,
-        //     uses scope `dynamic`; the discovery loader already stamps
-        //     `ConfigScope::Dynamic`). Live connection is residual.
+        //     `plugin:{plugin}:{server}` so it is keyed identically to a
+        //     normal configured server (`addPluginScopeToServers`,
+        //     `mcpPluginIntegration.ts:341-359`, uses scope `dynamic`; the
+        //     discovery loader already stamps `ConfigScope::Dynamic`). These
+        //     scoped configs are connected at enable time through the SAME
+        //     `McpRegistry::connect_all` path the engine uses for configured
+        //     `.mcp.json` servers (claude-code `getClaudeCodeMcpConfigs`
+        //     merges plugin servers into the SAME configs map that the
+        //     connection manager dials eagerly at startup — `config.ts:1114`).
         let mcp_scoped: Vec<McpServerConfig> = if self
             .strict
             .is_locked(PluginComponent::McpServers)
@@ -469,25 +473,19 @@ impl PluginManager {
         }
         let _ = &self.tool_registry;
 
-        // 6. MCP servers — seed each scoped config as `Disconnected` in the
-        //    registry's connection map (discoverable; live connect is residual)
-        //    and remember the scoped names so unload can remove exactly them.
+        // 6. MCP servers — route each scoped config through the registry's
+        //    live `connect_all` path, the SAME path engine-desktop uses for
+        //    normal configured `.mcp.json` servers (so plugin servers auto-dial
+        //    at bootstrap, transitioning Connecting→Connected, or to a
+        //    loop-eligible `Disconnected{last_error}` on failure that the
+        //    already-spawned reconnect loop retries). `connect_all` honors the
+        //    same `disabled` gating as configured servers. Remember the scoped
+        //    names FIRST so `unload_plugin` can remove exactly these entries
+        //    regardless of the state `connect_all` leaves them in.
         if !mcp_scoped.is_empty() {
-            let mut conns = self.mcp_registry.connections.write().await;
-            let mut names = Vec::with_capacity(mcp_scoped.len());
-            for cfg in mcp_scoped {
-                let key = cfg.name.clone();
-                conns.insert(
-                    key.clone(),
-                    McpConnectionState::Disconnected {
-                        config: cfg,
-                        last_error: None,
-                    },
-                );
-                names.push(key);
-            }
-            drop(conns);
+            let names: Vec<String> = mcp_scoped.iter().map(|cfg| cfg.name.clone()).collect();
             self.plugin_mcp_names.write().await.insert(manifest.id, names);
+            self.mcp_registry.connect_all(mcp_scoped).await;
         }
 
         // 7. LSP servers — plugin-only registration path.

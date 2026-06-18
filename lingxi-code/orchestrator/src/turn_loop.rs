@@ -302,6 +302,14 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
     system: Option<&str>,
     mut recovery: Option<&mut RecoveryState>,
 ) -> Result<(TurnStepOutcome, u64), OrchestratorError> {
+    // P0.1 (batched twin): arm the memory-selector prefetch CONCURRENTLY with
+    // this turn (claude-code `wAo`). Fired here at turn start so the in-flight
+    // handle is ready when `relevant_memory_reminder_message` awaits it below,
+    // before the blocking-limit estimate. A strict no-op when no prefetch is
+    // wired, keeping the locked turn-loop fixtures byte-identical. See
+    // [`ConversationOrchestrator::start_memory_prefetch`].
+    orch.start_memory_prefetch().await;
+
     // In-Loop Compaction Batch 4: proactively snip+micro+autocompact BEFORE
     // snapshotting history for the model call, so a long conversation
     // self-compacts mid-turn (TS pre-call pipeline `query.ts:365-467`). A strict
@@ -365,6 +373,19 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
     // wired / nothing completed since the last turn. See
     // [`ConversationOrchestrator::async_hook_response_reminder_message`].
     if let Some(reminder) = orch.async_hook_response_reminder_message().await {
+        history_snapshot.push(reminder);
+    }
+
+    // P0.1 (batched twin): per-turn, transient `relevant_memories` SURFACING
+    // reminder — the memory-selector/prefetch result rendered as one
+    // `<system-reminder>` meta user message. Appended to THIS call's OUTGOING
+    // snapshot only (never `session.history` / JSONL), after the async-hook
+    // reminder and BEFORE the blocking-limit estimate inside
+    // `call_api_with_ptl_recovery` so its tokens are counted in the prompt size.
+    // Awaits the prefetch armed by `start_memory_prefetch` at turn start. `None`
+    // when no prefetch is wired / empty result / everything already injected. See
+    // [`ConversationOrchestrator::relevant_memory_reminder_message`].
+    if let Some(reminder) = orch.relevant_memory_reminder_message().await {
         history_snapshot.push(reminder);
     }
 

@@ -15,6 +15,7 @@ pub mod secret_scan;
 pub mod selector;
 pub mod session_memory;
 pub mod snapshot;
+pub mod surfacing;
 pub mod team_memory;
 pub mod tier;
 

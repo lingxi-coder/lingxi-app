@@ -644,6 +644,32 @@ pub struct ConversationOrchestrator {
     /// Only consulted when the gate (`CLAUDE_CODE_AGENT_LIST_IN_MESSAGES`) is ON;
     /// inert (never read) in the default OFF build.
     pub(crate) sent_agent_names: Mutex<std::collections::HashSet<String>>,
+    /// P0.1: the memory-selector prefetcher, fired at turn start to score +
+    /// rank the available memdir set CONCURRENTLY with the main API call (1:1
+    /// with claude-code's `tengu_memdir_prefetch_collected` side-channel,
+    /// `wAo`/`Y$p`). `None` when no prefetch is wired (every test + any binary
+    /// without a memory selector) — then [`Self::start_memory_prefetch`] +
+    /// [`Self::relevant_memory_reminder_message`] are strict no-ops, keeping the
+    /// surfacing channel inert and the ~4000 locked fixtures byte-identical. The
+    /// LingXi gate is purely `memory_prefetch.is_some()` at the composition root
+    /// (no new env flag), mirroring claude-code's `tengu_moth_copse`-default-false
+    /// gate. Wired (when a real selector lands) via [`Self::with_memory_prefetch`].
+    pub(crate) memory_prefetch: Option<Arc<memory::prefetch::MemoryPrefetch>>,
+    /// P0.1 per-turn slot holding the in-flight prefetch handle armed by
+    /// [`Self::start_memory_prefetch`] at turn start and consumed by
+    /// [`Self::relevant_memory_reminder_message`] before snapshot assembly.
+    /// `None` between turns / when no prefetch is wired. Mirrors the
+    /// pending-handle slot pattern of the recovery / cache-safe slots.
+    pub(crate) pending_memory_prefetch:
+        Mutex<Option<memory::prefetch::PendingMemoryPrefetch>>,
+    /// P0.1 surfacing dedup: paths already surfaced via the
+    /// `relevant_memories` channel this session, so a memory surfaced once is
+    /// never re-injected on a later turn. Mirrors [`Self::sent_conditional_rules`]
+    /// (TS `loadedNestedMemoryPaths` / the prefetch's per-iteration consume
+    /// guard). Distinct from [`Self::read_file_state`], which the SHARED dedup
+    /// also consults so a file already loaded as a nested/conditional attachment
+    /// (P3.2) is never double-injected here.
+    pub(crate) surfaced_memory_paths: Mutex<std::collections::HashSet<std::path::PathBuf>>,
 }
 
 impl ConversationOrchestrator {
@@ -705,6 +731,9 @@ impl ConversationOrchestrator {
             sent_conditional_rules: Mutex::new(std::collections::HashSet::new()),
             sent_skill_names: Mutex::new(std::collections::HashSet::new()),
             sent_agent_names: Mutex::new(std::collections::HashSet::new()),
+            memory_prefetch: None,
+            pending_memory_prefetch: Mutex::new(None),
+            surfaced_memory_paths: Mutex::new(std::collections::HashSet::new()),
         }
     }
 
@@ -796,6 +825,29 @@ impl ConversationOrchestrator {
     #[must_use]
     pub fn has_skill_listing(&self) -> bool {
         self.skill_listing.is_some()
+    }
+
+    /// Attach a memory prefetcher so the per-turn `relevant_memories` surfacing
+    /// reminder is injected (P0.1). Without this the surfacing channel is a
+    /// strict no-op ([`Self::relevant_memory_reminder_message`] returns `None`),
+    /// keeping the locked fixtures byte-identical — the LingXi equivalent of
+    /// claude-code's `tengu_moth_copse`-default-false gate (here: "is a prefetch
+    /// wired at all"). Wired at the composition root once a real
+    /// selector-backed prefetch lands.
+    #[must_use]
+    pub fn with_memory_prefetch(
+        mut self,
+        prefetch: Arc<memory::prefetch::MemoryPrefetch>,
+    ) -> Self {
+        self.memory_prefetch = Some(prefetch);
+        self
+    }
+
+    /// Whether a memory prefetcher has been wired via
+    /// [`Self::with_memory_prefetch`]. (P0.1)
+    #[must_use]
+    pub fn has_memory_prefetch(&self) -> bool {
+        self.memory_prefetch.is_some()
     }
 
     /// Wire the source of completed background (`async`) hook responses, folded
@@ -2653,6 +2705,14 @@ impl ConversationOrchestrator {
                 break;
             }
 
+            // P0.1 (streaming twin): arm the memory-selector prefetch CONCURRENTLY
+            // with this turn (claude-code `wAo`). Fired here at turn start so the
+            // in-flight handle is ready when `relevant_memory_reminder_message`
+            // awaits it below, before the blocking-limit estimate. A strict no-op
+            // when no prefetch is wired, keeping the locked streaming fixtures
+            // byte-identical. See [`Self::start_memory_prefetch`].
+            self.start_memory_prefetch().await;
+
             // In-Loop Compaction Batch 4 (streaming twin): proactively
             // snip+micro+autocompact BEFORE snapshotting history for the
             // stream, so a long conversation self-compacts mid-turn. A strict
@@ -2729,6 +2789,19 @@ impl ConversationOrchestrator {
             // when no source is wired / nothing completed since the last turn.
             // See [`Self::async_hook_response_reminder_message`].
             if let Some(reminder) = self.async_hook_response_reminder_message().await {
+                snapshot.push(reminder);
+            }
+
+            // P0.1 (streaming twin): per-turn, transient `relevant_memories`
+            // SURFACING reminder — the memory-selector/prefetch result rendered
+            // as one `<system-reminder>` meta user message. Appended to THIS
+            // turn's OUTGOING snapshot only (never `session.history` / JSONL),
+            // after the async-hook reminder and BEFORE the blocking-limit estimate
+            // below so its tokens are counted in the prompt size. Awaits the
+            // prefetch armed by `start_memory_prefetch` at turn start. `None` when
+            // no prefetch is wired / empty result / everything already injected.
+            // See [`Self::relevant_memory_reminder_message`].
+            if let Some(reminder) = self.relevant_memory_reminder_message().await {
                 snapshot.push(reminder);
             }
 
@@ -3890,6 +3963,97 @@ impl ConversationOrchestrator {
             .map(|r| crate::prompt::conditional_rules::render_reminder(r))
             .collect::<Vec<_>>()
             .join("\n\n");
+        Some(ConversationMessage::user(MessageId::new(), content))
+    }
+
+    /// P0.1: arm the memory-selector prefetch for THIS turn, firing it
+    /// CONCURRENTLY with the main API call (claude-code's `wAo` prefetch
+    /// side-channel). Called at the START of each turn in BOTH drivers, BEFORE
+    /// the snapshot is assembled, so the in-flight handle is ready for
+    /// [`Self::relevant_memory_reminder_message`] to await. A strict no-op when
+    /// no prefetch is wired ([`Self::memory_prefetch`] is `None`) — then the slot
+    /// stays empty and the surfacing reminder is `None`, keeping the locked
+    /// fixtures byte-identical.
+    ///
+    /// The prefetch query is the latest NON-meta user-message text in the
+    /// session history (mirroring TS `e.findLast(m => m.type==="user" &&
+    /// !m.isMeta)` in `wAo`). The memdir directory is derived from the cwd; the
+    /// stub prefetch ignores both for now (it resolves to an empty set) so this
+    /// is inert by default.
+    pub(crate) async fn start_memory_prefetch(&self) {
+        let Some(prefetch) = self.memory_prefetch.as_ref() else {
+            return; // no prefetch wired ⇒ surfacing channel stays inert
+        };
+        // Latest non-meta user message = the turn query (TS findLast user/!meta).
+        // Meta messages (the transient reminders we append) carry no user intent,
+        // but they never enter `session.history`, so a plain last-user scan over
+        // history is faithful here.
+        let query = {
+            let s = self.session.lock().await;
+            s.history
+                .iter()
+                .rev()
+                .find(|m| matches!(m.role(), protocol::MessageRole::User))
+                .map(ConversationMessage::text_content)
+                .unwrap_or_default()
+        };
+        let pending = prefetch.start(query, self.cwd.clone()).await;
+        *self.pending_memory_prefetch.lock().await = Some(pending);
+    }
+
+    /// P0.1: the per-turn, transient `relevant_memories` SURFACING reminder — the
+    /// memory-selector/prefetch result rendered as a single `<system-reminder>`
+    /// meta user message. Returns `None` when no prefetch was armed this turn
+    /// ([`Self::start_memory_prefetch`] left the slot empty / no prefetch wired),
+    /// the prefetch resolved to an empty set, or every surfaced memory was
+    /// already injected (the SHARED dedup below).
+    ///
+    /// 1:1 with claude-code v2.1.181's `relevant_memories` attachment
+    /// (`normalizeAttachmentForAPI` case `"relevant_memories"`, messages.ts —
+    /// see [`memory::surfacing::render_surfacing_block`] for the exact shape):
+    /// the em-dash idx-0 preamble + per-memory `Memory: {path}:` header (with a
+    /// `>1`-day staleness prefix) wrapped in one `<system-reminder>` envelope.
+    ///
+    /// SHARED DEDUP: a memory is skipped when its path is in EITHER
+    /// [`Self::surfaced_memory_paths`] (already surfaced a prior turn) OR
+    /// [`Self::read_file_state`] (already loaded as a nested/conditional P3.2
+    /// attachment OR read by a file tool) — so a file can never be double-injected
+    /// across the surfacing + nested channels. Surfaced paths are recorded so each
+    /// memory injects ONCE (TS prefetch consume-once + `loadedNestedMemoryPaths`).
+    ///
+    /// Like every other per-turn reminder, the message is appended ONLY to the
+    /// per-turn OUTGOING snapshot (never `session.history` / JSONL), so it is
+    /// recomputed each turn and never accumulates.
+    pub(crate) async fn relevant_memory_reminder_message(&self) -> Option<ConversationMessage> {
+        // Consume the in-flight prefetch handle armed at turn start. `None` ⇒ no
+        // prefetch wired / not armed ⇒ no surfacing this turn.
+        let pending = self.pending_memory_prefetch.lock().await.take()?;
+        let surfaced = pending.take().await;
+        if surfaced.is_empty() {
+            return None;
+        }
+
+        // SHARED DEDUP — skip any memory already surfaced this session OR already
+        // loaded as a nested/conditional attachment / tool read (`read_file_state`).
+        let already_read: std::collections::HashSet<std::path::PathBuf> =
+            self.read_file_state.lock().await.iter().cloned().collect();
+        let fresh: Vec<memory::surfacing::SurfacedMemory> = {
+            let mut surfaced_set = self.surfaced_memory_paths.lock().await;
+            let mut out = Vec::new();
+            for m in surfaced {
+                if surfaced_set.contains(&m.path) || already_read.contains(&m.path) {
+                    continue; // double-injection guard
+                }
+                surfaced_set.insert(m.path.clone());
+                out.push(m);
+            }
+            out
+        };
+        if fresh.is_empty() {
+            return None;
+        }
+
+        let content = memory::surfacing::render_surfacing_block(&fresh);
         Some(ConversationMessage::user(MessageId::new(), content))
     }
 
@@ -6200,6 +6364,184 @@ mod conditional_rules_reminder_tests {
             !t1.contains("src-rule.md"),
             "already-sent src-rule must not re-inject: {t1}"
         );
+    }
+}
+
+// P0.1: `relevant_memory_reminder_message` SURFACING tests.
+//
+// A `MemoryPrefetch::with_fixed_result` (seeded surfaced set) is wired via
+// `with_memory_prefetch`; `start_memory_prefetch` arms the per-turn handle and
+// the reminder is asserted to render the `relevant_memories` shape, dedup against
+// both `surfaced_memory_paths` (across turns) and `read_file_state` (the SHARED
+// P3.2 nested-channel guard), and stay a strict no-op when no prefetch is wired.
+#[cfg(test)]
+mod relevant_memory_reminder_tests {
+    use super::*;
+    use crate::test_support::{
+        noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate,
+        StaticMemoryProvider,
+    };
+    use crate::OrchestratorConfig;
+    use async_trait::async_trait;
+    use memory::surfacing::SurfacedMemory;
+    use std::path::PathBuf;
+    use std::sync::Arc;
+    use std::time::SystemTime;
+    use tool_api::registry::ToolRegistry;
+
+    /// A runtime that actually RUNS the spawned future on the current tokio
+    /// runtime, so the prefetch's one-shot send fires (the shared
+    /// `noop_hook_executor` `UnusedRuntime` errors instead, which would leave the
+    /// channel unresolved). Cancel/sleep are no-ops — the prefetch task is
+    /// instantaneous.
+    struct InlineRuntime;
+    #[async_trait]
+    impl traits::RuntimeSpawner for InlineRuntime {
+        async fn spawn(
+            &self,
+            name: &str,
+            task: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'static>>,
+        ) -> Result<traits::BackgroundTaskHandle, traits::RuntimeError> {
+            tokio::spawn(task);
+            Ok(traits::BackgroundTaskHandle {
+                task_name: name.to_string(),
+                task_id: 0,
+            })
+        }
+        async fn sleep(&self, _d: std::time::Duration) {}
+        async fn cancel(
+            &self,
+            _h: &traits::BackgroundTaskHandle,
+        ) -> Result<(), traits::RuntimeError> {
+            Ok(())
+        }
+    }
+
+    fn mem(path: &str, content: &str, age_days: u64) -> SurfacedMemory {
+        SurfacedMemory {
+            path: PathBuf::from(path),
+            content: content.into(),
+            age_days,
+            mtime: SystemTime::UNIX_EPOCH,
+        }
+    }
+
+    /// Build an orchestrator with NO prefetch wired (surfacing inert).
+    fn orch_bare() -> ConversationOrchestrator {
+        ConversationOrchestrator::new(
+            OrchestratorConfig::default(),
+            Arc::new(MockApiClient::new(vec![])),
+            Arc::new(ToolRegistry::new()),
+            noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::with_files(vec![])),
+            PathBuf::from("/work/repo"),
+        )
+    }
+
+    /// Build an orchestrator whose prefetch resolves to `seed`.
+    fn orch_with_seed(seed: Vec<SurfacedMemory>) -> ConversationOrchestrator {
+        let runtime: Arc<dyn traits::RuntimeSpawner> = Arc::new(InlineRuntime);
+        let prefetch = Arc::new(memory::prefetch::MemoryPrefetch::with_fixed_result(
+            runtime, seed,
+        ));
+        orch_bare().with_memory_prefetch(prefetch)
+    }
+
+    #[tokio::test]
+    async fn no_prefetch_wired_yields_none() {
+        let orch = orch_bare();
+        // Without arming, and with no prefetch, the reminder is a strict no-op.
+        orch.start_memory_prefetch().await;
+        assert!(orch.relevant_memory_reminder_message().await.is_none());
+        assert!(!orch.has_memory_prefetch());
+    }
+
+    #[tokio::test]
+    async fn empty_prefetch_result_yields_none() {
+        let orch = orch_with_seed(vec![]);
+        orch.start_memory_prefetch().await;
+        assert!(orch.relevant_memory_reminder_message().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn not_armed_yields_none() {
+        // A wired prefetch that was never armed this turn (slot empty) ⇒ None.
+        let orch = orch_with_seed(vec![mem("/m/a.md", "A", 0)]);
+        assert!(orch.relevant_memory_reminder_message().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn seeded_prefetch_renders_relevant_memories_block() {
+        let orch = orch_with_seed(vec![mem("/m/a.md", "USE FD NOT FIND", 0)]);
+        orch.start_memory_prefetch().await;
+        let msg = orch
+            .relevant_memory_reminder_message()
+            .await
+            .expect("seeded prefetch must surface");
+        let text = msg.text_content();
+        assert!(text.starts_with("<system-reminder>\n"), "got: {text}");
+        assert!(
+            text.contains("Retrieved for possible relevance \u{2014} use only if it actually applies"),
+            "idx-0 preamble missing: {text}"
+        );
+        assert!(text.contains("Memory: /m/a.md:\n\nUSE FD NOT FIND"), "got: {text}");
+        assert!(text.ends_with("\n</system-reminder>"), "got: {text}");
+    }
+
+    #[tokio::test]
+    async fn surfaced_once_then_not_reinjected_across_turns() {
+        let orch = orch_with_seed(vec![mem("/m/a.md", "A", 0)]);
+        // Turn 0: surfaced.
+        orch.start_memory_prefetch().await;
+        assert!(
+            orch.relevant_memory_reminder_message().await.is_some(),
+            "first surfacing must inject"
+        );
+        // Turn 1: same memory ⇒ already in surfaced_memory_paths ⇒ no re-inject.
+        orch.start_memory_prefetch().await;
+        assert!(
+            orch.relevant_memory_reminder_message().await.is_none(),
+            "an already-surfaced memory must not be re-injected"
+        );
+    }
+
+    #[tokio::test]
+    async fn shared_dedup_skips_memory_already_in_read_file_state() {
+        // A memory whose path was already loaded as a nested/conditional (P3.2)
+        // attachment / tool read (present in read_file_state) must NOT be
+        // double-injected via the surfacing channel.
+        let path = PathBuf::from("/m/a.md");
+        let orch = orch_with_seed(vec![mem("/m/a.md", "A", 0)]);
+        orch.read_file_state.lock().await.push(path.clone());
+        orch.start_memory_prefetch().await;
+        assert!(
+            orch.relevant_memory_reminder_message().await.is_none(),
+            "a path already in read_file_state must not be surfaced"
+        );
+    }
+
+    #[tokio::test]
+    async fn partial_dedup_surfaces_only_fresh_memories() {
+        // Two memories; one already read. Only the fresh one surfaces, and it
+        // carries the idx-0 preamble (it is the first RENDERED memory).
+        let orch = orch_with_seed(vec![
+            mem("/m/seen.md", "SEEN", 0),
+            mem("/m/new.md", "NEW", 0),
+        ]);
+        orch.read_file_state
+            .lock()
+            .await
+            .push(PathBuf::from("/m/seen.md"));
+        orch.start_memory_prefetch().await;
+        let text = orch
+            .relevant_memory_reminder_message()
+            .await
+            .expect("the fresh memory must surface")
+            .text_content();
+        assert!(text.contains("Memory: /m/new.md:\n\nNEW"), "got: {text}");
+        assert!(!text.contains("/m/seen.md"), "already-read memory leaked: {text}");
     }
 }
 

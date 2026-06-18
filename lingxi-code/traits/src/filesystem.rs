@@ -43,6 +43,45 @@ pub trait FileSystem: Send + Sync {
     /// rewriting prior bytes (spec §22).
     async fn append_file(&self, path: &str, content: &str) -> Result<(), FsError>;
 
+    /// Exclusively create a brand-new empty file at `path`, failing if anything
+    /// already exists there (including a symlink).
+    ///
+    /// Mirrors claude-code's task-output init (`diskOutput.ts` `initTaskOutput`),
+    /// which opens with `O_CREAT | O_EXCL | O_NOFOLLOW`:
+    /// - `O_EXCL` makes the create idempotent-safe — a second create for the
+    ///   same path returns [`FsError::AlreadyExists`] rather than truncating
+    ///   bytes a concurrent writer already appended (the TOCTOU double-allocate
+    ///   race).
+    /// - `O_NOFOLLOW` refuses to follow a pre-planted symlink, closing the
+    ///   symlink-follow write vector from inside a sandbox.
+    ///
+    /// The default implementation creates the file via
+    /// [`write_file`](Self::write_file) (no exclusivity / symlink protection),
+    /// preserving the pre-hardening behavior for platforms and in-memory mocks
+    /// that do not need the atomic open. The hardened POSIX platform overrides
+    /// it with a real `O_EXCL | O_NOFOLLOW` open so the exclusive-create
+    /// guarantee (and the [`FsError::AlreadyExists`] collision) is genuine; a
+    /// mock that needs to exercise the collision path overrides this method to
+    /// fail on an already-present path.
+    async fn create_new_file(&self, path: &str) -> Result<(), FsError> {
+        self.write_file(path, "").await
+    }
+
+    /// Append `content` to `path` WITHOUT following a final-component symlink,
+    /// creating the file if it does not exist.
+    ///
+    /// Mirrors claude-code's task-output append (`diskOutput.ts`), which opens
+    /// with `O_WRONLY | O_APPEND | O_CREAT | O_NOFOLLOW` so a symlink planted at
+    /// the spool path from inside a sandbox cannot redirect the write to an
+    /// arbitrary host file.
+    ///
+    /// The default implementation delegates to [`append_file`](Self::append_file)
+    /// (no extra symlink protection); the hardened POSIX platform overrides it
+    /// with a real `O_NOFOLLOW` open.
+    async fn append_file_no_follow(&self, path: &str, content: &str) -> Result<(), FsError> {
+        self.append_file(path, content).await
+    }
+
     /// Truncate `path` to exactly `len` bytes.
     ///
     /// Used by the crash-safe JSONL reader to drop a torn tail after a power
@@ -113,6 +152,12 @@ pub enum FsError {
     /// Path resolves outside the workspace root.
     #[error("path outside workspace: {0}")]
     OutsideWorkspace(String),
+    /// A file (or symlink) already exists where an exclusive create was
+    /// requested. Surfaced by [`FileSystem::create_new_file`] when the path is
+    /// occupied — the `O_EXCL` collision that guards the spool double-allocate
+    /// race.
+    #[error("file already exists: {0}")]
+    AlreadyExists(String),
     /// File contents are not valid UTF-8 / look like binary data.
     #[error("file is binary: {0}")]
     BinaryFile(String),

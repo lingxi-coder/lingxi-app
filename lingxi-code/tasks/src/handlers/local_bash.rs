@@ -302,13 +302,15 @@ impl Task for LocalBashHandler {
             let result = process.run(&sandboxed).await;
 
             // Append captured output to the spool (best effort — spool I/O
-            // failure must not mask the command result).
+            // failure must not mask the command result). Append with O_NOFOLLOW
+            // (claude-code `diskOutput.ts`) so a symlink planted at the spool
+            // path from inside the sandbox cannot redirect the write (T18).
             if let Ok(out) = &result {
                 if !out.stdout.is_empty() {
-                    let _ = fs.append_file(&spool_path_str, &out.stdout).await;
+                    let _ = fs.append_file_no_follow(&spool_path_str, &out.stdout).await;
                 }
                 if !out.stderr.is_empty() {
-                    let _ = fs.append_file(&spool_path_str, &out.stderr).await;
+                    let _ = fs.append_file_no_follow(&spool_path_str, &out.stderr).await;
                 }
             }
 

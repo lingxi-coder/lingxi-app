@@ -242,6 +242,11 @@ impl TaskRegistryHandle for TaskRegistry {
                 crate::output_manager::OutputError::PathEscape(p) => {
                     TaskRegistryError::Internal(format!("path escape: {p}"))
                 }
+                // Unreachable on the read path (exclusive-create only fires in
+                // `allocate`), but the match must stay exhaustive.
+                crate::output_manager::OutputError::AlreadyExists(p) => {
+                    TaskRegistryError::Internal(format!("spool already allocated: {p}"))
+                }
             })?;
         Ok(TaskOutputChunk {
             task_id: state.base().id.clone(),

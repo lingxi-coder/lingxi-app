@@ -83,6 +83,55 @@ impl FileSystem for PosixFileSystem {
         f.flush().await.map_err(|e| FsError::Io(e.to_string()))
     }
 
+    async fn create_new_file(&self, path: &str) -> Result<(), FsError> {
+        // SECURITY: exclusive create with O_NOFOLLOW, byte-for-byte the
+        // claude-code `initTaskOutput` open (`diskOutput.ts`):
+        //   O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW
+        // - O_EXCL: fail with EEXIST if the path is already occupied — the
+        //   second-allocate truncate race is impossible (we never clobber bytes
+        //   a worker already appended).
+        // - O_NOFOLLOW: refuse a pre-planted symlink at the final component, so
+        //   a sandboxed attacker cannot redirect the create to a host file.
+        use std::os::unix::fs::OpenOptionsExt;
+        let f = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true) // O_CREAT | O_EXCL
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(path)
+            .map_err(|e| {
+                if e.kind() == std::io::ErrorKind::AlreadyExists {
+                    FsError::AlreadyExists(path.to_string())
+                } else {
+                    FsError::Io(e.to_string())
+                }
+            })?;
+        drop(f);
+        Ok(())
+    }
+
+    async fn append_file_no_follow(&self, path: &str, content: &str) -> Result<(), FsError> {
+        // SECURITY: append with O_NOFOLLOW, byte-for-byte the claude-code
+        // task-output append open (`diskOutput.ts`):
+        //   O_WRONLY | O_APPEND | O_CREAT | O_NOFOLLOW
+        // O_NOFOLLOW refuses to follow a symlink planted at the spool path, so a
+        // worker append cannot be redirected to an arbitrary host file.
+        // (`tokio::fs::OpenOptions::custom_flags` is inherent — no trait import.)
+        use tokio::io::AsyncWriteExt;
+        let mut f = tokio::fs::OpenOptions::new()
+            .append(true)
+            .create(true)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(path)
+            .await
+            .map_err(|e| FsError::Io(e.to_string()))?;
+        f.write_all(content.as_bytes())
+            .await
+            .map_err(|e| FsError::Io(e.to_string()))?;
+        // Same flush rationale as `append_file`: make append-then-read
+        // deterministic across the blocking pool.
+        f.flush().await.map_err(|e| FsError::Io(e.to_string()))
+    }
+
     async fn truncate(&self, path: &str, len: u64) -> Result<(), FsError> {
         let f = std::fs::OpenOptions::new()
             .write(true)
@@ -176,5 +225,116 @@ struct PosixFlockGuard {
 impl FlockGuard for PosixFlockGuard {
     fn path(&self) -> &str {
         &self.path
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+    use traits::FileSystem;
+
+    fn fs_at(root: &std::path::Path) -> PosixFileSystem {
+        PosixFileSystem::new(root.to_path_buf())
+    }
+
+    // ---- T4: exclusive-create (O_CREAT | O_EXCL | O_NOFOLLOW) --------------
+
+    #[tokio::test]
+    async fn create_new_file_creates_an_empty_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let fs = fs_at(dir.path());
+        let p = dir.path().join("spool.txt");
+        let ps = p.to_str().unwrap();
+
+        fs.create_new_file(ps).await.expect("first create succeeds");
+        assert!(p.exists(), "file materialized");
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), "", "created empty");
+    }
+
+    #[tokio::test]
+    async fn second_create_new_file_errors_and_does_not_truncate() {
+        // The double-allocate truncate race: a second exclusive create of the
+        // same path must FAIL (AlreadyExists), not silently clobber bytes a
+        // worker already appended.
+        let dir = tempfile::tempdir().unwrap();
+        let fs = fs_at(dir.path());
+        let p = dir.path().join("spool.txt");
+        let ps = p.to_str().unwrap();
+
+        fs.create_new_file(ps).await.unwrap();
+        // Simulate a worker appending output between the two allocations.
+        fs.append_file_no_follow(ps, "worker output\n").await.unwrap();
+
+        let err = fs
+            .create_new_file(ps)
+            .await
+            .expect_err("a second exclusive create must error");
+        assert!(
+            matches!(err, FsError::AlreadyExists(_)),
+            "second create returns AlreadyExists, not a silent truncate; got {err:?}"
+        );
+
+        // The worker's output survived — the failed create touched no bytes.
+        assert_eq!(
+            std::fs::read_to_string(&p).unwrap(),
+            "worker output\n",
+            "the existing output was NOT truncated by the refused create"
+        );
+    }
+
+    // ---- T18: O_NOFOLLOW refuses a pre-planted symlink --------------------
+
+    #[tokio::test]
+    async fn create_new_file_refuses_a_preplanted_symlink() {
+        // An attacker plants a symlink at the spool path pointing at a host
+        // file. O_NOFOLLOW must refuse to open it (create_new also implies
+        // O_EXCL → the existing symlink is an AlreadyExists collision), so the
+        // host file is never created/written through the link.
+        let dir = tempfile::tempdir().unwrap();
+        let fs = fs_at(dir.path());
+
+        let target = dir.path().join("victim-host-file");
+        let link = dir.path().join("spool.txt");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        let err = fs
+            .create_new_file(link.to_str().unwrap())
+            .await
+            .expect_err("create_new_file must refuse a symlink at the path");
+        assert!(
+            matches!(err, FsError::AlreadyExists(_) | FsError::Io(_)),
+            "symlink create is refused (EEXIST/ELOOP), got {err:?}"
+        );
+        // The symlink target was never materialized through the link.
+        assert!(
+            !target.exists(),
+            "the host file behind the symlink was NOT created"
+        );
+    }
+
+    #[tokio::test]
+    async fn append_no_follow_refuses_a_symlinked_spool_path() {
+        // O_NOFOLLOW on the append open: a worker append cannot be redirected
+        // through a symlink planted at the spool path.
+        let dir = tempfile::tempdir().unwrap();
+        let fs = fs_at(dir.path());
+
+        let target = dir.path().join("victim-host-file");
+        std::fs::write(&target, "original host content").unwrap();
+        let link = dir.path().join("spool.txt");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        let err = fs
+            .append_file_no_follow(link.to_str().unwrap(), "redirected!\n")
+            .await
+            .expect_err("append_file_no_follow must refuse to follow the symlink");
+        assert!(matches!(err, FsError::Io(_)), "got {err:?}");
+        // The host file behind the symlink is untouched (no append landed).
+        assert_eq!(
+            std::fs::read_to_string(&target).unwrap(),
+            "original host content",
+            "the symlink target was NOT written through"
+        );
     }
 }

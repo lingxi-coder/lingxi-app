@@ -280,8 +280,11 @@ impl Task for LocalAgentHandler {
                 Err(e) => (e.to_string(), TaskStatus::Failed),
             };
 
+            // Append with O_NOFOLLOW (claude-code `diskOutput.ts`) so a symlink
+            // planted at the spool path from inside the sandbox cannot redirect
+            // the write (T18).
             if !payload.is_empty() {
-                let _ = fs.append_file(&spool_path_str, &payload).await;
+                let _ = fs.append_file_no_follow(&spool_path_str, &payload).await;
             }
 
             status_sink.set_status(&worker_task_id, status).await;

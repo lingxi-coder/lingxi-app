@@ -231,13 +231,20 @@ impl TaskRegistry {
         let handle = handler.spawn(input.clone(), ctx).await?;
         let id = handle.task_id;
 
-        // 3. Allocate a registry-visible spool path and insert the typed state
-        //    built from the REAL input fields (not `create`'s placeholders), so
+        // 3. Recover the spool path the handler ALREADY allocated (the path is a
+        //    deterministic function of the id) and insert the typed state built
+        //    from the REAL input fields (not `create`'s placeholders), so
         //    `list()` / `get()` reflect a live spawned task.
+        //
+        //    We deliberately do NOT call `allocate(&id)` a second time here: the
+        //    handler created the spool (and its worker may already be appending
+        //    to it), so a re-allocate would either error on the exclusive
+        //    (`O_EXCL`) create or — worse, pre-fix — truncate output the worker
+        //    just wrote (the T4 double-allocate truncate race). `path_for` only
+        //    reconstructs the path; it touches no bytes.
         let path = self
             .output_manager
-            .allocate(&id)
-            .await
+            .path_for(&id)
             .map_err(|e| TaskError::Io(e.to_string()))?;
         // Keep a copy of the description for the `TaskCreated` fire below — the
         // original is moved into `base` here.
@@ -1450,5 +1457,214 @@ mod spawn_tests {
             .await
             .expect("create succeeds with no firer registered");
         assert!(!task_id.is_empty());
+    }
+
+    // ---- T4: spawn does NOT re-allocate the handler's spool ----------------
+    //
+    // An exclusive-create FS (O_EXCL semantics) + a handler that allocates its
+    // own spool and appends output. `registry.spawn` must consume that spool via
+    // `path_for` (no second `allocate`), so the worker's output survives and the
+    // exclusive create fires exactly once.
+
+    use std::sync::atomic::{AtomicUsize as Au, Ordering as Ord2};
+
+    /// In-memory FS with REAL exclusive-create semantics + a create counter.
+    struct ExclusiveCountingFs {
+        files: tokio::sync::Mutex<HashMap<String, String>>,
+        creates: Au,
+    }
+    impl ExclusiveCountingFs {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                files: tokio::sync::Mutex::new(HashMap::new()),
+                creates: Au::new(0),
+            })
+        }
+    }
+    #[async_trait]
+    impl FileSystem for ExclusiveCountingFs {
+        async fn read_file(
+            &self,
+            path: &str,
+            _o: Option<u64>,
+            _l: Option<u64>,
+        ) -> Result<traits::filesystem::FileContent, traits::filesystem::FsError> {
+            let map = self.files.lock().await;
+            let content = map.get(path).cloned().unwrap_or_default();
+            let total_lines = content.lines().count() as u64;
+            Ok(traits::filesystem::FileContent {
+                content,
+                truncated: false,
+                total_lines,
+            })
+        }
+        async fn write_file(
+            &self,
+            path: &str,
+            body: &str,
+        ) -> Result<(), traits::filesystem::FsError> {
+            self.files
+                .lock()
+                .await
+                .insert(path.to_string(), body.to_string());
+            Ok(())
+        }
+        async fn create_new_file(&self, path: &str) -> Result<(), traits::filesystem::FsError> {
+            self.creates.fetch_add(1, Ord2::SeqCst);
+            let mut map = self.files.lock().await;
+            if map.contains_key(path) {
+                return Err(traits::filesystem::FsError::AlreadyExists(path.to_string()));
+            }
+            map.insert(path.to_string(), String::new());
+            Ok(())
+        }
+        fn is_within_workspace(&self, _: &str) -> bool {
+            true
+        }
+        async fn watch(
+            &self,
+            _: &str,
+        ) -> Result<
+            std::pin::Pin<Box<dyn futures::Stream<Item = traits::filesystem::FileEvent> + Send>>,
+            traits::filesystem::FsError,
+        > {
+            Err(traits::filesystem::FsError::Io("nope".into()))
+        }
+        async fn append_file(
+            &self,
+            path: &str,
+            body: &str,
+        ) -> Result<(), traits::filesystem::FsError> {
+            self.files
+                .lock()
+                .await
+                .entry(path.to_string())
+                .or_default()
+                .push_str(body);
+            Ok(())
+        }
+        async fn truncate(&self, _: &str, _: u64) -> Result<(), traits::filesystem::FsError> {
+            Ok(())
+        }
+        async fn file_mtime(
+            &self,
+            _: &str,
+        ) -> Result<std::time::SystemTime, traits::filesystem::FsError> {
+            Ok(std::time::SystemTime::UNIX_EPOCH)
+        }
+        async fn file_size(&self, path: &str) -> Result<u64, traits::filesystem::FsError> {
+            let map = self.files.lock().await;
+            Ok(map.get(path).map_or(0, |s| s.len() as u64))
+        }
+        async fn delete_file(&self, path: &str) -> Result<(), traits::filesystem::FsError> {
+            self.files.lock().await.remove(path);
+            Ok(())
+        }
+        async fn symlink(&self, _: &str, _: &str) -> Result<(), traits::filesystem::FsError> {
+            Ok(())
+        }
+        async fn flock_exclusive(
+            &self,
+            _: &str,
+        ) -> Result<Box<dyn traits::filesystem::FlockGuard>, traits::filesystem::FsError> {
+            Err(traits::filesystem::FsError::Io("nope".into()))
+        }
+        async fn fsync(&self, _: &str) -> Result<(), traits::filesystem::FsError> {
+            Ok(())
+        }
+    }
+
+    /// A handler that allocates its OWN spool through the shared output manager
+    /// (like the real handlers) and appends a known line, then hands back a
+    /// fixed id — so a registry re-allocate would either collide (O_EXCL) or
+    /// truncate the appended bytes.
+    struct AllocatingHandler {
+        task_type: TaskType,
+        task_id: String,
+        out: Arc<crate::output_manager::TaskOutputManager>,
+    }
+    #[async_trait]
+    impl crate::task_trait::Task for AllocatingHandler {
+        fn name(&self) -> &str {
+            "allocating"
+        }
+        fn task_type(&self) -> TaskType {
+            self.task_type
+        }
+        async fn spawn(
+            &self,
+            _input: TaskSpawnInput,
+            _ctx: crate::task_trait::TaskContext,
+        ) -> Result<crate::task_trait::TaskHandle, TaskError> {
+            // Allocate the spool ONCE and write output the worker would produce.
+            let path = self
+                .out
+                .allocate(&self.task_id)
+                .await
+                .map_err(|e| TaskError::Io(e.to_string()))?;
+            self.out
+                .fs_for_test()
+                .append_file_no_follow(path.to_str().unwrap(), "spawned worker output\n")
+                .await
+                .map_err(|e| TaskError::Io(e.to_string()))?;
+            Ok(crate::task_trait::TaskHandle {
+                task_id: self.task_id.clone(),
+                cleanup: None,
+            })
+        }
+        async fn kill(
+            &self,
+            _task_id: &str,
+            _ctx: crate::task_trait::TaskContext,
+        ) -> Result<(), TaskError> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn spawn_does_not_reallocate_and_worker_output_survives() {
+        let fs = ExclusiveCountingFs::new();
+        let runtime = Arc::new(MockRuntimeSpawner::default());
+        let out = Arc::new(crate::output_manager::TaskOutputManager::new(
+            PathBuf::from("/spool"),
+            fs.clone(),
+        ));
+        let mut registry = TaskRegistry::new(runtime, fs.clone(), out.clone());
+        registry.register_handler(
+            TaskType::InProcessTeammate,
+            Arc::new(AllocatingHandler {
+                task_type: TaskType::InProcessTeammate,
+                task_id: "tspool1".into(),
+                out: out.clone(),
+            }),
+        );
+
+        let id = registry
+            .spawn(TaskType::InProcessTeammate, teammate_input(), "x".into())
+            .await
+            .expect("spawn must succeed WITHOUT a second exclusive allocate");
+        assert_eq!(id, "tspool1");
+
+        // The handler allocated EXACTLY once; the registry must not re-create.
+        assert_eq!(
+            fs.creates.load(Ord2::SeqCst),
+            1,
+            "registry.spawn must consume the handler's spool, not re-allocate it"
+        );
+
+        // The worker's output is intact (no truncation by a second allocate).
+        let path = out.path_for(&id).unwrap();
+        let read = out
+            .read(&path, crate::output_manager::OutputOptions::default())
+            .await
+            .unwrap();
+        assert!(
+            read.content.contains("spawned worker output"),
+            "the spawned worker's appended output survived; got {:?}",
+            read.content
+        );
+
+        // And the registry recorded the task under the handler id.
+        assert!(registry.get(&id).await.is_some());
     }
 }

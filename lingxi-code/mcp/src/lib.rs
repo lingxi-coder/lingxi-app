@@ -27,6 +27,7 @@ pub mod oauth;
 pub mod raw_conn;
 pub mod registry;
 pub mod xaa;
+pub mod xaa_idp;
 
 pub use client::{truncate_description, McpClient, McpClientError, MAX_MCP_DESCRIPTION_LENGTH};
 pub use connection::{ConfigScope, McpConnectionState, McpServerConfig};
@@ -47,3 +48,6 @@ pub use mcp_output_storage::{
 };
 pub use raw_conn::RawConnectionProvider;
 pub use registry::McpRegistry;
+pub use xaa_idp::{
+    MapServerOAuthLookup, ServerOAuthLookup, XaaIdpConfigProvider, XaaIdpSettings,
+};

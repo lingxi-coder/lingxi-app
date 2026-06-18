@@ -830,6 +830,17 @@ impl ConversationOrchestrator {
             .is_some_and(|r| r.has_oauth())
     }
 
+    /// Whether the wired MCP registry has a Cross-App-Access provider injected
+    /// ([`mcp::registry::XaaConfigProvider`] inside [`mcp::registry::OAuthDeps`]).
+    /// `false` when no registry/OAuth is wired OR no `xaaIdp` settings were
+    /// present (XAA stays opt-in, falling through to the actionable hard-fail).
+    /// Lets the desktop composition-root test confirm the XAA config layer is
+    /// production-reachable once configured.
+    #[must_use]
+    pub fn has_mcp_xaa(&self) -> bool {
+        self.mcp_registry.as_ref().is_some_and(|r| r.has_xaa())
+    }
+
     /// Whether a hook registry has been wired via
     /// [`Self::with_hook_registry`]. (M6-07)
     #[must_use]

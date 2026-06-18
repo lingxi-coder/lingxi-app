@@ -12,9 +12,9 @@ Port claude-code's project-trust model: on entering a directory that hasn't been
 
 - `utils/config.ts`: per-project config carries `hasTrustDialogAccepted?: boolean` (default false), stored under `config.projects[projectKey]` in `~/.claude.json`.
 - `checkHasTrustDialogAccepted(cwd)`: true if the cwd's project config has it, OR **any ancestor path** does (parent-walk — trusting a parent trusts children).
-- `components/TrustDialog/TrustDialog.tsx`: if `checkHasTrustDialogAccepted()` → skip (proceed). Else show "Do you trust the files in this folder?":
-  - **Accept** ("Yes, proceed") → set `hasTrustDialogAccepted: true` on the cwd project config, proceed (trusted session).
-  - **Decline** ("No, exit") → `process.exit`.
+- `components/TrustDialog/TrustDialog.tsx`: if `checkHasTrustDialogAccepted()` → skip (proceed). Else show the dialog. **The exact copy is byte-locked to `TrustDialog.tsx` (NOT the placeholder strings below — those were design guesses; the real copy is** title `"Accessing workspace:"` + cwd + `"Quick safety check: Is this a project you created or one you trust? (Like your own code, a well-known open source project, or work from your team). If not, take a moment to review what's in this folder first."` + `"Claude Code'll be able to read, edit, and execute files here."` + a `Security guide` link to `https://code.claude.com/docs/en/security` + options `"Yes, I trust this folder"` / `"No, exit"`**).
+  - **Accept** ("Yes, I trust this folder") → set `hasTrustDialogAccepted: true` on the cwd project config (EXCEPT cwd==$HOME → in-memory `setSessionTrustAccepted`, not persisted), proceed.
+  - **Decline** ("No, exit") → `gracefulShutdownSync(1)` (exit code **1**); the confirm:no keybinding path → `gracefulShutdownSync(0)`.
 - `screens/REPL.tsx` + `utils/plugins/performStartupChecks.tsx`: tools/hooks/plugins run ONLY after the dialog clears. Because decline exits, a *running* session is always trusted — so `project_trust` stays `Trusted` for any session that proceeds; the dialog is purely a startup gate + persistence.
 
 ## LingXi seams (what exists)
@@ -33,9 +33,9 @@ Port claude-code's project-trust model: on entering a directory that hasn't been
 
 2. **REPL startup gate** — `apps/cli/src/repl.rs::run_repl`:
    - After resolving cwd, before building the runtime/loop: if `should_prompt_interactively(is_tty, print)` AND `!check_has_trust_dialog_accepted(cfg_path, cwd)`, show the dialog over the shared stdin reader + stderr:
-     - Prompt (byte-locked to claude-code copy): `"Do you trust the files in this folder?\n\n{cwd}\n\n[y] Yes, proceed  [n] No, exit\n> "` (verify exact TS copy; match it). Read y/N (reuse the gate's y/yes/n/no/Empty parsing; Empty/n/EOF → decline).
+     - Prompt: the byte-exact `TrustDialog.tsx` copy (reference section above — "Accessing workspace:" … "Security guide: {url}" … "Yes, I trust this folder" / "No, exit") + a `[y/N]` reader. Read y/N (reuse the gate's y/yes/n/no/Empty parsing; Empty/n/EOF → decline).
      - Accept → `mark_trust_dialog_accepted(cfg_path, cwd)`, proceed.
-     - Decline → return exit code (the REPL returns `i32`; return a clean non-zero/`0`-with-message per claude-code's exit — verify the exit code; likely `0`).
+     - Decline → exit code **1** (`gracefulShutdownSync(1)`) WITHOUT building the runtime.
    - Non-TTY / already-accepted → proceed with no prompt (today's behavior; `project_trust` Trusted).
    - The dialog reads the SAME shared `BufReader` BEFORE the loop starts, so no stdin contention (sequential).
 

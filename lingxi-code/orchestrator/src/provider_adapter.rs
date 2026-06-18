@@ -19,7 +19,7 @@ use async_trait::async_trait;
 use futures::stream::BoxStream;
 use llm_client::{
     CacheControl, CostEstimator, DefaultLlmClient, LlmError, LlmEvent, LlmRequest, LlmResponse,
-    ProviderRequest, SystemBlock, Transport,
+    ProviderRequest, Transport,
 };
 use protocol::{ContentBlock, ConversationMessage};
 use std::collections::VecDeque;
@@ -427,8 +427,9 @@ impl ProviderApiAdapter {
 
         // Prompt-cache breakpoints (parity: claude-code getPromptCachingEnabled +
         // buildSystemPromptBlocks + addCacheBreakpoints). Anthropic permits at most
-        // 4 ephemeral breakpoints per request; we place at most 2 — one on the
-        // (single) system block and one on the last content block of the last
+        // 4 ephemeral breakpoints per request; we place at most 3 — up to two on
+        // the system blocks (prefix + rest, per splitSysPromptPrefix /
+        // buildSystemPromptBlocks) and one on the last content block of the last
         // message — matching the TS baseline (the tools array gets none on the
         // non-global-cache path). The Anthropic codec serializes
         // Some(CacheControl::Ephemeral) as {"type":"ephemeral"}; non-Anthropic
@@ -436,10 +437,12 @@ impl ProviderApiAdapter {
         let enable_caching = prompt_caching_enabled(model);
 
         if let Some(s) = system {
-            req.system = vec![SystemBlock {
-                text: s.to_string(),
-                cache_control: enable_caching.then_some(CacheControl::Ephemeral),
-            }];
+            // Split the assembled system string into up-to-3 cache blocks
+            // (here ≤2 — the attribution bucket is always empty for LingXi),
+            // marking only the org-scoped buckets, per
+            // `prompt::split_system_blocks`. Replaces the previous single
+            // collapsed block.
+            req.system = crate::prompt::split_system_blocks(s, enable_caching);
         }
         req.messages = messages;
 
@@ -1921,26 +1924,35 @@ mod tests {
     }
 
     #[test]
-    fn build_request_sets_two_cache_breakpoints_by_default() {
+    fn build_request_splits_system_into_org_blocks_by_default() {
+        use crate::prompt::locked_templates::{HEADER, SECTION_SEP};
         use llm_client::ContentBlock as LlmContentBlock;
         let _guard = CACHE_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         std::env::remove_var("DISABLE_PROMPT_CACHING");
         let transport = FakeTransport::always(ProviderResponse::json(200, ok_response_json()));
         let adapter = make_adapter(transport);
+        // A HEADER-prefixed assembled-shape system prompt splits into prefix +
+        // rest (splitSysPromptPrefix default mode), both org-scoped.
+        let system = format!("{HEADER}{SECTION_SEP}rest body here");
         let req = adapter
             .build_request(
                 "claude-sonnet-4-20250514",
                 None,
-                Some("system prompt"),
+                Some(&system),
                 vec![text_user_msg("hello")],
                 vec![],
                 false,
                 Some(1024),
             )
             .expect("build_request");
-        // (a) the single system block carries an ephemeral breakpoint.
-        assert_eq!(req.system.len(), 1);
+        // (a) two system blocks: prefix (HEADER) + rest, each org-scoped → each
+        // carries an ephemeral breakpoint (the attribution block is never
+        // emitted, so 2 not 3).
+        assert_eq!(req.system.len(), 2);
+        assert_eq!(req.system[0].text, HEADER);
         assert_eq!(req.system[0].cache_control, Some(CacheControl::Ephemeral));
+        assert_eq!(req.system[1].text, "rest body here");
+        assert_eq!(req.system[1].cache_control, Some(CacheControl::Ephemeral));
         // (c) the last message's last block carries the one message breakpoint.
         let last = req.messages.last().expect("a message");
         match last.content.last().expect("a content block") {
@@ -1953,16 +1965,18 @@ mod tests {
 
     #[test]
     fn build_request_omits_cache_breakpoints_when_disabled() {
+        use crate::prompt::locked_templates::{HEADER, SECTION_SEP};
         use llm_client::ContentBlock as LlmContentBlock;
         let _guard = CACHE_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         std::env::set_var("DISABLE_PROMPT_CACHING", "1");
         let transport = FakeTransport::always(ProviderResponse::json(200, ok_response_json()));
         let adapter = make_adapter(transport);
+        let system = format!("{HEADER}{SECTION_SEP}rest body here");
         let req = adapter
             .build_request(
                 "claude-sonnet-4-20250514",
                 None,
-                Some("system prompt"),
+                Some(&system),
                 vec![text_user_msg("hello")],
                 vec![],
                 false,
@@ -1970,7 +1984,10 @@ mod tests {
             )
             .expect("build_request");
         std::env::remove_var("DISABLE_PROMPT_CACHING");
+        // Still split into 2 blocks, but none carry a breakpoint.
+        assert_eq!(req.system.len(), 2);
         assert_eq!(req.system[0].cache_control, None);
+        assert_eq!(req.system[1].cache_control, None);
         let last = req.messages.last().expect("a message");
         match last.content.last().expect("a content block") {
             LlmContentBlock::Text { cache_control, .. } => assert_eq!(*cache_control, None),

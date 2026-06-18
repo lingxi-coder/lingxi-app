@@ -132,6 +132,83 @@ fn push_section_separator(s: &mut String) {
     }
 }
 
+/// Split an assembled system-prompt string into prompt-cache blocks, mirroring
+/// claude-code `splitSysPromptPrefix` default mode (`utils/api.ts:411-434`) +
+/// `buildSystemPromptBlocks` (`services/api/claude.ts:3213-3237`).
+///
+/// claude-code's `SystemPrompt` is a `string[]` bucketed by content match into
+/// three buckets — attribution header (`cacheScope=null`), the CLI prefix
+/// (`cacheScope='org'`), and everything else joined with `\n\n`
+/// (`cacheScope='org'`) — then `buildSystemPromptBlocks` maps each block to a
+/// text block that carries `cache_control` **only when the block's cacheScope
+/// is not null** and caching is enabled. The attribution block (scope `null`)
+/// therefore never gets a breakpoint.
+///
+/// LingXi assembles ONE concatenated string (see
+/// [`assemble_system_prompt_with_style`]) whose leading section is exactly the
+/// [`HEADER`] literal — byte-identical to claude-code's `DEFAULT_PREFIX`, which
+/// is the single member of `CLI_SYSPROMPT_PREFIXES`. LingXi has no
+/// `x-anthropic-billing-header` attribution machinery (it is GrowthBook /
+/// Bun-attestation gated even in TS and is never emitted here), so the
+/// attribution bucket is permanently empty. The faithful split for LingXi's
+/// input domain is therefore the prefix bucket (`HEADER`) plus the rest bucket
+/// (everything after the first section separator) — i.e. the default 3-way
+/// split **minus the always-absent attribution block**:
+///
+/// * `s == HEADER`, or `s` does not start with `HEADER + SECTION_SEP` (a
+///   `--system-prompt` override / preview bypass): a single block — matches the
+///   TS splitter emitting only the non-empty buckets (prefix-only or rest-only).
+/// * `s` starts with `HEADER + SECTION_SEP`: two blocks — `HEADER` (prefix,
+///   org-scoped) and the remainder (rest, org-scoped).
+///
+/// Both produced buckets are org-scoped, so each carries
+/// [`CacheControl::Ephemeral`] when `enable_caching` is `true`, and none when
+/// it is `false`. The order of the blocks matches `req.system`.
+#[must_use]
+pub fn split_system_blocks(
+    s: &str,
+    enable_caching: bool,
+) -> Vec<llm_client::SystemBlock> {
+    use llm_client::{CacheControl, SystemBlock};
+    let cc = || enable_caching.then_some(CacheControl::Ephemeral);
+
+    // The prefix bucket is exactly HEADER, present only when `s` begins with
+    // `HEADER + SECTION_SEP` (the assembled-prompt shape). `SECTION_SEP` is the
+    // boundary the assembler always emits between HEADER and the first body
+    // section, so the rest bucket starts immediately after it.
+    let prefix_boundary = {
+        let mut b = String::with_capacity(HEADER.len() + SECTION_SEP.len());
+        b.push_str(HEADER);
+        b.push_str(SECTION_SEP);
+        b
+    };
+    if let Some(rest) = s.strip_prefix(&prefix_boundary) {
+        if rest.is_empty() {
+            // HEADER followed by an empty body — prefix-only (degenerate).
+            return vec![SystemBlock {
+                text: HEADER.to_string(),
+                cache_control: cc(),
+            }];
+        }
+        return vec![
+            SystemBlock {
+                text: HEADER.to_string(),
+                cache_control: cc(),
+            },
+            SystemBlock {
+                text: rest.to_string(),
+                cache_control: cc(),
+            },
+        ];
+    }
+
+    // No HEADER prefix (override / custom prompt) — single rest-only block.
+    vec![SystemBlock {
+        text: s.to_string(),
+        cache_control: cc(),
+    }]
+}
+
 /// Runtime context required to assemble a system prompt.
 ///
 /// Constructed by `ConversationOrchestrator::run_turn` once per turn
@@ -367,5 +444,63 @@ mod tests {
         assert!(!out.contains("<tools>"));
         // Section still lands before the footer with a blank-line boundary.
         assert!(out.contains("# Output Style: Learning\nP\n\nNotes:"));
+    }
+
+    // ---- system-prompt cache-block split (splitSysPromptPrefix parity) ----
+
+    #[test]
+    fn split_header_plus_rest_yields_two_org_blocks_with_cache() {
+        use llm_client::CacheControl;
+        let s = format!("{HEADER}{SECTION_SEP}rest section A\n\nrest section B");
+        let blocks = split_system_blocks(&s, true);
+        assert_eq!(blocks.len(), 2);
+        // Prefix block is exactly HEADER, org-scoped → carries the breakpoint.
+        assert_eq!(blocks[0].text, HEADER);
+        assert_eq!(blocks[0].cache_control, Some(CacheControl::Ephemeral));
+        // Rest block is everything after the first separator, org-scoped → breakpoint.
+        assert_eq!(blocks[1].text, "rest section A\n\nrest section B");
+        assert_eq!(blocks[1].cache_control, Some(CacheControl::Ephemeral));
+    }
+
+    #[test]
+    fn split_omits_cache_control_when_caching_disabled() {
+        let s = format!("{HEADER}{SECTION_SEP}rest");
+        let blocks = split_system_blocks(&s, false);
+        assert_eq!(blocks.len(), 2);
+        assert_eq!(blocks[0].cache_control, None);
+        assert_eq!(blocks[1].cache_control, None);
+    }
+
+    #[test]
+    fn split_prefix_only_yields_single_block() {
+        // HEADER with no body after the separator (degenerate) collapses to one
+        // block, matching the TS splitter emitting only the non-empty prefix.
+        let s = format!("{HEADER}{SECTION_SEP}");
+        let blocks = split_system_blocks(&s, true);
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].text, HEADER);
+    }
+
+    #[test]
+    fn split_override_without_header_yields_single_rest_block() {
+        // A custom / --system-prompt override that does not start with HEADER is
+        // the rest-only bucket — one block.
+        let s = "You are a custom assistant.\n\nDo X.";
+        let blocks = split_system_blocks(s, true);
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].text, s);
+    }
+
+    #[test]
+    fn split_assembled_default_prompt_splits_at_header() {
+        // End-to-end: the real assembler output begins with HEADER and splits
+        // into prefix + rest, with the rest carrying the env/tools/footer.
+        let ctx = ctx_minimal();
+        let s = assemble_system_prompt(&ctx);
+        let blocks = split_system_blocks(&s, true);
+        assert_eq!(blocks.len(), 2);
+        assert_eq!(blocks[0].text, HEADER);
+        assert!(blocks[1].text.starts_with("<env>"));
+        assert!(blocks[1].text.ends_with("with a period.\n"));
     }
 }

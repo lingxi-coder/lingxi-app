@@ -613,6 +613,15 @@ pub struct ConversationOrchestrator {
     /// composition root from the `AsyncHookRegistry` completion channel.
     pub(crate) async_hook_responses:
         Option<Arc<dyn crate::prompt::async_hook_response::AsyncHookResponseProvider>>,
+    /// T35: source of terminal background tasks (a backgrounded `local_bash` /
+    /// `local_agent` / MCP `monitor` …) finished since the last turn, folded back
+    /// into the next turn as a `<task-notification>` reminder so the model learns
+    /// its async task completed (claude-code's per-task-type `enqueue*Notification`).
+    /// `None` ⇒ [`Self::task_notification_reminder_message`] is a strict no-op (the
+    /// default — keeps fixtures byte-identical). Wired at the desktop composition
+    /// root from the `TaskRegistry`.
+    pub(crate) task_notifications:
+        Option<Arc<dyn crate::prompt::task_notification::TaskNotificationProvider>>,
     /// §F: cache of the CONDITIONAL (`paths:`-gated) memory rules, populated the
     /// first time [`Self::conditional_rules_reminder_message`] runs (a `OnceCell`
     /// fill via the same `memory.load(&cwd)` the system prompt uses, then
@@ -727,6 +736,7 @@ impl ConversationOrchestrator {
             last_emitted_raw_utilization: Mutex::new(None),
             skill_listing: None,
             async_hook_responses: None,
+            task_notifications: None,
             conditional_rules_cache: tokio::sync::OnceCell::new(),
             sent_conditional_rules: Mutex::new(std::collections::HashSet::new()),
             sent_skill_names: Mutex::new(std::collections::HashSet::new()),
@@ -860,6 +870,19 @@ impl ConversationOrchestrator {
         provider: Arc<dyn crate::prompt::async_hook_response::AsyncHookResponseProvider>,
     ) -> Self {
         self.async_hook_responses = Some(provider);
+        self
+    }
+
+    /// T35: wire the source of terminal background tasks, folded back into the
+    /// next turn as a `<task-notification>` reminder by
+    /// [`Self::task_notification_reminder_message`] (claude-code's per-task-type
+    /// `enqueue*Notification`). Without it that method is a strict no-op.
+    #[must_use]
+    pub fn with_task_notifications(
+        mut self,
+        provider: Arc<dyn crate::prompt::task_notification::TaskNotificationProvider>,
+    ) -> Self {
+        self.task_notifications = Some(provider);
         self
     }
 
@@ -2792,6 +2815,16 @@ impl ConversationOrchestrator {
                 snapshot.push(reminder);
             }
 
+            // T35: fold the terminal background tasks finished since the last
+            // turn into THIS turn's OUTGOING snapshot only (never
+            // `session.history` / JSONL), drained consume-once so each completion
+            // surfaces exactly one `<task-notification>`. `None` when no registry
+            // is wired / nothing finished. See
+            // [`Self::task_notification_reminder_message`].
+            if let Some(reminder) = self.task_notification_reminder_message().await {
+                snapshot.push(reminder);
+            }
+
             // P0.1 (streaming twin): per-turn, transient `relevant_memories`
             // SURFACING reminder — the memory-selector/prefetch result rendered
             // as one `<system-reminder>` meta user message. Appended to THIS
@@ -3782,6 +3815,23 @@ impl ConversationOrchestrator {
         let provider = self.async_hook_responses.as_ref()?;
         let responses = provider.take_pending_responses().await;
         let content = crate::prompt::async_hook_response::render_reminder(&responses)?;
+        Some(ConversationMessage::user(MessageId::new(), content))
+    }
+
+    /// T35: the per-turn, transient `task-notification` reminder, or `None` when
+    /// no source is wired or no background task finished since the last turn.
+    ///
+    /// Mirrors [`Self::async_hook_response_reminder_message`]: drains the
+    /// registry's terminal-not-notified tasks (CONSUME-ONCE — the registry marks
+    /// each `notified` + evicts on drain) and renders their `<task-notification>`
+    /// blocks (claude-code's per-task-type `enqueue*Notification` formats) inside
+    /// one `<system-reminder>` meta user message. Appended ONLY to the per-turn
+    /// OUTGOING snapshot, never `session.history` / JSONL, so it never
+    /// accumulates. No delta set is needed — draining the registry IS the dedup.
+    pub(crate) async fn task_notification_reminder_message(&self) -> Option<ConversationMessage> {
+        let provider = self.task_notifications.as_ref()?;
+        let notifications = provider.take_pending_task_notifications().await;
+        let content = crate::prompt::task_notification::render_reminder(&notifications)?;
         Some(ConversationMessage::user(MessageId::new(), content))
     }
 
@@ -5879,6 +5929,76 @@ mod skill_listing_reminder_tests {
         let orch = orch_with(reg, None);
         assert!(
             orch.async_hook_response_reminder_message().await.is_none(),
+            "no provider wired ⇒ strict no-op"
+        );
+    }
+
+    // ── T35: `task-notification` reminder folds in then drains once ──────────
+
+    /// A [`TaskNotificationProvider`] that hands back its fixture exactly once
+    /// (the second drain returns empty), mirroring the registry's
+    /// take-mark-evict semantics so the consume-once invariant is testable
+    /// without a real registry.
+    struct OnceTaskNotifications(
+        std::sync::Mutex<Vec<traits::task_registry::TaskNotification>>,
+    );
+    #[async_trait::async_trait]
+    impl crate::prompt::task_notification::TaskNotificationProvider for OnceTaskNotifications {
+        async fn take_pending_task_notifications(
+            &self,
+        ) -> Vec<traits::task_registry::TaskNotification> {
+            std::mem::take(&mut *self.0.lock().unwrap())
+        }
+    }
+
+    #[tokio::test]
+    async fn task_notification_reminder_folds_in_then_drains_once() {
+        let reg = ToolRegistry::new();
+        // One terminal `local_bash` task — the minimal faithful surface.
+        let bash = traits::task_registry::TaskNotification {
+            task_id: "b12345678".into(),
+            task_type: "local_bash".into(),
+            status: "completed".into(),
+            description: "run tests".into(),
+            tool_use_id: None,
+            output_path: Some("/tmp/tasks/b12345678.output".into()),
+            exit_code: Some(0),
+            error: None,
+        };
+        let orch = orch_with(reg, None).with_task_notifications(Arc::new(OnceTaskNotifications(
+            std::sync::Mutex::new(vec![bash]),
+        )));
+        // Turn 0: the terminal task is folded in as a byte-faithful
+        // `<task-notification>` inside one `<system-reminder>`.
+        let t0 = orch
+            .task_notification_reminder_message()
+            .await
+            .expect("turn-0 task notification")
+            .text_content();
+        assert_eq!(
+            t0,
+            "<system-reminder>\n\
+<task-notification>\n\
+<task-id>b12345678</task-id>\n\
+<output-file>/tmp/tasks/b12345678.output</output-file>\n\
+<status>completed</status>\n\
+<summary>Background command \"run tests\" completed (exit code 0)</summary>\n\
+</task-notification>\n\
+</system-reminder>"
+        );
+        // Turn 1: consume-once — the notified+evicted task must NOT re-appear.
+        assert!(
+            orch.task_notification_reminder_message().await.is_none(),
+            "a delivered task notification must be drained, not repeated"
+        );
+    }
+
+    #[tokio::test]
+    async fn task_notification_reminder_none_without_provider() {
+        let reg = ToolRegistry::new();
+        let orch = orch_with(reg, None);
+        assert!(
+            orch.task_notification_reminder_message().await.is_none(),
             "no provider wired ⇒ strict no-op"
         );
     }

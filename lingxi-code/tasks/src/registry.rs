@@ -444,6 +444,69 @@ impl TaskRegistry {
         evict
     }
 
+    /// Drain the terminal tasks not yet surfaced to the model, marking each
+    /// `notified` (and evicting it, since terminal + notified is GC-able) so a
+    /// completion is reported exactly once. Returns a [`TaskNotification`]
+    /// snapshot per drained task, in registry-iteration order.
+    ///
+    /// This is the turn-boundary equivalent of claude-code's per-task-type
+    /// completion callbacks (`enqueueShellNotification` / `enqueueAgentNotification`
+    /// / …): a task that reaches a terminal status is reported once and then
+    /// `notified`. A task ALREADY `notified` (its output consumed via
+    /// `TaskOutput`/`TaskStop`) is skipped, so the model never sees a duplicate.
+    /// Pending / running tasks are left untouched.
+    ///
+    /// Field mapping per type (mirroring the per-type `enqueue*Notification`):
+    /// - `local_bash` carries `exit_code`;
+    /// - `local_agent` carries `error` (its `failed` reason);
+    /// - every type carries `tool_use_id` (when launched from a tool call) and
+    ///   the spool `output_path`.
+    pub async fn take_pending_task_notifications(
+        &self,
+    ) -> Vec<traits::task_registry::TaskNotification> {
+        use crate::handle::{status_to_wire, task_type_to_wire};
+        let mut map = self.tasks.write().await;
+        // Collect ids first (terminal + not-notified) so the per-id remove below
+        // doesn't fight the iteration borrow.
+        let drain_ids: Vec<String> = map
+            .iter()
+            .filter(|(_, s)| {
+                let b = s.base();
+                b.status.is_terminal() && !b.notified
+            })
+            .map(|(id, _)| id.clone())
+            .collect();
+        let mut out = Vec::with_capacity(drain_ids.len());
+        for id in drain_ids {
+            let Some(state) = map.get(&id) else { continue };
+            let b = state.base();
+            // Per-type fields the renderer needs beyond the shared base.
+            let exit_code = match state {
+                TaskState::LocalBash(bash) => bash.exit_code,
+                _ => None,
+            };
+            let error = match state {
+                TaskState::LocalAgent(agent) => agent.error.clone(),
+                _ => None,
+            };
+            out.push(traits::task_registry::TaskNotification {
+                task_id: b.id.clone(),
+                task_type: task_type_to_wire(b.task_type).to_string(),
+                status: status_to_wire(b.status).to_string(),
+                description: b.description.clone(),
+                tool_use_id: b.tool_use_id.clone(),
+                output_path: Some(b.output_file.to_string_lossy().into_owned()),
+                exit_code,
+                error,
+            });
+            // Mark notified + evict (terminal + notified is GC-able) so the
+            // completion surfaces exactly once. Mirrors `mark_notified`'s eager
+            // eviction without re-acquiring the lock.
+            map.remove(&id);
+        }
+        out
+    }
+
     /// Kill a task, cancelling its background handle if any.
     ///
     /// Two paths, decided by how the task was started:
@@ -1909,5 +1972,139 @@ mod spawn_tests {
         assert!(registry.get(&a).await.is_none());
         assert!(registry.get(&b).await.is_some(), "terminal but un-notified survives");
         assert!(registry.get(&c).await.is_some(), "notified but non-terminal survives");
+    }
+
+    // ---- T35: take_pending_task_notifications drain --------------------------
+
+    #[tokio::test]
+    async fn take_pending_drains_terminal_bash_once_with_exit_code() {
+        let (_d, registry) = make_registry();
+        let id = registry
+            .create(TaskType::LocalBash, teammate_input(), "run tests".into())
+            .await
+            .unwrap();
+        registry
+            .force_bash_terminal_for_test(&id, TaskStatus::Completed, Some(0))
+            .await;
+
+        // Drain 1: exactly one notification carrying the bash fields.
+        let drained = registry.take_pending_task_notifications().await;
+        assert_eq!(drained.len(), 1, "one terminal task ⇒ one notification");
+        let n = &drained[0];
+        assert_eq!(n.task_id, id);
+        assert_eq!(n.task_type, "local_bash");
+        assert_eq!(n.status, "completed");
+        assert_eq!(n.description, "run tests");
+        assert_eq!(n.exit_code, Some(0), "local_bash carries its exit_code");
+        assert!(n.error.is_none());
+        assert!(
+            n.output_path.as_deref().is_some_and(|p| p.ends_with(&format!("{id}.output"))),
+            "output_path is the spool path: {:?}",
+            n.output_path
+        );
+
+        // The drained task is evicted (terminal + now-notified).
+        assert!(registry.get(&id).await.is_none(), "drained task is evicted");
+
+        // Drain 2: consume-once — nothing left.
+        assert!(
+            registry.take_pending_task_notifications().await.is_empty(),
+            "a drained completion is not reported a second time"
+        );
+    }
+
+    #[tokio::test]
+    async fn take_pending_carries_agent_error() {
+        use crate::state::{LocalAgentTaskState, TaskState, TaskStateBase};
+        let (_d, registry) = make_registry();
+        // Build a terminal (failed) LocalAgent with an error message.
+        let base = TaskStateBase {
+            id: "afailed01".into(),
+            task_type: TaskType::LocalAgent,
+            status: TaskStatus::Failed,
+            description: "research".into(),
+            tool_use_id: Some("toolu_7".into()),
+            start_time: SystemTime::now(),
+            end_time: None,
+            total_paused_ms: 0,
+            output_file: std::path::PathBuf::from("/tmp/tasks/afailed01.output"),
+            output_offset: 0,
+            notified: false,
+        };
+        registry
+            .insert_state_for_test(TaskState::LocalAgent(LocalAgentTaskState {
+                base,
+                agent_id: protocol::AgentId::nil(),
+                prompt: String::new(),
+                error: Some("rate limited".into()),
+                messages: vec![],
+                pending_messages: vec![],
+                is_backgrounded: true,
+            }))
+            .await;
+
+        let drained = registry.take_pending_task_notifications().await;
+        assert_eq!(drained.len(), 1);
+        let n = &drained[0];
+        assert_eq!(n.task_type, "local_agent");
+        assert_eq!(n.status, "failed");
+        assert_eq!(n.error.as_deref(), Some("rate limited"));
+        assert_eq!(n.tool_use_id.as_deref(), Some("toolu_7"));
+        assert!(n.exit_code.is_none(), "agent tasks have no exit_code");
+    }
+
+    #[tokio::test]
+    async fn take_pending_skips_already_notified_and_non_terminal() {
+        let (_d, registry) = make_registry();
+
+        // A: terminal but ALREADY notified — but mark_notified evicts it, so
+        // model it as a notified+terminal task inserted directly via test seam.
+        {
+            use crate::state::{LocalBashTaskState, TaskState, TaskStateBase};
+            let base = TaskStateBase {
+                id: "bnotified".into(),
+                task_type: TaskType::LocalBash,
+                status: TaskStatus::Completed,
+                description: "seen".into(),
+                tool_use_id: None,
+                start_time: SystemTime::now(),
+                end_time: None,
+                total_paused_ms: 0,
+                output_file: std::path::PathBuf::from("/tmp/tasks/bnotified.output"),
+                output_offset: 0,
+                notified: true, // already surfaced (e.g. via TaskOutput)
+            };
+            registry
+                .insert_state_for_test(TaskState::LocalBash(LocalBashTaskState {
+                    base,
+                    command: String::new(),
+                    pid: None,
+                    exit_code: Some(0),
+                }))
+                .await;
+        }
+
+        // B: still pending (non-terminal).
+        let pending = registry
+            .create(TaskType::LocalBash, teammate_input(), "pending".into())
+            .await
+            .unwrap();
+
+        // C: terminal and un-notified — the only one that should drain.
+        let fresh = registry
+            .create(TaskType::LocalBash, teammate_input(), "fresh".into())
+            .await
+            .unwrap();
+        registry
+            .force_bash_terminal_for_test(&fresh, TaskStatus::Completed, Some(0))
+            .await;
+
+        let drained = registry.take_pending_task_notifications().await;
+        assert_eq!(drained.len(), 1, "only the terminal+un-notified task drains");
+        assert_eq!(drained[0].task_id, fresh);
+
+        // The already-notified task and the pending task both survive untouched.
+        assert!(registry.get("bnotified").await.is_some(), "already-notified survives");
+        assert!(registry.get(&pending).await.is_some(), "pending survives");
     }
 }

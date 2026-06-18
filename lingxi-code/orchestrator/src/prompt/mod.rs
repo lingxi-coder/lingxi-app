@@ -14,6 +14,7 @@ pub mod git_status;
 pub mod locked_templates;
 pub mod memory_block;
 pub mod skill_listing;
+pub mod task_notification;
 pub mod tools_block;
 
 pub use memory_block::{

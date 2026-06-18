@@ -3351,7 +3351,16 @@ pub async fn build(
     .with_skill_listing(Arc::new(RegistrySkillListing(shared_command_registry.clone())))
     // B5: fold completed background (`async`) hook responses back into the
     // next turn. Backed by the completion-channel drain buffer above.
-    .with_async_hook_responses(Arc::new(async_hook_response_buffer));
+    .with_async_hook_responses(Arc::new(async_hook_response_buffer))
+    // T35: fold terminal background tasks (a backgrounded `local_bash` /
+    // `local_agent` / MCP `monitor` …) back into the next turn as a
+    // `<task-notification>` reminder so the model learns its async task
+    // finished. Backed by the SAME `TaskRegistry` Arc wired into the tool
+    // context above; the provider drains the registry's terminal-not-notified
+    // tasks each turn (mark-notified + evict ⇒ each completion surfaces once).
+    .with_task_notifications(Arc::new(orchestrator::RegistryTaskNotifications::new(
+        task_registry.clone() as Arc<dyn traits::task_registry::TaskRegistryHandle>,
+    )));
 
     // P0.1 ACTIVATION (gated, default OFF). When `CLAUDE_CODE_MEMDIR_PREFETCH`
     // is truthy, wire the memdir-backed memory selector so relevant

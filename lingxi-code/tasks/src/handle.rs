@@ -36,7 +36,7 @@ fn task_type_from_wire(s: &str) -> Result<TaskType, TaskRegistryError> {
     })
 }
 
-fn task_type_to_wire(t: TaskType) -> &'static str {
+pub(crate) fn task_type_to_wire(t: TaskType) -> &'static str {
     match t {
         TaskType::LocalBash => "local_bash",
         TaskType::LocalAgent => "local_agent",
@@ -63,7 +63,7 @@ fn status_from_wire(s: &str) -> Result<TaskStatus, TaskRegistryError> {
     })
 }
 
-fn status_to_wire(s: TaskStatus) -> &'static str {
+pub(crate) fn status_to_wire(s: TaskStatus) -> &'static str {
     match s {
         TaskStatus::Pending => "pending",
         TaskStatus::Running => "running",
@@ -345,6 +345,16 @@ impl TaskRegistryHandle for TaskRegistry {
         TaskRegistry::mark_notified(self, id)
             .await
             .map_err(task_err_to_registry_err)
+    }
+
+    async fn take_pending_task_notifications(
+        &self,
+    ) -> Result<Vec<traits::task_registry::TaskNotification>, TaskRegistryError> {
+        // Dispatch to the inherent drain, which snapshots + marks-notified +
+        // evicts the terminal-not-notified tasks. Infallible at the registry
+        // level (the lock is always acquirable), so the seam result is always
+        // `Ok`.
+        Ok(TaskRegistry::take_pending_task_notifications(self).await)
     }
 }
 

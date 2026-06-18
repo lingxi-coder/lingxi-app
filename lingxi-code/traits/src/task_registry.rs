@@ -51,6 +51,39 @@ pub struct TaskRecord {
     pub command: Option<String>,
 }
 
+/// A terminal task that has not yet been surfaced to the model, snapshotted at
+/// drain time for the `<task-notification>` renderer (claude-code's per-task-type
+/// `enqueue*Notification`, e.g. `enqueueShellNotification` /
+/// `enqueueAgentNotification`). Each field maps to a tag the renderer emits;
+/// fields that a given task type does not carry stay `None` and the renderer
+/// omits the corresponding clause/tag.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TaskNotification {
+    /// 9-char task id → `<task-id>`.
+    pub task_id: String,
+    /// Task type wire string (one of the 7 byte-locked variants). Selects the
+    /// per-type notification format (bash / agent / monitor / generic).
+    pub task_type: String,
+    /// Terminal status wire string — one of `completed` / `failed` / `killed`
+    /// → `<status>` and the human-readable summary verb.
+    pub status: String,
+    /// Human-readable description → interpolated into `<summary>`.
+    pub description: String,
+    /// Originating `tool_use_id`, if the task was launched from a tool call →
+    /// the optional `<tool-use-id>` line. `None` ⇒ the line is omitted.
+    pub tool_use_id: Option<String>,
+    /// Absolute on-disk spool path → `<output-file>`. `None` ⇒ the renderer
+    /// falls back to the bare `<task_id>.output` filename.
+    pub output_path: Option<String>,
+    /// Process exit code for `local_bash` / `monitor_mcp` tasks, folded into the
+    /// summary (e.g. `(exit code 1)`). `None` ⇒ the exit clause is omitted.
+    pub exit_code: Option<i32>,
+    /// Failure reason for a `local_agent` task, folded into the `failed`
+    /// summary (`Agent "…" failed: {error}`). `None` falls back to
+    /// `Unknown error` for a failed agent (claude-code `error || 'Unknown error'`).
+    pub error: Option<String>,
+}
+
 /// One chunk of a task's accumulated stdout/stderr spool.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TaskOutputChunk {
@@ -154,6 +187,25 @@ pub trait TaskRegistryHandle: Send + Sync {
     /// existing mock handles compile unchanged.
     async fn mark_notified(&self, _id: &str) -> Result<(), TaskRegistryError> {
         Ok(())
+    }
+
+    /// Drain the terminal tasks that have NOT yet been surfaced to the model,
+    /// marking each `notified` (which eagerly evicts it) so a given completion
+    /// is reported exactly once. Returns a snapshot of each drained task for the
+    /// `<task-notification>` renderer, in registry-iteration order.
+    ///
+    /// 1:1 with claude-code's per-task-type completion path: a task that reaches
+    /// a terminal status enqueues exactly one `<task-notification>` and is then
+    /// `notified` (guarded by the same `notified` flag's check-and-set), so this
+    /// drain is the turn-boundary equivalent of those per-type
+    /// `enqueue*Notification` callbacks. A task ALREADY `notified` (e.g. by the
+    /// `TaskOutput`/`TaskStop` tool consuming its output) is skipped — no
+    /// duplicate. The default impl returns empty so existing mock handles compile
+    /// unchanged and builds with no registry stay byte-identical (no reminder).
+    async fn take_pending_task_notifications(
+        &self,
+    ) -> Result<Vec<TaskNotification>, TaskRegistryError> {
+        Ok(Vec::new())
     }
 }
 

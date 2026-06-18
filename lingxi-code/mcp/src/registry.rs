@@ -35,6 +35,56 @@ pub struct OAuthDeps {
     /// Host hook invoked with the authorization URL so the TUI / desktop can
     /// open a browser. Fired once per interactive flow.
     pub on_authorization_url: OnAuthorizationUrl,
+    /// Optional Cross-App-Access (XAA / SEP-990) config provider. When wired AND
+    /// `LINGXI_ENABLE_XAA` is truthy, an `oauth.xaa==Some(true)` server resolves
+    /// its token via the RFC 8693 → RFC 7523 token-exchange chain
+    /// ([`crate::xaa::perform_cross_app_access`]) instead of the consent flow.
+    ///
+    /// This provider supplies the per-server IdP + AS inputs (`id_token`, AS
+    /// `client_secret`, IdP token endpoint) that claude-code gathers via
+    /// `getXaaIdpSettings`/`acquireIdpIdToken`/`discoverOidc`/`mcpOAuthClientConfig`
+    /// (auth.ts:676-744). That IdP-login/secret surface has no config seam in
+    /// this codebase yet, so when this is `None` an XAA-flagged server hard-fails
+    /// with an actionable residual message rather than silently degrading.
+    // Dense OAuth/OIDC vocabulary (IdP, OIDC, AS) reads worse backticked.
+    #[allow(clippy::doc_markdown)]
+    pub xaa_config: Option<Arc<dyn XaaConfigProvider>>,
+}
+
+/// Per-server XAA inputs (the IdP `id_token` + AS/IdP credentials) gathered by
+/// the host. Mirrors the bundle claude-code's `performMCPXaaAuth` assembles
+/// from user settings + keychain before calling `performCrossAppAccess`
+/// (auth.ts:676-744). The IdP browser-login that mints `id_token`
+/// (`acquireIdpIdToken`) lives behind this seam.
+#[allow(clippy::doc_markdown)]
+#[derive(Debug, Clone)]
+pub struct XaaInputs {
+    /// AS-registered confidential client id (`serverConfig.oauth.clientId`).
+    pub client_id: String,
+    /// AS-registered confidential client secret (`mcpOAuthClientConfig`).
+    pub client_secret: String,
+    /// IdP-registered client id (`idp.clientId`).
+    pub idp_client_id: String,
+    /// Optional IdP client secret (`getIdpClientSecret`).
+    pub idp_client_secret: Option<String>,
+    /// The user's OIDC `id_token` (cached or freshly minted by IdP login).
+    pub idp_id_token: String,
+    /// IdP token endpoint (`discoverOidc(...).token_endpoint`).
+    pub idp_token_endpoint: String,
+}
+
+/// Seam supplying [`XaaInputs`] for an XAA-flagged server. Implemented by the
+/// host (desktop/CLI) once the IdP-settings + secret config surface exists.
+#[async_trait::async_trait]
+pub trait XaaConfigProvider: Send + Sync {
+    /// Resolve the XAA inputs for `server_name` / `server_url`, performing the
+    /// IdP login (or cache hit) as needed. Returns `Ok(None)` when this server
+    /// is not actually XAA-provisioned (caller hard-fails with guidance).
+    async fn xaa_inputs(
+        &self,
+        server_name: &str,
+        server_url: &str,
+    ) -> Result<Option<XaaInputs>, McpError>;
 }
 
 /// Initial reconnect backoff (claude-code `INITIAL_BACKOFF_MS = 1000`).
@@ -413,6 +463,18 @@ impl McpRegistry {
         };
         let key = oauth::server_key(&config.name, &config.spec);
 
+        // XAA (cross-app-access, SEP-990): when `oauth.xaa` is set, XAA is the
+        // ONLY auth path — never fall through to the consent flow (auth.ts:857-
+        // 900). Gated by `LINGXI_ENABLE_XAA` (mirror of CLAUDE_CODE_ENABLE_XAA);
+        // a flagged server with the env unset hard-fails with actionable copy.
+        if oauth_cfg.xaa == Some(true) {
+            let token = self.resolve_xaa_token(config, &key, deps).await?;
+            return Ok((
+                inject_bearer(&config.spec, token.access_token.expose_secret()),
+                Some(key),
+            ));
+        }
+
         // 1. Stored token, unexpired → use it.
         // 2. Stored token, expired with a refresh token → refresh, persist.
         // 3. No usable token → run the interactive flow, persist.
@@ -541,6 +603,101 @@ impl McpRegistry {
             .run_interactive_oauth(config, oauth_cfg, &key, deps, Some(scope))
             .await?;
         Ok(inject_bearer(&config.spec, token.access_token.expose_secret()))
+    }
+
+    /// Resolve an access token for an XAA-flagged server (auth.ts
+    /// `performMCPXaaAuth`, 664-845). Reuses a stored, unexpired XAA token if
+    /// present; otherwise runs the cross-app-access token-exchange chain
+    /// ([`crate::xaa::perform_cross_app_access`]) and persists the result
+    /// (including the confidential `client_secret`, so RFC-7009 revocation can
+    /// authenticate, and the AS URL via the persisted `client_id`).
+    ///
+    /// Gating (auth.ts:871-876): `LINGXI_ENABLE_XAA` must be truthy or this
+    /// hard-fails with actionable copy. When no [`XaaConfigProvider`] is wired
+    /// (the IdP-login/secret config seam — a noted residual), it returns a clear
+    /// residual error rather than silently degrading to the consent flow.
+    async fn resolve_xaa_token(
+        &self,
+        config: &McpServerConfig,
+        key: &str,
+        deps: &OAuthDeps,
+    ) -> Result<oauth::Tokens, McpError> {
+        // Gate on the enable flag (mirror of CLAUDE_CODE_ENABLE_XAA).
+        if !traits::env::is_env_truthy(std::env::var("LINGXI_ENABLE_XAA").ok().as_deref()) {
+            return Err(McpError::OAuth(format!(
+                "XAA is not enabled (set LINGXI_ENABLE_XAA=1). Remove 'xaa' from \
+                 server '{}' to use the standard consent flow.",
+                config.name
+            )));
+        }
+
+        // Reuse a stored, unexpired XAA token if present (no fresh exchange).
+        if let Some(stored) = oauth::load_tokens(&deps.storage, key).await? {
+            if deps.clock.now() < stored.expires_at() {
+                return Ok(stored.into_tokens());
+            }
+        }
+
+        // The IdP-login + AS-secret surface is supplied by the host provider.
+        // Absent it, XAA cannot proceed — a clearly-noted residual seam.
+        let provider = deps.xaa_config.as_ref().ok_or_else(|| {
+            McpError::OAuth(format!(
+                "XAA: no IdP connection configured for server '{}'. The XAA \
+                 IdP-login/secret config surface (getXaaIdpSettings / \
+                 acquireIdpIdToken / mcpOAuthClientConfig) is not yet wired \
+                 (residual).",
+                config.name
+            ))
+        })?;
+        let inputs = provider
+            .xaa_inputs(&config.name, spec_url(&config.spec))
+            .await?
+            .ok_or_else(|| {
+                McpError::OAuth(format!(
+                    "XAA: server '{}' is not XAA-provisioned (no IdP/AS inputs).",
+                    config.name
+                ))
+            })?;
+
+        let result = crate::xaa::perform_cross_app_access(
+            &deps.http,
+            spec_url(&config.spec),
+            &crate::xaa::XaaConfig {
+                client_id: &inputs.client_id,
+                client_secret: &inputs.client_secret,
+                idp_client_id: &inputs.idp_client_id,
+                idp_client_secret: inputs.idp_client_secret.as_deref(),
+                idp_id_token: &inputs.idp_id_token,
+                idp_token_endpoint: &inputs.idp_token_endpoint,
+            },
+        )
+        .await?;
+
+        // Persist: carry the AS confidential client_id/secret so refresh +
+        // RFC-7009 revocation can authenticate the confidential client
+        // (auth.ts:807-825 token-save). `expires_in` (when present) sets expiry.
+        let expires_at = match result.tokens.expires_in {
+            Some(secs) => deps.clock.now() + Duration::from_secs(secs),
+            // No expiry advertised → treat as already-stale so the next connect
+            // re-runs the exchange (XAA tokens are cheap to re-mint, silent).
+            None => deps.clock.now(),
+        };
+        let stored = oauth::StoredTokens {
+            access_token: result.tokens.access_token.clone(),
+            refresh_token: result.tokens.refresh_token.clone(),
+            expires_at_unix: expires_at
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs(),
+            client_id: Some(inputs.client_id.clone()),
+            client_secret: Some(inputs.client_secret.clone()),
+            step_up_scope: None,
+        };
+        oauth::store_tokens(&deps.storage, &deps.clock, key, &stored)
+            .await
+            .map_err(McpError::from)?;
+
+        Ok(stored.into_tokens())
     }
 
     /// Drive the full interactive OAuth flow and persist the resulting tokens.

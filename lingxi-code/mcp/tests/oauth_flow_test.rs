@@ -432,6 +432,7 @@ async fn full_flow_attaches_bearer_and_persists_tokens() {
             clock: clock.clone() as Arc<dyn Clock>,
             storage: storage.clone() as Arc<dyn SecureStorage>,
             on_authorization_url: on_url,
+            xaa_config: None,
         },
     );
 
@@ -509,6 +510,7 @@ async fn static_token_server_spec_is_unchanged() {
             clock: clock as Arc<dyn Clock>,
             storage: storage as Arc<dyn SecureStorage>,
             on_authorization_url: on_url,
+            xaa_config: None,
         },
     );
 
@@ -581,6 +583,7 @@ async fn expired_token_triggers_refresh_and_attaches_new_bearer() {
             clock: clock as Arc<dyn Clock>,
             storage: storage.clone() as Arc<dyn SecureStorage>,
             on_authorization_url: on_url,
+            xaa_config: None,
         },
     );
 
@@ -659,6 +662,7 @@ async fn connect_401_triggers_refresh_and_retry() {
             clock: clock as Arc<dyn Clock>,
             storage: storage as Arc<dyn SecureStorage>,
             on_authorization_url: on_url,
+            xaa_config: None,
         },
     );
 
@@ -730,6 +734,7 @@ async fn disconnect_revokes_tokens_and_clears_local() {
             clock: clock as Arc<dyn Clock>,
             storage: storage.clone() as Arc<dyn SecureStorage>,
             on_authorization_url: on_url,
+            xaa_config: None,
         },
     );
 
@@ -839,6 +844,7 @@ async fn disconnect_without_revocation_endpoint_still_clears() {
             clock: clock as Arc<dyn Clock>,
             storage: storage.clone() as Arc<dyn SecureStorage>,
             on_authorization_url: on_url,
+            xaa_config: None,
         },
     );
 
@@ -909,6 +915,7 @@ async fn connect_403_insufficient_scope_triggers_step_up_reauth() {
             clock: clock as Arc<dyn Clock>,
             storage: storage.clone() as Arc<dyn SecureStorage>,
             on_authorization_url: on_url,
+            xaa_config: None,
         },
     );
 
@@ -976,4 +983,157 @@ fn step_up_scope_extraction() {
         detect(&McpError::Connection("HTTP 401 insufficient_scope scope=x".into())),
         None
     );
+}
+
+// ---------------------------------------------------------------------------
+// RESIDUAL 3 (C): XAA gate + registry-driven cross-app-access.
+// ---------------------------------------------------------------------------
+
+use mcp::registry::{XaaConfigProvider, XaaInputs};
+
+/// Serializes the two XAA tests that mutate the process-global
+/// `LINGXI_ENABLE_XAA` env var so they can't race under the parallel runner.
+static XAA_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+/// An `oauth.xaa=Some(true)` server with `LINGXI_ENABLE_XAA` unset hard-fails
+/// with actionable copy (auth.ts:871-876) instead of degrading to consent.
+//
+// The serialization guard is intentionally held across the `connect().await`
+// (the env must stay set for the whole call). These tests run on the default
+// current-thread runtime, so this is safe; allow the lint.
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn xaa_flagged_server_without_enable_flag_hard_fails() {
+    let _guard = XAA_ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    // Ensure the gate env is unset for this test.
+    std::env::remove_var("LINGXI_ENABLE_XAA");
+
+    let mock_as = MockAs::new("{}", "{}");
+    let transport = RecordingTransport::new(0);
+    let storage = MemStorage::new();
+    let clock = TestClock::new(1_000);
+    let (on_url, _rx) = url_capture();
+
+    let oauth = McpOAuthConfigDto {
+        client_id: Some("as-client".into()),
+        callback_port: None,
+        auth_server_metadata_url: None,
+        xaa: Some(true),
+    };
+    let config = http_cfg("xaa-srv", Some(oauth));
+
+    let registry = McpRegistry::new(transport.clone() as Arc<dyn McpTransport>).with_oauth(
+        OAuthDeps {
+            http: mock_as as Arc<dyn HttpTransport>,
+            clock: clock as Arc<dyn Clock>,
+            storage: storage as Arc<dyn SecureStorage>,
+            on_authorization_url: on_url,
+            xaa_config: None,
+        },
+    );
+
+    let err = registry.connect(config).await.expect_err("xaa gate must fail");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("LINGXI_ENABLE_XAA"),
+        "actionable enable-flag copy; got: {msg}"
+    );
+    // The transport was never connected (the gate fires before connect).
+    assert_eq!(transport.connect_count(), 0);
+}
+
+/// Mock transport for the live XAA registry test: answers PRM / AS-metadata /
+/// `IdP` token-exchange / AS jwt-bearer.
+struct XaaHttp;
+#[async_trait]
+impl HttpTransport for XaaHttp {
+    async fn request(&self, req: HttpRequest) -> Result<HttpResponse, HttpError> {
+        let url = &req.url;
+        let (status, body) = if url.contains("oauth-protected-resource") {
+            (200, r#"{"resource":"https://mcp.example.com/v1","authorization_servers":["https://as.example.com"]}"#.to_string())
+        } else if url.contains("oauth-authorization-server") {
+            (200, r#"{"issuer":"https://as.example.com","token_endpoint":"https://as.example.com/token","grant_types_supported":["urn:ietf:params:oauth:grant-type:jwt-bearer"]}"#.to_string())
+        } else if url.contains("idp.example.com/token") {
+            (200, r#"{"access_token":"id-jag","issued_token_type":"urn:ietf:params:oauth:token-type:id-jag"}"#.to_string())
+        } else if url.contains("as.example.com/token") {
+            (200, r#"{"access_token":"xaa-access","token_type":"Bearer","expires_in":3600}"#.to_string())
+        } else {
+            (404, String::new())
+        };
+        Ok(HttpResponse { status, headers: vec![], body })
+    }
+    async fn stream_sse(&self, _req: HttpRequest) -> Result<SseStream, HttpError> {
+        Err(HttpError::InvalidRequest("unused".into()))
+    }
+}
+
+/// Mock XAA inputs provider for the live registry test.
+struct XaaTestProvider;
+#[async_trait]
+impl XaaConfigProvider for XaaTestProvider {
+    async fn xaa_inputs(
+        &self,
+        _server_name: &str,
+        _server_url: &str,
+    ) -> Result<Option<XaaInputs>, McpError> {
+        Ok(Some(XaaInputs {
+            client_id: "as-client".into(),
+            client_secret: "as-secret".into(),
+            idp_client_id: "idp-client".into(),
+            idp_client_secret: None,
+            idp_id_token: "the-id-token".into(),
+            idp_token_endpoint: "https://idp.example.com/token".into(),
+        }))
+    }
+}
+
+/// With the flag set + a wired provider, an XAA server resolves its Bearer via
+/// the cross-app-access exchange and attaches it to the spec; the persisted
+/// blob carries the AS confidential `client_id` + `client_secret`.
+#[allow(clippy::await_holding_lock)] // see the sibling test's note
+#[tokio::test]
+async fn xaa_enabled_drives_exchange_and_attaches_bearer() {
+    let _guard = XAA_ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    std::env::set_var("LINGXI_ENABLE_XAA", "1");
+
+    let transport = RecordingTransport::new(0);
+    let storage = MemStorage::new();
+    let clock = TestClock::new(1_000);
+    let (on_url, _rx) = url_capture();
+
+    let oauth = McpOAuthConfigDto {
+        client_id: Some("as-client".into()),
+        callback_port: None,
+        auth_server_metadata_url: None,
+        xaa: Some(true),
+    };
+    let config = http_cfg("xaa-live", Some(oauth));
+    let key = oauth::server_key("xaa-live", &config.spec);
+
+    let registry = McpRegistry::new(transport.clone() as Arc<dyn McpTransport>).with_oauth(
+        OAuthDeps {
+            http: Arc::new(XaaHttp) as Arc<dyn HttpTransport>,
+            clock: clock as Arc<dyn Clock>,
+            storage: storage.clone() as Arc<dyn SecureStorage>,
+            on_authorization_url: on_url,
+            xaa_config: Some(Arc::new(XaaTestProvider)),
+        },
+    );
+
+    registry.connect(config).await.expect("xaa connect ok");
+    std::env::remove_var("LINGXI_ENABLE_XAA");
+
+    assert_eq!(
+        spec_auth_header(&transport.last_spec()).as_deref(),
+        Some("Bearer xaa-access")
+    );
+    // Persisted blob carries the AS confidential client_id + client_secret so
+    // RFC-7009 revocation can authenticate the confidential client.
+    let stored = oauth::load_tokens(&(storage as Arc<dyn SecureStorage>), &key)
+        .await
+        .unwrap()
+        .expect("xaa tokens persisted");
+    assert_eq!(stored.access_token, "xaa-access");
+    assert_eq!(stored.client_id.as_deref(), Some("as-client"));
+    assert_eq!(stored.client_secret.as_deref(), Some("as-secret"));
 }

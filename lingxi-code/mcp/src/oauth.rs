@@ -25,11 +25,31 @@
 //! The [`OAuthState`] enum models the handshake stages; [`perform_oauth_flow`]
 //! drives discovery → (DCR) → PKCE → listener → URL → exchange.
 //!
-//! **Residual (noted, not ported — see task scope):** XAA cross-app-access
-//! (`performMCPXaaAuth`), CIMD (`client_id_metadata_document`), step-up scope
-//! (403 `insufficient_scope`), token revocation (RFC 7009), Slack-style
-//! `200`-with-error-body normalization, cross-process lockfile refresh
-//! coordination, and analytics events.
+//! **Implemented since the initial port:**
+//! - **Token revocation (RFC 7009)** — [`revoke_token`] / [`revoke_server_tokens`]
+//!   (port of `revokeToken`/`revokeServerTokens`, auth.ts:365-577), wired into
+//!   `McpRegistry::disconnect` (best-effort, refresh-then-access, then always
+//!   clear locally). The `preserveStepUpState` re-auth variant (auth.ts:578-617)
+//!   is not the logout path and stays residual.
+//! - **Step-up scope (403 `insufficient_scope`)** — detection + cached-scope
+//!   re-auth + retry in `registry.rs` (port of `wrapFetchWithStepUpDetection` /
+//!   `cachedStepUpScope`, auth.ts:1354-1374, 906-935). A structured
+//!   403-with-headers path (vs the flattened error string) is a noted residual,
+//!   parallel to the existing 401 note.
+//! - **XAA cross-app-access (SEP-990)** — the exchange engine + orchestrator
+//!   ([`crate::xaa`]) and the `LINGXI_ENABLE_XAA` + `oauth.xaa` gate in
+//!   `registry.rs` (port of `xaa.ts` + `performMCPXaaAuth`, auth.ts:847-900).
+//!
+//! **Residual (noted, not ported):**
+//! - The XAA **IdP-login / secret config surface** — `getXaaIdpSettings`,
+//!   `acquireIdpIdToken` (the one OIDC browser pop), `discoverOidc`, the
+//!   keychain `id_token` cache, the `xaaRefresh` silent path, the AS
+//!   `client_secret`/`mcpOAuthClientConfig` config seam, and analytics
+//!   (auth.ts:664-744). Supplied via the [`crate::registry::XaaConfigProvider`]
+//!   seam; absent it, an XAA-flagged server hard-fails with actionable copy.
+//! - CIMD (`client_id_metadata_document`), Slack-style `200`-with-error-body
+//!   normalization, cross-process lockfile refresh coordination, and analytics
+//!   events.
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use protocol::{HttpMethod, HttpRequest, Secret};

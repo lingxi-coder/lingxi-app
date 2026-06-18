@@ -101,7 +101,25 @@ pub fn normalize_messages_for_api(
     messages: Vec<ConversationMessage>,
 ) -> Vec<ConversationMessage> {
     let mut out: Vec<ConversationMessage> = Vec::with_capacity(messages.len());
-    for msg in messages {
+    for mut msg in messages {
+        // `stripAdvisorBlocks` (claude-code `claude.ts:1305`): drop
+        // `advisor_tool_result` (no advisor beta) and `connector_text` (no
+        // encode path — the Anthropic encoder rejects them) before the wire.
+        // The blocks remain PRESERVED in the JSONL transcript (history); only
+        // the outgoing clone is stripped. `redacted_thinking`/`server_tool_use`
+        // are kept (they round-trip).
+        match &mut msg {
+            ConversationMessage::User { content, .. }
+            | ConversationMessage::Assistant { content, .. } => {
+                content.retain(|b| {
+                    !matches!(
+                        b,
+                        ProtoBlock::ConnectorText { .. } | ProtoBlock::AdvisorToolResult { .. }
+                    )
+                });
+            }
+            ConversationMessage::System { .. } => {}
+        }
         match (out.last_mut(), msg) {
             (
                 Some(ConversationMessage::User {
@@ -115,6 +133,29 @@ pub fn normalize_messages_for_api(
             ) => {
                 join_text_at_seam(prev_content, new_content);
                 hoist_tool_results(prev_content);
+            }
+            // `mergeAssistantMessages` (claude-code `messages.ts`): the
+            // per-content-block assistant lines emitted by the streaming writer
+            // (one JSONL line per `content_block_stop`) re-collapse to a single
+            // assistant turn on the wire. claude-code keys on the shared API
+            // `message.id`; here we key on adjacency, which is equivalent —
+            // within a valid transcript consecutive `Assistant` messages with no
+            // intervening `User`/tool_result always belong to the same response.
+            // No `hoist_tool_results` (assistants carry `tool_use`, not
+            // `tool_result`, and block order must be preserved). A freshly-built
+            // single merged assistant is unaffected (identity); a resumed history
+            // of split lines collapses back to one turn.
+            (
+                Some(ConversationMessage::Assistant {
+                    content: prev_content,
+                    ..
+                }),
+                ConversationMessage::Assistant {
+                    content: new_content,
+                    ..
+                },
+            ) => {
+                join_text_at_seam(prev_content, new_content);
             }
             (_, msg) => out.push(msg),
         }
@@ -1273,5 +1314,77 @@ mod tests {
         };
         assert!(matches!(&content[0], ProtoBlock::Text { text }
             if text == "[Orphaned tool result removed due to conversation resume]"));
+    }
+
+    // ── mergeAssistantMessages + stripAdvisorBlocks (followup) ────────────────
+
+    /// Consecutive `Assistant` messages (the per-content-block streaming lines)
+    /// re-collapse to one turn on the wire, keeping the first id and block order.
+    #[test]
+    fn consecutive_assistants_merge_into_one() {
+        let first = MessageId::new();
+        let out = normalize_messages_for_api(vec![
+            ConversationMessage::Assistant {
+                id: first,
+                content: vec![ProtoBlock::Text { text: "hi".into() }],
+                stop_reason: None,
+            },
+            asst_blocks(vec![tu("toolu_a")]),
+        ]);
+        assert_eq!(out.len(), 1, "split assistant lines re-merge: {out:?}");
+        match &out[0] {
+            ConversationMessage::Assistant { id, content, .. } => {
+                assert_eq!(id, &first, "keeps the first line's id");
+                assert!(matches!(content[0], ProtoBlock::Text { .. }));
+                assert!(matches!(content[1], ProtoBlock::ToolUse { .. }));
+            }
+            other => panic!("expected merged Assistant, got {other:?}"),
+        }
+    }
+
+    /// A tool_result `user` line between assistant turns is a real boundary —
+    /// the assistants must NOT merge across it.
+    #[test]
+    fn tool_result_user_separates_assistant_turns_no_merge() {
+        let out = normalize_messages_for_api(vec![
+            asst_blocks(vec![ProtoBlock::Text { text: "t1".into() }]),
+            usr_blocks(vec![tr("toolu_a")]),
+            asst_blocks(vec![ProtoBlock::Text { text: "t2".into() }]),
+        ]);
+        assert_eq!(out.len(), 3);
+        assert!(matches!(out[0], ConversationMessage::Assistant { .. }));
+        assert!(matches!(out[1], ConversationMessage::User { .. }));
+        assert!(matches!(out[2], ConversationMessage::Assistant { .. }));
+    }
+
+    /// `connector_text` + `advisor_tool_result` are stripped before the wire;
+    /// `redacted_thinking` + `server_tool_use` are kept (they round-trip).
+    #[test]
+    fn advisor_and_connector_stripped_redacted_and_server_kept() {
+        let out = normalize_messages_for_api(vec![asst_blocks(vec![
+            ProtoBlock::Text { text: "x".into() },
+            ProtoBlock::RedactedThinking { data: "op".into() },
+            ProtoBlock::ServerToolUse {
+                id: "s1".into(),
+                name: "web_search".into(),
+                input: serde_json::json!({}),
+            },
+            ProtoBlock::ConnectorText {
+                connector_text: "c".into(),
+                signature: None,
+            },
+            ProtoBlock::AdvisorToolResult {
+                tool_use_id: "s1".into(),
+                content: serde_json::json!({}),
+                is_error: false,
+            },
+        ])]);
+        let ConversationMessage::Assistant { content, .. } = &out[0] else {
+            panic!("expected assistant");
+        };
+        assert_eq!(content.len(), 3, "connector+advisor stripped: {content:?}");
+        assert!(matches!(content[0], ProtoBlock::Text { .. }));
+        assert!(matches!(content[1], ProtoBlock::RedactedThinking { .. }));
+        assert!(matches!(content[2], ProtoBlock::ServerToolUse { .. }));
     }
 }

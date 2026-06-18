@@ -2513,16 +2513,20 @@ name = "mcp"
 version = "0.12.0"
 dependencies = [
  "async-trait",
+ "base64",
  "bytes",
  "jsonrpc",
  "protocol",
+ "rand 0.9.4",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
  "traits",
+ "urlencoding",
 ]
 
 [[package]]

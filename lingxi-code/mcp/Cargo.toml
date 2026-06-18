@@ -13,11 +13,15 @@ serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 async-trait.workspace = true
-tokio = { version = "1", features = ["sync", "time", "macros", "rt"] }
+tokio = { version = "1", features = ["sync", "time", "macros", "rt", "net", "io-util"] }
 tracing.workspace = true
+base64 = "0.22"
+rand = "0.9"
+sha2 = "0.10"
+urlencoding = "2"
 
 [dev-dependencies]
-tokio = { version = "1", features = ["sync", "time", "macros", "rt-multi-thread", "io-util"] }
+tokio = { version = "1", features = ["sync", "time", "macros", "rt-multi-thread", "io-util", "net"] }
 serde_json.workspace = true
 bytes = { workspace = true }
 tempfile = "3"

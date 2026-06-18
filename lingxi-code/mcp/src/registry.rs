@@ -9,13 +9,33 @@ use crate::client::McpClient;
 use crate::connection::{McpConnectionState, McpServerConfig};
 use crate::hook_dispatch::HookDispatcher;
 use crate::normalization::normalize_name_for_mcp;
+use crate::oauth::{self, OnAuthorizationUrl};
 use crate::raw_conn::RawConnectionProvider;
 use protocol::{AgentId, McpConnectionId};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 use tokio::sync::RwLock;
-use traits::{McpError, McpTransport};
+use traits::{Clock, HttpTransport, McpError, McpTransport, McpTransportSpec, SecureStorage};
+
+/// OAuth seam injected into the registry for remote (SSE/HTTP) MCP servers that
+/// declare an `oauth` config. When unset, OAuth-configured servers fall back to
+/// their static headers (no Bearer attach), and static-token servers are
+/// entirely unaffected. Mirrors claude-code's `services/mcp/auth.ts` wiring.
+#[derive(Clone)]
+pub struct OAuthDeps {
+    /// HTTP transport used for `.well-known` discovery, DCR, token exchange,
+    /// and refresh against the authorization server.
+    pub http: Arc<dyn HttpTransport>,
+    /// Wall-clock source used to compute / check token expiry.
+    pub clock: Arc<dyn Clock>,
+    /// Secure storage backing per-server token persistence (`mcp-oauth`
+    /// service, account = `oauth::server_key`).
+    pub storage: Arc<dyn SecureStorage>,
+    /// Host hook invoked with the authorization URL so the TUI / desktop can
+    /// open a browser. Fired once per interactive flow.
+    pub on_authorization_url: OnAuthorizationUrl,
+}
 
 /// Initial reconnect backoff (claude-code `INITIAL_BACKOFF_MS = 1000`).
 const INITIAL_BACKOFF: Duration = Duration::from_millis(1000);
@@ -60,6 +80,12 @@ pub struct McpRegistry {
     /// `{"action":"cancel"}` behavior. Set via [`Self::with_hook_dispatcher`],
     /// matching the `RawConnectionProvider` injection pattern.
     hook_dispatcher: Option<Arc<dyn HookDispatcher>>,
+    /// Optional OAuth 2.1 + PKCE seam for remote MCP servers configured with
+    /// an `oauth` block. When `None` (the default), [`Self::connect`] never
+    /// runs the OAuth flow and OAuth-configured servers connect with only their
+    /// static headers; static-token servers are unaffected either way. Wired
+    /// via [`Self::with_oauth`].
+    oauth: Option<OAuthDeps>,
     /// Interval used by the background health-check task.
     #[allow(dead_code)] // consumed by the health-check loop in Plan 13
     pub health_check_interval: Duration,
@@ -84,6 +110,7 @@ impl McpRegistry {
             transport,
             raw_conn: None,
             hook_dispatcher: None,
+            oauth: None,
             health_check_interval: Duration::from_secs(30),
             max_retry_count: 5,
         }
@@ -121,6 +148,24 @@ impl McpRegistry {
     #[must_use]
     pub fn with_hook_dispatcher(mut self, dispatcher: Option<Arc<dyn HookDispatcher>>) -> Self {
         self.hook_dispatcher = dispatcher;
+        self
+    }
+
+    /// Inject the OAuth 2.1 + PKCE seam ([`OAuthDeps`]) for remote MCP servers.
+    /// Builder-style so it composes with [`Self::new`] / [`Self::with_raw_conn`]:
+    ///
+    /// ```ignore
+    /// let reg = McpRegistry::with_raw_conn(transport, raw_conn).with_oauth(deps);
+    /// ```
+    ///
+    /// With this wired, [`Self::connect`] resolves a Bearer token for any
+    /// `Sse{oauth:Some}` / `Http{oauth:Some}` server (load → refresh-on-expiry →
+    /// interactive flow), injects `Authorization: Bearer <token>` into the
+    /// spec's headers, and retries once after a 401. Static-token servers
+    /// (`oauth: None`) take the unchanged path.
+    #[must_use]
+    pub fn with_oauth(mut self, deps: OAuthDeps) -> Self {
+        self.oauth = Some(deps);
         self
     }
 
@@ -219,18 +264,50 @@ impl McpRegistry {
         // map an elapsed deadline to a `Connection` error (the frozen `McpError`
         // has no connect-timeout variant — `Timeout` is tool-call-specific).
         let connect_timeout = mcp_connection_timeout();
-        let (conn, caps) = tokio::time::timeout(connect_timeout, async {
-            let conn = self.transport.connect(&config.spec).await?;
-            let caps = self.transport.initialize(&conn).await?;
-            Ok::<_, McpError>((conn, caps))
-        })
-        .await
-        .map_err(|_elapsed| {
-            McpError::Connection(format!(
-                "MCP connection timed out after {}s",
-                connect_timeout.as_secs()
-            ))
-        })??;
+
+        // OAuth (SSE/HTTP with an `oauth` block + wired `OAuthDeps`): resolve a
+        // Bearer token and inject it into the spec headers before connecting.
+        // Returns `(augmented_spec, server_key)` so a 401 can drive a refresh +
+        // retry. Static-token servers (and any server when `oauth` is unwired)
+        // resolve to the spec unchanged with no server key.
+        let (connect_spec, oauth_key) = self.resolve_oauth_spec(&config).await?;
+
+        let attempt = |spec: McpTransportSpec| {
+            let transport = Arc::clone(&self.transport);
+            async move {
+                let conn = transport.connect(&spec).await?;
+                let caps = transport.initialize(&conn).await?;
+                Ok::<_, McpError>((conn, caps))
+            }
+        };
+
+        let (conn, caps) = match tokio::time::timeout(connect_timeout, attempt(connect_spec.clone()))
+            .await
+            .map_err(|_elapsed| {
+                McpError::Connection(format!(
+                    "MCP connection timed out after {}s",
+                    connect_timeout.as_secs()
+                ))
+            })? {
+            Ok(pair) => pair,
+            // 401 on a connect/initialize for an OAuth server → the access token
+            // is stale: force a refresh (or a fresh interactive flow), re-inject
+            // the Bearer, and retry ONCE. Faithful-core 401 detection: the
+            // transport flattens errors to strings, so we substring-match "401"
+            // (structured status is a noted residual).
+            Err(e) if oauth_key.is_some() && error_is_401(&e) => {
+                let refreshed = self.reauth_oauth_spec(&config).await?;
+                tokio::time::timeout(connect_timeout, attempt(refreshed))
+                    .await
+                    .map_err(|_elapsed| {
+                        McpError::Connection(format!(
+                            "MCP connection timed out after {}s",
+                            connect_timeout.as_secs()
+                        ))
+                    })??
+            }
+            Err(e) => return Err(e),
+        };
         let mut tools = self.transport.list_tools(&conn).await?;
         let resources = self.transport.list_resources(&conn).await?;
         let prompts = self.transport.list_prompts(&conn).await?;
@@ -294,6 +371,142 @@ impl McpRegistry {
         }
 
         Ok(connection_id)
+    }
+
+    /// Resolve the spec to connect with, attaching a Bearer token for OAuth
+    /// servers. Returns `(spec, Some(server_key))` for an OAuth-configured
+    /// SSE/HTTP server (token loaded → refreshed-on-expiry → freshly minted via
+    /// the interactive flow), or `(config.spec.clone(), None)` for static-token
+    /// servers and any server when the OAuth seam is unwired.
+    ///
+    /// Mirrors claude-code's per-connect token resolution (`auth.ts` `tokens()`
+    /// + `useManageMCPConnections` attaching the Authorization header).
+    async fn resolve_oauth_spec(
+        &self,
+        config: &McpServerConfig,
+    ) -> Result<(McpTransportSpec, Option<String>), McpError> {
+        let Some(deps) = &self.oauth else {
+            return Ok((config.spec.clone(), None));
+        };
+        let Some(oauth_cfg) = spec_oauth(&config.spec) else {
+            return Ok((config.spec.clone(), None));
+        };
+        let key = oauth::server_key(&config.name, &config.spec);
+
+        // 1. Stored token, unexpired → use it.
+        // 2. Stored token, expired with a refresh token → refresh, persist.
+        // 3. No usable token → run the interactive flow, persist.
+        let token = match oauth::load_tokens(&deps.storage, &key).await? {
+            // Unexpired stored token → use it directly.
+            Some(stored) if deps.clock.now() < stored.expires_at() => stored.into_tokens(),
+            // Expired stored token.
+            Some(stored) => {
+                match stored.refresh_token.clone() {
+                    Some(refresh) => {
+                        let meta = oauth::discover_auth_server_metadata(
+                            &deps.http,
+                            spec_url(&config.spec),
+                            oauth_cfg.auth_server_metadata_url.as_deref(),
+                        )
+                        .await?;
+                        let client_id =
+                            oauth_cfg.client_id.clone().unwrap_or_default();
+                        let refreshed = oauth::refresh_tokens(
+                            &deps.http,
+                            &deps.clock,
+                            &meta,
+                            &client_id,
+                            &refresh,
+                        )
+                        .await?;
+                        oauth::save_tokens(&deps.storage, &deps.clock, &key, &refreshed).await?;
+                        refreshed
+                    }
+                    None => self.run_interactive_oauth(config, oauth_cfg, &key, deps).await?,
+                }
+            }
+            None => self.run_interactive_oauth(config, oauth_cfg, &key, deps).await?,
+        };
+
+        Ok((
+            inject_bearer(&config.spec, token.access_token.expose_secret()),
+            Some(key),
+        ))
+    }
+
+    /// Re-authenticate after a 401: refresh if a refresh token is stored, else
+    /// run a fresh interactive flow, then return the spec with the new Bearer.
+    async fn reauth_oauth_spec(
+        &self,
+        config: &McpServerConfig,
+    ) -> Result<McpTransportSpec, McpError> {
+        let deps = self
+            .oauth
+            .as_ref()
+            .ok_or_else(|| McpError::OAuth("oauth seam not wired".into()))?;
+        let oauth_cfg = spec_oauth(&config.spec)
+            .ok_or_else(|| McpError::OAuth("server has no oauth config".into()))?;
+        let key = oauth::server_key(&config.name, &config.spec);
+
+        let token = match oauth::load_tokens(&deps.storage, &key)
+            .await?
+            .and_then(|t| t.refresh_token)
+        {
+            Some(refresh) => {
+                let meta = oauth::discover_auth_server_metadata(
+                    &deps.http,
+                    spec_url(&config.spec),
+                    oauth_cfg.auth_server_metadata_url.as_deref(),
+                )
+                .await?;
+                let client_id = oauth_cfg.client_id.clone().unwrap_or_default();
+                match oauth::refresh_tokens(&deps.http, &deps.clock, &meta, &client_id, &refresh)
+                    .await
+                {
+                    Ok(t) => {
+                        oauth::save_tokens(&deps.storage, &deps.clock, &key, &t).await?;
+                        t
+                    }
+                    // Refresh token rejected → fall back to a fresh flow.
+                    Err(oauth::OAuthError::RefreshRejected(_)) => {
+                        self.run_interactive_oauth(config, oauth_cfg, &key, deps).await?
+                    }
+                    Err(e) => return Err(e.into()),
+                }
+            }
+            None => self.run_interactive_oauth(config, oauth_cfg, &key, deps).await?,
+        };
+
+        Ok(inject_bearer(&config.spec, token.access_token.expose_secret()))
+    }
+
+    /// Drive the full interactive OAuth flow and persist the resulting tokens.
+    async fn run_interactive_oauth(
+        &self,
+        config: &McpServerConfig,
+        oauth_cfg: &traits::McpOAuthConfigDto,
+        key: &str,
+        deps: &OAuthDeps,
+    ) -> Result<oauth::Tokens, McpError> {
+        // Surface `AwaitingOAuth` while the user completes the browser flow.
+        let callback_port = oauth_cfg.callback_port.unwrap_or(0);
+        self.connections.write().await.insert(
+            config.name.clone(),
+            McpConnectionState::AwaitingOAuth {
+                config: config.clone(),
+                callback_port,
+            },
+        );
+        let tokens = oauth::perform_oauth_flow(
+            &deps.http,
+            &deps.clock,
+            oauth_cfg,
+            spec_url(&config.spec),
+            &deps.on_authorization_url,
+        )
+        .await?;
+        oauth::save_tokens(&deps.storage, &deps.clock, key, &tokens).await?;
+        Ok(tokens)
     }
 
     /// Connect every server in `configs` at startup, mirroring claude-code's
@@ -677,6 +890,69 @@ mod backoff_schedule_tests {
         // Large attempts saturate at the cap, never overflow.
         assert_eq!(backoff_for(100), MAX_BACKOFF);
     }
+}
+
+/// Borrow the `oauth` config block of an SSE/HTTP spec, if present. Other
+/// transports (stdio, websocket, …) never carry OAuth → `None`.
+fn spec_oauth(spec: &McpTransportSpec) -> Option<&traits::McpOAuthConfigDto> {
+    match spec {
+        McpTransportSpec::Sse { oauth, .. } | McpTransportSpec::Http { oauth, .. } => oauth.as_ref(),
+        _ => None,
+    }
+}
+
+/// Endpoint URL of an SSE/HTTP spec (used as the OAuth `server_url` for
+/// discovery and the `getServerKey` hash). Empty for non-remote specs.
+fn spec_url(spec: &McpTransportSpec) -> &str {
+    match spec {
+        McpTransportSpec::Sse { url, .. } | McpTransportSpec::Http { url, .. } => url,
+        _ => "",
+    }
+}
+
+/// Clone `spec` with `Authorization: Bearer <token>` set in its headers map.
+/// Only SSE/HTTP specs carry headers; other variants are returned unchanged.
+fn inject_bearer(spec: &McpTransportSpec, access_token: &str) -> McpTransportSpec {
+    let bearer = format!("Bearer {access_token}");
+    match spec.clone() {
+        McpTransportSpec::Sse {
+            url,
+            mut headers,
+            headers_helper,
+            oauth,
+        } => {
+            headers.insert("Authorization".into(), bearer);
+            McpTransportSpec::Sse {
+                url,
+                headers,
+                headers_helper,
+                oauth,
+            }
+        }
+        McpTransportSpec::Http {
+            url,
+            mut headers,
+            oauth,
+        } => {
+            headers.insert("Authorization".into(), bearer);
+            McpTransportSpec::Http {
+                url,
+                headers,
+                oauth,
+            }
+        }
+        other => other,
+    }
+}
+
+/// Faithful-core 401 detection: the transport flattens HTTP failures to a
+/// `Connection` / `Handshake` error string, so we substring-match `"401"`.
+/// Structured-status detection is a noted residual.
+fn error_is_401(e: &McpError) -> bool {
+    matches!(
+        e,
+        McpError::Connection(m) | McpError::Handshake(m) if m.contains("401")
+    )
 }
 
 /// Whether a state's config is flagged `disabled` (mid-reconnect guard).

@@ -1087,6 +1087,7 @@ mod tests {
                 &self,
                 _agent_id: AgentId,
                 _name: String,
+                _team_name: String,
                 _description: String,
             ) -> Result<String, traits::team_spawn::TeamSpawnError> {
                 Ok(String::new())

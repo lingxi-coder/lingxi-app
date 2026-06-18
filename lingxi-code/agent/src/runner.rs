@@ -434,6 +434,13 @@ async fn run_subagent_loop(
                 }
                 let inv_ctx = traits::tool_invoker::SubagentInvocationContext {
                     parent_agent_id: ctx.parent_agent_id,
+                    // Swarm identity (claude-code `getAgentName()` /
+                    // `getTeammateContext()?.teamName`): a teammate's dispatched
+                    // tools see the teammate's DISPLAY name + team name so the
+                    // swarm-only `TaskUpdate` side-effects key on them. `None`
+                    // for one-shot subagents / the main thread.
+                    agent_name: ctx.agent_name.clone(),
+                    team_name: ctx.team_name.clone(),
                 };
                 match invoker.invoke(name, input.clone(), inv_ctx).await {
                     Ok(value) => {
@@ -960,6 +967,8 @@ mod tests {
         SubagentContext {
             agent_id: AgentId::new(),
             parent_agent_id: None,
+            agent_name: None,
+            team_name: None,
             agent_definition: AgentDefinition {
                 agent_type: "test".into(),
                 when_to_use: String::new(),

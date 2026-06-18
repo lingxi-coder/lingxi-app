@@ -24,6 +24,18 @@ use thiserror::Error;
 pub struct SubagentInvocationContext {
     /// Parent agent id (the agent that is dispatching the child).
     pub parent_agent_id: Option<AgentId>,
+    /// DISPLAY NAME of the teammate dispatching this tool call, if known
+    /// (claude-code `getAgentName()` — the teammate's human name, e.g.
+    /// `"researcher"`, NOT the `agent:<uuid>` form). `None` for the main
+    /// thread / leader. Mapped straight into
+    /// `ToolUseContext.agent_name` so the swarm-only `TaskUpdate` side-effects
+    /// (auto-owner, owner-change mailbox notification) key on the name.
+    pub agent_name: Option<String>,
+    /// TEAM NAME the dispatching teammate belongs to, if known (claude-code
+    /// `getTeammateContext()?.teamName`). Mapped into `ToolUseContext.team_name`
+    /// so `getTaskListId()` resolves an in-process teammate to the leader's
+    /// on-disk task directory. `None` for the main thread / standalone session.
+    pub team_name: Option<String>,
 }
 
 /// Failure modes for [`ToolInvoker::invoke`].

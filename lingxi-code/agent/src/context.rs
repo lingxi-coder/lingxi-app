@@ -27,6 +27,21 @@ pub struct SubagentContext {
     pub agent_id: AgentId,
     /// Parent agent id, when this agent was dispatched by another agent.
     pub parent_agent_id: Option<AgentId>,
+    /// DISPLAY NAME of this agent when it is an in-process teammate in a swarm
+    /// (claude-code `TeammateContext.agentName`, surfaced via `getAgentName()`).
+    /// For a teammate this is its human name (e.g. `"researcher"`), NOT the
+    /// `agent:<uuid>` form of [`Self::agent_id`]. `None` for one-shot subagents
+    /// and the main thread. The runner threads this into every dispatched
+    /// tool's [`traits::tool_invoker::SubagentInvocationContext`] so the
+    /// swarm-only `TaskUpdate` side-effects (auto-owner / owner-change mailbox
+    /// notification) key on the NAME (matching `getAgentStatuses`).
+    pub agent_name: Option<String>,
+    /// TEAM NAME this teammate belongs to (claude-code
+    /// `TeammateContext.teamName`, surfaced via `getTeamName()`). Threaded into
+    /// every dispatched tool's [`traits::tool_invoker::SubagentInvocationContext`]
+    /// so `getTaskListId()` resolves the teammate to the leader's on-disk task
+    /// directory. `None` for one-shot subagents / standalone sessions.
+    pub team_name: Option<String>,
     /// Static definition that gave rise to this spawn.
     pub agent_definition: AgentDefinition,
     /// Initial conversation messages seeded into the agent's state machine.

@@ -220,9 +220,20 @@ impl InProcessTeammateHandler {
     }
 
     /// Build the persistent [`SubagentContext`] for a spawn.
+    ///
+    /// `name` is the teammate's DISPLAY name and `team_name` the coordinator
+    /// team it belongs to (empty when spawned standalone). Both ride on the
+    /// context as [`SubagentContext::agent_name`] / [`SubagentContext::team_name`]
+    /// so the runner threads them into every dispatched tool's
+    /// [`traits::tool_invoker::SubagentInvocationContext`] — the Rust analogue of
+    /// claude-code running the teammate inside `runWithTeammateContext` so
+    /// `getAgentName()` / `getTeammateContext()?.teamName` resolve inside its
+    /// tool calls.
     fn build_context(
         &self,
         agent_id: protocol::AgentId,
+        name: &str,
+        team_name: &str,
         mut definition: AgentDefinition,
     ) -> SubagentContext {
         // Resolve the model preference to a concrete wire id, mirroring the
@@ -237,6 +248,17 @@ impl InProcessTeammateHandler {
         SubagentContext {
             agent_id,
             parent_agent_id: None,
+            // Swarm identity (claude-code `TeammateContext.agentName` /
+            // `.teamName`): the DISPLAY name is always reachable here (it is the
+            // spawn input); `team_name` is threaded from the coordinator team via
+            // the spawn input. An empty value (standalone spawn / no team) becomes
+            // `None` — the leader / main-thread default. The runner reads these
+            // and threads them into every dispatched tool's
+            // `SubagentInvocationContext`, so the merged swarm `TaskUpdate`
+            // side-effects (auto-owner, owner-change mailbox notification) and
+            // `getTaskListId()` actually fire for this teammate.
+            agent_name: (!name.is_empty()).then(|| name.to_string()),
+            team_name: (!team_name.is_empty()).then(|| team_name.to_string()),
             agent_definition: definition,
             prompt_messages: vec![],
             fork_context_messages: None,
@@ -339,7 +361,12 @@ impl Task for InProcessTeammateHandler {
         ctx: TaskContext,
     ) -> Result<TaskHandle, TaskError> {
         // 1. Only the InProcessTeammate variant is accepted.
-        let TaskSpawnInput::InProcessTeammate { agent_id, name } = input else {
+        let TaskSpawnInput::InProcessTeammate {
+            agent_id,
+            name,
+            team_name,
+        } = input
+        else {
             return Err(TaskError::Internal(
                 "in_process_teammate handler received a non-InProcessTeammate spawn input".into(),
             ));
@@ -362,7 +389,7 @@ impl Task for InProcessTeammateHandler {
             .definitions
             .resolve(&agent_id, &name)
             .ok_or_else(|| TaskError::Internal(format!("no agent definition for teammate {name}")))?;
-        let subagent_ctx = self.build_context(agent_id, definition);
+        let subagent_ctx = self.build_context(agent_id, &name, &team_name, definition);
 
         // 4. Allocate the slot — the pool spawns the persistent runner and
         //    hands back the outbound SubagentEvent stream.
@@ -383,13 +410,14 @@ impl Task for InProcessTeammateHandler {
         let output_manager = self.output.clone();
         let worker_spool_path = spool_path.clone();
         let status_sink = self.status_sink.clone();
-        // Best-effort `TeammateIdle` firer + the teammate name it carries. The
-        // team_name is not reachable from this leaf scope (it lives on the
-        // coordinator's TeamRegistry), so it rides as `""` — faithful to
-        // claude-code's `getTeamName() ?? ''` fallback and the same documented
-        // leaf-scope gap as the `TaskCompleted` `team_name`.
+        // Best-effort `TeammateIdle` firer + the teammate name / team name it
+        // carries. The team_name is now threaded from the coordinator through the
+        // spawn input (claude-code `getTeamName()`); an empty value (standalone
+        // spawn / no team) rides as `""`, matching claude-code's
+        // `getTeamName() ?? ''` fallback.
         let idle_firer = self.teammate_idle_firer.clone();
         let idle_name = name.clone();
+        let idle_team_name = team_name.clone();
         let worker_task_id = task_id.clone();
         let worker = Box::pin(async move {
             status_sink
@@ -422,7 +450,7 @@ impl Task for InProcessTeammateHandler {
                         firer
                             .fire(hooks::TeammateIdleFire {
                                 teammate_name: idle_name.clone(),
-                                team_name: String::new(),
+                                team_name: idle_team_name.clone(),
                             })
                             .await;
                     }
@@ -851,8 +879,12 @@ mod tests {
         let def = DefaultTeammateDefinition
             .resolve(&protocol::AgentId::new(), "lead")
             .unwrap();
-        let ctx = handler.build_context(protocol::AgentId::new(), def);
+        let ctx = handler.build_context(protocol::AgentId::new(), "lead", "alpha", def);
         assert!(matches!(&ctx.agent_definition.model, AgentModel::Explicit(m) if m == "claude-opus-4-7"));
+        // Swarm identity threaded onto the context (claude-code
+        // `TeammateContext.agentName` / `.teamName`).
+        assert_eq!(ctx.agent_name.as_deref(), Some("lead"));
+        assert_eq!(ctx.team_name.as_deref(), Some("alpha"));
     }
 
     #[test]
@@ -862,8 +894,11 @@ mod tests {
         let def = DefaultTeammateDefinition
             .resolve(&protocol::AgentId::new(), "lead")
             .unwrap();
-        let ctx = handler.build_context(protocol::AgentId::new(), def);
+        let ctx = handler.build_context(protocol::AgentId::new(), "lead", "", def);
         assert!(matches!(&ctx.agent_definition.model, AgentModel::Inherit));
+        // Empty team_name spawns standalone → team_name is None (leader default).
+        assert_eq!(ctx.agent_name.as_deref(), Some("lead"));
+        assert_eq!(ctx.team_name, None);
     }
 
     #[tokio::test]
@@ -908,6 +943,7 @@ mod tests {
                 TaskSpawnInput::InProcessTeammate {
                     agent_id: protocol::AgentId::new(),
                     name: "buddy".into(),
+                    team_name: "alpha".into(),
                 },
                 c.clone(),
             )
@@ -974,6 +1010,7 @@ mod tests {
                 TaskSpawnInput::InProcessTeammate {
                     agent_id: protocol::AgentId::new(),
                     name: "buddy".into(),
+                    team_name: "alpha".into(),
                 },
                 c,
             )
@@ -1010,6 +1047,7 @@ mod tests {
                 TaskSpawnInput::InProcessTeammate {
                     agent_id: protocol::AgentId::new(),
                     name: "buddy".into(),
+                    team_name: "alpha".into(),
                 },
                 c.clone(),
             )
@@ -1107,9 +1145,9 @@ mod tests {
     }
 
     /// A wired `TeammateIdleFirer` receives one fire per completed turn-set —
-    /// the "about to go idle" moment — carrying the teammate name (and `""`
-    /// team_name, the leaf-scope gap). Driving a second turn-set via an injected
-    /// message proves it fires again each time the teammate parks.
+    /// the "about to go idle" moment — carrying the teammate name and the team
+    /// name threaded from the spawn input. Driving a second turn-set via an
+    /// injected message proves it fires again each time the teammate parks.
     #[tokio::test]
     #[allow(clippy::similar_names)] // `fires` (results) vs `firer` (sender) are semantically distinct
     async fn completed_turn_set_fires_teammate_idle_hook() {
@@ -1122,6 +1160,7 @@ mod tests {
                 TaskSpawnInput::InProcessTeammate {
                     agent_id: protocol::AgentId::new(),
                     name: "buddy".into(),
+                    team_name: "alpha".into(),
                 },
                 c.clone(),
             )
@@ -1137,8 +1176,8 @@ mod tests {
         assert_eq!(fires.len(), 1, "one idle fire after turn-set 1: {fires:?}");
         assert_eq!(fires[0].teammate_name, "buddy", "carries the teammate name");
         assert_eq!(
-            fires[0].team_name, "",
-            "team_name is empty at the leaf scope (no team identity reachable)"
+            fires[0].team_name, "alpha",
+            "team_name is threaded from the spawn input (claude-code getTeamName())"
         );
 
         // Inject a message → drives turn-set 2, which parks again → a 2nd fire.
@@ -1168,6 +1207,7 @@ mod tests {
                 TaskSpawnInput::InProcessTeammate {
                     agent_id: protocol::AgentId::new(),
                     name: "buddy".into(),
+                    team_name: "alpha".into(),
                 },
                 c.clone(),
             )

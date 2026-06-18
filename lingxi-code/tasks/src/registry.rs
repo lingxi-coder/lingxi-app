@@ -517,11 +517,16 @@ impl TeamSpawnSeam for TaskRegistry {
         &self,
         agent_id: protocol::AgentId,
         name: String,
+        team_name: String,
         description: String,
     ) -> Result<String, TeamSpawnError> {
         self.spawn(
             TaskType::InProcessTeammate,
-            TaskSpawnInput::InProcessTeammate { agent_id, name },
+            TaskSpawnInput::InProcessTeammate {
+                agent_id,
+                name,
+                team_name,
+            },
             description,
         )
         .await
@@ -949,6 +954,7 @@ mod spawn_tests {
         TaskSpawnInput::InProcessTeammate {
             agent_id: protocol::AgentId::new(),
             name: "buddy".into(),
+            team_name: "alpha".into(),
         }
     }
 
@@ -1098,7 +1104,12 @@ mod spawn_tests {
 
         let seam: &dyn TeamSpawnSeam = &registry;
         let task_id = seam
-            .spawn_teammate(protocol::AgentId::new(), "buddy".into(), "a teammate".into())
+            .spawn_teammate(
+                protocol::AgentId::new(),
+                "buddy".into(),
+                "alpha".into(),
+                "a teammate".into(),
+            )
             .await
             .unwrap();
 
@@ -1131,7 +1142,12 @@ mod spawn_tests {
         // No InProcessTeammate handler registered.
         let seam: &dyn TeamSpawnSeam = &registry;
         let err = seam
-            .spawn_teammate(protocol::AgentId::new(), "buddy".into(), "no handler".into())
+            .spawn_teammate(
+                protocol::AgentId::new(),
+                "buddy".into(),
+                "alpha".into(),
+                "no handler".into(),
+            )
             .await
             .unwrap_err();
         assert!(
@@ -1239,7 +1255,12 @@ mod spawn_tests {
         // `send_message` resolves the handler through).
         let seam: &dyn TeamSpawnSeam = &registry;
         let task_id = seam
-            .spawn_teammate(protocol::AgentId::new(), "buddy".into(), "a teammate".into())
+            .spawn_teammate(
+                protocol::AgentId::new(),
+                "buddy".into(),
+                "alpha".into(),
+                "a teammate".into(),
+            )
             .await
             .unwrap();
         assert_eq!(task_id, "tmsgid");
@@ -1282,7 +1303,12 @@ mod spawn_tests {
 
         let seam: &dyn TeamSpawnSeam = &registry;
         let task_id = seam
-            .spawn_teammate(protocol::AgentId::new(), "buddy".into(), "x".into())
+            .spawn_teammate(
+                protocol::AgentId::new(),
+                "buddy".into(),
+                "alpha".into(),
+                "x".into(),
+            )
             .await
             .unwrap();
 
@@ -1303,7 +1329,12 @@ mod spawn_tests {
 
         let seam: &dyn TeamSpawnSeam = &registry;
         let task_id = seam
-            .spawn_teammate(protocol::AgentId::new(), "buddy".into(), "x".into())
+            .spawn_teammate(
+                protocol::AgentId::new(),
+                "buddy".into(),
+                "alpha".into(),
+                "x".into(),
+            )
             .await
             .unwrap();
 

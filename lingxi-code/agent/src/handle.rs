@@ -338,6 +338,8 @@ impl PoolSubagentSpawner {
         SubagentContext {
             agent_id: AgentId::new(),
             parent_agent_id: None,
+            agent_name: None,
+            team_name: None,
             agent_definition: def,
             prompt_messages: vec![ConversationMessage::user(MessageId::new(), prompt.to_string())],
             fork_context_messages: None,

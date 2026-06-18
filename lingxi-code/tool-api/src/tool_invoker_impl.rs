@@ -98,12 +98,14 @@ impl ToolInvoker for RegistryToolInvoker {
             messages: vec![],
             tool_use_id: None,
             agent_id: ctx.parent_agent_id,
-            // The subagent-invocation seam carries only the parent agent id; the
-            // teammate DISPLAY name / team name are not threaded through this
-            // narrow surface yet, so they stay `None` here (matching the leader /
-            // main-thread default).
-            agent_name: None,
-            team_name: None,
+            // Swarm identity threaded from the dispatching agent (claude-code
+            // `getAgentName()` / `getTeammateContext()?.teamName`): an in-process
+            // teammate's dispatched tools now see the teammate's DISPLAY name +
+            // team name, so the swarm-only `TaskUpdate` side-effects (auto-owner,
+            // owner-change mailbox notification) and `getTaskListId()` key on
+            // them. `None` for one-shot subagents / the leader / main thread.
+            agent_name: ctx.agent_name,
+            team_name: ctx.team_name,
             content_replacement_state: None,
             session: None,
             subagent_registry: Some(self.registry.clone()),
@@ -313,9 +315,7 @@ mod tests {
         let invoker = RegistryToolInvoker::new(registry.clone());
 
         let input = json!({ "hello": "world", "n": 42 });
-        let ctx = SubagentInvocationContext {
-            parent_agent_id: None,
-        };
+        let ctx = no_ctx();
 
         let result = invoker
             .invoke("TestEcho", input.clone(), ctx)
@@ -334,13 +334,7 @@ mod tests {
         let registry = registry_with_echo();
         let invoker = RegistryToolInvoker::new(registry);
         let result = invoker
-            .invoke(
-                "NotARealTool",
-                json!({}),
-                SubagentInvocationContext {
-                    parent_agent_id: None,
-                },
-            )
+            .invoke("NotARealTool", json!({}), no_ctx())
             .await;
         match result {
             Err(ToolInvokerError::NotFound(name)) => assert_eq!(name, "NotARealTool"),
@@ -362,13 +356,7 @@ mod tests {
 
         let invoker = RegistryToolInvoker::new(parent_registry.clone());
         invoker
-            .invoke(
-                "RecordingTool",
-                json!({}),
-                SubagentInvocationContext {
-                    parent_agent_id: None,
-                },
-            )
+            .invoke("RecordingTool", json!({}), no_ctx())
             .await
             .expect("dispatch ok");
 
@@ -378,6 +366,115 @@ mod tests {
         assert!(
             Arc::ptr_eq(&parent_registry, registry_in_ctx),
             "RegistryToolInvoker must thread the parent Arc<ToolRegistry> into ToolUseContext.subagent_registry verbatim — this preserves the M4-05 recursion-lock contract across the dispatch boundary"
+        );
+    }
+
+    // ──── swarm identity: SubagentInvocationContext name/team → ToolUseContext ────
+
+    /// Tool fixture that records the `(agent_name, team_name)` the dispatched
+    /// `ToolUseContext` carries, so a test can assert the swarm identity flows
+    /// through the invoker (claude-code `getAgentName()` /
+    /// `getTeammateContext()?.teamName`).
+    struct NameRecordingTool {
+        captured: Arc<StdMutex<Option<(Option<String>, Option<String>)>>>,
+    }
+    #[async_trait]
+    impl Tool for NameRecordingTool {
+        fn name(&self) -> &str {
+            "NameRecordingTool"
+        }
+        fn input_schema(&self) -> &serde_json::Value {
+            &RECORDING_INPUT_SCHEMA
+        }
+        fn is_enabled(&self, _: &ToolStaticContext) -> bool {
+            true
+        }
+        fn max_result_size_chars(&self) -> usize {
+            1024
+        }
+        fn is_concurrency_safe(&self, _: &serde_json::Value) -> bool {
+            true
+        }
+        fn is_read_only(&self, _: &serde_json::Value) -> bool {
+            true
+        }
+        async fn validate_input(
+            &self,
+            _: &serde_json::Value,
+            _: &ToolUseContext,
+        ) -> Result<(), ValidationError> {
+            Ok(())
+        }
+        async fn check_permissions(
+            &self,
+            _: &serde_json::Value,
+            _: &ToolUseContext,
+        ) -> PermissionResult {
+            allow_for_tests()
+        }
+        async fn description(&self, _: &serde_json::Value, _: &DescriptionOptions) -> String {
+            "rec".into()
+        }
+        async fn prompt(&self, _: &PromptOptions) -> String {
+            "rec".into()
+        }
+        async fn call(
+            &self,
+            _: serde_json::Value,
+            ctx: ToolUseContext,
+            _: ToolProgressSender,
+        ) -> Result<ToolCallResult, ToolError> {
+            *self.captured.lock().unwrap() = Some((ctx.agent_name.clone(), ctx.team_name.clone()));
+            Ok(ToolCallResult {
+                data: json!({}),
+                new_messages: vec![],
+                context_modifier: None,
+                mcp_meta: None,
+            })
+        }
+        fn interrupt_behavior(&self, _input: &serde_json::Value) -> InterruptBehavior {
+            InterruptBehavior::Cancel
+        }
+    }
+
+    /// The `agent_name` / `team_name` carried by the `SubagentInvocationContext`
+    /// must reach the dispatched tool's `ToolUseContext` verbatim — this is what
+    /// makes the merged swarm `TaskUpdate` auto-owner / `getTaskListId` logic
+    /// actually fire for an in-process teammate (it keys on these).
+    #[tokio::test]
+    async fn registry_invoker_threads_swarm_identity_into_tool_use_ctx() {
+        let captured: Arc<StdMutex<Option<(Option<String>, Option<String>)>>> =
+            Arc::new(StdMutex::new(None));
+        let mut registry = ToolRegistry::new();
+        registry.register_builtin(Arc::new(NameRecordingTool {
+            captured: captured.clone(),
+        }));
+        let invoker = RegistryToolInvoker::new(Arc::new(registry));
+
+        invoker
+            .invoke(
+                "NameRecordingTool",
+                json!({}),
+                SubagentInvocationContext {
+                    parent_agent_id: None,
+                    agent_name: Some("researcher".to_string()),
+                    team_name: Some("alpha".to_string()),
+                },
+            )
+            .await
+            .expect("dispatch ok");
+
+        let captured = captured.lock().unwrap();
+        let (agent_name, team_name) = captured.as_ref().expect("NameRecordingTool::call ran");
+        assert_eq!(
+            agent_name.as_deref(),
+            Some("researcher"),
+            "the teammate DISPLAY name reaches ToolUseContext.agent_name (getAgentName())"
+        );
+        assert_eq!(
+            team_name.as_deref(),
+            Some("alpha"),
+            "the team name reaches ToolUseContext.team_name (getTeammateContext()?.teamName)"
         );
     }
 
@@ -400,6 +497,8 @@ mod tests {
     fn no_ctx() -> SubagentInvocationContext {
         SubagentInvocationContext {
             parent_agent_id: None,
+            agent_name: None,
+            team_name: None,
         }
     }
 

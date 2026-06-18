@@ -164,6 +164,8 @@ mod tests {
         SubagentContext {
             agent_id: AgentId::new(),
             parent_agent_id: None,
+            agent_name: None,
+            team_name: None,
             agent_definition: AgentDefinition {
                 agent_type: "test".into(),
                 when_to_use: String::new(),

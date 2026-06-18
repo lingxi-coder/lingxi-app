@@ -48,10 +48,18 @@ pub enum TeamSpawnError {
 pub trait TeamSpawnSeam: Send + Sync {
     /// Start a real teammate task for `agent_id`, returning the
     /// handler-generated `task_id` (distinct from the worker's `AgentId`).
+    ///
+    /// `name` is the teammate's DISPLAY name (claude-code
+    /// `TeammateContext.agentName`); `team_name` is the coordinator team it
+    /// belongs to (`TeammateContext.teamName`). Both are threaded into the
+    /// teammate's `SubagentContext` so its dispatched tools see the swarm
+    /// identity (`getAgentName()` / `getTeammateContext()?.teamName`), which the
+    /// swarm-only `TaskUpdate` side-effects key on.
     async fn spawn_teammate(
         &self,
         agent_id: AgentId,
         name: String,
+        team_name: String,
         description: String,
     ) -> Result<String, TeamSpawnError>;
 
@@ -99,6 +107,7 @@ mod tests {
             &self,
             _agent_id: AgentId,
             _name: String,
+            _team_name: String,
             _description: String,
         ) -> Result<String, TeamSpawnError> {
             Ok(String::new())

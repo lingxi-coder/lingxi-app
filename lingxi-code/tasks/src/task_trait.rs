@@ -65,8 +65,14 @@ pub enum TaskSpawnInput {
     InProcessTeammate {
         /// Agent target.
         agent_id: protocol::AgentId,
-        /// Display name.
+        /// Display name (claude-code `TeammateContext.agentName`).
         name: String,
+        /// Team name this teammate belongs to (claude-code
+        /// `TeammateContext.teamName`). Empty when spawned standalone / without
+        /// a coordinator team context. Threaded into the teammate's
+        /// `SubagentContext.team_name` so its dispatched tools see the team
+        /// identity (`getTeammateContext()?.teamName`).
+        team_name: String,
     },
     /// Spawn a local workflow.
     LocalWorkflow {

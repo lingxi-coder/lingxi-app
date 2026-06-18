@@ -406,9 +406,15 @@ impl Tool for TeamCreateTool {
 
         // 3. Start the REAL InProcessTeammate task via the spawn seam. Returns
         //    the handler-generated task_id (distinct from the worker AgentId).
+        //    The teammate's DISPLAY name and TEAM name are threaded so its
+        //    dispatched tools resolve `getAgentName()` /
+        //    `getTeammateContext()?.teamName` (the swarm `TaskUpdate` side-effects
+        //    key on them). In this single-worker-per-team design the worker's
+        //    display name IS the team name (step 2 uses `team_name` for both), so
+        //    both args carry `team_name`.
         let task_id = self
             .spawn_seam
-            .spawn_teammate(agent_id, team_name.clone(), description)
+            .spawn_teammate(agent_id, team_name.clone(), team_name.clone(), description)
             .await
             .map_err(|e| ToolError::Internal(format!("TeamCreate: {e}")))?;
 
@@ -628,7 +634,7 @@ mod tests {
     struct RecordingSeam {
         task_id: String,
         spawns: AtomicUsize,
-        last_args: Mutex<Option<(AgentId, String, String)>>,
+        last_args: Mutex<Option<(AgentId, String, String, String)>>,
         injected: Mutex<Vec<String>>,
     }
 
@@ -652,10 +658,11 @@ mod tests {
             &self,
             agent_id: AgentId,
             name: String,
+            team_name: String,
             description: String,
         ) -> Result<String, traits::team_spawn::TeamSpawnError> {
             self.spawns.fetch_add(1, Ordering::SeqCst);
-            *self.last_args.lock().unwrap() = Some((agent_id, name, description));
+            *self.last_args.lock().unwrap() = Some((agent_id, name, team_name, description));
             Ok(self.task_id.clone())
         }
         async fn kill(&self, _task_id: &str) -> Result<(), traits::team_spawn::TeamSpawnError> {
@@ -1002,11 +1009,15 @@ mod tests {
         assert_eq!(lead, w.agent_id.as_uuid().to_string());
         assert_eq!(res.data["task_id"], "handler-task-42");
 
-        // The description was threaded through to the seam.
-        let (seam_agent_id, seam_name, seam_desc) =
+        // The display name, team name, and description were threaded to the seam.
+        let (seam_agent_id, seam_name, seam_team_name, seam_desc) =
             seam.last_args.lock().unwrap().clone().expect("seam called");
         assert_eq!(seam_agent_id, w.agent_id);
         assert_eq!(seam_name, "alpha-team");
+        assert_eq!(
+            seam_team_name, "alpha-team",
+            "team name threaded into spawn_teammate (getTeammateContext()?.teamName)"
+        );
         assert_eq!(seam_desc, "do work");
     }
 

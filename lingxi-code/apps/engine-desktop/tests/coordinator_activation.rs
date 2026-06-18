@@ -404,6 +404,7 @@ async fn anti_hollow_create_path_emits_nothing() {
                 TaskSpawnInput::InProcessTeammate {
                     agent_id,
                     name: "alpha".into(),
+                    team_name: "alpha".into(),
                 },
                 "hollow".into(),
             )

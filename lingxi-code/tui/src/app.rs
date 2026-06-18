@@ -977,8 +977,10 @@ pub fn render_screen(
                 // `render_help_to_string` body (Shortcuts + Slash-commands
                 // sections) line-by-line in a column View. Mirrors the
                 // Skills/Stats arms.
-                use crate::screens::help::render_help_to_string;
-                let body = render_help_to_string(h);
+                // (GAP D — help display) Render shortcut chords from the LIVE
+                // keymap so a user's `keybindings.json` override is reflected.
+                use crate::screens::help::render_help_to_string_with;
+                let body = render_help_to_string_with(h, state.keymap.bindings());
                 let lines: Vec<String> = body.lines().map(str::to_string).collect();
                 element! {
                     View(flex_direction: FlexDirection::Column, padding: 1) {

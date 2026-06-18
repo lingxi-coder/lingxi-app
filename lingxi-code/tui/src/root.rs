@@ -392,6 +392,103 @@ fn apply_vim_effect(st: &mut AppState, effect: crate::components::prompt_input::
     }
 }
 
+/// (GAP D — per-screen) The keymap consult outcome for a full-page screen key,
+/// mirroring claude-code's per-component `useKeybinding` model: a resolved
+/// chord is lowered back into the synthetic [`KeyEvent`] the screen's legacy
+/// reducer already understands (so the reducer body stays byte-identical), a
+/// chord-prefix is consumed, and an unbound / unmatched key falls through to
+/// the legacy hardcoded `match` unchanged.
+enum ScreenKey {
+    /// A binding resolved to a screen-nav action; feed this synthetic key to
+    /// the legacy reducer (e.g. `select:next` → `Down`).
+    Translate(KeyEvent),
+    /// A multi-keystroke chord prefix began/extended — consume the key, the
+    /// screen stays open and nothing is dispatched.
+    Consume,
+    /// No binding (or an action this screen doesn't own) — run the legacy
+    /// reducer on the ORIGINAL key, preserving every default chord byte-for-byte
+    /// and letting text-entry screens keep typing unbound printable chars.
+    Fallthrough,
+}
+
+/// (GAP D — per-screen) Map a resolved keybinding action id to the synthetic
+/// `KeyCode` the per-screen reducers already branch on. This is the inverse of
+/// the default keymap: the default `up`→`select:previous` round-trips back to
+/// `KeyCode::Up`, so with NO `keybindings.json` the consult is behavior-neutral
+/// (a default chord resolves to its action which lowers to the very key the
+/// reducer received). A user override (e.g. `ctrl+n`→`select:next`) lowers to
+/// the same `Down` the reducer handles, so the override reaches the screen.
+///
+/// Only the nav/control actions the screens own are mapped; any other action
+/// (e.g. `chat:*`, `app:*`, the effort-arrow `modelPicker:*` which the picker
+/// types literally) returns `None` so the caller falls through to the legacy
+/// reducer on the original key. Returning `None` for `modelPicker:*` is what
+/// keeps the model picker's `j`/`k`/char typing intact.
+fn action_to_screen_keycode(action: &str) -> Option<KeyCode> {
+    Some(match action {
+        // Vertical selection (Select / Settings / ModelPicker-nav contexts).
+        "select:next" | "messageSelector:down" | "footer:down" | "diff:nextFile" => KeyCode::Down,
+        "select:previous" | "messageSelector:up" | "footer:up" | "diff:previousFile" => KeyCode::Up,
+        // Accept / commit a selection.
+        "select:accept" | "settings:close" | "confirm:yes" | "footer:openSelected"
+        | "messageSelector:select" | "diff:viewDetails" => KeyCode::Enter,
+        // Cancel / dismiss / close. Every screen's legacy reducer treats Esc as
+        // its close/back key, so a rebound cancel chord still closes.
+        "select:cancel" | "confirm:no" | "help:dismiss" | "settings:search"
+        | "transcript:exit" | "diff:dismiss" | "attachments:exit" | "footer:clearSelection" => {
+            KeyCode::Esc
+        }
+        // Tab navigation (Settings tabs / Stats tabs).
+        "tabs:next" | "confirm:nextField" => KeyCode::Tab,
+        "tabs:previous" | "confirm:cycleMode" => KeyCode::BackTab,
+        // Horizontal nav (Settings tab cycle / back-out of a detail view).
+        "tabs:previous-left" | "diff:previousSource" => KeyCode::Left,
+        "tabs:next-right" | "diff:nextSource" => KeyCode::Right,
+        // Keyboard scroll (Scroll context). Wheel actions are intentionally
+        // left inert (the TUI surfaces no wheel events to this seam).
+        "scroll:pageUp" => KeyCode::PageUp,
+        "scroll:pageDown" => KeyCode::PageDown,
+        "scroll:top" => KeyCode::Home,
+        "scroll:bottom" => KeyCode::End,
+        _ => return None,
+    })
+}
+
+/// (GAP D — per-screen) Resolve a live screen key against the keymap for the
+/// given screen contexts, mirroring claude-code's `useKeybinding`:
+/// `[...screen_contexts, "Global"]` deduped (first-occurrence-wins). Returns a
+/// [`ScreenKey`] telling the caller whether to translate, consume, or fall
+/// through. The pending-chord state is threaded through `st.pending_chord`
+/// (shared with the primary dispatch — only one input path is live at a time).
+fn resolve_screen_key(st: &mut AppState, k: &KeyEvent, screen_contexts: &[&str]) -> ScreenKey {
+    use command_core::keybindings::keymap::Resolution;
+    let Some(input) = iocraft_to_input_key(k) else {
+        return ScreenKey::Fallthrough;
+    };
+    // [...screen_contexts, "Global"] deduped, first-occurrence-wins.
+    let mut contexts: Vec<String> = Vec::with_capacity(screen_contexts.len() + 1);
+    for c in screen_contexts.iter().chain(std::iter::once(&"Global")) {
+        if !contexts.iter().any(|x| x == c) {
+            contexts.push((*c).to_string());
+        }
+    }
+    match st.keymap.resolve(&input, &contexts, &mut st.pending_chord) {
+        Resolution::Action(act) => match action_to_screen_keycode(&act) {
+            Some(code) => {
+                // Lower to the synthetic key the legacy reducer handles. Esc is
+                // emitted with NONE modifiers so the `q`-no-modifier close guards
+                // and the bare-Esc arms match.
+                ScreenKey::Translate(KeyEvent::new(KeyEventKind::Press, code))
+            }
+            // An action this screen doesn't own (or a literal-typed effort arrow)
+            // → run the legacy reducer on the original key.
+            None => ScreenKey::Fallthrough,
+        },
+        Resolution::ChordPending => ScreenKey::Consume,
+        Resolution::Unbound | Resolution::None => ScreenKey::Fallthrough,
+    }
+}
+
 /// Route a key to the active full-page screen. Dispatches PER-VARIANT on the
 /// active `Screen` (M7-12): each screen owns its own key semantics while the
 /// shared contract — Esc/`q` close, no key leaks to `PromptInput` — holds for
@@ -416,8 +513,70 @@ fn apply_vim_effect(st: &mut AppState, effect: crate::components::prompt_input::
 ///
 /// M7-14 adds a further `match` arm here for its screen.
 #[allow(clippy::too_many_lines, reason = "flat per-screen match dispatcher; one arm per Screen variant")]
+#[allow(
+    clippy::match_same_arms,
+    reason = "the empty-context arms (Memory-editing / Connect / Doctor) are kept distinct for their differing rationale comments"
+)]
 fn handle_screen_key(st: &mut AppState, k: &KeyEvent) {
     use crate::screens::Screen;
+
+    // (GAP D — per-screen) Consult the runtime keymap BEFORE the legacy
+    // hardcoded reducers, mirroring claude-code's per-component `useKeybinding`.
+    // The active screen maps to a `useKeybinding`-style context list; a resolved
+    // chord is lowered back into the synthetic key the reducer already branches
+    // on (so reducers are untouched), a chord-prefix is consumed, and anything
+    // unbound / unmapped falls through to the legacy `match` on the ORIGINAL key.
+    // With NO `keybindings.json` this is behavior-neutral: a default chord
+    // resolves to the action that lowers to the very key it came from.
+    let screen_contexts: &[&str] = match &st.active_screen {
+        Some(Screen::Help(_)) => &["Help", "Scroll"],
+        Some(Screen::Model(_)) => &["ModelPicker"],
+        Some(Screen::Settings(_)) => &["Settings"],
+        // Memory has two modes in one reducer: a tier SELECTOR (nav keys) and an
+        // inline CLAUDE.md EDITOR (free text). Consult `Settings` only in the
+        // selector — while editing, `Settings`'s `j`/`k`/`space`/`/`/`r` would
+        // hijack typed chars, so editing falls through (text-entry residual).
+        Some(Screen::Memory(m)) if !m.editing => &["Settings"],
+        Some(Screen::Memory(_)) => &[],
+        // ThemePicker live-previews on Up/Down; its reducer does NOT bind `j`/`k`,
+        // so adding `Select` (whose `j`/`k`→nav) would change defaults. Use only
+        // `ThemePicker` — its sole binding (`ctrl+t`) isn't a nav action, so the
+        // consult is a pure fall-through on defaults while still honoring a user
+        // `ThemePicker`/`Global` override.
+        Some(Screen::Theme(_)) => &["ThemePicker"],
+        // Connect is a free-text API-key field: `y`/`n`/letters are typed into
+        // the key buffer, so it must NOT consult `Confirmation` (whose `y`/`n`
+        // would hijack typing). Its only control key (Esc-cancel) is owned
+        // unconditionally by the reducer, so no consult context is needed.
+        Some(Screen::Connect(_)) => &[],
+        Some(Screen::Stats(_) | Screen::Skills(_)) => &["Select", "Scroll"],
+        Some(
+            Screen::Mcp(_)
+            | Screen::Hooks(_)
+            | Screen::Permissions(_)
+            | Screen::Agents(_)
+            | Screen::BackgroundTasks(_)
+            | Screen::Resume(_),
+        ) => &["Select"],
+        // Doctor is read-only (Esc/q only) and needs no keymap consult; an
+        // absent screen never reaches here.
+        Some(Screen::Doctor(_)) | None => &[],
+    };
+    let eff_owned;
+    let k: &KeyEvent = if screen_contexts.is_empty() {
+        k
+    } else {
+        match resolve_screen_key(st, k, screen_contexts) {
+            ScreenKey::Translate(ev) => {
+                eff_owned = ev;
+                &eff_owned
+            }
+            // Mid-chord prefix: consume the key, keep the screen open.
+            ScreenKey::Consume => return,
+            ScreenKey::Fallthrough => k,
+        }
+    };
+
     match &mut st.active_screen {
         Some(Screen::Doctor(_)) => {
             // (M7-11) Read-only screen: Esc / `q` close; everything else inert.
@@ -2867,6 +3026,113 @@ mod tests {
         let mut ctrl_c = KeyEvent::new(KeyEventKind::Press, KeyCode::Char('c'));
         ctrl_c.modifiers = KeyModifiers::CONTROL;
         assert_eq!(resolve(&km, &ctrl_c), Some(KeyAction::Cancel));
+    }
+
+    /// (GAP D — per-screen, TDD) A `keybindings.json` override of a `Select`
+    /// chord (`ctrl+n` → `select:next`) reaches the MCP viewer's live dispatch
+    /// through `handle_screen_key`: ctrl+n now advances the selection exactly as
+    /// Down does. An unspecified key (Enter → enter detail) still falls back to
+    /// the legacy reducer. This proves the per-screen keymap consult is wired.
+    #[test]
+    fn per_screen_override_reaches_mcp_dispatch_unspecified_falls_back() {
+        use crate::screens::mcp::{McpRow, McpScreenState};
+        use crate::screens::Screen;
+        use command_core::keybindings::{load_keybindings, Keymap};
+        use std::io::Write;
+
+        let json = r#"{ "bindings": [ { "context": "Select", "bindings": { "ctrl+n": "select:next" } } ] }"#;
+        let path = std::env::temp_dir().join(format!(
+            "lingxi-tui-screen-kb-{}.json",
+            std::process::id()
+        ));
+        std::fs::File::create(&path)
+            .unwrap()
+            .write_all(json.as_bytes())
+            .unwrap();
+        let km = Keymap::from_load_result(load_keybindings(true, &path, false));
+        let _ = std::fs::remove_file(&path);
+
+        let rows = vec![
+            McpRow { name: "a".into(), status: "connected".into(), transport: "stdio".into() },
+            McpRow { name: "b".into(), status: "connected".into(), transport: "stdio".into() },
+        ];
+        let mut st = AppState::new(crate::state::StatusSnapshot::default());
+        st.set_keymap(km);
+        st.active_screen = Some(Screen::Mcp(McpScreenState { rows, ..Default::default() }));
+
+        // ctrl+n is NOT a default Select chord, but the override binds it to
+        // select:next → lowered to Down → advances the selection.
+        let mut ctrl_n = KeyEvent::new(KeyEventKind::Press, KeyCode::Char('n'));
+        ctrl_n.modifiers = KeyModifiers::CONTROL;
+        handle_screen_key(&mut st, &ctrl_n);
+        match &st.active_screen {
+            Some(Screen::Mcp(s)) => assert_eq!(s.selected, 1, "ctrl+n advanced selection"),
+            other => panic!("expected Mcp screen, got {other:?}"),
+        }
+
+        // Enter (unspecified by the override) still falls back to the legacy
+        // reducer → enters detail mode.
+        let enter = KeyEvent::new(KeyEventKind::Press, KeyCode::Enter);
+        handle_screen_key(&mut st, &enter);
+        match &st.active_screen {
+            Some(Screen::Mcp(s)) => {
+                assert_eq!(s.mode, crate::screens::mcp::McpDialogMode::Detail);
+            }
+            other => panic!("expected Mcp screen in detail, got {other:?}"),
+        }
+    }
+
+    /// (GAP D — per-screen) The DEFAULT keymap round-trips behavior-neutrally:
+    /// Down on the MCP viewer resolves `select:next` → lowered back to Down →
+    /// the legacy reducer advances the selection, exactly as before the consult.
+    #[test]
+    fn per_screen_default_keymap_is_behavior_neutral() {
+        use crate::screens::mcp::{McpRow, McpScreenState};
+        use crate::screens::Screen;
+        let rows = vec![
+            McpRow { name: "a".into(), status: "x".into(), transport: "stdio".into() },
+            McpRow { name: "b".into(), status: "x".into(), transport: "stdio".into() },
+        ];
+        let mut st = AppState::new(crate::state::StatusSnapshot::default());
+        // Default keymap (no override).
+        st.active_screen = Some(Screen::Mcp(McpScreenState { rows, ..Default::default() }));
+        let down = KeyEvent::new(KeyEventKind::Press, KeyCode::Down);
+        handle_screen_key(&mut st, &down);
+        match &st.active_screen {
+            Some(Screen::Mcp(s)) => assert_eq!(s.selected, 1, "Down advanced via default keymap"),
+            other => panic!("expected Mcp screen, got {other:?}"),
+        }
+    }
+
+    /// (GAP D — per-screen) The model picker is a TEXT-ENTRY screen using the
+    /// `ModelPicker` context (which binds only the effort arrows, not nav). A
+    /// printable char must STILL type into the search query (fall through to the
+    /// legacy reducer), and `j`/`k` are typed — NOT treated as nav — preserving
+    /// byte-identical search behavior.
+    #[test]
+    fn per_screen_model_picker_typing_falls_through() {
+        use crate::screens::model::{ModelRow, ModelScreenState};
+        use crate::screens::Screen;
+        let rows = vec![ModelRow {
+            display_model: "Opus".into(),
+            request_model: "claude-opus".into(),
+            provider_id: "anthropic".into(),
+            provider_label: "Anthropic".into(),
+            available: true,
+        }];
+        let mut st = AppState::new(crate::state::StatusSnapshot::default());
+        st.active_screen = Some(Screen::Model(ModelScreenState {
+            rows,
+            ..Default::default()
+        }));
+        // Typing 'j' must append to the query (NOT scroll), proving ModelPicker
+        // does not bind nav for printable chars.
+        let j = KeyEvent::new(KeyEventKind::Press, KeyCode::Char('j'));
+        handle_screen_key(&mut st, &j);
+        match &st.active_screen {
+            Some(Screen::Model(s)) => assert_eq!(s.query, "j", "j typed into query"),
+            other => panic!("expected Model screen, got {other:?}"),
+        }
     }
 
     #[test]

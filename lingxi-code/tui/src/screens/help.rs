@@ -21,22 +21,24 @@
 //!   (Shortcuts) and `commands` tabs into ONE scrollable screen and omits the
 //!   `custom-commands` + `[ant-only]` tabs (no frozen-safe TUI seam to the
 //!   per-project custom-command catalog).
-//! - The displayed key chords are claude-code's DEFAULT bindings, baked into a
-//!   static table. As of GAP D the runtime keymap seam EXISTS
-//!   (`command_core::keybindings::Keymap` + `get_binding_display_text`, the
-//!   analogue of `useShortcutDisplay`) and the live PRIMARY dispatch (root.rs
-//!   Global/Chat chords) consults it — but THIS help screen still renders the
-//!   static default chords (rewiring the display to read the live keymap is
-//!   tracked as keybindings residual), so a user's `keybindings.json` overrides
-//!   are not yet reflected HERE, and a few chords differ from the TUI's current
-//!   live bindings (e.g. `ctrl + g` opens Settings here rather than `$EDITOR`;
-//!   `undo` / `stash` / `fast mode` / `model picker` are listed for parity but
-//!   are not yet wired as live keys).
+//! - The displayed key chords are rendered from the LIVE runtime keymap
+//!   (`command_core::keybindings::get_binding_display_text`, the analogue of
+//!   claude-code's `useShortcutDisplay`): each rebindable row carries an
+//!   `(action, context)` plus a fallback chord, and the rendered chord is the
+//!   resolved binding text (a user's `~/.claude/keybindings.json` override is
+//!   reflected here) or the fallback when the action has no binding. The
+//!   non-rebindable rows (`!`, `/`, `@`, `&`, `/btw`, `/keybindings`,
+//!   `double tap esc`) stay literal. Under the DEFAULT keymap the rendered
+//!   chords are byte-identical to the historical static table EXCEPT that the
+//!   model-picker / fast-mode rows now show their true default chord (`meta + p`
+//!   / `meta + o`) rather than the historical `alt + p` / `alt + o` mislabel —
+//!   a deliberate parity correction.
 //! - The slash-command descriptions are concise in-tree summaries, not the
 //!   byte-locked `core_description` metadata (kept self-contained, mirroring
 //!   `skills.rs`'s locked-constant style).
 #![forbid(unsafe_code)]
 
+use command_core::keybindings::{get_binding_display_text, ParsedBinding};
 use crossterm::event::{KeyCode, KeyEvent};
 
 use crate::screens::scroll::{scroll_indicator, visible_slice, ScrollState};
@@ -62,29 +64,77 @@ pub const COMMANDS_HEADER: &str = "Slash commands";
 /// Locked footer hint (mirrors the read-only `skills.rs` footer).
 pub const FOOTER: &str = "Esc to close";
 
+/// One prompt-shortcut row.
+///
+/// `action`/`context` are `Some` for the REBINDABLE rows — the rendered chord
+/// is `get_binding_display_text(action, context, bindings)` (the live keymap,
+/// honoring `keybindings.json` overrides) and `fallback` is the chord shown when
+/// the action has no binding (1:1 with `useShortcutDisplay`'s `fallback` arg).
+/// Rows that are NOT keymap actions (`!`, `/`, `@`, `&`, `/btw`,
+/// `double tap esc`, `/keybindings`) carry `action = None` and render `fallback`
+/// verbatim. `fallback` is the historical spaced chord, so the DEFAULT keymap
+/// renders byte-identically (resolved chords are post-formatted to the same
+/// spaced `a + b` style).
+#[derive(Debug, Clone, Copy)]
+pub struct ShortcutRow {
+    /// Keybinding action id (e.g. `"app:toggleTranscript"`), or `None` for a
+    /// non-rebindable literal row.
+    pub action: Option<&'static str>,
+    /// Keybinding context the action resolves in (e.g. `"Global"`/`"Chat"`).
+    pub context: &'static str,
+    /// Chord shown when `action` is `None` or has no live binding.
+    pub fallback: &'static str,
+    /// Right-column label.
+    pub label: &'static str,
+}
+
 /// The prompt shortcuts, in claude-code `PromptInputHelpMenu` render order
-/// (left column then right column). Each entry is `(keys, label)`; the rendered
-/// line is the key padded to [`KEY_WIDTH`] then the label.
-pub const SHORTCUTS: &[(&str, &str)] = &[
-    ("!", "for bash mode"),
-    ("/", "for commands"),
-    ("@", "for file paths"),
-    ("&", "for background"),
-    ("/btw", "for side question"),
-    ("ctrl + o", "for verbose output"),
-    ("ctrl + t", "to toggle tasks"),
-    ("shift + \u{23CE}", "for newline"),
-    ("shift + tab", "to auto-accept edits"),
-    ("ctrl + _", "to undo"),
-    ("ctrl + s", "to stash prompt"),
-    ("ctrl + v", "to paste images"),
-    ("ctrl + g", "to edit in $EDITOR"),
-    ("ctrl + z", "to suspend"),
-    ("alt + p", "to switch model"),
-    ("alt + o", "to toggle fast mode"),
-    ("double tap esc", "to clear input"),
-    ("/keybindings", "to customize"),
+/// (left column then right column). REBINDABLE rows carry their
+/// `(action, context)` so the chord renders from the live keymap; literal rows
+/// (`action = None`) render their fallback verbatim. The action ids match
+/// `default_bindings`: e.g. `app:toggleTranscript`/`Global` (`ctrl+o`),
+/// `chat:cycleMode`/`Chat` (`shift+tab`), `chat:modelPicker`/`Chat` (`meta+p`).
+pub const SHORTCUTS: &[ShortcutRow] = &[
+    ShortcutRow { action: None, context: "Global", fallback: "!", label: "for bash mode" },
+    ShortcutRow { action: None, context: "Global", fallback: "/", label: "for commands" },
+    ShortcutRow { action: None, context: "Global", fallback: "@", label: "for file paths" },
+    ShortcutRow { action: None, context: "Global", fallback: "&", label: "for background" },
+    ShortcutRow { action: None, context: "Global", fallback: "/btw", label: "for side question" },
+    ShortcutRow { action: Some("app:toggleTranscript"), context: "Global", fallback: "ctrl + o", label: "for verbose output" },
+    ShortcutRow { action: Some("app:toggleTodos"), context: "Global", fallback: "ctrl + t", label: "to toggle tasks" },
+    ShortcutRow { action: None, context: "Chat", fallback: "shift + \u{23CE}", label: "for newline" },
+    ShortcutRow { action: Some("chat:cycleMode"), context: "Chat", fallback: "shift + tab", label: "to auto-accept edits" },
+    ShortcutRow { action: Some("chat:undo"), context: "Chat", fallback: "ctrl + _", label: "to undo" },
+    ShortcutRow { action: Some("chat:stash"), context: "Chat", fallback: "ctrl + s", label: "to stash prompt" },
+    ShortcutRow { action: Some("chat:imagePaste"), context: "Chat", fallback: "ctrl + v", label: "to paste images" },
+    ShortcutRow { action: Some("chat:externalEditor"), context: "Chat", fallback: "ctrl + g", label: "to edit in $EDITOR" },
+    ShortcutRow { action: None, context: "Global", fallback: "ctrl + z", label: "to suspend" },
+    ShortcutRow { action: Some("chat:modelPicker"), context: "Chat", fallback: "meta + p", label: "to switch model" },
+    ShortcutRow { action: Some("chat:fastMode"), context: "Chat", fallback: "meta + o", label: "to toggle fast mode" },
+    ShortcutRow { action: None, context: "Global", fallback: "double tap esc", label: "to clear input" },
+    ShortcutRow { action: None, context: "Global", fallback: "/keybindings", label: "to customize" },
 ];
+
+/// Resolve one [`ShortcutRow`]'s display chord against the live keymap bindings.
+/// 1:1 with `useShortcutDisplay`'s `getDisplayText(action, context) ?? fallback`:
+/// a rebindable row's chord is the resolved binding text (post-formatted to the
+/// spaced `a + b` style help uses), falling back to `fallback` when unbound; a
+/// literal row (`action = None`) always renders `fallback`.
+fn row_chord(row: &ShortcutRow, bindings: &[ParsedBinding]) -> String {
+    match row.action {
+        Some(action) => get_binding_display_text(action, row.context, bindings)
+            .map_or_else(|| row.fallback.to_string(), |c| spaced_chord(&c)),
+        None => row.fallback.to_string(),
+    }
+}
+
+/// Re-space a resolved chord (`"ctrl+o"` → `"ctrl + o"`) so a live-rendered
+/// default chord is byte-identical to the historical static spaced table. The
+/// resolver emits `+`-joined chords with no surrounding spaces; help's column
+/// uses ` + ` separators.
+fn spaced_chord(chord: &str) -> String {
+    chord.replace('+', " + ")
+}
 
 /// The slash commands this TUI surfaces, with concise descriptions (claude-code
 /// `HelpV2` `commands` tab). `(command, description)`.
@@ -126,14 +176,25 @@ impl Default for HelpState {
 
 impl HelpState {
     /// Build the Help screen, sizing the embedded [`ScrollState`] to the
-    /// flattened body-line count and the fixed [`VIEWPORT`].
+    /// flattened body-line count and the fixed [`VIEWPORT`]. The line COUNT is
+    /// keymap-independent (one row per shortcut/command regardless of the
+    /// rendered chord), so sizing uses the default bindings.
     #[must_use]
     pub fn new() -> Self {
-        let len = content_lines().len();
+        let len = content_lines(&default_bindings()).len();
         Self {
             scroll: ScrollState::new(len, VIEWPORT),
         }
     }
+}
+
+/// The default merged keybindings — used to size the scroll window and as the
+/// fallback for the keymap-free [`render_help_to_string`] oracle (so existing
+/// callers/tests render the byte-identical default chords).
+fn default_bindings() -> Vec<ParsedBinding> {
+    command_core::keybindings::Keymap::defaults()
+        .bindings()
+        .to_vec()
 }
 
 /// Controller outcome after a key (mirrors `SkillsOutcome`).
@@ -172,14 +233,14 @@ fn format_row(key: &str, label: &str) -> String {
 }
 
 /// Flatten the two sections to the body content lines (no title/intro/footer):
-/// the `Shortcuts` header + one line per shortcut, then the `Slash commands`
-/// header + one line per command. This is the list the embedded [`ScrollState`]
-/// scrolls over.
-fn content_lines() -> Vec<String> {
+/// the `Shortcuts` header + one line per shortcut (its chord resolved from
+/// `bindings` — the live keymap), then the `Slash commands` header + one line
+/// per command. This is the list the embedded [`ScrollState`] scrolls over.
+fn content_lines(bindings: &[ParsedBinding]) -> Vec<String> {
     let mut out = Vec::with_capacity(SHORTCUTS.len() + SLASH_COMMANDS.len() + 2);
     out.push(SHORTCUTS_HEADER.to_string());
-    for (key, label) in SHORTCUTS {
-        out.push(format_row(key, label));
+    for row in SHORTCUTS {
+        out.push(format_row(&row_chord(row, bindings), row.label));
     }
     out.push(COMMANDS_HEADER.to_string());
     for (cmd, desc) in SLASH_COMMANDS {
@@ -188,19 +249,30 @@ fn content_lines() -> Vec<String> {
     out
 }
 
-/// Pure render oracle: the full screen body as text.
+/// Pure render oracle: the full screen body as text, rendering shortcut chords
+/// from the DEFAULT keymap. Existing callers/tests keep byte-identical output;
+/// the live screen uses [`render_help_to_string_with`] to reflect a user's
+/// `keybindings.json` overrides.
+#[must_use]
+pub fn render_help_to_string(state: &HelpState) -> String {
+    render_help_to_string_with(state, &default_bindings())
+}
+
+/// Pure render oracle parameterized on the live keymap `bindings`: the shortcut
+/// chords are resolved via `get_binding_display_text` (the `useShortcutDisplay`
+/// analogue), so a user's `~/.claude/keybindings.json` override shows here.
 ///
 /// `Help` title, the `INTRO` line, then the visible window of the flattened
 /// section/row lines, then (when scrolled) a scroll indicator, then the
 /// `Esc to close` footer. Mirrors `render_skills_to_string`.
 #[must_use]
-pub fn render_help_to_string(state: &HelpState) -> String {
+pub fn render_help_to_string_with(state: &HelpState, bindings: &[ParsedBinding]) -> String {
     let mut out = String::from(TITLE);
     out.push('\n');
     out.push_str(INTRO);
     out.push('\n');
 
-    let lines = content_lines();
+    let lines = content_lines(bindings);
     for line in visible_slice(&lines, &state.scroll) {
         out.push_str(line);
         out.push('\n');
@@ -254,7 +326,7 @@ mod tests {
         // rows are visible (a plain `End` jump would scroll the header off the
         // top of the window).
         let mut s = HelpState::new();
-        let header_idx = content_lines()
+        let header_idx = content_lines(&default_bindings())
             .iter()
             .position(|l| l == COMMANDS_HEADER)
             .expect("Slash commands header is a body line");
@@ -331,13 +403,18 @@ mod tests {
 
     #[test]
     fn every_shortcut_and_command_is_a_body_line() {
-        let lines = content_lines();
+        let bindings = default_bindings();
+        let lines = content_lines(&bindings);
         // Header + each shortcut + header + each command.
         assert_eq!(lines.len(), SHORTCUTS.len() + SLASH_COMMANDS.len() + 2);
-        for (key, label) in SHORTCUTS {
+        for row in SHORTCUTS {
+            let chord = row_chord(row, &bindings);
             assert!(
-                lines.iter().any(|l| l.contains(key) && l.contains(label)),
-                "shortcut {key} / {label} present"
+                lines
+                    .iter()
+                    .any(|l| l.contains(&chord) && l.contains(row.label)),
+                "shortcut {chord} / {} present",
+                row.label
             );
         }
         for (cmd, desc) in SLASH_COMMANDS {
@@ -346,5 +423,74 @@ mod tests {
                 "command {cmd} / {desc} present"
             );
         }
+    }
+
+    /// (GAP D — help display) Build a `Vec<ParsedBinding>` from an inline
+    /// keybindings JSON override merged over the defaults (the live keymap the
+    /// help screen renders against).
+    fn bindings_with_override(json: &str) -> Vec<ParsedBinding> {
+        use command_core::keybindings::load_keybindings;
+        use std::io::Write;
+        let path = std::env::temp_dir().join(format!(
+            "lingxi-help-kb-{}-{}.json",
+            std::process::id(),
+            // nanos to keep parallel test invocations from colliding.
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_nanos())
+        ));
+        std::fs::File::create(&path)
+            .unwrap()
+            .write_all(json.as_bytes())
+            .unwrap();
+        let bindings = load_keybindings(true, &path, false).bindings;
+        let _ = std::fs::remove_file(&path);
+        bindings
+    }
+
+    /// (GAP D — help display, TDD) A user override of a rebindable shortcut
+    /// (`app:toggleTranscript` → `ctrl+y`) is reflected in the live-rendered
+    /// help chord, while an un-overridden row keeps its default chord. This is
+    /// the `useShortcutDisplay` semantics applied to the Help screen.
+    #[test]
+    fn help_renders_overridden_chord_and_keeps_unspecified_default() {
+        let bindings = bindings_with_override(
+            r#"{ "bindings": [ { "context": "Global", "bindings": { "ctrl+y": "app:toggleTranscript" } } ] }"#,
+        );
+        let s = HelpState::new();
+        let out = render_help_to_string_with(&s, &bindings);
+
+        // The verbose-output row (app:toggleTranscript / Global) now shows the
+        // overridden chord `ctrl + y` instead of the default `ctrl + o`.
+        assert!(
+            out.contains("ctrl + y") && out.contains("for verbose output"),
+            "overridden chord rendered, got: {out}"
+        );
+        // The un-overridden toggle-tasks row keeps its default `ctrl + t`.
+        assert!(
+            out.contains("ctrl + t") && out.contains("to toggle tasks"),
+            "unspecified row keeps default chord, got: {out}"
+        );
+    }
+
+    /// (GAP D — help display) Under the DEFAULT keymap the rebindable rows
+    /// render their default chords (the model-picker / fast-mode rows show their
+    /// TRUE default `meta + p` / `meta + o`, the documented parity correction).
+    #[test]
+    fn default_keymap_renders_default_chords() {
+        let bindings = default_bindings();
+        let chord = |action: &'static str, ctx: &'static str| -> String {
+            row_chord(
+                &ShortcutRow { action: Some(action), context: ctx, fallback: "X", label: "" },
+                &bindings,
+            )
+        };
+        assert_eq!(chord("app:toggleTranscript", "Global"), "ctrl + o");
+        assert_eq!(chord("chat:cycleMode", "Chat"), "shift + tab");
+        assert_eq!(chord("chat:imagePaste", "Chat"), "ctrl + v");
+        // The true default for the model picker is meta+p (not the historical
+        // `alt + p` mislabel) — rendered live as `meta + p`.
+        assert_eq!(chord("chat:modelPicker", "Chat"), "meta + p");
+        assert_eq!(chord("chat:fastMode", "Chat"), "meta + o");
     }
 }

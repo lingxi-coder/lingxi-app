@@ -426,14 +426,10 @@ async fn trust_gate() -> TrustGateOutcome {
     let config_path = config_path.expect("prompt implies a config path");
     match tui::startup_trust::mount_trust_dialog(&cwd).await {
         Ok(tui::startup_trust::TrustDialogOutcome::Accept) => {
-            // "Yes, I trust this folder" → persist (best-effort; a write
-            // failure must not crash startup — the session is still
-            // trusted-this-run). `TrustDialog.tsx:177` → `saveCurrentProjectConfig`.
-            if let Err(e) =
-                migrations::global_config::mark_trust_dialog_accepted(&config_path, &cwd)
-            {
-                tracing::warn!(error = %e, "mark_trust_dialog_accepted failed (ignored)");
-            }
+            // "Yes, I trust this folder" → record acceptance via the shared
+            // accept branch (`TrustDialog.tsx:162,174-177`): SESSION-ONLY
+            // in-memory when `cwd == $HOME`, else persisted to disk best-effort.
+            migrations::global_config::record_trust_accept(&config_path, &cwd);
             TrustGateOutcome::Proceed
         }
         Ok(tui::startup_trust::TrustDialogOutcome::Decline) => TrustGateOutcome::Decline,

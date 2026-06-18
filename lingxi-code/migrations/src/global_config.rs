@@ -23,8 +23,40 @@
 //!   worse than a skipped migration.
 
 use std::path::{Component, Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use serde_json::{Map, Value};
+
+/// In-memory session trust flag — `bootstrap/state.ts:153,363,1317-1322`
+/// (`STATE.sessionTrustAccepted` + `setSessionTrustAccepted` /
+/// `getSessionTrustAccepted`). When the trust dialog is accepted while
+/// `cwd === homedir()`, claude-code stores acceptance in memory ONLY (not on
+/// disk) via `setSessionTrustAccepted(true)` (`TrustDialog.tsx:174-175`), so
+/// hooks/features work this run without persisting trust for `$HOME`.
+static SESSION_TRUST_ACCEPTED: AtomicBool = AtomicBool::new(false);
+
+/// `setSessionTrustAccepted` (`bootstrap/state.ts:1317-1319`): set the
+/// in-memory session trust flag.
+pub fn set_session_trust_accepted(accepted: bool) {
+    SESSION_TRUST_ACCEPTED.store(accepted, Ordering::SeqCst);
+}
+
+/// `getSessionTrustAccepted` (`bootstrap/state.ts:1321-1322`): read the
+/// in-memory session trust flag.
+#[must_use]
+pub fn get_session_trust_accepted() -> bool {
+    SESSION_TRUST_ACCEPTED.load(Ordering::SeqCst)
+}
+
+/// `homedir()` (Node `os.homedir()`): `$HOME` resolved the SAME way the rest of
+/// this crate sources it ([`claude_config_home`] uses `std::env::var_os("HOME")`,
+/// NOT `dirs::home_dir`). Used by the `TrustDialog` accept branch to detect the
+/// `cwd === homedir()` session-only case (`TrustDialog.tsx:162,174`). `None`
+/// when `$HOME` is unset.
+#[must_use]
+pub fn trust_homedir() -> Option<PathBuf> {
+    std::env::var_os("HOME").map(PathBuf::from)
+}
 
 /// A raw JSON object — the in-memory shape of `~/.claude.json`.
 pub type JsonMap = Map<String, Value>;
@@ -370,10 +402,19 @@ pub fn save_project_config(
 /// (`read_map`/`get_project_config` `Err`) yields `false` here rather than
 /// propagating — the trust check must degrade to "ask the user", never to a
 /// crash or an implicit grant. The TS in-memory session-trust branch
-/// (`getSessionTrustAccepted`, the `homedir()===cwd` case) is intentionally
-/// NOT modeled by this disk-only store API; the dialog layer owns that.
+/// (`getSessionTrustAccepted`, the `homedir()===cwd` case) IS modeled here as
+/// the FIRST short-circuit — parity with `computeTrustDialogAccepted`
+/// (`config.ts:705-711`), where session trust OR disk grants acceptance.
 #[must_use]
 pub fn check_has_trust_dialog_accepted(config_path: &Path, cwd: &Path) -> bool {
+    // (0) Session-level (in-memory) trust, set when the dialog was accepted
+    // while `cwd === homedir()` (`TrustDialog.tsx:174-175` →
+    // `computeTrustDialogAccepted`'s first `if (getSessionTrustAccepted())`,
+    // `config.ts:709-711`). Disk is never consulted once this is set.
+    if get_session_trust_accepted() {
+        return true;
+    }
+
     // Canonicalize once (fall back to as-is), mirroring `project_path_for_config`
     // and TS's `resolve(getCwd())` before the lexical parent-walk.
     let resolved = cwd.canonicalize().unwrap_or_else(|_| cwd.to_path_buf());
@@ -423,6 +464,28 @@ pub fn mark_trust_dialog_accepted(config_path: &Path, cwd: &Path) -> Result<(), 
         p
     })
     .map(|_wrote| ())
+}
+
+/// Record a "Yes, I trust this folder" acceptance — the `onChange` accept
+/// branch of `TrustDialog.tsx:162,174-177`:
+/// - when `cwd === homedir()` ([`trust_homedir`]) acceptance is SESSION-ONLY
+///   (in-memory [`set_session_trust_accepted`]`(true)`, NOT persisted to disk),
+///   so hooks/features work this run without persisting trust for `$HOME`;
+/// - otherwise persist via [`mark_trust_dialog_accepted`]
+///   (`saveCurrentProjectConfig`), best-effort — a write failure must not crash
+///   startup (the session is still trusted-this-run), so a persist error is
+///   logged and swallowed, matching both CLI gates' prior behavior.
+///
+/// The `$HOME`/cwd comparison is the raw `homedir() === getCwd()` (no
+/// canonicalization in claude-code). Shared by the stdio-REPL gate
+/// (`repl::trust_gate`) and the TUI gate (`mode::trust_gate`) so the branch is
+/// defined and tested once.
+pub fn record_trust_accept(config_path: &Path, cwd: &Path) {
+    if Some(cwd) == trust_homedir().as_deref() {
+        set_session_trust_accepted(true);
+    } else if let Err(e) = mark_trust_dialog_accepted(config_path, cwd) {
+        tracing::warn!(error = %e, "mark_trust_dialog_accepted failed (ignored)");
+    }
 }
 
 #[cfg(test)]
@@ -832,6 +895,10 @@ mod tests {
 
     #[test]
     fn trust_check_none_is_false() {
+        // `env_lock` serializes against the session-flag tests (the in-memory
+        // `SESSION_TRUST_ACCEPTED` short-circuits `check_has_trust_dialog_accepted`).
+        let _g = env_lock();
+        assert!(!get_session_trust_accepted(), "no session flag leaked in");
         let t = temp_config();
         std::fs::write(
             &t.global,
@@ -886,6 +953,8 @@ mod tests {
 
     #[test]
     fn trust_check_corrupt_file_is_false() {
+        let _g = env_lock();
+        assert!(!get_session_trust_accepted(), "no session flag leaked in");
         let t = temp_config();
         std::fs::write(&t.global, "{ broken").unwrap();
         // Fail-safe-to-prompt: corrupt config must NOT panic and must be false.
@@ -894,8 +963,106 @@ mod tests {
 
     #[test]
     fn trust_check_missing_file_is_false() {
+        let _g = env_lock();
+        assert!(!get_session_trust_accepted(), "no session flag leaked in");
         let t = temp_config();
         // `t.global` never created.
         assert!(!check_has_trust_dialog_accepted(&t.global, &t.project));
+    }
+
+    /// Session-level (in-memory) trust short-circuits the disk check —
+    /// `computeTrustDialogAccepted`'s first branch (`config.ts:709-711`).
+    /// `SESSION_TRUST_ACCEPTED` is a process-global `AtomicBool`; this test
+    /// holds `env_lock()` so no other env/global-mutating test interleaves,
+    /// and RESETS the flag to `false` before returning so it does not leak.
+    #[test]
+    fn trust_check_session_flag_short_circuits_disk() {
+        let _g = env_lock();
+        // Default is false: a fresh process flag does not grant trust on its
+        // own (the missing-file path is exercised by `trust_check_missing_*`).
+        assert!(!get_session_trust_accepted());
+
+        let t = temp_config();
+        // No disk entry at all.
+        assert!(!check_has_trust_dialog_accepted(&t.global, &t.project));
+
+        // Setting the session flag grants trust with NO disk entry.
+        set_session_trust_accepted(true);
+        assert!(check_has_trust_dialog_accepted(&t.global, &t.project));
+        assert!(get_session_trust_accepted());
+
+        // Reset so the process-global does not leak into other tests.
+        set_session_trust_accepted(false);
+        assert!(!get_session_trust_accepted());
+        assert!(!check_has_trust_dialog_accepted(&t.global, &t.project));
+    }
+
+    /// `trust_homedir` sources `$HOME` the same way `claude_config_home` does
+    /// (`std::env::var_os("HOME")`), so the dialog's `cwd === homedir()` check
+    /// matches the rest of the crate.
+    #[test]
+    fn trust_homedir_resolves_home_env() {
+        let _g = env_lock();
+        std::env::set_var("HOME", "/tmp/cc-trust-home");
+        assert_eq!(trust_homedir(), Some(PathBuf::from("/tmp/cc-trust-home")));
+    }
+
+    /// `record_trust_accept` with `cwd == $HOME` ⇒ SESSION-ONLY: the in-memory
+    /// flag is set, the re-check returns true, but NOTHING is persisted to disk
+    /// (parity `TrustDialog.tsx:174-175` — `setSessionTrustAccepted`, NOT
+    /// `saveCurrentProjectConfig`). `env_lock` serializes the `$HOME` mutation
+    /// AND the process-global `SESSION_TRUST_ACCEPTED`; the flag is reset to
+    /// `false` before returning so it does not leak across tests.
+    #[test]
+    fn record_trust_accept_home_is_session_only_not_persisted() {
+        let _g = env_lock();
+        set_session_trust_accepted(false);
+
+        let t = temp_config();
+        // Point `$HOME` at the cwd so `trust_homedir() == cwd` (raw
+        // `homedir() === getCwd()`).
+        std::env::set_var("HOME", &t.project);
+
+        record_trust_accept(&t.global, &t.project);
+
+        // (a) In-memory flag set; the re-check now returns true…
+        assert!(get_session_trust_accepted());
+        assert!(check_has_trust_dialog_accepted(&t.global, &t.project));
+
+        // (b) …but NOTHING was written to disk: clearing the flag, the disk-only
+        // check is false and the global config file was never created.
+        set_session_trust_accepted(false);
+        assert!(
+            !check_has_trust_dialog_accepted(&t.global, &t.project),
+            "home-dir accept must NOT persist trust to disk"
+        );
+        assert!(!t.global.exists(), "no global config file should be written");
+
+        // Reset so the process-global does not leak.
+        set_session_trust_accepted(false);
+    }
+
+    /// `record_trust_accept` with `cwd != $HOME` ⇒ persisted to disk exactly as
+    /// today (the non-home `saveCurrentProjectConfig` branch); the session flag
+    /// is NOT touched.
+    #[test]
+    fn record_trust_accept_non_home_persists_to_disk() {
+        let _g = env_lock();
+        set_session_trust_accepted(false);
+
+        let t = temp_config();
+        // `$HOME` is a DIFFERENT directory than cwd (a sibling of `t.project`).
+        let home = t.project.parent().unwrap().join("not-the-cwd");
+        std::env::set_var("HOME", &home);
+
+        record_trust_accept(&t.global, &t.project);
+
+        // Session flag untouched; trust IS on disk (survives a flag reset).
+        assert!(!get_session_trust_accepted());
+        assert!(
+            check_has_trust_dialog_accepted(&t.global, &t.project),
+            "non-home accept must persist trust to disk"
+        );
+        assert!(t.global.exists(), "non-home accept must write the config file");
     }
 }

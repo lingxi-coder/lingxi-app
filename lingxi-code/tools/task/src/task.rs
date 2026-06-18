@@ -264,6 +264,18 @@ pub(crate) fn matches_verif(s: &str) -> bool {
     s.to_ascii_lowercase().contains("verif")
 }
 
+/// Whether the verification-nudge FEATURE is live at call time. claude gates the
+/// nudge on `feature('VERIFICATION_AGENT') && getFeatureValue_CACHED_MAY_BE_STALE(
+/// 'tengu_hive_evidence', false)` (`TaskUpdateTool.ts:334-335`). BOTH the bundle
+/// feature and the GrowthBook flag default OFF in production, so the nudge never
+/// reaches the model on the common interactive path. Neither real flag is
+/// threaded into the tool crate yet, so this proxies them with an env opt-in that
+/// is OFF by default — matching prod claude (no suffix). Swap this for the real
+/// `feature(...) && getFeatureValue(...)` terms once the host threads them in.
+pub(crate) fn verification_feature_enabled() -> bool {
+    env_truthy("CLAUDE_CODE_VERIFICATION_AGENT")
+}
+
 /// Shared predicate for the structural verification nudge — the common core of
 /// `TaskUpdateTool.ts:333-349` and `TodoWriteTool.ts:77-86`. Returns `true`
 /// when the nudge should be appended: the feature is on, this is the main
@@ -275,18 +287,17 @@ pub(crate) fn matches_verif(s: &str) -> bool {
 /// is `completed` (JS `Array.every`, vacuously `true` for an empty list — the
 /// `count >= 3` guard rejects that case); `count` is the item count.
 ///
-/// PARITY-GAP: the exact TS feature gate is
-/// `feature('VERIFICATION_AGENT') && getFeatureValue_CACHED_MAY_BE_STALE('tengu_hive_evidence', false)`.
-/// Neither the bundle feature nor the growthbook flag is threaded into
-/// `ToolUseContext` / `BuiltinToolContext`, so — following the V2 gating
-/// convention (`is_todo_v2_enabled`) — we approximate the feature gate with the
-/// interactive-session signal (`!is_non_interactive_session`) plus the EXACT
-/// main-thread check `agent_id.is_none()` (== `!context.agentId`). This errs
-/// toward NOT firing (conservative). Caveat: because the V1 `TodoWrite` tool is
-/// itself only advertised in non-interactive sessions, this proxy suppresses
-/// the TodoWrite nudge in production; it surfaces in the V2 `TaskUpdate` path
-/// (and in interactive tests). Swap this term if the host later threads the
-/// real flags through.
+/// PURE predicate for the structural-shape part of the gate (no flag read): the
+/// EXACT main-thread check `agent_id.is_none()` (== `!context.agentId`), the
+/// conservative `!is_non_interactive_session` guard, every item completed,
+/// `>= 3` items, and no item matching `/verif/i`. The FEATURE gate
+/// ([`verification_feature_enabled`], OFF by default — mirroring
+/// `feature('VERIFICATION_AGENT') && getFeatureValue('tengu_hive_evidence',
+/// false)`, both OFF in prod) is applied SEPARATELY at the call site so this
+/// predicate stays a pure, deterministic unit. `items` yields the per-item text
+/// the `/verif/i` regex runs over (TaskUpdate: task subjects; TodoWrite:
+/// contents). With the feature OFF by default, no suffix reaches the model on
+/// the common interactive path — matching prod claude.
 pub(crate) fn verification_nudge_needed<'a>(
     agent_id_is_none: bool,
     is_non_interactive_session: bool,
@@ -1559,7 +1570,8 @@ impl Tool for TaskUpdateTool {
         // before re-listing the store; `store.list()` reflects the just-applied
         // update (the store mutation above already persisted it).
         let mut nudge_needed = false;
-        if new_status == Some(TodoState::Completed)
+        if verification_feature_enabled()
+            && new_status == Some(TodoState::Completed)
             && ctx.agent_id.is_none()
             && !ctx.options.is_non_interactive_session
         {
@@ -1577,6 +1589,17 @@ impl Tool for TaskUpdateTool {
         emit_completed(&bus, TASK_UPDATE_COMPLETED, &invocation_id, duration(), &[]).await;
 
         let mut content = render_task_update_success(&task_id, &updated_fields);
+        // Teammate completion reminder (TaskUpdateTool.ts:386-394): when a
+        // teammate (`getAgentId()`) closes a task to `completed` and swarms are
+        // live, append the reminder. Gated on the COMPUTED transition's `to`
+        // (`statusChange?.to === 'completed'`), which is `status_change`'s `to`.
+        // Ordered BEFORE the verification nudge to match the TS suffix order.
+        if matches!(status_change, Some((_, TodoState::Completed)))
+            && ctx.agent_id.is_some()
+            && is_agent_swarms_enabled()
+        {
+            content.push_str("\n\nTask completed. Call TaskList now to find your next available task or see if your work unblocked others.");
+        }
         if nudge_needed {
             content.push_str(&verification_nudge_suffix());
         }
@@ -1676,8 +1699,13 @@ impl Tool for TaskStopTool {
     fn max_result_size_chars(&self) -> usize {
         100_000
     }
+    /// `shouldDefer: true` (`TaskStopTool.ts:53`).
+    fn should_defer(&self) -> bool {
+        true
+    }
+    /// `isConcurrencySafe() { return true }` (`TaskStopTool.ts:54-56`).
     fn is_concurrency_safe(&self, _: &Value) -> bool {
-        false
+        true
     }
     fn is_read_only(&self, _: &Value) -> bool {
         false
@@ -2110,6 +2138,10 @@ impl Tool for TaskOutputTool {
     }
     fn max_result_size_chars(&self) -> usize {
         100_000
+    }
+    /// `shouldDefer: true` (`TaskOutputTool.tsx:148`).
+    fn should_defer(&self) -> bool {
+        true
     }
     fn is_concurrency_safe(&self, _: &Value) -> bool {
         true
@@ -2658,6 +2690,7 @@ mod tests {
         struct EnvGuard {
             prev_config: Option<std::ffi::OsString>,
             prev_list: Option<std::ffi::OsString>,
+            prev_verif: Option<std::ffi::OsString>,
             dir: std::path::PathBuf,
             _lock: std::sync::MutexGuard<'static, ()>,
         }
@@ -2670,6 +2703,10 @@ mod tests {
                 match &self.prev_list {
                     Some(v) => std::env::set_var("CLAUDE_CODE_TASK_LIST_ID", v),
                     None => std::env::remove_var("CLAUDE_CODE_TASK_LIST_ID"),
+                }
+                match &self.prev_verif {
+                    Some(v) => std::env::set_var("CLAUDE_CODE_VERIFICATION_AGENT", v),
+                    None => std::env::remove_var("CLAUDE_CODE_VERIFICATION_AGENT"),
                 }
                 let _ = std::fs::remove_dir_all(&self.dir);
             }
@@ -2701,6 +2738,7 @@ mod tests {
             let _guard = EnvGuard {
                 prev_config: std::env::var_os("CLAUDE_CONFIG_DIR"),
                 prev_list: std::env::var_os("CLAUDE_CODE_TASK_LIST_ID"),
+                prev_verif: std::env::var_os("CLAUDE_CODE_VERIFICATION_AGENT"),
                 dir: dir.clone(),
                 _lock: super::ENV_LOCK
                     .lock()
@@ -2708,6 +2746,10 @@ mod tests {
             };
             std::env::set_var("CLAUDE_CONFIG_DIR", &dir);
             std::env::set_var("CLAUDE_CODE_TASK_LIST_ID", &unique);
+            // T13: the nudge FEATURE is OFF by default (matching prod claude). The
+            // store-level transition logic is unchanged; the feature gate is the
+            // only difference. Turn it ON for the transition assertions below.
+            std::env::remove_var("CLAUDE_CODE_VERIFICATION_AGENT");
 
             // 3-item list, none /verif/: two completed + one pending.
             let store = TodoStore::for_list(&unique);
@@ -2725,6 +2767,30 @@ mod tests {
                 .unwrap();
 
             let tool = TaskUpdateTool::new(bctx());
+
+            // Phase 0 — FEATURE OFF (default): even a real ->completed transition
+            // that closes a 3+ all-done list must NOT fire the nudge, because the
+            // VERIFICATION_AGENT/tengu_hive_evidence flags default OFF in prod.
+            let res = tool
+                .call(
+                    json!({ "taskId": &id3, "status": "completed" }),
+                    fresh_ctx(),
+                    fresh_tx(),
+                )
+                .await
+                .expect("transition update ok");
+            assert_eq!(
+                res.data["verificationNudgeNeeded"],
+                json!(false),
+                "feature OFF by default ⇒ no nudge on the common interactive path"
+            );
+            // Re-open #3 so the transition-on assertions below see the same shape.
+            store
+                .update(&id3, |t| t.status = TodoState::Pending)
+                .await;
+
+            // Enable the feature for the remaining (gate-on) assertions.
+            std::env::set_var("CLAUDE_CODE_VERIFICATION_AGENT", "1");
 
             // Phase 1 — NO-OP: re-send `completed` on the already-completed #1.
             // Raw input status == "completed" (the OLD buggy gate would fire),
@@ -3059,6 +3125,159 @@ mod tests {
             .expect("update ok");
 
             assert!(router.sent.lock().unwrap().is_empty(), "no route when swarms off");
+        }
+
+        // ── T5 teammate completion reminder (TaskUpdateTool.ts:386-394) ──────
+        const TEAMMATE_REMINDER: &str =
+            "\n\nTask completed. Call TaskList now to find your next available task or see if your work unblocked others.";
+
+        #[tokio::test]
+        async fn teammate_completion_reminder_present_for_swarm_completed_agent() {
+            let (_g, list, router) = setup(true);
+            let store = TodoStore::for_list(&list);
+            let id = store
+                .create(task("Build the thing", TodoState::Pending))
+                .await
+                .unwrap();
+
+            // Teammate (agent_id present) closes the task → completed, swarms on.
+            let tool = TaskUpdateTool::new(bctx(router));
+            let res = tool
+                .call(
+                    json!({ "taskId": &id, "status": "completed" }),
+                    ctx_with_agent(Some(AgentId::new())),
+                    fresh_tx(),
+                )
+                .await
+                .expect("update ok");
+
+            let content = res.data["content"].as_str().unwrap();
+            assert!(
+                content.ends_with(TEAMMATE_REMINDER),
+                "reminder appended verbatim after the success line: {content:?}"
+            );
+            assert_eq!(res.data["statusChange"]["to"], "completed");
+        }
+
+        #[tokio::test]
+        async fn teammate_completion_reminder_absent_when_swarm_off() {
+            let (_g, list, router) = setup(false);
+            let store = TodoStore::for_list(&list);
+            let id = store
+                .create(task("Build the thing", TodoState::Pending))
+                .await
+                .unwrap();
+
+            let tool = TaskUpdateTool::new(bctx(router));
+            let res = tool
+                .call(
+                    json!({ "taskId": &id, "status": "completed" }),
+                    ctx_with_agent(Some(AgentId::new())),
+                    fresh_tx(),
+                )
+                .await
+                .expect("update ok");
+
+            assert!(
+                !res.data["content"].as_str().unwrap().contains(TEAMMATE_REMINDER),
+                "no teammate reminder when swarms are off"
+            );
+        }
+
+        #[tokio::test]
+        async fn teammate_completion_reminder_absent_for_main_thread() {
+            let (_g, list, router) = setup(true);
+            let store = TodoStore::for_list(&list);
+            let id = store
+                .create(task("Build the thing", TodoState::Pending))
+                .await
+                .unwrap();
+
+            // Main thread (agent_id None == !getAgentId()) ⇒ no reminder.
+            let tool = TaskUpdateTool::new(bctx(router));
+            let res = tool
+                .call(
+                    json!({ "taskId": &id, "status": "completed" }),
+                    ctx_with_agent(None),
+                    fresh_tx(),
+                )
+                .await
+                .expect("update ok");
+
+            assert!(
+                !res.data["content"].as_str().unwrap().contains(TEAMMATE_REMINDER),
+                "no teammate reminder on the main thread (no agent id)"
+            );
+        }
+
+        #[tokio::test]
+        async fn teammate_completion_reminder_absent_when_not_completed_transition() {
+            let (_g, list, router) = setup(true);
+            let store = TodoStore::for_list(&list);
+            let id = store
+                .create(task("Build the thing", TodoState::Pending))
+                .await
+                .unwrap();
+
+            // in_progress (not a ->completed transition) ⇒ no reminder.
+            let tool = TaskUpdateTool::new(bctx(router));
+            let res = tool
+                .call(
+                    json!({ "taskId": &id, "status": "in_progress" }),
+                    ctx_with_agent(Some(AgentId::new())),
+                    fresh_tx(),
+                )
+                .await
+                .expect("update ok");
+
+            assert!(
+                !res.data["content"].as_str().unwrap().contains(TEAMMATE_REMINDER),
+                "reminder only on a ->completed transition"
+            );
+        }
+    }
+
+    // ── T8 / T19 Product-B TaskStop / TaskOutput tool-flag parity ────────────
+    mod product_b_tool_flags {
+        use super::*;
+        use std::sync::Arc;
+        use telemetry::AnalyticsBus;
+        use tool_api::test_support::{ctx_for_file_tools, make_dummy_fs};
+
+        fn bctx() -> BuiltinToolContext {
+            ctx_for_file_tools(
+                make_dummy_fs(),
+                Arc::new(AnalyticsBus::new()),
+                vec![std::env::temp_dir()],
+            )
+        }
+
+        #[test]
+        fn task_stop_should_defer_and_concurrency_safe() {
+            // TaskStopTool.ts:53 `shouldDefer: true`; :54-56 isConcurrencySafe → true.
+            let tool = TaskStopTool::new(bctx());
+            assert!(tool.should_defer(), "TaskStop shouldDefer === true");
+            assert!(
+                tool.is_concurrency_safe(&Value::Null),
+                "TaskStop isConcurrencySafe() === true"
+            );
+            // is_destructive / interrupt_behavior unchanged.
+            assert!(tool.is_destructive(&Value::Null));
+            assert!(matches!(
+                tool.interrupt_behavior(&Value::Null),
+                InterruptBehavior::Block
+            ));
+        }
+
+        #[test]
+        fn task_output_should_defer() {
+            // TaskOutputTool.tsx:148 `shouldDefer: true`.
+            let tool = TaskOutputTool::new(bctx());
+            assert!(tool.should_defer(), "TaskOutput shouldDefer === true");
+            assert!(
+                tool.is_concurrency_safe(&Value::Null),
+                "TaskOutput isConcurrencySafe stays true"
+            );
         }
     }
 

@@ -5,40 +5,37 @@
 //! streams its captured stdout/stderr into the task's spool file, mirroring the
 //! claude-code `LocalShellTask` lifecycle (`spawnShellTask` → `killTask`).
 //!
-//! ## Why `run()` and not `spawn_background()`
+//! ## One child, both streamed-to-spool and killable
 //!
-//! [`crate::task_trait::Task`] hands the handler a [`TaskContext`] carrying only
-//! `fs` + `runtime`; the engine must not call `tokio::spawn` directly (D17), so
-//! the worker runs inside `ctx.runtime.spawn(..)`. Inside that future the child
-//! is executed with [`ProcessRunner::run`], whose [`ProcessOutput`] is appended
-//! to the spool via [`FileSystem::append_file`].
+//! claude-code's `LocalShellTask` owns a single `ShellCommand`: the SAME process
+//! whose output streams to disk (`shellCommand.background(taskId)`) is the one
+//! `killTask` later signals (`shellCommand.kill()`). There is no second child;
+//! `background()` only transitions the already-running process — it does not
+//! re-execute the command (`LocalShellTask.tsx` / `killShellTasks.ts`).
 //!
-//! We deliberately do *not* use [`ProcessRunner::spawn_background`] for the
-//! primary execution path: a [`ProcessHandle`] exposes no live stdout/stderr
-//! stream, and the platform `spawn_background` wires the child's fds to a
-//! *runner-private* output file the handler cannot read back through the trait
-//! (see `platforms/posix/src/process/runner.rs`). `run()` is the only way to
-//! capture output for the spool that tests/UI read. The trade-off is that a
-//! pure-`run()` worker has no OS handle to hand to [`ProcessRunner::kill`];
-//! cancellation therefore rides on cooperatively dropping the runtime future
-//! (the runtime's documented `cancel` contract) plus flipping status to
-//! `Killed`. When a caller opts into background streaming
-//! ([`LocalBashHandler::with_background_spawn`]) the handler records the real
-//! [`ProcessHandle`] in `children` so [`Task::kill`] can issue a true
-//! [`ProcessRunner::kill`].
+//! This handler mirrors that single-child invariant. [`crate::task_trait::Task`]
+//! hands the handler a [`TaskContext`] carrying only `fs` + `runtime`; the
+//! engine must not call `tokio::spawn` directly (D17), so the one child runs via
+//! [`ProcessRunner::run`] inside a single `ctx.runtime.spawn(..)` worker future.
+//! The captured [`ProcessOutput`] is appended to the spool via
+//! `FileSystem::append_file_no_follow`.
 //!
-//! ## WARNING: background-streaming mode runs the command TWICE
+//! [`Task::kill`] terminates that exact child by cancelling the worker future
+//! through [`RuntimeSpawner::cancel`] — the analogue of TS
+//! `shellCommand.kill()`. Cancelling the worker drops the `run()` future, which
+//! drops the platform `Child`; the foreground runner spawns with
+//! `kill_on_drop(true)` (see `platforms/posix/src/process/runner.rs`), so the
+//! drop sends `SIGKILL` to the real OS process. The in-flight `bash -c` is thus
+//! authoritatively killed — not merely flagged. The worker-cancel record (the
+//! [`BackgroundTaskHandle`] + the `runtime` that minted it) is captured at spawn
+//! time because [`TaskContext`] is per-call and the synchronous
+//! [`TaskHandle::cleanup`] closure receives no `ctx`. This is exactly the seam
+//! the sibling [`crate::handlers::local_agent::LocalAgentHandler`] uses.
 //!
-//! With `use_background_spawn=true` the handler launches **two** independent OS
-//! children for one logical task: `spawn_background()` starts a detached
-//! (`setsid`) child whose output goes to a runner-private file, and the worker
-//! *also* calls `run()` to capture output for the spool. A side-effecting
-//! command (writes a file, mutates state, sends a request) therefore executes
-//! twice. The `run()` copy's exit drives status/spool; the detached copy is
-//! only terminable via [`Task::kill`] — if `kill` is never called it runs to
-//! completion regardless. Enable this mode only for commands that are
-//! idempotent / observe-only, or accept the double-execution. The default
-//! (`false`) executes the command exactly once via `run()`.
+//! There is deliberately NO [`ProcessRunner::spawn_background`] call: that would
+//! launch a *second*, independent OS child (detached `setsid`, output to a
+//! runner-private file) for one logical task — double-executing any
+//! side-effecting command. The single `run()` child is the whole task.
 
 use crate::id::TaskType;
 use crate::output_manager::TaskOutputManager;
@@ -48,7 +45,29 @@ use async_trait::async_trait;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use traits::{ProcessCommand, ProcessError, ProcessHandle, ProcessOutput, ProcessRunner, Sandbox};
+use traits::{
+    BackgroundTaskHandle, ProcessCommand, ProcessError, ProcessOutput, ProcessRunner,
+    RuntimeSpawner, Sandbox,
+};
+
+/// A worker-cancel record: the [`BackgroundTaskHandle`] returned by
+/// [`RuntimeSpawner::spawn`] plus the `runtime` Arc that minted it.
+///
+/// [`TaskContext`] (which carries `runtime`) is per-call and the synchronous
+/// [`TaskHandle::cleanup`] closure receives no `ctx`, so the handler captures
+/// the `runtime` alongside the handle at spawn time. That lets both
+/// [`Task::kill`] and [`LocalBashHandler::drain_pending_kills`] issue
+/// [`RuntimeSpawner::cancel`] without a fresh `ctx` — cancelling the in-flight
+/// `run()` future, which drops the platform `Child` and (via the runner's
+/// `kill_on_drop`) `SIGKILL`s the real OS process. Mirrors the sibling
+/// `LocalAgentHandler::WorkerCancel`.
+///
+/// Public because it appears in the signature of the public
+/// [`LocalBashHandler::workers_map`] accessor; fields stay private.
+pub struct WorkerCancel {
+    handle: BackgroundTaskHandle,
+    runtime: Arc<dyn RuntimeSpawner>,
+}
 
 /// Audit reason recorded on the sandboxed command when no policy is supplied,
 /// mirroring the hooks Command arm's `"hook_command"` bypass tag
@@ -78,8 +97,10 @@ pub trait TaskStatusSink: Send + Sync {
     /// [`ProcessOutput::exit_code`]). Called once on natural completion.
     async fn set_exit_code(&self, _task_id: &str, _exit_code: i32) {}
 
-    /// Record the child's OS pid once known. Called when a background handle
-    /// is obtained (streaming mode only).
+    /// Record the child's OS pid once known. Retained for sink-implementer
+    /// compatibility; the single-child `run()` path does not surface a pid
+    /// (the OS process is owned by the worker future, killed via cancellation),
+    /// so the handler no longer calls this. Defaulted to a no-op.
     async fn set_pid(&self, _task_id: &str, _pid: u32) {}
 }
 
@@ -97,10 +118,11 @@ impl TaskStatusSink for NoopStatusSink {
 ///
 /// Holds the constructor-injected execution dependencies that are *not*
 /// available on [`TaskContext`] ([`ProcessRunner`] + [`Sandbox`]), the spool
-/// manager, the terminal-status sink, and the shared child-handle map keyed by
-/// `task_id` so [`Task::kill`] can recover a [`ProcessHandle`].
+/// manager, the terminal-status sink, and the shared worker-cancel map keyed by
+/// `task_id` so [`Task::kill`] can cancel the in-flight worker future (which
+/// drops the `run()` child and `SIGKILL`s the real OS process).
 pub struct LocalBashHandler {
-    /// Runs the sandboxed bash command (and, in streaming mode, kills it).
+    /// Runs the sandboxed bash command.
     process: Arc<dyn ProcessRunner>,
     /// Mints the [`traits::SandboxedCommand`] the runner accepts (D2 / A1).
     sandbox: Arc<dyn Sandbox>,
@@ -108,19 +130,17 @@ pub struct LocalBashHandler {
     output_manager: Arc<TaskOutputManager>,
     /// Where terminal status / exit-code transitions are reported.
     status_sink: Arc<dyn TaskStatusSink>,
-    /// `task_id` → live child handle. Only populated in background-streaming
-    /// mode; [`Task::kill`] removes + kills the handle if present.
-    children: Arc<Mutex<HashMap<String, ProcessHandle>>>,
-    /// `task_id` → handle queued for teardown by the synchronous
+    /// `task_id` → live worker-cancel record. Populated for the duration of the
+    /// spawn; the worker removes its own entry on exit, and [`Task::kill`]
+    /// removes + cancels it if still present (cancelling the worker drops the
+    /// in-flight `run()`, which `SIGKILL`s the real OS child via the runner's
+    /// `kill_on_drop`).
+    workers: Arc<Mutex<HashMap<String, WorkerCancel>>>,
+    /// `task_id` → record queued for teardown by the synchronous
     /// [`TaskHandle::cleanup`] closure (which cannot await). Drained by
     /// [`LocalBashHandler::drain_pending_kills`], the async seam the
     /// registry/cleanup-registry calls on agent exit.
-    pending_kill: Arc<Mutex<HashMap<String, ProcessHandle>>>,
-    /// When `true`, also call [`ProcessRunner::spawn_background`] to obtain a
-    /// real [`ProcessHandle`] for the `children` map (enabling a true
-    /// `ProcessRunner::kill`). Off by default to keep the child executed
-    /// exactly once via `run()`.
-    use_background_spawn: bool,
+    pending_kill: Arc<Mutex<HashMap<String, WorkerCancel>>>,
 }
 
 impl LocalBashHandler {
@@ -142,9 +162,8 @@ impl LocalBashHandler {
             sandbox,
             output_manager,
             status_sink: Arc::new(NoopStatusSink),
-            children: Arc::new(Mutex::new(HashMap::new())),
+            workers: Arc::new(Mutex::new(HashMap::new())),
             pending_kill: Arc::new(Mutex::new(HashMap::new())),
-            use_background_spawn: false,
         }
     }
 
@@ -156,44 +175,26 @@ impl LocalBashHandler {
         self
     }
 
-    /// Opt into background-streaming mode: in addition to `run()`, obtain a
-    /// real [`ProcessHandle`] via [`ProcessRunner::spawn_background`] and record
-    /// it in `children` so [`Task::kill`] can issue a true
-    /// [`ProcessRunner::kill`]. The streamed child's output lands in the
-    /// runner's own file (see module docs), so the spool is still populated
-    /// from the `run()` capture.
-    ///
-    /// WARNING: this executes the command **twice** (one detached child via
-    /// `spawn_background`, one captured child via `run()`). See the module-level
-    /// "background-streaming mode runs the command TWICE" warning. Leave this
-    /// `false` (the default) for commands with side effects.
-    #[must_use]
-    pub fn with_background_spawn(mut self, enabled: bool) -> Self {
-        self.use_background_spawn = enabled;
-        self
-    }
-
-    /// Share the same `children` map with an external owner (e.g. the registry
+    /// Share the same `workers` map with an external owner (e.g. the registry
     /// wiring) so a [`TaskHandle::cleanup`] closure and [`Task::kill`] observe
-    /// the same handles.
+    /// the same worker-cancel records.
     #[must_use]
-    pub fn children_map(&self) -> Arc<Mutex<HashMap<String, ProcessHandle>>> {
-        self.children.clone()
+    pub fn workers_map(&self) -> Arc<Mutex<HashMap<String, WorkerCancel>>> {
+        self.workers.clone()
     }
 
-    /// Drain handles queued by [`TaskHandle::cleanup`] and kill each child for
-    /// real. This is the async counterpart of the synchronous cleanup closure:
-    /// the registry/cleanup-registry calls it on agent teardown so a child
-    /// outliving its agent is terminated (claude-code `killTask`-on-cleanup
-    /// parity). A queued handle with `pid == 0` is a pure-`run()` task that had
-    /// no OS child — it only flips status to `Killed`.
+    /// Drain records queued by [`TaskHandle::cleanup`] and cancel each worker
+    /// future for real. This is the async counterpart of the synchronous
+    /// cleanup closure: the registry/cleanup-registry calls it on agent teardown
+    /// so a child outliving its agent is terminated (claude-code
+    /// `killTask`-on-cleanup parity — `killShellTasksForAgent`). Cancelling the
+    /// worker drops the in-flight `run()`, which `SIGKILL`s the real OS child;
+    /// status is flipped to `Killed` regardless.
     pub async fn drain_pending_kills(&self) {
-        let pending: Vec<(String, ProcessHandle)> =
+        let pending: Vec<(String, WorkerCancel)> =
             self.pending_kill.lock().await.drain().collect();
-        for (task_id, handle) in pending {
-            if handle.pid != 0 {
-                let _ = self.process.kill(&handle).await;
-            }
+        for (task_id, rec) in pending {
+            let _ = rec.runtime.cancel(&rec.handle).await;
             self.status_sink.set_status(&task_id, TaskStatus::Killed).await;
         }
     }
@@ -271,27 +272,16 @@ impl Task for LocalBashHandler {
         //    (hooks/src/executor.rs:276).
         let sandboxed = self.sandbox.bypass_with_audit(pcmd, BYPASS_REASON);
 
-        // 4b. Optional background handle for a real ProcessRunner::kill seam.
-        if self.use_background_spawn {
-            match self.process.spawn_background(&sandboxed).await {
-                Ok(handle) => {
-                    self.status_sink.set_pid(&task_id, handle.pid).await;
-                    self.children.lock().await.insert(task_id.clone(), handle);
-                }
-                Err(e) => {
-                    self.status_sink.set_status(&task_id, TaskStatus::Failed).await;
-                    return Err(TaskError::Io(e.to_string()));
-                }
-            }
-        }
-
-        // 5. Drive the child to completion inside a runtime-spawned worker
+        // 5. Drive the ONE child to completion inside a runtime-spawned worker
         //    (engine code must not call tokio::spawn directly — D17). The worker
-        //    captures output via run(), appends it to the spool, and reports the
-        //    terminal status / exit code.
+        //    captures output via a single run(), appends it to the spool, and
+        //    reports the terminal status / exit code. This is the only OS child
+        //    for the task (no second `spawn_background` copy — TS's
+        //    `shellCommand.background()` re-uses the already-running process, it
+        //    does not re-execute the command).
         let process = self.process.clone();
         let status_sink = self.status_sink.clone();
-        let children = self.children.clone();
+        let workers = self.workers.clone();
         let fs = ctx.fs.clone();
         let worker_task_id = task_id.clone();
         let worker = Box::pin(async move {
@@ -320,44 +310,50 @@ impl Task for LocalBashHandler {
             }
             status_sink.set_status(&worker_task_id, status).await;
 
-            // The child has exited; drop any recorded handle so a late kill is
-            // a graceful no-op (claude-code `status !== 'running'` early return).
-            children.lock().await.remove(&worker_task_id);
+            // The child has exited; drop the cancel record so a late kill is a
+            // graceful no-op (claude-code `status !== 'running'` early return).
+            workers.lock().await.remove(&worker_task_id);
         });
 
-        ctx.runtime
+        let bg_handle = ctx
+            .runtime
             .spawn(&format!("{HANDLER_NAME}:{task_id}"), worker)
             .await
             .map_err(|e| TaskError::Internal(e.to_string()))?;
 
-        // 6. Build the cleanup seam (claude-code `registerCleanup` parity).
-        //    The closure is *synchronous* (the `TaskHandle::cleanup` type is
-        //    `Fn()`), while the only OS-kill primitive — `ProcessRunner::kill`
-        //    — is async, and engine code must not spawn its own runtime tasks
-        //    (D17). So cleanup cannot itself await a kill. Its honest job is to
-        //    flag the child for teardown by moving any live handle into the
-        //    shared `pending_kill` queue, which the registry/cleanup-registry
-        //    drains by calling the async `Task::kill`. Authoritative OS
-        //    termination therefore always flows through `Task::kill`.
-        let cleanup_children = self.children.clone();
+        // Record the worker-cancel handle (+ the runtime that minted it) so
+        // kill / drain can cancel the in-flight worker — i.e. terminate the one
+        // `run()` child — without a fresh ctx.
+        self.workers.lock().await.insert(
+            task_id.clone(),
+            WorkerCancel {
+                handle: bg_handle,
+                runtime: ctx.runtime.clone(),
+            },
+        );
+
+        // 6. Build the cleanup seam (claude-code `registerCleanup` parity —
+        //    `spawnShellTask` registers a cleanup that calls `killTask`). The
+        //    closure is *synchronous* (the `TaskHandle::cleanup` type is `Fn()`),
+        //    while `RuntimeSpawner::cancel` is async and engine code must not
+        //    spawn its own runtime tasks (D17). So cleanup cannot itself await a
+        //    cancel. Its honest job is to flag the worker for teardown by moving
+        //    any live cancel record into the shared `pending_kill` queue, which
+        //    the registry/cleanup-registry drains via the async
+        //    `drain_pending_kills`. Authoritative termination also flows through
+        //    `Task::kill`.
+        let cleanup_workers = self.workers.clone();
         let cleanup_pending = self.pending_kill.clone();
         let cleanup_task_id = task_id.clone();
         let cleanup: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
-            if let (Ok(mut children), Ok(mut pending)) =
-                (cleanup_children.try_lock(), cleanup_pending.try_lock())
+            if let (Ok(mut workers), Ok(mut pending)) =
+                (cleanup_workers.try_lock(), cleanup_pending.try_lock())
             {
-                if let Some(handle) = children.remove(&cleanup_task_id) {
-                    pending.insert(cleanup_task_id.clone(), handle);
-                } else {
-                    // Even with no live handle, record intent so a later drain
-                    // flips status to Killed for a still-pending task.
-                    pending
-                        .entry(cleanup_task_id.clone())
-                        .or_insert_with(|| ProcessHandle {
-                            task_id: cleanup_task_id.clone(),
-                            pid: 0,
-                        });
+                if let Some(rec) = workers.remove(&cleanup_task_id) {
+                    pending.insert(cleanup_task_id.clone(), rec);
                 }
+                // If no live record remains the worker already exited; nothing
+                // to queue (the terminal status was already reported).
             }
         });
 
@@ -368,30 +364,22 @@ impl Task for LocalBashHandler {
     }
 
     async fn kill(&self, task_id: &str, _ctx: TaskContext) -> Result<(), TaskError> {
-        // Recover the live handle (if any) and issue a real kill. An absent
-        // handle ⇒ the child already exited (or pure-run mode) ⇒ graceful no-op,
-        // mirroring claude-code's `status !== 'running'` early return.
-        let handle = self.children.lock().await.remove(task_id);
-        if let Some(h) = handle {
-            self.process
-                .kill(&h)
+        // Recover the live worker-cancel record (if any) and cancel the
+        // in-flight worker future — the analogue of TS `shellCommand.kill()`.
+        // Cancelling drops the `run()` future, which drops the platform `Child`;
+        // the foreground runner spawns with `kill_on_drop(true)`, so the drop
+        // `SIGKILL`s the real OS process. An absent record ⇒ the child already
+        // exited ⇒ graceful no-op (claude-code `status !== 'running'` early
+        // return in `killTask`).
+        let rec = self.workers.lock().await.remove(task_id);
+        if let Some(rec) = rec {
+            rec.runtime
+                .cancel(&rec.handle)
                 .await
                 .map_err(|e| TaskError::Io(e.to_string()))?;
         }
-        // Flip status to Killed regardless.
-        //
-        // NOTE on the in-flight worker future: this handler discards the
-        // `BackgroundTaskHandle` that `ctx.runtime.spawn` returns in `spawn()`
-        // (it has no map to record it in that `kill` can reach), so `kill` does
-        // NOT abort the worker future — the `run()` it is awaiting drives to
-        // completion. In pure-`run()` mode that is harmless (no OS child handle
-        // exists to leak; the foreground runner's `kill_on_drop` covers the
-        // timeout path). In background-streaming mode the `ProcessRunner::kill`
-        // above is what authoritatively terminates the OS child; the worker's
-        // own `run()` copy then exits naturally. Authoritative worker-future
-        // cancellation (handing this handle to the registry's
-        // `RuntimeSpawner::cancel`) is a follow-up once the registry drives
-        // `Task::spawn` and records the returned handle.
+        // Flip status to Killed regardless (best-effort; a worker that already
+        // reported a terminal status simply gets a redundant Killed).
         self.status_sink.set_status(task_id, TaskStatus::Killed).await;
         Ok(())
     }
@@ -414,7 +402,9 @@ mod tests {
     use tokio::sync::Mutex as TokioMutex;
     use traits::filesystem::{FileContent, FileEvent, FileSystem, FlockGuard, FsError};
     use traits::sandbox::{SandboxBackend, SandboxCapability, SandboxedTag};
-    use traits::{ProcessCommand, SandboxError, SandboxPolicy, SandboxedCommand};
+    use traits::{
+        ProcessCommand, ProcessHandle, SandboxError, SandboxPolicy, SandboxedCommand,
+    };
 
     // ---- In-memory FileSystem (mirrors handle.rs InMemoryFs) ---------------
 
@@ -506,33 +496,26 @@ mod tests {
         }
     }
 
-    // ---- Mock ProcessRunner (records the command it ran / killed) ----------
+    // ---- Mock ProcessRunner (records the command it ran) -------------------
+    //
+    // `run()` completes immediately with a fixed `ProcessOutput`. `kill()` /
+    // `spawn_background()` are trait stubs: the single-child design never calls
+    // them (the OS child is owned by the worker future and killed via
+    // `RuntimeSpawner::cancel`). The kill test uses `BlockingRunner` below.
 
     struct MockRunner {
         output: ProcessOutput,
         ran_command: StdMutex<Option<Vec<String>>>,
-        spawned_background: StdMutex<bool>,
-        killed: StdMutex<Vec<u32>>,
-        bg_pid: u32,
     }
     impl MockRunner {
         fn new(output: ProcessOutput) -> Arc<Self> {
             Arc::new(Self {
                 output,
                 ran_command: StdMutex::new(None),
-                spawned_background: StdMutex::new(false),
-                killed: StdMutex::new(Vec::new()),
-                bg_pid: 4242,
             })
         }
         fn ran_args(&self) -> Option<Vec<String>> {
             self.ran_command.lock().unwrap().clone()
-        }
-        fn killed_pids(&self) -> Vec<u32> {
-            self.killed.lock().unwrap().clone()
-        }
-        fn did_spawn_background(&self) -> bool {
-            *self.spawned_background.lock().unwrap()
         }
     }
     #[async_trait]
@@ -548,14 +531,66 @@ mod tests {
             &self,
             _cmd: &SandboxedCommand,
         ) -> Result<ProcessHandle, ProcessError> {
-            *self.spawned_background.lock().unwrap() = true;
-            Ok(ProcessHandle {
-                task_id: "bg".into(),
-                pid: self.bg_pid,
+            Err(ProcessError::Unsupported)
+        }
+        async fn kill(&self, _handle: &ProcessHandle) -> Result<(), ProcessError> {
+            Ok(())
+        }
+        fn is_available(&self) -> bool {
+            true
+        }
+    }
+
+    /// A long-running [`ProcessRunner`] whose `run()` future stands in for an
+    /// in-flight `bash -c "<long>"` child: it parks forever until the future is
+    /// dropped. A drop-guard records that the child future was actually
+    /// aborted, so a kill test can assert real termination — not merely a
+    /// status flip. This is the unit-test analogue of the platform runner's
+    /// `kill_on_drop(true)`: dropping the `run()` future is what `SIGKILL`s the
+    /// real OS process in production.
+    struct BlockingRunner {
+        /// Flipped to `true` inside the `run()` future's drop-guard when the
+        /// future is cancelled (i.e. the in-flight child was aborted).
+        aborted: Arc<std::sync::atomic::AtomicBool>,
+        /// Released once `run()` has started and is parked, so the test can
+        /// kill only after the child is genuinely in-flight.
+        started: Arc<tokio::sync::Notify>,
+    }
+    impl BlockingRunner {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                aborted: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                started: Arc::new(tokio::sync::Notify::new()),
             })
         }
-        async fn kill(&self, handle: &ProcessHandle) -> Result<(), ProcessError> {
-            self.killed.lock().unwrap().push(handle.pid);
+        fn was_aborted(&self) -> bool {
+            self.aborted.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+    #[async_trait]
+    impl ProcessRunner for BlockingRunner {
+        async fn run(&self, _cmd: &SandboxedCommand) -> Result<ProcessOutput, ProcessError> {
+            // Drop-guard: set `aborted` if this future is dropped (cancelled)
+            // before it completes — proof the in-flight child was terminated.
+            struct AbortGuard(Arc<std::sync::atomic::AtomicBool>);
+            impl Drop for AbortGuard {
+                fn drop(&mut self) {
+                    self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+                }
+            }
+            let _guard = AbortGuard(self.aborted.clone());
+            self.started.notify_one();
+            // Park forever; the only way out is cancellation (drop).
+            std::future::pending::<()>().await;
+            unreachable!("BlockingRunner::run only resolves via cancellation");
+        }
+        async fn spawn_background(
+            &self,
+            _cmd: &SandboxedCommand,
+        ) -> Result<ProcessHandle, ProcessError> {
+            Err(ProcessError::Unsupported)
+        }
+        async fn kill(&self, _handle: &ProcessHandle) -> Result<(), ProcessError> {
             Ok(())
         }
         fn is_available(&self) -> bool {
@@ -622,7 +657,6 @@ mod tests {
     struct RecordingSink {
         statuses: StdMutex<Vec<(String, TaskStatus)>>,
         exit_codes: StdMutex<Vec<(String, i32)>>,
-        pids: StdMutex<Vec<(String, u32)>>,
     }
     #[async_trait]
     impl TaskStatusSink for RecordingSink {
@@ -638,9 +672,6 @@ mod tests {
                 .unwrap()
                 .push((task_id.to_string(), exit_code));
         }
-        async fn set_pid(&self, task_id: &str, pid: u32) {
-            self.pids.lock().unwrap().push((task_id.to_string(), pid));
-        }
     }
     impl RecordingSink {
         fn last_status(&self) -> Option<TaskStatus> {
@@ -648,9 +679,6 @@ mod tests {
         }
         fn exit_codes(&self) -> Vec<(String, i32)> {
             self.exit_codes.lock().unwrap().clone()
-        }
-        fn pids(&self) -> Vec<(String, u32)> {
-            self.pids.lock().unwrap().clone()
         }
     }
 
@@ -826,61 +854,78 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn background_spawn_records_pid_and_kill_terminates_child() {
+    async fn kill_terminates_the_in_flight_child() {
+        // T2: kill() must REALLY terminate the in-flight `bash -c "<long>"`
+        // child — not merely flip status to Killed. We model the long-running
+        // child with a `BlockingRunner` whose `run()` future parks forever and
+        // sets an `aborted` flag in its drop-guard when cancelled. The handler's
+        // single child is owned by the worker future; `kill()` cancels that
+        // future via `RuntimeSpawner::cancel`, which drops the parked `run()`
+        // (in production: drops the platform `Child`, whose `kill_on_drop(true)`
+        // sends SIGKILL). We assert the child future was actually aborted AND
+        // the status flipped to Killed.
         let fs: Arc<dyn FileSystem> = Arc::new(InMemoryFs::new());
-        // Keep the run() future from finishing instantly so the handle survives
-        // until kill: a never-timed-out long output is fine — the worker still
-        // completes promptly with the mock, so we kill via the children map
-        // before the worker's remove() lands by inspecting the recorded handle.
-        let runner = MockRunner::new(output("", "", 0, false));
+        let runner = BlockingRunner::new();
+        let started = runner.started.clone();
         let sandbox = StubSandbox::new();
         let (_dir, mgr) = make_output_manager(fs.clone());
         let sink = Arc::new(RecordingSink::default());
 
-        let handler = LocalBashHandler::new(runner.clone(), sandbox, mgr)
-            .with_status_sink(sink.clone())
-            .with_background_spawn(true);
+        let handler =
+            LocalBashHandler::new(runner.clone(), sandbox, mgr).with_status_sink(sink.clone());
 
-        // Grab the shared children map BEFORE spawn so we can re-insert a handle
-        // deterministically for the kill assertion (the worker may have already
-        // removed it after run() completed).
-        let children = handler.children_map();
+        // The worker must run on the SAME runtime the handler records for the
+        // cancel seam, so `kill()`'s `RuntimeSpawner::cancel` aborts THIS task.
+        let runtime = Arc::new(MockRuntimeSpawner::default());
+        let ctx = TaskContext {
+            fs: fs.clone(),
+            runtime,
+        };
 
         let handle = handler
             .spawn(
                 TaskSpawnInput::LocalBash {
-                    command: "long".into(),
+                    command: "sleep 100000".into(),
                     timeout: None,
                 },
-                make_ctx(fs),
+                ctx.clone(),
             )
             .await
             .unwrap();
 
-        assert!(runner.did_spawn_background(), "background spawn issued");
+        // Wait until the child is genuinely in-flight (run() parked).
+        tokio::time::timeout(std::time::Duration::from_secs(5), started.notified())
+            .await
+            .expect("run() should start (child in-flight)");
+        assert!(!runner.was_aborted(), "child still running before kill");
 
-        // pid recorded into the sink.
-        let pids = sink.pids();
-        assert_eq!(pids.len(), 1);
-        assert_eq!(pids[0].1, 4242);
-
-        // Ensure a handle is present for the kill seam regardless of worker
-        // timing (re-insert the same handle the runner hands out).
-        children.lock().await.insert(
-            handle.task_id.clone(),
-            ProcessHandle {
-                task_id: "bg".into(),
-                pid: 4242,
-            },
-        );
-
+        // Kill: cancels the worker future ⇒ drops the in-flight run() child.
         handler
-            .kill(&handle.task_id, make_ctx(Arc::new(InMemoryFs::new())))
+            .kill(&handle.task_id, ctx)
             .await
             .expect("kill should succeed");
 
-        assert_eq!(runner.killed_pids(), vec![4242], "ProcessRunner::kill fired");
-        assert_eq!(sink.last_status(), Some(TaskStatus::Killed));
+        assert_eq!(sink.last_status(), Some(TaskStatus::Killed), "status ⇒ Killed");
+
+        // The in-flight child future was actually aborted (its drop-guard ran),
+        // proving a real termination rather than a bare status flip. Abort is
+        // observed at the next scheduler tick.
+        for _ in 0..200 {
+            if runner.was_aborted() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            runner.was_aborted(),
+            "kill aborted/reaped the in-flight child (drop-guard fired)"
+        );
+
+        // The cancel record is gone — a second kill is a graceful no-op.
+        assert!(
+            handler.workers_map().lock().await.get(&handle.task_id).is_none(),
+            "worker-cancel record removed on kill"
+        );
     }
 
     #[tokio::test]
@@ -892,14 +937,18 @@ mod tests {
         let sink = Arc::new(RecordingSink::default());
 
         let handler =
-            LocalBashHandler::new(runner.clone(), sandbox, mgr).with_status_sink(sink.clone());
+            LocalBashHandler::new(runner, sandbox, mgr).with_status_sink(sink.clone());
 
-        // No spawn ⇒ no handle. kill must still succeed and flip to Killed.
+        // No spawn ⇒ no worker-cancel record. kill must still succeed (nothing
+        // to cancel) and flip to Killed (claude-code `status !== 'running'`).
         handler
             .kill("bdeadbeef", make_ctx(fs))
             .await
             .expect("kill of unknown task is a no-op success");
-        assert!(runner.killed_pids().is_empty(), "no child to kill");
+        assert!(
+            handler.workers_map().lock().await.is_empty(),
+            "no worker record ⇒ nothing to cancel"
+        );
         assert_eq!(sink.last_status(), Some(TaskStatus::Killed));
     }
 
@@ -928,47 +977,63 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cleanup_then_drain_kills_streaming_child() {
+    async fn cleanup_then_drain_kills_in_flight_child() {
+        // claude-code `spawnShellTask` registers a cleanup that calls `killTask`
+        // (`killShellTasksForAgent` on agent teardown). The synchronous cleanup
+        // closure cannot await, so it moves the live worker-cancel record into
+        // `pending_kill`; the async `drain_pending_kills` then performs the real
+        // `RuntimeSpawner::cancel`, terminating the in-flight child.
         let fs: Arc<dyn FileSystem> = Arc::new(InMemoryFs::new());
-        let runner = MockRunner::new(output("", "", 0, false));
+        let runner = BlockingRunner::new();
+        let started = runner.started.clone();
         let sandbox = StubSandbox::new();
         let (_dir, mgr) = make_output_manager(fs.clone());
         let sink = Arc::new(RecordingSink::default());
 
-        let handler = LocalBashHandler::new(runner.clone(), sandbox, mgr)
-            .with_status_sink(sink.clone())
-            .with_background_spawn(true);
+        let handler =
+            LocalBashHandler::new(runner.clone(), sandbox, mgr).with_status_sink(sink.clone());
 
-        let children = handler.children_map();
+        let runtime = Arc::new(MockRuntimeSpawner::default());
+        let ctx = TaskContext {
+            fs: fs.clone(),
+            runtime,
+        };
+
         let handle = handler
             .spawn(
                 TaskSpawnInput::LocalBash {
                     command: "long".into(),
                     timeout: None,
                 },
-                make_ctx(fs),
+                ctx,
             )
             .await
             .unwrap();
 
-        // Re-seat a live handle so cleanup has something to enqueue regardless
-        // of the worker's removal timing.
-        children.lock().await.insert(
-            handle.task_id.clone(),
-            ProcessHandle {
-                task_id: "bg".into(),
-                pid: 4242,
-            },
-        );
+        // Wait until the child is genuinely in-flight before tearing it down.
+        tokio::time::timeout(std::time::Duration::from_secs(5), started.notified())
+            .await
+            .expect("run() should start (child in-flight)");
 
-        // Fire the synchronous cleanup closure (moves handle to pending_kill).
+        // Fire the synchronous cleanup closure (moves the live record to
+        // pending_kill).
         (handle.cleanup.as_ref().unwrap())();
 
-        // Drain performs the real async kill.
+        // Drain performs the real async cancel ⇒ drops the in-flight run() child.
         handler.drain_pending_kills().await;
 
-        assert_eq!(runner.killed_pids(), vec![4242], "drain killed the child");
         assert_eq!(sink.last_status(), Some(TaskStatus::Killed));
+
+        for _ in 0..200 {
+            if runner.was_aborted() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            runner.was_aborted(),
+            "drain aborted/reaped the in-flight child (drop-guard fired)"
+        );
     }
 
     #[test]

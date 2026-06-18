@@ -2350,6 +2350,25 @@ pub async fn build(
     // Arcs as OAuthDeps. Absent the settings, `xaa_config` stays `None` and an
     // XAA-flagged server keeps its actionable hard-fail (XAA stays opt-in).
     let xaa_config: Option<Arc<dyn mcp::registry::XaaConfigProvider>> = {
+        // Settings tiers, user → project → local (later wins). claude-code
+        // `getXaaIdpSettings` (settings.ts:674-726) actually reads
+        // `getInitialSettings()`, which ALSO merges a managed/policy tier
+        // (MDM/enterprise `managed-settings.json`) and a flag tier at the
+        // HIGHEST priority. xaaIdp inherits that for free in TS because it just
+        // reads one already-merged settings blob.
+        //
+        // We deliberately OMIT the managed/policy + flag VALUE tiers here, to
+        // stay consistent with the engine's other settings-VALUE consumers:
+        // the permission reader (`permission_rules_from_settings_json`) and the
+        // sandbox readers (`sandbox_runtime_config_from_settings_tiers` etc.)
+        // BOTH read these SAME 3 tiers and likewise omit managed/flag. The only
+        // "managed" plumbing in the engine is the settings file-WATCHER path
+        // classification (`settings_watch::managed_settings_dir` /
+        // `SettingsPaths.policy_settings`) and managed custom-command/skill
+        // DIRECTORY discovery — neither feeds a managed settings.json *value*
+        // into any merge. Wiring a managed/flag settings-value tier is a
+        // codebase-wide follow-up that should land for all three consumers
+        // (permission + sandbox + xaaIdp) together, NOT for xaaIdp alone.
         let mut tiers: Vec<String> = Vec::new();
         for p in [
             cfg.claude_home.join("settings.json"),

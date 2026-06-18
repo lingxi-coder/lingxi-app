@@ -97,6 +97,16 @@ impl XaaIdpSettings {
     /// Mirrors `getXaaIdpSettings` (xaaIdpLogin.ts:47-49) over the same tier
     /// precedence the engine uses for sandbox settings
     /// (`sandbox_runtime_config_from_settings_tiers`).
+    ///
+    /// NOTE on the managed/policy + flag tiers: claude-code `getXaaIdpSettings`
+    /// reads `getInitialSettings()` (settings.ts:674-726), which also merges a
+    /// managed/policy (MDM) tier and a flag tier at the HIGHEST priority. This
+    /// function takes whatever tiers the caller passes; the engine-desktop
+    /// composition root deliberately passes only the user/project/local tiers —
+    /// consistent with its permission and sandbox settings-VALUE readers, which
+    /// also omit managed/flag. Wiring a managed settings.json *value* tier is a
+    /// codebase-wide follow-up for all three consumers together, not specific to
+    /// xaaIdp. See the comment at the engine `xaa_config` tier read.
     #[must_use]
     pub fn from_settings_tiers(raw_tiers: &[&str]) -> Option<Self> {
         let mut merged: Option<XaaIdpSettings> = None;

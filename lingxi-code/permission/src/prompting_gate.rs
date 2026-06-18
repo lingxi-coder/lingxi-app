@@ -63,9 +63,7 @@ pub struct InteractivePromptingGate {
     // `BufReader<Stdin>` and clones the `Arc<Mutex<…>>` into the gate, so
     // both sides read from the SAME buffer — no second `BufReader` is created
     // here (that would double-buffer and strand the REPL's type-ahead bytes).
-    #[allow(dead_code)]
     pub(crate) stdin: Arc<Mutex<dyn AsyncBufRead + Send + Unpin>>,
-    #[allow(dead_code)]
     pub(crate) stderr: Arc<Mutex<dyn AsyncWrite + Send + Unpin>>,
 }
 

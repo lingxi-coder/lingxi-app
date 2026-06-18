@@ -218,9 +218,30 @@ fn encode_message(message: &crate::Message) -> Result<Value, LlmError> {
 }
 
 // Apply the Anthropic cache_control wrapper; no-op when None.
+//
+// Mirrors claude-code `getCacheControl` (`services/api/claude.ts:358-374`):
+// always `{"type":"ephemeral"}`, plus `"ttl":"1h"` when the 1h-TTL gate is on,
+// plus `"scope":"global"` when the block is the 1P global-scoped one. The plain
+// `Ephemeral` (org default) emits neither extra key — byte-identical to the
+// pre-feature `{"type":"ephemeral"}`.
 fn with_cache_control(mut block: Value, cache_control: Option<crate::CacheControl>) -> Value {
-    if cache_control.is_some() {
-        block["cache_control"] = serde_json::json!({"type": "ephemeral"});
+    use crate::{CacheControl, CacheScope};
+    match cache_control {
+        None => {}
+        Some(CacheControl::Ephemeral) => {
+            block["cache_control"] = serde_json::json!({"type": "ephemeral"});
+        }
+        Some(CacheControl::EphemeralScoped { scope, ttl_1h }) => {
+            let mut cc = serde_json::Map::new();
+            cc.insert("type".into(), Value::String("ephemeral".into()));
+            if ttl_1h {
+                cc.insert("ttl".into(), Value::String("1h".into()));
+            }
+            if matches!(scope, Some(CacheScope::Global)) {
+                cc.insert("scope".into(), Value::String("global".into()));
+            }
+            block["cache_control"] = Value::Object(cc);
+        }
     }
     block
 }

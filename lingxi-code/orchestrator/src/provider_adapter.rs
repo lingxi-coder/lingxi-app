@@ -36,14 +36,20 @@ use std::time::Instant;
 /// PARITY-NOTE: TS compares `model` for exact equality with the *configured*
 /// small-fast / default-sonnet / default-opus IDs; here we match the family by
 /// substring, a close (slightly more lenient) approximation.
+/// Shared truthy-env reader (`1`/`true`/`yes`/`on`, case/space-insensitive) —
+/// used by the prompt-cache gates.
+fn cache_env_truthy(name: &str) -> bool {
+    std::env::var(name).ok().is_some_and(|v| {
+        matches!(
+            v.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        )
+    })
+}
+
 fn prompt_caching_enabled(model: &str) -> bool {
     fn env_truthy(name: &str) -> bool {
-        std::env::var(name).ok().is_some_and(|v| {
-            matches!(
-                v.trim().to_ascii_lowercase().as_str(),
-                "1" | "true" | "yes" | "on"
-            )
-        })
+        cache_env_truthy(name)
     }
     if env_truthy("DISABLE_PROMPT_CACHING") {
         return false;
@@ -398,6 +404,37 @@ impl ProviderApiAdapter {
         }
     }
 
+    /// 1P global-cache-scope gate — parity `shouldUseGlobalCacheScope`
+    /// (`utils/betas.ts:227-232`): `getAPIProvider() === 'firstParty' &&
+    /// !CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS`.
+    ///
+    /// LingXi resolves the concrete provider downstream of this provider-agnostic
+    /// request builder and has no GrowthBook rollout bucketing, so the feature is
+    /// kept **dormant**: it requires an explicit opt-in env
+    /// (`CLAUDE_CODE_GLOBAL_CACHE_SCOPE`) — mirroring the experimental-beta gating
+    /// pattern used elsewhere — AND the subscriber (firstParty) signal, AND the
+    /// shared experimental-betas kill switch must not be set. Default: off.
+    fn should_use_global_cache_scope(&self) -> bool {
+        if cache_env_truthy("CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS") {
+            return false;
+        }
+        // `firstParty` approximation at this layer: a Claude.ai subscriber (the
+        // OAuth/first-party path). Opt-in env arms the otherwise-dormant feature.
+        cache_env_truthy("CLAUDE_CODE_GLOBAL_CACHE_SCOPE")
+            && self.effective_subscriber().is_subscriber
+    }
+
+    /// 1h-TTL gate — parity `should1hCacheTTL` (`services/api/claude.ts:393-434`).
+    ///
+    /// The TS path is GrowthBook-allowlist + querySource gated (machinery LingXi
+    /// lacks) plus a Bedrock env opt-in (`ENABLE_PROMPT_CACHING_1H_BEDROCK`).
+    /// Kept **dormant**: honored only via the Bedrock-style explicit opt-in
+    /// env `ENABLE_PROMPT_CACHING_1H` (default off), since LingXi has no
+    /// querySource allowlist to consult. Folded into the emitted cache_control.
+    fn should_1h_cache_ttl(&self) -> bool {
+        cache_env_truthy("ENABLE_PROMPT_CACHING_1H")
+    }
+
     // ── Shared request build ─────────────────────────────────────────────────
 
     /// Convert orchestrator-layer inputs into an `LlmRequest`.
@@ -442,7 +479,18 @@ impl ProviderApiAdapter {
             // marking only the org-scoped buckets, per
             // `prompt::split_system_blocks`. Replaces the previous single
             // collapsed block.
-            req.system = crate::prompt::split_system_blocks(s, enable_caching);
+            //
+            // 1P global-cache path (dormant): when the experimental gate is on
+            // we take splitSysPromptPrefix's global mode. LingXi does not yet
+            // assemble SYSTEM_PROMPT_DYNAMIC_BOUNDARY into the prompt, so this
+            // degenerates to the org default (boundaryIndex===-1 fallthrough) —
+            // the scope:'global'/ttl:'1h' serialization is wired and ready but
+            // inert until a boundary marker is assembled. See module residual.
+            let split_opts = crate::prompt::SplitOptions {
+                global_scope: self.should_use_global_cache_scope(),
+                ttl_1h: self.should_1h_cache_ttl(),
+            };
+            req.system = crate::prompt::split_system_blocks_with(s, enable_caching, split_opts);
         }
         req.messages = messages;
 
@@ -1993,6 +2041,82 @@ mod tests {
             LlmContentBlock::Text { cache_control, .. } => assert_eq!(*cache_control, None),
             other => panic!("expected trailing text block, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn build_request_global_cache_gate_dormant_by_default() {
+        // Without the opt-in env, the global gate is off even for a subscriber:
+        // a boundary-bearing prompt still splits org-default (2 blocks).
+        use crate::prompt::locked_templates::{HEADER, SECTION_SEP};
+        use crate::prompt::SYSTEM_PROMPT_DYNAMIC_BOUNDARY;
+        let _guard = CACHE_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var("DISABLE_PROMPT_CACHING");
+        std::env::remove_var("CLAUDE_CODE_GLOBAL_CACHE_SCOPE");
+        let transport = FakeTransport::always(ProviderResponse::json(200, ok_response_json()));
+        let adapter = make_adapter_with_subscriber(
+            transport,
+            SubscriberState { is_subscriber: true, is_enterprise: false },
+        );
+        let system = format!(
+            "{HEADER}{SECTION_SEP}static{SECTION_SEP}{SYSTEM_PROMPT_DYNAMIC_BOUNDARY}{SECTION_SEP}dynamic"
+        );
+        let req = adapter
+            .build_request(
+                "claude-sonnet-4-20250514",
+                None,
+                Some(&system),
+                vec![text_user_msg("hi")],
+                vec![],
+                false,
+                Some(1024),
+            )
+            .expect("build_request");
+        // Gate off → org default (no scope:global block, marker left inline).
+        assert_eq!(req.system.len(), 2);
+        assert_eq!(req.system[0].cache_control, Some(CacheControl::Ephemeral));
+    }
+
+    #[test]
+    fn build_request_global_cache_gate_armed_marks_global_static() {
+        // With the opt-in env + subscriber, the 1P global path activates and the
+        // static block carries scope:global while prefix/dynamic are uncached.
+        use crate::prompt::locked_templates::{HEADER, SECTION_SEP};
+        use crate::prompt::SYSTEM_PROMPT_DYNAMIC_BOUNDARY;
+        use llm_client::CacheScope;
+        let _guard = CACHE_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var("DISABLE_PROMPT_CACHING");
+        std::env::remove_var("CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS");
+        std::env::set_var("CLAUDE_CODE_GLOBAL_CACHE_SCOPE", "1");
+        let transport = FakeTransport::always(ProviderResponse::json(200, ok_response_json()));
+        let adapter = make_adapter_with_subscriber(
+            transport,
+            SubscriberState { is_subscriber: true, is_enterprise: false },
+        );
+        let system = format!(
+            "{HEADER}{SECTION_SEP}static{SECTION_SEP}{SYSTEM_PROMPT_DYNAMIC_BOUNDARY}{SECTION_SEP}dynamic"
+        );
+        let req = adapter
+            .build_request(
+                "claude-sonnet-4-20250514",
+                None,
+                Some(&system),
+                vec![text_user_msg("hi")],
+                vec![],
+                false,
+                Some(1024),
+            )
+            .expect("build_request");
+        std::env::remove_var("CLAUDE_CODE_GLOBAL_CACHE_SCOPE");
+        assert_eq!(req.system.len(), 3);
+        assert_eq!(req.system[0].text, HEADER);
+        assert_eq!(req.system[0].cache_control, None); // prefix uncached
+        assert_eq!(req.system[1].text, "static");
+        assert_eq!(
+            req.system[1].cache_control,
+            Some(CacheControl::EphemeralScoped { scope: Some(CacheScope::Global), ttl_1h: false })
+        );
+        assert_eq!(req.system[2].text, "dynamic");
+        assert_eq!(req.system[2].cache_control, None); // dynamic uncached
     }
 
     // ── build_request profile threading (Unit B Task 5) ──────────────────────

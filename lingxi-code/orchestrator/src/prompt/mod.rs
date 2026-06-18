@@ -165,12 +165,66 @@ fn push_section_separator(s: &mut String) {
 /// [`CacheControl::Ephemeral`] when `enable_caching` is `true`, and none when
 /// it is `false`. The order of the blocks matches `req.system`.
 #[must_use]
-pub fn split_system_blocks(
+pub fn split_system_blocks(s: &str, enable_caching: bool) -> Vec<llm_client::SystemBlock> {
+    split_system_blocks_with(s, enable_caching, SplitOptions::default())
+}
+
+/// `SYSTEM_PROMPT_DYNAMIC_BOUNDARY` marker — byte-identical to claude-code's
+/// constant (`constants/prompts.ts:114-115`). Separates the static prefix of the
+/// system prompt (cacheable at `global` scope under the 1P feature) from the
+/// dynamic suffix. LingXi does **not** currently assemble this marker into the
+/// prompt, so the 1P global path always falls through to the org default — see
+/// [`split_system_blocks_with`] and the residual note in `build_request`.
+pub const SYSTEM_PROMPT_DYNAMIC_BOUNDARY: &str = "__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__";
+
+/// Options controlling [`split_system_blocks_with`].
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SplitOptions {
+    /// When `true`, take the 1P global-cache path (`splitSysPromptPrefix` global
+    /// mode, `utils/api.ts:362-410`): the prefix block is **un**cached
+    /// (`cacheScope=null`), the static content before
+    /// [`SYSTEM_PROMPT_DYNAMIC_BOUNDARY`] is `global`-scoped, and the dynamic
+    /// content after it is uncached. When the boundary marker is absent
+    /// (`boundaryIndex===-1`) this falls through to the org default — faithful to
+    /// the TS `else` branch (`utils/api.ts:405-409`).
+    pub global_scope: bool,
+    /// When `true`, org/global breakpoints carry `ttl:'1h'`
+    /// (claude-code `should1hCacheTTL`). Folded into the emitted
+    /// [`llm_client::CacheControl`].
+    pub ttl_1h: bool,
+}
+
+/// Core splitter — see [`split_system_blocks`] for the default-mode contract and
+/// [`SplitOptions`] for the 1P global variant.
+#[must_use]
+pub fn split_system_blocks_with(
     s: &str,
     enable_caching: bool,
+    opts: SplitOptions,
 ) -> Vec<llm_client::SystemBlock> {
-    use llm_client::{CacheControl, SystemBlock};
-    let cc = || enable_caching.then_some(CacheControl::Ephemeral);
+    use llm_client::{CacheControl, CacheScope, SystemBlock};
+
+    // org breakpoint, ttl-aware: plain Ephemeral unless 1h is requested.
+    let org_cc = || -> Option<CacheControl> {
+        if !enable_caching {
+            return None;
+        }
+        if opts.ttl_1h {
+            Some(CacheControl::EphemeralScoped {
+                scope: None,
+                ttl_1h: true,
+            })
+        } else {
+            Some(CacheControl::Ephemeral)
+        }
+    };
+    // global breakpoint, ttl-aware.
+    let global_cc = || -> Option<CacheControl> {
+        enable_caching.then_some(CacheControl::EphemeralScoped {
+            scope: Some(CacheScope::Global),
+            ttl_1h: opts.ttl_1h,
+        })
+    };
 
     // The prefix bucket is exactly HEADER, present only when `s` begins with
     // `HEADER + SECTION_SEP` (the assembled-prompt shape). `SECTION_SEP` is the
@@ -182,31 +236,72 @@ pub fn split_system_blocks(
         b.push_str(SECTION_SEP);
         b
     };
-    if let Some(rest) = s.strip_prefix(&prefix_boundary) {
-        if rest.is_empty() {
-            // HEADER followed by an empty body — prefix-only (degenerate).
-            return vec![SystemBlock {
-                text: HEADER.to_string(),
-                cache_control: cc(),
-            }];
-        }
-        return vec![
-            SystemBlock {
-                text: HEADER.to_string(),
-                cache_control: cc(),
-            },
-            SystemBlock {
-                text: rest.to_string(),
-                cache_control: cc(),
-            },
-        ];
+
+    let Some(rest) = s.strip_prefix(&prefix_boundary) else {
+        // No HEADER prefix (override / custom prompt) — single rest-only block,
+        // org-scoped (the global path also treats a no-prefix body as the
+        // rest/dynamic bucket; with no boundary it is org by the fallthrough).
+        return vec![SystemBlock {
+            text: s.to_string(),
+            cache_control: org_cc(),
+        }];
+    };
+
+    if rest.is_empty() {
+        // HEADER followed by an empty body — prefix-only (degenerate).
+        // (Prefix is org-scoped in default mode; in the global no-boundary
+        // fallthrough it is likewise org.)
+        return vec![SystemBlock {
+            text: HEADER.to_string(),
+            cache_control: org_cc(),
+        }];
     }
 
-    // No HEADER prefix (override / custom prompt) — single rest-only block.
-    vec![SystemBlock {
-        text: s.to_string(),
-        cache_control: cc(),
-    }]
+    // 1P global path: only taken when the gate is on AND a boundary marker is
+    // present in the body. Mirrors splitSysPromptPrefix global mode — prefix
+    // uncached, static-before-boundary global-scoped, dynamic-after-boundary
+    // uncached.
+    if opts.global_scope {
+        let marker = format!("{SECTION_SEP}{SYSTEM_PROMPT_DYNAMIC_BOUNDARY}{SECTION_SEP}");
+        if let Some(idx) = rest.find(&marker) {
+            let static_part = &rest[..idx];
+            let dynamic_part = &rest[idx + marker.len()..];
+            let mut out = Vec::with_capacity(3);
+            // prefix: cacheScope=null → never cached.
+            out.push(SystemBlock {
+                text: HEADER.to_string(),
+                cache_control: None,
+            });
+            if !static_part.is_empty() {
+                out.push(SystemBlock {
+                    text: static_part.to_string(),
+                    cache_control: global_cc(),
+                });
+            }
+            if !dynamic_part.is_empty() {
+                // dynamic: cacheScope=null → never cached.
+                out.push(SystemBlock {
+                    text: dynamic_part.to_string(),
+                    cache_control: None,
+                });
+            }
+            return out;
+        }
+        // boundaryIndex === -1 → fall through to the org default below.
+    }
+
+    // Default / org mode (and global-no-boundary fallthrough): prefix + rest,
+    // both org-scoped.
+    vec![
+        SystemBlock {
+            text: HEADER.to_string(),
+            cache_control: org_cc(),
+        },
+        SystemBlock {
+            text: rest.to_string(),
+            cache_control: org_cc(),
+        },
+    ]
 }
 
 /// Runtime context required to assemble a system prompt.
@@ -489,6 +584,68 @@ mod tests {
         let blocks = split_system_blocks(s, true);
         assert_eq!(blocks.len(), 1);
         assert_eq!(blocks[0].text, s);
+    }
+
+    #[test]
+    fn split_global_with_boundary_marks_only_static_global() {
+        use llm_client::{CacheControl, CacheScope};
+        // Global mode + a boundary present: prefix uncached, static-before
+        // global-scoped, dynamic-after uncached (splitSysPromptPrefix global).
+        let s = format!(
+            "{HEADER}{SECTION_SEP}static body{SECTION_SEP}{SYSTEM_PROMPT_DYNAMIC_BOUNDARY}{SECTION_SEP}dynamic body"
+        );
+        let opts = SplitOptions {
+            global_scope: true,
+            ttl_1h: false,
+        };
+        let blocks = split_system_blocks_with(&s, true, opts);
+        assert_eq!(blocks.len(), 3);
+        assert_eq!(blocks[0].text, HEADER);
+        assert_eq!(blocks[0].cache_control, None); // prefix cacheScope=null
+        assert_eq!(blocks[1].text, "static body");
+        assert_eq!(
+            blocks[1].cache_control,
+            Some(CacheControl::EphemeralScoped {
+                scope: Some(CacheScope::Global),
+                ttl_1h: false
+            })
+        );
+        assert_eq!(blocks[2].text, "dynamic body");
+        assert_eq!(blocks[2].cache_control, None); // dynamic cacheScope=null
+    }
+
+    #[test]
+    fn split_global_without_boundary_falls_through_to_org() {
+        use llm_client::CacheControl;
+        // boundaryIndex === -1 → org default (prefix + rest, both org-scoped).
+        let s = format!("{HEADER}{SECTION_SEP}no boundary here");
+        let opts = SplitOptions {
+            global_scope: true,
+            ttl_1h: false,
+        };
+        let blocks = split_system_blocks_with(&s, true, opts);
+        assert_eq!(blocks.len(), 2);
+        assert_eq!(blocks[0].cache_control, Some(CacheControl::Ephemeral));
+        assert_eq!(blocks[1].cache_control, Some(CacheControl::Ephemeral));
+    }
+
+    #[test]
+    fn split_1h_ttl_folds_into_org_breakpoints() {
+        use llm_client::CacheControl;
+        let s = format!("{HEADER}{SECTION_SEP}rest");
+        let opts = SplitOptions {
+            global_scope: false,
+            ttl_1h: true,
+        };
+        let blocks = split_system_blocks_with(&s, true, opts);
+        assert_eq!(blocks.len(), 2);
+        assert_eq!(
+            blocks[0].cache_control,
+            Some(CacheControl::EphemeralScoped {
+                scope: None,
+                ttl_1h: true
+            })
+        );
     }
 
     #[test]

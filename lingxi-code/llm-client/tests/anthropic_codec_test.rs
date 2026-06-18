@@ -651,6 +651,49 @@ fn encode_system_blocks_and_cache_control() {
 }
 
 #[test]
+fn encode_cache_control_scope_and_ttl() {
+    // getCacheControl parity: scope:'global' + ttl:'1h' serialize as extra keys
+    // on {"type":"ephemeral"}; the plain Ephemeral emits neither.
+    let codec = AnthropicMessagesCodec::new("https://api.anthropic.com", "2023-06-01");
+    let mut request = LlmRequest::new("claude-sonnet-4-20250514").with_user_text("hi");
+    request.system = vec![
+        llm_client::SystemBlock {
+            text: "global static".to_string(),
+            cache_control: Some(llm_client::CacheControl::EphemeralScoped {
+                scope: Some(llm_client::CacheScope::Global),
+                ttl_1h: true,
+            }),
+        },
+        llm_client::SystemBlock {
+            text: "ttl only".to_string(),
+            cache_control: Some(llm_client::CacheControl::EphemeralScoped {
+                scope: None,
+                ttl_1h: true,
+            }),
+        },
+        llm_client::SystemBlock {
+            text: "plain org".to_string(),
+            cache_control: Some(llm_client::CacheControl::Ephemeral),
+        },
+    ];
+
+    let body = codec.encode_request(&request).unwrap().body_json;
+
+    // Block 0: type+ttl+scope.
+    assert_eq!(body["system"][0]["cache_control"]["type"], "ephemeral");
+    assert_eq!(body["system"][0]["cache_control"]["ttl"], "1h");
+    assert_eq!(body["system"][0]["cache_control"]["scope"], "global");
+    // Block 1: type+ttl, no scope key.
+    assert_eq!(body["system"][1]["cache_control"]["type"], "ephemeral");
+    assert_eq!(body["system"][1]["cache_control"]["ttl"], "1h");
+    assert!(body["system"][1]["cache_control"].get("scope").is_none());
+    // Block 2: plain ephemeral, neither extra key.
+    assert_eq!(body["system"][2]["cache_control"]["type"], "ephemeral");
+    assert!(body["system"][2]["cache_control"].get("ttl").is_none());
+    assert!(body["system"][2]["cache_control"].get("scope").is_none());
+}
+
+#[test]
 fn count_tokens_request_and_response_round_trip() {
     let codec = AnthropicMessagesCodec::new("https://api.anthropic.com", "2023-06-01");
     let mut request = LlmRequest::new("claude-sonnet-4-20250514").with_user_text("hello");

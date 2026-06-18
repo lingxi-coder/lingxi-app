@@ -140,12 +140,44 @@ impl SystemBlock {
     }
 }
 
+/// Cache-control scope, mirroring claude-code's `CacheScope`
+/// (`services/api/claude.ts` `getCacheControl`).
+///
+/// Only `Global` is serialized on the wire — `getCacheControl` emits the
+/// `scope` key solely when `scope === 'global'` (the org default carries no
+/// `scope` key). `Org` is therefore represented by the absence of a scope on a
+/// plain [`CacheControl::Ephemeral`] breakpoint; this enum exists only to carry
+/// the 1P `global` boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CacheScope {
+    /// First-party global cache scope — emits `"scope":"global"`.
+    Global,
+}
+
 /// Prompt-cache control marker.
+///
+/// `Ephemeral` is the org-default breakpoint (`getCacheControl({})` →
+/// `{"type":"ephemeral"}`). `EphemeralScoped` carries the optional `scope` /
+/// 1h-`ttl` fields the 1P global-cache path emits
+/// (`getCacheControl({scope, querySource})` →
+/// `{"type":"ephemeral", ttl?:'1h', scope?:'global'}`). The plain unit form is
+/// kept so the common (org) construction/match sites stay a unit variant.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CacheControl {
-    /// Anthropic ephemeral cache breakpoint.
+    /// Anthropic ephemeral cache breakpoint, org default (no scope, no ttl).
     Ephemeral,
+    /// Ephemeral breakpoint carrying optional 1P `scope` and/or 1h `ttl`.
+    EphemeralScoped {
+        /// `Some(Global)` emits `"scope":"global"`; `None` omits the key
+        /// (org default).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        scope: Option<CacheScope>,
+        /// When `true`, emits `"ttl":"1h"` (claude-code `should1hCacheTTL`).
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        ttl_1h: bool,
+    },
 }
 
 /// Canonical chat message.

@@ -13,7 +13,6 @@
 //! - Response body is EITHER a single `application/json` frame OR a
 //!   `text/event-stream` body of zero-or-more frames; content-type selects.
 
-use std::collections::HashMap;
 
 use eventsource_stream::Eventsource;
 use futures::StreamExt;
@@ -52,10 +51,13 @@ impl From<HttpConnectError> for McpError {
     }
 }
 
-fn build_headers(
+fn build_headers<H>(
     auth_token: Option<&str>,
-    extra_headers: &HashMap<String, String>,
-) -> Result<HeaderMap, HttpConnectError> {
+    extra_headers: &H,
+) -> Result<HeaderMap, HttpConnectError>
+where
+    for<'a> &'a H: IntoIterator<Item = (&'a String, &'a String)>,
+{
     let mut h = HeaderMap::new();
     h.insert(ACCEPT, HeaderValue::from_static(STREAMABLE_HTTP_ACCEPT));
     h.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
@@ -89,17 +91,25 @@ fn build_headers(
 /// zero-or-more frames — both modes are decoded and routed back through
 /// `jsonrpc::Connection`.
 ///
+/// `extra_headers` is generic over the map type so both an unordered `HashMap`
+/// and the insertion-ordered [`traits::McpHeaders`] (`IndexMap`) the MCP
+/// transport specs now carry are accepted (header order is irrelevant to the
+/// emitted HTTP request).
+///
 /// # Errors
 ///
 /// - [`HttpConnectError::Transport`] if reqwest client construction fails.
 /// - [`HttpConnectError::InvalidAuth`] if `auth_token` contains bytes that
 ///   cannot be expressed in an HTTP header value (non-ASCII, control chars).
-#[allow(clippy::implicit_hasher)] // public API: HashMap is the documented config shape
-pub async fn connect_http(
+pub async fn connect_http<H>(
     url: &str,
     auth_token: Option<&str>,
-    extra_headers: &HashMap<String, String>,
-) -> Result<Connection, HttpConnectError> {
+    extra_headers: &H,
+) -> Result<Connection, HttpConnectError>
+where
+    H: Clone + Send + 'static,
+    for<'a> &'a H: IntoIterator<Item = (&'a String, &'a String)>,
+{
     let client = reqwest::Client::builder()
         .build()
         .map_err(|e| HttpConnectError::Transport(e.to_string()))?;

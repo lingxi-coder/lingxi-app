@@ -53,13 +53,13 @@ fn sample_spec(kind: McpTransportKind) -> McpTransportSpec {
         },
         McpTransportKind::Sse => McpTransportSpec::Sse {
             url: "http://127.0.0.1:0/sse".into(),
-            headers: HashMap::new(),
+            headers: traits::McpHeaders::new(),
             headers_helper: None,
             oauth: None,
         },
         McpTransportKind::Http => McpTransportSpec::Http {
             url: "http://127.0.0.1:0/mcp".into(),
-            headers: HashMap::new(),
+            headers: traits::McpHeaders::new(),
             oauth: None,
         },
         McpTransportKind::WebSocket => McpTransportSpec::WebSocket {

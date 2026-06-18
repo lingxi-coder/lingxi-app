@@ -5,15 +5,14 @@
 //! `UnsupportedTransport`.
 
 use platform_windows::WindowsMcpTransport;
-use std::collections::HashMap;
-use traits::{McpError, McpTransport, McpTransportKind, McpTransportSpec};
+use traits::{McpError, McpHeaders, McpTransport, McpTransportKind, McpTransportSpec};
 
 #[tokio::test]
 async fn connect_sse_does_not_return_unsupported_transport() {
     let t = WindowsMcpTransport::new();
     let spec = McpTransportSpec::Sse {
         url: "http://127.0.0.1:1/never-listens".into(),
-        headers: HashMap::new(),
+        headers: McpHeaders::new(),
         headers_helper: None,
         oauth: None,
     };
@@ -34,7 +33,7 @@ async fn connect_http_does_not_return_unsupported_transport() {
     let t = WindowsMcpTransport::new();
     let spec = McpTransportSpec::Http {
         url: "http://127.0.0.1:1/never-listens".into(),
-        headers: HashMap::new(),
+        headers: McpHeaders::new(),
         oauth: None,
     };
     if let Err(McpError::UnsupportedTransport(k)) = t.connect(&spec).await {

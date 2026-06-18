@@ -531,12 +531,27 @@ fn handle_screen_key(st: &mut AppState, k: &KeyEvent) {
     let screen_contexts: &[&str] = match &st.active_screen {
         Some(Screen::Help(_)) => &["Help", "Scroll"],
         Some(Screen::Model(_)) => &["ModelPicker"],
-        Some(Screen::Settings(_)) => &["Settings"],
-        // Memory has two modes in one reducer: a tier SELECTOR (nav keys) and an
-        // inline CLAUDE.md EDITOR (free text). Consult `Settings` only in the
-        // selector — while editing, `Settings`'s `j`/`k`/`space`/`/`/`r` would
-        // hijack typed chars, so editing falls through (text-entry residual).
-        Some(Screen::Memory(m)) if !m.editing => &["Settings"],
+        // (GAP D fix) Settings is a TAB NAVIGATOR (Config/Settings/Status/Usage
+        // tabs + an `e`/Enter $EDITOR handoff on the Config tab) — NOT a
+        // settings-panel select-list. claude-code drives tab navigation through
+        // the `Tabs` context (`useTabHeaderFocus` → `tabs:next`/`tabs:previous`,
+        // see design-system/Tabs.tsx), so map it there. The OLD `Settings`
+        // mapping was wrong: that context's `/`→settings:search (lowered to Esc)
+        // CLOSED the screen and `space`→select:accept (lowered to Enter) fired
+        // the Config-tab $EDITOR handoff — both inert before, an unexcused
+        // default-config behavior regression. `Tabs` binds only tab/shift+tab/
+        // right/left → the reducer's existing next/prev tab cycle (byte-neutral),
+        // while Esc/`q` fall through to the reducer's native close.
+        Some(Screen::Settings(_)) => &["Tabs"],
+        // Memory has two modes in one reducer: a tier SELECTOR (a `<Select>` list
+        // in claude-code's MemoryFileSelector — Up/Down/`j`/`k`/Enter/Esc) and an
+        // inline CLAUDE.md EDITOR (free text). Consult `Select` (the faithful
+        // claude-code context) only in the selector; while editing, `Select`'s
+        // `j`/`k`/Enter/Esc would hijack typed chars, so editing falls through
+        // (text-entry residual). The OLD `Settings` mapping was wrong here too —
+        // its `/`→settings:search (Esc) CLOSED the screen and `space`→accept
+        // (Enter) OPENED the editor, both inert before.
+        Some(Screen::Memory(m)) if !m.editing => &["Select"],
         Some(Screen::Memory(_)) => &[],
         // ThemePicker live-previews on Up/Down; its reducer does NOT bind `j`/`k`,
         // so adding `Select` (whose `j`/`k`→nav) would change defaults. Use only
@@ -549,7 +564,20 @@ fn handle_screen_key(st: &mut AppState, k: &KeyEvent) {
         // would hijack typing). Its only control key (Esc-cancel) is owned
         // unconditionally by the reducer, so no consult context is needed.
         Some(Screen::Connect(_)) => &[],
-        Some(Screen::Stats(_) | Screen::Skills(_)) => &["Select", "Scroll"],
+        // (GAP D fix) Stats is a TAB NAVIGATOR (Overview/Models via Tab) + a
+        // keyboard SCROLL pager — NOT a select-list. The OLD `Select` mapping
+        // lowered `j`/`k`→select:next/previous→Down/Up and SCROLLED the body
+        // where `j`/`k` were inert (an unexcused default-keymap change on a
+        // tab-navigator screen). `Tabs` drives the tab cycle (byte-neutral with
+        // the reducer's Tab/BackTab toggle); `Scroll` keeps the native keyboard
+        // scroll. Esc/`q` fall through to the reducer's native close.
+        Some(Screen::Stats(_)) => &["Tabs", "Scroll"],
+        // (GAP D fix) Skills is a read-only SCROLL pager (no tabs, no selection,
+        // no accept) — so the OLD `Select` mapping (whose `j`/`k`→Down/Up would
+        // scroll, and whose `enter`→accept is meaningless here) was wrong. Use
+        // `Scroll` only: the native PageUp/PageDown/Home/End scroll keys, with
+        // Esc/`q` falling through to the reducer's native close.
+        Some(Screen::Skills(_)) => &["Scroll"],
         Some(
             Screen::Mcp(_)
             | Screen::Hooks(_)
@@ -3082,9 +3110,16 @@ mod tests {
         }
     }
 
-    /// (GAP D — per-screen) The DEFAULT keymap round-trips behavior-neutrally:
-    /// Down on the MCP viewer resolves `select:next` → lowered back to Down →
-    /// the legacy reducer advances the selection, exactly as before the consult.
+    /// (GAP D — per-screen) The DEFAULT keymap round-trips behavior-neutrally
+    /// for a `Select` LIST reducer: Down on the MCP viewer resolves `select:next`
+    /// → lowered back to Down → the legacy reducer advances the selection,
+    /// exactly as before the consult.
+    ///
+    /// NOTE: this only exercises a list-reducer that NATIVELY handles `j`/`k`, so
+    /// it does NOT cover the TAB-NAVIGATOR screens (Settings/Stats) where mapping
+    /// to a list context was a regression. Those are covered by
+    /// [`settings_tab_navigator_default_keymap_is_behavior_neutral`] and
+    /// [`stats_tab_navigator_default_keymap_is_behavior_neutral`].
     #[test]
     fn per_screen_default_keymap_is_behavior_neutral() {
         use crate::screens::mcp::{McpRow, McpScreenState};
@@ -3133,6 +3168,205 @@ mod tests {
             Some(Screen::Model(s)) => assert_eq!(s.query, "j", "j typed into query"),
             other => panic!("expected Model screen, got {other:?}"),
         }
+    }
+
+    /// Build a default-data Settings screen on `tab` (mirrors the screen's own
+    /// `fixture_state`). Used by the tab-navigator behavior-neutrality tests.
+    fn settings_screen_on(tab: crate::screens::settings::SettingsTab) -> crate::screens::Screen {
+        use crate::screens::settings::{SettingsData, SettingsState};
+        use engine::settings::tracer::ProvenanceTrace;
+        use engine::settings::{EffectiveSettings, SettingsJson};
+        use traits::{CostSnapshot, StatusSnapshot};
+        crate::screens::Screen::Settings(SettingsState::new(
+            tab,
+            SettingsData {
+                effective: EffectiveSettings {
+                    settings: SettingsJson::default(),
+                    trace: ProvenanceTrace::default(),
+                },
+                status: StatusSnapshot::default(),
+                cost: CostSnapshot::default(),
+            },
+        ))
+    }
+
+    /// (GAP D fix — tab navigators, TDD) The Settings screen is a TAB NAVIGATOR
+    /// (Config/Settings/Status/Usage tabs + an `e`/Enter $EDITOR handoff), NOT a
+    /// select-list. Under the DEFAULT keymap (no keybindings.json) it must NOT
+    /// inherit the `Settings`/`Select` LIST context, whose `/`→settings:search
+    /// (lowered to Esc) would CLOSE the screen and whose `space`→select:accept
+    /// (lowered to Enter) would trigger the Config-tab $EDITOR handoff. Both were
+    /// inert before the per-screen consult; this asserts they STAY inert.
+    #[test]
+    fn settings_tab_navigator_default_keymap_is_behavior_neutral() {
+        use crate::screens::settings::SettingsTab;
+        use crate::screens::Screen;
+
+        // `/` must NOT close the Settings screen under defaults (was inert).
+        let mut st = AppState::new(crate::state::StatusSnapshot::default());
+        st.active_screen = Some(settings_screen_on(SettingsTab::Config));
+        let slash = KeyEvent::new(KeyEventKind::Press, KeyCode::Char('/'));
+        handle_screen_key(&mut st, &slash);
+        assert!(
+            matches!(st.active_screen, Some(Screen::Settings(_))),
+            "`/` must stay inert on the Settings tab navigator, not close it"
+        );
+
+        // `space` must NOT trigger the $EDITOR handoff on the Config tab.
+        st.pending_config_edit = false;
+        let space = KeyEvent::new(KeyEventKind::Press, KeyCode::Char(' '));
+        handle_screen_key(&mut st, &space);
+        assert!(
+            matches!(st.active_screen, Some(Screen::Settings(_))),
+            "`space` must stay inert (no EditConfig) on the Settings tab navigator"
+        );
+        assert!(
+            !st.pending_config_edit,
+            "`space` must NOT raise the $EDITOR handoff under defaults"
+        );
+
+        // Tab navigation still works (Tab cycles tabs — the screen's real job).
+        let tab = KeyEvent::new(KeyEventKind::Press, KeyCode::Tab);
+        handle_screen_key(&mut st, &tab);
+        match &st.active_screen {
+            Some(Screen::Settings(s)) => {
+                assert_eq!(s.tab, SettingsTab::Config.next(), "Tab cycles to next tab");
+            }
+            other => panic!("expected Settings screen, got {other:?}"),
+        }
+    }
+
+    /// (GAP D fix) A `Tabs`-context override (`ctrl+l` → tabs:next) reaches the
+    /// Settings tab navigator's live dispatch, while Esc still closes (fallback).
+    #[test]
+    fn settings_tab_navigator_override_reaches_dispatch() {
+        use crate::screens::settings::SettingsTab;
+        use crate::screens::Screen;
+        use command_core::keybindings::{load_keybindings, Keymap};
+        use std::io::Write;
+
+        let json = r#"{ "bindings": [ { "context": "Tabs", "bindings": { "ctrl+l": "tabs:next" } } ] }"#;
+        let path = std::env::temp_dir()
+            .join(format!("lingxi-tui-settings-kb-{}.json", std::process::id()));
+        std::fs::File::create(&path).unwrap().write_all(json.as_bytes()).unwrap();
+        let km = Keymap::from_load_result(load_keybindings(true, &path, false));
+        let _ = std::fs::remove_file(&path);
+
+        let mut st = AppState::new(crate::state::StatusSnapshot::default());
+        st.set_keymap(km);
+        st.active_screen = Some(settings_screen_on(SettingsTab::Config));
+
+        // ctrl+l (override) → tabs:next → lowered to Tab → next tab.
+        let mut ctrl_l = KeyEvent::new(KeyEventKind::Press, KeyCode::Char('l'));
+        ctrl_l.modifiers = KeyModifiers::CONTROL;
+        handle_screen_key(&mut st, &ctrl_l);
+        match &st.active_screen {
+            Some(Screen::Settings(s)) => {
+                assert_eq!(s.tab, SettingsTab::Config.next(), "ctrl+l advanced the tab");
+            }
+            other => panic!("expected Settings screen, got {other:?}"),
+        }
+
+        // Esc (unspecified by the override) falls back → closes.
+        let esc = KeyEvent::new(KeyEventKind::Press, KeyCode::Esc);
+        handle_screen_key(&mut st, &esc);
+        assert!(st.active_screen.is_none(), "Esc closes the Settings screen (fallback)");
+    }
+
+    /// (GAP D fix — tab navigators, TDD) The Stats screen is a TAB NAVIGATOR
+    /// (Overview/Models via Tab) + a keyboard SCROLL pager. It must NOT inherit
+    /// the `Select` LIST context, whose `j`/`k`→select:next/previous (lowered to
+    /// Down/Up) would SCROLL the body where `j`/`k` were inert before. This
+    /// asserts `j`/`k` stay inert under the default keymap.
+    #[test]
+    fn stats_tab_navigator_default_keymap_is_behavior_neutral() {
+        use crate::screens::stats::{ModelUsage, StatsData, StatsState, StatsTab};
+        use crate::screens::Screen;
+        use std::collections::BTreeMap;
+
+        // Build a Models tab body LONGER than the 16-line VIEWPORT (each model
+        // = 2 lines) so that a scroll key genuinely moves the offset; this makes
+        // the "j stays inert / Down scrolls" distinction non-vacuous.
+        let mut model_usage = BTreeMap::new();
+        for i in 0..12 {
+            model_usage.insert(
+                format!("model-{i:02}"),
+                ModelUsage { input_tokens: 1000 + i, output_tokens: 500 + i, cache_read_tokens: 0 },
+            );
+        }
+        let data = StatsData { model_usage, total_sessions: 3, ..StatsData::default() };
+        let mut st = AppState::new(crate::state::StatusSnapshot::default());
+        st.active_screen = Some(Screen::Stats(StatsState::new(data)));
+        // Toggle to Models via Tab so the embedded scroll window is sized to the
+        // (long) Models body — the private `set_tab` re-anchors the scroll.
+        let tab = KeyEvent::new(KeyEventKind::Press, KeyCode::Tab);
+        handle_screen_key(&mut st, &tab);
+        let at_models_top = match &st.active_screen {
+            Some(Screen::Stats(s)) => {
+                assert_eq!(s.tab, StatsTab::Overview.toggled(), "Tab toggles to Models");
+                s.scroll.offset()
+            }
+            other => panic!("expected Stats screen, got {other:?}"),
+        };
+
+        // `j` must NOT scroll under defaults (was inert; the wrong Select mapping
+        // would lower j→Down and scroll it).
+        let j = KeyEvent::new(KeyEventKind::Press, KeyCode::Char('j'));
+        handle_screen_key(&mut st, &j);
+        match &st.active_screen {
+            Some(Screen::Stats(s)) => {
+                assert_eq!(s.scroll.offset(), at_models_top, "`j` must stay inert (no scroll)");
+            }
+            other => panic!("expected Stats screen, got {other:?}"),
+        }
+
+        // `k` likewise inert.
+        let k = KeyEvent::new(KeyEventKind::Press, KeyCode::Char('k'));
+        handle_screen_key(&mut st, &k);
+        match &st.active_screen {
+            Some(Screen::Stats(s)) => {
+                assert_eq!(s.scroll.offset(), at_models_top, "`k` must stay inert (no scroll)");
+            }
+            other => panic!("expected Stats screen, got {other:?}"),
+        }
+
+        // Down (native scroll key, Scroll context) STILL scrolls — proving the
+        // body is scrollable and the Scroll context is intact.
+        let down = KeyEvent::new(KeyEventKind::Press, KeyCode::Down);
+        handle_screen_key(&mut st, &down);
+        match &st.active_screen {
+            Some(Screen::Stats(s)) => {
+                assert!(s.scroll.offset() > at_models_top, "Down still scrolls the body");
+            }
+            other => panic!("expected Stats screen, got {other:?}"),
+        }
+    }
+
+    /// (GAP D fix — Memory selector, TDD) The Memory tier SELECTOR is a
+    /// `<Select>` list (claude-code `MemoryFileSelector`), so it must NOT inherit
+    /// the `Settings` panel context whose `/`→settings:search (lowered to Esc)
+    /// would CLOSE the screen — inert before. Under the default keymap `/` must
+    /// fall through to the selector's inert `_` arm, leaving the screen open.
+    #[test]
+    fn memory_selector_slash_does_not_close_under_defaults() {
+        use crate::screens::memory::MemoryScreenState;
+        use crate::screens::Screen;
+        let mut st = AppState::new(crate::state::StatusSnapshot::default());
+        st.active_screen = Some(Screen::Memory(MemoryScreenState::default()));
+        let slash = KeyEvent::new(KeyEventKind::Press, KeyCode::Char('/'));
+        handle_screen_key(&mut st, &slash);
+        assert!(
+            matches!(&st.active_screen, Some(Screen::Memory(m)) if !m.editing),
+            "`/` must stay inert on the Memory selector, not close it"
+        );
+        // `space` likewise must not open the editor (was inert; Settings' accept
+        // would have opened it).
+        let space = KeyEvent::new(KeyEventKind::Press, KeyCode::Char(' '));
+        handle_screen_key(&mut st, &space);
+        assert!(
+            matches!(&st.active_screen, Some(Screen::Memory(m)) if !m.editing),
+            "`space` must stay inert on the Memory selector (no editor open)"
+        );
     }
 
     #[test]

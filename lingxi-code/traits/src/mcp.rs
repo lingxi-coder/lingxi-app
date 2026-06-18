@@ -15,6 +15,18 @@ use serde_json::Value;
 use std::pin::Pin;
 use thiserror::Error;
 
+/// Insertion-order-preserving header map for remote MCP transports.
+///
+/// claude-code's `getServerKey` hashes `JSON.stringify({type,url,headers})`
+/// with the `headers` object keys in the config's insertion order (auth.ts:329,
+/// slowOperations.ts:189 — plain `JSON.stringify`, which preserves a JS
+/// object's key insertion order). A sorted map (e.g. `BTreeMap`/`HashMap`-then-
+/// sort) would diverge for configs with 2+ headers in non-alphabetical order,
+/// so the header order must be preserved end-to-end (config parse → spec →
+/// `server_key`). [`indexmap::IndexMap`] serializes as a JSON object preserving
+/// that order, so the on-disk/IPC shape is unchanged.
+pub type McpHeaders = indexmap::IndexMap<String, String>;
+
 /// Concrete transport configuration for one MCP server.
 ///
 /// Mirrors the 7 transport variants described in spec §7.1. Platform
@@ -35,8 +47,9 @@ pub enum McpTransportSpec {
     Sse {
         /// Endpoint URL.
         url: String,
-        /// Static request headers.
-        headers: std::collections::HashMap<String, String>,
+        /// Static request headers (insertion order preserved for `getServerKey`
+        /// byte-parity — see [`McpHeaders`]).
+        headers: McpHeaders,
         /// Optional executable that produces auth headers on demand.
         headers_helper: Option<String>,
         /// Optional OAuth 2.1 PKCE config.
@@ -46,8 +59,9 @@ pub enum McpTransportSpec {
     Http {
         /// Endpoint URL.
         url: String,
-        /// Static request headers.
-        headers: std::collections::HashMap<String, String>,
+        /// Static request headers (insertion order preserved for `getServerKey`
+        /// byte-parity — see [`McpHeaders`]).
+        headers: McpHeaders,
         /// Optional OAuth 2.1 PKCE config.
         oauth: Option<McpOAuthConfigDto>,
     },

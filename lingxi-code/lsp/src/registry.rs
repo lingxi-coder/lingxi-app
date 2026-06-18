@@ -47,7 +47,6 @@ pub struct LspRegistry {
     transport: Arc<dyn LspTransport>,
     /// Plugin id → server names contributed by that plugin (used by
     /// `unregister_plugin`).
-    #[allow(dead_code)] // Plan 16 wires plugin teardown.
     plugin_servers: RwLock<HashMap<PluginId, Vec<String>>>,
 }
 
@@ -146,11 +145,25 @@ impl LspRegistry {
     }
 
     /// Drop all servers contributed by `plugin_id` and return their names.
+    ///
+    /// Removes each contributed server from the live state map (and any cached
+    /// client), symmetric with [`Self::register_plugin_servers`], so a disabled
+    /// plugin leaves no orphaned LSP server behind.
     pub async fn unregister_plugin(&self, plugin_id: &PluginId) -> Vec<String> {
-        self.plugin_servers
+        let names = self
+            .plugin_servers
             .write()
             .await
             .remove(plugin_id)
-            .unwrap_or_default()
+            .unwrap_or_default();
+        if !names.is_empty() {
+            let mut servers = self.servers.write().await;
+            let mut clients = self.clients.write().await;
+            for n in &names {
+                servers.remove(n);
+                clients.remove(n);
+            }
+        }
+        names
     }
 }

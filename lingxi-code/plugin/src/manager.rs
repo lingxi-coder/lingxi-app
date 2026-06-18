@@ -2,9 +2,13 @@
 //! plugin components into the eight engine registries (tools, hooks, MCP,
 //! agent, skill, command, output-style, LSP).
 //!
-//! Today only `enable` and `disable` carry production logic. `install` is
-//! a stub returning an error — Plan 16 implements the actual fetches
-//! (git clone, marketplace download, `.mcpb` unpack).
+//! `enable` materialises commands, hooks, agents (frontmatter-gated),
+//! skills, output-styles, LSP servers, and MCP server CONFIGS (seeded
+//! `Disconnected` — live connect is residual). `disable` symmetrically
+//! removes them. `install`'s local-path arm discovers + enables a
+//! pre-fetched plugin dir; the network arms (git clone, marketplace
+//! download, `.mcpb` unpack) return a typed, capability-named error until
+//! the fetch + marketplace-policy machinery is ported.
 //!
 //! See spec §15.3.
 
@@ -18,11 +22,11 @@ use crate::strict_policy::{PluginComponent, StrictPluginOnlyPolicy};
 use command_api::CommandRegistry;
 use hooks::HookRegistry;
 use lsp::LspRegistry;
-use mcp::McpRegistry;
-use outputstyles::OutputStyleRegistry;
+use mcp::{McpConnectionState, McpRegistry, McpServerConfig};
+use outputstyles::{OutputStyle, OutputStyleFrontmatter, OutputStyleRegistry, OutputStyleSource};
 use protocol::PluginId;
 use secret::CredentialManager;
-use skill_api::SkillRegistry;
+use skill_api::{parse_skill_markdown, LoadedFrom, SkillRegistry, SkillSource};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -78,11 +82,14 @@ pub struct PluginManager {
     skill_registry: Arc<RwLock<SkillRegistry>>,
     hook_registry: Arc<RwLock<HookRegistry>>,
     output_style_registry: Arc<RwLock<OutputStyleRegistry>>,
-    #[allow(dead_code)] // Channel/MCP materialisation lands in Plan 16.
     mcp_registry: Arc<McpRegistry>,
     lsp_registry: Arc<LspRegistry>,
     tool_registry: Arc<RwLock<ToolRegistry>>,
     // Channel registry is part of mcp_registry's agent-scoped pool in M1.
+    /// Scoped MCP server names (`plugin:{plugin}:{server}`) each plugin seeded
+    /// into `mcp_registry.connections`, so [`Self::unload_plugin`] can remove
+    /// exactly those entries (the registry has no plugin-ownership index).
+    plugin_mcp_names: RwLock<HashMap<PluginId, Vec<String>>>,
 }
 
 impl PluginManager {
@@ -121,6 +128,7 @@ impl PluginManager {
             mcp_registry,
             lsp_registry,
             tool_registry,
+            plugin_mcp_names: RwLock::new(HashMap::new()),
         }
     }
 
@@ -154,10 +162,40 @@ impl PluginManager {
                     )))
                 }
             }
-            other => Err(PluginManagerError::Io(format!(
-                "install from {other:?} requires marketplace/git fetch (not yet wired); \
-                 install a pre-fetched plugin directory via PluginSource::LocalPath"
+            // The network-backed arms each name the specific fetch capability
+            // that is not yet ported, so the error is actionable. The actual
+            // machinery (`marketplace.rs` is a placeholder with no HTTP/clone/
+            // unzip code) plus the marketplace-policy gates
+            // (`getStrictKnownMarketplaces` / blocklist) are residual — until
+            // then, install a pre-fetched plugin directory via
+            // `PluginSource::LocalPath`.
+            PluginSource::OfficialMarketplace { name } => Err(PluginManagerError::Io(format!(
+                "install of '{name}' from the official marketplace requires the \
+                 marketplace fetch loop (HTTP listing + signed-manifest download); \
+                 not yet wired — install a pre-fetched plugin directory via \
+                 PluginSource::LocalPath"
             ))),
+            PluginSource::Marketplace { url, name } => Err(PluginManagerError::Io(format!(
+                "install of '{name}' from marketplace {url} requires the marketplace \
+                 fetch loop (not yet wired) — install a pre-fetched plugin directory \
+                 via PluginSource::LocalPath"
+            ))),
+            PluginSource::Git { url, ref_ } => Err(PluginManagerError::Io(format!(
+                "install from git {url}@{ref_} requires the git-clone fetch path \
+                 (not yet wired) — install a pre-fetched plugin directory via \
+                 PluginSource::LocalPath"
+            ))),
+            PluginSource::Mcpb { path, .. } => Err(PluginManagerError::Io(format!(
+                "install from .mcpb bundle {} requires the zip-unpack handler \
+                 (not yet wired) — install a pre-fetched plugin directory via \
+                 PluginSource::LocalPath",
+                path.display()
+            ))),
+            PluginSource::BuiltIn => Err(PluginManagerError::Io(
+                "BuiltIn plugins are compiled into the engine and are not \
+                 installed via PluginManager::install"
+                    .to_string(),
+            )),
         }
     }
 
@@ -212,6 +250,7 @@ impl PluginManager {
     }
 
     /// Materialise `manifest`'s components into the 8 registries.
+    #[allow(clippy::too_many_lines)] // Wiring layer — validate-then-mutate over 7 component slots.
     async fn load_plugin(
         &self,
         manifest: &PluginManifest,
@@ -309,6 +348,94 @@ impl PluginManager {
             }
         }
 
+        // (c) Skills — read each `skills/<name>/SKILL.md`, parse its frontmatter
+        //     body, namespace the name as `{plugin}:{skill}` (consistent with
+        //     commands / agents / output-styles — `loadPluginOutputStyles.ts:55`)
+        //     and stamp the owning plugin id so unload can target it. A file
+        //     that cannot be read or parsed is skipped (TS filters nulls).
+        let plugin_name = &manifest.name;
+        let mut skills: Vec<skill_api::Skill> = Vec::new();
+        if !self.strict.is_locked(PluginComponent::Skills) {
+            for sp in &manifest.components.skills {
+                let abs = if sp.path.is_absolute() {
+                    sp.path.clone()
+                } else {
+                    install_dir.join(&sp.path)
+                };
+                let Ok(raw) = tokio::fs::read_to_string(&abs).await else {
+                    continue;
+                };
+                let Ok(mut skill) =
+                    parse_skill_markdown(&raw, abs.clone(), SkillSource::Plugin, LoadedFrom::Plugin)
+                else {
+                    continue;
+                };
+                skill.name = format!("{plugin_name}:{}", skill.name);
+                skill.plugin_id = Some(manifest.id);
+                skills.push(skill);
+            }
+        }
+
+        // (d) Output styles — read each `output-styles/*.md`, parse the body as
+        //     the system-prompt addendum, namespace the name `{plugin}:{name}`
+        //     (`loadPluginOutputStyles.ts:55`). The body becomes
+        //     `system_prompt_addendum` (TS `prompt: markdownContent.trim()`).
+        let mut styles: Vec<OutputStyle> = Vec::new();
+        if !self.strict.is_locked(PluginComponent::OutputStyles) {
+            for op in &manifest.components.output_styles {
+                let abs = if op.path.is_absolute() {
+                    op.path.clone()
+                } else {
+                    install_dir.join(&op.path)
+                };
+                let Ok(raw) = tokio::fs::read_to_string(&abs).await else {
+                    continue;
+                };
+                let stem = abs
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or_default();
+                let disk = outputstyles::parse_output_style(&raw, stem);
+                let name = format!("{plugin_name}:{}", disk.name);
+                styles.push(OutputStyle {
+                    name: name.clone(),
+                    description: disk.description.clone(),
+                    source: OutputStyleSource::Plugin,
+                    frontmatter: OutputStyleFrontmatter {
+                        name,
+                        description: disk.description,
+                        ..Default::default()
+                    },
+                    system_prompt_addendum: disk.prompt,
+                    source_path: Some(abs),
+                });
+            }
+        }
+
+        // (e) MCP servers — scope each `.mcp.json` entry as
+        //     `plugin:{plugin}:{server}` and seed it `Disconnected` so it is
+        //     discoverable (e.g. in `/mcp`) WITHOUT forcing a live connect
+        //     (`addPluginScopeToServers`, `mcpPluginIntegration.ts:341-359`,
+        //     uses scope `dynamic`; the discovery loader already stamps
+        //     `ConfigScope::Dynamic`). Live connection is residual.
+        let mcp_scoped: Vec<McpServerConfig> = if self
+            .strict
+            .is_locked(PluginComponent::McpServers)
+        {
+            Vec::new()
+        } else {
+            manifest
+                .components
+                .mcp_servers
+                .values()
+                .map(|cfg| {
+                    let mut scoped = cfg.clone();
+                    scoped.name = format!("plugin:{plugin_name}:{}", cfg.name);
+                    scoped
+                })
+                .collect()
+        };
+
         // ---- All inputs validated; mutate the live registries now. ----
 
         // 1. Commands.
@@ -320,8 +447,11 @@ impl PluginManager {
         }
 
         // 3. Skills.
-        if !self.strict.is_locked(PluginComponent::Skills) {
-            // (build Skill objects from skill files; register)
+        if !skills.is_empty() {
+            self.skill_registry
+                .write()
+                .await
+                .register_plugin_skills(manifest.id, skills);
         }
 
         // 4. Hooks.
@@ -330,12 +460,36 @@ impl PluginManager {
             .await
             .register_plugin_hooks(manifest.id, manifest.components.hooks.clone());
 
-        // 5. OutputStyles — Plan 16 reads disk files; nothing to inject at M1.21.
-        let _ = &self.output_style_registry;
+        // 5. OutputStyles.
+        if !styles.is_empty() {
+            self.output_style_registry
+                .write()
+                .await
+                .register_plugin_styles(manifest.id, styles);
+        }
         let _ = &self.tool_registry;
-        let _ = &self.skill_registry;
 
-        // 6. MCP servers — registered through McpRegistry::connect for each entry.
+        // 6. MCP servers — seed each scoped config as `Disconnected` in the
+        //    registry's connection map (discoverable; live connect is residual)
+        //    and remember the scoped names so unload can remove exactly them.
+        if !mcp_scoped.is_empty() {
+            let mut conns = self.mcp_registry.connections.write().await;
+            let mut names = Vec::with_capacity(mcp_scoped.len());
+            for cfg in mcp_scoped {
+                let key = cfg.name.clone();
+                conns.insert(
+                    key.clone(),
+                    McpConnectionState::Disconnected {
+                        config: cfg,
+                        last_error: None,
+                    },
+                );
+                names.push(key);
+            }
+            drop(conns);
+            self.plugin_mcp_names.write().await.insert(manifest.id, names);
+        }
+
         // 7. LSP servers — plugin-only registration path.
         //
         // `LspRegistry::register_plugin_servers` is the ONLY supported way
@@ -362,7 +516,14 @@ impl PluginManager {
             .unregister_plugin(id);
         self.tool_registry.write().await.unregister_plugin(id);
         let _ = self.lsp_registry.unregister_plugin(id).await;
-        // mcp_registry cleanup: per-agent scope cleanup happens at agent exit.
+        // MCP cleanup: remove exactly the scoped `plugin:{plugin}:*` entries
+        // this plugin seeded into the registry's connection map.
+        if let Some(names) = self.plugin_mcp_names.write().await.remove(id) {
+            let mut conns = self.mcp_registry.connections.write().await;
+            for n in &names {
+                conns.remove(n);
+            }
+        }
         Ok(())
     }
 }

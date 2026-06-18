@@ -3,8 +3,9 @@
 //! Mirrors claude-code's cache-only loader (`pluginLoader.ts:1348`
 //! `createPluginFromPath` + `1618` standard `hooks/hooks.json`): walk the
 //! plugins directory, read each `<plugin>/.claude-plugin/plugin.json`, and
-//! auto-detect the `commands/`, `agents/`, `skills/`, `output-styles/`
-//! component directories plus the standard `hooks/hooks.json`.
+//! auto-detect the `commands/`, `agents/`, `skills/<name>/SKILL.md`,
+//! `output-styles/` component directories, the standard `hooks/hooks.json`,
+//! and the `.mcp.json` / `.lsp.json` server configs.
 
 use std::fs;
 use std::path::Path;
@@ -82,6 +83,56 @@ async fn discovers_a_single_installed_plugin_with_all_components() {
 
     // The install dir points at the plugin root.
     assert_eq!(dir, &tmp.path().join("myplugin"));
+}
+
+#[tokio::test]
+async fn detects_skill_subdirs_mcp_and_lsp_configs() {
+    // Skills use `skills/<name>/SKILL.md` (one level deep, SKILL.md only —
+    // `validatePlugin.ts:735-739`); MCP servers from `.mcp.json`; LSP servers
+    // from `.lsp.json` (`mcpPluginIntegration.ts` / `lspPluginIntegration.ts`).
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().join("p");
+    fs::create_dir_all(dir.join(".claude-plugin")).unwrap();
+    fs::write(
+        dir.join(".claude-plugin").join("plugin.json"),
+        r#"{"name":"p","version":"1.0.0"}"#,
+    )
+    .unwrap();
+
+    // skills/greeter/SKILL.md is detected; a flat skills/stray.md is NOT.
+    fs::create_dir_all(dir.join("skills").join("greeter")).unwrap();
+    fs::write(
+        dir.join("skills").join("greeter").join("SKILL.md"),
+        "---\nname: greeter\ndescription: hi\n---\nbody\n",
+    )
+    .unwrap();
+    fs::write(dir.join("skills").join("stray.md"), "not a skill").unwrap();
+
+    fs::write(
+        dir.join(".mcp.json"),
+        r#"{"mcpServers":{"echo":{"command":"echo"}}}"#,
+    )
+    .unwrap();
+    fs::write(
+        dir.join(".lsp.json"),
+        r#"{"pyls":{"name":"pyls","command":"pylsp","args":[],"env":{},"trigger_languages":["python"],"root_dir_markers":["pyproject.toml"],"initialization_options":null}}"#,
+    )
+    .unwrap();
+
+    let discovered = plugin::discover_installed_plugins(tmp.path()).await;
+    assert_eq!(discovered.len(), 1);
+    let comps = &discovered[0].1.components;
+
+    assert_eq!(comps.skills.len(), 1, "only skills/greeter/SKILL.md is a skill");
+    assert!(comps.skills[0].path.ends_with("greeter/SKILL.md"));
+    assert!(
+        comps.mcp_servers.contains_key("echo"),
+        "echo MCP server from .mcp.json"
+    );
+    assert!(
+        comps.lsp_servers.contains_key("pyls"),
+        "pyls LSP server from .lsp.json"
+    );
 }
 
 #[tokio::test]

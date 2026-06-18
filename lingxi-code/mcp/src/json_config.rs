@@ -18,7 +18,7 @@ use crate::env_expansion::expand_env_vars_in_string;
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::Path;
-use traits::McpTransportSpec;
+use traits::{McpHeaders, McpTransportSpec};
 
 /// Expand `${VAR}` / `${VAR:-default}` references in one string against the
 /// process environment, appending any missing-variable names to `missing`.
@@ -34,6 +34,18 @@ fn expand_field(value: &str, missing: &mut Vec<String>) -> String {
 /// `mapValues(map, expandString)` used for `env` and `headers`
 /// (`services/mcp/config.ts:579,595`).
 fn expand_map_values(map: HashMap<String, String>, missing: &mut Vec<String>) -> HashMap<String, String> {
+    map.into_iter()
+        .map(|(k, v)| {
+            let v = expand_field(&v, missing);
+            (k, v)
+        })
+        .collect()
+}
+
+/// Order-preserving variant of [`expand_map_values`] for `headers`. The header
+/// key order must survive parse → spec so the `getServerKey` config hash
+/// byte-matches claude-code (see [`traits::McpHeaders`]).
+fn expand_header_values(map: McpHeaders, missing: &mut Vec<String>) -> McpHeaders {
     map.into_iter()
         .map(|(k, v)| {
             let v = expand_field(&v, missing);
@@ -73,7 +85,7 @@ struct McpJsonEntry {
     #[serde(default, rename = "type")]
     transport_type: Option<String>,
     #[serde(default)]
-    headers: HashMap<String, String>,
+    headers: McpHeaders,
     #[serde(default)]
     disabled: bool,
 }
@@ -112,7 +124,7 @@ pub fn parse_mcp_json_string(
             }
         } else if let Some(url) = entry.url {
             let url = expand_field(&url, &mut missing);
-            let headers = expand_map_values(entry.headers, &mut missing);
+            let headers = expand_header_values(entry.headers, &mut missing);
             match entry.transport_type.as_deref() {
                 Some("sse") => McpTransportSpec::Sse {
                     url,
@@ -325,6 +337,35 @@ mod tests {
             }
             other => panic!("expected Http, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn headers_preserve_config_insertion_order_for_server_key() {
+        // Two headers declared Z-then-A (NON-alphabetical). The parsed spec
+        // must keep that order so `oauth::server_key` byte-matches claude-code's
+        // insertion-order `JSON.stringify` (see oauth::tests). A sorted map
+        // would reorder to A,Z and diverge.
+        let raw = r#"{
+          "mcpServers": {
+            "ordered": {
+              "url": "https://mcp.example.com/v1",
+              "type": "http",
+              "headers": { "Z-Header": "z", "A-Header": "a" }
+            }
+          }
+        }"#;
+        let cfgs = parse_mcp_json_string(raw, ConfigScope::Project).unwrap();
+        match &cfgs[0].spec {
+            McpTransportSpec::Http { headers, .. } => {
+                let order: Vec<&str> = headers.keys().map(String::as_str).collect();
+                assert_eq!(order, vec!["Z-Header", "A-Header"], "insertion order kept");
+            }
+            other => panic!("expected Http, got {other:?}"),
+        }
+        // End-to-end: the server key matches the pinned insertion-order
+        // reference hash (Node-computed in oauth::tests), NOT the sorted one.
+        let key = crate::oauth::server_key("ordered", &cfgs[0].spec);
+        assert_eq!(key, "ordered|b555b45e666ffa13");
     }
 
     #[test]

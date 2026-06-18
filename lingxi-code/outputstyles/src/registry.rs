@@ -165,6 +165,12 @@ impl OutputStyleRegistry {
         self.styles.insert(style.name.clone(), style);
     }
 
+    /// Look up a registered style by name.
+    #[must_use]
+    pub fn get(&self, name: &str) -> Option<&OutputStyle> {
+        self.styles.get(name)
+    }
+
     /// Register a batch of styles owned by `plugin_id`.
     pub fn register_plugin_styles(&mut self, plugin_id: PluginId, styles: Vec<OutputStyle>) {
         let names: Vec<String> = styles.iter().map(|s| s.name.clone()).collect();

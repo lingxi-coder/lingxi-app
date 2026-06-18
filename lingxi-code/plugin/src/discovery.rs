@@ -291,15 +291,20 @@ async fn load_plugin_from_path(plugin_dir: &Path) -> Option<(PluginId, PluginMan
 }
 
 /// Auto-detect the component directories of a plugin (Step 3 of
-/// `createPluginFromPath`): each of `commands/`, `agents/`, `skills/`,
-/// `output-styles/` is globbed for `*.md` when present, and the standard
-/// `hooks/hooks.json` is parsed when present.
+/// `createPluginFromPath`): `commands/`, `agents/`, `output-styles/` are
+/// globbed for `*.md` when present; `skills/` uses the `<name>/SKILL.md`
+/// one-level layout (`validatePlugin.ts:731-739`); the standard
+/// `hooks/hooks.json` is parsed when present; and MCP / LSP server configs are
+/// read from the plugin-root `.mcp.json` / `.lsp.json` files
+/// (`mcpPluginIntegration.ts:137`, `lspPluginIntegration.ts:64`).
 async fn detect_components(plugin_dir: &Path) -> PluginComponents {
     let commands = glob_md(&plugin_dir.join("commands")).await;
     let agents = glob_md(&plugin_dir.join("agents")).await;
-    let skills = glob_md(&plugin_dir.join("skills")).await;
+    let skills = glob_skill_dirs(&plugin_dir.join("skills")).await;
     let output_styles = glob_md(&plugin_dir.join("output-styles")).await;
     let hooks = load_standard_hooks(plugin_dir).await;
+    let mcp_servers = load_mcp_servers(plugin_dir).await;
+    let lsp_servers = load_lsp_servers(plugin_dir).await;
 
     PluginComponents {
         commands,
@@ -307,9 +312,93 @@ async fn detect_components(plugin_dir: &Path) -> PluginComponents {
         skills,
         output_styles,
         hooks,
-        mcp_servers: HashMap::new(),
-        lsp_servers: HashMap::new(),
+        mcp_servers,
+        lsp_servers,
     }
+}
+
+/// Collect plugin skills using claude-code's `<name>/SKILL.md` layout: descend
+/// ONE level into `skills/` and collect each subdirectory's `SKILL.md`
+/// (`validatePlugin.ts:735-739` — single `.md` files directly in `skills/` are
+/// NOT loaded, and a subdir without a `SKILL.md` is skipped). Sorted by path
+/// for deterministic ordering; a missing `skills/` dir yields an empty vec.
+async fn glob_skill_dirs(skills_dir: &Path) -> Vec<ComponentPath> {
+    let mut out = Vec::new();
+    let Ok(mut entries) = tokio::fs::read_dir(skills_dir).await else {
+        return out;
+    };
+    while let Ok(Some(entry)) = entries.next_entry().await {
+        if !entry.file_type().await.map(|t| t.is_dir()).unwrap_or(false) {
+            continue;
+        }
+        let skill_md = entry.path().join("SKILL.md");
+        if tokio::fs::try_exists(&skill_md).await.unwrap_or(false) {
+            out.push(ComponentPath {
+                path: skill_md,
+                metadata: None,
+            });
+        }
+    }
+    out.sort_by(|a, b| a.path.cmp(&b.path));
+    out
+}
+
+/// Read the plugin-root `.mcp.json` into `{ server name → McpServerConfig }`.
+///
+/// Mirrors `loadPluginMcpServers` (`mcpPluginIntegration.ts:137`): the file is
+/// the standard `.mcp.json` shape `{ "mcpServers": { … } }` (the bare-map
+/// fallback `parsed.mcpServers || parsed` is handled by the shared parser only
+/// for the wrapped form; we accept the wrapped form here, which matches the
+/// fixture and the common path). A missing / malformed file yields an empty
+/// map (non-fatal — claude-code logs and continues). Manifest-declared
+/// `mcpServers` is NOT read here (residual: `RawManifest` doesn't carry it).
+async fn load_mcp_servers(plugin_dir: &Path) -> HashMap<String, mcp::McpServerConfig> {
+    let path = plugin_dir.join(".mcp.json");
+    let Ok(raw) = tokio::fs::read_to_string(&path).await else {
+        return HashMap::new();
+    };
+    // Plugin MCP servers are dynamic-scoped (`addPluginScopeToServers` uses
+    // `scope: 'dynamic'`, `mcpPluginIntegration.ts:353`).
+    match mcp::parse_mcp_json_string(&raw, mcp::ConfigScope::Dynamic) {
+        Ok(configs) => configs
+            .into_iter()
+            .map(|c| (c.name.clone(), c))
+            .collect(),
+        Err(e) => {
+            tracing::warn!(error = %e, path = %path.display(), "skipping malformed plugin .mcp.json");
+            HashMap::new()
+        }
+    }
+}
+
+/// Read the plugin-root `.lsp.json` into `{ server name → LspServerConfig }`.
+///
+/// Mirrors `loadPluginLspServers` (`lspPluginIntegration.ts:64`): the file is a
+/// `Record<name, LspServerConfig>`. The record key is the server name; if an
+/// entry omits its own `name`, the key is stamped onto the config (the
+/// registry keys by `config.name`). A missing / malformed file yields an empty
+/// map. Manifest-declared `lspServers` is NOT read here (residual).
+async fn load_lsp_servers(plugin_dir: &Path) -> HashMap<String, traits::LspServerConfig> {
+    let path = plugin_dir.join(".lsp.json");
+    let Ok(raw) = tokio::fs::read_to_string(&path).await else {
+        return HashMap::new();
+    };
+    let parsed: HashMap<String, traits::LspServerConfig> = match serde_json::from_str(&raw) {
+        Ok(m) => m,
+        Err(e) => {
+            tracing::warn!(error = %e, path = %path.display(), "skipping malformed plugin .lsp.json");
+            return HashMap::new();
+        }
+    };
+    parsed
+        .into_iter()
+        .map(|(key, mut cfg)| {
+            if cfg.name.is_empty() {
+                cfg.name.clone_from(&key);
+            }
+            (cfg.name.clone(), cfg)
+        })
+        .collect()
 }
 
 /// Collect every `*.md` file directly under `dir` as a [`ComponentPath`],

@@ -35,7 +35,16 @@ pub async fn migrate_changelog_from_config(env: &MigrationEnv) {
             .await
         {
             use tokio::io::AsyncWriteExt;
-            let _ = f.write_all(changelog.as_bytes()).await;
+            if f.write_all(changelog.as_bytes()).await.is_ok() {
+                // Flush + fsync before the handle drops. Tokio's `File`
+                // defers the durable write to a background flush on drop,
+                // which races a synchronous read-back (e.g. under parallel
+                // test load): the reader can observe an empty file. Make
+                // the write durable here so the data is on disk before the
+                // function returns and `f` is dropped.
+                let _ = f.flush().await;
+                let _ = f.sync_all().await;
+            }
         }
     }
 

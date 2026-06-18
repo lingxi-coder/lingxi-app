@@ -11,6 +11,7 @@ use crate::hook_dispatch::HookDispatcher;
 use crate::normalization::normalize_name_for_mcp;
 use crate::oauth::{self, OnAuthorizationUrl};
 use crate::raw_conn::RawConnectionProvider;
+use indexmap::IndexMap;
 use protocol::{AgentId, McpConnectionId};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -118,7 +119,13 @@ pub struct McpRegistry {
     /// builtin MCP tools (`MCPTool`, `ListMcpResourcesTool`,
     /// `ReadMcpResourceTool`) can dispatch through the wire-locked
     /// client surface (in particular, `McpClientError::Timeout`).
-    clients: RwLock<HashMap<String, Arc<McpClient>>>,
+    ///
+    /// Insertion-ordered ([`IndexMap`]) so [`Self::servers_with_tools`] returns
+    /// server names in DISCOVERY order — claude builds `serversWithTools` by
+    /// iterating `appState.mcp.tools` in order with no sort
+    /// (`AgentTool.tsx:394-405`). A plain `HashMap` would make the required-MCP
+    /// gate error text non-deterministic.
+    clients: RwLock<IndexMap<String, Arc<McpClient>>>,
     /// Per-agent connection scoping (subagent isolation).
     #[allow(dead_code)] // populated by `register_for_agent` in Plan 13
     agent_scoped: RwLock<HashMap<AgentId, HashMap<String, McpConnectionId>>>,
@@ -166,7 +173,7 @@ impl McpRegistry {
     pub fn new(transport: Arc<dyn McpTransport>) -> Self {
         Self {
             connections: RwLock::new(HashMap::new()),
-            clients: RwLock::new(HashMap::new()),
+            clients: RwLock::new(IndexMap::new()),
             agent_scoped: RwLock::new(HashMap::new()),
             transport,
             raw_conn: None,
@@ -995,8 +1002,9 @@ impl McpRegistry {
             self.transport.disconnect(connection_id).await?;
             // Drop any cached `McpClient` so `get_client(name)` stops returning
             // a handle to the now-dead connection (registered under the raw
-            // `config.name` in `connect`).
-            self.clients.write().await.remove(name);
+            // `config.name` in `connect`). `shift_remove` preserves the
+            // insertion order of the remaining entries (discovery order).
+            self.clients.write().await.shift_remove(name);
             // Token revocation (RFC 7009) on the disconnect/logout path
             // (auth.ts `revokeServerTokens`). Best-effort: discover the AS
             // revocation_endpoint and POST a revoke for the refresh then access
@@ -1038,6 +1046,42 @@ impl McpRegistry {
             })
             .collect();
         out.sort_by(|a, b| a.name.cmp(&b.name));
+        out
+    }
+
+    /// The set of MCP server names that currently expose at least one tool —
+    /// i.e. servers that are connected AND authenticated (an unauthenticated
+    /// server has no tools). Port of claude-code's `serversWithTools` derivation
+    /// in `AgentTool.call` (`AgentTool.tsx:394-405`): claude scans
+    /// `appState.mcp.tools` for `mcp__<server>__<tool>` and collects the distinct
+    /// `<server>` part. Here we ask each registered [`McpClient`] for its tools
+    /// and extract the server segment from each tool's `full_name`
+    /// (`mcp__<server>__<tool>`), so a server with zero tools (e.g. still
+    /// awaiting OAuth) is correctly absent.
+    ///
+    /// Used by `AgentTool`'s pre-spawn `required_mcp_servers` gate
+    /// (`AgentTool.tsx:367-409`). Returned list is in DISCOVERY (insertion)
+    /// order and deduplicated — claude builds `serversWithTools` by iterating
+    /// `appState.mcp.tools` in order and pushing first-seen server names, with
+    /// NO sort, so the required-MCP error lists servers in that same order.
+    pub async fn servers_with_tools(&self) -> Vec<String> {
+        let clients: Vec<Arc<McpClient>> = self.clients.read().await.values().cloned().collect();
+        let mut out: Vec<String> = Vec::new();
+        for client in clients {
+            let Ok(tools) = client.list_tools().await else {
+                continue;
+            };
+            for tool in tools {
+                // `full_name` is `mcp__<server>__<tool>` (rewrite site in
+                // `connect`); the server segment is index 1.
+                let parts: Vec<&str> = tool.full_name.split("__").collect();
+                if let Some(server) = parts.get(1) {
+                    if !server.is_empty() && !out.iter().any(|s| s == server) {
+                        out.push((*server).to_string());
+                    }
+                }
+            }
+        }
         out
     }
 }
@@ -1725,6 +1769,14 @@ mod snapshot_tests {
     async fn snapshot_empty_registry() {
         let r = McpRegistry::new(Arc::new(StubTransport));
         assert_eq!(r.snapshot().await, Vec::<McpServerInfo>::new());
+    }
+
+    #[tokio::test]
+    async fn servers_with_tools_empty_when_no_clients() {
+        // No registered clients (e.g. a server still connecting / awaiting OAuth
+        // exposes no tools) → empty. Used by AgentTool's required-MCP gate.
+        let r = McpRegistry::new(Arc::new(StubTransport));
+        assert!(r.servers_with_tools().await.is_empty());
     }
 
     #[tokio::test]

@@ -41,11 +41,34 @@ pub struct MockSpawnInvocation {
 pub struct MockSubagentSpawner {
     invocations: Mutex<Vec<MockSpawnInvocation>>,
     response: Mutex<MockSpawnResponse>,
+    /// `required_mcp_servers` surfaced from `resolve_required_mcp_servers` (the
+    /// `#G3` pre-spawn MCP gate). Default empty (no requirement).
+    required_mcp_servers: Mutex<Vec<String>>,
+    /// Optional scripted `SelectedAgentMeta` for `resolve_selection` (G11 — the
+    /// `tengu_agent_tool_selected` event). `None` ⇒ the default minimal meta.
+    selection: Mutex<Option<traits::subagent_spawn::SelectedAgentMeta>>,
+    /// Captured `register_name(name, agent_id)` calls (G14) so tests can assert
+    /// that a name-carrying spawn registered the mapping.
+    registered_names: Mutex<Vec<(String, protocol::AgentId)>>,
 }
 
 #[derive(Clone)]
 enum MockSpawnResponse {
     Completed,
+    /// A completed result with caller-supplied claude `content` (the runner's
+    /// terminal result JSON), usage, and result-level totals — used by the `#3`
+    /// return-shape / `model_content` golden tests.
+    CompletedWith {
+        agent_id: protocol::AgentId,
+        content: serde_json::Value,
+        usage: SubagentUsage,
+        total_tool_use_count: u64,
+        total_duration_ms: u64,
+        total_tokens: u64,
+        assistant_message_count: u64,
+        response_char_count: u64,
+        last_request_id: Option<String>,
+    },
     Failed(String),
     Killed,
 }
@@ -57,12 +80,87 @@ impl MockSubagentSpawner {
         Self {
             invocations: Mutex::new(Vec::new()),
             response: Mutex::new(MockSpawnResponse::Completed),
+            required_mcp_servers: Mutex::new(Vec::new()),
+            selection: Mutex::new(None),
+            registered_names: Mutex::new(Vec::new()),
         }
+    }
+
+    /// Script the `SelectedAgentMeta` the next `resolve_selection` returns (G11).
+    pub fn script_selection(&self, meta: traits::subagent_spawn::SelectedAgentMeta) {
+        *self.selection.lock().unwrap() = Some(meta);
+    }
+
+    /// Drain and return the captured `register_name` calls (G14).
+    #[must_use]
+    pub fn registered_names(&self) -> Vec<(String, protocol::AgentId)> {
+        self.registered_names.lock().unwrap().clone()
+    }
+
+    /// Script the `required_mcp_servers` the next `resolve_required_mcp_servers`
+    /// returns (the `#G3` pre-spawn MCP gate).
+    pub fn script_required_mcp_servers(&self, servers: Vec<String>) {
+        *self.required_mcp_servers.lock().unwrap() = servers;
     }
 
     /// Force the next (and subsequent) spawns to fail.
     pub fn script_failed(&self, reason: impl Into<String>) {
         *self.response.lock().unwrap() = MockSpawnResponse::Failed(reason.into());
+    }
+
+    /// Script a fully-specified completed result (claude `content` JSON, usage,
+    /// totals) so `AgentTool::call` builds its real result shape + `model_content`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn script_completed_with(
+        &self,
+        agent_id: protocol::AgentId,
+        content: serde_json::Value,
+        usage: SubagentUsage,
+        total_tool_use_count: u64,
+        total_duration_ms: u64,
+        total_tokens: u64,
+    ) {
+        *self.response.lock().unwrap() = MockSpawnResponse::CompletedWith {
+            agent_id,
+            content,
+            usage,
+            total_tool_use_count,
+            total_duration_ms,
+            total_tokens,
+            assistant_message_count: 0,
+            response_char_count: 0,
+            last_request_id: None,
+        };
+    }
+
+    /// Script a completed result additionally carrying the G11 completed-event
+    /// rollups (`assistant_message_count` / `response_char_count` /
+    /// `last_request_id`) so the `tengu_agent_tool_completed` /
+    /// `tengu_cache_eviction_hint` emit tests can drive them.
+    #[allow(clippy::too_many_arguments)]
+    pub fn script_completed_full(
+        &self,
+        agent_id: protocol::AgentId,
+        content: serde_json::Value,
+        usage: SubagentUsage,
+        total_tool_use_count: u64,
+        total_duration_ms: u64,
+        total_tokens: u64,
+        assistant_message_count: u64,
+        response_char_count: u64,
+        last_request_id: Option<String>,
+    ) {
+        *self.response.lock().unwrap() = MockSpawnResponse::CompletedWith {
+            agent_id,
+            content,
+            usage,
+            total_tool_use_count,
+            total_duration_ms,
+            total_tokens,
+            assistant_message_count,
+            response_char_count,
+            last_request_id,
+        };
     }
 
     /// Force spawns to return Killed.
@@ -96,17 +194,55 @@ impl SubagentSpawner for MockSubagentSpawner {
         });
         let resp = self.response.lock().unwrap().clone();
         Ok(match resp {
+            // Mock: no real child exists, so a fresh AgentId is acceptable HERE.
             MockSpawnResponse::Completed => SubagentResult::Completed {
+                agent_id: protocol::AgentId::new(),
                 content: json!({ "mock": true }),
                 usage: SubagentUsage::default(),
+                total_tool_use_count: 0,
+                total_duration_ms: 0,
+                total_tokens: 0,
+                assistant_message_count: 0,
+                response_char_count: 0,
+                last_request_id: None,
             },
-            MockSpawnResponse::Failed(reason) => SubagentResult::Failed { reason },
-            MockSpawnResponse::Killed => SubagentResult::Killed,
+            MockSpawnResponse::CompletedWith {
+                agent_id,
+                content,
+                usage,
+                total_tool_use_count,
+                total_duration_ms,
+                total_tokens,
+                assistant_message_count,
+                response_char_count,
+                last_request_id,
+            } => SubagentResult::Completed {
+                agent_id,
+                content,
+                usage,
+                total_tool_use_count,
+                total_duration_ms,
+                total_tokens,
+                assistant_message_count,
+                response_char_count,
+                last_request_id,
+            },
+            MockSpawnResponse::Failed(reason) => SubagentResult::Failed {
+                agent_id: protocol::AgentId::new(),
+                reason,
+            },
+            MockSpawnResponse::Killed => SubagentResult::Killed {
+                agent_id: protocol::AgentId::new(),
+            },
         })
     }
 
     /// Fixed catalog so the dynamic-prompt test can assert `formatAgentLine`
-    /// output. Mirrors the shape the production spawner surfaces (built-ins).
+    /// output AND the `#1` explicit-unknown gate (`AgentTool::call` validates an
+    /// explicit `subagent_type` against this listing). Mirrors the shape the
+    /// production spawner surfaces (built-ins). `Plan` is included so the
+    /// budget-gate test (which spawns `Plan`) clears the type validation that now
+    /// precedes the budget gate.
     async fn agent_listing(&self) -> Vec<SubagentListingEntry> {
         vec![
             SubagentListingEntry {
@@ -119,7 +255,52 @@ impl SubagentSpawner for MockSubagentSpawner {
                 when_to_use: "search".into(),
                 tools_description: "All tools except Edit".into(),
             },
+            SubagentListingEntry {
+                agent_type: "Plan".into(),
+                when_to_use: "plan a task".into(),
+                tools_description: "All tools except Edit".into(),
+            },
         ]
+    }
+
+    /// Surface the scripted `required_mcp_servers` (default empty — built-ins
+    /// declare none). Drives the `#G3` pre-spawn MCP gate in `AgentTool::call`.
+    async fn resolve_required_mcp_servers(&self, _subagent_type: &str) -> Vec<String> {
+        self.required_mcp_servers.lock().unwrap().clone()
+    }
+
+    /// Surface the scripted `SelectedAgentMeta` (G11). When none is scripted,
+    /// echo the `subagent_type` (the trait default shape) so the
+    /// `tengu_agent_tool_selected` emit still has an `agent_type`.
+    async fn resolve_selection(
+        &self,
+        subagent_type: &str,
+        _model: Option<&str>,
+    ) -> traits::subagent_spawn::SelectedAgentMeta {
+        self.selection.lock().unwrap().clone().unwrap_or(
+            traits::subagent_spawn::SelectedAgentMeta {
+                agent_type: subagent_type.to_string(),
+                ..traits::subagent_spawn::SelectedAgentMeta::default()
+            },
+        )
+    }
+
+    /// Capture `register_name` calls (G14) so tests can assert the registration.
+    async fn register_name(&self, name: &str, agent_id: protocol::AgentId) {
+        self.registered_names
+            .lock()
+            .unwrap()
+            .push((name.to_string(), agent_id));
+    }
+
+    async fn resolve_name(&self, name: &str) -> Option<protocol::AgentId> {
+        self.registered_names
+            .lock()
+            .unwrap()
+            .iter()
+            .rev()
+            .find(|(n, _)| n == name)
+            .map(|(_, id)| *id)
     }
 }
 

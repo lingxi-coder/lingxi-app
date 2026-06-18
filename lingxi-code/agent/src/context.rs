@@ -9,7 +9,7 @@
 use crate::definition::AgentDefinition;
 use crate::display::AgentDisplay;
 use memory::snapshot::AgentMemorySnapshot;
-use protocol::{AgentId, ConversationMessage, McpConnectionId};
+use protocol::{AgentId, ConversationMessage, McpConnectionId, SessionId};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -131,4 +131,27 @@ pub struct SubagentContext {
     /// budget-exhausted terminal when the cumulative cost is over the limit.
     /// `None` disables budget enforcement (legacy/test contexts).
     pub budget: Option<Arc<dyn traits::budget::BudgetEnforcerHandle>>,
+    /// Hook executor the runner fires `SubagentStart` through to collect the
+    /// hooks' `additionalContexts` and inject them into the child's initial
+    /// messages (claude `runAgent.ts:530-555`), and to register/clear the
+    /// agent's frontmatter hooks scoped to this `agent_id` (Stop→SubagentStop,
+    /// `runAgent.ts:557-575`). The SAME `Arc<HookExecutorImpl>` the orchestrator
+    /// fires its other hooks through (engine-desktop fills it post-construction
+    /// via the spawner's set-once cell). `None` (tests / minimal builds) ⇒ the
+    /// runner skips SubagentStart firing + frontmatter-hook registration, keeping
+    /// the child's history byte-identical to legacy.
+    pub hook_executor: Option<Arc<hooks::HookExecutorImpl>>,
+    /// Skill loader the runner uses to preload the agent definition's
+    /// frontmatter `skills:` into the child's initial messages (claude
+    /// `runAgent.ts:577-646`). A leaf-trait seam (see [`traits::skill_loader`])
+    /// so the agent crate avoids a cycle into the command/skill registry. `None`
+    /// ⇒ no skill preloading (byte-identical legacy).
+    pub skill_loader: Option<Arc<dyn traits::skill_loader::SkillLoader>>,
+    /// Session id stamped on the `HookContext` the runner builds for the
+    /// SubagentStart fire + frontmatter-hook registration (the orchestrator's
+    /// session). Only consulted when [`Self::hook_executor`] is `Some`.
+    pub hook_session_id: SessionId,
+    /// Engine cwd stamped on that `HookContext`. Only consulted when
+    /// [`Self::hook_executor`] is `Some`.
+    pub hook_cwd: PathBuf,
 }

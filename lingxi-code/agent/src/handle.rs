@@ -17,6 +17,7 @@ use crate::context::SubagentContext;
 use crate::definition::{
     AgentDefinition, AgentModel, AgentPermissionMode, AgentSource, AgentToolPolicy,
 };
+use permission::PermissionMode;
 use crate::display::{AgentColor, AgentDisplay};
 use crate::pool::StateMachinePool;
 use crate::runner::SubagentEvent;
@@ -66,9 +67,12 @@ pub struct PoolSubagentSpawner {
     /// [`AgentToolPolicy`], serializing the result into
     /// [`SubagentContext::tool_schemas`] (advertised) and recording the resolved
     /// names into [`SubagentContext::allowed_tools`] (the runner's dispatch
-    /// allow-list). For today's hardcoded `AgentToolPolicy::All` default this is
-    /// the full set (no filtering); it auto-narrows once the spawn path loads
-    /// real per-agent definitions.
+    /// allow-list). Even under `AgentToolPolicy::All` the resolver strips the
+    /// always-disallowed agent-tool set (`Agent`/`TaskOutput`/`ExitPlanMode`/
+    /// `EnterPlanMode`/`AskUserQuestion`/`TaskStop`, gated by `USER_TYPE !==
+    /// 'ant'`) plus the definition's own `disallowed_tools`, so a
+    /// general-purpose child no longer inherits `Agent`/`Task`; it narrows
+    /// further once the spawn path loads real per-agent definitions.
     tool_registry: Arc<std::sync::OnceLock<Arc<ToolRegistry>>>,
     /// The 6 built-in subagent definitions, keyed by `agent_type`. Built once
     /// in [`Self::new`] from [`builtin_agent_definitions`]. The spawn path
@@ -90,6 +94,54 @@ pub struct PoolSubagentSpawner {
     /// tests) leaves the definition's model string RAW (legacy behavior: the
     /// runner's `resolve_model` emits `Inherit`→`"inherit"` / the bare alias).
     default_model: Option<String>,
+    /// Live/boot permission-mode anchor threaded into
+    /// [`crate::model_resolution::resolve_agent_model`] so an `AgentModel::Inherit`
+    /// spawn gets the plan-mode runtime resolution (`opusplan`→Opus / `haiku`→
+    /// Sonnet) when `permission_mode == Plan`. Default `PermissionMode::Default`
+    /// (the common case → the Inherit branch returns the parent model unchanged,
+    /// byte-identical to before this seam).
+    permission_mode: PermissionMode,
+    /// RAW user model setting string (mirrors claude-code
+    /// `getUserSpecifiedModelSetting()`, e.g. `"opusplan"` / `"haiku"` / `None`)
+    /// — NOT the resolved id. Used ONLY for the opusplan/haiku plan-mode runtime
+    /// resolution in [`crate::model_resolution::resolve_agent_model`]. Without it
+    /// (the default) the Inherit branch returns the parent model unchanged
+    /// (faithful: a non-opusplan setting never triggers the plan-mode swap).
+    model_setting: Option<String>,
+    /// Hook executor handed to every child runner via
+    /// [`SubagentContext::hook_executor`] so the runner can fire `SubagentStart`
+    /// (collecting + injecting the hooks' `additionalContexts`, claude
+    /// runAgent.ts:530-555) and register/clear the agent's frontmatter hooks
+    /// (Stop→SubagentStop, runAgent.ts:557-575). A SET-ONCE cell mirroring
+    /// [`Self::tool_registry`]: the executor is built AFTER the spawner is boxed
+    /// (it consumes the spawner via `with_agent_spawner`), so the boot path grabs
+    /// [`Self::hook_executor_handle`] before boxing and fills it once the executor
+    /// exists. Unfilled (the default / tests) ⇒ the child runner skips the
+    /// SubagentStart fire + frontmatter-hook registration (byte-identical legacy).
+    hook_executor: Arc<std::sync::OnceLock<Arc<hooks::HookExecutorImpl>>>,
+    /// Skill loader handed to every child runner via
+    /// [`SubagentContext::skill_loader`] so the runner can preload the agent
+    /// definition's frontmatter `skills:` (claude runAgent.ts:577-646). A leaf
+    /// trait ([`traits::skill_loader::SkillLoader`]) so the agent crate avoids a
+    /// cycle into the command/skill registry; the concrete impl is built at the
+    /// composition root. SET-ONCE cell (same cycle-break as the others). Unfilled
+    /// ⇒ no skill preloading (byte-identical legacy).
+    skill_loader: Arc<std::sync::OnceLock<Arc<dyn traits::skill_loader::SkillLoader>>>,
+    /// Session id stamped on the `HookContext` the child runner builds for the
+    /// SubagentStart fire (claude `createBaseHookInput`). Set at boot via
+    /// [`Self::with_hook_context`]; defaults to a nil session (only consulted when
+    /// [`Self::hook_executor`] is filled).
+    hook_session_id: protocol::SessionId,
+    /// Engine cwd stamped on that `HookContext`. Set at boot via
+    /// [`Self::with_hook_context`]; defaults to an empty path.
+    hook_cwd: std::path::PathBuf,
+    /// G14: name → child agent-id registry for `SendMessage` routing of spawned
+    /// ASYNC subagents (claude `AppState.agentNameRegistry`, AgentTool.tsx:704-711).
+    /// `AgentTool` calls [`SubagentSpawner::register_name`] after a successful
+    /// async spawn that carried a `name`; a `SendMessage({ to: name })` resolver
+    /// reads it via [`SubagentSpawner::resolve_name`]. Shared `Arc` so the same
+    /// map is visible across spawner clones. Sync agents are NOT registered.
+    name_registry: Arc<RwLock<HashMap<String, AgentId>>>,
 }
 
 impl PoolSubagentSpawner {
@@ -109,6 +161,13 @@ impl PoolSubagentSpawner {
             builtins: Arc::new(builtins),
             agent_catalog: Arc::new(std::sync::OnceLock::new()),
             default_model: None,
+            permission_mode: PermissionMode::Default,
+            model_setting: None,
+            hook_executor: Arc::new(std::sync::OnceLock::new()),
+            skill_loader: Arc::new(std::sync::OnceLock::new()),
+            hook_session_id: protocol::SessionId::nil(),
+            hook_cwd: std::path::PathBuf::new(),
+            name_registry: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -122,11 +181,86 @@ impl PoolSubagentSpawner {
         self
     }
 
+    /// Builder: set the live/boot permission-mode anchor threaded into
+    /// `resolve_agent_model` (so an `AgentModel::Inherit` spawn gets the plan-mode
+    /// runtime resolution `opusplan`→Opus / `haiku`→Sonnet when in plan mode).
+    /// Without it the default (`PermissionMode::Default`) keeps the Inherit branch
+    /// returning the parent model unchanged.
+    #[must_use]
+    pub fn with_permission_mode(mut self, mode: PermissionMode) -> Self {
+        self.permission_mode = mode;
+        self
+    }
+
+    /// Builder: set the RAW user model setting string (mirrors claude-code
+    /// `getUserSpecifiedModelSetting()`, e.g. `"opusplan"` / `"haiku"`). Used ONLY
+    /// for the opusplan/haiku plan-mode runtime resolution; without it the Inherit
+    /// branch returns the parent model unchanged (a non-opusplan setting never
+    /// triggers the plan-mode swap).
+    #[must_use]
+    pub fn with_model_setting(mut self, setting: impl Into<String>) -> Self {
+        self.model_setting = Some(setting.into());
+        self
+    }
+
     /// Builder: attach the model API seam the child runner uses to drive the
     /// real multi-turn loop. Without this, `spawn` produces stub completions.
     #[must_use]
     pub fn with_api_client(mut self, api_client: Arc<dyn SubagentApiClient>) -> Self {
         self.api_client = Some(api_client);
+        self
+    }
+
+    /// Builder: set the hook executor immediately (use when it is available at
+    /// construction — tests). The boot path instead uses
+    /// [`Self::hook_executor_handle`] to fill the cell later (the executor
+    /// consumes the spawner, so it does not exist at construction). See the field
+    /// doc. Threaded onto every child via [`SubagentContext::hook_executor`].
+    #[must_use]
+    pub fn with_hook_executor(self, executor: Arc<hooks::HookExecutorImpl>) -> Self {
+        let _ = self.hook_executor.set(executor);
+        self
+    }
+
+    /// Return a clone of the set-once hook-executor cell so the host can fill it
+    /// AFTER the executor is built (breaking the construction cycle, exactly like
+    /// [`Self::tool_registry_handle`]). First fill wins; later fills are no-ops.
+    #[must_use]
+    pub fn hook_executor_handle(&self) -> Arc<std::sync::OnceLock<Arc<hooks::HookExecutorImpl>>> {
+        self.hook_executor.clone()
+    }
+
+    /// Builder: set the skill loader immediately (tests). The boot path uses
+    /// [`Self::skill_loader_handle`] to fill it later. Threaded onto every child
+    /// via [`SubagentContext::skill_loader`].
+    #[must_use]
+    pub fn with_skill_loader(self, loader: Arc<dyn traits::skill_loader::SkillLoader>) -> Self {
+        let _ = self.skill_loader.set(loader);
+        self
+    }
+
+    /// Return a clone of the set-once skill-loader cell so the host can fill it
+    /// AFTER the concrete loader is built (same cycle-break as the others). First
+    /// fill wins.
+    #[must_use]
+    pub fn skill_loader_handle(
+        &self,
+    ) -> Arc<std::sync::OnceLock<Arc<dyn traits::skill_loader::SkillLoader>>> {
+        self.skill_loader.clone()
+    }
+
+    /// Builder: set the session id + cwd stamped on the `HookContext` the child
+    /// runner builds for the SubagentStart fire. Without it the defaults
+    /// (nil session / empty cwd) are used — only consulted when a hook executor
+    /// is wired.
+    #[must_use]
+    pub fn with_hook_context(
+        mut self,
+        session_id: protocol::SessionId,
+        cwd: std::path::PathBuf,
+    ) -> Self {
+        self.hook_session_id = session_id;
+        self.hook_cwd = cwd;
         self
     }
 
@@ -188,6 +322,8 @@ impl PoolSubagentSpawner {
             def.model = AgentModel::Explicit(crate::model_resolution::resolve_agent_model(
                 &def.model,
                 parent_model,
+                self.permission_mode,
+                self.model_setting.as_deref(),
             ));
         }
         def
@@ -197,9 +333,26 @@ impl PoolSubagentSpawner {
     ///
     /// Precedence (claude-code parity — later wins): file catalog
     /// (user/project) overrides built-ins. An unknown type defaults to
-    /// `general-purpose` (claude-code's `effectiveType ?? GENERAL_PURPOSE`); a
-    /// last-resort all-tools stub covers the impossible empty-built-ins case.
+    /// `general-purpose`; a last-resort all-tools stub covers the impossible
+    /// empty-built-ins case.
+    ///
+    /// NOTE: in claude-code the unknown→general-purpose fallback only fires when
+    /// `subagent_type` is OMITTED (`effectiveType ?? GENERAL_PURPOSE`,
+    /// AgentTool.tsx:322); an EXPLICIT unknown type throws `Agent type 'x' not
+    /// found`. That distinction is enforced UPSTREAM in `AgentTool::call`
+    /// (tools/agent), which validates an explicit type against `agent_listing()`
+    /// before spawning, so this method only ever receives an omitted (→
+    /// general-purpose) or a resolvable type from the tool path. Internal
+    /// callers that bypass the tool still get the permissive fallback.
     async fn lookup_definition(&self, subagent_type: &str) -> AgentDefinition {
+        // 0. Fork path (codex #5): the synthetic FORK_AGENT is resolved FIRST,
+        // unconditionally, so a user agent literally named "fork" cannot shadow
+        // it (claude uses the synthetic FORK_AGENT on the fork path, never the
+        // catalog — forkSubagent.ts:60-71 / AgentTool.tsx:335). It is NOT in the
+        // 6-element built-in vec (claude does not register it in builtInAgents).
+        if subagent_type == traits::fork_subagent::FORK_SUBAGENT_TYPE {
+            return crate::builtins::fork_agent_definition();
+        }
         // 1. File catalog (user/project) wins on collision.
         if let Some(catalog) = self.agent_catalog.get() {
             if let Some(def) = catalog
@@ -246,6 +399,16 @@ impl PoolSubagentSpawner {
             icon: None,
             allowed_tools: vec![],
             worktree_requirement: None,
+            // Defensive stub: no extended frontmatter — all defaults.
+            disallowed_tools: vec![],
+            skills: vec![],
+            required_mcp_servers: vec![],
+            background: false,
+            isolation: None,
+            memory: None,
+            effort: None,
+            initial_prompt: None,
+            color: None,
         }
     }
 
@@ -325,24 +488,58 @@ impl PoolSubagentSpawner {
 - For clear communication with the user the assistant MUST avoid using emojis.\n\
 - Do not use a colon before tool calls. Text like \"Let me read the file:\" followed by a read tool call should just be \"Let me read the file.\" with a period.";
 
-    fn make_subagent_context(def: AgentDefinition, prompt: &str) -> SubagentContext {
-        // claude-code renders the subagent system prompt as the agent body
-        // followed by the env-details trailer (see `SUBAGENT_NOTES_TRAILER`).
-        // Append the `Notes:` trailer after the body, joined by a blank line
-        // (the codebase section separator, matching orchestrator's
-        // `SECTION_SEP`). A `None` body stays `None` (no body, no trailer) —
-        // the existing "definition without a body" semantic is preserved.
-        let rendered_system_prompt: Option<Arc<str>> = def.system_prompt.as_deref().map(|body| {
-            Arc::from(format!("{body}\n\n{}", Self::SUBAGENT_NOTES_TRAILER))
-        });
+    /// Build the child context from a RESOLVED [`AgentDefinition`] + the
+    /// caller's task prompt, plus the optional fork carriers.
+    ///
+    /// Non-fork path (`fork_*` both `None`): the agent body becomes the system
+    /// prompt with the appended `Notes:` trailer, and the task `prompt` is the
+    /// first (and only) user message — byte-identical to before codex #5.
+    ///
+    /// Fork path (codex #5):
+    /// - `fork_parent_system_prompt = Some` → use the parent's already-rendered
+    ///   bytes VERBATIM as the system prompt and SKIP the `Notes:` trailer
+    ///   (re-appending it would bust the prompt cache; claude passes
+    ///   `override.systemPrompt` verbatim with no
+    ///   `enhanceSystemPromptWithEnvDetails`, AgentTool.tsx:622-623).
+    /// - `fork_context_messages = Some` → seed `ctx.fork_context_messages` with
+    ///   the byte-exact forked prefix and leave `prompt_messages` EMPTY (the
+    ///   directive is already the trailing Text block inside that prefix, built
+    ///   by `build_forked_messages`; `runner.rs` replays
+    ///   `fork_context_messages ++ prompt_messages`, so `[]` prompt_messages
+    ///   yields exactly the forked prefix — AgentTool.tsx:630 / spec note (A)).
+    fn make_subagent_context(
+        def: AgentDefinition,
+        prompt: &str,
+        fork_context_messages: Option<Vec<ConversationMessage>>,
+        fork_parent_system_prompt: Option<String>,
+    ) -> SubagentContext {
+        // System prompt: fork path uses the parent's rendered bytes verbatim
+        // (no trailer); non-fork path = agent body + the `Notes:` trailer
+        // (claude `enhanceSystemPromptWithEnvDetails`). A `None` body on the
+        // non-fork path stays `None` (no body, no trailer).
+        let rendered_system_prompt: Option<Arc<str>> = match &fork_parent_system_prompt {
+            Some(parent) => Some(Arc::from(parent.as_str())),
+            None => def
+                .system_prompt
+                .as_deref()
+                .map(|body| Arc::from(format!("{body}\n\n{}", Self::SUBAGENT_NOTES_TRAILER))),
+        };
+        // Fork path seeds prompt_messages EMPTY (the directive lives in the fork
+        // prefix); non-fork path seeds it with the task prompt user message.
+        let is_fork = fork_context_messages.is_some();
+        let prompt_messages = if is_fork {
+            vec![]
+        } else {
+            vec![ConversationMessage::user(MessageId::new(), prompt.to_string())]
+        };
         SubagentContext {
             agent_id: AgentId::new(),
             parent_agent_id: None,
             agent_name: None,
             team_name: None,
             agent_definition: def,
-            prompt_messages: vec![ConversationMessage::user(MessageId::new(), prompt.to_string())],
-            fork_context_messages: None,
+            prompt_messages,
+            fork_context_messages,
             allowed_tools: vec![],
             worktree_handle: None,
             is_async: false,
@@ -365,6 +562,13 @@ impl PoolSubagentSpawner {
             tool_invoker: None,
             tool_schemas: vec![],
             budget: None,
+            // Filled by `spawn` from the set-once `hook_executor` / `skill_loader`
+            // cells (None when unfilled — tests / minimal builds). `hook_session_id`
+            // / `hook_cwd` carry the boot-set values.
+            hook_executor: None,
+            skill_loader: None,
+            hook_session_id: protocol::SessionId::nil(),
+            hook_cwd: std::path::PathBuf::new(),
         }
     }
 
@@ -470,7 +674,12 @@ impl SubagentSpawner for PoolSubagentSpawner {
             let requested = AgentModel::Alias(model_pref.to_string());
             def.model = match &self.default_model {
                 Some(parent) => AgentModel::Explicit(
-                    crate::model_resolution::resolve_agent_model(&requested, parent),
+                    crate::model_resolution::resolve_agent_model(
+                        &requested,
+                        parent,
+                        self.permission_mode,
+                        self.model_setting.as_deref(),
+                    ),
                 ),
                 None => requested,
             };
@@ -481,13 +690,31 @@ impl SubagentSpawner for PoolSubagentSpawner {
         // isolation, and per-agent cwd override are separate features whose
         // wiring lands with the multi-agent + worktree spawn paths. They are
         // intentionally not faked here.
-        let mut ctx = Self::make_subagent_context(def, &request.prompt);
+        // Fork carriers (codex #5): on the fork path `AgentTool` ships the
+        // byte-exact forked prefix in `fork_context_messages` (the directive is
+        // already its trailing Text block, so `request.prompt` is unused as a
+        // seed) and the parent's rendered system prompt in
+        // `fork_parent_system_prompt`. Both `None` for every non-fork spawn →
+        // byte-identical legacy behavior.
+        let mut ctx = Self::make_subagent_context(
+            def,
+            &request.prompt,
+            request.fork_context_messages.clone(),
+            request.fork_parent_system_prompt.clone(),
+        );
         // Hand the child the parent's tool invoker, the parent's budget
         // enforcer, and our model API seam so the runner can drive the real
         // multi-turn loop and enforce the inherited budget per turn.
         ctx.tool_invoker = Some(inherit.tool_invoker);
         ctx.budget = Some(inherit.budget);
         ctx.api_client.clone_from(&self.api_client);
+        // G4/G5: thread the runner's hook executor + skill loader + hook context
+        // seed from the set-once cells (None when unfilled → the runner skips
+        // SubagentStart firing / frontmatter-hook registration / skill preload).
+        ctx.hook_executor = self.hook_executor.get().cloned();
+        ctx.skill_loader = self.skill_loader.get().cloned();
+        ctx.hook_session_id = self.hook_session_id;
+        ctx.hook_cwd = self.hook_cwd.clone();
         // Resolve THIS spawn's advertised tools + dispatch allow-list from the
         // live registry per the child's policy (unset registry → no tools).
         // Populating `allowed_tools` here ACTIVATES the runner's dispatch guard
@@ -512,21 +739,83 @@ impl SubagentSpawner for PoolSubagentSpawner {
         // the terminal Completed/Failed/Killed.
         let result = loop {
             match rx.recv().await {
-                Some(SubagentEvent::Completed { result, .. }) => {
+                Some(SubagentEvent::Completed {
+                    agent_id: child_id,
+                    result,
+                    usage,
+                    total_tool_use_count,
+                    total_duration_ms,
+                    assistant_message_count,
+                    last_request_id,
+                }) => {
+                    // Translate the wire usage into the trait rollup. claude
+                    // `getTokenCountFromUsage` = input + cache_creation + cache_read
+                    // + output of the FINAL turn's usage (tokens.ts:46-54); the
+                    // runner already carries that final usage (no cross-turn sum).
+                    let bt = usage.billable_tokens;
+                    let total_tokens = bt
+                        .input
+                        .saturating_add(bt.cache_write)
+                        .saturating_add(bt.cache_read)
+                        .saturating_add(bt.output);
+                    // claude `response_char_count: content.length`
+                    // (agentToolUtils.ts:328) — despite the name, this is the
+                    // NUMBER of text BLOCKS in the final response (`content` is the
+                    // `[{type:'text', text}]` array; `.length` is its element
+                    // count), NOT a summed character count. Count the text blocks
+                    // from the runner's `content` array to match byte-for-byte.
+                    let response_char_count = result
+                        .get("content")
+                        .and_then(serde_json::Value::as_array)
+                        .map(|arr| {
+                            arr.iter()
+                                .filter(|b| {
+                                    b.get("type").and_then(serde_json::Value::as_str)
+                                        == Some("text")
+                                })
+                                .count() as u64
+                        })
+                        .unwrap_or(0);
                     break SubagentResult::Completed {
+                        agent_id: child_id,
                         content: result,
-                        usage: SubagentUsage::default(),
+                        usage: SubagentUsage {
+                            total_tokens,
+                            input_tokens: bt.input,
+                            output_tokens: bt.output,
+                            cache_creation_input_tokens: bt.cache_write,
+                            cache_read_input_tokens: bt.cache_read,
+                        },
+                        total_tool_use_count,
+                        total_duration_ms,
+                        total_tokens,
+                        assistant_message_count,
+                        response_char_count,
+                        last_request_id,
                     };
                 }
-                Some(SubagentEvent::Failed { error, .. }) => {
-                    break SubagentResult::Failed { reason: error };
+                Some(SubagentEvent::Failed {
+                    agent_id: child_id,
+                    error,
+                }) => {
+                    break SubagentResult::Failed {
+                        agent_id: child_id,
+                        reason: error,
+                    };
                 }
-                Some(SubagentEvent::Killed { .. }) => {
-                    break SubagentResult::Killed;
+                Some(SubagentEvent::Killed {
+                    agent_id: child_id,
+                }) => {
+                    break SubagentResult::Killed {
+                        agent_id: child_id,
+                    };
                 }
                 Some(_) => continue,
                 None => {
+                    // No terminal event ever arrived; fall back to the bound
+                    // ctx agent_id (still the REAL child id, never a fresh one).
                     break SubagentResult::Failed {
+                        agent_id,
                         reason: "subagent channel closed unexpectedly".into(),
                     };
                 }
@@ -544,6 +833,91 @@ impl SubagentSpawner for PoolSubagentSpawner {
     /// [`Self::listing_entries`].
     async fn agent_listing(&self) -> Vec<SubagentListingEntry> {
         self.listing_entries().await
+    }
+
+    /// Resolve the `required_mcp_servers` declared by `subagent_type`'s
+    /// definition (claude-code `AgentDefinition.requiredMcpServers`) so
+    /// `AgentTool` can run the pre-spawn MCP-servers gate. Resolves the same
+    /// definition `spawn` would (file catalog overrides built-ins; unknown →
+    /// general-purpose) and returns its `required_mcp_servers` (built-ins
+    /// declare none → empty → gate skipped). Skips the model resolution
+    /// `resolve_definition` does — only the MCP-requirements field is needed.
+    async fn resolve_required_mcp_servers(&self, subagent_type: &str) -> Vec<String> {
+        self.lookup_definition(subagent_type)
+            .await
+            .required_mcp_servers
+    }
+
+    /// G11: surface the pre-spawn selection metadata for the
+    /// `tengu_agent_tool_selected` event (claude `AgentTool.tsx:419-428`):
+    /// resolve the definition, map its [`AgentSource`] to claude's source string,
+    /// resolve the concrete model (honoring the caller's optional `model`
+    /// family override), pull the `color`, and flag `is_built_in`.
+    async fn resolve_selection(
+        &self,
+        subagent_type: &str,
+        model: Option<&str>,
+    ) -> traits::subagent_spawn::SelectedAgentMeta {
+        let def = self.lookup_definition(subagent_type).await;
+        // claude `getAgentModel(selectedAgent.model, mainLoopModel, model,
+        // permissionMode)` (AgentTool.tsx:418): the caller's `model` override
+        // takes precedence over the definition's model frontmatter. Resolve to a
+        // concrete id when a parent/main-loop model is wired; without one the
+        // resolved id is left empty (no default to anchor against).
+        let resolved_model = match &self.default_model {
+            Some(parent) => {
+                let pref = match model {
+                    Some(m) => AgentModel::Alias(m.to_string()),
+                    None => def.model.clone(),
+                };
+                crate::model_resolution::resolve_agent_model(
+                    &pref,
+                    parent,
+                    self.permission_mode,
+                    self.model_setting.as_deref(),
+                )
+            }
+            None => String::new(),
+        };
+        traits::subagent_spawn::SelectedAgentMeta {
+            agent_type: def.agent_type.clone(),
+            resolved_model,
+            source: agent_source_to_claude_str(def.source).to_string(),
+            color: def.color.clone(),
+            is_built_in: matches!(def.source, AgentSource::BuiltIn),
+            // claude `selectedAgent.background` (AgentTool.tsx:426): the
+            // definition's `background` frontmatter flag, folded into `is_async`.
+            background: def.background,
+        }
+    }
+
+    /// G14: register `name → child agent-id` for `SendMessage` routing of a
+    /// spawned ASYNC subagent (claude `agentNameRegistry.set`, AgentTool.tsx:706).
+    async fn register_name(&self, name: &str, agent_id: AgentId) {
+        self.name_registry
+            .write()
+            .await
+            .insert(name.to_string(), agent_id);
+    }
+
+    /// G14: resolve a previously-registered async-agent name to its child id.
+    async fn resolve_name(&self, name: &str) -> Option<AgentId> {
+        self.name_registry.read().await.get(name).copied()
+    }
+}
+
+/// Map a LingXi [`AgentSource`] to claude-code's `selectedAgent.source` literal
+/// (`SettingSource` ∪ `'built-in'` / `'plugin'`, loadAgentsDir.ts:137/156 +
+/// settings/constants.ts:7-21). Used by [`PoolSubagentSpawner::resolve_selection`]
+/// to emit `tengu_agent_tool_selected`'s `source` field byte-faithfully.
+fn agent_source_to_claude_str(source: AgentSource) -> &'static str {
+    match source {
+        AgentSource::BuiltIn => "built-in",
+        AgentSource::Plugin => "plugin",
+        AgentSource::UserDefined => "userSettings",
+        AgentSource::Project => "projectSettings",
+        AgentSource::PolicySettings => "policySettings",
+        AgentSource::Flag => "flagSettings",
     }
 }
 
@@ -682,6 +1056,15 @@ mod tests {
             icon: None,
             allowed_tools: vec![],
             worktree_requirement: None,
+            disallowed_tools: vec![],
+            skills: vec![],
+            required_mcp_servers: vec![],
+            background: false,
+            isolation: None,
+            memory: None,
+            effort: None,
+            initial_prompt: None,
+            color: None,
         }
     }
 
@@ -748,7 +1131,8 @@ mod tests {
                 use_exact_tools: true,
             }))
             .await;
-        // Full set (sorted by name), and allow-list = resolved names.
+        // Full set, and allow-list = resolved names — both in the faithful
+        // `assembleToolPool` order (builtins sorted by name).
         let names: Vec<&str> = schemas.iter().map(|t| t["name"].as_str().unwrap()).collect();
         assert_eq!(names, vec!["Bash", "Read"]);
         // allow-list mirrors the resolved order, which now follows
@@ -777,12 +1161,14 @@ mod tests {
     async fn resolve_tools_includes_aliases_in_allow_list() {
         // The dispatch allow-list must accept every name the inherited invoker's
         // `find_by_name` accepts — including aliases — or a `tool_use` for a
-        // legacy alias (e.g. AgentTool's "Task") would be wrongly refused by the
-        // runner guard. Advertised schemas stay canonical-name-only.
+        // legacy alias would be wrongly refused by the runner guard. Advertised
+        // schemas stay canonical-name-only. Re-based on a benign tool (Bash /
+        // alias Shell) because "Agent" is now stripped by the always-disallowed
+        // default drop (see `resolve_tools_strips_agent_by_default`).
         let mut reg = ToolRegistry::new();
         reg.register_builtin(Arc::new(StubTool {
-            name: "Agent",
-            aliases: &["Task"],
+            name: "Bash",
+            aliases: &["Shell"],
         }));
         let runtime = Arc::new(MockRuntimeSpawner::default());
         let pool = Arc::new(StateMachinePool::new(runtime, 4));
@@ -795,9 +1181,58 @@ mod tests {
             .await;
         // Advertised: canonical name only.
         let names: Vec<&str> = schemas.iter().map(|t| t["name"].as_str().unwrap()).collect();
-        assert_eq!(names, vec!["Agent"]);
-        // Allow-list: canonical name AND the legacy alias.
-        assert_eq!(allowed, vec!["Agent".to_string(), "Task".to_string()]);
+        assert_eq!(names, vec!["Bash"]);
+        // Allow-list: canonical name AND the alias.
+        assert_eq!(allowed, vec!["Bash".to_string(), "Shell".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn resolve_tools_strips_agent_by_default() {
+        // The always-disallowed default drop (claude ALL_AGENT_DISALLOWED_TOOLS
+        // / filterToolsForAgent) removes the Agent tool from every subagent
+        // pool when USER_TYPE !== 'ant' — even under the All policy. With ONLY
+        // an Agent tool registered the resolved pool is empty.
+        let mut reg = ToolRegistry::new();
+        reg.register_builtin(Arc::new(StubTool {
+            name: "Agent",
+            aliases: &["Task"],
+        }));
+        let runtime = Arc::new(MockRuntimeSpawner::default());
+        let pool = Arc::new(StateMachinePool::new(runtime, 4));
+        let spawner = PoolSubagentSpawner::new(pool).with_tool_registry(Arc::new(reg));
+
+        let (schemas, allowed) = spawner
+            .resolve_tools(&agent_def(AgentToolPolicy::All {
+                // use_exact_tools: false → the always-disallowed strip applies.
+                // (The `true` / fork path BYPASSES this strip — see the
+                // tool_resolver `use_exact_tools_*` tests.)
+                use_exact_tools: false,
+            }))
+            .await;
+        assert!(schemas.is_empty(), "Agent must be stripped → no schemas");
+        assert!(allowed.is_empty(), "Agent (and alias Task) stripped → empty allow-list");
+    }
+
+    #[tokio::test]
+    async fn resolve_tools_all_policy_drops_agent() {
+        // End-to-end: the always-disallowed strip flows through resolve_tools →
+        // tool_schemas + allowed_tools. Agent is dropped, Bash+Read survive in
+        // the assembleToolPool/localeCompare-sorted order.
+        let runtime = Arc::new(MockRuntimeSpawner::default());
+        let pool = Arc::new(StateMachinePool::new(runtime, 4));
+        let spawner = PoolSubagentSpawner::new(pool)
+            .with_tool_registry(registry_with(&["Agent", "Bash", "Read"]));
+
+        let (schemas, allowed) = spawner
+            .resolve_tools(&agent_def(AgentToolPolicy::All {
+                // use_exact_tools: false → the always-disallowed strip applies
+                // (the fork/`true` path keeps Agent — tool_resolver bypass test).
+                use_exact_tools: false,
+            }))
+            .await;
+        let names: Vec<&str> = schemas.iter().map(|t| t["name"].as_str().unwrap()).collect();
+        assert_eq!(names, vec!["Bash", "Read"]);
+        assert_eq!(allowed, vec!["Bash".to_string(), "Read".to_string()]);
     }
 
     #[tokio::test]
@@ -812,7 +1247,9 @@ mod tests {
         // dispatch allow-list — `Bash` is dropped from both.
         let (schemas, allowed) = spawner
             .resolve_tools(&agent_def_plan(AgentToolPolicy::All {
-                use_exact_tools: true,
+                // use_exact_tools: false → Plan-mode narrowing applies (the
+                // fork/`true` path bypasses it — tool_resolver bypass test).
+                use_exact_tools: false,
             }))
             .await;
         let names: Vec<&str> = schemas.iter().map(|t| t["name"].as_str().unwrap()).collect();
@@ -938,7 +1375,7 @@ mod tests {
                 use_exact_tools: false,
             })
         };
-        let ctx = PoolSubagentSpawner::make_subagent_context(def, "do the task");
+        let ctx = PoolSubagentSpawner::make_subagent_context(def, "do the task", None, None);
         // Def body -> system prompt, with the appended `Notes:` env-details
         // trailer (claude-code `enhanceSystemPromptWithEnvDetails`). The body
         // stays first, joined to the trailer by a blank line.
@@ -967,7 +1404,7 @@ mod tests {
                 use_exact_tools: false,
             })
         };
-        let ctx = PoolSubagentSpawner::make_subagent_context(def, "task");
+        let ctx = PoolSubagentSpawner::make_subagent_context(def, "task", None, None);
         let sys = ctx.rendered_system_prompt.as_deref().unwrap();
         // Body first, trailer joined by a blank line; whole string is exactly
         // `body \n\n trailer`.
@@ -1004,9 +1441,82 @@ mod tests {
                 use_exact_tools: false,
             })
         };
-        let ctx = PoolSubagentSpawner::make_subagent_context(def, "task");
+        let ctx = PoolSubagentSpawner::make_subagent_context(def, "task", None, None);
         assert!(ctx.rendered_system_prompt.is_none());
         assert_eq!(ctx.prompt_messages[0].text_content(), "task");
+    }
+
+    // ── codex #5: fork-subagent resolution + context ──
+
+    #[tokio::test]
+    async fn lookup_definition_resolves_fork_synthetic_agent() {
+        // subagent_type "fork" resolves to the synthetic FORK_AGENT, NOT a
+        // catalog/general-purpose lookup — even when a catalog agent is named
+        // "fork" (the synthetic one wins unconditionally).
+        let runtime = Arc::new(MockRuntimeSpawner::default());
+        let pool = Arc::new(StateMachinePool::new(runtime, 4));
+        let shadow = AgentDefinition {
+            agent_type: "fork".to_string(),
+            when_to_use: "user shadow".to_string(),
+            ..agent_def(AgentToolPolicy::Explicit(vec!["Read".to_string()]))
+        };
+        let catalog = Arc::new(RwLock::new(vec![shadow]));
+        let spawner = PoolSubagentSpawner::new(pool).with_agent_catalog(catalog);
+        let def = spawner.lookup_definition("fork").await;
+        assert_eq!(def.agent_type, "fork");
+        // Synthetic, not the catalog shadow.
+        assert!(matches!(
+            def.tools,
+            AgentToolPolicy::All { use_exact_tools: true }
+        ));
+        assert_eq!(def.max_turns, 200);
+        assert!(matches!(def.permission_mode, AgentPermissionMode::Bubble));
+    }
+
+    #[test]
+    fn make_subagent_context_fork_parent_prompt_skips_notes_trailer() {
+        // fork_parent_system_prompt → rendered_system_prompt is the parent's
+        // bytes VERBATIM, with NO `Notes:` trailer (re-appending busts cache).
+        let def = crate::builtins::fork_agent_definition();
+        let parent_prompt = "PARENT SYSTEM PROMPT BYTES\n\n<env>cwd: /x</env>".to_string();
+        let ctx = PoolSubagentSpawner::make_subagent_context(
+            def,
+            "unused directive",
+            Some(vec![ConversationMessage::user(
+                MessageId::new(),
+                "prefix".to_string(),
+            )]),
+            Some(parent_prompt.clone()),
+        );
+        let sys = ctx.rendered_system_prompt.as_deref().unwrap();
+        assert_eq!(sys, parent_prompt);
+        assert!(!sys.contains("Notes:"), "fork must NOT append the Notes trailer");
+    }
+
+    #[test]
+    fn make_subagent_context_fork_seeds_prefix_and_empty_prompt_messages() {
+        // fork_context_messages → ctx.fork_context_messages, prompt_messages = [].
+        let def = crate::builtins::fork_agent_definition();
+        let prefix = vec![
+            ConversationMessage::Assistant {
+                id: MessageId::new(),
+                content: vec![protocol::ContentBlock::Text {
+                    text: "assistant turn".to_string(),
+                }],
+                stop_reason: Some("tool_use".to_string()),
+            },
+            ConversationMessage::user(MessageId::new(), "directive prefix".to_string()),
+        ];
+        let ctx = PoolSubagentSpawner::make_subagent_context(
+            def,
+            "unused",
+            Some(prefix.clone()),
+            Some("parent sys".to_string()),
+        );
+        assert!(ctx.prompt_messages.is_empty(), "fork seeds empty prompt_messages");
+        let fc = ctx.fork_context_messages.expect("fork_context_messages set");
+        assert_eq!(fc.len(), 2);
+        // runner replays fork_context_messages ++ prompt_messages = the prefix.
     }
 
     #[tokio::test]
@@ -1128,11 +1638,14 @@ mod tests {
             context_paths: vec![],
             description: None,
             model: Some("haiku".to_string()),
+            run_in_background: false,
             name: None,
             team_name: None,
             mode: None,
             isolation: None,
             cwd: None,
+            fork_context_messages: None,
+            fork_parent_system_prompt: None,
         };
         // Drive resolve_definition + the override branch directly by replicating
         // the spawn-path logic (spawn() would require a live runner).
@@ -1142,12 +1655,52 @@ mod tests {
             def.model = AgentModel::Explicit(crate::model_resolution::resolve_agent_model(
                 &requested,
                 "claude-opus-4-7",
+                permission::PermissionMode::Default,
+                None,
             ));
         }
         assert!(matches!(&def.model, AgentModel::Explicit(m) if m == "claude-haiku-4-5"));
         // Sanity: the request struct carries the rest of the parity params.
         req.name = Some("scout".into());
         assert_eq!(req.name.as_deref(), Some("scout"));
+    }
+
+    #[tokio::test]
+    async fn resolve_required_mcp_servers_builtins_are_empty() {
+        // Built-ins declare no required MCP servers → the spawner surfaces an
+        // empty list (gate skipped). G3/C2.
+        let runtime = Arc::new(MockRuntimeSpawner::default());
+        let pool = Arc::new(StateMachinePool::new(runtime, 4));
+        let spawner = PoolSubagentSpawner::new(pool);
+        assert!(spawner
+            .resolve_required_mcp_servers("general-purpose")
+            .await
+            .is_empty());
+        // Unknown → general-purpose fallback → also empty.
+        assert!(spawner
+            .resolve_required_mcp_servers("no-such-agent")
+            .await
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn resolve_required_mcp_servers_reads_catalog_definition() {
+        // A catalog agent that DECLARES required_mcp_servers surfaces them.
+        let runtime = Arc::new(MockRuntimeSpawner::default());
+        let pool = Arc::new(StateMachinePool::new(runtime, 4));
+        let custom = AgentDefinition {
+            agent_type: "needs-github".to_string(),
+            required_mcp_servers: vec!["github".to_string()],
+            ..agent_def(AgentToolPolicy::All {
+                use_exact_tools: false,
+            })
+        };
+        let catalog = Arc::new(RwLock::new(vec![custom]));
+        let spawner = PoolSubagentSpawner::new(pool).with_agent_catalog(catalog);
+        assert_eq!(
+            spawner.resolve_required_mcp_servers("needs-github").await,
+            vec!["github".to_string()]
+        );
     }
 
     #[test]
@@ -1162,5 +1715,101 @@ mod tests {
         let cloned = inherit.clone();
         assert!(Arc::ptr_eq(&inherit.tool_invoker, &cloned.tool_invoker));
         assert!(Arc::ptr_eq(&inherit.budget, &cloned.budget));
+    }
+
+    // ── G11: resolve_selection source mapping + model resolution ──
+
+    #[test]
+    fn agent_source_to_claude_str_byte_locked() {
+        // claude SettingSource literals + 'built-in'/'plugin' (loadAgentsDir.ts
+        // + settings/constants.ts).
+        assert_eq!(agent_source_to_claude_str(AgentSource::BuiltIn), "built-in");
+        assert_eq!(agent_source_to_claude_str(AgentSource::Plugin), "plugin");
+        assert_eq!(
+            agent_source_to_claude_str(AgentSource::UserDefined),
+            "userSettings"
+        );
+        assert_eq!(
+            agent_source_to_claude_str(AgentSource::Project),
+            "projectSettings"
+        );
+        assert_eq!(
+            agent_source_to_claude_str(AgentSource::PolicySettings),
+            "policySettings"
+        );
+        assert_eq!(agent_source_to_claude_str(AgentSource::Flag), "flagSettings");
+    }
+
+    #[tokio::test]
+    async fn resolve_selection_builtin_is_built_in_and_source() {
+        let runtime = Arc::new(MockRuntimeSpawner::default());
+        let pool = Arc::new(StateMachinePool::new(runtime, 4));
+        let spawner = PoolSubagentSpawner::new(pool);
+        let meta = spawner.resolve_selection("Explore", None).await;
+        assert_eq!(meta.agent_type, "Explore");
+        assert_eq!(meta.source, "built-in");
+        assert!(meta.is_built_in);
+    }
+
+    #[tokio::test]
+    async fn resolve_selection_catalog_project_source_mapped() {
+        let runtime = Arc::new(MockRuntimeSpawner::default());
+        let pool = Arc::new(StateMachinePool::new(runtime, 4));
+        let mut def = agent_def(AgentToolPolicy::All {
+            use_exact_tools: false,
+        });
+        def.agent_type = "proj-agent".into();
+        def.source = AgentSource::Project;
+        def.color = Some("green".into());
+        let catalog = Arc::new(RwLock::new(vec![def]));
+        let spawner = PoolSubagentSpawner::new(pool).with_agent_catalog(catalog);
+        let meta = spawner.resolve_selection("proj-agent", None).await;
+        assert_eq!(meta.source, "projectSettings");
+        assert!(!meta.is_built_in);
+        assert_eq!(meta.color.as_deref(), Some("green"));
+    }
+
+    // ── G14: name → agent-id registry round-trip ──
+
+    #[tokio::test]
+    async fn register_name_resolve_round_trip() {
+        let runtime = Arc::new(MockRuntimeSpawner::default());
+        let pool = Arc::new(StateMachinePool::new(runtime, 4));
+        let spawner = PoolSubagentSpawner::new(pool);
+        let id = AgentId::new();
+        assert_eq!(spawner.resolve_name("worker-x").await, None);
+        spawner.register_name("worker-x", id).await;
+        assert_eq!(spawner.resolve_name("worker-x").await, Some(id));
+    }
+
+    // ── #2/G13: spawn_async default surfaces a clear error (unwired) ──
+
+    #[tokio::test]
+    async fn spawn_async_default_returns_internal_error() {
+        let runtime = Arc::new(MockRuntimeSpawner::default());
+        let pool = Arc::new(StateMachinePool::new(runtime, 4));
+        let spawner = PoolSubagentSpawner::new(pool);
+        let invoker: Arc<dyn ToolInvoker> = Arc::new(DummyInvoker);
+        let budget: Arc<dyn BudgetEnforcerHandle> = Arc::new(DummyBudget);
+        let req = SubagentSpawnRequest {
+            subagent_type: "general-purpose".into(),
+            prompt: "go".into(),
+            context_paths: vec![],
+            description: None,
+            model: None,
+            run_in_background: true,
+            name: None,
+            team_name: None,
+            mode: None,
+            isolation: None,
+            cwd: None,
+            fork_context_messages: None,
+            fork_parent_system_prompt: None,
+        };
+        let err = spawner
+            .spawn_async(req, SubagentInheritance { tool_invoker: invoker, budget })
+            .await
+            .expect_err("default spawn_async is unwired → clear error");
+        assert!(format!("{err}").contains("not wired"));
     }
 }

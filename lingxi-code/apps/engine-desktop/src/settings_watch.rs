@@ -77,10 +77,22 @@ impl ConfigChangeFirer for orchestrator::ConversationOrchestrator {
     }
 }
 
+/// Env override that relocates the managed (policy) settings root. The real
+/// managed path is an absolute, OS-protected directory that tests cannot write;
+/// pointing this at a tempdir lets the managed-tier derivation tests exercise
+/// the loader + precedence fold without root. Unset in production, where the
+/// hardcoded OS path is used (faithful to claude-code's `getManagedFilePath`).
+pub const MANAGED_DIR_ENV: &str = "LINGXI_MANAGED_DIR";
+
 /// The OS-specific managed (policy) settings root, mirroring claude-code's
-/// `getManagedFilePath` (`managedPath.ts`).
+/// `getManagedFilePath` (`managedPath.ts`). Honors the [`MANAGED_DIR_ENV`]
+/// override first (test-only relocation); otherwise returns the hardcoded
+/// OS-specific path.
 #[must_use]
 pub fn managed_settings_dir() -> PathBuf {
+    if let Some(dir) = std::env::var_os(MANAGED_DIR_ENV).filter(|v| !v.is_empty()) {
+        return PathBuf::from(dir);
+    }
     if cfg!(target_os = "macos") {
         PathBuf::from("/Library/Application Support/ClaudeCode")
     } else if cfg!(target_os = "windows") {

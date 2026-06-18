@@ -438,6 +438,10 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
     // compaction inside `call_api_with_ptl_recovery`), BEFORE the assistant reply
     // is appended below. Strict no-op when no cache-safe slot is wired.
     orch.save_cache_safe_params(system, &model).await;
+    // FORK (codex #5 follow-up): record the rendered system prompt this turn
+    // handed the model, so a fork-subagent spawn dispatched below in this same
+    // turn can thread the exact bytes onto its child (cache-identical prefix).
+    orch.save_current_turn_system_prompt(system).await;
 
     // Task 8 (llm-client future-work batch 3): the call succeeded — forward
     // the adapter's unified rate-limit snapshot to the output stream when it
@@ -1045,6 +1049,8 @@ pub(crate) fn translate_response_blocks(content: &[LlmContentBlock]) -> Vec<Cont
             // Low-frequency server-side blocks: PRESERVED verbatim so resume/replay
             // JSONL bytes stay intact when protected-thinking/advisor/connector
             // betas are active (matches agent::runner::translate_response_blocks).
+            // Output-only — claude-code keeps them; non-streaming twin of the
+            // streaming `event_router`.
             LlmContentBlock::RedactedThinking { data } => {
                 Some(ContentBlock::RedactedThinking { data: data.clone() })
             }
@@ -1157,6 +1163,14 @@ pub(crate) async fn dispatch_tool_uses_tracked(
     // `context_modifier: None` (every existing tool + skills WITHOUT a `model:`
     // frontmatter) → the caller does NOTHING → byte-identical.
     let mut context_modifiers: Vec<ContextModifier> = Vec::new();
+    // FORK (codex #5 follow-up): the rendered system prompt this turn handed the
+    // model, recorded by the turn driver after the successful API call. Threaded
+    // onto each tool's `ToolUseContext::fork_parent_system_prompt` so a
+    // fork-subagent spawn (`AgentTool` with no `subagent_type`) can run its child
+    // with a byte-identical system prompt (cache-prefix parity, claude
+    // `AgentTool.tsx:622-623`). `None` until the first successful turn / when the
+    // turn ran with no system prompt — no non-fork tool reads this field.
+    let fork_parent_system_prompt = orch.current_turn_system_prompt().await;
     for (tool_use_id, name, input, provider_id) in tool_uses {
         orch.output.emit_tool_call(tool_use_id, name, input).await;
 
@@ -1252,6 +1266,13 @@ pub(crate) async fn dispatch_tool_uses_tracked(
             // passes `None`). Clone per-tool since this loop may dispatch a
             // batch (the streaming executor calls one-tool-at-a-time).
             cancel: cancel.clone(),
+            // FORK-ONLY: the parent's rendered system prompt for THIS turn (the
+            // bytes the model saw), recorded by the turn driver after the API
+            // call. On the fork path `AgentTool` threads it onto the child's
+            // `SubagentSpawnRequest.fork_parent_system_prompt` for a
+            // byte-identical cache prefix. `None` until the first successful turn
+            // / a turn with no system prompt; no non-fork tool reads it.
+            fork_parent_system_prompt: fork_parent_system_prompt.clone(),
         };
 
         // validate_input gate (claude-code `toolExecution.ts:683-723`): a
@@ -1631,40 +1652,18 @@ pub(crate) async fn dispatch_tool_uses_tracked(
             }
         }
 
-        // SubagentStart hook (parity with claude-code `executeSubagentStartHooks`,
-        // `utils/hooks.ts:3932-3952`, fired from `runAgent.ts:532` just before a
-        // subagent begins). claude-code fires it at the START of a subagent's
-        // run, the counterpart to the `SubagentStop` fired when it ends. The
-        // LingXi port spawns subagents only through the registered,
-        // turn_loop-dispatched `Agent` (legacy alias `Task`) tool, so the start
-        // of that tool's dispatch IS the subagent spawn — we fire it immediately
-        // BEFORE `tool_handle.call()`, after the pre-hook + permission gate have
-        // cleared (a blocked / denied call `continue`s above, so no subagent
-        // spawns and no SubagentStart fires — exactly like the SubagentStop arm).
-        // It carries the dispatched `subagent_type` on the hook context's
-        // `agent_type` (claude-code's `agentType`, also the `matchQuery`) and a
-        // fresh `agent_id` for the wire payload's required field — the Agent tool
-        // discards the child's pool id across the frozen `SubagentSpawner` seam
-        // (same documented limitation as the SubagentStop arm). Best-effort:
-        // `orch.hooks.execute` is a strict no-op when no `SubagentStart` hook is
-        // registered, and a failing hook never breaks the spawn.
-        if name == AGENT_TOOL_NAME || name == LEGACY_AGENT_TOOL_NAME {
-            let subagent_type = effective_input
-                .get("subagent_type")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or_default()
-                .to_string();
-            let start_event = HookEvent::SubagentStart {
-                agent_id: protocol::AgentId::new(),
-                agent_type: subagent_type.clone(),
-                parent_agent_id: None,
-            };
-            let start_ctx = HookContext {
-                agent_type: Some(subagent_type),
-                ..hook_ctx.clone()
-            };
-            let _start_agg = orch.hooks.execute(start_event, start_ctx).await;
-        }
+        // #8 NOTE: the SubagentStart wire-event fire MOVED below — to the
+        // post-`tool_handle.call()` site alongside `SubagentStop`. At this
+        // pre-call point the spawn has not run yet, so the child's REAL pool
+        // `AgentId` does not exist; firing here forced a fresh divergent id.
+        // The Agent tool now surfaces the child id on its result
+        // `data.agentId` (C1 seam: `SubagentResult` carries the real id back),
+        // so BOTH SubagentStart and SubagentStop fire post-call with that one
+        // canonical id — matching claude-code's single `agentId`
+        // (runAgent.ts:347). The fire-only-on-actual-spawn semantics are
+        // preserved: a pre-hook Block / permission denial `continue`s above
+        // before `tool_handle.call()`, so no subagent spawns and neither event
+        // fires.
 
         // One-shot progress channel — receiver dropped immediately.
         let (progress_tx, _progress_rx) =
@@ -1706,8 +1705,14 @@ pub(crate) async fn dispatch_tool_uses_tracked(
                 //   const content = formatError(error)   // bare, from utils/toolErrors.ts
                 // and feeds it raw into tool_result.content (line 1721).
                 // Only pre-execution paths (unknown-tool, schema validation) wrap.
-                let text = format!("Error: {err}");
-                (text, true, serde_json::json!({ "error": format!("{err}") }))
+                //
+                // The model-facing content uses `model_facing_message()` — the
+                // BARE inner message (claude's `error.message`) — NOT the
+                // `Display` form, which would leak a LingXi-internal variant
+                // prefix (`invalid input: ` / `internal: `) into the wire bytes.
+                let bare = err.model_facing_message();
+                let text = format!("Error: {bare}");
+                (text, true, serde_json::json!({ "error": bare }))
             }
         };
 
@@ -1768,6 +1773,23 @@ pub(crate) async fn dispatch_tool_uses_tracked(
         // hook duration bounded by tokio timeout — u128 ms cannot exceed u64::MAX
         #[allow(clippy::cast_possible_truncation)]
         let post_dur_ms = post_started.elapsed().as_millis() as u64;
+
+        // HOOK.1 (additionalContext, PostToolUse twin): a PostToolUse hook's
+        // `additionalContext` is ALSO a separate `hook_additional_context`
+        // attachment in claude-code (`toolHooks.ts:133-143`), injected AFTER the
+        // tool_result — exactly what the injected-messages seam does. The
+        // hookName prefix is `PostToolUse:{tool}`. `systemMessage` stays folded
+        // (handled by `final_content` below); only additionalContext splits out.
+        // Strict no-op when no PostToolUse hook returned additionalContext.
+        for ctx in &post_agg.additional_contexts {
+            let wrapped = format!(
+                "<system-reminder>\nPostToolUse:{name} hook additional context: {ctx}\n</system-reminder>"
+            );
+            injected_messages.push((
+                ConversationMessage::user(MessageId::new(), wrapped),
+                tool_use_id.clone(),
+            ));
+        }
 
         // PostToolUse `updatedMCPToolOutput`: a PostToolUse hook may REPLACE the
         // tool's output (claude-code `parseHookJSONOutput`,
@@ -1878,67 +1900,116 @@ pub(crate) async fn dispatch_tool_uses_tracked(
             );
         }
 
-        // SubagentStop hook (parity with claude-code's `executeStopHooks(…,
-        // subagentId, …)` → `hook_event_name: 'SubagentStop'`,
-        // `utils/hooks.ts:3653-3678`). claude-code fires it from the unified
-        // turn-loop stop chokepoint (`runStopHooks`/`stopHooks.ts`) when a
-        // subagent's query loop ENDS — keyed on `toolUseContext.agentId` being
-        // set. The LingXi port spawns subagents only through the registered,
+        // SubagentStart + SubagentStop hooks (parity with claude-code's
+        // `executeSubagentStartHooks` at `runAgent.ts:532` and
+        // `executeStopHooks(…, subagentId, …)` → `hook_event_name:
+        // 'SubagentStop'`, `utils/hooks.ts:3653-3678`). claude fires BOTH inside
+        // `runAgent` keyed on ONE canonical `agentId` (runAgent.ts:347). The
+        // LingXi port spawns subagents only through the registered,
         // turn_loop-dispatched `Agent` (legacy alias `Task`) tool: a completed
-        // `spawner.spawn()` MEANS the subagent's loop has stopped. So we fire it
-        // here at the spawn-completion site — same TIMING (subagent stopped),
-        // the fire just lives in this orchestrator-side dispatch chokepoint
+        // `spawner.spawn()` MEANS the subagent's loop ran and stopped. So we fire
+        // both here at the spawn-completion site — same observable timing, the
+        // fires just live in this orchestrator-side dispatch chokepoint
         // (alongside `PostToolUse`/`WorktreeCreate`) where `orch.hooks` is
-        // reachable, rather than inside the child runner (which has no hook
-        // seam). The documented minor divergence: it fires at spawn-completion
-        // vs. inside the subagent loop — identical observable timing.
+        // reachable. SubagentStart precedes SubagentStop, matching claude's
+        // start-then-stop ordering.
+        //
+        // #8 (real id): the Agent tool now surfaces the child's REAL pool
+        // `AgentId` on its result `data.agentId` (C1 seam: `SubagentResult`
+        // carries it back; `agent.rs` emits `agentId = agent_id.to_string()`).
+        // We parse it back here so BOTH events fire with the SAME single
+        // canonical id (claude runAgent.ts:347), replacing the two fresh
+        // divergent `AgentId::new()`s the chokepoint used to mint. The failure
+        // path is the single residual: a FAILED spawn returns `ToolError` (no
+        // `data`), so the id cannot be recovered — we fall back to a fresh
+        // `AgentId::new()` there (documented divergence; mitigated only if the
+        // fires move fully into the runner where `ctx.agent_id` is always live).
         //
         // Fires on BOTH a successful AND a failed/killed dispatch: the subagent
-        // always STOPS (claude-code's stop chokepoint runs at the loop's natural
-        // end regardless of outcome). It does NOT fire on a pre-hook Block or a
-        // permission denial — those `continue` above before any spawn, so no
-        // subagent ever ran. Best-effort: `orch.hooks.execute` is a strict
-        // no-op when no `SubagentStop` hook is registered, and a failing hook
-        // never breaks the turn (mirroring the `PostToolUse`/`WorktreeCreate`
-        // arms).
+        // always STARTED and STOPPED (claude-code's chokepoints run at the
+        // loop's natural boundaries regardless of outcome). They do NOT fire on
+        // a pre-hook Block or a permission denial — those `continue` above
+        // before any spawn, so no subagent ever ran. Best-effort:
+        // `orch.hooks.execute` is a strict no-op when no hook is registered, and
+        // a failing hook never breaks the turn.
         //
-        // Wire payload: the executor's `SubagentStop` arm builds the byte-
-        // faithful `SubagentStopHookInput` (`hook_payload.rs` /
-        // `executor.rs:698`). `agent_type` rides on the hook context (the
-        // dispatched `subagent_type`, claude-code's `agentType`); `agent_id` is
-        // the spawn-site `AgentId` (the orchestrator does not receive the
-        // child's pool id back — see note below). `status` is engine-side
-        // metadata (claude-code's `SubagentStop` wire schema has no status
-        // field, mirroring the `Stop` schema it derives from).
+        // SINGLE-FIRE (R7): the real `Agent`/`Task` tool drives a child runner
+        // that ALREADY fires the canonical lifecycle hooks claude fires inside
+        // `runAgent` — `SubagentStart` (session+plugin+frontmatter, general
+        // execute, collecting `additionalContexts` for the child's initial
+        // messages, runAgent.ts:530-555) and the child's OWN frontmatter
+        // `Stop`→`SubagentStop` (agent-scoped, runAgent.ts finally). It marks
+        // that on its success result `data.subagentHooksFired = true`. We read
+        // that flag here to AVOID the historical double-fire:
+        //   • SubagentStart — when the runner fired it, the chokepoint SKIPS its
+        //     own fire entirely (one canonical fire). The runner is the only site
+        //     that can inject the hooks' `additionalContexts` into the child, so
+        //     it MUST be the SubagentStart owner. When the flag is absent
+        //     (FakeAgentTool fixtures = no runner, or a FAILED spawn whose
+        //     `ToolError` carries no `data`), the chokepoint fires it as before.
+        //   • SubagentStop — the runner covers only the child's OWN frontmatter
+        //     SubagentStop, so the chokepoint still fires the COMPLEMENT (session
+        //     / plugin) via `execute_excluding_agent(child_id)`, which omits the
+        //     child's frontmatter bucket so those are not re-fired. This is
+        //     race-free vs. the runner's `clear_agent_hooks` regardless of
+        //     ordering. For FakeAgentTool fixtures (no frontmatter bucket for the
+        //     fake child id) this is byte-identical to the general `execute`.
         if name == AGENT_TOOL_NAME || name == LEGACY_AGENT_TOOL_NAME {
             let subagent_type = effective_input
                 .get("subagent_type")
                 .and_then(serde_json::Value::as_str)
                 .unwrap_or_default()
                 .to_string();
-            let status = if is_error { "failed" } else { "completed" };
-            let sa_event = HookEvent::SubagentStop {
-                // The Agent tool discards the child's pool `AgentId`
-                // (`SubagentResult` carries no id back across the frozen
-                // `SubagentSpawner` seam), so the orchestrator mints a fresh id
-                // for the wire payload's `agent_id` — the field is required by
-                // the claude-code schema but is not asserted against any locked
-                // fixture. (Threading the real child id would require a frozen
-                // `traits/` change to `SubagentResult`; reported as a follow-up.)
-                agent_id: protocol::AgentId::new(),
-                status: status.to_string(),
-            };
+            // #8: recover the REAL child id surfaced on the success result's
+            // `data.agentId`. Absent (the failure path carries `ToolError`, no
+            // `data`) → fresh fallback id, the single residual divergence.
+            let child_id = emit_payload
+                .get("agentId")
+                .and_then(serde_json::Value::as_str)
+                .and_then(protocol::AgentId::parse_prefixed)
+                .unwrap_or_else(protocol::AgentId::new);
+            // R7: did the child runner already fire the canonical SubagentStart
+            // (+ its own frontmatter SubagentStop)? Only the REAL Agent tool sets
+            // this; FakeAgentTool fixtures and the failure path leave it absent.
+            let runner_fired_start = emit_payload
+                .get("subagentHooksFired")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false);
             // Carry the dispatched `subagent_type` as the hook context's
             // `agent_type` so the wire payload's `agent_type` is faithful
-            // (claude-code passes the subagent's `agentType` into
-            // `executeStopHooks`). The session_id / cwd reuse the same context
-            // the pre/post hooks used.
+            // (claude-code passes the subagent's `agentType` into the hooks).
+            // The session_id / cwd reuse the same context the pre/post hooks used.
             let sa_ctx = HookContext {
-                agent_type: Some(subagent_type),
+                agent_type: Some(subagent_type.clone()),
+                agent_id: Some(child_id),
                 ..hook_ctx.clone()
             };
+            // SubagentStart FIRST (claude start-then-stop), with the canonical id.
+            // SKIP when the runner already fired it (no production double-fire).
+            if !runner_fired_start {
+                let start_event = HookEvent::SubagentStart {
+                    agent_id: child_id,
+                    agent_type: subagent_type,
+                    parent_agent_id: None,
+                };
+                let _start_agg = orch.hooks.execute(start_event, sa_ctx.clone()).await;
+            }
+
+            let status = if is_error { "failed" } else { "completed" };
+            let sa_event = HookEvent::SubagentStop {
+                agent_id: child_id,
+                status: status.to_string(),
+            };
             let sa_started = std::time::Instant::now();
-            let _sa_agg = orch.hooks.execute(sa_event, sa_ctx).await;
+            // EXCLUDE the child's own frontmatter bucket — the runner fired those
+            // agent-scoped (claude fires a subagent's stop hooks in-child). This
+            // covers session / plugin SubagentStop without double-firing the
+            // child's frontmatter ones, race-free vs. the runner's
+            // `clear_agent_hooks`.
+            let _sa_agg = orch
+                .hooks
+                .execute_excluding_agent(sa_event, sa_ctx, child_id)
+                .await;
             // hook duration bounded by tokio timeout — u128 ms cannot exceed u64::MAX
             #[allow(clippy::cast_possible_truncation)]
             let sa_dur_ms = sa_started.elapsed().as_millis() as u64;
@@ -1947,8 +2018,9 @@ pub(crate) async fn dispatch_tool_uses_tracked(
             tracing::debug!(
                 tool_name = %name,
                 status,
+                runner_fired_start,
                 duration_ms = sa_dur_ms,
-                "fired SubagentStop hook after Agent/Task tool completed",
+                "fired chokepoint SubagentStart (if runner didn't) + session/plugin SubagentStop after Agent/Task tool completed",
             );
         }
 
@@ -3335,6 +3407,146 @@ mod pre_tool_hook_tests {
         }
     }
 
+    /// FORK (codex #5 follow-up): a tool that records the
+    /// `fork_parent_system_prompt` from the `ToolUseContext` it is dispatched
+    /// with, so a test can assert `dispatch_tool_uses_tracked` threads the
+    /// turn's recorded system prompt onto every tool's context.
+    struct CaptureSystemPromptTool {
+        captured: Arc<std::sync::Mutex<Option<Option<String>>>>,
+    }
+    #[async_trait]
+    impl Tool for CaptureSystemPromptTool {
+        fn name(&self) -> &str {
+            "Capture"
+        }
+        fn input_schema(&self) -> &serde_json::Value {
+            static SCHEMA: once_cell::sync::Lazy<serde_json::Value> =
+                once_cell::sync::Lazy::new(|| json!({ "type": "object", "properties": {} }));
+            &SCHEMA
+        }
+        fn is_enabled(&self, _ctx: &ToolStaticContext) -> bool {
+            true
+        }
+        fn max_result_size_chars(&self) -> usize {
+            1024 * 1024
+        }
+        fn is_concurrency_safe(&self, _input: &serde_json::Value) -> bool {
+            true
+        }
+        fn is_read_only(&self, _input: &serde_json::Value) -> bool {
+            true
+        }
+        async fn validate_input(
+            &self,
+            _input: &serde_json::Value,
+            _ctx: &ToolUseContext,
+        ) -> Result<(), ValidationError> {
+            Ok(())
+        }
+        async fn check_permissions(
+            &self,
+            _input: &serde_json::Value,
+            _ctx: &ToolUseContext,
+        ) -> permission::PermissionResult {
+            permission::PermissionResult::Allow {
+                reason: permission::PermissionDecisionReason::Other {
+                    reason: "test".into(),
+                },
+                updated_input: None,
+                update_destination: None,
+                metadata: permission::result::PermissionMetadata::default(),
+            }
+        }
+        async fn description(
+            &self,
+            _input: &serde_json::Value,
+            _opts: &DescriptionOptions,
+        ) -> String {
+            "capture".into()
+        }
+        async fn prompt(&self, _opts: &PromptOptions) -> String {
+            String::new()
+        }
+        async fn call(
+            &self,
+            _input: serde_json::Value,
+            ctx: ToolUseContext,
+            _tx: ToolProgressSender,
+        ) -> Result<ToolCallResult, ToolError> {
+            *self.captured.lock().unwrap() = Some(ctx.fork_parent_system_prompt.clone());
+            Ok(ToolCallResult {
+                data: json!({ "content": "ok" }),
+                new_messages: vec![],
+                context_modifier: None,
+                mcp_meta: None,
+            })
+        }
+    }
+
+    /// FORK (codex #5 follow-up): after the turn driver records the rendered
+    /// system prompt via `save_current_turn_system_prompt`,
+    /// `dispatch_tool_uses_tracked` must thread those exact bytes onto every
+    /// tool's `ToolUseContext::fork_parent_system_prompt` (the field the fork
+    /// path reads to give the child a byte-identical cache prefix).
+    #[tokio::test]
+    async fn dispatch_threads_recorded_system_prompt_onto_tool_ctx() {
+        let captured = Arc::new(std::sync::Mutex::new(None));
+        let mut registry = ToolRegistry::new();
+        registry.register_builtin(Arc::new(CaptureSystemPromptTool {
+            captured: captured.clone(),
+        }) as Arc<dyn Tool>);
+        let orch = ConversationOrchestrator::new(
+            OrchestratorConfig::default(),
+            Arc::new(MockApiClient::new(vec![])),
+            Arc::new(registry),
+            pre_hook_executor(HookResponse::default()),
+            Arc::new(crate::test_support::NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            PathBuf::from("/tmp"),
+        );
+        let parent_bytes = "PARENT RENDERED SYSTEM PROMPT";
+        orch.save_current_turn_system_prompt(Some(parent_bytes)).await;
+
+        let uses = vec![(ToolUseId::new(), "Capture".to_string(), json!({}), None)];
+        let _ = dispatch_tool_uses_tracked(&orch, &uses, None).await.unwrap();
+
+        let got = captured.lock().unwrap().clone();
+        assert_eq!(
+            got,
+            Some(Some(parent_bytes.to_string())),
+            "tool ctx must carry the turn's recorded system prompt bytes"
+        );
+    }
+
+    /// FORK (codex #5 follow-up): when no system prompt has been recorded (no
+    /// successful turn yet, or a turn with no system prompt), the tool ctx
+    /// carries `None` — the existing non-fork behavior is unchanged.
+    #[tokio::test]
+    async fn dispatch_threads_none_when_no_system_prompt_recorded() {
+        let captured = Arc::new(std::sync::Mutex::new(None));
+        let mut registry = ToolRegistry::new();
+        registry.register_builtin(Arc::new(CaptureSystemPromptTool {
+            captured: captured.clone(),
+        }) as Arc<dyn Tool>);
+        let orch = ConversationOrchestrator::new(
+            OrchestratorConfig::default(),
+            Arc::new(MockApiClient::new(vec![])),
+            Arc::new(registry),
+            pre_hook_executor(HookResponse::default()),
+            Arc::new(crate::test_support::NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            PathBuf::from("/tmp"),
+        );
+
+        let uses = vec![(ToolUseId::new(), "Capture".to_string(), json!({}), None)];
+        let _ = dispatch_tool_uses_tracked(&orch, &uses, None).await.unwrap();
+
+        let got = captured.lock().unwrap().clone();
+        assert_eq!(got, Some(None), "tool ctx must carry None with no recorded prompt");
+    }
+
     /// SKILLEXEC.3 (Part A): a tool that succeeds AND injects a follow-up
     /// conversation message (the Skill-tool shape — `ToolCallResult.new_messages`
     /// carrying the expanded skill prompt). Mirrors `EchoTool` but with a
@@ -4016,13 +4228,16 @@ mod pre_tool_hook_tests {
         assert_eq!(results.len(), 1);
         let (content, is_error) = tool_result(&results[0]);
         assert!(is_error, "a failing tool must set is_error=true");
-        // Exact content: bare "Error: internal: kaboom" — no XML envelope.
-        // claude-code/src/services/tools/toolExecution.ts:1691 passes formatError(error)
-        // RAW into tool_result.content; only unknown-tool and schema-validation paths wrap.
+        // Exact content: bare "Error: kaboom" — no XML envelope AND no
+        // LingXi-internal `ToolError` variant prefix. claude-code's
+        // `toolExecution.ts:1691` passes `formatError(error)` (= `error.message`,
+        // bare) RAW into `tool_result.content`; the model never sees an
+        // `internal: `/`invalid input: ` prefix (that prefix is `Display`-only,
+        // for logging). Only unknown-tool and schema-validation paths wrap.
         assert_eq!(
             content,
-            "Error: internal: kaboom",
-            "tool-execution errors must be BARE (no <tool_use_error> wrapper)"
+            "Error: kaboom",
+            "tool-execution errors must be BARE (no <tool_use_error> wrapper, no variant prefix)"
         );
         assert!(
             !content.contains("<tool_use_error>"),

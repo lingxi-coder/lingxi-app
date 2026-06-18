@@ -77,7 +77,12 @@ pub struct HookContext {
 pub struct HookRegistry {
     sources: HashMap<HookSource, Vec<HookDefinition>>,
     plugin: HashMap<PluginId, Vec<HookDefinition>>,
-    #[allow(dead_code)] // Wired up in Plan 09 with the agent front-matter loader.
+    /// Frontmatter hooks scoped to the agent (claude `addSessionHook` keyed on
+    /// the agent id, registerFrontmatterHooks.ts). Registered by
+    /// [`Self::register_agent_hooks`] when a subagent starts and removed wholesale
+    /// by [`Self::clear_agent_hooks`] when it ends (claude `clearSessionHooks`,
+    /// runAgent.ts finally). Iterated by [`Self::match_event`] / [`Self::has_hooks_for`]
+    /// so an agent's frontmatter hooks actually fire while it runs.
     frontmatter: HashMap<AgentId, Vec<HookDefinition>>,
 }
 
@@ -106,6 +111,53 @@ impl HookRegistry {
     /// Drop every hook owned by `plugin_id` (used when a plugin unloads).
     pub fn unregister_plugin(&mut self, plugin_id: &PluginId) {
         self.plugin.remove(plugin_id);
+    }
+
+    /// Register an agent's frontmatter hooks, scoped to `agent_id` so they fire
+    /// only while that subagent runs and can be cleared wholesale on exit.
+    ///
+    /// Port of claude-code `registerFrontmatterHooks(setAppState, agentId, hooks,
+    /// …, isAgent)` (registerFrontmatterHooks.ts): when `is_agent` is `true`,
+    /// every `Stop` subscription on a hook is retargeted to `SubagentStop` —
+    /// because a subagent's loop end fires `SubagentStop`, not `Stop` (claude
+    /// `executeStopHooks` uses `SubagentStop` when called with an `agentId`). The
+    /// retarget rewrites the hook's `events` in place (a hook may subscribe to
+    /// multiple events; only the `Stop` entry is rewritten, and de-duplicated if
+    /// `SubagentStop` is already present). `is_agent == false` registers the
+    /// hooks verbatim (the skill-frontmatter path, scoped to a session id).
+    pub fn register_agent_hooks(
+        &mut self,
+        agent_id: AgentId,
+        hooks: &[HookDefinition],
+        is_agent: bool,
+    ) {
+        if hooks.is_empty() {
+            return;
+        }
+        let bucket = self.frontmatter.entry(agent_id).or_default();
+        for hook in hooks {
+            let mut hook = hook.clone();
+            if is_agent {
+                for ev in &mut hook.events {
+                    if *ev == crate::events::HookEventType::Stop {
+                        *ev = crate::events::HookEventType::SubagentStop;
+                    }
+                }
+                // De-dup a now-doubled `SubagentStop` (a hook that subscribed to
+                // BOTH Stop and SubagentStop would otherwise list it twice).
+                hook.events.dedup();
+            }
+            bucket.push(hook);
+        }
+    }
+
+    /// Remove every frontmatter hook scoped to `agent_id` (claude
+    /// `clearSessionHooks(rootSetAppState, agentId)`, runAgent.ts finally).
+    /// Returns the number of hooks dropped.
+    pub fn clear_agent_hooks(&mut self, agent_id: AgentId) -> usize {
+        self.frontmatter
+            .remove(&agent_id)
+            .map_or(0, |hooks| hooks.len())
     }
 
     /// Remove the hook with `hook_id` from whichever bucket it lives in,
@@ -220,6 +272,131 @@ impl HookRegistry {
         let mut matched: Vec<&HookDefinition> =
             self.sources.values().flatten().filter(keep).collect();
         for hooks in self.plugin.values() {
+            matched.extend(hooks.iter().filter(keep));
+        }
+        // Agent-scoped frontmatter hooks (registered via `register_agent_hooks`
+        // for the lifetime of a running subagent) fire alongside source/plugin
+        // hooks. claude scopes these by agent id, but matching here is over the
+        // event/matcher only — the registration lifetime (register on start,
+        // clear on stop) is what bounds them to the right agent.
+        for hooks in self.frontmatter.values() {
+            matched.extend(hooks.iter().filter(keep));
+        }
+        matched.sort_by(|a, b| b.priority.cmp(&a.priority));
+        matched
+    }
+
+    /// Like [`Self::match_event`] but restricted to the frontmatter hooks scoped
+    /// to a SINGLE `agent_id` (source / plugin / other-agent buckets excluded).
+    ///
+    /// Used by the child runner to fire `SubagentStop` against ONLY this agent's
+    /// own frontmatter Stop→SubagentStop hooks (claude `runAgent` fires the
+    /// subagent's stop hooks inside the child, runAgent.ts), without re-firing
+    /// session / plugin `SubagentStop` hooks that the orchestrator-side
+    /// chokepoint already covers. Returns `[]` when the agent registered no
+    /// frontmatter hooks — a strict no-op for the common (no-frontmatter-hook)
+    /// path so the child's behavior is byte-identical to legacy there.
+    #[must_use]
+    pub fn match_event_agent_scoped(
+        &self,
+        event: &HookEvent,
+        agent_id: AgentId,
+    ) -> Vec<&HookDefinition> {
+        let Some(bucket) = self.frontmatter.get(&agent_id) else {
+            return Vec::new();
+        };
+        let et = event.event_type();
+        let match_query = Self::match_query_for(event);
+        let if_target = Self::if_match_target(event);
+        let keep = |h: &&HookDefinition| -> bool {
+            if !h.events.contains(&et) {
+                return false;
+            }
+            let tool_name_ok = match (&match_query, h.matcher()) {
+                (Some(query), Some(matcher)) => matches_pattern(query, matcher),
+                _ => true,
+            };
+            if !tool_name_ok {
+                return false;
+            }
+            if let Some(if_cond) = h.if_pattern() {
+                if Self::if_condition_applies(h) {
+                    match &if_target {
+                        Some((tool_name, tool_input)) => {
+                            if !matches_if_condition(if_cond, tool_name, tool_input) {
+                                return false;
+                            }
+                        }
+                        None => return false,
+                    }
+                }
+            }
+            true
+        };
+        let mut matched: Vec<&HookDefinition> = bucket.iter().filter(keep).collect();
+        matched.sort_by(|a, b| b.priority.cmp(&a.priority));
+        matched
+    }
+
+    /// Like [`Self::match_event`] but with the frontmatter bucket scoped to
+    /// `exclude_agent_id` OMITTED (source / plugin / every OTHER agent's
+    /// frontmatter bucket still match).
+    ///
+    /// This is the orchestrator-chokepoint twin of [`Self::match_event_agent_scoped`]:
+    /// the child runner fires a subagent's OWN frontmatter `Stop`→`SubagentStop`
+    /// hooks in-child (agent-scoped, claude `runAgent`), so the chokepoint must
+    /// fire the COMPLEMENT — session / plugin `SubagentStop` hooks — WITHOUT
+    /// re-firing the child's frontmatter ones (which the runner already covered).
+    /// Excluding by id makes that deterministic regardless of whether
+    /// `clear_agent_hooks` has run yet (the runner clears the bucket after the
+    /// terminal event, which races the chokepoint fire). When the excluded agent
+    /// registered no frontmatter hooks (the common case, and every
+    /// `FakeAgentTool` fixture), this is byte-identical to [`Self::match_event`].
+    #[must_use]
+    pub fn match_event_excluding_agent(
+        &self,
+        event: &HookEvent,
+        exclude_agent_id: AgentId,
+    ) -> Vec<&HookDefinition> {
+        let et = event.event_type();
+        let match_query = Self::match_query_for(event);
+        let if_target = Self::if_match_target(event);
+        let keep = |h: &&HookDefinition| -> bool {
+            if !h.events.contains(&et) {
+                return false;
+            }
+            let tool_name_ok = match (&match_query, h.matcher()) {
+                (Some(query), Some(matcher)) => matches_pattern(query, matcher),
+                _ => true,
+            };
+            if !tool_name_ok {
+                return false;
+            }
+            if let Some(if_cond) = h.if_pattern() {
+                if Self::if_condition_applies(h) {
+                    match &if_target {
+                        Some((tool_name, tool_input)) => {
+                            if !matches_if_condition(if_cond, tool_name, tool_input) {
+                                return false;
+                            }
+                        }
+                        None => return false,
+                    }
+                }
+            }
+            true
+        };
+        let mut matched: Vec<&HookDefinition> =
+            self.sources.values().flatten().filter(keep).collect();
+        for hooks in self.plugin.values() {
+            matched.extend(hooks.iter().filter(keep));
+        }
+        // Every frontmatter bucket EXCEPT the excluded agent's own (the runner
+        // fires that one in-child, agent-scoped).
+        for (aid, hooks) in &self.frontmatter {
+            if *aid == exclude_agent_id {
+                continue;
+            }
             matched.extend(hooks.iter().filter(keep));
         }
         matched.sort_by(|a, b| b.priority.cmp(&a.priority));
@@ -398,6 +575,235 @@ mod all_hooks_tests {
         r.register_plugin_hooks(protocol::PluginId::new(), vec![h]);
         assert!(r.remove_once_hook(id));
         assert!(r.all_hooks().is_empty());
+    }
+
+    #[test]
+    fn register_agent_hooks_retargets_stop_to_subagent_stop() {
+        // G4: isAgent=true converts a Stop subscription to SubagentStop (claude
+        // registerFrontmatterHooks isAgent=true).
+        let mut r = HookRegistry::new();
+        let agent = AgentId::new();
+        let stop_hook = hk("agent-stop", HookEventType::Stop, HookSource::FrontMatter);
+        r.register_agent_hooks(agent, &[stop_hook], true);
+        // It fires on SubagentStop now, NOT Stop.
+        let on_subagent_stop = r.match_event(
+            &HookEvent::SubagentStop {
+                agent_id: agent,
+                status: "completed".into(),
+            },
+            &HookContext::default(),
+        );
+        assert_eq!(on_subagent_stop.len(), 1, "Stop retargeted to SubagentStop");
+        let on_stop = r.match_event(
+            &HookEvent::Stop {
+                reason: "x".into(),
+            },
+            &HookContext::default(),
+        );
+        assert!(on_stop.is_empty(), "no longer fires on plain Stop");
+    }
+
+    #[test]
+    fn register_agent_hooks_non_agent_keeps_stop() {
+        // is_agent=false (the skill-frontmatter path) registers verbatim.
+        let mut r = HookRegistry::new();
+        let agent = AgentId::new();
+        r.register_agent_hooks(
+            agent,
+            &[hk("skill-stop", HookEventType::Stop, HookSource::FrontMatter)],
+            false,
+        );
+        let on_stop = r.match_event(
+            &HookEvent::Stop {
+                reason: "x".into(),
+            },
+            &HookContext::default(),
+        );
+        assert_eq!(on_stop.len(), 1, "Stop preserved when is_agent=false");
+    }
+
+    #[test]
+    fn clear_agent_hooks_removes_only_that_agents_hooks() {
+        let mut r = HookRegistry::new();
+        let a = AgentId::new();
+        let b = AgentId::new();
+        r.register_agent_hooks(
+            a,
+            &[hk("a1", HookEventType::PreToolUse, HookSource::FrontMatter)],
+            true,
+        );
+        r.register_agent_hooks(
+            b,
+            &[hk("b1", HookEventType::PreToolUse, HookSource::FrontMatter)],
+            true,
+        );
+        assert_eq!(r.all_hooks().len(), 2);
+        // Clearing `a` drops only a1.
+        assert_eq!(r.clear_agent_hooks(a), 1);
+        let names: Vec<&str> = r.all_hooks().iter().map(|h| h.name.as_str()).collect();
+        assert_eq!(names, vec!["b1"]);
+        // Clearing an unknown agent is a no-op.
+        assert_eq!(r.clear_agent_hooks(AgentId::new()), 0);
+    }
+
+    #[test]
+    fn agent_scoped_hooks_fire_via_match_event() {
+        // The frontmatter bucket is iterated by match_event so agent hooks fire.
+        let mut r = HookRegistry::new();
+        let agent = AgentId::new();
+        r.register_agent_hooks(
+            agent,
+            &[hk("fm", HookEventType::PreToolUse, HookSource::FrontMatter)],
+            true,
+        );
+        let matched = r.match_event(
+            &HookEvent::PreToolUse {
+                tool_name: "Bash".into(),
+                tool_input: serde_json::json!({}),
+                tool_use_id: protocol::ToolUseId::new(),
+            },
+            &HookContext::default(),
+        );
+        assert_eq!(matched.len(), 1, "frontmatter hook fires");
+    }
+
+    #[test]
+    fn match_event_agent_scoped_only_returns_that_agents_frontmatter() {
+        // #9: the runner fires SubagentStop scoped to ITS agent's bucket only —
+        // source / plugin / other-agent SubagentStop hooks are excluded so the
+        // orchestrator chokepoint isn't double-fired.
+        let mut r = HookRegistry::new();
+        let a = AgentId::new();
+        let b = AgentId::new();
+        // a's frontmatter Stop→SubagentStop (the hook we want to fire).
+        r.register_agent_hooks(
+            a,
+            &[hk("a-stop", HookEventType::Stop, HookSource::FrontMatter)],
+            true,
+        );
+        // b's frontmatter SubagentStop — must NOT match for agent a.
+        r.register_agent_hooks(
+            b,
+            &[hk("b-stop", HookEventType::Stop, HookSource::FrontMatter)],
+            true,
+        );
+        // A SESSION-level SubagentStop hook — must NOT match the agent-scoped call.
+        r.register(hk(
+            "session-stop",
+            HookEventType::SubagentStop,
+            HookSource::User,
+        ));
+
+        let ev = HookEvent::SubagentStop {
+            agent_id: a,
+            status: "completed".into(),
+        };
+        let scoped = r.match_event_agent_scoped(&ev, a);
+        let names: Vec<&str> = scoped.iter().map(|h| h.name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["a-stop"],
+            "only agent a's own frontmatter SubagentStop fires: {names:?}"
+        );
+
+        // The general match_event DOES see the session + agent-a hook (3 total
+        // here: a-stop, b-stop also fire on SubagentStop event-type, session-stop),
+        // confirming the scoped variant is strictly narrower.
+        let all = r.match_event(&ev, &HookContext::default());
+        assert!(
+            all.len() >= scoped.len(),
+            "agent-scoped match is a subset of the general match"
+        );
+    }
+
+    #[test]
+    fn match_event_excluding_agent_omits_only_the_excluded_frontmatter() {
+        // R7: the chokepoint SubagentStop fires the COMPLEMENT of the runner's
+        // agent-scoped fire — session/plugin + every OTHER agent's frontmatter,
+        // but NOT the excluded child's own frontmatter SubagentStop.
+        let mut r = HookRegistry::new();
+        let a = AgentId::new();
+        let b = AgentId::new();
+        // a's frontmatter Stop→SubagentStop — MUST be excluded for agent a.
+        r.register_agent_hooks(
+            a,
+            &[hk("a-stop", HookEventType::Stop, HookSource::FrontMatter)],
+            true,
+        );
+        // b's frontmatter Stop→SubagentStop — a DIFFERENT agent, still fires.
+        r.register_agent_hooks(
+            b,
+            &[hk("b-stop", HookEventType::Stop, HookSource::FrontMatter)],
+            true,
+        );
+        // A SESSION-level SubagentStop hook — always fires (the chokepoint owns it).
+        r.register(hk(
+            "session-stop",
+            HookEventType::SubagentStop,
+            HookSource::User,
+        ));
+
+        let ev = HookEvent::SubagentStop {
+            agent_id: a,
+            status: "completed".into(),
+        };
+        let mut names: Vec<&str> = r
+            .match_event_excluding_agent(&ev, a)
+            .iter()
+            .map(|h| h.name.as_str())
+            .collect();
+        names.sort_unstable();
+        assert_eq!(
+            names,
+            vec!["b-stop", "session-stop"],
+            "excludes ONLY agent a's frontmatter; session + agent b still fire: {names:?}"
+        );
+
+        // Sanity: the general match still sees all three (a included).
+        let all = r.match_event(&ev, &HookContext::default());
+        assert_eq!(all.len(), 3, "general match sees a-stop too");
+    }
+
+    #[test]
+    fn match_event_excluding_agent_equals_match_event_when_excluded_agent_has_no_frontmatter() {
+        // FakeAgentTool fixtures: the fake child id has NO frontmatter bucket, so
+        // excluding it is byte-identical to the general match (fixtures green).
+        let mut r = HookRegistry::new();
+        r.register(hk(
+            "session-stop",
+            HookEventType::SubagentStop,
+            HookSource::User,
+        ));
+        let unknown = AgentId::new();
+        let ev = HookEvent::SubagentStop {
+            agent_id: unknown,
+            status: "completed".into(),
+        };
+        let excluded: Vec<&str> = r
+            .match_event_excluding_agent(&ev, unknown)
+            .iter()
+            .map(|h| h.name.as_str())
+            .collect();
+        let general: Vec<&str> = r
+            .match_event(&ev, &HookContext::default())
+            .iter()
+            .map(|h| h.name.as_str())
+            .collect();
+        assert_eq!(excluded, general, "no excluded frontmatter ⇒ identical to general");
+        assert_eq!(excluded, vec!["session-stop"]);
+    }
+
+    #[test]
+    fn match_event_agent_scoped_empty_for_unknown_agent() {
+        let r = HookRegistry::new();
+        let scoped = r.match_event_agent_scoped(
+            &HookEvent::SubagentStop {
+                agent_id: AgentId::new(),
+                status: "completed".into(),
+            },
+            AgentId::new(),
+        );
+        assert!(scoped.is_empty(), "no frontmatter hooks ⇒ empty");
     }
 
     #[test]

@@ -302,11 +302,17 @@ impl Task for DreamHandler {
             // path sets no model/teammate/isolation/cwd override.
             description: None,
             model: None,
+            // Dream consolidation is a synchronous subagent, never a background
+            // AgentTool spawn.
+            run_in_background: false,
             name: None,
             team_name: None,
             mode: None,
             isolation: None,
             cwd: None,
+            // Non-fork synchronous spawn.
+            fork_context_messages: None,
+            fork_parent_system_prompt: None,
         };
 
         // 4. Bundle the inheritance. Cloning the Arcs preserves pointer
@@ -340,7 +346,7 @@ impl Task for DreamHandler {
             // shared `TaskStatusSink` has no token-usage method, so token usage
             // is surfaced by spooling a `<usage><total_tokens>…` footer.
             let (payload, status) = match &result {
-                Ok(SubagentResult::Completed { content, usage }) => {
+                Ok(SubagentResult::Completed { content, usage, .. }) => {
                     let body = serde_json::to_string_pretty(content)
                         .unwrap_or_else(|_| content.to_string());
                     let body = format!(
@@ -349,8 +355,8 @@ impl Task for DreamHandler {
                     );
                     (body, TaskStatus::Completed)
                 }
-                Ok(SubagentResult::Failed { reason }) => (reason.clone(), TaskStatus::Failed),
-                Ok(SubagentResult::Killed) => (String::new(), TaskStatus::Killed),
+                Ok(SubagentResult::Failed { reason, .. }) => (reason.clone(), TaskStatus::Failed),
+                Ok(SubagentResult::Killed { .. }) => (String::new(), TaskStatus::Killed),
                 Err(e) => (e.to_string(), TaskStatus::Failed),
             };
 
@@ -590,12 +596,27 @@ mod tests {
             match canned {
                 Some(CannedResult::Completed(content, total_tokens)) => {
                     Ok(SubagentResult::Completed {
+                        agent_id: protocol::AgentId::new(),
                         content,
-                        usage: SubagentUsage { total_tokens },
+                        usage: SubagentUsage {
+                            total_tokens,
+                            ..Default::default()
+                        },
+                        total_tool_use_count: 0,
+                        total_duration_ms: 0,
+                        total_tokens,
+                        assistant_message_count: 0,
+                        response_char_count: 0,
+                        last_request_id: None,
                     })
                 }
-                Some(CannedResult::Failed(reason)) => Ok(SubagentResult::Failed { reason }),
-                Some(CannedResult::Killed) => Ok(SubagentResult::Killed),
+                Some(CannedResult::Failed(reason)) => Ok(SubagentResult::Failed {
+                    agent_id: protocol::AgentId::new(),
+                    reason,
+                }),
+                Some(CannedResult::Killed) => Ok(SubagentResult::Killed {
+                    agent_id: protocol::AgentId::new(),
+                }),
                 Some(CannedResult::Err(msg)) => Err(SubagentSpawnError::Runtime(msg)),
                 Some(CannedResult::Pending) | None => {
                     // Park forever — the test cancels via Task::kill.

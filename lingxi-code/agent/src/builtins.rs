@@ -31,9 +31,11 @@
 //!   follow-up that wires the host-context assembly. The 4 static agents'
 //!   prompts are ported VERBATIM (non-embedded-search-tools branch:
 //!   `Glob`/`Grep`/`Read`/`Bash`).
-//! - **`color` / `background` / `omitClaudeMd` / `criticalSystemReminder`**:
-//!   host-display / context-trimming flags with no `AgentDefinition` field
-//!   (or no runner consumer) today — not ported.
+//! - **`color` / `background`**: now exist as `AgentDefinition` fields (parsed
+//!   from frontmatter / JSON by [`crate::catalog`]); built-ins leave them at
+//!   their defaults here (`color` is assigned at display time). `omitClaudeMd`
+//!   / `criticalSystemReminder` remain context-trimming flags with no field /
+//!   runner consumer today — not ported.
 //! - **`model` resolution (wired for the spawn path)**: the spawner resolves
 //!   these model values to a concrete wire id at spawn time via
 //!   [`crate::model_resolution::resolve_agent_model`] (`Inherit` → parent /
@@ -346,6 +348,17 @@ fn def(
         icon: None,
         allowed_tools: vec![],
         worktree_requirement: None,
+        // Built-in (3P/non-ant) defs set none of the extended frontmatter
+        // fields; they take their defaults (empty / None / false).
+        disallowed_tools: vec![],
+        skills: vec![],
+        required_mcp_servers: vec![],
+        background: false,
+        isolation: None,
+        memory: None,
+        effort: None,
+        initial_prompt: None,
+        color: None,
     }
 }
 
@@ -409,6 +422,63 @@ pub fn builtin_agent_definitions() -> Vec<AgentDefinition> {
             VERIFICATION_PROMPT,
         ),
     ]
+}
+
+/// Synthetic `FORK_AGENT` definition for the fork-subagent path (claude
+/// `forkSubagent.ts:60-71`).
+///
+/// NOT registered in [`builtin_agent_definitions`] (claude does not register
+/// `FORK_AGENT` in `builtInAgents`, `forkSubagent.ts:45`) — it is resolved
+/// ONLY on the fork path by
+/// [`crate::handle::PoolSubagentSpawner::lookup_definition`] when
+/// `subagent_type == "fork"`.
+///
+/// Field mapping (claude → Rust):
+/// - `tools: ['*']` + `useExactTools` → [`AgentToolPolicy::All`] `{ use_exact_tools: true }`
+///   (the child gets the parent's full tool pool for cache-identical prefixes).
+/// - `maxTurns: 200` → `max_turns: 200`.
+/// - `model: 'inherit'` → [`AgentModel::Inherit`] (keeps the parent's model for
+///   context-length parity; on the fork path `AgentTool` also sends `model:
+///   None`, so the parent model is used).
+/// - `permissionMode: 'bubble'` → [`AgentPermissionMode::Bubble`] (surfaces
+///   permission prompts to the parent terminal).
+/// - `source: 'built-in'`, `baseDir: 'built-in'`.
+/// - `getSystemPrompt: () => ''` → `system_prompt: None`: it is UNUSED on the
+///   fork path — the child's system prompt is the parent's already-rendered
+///   bytes threaded via
+///   [`traits::subagent_spawn::SubagentSpawnRequest::fork_parent_system_prompt`].
+#[must_use]
+pub fn fork_agent_definition() -> AgentDefinition {
+    AgentDefinition {
+        agent_type: traits::fork_subagent::FORK_SUBAGENT_TYPE.to_string(),
+        when_to_use:
+            "Implicit fork — inherits full conversation context. Not selectable via subagent_type; triggered by omitting subagent_type when the fork experiment is active.".to_string(),
+        tools: AgentToolPolicy::All {
+            use_exact_tools: true,
+        },
+        max_turns: 200,
+        model: AgentModel::Inherit,
+        permission_mode: AgentPermissionMode::Bubble,
+        source: AgentSource::BuiltIn,
+        base_dir: "built-in".into(),
+        // getSystemPrompt () => '' is unused on the fork path — parent's rendered
+        // system prompt is threaded via fork_parent_system_prompt.
+        system_prompt: None,
+        mcp_servers: vec![],
+        frontmatter_hooks: vec![],
+        icon: None,
+        allowed_tools: vec![],
+        worktree_requirement: None,
+        disallowed_tools: vec![],
+        skills: vec![],
+        required_mcp_servers: vec![],
+        background: false,
+        isolation: None,
+        memory: None,
+        effort: None,
+        initial_prompt: None,
+        color: None,
+    }
 }
 
 #[cfg(test)]
@@ -493,6 +563,32 @@ mod tests {
             assert_eq!(d.max_turns, 100);
             assert!(matches!(d.permission_mode, AgentPermissionMode::Bubble));
         }
+    }
+
+    #[test]
+    fn fork_agent_definition_matches_claude() {
+        let f = fork_agent_definition();
+        assert_eq!(f.agent_type, "fork");
+        assert_eq!(f.max_turns, 200);
+        assert!(matches!(
+            f.tools,
+            AgentToolPolicy::All { use_exact_tools: true }
+        ));
+        assert!(matches!(f.model, AgentModel::Inherit));
+        assert!(matches!(f.permission_mode, AgentPermissionMode::Bubble));
+        assert!(matches!(f.source, AgentSource::BuiltIn));
+        // getSystemPrompt () => '' is unused on the fork path → no body.
+        assert!(f.system_prompt.is_none());
+        assert!(f.is_fork());
+    }
+
+    #[test]
+    fn fork_agent_not_in_six_builtins() {
+        // FORK_AGENT is NOT registered in builtInAgents (claude
+        // forkSubagent.ts:45) — the 6-element vec must not contain it.
+        let defs = builtin_agent_definitions();
+        assert!(!defs.iter().any(|d| d.agent_type == "fork"));
+        assert_eq!(defs.len(), 6);
     }
 
     #[test]

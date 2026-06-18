@@ -277,6 +277,7 @@ mod tests {
             session: None,
             subagent_registry: None,
             cancel: None,
+            fork_parent_system_prompt: None,
         }
     }
 

@@ -31,8 +31,11 @@ pub mod transcript;
 pub mod worktree_policy;
 
 pub use api::SubagentApiClient;
-pub use builtins::builtin_agent_definitions;
-pub use catalog::{load_agents_from_dirs, parse_agent_markdown, AgentLoadError};
+pub use builtins::{builtin_agent_definitions, fork_agent_definition};
+pub use catalog::{
+    load_agents_from_dirs, parse_agent_from_json, parse_agent_markdown, parse_agents_from_json,
+    AgentLoadError,
+};
 pub use color_manager::AgentColorManager;
 pub use context::SubagentContext;
 pub use definition::*;
@@ -43,7 +46,17 @@ pub use handle::{agent_listing_entries, tools_description, PoolSubagentSpawner};
 // `tool-agent` can reach them without depending on this engine crate); re-export
 // them here under the `agent::` path the orchestrator + callers use.
 pub use traits::subagent_spawn::{format_agent_line, should_inject_agent_list_in_messages};
+// Fork-subagent helpers live in the leaf `traits` crate (reachable by both
+// `tool-agent` and `agent`); re-export under `agent::` for ergonomic access.
+pub use traits::fork_subagent::{
+    build_child_message, build_forked_messages, build_worktree_notice, is_fork_subagent_enabled,
+    is_in_fork_child, FORK_SUBAGENT_TYPE,
+};
 pub use model_resolution::resolve_agent_model;
+// Re-export `PermissionMode` (lives in the `permission` crate, which `agent`
+// already depends on) so the `tasks` crate can reference `agent::PermissionMode`
+// for `resolve_agent_model`'s seam without widening its own dep graph.
+pub use permission::PermissionMode;
 pub use multi_dispatch::{MultiAgentDispatcher, MultiAgentSpawnSpec};
 pub use pool::{StateMachinePool, StateMachineSlot};
 pub use runner::SubagentEvent;

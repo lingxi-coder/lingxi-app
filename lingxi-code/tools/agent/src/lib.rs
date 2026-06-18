@@ -19,6 +19,8 @@
 pub mod agent;
 pub use agent::AgentTool;
 
+pub mod classifier_handoff;
+
 #[cfg(any(test, feature = "agent-test-support"))]
 pub mod agent_test_support;
 

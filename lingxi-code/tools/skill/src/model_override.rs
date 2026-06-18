@@ -87,6 +87,65 @@ fn family_default_id(family_lower: &str) -> Option<&'static str> {
     }
 }
 
+/// The Sonnet family default id for non-firstParty (3P) providers
+/// (`getModelStrings().sonnet45`, canonical `claude-sonnet-4-5-20250929`,
+/// `configs.ts:45`). See `agent::model_resolution::SONNET_3P_DEFAULT_ID` — kept
+/// in sync.
+///
+/// NB: for THIS seam the choice is a pure-internal no-op — the resolved id only
+/// feeds `model_supports_1m`, and both `claude-sonnet-4-6` and
+/// `claude-sonnet-4-5-20250929` canonicalize to a `claude-sonnet-4*` family that
+/// supports 1M, so `resolve_skill_model_override`'s OUTPUT is byte-identical
+/// either way. The provider-aware branch is mirrored anyway to keep the two
+/// `parseUserSpecifiedModel` ports structurally identical (matching claude's
+/// `getDefaultSonnetModel`) and prevent future drift.
+const SONNET_3P_DEFAULT_ID: &str = "claude-sonnet-4-5-20250929";
+
+/// `getDefault*Model()` (`model.ts`): the `ANTHROPIC_DEFAULT_{OPUS,SONNET,HAIKU}_MODEL`
+/// env override (when non-empty) wins, else the built-in family default. The
+/// skill `model:` alias path MUST route through these so a custom default flows
+/// through, matching claude's `resolveSkillModelOverride` → `parseUserSpecifiedModel`
+/// → `getDefault*Model()`. Mirrors `agent::model_resolution::env_default`.
+///
+/// Used for opus/haiku, whose defaults do NOT diverge by provider. Sonnet is
+/// provider-aware — see [`default_sonnet_model`].
+fn env_default(env_var: &str, family_lower: &str) -> String {
+    if let Some(v) = env::var(env_var).ok().filter(|s| !s.is_empty()) {
+        return v;
+    }
+    family_default_id(family_lower)
+        .expect("env_default called with a known family")
+        .to_string()
+}
+
+/// `getDefaultSonnetModel()` (`model.ts:118-128`): env override (non-empty) wins;
+/// else provider-aware — `claude-sonnet-4-5-20250929` for non-firstParty
+/// (Bedrock/Vertex/Foundry), `claude-sonnet-4-6` for firstParty. Mirrors
+/// `agent::model_resolution::get_default_sonnet_model`.
+fn default_sonnet_model() -> String {
+    if let Some(v) = env::var("ANTHROPIC_DEFAULT_SONNET_MODEL")
+        .ok()
+        .filter(|s| !s.is_empty())
+    {
+        return v;
+    }
+    if api_provider_is_first_party() {
+        return family_default_id("sonnet")
+            .expect("sonnet is a known family")
+            .to_string();
+    }
+    SONNET_3P_DEFAULT_ID.to_string()
+}
+
+/// `getAPIProvider() === 'firstParty'` (`providers.ts:6-13`): first-party iff none
+/// of `CLAUDE_CODE_USE_BEDROCK` / `_VERTEX` / `_FOUNDRY` is env-truthy (strict
+/// allowlist). Mirrors `agent::model_resolution::api_provider_is_first_party`.
+fn api_provider_is_first_party() -> bool {
+    !is_env_truthy(env::var("CLAUDE_CODE_USE_BEDROCK").ok().as_deref())
+        && !is_env_truthy(env::var("CLAUDE_CODE_USE_VERTEX").ok().as_deref())
+        && !is_env_truthy(env::var("CLAUDE_CODE_USE_FOUNDRY").ok().as_deref())
+}
+
 /// Resolve a user/skill-specified model string to a concrete id — the
 /// alias-resolution subset of `parseUserSpecifiedModel` (`model.ts:445-505`)
 /// that this seam can reach. Bare family aliases (`opus` / `sonnet` / `haiku` /
@@ -102,9 +161,12 @@ fn parse_user_specified_model(model_input: &str) -> String {
 
     match base.as_str() {
         // `opusplan` → Sonnet default (Opus only in plan mode), 1:1 with TS.
-        "opusplan" | "sonnet" => format!("{}{suffix}", family_default_id("sonnet").unwrap()),
-        "haiku" => format!("{}{suffix}", family_default_id("haiku").unwrap()),
-        "opus" => format!("{}{suffix}", family_default_id("opus").unwrap()),
+        // Routed through the env-aware (and provider-aware, #18) helpers so
+        // `ANTHROPIC_DEFAULT_*_MODEL` overrides + the 3P Sonnet default take effect
+        // on the skill `model:` path.
+        "opusplan" | "sonnet" => format!("{}{suffix}", default_sonnet_model()),
+        "haiku" => format!("{}{suffix}", env_default("ANTHROPIC_DEFAULT_HAIKU_MODEL", "haiku")),
+        "opus" => format!("{}{suffix}", env_default("ANTHROPIC_DEFAULT_OPUS_MODEL", "opus")),
         _ => {
             // Non-alias: preserve the original case, normalizing only `[1m]`.
             if has_1m_tag {
@@ -184,6 +246,51 @@ fn canonical_name(model: &str) -> String {
 mod tests {
     use super::*;
 
+    // ---- env-var serialization (#18 provider-aware Sonnet default) ----------
+    //
+    // CLAUDE_CODE_USE_{BEDROCK,VERTEX,FOUNDRY} / ANTHROPIC_DEFAULT_SONNET_MODEL
+    // mutate process-global env. cargo runs tests in parallel within a crate, so
+    // env-mutating tests share one Mutex and restore on Drop.
+    use std::sync::Mutex;
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    struct EnvGuard {
+        key: &'static str,
+        prev: Option<String>,
+    }
+    impl EnvGuard {
+        fn set(key: &'static str, val: &str) -> Self {
+            let prev = env::var(key).ok();
+            env::set_var(key, val);
+            Self { key, prev }
+        }
+    }
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            match &self.prev {
+                Some(v) => env::set_var(self.key, v),
+                None => env::remove_var(self.key),
+            }
+        }
+    }
+
+    /// Clear all three provider env vars (restored on Drop), pinning firstParty.
+    fn clear_provider_env() -> [EnvGuard; 3] {
+        let mk = |k: &'static str| {
+            let g = EnvGuard {
+                key: k,
+                prev: env::var(k).ok(),
+            };
+            env::remove_var(k);
+            g
+        };
+        [
+            mk("CLAUDE_CODE_USE_BEDROCK"),
+            mk("CLAUDE_CODE_USE_VERTEX"),
+            mk("CLAUDE_CODE_USE_FOUNDRY"),
+        ]
+    }
+
     #[test]
     fn skill_model_already_1m_passes_through() {
         // The skill explicitly asked for 1M → never touched.
@@ -217,8 +324,17 @@ mod tests {
 
     #[test]
     fn bare_alias_resolves_then_carries_1m() {
-        // `sonnet` resolves to claude-sonnet-4-6 (supports 1M) → [1m] re-appended,
-        // matching the TS `parseUserSpecifiedModel` pre-resolution step.
+        // `sonnet` resolves to the Sonnet default (supports 1M) → [1m] re-appended,
+        // matching the TS `parseUserSpecifiedModel` pre-resolution step. The
+        // resolution reads provider + ANTHROPIC_DEFAULT_SONNET_MODEL env (#18), so
+        // pin firstParty with no override under the ENV_LOCK to keep it hermetic.
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _g = clear_provider_env();
+        let _o = EnvGuard {
+            key: "ANTHROPIC_DEFAULT_SONNET_MODEL",
+            prev: env::var("ANTHROPIC_DEFAULT_SONNET_MODEL").ok(),
+        };
+        env::remove_var("ANTHROPIC_DEFAULT_SONNET_MODEL");
         assert_eq!(
             resolve_skill_model_override("sonnet", "claude-opus-4-6[1m]"),
             "sonnet[1m]"
@@ -240,6 +356,10 @@ mod tests {
 
     #[test]
     fn parse_resolves_known_aliases() {
+        // The `sonnet`/`opusplan` arms are provider-aware (#18) → pin firstParty
+        // under the ENV_LOCK to assert the 1P ids deterministically.
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _g = clear_provider_env();
         assert_eq!(parse_user_specified_model("opus"), "claude-opus-4-7");
         assert_eq!(parse_user_specified_model("sonnet"), "claude-sonnet-4-6");
         assert_eq!(parse_user_specified_model("haiku"), "claude-haiku-4-5");
@@ -250,5 +370,48 @@ mod tests {
             "claude-sonnet-4-6"
         );
         assert_eq!(parse_user_specified_model("My-Custom-ID"), "My-Custom-ID");
+    }
+
+    // ---- #18: 3P-provider Sonnet default on the skill `model:` path ----------
+
+    #[test]
+    fn parse_sonnet_alias_is_3p_default_on_bedrock() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _g = clear_provider_env();
+        let _b = EnvGuard::set("CLAUDE_CODE_USE_BEDROCK", "1");
+        assert_eq!(
+            parse_user_specified_model("sonnet"),
+            "claude-sonnet-4-5-20250929"
+        );
+        // `opusplan` resolves to the Sonnet default → same 3P id.
+        assert_eq!(
+            parse_user_specified_model("opusplan"),
+            "claude-sonnet-4-5-20250929"
+        );
+    }
+
+    #[test]
+    fn parse_sonnet_alias_is_1p_default_on_vertex_when_env_override_set() {
+        // ANTHROPIC_DEFAULT_SONNET_MODEL beats the 3P provider branch.
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _g = clear_provider_env();
+        let _v = EnvGuard::set("CLAUDE_CODE_USE_VERTEX", "1");
+        let _o = EnvGuard::set("ANTHROPIC_DEFAULT_SONNET_MODEL", "custom-sonnet-id");
+        assert_eq!(parse_user_specified_model("sonnet"), "custom-sonnet-id");
+    }
+
+    #[test]
+    fn skill_override_output_is_provider_invariant() {
+        // The provider-aware 3P Sonnet id is a pure-internal discriminator here:
+        // resolve_skill_model_override's OUTPUT is byte-identical on firstParty and
+        // on a 3P provider, because both Sonnet defaults canonicalize to a
+        // `claude-sonnet-4*` family that supports 1M.
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _g = clear_provider_env();
+        let fp = resolve_skill_model_override("sonnet", "claude-opus-4-6[1m]");
+        let _b = EnvGuard::set("CLAUDE_CODE_USE_BEDROCK", "1");
+        let tp = resolve_skill_model_override("sonnet", "claude-opus-4-6[1m]");
+        assert_eq!(fp, "sonnet[1m]");
+        assert_eq!(fp, tp);
     }
 }

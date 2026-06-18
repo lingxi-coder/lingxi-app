@@ -114,6 +114,7 @@ pub fn fresh_ctx() -> ToolUseContext {
         session: None,
         subagent_registry: None,
         cancel: None,
+        fork_parent_system_prompt: None,
     }
 }
 
@@ -555,6 +556,7 @@ pub fn ctx_for_file_tools(
         default_model: "claude-sonnet-4-20250514".to_string(),
         worktree: make_mock_worktree(),
         subagent_spawner: None,
+        agent_name_registry: None,
         task_registry: None,
         mailbox_router: None,
         budget_enforcer: None,
@@ -610,6 +612,7 @@ pub fn shell_test_ctx(out: ProcessOutput) -> super::BuiltinToolContext {
         default_model: "claude-sonnet-4-20250514".to_string(),
         worktree: make_mock_worktree(),
         subagent_spawner: None,
+        agent_name_registry: None,
         task_registry: None,
         mailbox_router: None,
         budget_enforcer: None,

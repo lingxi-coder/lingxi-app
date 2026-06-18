@@ -725,6 +725,7 @@ pub async fn build_mobile_inner(
         default_model: orch_cfg.model.clone(),
         worktree,
         subagent_spawner: None,
+        agent_name_registry: None,
         task_registry: None,
         mailbox_router: None,
         budget_enforcer: None,

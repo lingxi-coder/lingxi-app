@@ -176,6 +176,37 @@ pub trait Tool: Send + Sync {
     fn get_activity_description(&self, _input: &Value) -> Option<String> {
         None
     }
+
+    /// User-facing display name for this `(input)` pair, overriding [`name`] in
+    /// the UI when the tool wants a per-invocation label.
+    ///
+    /// Port of claude-code's `Tool.userFacingName(input)` (the `AgentTool`
+    /// override lives at `UI.tsx:760-775` — it shows the subagent type, e.g.
+    /// `"Explore"`, instead of the generic `"Agent"`). Defaults to `None` so
+    /// every other `Tool` impl is unaffected (frozen-trait rule); a `None` means
+    /// "use [`name`]".
+    ///
+    /// Distinct from the input-less [`user_facing_name`](Self::user_facing_name)
+    /// (a static label used by tools like `StopTask`/`TaskOutput`); this
+    /// per-invocation variant takes the call `input` so `AgentTool` can show the
+    /// requested subagent type.
+    ///
+    /// [`name`]: Tool::name
+    fn user_facing_name_for_input(&self, _input: &Value) -> Option<String> {
+        None
+    }
+
+    /// Background color (a theme-color key / name string) for this tool's
+    /// user-facing name badge, if any.
+    ///
+    /// Port of claude-code's `Tool.userFacingNameBackgroundColor(input)` (the
+    /// `AgentTool` override lives at `UI.tsx:776-787` — it returns the agent's
+    /// configured color via `getAgentColor(subagent_type)`). claude returns a
+    /// `keyof Theme`; the Rust analog returns the color name string. Defaults to
+    /// `None` so every other `Tool` impl is unaffected (frozen-trait rule).
+    fn user_facing_name_background_color(&self, _input: &Value) -> Option<String> {
+        None
+    }
 }
 
 /// Static context passed to [`Tool::is_enabled`]: feature flags and other
@@ -373,6 +404,44 @@ pub enum ToolError {
     Transport(String),
 }
 
+impl ToolError {
+    /// The BARE, model-facing message — the string claude-code would have
+    /// thrown as `error.message` and rendered verbatim into the `tool_result`
+    /// content via `formatError` (`utils/toolErrors.ts` returns `error.message`
+    /// unmodified; `services/tools/toolExecution.ts:1691` feeds it raw into the
+    /// `is_error` tool_result block).
+    ///
+    /// This is DISTINCT from [`std::fmt::Display`] (used for internal logging),
+    /// which prepends a per-variant prefix (`invalid input: `, `internal: `,
+    /// …). Those prefixes are a LingXi-internal convenience and must NOT leak
+    /// into the wire bytes the model sees — claude emits only the inner message
+    /// (e.g. `Agent type 'x' not found. Available agents: …`).
+    ///
+    /// For the message-carrying variants, the inner string IS exactly what the
+    /// equivalent claude-code tool throws, so we return it bare. The structured
+    /// variants (file-state, size, path, timeout, …) keep their full `Display`
+    /// rendering — that text IS the message claude would surface, and there is
+    /// no spurious prefix to strip.
+    #[must_use]
+    pub fn model_facing_message(&self) -> String {
+        match self {
+            // Single-string variants whose `Display` prepends a non-meaningful
+            // prefix: the inner string is the claude `error.message`.
+            ToolError::NotFound(s)
+            | ToolError::InvalidInput(s)
+            | ToolError::PermissionDenied(s)
+            | ToolError::Io(s)
+            | ToolError::Internal(s)
+            | ToolError::SubagentFailed(s)
+            | ToolError::LspFailure(s)
+            | ToolError::Transport(s) => s.clone(),
+            // Structured / prefix-free variants: `Display` already renders the
+            // exact model-facing message (no LingXi-only prefix to strip).
+            other => other.to_string(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod m4_01_error_variant_tests {
     use super::*;
@@ -423,5 +492,110 @@ mod m4_01_error_variant_tests {
     fn output_truncated_display_format() {
         let e = ToolError::OutputTruncated { limit: 30_000 };
         assert_eq!(e.to_string(), "output truncated at 30000 chars");
+    }
+
+    /// `model_facing_message()` returns the BARE inner message (claude's
+    /// `error.message`) — NO `invalid input: ` / `internal: ` Display prefix.
+    /// claude renders this verbatim into the `is_error` tool_result content
+    /// (`formatError` → `toolExecution.ts:1691`); the prefix is logging-only.
+    #[test]
+    fn model_facing_message_strips_variant_prefix() {
+        // The two prefixes the AgentTool errors actually use.
+        let invalid = ToolError::InvalidInput(
+            "Agent type 'x' not found. Available agents: general-purpose".into(),
+        );
+        assert_eq!(
+            invalid.model_facing_message(),
+            "Agent type 'x' not found. Available agents: general-purpose"
+        );
+        // Display keeps the prefix (logging path) — the divergence the fix targets.
+        assert_eq!(
+            invalid.to_string(),
+            "invalid input: Agent type 'x' not found. Available agents: general-purpose"
+        );
+
+        let internal = ToolError::Internal(
+            "Agent 'x' requires MCP servers matching: github. MCP servers with tools: none."
+                .into(),
+        );
+        assert_eq!(
+            internal.model_facing_message(),
+            "Agent 'x' requires MCP servers matching: github. MCP servers with tools: none."
+        );
+
+        // Other single-string variants are bare too.
+        assert_eq!(
+            ToolError::SubagentFailed("boom".into()).model_facing_message(),
+            "boom"
+        );
+
+        // Structured variants keep their full Display (no spurious prefix).
+        let timeout = ToolError::Timeout { timeout_ms: 5000 };
+        assert_eq!(
+            timeout.model_facing_message(),
+            "command timed out after 5000ms"
+        );
+    }
+}
+
+#[cfg(test)]
+mod user_facing_name_default_tests {
+    use super::*;
+    use crate::progress::ToolProgressSender;
+
+    /// A minimal `Tool` that overrides nothing — exercises the defaulted
+    /// `user_facing_name` / `user_facing_name_background_color` (G9 frozen-trait
+    /// rule: every non-`AgentTool` tool sees `None`).
+    struct BareTool {
+        schema: Value,
+    }
+
+    #[async_trait]
+    impl Tool for BareTool {
+        fn name(&self) -> &str {
+            "Bare"
+        }
+        fn input_schema(&self) -> &Value {
+            &self.schema
+        }
+        fn is_enabled(&self, _: &ToolStaticContext) -> bool {
+            true
+        }
+        fn max_result_size_chars(&self) -> usize {
+            0
+        }
+        fn is_concurrency_safe(&self, _: &Value) -> bool {
+            true
+        }
+        fn is_read_only(&self, _: &Value) -> bool {
+            true
+        }
+        async fn check_permissions(&self, _: &Value, _: &ToolUseContext) -> PermissionResult {
+            unimplemented!("not exercised")
+        }
+        async fn description(&self, _: &Value, _: &DescriptionOptions) -> String {
+            String::new()
+        }
+        async fn prompt(&self, _: &PromptOptions) -> String {
+            String::new()
+        }
+        async fn call(
+            &self,
+            _: Value,
+            _: ToolUseContext,
+            _: ToolProgressSender,
+        ) -> Result<ToolCallResult, ToolError> {
+            unimplemented!("not exercised")
+        }
+    }
+
+    #[test]
+    fn user_facing_name_methods_default_to_none() {
+        let t = BareTool {
+            schema: serde_json::json!({"type": "object"}),
+        };
+        let input = serde_json::json!({});
+        assert_eq!(t.user_facing_name_for_input(&input), None);
+        assert_eq!(t.user_facing_name_background_color(&input), None);
     }
 }

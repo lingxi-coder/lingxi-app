@@ -183,6 +183,15 @@ mod tests {
                 icon: None,
                 allowed_tools: vec![],
                 worktree_requirement: None,
+                disallowed_tools: vec![],
+                skills: vec![],
+                required_mcp_servers: vec![],
+                background: false,
+                isolation: None,
+                memory: None,
+                effort: None,
+                initial_prompt: None,
+                color: None,
             },
             prompt_messages: vec![],
             fork_context_messages: None,
@@ -204,6 +213,10 @@ mod tests {
             tool_invoker: None,
             tool_schemas: vec![],
             budget: None,
+            hook_executor: None,
+            skill_loader: None,
+            hook_session_id: protocol::SessionId::nil(),
+            hook_cwd: std::path::PathBuf::new(),
         }
     }
 

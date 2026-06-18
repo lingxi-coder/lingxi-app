@@ -29,6 +29,7 @@ use traits::process::ProcessRunner;
 use traits::sandbox::Sandbox;
 use traits::share::SharingService;
 use traits::stt::SpeechToText;
+use traits::agent_name_registry::AgentNameRegistry;
 use traits::subagent_spawn::SubagentSpawner;
 use traits::task_registry::TaskRegistryHandle;
 use traits::tts::TextToSpeech;
@@ -89,6 +90,13 @@ pub struct BuiltinToolContext {
     /// machine pool yet; in that case `AgentTool::call` surfaces a clear
     /// internal error. Production wires `agent::PoolSubagentSpawner`.
     pub subagent_spawner: Option<Arc<dyn SubagentSpawner>>,
+    /// Name → agent-id registry for spawned ASYNC subagents (claude
+    /// `AppState.agentNameRegistry`, `AgentTool.tsx:704-711`). `AgentTool`
+    /// registers `name → agentId` for a named async spawn so a later
+    /// `SendMessage({ to: name })` resolves the running agent. `None` when no
+    /// host registry is wired (sync-only paths never register). Distinct from
+    /// the coordinator teammate roster.
+    pub agent_name_registry: Option<Arc<dyn AgentNameRegistry>>,
     /// Task registry — the 6 `Task*` tools dispatch CRUD through this seam.
     /// Production wires `tasks::TaskRegistry`.
     pub task_registry: Option<Arc<dyn TaskRegistryHandle>>,

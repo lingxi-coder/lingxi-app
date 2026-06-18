@@ -8,6 +8,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod agent_name_registry;
 pub mod auth;
 pub mod bridge;
 pub mod budget;
@@ -19,6 +20,7 @@ pub mod computer_control;
 pub mod effect_handler;
 pub mod env;
 pub mod filesystem;
+pub mod fork_subagent;
 pub mod http;
 pub mod lsp;
 pub mod mailbox;
@@ -33,6 +35,7 @@ pub mod runtime;
 pub mod sandbox;
 pub mod secure_storage;
 pub mod share;
+pub mod skill_loader;
 pub mod stt;
 pub mod subagent_spawn;
 pub mod subscription;
@@ -83,6 +86,7 @@ pub use sandbox::{
 };
 pub use secure_storage::{SecureStorage, SecureStorageBackend, SecureStorageError};
 pub use share::{ShareError, SharePayload, ShareResult, SharingService};
+pub use skill_loader::{SkillLoad, SkillLoader};
 pub use stt::{SpeechToText, SttError, SttOpts, SttTranscript};
 pub use subagent_spawn::{
     SubagentInheritance, SubagentResult, SubagentSpawnError, SubagentSpawnRequest, SubagentSpawner,

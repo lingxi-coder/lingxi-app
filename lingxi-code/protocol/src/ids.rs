@@ -42,6 +42,18 @@ macro_rules! id_newtype {
             pub fn as_uuid(&self) -> Uuid {
                 self.0
             }
+
+            /// Parse the prefixed display form (`"<prefix>:<uuid>"`, as produced
+            /// by [`fmt::Display`]) back into the id, returning `None` on a
+            /// malformed string. A bare `<uuid>` (no prefix) is also accepted for
+            /// robustness. Used to recover an id surfaced as a plain string in a
+            /// tool result (e.g. the Agent tool's `data.agentId`).
+            #[must_use]
+            pub fn parse_prefixed(s: impl AsRef<str>) -> Option<Self> {
+                let s = s.as_ref();
+                let body = s.strip_prefix(concat!($prefix, ":")).unwrap_or(s);
+                Uuid::parse_str(body).ok().map(Self)
+            }
         }
 
         impl Default for $name {

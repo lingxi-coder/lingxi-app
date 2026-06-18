@@ -26,6 +26,7 @@
 
 #![forbid(unsafe_code)]
 
+mod agent_skill_loader;
 mod connect;
 pub mod file_changed_watch;
 pub mod settings_watch;
@@ -1180,8 +1181,10 @@ pub enum BuildError {
     SecureStorage(String),
     /// `sandbox.enabled` and `sandbox.failIfUnavailable` are both set, but the
     /// sandbox cannot run on this host (unsupported platform / WSL1 / missing
-    /// deps). Faithful to claude-code `isSandboxRequired()` — refusing rather
-    /// than silently ignoring the operator's security posture (issue #34044).
+    /// deps / platform not in `sandbox.enabledPlatforms`). Faithful to
+    /// claude-code's `isSandboxRequired()` startup refusal (sandbox-adapter.ts:479)
+    /// — refusing rather than silently ignoring the operator's security posture
+    /// (issue #34044).
     #[error("sandbox required but unavailable: {0}")]
     SandboxUnavailable(String),
 }
@@ -2106,11 +2109,47 @@ pub async fn build(
     // `with_default_model` anchors `AgentModel::Inherit` + family-alias tiers to
     // the parent model so built-in subagent spawns resolve to a concrete wire id
     // instead of passing `"inherit"`/`"haiku"` raw (parity batch 22).
+    // G4: boot-stable session id stamped on the child runner's SubagentStart
+    // HookContext (the runtime orchestrator session id is not available at boot;
+    // this is cosmetic on the SubagentStart wire payload — the additionalContext
+    // collection keys on agent_id/agent_type, set by the runner per spawn).
+    let subagent_hook_session_id = protocol::SessionId::new();
     let subagent_spawner_concrete = agent::PoolSubagentSpawner::new(subagent_pool)
         .with_api_client(subagent_api)
-        .with_default_model(orch_cfg.model.clone());
+        // #15: the parent model handed to the spawner must be the RESOLVED
+        // main-loop wire id (claude `getMainLoopModel()`), NOT the raw alias —
+        // `orch_cfg.model` is `cfg.default_model` with only a `profile/` prefix
+        // stripped, so an `opusplan`/`sonnet` install leaves it a bare alias. An
+        // `AgentModel::Inherit` spawn in DEFAULT mode returns the parent verbatim,
+        // which would be a bogus wire id that fails at the provider. Resolve it
+        // here; the raw alias is still threaded via `with_model_setting` below for
+        // the plan-mode `opusplan→Opus` swap.
+        .with_default_model(agent::model_resolution::resolve_user_specified_model(
+            &orch_cfg.model,
+        ))
+        // #15: thread the live permission mode + the RAW user model setting
+        // (e.g. "opusplan" / "haiku" — `cfg.default_model` is claude-code's
+        // `getUserSpecifiedModelSetting()`, the UN-resolved alias) into the
+        // spawner so `resolve_agent_model`'s `getRuntimeMainLoopModel` branch
+        // actually fires for an `AgentModel::Inherit` spawn: an `opusplan` install
+        // in plan mode resolves the subagent to Opus (not the resolved Sonnet
+        // main-loop model). Without these the Inherit branch returns the parent
+        // model unchanged (default mode → byte-identical to before this seam).
+        .with_permission_mode(cfg.permission_mode)
+        .with_model_setting(cfg.default_model.clone())
+        // G4/G5: stamp the session id + cwd on the `HookContext` the child runner
+        // builds for the SubagentStart fire (the orchestrator's hook context is
+        // session-scoped at runtime; the spawner uses a boot-stable session id —
+        // the field is cosmetic on the wire payload, the load-bearing
+        // agent_id/agent_type are set by the runner per spawn).
+        .with_hook_context(subagent_hook_session_id, cwd.clone());
     let subagent_tool_registry_cell = subagent_spawner_concrete.tool_registry_handle();
     let subagent_agent_catalog_cell = subagent_spawner_concrete.agent_catalog_handle();
+    // G4/G5: grab the set-once hook-executor + skill-loader cells BEFORE boxing,
+    // to fill once the `HookExecutorImpl` (5.25) and shared command registry exist
+    // (same cycle-break as the tool-registry / agent-catalog cells above).
+    let subagent_hook_executor_cell = subagent_spawner_concrete.hook_executor_handle();
+    let subagent_skill_loader_cell = subagent_spawner_concrete.skill_loader_handle();
     let subagent_spawner: Arc<dyn traits::subagent_spawn::SubagentSpawner> =
         Arc::new(subagent_spawner_concrete);
 
@@ -2502,6 +2541,12 @@ pub async fn build(
         .with_agent_spawner(subagent_spawner.clone()),
     );
 
+    // G4: fill the subagent spawner's hook-executor cell now that `hooks` exists,
+    // so a child runner can fire `SubagentStart` (collecting + injecting the
+    // hooks' `additionalContexts`) and register/clear the agent's frontmatter
+    // hooks (Stop→SubagentStop) scoped to the child id. First fill wins.
+    let _ = subagent_hook_executor_cell.set(hooks.clone());
+
     // (5.26) Build the MCP registry NOW (deferred from (5.1)) so it can carry
     //         the elicitation hook dispatcher, then auto-connect. The
     //         `OrchestratorHookDispatcher` shares the SAME `hooks` executor, so
@@ -2765,9 +2810,19 @@ pub async fn build(
     )
     .with_tool_invoker(teammate_invoker.clone() as Arc<dyn traits::tool_invoker::ToolInvoker>)
     // Anchor the teammate's `AgentModel::Inherit` / family aliases to the parent
-    // model — the same seam the `PoolSubagentSpawner` gets above — so a spawned
-    // teammate runs against a concrete wire id instead of passing `"inherit"` raw.
-    .with_default_model(orch_cfg.model.clone())
+    // model — the same seam the `PoolSubagentSpawner` gets above. #15: resolve
+    // the alias to the concrete main-loop wire id (claude `getMainLoopModel()`)
+    // so an `Inherit` teammate in default mode runs against a real id, not the
+    // raw `orch_cfg.model` alias (which would fail at the provider).
+    .with_default_model(agent::model_resolution::resolve_user_specified_model(
+        &orch_cfg.model,
+    ))
+    // #15: thread the live permission mode + the RAW user model setting (the
+    // un-resolved alias, e.g. "opusplan") so the teammate's `Inherit` resolution
+    // gets the same `getRuntimeMainLoopModel` plan-mode swap as the spawner above
+    // (opusplan + plan → Opus). Default mode → byte-identical to before.
+    .with_permission_mode(cfg.permission_mode)
+    .with_model_setting(cfg.default_model.clone())
     .with_status_sink(coordinator_sink as Arc<dyn tasks::handlers::TaskStatusSink>)
     // Fire the `TeammateIdle` hook (claude-code `executeTeammateIdleHooks`,
     // `stopHooks.ts:403`) each time a teammate finishes a turn-set and parks
@@ -3093,6 +3148,12 @@ pub async fn build(
         // (3b) AgentTool threads this into the subagent's RegistryToolInvoker so
         // spawned subagents are gated by the same boot gate as the main loop.
         permission_gate: Some(perms.clone()),
+        // G14: the AgentTool registers async-agent `name → agentId` in the
+        // spawner's OWN internal registry (PoolSubagentSpawner::register_name),
+        // so no separate ctx-level registry is wired here. A shared
+        // `Some(Arc<dyn AgentNameRegistry>)` can be threaded once a SendMessage
+        // resolver needs to read the same map outside the spawner.
+        agent_name_registry: None,
         mcp_registry: Some(mcp_registry.clone()),
         lsp_registry: Some(plugin_lsp_registry.clone()),
         camera: None,
@@ -3194,8 +3255,19 @@ pub async fn build(
     let skill_loader: Arc<dyn tool_skill::skill::SkillLoader> =
         Arc::new(skill_loader::CommandRegistrySkillLoader::with_session_id(
             shared_command_registry.clone(),
-            skill_session_id,
+            skill_session_id.clone(),
         ));
+    // G5: fill the subagent spawner's skill-loader cell with a
+    // `traits::skill_loader::SkillLoader` over the SAME shared command registry,
+    // so a child agent runner can preload its frontmatter `skills:` (claude
+    // runAgent.ts:577-646). First fill wins; the registry is filled at (6) before
+    // any spawn fires, so the loader never reads the empty registry.
+    let _ = subagent_skill_loader_cell.set(Arc::new(
+        agent_skill_loader::AgentSkillLoader::new(
+            shared_command_registry.clone(),
+            Some(skill_session_id),
+        ),
+    ) as Arc<dyn traits::skill_loader::SkillLoader>);
     // Fire the `CwdChanged` hook (claude-code `onCwdChangedForHooks`,
     // Shell.ts:409) when a `cd` inside a Bash call moves the persistent shell
     // cwd. The firer wraps the SAME `Arc<HookExecutorImpl>` the orchestrator
@@ -5371,8 +5443,8 @@ mod tests {
     fn sandbox_runtime_config_from_settings_tiers_is_opt_in() {
         use super::sandbox_runtime_config_from_settings_tiers;
         let ctx = sandbox::policy_convert::SandboxConvertContext::default();
-        let dir = std::path::Path::new("/tmp");
 
+        let dir = std::path::Path::new("/tmp");
         // Default (no `sandbox` subsection) → disabled (claude-code opt-in posture).
         assert!(!sandbox_runtime_config_from_settings_tiers(&[], dir, &ctx).enabled);
         assert!(
@@ -5409,6 +5481,248 @@ mod tests {
             )
             .enabled
         );
+    }
+
+    // ── IMPL-R3: managed (policySettings) tier in the sandbox derivation ──────
+    //
+    // claude-code's `getInitialSettings()`/`loadSettingsFromDisk()` always folds
+    // `policySettings` (managed) at the HIGHEST priority (SETTING_SOURCES:
+    // …→localSettings→flagSettings→policySettings, "later sources override
+    // earlier"). The desktop composition root appends
+    // `managed_settings_raw_tiers()` AFTER the user/project/local file tiers so a
+    // managed `sandbox.*` wins. These tests point `LINGXI_MANAGED_DIR` at a
+    // tempdir (the real managed path is an absolute, unwritable OS path) and
+    // assert the loader + fold honor managed precedence.
+    //
+    // `LINGXI_MANAGED_DIR` is process-global; serialize so a managed dir one test
+    // sets can't leak into another running in parallel. `#[tokio::test]` defaults
+    // to a current-thread runtime, so holding the (non-Send) `MutexGuard` across
+    // the `.await`s here is fine.
+    static MANAGED_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// (1) No user/project/local `sandbox` block; managed `managed-settings.json`
+    /// `{"sandbox":{"enabled":true}}` → managed alone enables.
+    #[tokio::test]
+    async fn managed_sandbox_enabled_overrides_absent_user_setting() {
+        let _g = MANAGED_ENV_LOCK.lock().unwrap();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            tmp.path().join("managed-settings.json"),
+            r#"{"sandbox":{"enabled":true}}"#,
+        )
+        .expect("write managed");
+        std::env::set_var(super::settings_watch::MANAGED_DIR_ENV, tmp.path());
+
+        let managed = super::settings_watch::managed_settings_raw_tiers().await;
+        // No user/project/local tiers (none present); managed is the only tier.
+        let refs: Vec<&str> = managed.iter().map(String::as_str).collect();
+        let ctx = sandbox::policy_convert::SandboxConvertContext::default();
+        let cfg = super::sandbox_runtime_config_from_settings_tiers(
+            &refs,
+            std::path::Path::new("/tmp"),
+            &ctx,
+        );
+        assert!(cfg.enabled, "managed sandbox.enabled:true alone must enable");
+
+        std::env::remove_var(super::settings_watch::MANAGED_DIR_ENV);
+    }
+
+    /// (2) User tier `{"sandbox":{"enabled":false}}`, managed
+    /// `{"sandbox":{"enabled":true}}` → policy (highest priority) wins.
+    #[tokio::test]
+    async fn managed_sandbox_enabled_overrides_user_disabled() {
+        let _g = MANAGED_ENV_LOCK.lock().unwrap();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            tmp.path().join("managed-settings.json"),
+            r#"{"sandbox":{"enabled":true}}"#,
+        )
+        .expect("write managed");
+        std::env::set_var(super::settings_watch::MANAGED_DIR_ENV, tmp.path());
+
+        // user tier (disabled) first, then managed appended LAST (highest).
+        let mut tiers = vec![r#"{"sandbox":{"enabled":false}}"#.to_string()];
+        tiers.extend(super::settings_watch::managed_settings_raw_tiers().await);
+        let refs: Vec<&str> = tiers.iter().map(String::as_str).collect();
+        let ctx = sandbox::policy_convert::SandboxConvertContext::default();
+        let cfg = super::sandbox_runtime_config_from_settings_tiers(
+            &refs,
+            std::path::Path::new("/tmp"),
+            &ctx,
+        );
+        assert!(
+            cfg.enabled,
+            "policySettings is highest priority and must override a user-disabled sandbox"
+        );
+
+        std::env::remove_var(super::settings_watch::MANAGED_DIR_ENV);
+    }
+
+    /// (3) Managed `{"sandbox":{"enabled":true,"failIfUnavailable":true}}` yields
+    /// `enabled && fail_if_unavailable` from the merged config — the
+    /// `sandbox_required` predicate that drives the `BuildError::SandboxUnavailable`
+    /// hard-reject path at the `build()` call site (mirrors :2647-2655). We assert
+    /// the merged-config predicate plus `unavailable_reason_for` returning `Some`
+    /// under a forced-unavailable platform (the same inputs `build()` feeds), per
+    /// spec §7.3 (a full `build()` is too heavy / host-dependent here).
+    #[tokio::test]
+    async fn managed_fail_if_unavailable_triggers_hard_reject() {
+        let _g = MANAGED_ENV_LOCK.lock().unwrap();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            tmp.path().join("managed-settings.json"),
+            r#"{"sandbox":{"enabled":true,"failIfUnavailable":true}}"#,
+        )
+        .expect("write managed");
+        std::env::set_var(super::settings_watch::MANAGED_DIR_ENV, tmp.path());
+
+        let tiers = super::settings_watch::managed_settings_raw_tiers().await;
+        let refs: Vec<&str> = tiers.iter().map(String::as_str).collect();
+        let ctx = sandbox::policy_convert::SandboxConvertContext::default();
+        let cfg = super::sandbox_runtime_config_from_settings_tiers(
+            &refs,
+            std::path::Path::new("/tmp"),
+            &ctx,
+        );
+        // The `sandbox_required` predicate (lib.rs:2647) = enabled && fail_if_unavailable.
+        assert!(
+            cfg.enabled && cfg.fail_if_unavailable,
+            "managed failIfUnavailable:true must produce a sandbox_required config"
+        );
+        // Forced-unavailable: an enabled sandbox NOT in the enabled-platform list
+        // is unavailable (mirrors the `unavailable_reason_for` inputs `build()`
+        // feeds), so the `BuildError::SandboxUnavailable` branch would be taken.
+        assert!(
+            platform_posix::PosixSandbox::unavailable_reason_for(cfg.enabled, false).is_some(),
+            "an enabled-but-unavailable sandbox must yield Some(reason) → hard reject"
+        );
+
+        std::env::remove_var(super::settings_watch::MANAGED_DIR_ENV);
+    }
+
+    /// (4) Managed `excludedCommands` flow into the sandbox-auto-allow fold: an
+    /// excluded command is NOT auto-allowed, a normal one still is.
+    #[tokio::test]
+    async fn managed_excluded_commands_flow_into_auto_allow() {
+        let _g = MANAGED_ENV_LOCK.lock().unwrap();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            tmp.path().join("managed-settings.json"),
+            r#"{"sandbox":{"enabled":true,"excludedCommands":["bazel:*"]}}"#,
+        )
+        .expect("write managed");
+        std::env::set_var(super::settings_watch::MANAGED_DIR_ENV, tmp.path());
+
+        let tiers = super::settings_watch::managed_settings_raw_tiers().await;
+        let refs: Vec<&str> = tiers.iter().map(String::as_str).collect();
+        let auto_allow = super::sandbox_auto_allow_from_settings_tiers(
+            &refs,
+            std::path::Path::new("/tmp"),
+        );
+        assert!(auto_allow.enabled, "managed enabled must flow through");
+        assert!(
+            !auto_allow.auto_allows("bazel build"),
+            "managed excludedCommands must exclude `bazel build` from auto-allow"
+        );
+        assert!(
+            auto_allow.auto_allows("echo hi"),
+            "a non-excluded command stays auto-allowed"
+        );
+
+        std::env::remove_var(super::settings_watch::MANAGED_DIR_ENV);
+    }
+
+    /// (5) `managed-settings.json` `{"sandbox":{"enabled":false}}` +
+    /// `managed-settings.d/10-org.json` `{"sandbox":{"enabled":true}}` → the
+    /// drop-in (sorted-alphabetical-last) wins, exercising
+    /// `managed_settings_raw_tiers` ordering.
+    #[tokio::test]
+    async fn managed_drop_in_overrides_base_managed_file() {
+        let _g = MANAGED_ENV_LOCK.lock().unwrap();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            tmp.path().join("managed-settings.json"),
+            r#"{"sandbox":{"enabled":false}}"#,
+        )
+        .expect("write base");
+        let drop_in = tmp.path().join("managed-settings.d");
+        std::fs::create_dir_all(&drop_in).expect("mkdir drop-in");
+        std::fs::write(
+            drop_in.join("10-org.json"),
+            r#"{"sandbox":{"enabled":true}}"#,
+        )
+        .expect("write drop-in");
+        std::env::set_var(super::settings_watch::MANAGED_DIR_ENV, tmp.path());
+
+        let tiers = super::settings_watch::managed_settings_raw_tiers().await;
+        // base then drop-in (the loader's ascending order).
+        assert_eq!(tiers.len(), 2, "base + one drop-in");
+        let refs: Vec<&str> = tiers.iter().map(String::as_str).collect();
+        let ctx = sandbox::policy_convert::SandboxConvertContext::default();
+        let cfg = super::sandbox_runtime_config_from_settings_tiers(
+            &refs,
+            std::path::Path::new("/tmp"),
+            &ctx,
+        );
+        assert!(
+            cfg.enabled,
+            "the drop-in (loaded last) must override the base managed file"
+        );
+
+        std::env::remove_var(super::settings_watch::MANAGED_DIR_ENV);
+    }
+
+    /// (6) `managed-settings.d/.hidden.json` and `managed-settings.d/README.md`
+    /// are ignored; only `*.json` non-dotfiles are read (mirrors the watcher's
+    /// `classify` behavior).
+    #[tokio::test]
+    async fn managed_settings_raw_tiers_skips_dotfiles_and_nonjson() {
+        let _g = MANAGED_ENV_LOCK.lock().unwrap();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        // No base managed-settings.json (absent → skipped).
+        let drop_in = tmp.path().join("managed-settings.d");
+        std::fs::create_dir_all(&drop_in).expect("mkdir drop-in");
+        std::fs::write(drop_in.join(".hidden.json"), r#"{"sandbox":{"enabled":true}}"#)
+            .expect("write dotfile");
+        std::fs::write(drop_in.join("README.md"), "not json").expect("write md");
+        std::fs::write(drop_in.join("20-real.json"), r#"{"sandbox":{"enabled":true}}"#)
+            .expect("write real");
+        std::env::set_var(super::settings_watch::MANAGED_DIR_ENV, tmp.path());
+
+        let tiers = super::settings_watch::managed_settings_raw_tiers().await;
+        assert_eq!(
+            tiers.len(),
+            1,
+            "only the single `*.json` non-dotfile drop-in is read (.hidden.json + README.md skipped)"
+        );
+
+        std::env::remove_var(super::settings_watch::MANAGED_DIR_ENV);
+    }
+
+    /// (7) Override points at a non-existent dir → `managed_settings_raw_tiers()`
+    /// is empty, so both helpers behave exactly as the pre-fix 3-tier path
+    /// (regression guard for the common case = byte-identical boot).
+    #[tokio::test]
+    async fn absent_managed_dir_is_noop() {
+        let _g = MANAGED_ENV_LOCK.lock().unwrap();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let missing = tmp.path().join("does-not-exist");
+        std::env::set_var(super::settings_watch::MANAGED_DIR_ENV, &missing);
+
+        let tiers = super::settings_watch::managed_settings_raw_tiers().await;
+        assert!(tiers.is_empty(), "absent managed dir → no tiers");
+
+        // With no managed tier and no other tiers, the sandbox stays disabled
+        // (byte-identical to the pre-fix opt-in posture).
+        let ctx = sandbox::policy_convert::SandboxConvertContext::default();
+        let cfg = super::sandbox_runtime_config_from_settings_tiers(
+            &[],
+            std::path::Path::new("/tmp"),
+            &ctx,
+        );
+        assert!(!cfg.enabled, "no tiers → sandbox disabled (opt-in default)");
+
+        std::env::remove_var(super::settings_watch::MANAGED_DIR_ENV);
     }
 
     // ── 3c-T2: providers/routing settings → ClientConfig (e2e-flavored) ───

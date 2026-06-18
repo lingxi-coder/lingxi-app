@@ -189,16 +189,17 @@ impl Task for LocalAgentHandler {
             agent_id: _agent_id,
             subagent_type,
             prompt,
-            is_backgrounded: _is_backgrounded,
+            is_backgrounded,
         } = input
         else {
             return Err(TaskError::Internal(
                 "local_agent handler received a non-LocalAgent spawn input".into(),
             ));
         };
-        // `is_backgrounded` affects only surfacing/eviction (the registry layer
-        // records it on `LocalAgentTaskState`), not the spawn mechanics — the
-        // one-shot subagent runs identically either way.
+        // `is_backgrounded` drives surfacing/eviction (the registry layer
+        // records it on `LocalAgentTaskState`) and is also threaded onto the
+        // spawn request's `run_in_background` below for spawn-surface parity; the
+        // one-shot subagent's local run mechanics are otherwise identical.
 
         // 2. Generate the task id (prefix 'a') and allocate its spool file.
         let task_id = crate::id::generate_task_id(TaskType::LocalAgent);
@@ -222,15 +223,20 @@ impl Task for LocalAgentHandler {
             prompt,
             context_paths: Vec::new(),
             // AgentTool spawn-surface parity params — the LocalAgent variant
-            // carries none of these overrides (its only inputs are agent_id /
-            // subagent_type / prompt / is_backgrounded), so all default to None.
+            // carries no model/name/etc. overrides, so those default to None.
             description: None,
             model: None,
+            // The LocalAgent variant IS the background path; wire its real
+            // `is_backgrounded` flag onto the spawn request's `run_in_background`.
+            run_in_background: is_backgrounded,
             name: None,
             team_name: None,
             mode: None,
             isolation: None,
             cwd: None,
+            // Non-fork spawn.
+            fork_context_messages: None,
+            fork_parent_system_prompt: None,
         };
 
         // 4. Bundle the inheritance. Cloning the Arcs preserves pointer
@@ -266,7 +272,7 @@ impl Task for LocalAgentHandler {
             // is surfaced by spooling a `<usage><total_tokens>…` footer —
             // byte-aligned with the TS `registerAsyncAgent` notification shape.
             let (payload, status) = match &result {
-                Ok(SubagentResult::Completed { content, usage }) => {
+                Ok(SubagentResult::Completed { content, usage, .. }) => {
                     // Pretty-print the JSON payload; fall back to the compact
                     // Display form if serialization somehow fails.
                     let body = serde_json::to_string_pretty(content)
@@ -277,8 +283,8 @@ impl Task for LocalAgentHandler {
                     );
                     (body, TaskStatus::Completed)
                 }
-                Ok(SubagentResult::Failed { reason }) => (reason.clone(), TaskStatus::Failed),
-                Ok(SubagentResult::Killed) => (String::new(), TaskStatus::Killed),
+                Ok(SubagentResult::Failed { reason, .. }) => (reason.clone(), TaskStatus::Failed),
+                Ok(SubagentResult::Killed { .. }) => (String::new(), TaskStatus::Killed),
                 Err(e) => (e.to_string(), TaskStatus::Failed),
             };
 
@@ -523,12 +529,27 @@ mod tests {
             match canned {
                 Some(CannedResult::Completed(content, total_tokens)) => {
                     Ok(SubagentResult::Completed {
+                        agent_id: protocol::AgentId::new(),
                         content,
-                        usage: SubagentUsage { total_tokens },
+                        usage: SubagentUsage {
+                            total_tokens,
+                            ..Default::default()
+                        },
+                        total_tool_use_count: 0,
+                        total_duration_ms: 0,
+                        total_tokens,
+                        assistant_message_count: 0,
+                        response_char_count: 0,
+                        last_request_id: None,
                     })
                 }
-                Some(CannedResult::Failed(reason)) => Ok(SubagentResult::Failed { reason }),
-                Some(CannedResult::Killed) => Ok(SubagentResult::Killed),
+                Some(CannedResult::Failed(reason)) => Ok(SubagentResult::Failed {
+                    agent_id: protocol::AgentId::new(),
+                    reason,
+                }),
+                Some(CannedResult::Killed) => Ok(SubagentResult::Killed {
+                    agent_id: protocol::AgentId::new(),
+                }),
                 Some(CannedResult::Err(msg)) => Err(SubagentSpawnError::Runtime(msg)),
                 Some(CannedResult::Pending) | None => {
                     // Park forever — the test cancels via Task::kill.

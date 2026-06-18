@@ -72,6 +72,57 @@ pub const MESSAGE_ADDED: &str = "tengu_agent_message_added";
 /// `tengu_agent_message_truncated` — a message exceeded the per-message cap and was truncated.
 pub const MESSAGE_TRUNCATED: &str = "tengu_agent_message_truncated";
 
+// -- AgentTool (claude-code) event-name constants -----------------------------
+//
+// claude-code's `AgentTool` emits these `tengu_agent_tool_*` (+ two flow-named)
+// events. They are the PARITY-faithful names — distinct from LingXi's INTERNAL
+// `telemetry::tengu::tool::AGENT_STARTED/AGENT_COMPLETED_M4_05/AGENT_FAILED`
+// (`tengu_tool_agent_*`), which are kept for back-compat. The internal names are
+// emitted AND these claude names are emitted alongside them (see
+// `tools/agent/src/agent.rs`).
+//
+// These are deliberately NOT added to the count-locked [`NAMES`] / the byte-for-
+// byte `ALL_EVENT_NAMES` registry fixture (`tengu_events.json`), which is a
+// snapshot of an OLDER claude event set; adding them would break the fixture's
+// 352-entry byte-parity lock. They live in [`AGENT_TOOL_NAMES`] for string-lock
+// testing only — mirroring how `tool::FILE_READ_ANALYTICS_NAMES` is kept apart.
+
+/// `tengu_agent_tool_selected` — `AgentTool` resolved the agent + model and is
+/// about to dispatch (claude `AgentTool.tsx:419`). Fields: `agent_type`, `model`,
+/// `source`, `color`, `is_built_in_agent`, `is_resume`, `is_async`, `is_fork`.
+pub const TOOL_SELECTED: &str = "tengu_agent_tool_selected";
+/// `tengu_agent_tool_completed` — `AgentTool` subagent finished (claude
+/// `agentToolUtils.ts:322`). Fields: `agent_type`, `model`, `prompt_char_count`,
+/// `response_char_count`, `assistant_message_count`, `total_tool_uses`,
+/// `duration_ms`, `total_tokens`, `is_built_in_agent`, `is_async`.
+pub const TOOL_COMPLETED: &str = "tengu_agent_tool_completed";
+/// `tengu_agent_tool_terminated` — an ASYNC `AgentTool` subagent was killed by
+/// the user (claude `agentToolUtils.ts:646`). Fields: `agent_type`, `model`,
+/// `duration_ms`, `is_async`, `is_built_in_agent`, `reason:'user_kill_async'`.
+pub const TOOL_TERMINATED: &str = "tengu_agent_tool_terminated";
+/// `tengu_cache_eviction_hint` — signals inference that a subagent's cache chain
+/// can be evicted (claude `agentToolUtils.ts:340`). Fields: `scope:'subagent_end'`,
+/// `last_request_id`. (Not `tengu_agent_*`-prefixed, but belongs to the
+/// AgentTool flow — placed here per the design.)
+pub const CACHE_EVICTION_HINT: &str = "tengu_cache_eviction_hint";
+/// `tengu_auto_mode_decision` — the handoff safety classifier's verdict on a
+/// subagent's work (claude `agentToolUtils.ts:431`). 13 fields incl. `decision`,
+/// `toolName`, `agentType`, `isHandoff:true`, the classifier-stage ids. (Not
+/// `tengu_agent_*`-prefixed, but belongs to the AgentTool flow.) Only emitted
+/// when the `TRANSCRIPT_CLASSIFIER` feature is ON (OFF by default in Rust).
+pub const AUTO_MODE_DECISION: &str = "tengu_auto_mode_decision";
+
+/// The 5 claude-named `AgentTool` flow events (see the consts above). Kept
+/// SEPARATE from [`NAMES`] so the byte-for-byte `ALL_EVENT_NAMES` registry
+/// fixture (an older-claude snapshot) stays locked. Used by string-lock tests.
+pub const AGENT_TOOL_NAMES: &[&str] = &[
+    TOOL_SELECTED,
+    TOOL_COMPLETED,
+    TOOL_TERMINATED,
+    CACHE_EVICTION_HINT,
+    AUTO_MODE_DECISION,
+];
+
 /// Order-locked array of all 30 names; consumed by `tengu::ALL_EVENT_NAMES`.
 pub(crate) const NAMES: &[&str] = &[
     STARTED,
@@ -495,4 +546,30 @@ pub struct MessageTruncatedPayload {
     pub original_bytes: u64,
     /// Retained size in bytes (post-truncation).
     pub kept_bytes: u64,
+}
+
+#[cfg(test)]
+mod agent_tool_event_name_tests {
+    use super::*;
+
+    /// String-lock the 5 claude `AgentTool`-flow event names (G11) — byte-for-byte
+    /// vs claude-code (`AgentTool.tsx` / `agentToolUtils.ts`).
+    #[test]
+    fn agent_tool_event_names_are_locked() {
+        assert_eq!(TOOL_SELECTED, "tengu_agent_tool_selected");
+        assert_eq!(TOOL_COMPLETED, "tengu_agent_tool_completed");
+        assert_eq!(TOOL_TERMINATED, "tengu_agent_tool_terminated");
+        assert_eq!(CACHE_EVICTION_HINT, "tengu_cache_eviction_hint");
+        assert_eq!(AUTO_MODE_DECISION, "tengu_auto_mode_decision");
+    }
+
+    #[test]
+    fn agent_tool_names_array_is_complete() {
+        assert_eq!(AGENT_TOOL_NAMES.len(), 5);
+        assert!(AGENT_TOOL_NAMES.contains(&TOOL_SELECTED));
+        assert!(AGENT_TOOL_NAMES.contains(&TOOL_COMPLETED));
+        assert!(AGENT_TOOL_NAMES.contains(&TOOL_TERMINATED));
+        assert!(AGENT_TOOL_NAMES.contains(&CACHE_EVICTION_HINT));
+        assert!(AGENT_TOOL_NAMES.contains(&AUTO_MODE_DECISION));
+    }
 }

@@ -49,6 +49,9 @@ use agent::definition::{
 };
 use agent::display::{AgentColor, AgentDisplay};
 use agent::pool::{PoolError, StateMachinePool};
+// `PermissionMode` is re-exported from the `agent` crate (which depends on
+// `permission`) so `tasks` can reference it without a new `permission` dep.
+use agent::PermissionMode;
 use agent::resolve_agent_model;
 use agent::runner::SubagentEvent;
 use agent::SubagentApiClient;
@@ -94,6 +97,16 @@ impl TeammateDefinitionResolver for DefaultTeammateDefinition {
             icon: None,
             allowed_tools: vec![],
             worktree_requirement: None,
+            // Synthesized stub: no extended frontmatter — all defaults.
+            disallowed_tools: vec![],
+            skills: vec![],
+            required_mcp_servers: vec![],
+            background: false,
+            isolation: None,
+            memory: None,
+            effort: None,
+            initial_prompt: None,
+            color: None,
         })
     }
 }
@@ -134,6 +147,17 @@ pub struct InProcessTeammateHandler {
     /// [`Self::with_default_model`]. `None` (the default / tests) leaves the
     /// definition's model RAW (legacy: the runner emits `Inherit`→`"inherit"`).
     default_model: Option<String>,
+    /// Live/boot permission-mode anchor threaded into
+    /// [`agent::resolve_agent_model`] (so an `AgentModel::Inherit` teammate gets
+    /// the plan-mode runtime resolution `opusplan`→Opus / `haiku`→Sonnet). Default
+    /// `PermissionMode::Default` keeps the Inherit branch returning the parent
+    /// model unchanged (mirrors `PoolSubagentSpawner::permission_mode`).
+    permission_mode: PermissionMode,
+    /// RAW user model setting string (mirrors `getUserSpecifiedModelSetting()`,
+    /// e.g. `"opusplan"` / `"haiku"`). Used ONLY for the opusplan/haiku plan-mode
+    /// runtime resolution; without it (the default) the Inherit branch returns the
+    /// parent model unchanged (mirrors `PoolSubagentSpawner::model_setting`).
+    model_setting: Option<String>,
     /// Terminal-status sink (same seam as `LocalBashHandler`).
     status_sink: Arc<dyn TaskStatusSink>,
     /// Best-effort seam to fire the `TeammateIdle` hook each time the persistent
@@ -166,6 +190,8 @@ impl InProcessTeammateHandler {
             tool_invoker: None,
             definitions: Arc::new(DefaultTeammateDefinition),
             default_model: None,
+            permission_mode: PermissionMode::Default,
+            model_setting: None,
             status_sink: Arc::new(NoopStatusSink),
             teammate_idle_firer: None,
             entries: Arc::new(Mutex::new(HashMap::new())),
@@ -186,6 +212,27 @@ impl InProcessTeammateHandler {
     #[must_use]
     pub fn with_default_model(mut self, model: impl Into<String>) -> Self {
         self.default_model = Some(model.into());
+        self
+    }
+
+    /// Set the live/boot permission-mode anchor threaded into
+    /// [`agent::resolve_agent_model`] (so an `AgentModel::Inherit` teammate gets
+    /// the plan-mode runtime resolution `opusplan`→Opus / `haiku`→Sonnet). Without
+    /// it the default (`PermissionMode::Default`) keeps the Inherit branch
+    /// returning the parent model unchanged.
+    #[must_use]
+    pub fn with_permission_mode(mut self, mode: PermissionMode) -> Self {
+        self.permission_mode = mode;
+        self
+    }
+
+    /// Set the RAW user model setting string (mirrors
+    /// `getUserSpecifiedModelSetting()`, e.g. `"opusplan"` / `"haiku"`). Used ONLY
+    /// for the opusplan/haiku plan-mode runtime resolution; without it the Inherit
+    /// branch returns the parent model unchanged.
+    #[must_use]
+    pub fn with_model_setting(mut self, setting: impl Into<String>) -> Self {
+        self.model_setting = Some(setting.into());
         self
     }
 
@@ -241,8 +288,12 @@ impl InProcessTeammateHandler {
         // concrete id), so a wired teammate runs against a live provider. Unset
         // `default_model` (tests / no boot wiring) leaves it RAW (legacy).
         if let Some(parent_model) = &self.default_model {
-            definition.model =
-                AgentModel::Explicit(resolve_agent_model(&definition.model, parent_model));
+            definition.model = AgentModel::Explicit(resolve_agent_model(
+                &definition.model,
+                parent_model,
+                self.permission_mode,
+                self.model_setting.as_deref(),
+            ));
         }
         let icon = definition.icon.clone();
         SubagentContext {
@@ -291,6 +342,14 @@ impl InProcessTeammateHandler {
             // preserves today's behavior (no per-turn budget gate) and is
             // purely additive.
             budget: None,
+            // Teammates do not yet wire the SubagentStart-hook / skills-preload
+            // seam (the in-process-teammate handler has no separate hook executor
+            // / skill loader cell); `None` keeps the child history byte-identical
+            // to today. Additive — wire alongside `PoolSubagentSpawner` later.
+            hook_executor: None,
+            skill_loader: None,
+            hook_session_id: protocol::SessionId::nil(),
+            hook_cwd: std::path::PathBuf::new(),
         }
     }
 }
@@ -899,6 +958,104 @@ mod tests {
         // Empty team_name spawns standalone → team_name is None (leader default).
         assert_eq!(ctx.agent_name.as_deref(), Some("lead"));
         assert_eq!(ctx.team_name, None);
+    }
+
+    // ---- #15: opusplan + plan mode resolves an Inherit teammate to Opus -------
+    //
+    // The composition root threads `with_permission_mode(cfg.permission_mode)` +
+    // `with_model_setting(cfg.default_model)` (the RAW user alias, e.g.
+    // "opusplan") onto the handler alongside
+    // `with_default_model(resolve_user_specified_model(orch_cfg.model))` — the
+    // RESOLVED main-loop id (Sonnet for an opusplan install). To stay FAITHFUL to
+    // production these tests derive the parent the SAME way: feed
+    // `resolve_user_specified_model("opusplan")` (= "claude-sonnet-4-6") as
+    // `with_default_model`, not a hand-picked literal the wired path never emits.
+    // These three together drive `resolve_agent_model`'s `getRuntimeMainLoopModel`
+    // branch (model.ts:145-167), proving the wired path end-to-end: an
+    // `AgentModel::Inherit` teammate on an `opusplan` install IN PLAN MODE resolves
+    // to Opus (without `[1m]`), NOT the resolved Sonnet main-loop model — i.e. the
+    // plan-mode swap fires through the builders the composition root populates.
+
+    #[test]
+    fn build_context_opusplan_plan_mode_resolves_inherit_to_opus() {
+        // Pin firstParty so `getDefaultOpusModel()` is deterministic regardless of
+        // any provider env this process inherits.
+        let _g = OpusEnvGuard::clear_providers();
+        // Derive the parent EXACTLY as the composition root does: resolve the raw
+        // "opusplan" alias to the main-loop wire id (Sonnet outside plan mode) —
+        // proving the swap below is to OPUS, not a pass-through of a literal.
+        let parent = agent::model_resolution::resolve_user_specified_model("opusplan");
+        let handler = model_test_handler(Some(&parent))
+            .with_permission_mode(PermissionMode::Plan)
+            .with_model_setting("opusplan");
+        let def = DefaultTeammateDefinition
+            .resolve(&protocol::AgentId::new(), "lead")
+            .unwrap();
+        let ctx = handler.build_context(protocol::AgentId::new(), "lead", "", def);
+        assert!(
+            matches!(&ctx.agent_definition.model, AgentModel::Explicit(m) if m == "claude-opus-4-7"),
+            "opusplan + plan mode must resolve an Inherit teammate to Opus, got {:?}",
+            ctx.agent_definition.model
+        );
+    }
+
+    #[test]
+    fn build_context_opusplan_default_mode_returns_resolved_parent() {
+        // Same opusplan setting but NOT in plan mode → the Inherit branch returns
+        // the resolved main-loop model unchanged (Sonnet), proving the swap is
+        // gated on plan mode (not on the setting alone). Parent derived via the
+        // resolver, exactly as the composition root produces it.
+        let _g = OpusEnvGuard::clear_providers();
+        let parent = agent::model_resolution::resolve_user_specified_model("opusplan");
+        assert_eq!(parent, "claude-sonnet-4-6", "opusplan resolves to Sonnet outside plan mode");
+        let handler = model_test_handler(Some(&parent))
+            .with_permission_mode(PermissionMode::Default)
+            .with_model_setting("opusplan");
+        let def = DefaultTeammateDefinition
+            .resolve(&protocol::AgentId::new(), "lead")
+            .unwrap();
+        let ctx = handler.build_context(protocol::AgentId::new(), "lead", "", def);
+        assert!(
+            matches!(&ctx.agent_definition.model, AgentModel::Explicit(m) if m == "claude-sonnet-4-6"),
+            "opusplan outside plan mode must keep the resolved parent (Sonnet), got {:?}",
+            ctx.agent_definition.model
+        );
+    }
+
+    /// RAII guard that clears the three provider env vars (Bedrock/Vertex/Foundry)
+    /// for the duration of a test so `getDefaultOpusModel()` resolves on the
+    /// firstParty branch deterministically (mirrors `model_resolution`'s test
+    /// guard). Restores prior values on drop.
+    struct OpusEnvGuard {
+        prev: Vec<(&'static str, Option<String>)>,
+    }
+    impl OpusEnvGuard {
+        fn clear_providers() -> Self {
+            let keys = [
+                "CLAUDE_CODE_USE_BEDROCK",
+                "CLAUDE_CODE_USE_VERTEX",
+                "CLAUDE_CODE_USE_FOUNDRY",
+            ];
+            let prev = keys
+                .iter()
+                .map(|k| {
+                    let v = std::env::var(k).ok();
+                    std::env::remove_var(k);
+                    (*k, v)
+                })
+                .collect();
+            Self { prev }
+        }
+    }
+    impl Drop for OpusEnvGuard {
+        fn drop(&mut self) {
+            for (k, v) in &self.prev {
+                match v {
+                    Some(val) => std::env::set_var(k, val),
+                    None => std::env::remove_var(k),
+                }
+            }
+        }
     }
 
     #[tokio::test]

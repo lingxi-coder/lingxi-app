@@ -107,11 +107,17 @@ impl AgentExecutor {
             // sets no model/teammate/isolation/cwd override.
             description: None,
             model: None,
+            // Hook-driven agents run synchronously inside the hook timeout.
+            run_in_background: false,
             name: None,
             team_name: None,
             mode: None,
             isolation: None,
             cwd: None,
+            // Non-fork path: the hook executor never forks a parent
+            // conversation, so the fork-subagent fields stay unset.
+            fork_context_messages: None,
+            fork_parent_system_prompt: None,
         };
 
         let fut = spawner.spawn(req, inherit);
@@ -155,7 +161,7 @@ impl AgentExecutor {
                     signal: AgentExecutionSignal::Ok,
                 }
             }
-            Ok(SubagentResult::Failed { reason }) => AgentExecutionOutcome {
+            Ok(SubagentResult::Failed { reason, .. }) => AgentExecutionOutcome {
                 result: HookResult {
                     outcome: HookOutcome::Error,
                     stdout: String::new(),
@@ -165,7 +171,7 @@ impl AgentExecutor {
                 },
                 signal: AgentExecutionSignal::Ok,
             },
-            Ok(SubagentResult::Killed) => AgentExecutionOutcome {
+            Ok(SubagentResult::Killed { .. }) => AgentExecutionOutcome {
                 result: HookResult {
                     outcome: HookOutcome::Cancelled,
                     stdout: String::new(),
@@ -276,8 +282,15 @@ mod tests {
     async fn happy_path_completed_parses_response_json() {
         let spawner = Arc::new(MockSpawner {
             result: Mutex::new(Some(Ok(SubagentResult::Completed {
+                agent_id: protocol::AgentId::new(),
                 content: json!(r#"{"decision":"approve"}"#),
                 usage: SubagentUsage::default(),
+                total_tool_use_count: 0,
+                total_duration_ms: 0,
+                total_tokens: 0,
+                assistant_message_count: 0,
+                response_char_count: 0,
+                last_request_id: None,
             }))),
         });
         let exec = AgentExecutor::new(Some(spawner.clone()), Duration::from_secs(5));
@@ -324,6 +337,7 @@ mod tests {
     async fn subagent_failed_returns_error() {
         let spawner = Arc::new(MockSpawner {
             result: Mutex::new(Some(Ok(SubagentResult::Failed {
+                agent_id: protocol::AgentId::new(),
                 reason: "no API key".into(),
             }))),
         });

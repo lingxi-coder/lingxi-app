@@ -26,6 +26,15 @@ fn mk(name: &str, desc: &str, tools: Vec<String>) -> AgentDefinition {
         icon: None,
         allowed_tools: tools,
         worktree_requirement: None,
+        disallowed_tools: vec![],
+        skills: vec![],
+        required_mcp_servers: vec![],
+        background: false,
+        isolation: None,
+        memory: None,
+        effort: None,
+        initial_prompt: None,
+        color: None,
     }
 }
 

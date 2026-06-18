@@ -58,6 +58,13 @@ pub struct ToolUseContext {
     /// the Bash/subprocess tools observe it in Phase 2 to kill in-flight work.
     /// `None` for batched/legacy call sites.
     pub cancel: Option<tokio_util::sync::CancellationToken>,
+    /// The parent agent's already-rendered system prompt bytes, threaded onto a
+    /// fork-subagent spawn so the child replays the parent's exact prompt (TS
+    /// `forkContextMessages` / `override.systemPrompt = forkParentSystemPrompt`).
+    /// `None` for the non-fork path and for call sites the orchestrator has not
+    /// yet wired (`AgentTool` then runs the fork child with `FORK_AGENT`'s empty
+    /// system prompt — functional, not byte-identical).
+    pub fork_parent_system_prompt: Option<String>,
     // File state cache wired in Plan 10.
 }
 
@@ -92,6 +99,7 @@ impl ToolUseContext {
             session: None,
             subagent_registry: None,
             cancel: None,
+            fork_parent_system_prompt: None,
         }
     }
 }

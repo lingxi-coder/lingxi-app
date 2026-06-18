@@ -219,6 +219,32 @@ impl HookExecutorImpl {
         self.registry.read().await.has_hooks_for(event_type)
     }
 
+    /// Register an agent's frontmatter hooks scoped to `agent_id` (G4 — claude
+    /// `registerFrontmatterHooks(setAppState, agentId, hooks, …, isAgent)`,
+    /// runAgent.ts:557-575). Writes through the shared registry so the hooks fire
+    /// for the lifetime of the running subagent; pass `is_agent = true` to
+    /// retarget `Stop` subscriptions to `SubagentStop`. Pair with
+    /// [`Self::clear_agent_hooks`] in the runner's terminal/cleanup path
+    /// (claude's `clearSessionHooks` in the `runAgent` finally).
+    pub async fn register_agent_hooks(
+        &self,
+        agent_id: protocol::AgentId,
+        hooks: &[HookDefinition],
+        is_agent: bool,
+    ) {
+        self.registry
+            .write()
+            .await
+            .register_agent_hooks(agent_id, hooks, is_agent);
+    }
+
+    /// Remove every frontmatter hook scoped to `agent_id` (G4 — claude
+    /// `clearSessionHooks(rootSetAppState, agentId)`, runAgent.ts finally).
+    /// Returns the number of hooks dropped.
+    pub async fn clear_agent_hooks(&self, agent_id: protocol::AgentId) -> usize {
+        self.registry.write().await.clear_agent_hooks(agent_id)
+    }
+
     /// Fire `event` and return the aggregated result of every matching hook.
     ///
     /// Hooks are evaluated in priority-descending order; processing stops
@@ -266,6 +292,112 @@ impl HookExecutorImpl {
             } else {
                 // B5 config-`async` path: background the hook and continue. It
                 // is excluded from `agg`, so it cannot block.
+                self.background_hook(hook, &event, &ctx).await;
+            }
+        }
+        agg
+    }
+
+    /// Fire `event` against ONLY the frontmatter hooks scoped to `agent_id`
+    /// (source / plugin / other-agent buckets excluded).
+    ///
+    /// The child runner uses this to fire `SubagentStop` for its OWN frontmatter
+    /// Stop→SubagentStop hooks (claude fires the subagent's stop hooks inside the
+    /// child, runAgent.ts) at the loop's end, BEFORE [`Self::clear_agent_hooks`]
+    /// removes them — otherwise those retargeted hooks are dead code (registered,
+    /// then cleared before the orchestrator-side `SubagentStop` chokepoint runs).
+    /// Scoping to this agent's bucket avoids double-firing session / plugin
+    /// `SubagentStop` hooks, which the chokepoint already covers. A strict no-op
+    /// (no matched hooks) when the agent registered none, so the no-frontmatter
+    /// path is byte-identical to legacy.
+    ///
+    /// Mirrors [`Self::execute`]'s per-hook dispatch (progress beacon, `blocking`
+    /// vs. background routing, `once` removal, `Block` short-circuit) so a
+    /// frontmatter hook behaves identically whether it fires here or via the
+    /// general path.
+    pub async fn execute_agent_scoped(
+        &self,
+        event: HookEvent,
+        ctx: HookContext,
+        agent_id: protocol::AgentId,
+    ) -> AggregateHookResult {
+        let reg = self.registry.read().await;
+        let matched: Vec<HookDefinition> = reg
+            .match_event_agent_scoped(&event, agent_id)
+            .into_iter()
+            .cloned()
+            .collect();
+        drop(reg);
+        let mut agg = AggregateHookResult::default();
+        let hook_event = format!("{:?}", event.event_type());
+        for hook in &matched {
+            agg.progress.push(crate::events::HookProgressEvent {
+                hook_event: hook_event.clone(),
+                hook_name: hook.name.clone(),
+                status_message: hook.status_message.clone(),
+            });
+            if hook.blocking {
+                let result = self.dispatcher().dispatch(hook, &event, &ctx).await;
+                if hook.once && matches!(result.outcome, HookOutcome::Success) {
+                    self.registry.write().await.remove_once_hook(hook.id);
+                }
+                Self::merge(&mut agg, hook, result);
+                if matches!(agg.decision, Some(crate::response::HookDecision::Block)) {
+                    break;
+                }
+            } else {
+                self.background_hook(hook, &event, &ctx).await;
+            }
+        }
+        agg
+    }
+
+    /// Fire `event` against every matching hook EXCEPT the frontmatter bucket
+    /// scoped to `exclude_agent_id` (source / plugin / other-agent buckets still
+    /// fire).
+    ///
+    /// The orchestrator-side `SubagentStop` chokepoint uses this so it fires the
+    /// session / plugin `SubagentStop` hooks WITHOUT re-firing the child's OWN
+    /// frontmatter `Stop`→`SubagentStop` hooks — those already fired in-child via
+    /// [`Self::execute_agent_scoped`] (claude fires a subagent's stop hooks inside
+    /// `runAgent`). Excluding by id is race-free vs. the runner's
+    /// `clear_agent_hooks` (which removes the bucket only after the terminal
+    /// event). A strict no-op difference from [`Self::execute`] when the excluded
+    /// agent registered no frontmatter hooks (every `FakeAgentTool` fixture).
+    ///
+    /// Mirrors [`Self::execute`]'s per-hook dispatch (progress beacon, `blocking`
+    /// vs. background routing, `once` removal, `Block` short-circuit).
+    pub async fn execute_excluding_agent(
+        &self,
+        event: HookEvent,
+        ctx: HookContext,
+        exclude_agent_id: protocol::AgentId,
+    ) -> AggregateHookResult {
+        let reg = self.registry.read().await;
+        let matched: Vec<HookDefinition> = reg
+            .match_event_excluding_agent(&event, exclude_agent_id)
+            .into_iter()
+            .cloned()
+            .collect();
+        drop(reg);
+        let mut agg = AggregateHookResult::default();
+        let hook_event = format!("{:?}", event.event_type());
+        for hook in &matched {
+            agg.progress.push(crate::events::HookProgressEvent {
+                hook_event: hook_event.clone(),
+                hook_name: hook.name.clone(),
+                status_message: hook.status_message.clone(),
+            });
+            if hook.blocking {
+                let result = self.dispatcher().dispatch(hook, &event, &ctx).await;
+                if hook.once && matches!(result.outcome, HookOutcome::Success) {
+                    self.registry.write().await.remove_once_hook(hook.id);
+                }
+                Self::merge(&mut agg, hook, result);
+                if matches!(agg.decision, Some(crate::response::HookDecision::Block)) {
+                    break;
+                }
+            } else {
                 self.background_hook(hook, &event, &ctx).await;
             }
         }
@@ -548,7 +680,9 @@ impl HookExecutorImpl {
             // `additionalContext` is kept on its OWN aggregate channel, distinct
             // from `system_messages`: only `additional_contexts` reaches the
             // model (claude-code `hook_additional_context`, `messages.ts:4117`),
-            // whereas `system_messages` is transcript-facing only (`:4258`).
+            // whereas `system_messages` is transcript-facing only (`:4258`). It is
+            // injected as its own <system-reminder> message, not folded into the
+            // tool_result content (claude-code `toolExecution.ts:845`).
             if let Some(ctx) = &resp.additional_context {
                 agg.additional_contexts.push(ctx.clone());
             }
@@ -3083,6 +3217,61 @@ mod once_and_status_message_tests {
         );
     }
 
+    /// #9: `execute_agent_scoped` fires ONLY the named agent's frontmatter
+    /// SubagentStop hooks — a session-level SubagentStop hook is excluded (the
+    /// orchestrator chokepoint owns those), so the in-child fire can't double-run.
+    #[tokio::test]
+    async fn execute_agent_scoped_fires_only_agent_frontmatter() {
+        let agent = protocol::AgentId::new();
+        let agent_runs = Arc::new(AtomicU32::new(0));
+        let session_runs = Arc::new(AtomicU32::new(0));
+
+        let mut registry = HookRegistry::new();
+        // Agent frontmatter Stop hook → retargeted to SubagentStop (isAgent=true).
+        let mut fm = builtin_hook("agent-stop", false, None);
+        fm.events = vec![HookEventType::Stop];
+        fm.name = "agent-stop".into();
+        registry.register_agent_hooks(agent, &[fm], true);
+        // Session-level SubagentStop hook (must NOT fire on the scoped call).
+        let mut sess = builtin_hook("session-stop", false, None);
+        sess.events = vec![HookEventType::SubagentStop];
+        sess.name = "session-stop".into();
+        sess.source = HookSource::User;
+        registry.register(sess);
+
+        let reg = Arc::new(RwLock::new(registry));
+        let mut exec =
+            HookExecutorImpl::new(reg.clone(), Arc::new(UnusedHttp), Arc::new(UnusedRuntime));
+        exec.register_builtin(Arc::new(CountingBuiltin {
+            id: "agent-stop".into(),
+            runs: agent_runs.clone(),
+            outcome: HookOutcome::Success,
+        }));
+        exec.register_builtin(Arc::new(CountingBuiltin {
+            id: "session-stop".into(),
+            runs: session_runs.clone(),
+            outcome: HookOutcome::Success,
+        }));
+
+        let ev = HookEvent::SubagentStop {
+            agent_id: agent,
+            status: "completed".into(),
+        };
+        exec.execute_agent_scoped(ev, HookContext::default(), agent)
+            .await;
+
+        assert_eq!(
+            agent_runs.load(Ordering::SeqCst),
+            1,
+            "the agent's frontmatter SubagentStop fires"
+        );
+        assert_eq!(
+            session_runs.load(Ordering::SeqCst),
+            0,
+            "the session-level SubagentStop is NOT fired by the scoped call"
+        );
+    }
+
     /// A `PostToolUse` Builtin hook returning `updated_mcp_tool_output` has it
     /// folded into the aggregate's `updated_mcp_tool_output` by `merge`.
     #[tokio::test]
@@ -3459,8 +3648,15 @@ mod http_agent_dispatch_tests {
         let spawner = Arc::new(RecordingSpawner {
             recorded: Mutex::new(Vec::new()),
             result: Mutex::new(Some(Ok(SubagentResult::Completed {
+                agent_id: protocol::AgentId::new(),
                 content: json!(r#"{"decision":"approve"}"#),
                 usage: SubagentUsage::default(),
+                total_tool_use_count: 0,
+                total_duration_ms: 0,
+                total_tokens: 0,
+                assistant_message_count: 0,
+                response_char_count: 0,
+                last_request_id: None,
             }))),
         });
         let mut registry = HookRegistry::new();

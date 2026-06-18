@@ -43,6 +43,24 @@ pub enum SubagentEvent {
         agent_id: AgentId,
         /// Final result payload (free-form JSON).
         result: serde_json::Value,
+        /// Wire usage from the FINAL model response (the spawner translates this
+        /// into `traits::SubagentUsage` + the result-level token total). The
+        /// legacy stub path has no real round-trips and emits `Usage::default()`.
+        usage: llm_client::Usage,
+        /// Number of tool-use blocks executed across the run (claude
+        /// `totalToolUseCount`). `0` on the stub path.
+        total_tool_use_count: u64,
+        /// Wall-clock duration of the run in milliseconds (claude
+        /// `totalDurationMs`). `0` on the stub path.
+        total_duration_ms: u64,
+        /// Number of assistant messages produced across the run (claude
+        /// `agentMessages.length`, fed into `tengu_agent_tool_completed`'s
+        /// `assistant_message_count`). `0` on the stub path.
+        assistant_message_count: u64,
+        /// The FINAL assistant turn's provider request id (claude
+        /// `lastAssistantMessage.requestId`) — used to gate
+        /// `tengu_cache_eviction_hint`. `None` on the stub path.
+        last_request_id: Option<String>,
     },
     /// Agent terminated due to an error.
     Failed {
@@ -65,6 +83,12 @@ pub enum SubagentEvent {
     },
 }
 
+/// Milliseconds elapsed since `start`, saturated into a `u64` (claude
+/// `totalDurationMs`).
+fn elapsed_ms(start: std::time::Instant) -> u64 {
+    u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX)
+}
+
 /// Subagent state-machine loop.
 ///
 /// When [`SubagentContext::api_client`] is `Some`, drives the real
@@ -76,10 +100,125 @@ pub async fn run_subagent(
     event_rx: mpsc::Receiver<engine::Event>,
     out_tx: mpsc::Sender<SubagentEvent>,
 ) {
-    if ctx.api_client.is_some() {
-        run_subagent_loop(ctx, event_rx, out_tx).await;
+    // G4 (frontmatter hooks): register the agent definition's frontmatter hooks
+    // scoped to this child `agent_id` BEFORE the run and clear them AFTER —
+    // claude `registerFrontmatterHooks(…, isAgent=true)` (runAgent.ts:557-575)
+    // then `clearSessionHooks(agentId)` in the `runAgent` finally. `isAgent=true`
+    // retargets each `Stop` subscription to `SubagentStop` (a subagent's loop end
+    // fires `SubagentStop`). Wrapped here at the dispatcher so the clear runs
+    // regardless of how the body returns (the loop has many early returns), and
+    // so an un-wired `hook_executor` (tests / minimal builds) is a strict no-op.
+    let frontmatter_cleanup = match &ctx.hook_executor {
+        Some(he) if !ctx.agent_definition.frontmatter_hooks.is_empty() => {
+            he.register_agent_hooks(
+                ctx.agent_id,
+                &ctx.agent_definition.frontmatter_hooks,
+                true,
+            )
+            .await;
+            Some((he.clone(), ctx.agent_id))
+        }
+        _ => None,
+    };
+
+    // #9 (dead SubagentStop): when this agent registered frontmatter hooks, the
+    // `Stop`→`SubagentStop` retargeted ones (registerFrontmatterHooks isAgent=true)
+    // must actually FIRE at the loop's natural end — claude fires the subagent's
+    // stop hooks INSIDE the child (`stopHooks.ts` via `query.ts`, keyed on
+    // `toolUseContext.agentId`). The LingXi orchestrator-side `SubagentStop`
+    // chokepoint runs AFTER this dispatcher returns (i.e. after `clear_agent_hooks`
+    // below), so those retargeted frontmatter hooks would be dead code without an
+    // in-child fire. We fire SubagentStop here, AGENT-SCOPED to this child's own
+    // bucket (see `execute_agent_scoped`), so session / plugin `SubagentStop`
+    // hooks are NOT double-fired — the chokepoint already covers those.
+    //
+    // To carry a faithful run status we proxy `out_tx`: forward every
+    // `SubagentEvent` to the real channel while remembering the terminal one, so
+    // the status maps to claude's outcome (`completed` / `failed` — `Killed` does
+    // not fire SubagentStop, matching claude where an aborted child's loop does
+    // not reach `stopHooks`). When there are NO frontmatter hooks (the common
+    // case) we skip the proxy entirely and pass `out_tx` straight through, so the
+    // hot path is byte-identical to legacy.
+    let agent_scoped_stop = frontmatter_cleanup.as_ref().map(|(he, agent_id)| {
+        (
+            he.clone(),
+            *agent_id,
+            ctx.agent_definition.agent_type.clone(),
+            ctx.hook_session_id,
+            ctx.hook_cwd.clone(),
+        )
+    });
+
+    let terminal_status = if agent_scoped_stop.is_some() {
+        // Proxy: forward events, capture the terminal disposition.
+        let (proxy_tx, mut proxy_rx) = mpsc::channel::<SubagentEvent>(16);
+        let forwarder = {
+            let real = out_tx.clone();
+            tokio::spawn(async move {
+                let mut status: Option<&'static str> = None;
+                while let Some(ev) = proxy_rx.recv().await {
+                    status = match &ev {
+                        SubagentEvent::Completed { .. } => Some("completed"),
+                        SubagentEvent::Failed { .. } => Some("failed"),
+                        // Killed does not fire SubagentStop (claude: an aborted
+                        // child throws before reaching its stop hooks).
+                        SubagentEvent::Killed { .. } => None,
+                        // Non-terminal: keep whatever terminal we last saw.
+                        _ => status,
+                    };
+                    // Best-effort forward; a closed receiver drops the rest.
+                    if real.send(ev).await.is_err() {
+                        break;
+                    }
+                }
+                status
+            })
+        };
+        // Run the body against the proxy, then drop our proxy sender so the
+        // forwarder's `recv()` loop ends and we can read the captured status.
+        if ctx.api_client.is_some() {
+            run_subagent_loop(ctx, event_rx, proxy_tx).await;
+        } else {
+            run_subagent_stub(ctx, event_rx, proxy_tx).await;
+        }
+        forwarder.await.unwrap_or(None)
     } else {
-        run_subagent_stub(ctx, event_rx, out_tx).await;
+        // No frontmatter hooks: straight passthrough, no proxy overhead.
+        if ctx.api_client.is_some() {
+            run_subagent_loop(ctx, event_rx, out_tx).await;
+        } else {
+            run_subagent_stub(ctx, event_rx, out_tx).await;
+        }
+        None
+    };
+
+    // Fire the agent-scoped SubagentStop BEFORE clearing the frontmatter hooks
+    // (otherwise the retargeted Stop→SubagentStop hooks are already gone). Only
+    // when the child reached a terminal that fires SubagentStop in claude
+    // (`completed` / `failed`).
+    if let (Some((he, agent_id, agent_type, session_id, cwd)), Some(status)) =
+        (agent_scoped_stop, terminal_status)
+    {
+        let stop_ctx = hooks::registry::HookContext {
+            session_id,
+            agent_id: Some(agent_id),
+            cwd,
+            agent_type: Some(agent_type),
+            ..Default::default()
+        };
+        he.execute_agent_scoped(
+            hooks::events::HookEvent::SubagentStop {
+                agent_id,
+                status: status.to_string(),
+            },
+            stop_ctx,
+            agent_id,
+        )
+        .await;
+    }
+
+    if let Some((he, agent_id)) = frontmatter_cleanup {
+        he.clear_agent_hooks(agent_id).await;
     }
 }
 
@@ -102,17 +241,182 @@ fn resolve_model(ctx: &SubagentContext) -> String {
     }
 }
 
-/// Aggregate the text from an assistant message's content blocks.
-fn aggregate_text(content: &[protocol::ContentBlock]) -> String {
-    let mut out = String::new();
-    for blk in content {
-        if let protocol::ContentBlock::Text { text } = blk {
-            if !out.is_empty() {
-                out.push('\n');
+/// Extract the text blocks the final agent response surfaces, with claude's
+/// backward-scan fallback.
+///
+/// Port of claude-code `finalizeAgentTool` (agentToolUtils.ts:304-317): take the
+/// text blocks from the LAST assistant message; if it carried none (the loop
+/// exited mid-turn on a pure `tool_use` turn), fall back to the most recent
+/// assistant message in `history` that DOES have text blocks. Returns the raw
+/// text strings (one per surviving text block) in source order — the caller maps
+/// them into claude's `content: [{type:'text', text}]` array.
+fn final_text_blocks(
+    history: &[protocol::ConversationMessage],
+    final_assistant_blocks: &[protocol::ContentBlock],
+) -> Vec<String> {
+    let texts_of = |blocks: &[protocol::ContentBlock]| -> Vec<String> {
+        blocks
+            .iter()
+            .filter_map(|b| match b {
+                protocol::ContentBlock::Text { text } => Some(text.clone()),
+                _ => None,
+            })
+            .collect::<Vec<String>>()
+    };
+    // 1. Text from the final assistant message.
+    let primary = texts_of(final_assistant_blocks);
+    if !primary.is_empty() {
+        return primary;
+    }
+    // 2. Backward scan: most recent assistant message WITH text.
+    for msg in history.iter().rev() {
+        if let protocol::ConversationMessage::Assistant { content, .. } = msg {
+            let t = texts_of(content);
+            if !t.is_empty() {
+                return t;
             }
-            out.push_str(text);
         }
     }
+    Vec::new()
+}
+
+/// Build the terminal `Completed.result` JSON for a clean stop.
+///
+/// Carries claude's `content` array (`[{type:'text', text}]`, agentToolUtils.ts
+/// `finalizeAgentTool` return) computed via the backward-scan
+/// [`final_text_blocks`], plus the legacy `text`/`stop_reason` keys existing
+/// consumers (and the runner's own tests) read. `AgentTool` reads `content` to
+/// build claude's structured result + model-facing trailer; the joined `text`
+/// stays for back-compat (`tasks::handlers::local_agent` / `dream`).
+fn build_completed_result(
+    history: &[protocol::ConversationMessage],
+    final_assistant_blocks: &[protocol::ContentBlock],
+    stop_reason: Option<&str>,
+) -> serde_json::Value {
+    let blocks = final_text_blocks(history, final_assistant_blocks);
+    let content: Vec<serde_json::Value> = blocks
+        .iter()
+        .map(|t| serde_json::json!({ "type": "text", "text": t }))
+        .collect();
+    serde_json::json!({
+        "content": content,
+        "text": blocks.join("\n"),
+        "stop_reason": stop_reason,
+    })
+}
+
+/// Byte-locked `formatSkillLoadingMetadata(skillName)` port
+/// (claude `processSlashCommand.tsx:786`): the leading text block of a preloaded
+/// skill's meta user message. claude ignores the `progressMessage` arg
+/// (`_progressMessage` is unused), so this renders only the (resolved) name:
+/// `<command-message>{name}</command-message>\n<command-name>{name}</command-name>\n<skill-format>true</skill-format>`.
+fn format_skill_loading_metadata(skill_name: &str) -> String {
+    format!(
+        "<command-message>{skill_name}</command-message>\n\
+<command-name>{skill_name}</command-name>\n\
+<skill-format>true</skill-format>"
+    )
+}
+
+/// Build the G4 (SubagentStart additionalContext) + G5 (skills) messages claude
+/// `runAgent` prepends to a child's INITIAL messages before the query loop, in
+/// claude's order: additionalContext (runAgent.ts:530-555) → skills
+/// (runAgent.ts:577-646). (Frontmatter-hook registration — runAgent.ts:557-575,
+/// ordered between them — is handled at the [`run_subagent`] dispatcher so the
+/// clear is guaranteed; its registration is side-effecting, not message-producing,
+/// so its position relative to these two message-producing steps is unobservable
+/// in the child history.)
+///
+/// Returns the extra [`ConversationMessage`]s to append after the prompt seed.
+/// A `None` `hook_executor` / `skill_loader` (tests / minimal builds) makes the
+/// respective step a strict no-op, so the child history stays byte-identical to
+/// legacy.
+async fn build_preload_messages(ctx: &SubagentContext) -> Vec<protocol::ConversationMessage> {
+    use protocol::{ContentBlock, ConversationMessage, MessageId};
+
+    let agent_type = ctx.agent_definition.agent_type.clone();
+    let mut out: Vec<ConversationMessage> = Vec::new();
+
+    // --- G4: SubagentStart hooks → additionalContext injection --------------
+    // claude fires `executeSubagentStartHooks(agentId, agentType, signal)`,
+    // collects every hook's `additionalContexts` into ONE `string[]`, and pushes
+    // a SINGLE `hook_additional_context` user message into `initialMessages`
+    // (runAgent.ts:530-555). That attachment renders (messages.ts:4117-4128 via
+    // `wrapInSystemReminder`) as ONE `<system-reminder>` message:
+    //   `<system-reminder>\nSubagentStart hook additional context: ` +
+    //   contexts.join("\n") + `\n</system-reminder>`
+    // An empty collection produces NO message (messages.ts:4118 early return).
+    // We match those bytes exactly: one message, the `SubagentStart hook
+    // additional context: ` prefix, the `\n`-join of all contexts.
+    if let Some(hooks) = &ctx.hook_executor {
+        let hook_ctx = hooks::registry::HookContext {
+            session_id: ctx.hook_session_id,
+            agent_id: Some(ctx.agent_id),
+            cwd: ctx.hook_cwd.clone(),
+            agent_type: Some(agent_type.clone()),
+            ..Default::default()
+        };
+        let agg = hooks
+            .execute(
+                hooks::events::HookEvent::SubagentStart {
+                    agent_id: ctx.agent_id,
+                    agent_type: agent_type.clone(),
+                    parent_agent_id: ctx.parent_agent_id,
+                },
+                hook_ctx,
+            )
+            .await;
+        if !agg.additional_contexts.is_empty() {
+            let joined = agg.additional_contexts.join("\n");
+            out.push(ConversationMessage::user(
+                MessageId::new(),
+                format!(
+                    "<system-reminder>\nSubagentStart hook additional context: {joined}\n</system-reminder>"
+                ),
+            ));
+        }
+    }
+
+    // --- G5: skills preload -------------------------------------------------
+    // claude resolves+loads each frontmatter skill and pushes a `isMeta` user
+    // message whose first block is `formatSkillLoadingMetadata(skillName,
+    // skill.progressMessage)` followed by the loaded content blocks
+    // (runAgent.ts:577-646). A missing / non-prompt skill logs claude's exact
+    // warn and is skipped.
+    if let Some(loader) = &ctx.skill_loader {
+        for skill_name in &ctx.agent_definition.skills {
+            match loader.resolve_and_load(skill_name, &agent_type).await {
+                None => {
+                    // claude runAgent.ts:600 — exact warn string.
+                    tracing::warn!(
+                        "[Agent: {agent_type}] Warning: Skill '{skill_name}' specified in frontmatter was not found"
+                    );
+                }
+                Some(load) => {
+                    tracing::debug!("[Agent: {agent_type}] Preloaded skill '{skill_name}'");
+                    // Leading metadata text block + the loaded content blocks
+                    // (claude `createUserMessage({ content: [metadata, ...content],
+                    // isMeta: true })`). LingXi's `ConversationMessage::User` has
+                    // no `isMeta` flag (the meta-ness is a UI concern claude uses
+                    // for rendering "Skill(name)"); the model-facing bytes — the
+                    // metadata block then the skill content — are what matter for
+                    // parity, and those are preserved here.
+                    let mut blocks: Vec<ContentBlock> =
+                        Vec::with_capacity(1 + load.content.len());
+                    blocks.push(ContentBlock::Text {
+                        text: format_skill_loading_metadata(&load.display_name),
+                    });
+                    blocks.extend(load.content);
+                    out.push(ConversationMessage::User {
+                        id: MessageId::new(),
+                        content: blocks,
+                        is_meta: false,
+                    });
+                }
+            }
+        }
+    }
+
     out
 }
 
@@ -245,12 +549,38 @@ async fn run_subagent_loop(
     }
     history.extend(ctx.prompt_messages.iter().cloned());
 
+    // G4 + G5 (claude runAgent.ts:530-646): SubagentStart-hook additionalContext
+    // injection then frontmatter skills preload, appended to the child's INITIAL
+    // messages before the first turn. Strict no-op (no extra messages) when
+    // neither `hook_executor` nor `skill_loader` is wired, so legacy / test
+    // builds keep a byte-identical history. (Frontmatter-hook registration is
+    // done at the `run_subagent` dispatcher for guaranteed cleanup.)
+    history.extend(build_preload_messages(&ctx).await);
+
     let max_turns = ctx.agent_definition.max_turns;
 
     // Once the cancellation channel closes, no UserExit / UserInterrupt can
     // ever arrive, so we stop racing it and await the API future directly
     // (racing a perpetually-ready `recv() -> None` arm would busy-loop).
     let mut event_channel_open = true;
+
+    // Result-level rollups carried onto the terminal `Completed` event so the
+    // spawner can populate claude's `totalDurationMs` / `totalToolUseCount`
+    // without re-deriving them. `run_start` spans the whole run (every turn-set
+    // in persistent mode); `total_tool_use_count` accumulates `tool_uses.len()`
+    // across turns. `last_usage` keeps the FINAL response usage (claude
+    // `getTokenCountFromUsage` reads the LAST assistant usage, not a sum), so it
+    // is overwritten — never accumulated — each turn.
+    let run_start = std::time::Instant::now();
+    let mut total_tool_use_count: u64 = 0;
+    let mut last_usage = llm_client::Usage::default();
+    // claude `agentMessages.length` — assistant turns produced across the run
+    // (one per round-trip) — and the FINAL turn's provider request id (claude
+    // `lastAssistantMessage.requestId`), both surfaced on the terminal
+    // `Completed` event so the spawner can emit `tengu_agent_tool_completed` /
+    // `tengu_cache_eviction_hint`.
+    let mut assistant_message_count: u64 = 0;
+    let mut last_request_id: Option<String> = None;
 
     // Outer loop: one iteration per turn-set. In non-persistent mode the
     // turn-set runs exactly once (we `return` after it). In persistent mode the
@@ -364,6 +694,21 @@ async fn run_subagent_loop(
             }
         };
 
+        // Keep the FINAL response usage for the terminal `Completed` rollup
+        // (claude `getTokenCountFromUsage` reads the LAST assistant usage — so
+        // overwrite, never accumulate, to stay byte-faithful).
+        last_usage = response.usage.clone();
+        // Track the assistant-message count (claude `agentMessages.length`) and
+        // the FINAL turn's provider request id (claude
+        // `lastAssistantMessage.requestId`). One assistant turn per round-trip;
+        // `response.id` is the provider response id (the `requestId` analog).
+        assistant_message_count = assistant_message_count.saturating_add(1);
+        last_request_id = if response.id.is_empty() {
+            None
+        } else {
+            Some(response.id.clone())
+        };
+
         // Build the assistant turn and append to history.
         let assistant_blocks = translate_response_blocks(&response.content);
         let stop_reason = response.stop_reason.clone();
@@ -389,6 +734,10 @@ async fn run_subagent_loop(
                     _ => None,
                 })
                 .collect();
+
+        // Accumulate the run-wide tool-use count (claude `totalToolUseCount`).
+        total_tool_use_count =
+            total_tool_use_count.saturating_add(tool_uses.len() as u64);
 
         // Dispatch any tool_use blocks FIRST, then decide loop disposition by
         // stop_reason — mirroring the orchestrator references. `execute_one_turn`
@@ -458,7 +807,12 @@ async fn run_subagent_loop(
                     Err(e) => {
                         tool_results.push(ContentBlock::ToolResult {
                             tool_use_id: tool_use_id.clone(),
-                            content: format!("tool error: {e}"),
+                            // Match the main turn-loop convention
+                            // (`turn_loop.rs` `"Error: {bare}"`): the bare
+                            // model-facing message, NOT the `Display` form which
+                            // would leak the LingXi-internal `ToolInvoker: …`
+                            // prefix into the child's tool_result wire bytes.
+                            content: format!("Error: {}", e.model_facing_message()),
                             is_error: true,
                             provider_tool_use_id: provider_id.clone(),
                         });
@@ -483,12 +837,22 @@ async fn run_subagent_loop(
         let should_continue =
             stop_reason.as_deref() == Some("tool_use") && !tool_uses.is_empty();
         if !should_continue {
-            let result = serde_json::json!({
-                "text": aggregate_text(&assistant_blocks),
-                "stop_reason": stop_reason,
-            });
+            // claude `finalizeAgentTool`: the result's `content` is the LAST
+            // assistant message's text blocks, with a backward-scan fallback to
+            // the most recent assistant message that has text when the final turn
+            // was tool-only (agentToolUtils.ts:304-317). `history` already holds
+            // the current assistant turn (pushed above) + every prior turn.
+            let result = build_completed_result(&history, &assistant_blocks, stop_reason.as_deref());
             let _ = out_tx
-                .send(SubagentEvent::Completed { agent_id, result })
+                .send(SubagentEvent::Completed {
+                    agent_id,
+                    result,
+                    usage: last_usage.clone(),
+                    total_tool_use_count,
+                    total_duration_ms: elapsed_ms(run_start),
+                    assistant_message_count,
+                    last_request_id: last_request_id.clone(),
+                })
                 .await;
             // Terminal stop for this turn-set: leave the inner turn loop and
             // let the persist decision below choose between returning
@@ -511,6 +875,11 @@ async fn run_subagent_loop(
                     "reason": "max_turns_exhausted",
                     "max_turns": max_turns,
                 }),
+                usage: last_usage.clone(),
+                total_tool_use_count,
+                total_duration_ms: elapsed_ms(run_start),
+                assistant_message_count,
+                last_request_id: last_request_id.clone(),
             })
             .await;
     }
@@ -641,6 +1010,13 @@ async fn run_subagent_stub(
                         .send(SubagentEvent::Completed {
                             agent_id,
                             result: serde_json::json!({ "reason": reason }),
+                            // Stub path makes no real round-trips: no usage / no
+                            // tool-use count / no measured duration.
+                            usage: llm_client::Usage::default(),
+                            total_tool_use_count: 0,
+                            total_duration_ms: 0,
+                            assistant_message_count: 0,
+                            last_request_id: None,
                         })
                         .await;
                 }
@@ -658,6 +1034,12 @@ async fn run_subagent_stub(
             .send(SubagentEvent::Completed {
                 agent_id,
                 result: serde_json::json!({ "reason": "eof_graceful" }),
+                // Stub path makes no real round-trips.
+                usage: llm_client::Usage::default(),
+                total_tool_use_count: 0,
+                total_duration_ms: 0,
+                assistant_message_count: 0,
+                last_request_id: None,
             })
             .await;
     } else {
@@ -948,6 +1330,48 @@ mod tests {
         }
     }
 
+    /// Build an `LlmResponse` carrying a text block AND a `tool_call` block
+    /// (+ the given `stop_reason`) — for the G2 backward-scan test (a turn that
+    /// surfaces text then a later turn that is tool-only).
+    fn text_and_tool_response(
+        text: &str,
+        name: &str,
+        stop_reason: Option<&str>,
+    ) -> llm_client::LlmResponse {
+        llm_client::LlmResponse {
+            id: "mock".into(),
+            model: "mock".into(),
+            content: vec![
+                llm_client::ContentBlock::Text {
+                    text: text.into(),
+                    cache_control: None,
+                },
+                llm_client::ContentBlock::ToolCall {
+                    id: ToolUseId::new().to_string(),
+                    name: name.into(),
+                    input: serde_json::json!({}),
+                },
+            ],
+            stop_reason: stop_reason.map(str::to_string),
+            usage: llm_client::Usage::default(),
+            cost: None,
+            provider_metadata: serde_json::Value::Null,
+        }
+    }
+
+    /// Build an `LlmResponse` carrying one `tool_call` block AND a non-default
+    /// `usage` (for the G1 usage-threading test).
+    fn tool_use_response_with_usage(
+        name: &str,
+        stop_reason: Option<&str>,
+        usage: llm_client::Usage,
+    ) -> llm_client::LlmResponse {
+        llm_client::LlmResponse {
+            usage,
+            ..tool_use_response(name, stop_reason)
+        }
+    }
+
     /// `fresh_subagent_ctx` plus a scripted `api_client` (and optional invoker),
     /// raising `max_turns` so multi-turn loops are reachable.
     fn loop_ctx(
@@ -986,6 +1410,15 @@ mod tests {
                 icon: None,
                 allowed_tools: vec![],
                 worktree_requirement: None,
+                disallowed_tools: vec![],
+                skills: vec![],
+                required_mcp_servers: vec![],
+                background: false,
+                isolation: None,
+                memory: None,
+                effort: None,
+                initial_prompt: None,
+                color: None,
             },
             prompt_messages: vec![],
             fork_context_messages: None,
@@ -1007,6 +1440,10 @@ mod tests {
             tool_invoker: None,
             tool_schemas: vec![],
             budget: None,
+            hook_executor: None,
+            skill_loader: None,
+            hook_session_id: protocol::SessionId::nil(),
+            hook_cwd: std::path::PathBuf::new(),
         }
     }
 
@@ -1279,6 +1716,110 @@ mod tests {
         let result = one_completed(&evs);
         assert_eq!(result["text"], "final answer");
         assert_eq!(result["stop_reason"], "end_turn");
+    }
+
+    #[tokio::test]
+    async fn loop_completed_result_carries_claude_content_array() {
+        // #3: the terminal result carries claude's `content` array of text
+        // blocks (one per text block), not only the joined `text` string.
+        let api =
+            MockSubagentApiClient::new(vec![Ok(text_response("final answer", Some("end_turn")))]);
+        let ctx = loop_ctx(api.clone(), None, 4);
+        let (_tx, event_rx) = mpsc::channel::<engine::Event>(8);
+        let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(16);
+        run_subagent(ctx, event_rx, out_tx).await;
+        let evs = drain(out_rx).await;
+        let result = one_completed(&evs);
+        assert_eq!(
+            result["content"],
+            serde_json::json!([{ "type": "text", "text": "final answer" }]),
+            "result carries claude content[] array"
+        );
+        assert_eq!(result["text"], "final answer", "legacy `text` still present");
+    }
+
+    #[tokio::test]
+    async fn loop_g2_backward_scan_recovers_text_from_earlier_turn() {
+        // G2 (agentToolUtils.ts:304-317): when the FINAL assistant turn is
+        // tool-only (no text), the result content falls back to the most recent
+        // assistant message that HAS text. Turn 1: text "partial" + a tool_use
+        // (continues). Turn 2: tool-only with end_turn (terminates, no text in
+        // the final block) → content must be "partial" from turn 1.
+        let api = MockSubagentApiClient::new(vec![
+            Ok(text_and_tool_response("partial", "Read", Some("tool_use"))),
+            Ok(tool_use_response("Read", Some("end_turn"))),
+        ]);
+        let invoker = CountingInvoker::new();
+        let ctx = loop_ctx(api.clone(), Some(invoker.clone()), 4);
+        let (_tx, event_rx) = mpsc::channel::<engine::Event>(8);
+        let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(16);
+        run_subagent(ctx, event_rx, out_tx).await;
+        let evs = drain(out_rx).await;
+        let result = one_completed(&evs);
+        // The final turn was tool-only; the backward scan recovered turn 1's text.
+        assert_eq!(
+            result["content"],
+            serde_json::json!([{ "type": "text", "text": "partial" }]),
+            "backward scan recovers the most recent assistant text; got {result:?}"
+        );
+        assert_eq!(result["text"], "partial");
+    }
+
+    #[tokio::test]
+    async fn loop_g1_completed_carries_final_turn_usage_and_tool_count() {
+        // G1: the terminal Completed event carries the FINAL turn's usage (claude
+        // reads only the last message usage, not a cross-turn sum) plus the
+        // run-wide tool-use count. Turn 1: tool_use with usage A (dispatched).
+        // Turn 2: end_turn text with usage B → carried usage == B; tool_uses == 1.
+        let usage_a = llm_client::Usage {
+            billable_tokens: llm_client::TokenUsage {
+                input: 1000,
+                output: 1,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let usage_b = llm_client::Usage {
+            billable_tokens: llm_client::TokenUsage {
+                input: 10,
+                output: 5,
+                cache_write: 3,
+                cache_read: 2,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let api = MockSubagentApiClient::new(vec![
+            Ok(tool_use_response_with_usage("Read", Some("tool_use"), usage_a)),
+            Ok(llm_client::LlmResponse {
+                usage: usage_b.clone(),
+                ..text_response("done", Some("end_turn"))
+            }),
+        ]);
+        let invoker = CountingInvoker::new();
+        let ctx = loop_ctx(api.clone(), Some(invoker.clone()), 4);
+        let (_tx, event_rx) = mpsc::channel::<engine::Event>(8);
+        let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(16);
+        run_subagent(ctx, event_rx, out_tx).await;
+        let evs = drain(out_rx).await;
+        let (usage, tool_count) = evs
+            .iter()
+            .find_map(|e| match e {
+                SubagentEvent::Completed {
+                    usage,
+                    total_tool_use_count,
+                    ..
+                } => Some((usage.clone(), *total_tool_use_count)),
+                _ => None,
+            })
+            .expect("one Completed");
+        // The carried usage is the FINAL turn's (B), NOT a sum with A.
+        assert_eq!(usage.billable_tokens.input, 10, "final-turn input, not summed");
+        assert_eq!(usage.billable_tokens.output, 5);
+        assert_eq!(usage.billable_tokens.cache_write, 3);
+        assert_eq!(usage.billable_tokens.cache_read, 2);
+        // One tool_use across the run (turn 1).
+        assert_eq!(tool_count, 1, "run-wide tool-use count");
     }
 
     #[tokio::test]
@@ -1790,6 +2331,599 @@ mod tests {
             evs.iter()
                 .any(|e| matches!(e, SubagentEvent::Killed { agent_id: aid } if *aid == agent_id)),
             "UserExit while idle yields Killed; got: {evs:?}"
+        );
+    }
+
+    // ── G4 (SubagentStart additionalContext) + G5 (skills preload) ──────────
+
+    /// `SubagentApiClient` that captures the `messages` of its FIRST round-trip
+    /// so a test can assert what the runner seeded as the child's initial
+    /// history (the preload messages are sent to the model, not emitted as
+    /// events). Replies with a single end_turn text turn.
+    struct CapturingApiClient {
+        first_messages: Mutex<Option<Vec<ConversationMessage>>>,
+    }
+    impl CapturingApiClient {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                first_messages: Mutex::new(None),
+            })
+        }
+        fn captured(&self) -> Vec<ConversationMessage> {
+            self.first_messages.lock().unwrap().clone().unwrap_or_default()
+        }
+    }
+    #[async_trait]
+    impl crate::api::SubagentApiClient for CapturingApiClient {
+        async fn messages_create(
+            &self,
+            _model: &str,
+            _system: Option<&str>,
+            messages: Vec<ConversationMessage>,
+            _tools: Vec<serde_json::Value>,
+        ) -> Result<llm_client::LlmResponse, llm_client::LlmError> {
+            let mut slot = self.first_messages.lock().unwrap();
+            if slot.is_none() {
+                *slot = Some(messages);
+            }
+            Ok(text_response("done", Some("end_turn")))
+        }
+    }
+
+    /// A `SubagentStart` builtin hook handler that returns one `additionalContext`
+    /// string so the runner injects it into the child's initial history (G4).
+    /// `handler_id` lets a test register more than one handler (distinct ids).
+    struct AdditionalContextStartHook {
+        handler_id: String,
+        context: String,
+    }
+    #[async_trait]
+    impl hooks::executor::BuiltinHookHandler for AdditionalContextStartHook {
+        fn id(&self) -> &str {
+            &self.handler_id
+        }
+        async fn handle(
+            &self,
+            _event: &hooks::events::HookEvent,
+            _ctx: &hooks::registry::HookContext,
+        ) -> hooks::response::HookResult {
+            hooks::response::HookResult {
+                outcome: hooks::response::HookOutcome::Success,
+                stdout: String::new(),
+                stderr: String::new(),
+                exit_code: None,
+                response: Some(hooks::response::HookResponse {
+                    additional_context: Some(self.context.clone()),
+                    ..Default::default()
+                }),
+            }
+        }
+    }
+
+    /// Build an `Arc<HookExecutorImpl>` with ONE registered SubagentStart hook
+    /// that returns `context` as additionalContext.
+    async fn exec_with_start_context(context: &str) -> Arc<hooks::HookExecutorImpl> {
+        use hooks::definition::{HookDefinition, HookExecutor, HookSource};
+        use hooks::events::HookEventType;
+        let registry = Arc::new(tokio::sync::RwLock::new(hooks::HookRegistry::new()));
+        registry.write().await.register(HookDefinition {
+            id: protocol::HookId::new(),
+            name: "additional-context-start".into(),
+            events: vec![HookEventType::SubagentStart],
+            if_condition: None,
+            executor: HookExecutor::Builtin {
+                handler_id: "additional-context-start".into(),
+            },
+            source: HookSource::User,
+            blocking: true,
+            timeout: None,
+            priority: 0,
+            once: false,
+            status_message: None,
+        });
+        let mut exec = hooks::HookExecutorImpl::new(
+            registry,
+            Arc::new(test_harness::mocks::MockHttpTransport::new()),
+            Arc::new(test_harness::mocks::MockRuntimeSpawner::default()),
+        );
+        exec.register_builtin(Arc::new(AdditionalContextStartHook {
+            handler_id: "additional-context-start".into(),
+            context: context.to_string(),
+        }));
+        Arc::new(exec)
+    }
+
+    /// Build an `Arc<HookExecutorImpl>` with TWO registered SubagentStart hooks,
+    /// each returning its own additionalContext — to prove the runner JOINS them
+    /// into a single `<system-reminder>` message (claude byte-parity).
+    async fn exec_with_two_start_contexts(c0: &str, c1: &str) -> Arc<hooks::HookExecutorImpl> {
+        use hooks::definition::{HookDefinition, HookExecutor, HookSource};
+        use hooks::events::HookEventType;
+        let registry = Arc::new(tokio::sync::RwLock::new(hooks::HookRegistry::new()));
+        for (i, handler_id) in ["start-ctx-0", "start-ctx-1"].iter().enumerate() {
+            registry.write().await.register(HookDefinition {
+                id: protocol::HookId::new(),
+                name: (*handler_id).into(),
+                events: vec![HookEventType::SubagentStart],
+                if_condition: None,
+                executor: HookExecutor::Builtin {
+                    handler_id: (*handler_id).into(),
+                },
+                source: HookSource::User,
+                blocking: true,
+                timeout: None,
+                // Distinct DESCENDING priorities pin the firing order so the
+                // join is deterministic (c0 then c1). `match_event` sorts
+                // priority-descending, so index 0 (priority 0) fires before
+                // index 1 (priority -1).
+                #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+                priority: -(i as i32),
+                once: false,
+                status_message: None,
+            });
+        }
+        let mut exec = hooks::HookExecutorImpl::new(
+            registry,
+            Arc::new(test_harness::mocks::MockHttpTransport::new()),
+            Arc::new(test_harness::mocks::MockRuntimeSpawner::default()),
+        );
+        exec.register_builtin(Arc::new(AdditionalContextStartHook {
+            handler_id: "start-ctx-0".into(),
+            context: c0.to_string(),
+        }));
+        exec.register_builtin(Arc::new(AdditionalContextStartHook {
+            handler_id: "start-ctx-1".into(),
+            context: c1.to_string(),
+        }));
+        Arc::new(exec)
+    }
+
+    /// A builtin hook handler that records every `SubagentStop` it sees (the
+    /// `status` carried on the event) — used to prove a frontmatter
+    /// `Stop`→`SubagentStop` hook actually fires inside the child runner (#9).
+    struct RecordingStopHook {
+        seen: Arc<Mutex<Vec<String>>>,
+    }
+    #[async_trait]
+    impl hooks::executor::BuiltinHookHandler for RecordingStopHook {
+        fn id(&self) -> &str {
+            "record-subagent-stop-in-runner"
+        }
+        async fn handle(
+            &self,
+            event: &hooks::events::HookEvent,
+            _ctx: &hooks::registry::HookContext,
+        ) -> hooks::response::HookResult {
+            if let hooks::events::HookEvent::SubagentStop { status, .. } = event {
+                self.seen.lock().unwrap().push(status.clone());
+            }
+            hooks::response::HookResult {
+                outcome: hooks::response::HookOutcome::Success,
+                stdout: String::new(),
+                stderr: String::new(),
+                exit_code: None,
+                response: None,
+            }
+        }
+    }
+
+    /// Build an executor wired with the [`RecordingStopHook`] builtin and NO
+    /// source/plugin hooks — so any SubagentStop the recorder sees must have come
+    /// from the agent-scoped frontmatter fire (the runner path), not a chokepoint.
+    fn exec_recording_stop(seen: Arc<Mutex<Vec<String>>>) -> Arc<hooks::HookExecutorImpl> {
+        let registry = Arc::new(tokio::sync::RwLock::new(hooks::HookRegistry::new()));
+        let mut exec = hooks::HookExecutorImpl::new(
+            registry,
+            Arc::new(test_harness::mocks::MockHttpTransport::new()),
+            Arc::new(test_harness::mocks::MockRuntimeSpawner::default()),
+        );
+        exec.register_builtin(Arc::new(RecordingStopHook { seen }));
+        Arc::new(exec)
+    }
+
+    /// A frontmatter `Stop` hook (Builtin executor) the runner retargets to
+    /// `SubagentStop` (registerFrontmatterHooks isAgent=true).
+    fn frontmatter_stop_hook(handler_id: &str) -> hooks::definition::HookDefinition {
+        use hooks::definition::{HookExecutor, HookSource};
+        use hooks::events::HookEventType;
+        hooks::definition::HookDefinition {
+            id: protocol::HookId::new(),
+            name: handler_id.into(),
+            events: vec![HookEventType::Stop],
+            if_condition: None,
+            executor: HookExecutor::Builtin {
+                handler_id: handler_id.into(),
+            },
+            source: HookSource::User,
+            blocking: true,
+            timeout: None,
+            priority: 0,
+            once: false,
+            status_message: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn frontmatter_stop_hook_fires_as_subagent_stop_in_runner() {
+        // #9: a frontmatter `Stop` hook is retargeted to `SubagentStop`
+        // (isAgent=true) and MUST fire at the child loop's clean end — BEFORE
+        // `clear_agent_hooks` removes it. A clean (end_turn) run yields one
+        // `SubagentStop` with status "completed".
+        let seen = Arc::new(Mutex::new(Vec::<String>::new()));
+        let api = CapturingApiClient::new();
+        let mut ctx = loop_ctx(api.clone(), None, 2);
+        ctx.prompt_messages = vec![ConversationMessage::user(MessageId::new(), "go".into())];
+        ctx.agent_definition.agent_type = "stop-agent".into();
+        ctx.agent_definition.frontmatter_hooks =
+            vec![frontmatter_stop_hook("record-subagent-stop-in-runner")];
+        ctx.hook_executor = Some(exec_recording_stop(seen.clone()));
+
+        let (event_tx, event_rx) = mpsc::channel::<engine::Event>(8);
+        let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(16);
+        drop(event_tx);
+        run_subagent(ctx, event_rx, out_tx).await;
+        let _ = drain(out_rx).await;
+
+        let recorded = seen.lock().unwrap().clone();
+        assert_eq!(
+            recorded,
+            vec!["completed".to_string()],
+            "frontmatter Stop→SubagentStop must fire exactly once (status completed): {recorded:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn no_frontmatter_hooks_means_no_runner_subagent_stop() {
+        // With NO frontmatter hooks the runner takes the passthrough path and
+        // fires NO agent-scoped SubagentStop (the orchestrator chokepoint owns
+        // session/plugin SubagentStop). The recorder sees nothing.
+        let seen = Arc::new(Mutex::new(Vec::<String>::new()));
+        let api = CapturingApiClient::new();
+        let mut ctx = loop_ctx(api.clone(), None, 2);
+        ctx.prompt_messages = vec![ConversationMessage::user(MessageId::new(), "go".into())];
+        // No frontmatter_hooks (default empty). Executor still wired.
+        ctx.hook_executor = Some(exec_recording_stop(seen.clone()));
+
+        let (event_tx, event_rx) = mpsc::channel::<engine::Event>(8);
+        let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(16);
+        drop(event_tx);
+        run_subagent(ctx, event_rx, out_tx).await;
+        let _ = drain(out_rx).await;
+
+        assert!(
+            seen.lock().unwrap().is_empty(),
+            "no frontmatter hooks ⇒ no agent-scoped SubagentStop fired"
+        );
+    }
+
+    /// Counts every SubagentStart and SubagentStop event the runner fires, so a
+    /// test can assert each canonical lifecycle hook fires EXACTLY once through
+    /// the REAL runner (R7 — no double-fire).
+    struct StartStopCounter {
+        starts: Arc<Mutex<u32>>,
+        stops: Arc<Mutex<Vec<String>>>,
+    }
+    #[async_trait]
+    impl hooks::executor::BuiltinHookHandler for StartStopCounter {
+        fn id(&self) -> &str {
+            "r7-start-stop-counter"
+        }
+        async fn handle(
+            &self,
+            event: &hooks::events::HookEvent,
+            _ctx: &hooks::registry::HookContext,
+        ) -> hooks::response::HookResult {
+            match event {
+                hooks::events::HookEvent::SubagentStart { .. } => {
+                    *self.starts.lock().unwrap() += 1;
+                }
+                hooks::events::HookEvent::SubagentStop { status, .. } => {
+                    self.stops.lock().unwrap().push(status.clone());
+                }
+                _ => {}
+            }
+            hooks::response::HookResult {
+                outcome: hooks::response::HookOutcome::Success,
+                stdout: String::new(),
+                stderr: String::new(),
+                exit_code: None,
+                response: None,
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn runner_fires_subagent_start_and_frontmatter_stop_exactly_once_each() {
+        // R7 integration: a REAL runner run with BOTH a SubagentStart hook AND a
+        // frontmatter `Stop`→`SubagentStop` hook (isAgent=true) must fire
+        // SubagentStart EXACTLY once (the canonical, additionalContext-collecting
+        // fire) and the frontmatter SubagentStop EXACTLY once (agent-scoped,
+        // BEFORE clear_agent_hooks). This is the assertion the orchestrator-side
+        // FakeAgentTool fixtures (no runner) cannot make.
+        use hooks::definition::{HookDefinition, HookExecutor, HookSource};
+        use hooks::events::HookEventType;
+
+        let starts = Arc::new(Mutex::new(0u32));
+        let stops = Arc::new(Mutex::new(Vec::<String>::new()));
+
+        // One executor with: a SESSION-level SubagentStart hook (fires in G4) and
+        // the frontmatter Stop hook is supplied via `frontmatter_hooks` below
+        // (the runner registers + retargets it to SubagentStop, isAgent=true).
+        let registry = Arc::new(tokio::sync::RwLock::new(hooks::HookRegistry::new()));
+        registry.write().await.register(HookDefinition {
+            id: protocol::HookId::new(),
+            name: "r7-start".into(),
+            events: vec![HookEventType::SubagentStart],
+            if_condition: None,
+            executor: HookExecutor::Builtin {
+                handler_id: "r7-start-stop-counter".into(),
+            },
+            source: HookSource::User,
+            blocking: true,
+            timeout: None,
+            priority: 0,
+            once: false,
+            status_message: None,
+        });
+        let mut exec = hooks::HookExecutorImpl::new(
+            registry,
+            Arc::new(test_harness::mocks::MockHttpTransport::new()),
+            Arc::new(test_harness::mocks::MockRuntimeSpawner::default()),
+        );
+        exec.register_builtin(Arc::new(StartStopCounter {
+            starts: starts.clone(),
+            stops: stops.clone(),
+        }));
+        let exec = Arc::new(exec);
+
+        let api = CapturingApiClient::new();
+        let mut ctx = loop_ctx(api.clone(), None, 2);
+        ctx.prompt_messages = vec![ConversationMessage::user(MessageId::new(), "go".into())];
+        ctx.agent_definition.agent_type = "r7-agent".into();
+        // The frontmatter Stop hook points at the SAME counter handler; the
+        // runner retargets Stop→SubagentStop (isAgent=true) and fires it
+        // agent-scoped at the loop's clean end.
+        ctx.agent_definition.frontmatter_hooks = vec![frontmatter_stop_hook("r7-start-stop-counter")];
+        ctx.hook_executor = Some(exec);
+
+        let (event_tx, event_rx) = mpsc::channel::<engine::Event>(8);
+        let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(16);
+        drop(event_tx);
+        run_subagent(ctx, event_rx, out_tx).await;
+        let _ = drain(out_rx).await;
+
+        assert_eq!(
+            *starts.lock().unwrap(),
+            1,
+            "SubagentStart must fire EXACTLY once through the real runner (no double-fire)"
+        );
+        assert_eq!(
+            stops.lock().unwrap().clone(),
+            vec!["completed".to_string()],
+            "frontmatter Stop→SubagentStop must fire EXACTLY once (status completed) in the runner"
+        );
+    }
+
+    /// Mock [`SkillLoader`] that resolves a fixed name to canned content, else None.
+    struct MockSkillLoader {
+        known: String,
+        content_text: String,
+    }
+    #[async_trait]
+    impl traits::skill_loader::SkillLoader for MockSkillLoader {
+        async fn resolve_and_load(
+            &self,
+            skill_name: &str,
+            _agent_type: &str,
+        ) -> Option<traits::skill_loader::SkillLoad> {
+            if skill_name == self.known {
+                Some(traits::skill_loader::SkillLoad {
+                    display_name: skill_name.to_string(),
+                    progress_message: None,
+                    content: vec![ContentBlock::Text {
+                        text: self.content_text.clone(),
+                    }],
+                })
+            } else {
+                None
+            }
+        }
+    }
+
+    fn user_text(msg: &ConversationMessage) -> Option<String> {
+        if let ConversationMessage::User { content, .. } = msg {
+            let t: Vec<String> = content
+                .iter()
+                .filter_map(|b| match b {
+                    ContentBlock::Text { text } => Some(text.clone()),
+                    _ => None,
+                })
+                .collect();
+            Some(t.join("\n"))
+        } else {
+            None
+        }
+    }
+
+    #[tokio::test]
+    async fn subagent_start_additional_context_injected_as_system_reminder() {
+        // G4: a SubagentStart hook's additionalContext lands as a
+        // `<system-reminder>` user message in the child's initial history,
+        // AFTER the prompt seed and BEFORE turn 1.
+        let api = CapturingApiClient::new();
+        let mut ctx = loop_ctx(api.clone(), None, 2);
+        ctx.prompt_messages = vec![ConversationMessage::user(MessageId::new(), "do it".into())];
+        ctx.hook_executor = Some(exec_with_start_context("extra from hook").await);
+
+        let (event_tx, event_rx) = mpsc::channel::<engine::Event>(8);
+        let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(16);
+        drop(event_tx);
+        run_subagent(ctx, event_rx, out_tx).await;
+        let _ = drain(out_rx).await;
+
+        let msgs = api.captured();
+        // The prompt is first, the injected system-reminder follows it.
+        let texts: Vec<String> = msgs.iter().filter_map(user_text).collect();
+        assert!(
+            texts.iter().any(|t| t == "do it"),
+            "prompt seed present: {texts:?}"
+        );
+        assert!(
+            texts.iter().any(|t| t
+                == "<system-reminder>\nSubagentStart hook additional context: extra from hook\n</system-reminder>"),
+            "additionalContext injected as the claude-byte <system-reminder> message: {texts:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn subagent_start_multiple_contexts_join_into_one_reminder() {
+        // G4 byte-parity (runAgent.ts:530-555 + messages.ts:4117-4128): when
+        // multiple SubagentStart hooks each return additionalContext, claude
+        // collects them into ONE `string[]` and emits a SINGLE
+        // `hook_additional_context` attachment whose body is
+        // `SubagentStart hook additional context: ` + contexts.join("\n").
+        let api = CapturingApiClient::new();
+        let mut ctx = loop_ctx(api.clone(), None, 2);
+        ctx.prompt_messages = vec![ConversationMessage::user(MessageId::new(), "do it".into())];
+        ctx.hook_executor = Some(exec_with_two_start_contexts("alpha", "beta").await);
+
+        let (event_tx, event_rx) = mpsc::channel::<engine::Event>(8);
+        let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(16);
+        drop(event_tx);
+        run_subagent(ctx, event_rx, out_tx).await;
+        let _ = drain(out_rx).await;
+
+        let texts: Vec<String> = api.captured().iter().filter_map(user_text).collect();
+        // Exactly ONE system-reminder message (not one per context).
+        let reminders: Vec<&String> = texts
+            .iter()
+            .filter(|t| t.starts_with("<system-reminder>\nSubagentStart hook additional context: "))
+            .collect();
+        assert_eq!(
+            reminders.len(),
+            1,
+            "exactly one joined SubagentStart reminder: {texts:?}"
+        );
+        assert_eq!(
+            reminders[0],
+            "<system-reminder>\nSubagentStart hook additional context: alpha\nbeta\n</system-reminder>",
+            "contexts joined with \\n in a single reminder"
+        );
+    }
+
+    #[tokio::test]
+    async fn no_hook_executor_means_no_preload_injection() {
+        // G4: with hook_executor=None the child history carries ONLY the prompt
+        // seed — byte-identical to legacy (no SubagentStart fire).
+        let api = CapturingApiClient::new();
+        let mut ctx = loop_ctx(api.clone(), None, 2);
+        ctx.prompt_messages = vec![ConversationMessage::user(MessageId::new(), "do it".into())];
+        // hook_executor + skill_loader both unset (default).
+
+        let (event_tx, event_rx) = mpsc::channel::<engine::Event>(8);
+        let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(16);
+        drop(event_tx);
+        run_subagent(ctx, event_rx, out_tx).await;
+        let _ = drain(out_rx).await;
+
+        let msgs = api.captured();
+        assert_eq!(msgs.len(), 1, "only the prompt seed; got: {msgs:?}");
+        assert_eq!(user_text(&msgs[0]).as_deref(), Some("do it"));
+    }
+
+    #[tokio::test]
+    async fn resolved_skill_prepends_metadata_then_content() {
+        // G5: a resolved skill is injected as a user message whose first block is
+        // the byte-locked loading metadata, followed by the loaded content.
+        let api = CapturingApiClient::new();
+        let mut ctx = loop_ctx(api.clone(), None, 2);
+        ctx.prompt_messages = vec![ConversationMessage::user(MessageId::new(), "go".into())];
+        ctx.agent_definition.agent_type = "my-agent".into();
+        ctx.agent_definition.skills = vec!["my-skill".into()];
+        ctx.skill_loader = Some(Arc::new(MockSkillLoader {
+            known: "my-skill".into(),
+            content_text: "SKILL BODY".into(),
+        }));
+
+        let (event_tx, event_rx) = mpsc::channel::<engine::Event>(8);
+        let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(16);
+        drop(event_tx);
+        run_subagent(ctx, event_rx, out_tx).await;
+        let _ = drain(out_rx).await;
+
+        let msgs = api.captured();
+        // The skill meta message carries the <skill-format> marker block first,
+        // then the loaded content.
+        let skill_text = msgs
+            .iter()
+            .filter_map(user_text)
+            .find(|t| t.contains("<skill-format>true</skill-format>"))
+            .expect("skill meta message present");
+        assert_eq!(
+            skill_text,
+            "<command-message>my-skill</command-message>\n\
+<command-name>my-skill</command-name>\n\
+<skill-format>true</skill-format>\nSKILL BODY",
+            "metadata block then content"
+        );
+    }
+
+    #[tokio::test]
+    async fn missing_skill_is_skipped_no_message() {
+        // G5: an unresolved skill injects NOTHING (claude logs the warn + skips).
+        let api = CapturingApiClient::new();
+        let mut ctx = loop_ctx(api.clone(), None, 2);
+        ctx.prompt_messages = vec![ConversationMessage::user(MessageId::new(), "go".into())];
+        ctx.agent_definition.agent_type = "my-agent".into();
+        ctx.agent_definition.skills = vec!["nope".into()];
+        ctx.skill_loader = Some(Arc::new(MockSkillLoader {
+            known: "my-skill".into(),
+            content_text: "SKILL BODY".into(),
+        }));
+
+        let (event_tx, event_rx) = mpsc::channel::<engine::Event>(8);
+        let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(16);
+        drop(event_tx);
+        run_subagent(ctx, event_rx, out_tx).await;
+        let _ = drain(out_rx).await;
+
+        let msgs = api.captured();
+        assert_eq!(msgs.len(), 1, "only the prompt seed (missing skill skipped): {msgs:?}");
+    }
+
+    #[tokio::test]
+    async fn preload_order_additional_context_then_skills() {
+        // Ordering parity (runAgent.ts 530→577): additionalContext message(s)
+        // come BEFORE the skills message(s) in the seeded history.
+        let api = CapturingApiClient::new();
+        let mut ctx = loop_ctx(api.clone(), None, 2);
+        ctx.prompt_messages = vec![ConversationMessage::user(MessageId::new(), "go".into())];
+        ctx.agent_definition.agent_type = "my-agent".into();
+        ctx.agent_definition.skills = vec!["my-skill".into()];
+        ctx.hook_executor = Some(exec_with_start_context("ctx0").await);
+        ctx.skill_loader = Some(Arc::new(MockSkillLoader {
+            known: "my-skill".into(),
+            content_text: "SKILL BODY".into(),
+        }));
+
+        let (event_tx, event_rx) = mpsc::channel::<engine::Event>(8);
+        let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(16);
+        drop(event_tx);
+        run_subagent(ctx, event_rx, out_tx).await;
+        let _ = drain(out_rx).await;
+
+        let texts: Vec<String> = api.captured().iter().filter_map(user_text).collect();
+        let ac_idx = texts
+            .iter()
+            .position(|t| t.contains("ctx0"))
+            .expect("additionalContext present");
+        let skill_idx = texts
+            .iter()
+            .position(|t| t.contains("<skill-format>"))
+            .expect("skill present");
+        assert!(
+            ac_idx < skill_idx,
+            "additionalContext must precede skills: {texts:?}"
         );
     }
 }

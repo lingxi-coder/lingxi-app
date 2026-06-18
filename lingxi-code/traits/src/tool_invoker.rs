@@ -52,6 +52,23 @@ pub enum ToolInvokerError {
     Internal(String),
 }
 
+impl ToolInvokerError {
+    /// The bare model-facing message — claude's `formatError(error)` =
+    /// `error.message`, WITHOUT the LingXi-internal `ToolInvoker: …` `Display`
+    /// prefix. Used as the subagent tool_result content so the child model
+    /// never sees an `invalid input: `/`internal error: ` variant prefix
+    /// (which is `Display`-only, for logging). Mirrors
+    /// [`tool_api::ToolError::model_facing_message`]. `NotFound` carries only
+    /// the tool name, so it is rendered into a full message here.
+    #[must_use]
+    pub fn model_facing_message(&self) -> String {
+        match self {
+            Self::NotFound(name) => format!("tool '{name}' not found"),
+            Self::InvalidInput(s) | Self::Internal(s) => s.clone(),
+        }
+    }
+}
+
 /// Tool invocation seam used by `AgentTool` to recurse into the registry.
 ///
 /// Concrete impls live in `lingxi-tools` (production wrapper around

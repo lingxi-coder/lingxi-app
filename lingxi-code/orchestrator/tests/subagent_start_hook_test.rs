@@ -78,8 +78,10 @@ impl RuntimeSpawner for UnusedRuntime {
 
 /// Stand-in for the real `Agent` tool, registered under a configurable name
 /// (`"Agent"` or the legacy `"Task"` alias) so the dispatch chokepoint keys on
-/// it. The `SubagentStart` fire is upstream of the dispatch outcome (it fires
-/// BEFORE `call()`), so a tool that simply echoes is sufficient.
+/// it. The `SubagentStart` + `SubagentStop` fires happen AFTER `call()` and read
+/// the child's REAL pool id off the result `data.agentId` (C1 seam), so this
+/// fake surfaces a fixed `agentId` to prove both events fire with the SAME
+/// canonical id (#8).
 struct FakeAgentTool {
     name: &'static str,
 }
@@ -142,14 +144,27 @@ impl Tool for FakeAgentTool {
             .get("subagent_type")
             .and_then(serde_json::Value::as_str)
             .unwrap_or_default();
+        // Surface a fixed REAL child id (the C1 seam: the real Agent tool emits
+        // `agentId = agent_id.to_string()`) so the chokepoint recovers it for
+        // BOTH the SubagentStart and SubagentStop fires (#8).
         Ok(ToolCallResult {
-            data: json!({ "subagent_type": subagent_type, "result": "done" }),
+            data: json!({
+                "subagent_type": subagent_type,
+                "result": "done",
+                "agentId": FAKE_AGENT_CHILD_ID.to_string(),
+            }),
             new_messages: vec![],
             context_modifier: None,
             mcp_meta: None,
         })
     }
 }
+
+/// Fixed child `AgentId` the [`FakeAgentTool`] surfaces on its result so tests
+/// can assert the chokepoint threads the REAL id (not a fresh mint) into both
+/// the SubagentStart and SubagentStop fires (#8).
+static FAKE_AGENT_CHILD_ID: once_cell::sync::Lazy<protocol::AgentId> =
+    once_cell::sync::Lazy::new(protocol::AgentId::new);
 
 /// A non-Agent tool that always succeeds.
 struct AlwaysOkTool;
@@ -374,11 +389,12 @@ async fn agent_dispatch_fires_subagent_start() {
     assert_eq!(seen[0].agent_type, "general-purpose");
     // The dispatched `subagent_type` also rides on the hook context's `agent_type`.
     assert_eq!(seen[0].ctx_agent_type.as_deref(), Some("general-purpose"));
-    // A real `agent:UUID` id rode on the event (the wire schema's required field).
-    assert!(
-        seen[0].agent_id.starts_with("agent:"),
-        "agent_id must be a stringified AgentId: {:?}",
-        seen[0].agent_id
+    // #8: the REAL child id (recovered from the result `data.agentId`) rode on
+    // the event — NOT a fresh mint.
+    assert_eq!(
+        seen[0].agent_id,
+        FAKE_AGENT_CHILD_ID.to_string(),
+        "SubagentStart must carry the child's REAL pool id from data.agentId"
     );
 }
 
@@ -495,4 +511,82 @@ async fn failing_subagent_start_hook_does_not_break_turn() {
         2,
         "the loop still reaches the terminating turn (2 API calls)"
     );
+}
+
+/// Records the `agent_id` carried by BOTH SubagentStart and SubagentStop events
+/// so a test can assert they share ONE canonical id (#8).
+struct StartStopIdRecorder {
+    start_id: Arc<Mutex<Option<String>>>,
+    stop_id: Arc<Mutex<Option<String>>>,
+}
+#[async_trait]
+impl BuiltinHookHandler for StartStopIdRecorder {
+    fn id(&self) -> &str {
+        "record-start-stop-id"
+    }
+    async fn handle(&self, event: &HookEvent, _ctx: &HookContext) -> HookResult {
+        match event {
+            HookEvent::SubagentStart { agent_id, .. } => {
+                *self.start_id.lock().unwrap() = Some(agent_id.to_string());
+            }
+            HookEvent::SubagentStop { agent_id, .. } => {
+                *self.stop_id.lock().unwrap() = Some(agent_id.to_string());
+            }
+            _ => {}
+        }
+        HookResult {
+            outcome: HookOutcome::Success,
+            stdout: String::new(),
+            stderr: String::new(),
+            exit_code: None,
+            response: None,
+        }
+    }
+}
+
+#[tokio::test]
+async fn subagent_start_and_stop_share_the_same_real_child_id() {
+    // #8: BOTH SubagentStart and SubagentStop must fire with the SAME canonical
+    // child id (claude runAgent.ts:347), recovered from the result `data.agentId`
+    // — not two fresh divergent mints.
+    let tool_use_id = ToolUseId::new();
+    let api = two_turn_api(
+        tool_use_id,
+        "Agent",
+        json!({ "subagent_type": "general-purpose", "prompt": "go" }),
+    );
+    let start_id = Arc::new(Mutex::new(None));
+    let stop_id = Arc::new(Mutex::new(None));
+    let registry = Arc::new(RwLock::new(HookRegistry::new()));
+    {
+        let mut w = registry.write().await;
+        w.register(builtin_hook(
+            "record-start-stop-id",
+            HookEventType::SubagentStart,
+        ));
+        w.register(builtin_hook(
+            "record-start-stop-id",
+            HookEventType::SubagentStop,
+        ));
+    }
+    let mut exec = HookExecutorImpl::new(registry, Arc::new(UnusedHttp), Arc::new(UnusedRuntime));
+    exec.register_builtin(Arc::new(StartStopIdRecorder {
+        start_id: start_id.clone(),
+        stop_id: stop_id.clone(),
+    }));
+    let hooks = Arc::new(exec);
+
+    let mut tools = ToolRegistry::new();
+    tools.register_builtin(Arc::new(FakeAgentTool { name: "Agent" }));
+    let orch = orch_with(api, hooks, tools);
+
+    let outcome = orch.run_turn("spawn an agent").await.expect("turn ok");
+    assert!(matches!(outcome, ConversationOutcome::EndTurn { .. }));
+
+    let start = start_id.lock().unwrap().clone().expect("SubagentStart fired");
+    let stop = stop_id.lock().unwrap().clone().expect("SubagentStop fired");
+    let expected = FAKE_AGENT_CHILD_ID.to_string();
+    assert_eq!(start, expected, "SubagentStart carries the real child id");
+    assert_eq!(stop, expected, "SubagentStop carries the real child id");
+    assert_eq!(start, stop, "both events share ONE canonical id");
 }

@@ -550,6 +550,14 @@ pub struct ConversationOrchestrator {
     /// [`compaction::Autocompactor::with_forked_runner`] at the composition root
     /// so producer (here) and consumer (the summarizer) share one slot.
     pub(crate) cache_safe_slot: Option<Arc<sidequery::CacheSafeParamsSlot>>,
+    /// FORK (codex #5 follow-up): the rendered system-prompt bytes the current
+    /// turn handed the model, recorded by the turn driver after a successful API
+    /// call so a fork-subagent spawn dispatched LATER in the same turn can thread
+    /// the exact bytes onto its child (cache-identical prefix, claude
+    /// `AgentTool.tsx:622-623` `override.systemPrompt = forkParentSystemPrompt`).
+    /// `None` until the first successful turn / when the turn ran with no system
+    /// prompt. Read by the fork dispatch path ONLY; no non-fork tool touches it.
+    pub(crate) current_turn_system_prompt: Mutex<Option<String>>,
     /// Read-file-state cache backing `/files` (TS `context.readFileState`).
     /// The dispatch loop (`turn_loop::dispatch_tool_uses`) inserts the
     /// absolutized `file_path` of every successful
@@ -730,6 +738,7 @@ impl ConversationOrchestrator {
             compaction: None,
             compaction_tracking: Mutex::new(compaction::AutoCompactTrackingState::default()),
             cache_safe_slot: None,
+            current_turn_system_prompt: Mutex::new(None),
             read_file_state: Arc::new(Mutex::new(Vec::new())),
             read_state_map: tool_api::read_file_state::new_read_file_state_map(),
             last_emitted_rate_limit: Mutex::new(None),
@@ -996,6 +1005,26 @@ impl ConversationOrchestrator {
             generation: 0,
         })
         .await;
+    }
+
+    /// FORK (codex #5 follow-up): record the rendered system-prompt bytes this
+    /// turn handed the model, so a fork-subagent spawn dispatched later in the
+    /// SAME turn can thread them onto its child (cache-identical prefix, claude
+    /// `AgentTool.tsx:622-623`). Called by the turn drivers right after a
+    /// successful API call (the `save_cache_safe_params` site). `None`/empty
+    /// system collapses to `None` (a turn with no system prompt records nothing).
+    pub(crate) async fn save_current_turn_system_prompt(&self, system: Option<&str>) {
+        *self.current_turn_system_prompt.lock().await =
+            system.filter(|s| !s.is_empty()).map(ToString::to_string);
+    }
+
+    /// FORK (codex #5 follow-up): the rendered system prompt recorded by the most
+    /// recent successful turn ([`Self::save_current_turn_system_prompt`]), or
+    /// `None` before the first successful turn / when that turn had no system
+    /// prompt. Read by the fork dispatch path to seed each tool's
+    /// `ToolUseContext::fork_parent_system_prompt`.
+    pub(crate) async fn current_turn_system_prompt(&self) -> Option<String> {
+        self.current_turn_system_prompt.lock().await.clone()
     }
 
     /// Task 8 (llm-client future-work batch 3): forward the API client's
@@ -6125,6 +6154,15 @@ mod agent_listing_reminder_tests {
             icon: None,
             allowed_tools: vec![],
             worktree_requirement: None,
+            disallowed_tools: vec![],
+            skills: vec![],
+            required_mcp_servers: vec![],
+            background: false,
+            isolation: None,
+            memory: None,
+            effort: None,
+            initial_prompt: None,
+            color: None,
         }
     }
 

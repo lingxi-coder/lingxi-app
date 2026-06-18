@@ -45,6 +45,15 @@ pub struct SubagentSpawnRequest {
     /// (TS `model`). The spawner maps this onto the agent model override.
     #[serde(default)]
     pub model: Option<String>,
+    /// Whether to run the spawned agent in the background (TS `run_in_background`,
+    /// `AgentTool.tsx:87` `z.boolean().optional()`). claude treats it as a
+    /// boolean predicate (`run_in_background === true`), so it is collapsed to a
+    /// plain `bool` (default `false`) at this seam — `None`/absent ⇒ `false` —
+    /// rather than carrying an `Option<bool>`. The model-facing schema in
+    /// `tools/agent` already declares + parses it; this field stops it being
+    /// dropped when the request is built.
+    #[serde(default)]
+    pub run_in_background: bool,
     /// Name for the spawned agent, making it addressable via `SendMessage`
     /// (TS `name`). Carried through; teammate routing is deferred.
     #[serde(default)]
@@ -65,32 +74,129 @@ pub struct SubagentSpawnRequest {
     /// cwd-override behavior is deferred.
     #[serde(default)]
     pub cwd: Option<String>,
+    // ===== Fork-subagent path (codex #5) =====
+    // Populated ONLY on the `AgentTool` fork path (subagent_type omitted + the
+    // fork gate ON). For every non-fork spawn they stay `None` and the spawner
+    // builds the child's system prompt from the resolved `AgentDefinition` body
+    // as before. Both `#[serde(default)]` so existing serialized payloads stay
+    // valid (frozen-crate rule).
+    /// The byte-exact forked conversation prefix the child replays as its cache
+    /// prefix (TS `forkContextMessages = toolUseContext.messages`, threaded as
+    /// `buildForkedMessages(prompt, assistantMessage)` output: the cloned parent
+    /// assistant message + a user message of placeholder tool_results + the
+    /// per-child directive). `AgentTool` owns the parent assistant message, so it
+    /// builds these and ships them here; on the fork path the spawner seeds
+    /// `prompt_messages = []` and lets the runner replay this prefix verbatim.
+    #[serde(default)]
+    pub fork_context_messages: Option<Vec<protocol::ConversationMessage>>,
+    /// The parent's already-rendered system prompt bytes (TS
+    /// `override.systemPrompt = forkParentSystemPrompt`, sourced from
+    /// `toolUseContext.renderedSystemPrompt`). When set, the spawner uses these
+    /// bytes VERBATIM as the child's system prompt and SKIPS the subagent
+    /// `Notes:` trailer (re-appending it would bust the prompt cache). `None`
+    /// (non-fork, or the orchestrator has not yet threaded the rendered prompt
+    /// onto `ToolUseContext`) keeps the existing body+trailer behavior.
+    #[serde(default)]
+    pub fork_parent_system_prompt: Option<String>,
 }
 
 /// Token-usage rollup returned at the end of a successful spawn.
+///
+/// Mirrors the primary numeric buckets of claude-code's AgentTool result `usage`
+/// object (`agentToolUtils.ts:238-256`): `input_tokens`, `output_tokens`,
+/// `cache_creation_input_tokens`, `cache_read_input_tokens`. The legacy
+/// [`SubagentUsage::total_tokens`] footer field is retained (existing consumers
+/// in `tasks::handlers::local_agent` / `dream` spool a `<usage><total_tokens>`
+/// footer from it).
+///
+/// The nullable sub-objects from claude's schema — `server_tool_use`
+/// (`{web_search_requests, web_fetch_requests}`), `service_tier`
+/// (`standard|priority|batch`), and `cache_creation`
+/// (`{ephemeral_1h_input_tokens, ephemeral_5m_input_tokens}`) — are DEFERRED:
+/// the runner's source `llm_client::Usage` has no `web_fetch_requests`,
+/// `service_tier`, or 1h/5m cache split to populate them faithfully, so they are
+/// intentionally omitted rather than zero-faked. Extending `llm_client::Usage`
+/// is the prerequisite for carrying them.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SubagentUsage {
-    /// Total token count consumed by the subagent's turn(s).
+    /// Total token count consumed by the subagent's turn(s) — the legacy footer
+    /// field consumers already read. When the runner populates this, it holds
+    /// the same value as the result-level total (claude `getTokenCountFromUsage`
+    /// of the final turn's usage = input + cache_creation + cache_read + output).
     pub total_tokens: u64,
+    /// Billable input tokens (claude `usage.input_tokens`).
+    pub input_tokens: u64,
+    /// Billable output tokens (claude `usage.output_tokens`).
+    pub output_tokens: u64,
+    /// Cache-creation (write) input tokens (claude `usage.cache_creation_input_tokens`).
+    pub cache_creation_input_tokens: u64,
+    /// Cache-read input tokens (claude `usage.cache_read_input_tokens`).
+    pub cache_read_input_tokens: u64,
 }
 
 /// Terminal result of one [`SubagentSpawner::spawn`] call.
+///
+/// The child pool [`protocol::AgentId`] is carried on EVERY variant (matching
+/// the source `agent::runner::SubagentEvent`, which already carries `agent_id`
+/// on all of Completed/Failed/Killed). This lets the orchestrator key the
+/// `SubagentStart`/`SubagentStop` lifecycle on the REAL child id (claude-code
+/// `runAgent.ts:347` real `agentId`) instead of minting a fresh one.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum SubagentResult {
     /// The subagent finished normally.
     Completed {
+        /// The real child pool agent id (claude `runAgent.ts:347` `agentId`).
+        agent_id: protocol::AgentId,
         /// Free-form JSON payload returned by the subagent.
         content: Value,
         /// Token-usage rollup.
         usage: SubagentUsage,
+        /// Number of tool-use blocks the subagent executed across the run
+        /// (claude result-level `totalToolUseCount`, `agentToolUtils.ts:233`).
+        total_tool_use_count: u64,
+        /// Wall-clock duration of the run in milliseconds (claude result-level
+        /// `totalDurationMs`, `agentToolUtils.ts:234` / `finalizeAgentTool`).
+        total_duration_ms: u64,
+        /// Token total = claude `getTokenCountFromUsage` of the FINAL turn's
+        /// usage (`input + cache_creation + cache_read + output`; `tokens.ts:46-54`)
+        /// — the result-level `totalTokens`, NOT a cross-turn sum. Holds the same
+        /// value as [`SubagentUsage::total_tokens`] when the runner populates
+        /// both from the final response usage.
+        total_tokens: u64,
+        /// Number of assistant messages the subagent produced across the run
+        /// (claude `agentMessages.length` fed into `tengu_agent_tool_completed`'s
+        /// `assistant_message_count`, `agentToolUtils.ts:329`). `0` on the stub
+        /// path / when the runner does not surface it.
+        #[serde(default)]
+        assistant_message_count: u64,
+        /// Number of text BLOCKS in the subagent's final response content
+        /// (claude `response_char_count: content.length` →
+        /// `tengu_agent_tool_completed`, `agentToolUtils.ts:328`). Despite the
+        /// field name, claude emits `content.length` — the element count of the
+        /// final response's `[{type:'text', text}]` array, NOT a summed char
+        /// count. `0` when not surfaced.
+        #[serde(default)]
+        response_char_count: u64,
+        /// The FINAL assistant turn's provider request id (claude
+        /// `lastAssistantMessage.requestId`, `agentToolUtils.ts:338`) — used to
+        /// emit `tengu_cache_eviction_hint` only when present
+        /// (`agentToolUtils.ts:339`). `None` on the stub path / when unavailable
+        /// → the cache-eviction hint is skipped, matching claude's truthy guard.
+        #[serde(default)]
+        last_request_id: Option<String>,
     },
     /// The subagent terminated with an error.
     Failed {
+        /// The real child pool agent id (claude `runAgent.ts:347` `agentId`).
+        agent_id: protocol::AgentId,
         /// Human-readable reason.
         reason: String,
     },
     /// The subagent was cancelled by the host.
-    Killed,
+    Killed {
+        /// The real child pool agent id (claude `runAgent.ts:347` `agentId`).
+        agent_id: protocol::AgentId,
+    },
 }
 
 /// Failure modes for [`SubagentSpawner::spawn`].
@@ -105,6 +211,57 @@ pub enum SubagentSpawnError {
     /// Any other internal failure.
     #[error("SubagentSpawner: internal error: {0}")]
     Internal(String),
+}
+
+/// Pre-spawn selection metadata for the `tengu_agent_tool_selected` event
+/// (claude `AgentTool.tsx:419-428`).
+///
+/// `AgentTool` needs the resolved agent's `source` / `color` / `model` /
+/// `is_built_in` BEFORE the spawn (to emit `tengu_agent_tool_selected`) without
+/// a second catalog lookup. The production [`SubagentSpawner`] surfaces it via
+/// [`SubagentSpawner::resolve_selection`]; the default impl returns a minimal
+/// meta (the `agent_type` echoed, everything else empty/false) so existing
+/// impls/tests/mocks are unaffected (frozen-crate rule).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SelectedAgentMeta {
+    /// Resolved agent type label (claude `selectedAgent.agentType`).
+    pub agent_type: String,
+    /// Resolved concrete model id (claude `resolvedAgentModel` =
+    /// `getAgentModel(...)`). Empty when no default model is wired.
+    pub resolved_model: String,
+    /// Origin string mapped to claude's `SettingSource` / `'built-in'` / `'plugin'`
+    /// literals (claude `selectedAgent.source`): one of `built-in`, `plugin`,
+    /// `userSettings`, `projectSettings`, `localSettings`, `flagSettings`,
+    /// `policySettings`. Empty when unresolved.
+    pub source: String,
+    /// The agent's configured color (claude `selectedAgent.color`), or `None`.
+    pub color: Option<String>,
+    /// Whether this is a built-in agent (claude `isBuiltInAgent(selectedAgent)`
+    /// = `source === 'built-in'`).
+    pub is_built_in: bool,
+    /// The agent definition's `background` frontmatter flag (claude
+    /// `selectedAgent.background`). claude computes
+    /// `is_async = run_in_background || selectedAgent.background`
+    /// (`AgentTool.tsx:426`), so a `background: true` agent is dispatched async
+    /// even when the caller omits `run_in_background`. Defaults to `false`.
+    #[serde(default)]
+    pub background: bool,
+}
+
+/// Result of an ASYNC spawn (claude `AgentTool.tsx:754-764` `async_launched`
+/// return).
+///
+/// `AgentTool`'s async branch returns `{ status:'async_launched', agentId,
+/// outputFile, canReadOutputFile, ... }` immediately; the lifecycle runs
+/// detached. The production [`SubagentSpawner::spawn_async`] surfaces the real
+/// child `agent_id` + the on-disk output path (claude `getTaskOutputPath`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AsyncLaunch {
+    /// The real child pool agent id (claude `agentBackgroundTask.agentId`).
+    pub agent_id: protocol::AgentId,
+    /// Absolute path to the agent's on-disk output file (claude
+    /// `getTaskOutputPath(agentId)`, `AgentTool.tsx:761`).
+    pub output_file: String,
 }
 
 /// Inheritance bundle the parent agent hands to a child spawn.
@@ -204,6 +361,79 @@ pub trait SubagentSpawner: Send + Sync {
     /// real catalog with claude-code's later-wins precedence.
     async fn agent_listing(&self) -> Vec<SubagentListingEntry> {
         Vec::new()
+    }
+
+    /// Resolve the `required_mcp_servers` declared by the agent definition that
+    /// `subagent_type` resolves to (claude-code `AgentDefinition.requiredMcpServers`,
+    /// `loadAgentsDir.ts:122`). `AgentTool` calls this BEFORE the spawn to run the
+    /// pre-spawn MCP-servers gate (`AgentTool.tsx:367-409`): an agent that requires
+    /// MCP servers is unavailable until those servers are connected + authenticated
+    /// (i.e. expose tools).
+    ///
+    /// Defaulted to empty so existing impls/tests need no change (frozen-crate
+    /// rule); the production [`SubagentSpawner`] overrides this to read the
+    /// resolved definition's `required_mcp_servers`. An empty result means "no
+    /// requirement" → the gate is skipped.
+    async fn resolve_required_mcp_servers(&self, _subagent_type: &str) -> Vec<String> {
+        Vec::new()
+    }
+
+    /// Resolve the pre-spawn selection metadata for the
+    /// `tengu_agent_tool_selected` event (claude `AgentTool.tsx:419-428`): the
+    /// resolved agent `source`, `color`, concrete `model`, and `is_built_in`
+    /// flag — surfaced WITHOUT a second catalog lookup or a spawn.
+    ///
+    /// Defaulted to a minimal meta (the `subagent_type` echoed, everything else
+    /// empty/false) so existing impls/tests need no change (frozen-crate rule);
+    /// the production [`SubagentSpawner`] overrides it. `model` is the caller's
+    /// optional model-family override (claude `model` schema field).
+    async fn resolve_selection(
+        &self,
+        subagent_type: &str,
+        _model: Option<&str>,
+    ) -> SelectedAgentMeta {
+        SelectedAgentMeta {
+            agent_type: subagent_type.to_string(),
+            ..SelectedAgentMeta::default()
+        }
+    }
+
+    /// Launch the subagent ASYNC (claude `run_in_background` /
+    /// `selectedAgent.background`, `AgentTool.tsx:686-764`): allocate the slot,
+    /// drive its lifecycle DETACHED, and return immediately with the
+    /// `async_launched` info.
+    ///
+    /// Defaulted to a CLEAR error (`SubagentSpawnError::Internal`) so an unwired
+    /// async branch surfaces an explicit message rather than silently falling
+    /// back to a sync spawn (the task forbids a silent wrong path). The
+    /// production [`SubagentSpawner`] overrides it once the disk-output +
+    /// notification lifecycle exists.
+    async fn spawn_async(
+        &self,
+        _request: SubagentSpawnRequest,
+        _inherit: SubagentInheritance,
+    ) -> Result<AsyncLaunch, SubagentSpawnError> {
+        Err(SubagentSpawnError::Internal(
+            "async subagent spawn (run_in_background) is not wired in this build".to_string(),
+        ))
+    }
+
+    /// Register `name → agent_id` for `SendMessage` routing of a spawned ASYNC
+    /// subagent (claude `AppState.agentNameRegistry.set`, `AgentTool.tsx:704-711`).
+    ///
+    /// Defaulted to a no-op so existing impls/tests need no change; the
+    /// production [`SubagentSpawner`] overrides it to store in its internal
+    /// name→id map (or delegate to a wired
+    /// [`crate::agent_name_registry::AgentNameRegistry`]). Sync agents are NOT
+    /// registered (claude `AgentTool.tsx:700-702`).
+    async fn register_name(&self, _name: &str, _agent_id: protocol::AgentId) {}
+
+    /// Resolve a previously-registered async-agent name to its id (the read side
+    /// of [`Self::register_name`]). Defaulted to `None`; the production spawner
+    /// overrides it so a `SendMessage({ to: name })` resolver can route to a
+    /// running async subagent.
+    async fn resolve_name(&self, _name: &str) -> Option<protocol::AgentId> {
+        None
     }
 }
 

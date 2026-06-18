@@ -2645,6 +2645,15 @@ pub async fn build(
         .errors
         .is_empty();
 
+    // Shared LSP registry: the SAME `Arc<LspRegistry>` is handed to the LSP
+    // tool (via `tool_ctx.lsp_registry`) AND to the plugin manager below, so
+    // plugin-supplied LSP servers (`.lsp.json`) are registered into the very
+    // registry the `LSPTool` reads at runtime (the registry's
+    // `register_plugin_servers` is the ONLY supported registration path).
+    let plugin_lsp_registry = Arc::new(lsp::LspRegistry::new(Arc::new(
+        platform_posix::PosixLspTransport::new(),
+    )));
+
     let tool_ctx = BuiltinToolContext {
         // FILE.B: file tools share one read-state map for the (future) staleness
         // guard / Read-dedup; the composition-root Arc-share with the orchestrator
@@ -2698,7 +2707,7 @@ pub async fn build(
         // spawned subagents are gated by the same boot gate as the main loop.
         permission_gate: Some(perms.clone()),
         mcp_registry: Some(mcp_registry.clone()),
-        lsp_registry: None,
+        lsp_registry: Some(plugin_lsp_registry.clone()),
         camera: None,
         voice: None,
         stt: None,
@@ -3041,9 +3050,20 @@ pub async fn build(
             discovered = plugin::discover_installed_plugins(&plugins_dir).await;
         }
         if !discovered.is_empty() {
-            // Real LSP registry (its plugin-server registration path is the
-            // only supported one); empty skill/output-style/tool registries
-            // for the component types not materialised this pass.
+            // Live registries the manager materialises plugin components into:
+            // - command  → `shared_command_registry` (drives `/`-completion +
+            //   the per-turn skill listing).
+            // - hooks    → `plugin_hook_registry` (the orchestrator's clone).
+            // - MCP      → `plugin_mcp_registry` (== the orchestrator's
+            //   `mcp_registry`; seeded configs are discoverable in `/mcp`).
+            // - LSP      → `plugin_lsp_registry` (== the `LSPTool`'s registry).
+            // The SKILL and OUTPUT-STYLE registries have no turn-loop consumer
+            // yet (skills surface to the model via the command-registry listing,
+            // output styles via the dir-based resolver `resolve_output_style`),
+            // so they are still local instances here: registration is faithful
+            // to `loadAllPlugins`' registry population, but end-to-end
+            // consumption of these two registries is separate existing-arch work
+            // (residual).
             let pm = plugin::PluginManager::new(
                 plugins_dir.clone(),
                 Arc::new(PosixFileSystem::new(cwd_for_plugins.clone())),
@@ -3057,9 +3077,7 @@ pub async fn build(
                 plugin_hook_registry.clone(),
                 Arc::new(RwLock::new(outputstyles::OutputStyleRegistry::new())),
                 plugin_mcp_registry.clone(),
-                Arc::new(lsp::LspRegistry::new(Arc::new(
-                    platform_posix::PosixLspTransport::new(),
-                ))),
+                plugin_lsp_registry.clone(),
                 Arc::new(RwLock::new(ToolRegistry::new())),
             );
             for (id, manifest, dir) in discovered {

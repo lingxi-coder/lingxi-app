@@ -377,3 +377,149 @@ async fn install_marketplace_arm_returns_typed_error_not_panic() {
         .expect_err("marketplace install is not wired");
     assert!(format!("{err}").contains("not yet wired"));
 }
+
+/// Write a fixture plugin that ships a skill (under `skills/<name>/SKILL.md`,
+/// the claude-code layout), an output-style, an `.mcp.json`, and a `.lsp.json`.
+fn write_full_component_plugin(root: &Path, dir_name: &str, plugin_name: &str) {
+    let plugin_dir = root.join(dir_name);
+    fs::create_dir_all(plugin_dir.join(".claude-plugin")).unwrap();
+    fs::write(
+        plugin_dir.join(".claude-plugin").join("plugin.json"),
+        format!(r#"{{"name":"{plugin_name}","version":"1.0.0"}}"#),
+    )
+    .unwrap();
+    // Skill: skills/<name>/SKILL.md — descend ONE level, collect SKILL.md only.
+    fs::create_dir_all(plugin_dir.join("skills").join("greeter")).unwrap();
+    fs::write(
+        plugin_dir.join("skills").join("greeter").join("SKILL.md"),
+        "---\nname: greeter\ndescription: greets people\n---\nBody of the greeter skill.\n",
+    )
+    .unwrap();
+    // Output style.
+    fs::create_dir_all(plugin_dir.join("output-styles")).unwrap();
+    fs::write(
+        plugin_dir.join("output-styles").join("terse.md"),
+        "---\nname: terse\ndescription: short replies\n---\nBe terse.\n",
+    )
+    .unwrap();
+    // MCP server config (.mcp.json).
+    fs::write(
+        plugin_dir.join(".mcp.json"),
+        r#"{"mcpServers":{"echo":{"command":"echo","args":["hi"]}}}"#,
+    )
+    .unwrap();
+    // LSP server config (.lsp.json) — a record keyed by server name.
+    fs::write(
+        plugin_dir.join(".lsp.json"),
+        r#"{"pyls":{"name":"pyls","command":"pylsp","args":[],"env":{},"trigger_languages":["python"],"root_dir_markers":["pyproject.toml"],"initialization_options":null}}"#,
+    )
+    .unwrap();
+}
+
+#[tokio::test]
+async fn enable_materializes_skill_outputstyle_mcp_lsp_into_live_registries() {
+    let tmp = tempfile::tempdir().unwrap();
+    write_full_component_plugin(tmp.path(), "full", "fullplugin");
+
+    let command_registry = Arc::new(RwLock::new(CommandRegistry::new()));
+    let hook_registry = Arc::new(RwLock::new(HookRegistry::new()));
+    let skill_registry = Arc::new(RwLock::new(SkillRegistry::new()));
+    let output_style_registry = Arc::new(RwLock::new(OutputStyleRegistry::new()));
+    let tool_registry = Arc::new(RwLock::new(ToolRegistry::new()));
+    let lsp_registry = Arc::new(LspRegistry::new(Arc::new(PosixLspTransport::new())));
+    let mcp_registry = Arc::new(McpRegistry::new(Arc::new(PosixMcpTransport::new())));
+
+    let storage = PlainTextSecureStorage::new(tmp.path().join("secrets"))
+        .await
+        .unwrap();
+    let credentials = Arc::new(CredentialManager::new(
+        Arc::new(storage),
+        Arc::new(PosixClock::new()),
+        Arc::new(PosixHttp::new()),
+    ));
+    let manager = PluginManager::new(
+        tmp.path().to_path_buf(),
+        Arc::new(PosixFileSystem::new(tmp.path().to_path_buf())),
+        Arc::new(PosixHttp::new()),
+        Arc::new(PosixRuntime::new()),
+        credentials,
+        Arc::new(PluginBlocklist::new(String::new())),
+        Arc::new(StrictPluginOnlyPolicy::empty()),
+        command_registry,
+        skill_registry.clone(),
+        hook_registry,
+        output_style_registry.clone(),
+        mcp_registry.clone(),
+        lsp_registry.clone(),
+        tool_registry,
+    );
+
+    let discovered = plugin::discover_installed_plugins(tmp.path()).await;
+    assert_eq!(discovered.len(), 1);
+    let (id, manifest, dir) = discovered.into_iter().next().unwrap();
+
+    manager
+        .enable(&id, manifest, dir)
+        .await
+        .expect("enable should materialize all components");
+
+    // Skill: registered under the plugin-namespaced name.
+    {
+        let reg = skill_registry.read().await;
+        assert!(
+            reg.get("fullplugin:greeter").is_some(),
+            "plugin skill should be registered as fullplugin:greeter, names={:?}",
+            reg.names()
+        );
+    }
+    // Output style: registered under the plugin-namespaced name.
+    {
+        let reg = output_style_registry.read().await;
+        assert!(
+            reg.get("fullplugin:terse").is_some(),
+            "plugin output-style should be registered as fullplugin:terse"
+        );
+    }
+    // MCP server config: seeded into the connection map under the scoped
+    // name. (`get_config` normalizes the colon-bearing key, so assert on the
+    // raw connection map — the registry-level observable used by `/mcp`.)
+    assert!(
+        mcp_registry
+            .connections
+            .read()
+            .await
+            .contains_key("plugin:fullplugin:echo"),
+        "plugin MCP server config should be seeded under plugin:fullplugin:echo"
+    );
+    // LSP server config: registered (config name as key).
+    assert!(
+        lsp_registry.get_config("pyls").await.is_some(),
+        "plugin LSP server config should be registered"
+    );
+
+    // Unload removes all of them.
+    manager.disable(&id).await.expect("disable should unload");
+    {
+        let reg = skill_registry.read().await;
+        assert!(reg.get("fullplugin:greeter").is_none(), "skill removed on unload");
+    }
+    {
+        let reg = output_style_registry.read().await;
+        assert!(
+            reg.get("fullplugin:terse").is_none(),
+            "output-style removed on unload"
+        );
+    }
+    assert!(
+        !mcp_registry
+            .connections
+            .read()
+            .await
+            .contains_key("plugin:fullplugin:echo"),
+        "MCP config removed on unload"
+    );
+    assert!(
+        lsp_registry.get_config("pyls").await.is_none(),
+        "LSP config removed on unload"
+    );
+}

@@ -149,6 +149,204 @@ fn hoist_tool_results(content: &mut [ProtoBlock]) {
     content.sort_by_key(|b| !matches!(b, ProtoBlock::ToolResult { .. }));
 }
 
+/// `ensureToolResultPairing` (claude-code `messages.ts:5133`): repair the
+/// tool_use ↔ tool_result pairing of a message list before the wire, so a
+/// resumed / interrupted / compacted transcript is not rejected by the API
+/// (orphaned tool_result, missing tool_result, duplicate ids).
+///
+/// Complements the LOAD-time `recover_orphaned_parallel_tool_results`
+/// (`session/jsonl/loader.rs`): this is the SEND-time pass that also catches
+/// mid-session interrupts. Runs AFTER [`normalize_messages_for_api`]. On a CLEAN
+/// turn — every `tool_use` has its matching `tool_result` in the following user
+/// message, no duplicates, no orphans — this is a strict identity no-op.
+///
+/// Repairs (byte-faithful to the TS placeholders):
+/// - Leading orphaned `tool_result`s (a user message with `tool_result` blocks
+///   and no preceding assistant) are stripped; if that empties the first
+///   message it becomes a `[Orphaned tool result removed due to conversation
+///   resume]` text message.
+/// - Duplicate `tool_use` ids (across messages) are de-duplicated; an orphaned
+///   `server_tool_use` whose `advisor_tool_result` is missing is stripped; an
+///   emptied assistant becomes a `[Tool use interrupted]` text message.
+/// - A `tool_use` with no matching `tool_result` gets a synthetic error result
+///   `[Tool result missing due to internal error]`; an orphaned/duplicate
+///   `tool_result` is stripped.
+#[must_use]
+pub fn ensure_tool_result_pairing(
+    messages: Vec<ConversationMessage>,
+) -> Vec<ConversationMessage> {
+    use protocol::ContentBlock as B;
+    use std::collections::HashSet;
+    const SYNTH: &str = "[Tool result missing due to internal error]";
+    const NO_CONTENT: &str = "(no content)";
+
+    let mut result: Vec<ConversationMessage> = Vec::with_capacity(messages.len());
+    let mut all_seen_tool_use_ids: HashSet<String> = HashSet::new();
+    let mut i = 0usize;
+    while i < messages.len() {
+        let msg = &messages[i];
+        let ConversationMessage::Assistant {
+            id: asst_id,
+            content,
+            stop_reason,
+        } = msg
+        else {
+            if let ConversationMessage::User { id, content, is_meta } = msg {
+                let prev_is_assistant =
+                    matches!(result.last(), Some(ConversationMessage::Assistant { .. }));
+                if !prev_is_assistant && content.iter().any(|b| matches!(b, B::ToolResult { .. })) {
+                    let stripped: Vec<B> = content
+                        .iter()
+                        .filter(|b| !matches!(b, B::ToolResult { .. }))
+                        .cloned()
+                        .collect();
+                    if !stripped.is_empty() {
+                        result.push(ConversationMessage::User {
+                            id: *id,
+                            content: stripped,
+                            is_meta: *is_meta,
+                        });
+                    } else if result.is_empty() {
+                        result.push(ConversationMessage::user(
+                            *id,
+                            "[Orphaned tool result removed due to conversation resume]".into(),
+                        ));
+                    }
+                    i += 1;
+                    continue;
+                }
+            }
+            result.push(msg.clone());
+            i += 1;
+            continue;
+        };
+
+        let server_result_ids: HashSet<String> = content
+            .iter()
+            .filter_map(|b| match b {
+                B::AdvisorToolResult { tool_use_id, .. } => Some(tool_use_id.clone()),
+                _ => None,
+            })
+            .collect();
+
+        let mut seen_tool_use_ids: HashSet<String> = HashSet::new();
+        let mut final_content: Vec<B> = Vec::with_capacity(content.len());
+        for block in content {
+            match block {
+                B::ToolUse { id, .. } => {
+                    let s = id.as_str().to_string();
+                    if all_seen_tool_use_ids.contains(&s) {
+                        continue;
+                    }
+                    all_seen_tool_use_ids.insert(s.clone());
+                    seen_tool_use_ids.insert(s);
+                    final_content.push(block.clone());
+                }
+                B::ServerToolUse { id, .. } if !server_result_ids.contains(id) => {
+                    continue;
+                }
+                _ => final_content.push(block.clone()),
+            }
+        }
+        if final_content.is_empty() {
+            final_content.push(B::Text {
+                text: "[Tool use interrupted]".into(),
+            });
+        }
+        result.push(ConversationMessage::Assistant {
+            id: *asst_id,
+            content: final_content,
+            stop_reason: stop_reason.clone(),
+        });
+
+        let next = messages.get(i + 1);
+        let mut existing_tr_ids: HashSet<String> = HashSet::new();
+        let mut has_dup_tr = false;
+        if let Some(ConversationMessage::User { content, .. }) = next {
+            for b in content {
+                if let B::ToolResult { tool_use_id, .. } = b {
+                    let t = tool_use_id.as_str().to_string();
+                    if !existing_tr_ids.insert(t) {
+                        has_dup_tr = true;
+                    }
+                }
+            }
+        }
+        let missing: Vec<String> = seen_tool_use_ids
+            .iter()
+            .filter(|id| !existing_tr_ids.contains(*id))
+            .cloned()
+            .collect();
+        let orphaned: HashSet<String> = existing_tr_ids
+            .iter()
+            .filter(|id| !seen_tool_use_ids.contains(*id))
+            .cloned()
+            .collect();
+
+        if missing.is_empty() && orphaned.is_empty() && !has_dup_tr {
+            i += 1;
+            continue;
+        }
+
+        let synth: Vec<B> = missing
+            .iter()
+            .map(|mid| B::ToolResult {
+                tool_use_id: protocol::ToolUseId::from(mid.clone()),
+                content: SYNTH.to_string(),
+                is_error: true,
+                provider_tool_use_id: None,
+            })
+            .collect();
+
+        if let Some(ConversationMessage::User { id: uid, content, is_meta }) = next {
+            let mut c = content.clone();
+            if !orphaned.is_empty() || has_dup_tr {
+                let mut seen: HashSet<String> = HashSet::new();
+                c.retain(|b| match b {
+                    B::ToolResult { tool_use_id, .. } => {
+                        let t = tool_use_id.as_str().to_string();
+                        if orphaned.contains(&t) {
+                            return false;
+                        }
+                        seen.insert(t)
+                    }
+                    _ => true,
+                });
+            }
+            let mut patched = synth;
+            patched.extend(c);
+            if !patched.is_empty() {
+                result.push(ConversationMessage::User {
+                    id: *uid,
+                    content: patched,
+                    is_meta: *is_meta,
+                });
+            } else {
+                // Role-alternation placeholder (claude-code `NO_CONTENT_MESSAGE`,
+                // isMeta: true).
+                result.push(ConversationMessage::User {
+                    id: protocol::MessageId::new(),
+                    content: vec![B::Text { text: NO_CONTENT.to_string() }],
+                    is_meta: true,
+                });
+            }
+            i += 2;
+        } else {
+            // Synthetic missing-result message (claude-code createUserMessage,
+            // isMeta: true).
+            if !synth.is_empty() {
+                result.push(ConversationMessage::User {
+                    id: protocol::MessageId::new(),
+                    content: synth,
+                    is_meta: true,
+                });
+            }
+            i += 1;
+        }
+    }
+    result
+}
+
 /// Convert a `Vec<serde_json::Value>` (tool declarations in wire JSON shape)
 /// into `Vec<llm_client::ToolDeclaration>`.
 ///
@@ -975,5 +1173,105 @@ mod tests {
             }
             other => panic!("expected User, got {other:?}"),
         }
+    }
+
+    // ── ensure_tool_result_pairing ────────────────────────────────────────────
+
+    fn tu(id: &str) -> ProtoBlock {
+        ProtoBlock::ToolUse {
+            id: ToolUseId::from(id),
+            name: "Read".into(),
+            input: serde_json::json!({}),
+            provider_id: None,
+        }
+    }
+    fn tr(id: &str) -> ProtoBlock {
+        ProtoBlock::ToolResult {
+            tool_use_id: ToolUseId::from(id),
+            content: "ok".into(),
+            is_error: false,
+            provider_tool_use_id: None,
+        }
+    }
+    fn asst_blocks(blocks: Vec<ProtoBlock>) -> ConversationMessage {
+        ConversationMessage::Assistant {
+            id: MessageId::new(),
+            content: blocks,
+            stop_reason: None,
+        }
+    }
+    fn usr_blocks(blocks: Vec<ProtoBlock>) -> ConversationMessage {
+        ConversationMessage::User {
+            id: MessageId::new(),
+            content: blocks,
+            is_meta: false,
+        }
+    }
+
+    /// Clean turn → strict identity no-op.
+    #[test]
+    fn pairing_clean_turn_is_noop() {
+        let out = ensure_tool_result_pairing(vec![
+            usr_blocks(vec![ProtoBlock::Text { text: "go".into() }]),
+            asst_blocks(vec![tu("toolu_a")]),
+            usr_blocks(vec![tr("toolu_a")]),
+        ]);
+        assert_eq!(out.len(), 3);
+        assert!(matches!(&out[1], ConversationMessage::Assistant { content, .. } if content.len() == 1));
+        assert!(matches!(&out[2], ConversationMessage::User { content, .. }
+            if content.len() == 1 && matches!(content[0], ProtoBlock::ToolResult { .. })));
+    }
+
+    /// A tool_use with no matching tool_result → synthetic error result injected.
+    #[test]
+    fn pairing_missing_result_synthesizes_error() {
+        let out = ensure_tool_result_pairing(vec![
+            asst_blocks(vec![tu("toolu_x")]),
+            usr_blocks(vec![ProtoBlock::Text { text: "next".into() }]),
+        ]);
+        let ConversationMessage::User { content, .. } = &out[1] else {
+            panic!("expected user");
+        };
+        match &content[0] {
+            ProtoBlock::ToolResult { tool_use_id, content, is_error, .. } => {
+                assert_eq!(tool_use_id.as_str(), "toolu_x");
+                assert!(*is_error);
+                assert_eq!(content, "[Tool result missing due to internal error]");
+            }
+            other => panic!("expected synthetic tool_result, got {other:?}"),
+        }
+    }
+
+    /// An orphaned tool_result (no matching tool_use) → stripped.
+    #[test]
+    fn pairing_orphaned_result_is_stripped() {
+        let out = ensure_tool_result_pairing(vec![
+            asst_blocks(vec![tu("toolu_a")]),
+            usr_blocks(vec![tr("toolu_a"), tr("toolu_ORPHAN")]),
+        ]);
+        let ConversationMessage::User { content, .. } = &out[1] else {
+            panic!("expected user");
+        };
+        let ids: Vec<&str> = content
+            .iter()
+            .filter_map(|b| match b {
+                ProtoBlock::ToolResult { tool_use_id, .. } => Some(tool_use_id.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(ids, vec!["toolu_a"], "orphan stripped: {content:?}");
+    }
+
+    /// Leading orphaned tool_result (resume mid-turn, no preceding assistant)
+    /// → replaced by the placeholder text.
+    #[test]
+    fn pairing_leading_orphan_stripped_to_placeholder() {
+        let out = ensure_tool_result_pairing(vec![usr_blocks(vec![tr("toolu_gone")])]);
+        assert_eq!(out.len(), 1);
+        let ConversationMessage::User { content, .. } = &out[0] else {
+            panic!("expected user");
+        };
+        assert!(matches!(&content[0], ProtoBlock::Text { text }
+            if text == "[Orphaned tool result removed due to conversation resume]"));
     }
 }

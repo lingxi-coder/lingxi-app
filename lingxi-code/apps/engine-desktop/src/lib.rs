@@ -1377,6 +1377,48 @@ impl orchestrator::prompt::skill_listing::SkillListingProvider for RegistrySkill
     }
 }
 
+/// Production [`mcp::oauth::OnAuthorizationUrl`] callback for OAuth-configured
+/// remote MCP servers. The MCP OAuth flow ([`mcp::McpRegistry::connect`]) fires
+/// this once per interactive flow with the authorization URL the user must visit
+/// to grant consent.
+///
+/// There is no browser-open util in this workspace, so this is best-effort:
+/// 1. Log the URL prominently at `info` level (the engine's only surfacing path
+///    from this depth — the TUI/transport tails the tracing stream).
+/// 2. Attempt a detached OS-native browser open (`open` on macOS, `xdg-open` on
+///    Linux, `cmd /c start` on Windows), ignoring any failure.
+///
+/// Non-panicking and non-blocking: a failed spawn leaves the logged URL as the
+/// fallback the user can copy by hand.
+fn mcp_on_authorization_url() -> mcp::oauth::OnAuthorizationUrl {
+    Arc::new(|url: &str| {
+        tracing::info!(
+            target: "lingxi::mcp::oauth",
+            authorization_url = %url,
+            "MCP OAuth: open this URL in a browser to authorize the server:\n  {url}",
+        );
+        // Best-effort detached browser open; failures are intentionally ignored.
+        #[cfg(target_os = "macos")]
+        let cmd: Option<(&str, &[&str])> = Some(("open", &[]));
+        #[cfg(target_os = "linux")]
+        let cmd: Option<(&str, &[&str])> = Some(("xdg-open", &[]));
+        #[cfg(target_os = "windows")]
+        let cmd: Option<(&str, &[&str])> = Some(("cmd", &["/c", "start", ""]));
+        #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+        let cmd: Option<(&str, &[&str])> = None;
+
+        if let Some((program, prefix)) = cmd {
+            let _ = std::process::Command::new(program)
+                .args(prefix)
+                .arg(url)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn();
+        }
+    })
+}
+
 /// # Errors
 ///
 /// Returns [`BuildError`] if the api-client or orchestrator cannot be
@@ -1430,6 +1472,10 @@ pub async fn build(
     let subscription: traits::subscription::SharedSubscription = std::sync::Arc::new(
         std::sync::RwLock::new(Some(traits::subscription::SubscriptionSnapshot::default())),
     );
+    // Retain a clone for the MCP OAuth seam (5.26): `CredentialManager::new`
+    // moves `storage`, but the registry's `OAuthDeps.storage` needs the SAME
+    // platform `Arc<dyn SecureStorage>` for per-server token persistence.
+    let mcp_oauth_storage = storage.clone();
     let credentials = Arc::new(CredentialManager::new(storage, clock.clone(), http.clone()));
     let oauth_cfg = ClaudeAiOAuthConfig::default_with_port(0);
     let oauth_client = Arc::new(ClaudeAiOAuthClient::new(
@@ -2286,12 +2332,27 @@ pub async fn build(
     let elicitation_dispatcher: Arc<dyn mcp::HookDispatcher> = Arc::new(
         orchestrator::OrchestratorHookDispatcher::new(hooks.clone(), cwd.clone()),
     );
+    // OAuth 2.1 + PKCE seam for OAuth-configured remote (SSE/HTTP) MCP servers.
+    // Reuses the platform `http` / `clock` / `storage` already built in step (1);
+    // `on_authorization_url` surfaces the consent URL to the user (logs it
+    // prominently + best-effort detached OS browser open). `xaa_config: None`
+    // leaves XAA-flagged servers on their actionable hard-fail (no config seam
+    // for the IdP-login surface yet). When a server has no `oauth` config this is
+    // entirely inert — static-token / no-oauth servers take the unchanged path.
+    let mcp_oauth_deps = mcp::registry::OAuthDeps {
+        http: http.clone() as Arc<dyn traits::HttpTransport>,
+        clock: clock.clone() as Arc<dyn traits::Clock>,
+        storage: mcp_oauth_storage,
+        on_authorization_url: mcp_on_authorization_url(),
+        xaa_config: None,
+    };
     let mcp_registry = Arc::new(
         mcp::McpRegistry::with_raw_conn(
             posix.clone() as Arc<dyn McpTransport>,
             posix as Arc<dyn mcp::RawConnectionProvider>,
         )
-        .with_hook_dispatcher(Some(elicitation_dispatcher)),
+        .with_hook_dispatcher(Some(elicitation_dispatcher))
+        .with_oauth(mcp_oauth_deps),
     );
     mcp_registry.connect_all(mcp_configs).await;
     tokio::spawn(Arc::clone(&mcp_registry).run_reconnect_loop());
@@ -3728,6 +3789,26 @@ mod tests {
         assert!(
             rt.orchestrator.has_compaction(),
             "no CompactionOrchestrator"
+        );
+    }
+
+    /// The production-built `McpRegistry` must carry the OAuth seam
+    /// ([`mcp::registry::OAuthDeps`]). Without `.with_oauth(..)` in `build()`,
+    /// OAuth-configured remote MCP servers can't authenticate (they silently
+    /// fall back to static headers). This asserts the composition root wires it.
+    #[tokio::test]
+    async fn build_wires_mcp_oauth_seam() {
+        let (_tmp, cfg) = test_config(true);
+        let output: Arc<dyn traits::OutputStream> =
+            Arc::new(orchestrator::test_support::MockOutputStream::new());
+        let perm_sink: Arc<dyn client_adapter::PermissionRequestSink> =
+            Arc::new(RecordingPermissionSink::default());
+
+        let rt = build(cfg, output, perm_sink).await.expect("build() failed");
+
+        assert!(
+            rt.orchestrator.has_mcp_oauth(),
+            "OAuthDeps not wired into the production MCP registry"
         );
     }
 

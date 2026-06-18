@@ -818,6 +818,18 @@ impl ConversationOrchestrator {
         self.mcp_registry.is_some()
     }
 
+    /// Whether the wired MCP registry has the OAuth seam injected
+    /// ([`mcp::registry::OAuthDeps`] via `McpRegistry::with_oauth`). `false`
+    /// when no registry is wired OR the registry lacks OAuth (static-header
+    /// fallback only). Lets the desktop composition-root test confirm OAuth is
+    /// production-reachable end to end.
+    #[must_use]
+    pub fn has_mcp_oauth(&self) -> bool {
+        self.mcp_registry
+            .as_ref()
+            .is_some_and(|r| r.has_oauth())
+    }
+
     /// Whether a hook registry has been wired via
     /// [`Self::with_hook_registry`]. (M6-07)
     #[must_use]

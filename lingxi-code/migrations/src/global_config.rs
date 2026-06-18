@@ -356,6 +356,75 @@ pub fn save_project_config(
     Ok(true)
 }
 
+/// `checkHasTrustDialogAccepted` → `computeTrustDialogAccepted`
+/// (`config.ts:705-743`): is `cwd`, or any of its ancestor directories,
+/// recorded as trusted on disk? Returns `true` when `projects[<key>]` carries
+/// a truthy `"hasTrustDialogAccepted"` for any of:
+///   1. the git-root / canonical project key of `cwd`
+///      (`getProjectPathForConfig`, the PRIMARY persistence location), then
+///   2. each lexical ancestor of `cwd` (`cwd`, `cwd/..`, … to root), keyed the
+///      way TS's `normalizePathForConfigKey(resolve(..))` walk does.
+///
+/// Two intentional divergences from this module's other readers, both
+/// fail-safe-to-PROMPT (never falsely trust): a missing or **broken** config
+/// (`read_map`/`get_project_config` `Err`) yields `false` here rather than
+/// propagating — the trust check must degrade to "ask the user", never to a
+/// crash or an implicit grant. The TS in-memory session-trust branch
+/// (`getSessionTrustAccepted`, the `homedir()===cwd` case) is intentionally
+/// NOT modeled by this disk-only store API; the dialog layer owns that.
+#[must_use]
+pub fn check_has_trust_dialog_accepted(config_path: &Path, cwd: &Path) -> bool {
+    // Canonicalize once (fall back to as-is), mirroring `project_path_for_config`
+    // and TS's `resolve(getCwd())` before the lexical parent-walk.
+    let resolved = cwd.canonicalize().unwrap_or_else(|_| cwd.to_path_buf());
+
+    // (1) The primary persistence key (git root or canonical cwd).
+    if project_has_trust(config_path, &project_path_for_config(cwd)) {
+        return true;
+    }
+
+    // (2) Lexical ancestor walk: `cwd`, its parent, … up to the filesystem
+    // root. `Path::parent` is the lexical `resolve(currentPath, '..')` analogue
+    // and stops returning when `parent == current` at the root (TS's loop
+    // break), so no explicit equality guard is needed.
+    let mut cur: Option<&Path> = Some(resolved.as_path());
+    while let Some(p) = cur {
+        let key = p.to_string_lossy().replace('\\', "/");
+        if project_has_trust(config_path, &key) {
+            return true;
+        }
+        cur = p.parent();
+    }
+
+    false
+}
+
+/// `config.projects?.[key]?.hasTrustDialogAccepted` truthiness, fail-safe to
+/// `false` on any read/parse error. TS reads the value as truthy (`if
+/// (projectConfig?.hasTrustDialogAccepted)`); the writer only ever stores the
+/// boolean `true`, so a `Value::Bool(true)` is the faithful truthiness test.
+fn project_has_trust(config_path: &Path, key: &str) -> bool {
+    matches!(
+        get_project_config(config_path, key),
+        Ok(p) if p.get("hasTrustDialogAccepted") == Some(&Value::Bool(true))
+    )
+}
+
+/// Persist trust for `cwd` (the `TrustDialog` "Yes, I trust this folder"
+/// branch, which calls `saveCurrentProjectConfig({ hasTrustDialogAccepted:
+/// true })` against `getProjectPathForConfig()` — `config.ts:717`,
+/// `TrustDialog.tsx:272-277`). Writes the same project key the primary check
+/// in [`check_has_trust_dialog_accepted`] reads first. PRESERVES every other
+/// key in that project's map and every other project (delegated to
+/// [`save_project_config`]).
+pub fn mark_trust_dialog_accepted(config_path: &Path, cwd: &Path) -> Result<(), GlobalConfigError> {
+    save_project_config(config_path, &project_path_for_config(cwd), |mut p| {
+        p.insert("hasTrustDialogAccepted".to_string(), Value::Bool(true));
+        p
+    })
+    .map(|_wrote| ())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -724,5 +793,109 @@ mod tests {
         let back = read_map(&real).unwrap();
         assert_eq!(back["keep"], serde_json::json!(true));
         assert_eq!(back["a"], serde_json::json!(1));
+    }
+
+    // ---- hasTrustDialogAccepted store (config.ts:705-743) ----
+
+    /// Write `projects[<key>] = { "hasTrustDialogAccepted": true }` to the
+    /// temp config, returning the key used (so callers can also seed siblings).
+    fn seed_trust(global: &Path, key: &str) {
+        std::fs::write(
+            global,
+            serde_json::to_string(&serde_json::json!({
+                "projects": { key: { "hasTrustDialogAccepted": true } }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn trust_check_cwd_accepted_is_true() {
+        let t = temp_config();
+        // No `.git`, so the project key == the canonicalized cwd.
+        let key = project_path_for_config(&t.project);
+        seed_trust(&t.global, &key);
+        assert!(check_has_trust_dialog_accepted(&t.global, &t.project));
+    }
+
+    #[test]
+    fn trust_check_ancestor_accepted_is_true() {
+        let t = temp_config();
+        // Trust a PARENT dir; check a nested child → true (parent-walk).
+        let child = t.project.join("a/b/c");
+        std::fs::create_dir_all(&child).unwrap();
+        let parent_key = project_path_for_config(&t.project);
+        seed_trust(&t.global, &parent_key);
+        assert!(check_has_trust_dialog_accepted(&t.global, &child));
+    }
+
+    #[test]
+    fn trust_check_none_is_false() {
+        let t = temp_config();
+        std::fs::write(
+            &t.global,
+            r#"{"projects":{"/some/other/proj":{"hasTrustDialogAccepted":true}}}"#,
+        )
+        .unwrap();
+        assert!(!check_has_trust_dialog_accepted(&t.global, &t.project));
+    }
+
+    #[test]
+    fn trust_mark_then_check_is_true() {
+        let t = temp_config();
+        mark_trust_dialog_accepted(&t.global, &t.project).unwrap();
+        assert!(check_has_trust_dialog_accepted(&t.global, &t.project));
+    }
+
+    #[test]
+    fn trust_mark_preserves_sibling_key_and_sibling_project() {
+        let t = temp_config();
+        let key = project_path_for_config(&t.project);
+        std::fs::write(
+            &t.global,
+            serde_json::to_string(&serde_json::json!({
+                "numStartups": 7,
+                "projects": {
+                    key.clone(): { "allowedTools": ["Bash"] },
+                    "/other/project": { "x": 1 },
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        mark_trust_dialog_accepted(&t.global, &t.project).unwrap();
+
+        let back = read_map(&t.global).unwrap();
+        // Trust set on our project…
+        assert_eq!(
+            back["projects"][&key]["hasTrustDialogAccepted"],
+            serde_json::json!(true)
+        );
+        // …a sibling key inside our project's map survives…
+        assert_eq!(
+            back["projects"][&key]["allowedTools"],
+            serde_json::json!(["Bash"])
+        );
+        // …a sibling PROJECT survives…
+        assert_eq!(back["projects"]["/other/project"]["x"], serde_json::json!(1));
+        // …and a top-level unknown key survives.
+        assert_eq!(back["numStartups"], serde_json::json!(7));
+    }
+
+    #[test]
+    fn trust_check_corrupt_file_is_false() {
+        let t = temp_config();
+        std::fs::write(&t.global, "{ broken").unwrap();
+        // Fail-safe-to-prompt: corrupt config must NOT panic and must be false.
+        assert!(!check_has_trust_dialog_accepted(&t.global, &t.project));
+    }
+
+    #[test]
+    fn trust_check_missing_file_is_false() {
+        let t = temp_config();
+        // `t.global` never created.
+        assert!(!check_has_trust_dialog_accepted(&t.global, &t.project));
     }
 }

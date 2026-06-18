@@ -28,6 +28,7 @@ pub mod root;
 pub mod screens;
 pub mod session;
 pub mod startup_bypass;
+pub mod startup_trust;
 pub mod state;
 pub mod streaming;
 pub mod telemetry;

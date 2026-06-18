@@ -109,6 +109,23 @@ pub async fn dispatch(
                     return exit_codes::RUNTIME_ERROR;
                 }
             };
+            // (Task 3) Startup project-trust dialog (`TrustDialog`, shown by
+            // `showSetupScreens` BEFORE the REPL/session and BEFORE any
+            // tool/hook/plugin runs). TTY-only — this `Mode::Tui` arm is only
+            // reached when stdin+stdout are terminals (`mode::decide_mode_with`
+            // falls back to `StdioRepl` otherwise), so the raw-mode mount is
+            // safe AND "non-interactive ⇒ no dialog" is satisfied for free.
+            // Placed BEFORE the bypass gate: trust is the outermost "may I
+            // touch this folder at all" gate. Already-accepted (incl.
+            // parent-walk-trusted) ⇒ skip ⇒ byte-identical to today.
+            match trust_gate().await {
+                TrustGateOutcome::Proceed => {}
+                TrustGateOutcome::Decline => {
+                    // "No, exit" / Esc → exit 1 (`TrustDialog.tsx:158-160`
+                    // `gracefulShutdownSync(1)`; matches the REPL gate).
+                    return exit_codes::RUNTIME_ERROR;
+                }
+            }
             // (Task 8) Startup bypass-permissions confirmation dialog
             // (`BypassPermissionsModeDialog`, shown by `showSetupScreens` BEFORE
             // the REPL). TTY-only — this arm is only reached when stdin+stdout
@@ -356,6 +373,77 @@ fn persist_skip_dangerous_prompt() {
     }
 }
 
+/// Outcome of the startup trust gate ([`trust_gate`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TrustGateOutcome {
+    /// Already trusted (incl. parent-walk), no config path, or the user
+    /// accepted the dialog ⇒ continue into the session (trusted).
+    Proceed,
+    /// The user declined (or pressed Esc) ⇒ exit 1.
+    Decline,
+}
+
+/// Whether the un-trusted cwd should mount the trust dialog, and the resolved
+/// `(cwd, config_path)` to mount + persist against. `None` ⇒ proceed with NO
+/// dialog (already trusted via parent-walk, OR no global config path to
+/// consult/persist — degrade exactly as today's hardcoded `Trusted`).
+///
+/// Pure decision (no terminal I/O): factored out of [`trust_gate`] so the
+/// gate's branch logic is unit-testable without a TTY (the mount itself, like
+/// `run_tui_session`, can't be driven headless). Mirrors
+/// `TrustDialog.tsx:199-202` — `if (hasTrustDialogAccepted) { onDone() }` skips
+/// the dialog.
+fn trust_gate_should_prompt(
+    cwd: &std::path::Path,
+    config_path: Option<&std::path::Path>,
+) -> bool {
+    match config_path {
+        // No config path to consult/persist ⇒ proceed without prompting
+        // (no-home degrade, same as `init::resolve_desktop_config`).
+        None => false,
+        // Already trusted (cwd or any ancestor) ⇒ proceed without prompting.
+        Some(p) => !migrations::global_config::check_has_trust_dialog_accepted(p, cwd),
+    }
+}
+
+/// Startup project-trust GATE (design doc §3; parity
+/// `components/TrustDialog/TrustDialog.tsx` + `showSetupScreens`).
+///
+/// Resolves the cwd + the global config path, and:
+/// - already-trusted (parent-walk) / no config path ⇒ [`TrustGateOutcome::Proceed`]
+///   with NO dialog (byte-identical to today's hardcoded `Trusted`);
+/// - otherwise mounts the TTY trust dialog; Accept ⇒ persist
+///   `hasTrustDialogAccepted` (best-effort) + `Proceed`; Decline/Esc ⇒
+///   [`TrustGateOutcome::Decline`] (exit 1); a mount I/O error ⇒ `Decline`
+///   (fail-closed — never silently proceed on a broken prompt).
+async fn trust_gate() -> TrustGateOutcome {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let config_path = migrations::global_config::global_config_path();
+    if !trust_gate_should_prompt(&cwd, config_path.as_deref()) {
+        return TrustGateOutcome::Proceed;
+    }
+    // `trust_gate_should_prompt` only returns true with `Some(config_path)`.
+    let config_path = config_path.expect("prompt implies a config path");
+    match tui::startup_trust::mount_trust_dialog(&cwd).await {
+        Ok(tui::startup_trust::TrustDialogOutcome::Accept) => {
+            // "Yes, I trust this folder" → persist (best-effort; a write
+            // failure must not crash startup — the session is still
+            // trusted-this-run). `TrustDialog.tsx:177` → `saveCurrentProjectConfig`.
+            if let Err(e) =
+                migrations::global_config::mark_trust_dialog_accepted(&config_path, &cwd)
+            {
+                tracing::warn!(error = %e, "mark_trust_dialog_accepted failed (ignored)");
+            }
+            TrustGateOutcome::Proceed
+        }
+        Ok(tui::startup_trust::TrustDialogOutcome::Decline) => TrustGateOutcome::Decline,
+        Err(e) => {
+            eprintln!("lingxi-cli: trust dialog failed: {e}");
+            TrustGateOutcome::Decline
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -477,5 +565,91 @@ mod tests {
         write_settings(&claude_home.join("settings.json"), r#"{"theme":"dark"}"#);
         assert!(read_status_line_config_from(&claude_home, &project_dir).is_none());
         std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    // ── (Task 3) startup trust gate ───────────────────────────────────────
+    //
+    // The mount itself (`mount_trust_dialog`) can't be driven headless (no TTY
+    // — same caveat documented on `run_tui_session` / `mount_bypass_dialog`),
+    // so the gate DECISION is tested here via the store seam
+    // (`trust_gate_should_prompt`, against a real `migrations::global_config`
+    // temp config). The dialog's pure key→outcome map (Accept/Decline/Esc) is
+    // covered by `tui::startup_trust`'s own unit tests; `apps/cli` does not
+    // depend on `crossterm`, so the gate's branch logic is exercised here at
+    // the predicate seam — mirroring how the bypass gate is covered (pure
+    // predicate, thin I/O wrapper excluded).
+
+    use std::path::PathBuf;
+
+    /// An un-trusted cwd ⇒ the gate WOULD mount the dialog
+    /// (`trust_gate_should_prompt == true`); persisting (the Accept path)
+    /// makes a subsequent `check_` true and the gate no longer re-prompts
+    /// (continue path / store marked).
+    #[test]
+    fn untrusted_cwd_prompts_then_accept_marks_and_continues() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config_path = tmp.path().join(".claude.json");
+        let cwd = tmp.path().join("project");
+        std::fs::create_dir_all(&cwd).unwrap();
+
+        // Un-trusted ⇒ dialog shown.
+        assert!(
+            trust_gate_should_prompt(&cwd, Some(config_path.as_path())),
+            "un-trusted cwd must mount the trust dialog"
+        );
+
+        // Accept persists ⇒ subsequent check is true (and the gate would NOT
+        // re-prompt) — the "continue, store marked" path.
+        migrations::global_config::mark_trust_dialog_accepted(&config_path, &cwd).unwrap();
+        assert!(
+            migrations::global_config::check_has_trust_dialog_accepted(&config_path, &cwd),
+            "accept must persist trust"
+        );
+        assert!(
+            !trust_gate_should_prompt(&cwd, Some(config_path.as_path())),
+            "after accept the gate must not re-prompt"
+        );
+    }
+
+    /// A trusted cwd ⇒ NO dialog (straight to the main screen / session).
+    #[test]
+    fn trusted_cwd_shows_no_dialog() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config_path = tmp.path().join(".claude.json");
+        let cwd = tmp.path().join("project");
+        std::fs::create_dir_all(&cwd).unwrap();
+        // Pre-trust the cwd.
+        migrations::global_config::mark_trust_dialog_accepted(&config_path, &cwd).unwrap();
+        assert!(
+            !trust_gate_should_prompt(&cwd, Some(config_path.as_path())),
+            "trusted cwd must NOT mount the trust dialog"
+        );
+    }
+
+    /// An ancestor-trusted cwd ⇒ NO dialog (parent-walk; trusting a parent
+    /// trusts children — `checkHasTrustDialogAccepted`).
+    #[test]
+    fn ancestor_trusted_cwd_shows_no_dialog() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config_path = tmp.path().join(".claude.json");
+        let parent = tmp.path().join("workspace");
+        let child = parent.join("sub").join("project");
+        std::fs::create_dir_all(&child).unwrap();
+        // Trust the PARENT only.
+        migrations::global_config::mark_trust_dialog_accepted(&config_path, &parent).unwrap();
+        assert!(
+            !trust_gate_should_prompt(&child, Some(config_path.as_path())),
+            "ancestor-trusted cwd must NOT mount the trust dialog (parent-walk)"
+        );
+    }
+
+    /// No global config path (no-home degrade) ⇒ NO dialog, proceed as today.
+    #[test]
+    fn no_config_path_shows_no_dialog() {
+        let cwd = PathBuf::from("/some/untracked/dir");
+        assert!(
+            !trust_gate_should_prompt(&cwd, None),
+            "no config path must proceed without a dialog (degrade)"
+        );
     }
 }

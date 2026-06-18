@@ -13,9 +13,10 @@ use futures::future::BoxFuture;
 use orchestrator::{OrchestratorError, TurnOutcome};
 use protocol::SessionId;
 use std::io::IsTerminal;
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Instant;
-use tokio::io::{stderr, stdin, AsyncBufRead, BufReader, Stdin};
+use tokio::io::{stderr, stdin, AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader, Stdin};
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 use traits::{OrchestratorHandle, OutputStream};
@@ -27,6 +28,131 @@ use traits::{OrchestratorHandle, OutputStream};
 /// + testable so the gate is never injected for a piped/CI session.
 fn should_prompt_interactively(is_tty: bool, print: bool) -> bool {
     is_tty && !print
+}
+
+/// Outcome of the startup trust gate.
+///
+/// `Proceed` ⇒ build the runtime + enter the loop (today's behavior).
+/// `Decline` ⇒ exit BEFORE building the runtime, with claude-code's
+/// "No, exit" exit code (`exit_codes::RUNTIME_ERROR` = 1, see below).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TrustOutcome {
+    Proceed,
+    Decline,
+}
+
+/// Byte-locked startup trust-dialog prompt for the stdio gate path.
+///
+/// Transcribes claude-code's `TrustDialog` (`components/TrustDialog/
+/// TrustDialog.tsx:206-263`) literal copy faithfully to a flat stderr
+/// `[y/N]` prompt. The Ink `PermissionDialog`/`Box`/`Select`/`Link` chrome
+/// cannot render through the gate's single-line `read_line` path, so the
+/// surrounding layout (newlines, the inlined Security-guide URL since stdio
+/// has no clickable `Link`, the `[y/N]` answer line modeled on
+/// `format_prompt_tool_use`) is the faithful flat adaptation — but every
+/// SENTENCE / LABEL / TITLE string is byte-locked to the TS:
+///   - title         `TrustDialog.tsx:257` `title="Accessing workspace:"`
+///   - cwd (bold)    `:207` `<Text bold>{getFsImplementation().cwd()}</Text>`
+///   - safety check  `:208` "Quick safety check: …review what's in this folder first."
+///   - capabilities  `:209` "Claude Code'll be able to read, edit, and execute files here."
+///   - security link `:220` "Security guide" → https://code.claude.com/docs/en/security
+///   - options       `:228,231` "Yes, I trust this folder" / "No, exit"
+fn format_trust_prompt(cwd: &Path) -> String {
+    format!(
+        "Accessing workspace:\n\n{cwd}\n\nQuick safety check: Is this a project you created or one you trust? (Like your own code, a well-known open source project, or work from your team). If not, take a moment to review what's in this folder first.\nClaude Code'll be able to read, edit, and execute files here.\n\nSecurity guide: https://code.claude.com/docs/en/security\n\n  Yes, I trust this folder\n  No, exit\n[y/N] ",
+        cwd = cwd.display()
+    )
+}
+
+/// Parse a single line of trust-dialog input: accept iff `y`/`yes`
+/// (case-insensitive, trimmed). Everything else — `n`/`no`, empty (just
+/// Enter), garbage — declines. This mirrors the permission gate's
+/// trim+lowercase classification (`prompting_gate.rs:120-130`), but the
+/// default here is DENY (the `[y/N]` capital N + claude-code's "No, exit"
+/// being the safe default selection): an empty line / EOF declines.
+fn parse_trust_input(line: &str) -> bool {
+    matches!(line.trim().to_ascii_lowercase().as_str(), "y" | "yes")
+}
+
+/// REPL startup trust GATE (design doc §2; parity
+/// `components/TrustDialog/TrustDialog.tsx` + `screens/REPL.tsx` startup).
+///
+/// claude-code shows the trust dialog BEFORE any tool/hook/plugin can run; a
+/// running session is therefore always trusted (decline exits). This is the
+/// stdio-REPL analogue: prompt over the SHARED stdin reader + stderr, BEFORE
+/// the runtime is built and the loop entered.
+///
+/// Gating (matches the dialog's skip/exit logic):
+/// - Non-interactive (non-TTY / `--print`) ⇒ `Proceed`, NO prompt, NO byte
+///   consumed — byte-identical to today (the dialog is interactive-only;
+///   `checkHasTrustDialogAccepted` short-circuits headless via the same
+///   `should_prompt_interactively` seam used for the permission gate).
+/// - No resolvable global config path OR already-accepted
+///   (`check_has_trust_dialog_accepted`, parent-walk) ⇒ `Proceed`, NO prompt
+///   (`TrustDialog.tsx:199-202`: `if (hasTrustDialogAccepted) { onDone() }`).
+/// - Otherwise prompt; `y`/`yes` ⇒ `mark_trust_dialog_accepted` (best-effort,
+///   the "Yes, I trust this folder" branch `TrustDialog.tsx:177` →
+///   `saveCurrentProjectConfig({ hasTrustDialogAccepted: true })`) then
+///   `Proceed`; `n`/`no`/empty/EOF ⇒ `Decline` (the "No, exit" branch
+///   `TrustDialog.tsx:158-160` → `gracefulShutdownSync(1)`).
+///
+/// The read locks the SAME `Arc<Mutex<BufReader<Stdin>>>` the loop later uses,
+/// sequentially BEFORE the loop, so there is zero stdin contention.
+async fn trust_gate(
+    reader: &Arc<Mutex<dyn AsyncBufRead + Send + Unpin>>,
+    stderr_sink: &Arc<Mutex<dyn AsyncWrite + Send + Unpin>>,
+    is_tty: bool,
+    print: bool,
+    config_path: Option<&Path>,
+    cwd: &Path,
+) -> TrustOutcome {
+    // Non-interactive ⇒ proceed exactly as today, no prompt, no byte consumed.
+    if !should_prompt_interactively(is_tty, print) {
+        return TrustOutcome::Proceed;
+    }
+    // No config path to persist/consult, or already trusted (parent-walk) ⇒
+    // proceed without prompting (no byte consumed).
+    let Some(cfg_path) = config_path else {
+        return TrustOutcome::Proceed;
+    };
+    if migrations::global_config::check_has_trust_dialog_accepted(cfg_path, cwd) {
+        return TrustOutcome::Proceed;
+    }
+
+    // Render the byte-locked dialog to stderr.
+    {
+        let prompt = format_trust_prompt(cwd);
+        let mut err = stderr_sink.lock().await;
+        if err.write_all(prompt.as_bytes()).await.is_err() || err.flush().await.is_err() {
+            // Cannot render the dialog ⇒ fail-safe to DECLINE (never silently
+            // trust an unprompted directory).
+            return TrustOutcome::Decline;
+        }
+    }
+
+    // Read ONE line off the shared reader.
+    let mut line = String::new();
+    let n = {
+        let mut guard = reader.lock().await;
+        match guard.read_line(&mut line).await {
+            Ok(n) => n,
+            Err(_) => 0,
+        }
+    };
+    if n == 0 {
+        // EOF / read error ⇒ decline (claude-code "No, exit" default).
+        return TrustOutcome::Decline;
+    }
+    if parse_trust_input(&line) {
+        // "Yes, I trust this folder" → persist (best-effort; a write failure
+        // must not crash startup — the session is still trusted-this-run).
+        if let Err(e) = migrations::global_config::mark_trust_dialog_accepted(cfg_path, cwd) {
+            tracing::warn!("failed to persist trust dialog acceptance: {e}");
+        }
+        TrustOutcome::Proceed
+    } else {
+        TrustOutcome::Decline
+    }
 }
 
 /// Map a REPL `ended_via` discriminator to the claude-code `SessionEnd`
@@ -80,6 +206,38 @@ pub async fn run_repl(argv: &Argv) -> i32 {
     // never stranded behind a second `BufReader`, and only one
     // `tokio::io::stdin()` exists (no double blocking-reader-thread race).
     let stdin_reader: Arc<Mutex<BufReader<Stdin>>> = Arc::new(Mutex::new(BufReader::new(stdin())));
+
+    // (trust dialog) Startup trust GATE — parity `screens/REPL.tsx` +
+    // `components/TrustDialog/TrustDialog.tsx`: before ANY tool/hook/plugin can
+    // run (i.e. before the runtime is built and the loop entered), show the
+    // one-time trust dialog for an un-trusted directory. Decline ⇒ exit with
+    // claude-code's "No, exit" code (`gracefulShutdownSync(1)`,
+    // `TrustDialog.tsx:158-160`) WITHOUT building the runtime. Accept persists
+    // `hasTrustDialogAccepted` and proceeds (the running session is trusted, so
+    // the hardcoded `project_trust: Trusted` downstream is now reached only
+    // after this gate clears). Non-TTY / `--print` / already-accepted ⇒ no
+    // prompt, byte-identical to today. The read shares the SAME `stdin_reader`
+    // the loop uses below — sequential, before the loop, so no contention.
+    let trust_stderr: Arc<Mutex<dyn AsyncWrite + Send + Unpin>> = Arc::new(Mutex::new(stderr()));
+    let trust_reader: Arc<Mutex<dyn AsyncBufRead + Send + Unpin>> = stdin_reader.clone();
+    let trust_cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let trust_cfg = migrations::global_config::global_config_path();
+    if trust_gate(
+        &trust_reader,
+        &trust_stderr,
+        std::io::stdin().is_terminal(),
+        argv.print,
+        trust_cfg.as_deref(),
+        &trust_cwd,
+    )
+    .await
+        == TrustOutcome::Decline
+    {
+        // "No, exit" → `gracefulShutdownSync(1)` (`TrustDialog.tsx:159`,
+        // `gracefulShutdown.ts:347` sets `process.exitCode = 1`). Exit BEFORE
+        // building the runtime.
+        return exit_codes::RUNTIME_ERROR;
+    }
 
     // Interactive (TTY, non-print) REPL injects the y/n permission gate sharing
     // the stdin reader; the piped/CI path stays byte-identical (no gate).
@@ -202,7 +360,16 @@ pub async fn run_repl(argv: &Argv) -> i32 {
 
 #[cfg(test)]
 mod tests {
-    use super::{session_end_reason, should_prompt_interactively};
+    use super::{
+        format_trust_prompt, parse_trust_input, session_end_reason, should_prompt_interactively,
+        trust_gate, TrustOutcome,
+    };
+    use std::path::{Path, PathBuf};
+    use std::sync::Arc;
+    use tokio::io::{
+        duplex, AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader,
+    };
+    use tokio::sync::Mutex;
 
     /// Interactive prompting is enabled ONLY for a TTY that is not in `--print`
     /// mode. A non-TTY (piped/CI) or a print session never injects the gate.
@@ -241,5 +408,177 @@ mod tests {
     fn unknown_reason_falls_back_to_other() {
         assert_eq!(session_end_reason("something_else"), "other");
         assert_eq!(session_end_reason(""), "other");
+    }
+
+    // ---- startup trust GATE (design doc §2) ----
+
+    /// A scripted shared `BufReader` over a `duplex` end, upcast to the same
+    /// `Arc<Mutex<dyn AsyncBufRead>>` trait object the production loop hands the
+    /// gate. Returns the reader and a sink draining the gate's stderr writes.
+    fn scripted_reader(bytes: &[u8]) -> Arc<Mutex<dyn AsyncBufRead + Send + Unpin>> {
+        let (mut writer, client) = duplex(1024);
+        let bytes = bytes.to_vec();
+        tokio::spawn(async move {
+            let _ = writer.write_all(&bytes).await;
+            // drop(writer) on task end closes the pipe ⇒ EOF after the bytes.
+        });
+        Arc::new(Mutex::new(BufReader::new(client)))
+    }
+
+    fn null_stderr() -> Arc<Mutex<dyn AsyncWrite + Send + Unpin>> {
+        let (out_end, _drain) = duplex(4096);
+        // Keep the drain alive for the test's lifetime by leaking it — the
+        // gate only ever writes a few hundred bytes which fit the 4096 buffer.
+        std::mem::forget(_drain);
+        Arc::new(Mutex::new(out_end))
+    }
+
+    /// A temp `~/.claude.json` config path + an un-trusted cwd, isolated from
+    /// the real home via a unique tempdir (no `env_lock` needed: we pass the
+    /// path explicitly to the gate, never reading `HOME`).
+    fn temp_cfg_and_cwd() -> (tempfile::TempDir, PathBuf, PathBuf) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cfg = dir.path().join(".claude.json");
+        // A real, canonicalizable cwd inside the tempdir.
+        let cwd = dir.path().join("project");
+        std::fs::create_dir_all(&cwd).expect("mkdir cwd");
+        (dir, cfg, cwd)
+    }
+
+    /// not-accepted + scripted `"y\n"` ⇒ marks accepted AND proceeds.
+    #[tokio::test]
+    async fn not_accepted_scripted_y_marks_and_proceeds() {
+        let (_dir, cfg, cwd) = temp_cfg_and_cwd();
+        assert!(
+            !migrations::global_config::check_has_trust_dialog_accepted(&cfg, &cwd),
+            "precondition: not yet trusted"
+        );
+        let reader = scripted_reader(b"y\n");
+        let outcome = trust_gate(&reader, &null_stderr(), true, false, Some(&cfg), &cwd).await;
+        assert_eq!(outcome, TrustOutcome::Proceed);
+        assert!(
+            migrations::global_config::check_has_trust_dialog_accepted(&cfg, &cwd),
+            "y must persist hasTrustDialogAccepted"
+        );
+    }
+
+    /// scripted `"n\n"` ⇒ declines, store NOT marked (caller returns
+    /// RUNTIME_ERROR without building the runtime).
+    #[tokio::test]
+    async fn scripted_n_declines_without_mark() {
+        let (_dir, cfg, cwd) = temp_cfg_and_cwd();
+        let reader = scripted_reader(b"n\n");
+        let outcome = trust_gate(&reader, &null_stderr(), true, false, Some(&cfg), &cwd).await;
+        assert_eq!(outcome, TrustOutcome::Decline);
+        assert!(
+            !migrations::global_config::check_has_trust_dialog_accepted(&cfg, &cwd),
+            "decline must NOT persist trust"
+        );
+    }
+
+    /// EOF (empty/closed reader, `read_line` returns 0) ⇒ decline, no mark.
+    #[tokio::test]
+    async fn eof_declines_without_mark() {
+        let (_dir, cfg, cwd) = temp_cfg_and_cwd();
+        let reader = scripted_reader(b"");
+        let outcome = trust_gate(&reader, &null_stderr(), true, false, Some(&cfg), &cwd).await;
+        assert_eq!(outcome, TrustOutcome::Decline);
+        assert!(!migrations::global_config::check_has_trust_dialog_accepted(&cfg, &cwd));
+    }
+
+    /// Empty line (just Enter) ⇒ decline (deny-default `[y/N]`), no mark.
+    #[tokio::test]
+    async fn empty_line_declines() {
+        let (_dir, cfg, cwd) = temp_cfg_and_cwd();
+        let reader = scripted_reader(b"\n");
+        let outcome = trust_gate(&reader, &null_stderr(), true, false, Some(&cfg), &cwd).await;
+        assert_eq!(outcome, TrustOutcome::Decline);
+        assert!(!migrations::global_config::check_has_trust_dialog_accepted(&cfg, &cwd));
+    }
+
+    /// Already-accepted ⇒ proceed with NO byte consumed (a follow-up line is
+    /// still readable off the SAME shared reader — proves no prompt happened).
+    #[tokio::test]
+    async fn already_accepted_no_byte_consumed() {
+        let (_dir, cfg, cwd) = temp_cfg_and_cwd();
+        migrations::global_config::mark_trust_dialog_accepted(&cfg, &cwd).expect("pre-mark");
+        let reader = scripted_reader(b"keep\n");
+        let outcome = trust_gate(&reader, &null_stderr(), true, false, Some(&cfg), &cwd).await;
+        assert_eq!(outcome, TrustOutcome::Proceed);
+        let mut follow = String::new();
+        let mut guard = reader.lock().await;
+        let n = guard.read_line(&mut follow).await.unwrap();
+        assert_eq!(n, "keep\n".len(), "no byte should have been consumed");
+        assert_eq!(follow, "keep\n");
+    }
+
+    /// Non-TTY ⇒ proceed, no prompt, no byte consumed, store untouched.
+    #[tokio::test]
+    async fn non_tty_proceeds_no_prompt() {
+        let (_dir, cfg, cwd) = temp_cfg_and_cwd();
+        let reader = scripted_reader(b"keep\n");
+        let outcome = trust_gate(&reader, &null_stderr(), false, false, Some(&cfg), &cwd).await;
+        assert_eq!(outcome, TrustOutcome::Proceed);
+        assert!(!migrations::global_config::check_has_trust_dialog_accepted(&cfg, &cwd));
+        let mut follow = String::new();
+        let mut guard = reader.lock().await;
+        let n = guard.read_line(&mut follow).await.unwrap();
+        assert_eq!(n, "keep\n".len());
+        assert_eq!(follow, "keep\n");
+    }
+
+    /// `--print` (even on a TTY) ⇒ proceed, no prompt, no byte consumed.
+    #[tokio::test]
+    async fn print_mode_proceeds() {
+        let (_dir, cfg, cwd) = temp_cfg_and_cwd();
+        let reader = scripted_reader(b"keep\n");
+        let outcome = trust_gate(&reader, &null_stderr(), true, true, Some(&cfg), &cwd).await;
+        assert_eq!(outcome, TrustOutcome::Proceed);
+        let mut follow = String::new();
+        let mut guard = reader.lock().await;
+        let n = guard.read_line(&mut follow).await.unwrap();
+        assert_eq!(n, "keep\n".len());
+    }
+
+    /// No resolvable config path ⇒ proceed, no prompt, no byte consumed.
+    #[tokio::test]
+    async fn no_config_path_proceeds() {
+        let reader = scripted_reader(b"keep\n");
+        let outcome =
+            trust_gate(&reader, &null_stderr(), true, false, None, Path::new("/tmp")).await;
+        assert_eq!(outcome, TrustOutcome::Proceed);
+        let mut follow = String::new();
+        let mut guard = reader.lock().await;
+        let n = guard.read_line(&mut follow).await.unwrap();
+        assert_eq!(n, "keep\n".len());
+    }
+
+    /// The flat trust prompt is byte-locked to claude-code's `TrustDialog`
+    /// copy (title / safety-check / capabilities / security-link / option
+    /// labels), with the cwd interpolated.
+    #[test]
+    fn format_trust_prompt_byte_locked() {
+        let s = format_trust_prompt(Path::new("/home/dev/project"));
+        assert_eq!(
+            s.as_bytes(),
+            b"Accessing workspace:\n\n/home/dev/project\n\nQuick safety check: Is this a project you created or one you trust? (Like your own code, a well-known open source project, or work from your team). If not, take a moment to review what's in this folder first.\nClaude Code'll be able to read, edit, and execute files here.\n\nSecurity guide: https://code.claude.com/docs/en/security\n\n  Yes, I trust this folder\n  No, exit\n[y/N] " as &[u8]
+        );
+    }
+
+    /// y/Y/yes/YES (trimmed, case-insensitive) accept; everything else —
+    /// n/no/empty/garbage — declines.
+    #[test]
+    fn parse_trust_input_accepts_only_yes_variants() {
+        assert!(parse_trust_input("y\n"));
+        assert!(parse_trust_input("Y\n"));
+        assert!(parse_trust_input("yes\n"));
+        assert!(parse_trust_input("YES\r\n"));
+        assert!(parse_trust_input("  yes  \n"));
+        assert!(!parse_trust_input("n\n"));
+        assert!(!parse_trust_input("no\n"));
+        assert!(!parse_trust_input("\n"));
+        assert!(!parse_trust_input(""));
+        assert!(!parse_trust_input("maybe\n"));
+        assert!(!parse_trust_input("yy\n"));
     }
 }

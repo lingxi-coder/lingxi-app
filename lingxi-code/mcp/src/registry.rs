@@ -219,6 +219,16 @@ impl McpRegistry {
         self
     }
 
+    /// Whether the OAuth seam ([`OAuthDeps`]) has been injected via
+    /// [`Self::with_oauth`]. `false` leaves OAuth-configured remote servers on
+    /// their static-header fallback; `true` enables the interactive
+    /// load → refresh → consent flow. Used by the desktop composition-root test
+    /// to assert OAuth is production-reachable.
+    #[must_use]
+    pub fn has_oauth(&self) -> bool {
+        self.oauth.is_some()
+    }
+
     /// Cache an `Arc<McpClient>` for `name` (M4-07).
     ///
     /// The platform host calls this after building the client (typically

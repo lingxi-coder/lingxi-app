@@ -75,24 +75,39 @@ class SherpaTts private constructor(
 
     companion object {
         fun load(entry: OfflineModelEntry, modelDir: File): SherpaTts {
+            // Optional companion assets the multi-lingual packs ship (guarded by
+            // presence): espeak-ng-data (English phonemes), dict + lexicons (zh),
+            // and number/date rule FSTs.
+            fun dir(name: String) = File(modelDir, name).takeIf { it.isDirectory }?.absolutePath
+            fun joinExisting(vararg names: String) =
+                names.map { File(modelDir, it) }.filter { it.exists() }.joinToString(",") { it.absolutePath }
+
             val modelCfg = OfflineTtsModelConfig().apply {
                 when (val p = entry.runtimeParams) {
                     is SherpaRuntimeParams.Tts.Kokoro -> kokoro = OfflineTtsKokoroModelConfig().apply {
                         model = File(modelDir, "model.onnx").absolutePath
                         voices = File(modelDir, "voices.bin").absolutePath
                         tokens = File(modelDir, "tokens.txt").absolutePath
+                        dir("espeak-ng-data")?.let { dataDir = it }
+                        dir("dict")?.let { dictDir = it }
+                        joinExisting("lexicon-us-en.txt", "lexicon-zh.txt").takeIf { it.isNotEmpty() }?.let { lexicon = it }
                     }
                     is SherpaRuntimeParams.Tts.Matcha -> matcha = OfflineTtsMatchaModelConfig().apply {
                         acousticModel = File(modelDir, "model-steps-3.onnx").absolutePath
                         vocoder = File(modelDir, "vocos-22khz-univ.onnx").absolutePath
                         tokens = File(modelDir, "tokens.txt").absolutePath
+                        dir("espeak-ng-data")?.let { dataDir = it }
                     }
                     else -> error("SherpaTts.load: ${entry.id} is not a TTS model")
                 }
                 numThreads = 2
                 provider = "cpu"
             }
-            val cfg = OfflineTtsConfig().apply { model = modelCfg }
+            val cfg = OfflineTtsConfig().apply {
+                model = modelCfg
+                // Chinese number/date/phone text-normalization rules (if shipped).
+                joinExisting("date-zh.fst", "number-zh.fst", "phone-zh.fst").takeIf { it.isNotEmpty() }?.let { ruleFsts = it }
+            }
             return SherpaTts(OfflineTts(assetManager = null, config = cfg), entry.sampleRateHz)
         }
     }

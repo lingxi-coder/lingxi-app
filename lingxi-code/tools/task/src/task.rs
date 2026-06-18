@@ -963,7 +963,16 @@ impl Tool for TaskCreateTool {
                     started.elapsed().as_millis() as u64,
                 )
                 .await;
-                return Err(ToolError::Internal(reason));
+                // T24: each blocking error is wrapped by `getTaskCreatedHookMessage`
+                // (`hooks.ts:1914-1917`) as `TaskCreated hook feedback:\n<error>`,
+                // then the wrapped messages are `\n`-joined and thrown
+                // (`TaskCreateTool.ts:106,112`). The firer aggregates the (possibly
+                // several) blocking hooks into one `\n`-joined reason, so the prefix
+                // applies once to the aggregate — byte-faithful with the TS feedback
+                // the model sees.
+                return Err(ToolError::Internal(format!(
+                    "TaskCreated hook feedback:\n{reason}"
+                )));
             }
         }
         // PARITY-GAP: context.setAppState(expandedView) (TaskCreateTool.ts:115-119)
@@ -1264,13 +1273,21 @@ impl Tool for TaskListTool {
         let tasks: Vec<Value> = rows
             .iter()
             .map(|row| {
-                json!({
+                // T27: `owner` is `z.string().optional()` (TaskListTool.ts:23) and
+                // sourced from `task.owner` (`call`, line 80), which is `undefined`
+                // when unset — so the key is OMITTED from the JSON, never emitted
+                // as `owner: null`. Build the object and insert `owner` only when
+                // present.
+                let mut obj = json!({
                     "id": row.id,
                     "subject": row.subject,
                     "status": status_wire(row.status),
-                    "owner": row.owner,
                     "blockedBy": row.blocked_by,
-                })
+                });
+                if let Some(owner) = row.owner.as_deref() {
+                    obj["owner"] = Value::String(owner.to_string());
+                }
+                obj
             })
             .collect();
         Ok(ToolCallResult {
@@ -1663,6 +1680,15 @@ impl Tool for TaskUpdateTool {
                     message_id: fresh_invocation_id(),
                     content: assignment_message,
                     timestamp: std::time::SystemTime::now(),
+                    // claude-code `color: getTeammateColor()` (TaskUpdateTool.ts:294).
+                    // The no-arg `getTeammateColor()` returns the SENDER session's
+                    // own assigned color (or `undefined`). The Rust host does not
+                    // thread a per-session teammate color into the tool context, so
+                    // the faithful value here is `None` — which serializes to NO
+                    // `color` key, byte-identical with claude-code's
+                    // `color: undefined` for the common main-thread / `team-lead`
+                    // sender that has no assigned color.
+                    color: None,
                 };
                 // Ignore the routing result — notification is best-effort.
                 let _ = router.route(&sender_name, &owner, msg).await;
@@ -1829,6 +1855,15 @@ impl Tool for TaskStopTool {
         const ALIASES: &[&str] = &["KillShell"];
         ALIASES
     }
+    /// `searchHint: 'kill a running background task'` (`TaskStopTool.ts:41`).
+    fn search_hint(&self) -> Option<&str> {
+        Some("kill a running background task")
+    }
+    /// `userFacingName: () => 'Stop Task'` for the `external` build
+    /// (`TaskStopTool.ts:46` — `''` only for `USER_TYPE === 'ant'`).
+    fn user_facing_name(&self) -> Option<&str> {
+        Some("Stop Task")
+    }
     fn input_schema(&self) -> &Value {
         &TASK_STOP_SCHEMA
     }
@@ -1974,11 +2009,17 @@ impl Tool for TaskStopTool {
             )));
         }
 
-        // Capture command + type from the pre-kill record. The narrow registry
-        // surface carries `description` (no separate `command` field), so it
-        // backs both the bash `command` and the agent `description` TS sources.
+        // Capture command + type from the pre-kill record. claude-code
+        // (`stopTask.ts:97`) computes
+        // `command = isLocalShellTask(task) ? task.command : task.description`:
+        // a `local_bash` task surfaces its shell COMMAND, every other task type
+        // its DESCRIPTION. The registry threads `command` (populated for
+        // `local_bash` only); fall back to `description` when absent.
         let task_type = record.task_type.clone();
-        let command = record.description.clone();
+        let command = match record.command.clone() {
+            Some(cmd) => cmd,
+            None => record.description.clone(),
+        };
 
         if let Err(e) = registry.kill(&task_id).await {
             emit_failed(
@@ -2080,6 +2121,22 @@ fn semantic_bool(v: &Value) -> Option<bool> {
         Value::String(s) if s == "false" => Some(false),
         _ => None,
     }
+}
+
+/// T30: parse the `TaskOutput` `timeout` (ms). claude-code's schema is
+/// `z.number().min(0).max(600000).default(30000)` (`TaskOutputTool.tsx:33`).
+/// JSON numbers are floats, so an integer-typed `30000`, a float-typed `30000.0`,
+/// and a fractional `30000.5` all pass `z.number()`. Read as `f64` (NOT `as_u64`,
+/// which rejects any non-integer JSON number and silently falls back to the 30s
+/// default), default `30000` when absent/non-numeric, and clamp into the
+/// `[0, 600000]` bounds the zod `.min(0).max(600000)` enforces. The result is the
+/// millisecond budget as a `u64`.
+fn parse_timeout_ms(input: &Value) -> u64 {
+    let raw = input
+        .get("timeout")
+        .and_then(Value::as_f64)
+        .unwrap_or(30_000.0);
+    raw.clamp(0.0, 600_000.0) as u64
 }
 
 /// Port of TS `parseInt(value, 10)`: skip leading ASCII whitespace, take an
@@ -2279,6 +2336,15 @@ impl Tool for TaskOutputTool {
         const ALIASES: &[&str] = &["AgentOutputTool", "BashOutputTool"];
         ALIASES
     }
+    /// `searchHint: 'read output/logs from a background task'`
+    /// (`TaskOutputTool.tsx:146`).
+    fn search_hint(&self) -> Option<&str> {
+        Some("read output/logs from a background task")
+    }
+    /// `userFacingName() { return 'Task Output' }` (`TaskOutputTool.tsx:151-153`).
+    fn user_facing_name(&self) -> Option<&str> {
+        Some("Task Output")
+    }
     fn input_schema(&self) -> &Value {
         &TASK_OUTPUT_SCHEMA
     }
@@ -2375,7 +2441,7 @@ impl Tool for TaskOutputTool {
         // `true` default. `timeout` defaults to 30000 ms
         // (`z.number().min(0).max(600000).default(30000)`).
         let block = input.get("block").and_then(semantic_bool).unwrap_or(true);
-        let timeout_ms = input.get("timeout").and_then(Value::as_u64).unwrap_or(30_000);
+        let timeout_ms = parse_timeout_ms(&input);
 
         // Existence check (`TaskOutputTool.tsx:215-218`): `if (!task) throw …`.
         // The record carries `task_type` + `description`, which the output
@@ -2591,6 +2657,26 @@ mod tests {
     fn retrieval_status_running_blocking_is_timeout() {
         // TS blocking branch: still running/pending after the wait → `timeout`.
         assert_eq!(task_output_retrieval_status(false, true), "timeout");
+    }
+
+    #[test]
+    fn parse_timeout_ms_handles_floats_and_clamps() {
+        // T30: TS `z.number().min(0).max(600000).default(30000)`.
+        // Absent → default 30000.
+        assert_eq!(parse_timeout_ms(&json!({})), 30_000);
+        // An integer JSON number parses as-is.
+        assert_eq!(parse_timeout_ms(&json!({ "timeout": 1234 })), 1234);
+        // A FLOAT JSON number must parse (the old `as_u64` path dropped these and
+        // silently fell back to the 30s default).
+        assert_eq!(parse_timeout_ms(&json!({ "timeout": 1234.0 })), 1234);
+        assert_eq!(parse_timeout_ms(&json!({ "timeout": 1500.9 })), 1500);
+        // Above the max is clamped DOWN to 600000 (zod `.max(600000)`).
+        assert_eq!(parse_timeout_ms(&json!({ "timeout": 999_999 })), 600_000);
+        assert_eq!(parse_timeout_ms(&json!({ "timeout": 600_000.5 })), 600_000);
+        // Below the min is clamped UP to 0 (zod `.min(0)`).
+        assert_eq!(parse_timeout_ms(&json!({ "timeout": -50 })), 0);
+        // A non-numeric value falls back to the default.
+        assert_eq!(parse_timeout_ms(&json!({ "timeout": "nope" })), 30_000);
     }
 
     #[test]
@@ -3118,6 +3204,49 @@ mod tests {
             let mut t = TodoTask::new(subject.into(), "the description".into(), None, Map::new());
             t.status = status;
             t
+        }
+
+        // ── T27 TaskList structured output omits null owner ───────────────
+        #[tokio::test]
+        async fn task_list_structured_output_omits_null_owner() {
+            // claude-code TaskListTool.ts: `owner: z.string().optional()` sourced
+            // from `task.owner` (undefined when unset) — the key is OMITTED, never
+            // emitted as `owner: null`. An OWNED task keeps the `owner` key.
+            let (_g, list, _router) = setup(false);
+            let store = TodoStore::for_list(&list);
+            store
+                .create(task("Unowned task", TodoState::Pending))
+                .await
+                .unwrap();
+            let mut owned = task("Owned task", TodoState::Pending);
+            owned.owner = Some("alice".into());
+            store.create(owned).await.unwrap();
+
+            let tool = TaskListTool::new(bctx(Arc::new(RecordingRouter::default())));
+            let res = tool
+                .call(json!({}), fresh_ctx(), fresh_tx())
+                .await
+                .expect("list ok");
+            let tasks = res.data["tasks"].as_array().expect("tasks array");
+            assert_eq!(tasks.len(), 2);
+
+            let unowned = tasks
+                .iter()
+                .find(|t| t["subject"] == "Unowned task")
+                .expect("unowned row present");
+            assert!(
+                unowned.get("owner").is_none(),
+                "an unset owner must be OMITTED, not emitted as owner:null — got {unowned}"
+            );
+
+            let owned_row = tasks
+                .iter()
+                .find(|t| t["subject"] == "Owned task")
+                .expect("owned row present");
+            assert_eq!(
+                owned_row["owner"], "alice",
+                "an assigned owner keeps the owner key"
+            );
         }
 
         // ── 5a auto-owner ────────────────────────────────────────────────
@@ -3719,6 +3848,25 @@ mod tests {
                 "TaskOutput isConcurrencySafe stays true"
             );
         }
+
+        #[test]
+        fn task_stop_search_hint_and_user_facing_name() {
+            // T21/T22: TaskStopTool.ts:41 searchHint, :46 userFacingName.
+            let tool = TaskStopTool::new(bctx());
+            assert_eq!(tool.search_hint(), Some("kill a running background task"));
+            assert_eq!(tool.user_facing_name(), Some("Stop Task"));
+        }
+
+        #[test]
+        fn task_output_search_hint_and_user_facing_name() {
+            // T21/T22: TaskOutputTool.tsx:146 searchHint, :151-153 userFacingName.
+            let tool = TaskOutputTool::new(bctx());
+            assert_eq!(
+                tool.search_hint(),
+                Some("read output/logs from a background task")
+            );
+            assert_eq!(tool.user_facing_name(), Some("Task Output"));
+        }
     }
 
     // ── BLOCKING TaskCreated / TaskCompleted lifecycle hooks (tool path) ──────
@@ -3874,7 +4022,12 @@ mod tests {
                 .expect_err("a blocking TaskCreated hook must error the create");
             match err {
                 ToolError::Internal(s) => {
-                    assert_eq!(s, "creation blocked by policy", "the hook reason surfaces")
+                    // T24: the blocking reason is prefixed `TaskCreated hook
+                    // feedback:\n` (claude-code `getTaskCreatedHookMessage`).
+                    assert_eq!(
+                        s, "TaskCreated hook feedback:\ncreation blocked by policy",
+                        "the hook reason surfaces with the TaskCreated feedback prefix"
+                    )
                 }
                 other => panic!("expected Internal(reason), got {other:?}"),
             }
@@ -4242,6 +4395,9 @@ mod tests {
                 task_type: "local_bash".into(),
                 status: status.into(),
                 description: "echo hi".into(),
+                // A `local_bash` task carries a distinct command; TaskStop must
+                // prefer this over `description` (claude-code stopTask.ts:97).
+                command: Some("echo hi > out.txt".into()),
             }
         }
 
@@ -4251,6 +4407,8 @@ mod tests {
                 task_type: "local_agent".into(),
                 status: status.into(),
                 description: "run the agent".into(),
+                // Non-bash tasks have no command; TaskStop falls back to description.
+                command: None,
             }
         }
 
@@ -4357,16 +4515,37 @@ mod tests {
                 .call(json!({ "task_id": "b12345678" }), fresh_ctx(), fresh_tx())
                 .await
                 .expect("stop ok");
+            // T10: a `local_bash` task surfaces its COMMAND, not its description
+            // (claude-code stopTask.ts:97). `rec()` has description "echo hi" but
+            // command "echo hi > out.txt" — the command must win.
             assert_eq!(
                 res.data["message"],
-                "Successfully stopped task: b12345678 (echo hi)"
+                "Successfully stopped task: b12345678 (echo hi > out.txt)"
             );
             assert_eq!(res.data["task_id"], "b12345678");
             assert_eq!(res.data["task_type"], "local_bash");
-            assert_eq!(res.data["command"], "echo hi");
+            assert_eq!(res.data["command"], "echo hi > out.txt");
             // No `content` key ⇒ orchestrator JSON-stringifies the whole data.
             assert!(res.data.get("content").is_none());
             assert_eq!(*reg.kill_calls.lock().unwrap(), 1);
+        }
+
+        #[tokio::test]
+        async fn task_stop_falls_back_to_description_for_non_bash() {
+            // T10: a non-bash task (no `command`) falls back to `description`
+            // (claude-code stopTask.ts:97 `: task.description`).
+            let reg = MockRegistry::with_record(Some(agent_rec("running")));
+            let tool = TaskStopTool::new(bctx(reg.clone()));
+            let res = tool
+                .call(json!({ "task_id": "a12345678" }), fresh_ctx(), fresh_tx())
+                .await
+                .expect("stop ok");
+            assert_eq!(
+                res.data["message"],
+                "Successfully stopped task: a12345678 (run the agent)"
+            );
+            assert_eq!(res.data["task_type"], "local_agent");
+            assert_eq!(res.data["command"], "run the agent");
         }
 
         #[tokio::test]

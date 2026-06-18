@@ -106,12 +106,14 @@ mod tests {
                     task_type: "local_bash".into(),
                     status: "running".into(),
                     description: "cargo build".into(),
+                    command: None,
                 },
                 TaskRecord {
                     task_id: "a00000002".into(),
                     task_type: "local_agent".into(),
                     status: "completed".into(),
                     description: "explore".into(),
+                    command: None,
                 },
             ],
         });

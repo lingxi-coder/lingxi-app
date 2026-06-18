@@ -133,6 +133,7 @@ impl TaskRegistryHandle for MockTaskRegistry {
             task_type: "local_bash".into(),
             status: "killed".into(),
             description: "stopped".into(),
+            command: None,
         })
     }
     async fn output(
@@ -306,12 +307,14 @@ async fn task_list_command_emits_task_rows() {
                 task_type: "local_bash".into(),
                 status: "running".into(),
                 description: "build".into(),
+                command: None,
             },
             TaskRecord {
                 task_id: "a1c2d3e4f".into(),
                 task_type: "agent".into(),
                 status: "completed".into(),
                 description: "review".into(),
+                command: None,
             },
         ],
     });
@@ -346,6 +349,7 @@ async fn task_list_poll_emits_task_row() {
             task_type: "local_bash".into(),
             status: "running".into(),
             description: "poll me".into(),
+            command: None,
         }],
     });
     let router = router_with(handle, tasks);

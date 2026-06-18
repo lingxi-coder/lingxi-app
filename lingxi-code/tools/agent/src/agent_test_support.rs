@@ -177,6 +177,7 @@ impl TaskRegistryHandle for MockTaskRegistryHandle {
             task_type: input.task_type,
             status: "pending".into(),
             description: input.description,
+            command: None,
         };
         self.records
             .lock()

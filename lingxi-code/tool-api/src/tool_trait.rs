@@ -36,6 +36,14 @@ pub trait Tool: Send + Sync {
         None
     }
 
+    /// Human-readable label shown to the user for this tool (claude-code
+    /// `userFacingName()`), distinct from the canonical wire [`name`](Self::name).
+    /// `None` means "use the canonical name" — claude-code falls back to the tool
+    /// name when no override is supplied.
+    fn user_facing_name(&self) -> Option<&str> {
+        None
+    }
+
     /// JSON Schema for the tool's input parameters.
     fn input_schema(&self) -> &Value;
 

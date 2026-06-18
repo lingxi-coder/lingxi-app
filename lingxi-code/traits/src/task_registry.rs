@@ -42,6 +42,13 @@ pub struct TaskRecord {
     pub status: String,
     /// Human-readable description.
     pub description: String,
+    /// The shell command, for `local_bash` tasks only (claude-code
+    /// `LocalShellTaskState.command`). `None` for every other task type. The
+    /// `TaskStop` tool surfaces this in preference to `description` for
+    /// `local_bash`, mirroring claude-code `stopTask.ts:97`
+    /// (`isLocalShellTask(task) ? task.command : task.description`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
 }
 
 /// One chunk of a task's accumulated stdout/stderr spool.

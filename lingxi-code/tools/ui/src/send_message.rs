@@ -260,6 +260,9 @@ impl SendMessageTool {
             message_id: tool_api::util::ids::ulid_or_uuid(),
             content,
             timestamp: SystemTime::now(),
+            // No teammate-color seam threaded into SendMessage; `None` is omitted
+            // from the wire form (parity with claude-code `color: undefined`).
+            color: None,
         };
         let _ = router.route(from, target, msg).await;
     }

@@ -160,6 +160,7 @@ mod tests {
                     message_id: "m1".into(),
                     content: "hi".into(),
                     timestamp: SystemTime::now(),
+                    color: None,
                 },
             )
             .await
@@ -181,6 +182,7 @@ mod tests {
                     message_id: "m1".into(),
                     content: "hi".into(),
                     timestamp: SystemTime::now(),
+                    color: None,
                 },
             )
             .await
@@ -211,6 +213,7 @@ mod tests {
                     message_id: "m1".into(),
                     content: r#"{"type":"task_assignment"}"#.into(),
                     timestamp: SystemTime::now(),
+                    color: None,
                 },
             )
             .await
@@ -251,6 +254,7 @@ mod tests {
                 message_id: "m2".into(),
                 content: "hi".into(),
                 timestamp: SystemTime::now(),
+                color: None,
             },
         )
         .await
@@ -272,6 +276,7 @@ mod tests {
                     message_id: "m3".into(),
                     content: "x".into(),
                     timestamp: SystemTime::now(),
+                    color: None,
                 },
             )
             .await

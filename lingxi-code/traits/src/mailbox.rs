@@ -18,6 +18,14 @@ pub struct MailboxMessage {
     pub content: String,
     /// Wall-clock send time.
     pub timestamp: SystemTime,
+    /// Sender's assigned teammate color, if any (claude-code `getTeammateColor()`,
+    /// `TaskUpdateTool.ts:279,294`). UI-only metadata carried on the mailbox
+    /// message so the recipient can colorize the sender. `None` when the sender
+    /// has no assigned color (e.g. the main-thread leader / `'team-lead'`), in
+    /// which case the field is omitted from the serialized message — byte-faithful
+    /// with claude-code's `color: undefined` (the key is dropped by JSON).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
 }
 
 /// Ack returned by [`MailboxRouterHandle::route`].
@@ -69,5 +77,37 @@ mod tests {
     #[test]
     fn trait_is_object_safe() {
         let _: Option<Arc<dyn MailboxRouterHandle>> = None;
+    }
+
+    #[test]
+    fn color_field_is_omitted_when_none() {
+        // claude-code `getTeammateColor()` returns `undefined` for the main-thread
+        // leader; the `color: undefined` key is then dropped from the serialized
+        // mailbox message. A `None` color must serialize to NO `color` key.
+        let msg = MailboxMessage {
+            message_id: "m1".into(),
+            content: "hi".into(),
+            timestamp: SystemTime::UNIX_EPOCH,
+            color: None,
+        };
+        let v: serde_json::Value = serde_json::to_value(&msg).unwrap();
+        assert!(
+            v.get("color").is_none(),
+            "a None color must be omitted from the wire form"
+        );
+    }
+
+    #[test]
+    fn color_field_round_trips_when_present() {
+        let msg = MailboxMessage {
+            message_id: "m1".into(),
+            content: "hi".into(),
+            timestamp: SystemTime::UNIX_EPOCH,
+            color: Some("cyan".into()),
+        };
+        let v: serde_json::Value = serde_json::to_value(&msg).unwrap();
+        assert_eq!(v["color"], "cyan");
+        let back: MailboxMessage = serde_json::from_value(v).unwrap();
+        assert_eq!(back.color.as_deref(), Some("cyan"));
     }
 }

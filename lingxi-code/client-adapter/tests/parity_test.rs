@@ -175,12 +175,14 @@ fn task_record_parity() {
         task_type: "local_bash".to_string(),
         status: "running".to_string(),
         description: "cargo build".to_string(),
+        command: None,
     };
     let completed = TaskRecord {
         task_id: "a00000002".to_string(),
         task_type: "local_agent".to_string(),
         status: "completed".to_string(),
         description: "explore".to_string(),
+        command: None,
     };
 
     let running_dto = lower_task_record(&running);

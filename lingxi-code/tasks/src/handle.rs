@@ -75,11 +75,19 @@ fn status_to_wire(s: TaskStatus) -> &'static str {
 
 fn state_to_record(s: &TaskState) -> TaskRecord {
     let b = s.base();
+    // Mirror claude-code `LocalShellTaskState.command`: only `local_bash` tasks
+    // carry a shell command. `TaskStop` prefers `command` over `description` for
+    // `local_bash` (`stopTask.ts:97`); every other task type reports `None`.
+    let command = match s {
+        TaskState::LocalBash(bash) => Some(bash.command.clone()),
+        _ => None,
+    };
     TaskRecord {
         task_id: b.id.clone(),
         task_type: task_type_to_wire(b.task_type).to_string(),
         status: status_to_wire(b.status).to_string(),
         description: b.description.clone(),
+        command,
     }
 }
 
@@ -194,6 +202,11 @@ impl TaskRegistryHandle for TaskRegistry {
             task_type: input.task_type,
             status: "pending".into(),
             description: input.description,
+            // `create` allocates a placeholder spawn input with an empty command
+            // (`placeholder_input`), so no real command is available at this point;
+            // a `local_bash` record gets its command once `state_to_record` reads
+            // the populated bash state. `None` here matches the pre-spawn shape.
+            command: None,
         })
     }
 
@@ -559,6 +572,81 @@ mod tests {
         assert_eq!(chunk.prompt.as_deref(), Some("do the thing"));
         assert_eq!(chunk.error.as_deref(), Some("model refused"));
         assert!(chunk.done, "failed task is terminal");
+    }
+
+    #[tokio::test]
+    async fn get_local_bash_record_carries_command() {
+        // T10: a `local_bash` record surfaces its shell COMMAND (claude-code
+        // `LocalShellTaskState.command`), distinct from its description, so
+        // `TaskStop` can prefer it (`stopTask.ts:97`).
+        let (_d, registry) = make_registry();
+        let task_id = crate::id::generate_task_id(crate::id::TaskType::LocalBash);
+        let spool = registry.output_manager.allocate(&task_id).await.unwrap();
+        let base = crate::state::TaskStateBase {
+            id: task_id.clone(),
+            task_type: crate::id::TaskType::LocalBash,
+            status: TaskStatus::Running,
+            description: "build the workspace".into(),
+            tool_use_id: None,
+            start_time: std::time::SystemTime::UNIX_EPOCH,
+            end_time: None,
+            total_paused_ms: 0,
+            output_file: spool,
+            output_offset: 0,
+            notified: false,
+        };
+        let state = TaskState::LocalBash(crate::state::LocalBashTaskState {
+            base,
+            command: "cargo build --release".into(),
+            pid: None,
+            exit_code: None,
+        });
+        registry.insert_state_for_test(state).await;
+
+        let h: &dyn TaskRegistryHandle = registry.as_ref();
+        let rec = h.get(&task_id).await.unwrap().expect("record present");
+        assert_eq!(
+            rec.command.as_deref(),
+            Some("cargo build --release"),
+            "local_bash record carries the shell command"
+        );
+        assert_eq!(rec.description, "build the workspace");
+    }
+
+    #[tokio::test]
+    async fn get_local_agent_record_has_no_command() {
+        // T10: non-bash task types report `command: None` so `TaskStop` falls back
+        // to `description` (`stopTask.ts:97` `: task.description`).
+        let (_d, registry) = make_registry();
+        let task_id = crate::id::generate_task_id(crate::id::TaskType::LocalAgent);
+        let spool = registry.output_manager.allocate(&task_id).await.unwrap();
+        let base = crate::state::TaskStateBase {
+            id: task_id.clone(),
+            task_type: crate::id::TaskType::LocalAgent,
+            status: TaskStatus::Running,
+            description: "review the PR".into(),
+            tool_use_id: None,
+            start_time: std::time::SystemTime::UNIX_EPOCH,
+            end_time: None,
+            total_paused_ms: 0,
+            output_file: spool,
+            output_offset: 0,
+            notified: false,
+        };
+        let state = TaskState::LocalAgent(crate::state::LocalAgentTaskState {
+            base,
+            agent_id: protocol::AgentId::nil(),
+            prompt: "do it".into(),
+            error: None,
+            messages: vec![],
+            pending_messages: vec![],
+            is_backgrounded: true,
+        });
+        registry.insert_state_for_test(state).await;
+
+        let h: &dyn TaskRegistryHandle = registry.as_ref();
+        let rec = h.get(&task_id).await.unwrap().expect("record present");
+        assert_eq!(rec.command, None, "non-bash record has no command");
     }
 
     #[tokio::test]

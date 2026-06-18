@@ -657,6 +657,7 @@ mod tests {
             task_type: "local_bash".to_string(),
             status: "killed".to_string(),
             description: "build".to_string(),
+            command: None,
         };
         let dto = lower_task_record(&rec);
         assert_eq!(dto.task_id, "b3f9zk2xq");

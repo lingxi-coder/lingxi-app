@@ -130,19 +130,115 @@ pub fn upgrade_to_https(url: &mut url::Url) {
     }
 }
 
-/// Map a redirect status code to its TS-exact status-text label, mirroring the
-/// ternary in `WebFetchTool.ts:218-225`:
+/// Map an HTTP status code to its reason phrase — 1:1 with claude-code's
+/// `c9n(statusCode)` (`STATUS_CODES[statusCode] ?? "Unknown Status"`), where
+/// `STATUS_CODES` is Node/bun's `http.STATUS_CODES` table. Used for BOTH the
+/// HTTP-error result body (`format_http_error_message`) and the redirect notice's
+/// `Status: {code} {text}` line.
 ///
-/// `301 → "Moved Permanently"`, `308 → "Permanent Redirect"`,
-/// `307 → "Temporary Redirect"`, everything else → `"Found"`.
+/// This replaces the prior 4-arm redirect ternary (`301/307/308 → …, else
+/// "Found"`), which was a divergence: claude-code uses the full status table, so
+/// e.g. `303 → "See Other"` (not "Found") and `429 → "Too Many Requests"`. Codes
+/// not in the table fall through to `"Unknown Status"` (matching the `?? "Unknown
+/// Status"` fallback), NOT `"Found"`.
 #[must_use]
-pub fn redirect_status_text(code: u16) -> &'static str {
+pub fn status_reason_phrase(code: u16) -> &'static str {
+    // Byte-exact reproduction of bun's `STATUS_CODES` (extracted from the
+    // claude-code binary); identical to Node's `http.STATUS_CODES` except bun
+    // additionally defines `509: "Bandwidth Limit Exceeded"`.
     match code {
+        100 => "Continue",
+        101 => "Switching Protocols",
+        102 => "Processing",
+        103 => "Early Hints",
+        200 => "OK",
+        201 => "Created",
+        202 => "Accepted",
+        203 => "Non-Authoritative Information",
+        204 => "No Content",
+        205 => "Reset Content",
+        206 => "Partial Content",
+        207 => "Multi-Status",
+        208 => "Already Reported",
+        226 => "IM Used",
+        300 => "Multiple Choices",
         301 => "Moved Permanently",
-        308 => "Permanent Redirect",
+        302 => "Found",
+        303 => "See Other",
+        304 => "Not Modified",
+        305 => "Use Proxy",
         307 => "Temporary Redirect",
-        _ => "Found",
+        308 => "Permanent Redirect",
+        400 => "Bad Request",
+        401 => "Unauthorized",
+        402 => "Payment Required",
+        403 => "Forbidden",
+        404 => "Not Found",
+        405 => "Method Not Allowed",
+        406 => "Not Acceptable",
+        407 => "Proxy Authentication Required",
+        408 => "Request Timeout",
+        409 => "Conflict",
+        410 => "Gone",
+        411 => "Length Required",
+        412 => "Precondition Failed",
+        413 => "Payload Too Large",
+        414 => "URI Too Long",
+        415 => "Unsupported Media Type",
+        416 => "Range Not Satisfiable",
+        417 => "Expectation Failed",
+        418 => "I'm a Teapot",
+        421 => "Misdirected Request",
+        422 => "Unprocessable Entity",
+        423 => "Locked",
+        424 => "Failed Dependency",
+        425 => "Too Early",
+        426 => "Upgrade Required",
+        428 => "Precondition Required",
+        429 => "Too Many Requests",
+        431 => "Request Header Fields Too Large",
+        451 => "Unavailable For Legal Reasons",
+        500 => "Internal Server Error",
+        501 => "Not Implemented",
+        502 => "Bad Gateway",
+        503 => "Service Unavailable",
+        504 => "Gateway Timeout",
+        505 => "HTTP Version Not Supported",
+        506 => "Variant Also Negotiates",
+        507 => "Insufficient Storage",
+        508 => "Loop Detected",
+        509 => "Bandwidth Limit Exceeded",
+        510 => "Not Extended",
+        511 => "Network Authentication Required",
+        _ => "Unknown Status",
     }
+}
+
+/// Build the byte-exact HTTP-error message claude-code returns as a SUCCESS
+/// result body when a fetch yields status ≥ 400 — 1:1 with `iIp(e)`:
+///
+/// ```text
+/// The server returned HTTP ${statusCode} ${statusText}.${retryAfter}
+///
+/// The response body was not retrieved. If this URL requires authentication, use
+/// an authenticated tool (e.g. `gh` for GitHub, or an MCP-provided fetch tool)
+/// instead of WebFetch.
+/// ```
+///
+/// `retry_after` is the response's `Retry-After` header value, if present; when
+/// `Some`, a `"\nRetry-After: {value}"` line is inserted directly after the
+/// status sentence (matching `e.retryAfter ? \`\nRetry-After: ${e.retryAfter}\` :
+/// ""`). The status text comes from [`status_reason_phrase`].
+#[must_use]
+pub fn format_http_error_message(status: u16, retry_after: Option<&str>) -> String {
+    let status_text = status_reason_phrase(status);
+    let retry = match retry_after {
+        Some(v) => format!("\nRetry-After: {v}"),
+        None => String::new(),
+    };
+    format!(
+        "The server returned HTTP {status} {status_text}.{retry}\n\nThe response body was not retrieved. If this URL requires authentication, use an authenticated tool (e.g. `gh` for GitHub, or an MCP-provided fetch tool) instead of WebFetch."
+    )
 }
 
 /// Build the byte-exact "REDIRECT DETECTED" message from `WebFetchTool.ts:227-235`.
@@ -162,7 +258,7 @@ pub fn format_redirect_message(
     status_code: u16,
     prompt: &str,
 ) -> String {
-    let status_text = redirect_status_text(status_code);
+    let status_text = status_reason_phrase(status_code);
     format!(
         "REDIRECT DETECTED: The URL redirects to a different host.\n\
          \n\
@@ -230,13 +326,6 @@ pub fn truncate_markdown_for_return(markdown: String) -> (String, bool) {
     let mut out = cut;
     out.push_str(WEBFETCH_TRUNCATION_SUFFIX);
     (out, true)
-}
-
-/// Format the byte-locked HTTP-error string. Spec §5:
-/// `"WebFetch: HTTP {status} from {url}"`.
-#[must_use]
-pub fn fmt_http_error(status: u16, url: &str) -> String {
-    format!("WebFetch: HTTP {status} from {url}")
 }
 
 /// Format the byte-locked DNS-error string. Spec §5:
@@ -778,7 +867,7 @@ Usage notes:\n\
                     }
                     // Not permitted (different host) — return the redirect notice.
                     let elapsed_ms = started.elapsed().as_millis() as u64;
-                    let status_text = redirect_status_text(resp.status);
+                    let status_text = status_reason_phrase(resp.status);
                     let message = format_redirect_message(
                         &current,
                         &redirect_url,
@@ -814,10 +903,41 @@ Usage notes:\n\
 
         match resp_result {
             Ok(resp) if resp.status >= 400 => {
-                let err_msg = fmt_http_error(resp.status, &parsed_input.url);
-                self.emit_failed(&invocation_id, "http_status", Some(resp.status), elapsed_ms)
+                // claude-code returns HTTP ≥ 400 as a SUCCESS data result, NOT a
+                // thrown error — `c.type === "http_error"` →
+                // `{bytes:0, code, codeText: STATUS_CODES[code] ?? "Unknown
+                // Status", result: iIp(c), durationMs, url}`. The `iIp` body gives
+                // the model actionable guidance ("use gh for GitHub / an MCP fetch
+                // tool if this requires auth") instead of an opaque transport
+                // failure. The `Retry-After` header (when present, e.g. on 429/503)
+                // is surfaced on its own line.
+                let retry_after = resp
+                    .headers
+                    .iter()
+                    .find(|(k, _)| k.eq_ignore_ascii_case("retry-after"))
+                    .map(|(_, v)| v.clone());
+                let code_text = status_reason_phrase(resp.status);
+                let message =
+                    format_http_error_message(resp.status, retry_after.as_deref());
+                // The tool call COMPLETED (it returns a result); claude-code logs a
+                // distinct `tengu_web_fetch_http_error`, but LingXi's telemetry
+                // vocabulary is started/completed/failed — completed is the faithful
+                // mapping for a successful tool result. `bytes:0` matches `iIp`.
+                self.emit_completed(&invocation_id, resp.status, 0, false, elapsed_ms)
                     .await;
-                Err(ToolError::Transport(err_msg))
+                Ok(ToolCallResult {
+                    data: json!({
+                        "url": parsed_input.url,
+                        "status": resp.status,
+                        "code_text": code_text,
+                        "content": message,
+                        "truncated": false,
+                        "bytes": 0,
+                    }),
+                    new_messages: vec![],
+                    context_modifier: None,
+                    mcp_meta: None,
+                })
             }
             Ok(resp) => {
                 let status = resp.status;
@@ -888,10 +1008,28 @@ Usage notes:\n\
                 })
             }
             Err(HttpError::Status { status, body: _ }) => {
-                let err_msg = fmt_http_error(status, &parsed_input.url);
-                self.emit_failed(&invocation_id, "http_status", Some(status), elapsed_ms)
+                // Transports that surface a 4xx/5xx as `Err(Status)` (rather than
+                // `Ok(resp)` with a >=400 status) take the same path as the
+                // `Ok(resp) if status >= 400` arm above: a SUCCESS result carrying
+                // the `iIp` body. No headers are available on this variant, so
+                // `Retry-After` is omitted.
+                let code_text = status_reason_phrase(status);
+                let message = format_http_error_message(status, None);
+                self.emit_completed(&invocation_id, status, 0, false, elapsed_ms)
                     .await;
-                Err(ToolError::Transport(err_msg))
+                Ok(ToolCallResult {
+                    data: json!({
+                        "url": parsed_input.url,
+                        "status": status,
+                        "code_text": code_text,
+                        "content": message,
+                        "truncated": false,
+                        "bytes": 0,
+                    }),
+                    new_messages: vec![],
+                    context_modifier: None,
+                    mcp_meta: None,
+                })
             }
             Err(HttpError::Connection(msg)) if is_dns_failure(&msg) => {
                 let err_msg = fmt_dns_error(&host);
@@ -1072,14 +1210,26 @@ mod tests {
     }
 
     #[test]
-    fn fmt_http_error_matches_lock() {
+    fn format_http_error_message_matches_iip() {
+        // No Retry-After (the common case): status sentence + the body note.
         assert_eq!(
-            fmt_http_error(500, "https://example.com/"),
-            "WebFetch: HTTP 500 from https://example.com/"
+            format_http_error_message(404, None),
+            "The server returned HTTP 404 Not Found.\n\nThe response body was not retrieved. If this URL requires authentication, use an authenticated tool (e.g. `gh` for GitHub, or an MCP-provided fetch tool) instead of WebFetch."
         );
         assert_eq!(
-            fmt_http_error(404, "http://localhost/path"),
-            "WebFetch: HTTP 404 from http://localhost/path"
+            format_http_error_message(500, None),
+            "The server returned HTTP 500 Internal Server Error.\n\nThe response body was not retrieved. If this URL requires authentication, use an authenticated tool (e.g. `gh` for GitHub, or an MCP-provided fetch tool) instead of WebFetch."
+        );
+        // With Retry-After (e.g. 429/503): a "\nRetry-After: {value}" line is
+        // inserted directly after the status sentence, before the blank line.
+        assert_eq!(
+            format_http_error_message(429, Some("120")),
+            "The server returned HTTP 429 Too Many Requests.\nRetry-After: 120\n\nThe response body was not retrieved. If this URL requires authentication, use an authenticated tool (e.g. `gh` for GitHub, or an MCP-provided fetch tool) instead of WebFetch."
+        );
+        // Unknown code falls through to "Unknown Status".
+        assert_eq!(
+            format_http_error_message(799, None),
+            "The server returned HTTP 799 Unknown Status.\n\nThe response body was not retrieved. If this URL requires authentication, use an authenticated tool (e.g. `gh` for GitHub, or an MCP-provided fetch tool) instead of WebFetch."
         );
     }
 
@@ -1132,18 +1282,32 @@ mod tests {
         assert_eq!(u.as_str(), "https://x.com:8080/a/b?q=1&z=2#h");
     }
 
-    // ---- redirect status text (WebFetchTool.ts:218-225) --------------------
+    // ---- status reason phrase (c9n / STATUS_CODES) -------------------------
 
     #[test]
-    fn redirect_status_text_matches_ts() {
-        assert_eq!(redirect_status_text(301), "Moved Permanently");
-        assert_eq!(redirect_status_text(308), "Permanent Redirect");
-        assert_eq!(redirect_status_text(307), "Temporary Redirect");
-        // Everything else (incl. 302, 303, 200, 0) falls through to "Found".
-        assert_eq!(redirect_status_text(302), "Found");
-        assert_eq!(redirect_status_text(303), "Found");
-        assert_eq!(redirect_status_text(200), "Found");
-        assert_eq!(redirect_status_text(0), "Found");
+    fn status_reason_phrase_matches_node_table() {
+        // Redirect codes used by the redirect notice.
+        assert_eq!(status_reason_phrase(301), "Moved Permanently");
+        assert_eq!(status_reason_phrase(308), "Permanent Redirect");
+        assert_eq!(status_reason_phrase(307), "Temporary Redirect");
+        assert_eq!(status_reason_phrase(302), "Found");
+        // 303 is "See Other" — the prior `redirect_status_text` ternary wrongly
+        // returned "Found" here (the divergence this fixes, #26).
+        assert_eq!(status_reason_phrase(303), "See Other");
+        // Success + client/server error phrases used by the http_error result.
+        assert_eq!(status_reason_phrase(200), "OK");
+        assert_eq!(status_reason_phrase(404), "Not Found");
+        assert_eq!(status_reason_phrase(429), "Too Many Requests");
+        assert_eq!(status_reason_phrase(418), "I'm a Teapot");
+        assert_eq!(status_reason_phrase(500), "Internal Server Error");
+        assert_eq!(status_reason_phrase(503), "Service Unavailable");
+        // bun-only entry (Node omits 509).
+        assert_eq!(status_reason_phrase(509), "Bandwidth Limit Exceeded");
+        assert_eq!(status_reason_phrase(511), "Network Authentication Required");
+        // Codes absent from the table fall through to "Unknown Status" (the
+        // `?? "Unknown Status"` fallback), NOT "Found".
+        assert_eq!(status_reason_phrase(0), "Unknown Status");
+        assert_eq!(status_reason_phrase(799), "Unknown Status");
     }
 
     // ---- redirect message (WebFetchTool.ts:227-235) ------------------------
@@ -1229,7 +1393,10 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
     }
 
     #[tokio::test]
-    async fn surfaces_http_500_as_transport() {
+    async fn http_500_returns_success_result_not_error() {
+        // 1:1 with claude-code: HTTP >= 400 is a SUCCESS data result carrying the
+        // `iIp` body (so the model can react / fall back to gh/MCP), NOT a thrown
+        // transport error.
         let _env = SKIP_ENV_LOCK.lock().await;
         crate::blocklist::clear_domain_check_cache();
         let (ctx, http, sink) = make_web_ctx();
@@ -1239,25 +1406,58 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
         http.enqueue(ok_response(500, "server error"));
 
         let tool = WebFetchTool::new(ctx);
-        let err = tool
+        let result = tool
             .call(
                 json!({ "url": "https://http500.example/x" }),
                 fresh_ctx(),
                 fresh_tx(),
             )
             .await
-            .expect_err("500 must be Err");
-        match err {
-            ToolError::Transport(msg) => {
-                assert_eq!(msg, "WebFetch: HTTP 500 from https://http500.example/x");
-            }
-            other => panic!("expected Transport, got {other:?}"),
-        }
+            .expect("500 must be Ok(result), not Err");
+        assert_eq!(result.data["status"], 500);
+        assert_eq!(result.data["code_text"], "Internal Server Error");
+        assert_eq!(result.data["bytes"], 0);
+        assert_eq!(
+            result.data["content"].as_str().unwrap(),
+            format_http_error_message(500, None)
+        );
+        // The tool call COMPLETED (returned a result), so `completed` fires and
+        // `failed` does not.
         let events = sink.events().await;
         let names: Vec<&str> = events.iter().map(|e| e.name.as_str()).collect();
         assert!(names.contains(&"tengu_tool_web_fetch_started"));
-        assert!(names.contains(&"tengu_tool_web_fetch_failed"));
-        assert!(!names.contains(&"tengu_tool_web_fetch_completed"));
+        assert!(names.contains(&"tengu_tool_web_fetch_completed"));
+        assert!(!names.contains(&"tengu_tool_web_fetch_failed"));
+    }
+
+    #[tokio::test]
+    async fn http_429_surfaces_retry_after_header() {
+        // A 429 with a Retry-After header surfaces the header on its own line in
+        // the result body, and reports codeText "Too Many Requests".
+        let _env = SKIP_ENV_LOCK.lock().await;
+        crate::blocklist::clear_domain_check_cache();
+        let (ctx, http, _sink) = make_web_ctx();
+        http.enqueue(preflight_allow());
+        http.enqueue(ScriptedResponse::Sync(protocol::HttpResponse {
+            status: 429,
+            headers: vec![("Retry-After".into(), "30".into())],
+            body: String::new(),
+        }));
+        let tool = WebFetchTool::new(ctx);
+        let result = tool
+            .call(
+                json!({ "url": "https://ratelimited.example/x" }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .expect("429 must be Ok(result)");
+        assert_eq!(result.data["status"], 429);
+        assert_eq!(result.data["code_text"], "Too Many Requests");
+        assert_eq!(
+            result.data["content"].as_str().unwrap(),
+            format_http_error_message(429, Some("30"))
+        );
     }
 
     #[tokio::test]

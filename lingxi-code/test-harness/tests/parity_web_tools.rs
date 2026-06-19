@@ -16,7 +16,7 @@ use telemetry::tengu::tool::{
 };
 use test_harness::parity::load_fixture;
 use tool_web::web_fetch::{
-    fmt_dns_error, fmt_http_error, WEBFETCH_ALLOWED_SCHEMES, WEBFETCH_MAX_MARKDOWN_LEN,
+    fmt_dns_error, format_http_error_message, WEBFETCH_ALLOWED_SCHEMES, WEBFETCH_MAX_MARKDOWN_LEN,
     WEBFETCH_MAX_REDIRECTS, WEBFETCH_MAX_TRANSFER_BYTES, WEBFETCH_TIMEOUT, WEBFETCH_TRUNCATION_SUFFIX,
     WEBFETCH_USER_AGENT_PREFIX,
 };
@@ -128,12 +128,15 @@ fn error_templates_match_runtime_formatters() {
         "URL scheme 'file' not allowed; only https/http"
     );
 
+    // HTTP >= 400 is now the `iIp` SUCCESS-result body (status sentence + the
+    // body note), not the old "WebFetch: HTTP {status} from {url}" transport
+    // error. The reason phrase comes from the Node/bun STATUS_CODES table.
     let concrete_http = fix
         .error_templates
         .http_status
         .replace("{status}", "500")
-        .replace("{url}", "https://example.com/");
-    assert_eq!(concrete_http, fmt_http_error(500, "https://example.com/"));
+        .replace("{status_text}", "Internal Server Error");
+    assert_eq!(concrete_http, format_http_error_message(500, None));
 
     let concrete_dns = fix
         .error_templates

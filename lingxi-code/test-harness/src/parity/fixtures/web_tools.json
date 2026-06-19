@@ -1,6 +1,6 @@
 {
   "_source": "claude-code/src/tools/WebFetchTool/utils.ts + WebSearchTool/WebSearchTool.ts",
-  "_note": "Byte-aligned locks for the web tools, now TS-faithful: WebFetch caps the TRANSFER at 10 MB (MAX_HTTP_CONTENT_LENGTH, utils.ts:112) and the converted MARKDOWN at 100k chars (MAX_MARKDOWN_LENGTH, utils.ts:128) — the prior single 5 MB body cap was a divergence and has been removed. Event names follow the M3-06 lock (_completed suffix, not _succeeded).",
+  "_note": "Byte-aligned locks for the web tools, now TS-faithful: WebFetch caps the TRANSFER at 10 MB (MAX_HTTP_CONTENT_LENGTH, utils.ts:112) and the converted MARKDOWN at 100k chars (MAX_MARKDOWN_LENGTH, utils.ts:128) — the prior single 5 MB body cap was a divergence and has been removed. Event names follow the M3-06 lock (_completed suffix, not _succeeded). error_templates.http_status is now the `iIp` SUCCESS-result body (status sentence + body note) returned for HTTP >= 400 — claude-code does NOT throw on >= 400; {status_text} comes from the Node/bun STATUS_CODES table (`status_reason_phrase`).",
   "webfetch_max_transfer_bytes": 10485760,
   "webfetch_max_markdown_len": 100000,
   "webfetch_max_redirects": 10,
@@ -23,7 +23,7 @@
   ],
   "error_templates": {
     "scheme_rejected": "URL scheme '{scheme}' not allowed; only https/http",
-    "http_status": "WebFetch: HTTP {status} from {url}",
+    "http_status": "The server returned HTTP {status} {status_text}.\n\nThe response body was not retrieved. If this URL requires authentication, use an authenticated tool (e.g. `gh` for GitHub, or an MCP-provided fetch tool) instead of WebFetch.",
     "dns_failure": "WebFetch: cannot resolve {host}"
   }
 }

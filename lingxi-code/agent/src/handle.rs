@@ -486,7 +486,8 @@ impl PoolSubagentSpawner {
 - Agent threads always have their cwd reset between bash calls, as a result please only use absolute file paths.\n\
 - In your final response, share file paths (always absolute, never relative) that are relevant to the task. Include code snippets only when the exact text is load-bearing (e.g., a bug you found, a function signature the caller asked for) — do not recap code you merely read.\n\
 - For clear communication with the user the assistant MUST avoid using emojis.\n\
-- Do not use a colon before tool calls. Text like \"Let me read the file:\" followed by a read tool call should just be \"Let me read the file.\" with a period.";
+- Do not use a colon before tool calls. Text like \"Let me read the file:\" followed by a read tool call should just be \"Let me read the file.\" with a period.\n\
+- Do NOT Write report/summary/findings/analysis .md files. Return findings directly as your final assistant message — the parent agent reads your text output, not files you create.";
 
     /// Build the child context from a RESOLVED [`AgentDefinition`] + the
     /// caller's task prompt, plus the optional fork carriers.
@@ -1415,8 +1416,8 @@ mod tests {
                 PoolSubagentSpawner::SUBAGENT_NOTES_TRAILER
             )
         );
-        // All four byte-locked bullets, including the em-dash (U+2014) in
-        // bullet 2 surviving byte-for-byte.
+        // All five byte-locked bullets, including the em-dash (U+2014) in
+        // bullets 2 and 5 surviving byte-for-byte.
         assert!(sys.contains(
             "Notes:\n- Agent threads always have their cwd reset between bash calls, as a result please only use absolute file paths."
         ));
@@ -1427,10 +1428,16 @@ mod tests {
         assert!(sys.contains(
             "just be \"Let me read the file.\" with a period."
         ));
+        // Bullet 5 is SUBAGENT-specific (the main FOOTER omits it — a main agent
+        // has no parent): never write report/summary .md files; return findings
+        // in the final assistant message.
+        assert!(sys.contains(
+            "- Do NOT Write report/summary/findings/analysis .md files. Return findings directly as your final assistant message — the parent agent reads your text output, not files you create."
+        ));
         // No trailing newline — the `notes` element is newline-free in TS
         // (the next block, `<env>`, is joined with a blank line, not appended
         // to the notes literal).
-        assert!(sys.ends_with("with a period."));
+        assert!(sys.ends_with("not files you create."));
     }
 
     #[test]

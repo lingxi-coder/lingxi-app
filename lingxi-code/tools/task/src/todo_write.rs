@@ -92,6 +92,7 @@ static INPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
         "properties": {
             "todos": {
                 "type": "array",
+                "description": "The updated todo list",
                 "items": {
                     "type": "object",
                     "properties": {
@@ -106,7 +107,8 @@ static INPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
                 }
             }
         },
-        "required": ["todos"]
+        "required": ["todos"],
+        "additionalProperties": false
     })
 });
 

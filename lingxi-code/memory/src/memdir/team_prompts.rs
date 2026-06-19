@@ -30,6 +30,7 @@ pub fn collect_team_prompts_at(
 ) -> std::io::Result<Vec<MemoryEntry>> {
     let roots = MemdirRoots {
         user_memdir: PathBuf::from("/dev/null"),
+        session_memdir: PathBuf::from("/dev/null"),
         team_memdir: Some(team_dir.to_path_buf()),
     };
     Ok(scan_memdir_at(&roots, now)?.entries)

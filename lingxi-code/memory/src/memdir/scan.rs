@@ -41,6 +41,14 @@ pub fn scan_memdir_at(
 ) -> std::io::Result<MemdirSnapshot> {
     let mut entries = Vec::new();
     enumerate(&roots.user_memdir, MemoryEntryTier::User, now, &mut entries)?;
+    // Session tier — per-session memory files written by `session_memory`. The
+    // dir is silently absent until an extraction has run (NotFound is ignored).
+    enumerate(
+        &roots.session_memdir,
+        MemoryEntryTier::Session,
+        now,
+        &mut entries,
+    )?;
     if let Some(team) = roots.team_memdir.as_deref() {
         enumerate(team, MemoryEntryTier::Team, now, &mut entries)?;
     }
@@ -166,6 +174,22 @@ mod tests {
     }
 
     #[test]
+    fn session_tier_assigned_for_session_memdir() {
+        // A file under `<config-home>/agents/session-memory` (exactly where
+        // `session_memory` writes) scans as the Session tier — the re-load half
+        // of session-memory, connected via the shared config-home resolution.
+        let tmp = TempDir::new().unwrap();
+        let home = tmp.path();
+        let session_dir = home.join(".claude").join("agents").join("session-memory");
+        fs::create_dir_all(&session_dir).unwrap();
+        fs::write(session_dir.join("sess-1.md"), b"durable note\n").unwrap();
+        let roots = memdir_path(home, false);
+        let snap = scan_memdir_at(&roots, SystemTime::now()).unwrap();
+        assert_eq!(snap.entries.len(), 1);
+        assert_eq!(snap.entries[0].tier, MemoryEntryTier::Session);
+    }
+
+    #[test]
     fn team_tier_assigned_for_team_memdir() {
         let tmp = TempDir::new().unwrap();
         let home = tmp.path();
@@ -182,6 +206,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let roots = MemdirRoots {
             user_memdir: tmp.path().join("does/not/exist"),
+            session_memdir: tmp.path().join("does/not/exist-sm"),
             team_memdir: None,
         };
         let snap = scan_memdir_at(&roots, SystemTime::now()).unwrap();

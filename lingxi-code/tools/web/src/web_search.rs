@@ -676,6 +676,44 @@ static INPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
     })
 });
 
+/// Verbatim claude-code v2.1.181 WebSearch tool description. The "current month"
+/// is a RUNTIME slot (claude-code computes it at render time); the format is
+/// "<Month> <Year>" (e.g. "June 2026"), matching the knowledge-cutoff date style
+/// — the only non-static byte in the whole string.
+fn web_search_description() -> String {
+    let month_year = chrono::Local::now().format("%B %Y").to_string();
+    // RAW string with real newlines + indentation: a `\n\` line continuation
+    // strips the leading "  " of each bullet, so it must NOT be used here. The
+    // content is flush-left in the source so the only indentation is the text's.
+    format!(
+        r#"Allows Claude to search the web and use the results to inform responses
+- Provides up-to-date information for current events and recent data
+- Returns search result information formatted as search result blocks, including links as markdown hyperlinks
+- Use this tool for accessing information beyond Claude's knowledge cutoff
+- Searches are performed automatically within a single API call
+
+CRITICAL REQUIREMENT - You MUST follow this:
+  - After answering the user's question, you MUST include a "Sources:" section at the end of your response
+  - In the Sources section, list all relevant URLs from the search results as markdown hyperlinks: [Title](URL)
+  - This is MANDATORY - never skip including sources in your response
+  - Example format:
+
+    [Your answer here]
+
+    Sources:
+    - [Source Title 1](https://example.com/1)
+    - [Source Title 2](https://example.com/2)
+
+Usage notes:
+  - Domain filtering is supported to include or block specific websites
+  - Web search is only available in the US
+
+IMPORTANT - Use the correct year in search queries:
+  - The current month is {month_year}. You MUST use this year when searching for recent information, documentation, or current events.
+  - Example: If the user asks for "latest React docs", search for "React documentation" with the current year, NOT last year"#
+    )
+}
+
 #[async_trait]
 impl Tool for WebSearchTool {
     fn name(&self) -> &str {
@@ -756,12 +794,10 @@ impl Tool for WebSearchTool {
     }
 
     async fn description(&self, _input: &Value, _opts: &DescriptionOptions) -> String {
-        "Searches the web via Anthropic's hosted web_search tool.".into()
+        web_search_description()
     }
     async fn prompt(&self, _opts: &PromptOptions) -> String {
-        "WebSearch executes a single search query and returns a mix of text \
-         commentary and structured hits. Query must be at least 2 characters."
-            .into()
+        web_search_description()
     }
 
     async fn call(
@@ -1032,6 +1068,21 @@ impl WebSearchTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn description_is_verbatim_v2_1_181() {
+        let d = web_search_description();
+        // Opening + the CRITICAL Sources requirement (byte-exact anchors).
+        assert!(d.starts_with("Allows Claude to search the web and use the results to inform responses\n"));
+        assert!(d.contains("CRITICAL REQUIREMENT - You MUST follow this:\n"));
+        assert!(d.contains("  - This is MANDATORY - never skip including sources in your response\n"));
+        assert!(d.contains("  - Example format:\n"));
+        assert!(d.contains("Usage notes:\n  - Domain filtering is supported to include or block specific websites\n  - Web search is only available in the US\n"));
+        // Runtime month/year slot: "<Month> <Year>" (e.g. "June 2026").
+        let my = chrono::Local::now().format("%B %Y").to_string();
+        assert!(d.contains(&format!("The current month is {my}. You MUST use this year")));
+        assert!(d.ends_with("with the current year, NOT last year"));
+    }
 
     #[test]
     fn locked_constants_match_spec() {

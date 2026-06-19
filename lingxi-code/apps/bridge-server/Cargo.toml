@@ -24,6 +24,9 @@ bridge = { path = "../../bridge" }
 client-protocol = { path = "../../client-protocol" }
 client-adapter = { path = "../../client-adapter" }
 permission = { path = "../../permission" }
+# Global config (`~/.claude.json`) path resolver — user/global-scope MCP servers
+# live inside it (top-level `mcpServers`), matching claude-code.
+migrations = { path = "../../migrations" }
 # F2-08: the full command-routing seam reaches the engine handles (in `traits`)
 # and the slash-command dispatcher (`command-api`). engine-desktop wires the
 # production runtime the router is built from (F2-05 binary path).

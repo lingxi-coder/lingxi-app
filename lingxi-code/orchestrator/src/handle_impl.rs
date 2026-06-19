@@ -212,18 +212,23 @@ impl OrchestratorHandle for ConversationOrchestrator {
     }
 
     async fn edit_config_file(&self) -> Result<MemoryEditorOutcome, HandleError> {
-        let config_dir = dirs::config_dir().ok_or_else(|| {
-            HandleError::ActionFailed("config_dir unavailable on this platform".into())
+        // claude-code has no standalone `config.json`: `/config` reads/writes
+        // `<config-home>/settings.json` (`$CLAUDE_CONFIG_DIR` else `~/.claude`).
+        // Edit that real file, not a phantom under `dirs::config_dir()`.
+        let home = dirs::home_dir().ok_or_else(|| {
+            HandleError::ActionFailed("home dir unavailable on this platform".into())
         })?;
-        let target = config_dir.join("claude").join("config.json");
+        let target = memory::claude_md::user_config_dir(&home).join("settings.json");
         spawn_editor_on(target, "{}\n").await
     }
 
     async fn edit_permissions_file(&self) -> Result<MemoryEditorOutcome, HandleError> {
-        let config_dir = dirs::config_dir().ok_or_else(|| {
-            HandleError::ActionFailed("config_dir unavailable on this platform".into())
+        // claude-code has no `permissions.json`: tool permissions live under the
+        // `permissions` key of `<config-home>/settings.json`. Open that file.
+        let home = dirs::home_dir().ok_or_else(|| {
+            HandleError::ActionFailed("home dir unavailable on this platform".into())
         })?;
-        let target = config_dir.join("claude").join("permissions.json");
+        let target = memory::claude_md::user_config_dir(&home).join("settings.json");
         spawn_editor_on(target, "{}\n").await
     }
 

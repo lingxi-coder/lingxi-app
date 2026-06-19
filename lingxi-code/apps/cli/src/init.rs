@@ -249,10 +249,12 @@ pub(crate) fn resolve_desktop_config(
     let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
     let claude_home = crate::run::claude_home_dir();
     let project_mcp_path = cwd.join(".mcp.json");
-    let global_mcp_path = dirs::config_dir().map_or_else(
-        || std::path::PathBuf::from("/dev/null"),
-        |d| d.join("lingxi").join("mcp.json"),
-    );
+    // User/global-scope MCP servers live INSIDE `~/.claude.json` (top-level
+    // `mcpServers`), exactly like claude-code — NOT a standalone file under the
+    // OS config dir. The loader reads only that key
+    // (`mcp::parse_global_config_mcp_servers`).
+    let global_mcp_path = migrations::global_config::global_config_path()
+        .unwrap_or_else(|| std::path::PathBuf::from("/dev/null"));
 
     let mut default_model = DesktopConfig::default().default_model;
     if let Some(m) = &argv.model {

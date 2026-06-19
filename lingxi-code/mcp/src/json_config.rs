@@ -121,7 +121,37 @@ pub fn parse_mcp_json_string(
     let serde_json::Value::Object(entries) = server_map else {
         return Ok(Vec::new());
     };
+    Ok(build_servers_from_map(entries, scope))
+}
 
+/// Parse MCP servers from a GLOBAL CONFIG file (`~/.claude.json`): reads ONLY the
+/// top-level `mcpServers` object. claude-code reads `config.mcpServers` directly
+/// (`wt().mcpServers`) with NO `|| parsed` bare-map fallback — the global config
+/// holds dozens of unrelated keys (`numStartups`, `projects`, `oauthAccount`, …)
+/// that must never be mistaken for server entries. An absent / non-object
+/// `mcpServers` yields no servers.
+///
+/// # Errors
+/// Returns [`McpJsonError::Json`] when `raw` is not valid JSON.
+pub fn parse_global_config_mcp_servers(
+    raw: &str,
+    scope: ConfigScope,
+) -> Result<Vec<McpServerConfig>, McpJsonError> {
+    let parsed: serde_json::Value = serde_json::from_str(raw)?;
+    let Some(serde_json::Value::Object(entries)) = parsed.get("mcpServers") else {
+        return Ok(Vec::new());
+    };
+    Ok(build_servers_from_map(entries, scope))
+}
+
+/// Build validated `McpServerConfig`s from a `{ name: entry }` server map.
+/// Shared by [`parse_mcp_json_string`] (bare-map fallback) and
+/// [`parse_global_config_mcp_servers`] (mcpServers-only). Invalid entries are
+/// logged + skipped (keeping valid siblings); the result is sorted by name.
+fn build_servers_from_map(
+    entries: &serde_json::Map<String, serde_json::Value>,
+    scope: ConfigScope,
+) -> Vec<McpServerConfig> {
     let mut out = Vec::new();
     for (name, raw_entry) in entries {
         // Per-entry validation: a shape that fails to deserialize is logged and
@@ -201,15 +231,19 @@ pub fn parse_mcp_json_string(
         });
     }
     out.sort_by(|a, b| a.name.cmp(&b.name));
-    Ok(out)
+    out
 }
 
-/// Load + merge `.mcp.json` configs from the project path (cwd) and the
-/// user-global path. Project entries take precedence on name collision.
+/// Load + merge MCP configs from the project `.mcp.json` (cwd) and the user
+/// GLOBAL CONFIG file (`~/.claude.json`). Project entries take precedence on
+/// name collision.
 ///
-/// Missing files yield empty lists. Parse errors are logged via
-/// `tracing::warn!` and the corresponding file is skipped — a malformed
-/// `.mcp.json` must not break startup.
+/// The project file is parsed with the `mcpServers || parsed` bare-map fallback
+/// (`.mcp.json` may be a bare server map); the global config is parsed
+/// `mcpServers`-only ([`parse_global_config_mcp_servers`]) so its many unrelated
+/// top-level keys are never mistaken for servers. Missing files yield empty
+/// lists. Parse errors are logged via `tracing::warn!` and the corresponding
+/// file is skipped — a malformed config must not break startup.
 #[must_use]
 pub fn load_mcp_json_with_precedence(
     project_path: &Path,
@@ -217,9 +251,10 @@ pub fn load_mcp_json_with_precedence(
 ) -> Vec<McpServerConfig> {
     let mut by_name: HashMap<String, McpServerConfig> = HashMap::new();
 
-    // User-global first (lower precedence).
+    // User-global first (lower precedence). The global path is the `~/.claude.json`
+    // global config, so read ONLY its `mcpServers` key (no bare-map fallback).
     if let Ok(raw) = std::fs::read_to_string(global_path) {
-        match parse_mcp_json_string(&raw, ConfigScope::User) {
+        match parse_global_config_mcp_servers(&raw, ConfigScope::User) {
             Ok(cfgs) => {
                 for c in cfgs {
                     by_name.insert(c.name.clone(), c);
@@ -491,5 +526,48 @@ mod tests {
         let cfgs = load_mcp_json_with_precedence(&project, &global);
         assert_eq!(cfgs.len(), 1);
         assert_eq!(cfgs[0].name, "y");
+    }
+
+    // ── Global config (`~/.claude.json`) user-scope MCP, mcpServers-only ──────
+
+    #[test]
+    fn global_config_reads_only_mcp_servers_key_not_siblings() {
+        // A real `~/.claude.json` has many unrelated top-level keys. The global
+        // reader must extract ONLY `mcpServers` and never treat e.g. `projects`
+        // or `numStartups` as server entries (claude-code `wt().mcpServers`).
+        let raw = r#"{
+          "numStartups": 7,
+          "oauthAccount": { "emailAddress": "x@y.z" },
+          "projects": { "/some/proj": { "allowedTools": ["Bash"] } },
+          "mcpServers": { "mem": { "command": "mcp-mem" } }
+        }"#;
+        let cfgs = parse_global_config_mcp_servers(raw, ConfigScope::User).unwrap();
+        assert_eq!(cfgs.len(), 1);
+        assert_eq!(cfgs[0].name, "mem");
+        assert_eq!(cfgs[0].scope, ConfigScope::User);
+    }
+
+    #[test]
+    fn global_config_without_mcp_servers_yields_none_no_bare_map_fallback() {
+        // No `mcpServers` key: must yield NO servers. The bare-map `|| parsed`
+        // fallback (valid for `.mcp.json`) must NOT apply to the global config —
+        // otherwise `numStartups` / `projects` would be mis-parsed as servers.
+        let raw = r#"{ "numStartups": 7, "projects": { "/p": {} } }"#;
+        let cfgs = parse_global_config_mcp_servers(raw, ConfigScope::User).unwrap();
+        assert!(cfgs.is_empty());
+    }
+
+    #[test]
+    fn precedence_loader_reads_global_config_mcp_servers_key() {
+        // End-to-end: the precedence loader pointed at a global-config file reads
+        // its `mcpServers`, ignoring sibling keys.
+        let dir = TempDir::new().unwrap();
+        let project = dir.path().join(".mcp.json"); // absent
+        let global = dir.path().join(".claude.json");
+        fs::write(&global, r#"{"numStartups":3,"mcpServers":{"g":{"command":"g"}}}"#).unwrap();
+        let cfgs = load_mcp_json_with_precedence(&project, &global);
+        assert_eq!(cfgs.len(), 1);
+        assert_eq!(cfgs[0].name, "g");
+        assert_eq!(cfgs[0].scope, ConfigScope::User);
     }
 }

@@ -186,10 +186,12 @@ pub fn resolve_desktop_config(args: &BridgeArgs) -> DesktopConfig {
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let claude_home = claude_config_home().unwrap_or_else(|| PathBuf::from("/dev/null"));
     let project_mcp_path = cwd.join(".mcp.json");
-    let global_mcp_path = dirs::config_dir().map_or_else(
-        || PathBuf::from("/dev/null"),
-        |d| d.join("lingxi").join("mcp.json"),
-    );
+    // User/global-scope MCP servers live INSIDE `~/.claude.json` (top-level
+    // `mcpServers`), exactly like claude-code — NOT a standalone file under the
+    // OS config dir. The loader reads only that key
+    // (`mcp::parse_global_config_mcp_servers`).
+    let global_mcp_path = migrations::global_config::global_config_path()
+        .unwrap_or_else(|| PathBuf::from("/dev/null"));
 
     let mut default_model = DesktopConfig::default().default_model;
     if let Some(m) = &args.model {

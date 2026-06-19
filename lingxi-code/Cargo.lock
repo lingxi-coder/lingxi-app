@@ -539,6 +539,7 @@ dependencies = [
  "engine-desktop",
  "futures-util",
  "http",
+ "migrations",
  "once_cell",
  "orchestrator",
  "permission",

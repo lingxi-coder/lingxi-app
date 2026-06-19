@@ -5,7 +5,6 @@
 //! Task 6.
 
 use async_trait::async_trait;
-use command_api::builtin_support::names::core_description;
 use command_api::model::{BuiltinCommandHandler, CommandResult};
 use command_api::parser::ParsedSlashCommand;
 use std::sync::Arc;
@@ -46,8 +45,17 @@ impl BuiltinCommandHandler for ExitHandler {
         "exit"
     }
 
+    /// `/exit` description.
+    ///
+    /// Byte-faithful to claude-code v2.1.183's dynamic getter
+    /// `wkl(){return _i()?"Detach from this background session (it keeps
+    /// running)":"Exit the CLI"}`. The Rust core has no background-session
+    /// predicate at this call site, so we return the non-background (default)
+    /// branch `"Exit the CLI"`. The background branch
+    /// `"Detach from this background session (it keeps running)"` is deferred
+    /// until a background-session predicate is threaded here.
     fn description(&self) -> &str {
-        core_description("exit")
+        "Exit the CLI"
     }
 }
 
@@ -82,6 +90,8 @@ mod tests {
         let mock = Arc::new(MockOrchestratorHandle::new());
         let h = ExitHandler::new(mock);
         assert_eq!(h.name(), "exit");
-        assert_eq!(h.description(), "Exit the REPL");
+        // Byte-faithful to claude-code v2.1.183 wkl() default (non-background)
+        // branch: "Exit the CLI" (NOT "Exit the REPL").
+        assert_eq!(h.description(), "Exit the CLI");
     }
 }

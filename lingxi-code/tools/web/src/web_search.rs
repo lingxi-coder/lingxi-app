@@ -123,8 +123,8 @@ pub fn infer_api_provider(base_url: &str) -> ApiProvider {
 /// Whether WebSearch is enabled for `provider` + `model` — 1:1 with claude-code
 /// `WebSearchTool.isEnabled` (`WebSearchTool.ts:168-193`):
 /// - `firstParty` ⇒ always enabled;
-/// - `vertex` ⇒ enabled only for Claude 4.x (`claude-opus-4` / `claude-sonnet-4`
-///   / `claude-haiku-4` substring);
+/// - `vertex` ⇒ enabled only for `claude-fable-5` or Claude 4.x
+///   (`claude-opus-4` / `claude-sonnet-4` / `claude-haiku-4` substring);
 /// - `foundry` ⇒ always enabled (Foundry only ships web-search-capable models);
 /// - anything else ⇒ disabled.
 #[must_use]
@@ -135,7 +135,8 @@ pub fn web_search_is_enabled(provider: ApiProvider, model: &str) -> bool {
         // `if` branches both returning `true` — merged here, same behavior).
         ApiProvider::FirstParty | ApiProvider::Foundry => true,
         ApiProvider::Vertex => {
-            model.contains("claude-opus-4")
+            model.contains("claude-fable-5")
+                || model.contains("claude-opus-4")
                 || model.contains("claude-sonnet-4")
                 || model.contains("claude-haiku-4")
         }
@@ -1117,6 +1118,9 @@ mod tests {
 
     #[test]
     fn is_enabled_vertex_only_claude_4x() {
+        // `claude-fable-5` is the first disjunct upstream (binary @202215129).
+        assert!(web_search_is_enabled(ApiProvider::Vertex, "claude-fable-5"));
+        assert!(web_search_is_enabled(ApiProvider::Vertex, "claude-fable-5-20260101"));
         assert!(web_search_is_enabled(ApiProvider::Vertex, "claude-opus-4-20250514"));
         assert!(web_search_is_enabled(ApiProvider::Vertex, "claude-sonnet-4-5"));
         assert!(web_search_is_enabled(ApiProvider::Vertex, "claude-haiku-4-5"));

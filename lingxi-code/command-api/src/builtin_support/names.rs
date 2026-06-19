@@ -387,7 +387,7 @@ pub fn core_description(name: &str) -> &'static str {
         "config" => "Open settings",
         "cost" => "Show total cost and duration of the current session",
         "doctor" => "Diagnose and verify your Claude Code installation and settings",
-        "exit" => "Exit the REPL",
+        "exit" => "Exit the CLI",
         "help" => "Show help and available commands",
         "hooks" => "Manage hooks",
         "init" => "Initialize a new CLAUDE.md file with codebase documentation",

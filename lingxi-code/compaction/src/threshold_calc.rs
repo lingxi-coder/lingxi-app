@@ -43,16 +43,18 @@ pub fn auto_compact_threshold(effective_window: u64) -> u64 {
     effective_window.saturating_sub(AUTOCOMPACT_BUFFER_TOKENS)
 }
 
-/// `true` when `estimated_tokens − snip_freed > threshold`.
+/// `true` when `estimated_tokens − snip_freed >= threshold`.
 ///
-/// Mirrors the threshold test inside `shouldAutoCompact`
-/// (`autoCompact.ts:225-238`): snip already removed messages but the surviving
-/// assistant usage still reflects pre-snip context, so the freed delta is
-/// subtracted before comparing against the threshold. Saturating subtraction so
-/// an over-large `snip_freed` clamps to zero rather than wrapping.
+/// Mirrors the proactive auto-compact gate `l3p`→`KRe`/`pFi` in claude-code
+/// v2.1.183: `l3p` subtracts the snip offset (`SC(...)-o`) before calling the
+/// level classifier, and the classifier's compact arm is `n.enabled&&e>=o`
+/// (`>=`, inclusive at the boundary). Snip already removed messages but the
+/// surviving assistant usage still reflects pre-snip context, so the freed
+/// delta is subtracted before comparing against the threshold. Saturating
+/// subtraction so an over-large `snip_freed` clamps to zero rather than wrapping.
 #[must_use]
 pub fn should_auto_compact(estimated_tokens: u64, snip_freed: u64, threshold: u64) -> bool {
-    estimated_tokens.saturating_sub(snip_freed) > threshold
+    estimated_tokens.saturating_sub(snip_freed) >= threshold
 }
 
 #[cfg(test)]
@@ -87,22 +89,27 @@ mod tests {
     }
 
     #[test]
-    fn should_auto_compact_strict_over_threshold() {
-        // Strictly above the threshold fires.
+    fn should_auto_compact_inclusive_at_threshold() {
+        // Above the threshold fires.
         assert!(should_auto_compact(167_001, 0, 167_000));
-        // Exactly at the threshold does NOT fire (strict `>`).
-        assert!(!should_auto_compact(167_000, 0, 167_000));
-        // Below does not fire.
+        // Exactly at the threshold fires (inclusive `>=`, matching the
+        // binary's `e>=o` compact arm in pFi).
+        assert!(should_auto_compact(167_000, 0, 167_000));
+        // One below the threshold does NOT fire.
+        assert!(!should_auto_compact(166_999, 0, 167_000));
+        // Well below does not fire.
         assert!(!should_auto_compact(100_000, 0, 167_000));
     }
 
     #[test]
     fn should_auto_compact_subtracts_snip_freed() {
-        // 170k tokens, but snip already freed 5k → 165k ≤ 167k → no compact.
+        // 170k tokens, but snip already freed 5k → 165k < 167k → no compact.
         assert!(!should_auto_compact(170_000, 5_000, 167_000));
-        // Only 2k freed → 168k > 167k → compact.
+        // Snip freed exactly down to the threshold → 167k >= 167k → compact.
+        assert!(should_auto_compact(170_000, 3_000, 167_000));
+        // Only 2k freed → 168k >= 167k → compact.
         assert!(should_auto_compact(170_000, 2_000, 167_000));
-        // Over-large snip_freed clamps to zero, not under threshold.
+        // Over-large snip_freed clamps to zero, not above threshold.
         assert!(!should_auto_compact(100_000, 999_999, 167_000));
     }
 }

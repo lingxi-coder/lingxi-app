@@ -31,6 +31,14 @@ use std::time::{Duration, SystemTime};
 /// Placeholder text substituted for cleared tool results.
 pub const TIME_BASED_MC_CLEARED_MESSAGE: &str = "[Old tool result content cleared]";
 
+/// Minimum would-be token savings before a time-based microcompact is allowed
+/// to clear anything. Mirrors TS `k5r = 20000` (binary v2.1.183, offset
+/// 197329444). `o$i` computes the candidate clear-set + `tokensSaved` via the
+/// scan-only `H5r`, then `if(o<k5r)return null;` — i.e. it abandons the whole
+/// microcompact (clears NOTHING, leaving the message list untouched) when the
+/// total savings would be under 20,000 tokens.
+pub const MICROCOMPACT_MIN_TOKENS_SAVED: u64 = 20_000;
+
 /// Set of tool names whose results microcompact is allowed to clear.
 ///
 /// Mirrors TS `COMPACTABLE_TOOLS` (`microCompact.ts:41-50`):
@@ -181,8 +189,16 @@ impl Microcompactor {
     /// matching user `ToolResult` blocks with the cleared placeholder.
     ///
     /// Returns a **no-op** result (original messages unchanged, `cleared_count`
-    /// and `tokens_saved` both `0`) when the clear-set is empty OR no tokens
-    /// would be saved — mirroring TS's two `null` returns.
+    /// and `tokens_saved` both `0`) when the clear-set is empty OR the total
+    /// would-be savings are below [`MICROCOMPACT_MIN_TOKENS_SAVED`] (TS `k5r`,
+    /// 20,000) — mirroring TS's `null` returns in `o$i`.
+    ///
+    /// Structure mirrors the binary: a scan-only pass (`H5r`) computes the
+    /// candidate clear-set + `tokens_saved` **without mutating** the message
+    /// list; if `tokens_saved < 20_000` (or the clear-set is empty) it abandons
+    /// the whole microcompact and returns the **original** messages untouched;
+    /// only then does the mutation pass (`DOt`) replace the matching tool
+    /// results with the cleared placeholder.
     ///
     /// The `_now` argument is retained for signature stability; the count-based
     /// fallback does not consult it (see the module-level time-gap divergence).
@@ -214,9 +230,42 @@ impl Microcompactor {
             return Self::noop(messages);
         }
 
-        // Pass 2: replace matching tool_result blocks in user messages.
+        // Scan-only pass (TS `H5r`): count how many tool results would be
+        // cleared and the tokens that would be saved, WITHOUT mutating anything.
+        // An already-cleared placeholder contributes nothing (TS `!Wxd`).
         let mut cleared_count = 0usize;
         let mut tokens_saved = 0u64;
+        for m in &messages {
+            if let ConversationMessage::User { content, .. } = m {
+                for b in content {
+                    if let ContentBlock::ToolResult {
+                        tool_use_id,
+                        content,
+                        ..
+                    } = b
+                    {
+                        if clear_set.contains(tool_use_id)
+                            && content != TIME_BASED_MC_CLEARED_MESSAGE
+                        {
+                            cleared_count += 1;
+                            tokens_saved = tokens_saved
+                                .saturating_add(rough_token_count_estimation(content));
+                        }
+                    }
+                }
+            }
+        }
+
+        // Floor check (TS `o$i`: `if(o<k5r)return null;`). Abandon the whole
+        // microcompact — clearing nothing and returning the ORIGINAL messages —
+        // when the total would-be savings are below the 20,000-token floor (this
+        // also covers `tokens_saved == 0`, e.g. every match already cleared).
+        if tokens_saved < MICROCOMPACT_MIN_TOKENS_SAVED {
+            return Self::noop(messages);
+        }
+
+        // Mutation pass (TS `DOt`): replace matching tool_result blocks in user
+        // messages with the cleared placeholder.
         let out: Vec<ConversationMessage> = messages
             .into_iter()
             .map(|m| {
@@ -234,9 +283,6 @@ impl Microcompactor {
                                 if clear_set.contains(tool_use_id)
                                     && content != TIME_BASED_MC_CLEARED_MESSAGE
                                 {
-                                    cleared_count += 1;
-                                    tokens_saved = tokens_saved
-                                        .saturating_add(rough_token_count_estimation(content));
                                     return ContentBlock::ToolResult {
                                         tool_use_id: tool_use_id.clone(),
                                         content: TIME_BASED_MC_CLEARED_MESSAGE.into(),
@@ -259,12 +305,6 @@ impl Microcompactor {
                 }
             })
             .collect();
-
-        // TS returns null when tokensSaved === 0 (e.g. every matching result was
-        // already cleared). Surface the no-op shape with the unchanged messages.
-        if tokens_saved == 0 {
-            return Self::noop(out);
-        }
 
         MicrocompactResult {
             messages: out,
@@ -326,7 +366,8 @@ mod tests {
     }
 
     /// (a) 8 compactable `tool_uses`, `keep_recent=5` → 3 oldest cleared, last 5
-    /// kept.
+    /// kept — provided the 3 cleared results clear at least
+    /// [`MICROCOMPACT_MIN_TOKENS_SAVED`] (20,000) tokens in total.
     #[test]
     fn keeps_last_five_clears_three_oldest() {
         let mut msgs = Vec::new();
@@ -335,8 +376,9 @@ mod tests {
             let id = ToolUseId::new();
             ids.push(id.clone());
             msgs.push(assistant_tool_use("Read", id.clone()));
-            // Non-trivial content so tokens_saved > 0 for cleared ones.
-            msgs.push(user_tool_result(id, &format!("body-{i} {}", "x".repeat(40))));
+            // Large content (~10k tokens each) so the 3 oldest cleared together
+            // clear well above the 20,000-token floor and the compact fires.
+            msgs.push(user_tool_result(id, &format!("body-{i} {}", "x".repeat(40_000))));
         }
         let mc = Microcompactor {
             config: TimeBasedMCConfig {
@@ -361,6 +403,67 @@ mod tests {
                 assert_ne!(result_content(res), TIME_BASED_MC_CLEARED_MESSAGE, "msg {i}");
             }
         }
+    }
+
+    /// 20,000-token floor (TS `k5r`): a clear-set exists and would save tokens,
+    /// but the total is below 20,000 → the whole microcompact is abandoned and
+    /// the ORIGINAL (un-mutated) messages are returned, byte-for-byte.
+    #[test]
+    fn below_min_tokens_saved_floor_is_noop() {
+        let mut msgs = Vec::new();
+        let mut ids = Vec::new();
+        // 8 results; with keep_recent=5 the 3 oldest form the clear-set. Each
+        // body ~12 tokens → ~36 tokens would-be saved, far below 20,000.
+        for i in 0..8 {
+            let id = ToolUseId::new();
+            ids.push(id.clone());
+            msgs.push(assistant_tool_use("Read", id.clone()));
+            msgs.push(user_tool_result(id, &format!("body-{i} {}", "x".repeat(40))));
+        }
+        let mc = Microcompactor {
+            config: TimeBasedMCConfig {
+                enabled: true,
+                keep_recent: 5,
+                ..Default::default()
+            },
+        };
+        let r = mc.compact(msgs, SystemTime::now());
+        // Under the floor → no-op: nothing cleared, no tokens saved.
+        assert_eq!(r.cleared_count, 0);
+        assert_eq!(r.tokens_saved, 0);
+        // The returned messages must be the ORIGINAL ones — NOT mutated to the
+        // placeholder (faithful to the binary's compute-then-check ordering).
+        for m in &r.messages {
+            if matches!(m, ConversationMessage::User { .. }) {
+                assert_ne!(result_content(m), TIME_BASED_MC_CLEARED_MESSAGE);
+            }
+        }
+    }
+
+    /// At exactly the 20,000-token floor the compact fires (`o<k5r` is strict
+    /// `<`, so `== 20_000` is NOT below the floor).
+    #[test]
+    fn at_min_tokens_saved_floor_fires() {
+        // One assistant Read (cleared) + one keeper, so keep_recent=1 leaves a
+        // single clear candidate. rough_token_count_estimation = (len+2)/4, so
+        // for tokens_saved == 20_000 we need len == 79_998 (79_998+2)/4 = 20_000.
+        let mut msgs = Vec::new();
+        let clear_id = ToolUseId::new();
+        let keep_id = ToolUseId::new();
+        msgs.push(assistant_tool_use("Read", clear_id.clone()));
+        msgs.push(assistant_tool_use("Read", keep_id.clone()));
+        msgs.push(user_tool_result(clear_id, &"x".repeat(79_998)));
+        msgs.push(user_tool_result(keep_id, "kept"));
+        let mc = Microcompactor {
+            config: TimeBasedMCConfig {
+                enabled: true,
+                keep_recent: 1,
+                ..Default::default()
+            },
+        };
+        let r = mc.compact(msgs, SystemTime::now());
+        assert_eq!(r.tokens_saved, 20_000);
+        assert_eq!(r.cleared_count, 1);
     }
 
     /// (b) already-cleared blocks are not re-counted (no tokens saved → no-op).
@@ -464,7 +567,8 @@ mod tests {
             let id = ToolUseId::new();
             ids.push(id.clone());
             msgs.push(assistant_tool_use("Bash", id.clone()));
-            msgs.push(user_tool_result(id, &format!("out-{i} {}", "q".repeat(40))));
+            // Large bodies so the 2 cleared exceed the 20,000-token floor.
+            msgs.push(user_tool_result(id, &format!("out-{i} {}", "q".repeat(50_000))));
         }
         let mc = Microcompactor {
             config: TimeBasedMCConfig {

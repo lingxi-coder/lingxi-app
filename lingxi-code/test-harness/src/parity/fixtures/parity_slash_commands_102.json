@@ -291,7 +291,7 @@
       "name": "exit",
       "is_core": true,
       "implemented": true,
-      "description": "Exit the REPL",
+      "description": "Exit the CLI",
       "claude_type": "local",
       "rust_status": "implemented",
       "target_status": "implemented",

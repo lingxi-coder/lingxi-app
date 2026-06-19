@@ -27,7 +27,7 @@ use tool_api::tool_trait::{
     ToolStaticContext, ValidationError,
 };
 
-use crate::schedule_cron::{cron_to_human, home_dir_or_internal, CRON_SUBDIR};
+use crate::schedule_cron::{config_home_dir, cron_to_human, home_dir_or_internal, CRON_SUBDIR};
 
 /// Tool name byte-lock.
 pub const CRON_LIST_TOOL_NAME: &str = "CronList";
@@ -101,7 +101,7 @@ fn truncate_single_line(s: &str, max_width: usize) -> String {
 /// Read every `~/.claude/cron/*.json` descriptor into the `jobs` shape, sorted
 /// by id for determinism. Unreadable / unparseable files are skipped.
 async fn read_all_jobs(home: &Path) -> Vec<Value> {
-    let dir = home.join(".claude").join(CRON_SUBDIR);
+    let dir = config_home_dir(home).join(CRON_SUBDIR);
     let mut jobs: Vec<Value> = Vec::new();
     let mut rd = match tokio::fs::read_dir(&dir).await {
         Ok(rd) => rd,

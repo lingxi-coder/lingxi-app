@@ -274,7 +274,7 @@ pub(crate) fn read_cli_mode_settings(parsed: &Argv) -> permission::CliModeSettin
         std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
     let mut default_mode = None;
     let mut bypass_disabled = false;
-    let home = dirs::home_dir().map(|h| h.join(".claude").join("settings.json"));
+    let home = Some(crate::run::claude_home_dir().join("settings.json"));
     let proj = project_dir.join(".claude").join("settings.json");
     // User first, then project (ascending priority): project read last wins on
     // `defaultMode`; `bypass_disabled` is sticky across tiers.

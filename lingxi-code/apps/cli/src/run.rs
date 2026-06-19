@@ -443,7 +443,9 @@ async fn load_resume_session_from(
 
 /// Claude config home dir. `$CLAUDE_CONFIG_DIR` (when non-empty) wins, else
 /// `~/.claude`. Mirrors the resolution the Doctor screen + session storage use.
-fn claude_home_dir() -> PathBuf {
+/// Shared across the CLI's settings/MCP/desktop-config resolution (`lib`,
+/// `mode`, `init`) so every user-tier path honors `$CLAUDE_CONFIG_DIR`.
+pub(crate) fn claude_home_dir() -> PathBuf {
     if let Ok(explicit) = std::env::var("CLAUDE_CONFIG_DIR") {
         if !explicit.is_empty() {
             return PathBuf::from(explicit);

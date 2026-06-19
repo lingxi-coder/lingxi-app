@@ -76,10 +76,14 @@ pub fn sanitize_name(name: &str) -> String {
         .collect()
 }
 
-/// Resolve the `~/.claude` root from `$HOME` (tests redirect `$HOME` to a
-/// tempdir). Returns `None` when `$HOME` is unset.
+/// Resolve the config-home root: `$CLAUDE_CONFIG_DIR` (set+non-empty) wins,
+/// else `$HOME/.claude` (tests redirect `$HOME` to a tempdir). Mirrors
+/// claude-code `tr()`. Returns `None` when neither resolves.
 #[must_use]
 pub fn claude_home() -> Option<PathBuf> {
+    if let Some(dir) = std::env::var_os("CLAUDE_CONFIG_DIR").filter(|v| !v.is_empty()) {
+        return Some(PathBuf::from(dir));
+    }
     std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".claude"))
 }
 

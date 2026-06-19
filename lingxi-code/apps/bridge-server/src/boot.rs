@@ -170,13 +170,21 @@ fn load_settings_blocks() -> (Option<BTreeMap<String, serde_json::Value>>, Optio
 /// The `ANTHROPIC_API_KEY` env value is read here but is NEVER logged; an empty
 /// key is a valid config (the server boots for transport testing and only a live
 /// turn fails with a 401 — surfaced to the client as a terminal `Error` event).
+/// User config-home: `$CLAUDE_CONFIG_DIR` (set+non-empty) else `~/.claude`
+/// (claude-code `tr()` / `getClaudeConfigHomeDir`). Shared by the bridge's
+/// desktop-config + lockfile resolution so both honor `$CLAUDE_CONFIG_DIR`.
+#[must_use]
+pub fn claude_config_home() -> Option<PathBuf> {
+    if let Some(dir) = std::env::var_os("CLAUDE_CONFIG_DIR").filter(|v| !v.is_empty()) {
+        return Some(PathBuf::from(dir));
+    }
+    dirs::home_dir().map(|h| h.join(".claude"))
+}
+
 #[must_use]
 pub fn resolve_desktop_config(args: &BridgeArgs) -> DesktopConfig {
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let claude_home = dirs::home_dir().map_or_else(
-        || PathBuf::from("/dev/null"),
-        |h| h.join(".claude"),
-    );
+    let claude_home = claude_config_home().unwrap_or_else(|| PathBuf::from("/dev/null"));
     let project_mcp_path = cwd.join(".mcp.json");
     let global_mcp_path = dirs::config_dir().map_or_else(
         || PathBuf::from("/dev/null"),

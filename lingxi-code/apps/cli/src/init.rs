@@ -247,10 +247,7 @@ pub(crate) fn resolve_desktop_config(
     permission_mode: permission::PermissionMode,
 ) -> DesktopConfig {
     let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-    let claude_home = dirs::home_dir().map_or_else(
-        || std::path::PathBuf::from("/dev/null"),
-        |h| h.join(".claude"),
-    );
+    let claude_home = crate::run::claude_home_dir();
     let project_mcp_path = cwd.join(".mcp.json");
     let global_mcp_path = dirs::config_dir().map_or_else(
         || std::path::PathBuf::from("/dev/null"),

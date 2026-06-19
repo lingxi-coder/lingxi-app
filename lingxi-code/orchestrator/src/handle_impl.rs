@@ -176,10 +176,14 @@ impl OrchestratorHandle for ConversationOrchestrator {
     }
 
     async fn run_doctor_checks(&self) -> DoctorReport {
-        // Use `dirs::config_dir()/claude` as the canonical config dir for
-        // probes (matches what `/memory` and `/config` write to).
-        let config_dir =
-            dirs::config_dir().map_or_else(|| std::path::PathBuf::from("."), |d| d.join("claude"));
+        // Probe the real config-home tree: `$CLAUDE_CONFIG_DIR` when set, else
+        // `~/.claude` (claude-code `tr()` — the SAME dir `/memory`, settings, and
+        // the TUI doctor screen use). NOT `dirs::config_dir()` (≈ `~/Library/
+        // Application Support` on macOS), which is a different, never-used tree.
+        let config_dir = dirs::home_dir().map_or_else(
+            || std::path::PathBuf::from("."),
+            |h| memory::claude_md::user_config_dir(&h),
+        );
         crate::diagnostics::run_all(&config_dir).await
     }
 

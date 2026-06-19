@@ -273,10 +273,7 @@ pub(crate) async fn mount_tui_runtime(tui_runtime: tui::session::Runtime) -> i32
 /// std::env::current_dir()`, read AFTER `cwd::apply_cwd` so it reflects any
 /// `--cwd`. These feed `migrations::settings_update::settings_path`.
 fn settings_dirs() -> (std::path::PathBuf, std::path::PathBuf) {
-    let claude_home = dirs::home_dir().map_or_else(
-        || std::path::PathBuf::from("/dev/null"),
-        |h| h.join(".claude"),
-    );
+    let claude_home = crate::run::claude_home_dir();
     let project_dir =
         std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
     (claude_home, project_dir)

@@ -300,9 +300,19 @@ pub(crate) fn home_dir_or_internal() -> Result<PathBuf, ToolError> {
         .ok_or_else(|| ToolError::Internal("CronCreate: HOME directory not available".into()))
 }
 
+/// User config-home: `$CLAUDE_CONFIG_DIR` (set+non-empty) else `<home>/.claude`
+/// (claude-code `tr()` / `getClaudeConfigHomeDir`).
+#[must_use]
+pub(crate) fn config_home_dir(home: &Path) -> PathBuf {
+    match std::env::var_os("CLAUDE_CONFIG_DIR") {
+        Some(dir) if !dir.is_empty() => PathBuf::from(dir),
+        _ => home.join(".claude"),
+    }
+}
+
 #[must_use]
 pub(crate) fn cron_path(home: &Path, task_id: &str) -> PathBuf {
-    home.join(".claude")
+    config_home_dir(home)
         .join(CRON_SUBDIR)
         .join(format!("{task_id}{CRON_FILE_SUFFIX}"))
 }
@@ -531,9 +541,9 @@ fn build_result_content(id: &str, human: &str, recurring: bool, durable: bool) -
     }
 }
 
-/// Count existing `~/.claude/cron/*.json` job descriptors.
+/// Count existing `<config-home>/cron/*.json` job descriptors.
 fn count_existing_jobs(home: &Path) -> usize {
-    let dir = home.join(".claude").join(CRON_SUBDIR);
+    let dir = config_home_dir(home).join(CRON_SUBDIR);
     match std::fs::read_dir(&dir) {
         Ok(rd) => rd
             .filter_map(Result::ok)

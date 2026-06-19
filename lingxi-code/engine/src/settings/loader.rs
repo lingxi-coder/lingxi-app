@@ -47,7 +47,18 @@ pub fn read_settings_file(path: &Path) -> Result<Option<SettingsJson>, SettingsE
 /// `None` if neither resolves (e.g. on a misconfigured CI runner).
 #[must_use]
 pub fn user_settings_path() -> Option<PathBuf> {
-    home_dir().map(|h| h.join(".claude").join("settings.json"))
+    config_home_dir().map(|h| h.join("settings.json"))
+}
+
+/// User config-home: `$CLAUDE_CONFIG_DIR` (set+non-empty) else `<home>/.claude`
+/// (claude-code `tr()` / `getClaudeConfigHomeDir`). Returns `None` only when
+/// neither the env override nor `$HOME` resolves.
+#[must_use]
+fn config_home_dir() -> Option<PathBuf> {
+    if let Some(dir) = std::env::var_os("CLAUDE_CONFIG_DIR").filter(|v| !v.is_empty()) {
+        return Some(PathBuf::from(dir));
+    }
+    home_dir().map(|h| h.join(".claude"))
 }
 
 /// Path to the project settings file: `<project_dir>/.claude/settings.json`.

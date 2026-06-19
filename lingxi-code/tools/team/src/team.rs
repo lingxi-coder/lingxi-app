@@ -99,7 +99,17 @@ impl TeamDeleteTool {
 /// observable at compile time.
 #[must_use]
 pub fn resolve_team_dir(home: &Path, team_name: &str) -> PathBuf {
-    home.join(".claude").join(TEAM_MEM_SUBDIR).join(team_name)
+    config_home_dir(home).join(TEAM_MEM_SUBDIR).join(team_name)
+}
+
+/// User config-home: `$CLAUDE_CONFIG_DIR` (set+non-empty) else `<home>/.claude`
+/// (claude-code `tr()` / `getClaudeConfigHomeDir`).
+#[must_use]
+fn config_home_dir(home: &Path) -> PathBuf {
+    match std::env::var_os("CLAUDE_CONFIG_DIR") {
+        Some(dir) if !dir.is_empty() => PathBuf::from(dir),
+        _ => home.join(".claude"),
+    }
 }
 
 /// Resolve the active HOME directory.

@@ -402,7 +402,17 @@ fn home_dir_or_internal() -> Result<PathBuf, ToolError> {
 
 #[must_use]
 pub(crate) fn config_path(home: &Path) -> PathBuf {
-    home.join(CONFIG_SUBDIR).join(CONFIG_FILE_NAME)
+    config_home_dir(home).join(CONFIG_FILE_NAME)
+}
+
+/// User config-home: `$CLAUDE_CONFIG_DIR` (set+non-empty) else
+/// `<home>/<CONFIG_SUBDIR>` (claude-code `tr()` / `getClaudeConfigHomeDir`).
+#[must_use]
+fn config_home_dir(home: &Path) -> PathBuf {
+    match std::env::var_os("CLAUDE_CONFIG_DIR") {
+        Some(dir) if !dir.is_empty() => PathBuf::from(dir),
+        _ => home.join(CONFIG_SUBDIR),
+    }
 }
 
 /// `ConfigTool` — get/set Claude Code settings.

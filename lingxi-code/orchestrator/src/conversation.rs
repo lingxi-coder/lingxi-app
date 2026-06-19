@@ -687,6 +687,28 @@ pub struct ConversationOrchestrator {
     /// also consults so a file already loaded as a nested/conditional attachment
     /// (P3.2) is never double-injected here.
     pub(crate) surfaced_memory_paths: Mutex<std::collections::HashSet<std::path::PathBuf>>,
+    /// P1 session-memory standalone trigger (§6.5). `None` = inert (no caller
+    /// wires it). When wired (via [`Self::with_session_memory`]) AND the
+    /// extractor's threshold is crossed, [`Self::maybe_extract_session_memory`]
+    /// background-forks a distillation at turn start and writes the per-session
+    /// memory file the next session re-loads through the Session-tier memdir scan.
+    pub(crate) session_memory: Option<Arc<SessionMemoryHandle>>,
+}
+
+/// Everything [`ConversationOrchestrator::maybe_extract_session_memory`] needs to
+/// run a standalone session-memory extraction (§6.5): the threshold-stateful
+/// extractor (behind a `Mutex` — `extract` advances its watermark), the forked
+/// runner that issues the distillation, the resolved config-home for the write
+/// path, and a runtime to background-spawn the fork so it never blocks a turn.
+pub struct SessionMemoryHandle {
+    /// The threshold-gated extractor; `Mutex` because `extract` is `&mut`.
+    pub extractor: Mutex<memory::session_memory::SessionMemoryExtractor>,
+    /// Forked-agent runner that issues the distillation off the cache prefix.
+    pub runner: Arc<sidequery::ForkedAgentRunner>,
+    /// Resolved `$CLAUDE_CONFIG_DIR ?? ~/.claude` dir (the write base).
+    pub config_home: std::path::PathBuf,
+    /// Runtime used to background-spawn the extraction fork.
+    pub runtime: Arc<dyn traits::RuntimeSpawner>,
 }
 
 impl ConversationOrchestrator {
@@ -753,6 +775,7 @@ impl ConversationOrchestrator {
             memory_prefetch: None,
             pending_memory_prefetch: Mutex::new(None),
             surfaced_memory_paths: Mutex::new(std::collections::HashSet::new()),
+            session_memory: None,
         }
     }
 
@@ -867,6 +890,63 @@ impl ConversationOrchestrator {
     #[must_use]
     pub fn has_memory_prefetch(&self) -> bool {
         self.memory_prefetch.is_some()
+    }
+
+    /// Wire the standalone session-memory extractor (§6.5). `None` (the default)
+    /// keeps it inert. The composition root builds the handle (gated, default
+    /// off) via [`crate::prompt::build_session_memory_handle`].
+    #[must_use]
+    pub fn with_session_memory(mut self, handle: Arc<SessionMemoryHandle>) -> Self {
+        self.session_memory = Some(handle);
+        self
+    }
+
+    /// P1 (§6.5): when a session-memory handle is wired AND the extractor's
+    /// tool-call threshold is crossed, BACKGROUND-fork a distillation of the
+    /// session history and write `<configHome>/agents/session-memory/<id>.md`
+    /// (which the next session re-loads via the Session-tier memdir scan). A
+    /// strict no-op when no handle is wired, no cache-safe params are available
+    /// yet, or the threshold is not crossed — so the locked fixtures stay
+    /// byte-identical by default. Never blocks the turn (the fork runs on the
+    /// handle's runtime); a failed extraction is swallowed, never surfaced.
+    pub(crate) async fn maybe_extract_session_memory(&self) {
+        let Some(handle) = self.session_memory.clone() else {
+            return;
+        };
+        // The fork shares the parent's cache-safe prefix; without it (early in a
+        // session) skip — a later turn re-checks.
+        let Some(slot) = self.cache_safe_slot.as_ref() else {
+            return;
+        };
+        let Some(params) = slot.get_last().await else {
+            return;
+        };
+        // Snapshot history + id without holding the session lock across the fork.
+        let (history, session_id) = {
+            let s = self.session.lock().await;
+            (s.history.clone(), s.session_id)
+        };
+        let runtime = handle.runtime.clone();
+        let _ = runtime
+            .spawn(
+                "session-memory-extract",
+                Box::pin(async move {
+                    let mut ex = handle.extractor.lock().await;
+                    if !ex.should_extract(&history) {
+                        return;
+                    }
+                    let _ = ex
+                        .extract(
+                            &handle.runner,
+                            params,
+                            &session_id.to_string(),
+                            &history,
+                            &handle.config_home,
+                        )
+                        .await;
+                }),
+            )
+            .await;
     }
 
     /// Wire the source of completed background (`async`) hook responses, folded
@@ -2764,6 +2844,9 @@ impl ConversationOrchestrator {
             // when no prefetch is wired, keeping the locked streaming fixtures
             // byte-identical. See [`Self::start_memory_prefetch`].
             self.start_memory_prefetch().await;
+            // P1 (§6.5): background-fork a session-memory extraction if the
+            // tool-call threshold has crossed (inert unless wired + enabled).
+            self.maybe_extract_session_memory().await;
 
             // In-Loop Compaction Batch 4 (streaming twin): proactively
             // snip+micro+autocompact BEFORE snapshotting history for the
@@ -6596,6 +6679,19 @@ mod relevant_memory_reminder_tests {
             Arc::new(StaticMemoryProvider::with_files(vec![])),
             PathBuf::from("/work/repo"),
         )
+    }
+
+    #[tokio::test]
+    async fn maybe_extract_session_memory_is_noop_without_handle() {
+        // The inert default: no session-memory handle wired (and no cache slot)
+        // ⇒ a strict no-op (no panic, nothing spawned), so the locked fixtures
+        // stay byte-identical. The enabled path's extract+write is covered by
+        // `memory::session_memory` tests; the composition-root wiring is gated
+        // behind `CLAUDE_CODE_SESSION_MEMORY` (default off).
+        let orch = orch_bare();
+        assert!(orch.session_memory.is_none());
+        orch.maybe_extract_session_memory().await;
+        assert!(orch.session_memory.is_none());
     }
 
     /// Build an orchestrator whose prefetch resolves to `seed`.

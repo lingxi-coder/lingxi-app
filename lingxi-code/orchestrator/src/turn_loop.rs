@@ -309,6 +309,9 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
     // wired, keeping the locked turn-loop fixtures byte-identical. See
     // [`ConversationOrchestrator::start_memory_prefetch`].
     orch.start_memory_prefetch().await;
+    // P1 (§6.5, batched twin): background-fork a session-memory extraction if the
+    // tool-call threshold has crossed (inert unless wired + enabled).
+    orch.maybe_extract_session_memory().await;
 
     // In-Loop Compaction Batch 4: proactively snip+micro+autocompact BEFORE
     // snapshotting history for the model call, so a long conversation

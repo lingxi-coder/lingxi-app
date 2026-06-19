@@ -161,6 +161,45 @@ pub fn build_memdir_prefetch(
     Arc::new(memory::prefetch::MemoryPrefetch::new(selector, runtime, roots))
 }
 
+/// Build a [`SessionMemoryHandle`](crate::SessionMemoryHandle) for the
+/// composition root — the §6.5 standalone session-memory extractor + its forked
+/// runner. Hand to [`ConversationOrchestrator::with_session_memory`](crate::ConversationOrchestrator);
+/// the composition root gates the call (default OFF). `config_home` is the
+/// resolved `$CLAUDE_CONFIG_DIR ?? ~/.claude` dir (the write base — pass
+/// [`user_config_dir`](memory::claude_md::user_config_dir)`(dirs::home_dir())`).
+#[must_use]
+pub fn build_session_memory_handle(
+    side_query_client: Arc<dyn sidequery::SideQueryClient>,
+    extraction_model: String,
+    initialization_threshold: u32,
+    update_threshold: u32,
+    home: &std::path::Path,
+    runtime: Arc<dyn traits::RuntimeSpawner>,
+) -> Arc<crate::SessionMemoryHandle> {
+    // Called only when the composition root is enabling the feature, so
+    // `enabled = true`. The `$CLAUDE_CONFIG_DIR`-aware config-home is the SAME
+    // base the Session-tier memdir scan reads, so writes re-load next session.
+    let config = memory::session_memory::SessionMemoryConfig {
+        enabled: true,
+        initialization_threshold,
+        update_threshold,
+        extraction_model,
+    };
+    let config_home = memory::claude_md::user_config_dir(home);
+    let runner = Arc::new(
+        sidequery::ForkedAgentRunner::new(Arc::new(sidequery::NoopSubagentSlotProvider))
+            .with_side_query_client(side_query_client, config.extraction_model.clone()),
+    );
+    Arc::new(crate::SessionMemoryHandle {
+        extractor: tokio::sync::Mutex::new(memory::session_memory::SessionMemoryExtractor::new(
+            config,
+        )),
+        runner,
+        config_home,
+        runtime,
+    })
+}
+
 /// [`build_memdir_prefetch`] for a composition root that has raw Anthropic
 /// credentials + an HTTP transport but no pre-built [`sidequery::SideQueryClient`]
 /// (e.g. the mobile host, which assembles a multi-provider `llm_client` rather

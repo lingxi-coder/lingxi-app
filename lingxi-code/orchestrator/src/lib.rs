@@ -57,8 +57,8 @@ pub mod test_support_stream;
 
 pub use config::{OrchestratorConfig, MAX_TURNS_DEFAULT};
 pub use conversation::{
-    ConversationOrchestrator, ConversationOutcome, OrchestratorApiClient, StreamingApiClient,
-    TurnOutcome,
+    ConversationOrchestrator, ConversationOutcome, OrchestratorApiClient, SessionMemoryHandle,
+    StreamingApiClient, TurnOutcome,
 };
 pub use error::OrchestratorError;
 pub use hook_prompt_runner::ApiClientHookPromptRunner;

@@ -3454,6 +3454,31 @@ pub async fn build(
         ),
         _ => orch_builder,
     };
+
+    // P1 session-memory standalone trigger (§6.5, gated, default OFF). When
+    // `CLAUDE_CODE_SESSION_MEMORY` is truthy, wire the threshold-gated extractor
+    // so durable notes are background-distilled (a Haiku-class fork) once the
+    // tool-call threshold crosses and written to
+    // `<configHome>/agents/session-memory/<id>.md`, which the Session-tier memdir
+    // scan re-loads next session. Thresholds are unpinned upstream (spec §6.5) —
+    // 30/30 tool calls is a tunable default. Unset/false ⇒ no handle ⇒ inert, so
+    // the locked fixtures stay byte-identical.
+    let orch_builder = match (
+        is_env_truthy("CLAUDE_CODE_SESSION_MEMORY"),
+        dirs::home_dir(),
+    ) {
+        (true, Some(home)) => orch_builder.with_session_memory(
+            orchestrator::prompt::build_session_memory_handle(
+                side_query_client.clone(),
+                "claude-haiku-4-5".to_string(),
+                30,
+                30,
+                &home,
+                Arc::new(PosixRuntime::new()) as Arc<dyn traits::RuntimeSpawner>,
+            ),
+        ),
+        _ => orch_builder,
+    };
     let orch = Arc::new(orch_builder);
 
     // (6) Command registry through the desktop composition root.

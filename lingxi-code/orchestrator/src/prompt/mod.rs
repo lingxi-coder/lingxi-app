@@ -661,7 +661,9 @@ mod tests {
         let blocks = split_system_blocks(&s, true);
         assert_eq!(blocks.len(), 2);
         assert_eq!(blocks[0].text, HEADER);
-        assert!(blocks[1].text.starts_with("<env>"));
+        assert!(blocks[1].text.starts_with(
+            "Here is useful information about the environment you are running in:\n<env>"
+        ));
         assert!(blocks[1].text.ends_with("with a period.\n"));
     }
 }

@@ -33,6 +33,8 @@ use std::fmt::Write;
 pub fn format(ctx: &SystemPromptContext) -> String {
     let mut s = String::with_capacity(512);
 
+    // Preamble line before the tags — byte-exact claude-code v2.1.181.
+    s.push_str("Here is useful information about the environment you are running in:\n");
     s.push_str("<env>\n");
     // The cwd line uses display() — paths with non-UTF8 bytes get
     // lossy-rendered. M5-03 accepts this (claude-code is JS, always UTF-8).
@@ -45,7 +47,12 @@ pub fn format(ctx: &SystemPromptContext) -> String {
     )
     .unwrap();
     if let Some(g) = &ctx.git_status {
-        // Two-space indent — LingXi extension; see "Critical fidelity items".
+        // LingXi extension: claude-code's `<env>` has NO git lines (`Git branch`
+        // / `Working tree clean` are 0 hits in v2.1.181) — it carries branch/dirty
+        // in a SEPARATE gitStatus context block that LingXi does not yet emit.
+        // Until that block exists these lines are kept so the model still sees
+        // git context (removing them alone would lose it). Follow-up (#20-tail):
+        // add the gitStatus block, then drop these two lines.
         writeln!(&mut s, "  Git branch: {}", g.branch).unwrap();
         writeln!(&mut s, "  Working tree clean: {}", g.working_dir_clean).unwrap();
     }

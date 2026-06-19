@@ -78,10 +78,13 @@ fn double_lf_between_each_section() {
     }];
     ctx.tool_names = vec!["X".into()];
     let out = assemble_system_prompt(&ctx);
-    // After HEADER, before `<env>` — should be exactly `\n\n`.
+    // After HEADER, before the env section — exactly `\n\n`, then the env
+    // preamble line + `<env>` (claude-code v2.1.181 prefixes `<env>` with
+    // "Here is useful information about the environment you are running in:").
     let header_end = "You are Claude Code, Anthropic's official CLI for Claude.";
     let after_header = &out[out.find(header_end).unwrap() + header_end.len()..];
-    assert!(after_header.starts_with("\n\n<env>"));
+    assert!(after_header
+        .starts_with("\n\nHere is useful information about the environment you are running in:\n<env>"));
     // After the cutoff line, before the memory preamble — `\n\n` + preamble.
     assert!(out.contains(&format!("\n\n{MEMORY_PREAMBLE}")));
     // The memory section does NOT end in a newline now, so the separator before

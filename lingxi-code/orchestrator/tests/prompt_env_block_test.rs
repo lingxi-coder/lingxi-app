@@ -25,6 +25,7 @@ fn ctx_minimal() -> SystemPromptContext {
 fn env_block_minimal_shape() {
     let out = env_block::format(&ctx_minimal());
     let expected = "\
+Here is useful information about the environment you are running in:
 <env>
 Working directory: /Users/u/proj
 Is directory a git repo: No

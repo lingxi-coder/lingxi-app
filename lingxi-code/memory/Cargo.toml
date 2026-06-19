@@ -25,6 +25,10 @@ tempfile = "3.13"
 async-trait.workspace = true
 filetime = "0.2"
 tokio = { workspace = true, features = ["macros", "rt", "sync", "time"] }
+# session_memory tests construct a forked-extract fixture (ToolUseOptions + a
+# SideQueryResponse{cost::Usage}); the library itself gains no new deps.
+cost = { path = "../cost" }
+tool-api = { path = "../tool-api" }
 
 [lints]
 workspace = true

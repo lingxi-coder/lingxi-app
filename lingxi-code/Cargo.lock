@@ -2563,6 +2563,7 @@ name = "memory"
 version = "0.12.0"
 dependencies = [
  "async-trait",
+ "cost",
  "filetime",
  "protocol",
  "regex",
@@ -2575,6 +2576,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
+ "tool-api",
  "tracing",
  "traits",
  "walkdir",

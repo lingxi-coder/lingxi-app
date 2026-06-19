@@ -2521,6 +2521,7 @@ dependencies = [
  "bytes",
  "indexmap",
  "jsonrpc",
+ "migrations",
  "protocol",
  "rand 0.9.4",
  "serde",

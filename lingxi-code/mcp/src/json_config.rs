@@ -289,6 +289,108 @@ pub fn load_mcp_json_with_precedence(
     out
 }
 
+/// Parse LOCAL-scope MCP servers from a GLOBAL CONFIG file (`~/.claude.json`):
+/// reads ONLY `projects.<project_key>.mcpServers` (claude-code local scope =
+/// `wt().projects[Pt()].mcpServers`). NO bare-map fallback. An absent project
+/// entry or `mcpServers` key yields no servers.
+///
+/// `project_key` is the canonical project key
+/// ([`migrations::global_config::project_path_for_config`]) — the same key
+/// claude-code stores per-project config under.
+///
+/// # Errors
+/// Returns [`McpJsonError::Json`] when `raw` is not valid JSON.
+pub fn parse_local_config_mcp_servers(
+    raw: &str,
+    project_key: &str,
+    scope: ConfigScope,
+) -> Result<Vec<McpServerConfig>, McpJsonError> {
+    let parsed: serde_json::Value = serde_json::from_str(raw)?;
+    let Some(serde_json::Value::Object(entries)) = parsed
+        .get("projects")
+        .and_then(|p| p.get(project_key))
+        .and_then(|proj| proj.get("mcpServers"))
+    else {
+        return Ok(Vec::new());
+    };
+    Ok(build_servers_from_map(entries, scope))
+}
+
+/// Load + merge MCP servers across all THREE claude-code config scopes, with
+/// precedence LOCAL > PROJECT > USER (claude-code's `["local","project","user"]`
+/// priority order — a server defined in a higher scope overrides a same-named
+/// one in a lower scope):
+/// - USER    = `<global_config>` top-level `mcpServers`
+/// - LOCAL   = `<global_config>` `projects.<cwd_key>.mcpServers`
+/// - PROJECT = `<cwd>/.mcp.json` (the bare-map `mcpServers || parsed` fallback applies)
+///
+/// `global_config_path` is `~/.claude.json`; `cwd_key` is
+/// `migrations::global_config::project_path_for_config(cwd)`. Missing files yield
+/// empty lists; parse errors are logged and skipped — a malformed config must
+/// not break startup.
+#[must_use]
+pub fn load_mcp_servers(
+    project_mcp_path: &Path,
+    global_config_path: &Path,
+    cwd: &Path,
+) -> Vec<McpServerConfig> {
+    let mut by_name: HashMap<String, McpServerConfig> = HashMap::new();
+    let global_raw = std::fs::read_to_string(global_config_path).ok();
+
+    // USER (lowest precedence): global config top-level `mcpServers`.
+    if let Some(raw) = &global_raw {
+        match parse_global_config_mcp_servers(raw, ConfigScope::User) {
+            Ok(cfgs) => {
+                for c in cfgs {
+                    by_name.insert(c.name.clone(), c);
+                }
+            }
+            Err(e) => tracing::warn!(
+                error = %e,
+                path = %global_config_path.display(),
+                "skipping malformed global config (user-scope mcpServers)"
+            ),
+        }
+    }
+
+    // PROJECT (middle): `<cwd>/.mcp.json` (bare-map fallback allowed).
+    if let Ok(raw) = std::fs::read_to_string(project_mcp_path) {
+        match parse_mcp_json_string(&raw, ConfigScope::Project) {
+            Ok(cfgs) => {
+                for c in cfgs {
+                    by_name.insert(c.name.clone(), c);
+                }
+            }
+            Err(e) => tracing::warn!(
+                error = %e,
+                path = %project_mcp_path.display(),
+                "skipping malformed project .mcp.json"
+            ),
+        }
+    }
+
+    // LOCAL (highest): global config `projects.<cwd_key>.mcpServers`.
+    if let Some(raw) = &global_raw {
+        let key = migrations::global_config::project_path_for_config(cwd);
+        match parse_local_config_mcp_servers(raw, &key, ConfigScope::Local) {
+            Ok(cfgs) => {
+                for c in cfgs {
+                    by_name.insert(c.name.clone(), c);
+                }
+            }
+            Err(e) => tracing::warn!(
+                error = %e,
+                path = %global_config_path.display(),
+                "skipping malformed global config (local-scope mcpServers)"
+            ),
+        }
+    }
+
+    let mut out: Vec<McpServerConfig> = by_name.into_values().collect();
+    out.sort_by(|a, b| a.name.cmp(&b.name));
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -569,5 +671,79 @@ mod tests {
         assert_eq!(cfgs.len(), 1);
         assert_eq!(cfgs[0].name, "g");
         assert_eq!(cfgs[0].scope, ConfigScope::User);
+    }
+
+    // ── Local-scope MCP (`~/.claude.json` projects[<key>].mcpServers) ─────────
+
+    #[test]
+    fn local_scope_reads_projects_keyed_mcp_servers() {
+        let raw = r#"{"projects":{"/some/proj":{"mcpServers":{"loc":{"command":"loc-cmd"}}}}}"#;
+        let cfgs = parse_local_config_mcp_servers(raw, "/some/proj", ConfigScope::Local).unwrap();
+        assert_eq!(cfgs.len(), 1);
+        assert_eq!(cfgs[0].name, "loc");
+        assert_eq!(cfgs[0].scope, ConfigScope::Local);
+    }
+
+    #[test]
+    fn local_scope_absent_project_key_yields_none() {
+        // Project entry exists for a DIFFERENT dir → no local servers for ours.
+        let raw = r#"{"projects":{"/other":{"mcpServers":{"x":{"command":"x"}}}}}"#;
+        let cfgs = parse_local_config_mcp_servers(raw, "/some/proj", ConfigScope::Local).unwrap();
+        assert!(cfgs.is_empty());
+    }
+
+    #[test]
+    fn three_scope_precedence_local_over_project_over_user() {
+        // Same server name "s" in ALL three scopes → LOCAL wins (claude-code
+        // priority order ["local","project","user"]).
+        let dir = TempDir::new().unwrap();
+        let cwd = dir.path();
+        let project = cwd.join(".mcp.json");
+        let global = cwd.join(".claude.json");
+        // Key BOTH the fixture and the loader via the same canonical resolver, so
+        // they match regardless of temp-dir symlink canonicalization.
+        let key = migrations::global_config::project_path_for_config(cwd);
+        let mut projects = serde_json::Map::new();
+        projects.insert(key, serde_json::json!({ "mcpServers": { "s": { "command": "local-s" } } }));
+        let global_json = serde_json::json!({
+            "mcpServers": { "s": { "command": "user-s" } },
+            "projects": serde_json::Value::Object(projects),
+        });
+        fs::write(&global, serde_json::to_string(&global_json).unwrap()).unwrap();
+        fs::write(&project, r#"{"mcpServers":{"s":{"command":"project-s"}}}"#).unwrap();
+
+        let cfgs = load_mcp_servers(&project, &global, cwd);
+        assert_eq!(cfgs.len(), 1);
+        assert_eq!(cfgs[0].scope, ConfigScope::Local);
+        match &cfgs[0].spec {
+            McpTransportSpec::Stdio { command, .. } => assert_eq!(command, "local-s"),
+            other => panic!("expected Stdio, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn three_scope_distinct_names_all_present_with_correct_scopes() {
+        let dir = TempDir::new().unwrap();
+        let cwd = dir.path();
+        let project = cwd.join(".mcp.json");
+        let global = cwd.join(".claude.json");
+        let key = migrations::global_config::project_path_for_config(cwd);
+        let mut projects = serde_json::Map::new();
+        projects.insert(key, serde_json::json!({ "mcpServers": { "loc": { "command": "loc" } } }));
+        let global_json = serde_json::json!({
+            "numStartups": 9,
+            "mcpServers": { "usr": { "command": "usr" } },
+            "projects": serde_json::Value::Object(projects),
+        });
+        fs::write(&global, serde_json::to_string(&global_json).unwrap()).unwrap();
+        fs::write(&project, r#"{"mcpServers":{"prj":{"command":"prj"}}}"#).unwrap();
+
+        let cfgs = load_mcp_servers(&project, &global, cwd);
+        assert_eq!(cfgs.len(), 3);
+        let by_name: std::collections::HashMap<&str, ConfigScope> =
+            cfgs.iter().map(|c| (c.name.as_str(), c.scope)).collect();
+        assert_eq!(by_name["loc"], ConfigScope::Local);
+        assert_eq!(by_name["prj"], ConfigScope::Project);
+        assert_eq!(by_name["usr"], ConfigScope::User);
     }
 }

@@ -2240,7 +2240,11 @@ pub async fn build(
         .get(1)
         .cloned()
         .unwrap_or_else(|| std::path::PathBuf::from("/dev/null"));
-    let mcp_configs = mcp::load_mcp_json_with_precedence(&project_mcp_path, &global_mcp_path);
+    // All three claude-code MCP scopes (precedence local > project > user):
+    // project `.mcp.json` (mcp_paths[0]), user + local both inside the global
+    // config `~/.claude.json` (mcp_paths[1]); local is keyed by the canonical
+    // project key for `cwd`.
+    let mcp_configs = mcp::load_mcp_servers(&project_mcp_path, &global_mcp_path, &cwd);
     // Build one concrete `PosixMcpTransport` and hand it to the registry as
     // BOTH the `McpTransport` (discovery) and the `RawConnectionProvider`
     // (live-client bridge), so a connected server yields a working `McpClient`

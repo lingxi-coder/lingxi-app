@@ -9,6 +9,9 @@ license.workspace = true
 protocol = { path = "../protocol" }
 traits = { path = "../traits" }
 jsonrpc = { path = "../jsonrpc" }
+# Local-scope MCP servers live in `~/.claude.json` projects[<cwd-key>].mcpServers;
+# the canonical project key is resolved by migrations::global_config.
+migrations = { path = "../migrations" }
 serde.workspace = true
 serde_json.workspace = true
 indexmap.workspace = true

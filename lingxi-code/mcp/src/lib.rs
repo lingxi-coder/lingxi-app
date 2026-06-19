@@ -41,8 +41,8 @@ pub use identity::{
 pub use inbound::{ElicitationCreateHandler, RootsListHandler};
 pub use initialize_params::{ClientCapabilities, InitializeParams};
 pub use json_config::{
-    load_mcp_json_with_precedence, parse_global_config_mcp_servers, parse_mcp_json_string,
-    McpJsonError,
+    load_mcp_json_with_precedence, load_mcp_servers, parse_global_config_mcp_servers,
+    parse_local_config_mcp_servers, parse_mcp_json_string, McpJsonError,
 };
 pub use mcp_output_storage::{
     binary_blob_saved_message, decode_base64, extension_for_mime_type, format_file_size,

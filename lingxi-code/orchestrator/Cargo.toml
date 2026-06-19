@@ -12,6 +12,7 @@ traits = { path = "../traits" }
 llm-client = { path = "../llm-client" }
 tool-api = { path = "../tool-api" }
 memory = { path = "../memory" }
+migrations = { path = "../migrations" }
 permission = { path = "../permission" }
 hooks = { path = "../hooks" }
 mcp = { path = "../mcp" }

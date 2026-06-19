@@ -2873,6 +2873,7 @@ dependencies = [
  "llm-client",
  "mcp",
  "memory",
+ "migrations",
  "once_cell",
  "outputstyles",
  "permission",

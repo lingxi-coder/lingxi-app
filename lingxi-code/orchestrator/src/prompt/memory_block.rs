@@ -76,13 +76,20 @@ impl MemoryHierarchyProvider for RealMemoryHierarchyProvider {
         // `MemoryFile` entry, parent before children.
         let mut processed: std::collections::HashSet<std::path::PathBuf> =
             std::collections::HashSet::new();
+        // External-include approval (claudemd.ts:826-846): the User tier always
+        // resolves external `@import`s; Managed/Project/Local do so ONLY when the
+        // per-project `hasClaudeMdExternalIncludesApproved` flag is set in
+        // `~/.claude.json` (read once per load). The interactive approval PROMPT
+        // that sets the flag is a deferred follow-up; honoring an already-set
+        // flag is the value-plumbing parity.
+        let external_includes_approved = migrations::global_config::global_config_path()
+            .map(|p| {
+                migrations::global_config::check_has_claude_md_external_includes_approved(&p, cwd)
+            })
+            .unwrap_or(false);
         let mut out = Vec::new();
         for e in entries {
-            // External-include policy (claudemd.ts:826-846): ONLY the User tier
-            // gets unconditional external includes. Managed and Project/Local
-            // default to local-only (the `hasClaudeMdExternalIncludesApproved`
-            // opt-in is not plumbed into this seam, so they use `false`).
-            let include_external = e.tier == memory::claude_md::ClaudeMdTier::User;
+            let include_external = include_external_for(e.tier, external_includes_approved);
             let expanded = memory::claude_md::loader::expand_memory_file(
                 &e.path,
                 &mut processed,
@@ -128,6 +135,34 @@ impl MemoryHierarchyProvider for RealMemoryHierarchyProvider {
 #[must_use]
 pub fn real_provider() -> Arc<dyn MemoryHierarchyProvider> {
     Arc::new(RealMemoryHierarchyProvider)
+}
+
+/// claude-code external-`@import` gate (claudemd.ts:826-846): the User tier
+/// always resolves external includes; every other tier (Managed/Project/Local)
+/// does so ONLY when `hasClaudeMdExternalIncludesApproved` is set for the
+/// project. (claude-code also has an internal `forceIncludeExternal`; LingXi has
+/// no caller that sets it, so it is omitted.)
+#[must_use]
+fn include_external_for(tier: memory::claude_md::ClaudeMdTier, approved: bool) -> bool {
+    matches!(tier, memory::claude_md::ClaudeMdTier::User) || approved
+}
+
+#[cfg(test)]
+mod external_include_tests {
+    use super::include_external_for;
+    use memory::claude_md::ClaudeMdTier::{Local, Managed, Project, User};
+
+    #[test]
+    fn user_tier_always_allows_external_others_only_when_approved() {
+        // User tier: external `@import`s always allowed (unconditional).
+        assert!(include_external_for(User, false));
+        assert!(include_external_for(User, true));
+        // Managed/Project/Local: gated on the per-project approval flag.
+        for tier in [Managed, Project, Local] {
+            assert!(!include_external_for(tier, false), "{tier:?} gated when unapproved");
+            assert!(include_external_for(tier, true), "{tier:?} allowed when approved");
+        }
+    }
 }
 
 /// Build a memdir-backed memory prefetcher for the composition root — the P0.1

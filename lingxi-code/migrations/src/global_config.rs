@@ -451,6 +451,20 @@ fn project_has_trust(config_path: &Path, key: &str) -> bool {
     )
 }
 
+/// `config.projects?.[getProjectPathForConfig(cwd)]?.hasClaudeMdExternalIncludesApproved`
+/// truthiness — whether the user has approved Managed/Project/Local CLAUDE.md
+/// files to `@import` paths OUTSIDE the working dir (claude-code
+/// `hasClaudeMdExternalIncludesApproved`, claudemd.ts:826-846). Fail-safe to
+/// `false` on any read/parse error; the writer only ever stores boolean `true`.
+/// No ancestor walk (unlike trust): this is the EXACT project's approval.
+#[must_use]
+pub fn check_has_claude_md_external_includes_approved(config_path: &Path, cwd: &Path) -> bool {
+    matches!(
+        get_project_config(config_path, &project_path_for_config(cwd)),
+        Ok(p) if p.get("hasClaudeMdExternalIncludesApproved") == Some(&Value::Bool(true))
+    )
+}
+
 /// Persist trust for `cwd` (the `TrustDialog` "Yes, I trust this folder"
 /// branch, which calls `saveCurrentProjectConfig({ hasTrustDialogAccepted:
 /// true })` against `getProjectPathForConfig()` — `config.ts:717`,
@@ -968,6 +982,70 @@ mod tests {
         let t = temp_config();
         // `t.global` never created.
         assert!(!check_has_trust_dialog_accepted(&t.global, &t.project));
+    }
+
+    // ---- hasClaudeMdExternalIncludesApproved (claudemd.ts:826-846) ----
+
+    /// Seed `projects[<key>] = { "hasClaudeMdExternalIncludesApproved": <v> }`.
+    fn seed_external_approved(global: &Path, key: &str, v: bool) {
+        std::fs::write(
+            global,
+            serde_json::to_string(&serde_json::json!({
+                "projects": { key: { "hasClaudeMdExternalIncludesApproved": v } }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn external_includes_check_cwd_approved_is_true() {
+        let t = temp_config();
+        let key = project_path_for_config(&t.project);
+        seed_external_approved(&t.global, &key, true);
+        assert!(check_has_claude_md_external_includes_approved(&t.global, &t.project));
+    }
+
+    #[test]
+    fn external_includes_check_false_value_is_false() {
+        let t = temp_config();
+        let key = project_path_for_config(&t.project);
+        // Stored `false` must read as not-approved (matches only boolean `true`).
+        seed_external_approved(&t.global, &key, false);
+        assert!(!check_has_claude_md_external_includes_approved(&t.global, &t.project));
+    }
+
+    #[test]
+    fn external_includes_check_no_ancestor_walk() {
+        let t = temp_config();
+        // Approve a PARENT dir; a nested child must NOT inherit (unlike trust,
+        // this is the EXACT project's approval — no parent-walk).
+        let child = t.project.join("a/b/c");
+        std::fs::create_dir_all(&child).unwrap();
+        let parent_key = project_path_for_config(&t.project);
+        seed_external_approved(&t.global, &parent_key, true);
+        assert!(!check_has_claude_md_external_includes_approved(&t.global, &child));
+    }
+
+    #[test]
+    fn external_includes_check_other_project_is_false() {
+        let t = temp_config();
+        std::fs::write(
+            &t.global,
+            r#"{"projects":{"/some/other/proj":{"hasClaudeMdExternalIncludesApproved":true}}}"#,
+        )
+        .unwrap();
+        assert!(!check_has_claude_md_external_includes_approved(&t.global, &t.project));
+    }
+
+    #[test]
+    fn external_includes_check_corrupt_or_missing_is_false() {
+        let t = temp_config();
+        // Missing file → false (fail-safe to local-only).
+        assert!(!check_has_claude_md_external_includes_approved(&t.global, &t.project));
+        // Corrupt file → false, no panic.
+        std::fs::write(&t.global, "{ broken").unwrap();
+        assert!(!check_has_claude_md_external_includes_approved(&t.global, &t.project));
     }
 
     /// Session-level (in-memory) trust short-circuits the disk check —

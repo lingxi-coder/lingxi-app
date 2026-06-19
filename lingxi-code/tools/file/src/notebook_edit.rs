@@ -164,8 +164,10 @@ impl Tool for NotebookEditTool {
     }
 
     async fn description(&self, _input: &Value, _opts: &DescriptionOptions) -> String {
-        // Verbatim claude-code `NotebookEditTool/prompt.ts:1-2`.
-        "Replace the contents of a specific cell in a Jupyter notebook.".to_string()
+        // Verbatim claude-code v2.1.181 NotebookEdit description (was the older
+        // "Replace the contents of a specific cell..." — v2.1.181 rewrote it to
+        // cover insert/delete + the .ipynb suffix).
+        "Replaces, inserts, or deletes a single cell in a Jupyter notebook (.ipynb file).".to_string()
     }
 
     async fn prompt(&self, _opts: &PromptOptions) -> String {

@@ -98,11 +98,10 @@ pub fn assemble_system_prompt_with_style(
         s.push_str(&memory);
     }
 
-    let tools = tools_block::format(&ctx.tool_names);
-    if !tools.is_empty() {
-        push_section_separator(&mut s);
-        s.push_str(&tools);
-    }
+    // NO `<tools>` block: claude-code passes tools to the model via the wire
+    // `tools:` API array, NOT a system-prompt text list (`<tools>` / `</tools>`
+    // are 0 hits in the v2.1.181 binary). `ctx.tool_names` is kept on the context
+    // for callers but is no longer rendered into the prompt.
 
     if let Some(style) = output_style {
         push_section_separator(&mut s);
@@ -517,14 +516,13 @@ mod tests {
         // Heading + body are present, exactly per getOutputStyleSection.
         assert!(out.contains("# Output Style: Explanatory\nBODY LINE 1\nBODY LINE 2"));
 
-        // Placement: after the `<tools>` block, before the `Notes:` FOOTER,
-        // with one blank line (`\n\n`) on each boundary.
-        let i_tools = out.find("</tools>").expect("tools present");
+        // Placement: after the memory section, before the `Notes:` FOOTER, with
+        // one blank line (`\n\n`) on each boundary. (No `<tools>` block — tools
+        // reach the model wire-side.)
+        assert!(!out.contains("<tools>"));
         let i_style = out.find("# Output Style:").expect("style present");
         let i_footer = out.find("Notes:").expect("footer present");
-        assert!(i_tools < i_style, "style must come after tools");
         assert!(i_style < i_footer, "style must come before footer");
-        assert!(out.contains("</tools>\n\n# Output Style: Explanatory"));
         assert!(out.contains("BODY LINE 2\n\nNotes:"));
     }
 

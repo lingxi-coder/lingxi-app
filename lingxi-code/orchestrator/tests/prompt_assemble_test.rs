@@ -38,7 +38,7 @@ fn minimal_assembly_no_memory_no_tools() {
 }
 
 #[test]
-fn section_order_locked_header_env_memory_tools_footer() {
+fn section_order_locked_header_env_memory_footer() {
     let mut ctx = ctx_minimal();
     ctx.memory_files = vec![MemoryFile {
         path: PathBuf::from("/proj/CLAUDE.md"),
@@ -57,13 +57,13 @@ fn section_order_locked_header_env_memory_tools_footer() {
     let i_contents = out
         .find("Contents of /proj/CLAUDE.md (project instructions, checked into the codebase):")
         .expect("memory contents marker present");
-    let i_tools = out.find("<tools>").expect("tools present");
+    // No `<tools>` block: tools reach the model via the wire `tools:` array.
+    assert!(!out.contains("<tools>"));
     let i_footer = out.find("Notes:").expect("footer present");
     assert!(i_header < i_env);
     assert!(i_env < i_memory);
     assert!(i_memory < i_contents);
-    assert!(i_contents < i_tools);
-    assert!(i_tools < i_footer);
+    assert!(i_contents < i_footer);
 }
 
 #[test]
@@ -87,11 +87,10 @@ fn double_lf_between_each_section() {
         .starts_with("\n\nHere is useful information about the environment you are running in:\n<env>"));
     // After the cutoff line, before the memory preamble — `\n\n` + preamble.
     assert!(out.contains(&format!("\n\n{MEMORY_PREAMBLE}")));
-    // The memory section does NOT end in a newline now, so the separator before
-    // `<tools>` is the assembler-inserted `\n\n` after the trimmed body `m`.
-    assert!(out.contains("\n\nm\n\n<tools>"));
-    // After `</tools>\n`, before `Notes:` — must contain `\n\nNotes:`.
-    assert!(out.contains("</tools>\n\nNotes:"));
+    // The memory section does NOT end in a newline, so the separator before the
+    // `Notes:` FOOTER is the assembler-inserted `\n\n` after the trimmed body `m`
+    // (no `<tools>` block in between — tools are wire-side).
+    assert!(out.contains("\n\nm\n\nNotes:"));
 }
 
 #[test]

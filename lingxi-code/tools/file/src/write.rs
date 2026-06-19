@@ -38,11 +38,12 @@ pub const TOOL_NAME: &str = "Write";
 /// caller's path verbatim, not a canonicalized form).
 #[must_use]
 pub fn write_result_message(path: &str, is_create: bool) -> String {
-    if is_create {
+    let base = if is_create {
         format!("File created successfully at: {path}")
     } else {
         format!("The file {path} has been updated successfully.")
-    }
+    };
+    format!("{base}{}", crate::FILE_STATE_CURRENT_SUFFIX)
 }
 
 /// `FileWriteTool` — writes a UTF-8 file inside the trusted-dirs whitelist.
@@ -421,16 +422,16 @@ mod tests {
         // FileWriteTool.ts:420-425.
         assert_eq!(
             write_result_message("/tmp/new.txt", true),
-            "File created successfully at: /tmp/new.txt"
+            "File created successfully at: /tmp/new.txt (file state is current in your context — no need to Read it back)"
         );
     }
 
     #[test]
     fn write_result_message_update_is_byte_locked() {
-        // FileWriteTool.ts:426-431.
+        // FileWriteTool.ts:426-431 + the file-state-current suffix (`Pyn`).
         assert_eq!(
             write_result_message("/tmp/old.txt", false),
-            "The file /tmp/old.txt has been updated successfully."
+            "The file /tmp/old.txt has been updated successfully. (file state is current in your context — no need to Read it back)"
         );
     }
 
@@ -438,7 +439,7 @@ mod tests {
     fn write_result_message_echoes_original_path_verbatim() {
         assert_eq!(
             write_result_message("./a/../b.txt", true),
-            "File created successfully at: ./a/../b.txt"
+            "File created successfully at: ./a/../b.txt (file state is current in your context — no need to Read it back)"
         );
     }
 
@@ -464,7 +465,7 @@ mod tests {
         assert_eq!(result.data["type"], "create");
         assert_eq!(
             result.data["content"].as_str().unwrap(),
-            format!("File created successfully at: {input_path}")
+            write_result_message(input_path, true)
         );
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "hello");
         let names: Vec<String> = sink.events().await.iter().map(|e| e.name.clone()).collect();
@@ -604,7 +605,7 @@ mod tests {
         assert_eq!(result.data["type"], "update");
         assert_eq!(
             result.data["content"].as_str().unwrap(),
-            format!("The file {input_path} has been updated successfully.")
+            write_result_message(input_path, false)
         );
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "new");
     }
@@ -633,7 +634,7 @@ mod tests {
         assert_eq!(result.data["type"], "create");
         assert_eq!(
             result.data["content"].as_str().unwrap(),
-            format!("File created successfully at: {input_path}")
+            write_result_message(input_path, true)
         );
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "filled");
     }
@@ -659,7 +660,7 @@ mod tests {
         assert_eq!(result.data["type"], "create");
         assert_eq!(
             result.data["content"].as_str().unwrap(),
-            format!("File created successfully at: {input_path}")
+            write_result_message(input_path, true)
         );
     }
 

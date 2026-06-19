@@ -21,6 +21,15 @@
     clippy::manual_let_else
 )]
 
+/// Suffix claude-code appends to a successful Edit/Write/MultiEdit result (binary
+/// const `Pyn`, with a U+2014 em-dash), telling the model it already holds the
+/// current file content. claude-code gates it on the file not being
+/// user-modified / stale-recovered; LingXi's non-interactive path is always
+/// current, so it is appended unconditionally. The leading space is part of the
+/// literal (it follows the base message directly).
+pub const FILE_STATE_CURRENT_SUFFIX: &str =
+    " (file state is current in your context — no need to Read it back)";
+
 pub mod edit;
 pub mod file_meta;
 pub mod glob;

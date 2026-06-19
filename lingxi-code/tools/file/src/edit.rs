@@ -77,11 +77,12 @@ pub fn patch_truncation_suffix(n: usize) -> String {
 /// human-in-the-loop accept step), so `modifiedNote` is always empty here.
 #[must_use]
 pub fn edit_result_message(path: &str, replace_all: bool) -> String {
-    if replace_all {
+    let base = if replace_all {
         format!("The file {path} has been updated. All occurrences were successfully replaced.")
     } else {
         format!("The file {path} has been updated successfully.")
-    }
+    };
+    format!("{base}{}", crate::FILE_STATE_CURRENT_SUFFIX)
 }
 
 /// `FileEditTool` — literal-search replacement in a UTF-8 file.
@@ -587,16 +588,17 @@ mod tests {
         // FileEditTool.ts:589-593 (non-interactive, modifiedNote empty).
         assert_eq!(
             edit_result_message("/tmp/a.txt", false),
-            "The file /tmp/a.txt has been updated successfully."
+            "The file /tmp/a.txt has been updated successfully. (file state is current in your context — no need to Read it back)"
         );
     }
 
     #[test]
     fn edit_result_message_replace_all_is_byte_locked() {
-        // FileEditTool.ts:581-586 (non-interactive, modifiedNote empty).
+        // FileEditTool.ts:581-586 (non-interactive, modifiedNote empty) + the
+        // file-state-current suffix (binary const `Pyn`).
         assert_eq!(
             edit_result_message("/tmp/a.txt", true),
-            "The file /tmp/a.txt has been updated. All occurrences were successfully replaced."
+            "The file /tmp/a.txt has been updated. All occurrences were successfully replaced. (file state is current in your context — no need to Read it back)"
         );
     }
 
@@ -605,7 +607,7 @@ mod tests {
         // claude-code echoes the input path, not a canonicalized form.
         assert_eq!(
             edit_result_message("./relative/../weird/path.txt", false),
-            "The file ./relative/../weird/path.txt has been updated successfully."
+            "The file ./relative/../weird/path.txt has been updated successfully. (file state is current in your context — no need to Read it back)"
         );
     }
 
@@ -637,7 +639,7 @@ mod tests {
         let input_path = target.to_str().unwrap();
         assert_eq!(
             result.data["content"].as_str().unwrap(),
-            format!("The file {input_path} has been updated successfully.")
+            edit_result_message(input_path, false)
         );
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "hello Rust");
     }
@@ -841,9 +843,7 @@ mod tests {
         let input_path = target.to_str().unwrap();
         assert_eq!(
             result.data["content"].as_str().unwrap(),
-            format!(
-                "The file {input_path} has been updated. All occurrences were successfully replaced."
-            )
+            edit_result_message(input_path, true)
         );
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "bar bar bar");
     }

@@ -34,7 +34,8 @@
 //!   cross-crate plumbing is not invented here (only the VCS excludes apply).
 
 use async_trait::async_trait;
-use grep_regex::RegexMatcherBuilder;
+use grep_matcher::Matcher;
+use grep_regex::{RegexMatcher, RegexMatcherBuilder};
 use grep_searcher::{Searcher, SearcherBuilder, Sink, SinkContext, SinkMatch};
 use ignore::overrides::OverrideBuilder;
 use ignore::types::TypesBuilder;
@@ -107,6 +108,32 @@ fn apply_head_limit<T>(items: Vec<T>, limit: Option<usize>, offset: usize) -> (V
     // model knows there may be more results and can paginate with offset.
     let was_truncated = len.saturating_sub(offset) > effective;
     (sliced, if was_truncated { Some(effective) } else { None })
+}
+
+/// `rg -o` / `--only-matching`: the matched substrings within `text`, in order
+/// (a line with N matches yields N entries). Uses the SAME `grep_regex` matcher
+/// the search ran with, so the extracted spans are byte-identical to ripgrep's.
+fn only_matching_spans(matcher: &RegexMatcher, text: &str) -> Vec<String> {
+    let bytes = text.as_bytes();
+    let mut out = Vec::new();
+    let mut at = 0;
+    while at <= bytes.len() {
+        match matcher.find_at(bytes, at) {
+            Ok(Some(m)) => {
+                if let Ok(s) = std::str::from_utf8(&bytes[m.start()..m.end()]) {
+                    out.push(s.to_string());
+                }
+                // Advance past the match; bump zero-width matches by one to
+                // avoid looping on the same position.
+                at = m.end();
+                if m.start() == m.end() {
+                    at += 1;
+                }
+            }
+            _ => break,
+        }
+    }
+    out
 }
 
 /// `formatLimitInfo` (`GrepTool.ts:134-142`). `appliedLimit` is only set when
@@ -401,6 +428,7 @@ static INPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
             "context":     { "type": "number" },
             "-n":          { "type": "boolean", "default": true },
             "-i":          { "type": "boolean", "default": false },
+            "-o":          { "type": "boolean", "default": false },
             "head_limit":  { "type": "number" },
             "offset":      { "type": "number", "default": 0 },
             "multiline":   { "type": "boolean", "default": false }
@@ -479,6 +507,10 @@ impl Tool for GrepTool {
         let case_insensitive = input.get("-i").and_then(value_as_bool).unwrap_or(false);
         let show_line_numbers = input.get("-n").and_then(value_as_bool).unwrap_or(true);
         let multiline = input.get("multiline").and_then(value_as_bool).unwrap_or(false);
+        // `-o` / `--only-matching` (rg -o): emit only the matched substrings, one
+        // per line. Only meaningful in content mode (claude-code: "Requires
+        // output_mode: content") and ignores -A/-B/-C context (like rg -o).
+        let only_matching = input.get("-o").and_then(value_as_bool).unwrap_or(false);
         let context_before = input.get("-B").and_then(value_as_usize);
         let context_after = input.get("-A").and_then(value_as_usize);
         let context_c = input.get("-C").and_then(value_as_usize);
@@ -566,8 +598,9 @@ impl Tool for GrepTool {
             None => None,
         };
 
-        // Effective context windows: context > -C > (-B and/or -A). Content only.
-        let (ctx_before, ctx_after) = if content_mode {
+        // Effective context windows: context > -C > (-B and/or -A). Content only,
+        // and never with `-o` (rg -o ignores context entirely).
+        let (ctx_before, ctx_after) = if content_mode && !only_matching {
             if let Some(c) = context_param {
                 (Some(c), Some(c))
             } else if let Some(c) = context_c {
@@ -650,11 +683,23 @@ impl Tool for GrepTool {
             if content_mode {
                 let rel = to_relative_path(path, &cwd_for_rel);
                 for (lnum, text) in &sink.records {
-                    let line = match (show_line_numbers, lnum) {
-                        (true, Some(n)) => format!("{rel}:{n}:{text}"),
-                        _ => format!("{rel}:{text}"),
-                    };
-                    content_lines.push(line);
+                    if only_matching {
+                        // rg -o: one matched substring per output line (a line
+                        // with multiple matches yields multiple output lines).
+                        for m in only_matching_spans(&matcher, text) {
+                            let line = match (show_line_numbers, lnum) {
+                                (true, Some(n)) => format!("{rel}:{n}:{m}"),
+                                _ => format!("{rel}:{m}"),
+                            };
+                            content_lines.push(line);
+                        }
+                    } else {
+                        let line = match (show_line_numbers, lnum) {
+                            (true, Some(n)) => format!("{rel}:{n}:{text}"),
+                            _ => format!("{rel}:{text}"),
+                        };
+                        content_lines.push(line);
+                    }
                 }
             } else if count_mode {
                 let rel = to_relative_path(path, &cwd_for_rel);
@@ -1085,6 +1130,43 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(content_str(&result), "a.rs:fn foo() {}");
+    }
+
+    #[tokio::test]
+    async fn content_mode_only_matching() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("a.rs"), "fn foo() {}\nfn bar() {}\n").unwrap();
+        let (ctx, _sink) = make_ctx(&tmp);
+        let tool = GrepTool::new(ctx);
+        let result = tool
+            .call(
+                json!({ "pattern": r"fn \w+", "output_mode": "content", "-o": true }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .unwrap();
+        // -o (rg --only-matching): only the matched substrings, with line numbers
+        // (-n defaults true). `fn \w+` matches "fn foo" / "fn bar", not the rest.
+        assert_eq!(content_str(&result), "a.rs:1:fn foo\na.rs:2:fn bar");
+    }
+
+    #[tokio::test]
+    async fn content_mode_only_matching_multiple_per_line() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("a.txt"), "ab ab ab\n").unwrap();
+        let (ctx, _sink) = make_ctx(&tmp);
+        let tool = GrepTool::new(ctx);
+        let result = tool
+            .call(
+                json!({ "pattern": "ab", "output_mode": "content", "-o": true, "-n": false }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .unwrap();
+        // Three matches on one line -> three output lines.
+        assert_eq!(content_str(&result), "a.txt:ab\na.txt:ab\na.txt:ab");
     }
 
     #[tokio::test]

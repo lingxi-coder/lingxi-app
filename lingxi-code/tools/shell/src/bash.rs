@@ -555,7 +555,7 @@ static INPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
     json!({
         "type": "object",
         "properties": {
-            "command":           { "type": "string" },
+            "command":           { "type": "string", "description": "The command to execute" },
             // claude-code `BashTool.tsx:229` names this param `timeout`
             // (milliseconds). A model sending `timeout` must be honored.
             "timeout":           {
@@ -564,8 +564,8 @@ static INPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
                 "maximum": 600_000,
                 "description": "Optional timeout in milliseconds (max 600000)"
             },
-            "run_in_background": { "type": "boolean" },
-            "description":       { "type": "string" },
+            "run_in_background": { "type": "boolean", "description": "Set to true to run this command in the background." },
+            "description":       { "type": "string", "description": "Clear, concise description of what this command does in active voice. Never use words like \"complex\" or \"risk\" in the description - just describe what it does.\n\nFor simple commands (git, npm, standard CLI tools), keep it brief (5-10 words):\n- ls → \"List files in current directory\"\n- git status → \"Show working tree status\"\n- npm install → \"Install package dependencies\"\n\nFor commands that are harder to parse at a glance (piped commands, obscure flags, etc.), add enough context to clarify what it does:\n- find . -name \"*.tmp\" -exec rm {} \\; → \"Find and delete all .tmp files recursively\"\n- git reset --hard origin/main → \"Discard all local changes and match remote main\"\n- curl -s url | jq '.data[]' → \"Fetch JSON from URL and extract data array elements\"" },
             // BASH.5: 1:1 with claude-code `BashTool.tsx` schema —
             // `dangerouslyDisableSandbox: z.boolean().optional().describe(...)`.
             "dangerouslyDisableSandbox": {

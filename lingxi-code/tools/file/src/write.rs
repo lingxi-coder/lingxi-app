@@ -110,8 +110,8 @@ static INPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
         "additionalProperties": false,
         "required": ["file_path", "content"],
         "properties": {
-            "file_path": { "type": "string" },
-            "content":   { "type": "string" }
+            "file_path": { "type": "string", "description": "The absolute path to the file to write (must be absolute, not relative)" },
+            "content":   { "type": "string", "description": "The content to write to the file" }
         }
     })
 });

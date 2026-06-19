@@ -1085,10 +1085,10 @@ static INPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
         "additionalProperties": false,
         "required": ["file_path"],
         "properties": {
-            "file_path": { "type": "string" },
-            "offset": { "type": "integer", "minimum": 0 },
-            "limit":  { "type": "integer", "minimum": 1 },
-            "pages":  { "type": "string" }
+            "file_path": { "type": "string", "description": "The absolute path to the file to read" },
+            "offset": { "type": "integer", "minimum": 0, "description": "The line number to start reading from. Only provide if the file is too large to read at once" },
+            "limit":  { "type": "integer", "minimum": 1, "description": "The number of lines to read. Only provide if the file is too large to read at once." },
+            "pages":  { "type": "string", "description": "Page range for PDF files (e.g., \"1-5\", \"3\", \"10-20\"). Only applicable to PDF files. Maximum 20 pages per request." }
         }
     })
 });

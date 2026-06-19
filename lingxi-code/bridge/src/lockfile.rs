@@ -102,10 +102,17 @@ impl IdeLockfile {
     /// Returns I/O errors if the home directory cannot be resolved or the
     /// `~/.claude/ide` directory cannot be created.
     pub fn for_user(port: u16, workspace_folders: Vec<PathBuf>) -> std::io::Result<Self> {
-        let home = dirs::home_dir().ok_or_else(|| {
-            std::io::Error::new(std::io::ErrorKind::NotFound, "no home directory")
-        })?;
-        let ide_dir = home.join(".claude").join("ide");
+        // Honor `$CLAUDE_CONFIG_DIR` (set+non-empty) else `~/.claude`, like the
+        // rest of the config-home tree, so the IDE discovery lockfile lands where
+        // the engine/peers look for it.
+        let config_home = std::env::var_os("CLAUDE_CONFIG_DIR")
+            .filter(|v| !v.is_empty())
+            .map(PathBuf::from)
+            .or_else(|| dirs::home_dir().map(|h| h.join(".claude")))
+            .ok_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::NotFound, "no home directory")
+            })?;
+        let ide_dir = config_home.join("ide");
         std::fs::create_dir_all(&ide_dir)?;
         Ok(Self::new_for_ide_dir(ide_dir, port, workspace_folders))
     }
@@ -133,10 +140,16 @@ impl IdeLockfile {
     /// Returns I/O errors if the home directory cannot be resolved or the
     /// `~/.claude/bridge` directory cannot be created.
     pub fn for_bridge(port: u16, workspace_folders: Vec<PathBuf>) -> std::io::Result<Self> {
-        let home = dirs::home_dir().ok_or_else(|| {
-            std::io::Error::new(std::io::ErrorKind::NotFound, "no home directory")
-        })?;
-        let bridge_dir = home.join(".claude").join("bridge");
+        // Honor `$CLAUDE_CONFIG_DIR` (set+non-empty) else `~/.claude`, matching
+        // the config-home tree (the Electron app reads this discovery file).
+        let config_home = std::env::var_os("CLAUDE_CONFIG_DIR")
+            .filter(|v| !v.is_empty())
+            .map(PathBuf::from)
+            .or_else(|| dirs::home_dir().map(|h| h.join(".claude")))
+            .ok_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::NotFound, "no home directory")
+            })?;
+        let bridge_dir = config_home.join("bridge");
         std::fs::create_dir_all(&bridge_dir)?;
         Ok(Self::new_for_bridge_dir(bridge_dir, port, workspace_folders))
     }

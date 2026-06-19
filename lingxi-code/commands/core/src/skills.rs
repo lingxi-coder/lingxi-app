@@ -126,16 +126,19 @@ impl BuiltinCommandHandler for SkillsHandler {
 
 fn claude_home_dir() -> PathBuf {
     // claude-code `tr()`: `$CLAUDE_CONFIG_DIR` (set+non-empty) wins, else
-    // `$HOME/.claude`.
+    // `$HOME/.claude` (with a `$USERPROFILE` fallback for Windows, matching the
+    // reference helpers in tools/file + tools/task).
     if let Some(dir) = std::env::var_os("CLAUDE_CONFIG_DIR") {
         if !dir.is_empty() {
             return PathBuf::from(dir);
         }
     }
-    std::env::var_os("HOME").map_or_else(
-        || PathBuf::from(".").join(".claude"),
-        |h| PathBuf::from(h).join(".claude"),
-    )
+    std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map_or_else(
+            || PathBuf::from(".").join(".claude"),
+            |h| PathBuf::from(h).join(".claude"),
+        )
 }
 
 #[cfg(test)]

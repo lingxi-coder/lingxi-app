@@ -1,0 +1,1418 @@
+{
+  "worklist": {
+    "worklist": [
+      {
+        "rank": 1,
+        "task": "Gate the bash sleep-block behind a tengu_amber_sentinel flag defaulting to false (so it's inert in default config), and while active fix the threshold 2s->25s, replace the message with the binary's exact string, and match the fractional regex (\\d+(\\.\\d*)?, f64 parse)",
+        "subsystem": "bash-shell",
+        "files": "lingxi-code/tools/shell/src/bash.rs",
+        "severity": "high",
+        "risk": "low"
+      },
+      {
+        "rank": 2,
+        "task": "Delete the fabricated CYBER_RISK_MITIGATION_REMINDER / MITIGATION_EXEMPT_MODELS / should_include_file_read_mitigation and its append; a successful text read's model_content should be just add_line_numbers(slice, offset)",
+        "subsystem": "file-read",
+        "files": "lingxi-code/tools/file/src/read.rs (~555, 574, 579, 1624-1626)",
+        "severity": "high",
+        "risk": "low"
+      },
+      {
+        "rank": 3,
+        "task": "Remove the 2000-line default cap on no-limit reads (don't clamp end_idx to MAX_LINES_TO_READ when limit is None), delete the default_capped flag and the invented '[File truncated...]' note; keep MAX_LINES_TO_READ only for the prompt advertisement string",
+        "subsystem": "file-read",
+        "files": "lingxi-code/tools/file/src/read.rs (1526-1531, 1619-1623)",
+        "severity": "high",
+        "risk": "low"
+      },
+      {
+        "rank": 4,
+        "task": "Add early device-file guard ($3p): reject the 12 static /dev/* paths + the two /proc/<pid> regexes with 'Cannot read '{raw_path}': this device file would block or produce infinite output.' BEFORE canonicalize (test the expanded/user-supplied path, not the symlink-resolved one)",
+        "subsystem": "file-read",
+        "files": "lingxi-code/tools/file/src/read.rs (validateInput path, before canonicalize_and_validate ~1350)",
+        "severity": "high",
+        "risk": "low"
+      },
+      {
+        "rank": 5,
+        "task": "Add -o/--only-matching flag to Grep schema and arg-parse, and implement only-matching output (one match substring per line via grep_searcher SinkMatch spans); requires output_mode:content",
+        "subsystem": "grep-glob",
+        "files": "lingxi-code/tools/file/src/grep.rs (schema ~383-409, arg parse ~459-491, sink ~285)",
+        "severity": "high",
+        "risk": "low"
+      },
+      {
+        "rank": 6,
+        "task": "Rewrite is_todo_v2_enabled as !traits::env::is_env_defined_falsy(CLAUDE_CODE_ENABLE_TASKS); drop the non_interactive term and NON_INTERACTIVE_SESSION_FLAG plumbing for this gate (fixes 3 opposite-outcome cases for TodoWrite/Task V1/V2 enablement)",
+        "subsystem": "todo",
+        "files": "lingxi-code/tools/.../task.rs (187-204)",
+        "severity": "high",
+        "risk": "low"
+      },
+      {
+        "rank": 7,
+        "task": "Replace TodoWrite model-facing prompt() with verbatim FWd/UWd consts (default UWd long-form), select via a simple-prompt gate; drop the bogus 'id' field mention",
+        "subsystem": "todo",
+        "files": "lingxi-code/tools/.../todo_write.rs (238-243), tool-api/src/wire.rs (137-142)",
+        "severity": "high",
+        "risk": "low"
+      },
+      {
+        "rank": 8,
+        "task": "Replace WebSearch description()/prompt() 1-line stub with the verbatim claude-code WebSearch DESCRIPTION incl. CRITICAL REQUIREMENT 'Sources:' block, US-only/domain-filtering lines, and runtime-substituted current-month/year (needs date injection)",
+        "subsystem": "web-tools",
+        "files": "lingxi-code/tools/web/src/web_search.rs (758-765)",
+        "severity": "high",
+        "risk": "low"
+      },
+      {
+        "rank": 9,
+        "task": "Add graceful token-cap PARTIAL view on the full-view branch (offset<=1 && no limit && no pages): port binary-shrink (6x0.7 backoff, 0.85 factor, char-fallback, strip trailing high-surrogate), set isPartialView, prepend the oIt-style paginating '[Truncated: PARTIAL view...]' reminder; keep hard error only for ranged reads",
+        "subsystem": "file-read",
+        "files": "lingxi-code/tools/file/src/read.rs (1544-1547, validate_content_tokens 129-138)",
+        "severity": "high",
+        "risk": "medium"
+      },
+      {
+        "rank": 10,
+        "task": "Convert WebFetch HTTP>=400 from a thrown transport error to a SUCCESS data result: build 'The server returned HTTP {code} {statusText}.{retryAfterLine}\\n\\nThe response body was not retrieved...' with a full STATUS_CODES table (fallback 'Unknown Status'), echo numeric Retry-After, return as data result (bytes:0, code, codeText), emit tengu_web_fetch_http_error",
+        "subsystem": "web-tools",
+        "files": "lingxi-code/tools/web/src/web_fetch.rs (238-240, 812-816, 886-890)",
+        "severity": "high",
+        "risk": "medium"
+      },
+      {
+        "rank": 11,
+        "task": "Add the missing per-turn todo-reminder attachment (M4p V1 / B4p V2 selected by is_todo_v2_enabled): track turnsSinceLastTodoWrite + turnsSinceLastReminder (thresholds 10/10), gate on tool presence + CLAUDE_CODE_TODO_REMINDER_MODE!='off', emit exact reminder text as isMeta; read session.todos into context-injection",
+        "subsystem": "todo",
+        "files": "lingxi-code/orchestrator (context-injection path), engine/src/session.rs (todos)",
+        "severity": "high",
+        "risk": "medium"
+      },
+      {
+        "rank": 12,
+        "task": "Add malformed-tool-use retry: when stop_reason=tool_use && zero tool_use blocks && !apiError, emit tengu_malformed_tool_use_response, inject byte-exact isMeta retry nudge (clean-retry vs malformed variant), reset recovery counters, set transition.reason=malformed_tool_use_retry, continue once (guard re-retry); both drivers",
+        "subsystem": "turn-loop",
+        "files": "lingxi-code/orchestrator/src/conversation.rs (3399, 3426-3433), turn_loop.rs (603-617)",
+        "severity": "high",
+        "risk": "medium"
+      },
+      {
+        "rank": 13,
+        "task": "Add thinking-only-response nudge: before treating end_turn/stop_sequence as terminal (and !apiError && source not compact && !GRe(source)), if no new assistant Text block has non-empty trimmed body and thinkingOnlyNudged unset, inject byte-exact meta nudge, set flag + transition.reason=thinking_only_retry, continue once; both drivers",
+        "subsystem": "turn-loop",
+        "files": "lingxi-code/orchestrator/src/conversation.rs (3356, 3426), turn_loop.rs",
+        "severity": "high",
+        "risk": "medium"
+      },
+      {
+        "rank": 14,
+        "task": "Insert the entire main system-prompt BODY (Pym opening + zHo + URL line + Oym '# System' + Lym code-style + Mym '# Executing actions with care' + Nym '# Using your tools' + Uym '# Tone and style') as locked literals between HEADER and env in J0 emit order; dynamic sections incremental/flag-gated",
+        "subsystem": "system-prompt",
+        "files": "lingxi-code/orchestrator/src/prompt/mod.rs (86-115), locked_templates.rs",
+        "severity": "high",
+        "risk": "medium"
+      },
+      {
+        "rank": 15,
+        "task": "Append the Edit/Write 'file state is current' suffix (PYN, U+2014 em-dash) when user_modified==false && stale_recovered==false (effectively always on the non-interactive common path) to both edit_result_message() and write_result_message()",
+        "subsystem": "file-edit",
+        "files": "lingxi-code/tools/file/src/edit.rs (79-85), write.rs (40-46)",
+        "severity": "medium",
+        "risk": "low"
+      },
+      {
+        "rank": 16,
+        "task": "Single-Edit deletion: when actual_new is empty && !actual_old.ends_with('\\n') && file contains actual_old+'\\n', replace actual_old+'\\n' (consume trailing newline) for both replacen and replace_all paths, matching AUa",
+        "subsystem": "file-edit",
+        "files": "lingxi-code/tools/file/src/edit.rs (440-444)",
+        "severity": "medium",
+        "risk": "low"
+      },
+      {
+        "rank": 17,
+        "task": "Set ENV_SHELL only when the resolved shell basename is bash; otherwise omit it (don't inject SHELL=/bin/zsh) \u2014 both posix and windows persistent-shell runners",
+        "subsystem": "bash-shell",
+        "files": "lingxi-code/platforms/posix/src/process/runner.rs (60), platforms/windows/src/process/runner.rs (50)",
+        "severity": "low",
+        "risk": "low"
+      },
+      {
+        "rank": 18,
+        "task": "Drop both timeout>600000 rejections and the schema 'maximum':600000; use the timeout value as-is when >0 (H5a). Add numeric-string coercion (VF): accept a string matching ^[-+]?\\d+(\\.\\d+)?$ before as_u64. Keep describe() max-text for guidance",
+        "subsystem": "bash-shell",
+        "files": "lingxi-code/tools/shell/src/bash.rs (564, 658-663, 713-716, 726-730)",
+        "severity": "medium",
+        "risk": "low"
+      },
+      {
+        "rank": 19,
+        "task": "Add .describe() strings to all Grep (15) and Glob (path/pattern) input-schema properties verbatim from the binary",
+        "subsystem": "grep-glob",
+        "files": "lingxi-code/tools/file/src/grep.rs (389-406), glob.rs (175-176)",
+        "severity": "medium",
+        "risk": "low"
+      },
+      {
+        "rank": 20,
+        "task": "Prepend 'Here is useful information about the environment you are running in:\\n' before <env>, and remove the two LingXi-extension '  Git branch:'/'  Working tree clean:' lines from the <env> block",
+        "subsystem": "system-prompt",
+        "files": "lingxi-code/orchestrator/src/prompt/env_block.rs (36, 47-51)",
+        "severity": "medium",
+        "risk": "low"
+      },
+      {
+        "rank": 21,
+        "task": "Fix knowledge_cutoff_for_model and marketing_name_for_model: add exact-canonical arms BEFORE the generic claude-opus-4 substring needle for opus-4-8/4-7 (cutoff 'January 2026'; names 'Opus 4.8'/'Opus 4.7' + '(1M context)' variants) and fable-5/mythos-5 ('January 2026'; 'Fable 5'/'Mythos 5'); update stale test at :156",
+        "subsystem": "system-prompt",
+        "files": "lingxi-code/orchestrator/src/prompt/env_meta.rs (29-82, 89-105, 156)",
+        "severity": "medium",
+        "risk": "low"
+      },
+      {
+        "rank": 22,
+        "task": "Append the 5th subagent-Notes footer bullet ('Do NOT Write report/summary/findings/analysis .md files...') to both SUBAGENT_NOTES_TRAILER and the orchestrator FOOTER; re-verify locked byte-length tests",
+        "subsystem": "system-prompt",
+        "files": "lingxi-code/agent/handle.rs (485-489), orchestrator locked_templates.rs (25-29)",
+        "severity": "medium",
+        "risk": "low"
+      },
+      {
+        "rank": 23,
+        "task": "Update the 9 divergent slash-palette core_description strings (agents/clear/compact/config/doctor/memory/model/status/permissions) to the verbatim v2.1.183 strings",
+        "subsystem": "slash-commands",
+        "files": "lingxi-code/command-api/src/builtin_support/names.rs (382-404)",
+        "severity": "medium",
+        "risk": "low"
+      },
+      {
+        "rank": 24,
+        "task": "Set WEBFETCH_TIMEOUT to 60s (KHp) instead of 30s; update the doc comment",
+        "subsystem": "web-tools",
+        "files": "lingxi-code/tools/web/src/web_fetch.rs (73, 730)",
+        "severity": "medium",
+        "risk": "low"
+      },
+      {
+        "rank": 25,
+        "task": "Fix WebFetch User-Agent to 'Claude-User (claude-code/<version>; +https://support.anthropic.com/)' (full formatter, not prefix); decide whether to track upstream VERSION string vs CARGO_PKG_VERSION",
+        "subsystem": "web-tools",
+        "files": "lingxi-code/tools/web/src/web_fetch.rs (67, 312-318, 725)",
+        "severity": "medium",
+        "risk": "low"
+      },
+      {
+        "rank": 26,
+        "task": "Add 303 to the WebFetch redirect-status match and replace redirect_status_text with a full reason-phrase table (fallback 'Unknown Status', shared with the http-error codeText path); fix the 303->'Found' and 200->'Found' test assertions",
+        "subsystem": "web-tools",
+        "files": "lingxi-code/tools/web/src/web_fetch.rs (139-146, 736, 1138-1142)",
+        "severity": "medium",
+        "risk": "low"
+      },
+      {
+        "rank": 27,
+        "task": "Cache and return the FULL converted WebFetch content; apply the 100k truncation only inside the apply-step prompt (remove truncate_markdown_for_return from cache/return path; recompute the truncated flag from the apply step)",
+        "subsystem": "web-tools",
+        "files": "lingxi-code/tools/web/src/web_fetch.rs (853-877), markdown.rs",
+        "severity": "medium",
+        "risk": "medium"
+      },
+      {
+        "rank": 28,
+        "task": "Invert WebFetch apply-step gate: when a side_query client exists, run the apply step (prompt='' if absent); take the raw path ONLY when isPreapprovedUrl && content-type contains text/markdown && len<100k",
+        "subsystem": "web-tools",
+        "files": "lingxi-code/tools/web/src/web_fetch.rs (377-387)",
+        "severity": "medium",
+        "risk": "medium"
+      },
+      {
+        "rank": 29,
+        "task": "Distinguish Grep match vs context lines in the sink and pass ripgrep context through verbatim ('-'-separated, not ':'), emit '--' group separators between context groups (stop forcing '{rel}:{n}:{text}' on every line)",
+        "subsystem": "grep-glob",
+        "files": "lingxi-code/tools/file/src/grep.rs (308-315, 650-658)",
+        "severity": "medium",
+        "risk": "medium"
+      },
+      {
+        "rank": 30,
+        "task": "Thread an active Read(deny) accessor into BuiltinToolContext and convert deny rules to '--glob !<pattern>' excludes for both Grep and Glob (absolute->'!path', relative->'!**/path')",
+        "subsystem": "grep-glob",
+        "files": "lingxi-code/tools/file/src/grep.rs (527-550), glob.rs (274-289)",
+        "severity": "medium",
+        "risk": "medium"
+      },
+      {
+        "rank": 31,
+        "task": "Add WebFetch wildcard domain matching for permission rules (port y$n/bRp/v$a): lowercase + trailing-dot normalize both rule and key, support domain:* (allow-all) and domain:*.x subdomain regex, inline '*'->'[^.:]*', all case-insensitive \u2014 replacing the exact byte-compare",
+        "subsystem": "permissions",
+        "files": "lingxi-code/permission/src/policy.rs (723, 1076-1117)",
+        "severity": "medium",
+        "risk": "medium"
+      },
+      {
+        "rank": 32,
+        "task": "Thread already-parsed merged settings additionalDirectories into .with_working_dirs(dirs) on the PermissionPolicy chain at engine boot so acceptEdits auto-allows edits/writes under additional working dirs",
+        "subsystem": "permissions",
+        "files": "lingxi-code/apps/engine-desktop/src/lib.rs (~2430, dirs already at 259-260/369-370)",
+        "severity": "medium",
+        "risk": "low"
+      },
+      {
+        "rank": 33,
+        "task": "Add Auto as a Shift+Tab cycle target (plan->auto, bypassPermissions->auto) gated on a canCycleToAuto predicate mirroring mJn/bx (isAutoModeAvailable + !circuit-broken + !disableAutoMode + model gate XCe); correct the stale 'USER_TYPE==ant' doc comment",
+        "subsystem": "permissions",
+        "files": "lingxi-code/permission/src/mode.rs (47-66)",
+        "severity": "medium",
+        "risk": "medium"
+      },
+      {
+        "rank": 34,
+        "task": "Add a MultiEdit tool {file_path, edits:[{old_string,new_string,replace_all?}]} implementing the Alo engine (strip trailing \\n+, substring-of-prior-new_string guard, shared AUa helper, 'String not found'/'Original and edited match' guards, all-or-nothing); register it and resolve the dangling 'MultiEdit' name in turn_loop.rs",
+        "subsystem": "file-edit",
+        "files": "lingxi-code/tools/file/src/ (new multi_edit.rs), lib.rs (160-167), orchestrator turn_loop.rs (22)",
+        "severity": "medium",
+        "risk": "medium"
+      },
+      {
+        "rank": 35,
+        "task": "Add hookSpecificOutput.updatedToolOutput (replaces output for ALL tools): add field to HookResponse/AggregateHookResult, parse it, apply for all tools (no isMcp gate) with outputSchema validation + does-not-match error; keep updatedMCPToolOutput as the MCP-only legacy mapping",
+        "subsystem": "hooks",
+        "files": "lingxi-code/hooks/src/response.rs (59-67, 197-204), hook_payload.rs (849-855), orchestrator",
+        "severity": "medium",
+        "risk": "medium"
+      },
+      {
+        "rank": 36,
+        "task": "Add the three missing HookEventType variants + payloads (PostToolBatch, UserPromptExpansion, MessageDisplay) with loader::parse_event_type arms and firing sites (batch end, prompt/slash-command expansion, message render)",
+        "subsystem": "hooks",
+        "files": "lingxi-code/hooks/src/events.rs (18-73), loader.rs (281-310)",
+        "severity": "medium",
+        "risk": "medium"
+      },
+      {
+        "rank": 37,
+        "task": "Add PreToolUse permissionDecision 'defer': add Defer to HookDecision, parse in both parse_response sites, thread a permissionBehavior=defer path gated on print-mode + single-tool batch, emit the two ignore-warnings + tengu_pre_tool_hook_deferred",
+        "subsystem": "hooks",
+        "files": "lingxi-code/hooks/src/response.rs (107-118), hook_payload.rs (813-822, 875-883)",
+        "severity": "medium",
+        "risk": "medium"
+      },
+      {
+        "rank": 38,
+        "task": "Add managed-policy hook gates: read policySettings.disableAllHooks (return no hooks + 'Skipping hooks ... due to disableAllHooks managed setting' log at runner head) and allowManagedHooksOnly (return only policy-tier hooks)",
+        "subsystem": "hooks",
+        "files": "lingxi-code/hooks/src/loader.rs, executor.rs",
+        "severity": "medium",
+        "risk": "medium"
+      },
+      {
+        "rank": 39,
+        "task": "Register built-in command aliases (config=[settings], exit=[quit], permissions=[allowed-tools], usage=[cost,stats], rename=[name], rewind=[checkpoint,undo], plugin=[plugins,marketplace], tasks=[bashes], desktop=[app], mobile=[ios,android], session=[remote]): add aliases() to BuiltinCommandHandler and call index_aliases() in register_builtin_handler",
+        "subsystem": "slash-commands",
+        "files": "lingxi-code/command-api/src/registry.rs (46-58), model.rs (229-236)",
+        "severity": "medium",
+        "risk": "medium"
+      },
+      {
+        "rank": 40,
+        "task": "Filter hidden/internal/disabled commands out of the slash palette and help screen (apply isHidden/isEnabled gating; wire the INTENTIONALLY_DISABLED/STUBS tables to a runtime consumer)",
+        "subsystem": "slash-commands",
+        "files": "lingxi-code/tui/src/components/prompt_input/palette.rs (67-85), command-api/src/builtin_support/help_render.rs (24-58)",
+        "severity": "medium",
+        "risk": "medium"
+      },
+      {
+        "rank": 41,
+        "task": "Add rapid-refill (thrashing) breaker: track turn_counter/compacted across turns; compute kho (compacted && turn_counter<3 -> ++consecutive_rapid_refills else reset); at >=3 skip summarizer and surface the byte-exact thrashing invalid_request error (reactive) / return rapidRefillBreakerTripped (proactive); emit tengu_auto_compact_rapid_refill_breaker",
+        "subsystem": "compaction",
+        "files": "lingxi-code/compaction/src/orchestrator.rs (215-253), thresholds.rs (78-87), reactive.rs",
+        "severity": "medium",
+        "risk": "medium"
+      },
+      {
+        "rank": 42,
+        "task": "Add the fixed-prefix overflow guard (a3p): estimate prefix tokens (totalInput - snipFreed - messagesEstimate) vs threshold before the summarizer; if prefix>threshold skip summarizer, log 'fixed prefix ~N > threshold M \u2014 compaction cannot help', fire tengu_auto_compact_prefix_overflow, surface compactionImpossible on the reactive path",
+        "subsystem": "compaction",
+        "files": "lingxi-code/compaction/src/orchestrator.rs (215-253)",
+        "severity": "medium",
+        "risk": "medium"
+      },
+      {
+        "rank": 43,
+        "task": "Wire post-compact attachment restoration: snapshot read-file state before clearing, restore up to POST_COMPACT_MAX_FILES_TO_RESTORE within POST_COMPACT_TOKEN_BUDGET/per-file caps as attachments after the summary, restore active-skill content, count them in succeeded telemetry's compactedMessageCount; consume the 5 dead constants; drop the non-faithful 'Compact boundary:' prefix",
+        "subsystem": "compaction",
+        "files": "lingxi-code/compaction/src/post_compact.rs (113-122), thresholds.rs (32-40), orchestrator conversation.rs (1324-1348)",
+        "severity": "medium",
+        "risk": "high"
+      },
+      {
+        "rank": 44,
+        "task": "Re-model the classifier auto-denial breaker: change DenialTrackingState to {consecutive_denials,total_denials} with maxConsecutive=3/maxTotal=20 (drop per-tool map+TTL), increment on auto-mode classifier denies + reset consecutive on non-deny, wire sel()/dSm into the auto-mode permission path (abort string in headless, fallback-to-prompting otherwise, emit tengu_auto_mode_denial_limit_exceeded)",
+        "subsystem": "turn-loop",
+        "files": "lingxi-code/permission/src/denial_tracking.rs (12-16), policy.rs (9,60,120)",
+        "severity": "medium",
+        "risk": "high"
+      },
+      {
+        "rank": 45,
+        "task": "Add refusal->fallback-model retry: add refusal_fallback_model (+server-refusal-fallback) to OrchestratorConfig; on stop_reason=refusal with a configured fallback not yet latched, persistently swap session.model, emit model_refusal_fallback warning, yield fallback_request{trigger:refusal}, retry once; otherwise terminate",
+        "subsystem": "turn-loop",
+        "files": "lingxi-code/orchestrator/src/conversation.rs (3426-3433), turn_loop.rs (616), config",
+        "severity": "medium",
+        "risk": "high"
+      },
+      {
+        "rank": 46,
+        "task": "Confirm pinned target version, then gate/remove the Bash sibling-error cascade so an errored Bash no longer cancels siblings: reduce AbortReason to {StreamingFallback, UserInterrupted}, drop SiblingError + BASH_TOOL_NAME guard + the 'Cancelled: parallel tool call' string",
+        "subsystem": "turn-loop",
+        "files": "lingxi-code/orchestrator/src/streaming_executor.rs (15, 33, 57-59, 405-416)",
+        "severity": "medium",
+        "risk": "medium"
+      },
+      {
+        "rank": 47,
+        "task": "Drop the TodoWrite verification-nudge suffix entirely (v2.1.183 emits only the unconditional base string) \u2014 or at minimum gate it behind verification_feature_enabled() at the call site; update test nudge_fires_when_all_completed_3plus_no_verif",
+        "subsystem": "todo",
+        "files": "lingxi-code/tools/.../todo_write.rs (329-341, 776)",
+        "severity": "medium",
+        "risk": "low"
+      },
+      {
+        "rank": 48,
+        "task": "Update NotebookEdit description() to the f2a string and prompt() to the A2a cell_id-based text (mind U+2014 em-dash); aligns the prompt with LingXi's already-cell_id schema",
+        "subsystem": "file-edit",
+        "files": "lingxi-code/tools/file/src/notebook_edit.rs (166, 171)",
+        "severity": "low",
+        "risk": "low"
+      },
+      {
+        "rank": 49,
+        "task": "Add Edit input-alias normalization (replace_name->replace_all true if true/'true', path->file_path, old_str->old_string, new_str->new_string) each only when canonical key absent and alias is a string",
+        "subsystem": "file-edit",
+        "files": "lingxi-code/tools/file/src/edit.rs (249-264)",
+        "severity": "low",
+        "risk": "low"
+      },
+      {
+        "rank": 50,
+        "task": "Extend Edit not-found recovery (vIe) with \\uXXXX escape-swap decode + non-ASCII regex fallback after the curly-quote path, and append the escape-swap note to the not-found error when old_string matches /\\\\u[0-9a-fA-F]{4}/ or contains U+0080..U+FFFF",
+        "subsystem": "file-edit",
+        "files": "lingxi-code/tools/file/src/quotes.rs, edit.rs (417-429)",
+        "severity": "low",
+        "risk": "low"
+      },
+      {
+        "rank": 51,
+        "task": "Add Edit max-editable-file-size gate: stat the file and if size>1_073_741_824 return ask/InvalidInput 'File is too large to edit (<human-size>). Maximum editable file size is 1 GB.' (errorCode 10)",
+        "subsystem": "file-edit",
+        "files": "lingxi-code/tools/file/src/edit.rs (call/validateInput)",
+        "severity": "low",
+        "risk": "low"
+      },
+      {
+        "rank": 52,
+        "task": "Add UNC early-allow (path starts with \\\\\\\\ or //) in Edit validateInput; defer the deny-directory check (errorCode 2) to permission-subsystem activation and document/defer the Perforce read-only gate",
+        "subsystem": "file-edit",
+        "files": "lingxi-code/tools/file/src/edit.rs (216-225)",
+        "severity": "low",
+        "risk": "low"
+      },
+      {
+        "rank": 53,
+        "task": "Add tengu_file_read_reread analytics: add FILE_READ_REREAD const to telemetry tengu/tool.rs (+ to FILE_READ_ANALYTICS_NAMES, bump 3->4), emit in read.rs after the read_file_state::get lookup (before/independent of the dedup gate) with priorOp=read|edit_write, wrapped in the PII tagger",
+        "subsystem": "file-read",
+        "files": "lingxi-code/telemetry/src/tengu/tool.rs, tools/file/src/read.rs (1287)",
+        "severity": "low",
+        "risk": "low"
+      },
+      {
+        "rank": 54,
+        "task": "Add cyan-noise stderr post-processing: strip <sandbox_violations> blocks (xEp) + extract/remove trailing 'Shell cwd was reset to ...' (kEp); in the cwd-tracking path, when canonicalize fails append 'Shell cwd was reset to <restored-cwd>' and fire tengu_bash_tool_reset_to_original_dir",
+        "subsystem": "bash-shell",
+        "files": "lingxi-code/tools/shell/src/bash.rs (966-1007)",
+        "severity": "low",
+        "risk": "low"
+      },
+      {
+        "rank": 55,
+        "task": "Always set CLAUDE_CODE_CHILD_SESSION=1 in build_command; add AI_AGENT (agent source), CLAUDE_EFFORT (effort set), TRACEPARENT (tracing enabled) per Uot",
+        "subsystem": "bash-shell",
+        "files": "lingxi-code/platforms/posix/src/process/runner.rs (58-64)",
+        "severity": "low",
+        "risk": "low"
+      },
+      {
+        "rank": 56,
+        "task": "Map settings.json defaultMode 'auto' -> PermissionMode::Auto in default_mode_from_settings_json (currently returns None and falls back to Default), honoring it gated like bx()",
+        "subsystem": "permissions",
+        "files": "lingxi-code/permission/src/loader.rs (92-101)",
+        "severity": "low",
+        "risk": "low"
+      },
+      {
+        "rank": 57,
+        "task": "Remove the fabricated tengu_tool_grep_*/tengu_tool_glob_* lifecycle events (GREP/GLOB_STARTED/COMPLETED/FAILED) \u2014 claude-code has no per-builtin-tool lifecycle events; delete the consts and their fire sites",
+        "subsystem": "grep-glob",
+        "files": "lingxi-code/telemetry/src/tengu/tool.rs (60-70), tools/file/src/grep.rs (342/366/379), glob.rs (138/152/165)",
+        "severity": "low",
+        "risk": "low"
+      },
+      {
+        "rank": 58,
+        "task": "Replace Glob/Grep generic PathBlocked path errors with specific 'Directory does not exist: {path}' / 'Path is not a directory: {path}' (and optional 'Did you mean {s}?' fuzzy hint) in a validateInput-equivalent",
+        "subsystem": "grep-glob",
+        "files": "lingxi-code/tools/file/src/glob.rs (261-268), grep.rs (496-503)",
+        "severity": "low",
+        "risk": "low"
+      },
+      {
+        "rank": 59,
+        "task": "Change Grep files_with_matches equal-mtime tiebreak from Rust byte Ord to a localeCompare-equivalent filename comparison (production branch only)",
+        "subsystem": "grep-glob",
+        "files": "lingxi-code/tools/file/src/grep.rs (764-775)",
+        "severity": "low",
+        "risk": "low"
+      },
+      {
+        "rank": 60,
+        "task": "Drop the WebFetch scheme-allowlist rejection (keep http->https upgrade; rely on validate_input parse check); keep the url_safety SSRF gate as documented LingXi-only hardening; fix file/data/ftp rejection tests; route redirect-without-Location to the http_error data result instead of a thrown 'redirect missing Location header'",
+        "subsystem": "web-tools",
+        "files": "lingxi-code/tools/web/src/web_fetch.rs (96-110, 609, 742-751, 937-953)",
+        "severity": "low",
+        "risk": "low"
+      },
+      {
+        "rank": 61,
+        "task": "Add model.contains('claude-fable-5') to the WebSearch Vertex enablement arm; optionally model the Foundry per-deployment web_search capability gate",
+        "subsystem": "web-tools",
+        "files": "lingxi-code/tools/web/src/web_search.rs (131-144)",
+        "severity": "low",
+        "risk": "low"
+      },
+      {
+        "rank": 62,
+        "task": "Persist WebFetch binary content to a webfetch-<ts>-<rand> temp file and append '\\n\\n[Binary content (<ctype>, <human-size>) also saved to <path>]'; populate the dead persisted_path/persisted_size fields (depends on full-content fix)",
+        "subsystem": "web-tools",
+        "files": "lingxi-code/tools/web/src/web_fetch.rs (853-877), cache.rs (49-50)",
+        "severity": "low",
+        "risk": "medium"
+      },
+      {
+        "rank": 63,
+        "task": "Route PDFs >3MB (bki) or unsupported-model to page extraction instead of inlining (keep PDF_TARGET_RAW_SIZE=20MB as the inline hard reject); dormant until pdf-render exists",
+        "subsystem": "file-read",
+        "files": "lingxi-code/tools/file/src/read.rs (~1044), pdf_read.rs (11)",
+        "severity": "low",
+        "risk": "low"
+      },
+      {
+        "rank": 64,
+        "task": "Add TodoWrite schema strictness: 'additionalProperties':false at top level + 'description':'The updated todo list' on the todos array; return Qla verbatim from description(); align empty-field messages to 'Content cannot be empty'/'Active form cannot be empty' and remove the 4096-char cap",
+        "subsystem": "todo",
+        "files": "lingxi-code/tools/.../todo_write.rs (40, 55-71, 89-111, 235-237)",
+        "severity": "low",
+        "risk": "low"
+      },
+      {
+        "rank": 65,
+        "task": "Port tIo() shell-line normalization at the shell-probe site: collapse $SHELL to 'zsh'/'bash' by substring else use raw $SHELL value, default 'unknown' when unset, add the win32 PowerShell branch (Su/tN)",
+        "subsystem": "system-prompt",
+        "files": "lingxi-code/orchestrator/src/conversation.rs (3763-3770)",
+        "severity": "low",
+        "risk": "low"
+      },
+      {
+        "rank": 66,
+        "task": "Drop the spurious <tools> name-list block from the assembled system prompt (tools reach the model via the wire tools: array); gate off the default path if retained for a non-tool-calling fallback",
+        "subsystem": "system-prompt",
+        "files": "lingxi-code/orchestrator/src/prompt/tools_block.rs (14-29), mod.rs (101-105)",
+        "severity": "low",
+        "risk": "low"
+      },
+      {
+        "rank": 67,
+        "task": "Add the DISABLE_*_COMMAND env gates (8: BUG/DOCTOR/EXTRA_USAGE/FEEDBACK/INSTALL_GITHUB_APP/LOGIN/LOGOUT/UPGRADE) as isEnabled predicates on their registrations",
+        "subsystem": "slash-commands",
+        "files": "lingxi-code/commands/core/src/register.rs (126-129)",
+        "severity": "low",
+        "risk": "low"
+      },
+      {
+        "rank": 68,
+        "task": "Make /effort 'max' description interpolate the current top model (gAi) instead of hardcoding 'Opus 4.6 only'; add the missing xhigh (unconditional) and ultracode (flag-gated) and auto-distinct effort levels to the enum/parser/USAGE",
+        "subsystem": "slash-commands",
+        "files": "lingxi-code/commands/core/src/effort.rs (46-47, 55-97, 83)",
+        "severity": "low",
+        "risk": "low"
+      },
+      {
+        "rank": 69,
+        "task": "Make /cost and /stats aliases of /usage (remove the standalone CostHandler/stats registration; add cost,stats to usage aliases) per the upstream consolidation",
+        "subsystem": "slash-commands",
+        "files": "lingxi-code/commands/core/src/cost.rs, register.rs (125, 302, 306), names.rs (38, 97)",
+        "severity": "low",
+        "risk": "low"
+      },
+      {
+        "rank": 70,
+        "task": "Add /clear 'reset'/'new' aliases and honor the optional session-name argument (currently _args is ignored); decide on removing upstream-deleted /vim, /pr-comments, /output-style builtins per the pinned reference revision",
+        "subsystem": "slash-commands",
+        "files": "lingxi-code/commands/core/src/clear.rs (35), register.rs (90, 203-204, 307), names.rs (74, 80, 113, 48)",
+        "severity": "low",
+        "risk": "low"
+      },
+      {
+        "rank": 71,
+        "task": "Add remaining hook wire-shape parity: base-payload effort field (conditional on model supporting effort), terminalSequence OSC-allowlist (NEo: OSC 0/1/2/9/99/777 + BEL), SessionEnd batch timeout (CLAUDE_CODE_SESSIONEND_HOOKS_TIMEOUT_MS, floor 1500/cap 60000), command-hook env COLUMNS/LINES + ${CLAUDE_PROJECT_DIR}/${CLAUDE_PLUGIN_ROOT} token replaceAll + CLAUDE_CODE_SHELL_PREFIX",
+        "subsystem": "hooks",
+        "files": "lingxi-code/hooks/src/response.rs, hook_payload.rs, executor.rs (48-58, 571-588)",
+        "severity": "low",
+        "risk": "medium"
+      },
+      {
+        "rank": 72,
+        "task": "Stop short-circuiting PreToolUse hook aggregation on first Block \u2014 dispatch ALL matched hooks for an event then fold blocked=any; thread toolAliases (REt/Enn) into matches_pattern (dormant for plain REPL)",
+        "subsystem": "hooks",
+        "files": "lingxi-code/hooks/src/executor.rs (289-291, 345-347, 397-399), matcher.rs (73)",
+        "severity": "low",
+        "risk": "medium"
+      },
+      {
+        "rank": 73,
+        "task": "Add the two missing rule sources toolsNarrowing + mcpServerPolicy at the tail of PermissionRuleSource iteration and add the effectiveMaxPermission=='ask' org-requires-approval branch ('Your organization requires approval for this tool') after the content-ask walk; gated on threaded mcpInfo",
+        "subsystem": "permissions",
+        "files": "lingxi-code/permission/src/rule.rs (161-179), policy.rs (authorize_inner)",
+        "severity": "low",
+        "risk": "medium"
+      },
+      {
+        "rank": 74,
+        "task": "Change the proactive auto-compact trigger boundary from strict > to >= (route through is_above_auto_compact_threshold which already uses >=, or fix should_auto_compact)",
+        "subsystem": "compaction",
+        "files": "lingxi-code/compaction/src/threshold_calc.rs (54-56), orchestrator conversation.rs (1433)",
+        "severity": "low",
+        "risk": "low"
+      },
+      {
+        "rank": 75,
+        "task": "Add a 20000-token microcompact floor (MICROCOMPACT_MIN_TOKENS_SAVED): return no-op when tokens_saved<20000 instead of ==0 (ideally compute candidate set+savings before mutating, matching H5r-then-check)",
+        "subsystem": "compaction",
+        "files": "lingxi-code/compaction/src/microcompact.rs (265-267)",
+        "severity": "low",
+        "risk": "low"
+      },
+      {
+        "rank": 76,
+        "task": "Implement messagesToPreserve / recent-message-tail preservation after compaction: select a recent tail to keep, append after summary, populate CompactBoundaryMetadata.preserved_segment (head/anchor/tail ids), use the recentMessagesPreserved continuation-message branch",
+        "subsystem": "compaction",
+        "files": "lingxi-code/compaction/src/boundary.rs (146), prompt.rs (20-23), orchestrator conversation.rs (1346-1348)",
+        "severity": "low",
+        "risk": "high"
+      },
+      {
+        "rank": 77,
+        "task": "Extend synthetic_unknown_tool with registry/agent-id/main-loop-model context to append the qmo-equivalent suffix for agent-frame-only / subagent-disallowed / not-enabled-this-session / otherwise-disabled / pending-MCP tool names (default '' keeps the common hallucinated-tool case identical)",
+        "subsystem": "turn-loop",
+        "files": "lingxi-code/orchestrator/src/streaming_executor.rs (600-613)",
+        "severity": "low",
+        "risk": "medium"
+      },
+      {
+        "rank": 78,
+        "task": "Delete the single trailing space after 'reading the file.' in EDIT_DESCRIPTION, update the doc comment claiming it's intentional, and fix the two tests asserting the trailing space",
+        "subsystem": "file-edit",
+        "files": "lingxi-code/tools/file/src/edit.rs (42, 46, ~1336, ~1344)",
+        "severity": "cosmetic",
+        "risk": "low"
+      },
+      {
+        "rank": 79,
+        "task": "Reverse SOURCES_BY_PRIORITY (and the rule.rs priority() ranking) so the first-matched/cited rule walks userSettings->...->session (matching Szn) for decisionReason.rule citation; outcome unaffected",
+        "subsystem": "permissions",
+        "files": "lingxi-code/permission/src/policy.rs (34-43, 747-766), rule.rs (181-198)",
+        "severity": "cosmetic",
+        "risk": "low"
+      },
+      {
+        "rank": 80,
+        "task": "Make /exit description dynamic (background-session-aware wkl()): default branch 'Exit the CLI', background branch 'Detach from this background session (it keeps running)' \u2014 replacing the static 'Exit the REPL'",
+        "subsystem": "slash-commands",
+        "files": "lingxi-code/commands/core/src/exit.rs (49-51), names.rs (390)",
+        "severity": "cosmetic",
+        "risk": "low"
+      }
+    ],
+    "total_confirmed": 73,
+    "themes": [
+      "FABRICATED MODEL-FACING OUTPUT: LingXi emits strings/events that do not exist in claude-code v2.1.183 and must be deleted, not adjusted \u2014 Read cyber-risk/malware reminder, Read 2000-line truncation note, TodoWrite verification-nudge suffix, the <tools> system-prompt block, Bash sibling-error 'Cancelled: parallel tool call' cascade, and the entire tengu_tool_<name>_* lifecycle telemetry family (grep/glob flagged here, but bash/edit/read/write/notebook/task share the same invented-event root). These are the highest-confidence, lowest-risk wins (pure removals).",
+      "BUILT-BUT-INERT SUBSYSTEMS: machinery exists but is never wired/consumed \u2014 classifier auto-denial breaker (DenialTrackingState has zero methods/readers), acceptEdits additionalDirectories (.with_working_dirs only called in a test), compaction AutoCompactTrackingState fields (never read/written), PostCompactBuilder + its 5 dead constants (never called), and the per-turn todo-reminder reading session.todos (written but read only in tests). Fixing these is mostly wiring, not new design.",
+      "SUBSTRING-VS-EXACT MODEL-ID MATCHING: env_meta.rs and web_search.rs use needle/contains matching that lets the newest models fall through to wrong/None results (opus-4-8/4-7 -> 'Opus 4'/'January 2025', fable-5/mythos-5 -> None, Vertex web-search disabled for fable-5). The fix pattern is identical everywhere: add exact-canonical arms BEFORE the generic substring needle. claude-code consistently uses canonical === on Fo(model).",
+      "MISSING GRACEFUL-DEGRADATION PATHS: LingXi hard-errors where claude-code returns a usable degraded result \u2014 Read token-overflow (hard error vs PARTIAL paginating view), WebFetch HTTP>=400 (thrown transport error vs instructional data result), WebFetch redirect-without-Location (thrown vs http_error result), and Bash timeout>max (rejected vs honored). Several web-tools gaps chain off the single missing http_error data-result shape + shared STATUS_CODES table.",
+      "DEFAULT-OFF GATES NOT MODELED: claude-code disables behaviors by default via flags LingXi lacks, so LingXi over-restricts \u2014 bash sleep-block (tengu_amber_sentinel default-false), microcompact (config-disabled), permission auto-mode reachability, and the TodoWrite/Task V2 enablement formula (the V2/V1 gate produces 3 opposite outcomes vs _l/TE). Faithful parity often means making a LingXi-active behavior inert by default.",
+      "STALE LOCKED LITERALS / VERSION SKEW: many tool descriptions, prompts, slash-palette strings, command aliases, and footers are byte-locked to an OLDER claude-code revision \u2014 the entire main system-prompt BODY is absent, TodoWrite/NotebookEdit/WebSearch prompts are short custom blurbs vs FWd/UWd/A2a/the WebSearch CRITICAL-REQUIREMENT block, 9 slash descriptions diverge, all built-in command aliases are unregistered, and several commands track removed/renamed upstream commands. Doc-comments frequently cite a now-wrong TS file:line; verify against the pinned binary before trusting any 'byte-locked' claim.",
+      "PERMISSION-SCOPE THREADING IS THE COMMON BLOCKER for several medium gaps (Grep/Glob Read(deny) excludes, additionalDirectories, mcpServerPolicy effectiveMaxPermission, deny-directory Edit gate): they all need a permission/MCP context accessor threaded into the tool/hook layer that does not yet exist \u2014 worth doing once as shared plumbing rather than per-gap."
+    ]
+  },
+  "confirmed": [
+    {
+      "subsystem": "bash-shell (tools/shell + platforms/posix process runner) parity vs claude-code v2.1.183",
+      "title": "Sleep-block threshold is 2s in LingXi but 25s in claude-code (G2n=25)",
+      "verdict": "confirmed",
+      "corrected_detail": "VERIFIED in binary: `var G2n=25` (strings: `G2n=25`) and `function t2p(e){...let o=parseFloat(r[1]);if(o<G2n)return null;...}`. LingXi tools/shell/src/bash.rs:96-98 `if secs < 2 { return None; }`. So LingXi blocks 2..24s sleeps that stock claude-code permits. Threshold constant is wrong (2 vs 25). Auditor's file:line and behavior are exact.",
+      "severity": "high",
+      "fix_sketch": "Change `secs < 2` to `secs < 25` (introduce a named const matching G2n=25) in detect_blocked_sleep_pattern."
+    },
+    {
+      "subsystem": "bash-shell (tools/shell + platforms/posix process runner) parity vs claude-code v2.1.183",
+      "title": "Sleep-block is gated OFF by default in claude-code (tengu_amber_sentinel) but always active in LingXi",
+      "verdict": "confirmed",
+      "corrected_detail": "VERIFIED in binary: `async validateInput(e){if(sq()&&!p4t&&!e.run_in_background){let t=t2p(e.command);...}}` and `function sq(){return ct(\"tengu_amber_sentinel\",!1)}` \u2014 the gate defaults to FALSE (second arg !1=false). LingXi bash.rs:677-683 runs detect_blocked_sleep_pattern unconditionally when run_in_background!=true (its own comment at 665-672 admits no Rust analog of the gate exists, so the block is always active). With the default-off gate, stock claude-code NEVER blocks any sleep; LingXi always does. This is the dominant behavioral divergence (subsumes gap 1: with the gate off, the 2-vs-25 threshold is moot for default config). NOTE: also caught in 2.1.161 (tengu_amber_sentinel present), so not version-skew.",
+      "severity": "high",
+      "fix_sketch": "Gate the entire sleep block behind a `tengu_amber_sentinel` feature flag defaulting to false (matching sq()), so the block is inert in default config; only then does the 25s threshold matter."
+    },
+    {
+      "subsystem": "bash-shell (tools/shell + platforms/posix process runner) parity vs claude-code v2.1.183",
+      "title": "Sleep-block message text differs entirely from claude-code",
+      "verdict": "confirmed",
+      "corrected_detail": "VERIFIED both directions. Binary message (exact): ``Blocked: ${t}. To wait for a condition, use Monitor with an until-loop (e.g. \\`until <check>; do sleep 2; done\\`). To wait for a command you started, use run_in_background: true. Do not chain shorter sleeps to work around this block.`` LingXi phrases ('Run blocking commands in the background', 'For streaming events', 'keep it under 2 seconds') = 0 hits in binary; binary phrases ('To wait for a condition, use Monitor with an until-loop', 'Do not chain shorter sleeps to work around this block') = 0 hits in LingXi bash.rs. LingXi message at bash.rs:679-681. errorCode:10 (binary) has no Rust surface (acceptable drop).",
+      "severity": "medium",
+      "fix_sketch": "Replace LingXi's message with the binary's exact string (note the embedded backtick `until <check>; do sleep 2; done` example). If gap 2's gate fix lands, this message only ever surfaces when the gate is enabled."
+    },
+    {
+      "subsystem": "bash-shell (tools/shell + platforms/posix process runner) parity vs claude-code v2.1.183",
+      "title": "Sleep regex does not match fractional durations; LingXi deliberately excludes them",
+      "verdict": "confirmed",
+      "corrected_detail": "VERIFIED in binary: `r=/^sleep\\s+(\\d+(?:\\.\\d*)?)\\s*$/.exec(n)` + `parseFloat(r[1])` + message `standalone sleep ${o}` (float). LingXi bash.rs:78-95 is integer-only (manual digit-run match) with an explicit comment that fractional sleeps are deliberately NOT matched, and formats the value as a u64. So `sleep 30.5` (>=25) is matched+blocked by claude-code but never matched by LingXi, and the embedded value type differs (float vs int). Real but low-impact, and entirely moot if gap-2 gate-off is applied (default config never blocks).",
+      "severity": "low",
+      "fix_sketch": "Match `\\d+(\\.\\d*)?`, parse as f64, compare to 25.0, format like JS parseFloat (30.0->'30', 30.5->'30.5'). Lower priority than the gate/threshold fix."
+    },
+    {
+      "subsystem": "bash-shell (tools/shell + platforms/posix process runner) parity vs claude-code v2.1.183",
+      "title": "Bash `timeout` over max is rejected as an error in LingXi; claude-code accepts any value",
+      "verdict": "confirmed",
+      "corrected_detail": "VERIFIED in binary: `timeout:VF(E.number().optional()).describe(`Optional timeout in milliseconds (max ${X3t()})`)` (no `.max()`), and `function H5a(e,t){let n=e.timeout;return typeof n===\"number\"&&n>0?n:t}` \u2014 no Math.min/clamp, no rejection; the 600000 max is describe()-text only. LingXi HARD-REJECTS timeout>600000 at TWO sites: validate_input bash.rs:658-663 AND call bash.rs:726-730 (`timeout {t} exceeds limit ...`), plus INPUT_SCHEMA bash.rs:564 sets `\"maximum\":600000`. So any model passing a large timeout is rejected by LingXi but honored as-is by claude-code. Auditor's file:lines exact (also confirmed schema maximum at 564, auditor said 561-566).",
+      "severity": "medium",
+      "fix_sketch": "Drop both >max rejections and the schema `maximum`; use the value as-is when >0 (H5a). Keep the describe()/schema description text mentioning the 600000 max for guidance only."
+    },
+    {
+      "subsystem": "bash-shell (tools/shell + platforms/posix process runner) parity vs claude-code v2.1.183",
+      "title": "Bash `timeout` numeric-string coercion missing in LingXi",
+      "verdict": "confirmed",
+      "corrected_detail": "VERIFIED in binary: `function VF(e=E.number()){return E.preprocess((t)=>{if(typeof t===\"string\"){let n=t.trim();if(/^[-+]?\\d+(\\.\\d+)?$/.test(n)){let r=Number(n);if(Number.isFinite(r))return r}}return t},e)}` \u2014 a numeric-string timeout is coerced before validation. LingXi bash.rs:713-716 (call) and 658 (validate) use `Value::as_u64` only, which returns None for a JSON string '5000' -> falls through to BASH_DEFAULT_TIMEOUT_MS. So a stringified timeout is honored by claude-code, silently defaulted by LingXi. Low impact (models usually send a number).",
+      "severity": "low",
+      "fix_sketch": "Before as_u64, accept a string matching `^[-+]?\\d+(\\.\\d+)?$`, parse it (VF coercion). Pairs with gap 5 (drop clamp)."
+    },
+    {
+      "subsystem": "bash-shell (tools/shell + platforms/posix process runner) parity vs claude-code v2.1.183",
+      "title": "Persistent shell sets SHELL unconditionally; claude-code only sets it for bash",
+      "verdict": "confirmed",
+      "corrected_detail": "VERIFIED in binary: spawn env `{...WO(),SHELL:n===\"bash\"?S:void 0,GIT_EDITOR:\"true\",...,...Uot({...source:\"agent\"})}` \u2014 SHELL is set ONLY when the resolved shell is bash; for zsh it is `void 0` (left inherited). LingXi platforms/posix/src/process/runner.rs:60 `tcmd.env(ENV_SHELL, &inner.command)` sets SHELL=<inner.command> unconditionally (=/bin/zsh on macOS). CONFIRMED the LingXi Bash tool spawns each command fresh via ProcessRunner::run (bash.rs:924) so this foreground runner IS the right comparison point against claude-code's per-spawn env. The windows runner (windows/src/process/runner.rs:50) has the same unconditional set. So on macOS LingXi injects SHELL=/bin/zsh; claude-code does not set SHELL at all.",
+      "severity": "low",
+      "fix_sketch": "Set ENV_SHELL only when the resolved shell basename is bash; otherwise omit it (inherit from process env)."
+    },
+    {
+      "subsystem": "bash-shell (tools/shell + platforms/posix process runner) parity vs claude-code v2.1.183",
+      "title": "Missing per-command env vars: CLAUDE_CODE_CHILD_SESSION, AI_AGENT, CLAUDE_EFFORT, TRACEPARENT",
+      "verdict": "confirmed",
+      "corrected_detail": "VERIFIED in binary: `function Uot(e){let t={CLAUDECODE:\"1\",CLAUDE_CODE_SESSION_ID:e.sessionId,CLAUDE_CODE_CHILD_SESSION:\"1\"};if(e.source===\"agent\")t.AI_AGENT=Mer(\"agent\");if(e.effortLevel!==void 0)t.CLAUDE_EFFORT=e.effortLevel;if(Evt()){let n=wHn();if(n!==void 0)t.TRACEPARENT=n}return t}`. CLAUDE_CODE_CHILD_SESSION:\"1\" is ALWAYS set. LingXi runner.rs:58-64 sets only CLAUDECODE=1, GIT_EDITOR=true, SHELL, and conditionally CLAUDE_CODE_SESSION_ID; grep across the whole tree = 0 hits for CLAUDE_CODE_CHILD_SESSION/AI_AGENT/CLAUDE_EFFORT/TRACEPARENT. NOTE: in the persistent-shell spawn site the binary always passes source:\"agent\", so AI_AGENT is also always set there. Uot/CHILD_SESSION absent in 2.1.161 strings dump \u2014 these env keys may be a newer addition, but CLAUDE_CODE_CHILD_SESSION is confirmed in current 2.1.183, so the gap stands for the live binary.",
+      "severity": "low",
+      "fix_sketch": "Always set CLAUDE_CODE_CHILD_SESSION=1 in build_command; add AI_AGENT (when source/agent context present), CLAUDE_EFFORT (when effort set), TRACEPARENT (when tracing enabled)."
+    },
+    {
+      "subsystem": "bash-shell (tools/shell + platforms/posix process runner) parity vs claude-code v2.1.183",
+      "title": "Command stderr is not truncated/cleaned; claude-code cleans sandbox_violations and applies cwd-reset extraction",
+      "verdict": "confirmed",
+      "corrected_detail": "VERIFIED in binary: `function xEp(e){if(!e.match(/<sandbox_violations>([\\s\\S]*?)<\\/sandbox_violations>/))return{cleanedStderr:e};return{cleanedStderr:c0n(e).trim()}}`, `function kEp(e){let t=e.match(lNa);...}` with `lNa=/(?:^|\\n)(Shell cwd was reset to .+)$/`, `Y2n=(e)=>`${e.trim()}\\nShell cwd was reset to ${Pt()}``, and `tengu_bash_tool_reset_to_original_dir` (telemetry present). LingXi: grep = 0 hits for sandbox_violations / 'Shell cwd was reset' / reset_to_original_dir anywhere in the Rust tree. bash.rs:1006-1007 only ANSI-strips stderr; the cwd-readback path (bash.rs:966-1002) silently no-ops when `canonicalize` of the new cwd FAILS (dir gone) \u2014 it never appends a 'Shell cwd was reset to' warning nor fires reset telemetry. Auditor's claim and file:lines are accurate. Severity raised from auditor's 'medium confidence' to confirmed: both binary regexes and the LingXi omission are concrete.",
+      "severity": "low",
+      "fix_sketch": "Add a stderr post-processor mirroring xEp (strip <sandbox_violations> blocks) + kEp (extract/remove trailing 'Shell cwd was reset to ...'); in the cwd-tracking path, when canonicalize fails, append 'Shell cwd was reset to <restored-cwd>' to stderr and fire tengu_bash_tool_reset_to_original_dir."
+    },
+    {
+      "subsystem": "file-read (Read tool) parity \u2014 lingxi-code/tools/file/src/read.rs vs claude-code v2.1.183",
+      "title": "Read tool has NO 2000-line default cap; LingXi caps no-limit reads at 2000 lines and emits a truncation note that claude-code never produces",
+      "verdict": "confirmed",
+      "corrected_detail": "BINARY (v2.1.183, payload offset ~10.92M): qel calls `Zdt(n,m,s,s===void 0?a:void 0,...)` where the 3rd arg is `s`=limit (maxLines) and the 4th is `s===void 0?a:void 0` = the byteCap (maxSizeBytes) only when no limit. `Zdt`\u2192`a$p(l,size,mtime,t=offset,n=maxLines,...)`. In a$p: the full-file fast path `if(r===0&&o===void 0&&s===void 0)` returns the ENTIRE file uncapped; otherwise `let l=o!==void 0?r+o:1/0` \u2192 Infinity when no maxLines. The streaming reader `d$p` (files \u2265 i$p=10485760=10MB) likewise sets `endLine:n!==void 0?t+n:1/0`. So NEITHER reader path has a 2000-line cap \u2014 confirmed verbatim. LQe=2000 exists but is used only in the prompt text (`By default, it reads up to ${LQe} lines`) and the separate @-mention attachment path. LINGXI (read.rs:1526 `let effective_limit = limit.unwrap_or(MAX_LINES_TO_READ)`, :1527 end_idx clamp, :1531 default_capped, :1619-1623 `[File truncated to the first {MAX_LINES_TO_READ} lines...]`): hard-caps no-limit reads to 2000 lines AND appends an invented note (claude-code's only truncation note is in the attachment path with different wording + 'Don't tell the user about this truncation'). Auditor's binary/LingXi line refs all accurate; version is 2.1.183 not 2.1.181 but behavior identical. Real divergence: a 2500-line <256KB no-limit read returns 2500 lines in claude-code, 2000+note in LingXi.",
+      "severity": "high",
+      "verdict_note": "",
+      "fix_sketch": "When input_limit is None, do NOT clamp end_idx to MAX_LINES_TO_READ \u2014 read the full file (the 256KB byte cap at read.rs:1350, gated on input_limit.is_none(), already bounds no-limit oversize reads; the token gate bounds the rest). Delete the default_capped flag and the :1619-1623 note. Keep MAX_LINES_TO_READ only for the prompt advertisement string."
+    },
+    {
+      "subsystem": "file-read (Read tool) parity \u2014 lingxi-code/tools/file/src/read.rs vs claude-code v2.1.183",
+      "title": "No graceful token-cap truncation: LingXi hard-errors on token overflow where claude-code returns a truncated PARTIAL view",
+      "verdict": "confirmed",
+      "corrected_detail": "BINARY: in qel, after `Zdt`, `k=(o??1)<=1&&s===void 0&&i===void 0` marks a full view (offset<=1, no limit, no pages). `try{await $el(f,r,l)}catch(L){if(L instanceof Fae&&k){...binary-shrink with a 6-iteration 0.7 backoff + 0.85 factor + char-fallback...; R=!W&&S<h?oIt+`showing lines 1-${S} of ${h} total (${L.tokenCount} tokens, cap ${l}). Call ${Ws} with offset=${S+1} limit=${S} for the next page, or ${$c} to find a specific section. Do NOT answer from this page alone...]`:oIt+`showing the first ${U.length} of ${f.length} characters...`}else throw L}`. oIt=`[Truncated: PARTIAL view \u2014 `; result carries truncatedByTokenCap/isPartialView; render prepends `<system-reminder>${r}</system-reminder>`. The hard Fae throw only surfaces for NON-full-view reads. $el=validateContentTokens (early-pass o<=r/4, API-refine `Iel(e)??o`, throw Fae if >r) and Fae msg = `File content (${e} tokens) exceeds maximum allowed tokens (${t})...`. LINGXI (read.rs:1544-1547): `if let Err(msg)=validate_content_tokens(&slice,...){ emit_failed(...max_tokens_exceeded); return Err(ToolError::Io(msg)) }` for ALL reads. validate_content_tokens (:129-138) returns a hard error for any overflow (its token logic is itself 1:1 with $el offline \u2014 early-pass max/4, fallback admit, error if >max). No 'PARTIAL view'/'truncatedByTokenCap'/binary-shrink path exists (0 hits). format_max_tokens_exceeded (:108) byte-matches Fae. Confirmed: the token-gate logic matches but the graceful full-view truncation + paginating reminder is entirely absent.",
+      "severity": "high",
+      "fix_sketch": "On the full-view branch (input_offset<=1 && input_limit==None && pages==None), catch the token-cap overflow instead of erroring: port the binary-shrink (split lines, est chars/token ratio N, $=floor(lines*cap/tokenCount*0.85), 6\u00d70.7 backoff, then char-fallback for un-paginatable long-line files, strip trailing high-surrogate), set isPartialView, and prepend the oIt-style `[Truncated: PARTIAL view \u2014 showing lines 1-{S} of {total} total ({tokenCount} tokens, cap {cap}). Call Read with offset={S+1} limit={S} for the next page, or Grep to find a specific section. Do NOT answer from this page alone if the answer may be further in the file.]` reminder (and the char-variant for long-line files). Keep the hard error only for ranged (offset/limit/pages) reads."
+    },
+    {
+      "subsystem": "file-read (Read tool) parity \u2014 lingxi-code/tools/file/src/read.rs vs claude-code v2.1.183",
+      "title": "Missing device-file guard: LingXi will read /dev/* and /proc/* device files that claude-code refuses",
+      "verdict": "confirmed",
+      "corrected_detail": "BINARY: in the Read tool's `validateInput` (NOT `call`): `let r=Ds(e)` (Ds=expandPath, resolves base/cwd/~ but NOT symlinks) \u2192 permission-deny check \u2192 UNC short-circuit \u2192 binary-extension check \u2192 `if($3p(r))return{result:!1,message:`Cannot read '${e}': this device file would block or produce infinite output.`,errorCode:9}`. NOTE the check tests the EXPANDED `r` but interpolates the RAW `${e}` into the message. `function $3p(e){if(U3p.has(e))return!0;if(e.startsWith(\"/proc/\")&&(e.endsWith(\"/fd/0\")||e.endsWith(\"/fd/1\")||e.endsWith(\"/fd/2\")))return!0;if(/^\\/proc\\/[^/]+\\/(environ|cmdline|auxv|maps|mem|stat)$/.test(e))return!0;return!1}`; `U3p=new Set([\"/dev/zero\",\"/dev/random\",\"/dev/urandom\",\"/dev/full\",\"/dev/stdin\",\"/dev/tty\",\"/dev/console\",\"/dev/stdout\",\"/dev/stderr\",\"/dev/fd/0\",\"/dev/fd/1\",\"/dev/fd/2\"])` \u2014 exactly 12 paths + 2 /proc rules, verbatim. LINGXI: 0 hits for /dev//proc/'device file'/'would block' in tools/file/src AND tool-api/src. read.rs uses size=metadata.len() (which is 0 for char devices, so the 256KB cap does NOT catch them) then `tokio::fs::read(&canon)` (:1355) reads to EOF \u2014 /dev/zero//dev/urandom never EOF, causing unbounded Vec growth / hang; /proc/<pid>/maps reads as text. Confirmed real.",
+      "severity": "high",
+      "fix_sketch": "Port $3p as an early guard. Because LingXi canonicalizes (resolves symlinks) where claude-code tests the merely-expanded path, place the guard on the user-supplied/expanded path BEFORE canonicalize_and_validate (or also test the pre-symlink path) to match \u2014 a static set {/dev/zero,/dev/random,/dev/urandom,/dev/full,/dev/stdin,/dev/tty,/dev/console,/dev/stdout,/dev/stderr,/dev/fd/0,/dev/fd/1,/dev/fd/2} membership + the two /proc regexes, returning `Cannot read '{path}': this device file would block or produce infinite output.` (interpolate the raw path, matching claude-code which interpolates ${e})."
+    },
+    {
+      "subsystem": "file-read (Read tool) parity \u2014 lingxi-code/tools/file/src/read.rs vs claude-code v2.1.183",
+      "title": "Fabricated cyber-risk/malware reminder appended to every text read \u2014 does not exist in claude-code v2.1.181",
+      "verdict": "confirmed",
+      "corrected_detail": "BINARY (v2.1.183): `grep -c malware`=0, `shouldIncludeFileReadMitigation`=0, `refuse to improve`=0 in the 17MB JS payload (and 0 in full `strings`). The text result render is `(r?`<system-reminder>${r}</system-reminder>\\n\\n`:\"\")+J3p(e)+z3p(e.file)` where r=the token-cap partial-view reminder only, J3p=memory-age reminder, z3p=Atn=cat -n line numbers. No malware/cyber-risk reminder and no model-gated read mitigation anywhere. The `claude-opus-4-6` hits in the binary are unrelated (Vertex region map + deprecation-date map + modelOverrides example). LINGXI: read.rs:555 CYBER_RISK_MITIGATION_REMINDER (~360-char malware <system-reminder>), :574 MITIGATION_EXEMPT_MODELS=[\"claude-opus-4-6\"], :579 should_include_file_read_mitigation, appended at :1624-1626 to every non-empty text read's model_content. Pure invention (or a stale port of an older claude-code version). Auditor only erred on version label (2.1.181 vs actual 2.1.183) \u2014 immaterial, absent in both per the auditor and my check.",
+      "severity": "high",
+      "fix_sketch": "Delete CYBER_RISK_MITIGATION_REMINDER (:555), MITIGATION_EXEMPT_MODELS (:574), should_include_file_read_mitigation (:579), and the :1624-1626 append. A successful text read's model_content should be just add_line_numbers(slice, offset), with the token-cap partial-view reminder prepended if/when GAP-2 is implemented. (The 'byte-locked to FileReadTool.ts:729-730' doc comment is false \u2014 verify-then-delete, but it is absent in 2.1.183.)"
+    },
+    {
+      "subsystem": "file-read (Read tool) parity \u2014 lingxi-code/tools/file/src/read.rs vs claude-code v2.1.183",
+      "title": "Missing tengu_file_read_reread analytics event",
+      "verdict": "confirmed",
+      "corrected_detail": "BINARY: in `call`, immediately after the read-state lookup and BEFORE the dedup gate: `let f=a.get(m);if(f)j(\"tengu_file_read_reread\",{priorOp:Qe(f.offset===void 0?\"edit_write\":\"read\")});` then a SEPARATE lookup `let h=ct(\"tengu_read_dedup_killswitch\",!1)?void 0:a.get(m)` for dedup. So reread fires on every read of a prior entry; dedup is distinct. Verbatim in payload. LINGXI: telemetry/src/tengu/tool.rs has FILE_READ_DEDUP, SESSION_FILE_READ, FILE_READ_LIMITS_OVERRIDE only \u2014 no FILE_READ_REREAD constant; FILE_READ_ANALYTICS_NAMES.len()==3. The only 'reread' grep hits in tools/file are test fn names. read.rs:1287 goes straight from the read_file_state::get lookup to the dedup gate with no reread emit. Confirmed (analytics-only, no model-facing effect).",
+      "severity": "low",
+      "fix_sketch": "Add `pub const FILE_READ_REREAD: &str=\"tengu_file_read_reread\";` to telemetry tengu/tool.rs and FILE_READ_ANALYTICS_NAMES (bump the count assertions 3\u21924). In read.rs `call`, right after the read_file_state::get lookup (independent of and before the dedup short-circuit at :1287), emit it when an entry exists: priorOp=\"read\" if entry.from_read (TS `offset!==undefined`) else \"edit_write\". Wrap the value in the PII tagger used by the other tool events (TS `Qe`)."
+    },
+    {
+      "subsystem": "file-read (Read tool) parity \u2014 lingxi-code/tools/file/src/read.rs vs claude-code v2.1.183",
+      "title": "PDF inline-vs-extraction routing constant: claude-code routes PDFs >3MB to page extraction; LingXi inlines up to 20MB",
+      "verdict": "confirmed",
+      "corrected_detail": "BINARY: constants `bki=3145728` (3MB), `k0t=20971520` (20MB), `Lbn=10`/`Iie=20` present. PDF path in qel: page-count `if(L!==null&&L>Lbn)throw too_many_pages`; then `let N=await jt().stat(n);if(!PQe()||N.size>bki){let W=await ago(n);...tengu_pdf_page_extraction...}`; then `if(!PQe())throw 'Reading full PDFs is not supported...'`. So a supported-model PDF >3MB routes to page-image EXTRACTION (ago); only \u22643MB on a supported model is inlined as a base64 document via Pel (which itself rejects >k0t=20MB). LINGXI (read.rs:1044-ish + pdf_read.rs:11 PDF_TARGET_RAW_SIZE=20MB): inline gate is only `if original_size > PDF_TARGET_RAW_SIZE \u2192 too_large`; no 3MB bki routing. A 3-20MB supported-model PDF is inlined as a document block instead of extracted to page images. Confirmed BUT correctly low severity: the whole PDF path is behind the default-OFF `pdf-read` feature, and page-image extraction itself requires the heavier `pdf-render` feature (poppler/tempfile/process) \u2014 so this is feature-gated and partly out of default scope, exactly as the auditor flagged (confidence medium is appropriate).",
+      "severity": "low",
+      "fix_sketch": "In the no-pages inline branch (read.rs ~1044), route to page extraction when `original_size > 3*1024*1024` (bki) OR the model is unsupported, instead of inlining; keep PDF_TARGET_RAW_SIZE=20MB (k0t) as the hard reject INSIDE the inline reader. Only meaningful once page-image extraction (pdf-render) exists; until then the divergence is dormant for the default build."
+    },
+    {
+      "subsystem": "file-edit tools (Edit / Write / MultiEdit / NotebookEdit) \u2014 model-facing result strings, match/deletion semantics, validateInput gates, tool descriptions",
+      "title": "Edit/Write success message omits the 'file state is current' suffix (Pyn) appended on the common non-interactive path",
+      "verdict": "confirmed",
+      "corrected_detail": "Binary v2.1.183 confirmed. Constant Pyn=\" (file state is current in your context \u2014 no need to Read it back)\" exists (offset 195604718). Edit mapToolResultToToolResultBlockParam destructures {filePath:n,userModified:r,replaceAll:o,staleRecovered:s}; a = s ? '(note: ... modified on disk ...)' : r ? '' : Pyn. So when userModified(r)=false AND staleRecovered(s)=false (the orchestrator/non-interactive common path), a=Pyn. Edit single='The file ${n} has been updated successfully${i}.${a}', replace_all='...updated${i}. All occurrences were successfully replaced.${a}'. Write: s=n?'':Pyn (n=userModified), appended unconditionally on the common path to both 'File created successfully at: ${e}${o}${s}' and 'The file ${e} has been updated successfully.${o}${s}'. LingXi tools/file/src/edit.rs:79-85 edit_result_message() and write.rs:40-46 write_result_message() return the strings with NO suffix; grep for 'no need to Read it back' across tools/ returns nothing. Real divergence: every successful Edit/Write tool_result on the common path differs by the trailing suffix. Note the em-dash is U+2014 (\u2014), not a hyphen.",
+      "severity": "medium",
+      "fix_sketch": "Add a const PYN_SUFFIX: &str = \" (file state is current in your context \\u{2014} no need to Read it back)\" and append it in edit_result_message()/write_result_message() whenever user_modified==false && stale_recovered==false. Since the non-interactive orchestrator has no human-accept step and no on-disk-stale recovery, both flags are effectively always false, so the suffix is appended unconditionally on the common path. Mind the em-dash byte (U+2014)."
+    },
+    {
+      "subsystem": "file-edit tools (Edit / Write / MultiEdit / NotebookEdit) \u2014 model-facing result strings, match/deletion semantics, validateInput gates, tool descriptions",
+      "title": "Single Edit deletion (new_string=\"\") does not consume the trailing newline like claude-code's AUa",
+      "verdict": "confirmed",
+      "corrected_detail": "Binary confirmed verbatim at offset 201328131: function AUa(e,t,n,r=!1){let o=r?replaceAll:replace; if(n!=='')return o(e,t,n); return !t.endsWith('\\n')&&e.includes(t+'\\n') ? o(e,t+'\\n',n) : o(e,t,n)}. Critically, the call chain proves single Edit uses this same engine: L$t({oldString:n,newString:r,replaceAll:o}) (201328313) -> blo({edits:[{old_string:n,new_string:r,replace_all:o}]}) -> Alo(t,edits) -> per-edit n = o.old_string===''?o.new_string : AUa(n,o.old_string,o.new_string,o.replace_all). So the deletion special-case (new_string=='' consumes a trailing \\n to avoid a leftover blank line) DOES apply to single Edit, not just MultiEdit. LingXi edit.rs:440-444 uses plain before.replacen(actual_old,&actual_new,1) / before.replace(...) with no new_string=='' special-casing -> leaves an extra blank line on a 'delete this line' edit. Confidence raised from medium to high; full call chain traced in-binary.",
+      "severity": "medium",
+      "fix_sketch": "In edit.rs before applying the replacement, when actual_new.is_empty() && !actual_old.ends_with('\\n') && before.contains(&format!(\"{actual_old}\\n\")), replace actual_old+\"\\n\" instead of actual_old (for both the single replacen and replace_all paths). Match AUa exactly: the guard is on new_string=='', and the +\"\\n\" form is tried only if old_string does not already end with \\n and the +\"\\n\" form exists in the file."
+    },
+    {
+      "subsystem": "file-edit tools (Edit / Write / MultiEdit / NotebookEdit) \u2014 model-facing result strings, match/deletion semantics, validateInput gates, tool descriptions",
+      "title": "No MultiEdit tool / Edit does not accept an edits[] array (sequential multi-edit with atomicity + overlap checks)",
+      "verdict": "confirmed",
+      "corrected_detail": "Binary Alo engine confirmed at 201329xxx with all three guard strings verbatim: 'Cannot edit file: old_string is a substring of a new_string from a previous edit.' (thrown when s=old_string.replace(/\\n+$/,'') is nonempty and is a substring of any prior edit's new_string), 'String not found in file. Failed to apply edit.' (jfe, when an edit produces no change), 'Original and edited file match exactly. Failed to apply edit.' (when final==original). MultiEdit appears in the tool-name pool. LingXi lib.rs:160-167 register_all registers Read/Write/Edit/NotebookEdit/Glob/Grep \u2014 NO MultiEdit. edit.rs:178-189 INPUT_SCHEMA is {file_path,old_string,new_string,replace_all} only \u2014 no edits[]. turn_loop.rs:22 lists 'MultiEdit' in a name array but no tool implements it; conversation.rs:564 only references it in a doc comment. Grep confirms the 3 guard strings and any edits[] schema are absent from tools/. Confidence raised from medium to high. Caveat on the auditor's lingxi_current: LingXi's single-Edit not-found message is actually 'String to replace not found in file.\\nString: {old_string}' (edit.rs:428) \u2014 different text from the MultiEdit guard, but irrelevant to the MultiEdit-absence claim.",
+      "severity": "medium",
+      "fix_sketch": "Add a MultiEditTool with schema {file_path, edits:[{old_string,new_string,replace_all?}]}; register in register_all; remove the dangling 'MultiEdit' from turn_loop.rs name array OR back it with the new tool. Implement the Alo engine over an in-memory buffer: for each edit strip trailing \\n+ from old_string, throw the substring guard if nonempty and contained in any prior new_string; apply via the AUa helper (shared with single Edit); throw 'String not found...' if no change; after all edits throw 'Original and edited...' if result==original; all-or-nothing (write only on full success)."
+    },
+    {
+      "subsystem": "file-edit tools (Edit / Write / MultiEdit / NotebookEdit) \u2014 model-facing result strings, match/deletion semantics, validateInput gates, tool descriptions",
+      "title": "Edit string-not-found does not try \\uXXXX escape-swap / non-ASCII regex fallbacks (vIe) nor emit the escape-swap note",
+      "verdict": "confirmed",
+      "corrected_detail": "Binary confirmed: function vIe(e,t){if(e.includes(t))return t; n=uUa(t),o=uUa(e).indexOf(n) (curly-normalize); if(o!==-1)return e.substring(...); if(Tlo.test(t)){s=flo(t);if(s!==t&&e.includes(s))return s} if(Slo.test(t)){s=e.match(new RegExp(dUa(t)));if(s)return s[0]} return null}. Constants: Tlo=/\\\\u[0-9a-fA-F]{4}/, Slo=/[\u0080-\uffff]/ (the auditor's '/[-\uffff]/' is the visual rendering of this same U+0080..U+FFFF range \u2014 equivalent), pUa(e)=Tlo.test(e)||Slo.test(e). The not-found guidance note string exists verbatim: '(note: Edit also tried swapping \\uXXXX escapes and their characters; neither form matched, so the mismatch is likely elsewhere in old_string. Re-read the file and copy the exact surrounding text.)', appended when pUa(old_string) is true. LingXi quotes.rs find_actual_string only recovers curly quotes (module is curly-quote-scoped); edit.rs:417-429 emits 'String to replace not found in file.\\nString: {old_string}' with no escape-swap fallback and no appended note; grep for the note text in tools/file/src returns nothing.",
+      "severity": "low",
+      "fix_sketch": "Extend quotes::find_actual_string (or add a sibling) with two extra fallbacks after the curly path: (a) if old_string matches /\\\\u[0-9a-fA-F]{4}/, decode the \\uXXXX escapes to chars and retry contains; (b) if old_string contains chars in U+0080..U+FFFF, build a regex matching escaped-or-literal forms and search. When still not found and old_string matches either pattern, append the escape-swap note to the not-found error."
+    },
+    {
+      "subsystem": "file-edit tools (Edit / Write / MultiEdit / NotebookEdit) \u2014 model-facing result strings, match/deletion semantics, validateInput gates, tool descriptions",
+      "title": "Edit has no maximum-editable-file-size cap (1 GiB) and no too-large error",
+      "verdict": "confirmed",
+      "corrected_detail": "Binary confirmed: in Edit validateInput, {size:g,mode:_}=await u.stat(i); if(g>DYa)return{result:!1,behavior:'ask',message:`File is too large to edit (${Ma(g)}). Maximum editable file size is ${Ma(DYa)}.`,errorCode:10}; with DYa=1073741824 (1 GiB). Ma() is the human-size formatter (renders ~'1 GB'). LingXi edit.rs call() reads the whole file via tokio::fs with no size check; grep for 'too large'/'Maximum editable'/1073741824 in edit.rs/write.rs returns nothing (the only 'too large' hits are in notebook_read.rs for a different feature). Edge case but a concrete missing gate + error string.",
+      "severity": "low",
+      "fix_sketch": "In Edit validateInput/call(), stat the file and if size > 1_073_741_824 return InvalidInput/ask with 'File is too large to edit (<human-size>). Maximum editable file size is 1 GB.' (errorCode 10). Use the same human-size formatter used elsewhere for byte counts."
+    },
+    {
+      "subsystem": "file-edit tools (Edit / Write / MultiEdit / NotebookEdit) \u2014 model-facing result strings, match/deletion semantics, validateInput gates, tool descriptions",
+      "title": "NotebookEdit description and prompt are the old cell_number-based text; v2.1.183 rewrote them to cell_id-based",
+      "verdict": "confirmed",
+      "corrected_detail": "Binary confirmed: f2a (description)='Edit a cell in a Jupyter notebook \u2014 replace, insert, or delete.'; A2a (prompt) begins 'Replaces, inserts, or deletes a single cell in a Jupyter notebook (.ipynb file).' and is cell_id-based ('add a new cell after the cell with the given' confirmed at 201376745; '`cell_id` is the `id` attribute shown in the Read tool's `<cell id=\"...\">` output' present). The old string 'data analysis and scientific computing' has 0 occurrences in the binary. LingXi notebook_edit.rs:166 description='Replace the contents of a specific cell in a Jupyter notebook.' (old) and line 171 prompt is the old cell_number-based text including 'data analysis and scientific computing'. The LingXi schema (notebook_edit.rs:104) already uses cell_id, so the old prompt is internally inconsistent with LingXi's own schema. Confirmed (note the em-dash in f2a is U+2014).",
+      "severity": "low",
+      "fix_sketch": "Replace notebook_edit.rs:166 description() with the f2a string and line 171 prompt() with the A2a text (cell_id-based, mentions Read tool, `cell_id` required for replace/delete, edit_mode defaults to replace, insert adds after the given cell_id or at the beginning if omitted with cell_type required, delete removes the cell). Mind the U+2014 em-dash in the description."
+    },
+    {
+      "subsystem": "file-edit tools (Edit / Write / MultiEdit / NotebookEdit) \u2014 model-facing result strings, match/deletion semantics, validateInput gates, tool descriptions",
+      "title": "Edit tool description has a trailing space after 'reading the file.' that v2.1.183 removed",
+      "verdict": "confirmed",
+      "corrected_detail": "Byte-verified in binary executable copy at offset ~202614146 (wBp function): '...attempt an edit without reading the file.' is immediately followed by a backtick \u2014 od -c shows 'f i l e . `' (the backtick `}fun) with NO space between '.' and '`'. The other copy (string table, 94891909) ends 'file.\\0'. Neither has a trailing space. LingXi edit.rs:46 EDIT_DESCRIPTION ends '...without reading the file. ' WITH a trailing space (the doc comment at edit.rs:42 explicitly preserves it as a deliberate older-claude-code artifact). One trailing-space byte divergence in the Edit description sent to the model; pure version skew.",
+      "severity": "cosmetic",
+      "fix_sketch": "Delete the single trailing space after 'reading the file.' on edit.rs:46, update the doc comment at edit.rs:42 that claims the space is intentional, and fix the two tests (edit.rs ~1336/1344) that assert the trailing space."
+    },
+    {
+      "subsystem": "file-edit tools (Edit / Write / MultiEdit / NotebookEdit) \u2014 model-facing result strings, match/deletion semantics, validateInput gates, tool descriptions",
+      "title": "Edit tool lacks input-alias normalization (replace_name/path/old_str/new_str) present in claude-code",
+      "verdict": "confirmed",
+      "corrected_detail": "Binary confirmed at offset 202613389: function vYa(e){if(!vBp(e))return null; ... if('replace_name'in t){r=t.replace_name; if(!('replace_all'in t))t.replace_all=r===!0||r==='true'; delete t.replace_name, n.push('alias_replace_name')} if('path'in t&&!('file_path'in t)&&typeof t.path==='string'){t.file_path=t.path;delete t.path;n.push('path')} if('old_str'...){t.old_string=t.old_str;...n.push('old_str')} if('new_str'...){t.new_string=t.new_str;...n.push('new_str')} return n.length?{input:t,shapeClass:n.join(',')}:null}. It is LIVE: the Edit tool object has coerceInput:vYa. Minor correction to the auditor: only replace_name pushes the 'alias_'-prefixed shapeClass token ('alias_replace_name'); path/old_str/new_str push the bare names \u2014 but the normalization behavior (value/key mapping) is exactly as claimed. LingXi edit.rs:249-264 reads only file_path/old_string/new_string/replace_all and errors 'old_string is required' etc.; grep for the aliases across tools/file/src returns nothing.",
+      "severity": "low",
+      "fix_sketch": "Add a coerce/normalize step before Edit validation that maps replace_name->replace_all (true if value===true||\"true\"), path->file_path, old_str->old_string, new_str->new_string, each only when the canonical key is absent and the alias is a string. Optionally record a shapeClass token for telemetry as claude-code does."
+    },
+    {
+      "subsystem": "file-edit tools (Edit / Write / MultiEdit / NotebookEdit) \u2014 model-facing result strings, match/deletion semantics, validateInput gates, tool descriptions",
+      "title": "Edit validateInput is missing the permission-deny-directory and non-regular-file gates",
+      "verdict": "confirmed",
+      "corrected_detail": "Binary confirmed in Edit validateInput: if(KH(i,Fr(t),'edit','deny')!==null)return{result:!1,behavior:'ask',message:'File is in a directory that is denied by your permission settings.',errorCode:2}; then if(i.startsWith('\\\\\\\\')||i.startsWith('//'))return{result:!0} (UNC/network early-allow); then stat, then if(H7e(_))return{...message:k7e,errorCode:11} where H7e(e)=cfr()&&(e&128)===0 (owner-write bit unset AND Perforce-enabled) and k7e='File is read-only \u2014 it has not been opened for edit in Perforce. Run `p4 edit <file>` to check it out, then retry...'. LingXi edit.rs:216-225 check_permissions is an allow-all stub ('allow-all-gate (M4-01 default)'); call() has no deny-directory check, no UNC early-allow, no file-mode/Perforce gate. Confirmed, but with the auditor's own caveats intact: deny-directory enforcement overlaps the permission subsystem which is built-but-inert-by-default in LingXi, and the Perforce gate is niche/platform-conditional (gated by cfr()). Confidence medium is appropriate.",
+      "severity": "low",
+      "fix_sketch": "Lowest-effort high-value piece: add the UNC early-allow (path starts with '\\\\\\\\' or '//' -> allow) and, when the permission subsystem is activated, a deny-directory check returning 'File is in a directory that is denied by your permission settings.' (errorCode 2). The Perforce read-only gate (owner-write bit unset + Perforce-enabled -> k7e errorCode 11) is niche and can be deferred or documented as a divergence."
+    },
+    {
+      "subsystem": "tools/file Grep + Glob (lingxi-code tools/file/src/grep.rs, glob.rs; telemetry/src/tengu/tool.rs)",
+      "title": "Grep tool drops the `-o` / --only-matching flag entirely (schema rejects it)",
+      "verdict": "confirmed",
+      "corrected_detail": "BINARY: confirmed both sites. Schema describe present verbatim: 'Print only the matched (non-empty) parts of each matching line, one match per output line (rg -o / --only-matching). Requires output_mode:'. call() honors it: `if(d&&o===\"content\")_.push(\"-o\")` (extracted from binary). LINGXI: grep.rs:383-409 INPUT_SCHEMA has `additionalProperties:false` (line 386) and lists pattern/path/glob/type/output_mode/-A/-B/-C/context/-n/-i/head_limit/offset/multiline \u2014 NO `-o` key (grep -n '\"-o\"' grep.rs = 0 hits). grep.rs:459-491 arg parse never reads `-o`. CRITICAL WIRING CONFIRMED: validate_tool_input_schema IS invoked in the live turn loop at orchestrator/src/turn_loop.rs:1221 (`validate_tool_input_schema(tool_handle.input_schema(), input)`), and the boon validator (schema_validation.rs:46-88) is a spec-compliant Draft validator that enforces additionalProperties:false. So a model passing `-o: true` IS rejected with a schema-validation error before the tool runs. The auditor's claim that schema_validation.rs is at line 46 is imprecise (the validate fn starts at line 46/the function body; enforcement is real regardless). only-matching output (one match-substring per line) is unimplemented. grep_searcher::SinkMatch is used (grep.rs:285) and can yield match spans, so the fix sketch is feasible. Real divergence.",
+      "severity": "high",
+      "verdict_note": "confirmed"
+    },
+    {
+      "subsystem": "tools/file Grep + Glob (lingxi-code tools/file/src/grep.rs, glob.rs; telemetry/src/tengu/tool.rs)",
+      "title": "Grep input schema has NO `.describe()` strings on any property (claude-code has rich descriptions on all 15)",
+      "verdict": "confirmed",
+      "corrected_detail": "BINARY: confirmed verbatim describe strings present: pattern='The regular expression pattern to search for in file contents'; output_mode='Output mode: \"content\" shows matching lines (supports -A/-B/-C context, -n line numbers, head_limit), '; head_limit='Limit output to first N lines/entries, equivalent to '; offset='Skip first N lines/entries before applying head_limit, equivalent to '; multiline='Enable multiline mode where . matches newlines and patterns can span lines (rg -U --multiline-dotall). Default: false.'. Glob path='The directory to search in. If not specified, the current working directory will be used. IMPORTANT: Omit this field to use the default directory. DO NOT enter ...'; Glob pattern='The glob pattern to match files against'. LINGXI: grep.rs:389-406 every property is bare e.g. `\"pattern\": { \"type\": \"string\" }` \u2014 zero `description` fields. glob.rs:175-176 same (`\"pattern\": {\"type\":\"string\"}`, `\"path\": {\"type\":\"string\"}`). The model-facing tool-definition bytes genuinely differ. Confirmed.",
+      "severity": "medium",
+      "verdict_note": "confirmed"
+    },
+    {
+      "subsystem": "tools/file Grep + Glob (lingxi-code tools/file/src/grep.rs, glob.rs; telemetry/src/tengu/tool.rs)",
+      "title": "Grep content mode emits `:` separators (and no `--` group separators) for context lines; claude-code passes ripgrep's `-`-separated context lines through verbatim",
+      "verdict": "confirmed",
+      "corrected_detail": "BINARY: confirmed content map `A-Za-z]:/.test(O)?2:0,U=O.indexOf(\":\",$);if(U>0){let W=O.substring(0,U),G=O.substring(U);return w7e(W)+G}` (extracted). A context line `file-line-text` or a bare `--` separator has no `:` after the drive offset, so it is returned unmodified \u2014 confirming rg's `-`-separated context lines and `--` group separators survive to the model. LINGXI: grep.rs:650-658 formats EVERY recorded line (match AND context) as `{rel}:{n}:{text}` or `{rel}:{text}` with a colon; the GrepSink (grep.rs:308-315 `context()`) records context lines into the same `records` buffer indistinguishably from matches (no match-vs-context bool); no `--` separator ever emitted. grep.rs header lines 14-17 explicitly DOCUMENT this as a known divergence. Real byte-level output divergence in content mode with context windows. Confirmed.",
+      "severity": "medium",
+      "verdict_note": "confirmed"
+    },
+    {
+      "subsystem": "tools/file Grep + Glob (lingxi-code tools/file/src/grep.rs, glob.rs; telemetry/src/tengu/tool.rs)",
+      "title": "Grep files_with_matches tiebreak uses Rust byte ordering, not localeCompare",
+      "verdict": "confirmed",
+      "corrected_detail": "BINARY: confirmed sort `...??0:0]}).sort((P,L)=>{let D=L[1]-P[1];if(D===0)return P[0].localeCompare(L[0])` (extracted with preceding context) \u2014 mtime-desc with a JS localeCompare filename tiebreak on equal mtime. LINGXI: grep.rs:764-775 production branch tiebreak is `a.0.to_string_lossy().cmp(&b.0.to_string_lossy())` = Rust byte/codepoint Ord (ASCII uppercase < lowercase), NOT localeCompare. NOTE: under cfg!(test) LingXi uses a PURE filename byte-sort (no mtime) which is a separate test-only path; the production-relevant divergence is the equal-mtime tiebreak. Auditor's note that Glob has no filename tiebreak is also correct (glob.rs:354 sorts only `a.1.cmp(&b.1)` by mtime, matching CC's lLa). Severity low (only triggers on identical-mtime files with case/locale-distinct names). Confirmed.",
+      "severity": "low",
+      "verdict_note": "confirmed"
+    },
+    {
+      "subsystem": "tools/file Grep + Glob (lingxi-code tools/file/src/grep.rs, glob.rs; telemetry/src/tengu/tool.rs)",
+      "title": "Glob path-validation error messages are fabricated/absent vs claude-code's specific 'Directory does not exist' / 'Path is not a directory'",
+      "verdict": "confirmed",
+      "corrected_detail": "BINARY: confirmed all messages present verbatim: `async validateInput({path:e})`, `Directory does not exist: ${e}`, `Path is not a directory: ${e}`, `Did you mean ${s}?` (and a `${l}` variant elsewhere). LINGXI: glob.rs has no validateInput equivalent; an invalid path goes through canonicalize_and_validate (glob.rs:261) and on ANY failure returns `ToolError::PathBlocked { path: base }` (glob.rs:266) \u2014 generic, no 'Directory does not exist'/'Path is not a directory' distinction, no fuzzy 'Did you mean'. Grep is identical (grep.rs:496-503 same PathBlocked-only). The auditor's cited LingXi lines (glob.rs:261-268, grep.rs:496-503) match. Model-visible error text + recovery hint genuinely differ. Severity low (error-path text only). Confirmed.",
+      "severity": "low",
+      "verdict_note": "confirmed"
+    },
+    {
+      "subsystem": "tools/file Grep + Glob (lingxi-code tools/file/src/grep.rs, glob.rs; telemetry/src/tengu/tool.rs)",
+      "title": "Grep/Glob emit fabricated `tengu_tool_grep_*` / `tengu_tool_glob_*` telemetry events that do not exist in claude-code",
+      "verdict": "confirmed",
+      "corrected_detail": "BINARY: decisively confirmed. `grep -a -o 'tengu_[a-z_]*grep[a-z_]*'` and `'...glob...'` over the binary return ONLY `tengu_file_suggestions_ripgrep`, `tengu_ripgrep_availability`, `tengu_ripgrep_eagain_retry` \u2014 zero `tengu_tool_grep_*` / `tengu_tool_glob_*`. Moreover CC has NO per-tool lifecycle events for ANY builtin tool: `tengu_tool_bash_*` and `tengu_tool_read_*` both return 0 hits; CC's tool analytics are the generic `tengu_tool_use_*` family (can_use_tool_allowed/rejected, cancelled, error, diff_computed, granted_by_*, denied_in_config, etc.). LINGXI: tool.rs:60-70 defines GREP_STARTED/COMPLETED/FAILED + GLOB_STARTED/COMPLETED/FAILED as `tengu_tool_grep_*`/`tengu_tool_glob_*`; grep.rs:342/366/379 and glob.rs:138/152/165 fire them. These are genuinely fabricated event names. (Scope note: this is part of a MUCH larger fabricated `tengu_tool_<name>_*` family \u2014 bash/edit/read/write/notebook/task/etc. \u2014 none of which exist in CC; the audit only flags grep/glob.) Confirmed for grep/glob.",
+      "severity": "low",
+      "verdict_note": "confirmed"
+    },
+    {
+      "subsystem": "tools/file Grep + Glob (lingxi-code tools/file/src/grep.rs, glob.rs; telemetry/src/tengu/tool.rs)",
+      "title": "Grep does not exclude paths covered by Read(deny) permission rules; claude-code converts deny rules into `--glob !<pattern>` excludes",
+      "verdict": "confirmed",
+      "corrected_detail": "BINARY: confirmed the construction. Found `push(\"--glob\",L)}for` (the deny-glob push loop followed by the cache-marker loop) and the per-pattern transform `` `!${P}`:`!**/${P}` `` (absolute pattern \u2192 `!path`, relative \u2192 `!**/path`). Also confirmed `read\",\"deny\"` appears 3x \u2014 the read-deny rule selector (UMl(e,\"read\",\"deny\")). LINGXI: grep.rs:527-550 OverrideBuilder excludes ONLY the 6 VCS dirs (VCS_DIRECTORIES_TO_EXCLUDE) + the user `glob` param \u2014 no Read(deny)-derived excludes, no cache-marker scan. grep.rs header lines 32-34 EXPLICITLY document this as DEFERRED ('no permission-context accessor for them exists in this workspace yet'). glob.rs:274-289 likewise registers only the user pattern. So files matched by an active Read(deny) rule ARE returned by LingXi but pruned by CC \u2014 a real permission-scoping gap (documented-deferred). Auditor's confidence 'medium' is apt (requires threading a read-deny accessor into BuiltinToolContext). Confirmed.",
+      "severity": "medium",
+      "verdict_note": "confirmed"
+    },
+    {
+      "subsystem": "permissions",
+      "title": "WebFetch permission rules: no wildcard domain matching (domain:*, domain:*.example.com)",
+      "verdict": "confirmed",
+      "corrected_detail": "Binary evidence holds EXACTLY as quoted. Verified in claude.exe: `function y$n(e,t){let n=e.get(t);if(n)return n;let r=v$a(t),o;for(let[s,i]of e){let a=v$a(s);if(!a.includes(\"*\")){if(a===r)return i}else if(o===void 0&&bRp(a,r))o=i}return o}`; `function v$a(e){if(!e.startsWith(\"domain:\"))return e;return `domain:${e.slice(7).toLowerCase().replace(/(?<=[^*.])\\.+(?=(:\\d+)?$)/,\"\")}`}`; `function bRp(e,t){...if(e===\"domain:*\")return!0;...if(e.startsWith(\"domain:*.\"))n=`^domain:(?:[^.:]+\\\\.)+${w$a(e.slice(9))}$`;else n=`^domain:${w$a(e.slice(7))}$`;return new RegExp(n,\"i\").test(t)}` and `function w$a(e){return e.split(\"*\").map((t)=>t.replace(/[.+?^${}()|[\\]\\\\]/g,\"\\\\$&\")).join(\"[^.:]*\")}`. Example strings `WebFetch(domain:*.google.com)` present in binary. LingXi side confirmed: policy.rs:1076-1093 `tool_content_key` builds `domain:{url_hostname}`; policy.rs:723 matches via raw byte-equality `tool_content_key(tool_name, input).as_deref() == Some(pattern)`; url_hostname (policy.rs:1099-1117) does NOT lowercase; rule.rs stores rule_content verbatim with NO to_lowercase/wildcard handling anywhere (grep for to_lowercase/domain: in rule.rs found only the round-trip test at rule.rs:344). BOTH sub-claims hold: (a) `domain:*` and `domain:*.google.com` rules never match in LingXi; (b) case-insensitivity diverges \u2014 URL `https://API.Example.com` \u2192 key `domain:API.Example.com` won't equal a `domain:api.example.com` rule in LingXi, but matches case-insensitively in claude-code.",
+      "severity": "medium",
+      "fix_sketch": "Replace the exact compare for WebFetch content rules (policy.rs:723) with a port of y$n/bRp/v$a: normalize both rule + key via lowercase + trailing-dot strip, support `domain:*` (allow-all), `domain:*.x` subdomain regex `^domain:(?:[^.:]+\\.)+{escaped}$`, and inline `*`\u2192`[^.:]*`, all case-insensitive."
+    },
+    {
+      "subsystem": "permissions",
+      "title": "defaultMode='auto' from settings.json is silently ignored",
+      "verdict": "confirmed",
+      "corrected_detail": "Binary confirmed: literal `enum([\"default\",\"acceptEdits\",\"bypassPermissions\",\"plan\",\"dontAsk\",\"auto\"])` present in claude.exe \u2014 `auto` IS an accepted defaultMode value. LingXi confirmed: loader.rs:92-101 `default_mode_from_settings_json` matches only default/plan/acceptEdits/bypassPermissions/dontAsk and returns `None` for any other value (incl. \"auto\"), so the caller falls back to Default. A settings.json with `permissions.defaultMode=\"auto\"` is honored by claude-code but ignored by LingXi. Note: actual entry into auto-mode is further gated in claude-code by the bx() model/circuit-breaker/disableAutoMode gate, so even claude-code may not END in auto for non-first-party models \u2014 but the enum value is parsed/accepted there and dropped entirely in LingXi.",
+      "severity": "low",
+      "fix_sketch": "Map \"auto\" \u2192 PermissionMode::Auto in default_mode_from_settings_json, and ensure the engine honors Auto from settings gated like claude-code's bx() (model XCe + circuit-breaker + disableAutoMode)."
+    },
+    {
+      "subsystem": "permissions",
+      "title": "Shift+Tab mode cycle never reaches 'auto' (plan\u2192auto, bypassPermissions\u2192auto)",
+      "verdict": "confirmed",
+      "corrected_detail": "Binary cycle confirmed verbatim: `case\"default\":return\"acceptEdits\";case\"acceptEdits\":return\"plan\";case\"plan\":if(e.isBypassPermissionsModeAvailable)return\"bypassPermissions\";if(mJn(e))return\"auto\";return\"default\";case\"bypassPermissions\":if(mJn(e))return\"auto\";return\"default\";case\"dontAsk\":return\"default\"`. The auditor's CENTRAL claim \u2014 that the gate is NOT USER_TYPE==='ant'-gated \u2014 is VERIFIED: `function mJn(e){let t=bx(),n=GPo(),r=!!e.isAutoModeAvailable&&t&&!n;...return r}`; `function bx(){if(gM?.isAutoModeCircuitBroken()??!1)return!1;if(DIo())return!1;if(!XCe(js()))return!1;return!0}`; `function DIo(){let e=ts()||{};return e.disableAutoMode===\"disable\"||e.permissions?.disableAutoMode===\"disable\"}`; `isAutoModeAvailable:bx()`. `grep -c USER_TYPE` over the `function bx()` line = 0, and no `USER_TYPE===\"ant\"` string is associated with auto-mode in the binary. So the gate is circuit-breaker + settings disableAutoMode + model gate XCe(js()) \u2014 NOT user-type. LingXi confirmed: mode.rs:57-66 `next_permission_mode` has Default\u2192AcceptEdits, AcceptEdits\u2192Plan, Plan-if-bypass\u2192BypassPermissions, and the catch-all `_ => Default` covers Plan(no bypass), BypassPermissions, DontAsk, Bubble, Auto. There is NO Auto cycle target. The mode.rs:47-55 doc comment explicitly (and now-falsely per the binary) attributes the omission to `USER_TYPE==='ant'` gating. User can never reach Auto via Shift+Tab in LingXi. Severity medium is fair; note auto IS additionally model-gated (XCe \u2014 first-party/anthropic newer models) so the practical reachability is narrower than 'any session', but the LingXi cycle closes the door unconditionally.",
+      "severity": "medium",
+      "fix_sketch": "Add Auto as a cycle target for plan\u2192auto and bypassPermissions\u2192auto, gated on a canCycleToAuto predicate mirroring mJn/bx (isAutoModeAvailable + !circuit-broken + !disableAutoMode-setting + model gate XCe); correct the stale 'USER_TYPE==ant-gated' doc comment at mode.rs:50-55."
+    },
+    {
+      "subsystem": "permissions",
+      "title": "acceptEdits auto-allow ignores additionalDirectories (additional_working_dirs never wired)",
+      "verdict": "confirmed",
+      "corrected_detail": "Binary confirmed: `function kF(e,t,n){let r=n??MD(e),o=Array.from(b$(t)).flatMap((s)=>WKn(s));return r.every((s)=>o.some((i)=>R0(s,i,{caseFold:!1})))}` and `kF(o,n,s);if(n.mode===\"acceptEdits\"&&d)return{behavior:\"allow\",updatedInput:t,decisionReason:{type:\"mode\",mode:n.mode}}` \u2014 acceptEdits auto-allows when the path is under ANY working dir (cwd \u222a additionalWorkingDirectories). LingXi confirmed: the ONLY callers of `with_working_dirs` (which is the sole way to populate `additional_working_dirs`) are policy.rs:152 (the definition) and policy.rs:2477 (a UNIT TEST). The production boot at apps/engine-desktop/src/lib.rs:2430-2432 chains `PermissionPolicy::from_rules(mode, rules).with_roots(roots).with_sandbox_runtime(sandbox_auto_allow)` with NO `.with_working_dirs(...)`, so `additional_working_dirs` is always empty in production. The field IS consumed by the authorize logic (policy.rs:368, 486-488, 888, 931) \u2014 so wiring it would take effect immediately. Settings `additionalDirectories` is parsed and threaded ONLY into the sandbox/filesystem allow-list (sandbox/src/policy_convert.rs:56,83,183-191; merged at lib.rs:259-260,369-370), never into the PermissionPolicy. Result: in acceptEdits mode, an edit/write under an additionalDirectories entry (outside cwd) is auto-allowed by claude-code but ASKS in LingXi; the bash path-constraint guard (policy.rs:359-368) likewise asks for redirects/cd into an additional dir claude-code permits.",
+      "severity": "medium",
+      "fix_sketch": "At engine boot (engine-desktop lib.rs ~2430), thread the already-parsed merged settings `additionalDirectories` into `.with_working_dirs(dirs)` on the PermissionPolicy chain (it is already collected for the sandbox path at lib.rs:259-260/369-370)."
+    },
+    {
+      "subsystem": "permissions",
+      "title": "Rule-source precedence array is in the reverse order vs claude-code (affects cited rule / decisionReason)",
+      "verdict": "confirmed",
+      "corrected_detail": "Binary confirmed: `Szn=[...Tw,\"cliArg\",\"command\",\"session\",\"toolsNarrowing\",\"mcpServerPolicy\"]` with `Tw=[\"userSettings\",\"projectSettings\",\"localSettings\",\"flagSettings\",\"policySettings\"]`, and `function yG(e){return Szn.flatMap((t)=>(e.alwaysDenyRules[t]||[]).map((n)=>({source:t,ruleBehavior:\"deny\",ruleValue:bA(n)})))}` followed by `.find(...)` \u2014 so the FIRST matching rule object cited is the userSettings one (Szn head). LingXi confirmed: policy.rs:34-43 `SOURCES_BY_PRIORITY=[Session,Command,CliArg,PolicySettings,FlagSettings,LocalSettings,ProjectSettings,UserSettings]` (Session first) and rule.rs:181-198 `priority()` ranks UserSettings=0..Session=7 \u2014 the EXACT reverse of Szn iteration. `first_match` (policy.rs:747-766) returns the first match walking SOURCES_BY_PRIORITY = Session-first. Observability characterization is correct: this only changes which rule OBJECT/string is cited in `decisionReason.rule` (and surfaced suggestions/prompt), NOT the allow/deny outcome \u2014 authorize_inner (policy.rs:285-312) walks the whole deny bucket first across all sources so any deny wins regardless of which source's rule is returned. Genuinely reversed; cosmetic severity is appropriate.",
+      "severity": "cosmetic",
+      "fix_sketch": "Reverse SOURCES_BY_PRIORITY (and the rule.rs priority() ranking it derives from for citation) so the first-matched/cited rule walks userSettings\u2192\u2026\u2192session matching Szn; verify against the cited rule string in permission prompts. Note: outcome is unaffected, so this is purely about matching claude-code's reported decisionReason.rule."
+    },
+    {
+      "subsystem": "permissions",
+      "title": "Missing rule sources toolsNarrowing / mcpServerPolicy and the MCP effectiveMaxPermission='ask' step",
+      "verdict": "confirmed",
+      "corrected_detail": "Binary confirmed: `Szn=[...Tw,\"cliArg\",\"command\",\"session\",\"toolsNarrowing\",\"mcpServerPolicy\"]` (two extra sources beyond LingXi's 8), and the MCP step `...effectiveMaxPermission===\"ask\"){let c={type:\"other\",reason:mBl};return{behavior:\"ask\",message:Yp(e.name,c),decisionReason:c}}` with `mBl=\"Your organization requires approval for this tool\"` (both quotes verified verbatim in claude.exe). LingXi confirmed: rule.rs:161-179 `PermissionRuleSource` has exactly 8 variants (UserSettings, ProjectSettings, LocalSettings, FlagSettings, PolicySettings, CliArg, Command, Session) \u2014 no toolsNarrowing / mcpServerPolicy. grep over permission/src for effectiveMaxPermission / mcpServerPolicy / toolsNarrowing / 'organization requires' returned ZERO hits \u2014 the org-requires-approval ask step is entirely absent from authorize_inner. The org-ask branch IS architecturally part of the permission engine (it lives in checkRuleBasedPermissions/XHe, between content-ask and the mode fallback), so the gap is correctly attributed to the permission engine even though effectiveMaxPermission is sourced from MCP server policy. Confidence raised to confirmed on the binary facts; the only 'medium' aspect (the MCP plumbing that supplies effectiveMaxPermission) is a separate downstream wiring concern.",
+      "severity": "low",
+      "fix_sketch": "Add toolsNarrowing + mcpServerPolicy to PermissionRuleSource (placed at the tail of iteration order to match Szn), and add an `effectiveMaxPermission == 'ask'` branch returning behavior:ask with reason 'Your organization requires approval for this tool' after the content-ask walk in authorize_inner \u2014 gated on an mcpInfo field threaded from the MCP subsystem."
+    },
+    {
+      "subsystem": "hooks",
+      "title": "permissionDecision \"defer\" (4th value) is unimplemented \u2014 PreToolUse hooks cannot defer a tool call in print mode",
+      "verdict": "confirmed",
+      "corrected_detail": "Binary evidence holds verbatim. claude.exe switch: `...case\"ask\":u.permissionBehavior=\"ask\";break;case\"defer\":u.permissionBehavior=\"defer\"` (present in BOTH the top-level and hookSpecificOutput variants of the switch \u2014 the hookSpecificOutput one uses `e.hookSpecificOutput.permissionDecisionReason||e.reason` for the blockingError). Schema: `permissionDecision:'\"allow\" | \"deny\" | \"ask\" | \"defer\" (optional)'`. Both warnings present: `permissionDecision=defer in interactive mode; ignoring (defer is print-mode only)` and `permissionDecision=defer but ${ee} tool calls are in this batch; ignoring (defer is solo-only \u2014 siblings would be orphaned on resume)`. Telemetry `tengu_pre_tool_hook_deferred` present, and `tool_deferred` is in the stop-reason list DDa. LingXi-current verified exact: hook_payload.rs:813-822 (top-level) handles only allow/deny, `_ => {}` drops ask+defer (the comment at :820 literally says \"ask and any other value fall through\"); hook_payload.rs:875-883 (hookSpecificOutput) same. response.rs:107-118 HookDecision enum = Allow/Approve/Block/Continue, no Defer. grep across hooks/orchestrator/permission for defer behavioral handling = 0 (only English 'deferred' in unrelated comments). Whole feature absent.",
+      "severity": "medium",
+      "fix_sketch": "Add a Defer variant to HookDecision; parse permissionDecision==\"defer\" in both parse_response sites; thread a permissionBehavior=defer path into the PreToolUse turn-loop handling, gated on non-interactive(print) mode + single-tool batch, emitting the two warn messages and tengu_pre_tool_hook_deferred."
+    },
+    {
+      "subsystem": "hooks",
+      "title": "hookSpecificOutput.updatedToolOutput (replaces output for ALL tools) is missing \u2014 only MCP-only updatedMCPToolOutput is implemented",
+      "verdict": "confirmed",
+      "corrected_detail": "Binary: `updatedToolOutput` is genuinely PARSED, not just a schema string. parseHookJSONOutput: `e.hookSpecificOutput.updatedToolOutput!==void 0)u.updatedToolOutput=e.hookSpecificOutput.updatedToolOutput`. Apply for ALL tools: `\"updatedToolOutput\"in D&&e.outputSchema?.safeParse(D.updatedToolOutput)?.success!==!1)x.data=D.updatedToolOutput` (no isMcp gate). Legacy MCP field is converted/MCP-gated: `if(p.updatedMCPToolOutput!==void 0&&Pk(t))yield{updatedToolOutput:p.updatedMCPToolOutput}`. Schema descriptions confirmed: `Replaces the tool output before it is sent to the model` and `Replaces the output for MCP tools only. Prefer updatedToolOutput, which works for all tools`. Shape error confirmed: `PostToolUse hook returned updatedToolOutput that does not match ${e.name}'s output shape: `. LingXi-current verified: response.rs:59-67 + :197-204 have only updated_mcp_tool_output (MCP-gated per the doc); hook_payload.rs:849-855 parses only updatedMCPToolOutput (PostToolUse-scoped, null-guarded). grep updatedToolOutput/updated_tool_output in hooks+orchestrator = 0. No output-shape validation/error path. This is a v2.1.181-era addition LingXi lacks.",
+      "severity": "medium",
+      "fix_sketch": "Add updated_tool_output: Option<Value> to HookResponse + AggregateHookResult; parse hookSpecificOutput.updatedToolOutput; in the orchestrator apply for ALL tools (no isMcpTool gate), validate against the tool's outputSchema and emit the does-not-match error on mismatch; keep updatedMCPToolOutput as the MCP-only legacy path that maps onto updatedToolOutput."
+    },
+    {
+      "subsystem": "hooks",
+      "title": "Three user-configurable hook events missing: PostToolBatch, UserPromptExpansion, MessageDisplay",
+      "verdict": "confirmed",
+      "corrected_detail": "Binary registry nym confirmed with all 30 entries incl `PostToolBatch:G4t`, `UserPromptExpansion:b$t`, `MessageDisplay:aAt`. Exact payloads verified: `hook_event_name:\"PostToolBatch\",tool_calls:e`; `hook_event_name:\"UserPromptExpansion\",expansion_type:e,command_name:t,command_args:n,command_source:r,prompt:o`; `hook_event_name:\"MessageDisplay\",turn_id:e.turnId,message_id:e.messageId,index:e.index,final:e.final,delta:e.delta`. LingXi-current verified: events.rs:18-73 HookEventType has exactly 27 variants (counted: none of the three present); loader.rs:281-310 parse_event_type has 27 arms + `_ => None` (the doc-comment at :275 even states \"all 27\"), so a settings.json hook keyed on any of the three is silently dropped at load.",
+      "severity": "medium",
+      "fix_sketch": "Add the three HookEventType variants + payloads; add loader::parse_event_type arms; wire firing sites (batch end, prompt/slash-command expansion, message render) and the MessageDisplay displayContent return path."
+    },
+    {
+      "subsystem": "hooks",
+      "title": "hook-output field terminalSequence (OSC-emit) is unimplemented",
+      "verdict": "confirmed",
+      "corrected_detail": "Binary holds: apply path `terminalSequence){let p=NEo(e.terminalSequence);if(p!==null)u.terminalSequence=p;else C(\\`Hook ${t} (...) returned a terminalSequence that was rejected by the allowlist (only OSC 0/1/2/9/99/777 and BEL are permitted)\\`)`. Schema describe: `A terminal escape sequence (e.g. OSC 9 / OSC 777 desktop-notification) for Claude Code to emit on your behalf. Only notification/title OSCs (0, 1, 2, 9, 99, 777) and BEL are permitted; anything else is dropped.` LingXi-current verified: HookResponse (response.rs:18-88) has no terminal_sequence field; grep terminalSequence/terminal_sequence/plainText in hooks+orchestrator = 0; parse_response never reads it.",
+      "severity": "low",
+      "fix_sketch": "Add terminal_sequence: Option<String> to HookResponse; parse top-level terminalSequence; validate against the OSC 0/1/2/9/99/777+BEL allowlist (NEo); emit via the TUI terminal writer or drop with the warn message on rejection."
+    },
+    {
+      "subsystem": "hooks",
+      "title": "Managed-policy hook gates disableAllHooks and allowManagedHooksOnly are absent",
+      "verdict": "confirmed",
+      "corrected_detail": "Binary holds: `function h$(){return Hn(\"policySettings\")?.disableAllHooks===!0}` and the runner gate `if(h$())return C(\\`Skipping hooks for ${i} due to 'disableAllHooks' managed setting\\`),[]` (verified the gate IS at the head of the generic runner cH, immediately followed by the workspace-trust gate and the matched-hook map). vBr loader: `if(e?.allowManagedHooksOnly===!0||Bl())return e?.hooks??{}`. allowManagedHooksOnly appears 11x, disableAllHooks 13x. LingXi-current verified: grep disableAllHooks/disable_all_hooks/allowManagedHooksOnly/allow_managed_hooks across the ENTIRE *.rs tree = 0 hits. No policy-tier gate in loader.rs or executor.rs; all user/project hooks always load and run.",
+      "severity": "medium",
+      "fix_sketch": "In the settings->hooks loader read policySettings.disableAllHooks (return no hooks) and policySettings.allowManagedHooksOnly (return only policy-tier hooks); gate the executor entry with the disableAllHooks check + the 'Skipping hooks ... due to disableAllHooks managed setting' log."
+    },
+    {
+      "subsystem": "hooks",
+      "title": "SessionEnd batch timeout (CLAUDE_CODE_SESSIONEND_HOOKS_TIMEOUT_MS, floor 1500ms, cap 60000ms) not implemented",
+      "verdict": "confirmed",
+      "corrected_detail": "Binary holds exactly: `Wqt(){let e=process.env.CLAUDE_CODE_SESSIONEND_HOOKS_TIMEOUT_MS,t=e?parseInt(e,10):NaN;if(Number.isFinite(t)&&t>0)return t;let n=0,...for(...)if(i.timeout&&i.timeout*1000>n)n=i.timeout*1000;return Math.max(nzn,Math.min(n,rym))}`. Constants confirmed: `nzn=1500` and `rym=60000`. SESSION_END_HOOK_TIMEOUT_MS_DEFAULT and ASYNC_REWAKE_FLUSH_TIMEOUT_MS are exported. CLAUDE_CODE_SESSIONEND_HOOKS_TIMEOUT_MS is a registered env var. LingXi-current verified: executor.rs:48-58 defines only HOOK_HTTP_TIMEOUT_MS=600_000, HOOK_COMMAND_TIMEOUT_MS=600_000, HOOK_AGENT_TIMEOUT_MS=60_000; grep for the env var / SESSION_END_HOOK_TIMEOUT / ASYNC_REWAKE_FLUSH in hooks+orchestrator = 0. SessionEnd uses the generic per-hook 10-min command timeout with no shutdown deadline.",
+      "severity": "low",
+      "fix_sketch": "When firing SessionEnd hooks, compute a batch deadline = parse(CLAUDE_CODE_SESSIONEND_HOOKS_TIMEOUT_MS) if finite>0 else max(1500, min(maxPerHookTimeoutMs, 60000)) and race the whole batch against it; add the env-var read."
+    },
+    {
+      "subsystem": "hooks",
+      "title": "Command hook env: missing COLUMNS/LINES and missing literal ${CLAUDE_PROJECT_DIR}/${CLAUDE_PLUGIN_ROOT} string substitution in the command",
+      "verdict": "confirmed",
+      "corrected_detail": "Binary holds: `...CLAUDE_PROJECT_DIR:T(S)},{columns:L,rows:D}=process.stdout;if(L)P.COLUMNS=String(L);if(D)P.LINES=String(D)` and the substituter `...fe.replaceAll(\"${CLAUDE_PROJECT_DIR}\",()=>S)...` (+ ${CLAUDE_PLUGIN_ROOT}/${CLAUDE_PLUGIN_DATA}) plus CLAUDE_CODE_SHELL_PREFIX usage \u2014 all present. LingXi-current verified: executor.rs:571-588 builds child_env = env.clone() then inserts ONLY CLAUDE_PROJECT_DIR (no COLUMNS/LINES, no CLAUDE_CODE_SHELL_PREFIX); command/args passed verbatim (command.clone()/args.clone()) with NO ${CLAUDE_PROJECT_DIR} literal substitution \u2014 the code comment even says it relies on a shell expanding $CLAUDE_PROJECT_DIR, not the claude-code-level ${...} token replaceAll. So non-shell exec / args won't see the literal token.",
+      "severity": "low",
+      "fix_sketch": "Before spawning, replaceAll the ${CLAUDE_PROJECT_DIR} token in command+args with the project dir (mirror plugin tokens when in scope); set COLUMNS/LINES from terminal size; honor CLAUDE_CODE_SHELL_PREFIX."
+    },
+    {
+      "subsystem": "hooks",
+      "title": "Base hook input is missing the `effort` field",
+      "verdict": "confirmed",
+      "corrected_detail": "Binary holds: `vd` returns `{session_id:r,transcript_path:tD(r),cwd:Pt(),permission_mode:e,agent_id:n?.agentId,agent_type:o,effort:a}` where `a=s&&n?.getAppState&&Lw(s)?{level:jO(s,i)}:void 0` and `jO(e,t){let n=oZ(e,t)??\"high\";return Mfe(n)}` \u2014 so effort={level} ONLY when the model supports effort (Lw), else omitted; defaults to 'high'. Schema `effort:E.object(`/`effort:E.union(` with `level:E.enum`/`level:E.string`. CORRECTION to auditor's lingxi_current cite: there is NO `BaseHookFields struct` at hook_payload.rs:785-789 (line 785 is inside parse_response; grep for BaseHookFields/BaseFields struct = 0 hits) \u2014 base fields are inlined per-payload (e.g. PreToolUsePayload :127-136 ends at agent_type). Gap itself holds: grep effort in hooks/src finds only the English word 'best-effort' in comments (19 hits, 0 field); no payload serializes an effort field. Wire shape diverges (absent rather than conditionally present).",
+      "severity": "low",
+      "fix_sketch": "Add effort: Option<EffortLevel> ({level: String}) to each base payload, skip_serializing_if None; populate from the main-loop model's effort (default 'high') only when the model supports effort levels \u2014 matching the conditional spread."
+    },
+    {
+      "subsystem": "hooks",
+      "title": "Hook tool-name matcher ignores the dynamic toolAliases map; PreToolUse decision aggregation short-circuits on first Block",
+      "verdict": "confirmed",
+      "corrected_detail": "BOTH halves confirmed. (a) Matcher: binary `iym(e,t,n)` is 3-arg with n=toolAliases; simple branch `t.split(\"|\").flatMap((o)=>REt(n0(o.trim()),n)).includes(e)` where `REt(e,t){let n=t&&Object.hasOwn(t,e)?t[e]:void 0;return n!==void 0&&n!==e?[e,n]:[e]}`; regex branch tests e, then static reverse bnn(e), then DYNAMIC reverse `for(let o of Enn(e,n))if(r.test(o))return!0` where `Enn(e,t){...for(let[r,o]of Object.entries(t))if(o===e)n.push(r)...}`. Caller passes `a=e?.toolPermissionContext.toolAliases`. NOTE: toolAliases is an SDK/init-config option (`toolAliases:E.record(E.string(),E.string()).optional().describe(\"Map of tool-name aliases ...\")` from initConfig.toolAliases/options.toolAliases), NOT a settings.json field \u2014 so this half is DORMANT for plain REPL/CLI (empty map) and only bites SDK hosts that set it. LingXi matcher.rs:73 matches_pattern is 2-arg (no aliases), only static get_legacy_tool_names; grep toolAliases/tool_aliases in hooks+permission = 0. (b) Aggregation: this is the impactful common-path half. Binary runner: `let m=c.map(async(...)=>{...{...,blocked:D}})` over ALL matched hooks then `f=await Promise.all(m)` \u2014 runs EVERY matched hook concurrently, NO short-circuit; blocked folded later via `ctt(e){return e.some((t)=>t.blocked)}`. LingXi executor.rs:289-291 / :345-347 / :397-399 break the loop the moment agg.decision==Block, so later matching hooks for the same event never dispatch (their side effects / systemMessage / additionalContext are lost). Raise from auditor's 'medium' confidence \u2014 both halves verified against source.",
+      "severity": "low",
+      "fix_sketch": "Thread the permission-context toolAliases map into matches_pattern and expand modern+legacy+dynamic names (REt/Enn equivalents). For aggregation, dispatch ALL matched hooks for an event (concurrently like claude-code, or at least without breaking on first Block) then fold blocked = any block \u2014 rather than short-circuiting on first Block."
+    },
+    {
+      "subsystem": "system-prompt assembly (orchestrator/src/prompt + agent/handle + conversation.rs build_system_prompt) vs claude-code getSystemPrompt/J0 + enhanceSystemPromptWithEnvDetails (Vym/Kym) + eIo/ZA/tIo",
+      "title": "Entire main system-prompt BODY is absent from LingXi's default prompt",
+      "verdict": "confirmed",
+      "corrected_detail": "Binary verified: J0/getSystemPrompt returns the array `[...o?[$ym(c)]:[Pym(c),Oym(),(c===null||c.keepCodingInstructions===true)?Lym():null,Mym(t),Nym(d),Uym()], ...r?.excludeDynamicSections?[Nhi(t)]:[<Eym/Cym/vym/Fym/kym/Hym... Zk dynamic sections>], ...QCe()?[Soe]:[], ...A, rNl(t)]`. Pym(c) body verified at its def: \"\\nYou are an interactive agent that helps users ... with software engineering tasks. Use the instructions below ...\\n\\n${zHo}\\nIMPORTANT: You must NEVER generate or guess URLs ...\". The short DEFAULT_PREFIX `dyn()`='You are Claude Code, Anthropic''s official CLI for Claude.' is PREPENDED to this body at API-assembly time (`Wc([Kun(W,..),dyn(..),...t,...])`), confirming HEADER and BODY are BOTH present in claude-code and the body is NOT the header. The `$ym` alternate branch ALSO emits a full behavioral body, so both gate branches send multi-KB steering. LingXi side verified: assemble_system_prompt_with_style (mod.rs:86-115) = HEADER + env + memory + <tools> + optional output-style + FOOTER only; grep over *.rs for 'Assist with authorized security','interactive agent that helps users','NEVER generate or guess URLs','Executing actions with care','Communicating with the user','# Tone and style','Using your tools' = 0 hits each. Production send path conversation.rs:2587 uses build_system_prompt() when override is None; system_prompt_override defaults None (config.rs:213) and is Some only in coordinator mode (engine-desktop:2757-2776). So the default model gets HEADER+env+memory+tools+footer with none of Pym/Oym/Lym/Mym/Nym/Uym/zHo/URL-line/dynamic sections.",
+      "severity": "high",
+      "verdict_note": "fix_sketch sound: port the static section set as locked literals between HEADER and env in J0 order; dynamic sections incremental.",
+      "fix_sketch": "Insert locked literals for Pym opening + zHo + URL line + Oym(# System) + Lym(code-style) + Mym(# Executing actions with care) + Nym(# Using your tools) + Uym(# Tone and style) between HEADER and the env block, in J0 emit order; add flag-gated dynamic sections incrementally."
+    },
+    {
+      "subsystem": "system-prompt assembly (orchestrator/src/prompt + agent/handle + conversation.rs build_system_prompt) vs claude-code getSystemPrompt/J0 + enhanceSystemPromptWithEnvDetails (Vym/Kym) + eIo/ZA/tIo",
+      "title": "env <env> block lacks the \"Here is useful information about the environment\" preamble line",
+      "verdict": "confirmed",
+      "corrected_detail": "Vym source verified verbatim at binary offset 205822510: `return\\`Here is useful information about the environment you are running in:\\n<env>\\nWorking directory: ${Pt()}\\nIs directory a git repo: ${n?\"Yes\":\"No\"}\\n${s}Platform: ${je.platform}\\n${tIo()}\\nOS Version: ${r}\\n</env>\\n${o}${a}\\``. Preamble line is present immediately before <env>. LingXi env_block.rs:36 starts with `s.push_str(\"<env>\\n\")` \u2014 no preamble; grep for the preamble literal = 0 hits. Note: this preamble belongs to the env-DETAILS attachment (rNl/Vym), which in claude-code comes LAST (after the body), not as a top-of-prompt header.",
+      "severity": "medium",
+      "fix_sketch": "Prepend \"Here is useful information about the environment you are running in:\\n\" before `<env>\\n` in env_block::format."
+    },
+    {
+      "subsystem": "system-prompt assembly (orchestrator/src/prompt + agent/handle + conversation.rs build_system_prompt) vs claude-code getSystemPrompt/J0 + enhanceSystemPromptWithEnvDetails (Vym/Kym) + eIo/ZA/tIo",
+      "title": "<env> block emits extra `Git branch` / `Working tree clean` lines not in claude-code",
+      "verdict": "confirmed",
+      "corrected_detail": "Vym (offset 205822510) emits inside <env> only: Working directory / `Is directory a git repo: ${n?\"Yes\":\"No\"}` / `${s}`(additional working dirs, optional) / Platform / `${tIo()}`(Shell line) / OS Version. No branch or working-tree-clean lines. LingXi env_block.rs:47-51 writes `  Git branch: {branch}` and `  Working tree clean: {clean}` when git_status is Some \u2014 and the code comment at line 48 explicitly labels it 'LingXi extension'. Confirmed two extra indented lines that change the env-block bytes.",
+      "severity": "medium",
+      "fix_sketch": "Remove the two `  Git branch:`/`  Working tree clean:` lines from env_block::format; route any richer git summary through a separate attachment block, not <env>."
+    },
+    {
+      "subsystem": "system-prompt assembly (orchestrator/src/prompt + agent/handle + conversation.rs build_system_prompt) vs claude-code getSystemPrompt/J0 + enhanceSystemPromptWithEnvDetails (Vym/Kym) + eIo/ZA/tIo",
+      "title": "knowledge_cutoff_for_model returns wrong/None cutoff for the newest models (opus-4-7/4-8, fable-5, mythos-5)",
+      "verdict": "confirmed",
+      "corrected_detail": "eIo verified verbatim at offset ~205825743: `function eIo(e){let t=Fo(e);if(t===\"claude-fable-5\"||t===\"claude-mythos-5\")return\"January 2026\";if(t===\"claude-opus-4-8\")return\"January 2026\";else if(t===\"claude-opus-4-7\")return\"January 2026\";else if(t===\"claude-sonnet-4-6\")return\"August 2025\";else if(t===\"claude-opus-4-6\")return\"May 2025\";else if(t===\"claude-opus-4-5\")return\"May 2025\";else if(t===\"claude-haiku-4-5\")return\"February 2025\";...}`. LingXi knowledge_cutoff_for_model (env_meta.rs:89-105): opus-4-7/4-8 fall into the generic `contains(\"claude-opus-4\")` arm \u2192 \"January 2025\" (WRONG \u2192 should be January 2026); fable-5/mythos-5 have no arm \u2192 None (WRONG \u2192 should be January 2026). Uses substring matching not eIo's exact canonical ===, so order-fallthrough is the root cause.",
+      "severity": "medium",
+      "fix_sketch": "Add arms (before the generic claude-opus-4 substring arm) for claude-opus-4-8/4-7 \u2192 \"January 2026\" and claude-fable-5/claude-mythos-5 \u2192 \"January 2026\"; prefer exact-canonical matching as eIo does."
+    },
+    {
+      "subsystem": "system-prompt assembly (orchestrator/src/prompt + agent/handle + conversation.rs build_system_prompt) vs claude-code getSystemPrompt/J0 + enhanceSystemPromptWithEnvDetails (Vym/Kym) + eIo/ZA/tIo",
+      "title": "marketing_name_for_model returns \"Opus 4\" for opus-4-7/4-8 and None for fable-5/mythos-5",
+      "verdict": "confirmed",
+      "corrected_detail": "The env-block marketing fn used by Kym is `ZA` (offset 194419596), NOT getMarketingNameForModel/Xoe (the picker variant Xoe is at 194417528). ZA verified: `function ZA(e){if(xr()===\"foundry\")return;let t=e.toLowerCase().includes(\"[1m]\"),n=Fo(e);if(n===\"claude-fable-5\")return\"Fable 5\";if(n===\"claude-mythos-5\")return\"Mythos 5\";if(n===\"claude-opus-4-8\")return t?\"Opus 4.8 (1M context)\":\"Opus 4.8\";if(n===\"claude-opus-4-7\")return t?\"Opus 4.7 (1M context)\":\"Opus 4.7\";if(n===\"claude-opus-4-6\")return t?\"Opus 4.6 (1M context)\":\"Opus 4.6\";...}`. LingXi marketing_name_for_model (env_meta.rs:29-82) uses substring fallthrough: opus-4-7/4-8 hit `contains(\"claude-opus-4\")` \u2192 \"Opus 4\"; fable-5/mythos-5 \u2192 None. Stale test at env_meta.rs:156 asserts `marketing_name_for_model(\"claude-opus-4-7\") == Some(\"Opus 4\")`. Secondary pre-existing divergence (not part of this gap): LingXi's 1M-suffix wording is \"(with 1M context)\" while ZA emits \"(1M context)\".",
+      "severity": "medium",
+      "fix_sketch": "Add exact-match arms ordered before the generic claude-opus-4 needle: claude-opus-4-8\u2192\"Opus 4.8\"/\"Opus 4.8 (1M context)\", claude-opus-4-7\u2192\"Opus 4.7\"/\"Opus 4.7 (1M context)\", claude-fable-5\u2192\"Fable 5\", claude-mythos-5\u2192\"Mythos 5\". Update the stale assertion at env_meta.rs:156. Optionally align 1M wording to ZA's \"(1M context)\"."
+    },
+    {
+      "subsystem": "system-prompt assembly (orchestrator/src/prompt + agent/handle + conversation.rs build_system_prompt) vs claude-code getSystemPrompt/J0 + enhanceSystemPromptWithEnvDetails (Vym/Kym) + eIo/ZA/tIo",
+      "title": "Subagent Notes footer is missing claude-code's 5th bullet (the report/.md-files instruction)",
+      "verdict": "confirmed",
+      "corrected_detail": "Binary footer 5th bullet verified verbatim: `- Do NOT ${zc} report/summary/findings/analysis .md files. Return findings directly as your final assistant message \u2014 the parent agent reads your text output, not files you create.` with `zc=\"Write\"` verified at offset ~196433263 (`var zc=\"Write\";`). Surrounding binary context shows this footer is element `o` in the agent-thread builder `return[...e,o,s(=await Vym),...i(=rNl)]`, i.e. the subagent prompt. LingXi SUBAGENT_NOTES_TRAILER (agent/handle.rs:485-489) ends at '...\"Let me read the file.\" with a period.' with NO 5th bullet; orchestrator FOOTER (locked_templates.rs:25-29) likewise has only 4 bullets.",
+      "severity": "medium",
+      "fix_sketch": "Append 5th bullet to both SUBAGENT_NOTES_TRAILER and FOOTER: \"\\n- Do NOT Write report/summary/findings/analysis .md files. Return findings directly as your final assistant message \u2014 the parent agent reads your text output, not files you create.\" Re-verify the locked byte-length tests after."
+    },
+    {
+      "subsystem": "system-prompt assembly (orchestrator/src/prompt + agent/handle + conversation.rs build_system_prompt) vs claude-code getSystemPrompt/J0 + enhanceSystemPromptWithEnvDetails (Vym/Kym) + eIo/ZA/tIo",
+      "title": "LingXi injects a spurious <tools> name-list block into the system prompt",
+      "verdict": "confirmed",
+      "corrected_detail": "Binary count of '<tools>' = 0 and '</tools>' = 0 (raw byte search over the whole 215MB binary). claude-code never emits a <tools> block in the system prompt; tools reach the model only via the API tools: array. LingXi tools_block.rs:14-29 emits `<tools>\\n- {name}\\n...\\n</tools>\\n` (alphabetically sorted) and mod.rs:101-105 splices it into every assembled prompt when tool_names is non-empty (fed by self.tools.all_names() at conversation.rs:3761). Auditor confidence 'medium' can be raised to high \u2014 the 0/0 binary count is unambiguous.",
+      "severity": "low",
+      "fix_sketch": "Drop the <tools> block from assemble_system_prompt (tools already reach the model via the wire tools: array). If retained for a non-tool-calling fallback, gate it off the default path."
+    },
+    {
+      "subsystem": "system-prompt assembly (orchestrator/src/prompt + agent/handle + conversation.rs build_system_prompt) vs claude-code getSystemPrompt/J0 + enhanceSystemPromptWithEnvDetails (Vym/Kym) + eIo/ZA/tIo",
+      "title": "Shell line not normalized to zsh/bash nor handling Windows PowerShell variants",
+      "verdict": "confirmed",
+      "corrected_detail": "tIo() verified verbatim at offset ~205826055: `function tIo(){let e=process.env.SHELL||\"unknown\",t=e.includes(\"zsh\")?\"zsh\":e.includes(\"bash\")?\"bash\":e;if(je.platform===\"win32\"){if(!Su())return\"Shell: PowerShell\";if(tN())return\"Shell: PowerShell (primary); Bash tool also available for POSIX scripts \u2014 each takes its own syntax.\";return\\`Shell: ${t}\\`}return\\`Shell: ${t}\\`}`. LingXi conversation.rs:3763-3770 derives shell via `Path::new($SHELL).file_name()` basename, unwrap_or \"sh\", no zsh/bash collapse, no win32 branch. CORRECTION to the auditor's framing: the divergence for non-zsh/bash shells is larger than 'file_name vs substring-collapse' \u2014 claude-code returns the RAW full $SHELL value (e.g. \"Shell: /usr/local/bin/fish\") whereas LingXi returns the basename (\"Shell: fish\"); for zsh/bash both agree; for unset $SHELL LingXi=\"sh\" vs claude-code=\"unknown\". Severity low because the common macOS/Linux case ($SHELL ending in /zsh or /bash) is byte-identical.",
+      "severity": "low",
+      "fix_sketch": "Port tIo() at the shell-probe site: collapse $SHELL to \"zsh\"/\"bash\" by substring else use the raw $SHELL value, default \"unknown\" when unset, and add the win32 PowerShell branch (Su/tN equivalents)."
+    },
+    {
+      "subsystem": "compaction (auto-compact / microcompact / post-compact)",
+      "title": "Rapid-refill (thrashing) breaker entirely missing \u2014 no consecutiveRapidRefills / turnCounter<3 detection, no thrashing abort message",
+      "verdict": "confirmed",
+      "corrected_detail": "Binary VERIFIED byte-for-byte: `function kho(e){return e?.compacted===!0&&e.turnCounter<Who?(e?.consecutiveRapidRefills??0)+1:0}` with `jho=3,Who=3,f6n=3`. Two trip sites confirmed: (1) REACTIVE PTL path `let Pr=kho(oe);if(!G&&Pr>=f6n){j(\"tengu_auto_compact_rapid_refill_breaker\",{consecutiveRapidRefills:...,turnsSincePreviousCompact:oe?.turnCounter??-1,...});...return yield <Rho err>,...{reason:\"rapid_refill_breaker\"}}` \u2014 emits the `Rho` invalid_request error and aborts; (2) PROACTIVE path `let d=kho(o);if(d>=f6n)return C(\"autocompact: rapid-refill breaker tripped \u2014 ...\"),Lt(\"compact_auto\",\"compact_auto_rapid_refill_breaker\"),{wasCompacted:!1,rapidRefillBreakerTripped:!0}`. The `Rho` message is byte-exact: 'Autocompact is thrashing: the context refilled to the limit within ${Who} turns of the previous compact, ${f6n} times in a row. A file being read or a tool output is likely too large for the context window. Try reading in smaller chunks, or use /clear to start fresh.' `rapid_refill_breaker` is also a registered abort reason (DDa array). LingXi VERIFIED: thresholds.rs:78-87 `AutoCompactTrackingState` has `compacted`/`turn_counter`/`turn_id` fields but a repo-wide grep across compaction/+orchestrator/ shows they are NEVER assigned or read (only match is unrelated `was_compacted`). orchestrator.rs:226-253 implements only the consecutive-FAILURE breaker (`MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES=3`). Zero hits for rapid_refill/thrashing/consecutive_rapid anywhere. reactive.rs is a 4-line stub. Auditor's file:lines and behavior are all accurate.",
+      "severity": "medium",
+      "fix_sketch": "Track turn_counter/compacted across turns; on each compact compute kho-equivalent (compacted && turn_counter<3 \u2192 ++consecutive_rapid_refills else reset); at >=3 skip the summarizer and surface the byte-exact thrashing message as an invalid_request assistant error ending the turn (reactive path) / return rapidRefillBreakerTripped (proactive path). Wire into maybe_compact_before_call + the reactive PTL path."
+    },
+    {
+      "subsystem": "compaction (auto-compact / microcompact / post-compact)",
+      "title": "'Fixed prefix exceeds threshold \u2014 compaction cannot help' guard (a3p) missing \u2014 compaction is attempted even when it can never reduce below threshold",
+      "verdict": "confirmed",
+      "corrected_detail": "Binary VERIFIED: `function a3p(e,t,n,r=0){let o=Xtt(e);if(!o)return null;let s=o.input_tokens+o.cache_read_input_tokens+o.cache_creation_input_tokens,i=Nv(e,Rw(t)),a=Math.max(0,s-r-i),l=lOt(t,n);if(a<=l)return null;...}` \u2014 prefixTokens `a = max(0, totalInput - r - messagesEstimate)` vs threshold `l=lOt(t,n)`, returns the overflow descriptor only when `a>l`. Caller confirmed: `let u=a3p(e,a,l,s);if(u)C(\"autocompact: fixed prefix ~${u.prefixTokens} > threshold ${u.thresholdTokens} \u2014 compaction cannot help\",{level:\"warn\"}),Lt(\"compact_auto\",\"compact_auto_prefix_overflow\"),j(\"tengu_auto_compact_prefix_overflow\",{...u,wouldHaveBlocked:!0})`. Strings `compactionImpossible`, `compact_auto_prefix_overflow`, `tengu_auto_compact_prefix_overflow` all present in binary. LingXi VERIFIED: orchestrator.rs:215-253 gates autocompact only on `should_auto_compact(...)` + the failure breaker; no fixed-prefix check. grep for cannot help/fixed.prefix/prefix_overflow/prefix_tokens/compactionImpossible across compaction/+orchestrator/ returns nothing (one unrelated comment in task_lifecycle_hook_firer.rs). Auditor accurate.",
+      "severity": "medium",
+      "fix_sketch": "Before the summarizer, estimate fixed-prefix tokens from the last usage snapshot (totalInput \u2212 snipFreed \u2212 messagesEstimate) and compare to the autocompact threshold; if prefix>threshold, skip the summarizer, log 'fixed prefix ~N > threshold M \u2014 compaction cannot help', fire tengu_auto_compact_prefix_overflow, and on the reactive path surface compactionImpossible instead of compacting."
+    },
+    {
+      "subsystem": "compaction (auto-compact / microcompact / post-compact)",
+      "title": "Time-based microcompact fires below the 20,000-token floor (k5r) \u2014 clears tool results that save only a few tokens",
+      "verdict": "confirmed",
+      "corrected_detail": "Binary VERIFIED: `k5r=20000` and `let{keepSet:r,tokensSaved:o,candidates:s}=H5r(e,n.keepRecent);if(o<k5r)return null;` \u2014 savings are computed FIRST (H5r), then the whole microcompact is abandoned (returns null = clears NOTHING) when total would-be savings < 20000. Placeholder `[Old tool result content cleared]` also confirmed in binary. LingXi VERIFIED: microcompact.rs:265-267 guard is `if tokens_saved == 0 { return Self::noop(out); }` \u2014 no 20k floor; any non-zero savings clears. Note LingXi mutates first then checks (vs binary's compute-then-check), an additional structural difference but the observable divergence is the threshold (0 vs 20000). Placeholder string at line 32 matches. Auditor's cited line range (262-267) is off by ~3 (actual guard 265-267) but substantively correct. Severity low is right \u2014 microcompact is time-gated/disabled by default (config.enabled=false), so this only bites when enabled.",
+      "severity": "low",
+      "fix_sketch": "Add `MICROCOMPACT_MIN_TOKENS_SAVED: u64 = 20_000` and return the no-op when `tokens_saved < 20_000` instead of `== 0` (ideally compute the candidate set + savings before mutating, to match the binary's H5r-then-check ordering and avoid mutating then reverting)."
+    },
+    {
+      "subsystem": "compaction (auto-compact / microcompact / post-compact)",
+      "title": "Proactive auto-compact trigger uses strict '>' instead of '>=' at the threshold boundary",
+      "verdict": "confirmed",
+      "corrected_detail": "Binary VERIFIED: the proactive runtime gate is `l3p`\u2192`KRe`\u2192`pFi`. `function pFi(e,t,n,r=t){let o=Swn(t,n),s=n.enabled?o:t,...;if(n.enabled&&e>=o)return{level:\"compact\",pctLeft:c};...}` uses `e>=o` (>=) for the compact level. `function Swn(e,t){let n=e-13000;...}` = effective\u221213000 threshold. `l3p` subtracts the snip offset then routes through KRe/pFi and returns `i.level===\"compact\"||\"blocked\"`. So at exactly tokens==threshold claude-code DOES compact. LingXi VERIFIED: threshold_calc.rs:54-56 `should_auto_compact = estimated_tokens.saturating_sub(snip_freed) > threshold` (strict >), and this is the exact function the proactive trigger calls at orchestrator/conversation.rs:1433 (maybe_compact_before_call) and compaction/orchestrator.rs:217. The divergence is correctly isolated: thresholds.rs:189-190 `is_above_auto_compact_threshold = enabled && token_usage >= autocompact_threshold` already uses >= (matches pFi) but is NOT on the proactive trigger path. One caveat on the auditor's framing: the LingXi doc-comment claims should_auto_compact mirrors an older `shouldAutoCompact (autoCompact.ts:225-238)` strict-`>` test; the *current* binary's proactive runtime path is the `>=` pFi level-calc, so this is a genuine 1-token boundary divergence. Confidence medium is appropriate (single-token edge case).",
+      "severity": "low",
+      "fix_sketch": "Change should_auto_compact to `estimated_tokens.saturating_sub(snip_freed) >= threshold`, or route the proactive trigger through calculate_token_warning_state(...).is_above_auto_compact_threshold which already has the correct >= boundary."
+    },
+    {
+      "subsystem": "compaction (auto-compact / microcompact / post-compact)",
+      "title": "messagesToPreserve / recent-message-tail preservation after compaction is not wired (full-history replacement only)",
+      "verdict": "confirmed",
+      "corrected_detail": "Binary VERIFIED: `messagesToPreserve` threaded end-to-end (`messagesToPreserve:[...i.compactResult.messagesToPreserve,...]`); post-compact assembly `{...,messagesToKeep:_,attachments:y.attachments,hookResults:y.hookResults,...}` where `_` derives from messagesToPreserve.map(k4e); `preservedSegment` boundary metadata present (incl. `t.compactMetadata?.preservedSegment||t.compactMetadata?.preservedMessages`). So claude-code can keep a verbatim tail of recent messages and relink them. (The exact literal `recentMessagesPreserved` did not appear as a standalone string \u2014 likely a property access not a string constant \u2014 but the messagesToPreserve/messagesToKeep/preservedSegment machinery that constitutes the gap is fully present.) LingXi VERIFIED: prompt.rs:20-23 documents the recentMessagesPreserved/up_to/partial variants as an intentional deferral; boundary.rs:146 create_compact_boundary hardcodes `preserved_segment: None` (and test :232 asserts it stays None); orchestrator/conversation.rs:1346-1348 apply_post_compact builds `history_after = [marker, ...result.messages]` with no kept tail; autocompact replaces history with a single summary message. Auditor accurate; severity low is right (documented deferral, real behavioral difference).",
+      "severity": "low",
+      "fix_sketch": "Implement the partial/up-to compaction path: select a tail of recent messages to preserve, append them after summaryMessages, populate CompactBoundaryMetadata.preserved_segment with head/anchor/tail ids, and use the recentMessagesPreserved continuation-message branch in get_compact_user_summary_message."
+    },
+    {
+      "subsystem": "compaction (auto-compact / microcompact / post-compact)",
+      "title": "Post-compact file/skill attachment restoration is unwired (constants defined, never consumed; PostCompactBuilder returns empty attachments)",
+      "verdict": "confirmed",
+      "corrected_detail": "Binary VERIFIED: snapshot-then-clear-then-restore pattern `let f=eOt(d.readFileState); d.readFileState.clear(); ...; let _=e.messagesToPreserve.map(k4e),y=await K2p(f,d,_).catch(()=>({attachments:[],hookResults:[]}))` then `{...,attachments:y.attachments,hookResults:y.hookResults}`; succeeded event `tengu_auto_compact_succeeded` with `compactedMessageCount:se.summaryMessages.length+se.attachments.length+se.hookResults.length` \u2014 all confirmed byte-level (incl. the `attachments:[],hookResults:[]` catch fallback). LingXi VERIFIED: thresholds.rs:32-40 define POST_COMPACT_MAX_FILES_TO_RESTORE=5 / POST_COMPACT_TOKEN_BUDGET=50_000 / POST_COMPACT_MAX_TOKENS_PER_FILE=5_000 / POST_COMPACT_MAX_TOKENS_PER_SKILL=5_000 / POST_COMPACT_SKILLS_TOKEN_BUDGET=25_000 \u2014 grep shows ZERO consumers of any of the five. post_compact.rs:113-122 PostCompactBuilder::build returns `attachments: Vec::new()` and prepends `\"Compact boundary:\\n\"`; grep confirms PostCompactBuilder is referenced ONLY in a session_memory.rs:26 doc comment \u2014 never actually called. The live apply_post_compact path (conversation.rs:1324-1348) correctly does NOT use the non-faithful prefix (it uses create_compact_boundary + extends result.messages), so the prefix is inert dead code. Auditor accurate on all points.",
+      "severity": "medium",
+      "fix_sketch": "Wire PostCompactBuilder (or apply_post_compact) to snapshot read-file state before clearing, restore up to POST_COMPACT_MAX_FILES_TO_RESTORE files within POST_COMPACT_TOKEN_BUDGET / per-file caps as attachments appended after the summary, restore active-skill content similarly, and count them in the succeeded telemetry's compactedMessageCount. Consume the existing dead constants; drop the non-faithful 'Compact boundary:' prefix from PostCompactBuilder."
+    },
+    {
+      "subsystem": "slash-commands",
+      "title": "Slash palette descriptions for the 18 core commands diverge from claude-code's verbatim strings",
+      "verdict": "confirmed",
+      "corrected_detail": "Binary v2.1.183 verbatim strings re-extracted and MATCH the auditor: agents=\"Manage agent configurations\", clear=\"Start a new session with empty context; previous session stays on disk (resumable with /resume)\", compact=\"Free up context by summarizing the conversation so far\", config=\"Open settings\", doctor=\"Diagnose and verify your Claude Code installation and settings\", memory=\"Open a memory file in your editor\", model=\"Set the AI model for Claude Code\", status=\"Show Claude Code status including version, model, account, API connectivity, and tool statuses\", permissions=\"Manage allow and deny tool permission rules\". LingXi core_description() at command-api/src/builtin_support/names.rs:382-404 returns the older/shorter strings (agents=\"Manage subagents\", config=\"Open config panel\", etc.) \u2014 9 of the 9 cited differ verbatim. These feed the palette via tui/src/components/prompt_input/palette.rs:81 and render at palette.rs:175 as `/name \u2013 desc`. (Note: config also has a SECOND binary object description \"Set a setting by key\" for the `config set` subcommand, and model has a FleetView variant \"Set model for this FleetView session (not persisted)\" \u2014 the canonical palette ones are the cited values.) Real, user-visible divergence.",
+      "severity": "medium"
+    },
+    {
+      "subsystem": "slash-commands",
+      "title": "Built-in command aliases are not registered (/quit, /settings, /allowed-tools, /undo, /checkpoint, /cost, /stats, etc. fail to resolve)",
+      "verdict": "confirmed",
+      "corrected_detail": "Binary aliases re-extracted and MATCH: config=[settings], exit=[quit], permissions=[allowed-tools], usage=[cost,stats], rename=[name], rewind=[checkpoint,undo], plugin=[plugins,marketplace], tasks=[bashes], desktop=[app], mobile=[ios,android], session=[remote]. LingXi: register_builtin_handler() at command-api/src/registry.rs:46-58 builds SlashCommand with `..SlashCommand::default()` (empty aliases) AND \u2014 unlike register_command at registry.rs:32 \u2014 does NOT call index_aliases(), so even a populated aliases field would not be indexed for builtin handlers. The BuiltinCommandHandler trait (command-api/src/model.rs:229-236) has only handle/name/description \u2014 no aliases() method. The ONLY builtin alias wired anywhere is continue->resume (commands/core/src/register.rs:174); the registry.rs:229 and dispatcher.rs:229 hits are test code. So /quit, /settings, /allowed-tools, /undo, /checkpoint, /cost-as-alias, /stats-as-alias, /name, /plugins, /marketplace, /bashes, /app, /remote all dead. Confirmed.",
+      "severity": "medium"
+    },
+    {
+      "subsystem": "slash-commands",
+      "title": "Slash palette/help lists hidden + internal commands that claude-code filters out",
+      "verdict": "confirmed",
+      "corrected_detail": "Binary filter expressions confirmed present: `!ne.isHidden&&!$te(ne)).map(...)`, `!r.isHidden).map(...)`, `!S.isHidden&&!$te(S))`, `!Ur.isHidden&&!$te(Ur))` \u2014 $te is the isEnabled-gate. The disabled set is compiled to a single placeholder object `isEnabled:()=>!1,isHidden:!0,name:\"stub\"` (so the audit's per-name list is the conceptual set, materialized as one stub). ant-trace exists (2 hits); autofix-pr/teleport exist as name objects. CORRECTION: `thinkback`/`thinkback-play` returned 0 hits in v2.1.183 (likely removed since the audit's reference) \u2014 not load-bearing for the gap. LingXi side confirmed: PaletteState::rows() at tui/src/components/prompt_input/palette.rs:67-85 builds from the full BUILTIN_COMMAND_NAMES with NO isHidden/isEnabled filter; render_help_screen() at command-api/src/builtin_support/help_render.rs:24-58 iterates ALL 99 names unfiltered (byte-locked to 99 lines). The INTENTIONALLY_DISABLED_COMMANDS / CORRECT_BY_DESIGN_STUBS tables in names.rs have NO runtime consumer (only re-exported in mod.rs) \u2014 documentation-only, confirmed. LingXi surfaces hidden/internal/disabled commands. Confirmed.",
+      "severity": "medium"
+    },
+    {
+      "subsystem": "slash-commands",
+      "title": "DISABLE_*_COMMAND environment gates are ignored",
+      "verdict": "confirmed",
+      "corrected_detail": "Binary has all 8 gates: DISABLE_BUG_COMMAND, DISABLE_DOCTOR_COMMAND, DISABLE_EXTRA_USAGE_COMMAND, DISABLE_FEEDBACK_COMMAND, DISABLE_INSTALL_GITHUB_APP_COMMAND, DISABLE_LOGIN_COMMAND, DISABLE_LOGOUT_COMMAND, DISABLE_UPGRADE_COMMAND. Confirmed inline: doctor=`isEnabled:()=>!je.DISABLE_DOCTOR_COMMAND`, logout=`isEnabled:()=>!je.DISABLE_LOGOUT_COMMAND`. LingXi: grep for any DISABLE_*_COMMAND across commands/ and command-api/ = 0 hits; doctor/login/logout registered unconditionally in register_core_batch_2 (commands/core/src/register.rs:126-129) with no env gate. Confirmed (severity low \u2014 these are uncommon kill-switches).",
+      "severity": "low"
+    },
+    {
+      "subsystem": "slash-commands",
+      "title": "/effort 'max' description hardcodes 'Opus 4.6' instead of interpolating the current top model",
+      "verdict": "confirmed",
+      "corrected_detail": "Binary uses a TEMPLATE: `Maximum capability with deepest reasoning (${gAi})` (gAi = top-model display var). The auditor's 'resolves to Opus 4.8' claim is CORRECT \u2014 \"Opus 4.8\" has 63 occurrences in v2.1.183 (e.g. \"Opus 4.8 (1M context)\", \"Opus 4.8 - best for\"). LingXi: commands/core/src/effort.rs:83 EffortLevel::Max description and effort.rs:47 USAGE both hardcode the literal \"Maximum capability with deepest reasoning (Opus 4.6 only)\" \u2014 wrong model version AND static instead of interpolated. Confirmed. (The doc-comment at effort.rs:46 admits 'verbatim from effort.tsx L174' \u2014 tracks an older revision.)",
+      "severity": "low"
+    },
+    {
+      "subsystem": "slash-commands",
+      "title": "/effort is missing the xhigh, ultracode, and auto-distinct effort levels (only 4 of 7)",
+      "verdict": "confirmed",
+      "corrected_detail": "Binary usage string: `Usage: /effort [low|medium|high|xhigh|max${e?\"|ultracode\":\"\"}|auto]` (ultracode is conditionally appended; xhigh is unconditional). Binary lines present: `Extended reasoning with thorough analysis (${nyn})` (xhigh) and `xhigh + dynamic workflow orchestration (this session only)` (ultracode), plus the auto line. LingXi: commands/core/src/effort.rs:55-61 enum EffortLevel = {Low,Medium,High,Max} only; parse_effort_level (effort.rs:89-97) accepts only those 4; USAGE (effort.rs:47) = `Usage: /effort [low|medium|high|max|auto]` with no xhigh/ultracode. So LingXi exposes 4 named levels vs the binary's 5-6 (xhigh always, ultracode gated). Confirmed. Minor nuance: ultracode is env/flag-gated in the binary, so a faithful port might also gate it \u2014 but xhigh is unconditional and definitively missing.",
+      "severity": "low"
+    },
+    {
+      "subsystem": "slash-commands",
+      "title": "/cost and /stats are standalone commands in LingXi but aliases of /usage in claude-code",
+      "verdict": "confirmed",
+      "corrected_detail": "Binary: `name:\"usage\",aliases:[\"cost\",\"stats\"]` confirmed; standalone `name:\"cost\"` and `name:\"stats\"` = 0 hits each. Two usage description variants exist: \"Show session cost, plan usage, and activity stats\" and \"Show session cost, plan usage, and what's contributing to your limits\". LingXi: names.rs lists cost (:38) and stats (:97) as separate BUILTIN_COMMAND_NAMES; commands/core/src/cost.rs registers a dedicated CostHandler (desc \"Show total cost and duration of the current session\", register.rs:125); stats is registered interactive-only (register.rs:302); usage is ALSO registered interactive-only (register.rs:306) with desc \"Show current session usage\" (usage.rs:13) and carries no cost/stats aliases. Three commands, three descriptions, no aliasing \u2014 vs the binary's one /usage with cost/stats aliases. Confirmed; severity low (partly the upstream consolidation may post-date the audit's reference, but the divergence holds against installed v2.1.183).",
+      "severity": "low"
+    },
+    {
+      "subsystem": "slash-commands",
+      "title": "Commands removed upstream (/vim, /pr-comments, /output-style) are still active builtins in LingXi",
+      "verdict": "confirmed",
+      "corrected_detail": "The auditor flagged this 'low confidence / version-skew' but it VERIFIES against the actually-installed v2.1.183: live command objects `name:\"vim\"` = 0, `name:\"pr-comments\"` = 0, `name:\"output-style\"` = 0; the 'Removed slash commands' changelog table is present (1 hit) including `/pr-comments` | Ask Claude in plain English to view pull request comments` and `Renamed to /usage-credits` (extra-usage->usage-credits; both extra-usage and usage-credits have 2 hits each). LingXi: names.rs still lists output-style(:74), pr-comments(:80), vim(:113), extra-usage(:48); register.rs wires OutputStyleHandler/PrCommentsHandler (register.rs:203-204) and vim interactive-only (register.rs:307). So LingXi presents these as live. Confirmed against v2.1.183 (raises confidence above the auditor's 'low'). Severity low \u2014 version-tracking churn on a deliberately-locked 99-command surface; whether to follow these removals depends on which reference revision LingXi locks to.",
+      "severity": "low"
+    },
+    {
+      "subsystem": "slash-commands",
+      "title": "/clear has no 'reset'/'new' aliases and ignores the optional session-name argument",
+      "verdict": "confirmed",
+      "corrected_detail": "Binary clear object confirmed verbatim: `name:\"clear\",description:\"Start a new session with empty context; previous session stays on disk (resumable with /resume)\",argumentHint:\"[name]\",aliases:[\"reset\",\"new\"],supportsNonInteractive:!0,thinClientDispatch:\"post-text\"`. LingXi: ClearHandler registered with no aliases (register.rs:90, via register_builtin_handler which can't carry aliases anyway \u2014 see gap 2); handle() takes `_args` (commands/core/src/clear.rs:35, underscore = ignored) and unconditionally calls clear_session(), returning \"Conversation cleared.\". So /reset and /new don't resolve and `/clear <name>` ignores the name. Confirmed.",
+      "severity": "low"
+    },
+    {
+      "subsystem": "slash-commands",
+      "title": "/exit description is static 'Exit the REPL' vs claude-code's dynamic background-session-aware string",
+      "verdict": "confirmed",
+      "corrected_detail": "Binary: `name:\"exit\",aliases:[\"quit\"],get description(){return wkl()...}` \u2014 a dynamic getter. \"Detach from this background session (it keeps running)\" present (1 hit), \"Exit the CLI\" present (2 hits). The default (non-background) branch is \"Exit the CLI\". LingXi: exit.rs:49-51 description() returns core_description(\"exit\") = \"Exit the REPL\" (names.rs:390) \u2014 static. CORRECTION: \"Exit the REPL\" does appear once in the binary, but it is NOT the exit command's description (that is wkl()); it's an unrelated string. So LingXi's static \"Exit the REPL\" matches neither branch of wkl(). Confirmed (cosmetic).",
+      "severity": "cosmetic"
+    },
+    {
+      "subsystem": "todo / TodoWrite + Task V2 tools (tool prompts, V1/V2 gate, per-turn todo reminders, verification nudge, input schema)",
+      "title": "isTodoV2Enabled gate formula is stale \u2014 wrong/opposite default vs v2.1.18x",
+      "verdict": "confirmed",
+      "corrected_detail": "Binary (v2.1.183, not .181) literally has `function TE(){if(_l(process.env.CLAUDE_CODE_ENABLE_TASKS))return!1;return!0}`, `isEnabled(){return!TE()}` for TodoWrite, and `_l=function(e){if(e===void 0)return!1;if(typeof e===\"boolean\")return!e;let t=String(e).toLowerCase().trim();return[\"0\",\"false\",\"no\",\"off\"].includes(t)}`. So V2-Task-tools-enabled = NOT(env normalizes to 0/false/no/off); TodoWrite enabled = env-IS-falsy. There is NO non-interactive term. LingXi (task.rs:187-204) computes `todo_v2_enabled_inner = env_truthy(CLAUDE_CODE_ENABLE_TASKS) || !non_interactive`. Re-derived truth table confirms 3 OPPOSITE outcomes: (A) non-interactive+unset: LingXi V2=false\u2192TodoWrite ENABLED vs claude V2=true\u2192TodoWrite OFF; (B) interactive+env=\"false\": LingXi V2=true\u2192TodoWrite OFF vs claude V2=false\u2192TodoWrite ON; (D) interactive+env=\"no\"/\"off\": LingXi ignores no/off (truthy-only) so V2=true\u2192TodoWrite OFF vs claude V2=false\u2192TodoWrite ON. Only the bare interactive+unset case (C) matches. CORRECTION to the auditor's fix_sketch: the needed helper ALREADY EXISTS as `traits::env::is_env_defined_falsy` (env.rs:18-30, matches _l exactly: unset/empty\u2192false, lowercased+trimmed \u2208 {0,false,no,off}); the fix is to rewrite is_todo_v2_enabled as `!traits::env::is_env_defined_falsy(env::var(\"CLAUDE_CODE_ENABLE_TASKS\"))` and drop the non_interactive term + the stale `utils/tasks.ts:130-136` doc cite \u2014 no new helper required.",
+      "severity": "high",
+      "verdict_note": "confirmed",
+      "fix_sketch": "Rewrite is_todo_v2_enabled to `!traits::env::is_env_defined_falsy(std::env::var(\"CLAUDE_CODE_ENABLE_TASKS\").ok().as_deref())`; delete todo_v2_enabled_inner's non_interactive param and NON_INTERACTIVE_SESSION_FLAG plumbing for this gate; reuse the existing is_env_defined_falsy (do NOT add a new is_env_falsy)."
+    },
+    {
+      "subsystem": "todo / TodoWrite + Task V2 tools (tool prompts, V1/V2 gate, per-turn todo reminders, verification nudge, input schema)",
+      "title": "TodoWrite model-facing prompt is a custom 3-sentence blurb, not FWd/UWd",
+      "verdict": "confirmed",
+      "corrected_detail": "Binary confirms `function Xla(e){return Dh(e)?FWd:UWd}`; FWd starts 'Create and update a task list for the current session. The list is rendered to the user as your working plan.'; UWd starts 'Use this tool to create and manage a structured task list for your current coding session'; `Dh=wn((e)=>{if(!e)return!1;if(st(process.env.CLAUDE_CODE_SIMPLE_SYSTEM_PROMPT))return!0;if(_l(process.env.CLAUDE_CODE_SIMPLE_SYSTEM_PROMPT))return!1;return!UWu(e)||FWu(e)})`. LingXi todo_write.rs:238-243 prompt() returns the short custom blurb 'Use TodoWrite to track work-in-progress. Each todo has id, content, and status...At most one todo may be in_progress at a time.' Confirmed this IS the model-facing field: tool-api/src/wire.rs:137-142 `tool_to_wire` sets the wire `description` to `tool.prompt(opts).await`. So the model receives the wrong, far-shorter text with no When-to-Use/Examples/Task-States sections, no FWd/UWd model-gated selection, and it wrongly states todos have an `id` field (claude TodoItem input is {content,status,activeForm}, no id).",
+      "severity": "high",
+      "verdict_note": "confirmed",
+      "fix_sketch": "Embed FWd + UWd verbatim as consts; select via a simple-prompt gate (Dh): thread model id / a simple-prompt bool into PromptOptions and pick FWd when set else UWd; short of threading, default to UWd (long, standard-model path). Drop the bogus `id` mention."
+    },
+    {
+      "subsystem": "todo / TodoWrite + Task V2 tools (tool prompts, V1/V2 gate, per-turn todo reminders, verification nudge, input schema)",
+      "title": "TodoWrite description() text wrong",
+      "verdict": "confirmed",
+      "corrected_detail": "Binary confirms verbatim Qla='Update the todo list for the current session. To be used proactively and often to track progress and pending tasks. Make sure that at least one task is in_progress at all times. Always provide both content (imperative) and activeForm (present continuous) for each task.' and `async description(){return Qla}` + `userFacingName(){return\"\"}`. LingXi todo_write.rs:235-237 description() returns 'Replace the session todo list'. Confirmed divergence; lower observable impact since wire.rs uses prompt() (not description()) for the model-facing description \u2014 description() feeds UI/telemetry surfaces. Severity low stands.",
+      "severity": "low",
+      "verdict_note": "confirmed",
+      "fix_sketch": "Return the Qla string verbatim from description()."
+    },
+    {
+      "subsystem": "todo / TodoWrite + Task V2 tools (tool prompts, V1/V2 gate, per-turn todo reminders, verification nudge, input schema)",
+      "title": "Per-turn todo-reminder attachment is entirely missing",
+      "verdict": "confirmed",
+      "corrected_detail": "Binary confirms `FA(\"todo_reminders\",f)`, renderer text 'The TodoWrite tool hasn't been used recently', 'Here are the existing contents of your todo list', thresholds `TURNS_SINCE_WRITE:10,TURNS_BETWEEN_REMINDERS:10`, the V2 variant 'task tools haven't been used recently', and the killswitch env `CLAUDE_CODE_TODO_REMINDER_MODE` + GrowthBook `tengu_soft_slate_nudge` \u2014 all present. LingXi side: grep across the whole tree for 'existing contents of your todo'/'been used recently'/'TURNS_SINCE_WRITE'/'turnsSinceLastTodoWrite'/'todo_reminder' returns 0 hits; conditional_rules.rs has 0 todo logic; session.todos (engine/src/session.rs) is WRITTEN by TodoWrite but READ only in tests (no orchestrator/coordinator read for context injection). Confirmed entirely missing for both V1 (M4p) and V2 (B4p) variants.",
+      "severity": "high",
+      "verdict_note": "confirmed",
+      "fix_sketch": "Add a per-turn attachment in the orchestrator context-injection path mirroring M4p/B4p: track turnsSinceLastTodoWrite + turnsSinceLastReminder, gate on TodoWrite/Task tool presence + a reminder-mode killswitch (CLAUDE_CODE_TODO_REMINDER_MODE !== 'off'), emit the exact reminder text as an isMeta message, selecting M4p vs B4p by is_todo_v2_enabled."
+    },
+    {
+      "subsystem": "todo / TodoWrite + Task V2 tools (tool prompts, V1/V2 gate, per-turn todo reminders, verification nudge, input schema)",
+      "title": "TodoWrite appends a verification-nudge suffix that does not exist in v2.1.18x",
+      "verdict": "confirmed",
+      "corrected_detail": "STRONGER than the auditor stated: the verification-nudge feature is ENTIRELY ABSENT from v2.1.183 \u2014 0 hits for 'spawn the verification agent', 'You just closed out 3+ tasks', the GrowthBook flag 'tengu_hive_evidence' (0), AND the bundle feature key 'VERIFICATION_AGENT' (0). The binary's TodoWrite mapToolResultToToolResultBlockParam returns ONLY the base string 'Todos have been modified successfully...' (confirmed present). LingXi todo_write.rs:329-341 computes verification_nudge_needed(...) and appends verification_nudge_suffix() with NO verification_feature_enabled() gate \u2014 confirmed by grep: verification_feature_enabled is called ONLY at task.rs:1738 (the V2 TaskUpdate path, correctly gated OFF) and NEVER at the TodoWrite call site. Test nudge_fires_when_all_completed_3plus_no_verif (todo_write.rs:776) asserts the suffix DOES fire on the plain interactive path. So on a plain interactive main-thread session closing out 3+ all-completed non-'verif' todos, LingXi emits model-facing text that v2.1.183 never produces from any tool.",
+      "severity": "medium",
+      "verdict_note": "confirmed",
+      "fix_sketch": "Drop the nudge from TodoWrite entirely (match v2.1.183's unconditional base string) \u2014 OR at minimum gate the suffix behind verification_feature_enabled() at the TodoWrite call site as TaskUpdate already does. Update test nudge_fires_when_all_completed_3plus_no_verif accordingly. (Note: the whole nudge concept incl. TaskUpdate's gated copy is dead in v2.1.183; safest parity is removal.)"
+    },
+    {
+      "subsystem": "todo / TodoWrite + Task V2 tools (tool prompts, V1/V2 gate, per-turn todo reminders, verification nudge, input schema)",
+      "title": "TodoWrite input schema not strict + missing field descriptions",
+      "verdict": "confirmed",
+      "corrected_detail": "Binary confirms top-level `E.strictObject({todos:mst().describe(\"The updated todo list\")})` (strictObject \u21d2 additionalProperties:false), item schema `E.object({content:E.string().min(1,\"Content cannot be empty\"),status:E.enum([\"pending\",\"in_progress\",\"completed\"]),activeForm:E.string().min(1,\"Active form cannot be empty\")})` (plain object), and output schema `E.object({oldTodos:mst().describe(\"The todo list before the update\"),newTodos:...})`. LingXi INPUT_SCHEMA (todo_write.rs:89-111): top-level object has NO additionalProperties:false; `todos` array has NO description; items use minLength:1 with no per-field description; no output schema exposed. Minor advertised-tool-definition drift; severity low stands.",
+      "severity": "low",
+      "verdict_note": "confirmed",
+      "fix_sketch": "Add `\"additionalProperties\": false` at the top level and `\"description\": \"The updated todo list\"` on the todos array to mirror strictObject + .describe()."
+    },
+    {
+      "subsystem": "todo / TodoWrite + Task V2 tools (tool prompts, V1/V2 gate, per-turn todo reminders, verification nudge, input schema)",
+      "title": "TodoWrite validation error text differs from zod messages",
+      "verdict": "confirmed",
+      "corrected_detail": "Binary confirms zod messages 'Content cannot be empty' and 'Active form cannot be empty' (content:E.string().min(1,...) / activeForm:E.string().min(1,...)). LingXi validate_todos (todo_write.rs:55-71) returns 'TodoWrite: todo content is empty' / 'TodoWrite: todo activeForm is empty' AND enforces TODO_MAX_CONTENT_CHARS=4096 (todo_write.rs:40,64-68) \u2014 claude's TodoItemSchema has no max() on content, so LingXi rejects long todos claude accepts. Both message divergence and the extra 4096 cap confirmed; low-frequency path, severity low stands.",
+      "severity": "low",
+      "verdict_note": "confirmed",
+      "fix_sketch": "Align empty-field messages to 'Content cannot be empty' / 'Active form cannot be empty'; remove the 4096-char cap to match the uncapped zod schema."
+    },
+    {
+      "subsystem": "turn-loop (orchestrator agentic loop: stop_reason disposition, streaming tool executor, permission auto-denial breaker, unknown-tool synthetic)",
+      "title": "Malformed-tool-use retry path is absent: stop_reason=\"tool_use\" with zero tool_use blocks ends the turn instead of injecting a retry nudge",
+      "verdict": "confirmed",
+      "corrected_detail": "Binary v2.1.183 evidence is exact (verified in the turn-loop fn P9p, strings record 242378, marker offset 30051): `if((ke?.message.stop_reason??Re)===\"tool_use\"&&ge.length===0&&!ke?.isApiErrorMessage){let Pr=m.transition?.reason!==\"malformed_tool_use_retry\",nr=PZa();if(j(\"tengu_malformed_tool_use_response\",{will_retry:Pr,...}),Pr){if(nr)for(let vs of ie)yield{type:\"tombstone\",message:vs};let io=Ln({content:nr?\"The previous response failed to produce a valid tool call. Please retry the tool call now.\":\"Your tool call was malformed and could not be parsed. Please retry.\",isMeta:!0,...});yield io,m={...maxOutputTokensRecoveryCount:0,hasAttemptedReactiveCompact:!1,...,transition:{reason:\"malformed_tool_use_retry\"}};continue}`. The retried-outcome telemetry tengu_malformed_tool_use_retry_outcome also exists. Both literal strings + event name present in binary (grep count 2 each = const + usage); 0 functional hits in the LingXi tree (the lone orchestrator/tests hit `malformed_tool_use_json_errors_at_stop` is an unrelated JSON-parse test). LingXi-current verified: orchestrator/src/conversation.rs:3399 `Some(\"tool_use\") if !pumped.tool_uses.is_empty() => continue` \u2014 when tool_uses is EMPTY it falls through to the generic `Some(other) =>` terminal arm at conversation.rs:3426-3433 which emits end_turn with the raw value and breaks (ENDS the turn). The batched driver turn_loop.rs:603-617 maps any non-end_turn/non-max_tokens stop_reason to the catch-all `_ => TurnStepOutcome::Continue` (line 616) \u2014 re-calls the API but injects NO retry nudge and NO tombstone. Divergence holds in both drivers.",
+      "severity": "high",
+      "fix_sketch": "In both loops, when stop_reason==\"tool_use\" and the parsed assistant has zero tool_use blocks and it is not an API-error message, emit tengu_malformed_tool_use_response, guard re-retry via a per-loop flag mirroring transition.reason!=\"malformed_tool_use_retry\", optionally tombstone the leaked-invoke assistant messages (clean-retry gated by the PZa() flag), inject an isMeta user message with the byte-exact string (clean-retry variant \"The previous response failed to produce a valid tool call. Please retry the tool call now.\" else \"Your tool call was malformed and could not be parsed. Please retry.\"), reset maxOutputTokensRecoveryCount/hasAttemptedReactiveCompact, set transition.reason=\"malformed_tool_use_retry\", and continue once."
+    },
+    {
+      "subsystem": "turn-loop (orchestrator agentic loop: stop_reason disposition, streaming tool executor, permission auto-denial breaker, unknown-tool synthetic)",
+      "title": "Thinking-only response nudge is absent: an end_turn/stop_sequence with no visible text ends the turn instead of nudging once for a user-visible response",
+      "verdict": "confirmed",
+      "corrected_detail": "Binary v2.1.183 evidence is exact (turn-loop fn P9p, record 242378, marker offset 31200): `let An=ke?.message.stop_reason??Re;if((An===\"end_turn\"||An===\"stop_sequence\")&&!ke?.isApiErrorMessage&&a!==\"compact\"&&!GRe(a)&&!ie.some((Pr)=>Pr.message.content.some((nr)=>nr.type===\"text\"&&nr.text.trim().length>0))){if(!V){Lt(\"query_thinking_only_response\",\"nudged\");let Pr=Ln({content:\"[Your previous response had no visible output. Please continue and produce a user-visible response.]\",isMeta:!0,...});yield Pr,m={...,thinkingOnlyNudged:!0,...,transition:{reason:\"thinking_only_retry\"}};continue}Oe(\"query_thinking_only_response\",\"nudge_exhausted\")}else if(V)Ie(...)`. State init confirms `thinkingOnlyNudged:!1` in m. Note the compact-source gate is BOTH `a!==\"compact\"` AND `!GRe(a)` (auditor only paraphrased the source-not-compact condition; the GRe(a) guard is an additional source-class exclusion \u2014 fix must replicate both). Literal string + event present; 0 hits in LingXi tree (the lone TUI comment hit is unrelated). LingXi-current verified: conversation.rs:3356 `Some(\"end_turn\")` arm does stop-hooks + token-budget then emit_end_turn/break with no empty-text check; no thinkingOnlyNudged state exists anywhere. stop_sequence hits the generic terminal arm at :3426. Confirmed.",
+      "severity": "high",
+      "fix_sketch": "Before treating end_turn/stop_sequence as terminal (and not API-error, and the query source is neither compact nor in the GRe() source class), check whether any newly-produced assistant ContentBlock::Text has a non-empty trimmed body; if none and a once-per-turn thinking_only_nudged flag is unset, log query_thinking_only_response=nudged, inject the byte-exact meta user message, set the flag and transition.reason=\"thinking_only_retry\", continue once; if already nudged log nudge_exhausted and end normally. Add the flag to per-turn loop state in both drivers."
+    },
+    {
+      "subsystem": "turn-loop (orchestrator agentic loop: stop_reason disposition, streaming tool executor, permission auto-denial breaker, unknown-tool synthetic)",
+      "title": "Sibling-error cascade (Bash error cancels parallel siblings with \"Cancelled: parallel tool call \u2026 errored\") no longer exists in claude-code; LingXi still emits it",
+      "verdict": "confirmed",
+      "corrected_detail": "Verified against the binary actually on disk = v2.1.183 (package.json), NOT the audit's stated .181 reference target \u2014 this is the auditor's own flagged caveat and the only residual uncertainty. In v2.1.183 the StreamingToolExecutor (strings record 242298): createSyntheticErrorMessage(e,t,n) handles ONLY t===\"user_interrupted\" (\u2192 bare REJECT_MESSAGE via Wqe(hqe)) else the \"Streaming fallback - tool execution discarded\" string; getAbortReason returns ONLY \"streaming_fallback\" (this.discarded) or \"user_interrupted\" (signal aborted), else null/block. Exhaustive scan of the executor body's `return\"...\"` shows exactly {\"\",\"block\",\"streaming_fallback\",\"user_interrupted\"} \u2014 NO sibling_error. The only \"sibling\" token is the unrelated telemetry event tengu_auto_mode_sibling_context_error (gathers sibling tool context for the auto-mode classifier; not a cancellation). The mid-loop local flag `l` is set when a tool_result has is_error===true but is used solely as the guard `if(u&&!l)` to avoid double-synthesizing an abort error \u2014 siblings keep running. grep \"Cancelled: parallel tool call\" in the binary = 0 (all 6-9 \"parallel tool call\" string hits are prompt/doc text). LingXi-current verified PRESENT and divergent: orchestrator/src/streaming_executor.rs:15 BASH_TOOL_NAME, :33 AbortReason::SiblingError, :57-59 emits `<tool_use_error>Cancelled: parallel tool call {desc} errored</tool_use_error>`, :405-416 drain_one sets has_errored + fires sibling_cancel when a tool named \"Bash\" returns is_error:true (9 tree hits of the string). So LingXi diverges from v2.1.183. Caveat: cannot confirm whether removal happened by .181 or in .182/.183 \u2014 confirm against the pinned target before ripping it out.",
+      "severity": "medium",
+      "fix_sketch": "After confirming the pinned target version, gate or remove the Bash sibling-error cascade so an errored Bash no longer cancels siblings (siblings keep their real results); reduce AbortReason to {StreamingFallback, UserInterrupted}, drop the SiblingError variant + BASH_TOOL_NAME guard + the \"Cancelled: parallel tool call\" string, matching v2.1.183 createSyntheticErrorMessage/getAbortReason."
+    },
+    {
+      "subsystem": "turn-loop (orchestrator agentic loop: stop_reason disposition, streaming tool executor, permission auto-denial breaker, unknown-tool synthetic)",
+      "title": "Refusal \u2192 fallback-model retry is absent: stop_reason \"refusal\" is treated as a hard terminal stop",
+      "verdict": "confirmed",
+      "corrected_detail": "Binary v2.1.183 evidence is exact (API-request layer, strings record 245312, offset 9168): `let Bo=s.refusalFallbackModel??(s.serverRefusalFallback!==void 0&&!ho?s.serverRefusalFallback.model:void 0);if(Hr.stop_reason===\"refusal\"&&Bo!==void 0)return yield{type:\"fallback_request\",trigger:\"refusal\",originalModel:s.model,fallbackModel:Bo,requestId:...,apiRefusalCategory:Hr.stop_details?.category??null,apiRefusalExplanation:Hr.stop_details?.explanation??null,...}`. model_refusal_fallback (27 hits) + refusalFallbackModel (5 hits) + refusalFallbackModelLatch (persistent-swap latch) all present. Minor evidence-string correction: the binary uses `Hr.stop_reason===\"refusal\"` (not a free-standing `stop_reason==\"refusal\"`), so a naive grep for that exact literal returns 0 \u2014 the logic is real, the auditor's paraphrase was slightly off. LingXi-current verified: conversation.rs:3426-3433 generic `Some(other) =>` terminal arm with comment at :3428 explicitly naming \"refusal\" as ended with the value as-is; batched turn_loop.rs:616 catch-all maps refusal to Continue (re-call) but with no model swap/warning. 0 refusal-fallback control-flow hits in orchestrator/ or llm-client/. Config-gated divergence (only manifests when a refusal-fallback model is configured).",
+      "severity": "medium",
+      "fix_sketch": "Add refusal_fallback_model (+ server-refusal-fallback) to OrchestratorConfig; in the request/turn path, when stop_reason==\"refusal\" and a fallback model is set and not yet latched this session, persistently swap session.model to it (refusalFallbackModelLatch equivalent), emit a model_refusal_fallback system warning {direction:\"retry\",level:\"warning\"}, yield a fallback_request{trigger:\"refusal\"}, and retry once; otherwise terminate as today."
+    },
+    {
+      "subsystem": "turn-loop (orchestrator agentic loop: stop_reason disposition, streaming tool executor, permission auto-denial breaker, unknown-tool synthetic)",
+      "title": "Classifier auto-denial circuit breaker is unwired and uses wrong thresholds (LingXi 5/10 per-tool/global vs claude-code 3/20 consecutive/total)",
+      "verdict": "confirmed",
+      "corrected_detail": "Binary v2.1.183 evidence is exact: `function sel(e){return e.consecutiveDenials>=y6n.maxConsecutive||e.totalDenials>=y6n.maxTotal}var y6n;var Mho=b(()=>{y6n={maxConsecutive:3,maxTotal:20}})` (record 242380); the increment (`...Denials+1,totalDenials:e.totalDenials+1`) and reset (`function Y4t(e){if(e.consecutiveDenials===0)return e;return{...e,consecutiveDenials:0}}`) confirmed. The breaker dSm (record 245372/denial1): `if(!sel(e))return null;let i=e.totalDenials>=y6n.maxTotal,a=...shouldAvoidPermissionPrompts,...;if(j(\"tengu_auto_mode_denial_limit_exceeded\",{limit:Qe(i?\"total\":\"consecutive\"),mode:Qe(a?\"headless\":\"cli\"),...}),a)throw new vu(\"Agent aborted: too many classifier denials in headless mode\");if(C(\"Classifier denial limit exceeded, falling back to prompting: ${u}\",{level:\"warn\"}),i)uAt(s,{...e,totalDenials:0,consecutiveDenials:0})`. All literal strings + event (5 hits) present. Minor: the headless mode is keyed off `shouldAvoidPermissionPrompts` (a===headless), not a literal \"headless\" flag \u2014 fix should derive it the same way. LingXi-current verified: permission/src/denial_tracking.rs:12 PER_TOOL_FALLBACK=5, :14 GLOBAL_FALLBACK=10, :16 RECORD_TTL=300s, per-tool HashMap (different model). policy.rs references denial_tracking ONLY at :9 (import), :60 (Mutex field decl), :120 (default init) \u2014 never read for a decision, never mutated; DenialTrackingState has ZERO methods (fn grep empty). The breaker is fully inert. No abort string / fallback-to-prompting / tengu_auto_mode_denial_limit_exceeded anywhere in the tree.",
+      "severity": "medium",
+      "fix_sketch": "Re-model DenialTrackingState to {consecutive_denials, total_denials} with maxConsecutive=3/maxTotal=20 (drop per-tool map + TTL), increment both on auto-mode classifier denies and reset consecutive on a non-deny, and wire sel()/dSm into the auto-mode permission path: on trip emit tengu_auto_mode_denial_limit_exceeded{limit,mode}, throw the byte-exact \"Agent aborted: too many classifier denials in headless mode\" when shouldAvoidPermissionPrompts (headless), else log \"Classifier denial limit exceeded, falling back to prompting: ...\" and (total-limit case) reset counters + switch that tool to interactive prompting."
+    },
+    {
+      "subsystem": "turn-loop (orchestrator agentic loop: stop_reason disposition, streaming tool executor, permission auto-denial breaker, unknown-tool synthetic)",
+      "title": "Unknown-tool error message omits the contextual qmo suffix for disabled/subagent/MCP-connecting tool names",
+      "verdict": "confirmed",
+      "corrected_detail": "Binary v2.1.183 evidence is exact (record 242035): `function qmo(e,t,n,r){if(ox()&&$tt.has(e)&&Cl(t,PA))return\". ${e} is only available inside ${PA}. Use ${PA} with code: await ${e}({...}).\";let o=Cl(O6(),e);if(n&&o&&DRe.has(o.name))return\". ${e} is not available inside subagents. Complete the task with the tools provided and return findings to the orchestrator.\";if(o?.name===Q1)return\". ${e} is not enabled in this session \u2014 write your message as normal assistant text instead.\";if(o)return\". ${e} exists but is not enabled in this context. Use one of the available tools instead.\";...}` and the MCP branch returns `\". The MCP server '${s.name}' is still connecting. Call ${IRe} to wait for it, then try again.\"`. addTool builds `<tool_use_error>Error: No such tool available: ${s}${f}</tool_use_error>` where ${f} is the qmo suffix (verified template at the addTool yield). For a genuinely-unknown name qmo returns \"\" so the message equals LingXi's. LingXi-current verified: orchestrator/src/streaming_executor.rs:600-613 synthetic_unknown_tool(id,name,provider_id) emits exactly `<tool_use_error>Error: No such tool available: {name}</tool_use_error>` with no suffix and no registry/agent/model context parameter; turn_loop reuses the same builder. 0 qmo-suffix string hits in the tree (the lone mcp/src/registry.rs:1776 \"still connecting\" is an unrelated code comment). Low-severity: common hallucinated-tool case is byte-identical; only disabled-built-in / subagent-disallowed / pending-MCP cases lose the corrective hint.",
+      "severity": "low",
+      "fix_sketch": "Extend synthetic_unknown_tool to accept registry/agent-id/main-loop-model context and append a qmo-equivalent suffix: detect tools available only inside the agent-frame, subagent-disallowed tools, the special not-enabled-this-session tool, otherwise-disabled-in-context tools, and pending MCP servers (mcp__server__ prefix) \u2014 emitting the matching byte-exact hint. Default \"\" keeps the common hallucinated-tool case identical."
+    },
+    {
+      "subsystem": "web-tools (WebFetch + WebSearch) parity audit",
+      "title": "WebFetch User-Agent string is wrong: 'claude-code-tool/<ver>' vs 'Claude-User (claude-code/<ver>; +https://support.anthropic.com/)'",
+      "verdict": "confirmed",
+      "corrected_detail": "Binary confirmed at /opt/homebrew/lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe (VERSION 2.1.183): `function sMr(){return\\`Claude-User (${tg()}; +https://support.anthropic.com/)\\`}` and the WebFetch GET (Buo) sends `\"User-Agent\":sMr()`. `function tg(){return\\`claude-code/...\\`}`. `grep -c 'claude-code-tool' = 0` \u2014 the literal NEVER appears in the binary. LingXi: tools/web/src/web_fetch.rs:67 `WEBFETCH_USER_AGENT_PREFIX = \"claude-code-tool/\"`, :312-318 user_agent() => `claude-code-tool/<CARGO_PKG_VERSION>`, sent at :725 as the user-agent header. The doc comment at :1-17 even self-describes the wrong locked string. WebSearch (web_search.rs) does NOT reuse this prefix for its API client (it goes through the hosted web_search tool, not a tool-side GET) \u2014 minor auditor overreach in the lingxi_current note, but the WebFetch divergence is real.",
+      "severity": "medium",
+      "verdict_note": "confirmed",
+      "fix_sketch": "Emit `Claude-User (claude-code/<version>; +https://support.anthropic.com/)`. Note <version> = `claude-code/<ver>` not `<ver>` alone; the prefix model needs replacing with a full formatter, not just a prefix swap. CARGO_PKG_VERSION will not equal claude-code's reported version \u2014 decide whether to track the upstream VERSION string."
+    },
+    {
+      "subsystem": "web-tools (WebFetch + WebSearch) parity audit",
+      "title": "WebFetch local-fetch timeout is 30s, claude-code uses 60s (KHp=60000)",
+      "verdict": "confirmed",
+      "corrected_detail": "Binary: `KHp=60000` and Buo passes `timeout:KHp` (verified both strings present). LingXi: web_fetch.rs:73 `WEBFETCH_TIMEOUT: Duration = Duration::from_secs(30)` used at :730. Real 30s vs 60s divergence per redirect hop. (VHp=10485760 maxContentLength matches LingXi's 10MB cap \u2014 that part is already 1:1.)",
+      "severity": "medium",
+      "fix_sketch": "Set WEBFETCH_TIMEOUT = Duration::from_secs(60). Update the doc comment which currently claims 30s with no TS citation."
+    },
+    {
+      "subsystem": "web-tools (WebFetch + WebSearch) parity audit",
+      "title": "WebFetch HTTP-error result: claude-code returns a SUCCESS data result with a long instructional message; LingXi throws a terse 'WebFetch: HTTP {status} from {url}' transport error",
+      "verdict": "confirmed",
+      "corrected_detail": "Binary confirmed: `function c9n(e){return yqa.STATUS_CODES[e]??\"Unknown Status\"}`; iIp builds `The server returned HTTP ${e.statusCode} ${t}.${n}` + `The response body was not retrieved. If this URL requires authentication, use an authenticated tool (e.g. \\`gh\\` for GitHub, or an MCP-provided fetch tool) instead of WebFetch.` where `n=e.retryAfter?\\`\\nRetry-After: ${e.retryAfter}\\`:\"\"`. Result mapping: `c.type===\"http_error\"){j(\"tengu_web_fetch_http_error\",{statusCode:c.statusCode})...return{data:{bytes:0,code:c.statusCode,codeText:c9n(c.statusCode),result:T,durationMs:Date.now()-l,url:o}}}` \u2014 a DATA result, not a throw. LingXi: web_fetch.rs:238-240 fmt_http_error => `WebFetch: HTTP {status} from {url}`, returned as `Err(ToolError::Transport(...))` at BOTH :812-816 (Ok(resp) status>=400) and :886-890 (Err(HttpError::Status)). No instructional body, no Retry-After echo, no STATUS_CODES text, surfaced as an ERROR not a data result. Fully confirmed.",
+      "severity": "high",
+      "fix_sketch": "Build `The server returned HTTP {code} {statusText}.{retryAfterLine}\\n\\nThe response body was not retrieved...` with statusText from a full HTTP STATUS_CODES table (fallback 'Unknown Status'), echo a numeric Retry-After header, and return as a normal ToolCallResult data result (bytes:0, code, codeText) \u2014 not Err. Emit tengu_web_fetch_http_error telemetry."
+    },
+    {
+      "subsystem": "web-tools (WebFetch + WebSearch) parity audit",
+      "title": "WebFetch redirect status-text only maps 4 codes (fallback 'Found'); claude-code uses Node's full STATUS_CODES table",
+      "verdict": "confirmed",
+      "corrected_detail": "Binary: the REDIRECT DETECTED line uses `let T=c9n(c.statusCode),S=\\`REDIRECT DETECTED...Status: ${c.statusCode} ${T}...` where c9n = full `STATUS_CODES[code]??\"Unknown Status\"`. LingXi: web_fetch.rs:139-146 redirect_status_text matches only 301/308/307, returns \"Found\" for everything else incl. 302/303. Test at :1138-1142 even asserts 303\u2192'Found' and 200\u2192'Found'. So a 303 yields 'Status: 303 Found' vs claude-code's 'Status: 303 See Other'; arbitrary codes mislabeled. (302\u2192'Found' coincides.) Confirmed; shares a root cause with Gap 3's codeText path \u2014 both should use one shared STATUS_CODES table with 'Unknown Status' fallback, not 'Found'.",
+      "severity": "low",
+      "fix_sketch": "Replace redirect_status_text with a full reason-phrase table (fallback 'Unknown Status'), shared with the http-error codeText path."
+    },
+    {
+      "subsystem": "web-tools (WebFetch + WebSearch) parity audit",
+      "title": "WebFetch redirect set omits 303 (See Other)",
+      "verdict": "confirmed",
+      "corrected_detail": "Binary: `YHp=new Set([301,302,303,307,308])` and `if(YHp.has(s)){let l=i.location;...}` \u2014 303 IS treated as a redirect. LingXi: web_fetch.rs:736 `if matches!(resp.status, 301 | 302 | 307 | 308)` \u2014 303 is absent, so a 303 falls through to the normal-response branch (status<400) and its body is treated as content. Confirmed divergence in redirect handling.",
+      "severity": "medium",
+      "fix_sketch": "Add 303 to the redirect-status match at web_fetch.rs:736 (and to the shared status-text table)."
+    },
+    {
+      "subsystem": "web-tools (WebFetch + WebSearch) parity audit",
+      "title": "WebFetch caps the cached/returned content at 100k chars; claude-code caches the FULL content and only truncates the apply-step prompt",
+      "verdict": "confirmed",
+      "corrected_detail": "Binary decisively confirmed: getURLMarkdownContent builds `p` as the FULL content \u2014 `if(a.includes(\"text/html\"))p=await s9n(d),m=Buffer.byteLength(p);else p=d,m=u` (NO truncation) \u2014 then caches it: `let f={bytes:u,code:s.status,codeText:s.statusText,content:p,contentType:a,persistedPath:l,persistedSize:c};...o9n.set(e,f,{size:Math.max(1,m)})`. Truncation to Cut(=1e5) happens ONLY inside the apply step l9n: `function l9n(e,t,n,r,o,s){let i=t.length>Cut?t.slice(0,Cut)+\\`\\n\\n[Content truncated due to length...]\\`:t...}`. LingXi: web_fetch.rs:853 `truncate_markdown_for_return(converted)` truncates to 100k BEFORE caching (:855-864, the cached `content` is the truncated body) and before returning (:868-877). For a >100k page with no apply step LingXi permanently loses the tail and caches it truncated. Confirmed.",
+      "severity": "medium",
+      "fix_sketch": "Cache and return the FULL converted content. Apply the 100k truncation only inside the apply-step prompt (markdown.rs::truncate_markdown already does this). Remove truncate_markdown_for_return from the cache/return path; recompute the `truncated` flag from the apply step, not the stored body."
+    },
+    {
+      "subsystem": "web-tools (WebFetch + WebSearch) parity audit",
+      "title": "WebFetch apply step is gated on (side_query present AND prompt present); claude-code ALWAYS runs the apply model unless URL is preapproved + text/markdown + under cap",
+      "verdict": "confirmed",
+      "corrected_detail": "Binary: `let g=i9n(o),_;if(g&&f.includes(\"text/markdown\")&&u.length<Cut)_=u;else _=await l9n(s,u,...,g,...)` where i9n=isPreapprovedUrl, f=content-type, u=content, s=prompt. The raw fast path requires preapproved AND text/markdown AND len<100k; OTHERWISE the apply model runs (prompt s always passed). LingXi: web_fetch.rs:377-387 maybe_apply runs only `if let (Some(client), Some(p)) = (self.side_query.as_ref(), prompt)` \u2014 both a wired client AND a non-None prompt required; raw content is the DEFAULT. Inverted gate confirmed. One caveat: claude-code's apply ALSO needs a model/side-query equivalent available; the structural inversion (raw-default vs apply-default, and the preapproved&&markdown&&small raw condition) is the real divergence.",
+      "severity": "medium",
+      "fix_sketch": "When a side_query client exists, run the apply step with prompt='' when absent; take the raw path ONLY when isPreapprovedUrl && content-type contains 'text/markdown' && len<100k. Matches `g&&f.includes('text/markdown')&&u.length<Cut`."
+    },
+    {
+      "subsystem": "web-tools (WebFetch + WebSearch) parity audit",
+      "title": "WebSearch description() / prompt() is a 1-line stub; claude-code's WebSearch description is a long mandatory-sources prompt",
+      "verdict": "confirmed",
+      "corrected_detail": "Binary confirmed the full description fragments all present: 'Allows Claude to search the web and use the results to inform responses', 'Returns search result information formatted as search result blocks', 'accessing information beyond Claude['s knowledge cutoff]', 'CRITICAL REQUIREMENT - You MUST follow this', 'Sources:', 'Domain filtering is supported to include or block specific websites', 'Web search is only available in the US', 'IMPORTANT - Use the correct year in search queries', 'The current month is'. LingXi: web_search.rs:758-760 description() => `\"Searches the web via Anthropic's hosted web_search tool.\"`; :761-765 prompt() => one sentence. The model-facing guidance differs radically. Confirmed.",
+      "severity": "high",
+      "fix_sketch": "Replace description() with the verbatim claude-code WebSearch DESCRIPTION incl. the CRITICAL REQUIREMENT 'Sources:' block, usage notes, US-only/domain-filtering lines, and the runtime-substituted current-month/year section (needs a date injection \u2014 it is not a static literal)."
+    },
+    {
+      "subsystem": "web-tools (WebFetch + WebSearch) parity audit",
+      "title": "WebSearch Vertex enablement omits 'claude-fable-5' (and 'anthropicAws'/'gateway' provider arms)",
+      "verdict": "confirmed",
+      "corrected_detail": "Binary: `isEnabled(){let e=xr();if(e===\"firstParty\"||e===\"anthropicAws\")return!0;if(e===\"gateway\")return!1;if(e===\"vertex\"){let t=js();return t.includes(\"claude-fable-5\")||t.includes(\"claude-opus-4\")||t.includes(\"claude-sonnet-4\")||t.includes(\"claude-haiku-4\")}if(e===\"foundry\")return!0;return!1}` plus `Web search is not available on this Foundry deployment` throw. LingXi: web_search.rs:131-144 Vertex arm checks only claude-opus-4/sonnet-4/haiku-4 \u2014 MISSING claude-fable-5. No anthropicAws/gateway concept (both fold to FirstParty-true and Other-false respectively, behaviorally OK except naming). Foundry is unconditionally true with no per-deployment web_search capability gate. The claude-fable-5 omission is the substantive bug: a fable-5 model on Vertex would be enabled upstream but disabled in LingXi. Confirmed.",
+      "severity": "low",
+      "fix_sketch": "Add `model.contains(\"claude-fable-5\")` to the Vertex arm at web_search.rs:137-141. Optionally model the Foundry per-deployment web_search capability gate."
+    },
+    {
+      "subsystem": "web-tools (WebFetch + WebSearch) parity audit",
+      "title": "WebFetch redirect-without-Location returns a normal http_error result; LingXi throws a custom 'redirect missing Location header' error",
+      "verdict": "confirmed",
+      "corrected_detail": "Binary: `if(YHp.has(s)){let l=i.location;if(typeof l!==\"string\"||l.trim()===\"\")return{type:\"http_error\",statusCode:s}...}` \u2014 degrades to the standard http_error result (the iIp instructional data result), NOT a throw. LingXi: web_fetch.rs:742-751 returns `Err(ToolError::Transport(\"WebFetch: redirect missing Location header\"))` \u2014 a thrown transport error whose string does not exist anywhere in the binary. Confirmed; this is the same result-shape divergence as Gap 3 (depends on Gap 3's http_error data-result path existing).",
+      "severity": "low",
+      "fix_sketch": "On empty/missing Location, fall through to the http_error result path (Gap 3's data result), not a throw."
+    },
+    {
+      "subsystem": "web-tools (WebFetch + WebSearch) parity audit",
+      "title": "WebFetch rejects non-http(s) schemes (file/data/ftp) with an invented error; claude-code never rejects by scheme (only upgrades http\u2192https)",
+      "verdict": "confirmed",
+      "corrected_detail": "Binary: WebFetch's getURLMarkdownContent does NO scheme allowlist \u2014 only `if(...protocol===\"http:\")...protocol=\"https:\"` then fetches; validateInput only checks `new URL(url)` parses ('The URL provided could not be parsed'). The 'Invalid URL protocol: must use http:// or https://' string belongs ONLY to `function uVu(e){...if(t.protocol!==\"http:\"&&t.protocol!==\"https:\")throw Error(...)}`, called from `function Oc(e){try{return uVu(e),await Dni(e)...}` \u2014 the browser-OPEN path (Dni runs `open`), NOT WebFetch. LingXi: web_fetch.rs:96-110 validate_url() rejects any non-https/http scheme with the invented `\"URL scheme '{scheme}' not allowed; only https/http\"`, called from call() at :609; tests :937-953 assert file/data/ftp rejection. The auditor's analysis is precise. NOTE: LingXi additionally runs crate::url_safety::validate_url_safety (SSRF/credential/internal-host gate) \u2014 an intentional defense-in-depth addition the auditor acknowledges; only the scheme allowlist rejection is the parity divergence.",
+      "severity": "low",
+      "fix_sketch": "Drop the scheme-allowlist rejection from validate_url (keep the http\u2192https upgrade); rely on validate_input's parse check. Keep the url_safety SSRF gate only if intentionally additive (document it as a known LingXi-only hardening)."
+    },
+    {
+      "subsystem": "web-tools (WebFetch + WebSearch) parity audit",
+      "title": "WebFetch does not persist binary content nor append the '[Binary content ... also saved to <path>]' footer",
+      "verdict": "confirmed",
+      "corrected_detail": "Binary: `if(U7r(a)){let A=\\`webfetch-${Date.now()}-${Math.random().toString(36).slice(2,8)}\\`,h=await B$e(i,a,A);if(!(\"error\"in h))l=h.filepath,c=h.size}` persists binary bodies; result append `[Binary content (${f}, ${Ma(h??d)}) also saved to ${A}]` (Ma = human-size formatter; U7r = binary content-type predicate, both present). LingXi: cache.rs:49-50 has `persisted_path: Option<String>` but web_fetch.rs:862 ALWAYS sets it to `None`; no binary persistence, no footer. The field is dead. Confirmed.",
+      "severity": "low",
+      "fix_sketch": "On a binary content-type, write bytes to `webfetch-<ts>-<rand>` temp file and append `\\n\\n[Binary content (<ctype>, <human-size>) also saved to <path>]` to the result; populate persisted_path/persisted_size. Note: depends on Gap 6 (full content + non-markdown body available) to be coherent."
+    }
+  ]
+}

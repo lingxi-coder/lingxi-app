@@ -172,8 +172,8 @@ static INPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
         "additionalProperties": false,
         "required": ["pattern"],
         "properties": {
-            "pattern": { "type": "string" },
-            "path":    { "type": "string" }
+            "pattern": { "type": "string", "description": "The glob pattern to match files against" },
+            "path":    { "type": "string", "description": "The directory to search in. If not specified, the current working directory will be used. IMPORTANT: Omit this field to use the default directory. DO NOT enter \"undefined\" or \"null\" - simply omit it for the default behavior. Must be a valid directory path if provided." }
         }
     })
 });

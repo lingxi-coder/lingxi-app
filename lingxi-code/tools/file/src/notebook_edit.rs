@@ -164,17 +164,19 @@ impl Tool for NotebookEditTool {
     }
 
     async fn description(&self, _input: &Value, _opts: &DescriptionOptions) -> String {
-        // Verbatim claude-code v2.1.181 NotebookEdit description const `f2a`
+        // Verbatim claude-code v2.1.183 NotebookEdit description const `f2a`
         // (em-dash is U+2014).
         "Edit a cell in a Jupyter notebook — replace, insert, or delete.".to_string()
     }
 
     async fn prompt(&self, _opts: &PromptOptions) -> String {
-        // Verbatim claude-code v2.1.181 NotebookEdit PROMPT const `A2a` (the
-        // older cell_number-based text was version-skewed; v2.1.181 is cell_id-
+        // Verbatim claude-code v2.1.183 NotebookEdit PROMPT const `A2a` (the
+        // older cell_number-based text was version-skewed; v2.1.183 is cell_id-
         // based). `${Ws}` → the "NotebookRead" tool name; em-dashes are U+2014;
-        // the backticks are literal markdown code spans.
+        // the backticks are literal markdown code spans. Note the BLANK LINE
+        // (`\n\n`) between the opening sentence and `Usage:` (binary A2a).
         "Replaces, inserts, or deletes a single cell in a Jupyter notebook (.ipynb file).\n\
+\n\
 Usage:\n\
 - You must use the NotebookRead tool on the notebook in this conversation before editing — this tool will fail otherwise.\n\
 - `notebook_path` must be an absolute path.\n\

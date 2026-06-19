@@ -39,8 +39,8 @@ async fn run_turn_passes_assembled_system_prompt_to_api_client() {
     let systems = api.captured_systems().await;
     assert_eq!(systems.len(), 1, "exactly one API call");
     let s = systems[0].as_deref().expect("system prompt threaded");
-    // Assembler always opens with HEADER and ends with FOOTER's last bullet.
+    // Assembler always opens with HEADER and ends with FOOTER's last (5th) bullet.
     assert!(s.starts_with("You are Claude Code"));
     assert!(s.contains("<env>"));
-    assert!(s.ends_with("with a period.\n"));
+    assert!(s.ends_with("not files you create.\n"));
 }

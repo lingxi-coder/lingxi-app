@@ -501,7 +501,7 @@ mod tests {
         assert!(!default.contains("# Output Style:"));
         // Spot-check the locked envelope is untouched.
         assert!(default.starts_with("You are Claude Code, Anthropic's official CLI for Claude."));
-        assert!(default.ends_with("with a period.\n"));
+        assert!(default.ends_with("not files you create.\n"));
     }
 
     #[test]
@@ -662,6 +662,6 @@ mod tests {
         assert!(blocks[1].text.starts_with(
             "Here is useful information about the environment you are running in:\n<env>"
         ));
-        assert!(blocks[1].text.ends_with("with a period.\n"));
+        assert!(blocks[1].text.ends_with("not files you create.\n"));
     }
 }

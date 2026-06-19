@@ -685,8 +685,13 @@ fn web_search_description() -> String {
     // RAW string with real newlines + indentation: a `\n\` line continuation
     // strips the leading "  " of each bullet, so it must NOT be used here. The
     // content is flush-left in the source so the only indentation is the text's.
+    // The binary's DESCRIPTION template literal begins with a leading newline and
+    // prefixes EVERY bullet with `- ` (incl. the first): `\n- Allows Claude...`.
+    // It also ends with a trailing `\n`. Both are reproduced here (raw string
+    // opens with a newline, first line is `- Allows...`, closes after a newline).
     format!(
-        r#"Allows Claude to search the web and use the results to inform responses
+        r#"
+- Allows Claude to search the web and use the results to inform responses
 - Provides up-to-date information for current events and recent data
 - Returns search result information formatted as search result blocks, including links as markdown hyperlinks
 - Use this tool for accessing information beyond Claude's knowledge cutoff
@@ -710,7 +715,8 @@ Usage notes:
 
 IMPORTANT - Use the correct year in search queries:
   - The current month is {month_year}. You MUST use this year when searching for recent information, documentation, or current events.
-  - Example: If the user asks for "latest React docs", search for "React documentation" with the current year, NOT last year"#
+  - Example: If the user asks for "latest React docs", search for "React documentation" with the current year, NOT last year
+"#
     )
 }
 
@@ -1070,10 +1076,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn description_is_verbatim_v2_1_181() {
+    fn description_is_verbatim_v2_1_183() {
         let d = web_search_description();
-        // Opening + the CRITICAL Sources requirement (byte-exact anchors).
-        assert!(d.starts_with("Allows Claude to search the web and use the results to inform responses\n"));
+        // Opening + the CRITICAL Sources requirement (byte-exact anchors). The
+        // binary's literal starts with a leading newline and a `- ` on the first
+        // bullet (`\n- Allows...`) and ends with a trailing newline.
+        assert!(d.starts_with("\n- Allows Claude to search the web and use the results to inform responses\n"));
         assert!(d.contains("CRITICAL REQUIREMENT - You MUST follow this:\n"));
         assert!(d.contains("  - This is MANDATORY - never skip including sources in your response\n"));
         assert!(d.contains("  - Example format:\n"));
@@ -1081,7 +1089,7 @@ mod tests {
         // Runtime month/year slot: "<Month> <Year>" (e.g. "June 2026").
         let my = chrono::Local::now().format("%B %Y").to_string();
         assert!(d.contains(&format!("The current month is {my}. You MUST use this year")));
-        assert!(d.ends_with("with the current year, NOT last year"));
+        assert!(d.ends_with("with the current year, NOT last year\n"));
     }
 
     #[test]

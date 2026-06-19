@@ -33,8 +33,8 @@ fn minimal_assembly_no_memory_no_tools() {
     assert!(!out.contains(MEMORY_PREAMBLE));
     assert!(!out.contains("Contents of "));
     assert!(!out.contains("<tools>"));
-    // Must end with the footer's final bullet + LF.
-    assert!(out.ends_with("with a period.\n"));
+    // Must end with the footer's final (5th) bullet + LF.
+    assert!(out.ends_with("not files you create.\n"));
 }
 
 #[test]
@@ -95,12 +95,12 @@ fn double_lf_between_each_section() {
 
 #[test]
 fn footer_byte_length_locked() {
-    // FOOTER literal length is locked at 633 bytes (measured at plan
-    // implementation time via _tmp_footer_len.rs probe). The plan
-    // wrote 709 as a guess; 633 is the actual count including the
-    // em-dash (U+2014, 3 UTF-8 bytes) and trailing LF.
+    // FOOTER literal length is locked at 816 bytes (was 633 for the 4-bullet
+    // footer; the 5th "do NOT Write report/.md files" bullet adds 183 bytes).
+    // Includes two em-dashes (U+2014, 3 UTF-8 bytes each, in bullets 2 and 5)
+    // and the trailing LF.
     //
     // If this fails after a claude-code rebase, re-measure with a
     // one-off `println!("{}", FOOTER.len())` probe and update.
-    assert_eq!(orchestrator::prompt::locked_templates::FOOTER.len(), 633);
+    assert_eq!(orchestrator::prompt::locked_templates::FOOTER.len(), 816);
 }

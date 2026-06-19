@@ -69,8 +69,10 @@ pub const WEBFETCH_USER_AGENT_PREFIX: &str = "claude-code-tool/";
 /// Schemes that `WebFetchTool` will accept. Spec §7 lock.
 pub const WEBFETCH_ALLOWED_SCHEMES: &[&str] = &["https", "http"];
 
-/// Per-request HTTP timeout for WebFetch.
-pub const WEBFETCH_TIMEOUT: Duration = Duration::from_secs(30);
+/// Per-request HTTP timeout for WebFetch — byte-locked to claude-code `KHp=60000`
+/// (the `timeout` axios passes in `fo.get(e, {timeout: KHp, ...})` inside the
+/// WebFetch GET helper `Buo`). NOT the 30 000 ms used by other fetches.
+pub const WEBFETCH_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Canonical tool name in the registry.
 pub const TOOL_NAME: &str = "WebFetch";
@@ -824,23 +826,45 @@ Usage notes:\n\
             };
             let result = self.ctx.http.request_no_follow(req).await;
 
-            // Redirect handling only on a 3xx `Ok` carrying a Location header.
+            // Redirect handling on a 3xx `Ok` carrying a Location header. The
+            // redirect status set is byte-locked to claude-code's
+            // `YHp=new Set([301,302,303,307,308])` — 303 (See Other) IS included
+            // (it was previously omitted, so a 303 fell through to normal-content
+            // handling).
             if let Ok(resp) = &result {
-                if matches!(resp.status, 301 | 302 | 307 | 308) {
+                if matches!(resp.status, 301 | 302 | 303 | 307 | 308) {
                     let location = resp
                         .headers
                         .iter()
                         .find(|(k, _)| k.eq_ignore_ascii_case("location"))
                         .map(|(_, v)| v.clone());
-                    let Some(location) = location else {
-                        // Redirect without a Location header — TS throws
-                        // "Redirect missing Location header".
-                        let elapsed_ms = started.elapsed().as_millis() as u64;
-                        self.emit_failed(&invocation_id, "redirect_no_location", Some(resp.status), elapsed_ms)
-                            .await;
-                        return Err(ToolError::Transport(
-                            "WebFetch: redirect missing Location header".to_string(),
-                        ));
+                    // claude-code: `if(typeof l!=="string"||l.trim()==="")return
+                    // {type:"http_error",statusCode:s}` — a redirect with a
+                    // missing OR empty/whitespace Location is NOT a thrown error;
+                    // it degrades to the same `http_error` SUCCESS result as a
+                    // >=400 response (with the 3xx status code).
+                    let location = match location {
+                        Some(l) if !l.trim().is_empty() => l,
+                        _ => {
+                            let elapsed_ms = started.elapsed().as_millis() as u64;
+                            let code_text = status_reason_phrase(resp.status);
+                            let message = format_http_error_message(resp.status, None);
+                            self.emit_completed(&invocation_id, resp.status, 0, false, elapsed_ms)
+                                .await;
+                            return Ok(ToolCallResult {
+                                data: json!({
+                                    "url": parsed_input.url,
+                                    "status": resp.status,
+                                    "code_text": code_text,
+                                    "content": message,
+                                    "truncated": false,
+                                    "bytes": 0,
+                                }),
+                                new_messages: vec![],
+                                context_modifier: None,
+                                mcp_meta: None,
+                            });
+                        }
                     };
                     // Resolve a possibly-relative Location against the current URL.
                     let redirect_url = match fetch_url.join(&location) {
@@ -2148,6 +2172,72 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
             http.request_calls.load(std::sync::atomic::Ordering::SeqCst),
             0,
             "must NOT use plain request"
+        );
+    }
+
+    /// #87: 303 (See Other) is in claude-code's redirect set
+    /// (`YHp=new Set([301,302,303,307,308])`). A cross-host 303 must be DETECTED
+    /// as a redirect (→ the notice), not treated as normal page content.
+    #[tokio::test]
+    async fn cross_host_303_redirect_is_detected() {
+        let _env = SKIP_ENV_LOCK.lock().await;
+        crate::cache::clear_web_fetch_cache();
+        crate::blocklist::clear_domain_check_cache();
+        std::env::set_var("LINGXI_SKIP_WEBFETCH_PREFLIGHT", "1");
+
+        let http = NoFollowMock::new(vec![redirect_resp(303, "https://other.example/landing")]);
+        let ctx = ctx_with_transport(http.clone() as Arc<dyn HttpTransport>);
+        let tool = WebFetchTool::new(ctx);
+        let res = tool
+            .call(
+                json!({ "url": "https://orig.example/page", "prompt": "do x" }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await;
+        std::env::remove_var("LINGXI_SKIP_WEBFETCH_PREFLIGHT");
+        let res = res.expect("303 must be detected as a redirect and return Ok with the notice");
+
+        assert_eq!(res.data["status"], 303);
+        assert_eq!(res.data["code_text"], "See Other");
+        let content = res.data["content"].as_str().unwrap();
+        assert!(
+            content.starts_with("REDIRECT DETECTED: The URL redirects to a different host."),
+            "303 should produce the redirect notice, got: {content}"
+        );
+        assert!(content.contains("Status: 303 See Other"));
+    }
+
+    /// #92: a redirect with a missing (or empty/whitespace) Location header
+    /// degrades to the `http_error` SUCCESS result with the 3xx status code
+    /// (claude-code: `if(typeof l!=="string"||l.trim()==="")return
+    /// {type:"http_error",statusCode:s}`), NOT a thrown transport error.
+    #[tokio::test]
+    async fn redirect_without_location_returns_http_error_result() {
+        let _env = SKIP_ENV_LOCK.lock().await;
+        crate::cache::clear_web_fetch_cache();
+        crate::blocklist::clear_domain_check_cache();
+        std::env::set_var("LINGXI_SKIP_WEBFETCH_PREFLIGHT", "1");
+
+        // 301 with NO Location header.
+        let http = NoFollowMock::new(vec![protocol::HttpResponse {
+            status: 301,
+            headers: vec![],
+            body: String::new(),
+        }]);
+        let ctx = ctx_with_transport(http.clone() as Arc<dyn HttpTransport>);
+        let tool = WebFetchTool::new(ctx);
+        let res = tool
+            .call(json!({ "url": "https://noloc.example/page" }), fresh_ctx(), fresh_tx())
+            .await
+            .expect("redirect-without-Location must be Ok(http_error result), not Err");
+
+        assert_eq!(res.data["status"], 301);
+        assert_eq!(res.data["code_text"], "Moved Permanently");
+        assert_eq!(res.data["bytes"], 0);
+        assert_eq!(
+            res.data["content"].as_str().unwrap(),
+            format_http_error_message(301, None)
         );
     }
 

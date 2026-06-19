@@ -7,7 +7,7 @@
   "webfetch_truncation_suffix": "\n\n[Content truncated due to length...]",
   "webfetch_user_agent_prefix": "claude-code-tool/",
   "webfetch_allowed_schemes": ["https", "http"],
-  "webfetch_timeout_secs": 30,
+  "webfetch_timeout_secs": 60,
   "websearch_tool_block_type": "web_search_20250305",
   "websearch_tool_block_name": "web_search",
   "websearch_max_uses": 8,

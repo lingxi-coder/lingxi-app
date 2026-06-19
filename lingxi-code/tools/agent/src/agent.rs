@@ -176,6 +176,7 @@ static AGENT_INPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
             },
             "mode": {
                 "type": "string",
+                "enum": ["acceptEdits", "auto", "bypassPermissions", "default", "dontAsk", "plan"],
                 "description": "Permission mode for spawned teammate (e.g., \"plan\" to require plan approval)."
             },
             "isolation": {

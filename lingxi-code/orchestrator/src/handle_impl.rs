@@ -111,10 +111,15 @@ impl OrchestratorHandle for ConversationOrchestrator {
     }
 
     async fn open_memory_editor(&self) -> Result<MemoryEditorOutcome, HandleError> {
-        let config_dir = dirs::config_dir().ok_or_else(|| {
-            HandleError::ActionFailed("config_dir unavailable on this platform".into())
+        // `/memory` edits the USER-tier CLAUDE.md — the SAME file the system-prompt
+        // hierarchy loads (memory::claude_md::user_config_dir): `$CLAUDE_CONFIG_DIR`
+        // when set, else `~/.claude/CLAUDE.md`. (Previously this targeted
+        // `dirs::config_dir()/claude/CLAUDE.md` — a different, never-loaded path that
+        // also ignored `$CLAUDE_CONFIG_DIR`.)
+        let home = dirs::home_dir().ok_or_else(|| {
+            HandleError::ActionFailed("home dir unavailable on this platform".into())
         })?;
-        let target = config_dir.join("claude").join("CLAUDE.md");
+        let target = memory::claude_md::user_config_dir(&home).join("CLAUDE.md");
         spawn_editor_on(target, "").await
     }
 

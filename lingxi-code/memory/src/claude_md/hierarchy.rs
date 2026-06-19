@@ -7,6 +7,28 @@ pub const FILE_NAME: &str = "CLAUDE.md";
 /// Filename of the local-override memory file.
 pub const LOCAL_OVERRIDE_NAME: &str = "CLAUDE.local.md";
 
+/// Resolve the USER-tier `.claude` config directory, honoring
+/// `$CLAUDE_CONFIG_DIR` (claude-code `getClaudeConfigHomeDir`, envUtils.ts:7-14):
+/// a non-empty `$CLAUDE_CONFIG_DIR` is the `.claude` dir verbatim; otherwise it
+/// falls back to `<home>/.claude`. `home` is the caller-supplied home (the
+/// production provider passes `dirs::home_dir()`; tests pass a temp dir), so the
+/// walk stays hermetic while the env override still wins. An EMPTY
+/// `$CLAUDE_CONFIG_DIR` is treated as UNSET (claude-code `??` semantics where
+/// `""` is falsy — matches `migrations::global_config`).
+#[must_use]
+pub fn user_config_dir(home: &Path) -> PathBuf {
+    resolve_user_config_dir(home, std::env::var_os("CLAUDE_CONFIG_DIR"))
+}
+
+/// Pure core of [`user_config_dir`] — the `$CLAUDE_CONFIG_DIR` value is injected
+/// so the resolution logic is testable without mutating process env.
+fn resolve_user_config_dir(home: &Path, config_dir_env: Option<std::ffi::OsString>) -> PathBuf {
+    match config_dir_env {
+        Some(dir) if !dir.is_empty() => PathBuf::from(dir),
+        _ => home.join(DOT_CLAUDE),
+    }
+}
+
 /// Env var that overrides the managed-settings directory for tests/demos so
 /// hermetic hierarchy tests stay machine-independent. When set, its value is
 /// used verbatim as the managed dir; otherwise [`managed_path`] returns the
@@ -122,8 +144,10 @@ pub fn walk(cwd: &Path, home: &Path, managed_dir: Option<&Path>) -> Hierarchy {
         );
     }
 
-    // (2) User tier — `<home>/.claude/CLAUDE.md` + `<home>/.claude/rules/**`.
-    let user_dir = home.join(DOT_CLAUDE);
+    // (2) User tier — `<config-home>/CLAUDE.md` + `<config-home>/rules/**`, where
+    //     config-home honors `$CLAUDE_CONFIG_DIR` (else `<home>/.claude`). This
+    //     keeps the loaded user-tier file in sync with `/memory`'s edit target.
+    let user_dir = user_config_dir(home);
     emit_probe(
         &user_dir,
         FILE_NAME,
@@ -353,6 +377,26 @@ mod tests {
 
     fn touch(dir: &std::path::Path, name: &str) {
         fs::write(dir.join(name), b"# notes\n").unwrap();
+    }
+
+    #[test]
+    fn user_config_dir_env_override_else_home() {
+        use std::ffi::OsString;
+        // A non-empty `$CLAUDE_CONFIG_DIR` is the `.claude` dir verbatim.
+        assert_eq!(
+            resolve_user_config_dir(Path::new("/h"), Some(OsString::from("/explicit/cfg"))),
+            PathBuf::from("/explicit/cfg")
+        );
+        // Empty `$CLAUDE_CONFIG_DIR` is treated as UNSET → `<home>/.claude`.
+        assert_eq!(
+            resolve_user_config_dir(Path::new("/h"), Some(OsString::new())),
+            PathBuf::from("/h/.claude")
+        );
+        // Unset → `<home>/.claude` (the pre-change default).
+        assert_eq!(
+            resolve_user_config_dir(Path::new("/h"), None),
+            PathBuf::from("/h/.claude")
+        );
     }
 
     #[test]

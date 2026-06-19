@@ -10,7 +10,7 @@
 pub mod hierarchy;
 pub mod loader;
 
-pub use hierarchy::{Hierarchy, HierarchyEntry};
+pub use hierarchy::{user_config_dir, Hierarchy, HierarchyEntry};
 pub use loader::{LoadedFile, LoaderError};
 
 /// Which CLAUDE.md tier a discovered file belongs to.

@@ -30,9 +30,29 @@ pub fn marketing_name_for_model(model_id: &str) -> Option<&'static str> {
     let canonical = model_id.to_ascii_lowercase();
     let has_1m = canonical.contains("[1m]");
 
+    if canonical.contains("claude-fable-5") {
+        return Some("Fable 5");
+    }
+    if canonical.contains("claude-mythos-5") {
+        return Some("Mythos 5");
+    }
+    if canonical.contains("claude-opus-4-8") {
+        return Some(if has_1m {
+            "Opus 4.8 (1M context)"
+        } else {
+            "Opus 4.8"
+        });
+    }
+    if canonical.contains("claude-opus-4-7") {
+        return Some(if has_1m {
+            "Opus 4.7 (1M context)"
+        } else {
+            "Opus 4.7"
+        });
+    }
     if canonical.contains("claude-opus-4-6") {
         return Some(if has_1m {
-            "Opus 4.6 (with 1M context)"
+            "Opus 4.6 (1M context)"
         } else {
             "Opus 4.6"
         });
@@ -48,21 +68,21 @@ pub fn marketing_name_for_model(model_id: &str) -> Option<&'static str> {
     }
     if canonical.contains("claude-sonnet-4-6") {
         return Some(if has_1m {
-            "Sonnet 4.6 (with 1M context)"
+            "Sonnet 4.6 (1M context)"
         } else {
             "Sonnet 4.6"
         });
     }
     if canonical.contains("claude-sonnet-4-5") {
         return Some(if has_1m {
-            "Sonnet 4.5 (with 1M context)"
+            "Sonnet 4.5 (1M context)"
         } else {
             "Sonnet 4.5"
         });
     }
     if canonical.contains("claude-sonnet-4") {
         return Some(if has_1m {
-            "Sonnet 4 (with 1M context)"
+            "Sonnet 4 (1M context)"
         } else {
             "Sonnet 4"
         });
@@ -88,7 +108,14 @@ pub fn marketing_name_for_model(model_id: &str) -> Option<&'static str> {
 #[must_use]
 pub fn knowledge_cutoff_for_model(model_id: &str) -> Option<&'static str> {
     let canonical = model_id.to_ascii_lowercase();
-    if canonical.contains("claude-sonnet-4-6") {
+    if canonical.contains("claude-fable-5") || canonical.contains("claude-mythos-5") {
+        Some("January 2026")
+    } else if canonical.contains("claude-opus-4-8") || canonical.contains("claude-opus-4-7") {
+        // TS lists `claude-opus-4-8` and `claude-opus-4-7` as separate arms
+        // that both return "January 2026"; merged here to satisfy clippy
+        // (if_same_then_else) — output is identical.
+        Some("January 2026")
+    } else if canonical.contains("claude-sonnet-4-6") {
         Some("August 2025")
     } else if canonical.contains("claude-opus-4-6") || canonical.contains("claude-opus-4-5") {
         // TS lists `claude-opus-4-6` and `claude-opus-4-5` as separate arms
@@ -133,17 +160,29 @@ mod tests {
 
     #[test]
     fn marketing_names_match_ts_map() {
+        assert_eq!(marketing_name_for_model("claude-fable-5"), Some("Fable 5"));
+        assert_eq!(marketing_name_for_model("claude-mythos-5"), Some("Mythos 5"));
+        assert_eq!(marketing_name_for_model("claude-opus-4-8"), Some("Opus 4.8"));
+        assert_eq!(
+            marketing_name_for_model("claude-opus-4-8-20260101[1m]"),
+            Some("Opus 4.8 (1M context)")
+        );
+        assert_eq!(marketing_name_for_model("claude-opus-4-7"), Some("Opus 4.7"));
+        assert_eq!(
+            marketing_name_for_model("claude-opus-4-7-20251101[1m]"),
+            Some("Opus 4.7 (1M context)")
+        );
         assert_eq!(marketing_name_for_model("claude-opus-4-6"), Some("Opus 4.6"));
         assert_eq!(
             marketing_name_for_model("claude-opus-4-6-20251101[1m]"),
-            Some("Opus 4.6 (with 1M context)")
+            Some("Opus 4.6 (1M context)")
         );
         assert_eq!(marketing_name_for_model("claude-opus-4-5"), Some("Opus 4.5"));
         assert_eq!(marketing_name_for_model("claude-opus-4-1"), Some("Opus 4.1"));
         assert_eq!(marketing_name_for_model("claude-opus-4-0"), Some("Opus 4"));
         assert_eq!(
             marketing_name_for_model("claude-sonnet-4-5[1m]"),
-            Some("Sonnet 4.5 (with 1M context)")
+            Some("Sonnet 4.5 (1M context)")
         );
         assert_eq!(marketing_name_for_model("claude-sonnet-4-5"), Some("Sonnet 4.5"));
         assert_eq!(marketing_name_for_model("claude-haiku-4-5"), Some("Haiku 4.5"));
@@ -153,17 +192,21 @@ mod tests {
         );
         // Unknown / unmapped -> None (TS bare-id fallback).
         assert_eq!(marketing_name_for_model("gpt-4o"), None);
-        assert_eq!(marketing_name_for_model("claude-opus-4-7"), Some("Opus 4"));
     }
 
     #[test]
     fn knowledge_cutoffs_match_ts_map() {
+        assert_eq!(knowledge_cutoff_for_model("claude-fable-5"), Some("January 2026"));
+        assert_eq!(knowledge_cutoff_for_model("claude-mythos-5"), Some("January 2026"));
+        assert_eq!(knowledge_cutoff_for_model("claude-opus-4-8"), Some("January 2026"));
+        assert_eq!(knowledge_cutoff_for_model("claude-opus-4-7"), Some("January 2026"));
         assert_eq!(knowledge_cutoff_for_model("claude-sonnet-4-6"), Some("August 2025"));
         assert_eq!(knowledge_cutoff_for_model("claude-opus-4-6"), Some("May 2025"));
         assert_eq!(knowledge_cutoff_for_model("claude-opus-4-5"), Some("May 2025"));
         assert_eq!(knowledge_cutoff_for_model("claude-haiku-4-5"), Some("February 2025"));
         assert_eq!(knowledge_cutoff_for_model("claude-opus-4-1"), Some("January 2025"));
         assert_eq!(knowledge_cutoff_for_model("claude-sonnet-4-0"), Some("January 2025"));
+        assert_eq!(knowledge_cutoff_for_model("claude-sonnet-4-5"), Some("January 2025"));
         assert_eq!(knowledge_cutoff_for_model("gpt-4o"), None);
     }
 

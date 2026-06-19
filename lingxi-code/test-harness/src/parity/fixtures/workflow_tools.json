@@ -7,10 +7,9 @@
     "completed": "completed"
   },
   "todo_aliases_rejected": ["done", "todo", "DONE", "Pending", "InProgress"],
-  "todo_max_content_chars": 4096,
   "todo_error_strings": {
-    "empty_content": "TodoWrite: todo content is empty",
-    "over_long_content_template": "TodoWrite: todo content exceeds 4096 chars (got {N})",
+    "empty_content": "Content cannot be empty",
+    "empty_active_form": "Active form cannot be empty",
     "duplicate_id_template": "TodoWrite: duplicate id '{id}'",
     "multi_in_progress_template": "TodoWrite: at most one todo may be 'in_progress' (got {N})"
   },

@@ -43,8 +43,10 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use traits::OrchestratorHandle;
 
-/// Usage block, verbatim from `effort.tsx` L174.
-const USAGE: &str = "Usage: /effort [low|medium|high|max|auto]\n\nEffort levels:\n- low: Quick, straightforward implementation\n- medium: Balanced approach with standard testing\n- high: Comprehensive implementation with extensive testing\n- max: Maximum capability with deepest reasoning (Opus 4.6 only)\n- auto: Use the default effort level for your model";
+/// Usage block. The `- max:` line renders the TS Usage template
+/// `Maximum capability with deepest reasoning (${gAi})` with `gAi` =
+/// `"Fable 5, Opus 4.6+, Sonnet 4.6"` (v2.1.183).
+const USAGE: &str = "Usage: /effort [low|medium|high|max|auto]\n\nEffort levels:\n- low: Quick, straightforward implementation\n- medium: Balanced approach with standard testing\n- high: Comprehensive implementation with extensive testing\n- max: Maximum capability with deepest reasoning (Fable 5, Opus 4.6+, Sonnet 4.6)\n- auto: Use the default effort level for your model";
 
 /// Environment variable that pins / clears the effort level for the session.
 const EFFORT_ENV_VAR: &str = "CLAUDE_CODE_EFFORT_LEVEL";
@@ -71,8 +73,10 @@ impl EffortLevel {
         }
     }
 
-    /// User-facing description, verbatim from `effort.ts` L224-235
-    /// (`getEffortLevelDescription`).
+    /// User-facing description, verbatim from `effort.ts`
+    /// (`getEffortLevelDescription`). The `max` case renders the TS template
+    /// `` `Maximum capability with deepest reasoning. ${qHt}` `` with `qHt` =
+    /// the v2.1.183 overthinking caveat.
     fn description(self) -> &'static str {
         match self {
             EffortLevel::Low => "Quick, straightforward implementation with minimal overhead",
@@ -80,7 +84,7 @@ impl EffortLevel {
             EffortLevel::High => {
                 "Comprehensive implementation with extensive testing and documentation"
             }
-            EffortLevel::Max => "Maximum capability with deepest reasoning (Opus 4.6 only)",
+            EffortLevel::Max => "Maximum capability with deepest reasoning. May use excessive tokens resulting in long response times or overthinking. Use sparingly for the hardest tasks.",
         }
     }
 }
@@ -585,7 +589,7 @@ mod tests {
         // non-ant) → suffix kept, nothing written.
         assert_eq!(
             run("MAX").await,
-            "Set effort level to max (this session only): Maximum capability with deepest reasoning (Opus 4.6 only)"
+            "Set effort level to max (this session only): Maximum capability with deepest reasoning. May use excessive tokens resulting in long response times or overthinking. Use sparingly for the hardest tasks."
         );
         // Persisted value is the last *persistable* set (medium); max didn't
         // overwrite it.
@@ -650,6 +654,22 @@ mod tests {
         assert_eq!(h.description(), "Set effort level for model usage");
     }
 
+    #[test]
+    fn max_description_and_usage_match_binary_v2_1_183() {
+        // `getEffortLevelDescription("max")` renders the TS template
+        // `Maximum capability with deepest reasoning. ${qHt}`.
+        assert_eq!(
+            EffortLevel::Max.description(),
+            "Maximum capability with deepest reasoning. May use excessive tokens resulting in long response times or overthinking. Use sparingly for the hardest tasks."
+        );
+        // The Usage block's `- max:` line renders the Usage template
+        // `Maximum capability with deepest reasoning (${gAi})` with
+        // `gAi="Fable 5, Opus 4.6+, Sonnet 4.6"`.
+        assert!(USAGE.contains(
+            "- max: Maximum capability with deepest reasoning (Fable 5, Opus 4.6+, Sonnet 4.6)\n"
+        ));
+    }
+
     // ---- persistence (updateSettingsForSource) parity ----
 
     #[tokio::test]
@@ -680,7 +700,7 @@ mod tests {
         env.write_settings("{}");
         assert_eq!(
             run("max").await,
-            "Set effort level to max (this session only): Maximum capability with deepest reasoning (Opus 4.6 only)"
+            "Set effort level to max (this session only): Maximum capability with deepest reasoning. May use excessive tokens resulting in long response times or overthinking. Use sparingly for the hardest tasks."
         );
         assert!(env.read_settings().unwrap().get("effortLevel").is_none());
     }

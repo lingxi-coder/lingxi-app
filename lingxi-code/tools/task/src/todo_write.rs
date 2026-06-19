@@ -36,35 +36,28 @@ pub const TODO_STATES: &[&str] = &[
     TODO_STATE_IN_PROGRESS,
     TODO_STATE_COMPLETED,
 ];
-/// Maximum `content` length per todo (chars, defensive cap).
-pub const TODO_MAX_CONTENT_CHARS: usize = 4_096;
 /// Canonical tool name in the registry.
 pub const TOOL_NAME: &str = "TodoWrite";
 
 /// Validate a `Vec<TodoItem>` for the TodoWrite contract.
 ///
-/// Mirrors claude-code `TodoItemSchema` (`utils/todo/types.ts`), which only
-/// requires `content` and `activeForm` to be non-empty. TS does NOT reject a
+/// Mirrors claude-code `TodoItemSchema` (zod `BWd`, v2.1.183), which only
+/// requires `content` and `activeForm` to be non-empty (`.min(1, ...)`); there
+/// is NO `.max()` on `content`, so long todos are accepted. TS does NOT reject a
 /// list with multiple `in_progress` items — the single-in-progress convention
 /// is advisory (surfaced in the prompt), never enforced — and TS input items
 /// carry no `id`, so neither an id-uniqueness nor an in-progress-count check
-/// exists.
+/// exists. The emptiness messages are the verbatim zod strings.
 ///
 /// # Errors
 /// Returns a human-readable error string on the first rule violation.
 pub fn validate_todos(todos: &[TodoItem]) -> Result<(), String> {
     for t in todos {
         if t.content.is_empty() {
-            return Err("TodoWrite: todo content is empty".into());
+            return Err("Content cannot be empty".into());
         }
         if t.active_form.is_empty() {
-            return Err("TodoWrite: todo activeForm is empty".into());
-        }
-        let n = t.content.chars().count();
-        if n > TODO_MAX_CONTENT_CHARS {
-            return Err(format!(
-                "TodoWrite: todo content exceeds {TODO_MAX_CONTENT_CHARS} chars (got {n})"
-            ));
+            return Err("Active form cannot be empty".into());
         }
     }
     Ok(())
@@ -235,7 +228,8 @@ impl Tool for TodoWriteTool {
     }
 
     async fn description(&self, _: &Value, _: &DescriptionOptions) -> String {
-        "Replace the session todo list".into()
+        // claude-code v2.1.183 `description(){return Qla}`.
+        "Update the todo list for the current session. To be used proactively and often to track progress and pending tasks. Make sure that at least one task is in_progress at all times. Always provide both content (imperative) and activeForm (present continuous) for each task.".into()
     }
     async fn prompt(&self, _: &PromptOptions) -> String {
         "Use TodoWrite to track work-in-progress. Each todo has id, content, \
@@ -402,6 +396,24 @@ mod tests {
         assert_eq!(TODO_STATES, &["pending", "in_progress", "completed"]);
     }
 
+    #[tokio::test]
+    async fn description_matches_binary_qla() {
+        // claude-code v2.1.183 `description(){return Qla}`.
+        let (tool, _sink, _session, _use_ctx) = make_tool_and_session();
+        let desc = tool
+            .description(
+                &json!({}),
+                &DescriptionOptions {
+                    is_non_interactive_session: false,
+                },
+            )
+            .await;
+        assert_eq!(
+            desc,
+            "Update the todo list for the current session. To be used proactively and often to track progress and pending tasks. Make sure that at least one task is in_progress at all times. Always provide both content (imperative) and activeForm (present continuous) for each task."
+        );
+    }
+
     #[test]
     fn todo_state_serialize_matches_lock() {
         assert_eq!(
@@ -432,11 +444,6 @@ mod tests {
         let err =
             serde_json::from_str::<TodoState>(r#""todo""#).expect_err("'todo' must be rejected");
         assert!(format!("{err}").contains("unknown variant"));
-    }
-
-    #[test]
-    fn max_content_cap_is_4096() {
-        assert_eq!(TODO_MAX_CONTENT_CHARS, 4_096);
     }
 
     #[test]
@@ -473,24 +480,21 @@ mod tests {
             active_form: "active".into(),
         }];
         let err = validate_todos(&todos).expect_err("empty content must reject");
-        assert_eq!(err, "TodoWrite: todo content is empty");
+        assert_eq!(err, "Content cannot be empty");
     }
 
     #[test]
-    fn validate_rejects_over_long_content() {
-        let huge = "x".repeat(TODO_MAX_CONTENT_CHARS + 1);
-        let n = huge.chars().count();
+    fn validate_accepts_long_content() {
+        // claude-code zod `TodoItemSchema` (BWd) has no `.max()` on content —
+        // long todos must be accepted (matches v2.1.183).
+        let huge = "x".repeat(10_000);
         let todos = vec![TodoItem {
             id: "a".into(),
             content: huge,
             status: TodoState::Pending,
             active_form: "active".into(),
         }];
-        let err = validate_todos(&todos).expect_err("over-long must reject");
-        assert_eq!(
-            err,
-            format!("TodoWrite: todo content exceeds {TODO_MAX_CONTENT_CHARS} chars (got {n})")
-        );
+        assert!(validate_todos(&todos).is_ok());
     }
 
     #[test]
@@ -703,7 +707,7 @@ mod tests {
             active_form: String::new(),
         }];
         let err = validate_todos(&todos).expect_err("empty activeForm must reject");
-        assert_eq!(err, "TodoWrite: todo activeForm is empty");
+        assert_eq!(err, "Active form cannot be empty");
     }
 
     #[tokio::test]

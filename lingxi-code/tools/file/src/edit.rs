@@ -39,11 +39,12 @@ pub const TOOL_NAME: &str = "Edit";
 ///     is never `ant` → `minimalUniquenessHint` is empty.
 ///   - `getPreReadInstruction()` interpolates `FILE_READ_TOOL_NAME = 'Read'`, and begins
 ///     with `\n-` (so `Usage:` is immediately followed by the first bullet) and ends with
-///     a trailing space after "before editing." — both preserved byte-for-byte below.
+///     `...reading the file.` (v2.1.183 dropped the trailing space the older builds had —
+///     the binary's `wBp()`/`RBp()` template literal closes immediately after the period).
 const EDIT_DESCRIPTION: &str = r#"Performs exact string replacements in files.
 
 Usage:
-- You must use your `Read` tool at least once in the conversation before editing. This tool will error if you attempt an edit without reading the file. 
+- You must use your `Read` tool at least once in the conversation before editing. This tool will error if you attempt an edit without reading the file.
 - When editing text from Read tool output, ensure you preserve the exact indentation (tabs/spaces) as it appears AFTER the line number prefix. The line number prefix format is: line number + tab. Everything after that is the actual file content to match. Never include any part of the line number prefix in the old_string or new_string.
 - ALWAYS prefer editing existing files in the codebase. NEVER write new files unless explicitly required.
 - Only use emojis if the user explicitly requests it. Avoid adding emojis to files unless asked.
@@ -1391,11 +1392,18 @@ mod tests {
             )
             .await;
         // Header + the `\n-` pre-read seam (Usage: immediately followed by the
-        // first bullet, which carries a trailing space after "before editing.").
+        // first bullet). v2.1.183 dropped the trailing space the older builds
+        // had after "reading the file." — the pre-read bullet now ends exactly
+        // at the period with no trailing space (binary `wBp()`/`RBp()`).
         assert!(d.starts_with(
             "Performs exact string replacements in files.\n\nUsage:\n- You must use your `Read` tool"
         ));
         assert!(d.contains("before editing. This tool will error"));
+        assert!(d.contains(
+            "This tool will error if you attempt an edit without reading the file.\n- When editing text"
+        ));
+        // No trailing space after the first bullet (the v2.1.183 one-byte fix).
+        assert!(!d.contains("reading the file. \n"));
         // Locks the compact-format decision (line number + tab, not padded-arrow).
         assert!(d.contains("The line number prefix format is: line number + tab."));
         // Final bullet, with NO trailing newline.

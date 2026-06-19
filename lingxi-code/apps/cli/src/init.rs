@@ -227,15 +227,17 @@ fn load_routing() -> Option<serde_json::Value> {
 /// - `api_key` ← env `ANTHROPIC_API_KEY` (empty string is valid).
 /// - `cwd` ← `std::env::current_dir()` (the process has already `chdir`'d into
 ///   any `--cwd`).
-/// - `claude_home` ← `~/.claude` (the hook / agents / settings loader root).
+/// - `claude_home` ← config-home (`$CLAUDE_CONFIG_DIR` else `~/.claude`, via
+///   `run::claude_home_dir`) — the hook / agents / settings loader root.
 /// - `default_model` ← `Argv::model`, else the desktop default.
 /// - `fallback_model` ← `Argv::fallback_model`, but ONLY in `--print` mode
 ///   (claude-code restricts `--fallback-model` to non-interactive runs); the
 ///   interactive TUI path resolves it to `None`.
 /// - `provider_profiles` ← settings `providers` block (`load_provider_profiles`).
 /// - `routing` ← settings `routing` block (`load_routing`).
-/// - `mcp_paths` ← `[<cwd>/.mcp.json, <config_dir>/lingxi/mcp.json]` (project
-///   preferred over global), matching the precedence the old loader used.
+/// - `mcp_paths` ← `[<cwd>/.mcp.json, ~/.claude.json]` (project `.mcp.json`
+///   preferred over the user/global `mcpServers` inside `~/.claude.json`, matching
+///   claude-code's user/project MCP scopes).
 /// - `use_noop_permission_gate` ← `true` (the CLI always binds the always-allow
 ///   `NoOpPermissionGate`; a transport binds `AdapterPermissionGate`).
 /// - `permission_mode` ← the CLI-resolved session mode threaded in by `run_cli`

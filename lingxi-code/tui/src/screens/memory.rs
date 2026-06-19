@@ -41,7 +41,11 @@ pub struct MemoryTierEntry {
 #[must_use]
 pub fn memory_tiers(cwd: &Path, home: &Path) -> Vec<MemoryTierEntry> {
     let project_path = cwd.join(FILE_NAME);
-    let user_path = home.join(".claude").join(FILE_NAME);
+    // User-tier CLAUDE.md must resolve via `$CLAUDE_CONFIG_DIR` (else `~/.claude`)
+    // — the SAME env-aware resolver the prompt loader (`hierarchy::walk`) uses, so
+    // the /memory editor writes exactly the file the system prompt loads (no
+    // split-brain when `$CLAUDE_CONFIG_DIR` is set).
+    let user_path = memory::claude_md::user_config_dir(home).join(FILE_NAME);
 
     let mut tiers = vec![
         MemoryTierEntry {

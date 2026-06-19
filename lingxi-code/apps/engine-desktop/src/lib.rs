@@ -2895,9 +2895,10 @@ pub async fn build(
     // (5.48) Cron: construct, load persisted descriptors, and start the live cron
     //        scheduler so jobs created by CronCreate actually fire — closing parity
     //        gap §0.3 / §B (the scheduler was never constructed, so descriptors on
-    //        disk never ran). Resolve the descriptor dir exactly as CronCreate does
-    //        (`$HOME/.claude/cron`, via `home_dir_or_internal` + `cron_path`), not
-    //        via `cfg.claude_home`, so the load dir always matches the write dir.
+    //        disk never ran). Resolve the descriptor dir via `cfg.claude_home`
+    //        (the `$CLAUDE_CONFIG_DIR`-aware config-home the CLI/bridge wire), so
+    //        the scheduler's load dir always matches where CronCreate writes
+    //        (`config_home_dir(home)/cron`) — both honor `$CLAUDE_CONFIG_DIR`.
     //        Ticks every 60s on a posix RuntimeSpawner (D17). The detached tick
     //        task holds a self-clone of the scheduler, so it runs for the process
     //        lifetime without being stored on `DesktopRuntime`.
@@ -2905,9 +2906,7 @@ pub async fn build(
     //        (claude-code `prompt.ts:34/38` — the env override that wins over the
     //        GrowthBook fleet flag, which itself defaults on).
     if cron_scheduler_enabled(std::env::var("CLAUDE_CODE_DISABLE_CRON").ok().as_deref()) {
-        let cron_dir = std::env::var_os("HOME")
-            .map(std::path::PathBuf::from)
-            .map_or_else(|| cfg.claude_home.join("cron"), |h| h.join(".claude").join("cron"));
+        let cron_dir = cfg.claude_home.join("cron");
         let scheduler = Arc::new(cron::CronScheduler::new(
             task_registry.clone(),
             Arc::new(PosixFileSystem::new(cwd.clone())),

@@ -348,17 +348,18 @@ impl OrchestratorHandle for ConversationOrchestrator {
 
     async fn list_resumable_sessions(&self) -> Vec<(String, String)> {
         // Enumerate the on-disk JSONL session store the resume path reads
-        // from: `<claude_home>/projects/<project_dir_name(cwd)>/<uuid>.jsonl`.
-        // `claude_home` follows the `~/.claude` convention the CLI wires.
-        // Each entry maps to `(session_id, label)`; label is the id (the
-        // first-prompt label + interactive picker are deferred). Newest-first
-        // by mtime. Returns an empty Vec when the store is absent.
+        // from: `<config-home>/projects/<project_dir_name(cwd)>/<uuid>.jsonl`.
+        // `config-home` is `$CLAUDE_CONFIG_DIR` (else `~/.claude`) — the SAME
+        // env-aware resolver the CLI loader (`run::claude_home_dir`) uses, so the
+        // picker lists exactly what `--resume` can load. Each entry maps to
+        // `(session_id, label)`; label is the id (the first-prompt label +
+        // interactive picker are deferred). Newest-first by mtime. Returns an
+        // empty Vec when the store is absent.
         let Some(home) = dirs::home_dir() else {
             return Vec::new();
         };
         let cwd = self.cwd.to_string_lossy();
-        let project_dir = home
-            .join(".claude")
+        let project_dir = memory::claude_md::user_config_dir(&home)
             .join("projects")
             .join(session::project_dir_name(&cwd));
         let Ok(entries) = std::fs::read_dir(&project_dir) else {

@@ -85,6 +85,34 @@ pub fn edit_result_message(path: &str, replace_all: bool) -> String {
     format!("{base}{}", crate::FILE_STATE_CURRENT_SUFFIX)
 }
 
+/// Normalize claude-code's accepted Edit input aliases to the canonical keys
+/// (claude-code coerces these — the `tengu_tool_input_coerced` path): `path` →
+/// `file_path`, `old_str` → `old_string`, `new_str` → `new_string`,
+/// `replace_name` → `replace_all` (truthy when the value is `true` or `"true"`).
+/// Only fills a canonical key when it is ABSENT, so an explicit canonical wins.
+fn normalize_edit_aliases(input: &mut Value) {
+    let Some(obj) = input.as_object_mut() else {
+        return;
+    };
+    for (alias, canonical) in [
+        ("path", "file_path"),
+        ("old_str", "old_string"),
+        ("new_str", "new_string"),
+    ] {
+        if !obj.contains_key(canonical) {
+            if let Some(v) = obj.get(alias).cloned() {
+                obj.insert(canonical.to_string(), v);
+            }
+        }
+    }
+    if !obj.contains_key("replace_all") {
+        if let Some(v) = obj.get("replace_name") {
+            let truthy = v.as_bool() == Some(true) || v.as_str() == Some("true");
+            obj.insert("replace_all".to_string(), Value::Bool(truthy));
+        }
+    }
+}
+
 /// `FileEditTool` — literal-search replacement in a UTF-8 file.
 pub struct FileEditTool {
     ctx: BuiltinToolContext,
@@ -236,6 +264,7 @@ impl Tool for FileEditTool {
     fn get_path(&self, input: &Value) -> Option<PathBuf> {
         input
             .get("file_path")
+            .or_else(|| input.get("path"))
             .and_then(Value::as_str)
             .map(PathBuf::from)
     }
@@ -246,6 +275,10 @@ impl Tool for FileEditTool {
         _ctx: ToolUseContext,
         _tx: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
+        // Coerce claude-code's input aliases (path/old_str/new_str/replace_name)
+        // to canonical keys before reading them.
+        let mut input = input;
+        normalize_edit_aliases(&mut input);
         let invocation_id = tool_api::util::ids::ulid_or_uuid();
         let file_path = input
             .get("file_path")
@@ -609,6 +642,31 @@ mod tests {
             edit_result_message("./relative/../weird/path.txt", false),
             "The file ./relative/../weird/path.txt has been updated successfully. (file state is current in your context — no need to Read it back)"
         );
+    }
+
+    #[test]
+    fn normalize_edit_aliases_fills_canonical_keys() {
+        let mut v = json!({
+            "path": "/p.txt", "old_str": "a", "new_str": "b", "replace_name": "true"
+        });
+        normalize_edit_aliases(&mut v);
+        assert_eq!(v["file_path"], "/p.txt");
+        assert_eq!(v["old_string"], "a");
+        assert_eq!(v["new_string"], "b");
+        assert_eq!(v["replace_all"], true);
+    }
+
+    #[test]
+    fn normalize_edit_aliases_explicit_canonical_wins_and_replace_name_bool() {
+        let mut v = json!({
+            "file_path": "/canon.txt", "path": "/alias.txt",
+            "old_string": "x", "old_str": "y", "new_string": "z",
+            "replace_name": true,
+        });
+        normalize_edit_aliases(&mut v);
+        assert_eq!(v["file_path"], "/canon.txt"); // explicit canonical wins
+        assert_eq!(v["old_string"], "x");
+        assert_eq!(v["replace_all"], true); // replace_name: true → replace_all
     }
 
     #[tokio::test]

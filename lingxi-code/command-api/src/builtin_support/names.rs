@@ -381,12 +381,12 @@ pub const HOST_BOUND_DEFERRED_GAPS: &[(&str, &str)] = &[
 #[must_use]
 pub fn core_description(name: &str) -> &'static str {
     match name {
-        "agents" => "Manage subagents",
-        "clear" => "Clear conversation history and free up context",
-        "compact" => "Compact the conversation to a summary",
-        "config" => "Open config panel",
+        "agents" => "Manage agent configurations",
+        "clear" => "Start a new session with empty context; previous session stays on disk (resumable with /resume)",
+        "compact" => "Free up context by summarizing the conversation so far",
+        "config" => "Open settings",
         "cost" => "Show total cost and duration of the current session",
-        "doctor" => "Diagnose installation and configuration",
+        "doctor" => "Diagnose and verify your Claude Code installation and settings",
         "exit" => "Exit the REPL",
         "help" => "Show help and available commands",
         "hooks" => "Manage hooks",
@@ -394,10 +394,10 @@ pub fn core_description(name: &str) -> &'static str {
         "login" => "Sign in with your Anthropic account",
         "logout" => "Sign out from your Anthropic account",
         "mcp" => "Manage MCP servers",
-        "memory" => "Edit Claude memory files",
-        "model" => "Set the model for Claude Code to use",
-        "permissions" => "Manage permissions",
-        "status" => "Show Claude Code status",
+        "memory" => "Open a memory file in your editor",
+        "model" => "Set the AI model for Claude Code",
+        "permissions" => "Manage allow and deny tool permission rules",
+        "status" => "Show Claude Code status including version, model, account, API connectivity, and tool statuses",
         "version" => "Print version information",
         _ => "(unimplemented in v0.6.0)",
     }

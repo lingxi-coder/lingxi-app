@@ -1,7 +1,7 @@
 Commands:
   /add-dir              (unimplemented in v0.6.0)
   /advisor              (unimplemented in v0.6.0)
-  /agents               Manage subagents
+  /agents               Manage agent configurations
   /ant-trace            (unimplemented in v0.6.0)
   /autofix-pr           (unimplemented in v0.6.0)
   /backfill-sessions    (unimplemented in v0.6.0)
@@ -12,12 +12,12 @@ Commands:
   /btw                  (unimplemented in v0.6.0)
   /bughunter            (unimplemented in v0.6.0)
   /chrome               (unimplemented in v0.6.0)
-  /clear                Clear conversation history and free up context
+  /clear                Start a new session with empty context; previous session stays on disk (resumable with /resume)
   /color                (unimplemented in v0.6.0)
   /commit               (unimplemented in v0.6.0)
   /commit-push-pr       (unimplemented in v0.6.0)
-  /compact              Compact the conversation to a summary
-  /config               Open config panel
+  /compact              Free up context by summarizing the conversation so far
+  /config               Open settings
   /context              (unimplemented in v0.6.0)
   /copy                 (unimplemented in v0.6.0)
   /cost                 Show total cost and duration of the current session
@@ -25,7 +25,7 @@ Commands:
   /debug-tool-call      (unimplemented in v0.6.0)
   /desktop              (unimplemented in v0.6.0)
   /diff                 (unimplemented in v0.6.0)
-  /doctor               Diagnose installation and configuration
+  /doctor               Diagnose and verify your Claude Code installation and settings
   /effort               (unimplemented in v0.6.0)
   /env                  (unimplemented in v0.6.0)
   /exit                 Exit the REPL
@@ -50,16 +50,16 @@ Commands:
   /login                Sign in with your Anthropic account
   /logout               Sign out from your Anthropic account
   /mcp                  Manage MCP servers
-  /memory               Edit Claude memory files
+  /memory               Open a memory file in your editor
   /mobile               (unimplemented in v0.6.0)
   /mock-limits          (unimplemented in v0.6.0)
-  /model                Set the model for Claude Code to use
+  /model                Set the AI model for Claude Code
   /oauth-refresh        (unimplemented in v0.6.0)
   /onboarding           (unimplemented in v0.6.0)
   /output-style         (unimplemented in v0.6.0)
   /passes               (unimplemented in v0.6.0)
   /perf-issue           (unimplemented in v0.6.0)
-  /permissions          Manage permissions
+  /permissions          Manage allow and deny tool permission rules
   /plan                 (unimplemented in v0.6.0)
   /plugin               (unimplemented in v0.6.0)
   /pr-comments          (unimplemented in v0.6.0)
@@ -80,7 +80,7 @@ Commands:
   /share                (unimplemented in v0.6.0)
   /skills               (unimplemented in v0.6.0)
   /stats                (unimplemented in v0.6.0)
-  /status               Show Claude Code status
+  /status               Show Claude Code status including version, model, account, API connectivity, and tool statuses
   /statusline           (unimplemented in v0.6.0)
   /stickers             (unimplemented in v0.6.0)
   /summary              (unimplemented in v0.6.0)

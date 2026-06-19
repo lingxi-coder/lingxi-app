@@ -139,6 +139,6 @@ mod tests {
         let mock = Arc::new(MockOrchestratorHandle::new());
         let h = AgentsHandler::new(mock);
         assert_eq!(h.name(), "agents");
-        assert_eq!(h.description(), "Manage subagents");
+        assert_eq!(h.description(), "Manage agent configurations");
     }
 }

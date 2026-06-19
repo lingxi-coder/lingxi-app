@@ -142,7 +142,7 @@ pub const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/help", "Show keyboard shortcuts and commands"),
     ("/clear", "Clear the conversation history"),
     ("/exit", "Exit Claude Code"),
-    ("/agents", "Manage subagents"),
+    ("/agents", "Manage agent configurations"),
     ("/mcp", "Show configured MCP servers"),
     ("/hooks", "Show configured hooks"),
     ("/model", "Set the active model"),

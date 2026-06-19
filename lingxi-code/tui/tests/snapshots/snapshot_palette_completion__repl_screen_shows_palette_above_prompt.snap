@@ -8,7 +8,7 @@ expression: out
 /cost – Show total cost and duration of the current session
 /color – (unimplemented in v0.6.0)
 /commit – (unimplemented in v0.6.0)
-/config – Open config panel
+/config – Open settings
 ❯ /co 
 ❯
 ? for shortcuts     shift + ⏎ for newline

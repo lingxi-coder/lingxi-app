@@ -142,6 +142,6 @@ Status:
         let mock = Arc::new(MockOrchestratorHandle::new());
         let h = StatusHandler::new(mock);
         assert_eq!(h.name(), "status");
-        assert_eq!(h.description(), "Show Claude Code status");
+        assert_eq!(h.description(), "Show Claude Code status including version, model, account, API connectivity, and tool statuses");
     }
 }

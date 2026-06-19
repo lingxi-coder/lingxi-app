@@ -101,8 +101,8 @@ mod tests {
         let s = render_help_screen();
         let line = s.lines().find(|l| l.starts_with("  /agents ")).unwrap();
         // "/agents" = 7 chars; pad 13 spaces to col1=20; then 2 separator
-        // spaces; then "Manage subagents".
-        let expected = format!("  /agents{}  Manage subagents", " ".repeat(20 - 7));
+        // spaces; then "Manage agent configurations".
+        let expected = format!("  /agents{}  Manage agent configurations", " ".repeat(20 - 7));
         assert_eq!(line, expected);
     }
 

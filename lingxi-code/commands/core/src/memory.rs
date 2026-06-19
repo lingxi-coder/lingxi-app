@@ -132,6 +132,6 @@ mod tests {
         let mock = Arc::new(MockOrchestratorHandle::new());
         let h = MemoryHandler::new(mock);
         assert_eq!(h.name(), "memory");
-        assert_eq!(h.description(), "Edit Claude memory files");
+        assert_eq!(h.description(), "Open a memory file in your editor");
     }
 }

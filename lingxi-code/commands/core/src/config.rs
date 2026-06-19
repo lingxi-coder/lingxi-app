@@ -102,6 +102,6 @@ mod tests {
         let mock = Arc::new(MockOrchestratorHandle::new());
         let h = ConfigHandler::new(mock);
         assert_eq!(h.name(), "config");
-        assert_eq!(h.description(), "Open config panel");
+        assert_eq!(h.description(), "Open settings");
     }
 }

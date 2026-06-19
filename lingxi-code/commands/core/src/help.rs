@@ -59,7 +59,7 @@ mod tests {
         match h.handle(&args).await {
             CommandResult::Done { display: Some(s) } => {
                 assert!(s.starts_with("Commands:\n"));
-                assert!(s.contains("Manage subagents"));
+                assert!(s.contains("Manage agent configurations"));
                 assert!(s.contains("/x402"));
                 // 100 newlines total (1 header + 99 commands).
                 assert_eq!(s.matches('\n').count(), 100);

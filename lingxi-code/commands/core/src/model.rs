@@ -155,7 +155,7 @@ mod tests {
         let mock = Arc::new(MockOrchestratorHandle::new());
         let h = ModelHandler::new(mock);
         assert_eq!(h.name(), "model");
-        assert_eq!(h.description(), "Set the model for Claude Code to use");
+        assert_eq!(h.description(), "Set the AI model for Claude Code");
     }
 
     /// `/model openai/gpt-5.2` with a fixture that has both openai and

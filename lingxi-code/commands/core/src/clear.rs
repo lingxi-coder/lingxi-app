@@ -109,7 +109,7 @@ mod tests {
         assert_eq!(h.name(), "clear");
         assert_eq!(
             h.description(),
-            "Clear conversation history and free up context"
+            "Start a new session with empty context; previous session stays on disk (resumable with /resume)"
         );
     }
 }

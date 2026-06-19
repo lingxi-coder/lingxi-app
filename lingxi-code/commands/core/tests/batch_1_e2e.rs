@@ -58,7 +58,7 @@ async fn help_dispatch() {
     match r {
         SlashDispatchResult::Handled { display } => {
             assert!(display.starts_with("Commands:\n"));
-            assert!(display.contains("Manage subagents"));
+            assert!(display.contains("Manage agent configurations"));
             // 100 newlines (header + 99 lines).
             assert_eq!(display.matches('\n').count(), 100);
         }

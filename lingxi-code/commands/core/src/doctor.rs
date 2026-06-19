@@ -1,4 +1,4 @@
-//! `/doctor` — render the 6-check diagnostic report.
+//! `/doctor` — render the diagnostic report (one row per check).
 //!
 //! See plan M5-11 T0 step 4 for the locked layout (one block per check;
 //! `[OK]` / `[!!]` / `[XX]` glyphs; optional detail indented 6 spaces;

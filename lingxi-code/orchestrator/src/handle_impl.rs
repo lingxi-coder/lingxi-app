@@ -184,7 +184,14 @@ impl OrchestratorHandle for ConversationOrchestrator {
             || std::path::PathBuf::from("."),
             |h| memory::claude_md::user_config_dir(&h),
         );
-        crate::diagnostics::run_all(&config_dir).await
+        // Also diagnose the global config `~/.claude.json` (the one path NOT under
+        // `tr()`: `($CLAUDE_CONFIG_DIR || $HOME)/.claude.json`), which claude-code's
+        // doctor probes alongside the tree.
+        crate::diagnostics::run_all(
+            &config_dir,
+            migrations::global_config::global_config_path().as_deref(),
+        )
+        .await
     }
 
     async fn get_status_snapshot(&self) -> StatusSnapshot {

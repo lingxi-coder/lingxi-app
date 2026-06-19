@@ -1,17 +1,22 @@
-//! `/doctor` check runners. M5-11 ships 6 checks (T2 step 6 + T12).
+//! `/doctor` check runners. Ships 7 checks (T2 step 6 + T12; plus the global
+//! `~/.claude.json` config probe — claude-code's doctor diagnoses both the
+//! `tr()`-rooted config-home tree AND the global config file).
 //!
 //! Each check returns a [`DoctorCheck`] with a `Pass`/`Warn`/`Fail` status.
 //! The aggregate [`DoctorReport`] is what the `/doctor` slash-command
-//! handler renders into the locked 6-row + Summary text panel.
+//! handler renders (one row per check) into the Summary text panel.
 
 use std::path::Path;
 use traits::{CheckStatus, DoctorCheck, DoctorReport, DoctorSummary};
 
-/// Run all 6 doctor checks against the supplied config-dir root and
-/// aggregate the results.
-pub async fn run_all(config_dir: &Path) -> DoctorReport {
+/// Run all doctor checks against the supplied config-dir root (the `tr()`-rooted
+/// config-home tree) plus the global config file (`~/.claude.json`, passed
+/// separately because it is the one path NOT under `tr()`), and aggregate the
+/// results.
+pub async fn run_all(config_dir: &Path, global_config_path: Option<&Path>) -> DoctorReport {
     let checks = vec![
         check_config_dir(config_dir).await,
+        check_global_config(global_config_path).await,
         check_api_key(),
         check_network().await,
         check_disk_space(config_dir).await,
@@ -59,6 +64,67 @@ async fn check_config_dir(p: &Path) -> DoctorCheck {
             None
         } else {
             Some(format!("{} is not writable", p.display()))
+        },
+    }
+}
+
+/// Probe the global config file `~/.claude.json` — claude-code's doctor names
+/// this file literally in its writability error and diagnoses it alongside the
+/// config-home tree. A corrupt (unparseable) global config breaks every config
+/// read, so it Fails; a present-but-read-only file Fails; an absent file is fine
+/// (it is created on the first config write). `None` (path unresolvable) Warns.
+async fn check_global_config(path: Option<&Path>) -> DoctorCheck {
+    let name = "global-config".to_string();
+    let Some(path) = path else {
+        return DoctorCheck {
+            name,
+            status: CheckStatus::Warn,
+            detail: Some("could not resolve the global config (~/.claude.json) path".to_string()),
+        };
+    };
+    match tokio::fs::read(path).await {
+        Ok(bytes) => {
+            if serde_json::from_slice::<serde_json::Value>(&bytes).is_err() {
+                return DoctorCheck {
+                    name,
+                    status: CheckStatus::Fail,
+                    detail: Some(format!(
+                        "{} is not valid JSON (corrupt global config)",
+                        path.display()
+                    )),
+                };
+            }
+            // Writability probe: append-open neither modifies nor truncates the
+            // file (we write nothing), it only proves the file can be opened for
+            // writing — non-destructive, unlike the config-dir scratch probe.
+            let writable = tokio::fs::OpenOptions::new()
+                .append(true)
+                .open(path)
+                .await
+                .is_ok();
+            DoctorCheck {
+                name,
+                status: if writable {
+                    CheckStatus::Pass
+                } else {
+                    CheckStatus::Fail
+                },
+                detail: if writable {
+                    None
+                } else {
+                    Some(format!("{} is not writable", path.display()))
+                },
+            }
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => DoctorCheck {
+            name,
+            status: CheckStatus::Pass,
+            detail: Some(format!("{} not yet created", path.display())),
+        },
+        Err(e) => DoctorCheck {
+            name,
+            status: CheckStatus::Fail,
+            detail: Some(format!("{} is unreadable: {e}", path.display())),
         },
     }
 }
@@ -230,12 +296,48 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn run_all_returns_6_checks() {
+    async fn run_all_returns_7_checks() {
         let tmp = std::env::temp_dir().join("lingxi_diag_test");
-        let report = run_all(&tmp).await;
-        assert_eq!(report.checks.len(), 6, "doctor must run 6 checks");
+        let global = tmp.join(".claude.json");
+        let report = run_all(&tmp, Some(&global)).await;
+        assert_eq!(report.checks.len(), 7, "doctor must run 7 checks");
         // Summary tallies match check count.
         let total = report.summary.passed + report.summary.warnings + report.summary.failed;
-        assert_eq!(total, 6);
+        assert_eq!(total, 7);
+    }
+
+    #[tokio::test]
+    async fn global_config_check_corrupt_is_fail() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".claude.json");
+        tokio::fs::write(&path, b"{ not json").await.unwrap();
+        let c = check_global_config(Some(&path)).await;
+        assert_eq!(c.name, "global-config");
+        assert!(matches!(c.status, CheckStatus::Fail));
+    }
+
+    #[tokio::test]
+    async fn global_config_check_valid_is_pass() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".claude.json");
+        tokio::fs::write(&path, br#"{"numStartups":1}"#).await.unwrap();
+        let c = check_global_config(Some(&path)).await;
+        assert!(matches!(c.status, CheckStatus::Pass));
+    }
+
+    #[tokio::test]
+    async fn global_config_check_absent_is_pass() {
+        // Fresh install: `~/.claude.json` not yet created — must Pass (it is
+        // written on the first config change), not Fail.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".claude.json"); // never created
+        let c = check_global_config(Some(&path)).await;
+        assert!(matches!(c.status, CheckStatus::Pass));
+    }
+
+    #[tokio::test]
+    async fn global_config_check_none_path_is_warn() {
+        let c = check_global_config(None).await;
+        assert!(matches!(c.status, CheckStatus::Warn));
     }
 }

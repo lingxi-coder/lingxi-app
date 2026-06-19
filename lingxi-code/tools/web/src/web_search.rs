@@ -669,9 +669,9 @@ static INPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
         "additionalProperties": false,
         "required": ["query"],
         "properties": {
-            "query": { "type": "string", "minLength": 2 },
-            "allowed_domains": { "type": "array", "items": { "type": "string" } },
-            "blocked_domains": { "type": "array", "items": { "type": "string" } }
+            "query": { "type": "string", "minLength": 2, "description": "The search query to use" },
+            "allowed_domains": { "type": "array", "items": { "type": "string" }, "description": "Only include search results from these domains" },
+            "blocked_domains": { "type": "array", "items": { "type": "string" }, "description": "Never include search results from these domains" }
         }
     })
 });

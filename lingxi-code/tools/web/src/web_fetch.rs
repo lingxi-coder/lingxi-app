@@ -480,8 +480,8 @@ static INPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
         "additionalProperties": false,
         "required": ["url"],
         "properties": {
-            "url": { "type": "string", "format": "uri" },
-            "prompt": { "type": "string" }
+            "url": { "type": "string", "format": "uri", "description": "The URL to fetch content from" },
+            "prompt": { "type": "string", "description": "The prompt to run on the fetched content" }
         }
     })
 });

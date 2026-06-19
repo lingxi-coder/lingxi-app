@@ -1,8 +1,8 @@
 //! `WebFetchTool` — fetches a URL via the M1 `HttpTransport` trait, with a
 //! 10 MB transfer cap, a 100 000-char markdown cap, scheme allow-list
-//! (`https`/`http`), manual permitted-redirect handling, and the locked
-//! `claude-code-tool/<CARGO_PKG_VERSION>` User-Agent. Spec §4 Flow B + §7
-//! Web wire identifiers.
+//! (`https`/`http`), manual permitted-redirect handling, and the claude-code
+//! `Claude-User (claude-code/<version>; +https://support.anthropic.com/)`
+//! User-Agent (v2.1.181). Spec §4 Flow B + §7 Web wire identifiers.
 //!
 //! Wire-locked constants (byte-checked against `parity_web_tools.json` + TS):
 //! - `WEBFETCH_MAX_TRANSFER_BYTES = 10 * 1024 * 1024` (10 MB; TS
@@ -310,9 +310,13 @@ impl WebFetchTool {
     }
 
     fn user_agent() -> String {
+        // claude-code WebFetch User-Agent (v2.1.181: `Claude-User (${tg()}; +...)`):
+        // `Claude-User (claude-code/<version>; +https://support.anthropic.com/)`.
+        // The `Claude-User (...)` wrapper is how Anthropic web infra recognizes
+        // claude-code fetch traffic (distinct from the api-client UA). LingXi has
+        // no pinned claude-code version, so its own crate version fills the slot.
         format!(
-            "{}{}",
-            WEBFETCH_USER_AGENT_PREFIX,
+            "Claude-User (claude-code/{}; +https://support.anthropic.com/)",
             env!("CARGO_PKG_VERSION")
         )
     }
@@ -1361,13 +1365,13 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
             .iter()
             .find(|(k, _)| k.eq_ignore_ascii_case("user-agent"))
             .expect("must have user-agent header");
-        assert!(
-            ua_value.starts_with(WEBFETCH_USER_AGENT_PREFIX),
-            "UA `{ua_value}` must start with `{WEBFETCH_USER_AGENT_PREFIX}`"
-        );
-        assert!(
-            ua_value.ends_with(env!("CARGO_PKG_VERSION")),
-            "UA `{ua_value}` must end with crate version"
+        assert_eq!(
+            ua_value,
+            &format!(
+                "Claude-User (claude-code/{}; +https://support.anthropic.com/)",
+                env!("CARGO_PKG_VERSION")
+            ),
+            "WebFetch UA must be claude-code's `Claude-User (...)` form"
         );
     }
 

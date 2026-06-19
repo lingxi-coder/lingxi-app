@@ -164,15 +164,22 @@ impl Tool for NotebookEditTool {
     }
 
     async fn description(&self, _input: &Value, _opts: &DescriptionOptions) -> String {
-        // Verbatim claude-code v2.1.181 NotebookEdit description (was the older
-        // "Replace the contents of a specific cell..." — v2.1.181 rewrote it to
-        // cover insert/delete + the .ipynb suffix).
-        "Replaces, inserts, or deletes a single cell in a Jupyter notebook (.ipynb file).".to_string()
+        // Verbatim claude-code v2.1.181 NotebookEdit description const `f2a`
+        // (em-dash is U+2014).
+        "Edit a cell in a Jupyter notebook — replace, insert, or delete.".to_string()
     }
 
     async fn prompt(&self, _opts: &PromptOptions) -> String {
-        // Verbatim claude-code `NotebookEditTool/prompt.ts:3` (PROMPT).
-        "Completely replaces the contents of a specific cell in a Jupyter notebook (.ipynb file) with new source. Jupyter notebooks are interactive documents that combine code, text, and visualizations, commonly used for data analysis and scientific computing. The notebook_path parameter must be an absolute path, not a relative path. The cell_number is 0-indexed. Use edit_mode=insert to add a new cell at the index specified by cell_number. Use edit_mode=delete to delete the cell at the index specified by cell_number.".to_string()
+        // Verbatim claude-code v2.1.181 NotebookEdit PROMPT const `A2a` (the
+        // older cell_number-based text was version-skewed; v2.1.181 is cell_id-
+        // based). `${Ws}` → the "NotebookRead" tool name; em-dashes are U+2014;
+        // the backticks are literal markdown code spans.
+        "Replaces, inserts, or deletes a single cell in a Jupyter notebook (.ipynb file).\n\
+Usage:\n\
+- You must use the NotebookRead tool on the notebook in this conversation before editing — this tool will fail otherwise.\n\
+- `notebook_path` must be an absolute path.\n\
+- `cell_id` is the `id` attribute shown in the NotebookRead tool's `<cell id=\"...\">` output. It is required for `replace` and `delete`.\n\
+- `edit_mode` defaults to `replace`. Use `insert` to add a new cell after the cell with the given `cell_id` (or at the beginning of the notebook if `cell_id` is omitted) — `cell_type` is required when inserting. Use `delete` to remove the cell.".to_string()
     }
 
     fn get_path(&self, input: &Value) -> Option<PathBuf> {

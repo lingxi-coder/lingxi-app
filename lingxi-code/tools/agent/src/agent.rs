@@ -159,7 +159,7 @@ static AGENT_INPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
             },
             "model": {
                 "type": "string",
-                "enum": ["sonnet", "opus", "haiku"],
+                "enum": ["sonnet", "opus", "haiku", "fable"],
                 "description": "Optional model override for this agent. Takes precedence over the agent definition's model frontmatter. If omitted, uses the agent definition's model, or inherits from the parent."
             },
             "run_in_background": {
@@ -181,7 +181,7 @@ static AGENT_INPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
             "isolation": {
                 "type": "string",
                 "enum": ["worktree", "remote"],
-                "description": "Isolation mode. \"worktree\" creates a temporary git worktree so the agent works on an isolated copy of the repo. \"remote\" launches the agent in a remote CCR environment (always runs in background)."
+                "description": "Isolation mode. \"worktree\" creates a temporary git worktree so the agent works on an isolated copy of the repo. \"remote\" launches the agent in a remote cloud environment (always runs in background; availability is gated)."
             },
             "cwd": {
                 "type": "string",
@@ -1732,7 +1732,7 @@ mod tests {
         // `model` + `isolation` carry the TS enum constraint.
         assert_eq!(
             AGENT_INPUT_SCHEMA["properties"]["model"]["enum"],
-            json!(["sonnet", "opus", "haiku"])
+            json!(["sonnet", "opus", "haiku", "fable"])
         );
         assert_eq!(
             AGENT_INPUT_SCHEMA["properties"]["isolation"]["enum"],

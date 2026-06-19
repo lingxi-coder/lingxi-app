@@ -63,38 +63,81 @@ pub fn format_timeout_error(timeout_ms: u64) -> String {
     BASH_TIMEOUT_ERROR_TEMPLATE.replace("{N}", &timeout_ms.to_string())
 }
 
-/// Detect a standalone or leading `sleep N` (N>=2) pattern that should use the
+/// Minimum sleep duration (seconds) that triggers the sleep-block — byte-locked
+/// to claude-code `G2n=25`. Sleeps shorter than this are permitted (the
+/// `if(o<G2n)return null` guard in `t2p`); LingXi previously used 2.
+pub const SLEEP_BLOCK_THRESHOLD_SECS: f64 = 25.0;
+
+/// Whether the bash sleep-block is active — the LingXi analogue of claude-code's
+/// `sq()=ct("tengu_amber_sentinel", false)` gate. Defaults to **false** (so the
+/// block is inert in the default config, exactly like stock claude-code), and is
+/// opt-in via a truthy `tengu_amber_sentinel` env override (1/true/yes/on). This
+/// mirrors `is_agent_swarms_enabled`'s env-based gate accessor (the GrowthBook
+/// gate is a host-runtime signal not threaded into the tool, so LingXi defaults
+/// it and exposes an env override for parity/testing).
+#[must_use]
+pub fn sleep_block_enabled() -> bool {
+    std::env::var("tengu_amber_sentinel").ok().is_some_and(|v| {
+        matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on")
+    })
+}
+
+/// Format a parsed sleep duration the way JS `${parseFloat(x)}` would: an
+/// integral value renders WITHOUT a decimal point (`30`, not `30.0`), a
+/// fractional value keeps its fraction (`30.5`).
+#[must_use]
+fn format_parsefloat(n: f64) -> String {
+    if n.fract() == 0.0 && n.abs() < 1e15 {
+        format!("{}", n as i64)
+    } else {
+        format!("{n}")
+    }
+}
+
+/// Detect a standalone or leading `sleep N` (N>=25) pattern that should use the
 /// background path / Monitor tool instead of blocking the turn. Faithful port
-/// of claude-code `detectBlockedSleepPattern` (`BashTool.tsx:322-337`): splits
-/// on the shell list separators (the `splitCommand_DEPRECATED` analogue), then
-/// matches `^sleep\s+(\d+)\s*$` on the FIRST subcommand only. Float durations
-/// (`sleep 0.5`) are deliberately NOT matched (legit pacing). Returns the
-/// pattern description (`standalone sleep N` or `sleep N followed by: <rest>`)
-/// for blockable commands, `None` otherwise.
+/// of claude-code `t2p` (`BashTool` `detectBlockedSleepPattern`): splits on the
+/// shell list separators, then matches `^sleep\s+(\d+(?:\.\d*)?)\s*$` on the
+/// FIRST subcommand only, `parseFloat`s the capture, and returns `null` when it
+/// is `< G2n` ([`SLEEP_BLOCK_THRESHOLD_SECS`] = 25). FRACTIONAL durations ARE
+/// matched (`sleep 30.5`), unlike the prior integer-only port. The duration is
+/// rendered with `parseFloat` semantics. Returns the pattern description
+/// (`standalone sleep N` or `sleep N followed by: <rest>`), else `None`.
 #[must_use]
 pub fn detect_blocked_sleep_pattern(command: &str) -> Option<String> {
     let parts = permission::shell_command::split_command(command);
     let first = parts.first().map(|s| s.trim()).unwrap_or("");
-    // `^sleep\s+(\d+)\s*$` — manual match (no regex dep). `\s` is ASCII
-    // whitespace; the integer-only capture rejects `sleep 0.5` (the `.` is not
-    // consumed by the digit run, leaving a non-whitespace remainder → no match).
+    // `^sleep\s+(\d+(?:\.\d*)?)\s*$` — manual match (no regex dep).
     let rest_after_kw = first.strip_prefix("sleep")?;
     // Require at least one whitespace char after the keyword.
     let after_ws = rest_after_kw.trim_start_matches(|c: char| c.is_ascii_whitespace());
     if after_ws.len() == rest_after_kw.len() {
         return None; // no separating whitespace (e.g. "sleeper")
     }
-    // Consume the digit run, then require only trailing whitespace.
-    let digits_end = after_ws
-        .find(|c: char| !c.is_ascii_digit())
-        .unwrap_or(after_ws.len());
-    let (digits, tail) = after_ws.split_at(digits_end);
-    if digits.is_empty() || !tail.trim_end_matches(|c: char| c.is_ascii_whitespace()).is_empty() {
+    // Consume the digit run, then an OPTIONAL `.` + further (optional) digits.
+    let bytes = after_ws.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() && bytes[i].is_ascii_digit() {
+        i += 1;
+    }
+    if i == 0 {
+        return None; // `\d+` needs at least one leading digit
+    }
+    if i < bytes.len() && bytes[i] == b'.' {
+        i += 1;
+        while i < bytes.len() && bytes[i].is_ascii_digit() {
+            i += 1;
+        }
+    }
+    let (num_str, tail) = after_ws.split_at(i);
+    if !tail.trim_end_matches(|c: char| c.is_ascii_whitespace()).is_empty() {
         return None;
     }
-    let secs: u64 = digits.parse().ok()?;
-    if secs < 2 {
-        return None; // sub-2s sleeps are fine (rate limiting, pacing)
+    // `parseFloat`: a trailing `.` (e.g. `30.`) is fine in JS but not for Rust's
+    // f64 parser, so strip it first.
+    let secs: f64 = num_str.trim_end_matches('.').parse().ok()?;
+    if secs < SLEEP_BLOCK_THRESHOLD_SECS {
+        return None; // sub-threshold sleeps are fine (rate limiting, pacing)
     }
     let rest = parts
         .iter()
@@ -104,10 +147,67 @@ pub fn detect_blocked_sleep_pattern(command: &str) -> Option<String> {
         .join(" ")
         .trim()
         .to_string();
+    let num_fmt = format_parsefloat(secs);
     if rest.is_empty() {
-        Some(format!("standalone sleep {secs}"))
+        Some(format!("standalone sleep {num_fmt}"))
     } else {
-        Some(format!("sleep {secs} followed by: {rest}"))
+        Some(format!("sleep {num_fmt} followed by: {rest}"))
+    }
+}
+
+/// `^[-+]?\d+(\.\d+)?$` — claude-code `VF`'s numeric-string predicate (manual,
+/// no regex dep). NOTE the fractional part requires ≥1 digit after the `.`
+/// (`\.\d+`), unlike the sleep regex's `\.\d*`.
+#[must_use]
+fn is_vf_numeric_string(s: &str) -> bool {
+    let b = s.as_bytes();
+    let mut i = 0;
+    if i < b.len() && (b[i] == b'+' || b[i] == b'-') {
+        i += 1;
+    }
+    let int_start = i;
+    while i < b.len() && b[i].is_ascii_digit() {
+        i += 1;
+    }
+    if i == int_start {
+        return false; // need ≥1 integer digit
+    }
+    if i < b.len() && b[i] == b'.' {
+        i += 1;
+        let frac_start = i;
+        while i < b.len() && b[i].is_ascii_digit() {
+            i += 1;
+        }
+        if i == frac_start {
+            return false; // `.` must be followed by ≥1 digit
+        }
+    }
+    i == b.len()
+}
+
+/// Resolve the `timeout` input to milliseconds — 1:1 with claude-code's `VF`
+/// preprocess (numeric-string coercion) followed by `H5a` (`typeof n==="number"
+/// && n>0 ? n : default`). A string matching [`is_vf_numeric_string`] is coerced
+/// to a number; the value is used iff it is a finite number > 0, else the
+/// default. There is NO upper clamp/rejection (the `max` in the schema's
+/// `describe` text is advisory only — claude-code's schema has no `.max()`).
+#[must_use]
+pub fn resolve_timeout_ms(input: &Value) -> u64 {
+    let as_num: Option<f64> = match input.get("timeout") {
+        Some(Value::String(s)) => {
+            let t = s.trim();
+            if is_vf_numeric_string(t) {
+                t.parse::<f64>().ok().filter(|n| n.is_finite())
+            } else {
+                None
+            }
+        }
+        Some(v) => v.as_f64(),
+        None => None,
+    };
+    match as_num {
+        Some(n) if n > 0.0 => n as u64,
+        _ => BASH_DEFAULT_TIMEOUT_MS,
     }
 }
 
@@ -558,10 +658,11 @@ static INPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
             "command":           { "type": "string", "description": "The command to execute" },
             // claude-code `BashTool.tsx:229` names this param `timeout`
             // (milliseconds). A model sending `timeout` must be honored.
+            // claude-code: `VF(E.number().optional()).describe(...)` — NO `.max()`
+            // (the "(max 600000)" is advisory describe text only). #4.
             "timeout":           {
                 "type": "integer",
                 "minimum": 1,
-                "maximum": 600_000,
                 "description": "Optional timeout in milliseconds (max 600000)"
             },
             "run_in_background": { "type": "boolean", "description": "Set to true to run this command in the background." },
@@ -655,29 +756,24 @@ impl Tool for BashTool {
         if cmd.is_empty() {
             return Err(ValidationError("`command` must not be empty".into()));
         }
-        if let Some(t) = input.get("timeout").and_then(Value::as_u64) {
-            if t > BASH_MAX_TIMEOUT_MS {
-                return Err(ValidationError(format!(
-                    "timeout {t} exceeds limit {BASH_MAX_TIMEOUT_MS}"
-                )));
-            }
-        }
-        // claude-code `BashTool.tsx:524-534` `validateInput`: block bare
-        // `sleep N` (N>=2) when NOT run in the background. TS additionally gates
-        // on `feature('MONITOR_TOOL') && !isBackgroundTasksDisabled` — the
-        // Monitor tool IS present in this repo and there is no Rust analog of
-        // `isBackgroundTasksDisabled` (defaults false), so the block is active
-        // whenever `run_in_background != true`. The error message is
-        // byte-identical to `BashTool.tsx:530`; `errorCode: 10` (TS:531) has no
+        // claude-code's bash `timeout` schema is `VF(E.number().optional())` with
+        // NO `.max()` — the resolver `H5a` accepts any number > 0, so an
+        // over-`max` value is honored (the schema `describe` text's "(max
+        // 600000)" is advisory only). The prior >max rejection is removed (#4).
+        //
+        // claude-code `validateInput`: block bare `sleep N` (N>=25) when NOT run
+        // in the background — BUT only when `sq()=ct("tengu_amber_sentinel",
+        // false)` is enabled (default false → inert, like stock claude-code).
+        // The message is byte-identical to the binary; `errorCode: 10` has no
         // Rust surface and is dropped.
         let run_bg = input
             .get("run_in_background")
             .and_then(Value::as_bool)
             .unwrap_or(false);
-        if !run_bg {
+        if sleep_block_enabled() && !run_bg {
             if let Some(pattern) = detect_blocked_sleep_pattern(cmd) {
                 return Err(ValidationError(format!(
-                    "Blocked: {pattern}. Run blocking commands in the background with run_in_background: true — you'll get a completion notification when done. For streaming events (watching logs, polling APIs), use the Monitor tool. If you genuinely need a delay (rate limiting, deliberate pacing), keep it under 2 seconds."
+                    "Blocked: {pattern}. To wait for a condition, use Monitor with an until-loop (e.g. `until <check>; do sleep 2; done`). To wait for a command you started, use run_in_background: true. Do not chain shorter sleeps to work around this block."
                 )));
             }
         }
@@ -707,13 +803,10 @@ impl Tool for BashTool {
             .and_then(Value::as_str)
             .ok_or_else(|| ToolError::InvalidInput("missing command".into()))?
             .to_string();
-        // claude-code `BashTool.tsx:229` sends the timeout as `timeout`
-        // (milliseconds). Lenient numeric coercion: `as_u64` accepts a JSON
-        // integer; a fractional/string value falls through to the default.
-        let timeout_ms = input
-            .get("timeout")
-            .and_then(Value::as_u64)
-            .unwrap_or(BASH_DEFAULT_TIMEOUT_MS);
+        // claude-code `BashTool.tsx` sends the timeout as `timeout` (ms). Resolve
+        // it with the faithful `VF` (numeric-string coercion) + `H5a` (use iff a
+        // finite number > 0, else default) logic — no upper clamp/rejection (#4/#5).
+        let timeout_ms = resolve_timeout_ms(&input);
         let run_bg = input
             .get("run_in_background")
             .and_then(Value::as_bool)
@@ -723,11 +816,6 @@ impl Tool for BashTool {
             .get("dangerouslyDisableSandbox")
             .and_then(Value::as_bool)
             .unwrap_or(false);
-        if timeout_ms > BASH_MAX_TIMEOUT_MS {
-            return Err(ToolError::InvalidInput(format!(
-                "timeout {timeout_ms} exceeds limit {BASH_MAX_TIMEOUT_MS}"
-            )));
-        }
         if cfg!(target_os = "windows") {
             return Err(ToolError::InvalidInput(
                 "Bash is not supported on Windows; use PowerShellTool".into(),
@@ -1405,73 +1493,154 @@ mod tests {
         assert_eq!(res.data["stdout"], "");
     }
 
-    #[tokio::test]
-    async fn validate_input_blocks_standalone_sleep() {
-        let tool = BashTool::new(shell_test_ctx(ProcessOutput {
+    /// Serializes every test that mutates the process-global
+    /// `tengu_amber_sentinel` gate env (the sleep-block opt-in). A tokio mutex
+    /// keeps the guard `Send` across the `.await` in these async tests.
+    static SLEEP_GATE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    fn bash_tool_noop() -> BashTool {
+        BashTool::new(shell_test_ctx(ProcessOutput {
             stdout: String::new(),
             stderr: String::new(),
             exit_code: 0,
             timed_out: false,
-        }));
-        let err = tool
-            .validate_input(&json!({"command": "sleep 5"}), &use_ctx())
-            .await
-            .expect_err("sleep 5 must be blocked");
+        }))
+    }
+
+    #[tokio::test]
+    async fn validate_input_blocks_standalone_sleep_when_gate_on() {
+        let _g = SLEEP_GATE_LOCK.lock().await;
+        let tool = bash_tool_noop();
+        // Gate ON + duration >= 25 (G2n) → blocked with the byte-exact message.
+        std::env::set_var("tengu_amber_sentinel", "1");
+        let result = tool
+            .validate_input(&json!({"command": "sleep 30"}), &use_ctx())
+            .await;
+        std::env::remove_var("tengu_amber_sentinel");
+        let err = result.expect_err("sleep 30 must be blocked when the gate is on");
+        assert_eq!(
+            err.0,
+            "Blocked: standalone sleep 30. To wait for a condition, use Monitor with an until-loop (e.g. `until <check>; do sleep 2; done`). To wait for a command you started, use run_in_background: true. Do not chain shorter sleeps to work around this block."
+        );
+    }
+
+    #[tokio::test]
+    async fn validate_input_blocks_sleep_with_followup_when_gate_on() {
+        let _g = SLEEP_GATE_LOCK.lock().await;
+        let tool = bash_tool_noop();
+        std::env::set_var("tengu_amber_sentinel", "1");
+        let result = tool
+            .validate_input(&json!({"command": "sleep 30 && echo done"}), &use_ctx())
+            .await;
+        std::env::remove_var("tengu_amber_sentinel");
+        let err = result.expect_err("sleep 30 && ... must be blocked when the gate is on");
         assert!(
-            err.0.starts_with("Blocked: standalone sleep 5."),
+            err.0.starts_with("Blocked: sleep 30 followed by: echo done. To wait"),
             "got: {}",
             err.0
         );
     }
 
     #[tokio::test]
-    async fn validate_input_blocks_sleep_with_followup() {
-        let tool = BashTool::new(shell_test_ctx(ProcessOutput {
-            stdout: String::new(),
-            stderr: String::new(),
-            exit_code: 0,
-            timed_out: false,
-        }));
-        let err = tool
-            .validate_input(&json!({"command": "sleep 5 && echo done"}), &use_ctx())
+    async fn validate_input_sleep_block_is_off_by_default() {
+        let _g = SLEEP_GATE_LOCK.lock().await;
+        let tool = bash_tool_noop();
+        // No gate env set (default) → even a long sleep is allowed (1:1 with
+        // stock claude-code, whose `sq()` defaults false).
+        std::env::remove_var("tengu_amber_sentinel");
+        tool.validate_input(&json!({"command": "sleep 30"}), &use_ctx())
             .await
-            .expect_err("sleep 5 && ... must be blocked");
-        assert!(
-            err.0.contains("Blocked: sleep 5 followed by: echo done"),
-            "got: {}",
-            err.0
-        );
+            .expect("sleep 30 must be ALLOWED by default (gate off)");
     }
 
     #[tokio::test]
-    async fn validate_input_allows_short_and_float_sleep_and_other_commands() {
-        let tool = BashTool::new(shell_test_ctx(ProcessOutput {
-            stdout: String::new(),
-            stderr: String::new(),
-            exit_code: 0,
-            timed_out: false,
-        }));
-        for ok in ["sleep 1", "sleep 0.5", "echo hi", "sleeper foo"] {
-            tool.validate_input(&json!({ "command": ok }), &use_ctx())
-                .await
-                .unwrap_or_else(|e| panic!("{ok:?} should be allowed, got: {}", e.0));
+    async fn validate_input_allows_sub_threshold_and_float_even_when_gate_on() {
+        let _g = SLEEP_GATE_LOCK.lock().await;
+        let tool = bash_tool_noop();
+        std::env::set_var("tengu_amber_sentinel", "1");
+        // < 25 (incl. fractional, and non-sleep commands) are never blocked.
+        let mut results = Vec::new();
+        for ok in ["sleep 24", "sleep 24.9", "sleep 0.5", "echo hi", "sleeper foo"] {
+            results.push((ok, tool.validate_input(&json!({ "command": ok }), &use_ctx()).await));
+        }
+        std::env::remove_var("tengu_amber_sentinel");
+        for (ok, r) in results {
+            r.unwrap_or_else(|e| panic!("{ok:?} should be allowed, got: {}", e.0));
         }
     }
 
     #[tokio::test]
-    async fn validate_input_allows_sleep_when_backgrounded() {
-        let tool = BashTool::new(shell_test_ctx(ProcessOutput {
-            stdout: String::new(),
-            stderr: String::new(),
-            exit_code: 0,
-            timed_out: false,
-        }));
-        tool.validate_input(
-            &json!({"command": "sleep 5", "run_in_background": true}),
-            &use_ctx(),
-        )
-        .await
-        .expect("sleep 5 backgrounded must be allowed");
+    async fn validate_input_allows_sleep_when_backgrounded_even_with_gate_on() {
+        let _g = SLEEP_GATE_LOCK.lock().await;
+        let tool = bash_tool_noop();
+        std::env::set_var("tengu_amber_sentinel", "1");
+        let result = tool
+            .validate_input(
+                &json!({"command": "sleep 30", "run_in_background": true}),
+                &use_ctx(),
+            )
+            .await;
+        std::env::remove_var("tengu_amber_sentinel");
+        result.expect("sleep 30 backgrounded must be allowed even with the gate on");
+    }
+
+    #[test]
+    fn detect_blocked_sleep_pattern_threshold_and_fractional() {
+        // Below the 25s threshold → not blocked.
+        assert_eq!(detect_blocked_sleep_pattern("sleep 24"), None);
+        assert_eq!(detect_blocked_sleep_pattern("sleep 24.9"), None);
+        assert_eq!(detect_blocked_sleep_pattern("sleep 0.5"), None);
+        // At/above threshold → blocked; integral renders WITHOUT a decimal.
+        assert_eq!(
+            detect_blocked_sleep_pattern("sleep 25"),
+            Some("standalone sleep 25".to_string())
+        );
+        assert_eq!(
+            detect_blocked_sleep_pattern("sleep 30"),
+            Some("standalone sleep 30".to_string())
+        );
+        // Fractional duration is matched and kept (parseFloat semantics).
+        assert_eq!(
+            detect_blocked_sleep_pattern("sleep 30.5"),
+            Some("standalone sleep 30.5".to_string())
+        );
+        // Trailing dot (`30.`) parses as 30 → "30".
+        assert_eq!(
+            detect_blocked_sleep_pattern("sleep 30."),
+            Some("standalone sleep 30".to_string())
+        );
+        // Leading sleep with a follow-up command.
+        assert_eq!(
+            detect_blocked_sleep_pattern("sleep 40 && echo done"),
+            Some("sleep 40 followed by: echo done".to_string())
+        );
+        // Non-matches.
+        assert_eq!(detect_blocked_sleep_pattern("sleeper foo"), None);
+        assert_eq!(detect_blocked_sleep_pattern("echo hi"), None);
+    }
+
+    #[test]
+    fn resolve_timeout_ms_vf_h5a_semantics() {
+        // Plain number > 0 honored, even over the advisory 600000 "max" (#4).
+        assert_eq!(resolve_timeout_ms(&json!({"timeout": 200})), 200);
+        assert_eq!(resolve_timeout_ms(&json!({"timeout": 700_000})), 700_000);
+        // Numeric STRING coerced (VF): "30000" → 30000 (#5).
+        assert_eq!(resolve_timeout_ms(&json!({"timeout": "30000"})), 30_000);
+        assert_eq!(resolve_timeout_ms(&json!({"timeout": " 5000 "})), 5_000);
+        // 0 / negative / non-numeric string / absent → default (H5a).
+        assert_eq!(resolve_timeout_ms(&json!({"timeout": 0})), BASH_DEFAULT_TIMEOUT_MS);
+        assert_eq!(resolve_timeout_ms(&json!({"timeout": -5})), BASH_DEFAULT_TIMEOUT_MS);
+        assert_eq!(resolve_timeout_ms(&json!({"timeout": "abc"})), BASH_DEFAULT_TIMEOUT_MS);
+        assert_eq!(resolve_timeout_ms(&json!({})), BASH_DEFAULT_TIMEOUT_MS);
+    }
+
+    #[tokio::test]
+    async fn validate_input_no_longer_rejects_over_max_timeout() {
+        // #4: an over-600000 timeout is accepted (no schema/runtime max).
+        let tool = bash_tool_noop();
+        tool.validate_input(&json!({"command": "echo hi", "timeout": 900_000}), &use_ctx())
+            .await
+            .expect("over-max timeout must be accepted (no max rejection)");
     }
 
     #[tokio::test]

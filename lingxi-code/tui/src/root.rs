@@ -1936,10 +1936,10 @@ pub async fn pump_open_permissions(state: &Arc<Mutex<AppState>>) -> bool {
 /// `screens::doctor::claude_home_dir`. Falls back to `.` when the home dir is
 /// unknown so the walk simply finds nothing.
 fn claude_home_dir() -> std::path::PathBuf {
+    // claude-code `tr()` `??`: a SET `$CLAUDE_CONFIG_DIR` wins verbatim (incl.
+    // empty → cwd-relative); only UNSET falls back to `<home>/.claude`.
     if let Ok(explicit) = std::env::var("CLAUDE_CONFIG_DIR") {
-        if !explicit.is_empty() {
-            return std::path::PathBuf::from(explicit);
-        }
+        return std::path::PathBuf::from(explicit);
     }
     dirs::home_dir().map_or_else(|| std::path::PathBuf::from("."), |h| h.join(".claude"))
 }

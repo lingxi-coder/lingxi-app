@@ -8,13 +8,15 @@ pub const FILE_NAME: &str = "CLAUDE.md";
 pub const LOCAL_OVERRIDE_NAME: &str = "CLAUDE.local.md";
 
 /// Resolve the USER-tier `.claude` config directory, honoring
-/// `$CLAUDE_CONFIG_DIR` (claude-code `getClaudeConfigHomeDir`, envUtils.ts:7-14):
-/// a non-empty `$CLAUDE_CONFIG_DIR` is the `.claude` dir verbatim; otherwise it
-/// falls back to `<home>/.claude`. `home` is the caller-supplied home (the
-/// production provider passes `dirs::home_dir()`; tests pass a temp dir), so the
-/// walk stays hermetic while the env override still wins. An EMPTY
-/// `$CLAUDE_CONFIG_DIR` is treated as UNSET (claude-code `??` semantics where
-/// `""` is falsy — matches `migrations::global_config`).
+/// `$CLAUDE_CONFIG_DIR` (claude-code `tr()`: `process.env.CLAUDE_CONFIG_DIR ??
+/// join(homedir(), ".claude")`). When the env var is SET its value is the config
+/// dir verbatim — including a set-but-EMPTY value, which `??` honors (config-home
+/// then resolves cwd-relative), exactly as claude-code v2.1.181 does; only an
+/// UNSET var falls back to `<home>/.claude`. `home` is the caller-supplied home
+/// (production passes `dirs::home_dir()`; tests pass a temp dir) so the walk
+/// stays hermetic while the env override wins. (NOTE: the GLOBAL `~/.claude.json`
+/// resolver in `migrations::global_config` uses `||` and so treats empty as
+/// unset — that asymmetry is itself faithful to claude-code.)
 #[must_use]
 pub fn user_config_dir(home: &Path) -> PathBuf {
     resolve_user_config_dir(home, std::env::var_os("CLAUDE_CONFIG_DIR"))
@@ -24,8 +26,10 @@ pub fn user_config_dir(home: &Path) -> PathBuf {
 /// so the resolution logic is testable without mutating process env.
 fn resolve_user_config_dir(home: &Path, config_dir_env: Option<std::ffi::OsString>) -> PathBuf {
     match config_dir_env {
-        Some(dir) if !dir.is_empty() => PathBuf::from(dir),
-        _ => home.join(DOT_CLAUDE),
+        // `??`: a SET value wins verbatim, even when empty (claude-code resolves
+        // it cwd-relative); only an UNSET var falls back to `<home>/.claude`.
+        Some(dir) => PathBuf::from(dir),
+        None => home.join(DOT_CLAUDE),
     }
 }
 
@@ -382,15 +386,16 @@ mod tests {
     #[test]
     fn user_config_dir_env_override_else_home() {
         use std::ffi::OsString;
-        // A non-empty `$CLAUDE_CONFIG_DIR` is the `.claude` dir verbatim.
+        // A set `$CLAUDE_CONFIG_DIR` is the `.claude` dir verbatim.
         assert_eq!(
             resolve_user_config_dir(Path::new("/h"), Some(OsString::from("/explicit/cfg"))),
             PathBuf::from("/explicit/cfg")
         );
-        // Empty `$CLAUDE_CONFIG_DIR` is treated as UNSET → `<home>/.claude`.
+        // A set-but-EMPTY `$CLAUDE_CONFIG_DIR` is honored verbatim (claude-code
+        // `??` resolves it cwd-relative), NOT treated as unset.
         assert_eq!(
             resolve_user_config_dir(Path::new("/h"), Some(OsString::new())),
-            PathBuf::from("/h/.claude")
+            PathBuf::from("")
         );
         // Unset → `<home>/.claude` (the pre-change default).
         assert_eq!(

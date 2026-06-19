@@ -300,13 +300,13 @@ pub(crate) fn home_dir_or_internal() -> Result<PathBuf, ToolError> {
         .ok_or_else(|| ToolError::Internal("CronCreate: HOME directory not available".into()))
 }
 
-/// User config-home: `$CLAUDE_CONFIG_DIR` (set+non-empty) else `<home>/.claude`
-/// (claude-code `tr()` / `getClaudeConfigHomeDir`).
+/// User config-home: `$CLAUDE_CONFIG_DIR` when set (claude-code `tr()` `??`: an
+/// empty value is honored verbatim → cwd-relative), else `<home>/.claude`.
 #[must_use]
 pub(crate) fn config_home_dir(home: &Path) -> PathBuf {
     match std::env::var_os("CLAUDE_CONFIG_DIR") {
-        Some(dir) if !dir.is_empty() => PathBuf::from(dir),
-        _ => home.join(".claude"),
+        Some(dir) => PathBuf::from(dir),
+        None => home.join(".claude"),
     }
 }
 

@@ -106,7 +106,6 @@ impl IdeLockfile {
         // rest of the config-home tree, so the IDE discovery lockfile lands where
         // the engine/peers look for it.
         let config_home = std::env::var_os("CLAUDE_CONFIG_DIR")
-            .filter(|v| !v.is_empty())
             .map(PathBuf::from)
             .or_else(|| dirs::home_dir().map(|h| h.join(".claude")))
             .ok_or_else(|| {
@@ -143,7 +142,6 @@ impl IdeLockfile {
         // Honor `$CLAUDE_CONFIG_DIR` (set+non-empty) else `~/.claude`, matching
         // the config-home tree (the Electron app reads this discovery file).
         let config_home = std::env::var_os("CLAUDE_CONFIG_DIR")
-            .filter(|v| !v.is_empty())
             .map(PathBuf::from)
             .or_else(|| dirs::home_dir().map(|h| h.join(".claude")))
             .ok_or_else(|| {

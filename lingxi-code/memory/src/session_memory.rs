@@ -241,8 +241,9 @@ fn write_session_memory(path: &Path, content: &str) -> Result<(), MemoryError> {
 }
 
 /// Resolve the config-home directory used for session-memory writes:
-/// `$CLAUDE_CONFIG_DIR` (when set AND non-empty) else `$HOME/.claude` else
-/// `$USERPROFILE/.claude` else a bare `.claude`.
+/// `$CLAUDE_CONFIG_DIR` when set (claude-code `??`: an empty value is honored
+/// verbatim → cwd-relative) else `$HOME/.claude` else `$USERPROFILE/.claude`
+/// else a bare `.claude`.
 ///
 /// Delegates the `$CLAUDE_CONFIG_DIR`-vs-home resolution to the canonical
 /// [`crate::claude_md::user_config_dir`]; this fn only resolves the fallback home
@@ -437,15 +438,13 @@ mod tests {
 
     #[test]
     fn config_home_dir_honors_claude_config_dir_then_home() {
-        // We avoid mutating real process env across threads beyond a scoped
-        // check; the empty-string-is-unset divergence is asserted via a direct
-        // path-shape check when CLAUDE_CONFIG_DIR is set.
+        // We avoid mutating real process env across threads beyond a scoped check.
         let prev = std::env::var_os("CLAUDE_CONFIG_DIR");
         std::env::set_var("CLAUDE_CONFIG_DIR", "/explicit/cfg");
         assert_eq!(config_home_dir(), PathBuf::from("/explicit/cfg"));
-        // Empty string is treated as UNSET (foundation divergence).
+        // A set-but-EMPTY string is honored verbatim (claude-code `??`).
         std::env::set_var("CLAUDE_CONFIG_DIR", "");
-        assert_ne!(config_home_dir(), PathBuf::from(""));
+        assert_eq!(config_home_dir(), PathBuf::from(""));
         match prev {
             Some(v) => std::env::set_var("CLAUDE_CONFIG_DIR", v),
             None => std::env::remove_var("CLAUDE_CONFIG_DIR"),

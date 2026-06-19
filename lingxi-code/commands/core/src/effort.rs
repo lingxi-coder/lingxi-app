@@ -119,14 +119,15 @@ fn to_persistable(level: EffortLevel) -> Option<EffortLevel> {
     }
 }
 
-/// `<config-home>/settings.json` — `$CLAUDE_CONFIG_DIR` (set+non-empty) else
-/// `~/.claude`. Byte-identical to the engine settings loader
+/// `<config-home>/settings.json` — `$CLAUDE_CONFIG_DIR` when set (claude-code
+/// `tr()` `??`: an empty value is honored verbatim), else `~/.claude`.
+/// Byte-identical to the engine settings loader
 /// (`engine/src/settings/loader.rs` `config_home_dir` + `user_settings_path`)
 /// so `/effort`'s persisted `effortLevel` lands in the SAME file the loader and
 /// `/config` read. `None` if neither the env override nor `HOME` resolves (TS
 /// `getSettingsFilePathForSource` → `null` → `{ error: null }`).
 fn user_settings_path() -> Option<PathBuf> {
-    if let Some(dir) = std::env::var_os("CLAUDE_CONFIG_DIR").filter(|v| !v.is_empty()) {
+    if let Some(dir) = std::env::var_os("CLAUDE_CONFIG_DIR") {
         return Some(PathBuf::from(dir).join("settings.json"));
     }
     std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".claude").join("settings.json"))

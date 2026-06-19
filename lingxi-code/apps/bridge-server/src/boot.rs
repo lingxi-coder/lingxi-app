@@ -170,12 +170,12 @@ fn load_settings_blocks() -> (Option<BTreeMap<String, serde_json::Value>>, Optio
 /// The `ANTHROPIC_API_KEY` env value is read here but is NEVER logged; an empty
 /// key is a valid config (the server boots for transport testing and only a live
 /// turn fails with a 401 — surfaced to the client as a terminal `Error` event).
-/// User config-home: `$CLAUDE_CONFIG_DIR` (set+non-empty) else `~/.claude`
-/// (claude-code `tr()` / `getClaudeConfigHomeDir`). Shared by the bridge's
-/// desktop-config + lockfile resolution so both honor `$CLAUDE_CONFIG_DIR`.
+/// User config-home: `$CLAUDE_CONFIG_DIR` when set (claude-code `tr()` `??`: an
+/// empty value is honored verbatim → cwd-relative), else `~/.claude`. Shared by
+/// the bridge's desktop-config + lockfile resolution.
 #[must_use]
 pub fn claude_config_home() -> Option<PathBuf> {
-    if let Some(dir) = std::env::var_os("CLAUDE_CONFIG_DIR").filter(|v| !v.is_empty()) {
+    if let Some(dir) = std::env::var_os("CLAUDE_CONFIG_DIR") {
         return Some(PathBuf::from(dir));
     }
     dirs::home_dir().map(|h| h.join(".claude"))

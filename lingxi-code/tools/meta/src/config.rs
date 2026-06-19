@@ -405,13 +405,13 @@ pub(crate) fn config_path(home: &Path) -> PathBuf {
     config_home_dir(home).join(CONFIG_FILE_NAME)
 }
 
-/// User config-home: `$CLAUDE_CONFIG_DIR` (set+non-empty) else
-/// `<home>/<CONFIG_SUBDIR>` (claude-code `tr()` / `getClaudeConfigHomeDir`).
+/// User config-home: `$CLAUDE_CONFIG_DIR` when set (claude-code `tr()` `??`: an
+/// empty value is honored verbatim → cwd-relative), else `<home>/<CONFIG_SUBDIR>`.
 #[must_use]
 fn config_home_dir(home: &Path) -> PathBuf {
     match std::env::var_os("CLAUDE_CONFIG_DIR") {
-        Some(dir) if !dir.is_empty() => PathBuf::from(dir),
-        _ => home.join(CONFIG_SUBDIR),
+        Some(dir) => PathBuf::from(dir),
+        None => home.join(CONFIG_SUBDIR),
     }
 }
 

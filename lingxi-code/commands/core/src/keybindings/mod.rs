@@ -107,18 +107,17 @@ pub fn keybindings_path() -> PathBuf {
 
 /// Pure path resolver (extracted for testing without mutating process env):
 /// `$CLAUDE_CONFIG_DIR ?? join(home, '.claude')` then join `keybindings.json`.
-/// An empty `CLAUDE_CONFIG_DIR` is treated as unset (matches the TS `??`, which
-/// only falls back on `undefined`/`null`; an empty string would be honored in
-/// JS — but an empty config dir is degenerate, so we fall back like a missing
-/// `$HOME` does). A missing home falls back to the current directory so the
-/// path is always well-formed.
+/// Matches claude-code `tr()` `??`: a SET `$CLAUDE_CONFIG_DIR` is honored
+/// verbatim — including an empty value (which then resolves cwd-relative) —
+/// and only an UNSET var falls back to `<home>/.claude`. A missing home falls
+/// back to the current directory so the path is always well-formed.
 fn resolve_keybindings_path(
     config_dir_env: Option<std::ffi::OsString>,
     home_env: Option<std::ffi::OsString>,
 ) -> PathBuf {
     let base = match config_dir_env {
-        Some(dir) if !dir.is_empty() => PathBuf::from(dir),
-        _ => {
+        Some(dir) => PathBuf::from(dir),
+        None => {
             let home = home_env.map_or_else(|| PathBuf::from("."), PathBuf::from);
             home.join(".claude")
         }
@@ -514,13 +513,14 @@ mod tests {
     }
 
     #[test]
-    fn path_empty_config_dir_falls_back_to_home() {
-        // An empty CLAUDE_CONFIG_DIR is treated as unset.
+    fn path_empty_config_dir_is_honored_verbatim() {
+        // A set-but-EMPTY CLAUDE_CONFIG_DIR is honored verbatim (claude-code
+        // `??`), resolving cwd-relative — NOT treated as unset.
         let p = resolve_keybindings_path(
             Some(std::ffi::OsString::new()),
             Some(std::ffi::OsString::from("/home/u")),
         );
-        assert_eq!(p, PathBuf::from("/home/u/.claude/keybindings.json"));
+        assert_eq!(p, PathBuf::from("keybindings.json"));
     }
 
     #[test]

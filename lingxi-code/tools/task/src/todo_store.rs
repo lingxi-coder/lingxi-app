@@ -96,14 +96,13 @@ impl TodoTask {
 
 // ── path helpers (port of getClaudeConfigHomeDir / getTasksDir / sanitize) ──
 
-/// Port of `getClaudeConfigHomeDir()` (`envUtils.ts:7-13`): `$CLAUDE_CONFIG_DIR`
-/// when set+non-empty, else `$HOME/.claude` (falling back to `USERPROFILE` and
+/// Port of claude-code `tr()` (`$CLAUDE_CONFIG_DIR ?? join(home, ".claude")`):
+/// `$CLAUDE_CONFIG_DIR` when set is honored verbatim (`??`, incl. an empty value
+/// → cwd-relative), else `$HOME/.claude` (falling back to `USERPROFILE` and
 /// finally a bare `.claude` so the path is always well-formed).
 fn claude_config_home_dir() -> PathBuf {
     if let Some(dir) = std::env::var_os("CLAUDE_CONFIG_DIR") {
-        if !dir.is_empty() {
-            return PathBuf::from(dir);
-        }
+        return PathBuf::from(dir);
     }
     match std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")) {
         Some(home) => PathBuf::from(home).join(".claude"),

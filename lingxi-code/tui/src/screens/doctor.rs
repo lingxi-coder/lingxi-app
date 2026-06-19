@@ -88,10 +88,10 @@ fn rust_toolchain_version() -> String {
 /// config-dir resolution the rest of the workspace uses (`$CLAUDE_CONFIG_DIR`
 /// → `~/.claude`). Falls back to "~/.claude" when the home dir is unknown.
 fn claude_home_dir() -> String {
+    // claude-code `tr()` `??`: a SET `$CLAUDE_CONFIG_DIR` wins verbatim (incl.
+    // empty); only UNSET falls back to `<home>/.claude`.
     if let Ok(explicit) = std::env::var("CLAUDE_CONFIG_DIR") {
-        if !explicit.is_empty() {
-            return explicit;
-        }
+        return explicit;
     }
     match dirs::home_dir() {
         Some(h) => h.join(".claude").display().to_string(),

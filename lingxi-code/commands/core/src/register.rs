@@ -93,6 +93,14 @@ pub fn register_core_batch_1(
     reg.register_builtin_handler(Arc::new(HelpHandler::new()));
     reg.register_builtin_handler(Arc::new(InitHandler::new()));
     reg.register_builtin_handler(Arc::new(MemoryHandler::new(handle)));
+
+    // claude-code parity (#61/#68): `/clear` carries aliases ["reset","new"] and
+    // `/exit` carries ["quit"]. Like `continue→resume`, these are NOT builtin
+    // names (absent from `BUILTIN_COMMAND_NAMES`) — they dispatch to the target
+    // handler without their own palette row.
+    reg.register_alias("reset".to_string(), "clear".to_string());
+    reg.register_alias("new".to_string(), "clear".to_string());
+    reg.register_alias("quit".to_string(), "exit".to_string());
 }
 
 /// Overwrite the 12 batch-2 entries (`agents`, `config`, `cost`, `doctor`,
@@ -132,6 +140,12 @@ pub fn register_core_batch_2(
     reg.register_builtin_handler(Arc::new(PermissionsHandler::new(handle.clone())));
     reg.register_builtin_handler(Arc::new(StatusHandler::new(handle)));
     reg.register_builtin_handler(Arc::new(VersionHandler::new()));
+
+    // claude-code parity (#61): `/config` carries the alias ["settings"] and
+    // `/permissions` carries ["allowed-tools"]. Resolution-only aliases (no
+    // separate palette row), like `continue→resume`.
+    reg.register_alias("settings".to_string(), "config".to_string());
+    reg.register_alias("allowed-tools".to_string(), "permissions".to_string());
 }
 
 /// Overwrite the 4 batch-4 (engine-data) entries (`context`, `export`,

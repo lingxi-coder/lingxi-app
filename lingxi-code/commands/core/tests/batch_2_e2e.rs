@@ -57,6 +57,33 @@ fn fresh() -> (RegistrySlashDispatcher, Arc<MockOrchestratorHandle>) {
     (d, handle)
 }
 
+/// claude-code parity (#61/#68): built-in command aliases registered in
+/// `register_core_batch_1`/`_2` resolve to their target command.
+#[test]
+fn builtin_command_aliases_resolve_to_targets() {
+    let mut reg = CommandRegistry::new();
+    register_all_builtin_commands(&mut reg);
+    let handle: Arc<MockOrchestratorHandle> = Arc::new(MockOrchestratorHandle::new());
+    register_core_batch_1(&mut reg, handle.clone());
+    let auth: Arc<dyn AuthHandle> = Arc::new(MockAuth::ok(LoginInfo {
+        email: "u@x.com".into(),
+        org_id: "org".into(),
+    }));
+    register_core_batch_2(&mut reg, handle, auth);
+    for (alias, target) in [
+        ("reset", "clear"),
+        ("new", "clear"),
+        ("quit", "exit"),
+        ("settings", "config"),
+        ("allowed-tools", "permissions"),
+    ] {
+        let cmd = reg
+            .resolve(alias)
+            .unwrap_or_else(|| panic!("alias /{alias} must resolve"));
+        assert_eq!(cmd.name, target, "/{alias} should resolve to /{target}");
+    }
+}
+
 #[tokio::test]
 async fn cost_dispatch() {
     let (d, mock) = fresh();

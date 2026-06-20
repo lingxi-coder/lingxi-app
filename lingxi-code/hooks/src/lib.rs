@@ -33,6 +33,7 @@ pub mod ssrf_guard;
 pub mod task_completed_firer;
 pub mod task_created_firer;
 pub mod teammate_idle_firer;
+pub mod terminal_seq;
 
 pub use async_registry::AsyncHookRegistry;
 pub use cwd_changed_firer::{CwdChangedFire, CwdChangedFirer, OptionalCwdChangedFirer};

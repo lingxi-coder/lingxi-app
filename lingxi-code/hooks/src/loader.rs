@@ -19,7 +19,7 @@
 //!
 //! ## Event-name coverage
 //!
-//! [`parse_event_type`] recognizes all 27 of claude-code's `HOOK_EVENTS`
+//! [`parse_event_type`] recognizes all 30 of claude-code's `HOOK_EVENTS`
 //! (`entrypoints/sdk/coreTypes.ts:25-53`); each maps to a
 //! [`HookEventType`] variant.
 //!
@@ -437,9 +437,9 @@ fn build_executor(entry: &HookEntry) -> Option<(String, HookExecutor)> {
 /// Map a settings hook event-name string to its [`HookEventType`] variant.
 ///
 /// The recognized names are claude-code's `HOOK_EVENTS`
-/// (`entrypoints/sdk/coreTypes.ts:25-53`). Every one of those 27 event names
+/// (`entrypoints/sdk/coreTypes.ts:25-53`). Every one of those 30 event names
 /// has a corresponding `HookEvent`/`HookEventType` variant in
-/// [`crate::events`], so all 27 are recognized here. Unrecognized names
+/// [`crate::events`], so all 30 are recognized here. Unrecognized names
 /// (including event names with no variant yet, and arbitrary typos) return
 /// `None` and are silently skipped by the caller.
 fn parse_event_type(name: &str) -> Option<HookEventType> {
@@ -471,6 +471,12 @@ fn parse_event_type(name: &str) -> Option<HookEventType> {
         "InstructionsLoaded" => Some(HookEventType::InstructionsLoaded),
         "CwdChanged" => Some(HookEventType::CwdChanged),
         "FileChanged" => Some(HookEventType::FileChanged),
+        // #39: three more user-configurable events (claude-code registry `nym`,
+        // BIN off 205713189). Without these arms a settings.json hook keyed on
+        // them is silently dropped at load.
+        "PostToolBatch" => Some(HookEventType::PostToolBatch),
+        "UserPromptExpansion" => Some(HookEventType::UserPromptExpansion),
+        "MessageDisplay" => Some(HookEventType::MessageDisplay),
         _ => None,
     }
 }
@@ -574,7 +580,7 @@ mod tests {
     }
 
     #[test]
-    fn all_27_event_names_parse_to_their_variant() {
+    fn all_30_event_names_parse_to_their_variant() {
         // Mirrors claude-code HOOK_EVENTS (entrypoints/sdk/coreTypes.ts:25-53).
         // Each (settings name -> expected HookEventType) must round-trip.
         let cases: &[(&str, HookEventType)] = &[
@@ -605,8 +611,11 @@ mod tests {
             ("InstructionsLoaded", HookEventType::InstructionsLoaded),
             ("CwdChanged", HookEventType::CwdChanged),
             ("FileChanged", HookEventType::FileChanged),
+            ("PostToolBatch", HookEventType::PostToolBatch),
+            ("UserPromptExpansion", HookEventType::UserPromptExpansion),
+            ("MessageDisplay", HookEventType::MessageDisplay),
         ];
-        assert_eq!(cases.len(), 27, "claude-code HOOK_EVENTS has 27 names");
+        assert_eq!(cases.len(), 30, "claude-code HOOK_EVENTS has 30 names");
         for (name, expected) in cases {
             let raw = one_command(name);
             let hooks = parse_hooks_from_settings_json(&raw, HookSource::User).unwrap();

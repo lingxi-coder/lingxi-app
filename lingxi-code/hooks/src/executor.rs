@@ -22,13 +22,15 @@ use crate::hook_payload::{
     HookEventNamePreCompact, HookEventNameSessionEnd, HookEventNameSessionStart,
     HookEventNameSetup, HookEventNameStop, HookEventNameStopFailure, HookEventNameSubagentStart,
     HookEventNameSubagentStop, HookEventNameTaskCompleted, HookEventNameTaskCreated,
-    HookEventNameTeammateIdle, HookEventNameUserPromptSubmit, HookEventNameWorktreeCreate,
-    HookEventNameWorktreeRemove, InstructionsLoadedPayload, NotificationPayload,
-    PermissionDeniedPayload, PermissionRequestPayload, PostCompactPayload,
-    PostToolUseFailurePayload, PostToolUsePayload, PreCompactPayload, PreToolUsePayload,
-    SessionEndPayload, SessionStartPayload, SetupPayload, StopFailurePayload, StopPayload,
-    SubagentStartPayload, SubagentStopPayload, TaskCompletedPayload, TaskCreatedPayload,
-    TeammateIdlePayload, UserPromptSubmitPayload, WorktreeCreatePayload, WorktreeRemovePayload,
+    HookEventNameMessageDisplay, HookEventNamePostToolBatch, HookEventNameTeammateIdle,
+    HookEventNameUserPromptExpansion, HookEventNameUserPromptSubmit, HookEventNameWorktreeCreate,
+    HookEventNameWorktreeRemove, InstructionsLoadedPayload, MessageDisplayPayload,
+    NotificationPayload, PermissionDeniedPayload, PermissionRequestPayload, PostCompactPayload,
+    PostToolBatchPayload, PostToolUseFailurePayload, PostToolUsePayload, PreCompactPayload,
+    PreToolUsePayload, SessionEndPayload, SessionStartPayload, SetupPayload, StopFailurePayload,
+    StopPayload, SubagentStartPayload, SubagentStopPayload, TaskCompletedPayload,
+    TaskCreatedPayload, TeammateIdlePayload, UserPromptExpansionPayload, UserPromptSubmitPayload,
+    WorktreeCreatePayload, WorktreeRemovePayload,
 };
 use crate::http_executor::{HttpExecutionSignal, HttpExecutor};
 use crate::prompt_executor::{
@@ -1038,12 +1040,27 @@ impl HookExecutorImpl {
             if let Some(out) = &resp.updated_mcp_tool_output {
                 agg.updated_mcp_tool_output = Some(out.clone());
             }
+            // PostToolUse `updatedToolOutput` (all-tools, #38): keep the latest
+            // replacement any folded hook returned (claude-code keeps the most
+            // recent — BIN off 205724076). `!== void 0` semantics are preserved
+            // by the `Option<Option<Value>>` shape: the outer `Some` means a
+            // hook set the key (even to `null`), so we fold whenever it is
+            // `Some`. The orchestrator applies it for ALL tools (no isMcp gate).
+            if let Some(out) = &resp.updated_tool_output {
+                agg.updated_tool_output = Some(out.clone());
+            }
             // PermissionDenied `retry`: OR-fold so a single hook saying
             // `retry: true` flips the aggregate, mirroring TS's
             // `if (result.retry) hookSaysRetry = true` (`toolExecution.ts:1090`).
             // A `Some(false)` / `None` leaves it untouched.
             if resp.retry == Some(true) {
                 agg.retry = true;
+            }
+            // #40 `terminalSequence`: keep the latest a folded hook returned
+            // (claude-code applies `szn` per hook result). The consumer (TUI
+            // terminal writer) runs the allowlist validator + emit on apply.
+            if let Some(ts) = &resp.terminal_sequence {
+                agg.terminal_sequence = Some(ts.clone());
             }
             agg.attachments.extend(resp.attachments.clone());
         }
@@ -1661,6 +1678,77 @@ fn build_lifecycle_envelope_body(
                 team_name: team_name.clone(),
             };
             Some(("TeammateIdle", serde_json::to_string(&payload).ok()?))
+        }
+        // #39 PostToolBatch (claude-code `G4t`, BIN off 205710327): the full
+        // batch of resolved tool calls. Fires through `vd(r,void 0,n)` so it
+        // carries the base shape (permission_mode/agent_type from ctx).
+        HookEvent::PostToolBatch { tool_calls } => {
+            let payload = PostToolBatchPayload {
+                hook_event_name: HookEventNamePostToolBatch,
+                session_id: b.session_id,
+                transcript_path: b.transcript_path,
+                cwd: b.cwd,
+                permission_mode: b.permission_mode,
+                agent_id: b.agent_id,
+                agent_type: b.agent_type,
+                effort: b.effort,
+                tool_calls: tool_calls.clone(),
+            };
+            Some(("PostToolBatch", serde_json::to_string(&payload).ok()?))
+        }
+        // #39 UserPromptExpansion (claude-code `b$t`, BIN off 201270310).
+        HookEvent::UserPromptExpansion {
+            expansion_type,
+            command_name,
+            command_args,
+            command_source,
+            prompt,
+        } => {
+            let payload = UserPromptExpansionPayload {
+                hook_event_name: HookEventNameUserPromptExpansion,
+                session_id: b.session_id,
+                transcript_path: b.transcript_path,
+                cwd: b.cwd,
+                permission_mode: b.permission_mode,
+                agent_id: b.agent_id,
+                agent_type: b.agent_type,
+                effort: b.effort,
+                expansion_type: *expansion_type,
+                command_name: command_name.clone(),
+                command_args: command_args.clone(),
+                command_source: command_source.clone(),
+                prompt: prompt.clone(),
+            };
+            Some(("UserPromptExpansion", serde_json::to_string(&payload).ok()?))
+        }
+        // #39 MessageDisplay (claude-code `aAt`, BIN off 205705090). Fires
+        // through `vd(void 0)` (no permission mode), with `forceSyncExecution`
+        // + `suppressPerInvocationTelemetry` — those two are firing-site flags,
+        // not wire fields, so they do not appear in the payload.
+        HookEvent::MessageDisplay {
+            turn_id,
+            message_id,
+            index,
+            is_final,
+            delta,
+        } => {
+            let payload = MessageDisplayPayload {
+                hook_event_name: HookEventNameMessageDisplay,
+                session_id: b.session_id,
+                transcript_path: b.transcript_path,
+                cwd: b.cwd,
+                // `vd(void 0)` => no permission mode threaded.
+                permission_mode: None,
+                agent_id: b.agent_id,
+                agent_type: b.agent_type,
+                effort: b.effort,
+                turn_id: turn_id.clone(),
+                message_id: message_id.clone(),
+                index: *index,
+                is_final: *is_final,
+                delta: delta.clone(),
+            };
+            Some(("MessageDisplay", serde_json::to_string(&payload).ok()?))
         }
         _ => None,
     }
@@ -4297,6 +4385,109 @@ mod once_and_status_message_tests {
             Some(serde_json::json!({ "content": "rewritten" })),
             "the hook's updatedMCPToolOutput must reach the aggregate",
         );
+    }
+
+    /// #38: A `PostToolUse` Builtin hook returning `updated_tool_output` (the
+    /// all-tools field) has it folded into the aggregate by `merge`. The outer
+    /// `Some` is preserved (`!== void 0` semantics).
+    #[tokio::test]
+    async fn post_hook_updated_tool_output_reaches_aggregate() {
+        struct RewriteAll;
+        #[async_trait]
+        impl BuiltinHookHandler for RewriteAll {
+            fn id(&self) -> &str {
+                "rewrite_all"
+            }
+            async fn handle(&self, _event: &HookEvent, _ctx: &HookContext) -> HookResult {
+                HookResult {
+                    outcome: HookOutcome::Success,
+                    stdout: String::new(),
+                    stderr: String::new(),
+                    exit_code: None,
+                    response: Some(HookResponse {
+                        updated_tool_output: Some(Some(serde_json::json!({ "x": "all" }))),
+                        ..Default::default()
+                    }),
+                }
+            }
+        }
+        let hook = HookDefinition {
+            id: HookId::new(),
+            name: "rewrite_all".into(),
+            events: vec![HookEventType::PostToolUse],
+            if_condition: None,
+            executor: DefHookExecutor::Builtin {
+                handler_id: "rewrite_all".into(),
+            },
+            source: HookSource::User,
+            blocking: true,
+            timeout: None,
+            priority: 0,
+            once: false,
+            status_message: None,
+        };
+        let (exec, _reg) = executor_with(hook, Arc::new(RewriteAll));
+        let post = HookEvent::PostToolUse {
+            // a NON-mcp tool: updated_tool_output applies for all tools
+            tool_name: "Bash".into(),
+            tool_input: serde_json::json!({}),
+            tool_output: serde_json::json!("original"),
+            tool_use_id: ToolUseId::new(),
+        };
+        let agg = exec.execute(post, HookContext::default()).await;
+        assert_eq!(
+            agg.updated_tool_output,
+            Some(Some(serde_json::json!({ "x": "all" }))),
+            "the hook's updatedToolOutput must reach the aggregate",
+        );
+    }
+
+    /// #40: a hook returning a top-level `terminal_sequence` has it folded into
+    /// the aggregate by `merge` (latest wins); the consumer validates + emits.
+    #[tokio::test]
+    async fn hook_terminal_sequence_reaches_aggregate() {
+        struct TermHook;
+        #[async_trait]
+        impl BuiltinHookHandler for TermHook {
+            fn id(&self) -> &str {
+                "term"
+            }
+            async fn handle(&self, _event: &HookEvent, _ctx: &HookContext) -> HookResult {
+                HookResult {
+                    outcome: HookOutcome::Success,
+                    stdout: String::new(),
+                    stderr: String::new(),
+                    exit_code: None,
+                    response: Some(HookResponse {
+                        terminal_sequence: Some("\u{0007}".into()),
+                        ..Default::default()
+                    }),
+                }
+            }
+        }
+        let hook = HookDefinition {
+            id: HookId::new(),
+            name: "term".into(),
+            events: vec![HookEventType::PreToolUse],
+            if_condition: None,
+            executor: DefHookExecutor::Builtin {
+                handler_id: "term".into(),
+            },
+            source: HookSource::User,
+            blocking: true,
+            timeout: None,
+            priority: 0,
+            once: false,
+            status_message: None,
+        };
+        let (exec, _reg) = executor_with(hook, Arc::new(TermHook));
+        let pre = HookEvent::PreToolUse {
+            tool_name: "Bash".into(),
+            tool_input: serde_json::json!({}),
+            tool_use_id: ToolUseId::new(),
+        };
+        let agg = exec.execute(pre, HookContext::default()).await;
+        assert_eq!(agg.terminal_sequence.as_deref(), Some("\u{0007}"));
     }
 
     /// A `PostToolUse` hook that does NOT set `updated_mcp_tool_output` leaves

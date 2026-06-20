@@ -65,6 +65,24 @@ pub struct HookResponse {
     /// Additive default `None`, so non-`PostToolUse` hooks (and `PostToolUse`
     /// hooks that don't set it) leave the result untouched.
     pub updated_mcp_tool_output: Option<Value>,
+    /// Replacement tool output a `PostToolUse` hook returned via
+    /// `hookSpecificOutput.updatedToolOutput` (claude-code `parseHookJSONOutput`,
+    /// BIN off 205724076: `if(e.hookSpecificOutput.updatedToolOutput!==void 0)
+    /// u.updatedToolOutput=e.hookSpecificOutput.updatedToolOutput`). Unlike the
+    /// legacy [`Self::updated_mcp_tool_output`] (truthiness-gated, MCP-only),
+    /// this field uses `!== void 0` semantics — an explicit JSON `null` IS a
+    /// replacement — and the orchestrator substitutes it for the result of ALL
+    /// tools with NO `isMcpTool` gate (BIN off 202169384:
+    /// `if("updatedToolOutput"in D&&e.outputSchema?.safeParse(D.updatedToolOutput)
+    /// ?.success!==!1)x.data=D.updatedToolOutput`). The schema describe string is
+    /// `Replaces the tool output before it is sent to the model`. To preserve the
+    /// `!== void 0` semantics we model it as an `Option<Option<Value>>`: outer
+    /// `None` = key absent (no replacement); `Some(inner)` = key present where
+    /// `inner` is the replacement value (`Some(Value::Null)` for an explicit
+    /// `null`). Additive default `None`, so the common case (no `PostToolUse`
+    /// hook, or a hook that omits the field) leaves the result untouched.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updated_tool_output: Option<Option<Value>>,
     /// Elicitation answer a hook provided via
     /// `hookSpecificOutput.{action,content}` (claude-code
     /// `parseElicitationHookOutput`, `utils/hooks.ts:4434-4446` /
@@ -85,6 +103,17 @@ pub struct HookResponse {
     /// has no effect unless both hold — faithful to claude-code.
     #[serde(default)]
     pub retry: Option<bool>,
+    /// Top-level `terminalSequence` a hook returned (#40, claude-code schema
+    /// BIN off 200873127). A hook may ask Claude Code to emit a terminal escape
+    /// sequence (e.g. an OSC 9 / OSC 777 desktop notification). This is a
+    /// TOP-LEVEL field (NOT under `hookSpecificOutput`) and applies for ALL hook
+    /// result types (command/stdout, HTTP, mcp_tool, callback). The apply path
+    /// (`szn`, BIN off 205755390) runs the [`crate::terminal_seq`] allowlist
+    /// validator (`NEo`) — accepting only OSC ps in {0,1,2,9,99,777} plus BEL —
+    /// and either writes the validated sequence to the active terminal or warns
+    /// and drops it. Additive default `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal_sequence: Option<String>,
 }
 
 /// Structured elicitation answer a hook can return, mirroring claude-code's
@@ -115,6 +144,19 @@ pub enum HookDecision {
     /// Explicitly continue — useful as a tie-breaker when later hooks may
     /// otherwise block.
     Continue,
+    /// Defer the tool call (#37, `permissionDecision: "defer"`, claude-code BIN
+    /// off 205722868: `case"defer":u.permissionBehavior="defer"`; schema off
+    /// 205719537: `'"allow" | "deny" | "ask" | "defer" (optional)'`). A
+    /// `PreToolUse` hook may DEFER a solo tool call so it is re-attempted on a
+    /// later (interactive) resume rather than run now. The orchestrator gates
+    /// this on PRINT/non-interactive mode AND a single tool_use block in the
+    /// batch (BIN off 202454844): in interactive mode or a multi-tool batch it
+    /// warns and ignores (proceeds normally); on the gated path it emits the
+    /// `tengu_pre_tool_hook_deferred` analytic, pushes a `hook_deferred_tool`
+    /// meta message, and TERMINATES the turn with the `tool_deferred`
+    /// stop-reason (the tool is NOT executed). DORMANT on the default
+    /// interactive REPL path (the interactive-mode gate ignores it there).
+    Defer,
 }
 
 /// Raw outcome of a single hook invocation.
@@ -202,6 +244,17 @@ pub struct AggregateHookResult {
     /// dispatch with no mutating `PostToolUse` hook leaves the result unchanged
     /// (byte-identical).
     pub updated_mcp_tool_output: Option<Value>,
+    /// The last `updatedToolOutput` any folded `PostToolUse` hook returned
+    /// (claude-code keeps the most recent — BIN off 205724076). Unlike
+    /// [`Self::updated_mcp_tool_output`] this applies to ALL tools (no
+    /// `isMcpTool` gate) and uses `!== void 0` semantics (an explicit JSON
+    /// `null` IS a replacement), modeled as `Option<Option<Value>>`: outer
+    /// `None` = no hook set it; `Some(inner)` = a hook set it (`inner` is the
+    /// replacement, `Some(Value::Null)` for explicit `null`). The orchestrator
+    /// validates it against the tool's output schema and substitutes for the
+    /// result (BIN off 202169384). Additive default `None` → byte-identical when
+    /// no hook mutates the output.
+    pub updated_tool_output: Option<Option<Value>>,
     /// `true` when ANY folded `PermissionDenied` hook returned
     /// `hookSpecificOutput.retry: true` (claude-code `toolExecution.ts:1090`,
     /// `if (result.retry) hookSaysRetry = true`). The turn loop reads this — only
@@ -210,4 +263,11 @@ pub struct AggregateHookResult {
     /// no retrying `PermissionDenied` hook leaves it untouched (behavior-neutral
     /// for existing callers). DORMANT in the public build (see [`HookResponse::retry`]).
     pub retry: bool,
+    /// The last `terminalSequence` any folded hook returned (#40, claude-code
+    /// keeps the most recent — `szn` is invoked per hook result). `Some` only
+    /// when a hook supplied a `terminalSequence`. A consumer (the TUI terminal
+    /// writer) validates it via [`crate::terminal_seq::validate_terminal_sequence`]
+    /// and either emits the accepted sequence to the active terminal or warns +
+    /// drops it. Additive default `None` → byte-identical when no hook sets it.
+    pub terminal_sequence: Option<String>,
 }

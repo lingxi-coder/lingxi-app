@@ -436,6 +436,9 @@ fn event_str(et: &hooks::events::HookEventType) -> &'static str {
         E::CwdChanged => "CwdChanged",
         E::FileChanged => "FileChanged",
         E::Notification => "Notification",
+        E::PostToolBatch => "PostToolBatch",
+        E::UserPromptExpansion => "UserPromptExpansion",
+        E::MessageDisplay => "MessageDisplay",
     }
 }
 

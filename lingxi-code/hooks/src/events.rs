@@ -1,6 +1,6 @@
 //! Hook event taxonomy (spec §9.1).
 //!
-//! The engine emits one of 28 well-known event kinds at observable points in
+//! The engine emits one of 30 well-known event kinds at observable points in
 //! its lifecycle. Each kind carries a payload describing what just happened
 //! (tool input, session metadata, file path, etc.). Registered hooks subscribe
 //! by `HookEventType` (the type-tag enum) and inspect the carried `HookEvent`
@@ -70,6 +70,47 @@ pub enum HookEventType {
     FileChanged,
     /// A user-visible notification was raised by the engine or a hook.
     Notification,
+    /// All tool calls in a batch resolved; fired once after the per-tool
+    /// `PostToolUse` hooks, before the next model request (#39, claude-code
+    /// registry `nym`, BIN off 205713189: `PostToolBatch:G4t`).
+    PostToolBatch,
+    /// A slash-command or MCP-prompt was expanded into its underlying prompt
+    /// (#39, BIN off 205713189: `UserPromptExpansion:b$t`).
+    UserPromptExpansion,
+    /// An assistant message delta is about to be displayed (per-flush). Fired
+    /// synchronously with per-invocation telemetry suppressed (#39, BIN off
+    /// 205713189: `MessageDisplay:aAt`).
+    MessageDisplay,
+}
+
+/// Expansion source for an [`HookEvent::UserPromptExpansion`] — `slash_command`
+/// (a `/`-prefixed slash command) or `mcp_prompt` (an MCP-server-provided
+/// prompt). 1:1 with claude-code's input schema
+/// `expansion_type:E.enum(["slash_command","mcp_prompt"])` (BIN off 200754686).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PromptExpansionType {
+    /// A `/`-prefixed slash command.
+    SlashCommand,
+    /// An MCP-server-provided prompt.
+    McpPrompt,
+}
+
+/// One entry in an [`HookEvent::PostToolBatch`]'s `tool_calls` array. 1:1 with
+/// claude-code's `ggp` element schema (BIN off 200753653):
+/// `{tool_name:string, tool_input:unknown, tool_use_id:string,
+/// tool_response:unknown().optional()}`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PostToolBatchCall {
+    /// Canonical name of the tool (wire `tool_name`).
+    pub tool_name: String,
+    /// The tool input the engine dispatched (wire `tool_input`).
+    pub tool_input: Value,
+    /// Tool invocation ID (wire `tool_use_id`).
+    pub tool_use_id: ToolUseId,
+    /// Result payload returned by the tool (wire `tool_response`, optional).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_response: Option<Value>,
 }
 
 /// Source of a [`HookEvent::ConfigChange`] — which settings layer (or skills)
@@ -405,6 +446,55 @@ pub enum HookEvent {
         /// Notification taxonomy (`"info"`, `"warn"`, `"error"`).
         kind: String,
     },
+    /// All tool calls in a batch resolved (#39). Fired ONCE after every tool
+    /// call in the batch has resolved (and after the per-tool `PostToolUse`
+    /// hooks), before the next model request — claude-code `G4t`
+    /// (BIN off 205710327): `{...,hook_event_name:"PostToolBatch",
+    /// tool_calls:e}`.
+    PostToolBatch {
+        /// The full batch of resolved tool calls (wire `tool_calls`, required).
+        tool_calls: Vec<PostToolBatchCall>,
+    },
+    /// A slash-command / MCP-prompt expansion (#39). claude-code `b$t`
+    /// (BIN off 201270310): `{...,hook_event_name:"UserPromptExpansion",
+    /// expansion_type:e,command_name:t,command_args:n,command_source:r,
+    /// prompt:o}`.
+    UserPromptExpansion {
+        /// Whether the expanded prompt was a slash command or an MCP prompt
+        /// (wire `expansion_type`, required).
+        expansion_type: PromptExpansionType,
+        /// The command name that was expanded (wire `command_name`, required).
+        command_name: String,
+        /// The raw argument string passed to the command (wire `command_args`,
+        /// required; may be empty).
+        command_args: String,
+        /// The command's source/provenance (wire `command_source`, optional).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        command_source: Option<String>,
+        /// The expanded prompt text (wire `prompt`, required).
+        prompt: String,
+    },
+    /// An assistant-message delta is about to be displayed (#39). Fired per
+    /// flush, synchronously, with per-invocation telemetry suppressed —
+    /// claude-code `aAt` (BIN off 205705090):
+    /// `{...,hook_event_name:"MessageDisplay",turn_id:e.turnId,
+    /// message_id:e.messageId,index:e.index,final:e.final,delta:e.delta}`.
+    MessageDisplay {
+        /// UUID of the current turn (wire `turn_id`, required).
+        turn_id: String,
+        /// UUID of the assistant message being displayed (wire `message_id`,
+        /// required; stable across every flush of the same message).
+        message_id: String,
+        /// Zero-based index of this delta within the message (wire `index`,
+        /// required).
+        index: u64,
+        /// Whether this is the final delta of the message (wire `final`,
+        /// required). Renamed from the Rust keyword `final` via serde.
+        #[serde(rename = "final")]
+        is_final: bool,
+        /// The delta text being displayed (wire `delta`, required).
+        delta: String,
+    },
 }
 
 /// A `hook_progress` progress message emitted once per matching hook *before*
@@ -473,6 +563,85 @@ impl HookEvent {
             Self::CwdChanged { .. } => HookEventType::CwdChanged,
             Self::FileChanged { .. } => HookEventType::FileChanged,
             Self::Notification { .. } => HookEventType::Notification,
+            Self::PostToolBatch { .. } => HookEventType::PostToolBatch,
+            Self::UserPromptExpansion { .. } => HookEventType::UserPromptExpansion,
+            Self::MessageDisplay { .. } => HookEventType::MessageDisplay,
         }
+    }
+}
+
+#[cfg(test)]
+mod event_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn event_type_roundtrips_for_new_events() {
+        // #39: the three new variants map to their type-tags and the tags
+        // serialize to their PascalCase wire names.
+        for (ev, tag, name) in [
+            (
+                HookEvent::PostToolBatch { tool_calls: vec![] },
+                HookEventType::PostToolBatch,
+                "PostToolBatch",
+            ),
+            (
+                HookEvent::UserPromptExpansion {
+                    expansion_type: PromptExpansionType::SlashCommand,
+                    command_name: "c".into(),
+                    command_args: String::new(),
+                    command_source: None,
+                    prompt: "p".into(),
+                },
+                HookEventType::UserPromptExpansion,
+                "UserPromptExpansion",
+            ),
+            (
+                HookEvent::MessageDisplay {
+                    turn_id: "t".into(),
+                    message_id: "m".into(),
+                    index: 0,
+                    is_final: false,
+                    delta: "d".into(),
+                },
+                HookEventType::MessageDisplay,
+                "MessageDisplay",
+            ),
+        ] {
+            assert_eq!(ev.event_type(), tag);
+            assert_eq!(serde_json::to_string(&tag).unwrap(), format!("\"{name}\""));
+        }
+    }
+
+    #[test]
+    fn post_tool_batch_call_omits_tool_response_when_none() {
+        let call = PostToolBatchCall {
+            tool_name: "Bash".into(),
+            tool_input: json!({ "command": "ls" }),
+            tool_use_id: ToolUseId::new(),
+            tool_response: None,
+        };
+        let s = serde_json::to_string(&call).unwrap();
+        assert!(s.contains(r#""tool_name":"Bash""#), "{s}");
+        assert!(!s.contains("tool_response"), "None omits the key: {s}");
+        // present when Some
+        let call2 = PostToolBatchCall {
+            tool_response: Some(json!("out")),
+            ..call
+        };
+        let s2 = serde_json::to_string(&call2).unwrap();
+        assert!(s2.contains(r#""tool_response":"out""#), "{s2}");
+    }
+
+    #[test]
+    fn prompt_expansion_type_wire_values_are_snake_case() {
+        assert_eq!(
+            serde_json::to_string(&PromptExpansionType::SlashCommand).unwrap(),
+            r#""slash_command""#
+        );
+        assert_eq!(
+            serde_json::to_string(&PromptExpansionType::McpPrompt).unwrap(),
+            r#""mcp_prompt""#
+        );
     }
 }

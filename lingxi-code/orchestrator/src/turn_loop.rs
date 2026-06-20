@@ -123,6 +123,44 @@ fn normalize_lexically(path: &Path) -> PathBuf {
 /// to the orchestrator. The orchestrator never constructs the file tools (they
 /// arrive pre-built in `orch.tools`), so there is no `BuiltinToolContext`
 /// construction in this crate to thread the `Arc` through.
+/// #40 Apply a hook's folded `terminalSequence` (claude-code `szn`, BIN off
+/// 205755390). Runs the allowlist validator
+/// ([`hooks::terminal_seq::validate_terminal_sequence`], the `NEo` port):
+/// - REJECT → warn with claude-code's byte-faithful message (the observable
+///   half).
+/// - ACCEPT → the validated string would be written to the active terminal
+///   (`BEo`). The orchestrator holds no TTY handle (the TUI owns the terminal in
+///   a separate process; the `OutputStream` has no raw-escape emit), so the
+///   terminal WRITE is a documented RESIDUAL — surfaced here via a `debug!` log
+///   carrying the accepted sequence so a future `OutputStream` terminal-write
+///   seam (or a TUI-process applier reading the aggregate) can emit it.
+///
+/// Strict no-op when `seq` is `None` (no hook returned a `terminalSequence`).
+fn apply_terminal_sequence(
+    _orch: &ConversationOrchestrator,
+    hook_name: &str,
+    seq: Option<&str>,
+) {
+    let Some(seq) = seq else {
+        return;
+    };
+    match hooks::terminal_seq::validate_terminal_sequence(seq) {
+        Some(_validated) => {
+            // RESIDUAL: write `_validated` to the active terminal. No TTY here —
+            // log it so a terminal-write seam can pick it up.
+            tracing::debug!(
+                hook_name = %hook_name,
+                "Hook returned an allowlisted terminalSequence (terminal-write deferred — no orchestrator TTY)"
+            );
+        }
+        None => {
+            tracing::warn!(
+                "Hook {hook_name} returned a terminalSequence that was rejected by the allowlist (only OSC 0/1/2/9/99/777 and BEL are permitted)"
+            );
+        }
+    }
+}
+
 async fn record_read_file_state(
     orch: &ConversationOrchestrator,
     name: &str,
@@ -1377,6 +1415,14 @@ pub(crate) async fn dispatch_tool_uses_tracked(
     // `context_modifier: None` (every existing tool + skills WITHOUT a `model:`
     // frontmatter) → the caller does NOTHING → byte-identical.
     let mut context_modifiers: Vec<ContextModifier> = Vec::new();
+    // #39 PostToolBatch: accumulate one entry per RESOLVED tool call (claude-code
+    // fires PostToolBatch ONCE after every tool in the batch resolves, before the
+    // next model request — `tool_calls` = the full batch). A tool that is blocked
+    // / deferred / denied before execution `continue`s and does not reach the
+    // result push, so it is not part of the resolved batch (matching claude-code,
+    // where only executed tools have a `tool_response`). Empty when no tool ran →
+    // the PostToolBatch fire below is a strict no-op.
+    let mut post_tool_batch_calls: Vec<hooks::events::PostToolBatchCall> = Vec::new();
     // FORK (codex #5 follow-up): the rendered system prompt this turn handed the
     // model, recorded by the turn driver after the successful API call. Threaded
     // onto each tool's `ToolUseContext::fork_parent_system_prompt` so a
@@ -1546,6 +1592,17 @@ pub(crate) async fn dispatch_tool_uses_tracked(
         if pre_agg.prevent_continuation {
             prevent_continuation = true;
         }
+        // #40 terminalSequence apply (claude-code `szn`, BIN off 205755390): a
+        // hook may return a top-level `terminalSequence` for Claude Code to emit
+        // (OSC 9 / 777 desktop notification, etc.). Run the allowlist validator
+        // (`NEo`) over the folded sequence: on REJECT, warn (the observable half,
+        // byte-faithful to claude-code's reject message). On ACCEPT the
+        // validated string would be written to the active terminal (`BEo`); the
+        // orchestrator has no TTY handle (the TUI owns the terminal in a separate
+        // process and the `OutputStream` has no raw-escape emit), so the
+        // terminal-WRITE is a documented residual — the parse / merge / allowlist
+        // validation all land here and are observable. No-op when no hook set it.
+        apply_terminal_sequence(orch, &name, pre_agg.terminal_sequence.as_deref());
         // HOOK.1: a PreToolUse hook's `hookSpecificOutput.additionalContext`
         // ONLY (the executor merge folds `additionalContext` into
         // `additional_contexts`, distinct from `system_messages`). claude-code
@@ -1599,6 +1656,101 @@ pub(crate) async fn dispatch_tool_uses_tracked(
             ))
         };
 
+        // #37 `permissionDecision: "defer"` (claude-code BIN off 202454844). A
+        // `PreToolUse` hook may DEFER a solo tool call so it is re-attempted on a
+        // later interactive resume rather than run now. claude-code gates this:
+        //   1. ONLY in non-interactive (print) mode — in interactive mode it
+        //      warns `... in interactive mode; ignoring (defer is print-mode
+        //      only)` and proceeds normally.
+        //   2. ONLY when the batch holds a SINGLE tool_use block — with >1 it
+        //      warns `... but {n} tool calls are in this batch; ignoring (defer
+        //      is solo-only — siblings would be orphaned on resume)`.
+        // On the gated path it emits the `tengu_pre_tool_hook_deferred` analytic,
+        // pushes a `hook_deferred_tool` meta message, and TERMINATES the turn
+        // with the `tool_deferred` stop-reason — the tool is NOT executed.
+        //
+        // `is_non_interactive_session` = `!interactive_permissions` (the
+        // orchestrator's print/headless signal: `interactive_permissions` is
+        // `true` only when an interactive prompt transport is wired). DORMANT on
+        // the default interactive REPL — the interactive-mode gate ignores defer
+        // there, so the tool falls through to the normal permission gate.
+        if matches!(pre_agg.decision, Some(HookDecision::Defer)) {
+            let hook_name = format!("PreToolUse:{name}");
+            let is_non_interactive = !orch.config.interactive_permissions;
+            // batch size = the number of tool_use blocks this dispatch is
+            // processing (claude-code counts `tool_use` blocks in the assistant
+            // message via `Wn(s.message.content, te=>te.type==="tool_use")`).
+            let batch_tool_count = tool_uses.len();
+            if !is_non_interactive {
+                tracing::warn!(
+                    tool_name = %name,
+                    "Hook {hook_name} returned permissionDecision=defer in interactive mode; ignoring (defer is print-mode only)"
+                );
+                // ignored → fall through to the normal gate by clearing Defer.
+                // (handled below: the Defer decision is treated as no-decision)
+            } else if batch_tool_count > 1 {
+                tracing::warn!(
+                    tool_name = %name,
+                    "Hook {hook_name} returned permissionDecision=defer but {batch_tool_count} tool calls are in this batch; ignoring (defer is solo-only \u{2014} siblings would be orphaned on resume)"
+                );
+                // ignored → fall through to the normal gate.
+            } else {
+                // GATED path: honor the defer. Emit the analytic (inline event
+                // name, NOT a locked const — same pattern as
+                // `tengu_model_fallback_triggered`, so the 347 registry is
+                // untouched), push the `hook_deferred_tool` meta message, and
+                // terminate the turn (`tool_deferred` stop-reason — the tool is
+                // not executed).
+                let permission_mode = if orch.session.lock().await.plan_mode {
+                    "plan"
+                } else {
+                    "default"
+                };
+                tracing::info!(
+                    event = "tengu_pre_tool_hook_deferred",
+                    tool_name = %name,
+                );
+                tracing::info!(
+                    event = orch_events::HOOK_PRE_COMPLETED,
+                    tool_name = %name,
+                    decision = "defer",
+                    duration_ms = pre_dur_ms,
+                );
+                // `hook_deferred_tool` meta message (BIN off 202454844:
+                // `{type:"hook_deferred_tool",toolUseID,toolName,toolInput,
+                // hookName,hookEvent:"PreToolUse",permissionMode}`). LingXi has no
+                // protocol `isMeta`/structured-meta channel, so the deferred-tool
+                // record is surfaced as a plain meta user message carrying the
+                // faithful fields, ordered after this tool's pre-hook context.
+                let meta = serde_json::json!({
+                    "type": "hook_deferred_tool",
+                    "toolUseID": tool_use_id.to_string(),
+                    "toolName": name,
+                    "toolInput": input,
+                    "hookName": hook_name,
+                    "hookEvent": "PreToolUse",
+                    "permissionMode": permission_mode,
+                });
+                injected_messages.push((
+                    ConversationMessage::user(MessageId::new(), meta.to_string()),
+                    tool_use_id.clone(),
+                ));
+                // HOOK.1: surface any PreToolUse additionalContext (built above),
+                // ordered after the deferred-tool record, matching the Block arm.
+                if let Some(msg) = pre_context_message {
+                    injected_messages.push((msg, tool_use_id.clone()));
+                }
+                // TERMINATE the turn — the deferred tool is NOT executed. The
+                // `tool_deferred` stop-reason has no distinct LingXi turn-stop
+                // variant; reuse the `prevent_continuation` end-of-turn signal so
+                // the agent loop stops after this batch (the deferred tool's
+                // result is intentionally absent). `continue` skips this tool's
+                // execution entirely.
+                prevent_continuation = true;
+                continue;
+            }
+        }
+
         if matches!(pre_agg.decision, Some(HookDecision::Block)) {
             let reason = pre_agg
                 .reason
@@ -1649,6 +1801,11 @@ pub(crate) async fn dispatch_tool_uses_tracked(
                 Some(HookDecision::Approve) => "approve",
                 Some(HookDecision::Continue) => "continue",
                 Some(HookDecision::Block) => "block",
+                // #37: a Defer that reached here was IGNORED (interactive mode or
+                // a multi-tool batch) — the gated path `continue`d above, so this
+                // arm only fires for the ignored case, which proceeds to the
+                // normal permission gate exactly like no decision.
+                Some(HookDecision::Defer) => "defer-ignored",
                 None => "none",
             },
             duration_ms = pre_dur_ms,
@@ -1988,6 +2145,12 @@ pub(crate) async fn dispatch_tool_uses_tracked(
         #[allow(clippy::cast_possible_truncation)]
         let post_dur_ms = post_started.elapsed().as_millis() as u64;
 
+        // #40 terminalSequence apply for the PostToolUse aggregate (claude-code
+        // `szn` runs per hook result, all event types). Same as the PreToolUse
+        // side: validate + warn-on-reject (observable); the terminal-WRITE is a
+        // documented residual.
+        apply_terminal_sequence(orch, &name, post_agg.terminal_sequence.as_deref());
+
         // HOOK.1 (additionalContext, PostToolUse twin): a PostToolUse hook's
         // `additionalContext` is ALSO a separate `hook_additional_context`
         // attachment in claude-code (`toolHooks.ts:133-143`), injected AFTER the
@@ -2005,29 +2168,73 @@ pub(crate) async fn dispatch_tool_uses_tracked(
             ));
         }
 
-        // PostToolUse `updatedMCPToolOutput`: a PostToolUse hook may REPLACE the
-        // tool's output (claude-code `parseHookJSONOutput`,
-        // `utils/hooks.ts:646-649`). The replacement is applied ONLY for MCP
-        // tools, mirroring TS's `isMcpTool(tool)` gate (`toolHooks.ts:146` /
-        // `toolExecution.ts:1494-1496`): a non-MCP tool's result is left
-        // untouched even if a hook returns the field. Only a SUCCESSFUL result
-        // is mutated — the `PostToolUseFailure` arm carries no
-        // `updatedMCPToolOutput` in the TS schema, and `post_agg
-        // .updated_mcp_tool_output` is only ever set by a `PostToolUse` (success)
-        // dispatch (the failure arm fires `PostToolUseFailure`, whose parser
-        // never reads the field). When applied, the replacement JSON re-derives
-        // the model-facing text via `tool_result_to_model_text`, exactly as the
-        // original output did, so the model sees the mutated output. A strict
-        // no-op when no hook set the field (the common case) → byte-identical.
-        let (content, mcp_output_mutated) = match (
-            is_error,
-            tool_handle.is_mcp(),
-            post_agg.updated_mcp_tool_output.as_ref(),
-        ) {
-            (false, true, Some(new_output)) => {
-                (tool_result_to_model_text(new_output), true)
+        // PostToolUse `updatedToolOutput` (#38, all-tools) + `updatedMCPToolOutput`
+        // (legacy, MCP-only): a PostToolUse hook may REPLACE the tool's output.
+        // claude-code (BIN off 202157140) yields `updatedToolOutput` for ALL
+        // tools first, then yields `updatedMCPToolOutput` (mapped onto
+        // `updatedToolOutput`) ONLY when `isMcpTool(tool)` — yielded SECOND so
+        // for an MCP tool the MCP field overrides the all-tools field. The apply
+        // (BIN off 202169384) then substitutes the value ONLY when the tool's
+        // `outputSchema` either is absent OR validates the value successfully
+        // (`e.outputSchema?.safeParse(D.updatedToolOutput)?.success!==!1`); on a
+        // schema MISMATCH it keeps the ORIGINAL output and emits a
+        // `hook_error_during_execution` meta message (BIN off 202465455). Only a
+        // SUCCESSFUL result is mutated — the `PostToolUseFailure` arm carries no
+        // such field in the TS schema, and these aggregate fields are only ever
+        // set by a `PostToolUse` (success) dispatch. When applied, the
+        // replacement JSON re-derives the model-facing text via
+        // `tool_result_to_model_text`, exactly as the original did. A strict
+        // no-op when no hook set either field (the common case) → byte-identical.
+        //
+        // Precedence (mirrors the yield order): start from the all-tools
+        // `updated_tool_output` (the outer `Some` means a hook set the key, even
+        // to `null` — `!== void 0` semantics), then for an MCP tool override with
+        // the legacy `updated_mcp_tool_output` when present.
+        let replacement: Option<serde_json::Value> = if is_error {
+            None
+        } else {
+            let mut repl = post_agg
+                .updated_tool_output
+                .as_ref()
+                .map(|inner| inner.clone().unwrap_or(serde_json::Value::Null));
+            if tool_handle.is_mcp() {
+                if let Some(mcp) = post_agg.updated_mcp_tool_output.as_ref() {
+                    repl = Some(mcp.clone());
+                }
             }
-            _ => (content, false),
+            repl
+        };
+        let (content, mcp_output_mutated) = match replacement {
+            Some(new_output) => {
+                // Validate against the tool's output schema when one exists
+                // (`e.outputSchema?.safeParse(...)?.success!==!1`): substitute
+                // unless validation EXPLICITLY fails. No schema → substitute.
+                let schema_ok = match tool_handle.output_schema() {
+                    Some(schema) => crate::schema_validation::validate_tool_output_schema(
+                        schema,
+                        &new_output,
+                    ),
+                    None => Ok(()),
+                };
+                match schema_ok {
+                    Ok(()) => (tool_result_to_model_text(&new_output), true),
+                    Err(detail) => {
+                        // Schema MISMATCH: keep the ORIGINAL output and surface
+                        // the `hook_error_during_execution` meta message
+                        // (BIN off 202465455) to the model, after the tool_result.
+                        let msg = format!(
+                            "PostToolUse hook returned updatedToolOutput that does not match {name}'s output shape; using original output. {detail}"
+                        );
+                        tracing::warn!(tool_name = %name, "{msg}");
+                        injected_messages.push((
+                            ConversationMessage::user(MessageId::new(), msg),
+                            tool_use_id.clone(),
+                        ));
+                        (content, false)
+                    }
+                }
+            }
+            None => (content, false),
         };
 
         // HOOK.1: the PreToolUse `additionalContext`/`systemMessage` rides the
@@ -2245,6 +2452,18 @@ pub(crate) async fn dispatch_tool_uses_tracked(
             provider_tool_use_id: provider_id.clone(),
         });
 
+        // #39 PostToolBatch: record this resolved tool's call for the once-per-
+        // batch fire after the loop. `tool_response` is the structured tool
+        // output (the same `emit_payload` the PostToolUse hook saw). A failure
+        // result still resolves the call, so it is included with its error
+        // payload (claude-code's batch includes every resolved tool_use).
+        post_tool_batch_calls.push(hooks::events::PostToolBatchCall {
+            tool_name: name.clone(),
+            tool_input: effective_input.clone(),
+            tool_use_id: tool_use_id.clone(),
+            tool_response: Some(emit_payload.clone()),
+        });
+
         // HOOK.1: queue this tool's PreToolUse `additionalContext` as its OWN
         // message on the `injected` channel, tagged with this tool's
         // `tool_use_id` (TS `toolUseID`). Both drivers append `injected` AFTER
@@ -2256,6 +2475,28 @@ pub(crate) async fn dispatch_tool_uses_tracked(
             injected_messages.push((msg, tool_use_id.clone()));
         }
     }
+
+    // #39 PostToolBatch: fire ONCE after the whole batch resolved (claude-code
+    // `G4t`, BIN off 205710327: fired after every tool call in a batch resolves,
+    // before the next model request — distinct from per-tool `PostToolUse`).
+    // Strict no-op when no tool ran (empty batch). Best-effort: a
+    // failing/absent PostToolBatch hook never breaks the turn (the executor is a
+    // no-op when no PostToolBatch hook is registered, mirroring the per-tool
+    // PostToolUse fire). The aggregate decision/output are not consumed — this is
+    // an observational, post-batch event.
+    if !post_tool_batch_calls.is_empty() {
+        let session_id = { orch.session.lock().await.session_id };
+        let batch_ctx = HookContext {
+            session_id,
+            cwd: orch.cwd.clone(),
+            ..Default::default()
+        };
+        let batch_event = HookEvent::PostToolBatch {
+            tool_calls: post_tool_batch_calls,
+        };
+        let _batch_agg = orch.hooks.execute(batch_event, batch_ctx).await;
+    }
+
     Ok((
         results,
         prevent_continuation,
@@ -3876,6 +4117,24 @@ mod pre_tool_hook_tests {
     /// point, so a test can assert WHICH method the turn loop routed to:
     /// `check` → "via-check", `check_after_hook_allow` → "via-hook-allow",
     /// `check_in_plan_mode` → "via-plan-mode".
+    /// Gate that ALLOWS every call on every path (used by the #37 defer tests
+    /// where an IGNORED defer must fall through to a gate that lets the tool
+    /// run).
+    struct AllowAllGate;
+    #[async_trait]
+    impl PermissionGate for AllowAllGate {
+        async fn check(&self, _t: &str, _i: &serde_json::Value) -> PermissionDecision {
+            PermissionDecision::Allow
+        }
+        async fn check_after_hook_allow(
+            &self,
+            _t: &str,
+            _i: &serde_json::Value,
+        ) -> PermissionDecision {
+            PermissionDecision::Allow
+        }
+    }
+
     struct RouteProbeGate;
     #[async_trait]
     impl PermissionGate for RouteProbeGate {
@@ -5151,6 +5410,191 @@ mod pre_tool_hook_tests {
             content.contains("hook-said-no"),
             "PermissionRequest 'deny' reason surfaces: {content}"
         );
+    }
+
+    // ----- #37 permissionDecision "defer" ----------------------------------
+
+    /// A `PreToolUse` hook returning `permissionDecision: "defer"` in
+    /// NON-interactive (print) mode for a SOLO tool call defers the tool: it is
+    /// NOT executed (no tool_result), the turn is terminated
+    /// (`prevent_continuation`), and a `hook_deferred_tool` meta message is
+    /// injected carrying the faithful fields.
+    #[tokio::test]
+    async fn defer_in_print_mode_solo_tool_defers_and_terminates() {
+        let resp = HookResponse {
+            decision: Some(HookDecision::Defer),
+            ..HookResponse::default()
+        };
+        // OrchestratorConfig::default() has interactive_permissions=false
+        // (= non-interactive / print mode), and uses() is a single tool — so
+        // both defer gates pass and the gated path fires.
+        let orch = orch_with(
+            event_hook_executor(HookEventType::PreToolUse, resp),
+            Arc::new(AllowAllGate),
+            vec![],
+        );
+        let (results, prevent, injected, _) =
+            dispatch_tool_uses_tracked(&orch, &uses(), None).await.unwrap();
+        assert!(
+            results.is_empty(),
+            "the deferred tool produces NO tool_result: {results:?}"
+        );
+        assert!(prevent, "defer terminates the turn (prevent_continuation)");
+        // a hook_deferred_tool meta message was injected
+        let joined: String = injected
+            .iter()
+            .map(|(m, _)| match m {
+                ConversationMessage::User { content, .. } => content
+                    .iter()
+                    .filter_map(|b| match b {
+                        ContentBlock::Text { text } => Some(text.clone()),
+                        _ => None,
+                    })
+                    .collect::<String>(),
+                _ => String::new(),
+            })
+            .collect();
+        assert!(
+            joined.contains("hook_deferred_tool"),
+            "a hook_deferred_tool meta message must be injected: {joined}"
+        );
+        assert!(
+            joined.contains("\"hookEvent\":\"PreToolUse\""),
+            "the meta carries hookEvent=PreToolUse: {joined}"
+        );
+    }
+
+    /// A `PreToolUse` `defer` in INTERACTIVE mode is IGNORED (warn) — the tool
+    /// proceeds through the normal permission gate and runs.
+    #[tokio::test]
+    async fn defer_in_interactive_mode_is_ignored_and_tool_runs() {
+        let resp = HookResponse {
+            decision: Some(HookDecision::Defer),
+            ..HookResponse::default()
+        };
+        let mut registry = ToolRegistry::new();
+        registry.register_builtin(Arc::new(EchoTool) as Arc<dyn Tool>);
+        let cfg = OrchestratorConfig {
+            interactive_permissions: true, // interactive → defer ignored
+            ..OrchestratorConfig::default()
+        };
+        let orch = ConversationOrchestrator::new(
+            cfg,
+            Arc::new(MockApiClient::new(vec![])),
+            Arc::new(registry),
+            event_hook_executor(HookEventType::PreToolUse, resp),
+            Arc::new(AllowAllGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            PathBuf::from("/tmp"),
+        );
+        let (results, prevent, _, _) =
+            dispatch_tool_uses_tracked(&orch, &uses(), None).await.unwrap();
+        assert!(!prevent, "ignored defer does NOT terminate the turn");
+        assert_eq!(results.len(), 1, "the tool ran and produced a tool_result");
+        let (_, is_error) = tool_result(&results[0]);
+        assert!(!is_error, "the tool ran successfully (defer ignored)");
+    }
+
+    /// A `PreToolUse` `defer` in a MULTI-tool batch is IGNORED (solo-only) — the
+    /// tools proceed normally.
+    #[tokio::test]
+    async fn defer_in_multi_tool_batch_is_ignored() {
+        let resp = HookResponse {
+            decision: Some(HookDecision::Defer),
+            ..HookResponse::default()
+        };
+        // non-interactive (default) but TWO tool_use blocks → solo-only gate
+        // ignores the defer.
+        let orch = orch_with(
+            event_hook_executor(HookEventType::PreToolUse, resp),
+            Arc::new(AllowAllGate),
+            vec![],
+        );
+        let two = vec![
+            (ToolUseId::new(), "Echo".to_string(), json!({}), None),
+            (ToolUseId::new(), "Echo".to_string(), json!({}), None),
+        ];
+        let (results, prevent, _, _) =
+            dispatch_tool_uses_tracked(&orch, &two, None).await.unwrap();
+        assert!(!prevent, "multi-tool defer does NOT terminate the turn");
+        assert_eq!(results.len(), 2, "both tools ran (defer ignored)");
+    }
+
+    /// #39 PostToolBatch fires ONCE after a batch of resolved tools, carrying
+    /// the full batch in `tool_calls`.
+    #[tokio::test]
+    async fn post_tool_batch_fires_once_with_the_full_batch() {
+        use std::sync::Mutex as StdMutex;
+        // a capturing PostToolBatch hook recording the tool_calls count it saw.
+        struct CaptureBatch {
+            seen: Arc<StdMutex<Vec<usize>>>,
+        }
+        #[async_trait]
+        impl BuiltinHookHandler for CaptureBatch {
+            async fn handle(&self, event: &HookEvent, _ctx: &HookContext) -> HookResult {
+                if let HookEvent::PostToolBatch { tool_calls } = event {
+                    self.seen.lock().unwrap().push(tool_calls.len());
+                }
+                HookResult {
+                    outcome: HookOutcome::Success,
+                    stdout: String::new(),
+                    stderr: String::new(),
+                    exit_code: Some(0),
+                    response: Some(HookResponse::default()),
+                }
+            }
+            fn id(&self) -> &str {
+                "capture-batch"
+            }
+        }
+        let seen = Arc::new(StdMutex::new(Vec::new()));
+        let hook = HookDefinition {
+            id: HookId::new(),
+            name: "capture-batch".into(),
+            events: vec![HookEventType::PostToolBatch],
+            if_condition: None,
+            executor: DefHookExecutor::Builtin {
+                handler_id: "capture-batch".into(),
+            },
+            source: HookSource::Session,
+            blocking: true,
+            timeout: None,
+            priority: 0,
+            once: false,
+            status_message: None,
+        };
+        let mut registry = HookRegistry::new();
+        registry.register(hook);
+        let reg = Arc::new(tokio::sync::RwLock::new(registry));
+        let mut exec = HookExecutorImpl::new(reg, Arc::new(UnusedHttp), Arc::new(UnusedRuntime));
+        exec.register_builtin(Arc::new(CaptureBatch { seen: seen.clone() }));
+        let orch = orch_with(Arc::new(exec), Arc::new(AllowAllGate), vec![]);
+        let two = vec![
+            (ToolUseId::new(), "Echo".to_string(), json!({}), None),
+            (ToolUseId::new(), "Echo".to_string(), json!({}), None),
+        ];
+        let (results, _, _, _) = dispatch_tool_uses_tracked(&orch, &two, None).await.unwrap();
+        assert_eq!(results.len(), 2, "both tools ran");
+        let captured = seen.lock().unwrap().clone();
+        assert_eq!(
+            captured,
+            vec![2],
+            "PostToolBatch fires exactly once with the full 2-tool batch"
+        );
+    }
+
+    /// #39 PostToolBatch is a strict no-op when NO PostToolBatch hook is
+    /// registered (the common path) — the batch still dispatches normally.
+    #[tokio::test]
+    async fn post_tool_batch_no_hook_is_noop() {
+        let orch = orch_with(
+            pre_hook_executor(HookResponse::default()),
+            Arc::new(AllowAllGate),
+            vec![],
+        );
+        let (results, _, _, _) = dispatch_tool_uses_tracked(&orch, &uses(), None).await.unwrap();
+        assert_eq!(results.len(), 1, "the tool still ran (no PostToolBatch hook)");
     }
 
     #[tokio::test]

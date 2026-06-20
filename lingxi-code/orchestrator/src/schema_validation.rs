@@ -84,9 +84,58 @@ pub(crate) fn validate_tool_input_schema(
     Ok(())
 }
 
+/// Validate a `PostToolUse`-hook `updatedToolOutput` replacement against the
+/// tool's declared output JSON Schema (claude-code's `outputSchema.safeParse`,
+/// BIN off 202169384: `e.outputSchema?.safeParse(D.updatedToolOutput)
+/// ?.success!==!1`). Returns the concise error detail on a schema MISMATCH so
+/// the caller can surface the `... does not match <tool>'s output shape ...`
+/// meta message (BIN off 202465455) and keep the original output.
+///
+/// Identical compile/validate logic to [`validate_tool_input_schema`]: a
+/// schema that fails to COMPILE is treated as PASS (a `LingXi` schema bug must
+/// not discard a hook's valid replacement), matching the `?.` short-circuit in
+/// the binary (`success!==!1` is also satisfied when `safeParse` is `undefined`
+/// because `outputSchema` is absent — handled by the caller's `None` branch).
+pub(crate) fn validate_tool_output_schema(
+    schema: &serde_json::Value,
+    output: &serde_json::Value,
+) -> Result<(), String> {
+    const URL: &str = "mem://tool-output-schema";
+    let mut schemas = Schemas::new();
+    let mut compiler = Compiler::new();
+
+    if let Err(e) = compiler.add_resource(URL, schema.clone()) {
+        tracing::warn!(
+            error = %e,
+            "tool output_schema failed to load (treating as PASS — `LingXi` schema bug, not hook output error)"
+        );
+        return Ok(());
+    }
+    let sch = match compiler.compile(URL, &mut schemas) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "tool output_schema failed to compile (treating as PASS — `LingXi` schema bug, not hook output error)"
+            );
+            return Ok(());
+        }
+    };
+
+    if let Err(err) = schemas.validate(output, sch) {
+        let mut out = Vec::new();
+        flatten(&err, &mut out);
+        if out.is_empty() {
+            out.push(err.kind.to_string());
+        }
+        return Err(out.join("; "));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
-    use super::validate_tool_input_schema;
+    use super::{validate_tool_input_schema, validate_tool_output_schema};
     use serde_json::json;
 
     #[test]
@@ -142,5 +191,38 @@ mod tests {
     fn empty_object_schema_accepts_anything() {
         let schema = json!({ "type": "object" });
         assert!(validate_tool_input_schema(&schema, &json!({ "a": 1, "b": [2] })).is_ok());
+    }
+
+    #[test]
+    fn output_schema_mismatch_returns_detail() {
+        // #38: a hook `updatedToolOutput` that does not match the tool's output
+        // schema must FAIL so the caller keeps the original output and emits the
+        // `... does not match <tool>'s output shape ...` meta message.
+        let schema = json!({
+            "type": "object",
+            "properties": { "result": { "type": "string" } },
+            "required": ["result"],
+        });
+        let err = validate_tool_output_schema(&schema, &json!({})).unwrap_err();
+        assert!(err.contains("result"), "message should name the field: {err}");
+    }
+
+    #[test]
+    fn output_schema_match_passes() {
+        let schema = json!({
+            "type": "object",
+            "properties": { "result": { "type": "string" } },
+            "required": ["result"],
+        });
+        assert!(
+            validate_tool_output_schema(&schema, &json!({ "result": "ok" })).is_ok()
+        );
+    }
+
+    #[test]
+    fn output_schema_malformed_passes_through() {
+        // A schema bug must not discard a hook's valid replacement.
+        let schema = json!("not a schema");
+        assert!(validate_tool_output_schema(&schema, &json!({ "x": 1 })).is_ok());
     }
 }

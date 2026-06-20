@@ -117,6 +117,10 @@ hook_event_name_marker!(HookEventNameInstructionsLoaded, "InstructionsLoaded");
 hook_event_name_marker!(HookEventNameElicitation, "Elicitation");
 hook_event_name_marker!(HookEventNameWorktreeCreate, "WorktreeCreate");
 hook_event_name_marker!(HookEventNameTeammateIdle, "TeammateIdle");
+// #39 — three more user-configurable events.
+hook_event_name_marker!(HookEventNamePostToolBatch, "PostToolBatch");
+hook_event_name_marker!(HookEventNameUserPromptExpansion, "UserPromptExpansion");
+hook_event_name_marker!(HookEventNameMessageDisplay, "MessageDisplay");
 
 /// Wire-format `effort` object embedded in the base hook input shape
 /// (1:1 with `coreSchemas.ts` base `RT` schema:
@@ -819,6 +823,86 @@ pub struct WorktreeCreatePayload {
     pub name: String,
 }
 
+/// Wire-format `PostToolBatch` payload (#39). 1:1 with claude-code's input
+/// schema (BIN off 200753854): the base shape `.and({hook_event_name:
+/// "PostToolBatch", tool_calls:E.array(ggp())})`, where each element is a
+/// [`crate::events::PostToolBatchCall`]. Fired once after every tool call in a
+/// batch resolves, before the next model request.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(missing_docs, reason = "wire-format mirror of claude-code schema")]
+pub struct PostToolBatchPayload {
+    pub hook_event_name: HookEventNamePostToolBatch,
+    pub session_id: String,
+    pub transcript_path: String,
+    pub cwd: String,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub permission_mode: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub agent_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub agent_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub effort: Option<EffortLevel>,
+    pub tool_calls: Vec<crate::events::PostToolBatchCall>,
+}
+
+/// Wire-format `UserPromptExpansion` payload (#39). 1:1 with claude-code's input
+/// schema (BIN off 200754686): the base shape `.and({hook_event_name:
+/// "UserPromptExpansion", expansion_type:E.enum(["slash_command","mcp_prompt"]),
+/// command_name:string, command_args:string, command_source:string().optional(),
+/// prompt:string})`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(missing_docs, reason = "wire-format mirror of claude-code schema")]
+pub struct UserPromptExpansionPayload {
+    pub hook_event_name: HookEventNameUserPromptExpansion,
+    pub session_id: String,
+    pub transcript_path: String,
+    pub cwd: String,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub permission_mode: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub agent_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub agent_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub effort: Option<EffortLevel>,
+    pub expansion_type: crate::events::PromptExpansionType,
+    pub command_name: String,
+    pub command_args: String,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub command_source: Option<String>,
+    pub prompt: String,
+}
+
+/// Wire-format `MessageDisplay` payload (#39). 1:1 with claude-code's input
+/// schema (BIN off 200761745): the base shape `.and({hook_event_name:
+/// "MessageDisplay", turn_id:string, message_id:string, index:number().int(),
+/// final:bool, delta:string})`. The `final` wire key is renamed from the Rust
+/// keyword via serde. Fired per assistant-message flush, synchronously, with
+/// per-invocation telemetry suppressed.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(missing_docs, reason = "wire-format mirror of claude-code schema")]
+pub struct MessageDisplayPayload {
+    pub hook_event_name: HookEventNameMessageDisplay,
+    pub session_id: String,
+    pub transcript_path: String,
+    pub cwd: String,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub permission_mode: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub agent_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub agent_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub effort: Option<EffortLevel>,
+    pub turn_id: String,
+    pub message_id: String,
+    pub index: u64,
+    #[serde(rename = "final")]
+    pub is_final: bool,
+    pub delta: String,
+}
+
 /// Envelope used to send one of either payload kind across the wire.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
@@ -884,6 +968,14 @@ pub fn parse_response(
         resp.system_message = Some(s.to_string());
     }
 
+    // #40 top-level `terminalSequence` (claude-code schema BIN off 200873127).
+    // A TOP-LEVEL field (NOT under hookSpecificOutput) read for ALL hook result
+    // types. The allowlist validation (`NEo`) runs at APPLY time (the consumer),
+    // so parse just captures the raw string here.
+    if let Some(ts) = obj.get("terminalSequence").and_then(Value::as_str) {
+        resp.terminal_sequence = Some(ts.to_string());
+    }
+
     // legacy decision
     match obj.get("decision").and_then(Value::as_str) {
         Some("block") => resp.decision = Some(HookDecision::Block),
@@ -899,6 +991,11 @@ pub fn parse_response(
             }
         }
         Some("deny") => resp.decision = Some(HookDecision::Block),
+        // #37 `permissionDecision: "defer"` (claude-code BIN off 205722868:
+        // `case"defer":u.permissionBehavior="defer"`). Parsed as
+        // `HookDecision::Defer`; the orchestrator gates it on print-mode +
+        // solo-tool before honoring it (else it is ignored with a warn).
+        Some("defer") => resp.decision = Some(HookDecision::Defer),
         // "ask" and any other value fall through — preserve the existing decision.
         _ => {}
     }
@@ -929,6 +1026,18 @@ pub fn parse_response(
         // case (the only one expressible once the key is present), keeping a
         // hook that explicitly returns `null` a no-op like TS.
         if expected_event == "PostToolUse" {
+            // `hookSpecificOutput.updatedToolOutput` (claude-code BIN off
+            // 205724076: `if(e.hookSpecificOutput.updatedToolOutput!==void 0)
+            // u.updatedToolOutput=e.hookSpecificOutput.updatedToolOutput`).
+            // `!== void 0` semantics — the key being PRESENT (even with a JSON
+            // `null` value) IS a replacement, distinct from the legacy MCP field
+            // below which is truthiness-gated. `Map::get` returns `Some` only
+            // when the key is present, so this faithfully mirrors `!== void 0`:
+            // an explicit `null` becomes `Some(Some(Value::Null))` (a
+            // replacement with null), an omitted key leaves the outer `None`.
+            if let Some(out) = hs.get("updatedToolOutput") {
+                resp.updated_tool_output = Some(Some(out.clone()));
+            }
             if let Some(out) = hs.get("updatedMCPToolOutput") {
                 if !out.is_null() {
                     resp.updated_mcp_tool_output = Some(out.clone());
@@ -961,6 +1070,13 @@ pub fn parse_response(
                 }
             }
             Some("deny") => resp.decision = Some(HookDecision::Block),
+            // #37 `permissionDecision: "defer"` via hookSpecificOutput. A Block
+            // already set (deny / decline) wins — defer never overrides a deny.
+            Some("defer") => {
+                if !matches!(resp.decision, Some(HookDecision::Block)) {
+                    resp.decision = Some(HookDecision::Defer);
+                }
+            }
             _ => {}
         }
         if let Some(r) = hs.get("permissionDecisionReason").and_then(Value::as_str) {
@@ -1251,6 +1367,157 @@ mod tests {
         )
         .unwrap();
         assert!(r.updated_mcp_tool_output.is_none());
+        assert!(r.updated_tool_output.is_none());
+    }
+
+    // ---- #38 hookSpecificOutput.updatedToolOutput (all-tools) -------------
+
+    #[test]
+    fn parse_response_post_extracts_updated_tool_output_object() {
+        // `!== void 0` semantics: a present non-null value IS a replacement,
+        // applied for ALL tools (no isMcp gate). `Some(Some(value))`.
+        let r = parse_response(
+            r#"{"hookSpecificOutput":{"hookEventName":"PostToolUse","updatedToolOutput":{"result":"replaced"}}}"#,
+            "PostToolUse",
+        )
+        .unwrap();
+        assert_eq!(
+            r.updated_tool_output,
+            Some(Some(json!({ "result": "replaced" })))
+        );
+    }
+
+    #[test]
+    fn parse_response_post_explicit_null_updated_tool_output_is_replacement() {
+        // KEY DISTINCTION from the MCP field: `updatedToolOutput` uses
+        // `!== void 0` — an explicit JSON `null` IS a replacement (the key being
+        // present matters), so the outer `Some` is set with `Some(Value::Null)`.
+        let r = parse_response(
+            r#"{"hookSpecificOutput":{"hookEventName":"PostToolUse","updatedToolOutput":null}}"#,
+            "PostToolUse",
+        )
+        .unwrap();
+        assert_eq!(r.updated_tool_output, Some(Some(serde_json::Value::Null)));
+        // ... whereas the legacy MCP field treats null as a no-op:
+        assert!(r.updated_mcp_tool_output.is_none());
+    }
+
+    #[test]
+    fn parse_response_post_absent_updated_tool_output_is_none() {
+        let r = parse_response(
+            r#"{"hookSpecificOutput":{"hookEventName":"PostToolUse","additionalContext":"hi"}}"#,
+            "PostToolUse",
+        )
+        .unwrap();
+        assert!(r.updated_tool_output.is_none());
+    }
+
+    #[test]
+    fn parse_response_pre_ignores_updated_tool_output() {
+        // The TS switch only reads `updatedToolOutput` for the `PostToolUse`
+        // case — a PreToolUse hook returning it has it dropped.
+        let r = parse_response(
+            r#"{"hookSpecificOutput":{"hookEventName":"PreToolUse","updatedToolOutput":{"x":1}}}"#,
+            "PreToolUse",
+        )
+        .unwrap();
+        assert!(r.updated_tool_output.is_none());
+    }
+
+    #[test]
+    fn updated_tool_output_wire_round_trips_camel_case() {
+        // The struct field round-trips through serde with the camelCase wire key
+        // and `Option<Option<Value>>` shape preserved.
+        let resp = crate::response::HookResponse {
+            updated_tool_output: Some(Some(json!({ "a": 1 }))),
+            ..Default::default()
+        };
+        let s = serde_json::to_string(&resp).unwrap();
+        assert!(s.contains(r#""updated_tool_output":{"a":1}"#), "{s}");
+        let back: crate::response::HookResponse = serde_json::from_str(&s).unwrap();
+        assert_eq!(back.updated_tool_output, Some(Some(json!({ "a": 1 }))));
+        // Default (absent) is skip_serializing_if-omitted.
+        let none = crate::response::HookResponse::default();
+        let s2 = serde_json::to_string(&none).unwrap();
+        assert!(!s2.contains("updated_tool_output"), "{s2}");
+    }
+
+    // ---- #37 permissionDecision "defer" (4th value) ----------------------
+
+    #[test]
+    fn parse_response_top_level_defer_maps_to_defer_decision() {
+        let r = parse_response(r#"{"permissionDecision":"defer"}"#, "PreToolUse").unwrap();
+        assert_eq!(r.decision, Some(HookDecision::Defer));
+    }
+
+    #[test]
+    fn parse_response_hookspecific_defer_maps_to_defer_decision() {
+        let r = parse_response(
+            r#"{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"defer"}}"#,
+            "PreToolUse",
+        )
+        .unwrap();
+        assert_eq!(r.decision, Some(HookDecision::Defer));
+    }
+
+    #[test]
+    fn parse_response_deny_wins_over_defer() {
+        // A deny (Block) set by the legacy top-level decision must NOT be
+        // overridden by a later hookSpecificOutput `defer`.
+        let r = parse_response(
+            r#"{"decision":"block","hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"defer"}}"#,
+            "PreToolUse",
+        )
+        .unwrap();
+        assert_eq!(r.decision, Some(HookDecision::Block));
+    }
+
+    #[test]
+    fn defer_decision_round_trips() {
+        let s = serde_json::to_string(&HookDecision::Defer).unwrap();
+        assert_eq!(s, r#""Defer""#);
+        let back: HookDecision = serde_json::from_str(&s).unwrap();
+        assert_eq!(back, HookDecision::Defer);
+        // existing variants unchanged
+        assert_eq!(
+            serde_json::to_string(&HookDecision::Block).unwrap(),
+            r#""Block""#
+        );
+    }
+
+    // ---- #40 top-level terminalSequence ----------------------------------
+
+    #[test]
+    fn parse_response_reads_top_level_terminal_sequence() {
+        // JSON-escaped ESC `]9;hi` BEL. Parse captures the RAW string; the
+        // allowlist validation happens at apply time (the consumer).
+        let raw = "{\"terminalSequence\":\"\\u001b]9;hi\\u0007\"}";
+        let r = parse_response(raw, "PreToolUse").unwrap();
+        assert_eq!(
+            r.terminal_sequence.as_deref(),
+            Some("\u{001b}]9;hi\u{0007}")
+        );
+    }
+
+    #[test]
+    fn parse_response_terminal_sequence_absent_is_none() {
+        let r = parse_response(r#"{"systemMessage":"hi"}"#, "PreToolUse").unwrap();
+        assert!(r.terminal_sequence.is_none());
+    }
+
+    #[test]
+    fn terminal_sequence_round_trips_camel_case() {
+        let resp = crate::response::HookResponse {
+            terminal_sequence: Some("\u{0007}".into()),
+            ..Default::default()
+        };
+        let s = serde_json::to_string(&resp).unwrap();
+        assert!(s.contains("\"terminal_sequence\":\"\\u0007\""), "{s}");
+        let back: crate::response::HookResponse = serde_json::from_str(&s).unwrap();
+        assert_eq!(back.terminal_sequence.as_deref(), Some("\u{0007}"));
+        // default (None) is omitted
+        let none = crate::response::HookResponse::default();
+        assert!(!serde_json::to_string(&none).unwrap().contains("terminal_sequence"));
     }
 
     // ---- PermissionDenied wire payload (`coreSchemas.ts:461-471`) ---------

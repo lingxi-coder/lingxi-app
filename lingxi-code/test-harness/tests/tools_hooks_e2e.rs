@@ -42,6 +42,12 @@ impl BuiltinHookHandler for BlockingBuiltin {
                 additional_context: None,
                 // PermissionDenied retry (cb796fad): None — not a retry responder.
                 retry: None,
+                // #38 all-tools updatedToolOutput: None — Block mock replaces no
+                // tool output.
+                updated_tool_output: None,
+                // #40 terminalSequence: None — Block mock emits no terminal
+                // escape sequence.
+                terminal_sequence: None,
             }),
         }
     }

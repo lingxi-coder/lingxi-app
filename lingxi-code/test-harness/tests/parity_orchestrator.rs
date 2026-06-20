@@ -161,10 +161,15 @@ async fn single_turn_no_tools_completes_with_end_turn() {
         1,
         "exactly one API call for single-turn scenario"
     );
+    // R-P1: every outgoing API call now LEADS with the additional-context
+    // `<system-reminder>` meta (claudeMd/gitStatus/currentDate — currentDate is
+    // unconditional, so the meta is always present), so the API receives that
+    // meta PLUS the user message(s) before the assistant is appended.
+    let user_msgs_before_assistant = s.expected_session_messages.unwrap_or(2) - 1;
     assert_eq!(
         captured[0].len(),
-        s.expected_session_messages.unwrap_or(2) - 1,
-        "API receives only user messages (before assistant appended)"
+        user_msgs_before_assistant + 1,
+        "API receives the leading additional-context meta + user messages (before assistant appended)"
     );
 
     assert_eq!(s.expected_outcome.as_deref(), Some("EndTurn"));

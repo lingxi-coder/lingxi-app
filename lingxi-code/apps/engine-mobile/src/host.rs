@@ -1985,23 +1985,29 @@ mod tests {
             .await
             .expect("build_mobile with an injected memory provider must succeed");
 
-        let sys = rt.orchestrator.assemble_system_prompt_preview().await;
+        // R-P1: claudeMd lives in the leading additional-context `<system-reminder>`
+        // meta now (same `memory_block::format`), NOT the system prompt.
+        let ctx = rt
+            .orchestrator
+            .additional_context_preview()
+            .await
+            .expect("an additional-context meta must be present (currentDate is unconditional)");
         assert!(
-            sys.contains(
+            ctx.contains(
                 "Codebase and user instructions are shown below. Be sure to adhere to these instructions."
             ),
-            "injected memory must emit the memory preamble in the system prompt: {sys}"
+            "injected memory must emit the memory preamble in the additional-context meta: {ctx}"
         );
         assert!(
-            sys.contains(&format!(
+            ctx.contains(&format!(
                 "Contents of {} (project instructions, checked into the codebase):",
                 memory_path.display()
             )),
-            "the injected CLAUDE.md must emit a tier-tagged `Contents of …:` marker: {sys}"
+            "the injected CLAUDE.md must emit a tier-tagged `Contents of …:` marker: {ctx}"
         );
         assert!(
-            sys.contains(memory_body),
-            "the injected CLAUDE.md body must appear in the system prompt: {sys}"
+            ctx.contains(memory_body),
+            "the injected CLAUDE.md body must appear in the additional-context meta: {ctx}"
         );
     }
 

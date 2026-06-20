@@ -4417,6 +4417,27 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         }
     }
 
+    /// Read-only introspection seam for the leading additional-context
+    /// `<system-reminder>` meta (R-P1): `claudeMd` / `userEmail` / `currentDate`
+    /// live HERE now, not in the system prompt. Returns the meta's text, or
+    /// `None` when nothing is sourceable. Companion to
+    /// [`Self::assemble_system_prompt_preview`] — lets a host/composition-root
+    /// test prove an injected memory provider reaches the additional-context
+    /// message without a live model round-trip.
+    pub async fn additional_context_preview(&self) -> Option<String> {
+        self.additional_context_message()
+            .await
+            .and_then(|m| match m {
+                ConversationMessage::User { content, .. } => {
+                    content.into_iter().find_map(|b| match b {
+                        protocol::ContentBlock::Text { text } => Some(text),
+                        _ => None,
+                    })
+                }
+                _ => None,
+            })
+    }
+
     /// Build the per-turn system prompt by gathering cwd / git / file
     /// tree / memory / tool-name context and calling
     /// [`crate::prompt::assemble_system_prompt`]. Bypassed when

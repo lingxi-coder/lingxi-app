@@ -244,10 +244,17 @@ mod tests {
         messages
             .iter()
             .find_map(|m| match m {
-                ConversationMessage::User { content, .. } => Some(content.clone()),
+                // R-P1: skip the leading additional-context `<system-reminder>`
+                // meta (is_meta: true); the real prompt + images ride on the
+                // first NON-meta user message.
+                ConversationMessage::User {
+                    content,
+                    is_meta: false,
+                    ..
+                } => Some(content.clone()),
                 _ => None,
             })
-            .expect("a user message must be in the outgoing request")
+            .expect("a non-meta user message must be in the outgoing request")
     }
 
     /// The pure DTO→source conversion preserves the media type and base64 bytes

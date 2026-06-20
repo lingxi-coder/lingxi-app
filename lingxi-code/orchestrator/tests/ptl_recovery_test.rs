@@ -216,25 +216,33 @@ async fn ptl_exhausted_attempts_reactive_compact_then_surfaces_error() {
     // prompt-too-long assistant message.
     orch.run_turn("trigger").await.expect("turn ends without bubbling a hard error");
 
-    // The reactive compact must have been attempted: a `[Compacted N → M]`
-    // boundary marker is in history.
+    // A compaction must have been attempted during recovery. We assert this via
+    // the `CompactionCompleted` output event rather than a surviving boundary
+    // marker in history: with #58 the (proactive/reactive) compaction now
+    // preserves a verbatim recent-message tail, so the post-compact history is
+    // larger and the SUBSEQUENT prompt-too-long retry can head-truncate the
+    // boundary marker away (`truncateHeadForPTLRetry` drops oldest groups). The
+    // `CompactionCompleted` event is emitted by `apply_post_compact` the instant
+    // a compaction lands and is not subject to that later truncation — so it is
+    // the robust signal that a compact ran. (Before #58 the compact output was
+    // 2 messages, too small to truncate, so the marker happened to survive.)
+    let _before = before;
     let session = orch.session();
     let after = {
         let s = session.lock().await;
         s.history.clone()
     };
-    let compacted = after.iter().any(|m| matches!(
-        m,
-        ConversationMessage::System { content, .. } if content == "Conversation compacted"
-    ));
+    let events = output.snapshot().await;
+    let compacted = events
+        .iter()
+        .any(|e| matches!(e, OutputEvent::CompactionCompleted { .. }));
     assert!(
         compacted,
-        "the reactive full-compact fallback must have run (boundary marker present); history len before={before}"
+        "a compaction must have run during PTL recovery (CompactionCompleted emitted); history len before={before}"
     );
 
     // The turn ended with the byte-exact PROMPT_TOO_LONG_ERROR_MESSAGE assistant
     // text and an EndTurn event.
-    let events = output.snapshot().await;
     assert!(
         events
             .iter()

@@ -17,10 +17,14 @@
 //!   The transform is byte-faithful: same first-match semantics, same
 //!   `Summary:\n{trimmed}` rewrite, same `\n\n+` → `\n\n` collapse, same
 //!   final `.trim()`.
-//! - The `up_to`/`partial` prompt variants and the `recentMessagesPreserved`
-//!   branch exist in TS but are not exercised by this batch's summarizer
-//!   (base/manual compact only); they are intentionally omitted here and
-//!   noted as a deferral rather than ported as dead code.
+//! - The `up_to`/`partial` prompt variants are not exercised by the base
+//!   summarizer (base/manual compact only) and are noted as a deferral.
+//!   The `recentMessagesPreserved` branch (#58) IS now wired: when a partial
+//!   compaction preserves a verbatim tail of recent messages, the continuation
+//!   message gains the byte-exact `Recent messages are preserved verbatim.`
+//!   sentence (TS `UOt`'s `r` parameter). The `replVmCleared` branch (`UOt`'s
+//!   `o` parameter — a REPL-subsystem addendum) remains an intentional
+//!   deferral; the REPL VM-state reset is a separate finding.
 
 /// Aggressive no-tools preamble — prompt.ts:19-26.
 ///
@@ -264,20 +268,26 @@ pub fn format_compact_summary(summary: &str) -> String {
     collapsed.trim().to_string()
 }
 
-/// Build the user-facing continuation message — prompt.ts:337-374
-/// (`getCompactUserSummaryMessage`).
+/// Build the user-facing continuation message — `getCompactUserSummaryMessage`
+/// (TS `UOt(e,t,n,r,o)`, `bin/claude.exe` offset 197355616).
 ///
-/// The `recentMessagesPreserved` branch and the `feature('PROACTIVE')`
-/// autonomous-mode addendum from TS are intentionally omitted (no
-/// feature-flag infra in the port; the partial-compact path that sets
-/// `recentMessagesPreserved` is not wired by this batch). The base text,
-/// transcript-path branch, and the `suppress_follow_up_questions`
-/// continuation are byte-faithful.
+/// Byte-faithful order, each segment appended only when its flag/arg is set:
+/// 1. base: `This session is being continued… covers the earlier portion…\n\n{summary}`
+/// 2. `transcript_path` (`n`): `\n\nIf you need specific details…read the full transcript at: {path}`
+/// 3. `recent_messages_preserved` (`r`, #58): `\n\nRecent messages are preserved verbatim.`
+/// 4. (`o` `replVmCleared` — the REPL VM-state addendum — is an intentional
+///    deferral; the REPL VM reset is a separate finding.)
+/// 5. `suppress_follow_up_questions` (`t`): `\nContinue the conversation…`
+///
+/// The `recent_messages_preserved` sentence is emitted exactly when the
+/// partial/suffix-preserving path kept a verbatim tail after the summary —
+/// matching TS, which threads `r = messagesToKeep.length > 0`.
 #[must_use]
 pub fn get_compact_user_summary_message(
     summary: &str,
     suppress_follow_up_questions: bool,
     transcript_path: Option<&str>,
+    recent_messages_preserved: bool,
 ) -> String {
     let formatted_summary = format_compact_summary(summary);
 
@@ -289,6 +299,12 @@ pub fn get_compact_user_summary_message(
         base_summary.push_str(&format!(
             "\n\nIf you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: {path}"
         ));
+    }
+
+    // #58: when a verbatim tail rides after the summary, tell the model so it
+    // does not re-derive recent state from the summary (`UOt`'s `r` arg).
+    if recent_messages_preserved {
+        base_summary.push_str("\n\nRecent messages are preserved verbatim.");
     }
 
     if suppress_follow_up_questions {
@@ -414,7 +430,7 @@ mod tests {
 
     #[test]
     fn user_summary_message_base_only() {
-        let msg = get_compact_user_summary_message("<summary>S</summary>", false, None);
+        let msg = get_compact_user_summary_message("<summary>S</summary>", false, None, false);
         assert!(msg.starts_with(
             "This session is being continued from a previous conversation that ran out of context."
         ));
@@ -423,11 +439,13 @@ mod tests {
         assert!(!msg.contains("Continue the conversation from where it left off"));
         // No transcript line when path absent.
         assert!(!msg.contains("read the full transcript at:"));
+        // No preserved-tail sentence when no tail was kept.
+        assert!(!msg.contains("Recent messages are preserved verbatim."));
     }
 
     #[test]
     fn user_summary_message_with_suppress_adds_continuation() {
-        let msg = get_compact_user_summary_message("<summary>S</summary>", true, None);
+        let msg = get_compact_user_summary_message("<summary>S</summary>", true, None, false);
         assert!(msg.contains("Summary:\nS"));
         assert!(msg.contains("Continue the conversation from where it left off without asking the user any further questions."));
         assert!(msg.contains("Pick up the last task as if the break never happened."));
@@ -439,6 +457,7 @@ mod tests {
             "<summary>S</summary>",
             true,
             Some("/tmp/transcript.jsonl"),
+            false,
         );
         assert!(msg.contains(
             "read the full transcript at: /tmp/transcript.jsonl"
@@ -447,5 +466,48 @@ mod tests {
         let t = msg.find("read the full transcript at:").unwrap();
         let c = msg.find("Continue the conversation from where it left off").unwrap();
         assert!(t < c);
+    }
+
+    // --- #58 recentMessagesPreserved branch (TS `UOt`'s `r` arg) ---------- //
+
+    #[test]
+    fn user_summary_message_recent_preserved_appends_sentence() {
+        let msg =
+            get_compact_user_summary_message("<summary>S</summary>", false, None, true);
+        assert!(msg.contains("Summary:\nS"));
+        // Byte-exact preserved-tail sentence.
+        assert!(msg.contains("\n\nRecent messages are preserved verbatim."));
+    }
+
+    #[test]
+    fn user_summary_message_recent_preserved_ordering() {
+        // Order: base → transcript → recent-preserved → continuation.
+        let msg = get_compact_user_summary_message(
+            "<summary>S</summary>",
+            true,
+            Some("/t.jsonl"),
+            true,
+        );
+        let transcript = msg.find("read the full transcript at:").unwrap();
+        let preserved = msg.find("Recent messages are preserved verbatim.").unwrap();
+        let cont = msg
+            .find("Continue the conversation from where it left off")
+            .unwrap();
+        assert!(transcript < preserved, "transcript precedes preserved sentence");
+        assert!(preserved < cont, "preserved sentence precedes continuation");
+    }
+
+    #[test]
+    fn user_summary_message_no_preserved_when_flag_false() {
+        // The full-replacement path (no kept tail) must be byte-identical to
+        // before: no preserved-tail sentence anywhere.
+        let with_tail = get_compact_user_summary_message("<summary>S</summary>", true, None, true);
+        let without = get_compact_user_summary_message("<summary>S</summary>", true, None, false);
+        assert!(!without.contains("Recent messages are preserved verbatim."));
+        // The only delta between them is the inserted preserved-tail sentence.
+        assert_eq!(
+            with_tail.replace("\n\nRecent messages are preserved verbatim.", ""),
+            without
+        );
     }
 }

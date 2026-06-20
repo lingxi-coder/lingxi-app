@@ -1472,6 +1472,13 @@ impl ConversationOrchestrator {
         messages_before: u32,
         bytes_before: u64,
     ) -> traits::CompactionSummary {
+        // #58: the usage-zeroed verbatim tail the autocompact layer preserved
+        // (`messagesToPreserve` → `messagesToKeep`). Empty on the
+        // full-replacement path (short conversation / snip-micro-only /
+        // under-threshold), keeping the post-compact history byte-identical to
+        // before this finding.
+        let preserved_tail = result.messages_to_preserve;
+
         // CSM.4: build the TS-faithful compact boundary (`createCompactBoundaryMessage`,
         // the byte-exact `"Conversation compacted"` sentinel) instead of the ad-hoc
         // `[Compacted N → M]` marker, so the TUI scrollback + next-turn system-prompt
@@ -1479,8 +1486,28 @@ impl ConversationOrchestrator {
         // has no orchestrator-side consumer yet (no sidecar store / no
         // `get_messages_after_compact_boundary` caller), so it is discarded here; a
         // follow-up that persists it can swap `_metadata` for a real store.
-        let (marker, _metadata) =
-            compaction::create_compact_boundary(trigger, 0, None, None, None, &[]);
+        //
+        // #58: when a tail was preserved, the boundary carries a
+        // `preserved_segment` (`WAo`): head = first kept msg, anchor = the LAST
+        // summary message (suffix-preserving splice point), tail = last kept msg.
+        // The anchor is the last of `result.messages` (the summary set). When the
+        // tail is empty, `create_compact_boundary_with_preserved_tail` yields
+        // `preserved_segment: None`, identical to the plain constructor.
+        let anchor_uuid = if preserved_tail.is_empty() {
+            None
+        } else {
+            result.messages.last().map(protocol::ConversationMessage::id)
+        };
+        let (marker, _metadata) = compaction::create_compact_boundary_with_preserved_tail(
+            trigger,
+            0,
+            None,
+            None,
+            None,
+            &[],
+            &preserved_tail,
+            anchor_uuid.as_ref(),
+        );
 
         // #59: snapshot the read-file-state BEFORE clearing it, then restore the
         // most-recent files as post-compact attachments. Mirrors `Iqn`
@@ -1491,18 +1518,22 @@ impl ConversationOrchestrator {
         // `[boundaryMarker, ...summaryMessages, ...attachments, ...]`.
         let restored_attachments = self.restore_post_compact_attachments().await;
 
-        // COMPACT.1: the boundary marker leads the post-compact history, matching
-        // TS `buildPostCompactMessages` order `[boundaryMarker, ...summaryMessages,
-        // ...messagesToKeep, ...]` (compact.ts:330). Prepending (not appending) the
-        // marker is what lets a `get_messages_after_compact_boundary` consumer treat
-        // the summary + kept messages as the content AFTER the boundary, mirroring
-        // TS `getMessagesAfterCompactBoundary`.
-        let mut history_after =
-            Vec::with_capacity(result.messages.len() + 1 + restored_attachments.len());
+        // COMPACT.1 / #58: the boundary marker leads the post-compact history,
+        // matching TS `buildPostCompactMessages` / `Iqn` order
+        // `[boundaryMarker, ...summaryMessages, ...messagesToKeep, ...attachments,
+        // ...hookResults]` (compact.ts:330). The preserved verbatim tail
+        // (`messagesToKeep`) rides AFTER the summary and BEFORE the restored
+        // attachments. Empty `preserved_tail` ⇒ the order is identical to before
+        // (`[marker, ...summary, ...attachments]`).
+        let mut history_after = Vec::with_capacity(
+            result.messages.len() + 1 + preserved_tail.len() + restored_attachments.len(),
+        );
         history_after.push(marker.clone());
         history_after.extend(result.messages);
-        // Restored file attachments ride after the summary (the `attachments`
-        // slot in `buildPostCompactMessages`).
+        // #58: the usage-zeroed verbatim tail (`messagesToKeep`).
+        history_after.extend(preserved_tail);
+        // Restored file attachments ride after the summary + kept tail (the
+        // `attachments` slot in `buildPostCompactMessages`).
         history_after.extend(restored_attachments);
 
         let messages_after = u32::try_from(history_after.len()).unwrap_or(u32::MAX);

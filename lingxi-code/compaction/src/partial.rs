@@ -99,6 +99,53 @@ pub fn select_preserved_tail(messages: &[ConversationMessage]) -> Option<Preserv
     None
 }
 
+/// Carry a preserved-tail message across the compaction boundary, zeroing the
+/// per-message usage on preserved ASSISTANT messages so the tail does not
+/// double-count tokens after compaction.
+///
+/// 1:1 with TS `k4e` (`bin/claude.exe` offset ~202817xxx):
+/// ```js
+/// function k4e(e){
+///   if(e.type!=="assistant") return e;
+///   return {...e, message:{...e.message, usage:{...e.message.usage,
+///     input_tokens:0, output_tokens:0,
+///     cache_creation_input_tokens:0, cache_read_input_tokens:0}}};
+/// }
+/// ```
+///
+/// **Structural note (faithful no-op for the usage zeroing).** TS messages carry
+/// a per-message `message.usage` object; `k4e` blanks its four token counts so
+/// the replayed assistant turn is not re-billed. The Rust
+/// [`protocol::ConversationMessage::Assistant`] variant carries
+/// `{ id, content, stop_reason }` and has **no** per-message `usage` field — token
+/// usage lives on `llm_client::Usage`, accumulated outside the in-history message,
+/// never stored on the `ConversationMessage`. So there is no token field to zero:
+/// preserving the message verbatim already cannot double-count (the counts the TS
+/// version zeroes simply do not exist on the Rust message). This function is
+/// therefore the identity over the message — kept as an explicit seam so the
+/// `messagesToPreserve.map(k4e)` step is represented 1:1 and so a future
+/// protocol that gains per-message usage has the single place to blank it.
+#[must_use]
+pub fn zero_preserved_usage(message: ConversationMessage) -> ConversationMessage {
+    // `if(e.type!=="assistant") return e;` — non-assistant passes through.
+    // For assistant messages there is no per-message usage field in `protocol`
+    // to zero (see the structural note above), so the message is returned
+    // unchanged. The match is kept explicit to mirror the TS branch.
+    match message {
+        ConversationMessage::Assistant { .. } => message,
+        other => other,
+    }
+}
+
+/// Apply [`zero_preserved_usage`] across a preserved tail (TS
+/// `messagesToPreserve.map(k4e)` from `Iqn`).
+#[must_use]
+pub fn zero_preserved_tail_usage(
+    tail: Vec<ConversationMessage>,
+) -> Vec<ConversationMessage> {
+    tail.into_iter().map(zero_preserved_usage).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -204,5 +251,33 @@ mod tests {
             msgs.len(),
             "summarize ++ preserve must reconstruct the full message list"
         );
+    }
+
+    // --- #58 k4e usage-zeroing port -------------------------------------- //
+
+    #[test]
+    fn zero_preserved_usage_passes_through_non_assistant() {
+        let u = user("kept user msg");
+        let out = zero_preserved_usage(u.clone());
+        assert_eq!(out, u, "non-assistant message passes through unchanged");
+    }
+
+    #[test]
+    fn zero_preserved_usage_preserves_assistant_content_verbatim() {
+        // The Rust message carries no per-message usage to zero, so the
+        // assistant message rides through byte-identical (content + id + stop
+        // reason preserved). This proves the preserved tail is carried verbatim.
+        let a = assistant("preserved assistant reply");
+        let out = zero_preserved_usage(a.clone());
+        assert_eq!(out, a, "assistant content/id/stop_reason preserved verbatim");
+    }
+
+    #[test]
+    fn zero_preserved_tail_usage_maps_the_whole_tail() {
+        let tail = vec![assistant("reply"), user("follow up"), assistant("reply 2")];
+        let out = zero_preserved_tail_usage(tail.clone());
+        // Same length, same order, content preserved.
+        assert_eq!(out.len(), tail.len());
+        assert_eq!(out, tail);
     }
 }

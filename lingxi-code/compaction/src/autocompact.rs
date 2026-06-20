@@ -37,6 +37,14 @@ pub struct CompactionResult {
     pub compaction_usage: Option<Usage>,
     /// Resulting messages (typically a single summary system message).
     pub summary_messages: Vec<ConversationMessage>,
+    /// #58: the verbatim tail of recent messages preserved across the
+    /// compaction boundary (`messagesToPreserve` from `DRn`, usage-zeroed via
+    /// [`crate::partial::zero_preserved_tail_usage`] = TS `k4e`). Empty on the
+    /// full-replacement path (short conversation / no preservable tail), in
+    /// which case post-compact history is byte-identical to before this finding.
+    /// Otherwise this rides AFTER the summary in the `Iqn`
+    /// `[boundaryMarker, ...summaryMessages, ...messagesToKeep, ...]` order.
+    pub messages_to_preserve: Vec<ConversationMessage>,
 }
 
 /// Errors surfaced by the autocompact layer.
@@ -157,12 +165,40 @@ impl Autocompactor {
     ) -> Result<CompactionResult, CompactionError> {
         let pre = crate::grouping::estimate_tokens_for_range(&messages);
 
+        // #58 suffix-preserving split (`DRn`): choose the smallest preserved
+        // tail (largest summarize set) whose summarize prefix still contains an
+        // assistant message. `None` ⇒ the conversation is too short / has no
+        // valid prefix ⇒ full-replacement (identical to pre-#58 behaviour, empty
+        // preserved tail). The tail is usage-zeroed (`k4e`) and carried out so
+        // `apply_post_compact` can splice it after the summary.
+        let split = crate::partial::select_preserved_tail(&messages);
+        let preserved_tail: Vec<ConversationMessage> = split
+            .as_ref()
+            .map(|s| crate::partial::zero_preserved_tail_usage(s.to_preserve.clone()))
+            .unwrap_or_default();
+        let recent_messages_preserved = !preserved_tail.is_empty();
+
         // Plan 08 path — closes C2. Wired summarizer via the forked runner.
         if let (Some(runner), Some(slot)) = (&self.forked_runner, &self.cache_slot) {
             let mut cache_params = slot
                 .get_last()
                 .await
                 .ok_or_else(|| CompactionError::Internal("no cache-safe params".into()))?;
+
+            // #58: when a tail is preserved, the summarizer must see ONLY the
+            // prefix `A = m.flat()` (TS `_kd(A,...)`). Restrict the replayed
+            // fork context to the summarize prefix; the cache prefix the slot
+            // captured IS `session.history`, so its leading `to_summarize`
+            // messages match the split's prefix. Drop exactly the preserved-tail
+            // count from the END (the tail is what we carry verbatim). When no
+            // tail is preserved, the full context is summarized as before.
+            if let Some(split) = &split {
+                let keep = split.to_preserve.len();
+                if keep > 0 && keep <= cache_params.fork_context_messages.len() {
+                    let new_len = cache_params.fork_context_messages.len() - keep;
+                    cache_params.fork_context_messages.truncate(new_len);
+                }
+            }
 
             // Strip image blocks from the replayed context before the summary
             // request — the text summarizer must not receive raw image data
@@ -230,10 +266,13 @@ impl Autocompactor {
 
             // Strip <analysis>, rewrite <summary> → Summary:, then wrap in the
             // continuation message — the TS `compact.ts` summary-request path.
+            // #58: `recent_messages_preserved` adds the "Recent messages are
+            // preserved verbatim." sentence when a tail rides after the summary.
             let summary_text = crate::prompt::get_compact_user_summary_message(
                 &result.final_text,
                 /* suppress_follow_up_questions */ true,
                 /* transcript_path */ None,
+                recent_messages_preserved,
             );
 
             return Ok(CompactionResult {
@@ -247,6 +286,9 @@ impl Autocompactor {
                     protocol::MessageId::new(),
                     summary_text,
                 )],
+                // #58: the usage-zeroed verbatim tail, spliced after the summary
+                // by `apply_post_compact`. Empty ⇒ full-replacement path.
+                messages_to_preserve: preserved_tail,
             });
         }
 
@@ -266,6 +308,7 @@ impl Autocompactor {
             &unwired_summary,
             /* suppress_follow_up_questions */ true,
             /* transcript_path */ None,
+            recent_messages_preserved,
         );
         Ok(CompactionResult {
             pre_compact_token_count: pre,
@@ -276,6 +319,9 @@ impl Autocompactor {
                 protocol::MessageId::new(),
                 summary_text,
             )],
+            // #58: carry the preserved tail through the fallback too, so the
+            // history shape is consistent across both construction paths.
+            messages_to_preserve: preserved_tail,
         })
     }
 }
@@ -660,6 +706,125 @@ mod tests {
         assert!(
             client.seen_lens.lock().unwrap().len() >= 2,
             "should attempt at least one truncated retry before exhausting"
+        );
+    }
+
+    // --- #58: preserved recent-message tail ------------------------------ //
+
+    fn assistant_text(text: &str) -> ConversationMessage {
+        ConversationMessage::Assistant {
+            id: MessageId::new(),
+            content: vec![ContentBlock::Text { text: text.into() }],
+            stop_reason: Some("end_turn".into()),
+        }
+    }
+
+    #[tokio::test]
+    async fn compact_preserves_recent_tail_for_long_conversation() {
+        // A multi-group conversation: [u(q1), aA, u(q2), aB] → three API-round
+        // groups (boundary before each new assistant id). `DRn`/select_preserved_tail
+        // preserves the last group (the final assistant reply) and summarizes the
+        // prefix. The forked summarizer only sees the prefix; the tail is carried
+        // out verbatim in `messages_to_preserve`.
+        let prefix = vec![
+            user_msg("q1"),
+            assistant_text("first reply"),
+            user_msg("q2"),
+            assistant_text("second reply"),
+        ];
+        let (compactor, _client) = wired("<summary>S</summary>", prefix.clone()).await;
+
+        let result = compactor.compact(prefix).await.expect("wired compact");
+
+        // The preserved tail is non-empty (the last API round).
+        assert!(
+            !result.messages_to_preserve.is_empty(),
+            "a long conversation must preserve a recent tail"
+        );
+        // The summary (leading) is a single User message; the tail follows.
+        assert_eq!(result.summary_messages.len(), 1);
+        // The continuation message carries the preserved-tail sentence.
+        let summary_text = result.summary_messages[0].text_content();
+        assert!(
+            summary_text.contains("Recent messages are preserved verbatim."),
+            "preserved-tail summary must announce the verbatim tail: {summary_text}"
+        );
+        // The preserved tail is the final assistant reply, carried verbatim.
+        let tail_texts: Vec<String> = result
+            .messages_to_preserve
+            .iter()
+            .map(ConversationMessage::text_content)
+            .collect();
+        assert!(
+            tail_texts.iter().any(|t| t == "second reply"),
+            "the most recent assistant reply must be preserved verbatim: {tail_texts:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn compact_summarizer_sees_only_the_prefix_when_tail_preserved() {
+        // The forked summarizer must replay only the summarize PREFIX (TS
+        // `_kd(A,...)`), with the preserved tail dropped from `fork_context_messages`.
+        let prefix = vec![
+            user_msg("q1"),
+            assistant_text("first reply"),
+            user_msg("q2"),
+            assistant_text("second reply"),
+        ];
+        let (compactor, client) = wired("<summary>S</summary>", prefix.clone()).await;
+
+        let result = compactor.compact(prefix.clone()).await.expect("compact");
+        let keep = result.messages_to_preserve.len();
+        assert!(keep > 0, "precondition: a tail was preserved");
+
+        let sent = client.seen.lock().unwrap().clone().expect("client called");
+        // The forked request replays (prefix − preserved_tail) then the compact
+        // prompt. So the replayed-context count is `4 − keep`, plus the prompt.
+        let replayed = sent.messages.len() - 1; // last is the compact prompt
+        assert_eq!(
+            replayed,
+            prefix.len() - keep,
+            "summarizer must see only the prefix (tail dropped): replayed={replayed}, keep={keep}"
+        );
+        // The compact prompt is still last.
+        assert_eq!(
+            sent.messages.last().unwrap().text_content(),
+            crate::prompt::get_compact_prompt(None)
+        );
+    }
+
+    #[tokio::test]
+    async fn compact_short_conversation_has_no_preserved_tail() {
+        // A short conversation (fewer than two API-round groups) cannot be
+        // split: `messages_to_preserve` is empty and the summary carries NO
+        // preserved-tail sentence — byte-identical to before #58.
+        let prefix = vec![user_msg("only one user message")];
+        let (compactor, _client) = wired("<summary>S</summary>", prefix.clone()).await;
+
+        let result = compactor.compact(prefix).await.expect("compact");
+        assert!(
+            result.messages_to_preserve.is_empty(),
+            "short conversation must NOT preserve a tail"
+        );
+        let summary_text = result.summary_messages[0].text_content();
+        assert!(
+            !summary_text.contains("Recent messages are preserved verbatim."),
+            "no preserved-tail sentence on the full-replacement path: {summary_text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn compact_no_assistant_prefix_has_no_preserved_tail() {
+        // [u, u, aA]: only ONE assistant. select_preserved_tail's i=1 split
+        // preserves the last group [aA] but then the summarize prefix [u,u] has
+        // NO assistant → no valid split → full replacement, empty tail.
+        let prefix = vec![user_msg("a"), user_msg("b"), assistant_text("only reply")];
+        let (compactor, _client) = wired("<summary>S</summary>", prefix.clone()).await;
+
+        let result = compactor.compact(prefix).await.expect("compact");
+        assert!(
+            result.messages_to_preserve.is_empty(),
+            "a prefix with no assistant message cannot partial-compact"
         );
     }
 }

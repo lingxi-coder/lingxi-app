@@ -36,7 +36,9 @@ pub use boundary::{
     preserved_segment_for_tail, CompactBoundaryMetadata, CompactTrigger, PreservedSegment,
     BOUNDARY_CONTENT,
 };
-pub use partial::{select_preserved_tail, PreservedTailSplit};
+pub use partial::{
+    select_preserved_tail, zero_preserved_tail_usage, zero_preserved_usage, PreservedTailSplit,
+};
 pub use microcompact::{
     collect_compactable_tool_ids, compactable_tools, evaluate_time_based_trigger,
     reset_microcompact_state, MicrocompactResult, Microcompactor, TimeBasedMCConfig,

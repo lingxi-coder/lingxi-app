@@ -64,6 +64,15 @@ pub struct IterationCompactionResult {
     /// `compacted=true`, `turn_counter=0`) so the next refill within the window
     /// increments it.
     pub consecutive_rapid_refills: u32,
+    /// #58: the usage-zeroed verbatim tail the autocompact layer preserved
+    /// (`messagesToPreserve` → `messagesToKeep`). Carried separately from
+    /// [`Self::messages`] (which holds the leading `summaryMessages`) so the
+    /// orchestrator's `apply_post_compact` can splice it AFTER the summary in
+    /// the `[boundary, ...summary, ...messagesToKeep, ...attachments]` order
+    /// and populate the boundary's `preserved_segment`. Empty unless the
+    /// autocompact layer fired AND a tail was preserved — so the snip/micro-only
+    /// and under-threshold paths leave it empty (history shape unchanged).
+    pub messages_to_preserve: Vec<ConversationMessage>,
 }
 
 /// Owns one instance of each layer + the autocompact threshold.
@@ -232,6 +241,9 @@ impl CompactionOrchestrator {
 
         // --- Layer 3: autocompact (threshold + circuit-breaker gated) ----- //
         let mut was_compacted = false;
+        // #58: the preserved tail the autocompact layer carries out, if any.
+        // Empty unless autocompact fires AND `DRn` selected a preservable tail.
+        let mut messages_to_preserve: Vec<ConversationMessage> = Vec::new();
         let estimate_after_micro = crate::grouping::estimate_tokens_for_range(&messages);
         let over_threshold = crate::threshold_calc::should_auto_compact(
             estimate_after_micro,
@@ -270,6 +282,9 @@ impl CompactionOrchestrator {
             match self.auto.compact(messages.clone()).await {
                 Ok(result) => {
                     messages.clone_from(&result.summary_messages);
+                    // #58: carry the preserved tail out separately (NOT folded
+                    // into `messages`, which is the leading summary set).
+                    messages_to_preserve = result.messages_to_preserve;
                     freed = freed.saturating_add(
                         result
                             .pre_compact_token_count
@@ -305,6 +320,7 @@ impl CompactionOrchestrator {
             was_compacted,
             rapid_refill_breaker_tripped,
             consecutive_rapid_refills: tracking.consecutive_rapid_refills,
+            messages_to_preserve,
         })
     }
 }

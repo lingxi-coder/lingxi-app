@@ -824,6 +824,38 @@ impl Dispatcher {
                 // `subprocessEnv()` base-env replication and `CLAUDE_ENV_FILE`
                 // are out of B2 scope.
                 let mut child_env = env.clone();
+                // #43: `...Uot(o)` child-session env spread. claude-code assembles
+                // the hook command env as `P={...WO(), ...Uot(o), CLAUDE_PROJECT_DIR}`
+                // (BIN off 205727901) where `o=u9e(hookInput)={sessionId:session_id,
+                // effortLevel:effort?.level, source:"harness"}` (BIN off 199137330).
+                // `Uot` emits, in order:
+                //   CLAUDECODE="1"                       (always)
+                //   CLAUDE_CODE_SESSION_ID=sessionId     (always)
+                //   CLAUDE_CODE_CHILD_SESSION="1"        (always)
+                //   AI_AGENT=Mer("agent")                ONLY when source==="agent"
+                //   CLAUDE_EFFORT=effortLevel            ONLY when effortLevel set
+                //   TRACEPARENT=<otel>                   ONLY when Evt() (OTel on)
+                // For hooks `source==="harness"`, so `AI_AGENT` is NEVER emitted on a
+                // hook child — distinct from the Bash spawn (`source:"agent"`, which
+                // DOES set AI_AGENT). We mirror exactly: set CLAUDECODE /
+                // CLAUDE_CODE_SESSION_ID / CLAUDE_CODE_CHILD_SESSION unconditionally,
+                // CLAUDE_EFFORT only when `ctx.effort` carries a level, and we do NOT
+                // set AI_AGENT. Spread BEFORE CLAUDE_PROJECT_DIR so the engine project
+                // dir still wins (no key overlap, so order is cosmetic, but it tracks
+                // the binary's spread position).
+                //
+                // Residual: TRACEPARENT (OTel) — LingXi has no per-turn OTel span, so
+                // `Evt()` is effectively false and the binary would omit it too; the
+                // same documented residual as the Bash spawn path.
+                child_env.insert("CLAUDECODE".to_string(), "1".to_string());
+                child_env.insert(
+                    "CLAUDE_CODE_SESSION_ID".to_string(),
+                    ctx.session_id.to_string(),
+                );
+                child_env.insert("CLAUDE_CODE_CHILD_SESSION".to_string(), "1".to_string());
+                if let Some(effort) = &ctx.effort {
+                    child_env.insert("CLAUDE_EFFORT".to_string(), effort.level.clone());
+                }
                 let project_dir = ctx.project_dir.clone().unwrap_or_else(|| ctx.cwd.clone());
                 let project_dir_str = project_dir.to_string_lossy().into_owned();
                 child_env.insert("CLAUDE_PROJECT_DIR".to_string(), project_dir_str.clone());
@@ -2841,6 +2873,76 @@ mod command_arm_tests {
         let env = runner.recorded_env.lock().unwrap().clone().unwrap();
         assert!(!env.contains_key("COLUMNS"), "None columns sets no COLUMNS");
         assert!(!env.contains_key("LINES"), "zero rows is falsy → no LINES");
+    }
+
+    #[tokio::test]
+    async fn command_env_sets_uot_harness_vars() {
+        // #43: the hook command env spreads `...Uot(o)` with `source:"harness"`
+        // (BIN off 205727901 / 199137330): CLAUDECODE=1, CLAUDE_CODE_SESSION_ID,
+        // CLAUDE_CODE_CHILD_SESSION=1 are always present. `AI_AGENT` is gated on
+        // `source==="agent"`, so a hook child must NOT carry it.
+        let runner = MockRunner::ok(output("", "", 0));
+        let exec = executor_with(runner.clone());
+        let ctx = HookContext::default();
+        let expected_session = ctx.session_id.to_string();
+
+        let _ = exec.execute(pre_event(), ctx).await;
+
+        let env = runner.recorded_env.lock().unwrap().clone().unwrap();
+        assert_eq!(env.get("CLAUDECODE").map(String::as_str), Some("1"));
+        assert_eq!(
+            env.get("CLAUDE_CODE_CHILD_SESSION").map(String::as_str),
+            Some("1"),
+        );
+        assert_eq!(
+            env.get("CLAUDE_CODE_SESSION_ID").map(String::as_str),
+            Some(expected_session.as_str()),
+            "Uot threads the session id into the hook child",
+        );
+        assert!(
+            !env.contains_key("AI_AGENT"),
+            "hook source is harness, not agent — AI_AGENT must be absent",
+        );
+    }
+
+    #[tokio::test]
+    async fn command_env_sets_effort_only_when_present() {
+        // `Uot` sets `CLAUDE_EFFORT=effortLevel` only when `effortLevel` is set
+        // (`o.effortLevel = hookInput.effort?.level`). No effort on the ctx ⇒
+        // the env var is omitted; an effort level ⇒ it is set verbatim.
+        let runner = MockRunner::ok(output("", "", 0));
+        let exec = executor_with(runner.clone());
+        let _ = exec.execute(pre_event(), HookContext::default()).await;
+        assert!(
+            !runner
+                .recorded_env
+                .lock()
+                .unwrap()
+                .clone()
+                .unwrap()
+                .contains_key("CLAUDE_EFFORT"),
+            "no effort on ctx ⇒ no CLAUDE_EFFORT",
+        );
+
+        let runner2 = MockRunner::ok(output("", "", 0));
+        let exec2 = executor_with(runner2.clone());
+        let ctx = HookContext {
+            effort: Some(crate::hook_payload::EffortLevel::new("high")),
+            ..Default::default()
+        };
+        let _ = exec2.execute(pre_event(), ctx).await;
+        assert_eq!(
+            runner2
+                .recorded_env
+                .lock()
+                .unwrap()
+                .clone()
+                .unwrap()
+                .get("CLAUDE_EFFORT")
+                .map(String::as_str),
+            Some("high"),
+            "effort level surfaces as CLAUDE_EFFORT",
+        );
     }
 
     // ---- B1: lifecycle events now serialize through the Command arm -----

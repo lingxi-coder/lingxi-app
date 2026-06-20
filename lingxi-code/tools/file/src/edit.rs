@@ -332,7 +332,11 @@ impl Tool for FileEditTool {
     }
 
     async fn description(&self, _input: &Value, _opts: &DescriptionOptions) -> String {
-        EDIT_DESCRIPTION.to_string()
+        // R-EditDesc: claude-code's Edit `description()` is the short display label
+        // `"A tool for editing files"` (binary), NOT the long body — the long body
+        // lives in `prompt()`. The model-facing wire uses `prompt()` (wire.rs:140),
+        // so `description()` is a display label only; this keeps it 1:1 anyway.
+        "A tool for editing files".to_string()
     }
 
     async fn prompt(&self, opts: &PromptOptions) -> String {
@@ -2106,10 +2110,13 @@ that bypasses Perforce tracking."
     }
 
     #[tokio::test]
-    async fn description_is_verbatim_ts() {
+    async fn description_is_short_label_and_long_prompt_is_verbatim_ts() {
         let tmp = TempDir::new().unwrap();
         let (ctx, _sink) = make_ctx(&tmp);
         let tool = FileEditTool::new(ctx);
+        // R-EditDesc: description() is the SHORT display label (claude-code
+        // `async description(){return "A tool for editing files"}`), NOT the long
+        // body — the long body lives in prompt().
         let d = tool
             .description(
                 &json!({}),
@@ -2118,35 +2125,38 @@ that bypasses Perforce tracking."
                 },
             )
             .await;
+        assert_eq!(d, "A tool for editing files");
+        // The long body is prompt(model:None) ⇒ Dh(undefined)=false ⇒ LONG.
         // Header + the `\n-` pre-read seam (Usage: immediately followed by the
         // first bullet). v2.1.183 dropped the trailing space the older builds
         // had after "reading the file." — the pre-read bullet now ends exactly
         // at the period with no trailing space (binary `wBp()`/`RBp()`).
-        assert!(d.starts_with(
-            "Performs exact string replacements in files.\n\nUsage:\n- You must use your `Read` tool"
-        ));
-        assert!(d.contains("before editing. This tool will error"));
-        assert!(d.contains(
-            "This tool will error if you attempt an edit without reading the file.\n- When editing text"
-        ));
-        // No trailing space after the first bullet (the v2.1.183 one-byte fix).
-        assert!(!d.contains("reading the file. \n"));
-        // Locks the compact-format decision (line number + tab, not padded-arrow).
-        assert!(d.contains("The line number prefix format is: line number + tab."));
-        // Final bullet, with NO trailing newline.
-        assert!(d.ends_with(
-            "This parameter is useful if you want to rename a variable for instance."
-        ));
-        // Locks `minimalUniquenessHint` empty (non-`ant` 3P build).
-        assert!(!d.contains("smallest old_string"));
-        // prompt(model:None) ⇒ Dh(undefined)=false ⇒ LONG (== DESCRIPTION for Edit).
-        let p = tool
+        let long = tool
             .prompt(&PromptOptions {
                 include_examples: false,
                 model: None,
             })
             .await;
-        assert_eq!(p, d);
+        assert!(long.starts_with(
+            "Performs exact string replacements in files.\n\nUsage:\n- You must use your `Read` tool"
+        ));
+        assert!(long.contains("before editing. This tool will error"));
+        assert!(long.contains(
+            "This tool will error if you attempt an edit without reading the file.\n- When editing text"
+        ));
+        // No trailing space after the first bullet (the v2.1.183 one-byte fix).
+        assert!(!long.contains("reading the file. \n"));
+        // Locks the compact-format decision (line number + tab, not padded-arrow).
+        assert!(long.contains("The line number prefix format is: line number + tab."));
+        // Final bullet, with NO trailing newline.
+        assert!(long.ends_with(
+            "This parameter is useful if you want to rename a variable for instance."
+        ));
+        // Locks `minimalUniquenessHint` empty (non-`ant` 3P build).
+        assert!(!long.contains("smallest old_string"));
+        // prompt(model:None) ⇒ Dh(undefined)=false ⇒ LONG.
+        // description() (short label) and the long prompt() differ — confirm.
+        assert_ne!(long, d);
     }
 
     #[tokio::test]

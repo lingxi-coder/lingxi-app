@@ -532,6 +532,142 @@ pub fn simple_prompt(sandbox: &SandboxRuntimeConfig) -> String {
     lines.join("\n")
 }
 
+// ===== CONCISE (current-gen) variant ========================================
+
+/// Port of claude-code's CONCISE Bash git section `$Up(e)` (binary @202732xxx),
+/// the SHORT-prompt analogue of [`commit_and_pr_instructions`]. EXTERNAL-USER
+/// path.
+///
+/// The TS shape is:
+/// ```js
+/// function $Up(e){
+///   if(!aOt()) return "";                 // shouldIncludeGitInstructions
+///   let n="", {commit:r, pr:o}=qdt(),      // commit/pr ATTRIBUTION
+///       i=[r?`- End git commit messages with:\n${r}`:null,
+///          o?`- End PR bodies with:\n${o}`:null].filter(Boolean).join("\n"),
+///       a=_Xa() /* "" */, l=null, c=nqn(e) /* "" */;
+///   return `${n}# Git
+/// - Interactive flags (...) are not supported in this environment.
+/// - Use the \`gh\` CLI for GitHub operations (PRs, issues, API).
+/// - Commit or push only when the user asks${c?...:""}. If on the default branch, branch first.${i?`\n${i}`:""}${c?`\n- ${c}`:""}${a?`\n\n${a}`:""}${l?`\n\n${l}`:""}`
+/// }
+/// ```
+///
+/// Resolutions for the LingXi default (posix, external build):
+/// - `aOt()` → [`should_include_git_instructions`] (always-on stub here);
+/// - `_Xa()`/`nqn(e)` BOTH return `""` in the binary (`a`/`c` empty), and `l`
+///   is hard-`null`, so the trailing `${c}`/`${a}`/`${l}` interpolations vanish
+///   and the "only after the pre-ship checks below" clause never appears;
+/// - `qdt()` is the commit/PR ATTRIBUTION (`Co-Authored-By: <model> …` +
+///   `🤖 Generated with [Claude Code](https://claude.com/claude-code)`). This
+///   crate has NO attribution source — resolved the SAME way as the VERBOSE
+///   [`commit_and_pr_instructions`] (empty `commitAttribution`/`prAttribution`),
+///   so the `- End git commit messages with:` / `- End PR bodies with:` bullets
+///   are OMITTED (matching the binary's `includeCoAuthoredBy===false` shape,
+///   i.e. `qdt()` ⇒ `{commit:"",pr:""}` ⇒ `i==""`).
+fn concise_git_section() -> String {
+    if !should_include_git_instructions() {
+        return String::new();
+    }
+    // No attribution source (see [`commit_and_pr_instructions`]) ⇒ commit/pr
+    // attribution empty ⇒ the `- End …` bullets are omitted. `c`/`a`/`l` are
+    // all empty, so the section is exactly these three fixed bullets.
+    "# Git\n\
+     - Interactive flags (`-i`, e.g. `git rebase -i`, `git add -i`) are not supported in this environment.\n\
+     - Use the `gh` CLI for GitHub operations (PRs, issues, API).\n\
+     - Commit or push only when the user asks. If on the default branch, branch first."
+        .to_string()
+}
+
+/// Port of `getSimplePrompt`'s CONCISE branch `qUp(e)` (binary @202741xxx) —
+/// the `Dh(model)`-true Bash prompt that claude-code serves current-gen models
+/// (`claude-opus-4-8` / `claude-fable-5` / `claude-mythos-5`). EXTERNAL-USER,
+/// posix, non-Monitor, non-embedded-search-tools defaults.
+///
+/// The TS builder:
+/// ```js
+/// function qUp(e){
+///   let t=gXa()!==null,            // background-usage note exists?
+///       n=$Up(e),                  // CONCISE git section
+///       r=yXa(),                   // SANDBOX section (SAME as VERBOSE)
+///       o=Zw()?"…":"`find`, `grep`, `cat`, `head`, `tail`, `sed`, `awk`, or `echo`",
+///       s=[];
+///   if(t){ let a="- `run_in_background` runs the command detached: it keeps running across turns and re-invokes you when it exits. No `&` needed.";
+///          if(sq()) a+=" Foreground `sleep` is blocked; use Monitor with an until-loop to wait on a condition.";
+///          s.push(a); }
+///   let i=hXa();                   // i = null on non-win32
+///   return ["Executes a bash command and returns its output.",
+///     ...i?["",i]:[],              // (posix ⇒ empty)
+///     "",
+///     "- Working directory persists between calls, but prefer absolute paths — `cd` in a compound command can trigger a permission prompt. Shell state (env vars, functions) does not persist; the shell is initialized from the user's profile.",
+///     `- IMPORTANT: Avoid using this tool to run ${o} commands, unless explicitly instructed or after you have verified that a dedicated tool cannot accomplish your task. Instead, use the appropriate dedicated tool as this will provide a much better experience for the user.`,
+///     `- \`timeout\` is in milliseconds: default ${d4t()}, max ${Wdt()}.`,
+///     ...s,
+///     ...r?[r]:[],
+///     ...n?["",n]:[]].join("\n")
+/// }
+/// ```
+///
+/// Resolutions (LingXi default):
+/// - `i=hXa()` is `null` on non-win32 (a Windows-only "Git Bash (POSIX sh)"
+///   advisory, NOT model attribution) → the leading spread is empty. Bash is
+///   unsupported on Windows here anyway, mirroring the VERBOSE prompt which
+///   likewise omits its `d=hXa()`.
+/// - `o` = avoid-list. `Zw()` (embedded-search-tools) is the gated ant-native
+///   path; the external default takes the find/grep-INCLUSIVE list — IDENTICAL
+///   to the VERBOSE prompt's hardcoded `avoid_commands`.
+/// - `t` (`gXa()!==null`) ⟺ [`background_usage_note`] is `Some` (gated by
+///   `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS`). When present, the detached
+///   `run_in_background` bullet is emitted; `sq()` (the `tengu_amber_sentinel`
+///   / Monitor gate) is default-false here, so the trailing "Foreground `sleep`
+///   is blocked…" clause is omitted — same default as the VERBOSE sleep block.
+/// - `r=yXa()` is the SAME [`sandbox_section`] the VERBOSE prompt uses, so the
+///   CONCISE variant IS sandbox-dependent (appended when non-empty).
+/// - `d4t()`/`Wdt()` are [`BASH_DEFAULT_TIMEOUT_MS`]/[`BASH_MAX_TIMEOUT_MS`]
+///   rendered RAW (no `/ N minutes` conversion, unlike VERBOSE).
+///
+/// Em-dash is U+2014 (the binary stores it as the JS escape `—`).
+#[must_use]
+pub fn simple_prompt_concise(sandbox: &SandboxRuntimeConfig) -> String {
+    // CONCISE avoid-list — the Dh-true (SHORT) branch DROPS `find`/`grep` vs the
+    // LONG prompt (verified against the v2.1.183 binary's qUp builder + the
+    // rendered opus-4-8 output: the SHORT list starts at `cat`). NOT config-gated.
+    let avoid_commands = "`cat`, `head`, `tail`, `sed`, `awk`, or `echo`";
+
+    let mut lines: Vec<String> = vec![
+        "Executes a bash command and returns its output.".into(),
+        // `i=hXa()` is null on posix ⇒ no leading advisory; first real line is "".
+        String::new(),
+        "- Working directory persists between calls, but prefer absolute paths \u{2014} `cd` in a compound command can trigger a permission prompt. Shell state (env vars, functions) does not persist; the shell is initialized from the user's profile.".into(),
+        format!("- IMPORTANT: Avoid using this tool to run {avoid_commands} commands, unless explicitly instructed or after you have verified that a dedicated tool cannot accomplish your task. Instead, use the appropriate dedicated tool as this will provide a much better experience for the user."),
+        format!(
+            "- `timeout` is in milliseconds: default {}, max {}.",
+            BASH_DEFAULT_TIMEOUT_MS, BASH_MAX_TIMEOUT_MS
+        ),
+    ];
+
+    // `s` — the detached-run bullet, present iff the background note exists.
+    // `sq()` (Monitor / amber sentinel) is default-false ⇒ no Monitor clause.
+    if background_usage_note().is_some() {
+        lines.push("- `run_in_background` runs the command detached: it keeps running across turns and re-invokes you when it exits. No `&` needed.".into());
+    }
+
+    // `r=yXa()` — sandbox section (same as VERBOSE), appended when non-empty.
+    let sandbox_text = sandbox_section(sandbox);
+    if !sandbox_text.is_empty() {
+        lines.push(sandbox_text);
+    }
+
+    // `n=$Up(e)` — CONCISE git section, preceded by a blank line when non-empty.
+    let git = concise_git_section();
+    if !git.is_empty() {
+        lines.push(String::new());
+        lines.push(git);
+    }
+
+    lines.join("\n")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

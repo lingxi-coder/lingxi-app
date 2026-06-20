@@ -656,6 +656,104 @@ async fn emit_failed(
     bus.log_event(BASH_FAILED, meta).await;
 }
 
+// ===== BASH.7 — model-gated prompt selector (`Dh` predicate) ===============
+//
+// claude-code builds the Bash tool's model-facing prompt as
+// `getSimplePrompt(model) = Dh(model) ? qUp(/*CONCISE*/) : TXa(/*VERBOSE*/)`.
+// `Dh` (binary offset ~195159752) is the "simple system prompt" gate that
+// selects the SHORT (current-gen) vs LONG (classic) variant. The TWIN of this
+// predicate lives in `tools/web/src/web_search.rs` (`dh_simple_system_prompt`)
+// and `tools/task/src/todo_write.rs`; it is replicated here rather than shared
+// so `tool-shell` does not depend on `tool-web`/`tool-task`/`tool-api` for it
+// (another agent may be editing those shared crates in parallel). The logic
+// MUST stay byte-identical to those twins.
+
+/// Local replica of claude-code `Dh(model)` (binary offset ~195159752):
+///
+/// ```js
+/// Dh = (e)=>{
+///   if(!e) return false;                                          // no model → LONG
+///   if(st(env.CLAUDE_CODE_SIMPLE_SYSTEM_PROMPT)) return true;     // env-truthy → SHORT
+///   if(_l(env.CLAUDE_CODE_SIMPLE_SYSTEM_PROMPT)) return false;    // env-defined-falsy → LONG
+///   return !UWu(e) || FWu(e);                                     // FWu absent ⇒ !UWu(e)
+/// };
+/// ```
+///
+/// `UWu(model)` returns `false` for the current-gen `claude-opus-4-8` /
+/// `claude-fable-5` / `claude-mythos-5`, so `!UWu(e)` is `true` for those
+/// (⇒ SHORT) and `false` for classic models (⇒ LONG). `FWu` (config-flag
+/// refinement) is not plumbed into the tool layer; on a default config it is
+/// `false`, so the model branch reduces to `!UWu(e)` — mirrors the WebSearch /
+/// TodoWrite documented residual.
+fn dh_simple_system_prompt(model: Option<&str>) -> bool {
+    // `if(!e) return false` — short-circuit to LONG when no model is known.
+    let Some(model) = model.filter(|m| !m.is_empty()) else {
+        return false;
+    };
+    let env = std::env::var("CLAUDE_CODE_SIMPLE_SYSTEM_PROMPT").ok();
+    if traits::env::is_env_truthy(env.as_deref()) {
+        return true;
+    }
+    if traits::env::is_env_defined_falsy(env.as_deref()) {
+        return false;
+    }
+    // `return !UWu(e) || FWu(e)` with `FWu(e) == false` (config keys absent).
+    !uwu_standard_model(model)
+}
+
+/// Local replica of claude-code `UWu(model)` — the classic ("standard") model
+/// list. Returns `false` for the current-gen models (`claude-opus-4-8` /
+/// `claude-fable-5` / `claude-mythos-5`) so `Dh` serves them the SHORT prompt.
+/// Replicated from the WebSearch / TodoWrite `uwu_standard_model` twins to
+/// avoid a cross-crate dependency; the substring/equality checks operate on a
+/// lightly-lowercased raw model id (claude-code's `Fo(e)` profile-canonicalizer
+/// is not threaded here, but every published id is already canonical). The
+/// unknown-model `!pd()` fallthrough is `false` for the default first-party
+/// deployment (`pd()` true).
+fn uwu_standard_model(model: &str) -> bool {
+    // `dfe(e)` = `/-eap($|\[)/i.test(e)` — early-access models are NOT standard.
+    if is_early_access_model(model) {
+        return false;
+    }
+    let t = model.to_ascii_lowercase();
+    if t.contains("claude-3-")
+        || t.contains("haiku")
+        || t.contains("sonnet")
+        || t == "claude-opus-4-0"
+        || t == "claude-opus-4-1"
+        || t == "claude-opus-4-5"
+        || t == "claude-opus-4-6"
+        || t == "claude-opus-4-7"
+    {
+        return true;
+    }
+    if t == "claude-opus-4-8" || t == "claude-fable-5" || t == "claude-mythos-5" {
+        return false;
+    }
+    // `return !pd()` — provider class unavailable in the tool layer; default
+    // first-party deployment ⇒ `pd()` true ⇒ `!pd()` false.
+    false
+}
+
+/// Local replica of claude-code `dfe(e)`: `/-eap($|\[)/i.test(e)` — matches an
+/// early-access model id where `-eap` is at the end of the string or
+/// immediately followed by `[`. Twin of the WebSearch / TodoWrite
+/// `is_early_access_model`.
+fn is_early_access_model(model: &str) -> bool {
+    let lower = model.to_ascii_lowercase();
+    let mut from = 0usize;
+    while let Some(idx) = lower[from..].find("-eap") {
+        let abs = from + idx;
+        let after = abs + "-eap".len();
+        match lower.as_bytes().get(after) {
+            None => return true,        // `-eap` at end ($)
+            Some(&b'[') => return true, // `-eap[`
+            _ => from = after,
+        }
+    }
+    false
+}
+
 // ===== Tool type ============================================================
 
 /// `BashTool` — spawn a shell command through the configured `ProcessRunner`,
@@ -811,10 +909,20 @@ impl Tool for BashTool {
         }
     }
 
-    async fn prompt(&self, _opts: &PromptOptions) -> String {
-        // BASH.6 — faithful ~370-line port of claude-code `getSimplePrompt`,
-        // driven by the live sandbox runtime config on this context.
-        crate::prompt::simple_prompt(&self.ctx.sandbox_runtime)
+    async fn prompt(&self, opts: &PromptOptions) -> String {
+        // BASH.6/BASH.7 — 1:1 with claude-code
+        // `getSimplePrompt(model) = Dh(model) ? qUp(/*CONCISE*/) : TXa(/*VERBOSE*/)`.
+        // The `Dh(model)` "simple system prompt" gate (binary @~195159752)
+        // selects the SHORT current-gen variant vs the LONG classic one; the
+        // session/subagent model is threaded via `PromptOptions::model`, and
+        // `None` mirrors the binary's `Dh(undefined)` → LONG. BOTH variants are
+        // driven by the live sandbox runtime config on this context (the SHORT
+        // `qUp` calls the SAME `yXa()`/`sandbox_section`).
+        if dh_simple_system_prompt(opts.model.as_deref()) {
+            crate::prompt::simple_prompt_concise(&self.ctx.sandbox_runtime)
+        } else {
+            crate::prompt::simple_prompt(&self.ctx.sandbox_runtime)
+        }
     }
 
     async fn validate_input(
@@ -2504,5 +2612,134 @@ mod tests {
         assert_eq!(res.data["isImage"], false);
         assert_eq!(res.data["stdout"], bad);
         assert!(res.new_messages.is_empty());
+    }
+
+    // ===== BASH.7 — `Dh(model)` prompt gate ================================
+
+    #[test]
+    fn dh_gate_selects_short_for_current_gen_and_long_for_classic() {
+        // No model ⇒ `Dh(undefined)` ⇒ false ⇒ LONG.
+        assert!(!dh_simple_system_prompt(None));
+        assert!(!dh_simple_system_prompt(Some("")));
+        // Current-gen defaults: `UWu` is false ⇒ `!UWu` true ⇒ SHORT.
+        assert!(dh_simple_system_prompt(Some("claude-opus-4-8")));
+        assert!(dh_simple_system_prompt(Some("claude-fable-5")));
+        assert!(dh_simple_system_prompt(Some("claude-mythos-5")));
+        // Classic models: `UWu` true ⇒ `!UWu` false ⇒ LONG.
+        assert!(!dh_simple_system_prompt(Some("claude-opus-4-1")));
+        assert!(!dh_simple_system_prompt(Some("claude-3-5-sonnet-20241022")));
+        assert!(!dh_simple_system_prompt(Some("claude-haiku-4-5")));
+        // `UWu` classifications directly.
+        assert!(uwu_standard_model("claude-opus-4-7"));
+        assert!(!uwu_standard_model("claude-opus-4-8"));
+        // `-eap` early-access ⇒ NOT standard ⇒ SHORT.
+        assert!(is_early_access_model("claude-opus-4-8-eap"));
+        assert!(!uwu_standard_model("claude-3-5-sonnet-eap"));
+    }
+
+    #[tokio::test]
+    async fn prompt_default_model_none_returns_long_variant() {
+        // Default opts (model=None) ⇒ `Dh(None)` false ⇒ LONG prompt. The
+        // byte-locked LONG anchors must still hold (regression guard for the
+        // existing parity tests).
+        let out = ProcessOutput {
+            stdout: String::new(),
+            stderr: String::new(),
+            exit_code: 0,
+            timed_out: false,
+        };
+        let tool = BashTool::new(shell_test_ctx(out));
+        let p = tool.prompt(&PromptOptions::default()).await;
+        assert!(
+            p.starts_with("Executes a given bash command and returns its output."),
+            "LONG prompt opening missing; got:\n{p}"
+        );
+        assert!(
+            p.contains("The working directory persists between commands, but shell state does not."),
+            "LONG cwd sentence missing"
+        );
+        assert!(
+            p.contains("# Committing changes with git"),
+            "LONG committing-changes header missing"
+        );
+    }
+
+    #[tokio::test]
+    async fn prompt_current_gen_model_returns_short_variant() {
+        // `model: Some("claude-opus-4-8")` ⇒ `Dh` true ⇒ SHORT prompt — exactly
+        // what claude-code serves opus-4-8. Default test sandbox is disabled, so
+        // the sandbox section is absent and the git section is the CONCISE one.
+        let out = ProcessOutput {
+            stdout: String::new(),
+            stderr: String::new(),
+            exit_code: 0,
+            timed_out: false,
+        };
+        let tool = BashTool::new(shell_test_ctx(out));
+        let opts = PromptOptions {
+            model: Some("claude-opus-4-8".into()),
+            ..Default::default()
+        };
+        let p = tool.prompt(&opts).await;
+
+        // Opening — SHORT ("a bash command", NOT "a given bash command").
+        assert!(
+            p.starts_with("Executes a bash command and returns its output.\n\n"),
+            "SHORT opening missing; got:\n{p}"
+        );
+        assert!(
+            !p.contains("Executes a given bash command"),
+            "must NOT be the LONG opening"
+        );
+        // Working-directory bullet (em-dash U+2014, straight apostrophe).
+        assert!(
+            p.contains("- Working directory persists between calls, but prefer absolute paths \u{2014} `cd` in a compound command can trigger a permission prompt. Shell state (env vars, functions) does not persist; the shell is initialized from the user's profile."),
+            "SHORT working-directory bullet missing/incorrect; got:\n{p}"
+        );
+        // IMPORTANT avoid-list bullet — the SHORT (Dh-true) branch DROPS
+        // `find`/`grep` vs the LONG prompt (starts at `cat`; verified vs the
+        // v2.1.183 binary + rendered opus-4-8 output).
+        assert!(
+            p.contains("- IMPORTANT: Avoid using this tool to run `cat`, `head`, `tail`, `sed`, `awk`, or `echo` commands, unless explicitly instructed"),
+            "SHORT avoid-list bullet missing/incorrect; got:\n{p}"
+        );
+        assert!(
+            !p.contains("`find`, `grep`"),
+            "SHORT avoid-list must NOT include find/grep (those are LONG-only); got:\n{p}"
+        );
+        // Raw timeout bullet (no `/ N minutes` conversion).
+        assert!(
+            p.contains("- `timeout` is in milliseconds: default 120000, max 600000."),
+            "SHORT timeout bullet missing/incorrect; got:\n{p}"
+        );
+        // Detached run_in_background bullet (background note enabled by default,
+        // no Monitor clause since the amber-sentinel gate is default-false).
+        assert!(
+            p.contains("- `run_in_background` runs the command detached: it keeps running across turns and re-invokes you when it exits. No `&` needed."),
+            "SHORT run_in_background bullet missing; got:\n{p}"
+        );
+        assert!(
+            !p.contains("Foreground `sleep` is blocked"),
+            "Monitor clause must be absent by default (amber-sentinel off)"
+        );
+        // CONCISE `# Git` section — three fixed bullets, NO attribution bullets,
+        // NO LONG "Committing changes with git" header.
+        assert!(
+            p.contains("# Git\n- Interactive flags (`-i`, e.g. `git rebase -i`, `git add -i`) are not supported in this environment.\n- Use the `gh` CLI for GitHub operations (PRs, issues, API).\n- Commit or push only when the user asks. If on the default branch, branch first."),
+            "SHORT `# Git` section missing/incorrect; got:\n{p}"
+        );
+        assert!(
+            !p.contains("# Committing changes with git"),
+            "SHORT prompt must not carry the LONG git section"
+        );
+        assert!(
+            !p.contains("End git commit messages with:") && !p.contains("End PR bodies with:"),
+            "attribution bullets must be omitted (no attribution source, like the LONG prompt)"
+        );
+        // Sandbox section absent (default test sandbox disabled).
+        assert!(
+            !p.contains("## Command sandbox"),
+            "sandbox section should be absent when sandbox disabled"
+        );
     }
 }

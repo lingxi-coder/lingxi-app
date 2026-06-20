@@ -19,8 +19,6 @@ use std::fmt::Write;
 /// <env>
 /// Working directory: {cwd}
 /// Is directory a git repo: {Yes|No}
-///   Git branch: {branch}        (only when cwd is a git repo)
-///   Working tree clean: {true|false}   (only when cwd is a git repo)
 /// Platform: {platform}
 /// Shell: {shell}
 /// OS Version: {os_version}
@@ -46,16 +44,15 @@ pub fn format(ctx: &SystemPromptContext) -> String {
         if is_git { "Yes" } else { "No" }
     )
     .unwrap();
-    if let Some(g) = &ctx.git_status {
-        // LingXi extension: claude-code's `<env>` has NO git lines (`Git branch`
-        // / `Working tree clean` are 0 hits in v2.1.181) — it carries branch/dirty
-        // in a SEPARATE gitStatus context block that LingXi does not yet emit.
-        // Until that block exists these lines are kept so the model still sees
-        // git context (removing them alone would lose it). Follow-up (#20-tail):
-        // add the gitStatus block, then drop these two lines.
-        writeln!(&mut s, "  Git branch: {}", g.branch).unwrap();
-        writeln!(&mut s, "  Working tree clean: {}", g.working_dir_clean).unwrap();
-    }
+    // claude-code's `<env>` (binary `Vym`, offset 205822510) carries ONLY:
+    // `Working directory` / `Is directory a git repo` / [additional dirs] /
+    // `Platform` / `Shell` / `OS Version`. It has NO `Git branch` / `Working
+    // tree clean` line (0 hits in v2.1.183) — git branch/dirty live in a
+    // SEPARATE `gitStatus` session-context attachment ("This is the git status
+    // at the start of the conversation…"), not in `<env>`. RESIDUAL #48b: port
+    // that gitStatus block (needs main-branch detection, `git config user.name`,
+    // porcelain status, `git log --oneline -n 5`, and an additionalContext
+    // injection site) — a separate session-context feature from this `<env>`.
     writeln!(&mut s, "Platform: {}", ctx.platform).unwrap();
     writeln!(&mut s, "Shell: {}", ctx.shell).unwrap();
     writeln!(&mut s, "OS Version: {}", ctx.os_version).unwrap();

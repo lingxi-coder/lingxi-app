@@ -39,7 +39,7 @@ fn probe_returns_some_inside_clean_repo() {
 }
 
 #[test]
-fn env_block_includes_git_branch_when_repo_present() {
+fn env_block_marks_git_repo_yes_but_emits_no_git_lines() {
     let ctx = SystemPromptContext {
         cwd: PathBuf::from("/dummy"), // probe is NOT called by env_block
         platform: "macos".into(),
@@ -58,9 +58,12 @@ fn env_block_includes_git_branch_when_repo_present() {
         tool_names: Vec::new(),
     };
     let out = env_block::format(&ctx);
+    // A repo present sets the "Yes" line, but claude-code's <env> carries NO
+    // `Git branch` / `Working tree clean` lines (those live in the separate
+    // gitStatus attachment, #48b).
     assert!(out.contains("Is directory a git repo: Yes\n"));
-    assert!(out.contains("  Git branch: feature/x\n"));
-    assert!(out.contains("  Working tree clean: false\n"));
+    assert!(!out.contains("Git branch"));
+    assert!(!out.contains("Working tree clean"));
 }
 
 #[test]

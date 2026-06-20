@@ -4269,14 +4269,29 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         // tools_block::format sorts alphabetically inside.
         let tool_names: Vec<String> = self.tools.all_names();
 
-        let shell = std::env::var("SHELL")
-            .ok()
-            .and_then(|s| {
-                std::path::Path::new(&s)
-                    .file_name()
-                    .map(|n| n.to_string_lossy().into_owned())
-            })
-            .unwrap_or_else(|| "sh".into());
+        // Port of claude-code `tIo` (binary offset ~205825700):
+        //   let e = process.env.SHELL || "unknown",
+        //       t = e.includes("zsh") ? "zsh" : e.includes("bash") ? "bash" : e;
+        // i.e. the RAW $SHELL collapsed to "zsh"/"bash" by SUBSTRING (not the
+        // path basename), else the raw full $SHELL value verbatim; "unknown"
+        // when $SHELL is unset/empty. (`env_block` prepends the "Shell: "
+        // literal that `tIo` carries in its return value.) RESIDUAL #53b: the
+        // win32 PowerShell-primary branches (`Su()`/`tN()` availability probes)
+        // are not ported — LingXi has no PowerShell/Bash-tool probe at this
+        // site, so Windows falls through to `t` (tIo's `Shell: ${t}` else-arm).
+        let shell = {
+            let raw = std::env::var("SHELL")
+                .ok()
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| "unknown".into());
+            if raw.contains("zsh") {
+                "zsh".into()
+            } else if raw.contains("bash") {
+                "bash".into()
+            } else {
+                raw
+            }
+        };
 
         let ctx = SystemPromptContext {
             cwd,

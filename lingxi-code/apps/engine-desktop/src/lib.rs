@@ -2334,6 +2334,11 @@ pub async fn build(
         cfg.use_noop_permission_gate,
         cfg.permission_mode,
     );
+    // Read(deny) → search-exclude globs (GrepTool.ts:417-427, glob.ts lLa()).
+    // Populated inside the enforcement branch below from the boot policy and
+    // threaded into the tool ctx so `Grep`/`Glob` skip denied/sensitive paths.
+    // Empty (no enforcement / no Read-deny rule) ⇒ VCS-only behavior unchanged.
+    let mut read_deny_exclude_globs: Vec<String> = Vec::new();
     let perms: Arc<dyn PermissionGate> = if enforce_permissions {
             let mut rules = Vec::new();
             let mut mode = permission::PermissionMode::Default;
@@ -2446,6 +2451,10 @@ pub async fn build(
                 .with_working_dirs(additional_working_dirs)
                 .with_sandbox_runtime(sandbox_auto_allow);
             policy.bypass_killswitch_active = bypass_disabled;
+            // Resolve the active Read(deny) rules to search-exclude globs while
+            // the policy is still in scope (before it moves into the gate).
+            read_deny_exclude_globs =
+                permission::read_deny_exclude_globs(&policy, &cwd);
             let policy = Arc::new(policy);
             tracing::info!(
                 rules = rule_count,
@@ -3120,6 +3129,9 @@ pub async fn build(
         // guard / Read-dedup; the composition-root Arc-share with the orchestrator
         // is wired when a consumer (FILE.A/D/E/F) reads it.
         read_file_state: tool_api::read_file_state::new_read_file_state_map(),
+        // Read(deny) → Grep/Glob search excludes (resolved from the boot policy
+        // above; empty when enforcement is off or no Read-deny rule applies).
+        read_deny_exclude_globs,
         fs: Arc::new(PosixFileSystem::new(cwd.clone())),
         bus: Arc::new(telemetry::AnalyticsBus::new()),
         trusted_dirs: vec![cwd.clone()],

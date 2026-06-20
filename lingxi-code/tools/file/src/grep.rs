@@ -29,9 +29,13 @@
 //! - A wall-clock walk budget honors `CLAUDE_CODE_GLOB_TIMEOUT_SECONDS`
 //!   (default 20s, 60s on WSL); a timeout with zero results is surfaced as an
 //!   error (`utils/ripgrep.ts:130-133,444-454`), partial results are returned.
-//! - File-read ignore-patterns (`GrepTool.ts:411-427`) are DEFERRED: no
-//!   permission-context accessor for them exists in this workspace yet, so the
-//!   cross-crate plumbing is not invented here (only the VCS excludes apply).
+//! - File-read ignore-patterns (`GrepTool.ts:411-427`) are WIRED: the active
+//!   `Read`-`deny` permission rules are resolved to `--glob` excludes at engine
+//!   boot by `permission::read_deny_exclude_globs` (1:1 port of
+//!   `F4e(U4e(toolPermissionContext), cwd)`), threaded in via
+//!   `BuiltinToolContext::read_deny_exclude_globs`, and applied here as negated
+//!   `ignore`-crate overrides with the reference prefixing (rooted `/P` → `!P`;
+//!   relative `P` → `!**/P`). Empty (no `Read`-deny rule) ⇒ VCS excludes only.
 
 use async_trait::async_trait;
 use grep_matcher::Matcher;
@@ -560,6 +564,20 @@ impl Tool for GrepTool {
             let _ = ob.add(&format!("!{dir}"));
             let _ = ob.add(&format!("!{dir}/**"));
         }
+        // Read(deny) exclusions (GrepTool.ts:417-427): each active `Read`-`deny`
+        // rule (resolved by `permission::read_deny_exclude_globs` at boot) is
+        // turned into a negated override so a denied/sensitive path never
+        // appears in results. Prefix EXACTLY as the reference does: a rooted
+        // (`/`-anchored) entry → `!P`; a bare relative entry → `!**/P` (match at
+        // any depth). In `OverrideBuilder`, a `!`-prefixed pattern is an ignore.
+        for p in &self.ctx.read_deny_exclude_globs {
+            let neg = if p.starts_with('/') {
+                format!("!{p}")
+            } else {
+                format!("!**/{p}")
+            };
+            let _ = ob.add(&neg);
+        }
         if let Some(g) = glob_filter {
             for pat in split_glob_patterns(g) {
                 if let Err(e) = ob.add(&pat) {
@@ -1082,6 +1100,56 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(content_str(&result), "Found 1 file\na.rs");
+    }
+
+    /// Read(deny) exclude globs (GrepTool.ts:417-427): a populated
+    /// `read_deny_exclude_globs` removes denied paths from the search. A rooted
+    /// `/secrets/**` entry (`!P` prefixing) and a bare relative `.env` entry
+    /// (`!**/P` prefixing) are both honored; an empty set is a no-op.
+    #[tokio::test]
+    async fn read_deny_exclude_globs_skip_matches() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("a.rs"), "fn foo() {}").unwrap();
+        std::fs::write(tmp.path().join(".env"), "fn secret() {}").unwrap();
+        let secrets = tmp.path().join("secrets");
+        std::fs::create_dir(&secrets).unwrap();
+        std::fs::write(secrets.join("key.rs"), "fn bar() {}").unwrap();
+
+        // Baseline: no excludes → all three files match.
+        {
+            let (ctx, _sink) = make_ctx(&tmp);
+            let tool = GrepTool::new(ctx);
+            let out = content_str(
+                &tool
+                    .call(json!({ "pattern": "fn" }), fresh_ctx(), fresh_tx())
+                    .await
+                    .unwrap(),
+            );
+            assert!(out.contains("a.rs"), "baseline: {out}");
+            assert!(out.contains("secrets/key.rs"), "baseline: {out}");
+            assert!(out.contains(".env"), "baseline: {out}");
+        }
+
+        // Populated: rooted `/secrets/**` (→ `!/secrets/**`) prunes the dir, and
+        // bare `.env` (→ `!**/.env`) prunes the dotfile; `a.rs` survives.
+        {
+            let (mut ctx, _sink) = make_ctx(&tmp);
+            ctx.read_deny_exclude_globs =
+                vec!["/secrets/**".to_string(), ".env".to_string()];
+            let tool = GrepTool::new(ctx);
+            let out = content_str(
+                &tool
+                    .call(json!({ "pattern": "fn" }), fresh_ctx(), fresh_tx())
+                    .await
+                    .unwrap(),
+            );
+            assert!(out.contains("a.rs"), "non-denied survives: {out}");
+            assert!(
+                !out.contains("secrets/key.rs"),
+                "rooted deny pruned secrets/: {out}"
+            );
+            assert!(!out.contains(".env"), "relative deny pruned .env: {out}");
+        }
     }
 
     #[tokio::test]

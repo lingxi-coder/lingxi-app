@@ -704,6 +704,11 @@ pub async fn build_mobile_inner(
     let tool_ctx = BuiltinToolContext {
         // FILE.B: file tools share one read-state map (see engine-desktop note).
         read_file_state: tool_api::read_file_state::new_read_file_state_map(),
+        // Read(deny) → Grep/Glob search excludes. Mobile binds an
+        // `AdapterPermissionGate` (enforcement is remote) and builds NO local
+        // `PermissionPolicy`, so there are no resident Read-deny rules to resolve
+        // here — empty, matching the "no rule ⇒ unchanged" default.
+        read_deny_exclude_globs: Vec::new(),
         fs,
         bus: Arc::new(telemetry::AnalyticsBus::new()),
         trusted_dirs: vec![cwd.clone()],

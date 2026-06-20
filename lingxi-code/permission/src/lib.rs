@@ -28,6 +28,7 @@ pub mod persist;
 pub mod policy;
 pub mod policy_gate;
 pub mod prompting_gate;
+pub mod read_deny_globs;
 pub mod read_only_command;
 pub mod result;
 pub mod rule;
@@ -74,6 +75,7 @@ pub use persist::{persist_permission_update, PermissionPaths, PersistError};
 pub use policy::PermissionPolicy;
 pub use policy_gate::PolicyPermissionGate;
 pub use prompting_gate::InteractivePromptingGate;
+pub use read_deny_globs::read_deny_exclude_globs;
 pub use read_only_command::command_is_read_only;
 pub use sandbox_auto_allow::SandboxAutoAllowConfig;
 pub use result::{

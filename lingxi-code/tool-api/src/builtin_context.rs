@@ -166,6 +166,19 @@ pub struct BuiltinToolContext {
     /// this map). Cheap to clone (`Arc`).
     pub read_file_state: ReadFileStateMap,
 
+    // ===== Read(deny) search-exclusion seam =====
+    /// Ripgrep `--glob` exclude strings (WITHOUT the leading `!`) derived from
+    /// the active `Read`-`deny` permission rules — 1:1 with claude-code
+    /// `F4e(U4e(toolPermissionContext), cwd)`, computed once at engine boot via
+    /// [`permission::read_deny_exclude_globs`]. The `Grep` and `Glob` tools turn
+    /// each entry into a negated `ignore`-crate override so a denied/sensitive
+    /// path never appears in search results (`GrepTool.ts:417-427`, `glob.ts`
+    /// `lLa()`). Empty by default — every non-live construction site (tests,
+    /// other tools) leaves it `vec![]`, so behavior is unchanged when no
+    /// `Read`-deny rule applies. Populated only at the two live engine roots
+    /// (`engine-desktop` + `engine-mobile`) from the boot `PermissionPolicy`.
+    pub read_deny_exclude_globs: Vec<String>,
+
     // ===== Android-sandbox P3 seam =====
     /// Android-only `Shell` tool wiring (spec r3 §Shell tool). `None` on
     /// desktop / iOS. Built by `android-aar` from the probed capability cache +

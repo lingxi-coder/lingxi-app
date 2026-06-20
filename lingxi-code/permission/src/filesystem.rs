@@ -179,7 +179,7 @@ fn root_path_for_source(source: PermissionRuleSource, roots: &FsRoots) -> PathBu
 /// - `~/x` → root = home, pattern = `/x` (`pattern[1..]`); `None` home → no root.
 /// - `/x` (single slash) → root = [`root_path_for_source`], pattern unchanged.
 /// - otherwise → root `None`; a leading `./` is stripped (`./.env` → `.env`).
-fn pattern_with_root(
+pub(crate) fn pattern_with_root(
     pattern: &str,
     source: PermissionRuleSource,
     roots: &FsRoots,

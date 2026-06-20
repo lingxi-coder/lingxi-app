@@ -244,6 +244,17 @@ impl Tool for GlobTool {
                 "invalid glob pattern {pattern:?}: {e}"
             )));
         }
+        // Read(deny) exclusions (`glob.ts` `lLa()`: `for(_ of l) d.push("--glob",
+        // `!${_}`)`). Each active `Read`-`deny` rule (resolved at boot by
+        // `permission::read_deny_exclude_globs`) is added as a negated override
+        // so a denied/sensitive path is never listed. The reference prefixes a
+        // bare `!` to every entry — `F4e` already prepends a leading `/` to the
+        // rooted entries (and unrooted entries pass through relative), so we
+        // mirror that with `!{p}` verbatim. A `!`-prefixed `OverrideBuilder`
+        // pattern is an ignore.
+        for p in &self.ctx.read_deny_exclude_globs {
+            let _ = ob.add(&format!("!{p}"));
+        }
         let overrides = match ob.build() {
             Ok(o) => o,
             Err(e) => {
@@ -421,6 +432,64 @@ mod tests {
         let matches = result.data["matches"].as_array().unwrap();
         assert_eq!(matches.len(), 2);
         assert_eq!(result.data["truncated"], false);
+    }
+
+    /// Read(deny) exclude globs (`glob.ts` `lLa()`): a populated
+    /// `read_deny_exclude_globs` prunes the matching paths from the listing.
+    /// A `/secrets/**` rooted entry skips that dir; an empty set leaves every
+    /// file visible (behavior unchanged).
+    #[tokio::test]
+    async fn read_deny_exclude_globs_prune_listing() {
+        let _env = lock_and_clear_glob_env().await;
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("visible.rs"), "x").unwrap();
+        let secrets = tmp.path().join("secrets");
+        std::fs::create_dir(&secrets).unwrap();
+        std::fs::write(secrets.join("key.rs"), "x").unwrap();
+
+        // Baseline: NO excludes → both files are listed.
+        {
+            let (ctx, _sink) = make_ctx(&tmp);
+            let tool = GlobTool::new(ctx);
+            let matches: Vec<String> = tool
+                .call(json!({ "pattern": "**/*.rs" }), fresh_ctx(), fresh_tx())
+                .await
+                .unwrap()
+                .data["matches"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|v| v.as_str().unwrap().replace('\\', "/"))
+                .collect();
+            assert!(matches.iter().any(|m| m.ends_with("secrets/key.rs")));
+            assert!(matches.iter().any(|m| m.ends_with("visible.rs")));
+        }
+
+        // Populated: `/secrets/**` (the shape `read_deny_exclude_globs` yields
+        // for a `Read(/secrets/**)` deny at cwd) prunes the secrets dir.
+        {
+            let (mut ctx, _sink) = make_ctx(&tmp);
+            ctx.read_deny_exclude_globs = vec!["/secrets/**".to_string()];
+            let tool = GlobTool::new(ctx);
+            let matches: Vec<String> = tool
+                .call(json!({ "pattern": "**/*.rs" }), fresh_ctx(), fresh_tx())
+                .await
+                .unwrap()
+                .data["matches"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|v| v.as_str().unwrap().replace('\\', "/"))
+                .collect();
+            assert!(
+                !matches.iter().any(|m| m.ends_with("secrets/key.rs")),
+                "Read(deny) exclude must prune secrets/: {matches:?}"
+            );
+            assert!(
+                matches.iter().any(|m| m.ends_with("visible.rs")),
+                "non-denied file stays visible: {matches:?}"
+            );
+        }
     }
 
     /// The headline recursion fix: a BARE `*.rs` must match files at ANY depth

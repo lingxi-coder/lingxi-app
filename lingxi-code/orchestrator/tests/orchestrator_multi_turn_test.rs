@@ -166,7 +166,14 @@ async fn two_turns_with_one_tool_use_drives_loop_to_end_turn() {
 
     let captured = api.captured_msgs().await;
     assert_eq!(captured.len(), 2);
-    // The 2nd call's history must include: user(prompt), assistant(tool_use), user(tool_result).
+    // The 2nd call carries a leading `additionalContext` meta message (R-P1c/d,
+    // prepended each turn) followed by: user(prompt), assistant(tool_use),
+    // user(tool_result).
     let second_call = &captured[1];
-    assert_eq!(second_call.len(), 3);
+    assert_eq!(second_call.len(), 4);
+    assert!(
+        second_call[0].is_meta(),
+        "first message is the leading additionalContext meta; got {:?}",
+        second_call[0]
+    );
 }

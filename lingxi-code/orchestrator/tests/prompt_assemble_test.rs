@@ -5,7 +5,7 @@ use std::path::PathBuf;
 fn ctx_minimal() -> SystemPromptContext {
     SystemPromptContext {
         cwd: PathBuf::from("/proj"),
-        platform: "macos".into(),
+        platform: "darwin".into(),
         model: "claude-opus-4-7".into(),
         model_marketing_name: Some("Opus 4.7".into()),
         knowledge_cutoff: Some("January 2026".into()),
@@ -18,27 +18,31 @@ fn ctx_minimal() -> SystemPromptContext {
     }
 }
 
-// The verbatim preamble (claudemd.ts:89-90) that opens the memory section.
+// The verbatim preamble (claudemd.ts:89-90) that opened the OLD memory section.
 const MEMORY_PREAMBLE: &str = "Codebase and user instructions are shown below.";
 
 #[test]
-fn minimal_assembly_no_memory_no_tools() {
+fn minimal_assembly_no_memory_no_tools_no_footer() {
     let out = assemble_system_prompt(&ctx_minimal());
     // Must start with HEADER.
     assert!(out.starts_with("You are Claude Code, Anthropic's official CLI for Claude."));
-    // Must contain `<env>` and `</env>`.
-    assert!(out.contains("<env>\n"));
-    assert!(out.contains("</env>\n"));
-    // MUST NOT contain the memory preamble or `<tools>` (both empty here).
+    // Must contain the `# Environment` block (R-P1a: replaces the old `<env>`).
+    assert!(out.contains("\n\n# Environment\nYou have been invoked in the following environment: "));
+    assert!(!out.contains("<env>"));
+    // MUST NOT contain the memory section (R-P1c/d: CLAUDE.md is a meta message
+    // now), `<tools>`, or the `Notes:` FOOTER (R-P1b).
     assert!(!out.contains(MEMORY_PREAMBLE));
     assert!(!out.contains("Contents of "));
     assert!(!out.contains("<tools>"));
-    // Must end with the footer's final (5th) bullet + LF.
-    assert!(out.ends_with("not files you create.\n"));
+    assert!(!out.contains("Notes:"));
+    // Ends with the env block's last line (no FOOTER).
+    assert!(out.ends_with("available on Opus 4.8/4.7/4.6."));
 }
 
 #[test]
-fn section_order_locked_header_env_memory_footer() {
+fn memory_files_are_not_spliced_into_the_prompt() {
+    // Even with CLAUDE.md files present, the system prompt carries NO memory
+    // section — the content moves to the additional-context meta message.
     let mut ctx = ctx_minimal();
     ctx.memory_files = vec![MemoryFile {
         path: PathBuf::from("/proj/CLAUDE.md"),
@@ -49,65 +53,53 @@ fn section_order_locked_header_env_memory_footer() {
     }];
     ctx.tool_names = vec!["Read".into(), "Write".into()];
     let out = assemble_system_prompt(&ctx);
-    // Locate the section markers in the output and assert order. Memory is now
-    // a preamble + `Contents of …:` block (no enclosing tag).
-    let i_header = out.find("You are Claude Code").expect("header present");
-    let i_env = out.find("<env>").expect("env present");
-    let i_memory = out.find(MEMORY_PREAMBLE).expect("memory preamble present");
-    let i_contents = out
-        .find("Contents of /proj/CLAUDE.md (project instructions, checked into the codebase):")
-        .expect("memory contents marker present");
-    // No `<tools>` block: tools reach the model via the wire `tools:` array.
+    assert!(!out.contains(MEMORY_PREAMBLE));
+    assert!(!out.contains("Contents of /proj/CLAUDE.md"));
     assert!(!out.contains("<tools>"));
-    let i_footer = out.find("Notes:").expect("footer present");
-    assert!(i_header < i_env);
-    assert!(i_env < i_memory);
-    assert!(i_memory < i_contents);
-    assert!(i_contents < i_footer);
+    assert!(!out.contains("Notes:"));
+    assert!(out.ends_with("available on Opus 4.8/4.7/4.6."));
+}
+
+#[test]
+fn section_order_locked_header_body_env() {
+    let out = assemble_system_prompt(&ctx_minimal());
+    let i_header = out.find("You are Claude Code").expect("header present");
+    let i_body = out
+        .find("You are an interactive agent that helps users with software engineering tasks.")
+        .expect("static body present");
+    let i_env = out.find("# Environment").expect("env present");
+    assert!(i_header < i_body);
+    assert!(i_body < i_env);
 }
 
 #[test]
 fn double_lf_between_each_section() {
-    let mut ctx = ctx_minimal();
-    ctx.memory_files = vec![MemoryFile {
-        path: PathBuf::from("/p/CLAUDE.md"),
-        body: "m".into(),
-        is_local_override: false,
-        tier: memory::claude_md::ClaudeMdTier::Project,
-        globs: None,
-    }];
-    ctx.tool_names = vec!["X".into()];
-    let out = assemble_system_prompt(&ctx);
+    let out = assemble_system_prompt(&ctx_minimal());
     // After HEADER, before the static BODY — exactly `\n\n`, then the `Pym`
-    // opening paragraph (claude-code's `J0` emits the static body immediately
-    // after the `DEFAULT_PREFIX` header).
+    // opening paragraph.
     let header_end = "You are Claude Code, Anthropic's official CLI for Claude.";
     let after_header = &out[out.find(header_end).unwrap() + header_end.len()..];
     assert!(after_header.starts_with(
         "\n\nYou are an interactive agent that helps users with software engineering tasks."
     ));
-    // The env section follows the body, on its own `\n\n` boundary, prefixed by
-    // the env preamble line + `<env>`.
-    assert!(out.contains(
-        "\n\nHere is useful information about the environment you are running in:\n<env>"
-    ));
-    // After the cutoff line, before the memory preamble — `\n\n` + preamble.
-    assert!(out.contains(&format!("\n\n{MEMORY_PREAMBLE}")));
-    // The memory section does NOT end in a newline, so the separator before the
-    // `Notes:` FOOTER is the assembler-inserted `\n\n` after the trimmed body `m`
-    // (no `<tools>` block in between — tools are wire-side).
-    assert!(out.contains("\n\nm\n\nNotes:"));
+    // The env section follows the body, on its own `\n\n` boundary, opening with
+    // the `# Environment` heading.
+    assert!(out.contains("\n\n# Environment\nYou have been invoked in the following environment: "));
 }
 
 #[test]
-fn footer_byte_length_locked() {
-    // FOOTER literal length is locked at 816 bytes (was 633 for the 4-bullet
-    // footer; the 5th "do NOT Write report/.md files" bullet adds 183 bytes).
-    // Includes two em-dashes (U+2014, 3 UTF-8 bytes each, in bullets 2 and 5)
-    // and the trailing LF.
-    //
-    // If this fails after a claude-code rebase, re-measure with a
-    // one-off `println!("{}", FOOTER.len())` probe and update.
+fn no_footer_on_main_prompt() {
+    // R-P1b: the `Notes:` FOOTER is subagent-only (`H$t`). The main assembler
+    // must not append it.
+    let out = assemble_system_prompt(&ctx_minimal());
+    assert!(!out.contains("Notes:"));
+    assert!(!out.contains("not files you create."));
+}
+
+#[test]
+fn footer_literal_still_exported_for_subagent() {
+    // FOOTER itself is unchanged + still exported (the subagent path uses it).
+    // Length locked at 816 bytes (5-bullet footer, two em-dashes + trailing LF).
     assert_eq!(orchestrator::prompt::locked_templates::FOOTER.len(), 816);
 }
 
@@ -115,7 +107,6 @@ fn footer_byte_length_locked() {
 fn static_body_sections_present_and_ordered_between_header_and_env() {
     // claude-code v2.1.183 `J0` emits these six STATIC sections, in this order,
     // immediately after the `DEFAULT_PREFIX` header and before the env block.
-    // Byte-anchored against the binary extracts.
     let mut ctx = ctx_minimal();
     ctx.tool_names = vec![
         "Read".into(),
@@ -128,7 +119,6 @@ fn static_body_sections_present_and_ordered_between_header_and_env() {
     ];
     let out = assemble_system_prompt(&ctx);
 
-    // Anchor strings (byte-exact section openers / distinctive lines).
     let i_header = out.find("You are Claude Code, Anthropic's official CLI for Claude.").unwrap();
     let i_open = out
         .find("You are an interactive agent that helps users with software engineering tasks.")
@@ -150,9 +140,8 @@ fn static_body_sections_present_and_ordered_between_header_and_env() {
     let i_tone = out
         .find("\n# Tone and style\n - Only use emojis if the user explicitly requests it.")
         .unwrap();
-    let i_env = out.find("<env>").unwrap();
+    let i_env = out.find("# Environment").unwrap();
 
-    // Order: header < opening < zHo < urls < system < doing < exec < tools < tone < env.
     assert!(i_header < i_open);
     assert!(i_open < i_zho);
     assert!(i_zho < i_urls);
@@ -163,9 +152,6 @@ fn static_body_sections_present_and_ordered_between_header_and_env() {
     assert!(i_tools < i_tone);
     assert!(i_tone < i_env, "static body must precede the env block");
 
-    // Hooks bullet lives in the # System section (it used to be a fabricated
-    // per-read reminder — now it's prompt-body guidance).
     assert!(out.contains(" - Users may configure 'hooks', shell commands that execute"));
-    // The /help + feedback nested bullets use the two-space prefix.
     assert!(out.contains("\n  - /help: Get help with using Claude Code"));
 }

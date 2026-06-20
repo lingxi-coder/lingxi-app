@@ -219,6 +219,20 @@ pub struct OrchestratorConfig {
     /// batched: `Continue`), so the locked fixtures are byte-unaffected.
     #[serde(default)]
     pub refusal_fallback_model: Option<String>,
+
+    /// R-P1d: the authenticated user's email, surfaced in the leading
+    /// `additionalContext` meta message as
+    /// `# userEmail\nThe user's email address is {email}.` — 1:1 with
+    /// claude-code's `userContext.userEmail` (`pS`, sourced from
+    /// `Pc()?.emailAddress`). Only emitted when `Some(_)` and non-empty,
+    /// mirroring the `...email&&{userEmail:…}` spread.
+    ///
+    /// `None` (the parity default) omits the `# userEmail` entry entirely, so
+    /// the additional-context message carries only `# claudeMd` (when present)
+    /// and `# currentDate`. Populated at the composition root from the resolved
+    /// OAuth/account profile.
+    #[serde(default)]
+    pub user_email: Option<String>,
 }
 
 impl Default for OrchestratorConfig {
@@ -240,6 +254,7 @@ impl Default for OrchestratorConfig {
             max_budget_nano_usd: None,
             transcript_classifier_enabled: false,
             refusal_fallback_model: None,
+            user_email: None,
         }
     }
 }
@@ -287,6 +302,7 @@ mod tests {
             max_budget_nano_usd: Some(5_000_000_000),
             transcript_classifier_enabled: true,
             refusal_fallback_model: Some("claude-sonnet-4-6".into()),
+            user_email: Some("u@example.com".into()),
         };
         let s = serde_json::to_string(&cfg).unwrap();
         let back: OrchestratorConfig = serde_json::from_str(&s).unwrap();
@@ -309,6 +325,7 @@ mod tests {
         assert_eq!(back.max_budget_nano_usd, Some(5_000_000_000));
         assert!(back.transcript_classifier_enabled);
         assert_eq!(back.refusal_fallback_model.as_deref(), Some("claude-sonnet-4-6"));
+        assert_eq!(back.user_email.as_deref(), Some("u@example.com"));
     }
 
     #[test]

@@ -1,82 +1,140 @@
-//! `<env>...</env>` formatter — produces the env block of the system
-//! prompt with cwd, git status, platform, shell, OS version, and
-//! (after the closing tag) model + cutoff lines.
+//! `# Environment` markdown formatter — produces the environment section of
+//! the MAIN (J0 / interactive) system prompt with cwd, git-repo bool,
+//! platform, shell, OS version, model + cutoff, and the static model/CLI
+//! guidance lines.
 //!
-//! Byte-locked against `claude-code/src/constants/prompts.ts:606-649`
-//! (`computeEnvInfo`). See M5-03 plan "Reverse-engineered byte-locks".
+//! Byte-locked against claude-code v2.1.183 `Kym` (the `env_info_simple`
+//! body section, binary offset ~205822740). The MAIN prompt's
+//! `getSystemPrompt` selects `Kym` (`env_info_simple`) when
+//! `excludeDynamicSections` is false; the SUBAGENT path selects `zym`
+//! (`env_info_static` — model + cutoff only, no environment block). LingXi's
+//! subagent path is assembled separately (`agent/handle.rs`).
+//!
+//! Shape (`Kym`):
+//! ```text
+//! ["# Environment",
+//!  "You have been invoked in the following environment: ",   (trailing space)
+//!  ...AG(u)].join("\n")
+//! ```
+//! where `AG(u)` prefixes each scalar element with ` - ` (space-dash-space)
+//! and each ARRAY element (additional working dirs) with `  - ` (two-space).
+//! The element array `u` is, after dropping nulls:
+//! ```text
+//!  - Primary working directory: {cwd}
+//!  - Is a git repository: {true|false}
+//!  - Platform: {process.platform e.g. darwin}
+//!  - Shell: {zsh|bash|raw $SHELL}
+//!  - OS Version: {os.type() os.release()}
+//!  - You are powered by the model named {name}. The exact model ID is {id}.   (or id-only)
+//!  - Assistant knowledge cutoff is {cutoff}.   (omitted when unknown)
+//!  - The most recent Claude models are Fable 5 and the Claude 4.X family. …
+//!  - Claude Code is available as a CLI in the terminal, …
+//!  - Fast mode for Claude Code uses Claude Opus with faster output …
+//! ```
+//!
+//! NOTE: the model line `s` and cutoff line `a` are SEPARATE array elements,
+//! so each becomes its own ` - ` bullet (the cutoff is NOT joined to the model
+//! line by a blank line as in the old `<env>` form). The static
+//! Model-IDs / Claude-Code-availability / Fast-mode lines are verbatim
+//! (`Claude Code` kept as-is — LingXi is a 1:1 copy). The em-dash in
+//! "Model IDs —" and "isolated copy …— Run" is U+2014.
 #![forbid(unsafe_code)]
 
 use crate::prompt::SystemPromptContext;
 use std::fmt::Write;
 
-/// Format the `<env>...</env>` block for a given context.
+/// Canonical model-id constants (`wPe`, binary offset 205834250) interpolated
+/// into the "most recent Claude models" static line. Byte-exact v2.1.183.
+const MODEL_ID_FABLE: &str = "claude-fable-5";
+const MODEL_ID_OPUS: &str = "claude-opus-4-8";
+const MODEL_ID_SONNET: &str = "claude-sonnet-4-6";
+const MODEL_ID_HAIKU: &str = "claude-haiku-4-5-20251001";
+
+/// Format the `# Environment` block for a given context.
 ///
-/// Returns a single `String` ending with the (optional) knowledge-cutoff
-/// sentence (no trailing LF — the caller appends a section separator).
-///
-/// Shape:
-/// ```text
-/// <env>
-/// Working directory: {cwd}
-/// Is directory a git repo: {Yes|No}
-/// Platform: {platform}
-/// Shell: {shell}
-/// OS Version: {os_version}
-/// </env>
-/// {model_description}
-///
-/// {knowledge_cutoff_message}    (only when ctx.knowledge_cutoff is Some)
-/// ```
+/// Returns a single `String` with NO trailing LF — the caller (the assembler)
+/// appends a section separator. Each line carries the ` - ` bullet prefix per
+/// claude-code `AG`.
 #[must_use]
 pub fn format(ctx: &SystemPromptContext) -> String {
-    let mut s = String::with_capacity(512);
+    let mut s = String::with_capacity(1024);
 
-    // Preamble line before the tags — byte-exact claude-code v2.1.181.
-    s.push_str("Here is useful information about the environment you are running in:\n");
-    s.push_str("<env>\n");
-    // The cwd line uses display() — paths with non-UTF8 bytes get
-    // lossy-rendered. M5-03 accepts this (claude-code is JS, always UTF-8).
-    writeln!(&mut s, "Working directory: {}", ctx.cwd.display()).unwrap();
+    // Header lines — byte-exact `Kym`. The second line has a TRAILING SPACE.
+    s.push_str("# Environment\n");
+    s.push_str("You have been invoked in the following environment: ");
+
+    // Each subsequent element is one ` - ` bullet on its own line.
+    // `cwd` uses display() — paths with non-UTF8 bytes get lossy-rendered
+    // (claude-code is JS, always UTF-8).
+    write!(&mut s, "\n - Primary working directory: {}", ctx.cwd.display()).unwrap();
+
+    // `Is a git repository: ${r}` — `r` is the boolean from `vy()`, rendered by
+    // JS template interpolation as `true`/`false` (lowercase).
     let is_git = ctx.git_status.is_some();
-    writeln!(
-        &mut s,
-        "Is directory a git repo: {}",
-        if is_git { "Yes" } else { "No" }
-    )
-    .unwrap();
-    // claude-code's `<env>` (binary `Vym`, offset 205822510) carries ONLY:
-    // `Working directory` / `Is directory a git repo` / [additional dirs] /
-    // `Platform` / `Shell` / `OS Version`. It has NO `Git branch` / `Working
-    // tree clean` line (0 hits in v2.1.183) — git branch/dirty live in a
-    // SEPARATE `gitStatus` session-context attachment ("This is the git status
-    // at the start of the conversation…"), not in `<env>`. RESIDUAL #48b: port
-    // that gitStatus block (needs main-branch detection, `git config user.name`,
-    // porcelain status, `git log --oneline -n 5`, and an additionalContext
-    // injection site) — a separate session-context feature from this `<env>`.
-    writeln!(&mut s, "Platform: {}", ctx.platform).unwrap();
-    writeln!(&mut s, "Shell: {}", ctx.shell).unwrap();
-    writeln!(&mut s, "OS Version: {}", ctx.os_version).unwrap();
-    s.push_str("</env>\n");
+    write!(&mut s, "\n - Is a git repository: {is_git}").unwrap();
 
-    // Model description — outside the tags, mirrors claude-code:649.
-    let model = &ctx.model;
+    // `Platform: ${je.platform}` — `je.platform` is `process.platform`
+    // (`darwin`/`linux`/`win32`). LingXi feeds `std::env::consts::OS`, which is
+    // `macos`/`linux`/`windows`; the caller maps it to the node value.
+    write!(&mut s, "\n - Platform: {}", ctx.platform).unwrap();
+
+    // `tIo()` — already carries the `Shell: ` literal in its return value; the
+    // caller collapses the raw $SHELL to zsh/bash/raw and stores just the value.
+    write!(&mut s, "\n - Shell: {}", ctx.shell).unwrap();
+
+    // `OS Version: ${o}` — `o = nIo()` = `${os.type()} ${os.release()}`.
+    write!(&mut s, "\n - OS Version: {}", ctx.os_version).unwrap();
+
+    // Model line `s`: named form when the marketing name is known, else the
+    // bare-id fallback (claude-code `ZA(e)` truthy/falsy).
     match &ctx.model_marketing_name {
         Some(name) => {
             write!(
                 &mut s,
-                "You are powered by the model named {name}. The exact model ID is {model}."
+                "\n - You are powered by the model named {name}. The exact model ID is {}.",
+                ctx.model
             )
             .unwrap();
         }
         None => {
-            write!(&mut s, "You are powered by the model {model}.").unwrap();
+            write!(
+                &mut s,
+                "\n - You are powered by the model {}.",
+                ctx.model
+            )
+            .unwrap();
         }
     }
 
-    // Knowledge cutoff — claude-code:636-638 (`\n\n` prefix).
+    // Cutoff line `a`: a SEPARATE bullet, omitted entirely when unknown
+    // (`eIo(e)` null ⇒ the element is `null` and filtered out).
     if let Some(cutoff) = &ctx.knowledge_cutoff {
-        write!(&mut s, "\n\nAssistant knowledge cutoff is {cutoff}.").unwrap();
+        write!(&mut s, "\n - Assistant knowledge cutoff is {cutoff}.").unwrap();
     }
+
+    // Static guidance lines — byte-verbatim `Kym`. The em-dash is U+2014.
+    write!(
+        &mut s,
+        "\n - The most recent Claude models are Fable 5 and the Claude 4.X family. \
+Model IDs \u{2014} Fable 5: '{MODEL_ID_FABLE}', Opus 4.8: '{MODEL_ID_OPUS}', \
+Sonnet 4.6: '{MODEL_ID_SONNET}', Haiku 4.5: '{MODEL_ID_HAIKU}'. \
+When building AI applications, default to the latest and most capable Claude models."
+    )
+    .unwrap();
+
+    s.push_str(
+        "\n - Claude Code is available as a CLI in the terminal, desktop app (Mac/Windows), \
+web app (claude.ai/code), and IDE extensions (VS Code, JetBrains).",
+    );
+
+    // Fast-mode line: present on the MAIN path (claude-code `t?null:…` — `t` is
+    // the subagent flag, false here). LingXi's subagent path is assembled
+    // separately, so the main assembler always emits this line.
+    s.push_str(
+        "\n - Fast mode for Claude Code uses Claude Opus with faster output \
+(it does not downgrade to a smaller model). It can be toggled with /fast and is \
+available on Opus 4.8/4.7/4.6.",
+    );
 
     s
 }
@@ -106,11 +164,36 @@ mod tests {
     #[test]
     fn env_block_id_only_model_no_cutoff() {
         let out = format(&ctx());
-        assert!(out.contains("<env>\n"));
-        assert!(out.contains("Working directory: /x\n"));
-        assert!(out.contains("Is directory a git repo: No\n"));
-        assert!(out.contains("</env>\n"));
-        assert!(out.contains("You are powered by the model claude-opus-4-7."));
+        assert!(out.starts_with("# Environment\nYou have been invoked in the following environment: "));
+        assert!(out.contains("\n - Primary working directory: /x"));
+        assert!(out.contains("\n - Is a git repository: false"));
+        assert!(out.contains("\n - Platform: linux"));
+        assert!(out.contains("\n - Shell: bash"));
+        assert!(out.contains("\n - OS Version: Linux 6.6"));
+        assert!(out.contains("\n - You are powered by the model claude-opus-4-7."));
         assert!(!out.contains("Assistant knowledge cutoff"));
+        // Static lines present, em-dash byte-exact.
+        assert!(out.contains("Model IDs \u{2014} Fable 5: 'claude-fable-5'"));
+        assert!(out.contains("Opus 4.8: 'claude-opus-4-8'"));
+        assert!(out.ends_with("available on Opus 4.8/4.7/4.6."));
+    }
+
+    #[test]
+    fn env_block_named_model_with_cutoff() {
+        let mut c = ctx();
+        c.git_status = Some(crate::prompt::GitStatus::default());
+        c.model = "claude-opus-4-8[1m]".into();
+        c.model_marketing_name = Some("Opus 4.8 (1M context)".into());
+        c.knowledge_cutoff = Some("January 2026".into());
+        let out = format(&c);
+        assert!(out.contains("\n - Is a git repository: true"));
+        assert!(out.contains(
+            "\n - You are powered by the model named Opus 4.8 (1M context). \
+The exact model ID is claude-opus-4-8[1m]."
+        ));
+        // Cutoff is a SEPARATE bullet immediately after the model line.
+        assert!(out.contains(
+            "claude-opus-4-8[1m].\n - Assistant knowledge cutoff is January 2026."
+        ));
     }
 }

@@ -1,6 +1,5 @@
-//!
-//! Asserts the exact wire shape of [`env_block::format`] before the
-//! implementation lands in Task 6. Expected to FAIL at this task.
+//! Byte-lock for [`env_block::format`] — the `# Environment` markdown block
+//! (claude-code v2.1.183 `Kym` / `env_info_simple`, the MAIN/J0 path).
 
 use orchestrator::prompt::{env_block, FileTree, SystemPromptContext};
 use std::path::PathBuf;
@@ -8,7 +7,7 @@ use std::path::PathBuf;
 fn ctx_minimal() -> SystemPromptContext {
     SystemPromptContext {
         cwd: PathBuf::from("/Users/u/proj"),
-        platform: "macos".into(),
+        platform: "darwin".into(),
         model: "claude-opus-4-7".into(),
         model_marketing_name: Some("Opus 4.7".into()),
         knowledge_cutoff: Some("January 2026".into()),
@@ -22,19 +21,49 @@ fn ctx_minimal() -> SystemPromptContext {
 }
 
 #[test]
-fn env_block_minimal_shape() {
+fn env_block_full_byte_lock() {
     let out = env_block::format(&ctx_minimal());
-    let expected = "\
-Here is useful information about the environment you are running in:
-<env>
-Working directory: /Users/u/proj
-Is directory a git repo: No
-Platform: macos
-Shell: zsh
-OS Version: Darwin 25.3.0
-</env>
-You are powered by the model named Opus 4.7. The exact model ID is claude-opus-4-7.
-
-Assistant knowledge cutoff is January 2026.";
+    // The `# Environment` block, byte-exact against `Kym`. Built via explicit
+    // `\n`-joined lines so the TRAILING SPACE on the "You have been invoked …: "
+    // line survives source formatting. Each subsequent line carries the ` - `
+    // bullet (claude-code `AG`). The em-dash in "Model IDs —" is U+2014.
+    let expected = [
+        "# Environment",
+        "You have been invoked in the following environment: ", // trailing space
+        " - Primary working directory: /Users/u/proj",
+        " - Is a git repository: false",
+        " - Platform: darwin",
+        " - Shell: zsh",
+        " - OS Version: Darwin 25.3.0",
+        " - You are powered by the model named Opus 4.7. The exact model ID is claude-opus-4-7.",
+        " - Assistant knowledge cutoff is January 2026.",
+        " - The most recent Claude models are Fable 5 and the Claude 4.X family. \
+Model IDs \u{2014} Fable 5: 'claude-fable-5', Opus 4.8: 'claude-opus-4-8', \
+Sonnet 4.6: 'claude-sonnet-4-6', Haiku 4.5: 'claude-haiku-4-5-20251001'. \
+When building AI applications, default to the latest and most capable Claude models.",
+        " - Claude Code is available as a CLI in the terminal, desktop app (Mac/Windows), \
+web app (claude.ai/code), and IDE extensions (VS Code, JetBrains).",
+        " - Fast mode for Claude Code uses Claude Opus with faster output \
+(it does not downgrade to a smaller model). It can be toggled with /fast and is \
+available on Opus 4.8/4.7/4.6.",
+    ]
+    .join("\n");
     assert_eq!(out, expected, "env_block byte-lock mismatch");
+}
+
+#[test]
+fn env_block_id_only_no_cutoff_git_true() {
+    let mut ctx = ctx_minimal();
+    ctx.model_marketing_name = None;
+    ctx.knowledge_cutoff = None;
+    ctx.git_status = Some(orchestrator::prompt::GitStatus::default());
+    let out = env_block::format(&ctx);
+    assert!(out.contains("\n - Is a git repository: true\n"));
+    // Bare-id model fallback, no cutoff bullet.
+    assert!(out.contains("\n - You are powered by the model claude-opus-4-7.\n"));
+    assert!(!out.contains("Assistant knowledge cutoff"));
+    // The model line is immediately followed by the static "most recent" line.
+    assert!(out.contains(
+        "You are powered by the model claude-opus-4-7.\n - The most recent Claude models"
+    ));
 }

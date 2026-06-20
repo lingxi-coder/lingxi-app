@@ -154,9 +154,33 @@ pub fn os_version_string() -> String {
     format!("{} {}", std::env::consts::OS, std::env::consts::ARCH)
 }
 
+/// Local-date string in `YYYY-MM-DD` form, e.g. `2026-06-20`.
+///
+/// 1:1 with claude-code `Rtt` (binary offset ~197026183), which builds
+/// `${getFullYear()}-${getMonth()+1 padStart2}-${getDate() padStart2}` from a
+/// `new Date()` — i.e. the LOCAL date (not UTC). This is the `${date}` body of
+/// the `currentDate` additional-context entry (`WNi`: `Today's date is
+/// ${date}.`).
+#[must_use]
+pub fn current_date_string() -> String {
+    use chrono::Datelike;
+    let now = chrono::Local::now();
+    format!("{:04}-{:02}-{:02}", now.year(), now.month(), now.day())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn current_date_is_iso_local() {
+        let d = current_date_string();
+        // YYYY-MM-DD: 10 chars, dashes at 4 and 7.
+        assert_eq!(d.len(), 10, "got {d}");
+        assert_eq!(&d[4..5], "-");
+        assert_eq!(&d[7..8], "-");
+        assert!(d[..4].chars().all(|c| c.is_ascii_digit()));
+    }
 
     #[test]
     fn marketing_names_match_ts_map() {

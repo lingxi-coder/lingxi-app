@@ -29,7 +29,10 @@ pub use memory_block::{
 /// [`MemoryFile::tier`] without an extra dependency.
 pub use memory::claude_md::ClaudeMdTier;
 
-use crate::prompt::locked_templates::{FOOTER, HEADER, SECTION_SEP};
+// `FOOTER` is intentionally NOT imported here: the MAIN assembler no longer
+// appends it (R-P1b). It remains exported from `locked_templates` for the
+// subagent path (`agent/handle.rs`) and is named fully-qualified in tests.
+use crate::prompt::locked_templates::{HEADER, SECTION_SEP};
 use std::path::PathBuf;
 
 /// The active output-style section to inject into the system prompt.
@@ -65,28 +68,29 @@ pub fn assemble_system_prompt(ctx: &SystemPromptContext) -> String {
 /// Assemble a system prompt, optionally injecting an active output-style
 /// section.
 ///
-/// Section order is LOCKED:
+/// Section order is LOCKED (claude-code v2.1.183 J0 / `getSystemPrompt`,
+/// interactive):
 ///
 /// 1. `HEADER`
 /// 2. static BODY — the six claude-code `J0` static sections (opening +
 ///    `# System` + `# Doing tasks` + `# Executing actions with care` +
 ///    `# Using your tools` + `# Tone and style`); see [`body_sections::format`].
-/// 3. `<env>...</env>` + model description + cutoff
-/// 4. memory section — preamble + `Contents of …:` blocks (elided when no
-///    files); see [`memory_block::format`]. NO enclosing tag.
-/// 5. `<tools>...</tools>` (elided when no names)
-/// 6. `# Output Style: <name>` + body (elided when `output_style` is `None`)
-/// 7. `FOOTER`
+/// 3. `# Environment` markdown block — cwd / git-repo bool / platform / shell /
+///    OS version / model line / cutoff / static model+CLI guidance; see
+///    [`env_block::format`] (claude-code `Kym`).
+/// 4. `# Output Style: <name>` + body (elided when `output_style` is `None`).
+///
+/// NO memory section (R-P1c/R-P1d: CLAUDE.md is an additional-context meta
+/// message, not a system-prompt section), NO `<tools>` block (tools reach the
+/// model via the wire `tools:` array), and NO `Notes:` FOOTER (R-P1b: the
+/// footer is subagent-only `H$t`). gitStatus is appended to the prompt by the
+/// caller as a trailing dynamic cache block (claude-code `WZa`), not here.
 ///
 /// Separator between sections is exactly `\n\n` (one blank line).
-/// `FOOTER` itself ends with a single `\n`; the assembler does not
-/// append further newlines.
 ///
 /// OUTSTYLE.2: the output-style section is a `getSystemPrompt` body section
-/// (`constants/prompts.ts:505-507`), so it precedes the trailing
-/// `enhanceSystemPromptWithEnvDetails` `FOOTER`. When `output_style` is
-/// `None` (the `'default'` / unset path) the section is skipped entirely and
-/// the output is byte-identical to the pre-OUTSTYLE.2 prompt.
+/// (`constants/prompts.ts:505-507`). When `output_style` is `None` (the
+/// `'default'` / unset path) the section is skipped entirely.
 #[must_use]
 pub fn assemble_system_prompt_with_style(
     ctx: &SystemPromptContext,
@@ -107,11 +111,13 @@ pub fn assemble_system_prompt_with_style(
     push_section_separator(&mut s);
     s.push_str(&env_block::format(ctx));
 
-    let memory = memory_block::format(&ctx.memory_files);
-    if !memory.is_empty() {
-        push_section_separator(&mut s);
-        s.push_str(&memory);
-    }
+    // R-P1c/R-P1d: the CLAUDE.md memory block is NO LONGER spliced into the
+    // MAIN system prompt. claude-code v2.1.183 carries it as an additional-
+    // context `<system-reminder>` meta user message (the `claudeMd` key of
+    // `A6n(re, userContext)`), prepended to each turn's messages — NOT a system-
+    // prompt section. The orchestrator builds that message from
+    // `memory_block::format` (see `conversation.rs::additional_context_message`).
+    // `ctx.memory_files` is retained on the context for that path / callers.
 
     // NO `<tools>` block: claude-code passes tools to the model via the wire
     // `tools:` API array, NOT a system-prompt text list (`<tools>` / `</tools>`
@@ -123,8 +129,12 @@ pub fn assemble_system_prompt_with_style(
         s.push_str(&output_style_section(style));
     }
 
-    push_section_separator(&mut s);
-    s.push_str(FOOTER);
+    // R-P1b: NO `Notes:` FOOTER on the MAIN prompt. claude-code's J0
+    // (`getSystemPrompt`, interactive) has no Notes footer — it lives only in
+    // the SUBAGENT assembler `H$t` (binary offset ~205826340), which LingXi
+    // handles separately in `agent/handle.rs`. `FOOTER` is still exported from
+    // `locked_templates` for that subagent path; the main assembler simply does
+    // not append it.
     s
 }
 
@@ -514,13 +524,15 @@ mod tests {
         let none = assemble_system_prompt_with_style(&ctx, None);
         assert_eq!(default, none);
         assert!(!default.contains("# Output Style:"));
-        // Spot-check the locked envelope is untouched.
+        // Spot-check the locked envelope: opens with HEADER; ends with the
+        // `# Environment` block's last line (no `Notes:` FOOTER — R-P1b).
         assert!(default.starts_with("You are Claude Code, Anthropic's official CLI for Claude."));
-        assert!(default.ends_with("not files you create.\n"));
+        assert!(!default.contains("Notes:"));
+        assert!(default.ends_with("available on Opus 4.8/4.7/4.6."));
     }
 
     #[test]
-    fn active_style_injects_section_between_tools_and_footer() {
+    fn active_style_injects_section_after_env_no_footer() {
         let ctx = ctx_minimal();
         let style = ActiveOutputStyle {
             name: "Explanatory",
@@ -531,14 +543,16 @@ mod tests {
         // Heading + body are present, exactly per getOutputStyleSection.
         assert!(out.contains("# Output Style: Explanatory\nBODY LINE 1\nBODY LINE 2"));
 
-        // Placement: after the memory section, before the `Notes:` FOOTER, with
-        // one blank line (`\n\n`) on each boundary. (No `<tools>` block — tools
-        // reach the model wire-side.)
+        // Placement: after the `# Environment` block, on a `\n\n` boundary, and
+        // it is the LAST section (no `<tools>` block, no `Notes:` FOOTER). The
+        // prompt now ends with the style body.
         assert!(!out.contains("<tools>"));
+        assert!(!out.contains("Notes:"));
+        let i_env = out.find("# Environment").expect("env present");
         let i_style = out.find("# Output Style:").expect("style present");
-        let i_footer = out.find("Notes:").expect("footer present");
-        assert!(i_style < i_footer, "style must come before footer");
-        assert!(out.contains("BODY LINE 2\n\nNotes:"));
+        assert!(i_env < i_style, "env must come before style");
+        assert!(out.contains("available on Opus 4.8/4.7/4.6.\n\n# Output Style: Explanatory"));
+        assert!(out.ends_with("BODY LINE 2"));
     }
 
     #[test]
@@ -551,11 +565,11 @@ mod tests {
             prompt: "P",
         };
         let out = assemble_system_prompt_with_style(&ctx, Some(style));
-        // No memory section (empty files) and no tools section.
+        // No memory section (CLAUDE.md is a meta message now) and no tools section.
         assert!(!out.contains("Codebase and user instructions are shown below."));
         assert!(!out.contains("<tools>"));
-        // Section still lands before the footer with a blank-line boundary.
-        assert!(out.contains("# Output Style: Learning\nP\n\nNotes:"));
+        // The style is the last section (no FOOTER) and the prompt ends with it.
+        assert!(out.ends_with("# Output Style: Learning\nP"));
     }
 
     // ---- system-prompt cache-block split (splitSysPromptPrefix parity) ----
@@ -668,7 +682,8 @@ mod tests {
     #[test]
     fn split_assembled_default_prompt_splits_at_header() {
         // End-to-end: the real assembler output begins with HEADER and splits
-        // into prefix + rest, with the rest carrying the env/tools/footer.
+        // into prefix + rest, with the rest carrying the static BODY + the
+        // `# Environment` block (no memory/tools/footer).
         let ctx = ctx_minimal();
         let s = assemble_system_prompt(&ctx);
         let blocks = split_system_blocks(&s, true);
@@ -681,7 +696,9 @@ mod tests {
             .starts_with("You are an interactive agent that helps users with software engineering tasks."));
         assert!(blocks[1]
             .text
-            .contains("Here is useful information about the environment you are running in:\n<env>"));
-        assert!(blocks[1].text.ends_with("not files you create.\n"));
+            .contains("\n\n# Environment\nYou have been invoked in the following environment: "));
+        // No `Notes:` FOOTER — the rest block ends with the env block's last line.
+        assert!(!blocks[1].text.contains("Notes:"));
+        assert!(blocks[1].text.ends_with("available on Opus 4.8/4.7/4.6."));
     }
 }

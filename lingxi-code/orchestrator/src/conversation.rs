@@ -401,6 +401,18 @@ fn entrypoint_value() -> String {
         .unwrap_or_else(|| "cli".to_string())
 }
 
+/// Map Rust's `std::env::consts::OS` to the node `process.platform` value that
+/// claude-code's `# Environment` `Platform:` line emits (`je.platform`). Rust
+/// uses `macos`/`windows`; node uses `darwin`/`win32`. Other targets
+/// (`linux`, `freebsd`, …) share the same token in both, so they pass through.
+fn node_platform_name(rust_os: &str) -> &str {
+    match rust_os {
+        "macos" => "darwin",
+        "windows" => "win32",
+        other => other,
+    }
+}
+
 /// `getBranch()` (`sessionStorage.ts:1012-1019`) — resolve the cwd's current git
 /// branch via `git rev-parse --abbrev-ref HEAD`, or `None` on ANY failure (git
 /// missing / not a repo / non-zero exit / empty output). A detached HEAD prints
@@ -3341,6 +3353,17 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                 (s.history.clone(), s.model.clone(), s.model_profile.clone())
             };
 
+            // R-P1c/R-P1d (streaming twin): PREPEND the leading `additionalContext`
+            // meta message (`# claudeMd` / `# userEmail` / `# currentDate`) to THIS
+            // turn's OUTGOING snapshot only (never `session.history` / JSONL). 1:1
+            // with claude-code `A6n(re, userContext)`, which prepends the meta
+            // message at every `callModel`. Recomputed each turn, never accumulates.
+            // `currentDate` is always present, so this is `Some(_)` whenever a
+            // CLAUDE.md / email / date is sourceable (i.e. always for the date).
+            if let Some(ctx_msg) = self.additional_context_message().await {
+                snapshot.insert(0, ctx_msg);
+            }
+
             // OUTSTYLE.3 (streaming twin): per-turn, transient output-style
             // reminder. Appended to THIS turn's OUTGOING snapshot only — never to
             // `session.history` / JSONL — so it is recomputed each turn and never
@@ -3572,10 +3595,16 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                     // Re-snapshot history for the non-streaming call (the partial
                     // stream never touched session.history, so it is still the same
                     // snapshot we used for the stream — no reset needed).
-                    let (non_stream_snapshot, non_stream_model, non_stream_profile) = {
+                    let (mut non_stream_snapshot, non_stream_model, non_stream_profile) = {
                         let s = self.session.lock().await;
                         (s.history.clone(), s.model.clone(), s.model_profile.clone())
                     };
+                    // R-P1c/R-P1d: claude-code's `A6n` prepends the additional-
+                    // context meta message on EVERY `callModel`, including this
+                    // non-streaming fallback. Prepend it to the re-snapshot too.
+                    if let Some(ctx_msg) = self.additional_context_message().await {
+                        non_stream_snapshot.insert(0, ctx_msg);
+                    }
                     let tools_for_fallback = wire_tools.clone();
 
                     let resp = self
@@ -4376,7 +4405,11 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
 
         let ctx = SystemPromptContext {
             cwd,
-            platform: std::env::consts::OS.to_string(),
+            // `Platform: ${je.platform}` — claude-code emits the node
+            // `process.platform` value (`darwin`/`linux`/`win32`), NOT Rust's
+            // `std::env::consts::OS` (`macos`/`linux`/`windows`). Map the two
+            // divergent names so the env line is byte-exact.
+            platform: node_platform_name(std::env::consts::OS).to_string(),
             model: self.config.model.clone(),
             // SYSPROMPT.1: port TS getMarketingNameForModel / getKnowledgeCutoff
             // (`utils/model/model.ts:570`, `constants/prompts.ts:712`) so the
@@ -4411,7 +4444,106 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             name: r.name.as_str(),
             prompt: r.prompt.as_str(),
         });
-        assemble_system_prompt_with_style(&ctx, style)
+        let mut prompt = assemble_system_prompt_with_style(&ctx, style);
+
+        // R-P1c: append the `gitStatus` system-prompt attachment as a trailing
+        // dynamic block. claude-code threads the `systemContext` (whose only
+        // relevant key is `gitStatus`) into the system prompt via
+        // `WZa(systemPromptArray, systemContext)` → one extra `string[]` member
+        // `gitStatus: <value>` joined with `\n\n`, fed to `getSystemPrompt`.
+        // LingXi concatenates the system prompt into one string, so the block is
+        // appended here with the same blank-line boundary. `None` when cwd is not
+        // a git repo (claude-code omits the key, so nothing is appended).
+        if let Some(block) = git_status::render_git_status_block(&self.cwd) {
+            prompt.push_str("\n\n");
+            prompt.push_str(&block);
+        }
+        prompt
+    }
+
+    /// R-P1c/R-P1d: the leading `additionalContext` (`# claudeMd` / `# userEmail`
+    /// / `# currentDate`) meta user message, or `None` when nothing is sourceable.
+    ///
+    /// 1:1 with claude-code `A6n(messages, userContext)` (binary offset
+    /// ~205838418): when the `userContext` object is non-empty it PREPENDS one
+    /// `isMeta` user message whose body is
+    /// ```text
+    /// <system-reminder>
+    /// As you answer the user's questions, you can use the following context:
+    /// # {key}
+    /// {value}
+    /// …                          (one `# {key}\n{value}` per entry, joined by `\n`)
+    ///
+    ///       IMPORTANT: this context may or may not be relevant to your tasks. You should not respond to this context unless it is highly relevant to your task.
+    /// </system-reminder>
+    /// ```
+    /// (the IMPORTANT line is indented by exactly six spaces).
+    ///
+    /// The `userContext` keys, in claude-code insertion order (`pS`,
+    /// binary offset ~197202100): `claudeMd` (the assembled CLAUDE.md memory
+    /// block — [`memory_block::format`]), `userEmail`
+    /// (`The user's email address is {email}.`, only when configured), and
+    /// `currentDate` (`Today's date is {YYYY-MM-DD}.`, always present). The
+    /// `attachedProject` key (CLAUDE_PROJECT_TOOL) is not modelled.
+    ///
+    /// NOTE: `gitStatus` is NOT here — it belongs to the SEPARATE `systemContext`
+    /// that claude-code folds into the SYSTEM PROMPT (see `build_system_prompt`),
+    /// not this `userContext` message.
+    ///
+    /// Like the per-turn reminders, this is recomputed and prepended to the
+    /// OUTGOING snapshot each turn (claude-code calls `A6n` on every `callModel`);
+    /// it is never persisted to `session.history` / JSONL.
+    pub(crate) async fn additional_context_message(&self) -> Option<ConversationMessage> {
+        // `claudeMd` value = the assembled memory block (preamble + `Contents
+        // of …:` blocks). Empty when no CLAUDE.md files are loaded.
+        let memory_files = self.memory.load(&self.cwd).await;
+        let claude_md = crate::prompt::memory_block::format(&memory_files);
+
+        // Build the entries in claude-code insertion order; each is `# key\nvalue`.
+        let mut entries: Vec<String> = Vec::with_capacity(3);
+        if !claude_md.is_empty() {
+            entries.push(format!("# claudeMd\n{claude_md}"));
+        }
+        if let Some(email) = self
+            .config
+            .user_email
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            entries.push(format!(
+                "# userEmail\nThe user's email address is {email}."
+            ));
+        }
+        // `currentDate` is unconditional in claude-code (`currentDate: WNi(bRe())`).
+        entries.push(format!(
+            "# currentDate\nToday's date is {}.",
+            crate::prompt::env_meta::current_date_string()
+        ));
+
+        // `A6n` returns the messages unchanged when the context object is empty.
+        // `currentDate` is always present, so `entries` is never empty — but keep
+        // the guard for faithfulness to the `Object.entries(t).length===0` check.
+        if entries.is_empty() {
+            return None;
+        }
+
+        let body = entries.join("\n");
+        // NOTE: the IMPORTANT line is indented by EXACTLY six spaces (claude-code
+        // `A6n`). Those spaces must NOT sit at the start of a continued (`\`)
+        // string line — Rust's line-continuation strips leading whitespace — so
+        // the `\n\n      IMPORTANT` segment is written without a preceding `\`.
+        let important = "      IMPORTANT: this context may or may not be relevant to your tasks. \
+You should not respond to this context unless it is highly relevant to your task.";
+        let content = format!(
+            "<system-reminder>\n\
+As you answer the user's questions, you can use the following context:\n\
+{body}\n\n{important}\n</system-reminder>\n"
+        );
+        // claude-code `A6n` sets `isMeta:!0` on this message. It is sent to the
+        // wire (the wire conversion does not drop meta user messages) but never
+        // persisted to JSONL (it is only prepended to the OUTGOING snapshot).
+        Some(ConversationMessage::user_meta(MessageId::new(), content))
     }
 
     /// OUTSTYLE.3: the byte-exact per-turn output-style reminder, or `None` when
@@ -5526,6 +5658,17 @@ mod output_style_reminder_tests {
         matches!(msg, ConversationMessage::User { .. }) && text_of(msg) == expected
     }
 
+    /// True when `msg` is the leading `additionalContext` (`# claudeMd` /
+    /// `# userEmail` / `# currentDate`) meta message prepended each turn
+    /// (R-P1c/R-P1d). With `StaticMemoryProvider::empty()` and no `user_email`
+    /// it carries only the always-present `# currentDate` entry.
+    fn is_additional_context(msg: &ConversationMessage) -> bool {
+        matches!(msg, ConversationMessage::User { .. })
+            && text_of(msg).starts_with(
+                "<system-reminder>\nAs you answer the user's questions, you can use the following context:",
+            )
+    }
+
     // ----- direct unit coverage of the reminder builder -----
 
     #[test]
@@ -5629,17 +5772,19 @@ mod output_style_reminder_tests {
 
         orch.run_turn("user prompt body").await.expect("turn");
 
-        // OUTGOING snapshot: [user(prompt), reminder] — reminder is the trailing
-        // meta user message (TS position).
+        // OUTGOING snapshot: [additionalContext(meta), user(prompt), reminder] —
+        // the leading additional-context meta message (R-P1c/d) prepends the
+        // user prompt; the output-style reminder trails it (TS position).
         let outgoing = api.captured_msgs().await;
         assert_eq!(outgoing.len(), 1, "exactly one batched API call");
         let sent = &outgoing[0];
-        assert_eq!(sent.len(), 2, "user prompt + reminder; got {sent:?}");
-        assert_eq!(text_of(&sent[0]), "user prompt body");
+        assert_eq!(sent.len(), 3, "additionalContext + prompt + reminder; got {sent:?}");
+        assert!(is_additional_context(&sent[0]), "leading meta; got {:?}", sent[0]);
+        assert_eq!(text_of(&sent[1]), "user prompt body");
         assert!(
-            is_reminder(&sent[1], EXPLANATORY_REMINDER),
+            is_reminder(&sent[2], EXPLANATORY_REMINDER),
             "trailing message must be the byte-exact reminder; got {:?}",
-            sent[1]
+            sent[2]
         );
 
         // STORED history: [user(prompt), assistant] — the reminder was NOT pushed.
@@ -5687,10 +5832,17 @@ mod output_style_reminder_tests {
 
         let outgoing = api.captured_msgs().await;
         assert_eq!(outgoing.len(), 1);
-        // Byte-identical to the styleless path: the outgoing list is the prompt
-        // alone — no extra message.
-        assert_eq!(outgoing[0].len(), 1, "no reminder; got {:?}", outgoing[0]);
-        assert_eq!(text_of(&outgoing[0][0]), "just the prompt");
+        // No output-style reminder; the only prepended message is the leading
+        // additional-context meta (always present via `# currentDate`).
+        assert_eq!(outgoing[0].len(), 2, "additionalContext + prompt; got {:?}", outgoing[0]);
+        assert!(is_additional_context(&outgoing[0][0]), "leading meta; got {:?}", outgoing[0][0]);
+        assert_eq!(text_of(&outgoing[0][1]), "just the prompt");
+        assert!(
+            !outgoing[0].iter().any(|m| is_reminder(m, EXPLANATORY_REMINDER)
+                || is_reminder(m, LEARNING_REMINDER)),
+            "no output-style reminder on the default path; got {:?}",
+            outgoing[0]
+        );
     }
 
     // ----- streaming driver (`run_turn_streaming`) -----
@@ -5731,16 +5883,18 @@ mod output_style_reminder_tests {
             .await
             .expect("streaming turn");
 
-        // OUTGOING snapshot to the stream: [user(prompt), reminder].
+        // OUTGOING snapshot to the stream: [additionalContext(meta), user(prompt),
+        // reminder].
         let calls = streaming.captured_calls().await;
         assert_eq!(calls.len(), 1, "exactly one streaming call");
         let sent = &calls[0].messages;
-        assert_eq!(sent.len(), 2, "user prompt + reminder; got {sent:?}");
-        assert_eq!(text_of(&sent[0]), "streaming prompt");
+        assert_eq!(sent.len(), 3, "additionalContext + prompt + reminder; got {sent:?}");
+        assert!(is_additional_context(&sent[0]), "leading meta; got {:?}", sent[0]);
+        assert_eq!(text_of(&sent[1]), "streaming prompt");
         assert!(
-            is_reminder(&sent[1], LEARNING_REMINDER),
+            is_reminder(&sent[2], LEARNING_REMINDER),
             "trailing message must be the byte-exact Learning reminder; got {:?}",
-            sent[1]
+            sent[2]
         );
 
         // STORED history: reminder absent.
@@ -5788,14 +5942,144 @@ mod output_style_reminder_tests {
 
         let calls = streaming.captured_calls().await;
         assert_eq!(calls.len(), 1);
-        // Byte-identical to the styleless path: the prompt alone, no extra message.
+        // No output-style reminder; only the leading additional-context meta
+        // (always present via `# currentDate`) prepends the prompt.
         assert_eq!(
             calls[0].messages.len(),
-            1,
-            "no reminder; got {:?}",
+            2,
+            "additionalContext + prompt; got {:?}",
             calls[0].messages
         );
-        assert_eq!(text_of(&calls[0].messages[0]), "only prompt");
+        assert!(is_additional_context(&calls[0].messages[0]), "leading meta; got {:?}", calls[0].messages[0]);
+        assert_eq!(text_of(&calls[0].messages[1]), "only prompt");
+    }
+}
+
+// ============================================================================
+// R-P1c/R-P1d: the leading `additionalContext` (`# claudeMd` / `# userEmail` /
+// `# currentDate`) meta message — byte-lock against claude-code `A6n`.
+// ============================================================================
+#[cfg(test)]
+mod additional_context_tests {
+    use super::*;
+    use crate::prompt::MemoryFile;
+    use crate::test_support::{
+        noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate,
+        StaticMemoryProvider,
+    };
+    use crate::OrchestratorConfig;
+    use protocol::ContentBlock;
+    use std::sync::Arc;
+    use tool_api::registry::ToolRegistry;
+
+    fn orch_with(
+        memory: Arc<StaticMemoryProvider>,
+        email: Option<&str>,
+    ) -> ConversationOrchestrator {
+        ConversationOrchestrator::new(
+            OrchestratorConfig {
+                user_email: email.map(str::to_string),
+                ..OrchestratorConfig::default()
+            },
+            Arc::new(MockApiClient::new(vec![])),
+            Arc::new(ToolRegistry::new()),
+            noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            memory,
+            std::env::temp_dir(),
+        )
+    }
+
+    fn text(msg: &ConversationMessage) -> String {
+        match msg {
+            ConversationMessage::User { content, .. } => content
+                .iter()
+                .filter_map(|b| match b {
+                    ContentBlock::Text { text } => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect(),
+            _ => String::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn all_three_keys_byte_exact_order_and_wrapper() {
+        // claudeMd + userEmail present; currentDate always present. Insertion
+        // order (claude-code `pS`): claudeMd, userEmail, currentDate.
+        let mem = Arc::new(StaticMemoryProvider::with_files(vec![MemoryFile {
+            path: std::path::PathBuf::from("/proj/CLAUDE.md"),
+            body: "MD BODY".into(),
+            is_local_override: false,
+            tier: memory::claude_md::ClaudeMdTier::Project,
+            globs: None,
+        }]));
+        let orch = orch_with(mem, Some("u@example.com"));
+        let msg = orch.additional_context_message().await.expect("present");
+        // It is a META user message (claude-code `isMeta:!0`).
+        assert!(msg.is_meta(), "additionalContext must be isMeta");
+        let body = text(&msg);
+
+        // Exact wrapper: opens with the header line, closes with the IMPORTANT
+        // line indented by 6 spaces + the closing tag + trailing LF.
+        assert!(body.starts_with(
+            "<system-reminder>\nAs you answer the user's questions, you can use the following context:\n"
+        ));
+        assert!(body.ends_with(
+            "\n\n      IMPORTANT: this context may or may not be relevant to your tasks. \
+You should not respond to this context unless it is highly relevant to your task.\n</system-reminder>\n"
+        ));
+
+        // Keys in order, each `# key\nvalue`, joined by `\n`.
+        let i_md = body.find("# claudeMd\n").expect("claudeMd key");
+        let i_email = body.find("# userEmail\n").expect("userEmail key");
+        let i_date = body.find("# currentDate\n").expect("currentDate key");
+        assert!(i_md < i_email && i_email < i_date, "key order claudeMd<userEmail<currentDate");
+
+        // claudeMd value = the assembled memory block (preamble + Contents).
+        assert!(body.contains(
+            "# claudeMd\nCodebase and user instructions are shown below."
+        ));
+        assert!(body.contains("Contents of /proj/CLAUDE.md"));
+        assert!(body.contains("MD BODY"));
+        // userEmail value.
+        assert!(body.contains("# userEmail\nThe user's email address is u@example.com."));
+        // currentDate value (ISO local date).
+        let today = crate::prompt::env_meta::current_date_string();
+        assert!(body.contains(&format!("# currentDate\nToday's date is {today}.")));
+    }
+
+    #[tokio::test]
+    async fn omits_claude_md_and_email_when_absent_keeps_date() {
+        // Empty memory + no email → only `# currentDate` remains.
+        let orch = orch_with(Arc::new(StaticMemoryProvider::empty()), None);
+        let msg = orch.additional_context_message().await.expect("date always present");
+        let body = text(&msg);
+        assert!(!body.contains("# claudeMd"));
+        assert!(!body.contains("# userEmail"));
+        assert!(body.contains("# currentDate\nToday's date is "));
+        // The body between the header and the IMPORTANT line is exactly the one
+        // currentDate entry (no stray blank lines from empty entries).
+        let today = crate::prompt::env_meta::current_date_string();
+        let expected = format!(
+            "<system-reminder>\n\
+As you answer the user's questions, you can use the following context:\n\
+# currentDate\nToday's date is {today}.\n\
+\n      IMPORTANT: this context may or may not be relevant to your tasks. \
+You should not respond to this context unless it is highly relevant to your task.\n\
+</system-reminder>\n"
+        );
+        assert_eq!(body, expected, "single-key wrapper byte-lock");
+    }
+
+    #[tokio::test]
+    async fn empty_email_string_is_treated_as_absent() {
+        // `user_email: Some("")` (or whitespace) is filtered, matching the
+        // `...email&&{userEmail:…}` spread + LingXi's non-empty guard.
+        let orch = orch_with(Arc::new(StaticMemoryProvider::empty()), Some("   "));
+        let body = text(&orch.additional_context_message().await.expect("date"));
+        assert!(!body.contains("# userEmail"));
     }
 }
 

@@ -78,18 +78,23 @@ async fn turn_populates_slot_with_exact_sent_prefix() {
     // The slot assigns generation = 1 on the first save.
     assert_eq!(saved.generation, 1, "first save gets generation 1");
 
-    // `fork_context_messages` must equal the exact message set the model saw on
-    // the (single) API call — that is the prefix the forked summarizer replays.
+    // `fork_context_messages` is the cache-safe fork prefix — claude-code's
+    // `cacheSafeParams.forkContextMessages = re` (`session.history`), captured
+    // BEFORE the leading `additionalContext` meta message is prepended by `A6n`
+    // at `callModel` time. So the sent messages carry exactly ONE extra leading
+    // meta message (the `# currentDate` additional-context) versus the saved
+    // fork prefix — and the saved prefix equals the tail of the sent list.
     let calls = api.captured_msgs().await;
     assert_eq!(calls.len(), 1, "exactly one batched API call");
     assert_eq!(
-        saved.fork_context_messages.len(),
+        saved.fork_context_messages.len() + 1,
         calls[0].len(),
-        "saved prefix length must match the sent messages"
+        "sent messages = saved fork prefix + 1 leading additionalContext meta"
     );
     assert_eq!(
-        saved.fork_context_messages, calls[0],
-        "saved fork_context_messages must equal the exact sent prefix"
+        saved.fork_context_messages,
+        calls[0][1..],
+        "saved fork_context_messages must equal the sent prefix sans the leading meta"
     );
 
     // The model id propagates into the snapshot's tool-use options.

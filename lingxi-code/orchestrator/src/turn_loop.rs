@@ -408,6 +408,15 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
         (s.history.clone(), s.model.clone(), s.model_profile.clone())
     };
 
+    // R-P1c/R-P1d: PREPEND the leading `additionalContext` meta message
+    // (`# claudeMd` / `# userEmail` / `# currentDate`) to THIS call's OUTGOING
+    // snapshot only (never `session.history` / JSONL). 1:1 with claude-code
+    // `A6n(re, userContext)`, which prepends the meta message at every
+    // `callModel`. Recomputed each turn, never accumulates.
+    if let Some(ctx_msg) = orch.additional_context_message().await {
+        history_snapshot.insert(0, ctx_msg);
+    }
+
     // OUTSTYLE.3: per-turn, transient output-style reminder. When a non-default
     // output style is active, claude-code injects a meta user message into EVERY
     // turn's model input (the `output_style` attachment). We append it to THIS

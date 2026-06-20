@@ -721,6 +721,135 @@ IMPORTANT - Use the correct year in search queries:
     )
 }
 
+/// CONCISE WebSearch prompt — the `Dh(model)`-true branch of claude-code's
+/// `CNi(model)` (binary offset ~197074996). Extracted verbatim from the binary:
+///
+/// ```text
+/// Search the web. Returns result blocks with titles and URLs. US-only.
+///
+/// - The current month is ${t} — use this when searching for recent information.
+/// - `allowed_domains` / `blocked_domains` filter results.
+/// - After answering from results, end with a "Sources:" list of the URLs you used as markdown links.
+/// ```
+///
+/// `${t}` is `U1i()` = `new Date().toLocaleString("en-US",{month:"long",year:
+/// "numeric"})` (binary offset 197026096) → the same `%B %Y` ("June 2026") slot
+/// the verbose path uses. The dash is the em-dash (`—`, `—`). Unlike the
+/// VERBOSE variant this has NO leading and NO trailing newline. RAW Rust string;
+/// the only non-static byte is the `{month_year}` slot.
+fn web_search_description_concise() -> String {
+    let month_year = chrono::Local::now().format("%B %Y").to_string();
+    format!(
+        r#"Search the web. Returns result blocks with titles and URLs. US-only.
+
+- The current month is {month_year} — use this when searching for recent information.
+- `allowed_domains` / `blocked_domains` filter results.
+- After answering from results, end with a "Sources:" list of the URLs you used as markdown links."#
+    )
+}
+
+/// Local replica of claude-code `Dh(model)` (binary offset ~195159752), the
+/// "simple system prompt" gate that selects the CONCISE vs VERBOSE WebSearch
+/// prompt inside `CNi(model)`. The TWIN of this predicate lives in
+/// `tools/task/src/todo_write.rs` (`dh_simple_system_prompt`); it is replicated
+/// here rather than shared so `tool-web` does not depend on `tool-task` /
+/// `tool-api` for it. The logic MUST match TodoWrite's exactly:
+///
+/// ```js
+/// Dh = (e)=>{
+///   if(!e) return false;                                          // no model → VERBOSE
+///   if(st(env.CLAUDE_CODE_SIMPLE_SYSTEM_PROMPT)) return true;     // env-truthy → CONCISE
+///   if(_l(env.CLAUDE_CODE_SIMPLE_SYSTEM_PROMPT)) return false;    // env-defined-falsy → VERBOSE
+///   return !UWu(e) || FWu(e);                                     // FWu absent ⇒ !UWu(e)
+/// };
+/// ```
+///
+/// `UWu(model)` (the classic-model list) returns `false` for the current-gen
+/// `claude-opus-4-8` / `claude-fable-5` / `claude-mythos-5`, so `!UWu(e)` is
+/// `true` for those (⇒ CONCISE) and `false` for classic models (⇒ VERBOSE).
+/// `FWu` (config-flag refinement) is not plumbed into the tool layer; on a
+/// default config it is `false`, so the model branch reduces to `!UWu(e)` —
+/// mirrors TodoWrite's documented residual.
+fn dh_simple_system_prompt(model: Option<&str>) -> bool {
+    // `if(!e) return false` — short-circuit to VERBOSE when no model is known.
+    let Some(model) = model.filter(|m| !m.is_empty()) else {
+        return false;
+    };
+    let env = std::env::var("CLAUDE_CODE_SIMPLE_SYSTEM_PROMPT").ok();
+    if traits::env::is_env_truthy(env.as_deref()) {
+        return true;
+    }
+    if traits::env::is_env_defined_falsy(env.as_deref()) {
+        return false;
+    }
+    // `return !UWu(e) || FWu(e)` with `FWu(e) == false` (config keys absent).
+    !uwu_standard_model(model)
+}
+
+/// Local replica of claude-code `UWu(model)` — the classic ("standard") model
+/// list. Returns `false` for the current-gen models (`claude-opus-4-8` /
+/// `claude-fable-5` / `claude-mythos-5`) so `Dh` serves them the CONCISE prompt.
+/// Replicated from TodoWrite's `uwu_standard_model` (`tools/task/src/todo_write.rs`)
+/// to avoid a cross-crate dependency; the substring/equality checks operate on a
+/// lightly-lowercased raw model id (claude-code's `Fo(e)` profile-canonicalizer
+/// is not threaded here, but every published id is already canonical). The
+/// unknown-model `!pd()` fallthrough is `false` for the default first-party
+/// deployment (`pd()` true).
+fn uwu_standard_model(model: &str) -> bool {
+    // `dfe(e)` = `/-eap($|\[)/i.test(e)` — early-access models are NOT standard.
+    if is_early_access_model(model) {
+        return false;
+    }
+    let t = model.to_ascii_lowercase();
+    if t.contains("claude-3-")
+        || t.contains("haiku")
+        || t.contains("sonnet")
+        || t == "claude-opus-4-0"
+        || t == "claude-opus-4-1"
+        || t == "claude-opus-4-5"
+        || t == "claude-opus-4-6"
+        || t == "claude-opus-4-7"
+    {
+        return true;
+    }
+    if t == "claude-opus-4-8" || t == "claude-fable-5" || t == "claude-mythos-5" {
+        return false;
+    }
+    // `return !pd()` — provider class unavailable in the tool layer; default
+    // first-party deployment ⇒ `pd()` true ⇒ `!pd()` false.
+    false
+}
+
+/// Local replica of claude-code `dfe(e)`: `/-eap($|\[)/i.test(e)` — matches an
+/// early-access model id where `-eap` is at the end of the string or immediately
+/// followed by `[`. Twin of TodoWrite's `is_early_access_model`.
+fn is_early_access_model(model: &str) -> bool {
+    let lower = model.to_ascii_lowercase();
+    let mut from = 0usize;
+    while let Some(idx) = lower[from..].find("-eap") {
+        let abs = from + idx;
+        let after = abs + "-eap".len();
+        match lower.as_bytes().get(after) {
+            None => return true,        // `-eap` at end ($)
+            Some(&b'[') => return true, // `-eap[`
+            _ => from = after,
+        }
+    }
+    false
+}
+
+/// Select the WebSearch prompt variant — 1:1 with claude-code `CNi(model)`
+/// (binary offset ~197074952): `Dh(model) ? CONCISE : VERBOSE`. The session /
+/// subagent model is threaded via [`PromptOptions::model`]; `None` mirrors the
+/// binary's `Dh(undefined)` → VERBOSE.
+fn select_web_search_prompt(model: Option<&str>) -> String {
+    if dh_simple_system_prompt(model) {
+        web_search_description_concise()
+    } else {
+        web_search_description()
+    }
+}
+
 #[async_trait]
 impl Tool for WebSearchTool {
     fn name(&self) -> &str {
@@ -801,10 +930,20 @@ impl Tool for WebSearchTool {
     }
 
     async fn description(&self, _input: &Value, _opts: &DescriptionOptions) -> String {
+        // claude-code's WebSearch tool object has NO model-gated `description`
+        // method — only `async prompt({model:e}){return CNi(e)}` carries the
+        // `Dh(model)` CONCISE/VERBOSE gate (binary @202215633), exactly as
+        // TodoWrite's `description(){return Qla}` is fixed while its `prompt`
+        // gates on the model. `DescriptionOptions` carries no model id here, so
+        // this returns the VERBOSE variant (== the `Dh(None)`-false default).
         web_search_description()
     }
-    async fn prompt(&self, _opts: &PromptOptions) -> String {
-        web_search_description()
+    async fn prompt(&self, opts: &PromptOptions) -> String {
+        // 1:1 with claude-code `async prompt({model:e}){return CNi(e)}`
+        // (binary @202215633), where `CNi(model)=Dh(model)?CONCISE:VERBOSE`
+        // (@~197074952). The session/subagent model is threaded via
+        // `PromptOptions::model`; `None` ⇒ `Dh(undefined)` ⇒ VERBOSE.
+        select_web_search_prompt(opts.model.as_deref())
     }
 
     async fn call(
@@ -1091,6 +1230,102 @@ mod tests {
         let my = chrono::Local::now().format("%B %Y").to_string();
         assert!(d.contains(&format!("The current month is {my}. You MUST use this year")));
         assert!(d.ends_with("with the current year, NOT last year\n"));
+    }
+
+    #[test]
+    fn concise_description_is_verbatim_cni_dh_true_branch() {
+        // claude-code `CNi(model)` Dh-true branch (binary @~197074996). No
+        // leading and no trailing newline; em-dash (`—`); literal backticks
+        // around the domain-filter param names; `${t}` resolves to "<Month>
+        // <Year>" via `U1i()` (= chrono `%B %Y`).
+        let c = web_search_description_concise();
+        let my = chrono::Local::now().format("%B %Y").to_string();
+        assert_eq!(
+            c,
+            format!(
+                "Search the web. Returns result blocks with titles and URLs. US-only.\n\
+                 \n\
+                 - The current month is {my} \u{2014} use this when searching for recent information.\n\
+                 - `allowed_domains` / `blocked_domains` filter results.\n\
+                 - After answering from results, end with a \"Sources:\" list of the URLs you used as markdown links."
+            )
+        );
+        // No leading/trailing newline (distinct from the VERBOSE variant).
+        assert!(c.starts_with("Search the web. Returns result blocks with titles and URLs. US-only.\n"));
+        assert!(c.ends_with("as markdown links."));
+        // Real em-dash byte (e2 80 94), not a hyphen.
+        assert!(c.contains(" \u{2014} use this when searching"));
+    }
+
+    #[test]
+    fn select_prompt_gates_concise_for_current_gen_models() {
+        use std::env;
+        // Neutralize any ambient env override so the model branch alone decides.
+        let prev = env::var("CLAUDE_CODE_SIMPLE_SYSTEM_PROMPT").ok();
+        env::remove_var("CLAUDE_CODE_SIMPLE_SYSTEM_PROMPT");
+
+        // `None`/empty ⇒ Dh(undefined) ⇒ VERBOSE.
+        assert_eq!(select_web_search_prompt(None), web_search_description());
+        assert_eq!(select_web_search_prompt(Some("")), web_search_description());
+        // Current-gen models (UWu=false ⇒ !UWu=true ⇒ Dh true) ⇒ CONCISE.
+        assert_eq!(
+            select_web_search_prompt(Some("claude-opus-4-8")),
+            web_search_description_concise()
+        );
+        assert_eq!(
+            select_web_search_prompt(Some("claude-fable-5")),
+            web_search_description_concise()
+        );
+        assert_eq!(
+            select_web_search_prompt(Some("claude-mythos-5")),
+            web_search_description_concise()
+        );
+        // Classic models (UWu=true ⇒ Dh false) ⇒ VERBOSE.
+        assert_eq!(
+            select_web_search_prompt(Some("claude-sonnet-4-20250514")),
+            web_search_description()
+        );
+        assert_eq!(
+            select_web_search_prompt(Some("claude-opus-4-1")),
+            web_search_description()
+        );
+        assert_eq!(
+            select_web_search_prompt(Some("claude-3-5-haiku")),
+            web_search_description()
+        );
+
+        // Restore the prior env state.
+        match prev {
+            Some(v) => env::set_var("CLAUDE_CODE_SIMPLE_SYSTEM_PROMPT", v),
+            None => env::remove_var("CLAUDE_CODE_SIMPLE_SYSTEM_PROMPT"),
+        }
+    }
+
+    #[tokio::test]
+    async fn prompt_method_selects_concise_via_model_opt() {
+        use std::env;
+        let prev = env::var("CLAUDE_CODE_SIMPLE_SYSTEM_PROMPT").ok();
+        env::remove_var("CLAUDE_CODE_SIMPLE_SYSTEM_PROMPT");
+
+        // `PromptOptions::model = Some("claude-opus-4-8")` ⇒ CONCISE via the
+        // tool's `prompt()` method (the `async prompt({model:e}){return CNi(e)}`
+        // wiring). Default opts (model=None) ⇒ VERBOSE. `prompt()` ignores the
+        // context, so any test ctx works.
+        let tool = WebSearchTool::new(validation_ctx());
+        let concise = tool
+            .prompt(&PromptOptions {
+                include_examples: false,
+                model: Some("claude-opus-4-8".into()),
+            })
+            .await;
+        assert_eq!(concise, web_search_description_concise());
+        let verbose = tool.prompt(&PromptOptions::default()).await;
+        assert_eq!(verbose, web_search_description());
+
+        match prev {
+            Some(v) => env::set_var("CLAUDE_CODE_SIMPLE_SYSTEM_PROMPT", v),
+            None => env::remove_var("CLAUDE_CODE_SIMPLE_SYSTEM_PROMPT"),
+        }
     }
 
     #[test]

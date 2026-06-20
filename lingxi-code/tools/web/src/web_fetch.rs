@@ -651,7 +651,16 @@ static INPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
     json!({
         "type": "object",
         "additionalProperties": false,
-        "required": ["url"],
+        // claude-code zod (binary @201712484):
+        // `E.strictObject({url:E.string().url().describe(...),prompt:E.string()...})`
+        // — `prompt` is NOT `.optional()`, and `sdk-tools.d.ts`'s `WebFetchInput`
+        // confirms `{ url: string; prompt: string }` (both required). So `prompt`
+        // is advertised as required. The Rust `WebFetchInput.prompt` stays
+        // `Option<String>` with `#[serde(default)]` purely for deserialization
+        // tolerance (a missing/legacy payload decodes to `None` rather than
+        // erroring); the requirement is enforced at the model-facing schema, as
+        // claude-code enforces it at its zod input gate.
+        "required": ["url", "prompt"],
         "properties": {
             "url": { "type": "string", "format": "uri", "description": "The URL to fetch content from" },
             "prompt": { "type": "string", "description": "The prompt to run on the fetched content" }

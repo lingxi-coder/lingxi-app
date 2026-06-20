@@ -76,6 +76,13 @@ const OWNER_WRITE_BIT: u32 = 0o200;
 /// em-dash (`U+2014`), matching the binary's `—`.
 pub const PERFORCE_READ_ONLY_MESSAGE: &str = "File is read-only — it has not been opened for edit in Perforce. Run `p4 edit <file>` to check it out, then retry. Do not chmod the file writable; that bypasses Perforce tracking.";
 
+/// Byte-locked escape-swap note appended to the string-not-found message when
+/// `pUa(old_string)` holds (the lookup tried the `\uXXXX`-escape-swap /
+/// non-ASCII fallbacks and still missed). Binary offset 202624182:
+/// `g = pUa(r) ? "\n(note: Edit also tried swapping \\uXXXX escapes …)" : ""`.
+/// Leading `\n` is part of the literal.
+pub const ESCAPE_SWAP_NOTE: &str = "\n(note: Edit also tried swapping \\uXXXX escapes and their characters; neither form matched, so the mismatch is likely elsewhere in old_string. Re-read the file and copy the exact surrounding text.)";
+
 /// `H7e(_)` (binary offset 193220147): `cfr() && (mode & 128) === 0`.
 ///
 /// Returns `true` when Perforce mode is enabled (`cfr()` ==
@@ -580,6 +587,16 @@ impl Tool for FileEditTool {
                     // (claude-code FileEditTool.ts:316,471-479). `before` is the
                     // LF-normalized in-memory view from Batch D, so all curly
                     // matching happens against that normalized content.
+                    // `find_actual_string` == binary `vIe(before, old_string)`:
+                    // exact → curly-normalize → `\uXXXX`-escape-swap → non-ASCII
+                    // escaped-form regex. It returns `None` (TS `vIe` → `null`)
+                    // only when ALL four lookups miss; the binary then falls back
+                    // to the raw `old_string` (`vIe(...)||t`). We mirror that with
+                    // `unwrap_or_else` — when `vIe` missed, `actual_old` ==
+                    // `old_string`, which (since `vIe` step 1 already found
+                    // `before` does NOT contain `old_string`) yields `count == 0`
+                    // and routes to the not-found branch, exactly as the binary's
+                    // `if(!f){…errorCode 8…}` does.
                     let actual_old = crate::quotes::find_actual_string(&before, old_string)
                         .unwrap_or_else(|| old_string.to_string());
                     let actual_new =
@@ -588,10 +605,23 @@ impl Tool for FileEditTool {
                     if count == 0 {
                         self.emit_failed(&invocation_id, "no_match").await;
                         // Byte-locked string-to-replace-not-found message
-                        // (FileEditTool.ts:321). Echoes the ORIGINAL `old_string`
-                        // input (TS `${old_string}`), not `actual_old`.
+                        // (binary offset 202624182). Echoes the ORIGINAL
+                        // `old_string` input (TS `${r}`), not `actual_old`.
+                        //
+                        // The escape-swap note is appended iff `pUa(old_string)`
+                        // (== `has_escape_or_non_ascii`) — i.e. the lookup *did*
+                        // try the `\uXXXX`/non-ASCII fallbacks and still missed.
+                        // The binary builds:
+                        //   g = pUa(r) ? "\n(note: ...)" : "";
+                        //   message: `String to replace not found in file.
+                        //   String: ${r}${g}`
+                        let note = if crate::quotes::has_escape_or_non_ascii(old_string) {
+                            ESCAPE_SWAP_NOTE
+                        } else {
+                            ""
+                        };
                         return Err(ToolError::InvalidInput(format!(
-                            "String to replace not found in file.\nString: {old_string}"
+                            "String to replace not found in file.\nString: {old_string}{note}"
                         )));
                     }
                     if !replace_all && count > 1 {
@@ -1473,13 +1503,131 @@ that bypasses Perforce tracking."
             .await
             .unwrap_err();
         // Byte-locked string-to-replace-not-found message (FileEditTool.ts:321),
-        // echoing the original `old_string` ("absent") verbatim.
+        // echoing the original `old_string` ("absent") verbatim. Pure-ASCII
+        // old_string ⇒ `pUa` false ⇒ NO escape-swap note appended.
         match err {
             ToolError::InvalidInput(m) => {
                 assert_eq!(m, "String to replace not found in file.\nString: absent");
+                assert!(!m.contains("tried swapping"));
             }
             other => panic!("expected InvalidInput, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn no_match_appends_escape_swap_note_for_non_ascii() {
+        // old_string has a non-ASCII char (`pUa` true) but neither its literal
+        // nor its `\uXXXX` escaped form is in the file ⇒ not found, with the
+        // byte-locked escape-swap note appended (binary offset 202624182).
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("a.txt");
+        std::fs::write(&target, "plain ascii content").unwrap();
+        let (ctx, _sink) = make_ctx(&tmp);
+        seed_full_read(&ctx, &target);
+        let tool = FileEditTool::new(ctx);
+        let err = tool
+            .call(
+                json!({
+                    "file_path": target.to_str().unwrap(),
+                    "old_string": "café",
+                    "new_string": "x"
+                }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .unwrap_err();
+        match err {
+            ToolError::InvalidInput(m) => {
+                assert_eq!(
+                    m,
+                    format!("String to replace not found in file.\nString: café{ESCAPE_SWAP_NOTE}")
+                );
+                assert!(m.contains("tried swapping"));
+            }
+            other => panic!("expected InvalidInput, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn no_match_appends_note_for_unicode_escape_old_string() {
+        // old_string contains a `\uXXXX` escape (`pUa` true via Tlo) absent from
+        // the file ⇒ not found, with the escape-swap note appended.
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("a.txt");
+        std::fs::write(&target, "no match here").unwrap();
+        let (ctx, _sink) = make_ctx(&tmp);
+        seed_full_read(&ctx, &target);
+        let tool = FileEditTool::new(ctx);
+        let err = tool
+            .call(
+                json!({
+                    "file_path": target.to_str().unwrap(),
+                    "old_string": "x\\u00e9y",
+                    "new_string": "z"
+                }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .unwrap_err();
+        match err {
+            ToolError::InvalidInput(m) => {
+                assert!(m.contains("tried swapping"));
+                assert!(m.starts_with("String to replace not found in file.\nString: x\\u00e9y"));
+            }
+            other => panic!("expected InvalidInput, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn edit_succeeds_via_escape_swap_decode() {
+        // File has the literal `é`; model sent the `\uXXXX` escape. The `vIe`
+        // escape-decode fallback locates and replaces the literal text.
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("a.txt");
+        std::fs::write(&target, "let v = café;").unwrap();
+        let (ctx, _sink) = make_ctx(&tmp);
+        seed_full_read(&ctx, &target);
+        let tool = FileEditTool::new(ctx);
+        tool.call(
+            json!({
+                "file_path": target.to_str().unwrap(),
+                "old_string": "caf\\u00e9",
+                "new_string": "latte"
+            }),
+            fresh_ctx(),
+            fresh_tx(),
+        )
+        .await
+        .expect("escape-swap decode should locate and replace literal `café`");
+        let written = std::fs::read_to_string(&target).unwrap();
+        assert_eq!(written, "let v = latte;");
+    }
+
+    #[tokio::test]
+    async fn edit_succeeds_via_non_ascii_escaped_form() {
+        // File stores the ESCAPED form `é`; model sent the literal `é`. The
+        // `vIe` non-ASCII regex fallback (dUa) locates the escaped run.
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("a.txt");
+        std::fs::write(&target, "x = \\u00e9 ;").unwrap();
+        let (ctx, _sink) = make_ctx(&tmp);
+        seed_full_read(&ctx, &target);
+        let tool = FileEditTool::new(ctx);
+        tool.call(
+            json!({
+                "file_path": target.to_str().unwrap(),
+                "old_string": "é",
+                "new_string": "E"
+            }),
+            fresh_ctx(),
+            fresh_tx(),
+        )
+        .await
+        .expect("non-ASCII escaped-form fallback should locate `\\u00e9`");
+        let written = std::fs::read_to_string(&target).unwrap();
+        assert_eq!(written, "x = E ;");
     }
 
     #[tokio::test]

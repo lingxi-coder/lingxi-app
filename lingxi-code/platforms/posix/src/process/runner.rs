@@ -78,6 +78,44 @@ const HOOK_ENV_DENYLIST: &[&str] = &[
 /// [`HOOK_ENV_DENYLIST`].
 const HOOK_ENV_DENY_PREFIX: &str = "OTEL_";
 
+/// Env var gating the GHA subprocess secret-scrub (`subprocessEnv()`,
+/// `utils/subprocessEnv.ts:86`). claude-code-action sets it when running with
+/// untrusted content; truthy ⇒ scrub [`GHA_SUBPROCESS_SCRUB`] from EVERY
+/// subprocess env (Bash AND hook children both spawn via `subprocessEnv()`).
+const ENV_SUBPROCESS_ENV_SCRUB: &str = "CLAUDE_CODE_SUBPROCESS_ENV_SCRUB";
+
+/// Secret-bearing keys `subprocessEnv()` `delete`s from a child env when
+/// [`ENV_SUBPROCESS_ENV_SCRUB`] is truthy (`subprocessEnv.ts:15-53`,
+/// `GHA_SUBPROCESS_SCRUB`): Anthropic auth, OTLP exporter headers (carry bearer
+/// tokens), cloud-provider creds, GitHub-Actions OIDC/runtime tokens, and
+/// claude-code-action input duplicates. Each key's GitHub-Actions `INPUT_<KEY>`
+/// twin is stripped too. Without the flag (the common case) this is inert.
+const GHA_SUBPROCESS_SCRUB: &[&str] = &[
+    "ANTHROPIC_API_KEY",
+    "CLAUDE_CODE_OAUTH_TOKEN",
+    "ANTHROPIC_AUTH_TOKEN",
+    "ANTHROPIC_FOUNDRY_API_KEY",
+    "ANTHROPIC_CUSTOM_HEADERS",
+    "OTEL_EXPORTER_OTLP_HEADERS",
+    "OTEL_EXPORTER_OTLP_LOGS_HEADERS",
+    "OTEL_EXPORTER_OTLP_METRICS_HEADERS",
+    "OTEL_EXPORTER_OTLP_TRACES_HEADERS",
+    "AWS_SECRET_ACCESS_KEY",
+    "AWS_SESSION_TOKEN",
+    "AWS_BEARER_TOKEN_BEDROCK",
+    "GOOGLE_APPLICATION_CREDENTIALS",
+    "AZURE_CLIENT_SECRET",
+    "AZURE_CLIENT_CERTIFICATE_PATH",
+    "ACTIONS_ID_TOKEN_REQUEST_TOKEN",
+    "ACTIONS_ID_TOKEN_REQUEST_URL",
+    "ACTIONS_RUNTIME_TOKEN",
+    "ACTIONS_RUNTIME_URL",
+    "ALL_INPUTS",
+    "OVERRIDE_GITHUB_TOKEN",
+    "DEFAULT_WORKFLOW_TOKEN",
+    "SSH_SIGNING_KEY",
+];
+
 /// Production [`ProcessRunner`] using `tokio::process`.
 #[derive(Default)]
 pub struct PosixProcess;
@@ -188,6 +226,19 @@ impl PosixProcess {
         // 3. CLAUDE_CODE_SESSION_ID propagated only if explicitly provided.
         if let Some(sess) = inner.env.get(ENV_CLAUDE_CODE_SESSION_ID) {
             tcmd.env(ENV_CLAUDE_CODE_SESSION_ID, sess);
+        }
+        // 4. GHA subprocess secret-scrub (`subprocessEnv()`, subprocessEnv.ts:86-97):
+        //    when `CLAUDE_CODE_SUBPROCESS_ENV_SCRUB` is truthy (claude-code-action's
+        //    untrusted-content mode), `delete` each secret-bearing key + its
+        //    `INPUT_<KEY>` GitHub-Actions twin from the child env — for BOTH the
+        //    Bash and the hook child (both spawn via `subprocessEnv()`), so a
+        //    prompt-injected command can't read Anthropic/cloud/Actions creds in
+        //    that CI mode. Inert (no-op) without the flag — the common case.
+        if traits::env::is_env_truthy(std::env::var(ENV_SUBPROCESS_ENV_SCRUB).ok().as_deref()) {
+            for key in GHA_SUBPROCESS_SCRUB {
+                tcmd.env_remove(key);
+                tcmd.env_remove(format!("INPUT_{key}"));
+            }
         }
         tcmd
     }

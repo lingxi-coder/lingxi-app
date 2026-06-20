@@ -174,6 +174,65 @@ async fn run_strips_wo_denylist_from_hook_command_env() {
     }
 }
 
+/// GHA subprocess secret-scrub (`subprocessEnv()`): with
+/// `CLAUDE_CODE_SUBPROCESS_ENV_SCRUB` truthy, secret keys + their `INPUT_<KEY>`
+/// twins are stripped from the child env; inert without the flag.
+#[tokio::test]
+async fn run_scrubs_gha_secrets_only_when_flagged() {
+    let env_bin = ["/usr/bin/env", "/bin/env"]
+        .into_iter()
+        .find(|p| std::path::Path::new(p).exists())
+        .unwrap_or("/usr/bin/env");
+    std::env::set_var("ANTHROPIC_API_KEY", "sk-secret");
+    std::env::set_var("INPUT_ANTHROPIC_API_KEY", "sk-secret-input");
+    std::env::set_var("AWS_SESSION_TOKEN", "aws-secret");
+    std::env::set_var("LX_GHA_SURVIVOR", "i-survive");
+
+    // FLAG ON → secrets + the INPUT_ twin scrubbed; a non-listed var survives.
+    std::env::set_var("CLAUDE_CODE_SUBPROCESS_ENV_SCRUB", "1");
+    let out = PosixProcess::new()
+        .run(&mk(env_bin, vec![], HashMap::new()))
+        .await
+        .expect("run");
+    std::env::remove_var("CLAUDE_CODE_SUBPROCESS_ENV_SCRUB");
+    for scrubbed in [
+        "ANTHROPIC_API_KEY=",
+        "INPUT_ANTHROPIC_API_KEY=",
+        "AWS_SESSION_TOKEN=",
+    ] {
+        assert!(
+            !out.stdout.lines().any(|l| l.starts_with(scrubbed)),
+            "GHA secret leaked under the scrub flag: {scrubbed} in {out:?}"
+        );
+    }
+    assert!(
+        out.stdout.lines().any(|l| l == "LX_GHA_SURVIVOR=i-survive"),
+        "non-listed var wrongly scrubbed: {out:?}"
+    );
+
+    // FLAG OFF (default) → the secret survives; the scrub is inert.
+    let out_off = PosixProcess::new()
+        .run(&mk(env_bin, vec![], HashMap::new()))
+        .await
+        .expect("run");
+    assert!(
+        out_off
+            .stdout
+            .lines()
+            .any(|l| l == "ANTHROPIC_API_KEY=sk-secret"),
+        "without the flag the scrub must be inert: {out_off:?}"
+    );
+
+    for k in [
+        "ANTHROPIC_API_KEY",
+        "INPUT_ANTHROPIC_API_KEY",
+        "AWS_SESSION_TOKEN",
+        "LX_GHA_SURVIVOR",
+    ] {
+        std::env::remove_var(k);
+    }
+}
+
 /// #6: the powershell provider OMITS `SHELL` (`void 0`). A non-bash-provider
 /// spawn must not carry a `SHELL` value in the env we pass to the child.
 ///

@@ -137,10 +137,22 @@ pub fn patch_truncation_suffix(n: usize) -> String {
 /// `path` is the ORIGINAL `file_path` input string (claude-code echoes the
 /// caller's path verbatim, not a canonicalized form).
 ///
-/// The interactive-only `userModified` variant — which inserts
-/// `".  The user modified your proposed changes before accepting them. "` —
-/// is out of scope for the non-interactive orchestrator (there is no
-/// human-in-the-loop accept step), so `modifiedNote` is always empty here.
+/// claude-code's `xYa` suffix has THREE branches:
+/// `staleRecovered ? "<modified-on-disk note>" : (userModified ? "" : Pyn)`.
+/// Both non-`Pyn` branches are inert in LingXi's non-interactive orchestrator and
+/// are therefore documented-out rather than dead-coded (R-F5 / R-V1 disposition):
+/// - `userModified` (interactive-only) — which inserts `".  The user modified your
+///   proposed changes before accepting them. "` — requires a human-in-the-loop
+///   accept step that does not exist here.
+/// - `staleRecovered` — which inserts the `" (note: the file had been modified on
+///   disk since you last read it — the edit applied cleanly, but the file contains
+///   other changes not in your context. Read it before edits that depend on
+///   surrounding content.)"` note — requires on-disk staleness detection BETWEEN
+///   the Read and the Edit. LingXi's non-interactive tool path has no such
+///   detector (the file-state is always treated as current, hence the
+///   unconditional `Pyn`/`FILE_STATE_CURRENT_SUFFIX`), so this branch can never
+///   fire and would be dead code.
+/// So the suffix here is always `Pyn` (the current-state suffix).
 #[must_use]
 pub fn edit_result_message(path: &str, replace_all: bool) -> String {
     let base = if replace_all {

@@ -65,8 +65,10 @@ pub const WEBFETCH_MAX_REDIRECTS: u32 = 10;
 /// Spec §7 lock; matches `claude-code/src/tools/WebFetchTool/utils.ts:531-532`.
 pub const WEBFETCH_TRUNCATION_SUFFIX: &str = "\n\n[Content truncated due to length...]";
 
-/// User-Agent prefix for the tool-side fetch (distinct from api-client UA).
-/// The full header value is `concat!(WEBFETCH_USER_AGENT_PREFIX, env!("CARGO_PKG_VERSION"))`.
+/// Legacy User-Agent prefix (kept for `web_search` + the parity fixture). The
+/// live WebFetch `User-Agent` is built by [`WebFetchTool::user_agent`] as
+/// `Claude-User (claude-code/{traits::CLAUDE_CODE_VERSION}; +https://support.anthropic.com/)`
+/// — see R-V1; this prefix const is NOT the WebFetch header.
 /// Spec §7 lock.
 pub const WEBFETCH_USER_AGENT_PREFIX: &str = "claude-code-tool/";
 
@@ -409,14 +411,17 @@ impl WebFetchTool {
     }
 
     fn user_agent() -> String {
-        // claude-code WebFetch User-Agent (v2.1.181: `Claude-User (${tg()}; +...)`):
+        // claude-code WebFetch User-Agent (v2.1.183: `Claude-User (${tg()}; +...)`):
         // `Claude-User (claude-code/<version>; +https://support.anthropic.com/)`.
         // The `Claude-User (...)` wrapper is how Anthropic web infra recognizes
-        // claude-code fetch traffic (distinct from the api-client UA). LingXi has
-        // no pinned claude-code version, so its own crate version fills the slot.
+        // claude-code fetch traffic (distinct from the api-client UA).
+        // R-V1: the version is claude-code's VERSION (the parity target,
+        // `traits::CLAUDE_CODE_VERSION`), NOT LingXi's CARGO_PKG_VERSION — every
+        // WebFetch GET previously sent `claude-code/0.12.0` to Anthropic infra +
+        // target servers instead of `claude-code/2.1.183`.
         format!(
             "Claude-User (claude-code/{}; +https://support.anthropic.com/)",
-            env!("CARGO_PKG_VERSION")
+            traits::CLAUDE_CODE_VERSION
         )
     }
 
@@ -1732,13 +1737,11 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
             .iter()
             .find(|(k, _)| k.eq_ignore_ascii_case("user-agent"))
             .expect("must have user-agent header");
+        // R-V1: UA carries the claude-code parity-target version (2.1.183), not
+        // LingXi's CARGO_PKG_VERSION.
         assert_eq!(
-            ua_value,
-            &format!(
-                "Claude-User (claude-code/{}; +https://support.anthropic.com/)",
-                env!("CARGO_PKG_VERSION")
-            ),
-            "WebFetch UA must be claude-code's `Claude-User (...)` form"
+            ua_value, "Claude-User (claude-code/2.1.183; +https://support.anthropic.com/)",
+            "WebFetch UA must be claude-code's `Claude-User (...)` form with the parity version"
         );
     }
 

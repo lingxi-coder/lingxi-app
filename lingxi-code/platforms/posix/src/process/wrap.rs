@@ -44,14 +44,18 @@ pub const ENV_AI_AGENT: &str = "AI_AGENT";
 /// `` `claude-code_${VERSION.replace(/\./g,"-")}_${e}` `` and the bash-provider
 /// spawn site calls `Uot({…, source:"agent"})`, so `e === "agent"` is hardcoded
 /// at the spawn — `AI_AGENT` is therefore set UNCONDITIONALLY (not gated on an
-/// optional value). We derive the version from this crate's package version the
-/// same way the MCP `user_agent()` helper derives the `claude-code/<version>`
-/// product string, replacing `.` with `-` to match `Mer`.
+/// optional value).
+///
+/// R-V1: the version is claude-code's `VERSION` (the parity target), NOT LingXi's
+/// `CARGO_PKG_VERSION`. claude-code v2.1.183 emits `claude-code_2-1-183_agent`;
+/// using `CARGO_PKG_VERSION` (0.12.0) leaked `claude-code_0-12-0_agent` to every
+/// child process / hook reading `AI_AGENT`. LingXi is a 1:1 copy, so it presents
+/// the claude-code version it replicates.
 #[must_use]
 pub fn ai_agent_value() -> String {
     format!(
         "claude-code_{}_agent",
-        env!("CARGO_PKG_VERSION").replace('.', "-")
+        traits::CLAUDE_CODE_VERSION.replace('.', "-")
     )
 }
 
@@ -174,11 +178,14 @@ mod tests {
             .and_then(|s| s.strip_suffix("_agent"))
             .expect("prefix/suffix present");
         assert!(!mid.contains('.'), "version dots must be dashed: {v}");
+        // R-V1: the version is the claude-code parity target (2.1.183 → 2-1-183),
+        // NOT LingXi's CARGO_PKG_VERSION.
+        assert_eq!(v, "claude-code_2-1-183_agent");
         assert_eq!(
             v,
             format!(
                 "claude-code_{}_agent",
-                env!("CARGO_PKG_VERSION").replace('.', "-")
+                traits::CLAUDE_CODE_VERSION.replace('.', "-")
             )
         );
     }

@@ -181,9 +181,12 @@ pub struct SettingsJson {
     ///   argv fallback.  Only chain[0] is used; longer chains log a warning.
     /// - `retry.maxAttempts`: **WIRED** — sets `RetryControl.max_retries`.
     ///   Precedence: `CLAUDE_CODE_MAX_RETRIES` env > `maxAttempts` > default (10).
-    /// - `retry.backoffMs`: **WIRED** — scales the jitter ladder's first rung.
-    ///   Default `[500, 1000, 2000]` ms; `backoffMs=1000` → `[1000, 2000, 4000]`.
-    ///   Jitter ±20% still applies.  Server-sent `Retry-After` is never scaled.
+    /// - `retry.backoffMs`: **WIRED** — sets the exponential-backoff ladder's
+    ///   first rung (overrides the default base of 500ms). Ladder is
+    ///   `min(backoffMs * 2^attempt, 32000)`; `backoffMs=1000` →
+    ///   `[1000, 2000, 4000, 8000, 16000, 32000, …]`. Additive jitter
+    ///   `+ rand(0, 0.25) * base` still applies. Server-sent `Retry-After` is
+    ///   never scaled.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub routing: Option<Value>,
 }

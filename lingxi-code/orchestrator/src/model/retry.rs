@@ -31,13 +31,36 @@ use rand::Rng;
 use std::time::Duration;
 
 // ---------------------------------------------------------------------------
-// Cadence constants — byte-locked against api-client/src/retry.rs
+// Cadence constants — byte-locked against the v2.1.183 binary's `sle`
+// retry-delay helper (the main API request retry loop `Tzn`).
 // ---------------------------------------------------------------------------
+//
+// v2.1.183 binary (`bin/claude.exe`, offsets confirmed against the build):
+//
+// ```js
+// function sle(e, t, n = 32000) {                       // e=attempt(1-indexed), t=retry-after header, n=cap
+//   let r = Math.min(Cbm * Math.pow(2, e - 1), n),      // Cbm = 500 → base = min(500 * 2^(attempt-1), 32000)
+//       o = r + Math.random() * 0.25 * r;               // additive jitter: r + rand(0, 0.25) * r
+//   if (t) { let s = parseInt(t, 10); if (!isNaN(s)) return Math.max(s * 1000, o) }  // honor retry-after header
+//   return o
+// }
+// ```
+//
+// Constants block @ binary offset 206068108:
+//   `_bm=10, JIo=3000, ybm=3, ..., Cbm=500, vbm=60000, ..., pFl=300000, XIo=21600000`
+// `sle`'s default cap param `n=32000`.
+//
+// This is the **exponential** backoff (`500 * 2^(attempt-1)`, capped at 32000ms)
+// with **additive** jitter (`+ rand(0, 0.25) * base`) — NOT the old `[500, 1000,
+// 2000]` table with multiplicative `× uniform(0.8, 1.2)` jitter.
 
-/// Default base delays in milliseconds before each retry attempt. **Locked
-/// against spec §7**: changing these requires updating
-/// `parity_messages_create.json`.
-pub const DEFAULT_BASE_DELAYS_MS: &[u64] = &[500, 1_000, 2_000];
+/// Base delay in milliseconds: the first retry waits ~`500ms` (before jitter).
+/// Binary `Cbm = 500`. Each subsequent attempt doubles up to [`MAX_BACKOFF_MS`].
+pub const BASE_DELAY_MS: u64 = 500;
+
+/// Maximum (pre-jitter) backoff in milliseconds. Binary `sle`'s default cap
+/// param `n = 32000`. The exponential `500 * 2^(attempt-1)` is clamped here.
+pub const MAX_BACKOFF_MS: u64 = 32_000;
 
 /// Default maximum number of retries. Byte-locked to claude-code
 /// `withRetry.ts:52` (`const DEFAULT_MAX_RETRIES = 10`). Combined with the
@@ -71,15 +94,17 @@ pub fn max_retries_from_env() -> u32 {
 /// (`const MAX_529_RETRIES = 3`).
 pub const MAX_529_RETRIES: u8 = 3;
 
-/// Lower jitter bound — exclusive end is 1.2 to avoid doubling the delay.
-pub const JITTER_LOW: f64 = 0.8;
-/// Upper jitter bound (exclusive).
-pub const JITTER_HIGH: f64 = 1.2;
+/// Additive jitter fraction. Binary `sle`: `o = r + Math.random() * 0.25 * r`,
+/// so the delay is `base + uniform(0, 0.25) * base`, i.e. uniform over
+/// `[base, 1.25 * base)`.
+pub const JITTER_FRACTION: f64 = 0.25;
 
-/// Compute a jittered delay: `base_ms * uniform(0.8, 1.2)`.
+/// Compute a jittered delay: `base_ms + uniform(0, 0.25) * base_ms`.
 ///
-/// Uses `rand::thread_rng()` so independent retry loops do not share state
-/// across tokio tasks.
+/// Byte-faithful to the v2.1.183 binary's `sle` jitter
+/// (`r + Math.random() * 0.25 * r`). The result is uniform over
+/// `[base_ms, 1.25 * base_ms)`. Uses `rand::thread_rng()` so independent retry
+/// loops do not share state across tokio tasks.
 ///
 /// **Precision note**: the spec works in milliseconds where sub-ms accuracy
 /// is irrelevant to network timing. `base_ms as f64` and the round-trip back
@@ -90,13 +115,15 @@ pub const JITTER_HIGH: f64 = 1.2;
     clippy::cast_precision_loss,
     clippy::cast_possible_truncation,
     clippy::cast_sign_loss,
-    reason = "ms-scale timing; factor is in [0.8, 1.2) so f64*u64 stays in u64 range and is non-negative"
+    reason = "ms-scale timing; the jitter fraction is in [0, 0.25) so base + frac*base stays in u64 range and is non-negative"
 )]
 pub fn jittered_delay(base_ms: u64) -> Duration {
-    let factor: f64 = rand::thread_rng().gen_range(JITTER_LOW..JITTER_HIGH);
-    // Multiply in f64, cast back to u64 ms. Rounding direction does not matter
+    // Binary `sle`: o = r + Math.random() * 0.25 * r. `gen_range(0.0..0.25)`
+    // mirrors `Math.random() * 0.25` (half-open `[0, 0.25)`).
+    let frac: f64 = rand::thread_rng().gen_range(0.0..JITTER_FRACTION);
+    // Add in f64, cast back to u64 ms. Rounding direction does not matter
     // (we're in milliseconds; sub-ms accuracy is irrelevant to network timing).
-    let ms = ((base_ms as f64) * factor) as u64;
+    let ms = ((base_ms as f64) + (base_ms as f64) * frac) as u64;
     Duration::from_millis(ms)
 }
 
@@ -375,13 +402,14 @@ pub fn next_step(
 }
 
 /// Extended form of [`next_step`] with an optional `backoff_ms` override for
-/// the jitter ladder's first rung.
+/// the exponential ladder's first rung.
 ///
-/// When `backoff_ms` is `Some(b)`, the jitter ladder is scaled proportionally:
-/// `b / DEFAULT_BASE_DELAYS_MS[0]` ratio applied to each rung.  E.g.
-/// `backoff_ms = 1000` → `[1000, 2000, 4000]`.  Server-sent `retry_after`
-/// values are **never** scaled (they are used verbatim regardless of
-/// `backoff_ms`).
+/// When `backoff_ms` is `Some(b)`, the ladder's base is set to `b` (instead of
+/// [`BASE_DELAY_MS`] = 500), preserving the binary's exponential growth +
+/// [`MAX_BACKOFF_MS`] cap: `min(b * 2^attempt, 32000)`.  E.g. `backoff_ms =
+/// 1000` → `[1000, 2000, 4000, 8000, 16000, 32000, …]`.  Server-sent
+/// `retry_after` values are **never** scaled (they are used verbatim regardless
+/// of `backoff_ms`).
 pub fn next_step_with_backoff(
     state: &mut RetryState,
     ctl: &RetryControl,
@@ -497,45 +525,45 @@ pub fn next_step_with_backoff(
     }
 }
 
-/// Select the base delay for attempt index `attempt` from the default table,
-/// clamping to the last entry if the index is out of range.
+/// Select the (pre-jitter) base delay for attempt index `attempt`.
+///
+/// Byte-faithful to the v2.1.183 binary's `sle`: `min(500 * 2^(A-1), 32000)`
+/// where `A` is the binary's 1-indexed attempt. LingXi's `attempt` field is
+/// 0-indexed (it starts at 0 for the first retry and increments afterwards),
+/// so `A - 1 == attempt` and the formula here is `min(500 * 2^attempt, 32000)`.
+///
+/// The `2^attempt` term is computed with saturating arithmetic so a large
+/// `attempt` (which would otherwise overflow `u64`) simply clamps to the
+/// [`MAX_BACKOFF_MS`] cap rather than wrapping.
 pub(crate) fn base_delay_ms(attempt: u8) -> u64 {
-    let idx = (attempt as usize).min(DEFAULT_BASE_DELAYS_MS.len() - 1);
-    DEFAULT_BASE_DELAYS_MS[idx]
+    // 2^attempt via checked shift; any attempt >= 64 (or whose product would
+    // exceed u64) saturates, then the `.min` clamps to MAX_BACKOFF_MS anyway.
+    let factor = 1u64.checked_shl(u32::from(attempt)).unwrap_or(u64::MAX);
+    BASE_DELAY_MS.saturating_mul(factor).min(MAX_BACKOFF_MS)
 }
 
 /// Select the base delay scaled by an optional custom `backoff_ms` value.
 ///
 /// When `backoff_ms` is `None`, delegates to [`base_delay_ms`] for the
-/// default `[500, 1000, 2000]` ladder.
+/// default exponential ladder `min(500 * 2^attempt, 32000)`.
 ///
-/// When `backoff_ms` is `Some(b)`, the ladder is scaled proportionally:
-/// `ratio = b / DEFAULT_BASE_DELAYS_MS[0]` (= b / 500), so each rung
-/// becomes `DEFAULT[i] * ratio`.  E.g. `backoff_ms = 1000` →
-/// `[1000, 2000, 4000]`.  Jitter ±20% still applies via the caller.
+/// When `backoff_ms` is `Some(b)`, the ladder's first rung is set to `b`
+/// instead of [`BASE_DELAY_MS`] (= 500), keeping the same exponential growth
+/// and [`MAX_BACKOFF_MS`] cap: `min(b * 2^attempt, 32000)`.  E.g.
+/// `backoff_ms = 1000` → `[1000, 2000, 4000, 8000, 16000, 32000, …]`.
+/// Additive jitter still applies via the caller.
 ///
-/// `ratio` is computed in `u64` arithmetic (no float) by multiplying first
-/// to avoid integer truncation issues.
+/// Computed in `u64` arithmetic (no float) with saturating multiply so extreme
+/// values clamp to the cap rather than wrapping.  Floored at 1ms as the last
+/// line of defense against a zero-delay tight retry loop (settings parsing
+/// already rejects `backoffMs = 0`).
 #[must_use]
-#[allow(
-    clippy::cast_possible_truncation,
-    reason = "scaling within reasonable ms ranges; overflow saturates to u64::MAX"
-)]
 pub fn scaled_base_delay_ms(attempt: u8, backoff_ms: Option<u64>) -> u64 {
-    let default = base_delay_ms(attempt);
     match backoff_ms {
-        None => default,
+        None => base_delay_ms(attempt),
         Some(b) => {
-            // ratio = b / DEFAULT_BASE_DELAYS_MS[0], applied as integer multiply-then-divide.
-            // Use saturating arithmetic so extreme values don't wrap.  Floor at
-            // 1ms: settings parsing rejects backoffMs=0, but this is the last
-            // line of defense against a zero-delay tight retry loop (e.g. a
-            // future caller passing Some(0) directly).
-            default
-                .saturating_mul(b)
-                .checked_div(DEFAULT_BASE_DELAYS_MS[0])
-                .unwrap_or(default)
-                .max(1)
+            let factor = 1u64.checked_shl(u32::from(attempt)).unwrap_or(u64::MAX);
+            b.saturating_mul(factor).min(MAX_BACKOFF_MS).max(1)
         }
     }
 }
@@ -546,13 +574,21 @@ pub fn scaled_base_delay_ms(attempt: u8, backoff_ms: Option<u64>) -> u64 {
 
 #[cfg(test)]
 mod jittered_delay_tests {
-    //! Cadence lock tests ported byte-exact from api-client/src/retry.rs.
+    //! Cadence lock tests byte-locked against the v2.1.183 binary's `sle`
+    //! retry-delay helper.
     use super::*;
 
     #[test]
-    fn jitter_bounds_are_locked_against_spec() {
-        assert!((JITTER_LOW - 0.8).abs() < f64::EPSILON);
-        assert!((JITTER_HIGH - 1.2).abs() < f64::EPSILON);
+    fn jitter_fraction_is_locked_against_binary() {
+        // Binary `sle`: o = r + Math.random() * 0.25 * r.
+        assert!((JITTER_FRACTION - 0.25).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn base_and_cap_constants_match_binary() {
+        // Binary: Cbm = 500 (base), sle default cap param n = 32000.
+        assert_eq!(BASE_DELAY_MS, 500);
+        assert_eq!(MAX_BACKOFF_MS, 32_000);
     }
 
     #[test]
@@ -562,11 +598,11 @@ mod jittered_delay_tests {
         clippy::cast_sign_loss,
         reason = "ms-scale comparison; the values fit u64 trivially"
     )]
-    fn stays_within_plus_minus_20_percent() {
-        // Sample many times; every result must fall in [0.8x, 1.2x).
+    fn additive_jitter_stays_within_base_to_125_percent() {
+        // Binary `sle`: o = r + rand(0, 0.25) * r → uniform over [r, 1.25*r).
         let base = 1_000u64;
-        let lo = ((base as f64) * 0.8) as u64;
-        let hi = ((base as f64) * 1.2) as u64;
+        let lo = base; // jitter is additive and non-negative → never below base
+        let hi = ((base as f64) * 1.25) as u64;
         for _ in 0..2_000 {
             let d = jittered_delay(base);
             let ms = d.as_millis() as u64;
@@ -577,9 +613,36 @@ mod jittered_delay_tests {
         }
     }
 
+    /// Binary `sle` base ladder: `min(500 * 2^(attempt-1), 32000)`, 1-indexed.
+    /// LingXi's `attempt` is 0-indexed (`A - 1`), so `base_delay_ms(attempt)`
+    /// must equal `min(500 * 2^attempt, 32000)`.  Verifies attempts 1..10 of
+    /// the binary (i.e. LingXi indices 0..9) plus the cap saturation.
     #[test]
-    fn default_base_delays_match_spec() {
-        assert_eq!(DEFAULT_BASE_DELAYS_MS, &[500, 1_000, 2_000]);
+    fn base_delay_ladder_matches_binary_sle() {
+        // (lingxi_attempt_index, expected_pre_jitter_base_ms)
+        // binary attempt A = index + 1; base = min(500 * 2^(A-1), 32000).
+        let expected = [
+            (0u8, 500u64),    // A=1: 500 * 2^0  = 500
+            (1, 1_000),       // A=2: 500 * 2^1  = 1000
+            (2, 2_000),       // A=3: 500 * 2^2  = 2000
+            (3, 4_000),       // A=4: 500 * 2^3  = 4000
+            (4, 8_000),       // A=5: 500 * 2^4  = 8000
+            (5, 16_000),      // A=6: 500 * 2^5  = 16000
+            (6, 32_000),      // A=7: 500 * 2^6  = 32000 (== cap)
+            (7, 32_000),      // A=8: 500 * 2^7  = 64000 → capped at 32000
+            (8, 32_000),      // A=9: capped
+            (9, 32_000),      // A=10: capped
+        ];
+        for (attempt, want) in expected {
+            assert_eq!(
+                base_delay_ms(attempt),
+                want,
+                "base_delay_ms({attempt}) (binary A={}) should be {want}ms",
+                attempt + 1
+            );
+        }
+        // Extreme attempt must not overflow — clamps to the cap.
+        assert_eq!(base_delay_ms(200), MAX_BACKOFF_MS);
     }
 
     /// claude-code `withRetry.ts:52` — `const DEFAULT_MAX_RETRIES = 10`.
@@ -1300,8 +1363,13 @@ mod next_step_tests {
         );
     }
 
-    // --- Jitter uses DEFAULT_BASE_DELAYS_MS[min(attempt, len-1)] ---
+    // --- Backoff schedule byte-locked against the v2.1.183 binary `sle` ---
 
+    /// `next_step` must produce the binary `sle` schedule for the retryable
+    /// classes (ProviderInternal/Transport/Overloaded-no-fallback/RateLimited-
+    /// no-header): for each attempt the delay lies in `[base, 1.25 * base)`
+    /// where `base = min(500 * 2^attempt, 32000)` (binary 1-indexed
+    /// `A = attempt + 1`).  Covers the binary's attempts 1..10.
     #[test]
     #[allow(
         clippy::cast_precision_loss,
@@ -1310,37 +1378,62 @@ mod next_step_tests {
         clippy::cast_lossless,
         reason = "ms-scale comparison; the values fit u64 trivially"
     )]
-    fn jitter_uses_correct_base_delay_for_attempt() {
-        // attempt=0 → base=500ms, attempt=1 → 1000ms, attempt=2+ → 2000ms
-        // Check that delay is in the correct jittered range.
-        for (attempt_idx, &expected_base) in DEFAULT_BASE_DELAYS_MS.iter().enumerate() {
-            let lo = (expected_base as f64 * JITTER_LOW) as u64;
-            let hi = (expected_base as f64 * JITTER_HIGH) as u64;
+    fn next_step_delay_schedule_matches_binary_sle() {
+        // (lingxi attempt index 0..9, expected pre-jitter base = min(500*2^i, 32000))
+        let schedule: [(u8, u64); 10] = [
+            (0, 500),
+            (1, 1_000),
+            (2, 2_000),
+            (3, 4_000),
+            (4, 8_000),
+            (5, 16_000),
+            (6, 32_000),
+            (7, 32_000),
+            (8, 32_000),
+            (9, 32_000),
+        ];
+        for (attempt_idx, base) in schedule {
+            let lo = base; // additive non-negative jitter → never below base
+            let hi = ((base as f64) * 1.25) as u64;
             // Sample several times to catch stochastic issues.
             for _ in 0..50 {
-                // attempt_idx comes from enumerate() over a 3-element slice — fits u8.
-                #[allow(clippy::cast_possible_truncation)]
-                let attempt_u8 = attempt_idx as u8;
                 let mut state = RetryState {
-                    attempt: attempt_u8,
+                    attempt: attempt_idx,
                     consecutive_overloaded: 0,
                     ..RetryState::default()
                 };
                 let ctl = ctl_default();
                 let step = next_step(&mut state, &ctl, &LlmError::ProviderInternal, 0);
-                if let DriveStep::RetryAfter(d) = step {
-                    // as_millis() returns u128; the values are in [400, 2400] so truncation is safe.
-                    #[allow(clippy::cast_possible_truncation)]
-                    let ms = d.as_millis() as u64;
-                    assert!(
-                        ms >= lo && ms < hi,
-                        "attempt={attempt_idx}: delay {ms}ms outside [{lo},{hi})"
-                    );
-                } else {
+                let DriveStep::RetryAfter(d) = step else {
                     panic!("expected RetryAfter for attempt={attempt_idx}, got {step:?}");
-                }
+                };
+                #[allow(clippy::cast_possible_truncation)]
+                let ms = d.as_millis() as u64;
+                assert!(
+                    ms >= lo && ms < hi,
+                    "attempt={attempt_idx} (binary A={}): delay {ms}ms outside [{lo},{hi}) for base={base}",
+                    attempt_idx + 1
+                );
             }
         }
+    }
+
+    /// Spot-check the exact pre-jitter base ladder one more time through the
+    /// `scaled_base_delay_ms(_, None)` path used by `next_step` (no override),
+    /// pinning the exponential cap behaviour independent of the random jitter.
+    #[test]
+    fn scaled_base_delay_default_path_is_exponential_capped() {
+        assert_eq!(scaled_base_delay_ms(0, None), 500);
+        assert_eq!(scaled_base_delay_ms(1, None), 1_000);
+        assert_eq!(scaled_base_delay_ms(2, None), 2_000);
+        assert_eq!(scaled_base_delay_ms(5, None), 16_000);
+        assert_eq!(scaled_base_delay_ms(6, None), 32_000);
+        assert_eq!(scaled_base_delay_ms(20, None), 32_000); // capped, no overflow
+        // backoff_ms override sets the first rung but keeps exponential + cap.
+        assert_eq!(scaled_base_delay_ms(0, Some(1_000)), 1_000);
+        assert_eq!(scaled_base_delay_ms(1, Some(1_000)), 2_000);
+        assert_eq!(scaled_base_delay_ms(5, Some(1_000)), 32_000); // 1000*2^5=32000 == cap
+        assert_eq!(scaled_base_delay_ms(6, Some(1_000)), 32_000); // 1000*2^6=64000 → capped
     }
 }
 
@@ -1595,15 +1688,19 @@ mod backoff_scaling_tests {
         }
     }
 
-    /// `backoff_ms=1000` → ladder `[1000, 2000, 4000]` (ratio = 1000/500 = 2).
+    /// `backoff_ms=1000` → exponential ladder `min(1000 * 2^attempt, 32000)`
+    /// = `[1000, 2000, 4000, 8000, 16000, 32000, …]` (binary `sle` with base 1000).
     #[test]
-    fn backoff_1000_scales_to_doubled_ladder() {
-        // DEFAULT [500, 1000, 2000] × 2 = [1000, 2000, 4000]
+    fn backoff_1000_scales_exponentially_with_cap() {
         assert_eq!(scaled_base_delay_ms(0, Some(1000)), 1000);
         assert_eq!(scaled_base_delay_ms(1, Some(1000)), 2000);
         assert_eq!(scaled_base_delay_ms(2, Some(1000)), 4000);
-        // Clamp at last entry (attempt >= len).
-        assert_eq!(scaled_base_delay_ms(10, Some(1000)), 4000);
+        assert_eq!(scaled_base_delay_ms(3, Some(1000)), 8000);
+        assert_eq!(scaled_base_delay_ms(4, Some(1000)), 16000);
+        assert_eq!(scaled_base_delay_ms(5, Some(1000)), 32000); // 1000*2^5 == cap
+        // Beyond the cap (and at extreme attempts) clamps to MAX_BACKOFF_MS, no overflow.
+        assert_eq!(scaled_base_delay_ms(6, Some(1000)), MAX_BACKOFF_MS);
+        assert_eq!(scaled_base_delay_ms(10, Some(1000)), MAX_BACKOFF_MS);
     }
 
     /// `backoff_ms=500` → same as default (ratio = 1).
@@ -1618,9 +1715,10 @@ mod backoff_scaling_tests {
         }
     }
 
-    /// `backoff_ms=250` → halved ladder `[250, 500, 1000]`.
+    /// `backoff_ms=250` → exponential ladder `min(250 * 2^attempt, 32000)`
+    /// = `[250, 500, 1000, …]` (base halved relative to the default 500).
     #[test]
-    fn backoff_250_halves_ladder() {
+    fn backoff_250_exponential_from_lower_base() {
         assert_eq!(scaled_base_delay_ms(0, Some(250)), 250);
         assert_eq!(scaled_base_delay_ms(1, Some(250)), 500);
         assert_eq!(scaled_base_delay_ms(2, Some(250)), 1000);

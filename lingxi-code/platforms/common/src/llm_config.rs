@@ -45,9 +45,10 @@ use std::collections::BTreeMap;
 ///   when chain[0] is also overloaded, and so on until exhausted.
 /// - `max_retries`: `routing.retry.maxAttempts` parsed as `u32`. When `None`,
 ///   `CLAUDE_CODE_MAX_RETRIES` env (then `DEFAULT_MAX_RETRIES`) applies.
-/// - `backoff_ms`: `routing.retry.backoffMs` as the base-delay for the jitter
-///   ladder's first rung (scales `DEFAULT_BASE_DELAYS_MS` proportionally).
-///   When `None`, the default `[500, 1000, 2000]` ladder is used.
+/// - `backoff_ms`: `routing.retry.backoffMs` as the base-delay for the
+///   exponential backoff ladder's first rung (overrides `BASE_DELAY_MS` = 500,
+///   keeping `min(b * 2^attempt, 32000)` growth + cap). When `None`, the
+///   default ladder `min(500 * 2^attempt, 32000)` is used.
 #[derive(Debug, Default, Clone, PartialEq)]
 pub struct RoutingOverrides {
     /// Per-model fallback chains: display-model → ordered Vec of display-models.

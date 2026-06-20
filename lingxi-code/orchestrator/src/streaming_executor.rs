@@ -105,6 +105,56 @@ pub(crate) fn can_execute(executing_safe_flags: &[bool], candidate_safe: bool) -
         || (candidate_safe && executing_safe_flags.iter().all(|&s| s))
 }
 
+/// Default maximum number of concurrency-safe tools to execute simultaneously.
+/// Byte-locked to the v2.1.183 binary's `r1p` getter:
+/// ```js
+/// function r1p() {
+///   let e = parseInt(process.env.CLAUDE_CODE_MAX_TOOL_USE_CONCURRENCY || "", 10);
+///   return e > 0 ? e : 10;
+/// }
+/// ```
+pub(crate) const DEFAULT_MAX_TOOL_USE_CONCURRENCY: usize = 10;
+
+/// Resolve the maximum number of concurrency-safe tools to run at once,
+/// mirroring the binary's `r1p()`. Reads `CLAUDE_CODE_MAX_TOOL_USE_CONCURRENCY`
+/// and uses it only when it parses to a value `> 0`; otherwise the default of
+/// [`DEFAULT_MAX_TOOL_USE_CONCURRENCY`] (10).
+///
+/// Injectable form for tests: [`max_tool_use_concurrency_from`].
+pub(crate) fn max_tool_use_concurrency() -> usize {
+    max_tool_use_concurrency_from(std::env::var("CLAUDE_CODE_MAX_TOOL_USE_CONCURRENCY").ok().as_deref())
+}
+
+/// Pure resolver for [`max_tool_use_concurrency`] — `parseInt(v, 10) > 0 ? v : 10`.
+/// `parseInt` semantics: leading numeric prefix is parsed (e.g. `"5x"` → 5),
+/// non-numeric / absent / `<= 0` → the default.
+pub(crate) fn max_tool_use_concurrency_from(raw: Option<&str>) -> usize {
+    // Mirror JS `parseInt(s, 10)`: take the leading (optionally signed) integer
+    // prefix. Anything else (NaN) falls through to the default.
+    let parsed: Option<i64> = raw.and_then(|s| {
+        let t = s.trim_start();
+        let bytes = t.as_bytes();
+        let mut end = 0;
+        if matches!(bytes.first(), Some(b'+' | b'-')) {
+            end = 1;
+        }
+        while end < bytes.len() && bytes[end].is_ascii_digit() {
+            end += 1;
+        }
+        // Need at least one digit after the optional sign.
+        let has_digit = bytes[..end].iter().any(u8::is_ascii_digit);
+        if has_digit {
+            t[..end].parse::<i64>().ok()
+        } else {
+            None
+        }
+    });
+    match parsed {
+        Some(n) if n > 0 => n as usize,
+        _ => DEFAULT_MAX_TOOL_USE_CONCURRENCY,
+    }
+}
+
 // ============================================================================
 // StreamingToolExecutor — Task 6: struct + new() + add_tool()
 // ============================================================================
@@ -244,11 +294,26 @@ impl<'a> StreamingToolExecutor<'a> {
     /// queued non-concurrency-safe tool that cannot start yet (preserves
     /// exclusive-tool ordering). After each start the executing set changes, so
     /// we re-evaluate from scratch.
+    ///
+    /// ## Concurrency cap (parity binary `r1p` / `i1p`)
+    ///
+    /// The v2.1.183 binary runs a contiguous concurrency-safe group through
+    /// `i1p`, which merges the per-tool generators with a bounded window of
+    /// `r1p()` (`CLAUDE_CODE_MAX_TOOL_USE_CONCURRENCY`, default 10). So no more
+    /// than N concurrency-safe tools execute simultaneously; the rest of the
+    /// group waits for a slot. We enforce the same bound here: a queued safe
+    /// tool may only start when the number of currently-`Executing`
+    /// concurrency-safe tools is below the cap. When the cap is reached no
+    /// further safe tool starts this pass (and an unsafe tool is barriered by
+    /// the executing safe tools), so the queue stalls until a completion frees
+    /// a slot — at which point the streaming loop re-invokes `process_queue`.
     // Index loop + per-pass rebuild are forced by the borrow checker: `start_tool`
     // takes `&mut self`, so we can't hold an iterator borrow over `self.tools`
     // across a start. N is small (tools per turn), so the rebuild is negligible.
     #[allow(clippy::needless_range_loop)]
     pub(crate) fn process_queue(&mut self) {
+        // Resolve the cap once per call (env-driven; `r1p()`).
+        let max_safe = max_tool_use_concurrency();
         loop {
             let executing_flags: Vec<bool> = self
                 .tools
@@ -256,6 +321,10 @@ impl<'a> StreamingToolExecutor<'a> {
                 .filter(|t| t.status == ToolStatus::Executing)
                 .map(|t| t.is_concurrency_safe)
                 .collect();
+            // Count concurrency-safe tools already in flight (all executing
+            // tools are safe whenever a safe candidate could start, but count
+            // explicitly so the bound is correct regardless).
+            let executing_safe_count = executing_flags.iter().filter(|&&s| s).count();
 
             let mut started_any = false;
             for i in 0..self.tools.len() {
@@ -263,6 +332,16 @@ impl<'a> StreamingToolExecutor<'a> {
                     continue;
                 }
                 let safe = self.tools[i].is_concurrency_safe;
+                // Concurrency cap: do not start an (N+1)th simultaneous safe
+                // tool — keep it queued. An unsafe tool is unbounded (it runs
+                // alone behind the barrier), so the cap applies only to safe.
+                if safe && executing_safe_count >= max_safe {
+                    // At the safe-concurrency ceiling: this safe tool waits.
+                    // Keep scanning in case a later unsafe tool barriers, but it
+                    // can't start either while safe tools execute — so the pass
+                    // ends without starting anything once we hit the cap.
+                    continue;
+                }
                 if can_execute(&executing_flags, safe) {
                     self.start_tool(i);
                     started_any = true;
@@ -887,6 +966,157 @@ mod tests {
         assert_eq!(exec.tools[0].status, ToolStatus::Executing);
         assert_eq!(exec.tools[1].status, ToolStatus::Queued);
         assert_eq!(exec.tools[2].status, ToolStatus::Queued);
+    }
+
+    // ============================================================================
+    // B6: concurrency cap (binary r1p / i1p) tests
+    // ============================================================================
+
+    use super::{
+        max_tool_use_concurrency, max_tool_use_concurrency_from, DEFAULT_MAX_TOOL_USE_CONCURRENCY,
+    };
+
+    /// Binary `r1p`: `parseInt(env, 10) > 0 ? env : 10`.
+    #[test]
+    fn max_tool_use_concurrency_parse_matches_binary_r1p() {
+        // Absent / empty / non-numeric → default 10.
+        assert_eq!(max_tool_use_concurrency_from(None), 10);
+        assert_eq!(max_tool_use_concurrency_from(Some("")), 10);
+        assert_eq!(max_tool_use_concurrency_from(Some("abc")), 10);
+        // Zero and negative → default (binary uses `e > 0`).
+        assert_eq!(max_tool_use_concurrency_from(Some("0")), 10);
+        assert_eq!(max_tool_use_concurrency_from(Some("-3")), 10);
+        // Positive → that value.
+        assert_eq!(max_tool_use_concurrency_from(Some("1")), 1);
+        assert_eq!(max_tool_use_concurrency_from(Some("5")), 5);
+        assert_eq!(max_tool_use_concurrency_from(Some("25")), 25);
+        // parseInt leading-prefix semantics: "5x" → 5, "  7 " → 7.
+        assert_eq!(max_tool_use_concurrency_from(Some("5x")), 5);
+        assert_eq!(max_tool_use_concurrency_from(Some("  7 ")), 7);
+        // Default constant is 10.
+        assert_eq!(DEFAULT_MAX_TOOL_USE_CONCURRENCY, 10);
+    }
+
+    /// With 30 concurrency-safe tools, `process_queue` must start at most the
+    /// default cap (10) simultaneously; the remaining 20 stay Queued. Mirrors
+    /// the binary's `i1p` bounded merge (window = `r1p()` = 10).
+    /// (Mutates env to clear any override → `--test-threads=1`.)
+    #[tokio::test]
+    async fn process_queue_caps_safe_tools_at_default_ten() {
+        // Ensure no env override leaks in from the environment.
+        std::env::remove_var("CLAUDE_CODE_MAX_TOOL_USE_CONCURRENCY");
+        assert_eq!(max_tool_use_concurrency(), DEFAULT_MAX_TOOL_USE_CONCURRENCY);
+
+        let orch = orch_with_safe_tool();
+        let a = MessageId::new();
+        let mut exec = StreamingToolExecutor::new(&orch);
+        for _ in 0..30 {
+            exec.add_tool(ToolUseId::new(), "SafeTool".into(), json!({}), None, a);
+        }
+        exec.process_queue();
+
+        let executing = exec
+            .tools
+            .iter()
+            .filter(|t| t.status == ToolStatus::Executing)
+            .count();
+        let queued = exec
+            .tools
+            .iter()
+            .filter(|t| t.status == ToolStatus::Queued)
+            .count();
+        assert_eq!(
+            executing, DEFAULT_MAX_TOOL_USE_CONCURRENCY,
+            "no more than {DEFAULT_MAX_TOOL_USE_CONCURRENCY} safe tools may run at once"
+        );
+        assert_eq!(queued, 30 - DEFAULT_MAX_TOOL_USE_CONCURRENCY, "the rest stay Queued");
+        // The first N (in received order) are the ones started.
+        for i in 0..DEFAULT_MAX_TOOL_USE_CONCURRENCY {
+            assert_eq!(exec.tools[i].status, ToolStatus::Executing, "tool {i} should run");
+        }
+        for i in DEFAULT_MAX_TOOL_USE_CONCURRENCY..30 {
+            assert_eq!(exec.tools[i].status, ToolStatus::Queued, "tool {i} should wait");
+        }
+    }
+
+    /// `CLAUDE_CODE_MAX_TOOL_USE_CONCURRENCY` overrides the cap. With the env
+    /// set to 3 and 10 safe tools queued, exactly 3 start.
+    /// (Mutates env → `--test-threads=1`.)
+    #[tokio::test]
+    async fn process_queue_respects_env_concurrency_override() {
+        std::env::set_var("CLAUDE_CODE_MAX_TOOL_USE_CONCURRENCY", "3");
+        // Guard so a panic/assert failure still clears the env for sibling tests.
+        struct Clear;
+        impl Drop for Clear {
+            fn drop(&mut self) {
+                std::env::remove_var("CLAUDE_CODE_MAX_TOOL_USE_CONCURRENCY");
+            }
+        }
+        let _clear = Clear;
+
+        assert_eq!(max_tool_use_concurrency(), 3);
+
+        let orch = orch_with_safe_tool();
+        let a = MessageId::new();
+        let mut exec = StreamingToolExecutor::new(&orch);
+        for _ in 0..10 {
+            exec.add_tool(ToolUseId::new(), "SafeTool".into(), json!({}), None, a);
+        }
+        exec.process_queue();
+
+        let executing = exec
+            .tools
+            .iter()
+            .filter(|t| t.status == ToolStatus::Executing)
+            .count();
+        assert_eq!(executing, 3, "env override caps safe concurrency at 3");
+        assert_eq!(
+            exec.tools.iter().filter(|t| t.status == ToolStatus::Queued).count(),
+            7,
+            "remaining 7 stay Queued under the override"
+        );
+    }
+
+    /// Releasing one in-flight safe tool (mark it Completed) frees a slot so the
+    /// next queued safe tool starts on the following `process_queue` — the
+    /// sliding-window behaviour of the binary's `i1p` merge.
+    /// (Mutates env → `--test-threads=1`.)
+    #[tokio::test]
+    async fn process_queue_starts_next_safe_when_slot_frees() {
+        std::env::set_var("CLAUDE_CODE_MAX_TOOL_USE_CONCURRENCY", "2");
+        struct Clear;
+        impl Drop for Clear {
+            fn drop(&mut self) {
+                std::env::remove_var("CLAUDE_CODE_MAX_TOOL_USE_CONCURRENCY");
+            }
+        }
+        let _clear = Clear;
+
+        let orch = orch_with_safe_tool();
+        let a = MessageId::new();
+        let mut exec = StreamingToolExecutor::new(&orch);
+        for _ in 0..4 {
+            exec.add_tool(ToolUseId::new(), "SafeTool".into(), json!({}), None, a);
+        }
+        exec.process_queue();
+        // Cap=2 → first two run, last two wait.
+        assert_eq!(exec.tools[0].status, ToolStatus::Executing);
+        assert_eq!(exec.tools[1].status, ToolStatus::Executing);
+        assert_eq!(exec.tools[2].status, ToolStatus::Queued);
+        assert_eq!(exec.tools[3].status, ToolStatus::Queued);
+
+        // Simulate tool[0] completing → frees one slot.
+        exec.tools[0].status = ToolStatus::Completed;
+        exec.process_queue();
+        // Now exactly one more (tool[2]) starts; tool[3] still waits (slot full again).
+        assert_eq!(exec.tools[2].status, ToolStatus::Executing, "freed slot starts next");
+        assert_eq!(exec.tools[3].status, ToolStatus::Queued, "still capped at 2 in-flight");
+        let executing = exec
+            .tools
+            .iter()
+            .filter(|t| t.status == ToolStatus::Executing)
+            .count();
+        assert_eq!(executing, 2, "never more than 2 safe tools in flight");
     }
 
     #[tokio::test]

@@ -65,16 +65,17 @@ pub const ALL_EVENT_NAMES: &[&str] = {
     //          v0.6.0 (M5-14): 315 · v0.7.0 (M6-09): 326 · v0.8.0 (M7-16): 330.
     // CronDelete/CronList: tool block grows 134 → 140 (+6, 2 tools × 3 stages)
     //        → 336 total.
-    // FileReadTool analytics: +3 appended at the GLOBAL TAIL (tengu_file_read_dedup,
-    //        tengu_session_file_read, tengu_file_read_limits_override) — NOT in the
-    //        tool concat block (they are not tengu_tool_*) → 339 total. The trailing
-    //        `+ 3` is `tool::FILE_READ_ANALYTICS_NAMES.len()`.
-    // Config migrations: +9 (migration::NAMES, runMigrations port) → 348 total.
-    // Bypass-permissions dialog: +1 (permission::NAMES) → 349 total.
+    // FileReadTool analytics: +4 appended at the GLOBAL TAIL (tengu_file_read_dedup,
+    //        tengu_session_file_read, tengu_file_read_limits_override,
+    //        tengu_file_read_reread [#13]) — NOT in the tool concat block (they are
+    //        not tengu_tool_*) → 340 total. The `+ 4` below (between `13` and `9`)
+    //        is `tool::FILE_READ_ANALYTICS_NAMES.len()`.
+    // Config migrations: +9 (migration::NAMES, runMigrations port) → 349 total.
+    // Bypass-permissions dialog: +1 (permission::NAMES) → 350 total.
     // Coordinator swarm events: +3 (coordinator::NAMES — tengu_team_created,
     //        tengu_team_deleted, tengu_coordinator_mode_switched) appended as
-    //        their own GLOBAL-TAIL block after the permission block → 352 total.
-    const TOTAL: usize = 25 + 30 + 20 + 140 + 10 + 8 + 12 + 3 + 17 + 4 + 54 + 13 + 3 + 9 + 1 + 3;
+    //        their own GLOBAL-TAIL block after the permission block → 353 total.
+    const TOTAL: usize = 25 + 30 + 20 + 140 + 10 + 8 + 12 + 3 + 17 + 4 + 54 + 13 + 4 + 9 + 1 + 3;
     const fn concat_all() -> [&'static str; TOTAL] {
         let mut out: [&'static str; TOTAL] = [""; TOTAL];
         let mut idx = 0;

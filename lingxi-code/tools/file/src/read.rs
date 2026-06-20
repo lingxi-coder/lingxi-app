@@ -20,8 +20,8 @@ use std::time::Instant;
 use telemetry::pii::{PiiTagged, Verified};
 use telemetry::sink::{AnalyticsValue, LogEventMetadata};
 use telemetry::tengu::tool::{
-    FILE_READ_DEDUP, FILE_READ_LIMITS_OVERRIDE, READ_COMPLETED, READ_FAILED, READ_STARTED,
-    SESSION_FILE_READ,
+    FILE_READ_DEDUP, FILE_READ_LIMITS_OVERRIDE, FILE_READ_REREAD, READ_COMPLETED, READ_FAILED,
+    READ_STARTED, SESSION_FILE_READ,
 };
 use tool_api::context::ToolUseContext;
 use tool_api::progress::ToolProgressSender;
@@ -685,6 +685,20 @@ impl FileReadTool {
         self.ctx.bus.log_event(FILE_READ_DEDUP, md).await;
     }
 
+    /// `tengu_file_read_reread` (#13) — fired when reading a file that already
+    /// has a read-file-state entry, BEFORE the dedup short-circuit (claude-code:
+    /// `if(f) j("tengu_file_read_reread",{priorOp: f.offset===void 0?"edit_write"
+    /// :"read"})`). `prior_op` is `"read"` for a prior Read-origin entry,
+    /// `"edit_write"` for a prior Edit/Write-origin entry.
+    async fn emit_file_read_reread(&self, prior_op: &'static str) {
+        let mut md: LogEventMetadata = HashMap::new();
+        md.insert(
+            "priorOp".to_string(),
+            AnalyticsValue::String(Verified::assert_safe(prior_op.to_string()).into_inner()),
+        );
+        self.ctx.bus.log_event(FILE_READ_REREAD, md).await;
+    }
+
     /// `tengu_session_file_read` (`FileReadTool.ts:1069-1083`) — fired after a
     /// successful TEXT read. Metadata mirrors TS exactly:
     /// `totalLines`/`readLines`/`totalBytes`/`readBytes`/`offset` (int, always),
@@ -1285,6 +1299,14 @@ Usage:\n\
         // CLAUDE.md / memory auto-injection has no LingXi analog; the
         // offset/limit approximation matches for normal `Read`-sourced entries.
         if let Some(entry) = tool_api::read_file_state::get(&self.ctx.read_file_state, &canon) {
+            // #13: `tengu_file_read_reread` fires whenever the file ALREADY has a
+            // read-state entry (the `if(f)` in claude-code), BEFORE the dedup
+            // short-circuit. `priorOp` distinguishes the prior origin — the
+            // binary tests `f.offset===void 0` ("edit_write"); LingXi's
+            // `from_read` flag is the faithful Read-vs-Edit/Write discriminator
+            // (a full Read also has `offset==None`, so `offset` alone is wrong).
+            self.emit_file_read_reread(if entry.from_read { "read" } else { "edit_write" })
+                .await;
             let is_full_view = entry.offset.is_none() && entry.limit.is_none();
             let range_match = entry.offset == input_offset && entry.limit == input_limit;
             if entry.from_read && is_full_view && range_match && mtime_ms == entry.mtime_ms {

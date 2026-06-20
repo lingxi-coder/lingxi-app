@@ -45,16 +45,17 @@ fn registry_is_exactly_330_entries() {
     // tengu_tui_command_palette_opened/vim_mode_entered/key_pressed stay
     // deferred to M8 (no clean/aggregated emit site). 326 + 4 = 330.
     // CronDelete/CronList added 6 (2 tools × 3 lifecycle stages): 330 + 6 = 336.
-    // FileReadTool analytics added 3 at the global tail (tengu_file_read_dedup,
-    // tengu_session_file_read, tengu_file_read_limits_override): 336 + 3 = 339.
+    // FileReadTool analytics added 4 at the global tail (tengu_file_read_dedup,
+    // tengu_session_file_read, tengu_file_read_limits_override,
+    // tengu_file_read_reread [#13]): 336 + 4 = 340.
     // Config migrations added 9 as their own tail block (migration::NAMES,
-    // runMigrations port): 339 + 9 = 348.
+    // runMigrations port): 340 + 9 = 349.
     // Permission flow added 1 as its own tail block (permission::NAMES,
-    // bypass dialog accept): 348 + 1 = 349.
+    // bypass dialog accept): 349 + 1 = 350.
     // Coordinator swarm added 3 as its own global-tail block
     // (coordinator::NAMES — tengu_team_created, tengu_team_deleted,
-    // tengu_coordinator_mode_switched): 349 + 3 = 352.
-    assert_eq!(ALL_EVENT_NAMES.len(), 352);
+    // tengu_coordinator_mode_switched): 350 + 3 = 353.
+    assert_eq!(ALL_EVENT_NAMES.len(), 353);
 }
 
 #[test]
@@ -233,38 +234,40 @@ fn category_ordering_preserved() {
     for n in &ALL_EVENT_NAMES[323..336] {
         assert!(n.starts_with("tengu_tui_"), "tui block: {n}");
     }
-    // FileReadTool analytics block (3 events) appended at the GLOBAL TAIL — these
-    // are `tengu_file_read_*` / `tengu_session_file_read` (NOT `tengu_tool_*`),
-    // kept after the tui block so every per-block prefix slice above stays valid.
+    // FileReadTool analytics block (4 events, #13 added the 4th) appended at the
+    // GLOBAL TAIL — these are `tengu_file_read_*` / `tengu_session_file_read`
+    // (NOT `tengu_tool_*`), kept after the tui block so every per-block prefix
+    // slice above stays valid.
     assert_eq!(
-        &ALL_EVENT_NAMES[336..339],
+        &ALL_EVENT_NAMES[336..340],
         &[
             "tengu_file_read_dedup",
             "tengu_session_file_read",
             "tengu_file_read_limits_override",
+            "tengu_file_read_reread",
         ],
         "FileReadTool analytics tail block",
     );
-    // Config-migration block (9 events) appended after the FileRead trio —
+    // Config-migration block (9 events) appended after the FileRead block —
     // order matches TS runMigrations execution order (main.tsx:328-336).
-    // Positions 339..348.
+    // Positions 340..349.
     assert_eq!(
-        &ALL_EVENT_NAMES[339..348],
+        &ALL_EVENT_NAMES[340..349],
         &telemetry::tengu::migration::NAMES,
         "config-migration tail block",
     );
     // Permission-flow block (1 event) appended after the config-migration
     // block — bypass dialog accept (BypassPermissionsModeDialog.tsx).
-    // Position 348..349.
+    // Position 349..350.
     assert_eq!(
-        &ALL_EVENT_NAMES[348..349],
+        &ALL_EVENT_NAMES[349..350],
         &telemetry::tengu::permission::NAMES,
         "permission-flow tail block",
     );
     // Coordinator swarm block (3 events) appended after the permission block —
-    // tengu_team_created/_deleted/coordinator_mode_switched. Positions 349..352.
+    // tengu_team_created/_deleted/coordinator_mode_switched. Positions 350..353.
     assert_eq!(
-        &ALL_EVENT_NAMES[349..352],
+        &ALL_EVENT_NAMES[350..353],
         &telemetry::tengu::coordinator::NAMES,
         "coordinator swarm tail block",
     );
@@ -275,6 +278,7 @@ fn file_read_analytics_events_registered() {
     assert!(ALL_EVENT_NAMES.contains(&"tengu_file_read_dedup"));
     assert!(ALL_EVENT_NAMES.contains(&"tengu_session_file_read"));
     assert!(ALL_EVENT_NAMES.contains(&"tengu_file_read_limits_override"));
+    assert!(ALL_EVENT_NAMES.contains(&"tengu_file_read_reread"));
 }
 
 #[test]

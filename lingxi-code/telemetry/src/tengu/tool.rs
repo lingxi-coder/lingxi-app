@@ -361,6 +361,13 @@ pub const SESSION_FILE_READ: &str = "tengu_session_file_read";
 /// no-op). Metadata (per TS): `hasMaxTokens` (bool), `hasMaxSizeBytes` (bool).
 pub const FILE_READ_LIMITS_OVERRIDE: &str = "tengu_file_read_limits_override";
 
+/// `tengu_file_read_reread` (#13) — fired when reading a file that ALREADY has a
+/// read-file-state entry, BEFORE the dedup short-circuit (claude-code:
+/// `if(f) j("tengu_file_read_reread",{priorOp: f.offset===void 0?"edit_write":
+/// "read"})`). Metadata: `priorOp` = `"read"` when the prior entry came from a
+/// Read, `"edit_write"` when it came from an Edit/Write.
+pub const FILE_READ_REREAD: &str = "tengu_file_read_reread";
+
 /// Order-locked array of all 140 names; consumed by `tengu::ALL_EVENT_NAMES`.
 /// M3-06 locked the first 40; M4-02 appended 9 (powershell/repl/sleep);
 /// M4-03 appended 3 (`web_search`); M4-04 appended 15 workflow events;
@@ -525,9 +532,13 @@ pub(crate) const NAMES: &[&str] = &[
 /// [`crate::tengu::ALL_EVENT_NAMES`] is preserved. They are concatenated at the
 /// GLOBAL TAIL of `ALL_EVENT_NAMES` (after the tui block) by `tengu::mod.rs`, so
 /// every existing per-block prefix slice stays valid and only the registry tail
-/// grows by 3. See `tengu_events.json` (positions 336/337/338).
-pub(crate) const FILE_READ_ANALYTICS_NAMES: &[&str] =
-    &[FILE_READ_DEDUP, SESSION_FILE_READ, FILE_READ_LIMITS_OVERRIDE];
+/// grows by 4. See `tengu_events.json` (positions 336/337/338/339).
+pub(crate) const FILE_READ_ANALYTICS_NAMES: &[&str] = &[
+    FILE_READ_DEDUP,
+    SESSION_FILE_READ,
+    FILE_READ_LIMITS_OVERRIDE,
+    FILE_READ_REREAD,
+];
 
 #[cfg(test)]
 mod m4_04_workflow_event_tests {
@@ -611,7 +622,7 @@ mod m4_04_workflow_event_tests {
         assert_eq!(
             NAMES.len(),
             140,
-            "M3-06 40 + M4-02 9 + M4-03 3 + M4-04 15 + M4-05 24 + M4-06 6 + M4-07 13 + M4-08 24 + cron_delete/cron_list 6 = 140 (FileReadTool analytics 3 live in FILE_READ_ANALYTICS_NAMES, concatenated at the registry tail)"
+            "M3-06 40 + M4-02 9 + M4-03 3 + M4-04 15 + M4-05 24 + M4-06 6 + M4-07 13 + M4-08 24 + cron_delete/cron_list 6 = 140 (FileReadTool analytics 4 live in FILE_READ_ANALYTICS_NAMES, concatenated at the registry tail)"
         );
     }
 }
@@ -936,20 +947,24 @@ mod file_read_analytics_event_tests {
         assert_eq!(FILE_READ_DEDUP, "tengu_file_read_dedup");
         assert_eq!(SESSION_FILE_READ, "tengu_session_file_read");
         assert_eq!(FILE_READ_LIMITS_OVERRIDE, "tengu_file_read_limits_override");
+        assert_eq!(FILE_READ_REREAD, "tengu_file_read_reread");
     }
 
     #[test]
-    fn file_read_analytics_array_contains_all_3_events() {
-        assert_eq!(FILE_READ_ANALYTICS_NAMES.len(), 3);
-        for name in [FILE_READ_DEDUP, SESSION_FILE_READ, FILE_READ_LIMITS_OVERRIDE] {
+    fn file_read_analytics_array_contains_all_4_events() {
+        assert_eq!(FILE_READ_ANALYTICS_NAMES.len(), 4);
+        for name in [
+            FILE_READ_DEDUP,
+            SESSION_FILE_READ,
+            FILE_READ_LIMITS_OVERRIDE,
+            FILE_READ_REREAD,
+        ] {
             assert!(
                 FILE_READ_ANALYTICS_NAMES.contains(&name),
                 "FILE_READ_ANALYTICS_NAMES missing event: {name}"
             );
-        }
-        // They are NOT `tengu_tool_*` events — assert the distinct family, and
-        // confirm they are kept OUT of the `tengu_tool_*` NAMES block.
-        for name in [FILE_READ_DEDUP, SESSION_FILE_READ, FILE_READ_LIMITS_OVERRIDE] {
+            // They are NOT `tengu_tool_*` events — assert the distinct family,
+            // and confirm they are kept OUT of the `tengu_tool_*` NAMES block.
             assert!(!name.starts_with("tengu_tool_"));
             assert!(!NAMES.contains(&name));
         }

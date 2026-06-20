@@ -44,12 +44,8 @@ use once_cell::sync::Lazy;
 use permission::result::PermissionMetadata;
 use permission::{PermissionDecisionReason, PermissionResult};
 use serde_json::{json, Map, Value};
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
-use telemetry::pii::{PiiTagged, Verified};
-use telemetry::sink::{AnalyticsValue, LogEventMetadata};
-use telemetry::tengu::tool::{GREP_COMPLETED, GREP_FAILED, GREP_STARTED};
 use tool_api::context::ToolUseContext;
 use tool_api::progress::ToolProgressSender;
 use tool_api::tool_trait::{
@@ -353,58 +349,6 @@ impl GrepTool {
     pub fn new(ctx: BuiltinToolContext) -> Self {
         Self { ctx }
     }
-
-    async fn emit_started(&self, invocation_id: &str, pattern: &str) {
-        let mut md: LogEventMetadata = HashMap::new();
-        md.insert(
-            "invocation_id".to_string(),
-            AnalyticsValue::String(Verified::assert_safe(invocation_id.to_string()).into_inner()),
-        );
-        md.insert(
-            "_PROTO_pattern".to_string(),
-            AnalyticsValue::String(
-                PiiTagged::assert_pii_tagged_column(pattern.to_string()).into_inner(),
-            ),
-        );
-        self.ctx.bus.log_event(GREP_STARTED, md).await;
-    }
-
-    async fn emit_completed(
-        &self,
-        invocation_id: &str,
-        matches: u64,
-        files_scanned: u64,
-        duration_ms: u64,
-    ) {
-        let mut md: LogEventMetadata = HashMap::new();
-        md.insert(
-            "invocation_id".to_string(),
-            AnalyticsValue::String(Verified::assert_safe(invocation_id.to_string()).into_inner()),
-        );
-        md.insert("matches".to_string(), AnalyticsValue::Int(matches as i64));
-        md.insert(
-            "files_scanned".to_string(),
-            AnalyticsValue::Int(files_scanned as i64),
-        );
-        md.insert(
-            "duration_ms".to_string(),
-            AnalyticsValue::Int(duration_ms as i64),
-        );
-        self.ctx.bus.log_event(GREP_COMPLETED, md).await;
-    }
-
-    async fn emit_failed(&self, invocation_id: &str, kind: &str) {
-        let mut md: LogEventMetadata = HashMap::new();
-        md.insert(
-            "invocation_id".to_string(),
-            AnalyticsValue::String(Verified::assert_safe(invocation_id.to_string()).into_inner()),
-        );
-        md.insert(
-            "failure_kind".to_string(),
-            AnalyticsValue::String(Verified::assert_safe(kind.to_string()).into_inner()),
-        );
-        self.ctx.bus.log_event(GREP_FAILED, md).await;
-    }
 }
 
 static INPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
@@ -483,8 +427,6 @@ impl Tool for GrepTool {
         _ctx: ToolUseContext,
         _tx: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
-        let invocation_id = tool_api::util::ids::ulid_or_uuid();
-
         // --- Arg parsing (GrepTool.ts:310-326) ---
         let pattern = input
             .get("pattern")
@@ -524,13 +466,11 @@ impl Tool for GrepTool {
         let count_mode = output_mode == "count";
 
         let started = Instant::now();
-        self.emit_started(&invocation_id, pattern).await;
 
         let canon_base = match canonicalize_and_validate(&base, &self.ctx.trusted_dirs) {
             Ok(p) => p,
             Err(_) => {
                 emit_blocked_event(&self.ctx.bus, TOOL_NAME, &base).await;
-                self.emit_failed(&invocation_id, "path_blocked").await;
                 return Err(ToolError::PathBlocked { path: base });
             }
         };
@@ -550,7 +490,6 @@ impl Tool for GrepTool {
         {
             Ok(m) => m,
             Err(e) => {
-                self.emit_failed(&invocation_id, "bad_regex").await;
                 return Err(ToolError::InvalidInput(format!(
                     "invalid regex {pattern:?}: {e}"
                 )));
@@ -569,7 +508,6 @@ impl Tool for GrepTool {
         if let Some(g) = glob_filter {
             for pat in split_glob_patterns(g) {
                 if let Err(e) = ob.add(&pat) {
-                    self.emit_failed(&invocation_id, "bad_glob").await;
                     return Err(ToolError::InvalidInput(format!("invalid glob {pat:?}: {e}")));
                 }
             }
@@ -577,7 +515,6 @@ impl Tool for GrepTool {
         let overrides = match ob.build() {
             Ok(o) => o,
             Err(e) => {
-                self.emit_failed(&invocation_id, "bad_glob").await;
                 return Err(ToolError::InvalidInput(format!("invalid glob: {e}")));
             }
         };
@@ -591,7 +528,6 @@ impl Tool for GrepTool {
                 match tb.build() {
                     Ok(types) => Some(types),
                     Err(e) => {
-                        self.emit_failed(&invocation_id, "bad_type").await;
                         return Err(ToolError::InvalidInput(format!("invalid type {t:?}: {e}")));
                     }
                 }
@@ -625,7 +561,6 @@ impl Tool for GrepTool {
         let mut count_lines: Vec<String> = Vec::new();
         let mut files_matched: Vec<(PathBuf, SystemTime)> = Vec::new();
         let mut total_matches: u64 = 0;
-        let mut files_scanned: u64 = 0;
         let mut overflow_any = false;
 
         // --- Wall-clock budget on the walk (`utils/ripgrep.ts:130-133`) ---
@@ -651,7 +586,6 @@ impl Tool for GrepTool {
                 continue;
             }
             let path = entry.path();
-            files_scanned += 1;
 
             let mut sb = SearcherBuilder::new();
             sb.multi_line(multiline);
@@ -722,13 +656,8 @@ impl Tool for GrepTool {
         let had_results =
             total_matches > 0 || !files_matched.is_empty() || !content_lines.is_empty();
         if timed_out && !had_results {
-            self.emit_failed(&invocation_id, "timeout").await;
             return Err(ToolError::Io(RIPGREP_TIMEOUT_MSG(is_wsl)));
         }
-
-        let duration_ms = started.elapsed().as_millis() as u64;
-        self.emit_completed(&invocation_id, total_matches, files_scanned, duration_ms)
-            .await;
 
         // --- Assemble per-mode model string + metadata ---
         let mut data = Map::new();

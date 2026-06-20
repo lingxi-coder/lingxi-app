@@ -5,7 +5,7 @@
 use telemetry::tengu::ALL_EVENT_NAMES;
 
 #[test]
-fn registry_is_exactly_330_entries() {
+fn registry_is_exactly_347_entries() {
     // M4-05 added 24 events (8 agent/task tools × 3 lifecycle stages),
     // M4-06 added 6 (2 team tools × 3 lifecycle stages),
     // M4-07 added 13 (1 MCP_STARTED + 4 new tools × 3 lifecycle stages),
@@ -54,8 +54,12 @@ fn registry_is_exactly_330_entries() {
     // bypass dialog accept): 349 + 1 = 350.
     // Coordinator swarm added 3 as its own global-tail block
     // (coordinator::NAMES — tengu_team_created, tengu_team_deleted,
-    // tengu_coordinator_mode_switched): 350 + 3 = 353.
-    assert_eq!(ALL_EVENT_NAMES.len(), 353);
+    // tengu_coordinator_mode_switched): 344 + 3 = 347.
+    // Grep/Glob telemetry removed: claude-code v2.1.183 emits NO
+    // tengu_tool_grep_* / tengu_tool_glob_* events, so the 6 fabricated
+    // names were dropped from the tool block (tool block 140 → 134),
+    // shifting the total from 353 → 347.
+    assert_eq!(ALL_EVENT_NAMES.len(), 347);
 }
 
 #[test]
@@ -178,21 +182,24 @@ fn category_ordering_preserved() {
     // shifting downstream offsets by +24.
     // M5-07 shifts all post-session offsets by +3.
     // M5-08 shifts all post-session offsets by another +2.
-    // CronDelete/CronList grow the tool block by +6 (134 → 140), shifting all
+    // CronDelete/CronList grow the tool block by +6 (128 → 134), shifting all
     // downstream offsets by +6.
-    for n in &ALL_EVENT_NAMES[75..215] {
+    // Grep/Glob telemetry removed (claude-code emits none): the 6 fabricated
+    // tengu_tool_grep_* / tengu_tool_glob_* names are dropped, so the tool
+    // block is 134 (not 140) and every downstream offset shifts back by -6.
+    for n in &ALL_EVENT_NAMES[75..209] {
         assert!(n.starts_with("tengu_tool_"), "tool block: {n}");
     }
-    for n in &ALL_EVENT_NAMES[215..225] {
+    for n in &ALL_EVENT_NAMES[209..219] {
         assert!(n.starts_with("tengu_cost_"), "cost block: {n}");
     }
-    for n in &ALL_EVENT_NAMES[225..233] {
+    for n in &ALL_EVENT_NAMES[219..227] {
         assert!(n.starts_with("tengu_oauth_"), "oauth block: {n}");
     }
-    for n in &ALL_EVENT_NAMES[233..245] {
+    for n in &ALL_EVENT_NAMES[227..239] {
         assert!(n.starts_with("tengu_memory_"), "memory block: {n}");
     }
-    for n in &ALL_EVENT_NAMES[245..248] {
+    for n in &ALL_EVENT_NAMES[239..242] {
         assert!(n.starts_with("tengu_settings_"), "settings block: {n}");
     }
     // M5-02 grew the orchestrator block by +3 (conversation lifecycle).
@@ -202,7 +209,7 @@ fn category_ordering_preserved() {
     // Block size is now 17; release marker still trails. Walk order is
     // fixed by tengu::mod.rs's concat_all (settings → orchestrator →
     // release).
-    for n in &ALL_EVENT_NAMES[248..265] {
+    for n in &ALL_EVENT_NAMES[242..259] {
         assert!(
             n.starts_with("tengu_orchestrator_") || n.starts_with("tengu_repl_"),
             "orchestrator block: {n}"
@@ -211,16 +218,16 @@ fn category_ordering_preserved() {
     // M5-14 grew the release block from 1 to 2 (+lingxi_core_v0_6_0_released).
     // M6-09 grew it from 2 to 3 (+lingxi_core_v0_7_0_released).
     // M7-16 grew it from 3 to 4 (+lingxi_core_v0_8_0_released).
-    // CronDelete/CronList shift the start by +6 (tool block 134→140): 265..269.
-    for n in &ALL_EVENT_NAMES[265..269] {
+    // Grep/Glob telemetry removed shifts the start back by -6 (tool block
+    // 140→134): 259..263.
+    for n in &ALL_EVENT_NAMES[259..263] {
         assert!(n.starts_with("lingxi_core_"), "release block: {n}");
     }
     // M5-10/M5-11: command block (54 events: 18 batch-1 + 36 batch-2) follows
     // the release markers. Walk order (per tengu::mod.rs concat_all):
-    // … → release → command. M6-09 shifted the start by +1 (release 2→3);
-    // M7-16 shifts it another +1 (release 3→4). CronDelete/CronList shift it
-    // by +6 (tool block 134→140): 269..323.
-    for n in &ALL_EVENT_NAMES[269..323] {
+    // … → release → command. Grep/Glob telemetry removed shifts it back by -6
+    // (tool block 140→134): 263..317.
+    for n in &ALL_EVENT_NAMES[263..317] {
         assert!(n.starts_with("tengu_command_"), "command block: {n}");
     }
     // M6-01: tui block (4 events) trails command.
@@ -229,9 +236,9 @@ fn category_ordering_preserved() {
     // M6-09: tui block grows to 10 events (+scroll_started/scroll_ended).
     // M7-16: tui block grows to 13 events
     //        (+screen_opened/screen_closed/search_opened). Block shifted by +2
-    //        total vs M6-09 (release 2→3→4). CronDelete/CronList shift it by +6
-    //        (tool block 134→140): 323..336.
-    for n in &ALL_EVENT_NAMES[323..336] {
+    //        total vs M6-09 (release 2→3→4). Grep/Glob telemetry removed shifts
+    //        it back by -6 (tool block 140→134): 317..330.
+    for n in &ALL_EVENT_NAMES[317..330] {
         assert!(n.starts_with("tengu_tui_"), "tui block: {n}");
     }
     // FileReadTool analytics block (4 events, #13 added the 4th) appended at the
@@ -239,7 +246,7 @@ fn category_ordering_preserved() {
     // (NOT `tengu_tool_*`), kept after the tui block so every per-block prefix
     // slice above stays valid.
     assert_eq!(
-        &ALL_EVENT_NAMES[336..340],
+        &ALL_EVENT_NAMES[330..334],
         &[
             "tengu_file_read_dedup",
             "tengu_session_file_read",
@@ -250,24 +257,24 @@ fn category_ordering_preserved() {
     );
     // Config-migration block (9 events) appended after the FileRead block —
     // order matches TS runMigrations execution order (main.tsx:328-336).
-    // Positions 340..349.
+    // Positions 334..343 (shifted -6 by the Grep/Glob telemetry removal).
     assert_eq!(
-        &ALL_EVENT_NAMES[340..349],
+        &ALL_EVENT_NAMES[334..343],
         &telemetry::tengu::migration::NAMES,
         "config-migration tail block",
     );
     // Permission-flow block (1 event) appended after the config-migration
     // block — bypass dialog accept (BypassPermissionsModeDialog.tsx).
-    // Position 349..350.
+    // Position 343..344.
     assert_eq!(
-        &ALL_EVENT_NAMES[349..350],
+        &ALL_EVENT_NAMES[343..344],
         &telemetry::tengu::permission::NAMES,
         "permission-flow tail block",
     );
     // Coordinator swarm block (3 events) appended after the permission block —
-    // tengu_team_created/_deleted/coordinator_mode_switched. Positions 350..353.
+    // tengu_team_created/_deleted/coordinator_mode_switched. Positions 344..347.
     assert_eq!(
-        &ALL_EVENT_NAMES[350..353],
+        &ALL_EVENT_NAMES[344..347],
         &telemetry::tengu::coordinator::NAMES,
         "coordinator swarm tail block",
     );

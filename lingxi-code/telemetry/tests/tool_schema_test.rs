@@ -1,7 +1,10 @@
 use telemetry::tengu::tool;
 
 #[test]
-fn all_40_tool_event_names_are_locked() {
+fn all_34_tool_event_names_are_locked() {
+    // The M3-06 baseline was 40 events; the 6 fabricated grep/glob events
+    // (tengu_tool_grep_* / tengu_tool_glob_*) were removed to match
+    // claude-code v2.1.183, which emits none — so the baseline is now 34.
     let names: &[&str] = &[
         tool::STARTED,
         tool::COMPLETED,
@@ -24,12 +27,6 @@ fn all_40_tool_event_names_are_locked() {
         tool::WRITE_STARTED,
         tool::WRITE_COMPLETED,
         tool::WRITE_FAILED,
-        tool::GREP_STARTED,
-        tool::GREP_COMPLETED,
-        tool::GREP_FAILED,
-        tool::GLOB_STARTED,
-        tool::GLOB_COMPLETED,
-        tool::GLOB_FAILED,
         tool::WEB_FETCH_STARTED,
         tool::WEB_FETCH_COMPLETED,
         tool::WEB_FETCH_FAILED,
@@ -46,8 +43,8 @@ fn all_40_tool_event_names_are_locked() {
     ];
     assert_eq!(
         names.len(),
-        40,
-        "tool category must declare exactly 40 events"
+        34,
+        "tool category baseline must declare exactly 34 events (40 − 6 grep/glob)"
     );
     for n in names {
         assert!(

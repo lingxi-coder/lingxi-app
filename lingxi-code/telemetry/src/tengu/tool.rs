@@ -3,8 +3,10 @@
 //!
 //! Spec §7 line 768-779. Covers the generic tool lifecycle (started/completed/
 //! failed/cancelled), the permission gate, and per-tool started/completed/
-//! failed triads for bash, edit, read, write, grep, glob, `web_fetch`, task,
-//! notebook, and MCP, plus a single skill-invocation event. User-derived
+//! failed triads for bash, edit, read, write, `web_fetch`, task,
+//! notebook, and MCP, plus a single skill-invocation event. Grep/Glob emit
+//! NO telemetry (claude-code v2.1.183 emits no `tengu_tool_grep_*` /
+//! `tengu_tool_glob_*` events; the port matches it). User-derived
 //! string identifiers are typed [`Verified`](crate::Verified); free-form user
 //! content that may carry filepaths, secrets, or org-internal hostnames is
 //! [`PiiTagged`](crate::PiiTagged).
@@ -56,18 +58,6 @@ pub const WRITE_STARTED: &str = "tengu_tool_write_started";
 pub const WRITE_COMPLETED: &str = "tengu_tool_write_completed";
 /// `tengu_tool_write_failed` — Write tool errored.
 pub const WRITE_FAILED: &str = "tengu_tool_write_failed";
-/// `tengu_tool_grep_started` — Grep tool began scanning.
-pub const GREP_STARTED: &str = "tengu_tool_grep_started";
-/// `tengu_tool_grep_completed` — Grep tool returned match results.
-pub const GREP_COMPLETED: &str = "tengu_tool_grep_completed";
-/// `tengu_tool_grep_failed` — Grep tool errored (bad regex, IO).
-pub const GREP_FAILED: &str = "tengu_tool_grep_failed";
-/// `tengu_tool_glob_started` — Glob tool began expanding a pattern.
-pub const GLOB_STARTED: &str = "tengu_tool_glob_started";
-/// `tengu_tool_glob_completed` — Glob tool returned matched paths.
-pub const GLOB_COMPLETED: &str = "tengu_tool_glob_completed";
-/// `tengu_tool_glob_failed` — Glob tool errored.
-pub const GLOB_FAILED: &str = "tengu_tool_glob_failed";
 /// `tengu_tool_web_fetch_started` — `WebFetch` tool began an HTTP request.
 pub const WEB_FETCH_STARTED: &str = "tengu_tool_web_fetch_started";
 /// `tengu_tool_web_fetch_completed` — `WebFetch` tool received the response.
@@ -368,8 +358,10 @@ pub const FILE_READ_LIMITS_OVERRIDE: &str = "tengu_file_read_limits_override";
 /// Read, `"edit_write"` when it came from an Edit/Write.
 pub const FILE_READ_REREAD: &str = "tengu_file_read_reread";
 
-/// Order-locked array of all 140 names; consumed by `tengu::ALL_EVENT_NAMES`.
-/// M3-06 locked the first 40; M4-02 appended 9 (powershell/repl/sleep);
+/// Order-locked array of all 134 names; consumed by `tengu::ALL_EVENT_NAMES`.
+/// M3-06 locked the first 40 (less the 6 grep/glob events later removed to
+/// match claude-code, which emits no `tengu_tool_grep_*`/`tengu_tool_glob_*`);
+/// M4-02 appended 9 (powershell/repl/sleep);
 /// M4-03 appended 3 (`web_search`); M4-04 appended 15 workflow events;
 /// M4-05 appended 24 agent/task events; M4-06 appends 6 team events;
 /// M4-07 appends 13 MCP + LSP events; M4-08 appends 24 system events;
@@ -398,12 +390,6 @@ pub(crate) const NAMES: &[&str] = &[
     WRITE_STARTED,
     WRITE_COMPLETED,
     WRITE_FAILED,
-    GREP_STARTED,
-    GREP_COMPLETED,
-    GREP_FAILED,
-    GLOB_STARTED,
-    GLOB_COMPLETED,
-    GLOB_FAILED,
     WEB_FETCH_STARTED,
     WEB_FETCH_COMPLETED,
     WEB_FETCH_FAILED,
@@ -621,8 +607,8 @@ mod m4_04_workflow_event_tests {
         }
         assert_eq!(
             NAMES.len(),
-            140,
-            "M3-06 40 + M4-02 9 + M4-03 3 + M4-04 15 + M4-05 24 + M4-06 6 + M4-07 13 + M4-08 24 + cron_delete/cron_list 6 = 140 (FileReadTool analytics 4 live in FILE_READ_ANALYTICS_NAMES, concatenated at the registry tail)"
+            134,
+            "M3-06 34 (40 baseline − 6 grep/glob removed to match claude-code) + M4-02 9 + M4-03 3 + M4-04 15 + M4-05 24 + M4-06 6 + M4-07 13 + M4-08 24 + cron_delete/cron_list 6 = 134 (FileReadTool analytics 4 live in FILE_READ_ANALYTICS_NAMES, concatenated at the registry tail)"
         );
     }
 }
@@ -1264,75 +1250,9 @@ pub struct WriteFailedPayload {
     pub failure_kind: ToolFailureKind,
 }
 
-// -- Grep payloads ------------------------------------------------------------
-
-/// Payload for [`GREP_STARTED`].
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct GrepStartedPayload {
-    /// Stable identifier for this tool invocation.
-    pub invocation_id: Verified,
-    /// PII-tagged: regex pattern may include filepath fragments.
-    pub pattern: PiiTagged,
-}
-
-/// Payload for [`GREP_COMPLETED`].
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct GrepCompletedPayload {
-    /// Stable identifier for this tool invocation.
-    pub invocation_id: Verified,
-    /// Number of matching lines / hits.
-    pub matches: u64,
-    /// Number of files scanned.
-    pub files_scanned: u64,
-    /// Wall-clock duration of the tool call in milliseconds.
-    pub duration_ms: u64,
-}
-
-/// Payload for [`GREP_FAILED`].
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct GrepFailedPayload {
-    /// Stable identifier for this tool invocation.
-    pub invocation_id: Verified,
-    /// Coarse failure classification.
-    pub failure_kind: ToolFailureKind,
-}
-
-// -- Glob payloads ------------------------------------------------------------
-
-/// Payload for [`GLOB_STARTED`].
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct GlobStartedPayload {
-    /// Stable identifier for this tool invocation.
-    pub invocation_id: Verified,
-    /// PII-tagged: glob pattern may include filepath fragments.
-    pub pattern: PiiTagged,
-}
-
-/// Payload for [`GLOB_COMPLETED`].
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct GlobCompletedPayload {
-    /// Stable identifier for this tool invocation.
-    pub invocation_id: Verified,
-    /// Number of files matched by the pattern.
-    pub matches: u64,
-    /// Wall-clock duration of the tool call in milliseconds.
-    pub duration_ms: u64,
-}
-
-/// Payload for [`GLOB_FAILED`].
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct GlobFailedPayload {
-    /// Stable identifier for this tool invocation.
-    pub invocation_id: Verified,
-    /// Coarse failure classification.
-    pub failure_kind: ToolFailureKind,
-}
+// Grep/Glob emit NO telemetry (claude-code v2.1.183 emits no
+// `tengu_tool_grep_*` / `tengu_tool_glob_*` events), so there are no Grep/Glob
+// payload structs.
 
 // -- WebFetch payloads --------------------------------------------------------
 

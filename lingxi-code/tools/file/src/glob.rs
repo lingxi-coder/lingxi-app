@@ -38,12 +38,8 @@ use once_cell::sync::Lazy;
 use permission::result::PermissionMetadata;
 use permission::{PermissionDecisionReason, PermissionResult};
 use serde_json::{json, Value};
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::{Instant, SystemTime};
-use telemetry::pii::{PiiTagged, Verified};
-use telemetry::sink::{AnalyticsValue, LogEventMetadata};
-use telemetry::tengu::tool::{GLOB_COMPLETED, GLOB_FAILED, GLOB_STARTED};
 use tool_api::context::ToolUseContext;
 use tool_api::progress::ToolProgressSender;
 use tool_api::tool_trait::{
@@ -122,48 +118,6 @@ impl GlobTool {
     pub fn new(ctx: BuiltinToolContext) -> Self {
         Self { ctx }
     }
-
-    async fn emit_started(&self, invocation_id: &str, pattern: &str) {
-        let mut md: LogEventMetadata = HashMap::new();
-        md.insert(
-            "invocation_id".to_string(),
-            AnalyticsValue::String(Verified::assert_safe(invocation_id.to_string()).into_inner()),
-        );
-        md.insert(
-            "_PROTO_pattern".to_string(),
-            AnalyticsValue::String(
-                PiiTagged::assert_pii_tagged_column(pattern.to_string()).into_inner(),
-            ),
-        );
-        self.ctx.bus.log_event(GLOB_STARTED, md).await;
-    }
-
-    async fn emit_completed(&self, invocation_id: &str, matches: u64, duration_ms: u64) {
-        let mut md: LogEventMetadata = HashMap::new();
-        md.insert(
-            "invocation_id".to_string(),
-            AnalyticsValue::String(Verified::assert_safe(invocation_id.to_string()).into_inner()),
-        );
-        md.insert("matches".to_string(), AnalyticsValue::Int(matches as i64));
-        md.insert(
-            "duration_ms".to_string(),
-            AnalyticsValue::Int(duration_ms as i64),
-        );
-        self.ctx.bus.log_event(GLOB_COMPLETED, md).await;
-    }
-
-    async fn emit_failed(&self, invocation_id: &str, kind: &str) {
-        let mut md: LogEventMetadata = HashMap::new();
-        md.insert(
-            "invocation_id".to_string(),
-            AnalyticsValue::String(Verified::assert_safe(invocation_id.to_string()).into_inner()),
-        );
-        md.insert(
-            "failure_kind".to_string(),
-            AnalyticsValue::String(Verified::assert_safe(kind.to_string()).into_inner()),
-        );
-        self.ctx.bus.log_event(GLOB_FAILED, md).await;
-    }
 }
 
 static INPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
@@ -224,7 +178,6 @@ impl Tool for GlobTool {
         _ctx: ToolUseContext,
         _tx: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
-        let invocation_id = tool_api::util::ids::ulid_or_uuid();
         let pattern = input
             .get("pattern")
             .and_then(Value::as_str)
@@ -240,7 +193,6 @@ impl Tool for GlobTool {
             })?;
 
         let started = Instant::now();
-        self.emit_started(&invocation_id, pattern).await;
 
         // An absolute pattern (e.g. `/abs/proj/**/*.rs`) is split into a static
         // base dir + relative remainder — ripgrep's `--glob` only works with
@@ -262,7 +214,6 @@ impl Tool for GlobTool {
             Ok(p) => p,
             Err(_) => {
                 emit_blocked_event(&self.ctx.bus, TOOL_NAME, &base).await;
-                self.emit_failed(&invocation_id, "path_blocked").await;
                 return Err(ToolError::PathBlocked { path: base });
             }
         };
@@ -273,7 +224,6 @@ impl Tool for GlobTool {
         // matches `sub/x.rs`, fixing the old root-only behavior.
         let mut ob = OverrideBuilder::new(&canon_base);
         if let Err(e) = ob.add(pattern) {
-            self.emit_failed(&invocation_id, "bad_pattern").await;
             return Err(ToolError::InvalidInput(format!(
                 "invalid glob pattern {pattern:?}: {e}"
             )));
@@ -281,7 +231,6 @@ impl Tool for GlobTool {
         let overrides = match ob.build() {
             Ok(o) => o,
             Err(e) => {
-                self.emit_failed(&invocation_id, "bad_pattern").await;
                 return Err(ToolError::InvalidInput(format!(
                     "invalid glob pattern {pattern:?}: {e}"
                 )));
@@ -344,7 +293,6 @@ impl Tool for GlobTool {
         // error (so the model knows the search didn't complete); a timeout WITH
         // partial results returns them.
         if timed_out && hits.is_empty() {
-            self.emit_failed(&invocation_id, "timeout").await;
             return Err(ToolError::Io(RIPGREP_TIMEOUT_MSG(is_wsl)));
         }
 
@@ -378,10 +326,6 @@ impl Tool for GlobTool {
         } else {
             matches.join("\n")
         };
-
-        let duration_ms = started.elapsed().as_millis() as u64;
-        self.emit_completed(&invocation_id, matches.len() as u64, duration_ms)
-            .await;
 
         Ok(ToolCallResult {
             // `content` is what the model sees (turn_loop `tool_result_to_model_text`

@@ -63,19 +63,20 @@ pub const ALL_EVENT_NAMES: &[&str] = {
     //        → 330 total. Cumulative across releases:
     //          v0.4.0 (M3-06): 196 · v0.5.0 (M4-09): 238 ·
     //          v0.6.0 (M5-14): 315 · v0.7.0 (M6-09): 326 · v0.8.0 (M7-16): 330.
-    // CronDelete/CronList: tool block grows 134 → 140 (+6, 2 tools × 3 stages)
-    //        → 336 total.
+    // CronDelete/CronList: tool block grows 128 → 134 (+6, 2 tools × 3 stages)
+    //        → 330 total. (Grep/Glob emit no telemetry, matching claude-code
+    //        v2.1.183 — 6 fewer tengu_tool_* events than the old 140-name block.)
     // FileReadTool analytics: +4 appended at the GLOBAL TAIL (tengu_file_read_dedup,
     //        tengu_session_file_read, tengu_file_read_limits_override,
     //        tengu_file_read_reread [#13]) — NOT in the tool concat block (they are
-    //        not tengu_tool_*) → 340 total. The `+ 4` below (between `13` and `9`)
+    //        not tengu_tool_*) → 334 total. The `+ 4` below (between `13` and `9`)
     //        is `tool::FILE_READ_ANALYTICS_NAMES.len()`.
-    // Config migrations: +9 (migration::NAMES, runMigrations port) → 349 total.
-    // Bypass-permissions dialog: +1 (permission::NAMES) → 350 total.
+    // Config migrations: +9 (migration::NAMES, runMigrations port) → 343 total.
+    // Bypass-permissions dialog: +1 (permission::NAMES) → 344 total.
     // Coordinator swarm events: +3 (coordinator::NAMES — tengu_team_created,
     //        tengu_team_deleted, tengu_coordinator_mode_switched) appended as
-    //        their own GLOBAL-TAIL block after the permission block → 353 total.
-    const TOTAL: usize = 25 + 30 + 20 + 140 + 10 + 8 + 12 + 3 + 17 + 4 + 54 + 13 + 4 + 9 + 1 + 3;
+    //        their own GLOBAL-TAIL block after the permission block → 347 total.
+    const TOTAL: usize = 25 + 30 + 20 + 134 + 10 + 8 + 12 + 3 + 17 + 4 + 54 + 13 + 4 + 9 + 1 + 3;
     const fn concat_all() -> [&'static str; TOTAL] {
         let mut out: [&'static str; TOTAL] = [""; TOTAL];
         let mut idx = 0;
@@ -155,7 +156,7 @@ pub const ALL_EVENT_NAMES: &[&str] = {
         // are appended at the GLOBAL TAIL — they are not `tengu_tool_*`, so keeping
         // them out of the tool concat block preserves every per-block prefix slice
         // in event_name_completeness_test::category_ordering_preserved. Positions
-        // 336/337/338 (tengu_events.json fixture).
+        // 330/331/332/333 (tengu_events.json fixture).
         let mut i = 0;
         while i < tool::FILE_READ_ANALYTICS_NAMES.len() {
             out[idx] = tool::FILE_READ_ANALYTICS_NAMES[i];
@@ -163,7 +164,7 @@ pub const ALL_EVENT_NAMES: &[&str] = {
             i += 1;
         }
         // Config-migration block (tengu_migrate_* / model-migration markers) —
-        // appended after the FileRead global tail. Positions 339..348.
+        // appended after the FileRead global tail. Positions 334..343.
         let mut i = 0;
         while i < migration::NAMES.len() {
             out[idx] = migration::NAMES[i];
@@ -171,7 +172,7 @@ pub const ALL_EVENT_NAMES: &[&str] = {
             i += 1;
         }
         // Permission-flow block (bypass dialog accept) — appended after the
-        // config-migration block. Position 348.
+        // config-migration block. Position 343.
         let mut i = 0;
         while i < permission::NAMES.len() {
             out[idx] = permission::NAMES[i];
@@ -180,7 +181,7 @@ pub const ALL_EVENT_NAMES: &[&str] = {
         }
         // Coordinator swarm block (tengu_team_created/_deleted/
         // coordinator_mode_switched) — appended after the permission block.
-        // Positions 349..352.
+        // Positions 344..347.
         let mut i = 0;
         while i < coordinator::NAMES.len() {
             out[idx] = coordinator::NAMES[i];

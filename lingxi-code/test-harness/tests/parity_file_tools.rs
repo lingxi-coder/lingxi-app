@@ -48,8 +48,9 @@ struct TelemetryEventsRow {
     write: Vec<String>,
     edit: Vec<String>,
     notebook: Vec<String>,
-    glob: Vec<String>,
-    grep: Vec<String>,
+    // Grep and Glob emit NO telemetry (claude-code v2.1.183 emits no
+    // tengu_tool_grep_* / tengu_tool_glob_* events), so there are no
+    // `glob` / `grep` event lists.
 }
 
 #[derive(Deserialize)]
@@ -200,20 +201,7 @@ fn file_tools_fixture_matches_production_constants() {
             ev::NOTEBOOK_FAILED.to_string()
         ]
     );
-    assert_eq!(
-        fx.telemetry_events.glob,
-        vec![
-            ev::GLOB_STARTED.to_string(),
-            ev::GLOB_COMPLETED.to_string(),
-            ev::GLOB_FAILED.to_string()
-        ]
-    );
-    assert_eq!(
-        fx.telemetry_events.grep,
-        vec![
-            ev::GREP_STARTED.to_string(),
-            ev::GREP_COMPLETED.to_string(),
-            ev::GREP_FAILED.to_string()
-        ]
-    );
+    // Grep and Glob emit NO telemetry (claude-code v2.1.183 emits no
+    // tengu_tool_grep_* / tengu_tool_glob_* events), so there is nothing to
+    // assert for them here.
 }

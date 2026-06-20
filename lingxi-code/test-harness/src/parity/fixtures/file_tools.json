@@ -48,8 +48,6 @@
     "read":     ["tengu_tool_read_started", "tengu_tool_read_completed", "tengu_tool_read_failed"],
     "write":    ["tengu_tool_write_started", "tengu_tool_write_completed", "tengu_tool_write_failed"],
     "edit":     ["tengu_tool_edit_started", "tengu_tool_edit_completed", "tengu_tool_edit_failed"],
-    "notebook": ["tengu_tool_notebook_started", "tengu_tool_notebook_completed", "tengu_tool_notebook_failed"],
-    "glob":     ["tengu_tool_glob_started", "tengu_tool_glob_completed", "tengu_tool_glob_failed"],
-    "grep":     ["tengu_tool_grep_started", "tengu_tool_grep_completed", "tengu_tool_grep_failed"]
+    "notebook": ["tengu_tool_notebook_started", "tengu_tool_notebook_completed", "tengu_tool_notebook_failed"]
   }
 }

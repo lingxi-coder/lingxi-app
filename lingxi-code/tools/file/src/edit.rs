@@ -59,6 +59,13 @@ pub const PATCH_TRUNCATION_SUFFIX_TEMPLATE: &str = "\n\n... [{N} lines truncated
 /// suffix is appended. Chosen so a typical diff fits.
 pub const PATCH_PREVIEW_LINE_LIMIT: usize = 30;
 
+/// Maximum editable file size — byte-faithful to claude-code `FileEditTool`
+/// `validateInput` constant `DYa = 1073741824` (1 GiB; binary offset
+/// 202620510). A file whose on-disk size is *strictly greater* than this is
+/// rejected (`errorCode: 10`) before its body is read, with the
+/// [`MAX_EDIT_FILE_SIZE`]-derived "File is too large to edit" message.
+pub const MAX_EDIT_FILE_SIZE: u64 = 1_073_741_824;
+
 /// Build the byte-locked patch-truncation suffix with `n` substituted.
 #[must_use]
 pub fn patch_truncation_suffix(n: usize) -> String {
@@ -321,6 +328,28 @@ impl Tool for FileEditTool {
             }
         };
 
+        // Maximum-editable-file-size gate (claude-code `validateInput`
+        // errorCode 10, binary offset 202622179): after the deny check and
+        // before the body is read, `stat` the target and reject anything
+        // strictly larger than `DYa` (= [`MAX_EDIT_FILE_SIZE`], 1 GiB). A
+        // `stat` failure (e.g. the file does not exist — an empty-`old_string`
+        // creation) is swallowed in the binary (`catch(g){if(!Pn(g))throw g}`),
+        // so a missing file falls through to the normal create/read path.
+        if let Ok(metadata) = tokio::fs::metadata(&canon).await {
+            let size = metadata.len();
+            if size > MAX_EDIT_FILE_SIZE {
+                self.emit_failed(&invocation_id, "file_too_large").await;
+                // Byte-locked message; both sizes via `format_file_size`
+                // (TS `formatFileSize` / binary `Ma`), so the 1-GiB cap
+                // renders as `1GB`.
+                return Err(ToolError::InvalidInput(format!(
+                    "File is too large to edit ({}). Maximum editable file size is {}.",
+                    crate::read::format_file_size(size),
+                    crate::read::format_file_size(MAX_EDIT_FILE_SIZE),
+                )));
+            }
+        }
+
         // Distinguish "does not exist" from a real read error so an empty
         // `old_string` can mean new-file creation (claude-code FileEditTool).
         //
@@ -472,10 +501,27 @@ impl Tool for FileEditTool {
                             "Found {count} matches of the string to replace, but replace_all is false. To replace all occurrences, set replace_all to true. To replace only one occurrence, please provide more context to uniquely identify the instance.\nString: {old_string}"
                         )));
                     }
-                    let after = if replace_all {
-                        before.replace(actual_old.as_str(), &actual_new)
+                    // Apply the replacement, byte-faithful to claude-code
+                    // `AUa` (binary offset 201328322):
+                    //   if new_string !== "" -> replace old_string verbatim;
+                    //   else (a pure DELETION) and old_string does NOT already
+                    //   end with "\n" and the file contains `old_string + "\n"`,
+                    //   replace `old_string + "\n"` instead — so deleting a line
+                    //   also consumes its trailing newline and leaves no blank
+                    //   line behind. The +\n logic runs on the curly-normalized
+                    //   `actual_old`/`actual_new` (== TS `D`/`N` post-`vIe`).
+                    let search_target = if actual_new.is_empty()
+                        && !actual_old.ends_with('\n')
+                        && before.contains(&format!("{actual_old}\n"))
+                    {
+                        format!("{actual_old}\n")
                     } else {
-                        before.replacen(actual_old.as_str(), &actual_new, 1)
+                        actual_old.clone()
+                    };
+                    let after = if replace_all {
+                        before.replace(search_target.as_str(), &actual_new)
+                    } else {
+                        before.replacen(search_target.as_str(), &actual_new, 1)
                     };
                     let replacements = if replace_all { count as u32 } else { 1 };
                     (before, after, replacements)
@@ -701,6 +747,222 @@ mod tests {
             edit_result_message(input_path, false)
         );
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "hello Rust");
+    }
+
+    // ── Finding #16: deletion (new_string == "") consumes the trailing newline,
+    // byte-faithful to claude-code `AUa` (binary offset 201328322). ──────────
+
+    #[tokio::test]
+    async fn deletion_consumes_trailing_newline_no_blank_line() {
+        // Deleting a whole line (old_string has no trailing "\n") must also
+        // remove the line's newline so no blank line is left behind — claude-code
+        // `AUa` replaces `old_string + "\n"` when new_string is empty.
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("a.txt");
+        std::fs::write(&target, "alpha\nbravo\ncharlie\n").unwrap();
+        let (ctx, _sink) = make_ctx(&tmp);
+        seed_full_read(&ctx, &target);
+        let tool = FileEditTool::new(ctx);
+        tool.call(
+            json!({
+                "file_path": target.to_str().unwrap(),
+                "old_string": "bravo",
+                "new_string": ""
+            }),
+            fresh_ctx(),
+            fresh_tx(),
+        )
+        .await
+        .unwrap();
+        // Trailing "\n" of the deleted line is consumed: no leftover blank line.
+        assert_eq!(
+            std::fs::read_to_string(&target).unwrap(),
+            "alpha\ncharlie\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn deletion_old_string_already_ending_in_newline_not_double_consumed() {
+        // When old_string already ends in "\n", the `AUa` deletion branch's
+        // `!t.endsWith("\n")` guard is false, so we replace exactly old_string
+        // (no extra newline consumed → the NEXT line's newline survives).
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("b.txt");
+        std::fs::write(&target, "alpha\nbravo\ncharlie\n").unwrap();
+        let (ctx, _sink) = make_ctx(&tmp);
+        seed_full_read(&ctx, &target);
+        let tool = FileEditTool::new(ctx);
+        tool.call(
+            json!({
+                "file_path": target.to_str().unwrap(),
+                "old_string": "bravo\n",
+                "new_string": ""
+            }),
+            fresh_ctx(),
+            fresh_tx(),
+        )
+        .await
+        .unwrap();
+        // Exactly "bravo\n" removed; charlie's own newline is untouched.
+        assert_eq!(
+            std::fs::read_to_string(&target).unwrap(),
+            "alpha\ncharlie\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn deletion_without_following_newline_replaces_verbatim() {
+        // old_string with no trailing "\n" AND the file does NOT contain
+        // `old_string + "\n"` (e.g. the match is the last token, no newline
+        // after it) → `AUa`'s `e.includes(t+"\n")` is false, so it replaces
+        // old_string verbatim.
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("c.txt");
+        std::fs::write(&target, "keep this charlie").unwrap();
+        let (ctx, _sink) = make_ctx(&tmp);
+        seed_full_read(&ctx, &target);
+        let tool = FileEditTool::new(ctx);
+        tool.call(
+            json!({
+                "file_path": target.to_str().unwrap(),
+                "old_string": " charlie",
+                "new_string": ""
+            }),
+            fresh_ctx(),
+            fresh_tx(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "keep this");
+    }
+
+    #[tokio::test]
+    async fn deletion_replace_all_consumes_each_trailing_newline() {
+        // replace_all deletion mirrors `AUa`'s `replaceAll(t+"\n", "")` branch:
+        // every occurrence (and its trailing newline) is removed.
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("d.txt");
+        std::fs::write(&target, "DROP\nkeep\nDROP\ntail\n").unwrap();
+        let (ctx, _sink) = make_ctx(&tmp);
+        seed_full_read(&ctx, &target);
+        let tool = FileEditTool::new(ctx);
+        tool.call(
+            json!({
+                "file_path": target.to_str().unwrap(),
+                "old_string": "DROP",
+                "new_string": "",
+                "replace_all": true
+            }),
+            fresh_ctx(),
+            fresh_tx(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "keep\ntail\n");
+    }
+
+    // ── Finding #19: maximum-editable-file-size cap (1 GiB), claude-code
+    // `validateInput` errorCode 10 / constant `DYa = 1073741824`. ────────────
+
+    #[test]
+    fn max_edit_file_size_constant_matches_binary() {
+        // Binary `DYa` (offset 202620510) is 1073741824 (== 1 GiB), and the
+        // cap renders as `1GB` through the `formatFileSize`/`Ma` formatter.
+        assert_eq!(MAX_EDIT_FILE_SIZE, 1_073_741_824);
+        assert_eq!(crate::read::format_file_size(MAX_EDIT_FILE_SIZE), "1GB");
+    }
+
+    #[test]
+    fn too_large_message_is_byte_exact() {
+        // Reconstruct the exact `File is too large to edit (...). Maximum
+        // editable file size is 1GB.` message for a representative over-cap size.
+        let over = MAX_EDIT_FILE_SIZE + 1; // 1073741825 bytes → still "1GB" via Ma
+        let msg = format!(
+            "File is too large to edit ({}). Maximum editable file size is {}.",
+            crate::read::format_file_size(over),
+            crate::read::format_file_size(MAX_EDIT_FILE_SIZE),
+        );
+        assert_eq!(
+            msg,
+            "File is too large to edit (1GB). Maximum editable file size is 1GB."
+        );
+    }
+
+    #[tokio::test]
+    async fn over_cap_file_is_rejected_and_untouched() {
+        // A file whose reported size exceeds the cap is rejected before the body
+        // is read and is left byte-for-byte unchanged. We force the size check
+        // by stubbing `fs::metadata` is not feasible, so use a sparse-file
+        // allocation to reach >1 GiB cheaply (no actual 1 GiB write).
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("huge.txt");
+        let f = std::fs::File::create(&target).unwrap();
+        // `set_len` creates a sparse file on macOS/Linux (no physical blocks
+        // until written), so the on-disk size is >1 GiB at ~zero cost.
+        f.set_len(MAX_EDIT_FILE_SIZE + 1).unwrap();
+        drop(f);
+        // Guard: only run if the filesystem honored the sparse length.
+        let reported = std::fs::metadata(&target).unwrap().len();
+        assert!(reported > MAX_EDIT_FILE_SIZE, "sparse file not over cap");
+
+        let (ctx, _sink) = make_ctx(&tmp);
+        let tool = FileEditTool::new(ctx);
+        let err = tool
+            .call(
+                json!({
+                    "file_path": target.to_str().unwrap(),
+                    "old_string": "anything",
+                    "new_string": "x"
+                }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .unwrap_err();
+        // `ToolError::InvalidInput`'s Display prefixes "invalid input: "; the
+        // byte-exact model-facing message is the contained substring.
+        assert!(
+            err.to_string().ends_with(
+                "File is too large to edit (1GB). Maximum editable file size is 1GB."
+            ),
+            "unexpected error: {err}"
+        );
+        // File length unchanged (rejected before any write).
+        assert_eq!(std::fs::metadata(&target).unwrap().len(), reported);
+    }
+
+    #[tokio::test]
+    async fn at_cap_file_is_not_rejected() {
+        // The cap is STRICT (`size > DYa`): a file exactly AT the cap is not
+        // rejected by the size gate. (It then fails downstream for an absent
+        // match / unread-file guard — i.e. NOT with the too-large message.)
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("atcap.txt");
+        let f = std::fs::File::create(&target).unwrap();
+        f.set_len(MAX_EDIT_FILE_SIZE).unwrap(); // exactly 1 GiB (sparse)
+        drop(f);
+        let reported = std::fs::metadata(&target).unwrap().len();
+        assert_eq!(reported, MAX_EDIT_FILE_SIZE);
+
+        let (ctx, _sink) = make_ctx(&tmp);
+        let tool = FileEditTool::new(ctx);
+        let err = tool
+            .call(
+                json!({
+                    "file_path": target.to_str().unwrap(),
+                    "old_string": "anything",
+                    "new_string": "x"
+                }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .unwrap_err();
+        // NOT the too-large message — the size gate passed.
+        assert!(
+            !err.to_string().contains("File is too large to edit"),
+            "at-cap file must not trip the strict size gate; got: {err}"
+        );
     }
 
     #[tokio::test]

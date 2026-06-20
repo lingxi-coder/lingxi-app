@@ -48,6 +48,12 @@ struct PermissionsBlock {
     default_mode: Option<String>,
     #[serde(default, rename = "disableBypassPermissionsMode")]
     disable_bypass_permissions_mode: Option<String>,
+    /// Extra directories (beyond cwd) inside which `acceptEdits`/auto-allow
+    /// treats edits as writable. 1:1 with claude-code `permissions.additionalDirectories`,
+    /// which `TGd` folds into `ToolPermissionContext.additionalWorkingDirectories`
+    /// and `b$` unions with cwd for the `kF` working-dir auto-allow check.
+    #[serde(default, rename = "additionalDirectories")]
+    additional_directories: Vec<String>,
 }
 
 /// Parse one settings file's raw JSON into permission rules tagged with
@@ -120,6 +126,29 @@ pub fn bypass_permissions_disabled_from_settings_json(raw: &str) -> bool {
         .and_then(|p| p.disable_bypass_permissions_mode)
         .as_deref()
         == Some("disable")
+}
+
+/// Parse `permissions.additionalDirectories` (a string array of extra working
+/// directories) from one settings file's raw JSON. These are the dirs beyond
+/// `cwd` inside which `acceptEdits` mode auto-allows safe file edits.
+///
+/// 1:1 with claude-code: `TGd(s, settings.permissions?.additionalDirectories, …)`
+/// folds each entry into `ToolPermissionContext.additionalWorkingDirectories`,
+/// which `b$(e)=new Set([cwd(),...e.additionalWorkingDirectories.keys()])` unions
+/// with the cwd to form the `kF` working-dir auto-allow set.
+///
+/// Returns `Vec::new()` when the block, the field, or the JSON is absent/invalid
+/// (best-effort projection, like the other loaders here). The returned paths are
+/// the RAW settings strings as [`PathBuf`]s (relative / `~`-prefixed / absolute) —
+/// they are resolved against the policy's filesystem roots at authorize time by
+/// `expand_path`, so the caller need not pre-resolve them.
+#[must_use]
+pub fn additional_directories_from_settings_json(raw: &str) -> Vec<std::path::PathBuf> {
+    serde_json::from_str::<SettingsTop>(raw)
+        .ok()
+        .and_then(|t| t.permissions)
+        .map(|p| p.additional_directories.into_iter().map(std::path::PathBuf::from).collect())
+        .unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -232,6 +261,31 @@ mod tests {
         assert!(m(r#"{ "permissions": {} }"#).is_none());
         assert!(m("{}").is_none());
         assert!(m(r#"{ "permissions": { "defaultMode": "bogus" } }"#).is_none());
+    }
+
+    #[test]
+    fn additional_directories_parse() {
+        use std::path::PathBuf;
+        let f = additional_directories_from_settings_json;
+        // Present → returned as raw PathBufs (relative / ~ / absolute preserved).
+        assert_eq!(
+            f(r#"{ "permissions": { "additionalDirectories": ["../sibling", "~/work", "/abs/dir"] } }"#),
+            vec![
+                PathBuf::from("../sibling"),
+                PathBuf::from("~/work"),
+                PathBuf::from("/abs/dir"),
+            ]
+        );
+        // Absent field / no block / no JSON → empty (best-effort).
+        assert!(f(r#"{ "permissions": { "allow": ["Bash"] } }"#).is_empty());
+        assert!(f(r#"{ "permissions": {} }"#).is_empty());
+        assert!(f("{}").is_empty());
+        assert!(f("not json").is_empty());
+        // Coexists with other permissions keys.
+        assert_eq!(
+            f(r#"{ "permissions": { "allow": ["Read"], "additionalDirectories": ["a"] } }"#),
+            vec![PathBuf::from("a")]
+        );
     }
 
     #[test]

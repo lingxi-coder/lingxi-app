@@ -64,8 +64,8 @@ pub use gate::{
 };
 pub use headless_gate::DenyOnAskGate;
 pub use loader::{
-    bypass_permissions_disabled_from_settings_json, default_mode_from_settings_json,
-    permission_rules_from_settings_json,
+    additional_directories_from_settings_json, bypass_permissions_disabled_from_settings_json,
+    default_mode_from_settings_json, permission_rules_from_settings_json,
 };
 pub use mode::{next_permission_mode, PermissionMode};
 pub use mode_policy::is_plan_safe_tool;

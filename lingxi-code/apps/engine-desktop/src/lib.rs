@@ -2345,6 +2345,16 @@ pub async fn build(
             // `BypassPermissions` mode (`authorize` falls back to Ask). Sticky
             // across tiers — a disable is not overridable upward (claude-code).
             let mut bypass_disabled = false;
+            // (#34) Extra working dirs from `permissions.additionalDirectories`,
+            // unioned across tiers (claude-code `TGd` folds each tier's
+            // `additionalDirectories` into `additionalWorkingDirectories`, which
+            // `b$` unions with cwd for the `kF` acceptEdits auto-allow set). The
+            // sole populator of `PermissionPolicy::additional_working_dirs`; without
+            // it an acceptEdits write under an `additionalDirectories` entry ASKS
+            // instead of auto-allowing. Entries stay RAW (relative / `~` / absolute);
+            // `authorize` resolves them against `roots` via `expand_path` (same as
+            // claude-code's `LXr` path resolution).
+            let mut additional_working_dirs: Vec<std::path::PathBuf> = Vec::new();
             // Read the three persistable rule tiers in ASCENDING priority so
             // the highest-priority `defaultMode` wins (last write). settings.local.json
             // (3c) is read LAST so an `AllowAlways` persisted there is loaded back
@@ -2380,6 +2390,10 @@ pub async fn build(
                     if permission::bypass_permissions_disabled_from_settings_json(&raw) {
                         bypass_disabled = true; // sticky: any tier disabling wins
                     }
+                    // (#34) Union this tier's additionalDirectories into the
+                    // working-dir set (claude-code merges across SETTING_SOURCES).
+                    additional_working_dirs
+                        .extend(permission::additional_directories_from_settings_json(&raw));
                     raw_tiers.push(raw); // ascending priority preserved for sandbox derivation
                 }
             }
@@ -2429,6 +2443,7 @@ pub async fn build(
             }
             let mut policy = permission::PermissionPolicy::from_rules(mode, rules)
                 .with_roots(roots)
+                .with_working_dirs(additional_working_dirs)
                 .with_sandbox_runtime(sandbox_auto_allow);
             policy.bypass_killswitch_active = bypass_disabled;
             let policy = Arc::new(policy);

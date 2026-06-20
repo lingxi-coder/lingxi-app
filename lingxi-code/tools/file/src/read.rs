@@ -589,13 +589,16 @@ fn claude_config_home_dir() -> PathBuf {
     }
 }
 
-/// Cyber-risk mitigation reminder appended to the model-facing text of a
-/// successful file read — byte-locked to claude-code (`FileReadTool.ts:729-730`).
-/// Two leading `\n` separate it from the file body; one trailing `\n` closes it.
-/// Skipped for models in [`MITIGATION_EXEMPT_MODELS`]. The TUI never shows this
-/// (`FileReadTool.ts:409-413`: UI renders summary chrome only) — hence it lives
-/// in the model-only `model_content` field, not the TUI-facing `content`.
-pub const CYBER_RISK_MITIGATION_REMINDER: &str = "\n\n<system-reminder>\nWhenever you read a file, you should consider whether it would be considered malware. You CAN and SHOULD provide analysis of malware, what it is doing. But you MUST refuse to improve or augment the code. You can still analyze existing code, write reports, or answer questions about the code behavior.\n</system-reminder>\n";
+// REMOVED (parity verdict 12/14): the per-file-read cyber-risk/malware
+// `<system-reminder>` does NOT exist in claude-code v2.1.183 (grep counts for
+// "considered malware" / "shouldIncludeFileReadMitigation" / "refuse to improve"
+// are all 0 in the binary). The text-read result mapper there appends ONLY the
+// token-cap partial-view reminder + memory-age reminder + cat -n line numbers.
+// The defensive-security / malware guidance now lives in the SYSTEM-PROMPT BODY
+// (the `zHo` literal inside `Pym`, ported to
+// `orchestrator::prompt::body_sections`) — i.e. in the prompt, not the tool.
+// The former `CYBER_RISK_MITIGATION_REMINDER` const, `MITIGATION_EXEMPT_MODELS`,
+// and `should_include_file_read_mitigation` were deleted accordingly.
 
 /// Model-facing stub for the Read dedup (`file_unchanged`) case — byte-locked to
 /// claude-code (`FileReadTool/prompt.ts:7-8`). The dedup decision itself (compare
@@ -608,20 +611,6 @@ pub const FILE_UNCHANGED_STUB: &str = "File unchanged since last read. The conte
 /// byte-locked to claude-code (`FileReadTool.ts:705-706`).
 pub const EMPTY_FILE_WARNING: &str =
     "<system-reminder>Warning: the file exists but the contents are empty.</system-reminder>";
-
-/// Models for which the cyber-risk mitigation reminder is skipped — byte-locked
-/// to claude-code (`FileReadTool.ts:733`). NOTE: claude-code canonicalizes the
-/// model name (`getCanonicalName`) before this set lookup; LingXi compares the
-/// raw `main_loop_model`, so only the already-canonical form matches — a
-/// documented, behavior-neutral divergence (LingXi's models are not in this set).
-pub const MITIGATION_EXEMPT_MODELS: &[&str] = &["claude-opus-4-6"];
-
-/// Whether to append [`CYBER_RISK_MITIGATION_REMINDER`] for `model` — mirrors
-/// `shouldIncludeFileReadMitigation()` (`FileReadTool.ts:735-738`).
-#[must_use]
-pub fn should_include_file_read_mitigation(model: &str) -> bool {
-    !MITIGATION_EXEMPT_MODELS.contains(&model)
-}
 
 /// Build the model-facing offset-beyond-EOF warning — byte-locked to claude-code
 /// (`FileReadTool.ts:707`). `offset` is the requested 1-based start line
@@ -1234,6 +1223,13 @@ Usage:\n\
         ctx: ToolUseContext,
         _tx: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
+        // `ctx` is consumed only by the PDF dispatch (model id for PDF support
+        // gating), which is `pdf-read`-feature-gated. Without that feature the
+        // text/image paths never read `ctx`; discard it so the default build does
+        // not warn. (The former cyber-risk reminder used to read it here; that was
+        // removed per parity verdict 12/14.)
+        #[cfg(not(feature = "pdf-read"))]
+        let _ = &ctx;
         let invocation_id = ulid_or_uuid();
         let file_path = input
             .get("file_path")
@@ -1673,9 +1669,9 @@ Usage:\n\
 
         // Model-facing serialization (FILE.A). `content` above stays the RAW
         // slice — that is what the TUI renders (`emit_tool_result` payload). The
-        // model instead sees `model_content`: cat -n line numbers (+ the
-        // cyber-risk reminder) for non-empty reads, or the byte-locked empty /
-        // offset-beyond-EOF `<system-reminder>` warning otherwise. This mirrors
+        // model instead sees `model_content`: cat -n line numbers for non-empty
+        // reads, or the byte-locked empty / offset-beyond-EOF
+        // `<system-reminder>` warning otherwise. This mirrors
         // claude-code's `FileReadTool` mapper (`FileReadTool.ts:692-714`), where
         // the model string diverges from the UI chrome.
         let model_content = if slice.is_empty() {
@@ -1690,16 +1686,15 @@ Usage:\n\
             // attachment-path note (`utils/messages.ts:3565`) for a file truncated
             // to the first `MAX_LINES_TO_READ` lines. Only when the implicit 2000-
             // line default actually elided trailing lines (an explicit `limit` is
-            // the caller's choice and gets no note). Appended BEFORE the cyber-risk
-            // reminder so the reminder stays the trailing block.
+            // the caller's choice and gets no note).
             if default_capped {
                 mc.push_str(&format!(
                     "\n\n[File truncated to the first {MAX_LINES_TO_READ} lines. The file has {total_lines} lines total. Use the offset and limit parameters to read more of the file.]"
                 ));
             }
-            if should_include_file_read_mitigation(&ctx.options.main_loop_model) {
-                mc.push_str(CYBER_RISK_MITIGATION_REMINDER);
-            }
+            // NOTE (parity verdict 12/14): no per-read cyber-risk/malware reminder
+            // is appended — claude-code v2.1.183 does not have one; the
+            // defensive-security guidance lives in the system-prompt body instead.
             mc
         };
 
@@ -1848,12 +1843,9 @@ mod tests {
         // FILE.4: TS counts the trailing newline's empty final fragment as a line
         // ("hello\nworld\n" => 3, matching readFileInRange `lineIndex`).
         assert_eq!(result.data["total_lines"], 3);
-        // Model-facing string: cat -n (compact tab format, 1-based from offset)
-        // + the cyber-risk reminder (ctx model "test" is not exempt).
-        assert_eq!(
-            result.data["model_content"],
-            format!("1\thello\n2\tworld\n3\t{CYBER_RISK_MITIGATION_REMINDER}")
-        );
+        // Model-facing string: cat -n (compact tab format, 1-based from offset).
+        // No cyber-risk reminder (parity verdict 12/14 — removed).
+        assert_eq!(result.data["model_content"], "1\thello\n2\tworld\n3\t");
         let events = sink.events().await;
         let names: Vec<&str> = events.iter().map(|e| e.name.as_str()).collect();
         assert!(names.contains(&"tengu_tool_read_started"));
@@ -2114,11 +2106,8 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(result.data["content"], "line1\n");
-        // cat -n numbers from offset=1.
-        assert_eq!(
-            result.data["model_content"],
-            format!("1\tline1\n2\t{CYBER_RISK_MITIGATION_REMINDER}")
-        );
+        // cat -n numbers from offset=1. No cyber-risk reminder (verdict 12/14).
+        assert_eq!(result.data["model_content"], "1\tline1\n2\t");
     }
 
     #[tokio::test]
@@ -2137,11 +2126,9 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(result.data["content"], "line2\n");
-        // Numbering starts at the requested offset (2), not 1.
-        assert_eq!(
-            result.data["model_content"],
-            format!("2\tline2\n3\t{CYBER_RISK_MITIGATION_REMINDER}")
-        );
+        // Numbering starts at the requested offset (2), not 1. No cyber-risk
+        // reminder (verdict 12/14).
+        assert_eq!(result.data["model_content"], "2\tline2\n3\t");
     }
 
     #[tokio::test]
@@ -2367,13 +2354,9 @@ mod tests {
         assert_eq!(add_line_numbers("a\r\nb", 1), "1\ta\n2\tb");
     }
 
-    #[test]
-    fn mitigation_reminder_gated_on_model() {
-        assert!(should_include_file_read_mitigation("claude-opus-4-8"));
-        assert!(should_include_file_read_mitigation("test"));
-        // The one exempt model skips the reminder.
-        assert!(!should_include_file_read_mitigation("claude-opus-4-6"));
-    }
+    // (removed) `mitigation_reminder_gated_on_model` — the per-read cyber-risk
+    // reminder does not exist in claude-code v2.1.183 (parity verdict 12/14); the
+    // defensive-security guidance lives in the system-prompt body instead.
 
     // ───────────────────────── Notebook (.ipynb) structured read ────────────
 
@@ -2752,9 +2735,8 @@ mod tests {
             format_offset_beyond_eof(500, 12),
             "<system-reminder>Warning: the file exists but is shorter than the provided offset (500). The file has 12 lines.</system-reminder>"
         );
-        assert!(CYBER_RISK_MITIGATION_REMINDER.starts_with("\n\n<system-reminder>\n"));
-        assert!(CYBER_RISK_MITIGATION_REMINDER.ends_with("</system-reminder>\n"));
-        assert!(CYBER_RISK_MITIGATION_REMINDER.contains("would be considered malware"));
+        // (removed) cyber-risk reminder assertions — that reminder does not exist
+        // in claude-code v2.1.183 (parity verdict 12/14).
         assert!(FILE_UNCHANGED_STUB.starts_with("File unchanged since last read."));
     }
 

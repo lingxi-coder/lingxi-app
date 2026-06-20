@@ -117,8 +117,13 @@ async fn max_turns_zero_means_unbounded() {
 
 #[tokio::test]
 async fn default_config_single_end_turn_completes_cleanly() {
+    // Visible text: an empty-content end_turn trips the #78 thinking-only nudge
+    // (faithful), which requests another turn the single-response mock can't serve.
     let api = Arc::new(MockApiClient::new(vec![mock_message_response(
-        vec![],
+        vec![LlmContentBlock::Text {
+            text: "Done.".into(),
+            cache_control: None,
+        }],
         Some("end_turn"),
     )]));
     let output = Arc::new(MockOutputStream::new());

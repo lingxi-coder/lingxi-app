@@ -6,9 +6,9 @@
 
 use async_trait::async_trait;
 use orchestrator::test_support::{
-    content_block_start_tool_use, content_block_stop, input_json_delta, message_delta_stop,
-    message_start, message_stop, MockApiClient, MockOutputStream, MockStreamingApiClient,
-    NoOpPermissionGate, StaticMemoryProvider,
+    content_block_start_text, content_block_start_tool_use, content_block_stop, input_json_delta,
+    message_delta_stop, message_start, message_stop, text_delta, MockApiClient, MockOutputStream,
+    MockStreamingApiClient, NoOpPermissionGate, StaticMemoryProvider,
 };
 use orchestrator::{scripted, ConversationOrchestrator, OrchestratorConfig};
 use permission::result::PermissionMetadata;
@@ -132,6 +132,9 @@ async fn two_tools_dispatched_concurrently_results_ordered() {
     ];
     let turn2 = scripted![
         message_start("m2", "claude-opus-4-7"),
+        content_block_start_text(0),
+        text_delta(0, "Done."),
+        content_block_stop(0),
         message_delta_stop("end_turn"),
         message_stop(),
     ];
@@ -191,15 +194,18 @@ async fn two_tools_dispatched_concurrently_results_ordered() {
     // "light up thinking/usage" follow-up adds additive `Usage` emits
     // (from `message_start` / `message_delta`) that interleave but are
     // orthogonal to that ordering, so filter them (and `Thinking`) out
-    // before the sequence assertion.
+    // before the sequence assertion. The final completing turn now carries
+    // visible text ("Done.") so the #78 thinking-only nudge does not fire —
+    // that `Text` event is likewise orthogonal to tool ordering, so filter it.
     let kinds: Vec<&str> = events
         .iter()
         .filter_map(|e| match e {
-            OutputEvent::Text { .. } => Some("Text"),
             OutputEvent::ToolCall { .. } => Some("ToolCall"),
             OutputEvent::ToolResult { .. } => Some("ToolResult"),
             OutputEvent::EndTurn { .. } => Some("EndTurn"),
-            OutputEvent::Usage { .. } | OutputEvent::Thinking { .. } => None,
+            OutputEvent::Text { .. }
+            | OutputEvent::Usage { .. }
+            | OutputEvent::Thinking { .. } => None,
             _ => Some("Other"),
         })
         .collect();

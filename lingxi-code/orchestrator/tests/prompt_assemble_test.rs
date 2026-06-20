@@ -78,13 +78,19 @@ fn double_lf_between_each_section() {
     }];
     ctx.tool_names = vec!["X".into()];
     let out = assemble_system_prompt(&ctx);
-    // After HEADER, before the env section — exactly `\n\n`, then the env
-    // preamble line + `<env>` (claude-code v2.1.181 prefixes `<env>` with
-    // "Here is useful information about the environment you are running in:").
+    // After HEADER, before the static BODY — exactly `\n\n`, then the `Pym`
+    // opening paragraph (claude-code's `J0` emits the static body immediately
+    // after the `DEFAULT_PREFIX` header).
     let header_end = "You are Claude Code, Anthropic's official CLI for Claude.";
     let after_header = &out[out.find(header_end).unwrap() + header_end.len()..];
-    assert!(after_header
-        .starts_with("\n\nHere is useful information about the environment you are running in:\n<env>"));
+    assert!(after_header.starts_with(
+        "\n\nYou are an interactive agent that helps users with software engineering tasks."
+    ));
+    // The env section follows the body, on its own `\n\n` boundary, prefixed by
+    // the env preamble line + `<env>`.
+    assert!(out.contains(
+        "\n\nHere is useful information about the environment you are running in:\n<env>"
+    ));
     // After the cutoff line, before the memory preamble — `\n\n` + preamble.
     assert!(out.contains(&format!("\n\n{MEMORY_PREAMBLE}")));
     // The memory section does NOT end in a newline, so the separator before the
@@ -103,4 +109,63 @@ fn footer_byte_length_locked() {
     // If this fails after a claude-code rebase, re-measure with a
     // one-off `println!("{}", FOOTER.len())` probe and update.
     assert_eq!(orchestrator::prompt::locked_templates::FOOTER.len(), 816);
+}
+
+#[test]
+fn static_body_sections_present_and_ordered_between_header_and_env() {
+    // claude-code v2.1.183 `J0` emits these six STATIC sections, in this order,
+    // immediately after the `DEFAULT_PREFIX` header and before the env block.
+    // Byte-anchored against the binary extracts.
+    let mut ctx = ctx_minimal();
+    ctx.tool_names = vec![
+        "Read".into(),
+        "Edit".into(),
+        "Write".into(),
+        "Glob".into(),
+        "Grep".into(),
+        "Bash".into(),
+        "TodoWrite".into(),
+    ];
+    let out = assemble_system_prompt(&ctx);
+
+    // Anchor strings (byte-exact section openers / distinctive lines).
+    let i_header = out.find("You are Claude Code, Anthropic's official CLI for Claude.").unwrap();
+    let i_open = out
+        .find("You are an interactive agent that helps users with software engineering tasks.")
+        .expect("Pym opening present");
+    let i_zho = out
+        .find("IMPORTANT: Assist with authorized security testing, defensive security, CTF challenges")
+        .expect("zHo defensive-security guidance present in body");
+    let i_urls = out
+        .find("IMPORTANT: You must NEVER generate or guess URLs for the user")
+        .expect("NEVER-URLs line present");
+    let i_system = out.find("\n# System\n - All text you output outside of tool use").unwrap();
+    let i_doing = out.find("\n# Doing tasks\n - The user will primarily request you").unwrap();
+    let i_exec = out
+        .find("\n# Executing actions with care\n\nCarefully consider the reversibility")
+        .unwrap();
+    let i_tools = out
+        .find("\n# Using your tools\n - Prefer dedicated tools over Bash when one fits (Read, Edit, Write, Glob, Grep)")
+        .unwrap();
+    let i_tone = out
+        .find("\n# Tone and style\n - Only use emojis if the user explicitly requests it.")
+        .unwrap();
+    let i_env = out.find("<env>").unwrap();
+
+    // Order: header < opening < zHo < urls < system < doing < exec < tools < tone < env.
+    assert!(i_header < i_open);
+    assert!(i_open < i_zho);
+    assert!(i_zho < i_urls);
+    assert!(i_urls < i_system);
+    assert!(i_system < i_doing);
+    assert!(i_doing < i_exec);
+    assert!(i_exec < i_tools);
+    assert!(i_tools < i_tone);
+    assert!(i_tone < i_env, "static body must precede the env block");
+
+    // Hooks bullet lives in the # System section (it used to be a fabricated
+    // per-read reminder — now it's prompt-body guidance).
+    assert!(out.contains(" - Users may configure 'hooks', shell commands that execute"));
+    // The /help + feedback nested bullets use the two-space prefix.
+    assert!(out.contains("\n  - /help: Get help with using Claude Code"));
 }

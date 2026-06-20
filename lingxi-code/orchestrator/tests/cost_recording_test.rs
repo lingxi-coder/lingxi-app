@@ -3,7 +3,7 @@
 
 use cost::pricing::PricingCatalog;
 use cost::CostTracker;
-use llm_client::{LlmResponse, TokenUsage, Usage};
+use llm_client::{ContentBlock, LlmResponse, TokenUsage, Usage};
 use orchestrator::test_support::{
     noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider,
 };
@@ -19,7 +19,13 @@ fn end_turn_response_with_usage(input: u64, output: u64) -> LlmResponse {
     LlmResponse {
         id: "msg_mock".to_string(),
         model: "claude-opus-4-6".to_string(),
-        content: Vec::new(),
+        // Visible text so the response is a genuine end_turn completion — an
+        // empty-content end_turn trips the #78 thinking-only nudge (faithful),
+        // which would request another turn the single-response mock can't serve.
+        content: vec![ContentBlock::Text {
+            text: "Done.".to_string(),
+            cache_control: None,
+        }],
         stop_reason: Some("end_turn".to_string()),
         usage: Usage {
             billable_tokens: TokenUsage {

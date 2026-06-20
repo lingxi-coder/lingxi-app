@@ -6,6 +6,7 @@
 #![forbid(unsafe_code)]
 
 pub mod async_hook_response;
+pub mod body_sections;
 pub mod conditional_rules;
 pub mod env_block;
 pub mod env_meta;
@@ -66,12 +67,15 @@ pub fn assemble_system_prompt(ctx: &SystemPromptContext) -> String {
 /// Section order is LOCKED:
 ///
 /// 1. `HEADER`
-/// 2. `<env>...</env>` + model description + cutoff
-/// 3. memory section — preamble + `Contents of …:` blocks (elided when no
+/// 2. static BODY — the six claude-code `J0` static sections (opening +
+///    `# System` + `# Doing tasks` + `# Executing actions with care` +
+///    `# Using your tools` + `# Tone and style`); see [`body_sections::format`].
+/// 3. `<env>...</env>` + model description + cutoff
+/// 4. memory section — preamble + `Contents of …:` blocks (elided when no
 ///    files); see [`memory_block::format`]. NO enclosing tag.
-/// 4. `<tools>...</tools>` (elided when no names)
-/// 5. `# Output Style: <name>` + body (elided when `output_style` is `None`)
-/// 6. `FOOTER`
+/// 5. `<tools>...</tools>` (elided when no names)
+/// 6. `# Output Style: <name>` + body (elided when `output_style` is `None`)
+/// 7. `FOOTER`
 ///
 /// Separator between sections is exactly `\n\n` (one blank line).
 /// `FOOTER` itself ends with a single `\n`; the assembler does not
@@ -89,6 +93,16 @@ pub fn assemble_system_prompt_with_style(
 ) -> String {
     let mut s = String::with_capacity(2048);
     s.push_str(HEADER);
+
+    // Static system-prompt BODY (claude-code `J0` statics: opening / `# System`
+    // / `# Doing tasks` / `# Executing actions with care` / `# Using your tools`
+    // / `# Tone and style`), spliced between the HEADER and the env block. In
+    // the binary these six statics precede the dynamic env/memory group, so
+    // emitting them here keeps the statics-before-env relative order. The
+    // `Pym` opening clause toggles on whether an output style is active.
+    push_section_separator(&mut s);
+    s.push_str(&body_sections::format(output_style.is_some(), &ctx.tool_names));
+
     push_section_separator(&mut s);
     s.push_str(&env_block::format(ctx));
 
@@ -659,9 +673,14 @@ mod tests {
         let blocks = split_system_blocks(&s, true);
         assert_eq!(blocks.len(), 2);
         assert_eq!(blocks[0].text, HEADER);
-        assert!(blocks[1].text.starts_with(
-            "Here is useful information about the environment you are running in:\n<env>"
-        ));
+        // The rest block now opens with the static BODY (the `Pym` opening
+        // paragraph), which precedes the env block.
+        assert!(blocks[1]
+            .text
+            .starts_with("You are an interactive agent that helps users with software engineering tasks."));
+        assert!(blocks[1]
+            .text
+            .contains("Here is useful information about the environment you are running in:\n<env>"));
         assert!(blocks[1].text.ends_with("not files you create.\n"));
     }
 }

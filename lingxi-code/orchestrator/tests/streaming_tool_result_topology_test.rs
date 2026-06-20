@@ -13,9 +13,9 @@
 
 use async_trait::async_trait;
 use orchestrator::test_support::{
-    content_block_start_tool_use, content_block_stop, input_json_delta, message_delta_stop,
-    message_start, message_stop, MockApiClient, MockOutputStream, MockStreamingApiClient,
-    NoOpPermissionGate, StaticMemoryProvider,
+    content_block_start_text, content_block_start_tool_use, content_block_stop, input_json_delta,
+    message_delta_stop, message_start, message_stop, text_delta, MockApiClient, MockOutputStream,
+    MockStreamingApiClient, NoOpPermissionGate, StaticMemoryProvider,
 };
 use orchestrator::{scripted, ConversationOrchestrator, OrchestratorConfig};
 use permission::result::PermissionMetadata;
@@ -142,6 +142,9 @@ async fn streaming_tool_results_are_per_result_assistant_parented() {
     ];
     let turn2 = scripted![
         message_start("m2", "claude-opus-4-7"),
+        content_block_start_text(0),
+        text_delta(0, "Done."),
+        content_block_stop(0),
         message_delta_stop("end_turn"),
         message_stop(),
     ];
@@ -229,10 +232,23 @@ async fn streaming_tool_results_are_per_result_assistant_parented() {
     let msgs = reader.read_all().await.expect("read_all");
 
     // The three per-block assistant lines (one tool_use each), all sharing the
-    // same inner message.id.
+    // same inner message.id. The final completing turn carries visible text
+    // ("Done.") so the #78 thinking-only nudge does not fire — that pure-text
+    // assistant line is a separate turn (distinct inner message.id) and is not
+    // part of the tool-use topology, so scope to the tool_use-bearing lines.
     let assistant_lines: Vec<_> = msgs
         .iter()
         .filter(|m| m.message_type == "assistant")
+        .filter(|m| {
+            m.message
+                .get("content")
+                .and_then(|c| c.as_array())
+                .is_some_and(|blocks| {
+                    blocks
+                        .iter()
+                        .any(|b| b.get("type").and_then(|t| t.as_str()) == Some("tool_use"))
+                })
+        })
         .collect();
     assert_eq!(
         assistant_lines.len(),

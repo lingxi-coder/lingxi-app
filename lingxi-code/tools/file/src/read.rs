@@ -35,11 +35,14 @@ use tool_api::BuiltinToolContext;
 /// Maximum file size FileReadTool will load. Spec §7 lock (256 KB).
 pub const MAX_FILE_READ_SIZE: u64 = 262_144;
 
-/// Default line cap for a no-`limit` text read — byte-locked to claude-code
-/// `MAX_LINES_TO_READ` (`FileReadTool/prompt.ts:10`). When the caller supplies no
-/// `limit`, the read returns at most this many lines starting from `offset`, and
-/// the model-facing output surfaces the truncation (mirroring TS, whose
-/// `readFileInRange` is called with `maxLines = limit ?? MAX_LINES_TO_READ`).
+/// Prompt-advertised default line count — byte-locked to claude-code `LQe`
+/// (`FileReadTool/prompt.ts:10`, the "it reads up to 2000 lines" wording). This
+/// is a PROMPT-TEXT constant ONLY: claude-code's runtime applies NO 2000-line
+/// cap. When the caller supplies no `limit`, `readFileInRange` is called with
+/// `maxLines = limit` VERBATIM (the `?? MAX_LINES_TO_READ` default does NOT
+/// exist) — `maxLines === undefined` reads to EOF, and an over-budget full read
+/// is gracefully token-truncated (see [`truncate_to_token_budget`]) rather than
+/// line-capped. Used solely to interpolate the prompt description below.
 pub const MAX_LINES_TO_READ: u64 = 2000;
 
 /// Default per-read output token budget — byte-locked to claude-code
@@ -137,6 +140,138 @@ fn validate_content_tokens(content: &str, ext: Option<&str>, max_tokens: u64) ->
     }
     Ok(())
 }
+
+/// The `Truncated: PARTIAL view` note prefix — byte-locked to claude-code `oIt`
+/// (`FileReadTool.ts`): the literal `"[Truncated: PARTIAL view "` followed by an
+/// em-dash (U+2014) and a trailing space. The two branch tails below are
+/// appended to this to form the full note.
+const PARTIAL_VIEW_PREFIX: &str = "[Truncated: PARTIAL view \u{2014} ";
+
+/// Result of a graceful token-budget truncation of a full read.
+struct GracefulTruncation {
+    /// The truncated content (`U` / `T` in claude-code).
+    content: String,
+    /// The model-facing line count for the truncated content (`S`).
+    line_count: u64,
+    /// The note appended to the model-facing output (`R`).
+    note: String,
+}
+
+/// Gracefully shrink an over-budget FULL read to fit `max_tokens`, mirroring
+/// claude-code's post-`validateContentTokens` catch block (`FileReadTool.ts`,
+/// the `if(L instanceof Fae && k)` branch). Ported 1:1:
+///
+/// - `N = max(0.5, contentLen / tokenCount)` — chars-per-token derived from the
+///   full-content ratio; `O(s) = s.len() / N` is the per-substring token recount.
+/// - Line-based shrink: start at `$ = max(1, min(numLines, floor(numLines *
+///   cap / tokenCount * 0.85)))`, then up to 6 iterations of `$ *= 0.7` until
+///   the joined head fits (`O(U) <= cap`) or `$ <= 1`.
+/// - Char-based fallback (very long lines): if the line shrink still overflows
+///   or yields blank, slice raw chars `V = max(1, floor(cap * N * 0.85))`, up to
+///   6 iterations of `V *= 0.7`; guard against splitting a UTF-16 surrogate
+///   (here: never split inside a Rust `char`, which is the same intent).
+///
+/// `content_len`/substring lengths use UTF-8 byte length to match LingXi's token
+/// model (`rough_token_count_estimation_for_file_type` divides byte length), so
+/// `O(U)` is consistent with the estimate that produced `token_count`.
+fn truncate_to_token_budget(
+    content: &str,
+    token_count: u64,
+    max_tokens: u64,
+    total_lines: u64,
+) -> GracefulTruncation {
+    let cap = max_tokens as f64;
+    let token_count_f = token_count.max(1) as f64;
+    let content_len = content.len() as f64;
+    // `N = Math.max(0.5, f.length / Math.max(1, tokenCount))`.
+    let n_ratio = (content_len / token_count_f).max(0.5);
+    // `O(V) = V.length / N` — token estimate for a substring of byte length `len`.
+    let est_tokens = |byte_len: usize| (byte_len as f64) / n_ratio;
+
+    // Split into lines for the line-based shrink (`D = f.split("\n")`). This is a
+    // plain (non-inclusive) split, matching claude-code's `f.split("\n")`.
+    let lines: Vec<&str> = content.split('\n').collect();
+    let num_lines = lines.len();
+
+    // `$ = max(1, min(D.length, floor(D.length * l / tokenCount * 0.85)))`.
+    let mut line_n: usize = ((num_lines as f64) * cap / token_count_f * 0.85)
+        .floor()
+        .max(1.0) as usize;
+    line_n = line_n.clamp(1, num_lines);
+    let mut head = lines[..line_n].join("\n");
+
+    // Up to 6 iterations of `$ *= 0.7` until it fits or `$ <= 1`.
+    for _ in 0..6 {
+        if est_tokens(head.len()) <= cap || line_n <= 1 {
+            break;
+        }
+        line_n = ((line_n as f64) * 0.7).floor().max(1.0) as usize;
+        head = lines[..line_n].join("\n");
+    }
+
+    let mut char_based = false;
+    // Char-based fallback when the line shrink couldn't fit / produced blank.
+    if est_tokens(head.len()) > cap || head.trim().is_empty() {
+        // `V = max(1, floor(l * N * 0.85))` byte budget.
+        let mut byte_v: usize = (cap * n_ratio * 0.85).floor().max(1.0) as usize;
+        for _ in 0..6 {
+            head = slice_bytes_on_char_boundary(content, byte_v);
+            if est_tokens(head.len()) <= cap {
+                break;
+            }
+            byte_v = ((byte_v as f64) * 0.7).floor().max(1.0) as usize;
+        }
+        char_based = true;
+    }
+
+    // `T = U, S = W ? Uu(U,"\n")+1 : $`.
+    let line_count = if char_based {
+        head.matches('\n').count() as u64 + 1
+    } else {
+        line_n as u64
+    };
+
+    // Note branch: line-paging when `!W && S < h`, else the long-lines/char note.
+    let note = if !char_based && line_count < total_lines {
+        format!(
+            "{PARTIAL_VIEW_PREFIX}showing lines 1-{line_count} of {total_lines} total ({token_count} tokens, cap {max_tokens}). Call {read_name} with offset={next} limit={line_count} for the next page, or {grep_name} to find a specific section. Do NOT answer from this page alone if the answer may be further in the file.]",
+            read_name = TOOL_NAME,
+            grep_name = GREP_TOOL_NAME,
+            next = line_count + 1,
+        )
+    } else {
+        format!(
+            "{PARTIAL_VIEW_PREFIX}showing the first {shown} of {full} characters ({token_count} tokens, cap {max_tokens}); this file has very long lines and cannot be paginated by line. Use {grep_name} to find a specific section, or {read_name} with offset/limit to page through it. Do NOT answer from this excerpt alone if the answer may be elsewhere in the file.]",
+            shown = head.len(),
+            full = content.len(),
+            grep_name = GREP_TOOL_NAME,
+            read_name = TOOL_NAME,
+        )
+    };
+
+    GracefulTruncation {
+        content: head,
+        line_count,
+        note,
+    }
+}
+
+/// Slice `content` to at most `byte_budget` bytes, backing off to the previous
+/// UTF-8 character boundary — the safe analogue of claude-code's surrogate-pair
+/// guard (`if(Q>=55296&&Q<=56319) U=U.slice(0,-1)`), which avoids splitting a
+/// multi-unit character. Rust strings are UTF-8, so we simply refuse to slice
+/// mid-`char`.
+fn slice_bytes_on_char_boundary(content: &str, byte_budget: usize) -> String {
+    let mut end = byte_budget.min(content.len());
+    while end > 0 && !content.is_char_boundary(end) {
+        end -= 1;
+    }
+    content[..end].to_string()
+}
+
+/// The Grep tool name byte-lock — claude-code `$c` resolves to this in the
+/// `Truncated: PARTIAL view` note interpolations.
+const GREP_TOOL_NAME: &str = "Grep";
 
 /// Human-readable file size, byte-faithful to claude-code `formatFileSize`
 /// (`src/utils/format.ts:9-23`): `< 1KB` ⇒ `"{n} bytes"`; otherwise one decimal
@@ -1589,33 +1724,62 @@ Usage:\n\
             content.bytes().filter(|&b| b == b'\n').count() as u64 + 1
         };
         let start_idx = (offset.saturating_sub(1) as usize).min(all_lines.len());
-        // Default line cap (`FileReadTool/prompt.ts:10`, `MAX_LINES_TO_READ`):
-        // when no explicit `limit` is given, read at most 2000 lines from
-        // `offset`. claude-code advertises this default in the Read prompt ("it
-        // reads up to 2000 lines"); the cap keeps that promise and bounds a
-        // no-limit read of a long (but <256 KB) file. A `limit` supplied by the
-        // caller is honored verbatim (the explicit count, even if > 2000).
-        let effective_limit = limit.unwrap_or(MAX_LINES_TO_READ);
-        let end_idx = (start_idx + effective_limit as usize).min(all_lines.len());
-        // True when the default cap actually elided trailing lines (no explicit
-        // `limit`, and the file had more than `offset + MAX_LINES_TO_READ` lines).
-        // Surfaced to the model below so it knows to re-read with offset/limit.
-        let default_capped = limit.is_none() && end_idx < all_lines.len();
-        let slice: String = all_lines[start_idx..end_idx].concat();
+        // NO line cap. claude-code's runtime passes `maxLines = limit` VERBATIM
+        // (no `?? MAX_LINES_TO_READ` default), so an UNDEFINED `limit` reads to
+        // EOF; only an explicit `limit` bounds the end index. The "up to 2000
+        // lines" wording in the prompt is advisory text, NOT a runtime cap.
+        let end_idx = match limit {
+            Some(l) => (start_idx + l as usize).min(all_lines.len()),
+            None => all_lines.len(),
+        };
+        let mut slice: String = all_lines[start_idx..end_idx].concat();
         let line_range_start = offset;
-        let line_range_end = end_idx as u64;
+        let mut line_range_end = end_idx as u64;
+        // `read_lines` is the model-facing line count of the returned slice; it
+        // starts as the raw slice line count and is overwritten by a graceful
+        // truncation (`S` in claude-code).
+        let mut read_lines = (end_idx - start_idx) as u64;
 
         // Token-budget gate — `validateContentTokens(content, ext, maxTokens)`
-        // (`FileReadTool.ts:1030`). Runs on the range-limited slice, BEFORE the
-        // success/state side-effects, so an over-budget read throws (TS) /
-        // errors (Rust) with no completed event and nothing recorded. `ext` is
-        // the lowercased extension without the dot (TS `path.extname(...).
-        // slice(1)`). LingXi has no `fileReadingLimits`, so the budget is the
-        // default. See [`validate_content_tokens`] for the offline-fallback
-        // mapping of TS's count_tokens API refinement.
-        if let Err(msg) = validate_content_tokens(&slice, ext.as_deref(), DEFAULT_MAX_OUTPUT_TOKENS) {
-            self.emit_failed(&invocation_id, "max_tokens_exceeded").await;
-            return Err(ToolError::Io(msg));
+        // (`FileReadTool.ts`). LingXi has no `fileReadingLimits`, so the budget
+        // is the default. Over-budget handling diverges by whether this is a
+        // FULL read (`k = offset <= 1 && limit === undefined && pages ===
+        // undefined`): a full read is GRACEFULLY token-truncated (the catch
+        // block ports claude-code's `if(L instanceof Fae && k)` branch); an
+        // explicit-range read RE-THROWS as a hard error (`else throw L`).
+        //
+        // `pages` is never set on the text path (it's a PDF-only input), so the
+        // `k` flag here is `offset <= 1 && limit is None`.
+        let token_estimate =
+            rough_token_count_estimation_for_file_type(&slice, ext.as_deref());
+        let mut partial_note: Option<String> = None;
+        // Mirror `validateContentTokens`'s early-pass band: skip when 0 or
+        // `<= maxTokens/4`; otherwise the offline fallback is `effectiveCount ==
+        // estimate`, over budget iff `estimate > maxTokens`.
+        if token_estimate != 0
+            && token_estimate > DEFAULT_MAX_OUTPUT_TOKENS / 4
+            && token_estimate > DEFAULT_MAX_OUTPUT_TOKENS
+        {
+            let is_full_read = offset <= 1 && limit.is_none();
+            if is_full_read {
+                // Graceful truncation (`T=U, S=lineCount, v=S, R=note`).
+                let trunc = truncate_to_token_budget(
+                    &slice,
+                    token_estimate,
+                    DEFAULT_MAX_OUTPUT_TOKENS,
+                    total_lines,
+                );
+                slice = trunc.content;
+                read_lines = trunc.line_count;
+                line_range_end = trunc.line_count;
+                partial_note = Some(trunc.note);
+            } else {
+                self.emit_failed(&invocation_id, "max_tokens_exceeded").await;
+                return Err(ToolError::Io(format_max_tokens_exceeded(
+                    token_estimate,
+                    DEFAULT_MAX_OUTPUT_TOKENS,
+                )));
+            }
         }
 
         let duration_ms = started.elapsed().as_millis() as u64;
@@ -1650,12 +1814,12 @@ Usage:\n\
         // before returning the data). NOT fired on the notebook path (TS returns
         // before this site) nor on images/PDFs. The byte/line counts mirror
         // `readFileInRange`'s return: `totalBytes = Buffer.byteLength(text)` →
-        // full content byte length; `readBytes = Buffer.byteLength(content)` →
-        // the selected slice's byte length; `readLines = lineCount` → number of
-        // selected lines (`end_idx - start_idx`). `offset` is the defaulted
-        // offset; `limit` only when supplied. See [`emit_session_file_read`] for
-        // the `ext` / `messageID` (omitted) / session-flag handling.
-        let read_lines = (end_idx - start_idx) as u64;
+        // full content byte length; `readBytes = R!==void 0 ? byteLen(T) : _` →
+        // the (possibly truncated) slice's byte length; `readLines = S` → the
+        // model-facing line count (truncation overwrites it). `offset` is the
+        // defaulted offset; `limit` only when supplied. See
+        // [`emit_session_file_read`] for the `ext` / `messageID` (omitted) /
+        // session-flag handling.
         self.emit_session_file_read(
             &canon,
             total_lines,
@@ -1682,15 +1846,13 @@ Usage:\n\
             }
         } else {
             let mut mc = add_line_numbers(&slice, offset);
-            // Surface a default-cap truncation to the model — mirrors claude-code's
-            // attachment-path note (`utils/messages.ts:3565`) for a file truncated
-            // to the first `MAX_LINES_TO_READ` lines. Only when the implicit 2000-
-            // line default actually elided trailing lines (an explicit `limit` is
-            // the caller's choice and gets no note).
-            if default_capped {
-                mc.push_str(&format!(
-                    "\n\n[File truncated to the first {MAX_LINES_TO_READ} lines. The file has {total_lines} lines total. Use the offset and limit parameters to read more of the file.]"
-                ));
+            // Surface a graceful token-budget truncation to the model (`R` /
+            // `oIt` in claude-code). Only set on a FULL read that exceeded the
+            // token cap and was shrunk by [`truncate_to_token_budget`]; the note
+            // tells the model the partial view's range and how to page on.
+            if let Some(note) = partial_note {
+                mc.push_str("\n\n");
+                mc.push_str(&note);
             }
             // NOTE (parity verdict 12/14): no per-read cyber-risk/malware reminder
             // is appended — claude-code v2.1.183 does not have one; the
@@ -1798,6 +1960,8 @@ mod tests {
 
     #[test]
     fn max_lines_to_read_byte_locked() {
+        // Prompt-text constant only (the "up to 2000 lines" wording); NOT a
+        // runtime cap. The Read prompt below interpolates it.
         assert_eq!(MAX_LINES_TO_READ, 2000);
     }
 
@@ -1984,11 +2148,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn default_caps_at_2000_lines_and_notes_truncation() {
-        // A no-`limit` read of a file with > 2000 (but small) lines returns
-        // exactly the first MAX_LINES_TO_READ lines and surfaces the truncation
-        // in `model_content`. The file stays well under the 256 KB byte cap so
-        // the line cap (not the byte cap) is what bounds the read.
+    async fn no_limit_read_returns_all_lines_within_budget_no_note() {
+        // There is NO 2000-line cap. A no-`limit` read of a file with > 2000
+        // (but small / within-token-budget) lines returns ALL lines, with NO
+        // truncation note (claude-code passes `maxLines = limit` verbatim, and
+        // `undefined` reads to EOF).
         let tmp = TempDir::new().unwrap();
         let target = tmp.path().join("long.txt");
         let mut body = String::new();
@@ -1996,6 +2160,12 @@ mod tests {
             body.push_str(&format!("L{i}\n"));
         }
         assert!((body.len() as u64) < MAX_FILE_READ_SIZE, "must stay under byte cap");
+        // ~14 KB / 4 ≈ 3500 tokens, well under the 25000 token budget.
+        assert!(
+            rough_token_count_estimation_for_file_type(&body, Some("txt"))
+                < DEFAULT_MAX_OUTPUT_TOKENS,
+            "fixture must stay under the token budget so it reads in full"
+        );
         std::fs::write(&target, &body).unwrap();
         let (ctx, _sink) = make_ctx(&tmp);
         let tool = FileReadTool::new(ctx);
@@ -2006,30 +2176,29 @@ mod tests {
                 fresh_tx(),
             )
             .await
-            .expect("default-capped read must succeed");
-        // Exactly 2000 lines returned (the raw slice the TUI renders).
-        assert_eq!(result.data["content"].as_str().unwrap().lines().count(), 2000);
-        // The slice ends at line 2000.
-        assert!(result.data["content"].as_str().unwrap().ends_with("L2000\n"));
-        assert!(!result.data["content"].as_str().unwrap().contains("L2001"));
-        // line_range = [1, 2000]; total_lines reflects the whole file (2501 with
-        // the trailing-newline phantom line).
+            .expect("no-limit read must succeed");
+        // ALL 2500 lines returned (no cap).
+        assert_eq!(result.data["content"].as_str().unwrap().lines().count(), 2500);
+        assert!(result.data["content"].as_str().unwrap().ends_with("L2500\n"));
+        // line_range = [1, 2500] (end_idx = number of split_inclusive chunks);
+        // total_lines = 2501 (trailing-newline phantom line).
         assert_eq!(result.data["line_range"][0], 1);
-        assert_eq!(result.data["line_range"][1], 2000);
+        assert_eq!(result.data["line_range"][1], 2500);
         assert_eq!(result.data["total_lines"], 2501);
-        // The model is told about the truncation.
+        // NO truncation note of any kind.
         let mc = result.data["model_content"].as_str().unwrap();
         assert!(
-            mc.contains("File truncated to the first 2000 lines"),
-            "model_content must surface the default-cap truncation, got tail: {}",
+            !mc.contains("Truncated") && !mc.contains("File truncated"),
+            "within-budget full read must not surface any truncation note, got tail: {}",
             &mc[mc.len().saturating_sub(200)..]
         );
     }
 
     #[tokio::test]
     async fn explicit_limit_over_2000_is_honored_without_note() {
-        // An explicit `limit` is the caller's choice and is NOT clamped to 2000,
-        // and gets no truncation note even when it elides trailing lines.
+        // An explicit `limit` is the caller's choice and is honored verbatim
+        // (no 2000-line cap was ever applied), and gets no truncation note even
+        // when it elides trailing lines.
         let tmp = TempDir::new().unwrap();
         let target = tmp.path().join("long2.txt");
         let mut body = String::new();
@@ -2051,8 +2220,8 @@ mod tests {
         assert_eq!(result.data["content"].as_str().unwrap().lines().count(), 2200);
         let mc = result.data["model_content"].as_str().unwrap();
         assert!(
-            !mc.contains("File truncated to the first"),
-            "explicit limit must not emit the default-cap note"
+            !mc.contains("Truncated") && !mc.contains("File truncated"),
+            "explicit limit must not emit a truncation note"
         );
     }
 
@@ -2651,21 +2820,80 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn full_read_over_token_budget_errors() {
-        // A full read whose estimated tokens exceed DEFAULT_MAX_OUTPUT_TOKENS
-        // (25000) but stay under the 256KB byte cap must error with the
-        // byte-locked max-tokens message — and emit read_failed, not completed.
+    async fn full_read_over_token_budget_gracefully_truncates() {
+        // A FULL read (no offset, no limit) whose estimated tokens exceed
+        // DEFAULT_MAX_OUTPUT_TOKENS (25000) but stay under the 256KB byte cap is
+        // GRACEFULLY token-truncated (claude-code's `if(L instanceof Fae && k)`
+        // catch branch) — it SUCCEEDS, surfaces the `[Truncated: PARTIAL view —
+        // showing lines 1-N of H total ...]` note, and emits read_COMPLETED.
         let tmp = TempDir::new().unwrap();
         let target = tmp.path().join("dense.txt");
-        // ~120 KB of ASCII (under 256KB), estimate 120000/4 = 30000 > 25000.
-        let body = "x".repeat(120_000);
+        // A file over the 25000-token budget (>100 KB at bpt=4) but under the
+        // 256 KB byte cap. ~14000 lines of "line NNNNN\n" (~10 bytes each) ≈
+        // 140 KB → ~35000 tokens.
+        let mut body = String::new();
+        for i in 0..14_000u32 {
+            body.push_str(&format!("line {i:05}\n"));
+        }
+        // Byte length / 4 > 25000 tokens but < 256 KB.
+        assert!((body.len() as u64) < MAX_FILE_READ_SIZE, "must stay under byte cap");
+        assert!(
+            rough_token_count_estimation_for_file_type(&body, Some("txt"))
+                > DEFAULT_MAX_OUTPUT_TOKENS,
+            "fixture must exceed the token budget"
+        );
         std::fs::write(&target, &body).unwrap();
         let (ctx, sink) = make_ctx(&tmp);
         ctx.bus.attach_sink(sink.clone()).await;
         let tool = FileReadTool::new(ctx);
-        let err = tool
+        let result = tool
             .call(
                 json!({ "file_path": target.to_str().unwrap() }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .expect("over-budget full read must gracefully truncate, not error");
+        let mc = result.data["model_content"].as_str().unwrap();
+        // Exact note shape (line-paging branch): prefix + em-dash + range.
+        assert!(
+            mc.contains("[Truncated: PARTIAL view \u{2014} showing lines 1-"),
+            "model_content must carry the partial-view note, tail: {}",
+            &mc[mc.len().saturating_sub(400)..]
+        );
+        assert!(mc.contains(" total ("));
+        assert!(mc.contains(" tokens, cap 25000). Call Read with offset="));
+        assert!(mc.contains(" or Grep to find a specific section."));
+        assert!(mc.contains("Do NOT answer from this page alone"));
+        // The returned slice is strictly smaller than the whole file.
+        let returned_lines = result.data["content"].as_str().unwrap().lines().count();
+        assert!(returned_lines < 14_000, "must be truncated, got {returned_lines}");
+        // Emits read_COMPLETED (graceful path), not read_failed.
+        let events = sink.events().await;
+        let names: Vec<&str> = events.iter().map(|e| e.name.as_str()).collect();
+        assert!(names.contains(&"tengu_tool_read_completed"));
+        assert!(!names.contains(&"tengu_tool_read_failed"));
+    }
+
+    #[tokio::test]
+    async fn explicit_range_over_token_budget_errors() {
+        // An EXPLICIT-range read (limit set, or offset > 1) over the token
+        // budget RE-THROWS as a hard error (`else throw L`) — it is NOT a full
+        // read, so the graceful path does not apply.
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("dense2.txt");
+        let mut body = String::new();
+        for i in 0..50_000u32 {
+            body.push_str(&format!("line {i}\n"));
+        }
+        std::fs::write(&target, &body).unwrap();
+        let (ctx, sink) = make_ctx(&tmp);
+        ctx.bus.attach_sink(sink.clone()).await;
+        let tool = FileReadTool::new(ctx);
+        // limit large enough that the slice still exceeds the budget.
+        let err = tool
+            .call(
+                json!({ "file_path": target.to_str().unwrap(), "limit": 50_000 }),
                 fresh_ctx(),
                 fresh_tx(),
             )

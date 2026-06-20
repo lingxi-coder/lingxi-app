@@ -325,6 +325,16 @@ pub fn register_interactive_only_commands(reg: &mut CommandRegistry) {
             core_description(name),
         )));
     }
+
+    // claude-code parity (#61): resolution aliases for the interactive-only
+    // commands whose target stub is registered above (byte-verified alias sets).
+    // Like continue→resume these are NOT builtin names (no separate palette row).
+    reg.register_alias("checkpoint".to_string(), "rewind".to_string());
+    reg.register_alias("undo".to_string(), "rewind".to_string());
+    reg.register_alias("name".to_string(), "rename".to_string());
+    reg.register_alias("plugins".to_string(), "plugin".to_string());
+    reg.register_alias("marketplace".to_string(), "plugin".to_string());
+    reg.register_alias("bashes".to_string(), "tasks".to_string());
 }
 
 #[cfg(test)]
@@ -355,6 +365,28 @@ mod registry_tests {
                 reg.get_handler(name).is_some(),
                 "expected handler for /{name}"
             );
+        }
+    }
+
+    #[test]
+    fn interactive_only_aliases_resolve_to_targets() {
+        // claude-code parity (#61): the rewind/rename/plugin/tasks alias sets,
+        // registered by register_interactive_only_commands (called inside
+        // register_all_builtin_commands).
+        let mut reg = CommandRegistry::new();
+        register_all_builtin_commands(&mut reg);
+        for (alias, target) in [
+            ("checkpoint", "rewind"),
+            ("undo", "rewind"),
+            ("name", "rename"),
+            ("plugins", "plugin"),
+            ("marketplace", "plugin"),
+            ("bashes", "tasks"),
+        ] {
+            let cmd = reg
+                .resolve(alias)
+                .unwrap_or_else(|| panic!("alias /{alias} must resolve"));
+            assert_eq!(cmd.name, target, "/{alias} should resolve to /{target}");
         }
     }
 

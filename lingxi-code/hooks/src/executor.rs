@@ -747,6 +747,7 @@ fn build_envelope_body(event: &HookEvent, ctx: &HookContext) -> Option<(&'static
                 permission_mode: ctx.permission_mode.clone(),
                 agent_id: ctx.agent_id.as_ref().map(ToString::to_string),
                 agent_type: ctx.agent_type.clone(),
+                effort: ctx.effort.clone(),
                 tool_name: tool_name.clone(),
                 tool_input: tool_input.clone(),
                 tool_use_id: tool_use_id.to_string(),
@@ -767,6 +768,7 @@ fn build_envelope_body(event: &HookEvent, ctx: &HookContext) -> Option<(&'static
                 permission_mode: ctx.permission_mode.clone(),
                 agent_id: ctx.agent_id.as_ref().map(ToString::to_string),
                 agent_type: ctx.agent_type.clone(),
+                effort: ctx.effort.clone(),
                 tool_name: tool_name.clone(),
                 tool_input: tool_input.clone(),
                 tool_response: tool_output.clone(),
@@ -789,6 +791,11 @@ struct BaseHookFields {
     permission_mode: Option<String>,
     agent_id: Option<String>,
     agent_type: Option<String>,
+    /// Active reasoning-effort level (`effort: { level }`), sourced from the
+    /// [`HookContext`]. `None` (omitted on the wire) for session-lifecycle
+    /// hooks and effort-incapable models — faithful to claude-code's
+    /// conditional `effort` spread in `createBaseHookInput`.
+    effort: Option<crate::hook_payload::EffortLevel>,
 }
 
 impl BaseHookFields {
@@ -800,6 +807,7 @@ impl BaseHookFields {
             permission_mode: ctx.permission_mode.clone(),
             agent_id: ctx.agent_id.as_ref().map(ToString::to_string),
             agent_type: ctx.agent_type.clone(),
+            effort: ctx.effort.clone(),
         }
     }
 }
@@ -842,6 +850,7 @@ fn build_lifecycle_envelope_body(
                 permission_mode: b.permission_mode,
                 agent_id: b.agent_id,
                 agent_type: b.agent_type,
+                effort: b.effort,
                 stop_hook_active: false,
                 last_assistant_message: None,
             };
@@ -858,6 +867,7 @@ fn build_lifecycle_envelope_body(
                 agent_id: agent_id.to_string(),
                 agent_transcript_path: String::new(),
                 agent_type: b.agent_type.unwrap_or_default(),
+                effort: b.effort,
                 last_assistant_message: None,
             };
             Some(("SubagentStop", serde_json::to_string(&payload).ok()?))
@@ -878,6 +888,7 @@ fn build_lifecycle_envelope_body(
                 permission_mode: b.permission_mode,
                 agent_id: b.agent_id,
                 agent_type: b.agent_type,
+                effort: b.effort,
                 task_id: task_id.clone(),
                 task_subject: task_subject.clone(),
                 task_description: task_description.clone(),
@@ -909,6 +920,7 @@ fn build_lifecycle_envelope_body(
                 permission_mode: b.permission_mode,
                 agent_id: b.agent_id,
                 agent_type: b.agent_type,
+                effort: b.effort,
                 task_id: task_id.clone(),
                 task_subject: task_type.clone(),
                 task_description: Some(description.clone()),
@@ -926,6 +938,7 @@ fn build_lifecycle_envelope_body(
                 permission_mode: b.permission_mode,
                 agent_id: b.agent_id,
                 agent_type: b.agent_type,
+                effort: b.effort,
                 prompt: prompt.clone(),
             };
             Some(("UserPromptSubmit", serde_json::to_string(&payload).ok()?))
@@ -940,6 +953,7 @@ fn build_lifecycle_envelope_body(
                 agent_id: b.agent_id,
                 source: source.clone(),
                 agent_type: b.agent_type,
+                effort: b.effort,
                 model: None,
             };
             Some(("SessionStart", serde_json::to_string(&payload).ok()?))
@@ -953,6 +967,7 @@ fn build_lifecycle_envelope_body(
                 permission_mode: b.permission_mode,
                 agent_id: b.agent_id,
                 agent_type: b.agent_type,
+                effort: b.effort,
                 error: error.clone(),
                 error_details: None,
                 last_assistant_message: None,
@@ -981,6 +996,7 @@ fn build_lifecycle_envelope_body(
                 permission_mode: b.permission_mode,
                 agent_id: b.agent_id,
                 agent_type: b.agent_type,
+                effort: b.effort,
                 tool_name: tool_name.clone(),
                 tool_input: tool_input.clone(),
                 tool_use_id: tool_use_id.to_string(),
@@ -998,6 +1014,7 @@ fn build_lifecycle_envelope_body(
                 permission_mode: b.permission_mode,
                 agent_id: b.agent_id,
                 agent_type: b.agent_type,
+                effort: b.effort,
                 reason: reason.clone(),
             };
             Some(("SessionEnd", serde_json::to_string(&payload).ok()?))
@@ -1011,6 +1028,7 @@ fn build_lifecycle_envelope_body(
                 permission_mode: b.permission_mode,
                 agent_id: b.agent_id,
                 agent_type: b.agent_type,
+                effort: b.effort,
                 // `HookEvent::PreCompact.reason` is the `manual` / `auto`
                 // trigger in the wire schema.
                 trigger: reason.clone(),
@@ -1027,6 +1045,7 @@ fn build_lifecycle_envelope_body(
                 permission_mode: b.permission_mode,
                 agent_id: b.agent_id,
                 agent_type: b.agent_type,
+                effort: b.effort,
                 trigger: String::new(),
                 compact_summary: summary.clone(),
             };
@@ -1041,6 +1060,7 @@ fn build_lifecycle_envelope_body(
                 permission_mode: b.permission_mode,
                 agent_id: b.agent_id,
                 agent_type: b.agent_type,
+                effort: b.effort,
                 message: message.clone(),
                 title: None,
                 notification_type: kind.clone(),
@@ -1060,6 +1080,7 @@ fn build_lifecycle_envelope_body(
                 permission_mode: b.permission_mode,
                 agent_id: b.agent_id,
                 agent_type: b.agent_type,
+                effort: b.effort,
                 tool_name: tool_name.clone(),
                 tool_input: tool_input.clone(),
                 permission_suggestions: None,
@@ -1080,6 +1101,7 @@ fn build_lifecycle_envelope_body(
                 permission_mode: b.permission_mode,
                 agent_id: b.agent_id,
                 agent_type: b.agent_type,
+                effort: b.effort,
                 tool_name: tool_name.clone(),
                 tool_input: tool_input.clone(),
                 tool_use_id: tool_use_id.to_string(),
@@ -1096,6 +1118,7 @@ fn build_lifecycle_envelope_body(
                 permission_mode: b.permission_mode,
                 agent_id: b.agent_id,
                 agent_type: b.agent_type,
+                effort: b.effort,
                 trigger: String::new(),
             };
             Some(("Setup", serde_json::to_string(&payload).ok()?))
@@ -1113,6 +1136,7 @@ fn build_lifecycle_envelope_body(
                 permission_mode: b.permission_mode,
                 agent_id: agent_id.to_string(),
                 agent_type: agent_type.clone(),
+                effort: b.effort,
             };
             Some(("SubagentStart", serde_json::to_string(&payload).ok()?))
         }
@@ -1125,6 +1149,7 @@ fn build_lifecycle_envelope_body(
                 permission_mode: b.permission_mode,
                 agent_id: b.agent_id,
                 agent_type: b.agent_type,
+                effort: b.effort,
                 old_cwd: old.to_string_lossy().into_owned(),
                 new_cwd: new.to_string_lossy().into_owned(),
             };
@@ -1139,6 +1164,7 @@ fn build_lifecycle_envelope_body(
                 permission_mode: b.permission_mode,
                 agent_id: b.agent_id,
                 agent_type: b.agent_type,
+                effort: b.effort,
                 file_path: path.to_string_lossy().into_owned(),
                 event: kind.clone(),
             };
@@ -1153,6 +1179,7 @@ fn build_lifecycle_envelope_body(
                 permission_mode: b.permission_mode,
                 agent_id: b.agent_id,
                 agent_type: b.agent_type,
+                effort: b.effort,
                 worktree_path: path.to_string_lossy().into_owned(),
             };
             Some(("WorktreeRemove", serde_json::to_string(&payload).ok()?))
@@ -1177,6 +1204,7 @@ fn build_lifecycle_envelope_body(
                 permission_mode: None,
                 agent_id: b.agent_id,
                 agent_type: b.agent_type,
+                effort: b.effort,
                 source: *source,
                 file_path: file_path.as_ref().map(|p| p.to_string_lossy().into_owned()),
             };
@@ -1198,6 +1226,7 @@ fn build_lifecycle_envelope_body(
                 permission_mode: None,
                 agent_id: b.agent_id,
                 agent_type: b.agent_type,
+                effort: b.effort,
                 file_path: file_path.to_string_lossy().into_owned(),
                 memory_type: *memory_type,
                 load_reason: *load_reason,
@@ -1227,6 +1256,7 @@ fn build_lifecycle_envelope_body(
                 permission_mode: b.permission_mode,
                 agent_id: b.agent_id,
                 agent_type: b.agent_type,
+                effort: b.effort,
                 mcp_server_name: server_name.clone(),
                 message: message.clone(),
                 mode: *mode,
@@ -1245,6 +1275,7 @@ fn build_lifecycle_envelope_body(
                 permission_mode: None,
                 agent_id: b.agent_id,
                 agent_type: b.agent_type,
+                effort: b.effort,
                 name: name.clone(),
             };
             Some(("WorktreeCreate", serde_json::to_string(&payload).ok()?))
@@ -1268,6 +1299,7 @@ fn build_lifecycle_envelope_body(
                 permission_mode: b.permission_mode,
                 agent_id: b.agent_id,
                 agent_type: b.agent_type,
+                effort: b.effort,
                 teammate_name: teammate_name.clone(),
                 team_name: team_name.clone(),
             };

@@ -65,6 +65,15 @@ pub struct HookContext {
     /// inside a subagent context. Distinct from [`Self::transcript_path`]
     /// (the session transcript); `None` outside a subagent. Additive default.
     pub agent_transcript_path: Option<PathBuf>,
+    /// Active reasoning-effort level for the current turn, spliced into the
+    /// base hook input shape as `effort: { level }` (claude-code
+    /// `createBaseHookInput`, minified `vd`). `None` — the additive default —
+    /// when the firing scope has no effort signal, which is faithful for
+    /// session-lifecycle hooks and models that do not support the effort
+    /// parameter (claude-code's `Lw(model)` gate): in both cases the binary
+    /// omits the `effort` key entirely. The orchestrator populates this only
+    /// for tool-use-context hooks on effort-capable models. Additive default.
+    pub effort: Option<crate::hook_payload::EffortLevel>,
 }
 
 /// In-memory registry of hook definitions, sharded by their declared source.

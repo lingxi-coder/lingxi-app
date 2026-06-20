@@ -118,6 +118,36 @@ hook_event_name_marker!(HookEventNameElicitation, "Elicitation");
 hook_event_name_marker!(HookEventNameWorktreeCreate, "WorktreeCreate");
 hook_event_name_marker!(HookEventNameTeammateIdle, "TeammateIdle");
 
+/// Wire-format `effort` object embedded in the base hook input shape
+/// (1:1 with `coreSchemas.ts` base `RT` schema:
+/// `effort: E.object({ level: E.string() }).optional()`).
+///
+/// claude-code construction (`createBaseHookInput`, minified `vd`):
+/// `effort: s && getAppState && Lw(s) ? { level: jO(s, i) } : void 0` — i.e. the
+/// object is present (`{ level }`) ONLY for hooks that fire within a tool-use
+/// context on a model that supports the effort parameter, and omitted entirely
+/// (the optional spread collapses) for session-lifecycle hooks and models
+/// without effort support. `level` is the active effort level for the turn
+/// (`"low"` / `"medium"` / `"high"` / `"xhigh"` / `"max"`), after any silent
+/// downgrade for the selected model — the same value exposed to hook commands
+/// and Bash as the `CLAUDE_EFFORT` env var. Same shape as
+/// `StatusLineCommandInput.effort`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[allow(missing_docs, reason = "wire-format mirror of claude-code schema")]
+pub struct EffortLevel {
+    pub level: String,
+}
+
+impl EffortLevel {
+    /// Construct an `effort` object from the active effort `level` string.
+    #[must_use]
+    pub fn new(level: impl Into<String>) -> Self {
+        Self {
+            level: level.into(),
+        }
+    }
+}
+
 /// Wire-format `PreToolUse` payload (1:1 with `coreSchemas.ts:414-423`).
 ///
 /// Field meanings track claude-code exactly; see the schema reference above.
@@ -134,6 +164,8 @@ pub struct PreToolUsePayload {
     pub agent_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub agent_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub effort: Option<EffortLevel>,
     pub tool_name: String,
     pub tool_input: Value,
     pub tool_use_id: String,
@@ -155,6 +187,8 @@ pub struct PostToolUsePayload {
     pub agent_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub agent_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub effort: Option<EffortLevel>,
     pub tool_name: String,
     pub tool_input: Value,
     pub tool_response: Value,
@@ -179,6 +213,8 @@ pub struct StopPayload {
     pub agent_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub agent_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub effort: Option<EffortLevel>,
     pub stop_hook_active: bool,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub last_assistant_message: Option<String>,
@@ -203,6 +239,8 @@ pub struct SubagentStopPayload {
     pub agent_transcript_path: String,
     pub agent_type: String,
     #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub effort: Option<EffortLevel>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
     pub last_assistant_message: Option<String>,
 }
 
@@ -221,6 +259,8 @@ pub struct TaskCompletedPayload {
     pub agent_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub agent_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub effort: Option<EffortLevel>,
     pub task_id: String,
     pub task_subject: String,
     #[serde(skip_serializing_if = "Option::is_none", default)]
@@ -250,6 +290,8 @@ pub struct TaskCreatedPayload {
     pub agent_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub agent_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub effort: Option<EffortLevel>,
     pub task_id: String,
     pub task_subject: String,
     #[serde(skip_serializing_if = "Option::is_none", default)]
@@ -283,6 +325,8 @@ pub struct TeammateIdlePayload {
     pub agent_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub agent_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub effort: Option<EffortLevel>,
     pub teammate_name: String,
     pub team_name: String,
 }
@@ -302,6 +346,8 @@ pub struct UserPromptSubmitPayload {
     pub agent_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub agent_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub effort: Option<EffortLevel>,
     pub prompt: String,
 }
 
@@ -325,6 +371,8 @@ pub struct SessionStartPayload {
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub agent_type: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub effort: Option<EffortLevel>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
     pub model: Option<String>,
 }
 
@@ -346,6 +394,8 @@ pub struct StopFailurePayload {
     pub agent_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub agent_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub effort: Option<EffortLevel>,
     pub error: String,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub error_details: Option<String>,
@@ -374,6 +424,8 @@ pub struct PostToolUseFailurePayload {
     pub agent_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub agent_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub effort: Option<EffortLevel>,
     pub tool_name: String,
     pub tool_input: Value,
     pub tool_use_id: String,
@@ -400,6 +452,8 @@ pub struct SessionEndPayload {
     pub agent_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub agent_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub effort: Option<EffortLevel>,
     pub reason: String,
 }
 
@@ -423,6 +477,8 @@ pub struct PreCompactPayload {
     pub agent_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub agent_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub effort: Option<EffortLevel>,
     pub trigger: String,
     /// `.nullable()` in the schema — always present, `null` when absent.
     pub custom_instructions: Option<String>,
@@ -447,6 +503,8 @@ pub struct PostCompactPayload {
     pub agent_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub agent_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub effort: Option<EffortLevel>,
     pub trigger: String,
     pub compact_summary: String,
 }
@@ -469,6 +527,8 @@ pub struct NotificationPayload {
     pub agent_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub agent_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub effort: Option<EffortLevel>,
     pub message: String,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub title: Option<String>,
@@ -495,6 +555,8 @@ pub struct PermissionRequestPayload {
     pub agent_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub agent_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub effort: Option<EffortLevel>,
     pub tool_name: String,
     pub tool_input: Value,
     #[serde(skip_serializing_if = "Option::is_none", default)]
@@ -521,6 +583,8 @@ pub struct PermissionDeniedPayload {
     pub agent_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub agent_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub effort: Option<EffortLevel>,
     pub tool_name: String,
     pub tool_input: Value,
     pub tool_use_id: String,
@@ -546,6 +610,8 @@ pub struct SetupPayload {
     pub agent_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub agent_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub effort: Option<EffortLevel>,
     pub trigger: String,
 }
 
@@ -566,6 +632,8 @@ pub struct SubagentStartPayload {
     pub permission_mode: Option<String>,
     pub agent_id: String,
     pub agent_type: String,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub effort: Option<EffortLevel>,
 }
 
 /// Wire-format `CwdChanged` payload (1:1 with `coreSchemas.ts:727-735`
@@ -583,6 +651,8 @@ pub struct CwdChangedPayload {
     pub agent_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub agent_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub effort: Option<EffortLevel>,
     pub old_cwd: String,
     pub new_cwd: String,
 }
@@ -605,6 +675,8 @@ pub struct FileChangedPayload {
     pub agent_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub agent_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub effort: Option<EffortLevel>,
     pub file_path: String,
     pub event: String,
 }
@@ -625,6 +697,8 @@ pub struct WorktreeRemovePayload {
     pub agent_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub agent_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub effort: Option<EffortLevel>,
     pub worktree_path: String,
 }
 
@@ -647,6 +721,8 @@ pub struct ConfigChangePayload {
     pub agent_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub agent_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub effort: Option<EffortLevel>,
     pub source: crate::events::ConfigChangeSource,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub file_path: Option<String>,
@@ -672,6 +748,8 @@ pub struct InstructionsLoadedPayload {
     pub agent_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub agent_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub effort: Option<EffortLevel>,
     pub file_path: String,
     pub memory_type: crate::events::InstructionsMemoryType,
     pub load_reason: crate::events::InstructionsLoadReason,
@@ -703,6 +781,8 @@ pub struct ElicitationPayload {
     pub agent_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub agent_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub effort: Option<EffortLevel>,
     pub mcp_server_name: String,
     pub message: String,
     #[serde(skip_serializing_if = "Option::is_none", default)]
@@ -734,6 +814,8 @@ pub struct WorktreeCreatePayload {
     pub agent_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub agent_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub effort: Option<EffortLevel>,
     pub name: String,
 }
 
@@ -922,6 +1004,7 @@ mod tests {
             permission_mode: None,
             agent_id: None,
             agent_type: None,
+            effort: None,
             tool_name: "Bash".into(),
             tool_input: json!({"command": "ls"}),
             tool_use_id: "tu-1".into(),
@@ -940,6 +1023,7 @@ mod tests {
             permission_mode: None,
             agent_id: None,
             agent_type: None,
+            effort: None,
             tool_name: "Read".into(),
             tool_input: json!({"path": "/x"}),
             tool_response: json!({"content": "data"}),
@@ -960,6 +1044,7 @@ mod tests {
             permission_mode: Some("plan".into()),
             agent_id: Some("a-1".into()),
             agent_type: Some("general-purpose".into()),
+            effort: None,
             tool_name: "Edit".into(),
             tool_input: json!({"file_path": "/f"}),
             tool_use_id: "tu".into(),
@@ -968,6 +1053,57 @@ mod tests {
         let back: PreToolUsePayload = serde_json::from_str(&s).unwrap();
         assert_eq!(back.tool_name, "Edit");
         assert_eq!(back.agent_type.as_deref(), Some("general-purpose"));
+    }
+
+    /// `effort` is the base-shape `effort: { level }` object (finding #44):
+    /// present (as a nested object) only when populated, and OMITTED entirely
+    /// when `None` — matching claude-code's conditional `effort:a` spread in
+    /// `createBaseHookInput` (`effort` is `void 0` → key absent for
+    /// session-lifecycle hooks and effort-incapable models).
+    #[test]
+    fn effort_present_serializes_as_level_object_and_omitted_when_none() {
+        // PRESENT: `effort: { level: "high" }`, placed after the base
+        // `agent_type` field and before the event-specific fields.
+        let with_effort = PreToolUsePayload {
+            hook_event_name: HookEventNamePre,
+            session_id: "s".into(),
+            transcript_path: "/t".into(),
+            cwd: "/w".into(),
+            permission_mode: None,
+            agent_id: None,
+            agent_type: None,
+            effort: Some(EffortLevel::new("high")),
+            tool_name: "Bash".into(),
+            tool_input: json!({"command": "ls"}),
+            tool_use_id: "tu".into(),
+        };
+        let s = serde_json::to_string(&with_effort).unwrap();
+        // Nested `{ "level": "..." }` shape, not a bare string.
+        assert!(
+            s.contains(r#""effort":{"level":"high"}"#),
+            "effort serializes as a {{ level }} object: {s}"
+        );
+        // Wire position: base block, after `cwd` (the last always-present base
+        // field here) and immediately before `tool_name`.
+        assert!(
+            s.contains(r#""cwd":"/w","effort":{"level":"high"},"tool_name":"Bash""#),
+            "effort sits in the base block before event fields: {s}"
+        );
+        let back: PreToolUsePayload = serde_json::from_str(&s).unwrap();
+        assert_eq!(back.effort, Some(EffortLevel::new("high")));
+
+        // ABSENT: `None` → key omitted entirely (skip_serializing_if).
+        let no_effort = PreToolUsePayload {
+            effort: None,
+            ..with_effort.clone()
+        };
+        let s2 = serde_json::to_string(&no_effort).unwrap();
+        assert!(
+            !s2.contains("effort"),
+            "effort key is omitted when None: {s2}"
+        );
+        let back2: PreToolUsePayload = serde_json::from_str(&s2).unwrap();
+        assert_eq!(back2.effort, None);
     }
 
     #[test]
@@ -1129,6 +1265,7 @@ mod tests {
             permission_mode: Some("default".into()),
             agent_id: None,
             agent_type: None,
+            effort: None,
             tool_name: "Bash".into(),
             tool_input: json!({ "command": "git push" }),
             tool_use_id: "tu-9".into(),
@@ -1154,6 +1291,7 @@ mod tests {
             permission_mode: None,
             agent_id: None,
             agent_type: None,
+            effort: None,
             stop_hook_active: true,
             last_assistant_message: None,
         };
@@ -1174,6 +1312,7 @@ mod tests {
             permission_mode: Some("default".into()),
             agent_id: None,
             agent_type: None,
+            effort: None,
             stop_hook_active: false,
             last_assistant_message: Some("done".into()),
         };
@@ -1196,6 +1335,7 @@ mod tests {
             agent_id: "agent-7".into(),
             agent_transcript_path: "/tmp/agent-7.jsonl".into(),
             agent_type: "general-purpose".into(),
+            effort: None,
             last_assistant_message: None,
         };
         let s = serde_json::to_string(&p).unwrap();
@@ -1215,6 +1355,7 @@ mod tests {
             permission_mode: None,
             agent_id: None,
             agent_type: None,
+            effort: None,
             task_id: "task-42".into(),
             task_subject: "Build the thing".into(),
             task_description: None,
@@ -1238,6 +1379,7 @@ mod tests {
             permission_mode: None,
             agent_id: None,
             agent_type: None,
+            effort: None,
             task_id: "t1".into(),
             task_subject: "subj".into(),
             task_description: Some("desc".into()),
@@ -1261,6 +1403,7 @@ mod tests {
             permission_mode: None,
             agent_id: None,
             agent_type: None,
+            effort: None,
             task_id: "task-42".into(),
             task_subject: "LocalBash".into(),
             task_description: Some("do the work".into()),
@@ -1287,6 +1430,7 @@ mod tests {
             permission_mode: None,
             agent_id: None,
             agent_type: None,
+            effort: None,
             task_id: "t1".into(),
             task_subject: "subj".into(),
             task_description: Some("desc".into()),
@@ -1310,6 +1454,7 @@ mod tests {
             permission_mode: None,
             agent_id: None,
             agent_type: None,
+            effort: None,
             prompt: "fix the bug".into(),
         };
         let s = serde_json::to_string(&p).unwrap();
@@ -1330,6 +1475,7 @@ mod tests {
             agent_id: None,
             source: "startup".into(),
             agent_type: None,
+            effort: None,
             model: None,
         };
         let s = serde_json::to_string(&p).unwrap();
@@ -1350,6 +1496,7 @@ mod tests {
             agent_id: None,
             source: "resume".into(),
             agent_type: Some("code-reviewer".into()),
+            effort: None,
             model: Some("claude-opus".into()),
         };
         let s = serde_json::to_string(&p).unwrap();
@@ -1369,6 +1516,7 @@ mod tests {
             permission_mode: None,
             agent_id: None,
             agent_type: None,
+            effort: None,
             error: "rate_limit".into(),
             error_details: None,
             last_assistant_message: None,
@@ -1390,6 +1538,7 @@ mod tests {
             permission_mode: None,
             agent_id: None,
             agent_type: None,
+            effort: None,
             error: "server_error".into(),
             error_details: Some("upstream 500".into()),
             last_assistant_message: Some("partial".into()),
@@ -1458,6 +1607,7 @@ mod tests {
             agent_id: "a-1".into(),
             agent_transcript_path: "/t/a-1.jsonl".into(),
             agent_type: "general-purpose".into(),
+            effort: None,
             last_assistant_message: Some("hi".into()),
         };
         let s = serde_json::to_string(&p).unwrap();
@@ -1513,6 +1663,7 @@ mod tests {
             permission_mode: None,
             agent_id: None,
             agent_type: None,
+            effort: None,
             tool_name: "Bash".into(),
             tool_input: Value::Null,
             tool_use_id: "tu-1".into(),
@@ -1536,6 +1687,7 @@ mod tests {
             permission_mode: None,
             agent_id: None,
             agent_type: None,
+            effort: None,
             tool_name: "Edit".into(),
             tool_input: json!({"file_path": "/f"}),
             tool_use_id: "tu".into(),
@@ -1557,6 +1709,7 @@ mod tests {
             permission_mode: None,
             agent_id: None,
             agent_type: None,
+            effort: None,
             reason: "logout".into(),
         };
         let s = serde_json::to_string(&p).unwrap();
@@ -1578,6 +1731,7 @@ mod tests {
             permission_mode: None,
             agent_id: None,
             agent_type: None,
+            effort: None,
             trigger: "manual".into(),
             custom_instructions: None,
         };
@@ -1598,6 +1752,7 @@ mod tests {
             permission_mode: None,
             agent_id: None,
             agent_type: None,
+            effort: None,
             trigger: "auto".into(),
             custom_instructions: Some("keep the API surface".into()),
         };
@@ -1615,6 +1770,7 @@ mod tests {
             permission_mode: None,
             agent_id: None,
             agent_type: None,
+            effort: None,
             trigger: String::new(),
             compact_summary: "did the thing".into(),
         };
@@ -1635,6 +1791,7 @@ mod tests {
             permission_mode: None,
             agent_id: None,
             agent_type: None,
+            effort: None,
             message: "build done".into(),
             title: None,
             notification_type: "info".into(),
@@ -1656,6 +1813,7 @@ mod tests {
             permission_mode: None,
             agent_id: None,
             agent_type: None,
+            effort: None,
             message: "msg".into(),
             title: Some("Heads up".into()),
             notification_type: "warn".into(),
@@ -1674,6 +1832,7 @@ mod tests {
             permission_mode: None,
             agent_id: None,
             agent_type: None,
+            effort: None,
             tool_name: "Bash".into(),
             tool_input: json!({"command": "rm -rf /"}),
             permission_suggestions: None,
@@ -1695,6 +1854,7 @@ mod tests {
             permission_mode: None,
             agent_id: None,
             agent_type: None,
+            effort: None,
             trigger: String::new(),
         };
         let s = serde_json::to_string(&p).unwrap();
@@ -1714,6 +1874,7 @@ mod tests {
             permission_mode: None,
             agent_id: "agent-7".into(),
             agent_type: "general-purpose".into(),
+            effort: None,
         };
         let s = serde_json::to_string(&p).unwrap();
         assert_eq!(
@@ -1732,6 +1893,7 @@ mod tests {
             permission_mode: None,
             agent_id: None,
             agent_type: None,
+            effort: None,
             old_cwd: "/old".into(),
             new_cwd: "/new".into(),
         };
@@ -1752,6 +1914,7 @@ mod tests {
             permission_mode: None,
             agent_id: None,
             agent_type: None,
+            effort: None,
             file_path: "/work/src/main.rs".into(),
             event: "change".into(),
         };
@@ -1772,6 +1935,7 @@ mod tests {
             permission_mode: None,
             agent_id: None,
             agent_type: None,
+            effort: None,
             worktree_path: "/work/.worktrees/feat".into(),
         };
         let s = serde_json::to_string(&p).unwrap();
@@ -1817,6 +1981,7 @@ mod tests {
             permission_mode: None,
             agent_id: None,
             agent_type: None,
+            effort: None,
             source: crate::events::ConfigChangeSource::LocalSettings,
             file_path: None,
         };
@@ -1837,6 +2002,7 @@ mod tests {
             permission_mode: None,
             agent_id: None,
             agent_type: None,
+            effort: None,
             source: crate::events::ConfigChangeSource::PolicySettings,
             file_path: Some("/etc/claude/policy.json".into()),
         };
@@ -1857,6 +2023,7 @@ mod tests {
             permission_mode: None,
             agent_id: None,
             agent_type: None,
+            effort: None,
             file_path: "/work/CLAUDE.md".into(),
             memory_type: crate::events::InstructionsMemoryType::Project,
             load_reason: crate::events::InstructionsLoadReason::SessionStart,
@@ -1881,6 +2048,7 @@ mod tests {
             permission_mode: None,
             agent_id: None,
             agent_type: None,
+            effort: None,
             file_path: "/w/rules/api.md".into(),
             memory_type: crate::events::InstructionsMemoryType::Managed,
             load_reason: crate::events::InstructionsLoadReason::Compact,
@@ -1905,6 +2073,7 @@ mod tests {
             permission_mode: None,
             agent_id: None,
             agent_type: None,
+            effort: None,
             mcp_server_name: "github".into(),
             message: "Authorize?".into(),
             mode: None,
@@ -1930,6 +2099,7 @@ mod tests {
             permission_mode: Some("default".into()),
             agent_id: None,
             agent_type: None,
+            effort: None,
             mcp_server_name: "linear".into(),
             message: "Pick".into(),
             mode: Some(crate::events::ElicitationMode::Url),
@@ -1954,6 +2124,7 @@ mod tests {
             permission_mode: None,
             agent_id: None,
             agent_type: None,
+            effort: None,
             name: "feature-x".into(),
         };
         let s = serde_json::to_string(&p).unwrap();

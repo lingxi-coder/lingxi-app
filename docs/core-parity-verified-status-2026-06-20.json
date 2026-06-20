@@ -1373,5 +1373,43 @@
    }
   ],
   "_status_final": "FIX CAMPAIGN COMPLETE 2026-06-20. main 1928b77e. ALL behavioral parity findings from the adversarial review are LANDED or dispositioned: Tier1 security/decision (perm 8eb13a81, hooks f361443f), Tier2 model-facing (model-gate all 8 tools + R-P1 envelope 7cdbfd8c), Tier3 observable (R-V1 98613461, R-F5 doc-inert, R-O1 1928b77e, R-O2 in-hooks), Tier4 (R-TEST 7293f64b, R-MINOR 2-items 42e3bc77 + residuals-doc, R-TEL OUT-OF-SCOPE analytics-only), discovered (R-T6 bash-gate, R-EditDesc 59b6e76a, Dh-consolidation fafc84f9). Parent caught+fixed 4 agent errors via the live-claude-code-render oracle (Read/Bash SHORT prompt LONG-bullet leaks, a missing-file commit, a missing WO() denylist key). Non-blocking residuals: userEmail composition-root wiring (R-P1 follow-up; correctly omits when no email), R-MINOR out-of-arch gaps (CLAUDE_EFFORT/TRACEPARENT, tmux terminalSequence). The core is now substantially MORE 1:1 than the pre-review 'COMPLETE' claim — the review found + closed the categories the per-finding loop had missed (prompt envelope, model-conditional gating, version stamps, permission ordering, dead hooks)."
+ },
+ "codex_review_2026_06_20": {
+  "_what": "Reviewed a Codex-authored 12-finding parity list. KEY: Codex audited the STALE `work` branch (/Users/luolingfeng/Projects/LingXi-Next/lingxi-code, 68 commits behind main), so ~half its findings were ALREADY FIXED on main. Verified all 12 against main + the claude-code TS SOURCE oracle (claude-code/src/) via 4 read-only subagents, then fixed the genuine-real-on-main gaps.",
+  "classification": {
+   "ALREADY-FIXED-ON-MAIN (stale on work)": [
+    "WebFetch prompt required (my R-T5, required:[url,prompt])",
+    "<env> git lines / XML envelope (my R-P1, # Environment markdown)",
+    "Read 2000-line truncation (#9, reads to EOF + token-truncate)",
+    "Glob/Grep omitted path (trusted_dirs[0] == cwd in live engine)"
+   ],
+   "MISREAD / NOT-MODEL-FACING / OUT-OF-SCOPE": [
+    "Sandbox bypass-vs-wrap: FALSE — commands ARE sandboxed (2-layer: sandbox_runner.wrap()=real bwrap/sandbox-exec; bypass_with_audit only TAGS the already-wrapped cmd). Hooks-unsandboxed=correct parity. LocalBash bypass=dormant(0 callers).",
+    "WebFetch output data shape: not model-facing (model sees result==content).",
+    "Compaction contextCollapse: feature('CONTEXT_COLLAPSE')-gated, absent from reference build.",
+    "RemoteAgent/LocalWorkflow: cloud/feature-gated stubs (Dream+LocalAgent ARE wired); only bg-Agent→TaskRegistry is real-but-deferred (T15).",
+    "Slash 47 unimplemented: 24 cloud/remote/host (excluded) + 23 interactive-only stubs; non-interactive set faithful."
+   ],
+   "GENUINE-REAL-ON-MAIN → FIXED": [
+    "NotebookEdit 1-space on-disk indent (IPYNB_INDENT=1 vs serde 2-space) → main c727b6e2",
+    "Wire tool deny-filter (filterToolsByDenyRules; tool-wide deny hides tool from model + subagent pool) → main cde33069",
+    "HookContext transcript_path + permission_mode (always-present in claude-code base hook input) → main cde33069",
+    "ToolUseContext is_non_interactive_session true→!interactive_permissions (claude-code main REPL=false) → main cde33069"
+   ],
+   "SUPPLEMENTS (Codex MISSED, found by the verify agents)": [
+    "deny-filter must cover the SUBAGENT pool too (done)",
+    "subagent async tool-dispatch should be is_non_interactive=true (deferred — no is_async seam)",
+    "SubagentStop agent_transcript_path empty (shape-faithful fix landed; real path pending session-scoped subdir)",
+    "GHA subprocessEnv secret-scrub (CLAUDE_CODE_SUBPROCESS_ENV_SCRUB + 22-key list) not ported — niche CI security, REMAINING",
+    "WebSearch inner-query framing (no system prompt, bare query, no toolChoice/thinking) — low-severity, results EQUIVALENT, REMAINING",
+    "no session toolSchemaCache (perf); ToolUseContext.default skips feature-flag tool gating; Read fileReadingLimits override tier unported (3P/host)"
+   ]
+  },
+  "remaining_lower_value": [
+   "GHA env-scrub (niche CI security hardening)",
+   "WebSearch inner-query framing (low-severity, output-equivalent)",
+   "subagent async is_non_interactive (deferred, no seam)",
+   "leaf-firer hook transcript_path (no writer plumbed)"
+  ]
  }
 }

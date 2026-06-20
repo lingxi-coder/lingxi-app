@@ -4800,7 +4800,7 @@ mod tests {
             transport.clone(),
             std::collections::BTreeMap::new(),
             None,
-            Some(1000), // backoff_ms = 1000 → first rung 1000, jitter [800, 1200)
+            Some(1000), // backoff_ms = 1000 → first rung 1000, additive jitter [1000, 1250)
         );
 
         let before = tokio::time::Instant::now();
@@ -4810,17 +4810,17 @@ mod tests {
         let elapsed = before.elapsed();
 
         assert!(result.is_ok(), "should succeed after retry: {result:?}");
-        // Delay must be ≥ 800 ms (lower jitter bound of 1000 ms base).
-        // Default base = 500 ms → upper jitter bound = 600 ms < 800 ms.
-        // So ≥ 800 ms proves the 1000 ms base is in effect.
+        // Additive jitter (binary `sle`: base + rand(0,0.25)·base) → base 1000
+        // gives [1000, 1250). Default base 500 → [500, 625), upper 625 < 800.
+        // So ≥ 800 ms proves the 1000 ms base (not the default 500) is in effect.
         assert!(
             elapsed >= std::time::Duration::from_millis(800),
             "backoff_ms=1000 should produce ≥ 800 ms delay; elapsed={elapsed:?}"
         );
-        // Must be < 1200 ms (upper jitter bound of 1000 ms base).
+        // Must be < 1250 ms (upper additive-jitter bound: 1000 + 0.25·1000).
         assert!(
-            elapsed < std::time::Duration::from_millis(1200),
-            "backoff_ms=1000 delay should be < 1200 ms; elapsed={elapsed:?}"
+            elapsed < std::time::Duration::from_millis(1250),
+            "backoff_ms=1000 delay should be < 1250 ms; elapsed={elapsed:?}"
         );
     }
 

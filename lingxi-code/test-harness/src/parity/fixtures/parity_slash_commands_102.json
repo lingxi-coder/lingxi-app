@@ -1,10 +1,10 @@
 {
   "_meta": {
     "plan": "M5-09",
-    "spec_section": "§3 M5-09 row + §4.6 (Slash commands)",
+    "spec_section": "\u00a73 M5-09 row + \u00a74.6 (Slash commands)",
     "_claude_code_version": "see CHANGELOG v0.6.0 baseline",
-    "_count_history": "99-name surface; implemented is now target runtime status, not the old 18-core M5 split.",
-    "total_count_lock": 99,
+    "_count_history": "94-name surface (2026-06-20 slash parity #66/#67 removed cost/stats as /usage aliases + deleted vim/pr-comments/output-style). implemented is target runtime status.",
+    "total_count_lock": 94,
     "core_count_lock": 18,
     "unimplemented_count_lock": 47,
     "stub_literal_template": "{name}: not implemented in v0.6.0 (M5)",
@@ -210,16 +210,6 @@
       "target_status": "implemented",
       "requires_tui": true,
       "defer_reason": "requires clipboard access to the rendered TUI conversation buffer"
-    },
-    {
-      "name": "cost",
-      "is_core": true,
-      "implemented": true,
-      "description": "Show total cost and duration of the current session",
-      "claude_type": "local",
-      "rust_status": "implemented",
-      "target_status": "implemented",
-      "requires_tui": false
     },
     {
       "name": "ctx-viz",
@@ -558,15 +548,6 @@
       "requires_tui": false
     },
     {
-      "name": "output-style",
-      "is_core": false,
-      "implemented": true,
-      "claude_type": "local",
-      "rust_status": "implemented",
-      "target_status": "implemented",
-      "requires_tui": false
-    },
-    {
       "name": "passes",
       "is_core": false,
       "implemented": false,
@@ -614,15 +595,6 @@
       "target_status": "implemented",
       "requires_tui": true,
       "defer_reason": "requires interactive plugin manager UI"
-    },
-    {
-      "name": "pr-comments",
-      "is_core": false,
-      "implemented": true,
-      "claude_type": "prompt",
-      "rust_status": "implemented",
-      "target_status": "implemented",
-      "requires_tui": false
     },
     {
       "name": "privacy-settings",
@@ -778,16 +750,6 @@
       "requires_tui": false
     },
     {
-      "name": "stats",
-      "is_core": false,
-      "implemented": true,
-      "claude_type": "local-jsx",
-      "rust_status": "interactive_only",
-      "target_status": "implemented",
-      "requires_tui": true,
-      "defer_reason": "requires TUI stats screen"
-    },
-    {
       "name": "status",
       "is_core": true,
       "implemented": true,
@@ -912,12 +874,13 @@
     },
     {
       "name": "usage",
-      "is_core": false,
+      "is_core": true,
       "implemented": true,
       "claude_type": "local-jsx",
       "rust_status": "implemented_handle_bound",
       "target_status": "implemented",
-      "requires_tui": false
+      "requires_tui": false,
+      "description": "Show session cost, plan usage, and what's contributing to your limits"
     },
     {
       "name": "version",
@@ -928,16 +891,6 @@
       "rust_status": "implemented",
       "target_status": "implemented",
       "requires_tui": false
-    },
-    {
-      "name": "vim",
-      "is_core": false,
-      "implemented": true,
-      "claude_type": "local-jsx",
-      "rust_status": "interactive_only",
-      "target_status": "implemented",
-      "requires_tui": true,
-      "defer_reason": "requires TUI input mode state"
     },
     {
       "name": "voice",

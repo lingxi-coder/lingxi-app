@@ -13,7 +13,6 @@ Commands:
   /config               Open settings
   /context              (unimplemented in v0.6.0)
   /copy                 (unimplemented in v0.6.0)
-  /cost                 Show total cost and duration of the current session
   /desktop              (unimplemented in v0.6.0)
   /diff                 (unimplemented in v0.6.0)
   /doctor               Diagnose and verify your Claude Code installation and settings
@@ -39,12 +38,10 @@ Commands:
   /memory               Open a memory file in your editor
   /mobile               (unimplemented in v0.6.0)
   /model                Set the AI model for Claude Code
-  /output-style         (unimplemented in v0.6.0)
   /passes               (unimplemented in v0.6.0)
   /permissions          Manage allow and deny tool permission rules
   /plan                 (unimplemented in v0.6.0)
   /plugin               (unimplemented in v0.6.0)
-  /pr-comments          (unimplemented in v0.6.0)
   /privacy-settings     (unimplemented in v0.6.0)
   /release-notes        (unimplemented in v0.6.0)
   /reload-plugins       (unimplemented in v0.6.0)
@@ -58,7 +55,6 @@ Commands:
   /security-review      (unimplemented in v0.6.0)
   /session              (unimplemented in v0.6.0)
   /skills               (unimplemented in v0.6.0)
-  /stats                (unimplemented in v0.6.0)
   /status               Show Claude Code status including version, model, account, API connectivity, and tool statuses
   /statusline           (unimplemented in v0.6.0)
   /stickers             (unimplemented in v0.6.0)
@@ -67,8 +63,7 @@ Commands:
   /theme                (unimplemented in v0.6.0)
   /ultraplan            (unimplemented in v0.6.0)
   /upgrade              (unimplemented in v0.6.0)
-  /usage                (unimplemented in v0.6.0)
+  /usage                Show session cost, plan usage, and what's contributing to your limits
   /version              Print version information
-  /vim                  (unimplemented in v0.6.0)
   /voice                (unimplemented in v0.6.0)
   /x402                 (unimplemented in v0.6.0)

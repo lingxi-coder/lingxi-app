@@ -1,4 +1,4 @@
-//! End-to-end integration test: build a `CommandRegistry`, register all 99,
+//! End-to-end integration test: build a `CommandRegistry`, register all 94,
 //! wire a dispatcher, and exercise the full surface from the public API.
 //!
 //! See plan `docs/superpowers/plans/2026-05-25-m5-09-commands-surface.md`
@@ -91,7 +91,7 @@ async fn many_dispatches_against_one_registry() {
 async fn concurrent_dispatches_against_one_registry() {
     let d = Arc::new(build_dispatcher());
     let mut handles = vec![];
-    for name in ["agents", "config", "cost", "doctor", "hooks", "init"] {
+    for name in ["agents", "config", "version", "doctor", "hooks", "init"] {
         let dispatcher = d.clone();
         let raw = format!("/{name}");
         let expected = format!("{name}: not implemented in v0.6.0 (M5)");

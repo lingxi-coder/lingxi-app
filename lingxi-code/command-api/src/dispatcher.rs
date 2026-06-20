@@ -138,6 +138,20 @@ impl SlashCommandDispatcher for RegistrySlashDispatcher {
             };
         };
 
+        // 4a. Honor the `DISABLE_*_COMMAND` env gates for the affected builtins
+        //     (claude-code `isEnabled:()=>!je.DISABLE_X`). A disabled command is
+        //     dropped from findCommand's search, so it must NOT resolve — fall
+        //     through to the Unknown branch. Keyed by the command's canonical
+        //     name so a disabled command is unreachable via an alias too.
+        if matches!(command.kind, SlashCommandKind::Builtin { .. })
+            && crate::builtin_support::names::is_command_env_disabled(&command.name)
+        {
+            return SlashDispatchResult::Unknown {
+                name: parsed.name.clone(),
+                display: Self::unknown_command_literal(&parsed.name),
+            };
+        }
+
         if matches!(
             command.kind,
             SlashCommandKind::Markdown { .. } | SlashCommandKind::Plugin { .. }
@@ -329,6 +343,35 @@ mod tests {
             }
             other => panic!("expected Unknown, got {other:?}"),
         }
+    }
+
+    /// #63: a builtin whose `DISABLE_*_COMMAND` env gate is tripped does NOT
+    /// resolve — it falls through to the Unknown branch, mirroring claude-code's
+    /// `isEnabled:()=>!je.DISABLE_X` dropping it from findCommand.
+    #[tokio::test]
+    async fn env_disabled_builtin_does_not_resolve() {
+        static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _g = ENV_LOCK.lock().unwrap();
+        let var = "DISABLE_DOCTOR_COMMAND";
+        let d = seeded_dispatcher();
+
+        // Default: /doctor resolves to its (stub) handler → Handled.
+        std::env::remove_var(var);
+        assert!(matches!(
+            d.dispatch("/doctor").await,
+            SlashDispatchResult::Handled { .. }
+        ));
+
+        // Gate tripped: /doctor is Unknown.
+        std::env::set_var(var, "1");
+        match d.dispatch("/doctor").await {
+            SlashDispatchResult::Unknown { name, display } => {
+                assert_eq!(name, "doctor");
+                assert_eq!(display, "Unknown command: /doctor");
+            }
+            other => panic!("expected Unknown for gated /doctor, got {other:?}"),
+        }
+        std::env::remove_var(var);
     }
 
     #[tokio::test]

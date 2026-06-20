@@ -6,7 +6,7 @@
 //! ```text
 //! Commands:\n
 //!   /<name padded to longest+2>  <description>\n
-//!   ... (73 lines, sorted ASCII-ascending) ...
+//!   ... (68 lines, sorted ASCII-ascending) ...
 //! ```
 //!
 //! Where `<description>` is `core_description(name)` for the 18 core
@@ -14,10 +14,12 @@
 //! non-core entries. The 26 hidden/disabled commands
 //! ([`is_palette_hidden`]) are filtered out to match claude-code's
 //! `commands.filter(c => !c.isHidden && !$te(c))` help/palette filter, so the
-//! total is 1 header + 73 visible commands = 74 lines.
+//! default total (no `DISABLE_*_COMMAND` env gates set) is 1 header + 68
+//! visible commands = 69 lines.
 
 use crate::builtin_support::names::{
-    core_description, is_palette_hidden, BUILTIN_COMMAND_NAMES, BUILTIN_CORE_NAMES,
+    core_description, is_command_env_disabled, is_palette_hidden, BUILTIN_COMMAND_NAMES,
+    BUILTIN_CORE_NAMES,
 };
 
 /// Render the locked `/help` output as a single `String`.
@@ -33,8 +35,10 @@ use crate::builtin_support::names::{
 pub fn render_help_screen() -> String {
     // Column width is computed over the VISIBLE commands only (claude-code
     // never pads to a hidden command's width since the hidden ones never
-    // reach the renderer).
-    let visible = || BUILTIN_COMMAND_NAMES.iter().filter(|n| !is_palette_hidden(n));
+    // reach the renderer). A command whose `DISABLE_*_COMMAND` env gate is
+    // tripped is also dropped (claude-code's `!$te(c)` isEnabled()===off arm).
+    let visible =
+        || BUILTIN_COMMAND_NAMES.iter().filter(|n| !is_palette_hidden(n) && !is_command_env_disabled(n));
 
     let col1_width = visible().map(|n| n.len()).max().unwrap_or(0) + 2;
 
@@ -81,15 +85,16 @@ mod tests {
     }
 
     #[test]
-    fn output_has_exactly_74_lines() {
-        // 1 header + 73 visible commands = 74 lines (each terminated by '\n').
+    fn output_has_exactly_69_lines() {
+        // 1 header + 68 visible commands = 69 lines (each terminated by '\n').
         // The 26 hidden/disabled commands (is_palette_hidden) are filtered out,
         // matching claude-code's `!isHidden && !$te` help/palette filter.
+        // (94 builtins − 26 hidden = 68 visible, with no DISABLE_* env set.)
         let s = render_help_screen();
         let n = s.matches('\n').count();
         assert_eq!(
-            n, 74,
-            "expected 74 newlines (1 header + 73 visible commands), got {n}"
+            n, 69,
+            "expected 69 newlines (1 header + 68 visible commands), got {n}"
         );
     }
 
@@ -152,7 +157,7 @@ mod tests {
         let s = render_help_screen();
         for name in BUILTIN_COMMAND_NAMES {
             // Hidden/disabled commands are filtered out (see is_palette_hidden);
-            // only the 73 visible commands appear.
+            // only the 68 visible commands appear.
             if is_palette_hidden(name) {
                 continue;
             }

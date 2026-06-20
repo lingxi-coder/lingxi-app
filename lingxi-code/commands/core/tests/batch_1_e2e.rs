@@ -59,9 +59,9 @@ async fn help_dispatch() {
         SlashDispatchResult::Handled { display } => {
             assert!(display.starts_with("Commands:\n"));
             assert!(display.contains("Manage agent configurations"));
-            // 74 newlines (header + 73 visible lines); the 26 hidden/disabled
+            // 69 newlines (header + 68 visible lines); the 26 hidden/disabled
             // commands are filtered out to match claude-code's /help.
-            assert_eq!(display.matches('\n').count(), 74);
+            assert_eq!(display.matches('\n').count(), 69);
         }
         other => panic!("{other:?}"),
     }

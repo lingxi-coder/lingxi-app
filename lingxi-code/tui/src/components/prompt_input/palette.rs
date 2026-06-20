@@ -3,15 +3,17 @@
 //! (`PaletteState` + open/filter/select/accept) is unit-tested without iocraft;
 //! `PaletteOverlay` (Task 5) renders it.
 //!
-//! The 26 hidden/disabled commands (`is_palette_hidden`) are filtered out so
-//! the palette only lists the 73 visible commands, matching claude-code's
+//! The 26 hidden/disabled commands (`is_palette_hidden`) are filtered out, plus
+//! any command whose `DISABLE_*_COMMAND` env gate (`is_command_env_disabled`)
+//! is tripped, so the palette lists only the visible commands (68 with no env
+//! gate set), matching claude-code's
 //! `commands.filter(c => !c.isHidden && !$te(c))` palette filter.
 //!
 //! Literal lock (design §2.8): rows show `name` + ` – ` (en-dash, U+2013) +
 //! description, mirroring claude-code PromptInputFooterSuggestions.tsx.
 
 use command_api::builtin_support::names::{
-    core_description, is_palette_hidden, BUILTIN_COMMAND_NAMES,
+    core_description, is_command_env_disabled, is_palette_hidden, BUILTIN_COMMAND_NAMES,
 };
 use iocraft::prelude::*;
 
@@ -77,7 +79,7 @@ impl PaletteState {
     pub fn rows(&self) -> Vec<PaletteRow> {
         let names: Vec<String> = BUILTIN_COMMAND_NAMES
             .iter()
-            .filter(|n| !is_palette_hidden(n))
+            .filter(|n| !is_palette_hidden(n) && !is_command_env_disabled(n))
             .map(|s| (*s).to_string())
             .collect();
         filtered_ranked(&self.filter, &names)
@@ -86,7 +88,7 @@ impl PaletteState {
                 BUILTIN_COMMAND_NAMES
                     .iter()
                     .copied()
-                    .find(|n| *n == matched && !is_palette_hidden(n))
+                    .find(|n| *n == matched && !is_palette_hidden(n) && !is_command_env_disabled(n))
                     .map(|name| PaletteRow {
                         name,
                         description: core_description(name),
@@ -230,8 +232,8 @@ mod tests {
         let mut p = PaletteState::default();
         p.sync_from_prompt("/");
         let all = p.rows().len();
-        // 99 builtins minus the 26 hidden/disabled commands = 73 visible.
-        assert_eq!(all, 73, "bare slash lists every VISIBLE command");
+        // 94 builtins minus the 26 hidden/disabled commands = 68 visible.
+        assert_eq!(all, 68, "bare slash lists every VISIBLE command");
         p.sync_from_prompt("/comp");
         let narrowed = p.rows();
         assert!(narrowed.len() < all);

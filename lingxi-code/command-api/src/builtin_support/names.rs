@@ -1,19 +1,26 @@
-//! Locked constant tables of the 99 builtin command names + the 18 core names.
+//! Locked constant tables of the 94 builtin command names + the 18 core names.
 //!
 //! See plan `docs/superpowers/plans/2026-05-25-m5-09-commands-surface.md`
-//! Task 0 step 2 (99 list) + Task 0 step 3 (18 core list).
+//! Task 0 step 2 (name list) + Task 0 step 3 (18 core list).
 //!
 //! NOTE: The 2026-05-28 addendum locked the total at **99** (originally `102`
-//! in the plan prose). The 18 core count is unchanged.
+//! in the plan prose). The 2026-06-20 slash-parity pass (findings #66/#67 vs
+//! claude-code v2.1.183) re-locked the total to **94**: it removed the three
+//! commands claude-code deleted upstream (`vim`, `pr-comments`, `output-style`
+//! — 0 command objects in the v2.1.183 binary) and the two that became
+//! `aliases:["cost","stats"]` of `/usage` rather than standalone commands
+//! (`cost`, `stats` — 0 `name:"cost"`/`name:"stats"` command objects). The 18
+//! core count is unchanged: `cost`'s core slot was reassigned to `usage` (now
+//! the implemented command that absorbs cost/stats).
 
 /// Every built-in slash command's runtime name (without leading `/`),
-/// ASCII-sorted. Locked at length **99** for v0.6.0.
+/// ASCII-sorted. Locked at length **94** for v0.6.0.
 ///
 /// Changing the count or membership requires bumping the parity fixture
 /// `crates/test-harness/src/parity/fixtures/parity_slash_commands_102.json`
 /// (fixture filename retained for git-history continuity; the counts inside
-/// reflect the 99/81/18 lock per the 2026-05-28 addendum).
-pub const BUILTIN_COMMAND_NAMES: &[&str; 99] = &[
+/// reflect the 94/47/18 lock per the 2026-06-20 slash-parity pass).
+pub const BUILTIN_COMMAND_NAMES: &[&str; 94] = &[
     "add-dir",
     "advisor",
     "agents",
@@ -35,7 +42,6 @@ pub const BUILTIN_COMMAND_NAMES: &[&str; 99] = &[
     "config",
     "context",
     "copy",
-    "cost",
     "ctx-viz",
     "debug-tool-call",
     "desktop",
@@ -71,13 +77,11 @@ pub const BUILTIN_COMMAND_NAMES: &[&str; 99] = &[
     "model",
     "oauth-refresh",
     "onboarding",
-    "output-style",
     "passes",
     "perf-issue",
     "permissions",
     "plan",
     "plugin",
-    "pr-comments",
     "privacy-settings",
     "rate-limit-options",
     "release-notes",
@@ -94,7 +98,6 @@ pub const BUILTIN_COMMAND_NAMES: &[&str; 99] = &[
     "session",
     "share",
     "skills",
-    "stats",
     "status",
     "statusline",
     "stickers",
@@ -110,7 +113,6 @@ pub const BUILTIN_COMMAND_NAMES: &[&str; 99] = &[
     "upgrade",
     "usage",
     "version",
-    "vim",
     "voice",
     "x402",
 ];
@@ -128,7 +130,6 @@ pub const BUILTIN_CORE_NAMES: &[&str; 18] = &[
     "clear",
     "compact",
     "config",
-    "cost",
     "doctor",
     "exit",
     "help",
@@ -141,6 +142,7 @@ pub const BUILTIN_CORE_NAMES: &[&str; 18] = &[
     "model",
     "permissions",
     "status",
+    "usage",
     "version",
 ];
 
@@ -425,6 +427,54 @@ pub fn is_palette_hidden(name: &str) -> bool {
         || CORRECT_BY_DESIGN_STUBS.iter().any(|(n, _)| *n == name)
 }
 
+/// `(command_name, DISABLE_*_COMMAND env var)` pairs whose command object in
+/// claude-code v2.1.183 carries an `isEnabled:()=>!je.DISABLE_X_COMMAND`
+/// truthiness gate (`je` is `process.env`). When the env var is set to any
+/// non-empty value the command's `isEnabled()` resolves to `false`, so it is
+/// dropped from the slash palette and `/help` (the same
+/// `commands.filter(c => !c.isHidden && !$te(c))` path) **and** must not
+/// resolve.
+///
+/// Verified verbatim against the shipped `claude.exe` v2.1.183 command objects:
+///
+/// ```text
+/// name:"doctor",...,isEnabled:()=>!je.DISABLE_DOCTOR_COMMAND
+/// name:"login",...,isEnabled:()=>!je.DISABLE_LOGIN_COMMAND
+/// name:"logout",...,isEnabled:()=>!je.DISABLE_LOGOUT_COMMAND
+/// name:"upgrade",...,isEnabled:()=>!kz()&&!je.DISABLE_UPGRADE_COMMAND&&sa()!=="enterprise"
+/// name:"install-github-app",...,isEnabled:()=>!je.DISABLE_INSTALL_GITHUB_APP_COMMAND
+/// ```
+///
+/// NOTE: claude-code also defines `DISABLE_BUG_COMMAND` and
+/// `DISABLE_FEEDBACK_COMMAND`, but in v2.1.183 those gate the `/feedback`
+/// **input handler** (`if(je.DISABLE_FEEDBACK_COMMAND)return{kind:"disabled"…}`),
+/// not a command object's `isEnabled` — and there is no standalone `bug`
+/// command — so they are intentionally NOT modeled here (LingXi's `feedback`
+/// command object stays enabled, matching the binary). Likewise
+/// `DISABLE_EXTRA_USAGE_COMMAND` does not appear on the `extra-usage` object
+/// (`isEnabled:()=>pct()&&!kr()`), so it is excluded.
+pub const ENV_DISABLE_GATED_COMMANDS: &[(&str, &str)] = &[
+    ("doctor", "DISABLE_DOCTOR_COMMAND"),
+    ("install-github-app", "DISABLE_INSTALL_GITHUB_APP_COMMAND"),
+    ("login", "DISABLE_LOGIN_COMMAND"),
+    ("logout", "DISABLE_LOGOUT_COMMAND"),
+    ("upgrade", "DISABLE_UPGRADE_COMMAND"),
+];
+
+/// Returns `true` when `name`'s `DISABLE_*_COMMAND` env gate (see
+/// [`ENV_DISABLE_GATED_COMMANDS`]) is tripped — i.e. the env var is present and
+/// non-empty. Mirrors claude-code's `isEnabled:()=>!je.DISABLE_X` JS-truthiness
+/// semantics: in JS `!process.env.X` is `false` (command disabled) for any
+/// non-empty string value, including `"0"`/`"false"`, and `true` (enabled) only
+/// when the var is unset or the empty string.
+#[must_use]
+pub fn is_command_env_disabled(name: &str) -> bool {
+    ENV_DISABLE_GATED_COMMANDS
+        .iter()
+        .find(|(cmd, _)| *cmd == name)
+        .is_some_and(|(_, var)| std::env::var(var).is_ok_and(|v| !v.is_empty()))
+}
+
 /// Descriptions for the 18 core commands, used for `/help` rendering in M5-10.
 /// Lookup by core name; falls back to `"(unimplemented in v0.6.0)"` for the 81
 /// non-core entries.
@@ -435,7 +485,6 @@ pub fn core_description(name: &str) -> &'static str {
         "clear" => "Start a new session with empty context; previous session stays on disk (resumable with /resume)",
         "compact" => "Free up context by summarizing the conversation so far",
         "config" => "Open settings",
-        "cost" => "Show total cost and duration of the current session",
         "doctor" => "Diagnose and verify your Claude Code installation and settings",
         "exit" => "Exit the CLI",
         "help" => "Show help and available commands",
@@ -448,6 +497,9 @@ pub fn core_description(name: &str) -> &'static str {
         "model" => "Set the AI model for Claude Code",
         "permissions" => "Manage allow and deny tool permission rules",
         "status" => "Show Claude Code status including version, model, account, API connectivity, and tool statuses",
+        // claude-code v2.1.183 live `usage` command object
+        // (`name:"usage",aliases:["cost","stats"],...`).
+        "usage" => "Show session cost, plan usage, and what's contributing to your limits",
         "version" => "Print version information",
         _ => "(unimplemented in v0.6.0)",
     }
@@ -458,8 +510,84 @@ mod tests {
     use super::*;
 
     #[test]
-    fn total_count_locked_at_99() {
-        assert_eq!(BUILTIN_COMMAND_NAMES.len(), 99);
+    fn total_count_locked_at_94() {
+        assert_eq!(BUILTIN_COMMAND_NAMES.len(), 94);
+    }
+
+    // ── #63 DISABLE_*_COMMAND env gates ──────────────────────────────────────
+    // These tests mutate process env, so they serialize through ENV_LOCK to
+    // avoid racing each other (and any other env-reading test in this binary).
+
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn env_disable_gates_are_the_five_command_object_gated_names() {
+        // Verified verbatim against claude.exe v2.1.183 command objects.
+        let pairs: Vec<(&str, &str)> = ENV_DISABLE_GATED_COMMANDS.to_vec();
+        assert_eq!(
+            pairs,
+            vec![
+                ("doctor", "DISABLE_DOCTOR_COMMAND"),
+                ("install-github-app", "DISABLE_INSTALL_GITHUB_APP_COMMAND"),
+                ("login", "DISABLE_LOGIN_COMMAND"),
+                ("logout", "DISABLE_LOGOUT_COMMAND"),
+                ("upgrade", "DISABLE_UPGRADE_COMMAND"),
+            ]
+        );
+        // Every gated name is a real builtin.
+        let full: std::collections::HashSet<&str> = BUILTIN_COMMAND_NAMES.iter().copied().collect();
+        for (cmd, _) in ENV_DISABLE_GATED_COMMANDS {
+            assert!(full.contains(cmd), "gated name '{cmd}' is not a builtin");
+        }
+    }
+
+    #[test]
+    fn ungated_command_is_never_env_disabled() {
+        let _g = ENV_LOCK.lock().unwrap();
+        // `clear` has no DISABLE gate, so the helper is always false for it.
+        assert!(!is_command_env_disabled("clear"));
+        assert!(!is_command_env_disabled("feedback"));
+    }
+
+    #[test]
+    fn gated_command_disabled_only_when_env_set_nonempty() {
+        let _g = ENV_LOCK.lock().unwrap();
+        let var = "DISABLE_DOCTOR_COMMAND";
+        // Default (unset): enabled.
+        std::env::remove_var(var);
+        assert!(!is_command_env_disabled("doctor"));
+        // Empty string: still enabled (JS `!""` is true → command stays on).
+        std::env::set_var(var, "");
+        assert!(!is_command_env_disabled("doctor"));
+        // Any non-empty value: disabled (JS truthiness — even "0"/"false").
+        std::env::set_var(var, "1");
+        assert!(is_command_env_disabled("doctor"));
+        std::env::set_var(var, "0");
+        assert!(is_command_env_disabled("doctor"));
+        std::env::remove_var(var);
+        assert!(!is_command_env_disabled("doctor"));
+    }
+
+    #[test]
+    fn env_disabled_command_is_dropped_from_help_render() {
+        use crate::builtin_support::help_render::render_help_screen;
+        let _g = ENV_LOCK.lock().unwrap();
+        let var = "DISABLE_LOGIN_COMMAND";
+        std::env::remove_var(var);
+        let before = render_help_screen();
+        assert!(before.contains("  /login "), "login visible by default");
+        std::env::set_var(var, "1");
+        let after = render_help_screen();
+        assert!(
+            !after.contains("  /login "),
+            "login must be dropped from /help when DISABLE_LOGIN_COMMAND is set"
+        );
+        assert_eq!(
+            after.matches('\n').count(),
+            before.matches('\n').count() - 1,
+            "exactly one command (login) is removed"
+        );
+        std::env::remove_var(var);
     }
 
     #[test]
@@ -539,7 +667,6 @@ mod tests {
         // Spot-check a few rare ones so a future name rename doesn't drift silently.
         assert!(BUILTIN_COMMAND_NAMES.contains(&"x402"));
         assert!(BUILTIN_COMMAND_NAMES.contains(&"ctx-viz"));
-        assert!(BUILTIN_COMMAND_NAMES.contains(&"pr-comments"));
         assert!(BUILTIN_COMMAND_NAMES.contains(&"thinkback-play"));
         assert!(BUILTIN_COMMAND_NAMES.contains(&"terminal-setup"));
         assert!(BUILTIN_COMMAND_NAMES.contains(&"ant-trace"));
@@ -657,10 +784,10 @@ mod tests {
     #[test]
     fn intentionally_disabled_does_not_change_the_locked_surface() {
         // Guard the no-op property: the additive bucket-(d) table is a strict
-        // subset of the locked 99-name list and therefore cannot change the
+        // subset of the locked name list and therefore cannot change the
         // total count, membership, or ordering that the parity fixture locks.
         assert!(INTENTIONALLY_DISABLED_COMMANDS.len() < BUILTIN_COMMAND_NAMES.len());
-        assert_eq!(BUILTIN_COMMAND_NAMES.len(), 99);
+        assert_eq!(BUILTIN_COMMAND_NAMES.len(), 94);
     }
 
     // ========================================================================
@@ -765,6 +892,7 @@ mod tests {
             INTENTIONALLY_DISABLED_COMMANDS.len(),
             "23 + 3 == 26"
         );
+        assert_eq!(BUILTIN_COMMAND_NAMES.len(), 94);
     }
 
     #[test]

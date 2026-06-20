@@ -14,7 +14,7 @@ use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
 use tokio::sync::RwLock;
 use traits::{
-    AgentInfo, AuthError, AuthHandle, CostSnapshot, HookInfo, LoginInfo, McpServerInfo, McpStatus,
+    AgentInfo, AuthError, AuthHandle, HookInfo, LoginInfo, McpServerInfo, McpStatus,
     SlashCommandDispatcher, SlashDispatchResult, StatusSnapshot,
 };
 
@@ -76,6 +76,9 @@ fn builtin_command_aliases_resolve_to_targets() {
         ("quit", "exit"),
         ("settings", "config"),
         ("allowed-tools", "permissions"),
+        // #66/#61: cost/stats are now aliases of usage (not standalone cmds).
+        ("cost", "usage"),
+        ("stats", "usage"),
     ] {
         let cmd = reg
             .resolve(alias)
@@ -84,25 +87,20 @@ fn builtin_command_aliases_resolve_to_targets() {
     }
 }
 
+/// #66/#61: `/cost` is no longer a standalone command — it is an alias of
+/// `/usage`. Dispatching `/cost` therefore routes through the alias-aware
+/// `get_handler` to the `usage` handler. Without batch-5 wiring (not called by
+/// `fresh()`), `usage` is the headless InteractiveOnlyHandler fallback, so
+/// `/cost`, `/stats`, and `/usage` all yield the same interactive-only notice.
 #[tokio::test]
-async fn cost_dispatch() {
-    let (d, mock) = fresh();
-    mock.set_cost_snapshot(CostSnapshot {
-        total_usd: 0.0042,
-        input_tokens: 100,
-        output_tokens: 50,
-        api_calls: 1,
-        session_duration: std::time::Duration::from_secs(10),
-        ..CostSnapshot::default()
-    });
-    let r = d.dispatch("/cost").await;
-    if let SlashDispatchResult::Handled { display } = r {
-        assert_eq!(
-            display,
-            "Cost: $0.0042 (1 calls, 100+50 tokens, 10s session time)"
-        );
-    } else {
-        panic!("{r:?}");
+async fn cost_and_stats_dispatch_through_usage_alias() {
+    let (d, _mock) = fresh();
+    let expected = "/usage is available in interactive TUI mode only.";
+    for raw in ["/cost", "/stats", "/usage"] {
+        match d.dispatch(raw).await {
+            SlashDispatchResult::Handled { display } => assert_eq!(display, expected, "{raw}"),
+            other => panic!("{raw} expected Handled, got {other:?}"),
+        }
     }
 }
 

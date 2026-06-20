@@ -35,7 +35,7 @@ use traits::{AuthHandle, OutputStream};
 pub struct Runtime {
     /// The fully-constructed orchestrator.
     pub orchestrator: Arc<ConversationOrchestrator>,
-    /// Slash-command dispatcher seeded with the 99 builtins + 18 wired core
+    /// Slash-command dispatcher seeded with the 94 builtins + 18 wired core
     /// handlers (M5-09/M5-10/M5-11).
     pub dispatcher: RegistrySlashDispatcher,
     /// Auth handle for `/login` and `/logout`.

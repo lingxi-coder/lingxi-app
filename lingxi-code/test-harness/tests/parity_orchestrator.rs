@@ -311,7 +311,14 @@ async fn parity_cost_after_one_turn() {
     let response = llm_client::LlmResponse {
         id: "msg_mock".into(),
         model: "claude-opus-4-6".into(),
-        content: Vec::new(),
+        // A realistic end_turn response carries visible text. (An empty-content
+        // response would trip the #78 thinking-only nudge — which is faithful:
+        // claude-code also nudges an end_turn with no visible text — so the mock
+        // must produce visible text for a single-turn completion.)
+        content: vec![LlmContentBlock::Text {
+            text: "Done.".into(),
+            cache_control: None,
+        }],
         stop_reason: Some("end_turn".into()),
         // COST.3/5: new UsageApi fields default to None (no web-search /
         // non-fast) → base pricing, so this fixture's asserted cost is

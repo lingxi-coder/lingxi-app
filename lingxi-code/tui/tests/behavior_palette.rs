@@ -142,11 +142,11 @@ fn m7_07_registers_no_new_telemetry_events() {
     // the count grew via screen_opened/screen_closed/search_opened + the v0.8.0
     // marker, NOT the palette. If this fails, the palette event leaked in.
     let names = telemetry::tengu::ALL_EVENT_NAMES;
-    // 330 → 336 (CronDelete/CronList +6, LSP.7b) → 339 (FileRead analytics +3, W36)
-    // → 348 (config migrations +9) → 349 (permission flow +1) → 352 (coordinator
-    // swarm +3: team_created/team_deleted/coordinator_mode_switched);
+    // 330 − 6 (grep/glob fabricated events removed, #29) = 324 → 330 (CronDelete/
+    // CronList +6) → 334 (FileRead analytics +4, W36/#13) → 343 (config migrations
+    // +9) → 344 (permission flow +1) → 347 (coordinator swarm +3);
     // the palette still mints nothing (the contains-check below is the real guard).
-    assert_eq!(names.len(), 352, "registry at 352 (349 + coordinator swarm)");
+    assert_eq!(names.len(), 347, "registry at 347 (344 + coordinator swarm)");
     assert!(
         !names.contains(&"tengu_tui_command_palette_opened"),
         "palette telemetry is deferred to M8"

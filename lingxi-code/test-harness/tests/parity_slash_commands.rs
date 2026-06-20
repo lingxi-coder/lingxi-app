@@ -1,10 +1,11 @@
-//! Parity: lock the 99 builtin slash-command names plus the per-command
+//! Parity: lock the 94 builtin slash-command names plus the per-command
 //! command/target status matrix across the full surface.
 //!
 //! See plan `docs/superpowers/plans/2026-05-25-m5-09-commands-surface.md`
-//! Task 6. Locks introduced here (per 2026-05-28 addendum):
+//! Task 6. Locks (2026-06-20 slash-parity pass #66/#67 re-locked from 99→94 —
+//! removed cost/stats as /usage aliases + deleted vim/pr-comments/output-style):
 //!
-//! - Total name count = 99
+//! - Total name count = 94
 //! - Core name count = 18
 //! - Target implemented status is explicit per command
 //! - Stub literal template = "{name}: not implemented in v0.6.0 (M5)"
@@ -131,7 +132,6 @@ const TARGET_IMPLEMENTED: &[&str] = &[
     "config",
     "context",
     "copy",
-    "cost",
     "diff",
     "doctor",
     "effort",
@@ -149,11 +149,9 @@ const TARGET_IMPLEMENTED: &[&str] = &[
     "mcp",
     "memory",
     "model",
-    "output-style",
     "permissions",
     "plan",
     "plugin",
-    "pr-comments",
     "privacy-settings",
     "release-notes",
     "rename",
@@ -162,7 +160,6 @@ const TARGET_IMPLEMENTED: &[&str] = &[
     "rewind",
     "security-review",
     "skills",
-    "stats",
     "status",
     "statusline",
     "stickers",
@@ -171,7 +168,6 @@ const TARGET_IMPLEMENTED: &[&str] = &[
     "theme",
     "usage",
     "version",
-    "vim",
 ];
 
 fn fixture() -> ParityFile {
@@ -188,9 +184,9 @@ fn fixture_v2() -> ParityFileV2 {
 #[test]
 fn fixture_total_matches_constant() {
     let f = fixture();
-    assert_eq!(f.meta.total_count_lock, 99);
-    assert_eq!(f.commands.len(), 99);
-    assert_eq!(BUILTIN_COMMAND_NAMES.len(), 99);
+    assert_eq!(f.meta.total_count_lock, 94);
+    assert_eq!(f.commands.len(), 94);
+    assert_eq!(BUILTIN_COMMAND_NAMES.len(), 94);
     assert_eq!(f.commands.len(), BUILTIN_COMMAND_NAMES.len());
 }
 
@@ -213,7 +209,7 @@ fn fixture_core_matches_constant() {
 }
 
 #[test]
-fn fixture_unimplemented_count_is_81() {
+fn fixture_unimplemented_count_lock_matches_field() {
     let f = fixture();
     let v2 = fixture_v2();
     let n_unimpl = v2.commands.iter().filter(|c| !c.implemented).count();

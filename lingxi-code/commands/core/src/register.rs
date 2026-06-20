@@ -5,9 +5,9 @@
 use command_api::CommandRegistry;
 use std::sync::Arc;
 
-/// Register all 99 built-in slash commands into `reg`.
+/// Register all 94 built-in slash commands into `reg`.
 ///
-/// 81 of the names point at per-name instances of
+/// The non-core names point at per-name instances of
 /// [`command_api::builtin_support::UnimplementedCommandHandler`] that return the locked
 /// stub literal `"{name}: not implemented in v0.6.0 (M5)"`.
 ///
@@ -25,7 +25,7 @@ pub fn register_all_builtin_commands(reg: &mut CommandRegistry) {
         core_description, UnimplementedCommandHandler, BUILTIN_COMMAND_NAMES,
     };
 
-    // Pass 1: register all 99 with per-name unimplemented handler instances.
+    // Pass 1: register all 94 with per-name unimplemented handler instances.
     //
     // Each name needs its own handler **instance** because the handler
     // carries its own `name` field used to substitute the locked literal.
@@ -103,9 +103,9 @@ pub fn register_core_batch_1(
     reg.register_alias("quit".to_string(), "exit".to_string());
 }
 
-/// Overwrite the 12 batch-2 entries (`agents`, `config`, `cost`, `doctor`,
-/// `hooks`, `login`, `logout`, `mcp`, `model`, `permissions`, `status`,
-/// `version`) with their handle/auth-bound real handlers from M5-11.
+/// Overwrite the 11 batch-2 entries (`agents`, `config`, `doctor`, `hooks`,
+/// `login`, `logout`, `mcp`, `model`, `permissions`, `status`, `version`) with
+/// their handle/auth-bound real handlers from M5-11.
 ///
 /// Call **after** [`register_all_builtin_commands`] and (optionally) after
 /// [`register_core_batch_1`]. The function is idempotent — calling it twice
@@ -124,13 +124,12 @@ pub fn register_core_batch_2(
     auth: Arc<dyn traits::AuthHandle>,
 ) {
     use crate::{
-        AgentsHandler, ConfigHandler, CostHandler, DoctorHandler, HooksHandler, LoginHandler,
-        LogoutHandler, McpHandler, ModelHandler, PermissionsHandler, StatusHandler, VersionHandler,
+        AgentsHandler, ConfigHandler, DoctorHandler, HooksHandler, LoginHandler, LogoutHandler,
+        McpHandler, ModelHandler, PermissionsHandler, StatusHandler, VersionHandler,
     };
 
     reg.register_builtin_handler(Arc::new(AgentsHandler::new(handle.clone())));
     reg.register_builtin_handler(Arc::new(ConfigHandler::new(handle.clone())));
-    reg.register_builtin_handler(Arc::new(CostHandler::new(handle.clone())));
     reg.register_builtin_handler(Arc::new(DoctorHandler::new(handle.clone())));
     reg.register_builtin_handler(Arc::new(HooksHandler::new(handle.clone())));
     reg.register_builtin_handler(Arc::new(LoginHandler::new(auth.clone())));
@@ -190,32 +189,33 @@ pub fn register_core_batch_4(
 
 /// Register the batch-3 (M-parity) handle-free slash commands.
 ///
-/// These 11 commands (`commit`, `commit-push-pr`, `init-verifiers`,
-/// `insights`, `output-style`, `pr-comments`, `release-notes`, `review`,
-/// `security-review`, `statusline`, `stickers`) carry no orchestrator or auth
-/// handle: each is a static prompt-injection (`InjectMessage`) or a static
-/// display message (`Done`). They are wired unconditionally at the end of
-/// [`register_all_builtin_commands`], overwriting the matching pass-1
-/// unimplemented stub entries in-place.
+/// These 9 commands (`commit`, `commit-push-pr`, `init-verifiers`, `insights`,
+/// `release-notes`, `review`, `security-review`, `statusline`, `stickers`)
+/// carry no orchestrator or auth handle: each is a static prompt-injection
+/// (`InjectMessage`) or a static display message (`Done`). They are wired
+/// unconditionally at the end of [`register_all_builtin_commands`], overwriting
+/// the matching pass-1 unimplemented stub entries in-place.
 ///
-/// `output-style` (deprecated → `/config`) and `release-notes` (the changelog
-/// URL fallback) join the batch-3 set here as handle-free `Done` displays.
+/// `release-notes` (the changelog URL fallback) joins the batch-3 set here as a
+/// handle-free `Done` display.
+///
+/// NOTE: `output-style` and `pr-comments` were removed in claude-code v2.1.183
+/// (0 command objects in the binary) and are no longer LingXi builtins (slash
+/// parity #67), so their former batch-3 handlers were deleted.
 ///
 /// Deferred commands (e.g. `ant-trace`) are intentionally left on the shared
 /// [`command_api::builtin_support::UnimplementedCommandHandler`].
 pub fn register_core_batch_3(reg: &mut CommandRegistry) {
     use crate::{
         CommitHandler, CommitPushPrHandler, InitVerifiersHandler, InsightsHandler,
-        OutputStyleHandler, PrCommentsHandler, ReleaseNotesHandler, ReviewHandler,
-        SecurityReviewHandler, StatuslineHandler, StickersHandler,
+        ReleaseNotesHandler, ReviewHandler, SecurityReviewHandler, StatuslineHandler,
+        StickersHandler,
     };
 
     reg.register_builtin_handler(Arc::new(CommitHandler::new()));
     reg.register_builtin_handler(Arc::new(CommitPushPrHandler::new()));
     reg.register_builtin_handler(Arc::new(InitVerifiersHandler::new()));
     reg.register_builtin_handler(Arc::new(InsightsHandler::new()));
-    reg.register_builtin_handler(Arc::new(OutputStyleHandler::new()));
-    reg.register_builtin_handler(Arc::new(PrCommentsHandler::new()));
     reg.register_builtin_handler(Arc::new(ReleaseNotesHandler::new()));
     reg.register_builtin_handler(Arc::new(ReviewHandler::new()));
     reg.register_builtin_handler(Arc::new(SecurityReviewHandler::new()));
@@ -313,12 +313,10 @@ pub fn register_interactive_only_commands(reg: &mut CommandRegistry) {
         "privacy-settings",
         "rename",
         "rewind",
-        "stats",
         "tasks",
         "terminal-setup",
         "theme",
         "usage",
-        "vim",
     ] {
         reg.register_builtin_handler(Arc::new(InteractiveOnlyHandler::new(
             name,
@@ -335,6 +333,24 @@ pub fn register_interactive_only_commands(reg: &mut CommandRegistry) {
     reg.register_alias("plugins".to_string(), "plugin".to_string());
     reg.register_alias("marketplace".to_string(), "plugin".to_string());
     reg.register_alias("bashes".to_string(), "tasks".to_string());
+
+    // claude-code parity (#61/#66): `/usage` carries aliases ["cost","stats"]
+    // (BIN v2.1.183: `name:"usage",aliases:["cost","stats"]`). `cost`/`stats`
+    // are NOT standalone commands upstream (0 `name:"cost"`/`name:"stats"`
+    // objects); LingXi removed them as builtins and routes them here as
+    // resolution-only aliases of the `usage` command (registered above, and
+    // overwritten with the real UsageHandler by `register_core_batch_5`).
+    reg.register_alias("cost".to_string(), "usage".to_string());
+    reg.register_alias("stats".to_string(), "usage".to_string());
+
+    // claude-code parity (#61): `/desktop` aliases ["app"], `/mobile` aliases
+    // ["ios","android"], `/session` aliases ["remote"] — all three target
+    // commands ARE LingXi builtins (registered as pass-1 stubs in
+    // `register_all_builtin_commands`), so the aliases resolve.
+    reg.register_alias("app".to_string(), "desktop".to_string());
+    reg.register_alias("ios".to_string(), "mobile".to_string());
+    reg.register_alias("android".to_string(), "mobile".to_string());
+    reg.register_alias("remote".to_string(), "session".to_string());
 }
 
 #[cfg(test)]
@@ -344,13 +360,44 @@ mod registry_tests {
     use command_api::model::CommandResult;
 
     #[test]
-    fn register_all_registers_exactly_99_names() {
+    fn register_all_registers_exactly_94_names() {
         let mut reg = CommandRegistry::new();
         register_all_builtin_commands(&mut reg);
+        assert_eq!(BUILTIN_COMMAND_NAMES.len(), 94);
         for name in BUILTIN_COMMAND_NAMES {
             assert!(
                 reg.resolve(name).is_some(),
                 "expected command /{name} registered"
+            );
+        }
+    }
+
+    /// claude-code parity (#61/#66): `/cost` and `/stats` resolve to `/usage`,
+    /// and `/desktop`/`/mobile`/`/session` aliases resolve to their targets.
+    /// Also asserts cost/stats/vim/pr-comments/output-style are NOT standalone
+    /// builtins anymore (removed per #66/#67).
+    #[test]
+    fn usage_cost_stats_and_platform_aliases_resolve() {
+        let mut reg = CommandRegistry::new();
+        register_all_builtin_commands(&mut reg);
+        for (alias, target) in [
+            ("cost", "usage"),
+            ("stats", "usage"),
+            ("app", "desktop"),
+            ("ios", "mobile"),
+            ("android", "mobile"),
+            ("remote", "session"),
+        ] {
+            let cmd = reg
+                .resolve(alias)
+                .unwrap_or_else(|| panic!("alias /{alias} must resolve"));
+            assert_eq!(cmd.name, target, "/{alias} should resolve to /{target}");
+        }
+        // Removed standalone commands are gone from the builtin name surface.
+        for removed in ["vim", "pr-comments", "output-style"] {
+            assert!(
+                !BUILTIN_COMMAND_NAMES.contains(&removed),
+                "/{removed} should have been removed from BUILTIN_COMMAND_NAMES"
             );
         }
     }
@@ -576,7 +623,7 @@ mod batch_3_tests {
     }
 
     #[test]
-    fn all_11_batch_3_names_resolve_after_register_all() {
+    fn all_9_batch_3_names_resolve_after_register_all() {
         let mut reg = CommandRegistry::new();
         register_all_builtin_commands(&mut reg);
         for name in [
@@ -584,8 +631,6 @@ mod batch_3_tests {
             "commit-push-pr",
             "init-verifiers",
             "insights",
-            "output-style",
-            "pr-comments",
             "release-notes",
             "review",
             "security-review",
@@ -597,14 +642,15 @@ mod batch_3_tests {
         }
     }
 
-    /// The two new handle-free batch-3 `Done` commands must NOT return the
-    /// locked M5 stub literal after the standard registration call.
+    /// The handle-free batch-3 `release-notes` `Done` command must NOT return
+    /// the locked M5 stub literal after the standard registration call.
+    /// (`output-style` was removed upstream — slash parity #67.)
     #[tokio::test]
-    async fn output_style_and_release_notes_return_done_not_stub() {
+    async fn release_notes_returns_done_not_stub() {
         let mut reg = CommandRegistry::new();
         register_all_builtin_commands(&mut reg);
 
-        for name in ["output-style", "release-notes"] {
+        for name in ["release-notes"] {
             let h = reg
                 .get_handler(name)
                 .unwrap_or_else(|| panic!("/{name} handler missing"));
@@ -948,12 +994,10 @@ mod interactive_only_tests {
             "privacy-settings",
             "rename",
             "rewind",
-            "stats",
             "tasks",
             "terminal-setup",
             "theme",
             "usage",
-            "vim",
         ] {
             let h = reg
                 .get_handler(name)

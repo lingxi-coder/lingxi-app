@@ -3,8 +3,8 @@
 //! M5-10 removed the 6 batch-1 placeholders; their real handlers ship under
 //! `builtin::{clear, compact, exit, help, init, memory}`.
 //!
-//! M5-11 removed the remaining 12 batch-2 placeholders; their real handlers
-//! ship under `builtin::{agents, config, cost, doctor, hooks, login, logout,
+//! M5-11 removed the remaining batch-2 placeholders; their real handlers
+//! ship under `builtin::{agents, config, doctor, hooks, login, logout,
 //! mcp, model, permissions, status, version}`.
 //!
 //! Until [`command_api::registry::register_core_batch_1`] /
@@ -81,6 +81,14 @@ mod tests {
         let mut reg = command_api::CommandRegistry::new();
         crate::register_all_builtin_commands(&mut reg);
         for name in BUILTIN_CORE_NAMES {
+            // `usage` is a core command that `register_all_builtin_commands`
+            // itself overwrites with the headless InteractiveOnlyHandler
+            // fallback (`register_interactive_only_commands`), so before the
+            // batch-5 UsageHandler wiring it returns the interactive-only
+            // notice — not the M5 stub literal. Exempt it here.
+            if *name == "usage" {
+                continue;
+            }
             let h = reg
                 .get_handler(name)
                 .unwrap_or_else(|| panic!("no handler /{name}"));

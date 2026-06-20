@@ -23,6 +23,23 @@ use tool_shell::BashTool;
 use traits::process::{ProcessError, ProcessHandle, ProcessOutput, ProcessRunner};
 use traits::sandbox::SandboxedCommand;
 
+/// Serializes EVERY test whose correctness depends on
+/// `CLAUDE_BASH_MAINTAIN_PROJECT_WORKING_DIR` (TFo) having a fixed value. The
+/// `maintain_*` test SETS that process-global env var; every other cwd test
+/// reads it via `tfo_maintain_cwd` and assumes it is UNSET (so an in-workspace
+/// `cd` persists rather than resets). Because `cargo test` runs the file's tests
+/// in parallel threads, all of them must take this lock to avoid the env-set of
+/// one test perturbing another. `std::env` is process-global; this is the
+/// canonical "serialize env-mutating tests" guard.
+static MAINTAIN_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+/// Acquire [`MAINTAIN_ENV_LOCK`] tolerant of poisoning: the `()` payload carries
+/// no state, so a prior test panicking while holding the lock must not cascade
+/// into spurious `PoisonError` unwraps that MASK the original failure.
+fn maintain_lock() -> std::sync::MutexGuard<'static, ()> {
+    MAINTAIN_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 /// One captured spawn: the working directory passed to the runner and the
 /// assembled command string (the LAST arg — `bash -c -l <cmd>` after BASH.4's
 /// login-shell flag, so the command is no longer at a fixed index).
@@ -136,17 +153,25 @@ fn tool_with(workspace: &std::path::Path, runner: Arc<RecordingRunner>) -> BashT
 
 #[tokio::test]
 async fn foreground_cd_persists_to_next_call() {
+    // Depends on TFo (the maintain-cwd env) being UNSET — take the shared lock.
+    let _g = maintain_lock();
+    // A foreground `cd` to a directory WITHIN the workspace persists to the next
+    // call (claude-code `J2n` does not fire — `kF(target)` is contained in the
+    // allowed set = the workspace). The target is a real `sub/` subdir under the
+    // CANONICAL workspace so the containment check (`is_within_allowed` / `R0`)
+    // is deterministic under the macOS `/private/var` realpath folding.
     let workspace = TempDir::new().unwrap();
-    let target = TempDir::new().unwrap();
-    let target_canon = std::fs::canonicalize(target.path()).unwrap();
+    let workspace_canon = std::fs::canonicalize(workspace.path()).unwrap();
+    let target_canon = workspace_canon.join("sub");
+    std::fs::create_dir(&target_canon).unwrap();
 
     // First call simulates `cd <target>` (runner writes target into the
     // readback file); second call writes nothing.
-    let runner = RecordingRunner::new(vec![Some(target.path().to_path_buf()), None], false);
-    let tool = tool_with(workspace.path(), runner.clone());
+    let runner = RecordingRunner::new(vec![Some(target_canon.clone()), None], false);
+    let tool = tool_with(&workspace_canon, runner.clone());
 
     tool.call(
-        json!({ "command": format!("cd {}", target.path().display()) }),
+        json!({ "command": format!("cd {}", target_canon.display()) }),
         fresh_ctx(),
         fresh_tx(),
     )
@@ -160,14 +185,15 @@ async fn foreground_cd_persists_to_next_call() {
     let fg = runner.fg.lock().unwrap();
     assert_eq!(fg.len(), 2, "two foreground spawns expected");
     // First spawn runs under the initial workspace.
-    assert_eq!(fg[0].cwd.as_deref(), Some(workspace.path()));
+    assert_eq!(fg[0].cwd.as_deref(), Some(workspace_canon.as_path()));
     // Foreground command carries the readback redirect.
     assert!(
         fg[0].command.contains(" && pwd -P >| "),
         "foreground cmd should append pwd readback, got: {}",
         fg[0].command
     );
-    // Second spawn inherits the canonicalized post-`cd` cwd.
+    // Second spawn inherits the canonicalized post-`cd` (in-workspace) cwd —
+    // the cwd was NOT reset because the target is inside the workspace.
     assert_eq!(
         fg[1].cwd.as_deref(),
         Some(target_canon.as_path()),
@@ -367,6 +393,8 @@ fn tool_with_firer(
 
 #[tokio::test]
 async fn cwd_change_fires_cwd_changed_hook_with_old_and_new() {
+    // Depends on TFo (the maintain-cwd env) being UNSET — take the shared lock.
+    let _g = maintain_lock();
     // ONE tempdir, and the `cd` target is a real subdirectory inside it. Both
     // `old` and `new` derive from the SAME canonical root, so there is no second
     // independent `TempDir` whose creation/canonicalization can drift under the
@@ -424,6 +452,8 @@ async fn no_cwd_change_does_not_fire() {
 
 #[tokio::test]
 async fn no_firer_registered_is_a_silent_noop() {
+    // Depends on TFo (the maintain-cwd env) being UNSET — take the shared lock.
+    let _g = maintain_lock();
     // ONE tempdir + a real `sub` subdir (same churn-robust shape as the firing
     // test) so the canonical paths can't drift under the harness FS flake.
     let workspace = TempDir::new().unwrap();
@@ -458,4 +488,253 @@ async fn no_firer_registered_is_a_silent_noop() {
         Some(sub_canon.as_path()),
         "cwd update is unchanged when no firer is registered",
     );
+}
+
+// ===== Finding #8 — `J2n` cwd-reset when the shell leaves the allowed dirs ====
+//
+// claude-code `J2n`: after a command, if the shell cwd moved away from the
+// original (workspace) AND is NOT contained in an allowed dir — or the env
+// `CLAUDE_BASH_MAINTAIN_PROJECT_WORKING_DIR` forces it — chdir back to the
+// original, emit `tengu_bash_tool_reset_to_original_dir` (non-env branch only),
+// and append `Y2n`'s `\nShell cwd was reset to {original}` to stderr.
+
+/// Read the model-facing `stderr` field out of a Bash `ToolCallResult`.
+fn result_stderr(data: &serde_json::Value) -> String {
+    data.get("stderr")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string()
+}
+
+/// Build a `(workspace, outside)` pair under ONE shared `TempDir` root: `ws/` is
+/// the workspace and `outside/` is its SIBLING (genuinely outside the workspace
+/// subtree). Both derive from the SAME canonical root, so only one `TempDir` is
+/// created/canonicalized per test — the churn-robust shape the firer tests use,
+/// which keeps the macOS fseventsd/APFS canonicalize flake from perturbing the
+/// reset tests under parallel load. Returns `(root, ws_canon, outside_canon)`;
+/// the `TempDir` must be kept alive by the caller.
+fn workspace_and_outside() -> (TempDir, std::path::PathBuf, std::path::PathBuf) {
+    let root = TempDir::new().unwrap();
+    let root_canon = std::fs::canonicalize(root.path()).unwrap();
+    let ws = root_canon.join("ws");
+    let outside = root_canon.join("outside");
+    std::fs::create_dir(&ws).unwrap();
+    std::fs::create_dir(&outside).unwrap();
+    (root, ws, outside)
+}
+
+#[tokio::test]
+async fn cd_outside_workspace_resets_and_warns() {
+    let _g = maintain_lock();
+    // The `cd` target is a SIBLING of the workspace (outside its subtree), so
+    // `J2n` fires: cwd resets to the workspace and stderr gains the `Y2n` warning.
+    let (_root, workspace_canon, outside_canon) = workspace_and_outside();
+
+    let runner = RecordingRunner::new(vec![Some(outside_canon.clone()), None], false);
+    let tool = tool_with(&workspace_canon, runner.clone());
+
+    let res = tool
+        .call(
+            json!({ "command": format!("cd {}", outside_canon.display()) }),
+            fresh_ctx(),
+            fresh_tx(),
+        )
+        .await
+        .expect("first call ok");
+
+    // The reset warning is appended to the (empty) stderr: `"".trim()` == "" so
+    // the result is exactly `\nShell cwd was reset to {workspace}`.
+    assert_eq!(
+        result_stderr(&res.data),
+        format!("\nShell cwd was reset to {}", workspace_canon.display()),
+        "out-of-workspace cd must append the Y2n reset warning to stderr",
+    );
+
+    tool.call(json!({ "command": "pwd" }), fresh_ctx(), fresh_tx())
+        .await
+        .expect("second call ok");
+
+    let fg = runner.fg.lock().unwrap();
+    assert_eq!(fg.len(), 2);
+    // The shell cwd was reset — the second call spawns under the workspace, NOT
+    // the out-of-workspace target.
+    assert_eq!(
+        fg[1].cwd.as_deref(),
+        Some(workspace_canon.as_path()),
+        "out-of-workspace cd must reset the shell cwd to the workspace",
+    );
+}
+
+#[tokio::test]
+async fn cd_outside_workspace_preserves_existing_stderr() {
+    let _g = maintain_lock();
+    // Same as above but with non-empty command stderr. NOTE the binary divergence
+    // (documented residual): claude-code's BASH tool result `stderr` field carries
+    // ONLY the reset warning (`d = Y2n("")`; the command's stderr folds into stdout
+    // via the shell, `stderr_length:0` in its telemetry). LingXi surfaces command
+    // stderr in the result `stderr` field (a PRE-EXISTING design difference, not
+    // introduced by this finding), so the faithful adaptation appends the warning
+    // to it: `${stderr.trim()}\nShell cwd was reset to {workspace}`. In claude-code's
+    // only real case (empty command stderr) this is byte-identical to `Y2n("")`.
+    let (_root, workspace_canon, outside_canon) = workspace_and_outside();
+
+    let runner = Arc::new(StderrRunner {
+        stderr: "boom\n".into(),
+        inner: RecordingRunner::new(vec![Some(outside_canon.clone())], false),
+    });
+    let mut ctx = shell_test_ctx(ProcessOutput {
+        stdout: String::new(),
+        stderr: String::new(),
+        exit_code: 0,
+        timed_out: false,
+    });
+    ctx.workspace = workspace_canon.clone();
+    ctx.process = runner.clone();
+    let tool = BashTool::new(ctx);
+
+    let res = tool
+        .call(
+            json!({ "command": format!("cd {}", outside_canon.display()) }),
+            fresh_ctx(),
+            fresh_tx(),
+        )
+        .await
+        .expect("call ok");
+
+    assert_eq!(
+        result_stderr(&res.data),
+        format!("boom\nShell cwd was reset to {}", workspace_canon.display()),
+        "existing stderr is trimmed then the reset warning is appended",
+    );
+}
+
+/// RAII guard: removes `CLAUDE_BASH_MAINTAIN_PROJECT_WORKING_DIR` on drop so a
+/// panicking assert in the `maintain_*` test can NEVER leave the process-global
+/// env var set (which would poison every other cwd test in the file).
+struct MaintainEnvGuard;
+impl Drop for MaintainEnvGuard {
+    fn drop(&mut self) {
+        std::env::remove_var("CLAUDE_BASH_MAINTAIN_PROJECT_WORKING_DIR");
+    }
+}
+
+#[tokio::test]
+async fn maintain_env_resets_even_in_workspace() {
+    let _g = maintain_lock();
+    // `CLAUDE_BASH_MAINTAIN_PROJECT_WORKING_DIR=1` (TFo) forces a reset even for
+    // an in-workspace `cd` that would otherwise persist.
+    let workspace = TempDir::new().unwrap();
+    let workspace_canon = std::fs::canonicalize(workspace.path()).unwrap();
+    let sub_canon = workspace_canon.join("sub");
+    std::fs::create_dir(&sub_canon).unwrap();
+
+    let runner = RecordingRunner::new(vec![Some(sub_canon.clone()), None], false);
+    let tool = tool_with(&workspace_canon, runner.clone());
+
+    std::env::set_var("CLAUDE_BASH_MAINTAIN_PROJECT_WORKING_DIR", "1");
+    // Restored on scope exit even if an assert below panics (keeps the env var
+    // from leaking to the other lock-holders).
+    let _env_guard = MaintainEnvGuard;
+    let res = tool
+        .call(
+            json!({ "command": format!("cd {}", sub_canon.display()) }),
+            fresh_ctx(),
+            fresh_tx(),
+        )
+        .await
+        .expect("first call ok");
+
+    // The warning still appends (TFo's `r` branch sets `h=Y2n("")`), but the
+    // `tengu_bash_tool_reset_to_original_dir` telemetry does NOT fire (the
+    // `if(!r)` guard) — not observable here beyond the inline tracing event.
+    assert_eq!(
+        result_stderr(&res.data),
+        format!("\nShell cwd was reset to {}", workspace_canon.display()),
+        "TFo forces a reset warning even for an in-workspace cd",
+    );
+
+    tool.call(json!({ "command": "pwd" }), fresh_ctx(), fresh_tx())
+        .await
+        .expect("second call ok");
+
+    let fg = runner.fg.lock().unwrap();
+    assert_eq!(fg.len(), 2);
+    assert_eq!(
+        fg[1].cwd.as_deref(),
+        Some(workspace_canon.as_path()),
+        "TFo forces the shell cwd back to the workspace even for an in-workspace cd",
+    );
+}
+
+#[tokio::test]
+async fn subagent_is_unaffected_by_reset() {
+    let _g = maintain_lock();
+    // A subagent call carries `agent_id` (`prevent_cwd_changes`), so the entire
+    // readback block — including the `J2n` reset — is skipped. No reset warning,
+    // and the shared cwd is untouched (it was never advanced for a subagent).
+    let (_root, workspace_canon, outside_canon) = workspace_and_outside();
+
+    let runner = RecordingRunner::new(vec![Some(outside_canon.clone()), None], false);
+    let tool = tool_with(&workspace_canon, runner.clone());
+
+    let mut sub_ctx = fresh_ctx();
+    sub_ctx.agent_id = Some(protocol::AgentId::new());
+
+    let res = tool
+        .call(
+            json!({ "command": format!("cd {}", outside_canon.display()) }),
+            sub_ctx,
+            fresh_tx(),
+        )
+        .await
+        .expect("subagent call ok");
+
+    // No reset warning for a subagent (the readback block is gated out).
+    assert_eq!(
+        result_stderr(&res.data),
+        "",
+        "a subagent must not get the reset warning (readback block is skipped)",
+    );
+
+    tool.call(json!({ "command": "pwd" }), fresh_ctx(), fresh_tx())
+        .await
+        .expect("main call ok");
+
+    let fg = runner.fg.lock().unwrap();
+    assert_eq!(fg.len(), 2);
+    assert_eq!(
+        fg[1].cwd.as_deref(),
+        Some(workspace_canon.as_path()),
+        "subagent cd neither advances nor resets the shared cwd",
+    );
+}
+
+/// A `ProcessRunner` that returns a fixed stderr on the foreground `run`, while
+/// still simulating the `pwd -P` readback (so the reset path can be exercised
+/// with non-empty stderr). Delegates capture/readback to an inner
+/// `RecordingRunner`.
+struct StderrRunner {
+    stderr: String,
+    inner: Arc<RecordingRunner>,
+}
+
+#[async_trait]
+impl ProcessRunner for StderrRunner {
+    async fn run(&self, cmd: &SandboxedCommand) -> Result<ProcessOutput, ProcessError> {
+        let mut out = self.inner.run(cmd).await?;
+        out.stderr = self.stderr.clone();
+        Ok(out)
+    }
+    async fn spawn_background(
+        &self,
+        cmd: &SandboxedCommand,
+    ) -> Result<ProcessHandle, ProcessError> {
+        self.inner.spawn_background(cmd).await
+    }
+    async fn kill(&self, handle: &ProcessHandle) -> Result<(), ProcessError> {
+        self.inner.kill(handle).await
+    }
+    fn is_available(&self) -> bool {
+        self.inner.is_available()
+    }
 }

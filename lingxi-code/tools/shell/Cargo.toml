@@ -22,6 +22,12 @@ serde_json.workspace = true
 tokio = { workspace = true, features = ["fs"] }
 once_cell = "1"
 thiserror.workspace = true
+# Finding #8: the cwd-reset event `tengu_bash_tool_reset_to_original_dir` is NOT
+# a registered tengu/ALL_EVENT_NAMES const (registry stays at 347) — claude-code
+# fires it via `j(...)` only on the non-TFo reset branch. We emit it as an inline
+# `tracing` event instead of registering a new tengu name. `tracing` is already
+# in the workspace lockfile (orchestrator/engine), so this adds no new package.
+tracing.workspace = true
 
 # BASH.6 sandbox-prompt dir name uses the REAL uid (1:1 TS `process.getuid?.()`).
 # `nix::unistd::getuid()` is a SAFE wrapper around `getuid(2)`, so this crate keeps

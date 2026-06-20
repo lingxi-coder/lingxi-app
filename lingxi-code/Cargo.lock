@@ -5298,6 +5298,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tool-api",
+ "tracing",
  "traits",
 ]
 

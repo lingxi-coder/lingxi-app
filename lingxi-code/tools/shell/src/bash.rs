@@ -287,6 +287,79 @@ pub fn bash_max_output_length() -> usize {
     resolve_max_output_length(std::env::var("BASH_MAX_OUTPUT_LENGTH").ok().as_deref())
 }
 
+/// Port of claude-code `TFo` (`function TFo(){return
+/// st(process.env.CLAUDE_BASH_MAINTAIN_PROJECT_WORKING_DIR)}`): when truthy, the
+/// shell cwd is ALWAYS reset to the original (workspace) after a command, even
+/// for an in-workspace `cd`. `st` is the strict env-truthy allowlist
+/// (`1`/`true`/`yes`/`on`) — delegated to the canonical [`traits::env::is_env_truthy`]
+/// so it cannot drift. DEFAULT FALSE (unset/empty ⇒ false).
+fn tfo_maintain_cwd() -> bool {
+    traits::env::is_env_truthy(
+        std::env::var("CLAUDE_BASH_MAINTAIN_PROJECT_WORKING_DIR")
+            .ok()
+            .as_deref(),
+    )
+}
+
+/// Apply claude-code `R0`'s `/private/var` → `/var` and `/private/tmp` → `/tmp`
+/// path normalization (the macOS realpath-prefix folding) to a single path.
+/// 1:1 with the two `.replace(...)` calls in `R0`:
+///   `.replace(/^\/private\/var\//,"/var/").replace(/^\/private\/tmp(\/|$)/,"/tmp$1")`
+/// Returns the normalized string form (lossless for our containment compare).
+fn normalize_private_prefix(p: &std::path::Path) -> String {
+    let s = p.to_string_lossy();
+    if let Some(rest) = s.strip_prefix("/private/var/") {
+        return format!("/var/{rest}");
+    }
+    // `/private/tmp(\/|$)` — the `$1` keeps the trailing `/` (or end-of-string).
+    if let Some(rest) = s.strip_prefix("/private/tmp/") {
+        return format!("/tmp/{rest}");
+    }
+    if s == "/private/tmp" {
+        return "/tmp".to_string();
+    }
+    s.into_owned()
+}
+
+/// Port of claude-code `R0(e, t)` (`caseFold:false`): "is path `e` contained in
+/// directory `t`?" — the predicate `kF` applies over the allowed-dir set.
+///
+/// `R0` realpaths both via `Ds`, applies the `/private/var`+`/private/tmp`
+/// normalization to BOTH, then computes `posix.relative(t, e)`:
+///   - `""`            (same path)            ⇒ contained          → true
+///   - contains `..`   (`poe`)                ⇒ outside            → false
+///   - absolute        (no common base)       ⇒ outside            → false
+///   - else (relative, non-`..`)              ⇒ inside             → true
+///
+/// `cwd` arrives already canonicalized (the readback `canon`); we canonicalize
+/// `dir` to mirror `Ds`'s realpath, then fold the `/private/*` prefixes on both
+/// before the prefix-containment check. caseFold is FALSE on the `kF` path
+/// (case-sensitive) so we compare bytes directly.
+fn is_within_allowed(cwd: &std::path::Path, dir: &std::path::Path) -> bool {
+    // `Ds` realpaths; `cwd` is already `canon`. Canonicalize `dir`; if that
+    // fails (dir gone), fall back to the raw `dir` so the compare still runs
+    // (claude-code's `Ds` would throw and `R0`'s callers treat a throw as
+    // not-contained, but a missing workspace is already handled upstream by the
+    // deleted-cwd recovery — this fallback only affects an exotic race).
+    let dir_canon = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
+    let e = normalize_private_prefix(cwd);
+    let t = normalize_private_prefix(&dir_canon);
+    if e == t {
+        // `posix.relative(t, e)` == "" ⇒ same dir ⇒ contained.
+        return true;
+    }
+    // `posix.relative(t, e)` for `e` strictly inside `t` is a forward relative
+    // path with no leading `..` and is not absolute. We model that with a
+    // path-component prefix check: `e` starts with `t` AND the boundary is a
+    // path separator (so `/tmp/foobar` is NOT "inside" `/tmp/foo`).
+    let t_with_sep = if t.ends_with('/') {
+        t.clone()
+    } else {
+        format!("{t}/")
+    };
+    e.starts_with(&t_with_sep)
+}
+
 /// Truncate Bash output the way claude-code `BashTool/utils.ts` `formatOutput`
 /// does (`:156-158`): keep the first `max` chars, then append
 /// `\n\n... [N lines truncated] ...` where `N` is the number of `\n` characters
@@ -1052,6 +1125,16 @@ impl Tool for BashTool {
                 // mutate the shared cwd — TS `preventCwdChanges = !isMainThread`.
                 // The main thread has no `agent_id`; a subagent call carries one.
                 let prevent_cwd_changes = ctx.agent_id.is_some();
+                // claude-code `J2n` (the cwd-reset gate): when the readback shows
+                // the shell navigated OUTSIDE the allowed dirs — or the
+                // `CLAUDE_BASH_MAINTAIN_PROJECT_WORKING_DIR` env forces it — chdir
+                // the shell back to the original (workspace) cwd and warn. We do
+                // not chdir a real shell (the cwd is reasserted by the next call's
+                // `cwd:` spawn arg), so "reset" here = keep `shell_cwd` at the
+                // workspace instead of advancing it to the new dir, plus append
+                // the `Y2n` warning to stderr below. `Some(workspace)` => a reset
+                // warning must be appended; `None` => no reset.
+                let mut cwd_reset_warning: Option<std::path::PathBuf> = None;
                 if !prevent_cwd_changes {
                     if let Ok(contents) = std::fs::read_to_string(&cwd_file) {
                         let trimmed = contents.trim();
@@ -1059,30 +1142,78 @@ impl Tool for BashTool {
                             let new_cwd = std::path::PathBuf::from(trimmed);
                             if new_cwd != cwd {
                                 if let Ok(canon) = std::fs::canonicalize(&new_cwd) {
-                                    // Update the persistent cwd, then drop the
-                                    // guard BEFORE the best-effort hook fire (no
-                                    // mutex held across an `.await`). `clone_from`
-                                    // keeps `canon` owned for the fire below.
-                                    {
-                                        (*self.shell_cwd.lock().unwrap()).clone_from(&canon);
-                                    }
-                                    // BASH.4 `onCwdChangedForHooks(cwd, newCwd)`
-                                    // (Shell.ts:409): fire the `CwdChanged` hook
-                                    // when the cwd actually moved. We are already
-                                    // inside `new_cwd != cwd`, and the firer
-                                    // re-asserts `old != new` (claude-code's
-                                    // `oldCwd !== newCwd` guard,
-                                    // fileChangedWatcher.ts:137). Best-effort:
-                                    // a no-op when no firer is registered
-                                    // (mobile / plain `new`) or when the hook is
-                                    // absent — never breaks the cwd update.
-                                    if let Some(firer) = &self.cwd_changed_firer {
-                                        firer
-                                            .fire(hooks::CwdChangedFire {
-                                                old: cwd.clone(),
-                                                new: canon,
-                                            })
-                                            .await;
+                                    // claude-code `J2n` decision (the bash result
+                                    // path's `if(l){if(J2n(Fr(t)))h=Y2n("")}`):
+                                    //   J2n: `t=Pt()` (cwd after the command =
+                                    //   `canon`), `n=Ar()` (original = workspace),
+                                    //   reset when `TFo() || (t!==n && !kF(t))`.
+                                    // We compare `canon` to the WORKSPACE (not the
+                                    // prior `cwd`), so this is correct across
+                                    // multiple calls: `is_within_allowed` returns
+                                    // true when `canon == workspace` (subsuming
+                                    // J2n's `t!==n` equality guard — a `cd` back to
+                                    // the workspace is NOT a reset) and true when
+                                    // `canon` is inside it (`!kF` false). `kF`'s
+                                    // allowed set is the workspace (TS `b$` also
+                                    // folds in `additionalWorkingDirectories` — see
+                                    // the documented residual; the common
+                                    // no-additional-dirs case is faithful).
+                                    let force = tfo_maintain_cwd();
+                                    let should_reset =
+                                        force || !is_within_allowed(&canon, &self.ctx.workspace);
+                                    if should_reset {
+                                        // RESET (J2n fires): chdir back to original.
+                                        // We do NOT advance `shell_cwd` to `canon`;
+                                        // reset it to the workspace (TS `x_(n)`).
+                                        // Do NOT fire `CwdChanged` — the cwd did not
+                                        // really move from the model's view.
+                                        {
+                                            (*self.shell_cwd.lock().unwrap())
+                                                .clone_from(&self.ctx.workspace);
+                                        }
+                                        // `Y2n` appends `\nShell cwd was reset to
+                                        // {Pt()}` where `Pt()` is the cwd AFTER the
+                                        // chdir-back == the workspace.
+                                        cwd_reset_warning = Some(self.ctx.workspace.clone());
+                                        // `j("tengu_bash_tool_reset_to_original_dir")`
+                                        // fires ONLY on the non-TFo branch
+                                        // (`if(!r)`). It is NOT a registered
+                                        // tengu/ALL_EVENT_NAMES const — emit it as
+                                        // an inline tracing event so the registry
+                                        // stays at 347.
+                                        if !force {
+                                            tracing::info!(
+                                                event = "tengu_bash_tool_reset_to_original_dir"
+                                            );
+                                        }
+                                    } else {
+                                        // UPDATE (J2n does not fire): today's
+                                        // behavior exactly. Update the persistent
+                                        // cwd, then drop the guard BEFORE the
+                                        // best-effort hook fire (no mutex held
+                                        // across an `.await`). `clone_from` keeps
+                                        // `canon` owned for the fire below.
+                                        {
+                                            (*self.shell_cwd.lock().unwrap()).clone_from(&canon);
+                                        }
+                                        // BASH.4 `onCwdChangedForHooks(cwd, newCwd)`
+                                        // (Shell.ts:409): fire the `CwdChanged` hook
+                                        // when the cwd actually moved. We are already
+                                        // inside `new_cwd != cwd`, and the firer
+                                        // re-asserts `old != new` (claude-code's
+                                        // `oldCwd !== newCwd` guard,
+                                        // fileChangedWatcher.ts:137). Best-effort:
+                                        // a no-op when no firer is registered
+                                        // (mobile / plain `new`) or when the hook is
+                                        // absent — never breaks the cwd update.
+                                        if let Some(firer) = &self.cwd_changed_firer {
+                                            firer
+                                                .fire(hooks::CwdChangedFire {
+                                                    old: cwd.clone(),
+                                                    new: canon,
+                                                })
+                                                .await;
+                                        }
                                     }
                                 }
                             }
@@ -1094,6 +1225,32 @@ impl Tool for BashTool {
 
                 let (stdout_clean, ansi_dropped_out) = strip_ansi_count(&out.stdout);
                 let (stderr_clean, ansi_dropped_err) = strip_ansi_count(&out.stderr);
+                // claude-code `Y2n` (the cwd-reset warning): when `J2n` fired, the
+                // bash result path sets `d=Y2n("")` == `"\nShell cwd was reset to
+                // {cwd-after-chdir}"` (Y2n's arg is the EMPTY string; `"".trim()`
+                // == "" so the warning is exactly a leading-newline sentence).
+                //
+                // BINARY DIVERGENCE (documented residual): claude-code's BASH tool
+                // result `stderr` field is JUST `d` — the command's stderr folds
+                // into stdout via the shell (`stderr_length:0` in its
+                // `tengu_bash_tool_command_executed`), so there is never any
+                // pre-existing stderr to combine with. LingXi surfaces the
+                // command's stderr in the result `stderr` field (a PRE-EXISTING
+                // design difference, NOT introduced by this finding), so we append
+                // the warning to the already-cleaned `stderr_clean` — the only
+                // stderr consumer downstream (the image short-circuit and both text
+                // result blocks all read this binding). In claude-code's only real
+                // case (empty command stderr) this is byte-identical: an empty
+                // `stderr_clean` trims to "" giving exactly `\nShell cwd was reset
+                // to {workspace}` == `Y2n("")`.
+                let stderr_clean = match &cwd_reset_warning {
+                    Some(reset_to) => format!(
+                        "{}\nShell cwd was reset to {}",
+                        stderr_clean.trim(),
+                        reset_to.display()
+                    ),
+                    None => stderr_clean,
+                };
                 // Model-facing stdout normalization (claude-code): strip leading
                 // whitespace-only lines + trimEnd, then drop outer empty lines.
                 let normalized = crate::shared::strip_empty_lines(&crate::shared::normalize_stdout(
@@ -1283,6 +1440,92 @@ mod tests {
         assert_eq!(BASH_SHELL_LINUX, "/bin/bash");
         assert_eq!(BASH_SHELL_MACOS, "/bin/zsh");
         assert_eq!(TOOL_NAME, "Bash");
+    }
+
+    // ===== Finding #8 — `R0` containment port (`is_within_allowed`) ==========
+
+    #[test]
+    fn normalize_private_prefix_folds_var_and_tmp() {
+        use std::path::Path;
+        // `/private/var/...` → `/var/...`
+        assert_eq!(
+            normalize_private_prefix(Path::new("/private/var/folders/ab/x")),
+            "/var/folders/ab/x"
+        );
+        // `/private/tmp/...` → `/tmp/...` (the `$1` keeps the trailing segment)
+        assert_eq!(
+            normalize_private_prefix(Path::new("/private/tmp/foo")),
+            "/tmp/foo"
+        );
+        // `/private/tmp` (end-of-string) → `/tmp`
+        assert_eq!(normalize_private_prefix(Path::new("/private/tmp")), "/tmp");
+        // Non-matching prefixes pass through unchanged (no `/private/varX` fold).
+        assert_eq!(
+            normalize_private_prefix(Path::new("/private/variable")),
+            "/private/variable"
+        );
+        assert_eq!(normalize_private_prefix(Path::new("/usr/bin")), "/usr/bin");
+    }
+
+    #[test]
+    fn is_within_allowed_same_dir_is_contained() {
+        // `R0`: `posix.relative(t, e) == ""` ⇒ same dir ⇒ contained.
+        let dir = std::env::temp_dir();
+        let canon = std::fs::canonicalize(&dir).unwrap();
+        assert!(is_within_allowed(&canon, &canon));
+    }
+
+    #[test]
+    fn is_within_allowed_subdir_is_contained() {
+        // A real subdir of a real (canonicalized) workspace is contained — the
+        // `/private/var` realpath fold on macOS must not break the prefix check.
+        let ws = tempfile::TempDir::new().unwrap();
+        let ws_canon = std::fs::canonicalize(ws.path()).unwrap();
+        let sub = ws_canon.join("sub");
+        std::fs::create_dir(&sub).unwrap();
+        let sub_canon = std::fs::canonicalize(&sub).unwrap();
+        assert!(
+            is_within_allowed(&sub_canon, &ws_canon),
+            "{} should be within {}",
+            sub_canon.display(),
+            ws_canon.display()
+        );
+    }
+
+    #[test]
+    fn is_within_allowed_sibling_is_not_contained() {
+        // `R0`: `posix.relative(t, e)` is `..`-leading (or absolute) ⇒ outside.
+        // Two independent temp dirs are siblings, never nested.
+        let a = tempfile::TempDir::new().unwrap();
+        let b = tempfile::TempDir::new().unwrap();
+        let a_canon = std::fs::canonicalize(a.path()).unwrap();
+        let b_canon = std::fs::canonicalize(b.path()).unwrap();
+        assert!(
+            !is_within_allowed(&b_canon, &a_canon),
+            "{} must NOT be within {}",
+            b_canon.display(),
+            a_canon.display()
+        );
+    }
+
+    #[test]
+    fn is_within_allowed_prefix_string_not_path_boundary() {
+        // `/var/foobar` is NOT inside `/var/foo` — the boundary must be a path
+        // separator, mirroring `posix.relative` (`relative('/var/foo','/var/foobar')`
+        // == `../foobar`, `..`-leading ⇒ not contained). Build real dirs whose
+        // canonical names share a string prefix but are siblings.
+        let root = tempfile::TempDir::new().unwrap();
+        let root_canon = std::fs::canonicalize(root.path()).unwrap();
+        let foo = root_canon.join("foo");
+        let foobar = root_canon.join("foobar");
+        std::fs::create_dir(&foo).unwrap();
+        std::fs::create_dir(&foobar).unwrap();
+        assert!(
+            !is_within_allowed(&foobar, &foo),
+            "{} must NOT be 'within' {} (string-prefix, not path-prefix)",
+            foobar.display(),
+            foo.display()
+        );
     }
 
     #[test]

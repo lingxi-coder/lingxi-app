@@ -1364,6 +1364,12 @@
     "status": "DONE (main fafc84f9)",
     "title": "Dh predicate has 3 copies: tool-api (shared, used by tool-file+tool-task) + local copies in tool-web + tool-shell",
     "note": "Functional but redundant; consolidate tool-web/tool-shell to tool_api::dh_simple_system_prompt in a cleanup pass. Parallel-agent artifact (avoided shared-crate conflict during the fix wave)."
+   },
+   {
+    "id": "R-P1-ripple",
+    "status": "DONE (main db4467f6)",
+    "title": "R-P1's additional-context meta + claudeMd relocation rippled to 4 consumer/integration tests",
+    "note": "The final full-workspace run (8148 pass / 4 fail) caught that R-P1's CORRECT change — prepending the additional-context <system-reminder> meta to every outgoing turn (currentDate unconditional) + moving claudeMd out of the system prompt into that meta — broke 4 tests the R-P1 agent didn't update (it updated orchestrator's own tests only): bridge-server first_user_content (now skips is_meta:true), engine-desktop + engine-mobile build_*_with_injected_memory (now assert claudeMd reaches the new pub additional_context_preview() seam, not the system prompt), parity_orchestrator single-turn message count (+1 leading meta). LESSON: a behavior change in a shared seam ripples to CONSUMER-crate + integration tests — always run the FULL workspace --no-fail-fast after a cross-cutting fix, not just the owning crate."
    }
   ],
   "_status_final": "FIX CAMPAIGN COMPLETE 2026-06-20. main 1928b77e. ALL behavioral parity findings from the adversarial review are LANDED or dispositioned: Tier1 security/decision (perm 8eb13a81, hooks f361443f), Tier2 model-facing (model-gate all 8 tools + R-P1 envelope 7cdbfd8c), Tier3 observable (R-V1 98613461, R-F5 doc-inert, R-O1 1928b77e, R-O2 in-hooks), Tier4 (R-TEST 7293f64b, R-MINOR 2-items 42e3bc77 + residuals-doc, R-TEL OUT-OF-SCOPE analytics-only), discovered (R-T6 bash-gate, R-EditDesc 59b6e76a, Dh-consolidation fafc84f9). Parent caught+fixed 4 agent errors via the live-claude-code-render oracle (Read/Bash SHORT prompt LONG-bullet leaks, a missing-file commit, a missing WO() denylist key). Non-blocking residuals: userEmail composition-root wiring (R-P1 follow-up; correctly omits when no email), R-MINOR out-of-arch gaps (CLAUDE_EFFORT/TRACEPARENT, tmux terminalSequence). The core is now substantially MORE 1:1 than the pre-review 'COMPLETE' claim — the review found + closed the categories the per-finding loop had missed (prompt envelope, model-conditional gating, version stamps, permission ordering, dead hooks)."

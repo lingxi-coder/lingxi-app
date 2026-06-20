@@ -1,7 +1,8 @@
 //! `tokio::process`-backed [`ProcessRunner`] for desktop hosts.
 //!
 //! Foreground `run` applies the claude-code spawn-env contract
-//! (`CLAUDECODE=1`, `GIT_EDITOR=true`, `SHELL=<bin>`) plus a 30-minute
+//! (`CLAUDECODE=1`, `GIT_EDITOR=true`, `AI_AGENT=<…>`, `SHELL=<bin>` for the
+//! bash provider) plus a 30-minute
 //! default timeout. `spawn_background` lands a real child with
 //! file-mode stdio (POSIX `O_NOFOLLOW`) wired to a per-task output file
 //! and a setsid call so [`super::kill_tree::kill_tree_unix`] can later
@@ -11,8 +12,9 @@
 use crate::process::kill_tree::kill_tree_unix;
 use crate::process::spawn_unsafe::attach_setsid;
 use crate::process::wrap::{
-    task_output_path, DEFAULT_TIMEOUT, ENV_CLAUDECODE, ENV_CLAUDE_CODE_CHILD_SESSION,
-    ENV_CLAUDE_CODE_SESSION_ID, ENV_GIT_EDITOR, ENV_SHELL,
+    ai_agent_value, is_bash_provider_shell, task_output_path, DEFAULT_TIMEOUT, ENV_AI_AGENT,
+    ENV_CLAUDECODE, ENV_CLAUDE_CODE_CHILD_SESSION, ENV_CLAUDE_CODE_SESSION_ID, ENV_GIT_EDITOR,
+    ENV_SHELL,
 };
 use async_trait::async_trait;
 use std::os::unix::fs::OpenOptionsExt;
@@ -37,11 +39,20 @@ impl PosixProcess {
     ///
     /// Env-var precedence (matches claude-code `Shell.ts:317-328`):
     /// 1. Caller-supplied env vars on the [`SandboxedCommand`].
-    /// 2. `CLAUDECODE=1`, `GIT_EDITOR=true`, `SHELL=<inner.command>` —
+    /// 2. `CLAUDECODE=1`, `GIT_EDITOR=true`, `AI_AGENT=<Mer("agent")>`, and
+    ///    `SHELL=<inner.command>` (the last only for the bash provider) —
     ///    overwritten on top so callers cannot accidentally clobber them.
     /// 3. `CLAUDE_CODE_SESSION_ID` is propagated only when the caller has
     ///    explicitly injected it through the env map (the engine layer
     ///    decides whether to set it).
+    ///
+    /// `SHELL` (#6) follows claude-code's `SHELL: n==="bash"?S:void 0`: it is
+    /// set to the resolved shell binary ONLY for the bash provider
+    /// (`bash`/`zsh` spawns) and OMITTED for the powershell provider (whose
+    /// binary is `pwsh`/`powershell.exe`).
+    ///
+    /// `AI_AGENT` (#7) mirrors `Uot`'s unconditional `t.AI_AGENT=Mer("agent")`
+    /// (the bash spawn site hardcodes `source:"agent"`).
     fn build_command(cmd: &SandboxedCommand) -> Command {
         let inner = cmd.inner();
         let mut tcmd = Command::new(&inner.command);
@@ -61,8 +72,19 @@ impl PosixProcess {
             ENV_CLAUDE_CODE_CHILD_SESSION.0,
             ENV_CLAUDE_CODE_CHILD_SESSION.1,
         );
+        // #7: claude-code `Uot` always injects `AI_AGENT=Mer("agent")`.
+        tcmd.env(ENV_AI_AGENT, ai_agent_value());
         tcmd.env(ENV_GIT_EDITOR.0, ENV_GIT_EDITOR.1);
-        tcmd.env(ENV_SHELL, &inner.command);
+        // #6: SHELL only for the bash provider; powershell omits it. claude-code
+        // spreads `{...WO(), SHELL: n==="bash"?S:void 0}` — for powershell the
+        // `void 0` overwrites any inherited `SHELL` to `undefined`, which Node
+        // drops from the child env. We mirror that by REMOVING the inherited
+        // `SHELL` rather than merely not setting it.
+        if is_bash_provider_shell(&inner.command) {
+            tcmd.env(ENV_SHELL, &inner.command);
+        } else {
+            tcmd.env_remove(ENV_SHELL);
+        }
         // 3. CLAUDE_CODE_SESSION_ID propagated only if explicitly provided.
         if let Some(sess) = inner.env.get(ENV_CLAUDE_CODE_SESSION_ID) {
             tcmd.env(ENV_CLAUDE_CODE_SESSION_ID, sess);

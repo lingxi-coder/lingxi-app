@@ -25,9 +25,6 @@ pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 pub const ENV_CLAUDECODE: (&str, &str) = ("CLAUDECODE", "1");
 /// Marks every spawned process as running inside a claude-code CHILD session —
 /// claude-code `Uot` sets `CLAUDE_CODE_CHILD_SESSION:"1"` UNCONDITIONALLY (#7).
-/// (The conditional `AI_AGENT`/`CLAUDE_EFFORT`/`TRACEPARENT` vars need a
-/// command source / effort / tracing context not threaded into the runner — a
-/// separate follow-up.)
 pub const ENV_CLAUDE_CODE_CHILD_SESSION: (&str, &str) = ("CLAUDE_CODE_CHILD_SESSION", "1");
 /// Forces `git`'s editor to a no-op so interactive git commands cannot
 /// block the shell.
@@ -36,6 +33,40 @@ pub const ENV_GIT_EDITOR: (&str, &str) = ("GIT_EDITOR", "true");
 pub const ENV_SHELL: &str = "SHELL";
 /// Name of the session-id env var the IDE bridge / hooks consume.
 pub const ENV_CLAUDE_CODE_SESSION_ID: &str = "CLAUDE_CODE_SESSION_ID";
+/// Name of the agent-identity env var claude-code's `Uot` injects into child
+/// shell spawns. The value (see [`ai_agent_value`]) mirrors claude-code's
+/// `Mer("agent")`.
+pub const ENV_AI_AGENT: &str = "AI_AGENT";
+
+/// Value claude-code's `Uot` writes to `AI_AGENT` for child shell spawns.
+///
+/// claude-code's minified `Mer(e)` returns
+/// `` `claude-code_${VERSION.replace(/\./g,"-")}_${e}` `` and the bash-provider
+/// spawn site calls `Uot({…, source:"agent"})`, so `e === "agent"` is hardcoded
+/// at the spawn — `AI_AGENT` is therefore set UNCONDITIONALLY (not gated on an
+/// optional value). We derive the version from this crate's package version the
+/// same way the MCP `user_agent()` helper derives the `claude-code/<version>`
+/// product string, replacing `.` with `-` to match `Mer`.
+#[must_use]
+pub fn ai_agent_value() -> String {
+    format!(
+        "claude-code_{}_agent",
+        env!("CARGO_PKG_VERSION").replace('.', "-")
+    )
+}
+
+/// Does this spawn binary correspond to claude-code's **bash provider**
+/// (`n === "bash"`), as opposed to the powershell provider?
+///
+/// claude-code sets `SHELL: n==="bash"?S:void 0` — i.e. it writes `SHELL` only
+/// for the posix bash provider (whose resolved `shellPath` is `bash` *or*
+/// `zsh`) and OMITS it entirely for the powershell provider (whose binary is
+/// `pwsh`/`powershell.exe`). We reproduce that by treating any `bash`/`zsh`
+/// spawn binary as the bash provider.
+#[must_use]
+pub fn is_bash_provider_shell(command: &str) -> bool {
+    command.contains("bash") || command.contains("zsh")
+}
 
 /// Stable per-task output file path.
 ///
@@ -122,6 +153,48 @@ mod tests {
         assert_eq!(ENV_GIT_EDITOR, ("GIT_EDITOR", "true"));
         assert_eq!(ENV_SHELL, "SHELL");
         assert_eq!(ENV_CLAUDE_CODE_SESSION_ID, "CLAUDE_CODE_SESSION_ID");
+        assert_eq!(ENV_AI_AGENT, "AI_AGENT");
+    }
+
+    #[test]
+    fn ai_agent_value_matches_mer_agent_shape() {
+        // claude-code `Mer("agent")` => `claude-code_<version-dashed>_agent`.
+        let v = ai_agent_value();
+        assert!(
+            v.starts_with("claude-code_"),
+            "AI_AGENT must start with the claude-code_ prefix: {v}"
+        );
+        assert!(
+            v.ends_with("_agent"),
+            "AI_AGENT must end with the _agent suffix: {v}"
+        );
+        // The version segment uses `-` separators, never `.` (Mer's replace).
+        let mid = v
+            .strip_prefix("claude-code_")
+            .and_then(|s| s.strip_suffix("_agent"))
+            .expect("prefix/suffix present");
+        assert!(!mid.contains('.'), "version dots must be dashed: {v}");
+        assert_eq!(
+            v,
+            format!(
+                "claude-code_{}_agent",
+                env!("CARGO_PKG_VERSION").replace('.', "-")
+            )
+        );
+    }
+
+    #[test]
+    fn shell_gate_set_for_bash_provider_only() {
+        // bash provider (`n==="bash"`): macOS resolves to /bin/zsh, Linux /bin/bash.
+        assert!(is_bash_provider_shell("/bin/bash"));
+        assert!(is_bash_provider_shell("/bin/zsh"));
+        assert!(is_bash_provider_shell("/usr/local/bin/bash"));
+        // powershell provider (`n==="powershell"`): SHELL is omitted (void 0).
+        assert!(!is_bash_provider_shell("/usr/local/bin/pwsh"));
+        assert!(!is_bash_provider_shell("powershell.exe"));
+        // REPL interpreters are not the bash provider either.
+        assert!(!is_bash_provider_shell("/usr/bin/python3"));
+        assert!(!is_bash_provider_shell("node"));
     }
 
     #[test]

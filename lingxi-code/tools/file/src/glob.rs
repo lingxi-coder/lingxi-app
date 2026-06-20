@@ -44,6 +44,7 @@ use tool_api::context::ToolUseContext;
 use tool_api::progress::ToolProgressSender;
 use tool_api::tool_trait::{
     DescriptionOptions, PromptOptions, Tool, ToolCallResult, ToolError, ToolStaticContext,
+    ValidationError,
 };
 use tool_api::util::path_validation::{canonicalize_and_validate, emit_blocked_event};
 use tool_api::BuiltinToolContext;
@@ -151,6 +152,21 @@ impl Tool for GlobTool {
     }
     fn is_read_only(&self, _input: &Value) -> bool {
         true
+    }
+
+    /// 1:1 with claude-code Glob `validateInput({path})`: a supplied `path` must
+    /// be an existing directory, else a distinct "Directory does not exist" /
+    /// "Path is not a directory" message (see [`crate::dir_validate`]). The cwd
+    /// (`Pt()`) is the tool's workspace.
+    async fn validate_input(
+        &self,
+        input: &Value,
+        _ctx: &ToolUseContext,
+    ) -> Result<(), ValidationError> {
+        if let Some(path) = input.get("path").and_then(Value::as_str) {
+            crate::dir_validate::validate_search_directory(path, &self.ctx.workspace)?;
+        }
+        Ok(())
     }
 
     async fn check_permissions(&self, _input: &Value, _ctx: &ToolUseContext) -> PermissionResult {

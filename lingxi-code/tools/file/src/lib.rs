@@ -30,6 +30,7 @@
 pub const FILE_STATE_CURRENT_SUFFIX: &str =
     " (file state is current in your context — no need to Read it back)";
 
+mod dir_validate;
 pub mod edit;
 pub mod file_meta;
 pub mod glob;

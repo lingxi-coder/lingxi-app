@@ -182,13 +182,25 @@ pub fn build_tool_block(input: &WebSearchInput) -> Value {
 /// ([`WebSearchTool::call`] when `stream_sse` is unavailable). The primary path
 /// uses [`build_streaming_request_body`], which is identical except for the
 /// added `"stream": true`.
+/// claude-code's WebSearch inner-query framing (WebSearchTool.ts:258, 270-271):
+/// the user message is prefixed with `Perform a web search for the query: ` and
+/// a single-line system prompt frames the hosted-search model. The deeper
+/// `queryModelWithStreaming` params (thinkingConfig / toolChoice / agents /
+/// effortValue) are NOT reachable from this crate (it cannot touch the typed
+/// query pipeline — see the module doc) and the hosted-search RESULTS are
+/// equivalent regardless, so only the observable framing is mirrored here.
+const WEB_SEARCH_USER_PREFIX: &str = "Perform a web search for the query: ";
+const WEB_SEARCH_SYSTEM_PROMPT: &str =
+    "You are an assistant for performing a web search tool use";
+
 #[must_use]
 pub fn build_request_body(model: &str, input: &WebSearchInput) -> Value {
     json!({
         "model": model,
         "max_tokens": WEB_SEARCH_DEFAULT_MAX_TOKENS,
+        "system": WEB_SEARCH_SYSTEM_PROMPT,
         "messages": [
-            { "role": "user", "content": input.query }
+            { "role": "user", "content": format!("{WEB_SEARCH_USER_PREFIX}{}", input.query) }
         ],
         "tools": [ build_tool_block(input) ],
     })
@@ -207,8 +219,9 @@ pub fn build_streaming_request_body(model: &str, input: &WebSearchInput) -> Valu
     json!({
         "model": model,
         "max_tokens": WEB_SEARCH_DEFAULT_MAX_TOKENS,
+        "system": WEB_SEARCH_SYSTEM_PROMPT,
         "messages": [
-            { "role": "user", "content": input.query }
+            { "role": "user", "content": format!("{WEB_SEARCH_USER_PREFIX}{}", input.query) }
         ],
         "tools": [ build_tool_block(input) ],
         "stream": true,
@@ -1367,7 +1380,17 @@ mod tests {
         assert_eq!(body["model"], "claude-sonnet-4-20250514");
         assert_eq!(body["max_tokens"], 4096);
         assert_eq!(body["messages"][0]["role"], "user");
-        assert_eq!(body["messages"][0]["content"], "rust async traits");
+        // claude-code prefixes the query (WebSearchTool.ts:258) + sets a system
+        // prompt (asSystemPrompt(['You are an assistant for performing a web
+        // search tool use']), WebSearchTool.ts:270-271).
+        assert_eq!(
+            body["messages"][0]["content"],
+            "Perform a web search for the query: rust async traits"
+        );
+        assert_eq!(
+            body["system"],
+            "You are an assistant for performing a web search tool use"
+        );
         assert_eq!(body["tools"][0]["type"], "web_search_20250305");
     }
 

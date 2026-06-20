@@ -3437,6 +3437,12 @@ pub async fn build(
     // sandboxed `PosixFileSystem` (a Plan-16 dead-code field on `PluginManager`)
     // needs a workspace root, so snapshot it here.
     let cwd_for_plugins = watch_cwd.clone();
+    // #39 UserPromptExpansion: capture the SAME `Arc<HookExecutorImpl>` BEFORE
+    // it is moved into the orchestrator, so the slash-command dispatcher (built
+    // at (6), below) can fire `UserPromptExpansion` through it at command
+    // expansion. The dispatcher pairs it with a context provider that reads the
+    // orchestrator's live session id (`orch.expansion_hook_context()`).
+    let expansion_hook_executor = hooks.clone();
     let orch_builder = ConversationOrchestrator::new(
         orch_cfg, api_client, tools, hooks, perms, output, memory, cwd,
     )
@@ -3682,7 +3688,21 @@ pub async fn build(
         }
     }
 
-    let dispatcher = RegistrySlashDispatcher::new(shared_command_registry.clone());
+    // #39 UserPromptExpansion: wire the dispatcher to fire `UserPromptExpansion`
+    // (claude-code `WFa`→`b$t`) the moment it expands a markdown / MCP-prompt
+    // slash command. The context provider reads THIS conversation's live
+    // session id + cwd from the orchestrator (`expansion_hook_context`), matching
+    // the base hook input the orchestrator's own lifecycle hooks build. A strict
+    // no-op unless a `UserPromptExpansion` hook is registered.
+    let expansion_ctx_orch = orch.clone();
+    let dispatcher = RegistrySlashDispatcher::new(shared_command_registry.clone())
+        .with_expansion_hooks(
+            expansion_hook_executor,
+            std::sync::Arc::new(move || {
+                let orch = expansion_ctx_orch.clone();
+                Box::pin(async move { orch.expansion_hook_context().await })
+            }),
+        );
 
     // (7) Session lifecycle: fire the `SessionStart` hooks now that the
     //     orchestrator + hook registry are fully wired. claude-code fires the

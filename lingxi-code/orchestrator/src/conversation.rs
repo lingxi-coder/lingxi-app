@@ -2602,6 +2602,17 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         }
     }
 
+    /// Public lifecycle [`HookContext`] for collaborators that fire engine
+    /// hooks OUTSIDE the turn loop — notably the slash-command dispatcher,
+    /// which fires `UserPromptExpansion` (#39) at command expansion and needs
+    /// this conversation's `session_id` + `cwd` to populate the base hook input
+    /// (claude-code minified `vd`). Same shape as the in-loop lifecycle hooks
+    /// (`stop_hook_active = false`), so the dispatcher's payload matches the
+    /// orchestrator's own lifecycle firings byte-for-byte on the shared fields.
+    pub async fn expansion_hook_context(&self) -> HookContext {
+        self.lifecycle_hook_ctx(false).await
+    }
+
     /// Fire the `UserPromptSubmit` lifecycle hooks at prompt ingress (hooks B4,
     /// TS `executeUserPromptSubmitHooks` / `query.ts` prompt path). Returns
     /// `true` when a hook returned a `Block` decision, signalling the caller to
@@ -2614,6 +2625,46 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             .execute(HookEvent::UserPromptSubmit { prompt: prompt.to_string() }, ctx)
             .await;
         matches!(agg.decision, Some(hooks::response::HookDecision::Block))
+    }
+
+    /// Fire the `MessageDisplay` hooks at the BEGIN of an assistant-message
+    /// stream — the orchestrator twin of claude-code's stream-display state
+    /// machine `begin(d)` (BIN off 208862320), which, on each new assistant
+    /// message, checks the `MessageDisplay` gate and then initializes the
+    /// per-message flush state `o={apiMessageId:d, messageId:randomUUID(),
+    /// turnId:r, index:0, ...}`. The hook payload is built by `aAt` (BIN off
+    /// 205705090): `{hook_event_name:"MessageDisplay", turn_id:e.turnId,
+    /// message_id:e.messageId, index:e.index, final:e.final, delta:e.delta}`.
+    ///
+    /// LingXi's streaming pump emits text deltas through the `OutputStream`
+    /// rather than re-entering a hook-aware flush loop, so we fire ONCE per
+    /// assistant message at its begin (the single hook-reachable point that
+    /// owns the executor + the pre-allocated assistant id), mirroring the
+    /// `begin(d)` initialization with `index:0`, `final:false`, and an empty
+    /// `delta` (no delta text has streamed yet at begin). `turn_id` is a fresh
+    /// per-turn UUID minted here (claude-code `newTurn(){…; r=randomUUID()}`),
+    /// and `message_id` is the assistant message's bare UUID (no `msg:` prefix,
+    /// matching the binary's bare `randomUUID()` display id and the inner
+    /// Anthropic `message.id` formatting used by `persist_assistant_per_block`).
+    ///
+    /// Best-effort: the aggregate is discarded so a failing / blocking
+    /// `MessageDisplay` hook never affects the turn, and firing is a strict
+    /// no-op when no `MessageDisplay` hook is registered.
+    async fn fire_message_display(&self, turn_id: &str, assistant_id: MessageId) {
+        let ctx = self.lifecycle_hook_ctx(false).await;
+        let _ = self
+            .hooks
+            .execute(
+                HookEvent::MessageDisplay {
+                    turn_id: turn_id.to_string(),
+                    message_id: assistant_id.as_uuid().to_string(),
+                    index: 0,
+                    is_final: false,
+                    delta: String::new(),
+                },
+                ctx,
+            )
+            .await;
     }
 
     /// Fire the `Stop` lifecycle hooks at end-of-turn and classify the result
@@ -3524,6 +3575,16 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             // any) so it can reject in-flight/queued Cancel-behavior tools with the
             // REJECT_MESSAGE; `None` → identical to before.
             let assistant_id = MessageId::new();
+
+            // hooks #39: MessageDisplay fires at the BEGIN of this assistant
+            // message's stream (claude-code `begin(d)`, BIN off 208862320),
+            // mirroring its `o={apiMessageId:d, messageId:randomUUID(),
+            // turnId:r, index:0, …}` initialization. The `turn_id` is a fresh
+            // per-turn UUID (`newTurn(){…; r=randomUUID()}`). Best-effort +
+            // no-op when unregistered, so existing flows are byte-identical.
+            let turn_id = uuid::Uuid::new_v4().to_string();
+            self.fire_message_display(&turn_id, assistant_id).await;
+
             let mut exec = match &user_cancel {
                 Some(token) => crate::streaming_executor::StreamingToolExecutor::new_with_user_cancel(
                     self,

@@ -1,8 +1,7 @@
 ---
-source: crates/tui/tests/snapshot_palette_completion.rs
-assertion_line: 19
+source: tui/tests/snapshot_palette_completion.rs
 expression: out
 ---
 /copy – (unimplemented in v0.6.0)
-/cost – Show total cost and duration of the current session
 /color – (unimplemented in v0.6.0)
+/commit – (unimplemented in v0.6.0)

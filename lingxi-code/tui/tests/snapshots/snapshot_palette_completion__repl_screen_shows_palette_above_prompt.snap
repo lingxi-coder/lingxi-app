@@ -1,14 +1,13 @@
 ---
 source: tui/tests/snapshot_palette_completion.rs
-assertion_line: 62
 expression: out
 ---
  . $0.0000 0% default
 /copy – (unimplemented in v0.6.0)
-/cost – Show total cost and duration of the current session
 /color – (unimplemented in v0.6.0)
 /commit – (unimplemented in v0.6.0)
 /config – Open settings
-❯ /co 
+/compact – Free up context by summarizing the conversation
+❯o/co 
 ❯
 ? for shortcuts     shift + ⏎ for newline

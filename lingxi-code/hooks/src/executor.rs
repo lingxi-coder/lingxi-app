@@ -57,6 +57,112 @@ pub const HOOK_COMMAND_TIMEOUT_MS: u64 = 600_000;
 /// `claude-code/src/utils/hooks/execAgentHook.ts:75` fall-through default).
 pub const HOOK_AGENT_TIMEOUT_MS: u64 = 60_000;
 
+/// Process-env override for the `SessionEnd` hook *batch* shutdown deadline
+/// (claude-code `Wqt`, BIN off 205715763:
+/// `process.env.CLAUDE_CODE_SESSIONEND_HOOKS_TIMEOUT_MS`). When this parses as a
+/// finite integer `> 0` it is used verbatim (NOT clamped — the binary returns it
+/// directly, bypassing the floor/cap).
+pub const SESSION_END_HOOKS_TIMEOUT_ENV: &str = "CLAUDE_CODE_SESSIONEND_HOOKS_TIMEOUT_MS";
+
+/// Floor for the computed `SessionEnd` batch deadline (claude-code `nzn`, BIN off
+/// 205765355: `nzn=1500`, exported as `SESSION_END_HOOK_TIMEOUT_MS_DEFAULT`).
+/// `Wqt` returns `Math.max(nzn, Math.min(n, rym))`, so the batch deadline is
+/// never shorter than this when the env override is absent. Also doubles as the
+/// per-hook default timeout the `SessionEnd` runner passes (`lje` →
+/// `cH({…, timeoutMs: nzn})`, BIN off 205706285).
+pub const SESSION_END_HOOK_TIMEOUT_FLOOR_MS: u64 = 1_500;
+
+/// Cap for the computed `SessionEnd` batch deadline (claude-code `rym`, BIN off
+/// 205765364: `rym=60000`). `Wqt` returns `Math.max(nzn, Math.min(n, rym))`, so
+/// the computed deadline is never longer than this when the env override is
+/// absent.
+pub const SESSION_END_HOOK_TIMEOUT_CAP_MS: u64 = 60_000;
+
+/// Compute the `SessionEnd` hook *batch* shutdown deadline in milliseconds, faithful
+/// to claude-code `Wqt` (BIN off 205715763):
+///
+/// ```text
+/// function Wqt(){
+///   let e=process.env.CLAUDE_CODE_SESSIONEND_HOOKS_TIMEOUT_MS,
+///       t=e?parseInt(e,10):NaN;
+///   if(Number.isFinite(t)&&t>0)return t;            // env override wins, UNCLAMPED
+///   let n=0,r=uE()?[]:Kj()?.SessionEnd??[],
+///       o=[...f5()?.SessionEnd??[],...r];
+///   for(let s of o)for(let i of s.hooks)
+///     if(i.timeout&&i.timeout*1000>n)n=i.timeout*1000; // max per-hook timeout (s→ms)
+///   return Math.max(nzn,Math.min(n,rym))             // clamp to [1500, 60000]
+/// }
+/// ```
+///
+/// * `env_value` is the raw `CLAUDE_CODE_SESSIONEND_HOOKS_TIMEOUT_MS` string (or
+///   `None`). A value that parses (base-10, leading-digit, JS `parseInt`-style)
+///   to a finite `> 0` integer is returned VERBATIM — the env override bypasses
+///   the floor/cap, exactly as the binary does.
+/// * Otherwise the deadline is `max(FLOOR, min(max_per_hook_ms, CAP))`, where
+///   `max_per_hook_ms` is the largest declared per-hook timeout across the
+///   matched `SessionEnd` hooks (each hook's `Duration` in ms; an absent / zero
+///   timeout contributes `0`). With no per-hook timeouts this collapses to the
+///   1500 ms floor.
+#[must_use]
+pub fn session_end_batch_timeout_ms(env_value: Option<&str>, max_per_hook_ms: u64) -> u64 {
+    if let Some(raw) = env_value {
+        if let Some(parsed) = parse_int_base10(raw) {
+            // `Number.isFinite(t) && t > 0` — `parseInt` of a non-numeric prefix
+            // yields NaN (→ `None` here, falls through); a non-positive value is
+            // rejected and also falls through to the computed clamp.
+            if parsed > 0 {
+                // u64 already bounds finiteness; a positive value is returned
+                // unclamped, mirroring `return t`.
+                #[allow(clippy::cast_sign_loss)]
+                return parsed as u64;
+            }
+        }
+    }
+    SESSION_END_HOOK_TIMEOUT_FLOOR_MS.max(max_per_hook_ms.min(SESSION_END_HOOK_TIMEOUT_CAP_MS))
+}
+
+/// Largest declared per-hook timeout (in milliseconds) across a matched hook set
+/// — the `n` accumulator in `Wqt` (`if(i.timeout&&i.timeout*1000>n)n=i.timeout*1000`).
+/// A hook with no timeout (`None`) or a zero timeout contributes `0`.
+fn max_per_hook_timeout_ms(hooks: &[HookDefinition]) -> u64 {
+    hooks
+        .iter()
+        .filter_map(|h| h.timeout)
+        .map(|d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
+        .max()
+        .unwrap_or(0)
+}
+
+/// JS `parseInt(s, 10)`-style parse: skip leading ASCII whitespace, accept an
+/// optional sign, then consume the leading run of decimal digits and ignore any
+/// trailing non-digit suffix (so `"3000abc"` → `3000`, `"abc"` → `NaN`/`None`).
+/// Returns `None` for no leading digits (the `NaN` case) so the caller falls
+/// through to the computed clamp.
+fn parse_int_base10(s: &str) -> Option<i64> {
+    let bytes = s.trim_start().as_bytes();
+    let mut idx = 0;
+    let mut negative = false;
+    if let Some(&first) = bytes.first() {
+        if first == b'+' || first == b'-' {
+            negative = first == b'-';
+            idx = 1;
+        }
+    }
+    let digits_start = idx;
+    let mut value: i64 = 0;
+    while idx < bytes.len() && bytes[idx].is_ascii_digit() {
+        value = value
+            .saturating_mul(10)
+            .saturating_add(i64::from(bytes[idx] - b'0'));
+        idx += 1;
+    }
+    if idx == digits_start {
+        // No digits consumed → `parseInt` returns NaN.
+        return None;
+    }
+    Some(if negative { -value } else { value })
+}
+
 /// In-process Rust handler for [`HookExecutor::Builtin`] hooks.
 ///
 /// Implementations are registered with [`HookExecutorImpl::register_builtin`]
@@ -243,6 +349,98 @@ impl HookExecutorImpl {
     /// Returns the number of hooks dropped.
     pub async fn clear_agent_hooks(&self, agent_id: protocol::AgentId) -> usize {
         self.registry.write().await.clear_agent_hooks(agent_id)
+    }
+
+    /// Fire the `SessionEnd` hook batch against a *batch-wide shutdown deadline*
+    /// (claude-code `lje` → `cH({…, signal: AbortSignal.timeout(Wqt())})`,
+    /// BIN off 205706285 / 205715763).
+    ///
+    /// Distinct from [`Self::execute`]: at session teardown claude-code does not
+    /// give the `SessionEnd` batch the generic 10-minute per-hook budget — it caps
+    /// the WHOLE batch with a single deadline so a slow / hung `SessionEnd` hook
+    /// cannot stall process exit. The deadline is
+    /// [`session_end_batch_timeout_ms`] (env override, else
+    /// `max(1500, min(max_per_hook_ms, 60000))`).
+    ///
+    /// The deadline is applied as a wall-clock budget shared across the batch:
+    /// each matched hook is dispatched under `min(remaining_deadline, its own
+    /// per-hook timeout)`, mirroring the binary, where every hook's effective
+    /// signal is `xP(batchSignal, {timeoutMs: perHook})` — abort on EITHER the
+    /// batch deadline OR the per-hook timeout (BIN off 205755512 / 200906242).
+    /// Once the batch deadline elapses, the remaining hooks see an already-fired
+    /// deadline and are skipped (the binary's `if(r?.aborted)return[]` / empty
+    /// per-hook output), so a hung early hook cannot starve teardown.
+    ///
+    /// Like [`Self::execute`]: priority-descending order, `Block` short-circuit,
+    /// `once` removal, B5 non-blocking backgrounding (those are not awaited so
+    /// they never consume the deadline), and a strict no-op (default aggregate)
+    /// when no `SessionEnd` hook is registered.
+    pub async fn execute_session_end(&self, event: HookEvent, ctx: HookContext) -> AggregateHookResult {
+        let reg = self.registry.read().await;
+        let matched: Vec<HookDefinition> =
+            reg.match_event(&event, &ctx).into_iter().cloned().collect();
+        drop(reg);
+
+        // Compute the batch deadline from the env override / the max declared
+        // per-hook timeout across the matched set (claude-code `Wqt`).
+        let env_value = std::env::var(SESSION_END_HOOKS_TIMEOUT_ENV).ok();
+        let batch_timeout_ms =
+            session_end_batch_timeout_ms(env_value.as_deref(), max_per_hook_timeout_ms(&matched));
+        let deadline =
+            tokio::time::Instant::now() + Duration::from_millis(batch_timeout_ms);
+
+        let mut agg = AggregateHookResult::default();
+        let hook_event = format!("{:?}", event.event_type());
+        for hook in &matched {
+            agg.progress.push(crate::events::HookProgressEvent {
+                hook_event: hook_event.clone(),
+                hook_name: hook.name.clone(),
+                status_message: hook.status_message.clone(),
+            });
+            if hook.blocking {
+                // Bound this hook by the remaining batch budget. Once the batch
+                // deadline has passed, `timeout_at` fires immediately, so the
+                // remaining hooks are skipped (the binary's already-aborted
+                // signal → empty output), and the batch stops — a hung early
+                // hook cannot starve teardown.
+                let Ok(result) = tokio::time::timeout_at(
+                    deadline,
+                    self.dispatcher().dispatch(hook, &event, &ctx),
+                )
+                .await
+                else {
+                    // Batch deadline elapsed mid-dispatch (or before this hook
+                    // started). Record a timeout outcome and stop the batch —
+                    // no later SessionEnd hook gets a turn, faithful to the
+                    // aborted batch signal.
+                    emit_session_end_batch_timeout(hook, batch_timeout_ms);
+                    let timed_out = HookResult {
+                        outcome: HookOutcome::Timeout,
+                        stdout: String::new(),
+                        stderr: format!(
+                            "SessionEnd hook {} aborted: batch deadline ({batch_timeout_ms}ms) exceeded",
+                            hook.id
+                        ),
+                        exit_code: None,
+                        response: None,
+                    };
+                    Self::merge(&mut agg, hook, timed_out);
+                    break;
+                };
+                if hook.once && matches!(result.outcome, HookOutcome::Success) {
+                    self.registry.write().await.remove_once_hook(hook.id);
+                }
+                Self::merge(&mut agg, hook, result);
+                if matches!(agg.decision, Some(crate::response::HookDecision::Block)) {
+                    break;
+                }
+            } else {
+                // B5 non-blocking hooks are backgrounded (not awaited), so they
+                // never consume the batch deadline — identical to `execute`.
+                self.background_hook(hook, &event, &ctx).await;
+            }
+        }
+        agg
     }
 
     /// Fire `event` and return the aggregated result of every matching hook.
@@ -1458,6 +1656,18 @@ fn emit_command_timeout(hook: &HookDefinition, timeout: Duration) {
     );
 }
 
+/// Emit `HOOK_TIMEOUT` telemetry when a `SessionEnd` hook is cut off by the
+/// *batch* shutdown deadline (claude-code `Wqt`), distinct from a per-hook
+/// timeout. `batch_timeout_ms` is the whole-batch budget the hook overran.
+fn emit_session_end_batch_timeout(hook: &HookDefinition, batch_timeout_ms: u64) {
+    tracing::info!(
+        event = telemetry::tengu::orchestrator::HOOK_TIMEOUT,
+        hook_id = %hook.id,
+        hook_kind = "session_end_batch",
+        timeout_ms = batch_timeout_ms,
+    );
+}
+
 /// Emit arm-level telemetry for an HTTP signal (SSRF / timeout). Other
 /// telemetry (`HOOK_PRE_*` / `HOOK_POST_*`) is fired by the orchestrator's
 /// `dispatch_tool_with_hooks` (M5-06 Task 14).
@@ -1532,6 +1742,314 @@ mod constants_tests {
     #[test]
     fn agent_timeout_is_60_seconds() {
         assert_eq!(HOOK_AGENT_TIMEOUT_MS, 60_000);
+    }
+
+    #[test]
+    fn session_end_floor_and_cap_match_binary() {
+        // claude-code `nzn=1500`, `rym=60000` (BIN off 205765355 / 205765364).
+        assert_eq!(SESSION_END_HOOK_TIMEOUT_FLOOR_MS, 1_500);
+        assert_eq!(SESSION_END_HOOK_TIMEOUT_CAP_MS, 60_000);
+        assert_eq!(
+            SESSION_END_HOOKS_TIMEOUT_ENV,
+            "CLAUDE_CODE_SESSIONEND_HOOKS_TIMEOUT_MS"
+        );
+    }
+}
+
+#[cfg(test)]
+mod session_end_timeout_tests {
+    use super::{max_per_hook_timeout_ms, session_end_batch_timeout_ms};
+    use crate::definition::{HookDefinition, HookExecutor, HookSource};
+    use crate::events::HookEventType;
+    use protocol::HookId;
+    use std::time::Duration;
+
+    fn hook_with_timeout(timeout: Option<Duration>) -> HookDefinition {
+        HookDefinition {
+            id: HookId::new(),
+            name: "test-session-end".into(),
+            events: vec![HookEventType::SessionEnd],
+            if_condition: None,
+            executor: HookExecutor::Builtin {
+                handler_id: "noop".into(),
+            },
+            source: HookSource::User,
+            blocking: true,
+            timeout,
+            priority: 0,
+            once: false,
+            status_message: None,
+        }
+    }
+
+    #[test]
+    fn default_with_no_per_hook_timeouts_collapses_to_floor() {
+        // No env, no per-hook timeout ⇒ max(1500, min(0, 60000)) = 1500.
+        assert_eq!(session_end_batch_timeout_ms(None, 0), 1_500);
+    }
+
+    #[test]
+    fn default_clamps_below_floor_up_to_1500() {
+        // max per-hook = 800ms ⇒ max(1500, min(800, 60000)) = 1500.
+        assert_eq!(session_end_batch_timeout_ms(None, 800), 1_500);
+    }
+
+    #[test]
+    fn default_uses_max_per_hook_when_between_floor_and_cap() {
+        // max per-hook = 30000ms ⇒ max(1500, min(30000, 60000)) = 30000.
+        assert_eq!(session_end_batch_timeout_ms(None, 30_000), 30_000);
+    }
+
+    #[test]
+    fn default_caps_above_60000_down_to_cap() {
+        // max per-hook = 120000ms ⇒ max(1500, min(120000, 60000)) = 60000.
+        assert_eq!(session_end_batch_timeout_ms(None, 120_000), 60_000);
+    }
+
+    #[test]
+    fn env_override_is_used_verbatim_and_unclamped() {
+        // A finite, positive env value is returned EXACTLY (bypasses floor/cap).
+        assert_eq!(session_end_batch_timeout_ms(Some("3000"), 0), 3_000);
+        // Below the floor — still returned verbatim (env override is unclamped).
+        assert_eq!(session_end_batch_timeout_ms(Some("100"), 30_000), 100);
+        // Above the cap — still returned verbatim.
+        assert_eq!(
+            session_end_batch_timeout_ms(Some("999999"), 0),
+            999_999
+        );
+    }
+
+    #[test]
+    fn env_parseint_style_trailing_suffix_is_ignored() {
+        // JS `parseInt("3000abc", 10)` ⇒ 3000.
+        assert_eq!(session_end_batch_timeout_ms(Some("3000abc"), 0), 3_000);
+        assert_eq!(session_end_batch_timeout_ms(Some("  4200 "), 0), 4_200);
+    }
+
+    #[test]
+    fn env_non_numeric_or_nonpositive_falls_through_to_clamp() {
+        // `parseInt("abc")` ⇒ NaN ⇒ computed clamp (here floor).
+        assert_eq!(session_end_batch_timeout_ms(Some("abc"), 0), 1_500);
+        assert_eq!(session_end_batch_timeout_ms(Some(""), 0), 1_500);
+        // Zero / negative are rejected by the `> 0` guard ⇒ computed clamp.
+        assert_eq!(session_end_batch_timeout_ms(Some("0"), 30_000), 30_000);
+        assert_eq!(session_end_batch_timeout_ms(Some("-5"), 45_000), 45_000);
+    }
+
+    #[test]
+    fn max_per_hook_timeout_takes_the_largest_declared() {
+        let hooks = vec![
+            hook_with_timeout(Some(Duration::from_secs(5))),
+            hook_with_timeout(Some(Duration::from_secs(42))),
+            hook_with_timeout(None),
+            hook_with_timeout(Some(Duration::from_secs(3))),
+        ];
+        // max = 42s = 42000ms.
+        assert_eq!(max_per_hook_timeout_ms(&hooks), 42_000);
+        // Feeding that into the clamp ⇒ within [1500, 60000] ⇒ 42000.
+        assert_eq!(
+            session_end_batch_timeout_ms(None, max_per_hook_timeout_ms(&hooks)),
+            42_000
+        );
+    }
+
+    #[test]
+    fn max_per_hook_timeout_empty_or_all_none_is_zero() {
+        assert_eq!(max_per_hook_timeout_ms(&[]), 0);
+        let hooks = vec![hook_with_timeout(None), hook_with_timeout(None)];
+        assert_eq!(max_per_hook_timeout_ms(&hooks), 0);
+    }
+}
+
+/// Integration-style tests that exercise [`HookExecutorImpl::execute_session_end`]
+/// end-to-end: a slow `SessionEnd` hook is cut off by the batch shutdown deadline,
+/// and a fast one completes normally.
+#[cfg(test)]
+mod session_end_batch_deadline_tests {
+    use super::*;
+    use crate::definition::{HookDefinition, HookExecutor as DefHookExecutor, HookSource};
+    use crate::events::{HookEvent, HookEventType};
+    use crate::registry::{HookContext, HookRegistry};
+    use crate::response::{HookOutcome, HookResult};
+    use protocol::HookId;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use traits::RuntimeError;
+
+    /// `HttpTransport` stub — the Builtin arm never touches HTTP.
+    struct UnusedHttp;
+    #[async_trait]
+    impl HttpTransport for UnusedHttp {
+        async fn request(
+            &self,
+            _req: protocol::HttpRequest,
+        ) -> Result<protocol::HttpResponse, traits::HttpError> {
+            Err(traits::HttpError::InvalidRequest("unused".into()))
+        }
+        async fn stream_sse(
+            &self,
+            _req: protocol::HttpRequest,
+        ) -> Result<traits::http::SseStream, traits::HttpError> {
+            Err(traits::HttpError::InvalidRequest("unused".into()))
+        }
+    }
+
+    struct UnusedRuntime;
+    #[async_trait]
+    impl RuntimeSpawner for UnusedRuntime {
+        async fn spawn(
+            &self,
+            _name: &str,
+            _task: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'static>>,
+        ) -> Result<traits::BackgroundTaskHandle, RuntimeError> {
+            Err(RuntimeError::Internal("unused".into()))
+        }
+        async fn sleep(&self, _duration: Duration) {}
+        async fn cancel(&self, _handle: &traits::BackgroundTaskHandle) -> Result<(), RuntimeError> {
+            Ok(())
+        }
+    }
+
+    /// A builtin handler that sleeps `delay`, then flips `ran` and returns
+    /// success. If the batch deadline cuts it off, the sleep is cancelled and
+    /// `ran` stays `false`.
+    struct SleepingHandler {
+        id: String,
+        delay: Duration,
+        ran: Arc<AtomicBool>,
+    }
+    #[async_trait]
+    impl BuiltinHookHandler for SleepingHandler {
+        async fn handle(&self, _event: &HookEvent, _ctx: &HookContext) -> HookResult {
+            tokio::time::sleep(self.delay).await;
+            self.ran.store(true, Ordering::SeqCst);
+            HookResult {
+                outcome: HookOutcome::Success,
+                stdout: String::new(),
+                stderr: String::new(),
+                exit_code: Some(0),
+                response: None,
+            }
+        }
+        fn id(&self) -> &str {
+            &self.id
+        }
+    }
+
+    fn session_end_builtin_hook(handler_id: &str) -> HookDefinition {
+        HookDefinition {
+            id: HookId::new(),
+            name: "test-session-end".into(),
+            events: vec![HookEventType::SessionEnd],
+            if_condition: None,
+            executor: DefHookExecutor::Builtin {
+                handler_id: handler_id.into(),
+            },
+            source: HookSource::User,
+            blocking: true,
+            timeout: None,
+            priority: 0,
+            once: false,
+            status_message: None,
+        }
+    }
+
+    fn session_end_event() -> HookEvent {
+        HookEvent::SessionEnd {
+            session_id: protocol::SessionId::nil(),
+            reason: "logout".into(),
+        }
+    }
+
+    /// Both env-driven deadline behaviors in ONE test (the two halves share the
+    /// process-global `CLAUDE_CODE_SESSIONEND_HOOKS_TIMEOUT_MS`, so they must not
+    /// race in parallel — merging them keeps the env mutation single-threaded):
+    ///
+    /// * a SessionEnd hook running LONGER than the batch deadline is cut off
+    ///   (outcome `Timeout`, side-effect never lands, returns fast); and
+    /// * a hook completing WITHIN the deadline runs to completion (the deadline
+    ///   is a ceiling, not a forced wait).
+    #[tokio::test]
+    async fn batch_deadline_cuts_off_slow_hook_but_not_fast_hook() {
+        let prev = std::env::var(SESSION_END_HOOKS_TIMEOUT_ENV).ok();
+
+        // --- Half 1: tiny deadline (50ms), hook sleeps 5s → cut off. ---
+        std::env::set_var(SESSION_END_HOOKS_TIMEOUT_ENV, "50");
+        let slow_ran = Arc::new(AtomicBool::new(false));
+        let mut registry = HookRegistry::new();
+        registry.register(session_end_builtin_hook("slow"));
+        let reg = Arc::new(RwLock::new(registry));
+        let mut exec = HookExecutorImpl::new(reg, Arc::new(UnusedHttp), Arc::new(UnusedRuntime));
+        exec.register_builtin(Arc::new(SleepingHandler {
+            id: "slow".into(),
+            delay: Duration::from_secs(5),
+            ran: slow_ran.clone(),
+        }));
+        let start = std::time::Instant::now();
+        let slow_agg = exec
+            .execute_session_end(session_end_event(), HookContext::default())
+            .await;
+        let elapsed = start.elapsed();
+
+        // --- Half 2: generous deadline (5000ms), hook sleeps 10ms → completes. ---
+        std::env::set_var(SESSION_END_HOOKS_TIMEOUT_ENV, "5000");
+        let fast_ran = Arc::new(AtomicBool::new(false));
+        let mut registry = HookRegistry::new();
+        registry.register(session_end_builtin_hook("fast"));
+        let reg = Arc::new(RwLock::new(registry));
+        let mut exec = HookExecutorImpl::new(reg, Arc::new(UnusedHttp), Arc::new(UnusedRuntime));
+        exec.register_builtin(Arc::new(SleepingHandler {
+            id: "fast".into(),
+            delay: Duration::from_millis(10),
+            ran: fast_ran.clone(),
+        }));
+        let fast_agg = exec
+            .execute_session_end(session_end_event(), HookContext::default())
+            .await;
+
+        // Restore env before asserting so a panic doesn't leak it.
+        match prev {
+            Some(v) => std::env::set_var(SESSION_END_HOOKS_TIMEOUT_ENV, v),
+            None => std::env::remove_var(SESSION_END_HOOKS_TIMEOUT_ENV),
+        }
+
+        // Half 1 assertions: cut off well before the 5s sleep.
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "batch deadline must abort fast, took {elapsed:?}"
+        );
+        assert!(
+            !slow_ran.load(Ordering::SeqCst),
+            "the slow hook's success side-effect must NOT land — it was aborted"
+        );
+        let (_, slow_r) = &slow_agg.all_results[0];
+        assert!(
+            matches!(slow_r.outcome, HookOutcome::Timeout),
+            "cut-off hook records a Timeout outcome"
+        );
+        assert!(slow_r.stderr.contains("batch deadline"));
+
+        // Half 2 assertions: ran to completion.
+        assert!(
+            fast_ran.load(Ordering::SeqCst),
+            "a hook finishing within the deadline must run to completion"
+        );
+        let (_, fast_r) = &fast_agg.all_results[0];
+        assert!(matches!(fast_r.outcome, HookOutcome::Success));
+    }
+
+    /// No registered SessionEnd hook ⇒ strict no-op (default aggregate), no
+    /// deadline machinery observable.
+    #[tokio::test]
+    async fn no_session_end_hook_is_a_noop() {
+        let reg = Arc::new(RwLock::new(HookRegistry::new()));
+        let exec = HookExecutorImpl::new(reg, Arc::new(UnusedHttp), Arc::new(UnusedRuntime));
+
+        let agg = exec
+            .execute_session_end(session_end_event(), HookContext::default())
+            .await;
+
+        assert!(agg.all_results.is_empty());
+        assert_eq!(agg.decision, None);
     }
 }
 

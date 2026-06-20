@@ -2467,9 +2467,15 @@ impl ConversationOrchestrator {
     pub async fn fire_session_end(&self, reason: &str) {
         let session_id = { self.session.lock().await.session_id };
         let ctx = self.lifecycle_hook_ctx(false).await;
+        // Route through the SessionEnd *batch-deadline* path (claude-code `lje`
+        // → `cH({signal: AbortSignal.timeout(Wqt())})`): the whole SessionEnd
+        // hook batch is capped by a single shutdown budget
+        // (`CLAUDE_CODE_SESSIONEND_HOOKS_TIMEOUT_MS`, else `max(1500,
+        // min(maxPerHookMs, 60000))`), so a slow / hung teardown hook cannot
+        // stall session exit — NOT the generic 10-minute per-hook `execute`.
         let _ = self
             .hooks
-            .execute(
+            .execute_session_end(
                 HookEvent::SessionEnd {
                     session_id,
                     reason: reason.to_string(),

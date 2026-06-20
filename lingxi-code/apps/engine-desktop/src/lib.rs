@@ -3450,7 +3450,13 @@ pub async fn build(
     // tasks each turn (mark-notified + evict ⇒ each completion surfaces once).
     .with_task_notifications(Arc::new(orchestrator::RegistryTaskNotifications::new(
         task_registry.clone() as Arc<dyn traits::task_registry::TaskRegistryHandle>,
-    )));
+    )))
+    // Finding #73: supply the V2 task list to the per-turn `task_reminder`
+    // (the default variant when tasks are enabled). Reads the file-backed
+    // `TodoStore` for the active list each turn, resolving the list id via the
+    // same env/team precedence the `Task*` tools use. V1 (`todo_reminder`)
+    // needs no provider; it reads `session.todos` directly.
+    .with_todo_reminder_tasks(Arc::new(orchestrator::TodoStoreReminderTasks::new()));
 
     // P0.1 ACTIVATION (gated, default OFF). When `CLAUDE_CODE_MEMDIR_PREFETCH`
     // is truthy, wire the memdir-backed memory selector so relevant

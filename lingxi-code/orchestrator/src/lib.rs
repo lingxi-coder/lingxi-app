@@ -38,6 +38,7 @@ pub mod task_created_firer;
 pub mod task_lifecycle_hook_firer;
 pub mod task_notifications_provider;
 pub mod teammate_idle_firer;
+pub mod todo_reminder_tasks_provider;
 pub mod token_budget;
 pub mod turn_loop;
 
@@ -70,6 +71,7 @@ pub use task_created_firer::OrchestratorTaskCreatedFirer;
 pub use task_lifecycle_hook_firer::OrchestratorTaskLifecycleHookFirer;
 pub use task_notifications_provider::RegistryTaskNotifications;
 pub use teammate_idle_firer::OrchestratorTeammateIdleFirer;
+pub use todo_reminder_tasks_provider::TodoStoreReminderTasks;
 pub use prompt::{
     assemble_system_prompt, FileTree, FileTreeEntry, GitStatus, MemoryFile, SystemPromptContext,
 };

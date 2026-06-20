@@ -678,6 +678,14 @@ pub struct ConversationOrchestrator {
     /// root from the `TaskRegistry`.
     pub(crate) task_notifications:
         Option<Arc<dyn crate::prompt::task_notification::TaskNotificationProvider>>,
+    /// Finding #73: source of the V2 task list for the per-turn `task_reminder`
+    /// (the binary's `B4p` reading `p9(KF())`). `None` ⇒ the V2 reminder renders
+    /// with its base text only (no items appended), matching an empty store.
+    /// The V1 (`todo_reminder`) path needs no provider — it reads
+    /// `session.todos` directly. Wired at the desktop composition root from the
+    /// `tool_task::todo_store::TodoStore`.
+    pub(crate) todo_reminder_tasks:
+        Option<Arc<dyn crate::prompt::todo_reminder::TodoReminderTaskProvider>>,
     /// §F: cache of the CONDITIONAL (`paths:`-gated) memory rules, populated the
     /// first time [`Self::conditional_rules_reminder_message`] runs (a `OnceCell`
     /// fill via the same `memory.load(&cwd)` the system prompt uses, then
@@ -818,6 +826,7 @@ impl ConversationOrchestrator {
             skill_listing: None,
             async_hook_responses: None,
             task_notifications: None,
+            todo_reminder_tasks: None,
             conditional_rules_cache: tokio::sync::OnceCell::new(),
             sent_conditional_rules: Mutex::new(std::collections::HashSet::new()),
             sent_skill_names: Mutex::new(std::collections::HashSet::new()),
@@ -1022,6 +1031,20 @@ impl ConversationOrchestrator {
         provider: Arc<dyn crate::prompt::task_notification::TaskNotificationProvider>,
     ) -> Self {
         self.task_notifications = Some(provider);
+        self
+    }
+
+    /// Finding #73: wire the V2 task source consulted by the per-turn
+    /// `task_reminder` ([`Self::todo_reminder_message`], the binary's `B4p`).
+    /// Without it the V2 reminder still fires when its counters/gates are met,
+    /// but renders with no task items (base text only). The V1 (`todo_reminder`)
+    /// path reads `session.todos` directly and needs no provider.
+    #[must_use]
+    pub fn with_todo_reminder_tasks(
+        mut self,
+        provider: Arc<dyn crate::prompt::todo_reminder::TodoReminderTaskProvider>,
+    ) -> Self {
+        self.todo_reminder_tasks = Some(provider);
         self
     }
 
@@ -3334,6 +3357,21 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                 snapshot.push(reminder);
             }
 
+            // Finding #73 (streaming twin): per-turn, transient `todo_reminder`
+            // (V1) / `task_reminder` (V2) reminder. Same gates as the batched
+            // twin (killswitch / tool-present / Brief-absent / non-empty history
+            // / both counters at threshold). Body emitted RAW (no
+            // `<system-reminder>` wrap, matching `Ln({content:r,isMeta:!0})`).
+            // Placed after the agent-listing reminder and before the async-hook
+            // reminder, mirroring the binary `ytl` order (`todo_reminders` in the
+            // core `A` array, before the main-only `async_hook_responses`).
+            // Appended to THIS turn's OUTGOING snapshot only (never
+            // `session.history` / JSONL). `None` keeps the locked streaming
+            // fixtures byte-identical. See [`Self::todo_reminder_message`].
+            if let Some(reminder) = self.todo_reminder_message().await {
+                snapshot.push(reminder);
+            }
+
             // async_hook_response (streaming twin): fold completed background
             // (`async`) hook responses into THIS turn's OUTGOING snapshot only
             // (never `session.history` / JSONL), drained consume-once. `None`
@@ -3645,6 +3683,18 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                 let mut s = self.session.lock().await;
                 s.history.push(assistant_msg.clone());
             }
+
+            // Finding #73 (streaming twin): advance the per-turn todo/task
+            // reminder counters for THIS assistant turn, then reset
+            // `turns_since_last_todo_write` if this turn invoked the variant's
+            // "recent use" tool (TodoWrite / TaskCreate / TaskUpdate). Bump THEN
+            // reset so a TodoWrite turn lands at 0 (matching the binary scan that
+            // excludes the TodoWrite message itself). Mirrors the batched twin.
+            self.bump_reminder_turn_counters().await;
+            let invoked_tool_names: Vec<String> =
+                pumped.tool_uses.iter().map(|t| t.name.clone()).collect();
+            self.note_todo_reminder_tool_call(&invoked_tool_names).await;
+
             // DEFERRED-3: advance the interrupt-guard's reported final id to this
             // turn's assistant message.
             last_message_id = assistant_id;
@@ -4469,6 +4519,131 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         let notifications = provider.take_pending_task_notifications().await;
         let content = crate::prompt::task_notification::render_reminder(&notifications)?;
         Some(ConversationMessage::user(MessageId::new(), content))
+    }
+
+    /// Finding #73: the per-turn `todo_reminder` (V1) / `task_reminder` (V2)
+    /// meta user message, or `None` when not eligible this turn.
+    ///
+    /// 1:1 with the binary's producer `()=>TE()?B4p(o,t):M4p(o,t)` (`ytl`,
+    /// offset ~203087213). [`tool_task::reminder::select_mode`] picks V1 vs V2
+    /// (`TE()`). For the selected variant this mirrors the `M4p`/`B4p` gates:
+    /// 1. killswitch `wgo()!=="off"`;
+    /// 2. the `Brief` tool (`rjn`/`SendUserMessage`) is ABSENT (present ⇒ skip);
+    /// 3. the relevant tool is PRESENT this turn — `TodoWrite` (V1) /
+    ///    `TaskUpdate` (V2);
+    /// 4. the history is non-empty (`!e||e.length===0 ⇒ []`);
+    /// 5. BOTH counters reach their thresholds (`turns_since_last_todo_write >=
+    ///    TURNS_SINCE_WRITE && turns_since_last_reminder >= TURNS_BETWEEN_REMINDERS`).
+    ///
+    /// On fire it renders the RAW body (no `<system-reminder>` wrapper —
+    /// `Ln({content:r,isMeta:!0})`) and RESETS `turns_since_last_reminder` to
+    /// `0`. V1 reads `session.todos`; V2 reads the wired
+    /// [`crate::prompt::todo_reminder::TodoReminderTaskProvider`] (no provider ⇒
+    /// base text only, an empty store). Appended ONLY to the per-turn OUTGOING
+    /// snapshot (never `session.history` / JSONL) so it never accumulates.
+    ///
+    /// COUNTER NOTE: the binary recomputes the counters by scanning the message
+    /// log for the last `TodoWrite`/`Task` tool_use and the last reminder
+    /// ATTACHMENT. This engine never persists the reminder attachment, so the
+    /// counters are tracked as explicit `SessionState` fields, incremented once
+    /// per assistant turn (`bump_reminder_turn_counters`) and reset on the
+    /// relevant tool call (`note_todo_reminder_tool_call`).
+    pub(crate) async fn todo_reminder_message(&self) -> Option<ConversationMessage> {
+        // (1) killswitch.
+        if tool_task::reminder::is_killswitched() {
+            return None;
+        }
+        // (2) Brief (`SendUserMessage`/`Brief`) present ⇒ skip (both variants).
+        if self.tools.find_by_name("SendUserMessage").is_some() {
+            return None;
+        }
+
+        let mode = tool_task::reminder::select_mode();
+
+        // (3) tool-presence gate + (4) non-empty history + (5) counters, all
+        // read under one session lock so the snapshot is consistent. We reset
+        // `turns_since_last_reminder` here (inside the lock) iff we fire.
+        let mut s = self.session.lock().await;
+
+        // (4) empty history ⇒ no reminder.
+        if s.history.is_empty() {
+            return None;
+        }
+        // (5) both thresholds.
+        if s.turns_since_last_todo_write < tool_task::reminder::TURNS_SINCE_WRITE
+            || s.turns_since_last_reminder < tool_task::reminder::TURNS_BETWEEN_REMINDERS
+        {
+            return None;
+        }
+
+        match mode {
+            tool_task::reminder::ReminderMode::V1Todo => {
+                // (3) TodoWrite must be present this turn.
+                if self.tools.find_by_name("TodoWrite").is_none() {
+                    return None;
+                }
+                let items: Vec<(engine::TodoState, String)> = s
+                    .todos
+                    .iter()
+                    .map(|t| (t.status, t.content.clone()))
+                    .collect();
+                s.turns_since_last_reminder = 0;
+                drop(s);
+                let content = tool_task::reminder::render_v1(&items);
+                Some(ConversationMessage::user(MessageId::new(), content))
+            }
+            tool_task::reminder::ReminderMode::V2Task => {
+                // (3) TaskUpdate must be present this turn.
+                if self.tools.find_by_name("TaskUpdate").is_none() {
+                    return None;
+                }
+                s.turns_since_last_reminder = 0;
+                drop(s);
+                // Read the V2 task store outside the session lock.
+                let items: Vec<(String, engine::TodoState, String)> = match &self.todo_reminder_tasks
+                {
+                    Some(provider) => provider
+                        .task_items()
+                        .await
+                        .into_iter()
+                        .map(|t| (t.id, t.status, t.subject))
+                        .collect(),
+                    None => Vec::new(),
+                };
+                let content = tool_task::reminder::render_v2(&items);
+                Some(ConversationMessage::user(MessageId::new(), content))
+            }
+        }
+    }
+
+    /// Finding #73: increment BOTH reminder counters by one assistant turn.
+    /// Called once per assistant turn (after the API response is processed) on
+    /// both the batched and streaming paths, mirroring the binary's per-
+    /// assistant-message counting in `L4p`/`N4p`.
+    pub(crate) async fn bump_reminder_turn_counters(&self) {
+        let mut s = self.session.lock().await;
+        s.turns_since_last_todo_write = s.turns_since_last_todo_write.saturating_add(1);
+        s.turns_since_last_reminder = s.turns_since_last_reminder.saturating_add(1);
+    }
+
+    /// Finding #73: reset `turns_since_last_todo_write` to `0` when this turn's
+    /// assistant response invoked the variant's "recent use" tool — `TodoWrite`
+    /// (V1) or `TaskCreate`/`TaskUpdate` (V2). Mirrors `L4p`/`N4p` finding the
+    /// last such tool_use in the message log (which zeroes their `r` counter).
+    /// `tool_names` is the set of tool names invoked in the assistant turn.
+    pub(crate) async fn note_todo_reminder_tool_call(&self, tool_names: &[String]) {
+        let resets = match tool_task::reminder::select_mode() {
+            tool_task::reminder::ReminderMode::V1Todo => {
+                tool_names.iter().any(|n| n == "TodoWrite")
+            }
+            tool_task::reminder::ReminderMode::V2Task => tool_names
+                .iter()
+                .any(|n| n == "TaskCreate" || n == "TaskUpdate"),
+        };
+        if resets {
+            let mut s = self.session.lock().await;
+            s.turns_since_last_todo_write = 0;
+        }
     }
 
     /// The per-turn, transient `agent_listing_delta` reminder, or `None` when
@@ -7926,5 +8101,386 @@ mod pumped_visible_text_tests {
     #[test]
     fn thinking_plus_real_text_is_visible() {
         assert!(pumped_has_visible_text(&[thinking("reasoning"), text("answer")]));
+    }
+}
+
+// ============================================================================
+// Finding #73: per-turn `todo_reminder` (V1) / `task_reminder` (V2).
+//
+// Proves [`ConversationOrchestrator::todo_reminder_message`] +
+// [`ConversationOrchestrator::bump_reminder_turn_counters`] +
+// [`ConversationOrchestrator::note_todo_reminder_tool_call`]:
+// - counters increment once per turn and reset on the relevant tool call;
+// - the reminder fires only when BOTH counters reach the thresholds, the
+//   relevant tool is present, the Brief tool is absent, history is non-empty,
+//   and the killswitch is not "off";
+// - the body is byte-exact (V1 with/without items; V2 with items) and emitted
+//   RAW (no `<system-reminder>` wrapper).
+// The byte-level renderer is additionally covered in `tool_task::reminder::tests`.
+// ============================================================================
+#[cfg(test)]
+mod todo_reminder_tests {
+    use super::*;
+    use crate::prompt::todo_reminder::{TaskReminderItem, TodoReminderTaskProvider};
+    use crate::test_support::{
+        noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate,
+        StaticMemoryProvider,
+    };
+    use crate::OrchestratorConfig;
+    use engine::{TodoItem, TodoState};
+    use std::sync::Arc;
+    use tool_api::context::ToolUseContext;
+    use tool_api::progress::ToolProgressSender;
+    use tool_api::registry::ToolRegistry;
+    use tool_api::tool_trait::{
+        DescriptionOptions, PromptOptions, Tool, ToolCallResult, ToolError, ToolStaticContext,
+        ValidationError,
+    };
+
+    /// `std::env::set_var`/`remove_var` are not thread-safe; serialize the
+    /// env-mutating tests (selection + killswitch) behind this lock.
+    static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    /// Minimal name-only tool for the tool-presence gates.
+    struct NamedTool(&'static str);
+    #[async_trait]
+    impl Tool for NamedTool {
+        fn name(&self) -> &str {
+            self.0
+        }
+        fn input_schema(&self) -> &serde_json::Value {
+            static SCHEMA: once_cell::sync::Lazy<serde_json::Value> = once_cell::sync::Lazy::new(
+                || serde_json::json!({ "type": "object", "properties": {} }),
+            );
+            &SCHEMA
+        }
+        fn is_enabled(&self, _ctx: &ToolStaticContext) -> bool {
+            true
+        }
+        fn max_result_size_chars(&self) -> usize {
+            1024
+        }
+        fn is_concurrency_safe(&self, _input: &serde_json::Value) -> bool {
+            true
+        }
+        fn is_read_only(&self, _input: &serde_json::Value) -> bool {
+            true
+        }
+        async fn validate_input(
+            &self,
+            _input: &serde_json::Value,
+            _ctx: &ToolUseContext,
+        ) -> Result<(), ValidationError> {
+            Ok(())
+        }
+        async fn check_permissions(
+            &self,
+            _input: &serde_json::Value,
+            _ctx: &ToolUseContext,
+        ) -> permission::PermissionResult {
+            permission::PermissionResult::Allow {
+                reason: permission::PermissionDecisionReason::Other { reason: "t".into() },
+                updated_input: None,
+                update_destination: None,
+                metadata: permission::result::PermissionMetadata::default(),
+            }
+        }
+        async fn description(
+            &self,
+            _input: &serde_json::Value,
+            _opts: &DescriptionOptions,
+        ) -> String {
+            String::new()
+        }
+        async fn prompt(&self, _opts: &PromptOptions) -> String {
+            String::new()
+        }
+        async fn call(
+            &self,
+            _input: serde_json::Value,
+            _ctx: ToolUseContext,
+            _tx: ToolProgressSender,
+        ) -> Result<ToolCallResult, ToolError> {
+            Ok(ToolCallResult {
+                data: serde_json::json!({}),
+                new_messages: vec![],
+                context_modifier: None,
+                mcp_meta: None,
+            })
+        }
+    }
+
+    /// Static V2 task source.
+    struct StaticTasks(Vec<TaskReminderItem>);
+    #[async_trait]
+    impl TodoReminderTaskProvider for StaticTasks {
+        async fn task_items(&self) -> Vec<TaskReminderItem> {
+            self.0.clone()
+        }
+    }
+
+    fn orch_with(tools: ToolRegistry) -> ConversationOrchestrator {
+        let api = Arc::new(MockApiClient::new(vec![]));
+        ConversationOrchestrator::new(
+            OrchestratorConfig::default(),
+            api,
+            Arc::new(tools),
+            noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            std::env::temp_dir(),
+        )
+    }
+
+    fn reg_with(names: &[&'static str]) -> ToolRegistry {
+        let mut reg = ToolRegistry::new();
+        for n in names {
+            reg.register_builtin(Arc::new(NamedTool(n)));
+        }
+        reg
+    }
+
+    /// Make the session non-empty (the binary `!e||e.length===0 ⇒ []` gate) and
+    /// optionally arm both counters at their thresholds.
+    async fn prime_session(orch: &ConversationOrchestrator, write_c: u32, reminder_c: u32) {
+        let mut s = orch.session.lock().await;
+        s.history.push(ConversationMessage::user(
+            MessageId::new(),
+            "hi".to_string(),
+        ));
+        s.turns_since_last_todo_write = write_c;
+        s.turns_since_last_reminder = reminder_c;
+    }
+
+    // ── counters ────────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn bump_increments_both_counters_each_turn() {
+        let orch = orch_with(reg_with(&["TodoWrite"]));
+        orch.bump_reminder_turn_counters().await;
+        orch.bump_reminder_turn_counters().await;
+        let s = orch.session.lock().await;
+        assert_eq!(s.turns_since_last_todo_write, 2);
+        assert_eq!(s.turns_since_last_reminder, 2);
+    }
+
+    #[tokio::test]
+    async fn note_tool_call_resets_write_counter_on_todowrite_v1() {
+        let _g = ENV_LOCK.lock().await;
+        std::env::set_var("CLAUDE_CODE_ENABLE_TASKS", "off"); // ⇒ V1 selected
+        let orch = orch_with(reg_with(&["TodoWrite"]));
+        {
+            let mut s = orch.session.lock().await;
+            s.turns_since_last_todo_write = 7;
+            s.turns_since_last_reminder = 7;
+        }
+        orch.note_todo_reminder_tool_call(&["TodoWrite".to_string()])
+            .await;
+        {
+            let s = orch.session.lock().await;
+            assert_eq!(s.turns_since_last_todo_write, 0, "TodoWrite resets write ctr");
+            assert_eq!(s.turns_since_last_reminder, 7, "reminder ctr untouched");
+        }
+        // A non-qualifying tool (Read) does NOT reset.
+        {
+            let mut s = orch.session.lock().await;
+            s.turns_since_last_todo_write = 5;
+        }
+        orch.note_todo_reminder_tool_call(&["Read".to_string()]).await;
+        assert_eq!(orch.session.lock().await.turns_since_last_todo_write, 5);
+        std::env::remove_var("CLAUDE_CODE_ENABLE_TASKS");
+    }
+
+    #[tokio::test]
+    async fn note_tool_call_resets_on_taskupdate_v2_default() {
+        let _g = ENV_LOCK.lock().await;
+        std::env::remove_var("CLAUDE_CODE_ENABLE_TASKS"); // default ⇒ V2
+        let orch = orch_with(reg_with(&["TaskUpdate"]));
+        {
+            let mut s = orch.session.lock().await;
+            s.turns_since_last_todo_write = 9;
+        }
+        // V2 resets on TaskCreate or TaskUpdate, NOT on TodoWrite.
+        orch.note_todo_reminder_tool_call(&["TodoWrite".to_string()])
+            .await;
+        assert_eq!(
+            orch.session.lock().await.turns_since_last_todo_write,
+            9,
+            "V2 mode does not reset on TodoWrite"
+        );
+        orch.note_todo_reminder_tool_call(&["TaskUpdate".to_string()])
+            .await;
+        assert_eq!(orch.session.lock().await.turns_since_last_todo_write, 0);
+    }
+
+    // ── firing gates ──────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn no_fire_below_threshold() {
+        let _g = ENV_LOCK.lock().await;
+        std::env::remove_var("CLAUDE_CODE_TODO_REMINDER_MODE");
+        std::env::set_var("CLAUDE_CODE_ENABLE_TASKS", "off"); // V1
+        let orch = orch_with(reg_with(&["TodoWrite"]));
+        prime_session(&orch, 9, 10).await; // write ctr one short
+        assert!(orch.todo_reminder_message().await.is_none());
+        // Now both at threshold ⇒ fires.
+        {
+            let mut s = orch.session.lock().await;
+            s.turns_since_last_todo_write = 10;
+        }
+        assert!(orch.todo_reminder_message().await.is_some());
+        std::env::remove_var("CLAUDE_CODE_ENABLE_TASKS");
+    }
+
+    #[tokio::test]
+    async fn no_fire_when_history_empty() {
+        let _g = ENV_LOCK.lock().await;
+        std::env::set_var("CLAUDE_CODE_ENABLE_TASKS", "off");
+        let orch = orch_with(reg_with(&["TodoWrite"]));
+        // counters armed but NO history.
+        {
+            let mut s = orch.session.lock().await;
+            s.turns_since_last_todo_write = 10;
+            s.turns_since_last_reminder = 10;
+        }
+        assert!(
+            orch.todo_reminder_message().await.is_none(),
+            "empty history suppresses the reminder"
+        );
+        std::env::remove_var("CLAUDE_CODE_ENABLE_TASKS");
+    }
+
+    #[tokio::test]
+    async fn no_fire_when_tool_absent() {
+        let _g = ENV_LOCK.lock().await;
+        std::env::set_var("CLAUDE_CODE_ENABLE_TASKS", "off"); // V1 needs TodoWrite
+        let orch = orch_with(reg_with(&["Read"])); // no TodoWrite
+        prime_session(&orch, 10, 10).await;
+        assert!(orch.todo_reminder_message().await.is_none());
+        std::env::remove_var("CLAUDE_CODE_ENABLE_TASKS");
+    }
+
+    #[tokio::test]
+    async fn no_fire_when_brief_present() {
+        let _g = ENV_LOCK.lock().await;
+        std::env::set_var("CLAUDE_CODE_ENABLE_TASKS", "off");
+        // TodoWrite present AND Brief (SendUserMessage) present ⇒ skip.
+        let orch = orch_with(reg_with(&["TodoWrite", "SendUserMessage"]));
+        prime_session(&orch, 10, 10).await;
+        assert!(orch.todo_reminder_message().await.is_none());
+        std::env::remove_var("CLAUDE_CODE_ENABLE_TASKS");
+    }
+
+    #[tokio::test]
+    async fn killswitch_off_suppresses() {
+        let _g = ENV_LOCK.lock().await;
+        std::env::set_var("CLAUDE_CODE_ENABLE_TASKS", "off");
+        std::env::set_var("CLAUDE_CODE_TODO_REMINDER_MODE", "off");
+        let orch = orch_with(reg_with(&["TodoWrite"]));
+        prime_session(&orch, 10, 10).await;
+        assert!(
+            orch.todo_reminder_message().await.is_none(),
+            "killswitch \"off\" suppresses the reminder"
+        );
+        std::env::remove_var("CLAUDE_CODE_TODO_REMINDER_MODE");
+        std::env::remove_var("CLAUDE_CODE_ENABLE_TASKS");
+    }
+
+    // ── exact text + reminder-counter reset on fire ──────────────────────────
+
+    #[tokio::test]
+    async fn v1_fires_with_exact_text_no_items_and_resets_reminder_ctr() {
+        let _g = ENV_LOCK.lock().await;
+        std::env::remove_var("CLAUDE_CODE_TODO_REMINDER_MODE");
+        std::env::set_var("CLAUDE_CODE_ENABLE_TASKS", "off"); // V1
+        let orch = orch_with(reg_with(&["TodoWrite"]));
+        prime_session(&orch, 10, 10).await;
+        let msg = orch.todo_reminder_message().await.expect("fires");
+        // RAW body — NOT wrapped in <system-reminder>.
+        assert_eq!(
+            msg.text_content(),
+            "The TodoWrite tool hasn't been used recently. If you're working on tasks that would benefit from tracking progress, consider using the TodoWrite tool to track progress. Also consider cleaning up the todo list if has become stale and no longer matches what you are working on. Only use it if it's relevant to the current work. This is just a gentle reminder - ignore if not applicable.\n"
+        );
+        // The reminder counter reset to 0 on fire.
+        assert_eq!(orch.session.lock().await.turns_since_last_reminder, 0);
+        std::env::remove_var("CLAUDE_CODE_ENABLE_TASKS");
+    }
+
+    #[tokio::test]
+    async fn v1_fires_with_items_byte_exact() {
+        let _g = ENV_LOCK.lock().await;
+        std::env::remove_var("CLAUDE_CODE_TODO_REMINDER_MODE");
+        std::env::set_var("CLAUDE_CODE_ENABLE_TASKS", "off"); // V1
+        let orch = orch_with(reg_with(&["TodoWrite"]));
+        prime_session(&orch, 10, 10).await;
+        {
+            let mut s = orch.session.lock().await;
+            s.todos.push(TodoItem {
+                id: "t1".into(),
+                content: "first".into(),
+                status: TodoState::Pending,
+                active_form: "Doing first".into(),
+            });
+            s.todos.push(TodoItem {
+                id: "t2".into(),
+                content: "second".into(),
+                status: TodoState::InProgress,
+                active_form: "Doing second".into(),
+            });
+        }
+        let msg = orch.todo_reminder_message().await.expect("fires");
+        assert!(msg.text_content().ends_with(
+            "\n\nHere are the existing contents of your todo list:\n\n[1. [pending] first\n2. [in_progress] second]"
+        ), "got: {:?}", msg.text_content());
+        std::env::remove_var("CLAUDE_CODE_ENABLE_TASKS");
+    }
+
+    #[tokio::test]
+    async fn v2_fires_with_items_from_provider_byte_exact() {
+        let _g = ENV_LOCK.lock().await;
+        std::env::remove_var("CLAUDE_CODE_TODO_REMINDER_MODE");
+        std::env::remove_var("CLAUDE_CODE_ENABLE_TASKS"); // default ⇒ V2
+        let orch = orch_with(reg_with(&["TaskUpdate"])).with_todo_reminder_tasks(Arc::new(
+            StaticTasks(vec![
+                TaskReminderItem {
+                    id: "1".into(),
+                    status: TodoState::Completed,
+                    subject: "alpha".into(),
+                },
+                TaskReminderItem {
+                    id: "2".into(),
+                    status: TodoState::Pending,
+                    subject: "beta".into(),
+                },
+            ]),
+        ));
+        prime_session(&orch, 10, 10).await;
+        let msg = orch.todo_reminder_message().await.expect("fires");
+        let text = msg.text_content();
+        assert!(
+            text.starts_with("The task tools haven't been used recently."),
+            "got: {text}"
+        );
+        assert!(
+            text.ends_with("\n\nHere are the existing tasks:\n\n#1. [completed] alpha\n#2. [pending] beta"),
+            "got: {text:?}"
+        );
+        std::env::remove_var("CLAUDE_CODE_ENABLE_TASKS");
+    }
+
+    #[tokio::test]
+    async fn v2_fires_base_only_without_provider() {
+        let _g = ENV_LOCK.lock().await;
+        std::env::remove_var("CLAUDE_CODE_TODO_REMINDER_MODE");
+        std::env::remove_var("CLAUDE_CODE_ENABLE_TASKS"); // V2
+        let orch = orch_with(reg_with(&["TaskUpdate"])); // no task provider
+        prime_session(&orch, 10, 10).await;
+        let msg = orch.todo_reminder_message().await.expect("fires");
+        assert_eq!(
+            msg.text_content(),
+            "The task tools haven't been used recently. If you're working on tasks that would benefit from tracking progress, consider using TaskCreate to add new tasks and TaskUpdate to update task status (set to in_progress when starting, completed when done). Also consider cleaning up the task list if it has become stale. Only use these if relevant to the current work. This is just a gentle reminder - ignore if not applicable.\n"
+        );
+        std::env::remove_var("CLAUDE_CODE_ENABLE_TASKS");
     }
 }

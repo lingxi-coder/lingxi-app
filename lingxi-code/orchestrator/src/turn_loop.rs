@@ -451,6 +451,23 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
         history_snapshot.push(reminder);
     }
 
+    // Finding #73 (batched twin): per-turn, transient `todo_reminder` (V1) /
+    // `task_reminder` (V2) reminder, emitted ONLY when the killswitch is not
+    // `"off"`, the relevant tool is present (TodoWrite / TaskUpdate), the Brief
+    // tool is absent, the history is non-empty, and BOTH counters
+    // (`turns_since_last_todo_write` / `turns_since_last_reminder`) reach their
+    // thresholds (10/10). The body is emitted RAW (no `<system-reminder>` wrap,
+    // matching the binary's `Ln({content:r,isMeta:!0})`). Placed after the
+    // agent-listing reminder and before the async-hook reminder, mirroring the
+    // binary's `ytl` order (`todo_reminders` in the core `A` array, before the
+    // main-only `async_hook_responses`). Appended to THIS call's OUTGOING
+    // snapshot only (never `session.history` / JSONL). `None` keeps the locked
+    // turn-loop fixtures byte-identical (default: counters start at 0). See
+    // [`ConversationOrchestrator::todo_reminder_message`].
+    if let Some(reminder) = orch.todo_reminder_message().await {
+        history_snapshot.push(reminder);
+    }
+
     // async_hook_response (batched twin): fold completed background (`async`)
     // hook responses into THIS call's OUTGOING snapshot only (never
     // `session.history` / JSONL), drained consume-once. `None` when no source is
@@ -686,6 +703,20 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
         // (session.model untouched → byte-identical turn-loop fixtures).
         apply_model_context_modifiers(orch, context_modifiers).await;
     }
+
+    // Finding #73 (batched twin): advance the per-turn todo/task reminder
+    // counters for THIS assistant turn, then reset `turns_since_last_todo_write`
+    // to 0 if this turn's assistant response invoked the variant's "recent use"
+    // tool (TodoWrite for V1; TaskCreate/TaskUpdate for V2). Mirrors the
+    // binary's per-assistant-message counting in `L4p`/`N4p` (which zero `r` at
+    // the last such tool_use). Order — bump THEN reset — so a turn that calls
+    // TodoWrite lands at 0 (not 1), matching the binary scan that excludes the
+    // TodoWrite message itself. No-op for the locked fixtures (a single-turn
+    // run never reaches the threshold).
+    orch.bump_reminder_turn_counters().await;
+    let invoked_tool_names: Vec<String> =
+        tool_uses.iter().map(|(_, name, _, _)| name.clone()).collect();
+    orch.note_todo_reminder_tool_call(&invoked_tool_names).await;
 
     // 6. Decide loop disposition.
     let outcome = if hook_prevent_continuation {

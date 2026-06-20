@@ -80,6 +80,23 @@ pub struct SessionState {
     /// `ExitPlanModeTool`. Defaults to `false` on deserialize.
     #[serde(default)]
     pub plan_mode: bool,
+    /// Finding #73 — assistant turns since the last `TodoWrite` (V1) /
+    /// `TaskCreate`|`TaskUpdate` (V2) tool call. The per-turn todo-reminder
+    /// (`L4p`/`N4p` `turnsSinceLastTodoWrite`/`turnsSinceLastTaskManagement`)
+    /// fires only once this reaches `reminder::TURNS_SINCE_WRITE` (`10`). Reset
+    /// to `0` whenever a qualifying tool call is observed in a turn's assistant
+    /// response; incremented once per assistant turn. The binary recomputes
+    /// this by scanning the message log; this engine never persists the
+    /// reminder attachment to history, so it is tracked here as explicit
+    /// session state. Defaults to `0` on deserialize (pre-#73 sessions).
+    #[serde(default)]
+    pub turns_since_last_todo_write: u32,
+    /// Finding #73 — assistant turns since the last todo/task reminder fired
+    /// (`turnsSinceLastReminder`). The reminder fires only once this reaches
+    /// `reminder::TURNS_BETWEEN_REMINDERS` (`10`), then resets to `0`.
+    /// Incremented once per assistant turn. Defaults to `0` on deserialize.
+    #[serde(default)]
+    pub turns_since_last_reminder: u32,
     /// In-memory association of each tool-injected conversation message
     /// (`MessageId`) to the `tool_use_id` of the tool that injected it
     /// (the Skill tool's OWN `tool_use` block id). Faithful port of TS
@@ -107,6 +124,8 @@ impl SessionState {
             model_profile: None,
             todos: Vec::new(),
             plan_mode: false,
+            turns_since_last_todo_write: 0,
+            turns_since_last_reminder: 0,
             injected_message_sources: HashMap::new(),
         }
     }

@@ -11,6 +11,11 @@ engine = { path = "../engine" }
 traits = { path = "../traits" }
 llm-client = { path = "../llm-client" }
 tool-api = { path = "../tool-api" }
+# Finding #73: the byte-locked todo/task reminder text consts + renderers live
+# in `tool_task::reminder` (alongside the TodoWrite/Task tools they describe).
+# No cycle: `tool-task` depends only on the shared lower tier
+# (engine/tool-api/traits/protocol/permission/telemetry), never on orchestrator.
+tool-task = { path = "../tools/task" }
 memory = { path = "../memory" }
 migrations = { path = "../migrations" }
 permission = { path = "../permission" }

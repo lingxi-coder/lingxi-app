@@ -19,6 +19,7 @@
     clippy::manual_let_else
 )]
 
+pub mod reminder;
 pub mod task;
 pub mod todo_store;
 pub mod todo_write;

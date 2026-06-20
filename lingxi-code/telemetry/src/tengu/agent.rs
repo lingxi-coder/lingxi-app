@@ -112,6 +112,19 @@ pub const CACHE_EVICTION_HINT: &str = "tengu_cache_eviction_hint";
 /// when the `TRANSCRIPT_CLASSIFIER` feature is ON (OFF by default in Rust).
 pub const AUTO_MODE_DECISION: &str = "tengu_auto_mode_decision";
 
+/// `tengu_auto_mode_denial_limit_exceeded` — the auto-mode classifier denial
+/// **circuit breaker** tripped (claude `dSm`, binary v2.1.183 offset ~205930031).
+/// Fired by [`permission::denial_tracking::DenialTrackingState::trip`] when the
+/// consecutive (`>=3`) or total (`>=20`) classifier-denial limit is crossed.
+/// Fields: `limit` (`"total"`|`"consecutive"`), `mode` (`"headless"`|`"cli"`,
+/// from `shouldAvoidPermissionPrompts`), `messageID`, `consecutiveDenials`,
+/// `totalDenials`, `toolName`. Like [`AUTO_MODE_DECISION`] this belongs to the
+/// auto-mode/classifier flow and is deliberately NOT in the count-locked
+/// [`NAMES`] / `ALL_EVENT_NAMES` registry fixture (a snapshot of an OLDER claude
+/// event set). It is also kept OUT of [`AGENT_TOOL_NAMES`] (string-locked to the
+/// 5 AgentTool-flow events); its name is byte-locked by its own test.
+pub const AUTO_MODE_DENIAL_LIMIT_EXCEEDED: &str = "tengu_auto_mode_denial_limit_exceeded";
+
 /// The 5 claude-named `AgentTool` flow events (see the consts above). Kept
 /// SEPARATE from [`NAMES`] so the byte-for-byte `ALL_EVENT_NAMES` registry
 /// fixture (an older-claude snapshot) stays locked. Used by string-lock tests.
@@ -561,6 +574,16 @@ mod agent_tool_event_name_tests {
         assert_eq!(TOOL_TERMINATED, "tengu_agent_tool_terminated");
         assert_eq!(CACHE_EVICTION_HINT, "tengu_cache_eviction_hint");
         assert_eq!(AUTO_MODE_DECISION, "tengu_auto_mode_decision");
+    }
+
+    /// String-lock the auto-mode classifier denial circuit-breaker event name
+    /// (finding #81) — byte-for-byte vs claude-code `dSm` (`j(...)` emit).
+    #[test]
+    fn auto_mode_denial_limit_event_name_is_locked() {
+        assert_eq!(
+            AUTO_MODE_DENIAL_LIMIT_EXCEEDED,
+            "tengu_auto_mode_denial_limit_exceeded"
+        );
     }
 
     #[test]

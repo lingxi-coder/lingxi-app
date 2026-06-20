@@ -36,6 +36,11 @@ pub struct SubagentInvocationContext {
     /// so `getTaskListId()` resolves an in-process teammate to the leader's
     /// on-disk task directory. `None` for the main thread / standalone session.
     pub team_name: Option<String>,
+    /// Whether the dispatching subagent runs ASYNC (backgrounded). claude-code's
+    /// `runAgent` sets the child tools' `isNonInteractiveSession: true` for an
+    /// async agent (else it inherits the parent's flag, default `false`) —
+    /// `runAgent.ts:668-672`. Mapped into `ToolUseContext.is_non_interactive_session`.
+    pub is_async: bool,
 }
 
 /// Failure modes for [`ToolInvoker::invoke`].

@@ -91,7 +91,11 @@ impl ToolInvoker for RegistryToolInvoker {
                 main_loop_model: "subagent".into(),
                 max_budget_nano_usd: None,
                 mcp_clients: vec![],
-                is_non_interactive_session: false,
+                // claude-code `runAgent` (runAgent.ts:668-672): an ASYNC
+                // (backgrounded) subagent runs its tools with
+                // isNonInteractiveSession=true; a sync subagent inherits the
+                // parent (default false). `is_async` is the available signal.
+                is_non_interactive_session: ctx.is_async,
                 custom_system_prompt: None,
                 append_system_prompt: None,
             },
@@ -460,6 +464,7 @@ mod tests {
                     parent_agent_id: None,
                     agent_name: Some("researcher".to_string()),
                     team_name: Some("alpha".to_string()),
+                    is_async: false,
                 },
             )
             .await
@@ -500,6 +505,7 @@ mod tests {
             parent_agent_id: None,
             agent_name: None,
             team_name: None,
+            is_async: false,
         }
     }
 

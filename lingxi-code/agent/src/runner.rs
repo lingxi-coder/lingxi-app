@@ -807,6 +807,9 @@ async fn run_subagent_loop(
                     // for one-shot subagents / the main thread.
                     agent_name: ctx.agent_name.clone(),
                     team_name: ctx.team_name.clone(),
+                    // R1: an async (backgrounded) subagent runs its tools with
+                    // is_non_interactive_session=true (claude-code runAgent.ts:668-672).
+                    is_async: ctx.is_async,
                 };
                 match invoker.invoke(name, input.clone(), inv_ctx).await {
                     Ok(value) => {

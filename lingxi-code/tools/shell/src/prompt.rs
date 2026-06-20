@@ -118,13 +118,15 @@ fn background_usage_note() -> Option<String> {
     )
 }
 
-/// Port of `shouldIncludeGitInstructions` (`utils/gitSettings.ts`).
+/// Port of `shouldIncludeGitInstructions` (`aOt()`, `utils/gitSettings.ts`).
 ///
-/// There is no `gitSettings` analogue in this crate, so this is an always-on
-/// stub. TODO(BASH.x): wire to a settings-backed `git.includeGitInstructions`
-/// toggle once a settings source lands in tool-shell.
+/// R-MINOR: claude-code omits the git/PR section when
+/// `CLAUDE_CODE_DISABLE_GIT_INSTRUCTIONS` is set (truthy), else honors a settings
+/// `git.includeGitInstructions` toggle (default true). LingXi has no
+/// `gitSettings` source in this crate, so it models the env half (the settings
+/// toggle defaults to "on", so the env check is the only observable gate here).
 fn should_include_git_instructions() -> bool {
-    true
+    !is_env_truthy("CLAUDE_CODE_DISABLE_GIT_INSTRUCTIONS")
 }
 
 // ===== Sandbox section ======================================================
@@ -770,6 +772,25 @@ mod tests {
         assert!(
             !p.contains("You can use the `run_in_background` parameter"),
             "run_in_background note should be absent when CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1"
+        );
+    }
+
+    #[test]
+    fn git_section_absent_when_disabled_via_env() {
+        // R-MINOR: CLAUDE_CODE_DISABLE_GIT_INSTRUCTIONS (truthy) omits the git/PR
+        // section (claude-code `aOt()`); default-unset keeps it.
+        let _g = ENV_LOCK.lock().unwrap();
+        std::env::remove_var("CLAUDE_CODE_DISABLE_GIT_INSTRUCTIONS");
+        assert!(
+            simple_prompt(&disabled_sandbox()).contains("# Committing changes with git"),
+            "git section present by default"
+        );
+        std::env::set_var("CLAUDE_CODE_DISABLE_GIT_INSTRUCTIONS", "1");
+        let p = simple_prompt(&disabled_sandbox());
+        std::env::remove_var("CLAUDE_CODE_DISABLE_GIT_INSTRUCTIONS");
+        assert!(
+            !p.contains("# Committing changes with git"),
+            "git section should be absent when CLAUDE_CODE_DISABLE_GIT_INSTRUCTIONS=1"
         );
     }
 

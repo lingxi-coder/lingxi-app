@@ -845,7 +845,10 @@ static INPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
                 "description": "Set this to true to dangerously override sandbox mode and run commands without sandboxing."
             }
         },
-        "required": ["command"]
+        "required": ["command"],
+        // R-MINOR: claude-code's Bash input schema is `E.strictObject(...)`
+        // (additionalProperties:false) — unknown keys are rejected.
+        "additionalProperties": false
     })
 });
 

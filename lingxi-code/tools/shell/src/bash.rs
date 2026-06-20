@@ -789,13 +789,14 @@ impl Tool for BashTool {
         use sandbox::decision::{should_use_sandbox, SandboxDecision};
         use traits::sandbox::ProcessCommand as SbxCommand;
 
-        // PHASE-2: sibling `CancellationToken` threaded in by the streaming
-        // executor (a child of `sibling_cancel`). When an in-flight sibling Bash
-        // errors the executor fires it; the foreground run below races against
-        // it and, on cancel, drops the `run` future — `kill_on_drop` SIGKILLs
-        // the subprocess — returning `Aborted` so the executor substitutes the
-        // synthetic sibling-cancel. `None` for every non-streaming caller, in
-        // which case the run is awaited directly (no behavior change).
+        // PHASE-2: tool-abort `CancellationToken` threaded in by the streaming
+        // executor (a child of `tool_abort`). When the turn is discarded
+        // (streaming fallback) or the user interrupts, the executor fires it; the
+        // foreground run below races against it and, on cancel, drops the `run`
+        // future — `kill_on_drop` SIGKILLs the subprocess — returning `Aborted`
+        // so the executor substitutes the synthetic abort block. `None` for every
+        // non-streaming caller, in which case the run is awaited directly (no
+        // behavior change).
         let cancel = ctx.cancel.clone();
 
         let cmd_str = input

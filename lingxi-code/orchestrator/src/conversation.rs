@@ -516,6 +516,15 @@ pub struct ConversationOrchestrator {
     /// and breaks the loop. Wraps `AtomicBool` so reads are lock-free.
     /// Once `true`, this flag is never cleared (idempotent `/exit`).
     pub(crate) should_exit: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// Finding #80: once-per-session latch for the refusal→fallback-model swap
+    /// (claude-code's `refusalFallbackModelLatch`). Set the first time a turn's
+    /// response arrives with `stop_reason == "refusal"` AND
+    /// [`OrchestratorConfig::refusal_fallback_model`] is `Some`, after the session
+    /// model is swapped to the fallback. Once `true`, a subsequent `refusal`
+    /// keeps today's terminal behavior (no re-swap), so the fallback fires at
+    /// most ONCE per session — matching the binary, where the latch makes the
+    /// `mainLoopModel` override sticky.
+    pub(crate) refusal_fallback_latched: std::sync::atomic::AtomicBool,
     /// Cost tracker wired by [`Self::with_cost_tracker`] (M6-06). `None`
     /// when not configured — `snapshot_cost` then falls back to the M5-10
     /// zero-shaped stub. The CLI binary (M6-06 init.rs) always populates
@@ -789,6 +798,7 @@ impl ConversationOrchestrator {
             git_branch_cache: Mutex::new(None),
             current_prompt_id: Mutex::new(None),
             should_exit: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            refusal_fallback_latched: std::sync::atomic::AtomicBool::new(false),
             cost_tracker: None,
             analytics_bus: None,
             session_started_at: std::time::Instant::now(),
@@ -1912,6 +1922,70 @@ impl ConversationOrchestrator {
     /// Shared by the malformed-tool-use retry (#77) and thinking-only (#78)
     /// continuations, which mirror the same injection pattern as the
     /// max-output-tokens recovery nudge.
+    /// Finding #80: refusal → fallback-model swap (claude-code `bin/claude.exe`
+    /// offset ~205871579, `vr === "refusal" && rc !== void 0`). When the active
+    /// turn's response has `stop_reason == "refusal"`, a
+    /// [`OrchestratorConfig::refusal_fallback_model`] is configured, AND the
+    /// once-per-session latch ([`Self::refusal_fallback_latched`]) is not yet set:
+    ///
+    /// 1. set the latch (so the fallback fires at most once per session — the
+    ///    binary's `refusalFallbackModelLatch` makes the override sticky);
+    /// 2. persistently swap the session model to the fallback (the binary's
+    ///    `setAppState mainLoopModel = fallbackModel` + `jT(fallbackModel)` —
+    ///    every subsequent turn re-snapshots `session.model`, so the swap sticks);
+    /// 3. surface the user-visible warning on the output stream (the binary's
+    ///    `type:"system", subtype:"model_refusal_fallback", level:"warning",
+    ///    content: Bwn(originalModel, fallbackModel, category)`), reproduced
+    ///    byte-exact for the common `category == "other"` shape.
+    ///
+    /// Returns `true` when the swap happened (the caller must retry/continue the
+    /// turn against the fallback model), `false` when no fallback is configured or
+    /// the latch is already set (the caller preserves today's terminal behavior).
+    pub(crate) async fn maybe_swap_to_refusal_fallback(&self) -> bool {
+        let Some(fallback) = self.config.refusal_fallback_model.clone() else {
+            return false;
+        };
+        // Once-per-session latch (refusalFallbackModelLatch analog). `swap` returns
+        // the PRIOR value, so the first caller sees `false` and proceeds; any later
+        // caller sees `true` and bails → at most one swap per session.
+        if self
+            .refusal_fallback_latched
+            .swap(true, std::sync::atomic::Ordering::SeqCst)
+        {
+            return false;
+        }
+        // Persistently swap the session model to the fallback.
+        let original_model = {
+            let mut s = self.session.lock().await;
+            let prev = std::mem::replace(&mut s.model, fallback.clone());
+            // The fallback model has no associated provider profile (mirrors the
+            // overload-fallback re-issue, which passes `profile = None`).
+            s.model_profile = None;
+            prev
+        };
+        // User-visible warning. Byte-exact reproduction of the binary's
+        // `Bwn(originalModel, fallbackModel, "other")` =
+        //   `${mRd} Switched to ${Xd(fallback)}. ${nnt}`
+        // for the common `category == "other"` path (the cyber/bio/frontier_llm
+        // variants and the model-label resolver `Xd` are residuals — the raw
+        // fallback id stands in for the friendly label).
+        let warning = format!(
+            "This model has safety measures that flagged something in this session. \
+This sometimes happens with safe, normal conversations. Switched to {fallback}. \
+Send feedback with /feedback or learn more: https://support.claude.com/en/articles/15363606"
+        );
+        self.output.emit_text(&warning).await;
+        // Success-path analytics — inline event name (NOT a locked telemetry
+        // const), so the 347-entry `ALL_EVENT_NAMES` fixture lock is unperturbed.
+        tracing::info!(
+            event = "tengu_refusal_fallback_triggered",
+            original_model = %original_model,
+            fallback_model = %fallback,
+            trigger = "refusal",
+        );
+        true
+    }
+
     async fn inject_meta_user_message(&self, text: &str) {
         let msg = ConversationMessage::user(MessageId::new(), text.to_string());
         {
@@ -3840,11 +3914,19 @@ impl ConversationOrchestrator {
                     thinking_only_nudged = true;
                     continue;
                 }
+                // Finding #80 (streaming twin): a `refusal` response swaps to the
+                // configured `refusalFallbackModel` ONCE per session and retries.
+                // Intercepted ahead of the generic terminal arm; when no fallback
+                // is configured (or the latch is already set) it falls through to
+                // the terminal `Some(other)` arm below, byte-identical to before.
+                Some("refusal") if self.maybe_swap_to_refusal_fallback().await => {
+                    continue;
+                }
                 Some(other) => {
                     // max_tokens (recovery exhausted) / stop_sequence (visible
-                    // text or already nudged) / pause_turn / refusal — terminate
-                    // the loop with the value as-is, mirroring claude-code's
-                    // behavior (claude.ts:2269).
+                    // text or already nudged) / pause_turn / refusal (no fallback
+                    // configured / already latched) — terminate the loop with the
+                    // value as-is, mirroring claude-code's behavior (claude.ts:2269).
                     let cost = self.snapshot_cost_real().await;
                     self.output.emit_end_turn(other, &cost).await;
                     final_message_id = assistant_id;
@@ -7245,6 +7327,101 @@ mod relevant_memory_reminder_tests {
             .text_content();
         assert!(text.contains("Memory: /m/new.md:\n\nNEW"), "got: {text}");
         assert!(!text.contains("/m/seen.md"), "already-read memory leaked: {text}");
+    }
+}
+
+// ── Finding #80: refusal → fallback-model swap (maybe_swap_to_refusal_fallback) ──
+#[cfg(test)]
+mod refusal_fallback_tests {
+    use super::*;
+    use crate::test_support::{
+        noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate,
+        StaticMemoryProvider,
+    };
+    use crate::OrchestratorConfig;
+    use std::path::PathBuf;
+    use std::sync::Arc;
+    use tool_api::registry::ToolRegistry;
+
+    /// Build an orchestrator whose `refusal_fallback_model` is `cfg_fallback`,
+    /// returning the orchestrator + a clone of its `MockOutputStream` (shares the
+    /// same event buffer) so the test can inspect emitted warnings.
+    fn orch_with_refusal_fallback(
+        cfg_fallback: Option<&str>,
+    ) -> (ConversationOrchestrator, MockOutputStream) {
+        let out = MockOutputStream::new();
+        let cfg = OrchestratorConfig {
+            refusal_fallback_model: cfg_fallback.map(str::to_string),
+            ..OrchestratorConfig::default()
+        };
+        let orch = ConversationOrchestrator::new(
+            cfg,
+            Arc::new(MockApiClient::new(vec![])),
+            Arc::new(ToolRegistry::new()),
+            noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            Arc::new(out.clone()),
+            Arc::new(StaticMemoryProvider::with_files(vec![])),
+            PathBuf::from("/work/repo"),
+        );
+        (orch, out)
+    }
+
+    #[tokio::test]
+    async fn no_fallback_configured_is_a_strict_noop() {
+        let (orch, out) = orch_with_refusal_fallback(None);
+        let before = orch.session.lock().await.model.clone();
+        assert!(!orch.maybe_swap_to_refusal_fallback().await, "no fallback → false");
+        assert_eq!(orch.session.lock().await.model, before, "model must NOT change");
+        assert!(out.text_events().await.is_empty(), "no warning emitted");
+        assert!(
+            !orch
+                .refusal_fallback_latched
+                .load(std::sync::atomic::Ordering::SeqCst),
+            "latch must stay unset when nothing was configured"
+        );
+    }
+
+    #[tokio::test]
+    async fn swaps_once_then_latches() {
+        let (orch, _out) = orch_with_refusal_fallback(Some("claude-sonnet-4-6"));
+        // First refusal → swap.
+        assert!(orch.maybe_swap_to_refusal_fallback().await, "first call swaps");
+        assert_eq!(
+            orch.session.lock().await.model,
+            "claude-sonnet-4-6",
+            "session model must be swapped to the fallback"
+        );
+        assert!(
+            orch.session.lock().await.model_profile.is_none(),
+            "fallback model carries no provider profile"
+        );
+        // Second refusal → latched, no re-swap, terminal behavior preserved.
+        assert!(
+            !orch.maybe_swap_to_refusal_fallback().await,
+            "second call is latched (no re-swap)"
+        );
+        assert_eq!(
+            orch.session.lock().await.model,
+            "claude-sonnet-4-6",
+            "model unchanged on the second (latched) call"
+        );
+    }
+
+    #[tokio::test]
+    async fn emits_byte_exact_warning_on_swap() {
+        let (orch, out) = orch_with_refusal_fallback(Some("claude-sonnet-4-6"));
+        assert!(orch.maybe_swap_to_refusal_fallback().await);
+        let texts = out.text_events().await;
+        assert_eq!(texts.len(), 1, "exactly one warning emitted");
+        // Byte-exact reproduction of the binary's
+        // `Bwn(original, fallback, "other")` for category == "other".
+        assert_eq!(
+            texts[0],
+            "This model has safety measures that flagged something in this session. \
+This sometimes happens with safe, normal conversations. Switched to claude-sonnet-4-6. \
+Send feedback with /feedback or learn more: https://support.claude.com/en/articles/15363606"
+        );
     }
 }
 

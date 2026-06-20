@@ -737,6 +737,16 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
                 let state = recovery.expect("recovery is Some");
                 handle_max_output_tokens(orch, assistant_id, state).await?
             }
+            // Finding #80 (batched twin, claude-code `bin/claude.exe` offset
+            // ~205871579): a `refusal` response swaps to the configured
+            // `refusalFallbackModel` ONCE per session, warns the user, and Continues
+            // (the next step re-snapshots `session.model`, so it re-issues against
+            // the fallback). When no fallback is configured (or the latch is already
+            // set), the helper returns `false` and this falls through to the
+            // historical `_ => Continue` bare re-call — byte-identical to before.
+            Some("refusal") if orch.maybe_swap_to_refusal_fallback().await => {
+                TurnStepOutcome::Continue
+            }
             _ => TurnStepOutcome::Continue,
         }
     };
@@ -1372,9 +1382,9 @@ pub(crate) async fn dispatch_tool_uses_tracked(
     orch: &ConversationOrchestrator,
     tool_uses: &[(ToolUseId, String, serde_json::Value, Option<String>)],
     // PHASE-2 + DEFERRED-3: per-tool `CancellationToken` (a child of the streaming
-    // executor's `sibling_cancel`) threaded into each tool's
-    // `ToolUseContext::cancel`. It fires when a sibling Bash errors / the turn is
-    // discarded (Phase 2) OR — because `sibling_cancel` is parented to the turn's
+    // executor's `tool_abort`) threaded into each tool's
+    // `ToolUseContext::cancel`. It fires when the turn is discarded (streaming
+    // fallback) OR — because `tool_abort` is parented to the turn's
     // user-interrupt token in `new_with_user_cancel` — when the USER interrupts
     // (DEFERRED-3, ESC / new message). A Cancel-behavior tool (e.g. an in-flight
     // Bash) observes it to return early / SIGKILL its subprocess; the executor

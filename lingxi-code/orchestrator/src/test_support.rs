@@ -213,6 +213,10 @@ pub fn mock_message_response(
 // ============================================================================
 
 /// Capture all `OutputStream` events into an in-memory `Vec` for assertion.
+/// `Clone` shares the same underlying event buffer (`Arc<Mutex<…>>`), so a
+/// cloned handle observes events emitted through any clone — used to inspect
+/// the orchestrator's emitted output after wrapping the stream in an `Arc`.
+#[derive(Clone)]
 pub struct MockOutputStream {
     events: Arc<Mutex<Vec<OutputEvent>>>,
 }

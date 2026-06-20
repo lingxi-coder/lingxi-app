@@ -202,6 +202,23 @@ pub struct OrchestratorConfig {
     /// sets it true.
     #[serde(default)]
     pub transcript_classifier_enabled: bool,
+
+    /// Finding #80: user-configured `refusalFallbackModel` (claude-code
+    /// `bin/claude.exe` offset ~205871579). When `Some(id)` and a turn's response
+    /// arrives with `stop_reason == "refusal"`, BOTH drivers swap the session
+    /// model to `id` (ONCE per session — the `refusalFallbackModelLatch` analog,
+    /// tracked by [`crate::ConversationOrchestrator::refusal_fallback_latched`]),
+    /// warn the user, and retry the turn against the fallback model. This is the
+    /// `s.refusalFallbackModel` half of the binary's
+    /// `rc = s.refusalFallbackModel ?? (s.serverRefusalFallback?.model)` —
+    /// the `serverRefusalFallback` (server-driven sticky fallback) channel has no
+    /// LingXi config seam and is a documented residual.
+    ///
+    /// `None` (the parity default) is a STRICT no-op: a `refusal` response keeps
+    /// today's terminal behavior (streaming: `emit_end_turn("refusal")` + break;
+    /// batched: `Continue`), so the locked fixtures are byte-unaffected.
+    #[serde(default)]
+    pub refusal_fallback_model: Option<String>,
 }
 
 impl Default for OrchestratorConfig {
@@ -222,6 +239,7 @@ impl Default for OrchestratorConfig {
             output_style_dirs: Vec::new(),
             max_budget_nano_usd: None,
             transcript_classifier_enabled: false,
+            refusal_fallback_model: None,
         }
     }
 }
@@ -268,6 +286,7 @@ mod tests {
             output_style_dirs: vec![std::path::PathBuf::from("/home/u/.claude/output-styles")],
             max_budget_nano_usd: Some(5_000_000_000),
             transcript_classifier_enabled: true,
+            refusal_fallback_model: Some("claude-sonnet-4-6".into()),
         };
         let s = serde_json::to_string(&cfg).unwrap();
         let back: OrchestratorConfig = serde_json::from_str(&s).unwrap();
@@ -289,11 +308,19 @@ mod tests {
         );
         assert_eq!(back.max_budget_nano_usd, Some(5_000_000_000));
         assert!(back.transcript_classifier_enabled);
+        assert_eq!(back.refusal_fallback_model.as_deref(), Some("claude-sonnet-4-6"));
     }
 
     #[test]
     fn default_fallback_model_is_none() {
         assert!(OrchestratorConfig::default().fallback_model.is_none());
+    }
+
+    #[test]
+    fn default_refusal_fallback_model_is_none() {
+        // Finding #80: the parity default is a strict no-op — a `refusal`
+        // response keeps today's terminal/Continue behavior.
+        assert!(OrchestratorConfig::default().refusal_fallback_model.is_none());
     }
 
     #[test]

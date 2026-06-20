@@ -748,102 +748,17 @@ fn web_search_description_concise() -> String {
     )
 }
 
-/// Local replica of claude-code `Dh(model)` (binary offset ~195159752), the
-/// "simple system prompt" gate that selects the CONCISE vs VERBOSE WebSearch
-/// prompt inside `CNi(model)`. The TWIN of this predicate lives in
-/// `tools/task/src/todo_write.rs` (`dh_simple_system_prompt`); it is replicated
-/// here rather than shared so `tool-web` does not depend on `tool-task` /
-/// `tool-api` for it. The logic MUST match TodoWrite's exactly:
-///
-/// ```js
-/// Dh = (e)=>{
-///   if(!e) return false;                                          // no model → VERBOSE
-///   if(st(env.CLAUDE_CODE_SIMPLE_SYSTEM_PROMPT)) return true;     // env-truthy → CONCISE
-///   if(_l(env.CLAUDE_CODE_SIMPLE_SYSTEM_PROMPT)) return false;    // env-defined-falsy → VERBOSE
-///   return !UWu(e) || FWu(e);                                     // FWu absent ⇒ !UWu(e)
-/// };
-/// ```
-///
-/// `UWu(model)` (the classic-model list) returns `false` for the current-gen
-/// `claude-opus-4-8` / `claude-fable-5` / `claude-mythos-5`, so `!UWu(e)` is
-/// `true` for those (⇒ CONCISE) and `false` for classic models (⇒ VERBOSE).
-/// `FWu` (config-flag refinement) is not plumbed into the tool layer; on a
-/// default config it is `false`, so the model branch reduces to `!UWu(e)` —
-/// mirrors TodoWrite's documented residual.
-fn dh_simple_system_prompt(model: Option<&str>) -> bool {
-    // `if(!e) return false` — short-circuit to VERBOSE when no model is known.
-    let Some(model) = model.filter(|m| !m.is_empty()) else {
-        return false;
-    };
-    let env = std::env::var("CLAUDE_CODE_SIMPLE_SYSTEM_PROMPT").ok();
-    if traits::env::is_env_truthy(env.as_deref()) {
-        return true;
-    }
-    if traits::env::is_env_defined_falsy(env.as_deref()) {
-        return false;
-    }
-    // `return !UWu(e) || FWu(e)` with `FWu(e) == false` (config keys absent).
-    !uwu_standard_model(model)
-}
-
-/// Local replica of claude-code `UWu(model)` — the classic ("standard") model
-/// list. Returns `false` for the current-gen models (`claude-opus-4-8` /
-/// `claude-fable-5` / `claude-mythos-5`) so `Dh` serves them the CONCISE prompt.
-/// Replicated from TodoWrite's `uwu_standard_model` (`tools/task/src/todo_write.rs`)
-/// to avoid a cross-crate dependency; the substring/equality checks operate on a
-/// lightly-lowercased raw model id (claude-code's `Fo(e)` profile-canonicalizer
-/// is not threaded here, but every published id is already canonical). The
-/// unknown-model `!pd()` fallthrough is `false` for the default first-party
-/// deployment (`pd()` true).
-fn uwu_standard_model(model: &str) -> bool {
-    // `dfe(e)` = `/-eap($|\[)/i.test(e)` — early-access models are NOT standard.
-    if is_early_access_model(model) {
-        return false;
-    }
-    let t = model.to_ascii_lowercase();
-    if t.contains("claude-3-")
-        || t.contains("haiku")
-        || t.contains("sonnet")
-        || t == "claude-opus-4-0"
-        || t == "claude-opus-4-1"
-        || t == "claude-opus-4-5"
-        || t == "claude-opus-4-6"
-        || t == "claude-opus-4-7"
-    {
-        return true;
-    }
-    if t == "claude-opus-4-8" || t == "claude-fable-5" || t == "claude-mythos-5" {
-        return false;
-    }
-    // `return !pd()` — provider class unavailable in the tool layer; default
-    // first-party deployment ⇒ `pd()` true ⇒ `!pd()` false.
-    false
-}
-
-/// Local replica of claude-code `dfe(e)`: `/-eap($|\[)/i.test(e)` — matches an
-/// early-access model id where `-eap` is at the end of the string or immediately
-/// followed by `[`. Twin of TodoWrite's `is_early_access_model`.
-fn is_early_access_model(model: &str) -> bool {
-    let lower = model.to_ascii_lowercase();
-    let mut from = 0usize;
-    while let Some(idx) = lower[from..].find("-eap") {
-        let abs = from + idx;
-        let after = abs + "-eap".len();
-        match lower.as_bytes().get(after) {
-            None => return true,        // `-eap` at end ($)
-            Some(&b'[') => return true, // `-eap[`
-            _ => from = after,
-        }
-    }
-    false
-}
-
 /// Select the WebSearch prompt variant — 1:1 with claude-code `CNi(model)`
 /// (binary offset ~197074952): `Dh(model) ? CONCISE : VERBOSE`. The session /
 /// subagent model is threaded via [`PromptOptions::model`]; `None` mirrors the
 /// binary's `Dh(undefined)` → VERBOSE.
+///
+/// The `Dh(model)` "simple system prompt" gate is the shared
+/// [`tool_api::dh_simple_system_prompt`] (single source of truth in
+/// `tool-api/src/model_prompt_gate.rs`), consulted identically by the file/task
+/// tools — `UWu`/`dfe`/`FWu` parity notes live there.
 fn select_web_search_prompt(model: Option<&str>) -> String {
-    if dh_simple_system_prompt(model) {
+    if tool_api::dh_simple_system_prompt(model) {
         web_search_description_concise()
     } else {
         web_search_description()

@@ -661,98 +661,11 @@ async fn emit_failed(
 // claude-code builds the Bash tool's model-facing prompt as
 // `getSimplePrompt(model) = Dh(model) ? qUp(/*CONCISE*/) : TXa(/*VERBOSE*/)`.
 // `Dh` (binary offset ~195159752) is the "simple system prompt" gate that
-// selects the SHORT (current-gen) vs LONG (classic) variant. The TWIN of this
-// predicate lives in `tools/web/src/web_search.rs` (`dh_simple_system_prompt`)
-// and `tools/task/src/todo_write.rs`; it is replicated here rather than shared
-// so `tool-shell` does not depend on `tool-web`/`tool-task`/`tool-api` for it
-// (another agent may be editing those shared crates in parallel). The logic
-// MUST stay byte-identical to those twins.
-
-/// Local replica of claude-code `Dh(model)` (binary offset ~195159752):
-///
-/// ```js
-/// Dh = (e)=>{
-///   if(!e) return false;                                          // no model → LONG
-///   if(st(env.CLAUDE_CODE_SIMPLE_SYSTEM_PROMPT)) return true;     // env-truthy → SHORT
-///   if(_l(env.CLAUDE_CODE_SIMPLE_SYSTEM_PROMPT)) return false;    // env-defined-falsy → LONG
-///   return !UWu(e) || FWu(e);                                     // FWu absent ⇒ !UWu(e)
-/// };
-/// ```
-///
-/// `UWu(model)` returns `false` for the current-gen `claude-opus-4-8` /
-/// `claude-fable-5` / `claude-mythos-5`, so `!UWu(e)` is `true` for those
-/// (⇒ SHORT) and `false` for classic models (⇒ LONG). `FWu` (config-flag
-/// refinement) is not plumbed into the tool layer; on a default config it is
-/// `false`, so the model branch reduces to `!UWu(e)` — mirrors the WebSearch /
-/// TodoWrite documented residual.
-fn dh_simple_system_prompt(model: Option<&str>) -> bool {
-    // `if(!e) return false` — short-circuit to LONG when no model is known.
-    let Some(model) = model.filter(|m| !m.is_empty()) else {
-        return false;
-    };
-    let env = std::env::var("CLAUDE_CODE_SIMPLE_SYSTEM_PROMPT").ok();
-    if traits::env::is_env_truthy(env.as_deref()) {
-        return true;
-    }
-    if traits::env::is_env_defined_falsy(env.as_deref()) {
-        return false;
-    }
-    // `return !UWu(e) || FWu(e)` with `FWu(e) == false` (config keys absent).
-    !uwu_standard_model(model)
-}
-
-/// Local replica of claude-code `UWu(model)` — the classic ("standard") model
-/// list. Returns `false` for the current-gen models (`claude-opus-4-8` /
-/// `claude-fable-5` / `claude-mythos-5`) so `Dh` serves them the SHORT prompt.
-/// Replicated from the WebSearch / TodoWrite `uwu_standard_model` twins to
-/// avoid a cross-crate dependency; the substring/equality checks operate on a
-/// lightly-lowercased raw model id (claude-code's `Fo(e)` profile-canonicalizer
-/// is not threaded here, but every published id is already canonical). The
-/// unknown-model `!pd()` fallthrough is `false` for the default first-party
-/// deployment (`pd()` true).
-fn uwu_standard_model(model: &str) -> bool {
-    // `dfe(e)` = `/-eap($|\[)/i.test(e)` — early-access models are NOT standard.
-    if is_early_access_model(model) {
-        return false;
-    }
-    let t = model.to_ascii_lowercase();
-    if t.contains("claude-3-")
-        || t.contains("haiku")
-        || t.contains("sonnet")
-        || t == "claude-opus-4-0"
-        || t == "claude-opus-4-1"
-        || t == "claude-opus-4-5"
-        || t == "claude-opus-4-6"
-        || t == "claude-opus-4-7"
-    {
-        return true;
-    }
-    if t == "claude-opus-4-8" || t == "claude-fable-5" || t == "claude-mythos-5" {
-        return false;
-    }
-    // `return !pd()` — provider class unavailable in the tool layer; default
-    // first-party deployment ⇒ `pd()` true ⇒ `!pd()` false.
-    false
-}
-
-/// Local replica of claude-code `dfe(e)`: `/-eap($|\[)/i.test(e)` — matches an
-/// early-access model id where `-eap` is at the end of the string or
-/// immediately followed by `[`. Twin of the WebSearch / TodoWrite
-/// `is_early_access_model`.
-fn is_early_access_model(model: &str) -> bool {
-    let lower = model.to_ascii_lowercase();
-    let mut from = 0usize;
-    while let Some(idx) = lower[from..].find("-eap") {
-        let abs = from + idx;
-        let after = abs + "-eap".len();
-        match lower.as_bytes().get(after) {
-            None => return true,        // `-eap` at end ($)
-            Some(&b'[') => return true, // `-eap[`
-            _ => from = after,
-        }
-    }
-    false
-}
+// selects the SHORT (current-gen) vs LONG (classic) variant. It is the shared
+// `tool_api::dh_simple_system_prompt` (single source of truth in
+// `tool-api/src/model_prompt_gate.rs`), consulted identically by the WebSearch
+// and file/task tools — the `UWu`/`dfe`/`FWu` parity notes live there. The
+// Bash `prompt()` method calls it directly at its model gate.
 
 // ===== Tool type ============================================================
 
@@ -921,7 +834,7 @@ impl Tool for BashTool {
         // `None` mirrors the binary's `Dh(undefined)` → LONG. BOTH variants are
         // driven by the live sandbox runtime config on this context (the SHORT
         // `qUp` calls the SAME `yXa()`/`sandbox_section`).
-        if dh_simple_system_prompt(opts.model.as_deref()) {
+        if tool_api::dh_simple_system_prompt(opts.model.as_deref()) {
             crate::prompt::simple_prompt_concise(&self.ctx.sandbox_runtime)
         } else {
             crate::prompt::simple_prompt(&self.ctx.sandbox_runtime)
@@ -2618,27 +2531,11 @@ mod tests {
     }
 
     // ===== BASH.7 — `Dh(model)` prompt gate ================================
-
-    #[test]
-    fn dh_gate_selects_short_for_current_gen_and_long_for_classic() {
-        // No model ⇒ `Dh(undefined)` ⇒ false ⇒ LONG.
-        assert!(!dh_simple_system_prompt(None));
-        assert!(!dh_simple_system_prompt(Some("")));
-        // Current-gen defaults: `UWu` is false ⇒ `!UWu` true ⇒ SHORT.
-        assert!(dh_simple_system_prompt(Some("claude-opus-4-8")));
-        assert!(dh_simple_system_prompt(Some("claude-fable-5")));
-        assert!(dh_simple_system_prompt(Some("claude-mythos-5")));
-        // Classic models: `UWu` true ⇒ `!UWu` false ⇒ LONG.
-        assert!(!dh_simple_system_prompt(Some("claude-opus-4-1")));
-        assert!(!dh_simple_system_prompt(Some("claude-3-5-sonnet-20241022")));
-        assert!(!dh_simple_system_prompt(Some("claude-haiku-4-5")));
-        // `UWu` classifications directly.
-        assert!(uwu_standard_model("claude-opus-4-7"));
-        assert!(!uwu_standard_model("claude-opus-4-8"));
-        // `-eap` early-access ⇒ NOT standard ⇒ SHORT.
-        assert!(is_early_access_model("claude-opus-4-8-eap"));
-        assert!(!uwu_standard_model("claude-3-5-sonnet-eap"));
-    }
+    //
+    // The `Dh(model)` predicate itself (SHORT/LONG, `UWu`/`dfe` model
+    // classification) is unit-tested in `tool-api`'s `model_prompt_gate`; here
+    // we lock the Bash tool's observable behavior — that `prompt()` routes the
+    // gate to the correct SHORT/LONG variant per `PromptOptions::model`.
 
     #[tokio::test]
     async fn prompt_default_model_none_returns_long_variant() {

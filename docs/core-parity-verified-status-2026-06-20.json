@@ -1320,7 +1320,9 @@
    {
     "id": "R-TEL",
     "title": "Telemetry namespace is NOT claude-code's: only 23 of LingXi's 372 tengu_* names exist in the binary (binary has 1434). Analytics-only, never reaches model/user. The '347 = claude-code event set' framing was wrong.",
-    "confidence": "HIGH (self-verified via set comparison)"
+    "confidence": "HIGH (self-verified via set comparison)",
+    "status": "OUT-OF-SCOPE (scope call 2026-06-20, #36-class)",
+    "disposition": "Telemetry is ANALYTICS-ONLY — tengu_* events are sent to Anthropic analytics, never reach the model or the user, so the namespace mismatch is INVISIBLE to behavioral 1:1 (the model/user see identical behavior regardless of event names). Making it 1:1 would mean re-instrumenting the entire codebase to claude-code's 1434-event surface — and most of LingXi's 349 non-matching names are its OWN subsystems' lifecycle events (tengu_agent_fork_*/compaction_*/etc.) with NO claude-code equivalent, so it is not a rename but a fundamental re-instrumentation. Massive effort, zero model/user-observable impact — same disposition as #36 (enterprise governance) and cloud/remote. The const-array invariant (ALL_EVENT_NAMES len) stays internally consistent; that is sufficient for the build. NOT a behavioral parity gap. If the user later wants telemetry-surface parity, it is a dedicated standalone effort."
    },
    {
     "id": "R-TEST",
@@ -1331,7 +1333,9 @@
    {
     "id": "R-MINOR",
     "title": "Default-off gating/schema-shape gaps (inert under default config): Bash schema missing additionalProperties:false; shouldIncludeGitInstructions hardcoded true (ignores CLAUDE_CODE_DISABLE_GIT_INSTRUCTIONS); background-task truthiness strict-vs-bare; Bash schema field order; sleep-gate missing !p4t; CLAUDE_EFFORT/TRACEPARENT not injected on bash-spawn path; within-bucket exact-over-wildcard reported-rule only; terminalSequence tmux wrapping.",
-    "confidence": "HIGH"
+    "confidence": "HIGH",
+    "status": "PARTIAL — 2 clear items DONE (main 42e3bc77: Bash additionalProperties:false + CLAUDE_CODE_DISABLE_GIT_INSTRUCTIONS honoring). Residuals documented-low-value/out-of-arch.",
+    "residuals": "background-task DISABLE truthiness strict-vs-bare (edge env values only); Bash schema field ORDER (cosmetic, JSON key order); CLAUDE_EFFORT/TRACEPARENT not injected on the bash-spawn path (LingXi has no per-turn effort/OTel seam — out of architecture); within-bucket exact-over-wildcard domain precedence (reported decisionReason.rule only, NOT allow/deny/ask-affecting); terminalSequence tmux/screen wrapping (deferred-by-design to the TUI writer; the security-relevant accept/reject is 1:1)."
    }
   ],
   "genuinely_1to1_verified_byte_exact": "system-prompt 6 body sections + HEADER; compaction (full chain); ALL tool input schemas + field descriptions; tool LONG prompt bodies (older-model path); error+success messages (common path); truncation notes + file-state suffix; Bash timeout/sleep-block/cwd-reset; WebFetch HTTP-error/redirect/STATUS_CODES; abort reasons/refusal warning/V1+V2 reminders/TodoWrite/subagent Notes-trailer; permission source order (#35) + domain-match ALGORITHM (#31) + read-deny globs (#30) + modes (#32/33/34) + hook env (#43, REFUTES the stale COLUMNS/LINES claim) + SessionEnd timeout (#42) + updatedToolOutput (#38) + terminalSequence allowlist (#40) + defer (#37)/effort (#44)/isMeta.",
@@ -1340,7 +1344,7 @@
    "the top-line 'core 1:1 COMPLETE' framing missed the prompt-envelope, model-gating, version-stamp, and permission-ordering categories",
    "#43 COLUMNS/LINES reference claim was itself STALE (LingXi is 1:1 there)"
   ],
-  "_progress": "ALL HIGH+MED-VALUE FIXES DONE. main 7cdbfd8c. Tier1 (perm 8eb13a81, hooks f361443f) + Tier2 (model-gate R-T1/T2/T3/T4/T5/T6 + R-P1 ENVELOPE 7cdbfd8c) + Tier3 (R-V1 98613461, R-F5 doc, R-O2 in hooks) + R-TEST 7293f64b + R-EditDesc 59b6e76a. R-P1 byte-verified vs binary AND a live opus-4-8 session render (# Environment Kym, gitStatus in system-prompt w/ 'gitStatus:' prefix, claudeMd/userEmail/currentDate in leading <system-reminder> meta, no Notes footer on main). REMAINING: R-O1 (fire UserPromptExpansion/MessageDisplay — now unblocked), R-MINOR (default-off inert gaps), R-TEL (telemetry namespace 23/1434 — analytics-only, massive, #36-class scope call), Dh-consolidation (cleanup). userEmail composition-root wiring is an R-P1 follow-up.",
+  "_progress": "Near-complete. main 42e3bc77. ALL behavioral parity findings DONE or dispositioned: Tier1 (perm/hooks), Tier2 (model-gate + R-P1 envelope), Tier3 (R-V1 + R-F5-doc + R-O2 + R-O1 IN-FLIGHT), R-TEST, R-EditDesc, R-MINOR (2 clear items + residuals doc), R-TEL OUT-OF-SCOPE (analytics-only #36-class). Remaining: R-O1 (last real fix, agent running), Dh-consolidation (optional cleanup), userEmail composition-root wiring (R-P1 follow-up).",
   "discovered_during_fixes": [
    {
     "id": "R-T6",
@@ -1356,7 +1360,7 @@
    },
    {
     "id": "R-DhConsolidate",
-    "status": "open (cleanup)",
+    "status": "open (cleanup follow-up — non-blocking; 3 byte-identical Dh copies work correctly)",
     "title": "Dh predicate has 3 copies: tool-api (shared, used by tool-file+tool-task) + local copies in tool-web + tool-shell",
     "note": "Functional but redundant; consolidate tool-web/tool-shell to tool_api::dh_simple_system_prompt in a cleanup pass. Parallel-agent artifact (avoided shared-crate conflict during the fix wave)."
    }

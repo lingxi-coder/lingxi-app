@@ -106,6 +106,45 @@ fn apply_head_limit<T>(items: Vec<T>, limit: Option<usize>, offset: usize) -> (V
     (sliced, if was_truncated { Some(effective) } else { None })
 }
 
+/// Approximate JS `String.prototype.localeCompare(b)` under the default
+/// (en-US root) collation, used for the equal-mtime filename tiebreak in
+/// `files_with_matches` (binary @200995124: `P[0].localeCompare(L[0])`). The
+/// observable divergence from Rust byte `Ord` is CASE: localeCompare orders
+/// letters case-insensitively at the PRIMARY level (so `a` < `B` < `c`, unlike
+/// byte Ord where `B`(66) < `a`(97)), and breaks an otherwise-equal compare by
+/// case at the tertiary level with LOWERCASE before uppercase (`a` < `A`,
+/// `readme` < `README`). Verified against `node`:
+///   "a".localeCompare("B")===-1, "a".localeCompare("A")===-1,
+///   "README".localeCompare("readme")===1, "_x".localeCompare("ax")===-1,
+///   "file2".localeCompare("file10")===1 (NOT numeric).
+///
+/// Implementation: a two-level compare — primary is the lowercased codepoint
+/// order (case-insensitive); on a primary tie, the first position whose chars
+/// differ (necessarily only by case) is decided lowercase-first. This is exact
+/// for the ASCII filename domain (letters/digits/`._-`); full ICU/DUCET
+/// weighting for arbitrary Unicode is not ported (no collation dep) — a
+/// documented approximation for the rare equal-mtime non-ASCII tiebreak.
+fn locale_compare(a: &str, b: &str) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    // Primary: case-insensitive (lowercased) codepoint order.
+    let primary = a.to_lowercase().cmp(&b.to_lowercase());
+    if primary != Ordering::Equal {
+        return primary;
+    }
+    // Tertiary tiebreak: at the first differing char (which can only differ by
+    // case given the primary tie), lowercase sorts before uppercase.
+    for (ca, cb) in a.chars().zip(b.chars()) {
+        if ca != cb {
+            match (ca.is_lowercase(), cb.is_lowercase()) {
+                (true, false) => return Ordering::Less,
+                (false, true) => return Ordering::Greater,
+                _ => return ca.cmp(&cb),
+            }
+        }
+    }
+    a.chars().count().cmp(&b.chars().count())
+}
+
 /// `rg -o` / `--only-matching`: the matched substrings within `text`, in order
 /// (a line with N matches yields N entries). Uses the SAME `grep_regex` matcher
 /// the search ran with, so the extracted spans are byte-identical to ripgrep's.
@@ -736,13 +775,17 @@ impl Tool for GrepTool {
         } else {
             // files_with_matches (default). Sort mtime-desc + filename tiebreak;
             // pure filename sort under cfg!(test) (TS NODE_ENV === 'test').
+            // The equal-mtime tiebreak uses JS `localeCompare` semantics (binary
+            // @200995124: `.sort((P,L)=>{let D=L[1]-P[1];if(D===0)return
+            // P[0].localeCompare(L[0]);return D})`), NOT Rust byte Ord — see
+            // [`locale_compare`].
             files_matched.sort_by(|a, b| {
                 if cfg!(test) {
-                    a.0.to_string_lossy().cmp(&b.0.to_string_lossy())
+                    locale_compare(&a.0.to_string_lossy(), &b.0.to_string_lossy())
                 } else {
                     match b.1.cmp(&a.1) {
                         std::cmp::Ordering::Equal => {
-                            a.0.to_string_lossy().cmp(&b.0.to_string_lossy())
+                            locale_compare(&a.0.to_string_lossy(), &b.0.to_string_lossy())
                         }
                         other => other,
                     }
@@ -799,6 +842,23 @@ mod tests {
     use telemetry::{AnalyticsBus, InMemorySink};
     use tempfile::TempDir;
     use tool_api::test_support::{fresh_ctx, fresh_tx, make_dummy_fs};
+
+    #[test]
+    fn locale_compare_matches_js_localecompare() {
+        use std::cmp::Ordering::{Equal, Greater, Less};
+        // Cases probed against node `String.prototype.localeCompare` (en-US):
+        assert_eq!(locale_compare("a", "B"), Less); // case-insensitive primary (byte Ord would be Greater)
+        assert_eq!(locale_compare("B", "c"), Less);
+        assert_eq!(locale_compare("a", "A"), Less); // lowercase before uppercase
+        assert_eq!(locale_compare("A", "a"), Greater);
+        assert_eq!(locale_compare("abc", "Abc"), Less);
+        assert_eq!(locale_compare("README", "readme"), Greater);
+        assert_eq!(locale_compare("_x", "ax"), Less); // '_' before 'a'
+        assert_eq!(locale_compare("file2", "file10"), Greater); // NOT numeric: '2' > '1'
+        assert_eq!(locale_compare("Z", "a"), Greater);
+        assert_eq!(locale_compare("a.txt", "A.txt"), Less);
+        assert_eq!(locale_compare("same", "same"), Equal);
+    }
 
     pub(crate) fn make_ctx(tmp: &TempDir) -> (BuiltinToolContext, Arc<InMemorySink>) {
         let bus = Arc::new(AnalyticsBus::new());

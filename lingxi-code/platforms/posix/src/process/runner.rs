@@ -11,8 +11,8 @@
 use crate::process::kill_tree::kill_tree_unix;
 use crate::process::spawn_unsafe::attach_setsid;
 use crate::process::wrap::{
-    task_output_path, DEFAULT_TIMEOUT, ENV_CLAUDECODE, ENV_CLAUDE_CODE_SESSION_ID, ENV_GIT_EDITOR,
-    ENV_SHELL,
+    task_output_path, DEFAULT_TIMEOUT, ENV_CLAUDECODE, ENV_CLAUDE_CODE_CHILD_SESSION,
+    ENV_CLAUDE_CODE_SESSION_ID, ENV_GIT_EDITOR, ENV_SHELL,
 };
 use async_trait::async_trait;
 use std::os::unix::fs::OpenOptionsExt;
@@ -56,6 +56,11 @@ impl PosixProcess {
         }
         // 2. Spawn-env contract (overrides anything the caller set).
         tcmd.env(ENV_CLAUDECODE.0, ENV_CLAUDECODE.1);
+        // #7: claude-code `Uot` always marks child processes as a child session.
+        tcmd.env(
+            ENV_CLAUDE_CODE_CHILD_SESSION.0,
+            ENV_CLAUDE_CODE_CHILD_SESSION.1,
+        );
         tcmd.env(ENV_GIT_EDITOR.0, ENV_GIT_EDITOR.1);
         tcmd.env(ENV_SHELL, &inner.command);
         // 3. CLAUDE_CODE_SESSION_ID propagated only if explicitly provided.

@@ -23,6 +23,12 @@ pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 /// `Shell.execute` spawn. The runtime impl in [`super::runner`] applies
 /// these on top of the caller-supplied env.
 pub const ENV_CLAUDECODE: (&str, &str) = ("CLAUDECODE", "1");
+/// Marks every spawned process as running inside a claude-code CHILD session —
+/// claude-code `Uot` sets `CLAUDE_CODE_CHILD_SESSION:"1"` UNCONDITIONALLY (#7).
+/// (The conditional `AI_AGENT`/`CLAUDE_EFFORT`/`TRACEPARENT` vars need a
+/// command source / effort / tracing context not threaded into the runner — a
+/// separate follow-up.)
+pub const ENV_CLAUDE_CODE_CHILD_SESSION: (&str, &str) = ("CLAUDE_CODE_CHILD_SESSION", "1");
 /// Forces `git`'s editor to a no-op so interactive git commands cannot
 /// block the shell.
 pub const ENV_GIT_EDITOR: (&str, &str) = ("GIT_EDITOR", "true");
@@ -109,6 +115,10 @@ mod tests {
     #[test]
     fn env_constants_match_claude_code() {
         assert_eq!(ENV_CLAUDECODE, ("CLAUDECODE", "1"));
+        assert_eq!(
+            ENV_CLAUDE_CODE_CHILD_SESSION,
+            ("CLAUDE_CODE_CHILD_SESSION", "1")
+        );
         assert_eq!(ENV_GIT_EDITOR, ("GIT_EDITOR", "true"));
         assert_eq!(ENV_SHELL, "SHELL");
         assert_eq!(ENV_CLAUDE_CODE_SESSION_ID, "CLAUDE_CODE_SESSION_ID");

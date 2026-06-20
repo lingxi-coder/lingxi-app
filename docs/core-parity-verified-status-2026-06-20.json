@@ -1244,33 +1244,38 @@
     "title": "5 file tools ignore the wired model gate -> always emit LONG; current-gen models get SHORT in claude-code",
     "detail": "Dh(model)=true for opus-4-8/fable-5/mythos-5 => SHORT prompt; LingXi hardcodes LONG. Infra exists (TodoWrite uses opts.model).",
     "binary": "Dh off 195159752; SHORT Read 'Reads a file from the local filesystem.' present",
-    "confidence": "HIGH — THIS session got the SHORT Read description"
+    "confidence": "HIGH — THIS session got the SHORT Read description",
+    "status": "DONE (main 67a6fc12)"
    },
    {
     "id": "R-T2",
     "area": "tools/web/web_search.rs prompt(_opts)",
     "title": "WebSearch ignores model gate -> concise variant never emitted",
     "binary": "CNi off 197074952 (2-branch on Dh)",
-    "confidence": "HIGH"
+    "confidence": "HIGH",
+    "status": "DONE (main f072efd1)"
    },
    {
     "id": "R-T3",
     "area": "tools/file/read.rs",
     "title": "Read prompt missing the qhi bullet 'Do NOT re-read a file you just edited to verify...'",
     "binary": "qhi off 195604712 (em-dash); present in binary, absent in LingXi (self-verified)",
-    "confidence": "HIGH"
+    "confidence": "HIGH",
+    "status": "DONE (main 67a6fc12)"
    },
    {
     "id": "R-T4",
     "area": "various tool prompts",
     "title": "Prompt-text drifts: Read dir-line wording; NotebookEdit says 'NotebookRead' not 'Read' (2x, Ws='Read'); Bash missing 'never prepend cd <dir> to a git command' sentence; Bash sleep bullet has invented '(1-5 seconds)'",
-    "confidence": "HIGH"
+    "confidence": "HIGH",
+    "status": "DONE (main 5a591ca3+67a6fc12)"
    },
    {
     "id": "R-T5",
     "area": "tools/web/web_fetch.rs:654",
     "title": "WebFetch input schema makes `prompt` optional; claude-code requires it (strictObject, both required)",
-    "confidence": "MEDIUM"
+    "confidence": "MEDIUM",
+    "status": "DONE (main f072efd1)"
    }
   ],
   "tier3_observable": [
@@ -1331,6 +1336,26 @@
    "the top-line 'core 1:1 COMPLETE' framing missed the prompt-envelope, model-gating, version-stamp, and permission-ordering categories",
    "#43 COLUMNS/LINES reference claim was itself STALE (LingXi is 1:1 there)"
   ],
-  "_progress": "TIER 1 (decision/security) COMPLETE 2026-06-20: R-D1/R-D4 (perm 8eb13a81), R-D2/R-D3/R-O2/R-O4 (hooks f361443f). Each binary-reverified by parent + guarded-ff. Next: Tier 2 model-facing."
+  "_progress": "TIER 1 (8eb13a81 perm, f361443f hooks) + TIER 2 MODEL-GATE COMPLETE (R-T1 file 67a6fc12, R-T2 web f072efd1, R-T6 bash 507792e6, R-T3/T4a/T4b, R-T5). main 507792e6. Parent caught+fixed 2 agent SHORT-prompt errors (Read used LONG Khi bullet; Bash avoid-list had find/grep + a missing-file commit gap). REMAINING: R-P1 envelope (big), Tier 3 (R-V1 version stamps, R-O1 dead hook events, R-F5 Edit stale-recovered).",
+  "discovered_during_fixes": [
+   {
+    "id": "R-T6",
+    "status": "DONE (main 507792e6)",
+    "title": "Bash tool also has the Dh(model) gate (SHORT prompt for current-gen models); LingXi was always-LONG",
+    "note": "Found via this session's opus-4-8 Bash description. Gated tool set = Read/Write/Edit/Glob/Grep/Bash/WebSearch/TodoWrite (8). NotebookEdit/WebFetch verified single-variant (not gated)."
+   },
+   {
+    "id": "R-EditDesc",
+    "status": "open (minor)",
+    "title": "Edit description() returns the long body; claude-code wires a static 'A tool for editing files'",
+    "note": "description() is a display label, not the wire prompt() — low impact. Flagged by the R-T1 agent."
+   },
+   {
+    "id": "R-DhConsolidate",
+    "status": "open (cleanup)",
+    "title": "Dh predicate has 3 copies: tool-api (shared, used by tool-file+tool-task) + local copies in tool-web + tool-shell",
+    "note": "Functional but redundant; consolidate tool-web/tool-shell to tool_api::dh_simple_system_prompt in a cleanup pass. Parallel-agent artifact (avoided shared-crate conflict during the fix wave)."
+   }
+  ]
  }
 }

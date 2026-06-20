@@ -4667,10 +4667,15 @@ impl ConversationOrchestrator {
     pub(crate) async fn build_wire_tools(&self) -> Vec<serde_json::Value> {
         use tool_api::tool_trait::{PromptOptions, ToolStaticContext};
         let tools = self.tools.available_tools(&ToolStaticContext::default());
+        // claude-code builds the wire `tools` array with `prompt({model})`; the
+        // session model gates model-dependent tool prompts (TodoWrite's
+        // `Xla(model)=Dh(model)?FWd:UWd`). Snapshot it from the live session.
+        let model = self.session.lock().await.model.clone();
         tool_api::wire::tools_to_wire(
             &tools,
             &PromptOptions {
                 include_examples: true,
+                model: Some(model),
             },
         )
         .await

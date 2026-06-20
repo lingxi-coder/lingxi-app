@@ -785,6 +785,7 @@ mod tests {
         let p = tool
             .prompt(&PromptOptions {
                 include_examples: false,
+                model: None,
             })
             .await;
         assert_eq!(p, d);

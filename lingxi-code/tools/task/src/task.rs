@@ -3765,7 +3765,7 @@ mod tests {
         async fn task_list_prompt_disabled_is_base_text() {
             let _g = guard(false);
             let tool = TaskListTool::new(bctx());
-            let p = tool.prompt(&PromptOptions { include_examples: false }).await;
+            let p = tool.prompt(&PromptOptions { include_examples: false, model: None }).await;
             assert_eq!(p, TASK_LIST_PROMPT, "disabled variant is byte-identical to base");
             assert!(!p.contains("## Teammate Workflow"));
         }
@@ -3774,7 +3774,7 @@ mod tests {
         async fn task_list_prompt_enabled_has_teammate_workflow() {
             let _g = guard(true);
             let tool = TaskListTool::new(bctx());
-            let p = tool.prompt(&PromptOptions { include_examples: false }).await;
+            let p = tool.prompt(&PromptOptions { include_examples: false, model: None }).await;
             assert_eq!(p, TASK_LIST_PROMPT_SWARM);
             assert!(p.contains("## Teammate Workflow"));
             assert!(p.contains("- Before assigning tasks to teammates, to see what's available"));
@@ -3786,7 +3786,7 @@ mod tests {
         async fn task_create_prompt_disabled_is_base_text() {
             let _g = guard(false);
             let tool = TaskCreateTool::new(bctx());
-            let p = tool.prompt(&PromptOptions { include_examples: false }).await;
+            let p = tool.prompt(&PromptOptions { include_examples: false, model: None }).await;
             assert_eq!(p, TASK_CREATE_PROMPT, "disabled variant is byte-identical to base");
             assert!(!p.contains("and potentially assigned to teammates"));
         }
@@ -3795,7 +3795,7 @@ mod tests {
         async fn task_create_prompt_enabled_has_teammate_inserts() {
             let _g = guard(true);
             let tool = TaskCreateTool::new(bctx());
-            let p = tool.prompt(&PromptOptions { include_examples: false }).await;
+            let p = tool.prompt(&PromptOptions { include_examples: false, model: None }).await;
             assert_eq!(p, TASK_CREATE_PROMPT_SWARM);
             assert!(p.contains(
                 "Tasks that require careful planning or multiple operations and potentially assigned to teammates"

@@ -736,6 +736,7 @@ mod tests {
         let prompt = tool
             .prompt(&PromptOptions {
                 include_examples: true,
+                model: None,
             })
             .await;
         // Verbatim port of `EXIT_PLAN_MODE_V2_TOOL_PROMPT` (prompt.ts:6-29).

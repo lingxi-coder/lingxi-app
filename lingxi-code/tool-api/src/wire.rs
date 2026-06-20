@@ -237,6 +237,7 @@ mod tests {
     fn opts() -> PromptOptions {
         PromptOptions {
             include_examples: true,
+            model: None,
         }
     }
 

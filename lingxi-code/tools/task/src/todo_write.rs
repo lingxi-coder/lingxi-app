@@ -49,7 +49,10 @@ pub const TODO_WRITE_PROMPT_SIMPLE: &str = "Create and update a task list for th
 /// standard TodoWrite tool prompt selected by the `Dh` gate for classic
 /// models and whenever `CLAUDE_CODE_SIMPLE_SYSTEM_PROMPT` is
 /// env-defined-falsy. The single `${Ua}` substitution renders as the
-/// `Edit` tool name (`Ua="Edit"`). Byte-exact.
+/// `Edit` tool name (`Ua="Edit"`). Byte-exact: the binary template literal
+/// (`UWd=` at offset 199292273) ends with `...successfully.\n` — a trailing
+/// newline IS present (rendered length 9114 bytes), so the raw string closes
+/// (`"#`) on the following line.
 pub const TODO_WRITE_PROMPT_FULL: &str = r#"Use this tool to create and manage a structured task list for your current coding session. This helps you track progress, organize complex tasks, and demonstrate thoroughness to the user.
 It also helps the user understand the progress of the task and overall progress of their requests.
 
@@ -230,30 +233,125 @@ The assistant did not use the todo list because this is a single command executi
 When in doubt, use this tool. Being proactive with task management demonstrates attentiveness and ensures you complete all requirements successfully.
 "#;
 
+/// Port of claude-code `UWu(model)` (binary offset 195159370): the
+/// "uses the standard/long system prompt" model-class predicate.
+///
+/// ```js
+/// function UWu(e){
+///   if(dfe(e)) return false;                       // `-eap` (early-access) → false
+///   let t = Fo(e);                                 // normalize (strip region/profile)
+///   if(t.includes("claude-3-") || t.includes("haiku") || t.includes("sonnet")
+///      || t==="claude-opus-4-0" || t==="claude-opus-4-1" || t==="claude-opus-4-5"
+///      || t==="claude-opus-4-6" || t==="claude-opus-4-7") return true;
+///   if(t==="claude-opus-4-8" || t==="claude-fable-5" || t==="claude-mythos-5") return false;
+///   return !pd();                                  // unknown → !first-party
+/// }
+/// ```
+///
+/// `Fo` (binary offset ~ `function Fo(`) resolves application-inference-profiles
+/// and strips Bedrock region prefixes. LingXi has no `Fo` port, so we match the
+/// substring/equality checks on the raw model id after a light lowercasing —
+/// for every published Anthropic id this is identical to `Fo(e)` (the id is
+/// already canonical; region/profile-wrapped ids still contain the same
+/// `claude-3-`/`haiku`/`sonnet` substrings). The `dfe` early-access check
+/// (`/-eap($|\[)/i`) is reproduced verbatim. The unknown-model fallthrough
+/// `!pd()` (NOT first-party/anthropicAws/gateway) is approximated as `false`
+/// here because the provider class is not threaded into the tool layer; for the
+/// default first-party deployment `pd()` is `true` so `!pd()` is `false`,
+/// matching this default. This only affects genuinely unknown model ids on a
+/// non-first-party provider — documented residual.
+fn uwu_standard_model(model: &str) -> bool {
+    // `dfe(e)` = `/-eap($|\[)/i.test(e)` — early-access models are NOT standard.
+    if is_early_access_model(model) {
+        return false;
+    }
+    let t = model.to_ascii_lowercase();
+    if t.contains("claude-3-")
+        || t.contains("haiku")
+        || t.contains("sonnet")
+        || t == "claude-opus-4-0"
+        || t == "claude-opus-4-1"
+        || t == "claude-opus-4-5"
+        || t == "claude-opus-4-6"
+        || t == "claude-opus-4-7"
+    {
+        return true;
+    }
+    if t == "claude-opus-4-8" || t == "claude-fable-5" || t == "claude-mythos-5" {
+        return false;
+    }
+    // `return !pd()` — provider class unavailable in the tool layer; default
+    // first-party deployment ⇒ `pd()` true ⇒ `!pd()` false.
+    false
+}
+
+/// Port of claude-code `dfe(e)` (binary): `/-eap($|\[)/i.test(e)`. Matches an
+/// early-access-program model id where `-eap` is at the end of the string or
+/// immediately followed by `[`.
+fn is_early_access_model(model: &str) -> bool {
+    let lower = model.to_ascii_lowercase();
+    let mut from = 0usize;
+    while let Some(idx) = lower[from..].find("-eap") {
+        let abs = from + idx;
+        let after = abs + "-eap".len();
+        match lower.as_bytes().get(after) {
+            None => return true,        // `-eap` at end ($)
+            Some(&b'[') => return true, // `-eap[`
+            _ => from = after,
+        }
+    }
+    false
+}
+
+/// Port of claude-code `Dh(model)` (binary offset 195159798), the
+/// "simple system prompt" gate:
+///
+/// ```js
+/// Dh = wn((e)=>{
+///   if(!e) return false;                                            // no model → false
+///   if(st(process.env.CLAUDE_CODE_SIMPLE_SYSTEM_PROMPT)) return true;   // env-truthy → simple
+///   if(_l(process.env.CLAUDE_CODE_SIMPLE_SYSTEM_PROMPT)) return false;  // env-defined-falsy → standard
+///   return !UWu(e) || FWu(e);
+/// });
+/// ```
+///
+/// `FWu(model)` (binary offset 195159014) consults `clientDataCache
+/// .simple_system_prompt` and the `tengu_velvet_cascade` config flag — neither
+/// is plumbed into the tool layer. On a fresh/default config both are absent so
+/// `FWu` returns `false`, reducing the model branch to `!UWu(model)`. This is
+/// the dominant, parity-faithful behavior; a config that force-enables the
+/// simple prompt for a specific model via those keys is a documented residual.
+fn dh_simple_system_prompt(model: Option<&str>) -> bool {
+    // `if(!e) return false` — the gate short-circuits to the long prompt when
+    // no model is known (the JS `Dh(undefined)` path).
+    let Some(model) = model.filter(|m| !m.is_empty()) else {
+        return false;
+    };
+    let env = std::env::var("CLAUDE_CODE_SIMPLE_SYSTEM_PROMPT").ok();
+    if traits::env::is_env_truthy(env.as_deref()) {
+        return true;
+    }
+    if traits::env::is_env_defined_falsy(env.as_deref()) {
+        return false;
+    }
+    // `return !UWu(e) || FWu(e)` with `FWu(e) == false` (config keys absent).
+    !uwu_standard_model(model)
+}
+
 /// Port of claude-code `Xla(model)` = `Dh(model) ? FWd : UWd`
-/// (`prompt({model:e}){return Xla(e)}`). The `Dh` gate (binary offset
-/// 195159798) is: env `CLAUDE_CODE_SIMPLE_SYSTEM_PROMPT` truthy → FWd;
-/// env-defined-falsy → UWd; otherwise the model-class branch
-/// `!UWu(model) || FWu(model)` → FWd else UWd. The session model id is
-/// not threaded into `PromptOptions` in this build (would require a
-/// cross-crate `tool_trait::PromptOptions` field + caller changes), so
-/// the model-class branch resolves as it does in the binary when the
-/// model is absent: `Dh(undefined)` returns `false` → `UWd`. The
-/// env override is honored exactly. This is byte-exact for the env
-/// path and for every classic model; the only residual divergence is
-/// new-model (opus-4-8-class) sessions, which should pick `FWd`.
+/// (`prompt({model:e}){return Xla(e)}`). Selects the SHORT `FWd`
+/// ([`TODO_WRITE_PROMPT_SIMPLE`]) for new models (opus-4-8 / fable-5 /
+/// mythos-5) and whenever `CLAUDE_CODE_SIMPLE_SYSTEM_PROMPT` is env-truthy, and
+/// the long `UWd` ([`TODO_WRITE_PROMPT_FULL`]) for classic models and whenever
+/// the env override is defined-falsy. The session/subagent model is threaded
+/// via [`PromptOptions::model`]; `None` mirrors `Dh(undefined)` → `UWd`.
 #[must_use]
-pub fn select_todo_write_prompt() -> &'static str {
-    let simple = std::env::var("CLAUDE_CODE_SIMPLE_SYSTEM_PROMPT")
-        .ok();
-    if traits::env::is_env_truthy(simple.as_deref()) {
-        return TODO_WRITE_PROMPT_SIMPLE;
+pub fn select_todo_write_prompt(model: Option<&str>) -> &'static str {
+    if dh_simple_system_prompt(model) {
+        TODO_WRITE_PROMPT_SIMPLE
+    } else {
+        TODO_WRITE_PROMPT_FULL
     }
-    if traits::env::is_env_defined_falsy(simple.as_deref()) {
-        return TODO_WRITE_PROMPT_FULL;
-    }
-    // Model-class branch with model unavailable: `Dh(undefined)` → UWd.
-    TODO_WRITE_PROMPT_FULL
 }
 
 /// Validate a `Vec<TodoItem>` for the TodoWrite contract.
@@ -448,13 +546,14 @@ impl Tool for TodoWriteTool {
         // claude-code v2.1.183 `description(){return Qla}`.
         "Update the todo list for the current session. To be used proactively and often to track progress and pending tasks. Make sure that at least one task is in_progress at all times. Always provide both content (imperative) and activeForm (present continuous) for each task.".into()
     }
-    async fn prompt(&self, _: &PromptOptions) -> String {
+    async fn prompt(&self, opts: &PromptOptions) -> String {
         // claude-code v2.1.183 `prompt({model:e}){return Xla(e)}` where
-        // `function Xla(e){return Dh(e)?FWd:UWd}`. `Dh` selects the SHORT `FWd`
-        // prompt for new models (opus-4-8 / fable-5 / mythos-5) and the long
-        // `UWd` for classic models, gated up front by the
-        // `CLAUDE_CODE_SIMPLE_SYSTEM_PROMPT` env override.
-        select_todo_write_prompt().into()
+        // `function Xla(e){return Dh(e)?FWd:UWd}`. `Dh(model)` selects the SHORT
+        // `FWd` prompt for new models (opus-4-8 / fable-5 / mythos-5) and the
+        // long `UWd` for classic models, gated up front by the
+        // `CLAUDE_CODE_SIMPLE_SYSTEM_PROMPT` env override. The session model is
+        // threaded via `opts.model`; absent ⇒ `Dh(undefined)` → `UWd`.
+        select_todo_write_prompt(opts.model.as_deref()).into()
     }
 
     async fn call(
@@ -1079,8 +1178,14 @@ mod tests {
     #[tokio::test]
     async fn prompt_selects_uwd_or_fwd_via_dh_env_gate() {
         let (tool, _sink, _session, _use_ctx) = make_tool_and_session();
+        // No model threaded ⇒ `Dh(undefined)` is false ⇒ UWd (env override aside).
         let opts = PromptOptions {
             include_examples: false,
+            model: None,
+        };
+        let with_model = |m: &str| PromptOptions {
+            include_examples: false,
+            model: Some(m.to_string()),
         };
 
         // Default (var unset): no model threaded ⇒ `Dh(undefined)` is false ⇒
@@ -1093,6 +1198,8 @@ mod tests {
             assert!(p.starts_with(
                 "Use this tool to create and manage a structured task list for your current coding session."
             ));
+            // UWd ends with `...successfully.\n` — the binary template literal
+            // (UWd= @199292273) carries a trailing newline (rendered len 9114).
             assert!(p.ends_with(
                 "Being proactive with task management demonstrates attentiveness and ensures you complete all requirements successfully.\n"
             ));
@@ -1102,10 +1209,52 @@ mod tests {
             assert!(!p.contains("Use TodoWrite to track work-in-progress"));
         }
 
-        // `CLAUDE_CODE_SIMPLE_SYSTEM_PROMPT` truthy ⇒ the short FWd prompt.
+        // Model-class gate (var unset). `Dh(model) = !UWu(model)` (FWu=false):
+        // classic UWu models → UWd; new (opus-4-8 / fable-5 / mythos-5) → FWd.
+        {
+            let _g = EnvGuard::clear("CLAUDE_CODE_SIMPLE_SYSTEM_PROMPT");
+            // UWu == true ⇒ long UWd.
+            for classic in [
+                "claude-opus-4-7",
+                "claude-opus-4-0",
+                "claude-opus-4-1",
+                "claude-opus-4-5",
+                "claude-opus-4-6",
+                "claude-3-5-sonnet-20241022",
+                "claude-3-5-haiku-20241022",
+                "claude-sonnet-4-5",
+                "claude-haiku-4-5",
+                "us.anthropic.claude-3-7-sonnet-20250219-v1:0",
+            ] {
+                assert_eq!(
+                    tool.prompt(&with_model(classic)).await,
+                    TODO_WRITE_PROMPT_FULL,
+                    "UWu classic {classic:?} ⇒ UWd"
+                );
+            }
+            // UWu == false ⇒ short FWd. opus-4-8 is OUTSIDE UWu's 4-0..4-7 list.
+            for new_model in ["claude-opus-4-8", "claude-fable-5", "claude-mythos-5"] {
+                assert_eq!(
+                    tool.prompt(&with_model(new_model)).await,
+                    TODO_WRITE_PROMPT_SIMPLE,
+                    "new model {new_model:?} ⇒ FWd"
+                );
+            }
+            // `dfe` early-access (`-eap`) is never the standard prompt ⇒ FWd.
+            for eap in ["claude-opus-4-7-eap", "claude-sonnet-4-5-eap[x]"] {
+                assert_eq!(
+                    tool.prompt(&with_model(eap)).await,
+                    TODO_WRITE_PROMPT_SIMPLE,
+                    "early-access {eap:?} ⇒ FWd"
+                );
+            }
+        }
+
+        // `CLAUDE_CODE_SIMPLE_SYSTEM_PROMPT` truthy ⇒ the short FWd prompt
+        // (overrides the model branch — fires even for a classic model).
         for truthy in ["1", "true", "yes", "on", " On "] {
             let _g = EnvGuard::set("CLAUDE_CODE_SIMPLE_SYSTEM_PROMPT", truthy);
-            let p = tool.prompt(&opts).await;
+            let p = tool.prompt(&with_model("claude-opus-4-7")).await;
             assert_eq!(p, TODO_WRITE_PROMPT_SIMPLE, "truthy {truthy:?} ⇒ FWd");
             assert!(p.starts_with(
                 "Create and update a task list for the current session. The list is rendered to the user as your working plan."
@@ -1114,28 +1263,55 @@ mod tests {
             assert!(!p.contains("has id"));
         }
 
-        // `CLAUDE_CODE_SIMPLE_SYSTEM_PROMPT` defined-falsy ⇒ the long UWd prompt.
+        // `CLAUDE_CODE_SIMPLE_SYSTEM_PROMPT` defined-falsy ⇒ the long UWd prompt
+        // (overrides the model branch — fires even for opus-4-8).
         for falsy in ["0", "false", "no", "off"] {
             let _g = EnvGuard::set("CLAUDE_CODE_SIMPLE_SYSTEM_PROMPT", falsy);
-            let p = tool.prompt(&opts).await;
+            let p = tool.prompt(&with_model("claude-opus-4-8")).await;
             assert_eq!(p, TODO_WRITE_PROMPT_FULL, "defined-falsy {falsy:?} ⇒ UWd");
         }
 
+        // `if(!e) return false`: even with the env truthy, a MISSING model still
+        // short-circuits to UWd (the binary's `Dh(undefined)` guard runs first).
+        {
+            let _g = EnvGuard::set("CLAUDE_CODE_SIMPLE_SYSTEM_PROMPT", "1");
+            assert_eq!(tool.prompt(&opts).await, TODO_WRITE_PROMPT_FULL);
+        }
+
         // Any other (non-truthy, non-defined-falsy) value falls through to the
-        // model-class branch, which resolves to UWd when no model is available.
+        // model-class branch (here: classic ⇒ UWd; with no model ⇒ UWd).
         {
             let _g = EnvGuard::set("CLAUDE_CODE_SIMPLE_SYSTEM_PROMPT", "garbage");
+            assert_eq!(
+                tool.prompt(&with_model("claude-opus-4-7")).await,
+                TODO_WRITE_PROMPT_FULL
+            );
+            assert_eq!(
+                tool.prompt(&with_model("claude-opus-4-8")).await,
+                TODO_WRITE_PROMPT_SIMPLE
+            );
             assert_eq!(tool.prompt(&opts).await, TODO_WRITE_PROMPT_FULL);
         }
 
         // Selector helper agrees with the tool method.
         {
             let _g = EnvGuard::set("CLAUDE_CODE_SIMPLE_SYSTEM_PROMPT", "yes");
-            assert_eq!(select_todo_write_prompt(), TODO_WRITE_PROMPT_SIMPLE);
+            assert_eq!(
+                select_todo_write_prompt(Some("claude-opus-4-7")),
+                TODO_WRITE_PROMPT_SIMPLE
+            );
         }
         {
             let _g = EnvGuard::clear("CLAUDE_CODE_SIMPLE_SYSTEM_PROMPT");
-            assert_eq!(select_todo_write_prompt(), TODO_WRITE_PROMPT_FULL);
+            assert_eq!(select_todo_write_prompt(None), TODO_WRITE_PROMPT_FULL);
+            assert_eq!(
+                select_todo_write_prompt(Some("claude-opus-4-8")),
+                TODO_WRITE_PROMPT_SIMPLE
+            );
+            assert_eq!(
+                select_todo_write_prompt(Some("claude-opus-4-7")),
+                TODO_WRITE_PROMPT_FULL
+            );
         }
     }
 

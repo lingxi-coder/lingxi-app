@@ -225,10 +225,19 @@ pub struct DescriptionOptions {
 }
 
 /// Options controlling [`Tool::prompt`] output.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct PromptOptions {
     /// Whether to include illustrative examples in the prompt.
     pub include_examples: bool,
+    /// The session (or subagent) model id the wire `tools` array is being
+    /// built for. claude-code calls `prompt({model})` per tool, and some
+    /// prompts are model-gated — TodoWrite selects the short `FWd` vs. long
+    /// `UWd` variant via the `Dh(model)` "simple system prompt" gate
+    /// (`Xla(e)=Dh(e)?FWd:UWd`). `None` mirrors the binary's `Dh(undefined)`
+    /// (returns `false` → the long prompt). Thread the real model from the
+    /// turn-loop / subagent build sites so new models (e.g. `claude-opus-4-8`,
+    /// which is outside `UWu`'s classic list) correctly pick `FWd`.
+    pub model: Option<String>,
 }
 
 /// Information returned by [`Tool::is_search_or_read`] describing how an

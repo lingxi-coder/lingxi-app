@@ -2142,6 +2142,7 @@ mod tests {
         let prompt = tool
             .prompt(&PromptOptions {
                 include_examples: true,
+                model: None,
             })
             .await;
         assert!(prompt.contains("Available agent types and the tools they have access to:"));

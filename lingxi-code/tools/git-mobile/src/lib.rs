@@ -531,6 +531,7 @@ mod tests {
     async fn prompt_declares_structured_git_with_push() {
         let opts = PromptOptions {
             include_examples: false,
+            model: None,
         };
 
         let with_token = GitTool::new(test_ctx_git_enabled());

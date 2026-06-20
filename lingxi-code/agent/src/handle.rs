@@ -440,10 +440,24 @@ impl PoolSubagentSpawner {
                     .chain(t.aliases().iter().map(|a| (*a).to_string()))
             })
             .collect();
+        // claude-code builds a subagent's wire `tools` array with
+        // `prompt({model})` keyed on the SUBAGENT's resolved model, so a
+        // model-gated tool prompt (TodoWrite's `Xla(model)=Dh(model)?FWd:UWd`)
+        // tracks the child's model, not the parent's. `resolve_definition`
+        // (and the explicit-model override in `spawn`) resolve the def's
+        // `AgentModel` to a concrete id BEFORE this runs, so `Explicit` carries
+        // the wire id; `Inherit` falls back to the parent (`default_model`);
+        // a bare `Alias` is passed through raw. `None` ⇒ `Dh(undefined)` → UWd.
+        let model = match &agent_def.model {
+            AgentModel::Explicit(id) => Some(id.clone()),
+            AgentModel::Alias(a) => Some(a.clone()),
+            AgentModel::Inherit => self.default_model.clone(),
+        };
         let schemas = tool_api::wire::tools_to_wire(
             &resolved,
             &PromptOptions {
                 include_examples: true,
+                model,
             },
         )
         .await;

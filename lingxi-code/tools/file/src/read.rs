@@ -2073,6 +2073,7 @@ mod tests {
         let prompt = tool
             .prompt(&PromptOptions {
                 include_examples: false,
+                model: None,
             })
             .await;
         // Spot-check the VERBATIM TS template fragments (prompt.ts:27-49).

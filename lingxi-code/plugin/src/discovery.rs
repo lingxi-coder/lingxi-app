@@ -403,21 +403,42 @@ async fn load_lsp_servers(plugin_dir: &Path) -> HashMap<String, traits::LspServe
         .collect()
 }
 
-/// Collect every `*.md` file directly under `dir` as a [`ComponentPath`],
+/// Collect every `*.md` file under `dir` **recursively** as a [`ComponentPath`],
 /// sorted by path for deterministic ordering. Returns an empty vec when `dir`
 /// does not exist (the auto-detect "directory absent" case).
+///
+/// Mirrors `walkPluginMarkdown` (`walkPluginMarkdown.ts:21-69`): it descends
+/// into subdirectories so nested files carry their directory namespace
+/// (`commands/git/commit.md` → command `git:commit`, then `{plugin}:git:commit`
+/// via `command_name_from_path` + the manager's `{plugin}:` prefix), and it
+/// matches the `.md` extension case-insensitively (TS `toLowerCase()`).
+/// (`stopAtSkillDir` is not modeled here: LingXi discovers plugin skills only
+/// from the dedicated `skills/` directory via [`glob_skill_dirs`], so a
+/// `SKILL.md` nested under `commands/` is not a supported LingXi layout.)
 async fn glob_md(dir: &Path) -> Vec<ComponentPath> {
     let mut out = Vec::new();
-    let Ok(mut entries) = tokio::fs::read_dir(dir).await else {
-        return out;
-    };
-    while let Ok(Some(entry)) = entries.next_entry().await {
-        let p = entry.path();
-        if p.extension().and_then(|s| s.to_str()) == Some("md") {
-            out.push(ComponentPath {
-                path: p,
-                metadata: None,
-            });
+    // Iterative DFS (avoids boxing for async recursion). A directory that
+    // cannot be read is skipped, matching TS's swallowed readdir errors.
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(current) = stack.pop() {
+        let Ok(mut entries) = tokio::fs::read_dir(&current).await else {
+            continue;
+        };
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            let p = entry.path();
+            let is_dir = entry.file_type().await.map(|t| t.is_dir()).unwrap_or(false);
+            if is_dir {
+                stack.push(p);
+            } else if p
+                .extension()
+                .and_then(|s| s.to_str())
+                .is_some_and(|e| e.eq_ignore_ascii_case("md"))
+            {
+                out.push(ComponentPath {
+                    path: p,
+                    metadata: None,
+                });
+            }
         }
     }
     out.sort_by(|a, b| a.path.cmp(&b.path));

@@ -323,6 +323,13 @@ impl PluginManager {
                 // frontmatter/argument metadata), then convert to Plugin kind.
                 let base =
                     command_api::build_markdown_command(&file, command_api::CommandSource::Plugin);
+                // Namespace the command `{plugin}:{namespace}:{base}` to mirror
+                // `getCommandNameFromFile` (`loadPluginCommands.ts:60-97`), which
+                // ALWAYS prefixes `${pluginName}:` (consistent with skills /
+                // output-styles below). `base.name` already carries the
+                // subdirectory namespace from `command_name_from_path`, so the
+                // single `{plugin}:` prefix completes the canonical name.
+                let namespaced_name = format!("{}:{}", manifest.name, base.name);
                 let (frontmatter, prompt_template) = match base.kind {
                     command_api::SlashCommandKind::Markdown {
                         frontmatter,
@@ -335,6 +342,7 @@ impl PluginManager {
                     ),
                 };
                 cmds.push(command_api::SlashCommand {
+                    name: namespaced_name,
                     source: command_api::CommandSource::Plugin,
                     kind: command_api::SlashCommandKind::Plugin {
                         plugin_id: manifest.id,

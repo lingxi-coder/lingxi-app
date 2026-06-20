@@ -101,9 +101,11 @@ async fn enable_materializes_command_and_hook_into_live_registries() {
     // Command landed in the live command registry.
     {
         let reg = command_registry.read().await;
+        // Plugin commands are namespaced `{plugin}:{name}` — `getCommandNameFromFile`
+        // (`loadPluginCommands.ts:60-97`) always prefixes `${pluginName}:`.
         let cmd = reg
-            .resolve("hello")
-            .expect("plugin command `hello` should be registered");
+            .resolve("myplugin:hello")
+            .expect("plugin command `myplugin:hello` should be registered");
         assert_eq!(cmd.source, command_api::CommandSource::Plugin);
         // Verification fix #2: the command body + frontmatter must be loaded
         // from the markdown file — NOT empty. An empty prompt_template expands
@@ -184,9 +186,13 @@ async fn install_local_path_arm_materializes_and_returns_id() {
         .await
         .expect("local-path install should succeed");
 
-    // The command materialized as a side effect of install→enable.
+    // The command materialized as a side effect of install→enable
+    // (namespaced `{plugin}:{name}` per `getCommandNameFromFile`).
     let reg = command_registry.read().await;
-    assert!(reg.resolve("hello").is_some(), "command registered via install");
+    assert!(
+        reg.resolve("myplugin:hello").is_some(),
+        "namespaced command registered via install"
+    );
     drop(reg);
     assert!(!id.to_string().is_empty());
 }

@@ -24,7 +24,10 @@ pub struct ReservedShortcut {
 }
 
 /// Shortcuts that cannot be rebound — hardcoded in Claude Code.
-/// 1:1 with `NON_REBINDABLE` (reservedShortcuts.ts:16-33).
+/// 1:1 with `NON_REBINDABLE` (reservedShortcuts.ts:16-33). The `capslock`
+/// entry is present in the v2.1.185 binary's reserved table (offset
+/// 157646642) but absent from the older leaked `reservedShortcuts.ts`;
+/// the binary is canonical.
 pub const NON_REBINDABLE: &[ReservedShortcut] = &[
     ReservedShortcut {
         key: "ctrl+c",
@@ -39,6 +42,11 @@ pub const NON_REBINDABLE: &[ReservedShortcut] = &[
     ReservedShortcut {
         key: "ctrl+m",
         reason: "Cannot be rebound - identical to Enter in terminals (both send CR)",
+        severity: Severity::Error,
+    },
+    ReservedShortcut {
+        key: "capslock",
+        reason: "Caps Lock is not delivered to terminal applications",
         severity: Severity::Error,
     },
 ];

@@ -4474,8 +4474,8 @@ mod tests {
         let reg = rt.dispatcher.registry();
         let reg = reg.read().await;
         let cmd = reg
-            .resolve("hello")
-            .expect("plugin command `hello` should be discovered at bootstrap");
+            .resolve("myplugin:hello")
+            .expect("plugin command `myplugin:hello` should be discovered at bootstrap");
         assert_eq!(cmd.source, command_api::CommandSource::Plugin);
         // Verification fix #2: the command body must be loaded — an empty
         // prompt_template would expand to an inert prompt.
@@ -4535,8 +4535,8 @@ mod tests {
         let reg = rt.dispatcher.registry();
         let reg = reg.read().await;
         let cmd = reg
-            .resolve("forecast")
-            .expect("plugin command discovered via enabledPlugins cache layout");
+            .resolve("weather:forecast")
+            .expect("namespaced plugin command discovered via enabledPlugins cache layout");
         assert_eq!(cmd.source, command_api::CommandSource::Plugin);
         match &cmd.kind {
             command_api::SlashCommandKind::Plugin {

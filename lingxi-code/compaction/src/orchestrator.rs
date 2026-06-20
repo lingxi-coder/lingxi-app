@@ -18,7 +18,8 @@ use crate::autocompact::{Autocompactor, CompactionError};
 use crate::microcompact::{Microcompactor, TimeBasedMCConfig};
 use crate::snip::SnipCompactor;
 use crate::thresholds::{
-    AutoCompactTrackingState, CompactionLayer, MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES,
+    rapid_refill_count, AutoCompactTrackingState, CompactionLayer,
+    MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES, MAX_CONSECUTIVE_RAPID_REFILLS,
 };
 use protocol::ConversationMessage;
 use std::time::SystemTime;
@@ -45,6 +46,24 @@ pub struct IterationCompactionResult {
     /// autocompact was skipped (under threshold or circuit-breaker tripped) or
     /// failed; snip/micro firing alone does **not** set this.
     pub was_compacted: bool,
+    /// `true` when the rapid-refill (thrashing) breaker tripped this pass:
+    /// the context refilled to the limit within
+    /// [`RAPID_REFILL_TURN_WINDOW`](crate::thresholds::RAPID_REFILL_TURN_WINDOW)
+    /// turns of the previous compact,
+    /// [`MAX_CONSECUTIVE_RAPID_REFILLS`] times in a row. When set, the
+    /// summarizer was SKIPPED (history untouched, `was_compacted == false`) and
+    /// the caller should emit `tengu_auto_compact_rapid_refill_breaker` /
+    /// (reactive PTL path) surface the thrashing message. Mirrors
+    /// `rapidRefillBreakerTripped` from `autoCompactIfNeeded`
+    /// (`bin/claude.exe` offset 203006250).
+    pub rapid_refill_breaker_tripped: bool,
+    /// The rapid-refill count carried forward into the next turn's tracking
+    /// state (`consecutiveRapidRefills`): the `kho` result this pass. On a
+    /// successful compact this is written into
+    /// [`AutoCompactTrackingState::consecutive_rapid_refills`] (alongside
+    /// `compacted=true`, `turn_counter=0`) so the next refill within the window
+    /// increments it.
+    pub consecutive_rapid_refills: u32,
 }
 
 /// Owns one instance of each layer + the autocompact threshold.
@@ -229,7 +248,25 @@ impl CompactionOrchestrator {
         let breaker_tripped =
             tracking.consecutive_failures >= MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES;
 
-        if over_threshold && !breaker_tripped {
+        // #54 rapid-refill (thrashing) breaker: compute `kho(tracking)` BEFORE
+        // the summarizer. If the context has refilled to the limit within
+        // `RAPID_REFILL_TURN_WINDOW` turns of the previous compact,
+        // `MAX_CONSECUTIVE_RAPID_REFILLS` times in a row, SKIP the summarizer
+        // entirely — re-summarizing cannot help (a single file/tool output is
+        // too large), and re-running it every turn would thrash. Mirrors the
+        // proactive trip in `Eho`/`autoCompactIfNeeded` (`bin/claude.exe` offset
+        // 203006250): `let d=kho(o); if(d>=f6n) return {wasCompacted:!1,
+        // rapidRefillBreakerTripped:!0}`.
+        let rapid_refill = rapid_refill_count(tracking);
+        let mut rapid_refill_breaker_tripped = false;
+
+        if over_threshold && rapid_refill >= MAX_CONSECUTIVE_RAPID_REFILLS {
+            // Breaker trips: skip the summarizer, leave history untouched. The
+            // caller emits telemetry / (reactive) surfaces the thrashing
+            // message. The rapid-refill count is carried back so the caller can
+            // populate `tengu_auto_compact_rapid_refill_breaker`.
+            rapid_refill_breaker_tripped = true;
+        } else if over_threshold && !breaker_tripped {
             match self.auto.compact(messages.clone()).await {
                 Ok(result) => {
                     messages.clone_from(&result.summary_messages);
@@ -242,6 +279,14 @@ impl CompactionOrchestrator {
                     was_compacted = true;
                     // Reset the failure count on success.
                     tracking.consecutive_failures = 0;
+                    // #54 post-compact bookkeeping (`oe={compacted:!0,turnId:…,
+                    // turnCounter:0,consecutiveFailures:0,consecutiveRapidRefills:pe}`,
+                    // offset 202919683): mark compacted, reset the turn counter,
+                    // and carry the rapid-refill count forward so a refill within
+                    // the window on the NEXT compact increments it.
+                    tracking.compacted = true;
+                    tracking.turn_counter = 0;
+                    tracking.consecutive_rapid_refills = rapid_refill;
                 }
                 Err(e) => {
                     // Increment for the circuit breaker, then propagate.
@@ -258,6 +303,8 @@ impl CompactionOrchestrator {
             total_tokens_freed: freed,
             consecutive_failures: tracking.consecutive_failures,
             was_compacted,
+            rapid_refill_breaker_tripped,
+            consecutive_rapid_refills: tracking.consecutive_rapid_refills,
         })
     }
 }
@@ -536,5 +583,107 @@ mod tests {
     fn _result_shape(r: &CompactionResult) -> u64 {
         r.pre_compact_token_count
             .saturating_sub(r.post_compact_token_count)
+    }
+
+    // --- #54 rapid-refill (thrashing) breaker ---------------------------- //
+
+    #[tokio::test]
+    async fn rapid_refill_breaker_skips_summarizer_after_three_in_window() {
+        use crate::thresholds::MAX_CONSECUTIVE_RAPID_REFILLS;
+        // Threshold 0 → always over threshold. Default autocompactor SUCCEEDS.
+        // Simulate three consecutive rapid refills: each pass leaves
+        // `compacted=true, turn_counter=0`, so `rapid_refill_count` climbs
+        // 1 → 2 → 3; on the pass where it would reach 3 the breaker trips
+        // and the summarizer is SKIPPED.
+        let orch = order_orchestrator(0);
+        let msgs = vec![long_user(0), long_user(1)];
+
+        // Pre-seed tracking as if two rapid refills already happened: the last
+        // compact set compacted=true, turn_counter=0, consecutive_rapid_refills=2.
+        let mut tracking = AutoCompactTrackingState {
+            compacted: true,
+            turn_counter: 0,
+            consecutive_rapid_refills: 2,
+            ..Default::default()
+        };
+
+        // This pass: rapid_refill_count = 2 + 1 = 3 >= MAX → breaker trips.
+        let res = orch
+            .process_iteration_tracked(msgs, 0, &mut tracking)
+            .await
+            .expect("breaker trips to Ok, not Err");
+
+        assert!(
+            res.rapid_refill_breaker_tripped,
+            "the thrashing breaker must trip at {MAX_CONSECUTIVE_RAPID_REFILLS} rapid refills"
+        );
+        assert!(
+            !res.was_compacted,
+            "the summarizer must be SKIPPED when the breaker trips"
+        );
+        assert!(
+            !res.layers_applied.contains(&CompactionLayer::Autocompact),
+            "autocompact must not fire when the rapid-refill breaker is tripped"
+        );
+    }
+
+    #[tokio::test]
+    async fn rapid_refill_does_not_trip_when_window_exceeded() {
+        // compacted=true but turn_counter >= window(3) → NOT a rapid refill →
+        // count resets to 0, the summarizer runs normally.
+        let orch = order_orchestrator(0);
+        let msgs = vec![long_user(0), long_user(1)];
+        let mut tracking = AutoCompactTrackingState {
+            compacted: true,
+            turn_counter: 5, // well past the 3-turn window
+            consecutive_rapid_refills: 2,
+            ..Default::default()
+        };
+
+        let res = orch
+            .process_iteration_tracked(msgs, 0, &mut tracking)
+            .await
+            .expect("normal compact");
+
+        assert!(!res.rapid_refill_breaker_tripped, "breaker must NOT trip");
+        assert!(res.was_compacted, "summarizer runs when not thrashing");
+        // After a successful compact the count is reset (kho returned 0 here).
+        assert_eq!(res.consecutive_rapid_refills, 0);
+        assert_eq!(tracking.turn_counter, 0, "turn counter resets on compact");
+        assert!(tracking.compacted, "compacted flag set after a compact");
+    }
+
+    #[tokio::test]
+    async fn rapid_refill_count_climbs_across_consecutive_compacts() {
+        // Two consecutive in-window compacts: the carried count climbs 1 → 2
+        // (still below the breaker), proving the bookkeeping accumulates.
+        let orch = order_orchestrator(0);
+        let msgs = vec![long_user(0), long_user(1)];
+        // First refill within window: prev compacted=true, turn_counter=0,
+        // count=0 → kho=1 → compact runs, carries 1.
+        let mut tracking = AutoCompactTrackingState {
+            compacted: true,
+            turn_counter: 0,
+            consecutive_rapid_refills: 0,
+            ..Default::default()
+        };
+        let r1 = orch
+            .process_iteration_tracked(msgs.clone(), 0, &mut tracking)
+            .await
+            .expect("first refill compacts");
+        assert!(r1.was_compacted);
+        assert_eq!(r1.consecutive_rapid_refills, 1);
+        assert_eq!(tracking.consecutive_rapid_refills, 1);
+
+        // Second refill still within window (turn_counter reset to 0 by the
+        // first compact): kho = 1 + 1 = 2 → still below breaker → compacts,
+        // carries 2.
+        let r2 = orch
+            .process_iteration_tracked(msgs, 0, &mut tracking)
+            .await
+            .expect("second refill compacts");
+        assert!(r2.was_compacted);
+        assert_eq!(r2.consecutive_rapid_refills, 2);
+        assert!(!r2.rapid_refill_breaker_tripped);
     }
 }

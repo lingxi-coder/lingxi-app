@@ -428,11 +428,28 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
                 0,
             ));
         }
+        PtlCallOutcome::RapidRefillBreaker => {
+            // #54 reactive trip: surface the thrashing message + end the turn
+            // with `invalid_request` (the binary's `reason:"rapid_refill_breaker"`).
+            let assistant_id = surface_rapid_refill_thrashing(orch).await;
+            return Ok((
+                TurnStepOutcome::Ended {
+                    final_message_id: assistant_id,
+                    stop_reason: "invalid_request".to_string(),
+                },
+                0,
+            ));
+        }
     };
 
     // A3: this call's output-token count, returned to the budget loop so it can
     // accumulate `global_turn_tokens` (TS `getTurnOutputTokens()`).
     let output_tokens = response.usage.billable_tokens.output;
+
+    // #55: cache this response's total input tokens (the `Xtt` last-usage
+    // snapshot) so the proactive fixed-prefix overflow guard can compute the
+    // immovable prefix on the next `maybe_compact_before_call`.
+    orch.record_response_input_tokens(&response.usage);
 
     // In-Loop Compaction Batch 6: snapshot the cache-safe prompt prefix now the
     // call has succeeded, so the forked autocompact summarizer can replay this
@@ -629,6 +646,11 @@ enum PtlCallOutcome {
     /// The blocking-limit preempt fired, or the PTL retry budget +
     /// reactive-compact fallback were all exhausted. End the turn.
     PromptTooLong,
+    /// #54: the rapid-refill (thrashing) breaker tripped on the reactive PTL
+    /// path — re-compacting cannot help, so surface the byte-exact thrashing
+    /// message and end the turn with `reason:"rapid_refill_breaker"`
+    /// (`bin/claude.exe` offset 202942256).
+    RapidRefillBreaker,
 }
 
 /// Wrap the batched `messages_create` with the 413 / prompt-too-long reactive
@@ -790,6 +812,23 @@ async fn call_api_with_ptl_recovery(
                 .await
         };
         if let Ok(result) = compact_result {
+            // #54 reactive rapid-refill (thrashing) breaker: if the reactive
+            // compact tripped the breaker, re-compacting cannot help (a single
+            // file/tool output is too large). Emit telemetry + surface the
+            // byte-exact thrashing message and end the turn — mirroring the
+            // binary's reactive arm (`bin/claude.exe` offset 202942256).
+            if result.rapid_refill_breaker_tripped {
+                let turns_since = {
+                    let tracking = orch.compaction_tracking.lock().await;
+                    i64::from(tracking.turn_counter)
+                };
+                orch.fire_rapid_refill_breaker_telemetry_reactive(
+                    result.consecutive_rapid_refills,
+                    turns_since,
+                )
+                .await;
+                return Ok(PtlCallOutcome::RapidRefillBreaker);
+            }
             if result.was_compacted {
                 // hooks compaction lifecycle: capture the PostCompact payload
                 // BEFORE `apply_post_compact` consumes the result.
@@ -954,6 +993,39 @@ pub(crate) async fn surface_prompt_too_long(orch: &ConversationOrchestrator) -> 
     // per-block split is streaming-only.
     orch.persist_message_to_jsonl(&assistant_msg).await;
     orch.output.emit_text(PROMPT_TOO_LONG_ERROR_MESSAGE).await;
+    assistant_id
+}
+
+/// Surface the #54 rapid-refill (thrashing) breaker message on the reactive PTL
+/// path and end the turn.
+///
+/// 1:1 with claude-code v2.1.183 (`bin/claude.exe` offset 202942256): the
+/// reactive arm, on `kho(state) >= f6n`, emits the
+/// `tengu_auto_compact_rapid_refill_breaker` telemetry and surfaces the
+/// byte-exact thrashing message `Rho` as an `invalid_request` assistant error,
+/// ending the turn with `reason:"rapid_refill_breaker"`. We surface it on the
+/// same channel as [`surface_prompt_too_long`] (a stop-reason-bearing assistant
+/// message + emit), so the turn ends cleanly.
+pub(crate) async fn surface_rapid_refill_thrashing(
+    orch: &ConversationOrchestrator,
+) -> MessageId {
+    let assistant_id = MessageId::new();
+    let assistant_msg = ConversationMessage::Assistant {
+        id: assistant_id,
+        content: vec![ContentBlock::Text {
+            text: compaction::RAPID_REFILL_THRASHING_MESSAGE.to_string(),
+        }],
+        // The binary surfaces this as `error:"invalid_request"`.
+        stop_reason: Some("invalid_request".to_string()),
+    };
+    {
+        let mut s = orch.session.lock().await;
+        s.history.push(assistant_msg.clone());
+    }
+    orch.persist_message_to_jsonl(&assistant_msg).await;
+    orch.output
+        .emit_text(compaction::RAPID_REFILL_THRASHING_MESSAGE)
+        .await;
     assistant_id
 }
 
@@ -2623,6 +2695,99 @@ mod read_file_state_tests {
         assert_eq!(entry.limit, Some(1));
         // The `/files` `Vec` remains independent and empty.
         assert!(orch.files_in_context().await.is_empty());
+    }
+
+    // ----- #59 post-compact file/skill attachment restoration -----
+
+    #[tokio::test]
+    async fn force_compact_restores_recent_files_and_clears_read_state() {
+        use compaction::CompactionOrchestrator;
+        use protocol::{ConversationMessage, MessageId};
+        use traits::OrchestratorHandle;
+
+        // Compaction with a tiny threshold so a small seeded history compacts.
+        let mut orch = orch_with_tools(PathBuf::from("/tmp"), vec![]);
+        orch = orch.with_compaction(Arc::new(CompactionOrchestrator::new(10)));
+        let orch = Arc::new(orch);
+
+        // Seed enough history to trip the compactor.
+        {
+            let session = orch.session();
+            let mut s = session.lock().await;
+            for i in 0..20 {
+                s.history.push(ConversationMessage::user(
+                    MessageId::new(),
+                    format!("turn-{i} padded body text to push the token estimate over the threshold"),
+                ));
+            }
+        }
+
+        // Seed the read-file-state registry with two files at distinct mtimes.
+        tool_api::read_file_state::set(
+            &orch.read_state_map,
+            PathBuf::from("/tmp/old.rs"),
+            tool_api::read_file_state::ReadFileEntry {
+                content: "fn old() {}\n".into(),
+                mtime_ms: 100,
+                offset: None,
+                limit: None,
+                from_read: true,
+            },
+        );
+        tool_api::read_file_state::set(
+            &orch.read_state_map,
+            PathBuf::from("/tmp/new.rs"),
+            tool_api::read_file_state::ReadFileEntry {
+                content: "fn fresh() {}\n".into(),
+                mtime_ms: 200,
+                offset: None,
+                limit: None,
+                from_read: true,
+            },
+        );
+
+        orch.force_compact().await.expect("force_compact ok");
+
+        // The read-state registry is cleared post-compact (`readFileState.clear`).
+        assert!(
+            orch.read_state_map.lock().unwrap().is_empty(),
+            "read_state_map must be cleared after compaction"
+        );
+
+        // The restored file attachments ride after the boundary marker + summary.
+        let session = orch.session();
+        let s = session.lock().await;
+        let restored: Vec<&String> = s
+            .history
+            .iter()
+            .filter_map(|m| match m {
+                ConversationMessage::User { content, is_meta: true, .. } => {
+                    content.iter().find_map(|b| match b {
+                        protocol::ContentBlock::Text { text }
+                            if text.contains("restored after compaction") =>
+                        {
+                            Some(text)
+                        }
+                        _ => None,
+                    })
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            restored.len(),
+            2,
+            "both seeded files should be restored as attachments"
+        );
+        // Most-recent file content is present.
+        assert!(
+            restored.iter().any(|t| t.contains("fn fresh() {}")),
+            "the freshest file content must be restored"
+        );
+        assert!(
+            restored.iter().any(|t| t.contains("/tmp/new.rs")),
+            "the restored attachment names the file path"
+        );
     }
 
     #[tokio::test]

@@ -13,6 +13,7 @@ pub mod context_window;
 pub mod grouping;
 pub mod microcompact;
 pub mod orchestrator;
+pub mod partial;
 pub mod post_compact;
 pub mod prompt;
 pub mod ptl_retry;
@@ -30,17 +31,24 @@ pub use context_window::{
     MODEL_CONTEXT_WINDOW_DEFAULT,
 };
 pub use boundary::{
-    create_compact_boundary, find_last_compact_boundary_index, get_messages_after_compact_boundary,
-    is_compact_boundary, CompactBoundaryMetadata, CompactTrigger, PreservedSegment,
+    create_compact_boundary, create_compact_boundary_with_preserved_tail,
+    find_last_compact_boundary_index, get_messages_after_compact_boundary, is_compact_boundary,
+    preserved_segment_for_tail, CompactBoundaryMetadata, CompactTrigger, PreservedSegment,
     BOUNDARY_CONTENT,
 };
+pub use partial::{select_preserved_tail, PreservedTailSplit};
 pub use microcompact::{
     collect_compactable_tool_ids, compactable_tools, evaluate_time_based_trigger,
     reset_microcompact_state, MicrocompactResult, Microcompactor, TimeBasedMCConfig,
     TimeBasedTrigger, TIME_BASED_MC_CLEARED_MESSAGE,
 };
 pub use orchestrator::{CompactionOrchestrator, IterationCompactionResult};
-pub use post_compact::{is_main_thread_compact, run_post_compact_cleanup};
+pub use post_compact::{
+    estimate_content_tokens, is_main_thread_compact, restore_post_compact_files,
+    restore_post_compact_skills, run_post_compact_cleanup, truncate_skill_content,
+    FileRestoreCandidate, PostCompactBuilder, PostCompactMessages, RestoredFile, RestoredSkill,
+    SkillRestoreCandidate, SKILL_TRUNCATION_MARKER,
+};
 pub use warning_state::{
     clear_compact_warning_suppression, is_compact_warning_suppressed, suppress_compact_warning,
     CompactWarningState,
@@ -60,4 +68,6 @@ pub use thresholds::*;
 // takes a precomputed effective window and is reachable via the module path; it
 // is intentionally NOT glob-re-exported to avoid shadowing the model-aware
 // `thresholds::auto_compact_threshold`.
-pub use threshold_calc::{effective_context_window, should_auto_compact};
+pub use threshold_calc::{
+    compaction_prefix_overflow, effective_context_window, should_auto_compact, PrefixOverflow,
+};

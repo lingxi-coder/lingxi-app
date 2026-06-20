@@ -155,6 +155,73 @@ pub fn create_compact_boundary(
     (marker, metadata)
 }
 
+/// Build a [`PreservedSegment`] from a kept tail of messages and its anchor.
+///
+/// 1:1 with the `preservedSegment` object `WAo` stamps onto the boundary
+/// (`bin/claude.exe` offset 202984952):
+/// `{headUuid: keep[0].uuid, anchorUuid: <anchor>, tailUuid: keep.at(-1).uuid}`.
+/// The `anchor` is the message the loader splices the preserved tail AFTER — the
+/// last summary message for suffix-preserving compaction (so the kept tail
+/// follows the summary), or the boundary marker for prefix-preserving. Returns
+/// `None` when the kept tail is empty (no relink needed), matching the binary's
+/// `s.length>0 && {preservedSegment:…}` guard.
+#[must_use]
+pub fn preserved_segment_for_tail(
+    kept_tail: &[ConversationMessage],
+    anchor_uuid: Option<&MessageId>,
+) -> Option<PreservedSegment> {
+    let head = kept_tail.first()?;
+    let tail = kept_tail.last()?;
+    Some(PreservedSegment {
+        head_uuid: Some(message_uuid(head)),
+        anchor_uuid: anchor_uuid.map(MessageId::to_string),
+        tail_uuid: Some(message_uuid(tail)),
+    })
+}
+
+/// The `uuid` of a [`ConversationMessage`] as the boundary relink uses it
+/// (TS messages carry a `uuid`; here the [`MessageId`] is the stable id).
+fn message_uuid(message: &ConversationMessage) -> String {
+    match message {
+        ConversationMessage::User { id, .. }
+        | ConversationMessage::Assistant { id, .. }
+        | ConversationMessage::System { id, .. } => id.to_string(),
+    }
+}
+
+/// Construct a compact-boundary system message + metadata, populating
+/// [`CompactBoundaryMetadata::preserved_segment`] from a preserved tail.
+///
+/// Same as [`create_compact_boundary`] but for the suffix-preserving
+/// (`messagesToKeep`) path: the `kept_tail` is the verbatim tail kept after the
+/// summary, and `anchor_uuid` is the last summary message's id (the splice
+/// point). Mirrors `WAo(boundary, lastSummaryUuid, messagesToKeep)`
+/// (`bin/claude.exe` offset 202984952). When `kept_tail` is empty the
+/// `preserved_segment` is `None`, identical to [`create_compact_boundary`].
+#[must_use]
+#[allow(clippy::too_many_arguments)]
+pub fn create_compact_boundary_with_preserved_tail(
+    trigger: CompactTrigger,
+    pre_tokens: u64,
+    last_pre_compact_message_uuid: Option<MessageId>,
+    user_context: Option<String>,
+    messages_summarized: Option<u32>,
+    discovered_tools: &[String],
+    kept_tail: &[ConversationMessage],
+    anchor_uuid: Option<&MessageId>,
+) -> (ConversationMessage, CompactBoundaryMetadata) {
+    let (marker, mut metadata) = create_compact_boundary(
+        trigger,
+        pre_tokens,
+        last_pre_compact_message_uuid,
+        user_context,
+        messages_summarized,
+        discovered_tools,
+    );
+    metadata.preserved_segment = preserved_segment_for_tail(kept_tail, anchor_uuid);
+    (marker, metadata)
+}
+
 /// Whether `message` is a compact-boundary marker.
 ///
 /// TS `isCompactBoundaryMessage`: `type === 'system' && subtype ===
@@ -328,6 +395,72 @@ mod tests {
         let sliced = get_messages_after_compact_boundary(&msgs);
         assert_eq!(sliced.len(), 1);
         assert!(is_compact_boundary(&sliced[0]));
+    }
+
+    // --- #58 preserved-segment (messagesToKeep relink) -------------------- //
+
+    #[test]
+    fn preserved_segment_none_for_empty_tail() {
+        assert_eq!(preserved_segment_for_tail(&[], None), None);
+    }
+
+    #[test]
+    fn preserved_segment_head_anchor_tail() {
+        let anchor = MessageId::new();
+        let m0 = user("kept-0");
+        let m1 = user("kept-1");
+        let m2 = user("kept-2");
+        let head_id = match &m0 {
+            ConversationMessage::User { id, .. } => id.to_string(),
+            _ => unreachable!(),
+        };
+        let tail_id = match &m2 {
+            ConversationMessage::User { id, .. } => id.to_string(),
+            _ => unreachable!(),
+        };
+        let seg = preserved_segment_for_tail(&[m0, m1, m2], Some(&anchor))
+            .expect("non-empty tail yields a segment");
+        assert_eq!(seg.head_uuid.as_deref(), Some(head_id.as_str()));
+        assert_eq!(seg.tail_uuid.as_deref(), Some(tail_id.as_str()));
+        assert_eq!(seg.anchor_uuid.as_deref(), Some(&*anchor.to_string()));
+    }
+
+    #[test]
+    fn boundary_with_preserved_tail_populates_segment() {
+        let anchor = MessageId::new();
+        let kept = vec![user("recent-1"), user("recent-2")];
+        let (marker, meta) = create_compact_boundary_with_preserved_tail(
+            CompactTrigger::Auto,
+            1000,
+            None,
+            None,
+            Some(3),
+            &[],
+            &kept,
+            Some(&anchor),
+        );
+        assert!(is_compact_boundary(&marker));
+        let seg = meta.preserved_segment.expect("preserved segment set");
+        assert_eq!(seg.anchor_uuid.as_deref(), Some(&*anchor.to_string()));
+        assert!(seg.head_uuid.is_some());
+        assert!(seg.tail_uuid.is_some());
+    }
+
+    #[test]
+    fn boundary_with_empty_tail_has_no_segment() {
+        // Empty kept tail → preserved_segment None, identical to the plain
+        // create_compact_boundary.
+        let (_m, meta) = create_compact_boundary_with_preserved_tail(
+            CompactTrigger::Manual,
+            0,
+            None,
+            None,
+            None,
+            &[],
+            &[],
+            None,
+        );
+        assert_eq!(meta.preserved_segment, None);
     }
 
     #[test]

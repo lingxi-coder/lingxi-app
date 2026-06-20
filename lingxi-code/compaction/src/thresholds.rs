@@ -27,7 +27,26 @@ pub const MANUAL_COMPACT_BUFFER_TOKENS: u64 = 3_000;
 /// Maximum output tokens budgeted for the autocompact summary call.
 pub const MAX_OUTPUT_TOKENS_FOR_SUMMARY: u64 = 20_000;
 /// Maximum consecutive autocompact failures before the circuit breaker trips.
+///
+/// claude-code v2.1.183 `jho = 3` (`bin/claude.exe` offset 203009353).
 pub const MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES: u32 = 3;
+/// Turns-since-previous-compact ceiling below which a fresh compact counts as a
+/// "rapid refill" (the context refilled to the limit within this many turns).
+///
+/// claude-code v2.1.183 `Who = 3` (`bin/claude.exe` offset 203009353).
+pub const RAPID_REFILL_TURN_WINDOW: u32 = 3;
+/// Consecutive rapid-refill count at which the thrashing breaker trips.
+///
+/// claude-code v2.1.183 `f6n = 3` (`bin/claude.exe` offset 203009353).
+pub const MAX_CONSECUTIVE_RAPID_REFILLS: u32 = 3;
+
+/// Byte-exact thrashing message surfaced (on the reactive PTL path) when the
+/// rapid-refill breaker trips.
+///
+/// 1:1 with claude-code v2.1.183 `Rho` (`bin/claude.exe` offset 203009521).
+/// `${Who}` / `${f6n}` are both `3` (the constants are interpolated at module
+/// init), so the literal carries the resolved `3`s.
+pub const RAPID_REFILL_THRASHING_MESSAGE: &str = "Autocompact is thrashing: the context refilled to the limit within 3 turns of the previous compact, 3 times in a row. A file being read or a tool output is likely too large for the context window. Try reading in smaller chunks, or use /clear to start fresh.";
 /// Maximum number of recent files restored into the post-compact prompt.
 pub const POST_COMPACT_MAX_FILES_TO_RESTORE: usize = 5;
 /// Total token budget shared across post-compact file restoration.
@@ -74,16 +93,54 @@ pub enum CompactionReason {
 }
 
 /// Per-agent tracking state used to coordinate autocompact across iterations.
+///
+/// Mirrors the `autoCompactTracking` object claude-code threads through
+/// `autoCompactIfNeeded` (`bin/claude.exe`, the `{compacted, turnId,
+/// turnCounter, consecutiveFailures, consecutiveRapidRefills}` shape set at
+/// offset 202919683).
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct AutoCompactTrackingState {
-    /// Whether autocompact has run for the current turn.
+    /// Whether autocompact has run (`compacted`). Set `true` when a compact
+    /// ran; consulted by the rapid-refill breaker and the per-turn
+    /// `turnCounter++` increment.
     pub compacted: bool,
-    /// Monotonically increasing turn counter.
+    /// Turns since the previous compact (`turnCounter`): reset to `0` when a
+    /// compact runs, incremented each turn thereafter while `compacted`.
     pub turn_counter: u32,
-    /// Identifier of the current turn (e.g. message ID).
+    /// Identifier of the turn that last compacted (`turnId`).
     pub turn_id: String,
-    /// How many autocompact attempts have failed in a row.
+    /// How many autocompact attempts have failed in a row
+    /// (`consecutiveFailures`).
     pub consecutive_failures: u32,
+    /// How many compacts in a row each occurred within
+    /// [`RAPID_REFILL_TURN_WINDOW`] turns of the previous one
+    /// (`consecutiveRapidRefills`). Drives the thrashing breaker.
+    pub consecutive_rapid_refills: u32,
+}
+
+/// The rapid-refill (thrashing) count for `state`: how many consecutive
+/// compacts have each occurred within [`RAPID_REFILL_TURN_WINDOW`] turns of the
+/// previous one.
+///
+/// 1:1 with `kho` (`bin/claude.exe` offset 203004820):
+/// ```text
+/// function kho(e){
+///   return e?.compacted===!0 && e.turnCounter<Who
+///     ? (e?.consecutiveRapidRefills ?? 0) + 1
+///     : 0
+/// }
+/// ```
+/// When the previous compact ran (`compacted`) AND the context refilled within
+/// `Who` turns (`turn_counter < RAPID_REFILL_TURN_WINDOW`), the running rapid-
+/// refill count is incremented; otherwise it resets to `0`. The thrashing
+/// breaker trips when this reaches [`MAX_CONSECUTIVE_RAPID_REFILLS`].
+#[must_use]
+pub fn rapid_refill_count(state: &AutoCompactTrackingState) -> u32 {
+    if state.compacted && state.turn_counter < RAPID_REFILL_TURN_WINDOW {
+        state.consecutive_rapid_refills.saturating_add(1)
+    } else {
+        0
+    }
 }
 
 /// Returns the context window size minus the max output tokens reserved for the
@@ -537,5 +594,83 @@ mod tests {
                 calculate_token_warning_state(160_000, MODEL, &[], false).is_above_warning_threshold
             );
         });
+    }
+
+    // --- #54 rapid-refill (thrashing) breaker ------------------------------ //
+
+    #[test]
+    fn rapid_refill_count_zero_when_not_previously_compacted() {
+        // `compacted=false` → kho returns 0 regardless of the other fields.
+        let state = AutoCompactTrackingState {
+            compacted: false,
+            turn_counter: 0,
+            consecutive_rapid_refills: 5,
+            ..Default::default()
+        };
+        assert_eq!(rapid_refill_count(&state), 0);
+    }
+
+    #[test]
+    fn rapid_refill_count_zero_when_turn_counter_at_or_above_window() {
+        // turnCounter >= Who(3) → not a rapid refill → reset to 0.
+        let state = AutoCompactTrackingState {
+            compacted: true,
+            turn_counter: 3,
+            consecutive_rapid_refills: 2,
+            ..Default::default()
+        };
+        assert_eq!(rapid_refill_count(&state), 0);
+        let state4 = AutoCompactTrackingState {
+            turn_counter: 4,
+            ..state
+        };
+        assert_eq!(rapid_refill_count(&state4), 0);
+    }
+
+    #[test]
+    fn rapid_refill_count_increments_within_window() {
+        // compacted && turnCounter < Who → consecutiveRapidRefills + 1.
+        // First rapid refill: prev count 0 → 1.
+        let state0 = AutoCompactTrackingState {
+            compacted: true,
+            turn_counter: 0,
+            consecutive_rapid_refills: 0,
+            ..Default::default()
+        };
+        assert_eq!(rapid_refill_count(&state0), 1);
+        // Second: prev count 1 → 2.
+        let state1 = AutoCompactTrackingState {
+            consecutive_rapid_refills: 1,
+            turn_counter: 1,
+            ..state0.clone()
+        };
+        assert_eq!(rapid_refill_count(&state1), 2);
+        // Third: prev count 2 → 3 = MAX_CONSECUTIVE_RAPID_REFILLS → breaker trips.
+        let state2 = AutoCompactTrackingState {
+            consecutive_rapid_refills: 2,
+            turn_counter: 2,
+            ..state0
+        };
+        let count = rapid_refill_count(&state2);
+        assert_eq!(count, 3);
+        assert!(count >= MAX_CONSECUTIVE_RAPID_REFILLS, "breaker trips at 3");
+    }
+
+    #[test]
+    fn rapid_refill_constants_match_binary() {
+        // jho=3, Who=3, f6n=3.
+        assert_eq!(MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES, 3);
+        assert_eq!(RAPID_REFILL_TURN_WINDOW, 3);
+        assert_eq!(MAX_CONSECUTIVE_RAPID_REFILLS, 3);
+    }
+
+    #[test]
+    fn rapid_refill_thrashing_message_is_byte_exact() {
+        // Byte-exact `Rho` (bin/claude.exe offset 203009521), with ${Who}/${f6n}
+        // resolved to 3.
+        assert_eq!(
+            RAPID_REFILL_THRASHING_MESSAGE,
+            "Autocompact is thrashing: the context refilled to the limit within 3 turns of the previous compact, 3 times in a row. A file being read or a tool output is likely too large for the context window. Try reading in smaller chunks, or use /clear to start fresh."
+        );
     }
 }

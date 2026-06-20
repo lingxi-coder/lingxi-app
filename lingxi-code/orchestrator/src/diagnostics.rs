@@ -248,14 +248,15 @@ fn check_telemetry_schema() -> DoctorCheck {
     //        3 TUI events (screen_opened/screen_closed/search_opened, real
     //        emit sites) → 330 total. (command_palette_opened/vim_mode_entered/
     //        key_pressed deferred to M8 — no clean/aggregated emit site.)
-    // LSP.7b: +6 CronDelete/CronList tool events → 336.
-    // FileRead analytics: +3 global-tail events (tengu_file_read_dedup/
-    //        session_file_read/file_read_limits_override) → 339.
-    // Config migrations: +9 (migration::NAMES, runMigrations port) → 348.
-    // Permission flow: +1 (permission::NAMES, bypass dialog accept) → 349.
+    // grep/glob removal: −6 fabricated tengu_tool_grep_*/glob_* events (#29) → 324.
+    // LSP.7b: +6 CronDelete/CronList tool events → 330.
+    // FileRead analytics: +4 global-tail events (tengu_file_read_dedup/
+    //        session_file_read/file_read_limits_override/file_read_reread #13) → 334.
+    // Config migrations: +9 (migration::NAMES, runMigrations port) → 343.
+    // Permission flow: +1 (permission::NAMES, bypass dialog accept) → 344.
     // Coordinator swarm: +3 (coordinator::NAMES — team_created/team_deleted/
-    //        coordinator_mode_switched) → 352.
-    let expected = 352;
+    //        coordinator_mode_switched) → 347.
+    let expected = 347;
     DoctorCheck {
         name: "telemetry-schema".to_string(),
         status: if actual == expected {

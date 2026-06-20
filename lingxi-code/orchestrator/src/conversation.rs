@@ -426,6 +426,34 @@ fn git_branch_for_cwd(cwd: &std::path::Path) -> Option<String> {
     }
 }
 
+/// Count `document` and `image` content blocks across a message list, for the
+/// fixed-prefix overflow telemetry (`a3p`'s `documentBlockCount` /
+/// `imageBlockCount`, `bin/claude.exe` offset 203004969).
+///
+/// The binary recurses into `tool_result.content` arrays; in this port a
+/// [`protocol::ContentBlock::ToolResult`] carries a flat `String` (it cannot
+/// nest image/document blocks), so counting the top-level blocks of each
+/// message is the faithful equivalent. Returns `(document_count, image_count)`.
+fn count_document_and_image_blocks(messages: &[protocol::ConversationMessage]) -> (u32, u32) {
+    let mut documents = 0u32;
+    let mut images = 0u32;
+    for message in messages {
+        let blocks = match message {
+            protocol::ConversationMessage::User { content, .. }
+            | protocol::ConversationMessage::Assistant { content, .. } => content,
+            protocol::ConversationMessage::System { .. } => continue,
+        };
+        for block in blocks {
+            match block {
+                protocol::ContentBlock::Document { .. } => documents = documents.saturating_add(1),
+                protocol::ContentBlock::Image { .. } => images = images.saturating_add(1),
+                _ => {}
+            }
+        }
+    }
+    (documents, images)
+}
+
 /// The orchestrator. Owns the session, dispatches tools, drives the loop.
 ///
 /// Construction is via `new(...)` (batched-only) or `new_with_streaming(...)`
@@ -539,6 +567,17 @@ pub struct ConversationOrchestrator {
     /// fires inside `async` turn drivers; uncontended in practice (only the
     /// in-flight turn touches it). Default = zero consecutive failures.
     pub(crate) compaction_tracking: Mutex<compaction::AutoCompactTrackingState>,
+    /// The last API response's total *input* token count
+    /// (`input_tokens + cache_read_input_tokens + cache_creation_input_tokens`),
+    /// recorded by both turn drivers after every successful call. This is the
+    /// Rust seam for claude-code's `Xtt(messages)` last-usage snapshot
+    /// (`bin/claude.exe` offset 197212071): the fixed-prefix overflow guard
+    /// `a3p` (`compaction::compaction_prefix_overflow`) needs the immovable
+    /// prefix = `totalInput − messagesEstimate`, and `protocol` carries no
+    /// per-message `usage` object to recover it from, so the orchestrator caches
+    /// the most recent call's input total here. `0` until the first successful
+    /// call — the prefix guard is then a strict no-op (prefix `0 ≤ threshold`).
+    pub(crate) last_response_input_tokens: std::sync::atomic::AtomicU64,
     /// Shared cache-safe prompt-prefix slot (In-Loop Compaction Batch 6). When
     /// wired (via [`Self::with_cache_safe_slot`]), the turn drivers write a
     /// [`sidequery::CacheSafeParams`] snapshot after every successful API call
@@ -581,14 +620,13 @@ pub struct ConversationOrchestrator {
     /// `Vec` above, which preserves the existing `/files` ordering semantics.
     /// The orchestrator shares this `Arc` with the file tools' construction-
     /// time `BuiltinToolContext` so a tool's `readFileState.set` is visible
-    /// here (and to the future staleness guards / Read dedup). Behavior-neutral
-    /// for now: the map is populated but nothing reads it yet.
+    /// here (and to the future staleness guards / Read dedup).
     ///
-    /// Intentionally write-only THIS batch (file-tools-remainder Batch B): the
-    /// staleness guards (D/E/F) and Read dedup (A) are the first consumers, and
-    /// the composition root shares this `Arc` into the file tools'
-    /// `BuiltinToolContext`. Allow `dead_code` until those land.
-    #[allow(dead_code)]
+    /// CONSUMED post-compact (#59): [`Self::restore_post_compact_attachments`]
+    /// snapshots this registry, clears it, and re-attaches the most-recent files
+    /// after the compaction boundary (`K2p`/`Pqn`). The composition root shares
+    /// this `Arc` into the file tools' `BuiltinToolContext`. The staleness guards
+    /// (D/E/F) and Read dedup (A) are later additional consumers.
     pub(crate) read_state_map: tool_api::read_file_state::ReadFileStateMap,
     /// Task 8 (llm-client future-work batch 3): the last rate-limit snapshot
     /// forwarded to [`traits::OutputStream::emit_rate_limit`], for the
@@ -759,6 +797,7 @@ impl ConversationOrchestrator {
             agent_catalog: None,
             compaction: None,
             compaction_tracking: Mutex::new(compaction::AutoCompactTrackingState::default()),
+            last_response_input_tokens: std::sync::atomic::AtomicU64::new(0),
             cache_safe_slot: None,
             current_turn_system_prompt: Mutex::new(None),
             read_file_state: Arc::new(Mutex::new(Vec::new())),
@@ -1321,6 +1360,77 @@ impl ConversationOrchestrator {
     /// pre-compaction snapshot (the same snapshot fed to the compactor); the
     /// helper does NOT re-read history before swapping because the caller has
     /// not mutated it between snapshot and apply.
+    /// Snapshot the read-file-state, clear it, and restore the most-recent
+    /// files as post-compact attachment messages.
+    ///
+    /// #59 / `K2p`+`Pqn` (`bin/claude.exe` offsets 202820676 / 203001477): after
+    /// a compaction the read-file-state is cleared (its entries no longer match
+    /// the summarized history) and up to
+    /// [`compaction::POST_COMPACT_MAX_FILES_TO_RESTORE`] of the most-recently-read
+    /// files are re-attached — capped at
+    /// [`compaction::POST_COMPACT_MAX_TOKENS_PER_FILE`] each and a running
+    /// [`compaction::POST_COMPACT_TOKEN_BUDGET`] total — so the model keeps the
+    /// freshest file context across the boundary. The selection/budgeting is the
+    /// pure [`compaction::restore_post_compact_files`]; this method supplies the
+    /// candidates (from `read_state_map`, the `{content, mtime_ms}` registry) and
+    /// renders each survivor as a `<system-reminder>` meta user message.
+    ///
+    /// SKILL restoration (`Lqn`) is NOT wired here: this orchestrator carries no
+    /// invoked-skill registry to source candidates from, so the skill arm of
+    /// `K2p` has no data seam yet (documented residual). FILE restoration uses
+    /// the SNAPSHOT content the model last saw rather than a fresh disk re-read
+    /// (the binary re-reads via `R6n` with `maxTokens:J9p`); the per-file cap is
+    /// applied to the snapshot here, which is observably equivalent for an
+    /// unchanged file.
+    async fn restore_post_compact_attachments(&self) -> Vec<protocol::ConversationMessage> {
+        // Snapshot then clear the read-file-state registries (the `eOt` snapshot
+        // + `readFileState.clear()` step). Both the rich map and the `/files`
+        // Vec are cleared so the post-compact context starts from the restored
+        // set only.
+        let snapshot: Vec<(std::path::PathBuf, tool_api::read_file_state::ReadFileEntry)> = {
+            let mut map = self
+                .read_state_map
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            map.drain().collect()
+        };
+        self.read_file_state.lock().await.clear();
+
+        if snapshot.is_empty() {
+            return Vec::new();
+        }
+
+        let candidates: Vec<compaction::FileRestoreCandidate> = snapshot
+            .into_iter()
+            .map(|(path, entry)| compaction::FileRestoreCandidate {
+                path,
+                content: entry.content,
+                timestamp_ms: entry.mtime_ms,
+            })
+            .collect();
+
+        // `already_attached` is empty: this port does not thread the running
+        // attachment set into the boundary builder, so no file is double-counted
+        // here (the snapshot is the sole source).
+        let restored = compaction::restore_post_compact_files(candidates, &[]);
+
+        restored
+            .into_iter()
+            .map(|file| {
+                // Render the restored file as a `<system-reminder>` meta user
+                // message carrying the (per-file-capped) content. Mirrors the
+                // `compact_file_reference` / `type:"file"` attachment surfacing a
+                // "Referenced file {path}" body with the file content.
+                let body = format!(
+                    "<system-reminder>\nReferenced file {} (restored after compaction):\n{}\n</system-reminder>",
+                    file.path.display(),
+                    file.content
+                );
+                protocol::ConversationMessage::user_meta(protocol::MessageId::new(), body)
+            })
+            .collect()
+    }
+
     pub(crate) async fn apply_post_compact(
         &self,
         result: compaction::IterationCompactionResult,
@@ -1337,15 +1447,29 @@ impl ConversationOrchestrator {
         // follow-up that persists it can swap `_metadata` for a real store.
         let (marker, _metadata) =
             compaction::create_compact_boundary(trigger, 0, None, None, None, &[]);
+
+        // #59: snapshot the read-file-state BEFORE clearing it, then restore the
+        // most-recent files as post-compact attachments. Mirrors `Iqn`
+        // (`bin/claude.exe` offset 202817825): `let f=eOt(d.readFileState);
+        // d.readFileState.clear(); ...; K2p(f,...)`. The restored attachments are
+        // appended AFTER the summary, in the `messagesToKeep`/`attachments`
+        // position of `buildPostCompactMessages` order
+        // `[boundaryMarker, ...summaryMessages, ...attachments, ...]`.
+        let restored_attachments = self.restore_post_compact_attachments().await;
+
         // COMPACT.1: the boundary marker leads the post-compact history, matching
         // TS `buildPostCompactMessages` order `[boundaryMarker, ...summaryMessages,
         // ...messagesToKeep, ...]` (compact.ts:330). Prepending (not appending) the
         // marker is what lets a `get_messages_after_compact_boundary` consumer treat
         // the summary + kept messages as the content AFTER the boundary, mirroring
         // TS `getMessagesAfterCompactBoundary`.
-        let mut history_after = Vec::with_capacity(result.messages.len() + 1);
+        let mut history_after =
+            Vec::with_capacity(result.messages.len() + 1 + restored_attachments.len());
         history_after.push(marker.clone());
         history_after.extend(result.messages);
+        // Restored file attachments ride after the summary (the `attachments`
+        // slot in `buildPostCompactMessages`).
+        history_after.extend(restored_attachments);
 
         let messages_after = u32::try_from(history_after.len()).unwrap_or(u32::MAX);
         let bytes_after: u64 = history_after.iter().map(protocol::text_byte_size).sum();
@@ -1414,11 +1538,139 @@ impl ConversationOrchestrator {
     /// `SideQueryClient` inside `Autocompactor::compact`) — it does NOT
     /// re-enter `execute_one_turn`/this trigger — so no explicit guard flag is
     /// needed here. Documented to make the absence intentional.
+    /// Record the last API response's total input-token count
+    /// (`input_tokens + cache_read + cache_creation`) for the fixed-prefix
+    /// overflow guard. Called by both turn drivers after every successful call.
+    /// Mirrors claude-code's `Xtt` last-usage snapshot (see
+    /// [`Self::last_response_input_tokens`]).
+    pub(crate) fn record_response_input_tokens(&self, usage: &llm_client::Usage) {
+        let total_input = usage
+            .billable_tokens
+            .input
+            .saturating_add(usage.billable_tokens.cache_read)
+            .saturating_add(usage.billable_tokens.cache_write);
+        self.last_response_input_tokens
+            .store(total_input, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Fire the `tengu_auto_compact_prefix_overflow` telemetry event for a
+    /// detected fixed-prefix overflow.
+    ///
+    /// 1:1 with claude-code v2.1.183 (`bin/claude.exe` offset 203006250): the
+    /// auto path on a non-`null` `a3p` result emits
+    /// `j("tengu_auto_compact_prefix_overflow", {...u, wouldHaveBlocked:!0})`
+    /// — the spread `...u` carries the overflow descriptor fields, and the
+    /// path WARNS but STILL PROCEEDS (the guard never aborts the auto compact;
+    /// only the reactive PTL path surfaces `compactionImpossible`).
+    async fn fire_prefix_overflow_telemetry(&self, overflow: compaction::PrefixOverflow) {
+        let Some(bus) = self.analytics_bus.as_ref() else {
+            return;
+        };
+        #[allow(clippy::cast_possible_wrap)]
+        fn int(v: u64) -> telemetry::AnalyticsValue {
+            telemetry::AnalyticsValue::Int(i64::try_from(v).unwrap_or(i64::MAX))
+        }
+        let mut metadata = telemetry::LogEventMetadata::new();
+        metadata.insert("prefixTokens".into(), int(overflow.prefix_tokens));
+        metadata.insert("thresholdTokens".into(), int(overflow.threshold_tokens));
+        metadata.insert("totalInputTokens".into(), int(overflow.total_input_tokens));
+        metadata.insert("messagesEstimate".into(), int(overflow.messages_estimate));
+        metadata.insert("snipTokensFreed".into(), int(overflow.snip_tokens_freed));
+        metadata.insert(
+            "documentBlockCount".into(),
+            int(u64::from(overflow.document_block_count)),
+        );
+        metadata.insert(
+            "imageBlockCount".into(),
+            int(u64::from(overflow.image_block_count)),
+        );
+        metadata.insert(
+            "wouldHaveBlocked".into(),
+            telemetry::AnalyticsValue::Bool(true),
+        );
+        bus.log_event("tengu_auto_compact_prefix_overflow", metadata)
+            .await;
+    }
+
+    /// Fire the `tengu_auto_compact_rapid_refill_breaker` telemetry event when
+    /// the thrashing breaker trips.
+    ///
+    /// 1:1 with claude-code v2.1.183 (`bin/claude.exe` offset 202942256 /
+    /// 203006250): `j("tengu_auto_compact_rapid_refill_breaker",
+    /// {consecutiveRapidRefills, turnsSincePreviousCompact, ..., reactive})`.
+    /// The reactive arm sets `reactive:!0`; the proactive arm omits it.
+    async fn fire_rapid_refill_breaker_telemetry_with_reactive(
+        &self,
+        consecutive_rapid_refills: u32,
+        turns_since_previous_compact: i64,
+        reactive: bool,
+    ) {
+        let Some(bus) = self.analytics_bus.as_ref() else {
+            return;
+        };
+        let mut metadata = telemetry::LogEventMetadata::new();
+        metadata.insert(
+            "consecutiveRapidRefills".into(),
+            telemetry::AnalyticsValue::Int(i64::from(consecutive_rapid_refills)),
+        );
+        metadata.insert(
+            "turnsSincePreviousCompact".into(),
+            telemetry::AnalyticsValue::Int(turns_since_previous_compact),
+        );
+        if reactive {
+            metadata.insert("reactive".into(), telemetry::AnalyticsValue::Bool(true));
+        }
+        bus.log_event("tengu_auto_compact_rapid_refill_breaker", metadata)
+            .await;
+    }
+
+    /// Proactive-arm rapid-refill breaker telemetry (no `reactive` flag).
+    async fn fire_rapid_refill_breaker_telemetry(
+        &self,
+        consecutive_rapid_refills: u32,
+        turns_since_previous_compact: i64,
+    ) {
+        self.fire_rapid_refill_breaker_telemetry_with_reactive(
+            consecutive_rapid_refills,
+            turns_since_previous_compact,
+            false,
+        )
+        .await;
+    }
+
+    /// Reactive-arm rapid-refill breaker telemetry (`reactive:true`). Called by
+    /// the reactive PTL recovery path in `turn_loop`.
+    pub(crate) async fn fire_rapid_refill_breaker_telemetry_reactive(
+        &self,
+        consecutive_rapid_refills: u32,
+        turns_since_previous_compact: i64,
+    ) {
+        self.fire_rapid_refill_breaker_telemetry_with_reactive(
+            consecutive_rapid_refills,
+            turns_since_previous_compact,
+            true,
+        )
+        .await;
+    }
+
     pub(crate) async fn maybe_compact_before_call(&self) {
         let Some(compactor) = self.compaction.clone() else {
             // No compactor wired — strict no-op (history untouched).
             return;
         };
+
+        // #54 per-turn turn-counter increment (`if(oe?.compacted)
+        // oe.turnCounter++`, `bin/claude.exe` offset 202951666). Runs on EVERY
+        // turn after a compact (regardless of the threshold below) so the
+        // rapid-refill window (`turn_counter < RAPID_REFILL_TURN_WINDOW`) measures
+        // turns-since-previous-compact correctly. Fires
+        // `tengu_post_autocompact_turn`-equivalent bookkeeping; held only briefly.
+        {
+            let mut tracking = self.compaction_tracking.lock().await;
+            if tracking.compacted {
+                tracking.turn_counter = tracking.turn_counter.saturating_add(1);
+            }
+        }
 
         // Snapshot history + estimate tokens WITHOUT holding the lock across
         // the (possibly networked) compaction call.
@@ -1432,6 +1684,38 @@ impl ConversationOrchestrator {
         // because we have done no snip work yet at the call site.
         if !compaction::should_auto_compact(estimate, 0, compactor.autocompact_threshold) {
             return;
+        }
+
+        // #55 fixed-prefix overflow guard (`a3p`, `bin/claude.exe` offset
+        // 203004969). If the immovable prefix (system prompt + tools +
+        // attachments = `totalInput − messages`) already exceeds the autocompact
+        // threshold, compaction can NEVER bring usage below threshold. Mirror the
+        // auto path exactly: WARN + emit `tengu_auto_compact_prefix_overflow`
+        // (`wouldHaveBlocked:true`) but STILL PROCEED — the guard is observational
+        // on the auto path; only the reactive PTL path surfaces it to the user as
+        // `compactionImpossible`. `totalInput` is the last response's input total
+        // (the `Xtt` snapshot); `0` until the first call ⇒ a strict no-op.
+        let total_input = self
+            .last_response_input_tokens
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let (doc_blocks, img_blocks) = count_document_and_image_blocks(&snapshot);
+        if let Some(overflow) = compaction::compaction_prefix_overflow(
+            total_input,
+            estimate,
+            compactor.autocompact_threshold,
+            0,
+            doc_blocks,
+            img_blocks,
+        ) {
+            tracing::warn!(
+                prefix_tokens = overflow.prefix_tokens,
+                threshold_tokens = overflow.threshold_tokens,
+                "autocompact: fixed prefix ~{} > threshold {} — compaction cannot help",
+                overflow.prefix_tokens,
+                overflow.threshold_tokens,
+            );
+            self.fire_prefix_overflow_telemetry(overflow).await;
+            // Fall through — the auto path STILL PROCEEDS (parity with the binary).
         }
 
         let messages_before = u32::try_from(snapshot.len()).unwrap_or(u32::MAX);
@@ -1463,6 +1747,30 @@ impl ConversationOrchestrator {
                 return;
             }
         };
+
+        // #54 rapid-refill (thrashing) breaker (proactive trip): when the
+        // breaker tripped, the orchestrator SKIPPED the summarizer (history
+        // untouched). Emit `tengu_auto_compact_rapid_refill_breaker` and warn,
+        // then return — re-summarizing cannot help (a file/tool output is too
+        // large), so the proactive path leaves history alone. Mirrors `Eho`
+        // (`bin/claude.exe` offset 203006250).
+        if result.rapid_refill_breaker_tripped {
+            let consecutive = result.consecutive_rapid_refills;
+            // `turnsSincePreviousCompact` = the tracking turn counter (the
+            // binary reports `oe?.turnCounter ?? -1`).
+            let turns_since = i64::from(tracking.turn_counter);
+            // Drop the tracking lock before the async telemetry emit.
+            drop(tracking);
+            tracing::warn!(
+                consecutive_rapid_refills = consecutive,
+                turns_since_previous_compact = turns_since,
+                "autocompact: rapid-refill breaker tripped — {consecutive} consecutive refills within <{} turns each",
+                compaction::RAPID_REFILL_TURN_WINDOW,
+            );
+            self.fire_rapid_refill_breaker_telemetry(consecutive, turns_since)
+                .await;
+            return;
+        }
 
         if !result.was_compacted {
             // Snip/micro may have fired but autocompact did not (circuit
@@ -3168,6 +3476,11 @@ impl ConversationOrchestrator {
             // `record_api_response_v2` function + arg semantics: `Duration::ZERO`
             // (adapter doesn't surface per-call wall-clock) and `retries = 0`
             // (retries are swallowed internally by the adapter, same as batch path).
+            if let Some(ref usage) = pumped.usage {
+                // #55: cache this response's total input tokens (the `Xtt`
+                // last-usage snapshot) for the fixed-prefix overflow guard.
+                self.record_response_input_tokens(usage);
+            }
             if let Some(tracker) = self.cost_tracker.as_ref() {
                 if let Some(ref usage) = pumped.usage {
                     let cost_usage = crate::cost_wiring::llm_usage_to_cost_usage(usage);
@@ -7184,5 +7497,66 @@ mod persist_with_parent_tests {
             tr_lines[0].parent_uuid, tr_lines[1].parent_uuid,
             "the two tool_results must NOT share one parent (per-tool reparenting)"
         );
+    }
+}
+
+#[cfg(test)]
+mod prefix_overflow_block_count_tests {
+    use super::count_document_and_image_blocks;
+    use protocol::{
+        ContentBlock, ConversationMessage, DocumentSource, ImageSource, MessageId,
+    };
+
+    fn image_block() -> ContentBlock {
+        ContentBlock::Image {
+            source: ImageSource::Base64 {
+                media_type: "image/png".into(),
+                data: "AAAA".into(),
+            },
+        }
+    }
+
+    fn document_block() -> ContentBlock {
+        ContentBlock::Document {
+            source: DocumentSource::Base64 {
+                media_type: "application/pdf".into(),
+                data: "AAAA".into(),
+            },
+        }
+    }
+
+    #[test]
+    fn counts_documents_and_images_across_user_and_assistant() {
+        // #55 a3p documentBlockCount / imageBlockCount.
+        let msgs = vec![
+            ConversationMessage::User {
+                id: MessageId::new(),
+                content: vec![
+                    ContentBlock::Text { text: "hi".into() },
+                    image_block(),
+                    document_block(),
+                ],
+                is_meta: false,
+            },
+            ConversationMessage::Assistant {
+                id: MessageId::new(),
+                content: vec![image_block()],
+                stop_reason: None,
+            },
+            // System messages carry a flat string — never counted.
+            ConversationMessage::System {
+                id: MessageId::new(),
+                content: "system".into(),
+            },
+        ];
+        let (docs, imgs) = count_document_and_image_blocks(&msgs);
+        assert_eq!(docs, 1, "one document block across the messages");
+        assert_eq!(imgs, 2, "two image blocks across the messages");
+    }
+
+    #[test]
+    fn counts_zero_when_no_media_blocks() {
+        let msgs = vec![ConversationMessage::user(MessageId::new(), "plain text".into())];
+        assert_eq!(count_document_and_image_blocks(&msgs), (0, 0));
     }
 }

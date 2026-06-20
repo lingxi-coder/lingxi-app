@@ -27,7 +27,6 @@ use tool_web::web_search::{
 
 #[derive(Debug, Deserialize)]
 struct ErrorTemplates {
-    scheme_rejected: String,
     http_status: String,
     dns_failure: String,
 }
@@ -119,14 +118,11 @@ fn event_names_match_fixture() {
 #[test]
 fn error_templates_match_runtime_formatters() {
     let fix: WebToolsFixture = load_fixture("web_tools");
-    let concrete_scheme = fix
-        .error_templates
-        .scheme_rejected
-        .replace("{scheme}", "file");
-    assert_eq!(
-        concrete_scheme,
-        "URL scheme 'file' not allowed; only https/http"
-    );
+
+    // PARITY (#93): WebFetch has NO scheme-rejection error — claude-code's
+    // `validateURL` never rejects by scheme, so the `scheme_rejected` template
+    // was removed from the fixture. `file:`/`data:` URLs are rejected by the
+    // single-label-host SSRF rule instead (covered by tool-web unit tests).
 
     // HTTP >= 400 is now the `iIp` SUCCESS-result body (status sentence + the
     // body note), not the old "WebFetch: HTTP {status} from {url}" transport

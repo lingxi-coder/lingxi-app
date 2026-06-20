@@ -5437,6 +5437,7 @@ dependencies = [
  "serde_json",
  "sidequery",
  "telemetry",
+ "tempfile",
  "test-harness",
  "thiserror 2.0.18",
  "tokio",

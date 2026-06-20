@@ -22,7 +22,6 @@
     "tengu_tool_web_search_failed"
   ],
   "error_templates": {
-    "scheme_rejected": "URL scheme '{scheme}' not allowed; only https/http",
     "http_status": "The server returned HTTP {status} {status_text}.\n\nThe response body was not retrieved. If this URL requires authentication, use an authenticated tool (e.g. `gh` for GitHub, or an MCP-provided fetch tool) instead of WebFetch.",
     "dns_failure": "WebFetch: cannot resolve {host}"
   }

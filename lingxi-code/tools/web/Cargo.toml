@@ -44,6 +44,8 @@ tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 # web tool tests use MockHttpTransport/ScriptedResponse fixtures (dev-cycle to
 # test-harness is allowed by cargo since it's dev-only).
 test-harness = { path = "../../test-harness" }
+# Temp dirs for the binary-persist (`persist.rs`) unit tests.
+tempfile = "3"
 
 [lints]
 workspace = true

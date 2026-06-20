@@ -1,6 +1,8 @@
 //! `WebFetchTool` — fetches a URL via the M1 `HttpTransport` trait, with a
-//! 10 MB transfer cap, a 100 000-char markdown cap, scheme allow-list
-//! (`https`/`http`), manual permitted-redirect handling, and the claude-code
+//! 10 MB transfer cap, a 100 000-char markdown cap (applied in the apply step,
+//! NOT before caching), an SSRF/abuse gate (length / credentials / single-label
+//! host — no scheme rejection, faithful to claude-code `validateURL`), an
+//! `http`→`https` upgrade, manual permitted-redirect handling, and the claude-code
 //! `Claude-User (claude-code/<version>; +https://support.anthropic.com/)`
 //! User-Agent (v2.1.181). Spec §4 Flow B + §7 Web wire identifiers.
 //!
@@ -12,10 +14,12 @@
 //! - `WEBFETCH_MAX_REDIRECTS = 10` (TS `MAX_REDIRECTS`, `utils.ts:125`)
 //! - `WEBFETCH_TRUNCATION_SUFFIX = "\n\n[Content truncated due to length...]"`
 //! - `WEBFETCH_USER_AGENT_PREFIX = "claude-code-tool/"`
-//! - `WEBFETCH_ALLOWED_SCHEMES = ["https", "http"]`
+//! - `WEBFETCH_ALLOWED_SCHEMES = ["https", "http"]` (upgrade-native schemes, NOT
+//!   a rejection allow-list — see finding #93)
 //! - HTTP error format: `"WebFetch: HTTP {status} from {url}"`
 //! - DNS error format: `"WebFetch: cannot resolve {host}"`
 
+use crate::persist::{append_binary_footer, is_binary_content_type};
 use async_trait::async_trait;
 use once_cell::sync::Lazy;
 use permission::result::PermissionMetadata;
@@ -66,7 +70,12 @@ pub const WEBFETCH_TRUNCATION_SUFFIX: &str = "\n\n[Content truncated due to leng
 /// Spec §7 lock.
 pub const WEBFETCH_USER_AGENT_PREFIX: &str = "claude-code-tool/";
 
-/// Schemes that `WebFetchTool` will accept. Spec §7 lock.
+/// The two web schemes WebFetch handles natively: `https` is fetched as-is and
+/// `http` is upgraded to `https` before the fetch ([`upgrade_to_https`]). This is
+/// NOT a rejection allow-list — claude-code's WebFetch never rejects a URL by
+/// scheme (see [`validate_url`] / finding #93); a non-http(s) scheme that passes
+/// the SSRF gate reaches the transport and fails there. Retained only for
+/// documentation/parity-fixture purposes.
 pub const WEBFETCH_ALLOWED_SCHEMES: &[&str] = &["https", "http"];
 
 /// Per-request HTTP timeout for WebFetch — byte-locked to claude-code `KHp=60000`
@@ -87,26 +96,32 @@ pub struct WebFetchInput {
     pub prompt: Option<String>,
 }
 
-/// Validate that `url_str` parses AND uses an allowed scheme.
+/// Validate that `url_str` parses and passes the SSRF/abuse gate.
 ///
 /// Returns the parsed `url::Url` on success, or a descriptive error string on
-/// failure. On scheme miss, the error string is byte-locked to
-/// `"URL scheme '{scheme}' not allowed; only https/http"` (spec §5).
+/// failure.
+///
+/// PARITY (#93): claude-code's WebFetch path (`getURLMarkdownContent`/
+/// `validateURL` = `oqa`) does NOT reject by scheme — it only parse-checks,
+/// rejects embedded credentials, and rejects a hostname with fewer than two
+/// dot-separated labels, then upgrades `http:`→`https:`. A non-http(s) scheme
+/// like `ftp://host.tld/` therefore passes `validateURL` (and fails later at
+/// transport time). Schemes with no host (`file:///…`, `data:…`) are rejected
+/// by the `< 2 labels` host rule, NOT by a scheme allow-list. The `Invalid URL
+/// protocol` scheme check belongs to the OS-open path (`uVu`/`Dni`), not
+/// WebFetch. The prior `WEBFETCH_ALLOWED_SCHEMES` rejection here was an invented
+/// divergence and has been removed.
+///
+/// [`crate::url_safety::validate_url_safety`] remains the SSRF/abuse gate
+/// (length / credentials / single-label host) — faithful to `validateURL`.
 ///
 /// # Errors
-/// Returns an error if the URL fails to parse or uses a non-allowed scheme.
+/// Returns an error if the URL fails to parse or fails the SSRF/abuse gate.
 pub fn validate_url(url_str: &str) -> Result<url::Url, String> {
     let parsed = url::Url::parse(url_str).map_err(|e| format!("invalid URL: {e}"))?;
-    let scheme = parsed.scheme();
-    if !WEBFETCH_ALLOWED_SCHEMES.contains(&scheme) {
-        return Err(format!(
-            "URL scheme '{scheme}' not allowed; only https/http"
-        ));
-    }
     // claude-code `validateURL` SSRF/abuse gate: overlong URL, embedded
-    // credentials, single-label/internal hostname. (The scheme allow-list above
-    // is a Rust-side addition kept for defence-in-depth — claude-code upgrades
-    // http→https instead of rejecting non-https here.)
+    // credentials, single-label/internal hostname (the latter also rejects
+    // host-less schemes such as `file:`/`data:`, matching `oqa`).
     crate::url_safety::validate_url_safety(url_str, &parsed)?;
     Ok(parsed)
 }
@@ -312,22 +327,15 @@ pub fn is_permitted_redirect(original_url: &str, redirect_url: &str) -> bool {
     orig_host.is_some() && orig_host == redir_host
 }
 
-/// Truncate the converted `markdown` to [`WEBFETCH_MAX_MARKDOWN_LEN`] chars,
-/// appending [`WEBFETCH_TRUNCATION_SUFFIX`] when truncated — mirrors the
-/// `markdownContent.length > MAX_MARKDOWN_LENGTH` slice in
-/// `applyPromptToMarkdown` (`utils.ts:529-533`), but applied to the returned
-/// content (per this batch's spec: cap the markdown before returning). Slices on
-/// a `char` boundary (Unicode scalar), matching TS's UTF-16 `.slice` for BMP
-/// text. Returns `(possibly_truncated, truncated_flag)`.
+/// Whether the FULL fetched `body` exceeds the 100k-char apply-step cap and would
+/// therefore be truncated inside the apply step (`applyPromptToMarkdown` = `l9n`:
+/// `t.length > Cut`). PARITY (#88): the body is cached/returned in FULL; the cap
+/// only fires inside the apply step, so this is the source of the LingXi-internal
+/// `truncated` telemetry/result flag. Measured by `char` count (Unicode scalar),
+/// matching the raw fast-path condition `content.length < Cut`.
 #[must_use]
-pub fn truncate_markdown_for_return(markdown: String) -> (String, bool) {
-    if markdown.chars().count() <= WEBFETCH_MAX_MARKDOWN_LEN {
-        return (markdown, false);
-    }
-    let cut: String = markdown.chars().take(WEBFETCH_MAX_MARKDOWN_LEN).collect();
-    let mut out = cut;
-    out.push_str(WEBFETCH_TRUNCATION_SUFFIX);
-    (out, true)
+pub fn body_exceeds_markdown_cap(body: &str) -> bool {
+    body.chars().count() > WEBFETCH_MAX_MARKDOWN_LEN
 }
 
 /// Format the byte-locked DNS-error string. Spec §5:
@@ -466,31 +474,105 @@ impl WebFetchTool {
         }
     }
 
-    /// Returns `Some(model_output)` when the apply step ran, else `None`.
-    /// `is_preapproved` is the host+path allowlist result for the fetched URL.
+    /// Produce the tool-visible result body from the FULL fetched `content`,
+    /// 1:1 with claude-code's WebFetch `call()` apply decision (#89):
+    ///
+    /// ```text
+    /// let g = isPreapprovedUrl(url);
+    /// if (g && contentType.includes("text/markdown") && content.length < Cut)
+    ///     result = content;                      // raw fast-path
+    /// else
+    ///     result = await applyPromptToMarkdown(prompt, content, signal, …, g);
+    /// ```
+    ///
+    /// The apply model is the DEFAULT; the raw body is returned ONLY when the URL
+    /// is preapproved AND the content-type is `text/markdown` AND the body is
+    /// under the 100k-char cap (`Cut`). The prompt is ALWAYS passed (empty string
+    /// when absent — claude-code's `s` is the input prompt, present or `undefined`
+    /// interpolated; LingXi models absence as `""`). The 100k truncation lives
+    /// INSIDE the apply step ([`Self::apply_prompt`] → `markdown::truncate_markdown`),
+    /// NOT before caching/returning (#88).
+    ///
+    /// LingXi degraded path: when no `side_query` client is wired (mobile/minimal),
+    /// there is no apply model, so the raw body is returned regardless. This is a
+    /// faithful degradation — claude-code always has a model available.
     #[cfg(feature = "web-markdown")]
-    async fn maybe_apply(
+    async fn apply_or_raw(
         &self,
         is_preapproved: bool,
+        content_type: &str,
         content: &str,
         prompt: Option<&str>,
-    ) -> Option<String> {
-        if let (Some(client), Some(p)) = (self.side_query.as_ref(), prompt) {
-            return Some(self.apply_prompt(client, is_preapproved, content, p).await);
+    ) -> String {
+        // Raw fast-path: preapproved + text/markdown + under the 100k char cap.
+        if is_preapproved
+            && content_type.contains("text/markdown")
+            && content.chars().count() < WEBFETCH_MAX_MARKDOWN_LEN
+        {
+            return content.to_string();
         }
-        None
+        // Apply step is the default whenever a model (side_query) is wired.
+        if let Some(client) = self.side_query.as_ref() {
+            return self
+                .apply_prompt(client, is_preapproved, content, prompt.unwrap_or(""))
+                .await;
+        }
+        // Degraded path (no model wired): return the raw body.
+        content.to_string()
     }
 
-    /// No-op fallback when `web-markdown` is disabled.
+    /// No-op fallback when `web-markdown` is disabled: always the raw body.
     #[cfg(not(feature = "web-markdown"))]
     #[allow(clippy::unused_async)]
-    async fn maybe_apply(
+    async fn apply_or_raw(
         &self,
         _is_preapproved: bool,
-        _content: &str,
+        _content_type: &str,
+        content: &str,
         _prompt: Option<&str>,
-    ) -> Option<String> {
-        None
+    ) -> String {
+        content.to_string()
+    }
+
+    /// Persist the RAW response `body` to a temp file when `content_type` is a
+    /// binary type ([`is_binary_content_type`] = `U7r`), 1:1 with the
+    /// `if(U7r(a)){…B$e(i,a,A)…}` block in `getURLMarkdownContent`.
+    ///
+    /// Returns `(persisted_path, persisted_size)` — both `None` for a non-binary
+    /// body or on a write failure (matching `if(!("error"in h))`, which silently
+    /// skips persistence and the footer on error).
+    ///
+    /// Temp dir: `<workspace>/.claude/tool-results` (the same project-local
+    /// tool-results dir other tools use, e.g. `tools/mcp`'s binary-blob persist).
+    /// claude-code uses `<config>/<session>/tool-results`; LingXi's tool context
+    /// exposes the workspace root, not the config/session root, so the artifact is
+    /// written under the project's `.claude/tool-results`. (Residual: see report.)
+    fn persist_binary(
+        &self,
+        content_type: &str,
+        body: &[u8],
+    ) -> (Option<String>, Option<usize>) {
+        if !is_binary_content_type(content_type) {
+            return (None, None);
+        }
+        let unix_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0u128, |d| d.as_millis());
+        // A non-crypto uniqueness seed for the 6-char base-36 suffix (matches
+        // `Math.random().toString(36).slice(2,8)`'s role: collision-avoidance, not
+        // security). Mixes the ns clock with the body length + pointer.
+        let seed = {
+            let ns = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0u128, |d| d.as_nanos()) as u64;
+            ns ^ (body.len() as u64).rotate_left(17) ^ (body.as_ptr() as u64)
+        };
+        let stem = crate::persist::persisted_filename(unix_ms, seed);
+        let output_dir = self.ctx.workspace.join(".claude").join("tool-results");
+        match crate::persist::persist_binary_content(body, content_type, &stem, &output_dir) {
+            crate::persist::PersistResult::Ok { filepath, size } => (Some(filepath), Some(size)),
+            crate::persist::PersistResult::Err { .. } => (None, None),
+        }
     }
 
     async fn emit_started(&self, invocation_id: &str, url: &str, prompt_present: bool) {
@@ -725,22 +807,34 @@ Usage notes:\n\
         // ahead of the upgrade block at `utils.ts:406-416`. Repeat fetches of
         // the same URL return instantly without a second network round-trip.
         if let Some(hit) = crate::cache::cache_get(&parsed_input.url) {
-            // The cached `content` is the already-capped markdown; it was
-            // truncated iff it carries the truncation suffix (the live path
-            // appends [`WEBFETCH_TRUNCATION_SUFFIX`] when the 100k char cap hit).
-            let truncated = hit.content.ends_with(WEBFETCH_TRUNCATION_SUFFIX);
+            // PARITY (#88): the cached `content` is the FULL body (claude-code
+            // caches `content:p` un-sliced; the 100k cap only fires inside the
+            // apply step). The LingXi-internal `truncated` flag is derived from
+            // whether the body exceeds the apply-step cap, not from a suffix.
+            let truncated = body_exceeds_markdown_cap(&hit.content);
             // Cache hits do no network work, so the reported duration is 0 ms.
             self.emit_completed(&invocation_id, hit.status, hit.bytes as u64, truncated, 0)
                 .await;
-            // claude-code caches only the markdown; the prompt is applied on EVERY
-            // call (cache hit or miss). Run the apply step on the cached content.
-            let out_content = match self
-                .maybe_apply(is_preapproved, &hit.content, parsed_input.prompt.as_deref())
-                .await
-            {
-                Some(applied) => applied,
-                None => hit.content,
-            };
+            // claude-code caches only the body; the apply decision runs on EVERY
+            // call (cache hit or miss) — PARITY (#89): apply is the default, raw
+            // only for preapproved + text/markdown + under-cap.
+            let out_content = self
+                .apply_or_raw(
+                    is_preapproved,
+                    &hit.content_type,
+                    &hit.content,
+                    parsed_input.prompt.as_deref(),
+                )
+                .await;
+            // Binary footer (#94): re-append on the cache-hit path when the cached
+            // entry persisted a binary artifact.
+            let out_content = append_binary_footer(
+                out_content,
+                hit.persisted_path.as_deref(),
+                &hit.content_type,
+                hit.persisted_size,
+                hit.bytes,
+            );
             return Ok(ToolCallResult {
                 data: json!({
                     "url": parsed_input.url,
@@ -984,39 +1078,73 @@ Usage notes:\n\
                     .find(|(k, _)| k.eq_ignore_ascii_case("content-type"))
                     .map_or_else(String::new, |(_, v)| v.clone());
 
+                // Binary persist (#94): claude-code's `getURLMarkdownContent`
+                // persists the RAW response bytes to a temp file BEFORE the
+                // HTML→markdown conversion, whenever the content-type is binary
+                // (`U7r`). The artifact is the raw bytes; the cached/returned
+                // `content` is still the converted markdown / utf-8 text. On a
+                // persist error, the footer is simply skipped (`if(!("error"in
+                // h))`).
+                //
+                // RESIDUAL: the M1 `HttpResponse.body` is a `String` (UTF-8 text),
+                // so for a genuinely-binary body the original bytes are already
+                // lost to UTF-8 decoding upstream — we persist `body.as_bytes()`,
+                // which is faithful for text-ish/over-cap bodies and exercises the
+                // full predicate/persist/footer path, but is NOT byte-identical to
+                // the wire for true binaries. Full fidelity needs a `Vec<u8>`
+                // transport body (a cross-subsystem change — see report).
+                let (persisted_path, persisted_size) =
+                    self.persist_binary(&content_type, resp.body.as_bytes());
+
                 // HTML->markdown (claude-code converts HTML; non-HTML is used as-is).
                 // Behind `web-markdown`; feature off => content is the raw body.
                 #[cfg(feature = "web-markdown")]
-                let converted = if crate::markdown::is_html_content_type(&content_type) {
+                let content = if crate::markdown::is_html_content_type(&content_type) {
                     crate::markdown::html_to_markdown(&resp.body)
                 } else {
                     resp.body
                 };
                 #[cfg(not(feature = "web-markdown"))]
-                let converted = resp.body;
+                let content = resp.body;
 
-                // Markdown cap (`utils.ts:128`/`529-533`): truncate the converted
-                // markdown to 100k chars, appending the suffix, BEFORE caching /
-                // returning. `truncated` reflects whether this cut fired.
-                let (content, truncated) = truncate_markdown_for_return(converted);
+                // PARITY (#88): cache + return the FULL converted body. claude-code
+                // caches `content:p` un-sliced — the 100k cap fires ONLY inside the
+                // apply step. The LingXi-internal `truncated` flag reflects whether
+                // the body exceeds the apply-step cap.
+                let truncated = body_exceeds_markdown_cap(&content);
 
                 crate::cache::cache_set(
                     parsed_input.url.clone(),
                     crate::cache::CachedFetch {
                         content: content.clone(),
                         status,
-                        content_type,
+                        content_type: content_type.clone(),
                         bytes: body_bytes,
-                        persisted_path: None,
+                        persisted_path: persisted_path.clone(),
+                        persisted_size,
                     },
                 );
                 self.emit_completed(&invocation_id, status, body_bytes as u64, truncated, elapsed_ms)
                     .await;
 
+                // PARITY (#89): apply is the default; raw only for preapproved +
+                // text/markdown + under-cap.
                 let out_content = self
-                    .maybe_apply(is_preapproved, &content, parsed_input.prompt.as_deref())
-                    .await
-                    .unwrap_or(content);
+                    .apply_or_raw(
+                        is_preapproved,
+                        &content_type,
+                        &content,
+                        parsed_input.prompt.as_deref(),
+                    )
+                    .await;
+                // Binary footer (#94): append when a binary artifact was persisted.
+                let out_content = append_binary_footer(
+                    out_content,
+                    persisted_path.as_deref(),
+                    &content_type,
+                    persisted_size,
+                    body_bytes,
+                );
 
                 Ok(ToolCallResult {
                     data: json!({
@@ -1100,22 +1228,34 @@ mod tests {
         assert_eq!(u.scheme(), "http");
     }
 
+    // PARITY (#93): WebFetch's `validateURL` (`oqa`) has NO scheme allow-list.
+    // `file:` / `data:` URLs are host-less, so they are rejected by the
+    // single-label-host SSRF rule (NOT by scheme); `ftp://host.tld/` has a valid
+    // 2-label host so it PASSES `validateURL` and would fail later at transport
+    // time — claude-code never rejects it by scheme here.
+
     #[test]
-    fn rejects_file_scheme() {
+    fn rejects_file_scheme_via_host_rule() {
+        // `file:///etc/passwd` has an empty host (< 2 labels) → rejected by the
+        // SSRF gate, exactly as claude-code's `oqa` rejects it.
         let err = validate_url("file:///etc/passwd").expect_err("file:// must be rejected");
-        assert_eq!(err, "URL scheme 'file' not allowed; only https/http");
+        assert_eq!(err, "URL hostname is not publicly resolvable");
     }
 
     #[test]
-    fn rejects_data_scheme() {
+    fn rejects_data_scheme_via_host_rule() {
         let err = validate_url("data:text/plain,hello").expect_err("data: must be rejected");
-        assert_eq!(err, "URL scheme 'data' not allowed; only https/http");
+        // `data:` URLs have no host (< 2 labels) → SSRF gate rejects them.
+        assert_eq!(err, "URL hostname is not publicly resolvable");
     }
 
     #[test]
-    fn rejects_ftp_scheme() {
-        let err = validate_url("ftp://example.com/file").expect_err("ftp:// must be rejected");
-        assert_eq!(err, "URL scheme 'ftp' not allowed; only https/http");
+    fn does_not_reject_ftp_scheme_by_scheme() {
+        // `ftp://example.com/file` parses, has a 2-label host, and carries no
+        // credentials → `validateURL` accepts it (parity: no scheme allow-list).
+        // It would fail later at fetch time, not here.
+        let u = validate_url("ftp://example.com/file").expect("ftp must pass validate_url");
+        assert_eq!(u.scheme(), "ftp");
     }
 
     #[test]
@@ -1143,43 +1283,37 @@ mod tests {
         assert_eq!(TOOL_NAME, "WebFetch");
     }
 
+    // PARITY (#88): the body is cached/returned in FULL — there is NO
+    // pre-return truncation; the 100k cap only fires inside the apply step.
+    // `body_exceeds_markdown_cap` is just the source of the `truncated` flag.
+
     #[test]
-    fn does_not_truncate_short_markdown() {
-        let small = "hello world".to_string();
-        let (out, flag) = truncate_markdown_for_return(small.clone());
-        assert_eq!(out, small);
-        assert!(!flag);
+    fn cap_flag_false_for_short_body() {
+        assert!(!body_exceeds_markdown_cap("hello world"));
     }
 
     #[test]
-    fn does_not_truncate_markdown_exactly_at_cap() {
+    fn cap_flag_false_at_exactly_cap() {
+        // length == cap is NOT over the cap (`t.length > Cut` is strict; the raw
+        // fast-path also uses `length < Cut`).
         let exact = "a".repeat(WEBFETCH_MAX_MARKDOWN_LEN);
-        let (out, flag) = truncate_markdown_for_return(exact.clone());
-        assert_eq!(out, exact);
-        assert!(!flag);
+        assert!(!body_exceeds_markdown_cap(&exact));
     }
 
     #[test]
-    fn truncates_oversized_markdown_to_char_cap() {
-        let big = "a".repeat(WEBFETCH_MAX_MARKDOWN_LEN + 1024);
-        let (out, flag) = truncate_markdown_for_return(big);
-        assert!(flag);
-        assert!(out.ends_with(WEBFETCH_TRUNCATION_SUFFIX));
-        // Char count of the body (excluding the suffix) is exactly the cap.
-        let body_only = &out[..out.len() - WEBFETCH_TRUNCATION_SUFFIX.len()];
-        assert_eq!(body_only.chars().count(), WEBFETCH_MAX_MARKDOWN_LEN);
+    fn cap_flag_true_over_cap() {
+        let big = "a".repeat(WEBFETCH_MAX_MARKDOWN_LEN + 1);
+        assert!(body_exceeds_markdown_cap(&big));
     }
 
     #[test]
-    fn truncates_markdown_on_char_boundary_multibyte() {
-        // A run of multibyte chars; the cap is by CHAR (not byte), so no scalar
-        // is split and the body holds exactly WEBFETCH_MAX_MARKDOWN_LEN chars.
-        let s = "あ".repeat(WEBFETCH_MAX_MARKDOWN_LEN + 50);
-        let (out, flag) = truncate_markdown_for_return(s);
-        assert!(flag);
-        let body_only = &out[..out.len() - WEBFETCH_TRUNCATION_SUFFIX.len()];
-        assert!(body_only.is_char_boundary(body_only.len()));
-        assert_eq!(body_only.chars().count(), WEBFETCH_MAX_MARKDOWN_LEN);
+    fn cap_flag_counts_chars_not_bytes_multibyte() {
+        // A run of multibyte chars: the cap is by CHAR (not byte). `cap` such
+        // multibyte chars is exactly at the cap (not over); `cap+1` is over.
+        let at_cap = "あ".repeat(WEBFETCH_MAX_MARKDOWN_LEN);
+        assert!(!body_exceeds_markdown_cap(&at_cap));
+        let over = "あ".repeat(WEBFETCH_MAX_MARKDOWN_LEN + 1);
+        assert!(body_exceeds_markdown_cap(&over));
     }
 
     // ---- is_permitted_redirect (utils.ts:212-243) --------------------------
@@ -1601,6 +1735,9 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
 
     #[tokio::test]
     async fn rejects_file_scheme_in_call() {
+        // PARITY (#93): `file:///etc/passwd` is rejected by the single-label-host
+        // SSRF rule (it has no host), NOT by a scheme allow-list — matching
+        // claude-code's `validateURL`, which has no scheme rejection.
         let (ctx, _http, _sink) = make_web_ctx();
         let tool = WebFetchTool::new(ctx);
         let err = tool
@@ -1612,7 +1749,7 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
             .await
             .expect_err("file:// must be rejected");
         assert!(matches!(err, ToolError::InvalidInput(_)));
-        assert!(format!("{err}").contains("URL scheme 'file' not allowed; only https/http"));
+        assert!(format!("{err}").contains("URL hostname is not publicly resolvable"));
     }
 
     // ---- validateInput parity (WebFetchTool.ts:191-204) --------------------
@@ -2300,6 +2437,133 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
             assert!(seen.contains("# Doc"));
             assert_eq!(http.received_requests().len(), 2, "second call must be a cache hit (no new fetch)");
         }
+
+        // PARITY (#89): the apply step is the DEFAULT — it runs whenever a model
+        // (side_query) is wired, even with NO prompt (claude-code always passes
+        // the prompt `s`, empty when absent). Previously LingXi required
+        // `Some(prompt)`, which was the inverse of claude-code.
+        #[tokio::test]
+        async fn apply_runs_even_without_a_prompt() {
+            let _env = SKIP_ENV_LOCK.lock().await;
+            crate::cache::clear_web_fetch_cache();
+            crate::blocklist::clear_domain_check_cache();
+            let (ctx, http, _sink) = make_web_ctx();
+            http.enqueue(preflight_allow());
+            http.enqueue(ScriptedResponse::Sync(protocol::HttpResponse {
+                status: 200,
+                headers: vec![("content-type".into(), "text/html".into())],
+                body: "<h1>NoPrompt</h1>".into(),
+            }));
+            let capture = std::sync::Arc::new(CapturingSideQuery {
+                captured: std::sync::Mutex::new(None),
+                reply: "APPLIED".into(),
+            });
+            let tool = WebFetchTool::new(ctx).with_side_query(capture.clone());
+            // NOTE: no "prompt" key in the input.
+            let res = tool
+                .call(json!({ "url": "https://noprompt.example/x" }), fresh_ctx(), fresh_tx())
+                .await
+                .expect("ok");
+            assert_eq!(res.data["content"], "APPLIED", "apply must run with no prompt (#89)");
+        }
+
+        // PARITY (#89): the RAW fast-path is taken ONLY when the URL is
+        // preapproved AND content-type is text/markdown AND the body is under the
+        // 100k cap. `docs.python.org` is a preapproved host; a small text/markdown
+        // body → return raw, NO apply call.
+        #[tokio::test]
+        async fn preapproved_markdown_under_cap_skips_apply() {
+            let _env = SKIP_ENV_LOCK.lock().await;
+            crate::cache::clear_web_fetch_cache();
+            crate::blocklist::clear_domain_check_cache();
+            let (ctx, http, _sink) = make_web_ctx();
+            http.enqueue(preflight_allow());
+            http.enqueue(ScriptedResponse::Sync(protocol::HttpResponse {
+                status: 200,
+                headers: vec![("content-type".into(), "text/markdown".into())],
+                body: "# Raw markdown".into(),
+            }));
+            let capture = std::sync::Arc::new(CapturingSideQuery {
+                captured: std::sync::Mutex::new(None),
+                reply: "SHOULD-NOT-RUN".into(),
+            });
+            let tool = WebFetchTool::new(ctx).with_side_query(capture.clone());
+            let res = tool
+                .call(
+                    json!({ "url": "https://docs.python.org/3/library/os.html", "prompt": "p" }),
+                    fresh_ctx(),
+                    fresh_tx(),
+                )
+                .await
+                .expect("ok");
+            assert_eq!(res.data["content"], "# Raw markdown", "preapproved+md+under-cap → raw");
+            assert!(
+                capture.captured.lock().unwrap().is_none(),
+                "apply model must NOT be called on the raw fast-path"
+            );
+        }
+
+        // PARITY (#89): a preapproved + text/markdown body that is OVER the 100k
+        // cap does NOT take the raw fast-path — it runs the apply step.
+        #[tokio::test]
+        async fn preapproved_markdown_over_cap_runs_apply() {
+            let _env = SKIP_ENV_LOCK.lock().await;
+            crate::cache::clear_web_fetch_cache();
+            crate::blocklist::clear_domain_check_cache();
+            let (ctx, http, _sink) = make_web_ctx();
+            http.enqueue(preflight_allow());
+            let big = "a".repeat(WEBFETCH_MAX_MARKDOWN_LEN + 1);
+            http.enqueue(ScriptedResponse::Sync(protocol::HttpResponse {
+                status: 200,
+                headers: vec![("content-type".into(), "text/markdown".into())],
+                body: big,
+            }));
+            let capture = std::sync::Arc::new(CapturingSideQuery {
+                captured: std::sync::Mutex::new(None),
+                reply: "APPLIED-OVER-CAP".into(),
+            });
+            let tool = WebFetchTool::new(ctx).with_side_query(capture.clone());
+            let res = tool
+                .call(
+                    json!({ "url": "https://docs.python.org/big", "prompt": "p" }),
+                    fresh_ctx(),
+                    fresh_tx(),
+                )
+                .await
+                .expect("ok");
+            assert_eq!(res.data["content"], "APPLIED-OVER-CAP", "over-cap md → apply, not raw");
+            assert_eq!(res.data["truncated"], true, "#88: flag set when body exceeds cap");
+        }
+
+        // PARITY (#89): a NON-preapproved text/markdown body under the cap still
+        // runs the apply step (preapproval is required for the raw fast-path).
+        #[tokio::test]
+        async fn non_preapproved_markdown_runs_apply() {
+            let _env = SKIP_ENV_LOCK.lock().await;
+            crate::cache::clear_web_fetch_cache();
+            crate::blocklist::clear_domain_check_cache();
+            let (ctx, http, _sink) = make_web_ctx();
+            http.enqueue(preflight_allow());
+            http.enqueue(ScriptedResponse::Sync(protocol::HttpResponse {
+                status: 200,
+                headers: vec![("content-type".into(), "text/markdown".into())],
+                body: "# md".into(),
+            }));
+            let capture = std::sync::Arc::new(CapturingSideQuery {
+                captured: std::sync::Mutex::new(None),
+                reply: "APPLIED-NONPRE".into(),
+            });
+            let tool = WebFetchTool::new(ctx).with_side_query(capture.clone());
+            let res = tool
+                .call(
+                    json!({ "url": "https://random-not-preapproved.example/x", "prompt": "p" }),
+                    fresh_ctx(),
+                    fresh_tx(),
+                )
+                .await
+                .expect("ok");
+            assert_eq!(res.data["content"], "APPLIED-NONPRE", "non-preapproved md → apply");
+        }
     }
 
     #[cfg(feature = "web-markdown")]
@@ -2381,5 +2645,141 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
         }
         std::env::remove_var("LINGXI_SKIP_WEBFETCH_PREFLIGHT");
         assert!(!skip_web_fetch_preflight(), "unset must be falsy");
+    }
+
+    /// Build a web ctx whose workspace is `workspace` (so binary-persist writes
+    /// land in a controlled temp dir, not `/tmp`).
+    fn make_web_ctx_with_workspace(
+        workspace: std::path::PathBuf,
+    ) -> (BuiltinToolContext, Arc<MockHttpTransport>, Arc<InMemorySink>) {
+        let bus = Arc::new(AnalyticsBus::new());
+        let sink = Arc::new(InMemorySink::default());
+        let http = Arc::new(MockHttpTransport::new());
+        let mut ctx = tool_api::test_support::ctx_for_file_tools(
+            tool_api::test_support::make_dummy_fs(),
+            bus,
+            vec![workspace.clone()],
+        );
+        ctx.http = http.clone() as Arc<dyn HttpTransport>;
+        ctx.workspace = workspace;
+        (ctx, http, sink)
+    }
+
+    // PARITY (#88): a body OVER the 100k cap is cached + returned in FULL (no
+    // pre-return truncation, no truncation suffix on the raw path) — the cap only
+    // fires inside the apply step, which is absent here (no side_query). The
+    // `truncated` flag is still set.
+    #[tokio::test]
+    async fn oversized_body_is_returned_in_full_no_apply() {
+        let _env = SKIP_ENV_LOCK.lock().await;
+        crate::cache::clear_web_fetch_cache();
+        crate::blocklist::clear_domain_check_cache();
+        let (ctx, http, _sink) = make_web_ctx();
+        let big = "Z".repeat(WEBFETCH_MAX_MARKDOWN_LEN + 5000);
+        http.enqueue(preflight_allow());
+        http.enqueue(ok_response(200, &big));
+        let tool = WebFetchTool::new(ctx);
+        let res = tool
+            .call(
+                json!({ "url": "https://full-body.example/big" }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .expect("ok");
+        let content = res.data["content"].as_str().unwrap();
+        // FULL body, NOT truncated, NO suffix.
+        assert_eq!(content.chars().count(), WEBFETCH_MAX_MARKDOWN_LEN + 5000);
+        assert!(!content.ends_with(WEBFETCH_TRUNCATION_SUFFIX));
+        assert_eq!(res.data["truncated"], true, "flag reflects over-cap body");
+        // The cache also holds the FULL body.
+        let cached = crate::cache::cache_get("https://full-body.example/big").expect("cached");
+        assert_eq!(cached.content.chars().count(), WEBFETCH_MAX_MARKDOWN_LEN + 5000);
+    }
+
+    // PARITY (#94): a binary content-type persists the body to a temp file and
+    // appends the `[Binary content (...) also saved to <path>]` footer. (No
+    // side_query → raw body + footer.)
+    #[tokio::test]
+    async fn binary_content_persists_and_appends_footer() {
+        let _env = SKIP_ENV_LOCK.lock().await;
+        crate::cache::clear_web_fetch_cache();
+        crate::blocklist::clear_domain_check_cache();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let (ctx, http, _sink) = make_web_ctx_with_workspace(tmp.path().to_path_buf());
+        let body = "%PDF-1.4 fake pdf bytes";
+        http.enqueue(preflight_allow());
+        http.enqueue(ScriptedResponse::Sync(protocol::HttpResponse {
+            status: 200,
+            headers: vec![("content-type".into(), "application/pdf".into())],
+            body: body.to_string(),
+        }));
+        let tool = WebFetchTool::new(ctx);
+        let res = tool
+            .call(
+                json!({ "url": "https://binary.example/file.pdf" }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .expect("ok");
+        let content = res.data["content"].as_str().unwrap();
+        // Raw body, then the binary footer.
+        assert!(content.starts_with(body));
+        assert!(
+            content.contains(&format!(
+                "\n\n[Binary content (application/pdf, {}) also saved to ",
+                crate::persist::human_size(body.len() as u64)
+            )),
+            "missing binary footer: {content}"
+        );
+        // The persisted file exists under <workspace>/.claude/tool-results with a
+        // .pdf extension.
+        let results_dir = tmp.path().join(".claude").join("tool-results");
+        let entries: Vec<_> = std::fs::read_dir(&results_dir)
+            .expect("tool-results dir created")
+            .filter_map(Result::ok)
+            .collect();
+        assert_eq!(entries.len(), 1, "exactly one persisted artifact");
+        let name = entries[0].file_name().to_string_lossy().into_owned();
+        assert!(name.starts_with("webfetch-"), "name: {name}");
+        assert_eq!(
+            std::path::Path::new(&name).extension().and_then(|e| e.to_str()),
+            Some("pdf"),
+            "name: {name}"
+        );
+        assert_eq!(std::fs::read(entries[0].path()).unwrap(), body.as_bytes());
+    }
+
+    // PARITY (#94): a NON-binary (text/html) body does NOT persist and gets NO
+    // footer.
+    #[tokio::test]
+    async fn text_html_does_not_persist_or_footer() {
+        let _env = SKIP_ENV_LOCK.lock().await;
+        crate::cache::clear_web_fetch_cache();
+        crate::blocklist::clear_domain_check_cache();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let (ctx, http, _sink) = make_web_ctx_with_workspace(tmp.path().to_path_buf());
+        http.enqueue(preflight_allow());
+        http.enqueue(ScriptedResponse::Sync(protocol::HttpResponse {
+            status: 200,
+            headers: vec![("content-type".into(), "text/html; charset=utf-8".into())],
+            body: "<p>hi</p>".into(),
+        }));
+        let tool = WebFetchTool::new(ctx);
+        let res = tool
+            .call(
+                json!({ "url": "https://text.example/page" }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .expect("ok");
+        let content = res.data["content"].as_str().unwrap();
+        assert!(!content.contains("[Binary content"), "no footer for text/*");
+        assert!(
+            !tmp.path().join(".claude").join("tool-results").exists(),
+            "no tool-results dir created for non-binary content"
+        );
     }
 }

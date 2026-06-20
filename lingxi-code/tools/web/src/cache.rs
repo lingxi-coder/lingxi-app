@@ -38,7 +38,9 @@ pub const MAX_CACHE_ENTRIES: usize = 64;
 /// Haiku land in later batches; the cache stores the produced `content` as-is).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CachedFetch {
-    /// Tool-visible content body (post-truncation in the current pipeline).
+    /// Tool-visible content body. PARITY (#88): this is the FULL converted body —
+    /// claude-code caches `content:p` un-sliced; the 100k cap only fires inside
+    /// the apply step (`applyPromptToMarkdown`), not before caching.
     pub content: String,
     /// HTTP status code of the fetch.
     pub status: u16,
@@ -46,8 +48,13 @@ pub struct CachedFetch {
     pub content_type: String,
     /// Raw response byte length (the `bytes` field echoed in tool output).
     pub bytes: usize,
-    /// Path to a persisted binary artifact, if the body was binary.
+    /// Path to a persisted binary artifact, if the body was binary (`persistedPath`
+    /// in claude-code's cache entry). `None` for non-binary bodies.
     pub persisted_path: Option<String>,
+    /// Byte size of the persisted binary artifact (`persistedSize`). `None` when
+    /// nothing was persisted. The binary footer prefers this over `bytes`
+    /// (`Ma(persistedSize ?? bytes)`).
+    pub persisted_size: Option<usize>,
 }
 
 impl CachedFetch {
@@ -218,6 +225,7 @@ mod tests {
             content_type: "text/html".to_string(),
             bytes: content.len(),
             persisted_path: None,
+            persisted_size: None,
         }
     }
 

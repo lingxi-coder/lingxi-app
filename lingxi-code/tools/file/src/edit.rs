@@ -51,6 +51,17 @@ Usage:
 - The edit will FAIL if `old_string` is not unique in the file. Either provide a larger string with more surrounding context to make it unique or use `replace_all` to change every instance of `old_string`.
 - Use `replace_all` for replacing and renaming strings across the file. This parameter is useful if you want to rename a variable for instance."#;
 
+/// The SHORT Edit prompt — byte-locked VERBATIM to claude-code `RBp(e)`'s
+/// `Dh(e)===true` branch (binary offset 202614310), served to current-gen
+/// default models. `${Ws}`=Read; the line-prefix slot uses `t=N$e()`
+/// (`tengu_tab_read_sep`, defaults false) ⇒ `"line number + tab"` (matching the
+/// LONG body's `${n}`). The "fails otherwise" em-dash is U+2014.
+const EDIT_PROMPT_SHORT: &str = r#"Performs exact string replacement in a file.
+
+- You must Read the file in this conversation before editing, or the call will fail.
+- `old_string` must match the file exactly, including indentation, and be unique — the edit fails otherwise. Strip the Read line prefix (line number + tab) before matching.
+- `replace_all: true` replaces every occurrence instead."#;
+
 /// Patch-preview truncation template — spec §7. `{N}` is a literal that the
 /// emitter substitutes with the elided-line count via `String::replace`.
 pub const PATCH_TRUNCATION_SUFFIX_TEMPLATE: &str = "\n\n... [{N} lines truncated] ...";
@@ -312,8 +323,19 @@ impl Tool for FileEditTool {
         EDIT_DESCRIPTION.to_string()
     }
 
-    async fn prompt(&self, _opts: &PromptOptions) -> String {
-        EDIT_DESCRIPTION.to_string()
+    async fn prompt(&self, opts: &PromptOptions) -> String {
+        // Model-gated, mirroring claude-code `prompt({model:e}){return RBp(e)}`
+        // where `RBp(e){if(Dh(e))return SHORT; return LONG}` (binary offset
+        // 202614289). Predicate shared with TodoWrite via `tool_api`.
+        // NOTE: claude-code's Edit `description()` is the literal "A tool for
+        // editing files" (not model-gated, not this body); LingXi returns
+        // EDIT_DESCRIPTION there — a pre-existing divergence left untouched
+        // (out of scope for this prompt-gate fix).
+        if tool_api::dh_simple_system_prompt(opts.model.as_deref()) {
+            EDIT_PROMPT_SHORT.to_string()
+        } else {
+            EDIT_DESCRIPTION.to_string()
+        }
     }
 
     fn get_path(&self, input: &Value) -> Option<PathBuf> {
@@ -2105,7 +2127,7 @@ that bypasses Perforce tracking."
         ));
         // Locks `minimalUniquenessHint` empty (non-`ant` 3P build).
         assert!(!d.contains("smallest old_string"));
-        // prompt() equals DESCRIPTION for Edit.
+        // prompt(model:None) ⇒ Dh(undefined)=false ⇒ LONG (== DESCRIPTION for Edit).
         let p = tool
             .prompt(&PromptOptions {
                 include_examples: false,
@@ -2113,5 +2135,24 @@ that bypasses Perforce tracking."
             })
             .await;
         assert_eq!(p, d);
+    }
+
+    #[tokio::test]
+    async fn short_prompt_for_simple_system_model() {
+        let tmp = TempDir::new().unwrap();
+        let (ctx, _sink) = make_ctx(&tmp);
+        let tool = FileEditTool::new(ctx);
+        // model:claude-opus-4-8 ⇒ Dh=true ⇒ SHORT prompt (byte-anchor).
+        let p = tool
+            .prompt(&PromptOptions {
+                include_examples: false,
+                model: Some("claude-opus-4-8".to_string()),
+            })
+            .await;
+        assert_eq!(p, EDIT_PROMPT_SHORT);
+        assert!(p.starts_with("Performs exact string replacement in a file.\n\n- You must Read the file in this conversation before editing, or the call will fail."));
+        // Line-prefix slot resolves to "line number + tab" (N$e() default false).
+        assert!(p.contains("Strip the Read line prefix (line number + tab) before matching."));
+        assert!(p.ends_with("- `replace_all: true` replaces every occurrence instead."));
     }
 }

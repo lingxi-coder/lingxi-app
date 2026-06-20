@@ -20,6 +20,7 @@ pub mod anthropic_request;
 pub mod builtin_context;
 pub mod content_replacement;
 pub mod context;
+pub mod model_prompt_gate;
 pub mod progress;
 pub mod read_file_state;
 pub mod registry;
@@ -39,6 +40,7 @@ pub use builtin_context::{
 };
 pub use content_replacement::ContentReplacementState;
 pub use context::{ToolUseContext, ToolUseOptions};
+pub use model_prompt_gate::dh_simple_system_prompt;
 pub use progress::{progress_channel, ToolProgress, ToolProgressReceiver, ToolProgressSender};
 pub use read_file_state::{ReadFileEntry, ReadFileStateMap};
 pub use registry::ToolRegistry;

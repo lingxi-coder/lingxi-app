@@ -74,6 +74,11 @@ const GLOB_DESCRIPTION: &str = r#"- Fast file pattern matching tool that works w
 - Use this tool when you need to find files by name patterns
 - When you are doing an open ended search that may require multiple rounds of globbing and grepping, use the Agent tool instead"#;
 
+/// The SHORT Glob prompt — byte-locked VERBATIM to claude-code `Jhi(e)`'s
+/// `Dh(e)===true` branch (binary offset 195605886), served to current-gen
+/// default models. Single line, no interpolation.
+const GLOB_PROMPT_SHORT: &str = r#"Fast file pattern matching. Supports glob patterns like "**/*.js" or "src/**/*.ts". Returns matching file paths sorted by modification time."#;
+
 /// `extractGlobBaseDirectory` (`utils/glob.ts:17-64`): peel the static base
 /// directory (everything before the first glob metachar `* ? [ {`) off a
 /// pattern, returning `(base_dir, relative_pattern)`. Used to re-root absolute
@@ -184,8 +189,16 @@ impl Tool for GlobTool {
         GLOB_DESCRIPTION.to_string()
     }
 
-    async fn prompt(&self, _opts: &PromptOptions) -> String {
-        GLOB_DESCRIPTION.to_string()
+    async fn prompt(&self, opts: &PromptOptions) -> String {
+        // Model-gated, mirroring claude-code `prompt({model:e}){return Jhi(e)}`
+        // where `Jhi(e){if(Dh(e))return SHORT; return KBr}` (binary offset
+        // 195605879). `description()` stays the static LONG `KBr`. Predicate
+        // shared with TodoWrite via `tool_api`.
+        if tool_api::dh_simple_system_prompt(opts.model.as_deref()) {
+            GLOB_PROMPT_SHORT.to_string()
+        } else {
+            GLOB_DESCRIPTION.to_string()
+        }
     }
 
     async fn call(
@@ -385,6 +398,43 @@ mod tests {
             ),
             sink,
         )
+    }
+
+    #[tokio::test]
+    async fn prompt_is_model_gated() {
+        let tmp = TempDir::new().unwrap();
+        let (ctx, _sink) = make_ctx(&tmp);
+        let tool = GlobTool::new(ctx);
+        // description() is the static LONG list (KBr), never gated.
+        let d = tool
+            .description(
+                &json!({}),
+                &DescriptionOptions {
+                    is_non_interactive_session: false,
+                },
+            )
+            .await;
+        assert_eq!(d, GLOB_DESCRIPTION);
+        // prompt(model:None) ⇒ Dh(undefined)=false ⇒ LONG (== KBr).
+        let long = tool
+            .prompt(&PromptOptions {
+                include_examples: false,
+                model: None,
+            })
+            .await;
+        assert_eq!(long, GLOB_DESCRIPTION);
+        // prompt(model:claude-opus-4-8) ⇒ Dh=true ⇒ SHORT (byte-anchor).
+        let short = tool
+            .prompt(&PromptOptions {
+                include_examples: false,
+                model: Some("claude-opus-4-8".to_string()),
+            })
+            .await;
+        assert_eq!(short, GLOB_PROMPT_SHORT);
+        assert_eq!(
+            short,
+            "Fast file pattern matching. Supports glob patterns like \"**/*.js\" or \"src/**/*.ts\". Returns matching file paths sorted by modification time."
+        );
     }
 
     /// The glob env toggles (`CLAUDE_CODE_GLOB_*`) are process-global; cargo runs

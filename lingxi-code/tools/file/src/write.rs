@@ -29,6 +29,24 @@ use tool_api::BuiltinToolContext;
 /// Tool name byte-lock — matches claude-code tool registry.
 pub const TOOL_NAME: &str = "Write";
 
+/// The LONG Write prompt — byte-locked VERBATIM to claude-code `v0i(e)`'s
+/// `Dh(e)===false` branch (binary offset ~196432410): the base text plus
+/// `${ZAd()}` (the read-first line, `${Ws}`=Read) appended to the overwrite
+/// bullet, spelled out inline here. `${Ua}`=Edit. Em-dash is U+2014.
+const WRITE_PROMPT_LONG: &str = "Writes a file to the local filesystem.\n\nUsage:\n\
+- This tool will overwrite the existing file if there is one at the provided path.\n\
+- If this is an existing file, you MUST use the Read tool first to read the file's contents. This tool will fail if you did not read the file first.\n\
+- Prefer the Edit tool for modifying existing files \u{2014} it only sends the diff. Only use this tool to create new files or for complete rewrites.\n\
+- NEVER create documentation files (*.md) or README files unless explicitly requested by the User.\n\
+- Only use emojis if the user explicitly requests it. Avoid writing emojis to files unless asked.";
+
+/// The SHORT Write prompt — byte-locked VERBATIM to claude-code `v0i(e)`'s
+/// `Dh(e)===true` branch (binary offset 196432581), served to current-gen
+/// default models. `${Ws}`=Read, `${Ua}`=Edit. Em-dash is U+2014.
+const WRITE_PROMPT_SHORT: &str = "Writes a file to the local filesystem, overwriting if one exists.\n\
+\n\
+When to use: creating a new file, or fully replacing one you've already Read. Overwriting an existing file you haven't Read will fail. For partial changes, use Edit instead.";
+
 /// Build the model-facing `tool_result` message for a Write, byte-faithful to
 /// claude-code `FileWriteTool.mapToolResultToToolResultBlockParam`
 /// (`FileWriteTool.ts:418-433`): `create` → `"File created successfully at:
@@ -156,18 +174,15 @@ impl Tool for FileWriteTool {
         "Write a file to the local filesystem.".to_string()
     }
 
-    async fn prompt(&self, _opts: &PromptOptions) -> String {
-        // Verbatim claude-code `getWriteToolDescription()`
-        // (`FileWriteTool/prompt.ts:10-18`) with `getPreReadInstruction()`
-        // resolved (FILE_READ_TOOL_NAME = "Read") and the `—` em-dash
-        // rendered. No 3P/OSS-conditional fragments exist in this builder.
-        "Writes a file to the local filesystem.\n\nUsage:\n\
-- This tool will overwrite the existing file if there is one at the provided path.\n\
-- If this is an existing file, you MUST use the Read tool first to read the file's contents. This tool will fail if you did not read the file first.\n\
-- Prefer the Edit tool for modifying existing files — it only sends the diff. Only use this tool to create new files or for complete rewrites.\n\
-- NEVER create documentation files (*.md) or README files unless explicitly requested by the User.\n\
-- Only use emojis if the user explicitly requests it. Avoid writing emojis to files unless asked."
-            .to_string()
+    async fn prompt(&self, opts: &PromptOptions) -> String {
+        // Model-gated, mirroring claude-code `v0i(e){if(Dh(e))return SHORT;
+        // return LONG}` (binary offset ~196432410). Predicate shared with
+        // TodoWrite via `tool_api`.
+        if tool_api::dh_simple_system_prompt(opts.model.as_deref()) {
+            WRITE_PROMPT_SHORT.to_string()
+        } else {
+            WRITE_PROMPT_LONG.to_string()
+        }
     }
 
     fn get_path(&self, input: &Value) -> Option<PathBuf> {
@@ -415,6 +430,35 @@ mod tests {
     #[test]
     fn tool_name_is_write() {
         assert_eq!(TOOL_NAME, "Write");
+    }
+
+    #[tokio::test]
+    async fn prompt_is_model_gated() {
+        let tmp = TempDir::new().unwrap();
+        let (ctx, _sink) = make_ctx(&tmp);
+        let tool = FileWriteTool::new(ctx);
+        // model:None ⇒ Dh(undefined)=false ⇒ LONG (byte-anchor).
+        let long = tool
+            .prompt(&PromptOptions {
+                include_examples: false,
+                model: None,
+            })
+            .await;
+        assert_eq!(long, WRITE_PROMPT_LONG);
+        assert!(long.starts_with("Writes a file to the local filesystem.\n\nUsage:"));
+        assert!(long.contains("you MUST use the Read tool first"));
+        // model:claude-opus-4-8 ⇒ Dh=true ⇒ SHORT (byte-anchor).
+        let short = tool
+            .prompt(&PromptOptions {
+                include_examples: false,
+                model: Some("claude-opus-4-8".to_string()),
+            })
+            .await;
+        assert_eq!(short, WRITE_PROMPT_SHORT);
+        assert!(short.starts_with(
+            "Writes a file to the local filesystem, overwriting if one exists."
+        ));
+        assert!(short.contains("For partial changes, use Edit instead."));
     }
 
     #[test]

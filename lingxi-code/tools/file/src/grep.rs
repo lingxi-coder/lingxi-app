@@ -94,6 +94,18 @@ const GREP_DESCRIPTION: &str = r#"A powerful search tool built on ripgrep
   - Multiline matching: By default patterns match within single lines only. For cross-line patterns like `struct \{[\s\S]*?field`, use `multiline: true`
 "#;
 
+/// The SHORT Grep prompt — byte-locked VERBATIM to claude-code `Ajr(e)`'s
+/// `Dh(e)===true` branch (binary offset 197076712), served to current-gen
+/// default models. `${ns}`=Bash; the two em-dashes are U+2014. The regex
+/// snippets render with single backslashes (`function\s+\w+`, `interface\{\}`)
+/// — the JS template literal's `\\` collapse to one `\` in the final string.
+const GREP_PROMPT_SHORT: &str = r#"Content search built on ripgrep. Prefer this over `grep`/`rg` via Bash — results integrate with the permission UI and file links.
+
+- Full regex syntax (e.g. "log.*Error", "function\s+\w+"). Ripgrep, not grep — escape literal braces (`interface\{\}`).
+- Filter with `glob` (e.g. "**/*.tsx") or `type` (e.g. "js", "py", "rust").
+- `output_mode`: "content" (matching lines), "files_with_matches" (paths only, default), or "count".
+- `multiline: true` for patterns that span lines."#;
+
 /// `applyHeadLimit` (`GrepTool.ts:110-128`). `limit==Some(0)` → unlimited
 /// escape hatch; otherwise slice `[offset, offset+limit)` and report the
 /// applied limit only when truncation actually occurred.
@@ -476,8 +488,17 @@ impl Tool for GrepTool {
         GREP_DESCRIPTION.to_string()
     }
 
-    async fn prompt(&self, _opts: &PromptOptions) -> String {
-        GREP_DESCRIPTION.to_string()
+    async fn prompt(&self, opts: &PromptOptions) -> String {
+        // Model-gated, mirroring claude-code `prompt({model:e}){return Ajr(e)}`
+        // where `Ajr(e){if(Dh(e))return SHORT; return LONG}` (binary offset
+        // 197076712). `description(){return Ajr(void 0)}` is hard-pinned to the
+        // LONG (`Dh(undefined)`=false). Predicate shared with TodoWrite via
+        // `tool_api`.
+        if tool_api::dh_simple_system_prompt(opts.model.as_deref()) {
+            GREP_PROMPT_SHORT.to_string()
+        } else {
+            GREP_DESCRIPTION.to_string()
+        }
     }
 
     async fn call(
@@ -914,6 +935,46 @@ mod tests {
     #[test]
     fn tool_name_is_grep() {
         assert_eq!(TOOL_NAME, "Grep");
+    }
+
+    #[tokio::test]
+    async fn prompt_is_model_gated() {
+        let tmp = TempDir::new().unwrap();
+        let (ctx, _sink) = make_ctx(&tmp);
+        let tool = GrepTool::new(ctx);
+        // description() = Ajr(void 0) ⇒ always LONG.
+        let d = tool
+            .description(
+                &json!({}),
+                &DescriptionOptions {
+                    is_non_interactive_session: false,
+                },
+            )
+            .await;
+        assert_eq!(d, GREP_DESCRIPTION);
+        // prompt(model:None) ⇒ Dh(undefined)=false ⇒ LONG.
+        let long = tool
+            .prompt(&PromptOptions {
+                include_examples: false,
+                model: None,
+            })
+            .await;
+        assert_eq!(long, GREP_DESCRIPTION);
+        // prompt(model:claude-opus-4-8) ⇒ Dh=true ⇒ SHORT (byte-anchor).
+        let short = tool
+            .prompt(&PromptOptions {
+                include_examples: false,
+                model: Some("claude-opus-4-8".to_string()),
+            })
+            .await;
+        assert_eq!(short, GREP_PROMPT_SHORT);
+        assert!(short.starts_with(
+            "Content search built on ripgrep. Prefer this over `grep`/`rg` via Bash \u{2014} results integrate with the permission UI and file links."
+        ));
+        // Regex snippets render with single backslashes.
+        assert!(short.contains("\"function\\s+\\w+\""));
+        assert!(short.contains("escape literal braces (`interface\\{\\}`)."));
+        assert!(short.ends_with("- `multiline: true` for patterns that span lines."));
     }
 
     /// Count mode must report the TRUE per-file + total count, with NO per-file

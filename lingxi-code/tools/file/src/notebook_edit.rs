@@ -172,15 +172,16 @@ impl Tool for NotebookEditTool {
     async fn prompt(&self, _opts: &PromptOptions) -> String {
         // Verbatim claude-code v2.1.183 NotebookEdit PROMPT const `A2a` (the
         // older cell_number-based text was version-skewed; v2.1.183 is cell_id-
-        // based). `${Ws}` → the "NotebookRead" tool name; em-dashes are U+2014;
-        // the backticks are literal markdown code spans. Note the BLANK LINE
-        // (`\n\n`) between the opening sentence and `Usage:` (binary A2a).
+        // based). `${Ws}` interpolates to the Read tool name (`Ws="Read"`, binary
+        // offset 195604698) — NOT "NotebookRead"; em-dashes are U+2014; the
+        // backticks are literal markdown code spans. Note the BLANK LINE (`\n\n`)
+        // between the opening sentence and `Usage:` (binary A2a, offset 201376292).
         "Replaces, inserts, or deletes a single cell in a Jupyter notebook (.ipynb file).\n\
 \n\
 Usage:\n\
-- You must use the NotebookRead tool on the notebook in this conversation before editing — this tool will fail otherwise.\n\
+- You must use the Read tool on the notebook in this conversation before editing — this tool will fail otherwise.\n\
 - `notebook_path` must be an absolute path.\n\
-- `cell_id` is the `id` attribute shown in the NotebookRead tool's `<cell id=\"...\">` output. It is required for `replace` and `delete`.\n\
+- `cell_id` is the `id` attribute shown in the Read tool's `<cell id=\"...\">` output. It is required for `replace` and `delete`.\n\
 - `edit_mode` defaults to `replace`. Use `insert` to add a new cell after the cell with the given `cell_id` (or at the beginning of the notebook if `cell_id` is omitted) — `cell_type` is required when inserting. Use `delete` to remove the cell.".to_string()
     }
 

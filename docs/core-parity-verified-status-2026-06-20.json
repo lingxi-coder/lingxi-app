@@ -1236,7 +1236,8 @@
     "detail": "LingXi emits <env> XML (=subagent Vym) instead of v2.1.183 MAIN `# Environment` markdown (Kym); the model-catalog lines are absent; a subagent-only `Notes:` footer is appended to MAIN; gitStatus context block missing; claudeMd spliced into system prompt instead of a <system-reminder> additional-context msg.",
     "binary": "Kym off 205822731 (main env) vs Vym off 205822510 (subagent env); Notes only in H$t subagent off 205826521; gitStatus off 197200698; additional-context off 205838506",
     "confidence": "HIGH — corroborated by THIS opus-4-8 session's own system prompt (got `# Environment` markdown + gitStatus: block + # claudeMd in <system-reminder>)",
-    "note": "Prior #46/#47/#48/#20 byte-matched the WRONG function (subagent Vym/H$t) for the main path. #48b gitStatus was a known-deferred residual."
+    "note": "Prior #46/#47/#48/#20 byte-matched the WRONG function (subagent Vym/H$t) for the main path. #48b gitStatus was a known-deferred residual.",
+    "status": "DONE (main 7cdbfd8c)"
    },
    {
     "id": "R-T1",
@@ -1285,7 +1286,8 @@
     "title": "Version stamps stale: AI_AGENT=claude-code_0-12-0_agent (want 2-1-183); WebFetch UA=claude-code/0.12.0 (want 2.1.183)",
     "binary": "VERSION='2.1.183'",
     "confidence": "HIGH",
-    "note": "every child process/hook/outbound request carries the wrong version"
+    "note": "every child process/hook/outbound request carries the wrong version",
+    "status": "DONE (main 98613461)"
    },
    {
     "id": "R-O1",
@@ -1310,7 +1312,8 @@
     "title": "Edit success message omits the staleRecovered (disk-modified) variant",
     "binary": "xYa off 202627842",
     "confidence": "HIGH",
-    "severity": "edge"
+    "severity": "edge",
+    "status": "DONE-documented-inert (main 98613461)"
    }
   ],
   "tier4_engineering_non_model_facing": [
@@ -1322,7 +1325,8 @@
    {
     "id": "R-TEST",
     "title": "`cargo test --workspace` is RED on main 5025da5e: 2 TUI snapshot tests fail (snapshot_palette_completion) — stale after #66 /cost->/usage removed it; command DATA is parity-correct but snapshots weren't regenerated; also a `❯o/co` overlay-render artifact to eyeball before accepting. 8164 pass / 2 fail.",
-    "confidence": "HIGH (self-verified)"
+    "confidence": "HIGH (self-verified)",
+    "status": "DONE (main 7293f64b)"
    },
    {
     "id": "R-MINOR",
@@ -1336,7 +1340,7 @@
    "the top-line 'core 1:1 COMPLETE' framing missed the prompt-envelope, model-gating, version-stamp, and permission-ordering categories",
    "#43 COLUMNS/LINES reference claim was itself STALE (LingXi is 1:1 there)"
   ],
-  "_progress": "TIER 1 (8eb13a81 perm, f361443f hooks) + TIER 2 MODEL-GATE COMPLETE (R-T1 file 67a6fc12, R-T2 web f072efd1, R-T6 bash 507792e6, R-T3/T4a/T4b, R-T5). main 507792e6. Parent caught+fixed 2 agent SHORT-prompt errors (Read used LONG Khi bullet; Bash avoid-list had find/grep + a missing-file commit gap). REMAINING: R-P1 envelope (big), Tier 3 (R-V1 version stamps, R-O1 dead hook events, R-F5 Edit stale-recovered).",
+  "_progress": "ALL HIGH+MED-VALUE FIXES DONE. main 7cdbfd8c. Tier1 (perm 8eb13a81, hooks f361443f) + Tier2 (model-gate R-T1/T2/T3/T4/T5/T6 + R-P1 ENVELOPE 7cdbfd8c) + Tier3 (R-V1 98613461, R-F5 doc, R-O2 in hooks) + R-TEST 7293f64b + R-EditDesc 59b6e76a. R-P1 byte-verified vs binary AND a live opus-4-8 session render (# Environment Kym, gitStatus in system-prompt w/ 'gitStatus:' prefix, claudeMd/userEmail/currentDate in leading <system-reminder> meta, no Notes footer on main). REMAINING: R-O1 (fire UserPromptExpansion/MessageDisplay — now unblocked), R-MINOR (default-off inert gaps), R-TEL (telemetry namespace 23/1434 — analytics-only, massive, #36-class scope call), Dh-consolidation (cleanup). userEmail composition-root wiring is an R-P1 follow-up.",
   "discovered_during_fixes": [
    {
     "id": "R-T6",
@@ -1346,7 +1350,7 @@
    },
    {
     "id": "R-EditDesc",
-    "status": "open (minor)",
+    "status": "DONE (main 59b6e76a)",
     "title": "Edit description() returns the long body; claude-code wires a static 'A tool for editing files'",
     "note": "description() is a display label, not the wire prompt() — low impact. Flagged by the R-T1 agent."
    },

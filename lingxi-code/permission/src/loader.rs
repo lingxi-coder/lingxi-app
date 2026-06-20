@@ -97,6 +97,12 @@ pub fn default_mode_from_settings_json(raw: &str) -> Option<PermissionMode> {
         "acceptEdits" => Some(PermissionMode::AcceptEdits),
         "bypassPermissions" => Some(PermissionMode::BypassPermissions),
         "dontAsk" => Some(PermissionMode::DontAsk),
+        // #32: claude-code's settings `defaultMode` enum includes "auto"
+        // (`E.enum(["default","acceptEdits","bypassPermissions","plan","dontAsk",
+        // "auto"])`). Accepted at parse; the actual runtime ENTRY into auto-mode
+        // is further gated (model gate + circuit-breaker + disableAutoMode) — a
+        // separate concern, out of scope here.
+        "auto" => Some(PermissionMode::Auto),
         _ => None,
     }
 }
@@ -216,6 +222,11 @@ mod tests {
         assert!(matches!(
             m(r#"{ "permissions": { "defaultMode": "bypassPermissions" } }"#),
             Some(PermissionMode::BypassPermissions)
+        ));
+        // #32: "auto" is an accepted settings defaultMode value (was dropped→None).
+        assert!(matches!(
+            m(r#"{ "permissions": { "defaultMode": "auto" } }"#),
+            Some(PermissionMode::Auto)
         ));
         // Absent / no block / unknown → None (caller defaults to Default).
         assert!(m(r#"{ "permissions": {} }"#).is_none());

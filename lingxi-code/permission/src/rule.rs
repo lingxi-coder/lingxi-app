@@ -179,21 +179,24 @@ pub enum PermissionRuleSource {
 }
 
 impl PermissionRuleSource {
-    /// Priority order matching claude-code:
-    /// `userSettings` → `projectSettings` → `localSettings` → `flagSettings`
-    /// → `policySettings` → `cliArg` → `command` → `session`.
-    /// Higher index = higher priority.
+    /// Citation precedence matching claude-code's `Szn` walk
+    /// (`userSettings` → `projectSettings` → `localSettings` → `flagSettings`
+    /// → `policySettings` → `cliArg` → `command` → `session`), where the FIRST
+    /// source in the walk wins citation. Encoded so that **higher index = higher
+    /// precedence** (`userSettings` highest) — #35 (previously `session` was
+    /// highest, the reverse of claude-code). NOTE: citation only; the deny-wins
+    /// DECISION is behavior-first and independent of this rank.
     #[must_use]
     pub fn priority(self) -> u8 {
         match self {
-            Self::UserSettings => 0,
-            Self::ProjectSettings => 1,
-            Self::LocalSettings => 2,
-            Self::FlagSettings => 3,
-            Self::PolicySettings => 4,
-            Self::CliArg => 5,
-            Self::Command => 6,
-            Self::Session => 7,
+            Self::Session => 0,
+            Self::Command => 1,
+            Self::CliArg => 2,
+            Self::PolicySettings => 3,
+            Self::FlagSettings => 4,
+            Self::LocalSettings => 5,
+            Self::ProjectSettings => 6,
+            Self::UserSettings => 7,
         }
     }
 }
@@ -231,10 +234,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn session_outranks_user_settings() {
+    fn user_settings_outrank_session() {
+        // #35: claude-code's Szn cites userSettings before session, so
+        // userSettings has the higher citation precedence (NOT session).
         assert!(
-            PermissionRuleSource::Session.priority()
-                > PermissionRuleSource::UserSettings.priority()
+            PermissionRuleSource::UserSettings.priority()
+                > PermissionRuleSource::Session.priority()
         );
     }
 

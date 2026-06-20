@@ -29,17 +29,23 @@ use std::sync::Mutex;
 const ACCEPT_EDITS_ALLOWED_COMMANDS: [&str; 7] =
     ["mkdir", "touch", "rm", "rmdir", "mv", "cp", "sed"];
 
-/// Rule sources in DESCENDING priority (highest → lowest), matching D1.
-/// `authorize` walks every behavior bucket in this order.
+/// Rule sources in citation-walk order, byte-locked to claude-code's `Szn`
+/// (`[...Tw,"cliArg","command","session",…]` with `Tw=["userSettings",
+/// "projectSettings","localSettings","flagSettings","policySettings"]`) — #35.
+/// `first_match` walks each behavior bucket in this order and cites the FIRST
+/// matching rule. This is CITATION precedence only: the deny-wins outcome is
+/// behavior-first (`authorize_inner` checks the whole deny bucket before ask
+/// before allow), so the source order never changes the allow/deny DECISION —
+/// only which source's rule is reported. (Was the exact reverse of this.)
 const SOURCES_BY_PRIORITY: [PermissionRuleSource; 8] = [
-    PermissionRuleSource::Session,
-    PermissionRuleSource::Command,
-    PermissionRuleSource::CliArg,
-    PermissionRuleSource::PolicySettings,
-    PermissionRuleSource::FlagSettings,
-    PermissionRuleSource::LocalSettings,
-    PermissionRuleSource::ProjectSettings,
     PermissionRuleSource::UserSettings,
+    PermissionRuleSource::ProjectSettings,
+    PermissionRuleSource::LocalSettings,
+    PermissionRuleSource::FlagSettings,
+    PermissionRuleSource::PolicySettings,
+    PermissionRuleSource::CliArg,
+    PermissionRuleSource::Command,
+    PermissionRuleSource::Session,
 ];
 
 /// Rule-driven authorization policy.

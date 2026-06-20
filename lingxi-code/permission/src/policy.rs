@@ -425,6 +425,30 @@ impl PermissionPolicy {
                     ) {
                         return ask_path_constraint(tool_name, ask);
                     }
+                    // 2b'. Per-command PATH CONTAINMENT (claude-code
+                    //      `validateCommandPaths` + `PATH_EXTRACTORS`, run per
+                    //      subcommand by `checkPathConstraints`,
+                    //      `BashTool/pathValidation.ts:603/190-552`, wired at
+                    //      `bashPermissions.ts:1106-1122`). Sibling of the
+                    //      redirection/`cd` guard above: it covers the POSITIONAL
+                    //      FILE ARGUMENTS of ~31 path-taking commands
+                    //      (cat/head/grep/find/mv/cp/touch/sed/`git diff
+                    //      --no-index`/…), so `cat /etc/passwd` (cwd `/proj/work`)
+                    //      ASKS even past a matching `Bash(cat:*)` allow rule —
+                    //      and past an EXACT `Bash(cat /etc/passwd)` rule, since
+                    //      this runs BEFORE the `shell_exact_allow` short-circuit
+                    //      (2c-exact) and the allow walk (step 3), exactly as TS
+                    //      runs `validateCommandPaths` (step 3) ahead of the
+                    //      exact-match-allow (step 4) and prefix-allow (step 5).
+                    //      Shares this slot (after deny/ask, before exact/allow,
+                    //      roots- + shell-gated) and the byte-locked ask path.
+                    if let Some(ask) = crate::command_path_containment::check_command_path_containment(
+                        command,
+                        roots,
+                        &self.additional_working_dirs,
+                    ) {
+                        return ask_path_constraint(tool_name, ask);
+                    }
                 }
             }
         }
@@ -2881,11 +2905,42 @@ mod tests {
     }
 
     #[test]
-    fn accept_edits_bash_unsafe_sed_asks() {
-        // `sed -i ... /etc/passwd` writes in-place OUTSIDE cwd → the sed guard
-        // (Part A) returns Unsafe → ask with the byte-locked Other reason.
+    fn accept_edits_bash_unsafe_sed_outside_cwd_asks_with_containment() {
+        // `sed -i ... /etc/passwd` writes in-place OUTSIDE cwd. Per claude-code's
+        // ordering (`bashPermissions.ts:1106-1122`), `validateCommandPaths` (run
+        // by `checkPathConstraints`, step 3) fires BEFORE `checkSedConstraints`
+        // (step 5b) — so the PATH-CONTAINMENT ask wins, not the sed-constraints
+        // ask. sed is a `write` op (the `-i` in-place edit is not read-only-
+        // allowlisted), so the verb is "edit files in". This was previously
+        // asserted to emit SED_ASK_MESSAGE; that was a precedence bug fixed by
+        // wiring the per-command path-containment guard.
         let p = accept_edits_policy(r#"{ "permissions": {} }"#);
         match p.authorize("Bash", &bash("sed -i 's/a/b/' /etc/passwd")) {
+            PermissionResult::Ask { reason, prompt, .. } => {
+                assert!(
+                    matches!(reason, PermissionDecisionReason::Other { .. }),
+                    "containment ask uses the Other reason, got {reason:?}"
+                );
+                assert_eq!(
+                    prompt.message,
+                    "sed in '/etc/passwd' was blocked. For security, Claude Code \
+                     may only edit files in the allowed working directories for \
+                     this session: '/proj'."
+                );
+            }
+            other => panic!("expected Ask(Other), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn accept_edits_bash_dangerous_sed_inside_cwd_asks_with_sed_constraint() {
+        // A DANGEROUS sed (the `e` execute flag) whose file target stays INSIDE
+        // cwd: path-containment passes (./local → /proj/local is in cwd), so
+        // control falls through to the sed-constraints layer (step 3-sed), which
+        // emits the byte-locked SED ask message. This proves the sed-constraints
+        // layer is still reachable when path-containment is satisfied.
+        let p = accept_edits_policy(r#"{ "permissions": {} }"#);
+        match p.authorize("Bash", &bash("sed 's/a/b/e' ./local")) {
             PermissionResult::Ask { reason, prompt, .. } => {
                 assert!(
                     matches!(reason, PermissionDecisionReason::Other { .. }),

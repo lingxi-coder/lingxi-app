@@ -12,6 +12,7 @@ pub mod bash_tree_sitter;
 pub mod bypass_guard;
 pub mod classifier;
 pub mod cli_mode;
+pub mod command_path_containment;
 pub mod dangerous_patterns;
 pub mod dangerous_perms;
 pub mod dangerous_removal;
@@ -47,6 +48,7 @@ pub use auto_edit_safety::{
 pub use bash_security::{bash_command_is_safe, BashSafetyVerdict};
 pub use bypass_guard::{enforce_bypass_safety, BypassEnv};
 pub use classifier::is_classifier_permissions_enabled;
+pub use command_path_containment::check_command_path_containment;
 pub use cli_mode::{initial_permission_mode_from_cli, permission_mode_from_cli_string, CliModeSettings};
 pub use dangerous_patterns::{
     dangerous_bash_patterns, CROSS_PLATFORM_CODE_EXEC, POWERSHELL_DANGEROUS_PATTERNS,

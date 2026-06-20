@@ -17,7 +17,8 @@ pub mod names;
 pub mod unimplemented;
 
 pub use names::{
-    core_description, BUILTIN_COMMAND_NAMES, BUILTIN_CORE_NAMES, CORRECT_BY_DESIGN_STUBS,
-    HOST_BOUND_DEFERRED_GAPS, INTENTIONALLY_DISABLED_COMMANDS,
+    core_description, is_palette_hidden, BUILTIN_COMMAND_NAMES, BUILTIN_CORE_NAMES,
+    CORRECT_BY_DESIGN_STUBS, HIDDEN_PALETTE_COMMANDS, HOST_BOUND_DEFERRED_GAPS,
+    INTENTIONALLY_DISABLED_COMMANDS,
 };
 pub use unimplemented::UnimplementedCommandHandler;

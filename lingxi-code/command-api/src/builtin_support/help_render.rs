@@ -6,34 +6,43 @@
 //! ```text
 //! Commands:\n
 //!   /<name padded to longest+2>  <description>\n
-//!   ... (99 lines, sorted ASCII-ascending) ...
+//!   ... (73 lines, sorted ASCII-ascending) ...
 //! ```
 //!
 //! Where `<description>` is `core_description(name)` for the 18 core
 //! commands and the literal `"(unimplemented in v0.6.0)"` for the other
-//! 81 non-core entries. Total = 1 header + 99 commands = 100 lines.
+//! non-core entries. The 26 hidden/disabled commands
+//! ([`is_palette_hidden`]) are filtered out to match claude-code's
+//! `commands.filter(c => !c.isHidden && !$te(c))` help/palette filter, so the
+//! total is 1 header + 73 visible commands = 74 lines.
 
-use crate::builtin_support::names::{core_description, BUILTIN_COMMAND_NAMES, BUILTIN_CORE_NAMES};
+use crate::builtin_support::names::{
+    core_description, is_palette_hidden, BUILTIN_COMMAND_NAMES, BUILTIN_CORE_NAMES,
+};
 
 /// Render the locked `/help` output as a single `String`.
+///
+/// Hidden / disabled commands (per [`is_palette_hidden`]) are omitted, exactly
+/// as claude-code's `/help` and slash palette drop any command where
+/// `isHidden || isEnabled()===off`.
 ///
 /// The output is **byte-locked** — drift indicates the canonical surface
 /// changed and must be re-locked against the parity fixture
 /// `parity_help_screen.txt`.
 #[must_use]
 pub fn render_help_screen() -> String {
-    let col1_width = BUILTIN_COMMAND_NAMES
-        .iter()
-        .map(|n| n.len())
-        .max()
-        .unwrap_or(0)
-        + 2;
+    // Column width is computed over the VISIBLE commands only (claude-code
+    // never pads to a hidden command's width since the hidden ones never
+    // reach the renderer).
+    let visible = || BUILTIN_COMMAND_NAMES.iter().filter(|n| !is_palette_hidden(n));
 
-    // Capacity hint: header + 99 lines.
-    let mut out = String::with_capacity(10 + 99 * (col1_width + 40));
+    let col1_width = visible().map(|n| n.len()).max().unwrap_or(0) + 2;
+
+    // Capacity hint: header + visible lines.
+    let mut out = String::with_capacity(10 + 80 * (col1_width + 40));
     out.push_str("Commands:\n");
 
-    for name in BUILTIN_COMMAND_NAMES {
+    for name in visible() {
         // Column 1: `/<name>` left-padded to col1_width characters.
         out.push_str("  /");
         out.push_str(name);
@@ -72,14 +81,45 @@ mod tests {
     }
 
     #[test]
-    fn output_has_exactly_100_lines() {
-        // 1 header + 99 commands = 100 lines (each terminated by '\n').
+    fn output_has_exactly_74_lines() {
+        // 1 header + 73 visible commands = 74 lines (each terminated by '\n').
+        // The 26 hidden/disabled commands (is_palette_hidden) are filtered out,
+        // matching claude-code's `!isHidden && !$te` help/palette filter.
         let s = render_help_screen();
         let n = s.matches('\n').count();
         assert_eq!(
-            n, 100,
-            "expected 100 newlines (1 header + 99 commands), got {n}"
+            n, 74,
+            "expected 74 newlines (1 header + 73 visible commands), got {n}"
         );
+    }
+
+    #[test]
+    fn hidden_and_disabled_commands_are_omitted() {
+        use crate::builtin_support::names::{CORRECT_BY_DESIGN_STUBS, HIDDEN_PALETTE_COMMANDS};
+        let s = render_help_screen();
+        for name in HIDDEN_PALETTE_COMMANDS
+            .iter()
+            .copied()
+            .chain(CORRECT_BY_DESIGN_STUBS.iter().map(|(n, _)| *n))
+        {
+            let needle = format!("  /{name} ");
+            assert!(
+                !s.contains(&needle),
+                "/{name} is hidden/disabled and must not appear in /help"
+            );
+        }
+    }
+
+    #[test]
+    fn visible_host_bound_commands_still_appear() {
+        // claude-code SHOWS these (no isHidden/isEnabled gate), so /help must too.
+        let s = render_help_screen();
+        for name in ["btw", "x402", "reload-plugins", "install-slack-app", "mobile", "desktop"] {
+            assert!(
+                s.contains(&format!("  /{name} ")),
+                "/{name} is visible in claude-code and must appear in /help"
+            );
+        }
     }
 
     #[test]
@@ -107,9 +147,15 @@ mod tests {
     }
 
     #[test]
-    fn every_command_appears_once() {
+    fn every_visible_command_appears_once() {
+        use crate::builtin_support::names::is_palette_hidden;
         let s = render_help_screen();
         for name in BUILTIN_COMMAND_NAMES {
+            // Hidden/disabled commands are filtered out (see is_palette_hidden);
+            // only the 73 visible commands appear.
+            if is_palette_hidden(name) {
+                continue;
+            }
             // Match the exact line-start pattern `  /<name> ` (with trailing
             // space) to avoid prefix collisions like `/commit` matching
             // inside `/git-commit`.

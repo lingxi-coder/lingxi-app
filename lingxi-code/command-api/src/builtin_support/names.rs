@@ -375,6 +375,56 @@ pub const HOST_BOUND_DEFERRED_GAPS: &[(&str, &str)] = &[
     ("reload-plugins", "claude-code ships a `local` command (no gate); driven via SDK control-request, no plain-text registry analog yet"),
 ];
 
+/// **Statically-hidden named commands** — real, enabled (or conditionally
+/// enabled) builtin command objects that claude-code ships with the literal
+/// `isHidden:!0` flag, so they NEVER appear in the slash palette or `/help`
+/// even though they remain dispatchable when typed in full.
+///
+/// These are NOT in [`CORRECT_BY_DESIGN_STUBS`] (they are not `name:'stub'`
+/// no-ops, and several are conditionally enabled), so they must be filtered
+/// separately. Verified against the shipped `claude.exe` v2.1.183 command
+/// objects (each carries a literal `isHidden:!0` immediately after its
+/// `name`/`description`):
+///
+/// ```text
+/// name:"extra-usage",description:"Renamed to /usage-credits",isHidden:!0,isEnabled:()=>pct()&&!kr()
+/// name:"heapdump",description:"Dump the JS heap to ~/Desktop",isHidden:!0,...
+/// name:"rate-limit-options",description:"Show options when rate limit is reached",isEnabled:()=>Ro()||!1,isHidden:!0
+/// ```
+///
+/// claude-code's palette / `/help` list builders all apply the filter
+/// `commands.filter(c => !c.isHidden && !$te(c))` (3 confirmed sites:
+/// `!ne.isHidden&&!$te(ne)`, `!S.isHidden&&!$te(S)`, `!Ur.isHidden&&!$te(Ur)`),
+/// so any `isHidden:!0` command is dropped from both surfaces.
+pub const HIDDEN_PALETTE_COMMANDS: &[&str] = &["extra-usage", "heapdump", "rate-limit-options"];
+
+/// Returns `true` if `name` is hidden or disabled in claude-code's default
+/// external build and therefore must NOT appear in the slash palette or the
+/// `/help` screen — mirroring claude-code's
+/// `commands.filter(c => !c.isHidden && !$te(c))` (where `$te` is the
+/// "isEnabled() resolves to off" gate). The set is the union of:
+///
+/// - [`CORRECT_BY_DESIGN_STUBS`] — the 23 commands claude-code disables /
+///   hides / feature-gates-OFF / ships as a compiled `name:'stub'`
+///   (`isEnabled:()=>!1,isHidden:!0`) for ordinary users, so `$te(c)` is true
+///   (or, for `advisor`/`brief`/`teleport`/`autofix-pr`, the entitlement /
+///   statsig / remote gate is OFF by default, which also resolves `isHidden`
+///   true and `isEnabled()` false); and
+/// - [`HIDDEN_PALETTE_COMMANDS`] — the 3 enabled-but-`isHidden:!0` named
+///   commands (`extra-usage`, `heapdump`, `rate-limit-options`).
+///
+/// Total = 26 filtered names. The [`HOST_BOUND_DEFERRED_GAPS`] trio
+/// (`btw`, `x402`, `reload-plugins`) is deliberately EXCLUDED: claude-code
+/// implements those with no `isHidden`/`isEnabled` gate, so they remain
+/// visible. Likewise `install-slack-app`, `mobile`, and `desktop` carry no
+/// default-off hidden gate (`desktop`'s `Dsl()` returns `true`) and stay
+/// visible.
+#[must_use]
+pub fn is_palette_hidden(name: &str) -> bool {
+    HIDDEN_PALETTE_COMMANDS.contains(&name)
+        || CORRECT_BY_DESIGN_STUBS.iter().any(|(n, _)| *n == name)
+}
+
 /// Descriptions for the 18 core commands, used for `/help` rendering in M5-10.
 /// Lookup by core name; falls back to `"(unimplemented in v0.6.0)"` for the 81
 /// non-core entries.

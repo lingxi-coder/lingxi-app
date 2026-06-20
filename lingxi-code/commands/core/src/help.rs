@@ -60,9 +60,13 @@ mod tests {
             CommandResult::Done { display: Some(s) } => {
                 assert!(s.starts_with("Commands:\n"));
                 assert!(s.contains("Manage agent configurations"));
+                // /x402 stays visible (claude-code ships it with no isHidden gate).
                 assert!(s.contains("/x402"));
-                // 100 newlines total (1 header + 99 commands).
-                assert_eq!(s.matches('\n').count(), 100);
+                // Hidden/disabled commands are filtered out of /help.
+                assert!(!s.contains("  /heapdump "));
+                assert!(!s.contains("  /ant-trace "));
+                // 74 newlines total (1 header + 73 visible commands).
+                assert_eq!(s.matches('\n').count(), 74);
             }
             other => panic!("expected Done, got {other:?}"),
         }

@@ -19,7 +19,24 @@ fn golden_starts_with_locked_header() {
 }
 
 #[test]
-fn golden_has_100_lines() {
-    // 1 header + 99 commands = 100 lines (each `\n`-terminated).
-    assert_eq!(GOLDEN.matches('\n').count(), 100);
+fn golden_has_74_lines() {
+    // 1 header + 73 VISIBLE commands = 74 lines (each `\n`-terminated).
+    // The 26 hidden/disabled commands (is_palette_hidden) are filtered out,
+    // matching claude-code's `commands.filter(c => !c.isHidden && !$te(c))`.
+    assert_eq!(GOLDEN.matches('\n').count(), 74);
+}
+
+#[test]
+fn golden_omits_hidden_and_disabled_commands() {
+    use command_api::builtin_support::names::{CORRECT_BY_DESIGN_STUBS, HIDDEN_PALETTE_COMMANDS};
+    for name in HIDDEN_PALETTE_COMMANDS
+        .iter()
+        .copied()
+        .chain(CORRECT_BY_DESIGN_STUBS.iter().map(|(n, _)| *n))
+    {
+        assert!(
+            !GOLDEN.contains(&format!("  /{name} ")),
+            "/{name} is hidden/disabled and must not appear in the /help golden"
+        );
+    }
 }

@@ -1,12 +1,18 @@
-//! `/` slash-command palette: a live-filtered dropdown over the 99 builtin
+//! `/` slash-command palette: a live-filtered dropdown over the visible builtin
 //! command names. Opens when the prompt buffer starts with `/`. Pure logic
 //! (`PaletteState` + open/filter/select/accept) is unit-tested without iocraft;
 //! `PaletteOverlay` (Task 5) renders it.
 //!
+//! The 26 hidden/disabled commands (`is_palette_hidden`) are filtered out so
+//! the palette only lists the 73 visible commands, matching claude-code's
+//! `commands.filter(c => !c.isHidden && !$te(c))` palette filter.
+//!
 //! Literal lock (design §2.8): rows show `name` + ` – ` (en-dash, U+2013) +
 //! description, mirroring claude-code PromptInputFooterSuggestions.tsx.
 
-use command_api::builtin_support::names::{core_description, BUILTIN_COMMAND_NAMES};
+use command_api::builtin_support::names::{
+    core_description, is_palette_hidden, BUILTIN_COMMAND_NAMES,
+};
 use iocraft::prelude::*;
 
 use super::fuzzy::filtered_ranked;
@@ -63,10 +69,15 @@ impl PaletteState {
     }
 
     /// The filtered, ranked rows for the current filter.
+    ///
+    /// Hidden / disabled commands (per `is_palette_hidden`) are excluded up
+    /// front so they never appear in the dropdown, exactly as claude-code drops
+    /// any command where `isHidden || isEnabled()===off` from the palette.
     #[must_use]
     pub fn rows(&self) -> Vec<PaletteRow> {
         let names: Vec<String> = BUILTIN_COMMAND_NAMES
             .iter()
+            .filter(|n| !is_palette_hidden(n))
             .map(|s| (*s).to_string())
             .collect();
         filtered_ranked(&self.filter, &names)
@@ -75,7 +86,7 @@ impl PaletteState {
                 BUILTIN_COMMAND_NAMES
                     .iter()
                     .copied()
-                    .find(|n| *n == matched)
+                    .find(|n| *n == matched && !is_palette_hidden(n))
                     .map(|name| PaletteRow {
                         name,
                         description: core_description(name),
@@ -219,11 +230,52 @@ mod tests {
         let mut p = PaletteState::default();
         p.sync_from_prompt("/");
         let all = p.rows().len();
-        assert_eq!(all, 99, "bare slash lists every command");
+        // 99 builtins minus the 26 hidden/disabled commands = 73 visible.
+        assert_eq!(all, 73, "bare slash lists every VISIBLE command");
         p.sync_from_prompt("/comp");
         let narrowed = p.rows();
         assert!(narrowed.len() < all);
         assert!(narrowed.iter().any(|r| r.name == "compact"));
+    }
+
+    #[test]
+    fn hidden_and_disabled_commands_never_appear() {
+        use command_api::builtin_support::names::{
+            CORRECT_BY_DESIGN_STUBS, HIDDEN_PALETTE_COMMANDS,
+        };
+        let mut p = PaletteState::default();
+        p.sync_from_prompt("/");
+        let rows = p.rows();
+        for name in HIDDEN_PALETTE_COMMANDS
+            .iter()
+            .copied()
+            .chain(CORRECT_BY_DESIGN_STUBS.iter().map(|(n, _)| *n))
+        {
+            assert!(
+                !rows.iter().any(|r| r.name == name),
+                "/{name} is hidden/disabled and must not appear in the palette"
+            );
+        }
+        // And not even when typed as an exact prefix.
+        p.sync_from_prompt("/heapdump");
+        assert!(
+            p.rows().iter().all(|r| r.name != "heapdump"),
+            "/heapdump is isHidden:!0 and must never surface"
+        );
+    }
+
+    #[test]
+    fn visible_host_bound_commands_still_appear() {
+        // claude-code SHOWS these (no isHidden/isEnabled gate) — keep them.
+        let mut p = PaletteState::default();
+        p.sync_from_prompt("/");
+        let rows = p.rows();
+        for name in ["btw", "x402", "reload-plugins", "install-slack-app", "mobile", "desktop"] {
+            assert!(
+                rows.iter().any(|r| r.name == name),
+                "/{name} is visible in claude-code and must appear in the palette"
+            );
+        }
     }
 
     #[test]

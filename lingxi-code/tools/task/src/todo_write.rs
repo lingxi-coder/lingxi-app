@@ -39,6 +39,223 @@ pub const TODO_STATES: &[&str] = &[
 /// Canonical tool name in the registry.
 pub const TOOL_NAME: &str = "TodoWrite";
 
+/// claude-code v2.1.183 `FWd` (binary offset 199291572): the SHORT
+/// TodoWrite tool prompt selected by the `Dh` gate for new models
+/// (claude-opus-4-8 / claude-fable-5 / claude-mythos-5) and whenever
+/// `CLAUDE_CODE_SIMPLE_SYSTEM_PROMPT` is env-truthy. Byte-exact.
+pub const TODO_WRITE_PROMPT_SIMPLE: &str = "Create and update a task list for the current session. The list is rendered to the user as your working plan.\n\n- Each todo has `content`, `status` (\"pending\" | \"in_progress\" | \"completed\"), and `activeForm` (present-tense label shown while in progress).\n- Send the full list each call; it replaces the previous one.\n- Keep one item `in_progress` at a time and mark it `completed` when done.";
+
+/// claude-code v2.1.183 `UWd` (binary offset 199292278): the long
+/// standard TodoWrite tool prompt selected by the `Dh` gate for classic
+/// models and whenever `CLAUDE_CODE_SIMPLE_SYSTEM_PROMPT` is
+/// env-defined-falsy. The single `${Ua}` substitution renders as the
+/// `Edit` tool name (`Ua="Edit"`). Byte-exact.
+pub const TODO_WRITE_PROMPT_FULL: &str = r#"Use this tool to create and manage a structured task list for your current coding session. This helps you track progress, organize complex tasks, and demonstrate thoroughness to the user.
+It also helps the user understand the progress of the task and overall progress of their requests.
+
+## When to Use This Tool
+Use this tool proactively in these scenarios:
+
+1. Complex multi-step tasks - When a task requires 3 or more distinct steps or actions
+2. Non-trivial and complex tasks - Tasks that require careful planning or multiple operations
+3. User explicitly requests todo list - When the user directly asks you to use the todo list
+4. User provides multiple tasks - When users provide a list of things to be done (numbered or comma-separated)
+5. After receiving new instructions - Immediately capture user requirements as todos
+6. When you start working on a task - Mark it as in_progress BEFORE beginning work. Ideally you should only have one todo as in_progress at a time
+7. After completing a task - Mark it as completed and add any new follow-up tasks discovered during implementation
+
+## When NOT to Use This Tool
+
+Skip using this tool when:
+1. There is only a single, straightforward task
+2. The task is trivial and tracking it provides no organizational benefit
+3. The task can be completed in less than 3 trivial steps
+4. The task is purely conversational or informational
+
+NOTE that you should not use this tool if there is only one trivial task to do. In this case you are better off just doing the task directly.
+
+## Examples of When to Use the Todo List
+
+<example>
+User: I want to add a dark mode toggle to the application settings. Make sure you run the tests and build when you're done!
+Assistant: *Creates todo list with the following items:*
+1. Creating dark mode toggle component in Settings page
+2. Adding dark mode state management (context/store)
+3. Implementing CSS-in-JS styles for dark theme
+4. Updating existing components to support theme switching
+5. Running tests and build process, addressing any failures or errors that occur
+*Begins working on the first task*
+
+<reasoning>
+The assistant used the todo list because:
+1. Adding dark mode is a multi-step feature requiring UI, state management, and styling changes
+2. The user explicitly requested tests and build be run afterward
+3. The assistant inferred that tests and build need to pass by adding "Ensure tests and build succeed" as the final task
+</reasoning>
+</example>
+
+<example>
+User: Help me rename the function getCwd to getCurrentWorkingDirectory across my project
+Assistant: *Uses grep or search tools to locate all instances of getCwd in the codebase*
+I've found 15 instances of 'getCwd' across 8 different files.
+*Creates todo list with specific items for each file that needs updating*
+
+<reasoning>
+The assistant used the todo list because:
+1. First, the assistant searched to understand the scope of the task
+2. Upon finding multiple occurrences across different files, it determined this was a complex task with multiple steps
+3. The todo list helps ensure every instance is tracked and updated systematically
+4. This approach prevents missing any occurrences and maintains code consistency
+</reasoning>
+</example>
+
+
+<example>
+User: I need to implement these features for my e-commerce site: user registration, product catalog, shopping cart, and checkout flow.
+Assistant: *Creates a todo list breaking down each feature into specific tasks based on the project architecture*
+Let's start with user registration. This will involve creating database models, API endpoints, and frontend forms that integrate with your existing authentication system.
+
+<reasoning>
+The assistant used the todo list because:
+1. The user provided multiple complex features to implement in a comma separated list
+2. The todo list helps organize these large features into manageable tasks
+3. This approach allows for tracking progress across the entire implementation
+</reasoning>
+</example>
+
+<example>
+User: Can you help optimize my React application? It's rendering slowly and has performance issues.
+Assistant: *Reviews component structure, render patterns, state management, and data fetching*
+After analyzing your codebase, I've identified several performance issues.
+*Creates todo list with items like: 1) Implementing memoization for expensive calculations in ProductList, 2) Adding virtualization for long lists in Dashboard, 3) Optimizing image loading in Gallery component, 4) Fixing state update loops in ShoppingCart, 5) Reviewing bundle size and implementing code splitting*
+Let's start by implementing memoization for the expensive calculations in your ProductList component.
+
+<reasoning>
+The assistant used the todo list because:
+1. First, the assistant examined the codebase to identify specific performance issues
+2. Based on this analysis, it identified multiple optimization opportunities
+3. Performance optimization is a non-trivial task requiring multiple steps
+4. The todo list helps methodically track improvements across different components
+5. This systematic approach ensures all performance bottlenecks are addressed
+</reasoning>
+</example>
+
+## Examples of When NOT to Use the Todo List
+
+<example>
+User: How do I print 'Hello World' in Python?
+Assistant: In Python, you can print "Hello World" with this simple code:
+
+python
+print("Hello World")
+
+This will output the text "Hello World" to the console when executed.
+
+<reasoning>
+The assistant did not use the todo list because this is a single, trivial task that can be completed in one step. There's no need to track multiple tasks or steps for such a straightforward request.
+</reasoning>
+</example>
+
+<example>
+User: What does the git status command do?
+Assistant: The git status command shows the current state of your working directory and staging area. It displays which changes have been staged, which haven't, and which files aren't being tracked by Git. This is a fundamental command for understanding the current state of your repository before making commits.
+
+<reasoning>
+The assistant did not use the todo list because this is an informational request with no actual coding task to complete. The user is simply asking for an explanation, not for the assistant to perform multiple steps or tasks.
+</reasoning>
+</example>
+
+<example>
+User: Can you add a comment to the calculateTotal function to explain what it does?
+Assistant: Sure, let me add a comment to the calculateTotal function to explain what it does.
+* Uses the Edit tool to add a comment to the calculateTotal function *
+
+<reasoning>
+The assistant did not use the todo list because this is a single, straightforward task confined to one location in the code. Adding a comment doesn't require tracking multiple steps or systematic organization.
+</reasoning>
+</example>
+
+<example>
+User: Run npm install for me and tell me what happens.
+Assistant: I'll run the npm install command for you.
+
+*Executes: npm install*
+
+The command completed successfully. Here's the output:
+[Output of npm install command]
+
+All dependencies have been installed according to your package.json file.
+
+<reasoning>
+The assistant did not use the todo list because this is a single command execution with immediate results. There are no multiple steps to track or organize, making the todo list unnecessary for this straightforward task.
+</reasoning>
+</example>
+
+## Task States and Management
+
+1. **Task States**: Use these states to track progress:
+   - pending: Task not yet started
+   - in_progress: Currently working on (limit to ONE task at a time)
+   - completed: Task finished successfully
+
+   **IMPORTANT**: Task descriptions must have two forms:
+   - content: The imperative form describing what needs to be done (e.g., "Run tests", "Build the project")
+   - activeForm: The present continuous form shown during execution (e.g., "Running tests", "Building the project")
+
+2. **Task Management**:
+   - Update task status in real-time as you work
+   - Mark tasks complete IMMEDIATELY after finishing (don't batch completions)
+   - Exactly ONE task must be in_progress at any time (not less, not more)
+   - Complete current tasks before starting new ones
+   - Remove tasks that are no longer relevant from the list entirely
+
+3. **Task Completion Requirements**:
+   - ONLY mark a task as completed when you have FULLY accomplished it
+   - If you encounter errors, blockers, or cannot finish, keep the task as in_progress
+   - When blocked, create a new task describing what needs to be resolved
+   - Never mark a task as completed if:
+     - Tests are failing
+     - Implementation is partial
+     - You encountered unresolved errors
+     - You couldn't find necessary files or dependencies
+
+4. **Task Breakdown**:
+   - Create specific, actionable items
+   - Break complex tasks into smaller, manageable steps
+   - Use clear, descriptive task names
+   - Always provide both forms:
+     - content: "Fix authentication bug"
+     - activeForm: "Fixing authentication bug"
+
+When in doubt, use this tool. Being proactive with task management demonstrates attentiveness and ensures you complete all requirements successfully.
+"#;
+
+/// Port of claude-code `Xla(model)` = `Dh(model) ? FWd : UWd`
+/// (`prompt({model:e}){return Xla(e)}`). The `Dh` gate (binary offset
+/// 195159798) is: env `CLAUDE_CODE_SIMPLE_SYSTEM_PROMPT` truthy → FWd;
+/// env-defined-falsy → UWd; otherwise the model-class branch
+/// `!UWu(model) || FWu(model)` → FWd else UWd. The session model id is
+/// not threaded into `PromptOptions` in this build (would require a
+/// cross-crate `tool_trait::PromptOptions` field + caller changes), so
+/// the model-class branch resolves as it does in the binary when the
+/// model is absent: `Dh(undefined)` returns `false` → `UWd`. The
+/// env override is honored exactly. This is byte-exact for the env
+/// path and for every classic model; the only residual divergence is
+/// new-model (opus-4-8-class) sessions, which should pick `FWd`.
+#[must_use]
+pub fn select_todo_write_prompt() -> &'static str {
+    let simple = std::env::var("CLAUDE_CODE_SIMPLE_SYSTEM_PROMPT")
+        .ok();
+    if traits::env::is_env_truthy(simple.as_deref()) {
+        return TODO_WRITE_PROMPT_SIMPLE;
+    }
+    if traits::env::is_env_defined_falsy(simple.as_deref()) {
+        return TODO_WRITE_PROMPT_FULL;
+    }
+    // Model-class branch with model unavailable: `Dh(undefined)` → UWd.
+    TODO_WRITE_PROMPT_FULL
+}
+
 /// Validate a `Vec<TodoItem>` for the TodoWrite contract.
 ///
 /// Mirrors claude-code `TodoItemSchema` (zod `BWd`, v2.1.183), which only
@@ -232,10 +449,12 @@ impl Tool for TodoWriteTool {
         "Update the todo list for the current session. To be used proactively and often to track progress and pending tasks. Make sure that at least one task is in_progress at all times. Always provide both content (imperative) and activeForm (present continuous) for each task.".into()
     }
     async fn prompt(&self, _: &PromptOptions) -> String {
-        "Use TodoWrite to track work-in-progress. Each todo has id, content, \
-         and status (pending / in_progress / completed). At most one todo \
-         may be in_progress at a time."
-            .into()
+        // claude-code v2.1.183 `prompt({model:e}){return Xla(e)}` where
+        // `function Xla(e){return Dh(e)?FWd:UWd}`. `Dh` selects the SHORT `FWd`
+        // prompt for new models (opus-4-8 / fable-5 / mythos-5) and the long
+        // `UWd` for classic models, gated up front by the
+        // `CLAUDE_CODE_SIMPLE_SYSTEM_PROMPT` env override.
+        select_todo_write_prompt().into()
     }
 
     async fn call(
@@ -316,25 +535,18 @@ impl Tool for TodoWriteTool {
 
         let (pending, in_progress, completed) = summary(&todos);
 
-        // Model-facing result text (`TodoWriteTool.ts:104-113`
-        // `mapToolResultToToolResultBlockParam`): the fixed base string, plus
-        // the structural verification nudge when the main-thread agent closes
-        // out a 3+ item all-completed list with no verification step
-        // (`TodoWriteTool.ts:72-86`; regex runs over each todo's `content`).
-        // `all_done` was computed above for the clear-on-completion store.
-        let nudge_needed = crate::task::verification_nudge_needed(
-            ctx.agent_id.is_none(),
-            ctx.options.is_non_interactive_session,
-            all_done,
-            todos.len(),
-            todos.iter().map(|t| t.content.as_str()),
-        );
-        let mut content = String::from(
+        // Model-facing result text (`TodoWriteTool.ts`
+        // `mapToolResultToToolResultBlockParam`): in claude-code v2.1.183 the
+        // tool_result `content` is UNCONDITIONALLY the fixed base string
+        // (verified at binary offset 199302445 — `content:"Todos have been
+        // modified successfully. …"`). There is NO verification-nudge suffix:
+        // grep of v2.1.183 for `spawn the verification agent`, `You just closed
+        // out`, `tengu_hive_evidence`, `VERIFICATION_AGENT`, and
+        // `verificationNudge` all return 0. The whole nudge feature is absent,
+        // so neither the suffix nor a `verificationNudgeNeeded` field is emitted.
+        let content = String::from(
             "Todos have been modified successfully. Ensure that you continue to use the todo list to track your progress. Please proceed with the current tasks if applicable",
         );
-        if nudge_needed {
-            content.push_str(&crate::task::verification_nudge_suffix());
-        }
 
         Ok(ToolCallResult {
             data: json!({
@@ -345,7 +557,6 @@ impl Tool for TodoWriteTool {
                     "in_progress": in_progress,
                     "completed": completed,
                 },
-                "verificationNudgeNeeded": nudge_needed,
             }),
             new_messages: Vec::new(),
             context_modifier: None,
@@ -769,10 +980,17 @@ mod tests {
         assert_eq!(s.todos.len(), 2, "a not-all-completed write is stored verbatim");
     }
 
-    // ── verification nudge (sub-batch [5]) ───────────────────────────────
+    // ── result text is the BARE base string (finding #74) ────────────────
+    //
+    // claude-code v2.1.183 has NO verification-nudge feature: the TodoWrite
+    // tool_result `content` is unconditionally the base string (binary offset
+    // 199302445), and there is no `verificationNudgeNeeded` result field.
+    // These tests pin the always-bare result and the absence of the field.
 
     const TODO_BASE: &str = "Todos have been modified successfully. Ensure that you continue to use the todo list to track your progress. Please proceed with the current tasks if applicable";
 
+    /// Markers from the removed (fabricated) verification-nudge suffix — must
+    /// NEVER appear in the result text on any path.
     const NUDGE_MARKER: &str = "spawn the verification agent (subagent_type=\"verification\")";
 
     fn completed(id: &str, content: &str) -> Value {
@@ -780,7 +998,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn nudge_fires_when_all_completed_3plus_no_verif() {
+    async fn result_is_bare_base_when_all_completed_3plus() {
+        // The exact scenario that previously fired the (fabricated) nudge —
+        // 3+ all-completed items on the main-thread interactive path. The
+        // result must now be the bare base string with no suffix and no
+        // `verificationNudgeNeeded` field.
         let (tool, sink, _session, use_ctx) = make_tool_and_session();
         tool.ctx.bus.attach_sink(sink.clone()).await;
         let input = json!({
@@ -791,14 +1013,19 @@ mod tests {
             ]
         });
         let res = tool.call(input, use_ctx, fresh_tx()).await.expect("ok");
-        let content = res.data["content"].as_str().unwrap();
-        assert!(content.starts_with(TODO_BASE), "base prefix: {content}");
-        assert!(content.contains(NUDGE_MARKER), "nudge present: {content}");
-        assert_eq!(res.data["verificationNudgeNeeded"], json!(true));
+        assert_eq!(res.data["content"], json!(TODO_BASE), "bare base string only");
+        assert!(
+            !res.data["content"].as_str().unwrap().contains(NUDGE_MARKER),
+            "no verification-nudge suffix"
+        );
+        assert!(
+            res.data.get("verificationNudgeNeeded").is_none(),
+            "no verificationNudgeNeeded field in result data"
+        );
     }
 
     #[tokio::test]
-    async fn no_nudge_when_fewer_than_three() {
+    async fn result_is_bare_base_for_fewer_than_three() {
         let (tool, sink, _session, use_ctx) = make_tool_and_session();
         tool.ctx.bus.attach_sink(sink.clone()).await;
         let input = json!({
@@ -806,27 +1033,11 @@ mod tests {
         });
         let res = tool.call(input, use_ctx, fresh_tx()).await.expect("ok");
         assert_eq!(res.data["content"], json!(TODO_BASE));
-        assert_eq!(res.data["verificationNudgeNeeded"], json!(false));
+        assert!(res.data.get("verificationNudgeNeeded").is_none());
     }
 
     #[tokio::test]
-    async fn no_nudge_when_content_matches_verif() {
-        let (tool, sink, _session, use_ctx) = make_tool_and_session();
-        tool.ctx.bus.attach_sink(sink.clone()).await;
-        let input = json!({
-            "todos": [
-                completed("1", "Implement parser"),
-                completed("2", "Verify the fix"),
-                completed("3", "Write docs"),
-            ]
-        });
-        let res = tool.call(input, use_ctx, fresh_tx()).await.expect("ok");
-        assert_eq!(res.data["content"], json!(TODO_BASE));
-        assert_eq!(res.data["verificationNudgeNeeded"], json!(false));
-    }
-
-    #[tokio::test]
-    async fn no_nudge_for_subagent() {
+    async fn result_is_bare_base_for_subagent() {
         let (tool, sink, _session, mut use_ctx) = make_tool_and_session();
         tool.ctx.bus.attach_sink(sink.clone()).await;
         use_ctx.agent_id = Some(protocol::AgentId::new());
@@ -839,11 +1050,11 @@ mod tests {
         });
         let res = tool.call(input, use_ctx, fresh_tx()).await.expect("ok");
         assert_eq!(res.data["content"], json!(TODO_BASE));
-        assert_eq!(res.data["verificationNudgeNeeded"], json!(false));
+        assert!(res.data.get("verificationNudgeNeeded").is_none());
     }
 
     #[tokio::test]
-    async fn no_nudge_when_not_all_completed() {
+    async fn result_is_bare_base_when_not_all_completed() {
         let (tool, sink, _session, use_ctx) = make_tool_and_session();
         tool.ctx.bus.attach_sink(sink.clone()).await;
         let input = json!({
@@ -855,6 +1066,103 @@ mod tests {
         });
         let res = tool.call(input, use_ctx, fresh_tx()).await.expect("ok");
         assert_eq!(res.data["content"], json!(TODO_BASE));
-        assert_eq!(res.data["verificationNudgeNeeded"], json!(false));
+        assert!(res.data.get("verificationNudgeNeeded").is_none());
+    }
+
+    // ── model-facing prompt() = Xla(model) = Dh(model) ? FWd : UWd (#71) ──
+    //
+    // All cases live in ONE test (no `serial_test` dep) so the parallel test
+    // runner never has two bodies mutating the shared
+    // `CLAUDE_CODE_SIMPLE_SYSTEM_PROMPT` env var at once. The `EnvGuard`
+    // restores the prior value on drop. No other test module reads this var.
+
+    #[tokio::test]
+    async fn prompt_selects_uwd_or_fwd_via_dh_env_gate() {
+        let (tool, _sink, _session, _use_ctx) = make_tool_and_session();
+        let opts = PromptOptions {
+            include_examples: false,
+        };
+
+        // Default (var unset): no model threaded ⇒ `Dh(undefined)` is false ⇒
+        // the long UWd prompt — NOT the old custom 3-sentence blurb.
+        {
+            let _g = EnvGuard::clear("CLAUDE_CODE_SIMPLE_SYSTEM_PROMPT");
+            let p = tool.prompt(&opts).await;
+            assert_eq!(p, TODO_WRITE_PROMPT_FULL);
+            // Binary-locked head + tail of UWd.
+            assert!(p.starts_with(
+                "Use this tool to create and manage a structured task list for your current coding session."
+            ));
+            assert!(p.ends_with(
+                "Being proactive with task management demonstrates attentiveness and ensures you complete all requirements successfully.\n"
+            ));
+            // The `${Ua}` substitution renders the Edit tool name verbatim.
+            assert!(p.contains("Uses the Edit tool to add a comment"));
+            // The stale blurb (and its false `id` claim) is gone.
+            assert!(!p.contains("Use TodoWrite to track work-in-progress"));
+        }
+
+        // `CLAUDE_CODE_SIMPLE_SYSTEM_PROMPT` truthy ⇒ the short FWd prompt.
+        for truthy in ["1", "true", "yes", "on", " On "] {
+            let _g = EnvGuard::set("CLAUDE_CODE_SIMPLE_SYSTEM_PROMPT", truthy);
+            let p = tool.prompt(&opts).await;
+            assert_eq!(p, TODO_WRITE_PROMPT_SIMPLE, "truthy {truthy:?} ⇒ FWd");
+            assert!(p.starts_with(
+                "Create and update a task list for the current session. The list is rendered to the user as your working plan."
+            ));
+            // FWd no longer (falsely) claims todos carry an `id` field.
+            assert!(!p.contains("has id"));
+        }
+
+        // `CLAUDE_CODE_SIMPLE_SYSTEM_PROMPT` defined-falsy ⇒ the long UWd prompt.
+        for falsy in ["0", "false", "no", "off"] {
+            let _g = EnvGuard::set("CLAUDE_CODE_SIMPLE_SYSTEM_PROMPT", falsy);
+            let p = tool.prompt(&opts).await;
+            assert_eq!(p, TODO_WRITE_PROMPT_FULL, "defined-falsy {falsy:?} ⇒ UWd");
+        }
+
+        // Any other (non-truthy, non-defined-falsy) value falls through to the
+        // model-class branch, which resolves to UWd when no model is available.
+        {
+            let _g = EnvGuard::set("CLAUDE_CODE_SIMPLE_SYSTEM_PROMPT", "garbage");
+            assert_eq!(tool.prompt(&opts).await, TODO_WRITE_PROMPT_FULL);
+        }
+
+        // Selector helper agrees with the tool method.
+        {
+            let _g = EnvGuard::set("CLAUDE_CODE_SIMPLE_SYSTEM_PROMPT", "yes");
+            assert_eq!(select_todo_write_prompt(), TODO_WRITE_PROMPT_SIMPLE);
+        }
+        {
+            let _g = EnvGuard::clear("CLAUDE_CODE_SIMPLE_SYSTEM_PROMPT");
+            assert_eq!(select_todo_write_prompt(), TODO_WRITE_PROMPT_FULL);
+        }
+    }
+
+    /// Minimal scoped env guard: sets/clears a var for the test body and
+    /// restores the prior value on drop.
+    struct EnvGuard {
+        key: &'static str,
+        prev: Option<String>,
+    }
+    impl EnvGuard {
+        fn set(key: &'static str, val: &str) -> Self {
+            let prev = std::env::var(key).ok();
+            std::env::set_var(key, val);
+            Self { key, prev }
+        }
+        fn clear(key: &'static str) -> Self {
+            let prev = std::env::var(key).ok();
+            std::env::remove_var(key);
+            Self { key, prev }
+        }
+    }
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            match &self.prev {
+                Some(v) => std::env::set_var(self.key, v),
+                None => std::env::remove_var(self.key),
+            }
+        }
     }
 }

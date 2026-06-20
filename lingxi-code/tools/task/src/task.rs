@@ -169,38 +169,39 @@ fn iso8601_utc(t: std::time::SystemTime) -> String {
 
 // ==== Product-A V2 gating (sub-batch [2]) ===================================
 
-/// Feature-flag key carrying the host's non-interactive-session bit into
-/// [`ToolStaticContext`]. claude-code reads `getIsNonInteractiveSession()`
-/// directly; the Rust `ToolStaticContext` exposes host toggles only via
-/// `feature_flags`, so the host threads the bit through under this key. Absent
-/// ⇒ interactive (the common case).
-const NON_INTERACTIVE_SESSION_FLAG: &str = "is_non_interactive_session";
-
 /// Port of `isEnvTruthy(process.env[key])` (`envUtils.ts:32-37`): lower-cased,
 /// trimmed value ∈ {`1`,`true`,`yes`,`on`}.
 fn env_truthy(key: &str) -> bool {
     traits::env::is_env_truthy(std::env::var(key).ok().as_deref())
 }
 
-/// Pure core of [`is_todo_v2_enabled`] (`isTodoV2Enabled`,
-/// `utils/tasks.ts:130-136`): `enable_tasks_env || !non_interactive`.
-fn todo_v2_enabled_inner(enable_tasks_env: bool, non_interactive: bool) -> bool {
-    enable_tasks_env || !non_interactive
+/// Pure core of [`is_todo_v2_enabled`] — 1:1 with the v2.1.183 binary `TE()`:
+/// `function TE(){if(_l(process.env.CLAUDE_CODE_ENABLE_TASKS))return!1;return!0}`.
+/// i.e. V2-Task-tools-enabled = NOT (the env normalizes to `0`/`false`/`no`/`off`).
+/// `_l` = [`traits::env::is_env_defined_falsy`] (byte-exact: `e===void 0`⇒false,
+/// boolean⇒`!e`, else lowercased+trimmed ∈ {`0`,`false`,`no`,`off`}).
+///
+/// There is NO non-interactive term in the binary — the prior
+/// `enable_tasks_env || !non_interactive` formula was stale (wrong/opposite
+/// default for unset+non-interactive and for interactive+`false`/`no`/`off`).
+fn todo_v2_enabled_inner(enable_tasks_env_defined_falsy: bool) -> bool {
+    !enable_tasks_env_defined_falsy
 }
 
 /// Whether the Product-A V2 Task tools are advertised (and `TodoWrite` hidden).
 ///
-/// Port of `isTodoV2Enabled()`: force-enabled by a truthy
-/// `CLAUDE_CODE_ENABLE_TASKS`, otherwise enabled whenever the session is
-/// interactive.
+/// Port of `isTodoV2Enabled()` (binary `TE()`): enabled UNLESS
+/// `CLAUDE_CODE_ENABLE_TASKS` is a *defined falsy* value (`0`/`false`/`no`/`off`,
+/// case-insensitive, trimmed). Unset, empty, or any other value ⇒ enabled.
+///
+/// The `ctx` parameter is retained for the `Tool::is_enabled` signature but is
+/// unused — the binary's `TE()` reads only `process.env`, no session/interactive
+/// signal.
 #[must_use]
-pub fn is_todo_v2_enabled(ctx: &ToolStaticContext) -> bool {
-    let non_interactive = ctx
-        .feature_flags
-        .get(NON_INTERACTIVE_SESSION_FLAG)
-        .copied()
-        .unwrap_or(false);
-    todo_v2_enabled_inner(env_truthy("CLAUDE_CODE_ENABLE_TASKS"), non_interactive)
+pub fn is_todo_v2_enabled(_ctx: &ToolStaticContext) -> bool {
+    todo_v2_enabled_inner(traits::env::is_env_defined_falsy(
+        std::env::var("CLAUDE_CODE_ENABLE_TASKS").ok().as_deref(),
+    ))
 }
 
 /// Pure core of [`is_agent_swarms_enabled`] (`isAgentSwarmsEnabled`,
@@ -2745,23 +2746,25 @@ mod tests {
 
     #[test]
     fn todo_v2_enabled_inner_matches_ts_predicate() {
-        // enable_tasks_env || !non_interactive
-        assert!(todo_v2_enabled_inner(false, false)); // interactive → on
-        assert!(!todo_v2_enabled_inner(false, true)); // non-interactive → off
-        assert!(todo_v2_enabled_inner(true, true)); // forced on by env
-        assert!(todo_v2_enabled_inner(true, false));
+        // Binary TE(): enabled = NOT(_l(CLAUDE_CODE_ENABLE_TASKS)), i.e.
+        // NOT(env is defined-falsy). No non-interactive term.
+        assert!(todo_v2_enabled_inner(false)); // env not defined-falsy (unset/empty/garbage/truthy) → on
+        assert!(!todo_v2_enabled_inner(true)); // env defined-falsy (0/false/no/off) → off
     }
 
     #[test]
-    fn is_todo_v2_enabled_reads_non_interactive_flag() {
-        // Default (no flag) → interactive → V2 enabled. The CLAUDE_CODE_ENABLE_TASKS
-        // env branch is covered by `todo_v2_enabled_inner` to avoid global env races.
-        let mut ctx = ToolStaticContext::default();
-        assert!(is_todo_v2_enabled(&ctx));
-        ctx.feature_flags
-            .insert(NON_INTERACTIVE_SESSION_FLAG.to_string(), true);
-        // (Holds only when CLAUDE_CODE_ENABLE_TASKS is not truthy in the env.)
-        if !env_truthy("CLAUDE_CODE_ENABLE_TASKS") {
+    fn is_todo_v2_enabled_matches_te_defined_falsy() {
+        // The ctx is unused by TE(); the gate is purely the CLAUDE_CODE_ENABLE_TASKS
+        // defined-falsy check. Default (unset env) → enabled. We don't mutate the
+        // global env here (to avoid races); the defined-falsy truth table is
+        // covered by `todo_v2_enabled_inner` + `traits::env::is_env_defined_falsy`.
+        let ctx = ToolStaticContext::default();
+        // Holds whenever CLAUDE_CODE_ENABLE_TASKS is NOT a defined-falsy value.
+        if !traits::env::is_env_defined_falsy(
+            std::env::var("CLAUDE_CODE_ENABLE_TASKS").ok().as_deref(),
+        ) {
+            assert!(is_todo_v2_enabled(&ctx));
+        } else {
             assert!(!is_todo_v2_enabled(&ctx));
         }
     }

@@ -19,10 +19,12 @@
 //! `~/.claude/settings.json`, treat a missing value as a delete, never
 //! overwrite a JSON-syntax-broken file). [`persist_effort_level`] is the port.
 //!
-//! Per [`to_persistable`] (TS `toPersistableEffort`, `effort.ts` L95) only
-//! `low`/`medium`/`high` are persistable for non-ant users; `max` is
+//! Per [`to_persistable`] (TS `Tve` / `toPersistableEffort`) only
+//! `low`/`medium`/`high`/`xhigh` are persistable for non-ant users; `max` is
 //! session-scoped, so setting `max` keeps the `" (this session only)"` suffix
-//! and writes nothing — 1:1 with the TS `persistable === undefined` branch.
+//! and writes nothing — 1:1 with the TS `persistable === undefined` branch. A
+//! persistable level instead carries the `" (saved as your default for new
+//! sessions)"` suffix (TS `Ium`, v2.1.183).
 //!
 //! The `auto (currently {level})` computed level is driven by the ported
 //! [`get_displayed_effort_level`] → [`resolve_applied_effort`] →
@@ -43,58 +45,137 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use traits::OrchestratorHandle;
 
-/// Usage block. The `- max:` line renders the TS Usage template
-/// `Maximum capability with deepest reasoning (${gAi})` with `gAi` =
-/// `"Fable 5, Opus 4.6+, Sonnet 4.6"` (v2.1.183).
-const USAGE: &str = "Usage: /effort [low|medium|high|max|auto]\n\nEffort levels:\n- low: Quick, straightforward implementation\n- medium: Balanced approach with standard testing\n- high: Comprehensive implementation with extensive testing\n- max: Maximum capability with deepest reasoning (Fable 5, Opus 4.6+, Sonnet 4.6)\n- auto: Use the default effort level for your model";
+/// The `${nyn}` model-family interpolation used by the `xhigh` Usage/description
+/// lines: `getEffortHelpText` (`XVn`) and `getEffortLevelDescription` (`NXu`)
+/// both embed it. v2.1.183 value.
+const XHIGH_MODELS: &str = "Fable 5, Opus 4.7+";
+
+/// The `${gAi}` model-family interpolation used by the `- max:` Usage line
+/// (`XVn`). v2.1.183 value.
+const MAX_MODELS: &str = "Fable 5, Opus 4.6+, Sonnet 4.6";
+
+/// Render the `/effort` help block — a 1:1 port of `getEffortHelpText` (`XVn`).
+///
+/// The `- max:` line renders `Maximum capability with deepest reasoning
+/// (${gAi})`; the `- xhigh:` line renders `Extended reasoning with thorough
+/// analysis (${nyn})`. The `- ultracode:` line is appended only when
+/// `e = x4(js())` is true (here [`dynamic_workflows_enabled`]); `xhigh` is
+/// unconditional. `XVn` uses square brackets (`[...]`) for the bracketed list —
+/// the angle-bracket (`<...>`) form lives in the separate non-interactive
+/// empty-arg fallback (`tdm`), which this port routes to `show_current`.
+fn usage() -> String {
+    usage_with(dynamic_workflows_enabled())
+}
+
+/// `getEffortHelpText` (`XVn`) parameterized on the `e = x4(js())` gate, so both
+/// the gated-off and gated-on renderings are unit-testable independently of the
+/// seam-blocked [`dynamic_workflows_enabled`].
+fn usage_with(dynamic_workflows: bool) -> String {
+    let ultracode_list = if dynamic_workflows { "|ultracode" } else { "" };
+    let ultracode_line = if dynamic_workflows {
+        "- ultracode: xhigh + dynamic workflow orchestration (this session only)\n"
+    } else {
+        ""
+    };
+    format!(
+        "Usage: /effort [low|medium|high|xhigh|max{ultracode_list}|auto]\n\n\
+Effort levels:\n\
+- low: Quick, straightforward implementation\n\
+- medium: Balanced approach with standard testing\n\
+- high: Comprehensive implementation with extensive testing\n\
+- xhigh: Extended reasoning with thorough analysis ({XHIGH_MODELS})\n\
+- max: Maximum capability with deepest reasoning ({MAX_MODELS})\n\
+{ultracode_line}- auto: Use the default effort level for your model"
+    )
+}
 
 /// Environment variable that pins / clears the effort level for the session.
 const EFFORT_ENV_VAR: &str = "CLAUDE_CODE_EFFORT_LEVEL";
 
-/// The four discrete effort levels (`effort.ts` `EFFORT_LEVELS`).
+/// `x4(js())` — claude's dynamic-workflow-orchestration gate that unlocks the
+/// `ultracode` pseudo-level. `x4(e) = Ow() && (e===void 0 || yve(e))`, where
+/// `Ow()` is the dynamic-workflows feature flag and `yve` confirms the model
+/// supports it.
 ///
+/// This port has no `Ow()` seam (no dynamic-workflow-orchestration subsystem),
+/// so this returns `false` — byte-faithful to claude when the flag is off:
+/// `xhigh` is always present, `ultracode` never renders, and the parser never
+/// maps `ultracode → xhigh`. Flipping this on later turns on the `ultracode`
+/// list item / help line / invalid-arg hint / parser alias with no call-site
+/// changes (the precedence is already wired through every consumer).
+fn dynamic_workflows_enabled() -> bool {
+    false
+}
+
+/// The discrete effort levels (`effort.ts` `EFFORT_LEVELS` / `nP =
+/// ["low","medium","high","xhigh","max"]`, v2.1.183).
+///
+/// `ultracode` is NOT a member here: in claude it is a parser pseudo-level that
+/// maps onto `xhigh` (`Hum`/`Pum`/`ZVn`), not a distinct `EFFORT_LEVELS` value.
 /// Numeric efforts are ANT-only and intentionally omitted from this port.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum EffortLevel {
     Low,
     Medium,
     High,
+    Xhigh,
     Max,
 }
 
 impl EffortLevel {
-    /// The canonical lowercase string for this level.
+    /// The canonical lowercase string for this level (`String(e)` / `Jse`).
     fn as_str(self) -> &'static str {
         match self {
             EffortLevel::Low => "low",
             EffortLevel::Medium => "medium",
             EffortLevel::High => "high",
+            EffortLevel::Xhigh => "xhigh",
             EffortLevel::Max => "max",
         }
     }
 
     /// User-facing description, verbatim from `effort.ts`
-    /// (`getEffortLevelDescription`). The `max` case renders the TS template
-    /// `` `Maximum capability with deepest reasoning. ${qHt}` `` with `qHt` =
-    /// the v2.1.183 overthinking caveat.
-    fn description(self) -> &'static str {
+    /// (`getEffortLevelDescription` → `NXu`). The `xhigh` case renders the TS
+    /// template `` `Deeper reasoning than high, just below maximum (${nyn})` ``;
+    /// the `max` case renders `` `Maximum capability with deepest reasoning.
+    /// ${qHt}` `` with `qHt` = the v2.1.183 overthinking caveat.
+    fn description(self) -> String {
         match self {
-            EffortLevel::Low => "Quick, straightforward implementation with minimal overhead",
-            EffortLevel::Medium => "Balanced approach with standard implementation and testing",
-            EffortLevel::High => {
-                "Comprehensive implementation with extensive testing and documentation"
+            EffortLevel::Low => {
+                "Quick, straightforward implementation with minimal overhead".to_string()
             }
-            EffortLevel::Max => "Maximum capability with deepest reasoning. May use excessive tokens resulting in long response times or overthinking. Use sparingly for the hardest tasks.",
+            EffortLevel::Medium => {
+                "Balanced approach with standard implementation and testing".to_string()
+            }
+            EffortLevel::High => {
+                "Comprehensive implementation with extensive testing and documentation".to_string()
+            }
+            EffortLevel::Xhigh => {
+                format!("Deeper reasoning than high, just below maximum ({XHIGH_MODELS})")
+            }
+            EffortLevel::Max => "Maximum capability with deepest reasoning. May use excessive tokens resulting in long response times or overthinking. Use sparingly for the hardest tasks.".to_string(),
         }
     }
 }
 
-/// Parse a single lowercase token into an [`EffortLevel`] (`isEffortLevel`).
+/// Parse a single token into an [`EffortLevel`] — a 1:1 port of `hQe`:
+/// `n = _Ai[trim().toLowerCase()] ?? trim().toLowerCase(); wFe(n) ? n : void 0`.
+/// `_Ai = {med: "medium"}` is the only alias; `wFe` = `nP.includes`.
+///
+/// `ultracode` is NOT handled here — claude routes it separately (`ZVn`/`Hum`),
+/// mapping it to `xhigh` only when [`dynamic_workflows_enabled`] is true. See
+/// the `handle` dispatch.
 fn parse_effort_level(s: &str) -> Option<EffortLevel> {
-    match s {
+    // `_Ai[t] ?? t` — apply the `med → medium` alias before the membership test.
+    let normalized = match s.trim().to_lowercase().as_str() {
+        "med" => "medium".to_string(),
+        other => other.to_string(),
+    };
+    match normalized.as_str() {
         "low" => Some(EffortLevel::Low),
         "medium" => Some(EffortLevel::Medium),
         "high" => Some(EffortLevel::High),
+        "xhigh" => Some(EffortLevel::Xhigh),
         "max" => Some(EffortLevel::Max),
         _ => None,
     }
@@ -112,13 +193,16 @@ enum EnvOverride {
     Pinned { level: EffortLevel, raw: String },
 }
 
-/// `toPersistableEffort` (`effort.ts` L95) — the persistable subset of a
-/// level. `low`/`medium`/`high` persist; `max` is session-scoped for non-ant
-/// users (this port is non-ant), so it returns `None`. Numeric efforts are
-/// ANT-only and already absent from [`EffortLevel`].
+/// `toPersistableEffort` / `Tve` (`Tve(e){if(e==="low"||e==="medium"||
+/// e==="high"||e==="xhigh")return e;return}`) — the persistable subset of a
+/// level. `low`/`medium`/`high`/`xhigh` persist; `max` is session-scoped, so it
+/// returns `None`. Numeric efforts are ANT-only and already absent from
+/// [`EffortLevel`].
 fn to_persistable(level: EffortLevel) -> Option<EffortLevel> {
     match level {
-        EffortLevel::Low | EffortLevel::Medium | EffortLevel::High => Some(level),
+        EffortLevel::Low | EffortLevel::Medium | EffortLevel::High | EffortLevel::Xhigh => {
+            Some(level)
+        }
         EffortLevel::Max => None,
     }
 }
@@ -380,12 +464,13 @@ impl EffortHandler {
                     )
                 }
             }
-            // No conflict → `Set effort level to {x}{suffix}: {desc}`. The
-            // `(this session only)` suffix fires only for non-persistable
-            // (`max`) levels (L54).
+            // No conflict → `Set effort level to {x}{suffix}: {desc}`. Per `Ium`
+            // (v2.1.183) the suffix is `" (saved as your default for new
+            // sessions)"` for a persistable level and `" (this session only)"`
+            // for a session-only (`max`) level.
             _ => {
                 let suffix = if persistable.is_some() {
-                    ""
+                    " (saved as your default for new sessions)"
                 } else {
                     " (this session only)"
                 };
@@ -407,7 +492,7 @@ impl BuiltinCommandHandler for EffortHandler {
         // COMMON_HELP_ARGS.includes(args) in TS (case-sensitive there).
         if matches!(trimmed, "help" | "-h" | "--help") {
             return CommandResult::Done {
-                display: Some(USAGE.to_string()),
+                display: Some(usage()),
             };
         }
 
@@ -417,12 +502,35 @@ impl BuiltinCommandHandler for EffortHandler {
             self.show_current().await
         } else if normalized == "auto" || normalized == "unset" {
             Self::clear_effort()
+        } else if normalized == "ultracode" {
+            // `ZVn`: `ultracode` routes to `Pum`, the gated handler. When the
+            // dynamic-workflow seam is off it returns the "needs dynamic
+            // workflows enabled" guidance (`Pum` L1); when on it maps to `xhigh`
+            // (with the dynamic-orchestration suffix). LingXi's seam is off, so
+            // this renders the gated-off guidance. Falls through to the invalid
+            // path only structurally — kept explicit so flipping the seam wires
+            // the `xhigh` mapping here.
+            if dynamic_workflows_enabled() {
+                // ultracode → xhigh (Hum/Pum). Session-only orchestration.
+                Self::set_effort(EffortLevel::Xhigh)
+            } else {
+                // `Pum` gate-off message (verbatim, v2.1.183).
+                "Ultracode needs dynamic workflows enabled (see /config). Valid options are: low, medium, high, xhigh, max, auto".to_string()
+            }
         } else if let Some(level) = parse_effort_level(&normalized) {
             Self::set_effort(level)
         } else {
-            // `executeEffort` invalid-arg branch (`effort.tsx` L114) — uses the
-            // original (un-normalized, trimmed) argument text.
-            format!("Invalid argument: {trimmed}. Valid options are: low, medium, high, max, auto")
+            // `ZVn` invalid-arg branch — uses the original (un-normalized,
+            // trimmed) argument text. The `ultracode,` hint is appended only
+            // when the dynamic-workflow seam is on (`x4(js())`).
+            let ultracode_hint = if dynamic_workflows_enabled() {
+                " ultracode,"
+            } else {
+                ""
+            };
+            format!(
+                "Invalid argument: {trimmed}. Valid options are: low, medium, high, xhigh, max,{ultracode_hint} auto"
+            )
         };
 
         CommandResult::Done {
@@ -548,8 +656,87 @@ mod tests {
     async fn help_args_render_usage() {
         let _env = TestEnv::new();
         for raw in ["help", "-h", "--help", "  help  "] {
-            assert_eq!(run(raw).await, USAGE);
+            assert_eq!(run(raw).await, usage());
         }
+    }
+
+    #[test]
+    fn usage_is_byte_exact_with_gate_off() {
+        // `getEffortHelpText` (`XVn`) with `e = x4(js()) === false`:
+        // `xhigh` present, `ultracode` absent. Square brackets per `XVn`.
+        assert!(!dynamic_workflows_enabled());
+        assert_eq!(
+            usage(),
+            "Usage: /effort [low|medium|high|xhigh|max|auto]\n\n\
+Effort levels:\n\
+- low: Quick, straightforward implementation\n\
+- medium: Balanced approach with standard testing\n\
+- high: Comprehensive implementation with extensive testing\n\
+- xhigh: Extended reasoning with thorough analysis (Fable 5, Opus 4.7+)\n\
+- max: Maximum capability with deepest reasoning (Fable 5, Opus 4.6+, Sonnet 4.6)\n\
+- auto: Use the default effort level for your model"
+        );
+    }
+
+    #[test]
+    fn usage_is_byte_exact_with_gate_on() {
+        // `XVn` with `e === true`: `|ultracode` joins the bracket list and the
+        // `- ultracode:` line is appended before `- auto:`.
+        assert_eq!(
+            usage_with(true),
+            "Usage: /effort [low|medium|high|xhigh|max|ultracode|auto]\n\n\
+Effort levels:\n\
+- low: Quick, straightforward implementation\n\
+- medium: Balanced approach with standard testing\n\
+- high: Comprehensive implementation with extensive testing\n\
+- xhigh: Extended reasoning with thorough analysis (Fable 5, Opus 4.7+)\n\
+- max: Maximum capability with deepest reasoning (Fable 5, Opus 4.6+, Sonnet 4.6)\n\
+- ultracode: xhigh + dynamic workflow orchestration (this session only)\n\
+- auto: Use the default effort level for your model"
+        );
+    }
+
+    #[test]
+    fn xhigh_parses_and_describes() {
+        // `hQe("xhigh")` / `NXu("xhigh")`.
+        assert_eq!(parse_effort_level("xhigh"), Some(EffortLevel::Xhigh));
+        assert_eq!(parse_effort_level("  XHIGH  "), Some(EffortLevel::Xhigh));
+        assert_eq!(
+            EffortLevel::Xhigh.description(),
+            "Deeper reasoning than high, just below maximum (Fable 5, Opus 4.7+)"
+        );
+        // `_Ai = {med: "medium"}` alias.
+        assert_eq!(parse_effort_level("med"), Some(EffortLevel::Medium));
+        // `ultracode` is NOT a parse-level member (routed separately).
+        assert_eq!(parse_effort_level("ultracode"), None);
+    }
+
+    #[tokio::test]
+    async fn set_xhigh_is_persisted_as_default() {
+        let env = TestEnv::new();
+        // xhigh is persistable (`Tve`) → "(saved as your default …)" suffix +
+        // written to settings.json.
+        assert_eq!(
+            run("xhigh").await,
+            "Set effort level to xhigh (saved as your default for new sessions): Deeper reasoning than high, just below maximum (Fable 5, Opus 4.7+)"
+        );
+        assert_eq!(
+            env.read_settings().unwrap().get("effortLevel"),
+            Some(&json!("xhigh"))
+        );
+    }
+
+    #[tokio::test]
+    async fn ultracode_gated_off_renders_guidance() {
+        let _env = TestEnv::new();
+        // `Pum` gate-off branch (dynamic workflows disabled in this port).
+        assert_eq!(
+            run("ultracode").await,
+            "Ultracode needs dynamic workflows enabled (see /config). Valid options are: low, medium, high, xhigh, max, auto"
+        );
+        assert_eq!(run("ULTRACODE").await,
+            "Ultracode needs dynamic workflows enabled (see /config). Valid options are: low, medium, high, xhigh, max, auto"
+        );
     }
 
     #[tokio::test]
@@ -580,10 +767,10 @@ mod tests {
     #[tokio::test]
     async fn set_valid_level_no_env_is_session_only() {
         let env = TestEnv::new();
-        // low/medium/high are now persistable → suffix dropped.
+        // low/medium/high/xhigh are persistable → "(saved as your default …)".
         assert_eq!(
             run("medium").await,
-            "Set effort level to medium: Balanced approach with standard implementation and testing"
+            "Set effort level to medium (saved as your default for new sessions): Balanced approach with standard implementation and testing"
         );
         // max stays session-only (toPersistableEffort(max) === undefined for
         // non-ant) → suffix kept, nothing written.
@@ -616,7 +803,7 @@ mod tests {
         std::env::set_var(EFFORT_ENV_VAR, "high");
         assert_eq!(
             run("high").await,
-            "Set effort level to high: Comprehensive implementation with extensive testing and documentation"
+            "Set effort level to high (saved as your default for new sessions): Comprehensive implementation with extensive testing and documentation"
         );
     }
 
@@ -642,7 +829,7 @@ mod tests {
         let _env = TestEnv::new();
         assert_eq!(
             run("bogus").await,
-            "Invalid argument: bogus. Valid options are: low, medium, high, max, auto"
+            "Invalid argument: bogus. Valid options are: low, medium, high, xhigh, max, auto"
         );
     }
 
@@ -665,7 +852,7 @@ mod tests {
         // The Usage block's `- max:` line renders the Usage template
         // `Maximum capability with deepest reasoning (${gAi})` with
         // `gAi="Fable 5, Opus 4.6+, Sonnet 4.6"`.
-        assert!(USAGE.contains(
+        assert!(usage().contains(
             "- max: Maximum capability with deepest reasoning (Fable 5, Opus 4.6+, Sonnet 4.6)\n"
         ));
     }
@@ -677,7 +864,7 @@ mod tests {
         let env = TestEnv::new();
         assert_eq!(
             run("high").await,
-            "Set effort level to high: Comprehensive implementation with extensive testing and documentation"
+            "Set effort level to high (saved as your default for new sessions): Comprehensive implementation with extensive testing and documentation"
         );
         let map = env.read_settings().expect("settings.json written");
         assert_eq!(map.get("effortLevel"), Some(&json!("high")));

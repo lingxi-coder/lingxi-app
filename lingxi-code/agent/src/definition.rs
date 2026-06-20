@@ -188,8 +188,9 @@ pub enum AgentEffort {
     Numeric(i64),
 }
 
-/// Valid named effort levels (claude `EFFORT_LEVELS`).
-pub const EFFORT_LEVELS: [&str; 4] = ["low", "medium", "high", "max"];
+/// Valid named effort levels (claude `EFFORT_LEVELS` / `nP =
+/// ["low","medium","high","xhigh","max"]`, v2.1.183).
+pub const EFFORT_LEVELS: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
 
 /// Coerce a YAML/JSON frontmatter value into an [`AgentEffort`], mirroring
 /// claude `parseEffortValue` (effort.ts:71-87):

@@ -481,7 +481,7 @@ pub fn simple_prompt(sandbox: &SandboxRuntimeConfig) -> String {
         "Do not retry failing commands in a sleep loop — diagnose the root cause.".to_string(),
         "If waiting for a background task you started with `run_in_background`, you will be notified when it completes — do not poll.".to_string(),
         "If you must poll an external process, use a check command (e.g. `gh run view`) rather than sleeping first.".to_string(),
-        "If you must sleep, keep the duration short (1-5 seconds) to avoid blocking the user.".to_string(),
+        "If you must sleep, keep the duration short to avoid blocking the user.".to_string(),
     ];
 
     let background_note = background_usage_note();
@@ -489,7 +489,7 @@ pub fn simple_prompt(sandbox: &SandboxRuntimeConfig) -> String {
     let mut instruction_items: Vec<Bullet> = vec![
         Bullet::Item("If your command will create new directories or files, first use this tool to run `ls` to verify the parent directory exists and is the correct location.".into()),
         Bullet::Item("Always quote file paths that contain spaces with double quotes in your command (e.g., cd \"path with spaces/file.txt\")".into()),
-        Bullet::Item("Try to maintain your current working directory throughout the session by using absolute paths and avoiding usage of `cd`. You may use `cd` if the User explicitly requests it.".into()),
+        Bullet::Item("Try to maintain your current working directory throughout the session by using absolute paths and avoiding usage of `cd`. You may use `cd` if the User explicitly requests it. In particular, never prepend `cd <current-directory>` to a `git` command \u{2014} `git` already operates on the current working tree, and the compound triggers a permission prompt.".into()),
         Bullet::Item(format!(
             "You may specify an optional timeout in milliseconds (up to {max_timeout_ms}ms / {} minutes). By default, your command will timeout after {default_timeout_ms}ms ({} minutes).",
             max_timeout_ms / 60_000,
@@ -577,6 +577,23 @@ mod tests {
         assert!(
             p.contains("# Committing changes with git"),
             "missing committing-changes header"
+        );
+        // cwd/`cd` bullet — byte-locked to claude-code v2.1.183 (incl. the
+        // trailing git/cd sentence; em-dash is U+2014).
+        assert!(
+            p.contains(
+                "Try to maintain your current working directory throughout the session by using absolute paths and avoiding usage of `cd`. You may use `cd` if the User explicitly requests it. In particular, never prepend `cd <current-directory>` to a `git` command \u{2014} `git` already operates on the current working tree, and the compound triggers a permission prompt."
+            ),
+            "missing/incorrect cwd `cd`/git bullet (git/cd sentence must be present, em-dash U+2014)"
+        );
+        // sleep bullet — byte-locked to claude-code v2.1.183 (NO "(1-5 seconds)").
+        assert!(
+            p.contains("If you must sleep, keep the duration short to avoid blocking the user."),
+            "missing/incorrect sleep bullet"
+        );
+        assert!(
+            !p.contains("(1-5 seconds)"),
+            "sleep bullet must not contain the invented \"(1-5 seconds)\" qualifier"
         );
     }
 

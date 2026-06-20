@@ -1598,6 +1598,34 @@ pub async fn build(
 ) -> Result<DesktopRuntime, BuildError> {
     let cwd = cfg.cwd.clone();
 
+    // FIX A/B/C: mint the boot-canonical MAIN session id ONCE and derive the
+    // session's transcript path + subagents dir from `(claude_home, cwd, id)`.
+    // claude-code's `createBaseHookInput` (utils/hooks.ts:322) ALWAYS stamps
+    // `transcript_path: getTranscriptPathForSession(sessionId)` on EVERY hook
+    // payload, and `getAgentTranscriptPath` anchors spawned-subagent transcripts
+    // under `<projectDir>/<sessionId>/subagents`. The orchestrator generates its
+    // own `SessionId` INSIDE `ConversationOrchestrator::new`, so historically no
+    // single id was knowable at boot — the leaf firers / subagent spawner (built
+    // BEFORE the orchestrator) fired with an EMPTY `transcript_path` / a `/tmp`
+    // subdir. We close that by minting the id here and:
+    //   - handing it to the orchestrator via `.with_session_id` (so its live
+    //     session matches), and to the firers as the precomputed `transcript_path`;
+    //   - handing the subagents dir to the spawner via `with_hook_context`.
+    // The path helpers live in `orchestrator::transcript_paths` (a facade over
+    // `session::jsonl::path`) so this app needs no direct `session` dep.
+    let main_session_id = protocol::SessionId::new();
+    let main_session_uuid = main_session_id.as_uuid().to_string();
+    let main_transcript_path = orchestrator::transcript_paths::main_transcript_path(
+        &cfg.claude_home,
+        &cwd.to_string_lossy(),
+        &main_session_uuid,
+    );
+    let main_subagents_dir = orchestrator::transcript_paths::subagents_dir(
+        &cfg.claude_home,
+        &cwd.to_string_lossy(),
+        &main_session_uuid,
+    );
+
     // (1) Platform-minimal façade (http + clock + storage).
     let http = Arc::new(PosixHttp::new());
     let clock = Arc::new(PosixClock::new());
@@ -2142,7 +2170,18 @@ pub async fn build(
         // session-scoped at runtime; the spawner uses a boot-stable session id —
         // the field is cosmetic on the wire payload, the load-bearing
         // agent_id/agent_type are set by the runner per spawn).
-        .with_hook_context(subagent_hook_session_id, cwd.clone());
+        // FIX C: also thread the boot-computed MAIN-session subagents dir
+        // (`…/projects/<sanitize(cwd)>/<main_session>/subagents`) so each spawned
+        // child's `agent_transcript_path` (the agent-scoped `SubagentStop` field)
+        // resolves to the real `…/subagents/agent-<id>.jsonl` (claude-code
+        // `getAgentTranscriptPath`) instead of the prior `/tmp` placeholder. The
+        // subdir keys on the MAIN session id (claude `getSessionId()`), NOT the
+        // cosmetic `subagent_hook_session_id`.
+        .with_hook_context(
+            subagent_hook_session_id,
+            cwd.clone(),
+            Some(main_subagents_dir.clone()),
+        );
     let subagent_tool_registry_cell = subagent_spawner_concrete.tool_registry_handle();
     let subagent_agent_catalog_cell = subagent_spawner_concrete.agent_catalog_handle();
     // G4/G5: grab the set-once hook-executor + skill-loader cells BEFORE boxing,
@@ -2596,7 +2635,11 @@ pub async fn build(
     //         `with_hook_dispatcher(Some(..))` is the only behavioral delta from
     //         the previous `with_raw_conn` wiring.
     let elicitation_dispatcher: Arc<dyn mcp::HookDispatcher> = Arc::new(
-        orchestrator::OrchestratorHookDispatcher::new(hooks.clone(), cwd.clone()),
+        orchestrator::OrchestratorHookDispatcher::new(
+            hooks.clone(),
+            cwd.clone(),
+            main_transcript_path.clone(),
+        ),
     );
     // OAuth 2.1 + PKCE seam for OAuth-configured remote (SSE/HTTP) MCP servers.
     // Reuses the platform `http` / `clock` / `storage` already built in step (1);
@@ -2735,6 +2778,7 @@ pub async fn build(
     .with_task_completed_firer(Arc::new(orchestrator::OrchestratorTaskCompletedFirer::new(
         hooks.clone(),
         cwd.clone(),
+        main_transcript_path.clone(),
     )))
     // Fire the `TaskCreated` hook (claude-code `executeTaskCreatedHooks`) when a
     // task is created. Counterpart to the `TaskCompleted` firer above — wraps
@@ -2743,6 +2787,7 @@ pub async fn build(
     .with_task_created_firer(Arc::new(orchestrator::OrchestratorTaskCreatedFirer::new(
         hooks.clone(),
         cwd.clone(),
+        main_transcript_path.clone(),
     )));
     // Register the M2 self-contained per-type handlers (LocalBash + MonitorMcp)
     // before the registry is shared. Both depend only on platform traits we
@@ -2873,6 +2918,7 @@ pub async fn build(
     .with_teammate_idle_firer(Arc::new(orchestrator::OrchestratorTeammateIdleFirer::new(
         hooks.clone(),
         cwd.clone(),
+        main_transcript_path.clone(),
     )));
     task_registry_inner.register_handler(
         tasks::TaskType::InProcessTeammate,
@@ -3217,7 +3263,11 @@ pub async fn build(
         // tool can roll back creation / refuse a completion. Separate seam — the
         // registry firers' observe-only contract is unchanged.
         task_lifecycle_hooks: Some(Arc::new(
-            orchestrator::OrchestratorTaskLifecycleHookFirer::new(hooks.clone(), cwd.clone()),
+            orchestrator::OrchestratorTaskLifecycleHookFirer::new(
+                hooks.clone(),
+                cwd.clone(),
+                main_transcript_path.clone(),
+            ),
         )),
     };
     // (5.5) M10 (T12/T13): select the team-tool variant at BUILD time. A
@@ -3319,7 +3369,11 @@ pub async fn build(
     // never registers the shell tools, so the mobile path keeps the no-firer
     // BashTool.
     let cwd_changed_firer: hooks::OptionalCwdChangedFirer = Some(Arc::new(
-        orchestrator::OrchestratorCwdChangedFirer::new(hooks.clone(), cwd.clone()),
+        orchestrator::OrchestratorCwdChangedFirer::new(
+            hooks.clone(),
+            cwd.clone(),
+            main_transcript_path.clone(),
+        ),
     ));
     register_desktop_tools(
         &mut tools_inner,
@@ -3435,6 +3489,7 @@ pub async fn build(
             Some(Arc::new(orchestrator::OrchestratorFileChangedFirer::new(
                 hooks.clone(),
                 watch_cwd.clone(),
+                main_transcript_path.clone(),
             )))
         };
     // (6.5-pre) Clone the registry Arcs the plugin bootstrap (below, after the
@@ -3458,6 +3513,17 @@ pub async fn build(
     let orch_builder = ConversationOrchestrator::new(
         orch_cfg, api_client, tools, hooks, perms, output, memory, cwd,
     )
+    // FIX A: hand the orchestrator the resolved claude-home so its hook payloads
+    // carry a deterministically-computed `transcript_path`
+    // (`<config_home>/projects/<sanitize(cwd)>/<uuid>.jsonl`, claude-code
+    // `getTranscriptPathForSession`) even though PRODUCTION wires NO `JsonlWriter`
+    // (every `with_jsonl_writer` call site is a test). Without this every
+    // PreToolUse / PostToolBatch / lifecycle hook fired with an empty path.
+    .with_config_home(cfg.claude_home.clone())
+    // FIX A/B/C: adopt the boot-canonical session id so the orchestrator's LIVE
+    // session matches the id baked into the leaf firers' `transcript_path` and the
+    // subagent spawner's subagents dir — one consistent session id end-to-end.
+    .with_session_id(main_session_id)
     .with_cost_tracker(cost_tracker)
     .with_analytics_bus(analytics_bus)
     .with_mcp_registry(mcp_registry)

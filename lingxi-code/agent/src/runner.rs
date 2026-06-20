@@ -144,12 +144,13 @@ pub async fn run_subagent(
         // (claude-code `getAgentTranscriptPath(subagentId)`, coreSchemas.ts:556 /
         // utils/hooks.ts:3676). TS builds it as
         // `…/subagents[/subdir]/agent-${agentId}.jsonl`; LingXi mirrors the
-        // `agent-<id>.jsonl` leaf under this child's `transcript_subdir`. NOTE:
-        // the production spawn path currently seeds `transcript_subdir` to a
-        // `/tmp` placeholder (handle.rs / pool.rs), so the path is shape-faithful
-        // but not yet the real session-scoped location — same cosmetic caveat as
-        // `hook_session_id`. Filling it is strictly better than the prior empty
-        // value, which serialized as a bare default.
+        // `agent-<id>.jsonl` leaf under this child's `transcript_subdir`.
+        // FIX C: the production spawn path (handle.rs) now seeds `transcript_subdir`
+        // to the REAL session-scoped dir
+        // `<claude_home>/projects/<sanitize(cwd)>/<session>/subagents` (threaded
+        // from the composition root via `with_hook_context`), so this is the true
+        // `getAgentTranscriptPath` location — not the former `/tmp` placeholder.
+        // Tests / minimal builds that wire no subagents dir keep the `/tmp` default.
         let agent_transcript_path = ctx
             .transcript_subdir
             .join(format!("agent-{agent_id}.jsonl"));

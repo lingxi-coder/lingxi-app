@@ -47,16 +47,25 @@ pub struct OrchestratorHookDispatcher {
     /// Engine cwd, threaded into the `Elicitation` hook payload (`cwd`) and the
     /// per-hook Command-arm `CLAUDE_PROJECT_DIR` fallback.
     cwd: PathBuf,
+    /// The MAIN orchestrator session's transcript path
+    /// (`<config_home>/projects/<sanitize(cwd)>/<uuid>.jsonl`, claude-code
+    /// `getTranscriptPathForSession`), stamped on the `Elicitation` hook payload's
+    /// `transcript_path` (FIX B). Empty for builds wiring neither.
+    transcript_path: PathBuf,
 }
 
 impl OrchestratorHookDispatcher {
-    /// Build a dispatcher over the shared hook executor and engine cwd. Pass the
-    /// SAME `Arc<HookExecutorImpl>` handed to the orchestrator so the
-    /// `Elicitation` hook rides the identical registry / async / sandbox
-    /// plumbing.
+    /// Build a dispatcher over the shared hook executor, engine cwd, and the main
+    /// session's transcript path. Pass the SAME `Arc<HookExecutorImpl>` handed to
+    /// the orchestrator so the `Elicitation` hook rides the identical registry /
+    /// async / sandbox plumbing.
     #[must_use]
-    pub fn new(hooks: Arc<HookExecutorImpl>, cwd: PathBuf) -> Self {
-        Self { hooks, cwd }
+    pub fn new(hooks: Arc<HookExecutorImpl>, cwd: PathBuf, transcript_path: PathBuf) -> Self {
+        Self {
+            hooks,
+            cwd,
+            transcript_path,
+        }
     }
 
     /// Map the raw wire `mode` string onto the hooks `ElicitationMode`.
@@ -86,11 +95,12 @@ impl HookDispatcher for OrchestratorHookDispatcher {
             requested_schema: request.requested_schema,
         };
         // Minimal context: the inbound elicitation path has no live per-turn
-        // session, so we thread only the engine cwd (also used as the
-        // CLAUDE_PROJECT_DIR fallback). Everything else defaults — matching the
-        // orchestrator's other "context-light" hook fires.
+        // session, so we thread the engine cwd (also used as the CLAUDE_PROJECT_DIR
+        // fallback) and the main session's `transcript_path` (FIX B). Everything
+        // else defaults — matching the orchestrator's other "context-light" fires.
         let ctx = HookContext {
             cwd: self.cwd.clone(),
+            transcript_path: self.transcript_path.clone(),
             ..Default::default()
         };
 
@@ -128,6 +138,7 @@ mod tests {
         let dispatcher = OrchestratorHookDispatcher::new(
             noop_hook_executor(),
             PathBuf::from("/work"),
+            PathBuf::from("/work/.t.jsonl"),
         );
         let outcome = dispatcher
             .dispatch_elicitation(ElicitationHookRequest {

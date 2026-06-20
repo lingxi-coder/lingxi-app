@@ -46,15 +46,25 @@ pub struct OrchestratorCwdChangedFirer {
     /// fallback. This is distinct from the fire's `old`/`new` shell cwd, which
     /// becomes the `old_cwd` / `new_cwd` payload fields.
     cwd: PathBuf,
+    /// The MAIN orchestrator session's transcript path
+    /// (`<config_home>/projects/<sanitize(cwd)>/<uuid>.jsonl`, claude-code
+    /// `getTranscriptPathForSession`), stamped on the `CwdChanged` hook payload's
+    /// `transcript_path` (FIX B). Empty for builds wiring neither.
+    transcript_path: PathBuf,
 }
 
 impl OrchestratorCwdChangedFirer {
-    /// Build a firer over the shared hook executor and engine cwd. Pass the SAME
-    /// `Arc<HookExecutorImpl>` handed to the orchestrator so the `CwdChanged`
-    /// hook rides the identical registry / async / sandbox plumbing.
+    /// Build a firer over the shared hook executor, engine cwd, and the main
+    /// session's transcript path. Pass the SAME `Arc<HookExecutorImpl>` handed to
+    /// the orchestrator so the `CwdChanged` hook rides the identical registry /
+    /// async / sandbox plumbing.
     #[must_use]
-    pub fn new(hooks: Arc<HookExecutorImpl>, cwd: PathBuf) -> Self {
-        Self { hooks, cwd }
+    pub fn new(hooks: Arc<HookExecutorImpl>, cwd: PathBuf, transcript_path: PathBuf) -> Self {
+        Self {
+            hooks,
+            cwd,
+            transcript_path,
+        }
     }
 }
 
@@ -69,10 +79,12 @@ impl CwdChangedFirer for OrchestratorCwdChangedFirer {
             new: fire.new,
         };
         // Context-light: a cwd change has no live per-turn session here, so we
-        // thread only the engine cwd (also the CLAUDE_PROJECT_DIR fallback).
-        // Everything else defaults — matching the `OrchestratorTaskCreatedFirer`.
+        // thread the engine cwd (also the CLAUDE_PROJECT_DIR fallback) and the main
+        // session's `transcript_path` (FIX B). Everything else defaults — matching
+        // the `OrchestratorTaskCreatedFirer`.
         let ctx = HookContext {
             cwd: self.cwd.clone(),
+            transcript_path: self.transcript_path.clone(),
             ..Default::default()
         };
         // Best-effort: the executor never errors out of `execute`, so a
@@ -99,7 +111,11 @@ mod tests {
     async fn no_matching_hook_is_a_noop_fire() {
         // An executor with an empty registry never intervenes => the fire is a
         // silent no-op (the "no hook registered" contract). Must not panic/hang.
-        let firer = OrchestratorCwdChangedFirer::new(noop_hook_executor(), PathBuf::from("/work"));
+        let firer = OrchestratorCwdChangedFirer::new(
+            noop_hook_executor(),
+            PathBuf::from("/work"),
+            PathBuf::from("/work/.t.jsonl"),
+        );
         firer
             .fire(CwdChangedFire {
                 old: PathBuf::from("/work"),
@@ -146,15 +162,19 @@ mod tests {
     }
 
     /// Records the `(old, new)` it is dispatched, proving the firer's
-    /// `CwdChangedFire` reaches the executor as a `HookEvent::CwdChanged`.
+    /// `CwdChangedFire` reaches the executor as a `HookEvent::CwdChanged`. Also
+    /// captures the delivered `ctx.transcript_path` (FIX B) so the test can assert
+    /// the firer stamped the main session's transcript path on the hook context.
     struct RecordingBuiltin {
         seen: Arc<Mutex<Option<(PathBuf, PathBuf)>>>,
+        seen_transcript: Arc<Mutex<Option<PathBuf>>>,
     }
     #[async_trait]
     impl BuiltinHookHandler for RecordingBuiltin {
-        async fn handle(&self, event: &HookEvent, _ctx: &HookContext) -> HookResult {
+        async fn handle(&self, event: &HookEvent, ctx: &HookContext) -> HookResult {
             if let HookEvent::CwdChanged { old, new } = event {
                 *self.seen.lock().unwrap() = Some((old.clone(), new.clone()));
+                *self.seen_transcript.lock().unwrap() = Some(ctx.transcript_path.clone());
             }
             HookResult {
                 outcome: HookOutcome::Success,
@@ -175,7 +195,11 @@ mod tests {
         // handler: firing the orchestrator firer must deliver a
         // `HookEvent::CwdChanged { old, new }` carrying the fire's paths.
         let seen: Arc<Mutex<Option<(PathBuf, PathBuf)>>> = Arc::new(Mutex::new(None));
-        let handler = Arc::new(RecordingBuiltin { seen: seen.clone() });
+        let seen_transcript: Arc<Mutex<Option<PathBuf>>> = Arc::new(Mutex::new(None));
+        let handler = Arc::new(RecordingBuiltin {
+            seen: seen.clone(),
+            seen_transcript: seen_transcript.clone(),
+        });
 
         let mut registry = HookRegistry::new();
         registry.register(HookDefinition {
@@ -204,7 +228,11 @@ mod tests {
         );
         exec.register_builtin(handler);
 
-        let firer = OrchestratorCwdChangedFirer::new(Arc::new(exec), PathBuf::from("/work"));
+        let firer = OrchestratorCwdChangedFirer::new(
+            Arc::new(exec),
+            PathBuf::from("/work"),
+            PathBuf::from("/home/.claude/projects/-work/abc.jsonl"),
+        );
         firer
             .fire(CwdChangedFire {
                 old: PathBuf::from("/work/old"),
@@ -217,6 +245,15 @@ mod tests {
             got,
             Some((PathBuf::from("/work/old"), PathBuf::from("/work/new"))),
             "OrchestratorCwdChangedFirer must deliver HookEvent::CwdChanged(old,new)"
+        );
+        // FIX B: the firer must stamp the main session's transcript_path on the
+        // delivered hook context (claude-code `createBaseHookInput` always sets it).
+        let got_transcript = seen_transcript.lock().unwrap().clone();
+        assert_eq!(
+            got_transcript,
+            Some(PathBuf::from("/home/.claude/projects/-work/abc.jsonl")),
+            "OrchestratorCwdChangedFirer must carry the constructor's transcript_path \
+             into the HookContext (non-empty)"
         );
     }
 }

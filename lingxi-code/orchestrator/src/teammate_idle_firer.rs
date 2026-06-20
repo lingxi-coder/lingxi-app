@@ -49,15 +49,25 @@ pub struct OrchestratorTeammateIdleFirer {
     /// Engine cwd, threaded into the `TeammateIdle` hook payload (`cwd`) and the
     /// per-hook Command-arm `CLAUDE_PROJECT_DIR` fallback.
     cwd: PathBuf,
+    /// The MAIN orchestrator session's transcript path
+    /// (`<config_home>/projects/<sanitize(cwd)>/<uuid>.jsonl`, claude-code
+    /// `getTranscriptPathForSession`), stamped on the `TeammateIdle` hook payload's
+    /// `transcript_path` (FIX B). Empty for builds wiring neither.
+    transcript_path: PathBuf,
 }
 
 impl OrchestratorTeammateIdleFirer {
-    /// Build a firer over the shared hook executor and engine cwd. Pass the SAME
-    /// `Arc<HookExecutorImpl>` handed to the orchestrator so the `TeammateIdle`
-    /// hook rides the identical registry / async / sandbox plumbing.
+    /// Build a firer over the shared hook executor, engine cwd, and the main
+    /// session's transcript path. Pass the SAME `Arc<HookExecutorImpl>` handed to
+    /// the orchestrator so the `TeammateIdle` hook rides the identical registry /
+    /// async / sandbox plumbing.
     #[must_use]
-    pub fn new(hooks: Arc<HookExecutorImpl>, cwd: PathBuf) -> Self {
-        Self { hooks, cwd }
+    pub fn new(hooks: Arc<HookExecutorImpl>, cwd: PathBuf, transcript_path: PathBuf) -> Self {
+        Self {
+            hooks,
+            cwd,
+            transcript_path,
+        }
     }
 }
 
@@ -69,12 +79,13 @@ impl TeammateIdleFirer for OrchestratorTeammateIdleFirer {
             team_name: fire.team_name,
         };
         // Context-light: a per-turn-set teammate idle has no live per-turn
-        // session here, so we thread only the engine cwd (also the
-        // CLAUDE_PROJECT_DIR fallback). Everything else defaults — matching the
-        // orchestrator's other "context-light" hook fires
-        // (`OrchestratorTaskCompletedFirer`).
+        // session here, so we thread the engine cwd (also the CLAUDE_PROJECT_DIR
+        // fallback) and the main session's `transcript_path` (FIX B). Everything
+        // else defaults — matching the orchestrator's other "context-light" hook
+        // fires (`OrchestratorTaskCompletedFirer`).
         let ctx = HookContext {
             cwd: self.cwd.clone(),
+            transcript_path: self.transcript_path.clone(),
             ..Default::default()
         };
         // Best-effort: the executor never errors out of `execute`, so a
@@ -98,6 +109,7 @@ mod tests {
         let firer = OrchestratorTeammateIdleFirer::new(
             noop_hook_executor(),
             PathBuf::from("/work"),
+            PathBuf::from("/work/.t.jsonl"),
         );
         // Must not panic / hang.
         firer

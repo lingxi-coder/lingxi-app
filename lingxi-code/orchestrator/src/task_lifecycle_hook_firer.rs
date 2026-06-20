@@ -64,25 +64,36 @@ pub struct OrchestratorTaskLifecycleHookFirer {
     /// Engine cwd, threaded into the hook payload (`cwd`) and the per-hook
     /// Command-arm `CLAUDE_PROJECT_DIR` fallback.
     cwd: PathBuf,
+    /// The MAIN orchestrator session's transcript path
+    /// (`<config_home>/projects/<sanitize(cwd)>/<uuid>.jsonl`, claude-code
+    /// `getTranscriptPathForSession`), stamped on every lifecycle hook payload's
+    /// `transcript_path` (FIX B). Empty for builds wiring neither.
+    transcript_path: PathBuf,
 }
 
 impl OrchestratorTaskLifecycleHookFirer {
-    /// Build a firer over the shared hook executor and engine cwd. Pass the
-    /// SAME `Arc<HookExecutorImpl>` handed to the orchestrator (and the registry
-    /// firers) so the tool-path hooks ride the identical registry / async /
-    /// sandbox plumbing.
+    /// Build a firer over the shared hook executor, engine cwd, and the main
+    /// session's transcript path. Pass the SAME `Arc<HookExecutorImpl>` handed to
+    /// the orchestrator (and the registry firers) so the tool-path hooks ride the
+    /// identical registry / async / sandbox plumbing.
     #[must_use]
-    pub fn new(hooks: Arc<HookExecutorImpl>, cwd: PathBuf) -> Self {
-        Self { hooks, cwd }
+    pub fn new(hooks: Arc<HookExecutorImpl>, cwd: PathBuf, transcript_path: PathBuf) -> Self {
+        Self {
+            hooks,
+            cwd,
+            transcript_path,
+        }
     }
 
     /// Build the context-light [`HookContext`] used by every fire here. A task
-    /// lifecycle transition has no live per-turn session, so only the engine cwd
-    /// is threaded (also the `CLAUDE_PROJECT_DIR` fallback); everything else
-    /// defaults — matching the orchestrator's other context-light firers.
+    /// lifecycle transition has no live per-turn session, so the engine cwd (also
+    /// the `CLAUDE_PROJECT_DIR` fallback) and the main session's `transcript_path`
+    /// (FIX B) are threaded; everything else defaults — matching the
+    /// orchestrator's other context-light firers.
     fn ctx(&self) -> HookContext {
         HookContext {
             cwd: self.cwd.clone(),
+            transcript_path: self.transcript_path.clone(),
             ..Default::default()
         }
     }
@@ -163,8 +174,11 @@ mod tests {
 
     #[tokio::test]
     async fn no_matching_hook_allows_create_and_complete() {
-        let firer =
-            OrchestratorTaskLifecycleHookFirer::new(noop_hook_executor(), PathBuf::from("/work"));
+        let firer = OrchestratorTaskLifecycleHookFirer::new(
+            noop_hook_executor(),
+            PathBuf::from("/work"),
+            PathBuf::from("/work/.t.jsonl"),
+        );
         assert_eq!(
             firer
                 .fire_task_created("t1", "ship it", Some("do the work"), None, None)
@@ -265,6 +279,7 @@ mod tests {
         let firer = OrchestratorTaskLifecycleHookFirer::new(
             blocking_executor_for(HookEventType::TaskCreated, "creation denied"),
             PathBuf::from("/work"),
+            PathBuf::from("/work/.t.jsonl"),
         );
         let res = firer
             .fire_task_created("t1", "ship it", Some("desc"), None, None)
@@ -282,6 +297,7 @@ mod tests {
         let firer = OrchestratorTaskLifecycleHookFirer::new(
             blocking_executor_for(HookEventType::TaskCompleted, "not done yet"),
             PathBuf::from("/work"),
+            PathBuf::from("/work/.t.jsonl"),
         );
         let res = firer
             .fire_task_completed("t1", "completed", "ship it", Some("desc"))

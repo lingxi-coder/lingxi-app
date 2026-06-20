@@ -47,16 +47,26 @@ pub struct OrchestratorTaskCreatedFirer {
     /// Engine cwd, threaded into the `TaskCreated` hook payload (`cwd`) and the
     /// per-hook Command-arm `CLAUDE_PROJECT_DIR` fallback.
     cwd: PathBuf,
+    /// The MAIN orchestrator session's transcript path
+    /// (`<config_home>/projects/<sanitize(cwd)>/<uuid>.jsonl`, claude-code
+    /// `getTranscriptPathForSession`), stamped on the `TaskCreated` hook payload's
+    /// `transcript_path`. Computed once at the composition root from the
+    /// boot-canonical session id; empty path for builds that wire neither.
+    transcript_path: PathBuf,
 }
 
 impl OrchestratorTaskCreatedFirer {
-    /// Build a firer over the shared hook executor and engine cwd. Pass the
-    /// SAME `Arc<HookExecutorImpl>` handed to the orchestrator so the
-    /// `TaskCreated` hook rides the identical registry / async / sandbox
-    /// plumbing.
+    /// Build a firer over the shared hook executor, engine cwd, and the main
+    /// session's transcript path. Pass the SAME `Arc<HookExecutorImpl>` handed to
+    /// the orchestrator so the `TaskCreated` hook rides the identical registry /
+    /// async / sandbox plumbing.
     #[must_use]
-    pub fn new(hooks: Arc<HookExecutorImpl>, cwd: PathBuf) -> Self {
-        Self { hooks, cwd }
+    pub fn new(hooks: Arc<HookExecutorImpl>, cwd: PathBuf, transcript_path: PathBuf) -> Self {
+        Self {
+            hooks,
+            cwd,
+            transcript_path,
+        }
     }
 }
 
@@ -77,11 +87,13 @@ impl TaskCreatedFirer for OrchestratorTaskCreatedFirer {
             team_name: fire.team_name,
         };
         // Context-light: a task-creation transition has no live per-turn session
-        // here, so we thread only the engine cwd (also the CLAUDE_PROJECT_DIR
-        // fallback). Everything else defaults — matching the
-        // `OrchestratorTaskCompletedFirer`.
+        // here, so we thread the engine cwd (also the CLAUDE_PROJECT_DIR fallback)
+        // and the main session's `transcript_path` (FIX B — claude-code's
+        // `createBaseHookInput` ALWAYS stamps it). Everything else defaults —
+        // matching the `OrchestratorTaskCompletedFirer`.
         let ctx = HookContext {
             cwd: self.cwd.clone(),
+            transcript_path: self.transcript_path.clone(),
             ..Default::default()
         };
         // Best-effort: the executor never errors out of `execute`, so a
@@ -102,8 +114,11 @@ mod tests {
     async fn no_matching_hook_is_a_noop_fire() {
         // An executor with an empty registry never intervenes => the fire is a
         // silent no-op (the "no hook registered" contract).
-        let firer =
-            OrchestratorTaskCreatedFirer::new(noop_hook_executor(), PathBuf::from("/work"));
+        let firer = OrchestratorTaskCreatedFirer::new(
+            noop_hook_executor(),
+            PathBuf::from("/work"),
+            PathBuf::from("/work/.t.jsonl"),
+        );
         // Must not panic / hang.
         firer
             .fire(TaskCreatedFire {

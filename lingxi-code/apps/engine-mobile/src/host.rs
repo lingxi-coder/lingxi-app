@@ -810,7 +810,12 @@ pub async fn build_mobile_inner(
     // reports the loaded settings hooks (the executor fires against it; this
     // exposes it for inspection — mobile sibling of desktop's
     // `.with_hook_registry(hook_registry)`).
-    .with_hook_registry(hook_registry);
+    .with_hook_registry(hook_registry)
+    // FIX A: hand the orchestrator the resolved claude-home so its hook payloads
+    // carry a deterministically-computed `transcript_path` (claude-code
+    // `getTranscriptPathForSession`) even though no `JsonlWriter` is wired —
+    // mobile sibling of desktop's `.with_config_home(cfg.claude_home.clone())`.
+    .with_config_home(cfg.claude_home.clone());
     // P0.1 (gated): attach the memdir prefetch when enabled above.
     if let Some(prefetch) = memdir_prefetch {
         orch_inner = orch_inner.with_memory_prefetch(prefetch);

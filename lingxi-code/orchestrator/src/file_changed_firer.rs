@@ -43,15 +43,25 @@ pub struct OrchestratorFileChangedFirer {
     /// fallback. Distinct from the fire's `path`, which becomes the wire
     /// `file_path`.
     cwd: PathBuf,
+    /// The MAIN orchestrator session's transcript path
+    /// (`<config_home>/projects/<sanitize(cwd)>/<uuid>.jsonl`, claude-code
+    /// `getTranscriptPathForSession`), stamped on the `FileChanged` hook payload's
+    /// `transcript_path` (FIX B). Empty for builds wiring neither.
+    transcript_path: PathBuf,
 }
 
 impl OrchestratorFileChangedFirer {
-    /// Build a firer over the shared hook executor and engine cwd. Pass the SAME
-    /// `Arc<HookExecutorImpl>` handed to the orchestrator so the `FileChanged`
-    /// hook rides the identical registry / async / sandbox plumbing.
+    /// Build a firer over the shared hook executor, engine cwd, and the main
+    /// session's transcript path. Pass the SAME `Arc<HookExecutorImpl>` handed to
+    /// the orchestrator so the `FileChanged` hook rides the identical registry /
+    /// async / sandbox plumbing.
     #[must_use]
-    pub fn new(hooks: Arc<HookExecutorImpl>, cwd: PathBuf) -> Self {
-        Self { hooks, cwd }
+    pub fn new(hooks: Arc<HookExecutorImpl>, cwd: PathBuf, transcript_path: PathBuf) -> Self {
+        Self {
+            hooks,
+            cwd,
+            transcript_path,
+        }
     }
 }
 
@@ -66,10 +76,12 @@ impl FileChangedFirer for OrchestratorFileChangedFirer {
             kind: fire.kind,
         };
         // Context-light: a file change has no live per-turn session here, so we
-        // thread only the engine cwd (also the CLAUDE_PROJECT_DIR fallback).
-        // Everything else defaults — matching `OrchestratorCwdChangedFirer`.
+        // thread the engine cwd (also the CLAUDE_PROJECT_DIR fallback) and the main
+        // session's `transcript_path` (FIX B). Everything else defaults — matching
+        // `OrchestratorCwdChangedFirer`.
         let ctx = HookContext {
             cwd: self.cwd.clone(),
+            transcript_path: self.transcript_path.clone(),
             ..Default::default()
         };
         // Best-effort: the executor never errors out of `execute`, so a
@@ -96,7 +108,11 @@ mod tests {
     async fn no_matching_hook_is_a_noop_fire() {
         // An executor with an empty registry never intervenes => the fire is a
         // silent no-op (the "no hook registered" contract). Must not panic/hang.
-        let firer = OrchestratorFileChangedFirer::new(noop_hook_executor(), PathBuf::from("/work"));
+        let firer = OrchestratorFileChangedFirer::new(
+            noop_hook_executor(),
+            PathBuf::from("/work"),
+            PathBuf::from("/work/.t.jsonl"),
+        );
         firer
             .fire(FileChangedFire {
                 path: PathBuf::from("/work/.envrc"),
@@ -199,7 +215,11 @@ mod tests {
         );
         exec.register_builtin(handler);
 
-        let firer = OrchestratorFileChangedFirer::new(Arc::new(exec), PathBuf::from("/work"));
+        let firer = OrchestratorFileChangedFirer::new(
+            Arc::new(exec),
+            PathBuf::from("/work"),
+            PathBuf::from("/work/.t.jsonl"),
+        );
         firer
             .fire(FileChangedFire {
                 path: PathBuf::from("/work/.env"),

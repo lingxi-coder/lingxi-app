@@ -135,6 +135,17 @@ pub struct PoolSubagentSpawner {
     /// Engine cwd stamped on that `HookContext`. Set at boot via
     /// [`Self::with_hook_context`]; defaults to an empty path.
     hook_cwd: std::path::PathBuf,
+    /// FIX C: the MAIN session's subagents directory —
+    /// `<claude_home>/projects/<sanitize(cwd)>/<session_uuid>/subagents`
+    /// (claude-code `getAgentTranscriptPath`'s base dir). Precomputed at the
+    /// composition root and set at boot via [`Self::with_hook_context`] (the
+    /// `agent` crate has no `session`/`orchestrator` dep to derive it, so the host
+    /// — which does — passes the finished `PathBuf`). When `Some`, [`Self::spawn`]
+    /// seeds each child's `transcript_subdir` from it so the agent-scoped
+    /// `SubagentStop`'s `agent_transcript_path` is the true session-scoped
+    /// `…/subagents/agent-<id>.jsonl` instead of the prior `/tmp` placeholder.
+    /// `None` ⇒ the `/tmp` placeholder stands (byte-identical legacy).
+    hook_subagents_dir: Option<std::path::PathBuf>,
     /// G14: name → child agent-id registry for `SendMessage` routing of spawned
     /// ASYNC subagents (claude `AppState.agentNameRegistry`, AgentTool.tsx:704-711).
     /// `AgentTool` calls [`SubagentSpawner::register_name`] after a successful
@@ -180,6 +191,7 @@ impl PoolSubagentSpawner {
             skill_loader: Arc::new(std::sync::OnceLock::new()),
             hook_session_id: protocol::SessionId::nil(),
             hook_cwd: std::path::PathBuf::new(),
+            hook_subagents_dir: None,
             name_registry: Arc::new(RwLock::new(HashMap::new())),
             tool_wide_deny_names: Arc::new(std::sync::OnceLock::new()),
         }
@@ -284,17 +296,24 @@ impl PoolSubagentSpawner {
     }
 
     /// Builder: set the session id + cwd stamped on the `HookContext` the child
-    /// runner builds for the SubagentStart fire. Without it the defaults
-    /// (nil session / empty cwd) are used — only consulted when a hook executor
-    /// is wired.
+    /// runner builds for the SubagentStart fire, plus the precomputed
+    /// `subagents_dir` used to seed each spawned child's REAL `transcript_subdir`
+    /// (FIX C — `<claude_home>/projects/<sanitize(cwd)>/<session>/subagents`,
+    /// supplied by the host since `agent` has no `session`/`orchestrator` dep to
+    /// derive it). Without it the defaults (nil session / empty cwd / no subagents
+    /// dir ⇒ `/tmp` placeholder subdir) are used — only consulted when a hook
+    /// executor is wired. Pass `subagents_dir = None` to keep the legacy `/tmp`
+    /// placeholder.
     #[must_use]
     pub fn with_hook_context(
         mut self,
         session_id: protocol::SessionId,
         cwd: std::path::PathBuf,
+        subagents_dir: Option<std::path::PathBuf>,
     ) -> Self {
         self.hook_session_id = session_id;
         self.hook_cwd = cwd;
+        self.hook_subagents_dir = subagents_dir;
         self
     }
 
@@ -781,6 +800,15 @@ impl SubagentSpawner for PoolSubagentSpawner {
         ctx.skill_loader = self.skill_loader.get().cloned();
         ctx.hook_session_id = self.hook_session_id;
         ctx.hook_cwd = self.hook_cwd.clone();
+        // FIX C: seed the child's REAL `transcript_subdir` from the boot-computed
+        // session subagents dir (`…/projects/<sanitize(cwd)>/<session>/subagents`)
+        // when the host wired one, so `runner.rs`'s `agent_transcript_path` resolves
+        // to the true `…/subagents/agent-<id>.jsonl` (claude-code
+        // `getAgentTranscriptPath`). `None` ⇒ keep `make_subagent_context`'s `/tmp`
+        // placeholder (byte-identical legacy for tests / minimal builds).
+        if let Some(subagents_dir) = &self.hook_subagents_dir {
+            ctx.transcript_subdir = subagents_dir.clone();
+        }
         // Resolve THIS spawn's advertised tools + dispatch allow-list from the
         // live registry per the child's policy (unset registry → no tools).
         // Populating `allowed_tools` here ACTIVATES the runner's dispatch guard

@@ -493,6 +493,16 @@ pub struct ConversationOrchestrator {
     /// CLI will plumb `--cwd`; until then, callers pass the platform
     /// caller's cwd here.
     pub(crate) cwd: std::path::PathBuf,
+    /// Resolved `$CLAUDE_CONFIG_DIR ?? ~/.claude` dir (the claude-home root).
+    /// Used by [`Self::computed_transcript_path`] to deterministically derive the
+    /// session's transcript path (`<config_home>/projects/<sanitize(cwd)>/<uuid>.jsonl`,
+    /// = claude-code `getTranscriptPathForSession`) for hook payloads when no
+    /// `jsonl_writer` is wired — which is the PRODUCTION case (every
+    /// `with_jsonl_writer` call site is a test). `None` for library/test callers
+    /// that wire neither a writer nor a config home, in which case
+    /// `computed_transcript_path` returns an empty path (the prior `""` behavior).
+    /// Wired at the composition root via [`Self::with_config_home`].
+    pub(crate) config_home: Option<std::path::PathBuf>,
     /// Optional on-disk JSONL persistence (M5-07). `None` for in-memory
     /// tests; `Some` when the CLI binary wires `~/.claude/projects/.../<uuid>.jsonl`.
     pub(crate) jsonl_writer: Option<Arc<JsonlWriter>>,
@@ -813,6 +823,7 @@ impl ConversationOrchestrator {
             session: Arc::new(Mutex::new(session)),
             memory,
             cwd,
+            config_home: None,
             jsonl_writer: None,
             last_jsonl_uuid: Mutex::new(None),
             git_branch_cache: Mutex::new(None),
@@ -856,6 +867,62 @@ impl ConversationOrchestrator {
     pub fn with_jsonl_writer(mut self, writer: Arc<JsonlWriter>) -> Self {
         self.jsonl_writer = Some(writer);
         self
+    }
+
+    /// Attach the resolved claude-home (`$CLAUDE_CONFIG_DIR ?? ~/.claude`) so
+    /// hook payloads carry a deterministically-computed `transcript_path` even
+    /// when no [`JsonlWriter`] is wired (the production case). Builder-style —
+    /// wired at the composition root (`engine-desktop` / `engine-mobile`).
+    #[must_use]
+    pub fn with_config_home(mut self, config_home: std::path::PathBuf) -> Self {
+        self.config_home = Some(config_home);
+        self
+    }
+
+    /// Override the orchestrator's session id. Builder-style — used at the
+    /// composition root so the boot-canonical session id (also handed to the
+    /// leaf hook firers / subagent spawner for a consistent `transcript_path`)
+    /// matches the orchestrator's live session. Without this the constructor's
+    /// fresh [`SessionId::new`] stands (test/library callers).
+    #[must_use]
+    pub fn with_session_id(self, session_id: SessionId) -> Self {
+        // `session` is behind an `Arc<Mutex>`; this builder runs before any turn
+        // (single owner at construction), so a blocking lock is safe and avoids
+        // making the builder async.
+        {
+            let mut s = self
+                .session
+                .try_lock()
+                .expect("with_session_id runs at construction, before any turn holds the lock");
+            s.session_id = session_id;
+        }
+        self
+    }
+
+    /// Deterministically derive this session's transcript path from the resolved
+    /// claude-home + cwd + session id — the parity analog of claude-code's
+    /// `getTranscriptPathForSession(sessionId)` (`utils/sessionStorage.ts:207`),
+    /// which `createBaseHookInput` (`utils/hooks.ts:322`) ALWAYS stamps onto every
+    /// hook payload. Shape: `<config_home>/projects/<sanitize(cwd)>/<uuid>.jsonl`
+    /// (= `session::jsonl::path::session_path`). The id is formatted as the BARE
+    /// uuid (`SessionId::as_uuid`) to match claude-code's `${sessionId}.jsonl` and
+    /// the on-disk JSONL filename the writer/loader use — NOT the `sess:`-prefixed
+    /// [`std::fmt::Display`] form. Returns an empty path when no `config_home` is
+    /// wired (test/library builds that also wire no writer), preserving the prior
+    /// `""` hook field for those.
+    #[must_use]
+    pub(crate) fn computed_transcript_path(
+        &self,
+        session_id: &SessionId,
+    ) -> std::path::PathBuf {
+        match &self.config_home {
+            Some(home) => session::jsonl::path::session_path(
+                home,
+                &self.cwd.to_string_lossy(),
+                &session_id.as_uuid().to_string(),
+            ),
+            None => std::path::PathBuf::new(),
+        }
     }
 
     /// Attach a [`cost::CostTracker`] so `snapshot_cost` returns
@@ -2595,11 +2662,18 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
     async fn lifecycle_hook_ctx(&self, stop_hook_active: bool) -> HookContext {
         // FIX 2: populate `transcript_path` + `permission_mode` on the lifecycle
         // hook context, matching claude-code `createBaseHookInput` (always sets
-        // `transcript_path`, utils/hooks.ts:322) — the JSONL writer's path (empty
-        // when unwired) and the plan/default approximation of the session's
-        // permission mode. The lifecycle hooks (Stop / UserPromptSubmit /
-        // SessionStart / …) thus carry a non-empty `transcript_path` like the
-        // tool-use hooks do, instead of serializing `""`.
+        // `transcript_path`, utils/hooks.ts:322) and the plan/default approximation
+        // of the session's permission mode. The lifecycle hooks (Stop /
+        // UserPromptSubmit / SessionStart / …) thus carry a non-empty
+        // `transcript_path` like the tool-use hooks do, instead of serializing `""`.
+        //
+        // FIX A: the path is the live JSONL writer's path when one is wired
+        // (preserves the writer-backed tests) ELSE the deterministically-computed
+        // `<config_home>/projects/<sanitize(cwd)>/<uuid>.jsonl` — because in
+        // PRODUCTION no writer is wired, so the prior `unwrap_or_default()` left
+        // `transcript_path` EMPTY for every lifecycle hook. `computed_transcript_path`
+        // is itself `""` only when neither a writer nor a `config_home` is present
+        // (library/test builds), preserving the old behavior there.
         let (session_id, plan_mode) = {
             let s = self.session.lock().await;
             (s.session_id, s.plan_mode)
@@ -2608,7 +2682,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             .jsonl_writer
             .as_ref()
             .map(|w| w.path().to_path_buf())
-            .unwrap_or_default();
+            .unwrap_or_else(|| self.computed_transcript_path(&session_id));
         HookContext {
             session_id,
             cwd: self.cwd.clone(),

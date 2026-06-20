@@ -1627,11 +1627,15 @@ pub(crate) async fn dispatch_tool_uses_tracked(
         // matching claude-code `createBaseHookInput` (always sets
         // `transcript_path: getTranscriptPathForSession(...)`, utils/hooks.ts:322)
         // plus PreToolUse/PostToolUse's `permission_mode =
-        // appState.toolPermissionContext.mode` (toolHooks.ts:471). The transcript
-        // path is the live JSONL writer's path (empty when no writer is wired —
-        // the `unwrap_or_default()` keeps the prior `""` for those test/headless
-        // builds). LingXi's session models `plan_mode: bool`, so plan-vs-default is
-        // the faithful approximation (the defer path below uses the same logic).
+        // appState.toolPermissionContext.mode` (toolHooks.ts:471). LingXi's session
+        // models `plan_mode: bool`, so plan-vs-default is the faithful approximation
+        // (the defer path below uses the same logic).
+        //
+        // FIX A: the transcript path is the live JSONL writer's path when one is
+        // wired (preserves the writer-backed tests) ELSE the deterministically-
+        // computed `<config_home>/projects/<sanitize(cwd)>/<uuid>.jsonl`. In
+        // PRODUCTION no writer is wired, so the prior `unwrap_or_default()` made
+        // EVERY PreToolUse/PostToolUse hook carry an empty `transcript_path`.
         let (session_id, plan_mode) = {
             let s = orch.session.lock().await;
             (s.session_id, s.plan_mode)
@@ -1640,7 +1644,7 @@ pub(crate) async fn dispatch_tool_uses_tracked(
             .jsonl_writer
             .as_ref()
             .map(|w| w.path().to_path_buf())
-            .unwrap_or_default();
+            .unwrap_or_else(|| orch.computed_transcript_path(&session_id));
         let permission_mode = Some(if plan_mode { "plan" } else { "default" }.to_string());
         let hook_ctx = HookContext {
             session_id,
@@ -2592,7 +2596,9 @@ pub(crate) async fn dispatch_tool_uses_tracked(
     if !post_tool_batch_calls.is_empty() {
         // FIX 2: populate `transcript_path` + `permission_mode` here too (the
         // batch firer builds its own context). Same sources as the PreToolUse
-        // context above: the live JSONL writer path + the plan/default mode.
+        // context above: the live JSONL writer path (FIX A: ELSE the computed
+        // `<config_home>/projects/<sanitize(cwd)>/<uuid>.jsonl`, non-empty in
+        // production where no writer is wired) + the plan/default mode.
         let (session_id, plan_mode) = {
             let s = orch.session.lock().await;
             (s.session_id, s.plan_mode)
@@ -2601,7 +2607,7 @@ pub(crate) async fn dispatch_tool_uses_tracked(
             .jsonl_writer
             .as_ref()
             .map(|w| w.path().to_path_buf())
-            .unwrap_or_default();
+            .unwrap_or_else(|| orch.computed_transcript_path(&session_id));
         let batch_ctx = HookContext {
             session_id,
             cwd: orch.cwd.clone(),
@@ -4428,6 +4434,73 @@ mod pre_tool_hook_tests {
             ctx.permission_mode.as_deref(),
             Some("default"),
             "permission_mode must be 'default' outside plan mode (toolHooks.ts:471)"
+        );
+    }
+
+    #[tokio::test]
+    async fn pre_tool_hook_ctx_transcript_path_is_computed_when_no_writer() {
+        // FIX A PRODUCTION PATH: with NO `JsonlWriter` wired (the real production
+        // shape — every `with_jsonl_writer` call site is a test) but a `config_home`
+        // set, the PreToolUse hook's `transcript_path` must be the
+        // deterministically-computed `<config_home>/projects/<sanitize(cwd)>/<uuid>.jsonl`
+        // — claude-code `getTranscriptPathForSession`, which `createBaseHookInput`
+        // ALWAYS stamps — instead of the empty string the old `unwrap_or_default()`
+        // produced.
+        use protocol::SessionId;
+
+        let config_home = std::path::PathBuf::from("/home/user/.claude");
+        let cwd = std::path::PathBuf::from("/Users/me/proj");
+        // Pin a known session id so the expected path is deterministic.
+        let session_id = SessionId::new();
+        let expected = session::jsonl::path::session_path(
+            &config_home,
+            &cwd.to_string_lossy(),
+            &session_id.as_uuid().to_string(),
+        );
+
+        let seen = Arc::new(std::sync::Mutex::new(None));
+        let mut registry = ToolRegistry::new();
+        registry.register_builtin(Arc::new(EchoTool) as Arc<dyn Tool>);
+        let orch = ConversationOrchestrator::new(
+            OrchestratorConfig::default(),
+            Arc::new(MockApiClient::new(vec![])),
+            Arc::new(registry),
+            ctx_capturing_executor(seen.clone()),
+            Arc::new(crate::test_support::NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            cwd.clone(),
+        )
+        // NOTE: deliberately NO `.with_jsonl_writer(...)` — this is the production
+        // shape. Only the config home + a pinned session id are wired.
+        .with_config_home(config_home.clone())
+        .with_session_id(session_id);
+
+        let uses = vec![(ToolUseId::new(), "Echo".into(), json!({}), None)];
+        let _ = dispatch_tool_uses_tracked(&orch, &uses, None)
+            .await
+            .unwrap();
+
+        let ctx = seen.lock().unwrap().clone().expect("PreToolUse hook fired");
+        assert!(
+            !ctx.transcript_path.as_os_str().is_empty(),
+            "production transcript_path must be NON-EMPTY when a config_home is wired"
+        );
+        assert_eq!(
+            ctx.transcript_path, expected,
+            "transcript_path must be the computed <config_home>/projects/<sanitize(cwd)>/<uuid>.jsonl \
+             (claude-code getTranscriptPathForSession) when no JsonlWriter is wired"
+        );
+        // Correctly shaped: under <config_home>/projects and a `.jsonl` leaf named
+        // by the BARE uuid (no `sess:` prefix), matching the on-disk filename.
+        assert!(
+            ctx.transcript_path.starts_with(config_home.join("projects")),
+            "computed path must live under <config_home>/projects"
+        );
+        assert_eq!(
+            ctx.transcript_path.file_name().and_then(|s| s.to_str()),
+            Some(format!("{}.jsonl", session_id.as_uuid()).as_str()),
+            "leaf must be <bare-uuid>.jsonl"
         );
     }
 

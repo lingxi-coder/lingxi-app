@@ -4,7 +4,8 @@
  "by_status": {
   "already-done": 93,
   "false-positive": 1,
-  "out-of-scope": 1
+  "out-of-scope": 1,
+  "__note": "these counts are the PRE-review per-finding worklist; the 2026-06-20 adversarial re-audit reopened/added ~15 cross-cutting findings — see review_2026_06_20_adversarial (NOT folded into these counts)."
  },
  "remaining_real_todo_ids": [],
  "verdicts": [
@@ -1174,5 +1175,155 @@
    "note": "predicate/persist/footer byte-exact landed 46c9b681; #94b: true-binary fidelity needs transport HttpResponse.body String→Vec<u8> (cross-subsystem)"
   }
  ],
- "_status_final": "CORE 1:1 PARITY WORKLIST COMPLETE 2026-06-20. main d6465ffb. 93/95 landed; #17 false-positive (do NOT build); #36 out-of-scope (enterprise managed-policy MCP governance, user-confirmed out of core scope). No tractable core-parity work remains."
+ "_status_final": "RETRACTED 2026-06-20: a follow-up adversarial global re-audit (see review_2026_06_20_adversarial) DISPROVED the 'core is 1:1 COMPLETE' claim. The bodies/schemas/compaction are largely byte-exact 1:1, but there are CONFIRMED decision-affecting (4-5 permission/hook), model-facing (prompt envelope + model-gating + prompt-text drifts), and observable (version stamps, unfired hook events) divergences. Core is SUBSTANTIALLY but NOT TRULY 1:1. main 5025da5e.",
+ "review_2026_06_20_adversarial": {
+  "_what": "Adversarial global re-audit (5 subagents + self-verification) vs claude-code v2.1.183, run 2026-06-20 AFTER the worklist was marked COMPLETE. RETRACTS the 'core is 1:1' claim: substantial body/schema/compaction parity is real, but the audit found confirmed model-facing + decision-affecting divergences the per-finding worklist missed (it byte-verified individual items but missed whole CATEGORIES: prompt envelope, model-conditional prompt gating, version stamps, permission deny/ask ordering, unfired hook events). Several corroborated by THIS session's own opus-4-8 system prompt.",
+  "method": "5 general-purpose agents (file / shell+web / permissions+hooks / prompt+compaction+slash / turnloop+telemetry+task), each binary-grounded on .worktrees/android-real @5025da5e; key findings independently re-confirmed by me.",
+  "tier1_decision_or_security_affecting": [
+   {
+    "id": "R-D1",
+    "area": "permission/policy.rs:304-320",
+    "title": "Tool-wide ASK evaluated BEFORE content DENY (inverts deny-first)",
+    "impact": "ask:[Bash]+deny:[Bash(rm:*)] on `rm -rf /` => LingXi Ask (user may approve) vs binary Deny. SECURITY: a deny rule is downgradable to ask.",
+    "binary": "mSm/XHe off 205931956: full deny phase (B3t tool-wide + K5t content) before EIo ask",
+    "confidence": "HIGH",
+    "note": "LingXi test policy.rs:2165 toolwide_ask_short_circuits_before_content_deny LOCKS the wrong behavior — must be fixed too. Also content-ask placed before tool-specific checkPermissions (finer same-family nuance)."
+   },
+   {
+    "id": "R-D4",
+    "area": "permission/policy.rs:1115-1133 url_hostname",
+    "title": "WebFetch host extraction not WHATWG (no Punycode/IDNA/percent-decode)",
+    "impact": "IDN + percent-encoded hosts mis-key domain rules. foo%2Ebar.com => domain:foo.bar.com deny blocks in binary, NOT LingXi (deny-BYPASS). munchen.de => xn--... in binary.",
+    "binary": "_qa off 201711761 keys `domain:${new URL(n).hostname}`",
+    "confidence": "HIGH",
+    "fix": "use url crate (already a workspace dep): Url::parse(u).host_str(). Domain-match ALGORITHM is already byte-exact; only the feeder diverges."
+   },
+   {
+    "id": "R-D2",
+    "area": "hooks/hook_payload.rs:1066-1081",
+    "title": "hookSpecificOutput.permissionDecision does NOT unconditionally override legacy top-level decision",
+    "impact": "{decision:block, hsOut.permissionDecision:allow} => binary allow, LingXi block",
+    "binary": "azn off 205721920: decision switch first, hsOut switch second reassigns unconditionally",
+    "confidence": "HIGH"
+   },
+   {
+    "id": "R-D3",
+    "area": "hooks/response.rs:136-148",
+    "title": "PreToolUse permissionDecision:'ask' silently dropped (HookDecision has no Ask variant)",
+    "impact": "with R-D2, 'ask' can never override a prior 'approve'",
+    "binary": "azn: case 'ask': permissionBehavior='ask'; enum [allow,deny,ask,defer]",
+    "confidence": "HIGH"
+   },
+   {
+    "id": "R-O4",
+    "area": "hooks hook-command spawn",
+    "title": "Hook child env omits claude-code's auth/OTEL denylist",
+    "impact": "SECURITY: a hook script sees ambient CLAUDE_CODE_OAUTH_TOKEN / *_SUBSCRIPTION_TYPE / OTEL_* the binary strips",
+    "binary": "WO() off 195508064 deletes the denylist",
+    "confidence": "MEDIUM"
+   }
+  ],
+  "tier2_model_facing": [
+   {
+    "id": "R-P1",
+    "area": "orchestrator/prompt/env_block.rs + mod.rs:127 + locked_templates.rs FOOTER",
+    "title": "MAIN system-prompt ENVELOPE built from the SUBAGENT shape",
+    "detail": "LingXi emits <env> XML (=subagent Vym) instead of v2.1.183 MAIN `# Environment` markdown (Kym); the model-catalog lines are absent; a subagent-only `Notes:` footer is appended to MAIN; gitStatus context block missing; claudeMd spliced into system prompt instead of a <system-reminder> additional-context msg.",
+    "binary": "Kym off 205822731 (main env) vs Vym off 205822510 (subagent env); Notes only in H$t subagent off 205826521; gitStatus off 197200698; additional-context off 205838506",
+    "confidence": "HIGH — corroborated by THIS opus-4-8 session's own system prompt (got `# Environment` markdown + gitStatus: block + # claudeMd in <system-reminder>)",
+    "note": "Prior #46/#47/#48/#20 byte-matched the WRONG function (subagent Vym/H$t) for the main path. #48b gitStatus was a known-deferred residual."
+   },
+   {
+    "id": "R-T1",
+    "area": "tools/file/{read,write,edit,glob,grep}.rs prompt(_opts)",
+    "title": "5 file tools ignore the wired model gate -> always emit LONG; current-gen models get SHORT in claude-code",
+    "detail": "Dh(model)=true for opus-4-8/fable-5/mythos-5 => SHORT prompt; LingXi hardcodes LONG. Infra exists (TodoWrite uses opts.model).",
+    "binary": "Dh off 195159752; SHORT Read 'Reads a file from the local filesystem.' present",
+    "confidence": "HIGH — THIS session got the SHORT Read description"
+   },
+   {
+    "id": "R-T2",
+    "area": "tools/web/web_search.rs prompt(_opts)",
+    "title": "WebSearch ignores model gate -> concise variant never emitted",
+    "binary": "CNi off 197074952 (2-branch on Dh)",
+    "confidence": "HIGH"
+   },
+   {
+    "id": "R-T3",
+    "area": "tools/file/read.rs",
+    "title": "Read prompt missing the qhi bullet 'Do NOT re-read a file you just edited to verify...'",
+    "binary": "qhi off 195604712 (em-dash); present in binary, absent in LingXi (self-verified)",
+    "confidence": "HIGH"
+   },
+   {
+    "id": "R-T4",
+    "area": "various tool prompts",
+    "title": "Prompt-text drifts: Read dir-line wording; NotebookEdit says 'NotebookRead' not 'Read' (2x, Ws='Read'); Bash missing 'never prepend cd <dir> to a git command' sentence; Bash sleep bullet has invented '(1-5 seconds)'",
+    "confidence": "HIGH"
+   },
+   {
+    "id": "R-T5",
+    "area": "tools/web/web_fetch.rs:654",
+    "title": "WebFetch input schema makes `prompt` optional; claude-code requires it (strictObject, both required)",
+    "confidence": "MEDIUM"
+   }
+  ],
+  "tier3_observable": [
+   {
+    "id": "R-V1",
+    "area": "platforms/posix/process/wrap.rs:51-56 + tools/web/web_fetch.rs:411-420",
+    "title": "Version stamps stale: AI_AGENT=claude-code_0-12-0_agent (want 2-1-183); WebFetch UA=claude-code/0.12.0 (want 2.1.183)",
+    "binary": "VERSION='2.1.183'",
+    "confidence": "HIGH",
+    "note": "every child process/hook/outbound request carries the wrong version"
+   },
+   {
+    "id": "R-O1",
+    "area": "hooks events UserPromptExpansion + MessageDisplay",
+    "title": "Two hook events DEFINED+serialized but NEVER FIRED (no orchestrator dispatch site)",
+    "impact": "user hooks on these never run",
+    "binary": "fire sites off 201270257 / 208862316",
+    "confidence": "HIGH",
+    "note": "REOPENS #39 (was marked already-done = OVERCLAIM)"
+   },
+   {
+    "id": "R-O2",
+    "area": "hooks/hook_payload.rs",
+    "title": "Hook permissionDecision leniency: parses top-level field claude-code never reads; reads hsOut.permissionDecision for ANY event (binary: PreToolUse only); silently ignores unknown values instead of throwing",
+    "confidence": "HIGH",
+    "severity": "lenient-direction"
+   },
+   {
+    "id": "R-F5",
+    "area": "tools/file/edit.rs:134-141",
+    "title": "Edit success message omits the staleRecovered (disk-modified) variant",
+    "binary": "xYa off 202627842",
+    "confidence": "HIGH",
+    "severity": "edge"
+   }
+  ],
+  "tier4_engineering_non_model_facing": [
+   {
+    "id": "R-TEL",
+    "title": "Telemetry namespace is NOT claude-code's: only 23 of LingXi's 372 tengu_* names exist in the binary (binary has 1434). Analytics-only, never reaches model/user. The '347 = claude-code event set' framing was wrong.",
+    "confidence": "HIGH (self-verified via set comparison)"
+   },
+   {
+    "id": "R-TEST",
+    "title": "`cargo test --workspace` is RED on main 5025da5e: 2 TUI snapshot tests fail (snapshot_palette_completion) — stale after #66 /cost->/usage removed it; command DATA is parity-correct but snapshots weren't regenerated; also a `❯o/co` overlay-render artifact to eyeball before accepting. 8164 pass / 2 fail.",
+    "confidence": "HIGH (self-verified)"
+   },
+   {
+    "id": "R-MINOR",
+    "title": "Default-off gating/schema-shape gaps (inert under default config): Bash schema missing additionalProperties:false; shouldIncludeGitInstructions hardcoded true (ignores CLAUDE_CODE_DISABLE_GIT_INSTRUCTIONS); background-task truthiness strict-vs-bare; Bash schema field order; sleep-gate missing !p4t; CLAUDE_EFFORT/TRACEPARENT not injected on bash-spawn path; within-bucket exact-over-wildcard reported-rule only; terminalSequence tmux wrapping.",
+    "confidence": "HIGH"
+   }
+  ],
+  "genuinely_1to1_verified_byte_exact": "system-prompt 6 body sections + HEADER; compaction (full chain); ALL tool input schemas + field descriptions; tool LONG prompt bodies (older-model path); error+success messages (common path); truncation notes + file-state suffix; Bash timeout/sleep-block/cwd-reset; WebFetch HTTP-error/redirect/STATUS_CODES; abort reasons/refusal warning/V1+V2 reminders/TodoWrite/subagent Notes-trailer; permission source order (#35) + domain-match ALGORITHM (#31) + read-deny globs (#30) + modes (#32/33/34) + hook env (#43, REFUTES the stale COLUMNS/LINES claim) + SessionEnd timeout (#42) + updatedToolOutput (#38) + terminalSequence allowlist (#40) + defer (#37)/effort (#44)/isMeta.",
+  "reference_overclaims_found": [
+   "#39 UserPromptExpansion/MessageDisplay marked done but never fired",
+   "the top-line 'core 1:1 COMPLETE' framing missed the prompt-envelope, model-gating, version-stamp, and permission-ordering categories",
+   "#43 COLUMNS/LINES reference claim was itself STALE (LingXi is 1:1 there)"
+  ]
+ }
 }

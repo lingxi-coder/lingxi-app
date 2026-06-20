@@ -348,6 +348,28 @@ impl BuiltinHookHandler for PreAllowHook {
     }
 }
 
+/// A `PreToolUse` hook that returns `permissionDecision:"ask"` (parses to
+/// `HookDecision::Ask`) — forcing the interactive prompt even over an allow rule.
+struct PreAskHook;
+#[async_trait]
+impl BuiltinHookHandler for PreAskHook {
+    fn id(&self) -> &str {
+        "pre-ask"
+    }
+    async fn handle(&self, _event: &HookEvent, _ctx: &HookContext) -> HookResult {
+        HookResult {
+            outcome: HookOutcome::Success,
+            stdout: String::new(),
+            stderr: String::new(),
+            exit_code: None,
+            response: Some(HookResponse {
+                decision: Some(HookDecision::Ask),
+                ..Default::default()
+            }),
+        }
+    }
+}
+
 fn builtin_hook(name: &str, handler_id: &str, event_type: HookEventType) -> HookDefinition {
     HookDefinition {
         id: HookId::new(),
@@ -587,6 +609,62 @@ async fn pre_hook_allow_bypasses_gate_and_fires_neither() {
         log.requests.is_empty() && log.denials.is_empty(),
         "a PreToolUse 'allow' bypasses the gate → no permission events: req={:?} denied={:?}",
         log.requests,
+        log.denials
+    );
+}
+
+#[tokio::test]
+async fn pre_hook_ask_forces_prompt_over_allow_rule() {
+    // R-D3: a PreToolUse hook `permissionDecision:"ask"` (HookDecision::Ask) forces
+    // the about-to-ask path EVEN when the gate would ALLOW (NoOpPermissionGate →
+    // resolve_detailed = Allow). Contrast `allow_gate_fires_neither_permission_hook`
+    // (same gate, NO ask hook) where PermissionRequest does NOT fire. Here the Allow
+    // resolution is upgraded to Ask, so PermissionRequest FIRES before the prompt —
+    // claude-code `permissionBehavior="ask"` (azn ~205721920; deny > ask > allow, so
+    // it overrides an allow rule but a deny rule / plan mode would still bind).
+    let tool_use_id = ToolUseId::new();
+    let api = two_turn_api(tool_use_id.clone(), "Echo", json!({ "x": 1 }));
+    let log = Arc::new(Mutex::new(PermLog::default()));
+
+    let registry = Arc::new(RwLock::new(HookRegistry::new()));
+    {
+        let mut r = registry.write().await;
+        r.register(builtin_hook("pre", "pre-ask", HookEventType::PreToolUse));
+        r.register(builtin_hook(
+            "req",
+            "record-permission",
+            HookEventType::PermissionRequest,
+        ));
+        r.register(builtin_hook(
+            "denied",
+            "record-permission",
+            HookEventType::PermissionDenied,
+        ));
+    }
+    let mut exec = HookExecutorImpl::new(registry, Arc::new(UnusedHttp), Arc::new(UnusedRuntime));
+    exec.register_builtin(Arc::new(PreAskHook));
+    exec.register_builtin(Arc::new(PermRecorder { log: log.clone() }));
+    let hooks = Arc::new(exec);
+
+    let mut tools = ToolRegistry::new();
+    tools.register_builtin(Arc::new(EchoTool));
+    // NoOpPermissionGate would ALLOW (resolve_detailed = Allow); the hook ask must
+    // override it and force the prompt path.
+    let orch = orch_with_gate(api, hooks, tools, Arc::new(NoOpPermissionGate));
+
+    let outcome = orch.run_turn("run echo").await.expect("turn ok");
+    assert!(matches!(outcome, ConversationOutcome::EndTurn { .. }));
+
+    let log = log.lock().unwrap();
+    assert_eq!(
+        log.requests.len(),
+        1,
+        "a hook 'ask' forces the about-to-ask path even over an allow rule → PermissionRequest fires once: {:?}",
+        log.requests
+    );
+    assert!(
+        log.denials.is_empty(),
+        "an ask is not a deny → PermissionDenied must not fire: {:?}",
         log.denials
     );
 }

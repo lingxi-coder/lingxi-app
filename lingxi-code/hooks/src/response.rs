@@ -144,6 +144,19 @@ pub enum HookDecision {
     /// Explicitly continue — useful as a tie-breaker when later hooks may
     /// otherwise block.
     Continue,
+    /// Ask the user (`permissionDecision: "ask"`, claude-code BIN off
+    /// ~205721920: `case"ask":u.permissionBehavior="ask"`; schema enum
+    /// `["allow","deny","ask","defer"]`). A `PreToolUse` hook may force the
+    /// tool call through the INTERACTIVE permission prompt regardless of any
+    /// configured allow rule — `permissionBehavior="ask"` makes claude-code
+    /// prompt the user even when a rule would otherwise auto-allow. Distinct
+    /// from `Approve`/`Allow` (which SKIP the prompt) and `Block` (which
+    /// denies outright). The turn-loop consumer must route this through the
+    /// normal ask path (`PermissionGate::check`, which delegates to the prompt
+    /// transport) rather than `check_after_hook_allow`. Unconditionally
+    /// reassigned by the `hookSpecificOutput.permissionDecision` switch, like
+    /// every other case (matching `azn`'s second switch).
+    Ask,
     /// Defer the tool call (#37, `permissionDecision: "defer"`, claude-code BIN
     /// off 205722868: `case"defer":u.permissionBehavior="defer"`; schema off
     /// 205719537: `'"allow" | "deny" | "ask" | "defer" (optional)'`). A

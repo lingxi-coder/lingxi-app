@@ -1847,6 +1847,12 @@ pub(crate) async fn dispatch_tool_uses_tracked(
                 // arm only fires for the ignored case, which proceeds to the
                 // normal permission gate exactly like no decision.
                 Some(HookDecision::Defer) => "defer-ignored",
+                // R-D3: a `permissionDecision:"ask"` parses to `HookDecision::Ask`
+                // and forces the interactive prompt even over a configured allow
+                // rule — routed in the normal-gate branch below (an Allow
+                // resolution is upgraded to Ask when `hook_ask`). Deny rules and
+                // plan mode still bind (deny > ask > allow).
+                Some(HookDecision::Ask) => "ask",
                 None => "none",
             },
             duration_ms = pre_dur_ms,
@@ -1873,6 +1879,10 @@ pub(crate) async fn dispatch_tool_uses_tracked(
             pre_agg.decision,
             Some(HookDecision::Approve | HookDecision::Allow)
         );
+        // R-D3: a PreToolUse hook `permissionDecision:"ask"` forces the interactive
+        // prompt even over a configured allow rule (the resolution upgrade in the
+        // normal-gate branch below). Mutually exclusive with `hook_allowed`.
+        let hook_ask = matches!(pre_agg.decision, Some(HookDecision::Ask));
         // HOOK.4 — Plan-mode dynamic gate (parity with claude-code's live
         // `toolPermissionContext.mode = 'plan'`). When the session is in plan mode
         // (the model ran `EnterPlanMode` and has not yet exited), authorize under
@@ -1905,7 +1915,22 @@ pub(crate) async fn dispatch_tool_uses_tracked(
             // NORMAL permission path. Resolve the decision SOURCE first (without
             // delegating to the prompt transport) so the source-gated permission
             // hooks fire the way claude-code does.
-            match orch.perms.resolve_detailed(name, &effective_input).await {
+            let resolution = orch.perms.resolve_detailed(name, &effective_input).await;
+            // R-D3: a PreToolUse hook `permissionDecision:"ask"` (HookDecision::Ask)
+            // forces the interactive prompt even over a configured ALLOW rule
+            // (claude-code `permissionBehavior="ask"`, `azn` off ~205721920). The
+            // behavior precedence is deny > ask > allow, so a deny rule still binds
+            // (resolved as Deny below) and plan mode already bound above; only an
+            // Allow is upgraded to Ask so the prompt fires instead of silently
+            // auto-allowing. No-op unless a hook returned `ask`.
+            let resolution = if hook_ask
+                && matches!(resolution, PermissionResolution::Allow)
+            {
+                PermissionResolution::Ask
+            } else {
+                resolution
+            };
+            match resolution {
                 PermissionResolution::Allow => PermissionDecision::Allow,
                 PermissionResolution::Deny {
                     reason,

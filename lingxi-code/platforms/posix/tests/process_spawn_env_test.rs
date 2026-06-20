@@ -80,6 +80,100 @@ async fn run_injects_spawn_env_contract_for_bash_provider() {
     );
 }
 
+/// R-O4: a HOOK command (tagged `BypassAuditedWithReason { reason:
+/// "hook_command" }`) must have claude-code's `WO()` auth/OTEL denylist
+/// STRIPPED from its inherited env — the script can never read the OAuth
+/// token, subscription/rate-limit tier, background-session auth handles,
+/// resume/session bookkeeping, or any `OTEL_*` telemetry config. A
+/// NON-denylisted var still passes through; and a NON-hook command keeps the
+/// denylist (the strip is hook-specific). BOTH directions live in ONE test
+/// because they mutate `std::env` (process-global) — splitting them would race
+/// under the parallel test runner.
+#[tokio::test]
+async fn run_strips_wo_denylist_from_hook_command_env() {
+    // Seed the PARENT process env with denylisted keys + one survivor. The
+    // runner inherits the parent env (tokio default), so these reach `env`
+    // unless stripped.
+    std::env::set_var("CLAUDE_CODE_OAUTH_TOKEN", "secret-oauth");
+    std::env::set_var("CLAUDE_CODE_SUBSCRIPTION_TYPE", "max");
+    std::env::set_var("CLAUDE_CODE_RATE_LIMIT_TIER", "tier-9");
+    std::env::set_var("CLAUDE_BG_RV_AUTH", "bg-rv");
+    std::env::set_var("CLAUDE_CODE_RESUME_PROMPT", "resume-me");
+    std::env::set_var("OTEL_EXPORTER_OTLP_ENDPOINT", "http://otel");
+    std::env::set_var("CLAUDE_CODE_OTEL_DIAG_STDERR", "1");
+    std::env::set_var("LX_HOOK_SURVIVOR", "i-survive");
+
+    let env_bin = ["/usr/bin/env", "/bin/env"]
+        .into_iter()
+        .find(|p| std::path::Path::new(p).exists())
+        .unwrap_or("/usr/bin/env");
+
+    // A hook command carries the `hook_command` bypass-audit tag.
+    let cmd = SandboxedCommand::__new_sandboxed(
+        ProcessCommand {
+            command: env_bin.into(),
+            args: vec![],
+            cwd: None,
+            env: HashMap::new(),
+            timeout: None,
+            stdin: None,
+        },
+        SandboxedTag::BypassAuditedWithReason {
+            reason: "hook_command".to_string(),
+        },
+    );
+    let out = PosixProcess::new().run(&cmd).await.expect("run");
+
+    for denied in [
+        "CLAUDE_CODE_OAUTH_TOKEN=",
+        "CLAUDE_CODE_SUBSCRIPTION_TYPE=",
+        "CLAUDE_CODE_RATE_LIMIT_TIER=",
+        "CLAUDE_BG_RV_AUTH=",
+        "CLAUDE_CODE_RESUME_PROMPT=",
+        "OTEL_EXPORTER_OTLP_ENDPOINT=",
+        "CLAUDE_CODE_OTEL_DIAG_STDERR=",
+    ] {
+        assert!(
+            !out.stdout.lines().any(|l| l.starts_with(denied)),
+            "denylisted hook env var leaked: {denied} in {out:?}"
+        );
+    }
+    // A non-denylisted custom var survives.
+    assert!(
+        out.stdout.lines().any(|l| l == "LX_HOOK_SURVIVOR=i-survive"),
+        "non-denylisted hook env var was wrongly stripped: {out:?}"
+    );
+
+    // NEGATIVE direction: a NON-hook command (no `hook_command` tag) KEEPS the
+    // denylisted vars — the strip is hook-specific (claude-code runs `WO()`
+    // only for the hook-command env, NOT a normal Bash/REPL tool spawn). Reuse
+    // the parent env still carrying `CLAUDE_CODE_OAUTH_TOKEN` from above.
+    let out_non_hook = PosixProcess::new()
+        .run(&mk(env_bin, vec![], HashMap::new()))
+        .await
+        .expect("run");
+    assert!(
+        out_non_hook
+            .stdout
+            .lines()
+            .any(|l| l == "CLAUDE_CODE_OAUTH_TOKEN=secret-oauth"),
+        "non-hook command must NOT strip the denylist: {out_non_hook:?}"
+    );
+
+    for k in [
+        "CLAUDE_CODE_OAUTH_TOKEN",
+        "CLAUDE_CODE_SUBSCRIPTION_TYPE",
+        "CLAUDE_CODE_RATE_LIMIT_TIER",
+        "CLAUDE_BG_RV_AUTH",
+        "CLAUDE_CODE_RESUME_PROMPT",
+        "OTEL_EXPORTER_OTLP_ENDPOINT",
+        "CLAUDE_CODE_OTEL_DIAG_STDERR",
+        "LX_HOOK_SURVIVOR",
+    ] {
+        std::env::remove_var(k);
+    }
+}
+
 /// #6: the powershell provider OMITS `SHELL` (`void 0`). A non-bash-provider
 /// spawn must not carry a `SHELL` value in the env we pass to the child.
 ///

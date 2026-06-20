@@ -41,6 +41,43 @@ use traits::{
 /// keeps the full Bash-spawn contract unchanged.
 const HOOK_COMMAND_AUDIT_REASON: &str = "hook_command";
 
+/// Auth / session / OTEL env keys claude-code STRIPS from a hook command's
+/// environment. Mirrors `WO()` (claude-code BIN off ~195508064), which builds
+/// the hook child env from `process.env` and then `delete`s each of these keys
+/// (plus every `OTEL_*` key, handled separately below) so a hook script can
+/// never read the user's OAuth token, subscription/rate-limit tier, the
+/// background-session auth handles, or the resume/session bookkeeping. These
+/// are EXACT key names — `WO()` deletes specific keys (NOT wildcard patterns)
+/// for everything except the `OTEL_` prefix sweep. `AI_AGENT` / `GIT_EDITOR`
+/// are deliberately NOT here: they are not in `WO()`'s denylist (they are
+/// handled by the `is_hook_command` Bash-spawn gate above) and stripping them
+/// is already correct via that path.
+const HOOK_ENV_DENYLIST: &[&str] = &[
+    "CLAUDE_CODE_OAUTH_TOKEN",
+    "CLAUDE_CODE_SUBSCRIPTION_TYPE",
+    "CLAUDE_CODE_RATE_LIMIT_TIER",
+    "CLAUDE_BG_AUTH_SNAPSHOT_PATH",
+    "CLAUDE_BG_SOCKET_TOKENS_PATH",
+    "CLAUDE_BG_RV_AUTH",
+    "CLAUDE_BG_PTY_AUTH",
+    "CLAUDE_CODE_SESSION_KIND",
+    "CLAUDE_BG_SOURCE",
+    "CLAUDE_BG_ISOLATION",
+    "CLAUDE_BG_BACKEND",
+    "CLAUDE_CODE_SESSION_NAME",
+    "CLAUDE_CODE_RESUME_INTERRUPTED_TURN",
+    "CLAUDE_CODE_RESUME_PROMPT",
+    "CLAUDE_BG_SESSION_PERMISSION_RULES",
+    "CLAUDE_BG_MEMORY_TOGGLED_OFF",
+    "CLAUDE_CODE_OTEL_DIAG_STDERR",
+];
+
+/// Prefix `WO()` sweeps from the hook child env: every key starting with
+/// `OTEL_` is `delete`d (`for(let u of Object.keys(process.env))if(u
+/// .startsWith("OTEL_"))delete c[u]`). Applied in addition to
+/// [`HOOK_ENV_DENYLIST`].
+const HOOK_ENV_DENY_PREFIX: &str = "OTEL_";
+
 /// Production [`ProcessRunner`] using `tokio::process`.
 #[derive(Default)]
 pub struct PosixProcess;
@@ -112,6 +149,31 @@ impl PosixProcess {
         if !is_hook_command {
             tcmd.env(ENV_AI_AGENT, ai_agent_value());
             tcmd.env(ENV_GIT_EDITOR.0, ENV_GIT_EDITOR.1);
+        } else {
+            // R-O4: strip claude-code's `WO()` auth/OTEL denylist from a hook
+            // child's INHERITED env (BIN off ~195508064). A hook command runs
+            // with `source:"harness"` and `WO()` `delete`s these keys from the
+            // env it builds for the child, so the script can never read the
+            // user's OAuth token / subscription / rate-limit tier, the
+            // background-session auth handles, the resume/session bookkeeping,
+            // or any OTEL telemetry config. `tokio::process::Command` inherits
+            // the parent env by default (no `env_clear` here), so we
+            // `env_remove` each denylisted key + sweep every inherited `OTEL_*`
+            // key. A caller-supplied entry of the same name was applied above
+            // (step 1) and is removed too — matching `WO()`, which deletes from
+            // the FINAL merged env (`{...process.env,...}`), so a hook never
+            // sees these regardless of source.
+            for key in HOOK_ENV_DENYLIST {
+                tcmd.env_remove(key);
+            }
+            // Sweep every inherited `OTEL_*` key from the parent env. We read
+            // the keys (lossily, ignoring any non-UTF-8 name — an OTEL var is
+            // always ASCII) and `env_remove` each match.
+            for key in std::env::vars_os().filter_map(|(k, _)| k.into_string().ok()) {
+                if key.starts_with(HOOK_ENV_DENY_PREFIX) {
+                    tcmd.env_remove(&key);
+                }
+            }
         }
         // #6: SHELL only for the bash provider; powershell omits it. claude-code
         // spreads `{...WO(), SHELL: n==="bash"?S:void 0}` — for powershell the

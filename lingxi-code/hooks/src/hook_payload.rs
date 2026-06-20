@@ -929,6 +929,27 @@ pub enum HookResponseParseError {
         /// Actual value the hook returned.
         got: String,
     },
+    /// Legacy top-level `decision` had an unrecognised value. Mirrors `azn`'s
+    /// first switch `default: throw Error(`Unknown hook decision type:
+    /// ${e.decision}. Valid types are: approve, block`)` (claude-code BIN off
+    /// ~205721920) — the binary rejects the WHOLE hook output, so we surface a
+    /// parse error rather than silently ignoring the unknown value.
+    #[error("Unknown hook decision type: {value}. Valid types are: approve, block")]
+    UnknownDecision {
+        /// The unrecognised `decision` value the hook returned.
+        value: String,
+    },
+    /// `hookSpecificOutput.permissionDecision` had an unrecognised value.
+    /// Mirrors `azn`'s second switch `default: throw Error(`Unknown hook
+    /// permissionDecision type: ${...}. Valid types are: allow, deny, ask,
+    /// defer`)` (claude-code BIN off ~205721920).
+    #[error(
+        "Unknown hook permissionDecision type: {value}. Valid types are: allow, deny, ask, defer"
+    )]
+    UnknownPermissionDecision {
+        /// The unrecognised `permissionDecision` value the hook returned.
+        value: String,
+    },
 }
 
 /// Parse a hook's JSON reply into a [`HookResponse`].
@@ -976,29 +997,32 @@ pub fn parse_response(
         resp.terminal_sequence = Some(ts.to_string());
     }
 
-    // legacy decision
+    // Legacy top-level `decision` (claude-code `azn`'s FIRST switch, BIN off
+    // ~205721920: `if(e.decision)switch(e.decision){case"approve":…;case"block":
+    // …;default:throw Error("Unknown hook decision type: …. Valid types are:
+    // approve, block")}`). The `if(e.decision)` guard means a falsy value
+    // (absent / empty string / `null`) is skipped; a PRESENT but unrecognised
+    // string THROWS (rejects the whole hook output). We mirror both: only a
+    // non-empty string reaches the switch, and any value other than
+    // `approve`/`block` returns `UnknownDecision`.
     match obj.get("decision").and_then(Value::as_str) {
+        // `if(e.decision)` is falsy for the empty string — skip it like the binary.
+        None | Some("") => {}
         Some("block") => resp.decision = Some(HookDecision::Block),
         Some("approve") => resp.decision = Some(HookDecision::Approve),
-        _ => {}
+        Some(other) => {
+            return Err(HookResponseParseError::UnknownDecision {
+                value: other.to_string(),
+            })
+        }
     }
 
-    // top-level permissionDecision (preferred over legacy)
-    match obj.get("permissionDecision").and_then(Value::as_str) {
-        Some("allow") => {
-            if resp.decision.is_none() {
-                resp.decision = Some(HookDecision::Approve);
-            }
-        }
-        Some("deny") => resp.decision = Some(HookDecision::Block),
-        // #37 `permissionDecision: "defer"` (claude-code BIN off 205722868:
-        // `case"defer":u.permissionBehavior="defer"`). Parsed as
-        // `HookDecision::Defer`; the orchestrator gates it on print-mode +
-        // solo-tool before honoring it (else it is ignored with a warn).
-        Some("defer") => resp.decision = Some(HookDecision::Defer),
-        // "ask" and any other value fall through — preserve the existing decision.
-        _ => {}
-    }
+    // NOTE: the binary NEVER reads a BARE top-level `e.permissionDecision`
+    // (`azn` only ever consults `e.hookSpecificOutput.permissionDecision`, and
+    // only when `hookSpecificOutput.hookEventName==="PreToolUse"`). The previous
+    // top-level `permissionDecision` parse was a non-parity divergence and has
+    // been removed (R-O2a) — `permissionDecision` is honoured ONLY under
+    // `hookSpecificOutput` below.
     if let Some(r) = obj.get("permissionDecisionReason").and_then(Value::as_str) {
         resp.reason = Some(r.to_string());
     }
@@ -1063,21 +1087,44 @@ pub fn parse_response(
                 resp.retry = Some(retry);
             }
         }
-        match hs.get("permissionDecision").and_then(Value::as_str) {
-            Some("allow") => {
-                if !matches!(resp.decision, Some(HookDecision::Block)) {
-                    resp.decision = Some(HookDecision::Approve);
+        // `hookSpecificOutput.permissionDecision` switch (claude-code `azn`'s
+        // SECOND switch, BIN off ~205721920:
+        // `if(e.hookSpecificOutput?.hookEventName==="PreToolUse"
+        //   && e.hookSpecificOutput.permissionDecision)switch(...){
+        //     case"allow":u.permissionBehavior="allow";break;
+        //     case"deny":u.permissionBehavior="deny",…;break;
+        //     case"ask":u.permissionBehavior="ask";break;
+        //     case"defer":u.permissionBehavior="defer";break;
+        //     default:throw Error("Unknown hook permissionDecision type: …")}`).
+        // THREE parity rules captured here:
+        //   (R-O2b) GATED to `hookEventName === "PreToolUse"` — for any other
+        //           event the binary never enters this switch.
+        //   (R-D2)  UNCONDITIONAL reassignment — `permissionBehavior` is set
+        //           outright (no `if (decision != Block)` guard), so a hsOut
+        //           permissionDecision ALWAYS overrides a prior legacy
+        //           `decision:"block"`. Target: `{"decision":"block",
+        //           "hookSpecificOutput":{"permissionDecision":"allow"}}` →
+        //           Approve (the binary's `permissionBehavior="allow"`).
+        //   (R-O2c) `default: throw` — an unrecognised value rejects the whole
+        //           hook output (returns `UnknownPermissionDecision`).
+        // `allow`→`Approve` (skips the prompt), `deny`→`Block`, `ask`→`Ask`
+        // (R-D3, forces the interactive prompt), `defer`→`Defer`.
+        if expected_event == "PreToolUse" {
+            match hs.get("permissionDecision").and_then(Value::as_str) {
+                // The binary guards the switch on `&& e.hookSpecificOutput
+                // .permissionDecision` (truthy) — a missing key OR an empty
+                // string is falsy, so the switch is SKIPPED (no throw).
+                None | Some("") => {}
+                Some("allow") => resp.decision = Some(HookDecision::Approve),
+                Some("deny") => resp.decision = Some(HookDecision::Block),
+                Some("ask") => resp.decision = Some(HookDecision::Ask),
+                Some("defer") => resp.decision = Some(HookDecision::Defer),
+                Some(other) => {
+                    return Err(HookResponseParseError::UnknownPermissionDecision {
+                        value: other.to_string(),
+                    })
                 }
             }
-            Some("deny") => resp.decision = Some(HookDecision::Block),
-            // #37 `permissionDecision: "defer"` via hookSpecificOutput. A Block
-            // already set (deny / decline) wins — defer never overrides a deny.
-            Some("defer") => {
-                if !matches!(resp.decision, Some(HookDecision::Block)) {
-                    resp.decision = Some(HookDecision::Defer);
-                }
-            }
-            _ => {}
         }
         if let Some(r) = hs.get("permissionDecisionReason").and_then(Value::as_str) {
             resp.reason = Some(r.to_string());
@@ -1445,9 +1492,19 @@ mod tests {
     // ---- #37 permissionDecision "defer" (4th value) ----------------------
 
     #[test]
-    fn parse_response_top_level_defer_maps_to_defer_decision() {
+    fn parse_response_bare_top_level_permission_decision_is_ignored() {
+        // R-O2a: the binary's `azn` NEVER reads a BARE top-level
+        // `e.permissionDecision` — it only consults
+        // `e.hookSpecificOutput.permissionDecision` (gated to PreToolUse). A
+        // top-level `permissionDecision` (any value) is therefore IGNORED.
         let r = parse_response(r#"{"permissionDecision":"defer"}"#, "PreToolUse").unwrap();
-        assert_eq!(r.decision, Some(HookDecision::Defer));
+        assert_eq!(r.decision, None);
+        let r = parse_response(r#"{"permissionDecision":"allow"}"#, "PreToolUse").unwrap();
+        assert_eq!(r.decision, None);
+        // An unknown BARE top-level value must NOT throw either (the binary
+        // never reaches a switch for it).
+        let r = parse_response(r#"{"permissionDecision":"bogus"}"#, "PreToolUse").unwrap();
+        assert_eq!(r.decision, None);
     }
 
     #[test]
@@ -1461,15 +1518,113 @@ mod tests {
     }
 
     #[test]
-    fn parse_response_deny_wins_over_defer() {
-        // A deny (Block) set by the legacy top-level decision must NOT be
-        // overridden by a later hookSpecificOutput `defer`.
+    fn parse_response_hsout_permission_decision_overrides_legacy_block() {
+        // R-D2: `azn`'s SECOND switch reassigns `permissionBehavior`
+        // UNCONDITIONALLY — a `hookSpecificOutput.permissionDecision` ALWAYS
+        // overrides a prior legacy `decision:"block"` (there is no
+        // `if (decision != Block)` guard in the binary). So `block` + hsOut
+        // `defer` resolves to `Defer` (the binary's `permissionBehavior="defer"`
+        // wins over the earlier `"deny"`), NOT `Block`.
         let r = parse_response(
             r#"{"decision":"block","hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"defer"}}"#,
             "PreToolUse",
         )
         .unwrap();
-        assert_eq!(r.decision, Some(HookDecision::Block));
+        assert_eq!(r.decision, Some(HookDecision::Defer));
+    }
+
+    #[test]
+    fn parse_response_hsout_allow_overrides_legacy_block() {
+        // R-D2 target case: `{"decision":"block","hookSpecificOutput":
+        // {"permissionDecision":"allow"}}` → Approve (the binary's
+        // `permissionBehavior="allow"`), NOT Block. The legacy block is
+        // unconditionally overridden by the hsOut allow.
+        let r = parse_response(
+            r#"{"decision":"block","hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow"}}"#,
+            "PreToolUse",
+        )
+        .unwrap();
+        assert_eq!(r.decision, Some(HookDecision::Approve));
+    }
+
+    #[test]
+    fn parse_response_hsout_ask_maps_to_ask_decision() {
+        // R-D3: `permissionDecision:"ask"` → `HookDecision::Ask` (previously
+        // silently dropped via `_ => {}`). It also unconditionally overrides a
+        // legacy block.
+        let r = parse_response(
+            r#"{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"ask"}}"#,
+            "PreToolUse",
+        )
+        .unwrap();
+        assert_eq!(r.decision, Some(HookDecision::Ask));
+        let r = parse_response(
+            r#"{"decision":"block","hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"ask"}}"#,
+            "PreToolUse",
+        )
+        .unwrap();
+        assert_eq!(r.decision, Some(HookDecision::Ask));
+    }
+
+    #[test]
+    fn parse_response_hsout_permission_decision_gated_to_pre_tool_use() {
+        // R-O2b: the hsOut.permissionDecision switch is gated to
+        // `hookEventName === "PreToolUse"`. For a non-PreToolUse event the
+        // permissionDecision is ignored (the binary never enters the switch).
+        // PostToolUse hsOut `allow` must NOT set a decision.
+        let r = parse_response(
+            r#"{"hookSpecificOutput":{"hookEventName":"PostToolUse","permissionDecision":"allow"}}"#,
+            "PostToolUse",
+        )
+        .unwrap();
+        assert_eq!(r.decision, None);
+    }
+
+    #[test]
+    fn parse_response_unknown_decision_throws() {
+        // R-O2c: an unrecognised legacy `decision` rejects the whole output
+        // (`azn` `default: throw Error("Unknown hook decision type: …")`).
+        let err = parse_response(r#"{"decision":"maybe"}"#, "PreToolUse").unwrap_err();
+        assert!(
+            matches!(&err, HookResponseParseError::UnknownDecision { value } if value == "maybe"),
+            "{err:?}"
+        );
+        // Exact message shape mirrors the binary.
+        assert_eq!(
+            err.to_string(),
+            "Unknown hook decision type: maybe. Valid types are: approve, block"
+        );
+        // An empty `decision` is falsy in the binary's `if(e.decision)` — skipped, not thrown.
+        let r = parse_response(r#"{"decision":""}"#, "PreToolUse").unwrap();
+        assert_eq!(r.decision, None);
+    }
+
+    #[test]
+    fn parse_response_unknown_permission_decision_throws() {
+        // R-O2c: an unrecognised hsOut `permissionDecision` rejects the whole
+        // output (`azn` `default: throw Error("Unknown hook permissionDecision
+        // type: …")`).
+        let err = parse_response(
+            r#"{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"perhaps"}}"#,
+            "PreToolUse",
+        )
+        .unwrap_err();
+        assert!(
+            matches!(&err, HookResponseParseError::UnknownPermissionDecision { value } if value == "perhaps"),
+            "{err:?}"
+        );
+        assert_eq!(
+            err.to_string(),
+            "Unknown hook permissionDecision type: perhaps. Valid types are: allow, deny, ask, defer"
+        );
+        // An empty hsOut `permissionDecision` is falsy in the binary's
+        // `&& e.hookSpecificOutput.permissionDecision` guard — skipped, not thrown.
+        let r = parse_response(
+            r#"{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":""}}"#,
+            "PreToolUse",
+        )
+        .unwrap();
+        assert_eq!(r.decision, None);
     }
 
     #[test]
@@ -1483,6 +1638,15 @@ mod tests {
             serde_json::to_string(&HookDecision::Block).unwrap(),
             r#""Block""#
         );
+    }
+
+    #[test]
+    fn ask_decision_round_trips() {
+        // R-D3: the new `Ask` variant serialises/deserialises like the others.
+        let s = serde_json::to_string(&HookDecision::Ask).unwrap();
+        assert_eq!(s, r#""Ask""#);
+        let back: HookDecision = serde_json::from_str(&s).unwrap();
+        assert_eq!(back, HookDecision::Ask);
     }
 
     // ---- #40 top-level terminalSequence ----------------------------------

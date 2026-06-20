@@ -73,9 +73,16 @@ impl WireCodec for GeminiCodec {
             );
         }
         if let Some(reasoning) = &request.reasoning {
+            // Gemini only consumes a numeric budget. `Adaptive` never reaches this
+            // codec (only the Anthropic/firstParty path emits it); map it to `0`,
+            // Gemini's "let the model decide" dynamic-thinking value.
+            let budget = match reasoning {
+                crate::ReasoningConfig::Enabled { budget_tokens } => *budget_tokens,
+                crate::ReasoningConfig::Adaptive => 0,
+            };
             generation_config.insert(
                 "thinkingConfig".to_string(),
-                serde_json::json!({"thinkingBudget": reasoning.budget_tokens}),
+                serde_json::json!({"thinkingBudget": budget}),
             );
         }
         if !generation_config.is_empty() {

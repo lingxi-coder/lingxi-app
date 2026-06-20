@@ -49,8 +49,8 @@ pub use protocol::{
     validate_capabilities, CacheControl, CacheEdit, CacheScope, ContentBlock, ContentDelta, LlmEvent,
     LlmRequest,
     LlmResponse, Message, MessageDeltaPayload, NoopStreamDecoder, ProviderRequest, ProviderResponse,
-    RawStreamFrame, ReasoningConfig, ResponseFormat, StreamDecoder, StreamFraming, SystemBlock,
-    ToolChoice, ToolDeclaration, WireCodec,
+    RawStreamFrame, ReasoningConfig, RequestMetadata, ResponseFormat, StreamDecoder, StreamFraming,
+    SystemBlock, ToolChoice, ToolDeclaration, WireCodec,
 };
 pub use registry::{ModelListing, ModelRegistry, ResolvedRoute};
 pub use redaction::Redactor;

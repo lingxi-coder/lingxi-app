@@ -93,6 +93,17 @@ impl WireCodec for AnthropicMessagesCodec {
             body.insert("tool_choice".to_string(), encode_tool_choice(tool_choice));
         }
 
+        // metadata.user_id — claude-code always sends `metadata: { user_id }`
+        // (services/api/claude.ts:1699-1728). Emitted on the messages endpoint
+        // only (not count_tokens, which is prompt-shape-only). `None` omits the
+        // key, leaving wire bytes unchanged for callers that don't supply it.
+        if let Some(metadata) = &request.metadata {
+            body.insert(
+                "metadata".to_string(),
+                serde_json::json!({"user_id": metadata.user_id}),
+            );
+        }
+
         let mut provider_request = ProviderRequest::post_json(self.messages_url(), Value::Object(body));
         provider_request
             .headers
@@ -196,10 +207,15 @@ fn base_body(request: &LlmRequest) -> Result<serde_json::Map<String, Value>, Llm
         body.insert("system".to_string(), Value::Array(system));
     }
     if let Some(reasoning) = &request.reasoning {
-        body.insert(
-            "thinking".to_string(),
-            serde_json::json!({"type": "enabled", "budget_tokens": reasoning.budget_tokens}),
-        );
+        // Mirror claude-code's `thinking` field (claude.ts:1596-1630):
+        // adaptive → {"type":"adaptive"}; fixed budget → {"type":"enabled", …}.
+        let thinking = match reasoning {
+            crate::ReasoningConfig::Adaptive => serde_json::json!({"type": "adaptive"}),
+            crate::ReasoningConfig::Enabled { budget_tokens } => {
+                serde_json::json!({"type": "enabled", "budget_tokens": budget_tokens})
+            }
+        };
+        body.insert("thinking".to_string(), thinking);
     }
     Ok(body)
 }

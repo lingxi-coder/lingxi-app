@@ -62,6 +62,22 @@ pub struct LlmRequest {
     /// Optional reasoning/thinking budget request.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning: Option<ReasoningConfig>,
+    /// Optional request metadata. Emitted by the Anthropic codec as the
+    /// `metadata` object (claude-code `claude.ts:1699-1728` always sends it).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<RequestMetadata>,
+}
+
+/// Request metadata carried in the Anthropic `metadata` request field.
+///
+/// Mirrors claude-code's `metadata: { user_id }` (`services/api/claude.ts:503-525`,
+/// `1699-1728`). `user_id` is the JSON-stringified identity blob
+/// (`{...CLAUDE_CODE_EXTRA_METADATA, device_id, account_uuid, session_id}`); the
+/// caller composes the string, the codec emits it verbatim.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RequestMetadata {
+    /// Opaque identity string sent as `metadata.user_id`.
+    pub user_id: String,
 }
 
 impl LlmRequest {
@@ -112,11 +128,28 @@ impl LlmRequest {
     }
 }
 
-/// Provider-neutral reasoning/thinking budget.
+/// Provider-neutral reasoning/thinking request.
+///
+/// Mirrors claude-code's `thinking` request field
+/// (`services/api/claude.ts:1596-1630`): the Anthropic Messages API distinguishes
+/// `{"type":"adaptive"}` (the model decides depth dynamically — the default for
+/// adaptive-capable models) from `{"type":"enabled","budget_tokens":N}` (a fixed
+/// thinking budget). The provider-neutral codecs that only consume a numeric
+/// budget (Gemini, OpenAI Responses) map [`ReasoningConfig::Adaptive`] to a
+/// sensible dynamic default — those providers never receive `Adaptive` in
+/// practice (only the Anthropic/firstParty path emits it).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ReasoningConfig {
-    /// Maximum tokens the model may spend on reasoning.
-    pub budget_tokens: u32,
+#[serde(rename_all = "snake_case", tag = "mode")]
+pub enum ReasoningConfig {
+    /// Adaptive thinking — the model decides when and how much to think.
+    /// Anthropic wire: `{"type":"adaptive"}`.
+    Adaptive,
+    /// Fixed thinking budget. Anthropic wire:
+    /// `{"type":"enabled","budget_tokens":N}`.
+    Enabled {
+        /// Maximum tokens the model may spend on reasoning.
+        budget_tokens: u32,
+    },
 }
 
 /// One system-prompt block.

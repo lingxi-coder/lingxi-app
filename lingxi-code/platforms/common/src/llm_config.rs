@@ -9,24 +9,30 @@
 //!
 //! | `display_model`              | `billing_model`      | reasoning |
 //! |------------------------------|----------------------|-----------|
-//! | claude-sonnet-4-20250514     | claude-sonnet-4      | false     |
-//! | claude-sonnet-4-5-20250929   | claude-sonnet-4-5    | false     |
-//! | claude-sonnet-4-6            | claude-sonnet-4-6    | false     |
+//! | claude-sonnet-4-20250514     | claude-sonnet-4      | true      |
+//! | claude-sonnet-4-5-20250929   | claude-sonnet-4-5    | true      |
+//! | claude-sonnet-4-6            | claude-sonnet-4-6    | true      |
 //! | claude-opus-4-20250514       | claude-opus-4        | true      |
 //! | claude-opus-4-1-20250805     | claude-opus-4-1      | true      |
 //! | claude-opus-4-5-20251101     | claude-opus-4-5      | true      |
 //! | claude-opus-4-6              | claude-opus-4-6      | true      |
 //! | claude-opus-4-7              | claude-opus-4-7      | true      |  ← orchestrator DEFAULT_MODEL
-//! | claude-haiku-4-20250307      | claude-haiku-4       | false     |
-//! | claude-haiku-4-5             | claude-haiku-4-5     | false     |
+//! | claude-haiku-4-20250307      | claude-haiku-4       | true      |
+//! | claude-haiku-4-5             | claude-haiku-4-5     | true      |
+//!
+//! All Claude-4-generation models support the Anthropic `thinking` field
+//! (`modelSupportsThinking` → true for every non-`claude-3-*` first-party
+//! model), so every entry carries `reasoning: true` — the thinking field is sent
+//! by default (adaptive where supported, fixed budget otherwise). This gates
+//! `llm_client::validate_capabilities`'s reasoning check.
 //!
 //! ## Auth strategies
 //!
 //! `oauth_path = false` → `ApiKey` + `CredentialConfig::Env { var: "ANTHROPIC_API_KEY" }`
 //! `oauth_path = true`  → `OAuthBearer` + `CredentialConfig::HostManaged { id: "anthropic_oauth" }`
 //!
-//! All models get streaming, tools, vision, and documents; Opus variants
-//! additionally get `reasoning: true`.
+//! All models get streaming, tools, vision, documents, and `reasoning: true`
+//! (every Claude-4-generation model supports the `thinking` field).
 
 use std::collections::BTreeMap;
 
@@ -121,17 +127,17 @@ pub fn builtin_anthropic_config(api_base: &str, oauth_path: bool) -> ClientConfi
                     "claude-sonnet-4-20250514",
                     "claude-sonnet-4",
                     &["claude-sonnet-4", "claude-sonnet", "claude"],
-                    false,
+                    true,
                 ),
                 // — Claude Sonnet 4.5 —
                 model(
                     "claude-sonnet-4-5-20250929",
                     "claude-sonnet-4-5",
                     &["claude-sonnet-4-5"],
-                    false,
+                    true,
                 ),
                 // — Claude Sonnet 4.6 —
-                model("claude-sonnet-4-6", "claude-sonnet-4-6", &[], false),
+                model("claude-sonnet-4-6", "claude-sonnet-4-6", &[], true),
                 // — Claude Opus 4 (Opus-fallback gate target) —
                 model(
                     "claude-opus-4-20250514",
@@ -162,10 +168,10 @@ pub fn builtin_anthropic_config(api_base: &str, oauth_path: bool) -> ClientConfi
                     "claude-haiku-4-20250307",
                     "claude-haiku-4",
                     &["claude-haiku-4", "claude-haiku"],
-                    false,
+                    true,
                 ),
                 // — Claude Haiku 4.5 —
-                model("claude-haiku-4-5", "claude-haiku-4-5", &[], false),
+                model("claude-haiku-4-5", "claude-haiku-4-5", &[], true),
             ],
         }],
     }

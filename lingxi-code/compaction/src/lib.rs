@@ -27,8 +27,8 @@ pub mod warning_state;
 
 pub use autocompact::{Autocompactor, CompactionError, CompactionResult};
 pub use context_window::{
-    context_window_for_model, max_output_tokens_for_model, CONTEXT_1M_BETA_HEADER,
-    MODEL_CONTEXT_WINDOW_DEFAULT,
+    context_window_for_model, max_output_tokens_for_model, max_thinking_tokens_for_model,
+    CONTEXT_1M_BETA_HEADER, MODEL_CONTEXT_WINDOW_DEFAULT,
 };
 pub use boundary::{
     create_compact_boundary, create_compact_boundary_with_preserved_tail,

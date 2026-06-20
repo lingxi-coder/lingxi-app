@@ -84,7 +84,7 @@ fn image_url_block_requires_vision_capability() {
 #[test]
 fn reasoning_config_requires_reasoning_capability() {
     let mut request = LlmRequest::new("m").with_user_text("hi");
-    request.reasoning = Some(llm_client::ReasoningConfig { budget_tokens: 1024 });
+    request.reasoning = Some(llm_client::ReasoningConfig::Enabled { budget_tokens: 1024 });
     let capabilities = Capabilities {
         streaming: true,
         tools: true,

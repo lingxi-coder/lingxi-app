@@ -89,9 +89,19 @@ impl WireCodec for OpenAiResponsesCodec {
         }
 
         if let Some(reasoning) = &request.reasoning {
+            // The Responses API only accepts discrete effort levels. `Adaptive`
+            // never reaches this codec (only the Anthropic/firstParty path emits
+            // it); map it to the dynamic default `"high"` (budget 0 buckets to
+            // `"low"`, so use the max effort for the model-decides case).
+            let effort = match reasoning {
+                crate::ReasoningConfig::Enabled { budget_tokens } => {
+                    map_reasoning_effort(*budget_tokens)
+                }
+                crate::ReasoningConfig::Adaptive => "high",
+            };
             body.insert(
                 "reasoning".to_string(),
-                serde_json::json!({"effort": map_reasoning_effort(reasoning.budget_tokens)}),
+                serde_json::json!({"effort": effort}),
             );
         }
 

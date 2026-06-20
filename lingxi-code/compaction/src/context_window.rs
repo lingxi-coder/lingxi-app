@@ -206,6 +206,19 @@ pub fn max_output_tokens_for_model(model: &str) -> u64 {
     default_tokens
 }
 
+/// Returns the maximum thinking-budget tokens for `model`.
+///
+/// Mirrors claude-code's `getMaxThinkingTokensForModel`
+/// (`getModelMaxOutputTokens(model).upperLimit - 1`): the fixed-budget thinking
+/// ceiling is one below the model's max-output upper limit. Used by the
+/// orchestrator when the model does not support adaptive thinking and a concrete
+/// `budget_tokens` must be supplied.
+#[must_use]
+pub fn max_thinking_tokens_for_model(model: &str) -> u32 {
+    let (_default_tokens, upper_limit) = model_max_output_tokens(model);
+    u32::try_from(upper_limit.saturating_sub(1)).unwrap_or(u32::MAX)
+}
+
 /// Parse a base-10 integer that must be `> 0`; returns `None` otherwise.
 /// Mirrors the `parseInt(...)` + `!isNaN && > 0` guard used throughout the TS
 /// env-override code. Leading whitespace and a trailing non-numeric suffix are

@@ -463,7 +463,7 @@ fn stream_tool_fragment_without_index_defaults_to_slot_zero() {
 fn reasoning_config_is_rejected_until_responses_api_exists() {
     let codec = OpenAiChatCodec::new("https://api.openai.com/v1");
     let mut request = LlmRequest::new("gpt-4o");
-    request.reasoning = Some(llm_client::ReasoningConfig { budget_tokens: 2048 });
+    request.reasoning = Some(llm_client::ReasoningConfig::Enabled { budget_tokens: 2048 });
 
     let err = codec.encode_request(&request).unwrap_err();
 

@@ -69,6 +69,22 @@ fn prompt_caching_enabled(model: &str) -> bool {
     true
 }
 
+/// Collapse a [`ReasoningConfig`] to a numeric budget for telemetry labels.
+/// `Adaptive` → 0, `Enabled{b}` → b.
+fn reasoning_budget(reasoning: Option<llm_client::ReasoningConfig>) -> u32 {
+    match reasoning {
+        Some(llm_client::ReasoningConfig::Enabled { budget_tokens }) => budget_tokens,
+        Some(llm_client::ReasoningConfig::Adaptive) | None => 0,
+    }
+}
+
+/// `true` when the named env var is truthy under the strict claude-code
+/// allowlist (`1`/`true`/`yes`/`on`). Used for the `CLAUDE_CODE_DISABLE_THINKING`
+/// / `CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING` gates.
+fn is_thinking_env_disabled(name: &str) -> bool {
+    traits::env::is_env_truthy(std::env::var(name).ok().as_deref())
+}
+
 // ── Subscriber state ─────────────────────────────────────────────────────────
 
 /// Subscription flags — gates the 429 retry policy.
@@ -125,6 +141,19 @@ pub struct ProviderApiAdapter {
     /// `tool_choice` to that tool). `None` (the default for every normal turn)
     /// leaves the request's `tool_choice` unset so the model chooses freely.
     forced_tool_choice: Option<llm_client::ToolChoice>,
+    /// Session thinking configuration (claude-code `thinking` intent).
+    ///
+    /// Default [`ThinkingConfig::Adaptive`] — claude-code sends adaptive thinking
+    /// by default for adaptive-capable models. `build_request` resolves this
+    /// against the model's thinking predicates + the `CLAUDE_CODE_DISABLE_*`
+    /// env gates to produce the `reasoning` field and the coupled `temperature`.
+    /// Set via [`Self::with_thinking`].
+    thinking: crate::model::thinking::ThinkingConfig,
+    /// Identity for the Anthropic `metadata.user_id` field (claude-code
+    /// `claude.ts:503-525`). `None` (the default) omits `metadata` entirely.
+    /// Set via [`Self::with_request_metadata`]; the composition root supplies
+    /// the composed identity string.
+    request_metadata: Option<llm_client::RequestMetadata>,
     /// 1P experimental cache-editing inputs (claude.ts `addCacheBreakpoints`
     /// `newCacheEdits`/`pinnedEdits`, claude.ts:3068-3069). LingXi has no
     /// cached-microcompact scheduler to produce these, so the default is
@@ -380,6 +409,8 @@ impl ProviderApiAdapter {
             subscriber,
             subscription: None,
             forced_tool_choice: None,
+            thinking: crate::model::thinking::ThinkingConfig::default(),
+            request_metadata: None,
             cache_editing_inputs: CacheEditingInputs::default(),
             ua,
             version: version.into(),
@@ -413,6 +444,22 @@ impl ProviderApiAdapter {
     #[must_use]
     pub fn with_forced_tool_choice(mut self, choice: llm_client::ToolChoice) -> Self {
         self.forced_tool_choice = Some(choice);
+        self
+    }
+
+    /// Set the session thinking configuration. Builder-style; the default is
+    /// [`ThinkingConfig::Adaptive`](crate::model::thinking::ThinkingConfig::Adaptive).
+    #[must_use]
+    pub fn with_thinking(mut self, thinking: crate::model::thinking::ThinkingConfig) -> Self {
+        self.thinking = thinking;
+        self
+    }
+
+    /// Set the identity for the Anthropic `metadata.user_id` field. Builder-style;
+    /// the default is `None` (no `metadata` object emitted).
+    #[must_use]
+    pub fn with_request_metadata(mut self, metadata: llm_client::RequestMetadata) -> Self {
+        self.request_metadata = Some(metadata);
         self
     }
 
@@ -508,7 +555,7 @@ impl ProviderApiAdapter {
     /// Convert orchestrator-layer inputs into an `LlmRequest`.
     // An internal request-assembler: model + profile + system + msgs + tools +
     // stream + max_tokens are all genuinely distinct inputs (8/7).
-    #[allow(clippy::unused_self, clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments)]
     fn build_request(
         &self,
         model: &str,
@@ -614,7 +661,54 @@ impl ProviderApiAdapter {
             req.tool_choice = Some(choice.clone());
         }
         req.stream = stream;
-        req.max_tokens = max_tokens;
+
+        // max_tokens (DIV-3): honor the escalation override (Some) else the
+        // model value (claude.ts getMaxOutputTokensForModel). The base path
+        // passes None → the model's binary-grounded max-output tokens, NOT the
+        // codec's 4096 default.
+        req.max_tokens = Some(max_tokens.unwrap_or_else(|| {
+            u32::try_from(compaction::max_output_tokens_for_model(model)).unwrap_or(u32::MAX)
+        }));
+
+        // thinking (DIV-1) + temperature (DIV-4), mirroring claude.ts:1596-1630
+        // and claude.ts:1693. Computed AFTER max_tokens is known (the fixed-
+        // budget cap clamps to max_tokens-1).
+        {
+            use crate::model::thinking::{
+                model_supports_adaptive_thinking, model_supports_thinking, ThinkingConfig,
+            };
+            use llm_client::ReasoningConfig;
+
+            let has_thinking = self.thinking != ThinkingConfig::Disabled
+                && !is_thinking_env_disabled("CLAUDE_CODE_DISABLE_THINKING");
+
+            req.reasoning = if has_thinking && model_supports_thinking(model) {
+                if !is_thinking_env_disabled("CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING")
+                    && model_supports_adaptive_thinking(model)
+                {
+                    Some(ReasoningConfig::Adaptive)
+                } else {
+                    let mut budget = compaction::max_thinking_tokens_for_model(model);
+                    if let ThinkingConfig::Enabled { budget_tokens } = self.thinking {
+                        budget = budget_tokens;
+                    }
+                    // budget_tokens must stay strictly below max_tokens.
+                    budget = budget.min(req.max_tokens.unwrap_or(u32::MAX).saturating_sub(1));
+                    Some(ReasoningConfig::Enabled { budget_tokens: budget })
+                }
+            } else {
+                None
+            };
+
+            // temperature:1 ONLY when thinking is disabled (claude.ts:1693). The
+            // Anthropic codec emits temperature conditionally on Some.
+            req.temperature = if has_thinking { None } else { Some(1.0) };
+        }
+
+        // metadata.user_id (DIV-2): claude-code always sends it. `None` (no
+        // identity wired) omits the object — byte-identical to the prior request.
+        req.metadata = self.request_metadata.clone();
+
         Ok(req)
     }
 
@@ -1009,8 +1103,8 @@ impl ProviderApiAdapter {
             is_enterprise: sub.is_enterprise,
             ..RetryState::default()
         };
-        // thinking_budget: Task 6 drives with 0; extended-thinking wiring in Task 10+.
-        let thinking_budget: u32 = req.reasoning.map_or(0, |r| r.budget_tokens);
+        // thinking_budget for telemetry: Adaptive → 0, Enabled{b} → b.
+        let thinking_budget: u32 = reasoning_budget(req.reasoning);
         // Index into `chain` for the NEXT fallback entry to use.
         // chain_idx=0 means chain[0] is the current fallback in `retry_control`.
         // After a Fallback step, chain_idx advances to point at the next entry.
@@ -1266,7 +1360,7 @@ impl ProviderApiAdapter {
             &ResolveRetryEnv::from_process_env(),
             self.settings_max_retries,
         );
-        let thinking_budget: u32 = req.reasoning.map_or(0, |r| r.budget_tokens);
+        let thinking_budget: u32 = reasoning_budget(req.reasoning);
 
         loop {
             // Prepare so we can inject headers, then call execute_stream via
@@ -2120,6 +2214,7 @@ mod tests {
                         capabilities: Capabilities {
                             streaming: true,
                             tools: true,
+                            reasoning: true,
                             ..Default::default()
                         },
                     }],
@@ -2166,6 +2261,7 @@ mod tests {
                         capabilities: Capabilities {
                             streaming: true,
                             tools: true,
+                            reasoning: true,
                             ..Default::default()
                         },
                     }],
@@ -2565,6 +2661,146 @@ mod tests {
             .expect("build_request without profile");
         assert_eq!(req.model, "claude-opus-4-7", "model must be preserved verbatim");
         assert!(req.profile.is_none(), "profile must be None when not passed");
+    }
+
+    // ── build_request thinking / temperature / max_tokens (DIV-1/3/4) ────────
+
+    // Serialize the env-touching thinking tests: they mutate process-global
+    // CLAUDE_CODE_DISABLE_THINKING. A module-level mutex keeps them from racing
+    // each other (and is poison-tolerant).
+    static THINKING_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn clear_thinking_env() {
+        std::env::remove_var("CLAUDE_CODE_DISABLE_THINKING");
+        std::env::remove_var("CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING");
+    }
+
+    #[test]
+    fn build_request_adaptive_models_get_adaptive_no_temperature_model_max_tokens() {
+        let _g = THINKING_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_thinking_env();
+        let transport = FakeTransport::always(ProviderResponse::json(200, ok_response_json()));
+        let adapter = make_adapter(transport); // default ThinkingConfig::Adaptive
+
+        // (model, expected model-max-output-tokens) — from compaction's
+        // binary-grounded table. NOTE: opus-4-8 is newer than that table's
+        // dotted entries, so its canonical collapses to the bare `claude-opus-4`
+        // family → 32k (NOT 128k); fable-5 is unknown to the table → 32k default.
+        // We honor the existing table verbatim (per the change spec).
+        for (model, expected_max) in [
+            ("claude-opus-4-8", 32_000u32),
+            ("claude-sonnet-4-6", 32_000),
+            ("claude-fable-5", 32_000),
+        ] {
+            let req = adapter
+                .build_request(model, None, None, vec![], vec![], false, None)
+                .expect("build_request");
+            assert_eq!(
+                req.reasoning,
+                Some(llm_client::ReasoningConfig::Adaptive),
+                "{model} → adaptive"
+            );
+            assert!(req.temperature.is_none(), "{model} → no temperature when thinking on");
+            assert_eq!(req.max_tokens, Some(expected_max), "{model} → model max_tokens");
+        }
+        clear_thinking_env();
+    }
+
+    #[test]
+    fn build_request_non_adaptive_model_gets_fixed_budget() {
+        let _g = THINKING_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_thinking_env();
+        let transport = FakeTransport::always(ProviderResponse::json(200, ok_response_json()));
+        let adapter = make_adapter(transport); // default Adaptive intent, but model disallows adaptive
+
+        // haiku-4-5 supports thinking but NOT adaptive → Enabled{upperLimit-1}.
+        // compaction max output for haiku-4-5 = (32_000, 64_000) → budget 63_999,
+        // clamped to max_tokens(32_000)-1 = 31_999.
+        let req = adapter
+            .build_request("claude-haiku-4-5", None, None, vec![], vec![], false, None)
+            .expect("build_request");
+        assert_eq!(req.max_tokens, Some(32_000));
+        assert_eq!(
+            req.reasoning,
+            Some(llm_client::ReasoningConfig::Enabled { budget_tokens: 31_999 }),
+            "haiku-4-5 → fixed budget clamped to max_tokens-1"
+        );
+        assert!(req.temperature.is_none(), "thinking on → no temperature");
+        clear_thinking_env();
+    }
+
+    #[test]
+    fn build_request_disable_thinking_env_drops_reasoning_sets_temperature() {
+        let _g = THINKING_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_thinking_env();
+        std::env::set_var("CLAUDE_CODE_DISABLE_THINKING", "1");
+        let transport = FakeTransport::always(ProviderResponse::json(200, ok_response_json()));
+        let adapter = make_adapter(transport);
+
+        let req = adapter
+            .build_request("claude-opus-4-8", None, None, vec![], vec![], false, None)
+            .expect("build_request");
+        assert!(req.reasoning.is_none(), "thinking disabled → no reasoning");
+        assert_eq!(req.temperature, Some(1.0), "thinking disabled → temperature 1");
+        // max_tokens still the model value (opus-4-8 → bare opus-4 family → 32k).
+        assert_eq!(req.max_tokens, Some(32_000));
+        clear_thinking_env();
+    }
+
+    #[test]
+    fn build_request_explicit_max_tokens_override_wins() {
+        let _g = THINKING_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_thinking_env();
+        let transport = FakeTransport::always(ProviderResponse::json(200, ok_response_json()));
+        let adapter = make_adapter(transport);
+        // Escalation override (Some) honored verbatim.
+        let req = adapter
+            .build_request("claude-opus-4-8", None, None, vec![], vec![], false, Some(7_777))
+            .expect("build_request");
+        assert_eq!(req.max_tokens, Some(7_777));
+        clear_thinking_env();
+    }
+
+    #[test]
+    fn build_request_thinking_disabled_config_drops_reasoning() {
+        let _g = THINKING_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_thinking_env();
+        let transport = FakeTransport::always(ProviderResponse::json(200, ok_response_json()));
+        let adapter = make_adapter(transport)
+            .with_thinking(crate::model::thinking::ThinkingConfig::Disabled);
+        let req = adapter
+            .build_request("claude-opus-4-8", None, None, vec![], vec![], false, None)
+            .expect("build_request");
+        assert!(req.reasoning.is_none(), "ThinkingConfig::Disabled → no reasoning");
+        assert_eq!(req.temperature, Some(1.0));
+        clear_thinking_env();
+    }
+
+    #[test]
+    fn build_request_metadata_threaded_when_set() {
+        let _g = THINKING_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_thinking_env();
+        let transport = FakeTransport::always(ProviderResponse::json(200, ok_response_json()));
+        let adapter = make_adapter(transport).with_request_metadata(llm_client::RequestMetadata {
+            user_id: "{\"session_id\":\"s1\"}".to_string(),
+        });
+        let req = adapter
+            .build_request("claude-opus-4-8", None, None, vec![], vec![], false, None)
+            .expect("build_request");
+        assert_eq!(
+            req.metadata,
+            Some(llm_client::RequestMetadata { user_id: "{\"session_id\":\"s1\"}".to_string() })
+        );
+
+        // Default adapter → no metadata.
+        let bare = make_adapter(FakeTransport::always(ProviderResponse::json(
+            200,
+            ok_response_json(),
+        )))
+        .build_request("claude-opus-4-8", None, None, vec![], vec![], false, None)
+        .expect("build_request");
+        assert!(bare.metadata.is_none());
+        clear_thinking_env();
     }
 
     // ── effective_subscriber (batch-5 Task 3: live SharedSubscription) ───────
@@ -3638,6 +3874,7 @@ mod tests {
                         capabilities: Capabilities {
                             streaming: true,
                             tools: true,
+                            reasoning: true,
                             ..Default::default()
                         },
                     }],
@@ -3726,7 +3963,10 @@ mod tests {
                         // billing_model not in any catalog entry
                         billing_model: "claude-future-9999".to_string(),
                         aliases: vec![],
-                        capabilities: Capabilities::default(),
+                        capabilities: Capabilities {
+                            reasoning: true,
+                            ..Default::default()
+                        },
                     }],
                     pricing: PricingConfig::default(),
                     signing: None,
@@ -3973,6 +4213,7 @@ mod tests {
                             capabilities: Capabilities {
                                 streaming: true,
                                 tools: true,
+                                reasoning: true,
                                 ..Default::default()
                             },
                         },
@@ -3984,6 +4225,7 @@ mod tests {
                             capabilities: Capabilities {
                                 streaming: true,
                                 tools: true,
+                                reasoning: true,
                                 ..Default::default()
                             },
                         },
@@ -3995,6 +4237,7 @@ mod tests {
                             capabilities: Capabilities {
                                 streaming: true,
                                 tools: true,
+                                reasoning: true,
                                 ..Default::default()
                             },
                         },
@@ -4914,6 +5157,7 @@ mod tests {
                         capabilities: Capabilities {
                             streaming: true,
                             tools: true,
+                            reasoning: true,
                             ..Default::default()
                         },
                     }],

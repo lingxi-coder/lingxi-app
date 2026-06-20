@@ -416,7 +416,7 @@ fn reasoning_budget_maps_to_effort_buckets() {
     ];
     for (budget_tokens, effort) in cases {
         let mut request = LlmRequest::new("gpt-5").with_user_text("hi");
-        request.reasoning = Some(llm_client::ReasoningConfig { budget_tokens });
+        request.reasoning = Some(llm_client::ReasoningConfig::Enabled { budget_tokens });
         let provider_request = codec().encode_request(&request).unwrap();
         assert_eq!(
             provider_request.body_json["reasoning"],
@@ -588,7 +588,7 @@ fn encode_request_full_body_golden() {
         input_schema: serde_json::json!({"type": "object"}),
     }];
     request.tool_choice = Some(ToolChoice::Auto);
-    request.reasoning = Some(llm_client::ReasoningConfig { budget_tokens: 2048 });
+    request.reasoning = Some(llm_client::ReasoningConfig::Enabled { budget_tokens: 2048 });
 
     let provider_request = codec().encode_request(&request).unwrap();
 

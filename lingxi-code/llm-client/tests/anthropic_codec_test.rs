@@ -663,7 +663,7 @@ fn stream_error_events_map_to_error_taxonomy() {
 fn encode_reasoning_budget_as_thinking() {
     let codec = AnthropicMessagesCodec::new("https://api.anthropic.com", "2023-06-01");
     let mut request = LlmRequest::new("claude-sonnet-4-20250514");
-    request.reasoning = Some(llm_client::ReasoningConfig { budget_tokens: 2048 });
+    request.reasoning = Some(llm_client::ReasoningConfig::Enabled { budget_tokens: 2048 });
 
     let provider_request = codec.encode_request(&request).unwrap();
 
@@ -672,6 +672,40 @@ fn encode_reasoning_budget_as_thinking() {
 
     let bare = codec.encode_request(&LlmRequest::new("claude-sonnet-4-20250514")).unwrap();
     assert!(bare.body_json.get("thinking").is_none());
+}
+
+#[test]
+fn encode_adaptive_reasoning_as_thinking() {
+    let codec = AnthropicMessagesCodec::new("https://api.anthropic.com", "2023-06-01");
+    let mut request = LlmRequest::new("claude-opus-4-8");
+    request.reasoning = Some(llm_client::ReasoningConfig::Adaptive);
+
+    let provider_request = codec.encode_request(&request).unwrap();
+
+    assert_eq!(provider_request.body_json["thinking"]["type"], "adaptive");
+    assert!(provider_request.body_json["thinking"]
+        .get("budget_tokens")
+        .is_none());
+}
+
+#[test]
+fn encode_metadata_user_id() {
+    let codec = AnthropicMessagesCodec::new("https://api.anthropic.com", "2023-06-01");
+    let mut request = LlmRequest::new("claude-opus-4-8");
+    request.metadata = Some(llm_client::RequestMetadata {
+        user_id: "{\"device_id\":\"abc\",\"session_id\":\"s1\"}".to_string(),
+    });
+
+    let provider_request = codec.encode_request(&request).unwrap();
+
+    assert_eq!(
+        provider_request.body_json["metadata"]["user_id"],
+        "{\"device_id\":\"abc\",\"session_id\":\"s1\"}"
+    );
+
+    // Absent metadata → no key.
+    let bare = codec.encode_request(&LlmRequest::new("claude-opus-4-8")).unwrap();
+    assert!(bare.body_json.get("metadata").is_none());
 }
 
 #[test]

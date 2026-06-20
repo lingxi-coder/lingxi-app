@@ -190,6 +190,36 @@ pub(crate) const PERMISSION_DENIED_RETRY_MESSAGE: &str =
 /// which is the authoritative source for this string in this crate.
 pub(crate) use crate::model::prompt_too_long::PROMPT_TOO_LONG_ERROR_MESSAGE;
 
+/// Byte-exact meta nudge injected when the model returns `stop_reason ==
+/// "tool_use"` but produces ZERO `tool_use` blocks (a malformed / leaked-invoke
+/// response). 1:1 with claude-code v2.1.183 (`bin/claude.exe` offset
+/// ~202945837): the first-failure injection text.
+///
+/// claude-code gates the text on a `tengu_malformed_tool_use_clean_retry`
+/// feature flag (`PZa()`) that DEFAULTS TO FALSE, so the default first-failure
+/// string is this non-clean-retry variant. (The clean-retry variant would be
+/// "The previous response failed to produce a valid tool call. Please retry the
+/// tool call now." — gated behind the flag, not emitted in the default build.)
+/// `LingXi` has no protocol `isMeta` flag (cf. the max-output-tokens nudge), so
+/// the meta message is a plain user text message carrying these exact bytes.
+pub(crate) const MALFORMED_TOOL_USE_RETRY_NUDGE: &str =
+    "Your tool call was malformed and could not be parsed. Please retry.";
+
+/// Byte-exact NON-meta message emitted on the SECOND malformed-tool-use failure
+/// (the retry also produced no `tool_use` block): the turn terminates as
+/// completed. 1:1 with claude-code v2.1.183 (`bin/claude.exe` offset
+/// ~202946360, the `tc({content:...})` terminal branch).
+pub(crate) const MALFORMED_TOOL_USE_RETRY_FAILED: &str =
+    "The model's tool call could not be parsed (retry also failed).";
+
+/// Byte-exact meta nudge injected when the model returns an `end_turn` /
+/// `stop_sequence` response with NO visible text (thinking-only output) and it
+/// has not yet been nudged this turn. 1:1 with claude-code v2.1.183
+/// (`bin/claude.exe` offset ~202947000). `LingXi` has no protocol `isMeta`
+/// flag, so it is a plain user text message carrying these exact bytes.
+pub(crate) const THINKING_ONLY_NUDGE: &str =
+    "[Your previous response had no visible output. Please continue and produce a user-visible response.]";
+
 /// Per-conversation recovery bookkeeping carried by the turn drivers in
 /// `conversation.rs` and threaded `&mut` into [`execute_one_turn_with_recovery`].
 ///
@@ -216,6 +246,19 @@ pub(crate) struct RecoveryState {
     /// separate flag because the override is TAKEN per call). Reset alongside
     /// [`Self::max_output_tokens_recovery_count`].
     pub(crate) max_output_tokens_escalated: bool,
+    /// #77: whether a malformed-tool-use retry (`stop_reason == "tool_use"` with
+    /// zero `tool_use` blocks) has already fired this turn. Mirrors claude-code's
+    /// `transition.reason === "malformed_tool_use_retry"` guard so the SECOND
+    /// such failure terminates instead of looping. NOT reset by
+    /// [`Self::reset_max_output_tokens_recovery`] — it is a per-turn one-shot
+    /// independent of the max-output-tokens escalation episode.
+    #[allow(clippy::struct_field_names)]
+    pub(crate) malformed_tool_use_retried: bool,
+    /// #78: whether the thinking-only nudge (an `end_turn`/`stop_sequence`
+    /// response with no visible text) has already fired this turn. Mirrors
+    /// claude-code's `thinkingOnlyNudged` loop-state flag.
+    #[allow(clippy::struct_field_names)]
+    pub(crate) thinking_only_nudged: bool,
 }
 
 impl RecoveryState {
@@ -618,6 +661,32 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
         }
     } else {
         match response.stop_reason.as_deref() {
+            // #77 malformed-tool-use retry (batched twin): `stop_reason ==
+            // "tool_use"` but the response produced ZERO tool_use blocks. Only
+            // the recovery-aware drivers participate (the per-turn guard lives on
+            // `RecoveryState`); the legacy shim (`None`) keeps the historical
+            // `_ => Continue` no-op (re-call with no nudge). `tool_uses` is the
+            // dispatched set computed above — empty here means a malformed
+            // response (`tool_use` stop with no parseable tool_use block).
+            Some("tool_use") if recovery.is_some() && tool_uses.is_empty() => {
+                let state = recovery.as_deref_mut().expect("recovery is Some");
+                handle_malformed_tool_use(orch, assistant_id, state).await?
+            }
+            // #78 thinking-only nudge (batched twin): an `end_turn` /
+            // `stop_sequence` (or absent → treated as `end_turn`) response with
+            // no visible text gets ONE nudge before the turn ends. Recovery-aware
+            // drivers only; the compact-source exclusion (`a !== "compact" &&
+            // !GRe(a)`) is satisfied unconditionally (compaction runs in a
+            // separate code path, never this turn step).
+            Some("end_turn" | "stop_sequence") | None
+                if recovery
+                    .as_deref()
+                    .is_some_and(|s| !s.thinking_only_nudged)
+                    && !has_visible_text(&assistant_blocks) =>
+            {
+                let state = recovery.as_deref_mut().expect("recovery is Some");
+                handle_thinking_only(orch, state).await?
+            }
             Some("end_turn") => TurnStepOutcome::Ended {
                 final_message_id: assistant_id,
                 stop_reason: "end_turn".to_string(),
@@ -1089,6 +1158,76 @@ async fn handle_max_output_tokens(
         final_message_id: assistant_id,
         stop_reason: "max_tokens".to_string(),
     })
+}
+
+/// Whether any assistant content block is a non-whitespace [`ContentBlock::Text`]
+/// — the #78 "visible output" predicate (claude-code `bin/claude.exe` offset
+/// ~202946760). `false` = a thinking-only / text-empty response.
+fn has_visible_text(blocks: &[ContentBlock]) -> bool {
+    blocks
+        .iter()
+        .any(|b| matches!(b, ContentBlock::Text { text } if !text.trim().is_empty()))
+}
+
+/// #77 (batched twin, claude-code `bin/claude.exe` offset ~202945837): handle a
+/// `stop_reason == "tool_use"` response that produced ZERO `tool_use` blocks. On
+/// the FIRST failure inject the byte-exact meta retry nudge, reset the
+/// max-output-tokens recovery bookkeeping, arm the per-turn guard, and Continue.
+/// On the SECOND, surface the non-meta terminal message and end the turn as
+/// completed (`stop_reason = "end_turn"`).
+async fn handle_malformed_tool_use(
+    orch: &ConversationOrchestrator,
+    assistant_id: MessageId,
+    state: &mut RecoveryState,
+) -> Result<TurnStepOutcome, OrchestratorError> {
+    if state.malformed_tool_use_retried {
+        // Second failure → terminal NON-meta message, complete the turn.
+        orch.output.emit_text(MALFORMED_TOOL_USE_RETRY_FAILED).await;
+        let failed_msg = ConversationMessage::user(
+            MessageId::new(),
+            MALFORMED_TOOL_USE_RETRY_FAILED.to_string(),
+        );
+        {
+            let mut s = orch.session.lock().await;
+            s.history.push(failed_msg.clone());
+        }
+        orch.persist_message_to_jsonl(&failed_msg).await;
+        return Ok(TurnStepOutcome::Ended {
+            final_message_id: assistant_id,
+            stop_reason: "end_turn".to_string(),
+        });
+    }
+    let nudge_msg = ConversationMessage::user(
+        MessageId::new(),
+        MALFORMED_TOOL_USE_RETRY_NUDGE.to_string(),
+    );
+    {
+        let mut s = orch.session.lock().await;
+        s.history.push(nudge_msg.clone());
+    }
+    orch.persist_message_to_jsonl(&nudge_msg).await;
+    // TS resets the recovery counters on the retry transition.
+    state.reset_max_output_tokens_recovery();
+    state.malformed_tool_use_retried = true;
+    Ok(TurnStepOutcome::Continue)
+}
+
+/// #78 (batched twin, claude-code `bin/claude.exe` offset ~202946760): inject the
+/// once-per-turn thinking-only nudge as a meta user message and Continue. Caller
+/// has already checked `!thinking_only_nudged && !has_visible_text(..)`.
+async fn handle_thinking_only(
+    orch: &ConversationOrchestrator,
+    state: &mut RecoveryState,
+) -> Result<TurnStepOutcome, OrchestratorError> {
+    let nudge_msg =
+        ConversationMessage::user(MessageId::new(), THINKING_ONLY_NUDGE.to_string());
+    {
+        let mut s = orch.session.lock().await;
+        s.history.push(nudge_msg.clone());
+    }
+    orch.persist_message_to_jsonl(&nudge_msg).await;
+    state.thinking_only_nudged = true;
+    Ok(TurnStepOutcome::Continue)
 }
 
 /// Translate llm-client content blocks into protocol content blocks.
@@ -3008,6 +3147,7 @@ mod max_output_tokens_recovery_tests {
             max_output_tokens_recovery_count: 1,
             max_output_tokens_override: None,
             max_output_tokens_escalated: false,
+            ..Default::default()
         };
 
         // count 1 → 2
@@ -3049,6 +3189,7 @@ mod max_output_tokens_recovery_tests {
             max_output_tokens_recovery_count: MAX_OUTPUT_TOKENS_RECOVERY_LIMIT,
             max_output_tokens_override: None,
             max_output_tokens_escalated: false,
+            ..Default::default()
         };
 
         let len_before = history(&orch).await.len();
@@ -3189,6 +3330,318 @@ mod max_output_tokens_recovery_tests {
                 if matches!(content.first(), Some(ContentBlock::Text { text })
                     if text == MAX_OUTPUT_TOKENS_RECOVERY_NUDGE)
         )));
+    }
+}
+
+// ============================================================================
+// #77 malformed-tool-use retry + #78 thinking-only nudge (BATCHED path).
+// Drives `execute_one_turn_with_recovery_tracked` with a scripted `LlmResponse`
+// whose stop_reason / blocks force each branch, then asserts the byte-exact
+// nudge injection, the per-turn guard transitions, and the disposition.
+// ============================================================================
+#[cfg(test)]
+mod malformed_and_thinking_only_tests {
+    use super::{
+        execute_one_turn, execute_one_turn_with_recovery, RecoveryState, TurnStepOutcome,
+        MALFORMED_TOOL_USE_RETRY_FAILED, MALFORMED_TOOL_USE_RETRY_NUDGE, THINKING_ONLY_NUDGE,
+    };
+    use crate::conversation::ConversationOrchestrator;
+    use crate::test_support::{
+        mock_message_response, noop_hook_executor, MockApiClient, MockOutputStream,
+        NoOpPermissionGate, StaticMemoryProvider,
+    };
+    use crate::OrchestratorConfig;
+    use llm_client::LlmResponse;
+    use protocol::{ContentBlock, ConversationMessage};
+    use std::path::PathBuf;
+    use std::sync::Arc;
+    use tool_api::registry::ToolRegistry;
+
+    fn orch_with_responses(responses: Vec<LlmResponse>) -> ConversationOrchestrator {
+        ConversationOrchestrator::new(
+            OrchestratorConfig::default(),
+            Arc::new(MockApiClient::new(responses)),
+            Arc::new(ToolRegistry::new()),
+            noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            PathBuf::from("/tmp"),
+        )
+    }
+
+    /// A response whose `stop_reason` is `tool_use` but which carries ZERO
+    /// `tool_use` blocks (only a text block) — the #77 malformed shape.
+    fn malformed_tool_use_response() -> LlmResponse {
+        mock_message_response(
+            vec![llm_client::ContentBlock::Text {
+                text: "I'll call the tool".into(),
+                cache_control: None,
+            }],
+            Some("tool_use"),
+        )
+    }
+
+    /// A thinking-only response: `end_turn` `stop_reason` but only a `Reasoning`
+    /// (thinking) block — no visible text. The #78 shape.
+    fn thinking_only_response(stop_reason: &str) -> LlmResponse {
+        mock_message_response(
+            vec![llm_client::ContentBlock::Reasoning {
+                text: "thinking quietly".into(),
+                signature: None,
+            }],
+            Some(stop_reason),
+        )
+    }
+
+    async fn history(orch: &ConversationOrchestrator) -> Vec<ConversationMessage> {
+        orch.session.lock().await.history.clone()
+    }
+
+    fn last_user_text(h: &[ConversationMessage]) -> Option<String> {
+        match h.last()? {
+            ConversationMessage::User { content, .. } => match content.first()? {
+                ContentBlock::Text { text } => Some(text.clone()),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    // ---- byte-exact strings ------------------------------------------------
+
+    #[test]
+    fn malformed_nudge_strings_are_byte_exact() {
+        // Default build: clean-retry feature flag OFF (`PZa()` defaults false),
+        // so the first-failure string is the non-clean-retry variant.
+        assert_eq!(
+            MALFORMED_TOOL_USE_RETRY_NUDGE,
+            "Your tool call was malformed and could not be parsed. Please retry."
+        );
+        assert_eq!(
+            MALFORMED_TOOL_USE_RETRY_FAILED,
+            "The model's tool call could not be parsed (retry also failed)."
+        );
+    }
+
+    #[test]
+    fn thinking_only_nudge_is_byte_exact() {
+        assert_eq!(
+            THINKING_ONLY_NUDGE,
+            "[Your previous response had no visible output. Please continue and produce a user-visible response.]"
+        );
+    }
+
+    // ---- #77 malformed-tool-use -------------------------------------------
+
+    /// First malformed `tool_use` → Continue, byte-exact nudge appended as a
+    /// user message, guard armed, recovery reset.
+    #[tokio::test]
+    async fn malformed_tool_use_first_failure_continues_and_nudges() {
+        let orch = orch_with_responses(vec![malformed_tool_use_response()]);
+        let mut state = RecoveryState {
+            // Pre-seed a non-zero recovery count to prove it gets reset.
+            max_output_tokens_recovery_count: 2,
+            ..Default::default()
+        };
+
+        let step = execute_one_turn_with_recovery(&orch, None, Some(&mut state))
+            .await
+            .expect("step");
+        assert!(matches!(step, TurnStepOutcome::Continue));
+        assert!(state.malformed_tool_use_retried, "guard armed");
+        assert_eq!(
+            state.max_output_tokens_recovery_count, 0,
+            "recovery reset on retry transition"
+        );
+
+        let h = history(&orch).await;
+        assert_eq!(
+            last_user_text(&h).as_deref(),
+            Some(MALFORMED_TOOL_USE_RETRY_NUDGE)
+        );
+    }
+
+    /// Second malformed `tool_use` (guard already armed) → Ended with
+    /// stop_reason `end_turn`, the non-meta terminal message appended.
+    #[tokio::test]
+    async fn malformed_tool_use_second_failure_ends_turn() {
+        let orch = orch_with_responses(vec![malformed_tool_use_response()]);
+        let mut state = RecoveryState {
+            malformed_tool_use_retried: true,
+            ..Default::default()
+        };
+
+        let step = execute_one_turn_with_recovery(&orch, None, Some(&mut state))
+            .await
+            .expect("step");
+        match step {
+            TurnStepOutcome::Ended { stop_reason, .. } => {
+                assert_eq!(stop_reason, "end_turn");
+            }
+            TurnStepOutcome::Continue => panic!("expected Ended on second failure"),
+        }
+        let h = history(&orch).await;
+        assert_eq!(
+            last_user_text(&h).as_deref(),
+            Some(MALFORMED_TOOL_USE_RETRY_FAILED)
+        );
+    }
+
+    /// A NORMAL `tool_use` response (with an actual tool_use block) must NOT
+    /// trigger the malformed path — it Continues to dispatch as usual and
+    /// injects no malformed nudge.
+    #[tokio::test]
+    async fn normal_tool_use_does_not_trigger_malformed_path() {
+        let resp = mock_message_response(
+            vec![llm_client::ContentBlock::ToolCall {
+                id: "toolu_1".into(),
+                name: "Nope".into(), // unknown tool → synthetic error, still dispatched
+                input: serde_json::json!({}),
+            }],
+            Some("tool_use"),
+        );
+        let orch = orch_with_responses(vec![resp]);
+        let mut state = RecoveryState::default();
+
+        let step = execute_one_turn_with_recovery(&orch, None, Some(&mut state))
+            .await
+            .expect("step");
+        assert!(matches!(step, TurnStepOutcome::Continue));
+        assert!(!state.malformed_tool_use_retried, "guard NOT armed");
+        let h = history(&orch).await;
+        assert!(!h.iter().any(|m| matches!(
+            m,
+            ConversationMessage::User { content, .. }
+                if matches!(content.first(), Some(ContentBlock::Text { text })
+                    if text == MALFORMED_TOOL_USE_RETRY_NUDGE)
+        )));
+    }
+
+    /// The legacy shim (`recovery == None`) keeps the historical `_ => Continue`
+    /// no-op on a malformed `tool_use` — no nudge.
+    #[tokio::test]
+    async fn legacy_shim_does_not_handle_malformed_tool_use() {
+        let orch = orch_with_responses(vec![malformed_tool_use_response()]);
+        let step = execute_one_turn(&orch, None).await.expect("step");
+        assert!(matches!(step, TurnStepOutcome::Continue));
+        let h = history(&orch).await;
+        assert!(!h.iter().any(|m| matches!(
+            m,
+            ConversationMessage::User { content, .. }
+                if matches!(content.first(), Some(ContentBlock::Text { text })
+                    if text == MALFORMED_TOOL_USE_RETRY_NUDGE)
+        )));
+    }
+
+    // ---- #78 thinking-only -------------------------------------------------
+
+    /// An `end_turn` thinking-only response (not yet nudged) → Continue with
+    /// the byte-exact nudge appended, guard armed.
+    #[tokio::test]
+    async fn thinking_only_end_turn_first_time_nudges() {
+        let orch = orch_with_responses(vec![thinking_only_response("end_turn")]);
+        let mut state = RecoveryState::default();
+
+        let step = execute_one_turn_with_recovery(&orch, None, Some(&mut state))
+            .await
+            .expect("step");
+        assert!(matches!(step, TurnStepOutcome::Continue));
+        assert!(state.thinking_only_nudged, "guard armed");
+        let h = history(&orch).await;
+        assert_eq!(last_user_text(&h).as_deref(), Some(THINKING_ONLY_NUDGE));
+    }
+
+    /// A `stop_sequence` thinking-only response also triggers the nudge.
+    #[tokio::test]
+    async fn thinking_only_stop_sequence_nudges() {
+        let orch = orch_with_responses(vec![thinking_only_response("stop_sequence")]);
+        let mut state = RecoveryState::default();
+
+        let step = execute_one_turn_with_recovery(&orch, None, Some(&mut state))
+            .await
+            .expect("step");
+        assert!(matches!(step, TurnStepOutcome::Continue));
+        assert!(state.thinking_only_nudged);
+        let h = history(&orch).await;
+        assert_eq!(last_user_text(&h).as_deref(), Some(THINKING_ONLY_NUDGE));
+    }
+
+    /// Once nudged, a still-thinking-only `end_turn` ends the turn normally
+    /// (no second nudge).
+    #[tokio::test]
+    async fn thinking_only_already_nudged_ends_turn() {
+        let orch = orch_with_responses(vec![thinking_only_response("end_turn")]);
+        let mut state = RecoveryState {
+            thinking_only_nudged: true,
+            ..Default::default()
+        };
+
+        let step = execute_one_turn_with_recovery(&orch, None, Some(&mut state))
+            .await
+            .expect("step");
+        match step {
+            TurnStepOutcome::Ended { stop_reason, .. } => assert_eq!(stop_reason, "end_turn"),
+            TurnStepOutcome::Continue => panic!("expected Ended once already nudged"),
+        }
+        let h = history(&orch).await;
+        assert_ne!(last_user_text(&h).as_deref(), Some(THINKING_ONLY_NUDGE));
+    }
+
+    /// An `end_turn` response WITH visible text ends the turn — never nudged.
+    #[tokio::test]
+    async fn end_turn_with_visible_text_does_not_nudge() {
+        let resp = mock_message_response(
+            vec![llm_client::ContentBlock::Text {
+                text: "Here is the answer.".into(),
+                cache_control: None,
+            }],
+            Some("end_turn"),
+        );
+        let orch = orch_with_responses(vec![resp]);
+        let mut state = RecoveryState::default();
+
+        let step = execute_one_turn_with_recovery(&orch, None, Some(&mut state))
+            .await
+            .expect("step");
+        assert!(matches!(step, TurnStepOutcome::Ended { .. }));
+        assert!(!state.thinking_only_nudged);
+        let h = history(&orch).await;
+        assert_ne!(last_user_text(&h).as_deref(), Some(THINKING_ONLY_NUDGE));
+    }
+
+    /// Whitespace-only text counts as NOT visible (`.trim()` empty) → nudged.
+    #[tokio::test]
+    async fn whitespace_only_text_is_not_visible() {
+        let resp = mock_message_response(
+            vec![llm_client::ContentBlock::Text {
+                text: "   \n  ".into(),
+                cache_control: None,
+            }],
+            Some("end_turn"),
+        );
+        let orch = orch_with_responses(vec![resp]);
+        let mut state = RecoveryState::default();
+
+        let step = execute_one_turn_with_recovery(&orch, None, Some(&mut state))
+            .await
+            .expect("step");
+        assert!(matches!(step, TurnStepOutcome::Continue));
+        assert!(state.thinking_only_nudged);
+    }
+
+    /// The legacy shim (`recovery == None`) does NOT nudge on a thinking-only
+    /// `end_turn`; it ends the turn as before.
+    #[tokio::test]
+    async fn legacy_shim_does_not_handle_thinking_only() {
+        let orch = orch_with_responses(vec![thinking_only_response("end_turn")]);
+        let step = execute_one_turn(&orch, None).await.expect("step");
+        match step {
+            TurnStepOutcome::Ended { stop_reason, .. } => assert_eq!(stop_reason, "end_turn"),
+            TurnStepOutcome::Continue => panic!("legacy shim should end on end_turn"),
+        }
+        let h = history(&orch).await;
+        assert_ne!(last_user_text(&h).as_deref(), Some(THINKING_ONLY_NUDGE));
     }
 }
 
@@ -4773,6 +5226,7 @@ mod recovery_state_reset_tests {
             max_output_tokens_recovery_count: 2,
             max_output_tokens_override: Some(ESCALATED_MAX_TOKENS),
             max_output_tokens_escalated: true,
+            ..Default::default()
         };
         s.reset_max_output_tokens_recovery();
         assert_eq!(s.max_output_tokens_recovery_count, 0);

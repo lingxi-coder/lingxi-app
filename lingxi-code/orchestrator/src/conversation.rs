@@ -8,8 +8,9 @@ use crate::test_support::{HookExecutor, PermissionGate};
 use crate::token_budget::{check_token_budget, BudgetTracker, TokenBudgetDecision};
 use crate::turn_loop::{
     execute_one_turn, execute_one_turn_with_recovery_tracked, surface_prompt_too_long,
-    RecoveryState, TurnStepOutcome, MAX_OUTPUT_TOKENS_RECOVERY_LIMIT,
-    MAX_OUTPUT_TOKENS_RECOVERY_NUDGE,
+    RecoveryState, TurnStepOutcome, MALFORMED_TOOL_USE_RETRY_FAILED,
+    MALFORMED_TOOL_USE_RETRY_NUDGE, MAX_OUTPUT_TOKENS_RECOVERY_LIMIT,
+    MAX_OUTPUT_TOKENS_RECOVERY_NUDGE, THINKING_ONLY_NUDGE,
 };
 use async_trait::async_trait;
 use engine::SessionState;
@@ -1904,6 +1905,22 @@ impl ConversationOrchestrator {
     /// drives [`check_token_budget`], and on `continue` appends a meta user
     /// message carrying the byte-exact `getBudgetContinuationMessage` nudge.
     /// The completion telemetry is emitted as a `tracing` event on stop.
+    /// Inject a meta nudge as a plain user text message into both the live
+    /// session history and the JSONL persistence stream. The protocol carries
+    /// no `isMeta` flag (cf. the max-output-tokens / token-budget nudges), so a
+    /// meta message is a plain user text message carrying the byte-exact bytes.
+    /// Shared by the malformed-tool-use retry (#77) and thinking-only (#78)
+    /// continuations, which mirror the same injection pattern as the
+    /// max-output-tokens recovery nudge.
+    async fn inject_meta_user_message(&self, text: &str) {
+        let msg = ConversationMessage::user(MessageId::new(), text.to_string());
+        {
+            let mut s = self.session.lock().await;
+            s.history.push(msg.clone());
+        }
+        self.persist_message_to_jsonl(&msg).await;
+    }
+
     async fn maybe_continue_for_budget(
         &self,
         budget: Option<&mut BudgetTracker>,
@@ -3112,6 +3129,17 @@ impl ConversationOrchestrator {
         let mut budget = self.new_budget_tracker();
         let mut global_turn_tokens: u64 = 0;
         let mut turn_count: u32 = 0;
+        // Malformed-tool-use retry guard (claude-code `transition.reason ===
+        // "malformed_tool_use_retry"`): set after the FIRST `tool_use`
+        // stop_reason that produced zero tool_use blocks, so the SECOND such
+        // failure terminates instead of looping forever. Persists across
+        // turn-steps within this invocation.
+        let mut malformed_tool_use_retried = false;
+        // Thinking-only nudge guard (claude-code `thinkingOnlyNudged`): set
+        // after the once-per-turn nudge on an `end_turn`/`stop_sequence`
+        // response with no visible text, so a still-empty continuation ends
+        // normally instead of nudging again.
+        let mut thinking_only_nudged = false;
         let final_message_id;
         // DEFERRED-3 / esc-interrupt FIX: id of the most recent persisted message
         // (the user prompt until the first assistant message lands, then each
@@ -3673,6 +3701,23 @@ impl ConversationOrchestrator {
             // 6. Decide loop disposition.
             match pumped.stop_reason.as_deref() {
                 Some("end_turn") => {
+                    // #78 thinking-only nudge (claude-code `bin/claude.exe`
+                    // offset ~202946760): an `end_turn` response with no visible
+                    // text gets ONE nudge to produce user-visible output. This
+                    // fires BEFORE the Stop hooks (binary order: malformed →
+                    // thinking-only → stop-hooks → budget), so a thinking-only
+                    // turn re-prompts the model without first running Stop hooks.
+                    // The `a !== "compact" && !GRe(a)` source guard is satisfied
+                    // unconditionally here (compact subturns run in a separate
+                    // code path — `CompactionOrchestrator` — never this loop), and
+                    // `!isApiErrorMessage` holds because API errors are caught as
+                    // `Err(..)` upstream of this match. Once nudged, a still-empty
+                    // continuation falls through to the normal end.
+                    if !thinking_only_nudged && !pumped_has_visible_text(&pumped.assistant_blocks) {
+                        self.inject_meta_user_message(THINKING_ONLY_NUDGE).await;
+                        thinking_only_nudged = true;
+                        continue;
+                    }
                     // hooks B4: Stop hooks BEFORE the budget check (streaming
                     // twin; order recovery → stop-hooks → token-budget).
                     match self
@@ -3716,6 +3761,46 @@ impl ConversationOrchestrator {
                     break;
                 }
                 Some("tool_use") if !pumped.tool_uses.is_empty() => continue,
+                // #77 malformed-tool-use retry (claude-code `bin/claude.exe`
+                // offset ~202945837): `stop_reason == "tool_use"` but the
+                // assistant produced ZERO tool_use blocks (a malformed /
+                // leaked-invoke response). On the FIRST such failure, inject the
+                // byte-exact meta retry nudge, reset the max-output-tokens
+                // recovery bookkeeping (TS resets `maxOutputTokensRecoveryCount:
+                // 0` + `hasAttemptedReactiveCompact: false`), arm the guard, and
+                // loop. On the SECOND (`malformed_tool_use_retried` already set),
+                // surface the non-meta terminal message and end the turn. The
+                // `!isApiErrorMessage` guard holds (API errors are caught
+                // upstream as `Err(..)`). Default build keeps the clean-retry
+                // feature flag (`PZa()`) OFF, so we do NOT tombstone the leaked
+                // assistant blocks and use the non-clean-retry nudge string.
+                Some("tool_use") => {
+                    if malformed_tool_use_retried {
+                        // Second failure → terminal NON-meta message, complete.
+                        self.output.emit_text(MALFORMED_TOOL_USE_RETRY_FAILED).await;
+                        let failed_msg = ConversationMessage::user(
+                            MessageId::new(),
+                            MALFORMED_TOOL_USE_RETRY_FAILED.to_string(),
+                        );
+                        {
+                            let mut s = self.session.lock().await;
+                            s.history.push(failed_msg.clone());
+                        }
+                        self.persist_message_to_jsonl(&failed_msg).await;
+                        let cost = self.snapshot_cost_real().await;
+                        self.output.emit_end_turn("end_turn", &cost).await;
+                        final_message_id = assistant_id;
+                        break;
+                    }
+                    self.inject_meta_user_message(MALFORMED_TOOL_USE_RETRY_NUDGE)
+                        .await;
+                    // TS resets the recovery counters on the retry transition so
+                    // the continued turn starts a fresh max-output-tokens
+                    // escalation episode.
+                    recovery.reset_max_output_tokens_recovery();
+                    malformed_tool_use_retried = true;
+                    continue;
+                }
                 // A1: intercept `max_tokens` BEFORE the generic terminal arm.
                 // While recovery is not exhausted, inject the byte-exact meta
                 // nudge user message, increment the counter, and Continue
@@ -3742,10 +3827,24 @@ impl ConversationOrchestrator {
                     recovery.max_output_tokens_override = None;
                     continue;
                 }
+                // #78 thinking-only nudge for `stop_sequence` (claude-code
+                // groups `end_turn` and `stop_sequence` under one guard). A
+                // `stop_sequence` response with no visible text gets the same
+                // once-per-turn nudge before terminating. Intercepted ahead of
+                // the generic terminal arm; once nudged it falls through.
+                Some("stop_sequence")
+                    if !thinking_only_nudged
+                        && !pumped_has_visible_text(&pumped.assistant_blocks) =>
+                {
+                    self.inject_meta_user_message(THINKING_ONLY_NUDGE).await;
+                    thinking_only_nudged = true;
+                    continue;
+                }
                 Some(other) => {
-                    // max_tokens (recovery exhausted) / stop_sequence /
-                    // pause_turn / refusal — terminate the loop with the value
-                    // as-is, mirroring claude-code's behavior (claude.ts:2269).
+                    // max_tokens (recovery exhausted) / stop_sequence (visible
+                    // text or already nudged) / pause_turn / refusal — terminate
+                    // the loop with the value as-is, mirroring claude-code's
+                    // behavior (claude.ts:2269).
                     let cost = self.snapshot_cost_real().await;
                     self.output.emit_end_turn(other, &cost).await;
                     final_message_id = assistant_id;
@@ -3755,6 +3854,15 @@ impl ConversationOrchestrator {
                     // Stream ended without a stop_reason — treat as
                     // end_turn (rare; claude.ts uses the same fallback). The
                     // token-budget check applies here too (A3).
+                    // #78: a missing stop_reason is treated as `end_turn`
+                    // (claude-code `stop_reason ?? <default>`), so the
+                    // thinking-only nudge applies here on the same terms and,
+                    // like the `end_turn` arm, fires BEFORE the Stop hooks.
+                    if !thinking_only_nudged && !pumped_has_visible_text(&pumped.assistant_blocks) {
+                        self.inject_meta_user_message(THINKING_ONLY_NUDGE).await;
+                        thinking_only_nudged = true;
+                        continue;
+                    }
                     // hooks B4: Stop hooks before the budget check (same as the
                     // explicit end_turn arm).
                     match self
@@ -4585,6 +4693,23 @@ impl ConversationOrchestrator {
 /// are translated to `protocol::ContentBlock`; `ToolCall` blocks additionally
 /// populate the `tool_uses` vec so the concurrent dispatch runs exactly as in a
 /// real stream.
+/// Whether the turn's assistant blocks contain any user-visible text, mirroring
+/// claude-code's thinking-only guard predicate (`bin/claude.exe` offset
+/// ~202946760):
+/// `ie.some(msg => msg.content.some(b => b.type === "text" && b.text.trim().length > 0))`.
+///
+/// A `false` return = a thinking-only (or otherwise text-empty) response. Only
+/// [`protocol::ContentBlock::Text`] blocks with a non-whitespace body count;
+/// `Thinking`, `ToolUse`, etc. are not "visible output" for this gate. (Tool
+/// uses live in `PumpedTurn::tool_uses`, not `assistant_blocks`, and this gate
+/// only fires on `end_turn`/`stop_sequence` where no `tool_use` is present.)
+fn pumped_has_visible_text(blocks: &[protocol::ContentBlock]) -> bool {
+    use protocol::ContentBlock;
+    blocks
+        .iter()
+        .any(|b| matches!(b, ContentBlock::Text { text } if !text.trim().is_empty()))
+}
+
 fn llm_response_to_pumped_turn(resp: &LlmResponse) -> crate::streaming_loop::PumpedTurn {
     use crate::streaming_loop::{ObservedToolUse, PumpedTurn};
     use crate::turn_loop::translate_response_blocks;
@@ -7558,5 +7683,51 @@ mod prefix_overflow_block_count_tests {
     fn counts_zero_when_no_media_blocks() {
         let msgs = vec![ConversationMessage::user(MessageId::new(), "plain text".into())];
         assert_eq!(count_document_and_image_blocks(&msgs), (0, 0));
+    }
+}
+
+// #78: unit coverage for the streaming-path "visible output" predicate. The
+// streaming driver's thinking-only nudge (`conversation.rs` `Some("end_turn")`
+// / `Some("stop_sequence")` / `None` arms) gates on this exact function; the
+// batched twin's branch transitions are covered in
+// `turn_loop::malformed_and_thinking_only_tests`.
+#[cfg(test)]
+mod pumped_visible_text_tests {
+    use super::pumped_has_visible_text;
+    use protocol::ContentBlock;
+
+    fn text(s: &str) -> ContentBlock {
+        ContentBlock::Text { text: s.to_string() }
+    }
+    fn thinking(s: &str) -> ContentBlock {
+        ContentBlock::Thinking {
+            thinking: s.to_string(),
+            signature: None,
+        }
+    }
+
+    #[test]
+    fn empty_blocks_have_no_visible_text() {
+        assert!(!pumped_has_visible_text(&[]));
+    }
+
+    #[test]
+    fn thinking_only_has_no_visible_text() {
+        assert!(!pumped_has_visible_text(&[thinking("reasoning")]));
+    }
+
+    #[test]
+    fn whitespace_only_text_is_not_visible() {
+        assert!(!pumped_has_visible_text(&[text("   \n\t ")]));
+    }
+
+    #[test]
+    fn non_empty_text_is_visible() {
+        assert!(pumped_has_visible_text(&[text("hello")]));
+    }
+
+    #[test]
+    fn thinking_plus_real_text_is_visible() {
+        assert!(pumped_has_visible_text(&[thinking("reasoning"), text("answer")]));
     }
 }

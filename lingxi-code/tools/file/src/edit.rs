@@ -66,6 +66,46 @@ pub const PATCH_PREVIEW_LINE_LIMIT: usize = 30;
 /// [`MAX_EDIT_FILE_SIZE`]-derived "File is too large to edit" message.
 pub const MAX_EDIT_FILE_SIZE: u64 = 1_073_741_824;
 
+/// Owner-write permission bit (`S_IWUSR` == `0o200` == `128`) — the binary's
+/// `e & 128` test in `H7e`. The Perforce read-only guard fires when this bit is
+/// *unset* (the file is not owner-writable).
+const OWNER_WRITE_BIT: u32 = 0o200;
+
+/// Byte-locked Perforce read-only message — claude-code `validateInput`
+/// `errorCode: 11` string `k7e` (binary offset 193229321). The `—` is a real
+/// em-dash (`U+2014`), matching the binary's `—`.
+pub const PERFORCE_READ_ONLY_MESSAGE: &str = "File is read-only — it has not been opened for edit in Perforce. Run `p4 edit <file>` to check it out, then retry. Do not chmod the file writable; that bypasses Perforce tracking.";
+
+/// `H7e(_)` (binary offset 193220147): `cfr() && (mode & 128) === 0`.
+///
+/// Returns `true` when Perforce mode is enabled (`cfr()` ==
+/// `is_env_truthy(CLAUDE_CODE_PERFORCE_MODE)`) AND the file's owner-write bit
+/// ([`OWNER_WRITE_BIT`]) is unset — a read-only file that has not been checked
+/// out via `p4 edit`. On non-Unix targets the POSIX mode is unavailable, so the
+/// guard never fires (the binary's `mode & 128` is a POSIX concept).
+#[cfg_attr(not(unix), allow(unused_variables))]
+fn is_perforce_read_only(metadata: &std::fs::Metadata) -> bool {
+    if !is_perforce_mode_enabled() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        (metadata.mode() & OWNER_WRITE_BIT) == 0
+    }
+    #[cfg(not(unix))]
+    {
+        false
+    }
+}
+
+/// `cfr()` (binary offset 193219993): `st(process.env.CLAUDE_CODE_PERFORCE_MODE)`
+/// — env-truthiness (`1`/`true`/`yes`/`on`) of `CLAUDE_CODE_PERFORCE_MODE`,
+/// mirrored by [`traits::env::is_env_truthy`].
+fn is_perforce_mode_enabled() -> bool {
+    traits::env::is_env_truthy(std::env::var("CLAUDE_CODE_PERFORCE_MODE").ok().as_deref())
+}
+
 /// Build the byte-locked patch-truncation suffix with `n` substituted.
 #[must_use]
 pub fn patch_truncation_suffix(n: usize) -> String {
@@ -313,6 +353,38 @@ impl Tool for FileEditTool {
             ));
         }
 
+        // Permission-deny-directory gate (claude-code `validateInput` errorCode
+        // 2, binary offset 202622179):
+        //   if(KH(i,Fr(t),"edit","deny")!==null)
+        //     return{result:!1,behavior:"ask",
+        //       message:"File is in a directory that is denied by your
+        //                permission settings.",errorCode:2};
+        // `KH(path, Fr(ctx), "edit", "deny")` walks the `toolPermissionContext`
+        // (`Fr` folds the agent's permission layers over `getAppState().
+        // toolPermissionContext`) for a matching deny rule. RESIDUAL: LingXi's
+        // `ToolUseContext` carries NO permission handle (there is no
+        // `toolPermissionContext` / permission-layer field — see
+        // `tool-api/src/context.rs`), so this deny lookup cannot be performed
+        // from `call()`. Deny enforcement instead lives in the permission
+        // gate/policy layer (`permission/src/policy.rs`, currently inert by
+        // default), which runs ahead of the tool. When that subsystem is
+        // activated and threaded into the tool context, the byte-exact reject
+        // above belongs here, ahead of the UNC early-allow and the body read.
+
+        // UNC / network-path early-allow (claude-code `validateInput`, binary
+        // offset 202622179, immediately after the deny check):
+        //   if(i.startsWith("\\\\")||i.startsWith("//"))return{result:!0};
+        // A path beginning with a Windows UNC prefix (`\\server\share`) or a
+        // POSIX double-slash (`//host/share`) short-circuits `validateInput`
+        // with `{result:!0}` — bypassing the `stat`-based size cap (errorCode
+        // 10) and the Perforce read-only guard (errorCode 11) that follow. Both
+        // run against a `stat` the binary skips for these paths, so we mirror
+        // that by skipping the size-cap + Perforce gates below when `is_unc`.
+        // The edit itself still proceeds (validateInput passing == allow). The
+        // check is on the ORIGINAL `file_path` (`i`), before any canonical/
+        // sandbox normalization.
+        let is_unc = file_path.starts_with("\\\\") || file_path.starts_with("//");
+
         let path = PathBuf::from(file_path);
         let started = Instant::now();
         self.emit_started(&invocation_id, &path).await;
@@ -328,25 +400,55 @@ impl Tool for FileEditTool {
             }
         };
 
-        // Maximum-editable-file-size gate (claude-code `validateInput`
-        // errorCode 10, binary offset 202622179): after the deny check and
-        // before the body is read, `stat` the target and reject anything
-        // strictly larger than `DYa` (= [`MAX_EDIT_FILE_SIZE`], 1 GiB). A
-        // `stat` failure (e.g. the file does not exist — an empty-`old_string`
-        // creation) is swallowed in the binary (`catch(g){if(!Pn(g))throw g}`),
-        // so a missing file falls through to the normal create/read path.
-        if let Ok(metadata) = tokio::fs::metadata(&canon).await {
-            let size = metadata.len();
-            if size > MAX_EDIT_FILE_SIZE {
-                self.emit_failed(&invocation_id, "file_too_large").await;
-                // Byte-locked message; both sizes via `format_file_size`
-                // (TS `formatFileSize` / binary `Ma`), so the 1-GiB cap
-                // renders as `1GB`.
-                return Err(ToolError::InvalidInput(format!(
-                    "File is too large to edit ({}). Maximum editable file size is {}.",
-                    crate::read::format_file_size(size),
-                    crate::read::format_file_size(MAX_EDIT_FILE_SIZE),
-                )));
+        // Stat-based gates (claude-code `validateInput`, binary offset
+        // 202622179). The binary takes ONE `stat` and destructures
+        // `{size, mode}` from it, then runs the size cap and the Perforce
+        // read-only guard in order:
+        //   try{let{size:g,mode:_}=await u.stat(i);
+        //     if(g>DYa)return{...errorCode:10};
+        //     if(H7e(_))return{...message:k7e,errorCode:11}}
+        //   catch(g){if(!Pn(g))throw g}
+        // A `stat` failure (e.g. the file does not exist — an empty-`old_string`
+        // creation) is swallowed (`catch(g){if(!Pn(g))throw g}`), so a missing
+        // file falls through to the normal create/read path. Both gates are
+        // SKIPPED for UNC/network paths, which short-circuit before the `stat`
+        // (the `i.startsWith("\\\\")||i.startsWith("//")` early-allow above).
+        if !is_unc {
+            if let Ok(metadata) = tokio::fs::metadata(&canon).await {
+                // (1) Maximum-editable-file-size gate (errorCode 10): reject
+                // anything strictly larger than `DYa` (= [`MAX_EDIT_FILE_SIZE`],
+                // 1 GiB).
+                let size = metadata.len();
+                if size > MAX_EDIT_FILE_SIZE {
+                    self.emit_failed(&invocation_id, "file_too_large").await;
+                    // Byte-locked message; both sizes via `format_file_size`
+                    // (TS `formatFileSize` / binary `Ma`), so the 1-GiB cap
+                    // renders as `1GB`.
+                    return Err(ToolError::InvalidInput(format!(
+                        "File is too large to edit ({}). Maximum editable file size is {}.",
+                        crate::read::format_file_size(size),
+                        crate::read::format_file_size(MAX_EDIT_FILE_SIZE),
+                    )));
+                }
+
+                // (2) Perforce read-only guard (errorCode 11):
+                //   if(H7e(_))return{result:!1,behavior:"ask",
+                //     message:k7e,errorCode:11}
+                // where `H7e(e)=cfr()&&(e&128)===0` and
+                //   `cfr()=st(process.env.CLAUDE_CODE_PERFORCE_MODE)`.
+                // i.e. reject when Perforce mode is enabled (the env var is
+                // env-truthy: `1`/`true`/`yes`/`on`, via `st` == LingXi
+                // `traits::env::is_env_truthy`) AND the stat'd file's owner-write
+                // bit (`0o200` == `128` == `S_IWUSR`) is unset — a read-only
+                // file that has not been `p4 edit`-ed. The mode bit is read via
+                // the Unix `MetadataExt::mode()`; on non-Unix the mode is
+                // unavailable so the guard never fires (faithful: `mode` is a
+                // POSIX concept and the binary's `e&128` is meaningless
+                // off-POSIX).
+                if is_perforce_read_only(&metadata) {
+                    self.emit_failed(&invocation_id, "perforce_read_only").await;
+                    return Err(ToolError::InvalidInput(PERFORCE_READ_ONLY_MESSAGE.into()));
+                }
             }
         }
 
@@ -963,6 +1065,187 @@ mod tests {
             !err.to_string().contains("File is too large to edit"),
             "at-cap file must not trip the strict size gate; got: {err}"
         );
+    }
+
+    // ── Finding #23: Edit `validateInput` deny-directory (errorCode 2) / UNC
+    // early-allow / Perforce read-only guard (errorCode 11). Binary offset
+    // 202622179; `H7e`/`cfr` at 193220147/193219993; `k7e` at 193229321. ──────
+
+    #[test]
+    fn perforce_read_only_message_is_byte_exact() {
+        // `k7e` (binary offset 193229321): the em-dash is a real `U+2014`, and
+        // the backtick-fenced `p4 edit <file>` / `chmod` guidance is verbatim.
+        assert_eq!(
+            PERFORCE_READ_ONLY_MESSAGE,
+            "File is read-only \u{2014} it has not been opened for edit in Perforce. \
+Run `p4 edit <file>` to check it out, then retry. Do not chmod the file writable; \
+that bypasses Perforce tracking."
+        );
+        // Confirm a literal em-dash is present (catches an accidental ASCII `-`).
+        assert!(PERFORCE_READ_ONLY_MESSAGE.contains('\u{2014}'));
+    }
+
+    #[test]
+    fn owner_write_bit_matches_binary_128() {
+        // `H7e`'s `(e & 128) === 0`: 128 == 0o200 == S_IWUSR.
+        assert_eq!(OWNER_WRITE_BIT, 128);
+        assert_eq!(OWNER_WRITE_BIT, 0o200);
+    }
+
+    #[tokio::test]
+    async fn unc_path_skips_stat_gates_but_is_still_blocked_by_sandbox() {
+        // The UNC/network early-allow (`i.startsWith("\\\\")||i.startsWith("//")
+        // → {result:!0}`) makes `validateInput` PASS without running the
+        // `stat`-based size/Perforce gates. In LingXi those gates are guarded by
+        // `!is_unc`, so a `//`-prefixed path never trips them. (The sandbox
+        // `canonicalize_and_validate` then blocks the out-of-tree network path —
+        // that is LingXi's trusted-dir guard, not the binary's `validateInput`,
+        // and is the expected terminal outcome for a `//host/share` target that
+        // lives outside the tmp sandbox.) The point under test: the failure is
+        // NOT one of the stat gates' messages.
+        let tmp = TempDir::new().unwrap();
+        let (ctx, _sink) = make_ctx(&tmp);
+        let tool = FileEditTool::new(ctx);
+        let err = tool
+            .call(
+                json!({
+                    "file_path": "//server/share/file.txt",
+                    "old_string": "a",
+                    "new_string": "b"
+                }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            !msg.contains("File is too large to edit"),
+            "UNC path must skip the size gate; got: {msg}"
+        );
+        assert!(
+            !msg.contains("File is read-only"),
+            "UNC path must skip the Perforce gate; got: {msg}"
+        );
+    }
+
+    #[test]
+    fn unc_prefix_detection_matches_binary() {
+        // `i.startsWith("\\\\")||i.startsWith("//")` — the two prefixes the
+        // binary treats as UNC/network paths, computed on the raw `file_path`.
+        let is_unc = |p: &str| p.starts_with("\\\\") || p.starts_with("//");
+        assert!(is_unc("//server/share"));
+        assert!(is_unc(r"\\server\share"));
+        // Single leading slash / single backslash are NOT UNC.
+        assert!(!is_unc("/etc/hosts"));
+        assert!(!is_unc(r"\etc\hosts"));
+        assert!(!is_unc("relative/path"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn perforce_read_only_gate_fires_only_when_mode_enabled() {
+        // ALL `CLAUDE_CODE_PERFORCE_MODE`-dependent assertions live in this ONE
+        // test (crate convention — no `serial_test` dep) so the process-global
+        // env var is mutated within a single sequential unit. We restore the
+        // prior value at the end.
+        use std::os::unix::fs::PermissionsExt;
+        let prior = std::env::var("CLAUDE_CODE_PERFORCE_MODE").ok();
+
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("ro.txt");
+        std::fs::write(&target, "alpha\nbravo\n").unwrap();
+        // Clear the owner-write bit (0o444 == r--r--r--): owner-write unset.
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o444)).unwrap();
+
+        // (1) Perforce mode OFF (env unset) → guard does NOT fire even though
+        // the file is read-only; the edit proceeds past the gate (and fails
+        // later only on the unread-file staleness guard, NOT the Perforce msg).
+        std::env::remove_var("CLAUDE_CODE_PERFORCE_MODE");
+        {
+            let (ctx, _sink) = make_ctx(&tmp);
+            let tool = FileEditTool::new(ctx);
+            let err = tool
+                .call(
+                    json!({
+                        "file_path": target.to_str().unwrap(),
+                        "old_string": "bravo",
+                        "new_string": "delta"
+                    }),
+                    fresh_ctx(),
+                    fresh_tx(),
+                )
+                .await
+                .unwrap_err();
+            assert!(
+                !err.to_string().contains("File is read-only"),
+                "Perforce gate must stay dormant when mode is off; got: {err}"
+            );
+        }
+
+        // (2) Perforce mode ON + owner-write unset → reject with the byte-exact
+        // `k7e` message (errorCode 11).
+        std::env::set_var("CLAUDE_CODE_PERFORCE_MODE", "1");
+        {
+            let (ctx, _sink) = make_ctx(&tmp);
+            let tool = FileEditTool::new(ctx);
+            let err = tool
+                .call(
+                    json!({
+                        "file_path": target.to_str().unwrap(),
+                        "old_string": "bravo",
+                        "new_string": "delta"
+                    }),
+                    fresh_ctx(),
+                    fresh_tx(),
+                )
+                .await
+                .unwrap_err();
+            assert!(
+                err.to_string().ends_with(PERFORCE_READ_ONLY_MESSAGE),
+                "expected byte-exact Perforce message; got: {err}"
+            );
+        }
+
+        // (3) Perforce mode ON but the file IS owner-writable (0o644) → guard
+        // does NOT fire (mode bit set), edit proceeds past the gate.
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o644)).unwrap();
+        {
+            let (ctx, _sink) = make_ctx(&tmp);
+            let tool = FileEditTool::new(ctx);
+            let err = tool
+                .call(
+                    json!({
+                        "file_path": target.to_str().unwrap(),
+                        "old_string": "bravo",
+                        "new_string": "delta"
+                    }),
+                    fresh_ctx(),
+                    fresh_tx(),
+                )
+                .await
+                .unwrap_err();
+            assert!(
+                !err.to_string().contains("File is read-only"),
+                "owner-writable file must skip the Perforce gate; got: {err}"
+            );
+        }
+
+        // (4) is_env_truthy semantics flow through `cfr`: "on"/"true"/"yes" are
+        // truthy; "0"/"false"/"" are not. Spot-check via the helper directly so
+        // the gate's enable condition is locked to the env-truthiness allowlist.
+        std::env::set_var("CLAUDE_CODE_PERFORCE_MODE", "on");
+        assert!(is_perforce_mode_enabled());
+        std::env::set_var("CLAUDE_CODE_PERFORCE_MODE", "0");
+        assert!(!is_perforce_mode_enabled());
+        std::env::set_var("CLAUDE_CODE_PERFORCE_MODE", "");
+        assert!(!is_perforce_mode_enabled());
+
+        // Restore prior env state.
+        match prior {
+            Some(v) => std::env::set_var("CLAUDE_CODE_PERFORCE_MODE", v),
+            None => std::env::remove_var("CLAUDE_CODE_PERFORCE_MODE"),
+        }
     }
 
     #[tokio::test]

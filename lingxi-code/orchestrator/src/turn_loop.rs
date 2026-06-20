@@ -1557,7 +1557,16 @@ pub(crate) async fn dispatch_tool_uses_tracked(
                 main_loop_model: orch.config.model.clone(),
                 max_budget_nano_usd: None,
                 mcp_clients: Vec::new(),
-                is_non_interactive_session: true,
+                // FIX 3: claude-code's main REPL builds `getToolUseContext` with
+                // `isNonInteractiveSession: false` (REPL.tsx:2427). LingXi hardcoded
+                // `true` here — the OPPOSITE — which would flip the model-facing
+                // verification-nudge + fork-subagent paths in an interactive
+                // session. Use the orchestrator's own print/headless signal
+                // `!interactive_permissions` (the SAME signal the defer path uses at
+                // turn_loop.rs ~1729/1754): `true` only in a non-interactive
+                // (print/headless) session. Inert under today's default-off feature
+                // flags, but removes the latent divergence.
+                is_non_interactive_session: !orch.config.interactive_permissions,
                 custom_system_prompt: orch.config.system_prompt_override.clone(),
                 append_system_prompt: None,
             },
@@ -1613,10 +1622,31 @@ pub(crate) async fn dispatch_tool_uses_tracked(
         // M5-06 Task 14: PreToolUse hook chain. Build the event + context,
         // call the executor, and either Block (turn the response into an
         // error ToolResult), apply modified_input, or continue.
-        let session_id = { orch.session.lock().await.session_id };
+        // FIX 2: populate `transcript_path` + `permission_mode` on the PreToolUse
+        // context (and the PostToolUse fire below, which reuses this `hook_ctx`),
+        // matching claude-code `createBaseHookInput` (always sets
+        // `transcript_path: getTranscriptPathForSession(...)`, utils/hooks.ts:322)
+        // plus PreToolUse/PostToolUse's `permission_mode =
+        // appState.toolPermissionContext.mode` (toolHooks.ts:471). The transcript
+        // path is the live JSONL writer's path (empty when no writer is wired —
+        // the `unwrap_or_default()` keeps the prior `""` for those test/headless
+        // builds). LingXi's session models `plan_mode: bool`, so plan-vs-default is
+        // the faithful approximation (the defer path below uses the same logic).
+        let (session_id, plan_mode) = {
+            let s = orch.session.lock().await;
+            (s.session_id, s.plan_mode)
+        };
+        let transcript_path = orch
+            .jsonl_writer
+            .as_ref()
+            .map(|w| w.path().to_path_buf())
+            .unwrap_or_default();
+        let permission_mode = Some(if plan_mode { "plan" } else { "default" }.to_string());
         let hook_ctx = HookContext {
             session_id,
             cwd: orch.cwd.clone(),
+            transcript_path,
+            permission_mode,
             ..Default::default()
         };
         let pre_event = HookEvent::PreToolUse {
@@ -2560,10 +2590,23 @@ pub(crate) async fn dispatch_tool_uses_tracked(
     // PostToolUse fire). The aggregate decision/output are not consumed — this is
     // an observational, post-batch event.
     if !post_tool_batch_calls.is_empty() {
-        let session_id = { orch.session.lock().await.session_id };
+        // FIX 2: populate `transcript_path` + `permission_mode` here too (the
+        // batch firer builds its own context). Same sources as the PreToolUse
+        // context above: the live JSONL writer path + the plan/default mode.
+        let (session_id, plan_mode) = {
+            let s = orch.session.lock().await;
+            (s.session_id, s.plan_mode)
+        };
+        let transcript_path = orch
+            .jsonl_writer
+            .as_ref()
+            .map(|w| w.path().to_path_buf())
+            .unwrap_or_default();
         let batch_ctx = HookContext {
             session_id,
             cwd: orch.cwd.clone(),
+            transcript_path,
+            permission_mode: Some(if plan_mode { "plan" } else { "default" }.to_string()),
             ..Default::default()
         };
         let batch_event = HookEvent::PostToolBatch {
@@ -3003,6 +3046,144 @@ mod read_file_state_tests {
     async fn build_wire_tools_empty_registry_is_empty() {
         let orch = orch_with_tools(PathBuf::from("/tmp"), vec![]);
         assert!(orch.build_wire_tools().await.is_empty());
+    }
+
+    // ----- FIX 1: tool-wide deny filter on the wire `tools` array -----------
+    // claude-code `getTools`/`assembleToolPool` strip blanket-denied tools BEFORE
+    // the model sees them (`filterToolsByDenyRules`, tools.ts:307-310). The
+    // orchestrator now does the same in `build_wire_tools` via the gate's
+    // `tool_wide_deny_names`.
+
+    /// Build an orchestrator whose registry holds `builtins` + the MCP `mcp_tools`
+    /// (a single connection), gated by a `PolicyPermissionGate` carrying the given
+    /// tool-wide `deny` rule strings (e.g. `"WebFetch"`, `"mcp__github"`).
+    fn orch_with_deny_rules(
+        builtins: Vec<Arc<dyn Tool>>,
+        mcp_tools: Vec<Arc<dyn Tool>>,
+        deny: &[&str],
+    ) -> ConversationOrchestrator {
+        use permission::{
+            PermissionBehavior, PermissionPolicy, PermissionRule, PermissionRuleSource,
+            PermissionRuleValue, PolicyPermissionGate,
+        };
+        let mut registry = ToolRegistry::new();
+        for t in builtins {
+            registry.register_builtin(t);
+        }
+        if !mcp_tools.is_empty() {
+            registry.register_mcp_tools(protocol::McpConnectionId::new(), mcp_tools);
+        }
+        let rules = deny.iter().map(|d| PermissionRule {
+            value: PermissionRuleValue {
+                tool_name: (*d).to_string(),
+                rule_content: None,
+            },
+            behavior: PermissionBehavior::Deny,
+            source: PermissionRuleSource::ProjectSettings,
+        });
+        let policy = Arc::new(PermissionPolicy::from_rules(
+            permission::PermissionMode::Default,
+            rules,
+        ));
+        let gate: Arc<dyn traits::permission_gate::PermissionGate> = Arc::new(
+            PolicyPermissionGate::new(policy, Arc::new(NoOpPermissionGate)),
+        );
+        ConversationOrchestrator::new(
+            OrchestratorConfig::default(),
+            Arc::new(MockApiClient::new(vec![])),
+            Arc::new(registry),
+            crate::test_support::noop_hook_executor(),
+            gate,
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            PathBuf::from("/tmp"),
+        )
+    }
+
+    fn wire_tool_names(wire: &[serde_json::Value]) -> Vec<String> {
+        wire.iter()
+            .map(|t| t["name"].as_str().unwrap().to_string())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn build_wire_tools_hides_tool_wide_denied_tool() {
+        let cwd = PathBuf::from("/tmp");
+        let builtins: Vec<Arc<dyn Tool>> = vec![
+            Arc::new(StubFileTool {
+                name: "Read",
+                cwd: cwd.clone(),
+            }),
+            Arc::new(StubFileTool {
+                name: "WebFetch",
+                cwd: cwd.clone(),
+            }),
+        ];
+        let orch = orch_with_deny_rules(builtins, vec![], &["WebFetch"]);
+        let names = wire_tool_names(&orch.build_wire_tools().await);
+        assert_eq!(names, vec!["Read"], "deny:[WebFetch] hides WebFetch");
+    }
+
+    #[tokio::test]
+    async fn build_wire_tools_mcp_server_prefix_deny_hides_all_server_tools() {
+        // A tool-wide `mcp__github` deny strips EVERY `mcp__github__*` tool
+        // (claude-code MCP server-prefix blanket strip) but leaves other servers.
+        let cwd = PathBuf::from("/tmp");
+        let builtins: Vec<Arc<dyn Tool>> = vec![Arc::new(StubFileTool {
+            name: "Read",
+            cwd: cwd.clone(),
+        })];
+        let mcp: Vec<Arc<dyn Tool>> = vec![
+            Arc::new(StubFileTool {
+                name: "mcp__github__issue",
+                cwd: cwd.clone(),
+            }),
+            Arc::new(StubFileTool {
+                name: "mcp__github__pr",
+                cwd: cwd.clone(),
+            }),
+            Arc::new(StubFileTool {
+                name: "mcp__slack__post",
+                cwd: cwd.clone(),
+            }),
+        ];
+        let orch = orch_with_deny_rules(builtins, mcp, &["mcp__github"]);
+        let names = wire_tool_names(&orch.build_wire_tools().await);
+        assert_eq!(
+            names,
+            vec!["Read", "mcp__slack__post"],
+            "deny:[mcp__github] hides all mcp__github__* but keeps mcp__slack__post"
+        );
+    }
+
+    #[tokio::test]
+    async fn build_wire_tools_empty_deny_is_byte_identical() {
+        // Regression safety: with ZERO deny rules the filtered output must equal
+        // the unfiltered output (the default-gate path must not perturb anything).
+        let cwd = PathBuf::from("/tmp");
+        let mk = || -> Vec<Arc<dyn Tool>> {
+            vec![
+                Arc::new(StubFileTool {
+                    name: "Bash",
+                    cwd: cwd.clone(),
+                }) as Arc<dyn Tool>,
+                Arc::new(StubFileTool {
+                    name: "WebFetch",
+                    cwd: cwd.clone(),
+                }) as Arc<dyn Tool>,
+            ]
+        };
+        // No-deny gate (PolicyPermissionGate with empty rules) vs the default
+        // NoOp gate: both must yield the same wire bytes as the plain registry.
+        let baseline = orch_with_tools(cwd.clone(), mk()).build_wire_tools().await;
+        let gated = orch_with_deny_rules(mk(), vec![], &[])
+            .build_wire_tools()
+            .await;
+        assert_eq!(
+            gated, baseline,
+            "empty deny must be byte-identical to the unfiltered wire tools"
+        );
+        assert_eq!(wire_tool_names(&gated), vec!["Bash", "WebFetch"]);
     }
 
     #[tokio::test]
@@ -4150,6 +4331,136 @@ mod pre_tool_hook_tests {
         let mut exec = HookExecutorImpl::new(reg, Arc::new(UnusedHttp), Arc::new(UnusedRuntime));
         exec.register_builtin(Arc::new(RecordingHook { fired }));
         Arc::new(exec)
+    }
+
+    // ----- FIX 2: HookContext transcript_path + permission_mode -------------
+
+    /// Builtin PreToolUse hook that CAPTURES the [`HookContext`] it was handed,
+    /// so a test can assert the fire-site populated `transcript_path` +
+    /// `permission_mode` (claude-code `createBaseHookInput` always sets
+    /// `transcript_path`; PreToolUse/PostToolUse add `permission_mode`).
+    struct CtxCapturingHook {
+        seen: Arc<std::sync::Mutex<Option<HookContext>>>,
+    }
+    #[async_trait]
+    impl BuiltinHookHandler for CtxCapturingHook {
+        async fn handle(&self, _event: &HookEvent, ctx: &HookContext) -> HookResult {
+            *self.seen.lock().unwrap() = Some(ctx.clone());
+            HookResult {
+                outcome: HookOutcome::Success,
+                stdout: String::new(),
+                stderr: String::new(),
+                exit_code: Some(0),
+                response: Some(HookResponse::default()),
+            }
+        }
+        fn id(&self) -> &str {
+            "ctx-capture"
+        }
+    }
+
+    fn ctx_capturing_executor(
+        seen: Arc<std::sync::Mutex<Option<HookContext>>>,
+    ) -> Arc<HookExecutorImpl> {
+        let hook = HookDefinition {
+            id: HookId::new(),
+            name: "ctx-capture".into(),
+            events: vec![HookEventType::PreToolUse],
+            if_condition: None,
+            executor: DefHookExecutor::Builtin {
+                handler_id: "ctx-capture".into(),
+            },
+            source: HookSource::Session,
+            blocking: true,
+            timeout: None,
+            priority: 0,
+            once: false,
+            status_message: None,
+        };
+        let mut registry = HookRegistry::new();
+        registry.register(hook);
+        let reg = Arc::new(tokio::sync::RwLock::new(registry));
+        let mut exec = HookExecutorImpl::new(reg, Arc::new(UnusedHttp), Arc::new(UnusedRuntime));
+        exec.register_builtin(Arc::new(CtxCapturingHook { seen }));
+        Arc::new(exec)
+    }
+
+    #[tokio::test]
+    async fn pre_tool_hook_ctx_carries_transcript_path_and_permission_mode() {
+        // Wire a real JSONL writer so `transcript_path` is non-empty (it sources
+        // the live writer's path), register a PreToolUse hook that captures the
+        // context, dispatch a tool, and assert the fields are populated.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let session_path = dir.path().join("session.jsonl");
+        let fs: Arc<dyn traits::FileSystem> =
+            Arc::new(platform_posix::fs::PosixFileSystem::new(dir.path().to_path_buf()));
+        let writer = Arc::new(session::jsonl::writer::JsonlWriter::new(
+            session_path.clone(),
+            fs,
+        ));
+
+        let seen = Arc::new(std::sync::Mutex::new(None));
+        let mut registry = ToolRegistry::new();
+        registry.register_builtin(Arc::new(EchoTool) as Arc<dyn Tool>);
+        let orch = ConversationOrchestrator::new(
+            OrchestratorConfig::default(),
+            Arc::new(MockApiClient::new(vec![])),
+            Arc::new(registry),
+            ctx_capturing_executor(seen.clone()),
+            Arc::new(crate::test_support::NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            PathBuf::from("/tmp"),
+        )
+        .with_jsonl_writer(writer);
+
+        let uses = vec![(ToolUseId::new(), "Echo".into(), json!({}), None)];
+        let _ = dispatch_tool_uses_tracked(&orch, &uses, None)
+            .await
+            .unwrap();
+
+        let ctx = seen.lock().unwrap().clone().expect("PreToolUse hook fired");
+        assert_eq!(
+            ctx.transcript_path, session_path,
+            "transcript_path must be the live JSONL writer's path (claude-code createBaseHookInput)"
+        );
+        assert_eq!(
+            ctx.permission_mode.as_deref(),
+            Some("default"),
+            "permission_mode must be 'default' outside plan mode (toolHooks.ts:471)"
+        );
+    }
+
+    #[tokio::test]
+    async fn pre_tool_hook_ctx_permission_mode_is_plan_in_plan_mode() {
+        // When the session is in plan mode, `permission_mode` is "plan" — the
+        // faithful approximation of claude-code's permission-mode enum.
+        let seen = Arc::new(std::sync::Mutex::new(None));
+        let mut registry = ToolRegistry::new();
+        registry.register_builtin(Arc::new(EchoTool) as Arc<dyn Tool>);
+        let orch = ConversationOrchestrator::new(
+            OrchestratorConfig::default(),
+            Arc::new(MockApiClient::new(vec![])),
+            Arc::new(registry),
+            ctx_capturing_executor(seen.clone()),
+            Arc::new(crate::test_support::NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            PathBuf::from("/tmp"),
+        );
+        orch.session().lock().await.plan_mode = true;
+
+        let uses = vec![(ToolUseId::new(), "Echo".into(), json!({}), None)];
+        let _ = dispatch_tool_uses_tracked(&orch, &uses, None)
+            .await
+            .unwrap();
+
+        let ctx = seen.lock().unwrap().clone().expect("PreToolUse hook fired");
+        assert_eq!(
+            ctx.permission_mode.as_deref(),
+            Some("plan"),
+            "permission_mode must be 'plan' in plan mode"
+        );
     }
 
     /// Permission gate that denies every tool call AT THE PROMPT (`check`), but

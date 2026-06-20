@@ -205,6 +205,32 @@ impl PermissionPolicy {
         policy
     }
 
+    /// Tool-name targets of every TOOL-WIDE deny rule (`rule_content == None`)
+    /// across all sources — the rule names that BLANKET-deny a tool. Used by the
+    /// orchestrator's wire-tool filter to strip denied tools BEFORE the model
+    /// sees them, 1:1 with claude-code `filterToolsByDenyRules` /
+    /// `getDenyRuleForTool` (`tools.ts:262-269`, `permissions.ts:287-292`), which
+    /// drops a tool when a deny rule with NO `ruleContent` matches its name via
+    /// [`tool_wide_name_matches`]. CONTENT deny rules (e.g. `Bash(rm:*)`,
+    /// `WebFetch(domain:x)`) are EXCLUDED — they deny specific calls, not the
+    /// whole tool, so the tool stays advertised (matching TS, where
+    /// `toolMatchesRule` returns `false` when `ruleContent !== undefined`).
+    ///
+    /// Returns the raw rule tool-name strings (which may be a bare tool name like
+    /// `"WebFetch"` OR an MCP server prefix like `"mcp__github"`); the caller
+    /// matches each against an advertised tool's name with
+    /// [`tool_wide_name_matches`]. Order follows source-bucket iteration; the
+    /// caller only tests membership, so duplicates are harmless.
+    #[must_use]
+    pub fn tool_wide_deny_names(&self) -> Vec<String> {
+        self.deny_rules
+            .values()
+            .flat_map(|rules| rules.iter())
+            .filter(|r| r.value.rule_content.is_none())
+            .map(|r| r.value.tool_name.clone())
+            .collect()
+    }
+
     /// Resolve a tool call to a [`PermissionResult`].
     ///
     /// Evaluation order (claude-code `checkPermissionsForToolUse` skeleton):
@@ -1088,7 +1114,13 @@ fn mcp_info_from_string(s: &str) -> Option<McpInfo<'_>> {
 /// claude-code `toolMatchesRule` (`permissions.ts:251-268`). Exact name match,
 /// OR an MCP server-level rule: `mcp__server` (or `mcp__server__*`) matches any
 /// `mcp__server__tool` of that server.
-fn tool_wide_name_matches(rule_tool_name: &str, tool_name: &str) -> bool {
+///
+/// `pub` so the orchestrator's wire-tool deny filter
+/// ([`PermissionPolicy::tool_wide_deny_names`] → consumer in `build_wire_tools`)
+/// strips denied tools BEFORE the model sees them using the SAME matcher the
+/// runtime check uses (claude-code `filterToolsByDenyRules`, `tools.ts:262-269`).
+#[must_use]
+pub fn tool_wide_name_matches(rule_tool_name: &str, tool_name: &str) -> bool {
     if rule_tool_name == tool_name {
         return true;
     }
@@ -1509,6 +1541,62 @@ mod tests {
             });
         let r = p.authorize("Bash", &serde_json::json!({}));
         assert!(matches!(r, PermissionResult::Deny { .. }));
+    }
+
+    #[test]
+    fn tool_wide_deny_names_collects_only_content_less_deny_rules() {
+        // FIX 1: `tool_wide_deny_names` returns the names of TOOL-WIDE deny rules
+        // (rule_content == None) and EXCLUDES content deny rules (which deny calls,
+        // not the tool) — feeding claude-code `filterToolsByDenyRules`.
+        let rules = [
+            // tool-wide deny → included
+            PermissionRule {
+                value: PermissionRuleValue {
+                    tool_name: "WebFetch".into(),
+                    rule_content: None,
+                },
+                behavior: PermissionBehavior::Deny,
+                source: PermissionRuleSource::ProjectSettings,
+            },
+            // MCP server-prefix tool-wide deny → included
+            PermissionRule {
+                value: PermissionRuleValue {
+                    tool_name: "mcp__github".into(),
+                    rule_content: None,
+                },
+                behavior: PermissionBehavior::Deny,
+                source: PermissionRuleSource::UserSettings,
+            },
+            // CONTENT deny → EXCLUDED (denies the call, not the tool)
+            PermissionRule {
+                value: PermissionRuleValue {
+                    tool_name: "Bash".into(),
+                    rule_content: Some("rm:*".into()),
+                },
+                behavior: PermissionBehavior::Deny,
+                source: PermissionRuleSource::ProjectSettings,
+            },
+            // allow rule of any kind → never in the deny list
+            allow_rule("Read", None),
+        ];
+        let p = PermissionPolicy::from_rules(PermissionMode::Default, rules);
+        let mut names = p.tool_wide_deny_names();
+        names.sort();
+        assert_eq!(
+            names,
+            vec!["WebFetch".to_string(), "mcp__github".to_string()]
+                .into_iter()
+                .collect::<std::collections::BTreeSet<_>>()
+                .into_iter()
+                .collect::<Vec<_>>(),
+            "only the two tool-wide deny names (sorted), Bash(rm:*) content rule excluded"
+        );
+    }
+
+    #[test]
+    fn tool_wide_deny_names_empty_with_no_deny_rules() {
+        let p = PermissionPolicy::new(PermissionMode::Default);
+        assert!(p.tool_wide_deny_names().is_empty());
     }
 
     #[test]

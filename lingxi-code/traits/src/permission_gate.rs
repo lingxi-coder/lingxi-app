@@ -177,4 +177,24 @@ pub trait PermissionGate: Send + Sync {
             },
         }
     }
+
+    /// Tool-name targets of every TOOL-WIDE deny rule the gate enforces (a deny
+    /// rule with NO rule-content — a blanket strip of that tool).
+    ///
+    /// The orchestrator filters the wire `tools` array by these names BEFORE the
+    /// model sees them, 1:1 with claude-code `filterToolsByDenyRules` /
+    /// `getDenyRuleForTool` (`tools.ts:262-269`): a tool whose name matches one of
+    /// these (exact, OR an `mcp__server` prefix covering `mcp__server__tool`) is
+    /// dropped from the advertised set. Each returned string is matched against an
+    /// advertised tool's name by the SAME matcher the runtime check uses
+    /// (`permission::tool_wide_name_matches`).
+    ///
+    /// The default returns `Vec::new()` — a gate with no rule layer (the
+    /// interactive / no-op / adapter prompt transports) denies nothing tool-wide,
+    /// so the wire-tool set is UNCHANGED (byte-identical / regression-safe). Only
+    /// the rule-evaluating `PolicyPermissionGate` OVERRIDES this to surface its
+    /// policy's tool-wide deny names. Additive DEFAULTED (frozen-trait safe).
+    async fn tool_wide_deny_names(&self) -> Vec<String> {
+        Vec::new()
+    }
 }

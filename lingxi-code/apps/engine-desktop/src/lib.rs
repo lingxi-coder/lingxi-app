@@ -2150,6 +2150,12 @@ pub async fn build(
     // (same cycle-break as the tool-registry / agent-catalog cells above).
     let subagent_hook_executor_cell = subagent_spawner_concrete.hook_executor_handle();
     let subagent_skill_loader_cell = subagent_spawner_concrete.skill_loader_handle();
+    // FIX 1 (subagent pool): grab the set-once tool-wide-deny-names cell BEFORE
+    // boxing, to fill once the permission policy is built (same cycle-break as
+    // the registry/catalog/hook cells). Filled inside the enforcement branch
+    // below from `policy.tool_wide_deny_names()`; left empty otherwise ⇒ the
+    // subagent tool pool is unfiltered (byte-identical to before).
+    let subagent_tool_wide_deny_cell = subagent_spawner_concrete.tool_wide_deny_names_handle();
     let subagent_spawner: Arc<dyn traits::subagent_spawn::SubagentSpawner> =
         Arc::new(subagent_spawner_concrete);
 
@@ -2455,6 +2461,12 @@ pub async fn build(
             // the policy is still in scope (before it moves into the gate).
             read_deny_exclude_globs =
                 permission::read_deny_exclude_globs(&policy, &cwd);
+            // FIX 1 (subagent pool): hand the policy's TOOL-WIDE deny names to the
+            // subagent spawner so a blanket-denied tool is stripped from each
+            // child's advertised pool too (claude-code `assembleToolPool` →
+            // `filterToolsByDenyRules`). Set-once; only meaningful when there are
+            // tool-wide deny rules (empty otherwise ⇒ no child-pool filtering).
+            let _ = subagent_tool_wide_deny_cell.set(policy.tool_wide_deny_names());
             let policy = Arc::new(policy);
             tracing::info!(
                 rules = rule_count,

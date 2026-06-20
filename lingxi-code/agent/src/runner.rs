@@ -140,12 +140,26 @@ pub async fn run_subagent(
     // case) we skip the proxy entirely and pass `out_tx` straight through, so the
     // hot path is byte-identical to legacy.
     let agent_scoped_stop = frontmatter_cleanup.as_ref().map(|(he, agent_id)| {
+        // FIX 2: the agent-scoped SubagentStop carries `agent_transcript_path`
+        // (claude-code `getAgentTranscriptPath(subagentId)`, coreSchemas.ts:556 /
+        // utils/hooks.ts:3676). TS builds it as
+        // `…/subagents[/subdir]/agent-${agentId}.jsonl`; LingXi mirrors the
+        // `agent-<id>.jsonl` leaf under this child's `transcript_subdir`. NOTE:
+        // the production spawn path currently seeds `transcript_subdir` to a
+        // `/tmp` placeholder (handle.rs / pool.rs), so the path is shape-faithful
+        // but not yet the real session-scoped location — same cosmetic caveat as
+        // `hook_session_id`. Filling it is strictly better than the prior empty
+        // value, which serialized as a bare default.
+        let agent_transcript_path = ctx
+            .transcript_subdir
+            .join(format!("agent-{agent_id}.jsonl"));
         (
             he.clone(),
             *agent_id,
             ctx.agent_definition.agent_type.clone(),
             ctx.hook_session_id,
             ctx.hook_cwd.clone(),
+            agent_transcript_path,
         )
     });
 
@@ -196,7 +210,7 @@ pub async fn run_subagent(
     // (otherwise the retargeted Stop→SubagentStop hooks are already gone). Only
     // when the child reached a terminal that fires SubagentStop in claude
     // (`completed` / `failed`).
-    if let (Some((he, agent_id, agent_type, session_id, cwd)), Some(status)) =
+    if let (Some((he, agent_id, agent_type, session_id, cwd, agent_transcript_path)), Some(status)) =
         (agent_scoped_stop, terminal_status)
     {
         let stop_ctx = hooks::registry::HookContext {
@@ -204,6 +218,9 @@ pub async fn run_subagent(
             agent_id: Some(agent_id),
             cwd,
             agent_type: Some(agent_type),
+            // FIX 2: SubagentStop carries the agent's own transcript path
+            // (claude-code `agent_transcript_path`). See the tuple build above.
+            agent_transcript_path: Some(agent_transcript_path),
             ..Default::default()
         };
         he.execute_agent_scoped(

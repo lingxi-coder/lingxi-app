@@ -142,6 +142,19 @@ pub struct PoolSubagentSpawner {
     /// reads it via [`SubagentSpawner::resolve_name`]. Shared `Arc` so the same
     /// map is visible across spawner clones. Sync agents are NOT registered.
     name_registry: Arc<RwLock<HashMap<String, AgentId>>>,
+    /// TOOL-WIDE deny-rule names from the boot permission policy, applied in
+    /// [`Self::resolve_tools`] so a blanket-denied tool never leaks into a
+    /// subagent's advertised wire `tools` array — matching claude-code, where
+    /// `assembleToolPool` (the SAME pool builder used for coordinator workers,
+    /// `runAgent.ts`) runs `filterToolsByDenyRules`. A SET-ONCE cell mirroring
+    /// [`Self::tool_registry`]: the permission policy is built at the composition
+    /// root AFTER the spawner is boxed, so the host fills this once it exists via
+    /// [`Self::tool_wide_deny_names_handle`]. Unfilled (the default / tests /
+    /// no-enforcement) ⇒ NO names ⇒ the subagent tool pool is UNCHANGED
+    /// (byte-identical / regression-safe). Each entry is matched against a
+    /// resolved tool's name by [`permission::tool_wide_name_matches`] (exact name
+    /// OR an `mcp__server` prefix).
+    tool_wide_deny_names: Arc<std::sync::OnceLock<Vec<String>>>,
 }
 
 impl PoolSubagentSpawner {
@@ -168,7 +181,28 @@ impl PoolSubagentSpawner {
             hook_session_id: protocol::SessionId::nil(),
             hook_cwd: std::path::PathBuf::new(),
             name_registry: Arc::new(RwLock::new(HashMap::new())),
+            tool_wide_deny_names: Arc::new(std::sync::OnceLock::new()),
         }
+    }
+
+    /// Return a clone of the set-once tool-wide-deny-names cell so the host can
+    /// fill it AFTER the permission policy is built (same cycle-break as
+    /// [`Self::tool_registry_handle`]). The subagent tool resolver
+    /// ([`Self::resolve_tools`]) then strips any blanket-denied tool from each
+    /// child's advertised pool (claude-code `filterToolsByDenyRules`). First fill
+    /// wins. Unfilled ⇒ no filtering (byte-identical legacy).
+    #[must_use]
+    pub fn tool_wide_deny_names_handle(&self) -> Arc<std::sync::OnceLock<Vec<String>>> {
+        self.tool_wide_deny_names.clone()
+    }
+
+    /// Builder: set the tool-wide deny names immediately (tests). The boot path
+    /// uses [`Self::tool_wide_deny_names_handle`] to fill it later (the policy
+    /// does not exist at construction). Applied in [`Self::resolve_tools`].
+    #[must_use]
+    pub fn with_tool_wide_deny_names(self, names: Vec<String>) -> Self {
+        let _ = self.tool_wide_deny_names.set(names);
+        self
     }
 
     /// Builder: set the parent / main-loop model used to resolve a spawn's
@@ -424,7 +458,24 @@ impl PoolSubagentSpawner {
             return (Vec::new(), Vec::new());
         };
         let parent_tools = registry.available_tools(&ToolStaticContext::default());
-        let resolved = AgentToolResolver::resolve(agent_def, &parent_tools, &[], false);
+        let mut resolved = AgentToolResolver::resolve(agent_def, &parent_tools, &[], false);
+        // Tool-wide deny filter (claude-code `assembleToolPool` →
+        // `filterToolsByDenyRules`, the SAME pool builder coordinator workers use
+        // in `runAgent.ts`): a blanket-denied tool must not leak into the
+        // subagent's advertised wire `tools` array either. Names come from the
+        // boot policy via the set-once cell; UNFILLED / EMPTY (the default / no
+        // enforcement) ⇒ no tools dropped ⇒ the child pool is byte-identical to
+        // before (regression-safe). Same matcher as the runtime + main-loop wire
+        // filter (`tool_wide_name_matches`: exact name OR `mcp__server` prefix).
+        if let Some(denied) = self.tool_wide_deny_names.get() {
+            if !denied.is_empty() {
+                resolved.retain(|t| {
+                    !denied
+                        .iter()
+                        .any(|d| permission::tool_wide_name_matches(d, t.name()))
+                });
+            }
+        }
         // The allow-list must cover the SAME surface the inherited
         // `RegistryToolInvoker` accepts: `find_by_name` matches a tool by
         // `name()` OR any `aliases()` entry (registry.rs). Building the list
@@ -1170,6 +1221,85 @@ mod tests {
         let names: Vec<&str> = schemas.iter().map(|t| t["name"].as_str().unwrap()).collect();
         assert_eq!(names, vec!["Read"]);
         assert_eq!(allowed, vec!["Read".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn resolve_tools_strips_tool_wide_denied_tool_from_subagent_pool() {
+        // FIX 1 (subagent pool): a tool-wide deny rule fed via the set-once cell
+        // strips the tool from the child's advertised pool AND its dispatch
+        // allow-list (claude-code `assembleToolPool` → `filterToolsByDenyRules`).
+        let runtime = Arc::new(MockRuntimeSpawner::default());
+        let pool = Arc::new(StateMachinePool::new(runtime, 4));
+        let spawner = PoolSubagentSpawner::new(pool)
+            .with_tool_registry(registry_with(&["Read", "Bash", "WebFetch"]))
+            .with_tool_wide_deny_names(vec!["WebFetch".to_string()]);
+
+        let (schemas, allowed) = spawner
+            .resolve_tools(&agent_def(AgentToolPolicy::All {
+                use_exact_tools: true,
+            }))
+            .await;
+        let names: Vec<&str> = schemas.iter().map(|t| t["name"].as_str().unwrap()).collect();
+        assert_eq!(names, vec!["Bash", "Read"], "WebFetch denied → not advertised");
+        assert!(
+            !allowed.contains(&"WebFetch".to_string()),
+            "denied tool must not be in the dispatch allow-list either"
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_tools_mcp_server_deny_strips_all_server_tools_from_subagent() {
+        // A tool-wide `mcp__github` deny strips every `mcp__github__*` from the
+        // child pool (MCP server-prefix blanket strip) but keeps other servers.
+        let runtime = Arc::new(MockRuntimeSpawner::default());
+        let pool = Arc::new(StateMachinePool::new(runtime, 4));
+        let spawner = PoolSubagentSpawner::new(pool)
+            .with_tool_registry(registry_with(&[
+                "Read",
+                "mcp__github__issue",
+                "mcp__slack__post",
+            ]))
+            .with_tool_wide_deny_names(vec!["mcp__github".to_string()]);
+
+        let (schemas, _allowed) = spawner
+            .resolve_tools(&agent_def(AgentToolPolicy::All {
+                use_exact_tools: true,
+            }))
+            .await;
+        let names: Vec<&str> = schemas.iter().map(|t| t["name"].as_str().unwrap()).collect();
+        assert!(
+            !names.contains(&"mcp__github__issue"),
+            "mcp__github deny must strip mcp__github__issue, got: {names:?}"
+        );
+        assert!(
+            names.contains(&"mcp__slack__post") && names.contains(&"Read"),
+            "other server + builtins survive, got: {names:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_tools_empty_deny_leaves_subagent_pool_unchanged() {
+        // Regression safety: an unset / empty deny-names cell must leave the
+        // child pool byte-identical to before (no filtering).
+        let runtime = Arc::new(MockRuntimeSpawner::default());
+        let pool = Arc::new(StateMachinePool::new(runtime, 4));
+        let unfiltered = PoolSubagentSpawner::new(pool.clone())
+            .with_tool_registry(registry_with(&["Read", "Bash"]));
+        let (schemas_a, allowed_a) = unfiltered
+            .resolve_tools(&agent_def(AgentToolPolicy::All {
+                use_exact_tools: true,
+            }))
+            .await;
+        let empty_deny = PoolSubagentSpawner::new(pool)
+            .with_tool_registry(registry_with(&["Read", "Bash"]))
+            .with_tool_wide_deny_names(vec![]);
+        let (schemas_b, allowed_b) = empty_deny
+            .resolve_tools(&agent_def(AgentToolPolicy::All {
+                use_exact_tools: true,
+            }))
+            .await;
+        assert_eq!(schemas_a, schemas_b, "empty deny → identical schemas");
+        assert_eq!(allowed_a, allowed_b, "empty deny → identical allow-list");
     }
 
     #[tokio::test]

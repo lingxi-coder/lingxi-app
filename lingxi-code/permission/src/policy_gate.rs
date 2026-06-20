@@ -196,6 +196,15 @@ impl PermissionGate for PolicyPermissionGate {
         // fire PermissionRequest / PermissionDenied before the prompt resolves.
         self.resolve(self.policy.authorize(name, input), name)
     }
+
+    /// Surface the wrapped policy's TOOL-WIDE deny-rule names so the orchestrator
+    /// strips blanket-denied tools from the wire `tools` array before the model
+    /// sees them (claude-code `filterToolsByDenyRules`). Content deny rules are
+    /// excluded by [`PermissionPolicy::tool_wide_deny_names`] (they deny calls,
+    /// not the tool). With zero deny rules this is empty ⇒ no tools stripped.
+    async fn tool_wide_deny_names(&self) -> Vec<String> {
+        self.policy.tool_wide_deny_names()
+    }
 }
 
 /// Render a [`PermissionDecisionReason`] to the human/model-facing deny string

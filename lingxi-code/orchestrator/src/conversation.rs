@@ -2593,10 +2593,27 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
     /// mirroring the `PreToolUse` context construction in `turn_loop.rs` plus
     /// the B4 additive fields.
     async fn lifecycle_hook_ctx(&self, stop_hook_active: bool) -> HookContext {
-        let session_id = { self.session.lock().await.session_id };
+        // FIX 2: populate `transcript_path` + `permission_mode` on the lifecycle
+        // hook context, matching claude-code `createBaseHookInput` (always sets
+        // `transcript_path`, utils/hooks.ts:322) — the JSONL writer's path (empty
+        // when unwired) and the plan/default approximation of the session's
+        // permission mode. The lifecycle hooks (Stop / UserPromptSubmit /
+        // SessionStart / …) thus carry a non-empty `transcript_path` like the
+        // tool-use hooks do, instead of serializing `""`.
+        let (session_id, plan_mode) = {
+            let s = self.session.lock().await;
+            (s.session_id, s.plan_mode)
+        };
+        let transcript_path = self
+            .jsonl_writer
+            .as_ref()
+            .map(|w| w.path().to_path_buf())
+            .unwrap_or_default();
         HookContext {
             session_id,
             cwd: self.cwd.clone(),
+            transcript_path,
+            permission_mode: Some(if plan_mode { "plan" } else { "default" }.to_string()),
             stop_hook_active,
             ..Default::default()
         }
@@ -5183,7 +5200,25 @@ As you answer the user's questions, you can use the following context:\n\
     /// [`execute_one_turn`]: crate::turn_loop::execute_one_turn
     pub(crate) async fn build_wire_tools(&self) -> Vec<serde_json::Value> {
         use tool_api::tool_trait::{PromptOptions, ToolStaticContext};
-        let tools = self.tools.available_tools(&ToolStaticContext::default());
+        let mut tools = self.tools.available_tools(&ToolStaticContext::default());
+        // Tool-wide deny filter (claude-code `filterToolsByDenyRules`,
+        // `tools.ts:307-310`): strip every tool a TOOL-WIDE deny rule blankets,
+        // BEFORE the model sees it, using the SAME matcher the runtime check uses
+        // (`tool_wide_name_matches` — exact name OR an `mcp__server` prefix that
+        // covers all `mcp__server__tool` of that server). The names come from the
+        // permission gate; the default gate (no rule layer) returns an EMPTY list,
+        // so with zero deny rules `tools` is untouched and the wire bytes are
+        // byte-identical to before (regression-safe). Content deny rules
+        // (`Bash(rm:*)`, `WebFetch(domain:x)`) are NOT in this list — they deny
+        // specific calls, not the tool, so the tool stays advertised.
+        let denied = self.perms.tool_wide_deny_names().await;
+        if !denied.is_empty() {
+            tools.retain(|t| {
+                !denied
+                    .iter()
+                    .any(|d| permission::tool_wide_name_matches(d, t.name()))
+            });
+        }
         // claude-code builds the wire `tools` array with `prompt({model})`; the
         // session model gates model-dependent tool prompts (TodoWrite's
         // `Xla(model)=Dh(model)?FWd:UWd`). Snapshot it from the live session.

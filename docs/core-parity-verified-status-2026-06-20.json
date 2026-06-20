@@ -1187,7 +1187,8 @@
     "impact": "ask:[Bash]+deny:[Bash(rm:*)] on `rm -rf /` => LingXi Ask (user may approve) vs binary Deny. SECURITY: a deny rule is downgradable to ask.",
     "binary": "mSm/XHe off 205931956: full deny phase (B3t tool-wide + K5t content) before EIo ask",
     "confidence": "HIGH",
-    "note": "LingXi test policy.rs:2165 toolwide_ask_short_circuits_before_content_deny LOCKS the wrong behavior — must be fixed too. Also content-ask placed before tool-specific checkPermissions (finer same-family nuance)."
+    "note": "LingXi test policy.rs:2165 toolwide_ask_short_circuits_before_content_deny LOCKS the wrong behavior — must be fixed too. Also content-ask placed before tool-specific checkPermissions (finer same-family nuance).",
+    "status": "DONE (main 8eb13a81)"
    },
    {
     "id": "R-D4",
@@ -1196,7 +1197,8 @@
     "impact": "IDN + percent-encoded hosts mis-key domain rules. foo%2Ebar.com => domain:foo.bar.com deny blocks in binary, NOT LingXi (deny-BYPASS). munchen.de => xn--... in binary.",
     "binary": "_qa off 201711761 keys `domain:${new URL(n).hostname}`",
     "confidence": "HIGH",
-    "fix": "use url crate (already a workspace dep): Url::parse(u).host_str(). Domain-match ALGORITHM is already byte-exact; only the feeder diverges."
+    "fix": "use url crate (already a workspace dep): Url::parse(u).host_str(). Domain-match ALGORITHM is already byte-exact; only the feeder diverges.",
+    "status": "DONE (main 8eb13a81)"
    },
    {
     "id": "R-D2",
@@ -1204,7 +1206,8 @@
     "title": "hookSpecificOutput.permissionDecision does NOT unconditionally override legacy top-level decision",
     "impact": "{decision:block, hsOut.permissionDecision:allow} => binary allow, LingXi block",
     "binary": "azn off 205721920: decision switch first, hsOut switch second reassigns unconditionally",
-    "confidence": "HIGH"
+    "confidence": "HIGH",
+    "status": "DONE (main f361443f)"
    },
    {
     "id": "R-D3",
@@ -1212,7 +1215,8 @@
     "title": "PreToolUse permissionDecision:'ask' silently dropped (HookDecision has no Ask variant)",
     "impact": "with R-D2, 'ask' can never override a prior 'approve'",
     "binary": "azn: case 'ask': permissionBehavior='ask'; enum [allow,deny,ask,defer]",
-    "confidence": "HIGH"
+    "confidence": "HIGH",
+    "status": "DONE (main f361443f)"
    },
    {
     "id": "R-O4",
@@ -1220,7 +1224,8 @@
     "title": "Hook child env omits claude-code's auth/OTEL denylist",
     "impact": "SECURITY: a hook script sees ambient CLAUDE_CODE_OAUTH_TOKEN / *_SUBSCRIPTION_TYPE / OTEL_* the binary strips",
     "binary": "WO() off 195508064 deletes the denylist",
-    "confidence": "MEDIUM"
+    "confidence": "MEDIUM",
+    "status": "DONE (main f361443f)"
    }
   ],
   "tier2_model_facing": [
@@ -1291,7 +1296,8 @@
     "area": "hooks/hook_payload.rs",
     "title": "Hook permissionDecision leniency: parses top-level field claude-code never reads; reads hsOut.permissionDecision for ANY event (binary: PreToolUse only); silently ignores unknown values instead of throwing",
     "confidence": "HIGH",
-    "severity": "lenient-direction"
+    "severity": "lenient-direction",
+    "status": "DONE (main f361443f)"
    },
    {
     "id": "R-F5",
@@ -1324,6 +1330,7 @@
    "#39 UserPromptExpansion/MessageDisplay marked done but never fired",
    "the top-line 'core 1:1 COMPLETE' framing missed the prompt-envelope, model-gating, version-stamp, and permission-ordering categories",
    "#43 COLUMNS/LINES reference claim was itself STALE (LingXi is 1:1 there)"
-  ]
+  ],
+  "_progress": "TIER 1 (decision/security) COMPLETE 2026-06-20: R-D1/R-D4 (perm 8eb13a81), R-D2/R-D3/R-O2/R-O4 (hooks f361443f). Each binary-reverified by parent + guarded-ff. Next: Tier 2 model-facing."
  }
 }

@@ -291,6 +291,49 @@ pub fn format_binary(path: &std::path::Path) -> String {
     )
 }
 
+/// Whether `path` is a blocking device/special file that Read must refuse —
+/// 1:1 with claude-code `$3p` (#11): membership in the fixed `/dev` set `U3p`,
+/// any `/proc/…/fd/{0,1,2}`, or `^/proc/[^/]+/(environ|cmdline|auxv|maps|mem|
+/// stat)$`. Reading these would block or produce infinite output.
+#[must_use]
+pub fn is_device_file(path: &str) -> bool {
+    const DEVICE_PATHS: &[&str] = &[
+        "/dev/zero",
+        "/dev/random",
+        "/dev/urandom",
+        "/dev/full",
+        "/dev/stdin",
+        "/dev/tty",
+        "/dev/console",
+        "/dev/stdout",
+        "/dev/stderr",
+        "/dev/fd/0",
+        "/dev/fd/1",
+        "/dev/fd/2",
+    ];
+    if DEVICE_PATHS.contains(&path) {
+        return true;
+    }
+    if path.starts_with("/proc/")
+        && (path.ends_with("/fd/0") || path.ends_with("/fd/1") || path.ends_with("/fd/2"))
+    {
+        return true;
+    }
+    // `^/proc/[^/]+/(environ|cmdline|auxv|maps|mem|stat)$` — exactly `/proc/`,
+    // one non-empty non-slash segment, `/`, then one of the six names, end.
+    if let Some(rest) = path.strip_prefix("/proc/") {
+        let mut parts = rest.split('/');
+        if let (Some(seg), Some(name), None) = (parts.next(), parts.next(), parts.next()) {
+            if !seg.is_empty()
+                && matches!(name, "environ" | "cmdline" | "auxv" | "maps" | "mem" | "stat")
+            {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 /// Narrow no-break space (U+202F) used by some macOS versions in screenshot
 /// filenames before AM/PM — byte-locked to claude-code `THIN_SPACE`
 /// (`FileReadTool.ts:131`, `String.fromCharCode(8239)`).
@@ -1209,6 +1252,17 @@ Usage:\n\
         let path = PathBuf::from(file_path);
         self.emit_started(&invocation_id, &path).await;
 
+        // #11: refuse blocking device/special files (claude-code `$3p` in
+        // validateInput, BEFORE symlink resolution). Checked on the supplied
+        // path string (device/proc paths are absolute, so no ~/cwd expansion is
+        // needed). `${e}` is the original `file_path`.
+        if is_device_file(file_path) {
+            self.emit_failed(&invocation_id, "device_file").await;
+            return Err(ToolError::InvalidInput(format!(
+                "Cannot read '{file_path}': this device file would block or produce infinite output."
+            )));
+        }
+
         // `tengu_file_read_limits_override` (`FileReadTool.ts:511-516`): TS fires
         // this at the top of the read iff `fileReadingLimits !== undefined`. The
         // LingXi `ToolUseContext` has NO `fileReadingLimits` field — there is no
@@ -1670,6 +1724,32 @@ mod tests {
     use telemetry::{AnalyticsBus, InMemorySink};
     use tempfile::TempDir;
     use tool_api::test_support::{fresh_ctx, fresh_tx, make_dummy_fs};
+
+    #[test]
+    fn is_device_file_matches_claude_set() {
+        // `/dev` set members ($3p / U3p).
+        for p in [
+            "/dev/zero", "/dev/random", "/dev/urandom", "/dev/full", "/dev/stdin",
+            "/dev/tty", "/dev/console", "/dev/stdout", "/dev/stderr", "/dev/fd/0",
+            "/dev/fd/1", "/dev/fd/2",
+        ] {
+            assert!(is_device_file(p), "{p} should be a device file");
+        }
+        // /proc fd + the six special files.
+        assert!(is_device_file("/proc/self/fd/1"));
+        assert!(is_device_file("/proc/123/fd/2"));
+        assert!(is_device_file("/proc/123/environ"));
+        assert!(is_device_file("/proc/self/maps"));
+        assert!(is_device_file("/proc/1/cmdline"));
+        assert!(is_device_file("/proc/9/stat"));
+        // NOT device files.
+        assert!(!is_device_file("/dev/null")); // notably NOT in the blocked set
+        assert!(!is_device_file("/home/user/file.txt"));
+        assert!(!is_device_file("/proc/cpuinfo")); // no <pid> segment
+        assert!(!is_device_file("/proc/123/foo/environ")); // too many segments
+        assert!(!is_device_file("/proc/123/status")); // "status" != the "stat" name
+        assert!(!is_device_file("/proc//environ")); // empty pid segment
+    }
 
     fn make_ctx(tmp: &TempDir) -> (BuiltinToolContext, Arc<InMemorySink>) {
         let fs = make_dummy_fs();

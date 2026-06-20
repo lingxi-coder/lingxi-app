@@ -485,11 +485,24 @@ Usage:\n\
             _ => unreachable!("edit_mode validated above"),
         };
 
-        let serialized = match serde_json::to_string_pretty(&nb) {
-            Ok(s) => s,
-            Err(e) => {
-                self.emit_failed(&invocation_id, "json_emit").await;
-                return Err(ToolError::Io(e.to_string()));
+        // claude-code writes the notebook with `IPYNB_INDENT = 1` (ONE space) —
+        // `jsonStringify(notebook, null, 1)` (NotebookEditTool.ts:430-431).
+        // serde_json's `to_string_pretty` uses TWO spaces, which would write
+        // divergent on-disk bytes (different file hash / noisier git diffs for a
+        // round-tripped notebook). Serialize with a 1-space pretty formatter.
+        let serialized = {
+            use serde::Serialize as _;
+            let mut buf = Vec::new();
+            let mut ser = serde_json::Serializer::with_formatter(
+                &mut buf,
+                serde_json::ser::PrettyFormatter::with_indent(b" "),
+            );
+            match nb.serialize(&mut ser) {
+                Ok(()) => String::from_utf8(buf).expect("serde_json emits valid UTF-8"),
+                Err(e) => {
+                    self.emit_failed(&invocation_id, "json_emit").await;
+                    return Err(ToolError::Io(e.to_string()));
+                }
             }
         };
         if let Err(e) = tokio::fs::write(&canon, serialized.as_bytes()).await {
@@ -630,6 +643,42 @@ mod tests {
         let modified: Value =
             serde_json::from_str(&std::fs::read_to_string(&target).unwrap()).unwrap();
         assert_eq!(modified["cells"][0]["source"], "print('world')");
+    }
+
+    #[tokio::test]
+    async fn written_notebook_uses_one_space_indent() {
+        // claude-code writes the .ipynb with `IPYNB_INDENT = 1`
+        // (NotebookEditTool.ts:430-431). Lock the ON-DISK byte shape: top-level
+        // keys are indented by exactly ONE space — NOT serde_json's two-space
+        // `to_string_pretty` default (which would diverge file bytes/hashes).
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("nb.ipynb");
+        std::fs::write(&target, sample_notebook()).unwrap();
+        let (ctx, _sink) = make_ctx(&tmp);
+        seed_full_read(&ctx, &target);
+        let tool = NotebookEditTool::new(ctx);
+        tool.call(
+            json!({
+                "notebook_path": target.to_str().unwrap(),
+                "cell_id": "c1",
+                "edit_mode": "replace",
+                "new_source": "print('world')"
+            }),
+            fresh_ctx(),
+            fresh_tx(),
+        )
+        .await
+        .unwrap();
+        let written = std::fs::read_to_string(&target).unwrap();
+        assert!(
+            written.contains("\n \"cells\":") || written.contains("\n \"nbformat\":"),
+            "notebook must use 1-space indent (claude-code IPYNB_INDENT=1); got head:\n{}",
+            &written[..written.len().min(160)]
+        );
+        assert!(
+            !written.contains("\n  \"cells\":") && !written.contains("\n  \"nbformat\":"),
+            "notebook must NOT use serde_json's 2-space indent"
+        );
     }
 
     #[tokio::test]

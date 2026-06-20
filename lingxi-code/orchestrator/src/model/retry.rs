@@ -378,7 +378,7 @@ pub fn resolve_retry_control_with_settings(
 ///      increments consecutive counter).
 ///    - Budget exhausted → [`DriveStep::Terminal`].
 /// 2. [`LlmError::RateLimited`] — server wins:
-///    - `retry_after: Some(d)` → [`DriveStep::RetryAfter(d)`] verbatim (no jitter, consumes an attempt).
+///    - `retry_after: Some(d)` → [`DriveStep::RetryAfter`] `max(d, jittered backoff)` (binary `sle` floor; consumes an attempt).
 ///    - `retry_after: None` → [`DriveStep::RetryAfter`] (jittered, consumes an attempt).
 /// 3. [`LlmError::ProviderInternal`] / [`LlmError::Transport`] — budget check:
 ///    - Budget remains → [`DriveStep::RetryAfter`] (jittered, consumes an attempt).
@@ -407,9 +407,9 @@ pub fn next_step(
 /// When `backoff_ms` is `Some(b)`, the ladder's base is set to `b` (instead of
 /// [`BASE_DELAY_MS`] = 500), preserving the binary's exponential growth +
 /// [`MAX_BACKOFF_MS`] cap: `min(b * 2^attempt, 32000)`.  E.g. `backoff_ms =
-/// 1000` → `[1000, 2000, 4000, 8000, 16000, 32000, …]`.  Server-sent
-/// `retry_after` values are **never** scaled (they are used verbatim regardless
-/// of `backoff_ms`).
+/// 1000` → `[1000, 2000, 4000, 8000, 16000, 32000, …]`.  A server-sent
+/// `retry_after` acts as a **floor**: the delay is `max(retry_after, jittered
+/// backoff)` (binary `sle`), so a small server value never undercuts the backoff.
 pub fn next_step_with_backoff(
     state: &mut RetryState,
     ctl: &RetryControl,
@@ -472,8 +472,11 @@ pub fn next_step_with_backoff(
             }
 
             let delay = match retry_after {
-                // Server-sent delay is verbatim — never scaled by backoff_ms.
-                Some(d) => *d,
+                // Binary `sle` treats the retry-after header as a FLOOR, not a
+                // verbatim value: `return Math.max(header*1000, jittered_backoff)`.
+                // So a small server delay never undercuts our own exponential
+                // backoff during sustained rate-limiting (and a large one still wins).
+                Some(d) => (*d).max(jittered_delay(scaled_base_delay_ms(state.attempt, backoff_ms))),
                 None => jittered_delay(scaled_base_delay_ms(state.attempt, backoff_ms)),
             };
             state.attempt = state.attempt.saturating_add(1);
@@ -986,9 +989,11 @@ mod next_step_tests {
     }
 
     #[test]
-    fn rate_limited_server_delay_used_verbatim() {
+    fn rate_limited_large_server_delay_exceeds_backoff_floor() {
         let mut state = RetryState::default();
         let ctl = ctl_default();
+        // 30s server delay far exceeds the attempt-0 backoff (~500ms), so the
+        // binary `sle` floor max(server, jittered_backoff) returns the server delay.
         let server_delay = Duration::from_secs(30);
         let step = next_step(
             &mut state,
@@ -1002,9 +1007,34 @@ mod next_step_tests {
         assert_eq!(
             step,
             DriveStep::RetryAfter(server_delay),
-            "server-provided retry_after must be used verbatim"
+            "server retry_after exceeding the backoff floor is used as-is"
         );
         assert_eq!(state.attempt, 1);
+    }
+
+    #[test]
+    fn rate_limited_small_server_delay_floored_to_backoff() {
+        // A tiny server delay must NOT undercut our own exponential backoff
+        // (binary `sle`: max(header, jittered_backoff)).
+        let mut state = RetryState::default();
+        state.attempt = 5; // backoff base = min(500 * 2^5, 32000) = 16_000ms
+        let ctl = ctl_default();
+        let step = next_step(
+            &mut state,
+            &ctl,
+            &LlmError::RateLimited {
+                retry_after: Some(Duration::from_millis(100)),
+                scope: None,
+            },
+            0,
+        );
+        match step {
+            DriveStep::RetryAfter(d) => assert!(
+                d >= Duration::from_millis(16_000),
+                "100ms server delay must be floored to the ~16s backoff, got {d:?}"
+            ),
+            other => panic!("expected RetryAfter, got {other:?}"),
+        }
     }
 
     #[test]

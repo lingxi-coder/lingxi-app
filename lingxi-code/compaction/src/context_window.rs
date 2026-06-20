@@ -35,8 +35,9 @@ pub const MODEL_CONTEXT_WINDOW_DEFAULT: u64 = 200_000;
 
 /// Default max output tokens. Mirrors `MAX_OUTPUT_TOKENS_DEFAULT`.
 const MAX_OUTPUT_TOKENS_DEFAULT: u64 = 32_000;
-/// Upper limit for max output tokens. Mirrors `MAX_OUTPUT_TOKENS_UPPER_LIMIT`.
-const MAX_OUTPUT_TOKENS_UPPER_LIMIT: u64 = 64_000;
+/// Upper limit for max output tokens (the unknown-model fallback). Mirrors the
+/// binary `YCe` else-branch `NWu` = 128_000 (v2.1.183).
+const MAX_OUTPUT_TOKENS_UPPER_LIMIT: u64 = 128_000;
 
 /// 1M-context beta header. Mirrors `CONTEXT_1M_BETA_HEADER` in `constants/betas.ts`.
 pub const CONTEXT_1M_BETA_HEADER: &str = "context-1m-2025-08-07";
@@ -74,7 +75,16 @@ fn model_supports_1m(model: &str) -> bool {
 /// no-op for the substring checks we perform, so it is folded in here.
 fn canonical_name(model: &str) -> String {
     let name = model.to_lowercase();
-    // Order matters: check more specific versions first (4-6 before 4-5 before 4).
+    // Order matters: check more specific versions first (4-8/4-7/4-6 before 4-5 before 4).
+    // opus-4-8/4-7 must precede the bare `claude-opus-4` catch so they resolve to
+    // their own canonical (binary `getCanonicalName` preserves them) and get the
+    // 64k/128k max-output tier (binary `YCe`), not the bare-family 32k/32k.
+    if name.contains("claude-opus-4-8") {
+        return "claude-opus-4-8".to_string();
+    }
+    if name.contains("claude-opus-4-7") {
+        return "claude-opus-4-7".to_string();
+    }
     if name.contains("claude-opus-4-6") {
         return "claude-opus-4-6".to_string();
     }
@@ -159,7 +169,16 @@ pub fn context_window_for_model(model: &str, betas: &[String]) -> u64 {
 /// ant-model and model-capability branches (see module docs).
 fn model_max_output_tokens(model: &str) -> (u64, u64) {
     let m = canonical_name(model);
-    let (default_tokens, upper_limit) = if m.contains("opus-4-6") {
+    // Binary `YCe` (v2.1.183 getModelMaxOutputTokens): fable-5/mythos-5/opus-4-8/
+    // opus-4-7/opus-4-6 → 64k/128k; sonnet-4-6 → 32k/128k; opus-4-5/sonnet-4-0/4-5/
+    // haiku-4-5 → 32k/64k; opus-4-1/4-0 → 32k/32k; else → 32k/128k.
+    let (default_tokens, upper_limit) = if m.contains("opus-4-8")
+        || m.contains("opus-4-7")
+        || m.contains("fable-5")
+        || m.contains("mythos-5")
+    {
+        (64_000, 128_000)
+    } else if m.contains("opus-4-6") {
         (64_000, 128_000)
     } else if m.contains("sonnet-4-6") {
         (32_000, 128_000)
@@ -298,6 +317,11 @@ mod tests {
         assert_eq!(max_output_tokens_for_model("claude-sonnet-4-20250101"), 32_000);
         assert_eq!(max_output_tokens_for_model("claude-haiku-4-5-x"), 32_000);
         assert_eq!(max_output_tokens_for_model("claude-opus-4-1-x"), 32_000);
+        // Binary YCe: opus-4-8/4-7/fable-5/mythos-5 → 64k (NOT the bare-opus-4 32k).
+        assert_eq!(max_output_tokens_for_model("claude-opus-4-8-20260115"), 64_000);
+        assert_eq!(max_output_tokens_for_model("claude-opus-4-7-x"), 64_000);
+        assert_eq!(max_output_tokens_for_model("claude-fable-5"), 64_000);
+        assert_eq!(max_output_tokens_for_model("claude-mythos-5"), 64_000);
         assert_eq!(max_output_tokens_for_model("claude-opus-4-20250514"), 32_000);
         assert_eq!(max_output_tokens_for_model("claude-3-opus-20240229"), 4_096);
         assert_eq!(max_output_tokens_for_model("claude-3-sonnet-20240229"), 8_192);

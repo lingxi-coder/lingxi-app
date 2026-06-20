@@ -2682,15 +2682,12 @@ mod tests {
         let transport = FakeTransport::always(ProviderResponse::json(200, ok_response_json()));
         let adapter = make_adapter(transport); // default ThinkingConfig::Adaptive
 
-        // (model, expected model-max-output-tokens) — from compaction's
-        // binary-grounded table. NOTE: opus-4-8 is newer than that table's
-        // dotted entries, so its canonical collapses to the bare `claude-opus-4`
-        // family → 32k (NOT 128k); fable-5 is unknown to the table → 32k default.
-        // We honor the existing table verbatim (per the change spec).
+        // (model, expected model-max-output-tokens) — binary YCe (v2.1.183):
+        // opus-4-8 / fable-5 → 64k default; sonnet-4-6 → 32k default.
         for (model, expected_max) in [
-            ("claude-opus-4-8", 32_000u32),
+            ("claude-opus-4-8", 64_000u32),
             ("claude-sonnet-4-6", 32_000),
-            ("claude-fable-5", 32_000),
+            ("claude-fable-5", 64_000),
         ] {
             let req = adapter
                 .build_request(model, None, None, vec![], vec![], false, None)
@@ -2742,8 +2739,8 @@ mod tests {
             .expect("build_request");
         assert!(req.reasoning.is_none(), "thinking disabled → no reasoning");
         assert_eq!(req.temperature, Some(1.0), "thinking disabled → temperature 1");
-        // max_tokens still the model value (opus-4-8 → bare opus-4 family → 32k).
-        assert_eq!(req.max_tokens, Some(32_000));
+        // max_tokens still the model value (binary YCe: opus-4-8 → 64k).
+        assert_eq!(req.max_tokens, Some(64_000));
         clear_thinking_env();
     }
 

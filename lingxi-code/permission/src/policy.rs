@@ -726,7 +726,17 @@ impl PermissionPolicy {
                 if rule.value.tool_name != tool_name {
                     return false;
                 }
-                return tool_content_key(tool_name, input).as_deref() == Some(pattern);
+                let Some(key) = tool_content_key(tool_name, input) else {
+                    return false;
+                };
+                // WebFetch `domain:` rules support normalization + wildcards
+                // (claude-code `y$n`/`v$a`/`bRp`, #31); other content tools
+                // (Agent) stay raw-equality.
+                return if tool_name == "WebFetch" {
+                    domain_rule_matches(pattern, &key)
+                } else {
+                    key == pattern
+                };
             }
             FileToolKind::Editor => rule.value.tool_name == "Edit",
             FileToolKind::Reader => {
@@ -1122,6 +1132,83 @@ fn url_hostname(url: &str) -> Option<String> {
     (!host.is_empty()).then(|| host.to_string())
 }
 
+/// Whether a WebFetch `domain:` CONTENT-rule `pattern` matches the candidate
+/// `domain:{host}` `key` — 1:1 with claude-code's per-rule `y$n` logic (#31):
+/// raw exact hit, else normalized exact (non-wildcard) match, else `bRp`
+/// wildcard match. (`y$n`'s exact-over-wildcard PRECEDENCE across a bucket is a
+/// separate, finer nuance handled at the rule-walk level; this is the per-rule
+/// predicate.)
+fn domain_rule_matches(pattern: &str, key: &str) -> bool {
+    if pattern == key {
+        return true;
+    }
+    let np = normalize_domain_key(pattern);
+    let nk = normalize_domain_key(key);
+    if np.contains('*') {
+        domain_wildcard_matches(&np, &nk)
+    } else {
+        np == nk
+    }
+}
+
+/// Normalize a `domain:` rule string — claude-code `v$a`: lowercase the host and
+/// strip a trailing run of dots (the `replace(/(?<=[^*.])\.+(?=(:\d+)?$)/,"")`).
+/// Non-`domain:` strings are returned unchanged.
+fn normalize_domain_key(s: &str) -> String {
+    let Some(rest) = s.strip_prefix("domain:") else {
+        return s.to_string();
+    };
+    let lower = rest.to_ascii_lowercase();
+    // Split off an optional trailing `:port` (`:\d+$`) so dots are stripped from
+    // the host body only (matching the `(?=(:\d+)?$)` lookahead).
+    let (body, port) = match lower.rfind(':') {
+        Some(i) if !lower[i + 1..].is_empty() && lower[i + 1..].bytes().all(|b| b.is_ascii_digit()) => {
+            (&lower[..i], &lower[i..])
+        }
+        _ => (lower.as_str(), ""),
+    };
+    let trimmed = body.trim_end_matches('.');
+    // The lookbehind `(?<=[^*.])` requires the char before the dot-run to be
+    // neither `*` nor `.` (and to exist); otherwise the dots are NOT stripped.
+    let strip = trimmed.len() != body.len()
+        && !matches!(trimmed.chars().next_back(), None | Some('*') | Some('.'));
+    if strip {
+        format!("domain:{trimmed}{port}")
+    } else {
+        format!("domain:{lower}")
+    }
+}
+
+/// Whether wildcard `pattern` matches `candidate` (both normalized `domain:`
+/// strings) — claude-code `bRp` + `w$a`. `domain:*` matches all; `domain:*.x`
+/// matches one-or-more leading labels then `x`; a bare `*` becomes `[^.:]*`.
+fn domain_wildcard_matches(pattern: &str, candidate: &str) -> bool {
+    if !pattern.starts_with("domain:") || !candidate.starts_with("domain:") {
+        return false;
+    }
+    if pattern == "domain:*" {
+        return true;
+    }
+    let regex_str = if let Some(suffix) = pattern.strip_prefix("domain:*.") {
+        format!("^domain:(?:[^.:]+\\.)+{}$", escape_domain_wildcard(suffix))
+    } else {
+        let rest = &pattern["domain:".len()..];
+        format!("^domain:{}$", escape_domain_wildcard(rest))
+    };
+    // `(?i)` mirrors `bRp`'s `new RegExp(n, "i")` (inputs are already lowercased).
+    regex::Regex::new(&format!("(?i){regex_str}"))
+        .is_ok_and(|re| re.is_match(candidate))
+}
+
+/// Escape regex metacharacters and turn each `*` into `[^.:]*` — claude-code
+/// `w$a` (`split("*").map(escape).join("[^.:]*")`).
+fn escape_domain_wildcard(s: &str) -> String {
+    s.split('*')
+        .map(regex::escape)
+        .collect::<Vec<_>>()
+        .join("[^.:]*")
+}
+
 /// Byte-locked sed-constraint ask: an `acceptEdits` `sed` subcommand whose
 /// auto-allow verdict is `Unsafe` (claude-code `checkSedConstraints` returning
 /// `behavior: 'ask'`, `sedValidation.ts:665-675`). Tagged
@@ -1329,6 +1416,48 @@ fn ask_plan_mutation(tool_name: &str) -> PermissionResult {
 mod tests {
     use super::*;
     use crate::rule::{PermissionBehavior, PermissionRuleValue};
+
+    // ---- #31 WebFetch domain rule matching (y$n/v$a/bRp) -------------------
+
+    #[test]
+    fn domain_rule_exact_and_normalized() {
+        // Raw exact.
+        assert!(domain_rule_matches("domain:example.com", "domain:example.com"));
+        // Case-insensitive (pattern + key normalized to lowercase).
+        assert!(domain_rule_matches("domain:Example.COM", "domain:example.com"));
+        assert!(domain_rule_matches("domain:example.com", "domain:EXAMPLE.com"));
+        // Trailing dot on either side is stripped.
+        assert!(domain_rule_matches("domain:example.com.", "domain:example.com"));
+        assert!(domain_rule_matches("domain:example.com", "domain:example.com."));
+        // Non-matching host.
+        assert!(!domain_rule_matches("domain:example.com", "domain:other.com"));
+    }
+
+    #[test]
+    fn domain_rule_wildcards() {
+        // `domain:*` matches anything.
+        assert!(domain_rule_matches("domain:*", "domain:anything.example.org"));
+        // `*.example.com` needs >=1 leading label.
+        assert!(domain_rule_matches("domain:*.example.com", "domain:a.example.com"));
+        assert!(domain_rule_matches("domain:*.example.com", "domain:a.b.example.com"));
+        assert!(!domain_rule_matches("domain:*.example.com", "domain:example.com"));
+        assert!(!domain_rule_matches("domain:*.example.com", "domain:notexample.com"));
+        // A label-internal `*` becomes `[^.:]*` (does not cross a dot).
+        assert!(domain_rule_matches("domain:foo*.com", "domain:foobar.com"));
+        assert!(!domain_rule_matches("domain:foo*.com", "domain:foo.bar.com"));
+    }
+
+    #[test]
+    fn normalize_domain_key_trailing_dots() {
+        assert_eq!(normalize_domain_key("domain:Foo.COM."), "domain:foo.com");
+        // Preceded by `*`/`.` → not stripped (lookbehind fails).
+        assert_eq!(normalize_domain_key("domain:*."), "domain:*.");
+        // Trailing dots preserved before a :port-less host only; with port the
+        // host body is trimmed.
+        assert_eq!(normalize_domain_key("domain:x.com.:8080"), "domain:x.com:8080");
+        // Non-domain string untouched.
+        assert_eq!(normalize_domain_key("general-purpose"), "general-purpose");
+    }
 
     #[test]
     fn default_mode_asks_for_unknown_tool() {

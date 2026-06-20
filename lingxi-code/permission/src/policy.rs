@@ -296,25 +296,49 @@ impl PermissionPolicy {
     ) -> PermissionResult {
         let sources = SOURCES_BY_PRIORITY;
 
-        // Precedence mirrors claude-code `hasPermissionsToUseToolInner`:
-        //   1a tool-wide deny → 1b tool-wide ask → 1c content deny → content ask
-        //   → allow → mode.
-        // The tool-wide ask SHORT-CIRCUITS before any content deny (a project
-        // that asks on all of a tool, yet also denies one command, gets the ask).
+        // Precedence mirrors claude-code's real decision fn `mSm`
+        // (offset ~205931956). The KEY invariant (R-D1): the ENTIRE deny phase
+        // (tool-wide + content) runs before ANY ask, so a `deny` rule can never be
+        // downgraded to an `ask`. The mSm order is:
+        //   1a tool-wide deny  (`B3t` → `SIo`, ruleContent===void 0)
+        //   1b content deny    (`K5t(...,"deny")`)
+        //   1c tool-wide ask   (`EIo` → `SIo`, ruleContent===void 0)
+        //   → e.checkPermissions(...) runs; ONLY a `deny` verdict short-circuits
+        //     (`if(l?.behavior==="deny")return l`)
+        //   1d content ask     (`K5t(...,"ask")`)  — mSm step 5
+        //   → the checkPermissions ASK verdicts (dangerous rm/path/safety) are
+        //     returned (mSm step 6), then its ALLOW verdicts (sandbox auto-allow,
+        //     read-only, exact-allow) via the allow walk / mode.
+        // Because LingXi's per-tool guards below (sandbox-auto-allow,
+        // dangerous-removal, path-constraint, exact-allow, bash-safety) emit only
+        // ALLOW or ASK verdicts (never `deny` — deny rules are the explicit walks
+        // here), and content ask BEATS a checkPermissions allow/ask (mSm step 5
+        // precedes step 6/7), content ask must sit BEFORE that guard block — i.e.
+        // right after the deny phase + tool-wide ask. (Locked by
+        // `read_only_ask_rule_still_asks` + `sandbox_auto_allow_ask_rule_still_asks`,
+        // where a content ask wins over the read-only / sandbox auto-allow.)
         // 1a. Tool-wide deny.
         if let Some(rule) = self.first_match(&self.deny_rules, &sources, tool_name, input, false) {
             return deny_with_rule(rule);
         }
-        // 1b. Tool-wide ask.
-        if let Some(rule) = self.first_match(&self.ask_rules, &sources, tool_name, input, false) {
-            return ask_with_rule(rule, tool_name);
-        }
-        // 1c. Content deny.
+        // 1b. Content deny — runs as part of the deny phase, BEFORE any ask, so
+        //     a `deny:[Bash(rm:*)]` is honored even when `ask:[Bash]` is also set
+        //     (mSm: `K5t(...,"deny")` precedes the tool-wide ask `EIo`). This is
+        //     the R-D1 fix: previously tool-wide ask walked before content deny,
+        //     downgrading a deny to an ask.
         if let Some(rule) = self.first_match(&self.deny_rules, &sources, tool_name, input, true) {
             return deny_with_rule(rule);
         }
-        // Content ask — a matching ask rule prompts (the gate's read-only
-        // default may still auto-allow, but the rule is honored).
+        // 1c. Tool-wide ask (`EIo`).
+        if let Some(rule) = self.first_match(&self.ask_rules, &sources, tool_name, input, false) {
+            return ask_with_rule(rule, tool_name);
+        }
+        // 1d. Content ask (`K5t(...,"ask")`, mSm step 5) — a matching content ask
+        //     rule prompts. Placed AFTER the deny phase but BEFORE the per-tool
+        //     guards below, because content ask BEATS the guards' allow/ask
+        //     verdicts (sandbox auto-allow, read-only allow, exact-allow). The
+        //     gate's read-only default may still auto-allow, but the rule is
+        //     honored.
         if let Some(rule) = self.first_match(&self.ask_rules, &sources, tool_name, input, true) {
             return ask_with_rule(rule, tool_name);
         }
@@ -1108,28 +1132,20 @@ fn tool_content_key(tool_name: &str, input: &serde_json::Value) -> Option<String
     }
 }
 
-/// Extract the hostname from a URL string — a minimal stand-in for the WHATWG
-/// `new URL(url).hostname` used by claude-code for the `WebFetch` rule-content. Strips
-/// the scheme, userinfo, path/query/fragment, and port; preserves a bracketed
-/// IPv6 literal. Returns `None` when no host is present.
+/// Extract the hostname from a URL string — the WHATWG `new URL(url).hostname`
+/// claude-code uses to key `domain:${new URL(n).hostname}` rules (`_qa`,
+/// offset ~201711761). Delegates to the `url` crate (the Rust WHATWG URL
+/// parser): `Url::host_str()` reproduces `.hostname` exactly — it
+/// Punycode/IDNA-encodes IDN hosts (`münchen.de` → `xn--mnchen-3ya.de`),
+/// percent-decodes the host (`foo%2Ebar.com` → `foo.bar.com`), lowercases it,
+/// strips userinfo/port/path/query/fragment, and preserves a bracketed IPv6
+/// literal. Returns `None` when the URL fails to parse or carries no host
+/// (1:1 with `new URL(...)` throwing / a hostless URL — `_qa` then keys no
+/// `domain:` rule).
 fn url_hostname(url: &str) -> Option<String> {
-    let after_scheme = url.split_once("://").map_or(url, |(_, rest)| rest);
-    let authority = after_scheme
-        .split(['/', '?', '#'])
-        .next()
-        .unwrap_or(after_scheme);
-    // Drop any `user:pass@` userinfo (last `@` before the host).
-    let host_port = authority.rsplit_once('@').map_or(authority, |(_, h)| h);
-    let host = if host_port.starts_with('[') {
-        // IPv6 literal: the hostname includes the brackets (`[::1]`).
-        host_port
-            .find(']')
-            .map_or(host_port, |i| &host_port[..=i])
-    } else {
-        // Strip a `:port` suffix.
-        host_port.split_once(':').map_or(host_port, |(h, _)| h)
-    };
-    (!host.is_empty()).then(|| host.to_string())
+    url::Url::parse(url)
+        .ok()
+        .and_then(|u| u.host_str().map(str::to_string))
 }
 
 /// Whether a WebFetch `domain:` CONTENT-rule `pattern` matches the candidate
@@ -2162,16 +2178,21 @@ mod tests {
     }
 
     #[test]
-    fn toolwide_ask_short_circuits_before_content_deny() {
-        // claude-code precedence: a TOOL-WIDE ask rule pre-empts a CONTENT deny
-        // rule (1b before 1c). `ask:["Bash"]` + `deny:["Bash(rm:*)"]` → Ask.
+    fn content_deny_beats_toolwide_ask() {
+        // claude-code `mSm` precedence: the ENTIRE deny phase (tool-wide + content)
+        // runs BEFORE any ask, so a CONTENT deny rule pre-empts a TOOL-WIDE ask
+        // rule — a `deny` can never be downgraded to an `ask`.
+        // `ask:["Bash"]` + `deny:["Bash(rm:*)"]`, command `rm -rf /` → DENY
+        // (mSm step 2 `K5t(...,"deny")` precedes step 3 tool-wide ask `EIo`).
+        // (Was previously the WRONG `toolwide_ask_short_circuits_before_content_deny`
+        // test that asserted Ask — the deny-first reorder corrects it to Deny.)
         let p = policy_with_roots(
             r#"{ "permissions": { "ask": ["Bash"], "deny": ["Bash(rm:*)"] } }"#,
             PermissionMode::Default,
         );
         assert!(matches!(
             p.authorize("Bash", &bash("rm -rf /")),
-            PermissionResult::Ask { .. }
+            PermissionResult::Deny { .. }
         ));
     }
 
@@ -2197,6 +2218,39 @@ mod tests {
         assert!(matches!(
             p.authorize("Bash", &bash("rm x")),
             PermissionResult::Deny { .. }
+        ));
+    }
+
+    #[test]
+    fn deny_phase_completes_before_any_ask() {
+        // Reinforces the mSm invariant from a non-Bash angle: a CONTENT deny rule
+        // beats a TOOL-WIDE ask rule regardless of which is a guarded tool. The
+        // whole deny phase precedes the ask phase, so this returns Deny, not Ask.
+        let p = policy_with_roots(
+            r#"{ "permissions": { "ask": ["WebFetch"], "deny": ["WebFetch(domain:evil.com)"] } }"#,
+            PermissionMode::Default,
+        );
+        assert!(matches!(
+            p.authorize("WebFetch", &serde_json::json!({ "url": "https://evil.com/x" })),
+            PermissionResult::Deny { .. }
+        ));
+    }
+
+    #[test]
+    fn content_ask_beats_checkpermissions_allow_verdicts() {
+        // mSm: content ask (step 5) precedes the checkPermissions allow/ask
+        // verdicts (steps 6/7) — only a checkPermissions `deny` short-circuits
+        // before it. So a content ask wins over a read-only auto-allow: a
+        // `Bash(grep:*)` ask rule still prompts even though `grep` is read-only
+        // (which would otherwise auto-allow). (The sandbox-auto-allow sibling case
+        // is locked by `sandbox_auto_allow_ask_rule_still_asks`.)
+        let p = policy_with_roots(
+            r#"{ "permissions": { "ask": ["Bash(grep:*)"] } }"#,
+            PermissionMode::Default,
+        );
+        assert!(matches!(
+            p.authorize("Bash", &bash("grep pat file")),
+            PermissionResult::Ask { .. }
         ));
     }
 
@@ -2971,6 +3025,76 @@ mod tests {
         assert!(matches!(
             p.authorize("WebFetch", &webfetch("https://other.example.com/v1")),
             PermissionResult::Ask { .. }
+        ));
+    }
+
+    // ── R-D4: WHATWG-compliant WebFetch hostname extraction (`_qa`) ────────
+
+    #[test]
+    fn url_hostname_plain_ascii_unchanged() {
+        // The common case must be byte-identical to the old hand-rolled splitter:
+        // scheme + path stripped, userinfo + port dropped, IPv6 brackets kept.
+        assert_eq!(url_hostname("https://example.com/path").as_deref(), Some("example.com"));
+        assert_eq!(url_hostname("https://example.com").as_deref(), Some("example.com"));
+        assert_eq!(url_hostname("https://sub.example.com/a?q#f").as_deref(), Some("sub.example.com"));
+        assert_eq!(
+            url_hostname("https://user:pass@example.com:8080/p?q#f").as_deref(),
+            Some("example.com")
+        );
+        assert_eq!(url_hostname("https://[::1]:8080/p").as_deref(), Some("[::1]"));
+        // WHATWG lowercases the host (matches `new URL().hostname`).
+        assert_eq!(url_hostname("http://EXAMPLE.com/Path").as_deref(), Some("example.com"));
+        // A single-label host is valid and preserved (locks the `https://x` test).
+        assert_eq!(url_hostname("https://x").as_deref(), Some("x"));
+    }
+
+    #[test]
+    fn url_hostname_idn_is_punycoded() {
+        // claude-code keys `domain:${new URL(n).hostname}`, which IDNA/Punycode-
+        // encodes the host. The old splitter left the raw unicode, mis-keying the
+        // rule. `münchen.de` → `xn--mnchen-3ya.de`.
+        assert_eq!(
+            url_hostname("https://münchen.de/page").as_deref(),
+            Some("xn--mnchen-3ya.de")
+        );
+    }
+
+    #[test]
+    fn url_hostname_percent_encoded_is_decoded() {
+        // `new URL().hostname` percent-decodes the host: `foo%2Ebar.com` →
+        // `foo.bar.com` (`%2E` is `.`). The old splitter kept the literal `%2E`,
+        // letting a `WebFetch(domain:foo.bar.com)` deny rule be bypassed.
+        assert_eq!(
+            url_hostname("https://foo%2Ebar.com/x").as_deref(),
+            Some("foo.bar.com")
+        );
+    }
+
+    #[test]
+    fn webfetch_percent_encoded_host_no_longer_bypasses_deny() {
+        // END-TO-END deny-bypass regression: a `WebFetch(domain:foo.bar.com)` deny
+        // rule must now match a request to the percent-encoded `foo%2Ebar.com`,
+        // because the host extractor decodes it to `foo.bar.com` (was a bypass).
+        let p = policy_with_roots(
+            r#"{ "permissions": { "deny": ["WebFetch(domain:foo.bar.com)"] } }"#,
+            PermissionMode::Default,
+        );
+        assert!(matches!(
+            p.authorize("WebFetch", &webfetch("https://foo%2Ebar.com/secrets")),
+            PermissionResult::Deny { .. }
+        ));
+    }
+
+    #[test]
+    fn webfetch_idn_host_matches_punycode_deny_rule() {
+        // A deny rule keyed by the Punycode host matches an IDN request URL.
+        let p = policy_with_roots(
+            r#"{ "permissions": { "deny": ["WebFetch(domain:xn--mnchen-3ya.de)"] } }"#,
+            PermissionMode::Default,
+        );
+        assert!(matches!(
+            p.authorize("WebFetch", &webfetch("https://münchen.de/page")),
+            PermissionResult::Deny { .. }
         ));
     }
 

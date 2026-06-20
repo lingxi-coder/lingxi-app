@@ -16,6 +16,12 @@ thiserror.workspace = true
 tokio = { workspace = true, features = ["io-util", "io-std", "fs"] }
 tracing.workspace = true
 regex = "1"
+# WHATWG URL parser — the Rust analogue of the JS `new URL(...)` claude-code
+# uses to key `WebFetch(domain:${new URL(n).hostname})` rules (`_qa`,
+# offset ~201711761). `host_str()` reproduces `.hostname`: it Punycode/IDNA-
+# encodes IDN hosts and percent-decodes the host. Already in Cargo.lock (2.5.8,
+# pulled in by `tools/web`).
+url = "2"
 # Faithful gitignore-glob matcher for file-path permission rules (3a) — the
 # Rust analogue of claude-code's `ignore` npm lib; already in Cargo.lock.
 ignore = "0.4"

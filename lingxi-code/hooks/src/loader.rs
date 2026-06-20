@@ -63,6 +63,138 @@ use serde::Deserialize;
 use std::collections::HashMap;
 use std::time::Duration;
 
+/// Managed-policy gate over which settings-tier hooks are allowed to load.
+///
+/// Byte-faithful port of claude-code's hook-config resolver `vBr`
+/// (`claude.exe` off 195521070):
+///
+/// ```js
+/// function vBr(){
+///   let e=Hn("policySettings");
+///   if(e?.disableAllHooks===!0)return{};                       // (A) no hooks at all
+///   if(e?.allowManagedHooksOnly===!0||Bl())return e?.hooks??{};// (B) managed-only (safe-mode too)
+///   if(iS("hooks"))return e?.hooks??{};                        // (C) strictPluginOnly → managed-only
+///   let t=ts();                                                // main effective settings
+///   if(t.disableAllHooks===!0)return e?.hooks??{};             // (D) settings-tier disable → managed-only
+///   return t.hooks??{};                                        // (E) all merged hooks
+/// }
+/// ```
+///
+/// where `Bl()` (off 192139854) = `CLAUDE_CODE_SAFE_MODE || --safe-mode`, and
+/// `iS("hooks")` (off 195520574) = the `strictPluginOnlyCustomization` policy
+/// flag (`true`, or an array containing `"hooks"`).
+///
+/// `vBr` returns the merged hook *config map*; this crate instead loads each
+/// tier's hooks separately ([`parse_hooks_from_settings_json`] per [`HookSource`]), so
+/// the equivalent decision is "is THIS source's tier allowed to load at all?".
+/// [`Self::allows_source`] reproduces `vBr`'s branches as a per-source predicate:
+/// when only managed hooks survive (branches B/C/D) every non-[`HookSource::Managed`]
+/// tier is suppressed; when `disableAllHooks` is set in the policy tier
+/// (branch A) even the managed tier is suppressed.
+///
+/// `policySettings.disableAllHooks` / `allowManagedHooksOnly` are read from the
+/// managed/policy settings tier; `safe_mode` is the runtime `Bl()` signal;
+/// `settings_disable_all_hooks` is the merged-settings (`ts()`) `disableAllHooks`
+/// flag (branch D). Sourcing all three from resolved settings lives at the engine
+/// composition root (cross-crate); this struct is the pure decision the loader
+/// applies. The default-constructed gate (all `false`) allows every tier — the
+/// faithful no-managed-policy path.
+// Each bool is a distinct binary signal in `vBr` (disableAllHooks /
+// allowManagedHooksOnly / Bl() safe-mode / iS("hooks") / ts().disableAllHooks);
+// collapsing them into an enum would lose the 1:1 mapping to the source flags.
+#[allow(clippy::struct_excessive_bools)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct HookPolicyGate {
+    /// `policySettings.disableAllHooks === true` — suppresses EVERY tier,
+    /// including managed (branch A: `vBr` returns `{}`).
+    pub policy_disable_all_hooks: bool,
+    /// `policySettings.allowManagedHooksOnly === true` — only the managed tier
+    /// loads (branch B).
+    pub allow_managed_hooks_only: bool,
+    /// `Bl()` — `CLAUDE_CODE_SAFE_MODE` env or `--safe-mode` flag. Folds into
+    /// branch B (managed-only) exactly like `allowManagedHooksOnly`.
+    pub safe_mode: bool,
+    /// `strictPluginOnlyCustomization` (`iS("hooks")`, branch C) — also collapses
+    /// to managed-only.
+    pub strict_plugin_only: bool,
+    /// `ts().disableAllHooks === true` (the merged main-settings flag, branch D)
+    /// — collapses to managed-only (the managed tier is still honored).
+    pub settings_disable_all_hooks: bool,
+}
+
+/// Policy-settings shape consumed by [`HookPolicyGate::from_policy_settings_json`].
+#[derive(Debug, Default, Deserialize)]
+struct PolicySettingsTop {
+    #[serde(default, rename = "disableAllHooks")]
+    disable_all_hooks: Option<bool>,
+    #[serde(default, rename = "allowManagedHooksOnly")]
+    allow_managed_hooks_only: Option<bool>,
+}
+
+impl HookPolicyGate {
+    /// Build a gate from the raw policy/managed `settings.json` text plus the
+    /// two runtime signals (`safe_mode` = `Bl()`, `settings_disable_all_hooks` =
+    /// `ts().disableAllHooks`).
+    ///
+    /// Mirrors the binary's `e?.` optional-chaining fail-open: a malformed /
+    /// missing policy JSON parses to all-`None` (no gating from the policy tier),
+    /// exactly as `Hn("policySettings")` yielding `undefined` leaves
+    /// `e?.disableAllHooks` and `e?.allowManagedHooksOnly` `undefined` (falsy).
+    ///
+    /// `strict_plugin_only` (the `iS("hooks")` branch) is sourced separately at
+    /// the composition root (it reads a DIFFERENT policy field,
+    /// `strictPluginOnlyCustomization`, which can be a bool or a string array);
+    /// callers that resolve it should set it via the returned value's field.
+    #[must_use]
+    pub fn from_policy_settings_json(
+        policy_json: Option<&str>,
+        safe_mode: bool,
+        settings_disable_all_hooks: bool,
+    ) -> Self {
+        let policy: PolicySettingsTop = policy_json
+            .and_then(|raw| serde_json::from_str(raw).ok())
+            .unwrap_or_default();
+        Self {
+            // `=== !0` ⇒ strict `Some(true)`.
+            policy_disable_all_hooks: policy.disable_all_hooks == Some(true),
+            allow_managed_hooks_only: policy.allow_managed_hooks_only == Some(true),
+            safe_mode,
+            strict_plugin_only: false,
+            settings_disable_all_hooks,
+        }
+    }
+
+    /// `true` when only the managed/policy tier's hooks are allowed (branches
+    /// B/C/D of `vBr`): `allowManagedHooksOnly`, safe-mode, strict-plugin-only,
+    /// or the merged-settings `disableAllHooks`. (Independent of branch A, which
+    /// suppresses even the managed tier — see [`Self::allows_source`].)
+    #[must_use]
+    pub fn managed_only(&self) -> bool {
+        self.allow_managed_hooks_only
+            || self.safe_mode
+            || self.strict_plugin_only
+            || self.settings_disable_all_hooks
+    }
+
+    /// Whether hooks from `source` are allowed to load under this gate.
+    ///
+    /// - Branch A (`policy_disable_all_hooks`): no tier loads — returns `false`
+    ///   for every source, including [`HookSource::Managed`].
+    /// - Branches B/C/D ([`Self::managed_only`]): only [`HookSource::Managed`]
+    ///   loads.
+    /// - Otherwise (branch E): every tier loads.
+    #[must_use]
+    pub fn allows_source(&self, source: HookSource) -> bool {
+        if self.policy_disable_all_hooks {
+            return false;
+        }
+        if self.managed_only() {
+            return source == HookSource::Managed;
+        }
+        true
+    }
+}
+
 /// Top-level settings shape consumed by [`parse_hooks_from_settings_json`].
 #[derive(Debug, Deserialize)]
 struct SettingsTop {
@@ -148,6 +280,39 @@ const DEFAULT_AGENT_TYPE: &str = "general-purpose";
 /// `source` is propagated onto every returned [`HookDefinition`] so the
 /// registry can later display trust info per origin.
 pub fn parse_hooks_from_settings_json(
+    raw: &str,
+    source: HookSource,
+) -> Result<Vec<HookDefinition>, serde_json::Error> {
+    parse_into(raw, source)
+}
+
+/// [`parse_hooks_from_settings_json`] gated by a [`HookPolicyGate`].
+///
+/// When the gate suppresses `source` ([`HookPolicyGate::allows_source`] is
+/// `false` — e.g. a `disableAllHooks` / `allowManagedHooksOnly` managed policy,
+/// or safe-mode), this returns `Ok(vec![])` WITHOUT parsing `raw`, mirroring the
+/// binary's `vBr` returning `{}` / only the managed tier's hooks for the
+/// corresponding tiers. When the gate allows the source it is byte-identical to
+/// [`parse_hooks_from_settings_json`].
+///
+/// Composition roots that have resolved managed/policy settings + the safe-mode
+/// signal should call this per source instead of the ungated variant so the
+/// policy gate is honored at load time. The default-constructed gate
+/// ([`HookPolicyGate::default`]) allows every source, so wiring it in is
+/// behavior-neutral until a real policy is supplied.
+pub fn parse_hooks_from_settings_json_gated(
+    raw: &str,
+    source: HookSource,
+    gate: HookPolicyGate,
+) -> Result<Vec<HookDefinition>, serde_json::Error> {
+    if !gate.allows_source(source) {
+        return Ok(Vec::new());
+    }
+    parse_into(raw, source)
+}
+
+/// Shared projection used by both the ungated and gated entry points.
+fn parse_into(
     raw: &str,
     source: HookSource,
 ) -> Result<Vec<HookDefinition>, serde_json::Error> {
@@ -723,5 +888,175 @@ mod tests {
         assert!(matches!(hooks[1].executor, HookExecutor::Http { .. }));
         assert!(matches!(hooks[2].executor, HookExecutor::Agent { .. }));
         assert!(matches!(hooks[3].executor, HookExecutor::Prompt { .. }));
+    }
+
+    // ---- #41: managed-policy hook gate (vBr / h$) --------------------------
+
+    /// Minimal `{ "hooks": { "Stop": [{ "hooks": [command] }] } }` so a gated
+    /// load that allows the source produces exactly one hook.
+    fn one_stop_command() -> String {
+        one_command("Stop")
+    }
+
+    #[test]
+    fn policy_gate_default_allows_every_source() {
+        // The default-constructed gate (no managed policy, not safe-mode) is the
+        // faithful no-policy path: every tier loads.
+        let gate = HookPolicyGate::default();
+        for src in [
+            HookSource::User,
+            HookSource::Project,
+            HookSource::Local,
+            HookSource::Managed,
+            HookSource::Plugin,
+            HookSource::FrontMatter,
+        ] {
+            assert!(gate.allows_source(src), "default gate must allow {src:?}");
+        }
+        assert!(!gate.managed_only());
+    }
+
+    #[test]
+    fn policy_disable_all_hooks_blocks_every_tier_including_managed() {
+        // vBr branch A: `policySettings.disableAllHooks===true` → `{}` (no hooks
+        // at all). Even the managed tier is suppressed.
+        let policy = r#"{ "disableAllHooks": true }"#;
+        let gate = HookPolicyGate::from_policy_settings_json(Some(policy), false, false);
+        assert!(gate.policy_disable_all_hooks);
+        for src in [HookSource::User, HookSource::Project, HookSource::Managed] {
+            assert!(!gate.allows_source(src), "disableAllHooks must block {src:?}");
+        }
+    }
+
+    #[test]
+    fn allow_managed_hooks_only_keeps_only_managed_tier() {
+        // vBr branch B: `policySettings.allowManagedHooksOnly===true` → only the
+        // managed tier's hooks survive.
+        let policy = r#"{ "allowManagedHooksOnly": true }"#;
+        let gate = HookPolicyGate::from_policy_settings_json(Some(policy), false, false);
+        assert!(gate.managed_only());
+        assert!(gate.allows_source(HookSource::Managed));
+        for src in [HookSource::User, HookSource::Project, HookSource::Plugin] {
+            assert!(!gate.allows_source(src), "managed-only must block {src:?}");
+        }
+    }
+
+    #[test]
+    fn safe_mode_collapses_to_managed_only() {
+        // vBr branch B fold: `Bl()` (CLAUDE_CODE_SAFE_MODE / --safe-mode) is OR'd
+        // with allowManagedHooksOnly → only the managed tier loads.
+        let gate = HookPolicyGate::from_policy_settings_json(None, true, false);
+        assert!(gate.safe_mode);
+        assert!(gate.managed_only());
+        assert!(gate.allows_source(HookSource::Managed));
+        assert!(!gate.allows_source(HookSource::User));
+    }
+
+    #[test]
+    fn settings_tier_disable_all_hooks_collapses_to_managed_only() {
+        // vBr branch D: `ts().disableAllHooks===true` keeps the managed tier
+        // (returns `e?.hooks`), unlike branch A (policy disableAllHooks) which
+        // drops it. So the managed tier still loads.
+        let gate = HookPolicyGate::from_policy_settings_json(None, false, true);
+        assert!(gate.settings_disable_all_hooks);
+        assert!(gate.managed_only());
+        assert!(gate.allows_source(HookSource::Managed));
+        assert!(!gate.allows_source(HookSource::Project));
+    }
+
+    #[test]
+    fn strict_plugin_only_collapses_to_managed_only() {
+        // vBr branch C: `iS("hooks")` (strictPluginOnlyCustomization) → managed
+        // tier only. Sourced at the composition root and set on the gate field.
+        let gate = HookPolicyGate {
+            strict_plugin_only: true,
+            ..HookPolicyGate::default()
+        };
+        assert!(gate.managed_only());
+        assert!(gate.allows_source(HookSource::Managed));
+        assert!(!gate.allows_source(HookSource::User));
+    }
+
+    #[test]
+    fn policy_disable_all_hooks_takes_precedence_over_managed_only() {
+        // Branch A must win over B: when BOTH disableAllHooks and
+        // allowManagedHooksOnly are set, even the managed tier is dropped.
+        let policy = r#"{ "disableAllHooks": true, "allowManagedHooksOnly": true }"#;
+        let gate = HookPolicyGate::from_policy_settings_json(Some(policy), false, false);
+        assert!(!gate.allows_source(HookSource::Managed));
+        assert!(!gate.allows_source(HookSource::User));
+    }
+
+    #[test]
+    fn malformed_policy_json_fails_open() {
+        // The binary's `e?.` optional chaining treats missing/undefined policy
+        // as no gating. A malformed JSON parses to the all-`None` default ⇒ no
+        // gating beyond the runtime signals (here both false ⇒ everything loads).
+        let gate = HookPolicyGate::from_policy_settings_json(Some("not json {"), false, false);
+        assert!(!gate.policy_disable_all_hooks);
+        assert!(!gate.allow_managed_hooks_only);
+        assert!(gate.allows_source(HookSource::User));
+    }
+
+    #[test]
+    fn falsy_policy_flag_does_not_gate() {
+        // `=== !0` is strict `true`: `disableAllHooks: false` must NOT gate.
+        let policy = r#"{ "disableAllHooks": false, "allowManagedHooksOnly": false }"#;
+        let gate = HookPolicyGate::from_policy_settings_json(Some(policy), false, false);
+        assert!(!gate.policy_disable_all_hooks);
+        assert!(!gate.managed_only());
+        assert!(gate.allows_source(HookSource::User));
+    }
+
+    #[test]
+    fn gated_load_suppresses_without_parsing_when_blocked() {
+        // A blocked source returns an empty vec WITHOUT parsing — a managed
+        // disableAllHooks suppresses the user tier.
+        let gate = HookPolicyGate::from_policy_settings_json(
+            Some(r#"{ "disableAllHooks": true }"#),
+            false,
+            false,
+        );
+        let raw = one_stop_command();
+        let hooks =
+            parse_hooks_from_settings_json_gated(&raw, HookSource::User, gate).unwrap();
+        assert!(hooks.is_empty(), "disableAllHooks must suppress the user tier");
+    }
+
+    #[test]
+    fn gated_load_managed_only_keeps_managed_drops_user() {
+        let gate = HookPolicyGate::from_policy_settings_json(
+            Some(r#"{ "allowManagedHooksOnly": true }"#),
+            false,
+            false,
+        );
+        let raw = one_stop_command();
+        // Managed tier loads.
+        let managed =
+            parse_hooks_from_settings_json_gated(&raw, HookSource::Managed, gate).unwrap();
+        assert_eq!(managed.len(), 1);
+        assert_eq!(managed[0].source, HookSource::Managed);
+        // User tier is suppressed.
+        let user =
+            parse_hooks_from_settings_json_gated(&raw, HookSource::User, gate).unwrap();
+        assert!(user.is_empty());
+    }
+
+    #[test]
+    fn gated_load_under_default_gate_equals_ungated() {
+        // With the default (no-policy) gate, the gated entry point is
+        // byte-identical to the ungated one.
+        let raw = one_stop_command();
+        let gated = parse_hooks_from_settings_json_gated(
+            &raw,
+            HookSource::User,
+            HookPolicyGate::default(),
+        )
+        .unwrap();
+        let ungated = parse_hooks_from_settings_json(&raw, HookSource::User).unwrap();
+        assert_eq!(gated.len(), ungated.len());
+        assert_eq!(gated.len(), 1);
+        assert_eq!(gated[0].name, ungated[0].name);
+        assert_eq!(gated[0].source, ungated[0].source);
     }
 }

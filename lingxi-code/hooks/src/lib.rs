@@ -47,7 +47,9 @@ pub use hook_payload::{
     parse_response, HookEventEnvelope, HookEventNamePost, HookEventNamePre, HookResponseParseError,
     PostToolUsePayload, PreToolUsePayload,
 };
-pub use loader::parse_hooks_from_settings_json;
+pub use loader::{
+    parse_hooks_from_settings_json, parse_hooks_from_settings_json_gated, HookPolicyGate,
+};
 pub use matcher::{get_legacy_tool_names, matches_pattern, normalize_legacy_tool_name};
 pub use prompt_executor::{
     HookPromptRunner, PromptHookError, PromptHookRequest, HOOK_PROMPT_TIMEOUT_MS,

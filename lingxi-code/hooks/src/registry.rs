@@ -74,6 +74,19 @@ pub struct HookContext {
     /// omits the `effort` key entirely. The orchestrator populates this only
     /// for tool-use-context hooks on effort-capable models. Additive default.
     pub effort: Option<crate::hook_payload::EffortLevel>,
+    /// Controlling-terminal width/height at dispatch, injected into Command
+    /// hooks as `COLUMNS`/`LINES` (#43). claude-code reads
+    /// `{columns,rows}=process.stdout` and sets `if(L)P.COLUMNS=String(L)` /
+    /// `if(D)P.LINES=String(D)` (BIN off 205727903) — i.e. each is set ONLY when
+    /// truthy (non-zero / present). The hooks crate has no TTY of its own, so the
+    /// composition root passes the engine's `process.stdout` size here (`None`
+    /// for headless / non-TTY hosts, matching `process.stdout.columns` being
+    /// `undefined`); the Command arm then sets the env var only when `Some(n)` and
+    /// `n != 0` (the binary's falsy guard). Additive default `None`.
+    pub terminal_columns: Option<u16>,
+    /// Controlling-terminal height — see [`Self::terminal_columns`]. Injected as
+    /// the `LINES` env var (#43). Additive default `None`.
+    pub terminal_rows: Option<u16>,
 }
 
 /// In-memory registry of hook definitions, sharded by their declared source.

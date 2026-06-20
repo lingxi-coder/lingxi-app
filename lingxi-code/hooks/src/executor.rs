@@ -213,6 +213,16 @@ pub struct HookExecutorImpl {
     /// non-blocking hook falls back to running synchronously (so its result is
     /// never silently dropped) — the engine simply gains no backgrounding.
     async_registry: Option<Arc<AsyncHookRegistry>>,
+    /// #41: runner-head gate (`h$`, BIN off 195521423 =
+    /// `Hn("policySettings")?.disableAllHooks===!0`). When `true`, EVERY
+    /// `execute*` path skips all matched hooks and logs
+    /// `Skipping hooks for {event[:matcher]} due to 'disableAllHooks' managed
+    /// setting` — mirroring the binary's runner head `if(h$())return …,[]` ahead
+    /// of the workspace-trust gate. Sourced from resolved managed/policy settings
+    /// at the engine composition root and attached via
+    /// [`Self::with_policy_disable_all_hooks`]; defaults `false` (the no-managed
+    /// -policy path) so it is behavior-neutral until a policy is wired.
+    policy_disable_all_hooks: bool,
 }
 
 impl HookExecutorImpl {
@@ -238,7 +248,21 @@ impl HookExecutorImpl {
             process: None,
             sandbox: None,
             async_registry: None,
+            policy_disable_all_hooks: false,
         }
+    }
+
+    /// Attach the #41 runner-head gate (`h$`). When `disable_all_hooks` is
+    /// `true`, every `execute*` path skips all matched hooks and logs the
+    /// `'disableAllHooks' managed setting` skip line — mirroring the binary's
+    /// `if(h$())return …,[]` runner head. Sourced at the composition root from
+    /// the resolved `policySettings.disableAllHooks` managed setting (see
+    /// [`crate::loader::HookPolicyGate`]); the default (`false`) is the
+    /// no-managed-policy path and is behavior-neutral.
+    #[must_use]
+    pub fn with_policy_disable_all_hooks(mut self, disable_all_hooks: bool) -> Self {
+        self.policy_disable_all_hooks = disable_all_hooks;
+        self
     }
 
     /// Attach an [`AsyncHookRegistry`] so non-blocking (`blocking == false`)
@@ -371,11 +395,19 @@ impl HookExecutorImpl {
     /// deadline and are skipped (the binary's `if(r?.aborted)return[]` / empty
     /// per-hook output), so a hung early hook cannot starve teardown.
     ///
-    /// Like [`Self::execute`]: priority-descending order, `Block` short-circuit,
+    /// Like [`Self::execute`]: priority-descending order, every matched hook
+    /// dispatched (no first-`Block` break — #45(b); `Block` is folded sticky),
     /// `once` removal, B5 non-blocking backgrounding (those are not awaited so
     /// they never consume the deadline), and a strict no-op (default aggregate)
-    /// when no `SessionEnd` hook is registered.
+    /// when no `SessionEnd` hook is registered. The batch still stops early when
+    /// the shared shutdown deadline elapses.
     pub async fn execute_session_end(&self, event: HookEvent, ctx: HookContext) -> AggregateHookResult {
+        // #41 runner-head gate (`h$`): `policySettings.disableAllHooks` skips the
+        // SessionEnd batch entirely (the binary's `cH` head runs before the
+        // SessionEnd deadline race too).
+        if let Some(skipped) = self.policy_disable_gate(&event) {
+            return skipped;
+        }
         let reg = self.registry.read().await;
         let matched: Vec<HookDefinition> =
             reg.match_event(&event, &ctx).into_iter().cloned().collect();
@@ -431,9 +463,12 @@ impl HookExecutorImpl {
                     self.registry.write().await.remove_once_hook(hook.id);
                 }
                 Self::merge(&mut agg, hook, result);
-                if matches!(agg.decision, Some(crate::response::HookDecision::Block)) {
-                    break;
-                }
+                // #45(b): no early break on first `Block`. SessionEnd's decision is
+                // a shutdown-path verdict that is never consumed for blocking, and
+                // claude's `cH` runner runs every matched hook regardless; running
+                // the rest of the batch (still bounded by the batch deadline above)
+                // preserves later SessionEnd hooks' side effects. The `break` above
+                // remains for the batch-deadline-elapsed case only.
             } else {
                 // B5 non-blocking hooks are backgrounded (not awaited), so they
                 // never consume the batch deadline — identical to `execute`.
@@ -445,8 +480,12 @@ impl HookExecutorImpl {
 
     /// Fire `event` and return the aggregated result of every matching hook.
     ///
-    /// Hooks are evaluated in priority-descending order; processing stops
-    /// early on the first `Block` decision.
+    /// Hooks are evaluated in priority-descending order; EVERY matched hook is
+    /// dispatched (no early break on the first `Block` — #45(b), mirroring
+    /// claude-code's `cH` runner). The aggregate verdict is `Block` if ANY hook
+    /// blocked (`merge` keeps `Block` sticky), so later hooks' side effects
+    /// (systemMessage / additionalContext / updatedInput / `once`-removal) are
+    /// preserved while the blocking decision is unchanged.
     ///
     /// B5 — a matched hook with `blocking == false` is routed to the
     /// [`AsyncHookRegistry`] (when wired) instead of being awaited: it is
@@ -457,6 +496,11 @@ impl HookExecutorImpl {
     /// so its result is not silently dropped, but it is STILL excluded from the
     /// aggregate to preserve the "non-blocking can't block" contract.)
     pub async fn execute(&self, event: HookEvent, ctx: HookContext) -> AggregateHookResult {
+        // #41 runner-head gate (`h$`): `policySettings.disableAllHooks` skips
+        // ALL hooks before any matching/dispatch.
+        if let Some(skipped) = self.policy_disable_gate(&event) {
+            return skipped;
+        }
         let reg = self.registry.read().await;
         let matched: Vec<HookDefinition> =
             reg.match_event(&event, &ctx).into_iter().cloned().collect();
@@ -484,9 +528,13 @@ impl HookExecutorImpl {
                     self.registry.write().await.remove_once_hook(hook.id);
                 }
                 Self::merge(&mut agg, hook, result);
-                if matches!(agg.decision, Some(crate::response::HookDecision::Block)) {
-                    break;
-                }
+                // #45(b): NO early break on the first `Block`. claude-code's `cH`
+                // runner dispatches every matched hook (BIN off 205755512) and
+                // folds `blocked = some(t.blocked)` afterwards, so later hooks'
+                // systemMessage / additionalContext / updatedInput / `once`-removal
+                // side effects must NOT be lost. `merge` makes `Block` sticky, so
+                // the aggregate verdict is identical to the old short-circuit (any
+                // block wins) while the side effects are now preserved.
             } else {
                 // B5 config-`async` path: background the hook and continue. It
                 // is excluded from `agg`, so it cannot block.
@@ -510,15 +558,19 @@ impl HookExecutorImpl {
     /// path is byte-identical to legacy.
     ///
     /// Mirrors [`Self::execute`]'s per-hook dispatch (progress beacon, `blocking`
-    /// vs. background routing, `once` removal, `Block` short-circuit) so a
-    /// frontmatter hook behaves identically whether it fires here or via the
-    /// general path.
+    /// vs. background routing, `once` removal, no-early-`Block`-break with a
+    /// sticky `Block` fold — #45(b)) so a frontmatter hook behaves identically
+    /// whether it fires here or via the general path.
     pub async fn execute_agent_scoped(
         &self,
         event: HookEvent,
         ctx: HookContext,
         agent_id: protocol::AgentId,
     ) -> AggregateHookResult {
+        // #41 runner-head gate (`h$`).
+        if let Some(skipped) = self.policy_disable_gate(&event) {
+            return skipped;
+        }
         let reg = self.registry.read().await;
         let matched: Vec<HookDefinition> = reg
             .match_event_agent_scoped(&event, agent_id)
@@ -540,9 +592,8 @@ impl HookExecutorImpl {
                     self.registry.write().await.remove_once_hook(hook.id);
                 }
                 Self::merge(&mut agg, hook, result);
-                if matches!(agg.decision, Some(crate::response::HookDecision::Block)) {
-                    break;
-                }
+                // #45(b): no early break on first `Block` — see `execute`. All
+                // matched hooks dispatch; `merge` keeps `Block` sticky.
             } else {
                 self.background_hook(hook, &event, &ctx).await;
             }
@@ -564,13 +615,18 @@ impl HookExecutorImpl {
     /// agent registered no frontmatter hooks (every `FakeAgentTool` fixture).
     ///
     /// Mirrors [`Self::execute`]'s per-hook dispatch (progress beacon, `blocking`
-    /// vs. background routing, `once` removal, `Block` short-circuit).
+    /// vs. background routing, `once` removal, no-early-`Block`-break with a
+    /// sticky `Block` fold — #45(b)).
     pub async fn execute_excluding_agent(
         &self,
         event: HookEvent,
         ctx: HookContext,
         exclude_agent_id: protocol::AgentId,
     ) -> AggregateHookResult {
+        // #41 runner-head gate (`h$`).
+        if let Some(skipped) = self.policy_disable_gate(&event) {
+            return skipped;
+        }
         let reg = self.registry.read().await;
         let matched: Vec<HookDefinition> = reg
             .match_event_excluding_agent(&event, exclude_agent_id)
@@ -592,9 +648,8 @@ impl HookExecutorImpl {
                     self.registry.write().await.remove_once_hook(hook.id);
                 }
                 Self::merge(&mut agg, hook, result);
-                if matches!(agg.decision, Some(crate::response::HookDecision::Block)) {
-                    break;
-                }
+                // #45(b): no early break on first `Block` — see `execute`. All
+                // matched hooks dispatch; `merge` keeps `Block` sticky.
             } else {
                 self.background_hook(hook, &event, &ctx).await;
             }
@@ -768,17 +823,43 @@ impl Dispatcher {
                 // are out of B2 scope.
                 let mut child_env = env.clone();
                 let project_dir = ctx.project_dir.clone().unwrap_or_else(|| ctx.cwd.clone());
-                child_env.insert(
-                    "CLAUDE_PROJECT_DIR".to_string(),
-                    project_dir.to_string_lossy().into_owned(),
-                );
+                let project_dir_str = project_dir.to_string_lossy().into_owned();
+                child_env.insert("CLAUDE_PROJECT_DIR".to_string(), project_dir_str.clone());
+                // #43: COLUMNS/LINES from the controlling-terminal size. claude
+                // reads `{columns:L,rows:D}=process.stdout` then
+                // `if(L)P.COLUMNS=String(L);if(D)P.LINES=String(D)` (BIN off
+                // 205727903) — set ONLY when truthy (the `if(L)`/`if(D)` falsy
+                // guard). The size is threaded in via `HookContext` from the
+                // engine's stdout (the crate has no TTY of its own); `None` /
+                // `0` matches a non-TTY `process.stdout.columns === undefined`.
+                if let Some(cols) = ctx.terminal_columns.filter(|c| *c != 0) {
+                    child_env.insert("COLUMNS".to_string(), cols.to_string());
+                }
+                if let Some(rows) = ctx.terminal_rows.filter(|r| *r != 0) {
+                    child_env.insert("LINES".to_string(), rows.to_string());
+                }
+                // #43: literal `${CLAUDE_PROJECT_DIR}` token substitution in the
+                // command AND every arg (claude-code `_e` mapper, BIN off
+                // 205727901: `if(!fe.includes("${"))return fe; fe=fe.replaceAll(
+                // "${CLAUDE_PROJECT_DIR}",()=>S)`, applied as `k=[_e(e.command),
+                // e.args.map(_e)]`). A non-shell exec / arg never gets a shell to
+                // expand `$CLAUDE_PROJECT_DIR`, so the literal `${…}` token must be
+                // replaced here. `${CLAUDE_PLUGIN_ROOT}` / `${CLAUDE_PLUGIN_DATA}`
+                // need plugin scope (not on `HookExecutor::Command`) and are a
+                // documented residual — a string carrying only those tokens passes
+                // through unchanged, matching claude when no plugin scope is bound.
+                let command = substitute_project_dir(command, &project_dir_str);
+                let args: Vec<String> = args
+                    .iter()
+                    .map(|a| substitute_project_dir(a, &project_dir_str))
+                    .collect();
                 // claude-code writes `jsonStringify(hookInput) + '\n'` to the
                 // child's stdin then closes it (`hooks.ts:1006`/`1210`). The
                 // trailing newline is load-bearing: a bash `read -r line`
                 // returns exit 1 on EOF-before-delimiter without it.
                 let pcmd = ProcessCommand {
-                    command: command.clone(),
-                    args: args.clone(),
+                    command,
+                    args,
                     cwd: cwd.clone().or_else(|| Some(ctx.cwd.clone())),
                     env: child_env,
                     timeout: Some(effective_timeout),
@@ -861,13 +942,67 @@ impl Dispatcher {
 }
 
 impl HookExecutorImpl {
+    /// #41 runner-head gate (`h$`/`cH`, BIN off 195521423 / 205755512). When
+    /// the `policySettings.disableAllHooks` managed setting is active, every
+    /// `execute*` path returns the empty (default) aggregate WITHOUT dispatching
+    /// any hook, after logging the binary's skip line
+    /// `Skipping hooks for {event[:match_query]} due to 'disableAllHooks' managed
+    /// setting` (the binary's label is `event:matchQuery` when a `matchQuery` is
+    /// present, else just `event`). Returns `Some(default_aggregate)` when gated,
+    /// `None` otherwise.
+    fn policy_disable_gate(&self, event: &HookEvent) -> Option<AggregateHookResult> {
+        if !self.policy_disable_all_hooks {
+            return None;
+        }
+        let event_name = format!("{:?}", event.event_type());
+        let label = match Self::runner_match_query(event) {
+            Some(q) => format!("{event_name}:{q}"),
+            None => event_name,
+        };
+        tracing::info!(
+            "Skipping hooks for {label} due to 'disableAllHooks' managed setting"
+        );
+        Some(AggregateHookResult::default())
+    }
+
+    /// The `matchQuery` the binary's `cH` runner is invoked with for `event`
+    /// (the tool name for tool/permission events, else `None`) — used only to
+    /// format the #41 skip-log label. Mirrors `HookRegistry::match_query_for`.
+    fn runner_match_query(event: &HookEvent) -> Option<String> {
+        match event {
+            HookEvent::PreToolUse { tool_name, .. }
+            | HookEvent::PostToolUse { tool_name, .. }
+            | HookEvent::PostToolUseFailure { tool_name, .. }
+            | HookEvent::PermissionRequest { tool_name, .. }
+            | HookEvent::PermissionDenied { tool_name, .. } => Some(tool_name.clone()),
+            _ => None,
+        }
+    }
+
     fn merge(agg: &mut AggregateHookResult, hook: &HookDefinition, r: HookResult) {
         if let Some(resp) = &r.response {
-            if resp.decision.is_some() {
+            // #45(b): claude-code's `cH` runner dispatches EVERY matched hook
+            // (`c.map(async …)` + await-all, BIN off 205755512 — no break) then
+            // folds the verdict via `ctt(e)=e.some(t=>t.blocked)`: any hook's
+            // block wins, regardless of order. Now that the per-event loops no
+            // longer short-circuit on the first `Block`, `Block` must be STICKY
+            // here so a later non-`Block` hook can't overwrite an earlier block
+            // (the OR-fold equivalent of `some(blocked)`), and the block `reason`
+            // freezes at the FIRST blocker. Every OTHER channel
+            // (systemMessage/additionalContext/updatedInput/…) still accumulates
+            // or last-wins exactly as before, so later hooks' side effects — which
+            // the old early `break` silently dropped — are now preserved.
+            let already_blocked =
+                matches!(agg.decision, Some(crate::response::HookDecision::Block));
+            if resp.decision.is_some() && !already_blocked {
                 agg.decision = resp.decision;
             }
+            // Freeze the block reason at the first blocker: once blocked, a later
+            // hook's `reason` no longer overwrites the aggregate one.
             if let Some(reason) = &resp.reason {
-                agg.reason = Some(reason.clone());
+                if !already_blocked {
+                    agg.reason = Some(reason.clone());
+                }
             }
             if let Some(input) = &resp.updated_input {
                 agg.modified_input = Some(input.clone());
@@ -914,6 +1049,30 @@ impl HookExecutorImpl {
         }
         agg.all_results.push((hook.id, r));
     }
+}
+
+/// #43: substitute every literal `${CLAUDE_PROJECT_DIR}` token in `s` with
+/// `project_dir`.
+///
+/// Byte-faithful port of claude-code's `_e` mapper (BIN off 205727901):
+/// `if(!fe.includes("${"))return fe; fe=fe.replaceAll("${CLAUDE_PROJECT_DIR}",
+/// ()=>S)` — the `${`-presence fast-path guard (a string with no `${` is returned
+/// untouched, skipping the scan) and `replaceAll` (EVERY occurrence) semantics.
+/// `()=>S` is a replacer FUNCTION in JS, so a literal `$1` / `$&` in the project
+/// path is NOT treated as a replacement-pattern special; `str::replace` matches
+/// that (it inserts the replacement verbatim).
+///
+/// The plugin tokens `${CLAUDE_PLUGIN_ROOT}` / `${CLAUDE_PLUGIN_DATA}` are NOT
+/// handled here: they require plugin scope (`pluginRoot` / `pluginData`), which
+/// `HookExecutor::Command` does not carry — a documented residual. A string
+/// containing only those tokens (and no `${CLAUDE_PROJECT_DIR}`) passes through
+/// unchanged, matching claude when no plugin scope is bound.
+fn substitute_project_dir(s: &str, project_dir: &str) -> String {
+    // `if(!fe.includes("${"))return fe` — fast path: no template token at all.
+    if !s.contains("${") {
+        return s.to_string();
+    }
+    s.replace("${CLAUDE_PROJECT_DIR}", project_dir)
 }
 
 /// Build the serialized envelope body + `expected_event` marker for an event.
@@ -2075,6 +2234,10 @@ mod command_arm_tests {
         /// B2: the child env the arm handed to the sandbox, captured so tests
         /// can assert `CLAUDE_PROJECT_DIR` injection + precedence.
         recorded_env: Mutex<Option<HashMap<String, String>>>,
+        /// #43: the resolved command + args (after `${CLAUDE_PROJECT_DIR}`
+        /// substitution), captured so tests can assert the token replacement.
+        recorded_command: Mutex<Option<String>>,
+        recorded_args: Mutex<Option<Vec<String>>>,
     }
 
     impl MockRunner {
@@ -2083,6 +2246,8 @@ mod command_arm_tests {
                 result: Mutex::new(Some(Ok(output))),
                 recorded_stdin: Mutex::new(None),
                 recorded_env: Mutex::new(None),
+                recorded_command: Mutex::new(None),
+                recorded_args: Mutex::new(None),
             })
         }
         fn err(e: ProcessError) -> Arc<Self> {
@@ -2090,6 +2255,8 @@ mod command_arm_tests {
                 result: Mutex::new(Some(Err(e))),
                 recorded_stdin: Mutex::new(None),
                 recorded_env: Mutex::new(None),
+                recorded_command: Mutex::new(None),
+                recorded_args: Mutex::new(None),
             })
         }
     }
@@ -2099,6 +2266,8 @@ mod command_arm_tests {
         async fn run(&self, cmd: &SandboxedCommand) -> Result<ProcessOutput, ProcessError> {
             *self.recorded_stdin.lock().unwrap() = cmd.inner().stdin.clone();
             *self.recorded_env.lock().unwrap() = Some(cmd.inner().env.clone());
+            *self.recorded_command.lock().unwrap() = Some(cmd.inner().command.clone());
+            *self.recorded_args.lock().unwrap() = Some(cmd.inner().args.clone());
             self.result
                 .lock()
                 .unwrap()
@@ -2478,6 +2647,112 @@ mod command_arm_tests {
             Some("/some/cwd"),
             "absent project_dir falls back to ctx.cwd",
         );
+    }
+
+    // ---- #43: COLUMNS/LINES env + ${CLAUDE_PROJECT_DIR} substitution -------
+
+    /// A Command hook with a custom `command` + `args`, so #43 substitution can
+    /// be asserted against the recorded resolved values.
+    fn command_hook_with_cmd_args(command: &str, args: &[&str]) -> HookDefinition {
+        let mut h = command_hook();
+        if let DefHookExecutor::Command {
+            command: c, args: a, ..
+        } = &mut h.executor
+        {
+            *c = command.to_string();
+            *a = args.iter().map(|s| (*s).to_string()).collect();
+        }
+        h
+    }
+
+    #[test]
+    fn substitute_project_dir_replaces_every_occurrence() {
+        // `replaceAll` semantics — every `${CLAUDE_PROJECT_DIR}` token is
+        // replaced, not just the first.
+        assert_eq!(
+            substitute_project_dir("${CLAUDE_PROJECT_DIR}/a:${CLAUDE_PROJECT_DIR}/b", "/root"),
+            "/root/a:/root/b",
+        );
+    }
+
+    #[test]
+    fn substitute_project_dir_fast_path_no_template() {
+        // `if(!fe.includes("${"))return fe` — a string with no `${` is returned
+        // untouched.
+        assert_eq!(substitute_project_dir("./fmt.sh --check", "/root"), "./fmt.sh --check");
+    }
+
+    #[test]
+    fn substitute_project_dir_leaves_plugin_tokens_untouched() {
+        // The plugin tokens are NOT substituted here (no plugin scope) — a
+        // residual; a string carrying only those passes through unchanged.
+        assert_eq!(
+            substitute_project_dir("${CLAUDE_PLUGIN_ROOT}/x", "/root"),
+            "${CLAUDE_PLUGIN_ROOT}/x",
+        );
+    }
+
+    #[tokio::test]
+    async fn command_and_args_substitute_project_dir_token() {
+        let runner = MockRunner::ok(output("", "", 0));
+        let exec = executor_with_hook(
+            command_hook_with_cmd_args(
+                "${CLAUDE_PROJECT_DIR}/.claude/fmt.sh",
+                &["--root", "${CLAUDE_PROJECT_DIR}", "--plain"],
+            ),
+            runner.clone(),
+        );
+        let ctx = HookContext {
+            project_dir: Some(PathBuf::from("/repo/root")),
+            ..Default::default()
+        };
+
+        let _ = exec.execute(pre_event(), ctx).await;
+
+        let cmd = runner.recorded_command.lock().unwrap().clone().unwrap();
+        let args = runner.recorded_args.lock().unwrap().clone().unwrap();
+        assert_eq!(cmd, "/repo/root/.claude/fmt.sh", "command token substituted");
+        assert_eq!(
+            args,
+            vec!["--root".to_string(), "/repo/root".to_string(), "--plain".to_string()],
+            "each arg token substituted; non-token args untouched",
+        );
+    }
+
+    #[tokio::test]
+    async fn command_env_sets_columns_and_lines_from_ctx() {
+        let runner = MockRunner::ok(output("", "", 0));
+        let exec = executor_with(runner.clone());
+        let ctx = HookContext {
+            terminal_columns: Some(120),
+            terminal_rows: Some(40),
+            ..Default::default()
+        };
+
+        let _ = exec.execute(pre_event(), ctx).await;
+
+        let env = runner.recorded_env.lock().unwrap().clone().unwrap();
+        assert_eq!(env.get("COLUMNS").map(String::as_str), Some("120"));
+        assert_eq!(env.get("LINES").map(String::as_str), Some("40"));
+    }
+
+    #[tokio::test]
+    async fn command_env_omits_columns_lines_when_absent_or_zero() {
+        // The binary's `if(L)`/`if(D)` falsy guards: `None` (non-TTY,
+        // `process.stdout.columns === undefined`) and `0` set NEITHER env var.
+        let runner = MockRunner::ok(output("", "", 0));
+        let exec = executor_with(runner.clone());
+        let ctx = HookContext {
+            terminal_columns: None,
+            terminal_rows: Some(0),
+            ..Default::default()
+        };
+
+        let _ = exec.execute(pre_event(), ctx).await;
+
+        let env = runner.recorded_env.lock().unwrap().clone().unwrap();
+        assert!(!env.contains_key("COLUMNS"), "None columns sets no COLUMNS");
+        assert!(!env.contains_key("LINES"), "zero rows is falsy → no LINES");
     }
 
     // ---- B1: lifecycle events now serialize through the Command arm -----
@@ -3577,6 +3852,153 @@ mod async_path_tests {
             2,
             "both the blocking (inline) and async (background) hooks ran",
         );
+    }
+
+    // ---- #45b: no first-Block short-circuit + sticky Block; #41 runner gate -
+
+    /// A `ProcessRunner` that returns a different pre-canned [`ProcessOutput`]
+    /// per invocation (FIFO), so a multi-hook `execute` can be observed firing
+    /// EVERY matched hook (no first-`Block` short-circuit — #45b).
+    struct SequenceRunner {
+        outputs: StdMutex<std::collections::VecDeque<ProcessOutput>>,
+        runs: AtomicU64,
+    }
+    impl SequenceRunner {
+        fn new(outputs: Vec<ProcessOutput>) -> Arc<Self> {
+            Arc::new(Self {
+                outputs: StdMutex::new(outputs.into_iter().collect()),
+                runs: AtomicU64::new(0),
+            })
+        }
+    }
+    #[async_trait]
+    impl ProcessRunner for SequenceRunner {
+        async fn run(&self, _cmd: &SandboxedCommand) -> Result<ProcessOutput, ProcessError> {
+            self.runs.fetch_add(1, Ordering::SeqCst);
+            let next = self.outputs.lock().unwrap().pop_front();
+            Ok(next.unwrap_or_else(|| out("", "", 0)))
+        }
+        async fn spawn_background(
+            &self,
+            _cmd: &SandboxedCommand,
+        ) -> Result<ProcessHandle, ProcessError> {
+            Err(ProcessError::Unsupported)
+        }
+        async fn kill(&self, _handle: &ProcessHandle) -> Result<(), ProcessError> {
+            Ok(())
+        }
+        fn is_available(&self) -> bool {
+            true
+        }
+    }
+
+    /// #45b: `execute` dispatches EVERY matched blocking hook even after one
+    /// returns `Block`. The first hook blocks (exit 2); the second still runs and
+    /// its `systemMessage` side effect is folded into the aggregate — which the
+    /// old first-`Block` `break` would have silently dropped. The aggregate
+    /// verdict stays `Block` (sticky), reason frozen at the first blocker.
+    #[tokio::test]
+    async fn execute_dispatches_all_hooks_after_block_and_keeps_side_effects() {
+        let runner = SequenceRunner::new(vec![
+            out("", "first blocker", 2),
+            out(r#"{"systemMessage":"second ran"}"#, "", 0),
+        ]);
+        // Higher priority fires first (deterministic order).
+        let mut registry = HookRegistry::new();
+        registry.register(command_hook_with_priority(true, 10));
+        registry.register(command_hook_with_priority(true, 0));
+        let exec = HookExecutorImpl::new(
+            Arc::new(RwLock::new(registry)),
+            Arc::new(UnusedHttp),
+            TestRuntime::new(),
+        )
+        .with_process_runner(runner.clone(), Arc::new(StubSandbox));
+
+        let agg = exec.execute(pre_event(), HookContext::default()).await;
+
+        assert_eq!(runner.runs.load(Ordering::SeqCst), 2, "both hooks must run");
+        assert_eq!(agg.all_results.len(), 2, "both results folded");
+        assert_eq!(agg.decision, Some(HookDecision::Block));
+        assert_eq!(agg.reason.as_deref(), Some("first blocker"));
+        assert!(
+            agg.system_messages.iter().any(|m| m == "second ran"),
+            "the later hook's systemMessage must survive the earlier Block: {:?}",
+            agg.system_messages,
+        );
+    }
+
+    /// #45b: a LATER non-Block hook must NOT overwrite an earlier Block verdict
+    /// (the OR-fold equivalent of `some(blocked)`).
+    #[tokio::test]
+    async fn block_is_sticky_against_a_later_allowing_hook() {
+        let runner = SequenceRunner::new(vec![
+            out("", "blocked", 2),
+            out(r#"{"decision":"approve"}"#, "", 0),
+        ]);
+        let mut registry = HookRegistry::new();
+        registry.register(command_hook_with_priority(true, 10));
+        registry.register(command_hook_with_priority(true, 0));
+        let exec = HookExecutorImpl::new(
+            Arc::new(RwLock::new(registry)),
+            Arc::new(UnusedHttp),
+            TestRuntime::new(),
+        )
+        .with_process_runner(runner.clone(), Arc::new(StubSandbox));
+
+        let agg = exec.execute(pre_event(), HookContext::default()).await;
+
+        assert_eq!(runner.runs.load(Ordering::SeqCst), 2, "both hooks must run");
+        assert_eq!(
+            agg.decision,
+            Some(HookDecision::Block),
+            "an earlier Block is sticky — a later approve cannot un-block",
+        );
+    }
+
+    /// #41 runner-head gate (`h$`): when `policy_disable_all_hooks` is set, NO
+    /// hook is dispatched and the default (empty) aggregate is returned.
+    #[tokio::test]
+    async fn policy_disable_all_hooks_skips_every_hook_at_runner_head() {
+        let runner = SequenceRunner::new(vec![out("", "blocked", 2)]);
+        let mut registry = HookRegistry::new();
+        registry.register(command_hook_with_priority(true, 0));
+        let exec = HookExecutorImpl::new(
+            Arc::new(RwLock::new(registry)),
+            Arc::new(UnusedHttp),
+            TestRuntime::new(),
+        )
+        .with_process_runner(runner.clone(), Arc::new(StubSandbox))
+        .with_policy_disable_all_hooks(true);
+
+        let agg = exec.execute(pre_event(), HookContext::default()).await;
+
+        assert_eq!(
+            runner.runs.load(Ordering::SeqCst),
+            0,
+            "disableAllHooks must skip dispatch entirely",
+        );
+        assert_eq!(agg.decision, None, "skipped batch yields the default aggregate");
+        assert!(agg.all_results.is_empty());
+    }
+
+    /// #41: with the gate OFF (the default no-policy path) hooks fire normally,
+    /// so the gate is behavior-neutral until a policy is wired.
+    #[tokio::test]
+    async fn policy_disable_all_hooks_default_off_fires_hooks() {
+        let runner = SequenceRunner::new(vec![out("", "blocked", 2)]);
+        let mut registry = HookRegistry::new();
+        registry.register(command_hook_with_priority(true, 0));
+        let exec = HookExecutorImpl::new(
+            Arc::new(RwLock::new(registry)),
+            Arc::new(UnusedHttp),
+            TestRuntime::new(),
+        )
+        .with_process_runner(runner.clone(), Arc::new(StubSandbox));
+
+        let agg = exec.execute(pre_event(), HookContext::default()).await;
+
+        assert_eq!(runner.runs.load(Ordering::SeqCst), 1, "gate off ⇒ hook fires");
+        assert_eq!(agg.decision, Some(HookDecision::Block));
     }
 }
 

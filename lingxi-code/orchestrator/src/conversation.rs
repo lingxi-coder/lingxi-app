@@ -2960,7 +2960,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
     pub async fn fire_session_start(&self, source: &str) {
         let session_id = { self.session.lock().await.session_id };
         let ctx = self.lifecycle_hook_ctx(false).await;
-        let _ = self
+        let agg = self
             .hooks
             .execute(
                 HookEvent::SessionStart {
@@ -2970,6 +2970,40 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                 ctx,
             )
             .await;
+        // SESSIONSTART.CTX: a `SessionStart` hook's
+        // `hookSpecificOutput.additionalContext` becomes a persistent
+        // `hook_additional_context` attachment in the conversation —
+        // claude-code's `processSessionStartHooks` collects every hook's
+        // `additionalContext` and, when non-empty, emits a single
+        // `createAttachmentMessage({type:'hook_additional_context', content:
+        // additionalContexts, hookName:'SessionStart'})` (`utils/sessionStart.ts:163-172`),
+        // rendered by `messages.ts:4117-4128` as a meta user message
+        // `wrapInSystemReminder(`${hookName} hook additional context: ${content.join('\n')}`)`
+        // with `isMeta:true`.
+        //
+        // Unlike the per-turn date / output-style reminders (regenerated each
+        // turn and never stored), claude-code adds THIS message ONCE at session
+        // start and keeps it in the conversation array, so it rides EVERY
+        // subsequent turn. We mirror that by pushing it into `s.history`, which
+        // is cloned into each turn's outgoing snapshot (`turn_loop.rs` —
+        // `s.history.clone()`). `user_meta` (isMeta) is sent to the wire but not
+        // persisted to JSONL (matching `createUserMessage({isMeta:true})`); a
+        // `resume` re-fires `SessionStart`, so the context is re-added rather
+        // than relying on transcript persistence.
+        //
+        // Strict no-op when no hook emitted `additionalContext` — the aggregate
+        // is otherwise discarded exactly as before, so a failing / silent
+        // `SessionStart` hook never affects boot.
+        if !agg.additional_contexts.is_empty() {
+            let body = agg.additional_contexts.join("\n");
+            let msg = ConversationMessage::user_meta(
+                MessageId::new(),
+                format!(
+                    "<system-reminder>\nSessionStart hook additional context: {body}\n</system-reminder>"
+                ),
+            );
+            self.session.lock().await.history.push(msg);
+        }
     }
 
     /// Fire the `InstructionsLoaded` hooks once per loaded instruction file at
@@ -5565,6 +5599,43 @@ mod turn_recovery_tests {
         }
     }
 
+    /// `SessionStart` hook that emits `hookSpecificOutput.additionalContext`
+    /// (`Some`) or nothing (`None`) — exercises the SESSIONSTART.CTX consumption.
+    struct SessionStartCtxHandler {
+        ctx: Option<String>,
+    }
+    #[async_trait]
+    impl BuiltinHookHandler for SessionStartCtxHandler {
+        fn id(&self) -> &str {
+            "sess-ctx"
+        }
+        async fn handle(&self, event: &HookEvent, _ctx: &HookContext) -> HookResult {
+            let response = matches!(event, HookEvent::SessionStart { .. }).then(|| HookResponse {
+                additional_context: self.ctx.clone(),
+                ..Default::default()
+            });
+            HookResult {
+                outcome: HookOutcome::Success,
+                stdout: String::new(),
+                stderr: String::new(),
+                exit_code: None,
+                response,
+            }
+        }
+    }
+
+    async fn exec_session_start_ctx(ctx: Option<String>) -> Arc<HookExecutorImpl> {
+        let registry = Arc::new(RwLock::new(HookRegistry::new()));
+        registry
+            .write()
+            .await
+            .register(builtin_hook("sess-ctx", HookEventType::SessionStart));
+        let mut exec =
+            HookExecutorImpl::new(registry, Arc::new(UnusedHttp), Arc::new(UnusedRuntime));
+        exec.register_builtin(Arc::new(SessionStartCtxHandler { ctx }));
+        Arc::new(exec)
+    }
+
     fn builtin_hook(handler_id: &str, event_type: HookEventType) -> HookDefinition {
         HookDefinition {
             id: HookId::new(),
@@ -5719,6 +5790,74 @@ mod turn_recovery_tests {
         assert!(
             !seen.iter().any(|s| s.starts_with("Stop:")),
             "the normal Stop hooks must NOT fire on an api-error end: {seen:?}"
+        );
+    }
+
+    // -------- SESSIONSTART.CTX — SessionStart additionalContext consumption ----
+
+    #[tokio::test]
+    async fn session_start_additional_context_becomes_persistent_meta_history_message() {
+        // A `SessionStart` hook that emits `hookSpecificOutput.additionalContext`
+        // must surface it as a persistent `hook_additional_context` meta message
+        // in the conversation history (claude-code `processSessionStartHooks`,
+        // `sessionStart.ts:163-172` → `messages.ts:4117-4128`), so it rides every
+        // subsequent turn. The bytes are the exact `wrapInSystemReminder`
+        // (`hookName` = `SessionStart`, multi-line content preserved).
+        let orch = ConversationOrchestrator::new(
+            OrchestratorConfig::default(),
+            Arc::new(MockApiClient::new(vec![])),
+            Arc::new(ToolRegistry::new()),
+            exec_session_start_ctx(Some("Project: lingxi\nBranch: main".into())).await,
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            std::env::temp_dir(),
+        );
+        orch.fire_session_start("startup").await;
+
+        let history = orch.session().lock().await.history.clone();
+        assert_eq!(
+            history.len(),
+            1,
+            "exactly one hook_additional_context message; got {history:?}"
+        );
+        let body = match &history[0] {
+            ConversationMessage::User { content, .. } => content
+                .iter()
+                .filter_map(|b| match b {
+                    protocol::ContentBlock::Text { text } => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join(""),
+            other => panic!("expected a user meta message; got {other:?}"),
+        };
+        assert_eq!(
+            body,
+            "<system-reminder>\nSessionStart hook additional context: Project: lingxi\nBranch: main\n</system-reminder>",
+            "exact hook_additional_context bytes (hookName=SessionStart, content joined by \\n)"
+        );
+    }
+
+    #[tokio::test]
+    async fn session_start_without_additional_context_pushes_nothing() {
+        // Strict no-op: a SessionStart hook that emits no additionalContext leaves
+        // the history untouched (the aggregate is discarded exactly as before).
+        let orch = ConversationOrchestrator::new(
+            OrchestratorConfig::default(),
+            Arc::new(MockApiClient::new(vec![])),
+            Arc::new(ToolRegistry::new()),
+            exec_session_start_ctx(None).await,
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            std::env::temp_dir(),
+        );
+        orch.fire_session_start("startup").await;
+
+        assert!(
+            orch.session().lock().await.history.is_empty(),
+            "no additionalContext ⇒ nothing pushed to history"
         );
     }
 

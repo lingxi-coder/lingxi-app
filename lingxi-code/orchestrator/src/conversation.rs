@@ -4223,6 +4223,41 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                     // text or already nudged) / pause_turn / refusal (no fallback
                     // configured / already latched) — terminate the loop with the
                     // value as-is, mirroring claude-code's behavior (claude.ts:2269).
+                    //
+                    // First surface the byte-locked user-visible `API Error: …`
+                    // assistant message claude-code emits for the terminal
+                    // stop_reasons it reports as errors (`claude.ts:2266`
+                    // max_tokens [recovery exhausted], `:2279`
+                    // model_context_window_exceeded). A strict no-op for every
+                    // other terminal (stop_sequence / pause_turn /
+                    // refusal-without-fallback), so those end byte-identically to
+                    // before. Mirrors `surface_prompt_too_long` (persist a new
+                    // assistant message carrying the error text + the originating
+                    // stop_reason, then emit it).
+                    let api_error: Option<String> = match other {
+                        "max_tokens" => {
+                            let model = self.session.lock().await.model.clone();
+                            Some(format!(
+                                "API Error: Claude's response exceeded the {} output token maximum. To configure this behavior, set the CLAUDE_CODE_MAX_OUTPUT_TOKENS environment variable.",
+                                compaction::max_output_tokens_for_model(&model)
+                            ))
+                        }
+                        "model_context_window_exceeded" => Some(
+                            "API Error: The model has reached its context window limit."
+                                .to_string(),
+                        ),
+                        _ => None,
+                    };
+                    if let Some(text) = api_error {
+                        let err_msg = ConversationMessage::Assistant {
+                            id: MessageId::new(),
+                            content: vec![ContentBlock::Text { text: text.clone() }],
+                            stop_reason: Some(other.to_string()),
+                        };
+                        self.session.lock().await.history.push(err_msg.clone());
+                        self.persist_message_to_jsonl(&err_msg).await;
+                        self.output.emit_text(&text).await;
+                    }
                     let cost = self.snapshot_cost_real().await;
                     self.output.emit_end_turn(other, &cost).await;
                     final_message_id = assistant_id;
@@ -5749,6 +5784,48 @@ mod turn_recovery_tests {
                 |e| matches!(e, OutputEvent::EndTurn { stop_reason, .. } if stop_reason == "prompt_too_long")
             ),
             "the turn must end with stop_reason prompt_too_long; events={events:#?}"
+        );
+    }
+
+    // -------- terminal stop-reason API errors (claude.ts:2266-2292) --------
+
+    #[tokio::test]
+    async fn terminal_model_context_window_exceeded_surfaces_api_error() {
+        // `model_context_window_exceeded` has no recovery path, so it hits the
+        // terminal arm directly and must surface claude-code's byte-locked
+        // API-error message (`claude.ts:2279`) before ending the turn.
+        let streaming = Arc::new(MockStreamingApiClient::with_turns(vec![vec![
+            message_start("m", "claude-opus-4-7"),
+            content_block_start_text(0),
+            text_delta(0, "partial answer"),
+            content_block_stop(0),
+            message_delta_stop("model_context_window_exceeded"),
+            message_stop(),
+        ]]));
+        let output = Arc::new(MockOutputStream::new());
+        let orch = ConversationOrchestrator::new_with_streaming(
+            OrchestratorConfig::default(),
+            Arc::new(MockApiClient::new(vec![])),
+            streaming.clone(),
+            Arc::new(ToolRegistry::new()),
+            noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            output.clone(),
+            Arc::new(StaticMemoryProvider::empty()),
+            std::env::temp_dir(),
+        );
+        orch.run_turn_streaming("go").await.expect("turn ends");
+
+        let events = output.snapshot().await;
+        assert!(
+            events.iter().any(|e| matches!(e, OutputEvent::Text { text }
+                if text == "API Error: The model has reached its context window limit.")),
+            "byte-exact context-window-exceeded API error must be surfaced; events={events:#?}"
+        );
+        assert!(
+            events.iter().any(|e| matches!(e, OutputEvent::EndTurn { stop_reason, .. }
+                if stop_reason == "model_context_window_exceeded")),
+            "the turn must end with stop_reason model_context_window_exceeded; events={events:#?}"
         );
     }
 

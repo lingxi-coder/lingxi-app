@@ -757,14 +757,29 @@ Usage notes:\n\
   - For GitHub URLs, prefer using the gh CLI via Bash instead (e.g., gh pr view, gh issue view, gh api).\n"
             .into()
     }
-    async fn prompt(&self, _opts: &PromptOptions) -> String {
-        // claude-code's WebFetch has no separate `prompt()` — the `DESCRIPTION`
-        // constant is the full model-facing prompt. Mirror it here so both
-        // surfaces carry the verbatim TS text.
-        self.description(&Value::Null, &DescriptionOptions {
-            is_non_interactive_session: false,
-        })
-        .await
+    async fn prompt(&self, opts: &PromptOptions) -> String {
+        // 1:1 with claude-code `CMi(model)` (binary @196852876) — WebFetch DOES
+        // have a model-gated `prompt()` (the prior "no separate prompt()" note was
+        // STALE vs v2.1.185). `Dh(model)` (the shared `dh_simple_system_prompt`
+        // gate, identical to WebSearch) selects the SHORT variant; otherwise the
+        // LONG = an `IMPORTANT: WebFetch WILL FAIL…` auth-warning prefix (ending
+        // in `\n`) followed by the DESCRIPTION (which itself begins with `\n`, so
+        // the join is `access.\n\n- Fetches…`, matching the `…access.\n${GSd}`
+        // template, od-verified). The `t` (hasArtifactTool) artifact-exception
+        // branch is omitted — LingXi exposes no claude.ai/code/artifact tool, so
+        // `t` is always false.
+        if tool_api::dh_simple_system_prompt(opts.model.as_deref()) {
+            "Fetches a URL, converts the page to markdown, and answers `prompt` against it using a small fast model.\n\n- Fails on authenticated/private URLs \u{2014} use an authenticated MCP tool or `gh` for those instead.\n- HTTP is upgraded to HTTPS. Cross-host redirects are returned to you rather than followed; call again with the redirect URL.\n- Responses are cached for 15 minutes per URL.".to_string()
+        } else {
+            let description = self
+                .description(&Value::Null, &DescriptionOptions {
+                    is_non_interactive_session: false,
+                })
+                .await;
+            format!(
+                "IMPORTANT: WebFetch WILL FAIL for authenticated or private URLs. Before using this tool, check if the URL points to an authenticated service (e.g. Google Docs, Confluence, Jira, GitHub). If so, look for a specialized MCP tool that provides authenticated access.\n{description}"
+            )
+        }
     }
 
     /// Reject an unparseable URL early with the byte-exact upstream message.
@@ -1562,6 +1577,53 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
     /// the front of the queue — enqueue this *before* the fetch body response.
     fn preflight_allow() -> ScriptedResponse {
         ok_response(200, r#"{"can_fetch":true}"#)
+    }
+
+    #[tokio::test]
+    async fn prompt_gates_short_vs_long_with_auth_prefix() {
+        // 1:1 with claude-code `CMi(model)`: a current-gen model gets the SHORT
+        // variant; the default (no model) gets the LONG = `IMPORTANT: WebFetch
+        // WILL FAIL…` auth-prefix + the DESCRIPTION.
+        let _env = SKIP_ENV_LOCK.lock().await;
+        let prev = std::env::var("CLAUDE_CODE_SIMPLE_SYSTEM_PROMPT").ok();
+        std::env::remove_var("CLAUDE_CODE_SIMPLE_SYSTEM_PROMPT");
+
+        let (ctx, _http, _sink) = make_web_ctx();
+        let tool = WebFetchTool::new(ctx);
+
+        // Default (model=None) ⇒ LONG: auth-prefix, then the DESCRIPTION body. The
+        // `access.\n${GSd}` template (DESCRIPTION starts with `\n`) yields a blank
+        // line between the prefix and the first bullet.
+        let long = tool.prompt(&PromptOptions::default()).await;
+        assert!(
+            long.starts_with(
+                "IMPORTANT: WebFetch WILL FAIL for authenticated or private URLs."
+            ),
+            "LONG must lead with the auth-warning prefix; got {long:?}"
+        );
+        assert!(long.contains("authenticated access.\n\n- Fetches content from a specified URL"));
+
+        // Current-gen model ⇒ SHORT (no auth-prefix).
+        let short = tool
+            .prompt(&PromptOptions {
+                include_examples: false,
+                model: Some("claude-opus-4-8".into()),
+            })
+            .await;
+        assert!(
+            short.starts_with("Fetches a URL, converts the page to markdown"),
+            "SHORT variant expected; got {short:?}"
+        );
+        assert!(short.contains("Responses are cached for 15 minutes per URL."));
+        assert!(
+            !short.contains("IMPORTANT: WebFetch WILL FAIL"),
+            "the SHORT variant carries no auth-warning prefix"
+        );
+
+        match prev {
+            Some(v) => std::env::set_var("CLAUDE_CODE_SIMPLE_SYSTEM_PROMPT", v),
+            None => std::env::remove_var("CLAUDE_CODE_SIMPLE_SYSTEM_PROMPT"),
+        }
     }
 
     #[tokio::test]

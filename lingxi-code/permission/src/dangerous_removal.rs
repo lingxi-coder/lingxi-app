@@ -79,13 +79,19 @@ pub fn is_dangerous_removal_path(abs_path: &str, home: Option<&str>) -> bool {
         return true;
     }
 
+    // macOS: `/etc`, `/var`, `/tmp`, `/home` are symlinks under `/private`, so
+    // `rm -rf /private/etc` removes the real `/etc`. Normalize the
+    // `/private/(etc|var|tmp|home)` prefix away (TS `Stt`'s `r()`), so the
+    // root-child / home checks below catch it.
+    let normalized_private = normalize_macos_private(&forward_slashed);
+
     // Strip a single trailing `/` except for the bare root `/`.
-    let normalized_path = if forward_slashed == "/" {
-        forward_slashed.clone()
+    let normalized_path = if normalized_private == "/" {
+        normalized_private.clone()
     } else {
-        forward_slashed
+        normalized_private
             .strip_suffix('/')
-            .map_or(forward_slashed.clone(), str::to_string)
+            .map_or(normalized_private.clone(), str::to_string)
     };
 
     if normalized_path == "/" {
@@ -97,8 +103,13 @@ pub fn is_dangerous_removal_path(abs_path: &str, home: Option<&str>) -> bool {
     }
 
     if let Some(home) = home {
-        let normalized_home = collapse_slashes(home);
-        if normalized_path == normalized_home {
+        // TS `Stt` compares the case-folded (`IA`) path against the case-folded,
+        // `/private`-normalized, trailing-slash-stripped home directory.
+        let normalized_home = {
+            let np = normalize_macos_private(&collapse_slashes(home));
+            np.strip_suffix('/').map_or(np.clone(), str::to_string)
+        };
+        if case_fold(&normalized_path) == case_fold(&normalized_home) {
             return true;
         }
     }
@@ -113,6 +124,45 @@ pub fn is_dangerous_removal_path(abs_path: &str, home: Option<&str>) -> bool {
     }
 
     false
+}
+
+/// macOS `/private` normalization from TS `Stt` (`pathValidation.ts`):
+/// `/^\/private\/(etc|var|tmp|home)(\/|$)/i` → `/$1$2`. A no-op on non-macOS
+/// and for any path that does not start with `/private/<one of those names>`
+/// followed by `/` or end-of-string. The captured name's case is preserved
+/// (the regex replacement uses `$1`).
+fn normalize_macos_private(p: &str) -> String {
+    const PREFIX: &str = "/private/";
+    if !cfg!(target_os = "macos") {
+        return p.to_string();
+    }
+    if p.len() <= PREFIX.len() || !p[..PREFIX.len()].eq_ignore_ascii_case(PREFIX) {
+        return p.to_string();
+    }
+    let rest = &p[PREFIX.len()..];
+    for name in ["etc", "var", "tmp", "home"] {
+        if rest.len() >= name.len() && rest[..name.len()].eq_ignore_ascii_case(name) {
+            let after = &rest[name.len()..];
+            if after.is_empty() || after.starts_with('/') {
+                // `/private/<name>` → `/<name>` (preserve the matched case).
+                return format!("/{}{after}", &rest[..name.len()]);
+            }
+        }
+    }
+    p.to_string()
+}
+
+/// TS `IA` case-fold (`paths.ts`): `toLowerCase()` then map dotless-ı → `i` and
+/// long-s ſ → `s`, used for case-insensitive path comparison.
+fn case_fold(s: &str) -> String {
+    s.chars()
+        .flat_map(char::to_lowercase)
+        .map(|c| match c {
+            '\u{0131}' => 'i',
+            '\u{017f}' => 's',
+            other => other,
+        })
+        .collect()
 }
 
 /// Collapse runs of `\`/`/` into a single `/` (TS `replace(/[\\/]+/g, '/')`).
@@ -378,6 +428,45 @@ mod tests {
         assert!(is_dangerous_removal_path("*", HOME));
         assert!(is_dangerous_removal_path("/home/u/project/*", HOME));
         assert!(is_dangerous_removal_path("/some/deep/dir/*", HOME));
+    }
+
+    #[test]
+    fn predicate_macos_private_normalization() {
+        // On macOS, /etc, /var, /tmp, /home are symlinks under /private, so
+        // `rm -rf /private/etc` removes the real /etc. The `/private/<name>`
+        // prefix is normalized away (case-insensitively) before the critical
+        // checks. Off macOS this is a no-op.
+        if cfg!(target_os = "macos") {
+            assert!(is_dangerous_removal_path("/private/etc", None));
+            assert!(is_dangerous_removal_path("/private/var", None));
+            assert!(is_dangerous_removal_path("/private/tmp", None));
+            assert!(is_dangerous_removal_path("/private/home", None));
+            assert!(is_dangerous_removal_path("/private/etc/", None));
+            assert!(is_dangerous_removal_path("/Private/Etc", None)); // regex `/i`
+            // Children of a normalized critical dir are not themselves critical.
+            assert!(!is_dangerous_removal_path("/private/etc/nginx", None));
+            // A /private subdir not in the list is untouched.
+            assert!(!is_dangerous_removal_path("/private/foo", None));
+        } else {
+            assert!(!is_dangerous_removal_path("/private/etc", None));
+        }
+    }
+
+    #[test]
+    fn predicate_home_comparison_is_case_folded() {
+        // TS `Stt` compares the case-folded (`IA`) path against the case-folded
+        // home, so a case-variant of the home directory still matches.
+        assert!(is_dangerous_removal_path("/Home/U", Some("/home/u")));
+        assert!(is_dangerous_removal_path("/home/u", Some("/Home/U")));
+        assert!(!is_dangerous_removal_path("/home/other", Some("/home/u")));
+    }
+
+    #[test]
+    fn case_fold_lowercases_and_maps_special() {
+        assert_eq!(case_fold("/Users/ALICE"), "/users/alice");
+        assert_eq!(case_fold("I"), "i");
+        assert_eq!(case_fold("\u{0131}"), "i"); // dotless ı → i
+        assert_eq!(case_fold("\u{017f}"), "s"); // long s ſ → s
     }
 
     #[test]

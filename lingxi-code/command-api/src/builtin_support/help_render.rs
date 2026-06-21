@@ -90,6 +90,9 @@ mod tests {
         // The 26 hidden/disabled commands (is_palette_hidden) are filtered out,
         // matching claude-code's `!isHidden && !$te` help/palette filter.
         // (94 builtins − 26 hidden = 68 visible, with no DISABLE_* env set.)
+        // Serialize with the env-gate mutators (names::ENV_LOCK) so a concurrent
+        // `DISABLE_*_COMMAND` mutation can't transiently drop a counted command.
+        let _g = crate::builtin_support::names::ENV_LOCK.lock().unwrap();
         let s = render_help_screen();
         let n = s.matches('\n').count();
         assert_eq!(
@@ -154,6 +157,9 @@ mod tests {
     #[test]
     fn every_visible_command_appears_once() {
         use crate::builtin_support::names::is_palette_hidden;
+        // Serialize with the env-gate mutators (names::ENV_LOCK) so a concurrent
+        // `DISABLE_LOGIN_COMMAND` (etc.) mutation can't drop a command mid-render.
+        let _g = crate::builtin_support::names::ENV_LOCK.lock().unwrap();
         let s = render_help_screen();
         for name in BUILTIN_COMMAND_NAMES {
             // Hidden/disabled commands are filtered out (see is_palette_hidden);

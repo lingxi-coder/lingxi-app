@@ -241,7 +241,8 @@ async fn denied_fqn_tool_use_yields_permission_denied_result_and_skips_server() 
         "a denied FQN tool_use must not reach the server's call_tool"
     );
 
-    // The emitted ToolResult carries the `Permission denied:` error string.
+    // The emitted ToolResult carries claude-code's verbatim deny message
+    // (`Permission to use ${tool} has been denied.`, permissions.ts:1087).
     let events = output.snapshot().await;
     let result = events
         .iter()
@@ -257,8 +258,8 @@ async fn denied_fqn_tool_use_yields_permission_denied_result_and_skips_server() 
         .and_then(|v| v.as_str())
         .expect("denied result carries an `error` string");
     assert!(
-        err.starts_with("Permission denied:"),
-        "denied FQN must take the Permission-denied path; got {err:?}"
+        err == "Permission to use mcp__mock__a has been denied.",
+        "denied FQN must take the Permission-denied path with the verbatim message; got {err:?}"
     );
 }
 

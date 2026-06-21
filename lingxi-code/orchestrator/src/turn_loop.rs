@@ -2068,9 +2068,14 @@ pub(crate) async fn dispatch_tool_uses_tracked(
                 // when applicable, already fired on the classifier-deny branch
                 // above — claude-code fires it only for auto-mode classifier
                 // denials, not for the rule/mode/plan denials that also reach here.
+                // claude-code sends the permission deny message VERBATIM as the
+                // tool_result content (e.g. "Permission to use Bash has been
+                // denied." — built by the gate via `deny_reason_string`, or the
+                // tool's explicit `explanation`), NOT wrapped in a
+                // "Permission denied: " prefix.
                 let result_block = ContentBlock::ToolResult {
                     tool_use_id: tool_use_id.clone(),
-                    content: format!("Permission denied: {reason}"),
+                    content: reason.clone(),
                     is_error: true,
                     provider_tool_use_id: provider_id.clone(),
                 };
@@ -2078,7 +2083,7 @@ pub(crate) async fn dispatch_tool_uses_tracked(
                     .emit_tool_result(
                         tool_use_id,
                         name,
-                        &serde_json::json!({ "error": format!("Permission denied: {reason}") }),
+                        &serde_json::json!({ "error": reason }),
                     )
                     .await;
                 results.push(result_block);
@@ -5400,7 +5405,10 @@ mod pre_tool_hook_tests {
         let (results, _, _, _) = dispatch_tool_uses_tracked(&orch, &uses(), None).await.unwrap();
         let (content, is_error) = tool_result(&results[0]);
         assert!(is_error, "a deny rule must override a hook 'allow'");
-        assert!(content.contains("Permission denied: denied-by-rule"));
+        // The deny reason reaches the model VERBATIM (no "Permission denied: "
+        // wrapper); this test gate emits a raw reason string.
+        assert!(content.contains("denied-by-rule"));
+        assert!(!content.contains("Permission denied: denied-by-rule"));
         assert!(!content.contains("ECHOED-OUTPUT"), "tool never ran");
     }
 
@@ -5436,7 +5444,9 @@ mod pre_tool_hook_tests {
         let (results, _, _, _) = dispatch_tool_uses_tracked(&orch, &uses(), None).await.unwrap();
         let (content, is_error) = tool_result(&results[0]);
         assert!(is_error, "gate denial applies when the hook makes no decision");
-        assert!(content.contains("Permission denied: denied-by-gate"));
+        // Verbatim deny reason (no "Permission denied: " wrapper).
+        assert!(content.contains("denied-by-gate"));
+        assert!(!content.contains("Permission denied: denied-by-gate"));
     }
 
     /// UNKNOWN-TOOL: when the model calls a tool name that is not in the

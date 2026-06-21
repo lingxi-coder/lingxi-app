@@ -87,7 +87,7 @@ impl PolicyPermissionGate {
                 explanation,
                 ..
             } => PermissionDecision::Deny {
-                reason: explanation.unwrap_or_else(|| deny_reason_string(&reason)),
+                reason: explanation.unwrap_or_else(|| deny_reason_string(&reason, name)),
             },
             PermissionResult::Ask { .. } => {
                 if matches!(tool_default(name), PromptDefault::AllowByDefault) {
@@ -117,7 +117,7 @@ impl PolicyPermissionGate {
                 ..
             } => PermissionResolution::Deny {
                 source: map_decision_source(&reason),
-                reason: explanation.unwrap_or_else(|| deny_reason_string(&reason)),
+                reason: explanation.unwrap_or_else(|| deny_reason_string(&reason, name)),
                 // The policy gate's rule/mode/classifier denials are never an
                 // `ask`-behavior rejection carrying contentBlocks (the external
                 // build has no classifier/contentBlocks producer), so the
@@ -166,7 +166,7 @@ impl PermissionGate for PolicyPermissionGate {
                 explanation,
                 ..
             } => PermissionDecision::Deny {
-                reason: explanation.unwrap_or_else(|| deny_reason_string(&reason)),
+                reason: explanation.unwrap_or_else(|| deny_reason_string(&reason, name)),
             },
         }
     }
@@ -207,19 +207,29 @@ impl PermissionGate for PolicyPermissionGate {
     }
 }
 
-/// Render a [`PermissionDecisionReason`] to the human/model-facing deny string
-/// (used when the `Deny` carries no explicit `explanation`).
-fn deny_reason_string(reason: &PermissionDecisionReason) -> String {
+/// Render a [`PermissionDecisionReason`] to the model-facing deny string for
+/// `tool_name` (used when the `Deny` carries no explicit `explanation`).
+///
+/// claude-code's generic permission deny message is
+/// `Permission to use ${tool} has been denied.` (`permissions.ts:1087,1179`);
+/// the `dontAsk` mode appends the don't-ask clause + the shared workaround
+/// guidance (`DONT_ASK_REJECT_MESSAGE`, `messages.ts:237`). Tool-specific deny
+/// checks (e.g. Bash's `Permission to use Bash with command ${cmd} has been
+/// denied.`) set an explicit `explanation` that takes precedence over this.
+fn deny_reason_string(reason: &PermissionDecisionReason, tool_name: &str) -> String {
     match reason {
-        PermissionDecisionReason::MatchedRule { rule } => {
-            format!("denied by permission rule {}", rule.value.to_rule_string())
-        }
-        PermissionDecisionReason::PermissionMode { mode } => {
-            format!("denied by permission mode {mode:?}")
-        }
-        _ => "permission denied".to_string(),
+        PermissionDecisionReason::PermissionMode {
+            mode: PermissionMode::DontAsk,
+        } => format!(
+            "Permission to use {tool_name} has been denied because Claude Code is running in don't ask mode. {DENIAL_WORKAROUND_GUIDANCE}"
+        ),
+        _ => format!("Permission to use {tool_name} has been denied."),
     }
 }
+
+/// Shared guidance appended to certain permission denials (`messages.ts:226`),
+/// instructing the model on acceptable workarounds.
+const DENIAL_WORKAROUND_GUIDANCE: &str = "IMPORTANT: You *may* attempt to accomplish this action using other tools that might naturally be used to accomplish this goal, e.g. using head instead of cat. But you *should not* attempt to work around this denial in malicious ways, e.g. do not use your ability to run tests to execute non-test actions. You should only try to work around this restriction in reasonable ways that do not attempt to bypass the intent behind this denial. If you believe this capability is essential to complete the user's request, STOP and explain to the user what you were trying to do and why you need this permission. Let the user decide how to proceed.";
 
 /// Map a [`PermissionDecisionReason`] to the coarse [`PermissionDecisionSource`]
 /// the turn loop gates its permission hooks on (claude-code `decisionReason.type`).
@@ -239,6 +249,29 @@ mod tests {
     use crate::mode::PermissionMode;
     use crate::rule::PermissionRuleSource;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn deny_reason_string_is_byte_faithful() {
+        // Generic deny (rule/mode/other) ⇒ claude-code `permissions.ts:1087,1179`.
+        let generic = PermissionDecisionReason::Other {
+            reason: "anything".into(),
+        };
+        assert_eq!(
+            deny_reason_string(&generic, "Bash"),
+            "Permission to use Bash has been denied."
+        );
+        // dontAsk mode ⇒ `DONT_ASK_REJECT_MESSAGE` (`messages.ts:237`) with guidance.
+        let dont_ask = PermissionDecisionReason::PermissionMode {
+            mode: PermissionMode::DontAsk,
+        };
+        assert_eq!(
+            deny_reason_string(&dont_ask, "Edit"),
+            format!("Permission to use Edit has been denied because Claude Code is running in don't ask mode. {DENIAL_WORKAROUND_GUIDANCE}")
+        );
+        // The guidance text itself is byte-locked.
+        assert!(DENIAL_WORKAROUND_GUIDANCE.starts_with("IMPORTANT: You *may* attempt to accomplish this action using other tools"));
+        assert!(DENIAL_WORKAROUND_GUIDANCE.ends_with("Let the user decide how to proceed."));
+    }
 
     /// Records how many times its `check` is called, returning a fixed decision.
     struct RecordingInner {

@@ -738,10 +738,11 @@ async fn pre_tool_additional_context_surfaces_even_when_denied() {
                     if *tu == tool_use_id {
                         saw_deny_result = true;
                         assert!(*is_error, "the deny tool_result must be is_error");
+                        // claude-code sends the deny reason VERBATIM as the
+                        // tool_result content (no "Permission denied: " wrapper).
                         assert!(
-                            content.contains("Permission denied")
-                                && content.contains("policy forbids it"),
-                            "deny tool_result carries the deny reason: {content:?}"
+                            content.contains("policy forbids it"),
+                            "deny tool_result carries the deny reason verbatim: {content:?}"
                         );
                         assert!(
                             !content.contains("DENY-CTX"),
@@ -885,9 +886,10 @@ async fn ask_behavior_deny_appends_image_blocks_at_top_level() {
         } => {
             assert!(*is_error);
             assert_eq!(tu, &tool_use_id);
+            // Deny reason reaches the model VERBATIM (no "Permission denied: " wrapper).
             assert!(
-                c.contains("Permission denied") && c.contains("declined at prompt"),
-                "tool_result carries the deny reason: {c:?}"
+                c.contains("declined at prompt"),
+                "tool_result carries the deny reason verbatim: {c:?}"
             );
         }
         other => panic!("expected tool_result first, got {other:?}"),

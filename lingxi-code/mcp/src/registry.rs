@@ -428,14 +428,24 @@ impl McpRegistry {
         // logical server name, only an `McpConnectionId`). This is the missing
         // "rewrite site" the posix `list_tools` comment defers to: stamp the
         // RAW `config.name` into `server_name` and build the normalized FQN
-        // `mcp__<normalize(server)>__<tool>`. Mirrors claude-code's
-        // `buildMcpToolName(client.name, tool.name)` (client.ts:1768) with the
-        // 1:1 `normalizeNameForMCP` (normalization.rs). A `tool_name` already
-        // containing `__` (e.g. `read__file`) survives verbatim.
+        // `mcp__<normalize(server)>__<normalize(tool)>`. Mirrors claude-code's
+        // `buildMcpToolName(client.name, tool.name)` (client.ts:1768 →
+        // `mcpStringUtils.ts:51` `getMcpPrefix(server) + normalizeNameForMCP(tool)`),
+        // which normalizes BOTH segments with the 1:1 `normalizeNameForMCP`
+        // (normalization.rs). The RAW `tool_name` stays on the dto for dispatch
+        // (the server expects the unnormalized wire name, recovered via
+        // [`McpRegistry::resolve_wire_tool_name`] — claude-code carries it as
+        // `mcpInfo.toolName`, client.ts:1774). For valid-identifier tool names
+        // the normalized form equals the raw one, so the FQN is byte-unchanged
+        // except for names with characters outside `[a-zA-Z0-9_-]`.
         let normalized_server = normalize_name_for_mcp(&config.name);
         for dto in &mut tools {
             dto.server_name.clone_from(&config.name);
-            dto.full_name = format!("mcp__{}__{}", normalized_server, dto.tool_name);
+            dto.full_name = format!(
+                "mcp__{}__{}",
+                normalized_server,
+                normalize_name_for_mcp(&dto.tool_name)
+            );
         }
 
         let connection_id = conn.connection_id;
@@ -1084,6 +1094,40 @@ impl McpRegistry {
         }
         out
     }
+
+    /// Recover the RAW wire tool name for a model-facing MCP tool `full_name`.
+    ///
+    /// The model-facing `full_name` (`mcp__<normalize(server)>__<normalize(tool)>`,
+    /// the rewrite site in [`Self::connect`]) carries the NORMALIZED tool
+    /// segment, 1:1 with claude-code's `buildMcpToolName`. The MCP server,
+    /// however, expects the UNNORMALIZED wire name in its `tools/call` request.
+    /// claude-code keeps it as `mcpInfo.toolName` (`client.ts:1774`); here it
+    /// lives on the cached [`traits::McpToolDto::tool_name`], so the dispatch
+    /// path recovers it by matching the dto whose `full_name` equals the
+    /// model-supplied name.
+    ///
+    /// `normalized_server` is the FQN's server segment (already normalized).
+    /// Returns `None` when no connected server matches it or `full_name` is
+    /// unknown — the caller then falls back to the parsed (normalized) segment,
+    /// a no-op for valid-identifier names where raw == normalized.
+    pub async fn resolve_wire_tool_name(
+        &self,
+        normalized_server: &str,
+        full_name: &str,
+    ) -> Option<String> {
+        let conns = self.connections.read().await;
+        for state in conns.values() {
+            if let McpConnectionState::Connected { config, tools, .. } = state {
+                if normalize_name_for_mcp(&config.name) == normalized_server {
+                    return tools
+                        .iter()
+                        .find(|dto| dto.full_name == full_name)
+                        .map(|dto| dto.tool_name.clone());
+                }
+            }
+        }
+        None
+    }
 }
 
 /// MCPLIFE.4: the connect+initialize handshake deadline, mirroring claude-code's
@@ -1645,8 +1689,58 @@ mod tests {
         let McpConnectionState::Connected { tools, .. } = conns.get("fs").unwrap() else {
             panic!("expected Connected state");
         };
-        // The `__` inside the tool name survives verbatim.
+        // The `__` inside the tool name survives verbatim (normalize is a no-op
+        // for names already matching `[a-zA-Z0-9_-]` — `_` is a valid char).
         assert_eq!(tools[0].full_name, "mcp__fs__read__file");
+    }
+
+    #[tokio::test]
+    async fn connect_normalizes_special_char_tool_segment_and_resolves_raw_wire_name() {
+        // claude-code's `buildMcpToolName` normalizes BOTH the server AND the
+        // tool segment (`client.ts:1768` → `mcpStringUtils.ts:51`). A tool whose
+        // wire name contains a character outside `[a-zA-Z0-9_-]` (here the `.` in
+        // `weather.now`) gets a NORMALIZED model-facing FQN, while the RAW wire
+        // name is kept on the dto for dispatch (claude-code's `mcpInfo.toolName`).
+        let mock = Arc::new(BridgeMock::new(&["weather.now"]));
+        let registry = McpRegistry::with_raw_conn(
+            mock.clone() as Arc<dyn McpTransport>,
+            mock as Arc<dyn RawConnectionProvider>,
+        );
+        registry.connect(cfg("forecast")).await.unwrap();
+
+        let conns = registry.connections.read().await;
+        let McpConnectionState::Connected { tools, .. } = conns.get("forecast").unwrap() else {
+            panic!("expected Connected state");
+        };
+        // Model-facing FQN: the `.` normalizes to `_`.
+        assert_eq!(tools[0].full_name, "mcp__forecast__weather_now");
+        // The dto keeps the RAW wire name for dispatch.
+        assert_eq!(tools[0].tool_name, "weather.now");
+        drop(conns);
+
+        // resolve_wire_tool_name maps the normalized model-facing FQN back to
+        // the RAW wire name the server expects on `tools/call`.
+        assert_eq!(
+            registry
+                .resolve_wire_tool_name("forecast", "mcp__forecast__weather_now")
+                .await
+                .as_deref(),
+            Some("weather.now"),
+        );
+        // Unknown FQN or server ⇒ None (the caller falls back to the parsed
+        // segment, a no-op for valid-identifier names).
+        assert_eq!(
+            registry
+                .resolve_wire_tool_name("forecast", "mcp__forecast__missing")
+                .await,
+            None,
+        );
+        assert_eq!(
+            registry
+                .resolve_wire_tool_name("nope", "mcp__forecast__weather_now")
+                .await,
+            None,
+        );
     }
 
     #[tokio::test]

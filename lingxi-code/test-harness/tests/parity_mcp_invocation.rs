@@ -176,6 +176,47 @@ async fn wire_tools_contain_per_server_fqn_entries_with_server_schema() {
 // dispatch routes a mcp__mock__a tool_use to the server's call_tool
 // ============================================================================
 
+/// A tool whose wire name contains a character outside `[a-zA-Z0-9_-]` (`a.b`)
+/// is advertised to the model under its NORMALIZED FQN `mcp__mock__a_b`
+/// (claude-code `buildMcpToolName` normalizes the tool segment), but the MCP
+/// server must be called with the RAW wire name `a.b` (claude-code's
+/// `mcpInfo.toolName`). Proves the `resolve_wire_tool_name` dispatch round-trip
+/// end-to-end: model-facing normalized FQN ⇒ raw wire name on `tools/call`.
+#[tokio::test]
+async fn dispatch_sends_raw_wire_name_for_normalized_special_char_fqn() {
+    let (tools, mcp_registry, mock) = seed(&["a.b"]).await;
+
+    let api = Arc::new(MockApiClient::new(vec![
+        mock_message_response(
+            vec![LlmContentBlock::ToolCall {
+                id: ToolUseId::new().to_string(),
+                // The model addresses the tool by its NORMALIZED model-facing FQN.
+                name: "mcp__mock__a_b".into(),
+                input: serde_json::json!({ "x": 1 }),
+            }],
+            Some("tool_use"),
+        ),
+        mock_message_response(
+            vec![LlmContentBlock::Text {
+                text: "done".into(),
+                cache_control: None,
+            }],
+            Some("end_turn"),
+        ),
+    ]));
+    let output = Arc::new(MockOutputStream::new());
+    let orch = build_orchestrator(api.clone(), tools, output.clone(), mcp_registry);
+    orch.run_turn("call the dotted tool").await.expect("turn ok");
+
+    // The server's `call_tool` must observe the RAW wire name `a.b`, NOT the
+    // normalized FQN segment `a_b` — the divergence the fix closes.
+    assert_eq!(
+        mock.called_tools(),
+        vec!["a.b".to_string()],
+        "the server must receive the RAW wire name `a.b`, not the normalized `a_b`"
+    );
+}
+
 /// A model `tool_use` named `mcp__mock__a` is routed through `find_by_name`
 /// into the per-tool `MCPTool`, reaches the mock server's `call_tool`, and the
 /// result round-trips back as a non-error `ToolResult`.

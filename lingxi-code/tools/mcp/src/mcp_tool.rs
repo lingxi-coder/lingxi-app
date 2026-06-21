@@ -576,6 +576,26 @@ impl Tool for MCPTool {
         // (`client.ts:1840-1843`) and gates the `started`/`progress`/`completed`
         // progress events (`onProgress && toolUseId`,
         // `client.ts:1846`/`:1871`/`:1884`).
+        // MCP FQN: `full_name`'s tool segment is the NORMALIZED model-facing
+        // name (1:1 with claude-code `buildMcpToolName`, which normalizes BOTH
+        // the server AND the tool segment — `client.ts:1768`/`mcpStringUtils.ts:51`).
+        // The server expects the RAW wire tool name, carried alongside the dto
+        // like claude-code's `mcpInfo.toolName` (`client.ts:1774`). Resolve it
+        // from the registry and shadow `tool`; fall back to the parsed segment
+        // when the tool isn't registered (defensive — e.g. a hand-built /
+        // generic-dispatcher `full_name`). For valid-identifier tool names the
+        // raw and normalized forms are identical, so this is a no-op except for
+        // tool names containing characters outside `[a-zA-Z0-9_-]`.
+        let tool = registry
+            .resolve_wire_tool_name(&server, &full_name)
+            .await
+            .unwrap_or(tool);
+        // Reconstruct the raw-tool FQN so the client's `mcp__<server>__` prefix
+        // strip (`call_tool_with_meta`) recovers the RAW wire name. The server
+        // segment is unchanged (server normalization is identical); only the
+        // tool segment may differ from the model-facing `full_name`.
+        let dispatch_full_name = format!("mcp__{server}__{tool}");
+
         let tool_use_id = ctx.tool_use_id.clone();
 
         // `started` progress event (`client.ts:1845-1856`).
@@ -613,7 +633,7 @@ impl Tool for MCPTool {
 
         match client
             .call_tool_with_progress(
-                &full_name,
+                &dispatch_full_name,
                 arguments,
                 tool_use_id_str.as_deref(),
                 on_progress,

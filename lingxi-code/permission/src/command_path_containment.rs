@@ -604,8 +604,19 @@ fn validate_path(
         );
     }
 
-    // 4. Shell expansion syntax ($VAR / ${VAR} / $(cmd) / %VAR% / leading =).
-    if clean_path.contains('$') || clean_path.contains('%') || clean_path.starts_with('=') {
+    // 4. Shell expansion syntax: `$VAR` / `${VAR}` / `$(cmd)`, backtick command
+    // substitution, `%VAR%` (Windows only), or a leading `=`. 1:1 with claude-code
+    // `TPt` (binary @197017575):
+    // `o.includes("$") || zt()==="windows"&&o.includes("%") || o.includes("`") || o.startsWith("=")`.
+    // The `%` check is gated to Windows — on posix a bare `%` is a legal path
+    // character, so checking it unconditionally over-asks vs claude-code. The
+    // backtick (command substitution) check was previously MISSING, so a path arg
+    // containing a backtick under-asked vs claude-code.
+    if clean_path.contains('$')
+        || (cfg!(target_os = "windows") && clean_path.contains('%'))
+        || clean_path.contains('`')
+        || clean_path.starts_with('=')
+    {
         return PathGuard::Ask(
             "Shell expansion syntax in paths requires manual approval".to_string(),
         );
@@ -1051,8 +1062,25 @@ mod tests {
     }
 
     #[test]
-    fn percent_expansion_in_path_asks() {
-        let a = check("cat %TEMP%/x").expect("ask");
+    fn percent_in_path_is_not_shell_expansion_on_posix() {
+        // `%VAR%` is gated to Windows in claude-code's `TPt`
+        // (`zt()==="windows" && o.includes("%")`); on posix a bare `%` is a legal
+        // path character and must NOT raise the shell-expansion ask. LingXi
+        // previously checked `%` unconditionally → over-asked vs claude-code.
+        if let Some(a) = check("cat %TEMP%/x") {
+            assert_ne!(
+                a.message, "Shell expansion syntax in paths requires manual approval",
+                "`%` must not raise the shell-expansion ask on posix; got {a:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn backtick_command_substitution_in_path_asks() {
+        // Backtick command substitution must raise the shell-expansion ask
+        // (claude-code `TPt` `o.includes("`")`); LingXi previously omitted this
+        // check, under-asking vs claude-code.
+        let a = check("cat /tmp/`id`").expect("ask");
         assert_eq!(
             a.message,
             "Shell expansion syntax in paths requires manual approval"

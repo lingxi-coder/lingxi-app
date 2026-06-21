@@ -559,10 +559,13 @@ fn expand_tilde(path: &str, home: Option<&str>) -> String {
     }
 }
 
-/// TS `GLOB_PATTERN_REGEX = /[*?[\]{}]/` — does the path contain a glob metachar?
+/// v2.1.185 glob detector `yPt` — `*`, `?`, `[`/`]`. Brace `{}` is NO LONGER a
+/// glob metachar here: v2.1.185 split braces into a SEPARATE write-target guard
+/// (`TEd`, applied before `yPt` — see the "4b. Brace expansion" check at the
+/// glob-check call site). (The exact `[`/`]` pairing semantics of `yPt`
+/// are a residual edge case; a bare `]` is still treated as a metachar.)
 fn has_glob_metachar(s: &str) -> bool {
-    s.bytes()
-        .any(|b| matches!(b, b'*' | b'?' | b'[' | b']' | b'{' | b'}'))
+    s.bytes().any(|b| matches!(b, b'*' | b'?' | b'[' | b']'))
 }
 
 /// Port of the ASK-producing parts of TS `validatePath`
@@ -619,6 +622,21 @@ fn validate_path(
     {
         return PathGuard::Ask(
             "Shell expansion syntax in paths requires manual approval".to_string(),
+        );
+    }
+
+    // 4b. Brace expansion in a WRITE/CREATE target — a SEPARATE guard AHEAD of
+    //     the glob check (claude-code `TEd=/[{}]/` runs before `yPt`, binary
+    //     @197017575). `bash` may brace-expand `{a,b}` to paths outside the
+    //     working directory, so a braced write target asks. A braced READ path
+    //     falls through: v2.1.185's `yPt` does not treat `{}` as a glob, so it
+    //     containment-checks the full path below (rather than the glob base).
+    if matches!(operation_type, OperationType::Write | OperationType::Create)
+        && (clean_path.contains('{') || clean_path.contains('}'))
+    {
+        return PathGuard::Ask(
+            "Brace characters in write target require manual approval \u{2014} bash may brace-expand to paths outside the working directory"
+                .to_string(),
         );
     }
 
@@ -1139,6 +1157,36 @@ mod tests {
             "Glob patterns are not allowed in write operations. Please specify an exact file path."
         );
         assert_eq!(a.reason, a.message);
+    }
+
+    #[test]
+    fn brace_in_write_path_asks_with_brace_message() {
+        // touch is a create op; a brace in the write target gets the SEPARATE
+        // brace guard (claude-code `TEd`, v2.1.185), NOT the glob message.
+        let a = check("touch /proj/work/{a,b}.txt").expect("ask");
+        assert_eq!(
+            a.message,
+            "Brace characters in write target require manual approval \u{2014} bash may brace-expand to paths outside the working directory"
+        );
+        assert_eq!(a.reason, a.message);
+    }
+
+    #[test]
+    fn brace_in_read_path_is_not_glob_or_brace_ask() {
+        // A braced READ path is not a glob in v2.1.185 (`yPt` excludes `{}`), and
+        // the brace guard is write-only — so it raises neither the glob message
+        // nor the brace message (it containment-checks the full path).
+        if let Some(a) = check("cat /proj/work/{a,b}.txt") {
+            assert_ne!(
+                a.message,
+                "Glob patterns are not allowed in write operations. Please specify an exact file path.",
+                "a braced read path must not raise the glob message"
+            );
+            assert!(
+                !a.message.starts_with("Brace characters in write target"),
+                "the brace guard is write-only; got {a:?}"
+            );
+        }
     }
 
     #[test]

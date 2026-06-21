@@ -353,7 +353,7 @@ impl PermissionPolicy {
         //     the R-D1 fix: previously tool-wide ask walked before content deny,
         //     downgrading a deny to an ask.
         if let Some(rule) = self.first_match(&self.deny_rules, &sources, tool_name, input, true) {
-            return deny_with_rule(rule);
+            return deny_with_rule_content(rule, tool_name, input);
         }
         // 1c. Tool-wide ask (`EIo`).
         if let Some(rule) = self.first_match(&self.ask_rules, &sources, tool_name, input, false) {
@@ -1312,6 +1312,32 @@ fn deny_with_rule(rule: &PermissionRule) -> PermissionResult {
     PermissionResult::Deny {
         reason: PermissionDecisionReason::MatchedRule { rule: rule.clone() },
         explanation: None,
+        metadata: PermissionMetadata::default(),
+    }
+}
+
+/// Deny from a CONTENT (command-specific) rule match. For the Bash tool this
+/// carries the command in the model-facing message, 1:1 with
+/// `bashPermissions.ts:1003`: `Permission to use Bash with command ${command}
+/// has been denied.` (`command = input.command.trim()`). Other tools — and the
+/// TOOL-WIDE deny path (`permissions.ts:1087`) — use the generic
+/// `deny_reason_string` message via an absent `explanation`.
+fn deny_with_rule_content(
+    rule: &PermissionRule,
+    tool_name: &str,
+    input: &serde_json::Value,
+) -> PermissionResult {
+    let explanation = if tool_name == "Bash" {
+        input
+            .get("command")
+            .and_then(serde_json::Value::as_str)
+            .map(|cmd| format!("Permission to use Bash with command {} has been denied.", cmd.trim()))
+    } else {
+        None
+    };
+    PermissionResult::Deny {
+        reason: PermissionDecisionReason::MatchedRule { rule: rule.clone() },
+        explanation,
         metadata: PermissionMetadata::default(),
     }
 }
@@ -2556,6 +2582,45 @@ mod tests {
         assert_eq!(PermissionMode::AcceptEdits.title(), "Accept edits");
         assert_eq!(PermissionMode::BypassPermissions.title(), "Bypass Permissions");
         assert_eq!(PermissionMode::DontAsk.title(), "Don't Ask");
+    }
+
+    #[test]
+    fn bash_content_deny_carries_the_command_in_the_message() {
+        // deny:[Bash(rm:*)] matching `rm -rf /` ⇒ bashPermissions.ts:1003:
+        // `Permission to use Bash with command ${input.command.trim()} has been denied.`
+        let mut p = PermissionPolicy::new(PermissionMode::Default);
+        let rule = PermissionRule {
+            value: PermissionRuleValue {
+                tool_name: "Bash".into(),
+                rule_content: Some("rm:*".into()),
+            },
+            behavior: PermissionBehavior::Deny,
+            source: PermissionRuleSource::UserSettings,
+        };
+        p.deny_rules.entry(rule.source).or_default().push(rule);
+        match p.authorize("Bash", &serde_json::json!({ "command": "  rm -rf /  " })) {
+            PermissionResult::Deny { explanation, .. } => assert_eq!(
+                explanation.as_deref(),
+                Some("Permission to use Bash with command rm -rf / has been denied.")
+            ),
+            other => panic!("expected Deny, got {other:?}"),
+        }
+        // A TOOL-WIDE Bash deny stays generic (explanation None ⇒ the gate uses
+        // `deny_reason_string` → `Permission to use Bash has been denied.`).
+        let mut p2 = PermissionPolicy::new(PermissionMode::Default);
+        let toolwide = PermissionRule {
+            value: PermissionRuleValue {
+                tool_name: "Bash".into(),
+                rule_content: None,
+            },
+            behavior: PermissionBehavior::Deny,
+            source: PermissionRuleSource::UserSettings,
+        };
+        p2.deny_rules.entry(toolwide.source).or_default().push(toolwide);
+        match p2.authorize("Bash", &serde_json::json!({ "command": "ls" })) {
+            PermissionResult::Deny { explanation, .. } => assert_eq!(explanation, None),
+            other => panic!("expected Deny, got {other:?}"),
+        }
     }
 
     fn seeded_policy(mode: PermissionMode) -> PermissionPolicy {

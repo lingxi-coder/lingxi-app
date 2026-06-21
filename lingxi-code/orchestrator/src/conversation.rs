@@ -4616,6 +4616,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         let style = resolved.as_ref().map(|r| ActiveOutputStyle {
             name: r.name.as_str(),
             prompt: r.prompt.as_str(),
+            keep_coding_instructions: r.keep_coding_instructions,
         });
         let mut prompt = assemble_system_prompt_with_style(&ctx, style);
 

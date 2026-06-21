@@ -53,6 +53,12 @@ pub struct ActiveOutputStyle<'a> {
     pub name: &'a str,
     /// Verbatim style prompt body, emitted on the line after the heading.
     pub prompt: &'a str,
+    /// `keepCodingInstructions` (defaults to `true`). When an active style sets
+    /// this to `false`, the `# Doing tasks` (`Lym`) section is OMITTED from the
+    /// system prompt — mirroring the binary gate
+    /// `c===null||c.keepCodingInstructions===!0?Lym():null` (v2.1.185 offset
+    /// 205821502).
+    pub keep_coding_instructions: bool,
 }
 
 /// Assemble a system prompt from a [`SystemPromptContext`].
@@ -104,9 +110,17 @@ pub fn assemble_system_prompt_with_style(
     // / `# Tone and style`), spliced between the HEADER and the env block. In
     // the binary these six statics precede the dynamic env/memory group, so
     // emitting them here keeps the statics-before-env relative order. The
-    // `Pym` opening clause toggles on whether an output style is active.
+    // `Pym` opening clause toggles on whether an output style is active; the
+    // `# Doing tasks` (`Lym`) section is gated on the active style's
+    // `keepCodingInstructions` (default true ⇒ no-style and builtins stay
+    // byte-identical to before).
     push_section_separator(&mut s);
-    s.push_str(&body_sections::format(output_style.is_some(), &ctx.tool_names));
+    let keep_coding = output_style.map_or(true, |s| s.keep_coding_instructions);
+    s.push_str(&body_sections::format(
+        output_style.is_some(),
+        keep_coding,
+        &ctx.tool_names,
+    ));
 
     push_section_separator(&mut s);
     s.push_str(&env_block::format(ctx));
@@ -537,6 +551,7 @@ mod tests {
         let style = ActiveOutputStyle {
             name: "Explanatory",
             prompt: "BODY LINE 1\nBODY LINE 2",
+            keep_coding_instructions: true,
         };
         let out = assemble_system_prompt_with_style(&ctx, Some(style));
 
@@ -563,6 +578,7 @@ mod tests {
         let style = ActiveOutputStyle {
             name: "Learning",
             prompt: "P",
+            keep_coding_instructions: true,
         };
         let out = assemble_system_prompt_with_style(&ctx, Some(style));
         // No memory section (CLAUDE.md is a meta message now) and no tools section.

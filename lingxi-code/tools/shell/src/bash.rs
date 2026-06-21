@@ -382,6 +382,49 @@ fn truncate_bash_output(content: String, max: usize) -> (String, bool) {
     (truncated, true)
 }
 
+/// The interrupt/abort marker appended to stderr (`BashTool.tsx:602-604`).
+const ABORT_MARKER: &str = "<error>Command was aborted before completion</error>";
+
+/// Build the MODEL-facing `tool_result` content string exactly as claude-code's
+/// Bash result mapper: `content: [c, u, d].filter(Boolean).join("\n")`
+/// (v2.1.185 binary offset 202593080). The model sees this plain-text string —
+/// NOT a JSON dump of the structured `data` object (that object still flows to
+/// the TUI / `PostToolUse` hook). Parts:
+/// - `c` = stdout via `replace(/^(\s*\n)+/,"").trimEnd()` ([`normalize_stdout`]),
+/// - `u` = `stderr.trim()`, plus (when `interrupted`) a `\n` separator (`rYa`,
+///   only when stderr was non-empty) and the [`ABORT_MARKER`],
+/// - `d` = an optional background-run note,
+///
+/// then the non-empty parts are joined by `\n`.
+fn bash_model_content(
+    stdout: &str,
+    stderr: &str,
+    interrupted: bool,
+    background_note: Option<&str>,
+) -> String {
+    let c = crate::shared::normalize_stdout(stdout);
+    let mut u = stderr.trim().to_string();
+    if interrupted {
+        if !stderr.is_empty() {
+            u.push('\n');
+        }
+        u.push_str(ABORT_MARKER);
+    }
+    let mut parts: Vec<String> = Vec::new();
+    if !c.is_empty() {
+        parts.push(c);
+    }
+    if !u.is_empty() {
+        parts.push(u);
+    }
+    if let Some(d) = background_note {
+        if !d.is_empty() {
+            parts.push(d.to_string());
+        }
+    }
+    parts.join("\n")
+}
+
 /// Build the SUCCESSFUL `tool_result` for a timed-out / interrupted Bash run,
 /// mirroring claude-code's interrupted shape (`BashTool.tsx` ~602-605 / 720):
 /// `interrupted: true`, `timed_out: true`, partial stdout normalized + truncated
@@ -402,10 +445,16 @@ fn build_interrupted_result(stdout_partial: &str, stderr_partial: &str, cmd_str:
     if !stderr_final.is_empty() {
         stderr_final.push('\n');
     }
-    stderr_final.push_str("<error>Command was aborted before completion</error>");
+    stderr_final.push_str(ABORT_MARKER);
+
+    // Model-facing render: `[c, u(+abort marker)].join("\n")` (the binary appends
+    // the abort marker inside the result mapper, so build it from the pre-marker
+    // stderr with `interrupted = true`).
+    let model_content = bash_model_content(&stdout_final, &stderr_clean, true, None);
 
     ToolCallResult {
         data: json!({
+            "model_content": model_content,
             // No exit code on a killed process; claude-code carries the
             // ShellError code (-1 when killed). Mirror that.
             "exit_code": -1,
@@ -1031,8 +1080,17 @@ impl Tool for BashTool {
             return match self.ctx.process.spawn_background(&sandboxed).await {
                 Ok(handle) => {
                     let out_path = task_output_path(&handle.task_id).display().to_string();
+                    // Model-facing background note (`d` in the binary's mapper):
+                    // `Command running in background with ID: … Output is being
+                    // written to: … use Read on that file path.` (offset 183106320).
+                    let note = format!(
+                        "Command running in background with ID: {}. Output is being written to: {}. You will be notified when it completes. To check interim output, use Read on that file path.",
+                        handle.task_id, out_path
+                    );
+                    let model_content = bash_model_content("", "", false, Some(&note));
                     Ok(ToolCallResult {
                         data: json!({
+                            "model_content":    model_content,
                             "pid":              handle.pid,
                             "task_id":          handle.task_id,
                             "task_output_path": out_path,
@@ -1395,8 +1453,13 @@ impl Tool for BashTool {
                 meta.insert("truncated".into(), AnalyticsValue::Bool(truncated_out));
                 self.ctx.bus.log_event(BASH_COMPLETED, meta).await;
 
+                // Model sees the plain-text `[stdout, stderr].join("\n")` render
+                // (`content` in the binary's tool_result mapper), NOT the JSON
+                // object — which stays for the TUI / PostToolUse hook.
+                let model_content = bash_model_content(&stdout_final, &stderr_clean, false, None);
                 Ok(ToolCallResult {
                     data: json!({
+                        "model_content": model_content,
                         "exit_code": out.exit_code,
                         "stdout":    stdout_final,
                         "stderr":    stderr_clean,
@@ -1464,6 +1527,36 @@ mod tests {
         assert_eq!(BASH_SHELL_LINUX, "/bin/bash");
         assert_eq!(BASH_SHELL_MACOS, "/bin/zsh");
         assert_eq!(TOOL_NAME, "Bash");
+    }
+
+    #[test]
+    fn model_content_matches_binary_join() {
+        // [c, u, d].filter(Boolean).join("\n"): stdout + stderr joined by newline.
+        assert_eq!(
+            bash_model_content("hello\n", "warn: x\n", false, None),
+            "hello\nwarn: x"
+        );
+        // stdout only (stderr empty ⇒ dropped, no trailing newline).
+        assert_eq!(bash_model_content("ok\n", "", false, None), "ok");
+        // stderr only (empty stdout ⇒ dropped).
+        assert_eq!(bash_model_content("", "boom", false, None), "boom");
+        // Leading blank lines stripped + trimEnd (normalize_stdout / the `c` rule).
+        assert_eq!(bash_model_content("\n\n  data  \n", "", false, None), "  data");
+        // Interrupt appends the abort marker after a newline (rYa) when stderr present.
+        assert_eq!(
+            bash_model_content("partial\n", "err", true, None),
+            format!("partial\nerr\n{ABORT_MARKER}")
+        );
+        // Interrupt with empty stderr ⇒ marker only (no leading newline).
+        assert_eq!(
+            bash_model_content("", "", true, None),
+            ABORT_MARKER.to_string()
+        );
+        // Background note is the `d` part.
+        assert_eq!(
+            bash_model_content("", "", false, Some("Command running in background with ID: 7. Output is being written to: /p.")),
+            "Command running in background with ID: 7. Output is being written to: /p."
+        );
     }
 
     // ===== Finding #8 — `R0` containment port (`is_within_allowed`) ==========

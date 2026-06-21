@@ -174,12 +174,27 @@ fn using_your_tools(tool_names: &[String]) -> Option<String> {
 ///
 /// `output_style_active` toggles the `Pym` opening clause; `tool_names` drives
 /// the `# Using your tools` section (see [`using_your_tools`]).
+///
+/// `keep_coding_instructions` gates the `# Doing tasks` (`Lym`) section: the
+/// binary emits it when `c===null||c.keepCodingInstructions===!0` (v2.1.185
+/// offset 205821502), i.e. it is OMITTED only when an output style is active
+/// AND that style sets `keepCodingInstructions: false`. Callers pass `true`
+/// when no style is active (the `c===null` arm), so the styleless and
+/// builtin-style prompts are byte-unchanged.
 #[must_use]
-pub fn format(output_style_active: bool, tool_names: &[String]) -> String {
+pub fn format(
+    output_style_active: bool,
+    keep_coding_instructions: bool,
+    tool_names: &[String],
+) -> String {
     let mut sections: Vec<String> = Vec::with_capacity(6);
     sections.push(opening_paragraph(output_style_active));
     sections.push(SYSTEM_SECTION.to_string());
-    sections.push(DOING_TASKS_SECTION.to_string());
+    // `# Doing tasks` is dropped only for an active style with
+    // `keepCodingInstructions: false` (default true keeps it).
+    if !output_style_active || keep_coding_instructions {
+        sections.push(DOING_TASKS_SECTION.to_string());
+    }
     sections.push(EXECUTING_ACTIONS_SECTION.to_string());
     if let Some(tools) = using_your_tools(tool_names) {
         sections.push(tools);
@@ -228,6 +243,23 @@ mod tests {
         // Nested /help + feedback items use the two-space prefix.
         assert!(DOING_TASKS_SECTION.contains("\n  - /help: Get help with using Claude Code"));
         assert!(DOING_TASKS_SECTION.ends_with("report the issue at https://github.com/anthropics/claude-code/issues"));
+    }
+
+    #[test]
+    fn doing_tasks_gated_on_keep_coding_instructions() {
+        let tools: Vec<String> = Vec::new();
+        // No active style ⇒ DOING present (the `c===null` arm), regardless of flag.
+        assert!(format(false, true, &tools).contains("# Doing tasks"));
+        assert!(format(false, false, &tools).contains("# Doing tasks"));
+        // Active style with keepCodingInstructions:true ⇒ DOING present.
+        assert!(format(true, true, &tools).contains("# Doing tasks"));
+        // Active style with keepCodingInstructions:false ⇒ DOING OMITTED (the
+        // only case that diverges; binary `c.keepCodingInstructions===!0?…:null`).
+        assert!(!format(true, false, &tools).contains("# Doing tasks"));
+        // Omitting DOING must not disturb the neighbouring sections.
+        let omitted = format(true, false, &tools);
+        assert!(omitted.contains("# Executing actions with care"));
+        assert!(omitted.contains("# Tone and style"));
     }
 
     #[test]
@@ -285,7 +317,7 @@ mod tests {
             "Bash".to_string(),
             "TodoWrite".to_string(),
         ];
-        let body = format(false, &tools);
+        let body = format(false, true, &tools);
         let i_open = body.find("You are an interactive agent").expect("opening");
         let i_system = body.find("# System").expect("system");
         let i_doing = body.find("# Doing tasks").expect("doing");

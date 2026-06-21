@@ -266,9 +266,12 @@ fn render_completed_model_content(
     }
 
     // Trailer (AgentTool.tsx:1366-1372): agentId/SendMessage hint + worktree +
-    // <usage> block, appended after the content blocks.
+    // <usage> block, appended after the content blocks. v2.1.185 renamed the
+    // token key `total_tokens` → `subagent_tokens` (binary off 202120031;
+    // confirmed live in subagent result trailers); the leaked TS still shows the
+    // old `total_tokens`, so the binary is canonical here.
     let trailer = format!(
-        "agentId: {agent_id} (use SendMessage with to: '{agent_id}' to continue this agent){worktree_info_text}\n<usage>total_tokens: {total_tokens}\ntool_uses: {total_tool_use_count}\nduration_ms: {total_duration_ms}</usage>"
+        "agentId: {agent_id} (use SendMessage with to: '{agent_id}' to continue this agent){worktree_info_text}\n<usage>subagent_tokens: {total_tokens}\ntool_uses: {total_tool_use_count}\nduration_ms: {total_duration_ms}</usage>"
     );
     let mut blocks = content_or_marker;
     blocks.push(trailer);
@@ -2372,7 +2375,7 @@ mod tests {
         assert_eq!(
             mc,
             format!(
-                "the answer\nagentId: {child_id} (use SendMessage with to: '{child_id}' to continue this agent)\n<usage>total_tokens: 42\ntool_uses: 3\nduration_ms: 1234</usage>"
+                "the answer\nagentId: {child_id} (use SendMessage with to: '{child_id}' to continue this agent)\n<usage>subagent_tokens: 42\ntool_uses: 3\nduration_ms: 1234</usage>"
             )
         );
     }
@@ -2454,7 +2457,7 @@ mod tests {
             "empty content → no-output marker; got: {mc}"
         );
         // Non-one-shot → trailer still present after the marker.
-        assert!(mc.contains("<usage>total_tokens: 0"));
+        assert!(mc.contains("<usage>subagent_tokens: 0"));
     }
 
     // ── G3: required-MCP-servers gate (AgentTool.tsx:367-409) ──

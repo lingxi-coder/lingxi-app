@@ -209,7 +209,7 @@ Format:
 <summary>{{human-readable status summary}}</summary>
 <result>{{agent's final text response}}</result>
 <usage>
-  <total_tokens>N</total_tokens>
+  <subagent_tokens>N</subagent_tokens>
   <tool_uses>N</tool_uses>
   <duration_ms>N</duration_ms>
 </usage>

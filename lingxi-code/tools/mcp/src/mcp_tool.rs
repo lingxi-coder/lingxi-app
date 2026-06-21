@@ -156,6 +156,29 @@ fn first_content_block_text(content: &Value) -> Option<String> {
         .map(str::to_string)
 }
 
+/// Render an MCP result `content` value to a model-facing string IFF it is a
+/// non-empty array of TEXT blocks only (`[{type:"text", text:…}, …]`), joining
+/// the text by newline. Returns `None` for a bare-string `content` (already
+/// model-faithful via the `content` key) or an array containing any non-text
+/// block (image / resource — carrying those faithfully needs the block-array
+/// protocol change). A single text block (the common MCP result) renders to
+/// exactly its text, matching claude-code's single-block tool_result content.
+fn mcp_all_text_content_to_string(content: &Value) -> Option<String> {
+    let arr = content.as_array()?;
+    if arr.is_empty() {
+        return None;
+    }
+    let mut parts = Vec::with_capacity(arr.len());
+    for block in arr {
+        let obj = block.as_object()?;
+        if obj.get("type").and_then(Value::as_str) != Some("text") {
+            return None;
+        }
+        parts.push(obj.get("text").and_then(Value::as_str)?.to_string());
+    }
+    Some(parts.join("\n"))
+}
+
 /// Inspect an [`McpTransportSpec`] and return `(transport_kind, auth_kind)`.
 ///
 /// `transport_kind`: lowercase discriminator (`"stdio"`, `"sse"`, etc.).
@@ -693,13 +716,27 @@ impl Tool for MCPTool {
                     &output_dir,
                     now_millis,
                 );
+                let mut data = json!({
+                    "server_name": server,
+                    "tool_name": tool,
+                    "content": content,
+                    "is_error": dto.is_error,
+                });
+                // Model-facing render: claude-code passes the MCP result content
+                // DIRECTLY as the `tool_result` content (`MCPTool.ts:70-76`). When
+                // `content` is an all-text block array, surface the joined text as
+                // `model_content` so the model sees the result — NOT a JSON dump of
+                // the `{server_name,tool_name,content,is_error}` envelope (which is
+                // what `tool_result_to_model_text` emits for a non-string
+                // `content`). A bare-string `content` is already model-faithful; an
+                // image/resource-bearing array is left untouched (carrying those
+                // blocks faithfully needs `ToolResult.content` to accept a
+                // content-block array — a protocol change, deferred).
+                if let Some(text) = mcp_all_text_content_to_string(&data["content"]) {
+                    data["model_content"] = Value::String(text);
+                }
                 Ok(ToolCallResult {
-                    data: json!({
-                        "server_name": server,
-                        "tool_name": tool,
-                        "content": content,
-                        "is_error": dto.is_error,
-                    }),
+                    data,
                     new_messages: vec![],
                     context_modifier: None,
                     mcp_meta: build_mcp_meta(dto.meta, dto.structured_content),
@@ -1658,6 +1695,34 @@ mod tests {
         assert!(first_content_block_text(&json!([])).is_none());
         assert!(first_content_block_text(&json!([{ "type": "image" }])).is_none());
         assert!(first_content_block_text(&json!([{ "text": 7 }])).is_none());
+    }
+
+    #[test]
+    fn mcp_all_text_content_renders_model_facing_string() {
+        // Single text block (the common MCP result) → exactly its text, matching
+        // claude-code's single-block tool_result content (NOT a JSON dump).
+        assert_eq!(
+            mcp_all_text_content_to_string(&json!([{ "type": "text", "text": "result" }]))
+                .as_deref(),
+            Some("result")
+        );
+        // Multiple text blocks → newline-joined.
+        assert_eq!(
+            mcp_all_text_content_to_string(&json!([
+                { "type": "text", "text": "a" },
+                { "type": "text", "text": "b" },
+            ]))
+            .as_deref(),
+            Some("a\nb")
+        );
+        // Bare string / empty / image-bearing / resource-bearing → None (left for
+        // the `content` key or the block-array protocol change).
+        assert!(mcp_all_text_content_to_string(&json!("bare")).is_none());
+        assert!(mcp_all_text_content_to_string(&json!([])).is_none());
+        assert!(mcp_all_text_content_to_string(
+            &json!([{ "type": "text", "text": "a" }, { "type": "image", "source": {} }])
+        )
+        .is_none());
     }
 
     #[test]

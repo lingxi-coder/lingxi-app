@@ -125,6 +125,11 @@ pub struct ReplScreenProps {
     /// (A6) Horizontal padding (cells) for the custom status row, read from
     /// `statusLine.padding` (default `0`). Forwarded to `StatusLine.padding_x`.
     pub status_line_padding: usize,
+    /// (TokenWarning) The live context-pressure banner (clone of
+    /// `AppState.context_pressure`), or `None` when the context is below the
+    /// warning threshold. Rendered directly above the prompt as claude-code's
+    /// `<TokenWarning>` line (`PromptInput/Notifications.tsx:321`).
+    pub context_pressure: Option<traits::ContextPressureBanner>,
 }
 
 impl Default for ReplScreenProps {
@@ -156,6 +161,7 @@ impl Default for ReplScreenProps {
             session_agent_color: None,
             status_line_text: None,
             status_line_padding: 0,
+            context_pressure: None,
         }
     }
 }
@@ -170,6 +176,8 @@ pub fn ReplScreen(props: &ReplScreenProps) -> impl Into<AnyElement<'static>> {
     let permission_mode = props.status.permission_mode;
     // (A6) Custom status-line text + padding + width-for-truncation.
     let status_line_text = props.status_line_text.clone();
+    // (TokenWarning) The live context-pressure banner, rendered above the prompt.
+    let context_pressure = props.context_pressure.clone();
     let status_line_padding = props.status_line_padding;
     let status_line_width = props.prompt_width;
     let messages = props.messages.clone();
@@ -262,6 +270,25 @@ pub fn ReplScreen(props: &ReplScreenProps) -> impl Into<AnyElement<'static>> {
                 let failed_match = !hs.query.is_empty() && hs.match_index.is_none();
                 element! {
                     HistorySearchOverlay(query: query, failed_match: failed_match)
+                }
+            }))
+            // (TokenWarning) Context-pressure banner, drawn directly above the
+            // prompt — the 1:1 of claude-code's `<TokenWarning>` mounted in
+            // `PromptInput/Notifications.tsx:321`. Hidden (no row) when the
+            // context is below the warning threshold (the component's `return
+            // null`). `dimColor` for the auto-compact countdown, `warning`/`error`
+            // for the "Context low" line (`TokenWarning.tsx:169`).
+            #(context_pressure.as_ref().map(|b| {
+                let text = b.text.clone();
+                let color = match b.level {
+                    traits::ContextPressureLevel::Dim => theme.dim,
+                    traits::ContextPressureLevel::Warning => theme.warning,
+                    traits::ContextPressureLevel::Error => theme.error,
+                };
+                element! {
+                    View(flex_direction: FlexDirection::Row) {
+                        Text(content: text, color: color)
+                    }
                 }
             }))
             // (`/color`) Standalone-agent banner rule, drawn directly ABOVE the

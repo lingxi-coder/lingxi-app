@@ -718,6 +718,34 @@ pub enum OutputEvent {
     },
 }
 
+/// Severity / color of a context-pressure banner — mirrors the `<Text>` color
+/// in claude-code's `TokenWarning.tsx:169` (`dimColor` for the auto-compact
+/// countdown, `error` / `warning` for the "Context low" line).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContextPressureLevel {
+    /// `dimColor` — the auto-compact countdown branch.
+    Dim,
+    /// `color="warning"` — "Context low" below the error threshold.
+    Warning,
+    /// `color="error"` — "Context low" at/above the error threshold.
+    Error,
+}
+
+/// A rendered context-pressure banner: the byte-exact label + its severity.
+///
+/// Computed by the orchestrator each turn (1:1 with claude-code's `TokenWarning`
+/// component, via `compaction::token_warning_banner`) and pushed to the UI
+/// through [`OutputStream::emit_context_pressure`]. `None` at that sink clears a
+/// previously-shown banner once the context drops back below the warning
+/// threshold (e.g. after a compaction).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContextPressureBanner {
+    /// The byte-exact banner text (no surrounding chrome).
+    pub text: String,
+    /// The text color / severity.
+    pub level: ContextPressureLevel,
+}
+
 /// Sink for orchestrator-emitted output events.
 ///
 /// The stdio CLI (M5-12) and the future TUI (M6) both implement this.
@@ -835,6 +863,16 @@ pub trait OutputStream: Send + Sync {
         _fallback_available: Option<bool>,
     ) {
     }
+
+    /// Push the current context-pressure banner, or `None` to clear it.
+    ///
+    /// Called by the turn driver before every API call with the result of
+    /// `compaction::token_warning_banner` for the current context estimate — the
+    /// orchestrator-side twin of claude-code's `<TokenWarning>` render
+    /// (`PromptInput/Notifications.tsx:321`), which recomputes
+    /// `calculateTokenWarningState` as `tokenUsage` grows. Default no-op so
+    /// non-interactive sinks (print mode, tests) ignore it.
+    async fn emit_context_pressure(&self, _banner: Option<ContextPressureBanner>) {}
 
     /// Push a raw-utilization snapshot.
     ///

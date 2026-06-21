@@ -75,7 +75,8 @@ pub use mailbox::{
 pub use mcp::*;
 pub use notification::{NotificationError, NotificationRequest, NotificationService};
 pub use orchestrator::{
-    AgentInfo, CheckStatus, CompactionSummary, CostSnapshot, DoctorCheck, DoctorReport,
+    AgentInfo, CheckStatus, CompactionSummary, ContextPressureBanner, ContextPressureLevel,
+    CostSnapshot, DoctorCheck, DoctorReport,
     DoctorSummary, HandleError, HookInfo, McpServerInfo, McpStatus, MemoryEditorOutcome,
     ModelListing, OrchestratorHandle, OutputEvent, OutputStream, RateLimitSnapshot,
     StatusSnapshot, TurnOutcome, parse_model_ref,

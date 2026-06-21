@@ -1109,6 +1109,8 @@ pub fn render_screen(
                 .status_line_config
                 .as_ref()
                 .map_or(0, |c| c.padding),
+            // (TokenWarning) live context-pressure banner above the prompt.
+            context_pressure: state.context_pressure.clone(),
         )
     }
     .into_any()

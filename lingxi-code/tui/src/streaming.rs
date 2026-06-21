@@ -101,6 +101,13 @@ pub fn apply_event(state: &mut AppState, ev: TurnEvent, notify: &Notify) {
             // pass shows the post-turn dollar amount in the status line.
             state.status.cost = cost_str;
         }
+        TurnEvent::ContextPressure { banner } => {
+            // (TokenWarning) Store the orchestrator-computed context-pressure
+            // banner so the prompt chrome renders it next pass; `None` clears a
+            // previously-shown banner once the context drops below the warning
+            // threshold (claude-code's `<TokenWarning>` returning null).
+            state.context_pressure = banner;
+        }
         TurnEvent::CompactionCompleted {
             messages_before,
             messages_after,
@@ -245,6 +252,30 @@ mod tests {
 
     fn new_state() -> AppState {
         AppState::new(StatusSnapshot::default())
+    }
+
+    #[test]
+    fn context_pressure_event_sets_and_clears_the_banner() {
+        let mut s = new_state();
+        let n = Notify::new();
+        // Some(banner) → stored on AppState for the next render pass.
+        apply_event(
+            &mut s,
+            TurnEvent::ContextPressure {
+                banner: Some(traits::ContextPressureBanner {
+                    text: "12% until auto-compact".into(),
+                    level: traits::ContextPressureLevel::Dim,
+                }),
+            },
+            &n,
+        );
+        let b = s.context_pressure.as_ref().expect("banner stored");
+        assert_eq!(b.text, "12% until auto-compact");
+        assert_eq!(b.level, traits::ContextPressureLevel::Dim);
+        // None → cleared (claude-code's <TokenWarning> returning null once the
+        // context drops back below the warning threshold).
+        apply_event(&mut s, TurnEvent::ContextPressure { banner: None }, &n);
+        assert!(s.context_pressure.is_none(), "None clears the banner");
     }
 
     #[test]

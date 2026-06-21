@@ -860,6 +860,31 @@ async fn call_api_with_ptl_recovery(
     // is `true` to mirror the always-on default of this port (no GrowthBook).
     let estimate = compaction::grouping::estimate_tokens_for_range(&history_snapshot);
     let warning = compaction::calculate_token_warning_state(estimate, model, &[], true);
+
+    // Push the live context-pressure banner to the UI — the orchestrator-side
+    // twin of claude-code's `<TokenWarning>` render
+    // (`PromptInput/Notifications.tsx:321`), which recomputes
+    // `calculateTokenWarningState` as `tokenUsage` grows. We reuse the SAME
+    // `estimate` the auto-compact gate uses (claude-code's `tokenUsage`), so the
+    // banner's thresholds match the gate exactly. `None` clears a previously
+    // shown banner once the context drops back below the warning threshold
+    // (e.g. after a compaction). Default no-op for non-interactive sinks.
+    let banner = compaction::token_warning_banner(
+        &warning,
+        compaction::thresholds::is_auto_compact_enabled(true),
+        compaction::is_compact_warning_suppressed(),
+        None,
+    )
+    .map(|b| traits::ContextPressureBanner {
+        text: b.text,
+        level: match b.color {
+            compaction::TokenWarningColor::Dim => traits::ContextPressureLevel::Dim,
+            compaction::TokenWarningColor::Warning => traits::ContextPressureLevel::Warning,
+            compaction::TokenWarningColor::Error => traits::ContextPressureLevel::Error,
+        },
+    });
+    orch.output.emit_context_pressure(banner).await;
+
     if warning.is_at_blocking_limit {
         tracing::warn!(
             estimate,

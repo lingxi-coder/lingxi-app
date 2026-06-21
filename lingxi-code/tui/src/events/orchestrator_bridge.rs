@@ -18,7 +18,7 @@
 
 use async_trait::async_trait;
 use tokio::sync::mpsc::UnboundedSender;
-use traits::{CostSnapshot, OutputStream, TurnOutcome};
+use traits::{ContextPressureBanner, CostSnapshot, OutputStream, TurnOutcome};
 
 /// Events flowing from the orchestrator into the TUI render loop.
 ///
@@ -68,6 +68,14 @@ pub enum TurnEvent {
     /// `apply_event` writes the value into `state.status.cost`, refreshing
     /// the status-line render.
     CostUpdated(String),
+    /// The live context-pressure banner (or `None` to clear it). `apply_event`
+    /// stores it on `state.context_pressure`; the prompt chrome renders it as a
+    /// `<TokenWarning>`-equivalent line. Emitted by the orchestrator before
+    /// every API call with the current `compaction::token_warning_banner`.
+    ContextPressure {
+        /// `Some` shows the banner; `None` clears a previously-shown one.
+        banner: Option<ContextPressureBanner>,
+    },
     /// A successful `force_compact` finished. The TUI appends a
     /// `CompactBoundary` variant, rendered by `CompactBoundaryMessage`
     /// (M7-04) as `✻ Conversation compacted (ctrl+o for history)`. (M6-08
@@ -185,6 +193,10 @@ impl OutputStream for BridgeOutputStream {
             messages_after,
             bytes_saved,
         });
+    }
+
+    async fn emit_context_pressure(&self, banner: Option<ContextPressureBanner>) {
+        let _ = self.tx.send(TurnEvent::ContextPressure { banner });
     }
 
     async fn emit_end_turn(&self, stop_reason: &str, cost: &CostSnapshot) {
@@ -385,6 +397,40 @@ mod tests {
         assert!(matches!(
             rx.try_recv().expect("bridge must forward a TurnEvent"),
             TurnEvent::RateLimit { status: None, .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn emit_context_pressure_translates_to_event() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let bridge = BridgeOutputStream::new(tx);
+        bridge
+            .emit_context_pressure(Some(traits::ContextPressureBanner {
+                text: "Context low (8% remaining) \u{00b7} Run /compact to compact & continue"
+                    .into(),
+                level: traits::ContextPressureLevel::Error,
+            }))
+            .await;
+        match rx.try_recv().expect("bridge must forward a TurnEvent") {
+            TurnEvent::ContextPressure { banner: Some(b) } => {
+                assert_eq!(
+                    b.text,
+                    "Context low (8% remaining) \u{00b7} Run /compact to compact & continue"
+                );
+                assert_eq!(b.level, traits::ContextPressureLevel::Error);
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn emit_context_pressure_none_clears() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let bridge = BridgeOutputStream::new(tx);
+        bridge.emit_context_pressure(None).await;
+        assert!(matches!(
+            rx.try_recv().expect("bridge must forward a TurnEvent"),
+            TurnEvent::ContextPressure { banner: None }
         ));
     }
 

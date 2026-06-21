@@ -116,3 +116,53 @@ fn repl_screen_no_session_color_banner_when_none() {
         "expected NO `─` rule row when no session color is set; got:\n{out}"
     );
 }
+
+#[test]
+fn repl_screen_context_pressure_banner_present_when_set() {
+    // The orchestrator-computed TokenWarning banner renders directly above the
+    // prompt (claude-code's `<TokenWarning>` in `PromptInput/Notifications.tsx`).
+    let mut element = element! {
+        ReplScreen(
+            status: status(),
+            messages: Vec::<RenderedMessage>::new(),
+            cache: HeightCache::default(),
+            prompt_text: String::new(),
+            prompt_cursor: 0_usize,
+            prompt_width: 80_usize,
+            scroll_offset: 0_usize,
+            viewport_height: 5_usize,
+            context_pressure: Some(traits::ContextPressureBanner {
+                text: "Context low (8% remaining) \u{00b7} Run /compact to compact & continue"
+                    .to_string(),
+                level: traits::ContextPressureLevel::Error,
+            }),
+        )
+    };
+    let out = element.to_string();
+    assert!(
+        out.contains("Context low (8% remaining)"),
+        "expected the TokenWarning banner above the prompt; got:\n{out}"
+    );
+}
+
+#[test]
+fn repl_screen_no_context_pressure_banner_when_none() {
+    let mut element = element! {
+        ReplScreen(
+            status: status(),
+            messages: Vec::<RenderedMessage>::new(),
+            cache: HeightCache::default(),
+            prompt_text: String::new(),
+            prompt_cursor: 0_usize,
+            prompt_width: 80_usize,
+            scroll_offset: 0_usize,
+            viewport_height: 5_usize,
+            context_pressure: None,
+        )
+    };
+    let out = element.to_string();
+    assert!(
+        !out.contains("Context low"),
+        "expected NO TokenWarning banner when context_pressure is None; got:\n{out}"
+    );
+}

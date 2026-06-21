@@ -930,6 +930,11 @@ pub struct AppState {
     /// status-line command input's OPTIONAL `rate_limits` field — omitted
     /// when no window resolved (`StatusLine.tsx:99-101`).
     pub raw_utilization: Option<crate::components::status_line_command::RawUtilizationSnapshot>,
+    /// (TokenWarning) The live context-pressure banner pushed by the
+    /// orchestrator each turn (`OutputStream::emit_context_pressure`), or `None`
+    /// when the context is below the warning threshold. Rendered above the
+    /// prompt as claude-code's `<TokenWarning>` line.
+    pub context_pressure: Option<traits::ContextPressureBanner>,
     /// Shared subscription slot from the composition root (None in tests /
     /// print mode). Read at rate-limit compose time via
     /// [`Self::subscription_snapshot`].
@@ -1023,6 +1028,7 @@ impl AppState {
             status_line_config: None,
             status_line_dirty: false,
             raw_utilization: None,
+            context_pressure: None,
             subscription: None,
             // (GAP D) Defaults keymap — byte-identical to the hardcoded chords.
             // The composition root swaps in the user-config-merged keymap via

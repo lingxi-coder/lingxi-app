@@ -165,6 +165,86 @@ fn case_fold(s: &str) -> String {
         .collect()
 }
 
+/// Lexical (no-filesystem) path normalization à la Node `path.normalize` for
+/// POSIX paths: collapse empty segments (`//`), drop `.`, and resolve `..`
+/// against the prior real segment. Used to resolve a removal target like
+/// `<cwd>/..` to the parent before the workspace-ancestor comparison.
+fn lexical_normalize(p: &str) -> String {
+    let absolute = p.starts_with('/');
+    let mut out: Vec<&str> = Vec::new();
+    for seg in p.split('/') {
+        match seg {
+            "" | "." => {}
+            ".." => match out.last() {
+                Some(&"..") => out.push(".."),
+                Some(_) => {
+                    out.pop();
+                }
+                None => {
+                    if !absolute {
+                        out.push("..");
+                    }
+                }
+            },
+            s => out.push(s),
+        }
+    }
+    let body = out.join("/");
+    if absolute {
+        format!("/{body}")
+    } else if body.is_empty() {
+        ".".to_string()
+    } else {
+        body
+    }
+}
+
+/// TS `R0`'s `/private` normalization (`/^\/private\/var\//` → `/var/`,
+/// `/^\/private\/tmp(\/|$)/` → `/tmp$1`) — case-sensitive, applied
+/// unconditionally (a no-op for any path without that prefix).
+fn normalize_private_var_tmp(p: &str) -> String {
+    if let Some(rest) = p.strip_prefix("/private/var/") {
+        return format!("/var/{rest}");
+    }
+    if p == "/private/tmp" {
+        return "/tmp".to_string();
+    }
+    if let Some(rest) = p.strip_prefix("/private/tmp/") {
+        return format!("/tmp/{rest}");
+    }
+    p.to_string()
+}
+
+/// TS `R0(cwd, target)`: would removing `target` delete the working directory?
+/// True when `target` is the cwd itself or one of its ancestors (the working
+/// directory or a parent of it). Paths are `/private`-normalized, lexically
+/// normalized, and compared case-folded (the `caseFold: true` default).
+fn removal_hits_workspace(target: &str, cwd: &Path) -> bool {
+    let norm = |s: &str| normalize_private_var_tmp(&lexical_normalize(&collapse_slashes(s)));
+    let t = norm(target);
+    let c = norm(&cwd.to_string_lossy());
+    let tf = {
+        let f = case_fold(t.trim_end_matches('/'));
+        if f.is_empty() {
+            "/".to_string()
+        } else {
+            f
+        }
+    };
+    let cf = {
+        let f = case_fold(c.trim_end_matches('/'));
+        if f.is_empty() {
+            "/".to_string()
+        } else {
+            f
+        }
+    };
+    // target == cwd, or target is an ancestor of cwd (cwd is under target).
+    // Root (`/`) is an ancestor of every absolute cwd — special-cased because
+    // its `{tf}/` would be `//`.
+    cf == tf || (tf == "/" && cf.starts_with('/')) || cf.starts_with(&format!("{tf}/"))
+}
+
 /// Collapse runs of `\`/`/` into a single `/` (TS `replace(/[\\/]+/g, '/')`).
 fn collapse_slashes(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
@@ -371,6 +451,25 @@ pub fn check_dangerous_removal(command: &str, cwd: &Path, home: Option<&str>) ->
                     resolved_path: absolute_path,
                 });
             }
+            // Workspace-directory protection (TS `x0n` branch 3's `R0` check):
+            // ask before removing the working directory itself or any ancestor
+            // of it (`rm -rf .`, `rm -rf <cwd>`, `rm -rf ..`). The critical check
+            // above already returned for system paths; this catches the
+            // workspace which `is_dangerous_removal_path` does not. (Glob targets
+            // like `<cwd>/*` are handled by the critical/`/*` path with their own
+            // message; `removal_hits_workspace` requires concrete ancestry so it
+            // does not false-fire on them.)
+            if removal_hits_workspace(&absolute_path, cwd) {
+                return Some(DangerousRemoval {
+                    message: format!(
+                        "Dangerous {cmd_name} operation detected: '{absolute_path}'\n\nThis command would remove a workspace directory (the working directory, an additional working directory, or one of their parent directories). This requires explicit approval and cannot be auto-allowed by permission rules."
+                    ),
+                    reason: format!(
+                        "Dangerous {cmd_name} operation on working directory or its ancestor: {absolute_path}"
+                    ),
+                    resolved_path: absolute_path,
+                });
+            }
         }
     }
     None
@@ -502,6 +601,63 @@ mod tests {
         // A relative path resolves under cwd → deep under root → not dangerous.
         assert!(check_dangerous_removal("rm ./local/file", &cwd(), HOME).is_none());
         assert!(check_dangerous_removal("rm -f build/out.o", &cwd(), HOME).is_none());
+    }
+
+    #[test]
+    fn workspace_directory_removal_is_dangerous() {
+        // The cwd itself (a non-system path) → workspace ask (TS `x0n` branch 3
+        // `R0`). LingXi previously auto-allowed these.
+        for cmd in ["rm -rf .", "rm -rf /proj/work"] {
+            let d = check_dangerous_removal(cmd, &cwd(), HOME)
+                .unwrap_or_else(|| panic!("{cmd} should be flagged"));
+            assert!(
+                d.message.contains("would remove a workspace directory"),
+                "{cmd}: {}",
+                d.message
+            );
+            assert!(d.reason.contains("working directory or its ancestor"));
+        }
+        // A NON-system ancestor of a deeper cwd (parent dirs that are not root
+        // children — those would hit the critical check first).
+        let deep = PathBuf::from("/proj/work/pkg/src");
+        for cmd in ["rm -rf ..", "rm -rf /proj/work", "rm -rf /proj/work/pkg"] {
+            let d = check_dangerous_removal(cmd, &deep, HOME)
+                .unwrap_or_else(|| panic!("{cmd} should be flagged"));
+            assert!(
+                d.message.contains("would remove a workspace directory"),
+                "{cmd}: {}",
+                d.message
+            );
+        }
+    }
+
+    #[test]
+    fn removal_inside_or_beside_cwd_is_not_workspace() {
+        assert!(check_dangerous_removal("rm -rf subdir", &cwd(), HOME).is_none());
+        assert!(check_dangerous_removal("rm -rf /proj/work/build", &cwd(), HOME).is_none());
+        assert!(check_dangerous_removal("rm -rf /proj/other", &cwd(), HOME).is_none());
+    }
+
+    #[test]
+    fn removal_hits_workspace_logic() {
+        let cwd = std::path::Path::new("/proj/work");
+        assert!(removal_hits_workspace("/proj/work", cwd)); // equal
+        assert!(removal_hits_workspace("/proj", cwd)); // ancestor
+        assert!(removal_hits_workspace("/", cwd)); // root ancestor
+        assert!(removal_hits_workspace("/proj/work/..", cwd)); // → /proj
+        assert!(!removal_hits_workspace("/proj/work/sub", cwd)); // child
+        assert!(!removal_hits_workspace("/proj/other", cwd)); // sibling
+        assert!(!removal_hits_workspace("/elsewhere", cwd)); // unrelated
+    }
+
+    #[test]
+    fn lexical_normalize_resolves_dot_dot() {
+        assert_eq!(lexical_normalize("/proj/work/.."), "/proj");
+        assert_eq!(lexical_normalize("/a/b/../c"), "/a/c");
+        assert_eq!(lexical_normalize("/a/./b"), "/a/b");
+        assert_eq!(lexical_normalize("/a//b"), "/a/b");
+        assert_eq!(lexical_normalize("/.."), "/"); // cannot escape root
+        assert_eq!(lexical_normalize("a/../.."), ".."); // relative keeps leading ..
     }
 
     #[test]

@@ -23,6 +23,7 @@ pub mod snip;
 pub mod strip_media;
 pub mod threshold_calc;
 pub mod thresholds;
+pub mod token_warning_banner;
 pub mod warning_state;
 
 pub use autocompact::{Autocompactor, CompactionError, CompactionResult};
@@ -55,6 +56,7 @@ pub use warning_state::{
     clear_compact_warning_suppression, is_compact_warning_suppressed, suppress_compact_warning,
     CompactWarningState,
 };
+pub use token_warning_banner::{token_warning_banner, TokenWarningBanner, TokenWarningColor};
 pub use prompt::{
     format_compact_summary, get_compact_prompt, get_compact_user_summary_message,
     BASE_COMPACT_PROMPT, NO_TOOLS_PREAMBLE, NO_TOOLS_TRAILER,

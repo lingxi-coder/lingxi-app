@@ -23,10 +23,15 @@
 //!   `config.name` for `/mcp` display while resolving a model-supplied
 //!   normalized token.
 //!
-//! Still UNWIRED (a later batch): the agent's wire tool list
-//! (`ConversationOrchestrator::build_wire_tools`) serializes only the
-//! `ToolRegistry` (builtins + the generic `MCPTool` meta-tool) — individual
-//! `mcp__server__tool` entries are NOT advertised yet.
+//! Individual `mcp__server__tool` entries ARE advertised to the model: the
+//! composition root builds a per-tool `tool_mcp::MCPTool` for every discovered
+//! tool (`tool_mcp::build_registered_mcp_tools`) and registers them into the
+//! wire `ToolRegistry` (`engine-desktop` `register_mcp_tools`), so
+//! `ConversationOrchestrator::build_wire_tools` serializes each tool under its
+//! normalized FQN. The model-facing FQN normalizes BOTH the server AND the tool
+//! segment (matching claude-code `buildMcpToolName`, `client.ts:1768`); the raw
+//! wire tool name is kept on [`traits::McpToolDto::tool_name`] and recovered for
+//! dispatch by [`crate::registry::McpRegistry::resolve_wire_tool_name`].
 
 /// Claude.ai server names are prefixed with this string.
 const CLAUDEAI_SERVER_PREFIX: &str = "claude.ai ";

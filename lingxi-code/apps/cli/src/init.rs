@@ -197,6 +197,23 @@ fn load_provider_profiles() -> Option<std::collections::BTreeMap<String, serde_j
         .and_then(|eff| eff.settings.providers)
 }
 
+/// Load the merged `settings.claudeMdExcludes` (project + user + env layers) —
+/// glob patterns / absolute paths of `CLAUDE.md` files to exclude from the
+/// system prompt (claude-code `isClaudeMdExcluded`). Empty when unset.
+fn load_claude_md_excludes() -> Vec<String> {
+    let project_dir = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let env: std::collections::BTreeMap<String, String> = std::env::vars().collect();
+    let inputs = engine::settings::LoadInputs {
+        env: &env,
+        project_dir: &project_dir,
+        defaults: engine::settings::schema::SettingsJson::default(),
+    };
+    engine::settings::Settings::load(inputs)
+        .ok()
+        .and_then(|eff| eff.settings.claude_md_excludes)
+        .unwrap_or_default()
+}
+
 /// Load the merged settings `routing` object (project + user + env layers).
 ///
 /// Mirrors [`load_provider_profiles`] but reads the `routing` field. Returns
@@ -333,7 +350,9 @@ pub(crate) fn resolve_desktop_config(
         // parity), which also makes the session-start
         // `fire_instructions_loaded()` fire over those files. Tests inject a
         // controlled provider (or `None`); only this real-host path reads the FS.
-        memory_provider: Some(orchestrator::prompt::real_provider()),
+        memory_provider: Some(orchestrator::prompt::real_provider_with_excludes(
+            load_claude_md_excludes(),
+        )),
         // CLI-resolved session permission mode (`initialPermissionModeFromCLI`),
         // threaded in by `run_cli`.
         permission_mode,

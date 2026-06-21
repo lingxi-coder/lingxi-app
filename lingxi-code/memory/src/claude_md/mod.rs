@@ -7,9 +7,11 @@
 //! `.claude/rules/**`, and `CLAUDE.local.md`. Each file is read whole (no size
 //! cap — parity with claude-code `readFile`). See [`hierarchy::walk`].
 
+pub mod excludes;
 pub mod hierarchy;
 pub mod loader;
 
+pub use excludes::ClaudeMdExcluder;
 pub use hierarchy::{user_config_dir, Hierarchy, HierarchyEntry};
 pub use loader::{LoadedFile, LoaderError};
 

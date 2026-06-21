@@ -137,6 +137,39 @@ pub fn real_provider() -> Arc<dyn MemoryHierarchyProvider> {
     Arc::new(RealMemoryHierarchyProvider)
 }
 
+/// Like [`real_provider`] but DROPS the `CLAUDE.md` files whose path matches the
+/// `claudeMdExcludes` settings patterns (claude-code `isClaudeMdExcluded` runs
+/// inside `processMemoryFile`, so excluded User/Project/Local files never reach
+/// the system prompt; Managed is never excludable). Returns the unfiltered
+/// [`real_provider`] when no patterns are configured (byte-identical to before).
+#[must_use]
+pub fn real_provider_with_excludes(excludes: Vec<String>) -> Arc<dyn MemoryHierarchyProvider> {
+    let excluder = memory::claude_md::ClaudeMdExcluder::new(&excludes);
+    if excluder.is_empty() {
+        return real_provider();
+    }
+    Arc::new(ExcludeFilterProvider {
+        inner: Arc::new(RealMemoryHierarchyProvider),
+        excluder,
+    })
+}
+
+/// Wraps a [`MemoryHierarchyProvider`] and filters its result through the
+/// `claudeMdExcludes` gate (see [`real_provider_with_excludes`]).
+struct ExcludeFilterProvider {
+    inner: Arc<dyn MemoryHierarchyProvider>,
+    excluder: memory::claude_md::ClaudeMdExcluder,
+}
+
+#[async_trait]
+impl MemoryHierarchyProvider for ExcludeFilterProvider {
+    async fn load(&self, cwd: &Path) -> Vec<MemoryFile> {
+        let mut files = self.inner.load(cwd).await;
+        files.retain(|f| !self.excluder.is_excluded(&f.path, f.tier));
+        files
+    }
+}
+
 /// claude-code external-`@import` gate (claudemd.ts:826-846): the User tier
 /// always resolves external includes; every other tier (Managed/Project/Local)
 /// does so ONLY when `hasClaudeMdExternalIncludesApproved` is set for the
@@ -162,6 +195,57 @@ mod external_include_tests {
             assert!(!include_external_for(tier, false), "{tier:?} gated when unapproved");
             assert!(include_external_for(tier, true), "{tier:?} allowed when approved");
         }
+    }
+}
+
+#[cfg(test)]
+mod exclude_filter_tests {
+    use super::*;
+    use memory::claude_md::ClaudeMdTier;
+    use std::path::PathBuf;
+
+    struct StaticInner(Vec<MemoryFile>);
+    #[async_trait]
+    impl MemoryHierarchyProvider for StaticInner {
+        async fn load(&self, _cwd: &Path) -> Vec<MemoryFile> {
+            self.0.clone()
+        }
+    }
+
+    fn mf(path: &str, tier: ClaudeMdTier) -> MemoryFile {
+        MemoryFile {
+            path: PathBuf::from(path),
+            body: "x".into(),
+            is_local_override: matches!(tier, ClaudeMdTier::Local),
+            tier,
+            globs: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn filter_drops_matching_user_project_local_keeps_managed() {
+        let inner = Arc::new(StaticInner(vec![
+            mf("/mgr/CLAUDE.md", ClaudeMdTier::Managed), // matches `**/CLAUDE.md` but Managed → kept
+            mf("/a/secret/CLAUDE.md", ClaudeMdTier::Project), // excluded
+            mf("/a/public/CLAUDE.md", ClaudeMdTier::User), // excluded by `**/CLAUDE.md`
+        ]));
+        let provider = ExcludeFilterProvider {
+            inner,
+            excluder: memory::claude_md::ClaudeMdExcluder::new(&["**/CLAUDE.md".to_string()]),
+        };
+        let paths: Vec<String> = provider
+            .load(Path::new("/a"))
+            .await
+            .iter()
+            .map(|f| f.path.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(paths, vec!["/mgr/CLAUDE.md".to_string()]);
+    }
+
+    #[test]
+    fn empty_excludes_returns_unfiltered_provider() {
+        // No patterns ⇒ the plain real_provider (no wrapper), byte-identical path.
+        let _ = real_provider_with_excludes(vec![]);
     }
 }
 

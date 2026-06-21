@@ -19,6 +19,7 @@ regex = "1"
 tracing.workspace = true
 tokio = { version = "1", features = ["sync", "time"] }
 walkdir = "2.5"
+glob = "0.3"
 
 [dev-dependencies]
 tempfile = "3.13"

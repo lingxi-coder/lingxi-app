@@ -21,7 +21,7 @@ pub mod tools_block;
 
 pub use memory_block::{
     build_memdir_prefetch, build_memdir_prefetch_from_anthropic, build_session_memory_handle,
-    real_provider, MemoryHierarchyProvider, RealMemoryHierarchyProvider,
+    real_provider, real_provider_with_excludes, MemoryHierarchyProvider, RealMemoryHierarchyProvider,
 };
 
 /// Re-export of the CLAUDE.md tier enum so consumers that depend on

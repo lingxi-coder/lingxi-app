@@ -51,6 +51,7 @@ pub const MERGE_STRATEGIES: &[(&str, MergeStrategy)] = &[
     ("additionalDirectories", MergeStrategy::ConcatDedup),
     ("enabledTools", MergeStrategy::ConcatDedup),
     ("additionalIncludes", MergeStrategy::ConcatDedup),
+    ("claudeMdExcludes", MergeStrategy::ConcatDedup),
     // Object-merge fields (spec §7).
     ("sandbox", MergeStrategy::DeepMerge),
     ("hooks", MergeStrategy::DeepMerge),
@@ -116,6 +117,12 @@ pub struct SettingsJson {
     /// Array-merge field (concat-dedup).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub additional_includes: Option<Vec<String>>,
+
+    /// `claudeMdExcludes` (array-merge, concat-dedup): glob patterns or absolute
+    /// paths of `CLAUDE.md` files to exclude from loading (claude-code
+    /// `settings/types.ts:1053`, gate `isClaudeMdExcluded`, `claudemd.ts:547`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claude_md_excludes: Option<Vec<String>>,
 
     /// Object-merge field (deep-merge).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -210,6 +217,7 @@ impl SettingsJson {
             ),
             ("enabledTools", self.enabled_tools.as_deref()),
             ("additionalIncludes", self.additional_includes.as_deref()),
+            ("claudeMdExcludes", self.claude_md_excludes.as_deref()),
         ] {
             if let Some(arr) = array {
                 for (i, s) in arr.iter().enumerate() {
@@ -306,6 +314,7 @@ mod tests {
             "additionalDirectories",
             "enabledTools",
             "additionalIncludes",
+            "claudeMdExcludes",
         ] {
             let strat =
                 strategy_for(field).unwrap_or_else(|| panic!("missing strategy for {field}"));

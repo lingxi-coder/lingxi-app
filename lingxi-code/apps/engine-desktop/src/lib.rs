@@ -2015,6 +2015,21 @@ pub async fn build(
     // orchestrator (`tengu_cost_recorded`) so all live telemetry lands on the same
     // sink set — 1:1 with claude-code, where `logEvent` is a single global pipeline.
     let analytics_bus = Arc::new(telemetry::AnalyticsBus::new());
+    // metadata.user_id (getAPIMetadata, claude.ts:519): the JSON-string identity
+    // `{...extra, device_id, account_uuid, session_id}`. `device_id` =
+    // getOrCreateUserID (persisted, stable per install); `session_id` = the main
+    // session id (claude-code's getSessionId()); `account_uuid` = "" — the OAuth
+    // profile carrying the account UUID is fetched asynchronously in the
+    // background and is not available at construction, so this is the faithful
+    // `getOauthAccountInfo()?.accountUuid ?? ''` fallback (the value is per-account
+    // and never byte-matches claude-code regardless).
+    let request_metadata = llm_client::RequestMetadata {
+        user_id: ProviderApiAdapter::build_api_metadata_user_id(
+            &migrations::global_config::get_or_create_user_id(),
+            "",
+            &main_session_uuid,
+        ),
+    };
     let provider_adapter_built = ProviderApiAdapter::new_with_routing(
         llm_client,
         llm_transport,
@@ -2028,7 +2043,8 @@ pub async fn build(
         settings_max_retries,
         settings_backoff_ms,
     )
-    .with_subscription(subscription.clone());
+    .with_subscription(subscription.clone())
+    .with_request_metadata(request_metadata);
     // `--json-schema` structured output: FORCE the `StructuredOutput` tool so the
     // model returns its final result through it (1:1 with claude-code). Untouched
     // for every normal turn (`json_schema` is `None`).

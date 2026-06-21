@@ -463,6 +463,53 @@ impl ProviderApiAdapter {
         self
     }
 
+    /// `getAPIMetadata()` (`services/api/claude.ts:503-528`): build the Anthropic
+    /// request `metadata.user_id` value, which claude-code packs as a JSON STRING
+    /// `JSON.stringify({...extra, device_id, account_uuid, session_id})`.
+    ///
+    /// * `extra` = the `CLAUDE_CODE_EXTRA_METADATA` env var when it parses to a
+    ///   JSON object (any other value is ignored, mirroring the TS
+    ///   debug-log-and-skip — we have no debug log).
+    /// * Key order is `extra…, device_id, account_uuid, session_id` (workspace
+    ///   `serde_json` `preserve_order`), and a colliding `extra` key keeps its
+    ///   first position but takes the canonical value — byte-identical to the JS
+    ///   object spread.
+    ///
+    /// The composition root supplies `device_id` ([`migrations::global_config::
+    /// get_or_create_user_id`]), `account_uuid` (the OAuth account UUID, or `""`
+    /// — the TS `getOauthAccountInfo()?.accountUuid ?? ''`), and `session_id`
+    /// (the main session id, claude-code's `getSessionId()`).
+    #[must_use]
+    pub fn build_api_metadata_user_id(
+        device_id: &str,
+        account_uuid: &str,
+        session_id: &str,
+    ) -> String {
+        let mut obj = serde_json::Map::new();
+        if let Ok(extra_str) = std::env::var("CLAUDE_CODE_EXTRA_METADATA") {
+            if let Ok(serde_json::Value::Object(extra)) =
+                serde_json::from_str::<serde_json::Value>(&extra_str)
+            {
+                for (k, v) in extra {
+                    obj.insert(k, v);
+                }
+            }
+        }
+        obj.insert(
+            "device_id".to_string(),
+            serde_json::Value::String(device_id.to_string()),
+        );
+        obj.insert(
+            "account_uuid".to_string(),
+            serde_json::Value::String(account_uuid.to_string()),
+        );
+        obj.insert(
+            "session_id".to_string(),
+            serde_json::Value::String(session_id.to_string()),
+        );
+        serde_json::to_string(&serde_json::Value::Object(obj)).unwrap_or_default()
+    }
+
     /// Inject 1P cache-editing inputs (`newCacheEdits` / `pinnedEdits`). Test-only
     /// today — no production producer (cached-microcompact scheduler) is wired, so
     /// the default is empty. Builder-style.
@@ -2841,6 +2888,41 @@ mod tests {
         .expect("build_request");
         assert!(bare.metadata.is_none());
         clear_thinking_env();
+    }
+
+    #[test]
+    fn build_api_metadata_user_id_shapes_and_orders() {
+        // Serialize env access (CLAUDE_CODE_EXTRA_METADATA) with the other
+        // env-mutating tests in this module.
+        let _g = THINKING_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var("CLAUDE_CODE_EXTRA_METADATA");
+        // No extra → exactly the three canonical keys, in order, compact JSON.
+        assert_eq!(
+            ProviderApiAdapter::build_api_metadata_user_id("dev123", "acct-9", "sess-1"),
+            r#"{"device_id":"dev123","account_uuid":"acct-9","session_id":"sess-1"}"#
+        );
+        // Empty account_uuid (the `?? ''` branch) still emits the key.
+        assert_eq!(
+            ProviderApiAdapter::build_api_metadata_user_id("d", "", "s"),
+            r#"{"device_id":"d","account_uuid":"","session_id":"s"}"#
+        );
+        // Valid extra object is spread FIRST; a colliding key keeps its first
+        // position but takes the canonical value (JS `{...extra, device_id,…}`).
+        std::env::set_var(
+            "CLAUDE_CODE_EXTRA_METADATA",
+            r#"{"team":"core","device_id":"override"}"#,
+        );
+        assert_eq!(
+            ProviderApiAdapter::build_api_metadata_user_id("dev", "acct", "sess"),
+            r#"{"team":"core","device_id":"dev","account_uuid":"acct","session_id":"sess"}"#
+        );
+        // Invalid extra (not a JSON object) is ignored.
+        std::env::set_var("CLAUDE_CODE_EXTRA_METADATA", "not json");
+        assert_eq!(
+            ProviderApiAdapter::build_api_metadata_user_id("d", "a", "s"),
+            r#"{"device_id":"d","account_uuid":"a","session_id":"s"}"#
+        );
+        std::env::remove_var("CLAUDE_CODE_EXTRA_METADATA");
     }
 
     // ── effective_subscriber (batch-5 Task 3: live SharedSubscription) ───────

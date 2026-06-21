@@ -1283,6 +1283,7 @@ dependencies = [
  "llm-client",
  "lsp",
  "mcp",
+ "migrations",
  "nix",
  "openai-oauth",
  "orchestrator",
@@ -2597,6 +2598,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tracing",
+ "uuid",
 ]
 
 [[package]]

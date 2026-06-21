@@ -259,6 +259,55 @@ fn write_secure(path: &Path, contents: &str) -> std::io::Result<()> {
     file.write_all(contents.as_bytes())
 }
 
+/// `getOrCreateUserID()` (`config.ts:1757-1766`): the stable per-install
+/// identity stamped into the Anthropic request `metadata.user_id` as
+/// `device_id`. Returns the persisted top-level `userID` when present,
+/// otherwise generates `randomBytes(32).toString('hex')` (64 lowercase hex
+/// chars), persists it to the global config, and returns it. A missing config
+/// path (no HOME) yields a fresh non-persisted id so the caller always gets a
+/// value; like TS, the generated id is returned regardless of the save outcome.
+#[must_use]
+pub fn get_or_create_user_id() -> String {
+    match global_config_path() {
+        Some(path) => get_or_create_user_id_at(&path),
+        None => random_user_id(),
+    }
+}
+
+/// Path-parameterized core of [`get_or_create_user_id`] (testable without
+/// touching `$HOME`).
+fn get_or_create_user_id_at(path: &Path) -> String {
+    if let Ok(map) = read_map(path) {
+        if let Some(uid) = map.get("userID").and_then(Value::as_str) {
+            if !uid.is_empty() {
+                return uid.to_string();
+            }
+        }
+    }
+    let uid = random_user_id();
+    let to_store = uid.clone();
+    let _ = save_map(path, move |mut m| {
+        m.insert("userID".to_string(), Value::String(to_store));
+        m
+    });
+    uid
+}
+
+/// `randomBytes(32).toString('hex')` — 32 random bytes as 64 lowercase hex
+/// chars. Sourced from two v4 UUIDs (the workspace's CSPRNG-backed random
+/// substrate); the handful of version/variant bits are fixed, but this is a
+/// private per-install identifier never compared byte-for-byte.
+fn random_user_id() -> String {
+    let mut s = String::with_capacity(64);
+    for uuid in [uuid::Uuid::new_v4(), uuid::Uuid::new_v4()] {
+        for byte in uuid.as_bytes() {
+            use std::fmt::Write as _;
+            let _ = write!(s, "{byte:02x}");
+        }
+    }
+    s
+}
+
 /// `getProjectPathForConfig` (`config.ts:1588-1601`): the CANONICAL git root
 /// of the directory — walk up looking for a `.git` entry (dir OR file), then
 /// resolve a linked worktree's `.git` file through `gitdir:` → `commondir`
@@ -506,6 +555,36 @@ pub fn record_trust_accept(config_path: &Path, cwd: &Path) {
 mod tests {
     use super::*;
     use crate::test_support::env_lock;
+
+    #[test]
+    fn user_id_is_64_hex_persisted_and_reused() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join(".claude.json");
+        let first = get_or_create_user_id_at(&path);
+        // `randomBytes(32).toString('hex')` → 64 lowercase hex chars.
+        assert_eq!(first.len(), 64, "device id is 64 hex chars");
+        assert!(
+            first.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
+            "device id is lowercase hex: {first}"
+        );
+        // Persisted under top-level `userID` and reused on the next call.
+        assert_eq!(
+            read_map(&path).unwrap().get("userID").and_then(Value::as_str),
+            Some(first.as_str())
+        );
+        assert_eq!(get_or_create_user_id_at(&path), first, "stable across calls");
+    }
+
+    #[test]
+    fn user_id_honors_existing_nonempty_value() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join(".claude.json");
+        std::fs::write(&path, r#"{"userID":"preexisting-id","other":1}"#).unwrap();
+        assert_eq!(get_or_create_user_id_at(&path), "preexisting-id");
+        // An empty stored value is treated as absent → regenerated (64 hex).
+        std::fs::write(&path, r#"{"userID":""}"#).unwrap();
+        assert_eq!(get_or_create_user_id_at(&path).len(), 64);
+    }
 
     #[test]
     fn config_home_prefers_claude_config_dir() {

@@ -4690,6 +4690,7 @@ dependencies = [
  "compaction",
  "coordinator",
  "cost",
+ "cron",
  "crossterm 0.28.1",
  "engine",
  "filetime",

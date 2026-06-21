@@ -81,6 +81,8 @@ tool-web = { path = "../tools/web" }
 tool-plan = { path = "../tools/plan" }
 tool-meta = { path = "../tools/meta" }
 tool-cron = { path = "../tools/cron" }
+# Single-file scheduled-task persistence shape, asserted by parity_system_tools.
+cron = { path = "../cron" }
 tool-ui = { path = "../tools/ui" }
 tool-skill = { path = "../tools/skill" }
 tool-agent = { path = "../tools/agent" }

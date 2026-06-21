@@ -1,5 +1,5 @@
 //! `CronCreateTool` — schedule a prompt on a 5-field cron schedule and persist
-//! the job descriptor to `~/.claude/cron/<id>.json`.
+//! the job into the project's single `<root>/.claude/scheduled_tasks.json` file.
 //!
 //! 1:1 parity rewrite of claude-code `CronCreateTool.ts`. The model supplies a
 //! 5-field cron expression plus the prompt to enqueue at each fire time, with
@@ -8,12 +8,20 @@
 //! Wire identifiers:
 //! - 5-field cron expressions only (6-field with seconds is rejected by the
 //!   shared parser and surfaces as the generic "Expected 5 fields" message).
-//! - Persistence path `~/.claude/cron/<id>.json` where
-//!   `id = [d][0-9a-z]{8}` (9-char format).
+//! - `id = [d][0-9a-z]{8}` (9-char format).
+//!
+//! Persistence (1:1 with claude-code `cronTasks.ts`): a DURABLE job is appended
+//! to the single project-relative file `<projectRoot>/.claude/scheduled_tasks.json`
+//! shaped `{ "tasks": [ CronTask, … ] }` (camelCase fields, `createdAt` in epoch
+//! **milliseconds**, NO `durable`/next-fire on disk — those are runtime-only).
+//! A SESSION-ONLY job (`durable:false`) is NOT written to disk at all (matching
+//! claude-code's separate in-memory session store and the tool's own
+//! "Session-only (not written to disk …)" promise).
 //!
 //! This seam does NOT register the job into a live scheduler — it parses,
-//! computes the next fire time, and persists the descriptor. Production hosts
-//! pick the file up via `cron::scheduler::CronScheduler`.
+//! validates, and persists. Production hosts pick the file up via
+//! [`cron::scheduler::CronScheduler`], which computes each job's next fire time
+//! at runtime from the cron string + `lastFiredAt ?? createdAt`.
 
 use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
@@ -277,9 +285,11 @@ impl CronExpression {
 
 /// Tool name byte-lock.
 pub const CRON_CREATE_TOOL_NAME: &str = "CronCreate";
-/// Subdirectory under `~/.claude/`.
+/// Legacy per-job subdirectory under `~/.claude/` (retained as a wire-identifier
+/// lock; the durable path is now the single project file
+/// [`cron::tasks_file::SCHEDULED_TASKS_FILE`]).
 pub const CRON_SUBDIR: &str = "cron";
-/// File extension.
+/// Legacy per-job file extension (retained as a wire-identifier lock).
 pub const CRON_FILE_SUFFIX: &str = ".json";
 /// 9-char task-id prefix character (`d` for daemon/cron).
 pub const CRON_TASK_ID_PREFIX: char = 'd';
@@ -294,27 +304,14 @@ const MAX_JOBS: usize = 50;
 /// Recurring jobs auto-expire after this many days (CronCreateTool.ts prompt.ts).
 const DEFAULT_MAX_AGE_DAYS: i64 = 30;
 
-pub(crate) fn home_dir_or_internal() -> Result<PathBuf, ToolError> {
-    std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .ok_or_else(|| ToolError::Internal("CronCreate: HOME directory not available".into()))
-}
-
-/// User config-home: `$CLAUDE_CONFIG_DIR` when set (claude-code `tr()` `??`: an
-/// empty value is honored verbatim → cwd-relative), else `<home>/.claude`.
+/// Absolute path to the single project tasks file
+/// (`<project_root>/.claude/scheduled_tasks.json`). 1:1 with claude-code, which
+/// keys cron persistence off the project root (the session cwd), NOT the user
+/// config-home. Thin re-export of [`cron::tasks_file::scheduled_tasks_path`] so
+/// every cron tool resolves the path identically.
 #[must_use]
-pub(crate) fn config_home_dir(home: &Path) -> PathBuf {
-    match std::env::var_os("CLAUDE_CONFIG_DIR") {
-        Some(dir) => PathBuf::from(dir),
-        None => home.join(".claude"),
-    }
-}
-
-#[must_use]
-pub(crate) fn cron_path(home: &Path, task_id: &str) -> PathBuf {
-    config_home_dir(home)
-        .join(CRON_SUBDIR)
-        .join(format!("{task_id}{CRON_FILE_SUFFIX}"))
+pub(crate) fn cron_file_path(project_root: &Path) -> PathBuf {
+    cron::tasks_file::scheduled_tasks_path(project_root)
 }
 
 #[must_use]
@@ -541,14 +538,13 @@ fn build_result_content(id: &str, human: &str, recurring: bool, durable: bool) -
     }
 }
 
-/// Count existing `<config-home>/cron/*.json` job descriptors.
-fn count_existing_jobs(home: &Path) -> usize {
-    let dir = config_home_dir(home).join(CRON_SUBDIR);
-    match std::fs::read_dir(&dir) {
-        Ok(rd) => rd
-            .filter_map(Result::ok)
-            .filter(|e| e.path().extension().and_then(|x| x.to_str()) == Some("json"))
-            .count(),
+/// Count persisted jobs in the project's single `scheduled_tasks.json`
+/// (`tasks.len()`). A missing/garbage file counts as zero. Backs the
+/// `MAX_JOBS = 50` limit (CronCreateTool.ts:25).
+fn count_existing_jobs(project_root: &Path) -> usize {
+    let path = cron_file_path(project_root);
+    match std::fs::read_to_string(&path) {
+        Ok(body) => cron::tasks_file::parse_tasks(&body).tasks.len(),
         Err(_) => 0,
     }
 }
@@ -643,7 +639,7 @@ impl Tool for CronCreateTool {
     async fn check_permissions(&self, _: &Value, _: &ToolUseContext) -> PermissionResult {
         PermissionResult::Allow {
             reason: PermissionDecisionReason::Other {
-                reason: "CronCreate persists a cron descriptor under ~/.claude/cron/".into(),
+                reason: "CronCreate persists a cron job to .claude/scheduled_tasks.json".into(),
             },
             updated_input: None,
             update_destination: None,
@@ -687,13 +683,11 @@ impl Tool for CronCreateTool {
             )));
         }
 
-        // Too many scheduled jobs already.
-        if let Ok(home) = home_dir_or_internal() {
-            if count_existing_jobs(&home) >= MAX_JOBS {
-                return Err(ValidationError(format!(
-                    "Too many scheduled jobs (max {MAX_JOBS}). Cancel one first."
-                )));
-            }
+        // Too many scheduled jobs already (counted in the single project file).
+        if count_existing_jobs(&self.ctx.workspace) >= MAX_JOBS {
+            return Err(ValidationError(format!(
+                "Too many scheduled jobs (max {MAX_JOBS}). Cancel one first."
+            )));
         }
 
         // PARITY-GAP: TS rejects a `durable` cron created by a teammate
@@ -750,55 +744,62 @@ impl Tool for CronCreateTool {
         bus.log_event(SCHEDULE_CRON_STARTED, md).await;
 
         let now = self.ctx.clock.now();
+        // Next-fire is COMPUTED at runtime (cron + createdAt/lastFiredAt) and is
+        // never persisted (claude-code parity); we still derive it here purely
+        // for the analytics `next_fire_unix_secs` signal.
         let next = next_fire_after(&parsed, now);
         let next_unix = next
             .and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok())
             .map(|d| d.as_secs());
-        let created = now
+        // `createdAt` is epoch MILLISECONDS on disk (claude-code `Date.now()`).
+        let created_ms = now
             .duration_since(SystemTime::UNIX_EPOCH)
-            .map(|d| d.as_secs())
+            .map(|d| d.as_millis() as u64)
             .unwrap_or(0);
 
-        let home = match home_dir_or_internal() {
-            Ok(h) => h,
-            Err(e) => {
-                emit_failed(&bus, "no_home", started.elapsed().as_millis() as u64).await;
-                return Err(e);
-            }
-        };
         let id = generate_cron_task_id();
-        let path = cron_path(&home, &id);
-        let descriptor = json!({
-            "id": id,
-            "cron": cron,
-            "prompt": prompt,
-            "recurring": recurring,
-            "durable": durable,
-            "created_at_unix_secs": created,
-            "next_fire_unix_secs": next_unix,
-        });
-        if let Some(dir) = path.parent() {
-            if let Err(e) = tokio::fs::create_dir_all(dir).await {
-                emit_failed(&bus, "io_create_dir", started.elapsed().as_millis() as u64).await;
+
+        // Persist ONLY when durable. A session-only job (durable:false) is never
+        // written to disk — it would live in claude-code's separate in-memory
+        // session store (which this seam does not own), honoring the tool's
+        // "Session-only (not written to disk …)" promise.
+        let mut bytes_written: usize = 0;
+        if durable {
+            let path = cron_file_path(&self.ctx.workspace);
+            if let Some(dir) = path.parent() {
+                if let Err(e) = tokio::fs::create_dir_all(dir).await {
+                    emit_failed(&bus, "io_create_dir", started.elapsed().as_millis() as u64).await;
+                    return Err(ToolError::Io(format!(
+                        "CronCreate: io error at {}: {e}",
+                        dir.display()
+                    )));
+                }
+            }
+            // Read-modify-write the single `{ "tasks": [...] }` document: load the
+            // existing tasks (empty if absent/garbage), append the new CronTask,
+            // and write the whole file back.
+            let mut doc = match tokio::fs::read_to_string(&path).await {
+                Ok(body) => cron::tasks_file::parse_tasks(&body),
+                Err(_) => cron::tasks_file::ScheduledTasks::default(),
+            };
+            doc.tasks.push(cron::tasks_file::CronTask {
+                id: id.clone(),
+                cron: cron.clone(),
+                prompt: prompt.clone(),
+                created_at: created_ms,
+                last_fired_at: None,
+                recurring: Some(recurring),
+                permanent: None,
+            });
+            let body = cron::tasks_file::serialize_tasks(&doc);
+            bytes_written = body.len();
+            if let Err(e) = tokio::fs::write(&path, body.as_bytes()).await {
+                emit_failed(&bus, "io_write", started.elapsed().as_millis() as u64).await;
                 return Err(ToolError::Io(format!(
                     "CronCreate: io error at {}: {e}",
-                    dir.display()
+                    path.display()
                 )));
             }
-        }
-        let body = match serde_json::to_vec_pretty(&descriptor) {
-            Ok(b) => b,
-            Err(e) => {
-                emit_failed(&bus, "serde_error", started.elapsed().as_millis() as u64).await;
-                return Err(ToolError::Internal(format!("CronCreate: serde error: {e}")));
-            }
-        };
-        if let Err(e) = tokio::fs::write(&path, &body).await {
-            emit_failed(&bus, "io_write", started.elapsed().as_millis() as u64).await;
-            return Err(ToolError::Io(format!(
-                "CronCreate: io error at {}: {e}",
-                path.display()
-            )));
         }
 
         let mut md: LogEventMetadata = HashMap::new();
@@ -815,7 +816,7 @@ impl Tool for CronCreateTool {
         );
         md.insert(
             "bytes_written".into(),
-            AnalyticsValue::Int(body.len() as i64),
+            AnalyticsValue::Int(bytes_written as i64),
         );
         bus.log_event(SCHEDULE_CRON_COMPLETED, md).await;
 
@@ -840,7 +841,7 @@ impl Tool for CronCreateTool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tool_api::test_support::{fresh_ctx, fresh_tx, shell_test_ctx, HOME_LOCK};
+    use tool_api::test_support::{fresh_ctx, fresh_tx, shell_test_ctx_in};
     use traits::process::ProcessOutput;
 
     fn dummy_out() -> ProcessOutput {
@@ -849,6 +850,16 @@ mod tests {
             stderr: String::new(),
             exit_code: 0,
             timed_out: false,
+        }
+    }
+
+    /// Read the parsed `{ "tasks": [...] }` document at
+    /// `<root>/.claude/scheduled_tasks.json` (empty if absent).
+    async fn read_doc(root: &std::path::Path) -> cron::tasks_file::ScheduledTasks {
+        let path = cron::tasks_file::scheduled_tasks_path(root);
+        match tokio::fs::read_to_string(&path).await {
+            Ok(body) => cron::tasks_file::parse_tasks(&body),
+            Err(_) => cron::tasks_file::ScheduledTasks::default(),
         }
     }
 
@@ -930,11 +941,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn persists_descriptor() {
-        let _g = HOME_LOCK.lock().await;
+    async fn session_only_job_is_not_written_to_disk() {
+        // A durable:false (default) job lives only in the (separate) in-memory
+        // session store; nothing is written to scheduled_tasks.json.
         let tmp = tempfile::tempdir().unwrap();
-        std::env::set_var("HOME", tmp.path());
-        let tool = CronCreateTool::new(shell_test_ctx(dummy_out()));
+        let tool = CronCreateTool::new(shell_test_ctx_in(dummy_out(), tmp.path().to_path_buf()));
         let out = tool
             .call(
                 json!({"cron": "*/5 9-17 * * 1-5", "prompt": "echo hi"}),
@@ -952,20 +963,77 @@ mod tests {
         assert!(content.contains("Scheduled recurring job"));
         assert!(content.contains("Session-only (not written to disk, dies when Claude exits)"));
 
-        let path = format!("{}/.claude/cron/{id}.json", tmp.path().display());
+        // No file written at all.
+        let path = cron::tasks_file::scheduled_tasks_path(tmp.path());
+        assert!(!tokio::fs::try_exists(&path).await.unwrap());
+        assert!(read_doc(tmp.path()).await.tasks.is_empty());
+    }
+
+    #[tokio::test]
+    async fn durable_job_persists_to_single_project_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tool = CronCreateTool::new(shell_test_ctx_in(dummy_out(), tmp.path().to_path_buf()));
+        let out = tool
+            .call(
+                json!({"cron": "*/5 9-17 * * 1-5", "prompt": "echo hi", "durable": true}),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .expect("ok");
+        let id = out.data["id"].as_str().unwrap().to_string();
+
+        // The single `{ "tasks": [...] }` file carries one CronTask with the
+        // camelCase, epoch-MILLISECONDS shape — and NO durable / next-fire keys.
+        let path = cron::tasks_file::scheduled_tasks_path(tmp.path());
         let written = tokio::fs::read_to_string(&path).await.unwrap();
+        assert!(written.contains("\"tasks\""));
         assert!(written.contains("\"cron\": \"*/5 9-17 * * 1-5\""));
         assert!(written.contains("\"prompt\": \"echo hi\""));
+        assert!(written.contains("\"createdAt\""));
         assert!(written.contains("\"recurring\": true"));
-        assert!(written.contains("\"durable\": false"));
+        assert!(!written.contains("durable"));
+        assert!(!written.contains("nextFire"));
+        assert!(!written.contains("next_fire"));
+        assert!(!written.contains("created_at_unix"));
+        // Trailing newline (claude-code `+ '\n'`).
+        assert!(written.ends_with("}\n"));
+
+        let doc = read_doc(tmp.path()).await;
+        assert_eq!(doc.tasks.len(), 1);
+        assert_eq!(doc.tasks[0].id, id);
+        assert_eq!(doc.tasks[0].recurring, Some(true));
+        assert_eq!(doc.tasks[0].last_fired_at, None);
+        // `createdAt` is derived from the clock in epoch MILLISECONDS. The test
+        // StubClock is anchored at the Unix epoch, so this is 0 here — the ms
+        // conversion (`as_millis`) is exercised by the scheduler round-trip tests
+        // with a non-epoch clock.
+        assert_eq!(doc.tasks[0].created_at, 0);
+        assert!(written.contains("\"createdAt\": 0"));
+    }
+
+    #[tokio::test]
+    async fn durable_creates_append_into_one_file() {
+        // Two durable creates accumulate in the SAME file (read-modify-write).
+        let tmp = tempfile::tempdir().unwrap();
+        let tool = CronCreateTool::new(shell_test_ctx_in(dummy_out(), tmp.path().to_path_buf()));
+        for cron in ["*/5 * * * *", "0 9 * * *"] {
+            tool.call(
+                json!({"cron": cron, "prompt": "p", "durable": true}),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .expect("ok");
+        }
+        let doc = read_doc(tmp.path()).await;
+        assert_eq!(doc.tasks.len(), 2);
     }
 
     #[tokio::test]
     async fn one_shot_durable_result() {
-        let _g = HOME_LOCK.lock().await;
         let tmp = tempfile::tempdir().unwrap();
-        std::env::set_var("HOME", tmp.path());
-        let tool = CronCreateTool::new(shell_test_ctx(dummy_out()));
+        let tool = CronCreateTool::new(shell_test_ctx_in(dummy_out(), tmp.path().to_path_buf()));
         let out = tool
             .call(
                 json!({"cron": "30 14 28 2 *", "prompt": "remind me", "recurring": false, "durable": true}),
@@ -981,14 +1049,16 @@ mod tests {
         assert!(content.contains("Scheduled one-shot task"));
         assert!(content.contains("It will fire once then auto-delete"));
         assert!(content.contains("Persisted to .claude/scheduled_tasks.json"));
+        // recurring:false → the optional `recurring` key is omitted on disk.
+        let doc = read_doc(tmp.path()).await;
+        assert_eq!(doc.tasks.len(), 1);
+        assert_eq!(doc.tasks[0].recurring, Some(false));
     }
 
     #[tokio::test]
     async fn semantic_string_flags_via_call() {
-        let _g = HOME_LOCK.lock().await;
         let tmp = tempfile::tempdir().unwrap();
-        std::env::set_var("HOME", tmp.path());
-        let tool = CronCreateTool::new(shell_test_ctx(dummy_out()));
+        let tool = CronCreateTool::new(shell_test_ctx_in(dummy_out(), tmp.path().to_path_buf()));
         let out = tool
             .call(
                 json!({"cron": "0 9 * * *", "prompt": "x", "recurring": "no", "durable": "yes"}),
@@ -1003,10 +1073,8 @@ mod tests {
 
     #[tokio::test]
     async fn call_rejects_garbage_cron() {
-        let _g = HOME_LOCK.lock().await;
         let tmp = tempfile::tempdir().unwrap();
-        std::env::set_var("HOME", tmp.path());
-        let tool = CronCreateTool::new(shell_test_ctx(dummy_out()));
+        let tool = CronCreateTool::new(shell_test_ctx_in(dummy_out(), tmp.path().to_path_buf()));
         let err = tool
             .call(
                 json!({"cron": "not a cron", "prompt": "x"}),
@@ -1023,10 +1091,8 @@ mod tests {
         // PARITY: 6-field is no longer a special message; the shared 5-field
         // parser surfaces it as the generic "Expected 5 fields" error (TS
         // `parseCronExpression` returns null for non-5-field input).
-        let _g = HOME_LOCK.lock().await;
         let tmp = tempfile::tempdir().unwrap();
-        std::env::set_var("HOME", tmp.path());
-        let tool = CronCreateTool::new(shell_test_ctx(dummy_out()));
+        let tool = CronCreateTool::new(shell_test_ctx_in(dummy_out(), tmp.path().to_path_buf()));
         let err = tool
             .call(
                 json!({"cron": "0 */5 9-17 * * 1-5", "prompt": "x"}),
@@ -1041,10 +1107,8 @@ mod tests {
 
     #[tokio::test]
     async fn validate_rejects_garbage_cron() {
-        let _g = HOME_LOCK.lock().await;
         let tmp = tempfile::tempdir().unwrap();
-        std::env::set_var("HOME", tmp.path());
-        let tool = CronCreateTool::new(shell_test_ctx(dummy_out()));
+        let tool = CronCreateTool::new(shell_test_ctx_in(dummy_out(), tmp.path().to_path_buf()));
         let err = tool
             .validate_input(&json!({"cron": "not a cron", "prompt": "x"}), &fresh_ctx())
             .await
@@ -1109,10 +1173,8 @@ mod tests {
 
     #[tokio::test]
     async fn validate_rejects_out_of_range_with_invalid_message() {
-        let _g = HOME_LOCK.lock().await;
         let tmp = tempfile::tempdir().unwrap();
-        std::env::set_var("HOME", tmp.path());
-        let tool = CronCreateTool::new(shell_test_ctx(dummy_out()));
+        let tool = CronCreateTool::new(shell_test_ctx_in(dummy_out(), tmp.path().to_path_buf()));
         // Minute 99 is out of range -> the parser fails -> the generic
         // byte-exact "Invalid cron expression" message (errorCode 1 in TS),
         // NOT the "does not match any calendar date" message (errorCode 2).
@@ -1128,10 +1190,8 @@ mod tests {
 
     #[tokio::test]
     async fn validate_rejects_unsatisfiable_cron() {
-        let _g = HOME_LOCK.lock().await;
         let tmp = tempfile::tempdir().unwrap();
-        std::env::set_var("HOME", tmp.path());
-        let tool = CronCreateTool::new(shell_test_ctx(dummy_out()));
+        let tool = CronCreateTool::new(shell_test_ctx_in(dummy_out(), tmp.path().to_path_buf()));
         // February 30 is a real impossible date (Feb has at most 29 days), so no
         // calendar date in the horizon matches. (DOM 31 — which the old crude
         // 30-day decompose wrongly rejected — is now correctly satisfiable; see

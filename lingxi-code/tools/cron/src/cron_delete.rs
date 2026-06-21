@@ -1,9 +1,9 @@
-//! `CronDeleteTool` — cancel a scheduled cron job by id, deleting its
-//! `~/.claude/cron/<id>.json` descriptor.
+//! `CronDeleteTool` — cancel a scheduled cron job by id, removing it from the
+//! single project-relative `<root>/.claude/scheduled_tasks.json` file.
 //!
 //! 1:1 parity port of claude-code `CronDeleteTool.ts`. The model supplies the
-//! job `id` returned by `CronCreate`; the tool removes the persisted descriptor
-//! and reports `Cancelled job <id>.`.
+//! job `id` returned by `CronCreate`; the tool read-modify-writes the tasks
+//! file (dropping the matching task) and reports `Cancelled job <id>.`.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -26,7 +26,9 @@ use tool_api::tool_trait::{
     ToolStaticContext, ValidationError,
 };
 
-use crate::schedule_cron::{cron_path, home_dir_or_internal};
+use std::path::Path;
+
+use crate::schedule_cron::cron_file_path;
 
 /// Tool name byte-lock.
 pub const CRON_DELETE_TOOL_NAME: &str = "CronDelete";
@@ -66,6 +68,18 @@ async fn emit_failed(bus: &Arc<AnalyticsBus>, kind: &str, duration_ms: u64) {
         AnalyticsValue::Int(duration_ms as i64),
     );
     bus.log_event(CRON_DELETE_FAILED, md).await;
+}
+
+/// Does a persisted task with `id` exist in the project's single tasks file?
+async fn job_exists(project_root: &Path, id: &str) -> bool {
+    let path = cron_file_path(project_root);
+    match tokio::fs::read_to_string(&path).await {
+        Ok(body) => cron::tasks_file::parse_tasks(&body)
+            .tasks
+            .iter()
+            .any(|t| t.id == id),
+        Err(_) => false,
+    }
 }
 
 /// `CronDeleteTool` — cancel a scheduled cron job by id.
@@ -116,7 +130,7 @@ impl Tool for CronDeleteTool {
     async fn check_permissions(&self, _: &Value, _: &ToolUseContext) -> PermissionResult {
         PermissionResult::Allow {
             reason: PermissionDecisionReason::Other {
-                reason: "CronDelete removes a cron descriptor under ~/.claude/cron/".into(),
+                reason: "CronDelete removes a cron job from .claude/scheduled_tasks.json".into(),
             },
             updated_input: None,
             update_destination: None,
@@ -142,9 +156,7 @@ impl Tool for CronDeleteTool {
             .and_then(Value::as_str)
             .ok_or_else(|| ValidationError("CronDelete: missing or non-string id".into()))?;
 
-        let home = home_dir_or_internal().map_err(|e| ValidationError(e.to_string()))?;
-        let path = cron_path(&home, id);
-        if !tokio::fs::try_exists(&path).await.unwrap_or(false) {
+        if !job_exists(&self.ctx.workspace, id).await {
             return Err(ValidationError(format!("No scheduled job with id '{id}'")));
         }
         // PARITY-GAP: TS validateInput also rejects deleting a cron owned by a
@@ -177,23 +189,31 @@ impl Tool for CronDeleteTool {
         md.insert("id".into(), verified_str(&id));
         bus.log_event(CRON_DELETE_STARTED, md).await;
 
-        let home = match home_dir_or_internal() {
-            Ok(h) => h,
-            Err(e) => {
-                emit_failed(&bus, "no_home", started.elapsed().as_millis() as u64).await;
-                return Err(e);
+        // Read-modify-write the single `{ "tasks": [...] }` file: drop the task
+        // with the matching id and write the rest back. A missing file / missing
+        // id surfaces the byte-exact "No scheduled job with id '<id>'" error.
+        let path = cron_file_path(&self.ctx.workspace);
+        let body = match tokio::fs::read_to_string(&path).await {
+            Ok(b) => b,
+            Err(_) => {
+                emit_failed(&bus, "not_found", started.elapsed().as_millis() as u64).await;
+                return Err(ToolError::InvalidInput(format!(
+                    "No scheduled job with id '{id}'"
+                )));
             }
         };
-        let path = cron_path(&home, &id);
-
-        if !tokio::fs::try_exists(&path).await.unwrap_or(false) {
+        let mut doc = cron::tasks_file::parse_tasks(&body);
+        let before = doc.tasks.len();
+        doc.tasks.retain(|t| t.id != id);
+        if doc.tasks.len() == before {
             emit_failed(&bus, "not_found", started.elapsed().as_millis() as u64).await;
             return Err(ToolError::InvalidInput(format!(
                 "No scheduled job with id '{id}'"
             )));
         }
 
-        if let Err(e) = tokio::fs::remove_file(&path).await {
+        let updated = cron::tasks_file::serialize_tasks(&doc);
+        if let Err(e) = tokio::fs::write(&path, updated.as_bytes()).await {
             emit_failed(&bus, "io_remove", started.elapsed().as_millis() as u64).await;
             return Err(ToolError::Io(format!(
                 "CronDelete: io error at {}: {e}",
@@ -223,7 +243,7 @@ impl Tool for CronDeleteTool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tool_api::test_support::{fresh_ctx, fresh_tx, shell_test_ctx, HOME_LOCK};
+    use tool_api::test_support::{fresh_ctx, fresh_tx, shell_test_ctx_in};
     use traits::process::ProcessOutput;
 
     fn dummy_out() -> ProcessOutput {
@@ -235,24 +255,39 @@ mod tests {
         }
     }
 
-    /// Write a minimal cron descriptor to `~/.claude/cron/<id>.json`.
-    async fn write_job(home: &std::path::Path, id: &str, cron: &str, prompt: &str) {
-        let path = cron_path(home, id);
+    /// Seed `<root>/.claude/scheduled_tasks.json` with the given task ids.
+    async fn seed_ids(root: &Path, ids: &[&str]) {
+        let path = cron_file_path(root);
         tokio::fs::create_dir_all(path.parent().unwrap())
             .await
             .unwrap();
-        let descriptor = json!({
-            "id": id,
-            "cron": cron,
-            "prompt": prompt,
-            "recurring": true,
-            "durable": false,
-            "created_at_unix_secs": 0,
-            "next_fire_unix_secs": 60,
-        });
-        tokio::fs::write(&path, serde_json::to_vec_pretty(&descriptor).unwrap())
+        let doc = cron::tasks_file::ScheduledTasks {
+            tasks: ids
+                .iter()
+                .map(|id| cron::tasks_file::CronTask {
+                    id: (*id).into(),
+                    cron: "*/5 * * * *".into(),
+                    prompt: "echo hi".into(),
+                    created_at: 0,
+                    last_fired_at: None,
+                    recurring: Some(true),
+                    permanent: None,
+                })
+                .collect(),
+        };
+        tokio::fs::write(&path, cron::tasks_file::serialize_tasks(&doc))
             .await
             .unwrap();
+    }
+
+    async fn read_ids(root: &Path) -> Vec<String> {
+        let path = cron_file_path(root);
+        let body = tokio::fs::read_to_string(&path).await.unwrap_or_default();
+        cron::tasks_file::parse_tasks(&body)
+            .tasks
+            .into_iter()
+            .map(|t| t.id)
+            .collect()
     }
 
     #[test]
@@ -262,12 +297,11 @@ mod tests {
 
     #[tokio::test]
     async fn delete_existing_succeeds() {
-        let _g = HOME_LOCK.lock().await;
         let tmp = tempfile::tempdir().unwrap();
-        std::env::set_var("HOME", tmp.path());
-        write_job(tmp.path(), "d12345678", "*/5 * * * *", "echo hi").await;
+        // Two jobs; deleting one leaves the other in the same file.
+        seed_ids(tmp.path(), &["d12345678", "dkeep0000"]).await;
 
-        let tool = CronDeleteTool::new(shell_test_ctx(dummy_out()));
+        let tool = CronDeleteTool::new(shell_test_ctx_in(dummy_out(), tmp.path().to_path_buf()));
         let out = tool
             .call(json!({"id": "d12345678"}), fresh_ctx(), fresh_tx())
             .await
@@ -275,18 +309,14 @@ mod tests {
         assert_eq!(out.data["id"], json!("d12345678"));
         assert_eq!(out.data["content"], json!("Cancelled job d12345678."));
 
-        // The descriptor file is gone.
-        let path = cron_path(tmp.path(), "d12345678");
-        assert!(!tokio::fs::try_exists(&path).await.unwrap());
+        // Only the targeted job is gone; the file (and the other job) remains.
+        assert_eq!(read_ids(tmp.path()).await, vec!["dkeep0000".to_string()]);
     }
 
     #[tokio::test]
     async fn delete_missing_errors_with_exact_message() {
-        let _g = HOME_LOCK.lock().await;
         let tmp = tempfile::tempdir().unwrap();
-        std::env::set_var("HOME", tmp.path());
-
-        let tool = CronDeleteTool::new(shell_test_ctx(dummy_out()));
+        let tool = CronDeleteTool::new(shell_test_ctx_in(dummy_out(), tmp.path().to_path_buf()));
         let err = tool
             .call(json!({"id": "dnope0000"}), fresh_ctx(), fresh_tx())
             .await
@@ -301,11 +331,8 @@ mod tests {
 
     #[tokio::test]
     async fn validate_input_rejects_missing_job() {
-        let _g = HOME_LOCK.lock().await;
         let tmp = tempfile::tempdir().unwrap();
-        std::env::set_var("HOME", tmp.path());
-
-        let tool = CronDeleteTool::new(shell_test_ctx(dummy_out()));
+        let tool = CronDeleteTool::new(shell_test_ctx_in(dummy_out(), tmp.path().to_path_buf()));
         let err = tool
             .validate_input(&json!({"id": "dmissing1"}), &fresh_ctx())
             .await

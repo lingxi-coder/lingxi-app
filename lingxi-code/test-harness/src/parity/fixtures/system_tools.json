@@ -36,7 +36,7 @@
   "path_templates": {
     "brief":          "~/.claude/brief/<task_id>.txt",
     "config":         "~/.claude/settings.json",
-    "schedule_cron":  "~/.claude/cron/<task_id>.json"
+    "schedule_cron":  "<project>/.claude/scheduled_tasks.json"
   },
 
   "telemetry_events": [

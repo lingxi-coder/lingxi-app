@@ -2978,81 +2978,35 @@ pub async fn build(
 
     let task_registry = Arc::new(task_registry_inner);
 
-    // (5.48) Cron: construct, load persisted descriptors, and start the live cron
-    //        scheduler so jobs created by CronCreate actually fire — closing parity
-    //        gap §0.3 / §B (the scheduler was never constructed, so descriptors on
-    //        disk never ran). Resolve the descriptor dir via `cfg.claude_home`
-    //        (the `$CLAUDE_CONFIG_DIR`-aware config-home the CLI/bridge wire), so
-    //        the scheduler's load dir always matches where CronCreate writes
-    //        (`config_home_dir(home)/cron`) — both honor `$CLAUDE_CONFIG_DIR`.
-    //        Ticks every 60s on a posix RuntimeSpawner (D17). The detached tick
-    //        task holds a self-clone of the scheduler, so it runs for the process
-    //        lifetime without being stored on `DesktopRuntime`.
+    // (5.48) Cron: construct, load the single persisted tasks file, and start the
+    //        live cron scheduler so jobs created by CronCreate actually fire —
+    //        closing parity gap §0.3 / §B (the scheduler was never constructed, so
+    //        persisted jobs never ran). 1:1 with claude-code `cronTasks.ts`: all
+    //        durable jobs live in ONE project-relative file
+    //        `<cwd>/.claude/scheduled_tasks.json` (the same project root the
+    //        CronCreate/List/Delete tools key off via `BuiltinToolContext.workspace`,
+    //        which is `cwd`). `load_persisted` reads `createdAt`/`lastFiredAt` in
+    //        epoch ms; next-fire is COMPUTED at runtime from the cron string +
+    //        `lastFiredAt ?? createdAt` (never persisted). Ticks every 60s on a
+    //        posix RuntimeSpawner (D17). The detached tick task holds a self-clone
+    //        of the scheduler, so it runs for the process lifetime without being
+    //        stored on `DesktopRuntime`.
     //        Gated by the `CLAUDE_CODE_DISABLE_CRON` local kill-switch
     //        (claude-code `prompt.ts:34/38` — the env override that wins over the
     //        GrowthBook fleet flag, which itself defaults on).
     if cron_scheduler_enabled(std::env::var("CLAUDE_CODE_DISABLE_CRON").ok().as_deref()) {
-        let cron_dir = cfg.claude_home.join("cron");
+        let tasks_file = cron::tasks_file::scheduled_tasks_path(&cwd);
         let scheduler = Arc::new(cron::CronScheduler::new(
             task_registry.clone(),
             Arc::new(PosixFileSystem::new(cwd.clone())),
             clock.clone(),
             Arc::new(PosixRuntime::new()),
-            cron_dir.clone(),
+            tasks_file,
         ));
-        if let Ok(mut rd) = tokio::fs::read_dir(&cron_dir).await {
-            while let Ok(Some(entry)) = rd.next_entry().await {
-                let path = entry.path();
-                if path.extension().and_then(|x| x.to_str()) != Some("json") {
-                    continue;
-                }
-                let Ok(body) = tokio::fs::read_to_string(&path).await else {
-                    continue;
-                };
-                let Ok(desc) = serde_json::from_str::<serde_json::Value>(&body) else {
-                    continue;
-                };
-                if let (Some(id), Some(cron_str), Some(prompt)) = (
-                    desc.get("id").and_then(serde_json::Value::as_str),
-                    desc.get("cron").and_then(serde_json::Value::as_str),
-                    desc.get("prompt").and_then(serde_json::Value::as_str),
-                ) {
-                    // Carry the persisted `created_at_unix_secs` + `recurring` so a
-                    // recurring job created days ago is aged correctly on load
-                    // (auto-expires `DEFAULT_RECURRING_MAX_AGE` after creation). A
-                    // missing/zero timestamp falls back to "now" (a fresh window).
-                    let created_at = desc
-                        .get("created_at_unix_secs")
-                        .and_then(serde_json::Value::as_u64)
-                        .filter(|s| *s > 0)
-                        .map_or_else(
-                            std::time::SystemTime::now,
-                            |secs| std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(secs),
-                        );
-                    let recurring = desc
-                        .get("recurring")
-                        .and_then(serde_json::Value::as_bool)
-                        .unwrap_or(true);
-                    // Restore the persisted last-fire time so missed-run catch-up
-                    // does not re-fire a run already fired in a prior session.
-                    let last_run = desc
-                        .get("last_fired_unix_secs")
-                        .and_then(serde_json::Value::as_u64)
-                        .filter(|s| *s > 0)
-                        .map(|secs| {
-                            std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(secs)
-                        });
-                    if let Err(e) = scheduler
-                        .register_with_meta(
-                            id, cron_str, prompt, None, created_at, recurring, last_run,
-                        )
-                        .await
-                    {
-                        tracing::warn!("cron: skipping job {id} with invalid schedule: {e}");
-                    }
-                }
-            }
-        }
+        // Load every durable job from the single tasks file (a recurring job
+        // created days ago is aged correctly on load; its restored `lastFiredAt`
+        // prevents a missed-run catch-up from re-firing an already-fired run).
+        scheduler.load_persisted().await;
         if let Err(e) = scheduler.clone().start().await {
             tracing::error!("cron: failed to start scheduler: {e}");
         }

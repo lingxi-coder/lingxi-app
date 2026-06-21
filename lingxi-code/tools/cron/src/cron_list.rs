@@ -1,5 +1,5 @@
-//! `CronListTool` — list every scheduled cron job by reading the persisted
-//! `~/.claude/cron/*.json` descriptors.
+//! `CronListTool` — list every scheduled cron job by reading the single
+//! project-relative `<root>/.claude/scheduled_tasks.json` file.
 //!
 //! 1:1 parity port of claude-code `CronListTool.ts`. Returns a `jobs` array of
 //! `{id, cron, humanSchedule, prompt, recurring?, durable?}` plus a flattened
@@ -7,7 +7,6 @@
 
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::Arc;
 use std::time::Instant;
 
 use async_trait::async_trait;
@@ -15,10 +14,8 @@ use once_cell::sync::Lazy;
 use permission::result::PermissionMetadata;
 use permission::{PermissionDecisionReason, PermissionResult};
 use serde_json::{json, Map, Value};
-use telemetry::pii::Verified;
 use telemetry::sink::{AnalyticsValue, LogEventMetadata};
-use telemetry::tengu::tool::{CRON_LIST_COMPLETED, CRON_LIST_FAILED, CRON_LIST_STARTED};
-use telemetry::AnalyticsBus;
+use telemetry::tengu::tool::{CRON_LIST_COMPLETED, CRON_LIST_STARTED};
 
 use tool_api::context::ToolUseContext;
 use tool_api::progress::ToolProgressSender;
@@ -27,7 +24,7 @@ use tool_api::tool_trait::{
     ToolStaticContext, ValidationError,
 };
 
-use crate::schedule_cron::{config_home_dir, cron_to_human, home_dir_or_internal, CRON_SUBDIR};
+use crate::schedule_cron::cron_to_human;
 
 /// Tool name byte-lock.
 pub const CRON_LIST_TOOL_NAME: &str = "CronList";
@@ -44,20 +41,6 @@ static SCHEMA: Lazy<Value> = Lazy::new(|| {
         "required": []
     })
 });
-
-fn verified_str(s: &str) -> AnalyticsValue {
-    AnalyticsValue::String(Verified::assert_safe(s.to_string()).into_inner())
-}
-
-async fn emit_failed(bus: &Arc<AnalyticsBus>, kind: &str, duration_ms: u64) {
-    let mut md: LogEventMetadata = HashMap::new();
-    md.insert("error_kind".into(), verified_str(kind));
-    md.insert(
-        "duration_ms".into(),
-        AnalyticsValue::Int(duration_ms as i64),
-    );
-    bus.log_event(CRON_LIST_FAILED, md).await;
-}
 
 /// Truncate `s` to `max_width` columns, appending `…` if it was longer.
 ///
@@ -98,66 +81,35 @@ fn truncate_single_line(s: &str, max_width: usize) -> String {
     truncate_to_width(s, max_width)
 }
 
-/// Read every `~/.claude/cron/*.json` descriptor into the `jobs` shape, sorted
-/// by id for determinism. Unreadable / unparseable files are skipped.
-async fn read_all_jobs(home: &Path) -> Vec<Value> {
-    let dir = config_home_dir(home).join(CRON_SUBDIR);
-    let mut jobs: Vec<Value> = Vec::new();
-    let mut rd = match tokio::fs::read_dir(&dir).await {
-        Ok(rd) => rd,
-        Err(_) => return jobs, // dir absent → no jobs
+/// Read the single `<root>/.claude/scheduled_tasks.json` file into the `jobs`
+/// shape, sorted by id for determinism. A missing / unparseable file yields no
+/// jobs. Every persisted task is durable by definition, so the `durable:false`
+/// key (CronListTool.ts' `durable === false` spread, which only applies to the
+/// separate in-memory session tasks) is never emitted here.
+async fn read_all_jobs(project_root: &Path) -> Vec<Value> {
+    let path = cron::tasks_file::scheduled_tasks_path(project_root);
+    let body = match tokio::fs::read_to_string(&path).await {
+        Ok(b) => b,
+        Err(_) => return Vec::new(), // file absent → no jobs
     };
-    while let Ok(Some(entry)) = rd.next_entry().await {
-        let path = entry.path();
-        if path.extension().and_then(|x| x.to_str()) != Some("json") {
-            continue;
-        }
-        let body = match tokio::fs::read_to_string(&path).await {
-            Ok(b) => b,
-            Err(_) => continue,
-        };
-        let desc: Value = match serde_json::from_str(&body) {
-            Ok(v) => v,
-            Err(_) => continue,
-        };
-        let id = desc
-            .get("id")
-            .and_then(Value::as_str)
-            .map(str::to_string)
-            .or_else(|| {
-                path.file_stem()
-                    .and_then(|s| s.to_str())
-                    .map(str::to_string)
-            })
-            .unwrap_or_default();
-        let cron = desc
-            .get("cron")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_string();
-        let prompt = desc
-            .get("prompt")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_string();
-        let recurring = desc.get("recurring").and_then(Value::as_bool);
-        let durable = desc.get("durable").and_then(Value::as_bool);
+    let doc = cron::tasks_file::parse_tasks(&body);
 
-        let mut obj = Map::new();
-        obj.insert("id".into(), json!(id));
-        obj.insert("cron".into(), json!(cron));
-        obj.insert("humanSchedule".into(), json!(cron_to_human(&cron)));
-        obj.insert("prompt".into(), json!(prompt));
-        // Conditional spread (CronListTool.ts): `recurring` only when truthy,
-        // `durable` only when it is explicitly false.
-        if recurring == Some(true) {
-            obj.insert("recurring".into(), json!(true));
-        }
-        if durable == Some(false) {
-            obj.insert("durable".into(), json!(false));
-        }
-        jobs.push(Value::Object(obj));
-    }
+    let mut jobs: Vec<Value> = doc
+        .tasks
+        .into_iter()
+        .map(|t| {
+            let mut obj = Map::new();
+            obj.insert("id".into(), json!(t.id));
+            obj.insert("cron".into(), json!(t.cron));
+            obj.insert("humanSchedule".into(), json!(cron_to_human(&t.cron)));
+            obj.insert("prompt".into(), json!(t.prompt));
+            // Conditional spread (CronListTool.ts): `recurring` only when truthy.
+            if t.recurring == Some(true) {
+                obj.insert("recurring".into(), json!(true));
+            }
+            Value::Object(obj)
+        })
+        .collect();
     jobs.sort_by(|a, b| {
         a.get("id")
             .and_then(Value::as_str)
@@ -244,7 +196,7 @@ impl Tool for CronListTool {
     async fn check_permissions(&self, _: &Value, _: &ToolUseContext) -> PermissionResult {
         PermissionResult::Allow {
             reason: PermissionDecisionReason::Other {
-                reason: "CronList reads cron descriptors under ~/.claude/cron/".into(),
+                reason: "CronList reads .claude/scheduled_tasks.json".into(),
             },
             updated_input: None,
             update_destination: None,
@@ -279,19 +231,11 @@ impl Tool for CronListTool {
 
         bus.log_event(CRON_LIST_STARTED, HashMap::new()).await;
 
-        let home = match home_dir_or_internal() {
-            Ok(h) => h,
-            Err(e) => {
-                emit_failed(&bus, "no_home", started.elapsed().as_millis() as u64).await;
-                return Err(e);
-            }
-        };
-
         // PARITY-GAP: TS filters to the calling teammate's own crons
         // (`ctx ? allTasks.filter(t => t.agentId === ctx.agentId) : allTasks`).
         // There is no teammate context in this Rust seam, so every persisted
         // job is listed.
-        let jobs = read_all_jobs(&home).await;
+        let jobs = read_all_jobs(&self.ctx.workspace).await;
         let content = render_result(&jobs);
 
         let mut md: LogEventMetadata = HashMap::new();
@@ -317,8 +261,7 @@ impl Tool for CronListTool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::schedule_cron::cron_path;
-    use tool_api::test_support::{fresh_ctx, fresh_tx, shell_test_ctx, HOME_LOCK};
+    use tool_api::test_support::{fresh_ctx, fresh_tx, shell_test_ctx_in};
     use traits::process::ProcessOutput;
 
     fn dummy_out() -> ProcessOutput {
@@ -330,30 +273,31 @@ mod tests {
         }
     }
 
-    async fn write_job(
-        home: &Path,
-        id: &str,
-        cron: &str,
-        prompt: &str,
-        recurring: bool,
-        durable: bool,
-    ) {
-        let path = cron_path(home, id);
+    /// Seed the single `<root>/.claude/scheduled_tasks.json` file with the given
+    /// tasks (everything on disk is durable by definition — there is no on-disk
+    /// `durable` field).
+    async fn seed_tasks(root: &Path, tasks: Vec<cron::tasks_file::CronTask>) {
+        let path = cron::tasks_file::scheduled_tasks_path(root);
         tokio::fs::create_dir_all(path.parent().unwrap())
             .await
             .unwrap();
-        let descriptor = json!({
-            "id": id,
-            "cron": cron,
-            "prompt": prompt,
-            "recurring": recurring,
-            "durable": durable,
-            "created_at_unix_secs": 0,
-            "next_fire_unix_secs": 60,
-        });
-        tokio::fs::write(&path, serde_json::to_vec_pretty(&descriptor).unwrap())
+        let doc = cron::tasks_file::ScheduledTasks { tasks };
+        tokio::fs::write(&path, cron::tasks_file::serialize_tasks(&doc))
             .await
             .unwrap();
+    }
+
+    /// Build one recurring `CronTask` for seeding.
+    fn task(id: &str, cron: &str, prompt: &str, recurring: bool) -> cron::tasks_file::CronTask {
+        cron::tasks_file::CronTask {
+            id: id.into(),
+            cron: cron.into(),
+            prompt: prompt.into(),
+            created_at: 0,
+            last_fired_at: None,
+            recurring: Some(recurring),
+            permanent: None,
+        }
     }
 
     #[test]
@@ -377,11 +321,8 @@ mod tests {
 
     #[tokio::test]
     async fn empty_lists_no_jobs() {
-        let _g = HOME_LOCK.lock().await;
         let tmp = tempfile::tempdir().unwrap();
-        std::env::set_var("HOME", tmp.path());
-
-        let tool = CronListTool::new(shell_test_ctx(dummy_out()));
+        let tool = CronListTool::new(shell_test_ctx_in(dummy_out(), tmp.path().to_path_buf()));
         let out = tool
             .call(json!({}), fresh_ctx(), fresh_tx())
             .await
@@ -392,14 +333,18 @@ mod tests {
 
     #[tokio::test]
     async fn lists_created_jobs() {
-        let _g = HOME_LOCK.lock().await;
         let tmp = tempfile::tempdir().unwrap();
-        std::env::set_var("HOME", tmp.path());
-        // Insert out of order; the tool sorts by id.
-        write_job(tmp.path(), "dbbbb1111", "0 9 * * *", "morning", true, true).await;
-        write_job(tmp.path(), "daaaa0000", "*/5 * * * *", "ticker", true, false).await;
+        // Insert out of order; the tool sorts by id. Both are durable (on disk).
+        seed_tasks(
+            tmp.path(),
+            vec![
+                task("dbbbb1111", "0 9 * * *", "morning", true),
+                task("daaaa0000", "*/5 * * * *", "ticker", true),
+            ],
+        )
+        .await;
 
-        let tool = CronListTool::new(shell_test_ctx(dummy_out()));
+        let tool = CronListTool::new(shell_test_ctx_in(dummy_out(), tmp.path().to_path_buf()));
         let out = tool
             .call(json!({}), fresh_ctx(), fresh_tx())
             .await
@@ -412,25 +357,28 @@ mod tests {
         // humanSchedule rendered.
         assert_eq!(jobs[0]["humanSchedule"], json!("Every 5 minutes"));
         assert_eq!(jobs[1]["humanSchedule"], json!("Every day at 9:00am"));
-        // Conditional keys: recurring present (true) on both; durable:false key
-        // only on the session-only job, absent on the durable one.
+        // recurring present (true) on both. Every persisted task is durable, so
+        // the `durable` key is never emitted.
         assert_eq!(jobs[0]["recurring"], json!(true));
-        assert_eq!(jobs[0]["durable"], json!(false));
+        assert!(jobs[0].get("durable").is_none());
         assert_eq!(jobs[1]["recurring"], json!(true));
         assert!(jobs[1].get("durable").is_none());
     }
 
     #[tokio::test]
     async fn result_text_format() {
-        let _g = HOME_LOCK.lock().await;
         let tmp = tempfile::tempdir().unwrap();
-        std::env::set_var("HOME", tmp.path());
-        // Recurring + session-only.
-        write_job(tmp.path(), "daaaa0000", "*/5 * * * *", "ticker", true, false).await;
-        // One-shot + durable (durable=true → no [session-only], no durable key).
-        write_job(tmp.path(), "dbbbb1111", "30 14 28 2 *", "remind me", false, true).await;
+        // Recurring + one-shot, both durable (no [session-only] label on disk jobs).
+        seed_tasks(
+            tmp.path(),
+            vec![
+                task("daaaa0000", "*/5 * * * *", "ticker", true),
+                task("dbbbb1111", "30 14 28 2 *", "remind me", false),
+            ],
+        )
+        .await;
 
-        let tool = CronListTool::new(shell_test_ctx(dummy_out()));
+        let tool = CronListTool::new(shell_test_ctx_in(dummy_out(), tmp.path().to_path_buf()));
         let out = tool
             .call(json!({}), fresh_ctx(), fresh_tx())
             .await
@@ -440,7 +388,7 @@ mod tests {
         assert_eq!(lines.len(), 2);
         assert_eq!(
             lines[0],
-            "daaaa0000 \u{2014} Every 5 minutes (recurring) [session-only]: ticker"
+            "daaaa0000 \u{2014} Every 5 minutes (recurring): ticker"
         );
         assert_eq!(
             lines[1],
@@ -450,13 +398,11 @@ mod tests {
 
     #[tokio::test]
     async fn result_text_truncates_long_prompt() {
-        let _g = HOME_LOCK.lock().await;
         let tmp = tempfile::tempdir().unwrap();
-        std::env::set_var("HOME", tmp.path());
         let long = "x".repeat(120);
-        write_job(tmp.path(), "daaaa0000", "*/5 * * * *", &long, true, false).await;
+        seed_tasks(tmp.path(), vec![task("daaaa0000", "*/5 * * * *", &long, true)]).await;
 
-        let tool = CronListTool::new(shell_test_ctx(dummy_out()));
+        let tool = CronListTool::new(shell_test_ctx_in(dummy_out(), tmp.path().to_path_buf()));
         let out = tool
             .call(json!({}), fresh_ctx(), fresh_tx())
             .await

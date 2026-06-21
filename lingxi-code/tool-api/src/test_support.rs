@@ -636,3 +636,19 @@ pub fn shell_test_ctx(out: ProcessOutput) -> super::BuiltinToolContext {
         task_lifecycle_hooks: None,
     }
 }
+
+/// Like [`shell_test_ctx`] but with the project `workspace` pinned to
+/// `workspace`. Used by the cron tools' tests, which key their single
+/// `<workspace>/.claude/scheduled_tasks.json` persistence off the project root,
+/// so each test can isolate it in its own tempdir.
+#[must_use]
+#[allow(dead_code)]
+pub fn shell_test_ctx_in(
+    out: ProcessOutput,
+    workspace: std::path::PathBuf,
+) -> super::BuiltinToolContext {
+    super::BuiltinToolContext {
+        workspace,
+        ..shell_test_ctx(out)
+    }
+}

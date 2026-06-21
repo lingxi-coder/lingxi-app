@@ -7,7 +7,7 @@
 use crate::lock::{try_acquire_lock, CronLockError};
 use crate::schedule::{parse_cron, CronExpression};
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 use tasks::registry::TaskRegistry;
@@ -37,8 +37,8 @@ pub struct CronTaskDef {
     pub last_run: Option<SystemTime>,
     /// When `false`, the scheduler skips this job entirely.
     pub enabled: bool,
-    /// When the job was created (the persisted `created_at_unix_secs`). The
-    /// anchor for recurring auto-expiry ([`is_recurring_task_aged`]).
+    /// When the job was created (the persisted `createdAt`, epoch ms on disk).
+    /// The anchor for recurring auto-expiry ([`is_recurring_task_aged`]).
     pub created_at: SystemTime,
     /// `true` = fire on every schedule match until deleted or auto-expired;
     /// `false` = one-shot. Only recurring jobs are subject to max-age expiry.
@@ -98,18 +98,32 @@ fn finalize_fired_job(
     }
 }
 
-/// Merge a `last_fired_unix_secs` field into a persisted cron descriptor JSON,
-/// preserving every other field. Returns the re-serialized JSON, or `None` if
-/// the input is not a JSON object (so the caller leaves the file untouched).
+/// Set `lastFiredAt` (epoch **milliseconds**) on the task with `id` inside a
+/// parsed single-file `{ "tasks": [...] }` document body, returning the
+/// re-serialized file (pretty + trailing newline, 1:1 with claude-code). Returns
+/// `None` if the body has no such id (so the caller leaves the file untouched).
 /// Recording the last-fire time is what makes missed-run CATCH-UP safe ACROSS
 /// RESTARTS — without it a reloaded job would re-fire a run it already fired in
 /// a prior session (claude-code persists `lastFiredAt` for the same reason).
-fn descriptor_with_last_fired(json: &str, last_fired_unix_secs: u64) -> Option<String> {
-    let mut value: serde_json::Value = serde_json::from_str(json).ok()?;
-    value
-        .as_object_mut()?
-        .insert("last_fired_unix_secs".into(), last_fired_unix_secs.into());
-    serde_json::to_string_pretty(&value).ok()
+fn tasks_file_with_last_fired(body: &str, id: &str, last_fired_at_ms: u64) -> Option<String> {
+    let mut doc = crate::tasks_file::parse_tasks(body);
+    let task = doc.tasks.iter_mut().find(|t| t.id == id)?;
+    task.last_fired_at = Some(last_fired_at_ms);
+    Some(crate::tasks_file::serialize_tasks(&doc))
+}
+
+/// Remove the task with `id` from a parsed single-file `{ "tasks": [...] }`
+/// document body, returning the re-serialized file. Returns `None` if the id is
+/// absent (caller leaves the file untouched). Used when a one-shot job has fired
+/// (auto-delete) and when a recurring job ages out.
+fn tasks_file_without(body: &str, id: &str) -> Option<String> {
+    let mut doc = crate::tasks_file::parse_tasks(body);
+    let before = doc.tasks.len();
+    doc.tasks.retain(|t| t.id != id);
+    if doc.tasks.len() == before {
+        return None;
+    }
+    Some(crate::tasks_file::serialize_tasks(&doc))
 }
 
 /// Is a job DUE to fire at `now`? Enabled AND its next scheduled run after the
@@ -155,6 +169,13 @@ pub struct CronScheduler {
     fs: Arc<dyn FileSystem>,
     clock: Arc<dyn Clock>,
     runtime: Arc<dyn RuntimeSpawner>,
+    /// The single project tasks file
+    /// (`<project_root>/.claude/scheduled_tasks.json`) the scheduler loads from
+    /// and writes `lastFiredAt` back to. 1:1 with claude-code `cronTasks.ts`.
+    tasks_file: PathBuf,
+    /// Directory holding per-job lock files (the tasks file's parent, i.e.
+    /// `<project_root>/.claude`). LingXi's A9 cross-process locks live beside the
+    /// single tasks file.
     lock_dir: PathBuf,
     /// Maximum random delay (seconds) applied before launching each due job.
     pub jitter_seconds: u32,
@@ -165,7 +186,10 @@ pub struct CronScheduler {
 }
 
 impl CronScheduler {
-    /// Construct a new scheduler. The tick loop is not started until
+    /// Construct a new scheduler over the single project tasks file
+    /// `<project_root>/.claude/scheduled_tasks.json` (1:1 with claude-code
+    /// `cronTasks.ts`). The per-job A9 lock files live in that file's parent
+    /// directory (`<project_root>/.claude`). The tick loop is not started until
     /// [`Self::start`] is invoked.
     #[must_use]
     pub fn new(
@@ -173,18 +197,58 @@ impl CronScheduler {
         fs: Arc<dyn FileSystem>,
         clock: Arc<dyn Clock>,
         runtime: Arc<dyn RuntimeSpawner>,
-        lock_dir: PathBuf,
+        tasks_file: PathBuf,
     ) -> Self {
+        let lock_dir = tasks_file
+            .parent()
+            .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
         Self {
             tasks: Arc::new(RwLock::new(HashMap::new())),
             task_registry,
             fs,
             clock,
             runtime,
+            tasks_file,
             lock_dir,
             jitter_seconds: 30,
             recurring_max_age: Some(DEFAULT_RECURRING_MAX_AGE),
             tick_handle: Mutex::new(None),
+        }
+    }
+
+    /// Load every persisted (durable) job from the single project tasks file,
+    /// registering each into the in-memory schedule. A missing / unparseable
+    /// file registers nothing. `createdAt` / `lastFiredAt` are read in epoch
+    /// **milliseconds** (claude-code on-disk units). Invalid cron strings are
+    /// skipped with a warning. Call once after construction, before
+    /// [`Self::start`].
+    pub async fn load_persisted(&self) {
+        let path = self.tasks_file.to_string_lossy();
+        let Ok(body) = self.fs.read_file(&path, None, None).await.map(|c| c.content) else {
+            return; // file absent → nothing to load
+        };
+        let doc = crate::tasks_file::parse_tasks(&body);
+        for t in doc.tasks {
+            // Anchor expiry/catch-up off the persisted ms timestamps. A
+            // missing/zero `createdAt` falls back to "now" (a fresh window).
+            let created_at = if t.created_at > 0 {
+                SystemTime::UNIX_EPOCH + Duration::from_millis(t.created_at)
+            } else {
+                self.clock.now()
+            };
+            let recurring = t.recurring.unwrap_or(false);
+            let last_run = t
+                .last_fired_at
+                .filter(|ms| *ms > 0)
+                .map(|ms| SystemTime::UNIX_EPOCH + Duration::from_millis(ms));
+            if let Err(e) = self
+                .register_with_meta(
+                    &t.id, &t.cron, &t.prompt, None, created_at, recurring, last_run,
+                )
+                .await
+            {
+                tracing::warn!("cron: skipping job {} with invalid schedule: {e}", t.id);
+            }
         }
     }
 
@@ -275,8 +339,8 @@ impl CronScheduler {
 
         // Auto-expire aged RECURRING jobs (claude-code `isRecurringTaskAged` →
         // remove + `tengu_scheduled_task_expired`). Runs BEFORE the due-job scan,
-        // so an expired job never fires again; its persisted descriptor is
-        // deleted too, so it does not reload and re-expire every tick.
+        // so an expired job never fires again; it is removed from the single
+        // persisted tasks file too, so it does not reload and re-expire.
         let expired_ids: Vec<String> = {
             let tasks = self.tasks.read().await;
             tasks
@@ -295,8 +359,7 @@ impl CronScheduler {
                 }
             }
             for id in &expired_ids {
-                let job_path = self.lock_dir.join(format!("{id}.json"));
-                let _ = self.fs.delete_file(&job_path.to_string_lossy()).await;
+                self.remove_task_from_file(id).await;
                 tracing::info!(
                     event = "tengu_scheduled_task_expired",
                     cron_id = %id,
@@ -357,34 +420,30 @@ impl CronScheduler {
             }
 
             // Post-fire bookkeeping: a ONE-SHOT job auto-deletes (it has now
-            // fired once); a RECURRING job records `last_run` AND persists it
-            // (`last_fired_unix_secs`) so missed-run catch-up does not re-fire
+            // fired once); a RECURRING job records `last_run` AND persists
+            // `lastFiredAt` (epoch ms) so missed-run catch-up does not re-fire
             // this run after a restart.
             let one_shot = {
                 let mut tasks = self.tasks.write().await;
                 finalize_fired_job(&mut tasks, &id, now)
             };
-            let job_path = self.lock_dir.join(format!("{id}.json"));
-            let path_str = job_path.to_string_lossy();
             if one_shot {
-                let _ = self.fs.delete_file(&path_str).await;
+                // Remove the one-shot from the single tasks file. A missing entry
+                // (a non-durable, in-memory-only job) is a no-op — its in-memory
+                // state suffices since it never reloads.
+                self.remove_task_from_file(&id).await;
                 tracing::info!(cron_id = %id, "one-shot cron job fired and auto-deleted");
             } else {
-                // Read-modify-write the descriptor. A missing descriptor (a
-                // non-durable, in-memory-only job) is skipped — its in-memory
-                // `last_run` suffices since it never reloads; and a delete that
-                // races the fire makes the read fail, so we never resurrect it.
-                let now_secs = now
+                // Read-modify-write the single tasks file, setting `lastFiredAt`
+                // (ms) on this job's entry. A missing entry (in-memory-only job)
+                // is skipped — its in-memory `last_run` suffices since it never
+                // reloads; and a delete that races the fire makes the read fail,
+                // so we never resurrect it.
+                let now_ms = now
                     .duration_since(SystemTime::UNIX_EPOCH)
-                    .map(|d| d.as_secs())
+                    .map(|d| d.as_millis() as u64)
                     .unwrap_or(0);
-                if let Ok(content) =
-                    self.fs.read_file(&path_str, None, None).await.map(|c| c.content)
-                {
-                    if let Some(updated) = descriptor_with_last_fired(&content, now_secs) {
-                        let _ = self.fs.write_file(&path_str, &updated).await;
-                    }
-                }
+                self.set_last_fired_in_file(&id, now_ms).await;
             }
 
             // Release the lock so other peers see "stale" if we crash mid-task.
@@ -398,6 +457,30 @@ impl CronScheduler {
             self.runtime.cancel(&h).await?;
         }
         Ok(())
+    }
+
+    /// Remove the task with `id` from the single persisted tasks file (best
+    /// effort; read-modify-write via the `fs` seam). A missing file / missing id
+    /// is a no-op.
+    async fn remove_task_from_file(&self, id: &str) {
+        let path = self.tasks_file.to_string_lossy();
+        if let Ok(body) = self.fs.read_file(&path, None, None).await.map(|c| c.content) {
+            if let Some(updated) = tasks_file_without(&body, id) {
+                let _ = self.fs.write_file(&path, &updated).await;
+            }
+        }
+    }
+
+    /// Set `lastFiredAt` (epoch ms) on the task with `id` in the single persisted
+    /// tasks file (best effort; read-modify-write via the `fs` seam). A missing
+    /// file / missing id is a no-op.
+    async fn set_last_fired_in_file(&self, id: &str, last_fired_at_ms: u64) {
+        let path = self.tasks_file.to_string_lossy();
+        if let Ok(body) = self.fs.read_file(&path, None, None).await.map(|c| c.content) {
+            if let Some(updated) = tasks_file_with_last_fired(&body, id, last_fired_at_ms) {
+                let _ = self.fs.write_file(&path, &updated).await;
+            }
+        }
     }
 }
 
@@ -523,22 +606,45 @@ mod expiry_tests {
     }
 
     #[test]
-    fn descriptor_with_last_fired_merges_and_preserves_fields() {
-        use super::descriptor_with_last_fired;
-        let orig = r#"{"id":"j","cron":"0 9 * * *","prompt":"p","recurring":true,"durable":true,"created_at_unix_secs":100}"#;
-        let updated = descriptor_with_last_fired(orig, 555).unwrap();
-        let v: serde_json::Value = serde_json::from_str(&updated).unwrap();
-        assert_eq!(v["last_fired_unix_secs"], 555);
-        // Every original field is preserved.
-        assert_eq!(v["id"], "j");
-        assert_eq!(v["cron"], "0 9 * * *");
-        assert_eq!(v["prompt"], "p");
-        assert_eq!(v["recurring"], true);
-        assert_eq!(v["durable"], true);
-        assert_eq!(v["created_at_unix_secs"], 100);
-        // Non-object input → None (caller leaves the file untouched).
-        assert!(descriptor_with_last_fired("not json", 1).is_none());
-        assert!(descriptor_with_last_fired("[1,2,3]", 1).is_none());
+    fn tasks_file_with_last_fired_sets_ms_and_preserves_other_tasks() {
+        use super::tasks_file_with_last_fired;
+        // Two tasks; set lastFiredAt (ms) on the second only.
+        let orig = r#"{"tasks":[
+            {"id":"a","cron":"0 9 * * *","prompt":"pa","createdAt":100,"recurring":true},
+            {"id":"j","cron":"0 9 * * *","prompt":"p","createdAt":200,"recurring":true,"permanent":true}
+        ]}"#;
+        let updated = tasks_file_with_last_fired(orig, "j", 555_000).unwrap();
+        let doc = crate::tasks_file::parse_tasks(&updated);
+        let a = doc.tasks.iter().find(|t| t.id == "a").unwrap();
+        let j = doc.tasks.iter().find(|t| t.id == "j").unwrap();
+        // The targeted task gets lastFiredAt in MS; the other is untouched.
+        assert_eq!(j.last_fired_at, Some(555_000));
+        assert_eq!(a.last_fired_at, None);
+        // Unrelated fields preserved (incl. permanent).
+        assert_eq!(j.created_at, 200);
+        assert_eq!(j.permanent, Some(true));
+        // Serialized form is camelCase with a trailing newline.
+        assert!(updated.contains("\"lastFiredAt\": 555000"));
+        assert!(updated.ends_with("}\n"));
+        // Missing id → None (caller leaves the file untouched).
+        assert!(tasks_file_with_last_fired(orig, "ghost", 1).is_none());
+        assert!(tasks_file_with_last_fired("not json", "j", 1).is_none());
+    }
+
+    #[test]
+    fn tasks_file_without_drops_only_the_target() {
+        use super::tasks_file_without;
+        let orig = r#"{"tasks":[
+            {"id":"a","cron":"* * * * *","prompt":"pa","createdAt":1},
+            {"id":"b","cron":"* * * * *","prompt":"pb","createdAt":2}
+        ]}"#;
+        let updated = tasks_file_without(orig, "a").unwrap();
+        let doc = crate::tasks_file::parse_tasks(&updated);
+        assert_eq!(doc.tasks.len(), 1);
+        assert_eq!(doc.tasks[0].id, "b");
+        // Missing id → None.
+        assert!(tasks_file_without(orig, "ghost").is_none());
+        assert!(tasks_file_without("not json", "a").is_none());
     }
 
     #[test]

@@ -216,8 +216,14 @@ fn config_path_template_matches_resolver() {
 #[test]
 fn cron_path_template_matches_resolver() {
     let fx = fx();
+    // Cron persistence is the single project-relative tasks file
+    // `<project>/.claude/scheduled_tasks.json` (1:1 with claude-code
+    // `cronTasks.ts`), NOT a per-job file under the user config-home.
     assert_eq!(
         fx["path_templates"]["schedule_cron"].as_str().unwrap(),
-        "~/.claude/cron/<task_id>.json"
+        "<project>/.claude/scheduled_tasks.json"
     );
+    // The fixture template agrees with the production resolver.
+    let resolved = cron::tasks_file::scheduled_tasks_path(std::path::Path::new("<project>"));
+    assert_eq!(resolved.to_string_lossy(), "<project>/.claude/scheduled_tasks.json");
 }

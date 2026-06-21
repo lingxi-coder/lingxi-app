@@ -129,12 +129,21 @@ pub fn process_mcp_result(
 
     match persist_binary_content(content_str.as_bytes(), Some(mime), &persist_id, output_dir) {
         // File saved → hand the model the read-it-from-disk instructions
-        // (client.ts:2786-2798).
-        PersistBinaryResult::Ok { filepath, .. } => Value::String(get_large_output_instructions(
-            &filepath,
-            content_length,
-            &format_description(content),
-        )),
+        // (client.ts:2786-2798). Line stats accompany the plain-text
+        // (`toolResult`) shape only — `h = i==="toolResult" || f!==void 0`
+        // (client.ts:2773); array/JSON content carries no `{count,maxLen}`.
+        PersistBinaryResult::Ok { filepath, .. } => {
+            let line_stats = match content {
+                Value::String(_) => Some(compute_line_stats(&content_str)),
+                _ => None,
+            };
+            Value::String(get_large_output_instructions(
+                &filepath,
+                content_length,
+                &format_description(content),
+                line_stats.as_ref(),
+            ))
+        }
         // Write failed → the persist-failed truncation-info message
         // (client.ts:2775-2784).
         PersistBinaryResult::Err { error } => {
@@ -248,35 +257,111 @@ fn infer_compact_schema(value: &Value, depth: i32) -> String {
     }
 }
 
-/// `getLargeOutputInstructions(rawOutputPath, contentLength, formatDescription)`
-/// with `maxReadLength` undefined (`mcpOutputStorage.ts:39-59`). Byte-locked
-/// wording; `contentLength` is rendered with en-US comma grouping
-/// (`Number.prototype.toLocaleString`).
+/// Per-line statistics for a persisted plain-text result: `{count, maxLen}`
+/// (`client.ts:2773-2778`). `count` is the line count after dropping one
+/// trailing empty line; `max_len` is the longest line. TS measures `String`
+/// `.length` (UTF-16 units); `chars().count()` is the UTF-8 analogue used
+/// throughout this module (identical for ASCII).
+struct LineStats {
+    count: u64,
+    max_len: u64,
+}
+
+/// `A.split("\n")` → drop one trailing empty element → `{count, maxLen}`
+/// (`client.ts:2774-2778`).
+fn compute_line_stats(content: &str) -> LineStats {
+    let mut lines: Vec<&str> = content.split('\n').collect();
+    if lines.len() > 1 && lines.last() == Some(&"") {
+        lines.pop();
+    }
+    let max_len = lines.iter().map(|l| l.chars().count() as u64).max().unwrap_or(0);
+    LineStats { count: lines.len() as u64, max_len }
+}
+
+/// `R$d` (`mcpOutputStorage`): the default file-read max-output token budget.
+const DEFAULT_FILE_READ_MAX_OUTPUT_TOKENS: u64 = 25_000;
+
+/// `khe().maxTokens` (`mcpOutputStorage`): `CLAUDE_CODE_FILE_READ_MAX_OUTPUT_TOKENS`
+/// when a valid positive integer, else [`DEFAULT_FILE_READ_MAX_OUTPUT_TOKENS`].
+/// The `tengu_amber_wren` Statsig config layer is unportable and omitted; its
+/// `{}` default selects the same constant, so this matches the runtime default.
+fn file_read_max_output_tokens() -> u64 {
+    std::env::var("CLAUDE_CODE_FILE_READ_MAX_OUTPUT_TOKENS")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .filter(|&t| t > 0)
+        .unwrap_or(DEFAULT_FILE_READ_MAX_OUTPUT_TOKENS)
+}
+
+/// `getLargeOutputInstructions` (= `F7r`, `mcpOutputStorage`) for the default
+/// (`!lHn()`) prompt path: the `tengu_mcp_subagent_prompt` gate is off by
+/// default, so the format-aware jq/python/grep branches are not emitted. The
+/// MCP caller passes `maxReadLength` undefined and `line_stats` only for the
+/// plain-text shape. `content_length`/line counts render with en-US comma
+/// grouping (`Number.prototype.toLocaleString`).
 fn get_large_output_instructions(
     raw_output_path: &str,
     content_length: u64,
     format_description: &str,
+    line_stats: Option<&LineStats>,
 ) -> String {
-    let n = to_locale_string(content_length);
-    let mut out = String::new();
-    out.push_str(&format!(
-        "Error: result ({n} characters) exceeds maximum allowed tokens. Output has been saved to {raw_output_path}.\n"
-    ));
-    out.push_str(&format!("Format: {format_description}\n"));
-    out.push_str(
-        "Use offset and limit parameters to read specific portions of the file, search within it for specific content, and jq to make structured queries.\n",
-    );
-    out.push_str("REQUIREMENTS FOR SUMMARIZATION/ANALYSIS/REVIEW:\n");
-    out.push_str(&format!(
-        "- You MUST read the content from the file at {raw_output_path} in sequential chunks until 100% of the content has been read.\n"
-    ));
-    out.push_str(
-        "- If you receive truncation warnings when reading the file, reduce the chunk size until you have read 100% of the content without truncation.\n",
-    );
-    out.push_str(
-        "- Before producing ANY summary or analysis, you MUST explicitly describe what portion of the content you have read. ***If you did not read the entire content, you MUST explicitly state this.***\n",
-    );
-    out
+    // `Error: result (${o!==void 0 ? "${t} characters across ${o.count} line(s)"
+    // : "${t} characters"})` (client.ts).
+    let count_phrase = match line_stats {
+        Some(ls) => format!(
+            "{} characters across {} {}",
+            to_locale_string(content_length),
+            to_locale_string(ls.count),
+            if ls.count == 1 { "line" } else { "lines" },
+        ),
+        None => format!("{} characters", to_locale_string(content_length)),
+    };
+    // a = Math.floor(maxTokens * 4 * 0.8) == maxTokens * 16 / 5 (exact floor over
+    // the ×4 char budget). `c` holds when there are multiple lines all within the
+    // budget; `lines_too_long` (the note) shows for a single line or an
+    // over-budget line.
+    let a = file_read_max_output_tokens().saturating_mul(16) / 5;
+    let c = line_stats.is_some_and(|ls| ls.count > 1 && ls.max_len <= a);
+    let lines_too_long = line_stats.is_some() && !c;
+    format!(
+        "Error: result ({count_phrase}) exceeds maximum allowed tokens. Output has been saved to {raw_output_path}.\n\
+         Format: {format_description}\n\
+         Use offset and limit parameters to read specific portions of the file, search within it for specific content, and jq to make structured queries.\n\
+         REQUIREMENTS FOR SUMMARIZATION/ANALYSIS/REVIEW:\n\
+         {requirements}",
+        requirements = summarization_requirements(raw_output_path, None, lines_too_long),
+    )
+}
+
+/// `$$d(rawOutputPath, maxReadLength, linesTooLong)` (`mcpOutputStorage`): the
+/// REQUIREMENTS bullet list. `max_read_length` is `Some` only on the Bash/file
+/// path (its char budget appears in the truncation-warning bullet); the MCP
+/// path passes `None`. `lines_too_long` inserts the shell-slice note before the
+/// truncation-warning bullet.
+fn summarization_requirements(
+    raw_output_path: &str,
+    max_read_length: Option<u64>,
+    lines_too_long: bool,
+) -> String {
+    let truncation_bullet = match max_read_length {
+        Some(n) => format!(
+            "- If you receive truncation warnings when reading the file (\"[N lines truncated]\"), reduce the chunk size until you have read 100% of the content without truncation ***DO NOT PROCEED UNTIL YOU HAVE DONE THIS***. Bash output is limited to {} chars.\n",
+            to_locale_string(n),
+        ),
+        None =>
+            "- If you receive truncation warnings when reading the file, reduce the chunk size until you have read 100% of the content without truncation.\n".to_string(),
+    };
+    let lines_note = if lines_too_long {
+        "- Note: this file's lines are too long for Read's offset/limit chunking. If a shell tool is available, slice by character range (e.g. python read()[A:B], dd, or cut -c) instead.\n"
+    } else {
+        ""
+    };
+    format!(
+        "- You MUST read the content from the file at {raw_output_path} in sequential chunks until 100% of the content has been read.\n\
+         {lines_note}{truncation_bullet}\
+         - Before producing ANY summary or analysis, you MUST explicitly describe what portion of the content you have read. ***If you did not read the entire content, you MUST explicitly state this.***\n\
+         - If after a few attempts you cannot read the file (file not found, lines too long for Read's offset/limit, no shell access), STOP retrying. Summarize what you were able to read, explicitly state which portion you could not read and why, and proceed.\n"
+    )
 }
 
 /// The persist-failed fallback (`client.ts:2783`): truncation-info text naming
@@ -474,7 +559,13 @@ mod tests {
         assert!(text.contains(
             "- If you receive truncation warnings when reading the file, reduce the chunk size until you have read 100% of the content without truncation.\n"
         ));
-        assert!(text.ends_with("***If you did not read the entire content, you MUST explicitly state this.***\n"));
+        assert!(text.contains("***If you did not read the entire content, you MUST explicitly state this.***\n"));
+        // Array shape → no line stats → no "lines too long" note, bare count.
+        assert!(text.starts_with("Error: result ("));
+        assert!(!text.contains("characters across"), "array shape has no line count");
+        assert!(!text.contains("- Note: this file's lines are too long"));
+        // v2.1.185 final bullet.
+        assert!(text.ends_with("- If after a few attempts you cannot read the file (file not found, lines too long for Read's offset/limit, no shell access), STOP retrying. Summarize what you were able to read, explicitly state which portion you could not read and why, and proceed.\n"));
     }
 
     #[test]
@@ -511,16 +602,88 @@ mod tests {
     }
 
     #[test]
-    fn large_output_instructions_byte_layout() {
-        let s = get_large_output_instructions("/tmp/out/mcp-srv-tool-1.json", 1_234_567, "Plain text");
+    fn large_output_instructions_byte_layout_no_line_stats() {
+        // Array/JSON shape (no line stats): bare "characters" count, no
+        // "lines too long" note, plus the v2.1.185 final "STOP retrying" bullet.
+        let s = get_large_output_instructions(
+            "/tmp/out/mcp-srv-tool-1.json",
+            1_234_567,
+            "JSON array with schema: {...}",
+            None,
+        );
         let expected = "Error: result (1,234,567 characters) exceeds maximum allowed tokens. Output has been saved to /tmp/out/mcp-srv-tool-1.json.\n\
-Format: Plain text\n\
+Format: JSON array with schema: {...}\n\
 Use offset and limit parameters to read specific portions of the file, search within it for specific content, and jq to make structured queries.\n\
 REQUIREMENTS FOR SUMMARIZATION/ANALYSIS/REVIEW:\n\
 - You MUST read the content from the file at /tmp/out/mcp-srv-tool-1.json in sequential chunks until 100% of the content has been read.\n\
 - If you receive truncation warnings when reading the file, reduce the chunk size until you have read 100% of the content without truncation.\n\
-- Before producing ANY summary or analysis, you MUST explicitly describe what portion of the content you have read. ***If you did not read the entire content, you MUST explicitly state this.***\n";
+- Before producing ANY summary or analysis, you MUST explicitly describe what portion of the content you have read. ***If you did not read the entire content, you MUST explicitly state this.***\n\
+- If after a few attempts you cannot read the file (file not found, lines too long for Read's offset/limit, no shell access), STOP retrying. Summarize what you were able to read, explicitly state which portion you could not read and why, and proceed.\n";
         assert_eq!(s, expected);
+    }
+
+    #[test]
+    fn large_output_instructions_byte_layout_multiline_no_note() {
+        // Plain-text, multiple lines all within budget (maxLen <= 80000): the
+        // "across N lines" count form, but NO "lines too long" note.
+        let ls = LineStats { count: 5, max_len: 40 };
+        let s = get_large_output_instructions(
+            "/tmp/out/mcp-srv-tool-1.txt",
+            1_234_567,
+            "Plain text",
+            Some(&ls),
+        );
+        let expected = "Error: result (1,234,567 characters across 5 lines) exceeds maximum allowed tokens. Output has been saved to /tmp/out/mcp-srv-tool-1.txt.\n\
+Format: Plain text\n\
+Use offset and limit parameters to read specific portions of the file, search within it for specific content, and jq to make structured queries.\n\
+REQUIREMENTS FOR SUMMARIZATION/ANALYSIS/REVIEW:\n\
+- You MUST read the content from the file at /tmp/out/mcp-srv-tool-1.txt in sequential chunks until 100% of the content has been read.\n\
+- If you receive truncation warnings when reading the file, reduce the chunk size until you have read 100% of the content without truncation.\n\
+- Before producing ANY summary or analysis, you MUST explicitly describe what portion of the content you have read. ***If you did not read the entire content, you MUST explicitly state this.***\n\
+- If after a few attempts you cannot read the file (file not found, lines too long for Read's offset/limit, no shell access), STOP retrying. Summarize what you were able to read, explicitly state which portion you could not read and why, and proceed.\n";
+        assert_eq!(s, expected);
+    }
+
+    #[test]
+    fn large_output_instructions_byte_layout_single_line_gets_note() {
+        // Plain-text, a single line (count == 1 → c false → lines_too_long): the
+        // "across 1 line" singular form AND the shell-slice note.
+        let ls = LineStats { count: 1, max_len: 1_234_567 };
+        let s = get_large_output_instructions(
+            "/tmp/out/mcp-srv-tool-1.txt",
+            1_234_567,
+            "Plain text",
+            Some(&ls),
+        );
+        let expected = "Error: result (1,234,567 characters across 1 line) exceeds maximum allowed tokens. Output has been saved to /tmp/out/mcp-srv-tool-1.txt.\n\
+Format: Plain text\n\
+Use offset and limit parameters to read specific portions of the file, search within it for specific content, and jq to make structured queries.\n\
+REQUIREMENTS FOR SUMMARIZATION/ANALYSIS/REVIEW:\n\
+- You MUST read the content from the file at /tmp/out/mcp-srv-tool-1.txt in sequential chunks until 100% of the content has been read.\n\
+- Note: this file's lines are too long for Read's offset/limit chunking. If a shell tool is available, slice by character range (e.g. python read()[A:B], dd, or cut -c) instead.\n\
+- If you receive truncation warnings when reading the file, reduce the chunk size until you have read 100% of the content without truncation.\n\
+- Before producing ANY summary or analysis, you MUST explicitly describe what portion of the content you have read. ***If you did not read the entire content, you MUST explicitly state this.***\n\
+- If after a few attempts you cannot read the file (file not found, lines too long for Read's offset/limit, no shell access), STOP retrying. Summarize what you were able to read, explicitly state which portion you could not read and why, and proceed.\n";
+        assert_eq!(s, expected);
+    }
+
+    #[test]
+    fn compute_line_stats_matches_ts_split() {
+        // No trailing newline → all lines counted.
+        let ls = compute_line_stats("a\nbb\nccc");
+        assert_eq!((ls.count, ls.max_len), (3, 3));
+        // A single trailing newline is dropped (TS `S.at(-1)===""` pop).
+        let ls = compute_line_stats("a\nbb\nccc\n");
+        assert_eq!((ls.count, ls.max_len), (3, 3));
+        // A single line (no newline) → count 1.
+        let ls = compute_line_stats("abcd");
+        assert_eq!((ls.count, ls.max_len), (1, 4));
+        // Empty string → `"".split("\n")` is `[""]` → count 1, maxLen 0.
+        let ls = compute_line_stats("");
+        assert_eq!((ls.count, ls.max_len), (1, 0));
+        // Two trailing newlines: only ONE empty element is popped.
+        let ls = compute_line_stats("x\n\n");
+        assert_eq!((ls.count, ls.max_len), (2, 1));
     }
 
     #[test]

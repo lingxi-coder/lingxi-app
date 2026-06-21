@@ -230,6 +230,36 @@ fn encode_request_maps_image_and_tool_result_blocks() {
 }
 
 #[test]
+fn encode_request_passes_tool_result_content_block_array_verbatim() {
+    // An MCP result whose `output` is a content-block ARRAY (e.g. text + image)
+    // is sent VERBATIM as the Anthropic `tool_result.content` — claude-code
+    // passes the MCP content array directly (images stay viewable), NOT
+    // stringified. (An object output, above, still stringifies.)
+    let codec = AnthropicMessagesCodec::new("https://api.anthropic.com", "2023-06-01");
+    let mut request = LlmRequest::new("claude-sonnet-4-20250514");
+    request.messages.push(Message {
+        role: "user".to_string(),
+        content: vec![ContentBlock::ToolResult {
+            tool_call_id: "tool-1".to_string(),
+            output: serde_json::json!([
+                { "type": "text", "text": "see image:" },
+                { "type": "image", "source": { "type": "base64", "media_type": "image/png", "data": "AQID" } },
+            ]),
+            is_error: false,
+            cache_control: None,
+            cache_reference: None,
+        }],
+    });
+    let req = codec.encode_request(&request).unwrap();
+    let content = &req.body_json["messages"][0]["content"][0]["content"];
+    assert!(content.is_array(), "array output must stay an array, got {content:?}");
+    assert_eq!(content[0]["type"], "text");
+    assert_eq!(content[0]["text"], "see image:");
+    assert_eq!(content[1]["type"], "image");
+    assert_eq!(content[1]["source"]["data"], "AQID");
+}
+
+#[test]
 fn encode_request_emits_cache_edits_and_cache_reference() {
     // 1P experimental cache-editing wire shape (claude.ts:3052-3055, 3201-3203):
     // a tool_result carrying cache_reference + a cache_edits delete block.

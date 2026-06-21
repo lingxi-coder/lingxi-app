@@ -357,9 +357,14 @@ fn convert_content_block(
             content,
             is_error,
             provider_tool_use_id,
+            content_blocks,
         } => Ok(llm_client::ContentBlock::ToolResult {
             tool_call_id: provider_tool_use_id.unwrap_or_else(|| tool_use_id.to_string()),
-            output: serde_json::Value::String(content),
+            // A structured content-block array (e.g. MCP image/resource) rides
+            // as the `Value::Array` output and is emitted verbatim; plain text
+            // stays a `Value::String`.
+            output: content_blocks
+                .map_or_else(|| serde_json::Value::String(content), serde_json::Value::Array),
             is_error,
             cache_control: None,
             cache_reference: None,

@@ -278,6 +278,7 @@ impl Microcompactor {
                                 content,
                                 is_error,
                                 provider_tool_use_id,
+                                ..
                             } = &b
                             {
                                 if clear_set.contains(tool_use_id)
@@ -289,6 +290,7 @@ impl Microcompactor {
                                         is_error: *is_error,
                                         // Preserve the provider id through content clearing.
                                         provider_tool_use_id: provider_tool_use_id.clone(),
+                                        content_blocks: None,
                                     };
                                 }
                             }
@@ -350,6 +352,7 @@ mod tests {
                 content: content.into(),
                 is_error: false,
                 provider_tool_use_id: None,
+                content_blocks: None,
             }],
             is_meta: false,
         }

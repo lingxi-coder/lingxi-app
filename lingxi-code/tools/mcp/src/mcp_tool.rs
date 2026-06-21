@@ -723,15 +723,19 @@ impl Tool for MCPTool {
                     "is_error": dto.is_error,
                 });
                 // Model-facing render: claude-code passes the MCP result content
-                // DIRECTLY as the `tool_result` content (`MCPTool.ts:70-76`). When
-                // `content` is an all-text block array, surface the joined text as
-                // `model_content` so the model sees the result — NOT a JSON dump of
-                // the `{server_name,tool_name,content,is_error}` envelope (which is
-                // what `tool_result_to_model_text` emits for a non-string
-                // `content`). A bare-string `content` is already model-faithful; an
-                // image/resource-bearing array is left untouched (carrying those
-                // blocks faithfully needs `ToolResult.content` to accept a
-                // content-block array — a protocol change, deferred).
+                // DIRECTLY as the `tool_result` content (`MCPTool.ts:70-76`).
+                // - `model_content_blocks`: when `content` is a block ARRAY, carry
+                //   it so the egress sends the array VERBATIM (the model-faithful
+                //   wire form — text blocks stay separate, images/resources stay
+                //   structured; threaded via `ContentBlock::ToolResult.content_blocks`
+                //   → the codec `normalize_tool_result_content`).
+                // - `model_content`: the joined text — the TUI/display + fallback
+                //   form (used by the status surfaces and when there are no blocks).
+                // A bare-string `content` (or a large-output file replacement) has
+                // neither — it is already model-faithful as the plain `content`.
+                if data["content"].is_array() {
+                    data["model_content_blocks"] = data["content"].clone();
+                }
                 if let Some(text) = mcp_all_text_content_to_string(&data["content"]) {
                     data["model_content"] = Value::String(text);
                 }

@@ -373,6 +373,11 @@ fn encode_tool_choice(tool_choice: &crate::ToolChoice) -> Value {
 fn normalize_tool_result_content(output: &Value) -> Value {
     match output {
         Value::String(text) => Value::String(text.clone()),
+        // A content-block ARRAY (e.g. an MCP result with image / resource blocks)
+        // is sent VERBATIM as the Anthropic `tool_result.content` — claude-code
+        // passes the MCP content array directly (text blocks stay separate,
+        // images stay viewable). Other non-string shapes are stringified.
+        arr @ Value::Array(_) => arr.clone(),
         other => Value::String(other.to_string()),
     }
 }

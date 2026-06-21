@@ -796,6 +796,7 @@ async fn run_subagent_loop(
                         ),
                         is_error: true,
                         provider_tool_use_id: provider_id.clone(),
+                        content_blocks: None,
                     });
                     continue;
                 }
@@ -823,6 +824,7 @@ async fn run_subagent_loop(
                             content,
                             is_error: false,
                             provider_tool_use_id: provider_id.clone(),
+                            content_blocks: None,
                         });
                     }
                     Err(e) => {
@@ -836,6 +838,7 @@ async fn run_subagent_loop(
                             content: format!("Error: {}", e.model_facing_message()),
                             is_error: true,
                             provider_tool_use_id: provider_id.clone(),
+                            content_blocks: None,
                         });
                     }
                 }

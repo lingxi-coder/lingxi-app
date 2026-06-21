@@ -336,6 +336,7 @@ pub fn ensure_tool_result_pairing(
                 content: SYNTH.to_string(),
                 is_error: true,
                 provider_tool_use_id: None,
+                content_blocks: None,
             })
             .collect();
 
@@ -448,11 +449,15 @@ fn convert_block(block: ProtoBlock) -> Result<LlmBlock, LlmError> {
             content,
             is_error,
             provider_tool_use_id,
+            content_blocks,
         } => Ok(LlmBlock::ToolResult {
             // Must echo the same canonical id the paired `tool_use` carried so the
             // provider pairs them; `provider_tool_use_id` is vestigial/always None.
             tool_call_id: provider_tool_use_id.unwrap_or_else(|| tool_use_id.to_string()),
-            output: Value::String(content),
+            // A structured content-block array (MCP image/resource) rides as the
+            // `Value::Array` output (emitted verbatim); plain text stays a String.
+            output: content_blocks
+                .map_or_else(|| Value::String(content), Value::Array),
             is_error,
             cache_control: None,
             cache_reference: None,
@@ -629,6 +634,7 @@ mod tests {
                 content: "file content".to_string(),
                 is_error: false,
                 provider_tool_use_id: None,
+                content_blocks: None,
             }],
             is_meta: false,
         };
@@ -650,6 +656,7 @@ mod tests {
                 content: "file content".to_string(),
                 is_error: false,
                 provider_tool_use_id: None,
+                content_blocks: None,
             }],
             is_meta: false,
         };
@@ -670,6 +677,7 @@ mod tests {
                 content: "boom".to_string(),
                 is_error: true,
                 provider_tool_use_id: None,
+                content_blocks: None,
             }],
             is_meta: false,
         };
@@ -1083,6 +1091,7 @@ mod tests {
             content: content.to_string(),
             is_error: false,
             provider_tool_use_id: None,
+            content_blocks: None,
         }
     }
 
@@ -1232,6 +1241,7 @@ mod tests {
             content: "ok".into(),
             is_error: false,
             provider_tool_use_id: None,
+            content_blocks: None,
         }
     }
     fn asst_blocks(blocks: Vec<ProtoBlock>) -> ConversationMessage {

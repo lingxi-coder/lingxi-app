@@ -56,6 +56,7 @@ pub(crate) fn synthetic_error_block(
         content,
         is_error: true,
         provider_tool_use_id: None,
+        content_blocks: None,
     }
 }
 
@@ -472,6 +473,7 @@ impl<'a> StreamingToolExecutor<'a> {
                     content: format!("<tool_use_error>Error calling tool ({name}): {e}</tool_use_error>"),
                     is_error: true,
                     provider_tool_use_id: self.tools[i].provider_id.clone(),
+                    content_blocks: None,
                 });
                 self.tools[i].status = ToolStatus::Completed;
             }
@@ -635,6 +637,7 @@ pub(crate) fn synthetic_unknown_tool(
         ),
         is_error: true,
         provider_tool_use_id: provider_id,
+        content_blocks: None,
     }
 }
 
@@ -1287,12 +1290,14 @@ mod tests {
             content: "done".into(),
             is_error: false,
             provider_tool_use_id: None,
+            content_blocks: None,
         };
         let result_block2 = ContentBlock::ToolResult {
             tool_use_id: id2.clone(),
             content: "also done".into(),
             is_error: false,
             provider_tool_use_id: None,
+            content_blocks: None,
         };
 
         exec.tools.push(TrackedTool {
@@ -1378,6 +1383,7 @@ mod tests {
                 content: "done".into(),
                 is_error: false,
                 provider_tool_use_id: None,
+                content_blocks: None,
             }),
             injected: Vec::new(),
             modifiers: Vec::new(),

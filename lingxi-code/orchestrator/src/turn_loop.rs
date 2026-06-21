@@ -1532,6 +1532,7 @@ pub(crate) async fn dispatch_tool_uses_tracked(
                 content: format!("<tool_use_error>InputValidationError: {detail}</tool_use_error>"),
                 is_error: true,
                 provider_tool_use_id: provider_id.clone(),
+                content_blocks: None,
             };
             orch.output
                 .emit_tool_result(
@@ -1607,6 +1608,7 @@ pub(crate) async fn dispatch_tool_uses_tracked(
                 content: format!("<tool_use_error>{msg}</tool_use_error>"),
                 is_error: true,
                 provider_tool_use_id: provider_id.clone(),
+                content_blocks: None,
             };
             orch.output
                 .emit_tool_result(
@@ -1851,6 +1853,7 @@ pub(crate) async fn dispatch_tool_uses_tracked(
                 content: format!("Hook blocked: {reason}"),
                 is_error: true,
                 provider_tool_use_id: provider_id.clone(),
+                content_blocks: None,
             };
             orch.output
                 .emit_tool_result(
@@ -2078,6 +2081,7 @@ pub(crate) async fn dispatch_tool_uses_tracked(
                     content: reason.clone(),
                     is_error: true,
                     provider_tool_use_id: provider_id.clone(),
+                    content_blocks: None,
                 };
                 orch.output
                     .emit_tool_result(
@@ -2559,11 +2563,25 @@ pub(crate) async fn dispatch_tool_uses_tracked(
             );
         }
 
+        // MCP results carry a content-block array (`model_content_blocks`) so the
+        // egress can send it VERBATIM as `tool_result.content` (claude-code passes
+        // the MCP content array directly — images/resources stay structured). A
+        // hook-mutated result (output replaced or additionalContext appended)
+        // drops to the text-only `final_content`.
+        let content_blocks = if mutated {
+            None
+        } else {
+            emit_payload
+                .get("model_content_blocks")
+                .and_then(serde_json::Value::as_array)
+                .cloned()
+        };
         results.push(ContentBlock::ToolResult {
             tool_use_id: tool_use_id.clone(),
             content: final_content,
             is_error,
             provider_tool_use_id: provider_id.clone(),
+            content_blocks,
         });
 
         // #39 PostToolBatch: record this resolved tool's call for the once-per-

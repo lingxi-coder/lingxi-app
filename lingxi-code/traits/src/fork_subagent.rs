@@ -213,6 +213,7 @@ pub fn build_forked_messages(
             content: FORK_PLACEHOLDER_RESULT.to_string(),
             is_error: false,
             provider_tool_use_id: (*provider_id).clone(),
+            content_blocks: None,
         });
     }
     content.push(ContentBlock::Text {

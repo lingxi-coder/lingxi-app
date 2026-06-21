@@ -57,6 +57,7 @@ fn resumed_session_seeds_messages_in_order_with_tool_grouping() {
                 content: "contents".into(),
                 is_error: false,
                 provider_tool_use_id: None,
+                content_blocks: None,
             }],
             is_meta: false,
         },

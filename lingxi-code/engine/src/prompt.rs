@@ -58,12 +58,19 @@ fn content_blocks_to_api(blocks: &[protocol::ContentBlock]) -> Value {
                 content,
                 is_error,
                 provider_tool_use_id,
+                content_blocks,
             } => {
                 let wire_id = provider_tool_use_id
                     .clone()
                     .map_or_else(|| json!(tool_use_id), Value::String);
+                // claude-code passes a structured content-block array VERBATIM as
+                // `tool_result.content` (`mapToolResultToToolResultBlockParam`);
+                // fall back to the stringified text when absent.
+                let wire_content = content_blocks
+                    .as_ref()
+                    .map_or_else(|| json!(content), |b| json!(b));
                 json!({"type": "tool_result", "tool_use_id": wire_id,
-                       "content": content, "is_error": is_error})
+                       "content": wire_content, "is_error": is_error})
             }
             ContentBlock::Thinking {
                 thinking,

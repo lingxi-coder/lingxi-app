@@ -49,7 +49,8 @@ pub enum ContentBlock {
     ToolResult {
         /// ID of the `ToolUse` this result belongs to.
         tool_use_id: ToolUseId,
-        /// Stringified output payload.
+        /// Stringified output payload (the model-facing TEXT / display form, and
+        /// the egress `tool_result.content` when [`content_blocks`] is `None`).
         content: String,
         /// Whether the tool reported failure.
         is_error: bool,
@@ -59,6 +60,16 @@ pub enum ContentBlock {
         /// `None` when the paired call had no provider id (internally minted).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         provider_tool_use_id: Option<String>,
+        /// Model-facing content-BLOCK array, when the tool result is a structured
+        /// content array rather than plain text (e.g. an MCP result with image /
+        /// resource blocks). When `Some`, the egress sends this array VERBATIM as
+        /// the `tool_result.content` (claude-code `mapToolResultToToolResultBlockParam`
+        /// passes the MCP `content` array directly — text blocks stay separate,
+        /// images stay viewable); when `None`, the egress falls back to the
+        /// stringified [`content`]. Every non-MCP tool leaves this `None`, so its
+        /// wire form is unchanged.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        content_blocks: Option<Vec<serde_json::Value>>,
     },
     /// Extended-thinking reasoning trace.
     Thinking {
@@ -577,6 +588,7 @@ mod tests {
             content: "ok".into(),
             is_error: false,
             provider_tool_use_id: None,
+            content_blocks: None,
         };
         let v = serde_json::to_value(&none_block).unwrap();
         assert!(v.get("provider_tool_use_id").is_none());
@@ -586,6 +598,7 @@ mod tests {
             content: "ok".into(),
             is_error: false,
             provider_tool_use_id: Some("toolu_01ABC".into()),
+            content_blocks: None,
         };
         let v = serde_json::to_value(&some_block).unwrap();
         assert_eq!(
@@ -618,6 +631,7 @@ mod tests {
             content: "ok".into(),
             is_error: false,
             provider_tool_use_id: None,
+            content_blocks: None,
         };
         let v = serde_json::to_value(&block).unwrap();
         assert_eq!(

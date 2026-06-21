@@ -315,6 +315,7 @@ mod tests {
                     content: "edited".into(),
                     is_error: false,
                     provider_tool_use_id: None,
+                    content_blocks: None,
                 }],
                 is_meta: false,
             },
@@ -362,6 +363,7 @@ mod tests {
                 content: "stdout".into(),
                 is_error: false,
                 provider_tool_use_id: None,
+                content_blocks: None,
             }],
             is_meta: false,
         }];

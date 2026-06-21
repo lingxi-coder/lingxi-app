@@ -1864,25 +1864,46 @@ impl StreamingApiClient for ProviderApiAdapter {
 /// (apiLimits.ts:94).
 const MAX_MEDIA_PER_REQUEST: usize = 100;
 
-/// Count media (image/document) content blocks across all messages.
+/// True when a nested `tool_result.content` block (a raw JSON value, e.g. an MCP
+/// image/resource result) is a media item — `type === "image" || "document"`,
+/// matching claude-code `isMedia` (`claude.ts:943`).
+fn is_media_value(v: &serde_json::Value) -> bool {
+    matches!(
+        v.get("type").and_then(serde_json::Value::as_str),
+        Some("image") | Some("document")
+    )
+}
+
+/// Count media (image/document) content blocks across all messages, INCLUDING
+/// media NESTED inside `tool_result.content` (the `content_blocks` array MCP
+/// image/resource results populate). 1:1 with claude-code `stripExcessMediaItems`
+/// counting (`claude.ts:961-971`) — top-level media that ignored the nested
+/// channel let an MCP-image-heavy transcript silently exceed the API media cap.
 fn count_media(msgs: &[ConversationMessage]) -> usize {
     msgs.iter()
         .map(|m| match m {
             ConversationMessage::User { content, .. }
             | ConversationMessage::Assistant { content, .. } => content
                 .iter()
-                .filter(|b| {
-                    matches!(b, ContentBlock::Image { .. })
-                        || matches!(b, ContentBlock::Document { .. })
+                .map(|b| match b {
+                    ContentBlock::Image { .. } | ContentBlock::Document { .. } => 1,
+                    ContentBlock::ToolResult {
+                        content_blocks: Some(blocks),
+                        ..
+                    } => blocks.iter().filter(|v| is_media_value(v)).count(),
+                    _ => 0,
                 })
-                .count(),
+                .sum::<usize>(),
             ConversationMessage::System { .. } => 0,
         })
         .sum()
 }
 
 /// Return `msgs` with the OLDEST media items stripped until at most `limit`
-/// remain.
+/// remain. 1:1 with claude-code `stripExcessMediaItems` (`claude.ts:975-1014`):
+/// for each message (oldest-first), strip media NESTED in `tool_result.content`
+/// FIRST (the `.map`, `:982-999`), then TOP-LEVEL media (the `.filter`,
+/// `:1000-1006`).
 fn strip_excess_media(
     mut msgs: Vec<ConversationMessage>,
     limit: usize,
@@ -1901,6 +1922,27 @@ fn strip_excess_media(
             | ConversationMessage::Assistant { content, .. } => content,
             ConversationMessage::System { .. } => continue,
         };
+        // (1) Nested-in-tool_result media first (claude-code `.map`).
+        for block in content.iter_mut() {
+            if to_remove == 0 {
+                break;
+            }
+            if let ContentBlock::ToolResult {
+                content_blocks: Some(blocks),
+                ..
+            } = block
+            {
+                blocks.retain(|v| {
+                    if to_remove > 0 && is_media_value(v) {
+                        to_remove -= 1;
+                        false
+                    } else {
+                        true
+                    }
+                });
+            }
+        }
+        // (2) Top-level media (claude-code `.filter`).
         content.retain(|b| {
             if to_remove > 0
                 && (matches!(b, ContentBlock::Image { .. })
@@ -3161,6 +3203,62 @@ mod tests {
             is_meta: false,
         }];
         assert_eq!(count_media(&msgs), 1);
+    }
+
+    #[test]
+    fn count_media_includes_nested_tool_result_media() {
+        // An MCP image result populates `content_blocks` with `{"type":"image"}`
+        // values; these MUST count toward the media cap (claude.ts:965-969), or an
+        // image-heavy MCP transcript silently exceeds the API limit and 400s.
+        let msgs = vec![ConversationMessage::User {
+            id: protocol::MessageId::new(),
+            content: vec![ContentBlock::ToolResult {
+                tool_use_id: protocol::ToolUseId::new(),
+                content: "see images".to_string(),
+                is_error: false,
+                provider_tool_use_id: None,
+                content_blocks: Some(vec![
+                    serde_json::json!({"type": "text", "text": "x"}),
+                    serde_json::json!({"type": "image", "source": {"data": "AAA"}}),
+                    serde_json::json!({"type": "image", "source": {"data": "BBB"}}),
+                ]),
+            }],
+            is_meta: false,
+        }];
+        assert_eq!(count_media(&msgs), 2, "two nested image blocks must count");
+    }
+
+    #[test]
+    fn strip_excess_media_strips_nested_tool_result_media() {
+        // Over the cap, nested tool_result media is stripped oldest-first
+        // (claude.ts:982-999), leaving the text + the most-recent nested image.
+        let msgs = vec![ConversationMessage::User {
+            id: protocol::MessageId::new(),
+            content: vec![ContentBlock::ToolResult {
+                tool_use_id: protocol::ToolUseId::new(),
+                content: "imgs".to_string(),
+                is_error: false,
+                provider_tool_use_id: None,
+                content_blocks: Some(vec![
+                    serde_json::json!({"type": "image", "source": {"data": "a"}}),
+                    serde_json::json!({"type": "image", "source": {"data": "b"}}),
+                    serde_json::json!({"type": "image", "source": {"data": "c"}}),
+                    serde_json::json!({"type": "text", "text": "keep"}),
+                ]),
+            }],
+            is_meta: false,
+        }];
+        let stripped = strip_excess_media(msgs, 1);
+        assert_eq!(count_media(&stripped), 1, "nested media trimmed to the limit");
+        // The text block and the newest image survive.
+        let ConversationMessage::User { content, .. } = &stripped[0] else {
+            panic!("user message");
+        };
+        let ContentBlock::ToolResult { content_blocks: Some(blocks), .. } = &content[0] else {
+            panic!("tool_result with content_blocks");
+        };
+        assert_eq!(blocks.len(), 2, "one image + the text remain; got {blocks:?}");
+        assert!(blocks.iter().any(|v| v.get("type").and_then(|t| t.as_str()) == Some("text")));
     }
 
     #[test]

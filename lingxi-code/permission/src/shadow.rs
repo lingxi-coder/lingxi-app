@@ -91,7 +91,7 @@ pub fn is_shared_setting_source(source: PermissionRuleSource) -> bool {
 /// `getSettingSourceDisplayNameLowercase` (`settings/constants.ts:72`).
 /// Strings are byte-locked to claude-code.
 #[must_use]
-fn format_source(source: PermissionRuleSource) -> &'static str {
+pub(crate) fn format_source(source: PermissionRuleSource) -> &'static str {
     match source {
         PermissionRuleSource::UserSettings => "user settings",
         PermissionRuleSource::ProjectSettings => "shared project settings",

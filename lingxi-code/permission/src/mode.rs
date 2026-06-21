@@ -42,6 +42,22 @@ impl PermissionMode {
     pub fn is_external(self) -> bool {
         !matches!(self, Self::Bubble | Self::Auto)
     }
+
+    /// The human-facing mode title shown in permission prompts, 1:1 with
+    /// claude-code's `permissionModeTitle` → `getModeConfig(mode).title`
+    /// (`PermissionMode.ts:46-83`). `Bubble` has no claude-code config entry
+    /// (internal-only, never user-displayed) and falls back to `Default`.
+    #[must_use]
+    pub(crate) fn title(self) -> &'static str {
+        match self {
+            Self::Default | Self::Bubble => "Default",
+            Self::Plan => "Plan Mode",
+            Self::AcceptEdits => "Accept edits",
+            Self::BypassPermissions => "Bypass Permissions",
+            Self::DontAsk => "Don't Ask",
+            Self::Auto => "Auto mode",
+        }
+    }
 }
 
 /// The next mode in the Shift+Tab UI cycle (claude-code `fJn`, binary v2.1.183

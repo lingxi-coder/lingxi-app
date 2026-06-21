@@ -1370,7 +1370,14 @@ fn ask_with_rule(rule: &PermissionRule, tool_name: &str) -> PermissionResult {
         reason: PermissionDecisionReason::MatchedRule { rule: rule.clone() },
         prompt: PermissionPrompt {
             title: format!("Allow {tool_name}?"),
-            message: "The agent wants to use this tool (matched an ask rule).".into(),
+            // `createPermissionRequestMessage` rule branch (permissions.ts:163):
+            // `Permission rule '${rule}' from ${source} requires approval for
+            // this ${tool} command`.
+            message: format!(
+                "Permission rule '{}' from {} requires approval for this {tool_name} command",
+                rule.value.to_rule_string(),
+                crate::shadow::format_source(rule.source)
+            ),
             options: vec!["Allow once".into(), "Always allow".into(), "Deny".into()],
         },
         pending_classifier_check: None,
@@ -1383,7 +1390,13 @@ fn ask_with_mode(mode: PermissionMode, tool_name: &str) -> PermissionResult {
         reason: PermissionDecisionReason::PermissionMode { mode },
         prompt: PermissionPrompt {
             title: format!("Allow {tool_name}?"),
-            message: "The agent wants to use this tool.".into(),
+            // `createPermissionRequestMessage` mode branch (permissions.ts:200):
+            // `Current permission mode (${modeTitle}) requires approval for this
+            // ${tool} command`.
+            message: format!(
+                "Current permission mode ({}) requires approval for this {tool_name} command",
+                mode.title()
+            ),
             options: vec!["Allow once".into(), "Always allow".into(), "Deny".into()],
         },
         pending_classifier_check: None,
@@ -2510,6 +2523,39 @@ mod tests {
 
     fn allow_count(p: &PermissionPolicy) -> usize {
         p.allow_rules.values().flatten().count()
+    }
+
+    #[test]
+    fn ask_messages_are_byte_faithful() {
+        // Rule ask ⇒ createPermissionRequestMessage rule branch (permissions.ts:163).
+        let rule = PermissionRule {
+            value: PermissionRuleValue {
+                tool_name: "Bash".into(),
+                rule_content: Some("rm:*".into()),
+            },
+            behavior: PermissionBehavior::Ask,
+            source: PermissionRuleSource::ProjectSettings,
+        };
+        match ask_with_rule(&rule, "Bash") {
+            PermissionResult::Ask { prompt, .. } => assert_eq!(
+                prompt.message,
+                "Permission rule 'Bash(rm:*)' from shared project settings requires approval for this Bash command"
+            ),
+            _ => panic!("expected Ask"),
+        }
+        // Mode ask ⇒ mode branch (permissions.ts:200) with the Plan Mode title.
+        match ask_with_mode(PermissionMode::Plan, "Edit") {
+            PermissionResult::Ask { prompt, .. } => assert_eq!(
+                prompt.message,
+                "Current permission mode (Plan Mode) requires approval for this Edit command"
+            ),
+            _ => panic!("expected Ask"),
+        }
+        // Mode titles byte-locked to getModeConfig (PermissionMode.ts:46-74).
+        assert_eq!(PermissionMode::Default.title(), "Default");
+        assert_eq!(PermissionMode::AcceptEdits.title(), "Accept edits");
+        assert_eq!(PermissionMode::BypassPermissions.title(), "Bypass Permissions");
+        assert_eq!(PermissionMode::DontAsk.title(), "Don't Ask");
     }
 
     fn seeded_policy(mode: PermissionMode) -> PermissionPolicy {

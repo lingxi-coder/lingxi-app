@@ -47,7 +47,9 @@
 //! `cwd = workspace`, so this sentence is currently ASPIRATIONAL until BASH.4
 //! lands the per-session cwd carry-over.
 
-use crate::bash::{BASH_DEFAULT_TIMEOUT_MS, BASH_MAX_TIMEOUT_MS};
+use crate::bash::{
+    bash_default_timeout_ms, bash_max_timeout_ms, BASH_DEFAULT_TIMEOUT_MS, BASH_MAX_TIMEOUT_MS,
+};
 use sandbox::runtime_config::SandboxRuntimeConfig;
 
 // ===== Wire tool-name literals (string literals, NOT cross-crate imports) ====
@@ -448,8 +450,8 @@ Important:
 /// `BuiltinToolContext::sandbox_runtime`.
 #[must_use]
 pub fn simple_prompt(sandbox: &SandboxRuntimeConfig) -> String {
-    let max_timeout_ms = BASH_MAX_TIMEOUT_MS;
-    let default_timeout_ms = BASH_DEFAULT_TIMEOUT_MS;
+    let max_timeout_ms = bash_max_timeout_ms();
+    let default_timeout_ms = bash_default_timeout_ms();
 
     let tool_preference_items = vec![
         Bullet::Item(format!("File search: Use {GLOB_TOOL_NAME} (NOT find or ls)")),
@@ -644,7 +646,8 @@ pub fn simple_prompt_concise(sandbox: &SandboxRuntimeConfig) -> String {
         format!("- IMPORTANT: Avoid using this tool to run {avoid_commands} commands, unless explicitly instructed or after you have verified that a dedicated tool cannot accomplish your task. Instead, use the appropriate dedicated tool as this will provide a much better experience for the user."),
         format!(
             "- `timeout` is in milliseconds: default {}, max {}.",
-            BASH_DEFAULT_TIMEOUT_MS, BASH_MAX_TIMEOUT_MS
+            bash_default_timeout_ms(),
+            bash_max_timeout_ms()
         ),
     ];
 

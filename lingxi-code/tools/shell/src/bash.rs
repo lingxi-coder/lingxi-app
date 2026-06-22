@@ -44,12 +44,53 @@ use tool_api::BuiltinToolContext;
 
 // ===== Locked constants =====================================================
 
-/// 2-minute default Bash timeout — claude-code lock.
+/// 2-minute default Bash timeout — the fallback when `BASH_DEFAULT_TIMEOUT_MS`
+/// is unset (see [`bash_default_timeout_ms`]).
 pub const BASH_DEFAULT_TIMEOUT_MS: u64 = 120_000;
-/// 10-minute maximum Bash timeout — claude-code lock.
+/// 10-minute default maximum Bash timeout — the fallback floor when
+/// `BASH_MAX_TIMEOUT_MS` is unset (see [`bash_max_timeout_ms`]).
 pub const BASH_MAX_TIMEOUT_MS: u64 = 600_000;
 /// Byte-locked timeout error template. `{N}` is substituted at call time.
 pub const BASH_TIMEOUT_ERROR_TEMPLATE: &str = "Bash command timed out after {N}ms";
+
+/// claude-code `s0e()` — the effective default Bash timeout. Reads
+/// `BASH_DEFAULT_TIMEOUT_MS` via [`resolve_default_timeout_ms`].
+#[must_use]
+pub fn bash_default_timeout_ms() -> u64 {
+    resolve_default_timeout_ms(std::env::var("BASH_DEFAULT_TIMEOUT_MS").ok().as_deref())
+}
+
+/// Pure resolver for `s0e()`: `parseInt(raw,10)` used iff `> 0`, else
+/// [`BASH_DEFAULT_TIMEOUT_MS`] (120000).
+#[must_use]
+pub fn resolve_default_timeout_ms(raw: Option<&str>) -> u64 {
+    raw.and_then(parse_int_js)
+        .filter(|&n| n > 0)
+        .map(|n| n as u64)
+        .unwrap_or(BASH_DEFAULT_TIMEOUT_MS)
+}
+
+/// claude-code `j3n()` — the effective maximum Bash timeout (advisory; shown in
+/// the schema `describe` text and the system prompt). Reads `BASH_MAX_TIMEOUT_MS`
+/// via [`resolve_max_timeout_ms`].
+#[must_use]
+pub fn bash_max_timeout_ms() -> u64 {
+    resolve_max_timeout_ms(
+        std::env::var("BASH_MAX_TIMEOUT_MS").ok().as_deref(),
+        bash_default_timeout_ms(),
+    )
+}
+
+/// Pure resolver for `j3n()`: `parseInt(raw,10)` when `> 0` → `max(n, default)`;
+/// otherwise `max(`[`BASH_MAX_TIMEOUT_MS`]` (600000), default)`. The floor
+/// against `default` mirrors the binary's `Math.max(_, s0e(env))`.
+#[must_use]
+pub fn resolve_max_timeout_ms(raw: Option<&str>, default: u64) -> u64 {
+    raw.and_then(parse_int_js)
+        .filter(|&n| n > 0)
+        .map(|n| (n as u64).max(default))
+        .unwrap_or_else(|| BASH_MAX_TIMEOUT_MS.max(default))
+}
 /// Linux/WSL shell path.
 pub const BASH_SHELL_LINUX: &str = "/bin/bash";
 /// macOS shell path.
@@ -207,7 +248,7 @@ pub fn resolve_timeout_ms(input: &Value) -> u64 {
     };
     match as_num {
         Some(n) if n > 0.0 => n as u64,
-        _ => BASH_DEFAULT_TIMEOUT_MS,
+        _ => bash_default_timeout_ms(),
     }
 }
 
@@ -792,11 +833,12 @@ static INPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
             // claude-code `BashTool.tsx:229` names this param `timeout`
             // (milliseconds). A model sending `timeout` must be honored.
             // claude-code: `VF(E.number().optional()).describe(...)` — NO `.max()`
-            // (the "(max 600000)" is advisory describe text only). #4.
+            // (the "(max …)" is advisory describe text only). The max is the
+            // dynamic `Wdt()`=`j3n()` value, env-overridable via BASH_MAX_TIMEOUT_MS.
             "timeout":           {
                 "type": "integer",
                 "minimum": 1,
-                "description": "Optional timeout in milliseconds (max 600000)"
+                "description": format!("Optional timeout in milliseconds (max {})", bash_max_timeout_ms())
             },
             "run_in_background": { "type": "boolean", "description": "Set to true to run this command in the background." },
             "description":       { "type": "string", "description": "Clear, concise description of what this command does in active voice. Never use words like \"complex\" or \"risk\" in the description - just describe what it does.\n\nFor simple commands (git, npm, standard CLI tools), keep it brief (5-10 words):\n- ls → \"List files in current directory\"\n- git status → \"Show working tree status\"\n- npm install → \"Install package dependencies\"\n\nFor commands that are harder to parse at a glance (piped commands, obscure flags, etc.), add enough context to clarify what it does:\n- find . -name \"*.tmp\" -exec rm {} \\; → \"Find and delete all .tmp files recursively\"\n- git reset --hard origin/main → \"Discard all local changes and match remote main\"\n- curl -s url | jq '.data[]' → \"Fetch JSON from URL and extract data array elements\"" },
@@ -1978,6 +2020,26 @@ mod tests {
         // Non-matches.
         assert_eq!(detect_blocked_sleep_pattern("sleeper foo"), None);
         assert_eq!(detect_blocked_sleep_pattern("echo hi"), None);
+    }
+
+    #[test]
+    fn timeout_env_resolvers_s0e_j3n() {
+        // s0e(): unset / invalid / non-positive → 120000; positive → that value.
+        assert_eq!(resolve_default_timeout_ms(None), 120_000);
+        assert_eq!(resolve_default_timeout_ms(Some("")), 120_000);
+        assert_eq!(resolve_default_timeout_ms(Some("abc")), 120_000);
+        assert_eq!(resolve_default_timeout_ms(Some("0")), 120_000);
+        assert_eq!(resolve_default_timeout_ms(Some("-5")), 120_000);
+        assert_eq!(resolve_default_timeout_ms(Some("300000")), 300_000);
+        assert_eq!(resolve_default_timeout_ms(Some("90000")), 90_000);
+        // j3n(): unset → max(600000, default); positive → max(n, default).
+        assert_eq!(resolve_max_timeout_ms(None, 120_000), 600_000);
+        // A custom default above 600000 raises the floor (Math.max(_, s0e)).
+        assert_eq!(resolve_max_timeout_ms(None, 900_000), 900_000);
+        assert_eq!(resolve_max_timeout_ms(Some("1200000"), 120_000), 1_200_000);
+        // A max BELOW the default is floored up to the default.
+        assert_eq!(resolve_max_timeout_ms(Some("50000"), 120_000), 120_000);
+        assert_eq!(resolve_max_timeout_ms(Some("bad"), 120_000), 600_000);
     }
 
     #[test]

@@ -228,6 +228,12 @@ pub fn expand_memory_file<S: std::hash::BuildHasher>(
     }];
 
     for inc in parsed.include_paths {
+        // claude-code `pwd` parse gate (binary @197189020): skip an `@import`
+        // whose extension is non-empty and NOT in the text-file allowlist
+        // ("Skipping non-text file in @include"). Files with no extension pass.
+        if !is_text_include_extension(&inc) {
+            continue;
+        }
         let is_external = !path_in_working_path(&inc, cwd);
         if is_external && !include_external {
             continue;
@@ -243,6 +249,37 @@ pub fn expand_memory_file<S: std::hash::BuildHasher>(
     }
 
     result
+}
+
+/// claude-code text-file extension allowlist (binary `cwd` Set @197189020). An
+/// `@import` whose extension is non-empty and NOT in this set is skipped. Lookup
+/// is case-insensitive (the binary lowercases `path.extname()` before the
+/// `.has` check), so entries are stored lowercased without the leading dot.
+/// A file with no extension (incl. dotfiles like `.env`, whose Node `extname`
+/// is `""`) is allowed.
+const TEXT_INCLUDE_EXTENSIONS: &[&str] = &[
+    "md", "txt", "text", "json", "yaml", "yml", "toml", "xml", "csv", "html", "htm", "css", "scss",
+    "sass", "less", "js", "ts", "tsx", "jsx", "mjs", "cjs", "mts", "cts", "py", "pyi", "pyw", "rb",
+    "erb", "rake", "go", "rs", "java", "kt", "kts", "scala", "c", "cpp", "cc", "cxx", "h", "hpp",
+    "hxx", "cs", "swift", "sh", "bash", "zsh", "fish", "ps1", "bat", "cmd", "env", "ini", "cfg",
+    "conf", "config", "properties", "sql", "graphql", "gql", "proto", "vue", "svelte", "astro",
+    "ejs", "hbs", "pug", "jade", "php", "pl", "pm", "lua", "r", "dart", "ex", "exs", "erl", "hrl",
+    "clj", "cljs", "cljc", "edn", "hs", "lhs", "elm", "ml", "mli", "f", "f90", "f95", "for",
+    "cmake", "make", "makefile", "gradle", "sbt", "rst", "adoc", "asciidoc", "org", "tex", "latex",
+    "lock", "log", "diff", "patch",
+];
+
+/// `true` if `path` may be expanded as an `@import` target per the binary's
+/// text-file gate. Matches Node `path.extname(t).toLowerCase()` semantics: a
+/// missing/empty extension passes; otherwise membership in
+/// [`TEXT_INCLUDE_EXTENSIONS`].
+#[must_use]
+fn is_text_include_extension(path: &Path) -> bool {
+    let Some(ext) = path.extension() else {
+        return true;
+    };
+    let ext = ext.to_string_lossy().to_ascii_lowercase();
+    ext.is_empty() || TEXT_INCLUDE_EXTENSIONS.contains(&ext.as_str())
 }
 
 /// Parse one memory file's raw content into its sanitised body and the set
@@ -814,6 +851,31 @@ mod tests {
     use super::*;
     use std::fs;
     use tempfile::TempDir;
+
+    #[test]
+    fn text_include_extension_gate_matches_binary() {
+        // In the allowlist (case-insensitive).
+        for p in ["a.md", "b.RS", "c.Json", "d.toml", "e.py", "notes.txt"] {
+            assert!(
+                is_text_include_extension(Path::new(p)),
+                "{p} should be a text include"
+            );
+        }
+        // No extension (incl. dotfiles whose Node extname is "") → allowed.
+        for p in ["Makefile", ".env", "README"] {
+            assert!(
+                is_text_include_extension(Path::new(p)),
+                "{p} (no extname) should pass"
+            );
+        }
+        // Non-text extensions → skipped.
+        for p in ["img.png", "blob.gz", "a.tar.gz", "doc.pdf", "lib.so", "x.bin"] {
+            assert!(
+                !is_text_include_extension(Path::new(p)),
+                "{p} should be skipped as non-text"
+            );
+        }
+    }
 
     #[test]
     fn loads_small_file_into_loadedfile() {

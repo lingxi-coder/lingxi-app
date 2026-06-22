@@ -52,6 +52,13 @@ pub struct RealMemoryHierarchyProvider;
 #[async_trait]
 impl MemoryHierarchyProvider for RealMemoryHierarchyProvider {
     async fn load(&self, cwd: &Path) -> Vec<MemoryFile> {
+        // CLAUDE_CODE_DISABLE_CLAUDE_MDS (binary `yOe` @208938221:
+        // `je.CLAUDE_CODE_DISABLE_CLAUDE_MDS ? [] : await Mv()`). A plain truthy
+        // env check — ANY non-empty value (incl. "0") disables all CLAUDE.md
+        // loading; safe-mode sets it to "1".
+        if std::env::var_os("CLAUDE_CODE_DISABLE_CLAUDE_MDS").is_some_and(|v| !v.is_empty()) {
+            return Vec::new();
+        }
         let Some(home) = dirs::home_dir() else {
             return Vec::new();
         };

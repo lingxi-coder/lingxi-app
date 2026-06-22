@@ -43,7 +43,9 @@ use crate::id::TaskType;
 use crate::output_manager::TaskOutputManager;
 use crate::state::TaskStatus;
 use crate::task_trait::{Task, TaskContext, TaskError, TaskHandle, TaskSpawnInput};
+use agent::{StreamingSubagentSpawner, SubagentEvent};
 use async_trait::async_trait;
+use protocol::AgentId;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -91,6 +93,15 @@ pub struct WorkerCancel {
 pub struct LocalAgentHandler {
     /// Allocates a subagent slot and pumps it to a terminal [`SubagentResult`].
     spawner: Arc<dyn SubagentSpawner>,
+    /// The persistent/resumable spawn seam (local_agent resume). When wired AND
+    /// the spawn is backgrounded, the agent runs PERSISTENT — it "comes to rest"
+    /// after each turn-set and can be resumed via [`Task::send_message`] —
+    /// instead of the one-shot `spawner`. Production passes the same
+    /// `PoolSubagentSpawner` (it impls both `SubagentSpawner` and this).
+    streaming_spawner: Option<Arc<dyn StreamingSubagentSpawner>>,
+    /// `task_id` → the resting agent's id, for `send_message` resume routing.
+    /// Populated for a live persistent agent; removed when it terminates.
+    agent_ids: Arc<Mutex<HashMap<String, AgentId>>>,
     /// Parent's tool invoker — passed through *unchanged* in
     /// [`SubagentInheritance`] (the recursion lock relies on `Arc::ptr_eq`).
     tool_invoker: Arc<dyn traits::ToolInvoker>,
@@ -130,6 +141,8 @@ impl LocalAgentHandler {
     ) -> Self {
         Self {
             spawner,
+            streaming_spawner: None,
+            agent_ids: Arc::new(Mutex::new(HashMap::new())),
             tool_invoker,
             budget,
             output_manager,
@@ -137,6 +150,18 @@ impl LocalAgentHandler {
             workers: Arc::new(Mutex::new(HashMap::new())),
             pending_kill: Arc::new(Mutex::new(HashMap::new())),
         }
+    }
+
+    /// Wire the persistent/resumable spawn seam (local_agent resume). When set,
+    /// a backgrounded spawn runs PERSISTENT (comes to rest + resumable) instead
+    /// of one-shot. Production passes the same `PoolSubagentSpawner`.
+    #[must_use]
+    pub fn with_streaming_spawner(
+        mut self,
+        streaming: Arc<dyn StreamingSubagentSpawner>,
+    ) -> Self {
+        self.streaming_spawner = Some(streaming);
+        self
     }
 
     /// Attach a [`TaskStatusSink`] so terminal transitions / token usage are
@@ -258,7 +283,85 @@ impl Task for LocalAgentHandler {
         let output_manager = self.output_manager.clone();
         let worker_spool_path = spool_path.clone();
         let worker_task_id = task_id.clone();
-        let worker = Box::pin(async move {
+        let streaming = self.streaming_spawner.clone();
+        let agent_ids = self.agent_ids.clone();
+        let worker: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> =
+            if is_backgrounded && streaming.is_some() {
+                // ── PERSISTENT / resumable path (local_agent "comes to rest"). ──
+                // The agent emits ONE Completed per turn-set, then the runner
+                // PARKS awaiting the next message (delivered by `send_message` →
+                // `StreamingSubagentSpawner::resume`). Each rest appends to the
+                // spool and KEEPS the task alive (status stays Running → not
+                // evicted). Terminal only on Failed / Killed / channel-close.
+                let streaming = streaming.expect("is_some checked");
+                Box::pin(async move {
+                    status_sink
+                        .set_status(&worker_task_id, TaskStatus::Running)
+                        .await;
+                    let (agent_id, mut rx) =
+                        match streaming.spawn_persistent(request, inherit).await {
+                            Ok(v) => v,
+                            Err(e) => {
+                                let _ = output_manager
+                                    .append(&worker_spool_path, &e.to_string())
+                                    .await;
+                                status_sink
+                                    .set_status(&worker_task_id, TaskStatus::Failed)
+                                    .await;
+                                workers.lock().await.remove(&worker_task_id);
+                                return;
+                            }
+                        };
+                    // Register the live agent id so `send_message` can resume it.
+                    agent_ids.lock().await.insert(worker_task_id.clone(), agent_id);
+                    loop {
+                        match rx.recv().await {
+                            Some(SubagentEvent::Completed { result, usage, .. }) => {
+                                let body = serde_json::to_string_pretty(&result)
+                                    .unwrap_or_else(|_| result.to_string());
+                                let bt = usage.billable_tokens;
+                                let total = bt
+                                    .input
+                                    .saturating_add(bt.cache_write)
+                                    .saturating_add(bt.cache_read)
+                                    .saturating_add(bt.output);
+                                let body = format!(
+                                    "{body}\n<usage><total_tokens>{total}</total_tokens></usage>\n"
+                                );
+                                let _ = output_manager.append(&worker_spool_path, &body).await;
+                                // Came to rest — alive, awaiting the next message.
+                                status_sink
+                                    .set_status(&worker_task_id, TaskStatus::Running)
+                                    .await;
+                            }
+                            Some(SubagentEvent::Failed { error, .. }) => {
+                                let _ = output_manager.append(&worker_spool_path, &error).await;
+                                status_sink
+                                    .set_status(&worker_task_id, TaskStatus::Failed)
+                                    .await;
+                                break;
+                            }
+                            Some(SubagentEvent::Killed { .. }) => {
+                                status_sink
+                                    .set_status(&worker_task_id, TaskStatus::Killed)
+                                    .await;
+                                break;
+                            }
+                            // Progress / Message: live streaming, not spooled here.
+                            Some(_) => {}
+                            None => {
+                                status_sink
+                                    .set_status(&worker_task_id, TaskStatus::Completed)
+                                    .await;
+                                break;
+                            }
+                        }
+                    }
+                    agent_ids.lock().await.remove(&worker_task_id);
+                    workers.lock().await.remove(&worker_task_id);
+                })
+            } else {
+                Box::pin(async move {
             status_sink
                 .set_status(&worker_task_id, TaskStatus::Running)
                 .await;
@@ -302,7 +405,8 @@ impl Task for LocalAgentHandler {
             // The subagent has terminated; drop the cancel record so a late
             // kill is a graceful no-op (claude-code `status !== 'running'`).
             workers.lock().await.remove(&worker_task_id);
-        });
+                })
+            };
 
         let bg_handle = ctx
             .runtime
@@ -366,10 +470,38 @@ impl Task for LocalAgentHandler {
     }
 
     fn supports_messages(&self) -> bool {
-        // The TS `LocalAgentTask` object exposes no `send_message`; mid-turn
-        // messaging there is a separate `queuePendingMessage` path, out of
-        // scope for the handler trait.
-        false
+        // A PERSISTENT (backgrounded + resumable) local_agent accepts messages:
+        // `send_message` resumes a resting agent (claude-code `resumeAgentBackground`
+        // / `injectUserMessageToTeammate`). Without the streaming seam wired, the
+        // one-shot agent has no inbound channel → not supported.
+        self.streaming_spawner.is_some()
+    }
+
+    /// Resume a resting persistent local_agent: deliver `message` to its parked
+    /// runner (via [`StreamingSubagentSpawner::resume`] → `pool.send_event`),
+    /// which appends it to history and runs the next turn-set — the
+    /// `injectUserMessageToTeammate` / `resumeAgentBackground` analogue. Errors
+    /// when the streaming seam is unwired or the agent has terminated/evicted.
+    async fn send_message(
+        &self,
+        task_id: &str,
+        message: String,
+        _ctx: TaskContext,
+    ) -> Result<(), TaskError> {
+        let Some(streaming) = &self.streaming_spawner else {
+            return Err(TaskError::Unsupported);
+        };
+        let agent_id = self
+            .agent_ids
+            .lock()
+            .await
+            .get(task_id)
+            .copied()
+            .ok_or(TaskError::TerminatedTask)?;
+        streaming
+            .resume(&agent_id, message)
+            .await
+            .map_err(|e| TaskError::Internal(e.to_string()))
     }
 }
 
@@ -663,7 +795,185 @@ mod tests {
         sink.last_status().expect("worker never reported a status")
     }
 
+    // ---- Mock StreamingSubagentSpawner (persistent / resume seam) -----------
+
+    /// A persistent-spawner mock whose outbound event channel the TEST drives:
+    /// `spawn_persistent` stashes the `Sender` in `tx_slot` (so the test can
+    /// push per-turn-set `Completed`/`Failed`/… events), and `resume` bumps a
+    /// counter the test asserts on.
+    struct MockStreamingSpawner {
+        tx_slot: Arc<StdMutex<Option<tokio::sync::mpsc::Sender<SubagentEvent>>>>,
+        resume_count: Arc<std::sync::atomic::AtomicUsize>,
+    }
+    #[async_trait]
+    impl StreamingSubagentSpawner for MockStreamingSpawner {
+        async fn spawn_persistent(
+            &self,
+            _request: SubagentSpawnRequest,
+            _inherit: SubagentInheritance,
+        ) -> Result<(AgentId, tokio::sync::mpsc::Receiver<SubagentEvent>), SubagentSpawnError>
+        {
+            let (tx, rx) = tokio::sync::mpsc::channel(8);
+            *self.tx_slot.lock().unwrap() = Some(tx);
+            Ok((AgentId::new(), rx))
+        }
+        async fn resume(
+            &self,
+            _agent_id: &AgentId,
+            _message: String,
+        ) -> Result<(), SubagentSpawnError> {
+            self.resume_count
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    fn completed_event(marker: &str) -> SubagentEvent {
+        SubagentEvent::Completed {
+            agent_id: AgentId::new(),
+            result: json!({ "marker": marker }),
+            usage: llm_client::Usage::default(),
+            total_tool_use_count: 0,
+            total_duration_ms: 0,
+            assistant_message_count: 0,
+            last_request_id: None,
+        }
+    }
+
+    async fn await_spool_contains(
+        mgr: &Arc<TaskOutputManager>,
+        path: &std::path::Path,
+        needle: &str,
+    ) {
+        for _ in 0..200 {
+            if let Ok(read) = mgr
+                .read(path, crate::output_manager::OutputOptions::default())
+                .await
+            {
+                if read.content.contains(needle) {
+                    return;
+                }
+            }
+            tokio::task::yield_now().await;
+        }
+        panic!("spool never contained {needle:?}");
+    }
+
     // ---- Tests --------------------------------------------------------------
+
+    #[tokio::test]
+    async fn persistent_agent_rests_after_each_turn_set_and_resumes_on_message() {
+        let fs: Arc<dyn FileSystem> = Arc::new(InMemoryFs::new());
+        let dir = tempdir().unwrap();
+        let mgr = Arc::new(TaskOutputManager::new(PathBuf::from(dir.path()), fs.clone()));
+        let sink = Arc::new(RecordingSink::default());
+        let tx_slot: Arc<StdMutex<Option<tokio::sync::mpsc::Sender<SubagentEvent>>>> =
+            Arc::new(StdMutex::new(None));
+        let resume_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let streaming = Arc::new(MockStreamingSpawner {
+            tx_slot: tx_slot.clone(),
+            resume_count: resume_count.clone(),
+        });
+
+        // The one-shot spawner is present but UNUSED on the persistent path.
+        let handler =
+            make_handler(MockSpawner::new(CannedResult::Pending), mgr.clone(), sink.clone())
+                .with_streaming_spawner(streaming);
+        assert!(handler.supports_messages(), "streaming seam ⇒ messages supported");
+
+        let ctx = make_ctx(fs);
+        let handle = handler
+            .spawn(local_agent_input("start"), ctx.clone())
+            .await
+            .expect("spawn should succeed");
+        let task_id = handle.task_id.clone();
+
+        // Wait for the persistent worker to call spawn_persistent (stashes tx).
+        let tx = {
+            let mut got = None;
+            for _ in 0..200 {
+                if let Some(t) = tx_slot.lock().unwrap().clone() {
+                    got = Some(t);
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+            got.expect("spawn_persistent should have run")
+        };
+
+        // ── Turn-set 1: Completed ⇒ spool + COME TO REST (status Running). ──
+        tx.send(completed_event("first")).await.unwrap();
+        let spool_path = dir.path().join(format!("{task_id}.output"));
+        await_spool_contains(&mgr, &spool_path, "first").await;
+        // Rested, NOT terminal — still alive awaiting the next message.
+        assert_eq!(
+            sink.last_status(),
+            Some(TaskStatus::Running),
+            "agent comes to rest (alive)"
+        );
+
+        // ── Resume via send_message → the runner wakes for turn-set 2. ──
+        handler
+            .send_message(&task_id, "again".into(), ctx)
+            .await
+            .expect("resume ok");
+        assert_eq!(
+            resume_count.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "send_message routed to resume"
+        );
+
+        // ── Turn-set 2: another Completed ⇒ second spool + rest again. ──
+        tx.send(completed_event("second")).await.unwrap();
+        await_spool_contains(&mgr, &spool_path, "second").await;
+        assert_eq!(
+            sink.last_status(),
+            Some(TaskStatus::Running),
+            "rests again after the second turn-set"
+        );
+
+        // ── Channel close ⇒ the agent terminates (final Completed). ──
+        // Drop EVERY Sender — the one the slot still holds plus our handle.
+        tx_slot.lock().unwrap().take();
+        drop(tx);
+        let status = await_terminal(&sink).await;
+        assert_eq!(
+            status,
+            TaskStatus::Completed,
+            "channel close ⇒ terminal Completed"
+        );
+    }
+
+    #[tokio::test]
+    async fn send_message_requires_seam_and_live_agent() {
+        let fs: Arc<dyn FileSystem> = Arc::new(InMemoryFs::new());
+        let dir = tempdir().unwrap();
+        let mgr = Arc::new(TaskOutputManager::new(PathBuf::from(dir.path()), fs.clone()));
+        let sink = Arc::new(RecordingSink::default());
+        let ctx = make_ctx(fs);
+
+        // No streaming seam ⇒ one-shot ⇒ messaging unsupported.
+        let one_shot =
+            make_handler(MockSpawner::new(CannedResult::Pending), mgr.clone(), sink.clone());
+        assert!(!one_shot.supports_messages());
+        assert!(matches!(
+            one_shot.send_message("any", "hi".into(), ctx.clone()).await,
+            Err(TaskError::Unsupported)
+        ));
+
+        // Seam wired but no live agent for that id ⇒ TerminatedTask.
+        let streaming = Arc::new(MockStreamingSpawner {
+            tx_slot: Arc::new(StdMutex::new(None)),
+            resume_count: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        });
+        let persistent = make_handler(MockSpawner::new(CannedResult::Pending), mgr, sink)
+            .with_streaming_spawner(streaming);
+        assert!(persistent.supports_messages());
+        assert!(matches!(
+            persistent.send_message("ghost", "hi".into(), ctx).await,
+            Err(TaskError::TerminatedTask)
+        ));
+    }
 
     #[tokio::test]
     async fn spawn_runs_subagent_and_spools_completed_content() {

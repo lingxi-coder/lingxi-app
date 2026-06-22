@@ -2258,8 +2258,15 @@ pub async fn build(
     // below from `policy.tool_wide_deny_names()`; left empty otherwise ⇒ the
     // subagent tool pool is unfiltered (byte-identical to before).
     let subagent_tool_wide_deny_cell = subagent_spawner_concrete.tool_wide_deny_names_handle();
+    // Box ONCE as the concrete `Arc<PoolSubagentSpawner>` so it can serve as
+    // BOTH the one-shot `SubagentSpawner` and the persistent/resume
+    // `StreamingSubagentSpawner` (Phase-1 seam) — the LocalAgent handler needs
+    // the streaming half to make a backgrounded agent "come to rest" + resume.
+    let subagent_spawner_arc = Arc::new(subagent_spawner_concrete);
     let subagent_spawner: Arc<dyn traits::subagent_spawn::SubagentSpawner> =
-        Arc::new(subagent_spawner_concrete);
+        subagent_spawner_arc.clone();
+    let subagent_streaming_spawner: Arc<dyn agent::StreamingSubagentSpawner> =
+        subagent_spawner_arc;
 
     //       The budget enforcer is an unlimited / non-blocking config (every
     //       limit `None`, no warning thresholds, `WarnOnly` policy) so it never
@@ -3031,12 +3038,19 @@ pub async fn build(
     let local_agent_invoker = Arc::new(DeferredToolInvoker::new());
     task_registry_inner.register_handler(
         tasks::TaskType::LocalAgent,
-        Arc::new(tasks::handlers::LocalAgentHandler::new(
-            subagent_spawner.clone(),
-            local_agent_invoker.clone() as Arc<dyn traits::tool_invoker::ToolInvoker>,
-            budget_enforcer.clone(),
-            task_registry_inner.output_manager.clone(),
-        )),
+        Arc::new(
+            tasks::handlers::LocalAgentHandler::new(
+                subagent_spawner.clone(),
+                local_agent_invoker.clone() as Arc<dyn traits::tool_invoker::ToolInvoker>,
+                budget_enforcer.clone(),
+                task_registry_inner.output_manager.clone(),
+            )
+            // Wire the persistent/resume seam: a BACKGROUNDED LocalAgent now
+            // parks ("comes to rest") after each turn-set and accepts
+            // `send_message` to resume — claude-code's unified agent lifecycle
+            // (`resumeAgentBackground` / `injectUserMessageToTeammate`).
+            .with_streaming_spawner(subagent_streaming_spawner.clone()),
+        ),
     );
 
     // (5.46e) Register the `LocalWorkflow` handler so the `Workflow` tool's

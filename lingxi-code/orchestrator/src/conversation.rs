@@ -7722,6 +7722,8 @@ mod skill_listing_reminder_tests {
             output_path: Some("/tmp/tasks/b12345678.output".into()),
             exit_code: Some(0),
             error: None,
+            result: None,
+            usage: None,
         };
         let orch = orch_with(reg, None).with_task_notifications(Arc::new(OnceTaskNotifications(
             std::sync::Mutex::new(vec![bash]),

@@ -129,6 +129,8 @@ mod tests {
             output_path: None,
             exit_code: Some(0),
             error: None,
+            result: None,
+            usage: None,
         };
         let reg = Arc::new(FakeRegistry(Mutex::new(vec![n.clone()])));
         let provider = RegistryTaskNotifications::new(reg);

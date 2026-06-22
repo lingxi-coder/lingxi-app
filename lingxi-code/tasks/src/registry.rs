@@ -498,6 +498,16 @@ impl TaskRegistry {
                 output_path: Some(b.output_file.to_string_lossy().into_owned()),
                 exit_code,
                 error,
+                // `local_agent` `<result>` / `<usage>` (the optional sections):
+                // `LocalAgentTaskState` carries neither the final-message text nor
+                // the run usage today, so both stay `None` — the byte-faithful
+                // "no result" case. They flow only once the BACKGROUNDED local_agent
+                // path is wired (`AgentTool::call` dispatches synchronously today,
+                // and the production `LocalAgentHandler` has no result-bearing sink;
+                // the renderer already emits them when present — see
+                // `prompt::task_notification`). Part of the deferred async-agent work.
+                result: None,
+                usage: None,
             });
             // Mark notified + evict (terminal + notified is GC-able) so the
             // completion surfaces exactly once. Mirrors `mark_notified`'s eager

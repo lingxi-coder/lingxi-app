@@ -87,19 +87,44 @@ fn render_one(n: &TaskNotification) -> String {
 
     match n.task_type.as_str() {
         "local_agent" => {
-            // `enqueueAgentNotification` — summary interpolated RAW (not escaped).
+            // `enqueueAgentNotification` (v2.1.185 binary @202650700): the
+            // "came to rest" summary, an always-present `<note>`, and optional
+            // `<result>` / `<usage>` sections. The summary is escaped via `Np`
+            // (== [`escape_xml`]: `&<>` only) — a change from the prior raw
+            // interpolation, matching the v2.1.185 renderer (`<summary>${Np(g)}`).
             let summary = match n.status.as_str() {
-                "completed" => format!("Agent \"{}\" completed", n.description),
+                "completed" => format!("Agent \"{}\" came to rest", n.description),
                 "failed" => {
                     let err = n.error.as_deref().unwrap_or("Unknown error");
-                    format!("Agent \"{}\" failed: {err}", n.description)
+                    format!("Agent \"{}\" came to rest with an error: {err}", n.description)
                 }
-                // `killed` (and any other terminal) → "was stopped".
-                _ => format!("Agent \"{}\" was stopped", n.description),
+                // `killed` (and any other terminal) → "(stopped by user)".
+                _ => format!("Agent \"{}\" came to rest (stopped by user)", n.description),
             };
+            // Hardcoded, always-present `<note>` (binary @202651760).
+            const NOTE: &str = "A task-notification fires each time this agent comes to rest with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.";
+            // Optional `<result>` (escaped) — claude-code `s ? \n<result>${Np(s)}</result> : ''`.
+            let result_section = match &n.result {
+                Some(r) => format!("\n<result>{}</result>", escape_xml(r)),
+                None => String::new(),
+            };
+            // Optional `<usage>` — claude-code `i ? \n<usage>…</usage> : ''`.
+            let usage_section = match &n.usage {
+                Some(u) => format!(
+                    "\n<usage><subagent_tokens>{}</subagent_tokens><tool_uses>{}</tool_uses><duration_ms>{}</duration_ms></usage>",
+                    u.subagent_tokens, u.tool_uses, u.duration_ms
+                ),
+                None => String::new(),
+            };
+            // The binary's trailing `${v}` (a teammate children/messages block,
+            // `$mr` tag) is another OPTIONAL section, omitted here — LingXi's
+            // local_agent carries no such data, so its absence is byte-faithful
+            // (the same `data ? … : ''` shape as result/usage).
             format!(
-                "<task-notification>\n<task-id>{}</task-id>{tool_use_id_line}\n<output-file>{output_file}</output-file>\n<status>{}</status>\n<summary>{summary}</summary>\n</task-notification>",
-                n.task_id, n.status
+                "<task-notification>\n<task-id>{}</task-id>{tool_use_id_line}\n<output-file>{output_file}</output-file>\n<status>{}</status>\n<summary>{}</summary>\n<note>{NOTE}</note>{result_section}{usage_section}\n</task-notification>",
+                n.task_id,
+                n.status,
+                escape_xml(&summary)
             )
         }
         "local_bash" => {
@@ -197,6 +222,8 @@ mod tests {
             output_path: Some(format!("/tmp/tasks/{id}.output")),
             exit_code: None,
             error: None,
+            result: None,
+            usage: None,
         }
     }
 
@@ -245,9 +272,10 @@ mod tests {
     }
 
     #[test]
-    fn agent_completed_is_byte_faithful_and_unescaped() {
-        // The agent summary is interpolated RAW — a `<` in the description is
-        // NOT escaped (claude-code does not escape the agent summary).
+    fn agent_completed_is_byte_faithful_with_note_and_escaped_summary() {
+        // v2.1.185 `enqueueAgentNotification`: "came to rest" summary, escaped
+        // via `Np` (`<` in the description → `&lt;`), always-present `<note>`,
+        // and NO `<result>`/`<usage>` when absent (the byte-faithful no-result case).
         let n = base("a12345678", "local_agent", "completed", "scan <repo>");
         let out = render_reminder(std::slice::from_ref(&n)).expect("reminder");
         assert_eq!(
@@ -257,21 +285,84 @@ mod tests {
 <task-id>a12345678</task-id>\n\
 <output-file>/tmp/tasks/a12345678.output</output-file>\n\
 <status>completed</status>\n\
-<summary>Agent \"scan <repo>\" completed</summary>\n\
+<summary>Agent \"scan &lt;repo&gt;\" came to rest</summary>\n\
+<note>A task-notification fires each time this agent comes to rest with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>\n\
 </task-notification>\n\
 </system-reminder>"
         );
     }
 
     #[test]
-    fn agent_failed_uses_error_or_unknown() {
+    fn agent_failed_uses_came_to_rest_with_error_or_unknown() {
         let mut n = base("a12345678", "local_agent", "failed", "research");
         n.error = Some("rate limited".to_string());
-        assert!(render_one(&n)
-            .contains("<summary>Agent \"research\" failed: rate limited</summary>"));
+        assert!(
+            render_one(&n).contains(
+                "<summary>Agent \"research\" came to rest with an error: rate limited</summary>"
+            ),
+            "got: {}",
+            render_one(&n)
+        );
         n.error = None;
-        assert!(render_one(&n)
-            .contains("<summary>Agent \"research\" failed: Unknown error</summary>"));
+        assert!(render_one(&n).contains(
+            "<summary>Agent \"research\" came to rest with an error: Unknown error</summary>"
+        ));
+    }
+
+    #[test]
+    fn agent_killed_came_to_rest_stopped_by_user() {
+        let n = base("a12345678", "local_agent", "killed", "long job");
+        assert!(
+            render_one(&n)
+                .contains("<summary>Agent \"long job\" came to rest (stopped by user)</summary>"),
+            "got: {}",
+            render_one(&n)
+        );
+    }
+
+    /// The optional `<result>` (escaped) + `<usage>` sections, byte-faithful to
+    /// `enqueueAgentNotification`'s `s ? <result> : ''` / `i ? <usage> : ''`,
+    /// slotting after `<note>` in declaration order.
+    #[test]
+    fn agent_result_and_usage_sections_when_present() {
+        let mut n = base("a12345678", "local_agent", "completed", "audit");
+        n.result = Some("Found 2 bugs in <auth>".to_string());
+        n.usage = Some(traits::task_registry::AgentRunUsage {
+            subagent_tokens: 1234,
+            tool_uses: 7,
+            duration_ms: 4200,
+        });
+        assert_eq!(
+            render_one(&n),
+            "<task-notification>\n\
+<task-id>a12345678</task-id>\n\
+<output-file>/tmp/tasks/a12345678.output</output-file>\n\
+<status>completed</status>\n\
+<summary>Agent \"audit\" came to rest</summary>\n\
+<note>A task-notification fires each time this agent comes to rest with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>\n\
+<result>Found 2 bugs in &lt;auth&gt;</result>\n\
+<usage><subagent_tokens>1234</subagent_tokens><tool_uses>7</tool_uses><duration_ms>4200</duration_ms></usage>\n\
+</task-notification>"
+        );
+    }
+
+    /// `<usage>` present but `<result>` absent: only the usage section rides.
+    #[test]
+    fn agent_usage_without_result() {
+        let mut n = base("a12345678", "local_agent", "completed", "audit");
+        n.usage = Some(traits::task_registry::AgentRunUsage {
+            subagent_tokens: 5,
+            tool_uses: 0,
+            duration_ms: 1,
+        });
+        let block = render_one(&n);
+        assert!(!block.contains("<result>"), "no result section; got: {block}");
+        assert!(
+            block.contains(
+                "<usage><subagent_tokens>5</subagent_tokens><tool_uses>0</tool_uses><duration_ms>1</duration_ms></usage>"
+            ),
+            "got: {block}"
+        );
     }
 
     #[test]

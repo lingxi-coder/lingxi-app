@@ -51,13 +51,27 @@ pub struct TaskRecord {
     pub command: Option<String>,
 }
 
+/// Agent-run usage for a `local_agent` task-notification's optional `<usage>`
+/// section — mirrors claude-code's `enqueueAgentNotification` usage object
+/// (`{ totalTokens, toolUses, durationMs }`, rendered as
+/// `<subagent_tokens>/<tool_uses>/<duration_ms>`).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentRunUsage {
+    /// `totalTokens` → `<subagent_tokens>`.
+    pub subagent_tokens: u64,
+    /// `totalToolUseCount` → `<tool_uses>`.
+    pub tool_uses: u64,
+    /// `totalDurationMs` → `<duration_ms>`.
+    pub duration_ms: u64,
+}
+
 /// A terminal task that has not yet been surfaced to the model, snapshotted at
 /// drain time for the `<task-notification>` renderer (claude-code's per-task-type
 /// `enqueue*Notification`, e.g. `enqueueShellNotification` /
 /// `enqueueAgentNotification`). Each field maps to a tag the renderer emits;
 /// fields that a given task type does not carry stay `None` and the renderer
 /// omits the corresponding clause/tag.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TaskNotification {
     /// 9-char task id → `<task-id>`.
     pub task_id: String,
@@ -79,9 +93,16 @@ pub struct TaskNotification {
     /// summary (e.g. `(exit code 1)`). `None` ⇒ the exit clause is omitted.
     pub exit_code: Option<i32>,
     /// Failure reason for a `local_agent` task, folded into the `failed`
-    /// summary (`Agent "…" failed: {error}`). `None` falls back to
-    /// `Unknown error` for a failed agent (claude-code `error || 'Unknown error'`).
+    /// summary (`Agent "…" came to rest with an error: {error}`). `None` falls
+    /// back to `Unknown error` (claude-code `error || 'Unknown error'`).
     pub error: Option<String>,
+    /// `local_agent` only: the agent's final text response → the optional
+    /// `<result>` section (escaped). `None` ⇒ the section is omitted (the
+    /// byte-faithful "no result" case — claude-code's `s ? <result>… : ''`).
+    pub result: Option<String>,
+    /// `local_agent` only: run usage → the optional `<usage>` section.
+    /// `None` ⇒ omitted (claude-code's `i ? <usage>… : ''`).
+    pub usage: Option<AgentRunUsage>,
 }
 
 /// One chunk of a task's accumulated stdout/stderr spool.

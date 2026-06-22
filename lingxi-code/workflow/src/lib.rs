@@ -19,6 +19,33 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
+/// JS prelude defining the `parallel()` / `pipeline()` orchestration primitives,
+/// injected before the workflow body. The argument-validation `throw` messages
+/// are byte-locked to claude-code's. These are SEQUENTIAL (correct results, no
+/// concurrent fan-out yet) — `parallel`'s barrier + `pipeline`'s per-item
+/// staging are preserved; only the wall-clock concurrency is deferred to the
+/// pending-promise dispatch stage. A throwing thunk/stage resolves to `null`
+/// in the output (claude-code's `.filter(Boolean)` contract).
+const WORKFLOW_PRELUDE: &str = r#"
+globalThis.parallel = async (thunks) => {
+  if (!Array.isArray(thunks)) throw new Error("parallel() expects an array of thunks");
+  const out = [];
+  for (const t of thunks) { try { out.push(await t()); } catch (e) { out.push(null); } }
+  return out;
+};
+globalThis.pipeline = async (items, ...stages) => {
+  if (!Array.isArray(items)) throw new Error("pipeline() expects an array as the first argument");
+  for (const s of stages) if (typeof s !== "function") throw new Error("pipeline() stages must be functions: pipeline(items, item => ..., result => ...)");
+  const out = [];
+  for (let i = 0; i < items.length; i++) {
+    let v = items[i];
+    try { for (const s of stages) v = await s(v, items[i], i); out.push(v); }
+    catch (e) { out.push(null); }
+  }
+  return out;
+};
+"#;
+
 /// A progress event emitted by a running workflow script.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Progress {
@@ -212,6 +239,14 @@ where
             )
             .map_err(eng)?;
 
+        // Orchestration prelude: `parallel()` / `pipeline()` defined in JS
+        // (the same shape as claude-code's, including the byte-locked argument
+        // validation). NB these are SEQUENTIAL for now — they produce the same
+        // results as claude-code but without the concurrent fan-out; true
+        // concurrency needs the pending-promise dispatch model (next stage).
+        ctx.eval::<(), _>(WORKFLOW_PRELUDE.as_bytes())
+            .map_err(|e| WorkflowError::Engine(e.to_string()))?;
+
         // Eval the IIFE (returns a pending promise we drive below).
         ctx.eval::<rquickjs::Value, _>(wrapped.as_bytes())
             .map_err(|e| WorkflowError::Script(e.to_string()))?;
@@ -341,6 +376,76 @@ for (let i = 0; i < n; i++) log('item ' + i)
         match err {
             WorkflowError::Script(s) => assert!(s.contains("boom"), "got: {s}"),
             other => panic!("expected Script error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parallel_collects_results_in_order() {
+        let script = r#"
+const rs = await parallel([
+  () => agent('a'),
+  () => agent('b'),
+  () => agent('c'),
+])
+log(rs.join('|'))
+"#;
+        let mut n = 0;
+        let out = run(script, move |p: &str| {
+            n += 1;
+            format!("{p}{n}")
+        })
+        .unwrap();
+        assert_eq!(out.progress, vec![Progress::Log("a1|b2|c3".into())]);
+    }
+
+    #[test]
+    fn parallel_throwing_thunk_becomes_null() {
+        let script = r#"
+const rs = await parallel([
+  () => agent('ok'),
+  () => { throw new Error('boom') },
+])
+log(String(rs[0]) + ',' + String(rs[1]))
+"#;
+        let out = run(script, |_| "OK".to_string()).unwrap();
+        assert_eq!(out.progress, vec![Progress::Log("OK,null".into())]);
+    }
+
+    #[test]
+    fn pipeline_runs_each_item_through_all_stages() {
+        let script = r#"
+const rs = await pipeline(
+  [1, 2, 3],
+  (x) => x + 1,
+  (x) => x * 10,
+)
+log(rs.join(','))
+"#;
+        let out = run(script, |_| "x".to_string()).unwrap();
+        assert_eq!(out.progress, vec![Progress::Log("20,30,40".into())]);
+    }
+
+    #[test]
+    fn pipeline_rejects_non_array_first_arg() {
+        let err = run("await pipeline('nope', x => x)", |_| "x".to_string()).unwrap_err();
+        match err {
+            WorkflowError::Script(s) => assert!(
+                s.contains("pipeline() expects an array as the first argument"),
+                "got: {s}"
+            ),
+            other => panic!("got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn pipeline_rejects_non_function_stage() {
+        let err = run("await pipeline([1], 'notafn')", |_| "x".to_string()).unwrap_err();
+        match err {
+            WorkflowError::Script(s) => assert!(
+                s.contains("pipeline() stages must be functions"),
+                "got: {s}"
+            ),
+            other => panic!("got {other:?}"),
         }
     }
 }

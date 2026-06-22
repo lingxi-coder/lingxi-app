@@ -129,6 +129,108 @@ pub fn run_sync(script: &str) -> Result<RunOutcome, WorkflowError> {
     Ok(RunOutcome { progress })
 }
 
+/// Execute a workflow script's **async** body, capturing `phase()`/`log()` and
+/// routing `agent(prompt)` through `agent_runner`.
+///
+/// The body is wrapped in an `async` IIFE so top-level `await` works (claude-code
+/// runs the script as an `AsyncFunction`); QuickJS schedules the continuations as
+/// microtasks, which we drive to completion via the runtime job queue. `agent()`
+/// resolves synchronously through `agent_runner` (the real runtime blocks on a
+/// subagent and returns its result), so sequential `await agent(...)` chains run
+/// in order. (`parallel()`/`pipeline()` concurrency is a later stage.)
+///
+/// # Errors
+/// Returns [`WorkflowError`] if the engine fails to start, the script throws, or
+/// a job raises.
+pub fn run<R>(script: &str, agent_runner: R) -> Result<RunOutcome, WorkflowError>
+where
+    R: FnMut(&str) -> String + 'static,
+{
+    use rquickjs::{Context, Function, Runtime};
+
+    let rt = Runtime::new().map_err(|e| WorkflowError::Engine(e.to_string()))?;
+    let ctx = Context::full(&rt).map_err(|e| WorkflowError::Engine(e.to_string()))?;
+
+    let progress: Rc<RefCell<Vec<Progress>>> = Rc::new(RefCell::new(Vec::new()));
+    let error: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
+    let runner = Rc::new(RefCell::new(agent_runner));
+    let prepared = strip_meta_export(script);
+    // Wrap in an async IIFE; route a throw into `__wf_error` so it survives the
+    // microtask boundary (a rejected top-level promise would otherwise be lost).
+    // claude-code (V8) captures `(e && e.stack) || e`, but QuickJS's `e.stack`
+    // omits the message line, so capture `String(e)` (the message) plus the
+    // stack — the V8-vs-QuickJS stack frames differ inherently regardless.
+    let wrapped = format!(
+        "(async () => {{ try {{\n{prepared}\n}} catch (e) {{ globalThis.__wf_error(String(e) + (e && e.stack ? \"\\n\" + e.stack : \"\")); }} }})();"
+    );
+
+    ctx.with(|ctx| -> Result<(), WorkflowError> {
+        let globals = ctx.globals();
+        let eng = |e: rquickjs::Error| WorkflowError::Engine(e.to_string());
+
+        let p_log = progress.clone();
+        globals
+            .set(
+                "log",
+                Function::new(ctx.clone(), move |msg: String| {
+                    p_log.borrow_mut().push(Progress::Log(msg));
+                })
+                .map_err(eng)?,
+            )
+            .map_err(eng)?;
+
+        let p_phase = progress.clone();
+        globals
+            .set(
+                "phase",
+                Function::new(ctx.clone(), move |title: String| {
+                    p_phase.borrow_mut().push(Progress::Phase(title));
+                })
+                .map_err(eng)?,
+            )
+            .map_err(eng)?;
+
+        let r = runner.clone();
+        globals
+            .set(
+                "agent",
+                Function::new(ctx.clone(), move |prompt: String| -> String {
+                    (r.borrow_mut())(&prompt)
+                })
+                .map_err(eng)?,
+            )
+            .map_err(eng)?;
+
+        let err = error.clone();
+        globals
+            .set(
+                "__wf_error",
+                Function::new(ctx.clone(), move |msg: String| {
+                    *err.borrow_mut() = Some(msg);
+                })
+                .map_err(eng)?,
+            )
+            .map_err(eng)?;
+
+        // Eval the IIFE (returns a pending promise we drive below).
+        ctx.eval::<rquickjs::Value, _>(wrapped.as_bytes())
+            .map_err(|e| WorkflowError::Script(e.to_string()))?;
+        Ok(())
+    })?;
+
+    // Drive the microtask/job queue until the IIFE settles.
+    while rt
+        .execute_pending_job()
+        .map_err(|e| WorkflowError::Script(format!("{e:?}")))?
+    {}
+
+    if let Some(e) = error.borrow().clone() {
+        return Err(WorkflowError::Script(e));
+    }
+    let progress = progress.borrow().clone();
+    Ok(RunOutcome { progress })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -182,5 +284,63 @@ log(`done: ${items.join(',')}`)
     fn script_error_is_surfaced() {
         let err = run_sync("log(undefinedThing.x)").unwrap_err();
         assert!(matches!(err, WorkflowError::Script(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn runs_async_script_with_sequential_agents() {
+        // `await agent(...)` chains run in order; the runner sees the prompts
+        // sequentially and its results flow back into the script.
+        let script = r#"
+export const meta = { name: 'a', description: 'async smoke' }
+phase('Work')
+const a = await agent('first')
+log('got: ' + a)
+const b = await agent('second')
+log('got: ' + b)
+"#;
+        let mut calls = 0;
+        let out = run(script, move |prompt: &str| {
+            calls += 1;
+            format!("[r{calls}:{prompt}]")
+        })
+        .unwrap();
+        assert_eq!(
+            out.progress,
+            vec![
+                Progress::Phase("Work".into()),
+                Progress::Log("got: [r1:first]".into()),
+                Progress::Log("got: [r2:second]".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn async_script_uses_agent_result_in_logic() {
+        // The result of an awaited agent drives subsequent control flow.
+        let script = r#"
+const n = Number(await agent('count'))
+for (let i = 0; i < n; i++) log('item ' + i)
+"#;
+        let out = run(script, |_| "3".to_string()).unwrap();
+        assert_eq!(
+            out.progress,
+            vec![
+                Progress::Log("item 0".into()),
+                Progress::Log("item 1".into()),
+                Progress::Log("item 2".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn async_script_throw_surfaces_after_await() {
+        let err = run("await agent('x'); throw new Error('boom')", |_| {
+            "ok".to_string()
+        })
+        .unwrap_err();
+        match err {
+            WorkflowError::Script(s) => assert!(s.contains("boom"), "got: {s}"),
+            other => panic!("expected Script error, got {other:?}"),
+        }
     }
 }

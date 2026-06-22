@@ -17,6 +17,7 @@ pub mod client;
 pub mod config;
 pub mod connection;
 pub mod diagnostic_registry;
+pub mod diagnostics_format;
 pub mod open_file_tracker;
 pub mod passive_feedback;
 pub mod registry;

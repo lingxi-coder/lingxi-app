@@ -70,10 +70,14 @@ impl ClaudeMdExcluder {
     }
 }
 
-/// Expand exclude patterns by adding a realpath-resolved variant for each
-/// ABSOLUTE pattern (resolving the longest existing directory prefix), so a
-/// symlinked prefix (`/tmp` → `/private/tmp`) matches. Relative / glob-only
-/// patterns are kept verbatim. 1:1 with claude-code `resolveExcludePatterns`.
+/// Expand exclude patterns by ADDING a realpath-resolved variant for each
+/// ABSOLUTE pattern — keeping the original. 1:1 with claude-code `_wd`
+/// (@197183958): realpath the `dirname` of the pattern's static prefix (the
+/// part before the first glob char) and, if it differs, push
+/// `realpath(dirname) + pattern.slice(dirname.len)`. Only the DIRNAME is
+/// resolved (so a symlinked final component of the static prefix stays
+/// unresolved — matching the binary, NOT the longest-existing-prefix). A
+/// non-existent dirname (realpath throws) adds no variant.
 fn resolve_exclude_patterns(patterns: &[String]) -> Vec<String> {
     let mut out = Vec::new();
     for raw in patterns {
@@ -82,41 +86,37 @@ fn resolve_exclude_patterns(patterns: &[String]) -> Vec<String> {
             continue;
         }
         out.push(normalized.clone());
-        if normalized.starts_with('/') {
-            let glob_start = normalized
-                .find(|c| matches!(c, '*' | '?' | '{' | '['))
-                .unwrap_or(normalized.len());
-            let static_prefix = &normalized[..glob_start];
-            if let Some(resolved) = resolve_existing_prefix(static_prefix) {
-                let candidate = format!("{resolved}{}", &normalized[glob_start..]);
-                if candidate != normalized {
-                    out.push(candidate);
-                }
+        if !normalized.starts_with('/') {
+            continue;
+        }
+        let glob_start = normalized
+            .find(|c| matches!(c, '*' | '?' | '{' | '['))
+            .unwrap_or(normalized.len());
+        let static_prefix = &normalized[..glob_start];
+        let dirname = node_dirname(static_prefix);
+        if let Ok(real) = std::fs::canonicalize(dirname) {
+            let real = real.to_string_lossy().replace('\\', "/");
+            if real != dirname {
+                out.push(format!("{real}{}", &normalized[dirname.len()..]));
             }
         }
     }
     out
 }
 
-/// Canonicalize the longest existing prefix of absolute `path`, re-appending the
-/// non-existent tail. `None` when nothing in the path exists.
-fn resolve_existing_prefix(path: &str) -> Option<String> {
-    let mut dir = std::path::PathBuf::from(path);
-    let mut tail = String::new();
-    loop {
-        if dir.exists() {
-            let mut s = std::fs::canonicalize(&dir)
-                .ok()?
-                .to_string_lossy()
-                .replace('\\', "/");
-            s.push_str(&tail);
-            return Some(s);
-        }
-        let comp = dir.file_name()?.to_string_lossy().into_owned();
-        tail = format!("/{comp}{tail}");
-        if !dir.pop() {
-            return None;
-        }
+/// Node `path.dirname` for a POSIX path: drop one trailing `/`, then return the
+/// portion before the last `/`. `/tmp/foo`→`/tmp`, `/tmp/foo/`→`/tmp`,
+/// `/tmp`→`/`, `/`→`/`. The result is always a byte-prefix of the input (so the
+/// `pattern.slice(dirname.len)` re-append is correct).
+fn node_dirname(s: &str) -> &str {
+    let trimmed = s.strip_suffix('/').unwrap_or(s);
+    if trimmed.is_empty() {
+        return "/";
+    }
+    match trimmed.rfind('/') {
+        Some(0) => "/",
+        Some(i) => &trimmed[..i],
+        None => ".",
     }
 }
 
@@ -137,6 +137,20 @@ mod tests {
         // A glob that DOES match the path, but Managed tier is exempt.
         assert!(!ex.is_excluded(Path::new("/mgr/CLAUDE.md"), ClaudeMdTier::Managed));
         assert!(ex.is_excluded(Path::new("/proj/CLAUDE.md"), ClaudeMdTier::Project));
+    }
+
+    #[test]
+    fn node_dirname_matches_posix_semantics() {
+        // Node path.dirname semantics; result is always a byte-prefix of input.
+        assert_eq!(node_dirname("/tmp/foo"), "/tmp");
+        assert_eq!(node_dirname("/tmp/foo/"), "/tmp");
+        assert_eq!(node_dirname("/tmp/foo/bar.md"), "/tmp/foo");
+        assert_eq!(node_dirname("/tmp"), "/");
+        assert_eq!(node_dirname("/tmp/"), "/");
+        assert_eq!(node_dirname("/"), "/");
+        // The static prefix of `/a/b/*.md` is `/a/b/`; its dirname is `/a` — so
+        // only `/a` (not `/a/b`) is realpath-resolved, matching the binary `_wd`.
+        assert_eq!(node_dirname("/a/b/"), "/a");
     }
 
     #[test]

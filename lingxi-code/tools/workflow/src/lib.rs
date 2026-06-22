@@ -1,0 +1,369 @@
+//! `tool-workflow` — the `Workflow` tool: launch a model-authored workflow
+//! script as a background task.
+//!
+//! claude-code's Workflow tool runs the script in the background, returning
+//! immediately with `{ status: "async_launched", taskId, taskType:
+//! "local_workflow" }`; a `<task-notification>` arrives when it completes. The
+//! script orchestrates subagents (`agent()`/`parallel()`/`pipeline()`/…);
+//! LingXi runs it on the `workflow` crate's QuickJS runtime via a
+//! `LocalWorkflow` background task (`tasks::handlers::local_workflow`).
+//!
+//! The byte-exact model-facing surface — the tool name, the long-form
+//! description ([`Tool::prompt`]), and the input schema — is reproduced from the
+//! claude-code v2.1.185 binary. The launch itself goes through the injected
+//! [`WorkflowLauncher`] seam, which the composition root wires over the task
+//! registry; with no launcher wired the tool serves its surface but `call`
+//! reports a clear error.
+
+#![forbid(unsafe_code)]
+
+use std::sync::Arc;
+
+use async_trait::async_trait;
+use once_cell::sync::Lazy;
+use permission::result::PermissionMetadata;
+use permission::{PermissionDecisionReason, PermissionResult};
+use serde_json::{json, Value};
+
+use tool_api::context::ToolUseContext;
+use tool_api::progress::ToolProgressSender;
+use tool_api::tool_trait::{
+    DescriptionOptions, PromptOptions, Tool, ToolCallResult, ToolError, ToolStaticContext,
+    ValidationError,
+};
+
+/// Tool name byte-lock.
+pub const TOOL_NAME: &str = "Workflow";
+
+/// The long-form tool description (claude-code v2.1.185 `prompt`), reproduced
+/// byte-for-byte. A trailing newline (should an editor add one to the data file)
+/// is stripped so the API description matches the binary exactly.
+static DESCRIPTION: Lazy<String> = Lazy::new(|| {
+    include_str!("workflow_description.txt")
+        .trim_end_matches('\n')
+        .to_string()
+});
+
+/// The input schema (claude-code v2.1.185 `inputSchema`), reproduced from the
+/// zod `strictObject` definition (source-order properties, `additionalProperties:
+/// false`, no required keys — the "at least one of script/name/scriptPath"
+/// constraint is a runtime `.refine`, enforced in [`Tool::validate_input`]).
+static INPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
+    serde_json::from_str(include_str!("workflow_input_schema.json"))
+        .expect("workflow_input_schema.json is valid JSON")
+});
+
+/// What a [`WorkflowLauncher`] needs to start a workflow run. Mirrors the
+/// Workflow tool's input minus the `title`/`description` fields (which the tool
+/// description marks "Ignored").
+#[derive(Debug, Clone, Default)]
+pub struct WorkflowLaunchSpec {
+    /// Inline self-contained script source.
+    pub script: Option<String>,
+    /// Name of a predefined/saved workflow.
+    pub name: Option<String>,
+    /// Path to a script file on disk (takes precedence over `script`/`name`).
+    pub script_path: Option<String>,
+    /// `args` global value, passed verbatim.
+    pub args: Option<Value>,
+    /// Resume a prior run by its `wf_…` id.
+    pub resume_from_run_id: Option<String>,
+}
+
+/// The result of a successful launch.
+#[derive(Debug, Clone)]
+pub struct WorkflowLaunched {
+    /// The background task id (claude-code `taskId`).
+    pub task_id: String,
+}
+
+/// Error launching a workflow.
+#[derive(Debug)]
+pub struct WorkflowLaunchError(pub String);
+
+impl std::fmt::Display for WorkflowLaunchError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+impl std::error::Error for WorkflowLaunchError {}
+
+/// Seam that spawns a `LocalWorkflow` background task and returns its id. The
+/// composition root wires this over the task registry (keeping this crate
+/// decoupled from `tasks`); tests inject a mock.
+#[async_trait]
+pub trait WorkflowLauncher: Send + Sync {
+    /// Launch the workflow described by `spec`, returning the new task id.
+    async fn launch(
+        &self,
+        spec: WorkflowLaunchSpec,
+    ) -> Result<WorkflowLaunched, WorkflowLaunchError>;
+}
+
+/// `WorkflowTool` — launch a workflow script as a background task.
+#[derive(Clone)]
+pub struct WorkflowTool {
+    launcher: Option<Arc<dyn WorkflowLauncher>>,
+}
+
+impl WorkflowTool {
+    /// Construct. `launcher` is `None` when the host has not wired the workflow
+    /// task seam — the model-facing surface is still served, but `call` errors.
+    #[must_use]
+    pub fn new(launcher: Option<Arc<dyn WorkflowLauncher>>) -> Self {
+        Self { launcher }
+    }
+
+    fn spec_from_input(input: &Value) -> WorkflowLaunchSpec {
+        let s = |k: &str| input.get(k).and_then(Value::as_str).map(str::to_string);
+        WorkflowLaunchSpec {
+            script: s("script"),
+            name: s("name"),
+            script_path: s("scriptPath"),
+            args: input.get("args").cloned(),
+            resume_from_run_id: s("resumeFromRunId"),
+        }
+    }
+}
+
+#[async_trait]
+impl Tool for WorkflowTool {
+    fn name(&self) -> &str {
+        TOOL_NAME
+    }
+    fn input_schema(&self) -> &Value {
+        &INPUT_SCHEMA
+    }
+    fn is_enabled(&self, _: &ToolStaticContext) -> bool {
+        true
+    }
+    fn max_result_size_chars(&self) -> usize {
+        // The result is a tiny `{status, taskId, taskType}` object.
+        16384
+    }
+    fn is_concurrency_safe(&self, _: &Value) -> bool {
+        // A workflow fans out many side-effecting agents.
+        false
+    }
+    fn is_read_only(&self, _: &Value) -> bool {
+        false
+    }
+
+    async fn check_permissions(&self, _: &Value, _: &ToolUseContext) -> PermissionResult {
+        // The Workflow tool itself needs no permission gate — the subagents it
+        // spawns are individually permissioned (claude-code surfaces no
+        // `canUseTool` prompt for Workflow).
+        PermissionResult::Allow {
+            reason: PermissionDecisionReason::Other {
+                reason: "Workflow launch — spawned agents are individually permissioned".into(),
+            },
+            updated_input: None,
+            update_destination: None,
+            metadata: PermissionMetadata::default(),
+        }
+    }
+
+    async fn description(&self, _: &Value, _: &DescriptionOptions) -> String {
+        "Running a workflow".into()
+    }
+
+    async fn prompt(&self, _: &PromptOptions) -> String {
+        DESCRIPTION.clone()
+    }
+
+    async fn validate_input(
+        &self,
+        input: &Value,
+        _: &ToolUseContext,
+    ) -> Result<(), ValidationError> {
+        // zod `.refine(e => e.script || e.name || e.scriptPath, { message: … })`.
+        let present =
+            |k: &str| input.get(k).and_then(Value::as_str).is_some_and(|s| !s.is_empty());
+        if !present("script") && !present("name") && !present("scriptPath") {
+            return Err(ValidationError(
+                "Must provide script, name, or scriptPath".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    async fn call(
+        &self,
+        input: Value,
+        _ctx: ToolUseContext,
+        _progress: ToolProgressSender,
+    ) -> Result<ToolCallResult, ToolError> {
+        let launcher = self.launcher.as_ref().ok_or_else(|| {
+            ToolError::Internal("Workflow launching is not available in this host".into())
+        })?;
+        let spec = Self::spec_from_input(&input);
+        let launched = launcher
+            .launch(spec)
+            .await
+            .map_err(|e| ToolError::Internal(e.to_string()))?;
+        // claude-code result shape: { status: "async_launched", taskId, taskType }.
+        // (The "remote_launched"/"remote_agent" variants are the CCR/remote path,
+        // out of scope for the single-process build.)
+        Ok(ToolCallResult {
+            data: json!({
+                "status": "async_launched",
+                "taskId": launched.task_id,
+                "taskType": "local_workflow",
+            }),
+            new_messages: vec![],
+            context_modifier: None,
+            mcp_meta: None,
+        })
+    }
+}
+
+/// Register the `Workflow` tool against `reg`. Without a wired launcher the
+/// model-facing surface is served but `call` errors; the composition root
+/// constructs [`WorkflowTool::new(Some(launcher))`] directly once the workflow
+/// task seam is available.
+pub fn register_all(reg: &mut tool_api::ToolRegistry, _ctx: tool_api::BuiltinToolContext) {
+    reg.register_builtin(Arc::new(WorkflowTool::new(None)));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex as StdMutex;
+
+    struct MockLauncher {
+        task_id: String,
+        seen: StdMutex<Option<WorkflowLaunchSpec>>,
+    }
+    impl MockLauncher {
+        fn new(task_id: &str) -> Arc<Self> {
+            Arc::new(Self {
+                task_id: task_id.to_string(),
+                seen: StdMutex::new(None),
+            })
+        }
+    }
+    #[async_trait]
+    impl WorkflowLauncher for MockLauncher {
+        async fn launch(
+            &self,
+            spec: WorkflowLaunchSpec,
+        ) -> Result<WorkflowLaunched, WorkflowLaunchError> {
+            *self.seen.lock().unwrap() = Some(spec);
+            Ok(WorkflowLaunched {
+                task_id: self.task_id.clone(),
+            })
+        }
+    }
+
+    fn tool(launcher: Option<Arc<dyn WorkflowLauncher>>) -> WorkflowTool {
+        WorkflowTool::new(launcher)
+    }
+
+    #[test]
+    fn name_is_workflow() {
+        assert_eq!(tool(None).name(), "Workflow");
+    }
+
+    #[test]
+    fn description_matches_the_binary_byte_for_byte() {
+        // v2.1.185 runtime length of the Workflow tool description.
+        assert_eq!(DESCRIPTION.len(), 18961, "description byte length drifted");
+        assert!(DESCRIPTION.starts_with(
+            "Execute a workflow script that orchestrates multiple subagents deterministically."
+        ));
+        assert!(DESCRIPTION.ends_with("hand-author a continuation script."));
+        // The ${r1e} interpolation resolved to the ▸ group marker.
+        assert!(DESCRIPTION.contains("\"▸ name\" group in /workflows"));
+        // No leftover raw escape sequences.
+        assert!(!DESCRIPTION.contains("\\u2014"));
+    }
+
+    #[test]
+    fn input_schema_is_byte_exact() {
+        let s = &*INPUT_SCHEMA;
+        assert_eq!(s["type"], "object");
+        assert_eq!(s["additionalProperties"], false);
+        assert!(s.get("required").is_none(), "no required keys");
+        // Source-order properties (the zod definition order).
+        let props = s["properties"].as_object().unwrap();
+        let order: Vec<&String> = props.keys().collect();
+        assert_eq!(
+            order,
+            vec![
+                "script",
+                "name",
+                "description",
+                "title",
+                "args",
+                "scriptPath",
+                "resumeFromRunId"
+            ]
+        );
+        assert_eq!(props["script"]["maxLength"], 524288);
+        assert_eq!(props["resumeFromRunId"]["pattern"], "^wf_[a-z0-9-]{6,}$");
+        // E.unknown() → `args` has no `type` constraint.
+        assert!(props["args"].get("type").is_none());
+        assert!(props["script"]["description"]
+            .as_str()
+            .unwrap()
+            .starts_with("Self-contained workflow script."));
+    }
+
+    #[tokio::test]
+    async fn validate_requires_one_of_script_name_or_script_path() {
+        let t = tool(None);
+        let ctx = tool_api::test_support::fresh_ctx();
+        assert!(t.validate_input(&json!({}), &ctx).await.is_err());
+        assert!(t
+            .validate_input(&json!({ "title": "x" }), &ctx)
+            .await
+            .is_err());
+        assert!(t
+            .validate_input(&json!({ "script": "log('hi')" }), &ctx)
+            .await
+            .is_ok());
+        assert!(t
+            .validate_input(&json!({ "name": "review" }), &ctx)
+            .await
+            .is_ok());
+        assert!(t
+            .validate_input(&json!({ "scriptPath": "/tmp/wf.js" }), &ctx)
+            .await
+            .is_ok());
+    }
+
+    #[tokio::test]
+    async fn call_launches_and_returns_async_launched() {
+        let launcher = MockLauncher::new("w_abc123");
+        let t = tool(Some(launcher.clone()));
+        let res = t
+            .call(
+                json!({ "script": "return 1;", "args": ["a.ts", "b.ts"] }),
+                tool_api::test_support::fresh_ctx(),
+                tool_api::test_support::fresh_tx(),
+            )
+            .await
+            .expect("call ok");
+        assert_eq!(res.data["status"], "async_launched");
+        assert_eq!(res.data["taskId"], "w_abc123");
+        assert_eq!(res.data["taskType"], "local_workflow");
+        // The launcher saw the parsed spec (script + args).
+        let spec = launcher.seen.lock().unwrap().clone().expect("launched");
+        assert_eq!(spec.script.as_deref(), Some("return 1;"));
+        assert_eq!(spec.args, Some(json!(["a.ts", "b.ts"])));
+    }
+
+    #[tokio::test]
+    async fn call_without_a_launcher_errors() {
+        let t = tool(None);
+        let err = t
+            .call(
+                json!({ "script": "return 1;" }),
+                tool_api::test_support::fresh_ctx(),
+                tool_api::test_support::fresh_tx(),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ToolError::Internal(_)));
+    }
+}

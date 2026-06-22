@@ -242,6 +242,7 @@ fn decode_response_body(body_json: Value) -> Result<LlmResponse, LlmError> {
         model,
         content,
         stop_reason,
+        stop_details: None,
         usage,
         cost: None,
         provider_metadata: body_json,
@@ -515,6 +516,7 @@ impl OpenAiResponsesStreamDecoder {
                     .to_string(),
                 content: Vec::new(),
                 stop_reason: None,
+                stop_details: None,
                 usage: crate::Usage::default(),
                 cost: None,
                 provider_metadata: self.provider_metadata.clone(),
@@ -703,6 +705,7 @@ impl OpenAiResponsesStreamDecoder {
         out.push(LlmEvent::MessageDelta {
             delta: crate::MessageDeltaPayload {
                 stop_reason: self.stop_reason.clone(),
+                stop_details: None,
             },
             usage: self.usage.clone(),
         });

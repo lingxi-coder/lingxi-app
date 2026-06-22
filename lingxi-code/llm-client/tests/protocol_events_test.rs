@@ -6,6 +6,7 @@ fn sample_response() -> LlmResponse {
         model: "model-a".to_string(),
         content: vec![],
         stop_reason: None,
+        stop_details: None,
         usage: Usage::default(),
         cost: None,
         provider_metadata: serde_json::json!({}),
@@ -27,7 +28,7 @@ fn stream_events_support_block_lifecycle_and_terminal_delta() {
     };
     let stop = LlmEvent::ContentBlockStop { index: 0 };
     let terminal = LlmEvent::MessageDelta {
-        delta: MessageDeltaPayload { stop_reason: Some("end_turn".to_string()) },
+        delta: MessageDeltaPayload { stop_reason: Some("end_turn".to_string()), stop_details: None },
         usage: None,
     };
 
@@ -53,7 +54,7 @@ fn stream_event_json_has_expected_shape_and_round_trips() {
     };
     let stop = LlmEvent::ContentBlockStop { index: 0 };
     let terminal = LlmEvent::MessageDelta {
-        delta: MessageDeltaPayload { stop_reason: Some("end_turn".to_string()) },
+        delta: MessageDeltaPayload { stop_reason: Some("end_turn".to_string()), stop_details: None },
         usage: Some(Usage::default()),
     };
 

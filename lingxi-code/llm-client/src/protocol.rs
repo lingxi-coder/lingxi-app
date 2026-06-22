@@ -446,6 +446,10 @@ pub struct LlmResponse {
     /// `tool_use`, `max_tokens`, `stop_sequence`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stop_reason: Option<String>,
+    /// Optional refusal `stop_details` (`{category, explanation}`) for the
+    /// terminal refusal message's cyber/bio variant. `None` for non-refusals.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stop_details: Option<StopDetails>,
     /// Normalized usage.
     pub usage: Usage,
     /// Optional per-call cost estimate.
@@ -542,11 +546,30 @@ pub enum ContentDelta {
     },
 }
 
+/// Refusal `stop_details` — the Anthropic response message's
+/// `stop_details: {category, explanation}` (present on `stop_reason: "refusal"`
+/// responses). Drives the terminal refusal message's cyber/bio category variant
+/// (claude-code `U2e`: `t.category`/`t.explanation`). Both the non-streaming
+/// body and the streaming `message_delta.delta` carry it.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct StopDetails {
+    /// `cyber` / `bio` / … — the refusal category.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub category: Option<String>,
+    /// Free-text explanation (may embed a `https://claude.com/form/…` exemption URL).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub explanation: Option<String>,
+}
+
 /// Canonical terminal message delta payload.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MessageDeltaPayload {
     /// Optional terminal stop reason.
     pub stop_reason: Option<String>,
+    /// Optional refusal `stop_details` (the streaming `message_delta.delta`
+    /// carries it on a refusal).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stop_details: Option<StopDetails>,
 }
 
 /// Canonical tool declaration.

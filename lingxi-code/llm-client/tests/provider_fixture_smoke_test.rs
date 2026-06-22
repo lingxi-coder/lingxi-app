@@ -82,7 +82,7 @@ fn assert_openai_events(events: &[LlmEvent]) {
     assert!(matches!(
         events[8],
         LlmEvent::MessageDelta {
-            delta: llm_client::MessageDeltaPayload { stop_reason: Some(ref reason) },
+            delta: llm_client::MessageDeltaPayload { stop_reason: Some(ref reason), stop_details: None },
             ..
         } if reason == "tool_use"
     ));
@@ -124,7 +124,7 @@ fn assert_gemini_events(events: &[LlmEvent]) {
     assert!(matches!(
         events[7],
         LlmEvent::MessageDelta {
-            delta: llm_client::MessageDeltaPayload { stop_reason: Some(ref reason) },
+            delta: llm_client::MessageDeltaPayload { stop_reason: Some(ref reason), stop_details: None },
             ..
         } if reason == "tool_use"
     ));

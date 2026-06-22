@@ -135,6 +135,7 @@ mod tests {
             model: "claude-haiku-4-5".into(),
             content: vec![LlmContentBlock::Text { text: body.into(), cache_control: None }],
             stop_reason: Some("end_turn".into()),
+            stop_details: None,
             usage: Usage::default(),
             cost: None,
             provider_metadata: serde_json::Value::Null,

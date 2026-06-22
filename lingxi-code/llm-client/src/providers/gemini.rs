@@ -237,7 +237,7 @@ impl StreamDecoder for GeminiStreamDecoder {
         };
 
         out.push(LlmEvent::MessageDelta {
-            delta: MessageDeltaPayload { stop_reason },
+            delta: MessageDeltaPayload { stop_reason, stop_details: None },
             usage: self.usage.clone(),
         });
         out.push(LlmEvent::MessageStop);
@@ -259,6 +259,7 @@ fn decode_stream_start(root: &Value) -> LlmResponse {
             .to_string(),
         content: Vec::new(),
         stop_reason: None,
+        stop_details: None,
         usage: root.get("usageMetadata").map(decode_usage).unwrap_or_default(),
         cost: None,
         provider_metadata: Value::Null,
@@ -636,6 +637,7 @@ fn decode_response_body(body_json: Value) -> Result<LlmResponse, LlmError> {
         model,
         content,
         stop_reason,
+        stop_details: None,
         usage,
         cost: None,
         provider_metadata: body_json,

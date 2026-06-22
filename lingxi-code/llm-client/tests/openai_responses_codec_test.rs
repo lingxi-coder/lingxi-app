@@ -1186,6 +1186,7 @@ fn stream_created_emits_message_start_snapshot() {
                 model: "gpt-5".to_string(),
                 content: Vec::new(),
                 stop_reason: None,
+                stop_details: None,
                 usage: Usage::default(),
                 cost: None,
                 provider_metadata: serde_json::Value::Null,
@@ -1488,6 +1489,7 @@ fn stream_completed_closes_open_blocks_then_message_delta_and_stop() {
             LlmEvent::MessageDelta {
                 delta: MessageDeltaPayload {
                     stop_reason: Some("end_turn".to_string()),
+        stop_details: None,
                 },
                 usage: Some(Usage {
                     billable_tokens: TokenUsage {
@@ -1557,6 +1559,7 @@ fn stream_incomplete_max_output_tokens_maps_max_tokens() {
             LlmEvent::MessageDelta {
                 delta: MessageDeltaPayload {
                     stop_reason: Some("max_tokens".to_string()),
+        stop_details: None,
                 },
                 usage: None,
             },
@@ -1865,6 +1868,7 @@ fn stream_content_delta_before_created_emits_synthetic_message_start() {
                     model: String::new(),
                     content: Vec::new(),
                     stop_reason: None,
+                    stop_details: None,
                     usage: Usage::default(),
                     cost: None,
                     provider_metadata: serde_json::Value::Null,
@@ -1919,7 +1923,7 @@ fn stream_finish_without_completed_closes_blocks_and_stops() {
         &[
             LlmEvent::ContentBlockStop { index: 0 },
             LlmEvent::MessageDelta {
-                delta: MessageDeltaPayload { stop_reason: None },
+                delta: MessageDeltaPayload { stop_reason: None, stop_details: None },
                 usage: None,
             },
             LlmEvent::MessageStop,
@@ -2027,6 +2031,7 @@ fn stream_happy_path_exact_event_sequence() {
                     model: "gpt-5".to_string(),
                     content: Vec::new(),
                     stop_reason: None,
+                    stop_details: None,
                     usage: Usage::default(),
                     cost: None,
                     provider_metadata: serde_json::Value::Null,
@@ -2076,6 +2081,7 @@ fn stream_happy_path_exact_event_sequence() {
             LlmEvent::MessageDelta {
                 delta: MessageDeltaPayload {
                     stop_reason: Some("tool_use".to_string()),
+        stop_details: None,
                 },
                 usage: Some(Usage {
                     billable_tokens: TokenUsage {

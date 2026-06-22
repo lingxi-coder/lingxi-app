@@ -4544,6 +4544,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                             self.config.interactive_permissions,
                             other,
                             request_id.as_deref(),
+                            pumped.stop_details.as_ref(),
                         )
                     };
                     if let Some(text) = api_error {
@@ -5774,6 +5775,9 @@ fn llm_response_to_pumped_turn(resp: &LlmResponse) -> crate::streaming_loop::Pum
         stop_reason,
         output_tokens,
         usage,
+        // Non-streaming fallback: carry the response's refusal stop_details so
+        // the terminal refusal arm gets the cyber/bio variant.
+        stop_details: resp.stop_details.clone(),
     }
 }
 

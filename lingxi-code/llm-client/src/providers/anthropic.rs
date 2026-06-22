@@ -409,15 +409,38 @@ fn decode_response_body(body_json: Value) -> Result<LlmResponse, LlmError> {
         .get("stop_reason")
         .and_then(Value::as_str)
         .map(ToString::to_string);
+    // Refusal `stop_details: {category, explanation}` (read before `body_json`
+    // is moved into `provider_metadata`).
+    let stop_details = decode_stop_details(body_json.get("stop_details"));
 
     Ok(LlmResponse {
         id,
         model,
         content,
         stop_reason,
+        stop_details,
         usage,
         cost: None,
         provider_metadata: body_json,
+    })
+}
+
+/// Decode the Anthropic `stop_details: {category, explanation}` object (present
+/// on `stop_reason: "refusal"` responses + the streaming `message_delta.delta`).
+fn decode_stop_details(value: Option<&Value>) -> Option<crate::StopDetails> {
+    let obj = value?;
+    if obj.is_null() {
+        return None;
+    }
+    Some(crate::StopDetails {
+        category: obj
+            .get("category")
+            .and_then(Value::as_str)
+            .map(ToString::to_string),
+        explanation: obj
+            .get("explanation")
+            .and_then(Value::as_str)
+            .map(ToString::to_string),
     })
 }
 
@@ -514,6 +537,9 @@ fn decode_stream_event(value: &Value) -> Result<Vec<LlmEvent>, LlmError> {
                     .and_then(|delta| delta.get("stop_reason"))
                     .and_then(Value::as_str)
                     .map(ToString::to_string),
+                stop_details: decode_stop_details(
+                    value.get("delta").and_then(|delta| delta.get("stop_details")),
+                ),
             },
             usage: value.get("usage").map(normalize_anthropic_usage),
         }]),

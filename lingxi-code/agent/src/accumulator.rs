@@ -451,6 +451,7 @@ pub(crate) async fn accumulate_stream(
                     model,
                     content,
                     stop_reason,
+                    stop_details: None,
                     usage,
                     cost,
                     provider_metadata,
@@ -492,6 +493,7 @@ pub(crate) fn response_to_stream_events(resp: LlmResponse) -> Vec<LlmEvent> {
             model: resp.model.clone(),
             content: Vec::new(),
             stop_reason: None,
+            stop_details: None,
             // `resp.usage` is reused below for the final `message_delta`; clone
             // here since `Usage` is not `Copy`.
             usage: resp.usage.clone(),
@@ -569,6 +571,7 @@ pub(crate) fn response_to_stream_events(resp: LlmResponse) -> Vec<LlmEvent> {
     events.push(LlmEvent::MessageDelta {
         delta: MessageDeltaPayload {
             stop_reason: resp.stop_reason,
+            stop_details: None,
         },
         usage: Some(resp.usage),
     });
@@ -593,6 +596,7 @@ mod tests {
                 model: model.to_string(),
                 content: Vec::new(),
                 stop_reason: None,
+                stop_details: None,
                 usage: Usage::default(),
                 cost: None,
                 provider_metadata: Value::Null,
@@ -625,6 +629,7 @@ mod tests {
             LlmEvent::MessageDelta {
                 delta: MessageDeltaPayload {
                     stop_reason: Some("end_turn".into()),
+                stop_details: None,
                 },
                 usage: None,
             },
@@ -669,6 +674,7 @@ mod tests {
             LlmEvent::MessageDelta {
                 delta: MessageDeltaPayload {
                     stop_reason: Some("tool_use".into()),
+                stop_details: None,
                 },
                 usage: None,
             },
@@ -714,6 +720,7 @@ mod tests {
             LlmEvent::MessageDelta {
                 delta: MessageDeltaPayload {
                     stop_reason: Some("end_turn".into()),
+                stop_details: None,
                 },
                 usage: None,
             },
@@ -738,6 +745,7 @@ mod tests {
                     model: "claude-mock".into(),
                     content: Vec::new(),
                     stop_reason: None,
+                    stop_details: None,
                     usage: Usage {
                         billable_tokens: TokenUsage {
                             input: 42,
@@ -755,6 +763,7 @@ mod tests {
             LlmEvent::MessageDelta {
                 delta: MessageDeltaPayload {
                     stop_reason: Some("end_turn".into()),
+                stop_details: None,
                 },
                 usage: Some(Usage {
                     billable_tokens: TokenUsage {
@@ -900,6 +909,7 @@ mod tests {
                 cache_control: None,
             }],
             stop_reason: Some("end_turn".into()),
+            stop_details: None,
             usage: Usage::default(),
             cost: None,
             provider_metadata: Value::Null,
@@ -938,6 +948,7 @@ mod tests {
                 },
             ],
             stop_reason: Some("end_turn".into()),
+            stop_details: None,
             usage: Usage::default(),
             cost: None,
             provider_metadata: Value::Null,
@@ -1006,6 +1017,7 @@ mod tests {
                 },
             ],
             stop_reason: Some("tool_use".into()),
+            stop_details: None,
             usage: Usage {
                 billable_tokens: TokenUsage {
                     input: 11,
@@ -1033,6 +1045,7 @@ mod tests {
                 input: serde_json::json!({}),
             }],
             stop_reason: Some("end_turn".into()),
+            stop_details: None,
             usage: Usage::default(),
             cost: None,
             provider_metadata: Value::Null,

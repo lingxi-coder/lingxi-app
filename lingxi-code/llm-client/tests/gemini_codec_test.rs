@@ -273,7 +273,7 @@ fn sse_stream_reassembles_text_then_thought_then_function_call() {
     assert!(matches!(events[7], LlmEvent::ContentBlockStop { .. }));
     assert!(matches!(events[8], LlmEvent::ContentBlockStop { .. }));
     assert!(matches!(events[9], LlmEvent::ContentBlockStop { .. }));
-    assert!(matches!(events[10], LlmEvent::MessageDelta { delta: llm_client::MessageDeltaPayload { stop_reason: Some(ref reason) }, .. } if reason == "tool_use"));
+    assert!(matches!(events[10], LlmEvent::MessageDelta { delta: llm_client::MessageDeltaPayload { stop_reason: Some(ref reason), stop_details: None }, .. } if reason == "tool_use"));
     assert!(matches!(events.last(), Some(LlmEvent::MessageStop)));
 }
 

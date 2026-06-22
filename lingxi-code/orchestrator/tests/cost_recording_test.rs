@@ -27,6 +27,7 @@ fn end_turn_response_with_usage(input: u64, output: u64) -> LlmResponse {
             cache_control: None,
         }],
         stop_reason: Some("end_turn".to_string()),
+        stop_details: None,
         usage: Usage {
             billable_tokens: TokenUsage {
                 input,

@@ -400,7 +400,7 @@ async fn execute_stream_decodes_anthropic_event_sequence() {
     ));
     assert!(matches!(
         events[4],
-        LlmEvent::MessageDelta { delta: llm_client::MessageDeltaPayload { stop_reason: Some(ref reason) }, .. }
+        LlmEvent::MessageDelta { delta: llm_client::MessageDeltaPayload { stop_reason: Some(ref reason), stop_details: None }, .. }
             if reason == "end_turn"
     ));
     assert!(matches!(events.last(), Some(LlmEvent::MessageStop)));

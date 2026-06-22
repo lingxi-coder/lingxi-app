@@ -21,6 +21,7 @@ fn batched_response(text: &str) -> LlmResponse {
         model: "claude-opus-4-7".into(),
         content: vec![LlmContentBlock::Text { text: text.into(), cache_control: None }],
         stop_reason: Some("end_turn".into()),
+        stop_details: None,
         usage: Usage::default(),
         cost: None,
         provider_metadata: serde_json::Value::Null,

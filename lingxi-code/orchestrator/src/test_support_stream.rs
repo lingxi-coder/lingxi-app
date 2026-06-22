@@ -151,6 +151,7 @@ pub fn message_start(id: &str, model: &str) -> LlmEvent {
             model: model.to_string(),
             content: Vec::new(),
             stop_reason: None,
+            stop_details: None,
             usage: default_usage(),
             cost: None,
             provider_metadata: serde_json::Value::Null,
@@ -171,6 +172,7 @@ pub fn message_start_with_usage(id: &str, model: &str, usage: Usage) -> LlmEvent
             model: model.to_string(),
             content: Vec::new(),
             stop_reason: None,
+            stop_details: None,
             usage,
             cost: None,
             provider_metadata: serde_json::Value::Null,
@@ -239,6 +241,7 @@ pub fn message_delta_stop(stop_reason: &str) -> LlmEvent {
     LlmEvent::MessageDelta {
         delta: MessageDeltaPayload {
             stop_reason: Some(stop_reason.to_string()),
+                stop_details: None,
         },
         usage: None,
     }
@@ -276,6 +279,7 @@ pub fn message_delta_stop_with_usage(stop_reason: &str, usage: Usage) -> LlmEven
     LlmEvent::MessageDelta {
         delta: MessageDeltaPayload {
             stop_reason: Some(stop_reason.to_string()),
+                stop_details: None,
         },
         usage: Some(usage),
     }

@@ -256,6 +256,7 @@ pub fn mock_message_response(
         model: "claude-opus-4-7".to_string(),
         content,
         stop_reason: stop_reason.map(str::to_string),
+        stop_details: None,
         usage: Usage::default(),
         cost: None,
         provider_metadata: serde_json::Value::Null,

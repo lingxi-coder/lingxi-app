@@ -51,6 +51,10 @@ pub enum RouterAction {
         /// Full usage snapshot from the `message_delta` (authoritative for
         /// billing). `None` when the delta carried no usage.
         usage: Option<Usage>,
+        /// Refusal `stop_details` (`{category, explanation}`) from the delta —
+        /// drives the terminal refusal message's cyber/bio variant. `None` for
+        /// non-refusal deltas.
+        stop_details: Option<llm_client::StopDetails>,
     },
     /// `message_delta` arrived with usage but NO `stop_reason` (A3). The
     /// streaming loop records `output_tokens` and continues.
@@ -227,6 +231,7 @@ pub async fn dispatch_event(
                     stop_reason: sr,
                     output_tokens,
                     usage: usage_for_billing,
+                    stop_details: delta.stop_details,
                 })
             } else if output_tokens > 0 {
                 Ok(RouterAction::RecordUsage {
@@ -315,6 +320,7 @@ mod tests {
             LlmEvent::MessageDelta {
                 delta: MessageDeltaPayload {
                     stop_reason: Some("end_turn".into()),
+                stop_details: None,
                 },
                 usage: None,
             },
@@ -353,6 +359,7 @@ mod tests {
             model: "claude-opus-4-7".into(),
             content: vec![],
             stop_reason: Some("end_turn".into()),
+            stop_details: None,
             usage: Usage::default(),
             cost: None,
             provider_metadata: serde_json::Value::Null,

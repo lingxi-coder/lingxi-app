@@ -325,6 +325,7 @@ async fn parity_cost_after_one_turn() {
             cache_control: None,
         }],
         stop_reason: Some("end_turn".into()),
+        stop_details: None,
         // COST.3/5: new UsageApi fields default to None (no web-search /
         // non-fast) → base pricing, so this fixture's asserted cost is
         // unchanged.

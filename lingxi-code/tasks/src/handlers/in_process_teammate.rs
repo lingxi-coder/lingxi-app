@@ -779,6 +779,7 @@ mod tests {
                 cache_control: None,
             }],
             stop_reason: Some("end_turn".into()),
+            stop_details: None,
             usage: llm_client::Usage::default(),
             cost: None,
             provider_metadata: serde_json::Value::Null,

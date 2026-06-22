@@ -222,6 +222,7 @@ impl OpenAiStreamDecoder {
             model: root.get("model").and_then(serde_json::Value::as_str).unwrap_or_default().to_string(),
             content: Vec::new(),
             stop_reason: None,
+            stop_details: None,
             usage: Usage::default(),
             cost: None,
             provider_metadata: serde_json::Value::Null,
@@ -334,6 +335,7 @@ impl OpenAiStreamDecoder {
         out.push(LlmEvent::MessageDelta {
             delta: MessageDeltaPayload {
                 stop_reason: self.stop_reason.clone(),
+                stop_details: None,
             },
             usage: self.usage.clone(),
         });
@@ -630,6 +632,7 @@ fn decode_response_body(body_json: Value) -> Result<LlmResponse, LlmError> {
         model,
         content,
         stop_reason,
+        stop_details: None,
         usage,
         cost: None,
         provider_metadata: body_json,

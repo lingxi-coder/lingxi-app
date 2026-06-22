@@ -63,6 +63,10 @@ pub struct PumpedTurn {
     /// Used by `try_run_turn_streaming` to record into `CostTracker`
     /// (mirrors the non-streaming path in `turn_loop.rs`).
     pub usage: Option<LlmUsage>,
+    /// Refusal `stop_details` (`{category, explanation}`) from the final
+    /// `message_delta` — drives the terminal refusal message's cyber/bio
+    /// variant. `None` for non-refusal turns.
+    pub stop_details: Option<llm_client::StopDetails>,
 }
 
 /// Merge a `MessageDelta` usage snapshot into the `MessageStart` seed.
@@ -262,8 +266,12 @@ async fn pump_stream_inner(
                 stop_reason,
                 output_tokens,
                 usage,
+                stop_details,
             } => {
                 turn.stop_reason = Some(stop_reason);
+                if stop_details.is_some() {
+                    turn.stop_details = stop_details;
+                }
                 // The final delta's usage supersedes any earlier snapshot.
                 if output_tokens > 0 {
                     turn.output_tokens = output_tokens;

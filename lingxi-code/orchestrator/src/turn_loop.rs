@@ -797,7 +797,9 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
             // above did not `continue`) both end here. `max_tokens` (recovery
             // exhausted) is surfaced inside `handle_max_output_tokens`.
             Some(other @ ("model_context_window_exceeded" | "refusal")) => {
-                surface_terminal_api_error(orch, other).await;
+                // Pass the response's refusal `stop_details` so the cyber/bio
+                // variant fires (no-op for model_context_window_exceeded).
+                surface_terminal_api_error(orch, other, response.stop_details.as_ref()).await;
                 TurnStepOutcome::Ended {
                     final_message_id: assistant_id,
                     stop_reason: other.to_string(),
@@ -1245,6 +1247,7 @@ pub(crate) fn terminal_api_error_text(
     interactive: bool,
     stop_reason: &str,
     request_id: Option<&str>,
+    stop_details: Option<&llm_client::StopDetails>,
 ) -> Option<String> {
     match stop_reason {
         "max_tokens" => Some(format!(
@@ -1255,8 +1258,15 @@ pub(crate) fn terminal_api_error_text(
             Some("API Error: The model has reached its context window limit.".to_string())
         }
         "refusal" => {
+            // Faithful port of the binary's `U2e` (@197278360): the message is
+            // category-aware via `rnt(cat) = cat ∈ {"cyber","bio"}` and
+            // `pd() = firstParty` (always true for LingXi's Anthropic path).
+            let category = stop_details.and_then(|sd| sd.category.as_deref());
+            let cyber_or_bio = matches!(category, Some("cyber" | "bio"));
+            let is_cyber = matches!(category, Some("cyber"));
             let base = match crate::prompt::env_meta::marketing_name_for_model(model) {
                 Some(label) => {
+                    // LABEL branch. `m`/`f` are the interactive suffixes.
                     let m = if interactive {
                         "Double press esc to edit your last message, or try a different model with /model."
                     } else {
@@ -1267,28 +1277,46 @@ pub(crate) fn terminal_api_error_text(
                     } else {
                         "Learn more: https://support.claude.com/en/articles/15363606"
                     };
-                    format!(
-                        "API Error: {label} has safety measures that flagged something in this session (https://www.anthropic.com/legal/aup). This sometimes happens with safe, normal conversations. Claude Code can't respond to this request with {label}.\n\n{m}\n\n{f}"
-                    )
+                    // `A`: the cyber/bio variant (`rnt`) vs the generic one.
+                    let a = if cyber_or_bio {
+                        format!(
+                            "{label} has safety measures that flag messages on most cybersecurity or biology topics (https://www.anthropic.com/legal/aup). They may flag safe, normal content as well. These measures let us bring you Mythos-level capability in other areas sooner, and we're working to refine them."
+                        )
+                    } else {
+                        format!(
+                            "{label} has safety measures that flagged something in this session (https://www.anthropic.com/legal/aup). This sometimes happens with safe, normal conversations."
+                        )
+                    };
+                    format!("API Error: {a} Claude Code can't respond to this request with {label}.\n\n{m}\n\n{f}")
                 }
                 None => {
+                    // NO-LABEL branch.
                     let m = if interactive {
                         "Please double press esc to edit your last message or start a new session for Claude Code to assist with a different task."
                     } else {
                         "Try rephrasing the request in a new session or change your model."
                     };
-                    format!(
-                        "API Error: Claude Code is unable to respond to this request, which appears to violate our Usage Policy (https://www.anthropic.com/legal/aup). {m}"
-                    )
+                    if is_cyber {
+                        // Cyber-exemption variant (`cat==="cyber" && pd()`). `A`
+                        // is "This model" (no marketing name in this branch).
+                        let f = if interactive {
+                            "Send feedback with /feedback or learn more: https://support.claude.com/en/articles/15363606"
+                        } else {
+                            "Learn more: https://support.claude.com/en/articles/15363606"
+                        };
+                        let exemption =
+                            refusal_exemption_url(stop_details.and_then(|sd| sd.explanation.as_deref()));
+                        format!(
+                            "API Error: This model has safety measures that flagged this message for a cybersecurity topic. If your work requires this access, you can apply for an exemption: {exemption}\n\n{m}\n\n{f}"
+                        )
+                    } else {
+                        format!(
+                            "API Error: Claude Code is unable to respond to this request, which appears to violate our Usage Policy (https://www.anthropic.com/legal/aup). {m}"
+                        )
+                    }
                 }
             };
-            // The refusal assembly appends `\n\nRequest ID: ${n}` when a request
-            // id is present (binary @197279553: `let u = n ? `\n\nRequest ID:
-            // ${n}` : ""; content = c + u`). This suffix is REFUSAL-ONLY (the
-            // max_tokens / context-window messages have no Request ID line) and
-            // is separable from the cyber-category / `stop_details.explanation`
-            // variants, which remain residuals (LingXi does not track
-            // `stop_details`).
+            // `\n\nRequest ID: ${n}` suffix (REFUSAL-ONLY), binary @197279553.
             let suffix = match request_id {
                 Some(id) if !id.is_empty() => format!("\n\nRequest ID: {id}"),
                 _ => String::new(),
@@ -1297,6 +1325,28 @@ pub(crate) fn terminal_api_error_text(
         }
         _ => None,
     }
+}
+
+/// The binary's `oUi(explanation)`: extract a `https://claude.com/form/\S+`
+/// exemption URL from the refusal explanation (stripping trailing `.,;:!?)`),
+/// return it when ≤ 400 chars, else the fallback
+/// `https://claude.com/form/cyber-use-case`.
+fn refusal_exemption_url(explanation: Option<&str>) -> String {
+    const FALLBACK: &str = "https://claude.com/form/cyber-use-case";
+    const PREFIX: &str = "https://claude.com/form/";
+    if let Some(e) = explanation {
+        if let Some(start) = e.find(PREFIX) {
+            let rest = &e[start..];
+            // `\S+`: up to the next whitespace.
+            let end = rest.find(char::is_whitespace).unwrap_or(rest.len());
+            let url = rest[..end].trim_end_matches(['.', ',', ';', ':', '!', '?', ')']);
+            // `\S+` after `form/` requires at least one char; cap at dRd = 400.
+            if url.len() > PREFIX.len() && url.len() <= 400 {
+                return url.to_string();
+            }
+        }
+    }
+    FALLBACK.to_string()
 }
 
 /// Surface the terminal `API Error: …` assistant message on the BATCHED path
@@ -1312,6 +1362,7 @@ pub(crate) fn terminal_api_error_text(
 pub(crate) async fn surface_terminal_api_error(
     orch: &ConversationOrchestrator,
     stop_reason: &str,
+    stop_details: Option<&llm_client::StopDetails>,
 ) -> Option<MessageId> {
     let (model, interactive) = {
         let s = orch.session.lock().await;
@@ -1321,7 +1372,13 @@ pub(crate) async fn surface_terminal_api_error(
     // message's `\n\nRequest ID: …` suffix (recorded by the adapter from the
     // response headers; same slot the JSONL `requestId` reads from).
     let request_id = orch.api.last_request_id();
-    let text = terminal_api_error_text(&model, interactive, stop_reason, request_id.as_deref())?;
+    let text = terminal_api_error_text(
+        &model,
+        interactive,
+        stop_reason,
+        request_id.as_deref(),
+        stop_details,
+    )?;
     let assistant_id = MessageId::new();
     let assistant_msg = ConversationMessage::Assistant {
         id: assistant_id,
@@ -1394,7 +1451,7 @@ async fn handle_max_output_tokens(
 
     // Recovery exhausted — surface the byte-locked `API Error: …` cap message
     // (the streaming twin does this in its terminal arm), then end the turn.
-    surface_terminal_api_error(orch, "max_tokens").await;
+    surface_terminal_api_error(orch, "max_tokens", None).await;
     Ok(TurnStepOutcome::Ended {
         final_message_id: assistant_id,
         stop_reason: "max_tokens".to_string(),
@@ -2866,24 +2923,34 @@ fn tool_result_to_model_text(data: &serde_json::Value) -> String {
 
 #[cfg(test)]
 mod terminal_api_error_tests {
-    use super::terminal_api_error_text;
+    use super::{refusal_exemption_url, terminal_api_error_text};
+    use llm_client::StopDetails;
+
+    fn details(category: &str, explanation: Option<&str>) -> StopDetails {
+        StopDetails {
+            category: Some(category.to_string()),
+            explanation: explanation.map(str::to_string),
+        }
+    }
 
     /// The refusal message appends `\n\nRequest ID: {id}` when a request id is
     /// present (binary @197279553 `u = n ? `\n\nRequest ID: ${n}` : ""`), and
     /// omits it otherwise. The suffix is REFUSAL-ONLY.
     #[test]
     fn refusal_appends_request_id_suffix() {
-        let with = terminal_api_error_text("claude-opus-4-8", true, "refusal", Some("req_011abc"))
-            .expect("refusal text");
+        let with =
+            terminal_api_error_text("claude-opus-4-8", true, "refusal", Some("req_011abc"), None)
+                .expect("refusal text");
         assert!(with.ends_with("\n\nRequest ID: req_011abc"), "got: {with}");
 
-        let without = terminal_api_error_text("claude-opus-4-8", true, "refusal", None)
+        let without = terminal_api_error_text("claude-opus-4-8", true, "refusal", None, None)
             .expect("refusal text");
         assert!(!without.contains("Request ID:"), "got: {without}");
 
         // Empty id is treated as absent.
-        let empty = terminal_api_error_text("claude-opus-4-8", true, "refusal", Some(""))
-            .expect("refusal text");
+        let empty =
+            terminal_api_error_text("claude-opus-4-8", true, "refusal", Some(""), None)
+                .expect("refusal text");
         assert!(!empty.contains("Request ID:"), "got: {empty}");
     }
 
@@ -2892,10 +2959,87 @@ mod terminal_api_error_tests {
     #[test]
     fn non_refusal_terminals_have_no_request_id() {
         for sr in ["max_tokens", "model_context_window_exceeded"] {
-            let t = terminal_api_error_text("claude-opus-4-8", true, sr, Some("req_011abc"))
+            let t = terminal_api_error_text("claude-opus-4-8", true, sr, Some("req_011abc"), None)
                 .unwrap_or_else(|| panic!("{sr} text"));
             assert!(!t.contains("Request ID:"), "{sr}: {t}");
         }
+    }
+
+    /// No `stop_details` (the common refusal) → the generic label / Usage-Policy
+    /// text, byte-exact (no cyber/bio wording).
+    #[test]
+    fn refusal_without_stop_details_is_generic() {
+        // opus-4-8 HAS a marketing name → the label branch.
+        let t = terminal_api_error_text("claude-opus-4-8", true, "refusal", None, None)
+            .expect("refusal");
+        assert!(t.contains("has safety measures that flagged something in this session"), "got: {t}");
+        assert!(!t.contains("cybersecurity"), "got: {t}");
+    }
+
+    /// LABEL branch + cyber/bio category → the "flag messages on most
+    /// cybersecurity or biology topics … They may flag safe, normal content…"
+    /// variant (binary `U2e` `rnt(cat)` path).
+    #[test]
+    fn refusal_label_cyber_or_bio_variant() {
+        for cat in ["cyber", "bio"] {
+            let sd = details(cat, None);
+            let t = terminal_api_error_text(
+                "claude-opus-4-8",
+                true,
+                "refusal",
+                None,
+                Some(&sd),
+            )
+            .expect("refusal");
+            assert!(
+                t.contains("flag messages on most cybersecurity or biology topics"),
+                "{cat}: {t}"
+            );
+            assert!(
+                t.contains("They may flag safe, normal content as well."),
+                "{cat}: {t}"
+            );
+            assert!(t.contains("Claude Code can't respond to this request with"), "{cat}: {t}");
+        }
+    }
+
+    /// NO-LABEL branch + cyber category → the exemption-URL variant; the URL is
+    /// extracted from the explanation, else the fallback.
+    #[test]
+    fn refusal_nolabel_cyber_exemption_url() {
+        // A model with NO marketing name → the no-label branch. Use a bare id
+        // that `marketing_name_for_model` does not resolve.
+        let sd = details(
+            "cyber",
+            Some("see https://claude.com/form/abc123, thanks"),
+        );
+        let t = terminal_api_error_text("unknown-model-xyz", false, "refusal", None, Some(&sd))
+            .expect("refusal");
+        assert!(
+            t.contains("flagged this message for a cybersecurity topic"),
+            "got: {t}"
+        );
+        // Extracted URL (trailing comma stripped).
+        assert!(t.contains("exemption: https://claude.com/form/abc123\n\n"), "got: {t}");
+        assert!(!t.contains("abc123,"), "trailing punct must be stripped; got: {t}");
+    }
+
+    /// `oUi` exemption-URL extraction: form URL extracted (trailing punctuation
+    /// stripped), else the fallback.
+    #[test]
+    fn exemption_url_extraction() {
+        assert_eq!(
+            refusal_exemption_url(Some("apply at https://claude.com/form/cyber-x).")),
+            "https://claude.com/form/cyber-x"
+        );
+        assert_eq!(
+            refusal_exemption_url(None),
+            "https://claude.com/form/cyber-use-case"
+        );
+        assert_eq!(
+            refusal_exemption_url(Some("no url here")),
+            "https://claude.com/form/cyber-use-case"
+        );
     }
 }
 

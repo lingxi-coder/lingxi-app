@@ -359,6 +359,7 @@ mod tests {
     #[test]
     fn message_complete_synthesized_from_pumped_turn() {
         let turn = PumpedTurn {
+            stop_details: None,
             output_tokens: 0,
             assistant_blocks: vec![
                 ContentBlock::Thinking {
@@ -404,6 +405,7 @@ mod tests {
     #[test]
     fn image_block_is_dropped_from_synthesized_message() {
         let turn = PumpedTurn {
+            stop_details: None,
             output_tokens: 0,
             assistant_blocks: vec![
                 ContentBlock::Image {
@@ -488,6 +490,7 @@ mod tests {
         let wrapper = TurnWrapper::new(sink.clone());
 
         let turn = PumpedTurn {
+            stop_details: None,
             output_tokens: 0,
             assistant_blocks: vec![ContentBlock::Text { text: "hi".into() }],
             tool_uses: Vec::new(),

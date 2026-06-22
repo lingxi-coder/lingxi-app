@@ -23,6 +23,7 @@ fn end_turn_with_output_tokens(output_tokens: u64) -> LlmResponse {
             cache_control: None,
         }],
         stop_reason: Some("end_turn".to_string()),
+        stop_details: None,
         usage: Usage {
             billable_tokens: TokenUsage {
                 output: output_tokens,

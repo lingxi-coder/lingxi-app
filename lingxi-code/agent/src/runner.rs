@@ -1258,6 +1258,7 @@ mod tests {
                 model: "mock".into(),
                 content: vec![],
                 stop_reason: None,
+                stop_details: None,
                 usage: llm_client::Usage::default(),
                 cost: None,
                 provider_metadata: serde_json::Value::Null,
@@ -1285,6 +1286,7 @@ mod tests {
             LlmEvent::MessageDelta {
                 delta: MessageDeltaPayload {
                     stop_reason: Some(stop.into()),
+                stop_details: None,
                 },
                 usage: None,
             },
@@ -1315,6 +1317,7 @@ mod tests {
             LlmEvent::MessageDelta {
                 delta: MessageDeltaPayload {
                     stop_reason: Some(stop.into()),
+                stop_details: None,
                 },
                 usage: None,
             },
@@ -1386,6 +1389,7 @@ mod tests {
                 cache_control: None,
             }],
             stop_reason: stop_reason.map(str::to_string),
+            stop_details: None,
             usage: llm_client::Usage::default(),
             cost: None,
             provider_metadata: serde_json::Value::Null,
@@ -1403,6 +1407,7 @@ mod tests {
                 input: serde_json::json!({}),
             }],
             stop_reason: stop_reason.map(str::to_string),
+            stop_details: None,
             usage: llm_client::Usage::default(),
             cost: None,
             provider_metadata: serde_json::Value::Null,
@@ -1432,6 +1437,7 @@ mod tests {
                 },
             ],
             stop_reason: stop_reason.map(str::to_string),
+            stop_details: None,
             usage: llm_client::Usage::default(),
             cost: None,
             provider_metadata: serde_json::Value::Null,

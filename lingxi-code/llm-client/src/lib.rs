@@ -56,8 +56,8 @@ pub use protocol::{
     CacheScope, ContentBlock, ContentDelta, LlmEvent, LlmRequest, LlmResponse, Message,
     MessageDeltaPayload, NoopStreamDecoder, OpenAiResponsesRequestOptions, ProviderRequest,
     ProviderResponse, ProviderStreamTransport, RawStreamFrame, ReasoningConfig, RequestMetadata,
-    ResponseFormat, StreamDecoder, StreamFraming, SystemBlock, ToolChoice, ToolDeclaration,
-    WireCodec,
+    ResponseFormat, StopDetails, StreamDecoder, StreamFraming, SystemBlock, ToolChoice,
+    ToolDeclaration, WireCodec,
 };
 pub use providers::{
     AnthropicMessagesCodec, AzureOpenAiCodec, BedrockClaudeCodec, GeminiCodec, GeminiFile,

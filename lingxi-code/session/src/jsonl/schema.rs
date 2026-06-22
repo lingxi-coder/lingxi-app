@@ -67,6 +67,12 @@ pub struct JsonlMessage {
     #[serde(default)]
     pub message: Value,
 
+    // The Anthropic `request-id` response header (`req_…`) is persisted as the
+    // top-level `requestId` field on REAL assistant lines (the SDK's
+    // `response._request_id`). It is carried through [`Self::extra`] (the same
+    // flatten channel as `isMeta`), set by the writer only for real assistant
+    // lines — so no struct-literal constructor churn, and read-side round-trips
+    // it transparently. See `orchestrator::conversation::to_jsonl_message_with_inner_id`.
     /// `false` for the main agent loop; `true` for sub-agent transcripts.
     /// Optional in the schema but emitted by claude-code's writer; we default
     /// to `false` on write and accept missing on read.

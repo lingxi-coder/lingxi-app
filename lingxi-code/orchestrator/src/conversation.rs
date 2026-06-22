@@ -193,6 +193,16 @@ pub trait OrchestratorApiClient: Send + Sync {
         None
     }
 
+    /// The Anthropic `request-id` response header (`req_…`) of the most
+    /// recently completed call — recorded by the adapter from the stream
+    /// connect-success / non-stream response headers (the same pass that records
+    /// the rate-limit snapshot). Used to stamp the persisted assistant line's
+    /// top-level `requestId` (claude-code's `response._request_id`). Default
+    /// `None` for mocks / non-recording impls.
+    fn last_request_id(&self) -> Option<String> {
+        None
+    }
+
     /// Return the FULL most recently observed rate-limit header snapshot.
     ///
     /// Task 8 (llm-client future-work batch 3): unlike
@@ -2278,7 +2288,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         prompt_id: Option<String>,
     ) -> session::JsonlMessage {
         self.to_jsonl_message_with_inner_id(
-            msg, session_id, parent_uuid, git_branch, entrypoint, prompt_id, None, None, None,
+            msg, session_id, parent_uuid, git_branch, entrypoint, prompt_id, None, None, None, None,
         )
     }
 
@@ -2312,6 +2322,10 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         // `{role,content}` inner shape.
         assistant_model: Option<&str>,
         assistant_usage: Option<&serde_json::Value>,
+        // The Anthropic `request-id` response header for a REAL assistant line
+        // → the top-level `requestId` field (via `extra`). `None` (synthetic /
+        // user / system) omits it, matching claude-code's `requestId: undefined`.
+        request_id: Option<&str>,
     ) -> session::JsonlMessage {
         let (kind, mut inner_message) = match msg {
             ConversationMessage::User { content, .. } => (
@@ -2439,6 +2453,16 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         let mut extra = serde_json::Map::new();
         if msg.is_meta() {
             extra.insert("isMeta".to_string(), serde_json::Value::Bool(true));
+        }
+        // Top-level `requestId` (the Anthropic `request-id` response header) —
+        // claude-code persists it on REAL assistant lines only. The caller
+        // passes `Some` from the per-block real-response path; `None` (synthetic
+        // / user / system) omits it, matching `requestId: undefined`.
+        if let Some(rid) = request_id {
+            extra.insert(
+                "requestId".to_string(),
+                serde_json::Value::String(rid.to_string()),
+            );
         }
         session::JsonlMessage {
             message_type: kind.to_string(),
@@ -2618,6 +2642,11 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         // Raw Anthropic `usage` object for the BetaMessage envelope (the codec's
         // `Usage::provider_metadata`); `None` writes `usage: null`.
         usage: Option<&serde_json::Value>,
+        // The Anthropic `request-id` response header for this turn → the
+        // top-level `requestId` on every per-block assistant line. `None` when
+        // the adapter recorded no request-id (e.g. a mock that does not surface
+        // headers) — the line then omits `requestId`, like claude-code.
+        request_id: Option<&str>,
     ) -> std::collections::HashMap<protocol::ToolUseId, String> {
         let mut map: std::collections::HashMap<protocol::ToolUseId, String> =
             std::collections::HashMap::new();
@@ -2665,6 +2694,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                 Some(&inner_id),
                 Some(&model),
                 usage,
+                request_id,
             );
             let line_uuid = jmsg.uuid.clone();
             match writer.append(&jmsg).await {
@@ -4106,8 +4136,20 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             // Raw Anthropic `usage` object for the persisted BetaMessage envelope
             // (the streaming codec retains it on `Usage::provider_metadata`).
             let assistant_usage = pumped.usage.as_ref().map(assistant_usage_value);
+            // The Anthropic `request-id` response header for THIS turn → the
+            // top-level `requestId` on each persisted assistant line. The
+            // adapter records it from the stream connect-success / non-stream
+            // headers (the same `record_rate_limit_from_headers` pass), so it is
+            // the just-completed call's id here. `self.api` is the same adapter
+            // as `self.streaming_api` in production; the fallback non-stream call
+            // records it on `self.api` too.
+            let request_id = self.api.last_request_id();
             let tool_use_parent_uuids = self
-                .persist_assistant_per_block(&assistant_msg, assistant_usage.as_ref())
+                .persist_assistant_per_block(
+                    &assistant_msg,
+                    assistant_usage.as_ref(),
+                    request_id.as_deref(),
+                )
                 .await;
             // Fallback parent (the LAST persisted block's uuid) for any
             // tool_result whose tool_use id is missing from the map (defensive).
@@ -8794,6 +8836,13 @@ mod persist_with_parent_tests {
             Some("inner-abc"),
             Some("claude-opus-4-8"),
             Some(&usage),
+            Some("req_test123"),
+        );
+        // The real-response path stamps the top-level `requestId` (via `extra`).
+        assert_eq!(
+            jmsg.extra.get("requestId").and_then(|v| v.as_str()),
+            Some("req_test123"),
+            "real assistant line carries the top-level requestId"
         );
         let inner = jmsg.message.as_object().expect("inner is an object");
         let keys: Vec<&str> = inner.keys().map(String::as_str).collect();
@@ -8834,6 +8883,12 @@ mod persist_with_parent_tests {
             Some("inner-abc"),
             None,
             None,
+            None,
+        );
+        // No request_id supplied → no top-level `requestId` (the synthetic case).
+        assert!(
+            !plain.extra.contains_key("requestId"),
+            "synthetic line omits requestId"
         );
         let pinner = plain.message.as_object().unwrap();
         let pkeys: Vec<&str> = pinner.keys().map(String::as_str).collect();
@@ -8918,7 +8973,7 @@ mod persist_with_parent_tests {
             stop_reason: Some("tool_use".into()),
         };
 
-        let map = orch.persist_assistant_per_block(&assistant_msg, None).await;
+        let map = orch.persist_assistant_per_block(&assistant_msg, None, None).await;
 
         let lines = read_jsonl(&session_path);
         // (c) THREE single-block assistant lines.

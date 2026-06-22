@@ -217,6 +217,12 @@ pub struct ProviderApiAdapter {
     /// on the adapter directly. A future task can thread it into the handle if
     /// needed.
     last_rate_limit: Mutex<Option<RateLimitInfo>>,
+    /// The Anthropic `request-id` response header (`req_…`) of the most recently
+    /// recorded response, captured in [`Self::record_rate_limit_from_headers`]
+    /// (the stream connect-success + non-stream header pass). Read via the
+    /// `last_request_id()` trait method to stamp the persisted assistant line's
+    /// top-level `requestId`. `None` until the first recorded response.
+    last_request_id: Mutex<Option<String>>,
     /// Most recently observed RAW per-window utilization snapshot.
     ///
     /// Task 2 (llm-client future-work batch 5): parsed via
@@ -423,6 +429,7 @@ impl ProviderApiAdapter {
             available_model_ids,
             estimator,
             last_rate_limit: Mutex::new(None),
+            last_request_id: Mutex::new(None),
             last_raw_utilization: Mutex::new(None),
             last_429_message: Mutex::new(None),
             pending_429: Mutex::new(None),
@@ -929,6 +936,16 @@ impl ProviderApiAdapter {
             .iter()
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
+        // Capture the Anthropic `request-id` response header (`req_…`) on every
+        // recorded response — the SDK's `response._request_id`, which claude-code
+        // persists as the assistant line's top-level `requestId`. Prefer the
+        // canonical `request-id`, falling back to `x-request-id` (mirrors the
+        // transport's `request_id()` helper). `None` clears it when neither is
+        // present (so a stale id never leaks onto a later line).
+        *self.last_request_id.lock().unwrap() = headers
+            .get("request-id")
+            .or_else(|| headers.get("x-request-id"))
+            .cloned();
         // Task 2 (llm-client future-work batch 5): track the raw per-window
         // snapshot on EVERY recorded headers pass — `rawUtilization =
         // extractRawUtilization(headersToUse)` (claudeAiLimits.ts:476), NOT
@@ -1826,6 +1843,10 @@ impl OrchestratorApiClient for ProviderApiAdapter {
         })
     }
 
+    fn last_request_id(&self) -> Option<String> {
+        self.last_request_id.lock().unwrap().clone()
+    }
+
     /// Task 8 (llm-client future-work batch 3): expose the FULL internal
     /// nine-field snapshot for the turn drivers' `emit_rate_limit` seam.
     /// Delegates to the inherent [`Self::last_rate_limit_info`] (which
@@ -2432,6 +2453,39 @@ mod tests {
             content: vec![ContentBlock::Text { text: s.to_string() }],
             is_meta: false,
         }
+    }
+
+    /// `last_request_id()` captures the Anthropic `request-id` response header
+    /// (falling back to `x-request-id`) on every recorded headers pass, and
+    /// clears when neither is present (no stale leak onto a later line). This is
+    /// the slot the persisted assistant line's top-level `requestId` reads from.
+    #[test]
+    fn last_request_id_captures_request_id_header() {
+        let transport = FakeTransport::always(ProviderResponse::json(200, ok_response_json()));
+        let adapter = make_adapter(transport);
+        assert_eq!(OrchestratorApiClient::last_request_id(&adapter), None);
+
+        let mut h = std::collections::BTreeMap::new();
+        h.insert("request-id".to_string(), "req_011abc".to_string());
+        adapter.record_rate_limit_from_headers(&h);
+        assert_eq!(
+            OrchestratorApiClient::last_request_id(&adapter),
+            Some("req_011abc".to_string())
+        );
+
+        // `x-request-id` fallback when the canonical header is absent.
+        let mut h2 = std::collections::BTreeMap::new();
+        h2.insert("x-request-id".to_string(), "req_xfallback".to_string());
+        adapter.record_rate_limit_from_headers(&h2);
+        assert_eq!(
+            OrchestratorApiClient::last_request_id(&adapter),
+            Some("req_xfallback".to_string())
+        );
+
+        // Neither header → cleared (a later response without a request-id does
+        // not inherit the previous one).
+        adapter.record_rate_limit_from_headers(&std::collections::BTreeMap::new());
+        assert_eq!(OrchestratorApiClient::last_request_id(&adapter), None);
     }
 
     #[test]

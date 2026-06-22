@@ -365,21 +365,18 @@ pub async fn run_workflow_script(
                 let spent = spent.clone();
                 let nested_fs = nested_fs.clone();
                 async move {
-                    // `workflow()` nested call: route to a nested run instead of a
-                    // subagent spawn (the runtime only emits this when nesting is
-                    // allowed). The result string is the nested run's return value.
+                    // `workflow()` resolution: the runtime asks the host to resolve
+                    // a nested workflow reference to its SOURCE (it then evaluates
+                    // that source inline, in the same runtime, sharing state). We
+                    // read + strip the file and return the source; `""` ⇒ the
+                    // runtime throws "could not resolve".
                     let opts: Value = serde_json::from_str(&opts_json).unwrap_or(Value::Null);
-                    if let Some(spec_json) = opts.get("__wf_nested").and_then(Value::as_str) {
-                        return run_nested_workflow(
-                            spec_json,
-                            opts.get("__wf_args"),
-                            &subagent_type,
-                            spawner,
-                            tool_invoker,
-                            budget,
-                            nested_fs,
-                        )
-                        .await;
+                    if let Some(spec_json) = opts.get("__wf_resolve").and_then(Value::as_str) {
+                        let spec: Value = serde_json::from_str(spec_json).unwrap_or(Value::Null);
+                        return match resolve_nested_script(&spec, nested_fs.as_ref()).await {
+                            Ok(src) => workflow::strip_meta_export(&src),
+                            Err(_) => String::new(),
+                        };
                     }
                     // Resume cache: a journaled result for the same (prompt, opts)
                     // is replayed instead of re-spawning. The guard is dropped
@@ -459,50 +456,6 @@ async fn resolve_nested_script(
         return Err(format!("no saved workflow named '{name}'"));
     }
     Err("workflow() requires a name or scriptPath".to_string())
-}
-
-/// Run a nested `workflow()` call inline and return its result as the string the
-/// parent's `agent()` resolves with. The nested run shares the parent's spawner
-/// / tool-invoker / budget but is a separate runtime with nesting disabled
-/// (claude-code's one-level limit). Errors are surfaced as the result text.
-async fn run_nested_workflow(
-    spec_json: &str,
-    args: Option<&Value>,
-    subagent_type: &str,
-    spawner: Arc<dyn SubagentSpawner>,
-    tool_invoker: Arc<dyn ToolInvoker>,
-    budget: Arc<dyn BudgetEnforcerHandle>,
-    fs: Option<Arc<dyn FileSystem>>,
-) -> String {
-    let spec: Value = serde_json::from_str(spec_json).unwrap_or(Value::Null);
-    let nested_args = args
-        .filter(|v| !v.is_null())
-        .map(std::string::ToString::to_string);
-    let script = match resolve_nested_script(&spec, fs.as_ref()).await {
-        Ok(s) => s,
-        Err(e) => return format!("[workflow() error: {e}]"),
-    };
-    // Box the recursive future to break the cycle (async self-recursion).
-    let outcome = Box::pin(run_workflow_script(
-        &script,
-        subagent_type,
-        spawner,
-        tool_invoker,
-        budget,
-        None,
-        None,
-        None,
-        NestedConfig {
-            allow_nested: false,
-            args: nested_args,
-            fs: None,
-        },
-    ))
-    .await;
-    match outcome {
-        Ok(o) => o.result.unwrap_or_default(),
-        Err(e) => format!("[workflow() failed: {e}]"),
-    }
 }
 
 #[async_trait]
@@ -1070,21 +1023,26 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn workflow_runs_a_nested_scriptpath_inline() {
+    async fn workflow_runs_a_nested_scriptpath_inline_sharing_the_runtime() {
         let fs: Arc<dyn FileSystem> = Arc::new(InMemoryFs::new());
-        fs.write_file("/wf/child.js", "return { nested: true };")
-            .await
-            .unwrap();
+        // The nested workflow itself spawns an agent and reads its own args —
+        // proving it runs IN the parent's runtime (shared spawner + globals).
+        fs.write_file(
+            "/wf/child.js",
+            "const x = await agent('child-task'); return { got: x, n: args.n };",
+        )
+        .await
+        .unwrap();
         let spawner = Arc::new(EchoSpawner::default());
         let parent = r#"
-            const r = await workflow({ scriptPath: '/wf/child.js' });
-            log('nested=' + r.nested);
+            const r = await workflow({ scriptPath: '/wf/child.js' }, { n: 9 });
+            log('got=' + r.got + ' n=' + r.n);
             return r;
         "#;
         let outcome = run_workflow_script(
             parent,
             DEFAULT_WORKFLOW_SUBAGENT,
-            spawner,
+            spawner.clone(),
             Arc::new(MockInvoker),
             Arc::new(MockBudget),
             None,
@@ -1098,9 +1056,14 @@ mod tests {
         )
         .await
         .unwrap();
-        // The nested workflow ran and its return value flowed back.
-        assert_eq!(logs(&outcome), vec!["nested=true".to_string()]);
-        assert_eq!(outcome.result.as_deref(), Some(r#"{"nested":true}"#));
+        // The nested workflow's agent() went through the PARENT's spawner.
+        assert_eq!(*spawner.seen.lock().unwrap(), vec!["child-task".to_string()]);
+        // Its return value (incl. its own args) flowed back to the parent.
+        assert_eq!(logs(&outcome), vec!["got=echo:child-task n=9".to_string()]);
+        assert_eq!(
+            outcome.result.as_deref(),
+            Some(r#"{"got":"echo:child-task","n":9}"#)
+        );
     }
 
     // ==== Handler-level tests (full Task lifecycle) =========================

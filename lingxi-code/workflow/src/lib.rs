@@ -401,15 +401,19 @@ where
                 .map_err(|e| WorkflowError::Engine(e.to_string()))?;
         }
 
-        // Top-level `workflow()`: run a nested workflow inline by routing through
-        // an `agent('', { __wf_nested })` call the host runner intercepts; the
-        // result (JSON) is parsed and returned. (`agent` is resolved lazily at
-        // call time, so defining this before the prelude is fine.) Set only when
-        // nesting is allowed — a nested run leaves the prelude's throwing default,
-        // enforcing claude-code's one-level limit.
+        // Top-level `workflow()`: run a nested workflow INLINE, in this same
+        // runtime (claude-code shares the parent's runtime state — concurrency
+        // cap, agent counter, abort, budget). It (1) resolves the script via the
+        // host (an `agent('', { __wf_resolve })` call the runner reads as a file
+        // request, returning the source) and (2) evaluates that source as an
+        // async function in THIS context, so its `agent()`/`parallel()`/`budget`
+        // all share the parent's globals/queue. A depth counter throws on a
+        // nested `workflow()` (claude-code's one-level limit); `args` is swapped
+        // to the call's value for the nested body. (`agent` is resolved lazily at
+        // call time, so defining this before the prelude is fine.)
         if allow_nested {
             ctx.eval::<(), _>(
-                b"globalThis.workflow = async (nameOrRef, a) => { const spec = (typeof nameOrRef === 'string') ? { name: nameOrRef } : nameOrRef; const r = await agent('', { __wf_nested: JSON.stringify(spec), __wf_args: (a === undefined ? null : a) }); return r === '' ? undefined : JSON.parse(r); };" as &[u8],
+                b"globalThis.__wf_depth = 0; globalThis.workflow = async (nameOrRef, a) => { if (globalThis.__wf_depth >= 1) throw new Error(\"workflow(): nested workflows are not supported (workflow() inside a child)\"); const spec = (typeof nameOrRef === 'string') ? { name: nameOrRef } : nameOrRef; const src = await agent('', { __wf_resolve: JSON.stringify(spec) }); if (src === '') throw new Error(\"workflow(): could not resolve the nested workflow\"); globalThis.__wf_depth += 1; const savedArgs = globalThis.args; globalThis.args = a; try { return await (new Function('return (async () => {\\n' + src + '\\n})();'))(); } finally { globalThis.__wf_depth -= 1; globalThis.args = savedArgs; } };" as &[u8],
             )
             .map_err(|e| WorkflowError::Engine(e.to_string()))?;
         }
@@ -907,21 +911,22 @@ log('wf=' + (typeof workflow))
 
     #[test]
     fn workflow_runs_nested_inline_when_allowed() {
-        // allow_nested=true → workflow() routes through an `__wf_nested` agent()
-        // call; the host runner returns the nested workflow's result JSON, which
-        // workflow() parses and returns.
+        // allow_nested=true → workflow() resolves the nested SOURCE via an
+        // `__wf_resolve` agent() call, then evaluates it IN THIS runtime. The
+        // nested body's `return` flows back; its `args` is the call's value.
         let out = run_with_progress(
             r#"
                 const r = await workflow('child', { n: 1 });
-                log('ok=' + r.ok);
+                log('ok=' + r.ok + ' n=' + r.n);
                 return r;
             "#,
             |_prompts: &[String], opts_json: &[String]| {
                 opts_json
                     .iter()
                     .map(|o| {
-                        if o.contains("__wf_nested") {
-                            r#"{"ok":true}"#.to_string()
+                        if o.contains("__wf_resolve") {
+                            // The nested workflow's SOURCE (sees the swapped args).
+                            "return { ok: true, n: args.n };".to_string()
                         } else {
                             String::new()
                         }
@@ -934,7 +939,7 @@ log('wf=' + (typeof workflow))
             None,
         )
         .unwrap();
-        assert_eq!(out.progress, vec![Progress::Log("ok=true".into())]);
-        assert_eq!(out.result.as_deref(), Some(r#"{"ok":true}"#));
+        assert_eq!(out.progress, vec![Progress::Log("ok=true n=1".into())]);
+        assert_eq!(out.result.as_deref(), Some(r#"{"ok":true,"n":1}"#));
     }
 }

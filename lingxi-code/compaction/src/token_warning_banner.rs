@@ -54,6 +54,25 @@ pub struct TokenWarningBanner {
 ///
 /// The `·` separator is U+00B7 (the reference's `·`), reproduced verbatim.
 #[must_use]
+/// Raw-truthy read of `DISABLE_COMPACT` (binary `je.DISABLE_COMPACT`): any
+/// non-empty value disables the `/compact` command, so its banner CTA is dropped.
+fn disable_compact_env() -> bool {
+    std::env::var_os("DISABLE_COMPACT").is_some_and(|v| !v.is_empty())
+}
+
+/// Pure builder for the "Context low" line (binary @206545348 3-way ternary):
+/// an upgrade CTA wins; else a set `DISABLE_COMPACT` drops the CTA; else the
+/// `· Run /compact` CTA. Separated for env-race-free testing.
+fn context_low_text(percent_left: u8, upgrade_message: Option<&str>, disable_compact: bool) -> String {
+    match upgrade_message {
+        Some(upgrade) => format!("Context low ({percent_left}% remaining) \u{00b7} {upgrade}"),
+        None if disable_compact => format!("Context low ({percent_left}% remaining)"),
+        None => format!(
+            "Context low ({percent_left}% remaining) \u{00b7} Run /compact to compact & continue"
+        ),
+    }
+}
+
 pub fn token_warning_banner(
     state: &TokenWarningState,
     auto_compact_enabled: bool,
@@ -79,15 +98,12 @@ pub fn token_warning_banner(
             color: TokenWarningColor::Dim,
         })
     } else {
-        // `:169` the warning/error "Context low" line.
-        let text = match upgrade_message {
-            Some(upgrade) => {
-                format!("Context low ({percent_left}% remaining) \u{00b7} {upgrade}")
-            }
-            None => format!(
-                "Context low ({percent_left}% remaining) \u{00b7} Run /compact to compact & continue"
-            ),
-        };
+        // `:169` the warning/error "Context low" line — a 3-way ternary
+        // (binary @206545348): an upgrade CTA wins; else when `DISABLE_COMPACT`
+        // is set the bare line shows with NO `· Run /compact` CTA (the command is
+        // disabled — `isEnabled:()=>!je.DISABLE_COMPACT`); else the CTA. The env
+        // check is the binary's raw `je.DISABLE_COMPACT` (any non-empty value).
+        let text = context_low_text(percent_left, upgrade_message, disable_compact_env());
         let color = if state.is_above_error_threshold {
             TokenWarningColor::Error
         } else {
@@ -103,6 +119,25 @@ mod tests {
 
     /// Build a `TokenWarningState` with the threshold flags under test; the
     /// non-relevant flags are left `false`.
+    #[test]
+    fn context_low_text_three_way() {
+        // Upgrade CTA wins.
+        assert_eq!(
+            context_low_text(15, Some("Upgrade for 1M"), false),
+            "Context low (15% remaining) \u{00b7} Upgrade for 1M"
+        );
+        // DISABLE_COMPACT set, no upgrade → bare line, NO CTA.
+        assert_eq!(
+            context_low_text(8, None, true),
+            "Context low (8% remaining)"
+        );
+        // Normal: the "Run /compact" CTA.
+        assert_eq!(
+            context_low_text(8, None, false),
+            "Context low (8% remaining) \u{00b7} Run /compact to compact & continue"
+        );
+    }
+
     fn state(percent_left: u8, above_warning: bool, above_error: bool) -> TokenWarningState {
         TokenWarningState {
             percent_left,

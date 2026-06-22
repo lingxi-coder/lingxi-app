@@ -787,6 +787,22 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
             Some("refusal") if orch.maybe_swap_to_refusal_fallback().await => {
                 TurnStepOutcome::Continue
             }
+            // Terminal error stop_reasons (batched twin of the streaming
+            // `Some(other)` arm, claude.ts:2266/2279): surface the byte-locked
+            // `API Error: …` assistant message and END the turn. Previously these
+            // fell through to `_ => Continue` and bare-re-called the API, never
+            // surfacing the error — the #24 batched-path gap. `model_context_window_exceeded`
+            // and a terminal `refusal` (reached only when no `refusalFallbackModel`
+            // is configured / the once-per-session latch is set, so the swap arm
+            // above did not `continue`) both end here. `max_tokens` (recovery
+            // exhausted) is surfaced inside `handle_max_output_tokens`.
+            Some(other @ ("model_context_window_exceeded" | "refusal")) => {
+                surface_terminal_api_error(orch, other).await;
+                TurnStepOutcome::Ended {
+                    final_message_id: assistant_id,
+                    stop_reason: other.to_string(),
+                }
+            }
             _ => TurnStepOutcome::Continue,
         }
     };
@@ -1211,6 +1227,99 @@ pub(crate) async fn surface_rapid_refill_thrashing(
     assistant_id
 }
 
+/// Build the user-visible `API Error: …` text claude-code surfaces for the
+/// terminal stop_reasons it reports as errors: `max_tokens` (recovery
+/// exhausted), `model_context_window_exceeded`, and `refusal`
+/// (without a configured fallback). Returns `None` for every other terminal
+/// (`stop_sequence` / `pause_turn` / …), which end silently.
+///
+/// Shared by the streaming ([`ConversationOrchestrator`] turn loop) and batched
+/// ([`surface_terminal_api_error`]) terminal arms so both paths surface
+/// byte-identical text (claude-code `claude.ts:2266/2279`, `U2e`). The refusal
+/// cyber/bio category variant, the `stop_details.explanation` clause, and the
+/// `\n\nRequest ID: …` suffix remain residuals on BOTH paths — LingXi does not
+/// thread `stop_details`/requestId into the terminal arm, so the non-cyber,
+/// no-explanation path (the common terminal) fires.
+pub(crate) fn terminal_api_error_text(
+    model: &str,
+    interactive: bool,
+    stop_reason: &str,
+) -> Option<String> {
+    match stop_reason {
+        "max_tokens" => Some(format!(
+            "API Error: Claude's response exceeded the {} output token maximum. To configure this behavior, set the CLAUDE_CODE_MAX_OUTPUT_TOKENS environment variable.",
+            compaction::max_output_tokens_for_model(model)
+        )),
+        "model_context_window_exceeded" => {
+            Some("API Error: The model has reached its context window limit.".to_string())
+        }
+        "refusal" => Some(
+            match crate::prompt::env_meta::marketing_name_for_model(model) {
+                Some(label) => {
+                    let m = if interactive {
+                        "Double press esc to edit your last message, or try a different model with /model."
+                    } else {
+                        "Try rephrasing the request in a new session or change your model."
+                    };
+                    let f = if interactive {
+                        "Send feedback with /feedback or learn more: https://support.claude.com/en/articles/15363606"
+                    } else {
+                        "Learn more: https://support.claude.com/en/articles/15363606"
+                    };
+                    format!(
+                        "API Error: {label} has safety measures that flagged something in this session (https://www.anthropic.com/legal/aup). This sometimes happens with safe, normal conversations. Claude Code can't respond to this request with {label}.\n\n{m}\n\n{f}"
+                    )
+                }
+                None => {
+                    let m = if interactive {
+                        "Please double press esc to edit your last message or start a new session for Claude Code to assist with a different task."
+                    } else {
+                        "Try rephrasing the request in a new session or change your model."
+                    };
+                    format!(
+                        "API Error: Claude Code is unable to respond to this request, which appears to violate our Usage Policy (https://www.anthropic.com/legal/aup). {m}"
+                    )
+                }
+            },
+        ),
+        _ => None,
+    }
+}
+
+/// Surface the terminal `API Error: …` assistant message on the BATCHED path
+/// (the streaming twin inlines the same persist+emit before `emit_end_turn`).
+///
+/// Builds the text via [`terminal_api_error_text`]; when `Some`, pushes a
+/// stop-reason-bearing assistant message into history, persists it (the
+/// synthetic-envelope JSONL line), and emits the text. The caller still returns
+/// [`TurnStepOutcome::Ended`], whose driver fires the end-of-turn bookkeeping
+/// (`emit_end_turn`) exactly once — this helper deliberately does NOT emit the
+/// end-of-turn marker. Returns `Some(assistant_id)` of the surfaced message, or
+/// `None` when `stop_reason` is not one of the three error terminals.
+pub(crate) async fn surface_terminal_api_error(
+    orch: &ConversationOrchestrator,
+    stop_reason: &str,
+) -> Option<MessageId> {
+    let (model, interactive) = {
+        let s = orch.session.lock().await;
+        (s.model.clone(), orch.config.interactive_permissions)
+    };
+    let text = terminal_api_error_text(&model, interactive, stop_reason)?;
+    let assistant_id = MessageId::new();
+    let assistant_msg = ConversationMessage::Assistant {
+        id: assistant_id,
+        content: vec![ContentBlock::Text { text: text.clone() }],
+        stop_reason: Some(stop_reason.to_string()),
+    };
+    {
+        let mut s = orch.session.lock().await;
+        s.history.push(assistant_msg.clone());
+    }
+    orch.persist_message_to_jsonl(&assistant_msg).await;
+    orch.output.emit_text(&text).await;
+    Some(assistant_id)
+}
+
 /// A1 `max_tokens` recovery decision (TS `query.ts:1223-1255`).
 ///
 /// While `count < MAX_OUTPUT_TOKENS_RECOVERY_LIMIT`: append the byte-exact
@@ -1266,7 +1375,9 @@ async fn handle_max_output_tokens(
         return Ok(TurnStepOutcome::Continue);
     }
 
-    // Recovery exhausted — surface the cap by ending the turn.
+    // Recovery exhausted — surface the byte-locked `API Error: …` cap message
+    // (the streaming twin does this in its terminal arm), then end the turn.
+    surface_terminal_api_error(orch, "max_tokens").await;
     Ok(TurnStepOutcome::Ended {
         final_message_id: assistant_id,
         stop_reason: "max_tokens".to_string(),
@@ -3754,11 +3865,111 @@ mod max_output_tokens_recovery_tests {
             TurnStepOutcome::Continue => panic!("expected Ended on exhaustion"),
         }
         // The counter is NOT incremented past the limit, and NO nudge is
-        // appended on exhaustion (only the assistant message from this step).
+        // appended on exhaustion. The step appends the response assistant message
+        // AND the surfaced terminal `API Error: …` assistant message (#24 batched
+        // parity with the streaming terminal arm) → +2.
         assert_eq!(state.max_output_tokens_recovery_count, MAX_OUTPUT_TOKENS_RECOVERY_LIMIT);
         let h = history(&orch).await;
-        assert_eq!(h.len(), len_before + 1, "only the assistant msg, no nudge");
-        assert!(matches!(h.last(), Some(ConversationMessage::Assistant { .. })));
+        assert_eq!(
+            h.len(),
+            len_before + 2,
+            "the step's assistant msg + the surfaced terminal API-error msg"
+        );
+        // The last message is the surfaced terminal API-error assistant.
+        match h.last() {
+            Some(ConversationMessage::Assistant {
+                content,
+                stop_reason,
+                ..
+            }) => {
+                assert_eq!(stop_reason.as_deref(), Some("max_tokens"));
+                let ContentBlock::Text { text } = &content[0] else {
+                    panic!("expected a text block");
+                };
+                assert!(
+                    text.starts_with("API Error: Claude's response exceeded"),
+                    "got: {text}"
+                );
+            }
+            other => panic!("expected the surfaced Assistant API-error, got {other:?}"),
+        }
+    }
+
+    /// #24 batched parity: a terminal `model_context_window_exceeded` surfaces
+    /// the byte-locked `API Error: …` assistant message AND ends the turn
+    /// (previously fell through to `_ => Continue` and bare-re-called the API).
+    #[tokio::test]
+    async fn model_context_window_exceeded_surfaces_error_and_ends() {
+        let orch = orch_with_responses(vec![mock_message_response(
+            vec![llm_client::ContentBlock::Text {
+                text: "partial".into(),
+                cache_control: None,
+            }],
+            Some("model_context_window_exceeded"),
+        )]);
+        let mut state = RecoveryState::default();
+        let len_before = history(&orch).await.len();
+
+        let step = execute_one_turn_with_recovery(&orch, None, Some(&mut state))
+            .await
+            .expect("step");
+        match step {
+            TurnStepOutcome::Ended { stop_reason, .. } => {
+                assert_eq!(stop_reason, "model_context_window_exceeded");
+            }
+            TurnStepOutcome::Continue => panic!("expected Ended, not a bare re-call"),
+        }
+        let h = history(&orch).await;
+        assert_eq!(h.len(), len_before + 2, "response asst + surfaced API-error asst");
+        let Some(ConversationMessage::Assistant { content, stop_reason, .. }) = h.last() else {
+            panic!("expected the surfaced Assistant API-error");
+        };
+        assert_eq!(stop_reason.as_deref(), Some("model_context_window_exceeded"));
+        let ContentBlock::Text { text } = &content[0] else {
+            panic!("expected a text block");
+        };
+        assert_eq!(text, "API Error: The model has reached its context window limit.");
+    }
+
+    /// #24 batched parity: a terminal `refusal` with NO `refusalFallbackModel`
+    /// (the swap arm returns false) surfaces the byte-locked Usage-Policy
+    /// `API Error: …` message AND ends the turn (previously bare-re-called).
+    #[tokio::test]
+    async fn terminal_refusal_without_fallback_surfaces_error_and_ends() {
+        // Default config has no refusalFallbackModel → maybe_swap returns false.
+        let orch = orch_with_responses(vec![mock_message_response(
+            vec![llm_client::ContentBlock::Text {
+                text: "partial".into(),
+                cache_control: None,
+            }],
+            Some("refusal"),
+        )]);
+        let mut state = RecoveryState::default();
+        let len_before = history(&orch).await.len();
+
+        let step = execute_one_turn_with_recovery(&orch, None, Some(&mut state))
+            .await
+            .expect("step");
+        match step {
+            TurnStepOutcome::Ended { stop_reason, .. } => assert_eq!(stop_reason, "refusal"),
+            TurnStepOutcome::Continue => panic!("expected Ended, not a bare re-call"),
+        }
+        let h = history(&orch).await;
+        assert_eq!(h.len(), len_before + 2, "response asst + surfaced API-error asst");
+        let Some(ConversationMessage::Assistant { content, stop_reason, .. }) = h.last() else {
+            panic!("expected the surfaced Assistant API-error");
+        };
+        assert_eq!(stop_reason.as_deref(), Some("refusal"));
+        let ContentBlock::Text { text } = &content[0] else {
+            panic!("expected a text block");
+        };
+        // Either the labelled "safety measures" or the generic Usage-Policy
+        // variant — both are `API Error: …` and cite the AUP URL.
+        assert!(text.starts_with("API Error:"), "got: {text}");
+        assert!(
+            text.contains("https://www.anthropic.com/legal/aup"),
+            "got: {text}"
+        );
     }
 
     /// (Test plan 3) a normal `end_turn` is unaffected by the recovery wiring:

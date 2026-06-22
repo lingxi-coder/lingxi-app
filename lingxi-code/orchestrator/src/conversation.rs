@@ -4389,63 +4389,18 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                     // before. Mirrors `surface_prompt_too_long` (persist a new
                     // assistant message carrying the error text + the originating
                     // stop_reason, then emit it).
-                    let api_error: Option<String> = match other {
-                        "max_tokens" => {
-                            let model = self.session.lock().await.model.clone();
-                            Some(format!(
-                                "API Error: Claude's response exceeded the {} output token maximum. To configure this behavior, set the CLAUDE_CODE_MAX_OUTPUT_TOKENS environment variable.",
-                                compaction::max_output_tokens_for_model(&model)
-                            ))
-                        }
-                        "model_context_window_exceeded" => Some(
-                            "API Error: The model has reached its context window limit."
-                                .to_string(),
-                        ),
-                        // Terminal refusal — reached only when no `refusalFallbackModel`
-                        // is configured / the once-per-session latch is already set (the
-                        // swap arm above `continue`s). Surface the byte-locked message
-                        // claude-code's `U2e` builds (claude.ts): `ob` = "API Error"; the
-                        // model-label branch resolves the friendly name via
-                        // `marketing_name_for_model` (TS `Xd`/`nUi`), else the generic
-                        // Usage-Policy message; `kr()` = NOT interactive (TS
-                        // `!isInteractive`) selects the suffix. The cyber/bio category
-                        // variant, the `stop_details.explanation` clause, and the
-                        // `\n\nRequest ID: …` suffix are residuals — LingXi does not
-                        // thread `stop_details` / requestId into the terminal arm, so the
-                        // non-cyber, no-explanation path (the common terminal refusal)
-                        // fires here.
-                        "refusal" => {
-                            let model = self.session.lock().await.model.clone();
-                            let interactive = self.config.interactive_permissions;
-                            Some(match crate::prompt::env_meta::marketing_name_for_model(&model) {
-                                Some(label) => {
-                                    let m = if interactive {
-                                        "Double press esc to edit your last message, or try a different model with /model."
-                                    } else {
-                                        "Try rephrasing the request in a new session or change your model."
-                                    };
-                                    let f = if interactive {
-                                        "Send feedback with /feedback or learn more: https://support.claude.com/en/articles/15363606"
-                                    } else {
-                                        "Learn more: https://support.claude.com/en/articles/15363606"
-                                    };
-                                    format!(
-                                        "API Error: {label} has safety measures that flagged something in this session (https://www.anthropic.com/legal/aup). This sometimes happens with safe, normal conversations. Claude Code can't respond to this request with {label}.\n\n{m}\n\n{f}"
-                                    )
-                                }
-                                None => {
-                                    let m = if interactive {
-                                        "Please double press esc to edit your last message or start a new session for Claude Code to assist with a different task."
-                                    } else {
-                                        "Try rephrasing the request in a new session or change your model."
-                                    };
-                                    format!(
-                                        "API Error: Claude Code is unable to respond to this request, which appears to violate our Usage Policy (https://www.anthropic.com/legal/aup). {m}"
-                                    )
-                                }
-                            })
-                        }
-                        _ => None,
+                    // Build the byte-locked `API Error: …` via the shared
+                    // [`crate::turn_loop::terminal_api_error_text`] (the batched
+                    // twin uses the SAME builder, so both paths surface identical
+                    // text). `None` for stop_sequence / pause_turn / refusal-
+                    // without-fallback's other terminals → no message, end as-is.
+                    let api_error: Option<String> = {
+                        let model = self.session.lock().await.model.clone();
+                        crate::turn_loop::terminal_api_error_text(
+                            &model,
+                            self.config.interactive_permissions,
+                            other,
+                        )
                     };
                     if let Some(text) = api_error {
                         let err_msg = ConversationMessage::Assistant {

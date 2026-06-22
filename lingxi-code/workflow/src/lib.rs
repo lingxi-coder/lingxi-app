@@ -7,42 +7,64 @@
 //! model-authored scripts run with matching semantics.
 //!
 //! ## Stages
-//! This is the runtime foundation: the embedded engine plus the
-//! globals-injection + `meta`-extraction model the orchestration primitives
-//! build on. Stage status:
-//! * **done** — embedded engine, `meta` extraction, synchronous script body
-//!   execution with `phase()` / `log()` captured.
-//! * **next** — `agent()` bridged to the subagent spawner (needs the async
-//!   engine; gated on the `futures`-feature MSRV pin), then `parallel()` /
-//!   `pipeline()`, journaling/resume, budget, and tool/handler wiring.
+//! * **done** — embedded engine; async event-loop; the full global surface
+//!   (`agent`, `parallel`, `pipeline`, `phase`, `log`, `budget`, `args`,
+//!   `workflow`); CONCURRENT batch dispatch of `agent()` calls (agents pending
+//!   together run as one batch). The pluggable `agent_runner` resolves each
+//!   batch.
+//! * **next** — bridge `agent_runner` to LingXi's subagent spawner (the
+//!   `LocalWorkflowHandler` / `local_agent` seam), then journaling/resume, real
+//!   budget tracking, and `Workflow` tool registration.
 
 use std::cell::RefCell;
 use std::rc::Rc;
 
-/// JS prelude defining the `parallel()` / `pipeline()` orchestration primitives,
-/// injected before the workflow body. The argument-validation `throw` messages
-/// are byte-locked to claude-code's. These are SEQUENTIAL (correct results, no
-/// concurrent fan-out yet) — `parallel`'s barrier + `pipeline`'s per-item
-/// staging are preserved; only the wall-clock concurrency is deferred to the
-/// pending-promise dispatch stage. A throwing thunk/stage resolves to `null`
-/// in the output (claude-code's `.filter(Boolean)` contract).
+/// JS prelude defining `agent()` (a deferred promise) + the `parallel()` /
+/// `pipeline()` orchestration primitives, injected before the workflow body.
+/// The argument-validation `throw` messages are byte-locked to claude-code's.
+/// `parallel`/`pipeline` start every chain before awaiting, so agents pending at
+/// the same time are dispatched as ONE concurrent batch by the Rust driver
+/// (`run`'s pump loop). A throwing thunk/stage resolves to `null` (claude-code's
+/// `.filter(Boolean)` contract).
 const WORKFLOW_PRELUDE: &str = r#"
+// agent() returns a DEFERRED promise and queues the request; it never blocks.
+// The Rust driver pumps the queue between microtask drains, dispatching every
+// promise that is pending at the same time as ONE concurrent batch (via the
+// native __wf_dispatch_batch), then resolving them. So agents that are started
+// before the first await (parallel's fan-out) run concurrently, while a
+// sequential `await agent()` chain dispatches one at a time.
+globalThis.__wf_queue = [];
+globalThis.agent = (prompt) => new Promise((res) => { globalThis.__wf_queue.push({ prompt: String(prompt), res }); });
+globalThis.__wf_pump = () => {
+  const q = globalThis.__wf_queue;
+  if (q.length === 0) return false;
+  globalThis.__wf_queue = [];
+  const results = globalThis.__wf_dispatch_batch(q.map((x) => x.prompt));
+  for (let i = 0; i < q.length; i++) q[i].res(results[i]);
+  return true;
+};
+// parallel(): start EVERY thunk first (so their agents queue together → one
+// concurrent batch), then collect; a throwing thunk / rejected promise → null.
 globalThis.parallel = async (thunks) => {
   if (!Array.isArray(thunks)) throw new Error("parallel() expects an array of thunks");
+  const ps = thunks.map((t) => { try { return Promise.resolve(t()); } catch (e) { return Promise.resolve(null); } });
   const out = [];
-  for (const t of thunks) { try { out.push(await t()); } catch (e) { out.push(null); } }
+  for (const p of ps) { try { out.push(await p); } catch (e) { out.push(null); } }
   return out;
 };
+// pipeline(): each item runs its stage chain independently with NO barrier
+// between stages — expressed as parallel() over per-item chains, so item A can
+// be in a later stage while item B is still early, and each stage's agents
+// batch. A throwing stage drops that item to null.
 globalThis.pipeline = async (items, ...stages) => {
   if (!Array.isArray(items)) throw new Error("pipeline() expects an array as the first argument");
   for (const s of stages) if (typeof s !== "function") throw new Error("pipeline() stages must be functions: pipeline(items, item => ..., result => ...)");
-  const out = [];
-  for (let i = 0; i < items.length; i++) {
-    let v = items[i];
-    try { for (const s of stages) v = await s(v, items[i], i); out.push(v); }
-    catch (e) { out.push(null); }
-  }
-  return out;
+  const chain = async (item, idx) => {
+    let v = item;
+    for (const s of stages) v = await s(v, item, idx);
+    return v;
+  };
+  return await parallel(items.map((it, i) => () => chain(it, i)));
 };
 // Remaining globals. `budget` defaults to no-target (total null, spent 0,
 // remaining Infinity) — a real token-tracking budget is supplied once agent()
@@ -178,7 +200,7 @@ pub fn run_sync(script: &str) -> Result<RunOutcome, WorkflowError> {
 /// a job raises.
 pub fn run<R>(script: &str, agent_runner: R) -> Result<RunOutcome, WorkflowError>
 where
-    R: FnMut(&str) -> String + 'static,
+    R: FnMut(&[String]) -> Vec<String> + 'static,
 {
     use rquickjs::{Context, Function, Runtime};
 
@@ -224,12 +246,15 @@ where
             )
             .map_err(eng)?;
 
+        // Native batch dispatcher: the JS `__wf_pump` hands it every concurrently
+        // pending agent prompt at once; the runner resolves them (the real
+        // runtime spawns the subagents in parallel).
         let r = runner.clone();
         globals
             .set(
-                "agent",
-                Function::new(ctx.clone(), move |prompt: String| -> String {
-                    (r.borrow_mut())(&prompt)
+                "__wf_dispatch_batch",
+                Function::new(ctx.clone(), move |prompts: Vec<String>| -> Vec<String> {
+                    (r.borrow_mut())(&prompts)
                 })
                 .map_err(eng)?,
             )
@@ -246,11 +271,10 @@ where
             )
             .map_err(eng)?;
 
-        // Orchestration prelude: `parallel()` / `pipeline()` defined in JS
-        // (the same shape as claude-code's, including the byte-locked argument
-        // validation). NB these are SEQUENTIAL for now — they produce the same
-        // results as claude-code but without the concurrent fan-out; true
-        // concurrency needs the pending-promise dispatch model (next stage).
+        // Orchestration prelude: agent() (deferred-promise) + parallel() /
+        // pipeline() + budget/args/workflow defined in JS, with the byte-locked
+        // argument validation. The native __wf_dispatch_batch (above) receives
+        // each concurrent batch the pump produces.
         ctx.eval::<(), _>(WORKFLOW_PRELUDE.as_bytes())
             .map_err(|e| WorkflowError::Engine(e.to_string()))?;
 
@@ -260,11 +284,26 @@ where
         Ok(())
     })?;
 
-    // Drive the microtask/job queue until the IIFE settles.
-    while rt
-        .execute_pending_job()
-        .map_err(|e| WorkflowError::Script(format!("{e:?}")))?
-    {}
+    // Drive the runtime: drain microtasks, then pump the agent queue (dispatch
+    // every concurrently-pending agent as ONE batch + resolve), and repeat until
+    // the workflow settles (no jobs and no queued agents).
+    loop {
+        while rt
+            .execute_pending_job()
+            .map_err(|e| WorkflowError::Script(format!("{e:?}")))?
+        {}
+        let pumped = ctx.with(|ctx| -> Result<bool, WorkflowError> {
+            let pump: Function = ctx
+                .globals()
+                .get("__wf_pump")
+                .map_err(|e| WorkflowError::Engine(e.to_string()))?;
+            pump.call::<_, bool>(())
+                .map_err(|e| WorkflowError::Script(e.to_string()))
+        })?;
+        if !pumped {
+            break;
+        }
+    }
 
     if let Some(e) = error.borrow().clone() {
         return Err(WorkflowError::Script(e));
@@ -276,6 +315,12 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Batch runner for scripts that never call `agent()` (the batch is always
+    /// empty, so this is never actually invoked).
+    fn no_agents(prompts: &[String]) -> Vec<String> {
+        prompts.iter().map(|_| String::new()).collect()
+    }
 
     #[test]
     fn engine_evaluates_js() {
@@ -341,9 +386,14 @@ const b = await agent('second')
 log('got: ' + b)
 "#;
         let mut calls = 0;
-        let out = run(script, move |prompt: &str| {
-            calls += 1;
-            format!("[r{calls}:{prompt}]")
+        let out = run(script, move |prompts: &[String]| -> Vec<String> {
+            prompts
+                .iter()
+                .map(|prompt| {
+                    calls += 1;
+                    format!("[r{calls}:{prompt}]")
+                })
+                .collect()
         })
         .unwrap();
         assert_eq!(
@@ -363,7 +413,10 @@ log('got: ' + b)
 const n = Number(await agent('count'))
 for (let i = 0; i < n; i++) log('item ' + i)
 "#;
-        let out = run(script, |_| "3".to_string()).unwrap();
+        let out = run(script, |prompts: &[String]| {
+            prompts.iter().map(|_| "3".to_string()).collect()
+        })
+        .unwrap();
         assert_eq!(
             out.progress,
             vec![
@@ -376,9 +429,10 @@ for (let i = 0; i < n; i++) log('item ' + i)
 
     #[test]
     fn async_script_throw_surfaces_after_await() {
-        let err = run("await agent('x'); throw new Error('boom')", |_| {
-            "ok".to_string()
-        })
+        let err = run(
+            "await agent('x'); throw new Error('boom')",
+            |prompts: &[String]| prompts.iter().map(|_| "ok".to_string()).collect(),
+        )
         .unwrap_err();
         match err {
             WorkflowError::Script(s) => assert!(s.contains("boom"), "got: {s}"),
@@ -397,9 +451,14 @@ const rs = await parallel([
 log(rs.join('|'))
 "#;
         let mut n = 0;
-        let out = run(script, move |p: &str| {
-            n += 1;
-            format!("{p}{n}")
+        let out = run(script, move |prompts: &[String]| -> Vec<String> {
+            prompts
+                .iter()
+                .map(|p| {
+                    n += 1;
+                    format!("{p}{n}")
+                })
+                .collect()
         })
         .unwrap();
         assert_eq!(out.progress, vec![Progress::Log("a1|b2|c3".into())]);
@@ -414,8 +473,85 @@ const rs = await parallel([
 ])
 log(String(rs[0]) + ',' + String(rs[1]))
 "#;
-        let out = run(script, |_| "OK".to_string()).unwrap();
+        let out = run(script, |prompts: &[String]| {
+            prompts.iter().map(|_| "OK".to_string()).collect()
+        })
+        .unwrap();
         assert_eq!(out.progress, vec![Progress::Log("OK,null".into())]);
+    }
+
+    #[test]
+    fn parallel_dispatches_concurrent_agents_as_one_batch() {
+        // parallel() starts every thunk before awaiting → the agents queue
+        // together and the driver dispatches them as a SINGLE concurrent batch.
+        let script = r#"
+const rs = await parallel([() => agent('a'), () => agent('b'), () => agent('c')])
+log(rs.join('|'))
+"#;
+        let batches: Rc<RefCell<Vec<usize>>> = Rc::new(RefCell::new(Vec::new()));
+        let b = batches.clone();
+        let out = run(script, move |prompts: &[String]| -> Vec<String> {
+            b.borrow_mut().push(prompts.len());
+            prompts.iter().map(|p| format!("R:{p}")).collect()
+        })
+        .unwrap();
+        assert_eq!(out.progress, vec![Progress::Log("R:a|R:b|R:c".into())]);
+        assert_eq!(
+            *batches.borrow(),
+            vec![3],
+            "all three agents dispatched in ONE concurrent batch"
+        );
+    }
+
+    #[test]
+    fn sequential_awaits_are_separate_batches() {
+        // A sequential `await agent()` chain dispatches one prompt at a time.
+        let script = r#"
+const a = await agent('a')
+const b = await agent('b')
+log(a + b)
+"#;
+        let batches: Rc<RefCell<Vec<usize>>> = Rc::new(RefCell::new(Vec::new()));
+        let b = batches.clone();
+        let out = run(script, move |prompts: &[String]| -> Vec<String> {
+            b.borrow_mut().push(prompts.len());
+            prompts.iter().map(|p| p.to_uppercase()).collect()
+        })
+        .unwrap();
+        assert_eq!(out.progress, vec![Progress::Log("AB".into())]);
+        assert_eq!(
+            *batches.borrow(),
+            vec![1, 1],
+            "two sequential awaits → two batches of one"
+        );
+    }
+
+    #[test]
+    fn pipeline_stages_batch_across_items() {
+        // pipeline runs items independently, so each stage's agents across all
+        // items dispatch together: stage 1 over [x,y] is one batch, stage 2 is
+        // the next.
+        let script = r#"
+const rs = await pipeline(
+  ['x', 'y'],
+  (it) => agent('s1:' + it),
+  (prev) => agent('s2:' + prev),
+)
+log(rs.join('|'))
+"#;
+        let batches: Rc<RefCell<Vec<usize>>> = Rc::new(RefCell::new(Vec::new()));
+        let b = batches.clone();
+        let out = run(script, move |prompts: &[String]| -> Vec<String> {
+            b.borrow_mut().push(prompts.len());
+            prompts.iter().map(|p| format!("[{p}]")).collect()
+        })
+        .unwrap();
+        assert_eq!(out.progress, vec![Progress::Log("[s2:[s1:x]]|[s2:[s1:y]]".into())]);
+        assert_eq!(
+            *batches.borrow(),
+            vec![2, 2],
+            "stage 1 over both items is one batch, stage 2 the next"
+        );
     }
 
     #[test]
@@ -428,13 +564,13 @@ const rs = await pipeline(
 )
 log(rs.join(','))
 "#;
-        let out = run(script, |_| "x".to_string()).unwrap();
+        let out = run(script, no_agents).unwrap();
         assert_eq!(out.progress, vec![Progress::Log("20,30,40".into())]);
     }
 
     #[test]
     fn pipeline_rejects_non_array_first_arg() {
-        let err = run("await pipeline('nope', x => x)", |_| "x".to_string()).unwrap_err();
+        let err = run("await pipeline('nope', x => x)", no_agents).unwrap_err();
         match err {
             WorkflowError::Script(s) => assert!(
                 s.contains("pipeline() expects an array as the first argument"),
@@ -446,7 +582,7 @@ log(rs.join(','))
 
     #[test]
     fn pipeline_rejects_non_function_stage() {
-        let err = run("await pipeline([1], 'notafn')", |_| "x".to_string()).unwrap_err();
+        let err = run("await pipeline([1], 'notafn')", no_agents).unwrap_err();
         match err {
             WorkflowError::Script(s) => assert!(
                 s.contains("pipeline() stages must be functions"),
@@ -465,7 +601,7 @@ log('spent=' + String(budget.spent()))
 log('args=' + String(args))
 log('wf=' + (typeof workflow))
 "#;
-        let out = run(script, |_| "x".to_string()).unwrap();
+        let out = run(script, no_agents).unwrap();
         assert_eq!(
             out.progress,
             vec![
@@ -480,7 +616,7 @@ log('wf=' + (typeof workflow))
 
     #[test]
     fn nested_workflow_call_throws_clearly() {
-        let err = run("await workflow('child')", |_| "x".to_string()).unwrap_err();
+        let err = run("await workflow('child')", no_agents).unwrap_err();
         match err {
             WorkflowError::Script(s) => {
                 assert!(s.contains("nested workflows are not supported"), "got: {s}");

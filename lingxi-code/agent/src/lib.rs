@@ -40,7 +40,9 @@ pub use color_manager::AgentColorManager;
 pub use context::SubagentContext;
 pub use definition::*;
 pub use display::AgentDisplay;
-pub use handle::{agent_listing_entries, tools_description, PoolSubagentSpawner};
+pub use handle::{
+    agent_listing_entries, tools_description, PoolSubagentSpawner, StreamingSubagentSpawner,
+};
 // `agent_listing_delta` shared surface: the ONE `formatAgentLine` and the
 // `shouldInjectAgentListInMessages` gate live in the leaf `traits` crate (so
 // `tool-agent` can reach them without depending on this engine crate); re-export

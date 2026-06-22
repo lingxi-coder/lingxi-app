@@ -674,6 +674,142 @@ impl PoolSubagentSpawner {
         }
         crate::agent_listing_entries(&defs)
     }
+
+    /// Build the child [`SubagentContext`] for a spawn: definition resolution +
+    /// caller model override + inheritance (tool invoker / budget / api seam) +
+    /// hook cells + transcript dir + per-spawn tool resolution. Shared by the
+    /// one-shot [`SubagentSpawner::spawn`] and the resumable
+    /// [`StreamingSubagentSpawner::spawn_persistent`].
+    ///
+    /// `persistent = true` makes the runner "come to rest" after each terminal
+    /// turn-set — it parks awaiting the next inbound `UserMessage` (delivered via
+    /// [`StateMachinePool::send_event`]) instead of returning — and marks it
+    /// async (background-scheduled). This is the basis of the resumable
+    /// background local_agent (claude-code `run_in_background` + comes-to-rest).
+    async fn build_subagent_context(
+        &self,
+        request: &SubagentSpawnRequest,
+        inherit: SubagentInheritance,
+        persistent: bool,
+    ) -> SubagentContext {
+        let mut def = self.resolve_definition(&request.subagent_type).await;
+        // AgentTool spawn-surface parity: an explicit `model` from the caller
+        // (TS schema `model: 'sonnet' | 'opus' | 'haiku'`) takes precedence over
+        // the definition's model frontmatter (AgentTool.tsx:86).
+        if let Some(model_pref) = request.model.as_deref() {
+            let requested = AgentModel::Alias(model_pref.to_string());
+            def.model = match &self.default_model {
+                Some(parent) => AgentModel::Explicit(
+                    crate::model_resolution::resolve_agent_model(
+                        &requested,
+                        parent,
+                        self.permission_mode,
+                        self.model_setting.as_deref(),
+                    ),
+                ),
+                None => requested,
+            };
+        }
+        // Fork carriers (codex #5): on the fork path `fork_context_messages`
+        // carries the byte-exact forked prefix and `fork_parent_system_prompt`
+        // the parent's rendered system prompt; both `None` for a normal spawn.
+        let mut ctx = Self::make_subagent_context(
+            def,
+            &request.prompt,
+            request.fork_context_messages.clone(),
+            request.fork_parent_system_prompt.clone(),
+        );
+        // Hand the child the parent's tool invoker + budget enforcer + our model
+        // API seam (recursion-lock / budget-inheritance invariants).
+        ctx.tool_invoker = Some(inherit.tool_invoker);
+        ctx.budget = Some(inherit.budget);
+        ctx.api_client.clone_from(&self.api_client);
+        // G4/G5: thread the runner's hook executor + skill loader + hook context
+        // seed from the set-once cells (None ⇒ runner skips those steps).
+        ctx.hook_executor = self.hook_executor.get().cloned();
+        ctx.skill_loader = self.skill_loader.get().cloned();
+        ctx.hook_session_id = self.hook_session_id;
+        ctx.hook_cwd = self.hook_cwd.clone();
+        // Seed the child's REAL transcript_subdir when the host wired one.
+        if let Some(subagents_dir) = &self.hook_subagents_dir {
+            ctx.transcript_subdir = subagents_dir.clone();
+        }
+        // Resolve THIS spawn's advertised tools + dispatch allow-list.
+        let (tool_schemas, allowed_tools) = self.resolve_tools(&ctx.agent_definition).await;
+        ctx.tool_schemas = tool_schemas;
+        ctx.allowed_tools = allowed_tools;
+        ctx.schema = request.schema.clone();
+        // A persistent (background/resumable) agent parks after each turn-set;
+        // `is_async` marks background scheduling (vs the foreground one-shot).
+        ctx.persistent = persistent;
+        ctx.is_async = persistent;
+        ctx
+    }
+}
+
+/// The persistent / resumable subagent seam (claude-code `run_in_background` +
+/// "comes to rest" + `resumeAgentBackground`).
+///
+/// Distinct from the cross-crate [`traits::SubagentSpawner`] (whose return type
+/// is the traits-level [`SubagentResult`] — it cannot reference the `agent`-crate
+/// [`SubagentEvent`] stream). The task-layer LocalAgent handler — which already
+/// depends on `agent` — drives a persistent (background/resumable) local_agent
+/// through this trait: it pumps the [`SubagentEvent`] stream (one `Completed`
+/// per turn-set, then the runner parks awaiting the next message) and resumes a
+/// resting agent via [`Self::resume`].
+#[async_trait]
+pub trait StreamingSubagentSpawner: Send + Sync {
+    /// Spawn a PERSISTENT subagent (`persistent: true`): the runner "comes to
+    /// rest" after each terminal turn-set instead of returning. Returns its id
+    /// plus the outbound [`SubagentEvent`] stream the caller pumps.
+    async fn spawn_persistent(
+        &self,
+        request: SubagentSpawnRequest,
+        inherit: SubagentInheritance,
+    ) -> Result<(AgentId, tokio::sync::mpsc::Receiver<SubagentEvent>), SubagentSpawnError>;
+
+    /// Resume a resting persistent subagent by delivering a user `message` (the
+    /// `injectUserMessageToTeammate` analogue): the parked runner wakes, appends
+    /// it to history, and runs the next turn-set. Errors when the agent id is
+    /// unknown / its runner has terminated.
+    async fn resume(&self, agent_id: &AgentId, message: String)
+        -> Result<(), SubagentSpawnError>;
+}
+
+#[async_trait]
+impl StreamingSubagentSpawner for PoolSubagentSpawner {
+    async fn spawn_persistent(
+        &self,
+        request: SubagentSpawnRequest,
+        inherit: SubagentInheritance,
+    ) -> Result<(AgentId, tokio::sync::mpsc::Receiver<SubagentEvent>), SubagentSpawnError> {
+        let ctx = self.build_subagent_context(&request, inherit, true).await;
+        let agent_id = ctx.agent_id;
+        let (_aid, rx) = self
+            .pool
+            .allocate(ctx)
+            .await
+            .map_err(|e| SubagentSpawnError::Runtime(e.to_string()))?;
+        Ok((agent_id, rx))
+    }
+
+    async fn resume(
+        &self,
+        agent_id: &AgentId,
+        message: String,
+    ) -> Result<(), SubagentSpawnError> {
+        self.pool
+            .send_event(
+                agent_id,
+                engine::Event::UserMessage {
+                    message_id: protocol::MessageId::new(),
+                    request_id: protocol::RequestId::new(),
+                    content: message,
+                },
+            )
+            .await
+            .map_err(|e| SubagentSpawnError::Runtime(e.to_string()))
+    }
 }
 
 /// Render an [`AgentDefinition`]'s tool policy into the human "tools
@@ -749,81 +885,10 @@ impl SubagentSpawner for PoolSubagentSpawner {
         // overrides built-ins; unknown → general-purpose). Its tools policy /
         // model / max_turns / system prompt flow into the runner, and its
         // policy drives the per-spawn tool resolution below.
-        let mut def = self.resolve_definition(&request.subagent_type).await;
-        // AgentTool spawn-surface parity: an explicit `model` from the caller
-        // (TS schema `model: 'sonnet' | 'opus' | 'haiku'`) takes precedence
-        // over the definition's model frontmatter (AgentTool.tsx:86). Resolve
-        // the requested family to a concrete wire id via the same machinery
-        // (`resolve_agent_model`) `resolve_definition` uses when a default
-        // model is wired; without one, the bare alias is passed through raw
-        // (legacy back-compat — the runner resolves it later).
-        if let Some(model_pref) = request.model.as_deref() {
-            let requested = AgentModel::Alias(model_pref.to_string());
-            def.model = match &self.default_model {
-                Some(parent) => AgentModel::Explicit(
-                    crate::model_resolution::resolve_agent_model(
-                        &requested,
-                        parent,
-                        self.permission_mode,
-                        self.model_setting.as_deref(),
-                    ),
-                ),
-                None => requested,
-            };
-        }
-        // The other parity params (`name` / `team_name` / `mode` / `isolation`
-        // / `cwd`) are carried on the request but their behavioral effects are
-        // DEFERRED: teammate routing (name/team_name/mode), worktree/remote
-        // isolation, and per-agent cwd override are separate features whose
-        // wiring lands with the multi-agent + worktree spawn paths. They are
-        // intentionally not faked here.
-        // Fork carriers (codex #5): on the fork path `AgentTool` ships the
-        // byte-exact forked prefix in `fork_context_messages` (the directive is
-        // already its trailing Text block, so `request.prompt` is unused as a
-        // seed) and the parent's rendered system prompt in
-        // `fork_parent_system_prompt`. Both `None` for every non-fork spawn →
-        // byte-identical legacy behavior.
-        let mut ctx = Self::make_subagent_context(
-            def,
-            &request.prompt,
-            request.fork_context_messages.clone(),
-            request.fork_parent_system_prompt.clone(),
-        );
-        // Hand the child the parent's tool invoker, the parent's budget
-        // enforcer, and our model API seam so the runner can drive the real
-        // multi-turn loop and enforce the inherited budget per turn.
-        ctx.tool_invoker = Some(inherit.tool_invoker);
-        ctx.budget = Some(inherit.budget);
-        ctx.api_client.clone_from(&self.api_client);
-        // G4/G5: thread the runner's hook executor + skill loader + hook context
-        // seed from the set-once cells (None when unfilled → the runner skips
-        // SubagentStart firing / frontmatter-hook registration / skill preload).
-        ctx.hook_executor = self.hook_executor.get().cloned();
-        ctx.skill_loader = self.skill_loader.get().cloned();
-        ctx.hook_session_id = self.hook_session_id;
-        ctx.hook_cwd = self.hook_cwd.clone();
-        // FIX C: seed the child's REAL `transcript_subdir` from the boot-computed
-        // session subagents dir (`…/projects/<sanitize(cwd)>/<session>/subagents`)
-        // when the host wired one, so `runner.rs`'s `agent_transcript_path` resolves
-        // to the true `…/subagents/agent-<id>.jsonl` (claude-code
-        // `getAgentTranscriptPath`). `None` ⇒ keep `make_subagent_context`'s `/tmp`
-        // placeholder (byte-identical legacy for tests / minimal builds).
-        if let Some(subagents_dir) = &self.hook_subagents_dir {
-            ctx.transcript_subdir = subagents_dir.clone();
-        }
-        // Resolve THIS spawn's advertised tools + dispatch allow-list from the
-        // live registry per the child's policy (unset registry → no tools).
-        // Populating `allowed_tools` here ACTIVATES the runner's dispatch guard
-        // (runner.rs: an empty list = guard skipped). Its safety rests on the
-        // allow-list covering every name the inherited `RegistryToolInvoker`
-        // could dispatch — true because both derive from the same registry
-        // snapshot (and `resolve_tools` now folds in aliases). A future change
-        // that let the spawner's registry and the invoker's registry diverge
-        // would have to re-establish that invariant.
-        let (tool_schemas, allowed_tools) = self.resolve_tools(&ctx.agent_definition).await;
-        ctx.tool_schemas = tool_schemas;
-        ctx.allowed_tools = allowed_tools;
-        ctx.schema = request.schema.clone();
+        // Build the child context (non-persistent: the one-shot `spawn` returns
+        // on the first terminal stop). The persistent/resumable variant is
+        // `spawn_persistent` below.
+        let ctx = self.build_subagent_context(&request, inherit, false).await;
         let agent_id = ctx.agent_id;
         let (_aid, mut rx) = self
             .pool
@@ -1898,6 +1963,46 @@ mod tests {
         let cloned = inherit.clone();
         assert!(Arc::ptr_eq(&inherit.tool_invoker, &cloned.tool_invoker));
         assert!(Arc::ptr_eq(&inherit.budget, &cloned.budget));
+    }
+
+    /// local_agent "resume" Phase 1: `build_subagent_context(persistent=true)`
+    /// sets `SubagentContext.persistent` + `is_async`, so the runner "comes to
+    /// rest" (parks awaiting the next inbound message) after each turn-set
+    /// instead of returning — the basis of the resumable background local_agent.
+    /// `persistent=false` (the one-shot `spawn` path) keeps both `false`.
+    #[tokio::test]
+    async fn build_subagent_context_threads_persistent_flag() {
+        let runtime = Arc::new(MockRuntimeSpawner::default());
+        let pool = Arc::new(StateMachinePool::new(runtime, 4));
+        let spawner = PoolSubagentSpawner::new(pool);
+        let req = SubagentSpawnRequest {
+            subagent_type: "general-purpose".to_string(),
+            prompt: "go".to_string(),
+            context_paths: vec![],
+            description: None,
+            model: None,
+            run_in_background: true,
+            name: None,
+            team_name: None,
+            mode: None,
+            isolation: None,
+            cwd: None,
+            fork_context_messages: None,
+            fork_parent_system_prompt: None,
+            schema: None,
+        };
+        let mk_inherit = || SubagentInheritance {
+            tool_invoker: Arc::new(DummyInvoker),
+            budget: Arc::new(DummyBudget),
+        };
+
+        let persistent = spawner.build_subagent_context(&req, mk_inherit(), true).await;
+        assert!(persistent.persistent, "persistent agent must park (come to rest)");
+        assert!(persistent.is_async, "persistent agent is background-scheduled");
+
+        let one_shot = spawner.build_subagent_context(&req, mk_inherit(), false).await;
+        assert!(!one_shot.persistent, "the one-shot spawn path must NOT park");
+        assert!(!one_shot.is_async);
     }
 
     // ── G11: resolve_selection source mapping + model resolution ──

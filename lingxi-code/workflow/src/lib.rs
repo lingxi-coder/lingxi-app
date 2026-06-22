@@ -231,7 +231,7 @@ pub fn run<R>(script: &str, agent_runner: R) -> Result<RunOutcome, WorkflowError
 where
     R: FnMut(&[String], &[String]) -> Vec<String> + 'static,
 {
-    run_with_progress(script, agent_runner, |_: &Progress| {}, None)
+    run_with_progress(script, agent_runner, |_: &Progress| {}, None, false, None)
 }
 
 /// Like [`run`], but also fires `on_progress` for each `phase()`/`log()` event
@@ -247,6 +247,14 @@ pub fn run_with_progress<R, P>(
     agent_runner: R,
     on_progress: P,
     budget: Option<Arc<dyn WorkflowBudgetSource>>,
+    // When `true`, `workflow()` runs a nested workflow inline (the host runner
+    // resolves+runs it via an `__wf_nested` agent() call); `false` (nested runs)
+    // leaves the throwing default — claude-code's one-level nesting limit.
+    allow_nested: bool,
+    // The `args` global value as a JSON string (the Workflow tool's `args` input
+    // / a `workflow()` call's args). `None` ⇒ `undefined`. JSON is a subset of JS
+    // expressions, so it is a valid initializer.
+    args: Option<String>,
 ) -> Result<RunOutcome, WorkflowError>
 where
     // `(prompts, opts_json) -> results`: the two parallel arrays the pump
@@ -379,6 +387,28 @@ where
                 .map_err(eng)?;
             ctx.eval::<(), _>(
                 b"globalThis.budget = { total: __wf_budget_total(), spent: () => __wf_budget_spent(), remaining: () => { const t = globalThis.budget.total; return (t === null || t === undefined) ? Infinity : Math.max(0, t - __wf_budget_spent()); } };" as &[u8],
+            )
+            .map_err(|e| WorkflowError::Engine(e.to_string()))?;
+        }
+
+        // `args` global (the Workflow tool's `args` input / a `workflow()` call's
+        // args). Set BEFORE the prelude so its `if (!('args' in globalThis))`
+        // default is skipped. The value is already a JSON string (a valid JS
+        // initializer).
+        if let Some(args_json) = &args {
+            ctx.eval::<(), _>(format!("globalThis.args = {args_json};").as_bytes())
+                .map_err(|e| WorkflowError::Engine(e.to_string()))?;
+        }
+
+        // Top-level `workflow()`: run a nested workflow inline by routing through
+        // an `agent('', { __wf_nested })` call the host runner intercepts; the
+        // result (JSON) is parsed and returned. (`agent` is resolved lazily at
+        // call time, so defining this before the prelude is fine.) Set only when
+        // nesting is allowed — a nested run leaves the prelude's throwing default,
+        // enforcing claude-code's one-level limit.
+        if allow_nested {
+            ctx.eval::<(), _>(
+                b"globalThis.workflow = async (nameOrRef, a) => { const spec = (typeof nameOrRef === 'string') ? { name: nameOrRef } : nameOrRef; const r = await agent('', { __wf_nested: JSON.stringify(spec), __wf_args: (a === undefined ? null : a) }); return r === '' ? undefined : JSON.parse(r); };" as &[u8],
             )
             .map_err(|e| WorkflowError::Engine(e.to_string()))?;
         }
@@ -809,6 +839,8 @@ log('wf=' + (typeof workflow))
                 });
             },
             None,
+            false,
+            None,
         )
         .unwrap();
         // Callbacks fired live, in emission order.
@@ -841,6 +873,8 @@ log('wf=' + (typeof workflow))
             no_agents,
             |_: &Progress| {},
             Some(Arc::new(Src) as Arc<dyn WorkflowBudgetSource>),
+            false,
+            None,
         )
         .unwrap();
         assert_eq!(
@@ -851,5 +885,55 @@ log('wf=' + (typeof workflow))
                 Progress::Log("remaining=380000".into()),
             ]
         );
+    }
+
+    #[test]
+    fn args_global_reflects_the_passed_value() {
+        let out = run_with_progress(
+            "log('x=' + args.x); log('len=' + args.items.length);",
+            no_agents,
+            |_: &Progress| {},
+            None,
+            false,
+            Some(r#"{ "x": 7, "items": [1, 2, 3] }"#.to_string()),
+        )
+        .unwrap();
+        assert_eq!(
+            out.progress,
+            vec![Progress::Log("x=7".into()), Progress::Log("len=3".into())]
+        );
+    }
+
+    #[test]
+    fn workflow_runs_nested_inline_when_allowed() {
+        // allow_nested=true → workflow() routes through an `__wf_nested` agent()
+        // call; the host runner returns the nested workflow's result JSON, which
+        // workflow() parses and returns.
+        let out = run_with_progress(
+            r#"
+                const r = await workflow('child', { n: 1 });
+                log('ok=' + r.ok);
+                return r;
+            "#,
+            |_prompts: &[String], opts_json: &[String]| {
+                opts_json
+                    .iter()
+                    .map(|o| {
+                        if o.contains("__wf_nested") {
+                            r#"{"ok":true}"#.to_string()
+                        } else {
+                            String::new()
+                        }
+                    })
+                    .collect()
+            },
+            |_: &Progress| {},
+            None,
+            true,
+            None,
+        )
+        .unwrap();
+        assert_eq!(out.progress, vec![Progress::Log("ok=true".into())]);
+        assert_eq!(out.result.as_deref(), Some(r#"{"ok":true}"#));
     }
 }

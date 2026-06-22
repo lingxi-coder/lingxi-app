@@ -83,6 +83,9 @@ pub enum TaskSpawnInput {
         /// Resume a prior run (`wf_…`): journaled `agent()` results for
         /// unchanged (prompt, opts) are replayed instead of re-spawned.
         resume_from_run_id: Option<String>,
+        /// The `args` global value (the Workflow tool's `args` input), as a JSON
+        /// string. `None` ⇒ `undefined`.
+        args: Option<String>,
     },
     /// Spawn an MCP monitor.
     MonitorMcp {

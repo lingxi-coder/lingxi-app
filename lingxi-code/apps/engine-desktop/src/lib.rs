@@ -681,6 +681,11 @@ impl tool_workflow::WorkflowLauncher for TaskRegistryWorkflowLauncher {
                     workflow_id: spec.name.clone().unwrap_or_default(),
                     script,
                     resume_from_run_id: spec.resume_from_run_id.clone(),
+                    // The `args` global, serialised to a JSON string for the runtime.
+                    args: spec
+                        .args
+                        .as_ref()
+                        .map(|v| serde_json::to_string(v).unwrap_or_default()),
                 },
                 "Workflow".to_string(),
             )

@@ -738,6 +738,7 @@ mod tests {
                     workflow_id: "wf".into(),
                     script: String::new(),
                     resume_from_run_id: None,
+                    args: None,
                 },
                 make_ctx(fs),
             )

@@ -712,11 +712,13 @@ fn state_for_spawn(base: TaskStateBase, input: &TaskSpawnInput) -> TaskState {
             workflow_id,
             script,
             resume_from_run_id,
+            args,
         } => TaskState::LocalWorkflow(crate::state::LocalWorkflowTaskState {
             base,
             workflow_id: workflow_id.clone(),
             script: script.clone(),
             resume_from_run_id: resume_from_run_id.clone(),
+            args: args.clone(),
             current_step: 0,
         }),
         TaskSpawnInput::MonitorMcp { server_name, watch } => {

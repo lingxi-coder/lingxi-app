@@ -164,6 +164,9 @@ pub struct LocalWorkflowTaskState {
     /// Prior run id to resume journaled `agent()` results from, if any.
     #[serde(default)]
     pub resume_from_run_id: Option<String>,
+    /// The `args` global value (JSON string), if any.
+    #[serde(default)]
+    pub args: Option<String>,
     /// Index of the currently-executing step.
     pub current_step: usize,
 }

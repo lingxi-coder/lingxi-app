@@ -2,7 +2,7 @@
 //! character-based approximation elsewhere.
 
 use llm_client::{client::DefaultLlmClient, AnthropicMessagesCodec, LlmError, LlmRequest, Transport};
-use crate::model::betas::{apply_beta_header, Endpoint, Provider};
+use crate::model::betas::{apply_beta_header, BetaContext, Endpoint, Provider};
 
 /// Approximation divisor for non-Anthropic routes (byte-length/4 ≈ tokens).
 pub const APPROX_CHARS_PER_TOKEN: u64 = 4;
@@ -15,7 +15,20 @@ pub async fn count_tokens(
 ) -> Result<u64, LlmError> {
     match client.prepare_count_tokens(request).await {
         Ok(mut provider_request) => {
-            apply_beta_header(&mut provider_request, Provider::Anthropic, Endpoint::CountTokens);
+            // Gate on the resolved request model in the prepared body (the
+            // count_tokens ERr whitelist depends only on the model).
+            let model = provider_request
+                .body_json
+                .get("model")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or(request.model.as_str())
+                .to_string();
+            apply_beta_header(
+                &mut provider_request,
+                Provider::Anthropic,
+                Endpoint::CountTokens,
+                &BetaContext::for_model(model),
+            );
             let response = transport.execute(&provider_request).await?;
             // decode via a throwaway codec: decode is stateless and
             // base_url-independent.
@@ -245,6 +258,7 @@ mod tests {
         let expected = crate::model::betas::assemble_beta_header(
             crate::model::betas::Provider::Anthropic,
             crate::model::betas::Endpoint::CountTokens,
+            &crate::model::betas::BetaContext::for_model("claude-sonnet-4-20250514"),
         );
         assert_eq!(
             seen.headers.get("anthropic-beta").map(String::as_str),

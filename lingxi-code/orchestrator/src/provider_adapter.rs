@@ -6,7 +6,7 @@
 //! prepare/execute pair and feeds headers to `model/rate_limit.rs` + `model/retry.rs`.
 
 use crate::conversation::{OrchestratorApiClient, StreamingApiClient};
-use crate::model::betas::{apply_beta_header_with_auth, Endpoint, Provider};
+use crate::model::betas::{apply_beta_header_with_auth, BetaContext, Endpoint, Provider};
 use crate::model::rate_limit::{
     formatted_reset_times_from_headers, parse_retry_after, parse_unified_reset,
     rate_limit_error_message, RateLimitInfo, RawUtilization, SubscriptionContext,
@@ -768,12 +768,34 @@ impl ProviderApiAdapter {
     /// attempt — these injectors run once per prepare/execute attempt, so the
     /// live-slot read here is per-attempt, the lighter diff vs. threading the
     /// hoisted value through as a parameter).
+    /// Build the per-request [`BetaContext`] (the binary's `xLr(model)` inputs)
+    /// from the prepared request body: the resolved model id and `speed: "fast"`.
+    /// `interactive`/`show_thinking_summaries` use the faithful external-default
+    /// (interactive TUI, no summaries) — wiring the live session flags is a
+    /// documented follow-up; the dominant interactive path matches the binary.
+    fn beta_context(prepared: &ProviderRequest) -> BetaContext {
+        let model = prepared
+            .body_json
+            .get("model")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        let fast_mode = prepared
+            .body_json
+            .get("speed")
+            .and_then(serde_json::Value::as_str)
+            == Some("fast");
+        BetaContext::for_model(model).with_fast_mode(fast_mode)
+    }
+
     fn inject_headers(&self, prepared: &mut ProviderRequest, request_id: &str) {
-        // anthropic-beta (Task 2): full assembled list merged with any auth-injected betas.
+        // anthropic-beta: per-model gated set (e5/xLr port) merged with any
+        // auth-injected betas.
+        let ctx = Self::beta_context(prepared);
         apply_beta_header_with_auth(
             prepared,
             Provider::Anthropic,
             Endpoint::MessagesCreate,
+            &ctx,
             self.effective_subscriber().is_subscriber,
         );
         // User-Agent (Task 3).
@@ -788,10 +810,12 @@ impl ProviderApiAdapter {
 
     /// Same as [`inject_headers`] but for the streaming endpoint.
     fn inject_stream_headers(&self, prepared: &mut ProviderRequest, request_id: &str) {
+        let ctx = Self::beta_context(prepared);
         apply_beta_header_with_auth(
             prepared,
             Provider::Anthropic,
             Endpoint::MessagesCreateStream,
+            &ctx,
             self.effective_subscriber().is_subscriber,
         );
         prepared
@@ -5123,6 +5147,7 @@ mod tests {
         let expected_beta = crate::model::betas::assemble_beta_header(
             crate::model::betas::Provider::Anthropic,
             crate::model::betas::Endpoint::CountTokens,
+            &crate::model::betas::BetaContext::for_model("claude-sonnet-4-20250514"),
         );
         assert_eq!(
             transport.seen_headers(0).get("anthropic-beta").map(String::as_str),

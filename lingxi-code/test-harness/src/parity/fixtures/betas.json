@@ -1,36 +1,36 @@
 {
-  "_source": "claude-code/src/constants/betas.ts @ commit 6a25909 (2026-05-23)",
-  "_note": "Per-provider × per-endpoint expected anthropic-beta header value. Declaration order in betas.ts is the canonical order; assemble_beta_header emits constants in declaration order. count_tokens is the narrower endpoint; Vertex × count_tokens is restricted to the 3-entry VERTEX_COUNT_TOKENS_ALLOWED whitelist. Bedrock moves INTERLEAVED_THINKING / CONTEXT_1M / TOOL_SEARCH_TOOL_3P into extraBodyParams (excluded from header). Anthropic 1P also excludes the 3P-only TOOL_SEARCH_TOOL_3P. All providers exclude ADVANCED_TOOL_USE_1P from 3P routes (Vertex/Bedrock). Per v3 §32.6 fixture-matches-implementation rule for the ambiguous Anthropic × count_tokens row: CONTEXT_1M is gated by applies_messages_only() in betas.rs so it does NOT appear on count_tokens. Flagged for a follow-up parity audit against claude-code TS source — if upstream emits CONTEXT_1M for count_tokens, tighten applies_messages_only and update this row in the same commit.",
+  "_source": "claude-code v2.1.185 binary — the xLr/e5 getBetas(model) assembler (reverse-engineered byte-for-byte).",
+  "_note": "Expected anthropic-beta header for the in-scope first-party (Anthropic) path, per model. The header is NOT static per provider×endpoint — it is gated per model/capability/request by e5(model). For claude-opus-4-8 (interactive, experimental betas on, standard speed) the messages.create set is the xLr core in declaration order: claude-code, interleaved-thinking, redact-thinking, thinking-token-count, context-management, prompt-caching-scope, mid-conversation-system. count_tokens intersects that with the ERr whitelist {claude-code, interleaved-thinking, context-management, oauth}. Vertex/Bedrock have provider-specific xLr branches (web-search-on-vertex, thinking-token-count-firstParty-only, bRr extraBodyParams) that are OUT OF SCOPE here (LingXi drives Provider::Anthropic only); the Bedrock/Vertex exclusion structure is covered by orchestrator::model::betas unit tests. The prior fixture encoded the over-emitting static 14-entry set (incl. fabricated token-efficient-tools-2026-03-28) and is replaced.",
   "matrix": [
     {
       "provider": "anthropic",
       "endpoint": "messages_create",
-      "expected": "claude-code-20250219,interleaved-thinking-2025-05-14,context-1m-2025-08-07,context-management-2025-06-27,structured-outputs-2025-12-15,web-search-2025-03-05,advanced-tool-use-2025-11-20,effort-2025-11-24,task-budgets-2026-03-13,prompt-caching-scope-2026-01-05,fast-mode-2026-02-01,redact-thinking-2026-02-12,token-efficient-tools-2026-03-28,advisor-tool-2026-03-01"
+      "model": "claude-opus-4-8",
+      "expected": "claude-code-20250219,interleaved-thinking-2025-05-14,redact-thinking-2026-02-12,thinking-token-count-2026-05-13,context-management-2025-06-27,prompt-caching-scope-2026-01-05,mid-conversation-system-2026-04-07"
+    },
+    {
+      "provider": "anthropic",
+      "endpoint": "messages_create_stream",
+      "model": "claude-opus-4-8",
+      "expected": "claude-code-20250219,interleaved-thinking-2025-05-14,redact-thinking-2026-02-12,thinking-token-count-2026-05-13,context-management-2025-06-27,prompt-caching-scope-2026-01-05,mid-conversation-system-2026-04-07"
     },
     {
       "provider": "anthropic",
       "endpoint": "count_tokens",
+      "model": "claude-opus-4-8",
       "expected": "claude-code-20250219,interleaved-thinking-2025-05-14,context-management-2025-06-27"
     },
     {
-      "provider": "vertex",
+      "provider": "anthropic",
       "endpoint": "messages_create",
-      "expected": "claude-code-20250219,interleaved-thinking-2025-05-14,context-1m-2025-08-07,context-management-2025-06-27,structured-outputs-2025-12-15,web-search-2025-03-05,tool-search-tool-2025-10-19,effort-2025-11-24,task-budgets-2026-03-13,prompt-caching-scope-2026-01-05,fast-mode-2026-02-01,redact-thinking-2026-02-12,token-efficient-tools-2026-03-28,advisor-tool-2026-03-01"
+      "model": "claude-sonnet-4-6",
+      "expected": "claude-code-20250219,interleaved-thinking-2025-05-14,redact-thinking-2026-02-12,thinking-token-count-2026-05-13,context-management-2025-06-27,prompt-caching-scope-2026-01-05"
     },
     {
-      "provider": "vertex",
-      "endpoint": "count_tokens",
-      "expected": "claude-code-20250219,interleaved-thinking-2025-05-14,context-management-2025-06-27"
-    },
-    {
-      "provider": "bedrock",
+      "provider": "anthropic",
       "endpoint": "messages_create",
-      "expected": "claude-code-20250219,context-management-2025-06-27,structured-outputs-2025-12-15,web-search-2025-03-05,effort-2025-11-24,task-budgets-2026-03-13,prompt-caching-scope-2026-01-05,fast-mode-2026-02-01,redact-thinking-2026-02-12,token-efficient-tools-2026-03-28,advisor-tool-2026-03-01"
-    },
-    {
-      "provider": "bedrock",
-      "endpoint": "count_tokens",
-      "expected": "claude-code-20250219,context-management-2025-06-27"
+      "model": "claude-haiku-4-5",
+      "expected": "interleaved-thinking-2025-05-14,redact-thinking-2026-02-12,thinking-token-count-2026-05-13,context-management-2025-06-27,prompt-caching-scope-2026-01-05"
     }
   ]
 }

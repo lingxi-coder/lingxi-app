@@ -123,10 +123,16 @@ pub fn transform_result_content(content: &Value, server_name: &str, ctx: Persist
 fn transform_block(block: &Value, server_name: &str, ctx: PersistContext) -> Vec<Value> {
     let kind = block.get("type").and_then(Value::as_str);
     match kind {
-        // case 'text': return [{ type:'text', text: resultContent.text }]
+        // case 'text': return [{ type:'text', text }] — and, on the tool-result
+        // path (binary `Rzr(_,_,_,r=true)` via `Rzr(i,n,r,!0)`), preserve the
+        // source block's per-block `_meta` when present (`if(r){if(e._meta)…}`).
         Some("text") => {
             let text = block.get("text").and_then(Value::as_str).unwrap_or("");
-            vec![text_block(text)]
+            let mut out = text_block(text);
+            if let (Some(meta), Some(obj)) = (block.get("_meta"), out.as_object_mut()) {
+                obj.insert("_meta".to_string(), meta.clone());
+            }
+            vec![out]
         }
         // case 'audio': persistBlobToTextBlock(decode(data), mimeType, server,
         //   `[Audio from ${server}] `)  (client.ts:2490-2502)
@@ -443,6 +449,19 @@ mod tests {
             "got: {}",
             blocks[0]["text"]
         );
+    }
+
+    #[test]
+    fn text_block_preserves_per_block_meta() {
+        let dir = tempfile::tempdir().unwrap();
+        let content = json!([{ "type": "text", "text": "hi", "_meta": { "k": "v" } }]);
+        let got = transform_result_content(&content, "srv", ctx(dir.path()));
+        assert_eq!(got[0]["type"], json!("text"));
+        assert_eq!(got[0]["text"], json!("hi"));
+        assert_eq!(got[0]["_meta"], json!({ "k": "v" }));
+        // A text block WITHOUT _meta stays bare (no null _meta key).
+        let bare = transform_result_content(&json!([{ "type": "text", "text": "x" }]), "srv", ctx(dir.path()));
+        assert!(bare[0].get("_meta").is_none());
     }
 
     #[test]

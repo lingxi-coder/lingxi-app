@@ -34,7 +34,13 @@ const WORKFLOW_PRELUDE: &str = r#"
 // before the first await (parallel's fan-out) run concurrently, while a
 // sequential `await agent()` chain dispatches one at a time.
 globalThis.__wf_queue = [];
-globalThis.agent = (prompt, opts) => new Promise((res) => { globalThis.__wf_queue.push({ prompt: String(prompt), opts: opts || {}, res }); });
+// Sentinel + message for the 1000-agent lifetime cap (claude-code `k6a`/`c0p`).
+// The host returns the sentinel in a result slot when the cap is exceeded; the
+// pump then REJECTS that agent()'s promise with the byte-exact message so a
+// runaway loop throws rather than silently nulling.
+globalThis.__WF_AGENT_CAP_SENTINEL = String.fromCharCode(1) + "__wf_agent_cap__" + String.fromCharCode(1);
+globalThis.__WF_AGENT_CAP_MESSAGE = "Workflow agent() call cap reached (1000). This usually means a loop using budget.remaining() never terminates because no token budget was set — remaining() returns Infinity when budget.total is null. Add a hard iteration cap to the loop, or pass a token budget.";
+globalThis.agent = (prompt, opts) => new Promise((res, rej) => { globalThis.__wf_queue.push({ prompt: String(prompt), opts: opts || {}, res, rej }); });
 globalThis.__wf_pump = () => {
   const q = globalThis.__wf_queue;
   if (q.length === 0) return false;
@@ -43,7 +49,10 @@ globalThis.__wf_pump = () => {
   // opts ({agentType, model, isolation, schema, label, phase, effort}). The host
   // runner maps the spawn-affecting opts onto each subagent request.
   const results = globalThis.__wf_dispatch_batch(q.map((x) => x.prompt), q.map((x) => JSON.stringify(x.opts || {})));
-  for (let i = 0; i < q.length; i++) q[i].res(results[i]);
+  for (let i = 0; i < q.length; i++) {
+    if (results[i] === globalThis.__WF_AGENT_CAP_SENTINEL) q[i].rej(new Error(globalThis.__WF_AGENT_CAP_MESSAGE));
+    else q[i].res(results[i]);
+  }
   return true;
 };
 // parallel(): start EVERY thunk first (so their agents queue together → one

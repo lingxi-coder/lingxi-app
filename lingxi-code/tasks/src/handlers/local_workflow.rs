@@ -56,6 +56,19 @@ pub use crate::handlers::local_bash::{NoopStatusSink, TaskStatusSink};
 /// Handler name reported by [`Task::name`] / used as the runtime task-name.
 const HANDLER_NAME: &str = "local_workflow";
 
+/// claude-code `k6a` — the per-run lifetime cap on real `agent()` spawns. The
+/// 1001st spawn is refused with [`WF_AGENT_CAP_SENTINEL`] so the prelude rejects
+/// the `agent()` promise with `WorkflowAgentCapError` (a runaway-loop backstop).
+const WORKFLOW_AGENT_CAP: u64 = 1000;
+
+/// Sentinel the worker returns in place of a result when the agent cap is hit;
+/// the JS prelude recognizes it and throws the byte-exact cap message. The U+0001
+/// framing makes a collision with a real subagent result impossible while
+/// staying NUL-free (the prelude eval path uses a C string, which rejects
+/// NUL). MUST stay byte-identical to the preludes
+/// `__WF_AGENT_CAP_SENTINEL` (`String.fromCharCode(1)+"__wf_agent_cap__"+...`).
+const WF_AGENT_CAP_SENTINEL: &str = "\u{1}__wf_agent_cap__\u{1}";
+
 /// The subagent type spawned for a bare `agent(prompt)` call — claude-code's
 /// default workflow subagent.
 pub const DEFAULT_WORKFLOW_SUBAGENT: &str = "general-purpose";
@@ -379,6 +392,10 @@ pub async fn run_workflow_script(
         .expect("spawn workflow-script thread");
 
     let cap = concurrency_cap();
+    // Per-run real-spawn counter (claude-code `c`/`S()`): only fresh spawns
+    // count — replayed (journaled) and `__wf_resolve` calls are exempt, so
+    // resuming a >1000-agent workflow never trips the cap on replay.
+    let agent_count = Arc::new(AtomicU64::new(0));
     // Async worker: answer each batch by spawning its subagents concurrently
     // (bounded, order-preserving). The loop ends when the runner's sender is
     // dropped — i.e. when `workflow::run` returns.
@@ -391,6 +408,7 @@ pub async fn run_workflow_script(
                 let subagent_type = subagent_type.to_string();
                 let journal = journal.clone();
                 let spent = spent.clone();
+                let agent_count = agent_count.clone();
                 let nested_fs = nested_fs.clone();
                 async move {
                     // `workflow()` resolution: the runtime asks the host to resolve
@@ -414,6 +432,14 @@ pub async fn run_workflow_script(
                         if let Some(cached) = j.lock().unwrap().get(&key).cloned() {
                             return cached;
                         }
+                    }
+                    // 1000-agent lifetime cap (claude-code `S()` before each real
+                    // spawn): this is reached only after the cache-miss + non-resolve
+                    // checks, so replayed/resolve calls are exempt. `fetch_add`
+                    // returns the prior count → spawns 0..999 proceed, the 1001st
+                    // returns the sentinel and the prelude throws WorkflowAgentCapError.
+                    if agent_count.fetch_add(1, Ordering::SeqCst) >= WORKFLOW_AGENT_CAP {
+                        return WF_AGENT_CAP_SENTINEL.to_string();
                     }
                     let inherit = SubagentInheritance {
                         tool_invoker,
@@ -946,6 +972,44 @@ mod tests {
         )
         .await
         .expect("workflow runs to completion")
+    }
+
+    /// The 1000-agent lifetime cap: the 1001st REAL spawn rejects with the
+    /// byte-exact `WorkflowAgentCapError` message, terminating the run.
+    #[tokio::test]
+    async fn agent_cap_rejects_the_1001st_spawn() {
+        let spawner = Arc::new(EchoSpawner::default());
+        let result = run_workflow_script(
+            "for (let i = 0; i < 1001; i++) { await agent('x'); } return 'done';",
+            DEFAULT_WORKFLOW_SUBAGENT,
+            spawner,
+            Arc::new(MockInvoker),
+            Arc::new(MockBudget),
+            None,
+            None,
+            None,
+            None,
+            NestedConfig::default(),
+        )
+        .await;
+        let err = result.expect_err("the 1001st agent() must throw the cap error");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("Workflow agent() call cap reached (1000)"),
+            "got: {msg}"
+        );
+    }
+
+    /// A workflow that stays under the cap runs to completion unaffected.
+    #[tokio::test]
+    async fn under_cap_workflow_completes() {
+        let spawner = Arc::new(EchoSpawner::default());
+        let outcome = run_bridge(
+            "for (let i = 0; i < 50; i++) { await agent('x'); } return 'ok';",
+            spawner,
+        )
+        .await;
+        assert_eq!(outcome.result.as_deref(), Some("\"ok\""));
     }
 
     /// `budget.spent()` reads the shared pool: a pre-seeded value (standing in

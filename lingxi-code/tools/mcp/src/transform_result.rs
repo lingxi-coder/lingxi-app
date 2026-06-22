@@ -68,10 +68,24 @@ pub struct PersistContext<'a> {
     pub rand_tag: &'a str,
 }
 
-/// MIME types claude-code treats as inline images for a `resource` blob
-/// (`client.ts:449-454`). A blob with one of these mimeTypes becomes a prefix
-/// text block + an image block; anything else is persisted to disk.
+/// MIME types claude-code treats as inline images (binary `Lqd` set). A blob /
+/// `image` block with one of these (after [`is_image_mime`] normalization)
+/// becomes an inline image block; anything else is persisted to disk.
 const IMAGE_MIME_TYPES: &[&str] = &["image/jpeg", "image/png", "image/gif", "image/webp"];
+
+/// `Ara(mimeType)` (binary @198957564): `split(';')[0].trim().toLowerCase()`,
+/// normalize `image/jpg` → `image/jpeg`, then membership in [`IMAGE_MIME_TYPES`].
+/// A missing/empty mime is not an image. The `;`-strip drops params like
+/// `; charset=…`; the jpg→jpeg alias and the lowercase make the gate faithful.
+#[must_use]
+fn is_image_mime(mime: Option<&str>) -> bool {
+    let Some(raw) = mime else {
+        return false;
+    };
+    let base = raw.split(';').next().unwrap_or("").trim().to_ascii_lowercase();
+    let normalized = if base == "image/jpg" { "image/jpeg" } else { base.as_str() };
+    IMAGE_MIME_TYPES.contains(&normalized)
+}
 
 /// Transform an MCP tool-result `content` Value into its model-facing form.
 ///
@@ -128,12 +142,25 @@ fn transform_block(block: &Value, server_name: &str, ctx: PersistContext) -> Vec
                 ctx,
             )]
         }
-        // case 'image': maybeResize passthrough → base64 image block
-        // (client.ts:2503-2523)
+        // case 'image': binary `Rzr` gates on `Ara(mimeType)` — a recognized
+        // image mime → inline image block; otherwise the bytes are persisted to
+        // disk as a `[Image from <server>] ` text block (NOT emitted as a broken
+        // image the API would reject).
         Some("image") => {
             let data = block.get("data").and_then(Value::as_str).unwrap_or("");
             let mime = block.get("mimeType").and_then(Value::as_str);
-            vec![image_block(data, mime)]
+            if is_image_mime(mime) {
+                vec![image_block(data, mime)]
+            } else {
+                let source_description = format!("[Image from {server_name}] ");
+                vec![persist_blob_to_text_block(
+                    data,
+                    mime,
+                    server_name,
+                    &source_description,
+                    ctx,
+                )]
+            }
         }
         // case 'resource': text → prefixed text block; blob → image block or
         //   persisted text block (client.ts:2524-2573)
@@ -170,7 +197,7 @@ fn transform_resource(block: &Value, server_name: &str, ctx: PersistContext) -> 
     // else if ('blob' in resource) → image sub-case or persist.
     if let Some(blob) = resource.get("blob").and_then(Value::as_str) {
         let mime = resource.get("mimeType").and_then(Value::as_str);
-        let is_image = IMAGE_MIME_TYPES.contains(&mime.unwrap_or(""));
+        let is_image = is_image_mime(mime);
         if is_image {
             // content.push(prefix text) then content.push(image block). The TS
             // `if (prefix)` guard is always truthy here — `prefix` is the
@@ -222,11 +249,16 @@ fn image_block(data: &str, mime_type: Option<&str>) -> Value {
 /// faithfully downsampling needs an image codec, a `5e-resize` follow-up. This
 /// is the ONLY divergence from claude-code in the 5e transform.
 fn maybe_resize<'a>(data: &'a str, mime_type: Option<&str>) -> (&'a str, String) {
-    let ext = mime_type
+    let raw_ext = mime_type
+        .and_then(|m| m.split(';').next())
         .and_then(|m| m.split('/').nth(1))
+        .map(str::trim)
         .filter(|e| !e.is_empty())
         .unwrap_or("png")
-        .to_string();
+        .to_ascii_lowercase();
+    // `image/jpg` is not a valid wire media_type — the Anthropic API requires
+    // `image/jpeg` (matches the `Ara` jpg→jpeg normalization).
+    let ext = if raw_ext == "jpg" { "jpeg".to_string() } else { raw_ext };
     (data, ext)
 }
 
@@ -396,11 +428,41 @@ mod tests {
     }
 
     #[test]
-    fn image_block_missing_mime_defaults_png() {
-        // mimeType absent → ext defaults to "png" → "image/png".
+    fn image_block_missing_mime_persisted_not_emitted() {
+        // binary `Ara(undefined)` → false (`if(!e)return!1`): a missing mimeType
+        // is NOT a recognized image, so the bytes are persisted to disk as a
+        // `[Image from <server>] ` text block — NOT emitted as a png image.
         let dir = tempfile::tempdir().unwrap();
-        let content = json!([{ "type": "image", "data": "QUJD" }]);
+        let content = json!([{ "type": "image", "data": b64(b"PNGBYTES") }]);
         let got = transform_result_content(&content, "srv", ctx(dir.path()));
+        let blocks = got.as_array().unwrap();
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0]["type"], json!("text"));
+        assert!(
+            blocks[0]["text"].as_str().unwrap().starts_with("[Image from srv] "),
+            "got: {}",
+            blocks[0]["text"]
+        );
+    }
+
+    #[test]
+    fn image_block_jpg_alias_normalized_to_jpeg() {
+        // `image/jpg` passes the Ara gate (jpg→jpeg) and the emitted media_type
+        // is the wire-valid `image/jpeg`, not `image/jpg`.
+        let dir = tempfile::tempdir().unwrap();
+        let content = json!([{ "type": "image", "data": "QUJD", "mimeType": "image/jpg" }]);
+        let got = transform_result_content(&content, "srv", ctx(dir.path()));
+        assert_eq!(got[0]["type"], json!("image"));
+        assert_eq!(got[0]["source"]["media_type"], json!("image/jpeg"));
+    }
+
+    #[test]
+    fn image_block_mime_with_params_stripped() {
+        // `image/png; charset=binary` → params stripped, recognized as png.
+        let dir = tempfile::tempdir().unwrap();
+        let content = json!([{ "type": "image", "data": "QUJD", "mimeType": "image/png; charset=binary" }]);
+        let got = transform_result_content(&content, "srv", ctx(dir.path()));
+        assert_eq!(got[0]["type"], json!("image"));
         assert_eq!(got[0]["source"]["media_type"], json!("image/png"));
     }
 

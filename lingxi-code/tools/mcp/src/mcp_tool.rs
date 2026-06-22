@@ -712,16 +712,54 @@ impl Tool for MCPTool {
                 // prefix + image block, resource_link), mirroring
                 // `transformResultContent` (`client.ts:2478-2697`). Only ARRAY
                 // `content` is walked — a bare value is forwarded verbatim (MCP-5e).
+                let persist_ctx = crate::transform_result::PersistContext {
+                    output_dir: &output_dir,
+                    now_millis,
+                    rand_tag: &rand_tag,
+                };
                 let model_content = match &dto.structured_content {
-                    Some(sc) => Value::String(serde_json::to_string(sc).unwrap_or_default()),
+                    Some(sc) => {
+                        let sc_json = serde_json::to_string(sc).unwrap_or_default();
+                        // jqd (binary @198966347): when the result ALSO carries
+                        // non-`text` content blocks (images, audio, resources),
+                        // those survive ALONGSIDE the structured JSON as a
+                        // contentArray `[...transformed-non-text, {text:<json>}]`.
+                        // Original `text` blocks are dropped (the JSON represents
+                        // them). Only a structured-only result collapses to the
+                        // bare JSON string. Previously the non-text blocks (e.g.
+                        // images) were silently dropped.
+                        let non_text: Vec<Value> = dto
+                            .content
+                            .as_array()
+                            .map(|items| {
+                                items
+                                    .iter()
+                                    .filter(|b| {
+                                        b.get("type")
+                                            .and_then(Value::as_str)
+                                            .is_some_and(|t| t != "text")
+                                    })
+                                    .cloned()
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                        if non_text.is_empty() {
+                            Value::String(sc_json)
+                        } else {
+                            let transformed = crate::transform_result::transform_result_content(
+                                &Value::Array(non_text),
+                                &server,
+                                persist_ctx,
+                            );
+                            let mut arr = transformed.as_array().cloned().unwrap_or_default();
+                            arr.push(json!({ "type": "text", "text": sc_json }));
+                            Value::Array(arr)
+                        }
+                    }
                     None => crate::transform_result::transform_result_content(
                         &dto.content,
                         &server,
-                        crate::transform_result::PersistContext {
-                            output_dir: &output_dir,
-                            now_millis,
-                            rand_tag: &rand_tag,
-                        },
+                        persist_ctx,
                     ),
                 };
                 // MCP large-output guard (claude-code `processMCPResult`): over-

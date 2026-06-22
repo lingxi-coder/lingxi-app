@@ -1,0 +1,22 @@
+[package]
+name = "workflow"
+version = "0.12.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+# LingXi workflow runtime: executes claude-code-style workflow scripts that
+# orchestrate subagents. The model authors the scripts in JavaScript, so the
+# runtime embeds a JS engine (QuickJS via rquickjs) to run them with the same
+# semantics as claude-code's AsyncFunction-based executor.
+
+[dependencies]
+# rquickjs vendors quickjs-ng and compiles it by default (no system lib).
+# NB: the `futures` feature (Rust-future <-> JS-promise bridge) pulls
+# async-lock 3.4.2 which requires rustc 1.85 > the workspace MSRV 1.82, so the
+# foundation uses the synchronous engine; the async/`parallel()` integration
+# resolves that pin in a later stage.
+rquickjs = { version = "0.6" }
+
+[lints]
+workspace = true

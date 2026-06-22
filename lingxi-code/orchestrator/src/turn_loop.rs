@@ -1244,6 +1244,7 @@ pub(crate) fn terminal_api_error_text(
     model: &str,
     interactive: bool,
     stop_reason: &str,
+    request_id: Option<&str>,
 ) -> Option<String> {
     match stop_reason {
         "max_tokens" => Some(format!(
@@ -1253,8 +1254,8 @@ pub(crate) fn terminal_api_error_text(
         "model_context_window_exceeded" => {
             Some("API Error: The model has reached its context window limit.".to_string())
         }
-        "refusal" => Some(
-            match crate::prompt::env_meta::marketing_name_for_model(model) {
+        "refusal" => {
+            let base = match crate::prompt::env_meta::marketing_name_for_model(model) {
                 Some(label) => {
                     let m = if interactive {
                         "Double press esc to edit your last message, or try a different model with /model."
@@ -1280,8 +1281,20 @@ pub(crate) fn terminal_api_error_text(
                         "API Error: Claude Code is unable to respond to this request, which appears to violate our Usage Policy (https://www.anthropic.com/legal/aup). {m}"
                     )
                 }
-            },
-        ),
+            };
+            // The refusal assembly appends `\n\nRequest ID: ${n}` when a request
+            // id is present (binary @197279553: `let u = n ? `\n\nRequest ID:
+            // ${n}` : ""; content = c + u`). This suffix is REFUSAL-ONLY (the
+            // max_tokens / context-window messages have no Request ID line) and
+            // is separable from the cyber-category / `stop_details.explanation`
+            // variants, which remain residuals (LingXi does not track
+            // `stop_details`).
+            let suffix = match request_id {
+                Some(id) if !id.is_empty() => format!("\n\nRequest ID: {id}"),
+                _ => String::new(),
+            };
+            Some(format!("{base}{suffix}"))
+        }
         _ => None,
     }
 }
@@ -1304,7 +1317,11 @@ pub(crate) async fn surface_terminal_api_error(
         let s = orch.session.lock().await;
         (s.model.clone(), orch.config.interactive_permissions)
     };
-    let text = terminal_api_error_text(&model, interactive, stop_reason)?;
+    // The just-completed call's Anthropic `request-id` — for the refusal
+    // message's `\n\nRequest ID: …` suffix (recorded by the adapter from the
+    // response headers; same slot the JSONL `requestId` reads from).
+    let request_id = orch.api.last_request_id();
+    let text = terminal_api_error_text(&model, interactive, stop_reason, request_id.as_deref())?;
     let assistant_id = MessageId::new();
     let assistant_msg = ConversationMessage::Assistant {
         id: assistant_id,
@@ -2845,6 +2862,41 @@ fn tool_result_to_model_text(data: &serde_json::Value) -> String {
             || serde_json::to_string(data).unwrap_or_else(|_| "<unserializable>".into()),
             std::string::ToString::to_string,
         )
+}
+
+#[cfg(test)]
+mod terminal_api_error_tests {
+    use super::terminal_api_error_text;
+
+    /// The refusal message appends `\n\nRequest ID: {id}` when a request id is
+    /// present (binary @197279553 `u = n ? `\n\nRequest ID: ${n}` : ""`), and
+    /// omits it otherwise. The suffix is REFUSAL-ONLY.
+    #[test]
+    fn refusal_appends_request_id_suffix() {
+        let with = terminal_api_error_text("claude-opus-4-8", true, "refusal", Some("req_011abc"))
+            .expect("refusal text");
+        assert!(with.ends_with("\n\nRequest ID: req_011abc"), "got: {with}");
+
+        let without = terminal_api_error_text("claude-opus-4-8", true, "refusal", None)
+            .expect("refusal text");
+        assert!(!without.contains("Request ID:"), "got: {without}");
+
+        // Empty id is treated as absent.
+        let empty = terminal_api_error_text("claude-opus-4-8", true, "refusal", Some(""))
+            .expect("refusal text");
+        assert!(!empty.contains("Request ID:"), "got: {empty}");
+    }
+
+    /// The Request ID suffix is refusal-only: max_tokens / context-window
+    /// messages never carry it, even when a request id is available.
+    #[test]
+    fn non_refusal_terminals_have_no_request_id() {
+        for sr in ["max_tokens", "model_context_window_exceeded"] {
+            let t = terminal_api_error_text("claude-opus-4-8", true, sr, Some("req_011abc"))
+                .unwrap_or_else(|| panic!("{sr} text"));
+            assert!(!t.contains("Request ID:"), "{sr}: {t}");
+        }
+    }
 }
 
 #[cfg(test)]

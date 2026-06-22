@@ -4438,10 +4438,12 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                     // without-fallback's other terminals → no message, end as-is.
                     let api_error: Option<String> = {
                         let model = self.session.lock().await.model.clone();
+                        let request_id = self.api.last_request_id();
                         crate::turn_loop::terminal_api_error_text(
                             &model,
                             self.config.interactive_permissions,
                             other,
+                            request_id.as_deref(),
                         )
                     };
                     if let Some(text) = api_error {

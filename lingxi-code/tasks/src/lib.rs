@@ -19,7 +19,8 @@ pub mod state;
 pub mod task_trait;
 
 pub use handlers::{
-    DreamHandler, InProcessTeammateHandler, LocalAgentHandler, LocalBashHandler, MonitorMcpHandler,
+    DreamHandler, InProcessTeammateHandler, LocalAgentHandler, LocalBashHandler,
+    LocalWorkflowHandler, MonitorMcpHandler,
 };
 pub use id::{generate_task_id, TaskType};
 pub use registry::{

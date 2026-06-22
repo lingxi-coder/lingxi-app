@@ -648,6 +648,41 @@ pub fn desktop_tool_registry(
     reg
 }
 
+/// Launches `LocalWorkflow` background tasks for the `Workflow` tool by spawning
+/// through the shared [`tasks::registry::TaskRegistry`]. Single-process: only an
+/// inline `script` is supported today; resolving a saved `name` or a `scriptPath`
+/// to a script is a follow-up.
+struct TaskRegistryWorkflowLauncher {
+    registry: Arc<tasks::registry::TaskRegistry>,
+}
+
+#[async_trait::async_trait]
+impl tool_workflow::WorkflowLauncher for TaskRegistryWorkflowLauncher {
+    async fn launch(
+        &self,
+        spec: tool_workflow::WorkflowLaunchSpec,
+    ) -> Result<tool_workflow::WorkflowLaunched, tool_workflow::WorkflowLaunchError> {
+        let script = spec.script.ok_or_else(|| {
+            tool_workflow::WorkflowLaunchError(
+                "named/scriptPath workflows are not yet supported; pass an inline `script`".into(),
+            )
+        })?;
+        let task_id = self
+            .registry
+            .spawn(
+                tasks::TaskType::LocalWorkflow,
+                tasks::TaskSpawnInput::LocalWorkflow {
+                    workflow_id: spec.name.unwrap_or_default(),
+                    script,
+                },
+                "Workflow".to_string(),
+            )
+            .await
+            .map_err(|e| tool_workflow::WorkflowLaunchError(e.to_string()))?;
+        Ok(tool_workflow::WorkflowLaunched { task_id })
+    }
+}
+
 /// Register the desktop tool set into an existing (empty) registry.
 ///
 /// Each `tool_*::register_all` consumes a clone of `ctx`; the final crate
@@ -2992,6 +3027,24 @@ pub async fn build(
         )),
     );
 
+    // (5.46e) Register the `LocalWorkflow` handler so the `Workflow` tool's
+    //        `TaskRegistry::spawn(TaskType::LocalWorkflow)` dispatches to a real
+    //        workflow worker (the embedded QuickJS runtime + agent()→subagent
+    //        bridge) instead of failing with `UnknownType`. Same deferred-invoker
+    //        pattern as the LocalAgent handler above (bound at (5.5a) once `tools`
+    //        exists): a workflow's `agent()` calls inherit this invoker so their
+    //        child runners dispatch tools through the parent registry.
+    let local_workflow_invoker = Arc::new(DeferredToolInvoker::new());
+    task_registry_inner.register_handler(
+        tasks::TaskType::LocalWorkflow,
+        Arc::new(tasks::handlers::LocalWorkflowHandler::new(
+            subagent_spawner.clone(),
+            local_workflow_invoker.clone() as Arc<dyn traits::tool_invoker::ToolInvoker>,
+            budget_enforcer.clone(),
+            task_registry_inner.output_manager.clone(),
+        )),
+    );
+
     let task_registry = Arc::new(task_registry_inner);
 
     // (5.48) Cron: construct, load the single persisted tasks file, and start the
@@ -3354,6 +3407,19 @@ pub async fn build(
         cwd_changed_firer,
         Some(side_query_client.clone()),
     );
+    // Workflow tool (desktop-only — it fans out subagents). Registered here,
+    // after `register_desktop_tools`, because its launcher needs `task_registry`
+    // (constructed above): `Workflow.call` spawns a `LocalWorkflow` background
+    // task through it and returns `{status:"async_launched", taskId, taskType}`.
+    {
+        let workflow_launcher: Arc<dyn tool_workflow::WorkflowLauncher> =
+            Arc::new(TaskRegistryWorkflowLauncher {
+                registry: task_registry.clone(),
+            });
+        tools_inner.register_builtin(Arc::new(tool_workflow::WorkflowTool::new(Some(
+            workflow_launcher,
+        ))));
+    }
     for (conn_id, mcp_tools) in
         tool_mcp::build_registered_mcp_tools(&mcp_registry, mcp_tool_ctx).await
     {
@@ -3404,6 +3470,14 @@ pub async fn build(
     //        invokers above. A `LocalAgent` task's child runner dispatches its
     //        tools through the parent registry.
     local_agent_invoker.set(Arc::new(
+        tool_api::tool_invoker_impl::RegistryToolInvoker::new(tools.clone()).with_gate(perms.clone()),
+    ));
+
+    // (5.5a-local-workflow) Bind the `LocalWorkflow` handler's `DeferredToolInvoker`
+    //        to the real `RegistryToolInvoker` now that `tools` exists — so a
+    //        workflow's `agent()` subagents dispatch their tools through the
+    //        parent registry under the same recursion-lock + boot gate.
+    local_workflow_invoker.set(Arc::new(
         tool_api::tool_invoker_impl::RegistryToolInvoker::new(tools.clone()).with_gate(perms.clone()),
     ));
 

@@ -20,4 +20,5 @@ pub use in_process_teammate::{
 };
 pub use local_agent::LocalAgentHandler;
 pub use local_bash::{LocalBashHandler, NoopStatusSink, TaskStatusSink};
+pub use local_workflow::LocalWorkflowHandler;
 pub use monitor_mcp::MonitorMcpHandler;

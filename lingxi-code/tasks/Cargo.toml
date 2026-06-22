@@ -11,11 +11,13 @@ mcp = { path = "../mcp" }
 engine = { path = "../engine" }
 agent = { path = "../agent" }
 hooks = { path = "../hooks" }
+workflow = { path = "../workflow" }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 async-trait.workspace = true
 rand = "0.9"
+futures = "0.3"
 tokio = { version = "1", features = ["sync"] }
 tracing.workspace = true
 
@@ -23,7 +25,6 @@ tracing.workspace = true
 test-harness = { path = "../test-harness" }
 llm-client = { path = "../llm-client" }
 tempfile = "3.13"
-futures = "0.3"
 tokio = { version = "1", features = ["sync", "macros", "rt-multi-thread"] }
 
 [lints]

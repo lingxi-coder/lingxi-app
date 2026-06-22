@@ -207,6 +207,14 @@ fn result_to_string(result: Result<SubagentResult, SubagentSpawnError>) -> Strin
     }
 }
 
+/// Render a live `phase()`/`log()` progress event as a task-output line.
+fn format_progress(p: &workflow::Progress) -> String {
+    match p {
+        workflow::Progress::Phase(title) => format!("=== {title} ==="),
+        workflow::Progress::Log(message) => message.clone(),
+    }
+}
+
 /// Run a workflow `script` to completion, spawning each `agent()` call as a real
 /// subagent of type `subagent_type` via `spawner`. Returns the script's
 /// [`workflow::RunOutcome`] (its `phase()`/`log()` progress + return value) or a
@@ -221,6 +229,7 @@ pub async fn run_workflow_script(
     spawner: Arc<dyn SubagentSpawner>,
     tool_invoker: Arc<dyn ToolInvoker>,
     budget: Arc<dyn BudgetEnforcerHandle>,
+    progress_tx: Option<mpsc::UnboundedSender<String>>,
 ) -> Result<workflow::RunOutcome, workflow::WorkflowError> {
     // Request channel: each in-flight batch is (calls, reply-sender), where a
     // call is (prompt, opts_json). A buffer of one suffices — the runner blocks
@@ -249,7 +258,15 @@ pub async fn run_workflow_script(
                 }
                 reply_rx.blocking_recv().unwrap_or_default()
             };
-            let outcome = workflow::run(&script_owned, runner);
+            // `phase()`/`log()` fire this live; an unbounded `send` is non-blocking
+            // and needs no runtime, so it is safe from the script thread. The host
+            // drains `progress_tx` concurrently (e.g. spools to the task output).
+            let on_progress = move |p: &workflow::Progress| {
+                if let Some(tx) = &progress_tx {
+                    let _ = tx.send(format_progress(p));
+                }
+            };
+            let outcome = workflow::run_with_progress(&script_owned, runner, on_progress);
             let _ = outcome_tx.send(outcome);
         })
         .expect("spawn workflow-script thread");
@@ -340,14 +357,28 @@ impl Task for LocalWorkflowHandler {
                 .set_status(&worker_task_id, TaskStatus::Running)
                 .await;
 
-            let outcome = run_workflow_script(
+            // Live progress: `phase()`/`log()` lines are spooled to the task
+            // output as they happen (drained concurrently with the run), so a
+            // long workflow's progress is visible via TaskOutput before it
+            // finishes. The drainer ends when `run_workflow_script` drops its
+            // sender on return.
+            let (ptx, mut prx) = mpsc::unbounded_channel::<String>();
+            let prog_output = output_manager.clone();
+            let prog_spool = worker_spool_path.clone();
+            let drain = async move {
+                while let Some(line) = prx.recv().await {
+                    let _ = prog_output.append(&prog_spool, &format!("{line}\n")).await;
+                }
+            };
+            let run = run_workflow_script(
                 &script,
                 DEFAULT_WORKFLOW_SUBAGENT,
                 spawner,
                 tool_invoker,
                 budget,
-            )
-            .await;
+                Some(ptx),
+            );
+            let (outcome, ()) = tokio::join!(run, drain);
 
             // The Workflow tool result is the script's return value; spool it.
             // A script-level error spools its message and fails the task. Spool
@@ -660,6 +691,7 @@ mod tests {
             spawner,
             Arc::new(MockInvoker),
             Arc::new(MockBudget),
+            None,
         )
         .await
         .expect("workflow runs to completion")
@@ -799,6 +831,37 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(read.content, r#"{"confirmed":["echo:a","echo:b"]}"#);
+    }
+
+    #[tokio::test]
+    async fn handler_spools_live_progress_then_the_result() {
+        let fs: Arc<dyn FileSystem> = Arc::new(InMemoryFs::new());
+        let spawner = Arc::new(EchoSpawner::default());
+        let dir = tempdir().unwrap();
+        let mgr = Arc::new(TaskOutputManager::new(PathBuf::from(dir.path()), fs.clone()));
+        let sink = Arc::new(RecordingSink::default());
+        let handler = make_handler(spawner, mgr.clone(), sink.clone());
+
+        let script = r#"
+            phase('Scan');
+            log('found 2 things');
+            return { ok: true };
+        "#;
+        let handle = handler
+            .spawn(workflow_input(script), make_ctx(fs))
+            .await
+            .unwrap();
+        assert_eq!(await_terminal(&sink).await, TaskStatus::Completed);
+
+        let spool_path = dir.path().join(format!("{}.output", handle.task_id));
+        let read = mgr
+            .read(&spool_path, crate::output_manager::OutputOptions::default())
+            .await
+            .unwrap();
+        // phase/log were spooled live, followed by the return value.
+        assert!(read.content.contains("=== Scan ==="), "phase: {}", read.content);
+        assert!(read.content.contains("found 2 things"), "log: {}", read.content);
+        assert!(read.content.contains(r#"{"ok":true}"#), "result: {}", read.content);
     }
 
     #[tokio::test]

@@ -206,18 +206,39 @@ pub fn run_sync(script: &str) -> Result<RunOutcome, WorkflowError> {
 /// microtasks, which we drive to completion via the runtime job queue. `agent()`
 /// resolves synchronously through `agent_runner` (the real runtime blocks on a
 /// subagent and returns its result), so sequential `await agent(...)` chains run
-/// in order. (`parallel()`/`pipeline()` concurrency is a later stage.)
+/// in order.
 ///
 /// # Errors
 /// Returns [`WorkflowError`] if the engine fails to start, the script throws, or
 /// a job raises.
 pub fn run<R>(script: &str, agent_runner: R) -> Result<RunOutcome, WorkflowError>
 where
+    R: FnMut(&[String], &[String]) -> Vec<String> + 'static,
+{
+    run_with_progress(script, agent_runner, |_: &Progress| {})
+}
+
+/// Like [`run`], but also fires `on_progress` for each `phase()`/`log()` event
+/// **as it happens** (live), in addition to collecting them into the returned
+/// [`RunOutcome`]. The host forwards these so a running workflow's progress is
+/// visible (e.g. spooled to the task output) before the script completes.
+///
+/// # Errors
+/// Returns [`WorkflowError`] if the engine fails to start, the script throws, or
+/// a job raises.
+pub fn run_with_progress<R, P>(
+    script: &str,
+    agent_runner: R,
+    on_progress: P,
+) -> Result<RunOutcome, WorkflowError>
+where
     // `(prompts, opts_json) -> results`: the two parallel arrays the pump
     // dispatches — each `opts_json[i]` is `JSON.stringify(agent()'s opts)` for
     // `prompts[i]`. The host runner maps the spawn-affecting opts (agentType /
     // model / isolation) onto each subagent request.
     R: FnMut(&[String], &[String]) -> Vec<String> + 'static,
+    // Fires for every `phase()`/`log()` as it is emitted (live).
+    P: FnMut(&Progress) + 'static,
 {
     use rquickjs::{Context, Function, Runtime};
 
@@ -228,6 +249,7 @@ where
     let error: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
     let result_slot: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
     let runner = Rc::new(RefCell::new(agent_runner));
+    let on_progress = Rc::new(RefCell::new(on_progress));
     let prepared = strip_meta_export(script);
     // Wrap in an async IIFE; route a throw into `__wf_error` so it survives the
     // microtask boundary (a rejected top-level promise would otherwise be lost).
@@ -248,22 +270,28 @@ where
         let eng = |e: rquickjs::Error| WorkflowError::Engine(e.to_string());
 
         let p_log = progress.clone();
+        let op_log = on_progress.clone();
         globals
             .set(
                 "log",
                 Function::new(ctx.clone(), move |msg: String| {
-                    p_log.borrow_mut().push(Progress::Log(msg));
+                    let prog = Progress::Log(msg);
+                    (op_log.borrow_mut())(&prog);
+                    p_log.borrow_mut().push(prog);
                 })
                 .map_err(eng)?,
             )
             .map_err(eng)?;
 
         let p_phase = progress.clone();
+        let op_phase = on_progress.clone();
         globals
             .set(
                 "phase",
                 Function::new(ctx.clone(), move |title: String| {
-                    p_phase.borrow_mut().push(Progress::Phase(title));
+                    let prog = Progress::Phase(title);
+                    (op_phase.borrow_mut())(&prog);
+                    p_phase.borrow_mut().push(prog);
                 })
                 .map_err(eng)?,
             )
@@ -713,5 +741,31 @@ log('wf=' + (typeof workflow))
         assert!(got[0].contains(r#""model":"opus""#));
         assert!(got[0].contains(r#""isolation":"worktree""#));
         assert_eq!(got[1], "{}", "a bare agent(p) carries empty opts");
+    }
+
+    #[test]
+    fn run_with_progress_fires_live_callbacks() {
+        let seen: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
+        let s = seen.clone();
+        let script = r#"
+            phase('A');
+            log('one');
+            phase('B');
+            log('two');
+        "#;
+        let out = run_with_progress(script, no_agents, move |p: &Progress| {
+            s.borrow_mut().push(match p {
+                Progress::Phase(t) => format!("phase:{t}"),
+                Progress::Log(m) => format!("log:{m}"),
+            });
+        })
+        .unwrap();
+        // Callbacks fired live, in emission order.
+        assert_eq!(
+            *seen.borrow(),
+            vec!["phase:A", "log:one", "phase:B", "log:two"]
+        );
+        // The same events are still collected in the outcome.
+        assert_eq!(out.progress.len(), 4);
     }
 }

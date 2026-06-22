@@ -436,43 +436,267 @@ pub fn check_dangerous_removal(command: &str, cwd: &Path, home: Option<&str>) ->
         let paths = filter_out_flags(rest);
         for path in &paths {
             // Strip a single pair of surrounding quotes (TS:
-            // `path.replace(/^['"]|['"]$/g, '')`), then expand `~`.
-            let dequoted = strip_surrounding_quotes(path);
-            let clean_path = expand_tilde(dequoted, home);
-            let absolute_path = resolve_against_cwd(&clean_path, cwd);
-            if is_dangerous_removal_path(&absolute_path, home) {
-                return Some(DangerousRemoval {
-                    message: format!(
-                        "Dangerous {cmd_name} operation detected: '{absolute_path}'\n\nThis command would remove a critical system directory. This requires explicit approval and cannot be auto-allowed by permission rules."
-                    ),
-                    reason: format!(
-                        "Dangerous {cmd_name} operation on critical path: {absolute_path}"
-                    ),
-                    resolved_path: absolute_path,
-                });
+            // `path.replace(/^['"]|['"]$/g, '')`). `d` is the dequoted, NOT
+            // tilde-expanded target — the binary's `x0n` operates on `d` literal.
+            let d = strip_surrounding_quotes(path);
+            // The faithful per-target `x0n` branch evaluation (binary @199202560).
+            if let Some(hit) = evaluate_removal_target(cmd_name, d, rest, cwd, home) {
+                return Some(hit);
             }
-            // Workspace-directory protection (TS `x0n` branch 3's `R0` check):
-            // ask before removing the working directory itself or any ancestor
-            // of it (`rm -rf .`, `rm -rf <cwd>`, `rm -rf ..`). The critical check
-            // above already returned for system paths; this catches the
-            // workspace which `is_dangerous_removal_path` does not. (Glob targets
-            // like `<cwd>/*` are handled by the critical/`/*` path with their own
-            // message; `removal_hits_workspace` requires concrete ancestry so it
-            // does not false-fire on them.)
-            if removal_hits_workspace(&absolute_path, cwd) {
-                return Some(DangerousRemoval {
-                    message: format!(
-                        "Dangerous {cmd_name} operation detected: '{absolute_path}'\n\nThis command would remove a workspace directory (the working directory, an additional working directory, or one of their parent directories). This requires explicit approval and cannot be auto-allowed by permission rules."
-                    ),
-                    reason: format!(
-                        "Dangerous {cmd_name} operation on working directory or its ancestor: {absolute_path}"
-                    ),
-                    resolved_path: absolute_path,
-                });
+            // ── LingXi `~` SAFETY SUPERSET (the ONE deliberate divergence) ──
+            // `x0n` does NOT expand `~`, so `rm -rf ~` resolves to `<cwd>/~` (a
+            // literal subdir) and is auto-allowed. A real shell expands `~` to
+            // `$HOME` and deletes it. We additionally run the critical predicate
+            // on the tilde-expanded form, so `rm -rf ~` (and any `~`-target that
+            // resolves to a dangerous path the x0n branches above did not already
+            // flag) still ASKS. This runs LAST so the x0n branches keep their
+            // exact messages for the cases they DO cover (e.g. `~/*` → branch 2).
+            let expanded = expand_tilde(d, home);
+            if expanded != d {
+                let abs = resolve_against_cwd(&expanded, cwd);
+                if is_dangerous_removal_path(&abs, home) {
+                    return Some(critical_removal(cmd_name, &abs));
+                }
             }
         }
     }
     None
+}
+
+/// Evaluate ONE dequoted removal target `d` against the binary's `x0n` branch
+/// ladder (`bin/claude.exe` @199202560), in order: (1) cd-chain, (2)
+/// statically-unresolvable, (3) critical / workspace, (4) glob-traversal.
+/// `args` is the command's full argv (incl. flags) for the `rmdir -p` sub-check.
+///
+/// **Branch 1 (cd-chain) is dormant here**: the `o` "unresolvable-cd" flag
+/// requires walking the `cd`/`pushd` chain that precedes this `rm`, which the
+/// permission entry point (`check_dangerous_removal(command, cwd, home)`) does
+/// not thread. With `o = false` branch 1 never fires; the same glob is still
+/// caught by branch 2 (`is_dangerous_removal_path(p)` is true for any `…/*`),
+/// so the command still ASKS — only the message differs ("cannot be statically
+/// resolved" instead of "changes directories before the removal"). Documented
+/// safe-direction partial; wiring the cd-chain is a follow-up.
+fn evaluate_removal_target(
+    cmd_name: &str,
+    d: &str,
+    args: &[String],
+    cwd: &Path,
+    home: Option<&str>,
+) -> Option<DangerousRemoval> {
+    // p = isAbsolute(d) ? d : resolve(cwd, d)  (lexical join — see resolve_against_cwd).
+    let p = resolve_against_cwd(d, cwd);
+    // m = p with trailing glob runs stripped iteratively + normalized
+    // (TS `for(…) g = m.replace(/([\\/]\*+)+[\\/]*$/, "") || "/"`).
+    let m = strip_trailing_globs(&p);
+    let f = m != p;
+    let d_abs = is_absolute_path(d);
+
+    // A = m relative to cwd (when d is relative); used by branches 3 & 4.
+    let a = {
+        let cwd_s = cwd.to_string_lossy();
+        if d_abs {
+            m.clone()
+        } else {
+            let prefix = if cwd_s.ends_with('/') {
+                cwd_s.to_string()
+            } else {
+                format!("{cwd_s}/")
+            };
+            if let Some(rest) = m.strip_prefix(&prefix) {
+                rest.to_string()
+            } else if m == cwd_s {
+                String::new()
+            } else {
+                m.clone()
+            }
+        }
+    };
+
+    // ── Branch 1: cd-chain (dormant, o = false — see fn doc). ──
+
+    // ── Branch 2: statically-unresolvable removal target. ──
+    // The binary's `rm(p)` here is `p.includes($(…)) || p.includes(${…})` (the
+    // command-substitution / variable-expansion placeholders — NOT the critical
+    // predicate), i.e. a path that cannot be statically resolved because it
+    // contains a shell expansion. Critical `…/*` globs are NOT flagged here;
+    // they fall to branch 3 on the stripped base (so `/etc/*` → "critical", and
+    // a benign `build/*` is auto-allowed — matching `x0n`).
+    if f
+        && (q6r(d)
+            || contains_command_substitution(&p)
+            || d.starts_with('~')
+            || starts_with_two_seps(d)
+            || (!d_abs && has_dotdot_segment(d) && ends_with_sep_star(&p))
+            || (cmd_name == "rmdir" && ends_with_sep_star(&p) && args.iter().any(|h| has_p_flag(h)))
+            || (!d_abs && ends_with_star_seps(d) && ends_with_sep_star(&p)))
+    {
+        return Some(unresolvable_removal(cmd_name, &p));
+    }
+
+    // ── Branch 3: critical system dir (Stt) / workspace (R0). ──
+    // Gate: no globs stripped, OR the cwd-relative stripped path has no glob char.
+    if !f || !has_glob_char(&a) {
+        // h = [m] (+ the symlink-resolved m in TS; LingXi has no symlink resolve).
+        if is_dangerous_removal_path(&m, home) {
+            return Some(critical_removal(cmd_name, &p));
+        }
+        if removal_hits_workspace(&m, cwd) {
+            return Some(workspace_removal(cmd_name, &p));
+        }
+    }
+
+    // ── Branch 4: glob pattern traverses non-enumerable directories. ──
+    if f && ends_with_sep_star(&p) {
+        let seg_delta = count_real_segments(&p) - count_real_segments(&m);
+        let glob_segments = a
+            .split(['/', '\\'])
+            .filter(|s| has_glob_char(s))
+            .count();
+        if seg_delta + glob_segments > 1 {
+            return Some(traversal_removal(cmd_name, &p));
+        }
+    }
+
+    None
+}
+
+/// TS glob-strip loop: `m = p`; repeatedly `g = m.replace(/([\\/]\*+)+[\\/]*$/,"")||"/"`,
+/// and when `g` changed set `m = /[\\/]/.test(g) ? normalize(g) : g`, until fixed point.
+fn strip_trailing_globs(p: &str) -> String {
+    static RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let re = RE.get_or_init(|| regex::Regex::new(r"([\\/]\*+)+[\\/]*$").expect("valid regex"));
+    let mut m = p.to_string();
+    loop {
+        let prev = m.clone();
+        let stripped = re.replace(&m, "").into_owned();
+        let g = if stripped.is_empty() {
+            "/".to_string()
+        } else {
+            stripped
+        };
+        if g != m {
+            m = if g.contains(['/', '\\']) {
+                lexical_normalize(&collapse_slashes(&g))
+            } else {
+                g
+            };
+        }
+        if m == prev {
+            break;
+        }
+    }
+    m
+}
+
+/// TS `q6r(e)`: true when `e` has a `..` segment that follows a real (non-`.`,
+/// non-empty) segment (e.g. `foo/../`), which cannot be statically resolved.
+fn q6r(d: &str) -> bool {
+    let mut saw_real = false;
+    for seg in d.split(['/', '\\']) {
+        match seg {
+            "" | "." => {}
+            ".." => {
+                if saw_real {
+                    return true;
+                }
+            }
+            _ => saw_real = true,
+        }
+    }
+    false
+}
+
+/// The binary's branch-2 `rm(p)` = `p.includes($(…)) || p.includes(${…})`: the
+/// path carries a command-substitution / variable-expansion that cannot be
+/// statically resolved. (claude-code replaces `$(…)`/`${…}` with sentinel tokens
+/// during parse; LingXi keeps the literal forms, so we match those.)
+fn contains_command_substitution(p: &str) -> bool {
+    p.contains("$(") || p.contains("${")
+}
+
+/// TS `/[\\/]\*$/`: ends with a separator immediately followed by a single `*`.
+fn ends_with_sep_star(p: &str) -> bool {
+    p.ends_with("/*") || p.ends_with("\\*")
+}
+
+/// TS `/^[\\/]{2}/`: starts with two separators (`//…` / `\\…`).
+fn starts_with_two_seps(d: &str) -> bool {
+    let b = d.as_bytes();
+    b.len() >= 2 && (b[0] == b'/' || b[0] == b'\\') && (b[1] == b'/' || b[1] == b'\\')
+}
+
+/// TS `/(^|[\\/])\.\.([\\/]|$)/`: contains a `..` path segment.
+fn has_dotdot_segment(d: &str) -> bool {
+    d.split(['/', '\\']).any(|s| s == "..")
+}
+
+/// TS `/\*[\\/]+$/`: ends with `*` followed by one-or-more separators.
+fn ends_with_star_seps(d: &str) -> bool {
+    let trimmed = d.trim_end_matches(['/', '\\']);
+    trimmed.len() < d.len() && trimmed.ends_with('*')
+}
+
+/// TS `/[*?[]/`: contains a glob metacharacter.
+fn has_glob_char(s: &str) -> bool {
+    s.contains(['*', '?', '['])
+}
+
+/// TS `rmdir` `-p` detection: `/^--p/.test(h) || /^-[a-z]*p/.test(h)`.
+fn has_p_flag(arg: &str) -> bool {
+    if let Some(rest) = arg.strip_prefix("--") {
+        return rest.starts_with('p');
+    }
+    if let Some(rest) = arg.strip_prefix('-') {
+        return rest.chars().all(|c| c.is_ascii_lowercase()) && rest.contains('p');
+    }
+    false
+}
+
+/// Count non-empty, non-`.` path segments (TS `Wn(split(/[\\/]+/), s => s && s !== ".")`).
+fn count_real_segments(p: &str) -> usize {
+    p.split(['/', '\\']).filter(|s| !s.is_empty() && *s != ".").count()
+}
+
+fn critical_removal(cmd_name: &str, p: &str) -> DangerousRemoval {
+    DangerousRemoval {
+        message: format!(
+            "Dangerous {cmd_name} operation detected: '{p}'\n\nThis command would remove a critical system directory. This requires explicit approval and cannot be auto-allowed by permission rules."
+        ),
+        reason: format!("Dangerous {cmd_name} operation on critical path: {p}"),
+        resolved_path: p.to_string(),
+    }
+}
+
+fn workspace_removal(cmd_name: &str, p: &str) -> DangerousRemoval {
+    DangerousRemoval {
+        message: format!(
+            "Dangerous {cmd_name} operation detected: '{p}'\n\nThis command would remove a workspace directory (the working directory, an additional working directory, or one of their parent directories). This requires explicit approval and cannot be auto-allowed by permission rules."
+        ),
+        reason: format!(
+            "Dangerous {cmd_name} operation on working directory or its ancestor: {p}"
+        ),
+        resolved_path: p.to_string(),
+    }
+}
+
+fn unresolvable_removal(cmd_name: &str, p: &str) -> DangerousRemoval {
+    DangerousRemoval {
+        message: format!(
+            "Dangerous {cmd_name} operation detected: '{p}'\n\nThis command's removal target cannot be statically resolved to a directory. This requires explicit approval and cannot be auto-allowed by permission rules."
+        ),
+        reason: format!("Dangerous {cmd_name} operation on statically-unresolvable target: {p}"),
+        resolved_path: p.to_string(),
+    }
+}
+
+fn traversal_removal(cmd_name: &str, p: &str) -> DangerousRemoval {
+    DangerousRemoval {
+        message: format!(
+            "Dangerous {cmd_name} operation detected: '{p}'\n\nThis command's glob pattern traverses directories that cannot be statically enumerated. This requires explicit approval and cannot be auto-allowed by permission rules."
+        ),
+        reason: format!("Dangerous {cmd_name} operation on statically-unresolvable target: {p}"),
+        resolved_path: p.to_string(),
+    }
 }
 
 /// TS `path.replace(/^['"]|['"]$/g, '')`: remove ONE leading and ONE trailing
@@ -723,5 +947,105 @@ mod tests {
     fn rm_with_only_flags_no_paths_is_not_dangerous() {
         // No positional args → nothing to validate.
         assert!(check_dangerous_removal("rm -rf", &cwd(), HOME).is_none());
+    }
+
+    // ── Faithful `x0n` branch coverage (binary @199202560) ──
+
+    #[test]
+    fn tilde_superset_asks_for_bare_home_only() {
+        // LingXi SAFETY SUPERSET: `rm -rf ~` → `$HOME` → critical (x0n, which
+        // does NOT expand `~`, auto-allows it). A child of home is fine.
+        let d = check_dangerous_removal("rm -rf ~", &cwd(), HOME).unwrap();
+        assert_eq!(d.resolved_path, "/home/u");
+        assert!(d.message.contains("critical system directory"), "{}", d.message);
+        assert!(check_dangerous_removal("rm -rf ~/project", &cwd(), HOME).is_none());
+    }
+
+    #[test]
+    fn critical_glob_uses_critical_message_via_stripped_base() {
+        // `/etc/*` strips to `/etc` (critical) → branch 3 "critical" (NOT branch 2).
+        let d = check_dangerous_removal("rm -rf /etc/*", &cwd(), HOME).unwrap();
+        assert_eq!(d.resolved_path, "/etc/*");
+        assert!(d.message.contains("critical system directory"), "{}", d.message);
+    }
+
+    #[test]
+    fn workspace_glob_uses_workspace_message() {
+        // `<cwd>/*` and bare `*` strip to cwd → branch 3 "workspace".
+        for cmd in ["rm -rf /proj/work/*", "rm -rf *"] {
+            let d = check_dangerous_removal(cmd, &cwd(), HOME)
+                .unwrap_or_else(|| panic!("{cmd} should ask"));
+            assert!(
+                d.message.contains("would remove a workspace directory"),
+                "{cmd}: {}",
+                d.message
+            );
+        }
+    }
+
+    #[test]
+    fn benign_dir_glob_is_auto_allowed() {
+        // The stripped base is neither critical nor workspace → AUTO-ALLOWED
+        // (matches `x0n`; LingXi previously over-asked "critical" on every `…/*`).
+        assert!(check_dangerous_removal("rm -rf build/*", &cwd(), HOME).is_none());
+        assert!(check_dangerous_removal("rm -rf /proj/work/build/*", &cwd(), HOME).is_none());
+        assert!(check_dangerous_removal("rm -rf /home/u/project/*", &cwd(), HOME).is_none());
+    }
+
+    #[test]
+    fn command_substitution_glob_is_unresolvable() {
+        // `$(…)` / `${…}` in the target → branch 2 "cannot be statically resolved".
+        for cmd in ["rm -rf $(pwd)/*", "rm -rf ${HOME}/*"] {
+            let d = check_dangerous_removal(cmd, &cwd(), HOME)
+                .unwrap_or_else(|| panic!("{cmd} should ask"));
+            assert!(
+                d.message.contains("cannot be statically resolved to a directory"),
+                "{cmd}: {}",
+                d.message
+            );
+        }
+    }
+
+    #[test]
+    fn literal_tilde_glob_is_unresolvable_via_branch2() {
+        // `~/*` → branch 2 (`d.startsWith("~")`), NOT the critical superset.
+        let d = check_dangerous_removal("rm -rf ~/*", &cwd(), HOME).unwrap();
+        assert!(
+            d.message.contains("cannot be statically resolved to a directory"),
+            "{}",
+            d.message
+        );
+    }
+
+    #[test]
+    fn glob_traversal_asks() {
+        // `/a/*/b/*`: the glob spans more than one non-enumerable level →
+        // branch 4 "glob pattern traverses directories".
+        let d = check_dangerous_removal("rm -rf /a/*/b/*", &cwd(), HOME).unwrap();
+        assert!(
+            d.message.contains("glob pattern traverses directories"),
+            "{}",
+            d.message
+        );
+    }
+
+    #[test]
+    fn rmdir_p_glob_is_unresolvable() {
+        // `rmdir -p foo/*` → branch 2 (rmdir + `-p` + trailing `/*`).
+        let d = check_dangerous_removal("rmdir -p foo/*", &cwd(), HOME).unwrap();
+        assert!(
+            d.message.contains("cannot be statically resolved to a directory"),
+            "{}",
+            d.message
+        );
+    }
+
+    #[test]
+    fn q6r_dotdot_after_real_segment() {
+        assert!(q6r("foo/../bar"));
+        assert!(q6r("a/b/../.."));
+        assert!(!q6r("../foo")); // leading .. (no preceding real seg)
+        assert!(!q6r("./foo"));
+        assert!(!q6r("a/b/c"));
     }
 }

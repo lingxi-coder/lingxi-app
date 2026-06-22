@@ -50,7 +50,9 @@ fn presets() -> Vec<Preset> {
             base_url: "https://openrouter.ai/api/v1",
             protocol: ProtocolFamily::OpenAiChat,
             auth: AuthStrategy::ApiKey,
-            provider_id: ProviderId::OpenAICompatible { name: "openrouter".to_string() },
+            provider_id: ProviderId::OpenAICompatible {
+                name: "openrouter".to_string(),
+            },
             credential_env: Some("OPENROUTER_API_KEY"),
             slice_json: OPENROUTER,
         },
@@ -59,7 +61,9 @@ fn presets() -> Vec<Preset> {
             base_url: "https://api.deepseek.com",
             protocol: ProtocolFamily::OpenAiChat,
             auth: AuthStrategy::ApiKey,
-            provider_id: ProviderId::OpenAICompatible { name: "deepseek".to_string() },
+            provider_id: ProviderId::OpenAICompatible {
+                name: "deepseek".to_string(),
+            },
             credential_env: Some("DEEPSEEK_API_KEY"),
             slice_json: DEEPSEEK,
         },
@@ -70,7 +74,9 @@ fn presets() -> Vec<Preset> {
             base_url: "https://open.bigmodel.cn/api/anthropic",
             protocol: ProtocolFamily::AnthropicMessages,
             auth: AuthStrategy::ApiKey,
-            provider_id: ProviderId::Custom { name: "glm-coding".to_string() },
+            provider_id: ProviderId::Custom {
+                name: "glm-coding".to_string(),
+            },
             credential_env: Some("ZHIPU_API_KEY"),
             slice_json: GLM_CODING,
         },
@@ -83,7 +89,9 @@ fn presets() -> Vec<Preset> {
             base_url: "https://api.z.ai/api/paas/v4",
             protocol: ProtocolFamily::OpenAiChat,
             auth: AuthStrategy::ApiKey,
-            provider_id: ProviderId::OpenAICompatible { name: "zai".to_string() },
+            provider_id: ProviderId::OpenAICompatible {
+                name: "zai".to_string(),
+            },
             credential_env: Some("ZAI_API_KEY"),
             slice_json: ZAI,
         },
@@ -109,7 +117,9 @@ fn presets() -> Vec<Preset> {
             base_url: "https://chatgpt.com/backend-api/codex",
             protocol: ProtocolFamily::OpenAiResponses,
             auth: AuthStrategy::ChatGptOAuth,
-            provider_id: ProviderId::OpenAICompatible { name: "openai-chatgpt".to_string() },
+            provider_id: ProviderId::OpenAICompatible {
+                name: "openai-chatgpt".to_string(),
+            },
             credential_env: None,
             slice_json: OPENAI_CHATGPT,
         },
@@ -120,7 +130,9 @@ fn presets() -> Vec<Preset> {
             base_url: "https://api.githubcopilot.com",
             protocol: ProtocolFamily::OpenAiChat,
             auth: AuthStrategy::CopilotBearer,
-            provider_id: ProviderId::OpenAICompatible { name: "github-copilot".to_string() },
+            provider_id: ProviderId::OpenAICompatible {
+                name: "github-copilot".to_string(),
+            },
             credential_env: Some("GITHUB_TOKEN"),
             slice_json: GITHUB_COPILOT,
         },
@@ -155,8 +167,12 @@ pub fn builtin_presets() -> BuiltinCatalog {
             protocol: preset.protocol.clone(),
             auth: preset.auth.clone(),
             credential: match preset.credential_env {
-                Some(var) => CredentialConfig::Env { var: var.to_string() },
-                None => CredentialConfig::Static { id: preset.profile_name.to_string() },
+                Some(var) => CredentialConfig::Env {
+                    var: var.to_string(),
+                },
+                None => CredentialConfig::Static {
+                    id: preset.profile_name.to_string(),
+                },
             },
             models,
             pricing: crate::config::PricingConfig::default(),
@@ -164,6 +180,9 @@ pub fn builtin_presets() -> BuiltinCatalog {
             // (no AwsSigV4 / AzureOpenAi), so both default to None.
             signing: None,
             azure: None,
+            supports_websockets: matches!(preset.profile_name, "openai" | "openai-chatgpt"),
+            supports_websocket_compression: false,
+            websocket_connect_timeout_ms: None,
         });
     }
 
@@ -206,9 +225,15 @@ mod tests {
         assert_eq!(openai.protocol, ProtocolFamily::OpenAiResponses);
         assert_eq!(openai.provider_id, ProviderId::OpenAI);
         assert_eq!(openai.base_url, "https://api.openai.com/v1");
-        let chatgpt = catalog.providers.iter().find(|p| p.profile_name == "openai-chatgpt").expect("present");
+        assert!(openai.supports_websockets);
+        let chatgpt = catalog
+            .providers
+            .iter()
+            .find(|p| p.profile_name == "openai-chatgpt")
+            .expect("present");
         assert_eq!(chatgpt.protocol, ProtocolFamily::OpenAiResponses);
         assert_eq!(chatgpt.auth, AuthStrategy::ChatGptOAuth);
         assert_eq!(chatgpt.base_url, "https://chatgpt.com/backend-api/codex");
+        assert!(chatgpt.supports_websockets);
     }
 }

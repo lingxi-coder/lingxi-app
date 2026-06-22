@@ -36,6 +36,37 @@ pub trait Transport: Send + Sync {
         &'a self,
         request: &'a ProviderRequest,
     ) -> BoxFuture<'a, Result<StreamingResponse, LlmError>>;
+
+    /// Open a reusable OpenAI Responses WebSocket session.
+    ///
+    /// The default keeps existing transports source-compatible and reports the
+    /// capability as unsupported. Hosts that support WebSocket reuse override
+    /// this and return a session that can send sequential `response.create`
+    /// messages over one upgraded connection.
+    fn open_responses_websocket_session<'a>(
+        &'a self,
+        _request: &'a ProviderRequest,
+    ) -> BoxFuture<'a, Result<Box<dyn ResponsesWebSocketTransportSession>, LlmError>> {
+        Box::pin(async {
+            Err(LlmError::InvalidRequest {
+                message: "Responses WebSocket session transport is not supported".to_string(),
+            })
+        })
+    }
+}
+
+/// Reusable transport session for OpenAI Responses WebSocket requests.
+pub trait ResponsesWebSocketTransportSession: Send {
+    /// Send one prepared provider request over the already-open connection.
+    fn send<'a>(
+        &'a mut self,
+        request: &'a ProviderRequest,
+    ) -> BoxFuture<'a, Result<StreamingResponse, LlmError>>;
+
+    /// Close the reusable transport connection.
+    fn close<'a>(&'a mut self) -> BoxFuture<'a, Result<(), LlmError>> {
+        Box::pin(async { Ok(()) })
+    }
 }
 
 /// Status line and headers of a streaming response, plus its frame stream.

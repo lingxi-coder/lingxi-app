@@ -62,7 +62,10 @@ use tokio::sync::{Mutex, RwLock};
 use tokio_util::sync::CancellationToken;
 use tool_api::AnthropicRequestBuilder;
 use tool_api::BuiltinToolContext;
-use traits::http::{HttpError, RawByteStream, RawByteStreamWithMeta, SseStream, SseStreamWithMeta};
+use traits::http::{
+    HttpError, RawByteStream, RawByteStreamWithMeta, SseStream, SseStreamWithMeta,
+    WebSocketConnectionWithMeta, WebSocketMessageStreamWithMeta,
+};
 use traits::{
     AuthHandle, HttpTransport, OrchestratorHandle, OutputStream, Platform, SlashCommandDispatcher,
 };
@@ -110,6 +113,22 @@ impl HttpTransport for DynHttp {
         req: protocol::HttpRequest,
     ) -> Result<RawByteStreamWithMeta, HttpError> {
         self.0.stream_raw_bytes_with_meta(req).await
+    }
+    /// Forward WebSocket streaming so device transports that support Responses
+    /// WebSocket are not hidden behind this sized wrapper.
+    async fn stream_websocket_messages_with_meta(
+        &self,
+        req: protocol::HttpRequest,
+    ) -> Result<WebSocketMessageStreamWithMeta, HttpError> {
+        self.0.stream_websocket_messages_with_meta(req).await
+    }
+    /// Forward reusable WebSocket connections so Responses sessions can reuse
+    /// the device backend connection inside a turn.
+    async fn open_websocket_connection_with_meta(
+        &self,
+        req: protocol::HttpRequest,
+    ) -> Result<WebSocketConnectionWithMeta, HttpError> {
+        self.0.open_websocket_connection_with_meta(req).await
     }
 }
 
@@ -307,7 +326,10 @@ fn anthropic_models(default_model: &str) -> Vec<llm_client::ModelProfile> {
     // (matching `hook_prompt_runner::resolve_model`'s precedence:
     // `ANTHROPIC_SMALL_FAST_MODEL` > `ANTHROPIC_DEFAULT_HAIKU_MODEL` > default
     // Haiku), so such a request resolves instead of failing `ModelUnavailable`.
-    for var in ["ANTHROPIC_SMALL_FAST_MODEL", "ANTHROPIC_DEFAULT_HAIKU_MODEL"] {
+    for var in [
+        "ANTHROPIC_SMALL_FAST_MODEL",
+        "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+    ] {
         if let Ok(m) = std::env::var(var) {
             if !m.is_empty() {
                 ids.push(m);
@@ -484,11 +506,7 @@ pub async fn build_mobile_inner(
     // (3) Credential manager — built BEFORE the client so the same `Arc` serves
     //     BOTH the composite credential provider (below) and the OAuth client
     //     (used by /login, /logout, step (3b)). One store, no second keychain.
-    let credentials = Arc::new(CredentialManager::new(
-        storage,
-        clock.clone(),
-        http.clone(),
-    ));
+    let credentials = Arc::new(CredentialManager::new(storage, clock.clone(), http.clone()));
 
     let mut client = DefaultLlmClient::from_config(assembled.client_config)
         .map_err(|e| MobileBuildError::ApiBase(format!("llm-client config: {e}")))?;
@@ -499,7 +517,11 @@ pub async fn build_mobile_inner(
     let composite = provider_config::MultiCredentialProvider::new(
         credentials.clone(),
         assembled.credential_sources.clone(),
-        if has_api_key { Some(cfg.api_key.clone()) } else { None },
+        if has_api_key {
+            Some(cfg.api_key.clone())
+        } else {
+            None
+        },
         std::collections::BTreeMap::new(),
     );
     client = client.with_credential_provider(Arc::new(composite));
@@ -538,7 +560,12 @@ pub async fn build_mobile_inner(
         .chains
         .chains
         .iter()
-        .map(|(key, entries)| (key.clone(), entries.iter().map(|e| e.model.clone()).collect()))
+        .map(|(key, entries)| {
+            (
+                key.clone(),
+                entries.iter().map(|e| e.model.clone()).collect(),
+            )
+        })
         .collect();
     // Retry override → main's scalar settings_max_retries / settings_backoff_ms.
     let settings_max_retries = assembled.chains.retry.as_ref().map(|r| r.max_attempts);
@@ -637,7 +664,10 @@ pub async fn build_mobile_inner(
     if user_settings_path != project_settings_path {
         settings_sources.push((user_settings_path, hooks::definition::HookSource::User));
     }
-    settings_sources.push((project_settings_path, hooks::definition::HookSource::Project));
+    settings_sources.push((
+        project_settings_path,
+        hooks::definition::HookSource::Project,
+    ));
     for (path, source) in settings_sources {
         if let Ok(raw) = tokio::fs::read_to_string(&path).await {
             match hooks::parse_hooks_from_settings_json(&raw, source) {
@@ -773,27 +803,27 @@ pub async fn build_mobile_inner(
     // stay byte-identical. On a device the env var is typically unset, so this is
     // off unless the host app explicitly sets it. A missing/unusable key makes the
     // side query fail → empty surfaced set (never breaks a turn).
-    let memdir_prefetch = if traits::env::is_env_truthy(
-        std::env::var("CLAUDE_CODE_MEMDIR_PREFETCH").ok().as_deref(),
-    ) {
-        // `cfg.claude_home` is the device `.claude` dir; the helper re-appends
-        // `.claude/memdir`, so pass its PARENT as `home` ⇒ `<claude_home>/memdir`.
-        let home = cfg
-            .claude_home
-            .parent()
-            .map(std::path::Path::to_path_buf)
-            .unwrap_or_else(|| cwd.clone());
-        Some(orchestrator::prompt::build_memdir_prefetch_from_anthropic(
-            cfg.api_key.clone(),
-            Some(cfg.api_base.clone()),
-            http.clone(),
-            Arc::new(platform_posix_minimal::runtime::PosixRuntime::new())
-                as Arc<dyn traits::RuntimeSpawner>,
-            &home,
-        ))
-    } else {
-        None
-    };
+    let memdir_prefetch =
+        if traits::env::is_env_truthy(std::env::var("CLAUDE_CODE_MEMDIR_PREFETCH").ok().as_deref())
+        {
+            // `cfg.claude_home` is the device `.claude` dir; the helper re-appends
+            // `.claude/memdir`, so pass its PARENT as `home` ⇒ `<claude_home>/memdir`.
+            let home = cfg
+                .claude_home
+                .parent()
+                .map(std::path::Path::to_path_buf)
+                .unwrap_or_else(|| cwd.clone());
+            Some(orchestrator::prompt::build_memdir_prefetch_from_anthropic(
+                cfg.api_key.clone(),
+                Some(cfg.api_base.clone()),
+                http.clone(),
+                Arc::new(platform_posix_minimal::runtime::PosixRuntime::new())
+                    as Arc<dyn traits::RuntimeSpawner>,
+                &home,
+            ))
+        } else {
+            None
+        };
 
     let mut orch_inner = ConversationOrchestrator::new_with_streaming(
         orch_cfg,
@@ -832,6 +862,7 @@ pub async fn build_mobile_inner(
             tracing::warn!(error = %e, "failed to seed default model profile");
         }
     }
+    orch.spawn_startup_responses_websocket_prewarm();
     let reg = mobile_command_registry(handle, auth.clone());
     let dispatcher = RegistrySlashDispatcher::new(Arc::new(RwLock::new(reg)));
 
@@ -1992,11 +2023,10 @@ mod tests {
 
         // R-P1: claudeMd lives in the leading additional-context `<system-reminder>`
         // meta now (same `memory_block::format`), NOT the system prompt.
-        let ctx = rt
-            .orchestrator
-            .additional_context_preview()
-            .await
-            .expect("an additional-context meta must be present (currentDate is unconditional)");
+        let ctx =
+            rt.orchestrator.additional_context_preview().await.expect(
+                "an additional-context meta must be present (currentDate is unconditional)",
+            );
         assert!(
             ctx.contains(
                 "Codebase and user instructions are shown below. Be sure to adhere to these instructions."
@@ -2654,14 +2684,15 @@ mod tests {
         );
 
         // Bare: "claude-sonnet-4-20250514" → same id, no profile (no-op seed path)
-        let (id2, profile2) =
-            traits::parse_model_ref("claude-sonnet-4-20250514", &listings);
-        assert_eq!(id2, "claude-sonnet-4-20250514", "bare model id must pass through");
+        let (id2, profile2) = traits::parse_model_ref("claude-sonnet-4-20250514", &listings);
+        assert_eq!(
+            id2, "claude-sonnet-4-20250514",
+            "bare model id must pass through"
+        );
         assert!(profile2.is_none(), "bare model must yield None profile");
 
         // Shared id with two providers and explicit profile qualifier
-        let (id3, profile3) =
-            traits::parse_model_ref("github-copilot/gpt-5.2", &listings);
+        let (id3, profile3) = traits::parse_model_ref("github-copilot/gpt-5.2", &listings);
         assert_eq!(id3, "gpt-5.2");
         assert_eq!(profile3.as_deref(), Some("github-copilot"));
     }

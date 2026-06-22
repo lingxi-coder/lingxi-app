@@ -36,6 +36,7 @@ impl OpenAiResponsesCodec {
 }
 
 impl WireCodec for OpenAiResponsesCodec {
+    #[allow(clippy::too_many_lines)]
     fn encode_request(&self, request: &LlmRequest) -> Result<ProviderRequest, LlmError> {
         reject_unsupported_content_blocks(request)?;
 
@@ -67,16 +68,27 @@ impl WireCodec for OpenAiResponsesCodec {
 
         body.insert("input".to_string(), Value::Array(input));
 
-        if !request.tools.is_empty() {
-            body.insert(
-                "tools".to_string(),
-                Value::Array(request.tools.iter().map(encode_tool).collect()),
-            );
-        }
+        body.insert(
+            "tools".to_string(),
+            Value::Array(request.tools.iter().map(encode_tool).collect()),
+        );
 
-        if let Some(tool_choice) = &request.tool_choice {
-            body.insert("tool_choice".to_string(), encode_tool_choice(tool_choice));
-        }
+        body.insert(
+            "tool_choice".to_string(),
+            request
+                .tool_choice
+                .as_ref()
+                .map_or_else(|| Value::String("auto".to_string()), encode_tool_choice),
+        );
+        body.insert(
+            "parallel_tool_calls".to_string(),
+            Value::Bool(
+                request
+                    .openai_responses
+                    .parallel_tool_calls
+                    .unwrap_or(false),
+            ),
+        );
 
         if let Some(max_tokens) = request.max_tokens {
             body.insert("max_output_tokens".to_string(), Value::from(max_tokens));
@@ -109,13 +121,60 @@ impl WireCodec for OpenAiResponsesCodec {
             body.insert("text".to_string(), encode_text_controls(response_format));
         }
 
-        if request.stream {
-            body.insert("stream".to_string(), Value::Bool(true));
+        let mut include = request.openai_responses.include.clone();
+        if request.reasoning.is_some()
+            && !include
+                .iter()
+                .any(|item| item == "reasoning.encrypted_content")
+        {
+            include.push("reasoning.encrypted_content".to_string());
+        }
+        body.insert(
+            "include".to_string(),
+            Value::Array(include.into_iter().map(Value::String).collect()),
+        );
+
+        if let Some(service_tier) = &request.openai_responses.service_tier {
+            body.insert(
+                "service_tier".to_string(),
+                Value::String(service_tier.clone()),
+            );
+        }
+        if let Some(prompt_cache_key) = &request.openai_responses.prompt_cache_key {
+            body.insert(
+                "prompt_cache_key".to_string(),
+                Value::String(prompt_cache_key.clone()),
+            );
+        }
+        if !request.openai_responses.client_metadata.is_empty() {
+            body.insert(
+                "client_metadata".to_string(),
+                serde_json::to_value(&request.openai_responses.client_metadata).map_err(|err| {
+                    LlmError::InvalidRequest {
+                        message: format!(
+                            "OpenAI Responses client_metadata is not serializable: {err}"
+                        ),
+                    }
+                })?,
+            );
+        }
+        if let Some(previous_response_id) = &request.openai_responses.previous_response_id {
+            body.insert(
+                "previous_response_id".to_string(),
+                Value::String(previous_response_id.clone()),
+            );
+        }
+        if let Some(generate) = request.openai_responses.generate {
+            body.insert("generate".to_string(), Value::Bool(generate));
         }
 
-        // Stateless parity: never let the provider persist the response
-        // server-side; conversation state always lives with the caller.
-        body.insert("store".to_string(), Value::Bool(false));
+        body.insert("stream".to_string(), Value::Bool(request.stream));
+
+        let store = request
+            .openai_responses
+            .store
+            .unwrap_or_else(|| is_azure_responses_base_url(&self.base_url));
+        body.insert("store".to_string(), Value::Bool(store));
 
         let mut provider_request =
             ProviderRequest::post_json(self.responses_url(), Value::Object(body));
@@ -173,7 +232,10 @@ fn decode_response_body(body_json: Value) -> Result<LlmResponse, LlmError> {
     }
 
     let stop_reason = map_stop_reason(&body_json, has_function_call);
-    let usage = body_json.get("usage").map(normalize_usage).unwrap_or_default();
+    let usage = body_json
+        .get("usage")
+        .map(normalize_usage)
+        .unwrap_or_default();
 
     Ok(LlmResponse {
         id,
@@ -246,7 +308,14 @@ fn decode_reasoning_item(item: &Value, content: &mut Vec<ContentBlock>) {
 fn map_stop_reason(body_json: &Value, has_function_call: bool) -> Option<String> {
     let status = body_json.get("status").and_then(Value::as_str)?;
     match status {
-        "completed" => Some(if has_function_call { "tool_use" } else { "end_turn" }.to_string()),
+        "completed" => Some(
+            if has_function_call {
+                "tool_use"
+            } else {
+                "end_turn"
+            }
+            .to_string(),
+        ),
         "incomplete" => {
             let reason = body_json
                 .get("incomplete_details")
@@ -271,8 +340,14 @@ fn map_stop_reason(body_json: &Value, has_function_call: bool) -> Option<String>
 /// them (saturating) so every `TokenUsage` bucket stays independently billable
 /// (same rule as `OpenAiChatCodec`). Missing details objects → zeros.
 fn normalize_usage(usage: &Value) -> crate::Usage {
-    let input_tokens = usage.get("input_tokens").and_then(Value::as_u64).unwrap_or(0);
-    let output_tokens = usage.get("output_tokens").and_then(Value::as_u64).unwrap_or(0);
+    let input_tokens = usage
+        .get("input_tokens")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let output_tokens = usage
+        .get("output_tokens")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
     let cached_tokens = usage
         .get("input_tokens_details")
         .and_then(|details| details.get("cached_tokens"))
@@ -340,10 +415,15 @@ struct OpenAiResponsesStreamDecoder {
     has_function_call: bool,
     stop_reason: Option<String>,
     usage: Option<crate::Usage>,
+    provider_metadata: Value,
     done: bool,
 }
 
 impl StreamDecoder for OpenAiResponsesStreamDecoder {
+    fn set_provider_metadata(&mut self, metadata: Value) {
+        self.provider_metadata = metadata;
+    }
+
     fn decode_frame(&mut self, frame: RawStreamFrame) -> Result<Vec<LlmEvent>, LlmError> {
         let text = std::str::from_utf8(&frame.bytes).map_err(|_| LlmError::InvalidRequest {
             message: "OpenAI Responses stream frame is not valid UTF-8".to_string(),
@@ -393,6 +473,9 @@ impl StreamDecoder for OpenAiResponsesStreamDecoder {
             Some("response.failed") => {
                 return Err(decode_failed_event(&root));
             }
+            Some("error") => {
+                return Err(decode_wrapped_websocket_error_event(&root));
+            }
             // Unknown event types (response.in_progress, response.output_text.done,
             // future additions, ...) are ignored tolerantly.
             _ => {}
@@ -420,20 +503,30 @@ impl OpenAiResponsesStreamDecoder {
         let response = response.unwrap_or(&Value::Null);
         out.push(LlmEvent::MessageStart {
             response: Box::new(LlmResponse {
-                id: response.get("id").and_then(Value::as_str).unwrap_or_default().to_string(),
-                model: response.get("model").and_then(Value::as_str).unwrap_or_default().to_string(),
+                id: response
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string(),
+                model: response
+                    .get("model")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string(),
                 content: Vec::new(),
                 stop_reason: None,
                 usage: crate::Usage::default(),
                 cost: None,
-                provider_metadata: Value::Null,
+                provider_metadata: self.provider_metadata.clone(),
             }),
         });
     }
 
     /// Wire `output_index` of an item-scoped event; missing → slot zero.
     fn output_index(root: &Value) -> u64 {
-        root.get("output_index").and_then(Value::as_u64).unwrap_or(0)
+        root.get("output_index")
+            .and_then(Value::as_u64)
+            .unwrap_or(0)
     }
 
     fn handle_item_added(&mut self, root: &Value, out: &mut Vec<LlmEvent>) {
@@ -454,12 +547,21 @@ impl OpenAiResponsesStreamDecoder {
         }
         let index = self.next_index;
         self.next_index += 1;
-        self.blocks.insert(output_index, BlockState { index, open: true });
+        self.blocks
+            .insert(output_index, BlockState { index, open: true });
         out.push(LlmEvent::ContentBlockStart {
             index,
             content_block: ContentBlock::ToolCall {
-                id: item.get("call_id").and_then(Value::as_str).unwrap_or_default().to_string(),
-                name: item.get("name").and_then(Value::as_str).unwrap_or_default().to_string(),
+                id: item
+                    .get("call_id")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string(),
+                name: item
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string(),
                 input: Value::Object(serde_json::Map::new()),
             },
         });
@@ -479,7 +581,8 @@ impl OpenAiResponsesStreamDecoder {
         }
         let index = self.next_index;
         self.next_index += 1;
-        self.blocks.insert(output_index, BlockState { index, open: true });
+        self.blocks
+            .insert(output_index, BlockState { index, open: true });
         out.push(LlmEvent::ContentBlockStart {
             index,
             content_block: make_block(),
@@ -502,7 +605,9 @@ impl OpenAiResponsesStreamDecoder {
         );
         out.push(LlmEvent::ContentBlockDelta {
             index,
-            delta: crate::ContentDelta::TextDelta { text: delta.to_string() },
+            delta: crate::ContentDelta::TextDelta {
+                text: delta.to_string(),
+            },
         });
     }
 
@@ -582,6 +687,9 @@ impl OpenAiResponsesStreamDecoder {
         if let Some(response) = response {
             self.stop_reason = map_stop_reason(response, self.has_function_call);
             self.usage = response.get("usage").map(normalize_usage);
+            if let Some(usage) = &mut self.usage {
+                attach_stream_metadata_to_usage(usage, &self.provider_metadata);
+            }
         }
         self.finish_into(out);
     }
@@ -618,6 +726,17 @@ impl OpenAiResponsesStreamDecoder {
     }
 }
 
+fn attach_stream_metadata_to_usage(usage: &mut crate::Usage, stream_metadata: &Value) {
+    if stream_metadata.is_null() {
+        return;
+    }
+    let usage_metadata = std::mem::take(&mut usage.provider_metadata);
+    usage.provider_metadata = serde_json::json!({
+        "usage": usage_metadata,
+        "stream": stream_metadata,
+    });
+}
+
 /// Map a `response.failed` event onto the error taxonomy by routing its
 /// `response.error {code, message}` through the shared Chat-envelope error
 /// decoder (the code vocabulary is shared; there is no HTTP status on a
@@ -635,7 +754,10 @@ fn decode_failed_event(root: &Value) -> LlmError {
         .cloned()
         .unwrap_or(Value::Null);
 
-    let code = error.get("code").and_then(Value::as_str).unwrap_or_default();
+    let code = error
+        .get("code")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
     let message = error
         .get("message")
         .and_then(Value::as_str)
@@ -661,6 +783,58 @@ fn decode_failed_event(root: &Value) -> LlmError {
         body_json: serde_json::json!({ "error": error }),
         request_id: None,
     })
+}
+
+fn decode_wrapped_websocket_error_event(root: &Value) -> LlmError {
+    let error = root.get("error").cloned().unwrap_or(Value::Null);
+    let code = error
+        .get("code")
+        .and_then(Value::as_str)
+        .or_else(|| error.get("type").and_then(Value::as_str))
+        .unwrap_or_default();
+    if code == "websocket_connection_limit_reached" {
+        return LlmError::RateLimited {
+            retry_after: None,
+            scope: None,
+        };
+    }
+
+    let status = root
+        .get("status")
+        .or_else(|| root.get("status_code"))
+        .and_then(Value::as_u64)
+        .and_then(|value| u16::try_from(value).ok())
+        .unwrap_or(500);
+
+    super::openai::decode_error_response(&ProviderResponse {
+        status,
+        headers: websocket_event_headers(root.get("headers")),
+        body_json: serde_json::json!({ "error": error }),
+        request_id: None,
+    })
+}
+
+fn websocket_event_headers(value: Option<&Value>) -> std::collections::BTreeMap<String, String> {
+    let mut headers = std::collections::BTreeMap::new();
+    let Some(map) = value.and_then(Value::as_object) else {
+        return headers;
+    };
+    for (name, value) in map {
+        let Some(header_value) = websocket_header_value(value) else {
+            continue;
+        };
+        headers.insert(name.to_ascii_lowercase(), header_value);
+    }
+    headers
+}
+
+fn websocket_header_value(value: &Value) -> Option<String> {
+    match value {
+        Value::String(value) => Some(value.clone()),
+        Value::Number(value) => Some(value.to_string()),
+        Value::Bool(value) => Some(value.to_string()),
+        _ => None,
+    }
 }
 
 /// Parse the retry-after hint out of a `rate_limit_exceeded` message such as
@@ -709,6 +883,20 @@ fn map_reasoning_effort(budget_tokens: u32) -> &'static str {
         1025..=8192 => "medium",
         _ => "high",
     }
+}
+
+fn is_azure_responses_base_url(base_url: &str) -> bool {
+    const AZURE_MARKERS: [&str; 6] = [
+        "openai.azure.",
+        "cognitiveservices.azure.",
+        "aoai.azure.",
+        "azure-api.",
+        "azurefd.",
+        "windows.net/openai",
+    ];
+
+    let base_url = base_url.to_ascii_lowercase();
+    AZURE_MARKERS.iter().any(|marker| base_url.contains(marker))
 }
 
 fn encode_message(message: &crate::Message, input: &mut Vec<Value>) {
@@ -848,14 +1036,17 @@ fn reject_unsupported_content_blocks(request: &LlmRequest) -> Result<(), LlmErro
             match block {
                 ContentBlock::Reasoning { .. } | ContentBlock::RedactedThinking { .. } => {
                     return Err(LlmError::InvalidRequest {
-                        message: "OpenAiResponsesCodec does not encode reasoning blocks yet".to_string(),
+                        message: "OpenAiResponsesCodec does not encode reasoning blocks yet"
+                            .to_string(),
                     });
                 }
                 ContentBlock::ServerToolUse { .. }
                 | ContentBlock::ConnectorText { .. }
                 | ContentBlock::AdvisorToolResult { .. } => {
                     return Err(LlmError::InvalidRequest {
-                        message: "OpenAiResponsesCodec does not encode Anthropic server-generated blocks".to_string(),
+                        message:
+                            "OpenAiResponsesCodec does not encode Anthropic server-generated blocks"
+                                .to_string(),
                     });
                 }
                 _ => {}

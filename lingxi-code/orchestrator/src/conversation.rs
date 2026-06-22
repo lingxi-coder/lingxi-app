@@ -79,7 +79,8 @@ pub trait OrchestratorApiClient: Send + Sync {
         tools: Vec<serde_json::Value>,
         _max_tokens: u32,
     ) -> Result<LlmResponse, LlmError> {
-        self.messages_create(model, profile, system, msgs, tools).await
+        self.messages_create(model, profile, system, msgs, tools)
+            .await
     }
 
     /// Non-streaming `messages.create` with the **Opus-fallback** policy wired
@@ -111,7 +112,8 @@ pub trait OrchestratorApiClient: Send + Sync {
     ) -> Result<LlmResponse, LlmError> {
         // Default: ignore the fallback args and use the plain seam. Keeps all
         // non-Anthropic impls (and mocks) byte-identical.
-        self.messages_create(model, profile, system, msgs, tools).await
+        self.messages_create(model, profile, system, msgs, tools)
+            .await
     }
 
     /// Non-streaming `messages.create` with a pre-seeded consecutive-529 counter.
@@ -139,7 +141,8 @@ pub trait OrchestratorApiClient: Send + Sync {
     ) -> Result<LlmResponse, LlmError> {
         // Default: ignore the seed and use the plain seam. Keeps all
         // non-Anthropic impls (and mocks) byte-identical.
-        self.messages_create(model, profile, system, msgs, tools).await
+        self.messages_create(model, profile, system, msgs, tools)
+            .await
     }
 
     /// Count the input tokens a `messages.create` for `(model, system, msgs,
@@ -254,6 +257,27 @@ pub trait OrchestratorApiClient: Send + Sync {
     fn last_rate_limit_error_message(&self) -> Option<String> {
         None
     }
+
+    /// Best-effort startup prewarm for OpenAI Responses WebSocket providers.
+    ///
+    /// Default is a no-op so non-routing mocks and non-WebSocket clients keep
+    /// their existing behavior. Production [`ProviderApiAdapter`] sends the
+    /// provided empty-history request with `generate=false`.
+    async fn prewarm_responses_websocket(
+        &self,
+        _model: &str,
+        _profile: Option<&str>,
+        _system: Option<&str>,
+        _messages: Vec<ConversationMessage>,
+        _tools: Vec<serde_json::Value>,
+    ) -> Result<(), LlmError> {
+        Ok(())
+    }
+
+    /// Close any reusable Responses WebSocket session held by this API client.
+    async fn close_responses_websocket_session(&self) -> Result<(), LlmError> {
+        Ok(())
+    }
 }
 
 /// Re-map a terminal `RateLimited` turn error onto the limits-specific copy
@@ -309,10 +333,7 @@ pub trait StreamingApiClient: Send + Sync {
         system: Option<&str>,
         messages: Vec<ConversationMessage>,
         tools: Vec<serde_json::Value>,
-    ) -> Result<
-        futures::stream::BoxStream<'static, Result<LlmEvent, LlmError>>,
-        LlmError,
-    >;
+    ) -> Result<futures::stream::BoxStream<'static, Result<LlmEvent, LlmError>>, LlmError>;
 }
 
 /// Outcome of a single REPL turn driven by
@@ -750,8 +771,7 @@ pub struct ConversationOrchestrator {
     /// re-filtered to `globs.is_some()`). Avoids re-walking disk every turn while
     /// still letting lazy activation re-test the cached rules against the latest
     /// `read_file_state`. Empty when the hierarchy has no conditional rules.
-    pub(crate) conditional_rules_cache:
-        tokio::sync::OnceCell<Vec<crate::prompt::MemoryFile>>,
+    pub(crate) conditional_rules_cache: tokio::sync::OnceCell<Vec<crate::prompt::MemoryFile>>,
     /// §F sent-tracking ("delta"): the paths of conditional rules already
     /// injected this session, so each rule is rendered ONCE when first activated
     /// and never re-injected on later turns. 1:1 with TS `loadedNestedMemoryPaths`
@@ -791,8 +811,7 @@ pub struct ConversationOrchestrator {
     /// [`Self::relevant_memory_reminder_message`] before snapshot assembly.
     /// `None` between turns / when no prefetch is wired. Mirrors the
     /// pending-handle slot pattern of the recovery / cache-safe slots.
-    pub(crate) pending_memory_prefetch:
-        Mutex<Option<memory::prefetch::PendingMemoryPrefetch>>,
+    pub(crate) pending_memory_prefetch: Mutex<Option<memory::prefetch::PendingMemoryPrefetch>>,
     /// P0.1 surfacing dedup: paths already surfaced via the
     /// `relevant_memories` channel this session, so a memory surfaced once is
     /// never re-injected on a later turn. Mirrors [`Self::sent_conditional_rules`]
@@ -807,6 +826,12 @@ pub struct ConversationOrchestrator {
     /// background-forks a distillation at turn start and writes the per-session
     /// memory file the next session re-loads through the Session-tier memdir scan.
     pub(crate) session_memory: Option<Arc<SessionMemoryHandle>>,
+    /// Best-effort startup Responses WebSocket prewarm task.
+    ///
+    /// Lifecycle operations abort this before clearing or exiting the session so
+    /// a stale prewarm cannot later seed `previous_response_id`.
+    pub(crate) startup_responses_websocket_prewarm:
+        std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
 /// Everything [`ConversationOrchestrator::maybe_extract_session_memory`] needs to
@@ -895,6 +920,7 @@ impl ConversationOrchestrator {
             pending_memory_prefetch: Mutex::new(None),
             surfaced_memory_paths: Mutex::new(std::collections::HashSet::new()),
             session_memory: None,
+            startup_responses_websocket_prewarm: std::sync::Mutex::new(None),
         }
     }
 
@@ -948,10 +974,7 @@ impl ConversationOrchestrator {
     /// wired (test/library builds that also wire no writer), preserving the prior
     /// `""` hook field for those.
     #[must_use]
-    pub(crate) fn computed_transcript_path(
-        &self,
-        session_id: &SessionId,
-    ) -> std::path::PathBuf {
+    pub(crate) fn computed_transcript_path(&self, session_id: &SessionId) -> std::path::PathBuf {
         match &self.config_home {
             Some(home) => session::jsonl::path::session_path(
                 home,
@@ -1052,10 +1075,7 @@ impl ConversationOrchestrator {
     /// wired at all"). Wired at the composition root once a real
     /// selector-backed prefetch lands.
     #[must_use]
-    pub fn with_memory_prefetch(
-        mut self,
-        prefetch: Arc<memory::prefetch::MemoryPrefetch>,
-    ) -> Self {
+    pub fn with_memory_prefetch(mut self, prefetch: Arc<memory::prefetch::MemoryPrefetch>) -> Self {
         self.memory_prefetch = Some(prefetch);
         self
     }
@@ -1178,9 +1198,7 @@ impl ConversationOrchestrator {
     /// production-reachable end to end.
     #[must_use]
     pub fn has_mcp_oauth(&self) -> bool {
-        self.mcp_registry
-            .as_ref()
-            .is_some_and(|r| r.has_oauth())
+        self.mcp_registry.as_ref().is_some_and(|r| r.has_oauth())
     }
 
     /// Whether the wired MCP registry has a Cross-App-Access provider injected
@@ -1488,7 +1506,8 @@ impl ConversationOrchestrator {
         // PostCompact fires AFTER the compaction transition has been applied
         // (TS `compact.ts:723`). Manual `/compact` ⇒ `manual` trigger.
         // Best-effort — never fails the call.
-        self.fire_post_compact("manual", summary, tokens_freed).await;
+        self.fire_post_compact("manual", summary, tokens_freed)
+            .await;
 
         Ok(summary_out)
     }
@@ -1612,7 +1631,10 @@ impl ConversationOrchestrator {
         let anchor_uuid = if preserved_tail.is_empty() {
             None
         } else {
-            result.messages.last().map(protocol::ConversationMessage::id)
+            result
+                .messages
+                .last()
+                .map(protocol::ConversationMessage::id)
         };
         let (marker, _metadata) = compaction::create_compact_boundary_with_preserved_tail(
             trigger,
@@ -2196,12 +2218,8 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         // The orchestrator turn loop has no sub-agent `agentId` concept here
         // (that lives in the agent-spawn path); pass `None`, matching the main
         // query loop where `toolUseContext.agentId` is undefined for the root.
-        let decision = check_token_budget(
-            tracker,
-            None,
-            self.config.token_budget,
-            global_turn_tokens,
-        );
+        let decision =
+            check_token_budget(tracker, None, self.config.token_budget, global_turn_tokens);
         match decision {
             TokenBudgetDecision::Continue {
                 nudge_message,
@@ -2594,8 +2612,14 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         let git_branch = self.resolve_git_branch().await;
         let entrypoint = Some(entrypoint_value());
         let prompt_id = self.prompt_id_for_message(msg).await;
-        let jmsg =
-            self.to_jsonl_message(msg, &session_id_str, parent_uuid, git_branch, entrypoint, prompt_id);
+        let jmsg = self.to_jsonl_message(
+            msg,
+            &session_id_str,
+            parent_uuid,
+            git_branch,
+            entrypoint,
+            prompt_id,
+        );
         let uuid_for_chain = jmsg.uuid.clone();
         match writer.append(&jmsg).await {
             Ok(()) => {
@@ -2749,6 +2773,51 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         )
     }
 
+    /// Schedule a best-effort startup Responses WebSocket prewarm.
+    ///
+    /// The prewarm uses the current model/profile, assembled system prompt, and
+    /// current tool list with an empty conversation history. A later first turn
+    /// can then reuse the returned `response.id` when its request is a strict
+    /// extension of this prefix. Failures are intentionally ignored.
+    pub fn spawn_startup_responses_websocket_prewarm(self: &Arc<Self>) {
+        self.abort_startup_responses_websocket_prewarm();
+        let orchestrator = Arc::clone(self);
+        let handle = tokio::spawn(async move {
+            let (model, profile) = {
+                let session = orchestrator.session.lock().await;
+                (session.model.clone(), session.model_profile.clone())
+            };
+            let system = orchestrator.build_system_prompt().await;
+            let tools = orchestrator.build_wire_tools().await;
+            let _ = orchestrator
+                .api
+                .prewarm_responses_websocket(
+                    &model,
+                    profile.as_deref(),
+                    Some(&system),
+                    Vec::new(),
+                    tools,
+                )
+                .await;
+        });
+        *self
+            .startup_responses_websocket_prewarm
+            .lock()
+            .expect("startup responses websocket prewarm") = Some(handle);
+    }
+
+    /// Abort any pending startup Responses WebSocket prewarm task.
+    pub fn abort_startup_responses_websocket_prewarm(&self) {
+        if let Some(handle) = self
+            .startup_responses_websocket_prewarm
+            .lock()
+            .expect("startup responses websocket prewarm")
+            .take()
+        {
+            handle.abort();
+        }
+    }
+
     /// Task 6 (llm-client future-work batch 5): re-map a terminal
     /// `RateLimited` error onto the limits-specific copy the API client
     /// composed from the 429's own unified headers (claude-code
@@ -2787,10 +2856,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
     /// rejected, no windows" representation, so a headerless terminal 429
     /// promotes nothing and these emit-on-change helpers are no-ops — the
     /// terminal error copy already conveys the rejection.
-    async fn emit_terminal_rate_limit_if_changed<T>(
-        &self,
-        result: &Result<T, OrchestratorError>,
-    ) {
+    async fn emit_terminal_rate_limit_if_changed<T>(&self, result: &Result<T, OrchestratorError>) {
         if let Err(
             OrchestratorError::ApiCall(LlmError::RateLimited { .. })
             | OrchestratorError::Streaming(LlmError::RateLimited { .. }),
@@ -2819,8 +2885,10 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         // ConversationOutcome is #[non_exhaustive] so future variants will
         // also log as Completed when the only existing variant is EndTurn.
         match &result {
-            Ok(ConversationOutcome::EndTurn { turn_count, .. }
-            | ConversationOutcome::StopHookPrevented { turn_count, .. }) => {
+            Ok(
+                ConversationOutcome::EndTurn { turn_count, .. }
+                | ConversationOutcome::StopHookPrevented { turn_count, .. },
+            ) => {
                 tracing::info!(
                     event = orch_events::CONVERSATION_COMPLETED,
                     turn_count = *turn_count
@@ -2894,7 +2962,12 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         let ctx = self.lifecycle_hook_ctx(false).await;
         let agg = self
             .hooks
-            .execute(HookEvent::UserPromptSubmit { prompt: prompt.to_string() }, ctx)
+            .execute(
+                HookEvent::UserPromptSubmit {
+                    prompt: prompt.to_string(),
+                },
+                ctx,
+            )
             .await;
         matches!(agg.decision, Some(hooks::response::HookDecision::Block))
     }
@@ -2953,7 +3026,12 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         let ctx = self.lifecycle_hook_ctx(stop_hook_active).await;
         let agg = self
             .hooks
-            .execute(HookEvent::Stop { reason: reason.to_string() }, ctx)
+            .execute(
+                HookEvent::Stop {
+                    reason: reason.to_string(),
+                },
+                ctx,
+            )
             .await;
         let disposition = if agg.prevent_continuation {
             StopHookDisposition::Prevent
@@ -2998,7 +3076,12 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         let ctx = self.lifecycle_hook_ctx(false).await;
         let _ = self
             .hooks
-            .execute(HookEvent::StopFailure { error: error.to_string() }, ctx)
+            .execute(
+                HookEvent::StopFailure {
+                    error: error.to_string(),
+                },
+                ctx,
+            )
             .await;
     }
 
@@ -3075,7 +3158,12 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         // cannot block compaction (see DEFERRED note re: custom_instructions).
         let _ = self
             .hooks
-            .execute(HookEvent::PreCompact { reason: trigger.to_string() }, ctx)
+            .execute(
+                HookEvent::PreCompact {
+                    reason: trigger.to_string(),
+                },
+                ctx,
+            )
             .await;
     }
 
@@ -3109,7 +3197,12 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             .join("\n")
     }
 
-    pub(crate) async fn fire_post_compact(&self, trigger: &str, summary: String, tokens_freed: u64) {
+    pub(crate) async fn fire_post_compact(
+        &self,
+        trigger: &str,
+        summary: String,
+        tokens_freed: u64,
+    ) {
         // `trigger` is part of the TS PostCompact `matchQuery` but the
         // `HookEvent::PostCompact` wire builder emits an empty `trigger` field
         // (`hooks/executor.rs:768`); accepted here for call-site symmetry with
@@ -3118,7 +3211,13 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         let ctx = self.lifecycle_hook_ctx(false).await;
         let _ = self
             .hooks
-            .execute(HookEvent::PostCompact { summary, tokens_freed }, ctx)
+            .execute(
+                HookEvent::PostCompact {
+                    summary,
+                    tokens_freed,
+                },
+                ctx,
+            )
             .await;
     }
 
@@ -3548,8 +3647,10 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         self.emit_terminal_rate_limit_if_changed(&result).await;
         let result = result.map_err(|e| self.enrich_api_error(e));
         match &result {
-            Ok(ConversationOutcome::EndTurn { turn_count, .. }
-            | ConversationOutcome::StopHookPrevented { turn_count, .. }) => {
+            Ok(
+                ConversationOutcome::EndTurn { turn_count, .. }
+                | ConversationOutcome::StopHookPrevented { turn_count, .. },
+            ) => {
                 tracing::info!(
                     event = orch_events::TURN_STREAMING_COMPLETED,
                     turn_count = *turn_count
@@ -3669,7 +3770,10 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             // simply break. This is the structural barrier that prevents a
             // Block-behavior tool on a post-interrupt continuation from ever
             // executing. `None` token → never fires → identical to before.
-            if user_cancel.as_ref().is_some_and(CancellationToken::is_cancelled) {
+            if user_cancel
+                .as_ref()
+                .is_some_and(CancellationToken::is_cancelled)
+            {
                 let cost = self.snapshot_cost_real().await;
                 self.output.emit_end_turn("aborted_streaming", &cost).await;
                 final_message_id = last_message_id;
@@ -3845,19 +3949,10 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                 // the `Stop` hooks), so the directive is discarded and the normal
                 // end-of-turn tail runs — exactly mirroring the batched path.
                 let _ = self
-                    .handle_stop_at_end(
-                        "prompt_too_long",
-                        &mut stop_hook_active,
-                        turn_count,
-                        id,
-                    )
+                    .handle_stop_at_end("prompt_too_long", &mut stop_hook_active, turn_count, id)
                     .await;
                 if self
-                    .maybe_continue_for_budget(
-                        budget.as_mut(),
-                        &mut recovery,
-                        global_turn_tokens,
-                    )
+                    .maybe_continue_for_budget(budget.as_mut(), &mut recovery, global_turn_tokens)
                     .await
                 {
                     continue;
@@ -3892,10 +3987,12 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             self.fire_message_display(&turn_id, assistant_id).await;
 
             let mut exec = match &user_cancel {
-                Some(token) => crate::streaming_executor::StreamingToolExecutor::new_with_user_cancel(
-                    self,
-                    token.clone(),
-                ),
+                Some(token) => {
+                    crate::streaming_executor::StreamingToolExecutor::new_with_user_cancel(
+                        self,
+                        token.clone(),
+                    )
+                }
                 None => crate::streaming_executor::StreamingToolExecutor::new(self),
             };
 
@@ -3946,12 +4043,13 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             .await
             {
                 Ok(p) => p,
-                Err(OrchestratorError::Streaming(ref e @ (LlmError::Overloaded { .. } | LlmError::ProviderInternal)))
-                    if !is_env_truthy(
-                        std::env::var("CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK")
-                            .as_deref()
-                            .ok(),
-                    ) =>
+                Err(OrchestratorError::Streaming(
+                    ref e @ (LlmError::Overloaded { .. } | LlmError::ProviderInternal),
+                )) if !is_env_truthy(
+                    std::env::var("CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK")
+                        .as_deref()
+                        .ok(),
+                ) =>
                 {
                     // Seed: a streaming overload counts as 1 toward the consecutive
                     // 529 budget (LlmError::Overloaded = 529).  Other in-band errors
@@ -4059,7 +4157,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                             model_ref,
                             cost_usage,
                             std::time::Duration::ZERO,
-                            0,    // retries — not yet exposed from the adapter
+                            0, // retries — not yet exposed from the adapter
                             cache_read,
                             cache_create,
                             false, // is_batch_request — streaming is never batch
@@ -4258,7 +4356,10 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             // interrupt — both of which claude-code structurally prevents by
             // returning here first. `None` token (plain `run_turn_streaming`) →
             // never fires → identical to before.
-            if user_cancel.as_ref().is_some_and(CancellationToken::is_cancelled) {
+            if user_cancel
+                .as_ref()
+                .is_some_and(CancellationToken::is_cancelled)
+            {
                 let cost = self.snapshot_cost_real().await;
                 self.output.emit_end_turn("aborted_tools", &cost).await;
                 final_message_id = assistant_id;
@@ -4388,9 +4489,8 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                         s.history.push(nudge_msg.clone());
                     }
                     self.persist_message_to_jsonl(&nudge_msg).await;
-                    recovery.max_output_tokens_recovery_count = recovery
-                        .max_output_tokens_recovery_count
-                        .saturating_add(1);
+                    recovery.max_output_tokens_recovery_count =
+                        recovery.max_output_tokens_recovery_count.saturating_add(1);
                     recovery.max_output_tokens_override = None;
                     continue;
                 }
@@ -4698,6 +4798,13 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             prompt_len = prompt.len()
         );
         if cancel.is_cancelled() {
+            self.abort_startup_responses_websocket_prewarm();
+            if let Err(err) = self.api.close_responses_websocket_session().await {
+                tracing::warn!(
+                    error = %err,
+                    "failed to close responses websocket session after pre-cancelled streaming turn"
+                );
+            }
             return Ok(TurnOutcome::Cancelled);
         }
         // DEFERRED-3: GRANULAR user-ESC interrupt — do NOT race-drop the turn.
@@ -4718,10 +4825,19 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             .try_run_turn_streaming(prompt, images, Some(cancel.clone()))
             .await;
         match r {
-            Ok(ConversationOutcome::EndTurn { turn_count, .. }
-            | ConversationOutcome::StopHookPrevented { turn_count, .. }) => {
+            Ok(
+                ConversationOutcome::EndTurn { turn_count, .. }
+                | ConversationOutcome::StopHookPrevented { turn_count, .. },
+            ) => {
                 tracing::info!(event = orch_events::TURN_STREAMING_COMPLETED, turn_count);
                 if cancel.is_cancelled() {
+                    self.abort_startup_responses_websocket_prewarm();
+                    if let Err(err) = self.api.close_responses_websocket_session().await {
+                        tracing::warn!(
+                            error = %err,
+                            "failed to close responses websocket session after cancelled streaming turn"
+                        );
+                    }
                     Ok(TurnOutcome::Cancelled)
                 } else {
                     Ok(TurnOutcome::EndTurn)
@@ -4859,8 +4975,10 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                 &self.config.model,
             )
             .map(String::from),
-            knowledge_cutoff: crate::prompt::env_meta::knowledge_cutoff_for_model(&self.config.model)
-                .map(String::from),
+            knowledge_cutoff: crate::prompt::env_meta::knowledge_cutoff_for_model(
+                &self.config.model,
+            )
+            .map(String::from),
             shell,
             // SYSPROMPT.1: `uname -sr` (TS getUnameSR) e.g. "Darwin 25.3.0",
             // falling back to "<os> <arch>" on Windows / spawn failure.
@@ -4952,9 +5070,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             .map(str::trim)
             .filter(|s| !s.is_empty())
         {
-            entries.push(format!(
-                "# userEmail\nThe user's email address is {email}."
-            ));
+            entries.push(format!("# userEmail\nThe user's email address is {email}."));
         }
         // `currentDate` is unconditional in claude-code (`currentDate: WNi(bRe())`).
         entries.push(format!(
@@ -5204,16 +5320,16 @@ As you answer the user's questions, you can use the following context:\n\
                 s.turns_since_last_reminder = 0;
                 drop(s);
                 // Read the V2 task store outside the session lock.
-                let items: Vec<(String, engine::TodoState, String)> = match &self.todo_reminder_tasks
-                {
-                    Some(provider) => provider
-                        .task_items()
-                        .await
-                        .into_iter()
-                        .map(|t| (t.id, t.status, t.subject))
-                        .collect(),
-                    None => Vec::new(),
-                };
+                let items: Vec<(String, engine::TodoState, String)> =
+                    match &self.todo_reminder_tasks {
+                        Some(provider) => provider
+                            .task_items()
+                            .await
+                            .into_iter()
+                            .map(|t| (t.id, t.status, t.subject))
+                            .collect(),
+                        None => Vec::new(),
+                    };
                 let content = tool_task::reminder::render_v2(&items);
                 Some(ConversationMessage::user(MessageId::new(), content))
             }
@@ -5697,10 +5813,7 @@ impl StreamingApiClient for NoStreamingApiClient {
         _system: Option<&str>,
         _messages: Vec<ConversationMessage>,
         _tools: Vec<serde_json::Value>,
-    ) -> Result<
-        futures::stream::BoxStream<'static, Result<LlmEvent, LlmError>>,
-        LlmError,
-    > {
+    ) -> Result<futures::stream::BoxStream<'static, Result<LlmEvent, LlmError>>, LlmError> {
         Err(LlmError::Transport {
             message: "no streaming client configured".into(),
         })
@@ -5729,19 +5842,32 @@ mod turn_recovery_tests {
         MockOutputStream, MockStreamingApiClient, NoOpPermissionGate, StaticMemoryProvider,
     };
     use crate::OrchestratorConfig;
-    use llm_client::ContentBlock as LlmContentBlock;
     use hooks::definition::{HookDefinition, HookExecutor as DefHookExecutor, HookSource};
     use hooks::events::HookEventType;
     use hooks::executor::BuiltinHookHandler;
     use hooks::registry::HookRegistry;
     use hooks::response::{HookDecision, HookOutcome, HookResponse, HookResult};
     use hooks::HookExecutorImpl;
+    use llm_client::ContentBlock as LlmContentBlock;
     use protocol::{HookId, HttpRequest, HttpResponse};
     use std::pin::Pin;
     use std::sync::Mutex as StdMutex;
     use std::time::Duration;
     use tokio::sync::RwLock;
     use traits::{HttpError, HttpTransport, OutputEvent, RuntimeError, RuntimeSpawner};
+
+    async fn wait_for_prewarm_capture(
+        api: &MockApiClient,
+    ) -> Vec<crate::test_support::MockPrewarmCall> {
+        for _ in 0..50 {
+            let captured = api.captured_prewarm().await;
+            if !captured.is_empty() {
+                return captured;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        api.captured_prewarm().await
+    }
 
     // ---- unused HTTP / Runtime stubs (Builtin hooks never touch them) ----
     struct UnusedHttp;
@@ -5750,10 +5876,7 @@ mod turn_recovery_tests {
         async fn request(&self, _r: HttpRequest) -> Result<HttpResponse, HttpError> {
             Err(HttpError::InvalidRequest("unused".into()))
         }
-        async fn stream_sse(
-            &self,
-            _r: HttpRequest,
-        ) -> Result<traits::http::SseStream, HttpError> {
+        async fn stream_sse(&self, _r: HttpRequest) -> Result<traits::http::SseStream, HttpError> {
             Err(HttpError::InvalidRequest("unused".into()))
         }
     }
@@ -5768,10 +5891,7 @@ mod turn_recovery_tests {
             Err(RuntimeError::Internal("unused".into()))
         }
         async fn sleep(&self, _d: Duration) {}
-        async fn cancel(
-            &self,
-            _h: &traits::BackgroundTaskHandle,
-        ) -> Result<(), RuntimeError> {
+        async fn cancel(&self, _h: &traits::BackgroundTaskHandle) -> Result<(), RuntimeError> {
             Ok(())
         }
     }
@@ -5792,7 +5912,10 @@ mod turn_recovery_tests {
                     self.log.lock().unwrap().push(format!("Stop:{reason}"));
                 }
                 HookEvent::StopFailure { error } => {
-                    self.log.lock().unwrap().push(format!("StopFailure:{error}"));
+                    self.log
+                        .lock()
+                        .unwrap()
+                        .push(format!("StopFailure:{error}"));
                 }
                 _ => {}
             }
@@ -5961,7 +6084,10 @@ mod turn_recovery_tests {
             .run_turn_streaming("go")
             .await
             .expect("turn ends without a hard error");
-        assert!(matches!(outcome, ConversationOutcome::EndTurn { .. }), "{outcome:?}");
+        assert!(
+            matches!(outcome, ConversationOutcome::EndTurn { .. }),
+            "{outcome:?}"
+        );
 
         // The stream was NEVER opened — the preempt short-circuited the API call.
         assert!(
@@ -6021,7 +6147,9 @@ mod turn_recovery_tests {
             "byte-exact context-window-exceeded API error must be surfaced; events={events:#?}"
         );
         assert!(
-            events.iter().any(|e| matches!(e, OutputEvent::EndTurn { stop_reason, .. }
+            events
+                .iter()
+                .any(|e| matches!(e, OutputEvent::EndTurn { stop_reason, .. }
                 if stop_reason == "model_context_window_exceeded")),
             "the turn must end with stop_reason model_context_window_exceeded; events={events:#?}"
         );
@@ -6065,11 +6193,15 @@ mod turn_recovery_tests {
         let events = output.snapshot().await;
         let expected = "API Error: Opus 4.8 has safety measures that flagged something in this session (https://www.anthropic.com/legal/aup). This sometimes happens with safe, normal conversations. Claude Code can't respond to this request with Opus 4.8.\n\nTry rephrasing the request in a new session or change your model.\n\nLearn more: https://support.claude.com/en/articles/15363606";
         assert!(
-            events.iter().any(|e| matches!(e, OutputEvent::Text { text } if text == expected)),
+            events
+                .iter()
+                .any(|e| matches!(e, OutputEvent::Text { text } if text == expected)),
             "byte-exact U2e refusal message must be surfaced; events={events:#?}"
         );
         assert!(
-            events.iter().any(|e| matches!(e, OutputEvent::EndTurn { stop_reason, .. }
+            events
+                .iter()
+                .any(|e| matches!(e, OutputEvent::EndTurn { stop_reason, .. }
                 if stop_reason == "refusal")),
             "the turn must end with stop_reason refusal; events={events:#?}"
         );
@@ -6114,6 +6246,69 @@ mod turn_recovery_tests {
             !seen.iter().any(|s| s.starts_with("Stop:")),
             "the normal Stop hooks must NOT fire on an api-error end: {seen:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn startup_responses_websocket_prewarm_uses_current_model_profile_system_and_empty_history(
+    ) {
+        let api = Arc::new(MockApiClient::new(vec![]));
+        let orch = Arc::new(ConversationOrchestrator::new(
+            OrchestratorConfig {
+                model: "gpt-5".to_string(),
+                ..OrchestratorConfig::default()
+            },
+            api.clone(),
+            Arc::new(ToolRegistry::new()),
+            noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            std::env::temp_dir(),
+        ));
+        {
+            let mut session = orch.session.lock().await;
+            session.model_profile = Some("openai".to_string());
+        }
+
+        orch.spawn_startup_responses_websocket_prewarm();
+
+        let captured = wait_for_prewarm_capture(&api).await;
+        assert_eq!(captured.len(), 1);
+        let call = &captured[0];
+        assert_eq!(call.model, "gpt-5");
+        assert_eq!(call.profile.as_deref(), Some("openai"));
+        assert!(
+            call.messages.is_empty(),
+            "startup prewarm uses empty history"
+        );
+        assert!(
+            call.system
+                .as_deref()
+                .is_some_and(|system| !system.is_empty()),
+            "startup prewarm must use the assembled system prompt"
+        );
+    }
+
+    #[tokio::test]
+    async fn clear_session_aborts_startup_prewarm_and_closes_responses_websocket_session() {
+        let api = Arc::new(MockApiClient::new(vec![]));
+        let orch = Arc::new(ConversationOrchestrator::new(
+            OrchestratorConfig::default(),
+            api.clone(),
+            Arc::new(ToolRegistry::new()),
+            noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            std::env::temp_dir(),
+        ));
+
+        orch.spawn_startup_responses_websocket_prewarm();
+        <ConversationOrchestrator as traits::OrchestratorHandle>::clear_session(&*orch)
+            .await
+            .expect("clear session");
+
+        assert_eq!(api.close_responses_ws_count().await, 1);
     }
 
     // -------- SESSIONSTART.CTX — SessionStart additionalContext consumption ----
@@ -6205,7 +6400,10 @@ mod turn_recovery_tests {
         };
         let et = || {
             mock_message_response(
-                vec![LlmContentBlock::Text { text: "done".into(), cache_control: None }],
+                vec![LlmContentBlock::Text {
+                    text: "done".into(),
+                    cache_control: None,
+                }],
                 Some("end_turn"),
             )
         };
@@ -6230,7 +6428,10 @@ mod turn_recovery_tests {
         );
 
         let outcome = orch.run_turn("go").await.expect("turn ok");
-        assert!(matches!(outcome, ConversationOutcome::EndTurn { .. }), "{outcome:?}");
+        assert!(
+            matches!(outcome, ConversationOutcome::EndTurn { .. }),
+            "{outcome:?}"
+        );
         assert_eq!(
             api.captured_msgs().await.len(),
             7,
@@ -6362,7 +6563,11 @@ mod output_style_reminder_tests {
             std::env::temp_dir(),
         );
         assert_eq!(
-            text_of(&orch.output_style_reminder_message().expect("Learning resolves")),
+            text_of(
+                &orch
+                    .output_style_reminder_message()
+                    .expect("Learning resolves")
+            ),
             LEARNING_REMINDER
         );
     }
@@ -6397,8 +6602,9 @@ mod output_style_reminder_tests {
     async fn batched_active_style_appends_transient_reminder_not_persisted() {
         let dir = tempfile::tempdir().expect("tempdir");
         let session_path = dir.path().join("session.jsonl");
-        let fs: Arc<dyn traits::FileSystem> =
-            Arc::new(platform_posix::fs::PosixFileSystem::new(dir.path().to_path_buf()));
+        let fs: Arc<dyn traits::FileSystem> = Arc::new(platform_posix::fs::PosixFileSystem::new(
+            dir.path().to_path_buf(),
+        ));
         let writer = Arc::new(session::jsonl::writer::JsonlWriter::new(
             session_path.clone(),
             fs,
@@ -6432,8 +6638,16 @@ mod output_style_reminder_tests {
         let outgoing = api.captured_msgs().await;
         assert_eq!(outgoing.len(), 1, "exactly one batched API call");
         let sent = &outgoing[0];
-        assert_eq!(sent.len(), 3, "additionalContext + prompt + reminder; got {sent:?}");
-        assert!(is_additional_context(&sent[0]), "leading meta; got {:?}", sent[0]);
+        assert_eq!(
+            sent.len(),
+            3,
+            "additionalContext + prompt + reminder; got {sent:?}"
+        );
+        assert!(
+            is_additional_context(&sent[0]),
+            "leading meta; got {:?}",
+            sent[0]
+        );
         assert_eq!(text_of(&sent[1]), "user prompt body");
         assert!(
             is_reminder(&sent[2], EXPLANATORY_REMINDER),
@@ -6445,7 +6659,9 @@ mod output_style_reminder_tests {
         let history = orch.session.lock().await.history.clone();
         assert_eq!(history.len(), 2, "user + assistant only; got {history:?}");
         assert!(
-            history.iter().all(|m| !is_reminder(m, EXPLANATORY_REMINDER)),
+            history
+                .iter()
+                .all(|m| !is_reminder(m, EXPLANATORY_REMINDER)),
             "the reminder must never enter stored history; got {history:?}"
         );
         assert_eq!(text_of(&history[0]), "user prompt body");
@@ -6488,12 +6704,22 @@ mod output_style_reminder_tests {
         assert_eq!(outgoing.len(), 1);
         // No output-style reminder; the only prepended message is the leading
         // additional-context meta (always present via `# currentDate`).
-        assert_eq!(outgoing[0].len(), 2, "additionalContext + prompt; got {:?}", outgoing[0]);
-        assert!(is_additional_context(&outgoing[0][0]), "leading meta; got {:?}", outgoing[0][0]);
+        assert_eq!(
+            outgoing[0].len(),
+            2,
+            "additionalContext + prompt; got {:?}",
+            outgoing[0]
+        );
+        assert!(
+            is_additional_context(&outgoing[0][0]),
+            "leading meta; got {:?}",
+            outgoing[0][0]
+        );
         assert_eq!(text_of(&outgoing[0][1]), "just the prompt");
         assert!(
-            !outgoing[0].iter().any(|m| is_reminder(m, EXPLANATORY_REMINDER)
-                || is_reminder(m, LEARNING_REMINDER)),
+            !outgoing[0]
+                .iter()
+                .any(|m| is_reminder(m, EXPLANATORY_REMINDER) || is_reminder(m, LEARNING_REMINDER)),
             "no output-style reminder on the default path; got {:?}",
             outgoing[0]
         );
@@ -6505,8 +6731,9 @@ mod output_style_reminder_tests {
     async fn streaming_active_style_appends_transient_reminder_not_persisted() {
         let dir = tempfile::tempdir().expect("tempdir");
         let session_path = dir.path().join("session.jsonl");
-        let fs: Arc<dyn traits::FileSystem> =
-            Arc::new(platform_posix::fs::PosixFileSystem::new(dir.path().to_path_buf()));
+        let fs: Arc<dyn traits::FileSystem> = Arc::new(platform_posix::fs::PosixFileSystem::new(
+            dir.path().to_path_buf(),
+        ));
         let writer = Arc::new(session::jsonl::writer::JsonlWriter::new(
             session_path.clone(),
             fs,
@@ -6542,8 +6769,16 @@ mod output_style_reminder_tests {
         let calls = streaming.captured_calls().await;
         assert_eq!(calls.len(), 1, "exactly one streaming call");
         let sent = &calls[0].messages;
-        assert_eq!(sent.len(), 3, "additionalContext + prompt + reminder; got {sent:?}");
-        assert!(is_additional_context(&sent[0]), "leading meta; got {:?}", sent[0]);
+        assert_eq!(
+            sent.len(),
+            3,
+            "additionalContext + prompt + reminder; got {sent:?}"
+        );
+        assert!(
+            is_additional_context(&sent[0]),
+            "leading meta; got {:?}",
+            sent[0]
+        );
         assert_eq!(text_of(&sent[1]), "streaming prompt");
         assert!(
             is_reminder(&sent[2], LEARNING_REMINDER),
@@ -6604,7 +6839,11 @@ mod output_style_reminder_tests {
             "additionalContext + prompt; got {:?}",
             calls[0].messages
         );
-        assert!(is_additional_context(&calls[0].messages[0]), "leading meta; got {:?}", calls[0].messages[0]);
+        assert!(
+            is_additional_context(&calls[0].messages[0]),
+            "leading meta; got {:?}",
+            calls[0].messages[0]
+        );
         assert_eq!(text_of(&calls[0].messages[1]), "only prompt");
     }
 }
@@ -6689,12 +6928,13 @@ You should not respond to this context unless it is highly relevant to your task
         let i_md = body.find("# claudeMd\n").expect("claudeMd key");
         let i_email = body.find("# userEmail\n").expect("userEmail key");
         let i_date = body.find("# currentDate\n").expect("currentDate key");
-        assert!(i_md < i_email && i_email < i_date, "key order claudeMd<userEmail<currentDate");
+        assert!(
+            i_md < i_email && i_email < i_date,
+            "key order claudeMd<userEmail<currentDate"
+        );
 
         // claudeMd value = the assembled memory block (preamble + Contents).
-        assert!(body.contains(
-            "# claudeMd\nCodebase and user instructions are shown below."
-        ));
+        assert!(body.contains("# claudeMd\nCodebase and user instructions are shown below."));
         assert!(body.contains("Contents of /proj/CLAUDE.md"));
         assert!(body.contains("MD BODY"));
         // userEmail value.
@@ -6708,7 +6948,10 @@ You should not respond to this context unless it is highly relevant to your task
     async fn omits_claude_md_and_email_when_absent_keeps_date() {
         // Empty memory + no email → only `# currentDate` remains.
         let orch = orch_with(Arc::new(StaticMemoryProvider::empty()), None);
-        let msg = orch.additional_context_message().await.expect("date always present");
+        let msg = orch
+            .additional_context_message()
+            .await
+            .expect("date always present");
         let body = text(&msg);
         assert!(!body.contains("# claudeMd"));
         assert!(!body.contains("# userEmail"));
@@ -6749,10 +6992,10 @@ You should not respond to this context unless it is highly relevant to your task
 mod skill_model_override_tests {
     use super::*;
     use crate::test_support::{
-        content_block_start_text, content_block_start_tool_use, content_block_stop, input_json_delta,
-        message_delta_stop, message_start, message_stop, mock_message_response, noop_hook_executor,
-        text_delta, MockApiClient, MockOutputStream, MockStreamingApiClient, NoOpPermissionGate,
-        StaticMemoryProvider,
+        content_block_start_text, content_block_start_tool_use, content_block_stop,
+        input_json_delta, message_delta_stop, message_start, message_stop, mock_message_response,
+        noop_hook_executor, text_delta, MockApiClient, MockOutputStream, MockStreamingApiClient,
+        NoOpPermissionGate, StaticMemoryProvider,
     };
     use crate::OrchestratorConfig;
     use llm_client::ContentBlock as LlmContentBlock;
@@ -6780,8 +7023,9 @@ mod skill_model_override_tests {
             "ModelSwitch"
         }
         fn input_schema(&self) -> &serde_json::Value {
-            static SCHEMA: once_cell::sync::Lazy<serde_json::Value> =
-                once_cell::sync::Lazy::new(|| serde_json::json!({ "type": "object", "properties": {} }));
+            static SCHEMA: once_cell::sync::Lazy<serde_json::Value> = once_cell::sync::Lazy::new(
+                || serde_json::json!({ "type": "object", "properties": {} }),
+            );
             &SCHEMA
         }
         fn is_enabled(&self, _ctx: &ToolStaticContext) -> bool {
@@ -6858,8 +7102,9 @@ mod skill_model_override_tests {
             "Plain"
         }
         fn input_schema(&self) -> &serde_json::Value {
-            static SCHEMA: once_cell::sync::Lazy<serde_json::Value> =
-                once_cell::sync::Lazy::new(|| serde_json::json!({ "type": "object", "properties": {} }));
+            static SCHEMA: once_cell::sync::Lazy<serde_json::Value> = once_cell::sync::Lazy::new(
+                || serde_json::json!({ "type": "object", "properties": {} }),
+            );
             &SCHEMA
         }
         fn is_enabled(&self, _ctx: &ToolStaticContext) -> bool {
@@ -7099,7 +7344,9 @@ mod skill_model_override_tests {
         );
         let calls = streaming.captured_calls().await;
         assert!(
-            calls.iter().all(|c| c.model == crate::config::DEFAULT_MODEL),
+            calls
+                .iter()
+                .all(|c| c.model == crate::config::DEFAULT_MODEL),
             "every streaming call used the unchanged default model"
         );
     }
@@ -7246,14 +7493,25 @@ mod task7_midstream_fallback_tests {
 
         // (a) Stream was called exactly once — NOT replayed.
         let stream_calls = streaming.captured_calls().await;
-        assert_eq!(stream_calls.len(), 1, "(a) stream must be called exactly once");
+        assert_eq!(
+            stream_calls.len(),
+            1,
+            "(a) stream must be called exactly once"
+        );
 
         // (b) A fresh non-streaming messages_create_seeded was called.
         let seeds = api.captured_seeds().await;
-        assert_eq!(seeds.len(), 1, "(b) messages_create_seeded must be called exactly once");
+        assert_eq!(
+            seeds.len(),
+            1,
+            "(b) messages_create_seeded must be called exactly once"
+        );
 
         // (c) The seed is 1 (the streaming 529 counts toward the consecutive 529 budget).
-        assert_eq!(seeds[0], 1, "(c) seed must be 1 for a streaming Overloaded error");
+        assert_eq!(
+            seeds[0], 1,
+            "(c) seed must be 1 for a streaming Overloaded error"
+        );
 
         // (d) The final turn outcome is built from the non-streaming reply only.
         // The output must contain "fallback body" (from the non-streaming response),
@@ -7344,7 +7602,10 @@ mod task7_midstream_fallback_tests {
         std::env::remove_var(DISABLE_FALLBACK_ENV);
 
         // The error MUST propagate — no fallback.
-        assert!(result.is_err(), "error must propagate when fallback is disabled");
+        assert!(
+            result.is_err(),
+            "error must propagate when fallback is disabled"
+        );
         // No non-streaming call was made.
         assert!(
             api.captured_seeds().await.is_empty(),
@@ -7427,9 +7688,11 @@ mod enrich_rate_limited_error_tests {
     #[test]
     fn rate_limited_without_copy_passes_through() {
         let api = enrich_rate_limited_error(OrchestratorError::ApiCall(rate_limited()), None);
-        assert!(matches!(api, OrchestratorError::ApiCall(LlmError::RateLimited { .. })));
-        let stream =
-            enrich_rate_limited_error(OrchestratorError::Streaming(rate_limited()), None);
+        assert!(matches!(
+            api,
+            OrchestratorError::ApiCall(LlmError::RateLimited { .. })
+        ));
+        let stream = enrich_rate_limited_error(OrchestratorError::Streaming(rate_limited()), None);
         assert!(matches!(
             stream,
             OrchestratorError::Streaming(LlmError::RateLimited { .. })
@@ -7686,7 +7949,10 @@ mod skill_listing_reminder_tests {
             .await
             .expect("turn-1 new-only")
             .text_content();
-        assert!(t1.contains("- gamma:"), "turn-1 must contain the new skill: {t1}");
+        assert!(
+            t1.contains("- gamma:"),
+            "turn-1 must contain the new skill: {t1}"
+        );
         assert!(
             !t1.contains("- alpha:"),
             "turn-1 must NOT re-emit the already-sent skill: {t1}"
@@ -7741,9 +8007,7 @@ mod skill_listing_reminder_tests {
     /// (the second drain returns empty), mirroring the registry's
     /// take-mark-evict semantics so the consume-once invariant is testable
     /// without a real registry.
-    struct OnceTaskNotifications(
-        std::sync::Mutex<Vec<traits::task_registry::TaskNotification>>,
-    );
+    struct OnceTaskNotifications(std::sync::Mutex<Vec<traits::task_registry::TaskNotification>>);
     #[async_trait::async_trait]
     impl crate::prompt::task_notification::TaskNotificationProvider for OnceTaskNotifications {
         async fn take_pending_task_notifications(
@@ -7827,9 +8091,7 @@ mod agent_listing_reminder_tests {
         StaticMemoryProvider,
     };
     use crate::OrchestratorConfig;
-    use agent::{
-        AgentDefinition, AgentModel, AgentPermissionMode, AgentSource, AgentToolPolicy,
-    };
+    use agent::{AgentDefinition, AgentModel, AgentPermissionMode, AgentSource, AgentToolPolicy};
     use std::sync::Arc;
     use tool_api::context::ToolUseContext;
     use tool_api::progress::ToolProgressSender;
@@ -7980,7 +8242,9 @@ mod agent_listing_reminder_tests {
         let catalog = Arc::new(tokio::sync::RwLock::new(vec![agent_def(
             "general-purpose",
             "anything",
-            AgentToolPolicy::All { use_exact_tools: false },
+            AgentToolPolicy::All {
+                use_exact_tools: false,
+            },
         )]));
         let orch = orch_with(reg_with_agent_tool(), Some(catalog));
         assert!(
@@ -8010,7 +8274,9 @@ mod agent_listing_reminder_tests {
         let catalog = Arc::new(tokio::sync::RwLock::new(vec![agent_def(
             "general-purpose",
             "anything",
-            AgentToolPolicy::All { use_exact_tools: false },
+            AgentToolPolicy::All {
+                use_exact_tools: false,
+            },
         )]));
         // Empty registry — the Agent tool is not present this turn.
         let orch = orch_with(ToolRegistry::new(), Some(catalog));
@@ -8064,7 +8330,9 @@ mod agent_listing_reminder_tests {
         let catalog = Arc::new(tokio::sync::RwLock::new(vec![agent_def(
             "custom-agent",
             "a project agent",
-            AgentToolPolicy::All { use_exact_tools: false },
+            AgentToolPolicy::All {
+                use_exact_tools: false,
+            },
         )]));
         let orch = orch_with(reg_with_agent_tool(), Some(catalog));
 
@@ -8086,7 +8354,9 @@ mod agent_listing_reminder_tests {
         let catalog = Arc::new(tokio::sync::RwLock::new(vec![agent_def(
             "alpha-agent",
             "the alpha agent",
-            AgentToolPolicy::All { use_exact_tools: false },
+            AgentToolPolicy::All {
+                use_exact_tools: false,
+            },
         )]));
         let orch = orch_with(reg_with_agent_tool(), Some(catalog.clone()));
 
@@ -8429,10 +8699,15 @@ mod relevant_memory_reminder_tests {
         let text = msg.text_content();
         assert!(text.starts_with("<system-reminder>\n"), "got: {text}");
         assert!(
-            text.contains("Retrieved for possible relevance \u{2014} use only if it actually applies"),
+            text.contains(
+                "Retrieved for possible relevance \u{2014} use only if it actually applies"
+            ),
             "idx-0 preamble missing: {text}"
         );
-        assert!(text.contains("Memory: /m/a.md:\n\nUSE FD NOT FIND"), "got: {text}");
+        assert!(
+            text.contains("Memory: /m/a.md:\n\nUSE FD NOT FIND"),
+            "got: {text}"
+        );
         assert!(text.ends_with("\n</system-reminder>"), "got: {text}");
     }
 
@@ -8487,7 +8762,10 @@ mod relevant_memory_reminder_tests {
             .expect("the fresh memory must surface")
             .text_content();
         assert!(text.contains("Memory: /m/new.md:\n\nNEW"), "got: {text}");
-        assert!(!text.contains("/m/seen.md"), "already-read memory leaked: {text}");
+        assert!(
+            !text.contains("/m/seen.md"),
+            "already-read memory leaked: {text}"
+        );
     }
 }
 
@@ -8532,8 +8810,15 @@ mod refusal_fallback_tests {
     async fn no_fallback_configured_is_a_strict_noop() {
         let (orch, out) = orch_with_refusal_fallback(None);
         let before = orch.session.lock().await.model.clone();
-        assert!(!orch.maybe_swap_to_refusal_fallback().await, "no fallback → false");
-        assert_eq!(orch.session.lock().await.model, before, "model must NOT change");
+        assert!(
+            !orch.maybe_swap_to_refusal_fallback().await,
+            "no fallback → false"
+        );
+        assert_eq!(
+            orch.session.lock().await.model,
+            before,
+            "model must NOT change"
+        );
         assert!(out.text_events().await.is_empty(), "no warning emitted");
         assert!(
             !orch
@@ -8547,7 +8832,10 @@ mod refusal_fallback_tests {
     async fn swaps_once_then_latches() {
         let (orch, _out) = orch_with_refusal_fallback(Some("claude-sonnet-4-6"));
         // First refusal → swap.
-        assert!(orch.maybe_swap_to_refusal_fallback().await, "first call swaps");
+        assert!(
+            orch.maybe_swap_to_refusal_fallback().await,
+            "first call swaps"
+        );
         assert_eq!(
             orch.session.lock().await.model,
             "claude-sonnet-4-6",
@@ -8613,8 +8901,7 @@ mod persist_with_parent_tests {
         dir: &std::path::Path,
         path: std::path::PathBuf,
     ) -> ConversationOrchestrator {
-        let fs: Arc<dyn traits::FileSystem> =
-            Arc::new(PosixFileSystem::new(dir.to_path_buf()));
+        let fs: Arc<dyn traits::FileSystem> = Arc::new(PosixFileSystem::new(dir.to_path_buf()));
         let writer = Arc::new(session::jsonl::writer::JsonlWriter::new(path, fs));
         ConversationOrchestrator::new(
             OrchestratorConfig::default(),
@@ -8658,7 +8945,11 @@ mod persist_with_parent_tests {
 
         // Capture the assistant line's uuid from disk.
         let lines_after_asst = read_jsonl(&session_path);
-        assert_eq!(lines_after_asst.len(), 1, "expected 1 line (the assistant message)");
+        assert_eq!(
+            lines_after_asst.len(),
+            1,
+            "expected 1 line (the assistant message)"
+        );
         let assistant_uuid = lines_after_asst[0].uuid.clone();
 
         // Persist a tool-result user message via the override variant, passing
@@ -8697,8 +8988,7 @@ mod persist_with_parent_tests {
         let orch = orch_with_writer(dir.path(), session_path.clone());
 
         // 1. Persist a user message (no override).
-        let user_msg =
-            ConversationMessage::user(protocol::MessageId::new(), "user prompt".into());
+        let user_msg = ConversationMessage::user(protocol::MessageId::new(), "user prompt".into());
         orch.persist_message_to_jsonl(&user_msg).await;
         let lines = read_jsonl(&session_path);
         let user_uuid = lines[0].uuid.clone();
@@ -8721,11 +9011,8 @@ mod persist_with_parent_tests {
         //    last_jsonl_uuid which currently holds the assistant uuid).
         let tool_result_msg =
             ConversationMessage::user(protocol::MessageId::new(), "tool result".into());
-        orch.persist_message_to_jsonl_with_parent(
-            &tool_result_msg,
-            Some(user_uuid.clone()),
-        )
-        .await;
+        orch.persist_message_to_jsonl_with_parent(&tool_result_msg, Some(user_uuid.clone()))
+            .await;
 
         let lines = read_jsonl(&session_path);
         assert_eq!(lines.len(), 3, "expected 3 lines");
@@ -8748,18 +9035,19 @@ mod persist_with_parent_tests {
         let session_path = dir.path().join("session.jsonl");
         let orch = orch_with_writer(dir.path(), session_path.clone());
 
-        let msg1 =
-            ConversationMessage::user(protocol::MessageId::new(), "first message".into());
+        let msg1 = ConversationMessage::user(protocol::MessageId::new(), "first message".into());
         orch.persist_message_to_jsonl_with_parent(&msg1, None).await;
 
-        let msg2 =
-            ConversationMessage::user(protocol::MessageId::new(), "second message".into());
+        let msg2 = ConversationMessage::user(protocol::MessageId::new(), "second message".into());
         orch.persist_message_to_jsonl_with_parent(&msg2, None).await;
 
         let lines = read_jsonl(&session_path);
         assert_eq!(lines.len(), 2, "expected 2 JSONL lines");
         // First entry: root of chain → parent_uuid is None.
-        assert_eq!(lines[0].parent_uuid, None, "first entry must have no parent");
+        assert_eq!(
+            lines[0].parent_uuid, None,
+            "first entry must have no parent"
+        );
         // Second entry: must chain off the first.
         assert_eq!(
             lines[1].parent_uuid.as_deref(),
@@ -8781,15 +9069,13 @@ mod persist_with_parent_tests {
         let orch = orch_with_writer(dir.path(), session_path.clone());
 
         // 1. First message (no override) — root.
-        let msg1 =
-            ConversationMessage::user(protocol::MessageId::new(), "root".into());
+        let msg1 = ConversationMessage::user(protocol::MessageId::new(), "root".into());
         orch.persist_message_to_jsonl(&msg1).await;
         let lines = read_jsonl(&session_path);
         let root_uuid = lines[0].uuid.clone();
 
         // 2. Overridden message pointing back to root — simulates a tool result.
-        let msg2 =
-            ConversationMessage::user(protocol::MessageId::new(), "overridden".into());
+        let msg2 = ConversationMessage::user(protocol::MessageId::new(), "overridden".into());
         orch.persist_message_to_jsonl_with_parent(&msg2, Some(root_uuid.clone()))
             .await;
         let lines = read_jsonl(&session_path);
@@ -8803,8 +9089,7 @@ mod persist_with_parent_tests {
 
         // 3. Third message (no override) — must chain off msg2 (the overridden line),
         //    not off msg1 (root). This confirms last_jsonl_uuid was advanced.
-        let msg3 =
-            ConversationMessage::user(protocol::MessageId::new(), "subsequent".into());
+        let msg3 = ConversationMessage::user(protocol::MessageId::new(), "subsequent".into());
         orch.persist_message_to_jsonl(&msg3).await;
         let lines = read_jsonl(&session_path);
         assert_eq!(lines.len(), 3, "expected 3 JSONL lines");
@@ -8979,8 +9264,10 @@ mod persist_with_parent_tests {
 
         let lines = read_jsonl(&session_path);
         // (c) THREE single-block assistant lines.
-        let asst_lines: Vec<&JsonlMessage> =
-            lines.iter().filter(|l| l.message_type == "assistant").collect();
+        let asst_lines: Vec<&JsonlMessage> = lines
+            .iter()
+            .filter(|l| l.message_type == "assistant")
+            .collect();
         assert_eq!(
             asst_lines.len(),
             3,
@@ -9020,7 +9307,11 @@ mod persist_with_parent_tests {
         // (b) three DISTINCT top-level uuids.
         let uuids: std::collections::HashSet<&str> =
             asst_lines.iter().map(|l| l.uuid.as_str()).collect();
-        assert_eq!(uuids.len(), 3, "the three lines must have distinct top-level uuids");
+        assert_eq!(
+            uuids.len(),
+            3,
+            "the three lines must have distinct top-level uuids"
+        );
 
         // map must hold A and B -> their respective line uuids (text block none).
         let a_uuid = map.get(&id_a).expect("A in map").clone();
@@ -9087,9 +9378,7 @@ mod persist_with_parent_tests {
 #[cfg(test)]
 mod prefix_overflow_block_count_tests {
     use super::count_document_and_image_blocks;
-    use protocol::{
-        ContentBlock, ConversationMessage, DocumentSource, ImageSource, MessageId,
-    };
+    use protocol::{ContentBlock, ConversationMessage, DocumentSource, ImageSource, MessageId};
 
     fn image_block() -> ContentBlock {
         ContentBlock::Image {
@@ -9140,7 +9429,10 @@ mod prefix_overflow_block_count_tests {
 
     #[test]
     fn counts_zero_when_no_media_blocks() {
-        let msgs = vec![ConversationMessage::user(MessageId::new(), "plain text".into())];
+        let msgs = vec![ConversationMessage::user(
+            MessageId::new(),
+            "plain text".into(),
+        )];
         assert_eq!(count_document_and_image_blocks(&msgs), (0, 0));
     }
 }
@@ -9156,7 +9448,9 @@ mod pumped_visible_text_tests {
     use protocol::ContentBlock;
 
     fn text(s: &str) -> ContentBlock {
-        ContentBlock::Text { text: s.to_string() }
+        ContentBlock::Text {
+            text: s.to_string(),
+        }
     }
     fn thinking(s: &str) -> ContentBlock {
         ContentBlock::Thinking {
@@ -9187,7 +9481,10 @@ mod pumped_visible_text_tests {
 
     #[test]
     fn thinking_plus_real_text_is_visible() {
-        assert!(pumped_has_visible_text(&[thinking("reasoning"), text("answer")]));
+        assert!(pumped_has_visible_text(&[
+            thinking("reasoning"),
+            text("answer")
+        ]));
     }
 }
 
@@ -9366,7 +9663,10 @@ mod todo_reminder_tests {
             .await;
         {
             let s = orch.session.lock().await;
-            assert_eq!(s.turns_since_last_todo_write, 0, "TodoWrite resets write ctr");
+            assert_eq!(
+                s.turns_since_last_todo_write, 0,
+                "TodoWrite resets write ctr"
+            );
             assert_eq!(s.turns_since_last_reminder, 7, "reminder ctr untouched");
         }
         // A non-qualifying tool (Read) does NOT reset.
@@ -9374,7 +9674,8 @@ mod todo_reminder_tests {
             let mut s = orch.session.lock().await;
             s.turns_since_last_todo_write = 5;
         }
-        orch.note_todo_reminder_tool_call(&["Read".to_string()]).await;
+        orch.note_todo_reminder_tool_call(&["Read".to_string()])
+            .await;
         assert_eq!(orch.session.lock().await.turns_since_last_todo_write, 5);
         std::env::remove_var("CLAUDE_CODE_ENABLE_TASKS");
     }
@@ -9550,7 +9851,9 @@ mod todo_reminder_tests {
             "got: {text}"
         );
         assert!(
-            text.ends_with("\n\nHere are the existing tasks:\n\n#1. [completed] alpha\n#2. [pending] beta"),
+            text.ends_with(
+                "\n\nHere are the existing tasks:\n\n#1. [completed] alpha\n#2. [pending] beta"
+            ),
             "got: {text:?}"
         );
         std::env::remove_var("CLAUDE_CODE_ENABLE_TASKS");

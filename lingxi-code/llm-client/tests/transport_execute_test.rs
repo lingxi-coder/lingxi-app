@@ -71,6 +71,9 @@ fn anthropic_client() -> DefaultLlmClient {
             pricing: PricingConfig::default(),
             signing: None,
             azure: None,
+            supports_websockets: false,
+            supports_websocket_compression: false,
+            websocket_connect_timeout_ms: None,
         }],
     })
     .expect("client")
@@ -78,36 +81,55 @@ fn anthropic_client() -> DefaultLlmClient {
 
 #[tokio::test]
 async fn execute_sends_authenticated_request_and_decodes_response() {
-    let transport = FakeTransport::returning(ProviderResponse::json(200, serde_json::json!({
-        "id": "msg_1",
-        "model": "claude-sonnet-4-20250514",
-        "content": [{"type":"text","text":"hi"}],
-        "stop_reason": "end_turn",
-        "usage": {"input_tokens": 9, "output_tokens": 3}
-    })));
+    let transport = FakeTransport::returning(ProviderResponse::json(
+        200,
+        serde_json::json!({
+            "id": "msg_1",
+            "model": "claude-sonnet-4-20250514",
+            "content": [{"type":"text","text":"hi"}],
+            "stop_reason": "end_turn",
+            "usage": {"input_tokens": 9, "output_tokens": 3}
+        }),
+    ));
     let client = anthropic_client();
 
     let response = client
-        .execute(&LlmRequest::new("claude").with_user_text("hello"), &transport)
+        .execute(
+            &LlmRequest::new("claude").with_user_text("hello"),
+            &transport,
+        )
         .await
         .expect("response");
 
-    assert!(matches!(response.content.as_slice(), [ContentBlock::Text { text, .. }] if text == "hi"));
+    assert!(
+        matches!(response.content.as_slice(), [ContentBlock::Text { text, .. }] if text == "hi")
+    );
     assert_eq!(response.stop_reason.as_deref(), Some("end_turn"));
     assert_eq!(response.usage.billable_tokens.input, 9);
 
-    let seen = transport.seen.lock().expect("seen lock").clone().expect("request sent");
+    let seen = transport
+        .seen
+        .lock()
+        .expect("seen lock")
+        .clone()
+        .expect("request sent");
     assert_eq!(seen.url, "https://api.anthropic.com/v1/messages");
-    assert_eq!(seen.headers.get("x-api-key").map(String::as_str), Some("transport-key"));
+    assert_eq!(
+        seen.headers.get("x-api-key").map(String::as_str),
+        Some("transport-key")
+    );
     assert_eq!(seen.body_json["model"], "claude-sonnet-4-20250514");
 }
 
 #[tokio::test]
 async fn execute_routes_provider_errors_through_taxonomy() {
-    let mut error_response = ProviderResponse::json(429, serde_json::json!({
-        "type": "error",
-        "error": {"type": "rate_limit_error", "message": "slow down"}
-    }));
+    let mut error_response = ProviderResponse::json(
+        429,
+        serde_json::json!({
+            "type": "error",
+            "error": {"type": "rate_limit_error", "message": "slow down"}
+        }),
+    );
     error_response
         .headers
         .insert("retry-after".to_string(), "7".to_string());
@@ -115,7 +137,10 @@ async fn execute_routes_provider_errors_through_taxonomy() {
     let client = anthropic_client();
 
     let error = client
-        .execute(&LlmRequest::new("claude").with_user_text("hello"), &transport)
+        .execute(
+            &LlmRequest::new("claude").with_user_text("hello"),
+            &transport,
+        )
         .await
         .expect_err("must map to taxonomy");
 
@@ -155,7 +180,10 @@ async fn execute_propagates_transport_failures() {
     let client = anthropic_client();
 
     let error = client
-        .execute(&LlmRequest::new("claude").with_user_text("hello"), &FailingTransport)
+        .execute(
+            &LlmRequest::new("claude").with_user_text("hello"),
+            &FailingTransport,
+        )
         .await
         .expect_err("transport failure");
 

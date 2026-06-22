@@ -4,13 +4,17 @@
 //! (`ReqwestHttp` on desktop, native transports on mobile).
 
 use std::collections::BTreeMap;
+use std::time::Duration;
 
 use llm_client::{
-    BoxFuture, FrameStream, LlmError, ProviderRequest, ProviderResponse, RawStreamFrame,
-    StreamFraming, StreamingResponse,
+    BoxFuture, FrameStream, LlmError, ProviderRequest, ProviderResponse, ProviderStreamTransport,
+    RawStreamFrame, StreamFraming, StreamingResponse,
 };
 use protocol::{HttpMethod, HttpRequest, HttpResponse};
-use traits::http::{RawByteStream, RawByteStreamWithMeta, SseStream, SseStreamWithMeta};
+use traits::http::{
+    RawByteStream, RawByteStreamWithMeta, SseStream, SseStreamWithMeta, WebSocketConnection,
+    WebSocketMessageStream, WebSocketMessageStreamWithMeta,
+};
 use traits::{HttpError, HttpTransport};
 
 /// Adapter exposing a [`traits::HttpTransport`] as an [`llm_client::Transport`].
@@ -63,6 +67,56 @@ fn to_http_request(request: &ProviderRequest) -> Result<HttpRequest, LlmError> {
     })
 }
 
+fn to_responses_websocket_request(request: &ProviderRequest) -> Result<HttpRequest, LlmError> {
+    let mut http_request = to_http_request(request)?;
+    if request.body_bytes.is_some() {
+        return Err(LlmError::InvalidRequest {
+            message: "OpenAI Responses WebSocket requests do not support body_bytes".to_string(),
+        });
+    }
+    http_request.body = Some(responses_websocket_payload(&request.body_json)?);
+    http_request.body_bytes = None;
+    http_request.timeout = request
+        .websocket_connect_timeout_ms
+        .map(Duration::from_millis);
+    Ok(http_request)
+}
+
+fn to_responses_websocket_handshake_request(
+    request: &ProviderRequest,
+) -> Result<HttpRequest, LlmError> {
+    let mut http_request = to_http_request(request)?;
+    if request.body_bytes.is_some() {
+        return Err(LlmError::InvalidRequest {
+            message: "OpenAI Responses WebSocket requests do not support body_bytes".to_string(),
+        });
+    }
+    http_request.body = None;
+    http_request.body_bytes = None;
+    http_request.timeout = request
+        .websocket_connect_timeout_ms
+        .map(Duration::from_millis);
+    Ok(http_request)
+}
+
+fn responses_websocket_payload(body: &serde_json::Value) -> Result<String, LlmError> {
+    let serde_json::Value::Object(map) = body else {
+        return Err(LlmError::InvalidRequest {
+            message: "OpenAI Responses WebSocket request body must be a JSON object".to_string(),
+        });
+    };
+    let mut payload = map.clone();
+    payload.insert(
+        "type".to_string(),
+        serde_json::Value::String("response.create".to_string()),
+    );
+    serde_json::to_string(&serde_json::Value::Object(payload)).map_err(|err| {
+        LlmError::InvalidRequest {
+            message: format!("failed to encode OpenAI Responses WebSocket payload: {err}"),
+        }
+    })
+}
+
 fn lowercase_headers(headers: &[(String, String)]) -> BTreeMap<String, String> {
     headers
         .iter()
@@ -79,8 +133,7 @@ fn request_id(headers: &BTreeMap<String, String>) -> Option<String> {
 
 fn to_provider_response(response: &HttpResponse) -> ProviderResponse {
     let headers = lowercase_headers(&response.headers);
-    let body_json =
-        serde_json::from_str(&response.body).unwrap_or(serde_json::Value::Null);
+    let body_json = serde_json::from_str(&response.body).unwrap_or(serde_json::Value::Null);
     ProviderResponse {
         status: response.status,
         request_id: request_id(&headers),
@@ -101,6 +154,86 @@ fn status_error_response(status: u16, body: &str) -> ProviderResponse {
 fn map_http_error(error: &HttpError) -> LlmError {
     LlmError::Transport {
         message: error.to_string(),
+    }
+}
+
+async fn open_http_stream<T: HttpTransport>(
+    inner: &T,
+    request: &ProviderRequest,
+) -> Result<StreamingResponse, LlmError> {
+    match request.stream_framing {
+        StreamFraming::AwsEventStream => {
+            // Raw binary path: pass byte chunks directly to the codec's
+            // StreamDecoder (no SSE splitting). Used by Bedrock.
+            let http_request = to_http_request(request)?;
+            match inner.stream_raw_bytes_with_meta(http_request).await {
+                Ok(RawByteStreamWithMeta {
+                    status,
+                    headers,
+                    stream,
+                }) => Ok(StreamingResponse {
+                    status,
+                    headers: lowercase_headers(&headers),
+                    frames: Box::new(RawFrames { stream }),
+                }),
+                // Default transport impl (no override) may surface Err for ≥400.
+                Err(HttpError::Status { status, body }) => Ok(StreamingResponse {
+                    status,
+                    headers: BTreeMap::new(),
+                    frames: Box::new(BodyFrame {
+                        body: Some(body.into_bytes()),
+                    }),
+                }),
+                Err(error) => Err(map_http_error(&error)),
+            }
+        }
+        StreamFraming::Sse => {
+            let http_request = to_http_request(request)?;
+            match inner.stream_sse_with_meta(http_request).await {
+                Ok(SseStreamWithMeta {
+                    status,
+                    headers,
+                    stream,
+                }) => Ok(StreamingResponse {
+                    status,
+                    // Vec<(String,String)> → BTreeMap<String,String>; names are
+                    // already lowercased by the SseStreamWithMeta contract.
+                    headers: lowercase_headers(&headers),
+                    frames: Box::new(SseFrames { stream }),
+                }),
+                // Error path: `reqwest`'s error arm has no headers at this
+                // point (the response was consumed into the Status variant
+                // before headers could be captured), so headers remain empty.
+                Err(HttpError::Status { status, body }) => Ok(StreamingResponse {
+                    status,
+                    headers: BTreeMap::new(),
+                    frames: Box::new(BodyFrame {
+                        body: Some(body.into_bytes()),
+                    }),
+                }),
+                Err(error) => Err(map_http_error(&error)),
+            }
+        }
+    }
+}
+
+async fn open_responses_websocket_stream<T: HttpTransport>(
+    inner: &T,
+    request: &ProviderRequest,
+) -> Result<StreamingResponse, LlmError> {
+    let ws_request = to_responses_websocket_request(request)?;
+    match inner.stream_websocket_messages_with_meta(ws_request).await {
+        Ok(WebSocketMessageStreamWithMeta {
+            status,
+            headers,
+            stream,
+        }) => Ok(StreamingResponse {
+            status,
+            headers: lowercase_headers(&headers),
+            frames: Box::new(WebSocketFrames { stream }),
+        }),
+        Err(HttpError::Status { status: 426, .. }) => open_http_stream(inner, request).await,
+        Err(error) => Err(map_http_error(&error)),
     }
 }
 
@@ -126,60 +259,69 @@ impl<T: HttpTransport> llm_client::Transport for LlmTransportBridge<T> {
         request: &'a ProviderRequest,
     ) -> BoxFuture<'a, Result<StreamingResponse, LlmError>> {
         Box::pin(async move {
-            match request.stream_framing {
-                StreamFraming::AwsEventStream => {
-                    // Raw binary path: pass byte chunks directly to the codec's
-                    // StreamDecoder (no SSE splitting). Used by Bedrock.
-                    let http_request = to_http_request(request)?;
-                    match self.inner.stream_raw_bytes_with_meta(http_request).await {
-                        Ok(RawByteStreamWithMeta {
-                            status,
-                            headers,
-                            stream,
-                        }) => Ok(StreamingResponse {
-                            status,
-                            headers: lowercase_headers(&headers),
-                            frames: Box::new(RawFrames { stream }),
-                        }),
-                        // Default transport impl (no override) may surface Err for ≥400.
-                        Err(HttpError::Status { status, body }) => Ok(StreamingResponse {
-                            status,
-                            headers: BTreeMap::new(),
-                            frames: Box::new(BodyFrame {
-                                body: Some(body.into_bytes()),
-                            }),
-                        }),
-                        Err(error) => Err(map_http_error(&error)),
-                    }
-                }
-                StreamFraming::Sse => {
-                    let http_request = to_http_request(request)?;
-                    match self.inner.stream_sse_with_meta(http_request).await {
-                        Ok(SseStreamWithMeta {
-                            status,
-                            headers,
-                            stream,
-                        }) => Ok(StreamingResponse {
-                            status,
-                            // Vec<(String,String)> → BTreeMap<String,String>; names are
-                            // already lowercased by the SseStreamWithMeta contract.
-                            headers: lowercase_headers(&headers),
-                            frames: Box::new(SseFrames { stream }),
-                        }),
-                        // Error path: `reqwest`'s error arm has no headers at this
-                        // point (the response was consumed into the Status variant
-                        // before headers could be captured), so headers remain empty.
-                        Err(HttpError::Status { status, body }) => Ok(StreamingResponse {
-                            status,
-                            headers: BTreeMap::new(),
-                            frames: Box::new(BodyFrame {
-                                body: Some(body.into_bytes()),
-                            }),
-                        }),
-                        Err(error) => Err(map_http_error(&error)),
-                    }
+            match request.stream_transport {
+                ProviderStreamTransport::Http => open_http_stream(&self.inner, request).await,
+                ProviderStreamTransport::ResponsesWebSocket => {
+                    open_responses_websocket_stream(&self.inner, request).await
                 }
             }
+        })
+    }
+
+    fn open_responses_websocket_session<'a>(
+        &'a self,
+        request: &'a ProviderRequest,
+    ) -> BoxFuture<'a, Result<Box<dyn llm_client::ResponsesWebSocketTransportSession>, LlmError>>
+    {
+        Box::pin(async move {
+            let ws_request = to_responses_websocket_handshake_request(request)?;
+            match self
+                .inner
+                .open_websocket_connection_with_meta(ws_request)
+                .await
+            {
+                Ok(connection) => Ok(Box::new(BridgeResponsesWebSocketSession {
+                    connection: connection.connection,
+                })
+                    as Box<dyn llm_client::ResponsesWebSocketTransportSession>),
+                Err(error) => Err(map_http_error(&error)),
+            }
+        })
+    }
+}
+
+struct BridgeResponsesWebSocketSession {
+    connection: Box<dyn WebSocketConnection>,
+}
+
+impl llm_client::ResponsesWebSocketTransportSession for BridgeResponsesWebSocketSession {
+    fn send<'a>(
+        &'a mut self,
+        request: &'a ProviderRequest,
+    ) -> BoxFuture<'a, Result<StreamingResponse, LlmError>> {
+        Box::pin(async move {
+            let text = responses_websocket_payload(&request.body_json)?;
+            match self.connection.send_text_with_meta(text).await {
+                Ok(WebSocketMessageStreamWithMeta {
+                    status,
+                    headers,
+                    stream,
+                }) => Ok(StreamingResponse {
+                    status,
+                    headers: lowercase_headers(&headers),
+                    frames: Box::new(WebSocketFrames { stream }),
+                }),
+                Err(error) => Err(map_http_error(&error)),
+            }
+        })
+    }
+
+    fn close<'a>(&'a mut self) -> BoxFuture<'a, Result<(), LlmError>> {
+        Box::pin(async move {
+            self.connection
+                .close()
+                .await
+                .map_err(|error| map_http_error(&error))
         })
     }
 }
@@ -216,6 +358,23 @@ impl FrameStream for SseFrames {
             use futures_util::StreamExt;
             match self.stream.next().await {
                 Some(Ok(event)) => Ok(Some(RawStreamFrame::new(event.data.into_bytes()))),
+                Some(Err(error)) => Err(map_http_error(&error)),
+                None => Ok(None),
+            }
+        })
+    }
+}
+
+struct WebSocketFrames {
+    stream: WebSocketMessageStream,
+}
+
+impl FrameStream for WebSocketFrames {
+    fn next_frame(&mut self) -> BoxFuture<'_, Result<Option<RawStreamFrame>, LlmError>> {
+        Box::pin(async move {
+            use futures_util::StreamExt;
+            match self.stream.next().await {
+                Some(Ok(bytes)) => Ok(Some(RawStreamFrame::new(bytes))),
                 Some(Err(error)) => Err(map_http_error(&error)),
                 None => Ok(None),
             }

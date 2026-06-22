@@ -28,6 +28,8 @@ pub struct MockApiClient {
     captured_msgs: Arc<Mutex<Vec<Vec<ConversationMessage>>>>,
     captured_systems: Arc<Mutex<Vec<Option<String>>>>,
     captured_tools: Arc<Mutex<Vec<Vec<serde_json::Value>>>>,
+    captured_prewarm: Arc<Mutex<Vec<MockPrewarmCall>>>,
+    close_responses_ws_count: Arc<Mutex<u32>>,
     /// Task 7: seeds passed to `messages_create_seeded`; one entry per call.
     captured_seeds: Arc<Mutex<Vec<u8>>>,
     /// Task 8 (llm-client future-work batch 3): the FULL internal rate-limit
@@ -49,6 +51,21 @@ pub struct MockApiClient {
     rate_limit_error_message: std::sync::Mutex<Option<String>>,
 }
 
+/// Captured startup Responses WebSocket prewarm call.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MockPrewarmCall {
+    /// Model id used for the prewarm request.
+    pub model: String,
+    /// Optional provider profile selected for the prewarm request.
+    pub profile: Option<String>,
+    /// Assembled system prompt sent to the provider.
+    pub system: Option<String>,
+    /// Conversation messages included in the prewarm request.
+    pub messages: Vec<ConversationMessage>,
+    /// Wire tool schemas included in the prewarm request.
+    pub tools: Vec<serde_json::Value>,
+}
+
 impl MockApiClient {
     /// Construct a mock with a script of `responses` returned in order.
     #[must_use]
@@ -58,6 +75,8 @@ impl MockApiClient {
             captured_msgs: Arc::new(Mutex::new(Vec::new())),
             captured_systems: Arc::new(Mutex::new(Vec::new())),
             captured_tools: Arc::new(Mutex::new(Vec::new())),
+            captured_prewarm: Arc::new(Mutex::new(Vec::new())),
+            close_responses_ws_count: Arc::new(Mutex::new(0)),
             captured_seeds: Arc::new(Mutex::new(Vec::new())),
             rate_limit_full: std::sync::Mutex::new(None),
             raw_utilization: std::sync::Mutex::new(None),
@@ -101,6 +120,17 @@ impl MockApiClient {
     /// wire tool definitions on the batched path.
     pub async fn captured_tools(&self) -> Vec<Vec<serde_json::Value>> {
         self.captured_tools.lock().await.clone()
+    }
+
+    /// Snapshot captured startup Responses WebSocket prewarm calls.
+    pub async fn captured_prewarm(&self) -> Vec<MockPrewarmCall> {
+        self.captured_prewarm.lock().await.clone()
+    }
+
+    /// Number of times the test client was asked to close the Responses
+    /// WebSocket session.
+    pub async fn close_responses_ws_count(&self) -> u32 {
+        *self.close_responses_ws_count.lock().await
     }
 
     /// Snapshot the captured `msgs` arguments (one entry per `messages_create` call).
@@ -168,7 +198,8 @@ impl OrchestratorApiClient for MockApiClient {
             .await
             .push(initial_consecutive_overloaded);
         // Delegate to the plain seam so the queue logic is reused.
-        self.messages_create(model, profile, system, msgs, tools).await
+        self.messages_create(model, profile, system, msgs, tools)
+            .await
     }
 
     /// Task 8: return the snapshot pre-loaded via [`Self::set_rate_limit_full`].
@@ -186,6 +217,29 @@ impl OrchestratorApiClient for MockApiClient {
     /// [`Self::set_rate_limit_error_message`].
     fn last_rate_limit_error_message(&self) -> Option<String> {
         self.rate_limit_error_message.lock().unwrap().clone()
+    }
+
+    async fn prewarm_responses_websocket(
+        &self,
+        model: &str,
+        profile: Option<&str>,
+        system: Option<&str>,
+        messages: Vec<ConversationMessage>,
+        tools: Vec<serde_json::Value>,
+    ) -> Result<(), LlmError> {
+        self.captured_prewarm.lock().await.push(MockPrewarmCall {
+            model: model.to_string(),
+            profile: profile.map(str::to_string),
+            system: system.map(str::to_string),
+            messages,
+            tools,
+        });
+        Ok(())
+    }
+
+    async fn close_responses_websocket_session(&self) -> Result<(), LlmError> {
+        *self.close_responses_ws_count.lock().await += 1;
+        Ok(())
     }
 }
 
@@ -817,8 +871,7 @@ impl OrchestratorHandle for MockOrchestratorHandle {
     async fn switch_model(&self, model: &str, profile: Option<&str>) -> Result<(), HandleError> {
         self.switch_model_calls.fetch_add(1, Ordering::SeqCst);
         *self.switch_model_last.lock().unwrap() = Some(model.to_string());
-        *self.switch_model_last_profile.lock().unwrap() =
-            Some(profile.map(str::to_string));
+        *self.switch_model_last_profile.lock().unwrap() = Some(profile.map(str::to_string));
         if let Some(reason) = self.switch_model_error.lock().unwrap().take() {
             return Err(HandleError::ActionFailed(reason));
         }
@@ -916,11 +969,17 @@ mod tests {
     #[tokio::test]
     async fn mock_returns_responses_in_order() {
         let r1 = mock_message_response(
-            vec![LlmContentBlock::Text { text: "one".into(), cache_control: None }],
+            vec![LlmContentBlock::Text {
+                text: "one".into(),
+                cache_control: None,
+            }],
             Some("end_turn"),
         );
         let r2 = mock_message_response(
-            vec![LlmContentBlock::Text { text: "two".into(), cache_control: None }],
+            vec![LlmContentBlock::Text {
+                text: "two".into(),
+                cache_control: None,
+            }],
             Some("end_turn"),
         );
         let mock = MockApiClient::new(vec![r1, r2]);
@@ -932,10 +991,16 @@ mod tests {
             .messages_create("m", None, None, vec![], vec![])
             .await
             .expect("second");
-        let LlmContentBlock::Text { text: first_text, .. } = &resp1.content[0] else {
+        let LlmContentBlock::Text {
+            text: first_text, ..
+        } = &resp1.content[0]
+        else {
             panic!("expected text block");
         };
-        let LlmContentBlock::Text { text: second_text, .. } = &resp2.content[0] else {
+        let LlmContentBlock::Text {
+            text: second_text, ..
+        } = &resp2.content[0]
+        else {
             panic!("expected text block");
         };
         assert_eq!(first_text, "one");
@@ -948,7 +1013,9 @@ mod tests {
         let r = mock_message_response(vec![], Some("end_turn"));
         let mock = MockApiClient::new(vec![r]);
         let msgs = vec![];
-        mock.messages_create("m", None, None, msgs, vec![]).await.expect("call");
+        mock.messages_create("m", None, None, msgs, vec![])
+            .await
+            .expect("call");
         assert_eq!(mock.captured_msgs().await.len(), 1);
     }
 

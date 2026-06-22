@@ -39,6 +39,10 @@ impl OrchestratorHandle for ConversationOrchestrator {
     }
 
     async fn clear_session(&self) -> Result<(), HandleError> {
+        self.abort_startup_responses_websocket_prewarm();
+        if let Err(err) = self.api.close_responses_websocket_session().await {
+            tracing::warn!(error = %err, "failed to close responses websocket session during clear_session");
+        }
         let mut s = self.session.lock().await;
         s.history.clear();
         s.session_id = protocol::SessionId::new();
@@ -69,6 +73,10 @@ impl OrchestratorHandle for ConversationOrchestrator {
         history: Vec<protocol::ConversationMessage>,
         last_jsonl_uuid: Option<String>,
     ) -> Result<(), HandleError> {
+        self.abort_startup_responses_websocket_prewarm();
+        if let Err(err) = self.api.close_responses_websocket_session().await {
+            tracing::warn!(error = %err, "failed to close responses websocket session during resume_session");
+        }
         let mut s = self.session.lock().await;
         s.history = history;
         // Adopt the NAMED id (clear_session mints a fresh one; resume does NOT).
@@ -103,6 +111,10 @@ impl OrchestratorHandle for ConversationOrchestrator {
     }
 
     async fn request_exit(&self) {
+        self.abort_startup_responses_websocket_prewarm();
+        if let Err(err) = self.api.close_responses_websocket_session().await {
+            tracing::warn!(error = %err, "failed to close responses websocket session during request_exit");
+        }
         self.should_exit.store(true, Ordering::SeqCst);
     }
 
@@ -389,10 +401,7 @@ impl OrchestratorHandle for ConversationOrchestrator {
         }
         // Newest-first by modification time.
         found.sort_by(|a, b| b.0.cmp(&a.0));
-        found
-            .into_iter()
-            .map(|(_, id)| (id.clone(), id))
-            .collect()
+        found.into_iter().map(|(_, id)| (id.clone(), id)).collect()
     }
 }
 

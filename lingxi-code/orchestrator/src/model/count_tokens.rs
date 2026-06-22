@@ -1,8 +1,10 @@
 //! `count_tokens` facade: real endpoint on Anthropic routes, documented
 //! character-based approximation elsewhere.
 
-use llm_client::{client::DefaultLlmClient, AnthropicMessagesCodec, LlmError, LlmRequest, Transport};
 use crate::model::betas::{apply_beta_header, BetaContext, Endpoint, Provider};
+use llm_client::{
+    client::DefaultLlmClient, AnthropicMessagesCodec, LlmError, LlmRequest, Transport,
+};
 
 /// Approximation divisor for non-Anthropic routes (byte-length/4 ≈ tokens).
 pub const APPROX_CHARS_PER_TOKEN: u64 = 4;
@@ -65,13 +67,13 @@ pub fn approximate_tokens(request: &LlmRequest) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use llm_client::client::DefaultLlmClient;
     use llm_client::{
         AuthStrategy, BoxFuture, Capabilities, ClientConfig, ContentBlock, CredentialConfig,
         LlmRequest, Message, ModelProfile, PricingConfig, ProtocolFamily, ProviderId,
         ProviderProfile, ProviderRequest, ProviderResponse, StreamingResponse, SystemBlock,
         Transport,
     };
-    use llm_client::client::DefaultLlmClient;
     use std::sync::Mutex;
 
     // ----------------------------------------------------------------
@@ -87,7 +89,8 @@ mod tests {
     #[test]
     fn approximate_tokens_known_char_count_divides_by_four() {
         // 40 bytes → 10 tokens
-        let req = LlmRequest::new("model").with_user_text("1234567890123456789012345678901234567890");
+        let req =
+            LlmRequest::new("model").with_user_text("1234567890123456789012345678901234567890");
         assert_eq!(req.messages[0].content.len(), 1);
         assert_eq!(approximate_tokens(&req), 10);
     }
@@ -188,6 +191,9 @@ mod tests {
                 pricing: PricingConfig::default(),
                 signing: None,
                 azure: None,
+                supports_websockets: false,
+                supports_websocket_compression: false,
+                websocket_connect_timeout_ms: None,
             }],
         })
         .expect("client")
@@ -216,6 +222,9 @@ mod tests {
                 pricing: PricingConfig::default(),
                 signing: None,
                 azure: None,
+                supports_websockets: false,
+                supports_websocket_compression: false,
+                websocket_connect_timeout_ms: None,
             }],
         })
         .expect("client")
@@ -234,13 +243,27 @@ mod tests {
         let client = anthropic_client();
         let req = LlmRequest::new("claude").with_user_text("hello world");
 
-        let count = count_tokens(&client, &transport, &req).await.expect("count");
+        let count = count_tokens(&client, &transport, &req)
+            .await
+            .expect("count");
 
         assert_eq!(count, 2095);
         // Also verify the request was sent to the count_tokens endpoint.
-        let seen = transport.seen.lock().unwrap().clone().expect("request sent");
-        assert!(seen.url.ends_with("/v1/messages/count_tokens"), "url={}", seen.url);
-        assert_eq!(seen.headers.get("x-api-key").map(String::as_str), Some("ct-test-key"));
+        let seen = transport
+            .seen
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("request sent");
+        assert!(
+            seen.url.ends_with("/v1/messages/count_tokens"),
+            "url={}",
+            seen.url
+        );
+        assert_eq!(
+            seen.headers.get("x-api-key").map(String::as_str),
+            Some("ct-test-key")
+        );
     }
 
     #[tokio::test]
@@ -252,9 +275,16 @@ mod tests {
         let client = anthropic_client();
         let req = LlmRequest::new("claude").with_user_text("hello");
 
-        let _ = count_tokens(&client, &transport, &req).await.expect("count");
+        let _ = count_tokens(&client, &transport, &req)
+            .await
+            .expect("count");
 
-        let seen = transport.seen.lock().unwrap().clone().expect("request sent");
+        let seen = transport
+            .seen
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("request sent");
         let expected = crate::model::betas::assemble_beta_header(
             crate::model::betas::Provider::Anthropic,
             crate::model::betas::Endpoint::CountTokens,
@@ -284,11 +314,16 @@ mod tests {
         // 20 bytes of text → 5 tokens
         let req = LlmRequest::new("gpt").with_user_text("12345678901234567890");
 
-        let count = count_tokens(&client, &transport, &req).await.expect("count");
+        let count = count_tokens(&client, &transport, &req)
+            .await
+            .expect("count");
 
         assert_eq!(count, 5);
         // Transport must NOT have been called.
-        assert!(transport.seen.lock().unwrap().is_none(), "transport should not be called");
+        assert!(
+            transport.seen.lock().unwrap().is_none(),
+            "transport should not be called"
+        );
     }
 
     // ----------------------------------------------------------------

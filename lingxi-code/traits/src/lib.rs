@@ -66,8 +66,10 @@ pub use commands::{SlashCommandDispatcher, SlashDispatchResult};
 pub use computer_control::{ComputerControl, ComputerError, Screenshot};
 pub use effect_handler::EffectHandler;
 pub use filesystem::{FileContent, FileEvent, FileEventKind, FileSystem, FlockGuard, FsError};
-pub use http::{HttpError, HttpTransport};
-pub use http::RawByteStreamWithMeta;
+pub use http::{
+    HttpError, HttpTransport, RawByteStreamWithMeta, WebSocketConnection,
+    WebSocketConnectionWithMeta, WebSocketMessageStream, WebSocketMessageStreamWithMeta,
+};
 pub use lsp::{LspError, LspRawConnection, LspServerCapabilities, LspServerConfig, LspTransport};
 pub use mailbox::{
     MailboxError as RouterMailboxError, MailboxMessage, MailboxRouterHandle, RouteAck,
@@ -75,11 +77,10 @@ pub use mailbox::{
 pub use mcp::*;
 pub use notification::{NotificationError, NotificationRequest, NotificationService};
 pub use orchestrator::{
-    AgentInfo, CheckStatus, CompactionSummary, ContextPressureBanner, ContextPressureLevel,
-    CostSnapshot, DoctorCheck, DoctorReport,
-    DoctorSummary, HandleError, HookInfo, McpServerInfo, McpStatus, MemoryEditorOutcome,
-    ModelListing, OrchestratorHandle, OutputEvent, OutputStream, RateLimitSnapshot,
-    StatusSnapshot, TurnOutcome, parse_model_ref,
+    parse_model_ref, AgentInfo, CheckStatus, CompactionSummary, ContextPressureBanner,
+    ContextPressureLevel, CostSnapshot, DoctorCheck, DoctorReport, DoctorSummary, HandleError,
+    HookInfo, McpServerInfo, McpStatus, MemoryEditorOutcome, ModelListing, OrchestratorHandle,
+    OutputEvent, OutputStream, RateLimitSnapshot, StatusSnapshot, TurnOutcome,
 };
 pub use permission_gate::{PermissionDecision, PermissionGate};
 pub use platform::Platform;

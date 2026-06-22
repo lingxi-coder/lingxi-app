@@ -1,15 +1,17 @@
 use std::collections::{BTreeMap, VecDeque};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use crate::sigv4;
 use crate::{
     validate_capabilities, ApiKeyAuthenticator, AuthStrategy, Authenticator, BearerAuthenticator,
-    ChatGptAuthenticator, ClientConfig, CopilotAuthenticator, Credential, CredentialConfig,
-    CredentialProvider, CredentialScope, EnvCredentialProvider, FrameStream, LlmError, LlmEvent,
-    LlmRequest, LlmResponse, ModelListing, ModelRegistry, ProtocolFamily, ProviderId,
-    ProviderRequest, ProviderResponse, Route, StreamDecoder, StreamingResponse, Transport, WireCodec,
+    BoxFuture, ChatGptAuthenticator, ClientConfig, CopilotAuthenticator, Credential,
+    CredentialConfig, CredentialProvider, CredentialScope, EnvCredentialProvider, FrameStream,
+    LlmError, LlmEvent, LlmRequest, LlmResponse, ModelListing, ModelRegistry, ProtocolFamily,
+    ProviderId, ProviderRequest, ProviderResponse, ProviderStreamTransport, RawStreamFrame,
+    ResponsesWebSocketTransportSession, Route, StreamDecoder, StreamingResponse, Transport,
+    WireCodec,
 };
-use crate::sigv4;
 
 /// Anthropic Messages API version sent by codecs this client constructs.
 const ANTHROPIC_VERSION: &str = "2023-06-01";
@@ -30,6 +32,8 @@ struct RouteEntry {
     credential: CredentialConfig,
     base_url: String,
     signing: Option<crate::SigningConfig>,
+    supports_websockets: bool,
+    websocket_connect_timeout_ms: Option<u64>,
 }
 
 /// Polling knobs for [`DefaultLlmClient::wait_for_file_active`]. The defaults
@@ -52,6 +56,166 @@ impl Default for FileActivationPoll {
     }
 }
 
+/// Turn-scoped OpenAI Responses WebSocket state.
+///
+/// A session owns one reusable transport connection plus enough Responses state
+/// to send a compatible follow-up as `previous_response_id` + input delta.
+pub struct ResponsesWebSocketSession {
+    connection: Option<Box<dyn ResponsesWebSocketTransportSession>>,
+    state: Arc<Mutex<ResponsesWebSocketSessionState>>,
+}
+
+#[derive(Debug, Default)]
+struct ResponsesWebSocketSessionState {
+    fallback_to_http: bool,
+    connection_healthy: bool,
+    last_request_body: Option<serde_json::Value>,
+    last_response_id: Option<String>,
+    last_added_response_items: Vec<serde_json::Value>,
+    last_response_from_prewarm: bool,
+    last_logical_request_body: Option<serde_json::Value>,
+    last_wire_request_body: Option<serde_json::Value>,
+    last_wire_used_previous_response_id: bool,
+    last_wire_used_prewarm_response_id: bool,
+}
+
+/// Debug/telemetry snapshot for the most recent Responses WebSocket send.
+///
+/// `logical_request_body` is the full model-visible request the caller meant
+/// to send. `wire_request_body` is the compressed WebSocket payload body that
+/// may contain `previous_response_id` and only newly-added `input` items.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ResponsesWebSocketRequestSnapshot {
+    pub logical_request_body: Option<serde_json::Value>,
+    pub wire_request_body: Option<serde_json::Value>,
+    pub wire_used_previous_response_id: bool,
+    pub wire_used_prewarm_response_id: bool,
+}
+
+impl Default for ResponsesWebSocketSession {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ResponsesWebSocketSession {
+    /// Create an empty turn-scoped Responses WebSocket session.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            connection: None,
+            state: Arc::new(Mutex::new(ResponsesWebSocketSessionState {
+                connection_healthy: true,
+                ..ResponsesWebSocketSessionState::default()
+            })),
+        }
+    }
+
+    /// Whether this session has latched 426 fallback to HTTP SSE.
+    #[must_use]
+    pub fn fallback_to_http(&self) -> bool {
+        self.state
+            .lock()
+            .expect("responses ws state")
+            .fallback_to_http
+    }
+
+    /// Last completed Responses id observed on this session.
+    #[must_use]
+    pub fn last_response_id(&self) -> Option<String> {
+        self.state
+            .lock()
+            .expect("responses ws state")
+            .last_response_id
+            .clone()
+    }
+
+    /// Last output items observed via `response.output_item.added`.
+    #[must_use]
+    pub fn last_added_response_items(&self) -> Vec<serde_json::Value> {
+        self.state
+            .lock()
+            .expect("responses ws state")
+            .last_added_response_items
+            .clone()
+    }
+
+    /// Whether the last completed Responses id came from a `generate=false`
+    /// prewarm request.
+    #[must_use]
+    pub fn last_response_from_prewarm(&self) -> bool {
+        self.state
+            .lock()
+            .expect("responses ws state")
+            .last_response_from_prewarm
+    }
+
+    /// Snapshot of the most recent logical request body and compressed wire
+    /// body used by this WebSocket session.
+    #[must_use]
+    pub fn last_request_snapshot(&self) -> ResponsesWebSocketRequestSnapshot {
+        let state = self.state.lock().expect("responses ws state");
+        ResponsesWebSocketRequestSnapshot {
+            logical_request_body: state.last_logical_request_body.clone(),
+            wire_request_body: state.last_wire_request_body.clone(),
+            wire_used_previous_response_id: state.last_wire_used_previous_response_id,
+            wire_used_prewarm_response_id: state.last_wire_used_prewarm_response_id,
+        }
+    }
+
+    /// Close the reusable WebSocket connection and reset transient transport
+    /// state. Completed response ids are cleared because a new logical session
+    /// must not inherit `previous_response_id` from a closed conversation.
+    pub async fn close(&mut self) -> Result<(), LlmError> {
+        if let Some(mut connection) = self.connection.take() {
+            connection.close().await?;
+        }
+        let mut state = self.state.lock().expect("responses ws state");
+        state.connection_healthy = true;
+        state.last_request_body = None;
+        state.last_response_id = None;
+        state.last_added_response_items.clear();
+        state.last_response_from_prewarm = false;
+        state.last_logical_request_body = None;
+        state.last_wire_request_body = None;
+        state.last_wire_used_previous_response_id = false;
+        state.last_wire_used_prewarm_response_id = false;
+        Ok(())
+    }
+
+    fn mark_http_fallback(&mut self) {
+        self.connection = None;
+        let mut state = self.state.lock().expect("responses ws state");
+        state.fallback_to_http = true;
+        state.connection_healthy = false;
+    }
+
+    fn drop_unhealthy_connection(&mut self) {
+        let healthy = self
+            .state
+            .lock()
+            .expect("responses ws state")
+            .connection_healthy;
+        if !healthy {
+            self.connection = None;
+            self.state
+                .lock()
+                .expect("responses ws state")
+                .connection_healthy = true;
+        }
+    }
+}
+
+impl std::fmt::Debug for ResponsesWebSocketSession {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ResponsesWebSocketSession")
+            .field("has_connection", &self.connection.is_some())
+            .field("state", &self.state.lock().expect("responses ws state"))
+            .finish()
+    }
+}
+
 impl DefaultLlmClient {
     pub fn from_config(config: ClientConfig) -> Result<Self, LlmError> {
         let registry = ModelRegistry::from_config(config.clone())?;
@@ -63,6 +227,7 @@ impl DefaultLlmClient {
                     message: format!("duplicate provider profile_name: {}", provider.profile_name),
                 });
             }
+            validate_provider_profile(&provider)?;
             let codec = build_codec(&provider)?;
             let base_url = provider.base_url.clone();
             let signing = provider.signing.clone();
@@ -76,6 +241,8 @@ impl DefaultLlmClient {
                     credential: provider.credential,
                     base_url,
                     signing,
+                    supports_websockets: provider.supports_websockets,
+                    websocket_connect_timeout_ms: provider.websocket_connect_timeout_ms,
                 },
             );
         }
@@ -118,7 +285,9 @@ impl DefaultLlmClient {
         request: &LlmRequest,
         now: std::time::SystemTime,
     ) -> Result<PreparedLlmCall, LlmError> {
-        let resolved_route = self.registry.resolve_in(&request.model, request.profile.as_deref())?;
+        let resolved_route = self
+            .registry
+            .resolve_in(&request.model, request.profile.as_deref())?;
         validate_capabilities(request, resolved_route.capabilities)?;
 
         let entry = self
@@ -130,16 +299,26 @@ impl DefaultLlmClient {
             entry.codec.encode_request(request)?
         } else {
             let mut routed_request = request.clone();
-            routed_request.model.clone_from(&resolved_route.request_model);
+            routed_request
+                .model
+                .clone_from(&resolved_route.request_model);
             entry.codec.encode_request(&routed_request)?
         };
-        let provider_request = self
+        let mut provider_request = self
             .authenticate_at(entry, &resolved_route.profile_name, provider_request, now)
             .await?;
+        if request.stream
+            && entry.supports_websockets
+            && matches!(entry.protocol, ProtocolFamily::OpenAiResponses)
+        {
+            provider_request.stream_transport = ProviderStreamTransport::ResponsesWebSocket;
+            provider_request.websocket_connect_timeout_ms = entry.websocket_connect_timeout_ms;
+        }
 
         Ok(PreparedLlmCall {
             route: Route {
                 resolved_route,
+                protocol: entry.protocol.clone(),
                 codec: entry.codec.clone(),
             },
             provider_request,
@@ -182,10 +361,321 @@ impl DefaultLlmClient {
             return Err(decode_stream_error(&prepared, streaming).await);
         }
 
-        Ok(LlmEventStream::new(
-            prepared.route.codec.stream_decoder(),
-            streaming.frames,
+        Ok(stream_from_success(&prepared, streaming))
+    }
+
+    /// Open an OpenAI Responses WebSocket connection for later use without
+    /// sending a prompt payload.
+    pub async fn preconnect_websocket(
+        &self,
+        request: &LlmRequest,
+        transport: &dyn Transport,
+        session: &mut ResponsesWebSocketSession,
+    ) -> Result<(), LlmError> {
+        if session.fallback_to_http() || session.connection.is_some() {
+            return Ok(());
+        }
+        let prepared = self.prepare_websocket_stream_request(request).await?;
+        if !matches!(
+            prepared.provider_request.stream_transport,
+            ProviderStreamTransport::ResponsesWebSocket
+        ) {
+            return Err(LlmError::InvalidRequest {
+                message: "preconnect_websocket requires an OpenAI Responses profile with supports_websockets=true".to_string(),
+            });
+        }
+        match transport
+            .open_responses_websocket_session(&prepared.provider_request)
+            .await
+        {
+            Ok(connection) => {
+                session.connection = Some(connection);
+                Ok(())
+            }
+            Err(error) if is_websocket_upgrade_required(&error) => {
+                session.mark_http_fallback();
+                Ok(())
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Send a WebSocket prewarm request with `generate=false` and drain it to
+    /// completion, recording the returned response id for the next real turn.
+    pub async fn prewarm_websocket(
+        &self,
+        request: &LlmRequest,
+        transport: &dyn Transport,
+        session: &mut ResponsesWebSocketSession,
+    ) -> Result<(), LlmError> {
+        if session.fallback_to_http() {
+            return Ok(());
+        }
+        let mut prepared = self.prepare_websocket_stream_request(request).await?;
+        if !matches!(
+            prepared.provider_request.stream_transport,
+            ProviderStreamTransport::ResponsesWebSocket
+        ) {
+            return Err(LlmError::InvalidRequest {
+                message: "prewarm_websocket requires an OpenAI Responses profile with supports_websockets=true".to_string(),
+            });
+        }
+
+        let logical_body = prepared.provider_request.body_json.clone();
+        set_responses_generate(&mut prepared.provider_request.body_json, false)?;
+        let mut stream = self
+            .execute_prepared_responses_websocket(
+                prepared,
+                transport,
+                session,
+                logical_body,
+                true,
+                false,
+            )
+            .await?;
+        while stream.next_event().await?.is_some() {}
+        Ok(())
+    }
+
+    /// Send a prepared WebSocket prewarm request with `generate=false`.
+    ///
+    /// This variant is for orchestration layers that must inject provider
+    /// headers before the prewarm is sent. The logical request body is recorded
+    /// without `generate=false`; the wire body carries `generate=false`.
+    pub async fn prewarm_prepared_websocket(
+        &self,
+        mut prepared: PreparedLlmCall,
+        transport: &dyn Transport,
+        session: &mut ResponsesWebSocketSession,
+    ) -> Result<(), LlmError> {
+        if session.fallback_to_http() {
+            return Ok(());
+        }
+        if !matches!(
+            prepared.provider_request.stream_transport,
+            ProviderStreamTransport::ResponsesWebSocket
+        ) {
+            return Err(LlmError::InvalidRequest {
+                message:
+                    "prewarm_prepared_websocket requires an OpenAI Responses WebSocket request"
+                        .to_string(),
+            });
+        }
+
+        let logical_body = prepared.provider_request.body_json.clone();
+        set_responses_generate(&mut prepared.provider_request.body_json, false)?;
+        let mut stream = self
+            .execute_prepared_responses_websocket(
+                prepared,
+                transport,
+                session,
+                logical_body,
+                true,
+                false,
+            )
+            .await?;
+        while stream.next_event().await?.is_some() {}
+        Ok(())
+    }
+
+    /// Execute a streaming call using a turn-scoped Responses WebSocket session
+    /// when the resolved provider supports it. Non-WebSocket routes and
+    /// sessions that latched 426 fallback use the ordinary HTTP streaming path.
+    pub async fn execute_stream_with_session(
+        &self,
+        request: &LlmRequest,
+        transport: &dyn Transport,
+        session: &mut ResponsesWebSocketSession,
+    ) -> Result<LlmEventStream, LlmError> {
+        if !request.stream {
+            return Err(LlmError::InvalidRequest {
+                message: "execute_stream_with_session requires LlmRequest.stream = true"
+                    .to_string(),
+            });
+        }
+
+        let prepared = self.prepare(request).await?;
+        if session.fallback_to_http()
+            || !matches!(
+                prepared.provider_request.stream_transport,
+                ProviderStreamTransport::ResponsesWebSocket
+            )
+        {
+            return self.execute_prepared_http_stream(prepared, transport).await;
+        }
+
+        let logical_body = prepared.provider_request.body_json.clone();
+        self.execute_prepared_responses_websocket(
+            prepared,
+            transport,
+            session,
+            logical_body,
+            false,
+            true,
+        )
+        .await
+    }
+
+    /// Open a previously prepared streaming call through a Responses WebSocket
+    /// session when selected by route preparation, returning the raw streaming
+    /// response so callers can keep their existing header/decoder handling.
+    pub async fn open_prepared_stream_with_session(
+        &self,
+        prepared: PreparedLlmCall,
+        transport: &dyn Transport,
+        session: &mut ResponsesWebSocketSession,
+    ) -> Result<(PreparedLlmCall, StreamingResponse), LlmError> {
+        let logical_body = prepared.provider_request.body_json.clone();
+        self.open_prepared_stream_with_session_internal(
+            prepared,
+            transport,
+            session,
+            logical_body,
+            false,
+            true,
+        )
+        .await
+    }
+
+    async fn prepare_websocket_stream_request(
+        &self,
+        request: &LlmRequest,
+    ) -> Result<PreparedLlmCall, LlmError> {
+        let mut stream_request = request.clone();
+        stream_request.stream = true;
+        self.prepare(&stream_request).await
+    }
+
+    async fn execute_prepared_http_stream(
+        &self,
+        mut prepared: PreparedLlmCall,
+        transport: &dyn Transport,
+    ) -> Result<LlmEventStream, LlmError> {
+        prepared.provider_request.stream_transport = ProviderStreamTransport::Http;
+        let streaming = transport.open_stream(&prepared.provider_request).await?;
+        if streaming.status >= 400 {
+            return Err(decode_stream_error(&prepared, streaming).await);
+        }
+        Ok(stream_from_success(&prepared, streaming))
+    }
+
+    async fn open_prepared_stream_with_session_internal(
+        &self,
+        mut prepared: PreparedLlmCall,
+        transport: &dyn Transport,
+        session: &mut ResponsesWebSocketSession,
+        logical_body: serde_json::Value,
+        from_prewarm: bool,
+        allow_http_fallback: bool,
+    ) -> Result<(PreparedLlmCall, StreamingResponse), LlmError> {
+        if session.fallback_to_http()
+            || !matches!(
+                prepared.provider_request.stream_transport,
+                ProviderStreamTransport::ResponsesWebSocket
+            )
+        {
+            prepared.provider_request.stream_transport = ProviderStreamTransport::Http;
+            let streaming = transport.open_stream(&prepared.provider_request).await?;
+            return Ok((prepared, streaming));
+        }
+
+        session.drop_unhealthy_connection();
+        if session.connection.is_none() {
+            match transport
+                .open_responses_websocket_session(&prepared.provider_request)
+                .await
+            {
+                Ok(connection) => session.connection = Some(connection),
+                Err(error) if is_websocket_upgrade_required(&error) => {
+                    session.mark_http_fallback();
+                    if allow_http_fallback {
+                        prepared.provider_request.stream_transport = ProviderStreamTransport::Http;
+                        let streaming = transport.open_stream(&prepared.provider_request).await?;
+                        return Ok((prepared, streaming));
+                    }
+                    return Err(error);
+                }
+                Err(error) => return Err(error),
+            }
+        }
+
+        let mut send_request = prepared.provider_request.clone();
+        if !from_prewarm {
+            send_request.body_json = incremental_responses_body(&session.state, &logical_body)
+                .unwrap_or(logical_body.clone());
+        }
+        record_responses_wire_request(&session.state, &logical_body, &send_request.body_json);
+
+        let streaming = match session
+            .connection
+            .as_mut()
+            .expect("connection present")
+            .send(&send_request)
+            .await
+        {
+            Ok(streaming) => streaming,
+            Err(error) if is_websocket_upgrade_required(&error) => {
+                session.mark_http_fallback();
+                if allow_http_fallback {
+                    prepared.provider_request.stream_transport = ProviderStreamTransport::Http;
+                    let streaming = transport.open_stream(&prepared.provider_request).await?;
+                    return Ok((prepared, streaming));
+                }
+                return Err(error);
+            }
+            Err(error) => {
+                session.connection = None;
+                session
+                    .state
+                    .lock()
+                    .expect("responses ws state")
+                    .connection_healthy = false;
+                return Err(error);
+            }
+        };
+
+        let frames = Box::new(ResponsesSessionTrackingFrames {
+            inner: streaming.frames,
+            state: Arc::clone(&session.state),
+            logical_body,
+            from_prewarm,
+            items_added: Vec::new(),
+            terminal_seen: false,
+        });
+        Ok((
+            prepared,
+            StreamingResponse {
+                status: streaming.status,
+                headers: streaming.headers,
+                frames,
+            },
         ))
+    }
+
+    async fn execute_prepared_responses_websocket(
+        &self,
+        prepared: PreparedLlmCall,
+        transport: &dyn Transport,
+        session: &mut ResponsesWebSocketSession,
+        logical_body: serde_json::Value,
+        from_prewarm: bool,
+        allow_http_fallback: bool,
+    ) -> Result<LlmEventStream, LlmError> {
+        let (prepared, streaming) = self
+            .open_prepared_stream_with_session_internal(
+                prepared,
+                transport,
+                session,
+                logical_body,
+                from_prewarm,
+                allow_http_fallback,
+            )
+            .await?;
+        if streaming.status >= 400 {
+            session.connection = None;
+            return Err(decode_stream_error(&prepared, streaming).await);
+        }
+        Ok(stream_from_success(&prepared, streaming))
     }
 
     /// Resolve, validate, encode, and authenticate an Anthropic
@@ -212,7 +702,9 @@ impl DefaultLlmClient {
 
         let codec = crate::AnthropicMessagesCodec::new(&entry.base_url, ANTHROPIC_VERSION);
         let mut routed_request = request.clone();
-        routed_request.model.clone_from(&resolved_route.request_model);
+        routed_request
+            .model
+            .clone_from(&resolved_route.request_model);
         let provider_request = codec.encode_count_tokens_request(&routed_request)?;
         self.authenticate(entry, &resolved_route.profile_name, provider_request)
             .await
@@ -367,7 +859,8 @@ impl DefaultLlmClient {
         request: ProviderRequest,
     ) -> Result<ProviderRequest, LlmError> {
         use std::time::SystemTime;
-        self.authenticate_at(entry, profile_name, request, SystemTime::now()).await
+        self.authenticate_at(entry, profile_name, request, SystemTime::now())
+            .await
     }
 
     /// Injectable-clock variant used by tests to pin the `SigV4` timestamp.
@@ -402,9 +895,11 @@ impl DefaultLlmClient {
                 // Load Credential::AwsSigV4 from the credential store.
                 let credential = self.load_credential(entry, profile_name).await?;
                 let (access_key_id, secret_access_key, session_token) = match credential {
-                    Some(Credential::AwsSigV4 { access_key_id, secret_access_key, session_token }) => {
-                        (access_key_id, secret_access_key, session_token)
-                    }
+                    Some(Credential::AwsSigV4 {
+                        access_key_id,
+                        secret_access_key,
+                        session_token,
+                    }) => (access_key_id, secret_access_key, session_token),
                     Some(other) => {
                         return Err(LlmError::InvalidRequest {
                             message: format!(
@@ -429,10 +924,7 @@ impl DefaultLlmClient {
                 // Production code passes SystemTime::now(); tests pass a fixed instant.
                 let datetime = {
                     use std::time::UNIX_EPOCH;
-                    let secs = now
-                        .duration_since(UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_secs();
+                    let secs = now.duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
                     // Format as YYYYMMDDTHHMMSSZ from Unix seconds.
                     let (year, month, day, hour, min, sec) = secs_to_ymdhms(secs);
                     format!("{year:04}{month:02}{day:02}T{hour:02}{min:02}{sec:02}Z")
@@ -452,12 +944,21 @@ impl DefaultLlmClient {
                 )
                 .map_err(|e| LlmError::InvalidRequest { message: e })?;
 
-                request.headers.insert("x-amz-date".to_string(), signed.x_amz_date);
-                request.headers.insert("x-amz-content-sha256".to_string(), signed.x_amz_content_sha256);
+                request
+                    .headers
+                    .insert("x-amz-date".to_string(), signed.x_amz_date);
+                request.headers.insert(
+                    "x-amz-content-sha256".to_string(),
+                    signed.x_amz_content_sha256,
+                );
                 if let Some(token) = signed.x_amz_security_token {
-                    request.headers.insert("x-amz-security-token".to_string(), token);
+                    request
+                        .headers
+                        .insert("x-amz-security-token".to_string(), token);
                 }
-                request.headers.insert("Authorization".to_string(), signed.authorization);
+                request
+                    .headers
+                    .insert("Authorization".to_string(), signed.authorization);
                 return Ok(request);
             }
 
@@ -495,7 +996,11 @@ impl DefaultLlmClient {
                 let Some(secret) = self.load_credential(entry, profile_name).await? else {
                     return Ok(request);
                 };
-                let Credential::ChatGptOAuth { access_token, account_id, fedramp } = secret
+                let Credential::ChatGptOAuth {
+                    access_token,
+                    account_id,
+                    fedramp,
+                } = secret
                 else {
                     return Err(LlmError::Authentication);
                 };
@@ -516,15 +1021,13 @@ impl DefaultLlmClient {
                 let authenticator: Box<dyn Authenticator> = match (&entry.auth, &entry.protocol) {
                     // GitHub Copilot: GitHub OAuth token used directly as the
                     // bearer plus the Copilot header set (also strips x-api-key).
-                    (AuthStrategy::CopilotBearer, _) => {
-                        Box::new(CopilotAuthenticator::new(secret))
-                    }
+                    (AuthStrategy::CopilotBearer, _) => Box::new(CopilotAuthenticator::new(secret)),
                     (AuthStrategy::ApiKey, ProtocolFamily::AnthropicMessages) => {
                         Box::new(ApiKeyAuthenticator::new(secret))
                     }
-                    (AuthStrategy::ApiKey, ProtocolFamily::GeminiGenerateContent) => {
-                        Box::new(ApiKeyAuthenticator::with_header_name("x-goog-api-key", secret))
-                    }
+                    (AuthStrategy::ApiKey, ProtocolFamily::GeminiGenerateContent) => Box::new(
+                        ApiKeyAuthenticator::with_header_name("x-goog-api-key", secret),
+                    ),
                     // OpenAI-style APIs send api keys as bearer tokens.
                     _ => Box::new(BearerAuthenticator::new(secret)),
                 };
@@ -543,9 +1046,7 @@ impl DefaultLlmClient {
         {
             let existing = request.headers.get("anthropic-beta").map(String::as_str);
             let value = append_beta(existing, "oauth-2025-04-20");
-            request
-                .headers
-                .insert("anthropic-beta".to_string(), value);
+            request.headers.insert("anthropic-beta".to_string(), value);
         }
         Ok(request)
     }
@@ -559,9 +1060,14 @@ impl DefaultLlmClient {
     ) -> Result<Option<Credential>, LlmError> {
         let credential = match &entry.credential {
             CredentialConfig::None => return Ok(None),
-            CredentialConfig::Env { var } => EnvCredentialProvider::new(var.clone())
-                .load(&CredentialScope::new(entry.provider_id.clone(), profile_name))
-                .await?,
+            CredentialConfig::Env { var } => {
+                EnvCredentialProvider::new(var.clone())
+                    .load(&CredentialScope::new(
+                        entry.provider_id.clone(),
+                        profile_name,
+                    ))
+                    .await?
+            }
             CredentialConfig::Static { id } | CredentialConfig::HostManaged { id } => {
                 self.credentials
                     .as_ref()
@@ -654,43 +1160,83 @@ pub(crate) fn secs_to_ymdhms(secs: u64) -> (u32, u32, u32, u32, u32, u32) {
 
 fn build_codec(provider: &crate::ProviderProfile) -> Result<Box<dyn WireCodec>, LlmError> {
     match &provider.protocol {
-        crate::ProtocolFamily::AnthropicMessages => Ok(Box::new(crate::AnthropicMessagesCodec::new(
+        crate::ProtocolFamily::AnthropicMessages => Ok(Box::new(
+            crate::AnthropicMessagesCodec::new(provider.base_url.clone(), ANTHROPIC_VERSION),
+        )),
+        crate::ProtocolFamily::OpenAiChat => Ok(Box::new(crate::OpenAiChatCodec::new(
             provider.base_url.clone(),
-            ANTHROPIC_VERSION,
         ))),
-        crate::ProtocolFamily::OpenAiChat => {
-            Ok(Box::new(crate::OpenAiChatCodec::new(provider.base_url.clone())))
-        }
         crate::ProtocolFamily::GeminiGenerateContent => {
             Ok(Box::new(crate::GeminiCodec::new(provider.base_url.clone())))
         }
         crate::ProtocolFamily::AzureOpenAi => {
             // Require the azure config block (api_version).
-            let azure = provider.azure.as_ref().ok_or_else(|| LlmError::InvalidRequest {
-                message: format!(
-                    "provider profile '{}' uses AzureOpenAi but has no azure config; \
+            let azure = provider
+                .azure
+                .as_ref()
+                .ok_or_else(|| LlmError::InvalidRequest {
+                    message: format!(
+                        "provider profile '{}' uses AzureOpenAi but has no azure config; \
                      set ProviderProfile.azure = Some(AzureConfig {{ api_version: \"...\" }})",
-                    provider.profile_name
-                ),
-            })?;
+                        provider.profile_name
+                    ),
+                })?;
             Ok(Box::new(crate::AzureOpenAiCodec::new(
                 provider.base_url.clone(),
                 azure.api_version.clone(),
             )))
         }
-        crate::ProtocolFamily::VertexClaude => {
-            Ok(Box::new(crate::VertexClaudeCodec::new(provider.base_url.clone())))
-        }
-        crate::ProtocolFamily::VertexGemini => {
-            Ok(Box::new(crate::VertexGeminiCodec::new(provider.base_url.clone())))
-        }
-        crate::ProtocolFamily::BedrockClaude => {
-            Ok(Box::new(crate::BedrockClaudeCodec::new(provider.base_url.clone())))
-        }
-        crate::ProtocolFamily::OpenAiResponses => {
-            Ok(Box::new(crate::OpenAiResponsesCodec::new(provider.base_url.clone())))
-        }
+        crate::ProtocolFamily::VertexClaude => Ok(Box::new(crate::VertexClaudeCodec::new(
+            provider.base_url.clone(),
+        ))),
+        crate::ProtocolFamily::VertexGemini => Ok(Box::new(crate::VertexGeminiCodec::new(
+            provider.base_url.clone(),
+        ))),
+        crate::ProtocolFamily::BedrockClaude => Ok(Box::new(crate::BedrockClaudeCodec::new(
+            provider.base_url.clone(),
+        ))),
+        crate::ProtocolFamily::OpenAiResponses => Ok(Box::new(crate::OpenAiResponsesCodec::new(
+            provider.base_url.clone(),
+        ))),
     }
+}
+
+fn validate_provider_profile(provider: &crate::ProviderProfile) -> Result<(), LlmError> {
+    if provider.supports_websocket_compression {
+        return Err(LlmError::InvalidRequest {
+            message: format!(
+                "provider profile '{}' enables supports_websocket_compression, \
+                 but this build does not expose a stable WebSocket compression configuration",
+                provider.profile_name
+            ),
+        });
+    }
+
+    if !provider.supports_websockets {
+        return Ok(());
+    }
+
+    if !matches!(provider.protocol, ProtocolFamily::OpenAiResponses) {
+        return Err(LlmError::InvalidRequest {
+            message: format!(
+                "provider profile '{}' enables supports_websockets but uses protocol {:?}; \
+                 Responses WebSocket transport is only valid for OpenAiResponses",
+                provider.profile_name, provider.protocol
+            ),
+        });
+    }
+
+    if matches!(provider.auth, AuthStrategy::AwsSigV4) {
+        return Err(LlmError::InvalidRequest {
+            message: format!(
+                "provider profile '{}' enables supports_websockets with AwsSigV4; \
+                 Responses WebSocket transport does not support SigV4 signing",
+                provider.profile_name
+            ),
+        });
+    }
+
+    Ok(())
 }
 
 #[derive(Debug)]
@@ -723,6 +1269,175 @@ async fn decode_stream_error(prepared: &PreparedLlmCall, streaming: StreamingRes
         // decode_response rejects every status >= 400, so this arm is
         // unreachable for the statuses that route here.
         Ok(_) => LlmError::ProviderInternal,
+    }
+}
+
+fn stream_from_success(prepared: &PreparedLlmCall, streaming: StreamingResponse) -> LlmEventStream {
+    let metadata = crate::stream_provider_metadata_from_headers(&streaming.headers);
+    let mut decoder = prepared.route.codec.stream_decoder();
+    decoder.set_provider_metadata(metadata);
+    LlmEventStream::new(decoder, streaming.frames)
+}
+
+fn is_websocket_upgrade_required(error: &LlmError) -> bool {
+    match error {
+        LlmError::Transport { message } => {
+            message.contains("426") || message.to_ascii_lowercase().contains("upgrade required")
+        }
+        _ => false,
+    }
+}
+
+fn set_responses_generate(body: &mut serde_json::Value, generate: bool) -> Result<(), LlmError> {
+    let serde_json::Value::Object(map) = body else {
+        return Err(LlmError::InvalidRequest {
+            message: "OpenAI Responses request body must be a JSON object".to_string(),
+        });
+    };
+    map.insert("generate".to_string(), serde_json::Value::Bool(generate));
+    Ok(())
+}
+
+fn incremental_responses_body(
+    state: &Arc<Mutex<ResponsesWebSocketSessionState>>,
+    logical_body: &serde_json::Value,
+) -> Option<serde_json::Value> {
+    let state = state.lock().expect("responses ws state");
+    let previous_id = state.last_response_id.as_ref()?;
+    let previous_body = state.last_request_body.as_ref()?;
+    if non_input_responses_body(previous_body) != non_input_responses_body(logical_body) {
+        return None;
+    }
+    let previous_input = previous_body.get("input")?.as_array()?;
+    let current_input = logical_body.get("input")?.as_array()?;
+    if current_input.len() < previous_input.len() {
+        return None;
+    }
+    if !previous_input
+        .iter()
+        .zip(current_input.iter())
+        .all(|(previous, current)| previous == current)
+    {
+        return None;
+    }
+
+    let mut body = logical_body.clone();
+    let serde_json::Value::Object(map) = &mut body else {
+        return None;
+    };
+    map.insert(
+        "previous_response_id".to_string(),
+        serde_json::Value::String(previous_id.clone()),
+    );
+    map.insert(
+        "input".to_string(),
+        serde_json::Value::Array(current_input[previous_input.len()..].to_vec()),
+    );
+    Some(body)
+}
+
+fn record_responses_wire_request(
+    state: &Arc<Mutex<ResponsesWebSocketSessionState>>,
+    logical_body: &serde_json::Value,
+    wire_body: &serde_json::Value,
+) {
+    let mut state = state.lock().expect("responses ws state");
+    let used_previous_response_id = wire_body.get("previous_response_id").is_some();
+    state.last_logical_request_body = Some(logical_body.clone());
+    state.last_wire_request_body = Some(wire_body.clone());
+    state.last_wire_used_previous_response_id = used_previous_response_id;
+    state.last_wire_used_prewarm_response_id =
+        used_previous_response_id && state.last_response_from_prewarm;
+}
+
+fn non_input_responses_body(body: &serde_json::Value) -> serde_json::Value {
+    let serde_json::Value::Object(map) = body else {
+        return body.clone();
+    };
+    let mut copy = map.clone();
+    copy.remove("input");
+    copy.remove("previous_response_id");
+    copy.remove("generate");
+    serde_json::Value::Object(copy)
+}
+
+struct ResponsesSessionTrackingFrames {
+    inner: Box<dyn FrameStream>,
+    state: Arc<Mutex<ResponsesWebSocketSessionState>>,
+    logical_body: serde_json::Value,
+    from_prewarm: bool,
+    items_added: Vec<serde_json::Value>,
+    terminal_seen: bool,
+}
+
+impl FrameStream for ResponsesSessionTrackingFrames {
+    fn next_frame(&mut self) -> BoxFuture<'_, Result<Option<RawStreamFrame>, LlmError>> {
+        Box::pin(async move {
+            match self.inner.next_frame().await {
+                Ok(Some(frame)) => {
+                    self.observe_frame(&frame);
+                    Ok(Some(frame))
+                }
+                Ok(None) => {
+                    if !self.terminal_seen {
+                        self.mark_failed(false);
+                    }
+                    Ok(None)
+                }
+                Err(error) => {
+                    self.mark_failed(true);
+                    Err(error)
+                }
+            }
+        })
+    }
+}
+
+impl ResponsesSessionTrackingFrames {
+    fn observe_frame(&mut self, frame: &RawStreamFrame) {
+        let Ok(root) = serde_json::from_slice::<serde_json::Value>(&frame.bytes) else {
+            return;
+        };
+        match root.get("type").and_then(serde_json::Value::as_str) {
+            Some("response.output_item.added") => {
+                if let Some(item) = root.get("item") {
+                    self.items_added.push(item.clone());
+                }
+            }
+            Some("response.completed") => {
+                self.terminal_seen = true;
+                let response_id = root
+                    .get("response")
+                    .and_then(|response| response.get("id"))
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_string);
+                let mut state = self.state.lock().expect("responses ws state");
+                state.last_request_body = Some(self.logical_body.clone());
+                state.last_response_id = response_id;
+                state.last_added_response_items = self.items_added.clone();
+                state.last_response_from_prewarm = self.from_prewarm;
+                state.connection_healthy = true;
+            }
+            Some("response.incomplete" | "response.failed" | "error") => {
+                self.terminal_seen = true;
+                self.mark_failed(matches!(
+                    root.get("type").and_then(serde_json::Value::as_str),
+                    Some("response.failed" | "error")
+                ));
+            }
+            _ => {}
+        }
+    }
+
+    fn mark_failed(&self, connection_unhealthy: bool) {
+        let mut state = self.state.lock().expect("responses ws state");
+        state.last_request_body = None;
+        state.last_response_id = None;
+        state.last_added_response_items.clear();
+        state.last_response_from_prewarm = false;
+        if connection_unhealthy {
+            state.connection_healthy = false;
+        }
     }
 }
 
@@ -860,7 +1575,10 @@ mod tests {
     #[test]
     fn append_beta_to_existing_multi_entry_appends_at_end() {
         assert_eq!(
-            append_beta(Some("claude-code-20250219,interleaved-thinking-2025-05-14"), "oauth-2025-04-20"),
+            append_beta(
+                Some("claude-code-20250219,interleaved-thinking-2025-05-14"),
+                "oauth-2025-04-20"
+            ),
             "claude-code-20250219,interleaved-thinking-2025-05-14,oauth-2025-04-20",
         );
     }
@@ -869,7 +1587,10 @@ mod tests {
     fn append_beta_does_not_duplicate_when_already_present() {
         // oauth-2025-04-20 is already in the list — must not be added again.
         assert_eq!(
-            append_beta(Some("claude-code-20250219,oauth-2025-04-20"), "oauth-2025-04-20"),
+            append_beta(
+                Some("claude-code-20250219,oauth-2025-04-20"),
+                "oauth-2025-04-20"
+            ),
             "claude-code-20250219,oauth-2025-04-20",
         );
     }
@@ -889,13 +1610,21 @@ mod tests {
         let existing = "claude-code-20250219,interleaved-thinking-2025-05-14";
         let result = append_beta(Some(existing), "oauth-2025-04-20");
         // Both pre-existing betas survive.
-        assert!(result.split(',').any(|p| p == "claude-code-20250219"),
-            "claude-code beta must survive; got: {result}");
-        assert!(result.split(',').any(|p| p == "interleaved-thinking-2025-05-14"),
-            "interleaved-thinking beta must survive; got: {result}");
+        assert!(
+            result.split(',').any(|p| p == "claude-code-20250219"),
+            "claude-code beta must survive; got: {result}"
+        );
+        assert!(
+            result
+                .split(',')
+                .any(|p| p == "interleaved-thinking-2025-05-14"),
+            "interleaved-thinking beta must survive; got: {result}"
+        );
         // And oauth is now present.
-        assert!(result.split(',').any(|p| p == "oauth-2025-04-20"),
-            "oauth beta must be present; got: {result}");
+        assert!(
+            result.split(',').any(|p| p == "oauth-2025-04-20"),
+            "oauth beta must be present; got: {result}"
+        );
     }
 
     /// Dedup must work even when segments carry surrounding whitespace from a

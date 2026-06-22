@@ -84,9 +84,10 @@ pub fn start_upload_request(
         format!("{root}/upload/v1beta/files"),
         serde_json::json!({"file": {"display_name": display_name}}),
     );
-    request
-        .headers
-        .insert("x-goog-upload-protocol".to_string(), "resumable".to_string());
+    request.headers.insert(
+        "x-goog-upload-protocol".to_string(),
+        "resumable".to_string(),
+    );
     request
         .headers
         .insert("x-goog-upload-command".to_string(), "start".to_string());
@@ -114,9 +115,10 @@ pub fn parse_start_response(headers: &BTreeMap<String, String>) -> Result<String
     headers
         .get("x-goog-upload-url")
         .or_else(|| {
-            headers
-                .iter()
-                .find_map(|(name, value)| name.eq_ignore_ascii_case("x-goog-upload-url").then_some(value))
+            headers.iter().find_map(|(name, value)| {
+                name.eq_ignore_ascii_case("x-goog-upload-url")
+                    .then_some(value)
+            })
         })
         .cloned()
         .ok_or_else(|| LlmError::InvalidRequest {
@@ -143,8 +145,10 @@ pub fn upload_finalize_request(upload_url: &str, bytes: Vec<u8>) -> ProviderRequ
         url: upload_url.to_string(),
         headers,
         body_json: Value::Null,
+        stream_transport: crate::ProviderStreamTransport::Http,
         stream_framing: crate::StreamFraming::Sse,
         body_bytes: Some(bytes),
+        websocket_connect_timeout_ms: None,
     }
 }
 
@@ -178,8 +182,10 @@ pub fn file_status_request(base_url: &str, file_name: &str) -> ProviderRequest {
         url: format!("{root}/v1beta/{file_name}"),
         headers: BTreeMap::new(),
         body_json: Value::Null,
+        stream_transport: crate::ProviderStreamTransport::Http,
         stream_framing: crate::StreamFraming::Sse,
         body_bytes: None,
+        websocket_connect_timeout_ms: None,
     }
 }
 

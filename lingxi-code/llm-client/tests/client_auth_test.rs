@@ -1,12 +1,12 @@
 use std::sync::Arc;
 
 use llm_client::client::DefaultLlmClient;
+use llm_client::BoxFuture;
 use llm_client::{
     AuthStrategy, AzureConfig, Capabilities, ClientConfig, Credential, CredentialConfig,
     CredentialProvider, CredentialScope, LlmError, LlmRequest, ModelProfile, PricingConfig,
     ProtocolFamily, ProviderId, ProviderProfile, SigningConfig,
 };
-use llm_client::BoxFuture;
 
 // ── Fix 3.3: ChatGptOAuth dispatch integration ───────────────────────────────
 
@@ -37,7 +37,9 @@ async fn chatgpt_oauth_injects_bearer_and_account_id_headers() {
             base_url: "https://chatgpt.com/backend-api".to_string(),
             protocol: ProtocolFamily::OpenAiResponses,
             auth: AuthStrategy::ChatGptOAuth,
-            credential: CredentialConfig::HostManaged { id: "chatgpt-oauth".to_string() },
+            credential: CredentialConfig::HostManaged {
+                id: "chatgpt-oauth".to_string(),
+            },
             models: vec![ModelProfile {
                 display_model: "p-model".to_string(),
                 request_model: "p-model".to_string(),
@@ -52,25 +54,42 @@ async fn chatgpt_oauth_injects_bearer_and_account_id_headers() {
             pricing: PricingConfig::default(),
             signing: None,
             azure: None,
+            supports_websockets: false,
+            supports_websocket_compression: false,
+            websocket_connect_timeout_ms: None,
         }],
     })
     .expect("client")
     .with_credential_provider(Arc::new(ChatGptStore));
 
-    let prepared = client.prepare(&LlmRequest::new("p-model")).await.expect("prepare");
+    let prepared = client
+        .prepare(&LlmRequest::new("p-model"))
+        .await
+        .expect("prepare");
 
     assert_eq!(
-        prepared.provider_request.headers.get("Authorization").map(String::as_str),
+        prepared
+            .provider_request
+            .headers
+            .get("Authorization")
+            .map(String::as_str),
         Some("Bearer t"),
         "ChatGptOAuth must inject Authorization: Bearer header"
     );
     assert_eq!(
-        prepared.provider_request.headers.get("ChatGPT-Account-ID").map(String::as_str),
+        prepared
+            .provider_request
+            .headers
+            .get("ChatGPT-Account-ID")
+            .map(String::as_str),
         Some("a"),
         "ChatGptOAuth must inject ChatGPT-Account-ID header"
     );
     assert!(
-        !prepared.provider_request.headers.contains_key("X-OpenAI-Fedramp"),
+        !prepared
+            .provider_request
+            .headers
+            .contains_key("X-OpenAI-Fedramp"),
         "ChatGptOAuth must NOT inject X-OpenAI-Fedramp when fedramp=false"
     );
 }
@@ -103,6 +122,9 @@ fn profile(
         pricing: PricingConfig::default(),
         signing: None,
         azure: None,
+        supports_websockets: false,
+        supports_websocket_compression: false,
+        websocket_connect_timeout_ms: None,
     }
 }
 
@@ -127,11 +149,20 @@ async fn api_key_strategy_uses_provider_specific_headers() {
         ProtocolFamily::AnthropicMessages,
         "https://api.anthropic.com",
         AuthStrategy::ApiKey,
-        CredentialConfig::Env { var: "LLM_CLIENT_AUTH_TEST_ANTHROPIC".to_string() },
+        CredentialConfig::Env {
+            var: "LLM_CLIENT_AUTH_TEST_ANTHROPIC".to_string(),
+        },
     );
-    let prepared = client.prepare(&LlmRequest::new("p-model")).await.expect("prepare");
+    let prepared = client
+        .prepare(&LlmRequest::new("p-model"))
+        .await
+        .expect("prepare");
     assert_eq!(
-        prepared.provider_request.headers.get("x-api-key").map(String::as_str),
+        prepared
+            .provider_request
+            .headers
+            .get("x-api-key")
+            .map(String::as_str),
         Some("anthropic-secret")
     );
 
@@ -141,11 +172,20 @@ async fn api_key_strategy_uses_provider_specific_headers() {
         ProtocolFamily::GeminiGenerateContent,
         "https://generativelanguage.googleapis.com/v1beta",
         AuthStrategy::ApiKey,
-        CredentialConfig::Env { var: "LLM_CLIENT_AUTH_TEST_GEMINI".to_string() },
+        CredentialConfig::Env {
+            var: "LLM_CLIENT_AUTH_TEST_GEMINI".to_string(),
+        },
     );
-    let prepared = client.prepare(&LlmRequest::new("p-model")).await.expect("prepare");
+    let prepared = client
+        .prepare(&LlmRequest::new("p-model"))
+        .await
+        .expect("prepare");
     assert_eq!(
-        prepared.provider_request.headers.get("x-goog-api-key").map(String::as_str),
+        prepared
+            .provider_request
+            .headers
+            .get("x-goog-api-key")
+            .map(String::as_str),
         Some("gemini-secret")
     );
 
@@ -155,11 +195,20 @@ async fn api_key_strategy_uses_provider_specific_headers() {
         ProtocolFamily::OpenAiChat,
         "https://api.openai.com/v1",
         AuthStrategy::ApiKey,
-        CredentialConfig::Env { var: "LLM_CLIENT_AUTH_TEST_OPENAI".to_string() },
+        CredentialConfig::Env {
+            var: "LLM_CLIENT_AUTH_TEST_OPENAI".to_string(),
+        },
     );
-    let prepared = client.prepare(&LlmRequest::new("p-model")).await.expect("prepare");
+    let prepared = client
+        .prepare(&LlmRequest::new("p-model"))
+        .await
+        .expect("prepare");
     assert_eq!(
-        prepared.provider_request.headers.get("Authorization").map(String::as_str),
+        prepared
+            .provider_request
+            .headers
+            .get("Authorization")
+            .map(String::as_str),
         Some("Bearer openai-secret")
     );
 }
@@ -172,17 +221,30 @@ async fn oauth_bearer_on_anthropic_adds_oauth_beta_header() {
         ProtocolFamily::AnthropicMessages,
         "https://api.anthropic.com",
         AuthStrategy::OAuthBearer,
-        CredentialConfig::Env { var: "LLM_CLIENT_AUTH_TEST_OAUTH".to_string() },
+        CredentialConfig::Env {
+            var: "LLM_CLIENT_AUTH_TEST_OAUTH".to_string(),
+        },
     );
 
-    let prepared = client.prepare(&LlmRequest::new("p-model")).await.expect("prepare");
+    let prepared = client
+        .prepare(&LlmRequest::new("p-model"))
+        .await
+        .expect("prepare");
 
     assert_eq!(
-        prepared.provider_request.headers.get("Authorization").map(String::as_str),
+        prepared
+            .provider_request
+            .headers
+            .get("Authorization")
+            .map(String::as_str),
         Some("Bearer oauth-token")
     );
     assert_eq!(
-        prepared.provider_request.headers.get("anthropic-beta").map(String::as_str),
+        prepared
+            .provider_request
+            .headers
+            .get("anthropic-beta")
+            .map(String::as_str),
         Some("oauth-2025-04-20")
     );
 }
@@ -196,7 +258,11 @@ async fn host_managed_credentials_resolve_through_injected_provider() {
             &'a self,
             scope: &'a CredentialScope,
         ) -> BoxFuture<'a, Result<Credential, LlmError>> {
-            let id = scope.credential_id.as_deref().unwrap_or("missing").to_string();
+            let id = scope
+                .credential_id
+                .as_deref()
+                .unwrap_or("missing")
+                .to_string();
             Box::pin(async move { Ok(Credential::BearerToken(format!("token-for-{id}"))) })
         }
     }
@@ -207,16 +273,25 @@ async fn host_managed_credentials_resolve_through_injected_provider() {
             ProtocolFamily::OpenAiChat,
             "https://api.openai.com/v1",
             AuthStrategy::Bearer,
-            CredentialConfig::HostManaged { id: "team-key".to_string() },
+            CredentialConfig::HostManaged {
+                id: "team-key".to_string(),
+            },
         )],
     })
     .expect("client")
     .with_credential_provider(Arc::new(RecordingStore));
 
-    let prepared = client.prepare(&LlmRequest::new("p-model")).await.expect("prepare");
+    let prepared = client
+        .prepare(&LlmRequest::new("p-model"))
+        .await
+        .expect("prepare");
 
     assert_eq!(
-        prepared.provider_request.headers.get("Authorization").map(String::as_str),
+        prepared
+            .provider_request
+            .headers
+            .get("Authorization")
+            .map(String::as_str),
         Some("Bearer token-for-team-key")
     );
 }
@@ -228,11 +303,16 @@ async fn host_managed_credentials_without_provider_fail_authentication() {
         ProtocolFamily::OpenAiChat,
         "https://api.openai.com/v1",
         AuthStrategy::Bearer,
-        CredentialConfig::Static { id: "k".to_string() },
+        CredentialConfig::Static {
+            id: "k".to_string(),
+        },
     );
 
     assert!(matches!(
-        client.prepare(&LlmRequest::new("p-model")).await.unwrap_err(),
+        client
+            .prepare(&LlmRequest::new("p-model"))
+            .await
+            .unwrap_err(),
         LlmError::Authentication
     ));
 }
@@ -269,24 +349,36 @@ async fn sigv4_without_signing_config_fails_at_prepare() {
             // get past codec construction and hit the auth path.
             protocol: ProtocolFamily::AnthropicMessages,
             auth: AuthStrategy::AwsSigV4,
-            credential: CredentialConfig::HostManaged { id: "bedrock-key".to_string() },
+            credential: CredentialConfig::HostManaged {
+                id: "bedrock-key".to_string(),
+            },
             models: vec![ModelProfile {
                 display_model: "p-model".to_string(),
                 request_model: "p-model".to_string(),
                 billing_model: "p-model".to_string(),
                 aliases: vec![],
-                capabilities: Capabilities { streaming: true, tools: true, ..Default::default() },
+                capabilities: Capabilities {
+                    streaming: true,
+                    tools: true,
+                    ..Default::default()
+                },
             }],
             pricing: PricingConfig::default(),
             // No signing config → must fail at prepare() with InvalidRequest.
             signing: None,
             azure: None,
+            supports_websockets: false,
+            supports_websocket_compression: false,
+            websocket_connect_timeout_ms: None,
         }],
     })
     .expect("client")
     .with_credential_provider(Arc::new(SigV4Store));
 
-    let err = client.prepare(&LlmRequest::new("p-model")).await.unwrap_err();
+    let err = client
+        .prepare(&LlmRequest::new("p-model"))
+        .await
+        .unwrap_err();
     assert!(
         matches!(&err, LlmError::InvalidRequest { message } if message.contains("signing")),
         "expected InvalidRequest about missing signing config, got: {err:?}"
@@ -302,12 +394,21 @@ async fn gcp_token_injects_bearer_header() {
         ProtocolFamily::GeminiGenerateContent,
         "https://generativelanguage.googleapis.com/v1beta",
         AuthStrategy::GcpToken,
-        CredentialConfig::Env { var: "LLM_CLIENT_AUTH_TEST_GCP".to_string() },
+        CredentialConfig::Env {
+            var: "LLM_CLIENT_AUTH_TEST_GCP".to_string(),
+        },
     );
 
-    let prepared = client.prepare(&LlmRequest::new("p-model")).await.expect("prepare");
+    let prepared = client
+        .prepare(&LlmRequest::new("p-model"))
+        .await
+        .expect("prepare");
     assert_eq!(
-        prepared.provider_request.headers.get("Authorization").map(String::as_str),
+        prepared
+            .provider_request
+            .headers
+            .get("Authorization")
+            .map(String::as_str),
         Some("Bearer gcp-bearer-token"),
         "GcpToken must inject Authorization: Bearer"
     );
@@ -321,47 +422,76 @@ async fn azure_token_injects_api_key_header() {
     // Build an Azure OpenAI profile with AzureToken auth.
     let client = DefaultLlmClient::from_config(ClientConfig {
         providers: vec![ProviderProfile {
-            provider_id: ProviderId::OpenAICompatible { name: "azure".to_string() },
+            provider_id: ProviderId::OpenAICompatible {
+                name: "azure".to_string(),
+            },
             profile_name: "p".to_string(),
             base_url: "https://myresource.openai.azure.com".to_string(),
             protocol: ProtocolFamily::AzureOpenAi,
             auth: AuthStrategy::AzureToken,
-            credential: CredentialConfig::Env { var: "LLM_CLIENT_AUTH_TEST_AZURE".to_string() },
+            credential: CredentialConfig::Env {
+                var: "LLM_CLIENT_AUTH_TEST_AZURE".to_string(),
+            },
             models: vec![ModelProfile {
                 display_model: "p-model".to_string(),
                 request_model: "p-model".to_string(),
                 billing_model: "p-model".to_string(),
                 aliases: vec![],
-                capabilities: Capabilities { streaming: true, tools: true, ..Default::default() },
+                capabilities: Capabilities {
+                    streaming: true,
+                    tools: true,
+                    ..Default::default()
+                },
             }],
             pricing: PricingConfig::default(),
             signing: None,
-            azure: Some(AzureConfig { api_version: "2024-02-01".to_string() }),
+            azure: Some(AzureConfig {
+                api_version: "2024-02-01".to_string(),
+            }),
+            supports_websockets: false,
+            supports_websocket_compression: false,
+            websocket_connect_timeout_ms: None,
         }],
     })
     .expect("client");
 
-    let prepared = client.prepare(&LlmRequest::new("p-model")).await.expect("prepare");
+    let prepared = client
+        .prepare(&LlmRequest::new("p-model"))
+        .await
+        .expect("prepare");
 
     // api-key header must be present with the secret value.
     assert_eq!(
-        prepared.provider_request.headers.get("api-key").map(String::as_str),
+        prepared
+            .provider_request
+            .headers
+            .get("api-key")
+            .map(String::as_str),
         Some("azure-api-key-value"),
         "AzureToken must inject api-key header"
     );
     // Authorization must NOT be present (Azure uses api-key, not Bearer).
     assert!(
-        !prepared.provider_request.headers.contains_key("Authorization"),
+        !prepared
+            .provider_request
+            .headers
+            .contains_key("Authorization"),
         "AzureToken must NOT inject Authorization header"
     );
     // URL must use the Azure deployment pattern.
     assert!(
-        prepared.provider_request.url.contains("/openai/deployments/"),
+        prepared
+            .provider_request
+            .url
+            .contains("/openai/deployments/"),
         "Azure URL must include deployment segment; got: {}",
         prepared.provider_request.url
     );
     assert!(
-        prepared.provider_request.url.contains("api-version=2024-02-01"),
+        prepared
+            .provider_request
+            .url
+            .contains("api-version=2024-02-01"),
         "Azure URL must include api-version; got: {}",
         prepared.provider_request.url
     );
@@ -383,9 +513,15 @@ async fn missing_credential_config_sends_request_without_client_auth() {
         CredentialConfig::None,
     );
 
-    let prepared = client.prepare(&LlmRequest::new("p-model")).await.expect("prepare");
+    let prepared = client
+        .prepare(&LlmRequest::new("p-model"))
+        .await
+        .expect("prepare");
 
-    assert!(!prepared.provider_request.headers.contains_key("Authorization"));
+    assert!(!prepared
+        .provider_request
+        .headers
+        .contains_key("Authorization"));
     assert!(!prepared.provider_request.headers.contains_key("x-api-key"));
 }
 
@@ -397,7 +533,9 @@ async fn prepare_count_tokens_is_authenticated_for_anthropic_routes() {
         ProtocolFamily::AnthropicMessages,
         "https://api.anthropic.com",
         AuthStrategy::ApiKey,
-        CredentialConfig::Env { var: "LLM_CLIENT_AUTH_TEST_CT".to_string() },
+        CredentialConfig::Env {
+            var: "LLM_CLIENT_AUTH_TEST_CT".to_string(),
+        },
     );
 
     let prepared = client
@@ -406,7 +544,10 @@ async fn prepare_count_tokens_is_authenticated_for_anthropic_routes() {
         .expect("prepared");
 
     assert!(prepared.url.ends_with("/v1/messages/count_tokens"));
-    assert_eq!(prepared.headers.get("x-api-key").map(String::as_str), Some("ct-key"));
+    assert_eq!(
+        prepared.headers.get("x-api-key").map(String::as_str),
+        Some("ct-key")
+    );
     assert!(prepared.body_json.get("max_tokens").is_none());
 }
 
@@ -425,7 +566,9 @@ async fn prepare_count_tokens_rejects_non_anthropic_routes() {
         .await
         .unwrap_err();
 
-    assert!(matches!(err, LlmError::InvalidRequest { message } if message.contains("count_tokens")));
+    assert!(
+        matches!(err, LlmError::InvalidRequest { message } if message.contains("count_tokens"))
+    );
 }
 
 // ── Fix 4: Null-body hash divergence ─────────────────────────────────────────
@@ -472,8 +615,7 @@ async fn sigv4_null_body_signs_as_null_string() {
     );
     // The hash of "null" bytes is known.
     assert_eq!(
-        null_hash,
-        "74234e98afe7498fb5daf1f36ac2d78acc339464f950703b8c019892f982b90b",
+        null_hash, "74234e98afe7498fb5daf1f36ac2d78acc339464f950703b8c019892f982b90b",
         "SHA-256('null') must be the known value"
     );
 }
@@ -482,6 +624,7 @@ async fn sigv4_null_body_signs_as_null_string() {
 /// `Value::Null`, the `x-amz-content-sha256` header must equal
 /// SHA-256("null"), not SHA-256("").
 #[tokio::test]
+#[allow(clippy::too_many_lines)]
 async fn sigv4_null_body_content_sha256_via_client() {
     use std::time::{Duration, UNIX_EPOCH};
     #[derive(Debug)]
@@ -512,7 +655,9 @@ async fn sigv4_null_body_content_sha256_via_client() {
             base_url: "https://bedrock-runtime.us-east-1.amazonaws.com".to_string(),
             protocol: ProtocolFamily::AnthropicMessages,
             auth: AuthStrategy::AwsSigV4,
-            credential: CredentialConfig::HostManaged { id: "k".to_string() },
+            credential: CredentialConfig::HostManaged {
+                id: "k".to_string(),
+            },
             models: vec![ModelProfile {
                 display_model: "p-model".to_string(),
                 request_model: "p-model".to_string(),
@@ -530,6 +675,9 @@ async fn sigv4_null_body_content_sha256_via_client() {
                 service: "bedrock".to_string(),
             }),
             azure: None,
+            supports_websockets: false,
+            supports_websocket_compression: false,
+            websocket_connect_timeout_ms: None,
         }],
     })
     .expect("client")
@@ -553,7 +701,12 @@ async fn sigv4_null_body_content_sha256_via_client() {
         .provider_request
         .headers
         .iter()
-        .filter(|(k, _)| !matches!(k.as_str(), "Authorization" | "x-amz-date" | "x-amz-content-sha256"))
+        .filter(|(k, _)| {
+            !matches!(
+                k.as_str(),
+                "Authorization" | "x-amz-date" | "x-amz-content-sha256"
+            )
+        })
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
     let re_signed = llm_client::sigv4::sign_request(
@@ -571,7 +724,9 @@ async fn sigv4_null_body_content_sha256_via_client() {
     .expect("re-sign must succeed");
 
     // x-amz-content-sha256 must match the independent hash.
-    let actual_hash = prepared.provider_request.headers
+    let actual_hash = prepared
+        .provider_request
+        .headers
         .get("x-amz-content-sha256")
         .expect("x-amz-content-sha256 must be set");
     assert_eq!(
@@ -584,11 +739,19 @@ async fn sigv4_null_body_content_sha256_via_client() {
         actual_hash, expected_hash,
         "the body produced by AnthropicMessages codec is not null"
     );
-    let auth = prepared.provider_request.headers
+    let auth = prepared
+        .provider_request
+        .headers
         .get("Authorization")
         .expect("Authorization must be set");
-    assert!(auth.starts_with("AWS4-HMAC-SHA256 "), "Authorization must use SigV4; got: {auth}");
-    assert!(auth.contains("20150830"), "Authorization must contain the fixed date; got: {auth}");
+    assert!(
+        auth.starts_with("AWS4-HMAC-SHA256 "),
+        "Authorization must use SigV4; got: {auth}"
+    );
+    assert!(
+        auth.contains("20150830"),
+        "Authorization must contain the fixed date; got: {auth}"
+    );
 }
 
 // ── Fix 5: clock injection + exact-Authorization client test ─────────────────
@@ -628,7 +791,9 @@ async fn sigv4_exact_authorization_header_with_fixed_clock() {
             base_url: "https://bedrock-runtime.us-east-1.amazonaws.com".to_string(),
             protocol: ProtocolFamily::AnthropicMessages,
             auth: AuthStrategy::AwsSigV4,
-            credential: CredentialConfig::HostManaged { id: "k".to_string() },
+            credential: CredentialConfig::HostManaged {
+                id: "k".to_string(),
+            },
             models: vec![ModelProfile {
                 display_model: "p-model".to_string(),
                 request_model: "p-model".to_string(),
@@ -646,6 +811,9 @@ async fn sigv4_exact_authorization_header_with_fixed_clock() {
                 service: "bedrock".to_string(),
             }),
             azure: None,
+            supports_websockets: false,
+            supports_websocket_compression: false,
+            websocket_connect_timeout_ms: None,
         }],
     })
     .expect("client")
@@ -719,7 +887,8 @@ async fn sigv4_exact_authorization_header_with_fixed_clock() {
     // Hardcoded regression pin (computed once via sigv4::sign_request above, 2026-06-12).
     // Signed headers: anthropic-version;content-type;host;x-amz-date
     // Signature covers: AnthropicMessages encode of LlmRequest::new("p-model") at 20150830T123600Z.
-    let pinned_auth = "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/20150830/us-east-1/bedrock/aws4_request, \
+    let pinned_auth =
+        "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/20150830/us-east-1/bedrock/aws4_request, \
         SignedHeaders=anthropic-version;content-type;host;x-amz-date, \
         Signature=ba69f90a8b53e7b427de3a72a5233d07b159468b225c43f3ce290021a14b3814";
     assert_eq!(
@@ -729,14 +898,22 @@ async fn sigv4_exact_authorization_header_with_fixed_clock() {
 
     // Also check the x-amz-date header is the pinned timestamp.
     assert_eq!(
-        prepared.provider_request.headers.get("x-amz-date").map(String::as_str),
+        prepared
+            .provider_request
+            .headers
+            .get("x-amz-date")
+            .map(String::as_str),
         Some("20150830T123600Z"),
         "x-amz-date must match the fixed clock"
     );
 
     // And x-amz-content-sha256 must equal the independently-derived hash.
     assert_eq!(
-        prepared.provider_request.headers.get("x-amz-content-sha256").map(String::as_str),
+        prepared
+            .provider_request
+            .headers
+            .get("x-amz-content-sha256")
+            .map(String::as_str),
         Some(expected.x_amz_content_sha256.as_str()),
         "x-amz-content-sha256 must match independent hash of body bytes"
     );

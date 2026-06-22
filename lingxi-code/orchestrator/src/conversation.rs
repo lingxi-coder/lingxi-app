@@ -401,6 +401,24 @@ fn entrypoint_value() -> String {
         .unwrap_or_else(|| "cli".to_string())
 }
 
+/// Build the persisted assistant-envelope `usage` value from a normalized
+/// [`llm_client::Usage`]. Prefers the raw Anthropic usage object the codec
+/// retained on `provider_metadata` (byte-faithful to claude-code's persisted
+/// `BetaMessage.usage`); falls back to a reconstruction from the normalized
+/// billable buckets only when no raw object is present (unusual).
+fn assistant_usage_value(usage: &llm_client::Usage) -> serde_json::Value {
+    if usage.provider_metadata.is_object() {
+        return usage.provider_metadata.clone();
+    }
+    let b = &usage.billable_tokens;
+    serde_json::json!({
+        "input_tokens": b.input,
+        "cache_creation_input_tokens": b.cache_write,
+        "cache_read_input_tokens": b.cache_read,
+        "output_tokens": b.output,
+    })
+}
+
 /// Map Rust's `std::env::consts::OS` to the node `process.platform` value that
 /// claude-code's `# Environment` `Platform:` line emits (`je.platform`). Rust
 /// uses `macos`/`windows`; node uses `darwin`/`win32`. Other targets
@@ -2233,7 +2251,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         prompt_id: Option<String>,
     ) -> session::JsonlMessage {
         self.to_jsonl_message_with_inner_id(
-            msg, session_id, parent_uuid, git_branch, entrypoint, prompt_id, None,
+            msg, session_id, parent_uuid, git_branch, entrypoint, prompt_id, None, None, None,
         )
     }
 
@@ -2259,16 +2277,62 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         entrypoint: Option<String>,
         prompt_id: Option<String>,
         inner_message_id: Option<&str>,
+        // The real-response persist path supplies the response `model` and the
+        // raw Anthropic `usage` object, which makes the assistant line carry the
+        // full BetaMessage envelope (`{id,type,role,content,model,stop_reason,
+        // stop_sequence,usage}`, matching claude-code + the golden fixtures).
+        // Both `None` (the synthetic / user / system path) keeps the prior
+        // `{role,content}` inner shape.
+        assistant_model: Option<&str>,
+        assistant_usage: Option<&serde_json::Value>,
     ) -> session::JsonlMessage {
         let (kind, mut inner_message) = match msg {
             ConversationMessage::User { content, .. } => (
                 "user",
                 serde_json::json!({ "role": "user", "content": content }),
             ),
-            ConversationMessage::Assistant { content, .. } => (
-                "assistant",
-                serde_json::json!({ "role": "assistant", "content": content }),
-            ),
+            ConversationMessage::Assistant {
+                content,
+                stop_reason,
+                ..
+            } => {
+                let inner = if let Some(model) = assistant_model {
+                    // Build in the BetaMessage key order (`id` first); the block
+                    // below re-stamps the shared `id` idempotently.
+                    let mut m = serde_json::Map::new();
+                    if let Some(id) = inner_message_id {
+                        m.insert("id".to_string(), serde_json::Value::String(id.to_string()));
+                    }
+                    m.insert(
+                        "type".to_string(),
+                        serde_json::Value::String("message".to_string()),
+                    );
+                    m.insert(
+                        "role".to_string(),
+                        serde_json::Value::String("assistant".to_string()),
+                    );
+                    m.insert("content".to_string(), serde_json::json!(content));
+                    m.insert(
+                        "model".to_string(),
+                        serde_json::Value::String(model.to_string()),
+                    );
+                    m.insert(
+                        "stop_reason".to_string(),
+                        stop_reason
+                            .clone()
+                            .map_or(serde_json::Value::Null, serde_json::Value::String),
+                    );
+                    m.insert("stop_sequence".to_string(), serde_json::Value::Null);
+                    m.insert(
+                        "usage".to_string(),
+                        assistant_usage.cloned().unwrap_or(serde_json::Value::Null),
+                    );
+                    serde_json::Value::Object(m)
+                } else {
+                    serde_json::json!({ "role": "assistant", "content": content })
+                };
+                ("assistant", inner)
+            }
             ConversationMessage::System { content, .. } => (
                 "system",
                 serde_json::json!({ "role": "system", "content": content }),
@@ -2472,6 +2536,9 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
     pub(crate) async fn persist_assistant_per_block(
         &self,
         msg: &ConversationMessage,
+        // Raw Anthropic `usage` object for the BetaMessage envelope (the codec's
+        // `Usage::provider_metadata`); `None` writes `usage: null`.
+        usage: Option<&serde_json::Value>,
     ) -> std::collections::HashMap<protocol::ToolUseId, String> {
         let mut map: std::collections::HashMap<protocol::ToolUseId, String> =
             std::collections::HashMap::new();
@@ -2492,7 +2559,10 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         // Shared inner Anthropic `message.id` for every block of this turn.
         let inner_id = turn_id.as_uuid().to_string();
 
-        let session_id_str = self.session.lock().await.session_id.to_string();
+        let (session_id_str, model) = {
+            let s = self.session.lock().await;
+            (s.session_id.to_string(), s.model.clone())
+        };
         let git_branch = self.resolve_git_branch().await;
         let entrypoint = Some(entrypoint_value());
 
@@ -2514,6 +2584,8 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                 entrypoint.clone(),
                 None,
                 Some(&inner_id),
+                Some(&model),
+                usage,
             );
             let line_uuid = jmsg.uuid.clone();
             match writer.append(&jmsg).await {
@@ -3952,8 +4024,12 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             // parent. The in-memory `s.history` above stays the single merged
             // assistant message (the Anthropic request needs all blocks in one
             // assistant turn).
-            let tool_use_parent_uuids =
-                self.persist_assistant_per_block(&assistant_msg).await;
+            // Raw Anthropic `usage` object for the persisted BetaMessage envelope
+            // (the streaming codec retains it on `Usage::provider_metadata`).
+            let assistant_usage = pumped.usage.as_ref().map(assistant_usage_value);
+            let tool_use_parent_uuids = self
+                .persist_assistant_per_block(&assistant_msg, assistant_usage.as_ref())
+                .await;
             // Fallback parent (the LAST persisted block's uuid) for any
             // tool_result whose tool_use id is missing from the map (defensive).
             let assistant_uuid = self.last_jsonl_uuid.lock().await.clone();
@@ -8659,6 +8735,77 @@ mod persist_with_parent_tests {
         );
     }
 
+    #[tokio::test]
+    async fn assistant_envelope_carries_full_betamessage_shape() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let orch = orch_with_writer(dir.path(), dir.path().join("s.jsonl"));
+        let msg = ConversationMessage::Assistant {
+            id: protocol::MessageId::new(),
+            content: vec![protocol::ContentBlock::Text { text: "hi".into() }],
+            stop_reason: Some("end_turn".into()),
+        };
+        let usage = serde_json::json!({ "input_tokens": 5, "output_tokens": 3 });
+
+        // Real path (model + usage supplied) → full BetaMessage envelope, in the
+        // claude-code / golden-fixture key order.
+        let jmsg = orch.to_jsonl_message_with_inner_id(
+            &msg,
+            "sess",
+            None,
+            None,
+            None,
+            None,
+            Some("inner-abc"),
+            Some("claude-opus-4-8"),
+            Some(&usage),
+        );
+        let inner = jmsg.message.as_object().expect("inner is an object");
+        let keys: Vec<&str> = inner.keys().map(String::as_str).collect();
+        assert_eq!(
+            keys,
+            vec![
+                "id",
+                "type",
+                "role",
+                "content",
+                "model",
+                "stop_reason",
+                "stop_sequence",
+                "usage"
+            ],
+            "BetaMessage envelope key order"
+        );
+        assert_eq!(inner["id"], serde_json::json!("inner-abc"));
+        assert_eq!(inner["type"], serde_json::json!("message"));
+        assert_eq!(inner["role"], serde_json::json!("assistant"));
+        assert_eq!(inner["model"], serde_json::json!("claude-opus-4-8"));
+        assert_eq!(inner["stop_reason"], serde_json::json!("end_turn"));
+        assert_eq!(inner["stop_sequence"], serde_json::Value::Null);
+        assert_eq!(inner["usage"], usage);
+
+        // Synthetic / other path (no model/usage) → the prior `{role, content}`
+        // shape (+ the stamped inner id), unchanged.
+        let plain = orch.to_jsonl_message_with_inner_id(
+            &msg,
+            "sess",
+            None,
+            None,
+            None,
+            None,
+            Some("inner-abc"),
+            None,
+            None,
+        );
+        let pkeys: Vec<&str> = plain
+            .message
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(pkeys, vec!["role", "content", "id"]);
+    }
+
     // ── test 5: per-content_block_stop single-block assistant lines ───────────
     //
     // claude.ts:2171-2211: a streaming assistant turn emits ONE JSONL line per
@@ -8705,7 +8852,7 @@ mod persist_with_parent_tests {
             stop_reason: Some("tool_use".into()),
         };
 
-        let map = orch.persist_assistant_per_block(&assistant_msg).await;
+        let map = orch.persist_assistant_per_block(&assistant_msg, None).await;
 
         let lines = read_jsonl(&session_path);
         // (c) THREE single-block assistant lines.

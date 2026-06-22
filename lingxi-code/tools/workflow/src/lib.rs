@@ -88,6 +88,42 @@ impl std::fmt::Display for WorkflowLaunchError {
 }
 impl std::error::Error for WorkflowLaunchError {}
 
+/// Resolve a launch spec to a script source. Precedence follows claude-code:
+/// `scriptPath` over `script` over `name` (the schema marks `scriptPath` as
+/// "Takes precedence over `script` and `name`"). `read` loads a file's contents
+/// (the host provides real I/O); `name` resolution looks under
+/// `.claude/workflows/<name>` with common script extensions. (LingXi ships no
+/// built-in workflow library, so a `name` that isn't a saved file is an error.)
+pub fn resolve_script<R>(
+    spec: &WorkflowLaunchSpec,
+    read: R,
+) -> Result<String, WorkflowLaunchError>
+where
+    R: Fn(&str) -> std::io::Result<String>,
+{
+    let nonempty = |o: &Option<String>| o.as_deref().filter(|s| !s.is_empty()).map(str::to_string);
+    if let Some(path) = nonempty(&spec.script_path) {
+        return read(&path)
+            .map_err(|e| WorkflowLaunchError(format!("cannot read scriptPath '{path}': {e}")));
+    }
+    if let Some(script) = nonempty(&spec.script) {
+        return Ok(script);
+    }
+    if let Some(name) = nonempty(&spec.name) {
+        for ext in [".js", ".mjs", ".ts", ""] {
+            if let Ok(src) = read(&format!(".claude/workflows/{name}{ext}")) {
+                return Ok(src);
+            }
+        }
+        return Err(WorkflowLaunchError(format!(
+            "no saved workflow named '{name}' under .claude/workflows/"
+        )));
+    }
+    Err(WorkflowLaunchError(
+        "Must provide script, name, or scriptPath".into(),
+    ))
+}
+
 /// Seam that spawns a `LocalWorkflow` background task and returns its id. The
 /// composition root wires this over the task registry (keeping this crate
 /// decoupled from `tasks`); tests inject a mock.
@@ -262,6 +298,51 @@ mod tests {
     #[test]
     fn name_is_workflow() {
         assert_eq!(tool(None).name(), "Workflow");
+    }
+
+    #[test]
+    fn resolve_script_precedence_and_name_lookup() {
+        use std::collections::HashMap;
+        let files: HashMap<&str, &str> = HashMap::from([
+            ("/abs/wf.js", "FROM_PATH"),
+            (".claude/workflows/review.js", "FROM_NAME"),
+        ]);
+        let read = |p: &str| {
+            files
+                .get(p)
+                .map(|s| (*s).to_string())
+                .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "nope"))
+        };
+
+        // scriptPath wins over an inline script.
+        let spec = WorkflowLaunchSpec {
+            script: Some("INLINE".into()),
+            script_path: Some("/abs/wf.js".into()),
+            ..Default::default()
+        };
+        assert_eq!(resolve_script(&spec, &read).unwrap(), "FROM_PATH");
+
+        // inline script when there is no scriptPath.
+        let spec = WorkflowLaunchSpec {
+            script: Some("INLINE".into()),
+            ..Default::default()
+        };
+        assert_eq!(resolve_script(&spec, &read).unwrap(), "INLINE");
+
+        // name → .claude/workflows/<name>.js.
+        let spec = WorkflowLaunchSpec {
+            name: Some("review".into()),
+            ..Default::default()
+        };
+        assert_eq!(resolve_script(&spec, &read).unwrap(), "FROM_NAME");
+
+        // unknown name + nothing-provided → errors.
+        let spec = WorkflowLaunchSpec {
+            name: Some("missing".into()),
+            ..Default::default()
+        };
+        assert!(resolve_script(&spec, &read).is_err());
+        assert!(resolve_script(&WorkflowLaunchSpec::default(), &read).is_err());
     }
 
     #[test]

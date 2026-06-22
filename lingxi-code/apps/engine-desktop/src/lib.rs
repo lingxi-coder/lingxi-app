@@ -649,11 +649,12 @@ pub fn desktop_tool_registry(
 }
 
 /// Launches `LocalWorkflow` background tasks for the `Workflow` tool by spawning
-/// through the shared [`tasks::registry::TaskRegistry`]. Single-process: only an
-/// inline `script` is supported today; resolving a saved `name` or a `scriptPath`
-/// to a script is a follow-up.
+/// through the shared [`tasks::registry::TaskRegistry`]. Resolves the spec's
+/// `scriptPath` / `script` / `name` to a script source (claude-code precedence);
+/// `scriptPath`/`name` are read from disk relative to `cwd`.
 struct TaskRegistryWorkflowLauncher {
     registry: Arc<tasks::registry::TaskRegistry>,
+    cwd: std::path::PathBuf,
 }
 
 #[async_trait::async_trait]
@@ -662,17 +663,22 @@ impl tool_workflow::WorkflowLauncher for TaskRegistryWorkflowLauncher {
         &self,
         spec: tool_workflow::WorkflowLaunchSpec,
     ) -> Result<tool_workflow::WorkflowLaunched, tool_workflow::WorkflowLaunchError> {
-        let script = spec.script.ok_or_else(|| {
-            tool_workflow::WorkflowLaunchError(
-                "named/scriptPath workflows are not yet supported; pass an inline `script`".into(),
-            )
+        let cwd = self.cwd.clone();
+        let script = tool_workflow::resolve_script(&spec, |p| {
+            let path = std::path::Path::new(p);
+            let full = if path.is_absolute() {
+                path.to_path_buf()
+            } else {
+                cwd.join(path)
+            };
+            std::fs::read_to_string(full)
         })?;
         let task_id = self
             .registry
             .spawn(
                 tasks::TaskType::LocalWorkflow,
                 tasks::TaskSpawnInput::LocalWorkflow {
-                    workflow_id: spec.name.unwrap_or_default(),
+                    workflow_id: spec.name.clone().unwrap_or_default(),
                     script,
                 },
                 "Workflow".to_string(),
@@ -3415,6 +3421,7 @@ pub async fn build(
         let workflow_launcher: Arc<dyn tool_workflow::WorkflowLauncher> =
             Arc::new(TaskRegistryWorkflowLauncher {
                 registry: task_registry.clone(),
+                cwd: cwd.clone(),
             });
         tools_inner.register_builtin(Arc::new(tool_workflow::WorkflowTool::new(Some(
             workflow_launcher,

@@ -27,6 +27,7 @@
 #![forbid(unsafe_code)]
 
 mod agent_skill_loader;
+mod background_agent;
 mod connect;
 pub mod file_changed_watch;
 pub mod settings_watch;
@@ -3132,13 +3133,15 @@ pub async fn build(
     //       builtin `SendMessage` tool by casting it onto `tool_ctx.mailbox_router`
     //       (the trait impl lives on `MailboxRouter`); a default session leaves it
     //       `None` — byte-identical to the pre-M10 build.
-    let coordinator_mailbox: Option<Arc<dyn traits::mailbox::MailboxRouterHandle>> = if cfg
-        .session_started_as_coordinator
-    {
-        Some(coordinator.mailbox_router.clone() as Arc<dyn traits::mailbox::MailboxRouterHandle>)
-    } else {
-        None
-    };
+    // Wire the shared `MailboxRouter` for EVERY session (was coordinator-only):
+    // a backgrounded local_agent (`run_in_background`) registers its mailbox on
+    // this router, and the `SendMessage` tool must be able to route to it even
+    // outside a coordinator team. Faithful to claude-code, where `SendMessage`
+    // always resolves a running async agent. Non-async default sessions are
+    // unaffected — with no teammates/agents registered a send resolves to
+    // `NotFound`, the same effective outcome as the prior `None`.
+    let coordinator_mailbox: Option<Arc<dyn traits::mailbox::MailboxRouterHandle>> =
+        Some(coordinator.mailbox_router.clone() as Arc<dyn traits::mailbox::MailboxRouterHandle>);
     // (SANDBOX.1) Make the bash sandbox path LIVE (parity §0.2 / §B). Previously
     // `sandbox_available` was hardcoded `false`, so bash NEVER sandboxed — even
     // when the user enabled it in settings — leaving the macOS SBPL / Linux bwrap /
@@ -3243,6 +3246,21 @@ pub async fn build(
     let plugin_lsp_registry = Arc::new(lsp::LspRegistry::new(Arc::new(
         platform_posix::PosixLspTransport::new(),
     )));
+
+    // (5.5b) Decorate the subagent spawner so AgentTool's `run_in_background`
+    // path is LIVE: `spawn_async` spawns a PERSISTENT LocalAgent through the
+    // registry, registers its mailbox on the shared router, and starts the
+    // mailbox→runner pump (the `registerAsyncAgent` lifecycle). Built HERE —
+    // after `task_registry` exists — so NO deferred cell is needed; the
+    // one-shot / teammate / workflow handlers keep the raw spawner captured
+    // earlier (they only use the sync `spawn`, which the decorator delegates).
+    let subagent_spawner: Arc<dyn traits::subagent_spawn::SubagentSpawner> =
+        Arc::new(background_agent::BackgroundAgentSpawner {
+            inner: subagent_spawner,
+            registry: task_registry.clone(),
+            mailbox_router: coordinator.mailbox_router.clone(),
+            runtime: Arc::new(PosixRuntime::new()) as Arc<dyn traits::RuntimeSpawner>,
+        });
 
     let tool_ctx = BuiltinToolContext {
         // FILE.B: file tools share one read-state map for the (future) staleness

@@ -6,15 +6,14 @@
 //! a JS `AsyncFunction`; LingXi embeds QuickJS (via `rquickjs`) so the same
 //! model-authored scripts run with matching semantics.
 //!
-//! ## Stages
-//! * **done** — embedded engine; async event-loop; the full global surface
-//!   (`agent`, `parallel`, `pipeline`, `phase`, `log`, `budget`, `args`,
-//!   `workflow`); CONCURRENT batch dispatch of `agent()` calls (agents pending
-//!   together run as one batch). The pluggable `agent_runner` resolves each
-//!   batch.
-//! * **next** — bridge `agent_runner` to LingXi's subagent spawner (the
-//!   `LocalWorkflowHandler` / `local_agent` seam), then journaling/resume, real
-//!   budget tracking, and `Workflow` tool registration.
+//! The full global surface is implemented (`agent`, `parallel`, `pipeline`,
+//! `phase`, `log`, `budget`, `args`, `workflow`) with CONCURRENT batch dispatch
+//! of `agent()` calls (agents pending together run as one batch) via the
+//! pluggable `agent_runner`. The host (`tasks::handlers::local_workflow`) bridges
+//! `agent_runner` to LingXi's subagent spawner and adds live progress, a real
+//! token budget ([`WorkflowBudgetSource`]), structured-output `agent({schema})`,
+//! journaling/resume, and `workflow()` nesting; the `Workflow` tool
+//! (`tool-workflow`) is registered + wired at the desktop composition root.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -70,13 +69,15 @@ globalThis.pipeline = async (items, ...stages) => {
   };
   return await parallel(items.map((it, i) => () => chain(it, i)));
 };
-// Remaining globals. `budget` defaults to no-target (total null, spent 0,
-// remaining Infinity) — a real token-tracking budget is supplied once agent()
-// is bridged to subagents. `args` is the caller-provided input (undefined by
-// default). `workflow()` (nested run) is not supported yet and throws clearly.
+// Default globals. The host OVERRIDES each (before this prelude runs) when it
+// has a real value: `budget` (a WorkflowBudgetSource), `args` (the tool input),
+// and `workflow()` (a real nested-run impl when nesting is allowed). These
+// defaults apply otherwise: no-target budget; `undefined` args; and a
+// `workflow()` that throws — the state inside a nested run, where claude-code's
+// one-level nesting limit is reached.
 if (!('budget' in globalThis)) globalThis.budget = { total: null, spent: () => 0, remaining: () => Infinity };
 if (!('args' in globalThis)) globalThis.args = undefined;
-if (!('workflow' in globalThis)) globalThis.workflow = async () => { throw new Error("workflow(): nested workflows are not supported in this runtime yet"); };
+if (!('workflow' in globalThis)) globalThis.workflow = async () => { throw new Error("workflow(): nested workflows are not supported (workflow() inside a child)"); };
 "#;
 
 /// A progress event emitted by a running workflow script.

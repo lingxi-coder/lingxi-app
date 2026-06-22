@@ -44,6 +44,13 @@ globalThis.pipeline = async (items, ...stages) => {
   }
   return out;
 };
+// Remaining globals. `budget` defaults to no-target (total null, spent 0,
+// remaining Infinity) — a real token-tracking budget is supplied once agent()
+// is bridged to subagents. `args` is the caller-provided input (undefined by
+// default). `workflow()` (nested run) is not supported yet and throws clearly.
+if (!('budget' in globalThis)) globalThis.budget = { total: null, spent: () => 0, remaining: () => Infinity };
+if (!('args' in globalThis)) globalThis.args = undefined;
+if (!('workflow' in globalThis)) globalThis.workflow = async () => { throw new Error("workflow(): nested workflows are not supported in this runtime yet"); };
 "#;
 
 /// A progress event emitted by a running workflow script.
@@ -445,6 +452,39 @@ log(rs.join(','))
                 s.contains("pipeline() stages must be functions"),
                 "got: {s}"
             ),
+            other => panic!("got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn budget_args_workflow_globals_present() {
+        let script = r#"
+log('total=' + String(budget.total))
+log('remaining=' + String(budget.remaining()))
+log('spent=' + String(budget.spent()))
+log('args=' + String(args))
+log('wf=' + (typeof workflow))
+"#;
+        let out = run(script, |_| "x".to_string()).unwrap();
+        assert_eq!(
+            out.progress,
+            vec![
+                Progress::Log("total=null".into()),
+                Progress::Log("remaining=Infinity".into()),
+                Progress::Log("spent=0".into()),
+                Progress::Log("args=undefined".into()),
+                Progress::Log("wf=function".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn nested_workflow_call_throws_clearly() {
+        let err = run("await workflow('child')", |_| "x".to_string()).unwrap_err();
+        match err {
+            WorkflowError::Script(s) => {
+                assert!(s.contains("nested workflows are not supported"), "got: {s}");
+            }
             other => panic!("got {other:?}"),
         }
     }

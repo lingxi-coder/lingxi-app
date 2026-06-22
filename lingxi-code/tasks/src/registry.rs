@@ -562,7 +562,15 @@ impl TaskRegistry {
             out.push(traits::task_registry::TaskNotification {
                 task_id: b.id.clone(),
                 task_type: task_type_to_wire(b.task_type).to_string(),
-                status: status_to_wire(b.status).to_string(),
+                // DISPLAY status "completed" — the notification renderer
+                // (`prompt::task_notification`, the v2.1.185 `enqueueAgentNotification`)
+                // maps `completed → "Agent … came to rest"` and any other status
+                // to a wrong summary ("running" would hit the killed/`_` branch →
+                // "(stopped by user)"). A normal rest IS "came to rest", so the
+                // notification carries "completed". This is DISPLAY-ONLY and does
+                // NOT touch the registry — the task itself stays `Running` (alive,
+                // resumable); only this surfaced reminder reads `completed`.
+                status: status_to_wire(TaskStatus::Completed).to_string(),
                 description: b.description.clone(),
                 tool_use_id: b.tool_use_id.clone(),
                 // The spool carries the just-produced turn-set result; the model
@@ -2171,7 +2179,13 @@ mod spawn_tests {
         let drained = registry.take_pending_task_notifications().await;
         assert_eq!(drained.len(), 1, "one rest notification");
         assert_eq!(drained[0].task_id, "a-rest-1");
-        assert_eq!(drained[0].status, "running", "rest is non-terminal");
+        // DISPLAY status is "completed" so the renderer says "came to rest"
+        // (NOT "(stopped by user)"); the task itself stays Running (alive).
+        assert_eq!(drained[0].status, "completed", "renders as 'came to rest'");
+        assert!(
+            registry.get("a-rest-1").await.is_some(),
+            "the live task stays Running despite the 'completed' display status"
+        );
         assert_eq!(
             drained[0].output_path.as_deref(),
             Some("/tmp/tasks/a-rest-1.output"),

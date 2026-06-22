@@ -31,7 +31,8 @@
 //! script thread sends last is delivered to the caller.
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
+use std::sync::{Arc, OnceLock};
 
 use async_trait::async_trait;
 use futures::stream::StreamExt;
@@ -95,11 +96,16 @@ pub struct LocalWorkflowHandler {
     pending_kill: Arc<Mutex<HashMap<String, WorkerCancel>>>,
     /// The turn's token target (`cfg.token_budget`) backing the script's
     /// `budget.total`. `None` ⇒ no target (FLEET defaults, budget loops skip).
-    /// `budget.spent()` is the workflow's own accumulated subagent output
-    /// tokens (a close, safe approximation of claude-code's shared pool — the
-    /// main-loop delta is not included; wiring the exact session pool needs
-    /// orchestrator surgery and is a documented follow-up). Set by the root.
+    /// Set by the root via [`Self::with_token_budget`].
     token_budget_total: Option<u64>,
+    /// Late-bound shared output-token pool backing the script's `budget.spent()`.
+    /// The composition root publishes the orchestrator's
+    /// `output_token_pool` here once it exists (the handler is registered before
+    /// the orchestrator is built — same deferred pattern as the tool invoker).
+    /// When set, a run's subagents add their output tokens to this same `Arc`
+    /// that the main loop also feeds, so `spent()` reads main loop + all
+    /// workflows. When unset (tests), a run falls back to its own private pool.
+    output_pool_cell: Option<Arc<OnceLock<Arc<AtomicU64>>>>,
 }
 
 impl LocalWorkflowHandler {
@@ -123,6 +129,7 @@ impl LocalWorkflowHandler {
             workers: Arc::new(Mutex::new(HashMap::new())),
             pending_kill: Arc::new(Mutex::new(HashMap::new())),
             token_budget_total: None,
+            output_pool_cell: None,
         }
     }
 
@@ -139,6 +146,17 @@ impl LocalWorkflowHandler {
     #[must_use]
     pub fn with_token_budget(mut self, total: Option<u64>) -> Self {
         self.token_budget_total = total;
+        self
+    }
+
+    /// Late-bind the shared output-token pool backing `budget.spent()`. The
+    /// composition root passes a cloned `OnceLock` cell here at registration and
+    /// publishes the orchestrator's `output_token_pool` into it once the
+    /// orchestrator is built — so a run's `spent()` reflects the union of
+    /// main-loop and all-workflow output tokens. See [`Self::output_pool_cell`].
+    #[must_use]
+    pub fn with_output_pool_cell(mut self, cell: Arc<OnceLock<Arc<AtomicU64>>>) -> Self {
+        self.output_pool_cell = Some(cell);
         self
     }
 
@@ -240,7 +258,8 @@ fn format_progress(p: &workflow::Progress) -> String {
 }
 
 /// Backs the script's `budget` global: a fixed `total` (the turn's token target)
-/// and the run's own accumulated subagent output tokens as `spent`.
+/// and `spent` = the shared output-token pool (main loop + every workflow when
+/// wired by the root; this run's own subagent output when standalone).
 struct OwnSpendBudget {
     total: Option<u64>,
     spent: Arc<std::sync::atomic::AtomicU64>,
@@ -276,6 +295,13 @@ pub struct NestedConfig {
 /// `tool_invoker` and `budget` are the parent's inheritance `Arc`s; the same
 /// `Arc`s (cloned handle, identical inner) are handed to every child so the
 /// recursion lock and budget aggregate across the whole agent tree.
+///
+/// `shared_pool` backs the script's `budget.spent()`: when `Some`, it is the
+/// session-wide pool the main loop also feeds (every successful main-loop API
+/// response adds its output tokens), so `spent()` reads main loop + every
+/// workflow — claude-code's shared pool. When `None` (tests / no orchestrator),
+/// the run uses a fresh private pool counting only its own subagent output.
+#[allow(clippy::too_many_arguments)]
 pub async fn run_workflow_script(
     script: &str,
     subagent_type: &str,
@@ -285,6 +311,7 @@ pub async fn run_workflow_script(
     progress_tx: Option<mpsc::UnboundedSender<String>>,
     journal: Option<Arc<std::sync::Mutex<HashMap<String, String>>>>,
     token_budget_total: Option<u64>,
+    shared_pool: Option<Arc<AtomicU64>>,
     nested: NestedConfig,
 ) -> Result<workflow::RunOutcome, workflow::WorkflowError> {
     let NestedConfig {
@@ -292,13 +319,14 @@ pub async fn run_workflow_script(
         args: nested_args,
         fs: nested_fs,
     } = nested;
-    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::atomic::Ordering;
 
-    // The script's `budget`: `total` is the turn's target; `spent()` is this
-    // run's own accumulated subagent output tokens (a close, safe approximation
-    // of claude-code's shared pool). The worker adds each fresh subagent's
-    // output tokens; replayed (journaled) agents cost nothing, as in claude-code.
-    let spent = Arc::new(AtomicU64::new(0));
+    // The script's `budget`: `total` is the turn's target; `spent()` reads the
+    // shared pool — main loop (fed by the orchestrator per response) plus every
+    // workflow (the worker adds each fresh subagent's output tokens; replayed
+    // journaled agents cost nothing, as in claude-code). Without a shared pool
+    // (tests), a private counter tracks this run's own subagent output only.
+    let spent = shared_pool.unwrap_or_else(|| Arc::new(AtomicU64::new(0)));
     let budget_source: Arc<dyn workflow::WorkflowBudgetSource> = Arc::new(OwnSpendBudget {
         total: token_budget_total,
         spent: spent.clone(),
@@ -393,8 +421,9 @@ pub async fn run_workflow_script(
                     };
                     let request = make_request(&subagent_type, &prompt, &opts_json);
                     let raw = spawner.spawn(request, inherit).await;
-                    // Accumulate this fresh subagent's output tokens into the run's
-                    // own spend (replayed/cached agents above cost nothing).
+                    // Accumulate this fresh subagent's output tokens into the
+                    // shared `spent` pool (replayed/cached agents above cost
+                    // nothing) — the same pool the main loop feeds when wired.
                     if let Ok(SubagentResult::Completed { usage, .. }) = &raw {
                         spent.fetch_add(usage.output_tokens, Ordering::Relaxed);
                     }
@@ -509,6 +538,13 @@ impl Task for LocalWorkflowHandler {
         let output_manager = self.output_manager.clone();
         let fs = ctx.fs.clone();
         let token_budget_total = self.token_budget_total;
+        // The shared `budget.spent()` pool (main loop + all workflows), published
+        // by the root once the orchestrator exists. `None` in tests ⇒ the run
+        // uses its own private pool (own-spend only).
+        let shared_pool = self
+            .output_pool_cell
+            .as_ref()
+            .and_then(|c| c.get().cloned());
         let worker_spool_path = spool_path.clone();
         let worker_task_id = task_id.clone();
         let worker = Box::pin(async move {
@@ -566,6 +602,7 @@ impl Task for LocalWorkflowHandler {
                 Some(ptx),
                 Some(journal.clone()),
                 token_budget_total,
+                shared_pool,
                 NestedConfig {
                     allow_nested: true,
                     args: workflow_args,
@@ -904,10 +941,60 @@ mod tests {
             None,
             None,
             None,
+            None,
             NestedConfig::default(),
         )
         .await
         .expect("workflow runs to completion")
+    }
+
+    /// `budget.spent()` reads the shared pool: a pre-seeded value (standing in
+    /// for main-loop output the orchestrator already accumulated) plus every
+    /// subagent's output tokens — the union claude-code exposes, not own-spend.
+    #[tokio::test]
+    async fn shared_pool_makes_spent_read_main_loop_plus_subagents() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        // Pre-seed as if the main loop already spent 500 output tokens this turn.
+        let pool = Arc::new(AtomicU64::new(500));
+        let spawner = Arc::new(EchoSpawner::default()); // 100 output tokens/agent
+        let outcome = run_workflow_script(
+            "await agent('a'); await agent('b'); log('spent=' + budget.spent()); return '';",
+            DEFAULT_WORKFLOW_SUBAGENT,
+            spawner,
+            Arc::new(MockInvoker),
+            Arc::new(MockBudget),
+            None,
+            None,
+            Some(1_000_000),
+            Some(pool.clone()),
+            NestedConfig::default(),
+        )
+        .await
+        .expect("workflow runs to completion");
+        // 500 (seeded main loop) + 2×100 (the two subagents) = 700.
+        assert_eq!(pool.load(Ordering::Relaxed), 700);
+        assert!(
+            logs(&outcome).iter().any(|l| l == "spent=700"),
+            "spent() must read the shared pool live; got {:?}",
+            logs(&outcome)
+        );
+    }
+
+    /// Without a shared pool (the standalone/test path), `spent()` falls back to
+    /// a private counter of this run's own subagent output only.
+    #[tokio::test]
+    async fn no_shared_pool_falls_back_to_own_spend() {
+        let spawner = Arc::new(EchoSpawner::default());
+        let outcome = run_bridge(
+            "await agent('a'); log('spent=' + budget.spent()); return '';",
+            spawner,
+        )
+        .await;
+        assert!(
+            logs(&outcome).iter().any(|l| l == "spent=100"),
+            "own-spend fallback should count just the one subagent; got {:?}",
+            logs(&outcome)
+        );
     }
 
     #[tokio::test]
@@ -1010,6 +1097,7 @@ mod tests {
             None,
             None,
             None,
+            None,
             NestedConfig {
                 allow_nested: false,
                 args: Some(r#"{"a":5}"#.to_string()),
@@ -1045,6 +1133,7 @@ mod tests {
             spawner.clone(),
             Arc::new(MockInvoker),
             Arc::new(MockBudget),
+            None,
             None,
             None,
             None,

@@ -3047,6 +3047,12 @@ pub async fn build(
     //        exists): a workflow's `agent()` calls inherit this invoker so their
     //        child runners dispatch tools through the parent registry.
     let local_workflow_invoker = Arc::new(DeferredToolInvoker::new());
+    // Shared `budget.spent()` pool: published once the orchestrator exists
+    // (built below) — the same `Arc<AtomicU64>` the main loop feeds per response,
+    // so a workflow's `spent()` reads main loop + all workflows. Same deferred
+    // pattern as `local_workflow_invoker` (handler registered before the orch).
+    let local_workflow_output_pool: Arc<std::sync::OnceLock<Arc<std::sync::atomic::AtomicU64>>> =
+        Arc::new(std::sync::OnceLock::new());
     task_registry_inner.register_handler(
         tasks::TaskType::LocalWorkflow,
         Arc::new(
@@ -3057,9 +3063,10 @@ pub async fn build(
                 task_registry_inner.output_manager.clone(),
             )
             // The script's `budget.total` = the turn's token target
-            // (`OrchestratorConfig.token_budget`); `spent()` is the run's own
-            // accumulated subagent output tokens.
-            .with_token_budget(orch_cfg.token_budget),
+            // (`OrchestratorConfig.token_budget`); `spent()` reads the shared
+            // pool (main loop + all workflows) once `output_pool_cell` is bound.
+            .with_token_budget(orch_cfg.token_budget)
+            .with_output_pool_cell(local_workflow_output_pool.clone()),
         ),
     );
 
@@ -3663,6 +3670,12 @@ pub async fn build(
         _ => orch_builder,
     };
     let orch = Arc::new(orch_builder);
+
+    // Publish the orchestrator's shared output-token pool to the workflow
+    // handler (registered above with a still-empty cell). From here, a launched
+    // workflow's `budget.spent()` reads the same `Arc<AtomicU64>` the main loop
+    // feeds per response — main loop + all workflows, claude-code's shared pool.
+    let _ = local_workflow_output_pool.set(orch.output_token_pool());
 
     // (6) Command registry through the desktop composition root.
     let handle: Arc<dyn OrchestratorHandle> = orch.clone();

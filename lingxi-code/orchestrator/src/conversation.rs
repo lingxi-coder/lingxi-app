@@ -628,6 +628,14 @@ pub struct ConversationOrchestrator {
     /// the most recent call's input total here. `0` until the first successful
     /// call — the prefix guard is then a strict no-op (prefix `0 ≤ threshold`).
     pub(crate) last_response_input_tokens: std::sync::atomic::AtomicU64,
+    /// Shared output-token pool backing a workflow script's `budget.spent()`.
+    /// Every successful main-loop API response adds its output tokens here (in
+    /// [`Self::record_response_input_tokens`]); a launched `LocalWorkflowHandler`
+    /// is handed this same `Arc` so its subagents add theirs too. `budget.spent()`
+    /// then reads the union — the main loop plus every workflow — matching
+    /// claude-code's shared per-turn pool (cumulative over the session; exact for
+    /// the dominant single-directive case).
+    pub(crate) output_token_pool: Arc<std::sync::atomic::AtomicU64>,
     /// Shared cache-safe prompt-prefix slot (In-Loop Compaction Batch 6). When
     /// wired (via [`Self::with_cache_safe_slot`]), the turn drivers write a
     /// [`sidequery::CacheSafeParams`] snapshot after every successful API call
@@ -858,6 +866,7 @@ impl ConversationOrchestrator {
             compaction: None,
             compaction_tracking: Mutex::new(compaction::AutoCompactTrackingState::default()),
             last_response_input_tokens: std::sync::atomic::AtomicU64::new(0),
+            output_token_pool: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             cache_safe_slot: None,
             current_turn_system_prompt: Mutex::new(None),
             read_file_state: Arc::new(Mutex::new(Vec::new())),
@@ -1713,6 +1722,24 @@ impl ConversationOrchestrator {
             .saturating_add(usage.billable_tokens.cache_write);
         self.last_response_input_tokens
             .store(total_input, std::sync::atomic::Ordering::Relaxed);
+        // Feed the shared workflow `budget.spent()` pool: this is the single
+        // per-response chokepoint both turn drivers call, so adding the
+        // response's output tokens here accumulates the main-loop side of the
+        // pool. A launched workflow's subagents add their output tokens to the
+        // same `Arc`, so `budget.spent()` reads main loop + all workflows.
+        self.output_token_pool.fetch_add(
+            usage.billable_tokens.output,
+            std::sync::atomic::Ordering::Relaxed,
+        );
+    }
+
+    /// The shared output-token pool backing a launched workflow's
+    /// `budget.spent()`. The composition root hands the returned `Arc` to the
+    /// `LocalWorkflowHandler` so the script's `spent()` reflects the union of
+    /// main-loop and all-workflow output tokens. See [`Self::output_token_pool`].
+    #[must_use]
+    pub fn output_token_pool(&self) -> Arc<std::sync::atomic::AtomicU64> {
+        self.output_token_pool.clone()
     }
 
     /// Fire the `tengu_auto_compact_prefix_overflow` telemetry event for a

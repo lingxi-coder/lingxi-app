@@ -316,7 +316,13 @@ impl Task for LocalAgentHandler {
                     agent_ids.lock().await.insert(worker_task_id.clone(), agent_id);
                     loop {
                         match rx.recv().await {
-                            Some(SubagentEvent::Completed { result, usage, .. }) => {
+                            Some(SubagentEvent::Completed {
+                                result,
+                                usage,
+                                total_tool_use_count,
+                                total_duration_ms,
+                                ..
+                            }) => {
                                 let body = serde_json::to_string_pretty(&result)
                                     .unwrap_or_else(|_| result.to_string());
                                 let bt = usage.billable_tokens;
@@ -329,6 +335,19 @@ impl Task for LocalAgentHandler {
                                     "{body}\n<usage><total_tokens>{total}</total_tokens></usage>\n"
                                 );
                                 let _ = output_manager.append(&worker_spool_path, &body).await;
+                                // The `<result>` is the agent's final-text response
+                                // — binary `wc(ne.content,"\n")`, which the runner
+                                // already exposes as the result's `text` field
+                                // (`blocks.join("\n")`); NOT the JSON-pretty spool.
+                                let rest_result = result
+                                    .get("text")
+                                    .and_then(serde_json::Value::as_str)
+                                    .map(str::to_owned);
+                                let rest_usage = Some(traits::task_registry::AgentRunUsage {
+                                    subagent_tokens: total,
+                                    tool_uses: total_tool_use_count,
+                                    duration_ms: total_duration_ms,
+                                });
                                 // Came to rest — alive, awaiting the next message.
                                 // Keep status non-terminal (Running) so the
                                 // registry never evicts the resting agent, then
@@ -339,7 +358,9 @@ impl Task for LocalAgentHandler {
                                 status_sink
                                     .set_status(&worker_task_id, TaskStatus::Running)
                                     .await;
-                                status_sink.notify_rest(&worker_task_id).await;
+                                status_sink
+                                    .notify_rest(&worker_task_id, rest_result, rest_usage)
+                                    .await;
                             }
                             Some(SubagentEvent::Failed { error, .. }) => {
                                 let _ = output_manager.append(&worker_spool_path, &error).await;
@@ -735,6 +756,7 @@ mod tests {
     struct RecordingSink {
         statuses: StdMutex<Vec<(String, TaskStatus)>>,
         rest_count: StdMutex<usize>,
+        last_rest: StdMutex<Option<(Option<String>, Option<traits::task_registry::AgentRunUsage>)>>,
     }
     #[async_trait]
     impl TaskStatusSink for RecordingSink {
@@ -744,8 +766,14 @@ mod tests {
                 .unwrap()
                 .push((task_id.to_string(), status));
         }
-        async fn notify_rest(&self, _task_id: &str) {
+        async fn notify_rest(
+            &self,
+            _task_id: &str,
+            result: Option<String>,
+            usage: Option<traits::task_registry::AgentRunUsage>,
+        ) {
             *self.rest_count.lock().unwrap() += 1;
+            *self.last_rest.lock().unwrap() = Some((result, usage));
         }
     }
     impl RecordingSink {

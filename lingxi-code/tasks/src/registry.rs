@@ -57,7 +57,19 @@ pub struct TaskRegistry {
     /// WITHOUT eviction (the still-alive agent re-arms on its next rest). Kept
     /// out of [`TaskStateBase`] to avoid a workspace-wide exhaustive-initializer
     /// churn for a field only this path reads.
-    pending_rest: Arc<RwLock<std::collections::HashSet<String>>>,
+    pending_rest: Arc<RwLock<std::collections::HashMap<String, RestPayload>>>,
+}
+
+/// The optional `<result>` / `<usage>` payload an agent carries when it comes to
+/// rest (binary `enqueueAgentNotification` always passes both when a result
+/// exists). Stashed at arm time so [`TaskRegistry::take_pending_task_notifications`]
+/// can populate the notification — the live task itself stays `Running`.
+#[derive(Clone, Default)]
+struct RestPayload {
+    /// The agent's final-text response → the `<result>` section.
+    result: Option<String>,
+    /// Run usage → the `<usage>` section.
+    usage: Option<traits::task_registry::AgentRunUsage>,
 }
 
 impl TaskRegistry {
@@ -78,7 +90,7 @@ impl TaskRegistry {
             output_manager,
             task_completed_firer: None,
             task_created_firer: None,
-            pending_rest: Arc::new(RwLock::new(std::collections::HashSet::new())),
+            pending_rest: Arc::new(RwLock::new(std::collections::HashMap::new())),
         }
     }
 
@@ -459,7 +471,12 @@ impl TaskRegistry {
     /// surfaces it WITHOUT evicting; a fresh rest re-arms it. A no-op for an
     /// unknown or already-terminal task (the ordinary terminal-notification path
     /// owns those).
-    pub async fn mark_task_rested(&self, task_id: &str) {
+    pub async fn mark_task_rested(
+        &self,
+        task_id: &str,
+        result: Option<String>,
+        usage: Option<traits::task_registry::AgentRunUsage>,
+    ) {
         {
             let map = self.tasks.read().await;
             match map.get(task_id) {
@@ -467,7 +484,10 @@ impl TaskRegistry {
                 _ => return,
             }
         }
-        self.pending_rest.write().await.insert(task_id.to_string());
+        self.pending_rest
+            .write()
+            .await
+            .insert(task_id.to_string(), RestPayload { result, usage });
     }
 
     /// Drain the terminal tasks not yet surfaced to the model, marking each
@@ -547,13 +567,12 @@ impl TaskRegistry {
         // more than once." Drain + clear the armed set; the agent re-arms on its
         // next rest. A task that raced to terminal is skipped here (the terminal
         // drain above already owns it).
-        let rest_ids: Vec<String> = {
+        let rest_payloads: Vec<(String, RestPayload)> = {
             let mut armed = self.pending_rest.write().await;
-            let ids = armed.iter().cloned().collect::<Vec<_>>();
-            armed.clear();
-            ids
+            let drained = armed.drain().collect::<Vec<_>>();
+            drained
         };
-        for id in rest_ids {
+        for (id, payload) in rest_payloads {
             let Some(state) = map.get(&id) else { continue };
             let b = state.base();
             if b.status.is_terminal() {
@@ -578,8 +597,11 @@ impl TaskRegistry {
                 output_path: Some(b.output_file.to_string_lossy().into_owned()),
                 exit_code: None,
                 error: None,
-                result: None,
-                usage: None,
+                // The agent's final-text response + run usage, captured at rest
+                // time. The binary `enqueueAgentNotification` always emits these
+                // when a result exists; the renderer omits each clause when `None`.
+                result: payload.result,
+                usage: payload.usage,
             });
         }
         out
@@ -2175,13 +2197,30 @@ mod spawn_tests {
         );
 
         // Came to rest ⇒ exactly one notification, NON-terminal, NOT evicted.
-        registry.mark_task_rested("a-rest-1").await;
+        registry
+            .mark_task_rested(
+                "a-rest-1",
+                Some("final answer".to_string()),
+                Some(traits::task_registry::AgentRunUsage {
+                    subagent_tokens: 42,
+                    tool_uses: 3,
+                    duration_ms: 1500,
+                }),
+            )
+            .await;
         let drained = registry.take_pending_task_notifications().await;
         assert_eq!(drained.len(), 1, "one rest notification");
         assert_eq!(drained[0].task_id, "a-rest-1");
         // DISPLAY status is "completed" so the renderer says "came to rest"
         // (NOT "(stopped by user)"); the task itself stays Running (alive).
         assert_eq!(drained[0].status, "completed", "renders as 'came to rest'");
+        // The result text + usage are carried into the optional sections.
+        assert_eq!(drained[0].result.as_deref(), Some("final answer"));
+        assert_eq!(
+            drained[0].usage.as_ref().map(|u| u.subagent_tokens),
+            Some(42),
+            "usage carried for the <usage> section"
+        );
         assert!(
             registry.get("a-rest-1").await.is_some(),
             "the live task stays Running despite the 'completed' display status"
@@ -2203,7 +2242,7 @@ mod spawn_tests {
         );
 
         // Re-armable: the NEXT rest surfaces again (same task-id notifies > once).
-        registry.mark_task_rested("a-rest-1").await;
+        registry.mark_task_rested("a-rest-1", None, None).await;
         assert_eq!(
             registry.take_pending_task_notifications().await.len(),
             1,

@@ -350,9 +350,14 @@ impl TaskRegistryHandle for TaskRegistry {
             .map_err(task_err_to_registry_err)
     }
 
-    async fn mark_rested(&self, id: &str) {
+    async fn mark_rested(
+        &self,
+        id: &str,
+        result: Option<String>,
+        usage: Option<traits::task_registry::AgentRunUsage>,
+    ) {
         // Dispatch to the inherent arm-rest path (no-op for unknown/terminal).
-        TaskRegistry::mark_task_rested(self, id).await;
+        TaskRegistry::mark_task_rested(self, id, result, usage).await;
     }
 
     async fn take_pending_task_notifications(

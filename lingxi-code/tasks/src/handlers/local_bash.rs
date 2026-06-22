@@ -110,7 +110,17 @@ pub trait TaskStatusSink: Send + Sync {
     /// model's "you will be notified" promise for a backgrounded agent),
     /// re-armed on each subsequent rest. Defaulted to a no-op (claude-code:
     /// the `<note>` fires "each time this agent comes to rest").
-    async fn notify_rest(&self, _task_id: &str) {}
+    ///
+    /// `result` is the agent's final-text response and `usage` its run usage,
+    /// surfaced as the optional `<result>` / `<usage>` notification sections (the
+    /// binary `enqueueAgentNotification` always passes them when a result exists).
+    async fn notify_rest(
+        &self,
+        _task_id: &str,
+        _result: Option<String>,
+        _usage: Option<traits::task_registry::AgentRunUsage>,
+    ) {
+    }
 }
 
 /// No-op [`TaskStatusSink`] — the default when the handler is constructed

@@ -57,9 +57,14 @@ impl TaskStatusSink for RegistryStatusSink {
         }
     }
 
-    async fn notify_rest(&self, task_id: &str) {
+    async fn notify_rest(
+        &self,
+        task_id: &str,
+        result: Option<String>,
+        usage: Option<traits::task_registry::AgentRunUsage>,
+    ) {
         if let Some(reg) = self.registry.get() {
-            reg.mark_rested(task_id).await;
+            reg.mark_rested(task_id, result, usage).await;
         }
     }
 }

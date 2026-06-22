@@ -214,8 +214,17 @@ pub trait TaskRegistryHandle: Send + Sync {
     /// task — the read side of which is surfaced (without eviction) by
     /// [`take_pending_task_notifications`]. Called via the task status sink's
     /// `notify_rest` each time a backgrounded agent parks after a turn-set.
-    /// Default no-op so existing mock handles compile unchanged.
-    async fn mark_rested(&self, _id: &str) {}
+    /// `result` is the agent's final-text response and `usage` its run usage —
+    /// both surfaced as the optional `<result>` / `<usage>` notification sections
+    /// (the binary `enqueueAgentNotification` always passes them when a result
+    /// exists). Default no-op so existing mock handles compile unchanged.
+    async fn mark_rested(
+        &self,
+        _id: &str,
+        _result: Option<String>,
+        _usage: Option<AgentRunUsage>,
+    ) {
+    }
 
     /// Drain the terminal tasks that have NOT yet been surfaced to the model,
     /// marking each `notified` (which eagerly evicts it) so a given completion

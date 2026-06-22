@@ -92,6 +92,13 @@ pub struct LocalWorkflowHandler {
     /// `task_id` → record queued for teardown by the synchronous
     /// [`TaskHandle::cleanup`] closure; drained by [`Self::drain_pending_kills`].
     pending_kill: Arc<Mutex<HashMap<String, WorkerCancel>>>,
+    /// The turn's token target (`cfg.token_budget`) backing the script's
+    /// `budget.total`. `None` ⇒ no target (FLEET defaults, budget loops skip).
+    /// `budget.spent()` is the workflow's own accumulated subagent output
+    /// tokens (a close, safe approximation of claude-code's shared pool — the
+    /// main-loop delta is not included; wiring the exact session pool needs
+    /// orchestrator surgery and is a documented follow-up). Set by the root.
+    token_budget_total: Option<u64>,
 }
 
 impl LocalWorkflowHandler {
@@ -114,6 +121,7 @@ impl LocalWorkflowHandler {
             status_sink: Arc::new(NoopStatusSink),
             workers: Arc::new(Mutex::new(HashMap::new())),
             pending_kill: Arc::new(Mutex::new(HashMap::new())),
+            token_budget_total: None,
         }
     }
 
@@ -121,6 +129,15 @@ impl LocalWorkflowHandler {
     #[must_use]
     pub fn with_status_sink(mut self, sink: Arc<dyn TaskStatusSink>) -> Self {
         self.status_sink = sink;
+        self
+    }
+
+    /// Set the turn's token target (`cfg.token_budget`) so the script's
+    /// `budget.total`/`remaining()` reflect it (`spent()` is the run's own
+    /// accumulated subagent output tokens).
+    #[must_use]
+    pub fn with_token_budget(mut self, total: Option<u64>) -> Self {
+        self.token_budget_total = total;
         self
     }
 
@@ -215,6 +232,21 @@ fn format_progress(p: &workflow::Progress) -> String {
     }
 }
 
+/// Backs the script's `budget` global: a fixed `total` (the turn's token target)
+/// and the run's own accumulated subagent output tokens as `spent`.
+struct OwnSpendBudget {
+    total: Option<u64>,
+    spent: Arc<std::sync::atomic::AtomicU64>,
+}
+impl workflow::WorkflowBudgetSource for OwnSpendBudget {
+    fn total(&self) -> Option<u64> {
+        self.total
+    }
+    fn spent(&self) -> u64 {
+        self.spent.load(std::sync::atomic::Ordering::Relaxed)
+    }
+}
+
 /// Run a workflow `script` to completion, spawning each `agent()` call as a real
 /// subagent of type `subagent_type` via `spawner`. Returns the script's
 /// [`workflow::RunOutcome`] (its `phase()`/`log()` progress + return value) or a
@@ -231,7 +263,19 @@ pub async fn run_workflow_script(
     budget: Arc<dyn BudgetEnforcerHandle>,
     progress_tx: Option<mpsc::UnboundedSender<String>>,
     journal: Option<Arc<std::sync::Mutex<HashMap<String, String>>>>,
+    token_budget_total: Option<u64>,
 ) -> Result<workflow::RunOutcome, workflow::WorkflowError> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    // The script's `budget`: `total` is the turn's target; `spent()` is this
+    // run's own accumulated subagent output tokens (a close, safe approximation
+    // of claude-code's shared pool). The worker adds each fresh subagent's
+    // output tokens; replayed (journaled) agents cost nothing, as in claude-code.
+    let spent = Arc::new(AtomicU64::new(0));
+    let budget_source: Arc<dyn workflow::WorkflowBudgetSource> = Arc::new(OwnSpendBudget {
+        total: token_budget_total,
+        spent: spent.clone(),
+    });
     // Request channel: each in-flight batch is (calls, reply-sender), where a
     // call is (prompt, opts_json). A buffer of one suffices — the runner blocks
     // on its reply before sending the next.
@@ -267,7 +311,12 @@ pub async fn run_workflow_script(
                     let _ = tx.send(format_progress(p));
                 }
             };
-            let outcome = workflow::run_with_progress(&script_owned, runner, on_progress);
+            let outcome = workflow::run_with_progress(
+                &script_owned,
+                runner,
+                on_progress,
+                Some(budget_source),
+            );
             let _ = outcome_tx.send(outcome);
         })
         .expect("spawn workflow-script thread");
@@ -286,6 +335,7 @@ pub async fn run_workflow_script(
                 };
                 let subagent_type = subagent_type.to_string();
                 let journal = journal.clone();
+                let spent = spent.clone();
                 async move {
                     // Resume cache: a journaled result for the same (prompt, opts)
                     // is replayed instead of re-spawning. The guard is dropped
@@ -297,7 +347,13 @@ pub async fn run_workflow_script(
                         }
                     }
                     let request = make_request(&subagent_type, &prompt, &opts_json);
-                    let result = result_to_string(spawner.spawn(request, inherit).await);
+                    let raw = spawner.spawn(request, inherit).await;
+                    // Accumulate this fresh subagent's output tokens into the run's
+                    // own spend (replayed/cached agents above cost nothing).
+                    if let Ok(SubagentResult::Completed { usage, .. }) = &raw {
+                        spent.fetch_add(usage.output_tokens, Ordering::Relaxed);
+                    }
+                    let result = result_to_string(raw);
                     if let Some(j) = &journal {
                         j.lock().unwrap().insert(key, result.clone());
                     }
@@ -367,6 +423,7 @@ impl Task for LocalWorkflowHandler {
         let workers = self.workers.clone();
         let output_manager = self.output_manager.clone();
         let fs = ctx.fs.clone();
+        let token_budget_total = self.token_budget_total;
         let worker_spool_path = spool_path.clone();
         let worker_task_id = task_id.clone();
         let worker = Box::pin(async move {
@@ -423,6 +480,7 @@ impl Task for LocalWorkflowHandler {
                 budget,
                 Some(ptx),
                 Some(journal.clone()),
+                token_budget_total,
             );
             let (outcome, ()) = tokio::join!(run, drain);
 
@@ -547,7 +605,10 @@ mod tests {
             Ok(SubagentResult::Completed {
                 agent_id: protocol::AgentId::new(),
                 content: Value::String(format!("echo:{}", request.prompt)),
-                usage: SubagentUsage::default(),
+                usage: SubagentUsage {
+                    output_tokens: 100,
+                    ..Default::default()
+                },
                 total_tool_use_count: 0,
                 total_duration_ms: 0,
                 total_tokens: 0,
@@ -749,6 +810,7 @@ mod tests {
             spawner,
             Arc::new(MockInvoker),
             Arc::new(MockBudget),
+            None,
             None,
             None,
         )
@@ -991,6 +1053,38 @@ mod tests {
             "rebuilt from cache: {}",
             out2.content
         );
+    }
+
+    #[tokio::test]
+    async fn budget_total_and_own_spend_drive_the_budget_global() {
+        let fs: Arc<dyn FileSystem> = Arc::new(InMemoryFs::new());
+        let spawner = Arc::new(EchoSpawner::default());
+        let dir = tempdir().unwrap();
+        let mgr = Arc::new(TaskOutputManager::new(PathBuf::from(dir.path()), fs.clone()));
+        let sink = Arc::new(RecordingSink::default());
+        let handler =
+            make_handler(spawner, mgr.clone(), sink.clone()).with_token_budget(Some(500));
+
+        // Each echo agent reports 100 output tokens; two agents ⇒ spent 200.
+        let script = r#"
+            await agent('a');
+            await agent('b');
+            log('B:' + budget.total + '/' + budget.spent() + '/' + budget.remaining());
+            return {};
+        "#;
+        let handle = handler
+            .spawn(workflow_input(script), make_ctx(fs))
+            .await
+            .unwrap();
+        assert_eq!(await_terminal(&sink).await, TaskStatus::Completed);
+
+        let spool = dir.path().join(format!("{}.output", handle.task_id));
+        let read = mgr
+            .read(&spool, crate::output_manager::OutputOptions::default())
+            .await
+            .unwrap();
+        // total=500, spent=2×100, remaining=300.
+        assert!(read.content.contains("B:500/200/300"), "{}", read.content);
     }
 
     #[tokio::test]

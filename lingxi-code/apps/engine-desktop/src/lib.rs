@@ -3044,12 +3044,18 @@ pub async fn build(
     let local_workflow_invoker = Arc::new(DeferredToolInvoker::new());
     task_registry_inner.register_handler(
         tasks::TaskType::LocalWorkflow,
-        Arc::new(tasks::handlers::LocalWorkflowHandler::new(
-            subagent_spawner.clone(),
-            local_workflow_invoker.clone() as Arc<dyn traits::tool_invoker::ToolInvoker>,
-            budget_enforcer.clone(),
-            task_registry_inner.output_manager.clone(),
-        )),
+        Arc::new(
+            tasks::handlers::LocalWorkflowHandler::new(
+                subagent_spawner.clone(),
+                local_workflow_invoker.clone() as Arc<dyn traits::tool_invoker::ToolInvoker>,
+                budget_enforcer.clone(),
+                task_registry_inner.output_manager.clone(),
+            )
+            // The script's `budget.total` = the turn's token target
+            // (`OrchestratorConfig.token_budget`); `spent()` is the run's own
+            // accumulated subagent output tokens.
+            .with_token_budget(orch_cfg.token_budget),
+        ),
     );
 
     let task_registry = Arc::new(task_registry_inner);

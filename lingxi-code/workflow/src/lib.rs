@@ -18,6 +18,7 @@
 
 use std::cell::RefCell;
 use std::rc::Rc;
+use std::sync::Arc;
 
 /// JS prelude defining `agent()` (a deferred promise) + the `parallel()` /
 /// `pipeline()` orchestration primitives, injected before the workflow body.
@@ -119,6 +120,21 @@ pub struct RunOutcome {
     pub result: Option<String>,
 }
 
+/// Supplies the live token budget the script's `budget` global reflects: the
+/// turn's target (`budget.total`) and the shared output-token spend
+/// (`budget.spent()`), read on demand while the script runs. The host (the
+/// composition root) backs this with the orchestrator's token target plus the
+/// session's cumulative usage — the same shared pool the main loop and every
+/// subagent add to. `None` leaves the no-target default (total `null`, spent
+/// `0`, remaining `Infinity`).
+pub trait WorkflowBudgetSource: Send + Sync {
+    /// The turn's token target, or `None` if no `+Nk` target was set.
+    fn total(&self) -> Option<u64>;
+    /// Output tokens spent this turn across the shared pool (main loop + all
+    /// workflows/subagents).
+    fn spent(&self) -> u64;
+}
+
 /// Rewrite a leading `export const meta = …` / `export const meta=…` into a
 /// plain `const meta = …` so the script body can be evaluated as a classic
 /// script. claude-code reads `meta` from the module's export; here the meta
@@ -215,7 +231,7 @@ pub fn run<R>(script: &str, agent_runner: R) -> Result<RunOutcome, WorkflowError
 where
     R: FnMut(&[String], &[String]) -> Vec<String> + 'static,
 {
-    run_with_progress(script, agent_runner, |_: &Progress| {})
+    run_with_progress(script, agent_runner, |_: &Progress| {}, None)
 }
 
 /// Like [`run`], but also fires `on_progress` for each `phase()`/`log()` event
@@ -230,6 +246,7 @@ pub fn run_with_progress<R, P>(
     script: &str,
     agent_runner: R,
     on_progress: P,
+    budget: Option<Arc<dyn WorkflowBudgetSource>>,
 ) -> Result<RunOutcome, WorkflowError>
 where
     // `(prompts, opts_json) -> results`: the two parallel arrays the pump
@@ -336,6 +353,35 @@ where
                 .map_err(eng)?,
             )
             .map_err(eng)?;
+
+        // Real token budget (when the host supplies a source): set
+        // `globalThis.budget` BEFORE the prelude so its `if (!('budget' in
+        // globalThis))` default is skipped. `budget.total` snapshots the turn's
+        // target; `spent()`/`remaining()` read the shared pool live.
+        if let Some(src) = budget.as_ref() {
+            let s_total = src.clone();
+            globals
+                .set(
+                    "__wf_budget_total",
+                    Function::new(ctx.clone(), move || -> Option<f64> {
+                        s_total.total().map(|t| t as f64)
+                    })
+                    .map_err(eng)?,
+                )
+                .map_err(eng)?;
+            let s_spent = src.clone();
+            globals
+                .set(
+                    "__wf_budget_spent",
+                    Function::new(ctx.clone(), move || -> f64 { s_spent.spent() as f64 })
+                        .map_err(eng)?,
+                )
+                .map_err(eng)?;
+            ctx.eval::<(), _>(
+                b"globalThis.budget = { total: __wf_budget_total(), spent: () => __wf_budget_spent(), remaining: () => { const t = globalThis.budget.total; return (t === null || t === undefined) ? Infinity : Math.max(0, t - __wf_budget_spent()); } };" as &[u8],
+            )
+            .map_err(|e| WorkflowError::Engine(e.to_string()))?;
+        }
 
         // Orchestration prelude: agent() (deferred-promise) + parallel() /
         // pipeline() + budget/args/workflow defined in JS, with the byte-locked
@@ -753,12 +799,17 @@ log('wf=' + (typeof workflow))
             phase('B');
             log('two');
         "#;
-        let out = run_with_progress(script, no_agents, move |p: &Progress| {
-            s.borrow_mut().push(match p {
-                Progress::Phase(t) => format!("phase:{t}"),
-                Progress::Log(m) => format!("log:{m}"),
-            });
-        })
+        let out = run_with_progress(
+            script,
+            no_agents,
+            move |p: &Progress| {
+                s.borrow_mut().push(match p {
+                    Progress::Phase(t) => format!("phase:{t}"),
+                    Progress::Log(m) => format!("log:{m}"),
+                });
+            },
+            None,
+        )
         .unwrap();
         // Callbacks fired live, in emission order.
         assert_eq!(
@@ -767,5 +818,38 @@ log('wf=' + (typeof workflow))
         );
         // The same events are still collected in the outcome.
         assert_eq!(out.progress.len(), 4);
+    }
+
+    #[test]
+    fn real_budget_source_drives_the_budget_globals() {
+        struct Src;
+        impl WorkflowBudgetSource for Src {
+            fn total(&self) -> Option<u64> {
+                Some(500_000)
+            }
+            fn spent(&self) -> u64 {
+                120_000
+            }
+        }
+        let script = r#"
+            log('total=' + String(budget.total));
+            log('spent=' + String(budget.spent()));
+            log('remaining=' + String(budget.remaining()));
+        "#;
+        let out = run_with_progress(
+            script,
+            no_agents,
+            |_: &Progress| {},
+            Some(Arc::new(Src) as Arc<dyn WorkflowBudgetSource>),
+        )
+        .unwrap();
+        assert_eq!(
+            out.progress,
+            vec![
+                Progress::Log("total=500000".into()),
+                Progress::Log("spent=120000".into()),
+                Progress::Log("remaining=380000".into()),
+            ]
+        );
     }
 }

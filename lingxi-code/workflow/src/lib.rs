@@ -109,6 +109,11 @@ impl std::error::Error for WorkflowError {}
 pub struct RunOutcome {
     /// Progress events (`phase()` / `log()`) in emission order.
     pub progress: Vec<Progress>,
+    /// The script's return value, JSON-serialised. claude-code returns the
+    /// script's resolved value (e.g. `return { confirmed }`) as the Workflow
+    /// tool result; this is `JSON.stringify(value)`. `None` when the script
+    /// returns `undefined` (no `return`).
+    pub result: Option<String>,
 }
 
 /// Rewrite a leading `export const meta = …` / `export const meta=…` into a
@@ -182,7 +187,12 @@ pub fn run_sync(script: &str) -> Result<RunOutcome, WorkflowError> {
     // The injected functions still hold `Rc` clones (the context owns them), so
     // clone the captured events out rather than unwrapping the `Rc`.
     let progress = progress.borrow().clone();
-    Ok(RunOutcome { progress })
+    // A classic (non-async) script cannot use top-level `return`, so there is
+    // never a captured result on this path.
+    Ok(RunOutcome {
+        progress,
+        result: None,
+    })
 }
 
 /// Execute a workflow script's **async** body, capturing `phase()`/`log()` and
@@ -209,6 +219,7 @@ where
 
     let progress: Rc<RefCell<Vec<Progress>>> = Rc::new(RefCell::new(Vec::new()));
     let error: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
+    let result_slot: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
     let runner = Rc::new(RefCell::new(agent_runner));
     let prepared = strip_meta_export(script);
     // Wrap in an async IIFE; route a throw into `__wf_error` so it survives the
@@ -216,8 +227,13 @@ where
     // claude-code (V8) captures `(e && e.stack) || e`, but QuickJS's `e.stack`
     // omits the message line, so capture `String(e)` (the message) plus the
     // stack — the V8-vs-QuickJS stack frames differ inherently regardless.
+    // The IIFE's resolved value is the script's `return` value; capture it via
+    // `.then` into `__wf_result` (JSON-serialised) so the Workflow tool can
+    // return it. `undefined` (no `return`) leaves the result unset. A throw is
+    // already routed to `__wf_error` inside the `catch`, so the success handler
+    // sees `undefined` and the rejection handler is a no-op.
     let wrapped = format!(
-        "(async () => {{ try {{\n{prepared}\n}} catch (e) {{ globalThis.__wf_error(String(e) + (e && e.stack ? \"\\n\" + e.stack : \"\")); }} }})();"
+        "(async () => {{ try {{\n{prepared}\n}} catch (e) {{ globalThis.__wf_error(String(e) + (e && e.stack ? \"\\n\" + e.stack : \"\")); }} }})().then((v) => {{ try {{ if (v !== undefined) globalThis.__wf_result(JSON.stringify(v)); }} catch (e) {{ globalThis.__wf_error(String(e)); }} }}, () => {{}});"
     );
 
     ctx.with(|ctx| -> Result<(), WorkflowError> {
@@ -271,6 +287,18 @@ where
             )
             .map_err(eng)?;
 
+        // Native sink for the script's JSON-serialised return value.
+        let res = result_slot.clone();
+        globals
+            .set(
+                "__wf_result",
+                Function::new(ctx.clone(), move |v: String| {
+                    *res.borrow_mut() = Some(v);
+                })
+                .map_err(eng)?,
+            )
+            .map_err(eng)?;
+
         // Orchestration prelude: agent() (deferred-promise) + parallel() /
         // pipeline() + budget/args/workflow defined in JS, with the byte-locked
         // argument validation. The native __wf_dispatch_batch (above) receives
@@ -309,7 +337,8 @@ where
         return Err(WorkflowError::Script(e));
     }
     let progress = progress.borrow().clone();
-    Ok(RunOutcome { progress })
+    let result = result_slot.borrow().clone();
+    Ok(RunOutcome { progress, result })
 }
 
 #[cfg(test)]
@@ -623,5 +652,32 @@ log('wf=' + (typeof workflow))
             }
             other => panic!("got {other:?}"),
         }
+    }
+
+    #[test]
+    fn captures_the_scripts_return_value_as_json() {
+        // The script's `return` value is the Workflow tool's result.
+        let out = run("return { ok: 1, items: [2, 3] };", no_agents).unwrap();
+        assert_eq!(out.result.as_deref(), Some(r#"{"ok":1,"items":[2,3]}"#));
+    }
+
+    #[test]
+    fn no_return_leaves_the_result_unset() {
+        let out = run("log('side effect only');", no_agents).unwrap();
+        assert_eq!(out.result, None);
+        assert_eq!(out.progress, vec![Progress::Log("side effect only".into())]);
+    }
+
+    #[test]
+    fn captures_a_return_value_built_from_agent_results() {
+        let script = r#"
+            const rs = await parallel([() => agent('a'), () => agent('b')]);
+            return { confirmed: rs };
+        "#;
+        let out = run(script, |prompts: &[String]| {
+            prompts.iter().map(|p| format!("{p}!")).collect()
+        })
+        .unwrap();
+        assert_eq!(out.result.as_deref(), Some(r#"{"confirmed":["a!","b!"]}"#));
     }
 }

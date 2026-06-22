@@ -4246,6 +4246,50 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                             "API Error: The model has reached its context window limit."
                                 .to_string(),
                         ),
+                        // Terminal refusal — reached only when no `refusalFallbackModel`
+                        // is configured / the once-per-session latch is already set (the
+                        // swap arm above `continue`s). Surface the byte-locked message
+                        // claude-code's `U2e` builds (claude.ts): `ob` = "API Error"; the
+                        // model-label branch resolves the friendly name via
+                        // `marketing_name_for_model` (TS `Xd`/`nUi`), else the generic
+                        // Usage-Policy message; `kr()` = NOT interactive (TS
+                        // `!isInteractive`) selects the suffix. The cyber/bio category
+                        // variant, the `stop_details.explanation` clause, and the
+                        // `\n\nRequest ID: …` suffix are residuals — LingXi does not
+                        // thread `stop_details` / requestId into the terminal arm, so the
+                        // non-cyber, no-explanation path (the common terminal refusal)
+                        // fires here.
+                        "refusal" => {
+                            let model = self.session.lock().await.model.clone();
+                            let interactive = self.config.interactive_permissions;
+                            Some(match crate::prompt::env_meta::marketing_name_for_model(&model) {
+                                Some(label) => {
+                                    let m = if interactive {
+                                        "Double press esc to edit your last message, or try a different model with /model."
+                                    } else {
+                                        "Try rephrasing the request in a new session or change your model."
+                                    };
+                                    let f = if interactive {
+                                        "Send feedback with /feedback or learn more: https://support.claude.com/en/articles/15363606"
+                                    } else {
+                                        "Learn more: https://support.claude.com/en/articles/15363606"
+                                    };
+                                    format!(
+                                        "API Error: {label} has safety measures that flagged something in this session (https://www.anthropic.com/legal/aup). This sometimes happens with safe, normal conversations. Claude Code can't respond to this request with {label}.\n\n{m}\n\n{f}"
+                                    )
+                                }
+                                None => {
+                                    let m = if interactive {
+                                        "Please double press esc to edit your last message or start a new session for Claude Code to assist with a different task."
+                                    } else {
+                                        "Try rephrasing the request in a new session or change your model."
+                                    };
+                                    format!(
+                                        "API Error: Claude Code is unable to respond to this request, which appears to violate our Usage Policy (https://www.anthropic.com/legal/aup). {m}"
+                                    )
+                                }
+                            })
+                        }
                         _ => None,
                     };
                     if let Some(text) = api_error {
@@ -5826,6 +5870,54 @@ mod turn_recovery_tests {
             events.iter().any(|e| matches!(e, OutputEvent::EndTurn { stop_reason, .. }
                 if stop_reason == "model_context_window_exceeded")),
             "the turn must end with stop_reason model_context_window_exceeded; events={events:#?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn terminal_refusal_without_fallback_surfaces_safety_message() {
+        // A `refusal` with no `refusalFallbackModel` configured hits the terminal
+        // arm (the swap arm `continue`s only when a fallback is set), so it must
+        // surface claude-code's byte-locked `U2e` refusal message — the model-label
+        // branch (resolved via `marketing_name_for_model`), non-interactive suffix
+        // (`interactive_permissions` defaults false).
+        let streaming = Arc::new(MockStreamingApiClient::with_turns(vec![vec![
+            message_start("m", "claude-opus-4-8"),
+            content_block_start_text(0),
+            text_delta(0, "partial"),
+            content_block_stop(0),
+            message_delta_stop("refusal"),
+            message_stop(),
+        ]]));
+        let output = Arc::new(MockOutputStream::new());
+        let mut cfg = OrchestratorConfig::default();
+        cfg.model = "claude-opus-4-8".to_string();
+        assert!(
+            cfg.refusal_fallback_model.is_none(),
+            "default config must have no refusal fallback (else the swap arm runs)"
+        );
+        let orch = ConversationOrchestrator::new_with_streaming(
+            cfg,
+            Arc::new(MockApiClient::new(vec![])),
+            streaming.clone(),
+            Arc::new(ToolRegistry::new()),
+            noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            output.clone(),
+            Arc::new(StaticMemoryProvider::empty()),
+            std::env::temp_dir(),
+        );
+        orch.run_turn_streaming("go").await.expect("turn ends");
+
+        let events = output.snapshot().await;
+        let expected = "API Error: Opus 4.8 has safety measures that flagged something in this session (https://www.anthropic.com/legal/aup). This sometimes happens with safe, normal conversations. Claude Code can't respond to this request with Opus 4.8.\n\nTry rephrasing the request in a new session or change your model.\n\nLearn more: https://support.claude.com/en/articles/15363606";
+        assert!(
+            events.iter().any(|e| matches!(e, OutputEvent::Text { text } if text == expected)),
+            "byte-exact U2e refusal message must be surfaced; events={events:#?}"
+        );
+        assert!(
+            events.iter().any(|e| matches!(e, OutputEvent::EndTurn { stop_reason, .. }
+                if stop_reason == "refusal")),
+            "the turn must end with stop_reason refusal; events={events:#?}"
         );
     }
 

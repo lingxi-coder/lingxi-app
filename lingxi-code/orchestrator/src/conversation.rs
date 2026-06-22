@@ -2356,7 +2356,59 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                     );
                     serde_json::Value::Object(m)
                 } else {
-                    serde_json::json!({ "role": "assistant", "content": content })
+                    // SYNTHETIC assistant line (no real response model/usage).
+                    // LingXi's only synthetic assistant persist is the terminal
+                    // API-error line (conversation.rs ~4399). claude-code builds
+                    // these via baseCreateAssistantMessage (`QBl`) →
+                    // createAssistantAPIErrorMessage (`tc`), which persists the
+                    // synthetic BetaMessage envelope (v2.1.185 binary @205978440):
+                    //   {id, container:null, model:"<synthetic>", role:"assistant",
+                    //    stop_details:null, stop_reason:"stop_sequence",
+                    //    stop_sequence:"", type:"message", content, context_management:null}
+                    // `usage` is OMITTED — `tc` calls `QBl` with no `usage` arg,
+                    // so `usage:undefined` drops the key under JSON.stringify.
+                    // `stop_reason` is hardcoded `"stop_sequence"`; the real
+                    // terminal reason lives in the OUTER apiError/error fields,
+                    // which claude-code does NOT write into the persisted inner
+                    // message (and which LingXi doesn't track). `model` is the
+                    // `<synthetic>` sentinel (`WR`). The prior shape was a bare
+                    // `{role,content}` — under-specified vs the binary.
+                    let mut m = serde_json::Map::new();
+                    m.insert(
+                        "id".to_string(),
+                        serde_json::Value::String(
+                            inner_message_id
+                                .map_or_else(|| msg.id().as_uuid().to_string(), str::to_string),
+                        ),
+                    );
+                    m.insert("container".to_string(), serde_json::Value::Null);
+                    m.insert(
+                        "model".to_string(),
+                        serde_json::Value::String("<synthetic>".to_string()),
+                    );
+                    m.insert(
+                        "role".to_string(),
+                        serde_json::Value::String("assistant".to_string()),
+                    );
+                    m.insert("stop_details".to_string(), serde_json::Value::Null);
+                    m.insert(
+                        "stop_reason".to_string(),
+                        serde_json::Value::String("stop_sequence".to_string()),
+                    );
+                    m.insert(
+                        "stop_sequence".to_string(),
+                        serde_json::Value::String(String::new()),
+                    );
+                    m.insert(
+                        "type".to_string(),
+                        serde_json::Value::String("message".to_string()),
+                    );
+                    m.insert("content".to_string(), serde_json::json!(content));
+                    m.insert("context_management".to_string(), serde_json::Value::Null);
+                    // `stop_reason` from the ConversationMessage is intentionally
+                    // not used here (the synthetic envelope hardcodes it).
+                    let _ = stop_reason;
+                    serde_json::Value::Object(m)
                 };
                 ("assistant", inner)
             }
@@ -8810,8 +8862,11 @@ mod persist_with_parent_tests {
         assert_eq!(inner["stop_sequence"], serde_json::Value::Null);
         assert_eq!(inner["usage"], usage);
 
-        // Synthetic / other path (no model/usage) → the prior `{role, content}`
-        // shape (+ the stamped inner id), unchanged.
+        // Synthetic path (no model/usage) → the synthetic BetaMessage envelope
+        // (baseCreateAssistantMessage `QBl` → createAssistantAPIErrorMessage `tc`,
+        // binary @205978440): model "<synthetic>", `usage` OMITTED, `stop_reason`
+        // hardcoded "stop_sequence" (NOT the message's own "end_turn"), with
+        // container/stop_details/context_management = null.
         let plain = orch.to_jsonl_message_with_inner_id(
             &msg,
             "sess",
@@ -8823,14 +8878,41 @@ mod persist_with_parent_tests {
             None,
             None,
         );
-        let pkeys: Vec<&str> = plain
-            .message
-            .as_object()
-            .unwrap()
-            .keys()
-            .map(String::as_str)
-            .collect();
-        assert_eq!(pkeys, vec!["role", "content", "id"]);
+        let pinner = plain.message.as_object().unwrap();
+        let pkeys: Vec<&str> = pinner.keys().map(String::as_str).collect();
+        assert_eq!(
+            pkeys,
+            vec![
+                "id",
+                "container",
+                "model",
+                "role",
+                "stop_details",
+                "stop_reason",
+                "stop_sequence",
+                "type",
+                "content",
+                "context_management"
+            ],
+            "synthetic BetaMessage envelope key order"
+        );
+        assert_eq!(pinner["id"], serde_json::json!("inner-abc"));
+        assert_eq!(pinner["model"], serde_json::json!("<synthetic>"));
+        assert_eq!(pinner["container"], serde_json::Value::Null);
+        assert_eq!(pinner["role"], serde_json::json!("assistant"));
+        assert_eq!(pinner["stop_details"], serde_json::Value::Null);
+        // Hardcoded "stop_sequence", NOT the message's own "end_turn".
+        assert_eq!(pinner["stop_reason"], serde_json::json!("stop_sequence"));
+        assert_eq!(pinner["stop_sequence"], serde_json::json!(""));
+        assert_eq!(pinner["type"], serde_json::json!("message"));
+        assert_eq!(pinner["context_management"], serde_json::Value::Null);
+        // `usage` is omitted (tc calls QBl without a usage arg).
+        assert!(
+            !pinner.contains_key("usage"),
+            "synthetic envelope must omit usage"
+        );
+        assert_eq!(pinner["content"][0]["type"], serde_json::json!("text"));
+        assert_eq!(pinner["content"][0]["text"], serde_json::json!("hi"));
     }
 
     // ── test 5: per-content_block_stop single-block assistant lines ───────────

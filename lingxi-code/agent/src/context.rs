@@ -126,6 +126,11 @@ pub struct SubagentContext {
     /// the policy is per-agent: a read-only agent narrows this advertised set
     /// AND `allowed_tools` together, while `general-purpose` keeps the full set.
     pub tool_schemas: Vec<serde_json::Value>,
+    /// Structured-output schema (JSON Schema string) forwarded from
+    /// [`traits::subagent_spawn::SubagentSpawnRequest::schema`]. When `Some`, the
+    /// runner injects a forced `StructuredOutput` tool and returns the model's
+    /// tool input as the result. `None` ⇒ free-form text output.
+    pub schema: Option<String>,
     /// Inherited budget enforcer (from `SubagentInheritance::budget`). When
     /// `Some`, the multi-turn loop consults it once per turn and stops with a
     /// budget-exhausted terminal when the cumulative cost is over the limit.

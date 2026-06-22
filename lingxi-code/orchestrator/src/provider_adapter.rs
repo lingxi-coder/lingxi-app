@@ -1887,6 +1887,25 @@ impl agent::SubagentApiClient for ProviderApiAdapter {
         // llm-client resolves unscoped (default behaviour).
         StreamingApiClient::stream(self, model, None, system, messages, tools).await
     }
+
+    async fn messages_create_stream_forced(
+        &self,
+        model: &str,
+        system: Option<&str>,
+        messages: Vec<ConversationMessage>,
+        tools: Vec<serde_json::Value>,
+        forced_tool: Option<&str>,
+    ) -> Result<BoxStream<'static, Result<LlmEvent, LlmError>>, LlmError> {
+        // Structured-output path: build the request and force `tool_choice` to
+        // the named tool so the model must emit a matching structured call.
+        let mut req = self.build_request(model, None, system, messages, tools, true, None)?;
+        if let Some(name) = forced_tool {
+            req.tool_choice = Some(llm_client::ToolChoice::Tool {
+                name: name.to_string(),
+            });
+        }
+        self.drive_stream(req).await
+    }
 }
 
 #[async_trait]

@@ -212,6 +212,7 @@ mod tests {
             api_client: None,
             tool_invoker: None,
             tool_schemas: vec![],
+            schema: None,
             budget: None,
             hook_executor: None,
             skill_loader: None,

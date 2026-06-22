@@ -64,4 +64,23 @@ pub trait SubagentApiClient: Send + Sync {
         let events = crate::accumulator::response_to_stream_events(resp);
         Ok(futures::stream::iter(events.into_iter().map(Ok)).boxed())
     }
+
+    /// Like [`Self::messages_create_stream`], but FORCES the model to call the
+    /// named tool (`tool_choice`) — used to make a subagent emit structured
+    /// output by forcing a synthetic `StructuredOutput` tool. The default
+    /// implementation ignores `forced_tool` (no forcing), so existing impls and
+    /// the non-schema path are unchanged; the production provider adapter
+    /// overrides it to thread `tool_choice` into the request.
+    async fn messages_create_stream_forced(
+        &self,
+        model: &str,
+        system: Option<&str>,
+        messages: Vec<protocol::ConversationMessage>,
+        tools: Vec<serde_json::Value>,
+        forced_tool: Option<&str>,
+    ) -> Result<BoxStream<'static, Result<LlmEvent, LlmError>>, LlmError> {
+        let _ = forced_tool;
+        self.messages_create_stream(model, system, messages, tools)
+            .await
+    }
 }

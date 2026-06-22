@@ -719,6 +719,8 @@ Usage notes:\n\
             cwd: if is_fork { None } else { parsed.cwd.clone() },
             fork_context_messages: None,
             fork_parent_system_prompt: None,
+            // The Agent (Task) tool has no structured-output schema param.
+            schema: None,
         };
 
         match spawner.spawn_async(request, inherit).await {
@@ -1274,6 +1276,7 @@ Use /mcp to configure and authenticate the required MCP servers.",
             } else {
                 None
             },
+            schema: None,
         };
 
         let outcome = spawner.spawn(request, inherit).await;

@@ -237,6 +237,7 @@ impl Task for LocalAgentHandler {
             // Non-fork spawn.
             fork_context_messages: None,
             fork_parent_system_prompt: None,
+            schema: None,
         };
 
         // 4. Bundle the inheritance. Cloning the Arcs preserves pointer

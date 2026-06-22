@@ -553,7 +553,29 @@ async fn run_subagent_loop(
     let system: Option<String> = ctx.rendered_system_prompt.as_ref().map(std::string::ToString::to_string);
     // Wire tool definitions advertised to the model on every round-trip (empty
     // when the spawner wired none). Cloned per round-trip below.
-    let tool_schemas = ctx.tool_schemas.clone();
+    //
+    // Structured output (claude-code workflow `agent({schema})`): when a schema
+    // was requested, inject a synthetic `StructuredOutput` tool whose
+    // `input_schema` IS the schema and force the model to call it (`tool_choice`
+    // via `messages_create_stream_forced`); its tool input is captured below as
+    // the run's result.
+    let mut tool_schemas = ctx.tool_schemas.clone();
+    let force_structured_tool: Option<&'static str> = if let Some(schema_str) = &ctx.schema {
+        let input_schema: serde_json::Value = serde_json::from_str(schema_str)
+            .unwrap_or_else(|_| serde_json::json!({ "type": "object" }));
+        tool_schemas.push(serde_json::json!({
+            "name": "StructuredOutput",
+            "description":
+                "Return the final result as a single structured object matching the required schema.",
+            "input_schema": input_schema,
+        }));
+        Some("StructuredOutput")
+    } else {
+        None
+    };
+    // Captured when the model calls the synthetic `StructuredOutput` tool — that
+    // input becomes the run's result, and the loop terminates.
+    let mut structured_result: Option<serde_json::Value> = None;
     // Per-agent tool allow-list enforced at dispatch (see below). Empty = no
     // restriction (the resolver has not filtered, e.g. `AgentToolPolicy::All`).
     // This is the dispatch-time guard the advertised set relies on: the
@@ -664,14 +686,26 @@ async fn run_subagent_loop(
         // in-flight stream, exactly as dropping a non-streaming call would.
         let response = loop {
             let api_call = async {
-                let stream = api_client
-                    .messages_create_stream(
-                        &model,
-                        system.as_deref(),
-                        history.clone(),
-                        tool_schemas.clone(),
-                    )
-                    .await?;
+                let stream = if let Some(forced) = force_structured_tool {
+                    api_client
+                        .messages_create_stream_forced(
+                            &model,
+                            system.as_deref(),
+                            history.clone(),
+                            tool_schemas.clone(),
+                            Some(forced),
+                        )
+                        .await?
+                } else {
+                    api_client
+                        .messages_create_stream(
+                            &model,
+                            system.as_deref(),
+                            history.clone(),
+                            tool_schemas.clone(),
+                        )
+                        .await?
+                };
                 crate::accumulator::accumulate_stream(stream).await
             };
             if !event_channel_open {
@@ -782,6 +816,20 @@ async fn run_subagent_loop(
 
             let mut tool_results: Vec<ContentBlock> = Vec::with_capacity(tool_uses.len());
             for (tool_use_id, name, input, provider_id) in &tool_uses {
+                // Structured output: the synthetic `StructuredOutput` tool is not
+                // dispatched — its input IS the run's result. Capture it and feed
+                // back a benign ToolResult; the loop terminates below.
+                if force_structured_tool == Some(name.as_str()) {
+                    structured_result = Some(input.clone());
+                    tool_results.push(ContentBlock::ToolResult {
+                        tool_use_id: tool_use_id.clone(),
+                        content: "(structured output captured)".to_string(),
+                        is_error: false,
+                        provider_tool_use_id: provider_id.clone(),
+                        content_blocks: None,
+                    });
+                    continue;
+                }
                 // Allow-list guard: when `allowed_tools` is non-empty, a model
                 // request for a tool outside it is refused WITHOUT dispatching
                 // (the inherited `RegistryToolInvoker` would otherwise run any
@@ -858,15 +906,22 @@ async fn run_subagent_loop(
         // `end_turn`, a stream with no stop_reason (`None`), and any other
         // reason (max_tokens / stop_sequence / pause_turn / refusal), even when
         // the truncated turn carried tool_uses we just dispatched.
-        let should_continue =
-            stop_reason.as_deref() == Some("tool_use") && !tool_uses.is_empty();
+        // A captured structured output terminates the run (it IS the result),
+        // even though the forced tool call carries a `tool_use` stop reason.
+        let should_continue = stop_reason.as_deref() == Some("tool_use")
+            && !tool_uses.is_empty()
+            && structured_result.is_none();
         if !should_continue {
             // claude `finalizeAgentTool`: the result's `content` is the LAST
             // assistant message's text blocks, with a backward-scan fallback to
             // the most recent assistant message that has text when the final turn
             // was tool-only (agentToolUtils.ts:304-317). `history` already holds
             // the current assistant turn (pushed above) + every prior turn.
-            let result = build_completed_result(&history, &assistant_blocks, stop_reason.as_deref());
+            // A `schema` run returns the captured StructuredOutput tool input.
+            let result = match structured_result.take() {
+                Some(structured) => structured,
+                None => build_completed_result(&history, &assistant_blocks, stop_reason.as_deref()),
+            };
             let _ = out_tx
                 .send(SubagentEvent::Completed {
                     agent_id,
@@ -1463,6 +1518,7 @@ mod tests {
             api_client: None,
             tool_invoker: None,
             tool_schemas: vec![],
+            schema: None,
             budget: None,
             hook_executor: None,
             skill_loader: None,
@@ -1787,6 +1843,31 @@ mod tests {
             "backward scan recovers the most recent assistant text; got {result:?}"
         );
         assert_eq!(result["text"], "partial");
+    }
+
+    #[tokio::test]
+    async fn schema_forces_structured_output_and_returns_the_tool_input() {
+        // With `ctx.schema` set, the runner injects+forces a `StructuredOutput`
+        // tool; the model's tool input IS the run's result (it is NOT dispatched).
+        let structured = serde_json::json!({ "answer": 42, "ok": true });
+        let resp = llm_client::LlmResponse {
+            content: vec![llm_client::ContentBlock::ToolCall {
+                id: ToolUseId::new().to_string(),
+                name: "StructuredOutput".into(),
+                input: structured.clone(),
+            }],
+            ..tool_use_response("StructuredOutput", Some("tool_use"))
+        };
+        let api = MockSubagentApiClient::new(vec![Ok(resp)]);
+        let invoker = CountingInvoker::new();
+        let mut ctx = loop_ctx(api, Some(invoker.clone()), 4);
+        ctx.schema = Some(r#"{"type":"object"}"#.to_string());
+        let (_tx, event_rx) = mpsc::channel::<engine::Event>(8);
+        let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(16);
+        run_subagent(ctx, event_rx, out_tx).await;
+        let evs = drain(out_rx).await;
+        // The Completed result IS the captured StructuredOutput tool input.
+        assert_eq!(one_completed(&evs), structured);
     }
 
     #[tokio::test]

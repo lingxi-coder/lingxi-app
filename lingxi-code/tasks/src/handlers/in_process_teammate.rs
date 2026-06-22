@@ -338,6 +338,8 @@ impl InProcessTeammateHandler {
             // `SubagentContext::tool_schemas` WARNING), so keeping this empty is
             // also what prevents advertising tools the agent's policy forbids.
             tool_schemas: vec![],
+            // Teammates have no structured-output schema.
+            schema: None,
             // Teammates do not currently inherit a budget enforcer; `None`
             // preserves today's behavior (no per-turn budget gate) and is
             // purely additive.

@@ -646,6 +646,8 @@ impl PoolSubagentSpawner {
             api_client: None,
             tool_invoker: None,
             tool_schemas: vec![],
+            // Overwritten by `spawn` from `request.schema` (like `tool_schemas`).
+            schema: None,
             budget: None,
             // Filled by `spawn` from the set-once `hook_executor` / `skill_loader`
             // cells (None when unfilled — tests / minimal builds). `hook_session_id`
@@ -821,6 +823,7 @@ impl SubagentSpawner for PoolSubagentSpawner {
         let (tool_schemas, allowed_tools) = self.resolve_tools(&ctx.agent_definition).await;
         ctx.tool_schemas = tool_schemas;
         ctx.allowed_tools = allowed_tools;
+        ctx.schema = request.schema.clone();
         let agent_id = ctx.agent_id;
         let (_aid, mut rx) = self
             .pool
@@ -1825,6 +1828,7 @@ mod tests {
             cwd: None,
             fork_context_messages: None,
             fork_parent_system_prompt: None,
+            schema: None,
         };
         // Drive resolve_definition + the override branch directly by replicating
         // the spawn-path logic (spawn() would require a live runner).
@@ -1984,6 +1988,7 @@ mod tests {
             cwd: None,
             fork_context_messages: None,
             fork_parent_system_prompt: None,
+            schema: None,
         };
         let err = spawner
             .spawn_async(req, SubagentInheritance { tool_invoker: invoker, budget })

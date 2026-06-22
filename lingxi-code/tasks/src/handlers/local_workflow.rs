@@ -196,6 +196,12 @@ fn make_request(default_subagent_type: &str, prompt: &str, opts_json: &str) -> S
         cwd: None,
         fork_context_messages: None,
         fork_parent_system_prompt: None,
+        // `agent(prompt, { schema })` → structured output. The opt is a JSON
+        // Schema object; carry it as its serialised form for the runner to force.
+        schema: opts
+            .get("schema")
+            .filter(|v| !v.is_null())
+            .map(std::string::ToString::to_string),
     }
 }
 
@@ -888,20 +894,22 @@ mod tests {
     async fn agent_opts_map_to_the_spawn_request() {
         let spawner = Arc::new(EchoSpawner::default());
         let script = r#"
-            await agent('p', { agentType: 'code-reviewer', model: 'opus', isolation: 'worktree' });
+            await agent('p', { agentType: 'code-reviewer', model: 'opus', isolation: 'worktree', schema: { type: 'object' } });
             await agent('plain');
         "#;
         run_bridge(script, spawner.clone()).await;
         let reqs = spawner.seen_reqs.lock().unwrap().clone();
         assert_eq!(reqs.len(), 2);
-        // agentType / model / isolation opts → the spawn request.
+        // agentType / model / isolation / schema opts → the spawn request.
         assert_eq!(reqs[0].subagent_type, "code-reviewer");
         assert_eq!(reqs[0].model.as_deref(), Some("opus"));
         assert_eq!(reqs[0].isolation.as_deref(), Some("worktree"));
+        assert_eq!(reqs[0].schema.as_deref(), Some(r#"{"type":"object"}"#));
         // A bare agent(prompt) → default type, no overrides.
         assert_eq!(reqs[1].subagent_type, "general-purpose");
         assert_eq!(reqs[1].model, None);
         assert_eq!(reqs[1].isolation, None);
+        assert_eq!(reqs[1].schema, None);
     }
 
     // ==== Handler-level tests (full Task lifecycle) =========================

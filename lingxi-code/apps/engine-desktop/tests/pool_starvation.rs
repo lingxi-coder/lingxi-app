@@ -174,6 +174,7 @@ fn parked_teammate_ctx() -> SubagentContext {
         api_client: None,
         tool_invoker: None,
         tool_schemas: vec![],
+        schema: None,
         budget: None,
         hook_executor: None,
         skill_loader: None,
@@ -213,6 +214,7 @@ fn agent_tool_request() -> SubagentSpawnRequest {
         cwd: None,
         fork_context_messages: None,
         fork_parent_system_prompt: None,
+        schema: None,
         run_in_background: false,
     }
 }

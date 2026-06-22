@@ -98,6 +98,13 @@ pub struct SubagentSpawnRequest {
     /// onto `ToolUseContext`) keeps the existing body+trailer behavior.
     #[serde(default)]
     pub fork_parent_system_prompt: Option<String>,
+    /// Structured-output schema (JSON Schema, serialised as a string) the child
+    /// must satisfy: the runner injects a forced `StructuredOutput` tool whose
+    /// `input_schema` IS this schema, forces `tool_choice` to it, and returns the
+    /// model's tool input as the result (claude-code's workflow `agent({schema})`
+    /// — validation happens at the tool-call layer). `None` ⇒ free-form text.
+    #[serde(default)]
+    pub schema: Option<String>,
 }
 
 /// Token-usage rollup returned at the end of a successful spawn.

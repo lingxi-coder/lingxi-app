@@ -118,6 +118,7 @@ impl AgentExecutor {
             // conversation, so the fork-subagent fields stay unset.
             fork_context_messages: None,
             fork_parent_system_prompt: None,
+            schema: None,
         };
 
         let fut = spawner.spawn(req, inherit);

@@ -50,6 +50,7 @@ globalThis.__wf_pump = () => {
 // concurrent batch), then collect; a throwing thunk / rejected promise → null.
 globalThis.parallel = async (thunks) => {
   if (!Array.isArray(thunks)) throw new Error("parallel() expects an array of thunks");
+  if (thunks.length > 4096) throw new Error("array length " + thunks.length + " exceeds the maximum of 4096 supported across the workflow VM boundary");
   const ps = thunks.map((t) => { try { return Promise.resolve(t()); } catch (e) { return Promise.resolve(null); } });
   const out = [];
   for (const p of ps) { try { out.push(await p); } catch (e) { out.push(null); } }
@@ -61,6 +62,7 @@ globalThis.parallel = async (thunks) => {
 // batch. A throwing stage drops that item to null.
 globalThis.pipeline = async (items, ...stages) => {
   if (!Array.isArray(items)) throw new Error("pipeline() expects an array as the first argument");
+  if (items.length > 4096) throw new Error("array length " + items.length + " exceeds the maximum of 4096 supported across the workflow VM boundary");
   for (const s of stages) if (typeof s !== "function") throw new Error("pipeline() stages must be functions: pipeline(items, item => ..., result => ...)");
   const chain = async (item, idx) => {
     let v = item;

@@ -230,6 +230,7 @@ pub async fn run_workflow_script(
     tool_invoker: Arc<dyn ToolInvoker>,
     budget: Arc<dyn BudgetEnforcerHandle>,
     progress_tx: Option<mpsc::UnboundedSender<String>>,
+    journal: Option<Arc<std::sync::Mutex<HashMap<String, String>>>>,
 ) -> Result<workflow::RunOutcome, workflow::WorkflowError> {
     // Request channel: each in-flight batch is (calls, reply-sender), where a
     // call is (prompt, opts_json). A buffer of one suffices — the runner blocks
@@ -284,9 +285,23 @@ pub async fn run_workflow_script(
                     budget: budget.clone(),
                 };
                 let subagent_type = subagent_type.to_string();
+                let journal = journal.clone();
                 async move {
+                    // Resume cache: a journaled result for the same (prompt, opts)
+                    // is replayed instead of re-spawning. The guard is dropped
+                    // before any `.await` (a std Mutex guard is not `Send`).
+                    let key = format!("{prompt}\u{0}{opts_json}");
+                    if let Some(j) = &journal {
+                        if let Some(cached) = j.lock().unwrap().get(&key).cloned() {
+                            return cached;
+                        }
+                    }
                     let request = make_request(&subagent_type, &prompt, &opts_json);
-                    result_to_string(spawner.spawn(request, inherit).await)
+                    let result = result_to_string(spawner.spawn(request, inherit).await);
+                    if let Some(j) = &journal {
+                        j.lock().unwrap().insert(key, result.clone());
+                    }
+                    result
                 }
             }))
             .buffered(cap)
@@ -322,6 +337,7 @@ impl Task for LocalWorkflowHandler {
         let TaskSpawnInput::LocalWorkflow {
             workflow_id: _workflow_id,
             script,
+            resume_from_run_id,
         } = input
         else {
             return Err(TaskError::Internal(
@@ -350,11 +366,40 @@ impl Task for LocalWorkflowHandler {
         let status_sink = self.status_sink.clone();
         let workers = self.workers.clone();
         let output_manager = self.output_manager.clone();
+        let fs = ctx.fs.clone();
         let worker_spool_path = spool_path.clone();
         let worker_task_id = task_id.clone();
         let worker = Box::pin(async move {
             status_sink
                 .set_status(&worker_task_id, TaskStatus::Running)
+                .await;
+
+            // Resume journal: a stable `wf_…` run id keys a per-(prompt, opts)
+            // `agent()` result cache. A new run mints one; a resume reuses the
+            // caller's id and pre-loads its journal so unchanged agents replay
+            // instead of re-spawning. The id is surfaced to the task output so a
+            // later call can pass it back as `resumeFromRunId`.
+            let run_id = resume_from_run_id
+                .clone()
+                .unwrap_or_else(|| format!("wf_{:016x}", rand::random::<u64>()));
+            let journal_path = worker_spool_path
+                .parent()
+                .map(|d| d.join(format!("workflow-{run_id}.json")));
+            let mut cache: HashMap<String, String> = HashMap::new();
+            if resume_from_run_id.is_some() {
+                if let Some(p) = journal_path.as_ref().and_then(|p| p.to_str()) {
+                    if let Ok(fc) = fs.read_file(p, None, None).await {
+                        if let Ok(loaded) =
+                            serde_json::from_str::<HashMap<String, String>>(&fc.content)
+                        {
+                            cache = loaded;
+                        }
+                    }
+                }
+            }
+            let journal = Arc::new(std::sync::Mutex::new(cache));
+            let _ = output_manager
+                .append(&worker_spool_path, &format!("runId: {run_id}\n"))
                 .await;
 
             // Live progress: `phase()`/`log()` lines are spooled to the task
@@ -377,8 +422,20 @@ impl Task for LocalWorkflowHandler {
                 tool_invoker,
                 budget,
                 Some(ptx),
+                Some(journal.clone()),
             );
             let (outcome, ()) = tokio::join!(run, drain);
+
+            // Persist the journal (new + replayed results) under the run id so a
+            // later resume can replay them. Serialise before any await so the std
+            // Mutex guard never crosses an await point.
+            let serialized = serde_json::to_string(&*journal.lock().unwrap()).ok();
+            if let (Some(p), Some(s)) = (
+                journal_path.as_ref().and_then(|p| p.to_str()),
+                serialized.as_ref(),
+            ) {
+                let _ = fs.write_file(p, s).await;
+            }
 
             // The Workflow tool result is the script's return value; spool it.
             // A script-level error spools its message and fails the task. Spool
@@ -654,6 +711,7 @@ mod tests {
         TaskSpawnInput::LocalWorkflow {
             workflow_id: "wf".into(),
             script: script.into(),
+            resume_from_run_id: None,
         }
     }
 
@@ -691,6 +749,7 @@ mod tests {
             spawner,
             Arc::new(MockInvoker),
             Arc::new(MockBudget),
+            None,
             None,
         )
         .await
@@ -824,13 +883,19 @@ mod tests {
         seen.sort();
         assert_eq!(seen, vec!["a".to_string(), "b".to_string()]);
 
-        // The script's return value (JSON) was spooled as the task result.
+        // The script's return value (JSON) was spooled as the task result,
+        // after the surfaced run id.
         let spool_path = dir.path().join(format!("{}.output", handle.task_id));
         let read = mgr
             .read(&spool_path, crate::output_manager::OutputOptions::default())
             .await
             .unwrap();
-        assert_eq!(read.content, r#"{"confirmed":["echo:a","echo:b"]}"#);
+        assert!(read.content.starts_with("runId: wf_"), "{}", read.content);
+        assert!(
+            read.content.contains(r#"{"confirmed":["echo:a","echo:b"]}"#),
+            "{}",
+            read.content
+        );
     }
 
     #[tokio::test]
@@ -862,6 +927,70 @@ mod tests {
         assert!(read.content.contains("=== Scan ==="), "phase: {}", read.content);
         assert!(read.content.contains("found 2 things"), "log: {}", read.content);
         assert!(read.content.contains(r#"{"ok":true}"#), "result: {}", read.content);
+    }
+
+    #[tokio::test]
+    async fn resume_replays_journaled_agent_results_without_respawning() {
+        let fs: Arc<dyn FileSystem> = Arc::new(InMemoryFs::new());
+        let dir = tempdir().unwrap();
+        let mgr = Arc::new(TaskOutputManager::new(PathBuf::from(dir.path()), fs.clone()));
+        let script = r#"
+            const a = await agent('a');
+            const b = await agent('b');
+            return { a, b };
+        "#;
+
+        // Run 1: fresh run — both agents spawn; capture the surfaced runId.
+        let spawner1 = Arc::new(EchoSpawner::default());
+        let sink1 = Arc::new(RecordingSink::default());
+        let h1 = make_handler(spawner1.clone(), mgr.clone(), sink1.clone());
+        let handle1 = h1
+            .spawn(workflow_input(script), make_ctx(fs.clone()))
+            .await
+            .unwrap();
+        assert_eq!(await_terminal(&sink1).await, TaskStatus::Completed);
+        assert_eq!(spawner1.seen.lock().unwrap().len(), 2, "run 1 spawns both");
+
+        let spool1 = dir.path().join(format!("{}.output", handle1.task_id));
+        let out1 = mgr
+            .read(&spool1, crate::output_manager::OutputOptions::default())
+            .await
+            .unwrap();
+        let run_id = out1
+            .content
+            .lines()
+            .find_map(|l| l.strip_prefix("runId: "))
+            .expect("runId surfaced")
+            .to_string();
+        assert!(run_id.starts_with("wf_"), "runId: {run_id}");
+
+        // Run 2: resume the same id — every agent() must replay from the journal,
+        // so the spawner is never called, and the result is rebuilt from cache.
+        let spawner2 = Arc::new(EchoSpawner::default());
+        let sink2 = Arc::new(RecordingSink::default());
+        let h2 = make_handler(spawner2.clone(), mgr.clone(), sink2.clone());
+        let input2 = TaskSpawnInput::LocalWorkflow {
+            workflow_id: "wf".into(),
+            script: script.into(),
+            resume_from_run_id: Some(run_id),
+        };
+        let handle2 = h2.spawn(input2, make_ctx(fs.clone())).await.unwrap();
+        assert_eq!(await_terminal(&sink2).await, TaskStatus::Completed);
+        assert!(
+            spawner2.seen.lock().unwrap().is_empty(),
+            "resume must replay journaled results, not re-spawn"
+        );
+
+        let spool2 = dir.path().join(format!("{}.output", handle2.task_id));
+        let out2 = mgr
+            .read(&spool2, crate::output_manager::OutputOptions::default())
+            .await
+            .unwrap();
+        assert!(
+            out2.content.contains(r#"{"a":"echo:a","b":"echo:b"}"#),
+            "rebuilt from cache: {}",
+            out2.content
+        );
     }
 
     #[tokio::test]

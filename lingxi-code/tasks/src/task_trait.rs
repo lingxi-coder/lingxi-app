@@ -80,6 +80,9 @@ pub enum TaskSpawnInput {
         workflow_id: String,
         /// The model-authored workflow script source (JavaScript) to execute.
         script: String,
+        /// Resume a prior run (`wf_…`): journaled `agent()` results for
+        /// unchanged (prompt, opts) are replayed instead of re-spawned.
+        resume_from_run_id: Option<String>,
     },
     /// Spawn an MCP monitor.
     MonitorMcp {

@@ -680,6 +680,7 @@ impl tool_workflow::WorkflowLauncher for TaskRegistryWorkflowLauncher {
                 tasks::TaskSpawnInput::LocalWorkflow {
                     workflow_id: spec.name.clone().unwrap_or_default(),
                     script,
+                    resume_from_run_id: spec.resume_from_run_id.clone(),
                 },
                 "Workflow".to_string(),
             )

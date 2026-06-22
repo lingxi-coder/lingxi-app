@@ -708,14 +708,17 @@ fn state_for_spawn(base: TaskStateBase, input: &TaskSpawnInput) -> TaskState {
                 pending_messages: vec![],
             })
         }
-        TaskSpawnInput::LocalWorkflow { workflow_id, script } => {
-            TaskState::LocalWorkflow(crate::state::LocalWorkflowTaskState {
-                base,
-                workflow_id: workflow_id.clone(),
-                script: script.clone(),
-                current_step: 0,
-            })
-        }
+        TaskSpawnInput::LocalWorkflow {
+            workflow_id,
+            script,
+            resume_from_run_id,
+        } => TaskState::LocalWorkflow(crate::state::LocalWorkflowTaskState {
+            base,
+            workflow_id: workflow_id.clone(),
+            script: script.clone(),
+            resume_from_run_id: resume_from_run_id.clone(),
+            current_step: 0,
+        }),
         TaskSpawnInput::MonitorMcp { server_name, watch } => {
             TaskState::MonitorMcp(crate::state::MonitorMcpTaskState {
                 base,

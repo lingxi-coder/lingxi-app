@@ -161,6 +161,9 @@ pub struct LocalWorkflowTaskState {
     /// The model-authored workflow script source (carried for resume).
     #[serde(default)]
     pub script: String,
+    /// Prior run id to resume journaled `agent()` results from, if any.
+    #[serde(default)]
+    pub resume_from_run_id: Option<String>,
     /// Index of the currently-executing step.
     pub current_step: usize,
 }

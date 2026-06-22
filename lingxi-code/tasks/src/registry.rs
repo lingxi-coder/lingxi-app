@@ -50,6 +50,14 @@ pub struct TaskRegistry {
     /// `None` (the default) => strict no-op; the orchestrator injects a real
     /// firer via [`with_task_created_firer`](Self::with_task_created_firer).
     task_created_firer: hooks::OptionalTaskCreatedFirer,
+    /// Task ids of PERSISTENT agents that came to rest since the last drain —
+    /// armed by [`mark_task_rested`](Self::mark_task_rested) (via the status
+    /// sink's `notify_rest`), surfaced ONCE per rest by
+    /// [`take_pending_task_notifications`](Self::take_pending_task_notifications)
+    /// WITHOUT eviction (the still-alive agent re-arms on its next rest). Kept
+    /// out of [`TaskStateBase`] to avoid a workspace-wide exhaustive-initializer
+    /// churn for a field only this path reads.
+    pending_rest: Arc<RwLock<std::collections::HashSet<String>>>,
 }
 
 impl TaskRegistry {
@@ -70,6 +78,7 @@ impl TaskRegistry {
             output_manager,
             task_completed_firer: None,
             task_created_firer: None,
+            pending_rest: Arc::new(RwLock::new(std::collections::HashSet::new())),
         }
     }
 
@@ -444,6 +453,23 @@ impl TaskRegistry {
         evict
     }
 
+    /// Arm a one-shot "came to rest" notification for a PERSISTENT, still-alive
+    /// task (the `LocalAgentHandler` calls this via the status sink each time its
+    /// backgrounded agent rests). The next [`take_pending_task_notifications`]
+    /// surfaces it WITHOUT evicting; a fresh rest re-arms it. A no-op for an
+    /// unknown or already-terminal task (the ordinary terminal-notification path
+    /// owns those).
+    pub async fn mark_task_rested(&self, task_id: &str) {
+        {
+            let map = self.tasks.read().await;
+            match map.get(task_id) {
+                Some(s) if !s.base().status.is_terminal() => {}
+                _ => return,
+            }
+        }
+        self.pending_rest.write().await.insert(task_id.to_string());
+    }
+
     /// Drain the terminal tasks not yet surfaced to the model, marking each
     /// `notified` (and evicting it, since terminal + notified is GC-able) so a
     /// completion is reported exactly once. Returns a [`TaskNotification`]
@@ -513,6 +539,40 @@ impl TaskRegistry {
             // completion surfaces exactly once. Mirrors `mark_notified`'s eager
             // eviction without re-acquiring the lock.
             map.remove(&id);
+        }
+
+        // Rest notifications: a PERSISTENT agent that came to rest (non-terminal,
+        // still alive) surfaces ONCE per rest WITHOUT eviction — claude-code's
+        // "fires each time this agent comes to rest … the same task-id may notify
+        // more than once." Drain + clear the armed set; the agent re-arms on its
+        // next rest. A task that raced to terminal is skipped here (the terminal
+        // drain above already owns it).
+        let rest_ids: Vec<String> = {
+            let mut armed = self.pending_rest.write().await;
+            let ids = armed.iter().cloned().collect::<Vec<_>>();
+            armed.clear();
+            ids
+        };
+        for id in rest_ids {
+            let Some(state) = map.get(&id) else { continue };
+            let b = state.base();
+            if b.status.is_terminal() {
+                continue;
+            }
+            out.push(traits::task_registry::TaskNotification {
+                task_id: b.id.clone(),
+                task_type: task_type_to_wire(b.task_type).to_string(),
+                status: status_to_wire(b.status).to_string(),
+                description: b.description.clone(),
+                tool_use_id: b.tool_use_id.clone(),
+                // The spool carries the just-produced turn-set result; the model
+                // reads it (it was told it can Read/Bash-tail the output file).
+                output_path: Some(b.output_file.to_string_lossy().into_owned()),
+                exit_code: None,
+                error: None,
+                result: None,
+                usage: None,
+            });
         }
         out
     }
@@ -2067,6 +2127,74 @@ mod spawn_tests {
         assert_eq!(n.error.as_deref(), Some("rate limited"));
         assert_eq!(n.tool_use_id.as_deref(), Some("toolu_7"));
         assert!(n.exit_code.is_none(), "agent tasks have no exit_code");
+    }
+
+    #[tokio::test]
+    async fn rested_agent_surfaces_once_per_rest_without_eviction() {
+        use crate::state::{LocalAgentTaskState, TaskState, TaskStateBase};
+        let (_d, registry) = make_registry();
+
+        // A PERSISTENT (backgrounded) agent that came to rest: NON-terminal.
+        let base = TaskStateBase {
+            id: "a-rest-1".into(),
+            task_type: TaskType::LocalAgent,
+            status: TaskStatus::Running,
+            description: "bg agent".into(),
+            tool_use_id: Some("toolu_r".into()),
+            start_time: SystemTime::now(),
+            end_time: None,
+            total_paused_ms: 0,
+            output_file: std::path::PathBuf::from("/tmp/tasks/a-rest-1.output"),
+            output_offset: 0,
+            notified: false,
+        };
+        registry
+            .insert_state_for_test(TaskState::LocalAgent(LocalAgentTaskState {
+                base,
+                agent_id: protocol::AgentId::nil(),
+                prompt: String::new(),
+                error: None,
+                messages: vec![],
+                pending_messages: vec![],
+                is_backgrounded: true,
+            }))
+            .await;
+
+        // No rest armed yet ⇒ a Running task surfaces NOTHING.
+        assert!(
+            registry.take_pending_task_notifications().await.is_empty(),
+            "a running-but-not-rested agent is not notified"
+        );
+
+        // Came to rest ⇒ exactly one notification, NON-terminal, NOT evicted.
+        registry.mark_task_rested("a-rest-1").await;
+        let drained = registry.take_pending_task_notifications().await;
+        assert_eq!(drained.len(), 1, "one rest notification");
+        assert_eq!(drained[0].task_id, "a-rest-1");
+        assert_eq!(drained[0].status, "running", "rest is non-terminal");
+        assert_eq!(
+            drained[0].output_path.as_deref(),
+            Some("/tmp/tasks/a-rest-1.output"),
+            "spool path carried so the model can read the result"
+        );
+        assert!(
+            registry.get("a-rest-1").await.is_some(),
+            "a resting agent is NOT evicted — it stays alive for the next message"
+        );
+
+        // The arm is one-shot: a second drain (no new rest) is empty.
+        assert!(
+            registry.take_pending_task_notifications().await.is_empty(),
+            "the rest notification fires exactly once until re-armed"
+        );
+
+        // Re-armable: the NEXT rest surfaces again (same task-id notifies > once).
+        registry.mark_task_rested("a-rest-1").await;
+        assert_eq!(
+            registry.take_pending_task_notifications().await.len(),
+            1,
+            "each subsequent rest re-arms the notification"
+        );
     }
 
     #[tokio::test]

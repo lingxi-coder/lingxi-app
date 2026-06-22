@@ -210,6 +210,13 @@ pub trait TaskRegistryHandle: Send + Sync {
         Ok(())
     }
 
+    /// Arm a one-shot "came to rest" notification for a PERSISTENT, still-alive
+    /// task — the read side of which is surfaced (without eviction) by
+    /// [`take_pending_task_notifications`]. Called via the task status sink's
+    /// `notify_rest` each time a backgrounded agent parks after a turn-set.
+    /// Default no-op so existing mock handles compile unchanged.
+    async fn mark_rested(&self, _id: &str) {}
+
     /// Drain the terminal tasks that have NOT yet been surfaced to the model,
     /// marking each `notified` (which eagerly evicts it) so a given completion
     /// is reported exactly once. Returns a snapshot of each drained task for the

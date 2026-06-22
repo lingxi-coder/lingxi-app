@@ -330,9 +330,16 @@ impl Task for LocalAgentHandler {
                                 );
                                 let _ = output_manager.append(&worker_spool_path, &body).await;
                                 // Came to rest — alive, awaiting the next message.
+                                // Keep status non-terminal (Running) so the
+                                // registry never evicts the resting agent, then
+                                // arm a one-shot "came to rest" notification so
+                                // the model learns a turn-set finished (the
+                                // `run_in_background` "you will be notified"
+                                // promise; re-armed on each subsequent rest).
                                 status_sink
                                     .set_status(&worker_task_id, TaskStatus::Running)
                                     .await;
+                                status_sink.notify_rest(&worker_task_id).await;
                             }
                             Some(SubagentEvent::Failed { error, .. }) => {
                                 let _ = output_manager.append(&worker_spool_path, &error).await;
@@ -727,6 +734,7 @@ mod tests {
     #[derive(Default)]
     struct RecordingSink {
         statuses: StdMutex<Vec<(String, TaskStatus)>>,
+        rest_count: StdMutex<usize>,
     }
     #[async_trait]
     impl TaskStatusSink for RecordingSink {
@@ -736,10 +744,16 @@ mod tests {
                 .unwrap()
                 .push((task_id.to_string(), status));
         }
+        async fn notify_rest(&self, _task_id: &str) {
+            *self.rest_count.lock().unwrap() += 1;
+        }
     }
     impl RecordingSink {
         fn last_status(&self) -> Option<TaskStatus> {
             self.statuses.lock().unwrap().last().map(|(_, s)| *s)
+        }
+        fn rest_count(&self) -> usize {
+            *self.rest_count.lock().unwrap()
         }
     }
 
@@ -911,6 +925,7 @@ mod tests {
             Some(TaskStatus::Running),
             "agent comes to rest (alive)"
         );
+        assert_eq!(sink.rest_count(), 1, "first rest armed a notification");
 
         // ── Resume via send_message → the runner wakes for turn-set 2. ──
         handler
@@ -931,6 +946,7 @@ mod tests {
             Some(TaskStatus::Running),
             "rests again after the second turn-set"
         );
+        assert_eq!(sink.rest_count(), 2, "second rest re-armed the notification");
 
         // ── Channel close ⇒ the agent terminates (final Completed). ──
         // Drop EVERY Sender — the one the slot still holds plus our handle.

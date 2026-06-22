@@ -3037,6 +3037,12 @@ pub async fn build(
     //        backgrounded seam to re-route; that wiring lands with the async-agent
     //        work. Registering the handler here is the prerequisite for it.
     let local_agent_invoker = Arc::new(DeferredToolInvoker::new());
+    // Bridge the LocalAgent worker's status (and rest signals) THROUGH to the
+    // registry so list/get reflect reality and `take_pending_task_notifications`
+    // actually fires (terminal completion + each "comes to rest"). Deferred: the
+    // handler is registered before the registry `Arc` exists, so this is bound
+    // at (5.46f) below once `task_registry` is built.
+    let local_agent_status_sink = Arc::new(tasks::registry_status_sink::RegistryStatusSink::new());
     task_registry_inner.register_handler(
         tasks::TaskType::LocalAgent,
         Arc::new(
@@ -3050,7 +3056,10 @@ pub async fn build(
             // parks ("comes to rest") after each turn-set and accepts
             // `send_message` to resume — claude-code's unified agent lifecycle
             // (`resumeAgentBackground` / `injectUserMessageToTeammate`).
-            .with_streaming_spawner(subagent_streaming_spawner.clone()),
+            .with_streaming_spawner(subagent_streaming_spawner.clone())
+            .with_status_sink(
+                local_agent_status_sink.clone() as Arc<dyn tasks::handlers::TaskStatusSink>
+            ),
         ),
     );
 
@@ -3086,6 +3095,13 @@ pub async fn build(
     );
 
     let task_registry = Arc::new(task_registry_inner);
+
+    // (5.46f) Bind the deferred LocalAgent status sink now that the registry
+    //         `Arc` exists: the persistent agent's `set_status` / `notify_rest`
+    //         now reach `task_registry`, so terminal + per-rest notifications
+    //         surface through `take_pending_task_notifications`.
+    local_agent_status_sink
+        .bind(task_registry.clone() as Arc<dyn traits::task_registry::TaskRegistryHandle>);
 
     // (5.48) Cron: construct, load the single persisted tasks file, and start the
     //        live cron scheduler so jobs created by CronCreate actually fire —

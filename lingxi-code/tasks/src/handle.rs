@@ -350,6 +350,11 @@ impl TaskRegistryHandle for TaskRegistry {
             .map_err(task_err_to_registry_err)
     }
 
+    async fn mark_rested(&self, id: &str) {
+        // Dispatch to the inherent arm-rest path (no-op for unknown/terminal).
+        TaskRegistry::mark_task_rested(self, id).await;
+    }
+
     async fn take_pending_task_notifications(
         &self,
     ) -> Result<Vec<traits::task_registry::TaskNotification>, TaskRegistryError> {

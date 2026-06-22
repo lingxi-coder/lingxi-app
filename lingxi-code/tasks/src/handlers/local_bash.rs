@@ -102,6 +102,15 @@ pub trait TaskStatusSink: Send + Sync {
     /// (the OS process is owned by the worker future, killed via cancellation),
     /// so the handler no longer calls this. Defaulted to a no-op.
     async fn set_pid(&self, _task_id: &str, _pid: u32) {}
+
+    /// Signal that a PERSISTENT task came to rest: it produced a turn-set result
+    /// and PARKED (still alive, awaiting the next message). Unlike
+    /// [`Self::set_status`] this does NOT mark the task terminal — it arms a
+    /// one-shot "came to rest" notification the registry surfaces once (the
+    /// model's "you will be notified" promise for a backgrounded agent),
+    /// re-armed on each subsequent rest. Defaulted to a no-op (claude-code:
+    /// the `<note>` fires "each time this agent comes to rest").
+    async fn notify_rest(&self, _task_id: &str) {}
 }
 
 /// No-op [`TaskStatusSink`] — the default when the handler is constructed

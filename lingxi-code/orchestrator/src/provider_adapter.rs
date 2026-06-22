@@ -790,7 +790,8 @@ impl ProviderApiAdapter {
         // budget cap clamps to max_tokens-1).
         {
             use crate::model::thinking::{
-                model_supports_adaptive_thinking, model_supports_thinking, ThinkingConfig,
+                model_sends_temperature, model_supports_adaptive_thinking,
+                model_supports_thinking, ThinkingConfig,
             };
             use llm_client::ReasoningConfig;
 
@@ -817,9 +818,16 @@ impl ProviderApiAdapter {
                 None
             };
 
-            // temperature:1 ONLY when thinking is disabled (claude.ts:1693). The
-            // Anthropic codec emits temperature conditionally on Some.
-            req.temperature = if has_thinking { None } else { Some(1.0) };
+            // temperature:1 ONLY when thinking is disabled AND the model is in the
+            // `rhn` temperature-gate set (binary @205866168:
+            // `!xs && rhn(u) ? temperatureOverride ?? 1 : void 0`). The default
+            // opus-4-8 (and 4-7/fable-5/mythos-5/unknowns) are NOT in `rhn` → the
+            // field is omitted. The Anthropic codec emits temperature on Some only.
+            req.temperature = if !has_thinking && model_sends_temperature(model) {
+                Some(1.0)
+            } else {
+                None
+            };
         }
 
         // metadata.user_id (DIV-2): claude-code always sends it. `None` (no
@@ -3202,10 +3210,11 @@ mod tests {
             .build_request("claude-opus-4-8", None, None, vec![], vec![], false, None)
             .expect("build_request");
         assert!(req.reasoning.is_none(), "thinking disabled → no reasoning");
-        assert_eq!(
-            req.temperature,
-            Some(1.0),
-            "thinking disabled → temperature 1"
+        // opus-4-8 is not in the `rhn` temperature-gate set → no temperature even
+        // when thinking is env-disabled.
+        assert!(
+            req.temperature.is_none(),
+            "opus-4-8 thinking-disabled → no temperature (not in rhn set)"
         );
         // max_tokens still the model value (binary YCe: opus-4-8 → 64k).
         assert_eq!(req.max_tokens, Some(64_000));
@@ -3248,7 +3257,32 @@ mod tests {
             req.reasoning.is_none(),
             "ThinkingConfig::Disabled → no reasoning"
         );
-        assert_eq!(req.temperature, Some(1.0));
+        // opus-4-8 is NOT in the `rhn` temperature-gate set → field omitted even
+        // with thinking disabled (binary @205866168: `!xs && rhn(u) ? … : void 0`).
+        assert!(
+            req.temperature.is_none(),
+            "opus-4-8 thinking-disabled → no temperature (not in rhn set)"
+        );
+        clear_thinking_env();
+    }
+
+    #[test]
+    fn build_request_thinking_disabled_temperature_only_for_rhn_models() {
+        let _g = THINKING_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_thinking_env();
+        let transport = FakeTransport::always(ProviderResponse::json(200, ok_response_json()));
+        let adapter =
+            make_adapter(transport).with_thinking(crate::model::thinking::ThinkingConfig::Disabled);
+        // claude-sonnet-4-5 IS in the `rhn` set → temperature:1 is sent.
+        let req = adapter
+            .build_request("claude-sonnet-4-5", None, None, vec![], vec![], false, None)
+            .expect("build_request");
+        assert!(req.reasoning.is_none(), "thinking disabled → no reasoning");
+        assert_eq!(
+            req.temperature,
+            Some(1.0),
+            "sonnet-4-5 thinking-disabled → temperature:1 (in rhn set)"
+        );
         clear_thinking_env();
     }
 

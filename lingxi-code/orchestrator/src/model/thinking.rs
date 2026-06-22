@@ -127,6 +127,40 @@ pub fn model_supports_adaptive_thinking(model: &str) -> bool {
     true
 }
 
+/// `rhn` — the v2.1.185 temperature-gate model set (binary `function rhn`
+/// @195164989). When thinking is disabled, claude-code sends `temperature:1`
+/// ONLY for these models; for every OTHER model — including the default
+/// `claude-opus-4-8`, `claude-opus-4-7`, `claude-fable-5`, `claude-mythos-5`,
+/// and any unknown id — it omits the `temperature` field entirely.
+///
+/// Binary: substring match on `claude-3-` plus canonical equality on the
+/// explicit 4.x list `{opus-4-0, opus-4-1, opus-4-5, opus-4-6, sonnet-4-0,
+/// sonnet-4-5, sonnet-4-6, haiku-4-5}`. NOTE this is a DISTINCT set from
+/// [`model_supports_adaptive_thinking`] (which puts opus-4-8/4-7/fable-5/
+/// mythos-5 in its TRUE set) — do not conflate them.
+#[must_use]
+pub fn model_sends_temperature(model: &str) -> bool {
+    let c = canonical(model);
+    if c.starts_with("claude-3-") {
+        return true;
+    }
+    const TEMP: &[&str] = &[
+        "claude-opus-4-0",
+        "claude-opus-4-1",
+        "claude-opus-4-5",
+        "claude-opus-4-6",
+        "claude-sonnet-4-0",
+        "claude-sonnet-4-5",
+        "claude-sonnet-4-6",
+        "claude-haiku-4-5",
+        // bare family fall-throughs resolve to a 4.0-class id, all in the TRUE set
+        "claude-opus-4",
+        "claude-sonnet-4",
+        "claude-haiku-4",
+    ];
+    TEMP.contains(&c.as_str())
+}
+
 /// Session/request thinking configuration, mirroring claude-code's resolved
 /// `thinking` intent before it is rendered into the Anthropic `thinking` field.
 ///

@@ -788,7 +788,7 @@ const READ_PROMPT_SHORT: &str = "Reads a file from the local filesystem.\n\
 \n\
 - `file_path` must be an absolute path.\n\
 - Reads up to 2000 lines by default.\n\
-- When you already know which part of the file you need, only read that part. This can be important for larger files.\n\
+- You can optionally specify a line offset and limit (especially handy for long files), but it's recommended to read the whole file by not providing these parameters\n\
 - Results are returned using cat -n format, with line numbers starting at 1\n\
 - Reads images (PNG, JPG, \u{2026}) and presents them visually. Reads PDFs via the `pages` parameter (e.g. \"1-5\", max 20 pages/request; required for PDFs over 10 pages). Reads Jupyter notebooks (.ipynb) as cells with outputs.\n\
 - Reading a directory, a missing file, or an empty file returns an error or system reminder rather than content.\n\

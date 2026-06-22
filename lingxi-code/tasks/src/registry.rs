@@ -708,10 +708,11 @@ fn state_for_spawn(base: TaskStateBase, input: &TaskSpawnInput) -> TaskState {
                 pending_messages: vec![],
             })
         }
-        TaskSpawnInput::LocalWorkflow { workflow_id } => {
+        TaskSpawnInput::LocalWorkflow { workflow_id, script } => {
             TaskState::LocalWorkflow(crate::state::LocalWorkflowTaskState {
                 base,
                 workflow_id: workflow_id.clone(),
+                script: script.clone(),
                 current_step: 0,
             })
         }

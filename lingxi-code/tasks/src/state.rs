@@ -158,6 +158,9 @@ pub struct LocalWorkflowTaskState {
     pub base: TaskStateBase,
     /// Workflow identifier.
     pub workflow_id: String,
+    /// The model-authored workflow script source (carried for resume).
+    #[serde(default)]
+    pub script: String,
     /// Index of the currently-executing step.
     pub current_step: usize,
 }

@@ -174,6 +174,7 @@ fn placeholder_input(task_type: TaskType) -> TaskSpawnInput {
         },
         TaskType::LocalWorkflow => TaskSpawnInput::LocalWorkflow {
             workflow_id: String::new(),
+            script: String::new(),
         },
         TaskType::MonitorMcp => TaskSpawnInput::MonitorMcp {
             server_name: String::new(),

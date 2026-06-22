@@ -78,6 +78,8 @@ pub enum TaskSpawnInput {
     LocalWorkflow {
         /// Workflow identifier.
         workflow_id: String,
+        /// The model-authored workflow script source (JavaScript) to execute.
+        script: String,
     },
     /// Spawn an MCP monitor.
     MonitorMcp {

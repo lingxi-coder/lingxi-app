@@ -4,8 +4,9 @@
 //! claude-code executes workflow scripts as a JS `AsyncFunction` whose injected
 //! `agent()` global spawns a child agent and resolves with its result. LingXi
 //! runs the same scripts on the embedded QuickJS runtime (the `workflow` crate);
-//! this module is the bridge between that runtime's batch `agent_runner` seam
-//! and the [`SubagentSpawner`] the Task subsystem uses to spawn children.
+//! this module bridges that runtime's batch `agent_runner` seam to the
+//! [`SubagentSpawner`] the Task subsystem uses, and wires the whole thing into a
+//! background [`Task`] (mirroring [`crate::handlers::local_agent`]).
 //!
 //! ## The sync ↔ async bridge
 //!
@@ -29,26 +30,117 @@
 //! the worker loop sees the closed channel and ends, and the outcome that the
 //! script thread sends last is delivered to the caller.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use futures::stream::StreamExt;
 use serde_json::Value;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, Mutex};
 use traits::{
-    BudgetEnforcerHandle, SubagentInheritance, SubagentResult, SubagentSpawnError,
-    SubagentSpawnRequest, SubagentSpawner, ToolInvoker,
+    BackgroundTaskHandle, BudgetEnforcerHandle, RuntimeSpawner, SubagentInheritance,
+    SubagentResult, SubagentSpawnError, SubagentSpawnRequest, SubagentSpawner, ToolInvoker,
 };
 
-/// Handler for the local-workflow task type.
-///
-/// The task lifecycle wiring (status sink, output spooling, kill) is added in a
-/// later increment; [`run_workflow_script`] is the reusable core that drives a
-/// script to completion against a [`SubagentSpawner`].
-pub struct LocalWorkflowHandler;
+use crate::id::TaskType;
+use crate::output_manager::TaskOutputManager;
+use crate::state::TaskStatus;
+use crate::task_trait::{Task, TaskContext, TaskError, TaskHandle, TaskSpawnInput};
+
+// Reuse the status-sink seam defined once in the bash handler (single impl wired
+// across handlers), exactly as `local_agent` does.
+pub use crate::handlers::local_bash::{NoopStatusSink, TaskStatusSink};
+
+/// Handler name reported by [`Task::name`] / used as the runtime task-name.
+const HANDLER_NAME: &str = "local_workflow";
 
 /// The subagent type spawned for a bare `agent(prompt)` call — claude-code's
 /// default workflow subagent.
 pub const DEFAULT_WORKFLOW_SUBAGENT: &str = "general-purpose";
+
+/// A live worker-cancel record: the background-task handle plus the runtime that
+/// minted it, so [`Task::kill`] / cleanup can cancel the in-flight worker without
+/// a fresh [`TaskContext`]. (Each handler keeps its own — the fields are private;
+/// `pub` so it can appear in [`LocalWorkflowHandler::workers_map`]'s return type.)
+pub struct WorkerCancel {
+    handle: BackgroundTaskHandle,
+    runtime: Arc<dyn RuntimeSpawner>,
+}
+
+/// Background [`Task`] that runs a workflow script and spools its result.
+///
+/// Mirrors [`crate::handlers::local_agent::LocalAgentHandler`]: a runtime-spawned
+/// worker drives the script to completion (via [`run_workflow_script`]), spools
+/// the script's return value, reports the terminal status, and removes its own
+/// cancel record on exit. `kill` cancels the in-flight worker.
+pub struct LocalWorkflowHandler {
+    /// Allocates a subagent slot and pumps it to a terminal [`SubagentResult`].
+    spawner: Arc<dyn SubagentSpawner>,
+    /// Parent's tool invoker — passed through *unchanged* in
+    /// [`SubagentInheritance`] (the recursion lock relies on `Arc::ptr_eq`).
+    tool_invoker: Arc<dyn ToolInvoker>,
+    /// Parent's budget enforcer — passed through *unchanged* so budget charges
+    /// aggregate across the whole agent tree (`Arc::ptr_eq` invariant).
+    budget: Arc<dyn BudgetEnforcerHandle>,
+    /// Owns the spool directory + path allocation for the result payload.
+    output_manager: Arc<TaskOutputManager>,
+    /// Where terminal status transitions are reported.
+    status_sink: Arc<dyn TaskStatusSink>,
+    /// `task_id` → live worker-cancel record (removed by the worker on exit, or
+    /// by [`Task::kill`] / cleanup).
+    workers: Arc<Mutex<HashMap<String, WorkerCancel>>>,
+    /// `task_id` → record queued for teardown by the synchronous
+    /// [`TaskHandle::cleanup`] closure; drained by [`Self::drain_pending_kills`].
+    pending_kill: Arc<Mutex<HashMap<String, WorkerCancel>>>,
+}
+
+impl LocalWorkflowHandler {
+    /// Construct a handler with the injected dependencies. `tool_invoker` +
+    /// `budget` are stored so each run can bundle them into a
+    /// [`SubagentInheritance`] (cloning the `Arc` preserves pointer identity —
+    /// required by the recursion-lock + budget-aggregation invariants).
+    #[must_use]
+    pub fn new(
+        spawner: Arc<dyn SubagentSpawner>,
+        tool_invoker: Arc<dyn ToolInvoker>,
+        budget: Arc<dyn BudgetEnforcerHandle>,
+        output_manager: Arc<TaskOutputManager>,
+    ) -> Self {
+        Self {
+            spawner,
+            tool_invoker,
+            budget,
+            output_manager,
+            status_sink: Arc::new(NoopStatusSink),
+            workers: Arc::new(Mutex::new(HashMap::new())),
+            pending_kill: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    /// Attach a [`TaskStatusSink`] so terminal transitions are reported.
+    #[must_use]
+    pub fn with_status_sink(mut self, sink: Arc<dyn TaskStatusSink>) -> Self {
+        self.status_sink = sink;
+        self
+    }
+
+    /// Share the same `workers` map with an external owner (registry wiring) so a
+    /// [`TaskHandle::cleanup`] closure and [`Task::kill`] observe the same handles.
+    #[must_use]
+    pub fn workers_map(&self) -> Arc<Mutex<HashMap<String, WorkerCancel>>> {
+        self.workers.clone()
+    }
+
+    /// Drain records queued by [`TaskHandle::cleanup`] and cancel each worker
+    /// future for real (the async counterpart of the synchronous cleanup closure).
+    pub async fn drain_pending_kills(&self) {
+        let pending: Vec<(String, WorkerCancel)> = self.pending_kill.lock().await.drain().collect();
+        for (task_id, rec) in pending {
+            let _ = rec.runtime.cancel(&rec.handle).await;
+            self.status_sink.set_status(&task_id, TaskStatus::Killed).await;
+        }
+    }
+}
 
 /// claude-code's concurrency cap for in-flight `agent()` calls:
 /// `min(16, cpu_cores - 2)`, at least 1.
@@ -108,7 +200,7 @@ fn result_to_string(result: Result<SubagentResult, SubagentSpawnError>) -> Strin
 
 /// Run a workflow `script` to completion, spawning each `agent()` call as a real
 /// subagent of type `subagent_type` via `spawner`. Returns the script's
-/// [`workflow::RunOutcome`] (its `phase()`/`log()` progress) or a
+/// [`workflow::RunOutcome`] (its `phase()`/`log()` progress + return value) or a
 /// [`workflow::WorkflowError`].
 ///
 /// `tool_invoker` and `budget` are the parent's inheritance `Arc`s; the same
@@ -177,18 +269,154 @@ pub async fn run_workflow_script(
     })?
 }
 
+#[async_trait]
+impl Task for LocalWorkflowHandler {
+    fn name(&self) -> &str {
+        HANDLER_NAME
+    }
+
+    fn task_type(&self) -> TaskType {
+        TaskType::LocalWorkflow
+    }
+
+    async fn spawn(
+        &self,
+        input: TaskSpawnInput,
+        ctx: TaskContext,
+    ) -> Result<TaskHandle, TaskError> {
+        // 1. Only the LocalWorkflow variant is accepted.
+        let TaskSpawnInput::LocalWorkflow {
+            workflow_id: _workflow_id,
+            script,
+        } = input
+        else {
+            return Err(TaskError::Internal(
+                "local_workflow handler received a non-LocalWorkflow spawn input".into(),
+            ));
+        };
+
+        // 2. Generate the task id (prefix 'w') and allocate its spool file.
+        let task_id = crate::id::generate_task_id(TaskType::LocalWorkflow);
+        let spool_path = self
+            .output_manager
+            .allocate(&task_id)
+            .await
+            .map_err(|e| TaskError::Io(e.to_string()))?;
+        if spool_path.to_str().is_none() {
+            return Err(TaskError::Internal("spool path is not valid UTF-8".into()));
+        }
+
+        // 3. Drive the workflow to completion inside a runtime-spawned worker
+        //    (engine code must not call tokio::spawn directly — D17). The worker
+        //    awaits `run_workflow_script`, spools the script's return value,
+        //    reports the terminal status, and removes its own cancel record.
+        let spawner = self.spawner.clone();
+        let tool_invoker = self.tool_invoker.clone();
+        let budget = self.budget.clone();
+        let status_sink = self.status_sink.clone();
+        let workers = self.workers.clone();
+        let output_manager = self.output_manager.clone();
+        let worker_spool_path = spool_path.clone();
+        let worker_task_id = task_id.clone();
+        let worker = Box::pin(async move {
+            status_sink
+                .set_status(&worker_task_id, TaskStatus::Running)
+                .await;
+
+            let outcome = run_workflow_script(
+                &script,
+                DEFAULT_WORKFLOW_SUBAGENT,
+                spawner,
+                tool_invoker,
+                budget,
+            )
+            .await;
+
+            // The Workflow tool result is the script's return value; spool it.
+            // A script-level error spools its message and fails the task. Spool
+            // I/O is best-effort — a write failure must not mask the result.
+            let (payload, status) = match outcome {
+                Ok(out) => (out.result.unwrap_or_default(), TaskStatus::Completed),
+                Err(e) => (e.to_string(), TaskStatus::Failed),
+            };
+            if !payload.is_empty() {
+                let _ = output_manager.append(&worker_spool_path, &payload).await;
+            }
+
+            status_sink.set_status(&worker_task_id, status).await;
+            workers.lock().await.remove(&worker_task_id);
+        });
+
+        let bg_handle = ctx
+            .runtime
+            .spawn(&format!("{HANDLER_NAME}:{task_id}"), worker)
+            .await
+            .map_err(|e| TaskError::Internal(e.to_string()))?;
+
+        self.workers.lock().await.insert(
+            task_id.clone(),
+            WorkerCancel {
+                handle: bg_handle,
+                runtime: ctx.runtime.clone(),
+            },
+        );
+
+        // 4. Synchronous cleanup seam (claude-code `registerCleanup` parity): the
+        //    closure cannot await, so it moves any live cancel record into
+        //    `pending_kill`; `drain_pending_kills` performs the real cancel.
+        let cleanup_workers = self.workers.clone();
+        let cleanup_pending = self.pending_kill.clone();
+        let cleanup_task_id = task_id.clone();
+        let cleanup: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
+            if let (Ok(mut workers), Ok(mut pending)) =
+                (cleanup_workers.try_lock(), cleanup_pending.try_lock())
+            {
+                if let Some(rec) = workers.remove(&cleanup_task_id) {
+                    pending.insert(cleanup_task_id.clone(), rec);
+                }
+            }
+        });
+
+        Ok(TaskHandle {
+            task_id,
+            cleanup: Some(cleanup),
+        })
+    }
+
+    async fn kill(&self, task_id: &str, _ctx: TaskContext) -> Result<(), TaskError> {
+        // Cancel the in-flight worker future (the analogue of TS
+        // `abortController.abort()`). An absent record ⇒ already terminated ⇒
+        // graceful no-op.
+        let rec = self.workers.lock().await.remove(task_id);
+        if let Some(rec) = rec {
+            rec.runtime
+                .cancel(&rec.handle)
+                .await
+                .map_err(|e| TaskError::Io(e.to_string()))?;
+        }
+        self.status_sink.set_status(task_id, TaskStatus::Killed).await;
+        Ok(())
+    }
+}
+
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
-    use async_trait::async_trait;
     use serde_json::json;
     use std::any::Any;
+    use std::collections::HashMap as StdHashMap;
+    use std::path::PathBuf;
     use std::sync::Mutex as StdMutex;
+    use tempfile::tempdir;
+    use test_harness::mocks::MockRuntimeSpawner;
+    use tokio::sync::Mutex as TokioMutex;
+    use traits::filesystem::{FileContent, FileEvent, FileSystem, FlockGuard, FsError};
     use traits::tool_invoker::{SubagentInvocationContext, ToolInvokerError};
     use traits::{BudgetError, SubagentUsage};
 
-    /// Spawner that echoes each prompt back as `echo:<prompt>` (or fails every
-    /// spawn when `fail` is set), recording the prompts it saw.
+    // ---- Echo SubagentSpawner: `agent(p)` → "echo:p" (records prompts) ------
+
     #[derive(Default)]
     struct EchoSpawner {
         seen: StdMutex<Vec<String>>,
@@ -223,6 +451,8 @@ mod tests {
         }
     }
 
+    // ---- Inert ToolInvoker / BudgetEnforcerHandle ---------------------------
+
     struct MockInvoker;
     #[async_trait]
     impl ToolInvoker for MockInvoker {
@@ -250,6 +480,149 @@ mod tests {
         }
     }
 
+    // ---- In-memory FileSystem (mirrors the other handler fixtures) ----------
+
+    struct InMemoryFs {
+        files: TokioMutex<StdHashMap<String, String>>,
+    }
+    impl InMemoryFs {
+        fn new() -> Self {
+            Self {
+                files: TokioMutex::new(StdHashMap::new()),
+            }
+        }
+    }
+    #[async_trait]
+    impl FileSystem for InMemoryFs {
+        async fn read_file(
+            &self,
+            path: &str,
+            offset: Option<u64>,
+            limit: Option<u64>,
+        ) -> Result<FileContent, FsError> {
+            let map = self.files.lock().await;
+            let content = map.get(path).cloned().unwrap_or_default();
+            let off = usize::try_from(offset.unwrap_or(0)).unwrap_or(usize::MAX);
+            let body: String = content.chars().skip(off).collect();
+            let truncated = limit.is_some_and(|lim| body.len() as u64 > lim);
+            let trimmed = match limit {
+                Some(lim) => body
+                    .chars()
+                    .take(usize::try_from(lim).unwrap_or(usize::MAX))
+                    .collect(),
+                None => body,
+            };
+            let total_lines = content.lines().count() as u64;
+            Ok(FileContent {
+                content: trimmed,
+                truncated,
+                total_lines,
+            })
+        }
+        async fn write_file(&self, path: &str, body: &str) -> Result<(), FsError> {
+            self.files
+                .lock()
+                .await
+                .insert(path.to_string(), body.to_string());
+            Ok(())
+        }
+        fn is_within_workspace(&self, _: &str) -> bool {
+            true
+        }
+        async fn watch(
+            &self,
+            _: &str,
+        ) -> Result<std::pin::Pin<Box<dyn futures::Stream<Item = FileEvent> + Send>>, FsError>
+        {
+            Err(FsError::Io("not supported".into()))
+        }
+        async fn append_file(&self, path: &str, body: &str) -> Result<(), FsError> {
+            let mut map = self.files.lock().await;
+            map.entry(path.to_string()).or_default().push_str(body);
+            Ok(())
+        }
+        async fn truncate(&self, path: &str, len: u64) -> Result<(), FsError> {
+            let mut map = self.files.lock().await;
+            if let Some(s) = map.get_mut(path) {
+                s.truncate(usize::try_from(len).unwrap_or(usize::MAX));
+            }
+            Ok(())
+        }
+        async fn file_mtime(&self, _: &str) -> Result<std::time::SystemTime, FsError> {
+            Ok(std::time::SystemTime::UNIX_EPOCH)
+        }
+        async fn file_size(&self, path: &str) -> Result<u64, FsError> {
+            let map = self.files.lock().await;
+            Ok(map.get(path).map_or(0, |s| s.len() as u64))
+        }
+        async fn delete_file(&self, path: &str) -> Result<(), FsError> {
+            self.files.lock().await.remove(path);
+            Ok(())
+        }
+        async fn symlink(&self, _: &str, _: &str) -> Result<(), FsError> {
+            Ok(())
+        }
+        async fn flock_exclusive(&self, _: &str) -> Result<Box<dyn FlockGuard>, FsError> {
+            Err(FsError::Io("not supported".into()))
+        }
+        async fn fsync(&self, _: &str) -> Result<(), FsError> {
+            Ok(())
+        }
+    }
+
+    // ---- Recording status sink ----------------------------------------------
+
+    #[derive(Default)]
+    struct RecordingSink {
+        statuses: StdMutex<Vec<(String, TaskStatus)>>,
+    }
+    #[async_trait]
+    impl TaskStatusSink for RecordingSink {
+        async fn set_status(&self, task_id: &str, status: TaskStatus) {
+            self.statuses
+                .lock()
+                .unwrap()
+                .push((task_id.to_string(), status));
+        }
+    }
+    impl RecordingSink {
+        fn last_status(&self) -> Option<TaskStatus> {
+            self.statuses.lock().unwrap().last().map(|(_, s)| *s)
+        }
+    }
+
+    // ---- Helpers ------------------------------------------------------------
+
+    fn make_ctx(fs: Arc<dyn FileSystem>) -> TaskContext {
+        TaskContext {
+            fs,
+            runtime: Arc::new(MockRuntimeSpawner::default()),
+        }
+    }
+
+    fn workflow_input(script: &str) -> TaskSpawnInput {
+        TaskSpawnInput::LocalWorkflow {
+            workflow_id: "wf".into(),
+            script: script.into(),
+        }
+    }
+
+    /// Poll the sink until it reports a terminal status (the worker runs on the
+    /// `MockRuntimeSpawner`'s tokio task, so yields let it finish).
+    async fn await_terminal(sink: &Arc<RecordingSink>) -> TaskStatus {
+        for _ in 0..400 {
+            if let Some(s) = sink.last_status() {
+                if s.is_terminal() {
+                    return s;
+                }
+            }
+            tokio::task::yield_now().await;
+        }
+        sink.last_status().expect("worker never reported a status")
+    }
+
+    // ==== Bridge-level tests (run_workflow_script directly) ==================
+
     fn logs(outcome: &workflow::RunOutcome) -> Vec<String> {
         outcome
             .progress
@@ -261,7 +634,7 @@ mod tests {
             .collect()
     }
 
-    async fn run(script: &str, spawner: Arc<EchoSpawner>) -> workflow::RunOutcome {
+    async fn run_bridge(script: &str, spawner: Arc<EchoSpawner>) -> workflow::RunOutcome {
         run_workflow_script(
             script,
             DEFAULT_WORKFLOW_SUBAGENT,
@@ -284,10 +657,8 @@ mod tests {
             ]);
             log('R:' + rs.join(','));
         "#;
-        let outcome = run(script, spawner.clone()).await;
-        // Result order follows prompt order even though the spawns run concurrently.
+        let outcome = run_bridge(script, spawner.clone()).await;
         assert_eq!(logs(&outcome), vec!["R:echo:a,echo:b,echo:c".to_string()]);
-        // The spawner saw all three prompts (concurrent → order not asserted).
         let mut seen = spawner.seen.lock().unwrap().clone();
         seen.sort();
         assert_eq!(seen, vec!["a".to_string(), "b".to_string(), "c".to_string()]);
@@ -301,9 +672,8 @@ mod tests {
             const b = await agent('2');
             log(a + '|' + b);
         "#;
-        let outcome = run(script, spawner.clone()).await;
+        let outcome = run_bridge(script, spawner.clone()).await;
         assert_eq!(logs(&outcome), vec!["echo:1|echo:2".to_string()]);
-        // Sequential awaits are separate batches, so the spawner order is fixed.
         assert_eq!(
             *spawner.seen.lock().unwrap(),
             vec!["1".to_string(), "2".to_string()]
@@ -320,24 +690,13 @@ mod tests {
             const r = await agent('x');
             log('got:' + (r || 'NONE'));
         "#;
-        let outcome = run(script, spawner).await;
-        // Empty string is falsy → the `||` fallback fires, matching `null`.
+        let outcome = run_bridge(script, spawner).await;
         assert_eq!(logs(&outcome), vec!["got:NONE".to_string()]);
-    }
-
-    #[tokio::test]
-    async fn script_with_no_agents_still_completes() {
-        let spawner = Arc::new(EchoSpawner::default());
-        let outcome = run("log('done');", spawner.clone()).await;
-        assert_eq!(logs(&outcome), vec!["done".to_string()]);
-        assert!(spawner.seen.lock().unwrap().is_empty());
     }
 
     #[tokio::test]
     async fn pipeline_stages_run_each_item_through_the_spawner() {
         let spawner = Arc::new(EchoSpawner::default());
-        // Two items, two stages: stage 1 spawns agent(item), stage 2 spawns
-        // agent(prev + '!'). Final results are the stage-2 outputs.
         let script = r#"
             const rs = await pipeline(
               ['x', 'y'],
@@ -346,10 +705,118 @@ mod tests {
             );
             log('P:' + rs.join(','));
         "#;
-        let outcome = run(script, spawner.clone()).await;
+        let outcome = run_bridge(script, spawner.clone()).await;
         assert_eq!(
             logs(&outcome),
             vec!["P:echo:echo:x!,echo:echo:y!".to_string()]
         );
+    }
+
+    // ==== Handler-level tests (full Task lifecycle) =========================
+
+    fn make_handler(
+        spawner: Arc<dyn SubagentSpawner>,
+        mgr: Arc<TaskOutputManager>,
+        sink: Arc<dyn TaskStatusSink>,
+    ) -> LocalWorkflowHandler {
+        LocalWorkflowHandler::new(spawner, Arc::new(MockInvoker), Arc::new(MockBudget), mgr)
+            .with_status_sink(sink)
+    }
+
+    #[tokio::test]
+    async fn handler_runs_workflow_and_spools_the_return_value() {
+        let fs: Arc<dyn FileSystem> = Arc::new(InMemoryFs::new());
+        let spawner = Arc::new(EchoSpawner::default());
+        let dir = tempdir().unwrap();
+        let mgr = Arc::new(TaskOutputManager::new(PathBuf::from(dir.path()), fs.clone()));
+        let sink = Arc::new(RecordingSink::default());
+
+        let handler = make_handler(spawner.clone(), mgr.clone(), sink.clone());
+
+        // A workflow that fans out two agents and returns a structured result.
+        let script = r#"
+            const rs = await parallel([() => agent('a'), () => agent('b')]);
+            return { confirmed: rs };
+        "#;
+        let handle = handler
+            .spawn(workflow_input(script), make_ctx(fs))
+            .await
+            .expect("spawn should succeed");
+
+        assert!(handle.task_id.starts_with('w'), "LocalWorkflow id prefix 'w'");
+        assert!(handle.cleanup.is_some(), "cleanup seam present");
+
+        assert_eq!(await_terminal(&sink).await, TaskStatus::Completed);
+
+        // Both agents ran.
+        let mut seen = spawner.seen.lock().unwrap().clone();
+        seen.sort();
+        assert_eq!(seen, vec!["a".to_string(), "b".to_string()]);
+
+        // The script's return value (JSON) was spooled as the task result.
+        let spool_path = dir.path().join(format!("{}.output", handle.task_id));
+        let read = mgr
+            .read(&spool_path, crate::output_manager::OutputOptions::default())
+            .await
+            .unwrap();
+        assert_eq!(read.content, r#"{"confirmed":["echo:a","echo:b"]}"#);
+    }
+
+    #[tokio::test]
+    async fn handler_maps_a_script_error_to_failed() {
+        let fs: Arc<dyn FileSystem> = Arc::new(InMemoryFs::new());
+        let spawner = Arc::new(EchoSpawner::default());
+        let dir = tempdir().unwrap();
+        let mgr = Arc::new(TaskOutputManager::new(PathBuf::from(dir.path()), fs.clone()));
+        let sink = Arc::new(RecordingSink::default());
+
+        let handler = make_handler(spawner, mgr, sink.clone());
+
+        // A script that throws ⇒ WorkflowError::Script ⇒ Failed.
+        let handle = handler
+            .spawn(workflow_input("throw new Error('kaboom');"), make_ctx(fs))
+            .await
+            .unwrap();
+
+        assert_eq!(await_terminal(&sink).await, TaskStatus::Failed);
+        assert!(handle.task_id.starts_with('w'));
+    }
+
+    #[tokio::test]
+    async fn handler_rejects_a_non_workflow_input() {
+        let fs: Arc<dyn FileSystem> = Arc::new(InMemoryFs::new());
+        let dir = tempdir().unwrap();
+        let mgr = Arc::new(TaskOutputManager::new(PathBuf::from(dir.path()), fs.clone()));
+        let handler = make_handler(
+            Arc::new(EchoSpawner::default()),
+            mgr,
+            Arc::new(RecordingSink::default()),
+        );
+
+        let wrong = TaskSpawnInput::LocalAgent {
+            agent_id: protocol::AgentId::new(),
+            subagent_type: "general-purpose".into(),
+            prompt: "p".into(),
+            is_backgrounded: true,
+        };
+        match handler.spawn(wrong, make_ctx(fs)).await {
+            Err(TaskError::Internal(_)) => {}
+            Err(other) => panic!("expected Internal, got {other:?}"),
+            Ok(_) => panic!("non-LocalWorkflow input must be rejected"),
+        }
+    }
+
+    #[tokio::test]
+    async fn name_and_type_are_local_workflow() {
+        let fs: Arc<dyn FileSystem> = Arc::new(InMemoryFs::new());
+        let dir = tempdir().unwrap();
+        let mgr = Arc::new(TaskOutputManager::new(PathBuf::from(dir.path()), fs));
+        let handler = make_handler(
+            Arc::new(EchoSpawner::default()),
+            mgr,
+            Arc::new(RecordingSink::default()),
+        );
+        assert_eq!(handler.name(), "local_workflow");
+        assert_eq!(handler.task_type(), TaskType::LocalWorkflow);
     }
 }

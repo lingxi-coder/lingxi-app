@@ -735,6 +735,7 @@ mod tests {
             .spawn(
                 TaskSpawnInput::LocalWorkflow {
                     workflow_id: "wf".into(),
+                    script: String::new(),
                 },
                 make_ctx(fs),
             )

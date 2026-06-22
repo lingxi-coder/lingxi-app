@@ -92,6 +92,9 @@ fn gemini_client() -> DefaultLlmClient {
             pricing: PricingConfig::default(),
             signing: None,
             azure: None,
+            supports_websockets: false,
+            supports_websocket_compression: false,
+            websocket_connect_timeout_ms: None,
         }],
     })
     .expect("client")
@@ -119,6 +122,9 @@ fn anthropic_client() -> DefaultLlmClient {
             pricing: PricingConfig::default(),
             signing: None,
             azure: None,
+            supports_websockets: false,
+            supports_websocket_compression: false,
+            websocket_connect_timeout_ms: None,
         }],
     })
     .expect("client")
@@ -150,7 +156,12 @@ async fn wait_for_file_active_polls_until_active() {
     let client = gemini_client();
 
     let file = client
-        .wait_for_file_active("gemini", "files/abc", &transport, FileActivationPoll::default())
+        .wait_for_file_active(
+            "gemini",
+            "files/abc",
+            &transport,
+            FileActivationPoll::default(),
+        )
         .await
         .expect("file becomes ACTIVE");
 
@@ -188,7 +199,12 @@ async fn wait_for_file_active_fails_fast_on_failed_state() {
     let client = gemini_client();
 
     let error = client
-        .wait_for_file_active("gemini", "files/abc", &transport, FileActivationPoll::default())
+        .wait_for_file_active(
+            "gemini",
+            "files/abc",
+            &transport,
+            FileActivationPoll::default(),
+        )
         .await
         .expect_err("FAILED must error");
     assert!(matches!(
@@ -231,7 +247,12 @@ async fn wait_for_file_active_rejects_non_gemini_family() {
     let client = anthropic_client();
 
     let error = client
-        .wait_for_file_active("claude", "files/abc", &transport, FileActivationPoll::default())
+        .wait_for_file_active(
+            "claude",
+            "files/abc",
+            &transport,
+            FileActivationPoll::default(),
+        )
         .await
         .expect_err("must reject");
     // Same family-guard shape as upload_file.
@@ -255,7 +276,12 @@ async fn wait_for_file_active_unknown_state_keeps_polling() {
     let client = gemini_client();
 
     let file = client
-        .wait_for_file_active("gemini", "files/abc", &transport, FileActivationPoll::default())
+        .wait_for_file_active(
+            "gemini",
+            "files/abc",
+            &transport,
+            FileActivationPoll::default(),
+        )
         .await
         .expect("unknown state keeps polling");
     assert_eq!(file.state, "ACTIVE");

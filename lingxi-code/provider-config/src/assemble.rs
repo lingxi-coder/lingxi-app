@@ -16,7 +16,9 @@ fn anthropic_profile(inputs: &AssembleInputs) -> (ProviderProfile, Option<Creden
     let (auth, credential, cred_source) = if inputs.anthropic_has_api_key {
         (
             AuthStrategy::ApiKey,
-            CredentialConfig::Static { id: "anthropic-api-key".to_string() },
+            CredentialConfig::Static {
+                id: "anthropic-api-key".to_string(),
+            },
             Some(CredentialSource {
                 provider_id: ProviderId::AnthropicFirstParty,
                 profile_name: "anthropic".to_string(),
@@ -28,7 +30,9 @@ fn anthropic_profile(inputs: &AssembleInputs) -> (ProviderProfile, Option<Creden
     } else if inputs.anthropic_has_oauth {
         (
             AuthStrategy::OAuthBearer,
-            CredentialConfig::Static { id: "anthropic-oauth".to_string() },
+            CredentialConfig::Static {
+                id: "anthropic-oauth".to_string(),
+            },
             Some(CredentialSource {
                 provider_id: ProviderId::AnthropicFirstParty,
                 profile_name: "anthropic".to_string(),
@@ -52,6 +56,9 @@ fn anthropic_profile(inputs: &AssembleInputs) -> (ProviderProfile, Option<Creden
         pricing: PricingConfig::default(),
         signing: None,
         azure: None,
+        supports_websockets: false,
+        supports_websocket_compression: false,
+        websocket_connect_timeout_ms: None,
     };
     (profile, cred_source)
 }
@@ -124,11 +131,18 @@ pub fn assemble(inputs: AssembleInputs) -> Assembled {
         }
         let id = pu.profile.profile_name.clone();
         let mut profile = pu.profile;
-        profile.credential = CredentialConfig::Static { id: id.clone() };
+        let credential_id = match &profile.credential {
+            CredentialConfig::Static { id } | CredentialConfig::HostManaged { id } => id.clone(),
+            CredentialConfig::Env { var } => var.clone(),
+            CredentialConfig::None => {
+                profile.credential = CredentialConfig::Static { id: id.clone() };
+                id.clone()
+            }
+        };
         credential_sources.push(CredentialSource {
             provider_id: profile.provider_id.clone(),
             profile_name: profile.profile_name.clone(),
-            credential_id: id,
+            credential_id,
             env_var: pu.env_var,
             kind: CredentialKind::ApiKey,
         });
@@ -168,7 +182,9 @@ pub fn assemble(inputs: AssembleInputs) -> Assembled {
             }
         }
         if entries.is_empty() {
-            warnings.push(format!("routing.fallback[{key:?}]: no valid entries; chain dropped"));
+            warnings.push(format!(
+                "routing.fallback[{key:?}]: no valid entries; chain dropped"
+            ));
         } else {
             chains.chains.insert(key, entries);
         }
@@ -240,8 +256,17 @@ mod tests {
             .iter()
             .find(|p| p.profile_name == "openrouter")
             .unwrap();
-        assert_eq!(openrouter.credential, CredentialConfig::Static { id: "openrouter".to_string() });
-        let cs = out.credential_sources.iter().find(|c| c.credential_id == "openrouter").unwrap();
+        assert_eq!(
+            openrouter.credential,
+            CredentialConfig::Static {
+                id: "openrouter".to_string()
+            }
+        );
+        let cs = out
+            .credential_sources
+            .iter()
+            .find(|c| c.credential_id == "openrouter")
+            .unwrap();
         assert_eq!(cs.profile_name, "openrouter");
         assert_eq!(cs.env_var.as_deref(), Some("OPENROUTER_API_KEY"));
         assert_eq!(cs.kind, CredentialKind::ApiKey);
@@ -250,13 +275,22 @@ mod tests {
     #[test]
     fn anthropic_api_key_credential_source() {
         let out = assemble(anthropic_only_inputs());
-        let cs = out.credential_sources.iter().find(|c| c.credential_id == "anthropic-api-key").unwrap();
+        let cs = out
+            .credential_sources
+            .iter()
+            .find(|c| c.credential_id == "anthropic-api-key")
+            .unwrap();
         assert_eq!(cs.profile_name, "anthropic");
         assert_eq!(cs.env_var.as_deref(), Some("ANTHROPIC_API_KEY"));
         assert_eq!(cs.kind, CredentialKind::ApiKey);
         let anthropic = &out.client_config.providers[0];
         assert_eq!(anthropic.auth, AuthStrategy::ApiKey);
-        assert_eq!(anthropic.credential, CredentialConfig::Static { id: "anthropic-api-key".to_string() });
+        assert_eq!(
+            anthropic.credential,
+            CredentialConfig::Static {
+                id: "anthropic-api-key".to_string()
+            }
+        );
     }
 
     #[test]
@@ -267,8 +301,17 @@ mod tests {
         let out = assemble(inp);
         let anthropic = &out.client_config.providers[0];
         assert_eq!(anthropic.auth, AuthStrategy::OAuthBearer);
-        assert_eq!(anthropic.credential, CredentialConfig::Static { id: "anthropic-oauth".to_string() });
-        let cs = out.credential_sources.iter().find(|c| c.credential_id == "anthropic-oauth").unwrap();
+        assert_eq!(
+            anthropic.credential,
+            CredentialConfig::Static {
+                id: "anthropic-oauth".to_string()
+            }
+        );
+        let cs = out
+            .credential_sources
+            .iter()
+            .find(|c| c.credential_id == "anthropic-oauth")
+            .unwrap();
         assert_eq!(cs.kind, CredentialKind::OAuth);
         assert!(cs.env_var.is_none());
     }
@@ -282,10 +325,9 @@ mod tests {
         let anthropic = &out.client_config.providers[0];
         assert_eq!(anthropic.auth, AuthStrategy::None);
         assert_eq!(anthropic.credential, CredentialConfig::None);
-        assert!(out
-            .credential_sources
-            .iter()
-            .all(|c| c.credential_id != "anthropic-api-key" && c.credential_id != "anthropic-oauth"));
+        assert!(out.credential_sources.iter().all(
+            |c| c.credential_id != "anthropic-api-key" && c.credential_id != "anthropic-oauth"
+        ));
     }
 
     #[test]
@@ -296,9 +338,23 @@ mod tests {
             json!({ "type": "openai", "baseUrl": "https://api.groq.com/openai/v1", "apiKeyEnv": "GROQ_API_KEY", "models": ["llama-3.3-70b"] }),
         );
         let out = assemble(inp);
-        let groq = out.client_config.providers.iter().find(|p| p.profile_name == "groq").unwrap();
-        assert_eq!(groq.credential, CredentialConfig::Static { id: "groq".to_string() });
-        let cs = out.credential_sources.iter().find(|c| c.credential_id == "groq").unwrap();
+        let groq = out
+            .client_config
+            .providers
+            .iter()
+            .find(|p| p.profile_name == "groq")
+            .unwrap();
+        assert_eq!(
+            groq.credential,
+            CredentialConfig::Static {
+                id: "groq".to_string()
+            }
+        );
+        let cs = out
+            .credential_sources
+            .iter()
+            .find(|c| c.credential_id == "groq")
+            .unwrap();
         assert_eq!(cs.env_var.as_deref(), Some("GROQ_API_KEY"));
     }
 
@@ -307,11 +363,18 @@ mod tests {
         let mut inp = anthropic_only_inputs();
         inp.user_providers.insert(
             "listingonly".to_string(),
-            json!({ "type": "openai", "baseUrl": "https://x" }),
+            json!({ "type": "openai", "baseUrl": "https://x", "apiKeyEnv": "LISTING_ONLY_KEY" }),
         );
         let out = assemble(inp);
-        assert!(out.client_config.providers.iter().all(|p| p.profile_name != "listingonly"));
-        assert!(out.warnings.iter().any(|w| w.contains("listingonly") && w.contains("no models")));
+        assert!(out
+            .client_config
+            .providers
+            .iter()
+            .all(|p| p.profile_name != "listingonly"));
+        assert!(out
+            .warnings
+            .iter()
+            .any(|w| w.contains("listingonly") && w.contains("no models")));
     }
 
     #[test]
@@ -328,7 +391,10 @@ mod tests {
         let mut inp = anthropic_only_inputs();
         inp.routing = Some(json!({ "aliases": { "x": "nope/missing" } }));
         let out = assemble(inp);
-        assert!(out.warnings.iter().any(|w| w.contains('x') && w.contains("nope/missing")));
+        assert!(out
+            .warnings
+            .iter()
+            .any(|w| w.contains('x') && w.contains("nope/missing")));
     }
 
     #[test]
@@ -336,7 +402,7 @@ mod tests {
         let mut inp = anthropic_only_inputs();
         inp.user_providers.insert(
             "deepseek-user".to_string(),
-            json!({ "type": "openai", "baseUrl": "https://api.deepseek.com", "models": ["deepseek-chat"] }),
+            json!({ "type": "openai", "baseUrl": "https://api.deepseek.com", "apiKeyEnv": "DEEPSEEK_API_KEY", "models": ["deepseek-chat"] }),
         );
         inp.routing = Some(json!({
             "fallback": { "primary": ["anthropic/claude-opus-4-6", "deepseek-user/deepseek-chat"] }
@@ -346,14 +412,20 @@ mod tests {
         assert_eq!(chain.len(), 2);
         assert_eq!(chain[0].provider_id, ProviderId::AnthropicFirstParty);
         assert_eq!(chain[0].model, "claude-opus-4-6");
-        assert_eq!(chain[1].provider_id, ProviderId::OpenAICompatible { name: "deepseek-user".to_string() });
+        assert_eq!(
+            chain[1].provider_id,
+            ProviderId::OpenAICompatible {
+                name: "deepseek-user".to_string()
+            }
+        );
         assert_eq!(chain[1].model, "deepseek-chat");
     }
 
     #[test]
     fn fallback_unknown_entry_skipped_chain_kept() {
         let mut inp = anthropic_only_inputs();
-        inp.routing = Some(json!({ "fallback": { "primary": ["anthropic/claude-opus-4-6", "ghost/none"] } }));
+        inp.routing =
+            Some(json!({ "fallback": { "primary": ["anthropic/claude-opus-4-6", "ghost/none"] } }));
         let out = assemble(inp);
         let chain = out.chains.chains.get("primary").unwrap();
         assert_eq!(chain.len(), 1);

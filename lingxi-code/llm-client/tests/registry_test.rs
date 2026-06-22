@@ -1,6 +1,6 @@
 use llm_client::{
     AuthStrategy, Capabilities, ClientConfig, CredentialConfig, ModelProfile, ModelRegistry,
-    PricingConfig, ProviderId, ProviderProfile, ProtocolFamily,
+    PricingConfig, ProtocolFamily, ProviderId, ProviderProfile,
 };
 
 fn test_config() -> ClientConfig {
@@ -33,6 +33,9 @@ fn test_config() -> ClientConfig {
             pricing: PricingConfig::default(),
             signing: None,
             azure: None,
+            supports_websockets: false,
+            supports_websocket_compression: false,
+            websocket_connect_timeout_ms: None,
         }],
     }
 }
@@ -70,7 +73,9 @@ fn resolve_rejects_ambiguous_model_references() {
             if message.contains("openrouter") && message.contains("fallback-gateway")
     ));
 
-    let route = registry.resolve("or-sonnet").expect("unique alias still resolves");
+    let route = registry
+        .resolve("or-sonnet")
+        .expect("unique alias still resolves");
     assert_eq!(route.profile_name, "openrouter");
 }
 

@@ -1,6 +1,9 @@
 use base64::Engine as _;
 use llm_client::providers::OpenAiResponsesCodec;
-use llm_client::{ContentBlock, LlmRequest, Message, ToolChoice, ToolDeclaration, WireCodec};
+use llm_client::{
+    ContentBlock, LlmRequest, Message, OpenAiResponsesRequestOptions, ToolChoice, ToolDeclaration,
+    WireCodec,
+};
 
 const BASE_URL: &str = "https://api.openai.com/v1";
 
@@ -37,7 +40,10 @@ fn encode_request_sets_content_type_header_only() {
         .unwrap();
 
     assert_eq!(
-        provider_request.headers.get("content-type").map(String::as_str),
+        provider_request
+            .headers
+            .get("content-type")
+            .map(String::as_str),
         Some("application/json")
     );
     // Auth is added later by DefaultLlmClient::authenticate, never by the codec.
@@ -333,7 +339,16 @@ fn no_tools_omits_tools_key() {
         .encode_request(&LlmRequest::new("gpt-5").with_user_text("hi"))
         .unwrap();
 
-    assert!(provider_request.body_json.get("tools").is_none());
+    assert_eq!(provider_request.body_json["tools"], serde_json::json!([]));
+}
+
+#[test]
+fn default_tool_choice_is_auto_for_responses_parity() {
+    let provider_request = codec()
+        .encode_request(&LlmRequest::new("gpt-5").with_user_text("hi"))
+        .unwrap();
+
+    assert_eq!(provider_request.body_json["tool_choice"], "auto");
 }
 
 #[test]
@@ -433,6 +448,7 @@ fn no_reasoning_config_omits_reasoning_key() {
         .unwrap();
 
     assert!(provider_request.body_json.get("reasoning").is_none());
+    assert_eq!(provider_request.body_json["include"], serde_json::json!([]));
 }
 
 // ── response_format → text.format ─────────────────────────────────────────────
@@ -505,16 +521,84 @@ fn stream_false_omits_stream_key() {
         .encode_request(&LlmRequest::new("gpt-5").with_user_text("hi"))
         .unwrap();
 
-    assert!(provider_request.body_json.get("stream").is_none());
+    assert_eq!(provider_request.body_json["stream"], false);
 }
 
 #[test]
-fn store_is_always_false() {
+fn store_defaults_false_for_non_azure() {
     let provider_request = codec()
         .encode_request(&LlmRequest::new("gpt-5").with_user_text("hi"))
         .unwrap();
 
     assert_eq!(provider_request.body_json["store"], false);
+}
+
+#[test]
+fn store_defaults_true_for_azure_responses_base_url() {
+    let codec = OpenAiResponsesCodec::new("https://foo.openai.azure.com/openai");
+    let provider_request = codec
+        .encode_request(&LlmRequest::new("gpt-5").with_user_text("hi"))
+        .unwrap();
+
+    assert_eq!(provider_request.body_json["store"], true);
+}
+
+#[test]
+fn explicit_store_override_wins_over_azure_detection() {
+    let codec = OpenAiResponsesCodec::new("https://foo.openai.azure.com/openai");
+    let mut request = LlmRequest::new("gpt-5").with_user_text("hi");
+    request.openai_responses.store = Some(false);
+
+    let provider_request = codec.encode_request(&request).unwrap();
+
+    assert_eq!(provider_request.body_json["store"], false);
+}
+
+#[test]
+fn codex_responses_options_encode_extra_request_fields() {
+    let mut client_metadata = std::collections::BTreeMap::new();
+    client_metadata.insert("session_id".to_string(), "sess_1".to_string());
+    let mut request = LlmRequest::new("gpt-5").with_user_text("hi");
+    request.openai_responses = OpenAiResponsesRequestOptions {
+        parallel_tool_calls: Some(true),
+        include: vec!["file_search_call.results".to_string()],
+        service_tier: Some("priority".to_string()),
+        prompt_cache_key: Some("cache-key".to_string()),
+        client_metadata,
+        store: None,
+        previous_response_id: None,
+        generate: None,
+    };
+
+    let provider_request = codec().encode_request(&request).unwrap();
+
+    assert_eq!(provider_request.body_json["parallel_tool_calls"], true);
+    assert_eq!(
+        provider_request.body_json["include"],
+        serde_json::json!(["file_search_call.results"])
+    );
+    assert_eq!(provider_request.body_json["service_tier"], "priority");
+    assert_eq!(provider_request.body_json["prompt_cache_key"], "cache-key");
+    assert_eq!(
+        provider_request.body_json["client_metadata"],
+        serde_json::json!({"session_id": "sess_1"})
+    );
+}
+
+#[test]
+fn reasoning_adds_encrypted_content_include_once() {
+    let mut request = LlmRequest::new("gpt-5").with_user_text("hi");
+    request.reasoning = Some(llm_client::ReasoningConfig::Enabled {
+        budget_tokens: 2048,
+    });
+    request.openai_responses.include = vec!["reasoning.encrypted_content".to_string()];
+
+    let provider_request = codec().encode_request(&request).unwrap();
+
+    assert_eq!(
+        provider_request.body_json["include"],
+        serde_json::json!(["reasoning.encrypted_content"])
+    );
 }
 
 // ── unsupported history blocks ────────────────────────────────────────────────
@@ -588,7 +672,9 @@ fn encode_request_full_body_golden() {
         input_schema: serde_json::json!({"type": "object"}),
     }];
     request.tool_choice = Some(ToolChoice::Auto);
-    request.reasoning = Some(llm_client::ReasoningConfig::Enabled { budget_tokens: 2048 });
+    request.reasoning = Some(llm_client::ReasoningConfig::Enabled {
+        budget_tokens: 2048,
+    });
 
     let provider_request = codec().encode_request(&request).unwrap();
 
@@ -610,8 +696,10 @@ fn encode_request_full_body_golden() {
                 "strict": false,
             }],
             "tool_choice": "auto",
+            "parallel_tool_calls": false,
             "max_output_tokens": 4096,
             "reasoning": {"effort": "medium"},
+            "include": ["reasoning.encrypted_content"],
             "stream": true,
             "store": false,
         })
@@ -663,8 +751,14 @@ fn decode_response_message_output_text_parts_become_text_blocks() {
     assert_eq!(
         decoded.content,
         vec![
-            ContentBlock::Text { text: "hello".to_string(), cache_control: None },
-            ContentBlock::Text { text: "world".to_string(), cache_control: None },
+            ContentBlock::Text {
+                text: "hello".to_string(),
+                cache_control: None
+            },
+            ContentBlock::Text {
+                text: "world".to_string(),
+                cache_control: None
+            },
         ]
     );
 }
@@ -749,7 +843,10 @@ fn decode_response_reasoning_without_summary_is_skipped() {
     ])));
     assert_eq!(
         decoded.content,
-        vec![ContentBlock::Text { text: "hi".to_string(), cache_control: None }]
+        vec![ContentBlock::Text {
+            text: "hi".to_string(),
+            cache_control: None
+        }]
     );
 }
 
@@ -762,7 +859,10 @@ fn decode_response_unknown_output_items_are_skipped() {
     ])));
     assert_eq!(
         decoded.content,
-        vec![ContentBlock::Text { text: "hi".to_string(), cache_control: None }]
+        vec![ContentBlock::Text {
+            text: "hi".to_string(),
+            cache_control: None
+        }]
     );
 }
 
@@ -779,8 +879,14 @@ fn decode_response_preserves_output_item_order() {
     assert_eq!(
         decoded.content,
         vec![
-            ContentBlock::Reasoning { text: "thinking".to_string(), signature: None },
-            ContentBlock::Text { text: "I'll run it".to_string(), cache_control: None },
+            ContentBlock::Reasoning {
+                text: "thinking".to_string(),
+                signature: None
+            },
+            ContentBlock::Text {
+                text: "I'll run it".to_string(),
+                cache_control: None
+            },
             ContentBlock::ToolCall {
                 id: "call_1".to_string(),
                 name: "Bash".to_string(),
@@ -1000,11 +1106,72 @@ fn decode_stream(frames: &[serde_json::Value]) -> Vec<LlmEvent> {
     events
 }
 
+fn decode_stream_with_metadata(
+    frames: &[serde_json::Value],
+    metadata: serde_json::Value,
+) -> Vec<LlmEvent> {
+    let mut decoder = codec().stream_decoder();
+    decoder.set_provider_metadata(metadata);
+    let mut events = Vec::new();
+    for frame in frames {
+        events.extend(
+            decoder
+                .decode_frame(RawStreamFrame::new(frame.to_string().into_bytes()))
+                .unwrap(),
+        );
+    }
+    events
+}
+
 fn created_frame() -> serde_json::Value {
     serde_json::json!({
         "type": "response.created",
         "response": {"id": "resp_1", "model": "gpt-5", "status": "in_progress"},
     })
+}
+
+#[test]
+fn stream_provider_metadata_is_retained_on_start_and_terminal_usage() {
+    let metadata = serde_json::json!({
+        "openai-model": "gpt-5-2026-06-01",
+        "x-models-etag": "etag-1",
+        "x-codex-turn-state": "turn-state",
+        "x-ratelimit-limit-requests": "1000",
+    });
+    let usage_json = serde_json::json!({
+        "input_tokens": 2,
+        "output_tokens": 3,
+        "total_tokens": 5,
+    });
+    let events = decode_stream_with_metadata(
+        &[
+            created_frame(),
+            serde_json::json!({
+                "type": "response.completed",
+                "response": {
+                    "id": "resp_1",
+                    "model": "gpt-5",
+                    "status": "completed",
+                    "usage": usage_json,
+                },
+            }),
+        ],
+        metadata.clone(),
+    );
+
+    assert!(matches!(
+        &events[0],
+        LlmEvent::MessageStart { response }
+            if response.provider_metadata == metadata
+    ));
+    assert!(matches!(
+        &events[1],
+        LlmEvent::MessageDelta { usage: Some(usage), .. }
+            if usage.provider_metadata == serde_json::json!({
+                "usage": usage_json,
+                "stream": metadata,
+            })
+    ));
 }
 
 #[test]
@@ -1058,14 +1225,18 @@ fn stream_text_delta_opens_block_once_then_deltas() {
         events[2],
         LlmEvent::ContentBlockDelta {
             index: 0,
-            delta: ContentDelta::TextDelta { text: "Hel".to_string() },
+            delta: ContentDelta::TextDelta {
+                text: "Hel".to_string()
+            },
         }
     );
     assert_eq!(
         events[3],
         LlmEvent::ContentBlockDelta {
             index: 0,
-            delta: ContentDelta::TextDelta { text: "lo".to_string() },
+            delta: ContentDelta::TextDelta {
+                text: "lo".to_string()
+            },
         }
     );
 }
@@ -1224,7 +1395,10 @@ fn stream_output_item_done_emits_content_block_stop() {
         }),
     ]);
 
-    assert_eq!(events.last(), Some(&LlmEvent::ContentBlockStop { index: 0 }));
+    assert_eq!(
+        events.last(),
+        Some(&LlmEvent::ContentBlockStop { index: 0 })
+    );
 }
 
 #[test]
@@ -1395,7 +1569,9 @@ fn stream_incomplete_max_output_tokens_maps_max_tokens() {
 fn stream_failed_maps_error_taxonomy() {
     let mut decoder = codec().stream_decoder();
     decoder
-        .decode_frame(RawStreamFrame::new(created_frame().to_string().into_bytes()))
+        .decode_frame(RawStreamFrame::new(
+            created_frame().to_string().into_bytes(),
+        ))
         .unwrap();
     let err = decoder
         .decode_frame(RawStreamFrame::new(
@@ -1500,6 +1676,58 @@ fn stream_failed_rate_limit_exceeded_without_delay_text_still_maps_rate_limited(
 }
 
 #[test]
+fn websocket_wrapped_rate_limit_error_maps_through_openai_taxonomy() {
+    let mut decoder = codec().stream_decoder();
+    let err = decoder
+        .decode_frame(RawStreamFrame::new(
+            serde_json::json!({
+                "type": "error",
+                "status": 429,
+                "error": {"type": "rate_limit_error", "message": "slow down"},
+                "headers": {"retry-after": "7", "x-request-id": "req_ws"},
+            })
+            .to_string()
+            .into_bytes(),
+        ))
+        .unwrap_err();
+
+    match err {
+        llm_client::LlmError::RateLimited { retry_after, scope } => {
+            assert_eq!(retry_after, Some(std::time::Duration::from_secs(7)));
+            assert_eq!(scope, None);
+        }
+        other => panic!("expected RateLimited, got: {other:?}"),
+    }
+}
+
+#[test]
+fn websocket_connection_limit_reached_is_retryable_rate_limit() {
+    let mut decoder = codec().stream_decoder();
+    let err = decoder
+        .decode_frame(RawStreamFrame::new(
+            serde_json::json!({
+                "type": "error",
+                "status": 429,
+                "error": {
+                    "code": "websocket_connection_limit_reached",
+                    "message": "too many websocket connections",
+                },
+            })
+            .to_string()
+            .into_bytes(),
+        ))
+        .unwrap_err();
+
+    assert!(matches!(
+        err,
+        llm_client::LlmError::RateLimited {
+            retry_after: None,
+            scope: None
+        }
+    ));
+}
+
+#[test]
 fn stream_failed_invalid_prompt_maps_invalid_request() {
     // codex responses.rs is_invalid_prompt_error: code "invalid_prompt" is a
     // non-retryable invalid request, not a generic 5xx fallthrough.
@@ -1545,7 +1773,10 @@ fn stream_failed_unknown_code_falls_back_to_provider_internal() {
         ))
         .unwrap_err();
 
-    assert!(matches!(err, llm_client::LlmError::ProviderInternal), "got: {err:?}");
+    assert!(
+        matches!(err, llm_client::LlmError::ProviderInternal),
+        "got: {err:?}"
+    );
 }
 
 #[test]
@@ -1810,11 +2041,15 @@ fn stream_happy_path_exact_event_sequence() {
             },
             LlmEvent::ContentBlockDelta {
                 index: 0,
-                delta: ContentDelta::TextDelta { text: "On ".to_string() },
+                delta: ContentDelta::TextDelta {
+                    text: "On ".to_string()
+                },
             },
             LlmEvent::ContentBlockDelta {
                 index: 0,
-                delta: ContentDelta::TextDelta { text: "it.".to_string() },
+                delta: ContentDelta::TextDelta {
+                    text: "it.".to_string()
+                },
             },
             LlmEvent::ContentBlockStop { index: 0 },
             LlmEvent::ContentBlockStart {

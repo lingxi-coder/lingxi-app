@@ -115,6 +115,9 @@ impl ProviderSideQueryClient {
                 pricing: PricingConfig::default(),
                 signing: None,
                 azure: None,
+                supports_websockets: false,
+                supports_websocket_compression: false,
+                websocket_connect_timeout_ms: None,
                 // Wildcard model support: sidequery uses any model string the
                 // caller passes (e.g. "claude-haiku-4-5" for memory summaries,
                 // "claude-opus-4-6" for compaction). We register a catch-all
@@ -170,13 +173,21 @@ fn sidequery_model_table() -> Vec<ModelProfile> {
     vec![
         // Memory-selector model
         model("claude-haiku-4-5", "claude-haiku-4-5", &[]),
-        model("claude-haiku-4-20250307", "claude-haiku-4", &["claude-haiku-4", "claude-haiku"]),
+        model(
+            "claude-haiku-4-20250307",
+            "claude-haiku-4",
+            &["claude-haiku-4", "claude-haiku"],
+        ),
         // Compaction model (AutocompactConfig::default)
         model("claude-opus-4-6", "claude-opus-4-6", &[]),
         model("claude-opus-4-7", "claude-opus-4-7", &[]),
         // Broad Sonnet/Opus/Haiku coverage for callers using any model string
         model("claude-sonnet-4-6", "claude-sonnet-4-6", &[]),
-        model("claude-opus-4-20250514", "claude-opus-4", &["claude-opus-4", "claude-opus"]),
+        model(
+            "claude-opus-4-20250514",
+            "claude-opus-4",
+            &["claude-opus-4", "claude-opus"],
+        ),
         model(
             "claude-sonnet-4-20250514",
             "claude-sonnet-4",
@@ -323,13 +334,11 @@ fn convert_one_message(
                 .map(convert_content_block)
                 .collect::<Result<Vec<_>, _>>()?,
         }),
-        protocol::ConversationMessage::System { .. } => {
-            Err(llm_client::LlmError::InvalidRequest {
-                message:
-                    "System messages must not appear in the messages vec; pass them via system_prompt"
-                        .to_string(),
-            })
-        }
+        protocol::ConversationMessage::System { .. } => Err(llm_client::LlmError::InvalidRequest {
+            message:
+                "System messages must not appear in the messages vec; pass them via system_prompt"
+                    .to_string(),
+        }),
     }
 }
 
@@ -363,18 +372,21 @@ fn convert_content_block(
             // A structured content-block array (e.g. MCP image/resource) rides
             // as the `Value::Array` output and is emitted verbatim; plain text
             // stays a `Value::String`.
-            output: content_blocks
-                .map_or_else(|| serde_json::Value::String(content), serde_json::Value::Array),
+            output: content_blocks.map_or_else(
+                || serde_json::Value::String(content),
+                serde_json::Value::Array,
+            ),
             is_error,
             cache_control: None,
             cache_reference: None,
         }),
-        protocol::ContentBlock::Thinking { thinking, signature } => {
-            Ok(llm_client::ContentBlock::Reasoning {
-                text: thinking,
-                signature,
-            })
-        }
+        protocol::ContentBlock::Thinking {
+            thinking,
+            signature,
+        } => Ok(llm_client::ContentBlock::Reasoning {
+            text: thinking,
+            signature,
+        }),
         protocol::ContentBlock::Image { source } => convert_image(source),
         protocol::ContentBlock::Document { source } => convert_document(source),
         // Low-frequency server-side blocks: replayed verbatim into the request
@@ -514,7 +526,9 @@ mod tests {
         }
 
         async fn stream_sse(&self, _req: HttpRequest) -> Result<SseStream, HttpError> {
-            Err(HttpError::InvalidRequest("sse not used in side query".into()))
+            Err(HttpError::InvalidRequest(
+                "sse not used in side query".into(),
+            ))
         }
     }
 
@@ -579,8 +593,7 @@ mod tests {
         let received = transport.received.lock().unwrap();
         assert_eq!(received.len(), 1);
         let raw_body = received[0].body.as_deref().expect("request has a body");
-        let body: serde_json::Value =
-            serde_json::from_str(raw_body).expect("request body is JSON");
+        let body: serde_json::Value = serde_json::from_str(raw_body).expect("request body is JSON");
 
         // The forwarded fields reach the wire body.
         assert_eq!(body["model"].as_str(), Some("claude-haiku-4-5"));

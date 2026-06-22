@@ -91,6 +91,22 @@ pub struct ProviderProfile {
     /// codec-build time.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub azure: Option<AzureConfig>,
+    /// Whether this `OpenAI` Responses provider supports the Responses WebSocket
+    /// transport. Defaults to false so existing profiles keep HTTP SSE
+    /// streaming unless they opt in explicitly.
+    #[serde(default)]
+    pub supports_websockets: bool,
+    /// Whether this provider profile can negotiate WebSocket
+    /// permessage-deflate for Responses WebSocket transport.
+    ///
+    /// Defaults to false. The current platform transport keeps this disabled
+    /// until the underlying tungstenite dependency exposes a stable compression
+    /// configuration surface.
+    #[serde(default)]
+    pub supports_websocket_compression: bool,
+    /// Optional WebSocket connect timeout in milliseconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub websocket_connect_timeout_ms: Option<u64>,
 }
 
 /// Wire protocol route family.

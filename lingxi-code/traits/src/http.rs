@@ -21,6 +21,12 @@ pub type SseStream = Pin<Box<dyn Stream<Item = Result<SseEvent, HttpError>> + Se
 /// interprets the bytes.
 pub type RawByteStream = Pin<Box<dyn Stream<Item = Result<Vec<u8>, HttpError>> + Send>>;
 
+/// A pinned, boxed stream of WebSocket text-message payloads as raw bytes.
+///
+/// Returned by [`HttpTransport::stream_websocket_messages_with_meta`] for
+/// provider protocols that deliver one JSON event per WebSocket message.
+pub type WebSocketMessageStream = Pin<Box<dyn Stream<Item = Result<Vec<u8>, HttpError>> + Send>>;
+
 /// SSE stream together with the HTTP response metadata that preceded it.
 ///
 /// Returned by [`HttpTransport::stream_sse_with_meta`]. The status and headers
@@ -73,6 +79,50 @@ pub struct RawByteStreamWithMeta {
     pub stream: RawByteStream,
 }
 
+/// WebSocket message stream together with the HTTP upgrade response metadata.
+///
+/// The status and headers are captured from the successful WebSocket upgrade
+/// response before the first provider event message arrives.
+pub struct WebSocketMessageStreamWithMeta {
+    /// HTTP status of the WebSocket upgrade response (normally 101).
+    pub status: u16,
+    /// Response headers, lowercased names (e.g. `"openai-model"`).
+    pub headers: Vec<(String, String)>,
+    /// Provider event messages as raw bytes.
+    pub stream: WebSocketMessageStream,
+}
+
+/// Reusable WebSocket connection plus the HTTP upgrade metadata that opened it.
+pub struct WebSocketConnectionWithMeta {
+    /// HTTP status of the WebSocket upgrade response (normally 101).
+    pub status: u16,
+    /// Response headers, lowercased names (e.g. `"openai-model"`).
+    pub headers: Vec<(String, String)>,
+    /// Open connection. Callers may send sequential provider request messages
+    /// and drain the returned stream to a terminal event before sending again.
+    pub connection: Box<dyn WebSocketConnection>,
+}
+
+/// Reusable WebSocket connection abstraction for provider protocols that send
+/// one request text frame followed by one JSON-event stream.
+#[async_trait]
+pub trait WebSocketConnection: Send {
+    /// Send one text request message and return the provider event stream for
+    /// that request.
+    async fn send_text_with_meta(
+        &mut self,
+        text: String,
+    ) -> Result<WebSocketMessageStreamWithMeta, HttpError>;
+
+    /// Close the underlying WebSocket connection.
+    ///
+    /// Default transports may no-op because the connection is owned by the
+    /// concrete implementation and will close on drop.
+    async fn close(&mut self) -> Result<(), HttpError> {
+        Ok(())
+    }
+}
+
 /// A `Stream` that yields a single chunk then ends. Backs the default
 /// [`HttpTransport::stream_raw_bytes`] (buffer-the-body) impl without pulling a
 /// stream-combinator dependency into this leaf crate.
@@ -120,10 +170,7 @@ pub trait HttpTransport: Send + Sync {
     ///
     /// Returns [`HttpError`] on connection failure or a non-2xx status that the
     /// transport surfaces as an error (behaviour depends on the implementation).
-    async fn stream_sse_with_meta(
-        &self,
-        req: HttpRequest,
-    ) -> Result<SseStreamWithMeta, HttpError> {
+    async fn stream_sse_with_meta(&self, req: HttpRequest) -> Result<SseStreamWithMeta, HttpError> {
         Ok(SseStreamWithMeta {
             status: 200,
             headers: Vec::new(),
@@ -181,6 +228,31 @@ pub trait HttpTransport: Send + Sync {
             headers: Vec::new(),
             stream: self.stream_raw_bytes(req).await?,
         })
+    }
+
+    /// Open a provider WebSocket stream, send the request body as the first
+    /// text message, and return provider event text messages as raw bytes.
+    ///
+    /// Default implementations do not support WebSocket streaming. Production
+    /// transports that can perform WebSocket handshakes override this method.
+    async fn stream_websocket_messages_with_meta(
+        &self,
+        _req: HttpRequest,
+    ) -> Result<WebSocketMessageStreamWithMeta, HttpError> {
+        Err(HttpError::InvalidRequest(
+            "websocket streaming is not supported by this transport".to_string(),
+        ))
+    }
+
+    /// Open a reusable provider WebSocket connection without sending a prompt
+    /// payload. Default transports do not support WebSocket reuse.
+    async fn open_websocket_connection_with_meta(
+        &self,
+        _req: HttpRequest,
+    ) -> Result<WebSocketConnectionWithMeta, HttpError> {
+        Err(HttpError::InvalidRequest(
+            "websocket connection reuse is not supported by this transport".to_string(),
+        ))
     }
 }
 
@@ -274,10 +346,7 @@ mod tests {
             async fn request(&self, _req: HttpRequest) -> Result<HttpResponse, HttpError> {
                 Err(HttpError::InvalidRequest("not used".to_string()))
             }
-            async fn stream_sse(
-                &self,
-                _req: HttpRequest,
-            ) -> Result<SseStream, HttpError> {
+            async fn stream_sse(&self, _req: HttpRequest) -> Result<SseStream, HttpError> {
                 // Return an empty stream.
                 use futures_core::stream::Stream;
                 use std::pin::Pin;
@@ -285,7 +354,10 @@ mod tests {
                 struct Empty;
                 impl Stream for Empty {
                     type Item = Result<protocol::SseEvent, HttpError>;
-                    fn poll_next(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+                    fn poll_next(
+                        self: Pin<&mut Self>,
+                        _cx: &mut Context<'_>,
+                    ) -> Poll<Option<Self::Item>> {
                         Poll::Ready(None)
                     }
                 }
@@ -299,10 +371,7 @@ mod tests {
             .await
             .expect("default must succeed");
         assert_eq!(meta.status, 200, "default status must be 200");
-        assert!(
-            meta.headers.is_empty(),
-            "default headers must be empty"
-        );
+        assert!(meta.headers.is_empty(), "default headers must be empty");
     }
 
     /// The default `request_no_follow` delegates to `request`: a transport that
@@ -334,7 +403,10 @@ mod tests {
             .request_no_follow(get_req())
             .await
             .expect("default request_no_follow must succeed");
-        assert_eq!(resp.status, 301, "default must surface the 3xx from request");
+        assert_eq!(
+            resp.status, 301,
+            "default must surface the 3xx from request"
+        );
         let location = resp
             .headers
             .iter()

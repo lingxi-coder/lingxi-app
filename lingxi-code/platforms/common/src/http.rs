@@ -13,10 +13,20 @@
 use async_trait::async_trait;
 use bytes::BytesMut;
 use futures_core::stream::Stream;
+use futures_util::sink::SinkExt;
 use futures_util::stream::StreamExt;
 use protocol::{HttpRequest, HttpResponse, SseEvent};
-use traits::http::{RawByteStream, RawByteStreamWithMeta, SseStream, SseStreamWithMeta};
+use std::sync::{Arc, Mutex};
+use traits::http::{
+    RawByteStream, RawByteStreamWithMeta, SseStream, SseStreamWithMeta, WebSocketConnection,
+    WebSocketConnectionWithMeta, WebSocketMessageStream, WebSocketMessageStreamWithMeta,
+};
 use traits::{HttpError, HttpTransport};
+use url::Url;
+
+const OPENAI_BETA_HEADER: &str = "OpenAI-Beta";
+const RESPONSES_WEBSOCKETS_V2_BETA: &str = "responses_websockets=2026-02-06";
+const DEFAULT_WEBSOCKET_CONNECT_TIMEOUT_MS: u64 = 15_000;
 
 /// Production HTTP transport using `reqwest::Client`.
 ///
@@ -78,10 +88,7 @@ fn to_reqwest_method(method: protocol::HttpMethod) -> reqwest::Method {
 /// ([`HttpTransport::request`] / [`HttpTransport::stream_sse`] /
 /// [`HttpTransport::stream_sse_with_meta`] / [`HttpTransport::stream_raw_bytes`])
 /// calls it.
-fn build_reqwest(
-    client: &reqwest::Client,
-    req: HttpRequest,
-) -> reqwest::RequestBuilder {
+fn build_reqwest(client: &reqwest::Client, req: HttpRequest) -> reqwest::RequestBuilder {
     let mut rb = client.request(to_reqwest_method(req.method), &req.url);
     for (k, v) in &req.headers {
         rb = rb.header(k, v);
@@ -96,6 +103,224 @@ fn build_reqwest(
         rb = rb.timeout(timeout);
     }
     rb
+}
+
+fn websocket_url_for(url: &str) -> Result<Url, HttpError> {
+    let mut url = Url::parse(url).map_err(|err| HttpError::InvalidRequest(err.to_string()))?;
+    let scheme = match url.scheme() {
+        "http" => "ws",
+        "https" => "wss",
+        "ws" | "wss" => return Ok(url),
+        other => {
+            return Err(HttpError::InvalidRequest(format!(
+                "unsupported websocket URL scheme: {other}"
+            )))
+        }
+    };
+    url.set_scheme(scheme).map_err(|_| {
+        HttpError::InvalidRequest(format!("failed to set websocket URL scheme: {url}"))
+    })?;
+    Ok(url)
+}
+
+fn should_forward_websocket_header(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    !matches!(
+        lower.as_str(),
+        "content-length" | "content-type" | "connection" | "host" | "transfer-encoding" | "upgrade"
+    ) && !lower.starts_with("sec-websocket-")
+}
+
+fn append_openai_beta(headers: &mut ::http::HeaderMap) -> Result<(), HttpError> {
+    let next = match headers
+        .get(OPENAI_BETA_HEADER)
+        .and_then(|value| value.to_str().ok())
+    {
+        Some(existing)
+            if existing
+                .split(',')
+                .any(|segment| segment.trim() == RESPONSES_WEBSOCKETS_V2_BETA) =>
+        {
+            existing.to_string()
+        }
+        Some(existing) if !existing.trim().is_empty() => {
+            format!("{existing},{RESPONSES_WEBSOCKETS_V2_BETA}")
+        }
+        _ => RESPONSES_WEBSOCKETS_V2_BETA.to_string(),
+    };
+    let value = ::http::HeaderValue::from_str(&next)
+        .map_err(|err| HttpError::InvalidRequest(err.to_string()))?;
+    headers.insert(OPENAI_BETA_HEADER, value);
+    Ok(())
+}
+
+fn build_websocket_request(req: &HttpRequest) -> Result<::http::Request<()>, HttpError> {
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+
+    let url = websocket_url_for(&req.url)?;
+    let mut request = url
+        .as_str()
+        .into_client_request()
+        .map_err(|err| HttpError::InvalidRequest(err.to_string()))?;
+
+    for (name, value) in &req.headers {
+        if !should_forward_websocket_header(name) {
+            continue;
+        }
+        let header_name = ::http::HeaderName::from_bytes(name.as_bytes())
+            .map_err(|err| HttpError::InvalidRequest(err.to_string()))?;
+        let header_value = ::http::HeaderValue::from_str(value)
+            .map_err(|err| HttpError::InvalidRequest(err.to_string()))?;
+        request.headers_mut().insert(header_name, header_value);
+    }
+    append_openai_beta(request.headers_mut())?;
+    Ok(request)
+}
+
+fn map_websocket_error(error: tokio_tungstenite::tungstenite::Error) -> HttpError {
+    use tokio_tungstenite::tungstenite::Error as WsError;
+    match error {
+        WsError::Http(response) => {
+            let status = response.status().as_u16();
+            let body = response
+                .body()
+                .as_ref()
+                .and_then(|bytes| String::from_utf8(bytes.clone()).ok())
+                .unwrap_or_default();
+            HttpError::Status { status, body }
+        }
+        WsError::ConnectionClosed | WsError::AlreadyClosed => {
+            HttpError::Connection("websocket closed".to_string())
+        }
+        WsError::Io(err) => HttpError::Connection(err.to_string()),
+        other => HttpError::Connection(other.to_string()),
+    }
+}
+
+fn is_responses_terminal_message(text: &str) -> bool {
+    let trimmed = text.trim();
+    if trimmed == "[DONE]" {
+        return true;
+    }
+    serde_json::from_str::<serde_json::Value>(trimmed)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("type")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+        })
+        .is_some_and(|kind| kind == "response.completed" || kind == "response.incomplete")
+}
+
+type ProviderWebSocketStream =
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
+
+struct ReusableResponsesWebSocketState {
+    slot: Arc<Mutex<Option<ProviderWebSocketStream>>>,
+    stream: Option<ProviderWebSocketStream>,
+    terminal_seen: bool,
+}
+
+fn responses_websocket_reusable_stream(
+    stream: ProviderWebSocketStream,
+    slot: Arc<Mutex<Option<ProviderWebSocketStream>>>,
+) -> WebSocketMessageStream {
+    Box::pin(futures_util::stream::try_unfold(
+        ReusableResponsesWebSocketState {
+            slot,
+            stream: Some(stream),
+            terminal_seen: false,
+        },
+        |mut state| async move {
+            if state.terminal_seen {
+                return Ok(None);
+            }
+
+            loop {
+                let Some(stream) = state.stream.as_mut() else {
+                    return Ok(None);
+                };
+                let Some(message) = stream.next().await else {
+                    return Err(HttpError::Connection(
+                        "websocket closed before response.completed".to_string(),
+                    ));
+                };
+                match message {
+                    Ok(tokio_tungstenite::tungstenite::Message::Text(text)) => {
+                        state.terminal_seen = is_responses_terminal_message(&text);
+                        if state.terminal_seen {
+                            let stream = state.stream.take().expect("stream present");
+                            *state.slot.lock().expect("websocket slot") = Some(stream);
+                        }
+                        return Ok(Some((text.into_bytes(), state)));
+                    }
+                    Ok(tokio_tungstenite::tungstenite::Message::Binary(_)) => {
+                        return Err(HttpError::InvalidResponse(
+                            "unexpected binary websocket event".to_string(),
+                        ));
+                    }
+                    Ok(tokio_tungstenite::tungstenite::Message::Ping(payload)) => {
+                        stream
+                            .send(tokio_tungstenite::tungstenite::Message::Pong(payload))
+                            .await
+                            .map_err(map_websocket_error)?;
+                    }
+                    Ok(tokio_tungstenite::tungstenite::Message::Pong(_))
+                    | Ok(tokio_tungstenite::tungstenite::Message::Frame(_)) => {}
+                    Ok(tokio_tungstenite::tungstenite::Message::Close(_)) => {
+                        return Err(HttpError::Connection(
+                            "websocket closed by server before response.completed".to_string(),
+                        ));
+                    }
+                    Err(error) => return Err(map_websocket_error(error)),
+                }
+            }
+        },
+    ))
+}
+
+struct ReqwestResponsesWebSocketConnection {
+    status: u16,
+    headers: Vec<(String, String)>,
+    slot: Arc<Mutex<Option<ProviderWebSocketStream>>>,
+}
+
+#[async_trait]
+impl WebSocketConnection for ReqwestResponsesWebSocketConnection {
+    async fn send_text_with_meta(
+        &mut self,
+        text: String,
+    ) -> Result<WebSocketMessageStreamWithMeta, HttpError> {
+        let stream = self
+            .slot
+            .lock()
+            .expect("websocket slot")
+            .take()
+            .ok_or_else(|| {
+                HttpError::Connection(
+                    "websocket request already in flight or connection closed".to_string(),
+                )
+            })?;
+        let mut stream = stream;
+        stream
+            .send(tokio_tungstenite::tungstenite::Message::Text(text))
+            .await
+            .map_err(map_websocket_error)?;
+
+        Ok(WebSocketMessageStreamWithMeta {
+            status: self.status,
+            headers: self.headers.clone(),
+            stream: responses_websocket_reusable_stream(stream, Arc::clone(&self.slot)),
+        })
+    }
+
+    async fn close(&mut self) -> Result<(), HttpError> {
+        let Some(mut stream) = self.slot.lock().expect("websocket slot").take() else {
+            return Ok(());
+        };
+        stream.close(None).await.map_err(map_websocket_error)
+    }
 }
 
 #[async_trait]
@@ -194,10 +419,7 @@ impl HttpTransport for ReqwestHttp {
     /// that do NOT override `stream_sse_with_meta` (i.e. the default
     /// implementation in `traits`). Those callers produce empty headers as
     /// before — no behaviour change for default-impl transports.
-    async fn stream_sse_with_meta(
-        &self,
-        req: HttpRequest,
-    ) -> Result<SseStreamWithMeta, HttpError> {
+    async fn stream_sse_with_meta(&self, req: HttpRequest) -> Result<SseStreamWithMeta, HttpError> {
         let resp = build_reqwest(&self.client, req)
             .send()
             .await
@@ -241,10 +463,7 @@ impl HttpTransport for ReqwestHttp {
         })
     }
 
-    async fn stream_raw_bytes(
-        &self,
-        req: HttpRequest,
-    ) -> Result<RawByteStream, HttpError> {
+    async fn stream_raw_bytes(&self, req: HttpRequest) -> Result<RawByteStream, HttpError> {
         let resp = build_reqwest(&self.client, req)
             .send()
             .await
@@ -319,6 +538,72 @@ impl HttpTransport for ReqwestHttp {
             status,
             headers,
             stream: Box::pin(byte_stream),
+        })
+    }
+
+    async fn stream_websocket_messages_with_meta(
+        &self,
+        req: HttpRequest,
+    ) -> Result<WebSocketMessageStreamWithMeta, HttpError> {
+        let request_text = req.body.clone().ok_or_else(|| {
+            HttpError::InvalidRequest(
+                "websocket provider request requires a JSON text body".to_string(),
+            )
+        })?;
+        if req.body_bytes.is_some() {
+            return Err(HttpError::InvalidRequest(
+                "websocket provider request does not support body_bytes".to_string(),
+            ));
+        }
+
+        let mut connection = self.open_websocket_connection_with_meta(req).await?;
+        connection
+            .connection
+            .send_text_with_meta(request_text)
+            .await
+    }
+
+    async fn open_websocket_connection_with_meta(
+        &self,
+        req: HttpRequest,
+    ) -> Result<WebSocketConnectionWithMeta, HttpError> {
+        if req.body_bytes.is_some() {
+            return Err(HttpError::InvalidRequest(
+                "websocket provider request does not support body_bytes".to_string(),
+            ));
+        }
+
+        let request = build_websocket_request(&req)?;
+        let connect_timeout = req.timeout.unwrap_or_else(|| {
+            std::time::Duration::from_millis(DEFAULT_WEBSOCKET_CONNECT_TIMEOUT_MS)
+        });
+        let (stream, response) =
+            tokio::time::timeout(connect_timeout, tokio_tungstenite::connect_async(request))
+                .await
+                .map_err(|_| HttpError::Timeout(connect_timeout))?
+                .map_err(map_websocket_error)?;
+
+        let status = response.status().as_u16();
+        let headers: Vec<(String, String)> = response
+            .headers()
+            .iter()
+            .map(|(name, value)| {
+                (
+                    name.as_str().to_ascii_lowercase(),
+                    value.to_str().unwrap_or("").to_string(),
+                )
+            })
+            .collect();
+        let slot = Arc::new(Mutex::new(Some(stream)));
+
+        Ok(WebSocketConnectionWithMeta {
+            status,
+            headers: headers.clone(),
+            connection: Box::new(ReqwestResponsesWebSocketConnection {
+                status,
+                headers,
+                slot,
+            }),
         })
     }
 }
@@ -485,7 +770,10 @@ mod tests {
         let result = transport.request_no_follow(req).await;
         // Must be a transport error (connection/timeout), NOT a panic and NOT a
         // success — proving the no-redirect client was built and used.
-        assert!(result.is_err(), "unroutable host must error, got: {result:?}");
+        assert!(
+            result.is_err(),
+            "unroutable host must error, got: {result:?}"
+        );
     }
 
     /// True no-follow behaviour: against an in-process axum server that returns a
@@ -605,10 +893,11 @@ mod tests {
         } = transport.stream_sse_with_meta(req).await.unwrap();
 
         assert_eq!(status, 200, "status must be captured");
-        let has_retry = headers
-            .iter()
-            .any(|(k, v)| k == "retry-after" && v == "7");
-        assert!(has_retry, "retry-after header must be captured; got: {headers:?}");
+        let has_retry = headers.iter().any(|(k, v)| k == "retry-after" && v == "7");
+        assert!(
+            has_retry,
+            "retry-after header must be captured; got: {headers:?}"
+        );
         let has_custom = headers.iter().any(|(k, _)| k == "x-custom");
         assert!(has_custom, "x-custom header must be captured");
 
@@ -672,15 +961,22 @@ mod tests {
             .headers
             .iter()
             .any(|(k, v)| k == "retry-after" && v == "42");
-        assert!(has_retry, "retry-after header must be present; got: {:?}", meta.headers);
-        let has_custom = meta
-            .headers
-            .iter()
-            .any(|(k, _)| k == "x-custom-error");
+        assert!(
+            has_retry,
+            "retry-after header must be present; got: {:?}",
+            meta.headers
+        );
+        let has_custom = meta.headers.iter().any(|(k, _)| k == "x-custom-error");
         assert!(has_custom, "x-custom-error header must be present");
 
         // The error body arrives as a single SSE data frame.
-        let event = meta.stream.boxed().next().await.expect("one frame").unwrap();
+        let event = meta
+            .stream
+            .boxed()
+            .next()
+            .await
+            .expect("one frame")
+            .unwrap();
         assert!(
             event.data.contains("rate_limit_error"),
             "error body must be in frame data; got: {}",
@@ -878,7 +1174,11 @@ mod tests {
             .headers
             .iter()
             .any(|(k, v)| k == "x-binary-meta" && v == "yes");
-        assert!(has_meta, "x-binary-meta header must be captured; got: {:?}", meta.headers);
+        assert!(
+            has_meta,
+            "x-binary-meta header must be captured; got: {:?}",
+            meta.headers
+        );
 
         // Collect all chunks.
         let mut all_bytes: Vec<u8> = Vec::new();
@@ -886,7 +1186,11 @@ mod tests {
         while let Some(chunk) = stream.next().await {
             all_bytes.extend_from_slice(&chunk.unwrap());
         }
-        assert_eq!(all_bytes, &[0x00, 0x01, 0x02, 0x03], "binary body must arrive intact");
+        assert_eq!(
+            all_bytes,
+            &[0x00, 0x01, 0x02, 0x03],
+            "binary body must arrive intact"
+        );
     }
 
     /// `stream_raw_bytes_with_meta` on a ≥400 response must return `Ok` with
@@ -904,10 +1208,7 @@ mod tests {
         async fn error_handler() -> Response {
             (
                 axum::http::StatusCode::TOO_MANY_REQUESTS,
-                [
-                    ("content-type", "application/json"),
-                    ("retry-after", "30"),
-                ],
+                [("content-type", "application/json"), ("retry-after", "30")],
                 r#"{"error":"rate_limit"}"#,
             )
                 .into_response()
@@ -939,12 +1240,24 @@ mod tests {
             .headers
             .iter()
             .any(|(k, v)| k == "retry-after" && v == "30");
-        assert!(has_retry, "retry-after must be present; got: {:?}", meta.headers);
+        assert!(
+            has_retry,
+            "retry-after must be present; got: {:?}",
+            meta.headers
+        );
 
         // Body arrives as a single chunk.
-        let chunk = meta.stream.boxed().next().await.expect("one chunk").unwrap();
+        let chunk = meta
+            .stream
+            .boxed()
+            .next()
+            .await
+            .expect("one chunk")
+            .unwrap();
         assert!(
-            chunk.windows(b"rate_limit".len()).any(|w| w == b"rate_limit"),
+            chunk
+                .windows(b"rate_limit".len())
+                .any(|w| w == b"rate_limit"),
             "body chunk must contain error; got: {chunk:?}"
         );
     }

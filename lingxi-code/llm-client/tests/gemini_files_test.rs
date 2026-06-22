@@ -33,7 +33,10 @@ fn start_upload_request_pins_url_headers_and_body_for_v1beta_base() {
     );
 
     let mut expected_headers = BTreeMap::new();
-    expected_headers.insert("x-goog-upload-protocol".to_string(), "resumable".to_string());
+    expected_headers.insert(
+        "x-goog-upload-protocol".to_string(),
+        "resumable".to_string(),
+    );
     expected_headers.insert("x-goog-upload-command".to_string(), "start".to_string());
     expected_headers.insert(
         "x-goog-upload-header-content-length".to_string(),
@@ -321,6 +324,9 @@ fn gemini_client() -> DefaultLlmClient {
             pricing: PricingConfig::default(),
             signing: None,
             azure: None,
+            supports_websockets: false,
+            supports_websocket_compression: false,
+            websocket_connect_timeout_ms: None,
         }],
     })
     .expect("client")
@@ -348,6 +354,9 @@ fn anthropic_client() -> DefaultLlmClient {
             pricing: PricingConfig::default(),
             signing: None,
             azure: None,
+            supports_websockets: false,
+            supports_websocket_compression: false,
+            websocket_connect_timeout_ms: None,
         }],
     })
     .expect("client")
@@ -377,8 +386,7 @@ fn upload_ok_response(state: &str) -> ProviderResponse {
 
 #[tokio::test]
 async fn upload_file_runs_the_two_step_authenticated_flow() {
-    let upload_url =
-        "https://generativelanguage.googleapis.com/upload/v1beta/files?upload_id=abc";
+    let upload_url = "https://generativelanguage.googleapis.com/upload/v1beta/files?upload_id=abc";
     let transport = ScriptedTransport::returning(vec![
         start_ok_response(upload_url),
         upload_ok_response("ACTIVE"),
@@ -412,7 +420,10 @@ async fn upload_file_runs_the_two_step_authenticated_flow() {
         Some("gemini-files-key")
     );
     assert_eq!(
-        start.headers.get("x-goog-upload-command").map(String::as_str),
+        start
+            .headers
+            .get("x-goog-upload-command")
+            .map(String::as_str),
         Some("start")
     );
     assert_eq!(
@@ -435,11 +446,17 @@ async fn upload_file_runs_the_two_step_authenticated_flow() {
         Some("gemini-files-key")
     );
     assert_eq!(
-        upload.headers.get("x-goog-upload-command").map(String::as_str),
+        upload
+            .headers
+            .get("x-goog-upload-command")
+            .map(String::as_str),
         Some("upload, finalize")
     );
     assert_eq!(
-        upload.headers.get("x-goog-upload-offset").map(String::as_str),
+        upload
+            .headers
+            .get("x-goog-upload-offset")
+            .map(String::as_str),
         Some("0")
     );
     assert_eq!(upload.body_bytes, Some(vec![9, 8, 7]));
@@ -466,10 +483,8 @@ async fn upload_file_rejects_non_gemini_profiles() {
 #[tokio::test]
 async fn upload_file_errors_when_upload_url_header_is_missing() {
     // Start response with NO x-goog-upload-url header.
-    let transport = ScriptedTransport::returning(vec![ProviderResponse::json(
-        200,
-        serde_json::Value::Null,
-    )]);
+    let transport =
+        ScriptedTransport::returning(vec![ProviderResponse::json(200, serde_json::Value::Null)]);
     let client = gemini_client();
 
     let error = client
@@ -535,7 +550,9 @@ fn uploaded_file_uri_round_trips_into_gemini_file_data_encoding() {
     let mut request = LlmRequest::new("gemini-2.0-flash");
     request.messages.push(Message {
         role: "user".to_string(),
-        content: vec![ContentBlock::ImageUrl { url: file.uri.clone() }],
+        content: vec![ContentBlock::ImageUrl {
+            url: file.uri.clone(),
+        }],
     });
     let provider_request = codec.encode_request(&request).expect("encoded");
     let part = &provider_request.body_json["contents"][0]["parts"][0];

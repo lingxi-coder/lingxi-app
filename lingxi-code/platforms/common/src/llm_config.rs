@@ -101,12 +101,16 @@ pub fn builtin_anthropic_config(api_base: &str, oauth_path: bool) -> ClientConfi
     let (auth, credential) = if oauth_path {
         (
             AuthStrategy::OAuthBearer,
-            CredentialConfig::HostManaged { id: "anthropic_oauth".to_string() },
+            CredentialConfig::HostManaged {
+                id: "anthropic_oauth".to_string(),
+            },
         )
     } else {
         (
             AuthStrategy::ApiKey,
-            CredentialConfig::Env { var: "ANTHROPIC_API_KEY".to_string() },
+            CredentialConfig::Env {
+                var: "ANTHROPIC_API_KEY".to_string(),
+            },
         )
     };
 
@@ -121,6 +125,9 @@ pub fn builtin_anthropic_config(api_base: &str, oauth_path: bool) -> ClientConfi
             pricing: PricingConfig::default(),
             signing: None,
             azure: None,
+            supports_websockets: false,
+            supports_websocket_compression: false,
+            websocket_connect_timeout_ms: None,
             models: vec![
                 // — Claude Sonnet 4 (default engine model) —
                 model(
@@ -263,33 +270,48 @@ fn apply_one_provider(
 
     let (provider_id, protocol) = match type_str {
         "openai" => (
-            ProviderId::OpenAICompatible { name: profile_name.to_string() },
+            ProviderId::OpenAICompatible {
+                name: profile_name.to_string(),
+            },
             ProtocolFamily::OpenAiChat,
         ),
         // OpenAI Responses API (`POST {baseUrl}/responses`); same baseUrl /
         // apiKeyEnv requirements and ApiKey (Bearer) auth as "openai".
         "openai-responses" => (
-            ProviderId::OpenAICompatible { name: profile_name.to_string() },
+            ProviderId::OpenAICompatible {
+                name: profile_name.to_string(),
+            },
             ProtocolFamily::OpenAiResponses,
         ),
-        "anthropic" => (ProviderId::AnthropicFirstParty, ProtocolFamily::AnthropicMessages),
+        "anthropic" => (
+            ProviderId::AnthropicFirstParty,
+            ProtocolFamily::AnthropicMessages,
+        ),
         "gemini" => (ProviderId::Gemini, ProtocolFamily::GeminiGenerateContent),
         "azure-openai" => (
-            ProviderId::OpenAICompatible { name: profile_name.to_string() },
+            ProviderId::OpenAICompatible {
+                name: profile_name.to_string(),
+            },
             ProtocolFamily::AzureOpenAi,
         ),
         "bedrock-claude" => (
-            ProviderId::OpenAICompatible { name: profile_name.to_string() },
+            ProviderId::OpenAICompatible {
+                name: profile_name.to_string(),
+            },
             ProtocolFamily::BedrockClaude,
         ),
         // Vertex AI: Claude on Vertex (rawPredict/streamRawPredict SSE)
         "vertex-claude" => (
-            ProviderId::OpenAICompatible { name: profile_name.to_string() },
+            ProviderId::OpenAICompatible {
+                name: profile_name.to_string(),
+            },
             ProtocolFamily::VertexClaude,
         ),
         // Vertex AI: Gemini on Vertex (generateContent/streamGenerateContent SSE)
         "vertex-gemini" => (
-            ProviderId::OpenAICompatible { name: profile_name.to_string() },
+            ProviderId::OpenAICompatible {
+                name: profile_name.to_string(),
+            },
             ProtocolFamily::VertexGemini,
         ),
         other => {
@@ -325,7 +347,10 @@ fn apply_one_provider(
                 || format!("https://bedrock-runtime.{region}.amazonaws.com"),
                 str::to_string,
             );
-        let signing = SigningConfig { region, service: "bedrock".to_string() };
+        let signing = SigningConfig {
+            region,
+            service: "bedrock".to_string(),
+        };
         (base_url, Some(signing))
     } else {
         let base_url = entry
@@ -355,7 +380,9 @@ fn apply_one_provider(
     // For all other types, apiKeyEnv is required.
     let credential_config = if type_str == "bedrock-claude" {
         // Use HostManaged so the client's injected CredentialProvider is consulted.
-        CredentialConfig::HostManaged { id: "bedrock_sigv4".to_string() }
+        CredentialConfig::HostManaged {
+            id: "bedrock_sigv4".to_string(),
+        }
     } else {
         let api_key_env = entry
             .get("apiKeyEnv")
@@ -391,20 +418,79 @@ fn apply_one_provider(
         None
     };
 
-    // models is REQUIRED; absent or empty → error.
-    let models_val = entry.get("models").ok_or_else(|| LlmError::InvalidRequest {
-        message: format!(
-            "provider {profile_name:?}: \"models\" is required (no auto-discovery)"
-        ),
-    })?;
-    let models_arr = models_val.as_array().ok_or_else(|| LlmError::InvalidRequest {
-        message: format!("provider {profile_name:?}: \"models\" must be an array"),
-    })?;
-    if models_arr.is_empty() {
+    let supports_websockets = entry
+        .get("supportsWebsockets")
+        .map(|value| {
+            value.as_bool().ok_or_else(|| LlmError::InvalidRequest {
+                message: format!(
+                    "provider {profile_name:?}: \"supportsWebsockets\" must be a boolean"
+                ),
+            })
+        })
+        .transpose()?
+        .unwrap_or(false);
+    let supports_websocket_compression = entry
+        .get("supportsWebsocketCompression")
+        .map(|value| {
+            value.as_bool().ok_or_else(|| LlmError::InvalidRequest {
+                message: format!(
+                    "provider {profile_name:?}: \"supportsWebsocketCompression\" must be a boolean"
+                ),
+            })
+        })
+        .transpose()?
+        .unwrap_or(false);
+    let websocket_connect_timeout_ms = entry
+        .get("websocketConnectTimeoutMs")
+        .map(|value| {
+            value
+                .as_u64()
+                .ok_or_else(|| LlmError::InvalidRequest {
+                    message: format!(
+                        "provider {profile_name:?}: \"websocketConnectTimeoutMs\" must be an unsigned integer"
+                    ),
+                })
+        })
+        .transpose()?;
+
+    if supports_websockets && type_str == "bedrock-claude" {
         return Err(LlmError::InvalidRequest {
             message: format!(
-                "provider {profile_name:?}: \"models\" must have at least one entry"
+                "provider {profile_name:?}: supportsWebsockets is not supported for AWS SigV4/Bedrock providers"
             ),
+        });
+    }
+    if supports_websockets && !matches!(protocol, ProtocolFamily::OpenAiResponses) {
+        return Err(LlmError::InvalidRequest {
+            message: format!(
+                "provider {profile_name:?}: supportsWebsockets is only valid for openai-responses providers"
+            ),
+        });
+    }
+    if supports_websocket_compression {
+        return Err(LlmError::InvalidRequest {
+            message: format!(
+                "provider {profile_name:?}: supportsWebsocketCompression is not supported by this build"
+            ),
+        });
+    }
+
+    // models is REQUIRED; absent or empty → error.
+    let models_val = entry
+        .get("models")
+        .ok_or_else(|| LlmError::InvalidRequest {
+            message: format!(
+                "provider {profile_name:?}: \"models\" is required (no auto-discovery)"
+            ),
+        })?;
+    let models_arr = models_val
+        .as_array()
+        .ok_or_else(|| LlmError::InvalidRequest {
+            message: format!("provider {profile_name:?}: \"models\" must be an array"),
+        })?;
+    if models_arr.is_empty() {
+        return Err(LlmError::InvalidRequest {
+            message: format!("provider {profile_name:?}: \"models\" must have at least one entry"),
         });
     }
 
@@ -414,12 +500,11 @@ fn apply_one_provider(
     }
 
     // Parse optional "pricing" block → per-model price overrides.
-    let pricing =
-        if let Some(pricing_val) = entry.get("pricing") {
-            parse_pricing_overrides(profile_name, pricing_val, &model_profiles)?
-        } else {
-            PricingConfig::default()
-        };
+    let pricing = if let Some(pricing_val) = entry.get("pricing") {
+        parse_pricing_overrides(profile_name, pricing_val, &model_profiles)?
+    } else {
+        PricingConfig::default()
+    };
 
     // Auth strategy by type:
     // - azure-openai: AzureToken (injects `api-key:` header rather than `Authorization: Bearer`)
@@ -449,6 +534,9 @@ fn apply_one_provider(
         pricing,
         signing: bedrock_signing,
         azure: azure_config,
+        supports_websockets,
+        supports_websocket_compression,
+        websocket_connect_timeout_ms,
     });
     Ok(())
 }
@@ -492,19 +580,21 @@ fn parse_pricing_overrides(
         "reasoningPerMtok",
     ];
 
-    let pricing_obj = pricing_val.as_object().ok_or_else(|| LlmError::InvalidRequest {
-        message: format!(
-            "provider {profile_name:?}: \"pricing\" must be an object (got {})",
-            match pricing_val {
-                serde_json::Value::Array(_) => "array",
-                serde_json::Value::Bool(_) => "bool",
-                serde_json::Value::Number(_) => "number",
-                serde_json::Value::String(_) => "string",
-                serde_json::Value::Null => "null",
-                serde_json::Value::Object(_) => "object",
-            }
-        ),
-    })?;
+    let pricing_obj = pricing_val
+        .as_object()
+        .ok_or_else(|| LlmError::InvalidRequest {
+            message: format!(
+                "provider {profile_name:?}: \"pricing\" must be an object (got {})",
+                match pricing_val {
+                    serde_json::Value::Array(_) => "array",
+                    serde_json::Value::Bool(_) => "bool",
+                    serde_json::Value::Number(_) => "number",
+                    serde_json::Value::String(_) => "string",
+                    serde_json::Value::Null => "null",
+                    serde_json::Value::Object(_) => "object",
+                }
+            ),
+        })?;
 
     let mut overrides = Vec::new();
 
@@ -519,11 +609,14 @@ fn parse_pricing_overrides(
             });
         }
 
-        let model_pricing_obj = model_pricing_val.as_object().ok_or_else(|| LlmError::InvalidRequest {
-            message: format!(
-                "provider {profile_name:?}: pricing[{model_id:?}] must be an object"
-            ),
-        })?;
+        let model_pricing_obj =
+            model_pricing_val
+                .as_object()
+                .ok_or_else(|| LlmError::InvalidRequest {
+                    message: format!(
+                        "provider {profile_name:?}: pricing[{model_id:?}] must be an object"
+                    ),
+                })?;
 
         // Validate: no unknown keys.
         for key in model_pricing_obj.keys() {
@@ -537,16 +630,46 @@ fn parse_pricing_overrides(
         }
 
         // Parse required fields.
-        let input_per_million = parse_price_field(profile_name, model_id, model_pricing_obj, "inputPerMtok", true)?
-            .unwrap_or(0.0);
-        let output_per_million = parse_price_field(profile_name, model_id, model_pricing_obj, "outputPerMtok", true)?
-            .unwrap_or(0.0);
-        let cache_write_per_million = parse_price_field(profile_name, model_id, model_pricing_obj, "cacheWritePerMtok", false)?
-            .unwrap_or(0.0);
-        let cache_read_per_million = parse_price_field(profile_name, model_id, model_pricing_obj, "cacheReadPerMtok", false)?
-            .unwrap_or(0.0);
-        let reasoning_per_million = parse_price_field(profile_name, model_id, model_pricing_obj, "reasoningPerMtok", false)?
-            .unwrap_or(0.0);
+        let input_per_million = parse_price_field(
+            profile_name,
+            model_id,
+            model_pricing_obj,
+            "inputPerMtok",
+            true,
+        )?
+        .unwrap_or(0.0);
+        let output_per_million = parse_price_field(
+            profile_name,
+            model_id,
+            model_pricing_obj,
+            "outputPerMtok",
+            true,
+        )?
+        .unwrap_or(0.0);
+        let cache_write_per_million = parse_price_field(
+            profile_name,
+            model_id,
+            model_pricing_obj,
+            "cacheWritePerMtok",
+            false,
+        )?
+        .unwrap_or(0.0);
+        let cache_read_per_million = parse_price_field(
+            profile_name,
+            model_id,
+            model_pricing_obj,
+            "cacheReadPerMtok",
+            false,
+        )?
+        .unwrap_or(0.0);
+        let reasoning_per_million = parse_price_field(
+            profile_name,
+            model_id,
+            model_pricing_obj,
+            "reasoningPerMtok",
+            false,
+        )?
+        .unwrap_or(0.0);
 
         let pricing = TokenPricing {
             input_per_million,
@@ -558,7 +681,10 @@ fn parse_pricing_overrides(
         overrides.push((model_id.clone(), pricing));
     }
 
-    Ok(PricingConfig { require_priced: false, overrides })
+    Ok(PricingConfig {
+        require_priced: false,
+        overrides,
+    })
 }
 
 /// Parse and validate one price field from a model's pricing object.
@@ -599,24 +725,23 @@ fn parse_price_field(
 }
 
 /// Parse one `models[n]` entry from the settings JSON into a [`ModelProfile`].
-fn parse_model_entry(
-    profile_name: &str,
-    m: &serde_json::Value,
-) -> Result<ModelProfile, LlmError> {
+fn parse_model_entry(profile_name: &str, m: &serde_json::Value) -> Result<ModelProfile, LlmError> {
     let id = m
         .get("id")
         .and_then(serde_json::Value::as_str)
         .ok_or_else(|| LlmError::InvalidRequest {
-            message: format!(
-                "provider {profile_name:?}: each model entry must have an \"id\""
-            ),
+            message: format!("provider {profile_name:?}: each model entry must have an \"id\""),
         })?
         .to_string();
 
     let aliases: Vec<String> = m
         .get("aliases")
         .and_then(serde_json::Value::as_array)
-        .map(|arr| arr.iter().filter_map(|a| a.as_str().map(String::from)).collect())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|a| a.as_str().map(String::from))
+                .collect()
+        })
         .unwrap_or_default();
 
     let caps = parse_capabilities(m.get("capabilities"));
@@ -676,7 +801,11 @@ fn resolve_display_model<'a>(
     cfg.providers
         .iter()
         .find(|p| p.profile_name == profile_part)
-        .and_then(|p| p.models.iter().find(|m| m.display_model == model_part || m.aliases.contains(&model_part.to_string())))
+        .and_then(|p| {
+            p.models.iter().find(|m| {
+                m.display_model == model_part || m.aliases.contains(&model_part.to_string())
+            })
+        })
         .map(|m| m.display_model.as_str())
 }
 
@@ -724,7 +853,10 @@ pub fn parse_routing_overrides(
     let mut overrides = RoutingOverrides::default();
 
     // ── fallback ──────────────────────────────────────────────────────────────
-    if let Some(fallback_map) = routing.get("fallback").and_then(serde_json::Value::as_object) {
+    if let Some(fallback_map) = routing
+        .get("fallback")
+        .and_then(serde_json::Value::as_object)
+    {
         for (key, chain_val) in fallback_map {
             // Resolve the KEY to a display model.
             // The key may be "profile/model" or a bare alias/display model.
@@ -741,11 +873,14 @@ pub fn parse_routing_overrides(
             };
 
             // chain_val must be a non-empty array; every entry is validated.
-            let chain = chain_val.as_array().ok_or_else(|| llm_client::LlmError::InvalidRequest {
-                message: format!(
+            let chain =
+                chain_val
+                    .as_array()
+                    .ok_or_else(|| llm_client::LlmError::InvalidRequest {
+                        message: format!(
                     "routing.fallback[{key:?}]: value must be an array of \"profile/model\" strings"
                 ),
-            })?;
+                    })?;
             if chain.is_empty() {
                 return Err(llm_client::LlmError::InvalidRequest {
                     message: format!(
@@ -756,11 +891,14 @@ pub fn parse_routing_overrides(
             // Validate every entry in the chain and collect display models.
             let mut resolved_chain: Vec<String> = Vec::with_capacity(chain.len());
             for (i, entry_val) in chain.iter().enumerate() {
-                let target = entry_val.as_str().ok_or_else(|| llm_client::LlmError::InvalidRequest {
-                    message: format!(
+                let target =
+                    entry_val
+                        .as_str()
+                        .ok_or_else(|| llm_client::LlmError::InvalidRequest {
+                            message: format!(
                         "routing.fallback[{key:?}]: chain[{i}] must be a \"profile/model\" string"
                     ),
-                })?;
+                        })?;
                 let (profile_part, model_part) = target.split_once('/').ok_or_else(|| {
                     llm_client::LlmError::InvalidRequest {
                         message: format!(
@@ -785,21 +923,28 @@ pub fn parse_routing_overrides(
     // ── retry ────────────────────────────────────────────────────────────────
     if let Some(retry_obj) = routing.get("retry").and_then(serde_json::Value::as_object) {
         if let Some(max_attempts_val) = retry_obj.get("maxAttempts") {
-            let n = max_attempts_val.as_u64().ok_or_else(|| llm_client::LlmError::InvalidRequest {
-                message: "routing.retry.maxAttempts must be a non-negative integer".to_string(),
-            })?;
+            let n =
+                max_attempts_val
+                    .as_u64()
+                    .ok_or_else(|| llm_client::LlmError::InvalidRequest {
+                        message: "routing.retry.maxAttempts must be a non-negative integer"
+                            .to_string(),
+                    })?;
             overrides.max_retries = Some(u32::try_from(n).unwrap_or(u32::MAX));
         }
         if let Some(backoff_val) = retry_obj.get("backoffMs") {
-            let n = backoff_val.as_u64().ok_or_else(|| llm_client::LlmError::InvalidRequest {
-                message: "routing.retry.backoffMs must be a non-negative integer".to_string(),
-            })?;
+            let n = backoff_val
+                .as_u64()
+                .ok_or_else(|| llm_client::LlmError::InvalidRequest {
+                    message: "routing.retry.backoffMs must be a non-negative integer".to_string(),
+                })?;
             if n == 0 {
                 // 0 would collapse the jitter ladder to zero-delay retries (a
                 // tight retry loop hammering the provider) — reject up front.
                 return Err(llm_client::LlmError::InvalidRequest {
-                    message: "routing.retry.backoffMs must be >= 1 (0 would disable backoff entirely)"
-                        .to_string(),
+                    message:
+                        "routing.retry.backoffMs must be >= 1 (0 would disable backoff entirely)"
+                            .to_string(),
                 });
             }
             overrides.backoff_ms = Some(n);
@@ -820,23 +965,29 @@ fn apply_routing_aliases(
     let Some(routing) = routing else {
         return Ok(());
     };
-    let Some(aliases_map) = routing.get("aliases").and_then(serde_json::Value::as_object) else {
+    let Some(aliases_map) = routing
+        .get("aliases")
+        .and_then(serde_json::Value::as_object)
+    else {
         return Ok(());
     };
 
     for (alias, target_val) in aliases_map {
-        let target = target_val.as_str().ok_or_else(|| LlmError::InvalidRequest {
-            message: format!("routing.aliases[{alias:?}]: value must be a string"),
-        })?;
+        let target = target_val
+            .as_str()
+            .ok_or_else(|| LlmError::InvalidRequest {
+                message: format!("routing.aliases[{alias:?}]: value must be a string"),
+            })?;
 
         // target is "profile_name/model_id"
-        let (profile_part, model_part) = target.split_once('/').ok_or_else(|| {
-            LlmError::InvalidRequest {
-                message: format!(
-                    "routing.aliases[{alias:?}]: target {target:?} must be \"profile/model\""
-                ),
-            }
-        })?;
+        let (profile_part, model_part) =
+            target
+                .split_once('/')
+                .ok_or_else(|| LlmError::InvalidRequest {
+                    message: format!(
+                        "routing.aliases[{alias:?}]: target {target:?} must be \"profile/model\""
+                    ),
+                })?;
 
         // Find the matching model in cfg.providers (including builtin).
         let model = cfg
@@ -913,8 +1064,7 @@ mod tests {
     #[tokio::test]
     async fn default_model_resolves() {
         let cfg = test_config("https://api.anthropic.com");
-        let client =
-            DefaultLlmClient::from_config(cfg).expect("config must be valid");
+        let client = DefaultLlmClient::from_config(cfg).expect("config must be valid");
 
         // `prepare()` exercises registry resolution + codec encoding + auth —
         // with AuthStrategy::None it short-circuits before any network call.
@@ -952,7 +1102,8 @@ mod tests {
     #[test]
     fn openai_profile_appended() {
         let mut cfg = builtin_anthropic_config("https://api.anthropic.com", false);
-        let providers: BTreeMap<String, serde_json::Value> = serde_json::from_str(r#"{
+        let providers: BTreeMap<String, serde_json::Value> = serde_json::from_str(
+            r#"{
             "groq": {
                 "type": "openai",
                 "baseUrl": "https://api.groq.com/openai/v1",
@@ -961,12 +1112,18 @@ mod tests {
                     { "id": "llama-3.3-70b-versatile" }
                 ]
             }
-        }"#).unwrap();
+        }"#,
+        )
+        .unwrap();
 
         apply_settings_providers(&mut cfg, &providers, None).expect("must succeed");
 
         assert_eq!(cfg.providers.len(), 2, "builtin + groq");
-        let groq = cfg.providers.iter().find(|p| p.profile_name == "groq").unwrap();
+        let groq = cfg
+            .providers
+            .iter()
+            .find(|p| p.profile_name == "groq")
+            .unwrap();
         assert_eq!(groq.base_url, "https://api.groq.com/openai/v1");
         assert_eq!(groq.protocol, ProtocolFamily::OpenAiChat);
         assert!(
@@ -975,7 +1132,9 @@ mod tests {
         );
         assert_eq!(
             groq.credential,
-            CredentialConfig::Env { var: "GROQ_API_KEY".to_string() }
+            CredentialConfig::Env {
+                var: "GROQ_API_KEY".to_string()
+            }
         );
         assert_eq!(groq.models.len(), 1);
         assert_eq!(groq.models[0].display_model, "llama-3.3-70b-versatile");
@@ -990,7 +1149,8 @@ mod tests {
     #[test]
     fn gemini_profile_parses() {
         let mut cfg = builtin_anthropic_config("https://api.anthropic.com", false);
-        let providers: BTreeMap<String, serde_json::Value> = serde_json::from_str(r#"{
+        let providers: BTreeMap<String, serde_json::Value> = serde_json::from_str(
+            r#"{
             "my-gemini": {
                 "type": "gemini",
                 "baseUrl": "https://generativelanguage.googleapis.com/v1beta",
@@ -999,16 +1159,24 @@ mod tests {
                     { "id": "gemini-2.0-flash" }
                 ]
             }
-        }"#).unwrap();
+        }"#,
+        )
+        .unwrap();
 
         apply_settings_providers(&mut cfg, &providers, None).expect("must succeed");
 
-        let gemini = cfg.providers.iter().find(|p| p.profile_name == "my-gemini").unwrap();
+        let gemini = cfg
+            .providers
+            .iter()
+            .find(|p| p.profile_name == "my-gemini")
+            .unwrap();
         assert_eq!(gemini.protocol, ProtocolFamily::GeminiGenerateContent);
         assert_eq!(gemini.provider_id, ProviderId::Gemini);
         assert_eq!(
             gemini.credential,
-            CredentialConfig::Env { var: "GEMINI_API_KEY".to_string() }
+            CredentialConfig::Env {
+                var: "GEMINI_API_KEY".to_string()
+            }
         );
     }
 
@@ -1017,21 +1185,31 @@ mod tests {
     #[test]
     fn alias_injected_into_custom_profile() {
         let mut cfg = builtin_anthropic_config("https://api.anthropic.com", false);
-        let providers: BTreeMap<String, serde_json::Value> = serde_json::from_str(r#"{
+        let providers: BTreeMap<String, serde_json::Value> = serde_json::from_str(
+            r#"{
             "groq": {
                 "type": "openai",
                 "baseUrl": "https://api.groq.com/openai/v1",
                 "apiKeyEnv": "GROQ_API_KEY",
                 "models": [{ "id": "llama-3.3-70b-versatile" }]
             }
-        }"#).unwrap();
-        let routing: serde_json::Value = serde_json::from_str(r#"{
+        }"#,
+        )
+        .unwrap();
+        let routing: serde_json::Value = serde_json::from_str(
+            r#"{
             "aliases": { "llama": "groq/llama-3.3-70b-versatile" }
-        }"#).unwrap();
+        }"#,
+        )
+        .unwrap();
 
         apply_settings_providers(&mut cfg, &providers, Some(&routing)).expect("must succeed");
 
-        let groq = cfg.providers.iter().find(|p| p.profile_name == "groq").unwrap();
+        let groq = cfg
+            .providers
+            .iter()
+            .find(|p| p.profile_name == "groq")
+            .unwrap();
         assert!(
             groq.models[0].aliases.contains(&"llama".to_string()),
             "alias 'llama' must be injected into the model's aliases"
@@ -1043,13 +1221,20 @@ mod tests {
     #[test]
     fn alias_injected_into_builtin_profile() {
         let mut cfg = builtin_anthropic_config("https://api.anthropic.com", false);
-        let routing: serde_json::Value = serde_json::from_str(r#"{
+        let routing: serde_json::Value = serde_json::from_str(
+            r#"{
             "aliases": { "my-sonnet": "anthropic/claude-sonnet-4-20250514" }
-        }"#).unwrap();
+        }"#,
+        )
+        .unwrap();
 
         apply_settings_providers(&mut cfg, &BTreeMap::new(), Some(&routing)).expect("must succeed");
 
-        let anthropic = cfg.providers.iter().find(|p| p.profile_name == "anthropic").unwrap();
+        let anthropic = cfg
+            .providers
+            .iter()
+            .find(|p| p.profile_name == "anthropic")
+            .unwrap();
         let sonnet = anthropic
             .models
             .iter()
@@ -1065,13 +1250,16 @@ mod tests {
     #[test]
     fn missing_models_is_error() {
         let mut cfg = builtin_anthropic_config("https://api.anthropic.com", false);
-        let providers: BTreeMap<String, serde_json::Value> = serde_json::from_str(r#"{
+        let providers: BTreeMap<String, serde_json::Value> = serde_json::from_str(
+            r#"{
             "bad-provider": {
                 "type": "openai",
                 "baseUrl": "https://example.com",
                 "apiKeyEnv": "SOME_KEY"
             }
-        }"#).unwrap();
+        }"#,
+        )
+        .unwrap();
 
         let err = apply_settings_providers(&mut cfg, &providers, None).unwrap_err();
         assert!(
@@ -1084,14 +1272,17 @@ mod tests {
     #[test]
     fn empty_models_is_error() {
         let mut cfg = builtin_anthropic_config("https://api.anthropic.com", false);
-        let providers: BTreeMap<String, serde_json::Value> = serde_json::from_str(r#"{
+        let providers: BTreeMap<String, serde_json::Value> = serde_json::from_str(
+            r#"{
             "empty-provider": {
                 "type": "openai",
                 "baseUrl": "https://example.com",
                 "apiKeyEnv": "SOME_KEY",
                 "models": []
             }
-        }"#).unwrap();
+        }"#,
+        )
+        .unwrap();
 
         let err = apply_settings_providers(&mut cfg, &providers, None).unwrap_err();
         assert!(
@@ -1104,14 +1295,17 @@ mod tests {
     #[test]
     fn unknown_type_is_error() {
         let mut cfg = builtin_anthropic_config("https://api.anthropic.com", false);
-        let providers: BTreeMap<String, serde_json::Value> = serde_json::from_str(r#"{
+        let providers: BTreeMap<String, serde_json::Value> = serde_json::from_str(
+            r#"{
             "weird": {
                 "type": "cohere",
                 "baseUrl": "https://api.cohere.ai",
                 "apiKeyEnv": "COHERE_KEY",
                 "models": [{ "id": "command-r" }]
             }
-        }"#).unwrap();
+        }"#,
+        )
+        .unwrap();
 
         let err = apply_settings_providers(&mut cfg, &providers, None).unwrap_err();
         assert!(
@@ -1125,14 +1319,17 @@ mod tests {
     fn duplicate_profile_name_is_error() {
         let mut cfg = builtin_anthropic_config("https://api.anthropic.com", false);
         // "anthropic" is already the builtin profile name.
-        let providers: BTreeMap<String, serde_json::Value> = serde_json::from_str(r#"{
+        let providers: BTreeMap<String, serde_json::Value> = serde_json::from_str(
+            r#"{
             "anthropic": {
                 "type": "openai",
                 "baseUrl": "https://example.com",
                 "apiKeyEnv": "KEY",
                 "models": [{ "id": "some-model" }]
             }
-        }"#).unwrap();
+        }"#,
+        )
+        .unwrap();
 
         let err = apply_settings_providers(&mut cfg, &providers, None).unwrap_err();
         assert!(
@@ -1145,13 +1342,16 @@ mod tests {
     #[test]
     fn missing_base_url_is_error() {
         let mut cfg = builtin_anthropic_config("https://api.anthropic.com", false);
-        let providers: BTreeMap<String, serde_json::Value> = serde_json::from_str(r#"{
+        let providers: BTreeMap<String, serde_json::Value> = serde_json::from_str(
+            r#"{
             "no-url": {
                 "type": "openai",
                 "apiKeyEnv": "SOME_KEY",
                 "models": [{ "id": "some-model" }]
             }
-        }"#).unwrap();
+        }"#,
+        )
+        .unwrap();
 
         let err = apply_settings_providers(&mut cfg, &providers, None).unwrap_err();
         assert!(
@@ -1164,14 +1364,17 @@ mod tests {
     #[test]
     fn empty_base_url_is_error() {
         let mut cfg = builtin_anthropic_config("https://api.anthropic.com", false);
-        let providers: BTreeMap<String, serde_json::Value> = serde_json::from_str(r#"{
+        let providers: BTreeMap<String, serde_json::Value> = serde_json::from_str(
+            r#"{
             "empty-url": {
                 "type": "openai",
                 "baseUrl": "",
                 "apiKeyEnv": "SOME_KEY",
                 "models": [{ "id": "some-model" }]
             }
-        }"#).unwrap();
+        }"#,
+        )
+        .unwrap();
 
         let err = apply_settings_providers(&mut cfg, &providers, None).unwrap_err();
         assert!(
@@ -1184,13 +1387,16 @@ mod tests {
     #[test]
     fn missing_api_key_env_is_error() {
         let mut cfg = builtin_anthropic_config("https://api.anthropic.com", false);
-        let providers: BTreeMap<String, serde_json::Value> = serde_json::from_str(r#"{
+        let providers: BTreeMap<String, serde_json::Value> = serde_json::from_str(
+            r#"{
             "no-key-env": {
                 "type": "openai",
                 "baseUrl": "https://example.com",
                 "models": [{ "id": "some-model" }]
             }
-        }"#).unwrap();
+        }"#,
+        )
+        .unwrap();
 
         let err = apply_settings_providers(&mut cfg, &providers, None).unwrap_err();
         assert!(
@@ -1203,14 +1409,17 @@ mod tests {
     #[test]
     fn empty_api_key_env_is_error() {
         let mut cfg = builtin_anthropic_config("https://api.anthropic.com", false);
-        let providers: BTreeMap<String, serde_json::Value> = serde_json::from_str(r#"{
+        let providers: BTreeMap<String, serde_json::Value> = serde_json::from_str(
+            r#"{
             "empty-key-env": {
                 "type": "openai",
                 "baseUrl": "https://example.com",
                 "apiKeyEnv": "",
                 "models": [{ "id": "some-model" }]
             }
-        }"#).unwrap();
+        }"#,
+        )
+        .unwrap();
 
         let err = apply_settings_providers(&mut cfg, &providers, None).unwrap_err();
         assert!(
@@ -1223,9 +1432,12 @@ mod tests {
     #[test]
     fn alias_unknown_target_is_error() {
         let mut cfg = builtin_anthropic_config("https://api.anthropic.com", false);
-        let routing: serde_json::Value = serde_json::from_str(r#"{
+        let routing: serde_json::Value = serde_json::from_str(
+            r#"{
             "aliases": { "fast": "nonexistent-profile/some-model" }
-        }"#).unwrap();
+        }"#,
+        )
+        .unwrap();
 
         let err = apply_settings_providers(&mut cfg, &BTreeMap::new(), Some(&routing)).unwrap_err();
         assert!(
@@ -1240,22 +1452,33 @@ mod tests {
         let mut cfg = builtin_anthropic_config("https://api.anthropic.com", false);
         // Add a second provider so we can test cross-profile fallback.
         cfg.providers.push(llm_client::ProviderProfile {
-            provider_id: llm_client::ProviderId::OpenAICompatible { name: "groq".to_string() },
+            provider_id: llm_client::ProviderId::OpenAICompatible {
+                name: "groq".to_string(),
+            },
             profile_name: "groq".to_string(),
             base_url: "https://api.groq.com".to_string(),
             protocol: llm_client::ProtocolFamily::OpenAiChat,
             auth: llm_client::AuthStrategy::ApiKey,
-            credential: llm_client::CredentialConfig::Env { var: "GROQ_KEY".to_string() },
+            credential: llm_client::CredentialConfig::Env {
+                var: "GROQ_KEY".to_string(),
+            },
             models: vec![llm_client::ModelProfile {
                 display_model: "llama-3.3-70b".to_string(),
                 request_model: "llama-3.3-70b".to_string(),
                 billing_model: "llama-3.3-70b".to_string(),
                 aliases: vec!["llama".to_string()],
-                capabilities: llm_client::Capabilities { streaming: true, tools: true, ..Default::default() },
+                capabilities: llm_client::Capabilities {
+                    streaming: true,
+                    tools: true,
+                    ..Default::default()
+                },
             }],
             pricing: PricingConfig::default(),
             signing: None,
             azure: None,
+            supports_websockets: false,
+            supports_websocket_compression: false,
+            websocket_connect_timeout_ms: None,
         });
         cfg
     }
@@ -1264,12 +1487,15 @@ mod tests {
     #[test]
     fn parse_routing_overrides_happy() {
         let cfg = routing_test_cfg();
-        let routing: serde_json::Value = serde_json::from_str(r#"{
+        let routing: serde_json::Value = serde_json::from_str(
+            r#"{
             "fallback": {
                 "anthropic/claude-opus-4-7": ["anthropic/claude-sonnet-4-20250514"]
             },
             "retry": { "maxAttempts": 5, "backoffMs": 1000 }
-        }"#).unwrap();
+        }"#,
+        )
+        .unwrap();
 
         let overrides = parse_routing_overrides(&routing, &cfg).expect("must succeed");
         assert_eq!(
@@ -1285,11 +1511,14 @@ mod tests {
     #[test]
     fn parse_routing_overrides_unknown_fallback_target_error() {
         let cfg = routing_test_cfg();
-        let routing: serde_json::Value = serde_json::from_str(r#"{
+        let routing: serde_json::Value = serde_json::from_str(
+            r#"{
             "fallback": {
                 "anthropic/claude-opus-4-7": ["nonexistent/model"]
             }
-        }"#).unwrap();
+        }"#,
+        )
+        .unwrap();
 
         let err = parse_routing_overrides(&routing, &cfg).unwrap_err();
         assert!(
@@ -1302,14 +1531,17 @@ mod tests {
     #[test]
     fn parse_routing_overrides_unknown_chain1_target_error() {
         let cfg = routing_test_cfg();
-        let routing: serde_json::Value = serde_json::from_str(r#"{
+        let routing: serde_json::Value = serde_json::from_str(
+            r#"{
             "fallback": {
                 "anthropic/claude-opus-4-7": [
                     "anthropic/claude-sonnet-4-20250514",
                     "nonexistent/model-two"
                 ]
             }
-        }"#).unwrap();
+        }"#,
+        )
+        .unwrap();
 
         let err = parse_routing_overrides(&routing, &cfg).unwrap_err();
         assert!(
@@ -1322,16 +1554,20 @@ mod tests {
     #[test]
     fn parse_routing_overrides_full_chain_stored() {
         let cfg = routing_test_cfg();
-        let routing: serde_json::Value = serde_json::from_str(r#"{
+        let routing: serde_json::Value = serde_json::from_str(
+            r#"{
             "fallback": {
                 "anthropic/claude-opus-4-7": [
                     "anthropic/claude-sonnet-4-20250514",
                     "groq/llama-3.3-70b"
                 ]
             }
-        }"#).unwrap();
+        }"#,
+        )
+        .unwrap();
 
-        let overrides = parse_routing_overrides(&routing, &cfg).expect("must succeed with multi-entry chain");
+        let overrides =
+            parse_routing_overrides(&routing, &cfg).expect("must succeed with multi-entry chain");
         // Full chain must be stored in order.
         assert_eq!(
             overrides.fallback.get("claude-opus-4-7"),
@@ -1347,9 +1583,12 @@ mod tests {
     #[test]
     fn parse_routing_overrides_retry_numbers() {
         let cfg = routing_test_cfg();
-        let routing: serde_json::Value = serde_json::from_str(r#"{
+        let routing: serde_json::Value = serde_json::from_str(
+            r#"{
             "retry": { "maxAttempts": 3, "backoffMs": 2000 }
-        }"#).unwrap();
+        }"#,
+        )
+        .unwrap();
 
         let overrides = parse_routing_overrides(&routing, &cfg).expect("must succeed");
         assert_eq!(overrides.max_retries, Some(3));
@@ -1362,9 +1601,12 @@ mod tests {
     #[test]
     fn parse_routing_overrides_backoff_zero_rejected() {
         let cfg = routing_test_cfg();
-        let routing: serde_json::Value = serde_json::from_str(r#"{
+        let routing: serde_json::Value = serde_json::from_str(
+            r#"{
             "retry": { "backoffMs": 0 }
-        }"#).unwrap();
+        }"#,
+        )
+        .unwrap();
 
         let err = parse_routing_overrides(&routing, &cfg).expect_err("backoffMs=0 must error");
         let llm_client::LlmError::InvalidRequest { message } = err else {
@@ -1390,11 +1632,14 @@ mod tests {
     fn parse_routing_overrides_key_alias_resolves_to_display_model() {
         let cfg = routing_test_cfg();
         // "llama" is an alias for "llama-3.3-70b" in the groq profile.
-        let routing: serde_json::Value = serde_json::from_str(r#"{
+        let routing: serde_json::Value = serde_json::from_str(
+            r#"{
             "fallback": {
                 "llama": ["anthropic/claude-sonnet-4-20250514"]
             }
-        }"#).unwrap();
+        }"#,
+        )
+        .unwrap();
 
         let overrides = parse_routing_overrides(&routing, &cfg).expect("must succeed");
         assert_eq!(
@@ -1411,7 +1656,8 @@ mod tests {
     #[test]
     fn pricing_overrides_happy_path() {
         let mut cfg = builtin_anthropic_config("https://api.anthropic.com", false);
-        let providers: BTreeMap<String, serde_json::Value> = serde_json::from_str(r#"{
+        let providers: BTreeMap<String, serde_json::Value> = serde_json::from_str(
+            r#"{
             "myprovider": {
                 "type": "openai",
                 "baseUrl": "https://api.example.com/v1",
@@ -1427,37 +1673,65 @@ mod tests {
                     }
                 }
             }
-        }"#).unwrap();
+        }"#,
+        )
+        .unwrap();
 
         apply_settings_providers(&mut cfg, &providers, None).expect("must succeed");
 
-        let p = cfg.providers.iter().find(|p| p.profile_name == "myprovider").unwrap();
+        let p = cfg
+            .providers
+            .iter()
+            .find(|p| p.profile_name == "myprovider")
+            .unwrap();
         assert_eq!(p.pricing.overrides.len(), 1);
         let (model_id, tp) = &p.pricing.overrides[0];
         assert_eq!(model_id, "gpt-custom");
-        assert!((tp.input_per_million - 1.5).abs() < 1e-12, "input_per_million");
-        assert!((tp.output_per_million - 6.0).abs() < 1e-12, "output_per_million");
-        assert!((tp.cache_write_per_million - 1.875).abs() < 1e-12, "cache_write_per_million");
-        assert!((tp.cache_read_per_million - 0.15).abs() < 1e-12, "cache_read_per_million");
-        assert!((tp.reasoning_per_million - 6.0).abs() < 1e-12, "reasoning_per_million");
+        assert!(
+            (tp.input_per_million - 1.5).abs() < 1e-12,
+            "input_per_million"
+        );
+        assert!(
+            (tp.output_per_million - 6.0).abs() < 1e-12,
+            "output_per_million"
+        );
+        assert!(
+            (tp.cache_write_per_million - 1.875).abs() < 1e-12,
+            "cache_write_per_million"
+        );
+        assert!(
+            (tp.cache_read_per_million - 0.15).abs() < 1e-12,
+            "cache_read_per_million"
+        );
+        assert!(
+            (tp.reasoning_per_million - 6.0).abs() < 1e-12,
+            "reasoning_per_million"
+        );
     }
 
     /// Absent pricing block → empty overrides (existing behavior preserved).
     #[test]
     fn pricing_overrides_absent_gives_empty() {
         let mut cfg = builtin_anthropic_config("https://api.anthropic.com", false);
-        let providers: BTreeMap<String, serde_json::Value> = serde_json::from_str(r#"{
+        let providers: BTreeMap<String, serde_json::Value> = serde_json::from_str(
+            r#"{
             "myprovider": {
                 "type": "openai",
                 "baseUrl": "https://api.example.com/v1",
                 "apiKeyEnv": "MY_API_KEY",
                 "models": [{ "id": "gpt-custom" }]
             }
-        }"#).unwrap();
+        }"#,
+        )
+        .unwrap();
 
         apply_settings_providers(&mut cfg, &providers, None).expect("must succeed");
 
-        let p = cfg.providers.iter().find(|p| p.profile_name == "myprovider").unwrap();
+        let p = cfg
+            .providers
+            .iter()
+            .find(|p| p.profile_name == "myprovider")
+            .unwrap();
         assert!(
             p.pricing.overrides.is_empty(),
             "absent pricing must produce empty overrides"
@@ -1468,7 +1742,8 @@ mod tests {
     #[test]
     fn pricing_overrides_unknown_model_is_error() {
         let mut cfg = builtin_anthropic_config("https://api.anthropic.com", false);
-        let providers: BTreeMap<String, serde_json::Value> = serde_json::from_str(r#"{
+        let providers: BTreeMap<String, serde_json::Value> = serde_json::from_str(
+            r#"{
             "myprovider": {
                 "type": "openai",
                 "baseUrl": "https://api.example.com/v1",
@@ -1478,7 +1753,9 @@ mod tests {
                     "nonexistent-model": { "inputPerMtok": 1.0, "outputPerMtok": 2.0 }
                 }
             }
-        }"#).unwrap();
+        }"#,
+        )
+        .unwrap();
 
         let err = apply_settings_providers(&mut cfg, &providers, None).unwrap_err();
         assert!(
@@ -1491,7 +1768,8 @@ mod tests {
     #[test]
     fn pricing_overrides_negative_price_is_error() {
         let mut cfg = builtin_anthropic_config("https://api.anthropic.com", false);
-        let providers: BTreeMap<String, serde_json::Value> = serde_json::from_str(r#"{
+        let providers: BTreeMap<String, serde_json::Value> = serde_json::from_str(
+            r#"{
             "myprovider": {
                 "type": "openai",
                 "baseUrl": "https://api.example.com/v1",
@@ -1501,7 +1779,9 @@ mod tests {
                     "gpt-custom": { "inputPerMtok": -1.0, "outputPerMtok": 2.0 }
                 }
             }
-        }"#).unwrap();
+        }"#,
+        )
+        .unwrap();
 
         let err = apply_settings_providers(&mut cfg, &providers, None).unwrap_err();
         assert!(
@@ -1514,7 +1794,8 @@ mod tests {
     #[test]
     fn pricing_overrides_unknown_key_is_error() {
         let mut cfg = builtin_anthropic_config("https://api.anthropic.com", false);
-        let providers: BTreeMap<String, serde_json::Value> = serde_json::from_str(r#"{
+        let providers: BTreeMap<String, serde_json::Value> = serde_json::from_str(
+            r#"{
             "myprovider": {
                 "type": "openai",
                 "baseUrl": "https://api.example.com/v1",
@@ -1528,7 +1809,9 @@ mod tests {
                     }
                 }
             }
-        }"#).unwrap();
+        }"#,
+        )
+        .unwrap();
 
         let err = apply_settings_providers(&mut cfg, &providers, None).unwrap_err();
         assert!(
@@ -1541,7 +1824,8 @@ mod tests {
     #[test]
     fn pricing_overrides_non_number_price_is_error() {
         let mut cfg = builtin_anthropic_config("https://api.anthropic.com", false);
-        let providers: BTreeMap<String, serde_json::Value> = serde_json::from_str(r#"{
+        let providers: BTreeMap<String, serde_json::Value> = serde_json::from_str(
+            r#"{
             "myprovider": {
                 "type": "openai",
                 "baseUrl": "https://api.example.com/v1",
@@ -1551,7 +1835,9 @@ mod tests {
                     "gpt-custom": { "inputPerMtok": "not-a-number", "outputPerMtok": 2.0 }
                 }
             }
-        }"#).unwrap();
+        }"#,
+        )
+        .unwrap();
 
         let err = apply_settings_providers(&mut cfg, &providers, None).unwrap_err();
         assert!(
@@ -1564,7 +1850,8 @@ mod tests {
     #[test]
     fn pricing_overrides_optional_fields_may_be_absent() {
         let mut cfg = builtin_anthropic_config("https://api.anthropic.com", false);
-        let providers: BTreeMap<String, serde_json::Value> = serde_json::from_str(r#"{
+        let providers: BTreeMap<String, serde_json::Value> = serde_json::from_str(
+            r#"{
             "myprovider": {
                 "type": "openai",
                 "baseUrl": "https://api.example.com/v1",
@@ -1574,17 +1861,33 @@ mod tests {
                     "gpt-custom": { "inputPerMtok": 2.0, "outputPerMtok": 8.0 }
                 }
             }
-        }"#).unwrap();
+        }"#,
+        )
+        .unwrap();
 
-        apply_settings_providers(&mut cfg, &providers, None).expect("must succeed with minimal pricing");
+        apply_settings_providers(&mut cfg, &providers, None)
+            .expect("must succeed with minimal pricing");
 
-        let p = cfg.providers.iter().find(|p| p.profile_name == "myprovider").unwrap();
+        let p = cfg
+            .providers
+            .iter()
+            .find(|p| p.profile_name == "myprovider")
+            .unwrap();
         let (_, tp) = &p.pricing.overrides[0];
         assert!((tp.input_per_million - 2.0).abs() < 1e-12);
         assert!((tp.output_per_million - 8.0).abs() < 1e-12);
-        assert!((tp.cache_write_per_million - 0.0).abs() < 1e-12, "cache_write defaults to 0");
-        assert!((tp.cache_read_per_million - 0.0).abs() < 1e-12, "cache_read defaults to 0");
-        assert!((tp.reasoning_per_million - 0.0).abs() < 1e-12, "reasoning defaults to 0");
+        assert!(
+            (tp.cache_write_per_million - 0.0).abs() < 1e-12,
+            "cache_write defaults to 0"
+        );
+        assert!(
+            (tp.cache_read_per_million - 0.0).abs() < 1e-12,
+            "cache_read defaults to 0"
+        );
+        assert!(
+            (tp.reasoning_per_million - 0.0).abs() < 1e-12,
+            "reasoning defaults to 0"
+        );
     }
 
     // ── azure-openai settings type (Task 5) tests ─────────────────────────────
@@ -1601,7 +1904,8 @@ mod tests {
         std::env::set_var("PLATFORM_COMMON_TEST_AZURE_KEY", "my-azure-api-key");
 
         let mut cfg = builtin_anthropic_config("https://api.anthropic.com", false);
-        let providers: BTreeMap<String, serde_json::Value> = serde_json::from_str(r#"{
+        let providers: BTreeMap<String, serde_json::Value> = serde_json::from_str(
+            r#"{
             "my-azure": {
                 "type": "azure-openai",
                 "baseUrl": "https://myresource.openai.azure.com",
@@ -1611,14 +1915,22 @@ mod tests {
                     { "id": "gpt-4o-deployment" }
                 ]
             }
-        }"#).unwrap();
+        }"#,
+        )
+        .unwrap();
 
         apply_settings_providers(&mut cfg, &providers, None).expect("must succeed");
 
         // Verify the profile was parsed correctly.
-        let azure_profile = cfg.providers.iter().find(|p| p.profile_name == "my-azure")
+        let azure_profile = cfg
+            .providers
+            .iter()
+            .find(|p| p.profile_name == "my-azure")
             .expect("my-azure profile must be present");
-        assert_eq!(azure_profile.protocol, llm_client::ProtocolFamily::AzureOpenAi);
+        assert_eq!(
+            azure_profile.protocol,
+            llm_client::ProtocolFamily::AzureOpenAi
+        );
         assert_eq!(azure_profile.auth, llm_client::AuthStrategy::AzureToken);
         assert!(
             azure_profile.azure.as_ref().map(|a| a.api_version.as_str()) == Some("2024-02-01"),
@@ -1632,26 +1944,39 @@ mod tests {
 
         // URL check: deployment pattern.
         assert!(
-            prepared.provider_request.url.contains("/openai/deployments/gpt-4o-deployment/chat/completions"),
+            prepared
+                .provider_request
+                .url
+                .contains("/openai/deployments/gpt-4o-deployment/chat/completions"),
             "URL must include deployment path; got: {}",
             prepared.provider_request.url
         );
         assert!(
-            prepared.provider_request.url.contains("api-version=2024-02-01"),
+            prepared
+                .provider_request
+                .url
+                .contains("api-version=2024-02-01"),
             "URL must include api-version; got: {}",
             prepared.provider_request.url
         );
 
         // Auth check: api-key header present.
         assert_eq!(
-            prepared.provider_request.headers.get("api-key").map(String::as_str),
+            prepared
+                .provider_request
+                .headers
+                .get("api-key")
+                .map(String::as_str),
             Some("my-azure-api-key"),
             "api-key header must be injected by AzureToken auth"
         );
 
         // No Authorization header (Azure uses api-key, not Bearer).
         assert!(
-            !prepared.provider_request.headers.contains_key("Authorization"),
+            !prepared
+                .provider_request
+                .headers
+                .contains_key("Authorization"),
             "AzureToken must NOT inject Authorization header"
         );
 
@@ -1667,14 +1992,17 @@ mod tests {
     #[test]
     fn azure_openai_missing_api_version_is_error() {
         let mut cfg = builtin_anthropic_config("https://api.anthropic.com", false);
-        let providers: BTreeMap<String, serde_json::Value> = serde_json::from_str(r#"{
+        let providers: BTreeMap<String, serde_json::Value> = serde_json::from_str(
+            r#"{
             "my-azure": {
                 "type": "azure-openai",
                 "baseUrl": "https://myresource.openai.azure.com",
                 "apiKeyEnv": "SOME_KEY",
                 "models": [{ "id": "gpt-4o" }]
             }
-        }"#).unwrap();
+        }"#,
+        )
+        .unwrap();
 
         let err = apply_settings_providers(&mut cfg, &providers, None).unwrap_err();
         assert!(
@@ -1687,7 +2015,8 @@ mod tests {
     #[test]
     fn azure_openai_empty_api_version_is_error() {
         let mut cfg = builtin_anthropic_config("https://api.anthropic.com", false);
-        let providers: BTreeMap<String, serde_json::Value> = serde_json::from_str(r#"{
+        let providers: BTreeMap<String, serde_json::Value> = serde_json::from_str(
+            r#"{
             "my-azure": {
                 "type": "azure-openai",
                 "baseUrl": "https://myresource.openai.azure.com",
@@ -1695,7 +2024,9 @@ mod tests {
                 "apiVersion": "",
                 "models": [{ "id": "gpt-4o" }]
             }
-        }"#).unwrap();
+        }"#,
+        )
+        .unwrap();
 
         let err = apply_settings_providers(&mut cfg, &providers, None).unwrap_err();
         assert!(
@@ -1708,14 +2039,17 @@ mod tests {
     #[test]
     fn unknown_type_mentions_azure_openai_in_supported_list() {
         let mut cfg = builtin_anthropic_config("https://api.anthropic.com", false);
-        let providers: BTreeMap<String, serde_json::Value> = serde_json::from_str(r#"{
+        let providers: BTreeMap<String, serde_json::Value> = serde_json::from_str(
+            r#"{
             "weird": {
                 "type": "cohere-v2",
                 "baseUrl": "https://api.cohere.ai",
                 "apiKeyEnv": "COHERE_KEY",
                 "models": [{ "id": "command-r" }]
             }
-        }"#).unwrap();
+        }"#,
+        )
+        .unwrap();
 
         let err = apply_settings_providers(&mut cfg, &providers, None).unwrap_err();
         assert!(
@@ -1735,27 +2069,38 @@ mod tests {
     #[test]
     fn bedrock_claude_default_base_url_from_region() {
         let mut cfg = builtin_anthropic_config("https://api.anthropic.com", false);
-        let providers: BTreeMap<String, serde_json::Value> = serde_json::from_str(r#"{
+        let providers: BTreeMap<String, serde_json::Value> = serde_json::from_str(
+            r#"{
             "my-bedrock": {
                 "type": "bedrock-claude",
                 "region": "us-east-1",
                 "models": [{ "id": "anthropic.claude-3-5-sonnet-20241022-v2:0" }]
             }
-        }"#).unwrap();
+        }"#,
+        )
+        .unwrap();
 
         apply_settings_providers(&mut cfg, &providers, None).expect("must succeed");
 
-        let bedrock = cfg.providers.iter().find(|p| p.profile_name == "my-bedrock").unwrap();
+        let bedrock = cfg
+            .providers
+            .iter()
+            .find(|p| p.profile_name == "my-bedrock")
+            .unwrap();
         assert_eq!(
-            bedrock.base_url,
-            "https://bedrock-runtime.us-east-1.amazonaws.com",
+            bedrock.base_url, "https://bedrock-runtime.us-east-1.amazonaws.com",
             "base_url must default to region-derived endpoint"
         );
         assert_eq!(bedrock.protocol, ProtocolFamily::BedrockClaude);
         assert_eq!(bedrock.auth, AuthStrategy::AwsSigV4);
         assert!(
-            bedrock.signing.as_ref().map(|s| (s.region.as_str(), s.service.as_str())) == Some(("us-east-1", "bedrock")),
-            "signing config must have region=us-east-1 and service=bedrock; got {:?}", bedrock.signing
+            bedrock
+                .signing
+                .as_ref()
+                .map(|s| (s.region.as_str(), s.service.as_str()))
+                == Some(("us-east-1", "bedrock")),
+            "signing config must have region=us-east-1 and service=bedrock; got {:?}",
+            bedrock.signing
         );
         assert_eq!(
             bedrock.credential,
@@ -1769,21 +2114,27 @@ mod tests {
     #[test]
     fn bedrock_claude_explicit_base_url_overrides_default() {
         let mut cfg = builtin_anthropic_config("https://api.anthropic.com", false);
-        let providers: BTreeMap<String, serde_json::Value> = serde_json::from_str(r#"{
+        let providers: BTreeMap<String, serde_json::Value> = serde_json::from_str(
+            r#"{
             "my-bedrock": {
                 "type": "bedrock-claude",
                 "region": "eu-west-1",
                 "baseUrl": "https://custom-bedrock.example.com",
                 "models": [{ "id": "anthropic.claude-3-haiku-20240307-v1:0" }]
             }
-        }"#).unwrap();
+        }"#,
+        )
+        .unwrap();
 
         apply_settings_providers(&mut cfg, &providers, None).expect("must succeed");
 
-        let bedrock = cfg.providers.iter().find(|p| p.profile_name == "my-bedrock").unwrap();
+        let bedrock = cfg
+            .providers
+            .iter()
+            .find(|p| p.profile_name == "my-bedrock")
+            .unwrap();
         assert_eq!(
-            bedrock.base_url,
-            "https://custom-bedrock.example.com",
+            bedrock.base_url, "https://custom-bedrock.example.com",
             "explicit baseUrl must override the region-derived default"
         );
         assert!(
@@ -1796,12 +2147,15 @@ mod tests {
     #[test]
     fn bedrock_claude_missing_region_is_error() {
         let mut cfg = builtin_anthropic_config("https://api.anthropic.com", false);
-        let providers: BTreeMap<String, serde_json::Value> = serde_json::from_str(r#"{
+        let providers: BTreeMap<String, serde_json::Value> = serde_json::from_str(
+            r#"{
             "my-bedrock": {
                 "type": "bedrock-claude",
                 "models": [{ "id": "anthropic.claude-3-5-sonnet-20241022-v2:0" }]
             }
-        }"#).unwrap();
+        }"#,
+        )
+        .unwrap();
 
         let err = apply_settings_providers(&mut cfg, &providers, None).unwrap_err();
         assert!(
@@ -1822,11 +2176,9 @@ mod tests {
     /// Test name: `bedrock_claude_prepare_e2e_sigv4_headers`
     #[tokio::test]
     async fn bedrock_claude_prepare_e2e_sigv4_headers() {
+        use llm_client::{Credential, DefaultLlmClient, StaticCredentialProvider};
         use std::sync::Arc;
         use std::time::{Duration, UNIX_EPOCH};
-        use llm_client::{
-            Credential, DefaultLlmClient, StaticCredentialProvider,
-        };
 
         let mut cfg = builtin_anthropic_config("https://api.anthropic.com", false);
         let providers: BTreeMap<String, serde_json::Value> = serde_json::from_str(r#"{
@@ -1868,25 +2220,38 @@ mod tests {
             prepared.provider_request.url
         );
         assert!(
-            prepared.provider_request.url.contains("anthropic.claude-3-5-sonnet-20241022-v2:0"),
+            prepared
+                .provider_request
+                .url
+                .contains("anthropic.claude-3-5-sonnet-20241022-v2:0"),
             "URL must contain model id with raw ':'; got: {}",
             prepared.provider_request.url
         );
 
         // x-amz-date must be present and match the fixed clock.
-        let amz_date = prepared.provider_request.headers
+        let amz_date = prepared
+            .provider_request
+            .headers
             .get("x-amz-date")
             .expect("x-amz-date header must be present");
-        assert_eq!(amz_date, "20240115T123456Z", "x-amz-date must match the fixed clock");
+        assert_eq!(
+            amz_date, "20240115T123456Z",
+            "x-amz-date must match the fixed clock"
+        );
 
         // x-amz-content-sha256 must be present.
         assert!(
-            prepared.provider_request.headers.contains_key("x-amz-content-sha256"),
+            prepared
+                .provider_request
+                .headers
+                .contains_key("x-amz-content-sha256"),
             "x-amz-content-sha256 header must be present"
         );
 
         // Authorization header must use AWS4-HMAC-SHA256.
-        let auth = prepared.provider_request.headers
+        let auth = prepared
+            .provider_request
+            .headers
             .get("Authorization")
             .expect("Authorization header must be present");
         assert!(
@@ -1911,14 +2276,21 @@ mod tests {
 
         // anthropic_version must be in body.
         assert_eq!(
-            prepared.provider_request.body_json.get("anthropic_version").and_then(serde_json::Value::as_str),
+            prepared
+                .provider_request
+                .body_json
+                .get("anthropic_version")
+                .and_then(serde_json::Value::as_str),
             Some("bedrock-2023-05-31"),
             "body must contain anthropic_version=bedrock-2023-05-31"
         );
 
         // No anthropic-version header.
         assert!(
-            !prepared.provider_request.headers.contains_key("anthropic-version"),
+            !prepared
+                .provider_request
+                .headers
+                .contains_key("anthropic-version"),
             "anthropic-version header must NOT be present for Bedrock"
         );
     }
@@ -1941,12 +2313,18 @@ mod tests {
 
         apply_settings_providers(&mut cfg, &providers, None).expect("must succeed");
 
-        let p = cfg.providers.iter().find(|p| p.profile_name == "my-vertex-claude").unwrap();
+        let p = cfg
+            .providers
+            .iter()
+            .find(|p| p.profile_name == "my-vertex-claude")
+            .unwrap();
         assert_eq!(p.protocol, ProtocolFamily::VertexClaude);
         assert_eq!(p.auth, AuthStrategy::GcpToken);
         assert_eq!(
             p.credential,
-            CredentialConfig::Env { var: "VERTEX_BEARER_TOKEN".to_string() },
+            CredentialConfig::Env {
+                var: "VERTEX_BEARER_TOKEN".to_string()
+            },
             "vertex-claude must use CredentialConfig::Env so the token env var is consulted"
         );
         assert_eq!(
@@ -1959,13 +2337,16 @@ mod tests {
     #[test]
     fn vertex_claude_missing_base_url_is_error() {
         let mut cfg = builtin_anthropic_config("https://api.anthropic.com", false);
-        let providers: BTreeMap<String, serde_json::Value> = serde_json::from_str(r#"{
+        let providers: BTreeMap<String, serde_json::Value> = serde_json::from_str(
+            r#"{
             "my-vertex-claude": {
                 "type": "vertex-claude",
                 "apiKeyEnv": "VERTEX_BEARER_TOKEN",
                 "models": [{ "id": "claude-sonnet-4@20250514" }]
             }
-        }"#).unwrap();
+        }"#,
+        )
+        .unwrap();
 
         let err = apply_settings_providers(&mut cfg, &providers, None).unwrap_err();
         assert!(
@@ -1989,7 +2370,10 @@ mod tests {
     /// passes it to `BearerAuthenticator` → `Authorization: Bearer <value>`.
     #[tokio::test]
     async fn vertex_claude_prepare_e2e_bearer_header() {
-        std::env::set_var("PLATFORM_COMMON_TEST_VERTEX_CLAUDE_TOKEN", "my-gcp-bearer-token");
+        std::env::set_var(
+            "PLATFORM_COMMON_TEST_VERTEX_CLAUDE_TOKEN",
+            "my-gcp-bearer-token",
+        );
 
         let mut cfg = builtin_anthropic_config("https://api.anthropic.com", false);
         let providers: BTreeMap<String, serde_json::Value> = serde_json::from_str(r#"{
@@ -2016,13 +2400,18 @@ mod tests {
             prepared.provider_request.url
         );
         assert!(
-            prepared.provider_request.url.contains("/publishers/anthropic/models/"),
+            prepared
+                .provider_request
+                .url
+                .contains("/publishers/anthropic/models/"),
             "URL must contain /publishers/anthropic/models/; got: {}",
             prepared.provider_request.url
         );
 
         // Authorization: Bearer <token> must be present.
-        let auth_header = prepared.provider_request.headers
+        let auth_header = prepared
+            .provider_request
+            .headers
             .get("Authorization")
             .expect("Authorization header must be present for GcpToken");
         assert_eq!(
@@ -2039,7 +2428,9 @@ mod tests {
 
         // anthropic_version: vertex-2023-10-16 in body.
         assert_eq!(
-            prepared.provider_request.body_json
+            prepared
+                .provider_request
+                .body_json
                 .get("anthropic_version")
                 .and_then(serde_json::Value::as_str),
             Some("vertex-2023-10-16"),
@@ -2048,7 +2439,10 @@ mod tests {
 
         // No anthropic-version header.
         assert!(
-            !prepared.provider_request.headers.contains_key("anthropic-version"),
+            !prepared
+                .provider_request
+                .headers
+                .contains_key("anthropic-version"),
             "anthropic-version header must NOT be present for VertexClaude"
         );
     }
@@ -2071,12 +2465,18 @@ mod tests {
 
         apply_settings_providers(&mut cfg, &providers, None).expect("must succeed");
 
-        let p = cfg.providers.iter().find(|p| p.profile_name == "my-vertex-gemini").unwrap();
+        let p = cfg
+            .providers
+            .iter()
+            .find(|p| p.profile_name == "my-vertex-gemini")
+            .unwrap();
         assert_eq!(p.protocol, ProtocolFamily::VertexGemini);
         assert_eq!(p.auth, AuthStrategy::GcpToken);
         assert_eq!(
             p.credential,
-            CredentialConfig::Env { var: "VERTEX_BEARER_TOKEN".to_string() },
+            CredentialConfig::Env {
+                var: "VERTEX_BEARER_TOKEN".to_string()
+            },
             "vertex-gemini must use CredentialConfig::Env so the token env var is consulted"
         );
     }
@@ -2088,7 +2488,10 @@ mod tests {
     /// - `contents` array in body (Gemini format)
     #[tokio::test]
     async fn vertex_gemini_prepare_e2e_bearer_header() {
-        std::env::set_var("PLATFORM_COMMON_TEST_VERTEX_GEMINI_TOKEN", "my-vertex-gemini-token");
+        std::env::set_var(
+            "PLATFORM_COMMON_TEST_VERTEX_GEMINI_TOKEN",
+            "my-vertex-gemini-token",
+        );
 
         let mut cfg = builtin_anthropic_config("https://api.anthropic.com", false);
         let providers: BTreeMap<String, serde_json::Value> = serde_json::from_str(r#"{
@@ -2115,13 +2518,18 @@ mod tests {
             prepared.provider_request.url
         );
         assert!(
-            prepared.provider_request.url.contains("/publishers/google/models/"),
+            prepared
+                .provider_request
+                .url
+                .contains("/publishers/google/models/"),
             "URL must contain /publishers/google/models/; got: {}",
             prepared.provider_request.url
         );
 
         // Authorization: Bearer <token> must be present.
-        let auth_header = prepared.provider_request.headers
+        let auth_header = prepared
+            .provider_request
+            .headers
             .get("Authorization")
             .expect("Authorization header must be present for GcpToken");
         assert_eq!(
@@ -2131,14 +2539,21 @@ mod tests {
 
         // Body must have contents array (Gemini format).
         assert!(
-            prepared.provider_request.body_json.get("contents").is_some(),
+            prepared
+                .provider_request
+                .body_json
+                .get("contents")
+                .is_some(),
             "body must have 'contents' (Gemini format); got: {}",
             prepared.provider_request.body_json
         );
 
         // No x-goog-api-key header (Vertex uses Bearer, not api-key).
         assert!(
-            !prepared.provider_request.headers.contains_key("x-goog-api-key"),
+            !prepared
+                .provider_request
+                .headers
+                .contains_key("x-goog-api-key"),
             "x-goog-api-key must NOT be present for Vertex Gemini"
         );
     }
@@ -2147,21 +2562,30 @@ mod tests {
     #[test]
     fn unknown_type_mentions_vertex_types_in_supported_list() {
         let mut cfg = builtin_anthropic_config("https://api.anthropic.com", false);
-        let providers: BTreeMap<String, serde_json::Value> = serde_json::from_str(r#"{
+        let providers: BTreeMap<String, serde_json::Value> = serde_json::from_str(
+            r#"{
             "weird": {
                 "type": "cohere-v3",
                 "baseUrl": "https://api.cohere.ai",
                 "apiKeyEnv": "COHERE_KEY",
                 "models": [{ "id": "command-r" }]
             }
-        }"#).unwrap();
+        }"#,
+        )
+        .unwrap();
 
         let err = apply_settings_providers(&mut cfg, &providers, None).unwrap_err();
         let LlmError::InvalidRequest { message } = err else {
             panic!("expected InvalidRequest, got something else");
         };
-        assert!(message.contains("vertex-claude"), "must list vertex-claude; got: {message}");
-        assert!(message.contains("vertex-gemini"), "must list vertex-gemini; got: {message}");
+        assert!(
+            message.contains("vertex-claude"),
+            "must list vertex-claude; got: {message}"
+        );
+        assert!(
+            message.contains("vertex-gemini"),
+            "must list vertex-gemini; got: {message}"
+        );
     }
 
     // ── openai-responses settings type tests ──────────────────────────────────
@@ -2172,7 +2596,8 @@ mod tests {
     #[test]
     fn openai_responses_profile_parses() {
         let mut cfg = builtin_anthropic_config("https://api.anthropic.com", false);
-        let providers: BTreeMap<String, serde_json::Value> = serde_json::from_str(r#"{
+        let providers: BTreeMap<String, serde_json::Value> = serde_json::from_str(
+            r#"{
             "my-responses": {
                 "type": "openai-responses",
                 "baseUrl": "https://api.openai.com/v1",
@@ -2181,12 +2606,18 @@ mod tests {
                     { "id": "gpt-4o" }
                 ]
             }
-        }"#).unwrap();
+        }"#,
+        )
+        .unwrap();
 
         apply_settings_providers(&mut cfg, &providers, None).expect("must succeed");
 
         assert_eq!(cfg.providers.len(), 2, "builtin + my-responses");
-        let p = cfg.providers.iter().find(|p| p.profile_name == "my-responses").unwrap();
+        let p = cfg
+            .providers
+            .iter()
+            .find(|p| p.profile_name == "my-responses")
+            .unwrap();
         assert_eq!(p.base_url, "https://api.openai.com/v1");
         assert_eq!(p.protocol, ProtocolFamily::OpenAiResponses);
         assert_eq!(p.auth, AuthStrategy::ApiKey);
@@ -2196,7 +2627,9 @@ mod tests {
         );
         assert_eq!(
             p.credential,
-            CredentialConfig::Env { var: "OPENAI_API_KEY".to_string() }
+            CredentialConfig::Env {
+                var: "OPENAI_API_KEY".to_string()
+            }
         );
         assert_eq!(p.models.len(), 1);
         assert_eq!(p.models[0].display_model, "gpt-4o");
@@ -2211,13 +2644,16 @@ mod tests {
     #[test]
     fn openai_responses_missing_base_url_is_error() {
         let mut cfg = builtin_anthropic_config("https://api.anthropic.com", false);
-        let providers: BTreeMap<String, serde_json::Value> = serde_json::from_str(r#"{
+        let providers: BTreeMap<String, serde_json::Value> = serde_json::from_str(
+            r#"{
             "my-responses": {
                 "type": "openai-responses",
                 "apiKeyEnv": "OPENAI_API_KEY",
                 "models": [{ "id": "gpt-4o" }]
             }
-        }"#).unwrap();
+        }"#,
+        )
+        .unwrap();
 
         let err = apply_settings_providers(&mut cfg, &providers, None).unwrap_err();
         assert!(
@@ -2230,13 +2666,16 @@ mod tests {
     #[test]
     fn openai_responses_missing_api_key_env_is_error() {
         let mut cfg = builtin_anthropic_config("https://api.anthropic.com", false);
-        let providers: BTreeMap<String, serde_json::Value> = serde_json::from_str(r#"{
+        let providers: BTreeMap<String, serde_json::Value> = serde_json::from_str(
+            r#"{
             "my-responses": {
                 "type": "openai-responses",
                 "baseUrl": "https://api.openai.com/v1",
                 "models": [{ "id": "gpt-4o" }]
             }
-        }"#).unwrap();
+        }"#,
+        )
+        .unwrap();
 
         let err = apply_settings_providers(&mut cfg, &providers, None).unwrap_err();
         assert!(
@@ -2251,10 +2690,14 @@ mod tests {
     /// - `Authorization: Bearer <key>` header (OpenAI family ApiKey auth)
     #[tokio::test]
     async fn openai_responses_prepare_e2e_responses_url_and_bearer_header() {
-        std::env::set_var("PLATFORM_COMMON_TEST_OPENAI_RESPONSES_KEY", "my-responses-key");
+        std::env::set_var(
+            "PLATFORM_COMMON_TEST_OPENAI_RESPONSES_KEY",
+            "my-responses-key",
+        );
 
         let mut cfg = builtin_anthropic_config("https://api.anthropic.com", false);
-        let providers: BTreeMap<String, serde_json::Value> = serde_json::from_str(r#"{
+        let providers: BTreeMap<String, serde_json::Value> = serde_json::from_str(
+            r#"{
             "my-responses": {
                 "type": "openai-responses",
                 "baseUrl": "https://api.openai.com/v1",
@@ -2263,7 +2706,9 @@ mod tests {
                     { "id": "gpt-4o", "capabilities": {"streaming": true, "tools": true} }
                 ]
             }
-        }"#).unwrap();
+        }"#,
+        )
+        .unwrap();
 
         apply_settings_providers(&mut cfg, &providers, None).expect("must succeed");
 
@@ -2277,7 +2722,9 @@ mod tests {
             "URL must be {{baseUrl}}/responses"
         );
 
-        let auth_header = prepared.provider_request.headers
+        let auth_header = prepared
+            .provider_request
+            .headers
             .get("Authorization")
             .expect("Authorization header must be present for ApiKey auth");
         assert_eq!(
@@ -2286,18 +2733,118 @@ mod tests {
         );
     }
 
+    #[test]
+    fn openai_responses_websocket_settings_parse_capability_and_timeout() {
+        let mut cfg = builtin_anthropic_config("https://api.anthropic.com", false);
+        let providers: BTreeMap<String, serde_json::Value> = serde_json::from_str(
+            r#"{
+            "my-responses": {
+                "type": "openai-responses",
+                "baseUrl": "https://api.openai.com/v1",
+                "apiKeyEnv": "OPENAI_API_KEY",
+                "supportsWebsockets": true,
+                "websocketConnectTimeoutMs": 2500,
+                "models": [{ "id": "gpt-5" }]
+            }
+        }"#,
+        )
+        .unwrap();
+
+        apply_settings_providers(&mut cfg, &providers, None).expect("must succeed");
+
+        let profile = cfg
+            .providers
+            .iter()
+            .find(|p| p.profile_name == "my-responses")
+            .expect("profile");
+        assert!(profile.supports_websockets);
+        assert_eq!(profile.websocket_connect_timeout_ms, Some(2500));
+    }
+
+    #[test]
+    fn websocket_settings_reject_non_responses_provider() {
+        let mut cfg = builtin_anthropic_config("https://api.anthropic.com", false);
+        let providers: BTreeMap<String, serde_json::Value> = serde_json::from_str(
+            r#"{
+            "chat": {
+                "type": "openai",
+                "baseUrl": "https://api.openai.com/v1",
+                "apiKeyEnv": "OPENAI_API_KEY",
+                "supportsWebsockets": true,
+                "models": [{ "id": "gpt-4o" }]
+            }
+        }"#,
+        )
+        .unwrap();
+
+        let err = apply_settings_providers(&mut cfg, &providers, None).unwrap_err();
+        assert!(
+            matches!(err, LlmError::InvalidRequest { ref message } if message.contains("openai-responses")),
+            "got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn websocket_settings_reject_bedrock_sigv4_provider() {
+        let mut cfg = builtin_anthropic_config("https://api.anthropic.com", false);
+        let providers: BTreeMap<String, serde_json::Value> = serde_json::from_str(
+            r#"{
+            "bedrock": {
+                "type": "bedrock-claude",
+                "region": "us-east-1",
+                "supportsWebsockets": true,
+                "models": [{ "id": "anthropic.claude-3-5-sonnet-20241022-v2:0" }]
+            }
+        }"#,
+        )
+        .unwrap();
+
+        let err = apply_settings_providers(&mut cfg, &providers, None).unwrap_err();
+        assert!(
+            matches!(err, LlmError::InvalidRequest { ref message } if message.contains("AWS SigV4")),
+            "got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn websocket_compression_setting_is_explicitly_rejected_until_supported() {
+        let mut cfg = builtin_anthropic_config("https://api.anthropic.com", false);
+        let providers: BTreeMap<String, serde_json::Value> = serde_json::from_str(
+            r#"{
+            "my-responses": {
+                "type": "openai-responses",
+                "baseUrl": "https://api.openai.com/v1",
+                "apiKeyEnv": "OPENAI_API_KEY",
+                "supportsWebsockets": true,
+                "supportsWebsocketCompression": true,
+                "models": [{ "id": "gpt-5" }]
+            }
+        }"#,
+        )
+        .unwrap();
+
+        let err = apply_settings_providers(&mut cfg, &providers, None).unwrap_err();
+        assert!(
+            matches!(err, LlmError::InvalidRequest { ref message } if message.contains("not supported")),
+            "got: {err:?}"
+        );
+    }
+
     /// The error message for unknown type includes `openai-responses`.
     #[test]
     fn unknown_type_mentions_openai_responses_in_supported_list() {
         let mut cfg = builtin_anthropic_config("https://api.anthropic.com", false);
-        let providers: BTreeMap<String, serde_json::Value> = serde_json::from_str(r#"{
+        let providers: BTreeMap<String, serde_json::Value> = serde_json::from_str(
+            r#"{
             "weird": {
                 "type": "cohere-v4",
                 "baseUrl": "https://api.cohere.ai",
                 "apiKeyEnv": "COHERE_KEY",
                 "models": [{ "id": "command-r" }]
             }
-        }"#).unwrap();
+        }"#,
+        )
+        .unwrap();
 
         let err = apply_settings_providers(&mut cfg, &providers, None).unwrap_err();
         let LlmError::InvalidRequest { message } = err else {
@@ -2307,5 +2854,113 @@ mod tests {
             message.contains("openai-responses"),
             "must list openai-responses; got: {message}"
         );
+    }
+
+    #[test]
+    fn supported_provider_kinds_parse_to_expected_protocols() {
+        let mut cfg = builtin_anthropic_config("https://api.anthropic.com", false);
+        let providers: BTreeMap<String, serde_json::Value> = serde_json::from_str(r#"{
+            "openai-chat": {
+                "type": "openai",
+                "baseUrl": "https://api.openai.com/v1",
+                "apiKeyEnv": "OPENAI_API_KEY",
+                "models": [{ "id": "gpt-4o" }]
+            },
+            "openai-resp": {
+                "type": "openai-responses",
+                "baseUrl": "https://api.openai.com/v1",
+                "apiKeyEnv": "OPENAI_API_KEY",
+                "models": [{ "id": "gpt-4o" }]
+            },
+            "anthropic-api": {
+                "type": "anthropic",
+                "baseUrl": "https://api.anthropic.com",
+                "apiKeyEnv": "ANTHROPIC_API_KEY",
+                "models": [{ "id": "claude-sonnet-4-20250514" }]
+            },
+            "gemini-api": {
+                "type": "gemini",
+                "baseUrl": "https://generativelanguage.googleapis.com/v1beta",
+                "apiKeyEnv": "GEMINI_API_KEY",
+                "models": [{ "id": "gemini-2.5-pro" }]
+            },
+            "azure-api": {
+                "type": "azure-openai",
+                "baseUrl": "https://example.openai.azure.com/openai/deployments/gpt-4o",
+                "apiKeyEnv": "AZURE_OPENAI_API_KEY",
+                "apiVersion": "2024-02-01",
+                "models": [{ "id": "gpt-4o" }]
+            },
+            "bedrock-api": {
+                "type": "bedrock-claude",
+                "region": "us-east-1",
+                "models": [{ "id": "anthropic.claude-3-5-sonnet-20241022-v2:0" }]
+            },
+            "vertex-claude-api": {
+                "type": "vertex-claude",
+                "baseUrl": "https://us-central1-aiplatform.googleapis.com/v1/projects/p/locations/us-central1/publishers/anthropic/models/claude-sonnet-4:rawPredict",
+                "apiKeyEnv": "VERTEX_TOKEN",
+                "models": [{ "id": "claude-sonnet-4" }]
+            },
+            "vertex-gemini-api": {
+                "type": "vertex-gemini",
+                "baseUrl": "https://us-central1-aiplatform.googleapis.com/v1/projects/p/locations/us-central1/publishers/google/models/gemini-2.5-pro:generateContent",
+                "apiKeyEnv": "VERTEX_TOKEN",
+                "models": [{ "id": "gemini-2.5-pro" }]
+            }
+        }"#).unwrap();
+
+        apply_settings_providers(&mut cfg, &providers, None).expect("providers parse");
+
+        let by_name = |name: &str| {
+            cfg.providers
+                .iter()
+                .find(|p| p.profile_name == name)
+                .unwrap_or_else(|| panic!("missing provider {name}"))
+        };
+        assert_eq!(by_name("openai-chat").protocol, ProtocolFamily::OpenAiChat);
+        assert_eq!(
+            by_name("openai-resp").protocol,
+            ProtocolFamily::OpenAiResponses
+        );
+        assert_eq!(
+            by_name("anthropic-api").protocol,
+            ProtocolFamily::AnthropicMessages
+        );
+        assert_eq!(
+            by_name("gemini-api").protocol,
+            ProtocolFamily::GeminiGenerateContent
+        );
+        assert_eq!(by_name("azure-api").protocol, ProtocolFamily::AzureOpenAi);
+        assert_eq!(by_name("azure-api").auth, AuthStrategy::AzureToken);
+        assert_eq!(
+            by_name("azure-api")
+                .azure
+                .as_ref()
+                .map(|c| c.api_version.as_str()),
+            Some("2024-02-01")
+        );
+        assert_eq!(
+            by_name("bedrock-api").protocol,
+            ProtocolFamily::BedrockClaude
+        );
+        assert_eq!(by_name("bedrock-api").auth, AuthStrategy::AwsSigV4);
+        assert_eq!(
+            by_name("bedrock-api")
+                .signing
+                .as_ref()
+                .map(|s| (s.region.as_str(), s.service.as_str())),
+            Some(("us-east-1", "bedrock"))
+        );
+        assert_eq!(
+            by_name("vertex-claude-api").protocol,
+            ProtocolFamily::VertexClaude
+        );
+        assert_eq!(by_name("vertex-claude-api").auth, AuthStrategy::GcpToken);
+        assert_eq!(
+            by_name("vertex-gemini-api").protocol,
+            ProtocolFamily::VertexGemini
+        );
+        assert_eq!(by_name("vertex-gemini-api").auth, AuthStrategy::GcpToken);
     }
 }

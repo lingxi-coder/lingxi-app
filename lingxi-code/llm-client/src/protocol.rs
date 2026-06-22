@@ -24,6 +24,23 @@ pub enum StreamFraming {
     AwsEventStream,
 }
 
+/// Which transport should be used when opening a streaming provider request.
+///
+/// This is intentionally separate from [`StreamFraming`]: the framing describes
+/// how bytes/messages become provider stream frames, while the transport chooses
+/// the connection type used to receive those frames.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderStreamTransport {
+    /// HTTP streaming response (SSE or raw bytes, according to
+    /// [`StreamFraming`]).
+    #[default]
+    Http,
+    /// `OpenAI` Responses API over WebSocket. Only valid for
+    /// [`crate::ProtocolFamily::OpenAiResponses`] streaming requests.
+    ResponsesWebSocket,
+}
+
 /// Canonical request passed to provider protocols.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct LlmRequest {
@@ -66,6 +83,13 @@ pub struct LlmRequest {
     /// `metadata` object (claude-code `claude.ts:1699-1728` always sends it).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub metadata: Option<RequestMetadata>,
+    /// `OpenAI` Responses API request controls that do not have provider-neutral
+    /// equivalents.
+    #[serde(
+        default,
+        skip_serializing_if = "OpenAiResponsesRequestOptions::is_default"
+    )]
+    pub openai_responses: OpenAiResponsesRequestOptions,
 }
 
 /// Request metadata carried in the Anthropic `metadata` request field.
@@ -78,6 +102,46 @@ pub struct LlmRequest {
 pub struct RequestMetadata {
     /// Opaque identity string sent as `metadata.user_id`.
     pub user_id: String,
+}
+
+/// `OpenAI` Responses API controls that mirror Codex core's request envelope.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OpenAiResponsesRequestOptions {
+    /// Whether the model may issue parallel tool calls.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parallel_tool_calls: Option<bool>,
+    /// Extra Responses `include` entries.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub include: Vec<String>,
+    /// Optional service tier.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service_tier: Option<String>,
+    /// Optional prompt cache key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_cache_key: Option<String>,
+    /// Optional client metadata map.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub client_metadata: BTreeMap<String, String>,
+    /// Explicit Responses `store` override. When absent, the codec derives the
+    /// Azure default from the base URL, matching Codex core.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub store: Option<bool>,
+    /// Optional previous Responses id used by the WebSocket session path to
+    /// send only newly-added input items.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub previous_response_id: Option<String>,
+    /// Optional generation control. The WebSocket prewarm path sets
+    /// `generate=false`; regular HTTP/SSE requests leave it unset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generate: Option<bool>,
+}
+
+impl OpenAiResponsesRequestOptions {
+    /// Whether all controls are unset.
+    #[must_use]
+    pub fn is_default(&self) -> bool {
+        self == &Self::default()
+    }
 }
 
 impl LlmRequest {
@@ -102,7 +166,10 @@ impl LlmRequest {
     pub fn with_user_text(mut self, text: impl Into<String>) -> Self {
         self.messages.push(Message {
             role: "user".to_string(),
-            content: vec![ContentBlock::Text { text: text.into(), cache_control: None }],
+            content: vec![ContentBlock::Text {
+                text: text.into(),
+                cache_control: None,
+            }],
         });
         self
     }
@@ -135,7 +202,7 @@ impl LlmRequest {
 /// `{"type":"adaptive"}` (the model decides depth dynamically — the default for
 /// adaptive-capable models) from `{"type":"enabled","budget_tokens":N}` (a fixed
 /// thinking budget). The provider-neutral codecs that only consume a numeric
-/// budget (Gemini, OpenAI Responses) map [`ReasoningConfig::Adaptive`] to a
+/// budget (Gemini, `OpenAI` Responses) map [`ReasoningConfig::Adaptive`] to a
 /// sensible dynamic default — those providers never receive `Adaptive` in
 /// practice (only the Anthropic/firstParty path emits it).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -275,7 +342,7 @@ pub enum ContentBlock {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cache_control: Option<CacheControl>,
         /// 1P experimental cache-editing tag — the `cache_reference` set on a
-        /// tool_result that falls within the cached prefix when the cache-editing
+        /// `tool_result` that falls within the cached prefix when the cache-editing
         /// gate is armed (claude-code `addCacheBreakpoints`, claude.ts:3164-3207).
         /// `None` (the default 3P/Anthropic path) omits the key entirely, so wire
         /// bytes are unchanged. Set to the answered `tool_use_id`.
@@ -539,6 +606,13 @@ pub struct ProviderRequest {
     pub headers: BTreeMap<String, String>,
     /// JSON request body.
     pub body_json: Value,
+    /// Which transport should be used for streaming this request.
+    ///
+    /// Defaults to [`ProviderStreamTransport::Http`]; route selection may set
+    /// this to [`ProviderStreamTransport::ResponsesWebSocket`] for `OpenAI`
+    /// Responses providers that explicitly support WebSocket transport.
+    #[serde(default)]
+    pub stream_transport: ProviderStreamTransport,
     /// Which streaming framing protocol to use for this request.
     ///
     /// Defaults to [`StreamFraming::Sse`]; codecs that target the AWS
@@ -554,6 +628,12 @@ pub struct ProviderRequest {
     /// body.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub body_bytes: Option<Vec<u8>>,
+    /// Optional WebSocket connection timeout in milliseconds.
+    ///
+    /// Only used when [`ProviderStreamTransport::ResponsesWebSocket`] is
+    /// selected; HTTP transports ignore it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub websocket_connect_timeout_ms: Option<u64>,
 }
 
 impl ProviderRequest {
@@ -569,8 +649,10 @@ impl ProviderRequest {
             url: url.into(),
             headers: BTreeMap::new(),
             body_json,
+            stream_transport: ProviderStreamTransport::Http,
             stream_framing: StreamFraming::Sse,
             body_bytes: None,
+            websocket_connect_timeout_ms: None,
         }
     }
 }
@@ -647,6 +729,14 @@ impl StreamDecoder for NoopStreamDecoder {
 
 /// Provider stream decoder.
 pub trait StreamDecoder: std::fmt::Debug + Send {
+    /// Seed decoder-visible provider metadata captured before frames are read.
+    ///
+    /// HTTP streaming transports expose control-plane data such as rate-limit
+    /// headers, model etags, server model names, and turn-state headers before
+    /// the first SSE frame. Most codecs ignore it; Responses uses it to retain
+    /// Codex control metadata without adding a new streaming event variant.
+    fn set_provider_metadata(&mut self, _metadata: Value) {}
+
     /// Decode one raw stream frame into zero or more canonical events.
     fn decode_frame(&mut self, frame: RawStreamFrame) -> Result<Vec<LlmEvent>, LlmError>;
 
@@ -656,8 +746,38 @@ pub trait StreamDecoder: std::fmt::Debug + Send {
     }
 }
 
+/// Extract cross-provider streaming control metadata from normalized headers.
+#[must_use]
+pub fn stream_provider_metadata_from_headers(headers: &BTreeMap<String, String>) -> Value {
+    let mut metadata = serde_json::Map::new();
+    for (name, value) in headers {
+        let key = name.to_ascii_lowercase();
+        if is_stream_metadata_header(&key) {
+            metadata.insert(key, Value::String(value.clone()));
+        }
+    }
+    if metadata.is_empty() {
+        Value::Null
+    } else {
+        Value::Object(metadata)
+    }
+}
+
+fn is_stream_metadata_header(name: &str) -> bool {
+    name == "openai-model"
+        || name == "x-models-etag"
+        || name == "x-reasoning-included"
+        || name == "x-request-id"
+        || name == "x-codex-turn-state"
+        || name == "retry-after"
+        || name.starts_with("x-ratelimit-")
+}
+
 /// Validate request capabilities before transport I/O.
-pub fn validate_capabilities(request: &LlmRequest, capabilities: Capabilities) -> Result<(), LlmError> {
+pub fn validate_capabilities(
+    request: &LlmRequest,
+    capabilities: Capabilities,
+) -> Result<(), LlmError> {
     if request.stream && !capabilities.streaming {
         return Err(LlmError::UnsupportedCapability {
             capability: "streaming".to_string(),
@@ -685,7 +805,9 @@ pub fn validate_capabilities(request: &LlmRequest, capabilities: Capabilities) -
     for message in &request.messages {
         for block in &message.content {
             match block {
-                ContentBlock::Image { .. } | ContentBlock::ImageUrl { .. } if !capabilities.vision => {
+                ContentBlock::Image { .. } | ContentBlock::ImageUrl { .. }
+                    if !capabilities.vision =>
+                {
                     return Err(LlmError::UnsupportedCapability {
                         capability: "vision".to_string(),
                     });
@@ -724,6 +846,12 @@ mod tests {
     #[test]
     fn with_profile_sets_field_and_new_defaults_none() {
         assert_eq!(LlmRequest::new("m").profile, None);
-        assert_eq!(LlmRequest::new("m").with_profile("openai").profile.as_deref(), Some("openai"));
+        assert_eq!(
+            LlmRequest::new("m")
+                .with_profile("openai")
+                .profile
+                .as_deref(),
+            Some("openai")
+        );
     }
 }

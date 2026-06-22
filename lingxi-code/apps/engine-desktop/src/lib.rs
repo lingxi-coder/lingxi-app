@@ -3581,6 +3581,7 @@ pub async fn build(
             tracing::warn!(error = %e, "failed to seed default model profile");
         }
     }
+    orch.spawn_startup_responses_websocket_prewarm();
     // Plan 3c: `/connect` seams — Copilot device-flow over `PosixHttp`, and the
     // API-key writer over the host secure prompt (tui-supplied; headless no-op).
     // M8: also wire the ChatGPT OAuth seam (`/connect chatgpt`).

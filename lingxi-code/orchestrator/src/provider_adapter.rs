@@ -11,7 +11,10 @@ use crate::model::rate_limit::{
     formatted_reset_times_from_headers, parse_retry_after, parse_unified_reset,
     rate_limit_error_message, RateLimitInfo, RawUtilization, SubscriptionContext,
 };
-use crate::model::retry::{next_step_with_backoff, resolve_retry_control_with_settings, DriveStep, ResolveRetryEnv, RetryControl, RetryState};
+use crate::model::retry::{
+    next_step_with_backoff, resolve_retry_control_with_settings, DriveStep, ResolveRetryEnv,
+    RetryControl, RetryState,
+};
 use crate::model::telemetry;
 use crate::model::user_agent::{user_agent, UserAgentEnv};
 use agent::convert::{
@@ -21,7 +24,7 @@ use async_trait::async_trait;
 use futures::stream::BoxStream;
 use llm_client::{
     CacheControl, CostEstimator, DefaultLlmClient, LlmError, LlmEvent, LlmRequest, LlmResponse,
-    ProviderRequest, Transport,
+    ResponsesWebSocketSession, Transport,
 };
 use protocol::{ContentBlock, ConversationMessage};
 use std::collections::VecDeque;
@@ -264,6 +267,13 @@ pub struct ProviderApiAdapter {
     /// subsequent success — so a retried-then-recovered 429 never plants a
     /// rejected snapshot (the prior per-attempt-write divergence, CLOSED).
     pending_429: Mutex<Option<Pending429>>,
+    /// Conversation-session scoped OpenAI Responses WebSocket connection/cache.
+    ///
+    /// The adapter is used by one conversation runtime; mobile already enforces
+    /// one in-flight turn. The underlying `llm-client` session still only sends
+    /// `previous_response_id` when the new request is a strict compatible
+    /// extension of the previous completed request.
+    responses_ws_session: tokio::sync::Mutex<ResponsesWebSocketSession>,
 }
 
 /// 429-attempt state held until the retry loop declares the error TERMINAL —
@@ -321,7 +331,16 @@ impl ProviderApiAdapter {
         analytics: Option<Arc<::telemetry::AnalyticsBus>>,
         fallback_model: Option<String>,
     ) -> Self {
-        Self::new_with_estimator(client, transport, subscriber, ua, version, analytics, fallback_model, None)
+        Self::new_with_estimator(
+            client,
+            transport,
+            subscriber,
+            ua,
+            version,
+            analytics,
+            fallback_model,
+            None,
+        )
     }
 
     /// Construct the adapter with an explicit cost estimator.
@@ -426,6 +445,7 @@ impl ProviderApiAdapter {
             last_raw_utilization: Mutex::new(None),
             last_429_message: Mutex::new(None),
             pending_429: Mutex::new(None),
+            responses_ws_session: tokio::sync::Mutex::new(ResponsesWebSocketSession::new()),
         }
     }
 
@@ -436,6 +456,41 @@ impl ProviderApiAdapter {
     pub fn with_subscription(mut self, slot: traits::subscription::SharedSubscription) -> Self {
         self.subscription = Some(slot);
         self
+    }
+
+    /// Best-effort startup preconnect for OpenAI Responses WebSocket profiles.
+    ///
+    /// This opens the WebSocket handshake only; no prompt payload is sent.
+    /// Callers intentionally ignore failures so normal HTTP/SSE or later WS
+    /// connect paths remain authoritative.
+    pub async fn preconnect_responses_websocket(
+        &self,
+        model: &str,
+        profile: Option<&str>,
+    ) -> Result<(), LlmError> {
+        let mut request = LlmRequest::new(model);
+        request.profile = profile.map(str::to_string);
+        request.stream = true;
+        let mut session = self.responses_ws_session.lock().await;
+        self.client
+            .preconnect_websocket(&request, self.transport.as_ref(), &mut session)
+            .await
+    }
+
+    /// Spawn [`Self::preconnect_responses_websocket`] on the current runtime and
+    /// discard errors. Intended for engine startup where latency reduction must
+    /// never block session initialization.
+    pub fn spawn_responses_websocket_preconnect(
+        self: &Arc<Self>,
+        model: String,
+        profile: Option<String>,
+    ) {
+        let adapter = Arc::clone(self);
+        tokio::spawn(async move {
+            let _ = adapter
+                .preconnect_responses_websocket(&model, profile.as_deref())
+                .await;
+        });
     }
 
     /// Force a specific `tool_choice` on every request this adapter drives — used
@@ -532,9 +587,15 @@ impl ProviderApiAdapter {
     /// attempts — the TS-faithful behaviour (`getSubscriptionType()` reads per
     /// attempt-ish but the gate effectively stabilizes per request).
     fn effective_subscriber(&self) -> SubscriberState {
-        let Some(slot) = &self.subscription else { return self.subscriber; };
-        let Ok(guard) = slot.read() else { return self.subscriber; };
-        let Some(snap) = guard.as_ref() else { return self.subscriber; };
+        let Some(slot) = &self.subscription else {
+            return self.subscriber;
+        };
+        let Ok(guard) = slot.read() else {
+            return self.subscriber;
+        };
+        let Some(snap) = guard.as_ref() else {
+            return self.subscriber;
+        };
         SubscriberState {
             is_subscriber: snap.is_subscriber,
             is_enterprise: snap.subscription_type.as_deref() == Some("enterprise"),
@@ -593,8 +654,7 @@ impl ProviderApiAdapter {
         if cache_env_truthy("CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS") {
             return false;
         }
-        cache_env_truthy("CLAUDE_CODE_CACHE_EDITING")
-            && self.effective_subscriber().is_subscriber
+        cache_env_truthy("CLAUDE_CODE_CACHE_EDITING") && self.effective_subscriber().is_subscriber
     }
 
     // ── Shared request build ─────────────────────────────────────────────────
@@ -668,7 +728,8 @@ impl ProviderApiAdapter {
                 if let Some(block) = last.content.iter_mut().rev().find(|b| {
                     !matches!(
                         b,
-                        LlmContentBlock::Reasoning { .. } | LlmContentBlock::RedactedThinking { .. }
+                        LlmContentBlock::Reasoning { .. }
+                            | LlmContentBlock::RedactedThinking { .. }
                     )
                 }) {
                     match block {
@@ -701,9 +762,9 @@ impl ProviderApiAdapter {
         }
 
         req.tools = tool_decls; // No tool-array breakpoint (matches TS baseline).
-        // Forced tool choice (e.g. `--json-schema` → `StructuredOutput`). Unset
-        // for every normal turn, so the request carries no `tool_choice` and the
-        // model chooses freely — byte-identical to the pre-feature request.
+                                // Forced tool choice (e.g. `--json-schema` → `StructuredOutput`). Unset
+                                // for every normal turn, so the request carries no `tool_choice` and the
+                                // model chooses freely — byte-identical to the pre-feature request.
         if let Some(choice) = &self.forced_tool_choice {
             req.tool_choice = Some(choice.clone());
         }
@@ -741,7 +802,9 @@ impl ProviderApiAdapter {
                     }
                     // budget_tokens must stay strictly below max_tokens.
                     budget = budget.min(req.max_tokens.unwrap_or(u32::MAX).saturating_sub(1));
-                    Some(ReasoningConfig::Enabled { budget_tokens: budget })
+                    Some(ReasoningConfig::Enabled {
+                        budget_tokens: budget,
+                    })
                 }
             } else {
                 None
@@ -768,36 +831,51 @@ impl ProviderApiAdapter {
     /// attempt — these injectors run once per prepare/execute attempt, so the
     /// live-slot read here is per-attempt, the lighter diff vs. threading the
     /// hoisted value through as a parameter).
-    fn inject_headers(&self, prepared: &mut ProviderRequest, request_id: &str) {
-        // anthropic-beta (Task 2): full assembled list merged with any auth-injected betas.
-        apply_beta_header_with_auth(
-            prepared,
-            Provider::Anthropic,
-            Endpoint::MessagesCreate,
-            self.effective_subscriber().is_subscriber,
-        );
+    fn inject_headers(&self, prepared: &mut llm_client::PreparedLlmCall, request_id: &str) {
+        // Anthropic beta headers are protocol-specific. OpenAI/Gemini/Vertex/
+        // Bedrock/Azure routes must not receive Anthropic beta headers.
+        if matches!(
+            prepared.route.protocol,
+            llm_client::ProtocolFamily::AnthropicMessages
+        ) {
+            apply_beta_header_with_auth(
+                &mut prepared.provider_request,
+                Provider::Anthropic,
+                Endpoint::MessagesCreate,
+                self.effective_subscriber().is_subscriber,
+            );
+        }
         // User-Agent (Task 3).
-        prepared
-            .headers
-            .insert("user-agent".to_string(), user_agent(&self.ua, &self.version));
+        prepared.provider_request.headers.insert(
+            "user-agent".to_string(),
+            user_agent(&self.ua, &self.version),
+        );
         // Client-traceable request id (matches api-client header name).
         prepared
+            .provider_request
             .headers
             .insert("x-request-id".to_string(), request_id.to_string());
     }
 
     /// Same as [`inject_headers`] but for the streaming endpoint.
-    fn inject_stream_headers(&self, prepared: &mut ProviderRequest, request_id: &str) {
-        apply_beta_header_with_auth(
-            prepared,
-            Provider::Anthropic,
-            Endpoint::MessagesCreateStream,
-            self.effective_subscriber().is_subscriber,
+    fn inject_stream_headers(&self, prepared: &mut llm_client::PreparedLlmCall, request_id: &str) {
+        if matches!(
+            prepared.route.protocol,
+            llm_client::ProtocolFamily::AnthropicMessages
+        ) {
+            apply_beta_header_with_auth(
+                &mut prepared.provider_request,
+                Provider::Anthropic,
+                Endpoint::MessagesCreateStream,
+                self.effective_subscriber().is_subscriber,
+            );
+        }
+        prepared.provider_request.headers.insert(
+            "user-agent".to_string(),
+            user_agent(&self.ua, &self.version),
         );
         prepared
-            .headers
-            .insert("user-agent".to_string(), user_agent(&self.ua, &self.version));
-        prepared
+            .provider_request
             .headers
             .insert("x-request-id".to_string(), request_id.to_string());
     }
@@ -806,7 +884,9 @@ impl ProviderApiAdapter {
 
     /// Resolve the 429 retry delay using the server-sent reset ladder:
     /// `retry-after` → `anthropic-ratelimit-unified-reset` → `anthropic-ratelimit-requests-reset` → 1 s.
-    fn resolve_retry_after(headers: &std::collections::BTreeMap<String, String>) -> std::time::Duration {
+    fn resolve_retry_after(
+        headers: &std::collections::BTreeMap<String, String>,
+    ) -> std::time::Duration {
         // Convert BTreeMap to vec for parse helpers.
         let hvec: Vec<(String, String)> = headers
             .iter()
@@ -897,10 +977,7 @@ impl ProviderApiAdapter {
     ///
     /// Emits a `tracing::warn!` when the overage status indicates the account is
     /// at or near exhaustion (`overage_status == "rejected"` or `"allowed_warning"`).
-    fn record_rate_limit_from_headers(
-        &self,
-        headers: &std::collections::BTreeMap<String, String>,
-    ) {
+    fn record_rate_limit_from_headers(&self, headers: &std::collections::BTreeMap<String, String>) {
         let hvec: Vec<(String, String)> = headers
             .iter()
             .map(|(k, v)| (k.clone(), v.clone()))
@@ -1105,7 +1182,8 @@ impl ProviderApiAdapter {
         req: LlmRequest,
         retry_control: RetryControl,
     ) -> Result<LlmResponse, LlmError> {
-        self.drive_non_stream_seeded_with_chain(req, retry_control, 0, &[]).await
+        self.drive_non_stream_seeded_with_chain(req, retry_control, 0, &[])
+            .await
     }
 
     /// Non-stream retry driver with a pre-seeded `consecutive_overloaded` counter
@@ -1175,14 +1253,20 @@ impl ProviderApiAdapter {
                     return Err(e);
                 }
             };
-            self.inject_headers(&mut prepared.provider_request, &request_id);
+            self.inject_headers(&mut prepared, &request_id);
 
             let resp_result = self.transport.execute(&prepared.provider_request).await;
 
             match resp_result {
                 Err(transport_err) => {
                     // Transport-layer failure; feed into the retry driver.
-                    let step = next_step_with_backoff(&mut state, &retry_control, &transport_err, thinking_budget, self.settings_backoff_ms);
+                    let step = next_step_with_backoff(
+                        &mut state,
+                        &retry_control,
+                        &transport_err,
+                        thinking_budget,
+                        self.settings_backoff_ms,
+                    );
                     if let DriveStep::RetryAfter(delay) = step {
                         tokio::time::sleep(delay).await;
                         continue;
@@ -1219,7 +1303,8 @@ impl ProviderApiAdapter {
                                     }
                                 }
                             }
-                            let elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+                            let elapsed_ms =
+                                u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
                             telemetry::emit_succeeded(
                                 &self.analytics,
                                 &req.model,
@@ -1265,7 +1350,13 @@ impl ProviderApiAdapter {
                                 decode_err.clone()
                             };
 
-                            let step = next_step_with_backoff(&mut state, &retry_control, &effective_err, thinking_budget, self.settings_backoff_ms);
+                            let step = next_step_with_backoff(
+                                &mut state,
+                                &retry_control,
+                                &effective_err,
+                                thinking_budget,
+                                self.settings_backoff_ms,
+                            );
                             match step {
                                 DriveStep::RetryAfter(delay) => {
                                     tokio::time::sleep(delay).await;
@@ -1273,12 +1364,14 @@ impl ProviderApiAdapter {
                                 }
                                 DriveStep::AdjustMaxTokens(new_max) => {
                                     // Emit telemetry for the overflow adjustment.
-                                    if let Some(overflow) = crate::model::overflow::parse_overflow_message(
-                                        match &decode_err {
-                                            LlmError::InvalidRequest { message } => message,
-                                            _ => "",
-                                        },
-                                    ) {
+                                    if let Some(overflow) =
+                                        crate::model::overflow::parse_overflow_message(
+                                            match &decode_err {
+                                                LlmError::InvalidRequest { message } => message,
+                                                _ => "",
+                                            },
+                                        )
+                                    {
                                         telemetry::emit_max_tokens_overflow_adjustment(
                                             &self.analytics,
                                             &req.model,
@@ -1416,14 +1509,30 @@ impl ProviderApiAdapter {
                 Ok(p) => p,
                 Err(e) => return Err(e),
             };
-            self.inject_stream_headers(&mut prepared.provider_request, &request_id);
+            self.inject_stream_headers(&mut prepared, &request_id);
 
-            // Open stream directly through transport; replicate the connect-phase
-            // error-drain that execute_stream normally does, because we need to
-            // inject headers into the prepared request ourselves.
-            match self.transport.open_stream(&prepared.provider_request).await {
+            // Open stream through the prepared-call path so injected headers are
+            // preserved while OpenAI Responses providers can reuse a WebSocket
+            // session and apply previous_response_id deltas.
+            let opened = {
+                let mut responses_ws_session = self.responses_ws_session.lock().await;
+                self.client
+                    .open_prepared_stream_with_session(
+                        prepared,
+                        self.transport.as_ref(),
+                        &mut responses_ws_session,
+                    )
+                    .await
+            };
+            match opened {
                 Err(transport_err) => {
-                    let step = next_step_with_backoff(&mut state, &ctl, &transport_err, thinking_budget, self.settings_backoff_ms);
+                    let step = next_step_with_backoff(
+                        &mut state,
+                        &ctl,
+                        &transport_err,
+                        thinking_budget,
+                        self.settings_backoff_ms,
+                    );
                     match step {
                         DriveStep::RetryAfter(delay) => {
                             tokio::time::sleep(delay).await;
@@ -1432,7 +1541,7 @@ impl ProviderApiAdapter {
                         _ => return Err(transport_err),
                     }
                 }
-                Ok(streaming) => {
+                Ok((prepared, streaming)) => {
                     // Connect-phase status ≥ 400: drain and decode as error.
                     if streaming.status >= 400 {
                         let response_headers = streaming.headers;
@@ -1475,7 +1584,13 @@ impl ProviderApiAdapter {
                             decode_err.clone()
                         };
 
-                        let step = next_step_with_backoff(&mut state, &ctl, &effective_err, thinking_budget, self.settings_backoff_ms);
+                        let step = next_step_with_backoff(
+                            &mut state,
+                            &ctl,
+                            &effective_err,
+                            thinking_budget,
+                            self.settings_backoff_ms,
+                        );
                         if let DriveStep::RetryAfter(delay) = step {
                             tokio::time::sleep(delay).await;
                             // Re-prepare on next iteration so headers stay fresh.
@@ -1507,7 +1622,10 @@ impl ProviderApiAdapter {
 
                     // Success: wrap the LlmEventStream from the codec into a BoxStream.
                     // Build the event stream from the codec decoder + raw frames.
-                    let decoder = prepared.route.codec.stream_decoder();
+                    let mut decoder = prepared.route.codec.stream_decoder();
+                    decoder.set_provider_metadata(
+                        llm_client::stream_provider_metadata_from_headers(&streaming.headers),
+                    );
                     let frames = streaming.frames;
 
                     // Clone analytics + metadata into the unfold state so
@@ -1531,8 +1649,8 @@ impl ProviderApiAdapter {
                         started: stream_started,
                     };
 
-                    let boxed: BoxStream<'static, Result<LlmEvent, LlmError>> = Box::pin(
-                        futures::stream::unfold(stream_state, |mut s| async move {
+                    let boxed: BoxStream<'static, Result<LlmEvent, LlmError>> =
+                        Box::pin(futures::stream::unfold(stream_state, |mut s| async move {
                             loop {
                                 if let Some(event) = s.queue.pop_front() {
                                     // Emit succeed telemetry on the terminal event
@@ -1543,10 +1661,9 @@ impl ProviderApiAdapter {
                                     );
                                     if is_terminal && !s.done {
                                         s.done = true;
-                                        let elapsed_ms = u64::try_from(
-                                            s.started.elapsed().as_millis()
-                                        )
-                                        .unwrap_or(u64::MAX);
+                                        let elapsed_ms =
+                                            u64::try_from(s.started.elapsed().as_millis())
+                                                .unwrap_or(u64::MAX);
                                         telemetry::emit_succeeded(
                                             &s.analytics,
                                             &s.model,
@@ -1617,8 +1734,7 @@ impl ProviderApiAdapter {
                                     }
                                 }
                             }
-                        }),
-                    );
+                        }));
                     return Ok(boxed);
                 }
             }
@@ -1662,8 +1778,12 @@ impl OrchestratorApiClient for ProviderApiAdapter {
         // `/v1/messages/count_tokens` endpoint (with the `count_tokens` beta) on
         // Anthropic routes, byte-length/4 approximation elsewhere.
         let req = self.build_request(model, profile, system, msgs, tools, false, None)?;
-        crate::model::count_tokens::count_tokens(self.client.as_ref(), self.transport.as_ref(), &req)
-            .await
+        crate::model::count_tokens::count_tokens(
+            self.client.as_ref(),
+            self.transport.as_ref(),
+            &req,
+        )
+        .await
     }
 
     async fn messages_create_with_opts(
@@ -1675,7 +1795,8 @@ impl OrchestratorApiClient for ProviderApiAdapter {
         tools: Vec<serde_json::Value>,
         max_tokens: u32,
     ) -> Result<LlmResponse, LlmError> {
-        let req = self.build_request(model, profile, system, msgs, tools, false, Some(max_tokens))?;
+        let req =
+            self.build_request(model, profile, system, msgs, tools, false, Some(max_tokens))?;
         let ctl = resolve_retry_control_with_settings(
             model,
             None,
@@ -1714,7 +1835,10 @@ impl OrchestratorApiClient for ProviderApiAdapter {
         // Normalize the request model via alias_to_display so that an alias
         // request (e.g. "claude-3-5-sonnet" → display "claude-sonnet-4-5")
         // still finds the per-model fallback entry whose key is the display model.
-        let display_model = self.alias_to_display.get(model).map_or(model, String::as_str);
+        let display_model = self
+            .alias_to_display
+            .get(model)
+            .map_or(model, String::as_str);
 
         // Build the effective chain:
         //   1. explicit call-site fallback_model → single-entry chain (legacy path)
@@ -1749,7 +1873,8 @@ impl OrchestratorApiClient for ProviderApiAdapter {
         if !effective_chain.is_empty() {
             ctl.allow_fallback = true;
         }
-        self.drive_non_stream_seeded_with_chain(req, ctl, 0, &effective_chain).await
+        self.drive_non_stream_seeded_with_chain(req, ctl, 0, &effective_chain)
+            .await
     }
 
     /// Non-streaming call seeded with a pre-counted consecutive-529 value.
@@ -1795,11 +1920,12 @@ impl OrchestratorApiClient for ProviderApiAdapter {
     /// (all three fields: `rate_limit_type`, `overage_status`, and
     /// `overage_disabled_reason`).
     fn last_rate_limit_info(&self) -> Option<traits::RateLimitSnapshot> {
-        self.last_rate_limit_info().map(|info| traits::RateLimitSnapshot {
-            rate_limit_type: info.rate_limit_type,
-            overage_status: info.overage_status,
-            overage_disabled_reason: info.overage_disabled_reason,
-        })
+        self.last_rate_limit_info()
+            .map(|info| traits::RateLimitSnapshot {
+                rate_limit_type: info.rate_limit_type,
+                overage_status: info.overage_status,
+                overage_disabled_reason: info.overage_disabled_reason,
+            })
     }
 
     /// Task 8 (llm-client future-work batch 3): expose the FULL internal
@@ -1824,6 +1950,29 @@ impl OrchestratorApiClient for ProviderApiAdapter {
     /// terminal-429 re-map (claude-code `errors.ts:480-524`).
     fn last_rate_limit_error_message(&self) -> Option<String> {
         self.last_429_message.lock().unwrap().clone()
+    }
+
+    async fn prewarm_responses_websocket(
+        &self,
+        model: &str,
+        profile: Option<&str>,
+        system: Option<&str>,
+        messages: Vec<ConversationMessage>,
+        tools: Vec<serde_json::Value>,
+    ) -> Result<(), LlmError> {
+        let req = self.build_request(model, profile, system, messages, tools, true, None)?;
+        let mut prepared = self.client.prepare(&req).await?;
+        let request_id = new_request_id();
+        self.inject_stream_headers(&mut prepared, &request_id);
+        let mut session = self.responses_ws_session.lock().await;
+        self.client
+            .prewarm_prepared_websocket(prepared, self.transport.as_ref(), &mut session)
+            .await
+    }
+
+    async fn close_responses_websocket_session(&self) -> Result<(), LlmError> {
+        let mut session = self.responses_ws_session.lock().await;
+        session.close().await
     }
 }
 
@@ -2143,7 +2292,12 @@ fn apply_cache_editing(
                     continue;
                 }
                 for block in &mut messages[i].content {
-                    if let Cb::ToolResult { tool_call_id, cache_reference, .. } = block {
+                    if let Cb::ToolResult {
+                        tool_call_id,
+                        cache_reference,
+                        ..
+                    } = block
+                    {
                         *cache_reference = Some(tool_call_id.clone());
                     }
                 }
@@ -2310,6 +2464,9 @@ mod tests {
                     pricing: PricingConfig::default(),
                     signing: None,
                     azure: None,
+                    supports_websockets: false,
+                    supports_websocket_compression: false,
+                    websocket_connect_timeout_ms: None,
                 }],
             })
             .expect("client"),
@@ -2357,6 +2514,9 @@ mod tests {
                     pricing: PricingConfig::default(),
                     signing: None,
                     azure: None,
+                    supports_websockets: false,
+                    supports_websocket_compression: false,
+                    websocket_connect_timeout_ms: None,
                 }],
             })
             .expect("client"),
@@ -2376,6 +2536,77 @@ mod tests {
         )
     }
 
+    fn make_adapter_for_protocol(
+        protocol: ProtocolFamily,
+        provider_id: ProviderId,
+        base_url: &str,
+    ) -> ProviderApiAdapter {
+        let azure = if matches!(protocol, ProtocolFamily::AzureOpenAi) {
+            Some(llm_client::AzureConfig {
+                api_version: "2024-02-01".to_string(),
+            })
+        } else {
+            None
+        };
+        let client = Arc::new(
+            DefaultLlmClient::from_config(ClientConfig {
+                providers: vec![ProviderProfile {
+                    provider_id,
+                    profile_name: "p".to_string(),
+                    base_url: base_url.to_string(),
+                    protocol,
+                    auth: AuthStrategy::None,
+                    credential: CredentialConfig::None,
+                    models: vec![ModelProfile {
+                        display_model: "model".to_string(),
+                        request_model: "model".to_string(),
+                        billing_model: "model".to_string(),
+                        aliases: Vec::new(),
+                        capabilities: Capabilities {
+                            streaming: true,
+                            tools: true,
+                            reasoning: true,
+                            structured_output: true,
+                            ..Default::default()
+                        },
+                    }],
+                    pricing: PricingConfig::default(),
+                    signing: None,
+                    azure,
+                    supports_websockets: false,
+                    supports_websocket_compression: false,
+                    websocket_connect_timeout_ms: None,
+                }],
+            })
+            .expect("client"),
+        );
+        ProviderApiAdapter::new(
+            client,
+            FakeTransport::always(ProviderResponse::json(200, ok_response_json())),
+            SubscriberState::default(),
+            UserAgentEnv {
+                user_type: Some("external".to_string()),
+                entrypoint: Some("cli".to_string()),
+                ..Default::default()
+            },
+            "0.0.0",
+            None,
+            None,
+        )
+    }
+
+    async fn headers_after_inject_for_protocol(
+        protocol: ProtocolFamily,
+        provider_id: ProviderId,
+        base_url: &str,
+    ) -> BTreeMap<String, String> {
+        let adapter = make_adapter_for_protocol(protocol, provider_id, base_url);
+        let request = LlmRequest::new("model").with_user_text("hi");
+        let mut prepared = adapter.client.prepare(&request).await.expect("prepare");
+        adapter.inject_headers(&mut prepared, "req_test");
+        prepared.provider_request.headers
+    }
+
     // ── Prompt-cache breakpoints (CACHE.1) ──────────────────────────────────
 
     // Serializes the two prompt-cache tests: one mutates DISABLE_PROMPT_CACHING
@@ -2386,7 +2617,9 @@ mod tests {
     fn text_user_msg(s: &str) -> ConversationMessage {
         ConversationMessage::User {
             id: protocol::MessageId::new(),
-            content: vec![ContentBlock::Text { text: s.to_string() }],
+            content: vec![ContentBlock::Text {
+                text: s.to_string(),
+            }],
             is_meta: false,
         }
     }
@@ -2475,7 +2708,10 @@ mod tests {
         let transport = FakeTransport::always(ProviderResponse::json(200, ok_response_json()));
         let adapter = make_adapter_with_subscriber(
             transport,
-            SubscriberState { is_subscriber: true, is_enterprise: false },
+            SubscriberState {
+                is_subscriber: true,
+                is_enterprise: false,
+            },
         );
         let system = format!(
             "{HEADER}{SECTION_SEP}static{SECTION_SEP}{SYSTEM_PROMPT_DYNAMIC_BOUNDARY}{SECTION_SEP}dynamic"
@@ -2510,7 +2746,10 @@ mod tests {
         let transport = FakeTransport::always(ProviderResponse::json(200, ok_response_json()));
         let adapter = make_adapter_with_subscriber(
             transport,
-            SubscriberState { is_subscriber: true, is_enterprise: false },
+            SubscriberState {
+                is_subscriber: true,
+                is_enterprise: false,
+            },
         );
         let system = format!(
             "{HEADER}{SECTION_SEP}static{SECTION_SEP}{SYSTEM_PROMPT_DYNAMIC_BOUNDARY}{SECTION_SEP}dynamic"
@@ -2533,7 +2772,10 @@ mod tests {
         assert_eq!(req.system[1].text, "static");
         assert_eq!(
             req.system[1].cache_control,
-            Some(CacheControl::EphemeralScoped { scope: Some(CacheScope::Global), ttl_1h: false })
+            Some(CacheControl::EphemeralScoped {
+                scope: Some(CacheScope::Global),
+                ttl_1h: false
+            })
         );
         assert_eq!(req.system[2].text, "dynamic");
         assert_eq!(req.system[2].cache_control, None); // dynamic uncached
@@ -2572,7 +2814,9 @@ mod tests {
             },
             CM::Assistant {
                 id: MessageId::new(),
-                content: vec![PB::Text { text: "ok".to_string() }],
+                content: vec![PB::Text {
+                    text: "ok".to_string(),
+                }],
                 stop_reason: None,
             },
             text_user_msg("continue"),
@@ -2591,7 +2835,10 @@ mod tests {
         // Even a subscriber + injected edits must stay inert without the env.
         let adapter = make_adapter_with_subscriber(
             transport,
-            SubscriberState { is_subscriber: true, is_enterprise: false },
+            SubscriberState {
+                is_subscriber: true,
+                is_enterprise: false,
+            },
         )
         .with_cache_editing_inputs(CacheEditingInputs {
             new_edits: vec![llm_client::CacheEdit::Delete {
@@ -2617,7 +2864,10 @@ mod tests {
                     !matches!(b, LlmContentBlock::CacheEdits { .. }),
                     "no cache_edits block on the default path"
                 );
-                if let LlmContentBlock::ToolResult { cache_reference, .. } = b {
+                if let LlmContentBlock::ToolResult {
+                    cache_reference, ..
+                } = b
+                {
                     assert_eq!(*cache_reference, None, "no cache_reference by default");
                 }
             }
@@ -2639,18 +2889,29 @@ mod tests {
         // new (last user msg) deletes "dup" (collapsed by dedup) + "n1".
         let adapter = make_adapter_with_subscriber(
             transport,
-            SubscriberState { is_subscriber: true, is_enterprise: false },
+            SubscriberState {
+                is_subscriber: true,
+                is_enterprise: false,
+            },
         )
         .with_cache_editing_inputs(CacheEditingInputs {
             new_edits: vec![
-                CacheEdit::Delete { cache_reference: "dup".to_string() },
-                CacheEdit::Delete { cache_reference: "n1".to_string() },
+                CacheEdit::Delete {
+                    cache_reference: "dup".to_string(),
+                },
+                CacheEdit::Delete {
+                    cache_reference: "n1".to_string(),
+                },
             ],
             pinned: vec![PinnedCacheEdits {
                 user_message_index: 1,
                 edits: vec![
-                    CacheEdit::Delete { cache_reference: "dup".to_string() },
-                    CacheEdit::Delete { cache_reference: "p1".to_string() },
+                    CacheEdit::Delete {
+                        cache_reference: "dup".to_string(),
+                    },
+                    CacheEdit::Delete {
+                        cache_reference: "p1".to_string(),
+                    },
                 ],
             }],
         });
@@ -2671,7 +2932,12 @@ mod tests {
         let mut stamped = 0;
         for m in &req.messages {
             for b in &m.content {
-                if let LlmContentBlock::ToolResult { tool_call_id, cache_reference, .. } = b {
+                if let LlmContentBlock::ToolResult {
+                    tool_call_id,
+                    cache_reference,
+                    ..
+                } = b
+                {
                     assert_eq!(cache_reference.as_deref(), Some(tool_call_id.as_str()));
                     stamped += 1;
                 }
@@ -2693,7 +2959,10 @@ mod tests {
         }
         refs.sort();
         // dedup: "dup" appears once (pinned wins, new collapses), plus p1 + n1.
-        assert_eq!(refs, vec!["dup".to_string(), "n1".to_string(), "p1".to_string()]);
+        assert_eq!(
+            refs,
+            vec!["dup".to_string(), "n1".to_string(), "p1".to_string()]
+        );
 
         // (c) the pinned block landed in the tool_result user message, spliced
         // immediately AFTER the tool_result block.
@@ -2739,18 +3008,16 @@ mod tests {
         let transport = FakeTransport::always(ProviderResponse::json(200, ok_response_json()));
         let adapter = make_adapter(transport);
         let req = adapter
-            .build_request(
-                "claude-opus-4-7",
-                None,
-                None,
-                vec![],
-                vec![],
-                false,
-                None,
-            )
+            .build_request("claude-opus-4-7", None, None, vec![], vec![], false, None)
             .expect("build_request without profile");
-        assert_eq!(req.model, "claude-opus-4-7", "model must be preserved verbatim");
-        assert!(req.profile.is_none(), "profile must be None when not passed");
+        assert_eq!(
+            req.model, "claude-opus-4-7",
+            "model must be preserved verbatim"
+        );
+        assert!(
+            req.profile.is_none(),
+            "profile must be None when not passed"
+        );
     }
 
     // ── build_request thinking / temperature / max_tokens (DIV-1/3/4) ────────
@@ -2787,8 +3054,15 @@ mod tests {
                 Some(llm_client::ReasoningConfig::Adaptive),
                 "{model} → adaptive"
             );
-            assert!(req.temperature.is_none(), "{model} → no temperature when thinking on");
-            assert_eq!(req.max_tokens, Some(expected_max), "{model} → model max_tokens");
+            assert!(
+                req.temperature.is_none(),
+                "{model} → no temperature when thinking on"
+            );
+            assert_eq!(
+                req.max_tokens,
+                Some(expected_max),
+                "{model} → model max_tokens"
+            );
         }
         clear_thinking_env();
     }
@@ -2809,7 +3083,9 @@ mod tests {
         assert_eq!(req.max_tokens, Some(32_000));
         assert_eq!(
             req.reasoning,
-            Some(llm_client::ReasoningConfig::Enabled { budget_tokens: 31_999 }),
+            Some(llm_client::ReasoningConfig::Enabled {
+                budget_tokens: 31_999
+            }),
             "haiku-4-5 → fixed budget clamped to max_tokens-1"
         );
         assert!(req.temperature.is_none(), "thinking on → no temperature");
@@ -2828,7 +3104,11 @@ mod tests {
             .build_request("claude-opus-4-8", None, None, vec![], vec![], false, None)
             .expect("build_request");
         assert!(req.reasoning.is_none(), "thinking disabled → no reasoning");
-        assert_eq!(req.temperature, Some(1.0), "thinking disabled → temperature 1");
+        assert_eq!(
+            req.temperature,
+            Some(1.0),
+            "thinking disabled → temperature 1"
+        );
         // max_tokens still the model value (binary YCe: opus-4-8 → 64k).
         assert_eq!(req.max_tokens, Some(64_000));
         clear_thinking_env();
@@ -2842,7 +3122,15 @@ mod tests {
         let adapter = make_adapter(transport);
         // Escalation override (Some) honored verbatim.
         let req = adapter
-            .build_request("claude-opus-4-8", None, None, vec![], vec![], false, Some(7_777))
+            .build_request(
+                "claude-opus-4-8",
+                None,
+                None,
+                vec![],
+                vec![],
+                false,
+                Some(7_777),
+            )
             .expect("build_request");
         assert_eq!(req.max_tokens, Some(7_777));
         clear_thinking_env();
@@ -2853,12 +3141,15 @@ mod tests {
         let _g = THINKING_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         clear_thinking_env();
         let transport = FakeTransport::always(ProviderResponse::json(200, ok_response_json()));
-        let adapter = make_adapter(transport)
-            .with_thinking(crate::model::thinking::ThinkingConfig::Disabled);
+        let adapter =
+            make_adapter(transport).with_thinking(crate::model::thinking::ThinkingConfig::Disabled);
         let req = adapter
             .build_request("claude-opus-4-8", None, None, vec![], vec![], false, None)
             .expect("build_request");
-        assert!(req.reasoning.is_none(), "ThinkingConfig::Disabled → no reasoning");
+        assert!(
+            req.reasoning.is_none(),
+            "ThinkingConfig::Disabled → no reasoning"
+        );
         assert_eq!(req.temperature, Some(1.0));
         clear_thinking_env();
     }
@@ -2876,7 +3167,9 @@ mod tests {
             .expect("build_request");
         assert_eq!(
             req.metadata,
-            Some(llm_client::RequestMetadata { user_id: "{\"session_id\":\"s1\"}".to_string() })
+            Some(llm_client::RequestMetadata {
+                user_id: "{\"session_id\":\"s1\"}".to_string()
+            })
         );
 
         // Default adapter → no metadata.
@@ -2937,11 +3230,13 @@ mod tests {
     fn effective_subscriber_prefers_live_snapshot() {
         let transport = FakeTransport::always(ProviderResponse::json(200, ok_response_json()));
         let adapter = make_adapter_with_subscriber(transport, SubscriberState::default())
-            .with_subscription(shared_slot(Some(traits::subscription::SubscriptionSnapshot {
-                is_subscriber: true,
-                subscription_type: Some("enterprise".to_string()),
-                ..Default::default()
-            })));
+            .with_subscription(shared_slot(Some(
+                traits::subscription::SubscriptionSnapshot {
+                    is_subscriber: true,
+                    subscription_type: Some("enterprise".to_string()),
+                    ..Default::default()
+                },
+            )));
         let sub = adapter.effective_subscriber();
         assert!(sub.is_subscriber);
         assert!(sub.is_enterprise);
@@ -2949,7 +3244,10 @@ mod tests {
 
     #[test]
     fn effective_subscriber_falls_back_when_slot_empty_or_absent() {
-        let static_state = SubscriberState { is_subscriber: true, is_enterprise: false };
+        let static_state = SubscriberState {
+            is_subscriber: true,
+            is_enterprise: false,
+        };
 
         // No slot attached → static build-time state.
         let transport = FakeTransport::always(ProviderResponse::json(200, ok_response_json()));
@@ -2971,11 +3269,13 @@ mod tests {
     fn effective_subscriber_non_enterprise_tier_is_not_enterprise() {
         let transport = FakeTransport::always(ProviderResponse::json(200, ok_response_json()));
         let adapter = make_adapter_with_subscriber(transport, SubscriberState::default())
-            .with_subscription(shared_slot(Some(traits::subscription::SubscriptionSnapshot {
-                is_subscriber: true,
-                subscription_type: Some("team".to_string()),
-                ..Default::default()
-            })));
+            .with_subscription(shared_slot(Some(
+                traits::subscription::SubscriptionSnapshot {
+                    is_subscriber: true,
+                    subscription_type: Some("team".to_string()),
+                    ..Default::default()
+                },
+            )));
         let sub = adapter.effective_subscriber();
         assert!(sub.is_subscriber);
         assert!(!sub.is_enterprise);
@@ -2988,7 +3288,13 @@ mod tests {
         let transport = FakeTransport::always(ProviderResponse::json(200, ok_response_json()));
         let adapter = make_adapter(transport.clone());
         let resp = adapter
-            .messages_create("claude-sonnet-4-20250514", None, Some("sys"), Vec::new(), Vec::new())
+            .messages_create(
+                "claude-sonnet-4-20250514",
+                None,
+                Some("sys"),
+                Vec::new(),
+                Vec::new(),
+            )
             .await
             .expect("ok");
         assert_eq!(resp.model, "claude-sonnet-4-20250514");
@@ -3000,7 +3306,10 @@ mod tests {
         let transport = FakeTransport::always(ProviderResponse::json(200, ok_response_json()));
         let adapter = make_adapter(transport);
         let models = OrchestratorApiClient::available_models(&adapter);
-        assert!(!models.is_empty(), "available_models must return at least one entry");
+        assert!(
+            !models.is_empty(),
+            "available_models must return at least one entry"
+        );
     }
 
     #[test]
@@ -3025,7 +3334,10 @@ mod tests {
         assert_eq!(label_for("openrouter").as_deref(), Some("OpenRouter"));
         assert_eq!(label_for("deepseek").as_deref(), Some("DeepSeek"));
         assert_eq!(label_for("glm-coding").as_deref(), Some("GLM (coding)"));
-        assert_eq!(label_for("github-copilot").as_deref(), Some("GitHub Copilot"));
+        assert_eq!(
+            label_for("github-copilot").as_deref(),
+            Some("GitHub Copilot")
+        );
     }
 
     #[tokio::test]
@@ -3038,7 +3350,13 @@ mod tests {
             "input_schema": {"type": "object"}
         })];
         let _ = adapter
-            .messages_create("claude-sonnet-4-20250514", None, Some("sys"), Vec::new(), tools)
+            .messages_create(
+                "claude-sonnet-4-20250514",
+                None,
+                Some("sys"),
+                Vec::new(),
+                tools,
+            )
             .await
             .expect("ok");
         assert_eq!(transport.seen_count(), 1);
@@ -3065,7 +3383,12 @@ mod tests {
         let adapter = make_adapter(transport.clone());
         let seam: Arc<dyn agent::SubagentApiClient> = Arc::new(adapter);
         let result = seam
-            .messages_create("claude-sonnet-4-20250514", Some("sys"), Vec::new(), Vec::new())
+            .messages_create(
+                "claude-sonnet-4-20250514",
+                Some("sys"),
+                Vec::new(),
+                Vec::new(),
+            )
             .await;
         // May succeed or fail with UnsupportedCapability if stream not configured,
         // but must not panic.
@@ -3115,7 +3438,13 @@ mod tests {
         ]);
         let adapter = make_adapter(transport.clone());
         let resp = adapter
-            .messages_create("claude-sonnet-4-20250514", None, None, Vec::new(), Vec::new())
+            .messages_create(
+                "claude-sonnet-4-20250514",
+                None,
+                None,
+                Vec::new(),
+                Vec::new(),
+            )
             .await
             .expect("ok after retry");
         assert_eq!(resp.stop_reason.as_deref(), Some("end_turn"));
@@ -3129,7 +3458,13 @@ mod tests {
         let transport = FakeTransport::always(ProviderResponse::json(200, ok_response_json()));
         let adapter = make_adapter(transport.clone());
         let _ = adapter
-            .messages_create("claude-sonnet-4-20250514", None, None, Vec::new(), Vec::new())
+            .messages_create(
+                "claude-sonnet-4-20250514",
+                None,
+                None,
+                Vec::new(),
+                Vec::new(),
+            )
             .await
             .expect("ok");
         let headers = transport.seen_headers(0);
@@ -3144,6 +3479,75 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn anthropic_beta_header_is_protocol_scoped() {
+        let anthropic_headers = headers_after_inject_for_protocol(
+            ProtocolFamily::AnthropicMessages,
+            ProviderId::AnthropicFirstParty,
+            "https://api.anthropic.com",
+        )
+        .await;
+        assert!(anthropic_headers.contains_key("anthropic-beta"));
+
+        let routes = [
+            (
+                ProtocolFamily::OpenAiChat,
+                "https://api.openai.com/v1",
+                "openai",
+            ),
+            (
+                ProtocolFamily::OpenAiResponses,
+                "https://api.openai.com/v1",
+                "openai-responses",
+            ),
+            (
+                ProtocolFamily::GeminiGenerateContent,
+                "https://generativelanguage.googleapis.com/v1beta",
+                "gemini",
+            ),
+            (
+                ProtocolFamily::AzureOpenAi,
+                "https://example.openai.azure.com/openai/deployments/model",
+                "azure-openai",
+            ),
+            (
+                ProtocolFamily::BedrockClaude,
+                "https://bedrock-runtime.us-east-1.amazonaws.com",
+                "bedrock-claude",
+            ),
+            (
+                ProtocolFamily::VertexClaude,
+                "https://us-central1-aiplatform.googleapis.com/v1/projects/p/locations/us-central1/publishers/anthropic/models/model:rawPredict",
+                "vertex-claude",
+            ),
+            (
+                ProtocolFamily::VertexGemini,
+                "https://us-central1-aiplatform.googleapis.com/v1/projects/p/locations/us-central1/publishers/google/models/model:generateContent",
+                "vertex-gemini",
+            ),
+        ];
+
+        for (protocol, base_url, name) in routes {
+            let headers = headers_after_inject_for_protocol(
+                protocol,
+                ProviderId::OpenAICompatible {
+                    name: name.to_string(),
+                },
+                base_url,
+            )
+            .await;
+            assert!(
+                !headers.contains_key("anthropic-beta"),
+                "{name} must not receive anthropic-beta: {headers:?}"
+            );
+            assert!(headers.contains_key("user-agent"));
+            assert_eq!(
+                headers.get("x-request-id").map(String::as_str),
+                Some("req_test")
+            );
+        }
+    }
+
     /// Plan test: budget terminates after DEFAULT_MAX_RETRIES + 1 executions.
     #[tokio::test]
     async fn retry_terminal_after_budget() {
@@ -3152,9 +3556,20 @@ mod tests {
             500,
             serde_json::json!({"type": "error", "error": {"type": "api_error", "message": "internal"}}),
         ))]);
-        let adapter = make_adapter(transport.clone());
+        let adapter = make_adapter_with_routing(
+            transport.clone(),
+            std::collections::BTreeMap::new(),
+            None,
+            Some(0),
+        );
         let result = adapter
-            .messages_create("claude-sonnet-4-20250514", None, None, Vec::new(), Vec::new())
+            .messages_create(
+                "claude-sonnet-4-20250514",
+                None,
+                None,
+                Vec::new(),
+                Vec::new(),
+            )
             .await;
         assert!(result.is_err(), "must fail after exhausting budget");
         // Should have tried DEFAULT_MAX_RETRIES + 1 = 11 times.
@@ -3184,11 +3599,21 @@ mod tests {
         });
         let adapter = make_adapter(transport.clone());
         let result = adapter
-            .messages_create("claude-sonnet-4-20250514", None, None, Vec::new(), Vec::new())
+            .messages_create(
+                "claude-sonnet-4-20250514",
+                None,
+                None,
+                Vec::new(),
+                Vec::new(),
+            )
             .await;
         assert!(result.is_err(), "x-should-retry:false must be terminal");
         // Only ONE execution — no retries.
-        assert_eq!(transport.seen_count(), 1, "x-should-retry:false must not retry");
+        assert_eq!(
+            transport.seen_count(),
+            1,
+            "x-should-retry:false must not retry"
+        );
     }
 
     /// Plan test: tool_use id round-trips through the adapter without mangling.
@@ -3208,7 +3633,13 @@ mod tests {
         let transport = FakeTransport::always(ProviderResponse::json(200, response_json));
         let adapter = make_adapter(transport);
         let resp = adapter
-            .messages_create("claude-sonnet-4-20250514", None, None, Vec::new(), Vec::new())
+            .messages_create(
+                "claude-sonnet-4-20250514",
+                None,
+                None,
+                Vec::new(),
+                Vec::new(),
+            )
             .await
             .expect("ok");
         match resp.content.as_slice() {
@@ -3331,16 +3762,30 @@ mod tests {
             is_meta: false,
         }];
         let stripped = strip_excess_media(msgs, 1);
-        assert_eq!(count_media(&stripped), 1, "nested media trimmed to the limit");
+        assert_eq!(
+            count_media(&stripped),
+            1,
+            "nested media trimmed to the limit"
+        );
         // The text block and the newest image survive.
         let ConversationMessage::User { content, .. } = &stripped[0] else {
             panic!("user message");
         };
-        let ContentBlock::ToolResult { content_blocks: Some(blocks), .. } = &content[0] else {
+        let ContentBlock::ToolResult {
+            content_blocks: Some(blocks),
+            ..
+        } = &content[0]
+        else {
             panic!("tool_result with content_blocks");
         };
-        assert_eq!(blocks.len(), 2, "one image + the text remain; got {blocks:?}");
-        assert!(blocks.iter().any(|v| v.get("type").and_then(|t| t.as_str()) == Some("text")));
+        assert_eq!(
+            blocks.len(),
+            2,
+            "one image + the text remain; got {blocks:?}"
+        );
+        assert!(blocks
+            .iter()
+            .any(|v| v.get("type").and_then(|t| t.as_str()) == Some("text")));
     }
 
     #[test]
@@ -3395,25 +3840,44 @@ mod tests {
     #[test]
     fn error_kind_labels_match_api_client_originals() {
         // api-client: Unauthorized → "unauthorized"
-        assert_eq!(ProviderApiAdapter::error_kind(&LlmError::Authentication), "unauthorized");
-        assert_eq!(ProviderApiAdapter::error_kind(&LlmError::PermissionDenied), "unauthorized");
+        assert_eq!(
+            ProviderApiAdapter::error_kind(&LlmError::Authentication),
+            "unauthorized"
+        );
+        assert_eq!(
+            ProviderApiAdapter::error_kind(&LlmError::PermissionDenied),
+            "unauthorized"
+        );
         // api-client: Server → "server"
-        assert_eq!(ProviderApiAdapter::error_kind(&LlmError::ProviderInternal), "server");
+        assert_eq!(
+            ProviderApiAdapter::error_kind(&LlmError::ProviderInternal),
+            "server"
+        );
         // api-client: Http → "http"
         assert_eq!(
-            ProviderApiAdapter::error_kind(&LlmError::Transport { message: "t".into() }),
+            ProviderApiAdapter::error_kind(&LlmError::Transport {
+                message: "t".into()
+            }),
             "http"
         );
         // api-client: MalformedStream → "malformed_stream"
         assert_eq!(
-            ProviderApiAdapter::error_kind(&LlmError::StreamInterrupted { message: "s".into() }),
+            ProviderApiAdapter::error_kind(&LlmError::StreamInterrupted {
+                message: "s".into()
+            }),
             "malformed_stream"
         );
         // api-client: Overloaded → "overloaded"
-        assert_eq!(ProviderApiAdapter::error_kind(&LlmError::Overloaded { repeated: false }), "overloaded");
+        assert_eq!(
+            ProviderApiAdapter::error_kind(&LlmError::Overloaded { repeated: false }),
+            "overloaded"
+        );
         // api-client: RateLimited → "rate_limited"
         assert_eq!(
-            ProviderApiAdapter::error_kind(&LlmError::RateLimited { retry_after: None, scope: None }),
+            ProviderApiAdapter::error_kind(&LlmError::RateLimited {
+                retry_after: None,
+                scope: None
+            }),
             "rate_limited"
         );
         // api-client: PromptTooLong → "prompt_too_long"
@@ -3443,10 +3907,19 @@ mod tests {
         });
         let adapter = make_adapter_with_subscriber(
             transport.clone(),
-            SubscriberState { is_subscriber: true, is_enterprise: false },
+            SubscriberState {
+                is_subscriber: true,
+                is_enterprise: false,
+            },
         );
         let result = adapter
-            .messages_create("claude-sonnet-4-20250514", None, None, Vec::new(), Vec::new())
+            .messages_create(
+                "claude-sonnet-4-20250514",
+                None,
+                None,
+                Vec::new(),
+                Vec::new(),
+            )
             .await;
         assert!(result.is_err(), "subscriber 429 must be terminal");
         // Only ONE execution — no retries.
@@ -3530,12 +4003,24 @@ mod tests {
         // Subscriber (non-enterprise) → the 429 is terminal on the first try.
         let adapter = make_adapter_with_subscriber(
             transport.clone(),
-            SubscriberState { is_subscriber: true, is_enterprise: false },
+            SubscriberState {
+                is_subscriber: true,
+                is_enterprise: false,
+            },
         );
         let result = adapter
-            .messages_create("claude-sonnet-4-20250514", None, None, Vec::new(), Vec::new())
+            .messages_create(
+                "claude-sonnet-4-20250514",
+                None,
+                None,
+                Vec::new(),
+                Vec::new(),
+            )
             .await;
-        assert!(matches!(result, Err(LlmError::RateLimited { .. })), "got {result:?}");
+        assert!(
+            matches!(result, Err(LlmError::RateLimited { .. })),
+            "got {result:?}"
+        );
 
         // The composed copy is cached for the orchestrator's terminal re-map.
         assert_eq!(
@@ -3605,12 +4090,24 @@ mod tests {
         // Subscriber (non-enterprise) → the 429 is terminal on the first try.
         let adapter = make_adapter_with_subscriber(
             transport.clone(),
-            SubscriberState { is_subscriber: true, is_enterprise: false },
+            SubscriberState {
+                is_subscriber: true,
+                is_enterprise: false,
+            },
         );
         let result = adapter
-            .messages_create("claude-sonnet-4-20250514", None, None, Vec::new(), Vec::new())
+            .messages_create(
+                "claude-sonnet-4-20250514",
+                None,
+                None,
+                Vec::new(),
+                Vec::new(),
+            )
             .await;
-        assert!(matches!(result, Err(LlmError::RateLimited { .. })), "got {result:?}");
+        assert!(
+            matches!(result, Err(LlmError::RateLimited { .. })),
+            "got {result:?}"
+        );
 
         // Promoted at the terminal: rejected limits snapshot.
         let info = OrchestratorApiClient::last_rate_limit_full(&adapter).expect("snapshot");
@@ -3665,10 +4162,19 @@ mod tests {
         // Enterprise subscriber → the 429 is retried, then the 200 recovers.
         let adapter = make_adapter_with_subscriber(
             transport.clone(),
-            SubscriberState { is_subscriber: true, is_enterprise: true },
+            SubscriberState {
+                is_subscriber: true,
+                is_enterprise: true,
+            },
         );
         let result = adapter
-            .messages_create("claude-sonnet-4-20250514", None, None, Vec::new(), Vec::new())
+            .messages_create(
+                "claude-sonnet-4-20250514",
+                None,
+                None,
+                Vec::new(),
+                Vec::new(),
+            )
             .await;
         assert!(result.is_ok(), "429 then 200 must recover: {result:?}");
 
@@ -3779,7 +4285,13 @@ mod tests {
         // Drive A: 429(seven_day) (retried, pending set) → 400 (terminal,
         // non-RateLimited → no promotion). Pending lingers with A's snapshot.
         let a = adapter
-            .messages_create("claude-haiku-4-20250307", None, None, Vec::new(), Vec::new())
+            .messages_create(
+                "claude-haiku-4-20250307",
+                None,
+                None,
+                Vec::new(),
+                Vec::new(),
+            )
             .await;
         assert!(
             matches!(a, Err(LlmError::InvalidRequest { .. })),
@@ -3789,7 +4301,13 @@ mod tests {
         // Drive B: 429(five_hour) (retried, pending OVERWRITTEN with B's
         // snapshot) → 429(five_hour) terminal → promotes B's snapshot.
         let b = adapter
-            .messages_create("claude-haiku-4-20250307", None, None, Vec::new(), Vec::new())
+            .messages_create(
+                "claude-haiku-4-20250307",
+                None,
+                None,
+                Vec::new(),
+                Vec::new(),
+            )
             .await;
         assert!(
             matches!(b, Err(LlmError::RateLimited { .. })),
@@ -3825,10 +4343,19 @@ mod tests {
         });
         let adapter = make_adapter_with_subscriber(
             transport.clone(),
-            SubscriberState { is_subscriber: true, is_enterprise: false },
+            SubscriberState {
+                is_subscriber: true,
+                is_enterprise: false,
+            },
         );
         let result = adapter
-            .messages_create("claude-sonnet-4-20250514", None, None, Vec::new(), Vec::new())
+            .messages_create(
+                "claude-sonnet-4-20250514",
+                None,
+                None,
+                Vec::new(),
+                Vec::new(),
+            )
             .await;
         assert!(result.is_err());
         assert_eq!(
@@ -3863,10 +4390,19 @@ mod tests {
         // Without a pro/enterprise snapshot → "Sonnet limit".
         let adapter = make_adapter_with_subscriber(
             FakeTransport::always(resp_429("seven_day_sonnet")),
-            SubscriberState { is_subscriber: true, is_enterprise: false },
+            SubscriberState {
+                is_subscriber: true,
+                is_enterprise: false,
+            },
         );
         let _ = adapter
-            .messages_create("claude-sonnet-4-20250514", None, None, Vec::new(), Vec::new())
+            .messages_create(
+                "claude-sonnet-4-20250514",
+                None,
+                None,
+                Vec::new(),
+                Vec::new(),
+            )
             .await;
         assert_eq!(
             OrchestratorApiClient::last_rate_limit_error_message(&adapter).as_deref(),
@@ -3876,15 +4412,26 @@ mod tests {
         // With a live `pro` snapshot → "weekly limit".
         let pro = make_adapter_with_subscriber(
             FakeTransport::always(resp_429("seven_day_sonnet")),
-            SubscriberState { is_subscriber: true, is_enterprise: false },
+            SubscriberState {
+                is_subscriber: true,
+                is_enterprise: false,
+            },
         )
-        .with_subscription(shared_slot(Some(traits::subscription::SubscriptionSnapshot {
-            is_subscriber: true,
-            subscription_type: Some("pro".to_string()),
-            ..Default::default()
-        })));
+        .with_subscription(shared_slot(Some(
+            traits::subscription::SubscriptionSnapshot {
+                is_subscriber: true,
+                subscription_type: Some("pro".to_string()),
+                ..Default::default()
+            },
+        )));
         let _ = pro
-            .messages_create("claude-sonnet-4-20250514", None, None, Vec::new(), Vec::new())
+            .messages_create(
+                "claude-sonnet-4-20250514",
+                None,
+                None,
+                Vec::new(),
+                Vec::new(),
+            )
             .await;
         assert_eq!(
             OrchestratorApiClient::last_rate_limit_error_message(&pro).as_deref(),
@@ -3916,13 +4463,29 @@ mod tests {
         ]);
         let adapter = make_adapter_with_subscriber(
             transport.clone(),
-            SubscriberState { is_subscriber: true, is_enterprise: true },
+            SubscriberState {
+                is_subscriber: true,
+                is_enterprise: true,
+            },
         );
         let result = adapter
-            .messages_create("claude-sonnet-4-20250514", None, None, Vec::new(), Vec::new())
+            .messages_create(
+                "claude-sonnet-4-20250514",
+                None,
+                None,
+                Vec::new(),
+                Vec::new(),
+            )
             .await;
-        assert!(result.is_ok(), "enterprise subscriber 429 must retry and succeed");
-        assert_eq!(transport.seen_count(), 2, "should have made 2 requests (429 then 200)");
+        assert!(
+            result.is_ok(),
+            "enterprise subscriber 429 must retry and succeed"
+        );
+        assert_eq!(
+            transport.seen_count(),
+            2,
+            "should have made 2 requests (429 then 200)"
+        );
     }
 
     /// Fix 1 end-to-end: a fake transport returns a 400 PTL envelope with counts;
@@ -3946,7 +4509,13 @@ mod tests {
         let adapter = make_adapter(transport);
 
         let result = adapter
-            .messages_create("claude-sonnet-4-20250514", None, None, Vec::new(), Vec::new())
+            .messages_create(
+                "claude-sonnet-4-20250514",
+                None,
+                None,
+                Vec::new(),
+                Vec::new(),
+            )
             .await;
 
         match result {
@@ -3992,7 +4561,13 @@ mod tests {
 
         let adapter = make_adapter(transport);
         let llm_result = adapter
-            .messages_create("claude-sonnet-4-20250514", None, None, Vec::new(), Vec::new())
+            .messages_create(
+                "claude-sonnet-4-20250514",
+                None,
+                None,
+                Vec::new(),
+                Vec::new(),
+            )
             .await;
 
         // Clean up before any assert that might panic.
@@ -4004,9 +4579,9 @@ mod tests {
         // The adapter must return Err(LlmError::Overloaded { repeated: true }).
         match &llm_result {
             Err(LlmError::Overloaded { repeated: true }) => {} // correct
-            other => panic!(
-                "expected Err(LlmError::Overloaded {{ repeated: true }}), got {other:?}"
-            ),
+            other => {
+                panic!("expected Err(LlmError::Overloaded {{ repeated: true }}), got {other:?}")
+            }
         }
 
         // The OrchestratorError conversion must yield RepeatedOverloaded.
@@ -4025,8 +4600,8 @@ mod tests {
     // ── 3c-T3: LlmResponse.cost populated from cost estimator ─────────────────
 
     fn make_adapter_with_estimator(transport: Arc<dyn Transport>) -> ProviderApiAdapter {
-        use cost::pricing::PricingCatalog as CostCatalog;
         use crate::cost_wiring::llm_catalog_from_cost;
+        use cost::pricing::PricingCatalog as CostCatalog;
         use llm_client::{CostEstimator, PricingPolicy};
         #[allow(deprecated)]
         std::env::set_var("ADAPTER_TEST_KEY", "test-key");
@@ -4060,6 +4635,9 @@ mod tests {
                     pricing: PricingConfig::default(),
                     signing: None,
                     azure: None,
+                    supports_websockets: false,
+                    supports_websocket_compression: false,
+                    websocket_connect_timeout_ms: None,
                 }],
             })
             .expect("client"),
@@ -4096,7 +4674,13 @@ mod tests {
         let transport = FakeTransport::always(ProviderResponse::json(200, response_json));
         let adapter = make_adapter_with_estimator(transport);
         let resp = adapter
-            .messages_create("claude-sonnet-4-20250514", None, None, Vec::new(), Vec::new())
+            .messages_create(
+                "claude-sonnet-4-20250514",
+                None,
+                None,
+                Vec::new(),
+                Vec::new(),
+            )
             .await
             .expect("ok");
         let cost = resp.cost.expect("cost must be Some for a priced model");
@@ -4116,8 +4700,8 @@ mod tests {
     #[tokio::test]
     async fn cost_none_for_unpriced_model() {
         // Build an adapter with an estimator but a billing model not in the catalog.
-        use cost::pricing::PricingCatalog as CostCatalog;
         use crate::cost_wiring::llm_catalog_from_cost;
+        use cost::pricing::PricingCatalog as CostCatalog;
         use llm_client::{CostEstimator, PricingPolicy};
         #[allow(deprecated)]
         std::env::set_var("ADAPTER_TEST_KEY2", "test-key");
@@ -4150,6 +4734,9 @@ mod tests {
                     pricing: PricingConfig::default(),
                     signing: None,
                     azure: None,
+                    supports_websockets: false,
+                    supports_websocket_compression: false,
+                    websocket_connect_timeout_ms: None,
                 }],
             })
             .expect("client"),
@@ -4203,7 +4790,13 @@ mod tests {
         // make_adapter wires None estimator (ProviderApiAdapter::new default path)
         let adapter = make_adapter(transport);
         let resp = adapter
-            .messages_create("claude-sonnet-4-20250514", None, None, Vec::new(), Vec::new())
+            .messages_create(
+                "claude-sonnet-4-20250514",
+                None,
+                None,
+                Vec::new(),
+                Vec::new(),
+            )
             .await
             .expect("ok");
         assert!(resp.cost.is_none(), "no estimator → cost must be None");
@@ -4270,25 +4863,17 @@ mod tests {
             _request: &'a ProviderRequest,
         ) -> BoxFuture<'a, Result<StreamingResponse, LlmError>> {
             let mut count = self.stream_call_count.lock().unwrap();
-            let idx = (*count).min(
-                self.stream_resps
-                    .lock()
-                    .unwrap()
-                    .len()
-                    .saturating_sub(1),
-            );
+            let idx = (*count).min(self.stream_resps.lock().unwrap().len().saturating_sub(1));
             *count += 1;
             drop(count);
             let resp = {
                 let resps = self.stream_resps.lock().unwrap();
                 match &resps[idx] {
-                    FakeStreamResp::Status { status, headers } => {
-                        Ok(StreamingResponse {
-                            status: *status,
-                            headers: headers.clone(),
-                            frames: Box::new(EmptyFrames),
-                        })
-                    }
+                    FakeStreamResp::Status { status, headers } => Ok(StreamingResponse {
+                        status: *status,
+                        headers: headers.clone(),
+                        frames: Box::new(EmptyFrames),
+                    }),
                     FakeStreamResp::Err(e) => Err(e.clone()),
                 }
             };
@@ -4424,6 +5009,9 @@ mod tests {
                     pricing: PricingConfig::default(),
                     signing: None,
                     azure: None,
+                    supports_websockets: false,
+                    supports_websocket_compression: false,
+                    websocket_connect_timeout_ms: None,
                 }],
             })
             .expect("client"),
@@ -4491,12 +5079,8 @@ mod tests {
 
         // No env var needed: claude-opus-4-6 is_non_custom_opus=true → allow_fallback=true
         // for non-subscriber (default SubscriberState).
-        let mut adapter = make_adapter_with_routing(
-            transport.clone(),
-            fallback_overrides,
-            None,
-            None,
-        );
+        let mut adapter =
+            make_adapter_with_routing(transport.clone(), fallback_overrides, None, Some(0));
         // Global fallback also points somewhere — per-model must win.
         adapter.fallback_model = Some("claude-sonnet-4-20250514".to_string());
 
@@ -4518,7 +5102,11 @@ mod tests {
             result.is_ok(),
             "per-model fallback should route to haiku and succeed: {result:?}"
         );
-        assert_eq!(transport.seen_count(), 4, "expected 4 requests: 3 × 529 + 1 × 200");
+        assert_eq!(
+            transport.seen_count(),
+            4,
+            "expected 4 requests: 3 × 529 + 1 × 200"
+        );
     }
 
     /// Global fallback is used when no per-model entry is present.
@@ -4547,7 +5135,7 @@ mod tests {
             transport.clone(),
             std::collections::BTreeMap::new(),
             None,
-            None,
+            Some(0),
         );
         // Global fallback: opus → haiku.
         adapter.fallback_model = Some("claude-haiku-4-20250307".to_string());
@@ -4601,23 +5189,19 @@ mod tests {
             vec!["claude-haiku-4-20250307".to_string()],
         );
 
-        let adapter = make_adapter_with_routing(
-            transport.clone(),
-            fallback_overrides,
-            None,
-            None,
-        );
+        let adapter =
+            make_adapter_with_routing(transport.clone(), fallback_overrides, None, Some(0));
 
         // Request via ALIAS — the alias_to_display map must normalize this to
         // "claude-sonnet-4-20250514" before the fallback_overrides lookup.
         let result = OrchestratorApiClient::messages_create_with_fallback(
             &adapter,
-            "claude",      // alias of "claude-sonnet-4-20250514"
+            "claude", // alias of "claude-sonnet-4-20250514"
             None,
             Some("sys"),
             Vec::new(),
             Vec::new(),
-            None,          // no explicit call-site fallback (per-model must activate)
+            None, // no explicit call-site fallback (per-model must activate)
             false,
             false,
         )
@@ -4677,7 +5261,8 @@ mod tests {
             ],
         );
 
-        let adapter = make_adapter_with_routing(transport.clone(), fallback_overrides, None, None);
+        let adapter =
+            make_adapter_with_routing(transport.clone(), fallback_overrides, None, Some(0));
 
         let result = OrchestratorApiClient::messages_create_with_fallback(
             &adapter,
@@ -4692,8 +5277,15 @@ mod tests {
         )
         .await;
 
-        assert!(result.is_ok(), "chain walk must succeed on chain[1]: {result:?}");
-        assert_eq!(transport.seen_count(), 7, "3 primary + 3 chain[0] + 1 chain[1]");
+        assert!(
+            result.is_ok(),
+            "chain walk must succeed on chain[1]: {result:?}"
+        );
+        assert_eq!(
+            transport.seen_count(),
+            7,
+            "3 primary + 3 chain[0] + 1 chain[1]"
+        );
 
         // Assert the model sequence: first 3 requests use primary, next 3 use chain[0],
         // last 1 uses chain[1].
@@ -4740,7 +5332,8 @@ mod tests {
             vec!["claude-haiku-4-20250307".to_string()],
         );
 
-        let adapter = make_adapter_with_routing(transport.clone(), fallback_overrides, None, None);
+        let adapter =
+            make_adapter_with_routing(transport.clone(), fallback_overrides, None, Some(0));
 
         let result = OrchestratorApiClient::messages_create_with_fallback(
             &adapter,
@@ -4755,7 +5348,10 @@ mod tests {
         )
         .await;
 
-        assert!(result.is_err(), "exhausted chain must produce terminal error");
+        assert!(
+            result.is_err(),
+            "exhausted chain must produce terminal error"
+        );
         // The error must be Overloaded (either repeated=true from external path or
         // plain Overloaded — either variant indicates the chain was walked and terminated).
         assert!(
@@ -4793,7 +5389,8 @@ mod tests {
             "claude-opus-4-6".to_string(),
             vec!["claude-haiku-4-20250307".to_string()],
         );
-        let adapter = make_adapter_with_routing(transport.clone(), fallback_overrides, None, None);
+        let adapter =
+            make_adapter_with_routing(transport.clone(), fallback_overrides, None, Some(0));
 
         let result = OrchestratorApiClient::messages_create_with_fallback(
             &adapter,
@@ -4808,7 +5405,10 @@ mod tests {
         )
         .await;
 
-        assert!(result.is_ok(), "single-entry chain must succeed: {result:?}");
+        assert!(
+            result.is_ok(),
+            "single-entry chain must succeed: {result:?}"
+        );
         assert_eq!(transport.seen_count(), 4, "3 primary 529s + 1 fallback 200");
         // First 3 requests: primary model.
         for i in 0..3 {
@@ -4850,8 +5450,12 @@ mod tests {
             FakeResponse::Ok(ProviderResponse::json(200, sonnet_ok)),
         ]);
 
-        let mut adapter =
-            make_adapter_with_routing(transport.clone(), std::collections::BTreeMap::new(), None, None);
+        let mut adapter = make_adapter_with_routing(
+            transport.clone(),
+            std::collections::BTreeMap::new(),
+            None,
+            Some(0),
+        );
         // Set global fallback only (no per-model chain).
         adapter.fallback_model = Some("claude-sonnet-4-20250514".to_string());
 
@@ -4911,7 +5515,13 @@ mod tests {
         std::env::remove_var("CLAUDE_CODE_MAX_RETRIES");
 
         let result = adapter
-            .messages_create("claude-sonnet-4-20250514", None, None, Vec::new(), Vec::new())
+            .messages_create(
+                "claude-sonnet-4-20250514",
+                None,
+                None,
+                Vec::new(),
+                Vec::new(),
+            )
             .await;
 
         // Restore.
@@ -4939,23 +5549,43 @@ mod tests {
     /// build the expected `RetryControl` and compare `max_retries`.
     #[test]
     fn env_max_retries_beats_settings_via_resolve() {
-        use crate::model::retry::{resolve_retry_control_with_settings, ResolveRetryEnv, DEFAULT_MAX_RETRIES};
+        use crate::model::retry::{
+            resolve_retry_control_with_settings, ResolveRetryEnv, DEFAULT_MAX_RETRIES,
+        };
 
         // env=Some("1") + settings=Some(8) → max_retries=1 (env wins).
         let env_with_1 = ResolveRetryEnv {
             max_retries: Some("1".to_string()),
             ..ResolveRetryEnv::default()
         };
-        let ctl = resolve_retry_control_with_settings("claude-sonnet-4-20250514", None, false, &env_with_1, Some(8));
+        let ctl = resolve_retry_control_with_settings(
+            "claude-sonnet-4-20250514",
+            None,
+            false,
+            &env_with_1,
+            Some(8),
+        );
         assert_eq!(ctl.max_retries, 1, "env(1) must beat settings(8)");
 
         // env=None + settings=Some(7) → max_retries=7 (settings wins).
         let env_absent = ResolveRetryEnv::default();
-        let ctl2 = resolve_retry_control_with_settings("claude-sonnet-4-20250514", None, false, &env_absent, Some(7));
+        let ctl2 = resolve_retry_control_with_settings(
+            "claude-sonnet-4-20250514",
+            None,
+            false,
+            &env_absent,
+            Some(7),
+        );
         assert_eq!(ctl2.max_retries, 7, "settings(7) must beat default(10)");
 
         // env=None + settings=None → DEFAULT.
-        let ctl3 = resolve_retry_control_with_settings("claude-sonnet-4-20250514", None, false, &env_absent, None);
+        let ctl3 = resolve_retry_control_with_settings(
+            "claude-sonnet-4-20250514",
+            None,
+            false,
+            &env_absent,
+            None,
+        );
         assert_eq!(ctl3.max_retries, DEFAULT_MAX_RETRIES);
     }
 
@@ -4984,7 +5614,13 @@ mod tests {
 
         let before = tokio::time::Instant::now();
         let result = adapter
-            .messages_create("claude-sonnet-4-20250514", None, None, Vec::new(), Vec::new())
+            .messages_create(
+                "claude-sonnet-4-20250514",
+                None,
+                None,
+                Vec::new(),
+                Vec::new(),
+            )
             .await;
         let elapsed = before.elapsed();
 
@@ -5030,7 +5666,13 @@ mod tests {
         });
         let adapter = make_adapter(transport);
         let _ = adapter
-            .messages_create("claude-sonnet-4-20250514", None, None, Vec::new(), Vec::new())
+            .messages_create(
+                "claude-sonnet-4-20250514",
+                None,
+                None,
+                Vec::new(),
+                Vec::new(),
+            )
             .await
             .expect("ok");
 
@@ -5055,7 +5697,13 @@ mod tests {
         let transport = FakeTransport::always(ProviderResponse::json(200, ok_response_json()));
         let adapter = make_adapter(transport);
         let _ = adapter
-            .messages_create("claude-sonnet-4-20250514", None, None, Vec::new(), Vec::new())
+            .messages_create(
+                "claude-sonnet-4-20250514",
+                None,
+                None,
+                Vec::new(),
+                Vec::new(),
+            )
             .await
             .expect("ok");
 
@@ -5093,8 +5741,15 @@ mod tests {
         .await
         .expect("count_tokens ok");
 
-        assert_eq!(count, 2095, "decoded input_tokens from the count_tokens response");
-        assert_eq!(transport.seen_count(), 1, "exactly one count_tokens request sent");
+        assert_eq!(
+            count, 2095,
+            "decoded input_tokens from the count_tokens response"
+        );
+        assert_eq!(
+            transport.seen_count(),
+            1,
+            "exactly one count_tokens request sent"
+        );
 
         let url = transport.seen.lock().unwrap()[0].url.clone();
         assert!(
@@ -5106,7 +5761,10 @@ mod tests {
             crate::model::betas::Endpoint::CountTokens,
         );
         assert_eq!(
-            transport.seen_headers(0).get("anthropic-beta").map(String::as_str),
+            transport
+                .seen_headers(0)
+                .get("anthropic-beta")
+                .map(String::as_str),
             Some(expected_beta.as_str()),
             "anthropic-beta header must equal assemble_beta_header(Anthropic, CountTokens)"
         );
@@ -5168,7 +5826,13 @@ mod tests {
         });
         let adapter = make_adapter(transport);
         let _ = adapter
-            .messages_create("claude-sonnet-4-20250514", None, None, Vec::new(), Vec::new())
+            .messages_create(
+                "claude-sonnet-4-20250514",
+                None,
+                None,
+                Vec::new(),
+                Vec::new(),
+            )
             .await
             .expect("ok");
 
@@ -5199,7 +5863,13 @@ mod tests {
         let transport = FakeTransport::always(ProviderResponse::json(200, ok_response_json()));
         let adapter = make_adapter(transport);
         let _ = adapter
-            .messages_create("claude-sonnet-4-20250514", None, None, Vec::new(), Vec::new())
+            .messages_create(
+                "claude-sonnet-4-20250514",
+                None,
+                None,
+                Vec::new(),
+                Vec::new(),
+            )
             .await
             .expect("ok");
 
@@ -5343,6 +6013,9 @@ mod tests {
                     pricing: PricingConfig::default(),
                     signing: None,
                     azure: None,
+                    supports_websockets: false,
+                    supports_websocket_compression: false,
+                    websocket_connect_timeout_ms: None,
                 }],
             })
             .expect("client"),
@@ -5374,8 +6047,8 @@ mod tests {
     /// 2. `tengu_api_request_succeeded` (from the unfold's terminal-event arm)
     #[tokio::test]
     async fn stream_emit_succeeded_fires_on_message_stop() {
-        use futures::StreamExt as _;
         use ::telemetry::AnalyticsValue;
+        use futures::StreamExt as _;
 
         let transport = ScriptedStreamTransport::anthropic_success();
         let (adapter, sink) = make_stream_adapter_with_bus(transport).await;

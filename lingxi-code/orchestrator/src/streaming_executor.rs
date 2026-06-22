@@ -19,7 +19,11 @@ const REJECT_MESSAGE: &str = "The user doesn't want to proceed with this tool us
 /// Result of one `dispatch_tool_uses_tracked` call routed through the executor:
 /// the single result block + the tool's injected messages + context modifiers.
 type DispatchOutcome = Result<
-    (ContentBlock, Vec<(ConversationMessage, ToolUseId)>, Vec<ContextModifier>),
+    (
+        ContentBlock,
+        Vec<(ConversationMessage, ToolUseId)>,
+        Vec<ContextModifier>,
+    ),
     crate::error::OrchestratorError,
 >;
 
@@ -38,13 +42,12 @@ pub(crate) enum AbortReason {
 /// Build the synthetic `tool_result` for a cancelled tool (TS
 /// `createSyntheticErrorMessage`). `provider_tool_use_id` is left `None` —
 /// the caller copies the tracked tool's `provider_id` in before persisting.
-pub(crate) fn synthetic_error_block(
-    tool_use_id: ToolUseId,
-    reason: AbortReason,
-) -> ContentBlock {
+pub(crate) fn synthetic_error_block(tool_use_id: ToolUseId, reason: AbortReason) -> ContentBlock {
     let content = match reason {
-        AbortReason::StreamingFallback =>
-            "<tool_use_error>Error: Streaming fallback - tool execution discarded</tool_use_error>".to_string(),
+        AbortReason::StreamingFallback => {
+            "<tool_use_error>Error: Streaming fallback - tool execution discarded</tool_use_error>"
+                .to_string()
+        }
         // claude-code (StreamingToolExecutor.ts:160-172) uses the BARE REJECT_MESSAGE
         // here — NOT `<tool_use_error>`-wrapped — with is_error: true. This is the
         // faithful text; the `UserInterrupted` reason itself is only produced once
@@ -102,8 +105,7 @@ pub(crate) struct TrackedTool {
 /// `executing_safe_flags` is a slice of the `is_concurrency_safe` flags for
 /// every tool currently in the `Executing` state.
 pub(crate) fn can_execute(executing_safe_flags: &[bool], candidate_safe: bool) -> bool {
-    executing_safe_flags.is_empty()
-        || (candidate_safe && executing_safe_flags.iter().all(|&s| s))
+    executing_safe_flags.is_empty() || (candidate_safe && executing_safe_flags.iter().all(|&s| s))
 }
 
 /// Default maximum number of concurrency-safe tools to execute simultaneously.
@@ -123,7 +125,11 @@ pub(crate) const DEFAULT_MAX_TOOL_USE_CONCURRENCY: usize = 10;
 ///
 /// Injectable form for tests: [`max_tool_use_concurrency_from`].
 pub(crate) fn max_tool_use_concurrency() -> usize {
-    max_tool_use_concurrency_from(std::env::var("CLAUDE_CODE_MAX_TOOL_USE_CONCURRENCY").ok().as_deref())
+    max_tool_use_concurrency_from(
+        std::env::var("CLAUDE_CODE_MAX_TOOL_USE_CONCURRENCY")
+            .ok()
+            .as_deref(),
+    )
 }
 
 /// Pure resolver for [`max_tool_use_concurrency`] — `parseInt(v, 10) > 0 ? v : 10`.
@@ -377,23 +383,26 @@ impl<'a> StreamingToolExecutor<'a> {
         // `user_cancel`), `tool_abort` fires and this child fires too — an
         // in-flight Bash kills its subprocess.
         let child = self.tool_abort.child_token();
-        let fut = async move {
-            let single = vec![(id, name, input, provider_id)];
-            let outcome: DispatchOutcome =
-                match crate::turn_loop::dispatch_tool_uses_tracked(orch, &single, Some(child)).await {
-                    // `single` has one element, so `pop()` == the only result.
-                    Ok((mut blocks, _prevent, injected, modifiers)) => blocks
-                        .pop()
-                        .map(|b| (b, injected, modifiers))
-                        .ok_or_else(|| {
-                            crate::error::OrchestratorError::StreamingProtocol(format!(
-                                "dispatch returned empty for tool index {i}"
-                            ))
-                        }),
-                    Err(e) => Err(e),
-                };
-            (i, outcome)
-        };
+        let fut =
+            async move {
+                let single = vec![(id, name, input, provider_id)];
+                let outcome: DispatchOutcome =
+                    match crate::turn_loop::dispatch_tool_uses_tracked(orch, &single, Some(child))
+                        .await
+                    {
+                        // `single` has one element, so `pop()` == the only result.
+                        Ok((mut blocks, _prevent, injected, modifiers)) => blocks
+                            .pop()
+                            .map(|b| (b, injected, modifiers))
+                            .ok_or_else(|| {
+                                crate::error::OrchestratorError::StreamingProtocol(format!(
+                                    "dispatch returned empty for tool index {i}"
+                                ))
+                            }),
+                        Err(e) => Err(e),
+                    };
+                (i, outcome)
+            };
         self.inflight.push(Box::pin(fut));
     }
 
@@ -470,7 +479,9 @@ impl<'a> StreamingToolExecutor<'a> {
                 let name = &self.tools[i].name;
                 self.tools[i].result = Some(ContentBlock::ToolResult {
                     tool_use_id: self.tools[i].id.clone(),
-                    content: format!("<tool_use_error>Error calling tool ({name}): {e}</tool_use_error>"),
+                    content: format!(
+                        "<tool_use_error>Error calling tool ({name}): {e}</tool_use_error>"
+                    ),
                     is_error: true,
                     provider_tool_use_id: self.tools[i].provider_id.clone(),
                     content_blocks: None,
@@ -567,7 +578,11 @@ fn tool_description(t: &TrackedTool) -> String {
 /// Copy a provider-issued tool-call id onto a `ToolResult` block's
 /// `provider_tool_use_id` for egress replay; no-op for non-`ToolResult` blocks.
 fn set_provider_id(block: &mut ContentBlock, provider_id: Option<String>) {
-    if let ContentBlock::ToolResult { provider_tool_use_id, .. } = block {
+    if let ContentBlock::ToolResult {
+        provider_tool_use_id,
+        ..
+    } = block
+    {
         *provider_tool_use_id = provider_id;
     }
 }
@@ -632,9 +647,7 @@ pub(crate) fn synthetic_unknown_tool(
 ) -> ContentBlock {
     ContentBlock::ToolResult {
         tool_use_id: id,
-        content: format!(
-            "<tool_use_error>Error: No such tool available: {name}</tool_use_error>"
-        ),
+        content: format!("<tool_use_error>Error: No such tool available: {name}</tool_use_error>"),
         is_error: true,
         provider_tool_use_id: provider_id,
         content_blocks: None,
@@ -644,6 +657,15 @@ pub(crate) fn synthetic_unknown_tool(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    static TOOL_CONCURRENCY_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    fn tool_concurrency_env_guard() -> std::sync::MutexGuard<'static, ()> {
+        TOOL_CONCURRENCY_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
 
     #[test]
     fn status_enum_roundtrips() {
@@ -654,8 +676,13 @@ mod tests {
     #[test]
     fn streaming_fallback_synthetic() {
         let block = synthetic_error_block(ToolUseId::new(), AbortReason::StreamingFallback);
-        let ContentBlock::ToolResult { content, .. } = block else { panic!() };
-        assert_eq!(content, "<tool_use_error>Error: Streaming fallback - tool execution discarded</tool_use_error>");
+        let ContentBlock::ToolResult { content, .. } = block else {
+            panic!()
+        };
+        assert_eq!(
+            content,
+            "<tool_use_error>Error: Streaming fallback - tool execution discarded</tool_use_error>"
+        );
     }
 
     // ============================================================================
@@ -663,7 +690,10 @@ mod tests {
     // ============================================================================
 
     use crate::conversation::ConversationOrchestrator;
-    use crate::test_support::{noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider};
+    use crate::test_support::{
+        noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate,
+        StaticMemoryProvider,
+    };
     use crate::OrchestratorConfig;
     use async_trait::async_trait;
     use protocol::MessageId;
@@ -698,16 +728,26 @@ mod tests {
 
     #[async_trait]
     impl Tool for SafeTool {
-        fn name(&self) -> &str { "SafeTool" }
+        fn name(&self) -> &str {
+            "SafeTool"
+        }
         fn input_schema(&self) -> &serde_json::Value {
             static SCHEMA: once_cell::sync::Lazy<serde_json::Value> =
                 once_cell::sync::Lazy::new(|| json!({ "type": "object", "properties": {} }));
             &SCHEMA
         }
-        fn is_enabled(&self, _ctx: &ToolStaticContext) -> bool { true }
-        fn max_result_size_chars(&self) -> usize { 1024 * 1024 }
-        fn is_concurrency_safe(&self, _input: &serde_json::Value) -> bool { true }
-        fn is_read_only(&self, _input: &serde_json::Value) -> bool { true }
+        fn is_enabled(&self, _ctx: &ToolStaticContext) -> bool {
+            true
+        }
+        fn max_result_size_chars(&self) -> usize {
+            1024 * 1024
+        }
+        fn is_concurrency_safe(&self, _input: &serde_json::Value) -> bool {
+            true
+        }
+        fn is_read_only(&self, _input: &serde_json::Value) -> bool {
+            true
+        }
         async fn validate_input(
             &self,
             _input: &serde_json::Value,
@@ -721,7 +761,9 @@ mod tests {
             _ctx: &ToolUseContext,
         ) -> permission::PermissionResult {
             permission::PermissionResult::Allow {
-                reason: permission::PermissionDecisionReason::Other { reason: "test".into() },
+                reason: permission::PermissionDecisionReason::Other {
+                    reason: "test".into(),
+                },
                 updated_input: None,
                 update_destination: None,
                 metadata: permission::result::PermissionMetadata::default(),
@@ -734,7 +776,9 @@ mod tests {
         ) -> String {
             "safe-tool".into()
         }
-        async fn prompt(&self, _opts: &PromptOptions) -> String { String::new() }
+        async fn prompt(&self, _opts: &PromptOptions) -> String {
+            String::new()
+        }
         async fn call(
             &self,
             _input: serde_json::Value,
@@ -770,11 +814,20 @@ mod tests {
     async fn add_unknown_tool_completes_immediately_with_wrapper() {
         let orch = orch_empty();
         let mut exec = StreamingToolExecutor::new(&orch);
-        exec.add_tool(ToolUseId::new(), "Nope".into(), json!({}), None, MessageId::new());
+        exec.add_tool(
+            ToolUseId::new(),
+            "Nope".into(),
+            json!({}),
+            None,
+            MessageId::new(),
+        );
         let t = &exec.tools[0];
         assert_eq!(t.status, ToolStatus::Completed);
         assert!(t.is_concurrency_safe);
-        let ContentBlock::ToolResult { content, is_error, .. } = t.result.as_ref().unwrap() else {
+        let ContentBlock::ToolResult {
+            content, is_error, ..
+        } = t.result.as_ref().unwrap()
+        else {
             panic!("expected ToolResult block")
         };
         assert!(*is_error);
@@ -788,7 +841,13 @@ mod tests {
     async fn add_known_concurrency_safe_tool_is_queued() {
         let orch = orch_with_safe_tool();
         let mut exec = StreamingToolExecutor::new(&orch);
-        exec.add_tool(ToolUseId::new(), "SafeTool".into(), json!({}), None, MessageId::new());
+        exec.add_tool(
+            ToolUseId::new(),
+            "SafeTool".into(),
+            json!({}),
+            None,
+            MessageId::new(),
+        );
         let t = &exec.tools[0];
         assert_eq!(t.status, ToolStatus::Queued);
         assert!(t.is_concurrency_safe);
@@ -804,10 +863,10 @@ mod tests {
     #[test]
     fn can_execute_respects_concurrency_safety() {
         assert!(can_execute(&[], true));
-        assert!(can_execute(&[], false));         // nothing running → ok
+        assert!(can_execute(&[], false)); // nothing running → ok
         assert!(can_execute(&[true, true], true)); // all safe + candidate safe → ok
-        assert!(!can_execute(&[true], false));    // candidate unsafe, something running → no
-        assert!(!can_execute(&[false], true));    // an unsafe tool running → no
+        assert!(!can_execute(&[true], false)); // candidate unsafe, something running → no
+        assert!(!can_execute(&[false], true)); // an unsafe tool running → no
         assert!(!can_execute(&[true, true], false)); // many safe running, unsafe candidate → no
     }
 
@@ -816,16 +875,26 @@ mod tests {
 
     #[async_trait]
     impl Tool for UnsafeTool {
-        fn name(&self) -> &str { "UnsafeTool" }
+        fn name(&self) -> &str {
+            "UnsafeTool"
+        }
         fn input_schema(&self) -> &serde_json::Value {
             static SCHEMA: once_cell::sync::Lazy<serde_json::Value> =
                 once_cell::sync::Lazy::new(|| json!({ "type": "object", "properties": {} }));
             &SCHEMA
         }
-        fn is_enabled(&self, _ctx: &ToolStaticContext) -> bool { true }
-        fn max_result_size_chars(&self) -> usize { 1024 * 1024 }
-        fn is_concurrency_safe(&self, _input: &serde_json::Value) -> bool { false }
-        fn is_read_only(&self, _input: &serde_json::Value) -> bool { false }
+        fn is_enabled(&self, _ctx: &ToolStaticContext) -> bool {
+            true
+        }
+        fn max_result_size_chars(&self) -> usize {
+            1024 * 1024
+        }
+        fn is_concurrency_safe(&self, _input: &serde_json::Value) -> bool {
+            false
+        }
+        fn is_read_only(&self, _input: &serde_json::Value) -> bool {
+            false
+        }
         async fn validate_input(
             &self,
             _input: &serde_json::Value,
@@ -839,7 +908,9 @@ mod tests {
             _ctx: &ToolUseContext,
         ) -> permission::PermissionResult {
             permission::PermissionResult::Allow {
-                reason: permission::PermissionDecisionReason::Other { reason: "test".into() },
+                reason: permission::PermissionDecisionReason::Other {
+                    reason: "test".into(),
+                },
                 updated_input: None,
                 update_destination: None,
                 metadata: permission::result::PermissionMetadata::default(),
@@ -852,7 +923,9 @@ mod tests {
         ) -> String {
             "unsafe-tool".into()
         }
-        async fn prompt(&self, _opts: &PromptOptions) -> String { String::new() }
+        async fn prompt(&self, _opts: &PromptOptions) -> String {
+            String::new()
+        }
         async fn call(
             &self,
             _input: serde_json::Value,
@@ -1006,6 +1079,7 @@ mod tests {
     /// (Mutates env to clear any override → `--test-threads=1`.)
     #[tokio::test]
     async fn process_queue_caps_safe_tools_at_default_ten() {
+        let _guard = tool_concurrency_env_guard();
         // Ensure no env override leaks in from the environment.
         std::env::remove_var("CLAUDE_CODE_MAX_TOOL_USE_CONCURRENCY");
         assert_eq!(max_tool_use_concurrency(), DEFAULT_MAX_TOOL_USE_CONCURRENCY);
@@ -1032,13 +1106,25 @@ mod tests {
             executing, DEFAULT_MAX_TOOL_USE_CONCURRENCY,
             "no more than {DEFAULT_MAX_TOOL_USE_CONCURRENCY} safe tools may run at once"
         );
-        assert_eq!(queued, 30 - DEFAULT_MAX_TOOL_USE_CONCURRENCY, "the rest stay Queued");
+        assert_eq!(
+            queued,
+            30 - DEFAULT_MAX_TOOL_USE_CONCURRENCY,
+            "the rest stay Queued"
+        );
         // The first N (in received order) are the ones started.
         for i in 0..DEFAULT_MAX_TOOL_USE_CONCURRENCY {
-            assert_eq!(exec.tools[i].status, ToolStatus::Executing, "tool {i} should run");
+            assert_eq!(
+                exec.tools[i].status,
+                ToolStatus::Executing,
+                "tool {i} should run"
+            );
         }
         for i in DEFAULT_MAX_TOOL_USE_CONCURRENCY..30 {
-            assert_eq!(exec.tools[i].status, ToolStatus::Queued, "tool {i} should wait");
+            assert_eq!(
+                exec.tools[i].status,
+                ToolStatus::Queued,
+                "tool {i} should wait"
+            );
         }
     }
 
@@ -1047,6 +1133,7 @@ mod tests {
     /// (Mutates env → `--test-threads=1`.)
     #[tokio::test]
     async fn process_queue_respects_env_concurrency_override() {
+        let _guard = tool_concurrency_env_guard();
         std::env::set_var("CLAUDE_CODE_MAX_TOOL_USE_CONCURRENCY", "3");
         // Guard so a panic/assert failure still clears the env for sibling tests.
         struct Clear;
@@ -1074,7 +1161,10 @@ mod tests {
             .count();
         assert_eq!(executing, 3, "env override caps safe concurrency at 3");
         assert_eq!(
-            exec.tools.iter().filter(|t| t.status == ToolStatus::Queued).count(),
+            exec.tools
+                .iter()
+                .filter(|t| t.status == ToolStatus::Queued)
+                .count(),
             7,
             "remaining 7 stay Queued under the override"
         );
@@ -1086,6 +1176,7 @@ mod tests {
     /// (Mutates env → `--test-threads=1`.)
     #[tokio::test]
     async fn process_queue_starts_next_safe_when_slot_frees() {
+        let _guard = tool_concurrency_env_guard();
         std::env::set_var("CLAUDE_CODE_MAX_TOOL_USE_CONCURRENCY", "2");
         struct Clear;
         impl Drop for Clear {
@@ -1112,8 +1203,16 @@ mod tests {
         exec.tools[0].status = ToolStatus::Completed;
         exec.process_queue();
         // Now exactly one more (tool[2]) starts; tool[3] still waits (slot full again).
-        assert_eq!(exec.tools[2].status, ToolStatus::Executing, "freed slot starts next");
-        assert_eq!(exec.tools[3].status, ToolStatus::Queued, "still capped at 2 in-flight");
+        assert_eq!(
+            exec.tools[2].status,
+            ToolStatus::Executing,
+            "freed slot starts next"
+        );
+        assert_eq!(
+            exec.tools[3].status,
+            ToolStatus::Queued,
+            "still capped at 2 in-flight"
+        );
         let executing = exec
             .tools
             .iter()
@@ -1134,7 +1233,10 @@ mod tests {
             MessageId::new(),
         );
         let t = &exec.tools[0];
-        let ContentBlock::ToolResult { provider_tool_use_id, .. } = t.result.as_ref().unwrap()
+        let ContentBlock::ToolResult {
+            provider_tool_use_id,
+            ..
+        } = t.result.as_ref().unwrap()
         else {
             panic!()
         };
@@ -1146,7 +1248,12 @@ mod tests {
     #[test]
     fn user_interrupted_synthetic_is_bare_reject_message() {
         let block = synthetic_error_block(ToolUseId::new(), AbortReason::UserInterrupted);
-        let ContentBlock::ToolResult { content, is_error, .. } = block else { panic!() };
+        let ContentBlock::ToolResult {
+            content, is_error, ..
+        } = block
+        else {
+            panic!()
+        };
         assert!(is_error, "user-interrupted result must be an error");
         assert_eq!(content, REJECT_MESSAGE);
         assert!(
@@ -1258,7 +1365,13 @@ mod tests {
     async fn take_newly_completed_yields_unknown_tool_immediately() {
         let orch = orch_empty();
         let mut exec = StreamingToolExecutor::new(&orch);
-        exec.add_tool(ToolUseId::new(), "NoSuchTool".into(), json!({}), None, MessageId::new());
+        exec.add_tool(
+            ToolUseId::new(),
+            "NoSuchTool".into(),
+            json!({}),
+            None,
+            MessageId::new(),
+        );
         // No process_queue, no drain_one — it's already Completed.
         assert_eq!(exec.tools[0].status, ToolStatus::Completed);
 
@@ -1319,7 +1432,7 @@ mod tests {
             provider_id: None,
             assistant_id: a,
             status: ToolStatus::Executing,
-            is_concurrency_safe: false,  // exclusive barrier
+            is_concurrency_safe: false, // exclusive barrier
             result: None,
             injected: Vec::new(),
             modifiers: Vec::new(),
@@ -1339,7 +1452,11 @@ mod tests {
 
         let results = exec.take_newly_completed();
         // Only tool[0] should be emitted; tool[1] is the barrier; tool[2] is skipped.
-        assert_eq!(results.len(), 1, "only the pre-barrier completed tool should be drained");
+        assert_eq!(
+            results.len(),
+            1,
+            "only the pre-barrier completed tool should be drained"
+        );
         assert_eq!(exec.tools[0].status, ToolStatus::Yielded);
         // tool[1] still Executing (we don't touch it).
         assert_eq!(exec.tools[1].status, ToolStatus::Executing);
@@ -1407,16 +1524,26 @@ mod tests {
 
     #[async_trait]
     impl Tool for CancelBehaviorTool {
-        fn name(&self) -> &str { "CancelTool" }
+        fn name(&self) -> &str {
+            "CancelTool"
+        }
         fn input_schema(&self) -> &serde_json::Value {
             static SCHEMA: once_cell::sync::Lazy<serde_json::Value> =
                 once_cell::sync::Lazy::new(|| json!({ "type": "object", "properties": {} }));
             &SCHEMA
         }
-        fn is_enabled(&self, _ctx: &ToolStaticContext) -> bool { true }
-        fn max_result_size_chars(&self) -> usize { 1024 * 1024 }
-        fn is_concurrency_safe(&self, _input: &serde_json::Value) -> bool { true }
-        fn is_read_only(&self, _input: &serde_json::Value) -> bool { true }
+        fn is_enabled(&self, _ctx: &ToolStaticContext) -> bool {
+            true
+        }
+        fn max_result_size_chars(&self) -> usize {
+            1024 * 1024
+        }
+        fn is_concurrency_safe(&self, _input: &serde_json::Value) -> bool {
+            true
+        }
+        fn is_read_only(&self, _input: &serde_json::Value) -> bool {
+            true
+        }
         fn interrupt_behavior(
             &self,
             _input: &serde_json::Value,
@@ -1436,7 +1563,9 @@ mod tests {
             _ctx: &ToolUseContext,
         ) -> permission::PermissionResult {
             permission::PermissionResult::Allow {
-                reason: permission::PermissionDecisionReason::Other { reason: "test".into() },
+                reason: permission::PermissionDecisionReason::Other {
+                    reason: "test".into(),
+                },
                 updated_input: None,
                 update_destination: None,
                 metadata: permission::result::PermissionMetadata::default(),
@@ -1449,7 +1578,9 @@ mod tests {
         ) -> String {
             "cancel-tool".into()
         }
-        async fn prompt(&self, _opts: &PromptOptions) -> String { String::new() }
+        async fn prompt(&self, _opts: &PromptOptions) -> String {
+            String::new()
+        }
         async fn call(
             &self,
             _input: serde_json::Value,
@@ -1505,7 +1636,11 @@ mod tests {
         assert_eq!(exec.abort_reason_for(1), None);
         user_cancel.cancel();
         assert_eq!(exec.abort_reason_for(0), Some(AbortReason::UserInterrupted));
-        assert_eq!(exec.abort_reason_for(1), None, "Block tool is NOT interrupted");
+        assert_eq!(
+            exec.abort_reason_for(1),
+            None,
+            "Block tool is NOT interrupted"
+        );
     }
 
     /// Queued Cancel-behavior tool under a fired user-cancel gets the bare
@@ -1519,8 +1654,9 @@ mod tests {
         exec.add_tool(ToolUseId::new(), "CancelTool".into(), json!({}), None, a);
         user_cancel.cancel();
         exec.apply_abort_to_pending();
-        let ContentBlock::ToolResult { content, is_error, .. } =
-            exec.tools[0].result.as_ref().unwrap()
+        let ContentBlock::ToolResult {
+            content, is_error, ..
+        } = exec.tools[0].result.as_ref().unwrap()
         else {
             panic!()
         };
@@ -1543,7 +1679,12 @@ mod tests {
         assert_eq!(exec.tools[0].status, ToolStatus::Executing);
         user_cancel.cancel();
         let results = exec.run_to_completion().await.unwrap();
-        let ContentBlock::ToolResult { content, is_error, .. } = &results[0] else { panic!() };
+        let ContentBlock::ToolResult {
+            content, is_error, ..
+        } = &results[0]
+        else {
+            panic!()
+        };
         assert!(*is_error);
         assert_eq!(
             content, REJECT_MESSAGE,
@@ -1568,7 +1709,12 @@ mod tests {
         assert_eq!(exec.tools[0].status, ToolStatus::Executing);
         exec.discard();
         let results = exec.run_to_completion().await.unwrap();
-        let ContentBlock::ToolResult { content, is_error, .. } = &results[0] else { panic!() };
+        let ContentBlock::ToolResult {
+            content, is_error, ..
+        } = &results[0]
+        else {
+            panic!()
+        };
         assert!(*is_error);
         assert_eq!(
             content,
@@ -1586,7 +1732,10 @@ mod tests {
         let a = MessageId::new();
         let mut exec = StreamingToolExecutor::new(&orch);
         // No tools at all → nothing unfinished.
-        assert!(!exec.has_unfinished(), "empty executor must have no unfinished tools");
+        assert!(
+            !exec.has_unfinished(),
+            "empty executor must have no unfinished tools"
+        );
 
         exec.add_tool(ToolUseId::new(), "SafeTool".into(), json!({}), None, a);
         assert!(exec.has_unfinished(), "Queued tool means unfinished");
@@ -1597,7 +1746,10 @@ mod tests {
         while !exec.inflight.is_empty() {
             exec.drain_one().await;
         }
-        assert!(exec.has_unfinished(), "Completed but not yet Yielded still unfinished");
+        assert!(
+            exec.has_unfinished(),
+            "Completed but not yet Yielded still unfinished"
+        );
 
         exec.take_newly_completed();
         assert!(!exec.has_unfinished(), "all Yielded → no unfinished tools");

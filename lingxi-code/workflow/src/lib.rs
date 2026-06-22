@@ -34,12 +34,15 @@ const WORKFLOW_PRELUDE: &str = r#"
 // before the first await (parallel's fan-out) run concurrently, while a
 // sequential `await agent()` chain dispatches one at a time.
 globalThis.__wf_queue = [];
-globalThis.agent = (prompt) => new Promise((res) => { globalThis.__wf_queue.push({ prompt: String(prompt), res }); });
+globalThis.agent = (prompt, opts) => new Promise((res) => { globalThis.__wf_queue.push({ prompt: String(prompt), opts: opts || {}, res }); });
 globalThis.__wf_pump = () => {
   const q = globalThis.__wf_queue;
   if (q.length === 0) return false;
   globalThis.__wf_queue = [];
-  const results = globalThis.__wf_dispatch_batch(q.map((x) => x.prompt));
+  // Dispatch the batch as two parallel arrays: the prompts and the JSON-encoded
+  // opts ({agentType, model, isolation, schema, label, phase, effort}). The host
+  // runner maps the spawn-affecting opts onto each subagent request.
+  const results = globalThis.__wf_dispatch_batch(q.map((x) => x.prompt), q.map((x) => JSON.stringify(x.opts || {})));
   for (let i = 0; i < q.length; i++) q[i].res(results[i]);
   return true;
 };
@@ -210,7 +213,11 @@ pub fn run_sync(script: &str) -> Result<RunOutcome, WorkflowError> {
 /// a job raises.
 pub fn run<R>(script: &str, agent_runner: R) -> Result<RunOutcome, WorkflowError>
 where
-    R: FnMut(&[String]) -> Vec<String> + 'static,
+    // `(prompts, opts_json) -> results`: the two parallel arrays the pump
+    // dispatches — each `opts_json[i]` is `JSON.stringify(agent()'s opts)` for
+    // `prompts[i]`. The host runner maps the spawn-affecting opts (agentType /
+    // model / isolation) onto each subagent request.
+    R: FnMut(&[String], &[String]) -> Vec<String> + 'static,
 {
     use rquickjs::{Context, Function, Runtime};
 
@@ -263,15 +270,18 @@ where
             .map_err(eng)?;
 
         // Native batch dispatcher: the JS `__wf_pump` hands it every concurrently
-        // pending agent prompt at once; the runner resolves them (the real
-        // runtime spawns the subagents in parallel).
+        // pending agent prompt + its JSON-encoded opts at once; the runner
+        // resolves them (the real runtime spawns the subagents in parallel).
         let r = runner.clone();
         globals
             .set(
                 "__wf_dispatch_batch",
-                Function::new(ctx.clone(), move |prompts: Vec<String>| -> Vec<String> {
-                    (r.borrow_mut())(&prompts)
-                })
+                Function::new(
+                    ctx.clone(),
+                    move |prompts: Vec<String>, opts_json: Vec<String>| -> Vec<String> {
+                        (r.borrow_mut())(&prompts, &opts_json)
+                    },
+                )
                 .map_err(eng)?,
             )
             .map_err(eng)?;
@@ -347,7 +357,7 @@ mod tests {
 
     /// Batch runner for scripts that never call `agent()` (the batch is always
     /// empty, so this is never actually invoked).
-    fn no_agents(prompts: &[String]) -> Vec<String> {
+    fn no_agents(prompts: &[String], _opts: &[String]) -> Vec<String> {
         prompts.iter().map(|_| String::new()).collect()
     }
 
@@ -415,7 +425,7 @@ const b = await agent('second')
 log('got: ' + b)
 "#;
         let mut calls = 0;
-        let out = run(script, move |prompts: &[String]| -> Vec<String> {
+        let out = run(script, move |prompts: &[String], _opts: &[String]| -> Vec<String> {
             prompts
                 .iter()
                 .map(|prompt| {
@@ -442,7 +452,7 @@ log('got: ' + b)
 const n = Number(await agent('count'))
 for (let i = 0; i < n; i++) log('item ' + i)
 "#;
-        let out = run(script, |prompts: &[String]| {
+        let out = run(script, |prompts: &[String], _opts: &[String]| {
             prompts.iter().map(|_| "3".to_string()).collect()
         })
         .unwrap();
@@ -460,7 +470,7 @@ for (let i = 0; i < n; i++) log('item ' + i)
     fn async_script_throw_surfaces_after_await() {
         let err = run(
             "await agent('x'); throw new Error('boom')",
-            |prompts: &[String]| prompts.iter().map(|_| "ok".to_string()).collect(),
+            |prompts: &[String], _opts: &[String]| prompts.iter().map(|_| "ok".to_string()).collect(),
         )
         .unwrap_err();
         match err {
@@ -480,7 +490,7 @@ const rs = await parallel([
 log(rs.join('|'))
 "#;
         let mut n = 0;
-        let out = run(script, move |prompts: &[String]| -> Vec<String> {
+        let out = run(script, move |prompts: &[String], _opts: &[String]| -> Vec<String> {
             prompts
                 .iter()
                 .map(|p| {
@@ -502,7 +512,7 @@ const rs = await parallel([
 ])
 log(String(rs[0]) + ',' + String(rs[1]))
 "#;
-        let out = run(script, |prompts: &[String]| {
+        let out = run(script, |prompts: &[String], _opts: &[String]| {
             prompts.iter().map(|_| "OK".to_string()).collect()
         })
         .unwrap();
@@ -519,7 +529,7 @@ log(rs.join('|'))
 "#;
         let batches: Rc<RefCell<Vec<usize>>> = Rc::new(RefCell::new(Vec::new()));
         let b = batches.clone();
-        let out = run(script, move |prompts: &[String]| -> Vec<String> {
+        let out = run(script, move |prompts: &[String], _opts: &[String]| -> Vec<String> {
             b.borrow_mut().push(prompts.len());
             prompts.iter().map(|p| format!("R:{p}")).collect()
         })
@@ -542,7 +552,7 @@ log(a + b)
 "#;
         let batches: Rc<RefCell<Vec<usize>>> = Rc::new(RefCell::new(Vec::new()));
         let b = batches.clone();
-        let out = run(script, move |prompts: &[String]| -> Vec<String> {
+        let out = run(script, move |prompts: &[String], _opts: &[String]| -> Vec<String> {
             b.borrow_mut().push(prompts.len());
             prompts.iter().map(|p| p.to_uppercase()).collect()
         })
@@ -570,7 +580,7 @@ log(rs.join('|'))
 "#;
         let batches: Rc<RefCell<Vec<usize>>> = Rc::new(RefCell::new(Vec::new()));
         let b = batches.clone();
-        let out = run(script, move |prompts: &[String]| -> Vec<String> {
+        let out = run(script, move |prompts: &[String], _opts: &[String]| -> Vec<String> {
             b.borrow_mut().push(prompts.len());
             prompts.iter().map(|p| format!("[{p}]")).collect()
         })
@@ -674,10 +684,34 @@ log('wf=' + (typeof workflow))
             const rs = await parallel([() => agent('a'), () => agent('b')]);
             return { confirmed: rs };
         "#;
-        let out = run(script, |prompts: &[String]| {
+        let out = run(script, |prompts: &[String], _opts: &[String]| {
             prompts.iter().map(|p| format!("{p}!")).collect()
         })
         .unwrap();
         assert_eq!(out.result.as_deref(), Some(r#"{"confirmed":["a!","b!"]}"#));
+    }
+
+    #[test]
+    fn agent_opts_reach_the_runner_as_json() {
+        // `agent(prompt, opts)` — the opts object is JSON-encoded and handed to
+        // the runner alongside each prompt (parallel arrays). A bare `agent(p)`
+        // yields `{}`.
+        let captured: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
+        let cap = captured.clone();
+        let script = r#"
+            await agent('p1', { agentType: 'reviewer', model: 'opus', isolation: 'worktree' });
+            await agent('p2');
+        "#;
+        run(script, move |prompts: &[String], opts: &[String]| {
+            cap.borrow_mut().extend(opts.iter().cloned());
+            prompts.iter().map(|_| "ok".to_string()).collect()
+        })
+        .unwrap();
+        let got = captured.borrow().clone();
+        assert_eq!(got.len(), 2);
+        assert!(got[0].contains(r#""agentType":"reviewer""#), "got: {}", got[0]);
+        assert!(got[0].contains(r#""model":"opus""#));
+        assert!(got[0].contains(r#""isolation":"worktree""#));
+        assert_eq!(got[1], "{}", "a bare agent(p) carries empty opts");
     }
 }

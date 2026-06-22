@@ -151,22 +151,31 @@ fn concurrency_cap() -> usize {
     cores.saturating_sub(2).clamp(1, 16)
 }
 
-/// Build the `SubagentSpawnRequest` for one `agent(prompt)` call. Mirrors the
-/// Task tool's local-agent template: a plain prompt-only spawn with every
-/// optional field defaulted. (The `agent()` opts — schema/label/phase/model/
-/// effort/agentType/isolation — are threaded through in a later increment.)
-fn make_request(subagent_type: &str, prompt: &str) -> SubagentSpawnRequest {
+/// Build the `SubagentSpawnRequest` for one `agent(prompt, opts)` call. The
+/// spawn-affecting `agent()` opts are mapped from `opts_json`
+/// (`JSON.stringify(opts)`): `agentType` overrides the default subagent type,
+/// `model` and `isolation` pass through. (`schema` — structured output — and the
+/// display-only `label`/`phase`/`effort` opts are not mapped here.)
+fn make_request(default_subagent_type: &str, prompt: &str, opts_json: &str) -> SubagentSpawnRequest {
+    let opts: Value = serde_json::from_str(opts_json).unwrap_or(Value::Null);
+    let opt_str = |k: &str| {
+        opts.get(k)
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+    };
+    let subagent_type = opt_str("agentType").unwrap_or_else(|| default_subagent_type.to_string());
     SubagentSpawnRequest {
-        subagent_type: subagent_type.to_string(),
+        subagent_type,
         prompt: prompt.to_string(),
         context_paths: Vec::new(),
         description: None,
-        model: None,
+        model: opt_str("model"),
         run_in_background: false,
         name: None,
         team_name: None,
         mode: None,
-        isolation: None,
+        isolation: opt_str("isolation"),
         cwd: None,
         fork_context_messages: None,
         fork_parent_system_prompt: None,
@@ -213,9 +222,11 @@ pub async fn run_workflow_script(
     tool_invoker: Arc<dyn ToolInvoker>,
     budget: Arc<dyn BudgetEnforcerHandle>,
 ) -> Result<workflow::RunOutcome, workflow::WorkflowError> {
-    // Request channel: each in-flight batch is (prompts, reply-sender). A buffer
-    // of one suffices — the runner blocks on its reply before sending the next.
-    let (req_tx, mut req_rx) = mpsc::channel::<(Vec<String>, oneshot::Sender<Vec<String>>)>(1);
+    // Request channel: each in-flight batch is (calls, reply-sender), where a
+    // call is (prompt, opts_json). A buffer of one suffices — the runner blocks
+    // on its reply before sending the next.
+    let (req_tx, mut req_rx) =
+        mpsc::channel::<(Vec<(String, String)>, oneshot::Sender<Vec<String>>)>(1);
     let (outcome_tx, outcome_rx) =
         oneshot::channel::<Result<workflow::RunOutcome, workflow::WorkflowError>>();
     let script_owned = script.to_string();
@@ -226,9 +237,14 @@ pub async fn run_workflow_script(
     std::thread::Builder::new()
         .name("workflow-script".into())
         .spawn(move || {
-            let runner = move |prompts: &[String]| -> Vec<String> {
+            let runner = move |prompts: &[String], opts_json: &[String]| -> Vec<String> {
                 let (reply_tx, reply_rx) = oneshot::channel();
-                if req_tx.blocking_send((prompts.to_vec(), reply_tx)).is_err() {
+                let calls: Vec<(String, String)> = prompts
+                    .iter()
+                    .cloned()
+                    .zip(opts_json.iter().cloned())
+                    .collect();
+                if req_tx.blocking_send((calls, reply_tx)).is_err() {
                     return Vec::new();
                 }
                 reply_rx.blocking_recv().unwrap_or_default()
@@ -242,22 +258,23 @@ pub async fn run_workflow_script(
     // Async worker: answer each batch by spawning its subagents concurrently
     // (bounded, order-preserving). The loop ends when the runner's sender is
     // dropped — i.e. when `workflow::run` returns.
-    while let Some((prompts, reply)) = req_rx.recv().await {
-        let results: Vec<String> = futures::stream::iter(prompts.into_iter().map(|prompt| {
-            let spawner = spawner.clone();
-            let inherit = SubagentInheritance {
-                tool_invoker: tool_invoker.clone(),
-                budget: budget.clone(),
-            };
-            let subagent_type = subagent_type.to_string();
-            async move {
-                let request = make_request(&subagent_type, &prompt);
-                result_to_string(spawner.spawn(request, inherit).await)
-            }
-        }))
-        .buffered(cap)
-        .collect()
-        .await;
+    while let Some((calls, reply)) = req_rx.recv().await {
+        let results: Vec<String> =
+            futures::stream::iter(calls.into_iter().map(|(prompt, opts_json)| {
+                let spawner = spawner.clone();
+                let inherit = SubagentInheritance {
+                    tool_invoker: tool_invoker.clone(),
+                    budget: budget.clone(),
+                };
+                let subagent_type = subagent_type.to_string();
+                async move {
+                    let request = make_request(&subagent_type, &prompt, &opts_json);
+                    result_to_string(spawner.spawn(request, inherit).await)
+                }
+            }))
+            .buffered(cap)
+            .collect()
+            .await;
         // Receiver gone only if the script thread vanished; nothing to do.
         let _ = reply.send(results);
     }
@@ -420,6 +437,7 @@ mod tests {
     #[derive(Default)]
     struct EchoSpawner {
         seen: StdMutex<Vec<String>>,
+        seen_reqs: StdMutex<Vec<SubagentSpawnRequest>>,
         fail: bool,
     }
 
@@ -431,6 +449,7 @@ mod tests {
             _inherit: SubagentInheritance,
         ) -> Result<SubagentResult, SubagentSpawnError> {
             self.seen.lock().unwrap().push(request.prompt.clone());
+            self.seen_reqs.lock().unwrap().push(request.clone());
             if self.fail {
                 return Ok(SubagentResult::Failed {
                     agent_id: protocol::AgentId::new(),
@@ -710,6 +729,26 @@ mod tests {
             logs(&outcome),
             vec!["P:echo:echo:x!,echo:echo:y!".to_string()]
         );
+    }
+
+    #[tokio::test]
+    async fn agent_opts_map_to_the_spawn_request() {
+        let spawner = Arc::new(EchoSpawner::default());
+        let script = r#"
+            await agent('p', { agentType: 'code-reviewer', model: 'opus', isolation: 'worktree' });
+            await agent('plain');
+        "#;
+        run_bridge(script, spawner.clone()).await;
+        let reqs = spawner.seen_reqs.lock().unwrap().clone();
+        assert_eq!(reqs.len(), 2);
+        // agentType / model / isolation opts → the spawn request.
+        assert_eq!(reqs[0].subagent_type, "code-reviewer");
+        assert_eq!(reqs[0].model.as_deref(), Some("opus"));
+        assert_eq!(reqs[0].isolation.as_deref(), Some("worktree"));
+        // A bare agent(prompt) → default type, no overrides.
+        assert_eq!(reqs[1].subagent_type, "general-purpose");
+        assert_eq!(reqs[1].model, None);
+        assert_eq!(reqs[1].isolation, None);
     }
 
     // ==== Handler-level tests (full Task lifecycle) =========================

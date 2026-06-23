@@ -206,6 +206,16 @@ pub trait OrchestratorApiClient: Send + Sync {
         None
     }
 
+    /// Number of budget-consuming retry attempts the most recent API call
+    /// performed before succeeding. Recorded by the adapter from its retry
+    /// driver's `RetryState`. Used by the cost-recording call sites to pass the
+    /// real retry count to `CostTracker::record_api_response_v2` instead of the
+    /// previous hardcoded `0` (#5 main-loop parity). Default `0` for mocks /
+    /// non-retrying impls.
+    fn last_retry_count(&self) -> u32 {
+        0
+    }
+
     /// Return the FULL most recently observed rate-limit header snapshot.
     ///
     /// Task 8 (llm-client future-work batch 3): unlike
@@ -334,6 +344,15 @@ pub trait StreamingApiClient: Send + Sync {
         messages: Vec<ConversationMessage>,
         tools: Vec<serde_json::Value>,
     ) -> Result<futures::stream::BoxStream<'static, Result<LlmEvent, LlmError>>, LlmError>;
+
+    /// Connect-phase retry count of the most recent `stream` call (the value
+    /// the adapter knows when it returns the stream). Used by the streaming
+    /// cost-recording site to pass the real retry count to
+    /// `CostTracker::record_api_response_v2` instead of `0` (#5 main-loop
+    /// parity). Default `0` for mocks / non-retrying impls.
+    fn last_retry_count(&self) -> u32 {
+        0
+    }
 }
 
 /// Outcome of a single REPL turn driven by
@@ -4068,6 +4087,12 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                 None => crate::streaming_executor::StreamingToolExecutor::new(self),
             };
 
+            // #5: wall-clock from stream-open through pump completion (incl. any
+            // 529→non-stream fallback) so the CostTracker records a REAL duration
+            // instead of `Duration::ZERO`. Paired with
+            // `self.streaming_api.last_retry_count()` at the billing site below.
+            let api_call_started = std::time::Instant::now();
+
             let stream = self
                 .streaming_api
                 .stream(
@@ -4209,10 +4234,10 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             global_turn_tokens = global_turn_tokens.saturating_add(pumped.output_tokens);
 
             // BILLING: record streaming-turn usage into CostTracker — mirrors the
-            // non-streaming path in `turn_loop.rs:375-393`. Uses the same
-            // `record_api_response_v2` function + arg semantics: `Duration::ZERO`
-            // (adapter doesn't surface per-call wall-clock) and `retries = 0`
-            // (retries are swallowed internally by the adapter, same as batch path).
+            // non-streaming path in `turn_loop.rs`. #5 (main-loop parity): pass
+            // the REAL wall-clock duration (stream-open → pump completion) and
+            // the REAL connect-phase retry count (`last_retry_count()`) instead
+            // of the previous hardcoded `Duration::ZERO` / `0`.
             if let Some(ref usage) = pumped.usage {
                 // #55: cache this response's total input tokens (the `Xtt`
                 // last-usage snapshot) for the fixed-prefix overflow guard.
@@ -4228,8 +4253,8 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                         .record_api_response_v2(
                             model_ref,
                             cost_usage,
-                            std::time::Duration::ZERO,
-                            0, // retries — not yet exposed from the adapter
+                            api_call_started.elapsed(),
+                            self.streaming_api.last_retry_count(),
                             cache_read,
                             cache_create,
                             false, // is_batch_request — streaming is never batch

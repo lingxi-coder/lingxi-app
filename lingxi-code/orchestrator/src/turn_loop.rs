@@ -547,6 +547,10 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
     let max_tokens_override = recovery
         .as_deref_mut()
         .and_then(|r| r.max_output_tokens_override.take());
+    // #5: wall-clock the API round-trip (incl. any in-adapter retries + the PTL
+    // reactive-recovery tail) so the CostTracker records a REAL duration instead
+    // of `Duration::ZERO`. Paired with `orch.api.last_retry_count()` below.
+    let api_call_started = std::time::Instant::now();
     let response = match call_api_with_ptl_recovery(
         orch,
         system,
@@ -615,10 +619,10 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
     orch.emit_raw_utilization_if_changed().await;
 
     // 1.5 M6-06: record this response's usage into the wired CostTracker (if any).
-    // We pass `Duration::ZERO` (the api-client adapter does not currently
-    // surface per-call wall-clock duration) and `retries = 0` (retries are
-    // swallowed internally). Both inaccuracies are documented in v0.7.0
-    // release notes; M7 wires through real timing.
+    // #5 (main-loop parity): pass the REAL wall-clock duration of the API
+    // round-trip and the REAL retry count (`last_retry_count()`, the adapter's
+    // `RetryState::attempt`) instead of the previous hardcoded `Duration::ZERO`
+    // / `0`. claude-code's cost recorder receives both.
     if let Some(tracker) = orch.cost_tracker.as_ref() {
         let usage = crate::cost_wiring::llm_usage_to_cost_usage(&response.usage);
         let cache_read = response.usage.billable_tokens.cache_read;
@@ -628,8 +632,8 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
             .record_api_response_v2(
                 model_ref,
                 usage,
-                std::time::Duration::ZERO,
-                0, // retries — not yet exposed from the adapter
+                api_call_started.elapsed(),
+                orch.api.last_retry_count(),
                 cache_read,
                 cache_create,
                 false, // is_batch_request — M6 always false

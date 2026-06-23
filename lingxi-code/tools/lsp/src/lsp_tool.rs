@@ -91,6 +91,32 @@ pub const LSP_OPERATIONS_LOCKED: [&str; 9] = [
     LSP_OPERATION_OUTGOING_CALLS,
 ];
 
+/// The model-facing LSP tool description — byte-exact to claude-code's `udo`
+/// (binary @202037362). The `\u{2014}` is the em-dash in the workspaceSymbol
+/// note.
+pub const LSP_TOOL_DESCRIPTION: &str = "Interact with Language Server Protocol (LSP) servers to get code intelligence features.\n\
+\n\
+Supported operations:\n\
+- goToDefinition: Find where a symbol is defined\n\
+- findReferences: Find all references to a symbol\n\
+- hover: Get hover information (documentation, type info) for a symbol\n\
+- documentSymbol: Get all symbols (functions, classes, variables) in a document\n\
+- workspaceSymbol: Search for symbols matching a query across the entire workspace\n\
+- goToImplementation: Find implementations of an interface or abstract method\n\
+- prepareCallHierarchy: Get call hierarchy item at a position (functions/methods)\n\
+- incomingCalls: Find all functions/methods that call the function at a position\n\
+- outgoingCalls: Find all functions/methods called by the function at a position\n\
+\n\
+All operations require:\n\
+- filePath: The file to operate on\n\
+- line: The line number (1-based, as shown in editors)\n\
+- character: The character offset (1-based, as shown in editors)\n\
+\n\
+The workspaceSymbol operation also takes:\n\
+- query: The symbol name or partial name to search for. Always provide it \u{2014} most language servers return no results for an empty query.\n\
+\n\
+Note: LSP servers must be configured for the file type. If no server is available, an error will be returned.";
+
 /// Position-validation error literal (LingXi lock; ASCII `>=` form).
 pub const LSP_POSITION_ERROR: &str = "LSP position must be 1-based (line >= 1, character >= 1)";
 
@@ -1058,7 +1084,8 @@ impl Tool for LSPTool {
         true
     }
     fn max_result_size_chars(&self) -> usize {
-        30_000
+        // claude-code `maxOutputChars: 1e5` for the LSP tool.
+        100_000
     }
     fn is_concurrency_safe(&self, _: &Value) -> bool {
         true
@@ -1101,11 +1128,10 @@ impl Tool for LSPTool {
     }
 
     async fn description(&self, _: &Value, _: &DescriptionOptions) -> String {
-        "LSP-server operations (goToDefinition / findReferences / hover / documentSymbol / workspaceSymbol / goToImplementation / prepareCallHierarchy / incomingCalls / outgoingCalls). 1-based positions."
-            .into()
+        LSP_TOOL_DESCRIPTION.into()
     }
     async fn prompt(&self, _: &PromptOptions) -> String {
-        "Use LSP to query LSP servers at a 1-based (line, character) position.".into()
+        LSP_TOOL_DESCRIPTION.into()
     }
 
     async fn call(

@@ -204,6 +204,32 @@ impl LspRegistry {
         Ok(raw.connection_id)
     }
 
+    /// Ensure the server for `path` is running and return its `(name, client,
+    /// config)` — the convenience the `LSPTool` uses to resolve a server from
+    /// the file alone (claude-code dispatches by `filePath`, never a model-
+    /// supplied server name).
+    ///
+    /// # Errors
+    /// [`LspError::Unavailable`] when no server handles the file (or its
+    /// client/config vanished); transport errors propagate from
+    /// [`Self::ensure_server_for_file`].
+    pub async fn ensure_client_for_file(
+        &self,
+        path: &Path,
+    ) -> Result<(String, Arc<LspClient>, LspServerConfig), LspError> {
+        self.ensure_server_for_file(path).await?;
+        let name = self
+            .file_route_cache
+            .read()
+            .await
+            .get(path)
+            .cloned()
+            .ok_or(LspError::Unavailable)?;
+        let client = self.get_client(&name).await.ok_or(LspError::Unavailable)?;
+        let config = self.get_config(&name).await.ok_or(LspError::Unavailable)?;
+        Ok((name, client, config))
+    }
+
     /// Bulk-register server configurations contributed by `plugin_id`.
     ///
     /// This is the **only** public path for registering LSP servers in

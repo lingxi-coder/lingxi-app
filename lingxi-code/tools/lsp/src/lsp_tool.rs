@@ -1056,16 +1056,19 @@ impl LSPTool {
 }
 
 static LSP_TOOL_SCHEMA: Lazy<Value> = Lazy::new(|| {
+    // Byte-faithful to claude-code's LSP zod schema (@183057616): `operation`,
+    // `filePath`, 1-based `line`/`character`, optional `query`. There is NO
+    // `server_name` — the server is resolved from `filePath`.
     json!({
         "type": "object",
         "properties": {
-            "operation":   { "type": "string", "enum": ["goToDefinition", "findReferences", "hover", "documentSymbol", "workspaceSymbol", "goToImplementation", "prepareCallHierarchy", "incomingCalls", "outgoingCalls"] },
-            "server_name": { "type": "string", "minLength": 1 },
-            "file_path":   { "type": "string", "minLength": 1 },
-            "line":        { "type": "integer", "minimum": 1 },
-            "character":   { "type": "integer", "minimum": 1 }
+            "operation":   { "type": "string", "enum": ["goToDefinition", "findReferences", "hover", "documentSymbol", "workspaceSymbol", "goToImplementation", "prepareCallHierarchy", "incomingCalls", "outgoingCalls"], "description": "The LSP operation to perform" },
+            "filePath":    { "type": "string", "minLength": 1, "description": "The absolute or relative path to the file" },
+            "line":        { "type": "integer", "minimum": 1, "description": "The line number (1-based, as shown in editors)" },
+            "character":   { "type": "integer", "minimum": 1, "description": "The character offset (1-based, as shown in editors)" },
+            "query":       { "type": "string", "description": "The symbol name or partial name to search for (workspaceSymbol only). Most language servers return no results for an empty query, so always provide it when using workspaceSymbol." }
         },
-        "required": ["operation", "server_name", "file_path", "line", "character"]
+        "required": ["operation", "filePath", "line", "character"]
     })
 });
 
@@ -1148,20 +1151,20 @@ impl Tool for LSPTool {
                 ToolError::InvalidInput("LSPTool: missing or non-string operation".into())
             })?
             .to_string();
-        let server_name = input
-            .get("server_name")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| {
-                ToolError::InvalidInput("LSPTool: missing or non-string server_name".into())
-            })?
-            .to_string();
+        // claude-code dispatches by `filePath` and resolves the server itself —
+        // there is NO model-supplied `server_name`.
         let file_path = input
-            .get("file_path")
+            .get("filePath")
             .and_then(|v| v.as_str())
             .ok_or_else(|| {
-                ToolError::InvalidInput("LSPTool: missing or non-string file_path".into())
+                ToolError::InvalidInput("LSPTool: missing or non-string filePath".into())
             })?
             .to_string();
+        // `workspaceSymbol` query (optional; ignored by the other operations).
+        let query = input
+            .get("query")
+            .and_then(|v| v.as_str())
+            .map(str::to_string);
         let line = input
             .get("line")
             .and_then(serde_json::Value::as_u64)
@@ -1192,7 +1195,6 @@ impl Tool for LSPTool {
             LSP_STARTED,
             &[
                 ("_PROTO_operation", pii(&operation)),
-                ("_PROTO_server_name", pii(&server_name)),
                 ("_PROTO_file_path", pii(&file_path)),
                 ("line", verified_int(line as u64)),
                 ("character", verified_int(character as u64)),
@@ -1207,7 +1209,7 @@ impl Tool for LSPTool {
                     bus,
                     LSP_FAILED,
                     &[
-                        ("_PROTO_server_name", pii(&server_name)),
+                        ("_PROTO_file_path", pii(&file_path)),
                         ("error_kind", verified_str("registry_unconfigured")),
                     ],
                 )
@@ -1218,38 +1220,27 @@ impl Tool for LSPTool {
             }
         };
 
-        let client = match registry.get_client(&server_name).await {
-            Some(c) => c,
-            None => {
+        // Resolve (and start, if needed) the server responsible for this file —
+        // claude-code routes by filePath, never a model-supplied server name.
+        // A file with no configured server yields the documented "no server
+        // available" error.
+        let (server_name, client, config) = match registry
+            .ensure_client_for_file(std::path::Path::new(&file_path))
+            .await
+        {
+            Ok(triple) => triple,
+            Err(e) => {
                 emit(
                     bus,
                     LSP_FAILED,
                     &[
-                        ("_PROTO_server_name", pii(&server_name)),
-                        ("error_kind", verified_str("server_not_running")),
+                        ("_PROTO_file_path", pii(&file_path)),
+                        ("error_kind", verified_str("no_server_for_file")),
                     ],
                 )
                 .await;
                 return Err(ToolError::InvalidInput(format!(
-                    "LSP server '{server_name}' is not running"
-                )));
-            }
-        };
-
-        let config = match registry.get_config(&server_name).await {
-            Some(c) => c,
-            None => {
-                emit(
-                    bus,
-                    LSP_FAILED,
-                    &[
-                        ("_PROTO_server_name", pii(&server_name)),
-                        ("error_kind", verified_str("server_not_running")),
-                    ],
-                )
-                .await;
-                return Err(ToolError::InvalidInput(format!(
-                    "LSP server '{server_name}' is not running"
+                    "No LSP server is available for {file_path}: {e}"
                 )));
             }
         };
@@ -1276,7 +1267,7 @@ impl Tool for LSPTool {
             }
             "hover" => ops::hover(&client, &tracker, &config, path, line, character).await,
             "documentSymbol" => ops::document_symbol(&client, &tracker, &config, path).await,
-            "workspaceSymbol" => ops::workspace_symbol(&client, None).await,
+            "workspaceSymbol" => ops::workspace_symbol(&client, query).await,
             "goToImplementation" => {
                 ops::go_to_implementation(&client, &tracker, &config, path, line, character).await
             }

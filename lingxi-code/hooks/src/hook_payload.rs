@@ -121,6 +121,9 @@ hook_event_name_marker!(HookEventNameTeammateIdle, "TeammateIdle");
 hook_event_name_marker!(HookEventNamePostToolBatch, "PostToolBatch");
 hook_event_name_marker!(HookEventNameUserPromptExpansion, "UserPromptExpansion");
 hook_event_name_marker!(HookEventNameMessageDisplay, "MessageDisplay");
+// ElicitationResult — fires after the user responds to an MCP elicitation
+// (binary-confirmed at BIN off ~201751493; key literal `"ElicitationResult"`).
+hook_event_name_marker!(HookEventNameElicitationResult, "ElicitationResult");
 
 /// Wire-format `effort` object embedded in the base hook input shape
 /// (1:1 with `coreSchemas.ts` base `RT` schema:
@@ -337,6 +340,9 @@ pub struct TeammateIdlePayload {
 
 /// Wire-format `UserPromptSubmit` payload (1:1 with `coreSchemas.ts:484-491`
 /// `UserPromptSubmitHookInputSchema`; constructed at `utils/hooks.ts:3840-3843`).
+///
+/// `session_title` is optional (binary-confirmed at BIN off 201745825:
+/// `{hook_event_name:"UserPromptSubmit", prompt:string, session_title?:string}`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[allow(missing_docs, reason = "wire-format mirror of claude-code schema")]
 pub struct UserPromptSubmitPayload {
@@ -353,6 +359,10 @@ pub struct UserPromptSubmitPayload {
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub effort: Option<EffortLevel>,
     pub prompt: String,
+    /// Current session title at the time the prompt is submitted (optional,
+    /// binary-confirmed `session_title` key at BIN off 201745825).
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub session_title: Option<String>,
 }
 
 /// Wire-format `SessionStart` payload (1:1 with `coreSchemas.ts:493-502`
@@ -360,6 +370,8 @@ pub struct UserPromptSubmitPayload {
 ///
 /// `source` is one of `startup` / `resume` / `clear` / `compact` in TS;
 /// modelled here as a free `String` (validation happens upstream).
+/// `session_title` is optional (binary-confirmed at BIN off 201745825:
+/// `{…, source:enum, agent_type?:string, model?:string, session_title?:string}`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[allow(missing_docs, reason = "wire-format mirror of claude-code schema")]
 pub struct SessionStartPayload {
@@ -378,6 +390,10 @@ pub struct SessionStartPayload {
     pub effort: Option<EffortLevel>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub model: Option<String>,
+    /// Current session title at session start (optional,
+    /// binary-confirmed `session_title` key at BIN off ~201746000).
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub session_title: Option<String>,
 }
 
 /// Wire-format `StopFailure` payload (1:1 with `coreSchemas.ts:529-538`
@@ -799,6 +815,52 @@ pub struct ElicitationPayload {
     pub requested_schema: Option<Value>,
 }
 
+/// Wire-format `ElicitationResult` payload. 1:1 with the binary's
+/// `ElicitationResultHookInputSchema` (BIN off ~201751493):
+/// `gT().and({hook_event_name:"ElicitationResult", mcp_server_name:string,
+/// elicitation_id?:string, mode?:enum(["form","url"]),
+/// action:enum(["accept","decline","cancel"]), content?:record(string,unknown)})`.
+///
+/// Fired after the user responds to an MCP elicitation (or a hook intercepts it).
+/// `action` is REQUIRED; `elicitation_id`, `mode`, and `content` are optional.
+/// Built with `createBaseHookInput(permissionMode)` (same as `Elicitation`), so
+/// `permission_mode` IS threaded.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(missing_docs, reason = "wire-format mirror of claude-code schema")]
+pub struct ElicitationResultPayload {
+    pub hook_event_name: HookEventNameElicitationResult,
+    pub session_id: String,
+    pub transcript_path: String,
+    pub cwd: String,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub permission_mode: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub agent_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub agent_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub effort: Option<EffortLevel>,
+    /// Name of the MCP server that requested elicitation (wire `mcp_server_name`,
+    /// required). Sourced from `HookEvent::ElicitationResult.server_name`.
+    pub mcp_server_name: String,
+    /// Server-assigned elicitation ID (optional). Not yet threaded through
+    /// `HookEvent::ElicitationResult` — defaults to `None`.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub elicitation_id: Option<String>,
+    /// Presentation mode (`form` / `url`), if specified (optional). Not yet
+    /// threaded through `HookEvent::ElicitationResult` — defaults to `None`.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub mode: Option<crate::events::ElicitationMode>,
+    /// User's response action (required): `"accept"` / `"decline"` / `"cancel"`.
+    /// Extracted from `HookEvent::ElicitationResult.result["action"]` or defaults
+    /// to `"cancel"` when the field is absent from the result JSON.
+    pub action: String,
+    /// Structured form content returned by the user (optional). Extracted from
+    /// `HookEvent::ElicitationResult.result["content"]`.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub content: Option<Value>,
+}
+
 /// Wire-format `WorktreeCreate` payload (1:1 with `coreSchemas.ts:709-716`
 /// `WorktreeCreateHookInputSchema`; constructed at `utils/hooks.ts:4931-4935`).
 ///
@@ -1137,7 +1199,9 @@ pub fn parse_response(
         // `blockingError` => the handler returns `{action:'decline'}`), so we
         // map it onto `HookDecision::Block` here, preserving any earlier
         // reason. Only set when an `action` is present, exactly like the JS
-        // `if (!specific.action) return {}`.
+        // `if (!specific.action) return {}`. Applies to both `Elicitation` and
+        // `ElicitationResult` events (binary-confirmed: both share the same
+        // hookSpecificOutput shape: `{hookEventName, action?, content?}`).
         if let Some(action) = hs.get("action").and_then(Value::as_str) {
             resp.elicitation_response = Some(crate::response::ElicitationHookResponse {
                 action: action.to_string(),
@@ -1145,6 +1209,33 @@ pub fn parse_response(
             });
             if action == "decline" {
                 resp.decision = Some(HookDecision::Block);
+            }
+        }
+
+        // `hookSpecificOutput.sessionTitle` (binary-confirmed at BIN off
+        // 201754804: gated to `hookEventName === "UserPromptSubmit"`).
+        // Allows a hook to rename the session. The orchestrator applies it
+        // via the session-title update path.
+        if expected_event == "UserPromptSubmit" {
+            if let Some(title) = hs.get("sessionTitle").and_then(Value::as_str) {
+                resp.session_title = Some(title.to_string());
+            }
+            // `hookSpecificOutput.suppressOriginalPrompt` (binary-confirmed at
+            // BIN off 201754804: boolean, description "When decision is 'block',
+            // omit the original prompt from the block message"). Scoped to
+            // `UserPromptSubmit` only (the binary's schema gate).
+            if let Some(b) = hs.get("suppressOriginalPrompt").and_then(Value::as_bool) {
+                resp.suppress_original_prompt = b;
+            }
+        }
+
+        // `hookSpecificOutput.displayContent` (binary-confirmed at BIN off
+        // 201757586: gated to `hookEventName === "MessageDisplay"`). Replaces
+        // the assistant delta on-screen; does NOT affect the stored message.
+        // Scoped to `MessageDisplay` (the binary's schema gate).
+        if expected_event == "MessageDisplay" {
+            if let Some(dc) = hs.get("displayContent").and_then(Value::as_str) {
+                resp.display_content = Some(dc.to_string());
             }
         }
     }
@@ -1887,6 +1978,7 @@ mod tests {
             agent_type: None,
             effort: None,
             prompt: "fix the bug".into(),
+            session_title: None,
         };
         let s = serde_json::to_string(&p).unwrap();
         assert_eq!(
@@ -1908,6 +2000,7 @@ mod tests {
             agent_type: None,
             effort: None,
             model: None,
+            session_title: None,
         };
         let s = serde_json::to_string(&p).unwrap();
         assert_eq!(
@@ -1929,6 +2022,7 @@ mod tests {
             agent_type: Some("code-reviewer".into()),
             effort: None,
             model: Some("claude-opus".into()),
+            session_title: None,
         };
         let s = serde_json::to_string(&p).unwrap();
         assert_eq!(
@@ -2581,5 +2675,210 @@ mod tests {
         let _: HookEventNameElicitation = serde_json::from_str(r#""Elicitation""#).unwrap();
         let _: HookEventNameWorktreeCreate = serde_json::from_str(r#""WorktreeCreate""#).unwrap();
         assert!(serde_json::from_str::<HookEventNameConfigChange>(r#""Elicitation""#).is_err());
+    }
+
+    // ---- [P0] ElicitationResult payload (parity fix) ---------------------
+
+    #[test]
+    fn elicitation_result_payload_serializes_required_fields() {
+        // Binary-confirmed schema: {hook_event_name:"ElicitationResult",
+        // mcp_server_name:string, …, action:enum(["accept","decline","cancel"]),
+        // content?:record}. Required wire shape with minimal fields.
+        let p = ElicitationResultPayload {
+            hook_event_name: HookEventNameElicitationResult,
+            session_id: "s".into(),
+            transcript_path: "/t".into(),
+            cwd: "/w".into(),
+            permission_mode: None,
+            agent_id: None,
+            agent_type: None,
+            effort: None,
+            mcp_server_name: "my-server".into(),
+            elicitation_id: None,
+            mode: None,
+            action: "accept".into(),
+            content: None,
+        };
+        let s = serde_json::to_string(&p).unwrap();
+        assert!(s.contains(r#""hook_event_name":"ElicitationResult""#), "{s}");
+        assert!(s.contains(r#""mcp_server_name":"my-server""#), "{s}");
+        assert!(s.contains(r#""action":"accept""#), "{s}");
+        // Optional fields absent when None.
+        assert!(!s.contains("elicitation_id"), "{s}");
+        assert!(!s.contains("content"), "{s}");
+        assert!(!s.contains("mode"), "{s}");
+    }
+
+    #[test]
+    fn elicitation_result_payload_serializes_with_content() {
+        // `content` is a record(string, unknown) — passes through as-is.
+        let p = ElicitationResultPayload {
+            hook_event_name: HookEventNameElicitationResult,
+            session_id: "s".into(),
+            transcript_path: "/t".into(),
+            cwd: "/w".into(),
+            permission_mode: None,
+            agent_id: None,
+            agent_type: None,
+            effort: None,
+            mcp_server_name: "srv".into(),
+            elicitation_id: Some("eid-42".into()),
+            mode: Some(crate::events::ElicitationMode::Form),
+            action: "decline".into(),
+            content: Some(json!({"reason": "no thanks"})),
+        };
+        let s = serde_json::to_string(&p).unwrap();
+        assert!(s.contains(r#""action":"decline""#), "{s}");
+        assert!(s.contains(r#""elicitation_id":"eid-42""#), "{s}");
+        assert!(s.contains(r#""mode":"form""#), "{s}");
+        assert!(s.contains(r#""content":{"reason":"no thanks"}"#), "{s}");
+    }
+
+    #[test]
+    fn elicitation_result_marker_serializes_correct_literal() {
+        assert_eq!(
+            serde_json::to_string(&HookEventNameElicitationResult).unwrap(),
+            r#""ElicitationResult""#
+        );
+        let _: HookEventNameElicitationResult =
+            serde_json::from_str(r#""ElicitationResult""#).unwrap();
+        assert!(
+            serde_json::from_str::<HookEventNameElicitationResult>(r#""Elicitation""#).is_err()
+        );
+    }
+
+    // ---- [P1] session_title in input payloads ----------------------------
+
+    #[test]
+    fn user_prompt_submit_payload_with_session_title() {
+        // Binary-confirmed: `session_title` is optional on `UserPromptSubmit`
+        // (BIN off 201745825). When `Some`, it appears AFTER `prompt`.
+        let p = UserPromptSubmitPayload {
+            hook_event_name: HookEventNameUserPromptSubmit,
+            session_id: "s".into(),
+            transcript_path: "/t".into(),
+            cwd: "/w".into(),
+            permission_mode: None,
+            agent_id: None,
+            agent_type: None,
+            effort: None,
+            prompt: "hello".into(),
+            session_title: Some("My Project".into()),
+        };
+        let s = serde_json::to_string(&p).unwrap();
+        assert!(s.contains(r#""session_title":"My Project""#), "{s}");
+        // When None, key is omitted.
+        let p2 = UserPromptSubmitPayload { session_title: None, ..p };
+        let s2 = serde_json::to_string(&p2).unwrap();
+        assert!(!s2.contains("session_title"), "{s2}");
+    }
+
+    #[test]
+    fn session_start_payload_with_session_title() {
+        // Binary-confirmed: `session_title` is optional on `SessionStart`
+        // (BIN off ~201746000).
+        let p = SessionStartPayload {
+            hook_event_name: HookEventNameSessionStart,
+            session_id: "s".into(),
+            transcript_path: "/t".into(),
+            cwd: "/w".into(),
+            permission_mode: None,
+            agent_id: None,
+            source: "startup".into(),
+            agent_type: None,
+            effort: None,
+            model: None,
+            session_title: Some("New Chat".into()),
+        };
+        let s = serde_json::to_string(&p).unwrap();
+        assert!(s.contains(r#""session_title":"New Chat""#), "{s}");
+        // When None, key is omitted.
+        let p2 = SessionStartPayload { session_title: None, ..p };
+        let s2 = serde_json::to_string(&p2).unwrap();
+        assert!(!s2.contains("session_title"), "{s2}");
+    }
+
+    // ---- [P1] UserPromptSubmit hookSpecificOutput: sessionTitle + suppressOriginalPrompt
+
+    #[test]
+    fn parse_response_user_prompt_submit_session_title() {
+        // Binary-confirmed: `sessionTitle` in hookSpecificOutput for `UserPromptSubmit`
+        // (BIN off 201754804). Scoped to `UserPromptSubmit` only.
+        let r = parse_response(
+            r#"{"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","sessionTitle":"Renamed"}}"#,
+            "UserPromptSubmit",
+        )
+        .unwrap();
+        assert_eq!(r.session_title.as_deref(), Some("Renamed"));
+        // Not parsed for other events.
+        let r2 = parse_response(
+            r#"{"hookSpecificOutput":{"hookEventName":"Stop","sessionTitle":"x"}}"#,
+            "Stop",
+        )
+        .unwrap();
+        assert!(r2.session_title.is_none(), "sessionTitle ignored for non-UserPromptSubmit");
+    }
+
+    #[test]
+    fn parse_response_user_prompt_submit_suppress_original_prompt() {
+        // Binary-confirmed: `suppressOriginalPrompt` in hookSpecificOutput for
+        // `UserPromptSubmit` (BIN off 201754804; description: "When decision is
+        // 'block', omit the original prompt from the block message").
+        let r = parse_response(
+            r#"{"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","suppressOriginalPrompt":true}}"#,
+            "UserPromptSubmit",
+        )
+        .unwrap();
+        assert!(r.suppress_original_prompt);
+        // `false` is passed through correctly.
+        let r2 = parse_response(
+            r#"{"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","suppressOriginalPrompt":false}}"#,
+            "UserPromptSubmit",
+        )
+        .unwrap();
+        assert!(!r2.suppress_original_prompt);
+        // Not parsed for other events.
+        let r3 = parse_response(
+            r#"{"hookSpecificOutput":{"hookEventName":"Stop","suppressOriginalPrompt":true}}"#,
+            "Stop",
+        )
+        .unwrap();
+        assert!(!r3.suppress_original_prompt, "suppressOriginalPrompt ignored for non-UserPromptSubmit");
+        // Default is false.
+        let r4 = parse_response(
+            r#"{"hookSpecificOutput":{"hookEventName":"UserPromptSubmit"}}"#,
+            "UserPromptSubmit",
+        )
+        .unwrap();
+        assert!(!r4.suppress_original_prompt);
+    }
+
+    // ---- [P1] MessageDisplay hookSpecificOutput: displayContent -----------
+
+    #[test]
+    fn parse_response_message_display_display_content() {
+        // Binary-confirmed: `displayContent` in hookSpecificOutput for
+        // `MessageDisplay` (BIN off 201757586; description: "Text displayed in
+        // place of the delta.").
+        let r = parse_response(
+            r#"{"hookSpecificOutput":{"hookEventName":"MessageDisplay","displayContent":"overridden text"}}"#,
+            "MessageDisplay",
+        )
+        .unwrap();
+        assert_eq!(r.display_content.as_deref(), Some("overridden text"));
+        // Absent when not set.
+        let r2 = parse_response(
+            r#"{"hookSpecificOutput":{"hookEventName":"MessageDisplay"}}"#,
+            "MessageDisplay",
+        )
+        .unwrap();
+        assert!(r2.display_content.is_none());
+        // Not parsed for other events.
+        let r3 = parse_response(
+            r#"{"hookSpecificOutput":{"hookEventName":"Stop","displayContent":"x"}}"#,
+            "Stop",
+        )
+        .unwrap();
+        assert!(r3.display_content.is_none(), "displayContent ignored for non-MessageDisplay");
     }
 }

@@ -114,6 +114,25 @@ pub struct HookResponse {
     /// and drops it. Additive default `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub terminal_sequence: Option<String>,
+    /// `hookSpecificOutput.sessionTitle` returned by a `UserPromptSubmit` hook
+    /// (binary-confirmed at BIN off 201754804:
+    /// `{hookEventName:"UserPromptSubmit", additionalContext?:string,
+    /// sessionTitle?:string, suppressOriginalPrompt?:boolean}`).
+    /// Allows a hook to rename the session. Additive default `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_title: Option<String>,
+    /// `hookSpecificOutput.suppressOriginalPrompt` returned by a `UserPromptSubmit`
+    /// hook (binary-confirmed at BIN off 201754804; description: "When decision is
+    /// 'block', omit the original prompt from the block message"). Additive default
+    /// `false`. TODO: wire at the block-message render site.
+    #[serde(default)]
+    pub suppress_original_prompt: bool,
+    /// `hookSpecificOutput.displayContent` returned by a `MessageDisplay` hook
+    /// (binary-confirmed at BIN off 201757586; description: "Text displayed in
+    /// place of the delta. Omit (or return the delta unchanged) to display the
+    /// original."). Additive default `None`. TODO: wire at the render site.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_content: Option<String>,
 }
 
 /// Structured elicitation answer a hook can return, mirroring claude-code's
@@ -283,4 +302,21 @@ pub struct AggregateHookResult {
     /// and either emits the accepted sequence to the active terminal or warns +
     /// drops it. Additive default `None` → byte-identical when no hook sets it.
     pub terminal_sequence: Option<String>,
+    /// The last `sessionTitle` any folded `UserPromptSubmit` hook returned
+    /// (binary-confirmed at BIN off 201754804). Allows a hook to rename the
+    /// session at prompt-submit time. `None` when no hook set it. The orchestrator
+    /// applies this by triggering the session title update path.
+    pub session_title: Option<String>,
+    /// `true` when ANY folded `UserPromptSubmit` hook returned
+    /// `suppressOriginalPrompt: true` (binary-confirmed at BIN off 201754804;
+    /// description: "When decision is 'block', omit the original prompt from the
+    /// block message"). OR-folded: a single hook setting it flips the aggregate.
+    /// TODO: wire the display suppression at the block-message render site.
+    pub suppress_original_prompt: bool,
+    /// The last `displayContent` any folded `MessageDisplay` hook returned
+    /// (binary-confirmed at BIN off 201757586). When `Some`, the orchestrator
+    /// should substitute this text for the assistant delta on-screen (without
+    /// affecting the stored message). `None` when no hook set it.
+    /// TODO: wire the display-override at the message-display render site.
+    pub display_content: Option<String>,
 }

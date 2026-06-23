@@ -87,6 +87,11 @@ pub struct HookContext {
     /// Controlling-terminal height — see [`Self::terminal_columns`]. Injected as
     /// the `LINES` env var (#43). Additive default `None`.
     pub terminal_rows: Option<u16>,
+    /// Current session title at the moment of dispatch, threaded into
+    /// `UserPromptSubmit` and `SessionStart` payloads as `session_title`
+    /// (binary-confirmed at BIN off 201745825). `None` when no title is
+    /// available or not applicable (most event types). Additive default `None`.
+    pub session_title: Option<String>,
 }
 
 /// In-memory registry of hook definitions, sharded by their declared source.

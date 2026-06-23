@@ -14,8 +14,10 @@ use crate::async_registry::{AsyncHookRegistry, HookWork};
 use crate::definition::{HookDefinition, HookExecutor};
 use crate::events::HookEvent;
 use crate::hook_payload::{
-    parse_response, ConfigChangePayload, CwdChangedPayload, ElicitationPayload, FileChangedPayload,
+    parse_response, ConfigChangePayload, CwdChangedPayload, ElicitationPayload,
+    ElicitationResultPayload, FileChangedPayload,
     HookEventNameConfigChange, HookEventNameCwdChanged, HookEventNameElicitation,
+    HookEventNameElicitationResult,
     HookEventNameFileChanged, HookEventNameInstructionsLoaded, HookEventNameNotification,
     HookEventNamePermissionDenied, HookEventNamePermissionRequest, HookEventNamePost,
     HookEventNamePostCompact, HookEventNamePostToolUseFailure, HookEventNamePre,
@@ -40,6 +42,7 @@ use crate::registry::{HookContext, HookRegistry};
 use crate::response::{AggregateHookResult, HookDecision, HookOutcome, HookResponse, HookResult};
 use crate::ssrf_guard::SsrfGuard;
 use async_trait::async_trait;
+use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -1099,6 +1102,23 @@ impl HookExecutorImpl {
             if let Some(ts) = &resp.terminal_sequence {
                 agg.terminal_sequence = Some(ts.clone());
             }
+            // `sessionTitle` (UserPromptSubmit output, BIN off 201754804):
+            // keep the latest — mirrors TS's `applyHookSessionTitle` last-wins
+            // assignment. `None` for all non-`UserPromptSubmit` hooks.
+            if let Some(title) = &resp.session_title {
+                agg.session_title = Some(title.clone());
+            }
+            // `suppressOriginalPrompt` (UserPromptSubmit output): OR-fold so a
+            // single hook setting it flips the aggregate (a later hook returning
+            // `false` doesn't undo a prior `true`).
+            if resp.suppress_original_prompt {
+                agg.suppress_original_prompt = true;
+            }
+            // `displayContent` (MessageDisplay output, BIN off 201757586):
+            // keep the latest a folded hook returned — mirrors TS last-wins.
+            if let Some(dc) = &resp.display_content {
+                agg.display_content = Some(dc.clone());
+            }
             agg.attachments.extend(resp.attachments.clone());
         }
         agg.all_results.push((hook.id, r));
@@ -1207,6 +1227,10 @@ struct BaseHookFields {
     /// hooks and effort-incapable models — faithful to claude-code's
     /// conditional `effort` spread in `createBaseHookInput`.
     effort: Option<crate::hook_payload::EffortLevel>,
+    /// Current session title (binary-confirmed at BIN off 201745825). Threaded
+    /// into `UserPromptSubmit` and `SessionStart` payloads; `None` for all
+    /// other events (they ignore this field even if populated in ctx).
+    session_title: Option<String>,
 }
 
 impl BaseHookFields {
@@ -1219,6 +1243,7 @@ impl BaseHookFields {
             agent_id: ctx.agent_id.as_ref().map(ToString::to_string),
             agent_type: ctx.agent_type.clone(),
             effort: ctx.effort.clone(),
+            session_title: ctx.session_title.clone(),
         }
     }
 }
@@ -1239,9 +1264,9 @@ impl BaseHookFields {
 /// carry those fields and serialize faithfully. `PermissionDenied` is likewise
 /// ported here (the hook-firing batch extended its variant with `tool_input` /
 /// `tool_use_id`). `TaskCreated` is now serialized too (mirroring the
-/// `TaskCompleted` arm, fired through the `TaskCreatedFirer` seam). Every
-/// remaining (not-yet-ported) variant — `TeammateIdle`, `ElicitationResult` —
-/// returns `None` until its wire schema is ported.
+/// `TaskCompleted` arm, fired through the `TaskCreatedFirer` seam). The parity-fix
+/// batch then ported `ElicitationResult` ([P0] gap). All 30 `HookEvent` variants
+/// are now serializable; the `_ => None` catch-all is a forward-compatibility guard.
 #[allow(
     clippy::too_many_lines,
     reason = "per-event payload construction fan-out — splitting hurts readability"
@@ -1351,6 +1376,7 @@ fn build_lifecycle_envelope_body(
                 agent_type: b.agent_type,
                 effort: b.effort,
                 prompt: prompt.clone(),
+                session_title: b.session_title,
             };
             Some(("UserPromptSubmit", serde_json::to_string(&payload).ok()?))
         }
@@ -1366,6 +1392,7 @@ fn build_lifecycle_envelope_body(
                 agent_type: b.agent_type,
                 effort: b.effort,
                 model: None,
+                session_title: b.session_title,
             };
             Some(("SessionStart", serde_json::to_string(&payload).ok()?))
         }
@@ -1786,6 +1813,51 @@ fn build_lifecycle_envelope_body(
                 delta: delta.clone(),
             };
             Some(("MessageDisplay", serde_json::to_string(&payload).ok()?))
+        }
+        // `executeElicitationResultHooks` (BIN off 67628403). Wire schema
+        // (binary-confirmed at BIN off ~201751493):
+        // `{hook_event_name:"ElicitationResult", mcp_server_name:string,
+        //   elicitation_id?:string, mode?:enum(["form","url"]),
+        //   action:enum(["accept","decline","cancel"]),
+        //   content?:record(string,unknown)}`.
+        // The `action` and `content` fields are extracted from the
+        // `HookEvent::ElicitationResult.result` JSON blob (the complete
+        // elicitation response). `elicitation_id` and `mode` are not yet
+        // threaded through `HookEvent::ElicitationResult` — defaulted to `None`
+        // per the B1 default-fill convention. Uses `createBaseHookInput
+        // (permissionMode)` (same as `Elicitation`), so permission_mode IS
+        // threaded.
+        HookEvent::ElicitationResult {
+            server_name,
+            result,
+        } => {
+            // Extract `action` from the result JSON. The binary schema requires
+            // it; fall back to `"cancel"` (the safe default) when absent, so the
+            // hook process still receives a valid payload even if the engine
+            // didn't capture the action.
+            let action = result
+                .get("action")
+                .and_then(Value::as_str)
+                .unwrap_or("cancel")
+                .to_string();
+            // `content` is a record (optional): pass it through as-is when present.
+            let content = result.get("content").cloned();
+            let payload = ElicitationResultPayload {
+                hook_event_name: HookEventNameElicitationResult,
+                session_id: b.session_id,
+                transcript_path: b.transcript_path,
+                cwd: b.cwd,
+                permission_mode: b.permission_mode,
+                agent_id: b.agent_id,
+                agent_type: b.agent_type,
+                effort: b.effort,
+                mcp_server_name: server_name.clone(),
+                elicitation_id: None,
+                mode: None,
+                action,
+                content,
+            };
+            Some(("ElicitationResult", serde_json::to_string(&payload).ok()?))
         }
         _ => None,
     }
@@ -3397,14 +3469,11 @@ mod command_arm_tests {
         // `TaskCreated` (fired through the `TaskCreatedFirer` seam, mirroring
         // `TaskCompleted`), and the teammate-idle batch ported `TeammateIdle`
         // (extending its variant with `teammate_name` / `team_name`, fired
-        // through the `TeammateIdleFirer` seam). The only event still without a
-        // ported wire schema (`ElicitationResult`) must continue to fall through
-        // to `None` until its schema is ported.
+        // through the `TeammateIdleFirer` seam). The parity-fix batch then ported
+        // `ElicitationResult` (P0 gap). All 30 `HookEvent` variants are now
+        // serializable — this test is a no-op guard for future new unported variants.
         let ctx = HookContext::default();
-        let unported = vec![HookEvent::ElicitationResult {
-            server_name: "srv".into(),
-            result: json!({}),
-        }];
+        let unported: Vec<HookEvent> = vec![];
         for ev in unported {
             assert!(
                 build_envelope_body(&ev, &ctx).is_none(),
@@ -3595,6 +3664,15 @@ mod command_arm_tests {
                 },
                 "WorktreeCreate",
             ),
+            // [P0] parity-fix: ElicitationResult (binary-confirmed at BIN off
+            // ~201751493; action extracted from result JSON, defaults to "cancel").
+            (
+                HookEvent::ElicitationResult {
+                    server_name: "srv".into(),
+                    result: json!({"action": "accept", "content": {"token": "xyz"}}),
+                },
+                "ElicitationResult",
+            ),
         ];
         for (ev, expected) in cases {
             let (marker, body) = build_envelope_body(&ev, &ctx).expect("must serialize");
@@ -3603,6 +3681,37 @@ mod command_arm_tests {
             // round-trips through parse_response without a mismatch error.
             assert!(body.contains(&format!(r#""hook_event_name":"{expected}""#)));
         }
+    }
+
+    #[test]
+    fn elicitation_result_envelope_extracts_action_from_result() {
+        // [P0] parity-fix: `ElicitationResult` wire payload extracts `action`
+        // from the embedded `result` JSON blob (binary-confirmed schema).
+        let ctx = HookContext::default();
+        let ev = HookEvent::ElicitationResult {
+            server_name: "my-server".into(),
+            result: json!({"action": "decline", "content": {"reason": "no"}}),
+        };
+        let (marker, body) = build_envelope_body(&ev, &ctx).expect("must serialize");
+        assert_eq!(marker, "ElicitationResult");
+        assert!(body.contains(r#""mcp_server_name":"my-server""#), "{body}");
+        assert!(body.contains(r#""action":"decline""#), "{body}");
+        assert!(body.contains(r#""content":{"reason":"no"}"#), "{body}");
+        // `elicitation_id` and `mode` default to `None` (absent from wire).
+        assert!(!body.contains("elicitation_id"), "{body}");
+        assert!(!body.contains("mode"), "{body}");
+    }
+
+    #[test]
+    fn elicitation_result_envelope_defaults_action_to_cancel_when_absent() {
+        // When `result` JSON has no `action`, fall back to `"cancel"` (safe default).
+        let ctx = HookContext::default();
+        let ev = HookEvent::ElicitationResult {
+            server_name: "srv".into(),
+            result: json!({}),
+        };
+        let (_marker, body) = build_envelope_body(&ev, &ctx).expect("must serialize");
+        assert!(body.contains(r#""action":"cancel""#), "{body}");
     }
 }
 
